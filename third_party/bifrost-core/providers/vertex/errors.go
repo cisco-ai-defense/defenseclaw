@@ -1,0 +1,104 @@
+package vertex
+
+import (
+	"errors"
+	"strings"
+
+	"github.com/bytedance/sonic"
+	providerUtils "github.com/maximhq/bifrost/core/providers/utils"
+	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/valyala/fasthttp"
+)
+
+func parseVertexError(resp *fasthttp.Response) *schemas.BifrostError {
+	var openAIErr schemas.BifrostError
+	var vertexErr []VertexError
+
+	decodedBody, err := providerUtils.CheckAndDecodeBody(resp)
+	if err != nil {
+		bifrostErr := providerUtils.NewBifrostOperationError(schemas.ErrProviderResponseDecode, err)
+		return bifrostErr
+	}
+
+	// Check for empty response
+	trimmed := strings.TrimSpace(string(decodedBody))
+	if len(trimmed) == 0 {
+		bifrostErr := &schemas.BifrostError{
+			IsBifrostError: false,
+			StatusCode:     schemas.Ptr(resp.StatusCode()),
+			Error: &schemas.ErrorField{
+				Message: schemas.ErrProviderResponseEmpty,
+			},
+		}
+		return bifrostErr
+	}
+
+	// Check for HTML error response before attempting JSON parsing
+	if providerUtils.IsHTMLResponse(resp, decodedBody) {
+		bifrostErr := &schemas.BifrostError{
+			IsBifrostError: false,
+			StatusCode:     schemas.Ptr(resp.StatusCode()),
+			Error: &schemas.ErrorField{
+				Message: schemas.ErrProviderResponseHTML,
+				Error:   errors.New(string(decodedBody)),
+			},
+			ExtraFields: schemas.BifrostErrorExtraFields{
+				RawResponse: string(decodedBody),
+			},
+		}
+		return bifrostErr
+	}
+
+	createError := func(message, status string) *schemas.BifrostError {
+		bifrostErr := providerUtils.NewProviderAPIError(message, nil, resp.StatusCode(), nil, nil)
+		if status != "" {
+			if bifrostErr.Error == nil {
+				bifrostErr.Error = &schemas.ErrorField{}
+			}
+			bifrostErr.Error.Type = &status
+		}
+		var rawResponse interface{}
+		if err := sonic.Unmarshal(decodedBody, &rawResponse); err != nil {
+			rawResponse = string(decodedBody)
+		}
+		bifrostErr.ExtraFields.RawResponse = rawResponse
+		return bifrostErr
+	}
+
+	if err := sonic.Unmarshal(decodedBody, &openAIErr); err != nil || openAIErr.Error == nil {
+		// Try Vertex error format if OpenAI format fails or is incomplete
+		if err := sonic.Unmarshal(decodedBody, &vertexErr); err != nil {
+			//try with single Vertex error format
+			var vertexErr VertexError
+			if err := sonic.Unmarshal(decodedBody, &vertexErr); err != nil {
+				// Try VertexValidationError format (validation errors from Mistral endpoint)
+				var validationErr VertexValidationError
+				if err := sonic.Unmarshal(decodedBody, &validationErr); err != nil {
+					bifrostErr := providerUtils.NewBifrostOperationError(schemas.ErrProviderResponseUnmarshal, err)
+					return bifrostErr
+				}
+				if len(validationErr.Detail) > 0 {
+					return createError(validationErr.Detail[0].Msg, "")
+				}
+				return createError("Unknown error", "")
+			}
+			return createError(vertexErr.Error.Message, vertexErr.Error.Status)
+		}
+		if len(vertexErr) > 0 {
+			return createError(vertexErr[0].Error.Message, vertexErr[0].Error.Status)
+		}
+		return createError("Unknown error", "")
+	}
+	// OpenAI error format succeeded with valid Error field.
+	openAIStatus := ""
+	if openAIErr.Error.Type != nil {
+		openAIStatus = *openAIErr.Error.Type
+	}
+	if openAIStatus == "" {
+		var single VertexError
+		if err := sonic.Unmarshal(decodedBody, &single); err == nil {
+			openAIStatus = single.Error.Status
+		}
+	}
+	return createError(openAIErr.Error.Message, openAIStatus)
+}

@@ -96,6 +96,17 @@ try {
         -not $logged.Contains('[installer] defenseclaw_skip ')) {
         throw "skip is not logged with the shared marker: $warningText"
     }
+
+    $pendingWarnings = @()
+    Write-DefenseClawTargetRuntimeSkippedProfiles -Plan (New-Plan @($busy)) `
+        -Layout @{ GuardianLogPath = $logPath } -ValidationOnly `
+        -WarningVariable pendingWarnings -WarningAction SilentlyContinue
+    $pendingText = (@($pendingWarnings) | Microsoft.PowerShell.Core\ForEach-Object { [string]$_ }) -join "`n"
+    if (-not $pendingText.Contains('left pending in this lifecycle run') -or
+        -not $pendingText.Contains('run Setup /ensure to retry enrollment') -or
+        -not $pendingText.Contains('sharing violation after 10 attempts')) {
+        throw "validation skip did not name the account and recovery: $pendingText"
+    }
 }
 finally {
     [IO.Directory]::Delete($logDirectory, $true)

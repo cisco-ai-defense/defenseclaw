@@ -248,6 +248,26 @@ class AlertFindingRowsTests(unittest.TestCase):
             self.assertIn(f"  {alert_id}\n", result.output)
             self.assertIn("Preview: 1 alert(s) matched.", result.output)
 
+        # Audit review 2 N1: a terminal row with a structured payload whose
+        # reason or raw payload only mentions surface=cowork keeps its stored
+        # target and no Surface line; the legacy row above with no payload is
+        # Cowork by its surface=cowork detail.
+        self.assertTrue(fixture["not_cowork"])
+        listed_json = {row["id"]: row for row in json.loads(
+            self.runner.invoke(alerts, ["--json", "-n", "50"], obj=self.app, catch_exceptions=False).output
+        )}
+        self.assertEqual(listed_json["legacy-cowork-hook"]["surface"], "cowork")
+        for row in fixture["not_cowork"]:
+            alert_id = row["alert"]
+            self.assertIn(alert_id, listed)
+            shown = self.runner.invoke(
+                alerts, ["--show", str(listed.index(alert_id) + 1)], obj=self.app, catch_exceptions=False
+            ).output
+            self.assertRegex(shown, r"Target:\s+" + re.escape(row["printed"]) + r"\n")
+            self.assertNotIn("Surface:", shown)
+            self.assertEqual(listed_json[alert_id]["target"], row["printed"])
+            self.assertEqual(listed_json[alert_id]["surface"], "")
+
     def test_judge_finding_names_the_judge_and_no_repeated_id(self):
         # GAP-1886: a judge finding read "Rule: JUDGE-EXFIL-FILE: JUDGE-EXFIL-FILE"
         # and "Scanner: hook-rules", like a regex rule.

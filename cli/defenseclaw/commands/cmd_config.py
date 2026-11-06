@@ -56,6 +56,7 @@ from defenseclaw.config_inspect import (
     config_v8_schema,
     inspect_v8_config,
 )
+from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.file_permissions import UNSAFE_PATH_NAMESPACE_VIEW
 from defenseclaw.observability.v8_config import (
@@ -898,7 +899,10 @@ def _seed_moved_policies(cfg) -> list[str]:
     return [f"Seeded the rule packs and Rego policies in {policy_dir} for the new data_dir."]
 
 
-def _write_config_change(app: AppContext, changes: list, expect_sha256: str | None, verb: str) -> bool:
+def _write_config_change(
+    app: AppContext, changes: list, expect_sha256: str | None, verb: str,
+    *, check_candidate=None,
+) -> bool:
     """Apply the changes in one write through the writer; False when they changed nothing."""
     from defenseclaw import config_writer
 
@@ -930,6 +934,7 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
             f"defenseclaw config {verb}",
             expect_sha256,
             path=path,
+            check_candidate=check_candidate,
         )
     except config_writer.ManagedConfigWriteError as exc:
         from defenseclaw.enforce.asset_lists import audit_managed_config_refusal
@@ -1078,6 +1083,12 @@ def _refresh_stopped_gateway_hooks(before: object) -> list[str]:
     refreshed: list[str] = []
     with fail_mode_transaction_lock(after):
         for name, mode in changed:
+            if normalize_connector(name) in {"openclaw", "zeptoclaw"}:
+                notes.append(
+                    f"{name} PATH shims read the saved fail-{mode} mode when they run; "
+                    "their installed fallback is refreshed at the next gateway start."
+                )
+                continue
             if name not in _RECONCILE_CONNECTORS:
                 notes.append(
                     f"warning: {name} hooks keep their previous fail mode until the next "
@@ -1202,7 +1213,39 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
         raise click.ClickException(
             f"an empty value does not set {key}; use defenseclaw config unset {key}"
         )
-    _write_config_change(app, [Change(key, parsed)], expect_sha256, "set")
+    roster_change = parts == ["guardrail"] or parts[:2] == ["guardrail", "connectors"]
+    check_candidate = _check_guardrail_connector_roster if roster_change else None
+    _write_config_change(app, [Change(key, parsed)], expect_sha256, "set", check_candidate=check_candidate)
+
+
+def _check_guardrail_connector_roster(_path: str, candidate: bytes) -> None:
+    """Check the final enabled roster while the writer holds config.yaml.lock."""
+    from defenseclaw import config_writer
+
+    document = config_writer._parse_config_document(candidate)
+    if config_writer.secure_client_document(document):
+        return
+    guardrail = document.get("guardrail", {}) if isinstance(document, dict) else {}
+    roster = guardrail.get("connectors", {}) if isinstance(guardrail, dict) else {}
+    if not isinstance(roster, dict):
+        return
+    configured = {normalize_connector(name) for name in roster if isinstance(name, str)}
+    if len(configured) < 2:
+        return
+    enabled = {
+        normalize_connector(name)
+        for name, entry in roster.items()
+        if isinstance(name, str) and isinstance(entry, dict) and entry.get("enabled") is not False
+    }
+    proxies = sorted(enabled & {"openclaw", "zeptoclaw"})
+    if proxies:
+        proxy = proxies[0]
+        others = sorted(configured - {proxy})
+        label = "hook connectors" if not set(others) & {"openclaw", "zeptoclaw"} else "other connectors"
+        raise config_writer.ConfigWriteError(
+            f"{proxy} needs a proxy binding and cannot share a gateway process "
+            f"with {label} ({', '.join(others)})."
+        )
 
 
 def _refuse_retired_scanner_key(key: str, parts: list) -> None:
@@ -1255,7 +1298,12 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
         )
         for key, parts in parsed
     ]
-    if _write_config_change(app, changes, expect_sha256, "unset"):
+    roster_change = any(
+        parts == ["guardrail"] or parts[:2] == ["guardrail", "connectors"]
+        for _key, parts in parsed
+    )
+    check_candidate = _check_guardrail_connector_roster if roster_change else None
+    if _write_config_change(app, changes, expect_sha256, "unset", check_candidate=check_candidate):
         for note in _left_roster_notes(parsed, roster):
             click.echo(note)
         return

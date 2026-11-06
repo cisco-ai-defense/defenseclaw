@@ -160,6 +160,9 @@ func applyEnterprisePolicyReport(result *enterprisestatus.Result, out []byte, ch
 			"config.yaml was changed outside the DefenseClaw lifecycle (config generation %d does not record it) and the gateway may already enforce it; run ensure with the intended config to put the managed config back",
 			state.ConfigGeneration))
 	}
+	if report.GatewayReportedBundleID != "" {
+		windowsEnterpriseConfigRecoveryGuidance(result, true)
+	}
 	return state
 }
 

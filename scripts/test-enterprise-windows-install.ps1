@@ -607,8 +607,18 @@ try {
     & icacls.exe $runtimeDirectory /grant '*S-1-5-32-545:(OI)(CI)M' | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail "icacls could not drift $runtimeDirectory" }
     $run = Invoke-Lifecycle -Name '02-ensure-runtime-acl-repair' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
-    Assert-Result $run 'ensure-runtime-acl-repair' (@('--action', 'ensure', '--installed', '--version', $Version, '--ready') +
-        $installedChecks + @('--allow-warning', 'ensure_repair'))
+    # The running hook guardian races Setup for this drift. Setup either puts
+    # the ACL back itself (ensure_repair or a change) or finds that the
+    # guardian already did and names that repair (guardian_repaired_drift,
+    # GAP-0573). Both are correct; either way ensure must not report a no-op.
+    Assert-Result $run 'ensure-runtime-acl-repair' (@('--action', 'ensure', '--changed', '--installed', '--version', $Version, '--ready') +
+        $installedChecks + @('--allow-warning', 'ensure_repair', '--allow-warning', 'guardian_repaired_drift'))
+    $repairResult = Get-Content -LiteralPath $run.Result -Raw | ConvertFrom-Json
+    foreach ($warning in @($repairResult.warnings)) {
+        if ($warning.code -eq 'guardian_repaired_drift' -and $warning.message.IndexOf($runtimeDirectory, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            Fail "ensure named a guardian repair that is not the drifted $runtimeDirectory`: $($warning.message)"
+        }
+    }
     Assert-ServicesRunning
     $writeMask = [int][Security.AccessControl.FileSystemRights]::Write
     foreach ($ace in (Get-Acl -LiteralPath $runtimeDirectory).Access) {

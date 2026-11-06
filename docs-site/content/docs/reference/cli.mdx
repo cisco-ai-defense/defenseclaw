@@ -502,7 +502,7 @@ Editor agents that speak the Agent Client Protocol (Zed, JetBrains) are guarded 
 
 ## Guardrail
 
-Per-connector guardrail controls. `--connector X` is the explicit scope selector on a **multi-connector** install: reads narrow to one active connector, and writes land in `guardrail.connectors.<name>`. Omit `--connector` for the broad path. Reads show the full active roster; global enable/disable affects the whole guardrail; fail-mode, HILT, and block-message writes reconcile active connector posture where supported. On a single-connector install `--connector` is rejected because there is only one posture, except for `mode`, `block-at`, `alert-at`, `use-pack` and `protection`, which accept the one active connector and write its override block. All of these are on the Python `defenseclaw` CLI.
+Per-connector guardrail controls. `--connector X` is the explicit scope selector on a **multi-connector** install: reads narrow to one active connector, and writes land in `guardrail.connectors.<name>`. Omit `--connector` for the broad path. Reads show the full active roster; global enable/disable affects the whole guardrail; fail-mode, HILT, and block-message writes reconcile active connector posture where supported. On a single-connector install, `enable`, `disable`, `fail-mode`, `hilt` and `block-message` accept the active name and use their global path; another name is refused. `mode`, `block-at`, `alert-at`, `use-pack` and `protection` accept the active name and write its override block. All of these are on the Python `defenseclaw` CLI.
 
 | Command | Use it for |
 | --- | --- |

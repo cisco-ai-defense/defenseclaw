@@ -1824,11 +1824,79 @@ def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
     )
 
 
+def _process_uid(pid: int) -> int | None:
+    """Return the real-user owner of *pid* from the kernel, or None."""
+
+    if pid <= 0:
+        return None
+    if sys.platform.startswith("linux"):
+        try:
+            return os.stat(f"/proc/{pid}").st_uid
+        except OSError:
+            return None
+    if sys.platform != "darwin":
+        return None
+    try:
+        completed = subprocess.run(
+            ["/bin/ps", "-o", "uid=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = completed.stdout.strip()
+    return int(value) if completed.returncode == 0 and value.isdecimal() else None
+
+
+def _check_gateway_account(cfg, r: _DoctorResult) -> None:
+    """Warn when this per-user home's live gateway runs as root.
+
+    A per-user gateway runs as its account. DefenseClawMac up to 1.0.8 could
+    run it as root ("Run gateway as administrator"), and ``sudo
+    defenseclaw-gateway start`` does the same; both leave root-owned files in
+    the home. A managed install is skipped: its macOS gateway is root by design.
+    """
+
+    if os.name == "nt" or _doctor_managed(cfg) or os.geteuid() == 0:
+        return
+    data_dir = _configured_gateway_data_dir(cfg)
+    if not data_dir:
+        return
+    record = read_pid_record(os.path.join(data_dir, "gateway.pid"))
+    if record.status != "ok" or not pid_alive(record.pid):
+        return
+    if _process_uid(record.pid) != 0:
+        return
+    remediation = (
+        "on macOS open DefenseClawMac and choose Start Gateway: it stops the root gateway with "
+        "administrator approval, returns its files to you and starts the gateway as you. "
+        "Otherwise: sudo defenseclaw-gateway stop && sudo chown -R "
+        + shlex.quote(getpass.getuser())
+        + " "
+        + shlex.quote(data_dir)
+        + " && defenseclaw-gateway start"
+    )
+    _emit(
+        "warn",
+        "Gateway account",
+        f"the gateway for this per-user home (pid {record.pid}) runs as root; a per-user gateway "
+        "must run as its account (root-run gateways leave root-owned files in the home and the CLI "
+        "cannot verify them)",
+        r=r,
+        check_id="doctor.gateway.account",
+        reason_code="per-user-gateway-runs-as-root",
+        remediation=remediation,
+    )
+
+
 # Vendor machine-policy folders agents read administrator policy from. An
 # agent treats the folder's presence as policy: Codex pauses every launch with
 # "Organization settings could not be loaded" when /etc/codex exists but it
-# cannot read it. A gateway run as root (the Mac app's administrator mode, or
-# sudo) used to create /etc/codex with mode 0700 for its /etc/codex/skills
+# cannot read it. A gateway run as root (the Mac app's administrator mode up to
+# 1.0.8, or sudo) used to create /etc/codex with mode 0700 for its /etc/codex/skills
 # watch; the watcher no longer creates vendor folders and a root gateway
 # removes the empty ones it recorded, but a folder left by an older release
 # needs an administrator. Keyed by platform so tests can substitute paths.
@@ -2429,8 +2497,8 @@ def _check_hilt_support(
         _emit(
             "pass",
             "Human approval",
-            f"OpenClaw prompts supported at {min_sev}+ (Control UI and chat channels that "
-            "forward /approve; openclaw tui and local chat do not show them)",
+            f"OpenClaw prompts supported at {min_sev}+ (Control UI, chat channels that "
+            "forward /approve, and openclaw tui from OpenClaw 2026.10.9)",
             r=r,
         )
     elif connector == "claudecode":
@@ -5263,6 +5331,19 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                         )
                     else:
                         _emit("warn", f"  └─ {sub}", f"degraded — {reason}" if reason else "degraded", r=r)
+                elif sub == "gateway" and isinstance(details, dict) and isinstance(details.get("hint"), str):
+                    # The OpenClaw gateway refused this sidecar's device or
+                    # token, and only the operator can fix it: the gateway
+                    # keeps retrying and names the step (GAP-0592).
+                    last_error = info.get("last_error")
+                    reason = last_error.strip() if isinstance(last_error, str) else ""
+                    _emit(
+                        "fail",
+                        f"  └─ {sub}",
+                        f"{state} — {reason}" if reason else state,
+                        r=r,
+                        remediation=details["hint"].strip(),
+                    )
                 else:
                     audit_db = str(getattr(cfg, "audit_db", "") or "")
                     reason = _telemetry_error_reason(details, audit_db) if sub == "telemetry" else ""
@@ -5661,7 +5742,7 @@ def _read_pid_from_file(pid_file: str) -> int:
 
 @dataclass(frozen=True)
 class _GatewayTrust:
-    """Result of proving that the configured API target is the managed PID."""
+    """Result of proving that the configured API target is this home's gateway."""
 
     code: str
     detail: str
@@ -6177,6 +6258,19 @@ def _trusted_gateway_listener(
         platform_name=platform_name,
     )
     if not process_trust.trusted:
+        from defenseclaw.enforce import asset_lists
+
+        if (
+            process_trust.code == "missing"
+            and platform_name.startswith("linux")
+            and not asset_lists.is_secure_client(cfg)
+            and str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise"
+            and api_port == _gateway_api_port(cfg)
+            and _gateway_api_host_is_loopback(cfg)
+        ):
+            transient = _transient_same_home_gateway_listener(cfg, evidence, host, api_port)
+            if transient is not None:
+                return transient
         return process_trust
     listener = _managed_gateway_listener_evidence(
         api_port,
@@ -6257,6 +6351,57 @@ def _other_account_gateway_listener_evidence(cfg, pid: int, host: str, api_port:
     except OSError:
         return None
     return ListenerEvidence("ok", pid=pid, reason="the gateway's own runtime record names this endpoint")
+
+
+def _transient_same_home_gateway_listener(
+    cfg, evidence: GatewayEvidence, host: str, api_port: int
+) -> _GatewayTrust | None:
+    """Read the gateway's own status proof for a Linux process without a PID file."""
+    from defenseclaw.gateway import resolve_trusted_gateway_binary
+
+    home = gateway_home_for_data_dir(cfg.data_dir)
+    if not os.path.isabs(home):
+        return None
+    listener = _managed_gateway_listener_evidence(
+        api_port, host=host, platform_name="linux", evidence=evidence
+    )
+    if listener.status != "ok" or listener.pid <= 0 or _linux_foreign_listener_accounts(api_port):
+        return None
+    try:
+        binary = resolve_trusted_gateway_binary()
+        if not binary:
+            return None
+        env = dict(os.environ)
+        env["DEFENSECLAW_HOME"] = home
+        report = subprocess.run(
+            [binary, "status", "--json"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=8,
+            env=env,
+            check=False,
+        )
+        if report.returncode != 0 or len(report.stdout) > 2 << 20:
+            return None
+        status = json.loads(report.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return None
+    # Go status checks the process at its reported endpoint. That endpoint
+    # must be the listener whose PID was inspected before and after the call.
+    if (
+        not isinstance(status, dict)
+        or status.get("running") is not True
+        or status.get("endpoint") != _gateway_api_url(cfg, "/health")
+        or not isinstance(status.get("health"), dict)
+    ):
+        return None
+    after = _managed_gateway_listener_evidence(
+        api_port, host=host, platform_name="linux", evidence=evidence
+    )
+    if after.status != "ok" or after.pid != listener.pid:
+        return None
+    return _GatewayTrust("trusted", "this account's gateway owns the API endpoint", listener.pid, home_bound=True)
 
 
 def _trusted_gateway_listener_for_lifecycle(
@@ -11643,6 +11788,36 @@ _INTERCEPTION_SELF_TEST_FRESHNESS = timedelta(minutes=3)
 _INTERCEPTION_FIRST_REPORT_WINDOW = timedelta(minutes=2)
 
 
+def _openclaw_plugin_host_is_loopback(host: str) -> bool:
+    """Mirror the OpenClaw plugin's loopback rule (listener-proof.ts isLoopbackHost)."""
+    value = str(host or "").strip().lower().strip("[]")
+    if value in ("localhost", "::1"):
+        return True
+    parts = value.split(".")
+    return len(parts) == 4 and parts[0] == "127" and all(p.isdigit() and int(p) <= 255 for p in parts[1:])
+
+
+def _check_openclaw_gateway_host(cfg, r: _DoctorResult) -> None:
+    """GAP-0594: the OpenClaw plugin sends its token only to a loopback
+    gateway.host. With any other host every tool check follows the plugin's
+    outage mode and every model call fails, so say it here."""
+    if "openclaw" not in _doctor_active_connectors(cfg) or not _connector_enabled(cfg, "openclaw"):
+        return
+    host = str(getattr(getattr(cfg, "gateway", None), "host", "") or "127.0.0.1")
+    if _openclaw_plugin_host_is_loopback(host):
+        return
+    _emit(
+        "fail",
+        "OpenClaw gateway.host",
+        f"{host} is not a loopback address: the OpenClaw plugin sends nothing to it, so tool checks "
+        "follow the outage mode and model calls fail",
+        r=r,
+        remediation=(
+            "defenseclaw config set gateway.host 127.0.0.1, then defenseclaw-gateway restart and restart OpenClaw"
+        ),
+    )
+
+
 def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
     """Fail closed when a proxy connector's :4000 listener is unused.
 
@@ -14903,6 +15078,7 @@ def doctor(
         if not auth_attempted:
             _check_gateway_token_drift(cfg, r)
         _check_gateway_home_mismatch(cfg, r)
+        _check_gateway_account(cfg, r)
     _check_connector_hook_credentials(cfg, r)
     _check_windows_watchdog_diagnostics(cfg, r)
     # Run the per-connector hook/health check for EVERY active connector,
@@ -14954,6 +15130,7 @@ def doctor(
     _check_cowork(cfg, sidecar_health, r)
     _check_guardrail_proxy(cfg, r)
     _check_proxy_interception(cfg, r, live_health=sidecar_health)
+    _check_openclaw_gateway_host(cfg, r)
     _check_kernel_sensor(r)
     if not json_out:
         _doctor_subsection("Credentials")

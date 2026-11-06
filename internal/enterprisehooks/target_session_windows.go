@@ -53,12 +53,23 @@ func windowsEnterpriseStandaloneDeferredDataDirAccountLink(home, dataDir string,
 // stays pending until it next signs in, when the guardian moves the link
 // aside and enrolls it. Status names such accounts.
 func WindowsAccountOwnedDataDirLink(home, sid string) bool {
+	return windowsAccountOwnedDataDirLinkPath(home, sid) != ""
+}
+
+// WindowsAccountOwnedRootDataDirLink reports only an account-owned link at
+// the canonical folder itself. A link below a plain folder does not qualify.
+func WindowsAccountOwnedRootDataDirLink(home, sid string) bool {
+	root := filepath.Join(filepath.Clean(home), ".defenseclaw")
+	return sameWindowsEnterprisePath(windowsAccountOwnedDataDirLinkPath(home, sid), root)
+}
+
+func windowsAccountOwnedDataDirLinkPath(home, sid string) string {
 	target, err := windows.StringToSid(strings.TrimSpace(sid))
 	if err != nil || strings.TrimSpace(home) == "" {
-		return false
+		return ""
 	}
 	home = filepath.Clean(home)
-	return windowsTargetOwnedDataDirLink(home, filepath.Join(home, ".defenseclaw"), target) != ""
+	return windowsTargetOwnedDataDirLink(home, filepath.Join(home, ".defenseclaw"), target)
 }
 
 // windowsAccountCreatedDataDirAt reads dataDir's owner and DACL and reports

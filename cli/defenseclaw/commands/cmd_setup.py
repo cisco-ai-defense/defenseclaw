@@ -120,6 +120,7 @@ from defenseclaw.connector_contracts import (
     openclaw_bedrock_plugin_missing,
     openclaw_lacks_plugin_approvals,
     openclaw_needs_interception_advisory,
+    openclaw_tui_shows_approvals,
     opencode_requires_v2_upgrade,
     resolve_connector_contract,
     stable_agent_version,
@@ -7029,11 +7030,16 @@ def _check_guardrail_setup_connector_versions(
 def _warn_openclaw_setup_advisories(
     raw_version: str | None, human_approval: bool, openclaw_config_file: str | None
 ) -> None:
-    """Name where OpenClaw shows approvals (GAP-1958) and a missing Bedrock
-    provider plugin (GAP-1959). Both only warn; setup goes on."""
+    """Name where OpenClaw shows approvals (GAP-1958, GAP-0597) and a missing
+    Bedrock provider plugin (GAP-1959). Setup goes on either way. The approval
+    note is a warning only for an OpenClaw whose openclaw tui does not show
+    the requests (or whose version is unknown)."""
     label = f"OpenClaw {normalize_agent_version(raw_version or '') or ''}".strip()
     if human_approval:
-        ux.warn(f"{OPENCLAW_APPROVAL_SURFACES}.")
+        if openclaw_tui_shows_approvals(raw_version):
+            ux.subhead(f"{OPENCLAW_APPROVAL_SURFACES}.")
+        else:
+            ux.warn(f"{OPENCLAW_APPROVAL_SURFACES}.")
     if not openclaw_config_file:
         return
     try:

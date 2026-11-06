@@ -334,8 +334,18 @@ def test_the_engine_version_is_the_vocabulary_engine_version():
 _SENSOR_TERMS = re.compile(r"vm[ _-]?sensor|sensor package|cowork[_-]vm|defenseclaw-cowork-(?:amd64|arm64)", re.I)
 
 
-@pytest.mark.parametrize("path", [PAGE, *THREAT_MODELS], ids=lambda path: path.name)
-def test_the_page_does_not_name_the_vm_sensor(path):
+# Every public doc: the docs site, docs/, the CHANGELOG and the README
+# (audit review 2 N3, review 3).
+_PUBLIC_DOCS = (
+    *sorted((ROOT / "docs-site/content").rglob("*.mdx")),
+    *sorted((ROOT / "docs").rglob("*.md")),
+    ROOT / "CHANGELOG.md",
+    ROOT / "README.md",
+)
+
+
+@pytest.mark.parametrize("path", _PUBLIC_DOCS, ids=lambda path: path.relative_to(ROOT).as_posix())
+def test_public_docs_do_not_name_the_vm_sensor(path):
     # The Cowork VM sensor is undocumented by owner decision.
     text = path.read_text(encoding="utf-8")
     assert not _SENSOR_TERMS.findall(text), _SENSOR_TERMS.findall(text)

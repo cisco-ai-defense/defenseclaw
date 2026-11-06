@@ -43,20 +43,25 @@ func coworkAlertTarget(target string) (stored string, ok bool) {
 // coworkMarkerSQL is true for an audit row (alias a) of a Cowork call: the
 // hook audit envelope's surface or extra.surface (the check of
 // coworkaudit.lastEventsQuery), the hook decision's
-// defenseclaw.agent.surface, or a surface=cowork token of the legacy details
-// before details_json. It mirrors _event_surface in
+// defenseclaw.agent.surface, or, for a legacy row with no valid structured
+// payload, a surface=cowork token of the details before details_json. The
+// details of a row with a payload hold free text (an unquoted reason=, a
+// raw_payload=), so a terminal call that only mentions surface=cowork is not
+// Cowork (cowork audit review 2 N1). The payload is the one alerts read: the
+// row's structured_json, or a native v8 row's payload_json
+// (StructuredJSONReadSQL). It mirrors _event_surface in
 // cli/defenseclaw/commands/cmd_alerts.py, so the selector matches the rows
 // alerts label Cowork and no others.
 func coworkMarkerSQL(a string) string {
-	s := "COALESCE(" + a + ".structured_json,'')"
+	s := "COALESCE(" + StructuredJSONReadSQL(a, true, true) + ",'')"
 	d := "LOWER(COALESCE(" + a + ".details,''))"
 	return `((instr(` + s + `,'cowork') > 0 AND json_valid(` + s + `) AND 'cowork' IN (
 			LOWER(COALESCE(json_extract(` + s + `,'$.surface'),'')),
 			LOWER(COALESCE(json_extract(` + s + `,'$.extra.surface'),'')),
 			LOWER(COALESCE(json_extract(` + s + `,'$."defenseclaw.agent.surface"'),''))))
-		OR instr(' ' || CASE WHEN instr(` + d + `,' details_json=') > 0
+		OR ((` + s + ` = '' OR NOT json_valid(` + s + `)) AND instr(' ' || CASE WHEN instr(` + d + `,' details_json=') > 0
 				THEN substr(` + d + `,1,instr(` + d + `,' details_json=') - 1) ELSE ` + d + ` END || ' ',
-			' surface=cowork ') > 0)`
+			' surface=cowork ') > 0))`
 }
 
 // coworkAlertTargetPredicateSQL selects the stored claudecode target of a
