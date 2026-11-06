@@ -1526,11 +1526,12 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		return kept
 	}
 	commandText := strings.ToLower(input.Command)
-	overBudget, unresolved, possible := false, false, false
+	overBudget, unresolved, possible, namedTarget := false, false, false, false
 	evidence := request
 	evidence.overBudgetOmission = &overBudget
 	evidence.unresolvedTarget = &unresolved
 	evidence.possibleTarget = &possible
+	evidence.namedTarget = &namedTarget
 	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(evidence, facts)
 	if !symlinkWrite && !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
 		(request.Connector == "claudecode" || request.Connector == "codex") &&
@@ -1571,8 +1572,29 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			}))
 		}
 	}
+	if possible && !symlinkWrite && !request.StrictPolicy && mentionGrade == hookpaths.GradeNone &&
+		!trustedSudoersOnlyWrite(facts) {
+		// The unresolved write retains the filesystem reader's notice.
+		if _, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command"); ok {
+			enforcement := findingEnforcementDetectionOnly
+			if request.strictHookProfile && request.EnforcementCapable {
+				enforcement = findingEnforcementAllowed
+			}
+			findings = append(findings, adjustConfidence(input.Tool, RuleFinding{
+				RuleID: rule.ID, Title: "Possible SSH path mention", Severity: rule.Severity,
+				Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
+				Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
+				enforcement: enforcement,
+			}))
+		}
+	}
 	if possible && !symlinkWrite && !request.StrictPolicy && mentionGrade == hookpaths.GradeNone {
 		// The unresolved write retains the filesystem reader's notice.
+=======
+	if possible && !symlinkWrite && !request.StrictPolicy && !trustedSudoersOnlyWrite(facts) {
+		// The ordinary spelling names no protected target. Keep a visible
+		// notice while the default policy allows the command.
+>>>>>>> 71c9b304fe (fix(gateway): GAP-0288 GAP-0482 retain named paths within share budget)
 		if _, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command"); ok {
 			findings = append(findings, adjustConfidence(input.Tool, RuleFinding{
 				RuleID: rule.ID, Title: unresolvedWriteTargetTitle, Severity: rule.Severity,
@@ -1593,7 +1615,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	}
 	for _, finding := range findings {
 		if finding.RuleID == "persistence.ssh_authorized_keys_command" &&
-			finding.contributesToEnforcement() {
+			finding.contributesToEnforcement() && finding.proof.authorizes(finding.RuleID) {
 			return findings
 		}
 	}
@@ -1608,7 +1630,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			// cannot read) and its severity, but names the sudoers rule of
 			// the pack, not the SSH keys rule (GAP-0190).
 			named := rule
-			if commandText == "" && trustedSudoersOnlyWrite(facts) {
+			if trustedSudoersOnlyWrite(facts) {
 				if _, sudoers, found := trustedActionCatalogRule(generation, "PATH-ETC-SUDOERS"); found {
 					named = sudoers
 				}
@@ -1632,12 +1654,16 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				// what it is, not as a key write (rel-1-0-2:GAP-0690).
 				title = unresolvedWriteTargetTitle
 			}
-			return append(kept, adjustConfidence(input.Tool, RuleFinding{
+			finding := adjustConfidence(input.Tool, RuleFinding{
 				RuleID: named.ID, Title: title, Severity: rule.Severity,
 				Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
 				Tags: append([]string(nil), named.Tags...), LineNumber: 1,
 				enforcement: findingEnforcementAllowed,
-			}))
+			})
+			if namedTarget {
+				finding = finding.withTrustedActionProof(newResolvedPathFindingProof(named.ID, true))
+			}
+			return append(kept, finding)
 		}
 	}
 	return appendTrustedCMDPrivateKeyReadFinding(
