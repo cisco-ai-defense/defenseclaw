@@ -5762,6 +5762,9 @@ func wrappedMayLinkRead(text string, visibleMode bool) (mayLink, copyWord bool) 
 // still blocks (a Named target) everywhere, and the rest in strict only
 // (gas-ux-r1 GAP-0055 round 4).
 func SuppliedArchiveModeTwin(command string) (string, bool) {
+	if !slices.ContainsFunc(argumentSuppliers, func(supplier string) bool { return strings.Contains(command, supplier) }) {
+		return "", false // the common case costs one scan, no parse
+	}
 	file, parsed := parseShell(command)
 	if !parsed {
 		return "", false
