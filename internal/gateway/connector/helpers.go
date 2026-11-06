@@ -27,6 +27,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -454,7 +455,8 @@ func hookCommandTarget(words []string) (string, bool) {
 			}
 		case "sh", "bash", "dash", "zsh", "ksh":
 			for len(words) > 0 {
-				if words[0] == "--" || words[0] == "--noprofile" || words[0] == "--norc" || words[0] == "--posix" || hookShellFlagsRunScript(words[0]) {
+				if words[0] == "--" || words[0] == "--noprofile" || words[0] == "--norc" || words[0] == "--posix" ||
+					(base == "bash" && words[0] == "--login") || hookShellFlagsRunScript(words[0]) {
 					words = words[1:]
 					continue
 				}
@@ -495,7 +497,7 @@ func hookShellFlagsRunScript(word string) bool {
 		return false
 	}
 	for _, flag := range word[1:] {
-		if !strings.ContainsRune("eufxv", flag) {
+		if !strings.ContainsRune("eufxvil", flag) {
 			return false
 		}
 	}
@@ -522,20 +524,97 @@ func hookPathResolvesInHookDir(target, hookScript string) bool {
 		!strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
-// hookCommandClaimsHookDir also checks statically known executable values in
-// multi-statement commands. Such commands are reported, never removed.
+// hookCommandClaimsHookDir checks statically known executable values in
+// multi-statement commands. Child shells inherit values without changing the
+// parent's values, and function bodies are inspected when called. Commands
+// with more than one action are reported for review, never removed.
 func hookCommandClaimsHookDir(command, hookScript string) bool {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
 	if err != nil {
 		return false
 	}
 	known := make(map[string]string)
+	functions := make(map[string]*syntax.FuncDecl)
+	activeFunctions := make(map[*syntax.FuncDecl]bool)
+	type scopeFrame struct {
+		known     map[string]string
+		functions map[string]*syntax.FuncDecl
+	}
+	type savedValue struct {
+		value   string
+		present bool
+	}
+	type functionScope struct {
+		depth  int
+		locals map[string]savedValue
+	}
+	var frames []scopeFrame
+	var functionScopes []functionScope
+	scopeDepth := 0
 	found := false
-	syntax.Walk(file, func(node syntax.Node) bool {
+	var visit func(syntax.Node) bool
+	visit = func(node syntax.Node) bool {
+		if node == nil {
+			frame := frames[len(frames)-1]
+			frames = frames[:len(frames)-1]
+			if frame.known != nil {
+				known, functions = frame.known, frame.functions
+				scopeDepth--
+			}
+			return true
+		}
 		if found {
 			return false
 		}
+		if decl, ok := node.(*syntax.FuncDecl); ok {
+			if decl.Name != nil {
+				functions[decl.Name.Value] = decl
+			}
+			for _, name := range decl.Names {
+				functions[name.Value] = decl
+			}
+			return false
+		}
+		if binary, ok := node.(*syntax.BinaryCmd); ok && (binary.Op == syntax.Pipe || binary.Op == syntax.PipeAll) {
+			parentKnown, parentFunctions := known, functions
+			scopeDepth++
+			known, functions = maps.Clone(parentKnown), maps.Clone(parentFunctions)
+			syntax.Walk(binary.X, visit)
+			known, functions = maps.Clone(parentKnown), maps.Clone(parentFunctions)
+			syntax.Walk(binary.Y, visit)
+			known, functions = parentKnown, parentFunctions
+			scopeDepth--
+			return false
+		}
+		frame := scopeFrame{}
+		switch n := node.(type) {
+		case *syntax.Subshell, *syntax.CmdSubst, *syntax.ProcSubst, *syntax.CoprocClause:
+			frame.known, frame.functions = known, functions
+			known, functions = maps.Clone(known), maps.Clone(functions)
+			scopeDepth++
+		case *syntax.Stmt:
+			if n.Background || n.Coprocess || n.Disown {
+				frame.known, frame.functions = known, functions
+				known, functions = maps.Clone(known), maps.Clone(functions)
+				scopeDepth++
+			}
+		}
+		frames = append(frames, frame)
 		if decl, ok := node.(*syntax.DeclClause); ok {
+			if len(functionScopes) > 0 && functionScopes[len(functionScopes)-1].depth == scopeDepth &&
+				hookFunctionLocalDeclaration(decl) {
+				locals := functionScopes[len(functionScopes)-1].locals
+				for _, assign := range decl.Args {
+					if assign.Name == nil {
+						continue
+					}
+					name := assign.Name.Value
+					if _, seen := locals[name]; !seen {
+						value, present := known[name]
+						locals[name] = savedValue{value, present}
+					}
+				}
+			}
 			hookRecordKnownAssignments(decl.Args, known)
 			return true
 		}
@@ -559,19 +638,50 @@ func hookCommandClaimsHookDir(command, hookScript string) bool {
 		}
 		if hookPathResolvesInHookDir(words[0], hookScript) {
 			found = true
-			return false
+			return true
 		}
 		if target, ok := hookCommandTarget(words); ok && hookPathResolvesInHookDir(target, hookScript) {
 			found = true
-			return false
+			return true
 		}
 		if shellText, ok := hookShellCommandText(words); ok && hookCommandClaimsHookDir(shellText, hookScript) {
 			found = true
-			return false
+			return true
+		}
+		if function := functions[words[0]]; function != nil && !activeFunctions[function] {
+			activeFunctions[function] = true
+			functionScopes = append(functionScopes, functionScope{scopeDepth, make(map[string]savedValue)})
+			syntax.Walk(function.Body, visit)
+			locals := functionScopes[len(functionScopes)-1].locals
+			functionScopes = functionScopes[:len(functionScopes)-1]
+			for name, prior := range locals {
+				if prior.present {
+					known[name] = prior.value
+				} else {
+					delete(known, name)
+				}
+			}
+			delete(activeFunctions, function)
 		}
 		return true
-	})
+	}
+	syntax.Walk(file, visit)
 	return found
+}
+
+func hookFunctionLocalDeclaration(decl *syntax.DeclClause) bool {
+	switch decl.Variant.Value {
+	case "local":
+		return true
+	case "declare", "typeset":
+		for _, assign := range decl.Args {
+			if option, ok := literalHookWord(assign.Value); ok && strings.HasPrefix(option, "-") && strings.Contains(option, "g") {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func hookRecordKnownAssignments(assigns []*syntax.Assign, known map[string]string) {
@@ -612,21 +722,35 @@ func hookShellCommandText(words []string) (string, bool) {
 	if len(words) < 3 {
 		return "", false
 	}
-	switch hookCommandWrapper(words[0]) {
+	shell := hookCommandWrapper(words[0])
+	switch shell {
 	case "sh", "bash", "dash", "zsh", "ksh":
 	default:
 		return "", false
 	}
 	for i := 1; i < len(words)-1; i++ {
 		option := words[i]
+		if shell == "bash" {
+			switch option {
+			case "--noprofile", "--norc", "--posix", "--login", "--restricted", "--verbose":
+				continue
+			case "--rcfile", "--init-file", "-o", "-O":
+				i++
+				continue
+			}
+		}
 		if !strings.HasPrefix(option, "-") || len(option) < 2 {
 			return "", false
 		}
 		commandFlag := false
+		allowed := "eufxvi"
+		if shell == "bash" {
+			allowed += "lrps"
+		}
 		for _, flag := range option[1:] {
 			if flag == 'c' {
 				commandFlag = true
-			} else if !strings.ContainsRune("eufxvi", flag) {
+			} else if !strings.ContainsRune(allowed, flag) {
 				return "", false
 			}
 		}
