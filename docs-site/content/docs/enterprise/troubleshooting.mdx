@@ -579,14 +579,20 @@ The guardian is always running.
 
 On a standalone Windows host, Setup `/ensure`, `/repair`, `/upgrade` or `/uninstall` stops with exit `1603` and the message "refusing to change the deployment, and nothing was changed" (or `/verify` with "refusing to re-stamp a managed path in place"). Another account owns a managed file or folder, or can change it, for example after `icacls <path> /grant Users:(M)` or `icacls <StateRoot> /reset /T`. Setup does not give such a path a trusted access list back, because that account may have changed it. No service was stopped. The message names every refused path (up to 20), the account, and what to do for each.
 
-The hook guardian does not repair these paths either. Its log names each one as `machine policy object drift was not repaired`, with the same fix. This covers the Claude Code, Codex and Cursor policy folders and DefenseClaw's files in them.
+The hook guardian, and every DefenseClaw step that reads or updates the Claude Code, Codex and Cursor policy folders, do not repair these paths either. That covers those policy folders, DefenseClaw's files in them (the ownership record, the runtime selector, the Cursor rollback receipt) and the folders and files under the DefenseClaw state root. Every reader keeps refusing such a path. The guardian log names each one once, with its fix, in one of two lines:
+
+- `machine policy object drift was not repaired`: a policy folder or a DefenseClaw file in it.
+- `not repaired in place on a standalone install`: a folder or file under the state root.
+
+If an earlier Setup run stopped with the services stopped, the next run can stop with "refusing to recover the pending lifecycle transaction" instead. The services stay stopped and the transaction stays pending until you fix the paths it names, as below, and run Setup again.
 
 **Fix.** For each path the message names, from an elevated prompt:
 
-- Remove the account's entry: `icacls "<path>" /remove:g *<SID>`.
-- Give an owned path back to Administrators: `icacls "<path>" /setowner *S-1-5-32-544`.
-- If the path lost its protection and only inherits: `icacls "<path>" /inheritance:r` (then run Setup, which puts the access list back).
-- Check what the file holds, since that account could have changed it.
+- A DefenseClaw file in a Claude Code, Codex or Cursor policy folder: delete it, then run Setup `/ensure`, which writes it new. With the ownership record `.defenseclaw-managed-hooks.state`, also delete the policy file beside it (`90-defenseclaw.json` or `requirements.toml`). For Cursor, delete the record, `.defenseclaw-managed-hooks.receipt` and `defenseclaw-hook.ps1` together. Removing the entry instead is not enough: Setup keeps an unchanged file as it is, and a program that opened it while it could write it can still change it.
+- Any other path: remove the account's entry (`icacls "<path>" /remove:g *<SID>`), or give an owned path back to Administrators (`icacls "<path>" /setowner *S-1-5-32-544`).
+- A path that lost its protection and only inherits: do not use `icacls "<path>" /inheritance:r` on it. On a path that holds only inherited entries it leaves an empty access list, and SYSTEM and the gateway lose access until Setup runs. Run `icacls "<path>" /inheritance:d`, which keeps copies of the inherited entries, then `icacls "<path>" /remove:g *<SID>` for the account.
+- A folder Setup cannot list ("Setup cannot list the managed folder"): give Administrators access again (`icacls "<path>" /grant *S-1-5-32-544:(OI)(CI)(F)`).
+- Check what the file or folder holds, since that account could have changed it.
 
 Then:
 
