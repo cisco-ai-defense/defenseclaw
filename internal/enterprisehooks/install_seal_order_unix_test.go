@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,10 +19,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-// The installer verifies the registration under both host probe capabilities.
-// The no-probe path needs the newly rendered script's persisted digest, while
-// a host with a contained probe still verifies after the same seal step.
-func TestGAP0083HermesInstallSealsBeforeRegistrationReadback(t *testing.T) {
+// Read-back sees only transaction-local evidence under both probe capabilities.
+func TestGAP0083HermesInstallUsesPendingDigestBeforeRegistrationReadback(t *testing.T) {
 	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	setStandaloneProfileForTest(t, true)
@@ -38,29 +37,31 @@ func TestGAP0083HermesInstallSealsBeforeRegistrationReadback(t *testing.T) {
 			opts := hermesStandaloneOptions(t, home)
 			previous := installOwnedHooksPresent
 			t.Cleanup(func() { installOwnedHooksPresent = previous })
-			var observedSeal bool
-			installOwnedHooksPresent = func(conn connector.Connector, setup connector.SetupOpts) (bool, error) {
+			var observedPendingDigest bool
+			installOwnedHooksPresent = func(conn connector.Connector, setup connector.SetupOpts, pending connector.HookContractLockEntry) (bool, error) {
 				if conn.Name() != "hermes" {
-					return previous(conn, setup)
+					return previous(conn, setup, pending)
 				}
-				entry := connector.LoadHookContractLockEntry(setup.DataDir, "hermes")
-				want := entry.HookScriptDigests["hermes-hook.sh"]
+				if entry := connector.LoadHookContractLockEntry(setup.DataDir, "hermes"); entry.Connector != "" {
+					return false, fmt.Errorf("registration read-back saw a published contract lock")
+				}
+				want := pending.HookScriptDigests["hermes-hook.sh"]
 				body, err := os.ReadFile(filepath.Join(setup.DataDir, "hooks", "hermes-hook.sh"))
 				if err != nil {
 					return false, err
 				}
 				digest := sha256.Sum256(body)
-				observedSeal = want != "" && want == fmt.Sprintf("sha256:%x", digest)
+				observedPendingDigest = want != "" && want == fmt.Sprintf("sha256:%x", digest)
 				if !tc.containedProbe {
-					return observedSeal, nil
+					return observedPendingDigest, nil
 				}
 				return true, nil
 			}
 			if _, err := Install(context.Background(), opts); err != nil {
 				t.Fatalf("fresh Hermes Install: %v", err)
 			}
-			if !observedSeal {
-				t.Fatal("registration read-back preceded the persisted script seal")
+			if !observedPendingDigest {
+				t.Fatal("registration read-back lacked the pending script digest")
 			}
 			if _, err := Verify(context.Background(), opts); err != nil {
 				t.Fatalf("Hermes Verify after Install: %v", err)
@@ -69,7 +70,7 @@ func TestGAP0083HermesInstallSealsBeforeRegistrationReadback(t *testing.T) {
 	}
 }
 
-func TestGAP0083RejectedReadbackRestoresFreshInstallLock(t *testing.T) {
+func TestGAP0083RejectedReadbackDoesNotPublishFreshInstallLock(t *testing.T) {
 	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	setStandaloneProfileForTest(t, true)
@@ -77,18 +78,103 @@ func TestGAP0083RejectedReadbackRestoresFreshInstallLock(t *testing.T) {
 	opts := hermesStandaloneOptions(t, home)
 	previous := installOwnedHooksPresent
 	t.Cleanup(func() { installOwnedHooksPresent = previous })
-	var observedSeal bool
-	installOwnedHooksPresent = func(conn connector.Connector, setup connector.SetupOpts) (bool, error) {
-		observedSeal = connector.LoadHookContractLockEntry(setup.DataDir, conn.Name()).HookScriptDigests["hermes-hook.sh"] != ""
+	var observedPendingDigest bool
+	installOwnedHooksPresent = func(conn connector.Connector, setup connector.SetupOpts, pending connector.HookContractLockEntry) (bool, error) {
+		observedPendingDigest = pending.HookScriptDigests["hermes-hook.sh"] != ""
+		if entry := connector.LoadHookContractLockEntry(setup.DataDir, conn.Name()); entry.Connector != "" {
+			return false, fmt.Errorf("rejected read-back saw a published lock")
+		}
 		return false, nil
 	}
 	if _, err := Install(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "hook verification failed") {
 		t.Fatalf("rejected registration read-back = %v, want install refusal", err)
 	}
-	if !observedSeal {
-		t.Fatal("registration read-back preceded the new lock entry")
+	if !observedPendingDigest {
+		t.Fatal("registration read-back lacked the pending digest")
 	}
 	if entry := connector.LoadHookContractLockEntry(filepath.Join(home, ".defenseclaw"), "hermes"); entry.Connector != "" {
 		t.Fatalf("failed fresh install retained hook contract entry for %s", entry.Connector)
+	}
+}
+
+func TestGAP0083RejectedReadbackPreservesPeerContractLock(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	setStandaloneProfileForTest(t, true)
+	home := newTestHome(t)
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexConfig, []byte("model = \"test\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	codexOpts := standaloneOptions(home, "codex", "observe", "codex-cli 0.150.0")
+	if _, err := Install(context.Background(), codexOpts); err != nil {
+		t.Fatalf("Codex peer install: %v", err)
+	}
+	lockPath := filepath.Join(home, ".defenseclaw", "hook_contract_lock.json")
+	before, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hermesOpts := hermesStandaloneOptions(t, home)
+	previous := installOwnedHooksPresent
+	t.Cleanup(func() { installOwnedHooksPresent = previous })
+	installOwnedHooksPresent = func(conn connector.Connector, setup connector.SetupOpts, pending connector.HookContractLockEntry) (bool, error) {
+		if conn.Name() != "hermes" {
+			return previous(conn, setup, pending)
+		}
+		if pending.HookScriptDigests["hermes-hook.sh"] == "" {
+			return false, fmt.Errorf("pending Hermes digest is missing")
+		}
+		return false, nil
+	}
+	if _, err := Install(context.Background(), hermesOpts); err == nil || !strings.Contains(err.Error(), "hook verification failed") {
+		t.Fatalf("rejected Hermes install = %v, want read-back refusal", err)
+	}
+	after, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("rejected connector changed the peer contract lock")
+	}
+	if _, err := Verify(context.Background(), codexOpts); err != nil {
+		t.Fatalf("Codex peer Verify after rejected install: %v", err)
+	}
+}
+
+func TestGAP0083InterruptedReadbackDoesNotPublishLock(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	setStandaloneProfileForTest(t, true)
+	const childHomeEnv = "DC_GAP0083_INTERRUPTED_HOME"
+	if home := os.Getenv(childHomeEnv); home != "" {
+		opts := hermesStandaloneOptions(t, home)
+		installOwnedHooksPresent = func(conn connector.Connector, setup connector.SetupOpts, pending connector.HookContractLockEntry) (bool, error) {
+			if pending.HookScriptDigests["hermes-hook.sh"] == "" {
+				os.Exit(17)
+			}
+			os.Exit(0)
+			return false, nil
+		}
+		if _, err := Install(context.Background(), opts); err != nil {
+			t.Fatalf("child Install before read-back: %v", err)
+		}
+		t.Fatal("child Install returned without read-back")
+	}
+	home := newTestHome(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, "-test.run=^TestGAP0083InterruptedReadbackDoesNotPublishLock$")
+	cmd.Env = append(os.Environ(), childHomeEnv+"="+home)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("interrupted read-back child: %v: %s", err, output)
+	}
+	if entry := connector.LoadHookContractLockEntry(filepath.Join(home, ".defenseclaw"), "hermes"); entry.Connector != "" {
+		t.Fatalf("interrupted read-back published a %s lock", entry.Connector)
 	}
 }
