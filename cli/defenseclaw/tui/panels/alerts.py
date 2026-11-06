@@ -32,6 +32,7 @@ from defenseclaw.alert_semantics import (
 from defenseclaw.audit_time_order import audit_time_order
 from defenseclaw.hook_metrics import (
     POST_TOOL_DECISION,
+    allowed_finding_hook_label,
     connector_hook_decision,
     detection_only_hook_label,
     parse_detail_tokens,
@@ -1944,7 +1945,11 @@ def _hook_decision_from_rows(rows: Iterable[str], hook_target: str = "") -> str:
             # The same label as "defenseclaw alerts" (GAP-1560).
             decision = would_block_hook_label(hook_target, mode)
         elif not decision and action:
-            decision = "allowed" if action == "allow" else action
+            decision = (
+                allowed_finding_hook_label(hook_target, mode) or "allowed"
+                if action == "allow"
+                else action
+            )
     return decision
 
 
