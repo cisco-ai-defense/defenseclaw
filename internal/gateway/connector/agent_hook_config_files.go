@@ -25,15 +25,16 @@ const (
 	AgentHookConfigOpenCodeConfig = "opencode-config"
 	// AgentHookConfigBridge is the OpenCode bridge plugin DefenseClaw
 	// installs: the file is the whole install.
-	AgentHookConfigBridge = "bridge"
+	AgentHookConfigBridge       = "bridge"
+	AgentHookConfigHermesYAML   = "hermes-yaml"
+	AgentHookConfigKiroSettings = "kiro-settings"
 )
 
 // AgentHookConfigFile is a per-user file of an agent that registers
 // DefenseClaw's hooks, or that can switch them off (GAP-0048).
 type AgentHookConfigFile struct {
-	Connector string
-	Path      string
-	Format    string
+	Path   string
+	Format string
 }
 
 // AgentHookConfigFiles lists the per-user hook files of the connectors
@@ -45,22 +46,30 @@ func AgentHookConfigFiles() []AgentHookConfigFile {
 	opts := SetupOpts{}
 	claudeDir := claudeCodeConfigDir()
 	files := []AgentHookConfigFile{
-		{Connector: "claudecode", Path: claudeCodeSettingsPath(), Format: AgentHookConfigClaudeSettings},
-		{Connector: "claudecode", Path: filepath.Join(claudeDir, "settings.local.json"), Format: AgentHookConfigClaudeSettings},
-		{Connector: "codex", Path: codexConfigPath(), Format: AgentHookConfigCodexTOML},
-		{Connector: "codex", Path: codexHooksJSONPath(), Format: AgentHookConfigJSONHooks},
-		{Connector: "opencode", Path: opencodePluginPath(opts), Format: AgentHookConfigBridge},
-		{Connector: "cursor", Path: cursorHooksPath(opts), Format: AgentHookConfigJSONHooks},
-		{Connector: "devin", Path: devinHooksPath(opts), Format: AgentHookConfigJSONHooks},
-		{Connector: "copilot", Path: copilotHooksPath(opts), Format: AgentHookConfigJSONHooks},
+		{Path: claudeCodeSettingsPath(), Format: AgentHookConfigClaudeSettings},
+		{Path: filepath.Join(claudeDir, "settings.local.json"), Format: AgentHookConfigClaudeSettings},
+		{Path: codexConfigPath(), Format: AgentHookConfigCodexTOML},
+		{Path: codexHooksJSONPath(), Format: AgentHookConfigJSONHooks},
+		{Path: opencodePluginPath(opts), Format: AgentHookConfigBridge},
+		{Path: cursorHooksPath(opts), Format: AgentHookConfigJSONHooks},
+		{Path: devinHooksPath(opts), Format: AgentHookConfigJSONHooks},
+		{Path: copilotHooksPath(opts), Format: AgentHookConfigJSONHooks},
+		{Path: ampPluginPath(opts), Format: AgentHookConfigBridge},
+		{Path: antigravityHooksPath(opts), Format: AgentHookConfigJSONHooks},
+		{Path: kiroHooksPath(opts), Format: AgentHookConfigJSONHooks},
+		{Path: kiroManagedAgentPath(), Format: AgentHookConfigJSONHooks},
+		{Path: kiroBuiltInDefaultAgentPath(), Format: AgentHookConfigJSONHooks},
+		{Path: kiroConfiguredDefaultAgentPath(), Format: AgentHookConfigJSONHooks},
+		{Path: kiroSettingsPath(), Format: AgentHookConfigKiroSettings},
+		{Path: hermesConfigPath(opts), Format: AgentHookConfigHermesYAML},
 	}
 	for _, name := range []string{"settings.json", "config.json"} {
 		if path := copilotHomePath(name); path != "" {
-			files = append(files, AgentHookConfigFile{Connector: "copilot", Path: path, Format: AgentHookConfigCopilotSettings})
+			files = append(files, AgentHookConfigFile{Path: path, Format: AgentHookConfigCopilotSettings})
 		}
 	}
 	for _, path := range opencodeMCPReadPaths(opts) {
-		files = append(files, AgentHookConfigFile{Connector: "opencode", Path: path, Format: AgentHookConfigOpenCodeConfig})
+		files = append(files, AgentHookConfigFile{Path: path, Format: AgentHookConfigOpenCodeConfig})
 	}
 	out := files[:0]
 	for _, file := range files {
