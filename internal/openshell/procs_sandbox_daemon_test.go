@@ -5,40 +5,64 @@ package openshell
 
 import (
 	"context"
-	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"slices"
+	"runtime"
 	"testing"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 )
 
-func TestSandboxDaemonMacProcessInspectionUsesFixedCommand(t *testing.T) {
-	cmd := sandboxDaemonPSCommand(os.Getpid())
-	if cmd.Name != "/bin/ps" || cmd.Timeout != 3*time.Second || !slices.Equal(cmd.Env, []string{"LANG=C", "LC_ALL=C"}) ||
-		!slices.Equal(cmd.Args, []string{"-p", fmt.Sprint(os.Getpid()), "-o", "comm="}) ||
-		!slices.Equal(cmd.Unset, []string{"DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH"}) {
-		t.Fatalf("process inspection command = %+v", cmd)
+func startSandboxImageProbe(t *testing.T) (int, string) {
+	t.Helper()
+	image, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed := filepath.Join(t.TempDir(), "defenseclaw-gateway")
+	if err := os.WriteFile(claimed, []byte("named gateway file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(image, "30")
+	cmd.Args[0] = claimed
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	return cmd.Process.Pid, image
+}
+
+func TestGAP0617ProcessImagePathUsesRunningFile(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("process image lookup requires Linux or macOS")
+	}
+	pid, image := startSandboxImageProbe(t)
+	path, err := sandboxDaemonProcessPath(context.Background(), pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.Stat(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.Stat(path)
+	if err != nil || !os.SameFile(got, want) {
+		t.Fatalf("process image path = %q, want running file %q: %v", path, image, err)
 	}
 }
 
-// macOS lsof identifies the socket PID; ps comm gives its executable path.
-// A same-account process with a different file, or a different PID, does
-// not satisfy the daemon's status identity.
+// A different account or process cannot satisfy the daemon status identity.
 func TestMacSandboxDaemonPortNeedsExactAnsweringExecutable(t *testing.T) {
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("process image lookup requires Linux or macOS")
 	}
 	pid, uid := os.Getpid(), os.Geteuid()
 	r := &doctorRun{Doctor: &Doctor{GOOS: "darwin", DaemonPID: pid, Geteuid: os.Geteuid}}
 	holder := daemon.PortHolder{PID: pid, UID: uid}
-	setProcess := func(path string) {
-		r.DaemonProcessPath = func(context.Context, int) (string, error) { return path, nil }
-	}
-	setProcess(exe)
 	if !r.ownSandboxDaemonProcess(context.Background(), holder) {
 		t.Fatal("answering daemon executable was not recognized")
 	}
@@ -51,14 +75,11 @@ func TestMacSandboxDaemonPortNeedsExactAnsweringExecutable(t *testing.T) {
 	if r.ownSandboxDaemonProcess(context.Background(), holder) {
 		t.Fatal("a different account was accepted")
 	}
-	holder.UID = uid
-	other := filepath.Join(t.TempDir(), filepath.Base(exe))
-	if err := os.WriteFile(other, []byte("different executable"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	setProcess(other)
+	foreignPID, _ := startSandboxImageProbe(t)
+	r.DaemonPID = foreignPID
+	holder = daemon.PortHolder{PID: foreignPID, UID: uid}
 	if r.ownSandboxDaemonProcess(context.Background(), holder) {
-		t.Fatal("a different executable with the same name was accepted")
+		t.Fatal("a different executable with the same account was accepted")
 	}
 }
 

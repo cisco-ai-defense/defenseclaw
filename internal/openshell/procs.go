@@ -112,9 +112,9 @@ func (r *doctorRun) ownSandboxDaemonProcess(ctx context.Context, holder daemon.P
 		// /proc/<pid>/exe follows the running file even after an upgrade.
 		other, err = os.Stat("/proc/" + strconv.Itoa(holder.PID) + "/exe")
 	case "darwin":
-		// lsof identifies the socket PID, and a fixed ps reads its path.
+		// lsof identifies the socket PID; inspect that PID's running image.
 		var pathErr error
-		path, pathErr = r.DaemonProcessPath(ctx, holder.PID)
+		path, pathErr = sandboxDaemonProcessPath(ctx, holder.PID)
 		if pathErr != nil || !filepath.IsAbs(path) {
 			return false
 		}
@@ -161,23 +161,6 @@ func installedSandboxDaemonCopy(launcher, candidate string) bool {
 	}
 	copyDigest, err := fileSHA256(candidate)
 	return err == nil && copyDigest == digest
-}
-
-func sandboxDaemonPSCommand(pid int) Command {
-	return Command{Name: "/bin/ps", Args: []string{"-p", strconv.Itoa(pid), "-o", "comm="}, Timeout: 3 * time.Second,
-		Unset: []string{"DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH"}, Env: []string{"LANG=C", "LC_ALL=C"}}
-}
-
-func sandboxDaemonProcessPath(ctx context.Context, pid int) (string, error) {
-	out, err := (ExecRunner{}).Output(ctx, sandboxDaemonPSCommand(pid))
-	if err != nil {
-		return "", err
-	}
-	path := strings.TrimSpace(string(out))
-	if !filepath.IsAbs(path) || strings.ContainsAny(path, "\r\n") {
-		return "", fmt.Errorf("ps did not return an absolute executable path for pid %d", pid)
-	}
-	return path, nil
 }
 
 // findProcess is the first of procs running the executable named name
