@@ -1040,6 +1040,12 @@ func (g *HookConfigGuard) processPolicyAudit() {
 	if conn.Name() != "claudecode" && conn.Name() != "codex" {
 		return
 	}
+	if conn.Name() == "claudecode" {
+		if err := connector.EnsureClaudeCodeChain(opts); err != nil {
+			g.reportPolicyFailure(conn, err)
+			return
+		}
+	}
 	g.auditHookShellEnv(conn, opts)
 	reason := "periodic effective-policy audit"
 	if conn.Name() == "codex" {
