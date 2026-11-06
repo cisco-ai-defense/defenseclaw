@@ -30,6 +30,10 @@ import (
 // managedConfigRecordMaxBytes bounds the config read for the record.
 const managedConfigRecordMaxBytes = 8 << 20
 
+// managedConfigRecordDeferredTo is the lifecycle owner the last cycle left an
+// unrecorded config.yaml to, so the guardian log names it once per run.
+var managedConfigRecordDeferredTo string
+
 // recordUnrecordedManagedConfig records a managed config.yaml that the caller
 // has already loaded, but that config.generation.json does not record, as the
 // next config generation with the actor hand-edit:unattributed. The gateway
@@ -37,11 +41,17 @@ const managedConfigRecordMaxBytes = 8 << 20
 // management) within seconds and enforces it, yet the reported config
 // generation stayed where it was, so status, the policy line and the audit
 // trail named the previous config (GAP-0617). The Windows hook guardian runs
-// as SYSTEM and calls it each cycle; the lifecycle's own writes are recorded
-// under the writer lock, so they are never recorded twice. The generation
-// still says hand-edit, so status keeps warning that the config was changed
-// outside the lifecycle.
-func recordUnrecordedManagedConfig(path string, w io.Writer) {
+// as SYSTEM and calls it each cycle. The generation still says hand-edit, so
+// status keeps warning that the config was changed outside the lifecycle.
+//
+// claim is the one rule for who owns config.yaml (GAP-0646): it is called
+// only for bytes the record does not name, and says which lifecycle run owns
+// the file now (owner), or holds the lifecycle off while the edit is recorded
+// (release). A lifecycle run records its own write as its generation with the
+// write, so bytes found unrecorded while it owns the file are that run's,
+// never an edit; they are left to it. nil claims nothing (tests, and callers
+// with no lifecycle).
+func recordUnrecordedManagedConfig(path string, w io.Writer, claim func() (release func(), owner string)) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return
@@ -52,8 +62,21 @@ func recordUnrecordedManagedConfig(path string, w io.Writer) {
 	}
 	if state, err := configwrite.ReadGenerationState(path); err == nil &&
 		strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(raw)) {
+		managedConfigRecordDeferredTo = ""
 		return
 	}
+	if claim != nil {
+		release, owner := claim()
+		if owner != "" {
+			if owner != managedConfigRecordDeferredTo {
+				fmt.Fprintf(w, "[hook-guardian] config.yaml changed while %s; that run records its own config generation, so this is not recorded as an edit\n", owner)
+			}
+			managedConfigRecordDeferredTo = owner
+			return
+		}
+		defer release()
+	}
+	managedConfigRecordDeferredTo = ""
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	recorded, err := configwrite.RecordUnrecorded(ctx, path, raw, configwrite.Options{
