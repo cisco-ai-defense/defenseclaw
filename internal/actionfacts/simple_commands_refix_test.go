@@ -37,6 +37,8 @@ func TestSimpleCommandsW24Continuation(t *testing.T) {
 			SimpleCommand{Text: "rm -rf /", CWD: "/repo"}},
 		{"dash shell body", "dash -c 'true && rm -rf /'", "/repo", "/home/alice", DialectPOSIX,
 			SimpleCommand{Text: "rm -rf /", CWD: "/repo"}},
+		{"assignment in login shell", `bash -lc 'FOO=1; cat /etc/hosts'`, "/repo", "/home/alice", DialectPOSIX,
+			SimpleCommand{Text: "cat /etc/hosts"}},
 		{"login shell does not assume startup directory", `bash -lc 'cat .ssh/id_rsa'`, "/repo", "/home/alice", DialectPOSIX,
 			SimpleCommand{Text: "cat .ssh/id_rsa"}},
 		{"bash named option", "bash -o pipefail -c 'true && rm -rf /'", "/repo", "/home/alice", DialectPOSIX,
@@ -163,5 +165,23 @@ func TestSimpleCommandsWindowsEmptyBlockNeedsNoReduction(t *testing.T) {
 	input := Input{Tool: "shell", Command: `& { }`, CWD: `C:\repo`, DialectHint: DialectPowerShell}
 	if got := SimpleCommands(input, Analyze(input)); len(got) != 0 {
 		t.Errorf("empty script block produced compound children: %#v", got)
+	}
+}
+
+func TestSimpleRelativePathOperandAssignmentOnly(t *testing.T) {
+	for _, tt := range []struct {
+		name, source string
+		want         bool
+	}{
+		{"assignment", "FOO=1", false},
+		{"multiple assignments", "FOO=1 BAR=2", false},
+		{"relative redirect", "FOO=1 > output.txt", true},
+		{"absolute redirect", "FOO=1 > /tmp/output.txt", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := simpleRelativePathOperand(tt.source); got != tt.want {
+				t.Fatalf("simpleRelativePathOperand(%q) = %v, want %v", tt.source, got, tt.want)
+			}
+		})
 	}
 }
