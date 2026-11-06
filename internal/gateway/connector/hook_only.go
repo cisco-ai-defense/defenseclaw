@@ -5646,7 +5646,7 @@ func copilotBoundEventOwnsCommand(key, command, hookScript string) bool {
 		// A previous DefenseClaw adapter may have been deleted along with
 		// its data directory. Its event-bound command still identifies it.
 		if binding := copilotPowerShellAdapterBinding.FindStringSubmatch(strings.TrimSpace(command)); len(binding) == 3 {
-			adapter := strings.ReplaceAll(binding[1], "''", "'")
+			adapter := powershellLiteralValue(binding[1])
 			if _, err := os.Lstat(adapter); errors.Is(err, os.ErrNotExist) {
 				return true
 			}
@@ -5697,7 +5697,7 @@ func copilotMarkedAdapterCommand(command string) bool {
 	if len(binding) != 3 || !ValidCopilotHookEvent(binding[2]) {
 		return false
 	}
-	adapter := strings.ReplaceAll(binding[1], "''", "'")
+	adapter := powershellLiteralValue(binding[1])
 	body, err := safefile.ReadRegularFileBounded(adapter, 1<<20)
 	if err != nil {
 		return false
@@ -5746,7 +5746,7 @@ func copilotLiveOperatorLookalike(raw interface{}, hookScript string) bool {
 			continue
 		}
 		if binding := copilotPowerShellAdapterBinding.FindStringSubmatch(strings.TrimSpace(command)); len(binding) == 3 {
-			adapter := strings.ReplaceAll(binding[1], "''", "'")
+			adapter := powershellLiteralValue(binding[1])
 			current := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(hookScript), "& '"), "'")
 			if !strings.EqualFold(adapter, current) && !copilotMarkedAdapterCommand(command) {
 				if info, err := os.Lstat(adapter); err == nil && info.Mode().IsRegular() {
@@ -5915,7 +5915,7 @@ func copilotPowerShellCommandClaimsHandler(raw interface{}, adapter string) bool
 					lowered := strings.ToLower(command)
 					missingAdapter := false
 					if binding := copilotPowerShellAdapterBinding.FindStringSubmatch(strings.TrimSpace(command)); len(binding) == 3 {
-						path := strings.ReplaceAll(binding[1], "''", "'")
+						path := powershellLiteralValue(binding[1])
 						_, err := os.Lstat(path)
 						missingAdapter = errors.Is(err, os.ErrNotExist)
 					}

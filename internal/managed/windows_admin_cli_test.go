@@ -62,6 +62,41 @@ func TestWindowsAdminCommandQuotesEveryArgument(t *testing.T) {
 	}
 }
 
+// g072 review 2 S3: one quoting rule. The body doubles every single quote
+// PowerShell reads, the apostrophe and U+2018 to U+201B, and the value of a
+// body is the text it quoted.
+func TestPowerShellLiteralBodyAndValue(t *testing.T) {
+	for _, row := range []struct{ value, body string }{
+		{`C:\Users\dc-user\x.exe`, `C:\Users\dc-user\x.exe`},
+		{`C:\Users\O'Brien\x.exe`, `C:\Users\O''Brien\x.exe`},
+		{"C:\\Users\\O\u2019Brien\\x.exe", "C:\\Users\\O\u2019\u2019Brien\\x.exe"},
+		{"\u2018a\u2019 \u201ab\u201b", "\u2018\u2018a\u2019\u2019 \u201a\u201ab\u201b\u201b"},
+		{"''", "''''"},
+		{"", ""},
+	} {
+		if got := PowerShellLiteralBody(row.value); got != row.body {
+			t.Errorf("PowerShellLiteralBody(%q) = %q, want %q", row.value, got, row.body)
+		}
+		if got := PowerShellLiteral(row.value); got != "'"+row.body+"'" {
+			t.Errorf("PowerShellLiteral(%q) = %q", row.value, got)
+		}
+		if got := PowerShellLiteralValue(row.body); got != row.value {
+			t.Errorf("PowerShellLiteralValue(%q) = %q, want %q", row.body, got, row.value)
+		}
+	}
+	// A lone quote is kept, as the parsers kept a lone apostrophe.
+	if got := PowerShellLiteralValue("O\u2019Brien'x"); got != "O\u2019Brien'x" {
+		t.Errorf("lone quotes = %q", got)
+	}
+	old, ok := PowerShellLiteralBeforeTypographicQuotes("& 'C:\\Users\\O\u2019\u2019Brien''s\\x.exe' --hook codex")
+	if !ok || old != "& 'C:\\Users\\O\u2019Brien''s\\x.exe' --hook codex" {
+		t.Errorf("before 1.0.9 = %q, %t", old, ok)
+	}
+	if _, ok := PowerShellLiteralBeforeTypographicQuotes("& 'C:\\Users\\O''Brien\\x.exe'"); ok {
+		t.Error("a command without typographic quotes has no earlier form")
+	}
+}
+
 // g072 review 2 S2: the hint names the Program Files of the machine
 // registration. A standard user who sets ProgramFiles in a shell does not
 // get a hint, for an administrator to paste elevated, that names a folder of

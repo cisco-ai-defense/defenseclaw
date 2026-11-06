@@ -69,18 +69,57 @@ func WindowsCommandLine(executable string, args ...string) string {
 
 // PowerShellLiteral is value as one inert single-quoted PowerShell string.
 // PowerShell reads the typographic single quotes as quotes too, so each of
-// them is doubled like an apostrophe.
+// them is doubled like an apostrophe. It is the one PowerShell quoting rule:
+// the hook-command builders (connector, legacyconnector), the ACP setup and
+// every hint use it (g072 review 2 S3); the source check fails a quote
+// doubled by hand.
 func PowerShellLiteral(value string) string {
+	return "'" + PowerShellLiteralBody(value) + "'"
+}
+
+// PowerShellLiteralBody is value escaped for the inside of a single-quoted
+// PowerShell literal, for a template that holds the quotes itself
+// ('{{.HookBinaryPS}}'): each single quote, the apostrophe or a typographic
+// one, is doubled.
+func PowerShellLiteralBody(value string) string {
 	var quoted strings.Builder
-	quoted.WriteByte('\'')
 	for _, r := range value {
 		quoted.WriteRune(r)
 		if strings.ContainsRune(powerShellSingleQuotes, r) {
 			quoted.WriteRune(r)
 		}
 	}
-	quoted.WriteByte('\'')
 	return quoted.String()
+}
+
+// PowerShellLiteralValue is the value of body, the inside of a single-quoted
+// PowerShell literal (PowerShellLiteralBody): each doubled quote is one. A
+// quote that is not doubled is kept, as the hook-command parsers kept a lone
+// apostrophe.
+func PowerShellLiteralValue(body string) string {
+	runes := []rune(body)
+	var value strings.Builder
+	for i := 0; i < len(runes); i++ {
+		value.WriteRune(runes[i])
+		if strings.ContainsRune(powerShellSingleQuotes, runes[i]) && i+1 < len(runes) && runes[i+1] == runes[i] {
+			i++
+		}
+	}
+	return value.String()
+}
+
+// PowerShellLiteralBeforeTypographicQuotes is text, which holds PowerShell
+// literals from PowerShellLiteral, as releases before 1.0.9 rendered it: they
+// doubled only the apostrophe, so each doubled typographic quote is one again.
+// Such a literal ended early on a path like C:\Users\O’Brien; the
+// hook-ownership matchers keep that form owned, so setup rewrites it and
+// teardown removes it. ok is false when text has no doubled typographic quote.
+func PowerShellLiteralBeforeTypographicQuotes(text string) (string, bool) {
+	old := text
+	for _, r := range powerShellSingleQuotes[1:] {
+		old = strings.ReplaceAll(old, string(r)+string(r), string(r))
+	}
+	return old, old != text
 }
 
 // powerShellSingleQuotes are the characters PowerShell takes as a single

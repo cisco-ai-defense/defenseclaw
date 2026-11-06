@@ -39,6 +39,7 @@ import (
 	"unicode"
 	"unicode/utf16"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -844,9 +845,45 @@ func windowsQuoteExe(p string) string {
 // be invoked as `& '<path>'`; a quoted path without `&` is only an expression
 // and PowerShell rejects it as a pipeline target. Doubling a single quote is
 // PowerShell's literal escape and prevents a user-controlled home path from
-// changing the command structure.
+// changing the command structure. It is managed.PowerShellLiteral, the one
+// quoting rule: PowerShell reads U+2018 to U+201B as single quotes too, so a
+// hook under C:\Users\O’Brien ended the literal early and its command did
+// not parse, and the hook fell to its fail mode (g072 review 2 S3).
 func powershellQuoteLiteral(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+	return managed.PowerShellLiteral(value)
+}
+
+// powershellLiteralBody is powershellQuoteLiteral without the quotes, for a
+// template that holds them ('{{.HookBinaryPS}}').
+func powershellLiteralBody(value string) string {
+	return managed.PowerShellLiteralBody(value)
+}
+
+// powershellLiteralValue is the value of the inside of a single-quoted
+// literal powershellQuoteLiteral wrote.
+func powershellLiteralValue(body string) string {
+	return managed.PowerShellLiteralValue(body)
+}
+
+// preTypographicQuoteHookCommand is cmd as a release before 1.0.9 rendered
+// it, when cmd quotes a path with a typographic quote: those releases doubled
+// only the apostrophe (managed.PowerShellLiteralBeforeTypographicQuotes). An
+// encoded bridge is compared by its script. The form stays owned, so setup
+// rewrites it and teardown removes it.
+func preTypographicQuoteHookCommand(cmd string) (string, bool) {
+	prefix := windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand "
+	if encoded, ok := strings.CutPrefix(cmd, prefix); ok {
+		script, decoded := powershellDecodedCommand(encoded)
+		if !decoded {
+			return "", false
+		}
+		old, changed := managed.PowerShellLiteralBeforeTypographicQuotes(script)
+		if !changed {
+			return "", false
+		}
+		return prefix + powershellEncodedCommand(old), true
+	}
+	return managed.PowerShellLiteralBeforeTypographicQuotes(cmd)
 }
 
 func windowsAntigravityHookCommand() string {
@@ -1365,7 +1402,7 @@ func isNativeHookCommand(cmd string) bool {
 		if len(exe) < 2 || !strings.HasPrefix(exe, `'`) || !strings.HasSuffix(exe, `'`) {
 			return false
 		}
-		exe = strings.ReplaceAll(exe[1:len(exe)-1], `''`, `'`)
+		exe = powershellLiteralValue(exe[1 : len(exe)-1])
 	}
 	if exe == "" || strings.Contains(exe, `"`) {
 		return false
@@ -1444,6 +1481,13 @@ func nativeHookExactCommands(hookBinaries []string) map[string]struct{} {
 		// rewrites it to the current one and teardown removes it.
 		if legacy, ok := legacyWindowsAwaitedHookCommand(cmd); ok {
 			commands[legacy] = struct{}{}
+			if old, ok := preTypographicQuoteHookCommand(legacy); ok {
+				commands[old] = struct{}{}
+			}
+		}
+		// So does a pre-1.0.9 render of a path with a typographic quote.
+		if old, ok := preTypographicQuoteHookCommand(cmd); ok {
+			commands[old] = struct{}{}
 		}
 	}
 	for _, connectorName := range []string{"codex", "antigravity"} {

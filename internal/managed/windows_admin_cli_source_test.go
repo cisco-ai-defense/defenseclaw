@@ -50,6 +50,18 @@ var managedWindowsCallAllowed = map[string]string{
 	"internal/gateway/agent_not_installed.go":       "reads a cmd.exe shim prefix, where & is cmd's command separator",
 }
 
+// managedWindowsQuoteAllowed lists the files that double or read a
+// PowerShell single quote by hand, with the reason. Each re-renders or reads
+// a command line for the gateway's own matching, and is not a command that
+// runs; every literal that runs comes from managed.PowerShellLiteral. An
+// entry no call uses fails the test.
+var managedWindowsQuoteAllowed = map[string]string{
+	"internal/gateway/windows_command.go":         "quoteWindowsArg re-renders a parsed argv for policy matching",
+	"internal/actionfacts/simple_commands.go":     "re-renders a command with its resolved variables for policy matching",
+	"internal/gateway/trusted_action_dispatch.go": "the gateway's command-line reader for trusted actions",
+	"internal/gateway/powershell_state_write.go":  "re-renders a ${provider:path} variable as a literal for the state-write matcher",
+}
+
 var (
 	// managedWindowsCall is PowerShell's call operator before a quoted path,
 	// or at the end of a literal that a path is appended to: a command built
@@ -93,7 +105,10 @@ var (
 //     PowerShell or an Administrator prompt, names no bare `defenseclaw ...`
 //     command, except to a per-user install
 //     (managedWindowsBareCommandAllowed), and no instruction to run a
-//     subcommand without its executable (managedWindowsVerbOnly).
+//     subcommand without its executable (managedWindowsVerbOnly);
+//   - a PowerShell single quote is doubled, or a doubled one read, only by
+//     managed.PowerShellLiteral and PowerShellLiteralValue, which handle the
+//     typographic quotes too (g072 review 2 S3; managedWindowsQuoteAllowed).
 //
 // A sentence built with + is checked whole as well, with %s for each part
 // that is not a literal: the Windows words and the command were often in
@@ -130,6 +145,16 @@ func TestManagedWindowsCommandsComeFromTheRenderer(t *testing.T) {
 			windowsOnly := windowsOnlySource(t, path)
 			chained := map[*ast.BinaryExpr]bool{}
 			ast.Inspect(file, func(node ast.Node) bool {
+				if call, ok := node.(*ast.CallExpr); ok {
+					if problem := powerShellQuoteByHand(call); problem != "" {
+						if _, allowed := managedWindowsQuoteAllowed[rel]; allowed {
+							used["quote\x00"+rel] = true
+						} else {
+							t.Errorf("%s: %s", fset.Position(call.Pos()), problem)
+						}
+					}
+					return true
+				}
 				if sum, ok := node.(*ast.BinaryExpr); ok && sum.Op == token.ADD && !chained[sum] {
 					joined, parts := managedWindowsSentence(sum, chained)
 					for _, problem := range managedWindowsSentenceProblems(rel, joined, parts, windowsOnly) {
@@ -170,6 +195,69 @@ func TestManagedWindowsCommandsComeFromTheRenderer(t *testing.T) {
 	for prefix := range managedWindowsCallAllowed {
 		if !used["call\x00"+prefix] {
 			t.Errorf("managedWindowsCallAllowed lists %q, where no literal builds a PowerShell call", prefix)
+		}
+	}
+	for rel := range managedWindowsQuoteAllowed {
+		if !used["quote\x00"+rel] {
+			t.Errorf("managedWindowsQuoteAllowed lists %q, which quotes nothing by hand", rel)
+		}
+	}
+}
+
+// powerShellQuoteByHand is a problem when call is strings.ReplaceAll or
+// strings.Replace turning ' into ” (a PowerShell literal quoted by hand) or
+// ” into ' (one read by hand): either misses the typographic quotes
+// PowerShell reads as single quotes.
+func powerShellQuoteByHand(call *ast.CallExpr) string {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || len(call.Args) < 3 || sel.Sel.Name != "ReplaceAll" && sel.Sel.Name != "Replace" {
+		return ""
+	}
+	if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "strings" {
+		return ""
+	}
+	literal := func(expr ast.Expr) string {
+		lit, ok := expr.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return "\x00"
+		}
+		value, err := strconv.Unquote(lit.Value)
+		if err != nil {
+			return "\x00"
+		}
+		return value
+	}
+	switch old, replacement := literal(call.Args[1]), literal(call.Args[2]); {
+	case old == "'" && replacement == "''":
+		return "a PowerShell literal quoted by hand: use managed.PowerShellLiteral or PowerShellLiteralBody (typographic quotes too)"
+	case old == "''" && replacement == "'":
+		return "a PowerShell literal read by hand: use managed.PowerShellLiteralValue (typographic quotes too)"
+	}
+	return ""
+}
+
+func TestPowerShellQuoteByHand(t *testing.T) {
+	for source, want := range map[string]bool{
+		`strings.ReplaceAll(p, "'", "''")`:             true,
+		"strings.ReplaceAll(p, `'`, `''`)":             true,
+		`strings.Replace(p, "'", "''", -1)`:            true,
+		`strings.ReplaceAll(p[1:len(p)-1], "''", "'")`: true,
+		"strings.ReplaceAll(p, \"'\", `'\\''`)":        false,
+		`strings.ReplaceAll(p, "/", "\\")`:             false,
+		`bytes.ReplaceAll(p, "'", "''")`:               false,
+		`strings.ReplaceAll(p, quote, "''")`:           false,
+		`managed.PowerShellLiteral(p)`:                 false,
+	} {
+		expr, err := parser.ParseExpr(source)
+		if err != nil {
+			t.Fatalf("%s: %v", source, err)
+		}
+		call, ok := expr.(*ast.CallExpr)
+		if !ok {
+			t.Fatalf("%s: not a call", source)
+		}
+		if got := powerShellQuoteByHand(call) != ""; got != want {
+			t.Errorf("powerShellQuoteByHand(%s) = %t, want %t", source, got, want)
 		}
 	}
 }
