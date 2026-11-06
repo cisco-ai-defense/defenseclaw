@@ -423,6 +423,11 @@ Terminal or MDM script that has Full Disk Access (or grant it with a PPPC profil
 A pkg has no uninstaller, so the lifecycle removes the binaries itself. The
 root-owned `lifecycle/lifecycle.lock` remains so waiting runs share one lock. For a
 pkg install it also runs `pkgutil --forget com.cisco.defenseclaw.enterprise`.
+Uninstall also removes the shared folders the deployment created, such as `/opt`,
+`/opt/cisco`, `/usr/local/bin` and `/Library/Logs/Cisco`, once they are empty. A
+folder that existed before the install stays, empty or not. A deployment installed
+before 1.0.9 did not record `/opt` and `/opt/cisco`, so those stay until you remove
+them.
 launchd keeps a record for each removed label, so `launchctl print system` lists
 the labels as `enabled` while no job stays loaded. macOS also keeps any privacy
 (TCC) decision about the gateway binary, such as Full Disk Access; remove it in
