@@ -1896,6 +1896,21 @@ namespace $nativeNamespace
         // ";backup-kept" is added when it could not be).
         public static string SwapLaunchableFile(string replacement, string destination, string backup)
         {
+            return SwapLaunchableFileCore(replacement, destination, backup, true);
+        }
+
+        // GAP-0656 review M2: the same swap for a destination whose own
+        // object is not trusted (a foreign owner or writer). The replacement
+        // keeps the access list it was created with (inherited from the
+        // protected install folder), so no untrusted entry of the old object
+        // reaches the new one before Setup stamps it.
+        public static string SwapLaunchableFileKeepingAccess(string replacement, string destination, string backup)
+        {
+            return SwapLaunchableFileCore(replacement, destination, backup, false);
+        }
+
+        private static string SwapLaunchableFileCore(string replacement, string destination, string backup, bool copyDestinationAccess)
+        {
             const uint READ_CONTROL = 0x00020000;
             const uint WRITE_DAC = 0x00040000;
             const uint DELETE = 0x00010000;
@@ -1910,10 +1925,24 @@ namespace $nativeNamespace
             const uint PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000;
             const uint UNPROTECTED_DACL_SECURITY_INFORMATION = 0x20000000;
             const ushort SE_DACL_PROTECTED = 0x1000;
-            const int FileRenameInfoEx = 22;
-            const uint FILE_RENAME_REPLACE_IF_EXISTS = 0x00000001;
-            const uint FILE_RENAME_POSIX_SEMANTICS = 0x00000002;
             IntPtr invalid = new IntPtr(-1);
+
+            if (!copyDestinationAccess)
+            {
+                IntPtr own = CreateFileW(replacement, DELETE | SYNCHRONIZE,
+                    FILE_SHARE_READ | FILE_SHARE_DELETE,
+                    IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, IntPtr.Zero);
+                if (own == invalid)
+                    return "open:" + Marshal.GetLastWin32Error().ToString(System.Globalization.CultureInfo.InvariantCulture);
+                try
+                {
+                    return LinkBackupAndRename(own, destination, backup);
+                }
+                finally
+                {
+                    CloseHandle(own);
+                }
+            }
 
             IntPtr current = CreateFileW(destination, READ_CONTROL,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -1957,22 +1986,7 @@ namespace $nativeNamespace
                         IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero);
                     if (status != 0)
                         return "dacl:" + status.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                    if (!CreateHardLinkNative(backup, destination, IntPtr.Zero))
-                        return "link:" + Marshal.GetLastWin32Error().ToString(System.Globalization.CultureInfo.InvariantCulture);
-                    byte[] name = Encoding.Unicode.GetBytes(destination);
-                    int nameOffset = IntPtr.Size == 8 ? 20 : 12;
-                    byte[] rename = new byte[nameOffset + name.Length + 2];
-                    BitConverter.GetBytes(FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS).CopyTo(rename, 0);
-                    BitConverter.GetBytes((uint)name.Length).CopyTo(rename, nameOffset - 4);
-                    name.CopyTo(rename, nameOffset);
-                    if (!SetFileInformationByHandleNative(file, FileRenameInfoEx, rename, (uint)rename.Length))
-                    {
-                        string failure = "rename:" + Marshal.GetLastWin32Error().ToString(System.Globalization.CultureInfo.InvariantCulture);
-                        if (!DeleteFileNative(backup))
-                            failure += ";backup-kept";
-                        return failure;
-                    }
-                    return "";
+                    return LinkBackupAndRename(file, destination, backup);
                 }
                 finally
                 {
@@ -1984,6 +1998,101 @@ namespace $nativeNamespace
                 if (descriptor != IntPtr.Zero)
                     LocalFree(descriptor);
             }
+        }
+
+        // Links backup to the old destination, then renames the open
+        // replacement over destination with POSIX semantics in one step.
+        private static string LinkBackupAndRename(IntPtr file, string destination, string backup)
+        {
+            const int FileRenameInfoEx = 22;
+            const uint FILE_RENAME_REPLACE_IF_EXISTS = 0x00000001;
+            const uint FILE_RENAME_POSIX_SEMANTICS = 0x00000002;
+            if (!CreateHardLinkNative(backup, destination, IntPtr.Zero))
+                return "link:" + Marshal.GetLastWin32Error().ToString(System.Globalization.CultureInfo.InvariantCulture);
+            byte[] name = Encoding.Unicode.GetBytes(destination);
+            int nameOffset = IntPtr.Size == 8 ? 20 : 12;
+            byte[] rename = new byte[nameOffset + name.Length + 2];
+            BitConverter.GetBytes(FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS).CopyTo(rename, 0);
+            BitConverter.GetBytes((uint)name.Length).CopyTo(rename, nameOffset - 4);
+            name.CopyTo(rename, nameOffset);
+            if (!SetFileInformationByHandleNative(file, FileRenameInfoEx, rename, (uint)rename.Length))
+            {
+                string failure = "rename:" + Marshal.GetLastWin32Error().ToString(System.Globalization.CultureInfo.InvariantCulture);
+                if (!DeleteFileNative(backup))
+                    failure += ";backup-kept";
+                return failure;
+            }
+            return "";
+        }
+
+        // GAP-0656 review M2: 0 when path opens for reading with sharing
+        // limited to read and delete, as a program start opens it, so no
+        // handle has it open for writing; otherwise the Win32 error (32: a
+        // handle holds it for writing).
+        public static int GetReadOpenWithoutWriteSharingError(string path)
+        {
+            const uint GENERIC_READ = 0x80000000;
+            const uint FILE_SHARE_READ = 0x00000001;
+            const uint FILE_SHARE_DELETE = 0x00000004;
+            const uint OPEN_EXISTING = 3;
+            const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+            IntPtr handle = CreateFileW(path, GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_DELETE,
+                IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, IntPtr.Zero);
+            if (handle == new IntPtr(-1))
+                return Marshal.GetLastWin32Error();
+            CloseHandle(handle);
+            return 0;
+        }
+
+        // GAP-0656 review M2 (the g582 trust class): "" when path is an object
+        // Setup could have made, otherwise what is wrong with it: more than
+        // one name, an owner or a writer outside trusted (OWNER RIGHTS counts
+        // as the owner), a null or unreadable access list, or a handle open
+        // for writing. Deny and inherit-only entries grant nothing here.
+        public static string GetKeptFileDrift(string path, string[] trusted)
+        {
+            const int WRITE_LIKE = 0x00000002 | 0x00000004 | 0x00000010 | 0x00000040 |
+                0x00000100 | 0x00010000 | 0x00040000 | 0x00080000 |
+                0x10000000 | 0x40000000;
+            uint links = GetRegularFileLinkCountNoFollow(path);
+            if (links != 1)
+                return "it has " + links.ToString(System.Globalization.CultureInfo.InvariantCulture) + " names (hard links)";
+            HashSet<string> allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string sid in trusted)
+                if (!String.IsNullOrEmpty(sid))
+                    allowed.Add(sid);
+            System.Security.AccessControl.RawSecurityDescriptor descriptor =
+                new System.Security.AccessControl.RawSecurityDescriptor(GetFileSecurityDescriptor(path), 0);
+            string owner = descriptor.Owner == null ? "" : descriptor.Owner.Value;
+            if (!allowed.Contains(owner))
+                return "its owner " + (owner.Length == 0 ? "(none)" : owner) +
+                    " is not SYSTEM, Administrators, TrustedInstaller or the account Setup runs as";
+            if (descriptor.DiscretionaryAcl == null)
+                return "it has a null access list";
+            foreach (System.Security.AccessControl.GenericAce ace in descriptor.DiscretionaryAcl)
+            {
+                if ((ace.AceFlags & System.Security.AccessControl.AceFlags.InheritOnly) != 0)
+                    continue;
+                System.Security.AccessControl.AceType type = ace.AceType;
+                if (type == System.Security.AccessControl.AceType.AccessDenied ||
+                    type == System.Security.AccessControl.AceType.AccessDeniedObject ||
+                    type == System.Security.AccessControl.AceType.AccessDeniedCallback ||
+                    type == System.Security.AccessControl.AceType.AccessDeniedCallbackObject)
+                    continue;
+                System.Security.AccessControl.KnownAce known = ace as System.Security.AccessControl.KnownAce;
+                if (known == null)
+                    return "its access list has an entry of type " + type.ToString();
+                string sid = known.SecurityIdentifier.Value;
+                if ((known.AccessMask & WRITE_LIKE) != 0 && !allowed.Contains(sid) && sid != "S-1-3-4")
+                    return "the access entry for " + sid + " can change it";
+            }
+            int open = GetReadOpenWithoutWriteSharingError(path);
+            if (open != 0)
+                return "it does not open as a program start opens it (Win32 error " +
+                    open.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+                    "; 32: a handle has it open for writing)";
+            return "";
         }
 
         public static uint GetRegularFileLinkCountNoFollow(string path)
@@ -9052,6 +9161,26 @@ function Install-DefenseClawFileAtomic {
     Assert-DefenseClawNoReparsePath -Path $Source
     Assert-DefenseClawNoReparsePath -Path $Destination -AllowMissingLeaf
     [void]@(Remove-DefenseClawStaleReplacementBackups -Destination $Destination)
+    # GAP-0656 review M2 (the g582 trust class): standalone keeps only an
+    # object Setup could have made. A file with a second name, a foreign
+    # owner or writer, or a handle open for writing (every hook start then
+    # fails with a sharing violation, and the agent runs the call unchecked)
+    # is replaced by a fresh object whatever its bytes, and never re-stamped
+    # in place. The check runs before the hashes: a writer handle refuses the
+    # read Get-FileHash makes. The fresh object does not take over the old
+    # object's access list. Secure Client is unchanged.
+    $keepReplacementAccess = $false
+    if ($SkipIfContentMatches -and [IO.File]::Exists($Destination) -and
+        (Test-DefenseClawStandaloneProfile)) {
+        $drift = Get-DefenseClawKeptFileDrift -Path $Destination
+        if (-not [string]::IsNullOrEmpty($drift)) {
+            Write-DefenseClawLifecyclePhase -Stage (
+                "notice: $Destination is not kept: $drift; " +
+                'replacing it with a fresh copy (GAP-0656)')
+            $keepReplacementAccess = $true
+            $SkipIfContentMatches = $false
+        }
+    }
     if ($SkipIfContentMatches -and [IO.File]::Exists($Destination)) {
         $sourceItem = Microsoft.PowerShell.Management\Get-Item `
             -LiteralPath $Source `
@@ -9134,7 +9263,8 @@ function Install-DefenseClawFileAtomic {
                     $swapped = Invoke-DefenseClawLaunchableFileSwap `
                         -Temporary $temporary `
                         -Destination $Destination `
-                        -Backup $backup
+                        -Backup $backup `
+                        -KeepReplacementAccess:$keepReplacementAccess
                 }
                 $replacementClock = [Diagnostics.Stopwatch]::StartNew()
                 while (-not $swapped) {
@@ -9264,6 +9394,43 @@ function Install-DefenseClawFileAtomic {
     }
 }
 
+function Get-DefenseClawKeptFileDrift {
+    <#
+        GAP-0656 review M2 (the g582 trust class): Install-DefenseClawFileAtomic
+        -SkipIfContentMatches keeps a standalone file that already has the
+        replacement's bytes only when its object is one Setup could have made:
+        exactly one name, an owner and every writer among SYSTEM,
+        Administrators, TrustedInstaller and the account Setup runs as, and no
+        handle open for writing (an open for reading that shares only read and
+        delete, as a program start opens the file, succeeds). Returns '' for
+        such a file, otherwise what is wrong with it (NativeSecurity
+        GetKeptFileDrift). A file that cannot be inspected counts as drifted:
+        replacing a file is always safe, keeping a drifted one is not.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    $native = Initialize-DefenseClawNativeSecurity
+    $trusted = [string[]]@(
+        $script:SystemSID,
+        $script:AdministratorsSID,
+        $script:TrustedInstallerSID,
+        [string][Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    )
+    try {
+        return [string]$native::GetKeptFileDrift($Path, $trusted)
+    }
+    catch {
+        $failure = $_.Exception
+        while ($null -ne $failure.InnerException) {
+            $failure = $failure.InnerException
+        }
+        $message = [string]$failure.Message
+        if ($message.Length -gt 200) {
+            $message = $message.Substring(0, 200)
+        }
+        return "it cannot be inspected ($message)"
+    }
+}
+
 function Invoke-DefenseClawLaunchableFileSwap {
     <#
         GAP-0240: puts Temporary at Destination with the native
@@ -9287,12 +9454,20 @@ function Invoke-DefenseClawLaunchableFileSwap {
     param(
         [Parameter(Mandatory)][string]$Temporary,
         [Parameter(Mandatory)][string]$Destination,
-        [Parameter(Mandatory)][string]$Backup
+        [Parameter(Mandatory)][string]$Backup,
+        # GAP-0656 review M2: Destination's own object is not trusted; the
+        # new file keeps the access list it was created with instead.
+        [switch]$KeepReplacementAccess
     )
     $native = Initialize-DefenseClawNativeSecurity
     $clock = [Diagnostics.Stopwatch]::StartNew()
     while ($true) {
-        $result = [string]$native::SwapLaunchableFile($Temporary, $Destination, $Backup)
+        $result = if ($KeepReplacementAccess) {
+            [string]$native::SwapLaunchableFileKeepingAccess($Temporary, $Destination, $Backup)
+        }
+        else {
+            [string]$native::SwapLaunchableFile($Temporary, $Destination, $Backup)
+        }
         if ($result -ceq '') {
             return $true
         }
@@ -24422,8 +24597,11 @@ function Publish-DefenseClawEarlyHook {
     # bytes (a repair, or an ensure that applies a config change to the
     # installed release). Replacing it with the same bytes was the only hook
     # swap of such a run, and an agent starting the hook in the rename's
-    # instant could not start it and ran its tool call unchecked. The checks
-    # on the hook path run either way. Secure Client is unchanged.
+    # instant could not start it and ran its tool call unchecked. Only a
+    # healthy hook object is kept (one name, trusted owner and writers, no
+    # writer handle: Get-DefenseClawKeptFileDrift); a drifted one still gets
+    # a fresh object. The checks on the hook path run either way. Secure
+    # Client is unchanged.
     Install-DefenseClawSourceDescriptor -Source $Source -Destination $Layout.HookPath -SkipIfContentMatches:(Test-DefenseClawStandaloneProfile)
     # GAP-1070: a call the replaced release's hook took before the swap (one
     # still waiting for its input or its answer) is answered by the gateway

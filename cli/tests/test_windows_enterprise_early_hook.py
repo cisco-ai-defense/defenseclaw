@@ -87,7 +87,35 @@ def test_the_transaction_publishes_the_hook_before_it_stops_the_services() -> No
         "-SkipIfContentMatches:(Test-DefenseClawStandaloneProfile)\n"
     ) in publish_body
     atomic = _function_body(module, "Install-DefenseClawFileAtomic")
-    assert "if ($SkipIfContentMatches -and [IO.File]::Exists($Destination)) {" in atomic
+    # GAP-0656 review M2: only a healthy object is kept; a drifted one gets a
+    # fresh object that does not take over its access list (behaviour in
+    # enterprise-standalone-hook-keep-smoke.ps1).
+    # The check runs before the hashes: a writer handle refuses Get-FileHash.
+    gate = atomic.index(
+        "if ($SkipIfContentMatches -and [IO.File]::Exists($Destination) -and\n"
+        "        (Test-DefenseClawStandaloneProfile)) {"
+    )
+    drift = atomic.index("$drift = Get-DefenseClawKeptFileDrift -Path $Destination", gate)
+    assert drift < atomic.index("$keepReplacementAccess = $true", drift)
+    assert drift < atomic.index("$SkipIfContentMatches = $false", drift)
+    skip = atomic.index("if ($SkipIfContentMatches -and [IO.File]::Exists($Destination)) {")
+    assert drift < skip < atomic.index("Microsoft.PowerShell.Utility\\Get-FileHash", skip)
+    assert "-KeepReplacementAccess:$keepReplacementAccess" in atomic
+    native = _function_body(module, "Initialize-DefenseClawNativeSecurity")
+    kept = native[native.index("public static string GetKeptFileDrift(") :]
+    kept = kept[: kept.index("\n        }\n")]
+    for needle in (
+        "GetRegularFileLinkCountNoFollow(path)",
+        "if (links != 1)",
+        "if (!allowed.Contains(owner))",
+        "if (descriptor.DiscretionaryAcl == null)",
+        '!allowed.Contains(sid) && sid != "S-1-3-4"',
+        "GetReadOpenWithoutWriteSharingError(path)",
+    ):
+        assert needle in kept, needle
+    probe = native[native.index("public static int GetReadOpenWithoutWriteSharingError(") :]
+    probe = probe[: probe.index("\n        }\n")]
+    assert "CreateFileW(path, GENERIC_READ,\n                FILE_SHARE_READ | FILE_SHARE_DELETE," in probe
 
 
 

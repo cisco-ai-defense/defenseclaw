@@ -471,6 +471,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-guardian-first-reconcile-wait-smoke.ps1",
     "enterprise-standalone-guardian-readiness-older-gateway-smoke.ps1",
     "enterprise-standalone-guardian-state-identity-smoke.ps1",
+    "enterprise-standalone-hook-keep-smoke.ps1",
     "enterprise-standalone-hook-swap-launch-smoke.ps1",
     "enterprise-standalone-install-tree-smoke.ps1",
     "enterprise-standalone-machine-leftovers-purge-smoke.ps1",
@@ -1707,6 +1708,14 @@ def test_launchable_swap_links_the_old_file_before_one_posix_rename() -> None:
         assert needle in swap, needle
     assert swap.index("SetSecurityInfo(file") < swap.index("CreateHardLinkNative(") < swap.index(
         "SetFileInformationByHandleNative(file, FileRenameInfoEx"
+    )
+    # GAP-0656 review M2: a drifted destination's access list is not copied
+    # onto the fresh object; the link and the rename are the same steps.
+    keeping = swap[swap.index("public static string SwapLaunchableFileKeepingAccess(") :]
+    assert "return SwapLaunchableFileCore(replacement, destination, backup, false);" in keeping
+    core = swap[swap.index("private static string SwapLaunchableFileCore(") :]
+    assert core.index("if (!copyDestinationAccess)") < core.index("return LinkBackupAndRename(own, destination, backup);") < core.index(
+        "GetSecurityInfo(current, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION"
     )
     atomic = _function_body(module, "Install-DefenseClawFileAtomic")
     gate = atomic.index("if (Test-DefenseClawStandaloneProfile) {\n                    $swapped = Invoke-DefenseClawLaunchableFileSwap")
