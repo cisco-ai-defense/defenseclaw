@@ -144,11 +144,11 @@ def _validated_peer_link(link: str, root: str, peer: str, data_dir: str) -> tupl
         return tuple(ancestors), None
     if not stat.S_ISLNK(info.st_mode):
         raise ValueError("peer entry is not a link")
+    if _peer_path_uses_private_state(link, data_dir):
+        raise ValueError("peer link points into private state")
     destination = os.path.realpath(link)
     if os.path.commonpath((os.path.realpath(root), destination)) == os.path.realpath(root):
         raise ValueError("peer link points inside the package")
-    if any(part.casefold() in _PRIVATE_INSTALL_COMPONENTS for part in Path(destination).parts):
-        raise ValueError("peer link points into private state")
     active_root = _active_openclaw_root(data_dir=data_dir) if peer == "openclaw" else None
     if active_root is None or not os.path.samefile(destination, active_root):
         raise ValueError("peer link points outside the active installation")
@@ -160,6 +160,56 @@ def _validated_peer_link(link: str, root: str, peer: str, data_dir: str) -> tupl
     if manifest is None or json.loads(manifest).get("name") != peer:
         raise ValueError("peer link target has another package identity")
     return tuple(ancestors), (_filesystem_identity(info), os.readlink(link), manifest)
+
+
+def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
+    """Check every named target before symlink resolution can hide a name."""
+
+    from defenseclaw.config import default_data_path
+
+    roots = {os.path.normcase(os.path.realpath(str(default_data_path())))}
+    if data_dir:
+        roots.add(os.path.normcase(os.path.realpath(data_dir)))
+    target = os.readlink(link)
+    path = target if os.path.isabs(target) else os.path.join(os.path.dirname(link), target)
+    if not os.path.isabs(path):
+        path = os.path.join(os.getcwd(), path)
+    parts = Path(path).parts
+    current = parts[0]
+    pending = list(parts[1:])
+    links = 0
+    steps = 0
+    while pending:
+        steps += 1
+        if steps > 256:
+            raise ValueError("peer path is too deep")
+        part = pending.pop(0)
+        if part == "..":
+            current = os.path.dirname(current)
+            continue
+        if part.casefold() in _PRIVATE_INSTALL_COMPONENTS:
+            return True
+        current = os.path.join(current, part)
+        resolved = os.path.normcase(os.path.realpath(current))
+        for root in roots:
+            try:
+                if os.path.commonpath((root, resolved)) == root:
+                    return True
+            except ValueError:
+                continue
+        if os.path.islink(current):
+            links += 1
+            if links > 40:
+                raise ValueError("peer path has too many links")
+            next_target = os.readlink(current)
+            target_parts = Path(next_target).parts
+            if os.path.isabs(next_target):
+                current = target_parts[0]
+                pending = list(target_parts[1:]) + pending
+            else:
+                current = os.path.dirname(current)
+                pending = list(target_parts) + pending
+    return False
 
 
 def _named_openclaw_package(path: str) -> bool:
@@ -177,7 +227,7 @@ def _named_openclaw_package(path: str) -> bool:
         return False
 
 
-def _openclaw_root_for_executable(executable: str, *, discovered: bool = False) -> str | None:
+def _openclaw_root_for_executable(executable: str) -> str | None:
     """Bind a runnable launcher to its package, without running the launcher."""
 
     try:
@@ -199,63 +249,7 @@ def _openclaw_root_for_executable(executable: str, *, discovered: bool = False) 
             break
         directory = parent
 
-    manager_root = _manager_openclaw_root(executable)
-    if manager_root:
-        return manager_root
-
-    # An unrecorded off-PATH wrapper is not evidence of which package it
-    # launches. npm's linked launchers have already resolved to their package
-    # above; a recorded or PATH-selected wrapper is the operator's launcher.
-    if discovered:
-        return None
-    bin_dir = os.path.dirname(os.path.abspath(executable))
-    for candidate in (
-        os.path.join(bin_dir, "node_modules", "openclaw"),
-        os.path.join(os.path.dirname(bin_dir), "lib", "node_modules", "openclaw"),
-    ):
-        resolved = os.path.realpath(candidate)
-        if _named_openclaw_package(resolved):
-            return resolved
     return None
-
-
-def _manager_openclaw_root(executable: str) -> str | None:
-    """Resolve package-manager shims that do not link into the package."""
-
-    home = Path.home()
-    launcher = os.path.normcase(os.path.abspath(executable))
-
-    def at(path: Path) -> bool:
-        return launcher == os.path.normcase(os.path.abspath(path))
-
-    candidates: list[Path] = []
-    if at(home / ".volta/bin/openclaw"):
-        prefix = home / ".volta/tools/image/packages/openclaw"
-        candidates.extend((
-            prefix / "lib/node_modules/openclaw",
-            prefix / "node_modules/openclaw",
-        ))
-    elif at(home / ".local/share/pnpm/openclaw") or at(home / "Library/pnpm/openclaw"):
-        root = (home / ".local/share/pnpm" if at(home / ".local/share/pnpm/openclaw")
-                else home / "Library/pnpm")
-        for prefix in islice(root.glob("global/*"), 16):
-            candidates.extend((
-                prefix / "node_modules/openclaw",
-                prefix / "lib/node_modules/openclaw",
-            ))
-    elif at(home / ".asdf/shims/openclaw"):
-        candidates.extend(islice(
-            home.glob(".asdf/installs/nodejs/*/lib/node_modules/openclaw"), 16,
-        ))
-    elif at(home / ".local/share/mise/shims/openclaw"):
-        candidates.extend(islice(
-            home.glob(".local/share/mise/installs/node/*/lib/node_modules/openclaw"), 16,
-        ))
-    else:
-        return None
-
-    roots = {os.path.realpath(path) for path in candidates if _named_openclaw_package(os.path.realpath(path))}
-    return next(iter(roots)) if len(roots) == 1 else None
 
 
 def _recorded_openclaw_executable(data_dir: str) -> str | None:
@@ -332,19 +326,17 @@ def _discovered_openclaw_executables() -> list[str]:
 def _active_openclaw_root(*, data_dir: str = "") -> str | None:
     """Find one active package from recorded, PATH, or discovered launchers."""
 
+    on_path = shutil.which("openclaw")
+    path_root = _openclaw_root_for_executable(on_path) if on_path else None
+    if path_root:
+        return path_root
     recorded = _recorded_openclaw_executable(data_dir)
     if recorded:
         root = _openclaw_root_for_executable(recorded)
         if root:
             return root
-    on_path = shutil.which("openclaw")
-    path_root = _openclaw_root_for_executable(on_path) if on_path else None
     roots = {
         root for candidate in _discovered_openclaw_executables()
-        if (root := _openclaw_root_for_executable(candidate, discovered=True))
+        if (root := _openclaw_root_for_executable(candidate))
     }
-    if path_root:
-        # A scanner-service PATH may differ from the operator's. Without a
-        # recorded executable, conflicting runnable installs are ambiguous.
-        return path_root if not roots or roots == {path_root} else None
     return next(iter(roots)) if len(roots) == 1 else None
