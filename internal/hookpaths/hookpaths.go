@@ -4285,8 +4285,7 @@ func (l Links) UnreadArchiveTargetOnly(path string, facts map[string]string) boo
 }
 
 // ProtectedArchiveMoveName reports a protected entry name in a move after
-// extraction. This lexical control does not depend on gateway filesystem
-// access or the policy tier.
+// extraction. Archive creation and listing do not materialize links.
 func ProtectedArchiveMoveName(command, cwd, home string) bool {
 	if !strings.Contains(command, "mv") {
 		return false
@@ -4330,7 +4329,12 @@ func ProtectedArchiveMoveName(command, cwd, home string) bool {
 			}
 			program = programBase(program)
 			if slices.Contains(archivePrograms, program) && program != "rsync" {
-				seenArchive = true
+				words, static := make([]string, len(call.Args)), make([]bool, len(call.Args))
+				for i, word := range call.Args {
+					words[i], static[i] = StaticWord(word, home)
+				}
+				seenArchive = seenArchive || slices.Contains(static[1:], false) ||
+					archiveMayLink(program, words[1:], static[1:])
 				return true
 			}
 			if !seenArchive || !slices.Contains(renamePrograms, program) {
