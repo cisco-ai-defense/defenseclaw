@@ -326,14 +326,17 @@ func dispatchTrustedAction(
 		}()
 	}
 	// The sourced-file view can leave a later variable destination unknown.
-	// Apply the hook profile's tier after all rule lanes have reported, so a
-	// conservative child finding follows the same decision as its parent.
+	// Keep its finding visible when the balanced profile allows the call.
 	if !request.simpleCommandPass {
 		defer func() {
 			if balancedSourcedDestination(request, facts) {
-				findings = slices.DeleteFunc(findings, func(f RuleFinding) bool {
-					return f.RuleID == "persistence.ssh_authorized_keys_command"
-				})
+				for i := range findings {
+					if findings[i].RuleID != "persistence.ssh_authorized_keys_command" {
+						continue
+					}
+					findings[i].enforcement = findingEnforcementAlertOnly
+					findings[i].disposition = findingDispositionAdvisory
+				}
 			}
 		}()
 	}

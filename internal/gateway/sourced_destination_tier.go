@@ -123,10 +123,11 @@ func (p *sourcedDestinationProof) statement(stmt *syntax.Stmt, inSource bool, de
 			}
 			p.sourced = true
 			return true
-		case ":":
-			return len(call.Args) == 1
 		default:
-			return false
+			// Status-only commands may read values but do not change the
+			// redirect destination or write a file. The condition reader
+			// keeps expansions with effects unresolved.
+			return ordinaryStatusStatement(stmt)
 		}
 	case *syntax.IfClause:
 		return p.ifClause(call, inSource, depth+1)
@@ -158,10 +159,14 @@ func (p *sourcedDestinationProof) ifClause(clause *syntax.IfClause, inSource boo
 }
 
 func ordinarySourceCondition(stmts []*syntax.Stmt) bool {
-	if len(stmts) != 1 || !plainVariableStatement(stmts[0]) || len(stmts[0].Redirs) != 0 {
+	return len(stmts) == 1 && ordinaryStatusStatement(stmts[0])
+}
+
+func ordinaryStatusStatement(stmt *syntax.Stmt) bool {
+	if !plainVariableStatement(stmt) || len(stmt.Redirs) != 0 {
 		return false
 	}
-	call, ok := stmts[0].Cmd.(*syntax.CallExpr)
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
 	if !ok || len(call.Assigns) != 0 || len(call.Args) == 0 {
 		return false
 	}
