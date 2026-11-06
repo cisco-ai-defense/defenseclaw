@@ -109,7 +109,7 @@ func TestPerUserNoAnswerStaysClosed(t *testing.T) {
 		exited := make(chan int, 1)
 		opts := perUserRestartOptions(home, "open", false, stdout, stderr, func(code int) { exited <- code })
 		w := prepareAnswerWatchdog(&opts, sp, "open", time.Time{})
-		if !nativeAnswerBlocks(w.fallbackCode, string(w.fallbackOut)) {
+		if !nativeAnswerBlocks(w.fallback.code, string(w.fallback.out)) {
 			t.Fatal("a deadline before verified gateway contact must stay closed")
 		}
 		code, shown := fireAnswerDeadline(t, w, exited, stdout, stderr)

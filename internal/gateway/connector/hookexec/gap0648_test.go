@@ -518,7 +518,7 @@ func TestALateManagedAnswerForAHeldWatchdogIsTheInstallAnswerDuringALifecycle(t 
 	if w.installCheck == nil {
 		t.Fatal("no lifecycle look for the administrator's open")
 	}
-	install := string(w.installOut) + string(w.installErr)
+	install := string(w.install.out) + string(w.install.err)
 	w.waiter.extendTo(time.Now().Add(-time.Millisecond))
 	// The lifecycle starts; the watchdog's thread never runs.
 	running.Store(true)
@@ -526,7 +526,7 @@ func TestALateManagedAnswerForAHeldWatchdogIsTheInstallAnswerDuringALifecycle(t 
 	w.answered()
 	code := w.finish(0)
 	shown := stdout.String() + stderr.String()
-	if shown != install || code != w.installCode || strings.Contains(shown, `"allow"`) {
+	if shown != install || code != w.install.code || strings.Contains(shown, `"allow"`) {
 		t.Fatalf("exit %d answer %q, want the closed install answer %q", code, shown, install)
 	}
 	row, err := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
