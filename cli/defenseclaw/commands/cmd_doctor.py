@@ -17367,6 +17367,37 @@ class _UnexpectedRulePackValidatorFailure:
         )
 
 
+def _emit_custom_pack_config_error(gc: object, cfg: object, connector: str, r: object) -> None:
+    """Name the config error of the ``guardrail.custom_packs`` entry a connector selects.
+
+    The gateway, the hook and status read one verdict on the entry; a broken one
+    is a config error, the selection runs its built-in fallback pack, and the
+    hook's outage mode follows the strict tier (Go ``CustomRulePackError``).
+    """
+    from defenseclaw import policy_catalog
+
+    try:
+        name = gc.effective_rule_pack(connector)  # type: ignore[attr-defined]
+        problem = policy_catalog.custom_pack_problem(cfg, name) if isinstance(name, str) and name else ""
+        mode = gc.effective_hook_outage_fail_mode(connector)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - doctor must still report the rest.
+        return
+    if not problem:
+        return
+    fallback = policy_catalog.builtin_rule_pack_fallback(name)
+    _emit(
+        "fail",
+        "Rule pack",
+        f"config error: {problem}; the connector enforces the built-in {fallback} pack, "
+        f"and its hooks fail {mode} while the gateway is down",
+        r=r,
+        remediation=(
+            f"defenseclaw config set guardrail.custom_packs.{name}.path <folder> "
+            "(and .digest, from defenseclaw guardrail validate-pack)"
+        ),
+    )
+
+
 def _selected_rule_pack(gc: object, connector: str) -> tuple[str, str]:
     """The ``guardrail.rule_pack`` name a connector uses and, for a custom pack, its pinned digest.
 
@@ -17563,7 +17594,7 @@ def _emit_rule_pack_row(
             "Rule pack",
             f"{kind} {shown_path}: the pack files no longer match guardrail.custom_packs.{pack_name}.digest "
             f"(pinned {pinned.lower().removeprefix('sha256:')[:12]}, files {files_digest[:12]}); "
-            "the gateway keeps enforcing the pack it loaded before the edit",
+            "the gateway treats the entry as a config error and enforces the built-in pack of that name instead",
             r=r,
             remediation=(
                 f"defenseclaw config set guardrail.custom_packs.{pack_name}.digest "
@@ -17869,6 +17900,7 @@ def _check_connector_inventory(
             rule_pack_dir = (gc.effective_rule_pack_dir(connector) or "").strip()
         except Exception:  # noqa: BLE001
             rule_pack_dir = ""
+        _emit_custom_pack_config_error(gc, cfg, connector, r)
         if rule_pack_dir:
             pack = _selected_rule_pack(gc, connector)
             _emit_rule_pack_row(

@@ -29,6 +29,7 @@ func TestGAP0632LoadedPostureUsesPinnedManifestBytes(t *testing.T) {
 		"operator": {Path: dir, Digest: "sha256:" + pin},
 	}
 	t.Cleanup(func() { pendingPackPostures.Delete(dir); packPostures.Delete(dir) })
+	cfg.CheckCustomRulePacks()
 	pack, err := loadGlobalRulePack(guardrail.NewRulePackCache(), cfg, "global")
 	if err != nil {
 		t.Fatal(err)
@@ -69,6 +70,7 @@ func TestGAP0632PinnedPostureGovernsOutageAndAuditFailures(t *testing.T) {
 				"operator": {Path: dir, Digest: "sha256:" + pin},
 			}
 			t.Cleanup(func() { pendingPackPostures.Delete(dir); packPostures.Delete(dir) })
+			cfg.CheckCustomRulePacks()
 			if _, err := loadGlobalRulePack(guardrail.NewRulePackCache(), cfg, "global"); err != nil {
 				t.Fatal(err)
 			}

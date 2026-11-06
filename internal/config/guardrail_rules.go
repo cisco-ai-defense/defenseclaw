@@ -127,7 +127,7 @@ func (c *Config) resolveRulePackDir(ref RulePackRef) string {
 		return strings.TrimSpace(ref.Dir)
 	}
 	if custom, ok := c.UsableCustomRulePack(ref.Name); ok {
-		return strings.TrimSpace(custom.Path)
+		return customPackPathIn(c.customPackBase(), custom)
 	}
 	if name := c.BuiltinRulePackFor(ref.Name); name != "" && strings.TrimSpace(c.PolicyDir) != "" {
 		dir := filepath.Join(c.PolicyDir, "guardrail", name)
@@ -238,7 +238,7 @@ func (c *Config) ReferencedRulePackDirs() map[string]string {
 		}
 	}
 	for name, pack := range g.CustomPacks {
-		out["guardrail.custom_packs."+name+".path"] = strings.TrimSpace(pack.Path)
+		out["guardrail.custom_packs."+name+".path"] = customPackPathIn(c.customPackBase(), pack)
 	}
 	return out
 }

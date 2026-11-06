@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -1168,9 +1170,10 @@ class PerConnectorToggleTests(unittest.TestCase):
         app.cfg.guardrail.connectors["codex"].hilt = dcconfig.HILTConfig(
             enabled=True, min_severity="LOW"
         )
-        app.cfg.guardrail.custom_packs["protected-copilot"] = dcconfig.CustomRulePack(
-            path="/packs/protected-copilot/default"
-        )
+        pack_dir = os.path.join(tempfile.mkdtemp(), "protected-copilot", "default")
+        os.makedirs(pack_dir)
+        self.addCleanup(shutil.rmtree, os.path.dirname(os.path.dirname(pack_dir)), ignore_errors=True)
+        app.cfg.guardrail.custom_packs["protected-copilot"] = dcconfig.CustomRulePack(path=pack_dir)
         app.cfg.guardrail.connectors["copilot"].rule_pack = "protected-copilot"
         app.cfg.guardrail.block_at = "HIGH"
         with patch("defenseclaw.commands.cmd_guardrail._terminal_width", return_value=200):  # the table layout

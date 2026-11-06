@@ -2555,9 +2555,17 @@ rules:
 	}
 	badKey := effectiveRulePackKey(set.profiles["a-stale"].Config, "")
 	goodKey := effectiveRulePackKey(set.profiles["b-valid"].Config, "")
-	if badKey == goodKey || set.missing[badKey] == nil || set.rules[goodKey] == nil {
-		t.Fatalf("shared directory did not validate each pin: bad=%q good=%q missing=%v valid rules=%v",
-			badKey, goodKey, set.missing[badKey] != nil, set.rules[goodKey] != nil)
+	// The stale pin is that entry's config error (GAP-0632): its profile runs
+	// the built-in pack, not the shared folder; the valid pin loads the folder.
+	if badKey == goodKey || set.missing[badKey] != nil || set.rules[badKey] == nil || set.rules[goodKey] == nil {
+		t.Fatalf("shared directory did not validate each pin: bad=%q good=%q missing=%v fallback rules=%v valid rules=%v",
+			badKey, goodKey, set.missing[badKey] != nil, set.rules[badKey] != nil, set.rules[goodKey] != nil)
+	}
+	if packRule(set.packs[badKey], "PROFILE-PIN-MARKER") != nil {
+		t.Error("the stale pin loaded the shared folder's rules")
+	}
+	if packRule(set.packs[goodKey], "PROFILE-PIN-MARKER") == nil {
+		t.Error("the valid pin did not load the shared folder's rules")
 	}
 }
 

@@ -114,15 +114,25 @@ func packPosture(ref config.RulePackRef, dir string) string {
 	return postureFromManifest(dir, raw)
 }
 
-// guardrailRulePackDir is the directory of ref for a caller that holds only
-// the guardrail block: a usable custom_packs entry's path, else ref.Dir.
-func guardrailRulePackDir(gc *config.GuardrailConfig, ref config.RulePackRef) string {
+// guardrailPackPosture is packPosture of ref for a caller that holds only the
+// guardrail block, with the verdict and fallback every other reader of the
+// configuration uses: a usable custom_packs entry takes its own folder, a
+// broken one its built-in fallback (a broken entry named like a built-in
+// pack keeps that pack's posture, any other the default posture), and a
+// built-in name its own. gc carries the verdict of the load that built it, so
+// a folder that went away since does not change a posture already loaded.
+// Under the Secure Client integration (the process-wide managed flag) the
+// loader's own refusals apply and an entry always names its folder.
+func guardrailPackPosture(gc *config.GuardrailConfig, ref config.RulePackRef) string {
 	if gc != nil && ref.Name != "" {
-		if custom, ok := gc.CustomPacks[ref.Name]; ok && gc.CustomRulePackError(ref.Name) == nil {
-			return strings.TrimSpace(custom.Path)
+		if _, ok := gc.CustomPacks[ref.Name]; ok && (ManagedEnterpriseActive() || gc.CustomRulePackError(ref.Name) == nil) {
+			return packPosture(ref, gc.CustomRulePackPath(ref.Name))
+		}
+		if name := gc.BuiltinRulePackFor(ref.Name); name != "" {
+			return name
 		}
 	}
-	return ref.Dir
+	return packPosture(ref, ref.Dir)
 }
 
 func packLabel(ref config.RulePackRef, posture string) string {
@@ -206,7 +216,7 @@ func resolveGuardrailThresholds(gc *config.GuardrailConfig, connector string) Re
 		return thresholdsFromLevels(nil, "", "default", config.RulePackRef{})
 	}
 	ref := gc.EffectiveRulePackRef(connector)
-	return thresholdsFromLevels(gc, connector, packPosture(ref, guardrailRulePackDir(gc, ref)), ref)
+	return thresholdsFromLevels(gc, connector, guardrailPackPosture(gc, ref), ref)
 }
 
 func thresholdsFromLevels(gc *config.GuardrailConfig, connector, posture string, ref config.RulePackRef) ResolvedThresholds {
