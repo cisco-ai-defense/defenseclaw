@@ -175,6 +175,13 @@ type trustedActionRequest struct {
 	// ProtectedHomeHook is set only from a kernel-verified managed hook peer.
 	// Its gateway cannot inspect the caller's home when ProtectHome is active.
 	ProtectedHomeHook bool
+	// StrictPolicy keeps unresolved protected-path mentions enforcing in the
+	// strict rule-pack tier. Confirmed write targets enforce in every tier.
+	StrictPolicy bool
+	// OrdinaryKeyOperands is a complete POSIX command whose protected key
+	// name is only an input or display value and whose write targets are
+	// resolved ordinary paths.
+	OrdinaryKeyOperands bool
 	// ManagedHookOverflowHold retains a bounded state reading on an
 	// authenticated managed Windows hook without changing path resolution.
 	ManagedHookOverflowHold bool

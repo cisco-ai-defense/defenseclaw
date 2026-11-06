@@ -1021,6 +1021,350 @@ func trustedSymlinkName(input actionfacts.Input, name string) string {
 	return filepath.Clean(name)
 }
 
+// trustedOrdinaryKeyOperandRoles proves that an independent protected-path
+// mention is an input or display value in a complete POSIX action. The
+// ActionFacts write operands still need the hook client's resolved targets
+// (managed) or the local target walk (per-user); an unlisted destination is
+// never proof of an ordinary write.
+func trustedOrdinaryKeyOperandRoles(request trustedActionRequest, input actionfacts.Input, facts actionfacts.Facts) bool {
+	return trustedOrdinaryKeyOperandRolesDepth(request, input, facts, 0)
+}
+
+func trustedOrdinaryKeyOperandRolesDepth(request trustedActionRequest, input actionfacts.Input, facts actionfacts.Facts, depth int) bool {
+	if input.Command == "" || !trustedPOSIXShellCall(input, facts) ||
+		!filepath.IsAbs(facts.ActiveHome) ||
+		!trustedOrdinaryRedirectSyntax(input.Command) ||
+		facts.Parse.Dialect != actionfacts.DialectPOSIX || len(facts.Commands) == 0 ||
+		request.ResolvedWriteTargets[hookpaths.TruncatedKey] == "1" {
+		return false
+	}
+	for _, command := range facts.Commands {
+		switch command.Program {
+		case "", "echo", "printf", "diff", "cp", "cat", "head", "tail", "wc", "ls", "stat", "du", "readlink", "realpath", "grep", "egrep", "fgrep":
+		default:
+			return false
+		}
+	}
+	if facts.Parse.Status != actionfacts.StatusComplete {
+		if facts.Parse.Status != actionfacts.StatusPartial {
+			return false
+		}
+		// A compound action can leave a static source word unresolved in
+		// the whole view. Accept its independently analyzed statements only
+		// when they cover every original process in the same order. The
+		// child view must itself close without further decomposition.
+		if depth == 0 && len(facts.Commands) > 1 {
+			children := actionfacts.SimpleCommands(input, facts)
+			parents := make([]actionfacts.CommandFact, 0, len(facts.Commands))
+			for _, command := range facts.Commands {
+				if command.Program != "" {
+					parents = append(parents, command)
+				}
+			}
+			if len(children) == len(parents) && len(children) != 0 &&
+				(len(parents) == len(facts.Commands) || trustedOrdinaryStaticAssignments(request, input, facts)) {
+				complete := true
+				for i, child := range children {
+					parent := parents[i]
+					if child.Text == "" || child.EvaluationFailure != "" || child.UnresolvedBoundVariable ||
+						child.OpaqueValueAssignment || !filepath.IsAbs(child.CWD) ||
+						parent.Kind != actionfacts.CommandKindProcess || parent.ParentCommandID != 0 ||
+						parent.Background || len(parent.Wrappers) != 0 {
+						complete = false
+						break
+					}
+					part := input
+					part.Command, part.CWD, part.Args, part.Argv = child.Text, child.CWD, nil, nil
+					partFacts := actionfacts.Analyze(part)
+					if len(partFacts.Commands) != 1 || partFacts.Commands[0].Program != parent.Program ||
+						!trustedOrdinaryKeyOperandRolesDepth(request, part, partFacts, depth+1) {
+						complete = false
+						break
+					}
+				}
+				if complete {
+					return true
+				}
+			}
+		}
+		if len(facts.Parse.Issues) == 0 {
+			return false
+		}
+		// ActionFacts can leave the operands of a read-only utility
+		// unclassified while still proving its argv and shell redirects.
+		// Only that parser issue is compatible with this role proof.
+		for _, issue := range facts.Parse.Issues {
+			if issue != actionfacts.IssueUnknownOperandGrammar {
+				return false
+			}
+		}
+	}
+	mutating := make(map[int64]int)
+	protectedPaths := request.targetMemo.ProtectedAuthorizedKeysPaths(facts.ActiveHome)
+	ssh := canonicalSemanticPath(filepath.Join(facts.ActiveHome, ".ssh"))
+	for _, candidate := range facts.Paths {
+		switch candidate.Access {
+		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
+		default:
+			continue
+		}
+		mutating[candidate.CommandID]++
+		target := candidate.Resolved
+		if !filepath.IsAbs(target) || strings.ContainsAny(target, "*?[]") {
+			return false
+		}
+		if request.ProtectedHomeHook {
+			var present bool
+			target, present = request.ResolvedWriteTargets[target]
+			if !present || target == "" {
+				return false
+			}
+		} else {
+			var resolved bool
+			target, resolved = hookpaths.ResolveWriteTarget(target)
+			if !resolved {
+				return false
+			}
+		}
+		target = canonicalSemanticPath(target)
+		if target == ssh || strings.HasPrefix(target, ssh+"/") {
+			return false
+		}
+		if relative, account := liveHomeRelative(target); account && authorizedKeysRelative(relative) {
+			return false
+		}
+		for _, protected := range protectedPaths {
+			if target == canonicalSemanticPath(protected) {
+				return false
+			}
+		}
+	}
+	for _, command := range facts.Commands {
+		if command.Kind != actionfacts.CommandKindProcess ||
+			command.Effect != actionfacts.EffectExecute ||
+			command.ParentCommandID != 0 || command.Background ||
+			!command.ArgvComplete || len(command.Wrappers) != 0 {
+			return false
+		}
+		for _, redirect := range command.Redirects {
+			if redirect.Expands || redirect.Target == "" {
+				return false
+			}
+			switch redirect.Access {
+			case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
+				if mutating[command.ID] == 0 {
+					return false
+				}
+			}
+		}
+		switch command.Program {
+		case "printf":
+			for _, arg := range command.Argv[1:] {
+				if strings.HasPrefix(arg, "-v") || strings.Contains(arg, "%n") {
+					return false
+				}
+			}
+		case "diff":
+			for _, arg := range command.Argv[1:] {
+				if arg == "-o" || strings.HasPrefix(arg, "--output") {
+					return false
+				}
+			}
+		case "cp":
+			if facts.Parse.Status != actionfacts.StatusComplete ||
+				!slices.Contains(command.Operations, actionfacts.OperationCopy) ||
+				mutating[command.ID] == 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// The role proof accepts only redirect shapes whose operands ActionFacts can
+// associate with a file target. A descriptor-to-word redirect may name an FD
+// or a file; brace expansion can name a different file than its first word.
+func trustedOrdinaryRedirectSyntax(command string) bool {
+	if !strings.Contains(command, ">&") && !strings.ContainsAny(command, "{}") {
+		return true
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(command), "")
+	if err != nil {
+		return false
+	}
+	valid := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		redirect, ok := node.(*syntax.Redirect)
+		if !ok || redirect.Word == nil {
+			return valid
+		}
+		if redirect.Op == syntax.DplOut || redirect.Op == syntax.DplIn {
+			if len(redirect.Word.Parts) != 1 {
+				valid = false
+				return false
+			}
+			literal, simple := redirect.Word.Parts[0].(*syntax.Lit)
+			if !simple || literal.Value == "" ||
+				strings.Trim(literal.Value, "0123456789") != "" {
+				valid = false
+				return false
+			}
+		}
+		syntax.Walk(redirect.Word, func(part syntax.Node) bool {
+			if literal, ok := part.(*syntax.Lit); ok && strings.ContainsAny(literal.Value, "{}") {
+				valid = false
+				return false
+			}
+			if _, brace := part.(*syntax.BraceExp); brace {
+				valid = false
+				return false
+			}
+			return true
+		})
+		return valid
+	})
+	return valid
+}
+
+// trustedOrdinaryStaticAssignments checks the assignment facts omitted by
+// SimpleCommands. Only top-level, static lowercase scalar bindings qualify;
+// shell control variables, redirects and nested execution do not.
+func trustedOrdinaryStaticAssignments(request trustedActionRequest, input actionfacts.Input, facts actionfacts.Facts) bool {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(input.Command), "")
+	if err != nil || len(file.Stmts) != len(facts.Commands) {
+		return false
+	}
+	seen := false
+	protectedBindings := make(map[string]bool)
+	for i, stmt := range file.Stmts {
+		if facts.Commands[i].Program != "" {
+			if !request.ProtectedHomeHook && len(protectedBindings) != 0 {
+				for _, redirect := range stmt.Redirs {
+					if trustedWordReferencesBinding(redirect.Word, protectedBindings) {
+						return false
+					}
+				}
+				if facts.Commands[i].Program == "cp" {
+					if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) > 1 &&
+						trustedWordReferencesBinding(call.Args[len(call.Args)-1], protectedBindings) {
+						return false
+					}
+				}
+			}
+			continue
+		}
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) != 0 || len(call.Assigns) == 0 ||
+			len(stmt.Redirs) != 0 || stmt.Background || stmt.Coprocess || stmt.Negated {
+			return false
+		}
+		for _, assign := range call.Assigns {
+			if assign.Name == nil || assign.Append || assign.Array != nil || assign.Index != nil ||
+				assign.Name.Value == "" || assign.Name.Value == "path" || assign.Name.Value == "fpath" ||
+				strings.ContainsAny(assign.Name.Value, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") {
+				return false
+			}
+			value, known := hookpaths.StaticWord(assign.Value, facts.ActiveHome)
+			if !known {
+				return false
+			}
+			if !request.ProtectedHomeHook && trustedOrdinaryProtectedBindingValue(value, input.CWD, facts.ActiveHome, request.targetMemo) {
+				protectedBindings[assign.Name.Value] = true
+			}
+		}
+		seen = true
+	}
+	return seen
+}
+
+func trustedWordReferencesBinding(word *syntax.Word, bound map[string]bool) bool {
+	if word == nil {
+		return false
+	}
+	found := false
+	syntax.Walk(word, func(node syntax.Node) bool {
+		parameter, ok := node.(*syntax.ParamExp)
+		if ok && parameter.Param != nil && bound[parameter.Param.Value] {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+func trustedOrdinaryProtectedBindingValue(value, cwd, home string, memo *hookpaths.TargetMemo) bool {
+	if !filepath.IsAbs(value) {
+		value = filepath.Join(cwd, value)
+	}
+	resolved, ok := hookpaths.ResolveWriteTarget(value)
+	if !ok {
+		return false
+	}
+	resolved = canonicalSemanticPath(resolved)
+	for _, protected := range memo.ProtectedAuthorizedKeysPaths(home) {
+		if resolved == canonicalSemanticPath(protected) {
+			return true
+		}
+	}
+	relative, account := liveHomeRelative(resolved)
+	return account && authorizedKeysRelative(relative)
+}
+
+// trustedOrdinaryPatternRedirectRoles handles the POSIX case where a static
+// output glob makes ActionFacts leave the redirect target dynamic. The same
+// hookpaths decision checks the redirect by itself against live links and
+// glob matches; the remaining call must independently prove a read or display
+// role. Managed calls keep their client decision until an equivalent target
+// proof is available behind ProtectHome.
+func trustedOrdinaryPatternRedirectRoles(request trustedActionRequest, input actionfacts.Input, facts actionfacts.Facts) bool {
+	if request.ProtectedHomeHook || input.Command == "" ||
+		facts.Parse.Dialect != actionfacts.DialectPOSIX ||
+		facts.Parse.Status != actionfacts.StatusPartial ||
+		len(facts.Commands) != 1 {
+		return false
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(input.Command), "")
+	if err != nil || len(file.Stmts) != 1 {
+		return false
+	}
+	stmt := file.Stmts[0]
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) == 0 || len(call.Assigns) != 0 ||
+		len(stmt.Redirs) != 1 || stmt.Background || stmt.Coprocess || stmt.Negated {
+		return false
+	}
+	redirect := stmt.Redirs[0]
+	switch redirect.Op {
+	case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll:
+	default:
+		return false
+	}
+	if redirect.Word == nil || len(redirect.Word.Parts) != 1 {
+		return false
+	}
+	pattern, literal := redirect.Word.Parts[0].(*syntax.Lit)
+	if !literal || !strings.ContainsAny(pattern.Value, "*?[") {
+		return false
+	}
+	var word, body strings.Builder
+	printer := syntax.NewPrinter()
+	if printer.Print(&word, redirect.Word) != nil ||
+		printer.Print(&body, call) != nil {
+		return false
+	}
+	// The path reader receives only the redirect word. It therefore cannot
+	// confuse a protected path printed by the command with a write target.
+	if request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(
+		": > "+word.String(), input.CWD, facts.ActiveHome,
+		actionfacts.DialectPOSIX, nil) != "" {
+		return false
+	}
+	plain := input
+	plain.Command, plain.Args, plain.Argv = body.String(), nil, nil
+	return trustedOrdinaryKeyOperandRolesDepth(request, plain, actionfacts.Analyze(plain), 1)
+}
+
 func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, facts actionfacts.Facts) bool {
 	if command, ok := trustedBashCommandInput(request.Input); ok &&
 		trustedNoDereferenceTouchSafe(command, request.Input.CWD, facts.ActiveHome,
@@ -1340,7 +1684,10 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	if input.DialectHint != "" {
 		decision = request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
 	}
-	if decision != "" {
+	// The mention scan is independent of operand roles. A complete proof of
+	// ordinary destinations lets the write-target readers below decide the
+	// action; every other mention keeps the conservative decision.
+	if decision != "" && !request.OrdinaryKeyOperands {
 		return true
 	}
 	if !cannotResolveLocally && trustedPOSIXShellCall(input, facts) &&
@@ -1350,7 +1697,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// that a managed hook checks before ProtectHome hides the home.
 		return true
 	}
-	if request.ProtectedHomeHook && clientTargets[hookpaths.ActionDecisionKey] == hookpaths.ProtectedTargetDecision {
+	if request.ProtectedHomeHook && !request.OrdinaryKeyOperands &&
+		clientTargets[hookpaths.ActionDecisionKey] == hookpaths.ProtectedTargetDecision {
 		// Behind ProtectHome the walk above cannot follow the user's links;
 		// the user's hook ran the same decision on the same command and
 		// found a protected target, as a per-user gateway does (GAP-2514,

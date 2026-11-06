@@ -1526,6 +1526,9 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		return kept
 	}
 	commandText := strings.ToLower(input.Command)
+	request.OrdinaryKeyOperands = !request.StrictPolicy &&
+		(trustedOrdinaryKeyOperandRoles(request, input, facts) ||
+			trustedOrdinaryPatternRedirectRoles(request, input, facts))
 	overBudget, unresolved := false, false
 	evidence := request
 	evidence.overBudgetOmission = &overBudget
@@ -1566,7 +1569,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		}
 	}
 	if request.EnforcementCapable &&
-		(trustedAuthorizedKeysWriteProofWith(input, facts, symlinkWrite, clientGlobFacts(request), request.targetMemo) ||
+		(trustedAuthorizedKeysWriteProofWith(input, facts, symlinkWrite, clientGlobFacts(request), request.targetMemo, request.OrdinaryKeyOperands) ||
 			trustedSandboxGuestAuthorizedKeysWrite(request)) {
 		_, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command")
 		if ok {
@@ -1592,7 +1595,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
 				title = archiveBeforeWriteTitle
 			} else if symlinkWrite && unresolved && named.ID == rule.ID &&
-				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
+				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo, request.OrdinaryKeyOperands) &&
 				!trustedSandboxGuestAuthorizedKeysWrite(request) {
 				// The only write found is one the hook client and this
 				// gateway could not resolve: it still fails closed, named as
@@ -1725,16 +1728,16 @@ func trustedSudoersOnlyWrite(facts actionfacts.Facts) bool {
 // the command text of a shell tool filled in; globFacts is the managed hook
 // client's evidence (clientGlobFacts), nil for any other caller.
 func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool, globFacts map[string]string) bool {
-	return trustedAuthorizedKeysWriteProofWith(input, facts, symlinkWrite, globFacts, nil)
+	return trustedAuthorizedKeysWriteProofWith(input, facts, symlinkWrite, globFacts, nil, false)
 }
 
 // trustedAuthorizedKeysWriteProofWith is trustedAuthorizedKeysWriteProof
 // with the evaluation's file system answers (trustedActionRequest.targetMemo).
-func trustedAuthorizedKeysWriteProofWith(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool, globFacts map[string]string, memo *hookpaths.TargetMemo) bool {
+func trustedAuthorizedKeysWriteProofWith(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool, globFacts map[string]string, memo *hookpaths.TargetMemo, ordinaryOperands bool) bool {
 	if trustedNoDereferenceTouchSafe(input.Command, input.CWD, facts.ActiveHome, globFacts, globFacts != nil) {
 		return false
 	}
-	if input.Command != "" &&
+	if input.Command != "" && !ordinaryOperands &&
 		memo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts) == "protected-target" {
 		return true
 	}

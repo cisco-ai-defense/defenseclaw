@@ -217,6 +217,7 @@ func runToolCallCorpusProfile(t *testing.T, connector, profile string, cases []t
 				LegacyText:         legacyText,
 				Connector:          connector,
 				EnforcementCapable: true,
+				StrictPolicy:       profile == "strict",
 			})
 			// This corpus measures each fixture's original semantic owner. The
 			// action-mode protected-write class is an independent enforcement

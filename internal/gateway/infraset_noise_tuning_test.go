@@ -280,7 +280,9 @@ func TestAuthorizedKeysShellDirectoryResolution(t *testing.T) {
 // the path; every spelling and writer must block alike, and reads stay quiet.
 func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 	const connector = "home-spelled-authorized-keys"
+	const strictConnector = "home-spelled-authorized-keys-strict"
 	installToolCallCorpusProfileConnector(t, connector, "default")
+	installToolCallCorpusProfileConnector(t, strictConnector, "strict")
 	const rule = "persistence.ssh_authorized_keys_command"
 	t.Setenv("PYTHONPATH", "")
 	t.Setenv("PYTHONHOME", "")
@@ -508,9 +510,25 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		if test.name == "windows named OutFile" {
 			input.DialectHint = actionfacts.DialectPowerShell
 		}
+		// These input and display roles are ordinary in the default pack.
+		// Keep their conservative mention finding in the strict pack.
+		strictOnly := slices.Contains([]string{"diff", "local copy", "mention", "echo path to report"}, test.name)
+		if strictOnly {
+			balanced := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: input, LegacyText: string(args), Connector: connector,
+				EnforcementCapable: true,
+			})
+			if got := buildVerdict(balanced, "tool_call").Action; got != guardrailActionAllow {
+				t.Errorf("%s: default verdict %s, want allow", test.name, got)
+			}
+		}
+		selectedConnector := connector
+		if strictOnly {
+			selectedConnector = strictConnector
+		}
 		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
-			Input: input, LegacyText: string(args), Connector: connector,
-			EnforcementCapable: true,
+			Input: input, LegacyText: string(args), Connector: selectedConnector,
+			EnforcementCapable: true, StrictPolicy: strictOnly,
 		})
 		wantAction := guardrailActionAllow
 		if test.write {
