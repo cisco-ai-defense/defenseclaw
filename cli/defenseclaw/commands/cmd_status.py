@@ -558,10 +558,19 @@ def status(app: AppContext, as_json: bool) -> None:
         listener_state, listener_reason = (None, "API listener inspection failed") if holder_failed else (None, "")
         if not holder_failed and not holder and not hung_pid:
             listener_state, listener_reason = _sidecar_listener_state(cfg.gateway.api_port, bind)
+        root_holder = False
         if holder:
+            from defenseclaw.commands.cmd_doctor import ROOT_GATEWAY_REASON, ROOT_GATEWAY_REMEDY
+
+            root_holder = holder == ROOT_GATEWAY_REASON
+
             _status_row(
                 "Sidecar",
-                ux._style(f"not running; port {cfg.gateway.api_port} is held by {holder}", fg="yellow"),
+                ux._style(
+                    ROOT_GATEWAY_REASON + " " + ROOT_GATEWAY_REMEDY if root_holder else
+                    f"not running; port {cfg.gateway.api_port} is held by {holder}",
+                    fg="yellow",
+                ),
             )
         elif unread:
             _status_row(
@@ -589,10 +598,11 @@ def status(app: AppContext, as_json: bool) -> None:
         unconfirmed = not holder and not hung_pid and listener_state is not False
         _print_agents(
             cfg,
-            sidecar_down=not unconfirmed,
+            sidecar_down=not unconfirmed and not root_holder,
             sidecar_hung=bool(hung_pid),
             sidecar_unread=bool(unread),
             sidecar_unconfirmed=unconfirmed,
+            sidecar_root=root_holder,
         )
         _print_cowork(cfg, None, gateway_running=bool(hung_pid))
         _print_application_protection(cfg)
@@ -600,7 +610,10 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_hook_guardian(cfg)
         _print_fleet_health(cfg, client)
         if holder:
+            from defenseclaw.commands.cmd_doctor import ROOT_GATEWAY_REASON, ROOT_GATEWAY_REMEDY
+
             first_hint = (
+                ROOT_GATEWAY_REMEDY if holder == ROOT_GATEWAY_REASON else
                 "Free the port:  stop that process, or run: defenseclaw setup gateway --api-port "
                 f"{_free_api_port_hint(cfg)} --non-interactive"
             )
@@ -857,6 +870,7 @@ def _print_agents(
     sidecar_unread: bool = False,
     sidecar_unchecked: bool = False,
     sidecar_unconfirmed: bool = False,
+    sidecar_root: bool = False,
 ) -> None:
     """Render the "Agents" roster as one section, for ANY connector count.
 
@@ -968,6 +982,8 @@ def _print_agents(
         )
     if sidecar_unconfirmed and enabled_count:
         header = ux._style(f"{enabled_count} configured; live hook state is unconfirmed", fg="yellow")
+    if sidecar_root and enabled_count:
+        header = ux._style(f"{enabled_count} configured; hooks refuse the root-run gateway", fg="yellow")
     _status_row("Agents", header)
     if guardrail_off:
         ux.echo(" " * 16 + ux.dim("Turn protection back on: defenseclaw setup guardrail"))
@@ -981,6 +997,10 @@ def _print_agents(
             ),
             16,
         )
+    if sidecar_root and enabled_count:
+        from defenseclaw.commands.cmd_doctor import ROOT_GATEWAY_REMEDY
+
+        _echo_wrapped(" " * 16 + ux.dim(ROOT_GATEWAY_REMEDY), 16)
     for conn in actives:
         source = roster.get(conn, {}).get("source", "manual")
         mode = _effective_status_mode(cfg, conn, source)
@@ -2375,7 +2395,12 @@ def _status_payload(app) -> dict:
         else:
             pid = live_pid = 0 if holder else _live_gateway_pid(cfg)
             if holder:
-                reason = f"port {cfg.gateway.api_port} is held by {holder}; this gateway's state is unconfirmed"
+                from defenseclaw.commands.cmd_doctor import ROOT_GATEWAY_REASON, ROOT_GATEWAY_REMEDY
+
+                reason = (
+                    ROOT_GATEWAY_REASON + " " + ROOT_GATEWAY_REMEDY if holder == ROOT_GATEWAY_REASON else
+                    f"port {cfg.gateway.api_port} is held by {holder}; this gateway's state is unconfirmed"
+                )
                 payload["sidecar"] = {"running": None, "reason": reason}
             elif pid:
                 reason = (
