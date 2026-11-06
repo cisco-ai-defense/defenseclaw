@@ -4146,7 +4146,7 @@ type enterpriseHookWatchPassWrites struct {
 }
 
 func (w *enterpriseHookWatchPassWrites) observe(event fsnotify.Event, verified map[string]string) {
-	if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) == 0 {
+	if !enterpriseHookWatchEventRelevant(event) {
 		return
 	}
 	path := filepath.Clean(event.Name)

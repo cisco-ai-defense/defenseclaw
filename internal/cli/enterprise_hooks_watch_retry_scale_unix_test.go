@@ -23,12 +23,79 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
+	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
 )
 
 type gap0523LogBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
+}
+
+// Every relevant owned-file event uses the same fingerprint check when a
+// watch pass is running. A path is named only if its verified worker repairs it.
+func TestGAP0523InPassEventModes(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		event        fsnotify.Op
+		changed      bool
+		modeOnly     bool
+		workerRepair bool
+		wantPath     bool
+	}{
+		{"write_repaired", fsnotify.Write, true, false, true, true},
+		{"chmod_with_changed_bytes", fsnotify.Chmod, true, false, true, true},
+		{"chmod_mode_repaired", fsnotify.Chmod, true, true, true, true},
+		{"write_no_worker", fsnotify.Write, true, false, false, false},
+		{"chmod_same_content", fsnotify.Chmod, false, false, true, false},
+		{"irrelevant_event", 0, true, false, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			token := filepath.Join(t.TempDir(), ".hook-hermes.token")
+			if err := os.WriteFile(token, []byte("issued\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			verified := enterprisehooks.OwnedFileFingerprint(token)
+			if tc.changed {
+				if tc.modeOnly {
+					if err := os.Chmod(token, 0o644); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.WriteFile(token, []byte("changed\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			observations := &enterpriseHookWatchPassWrites{}
+			observations.observe(fsnotify.Event{Name: token, Op: tc.event}, map[string]string{token: verified})
+			if err := os.WriteFile(token, []byte("issued\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(token, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			owner := enterpriseHookReconcileRow{User: "alice", Connector: "hermes", OK: true}
+			key := enterpriseHookProtectedTargetKey(owner)
+			repaired := map[string]bool{}
+			if tc.workerRepair {
+				repaired[key] = true
+			}
+			prior := enterpriseHookReconcileRun{
+				Rows:            []enterpriseHookReconcileRow{owner},
+				WatchPathOwners: map[string][]string{token: {key}},
+			}
+			paths := enterpriseHookWatchRestoredOwnedFiles(
+				prior,
+				map[string]string{token: verified},
+				map[string]string{token: verified},
+				map[string]string{token: enterprisehooks.OwnedFileFingerprint(token)},
+				observations.snapshot(), repaired, []string{token},
+			)
+			if got := len(paths) == 1 && paths[0] == token; got != tc.wantPath {
+				t.Fatalf("event=%s changed=%v workerRepair=%v observed=%v paths=%v; want path=%v",
+					tc.event, tc.changed, tc.workerRepair, observations.snapshot(), paths, tc.wantPath)
+			}
+		})
+	}
 }
 
 // A periodic pass can finish the restoration before the queued filesystem
