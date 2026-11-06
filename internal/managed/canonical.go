@@ -159,6 +159,11 @@ type CanonicalOptions struct {
 	// UnixMode overrides a kind's macOS canonical permission bits, for
 	// per-user objects whose mode depends on the file (a hook script, a token).
 	UnixMode os.FileMode
+	// inPlaceOutOfClass keeps the plain in-place repair on standalone for an
+	// object outside the g582 class (the installed binaries and the two
+	// service logs of RepairWindowsManagedInstall): nothing reads them as
+	// policy, and the installer replaces the binaries.
+	inPlaceOutOfClass bool
 }
 
 // UnixOwnership is a uid and gid pair for CanonicalOptions.UnixOwner.
@@ -821,6 +826,7 @@ func RepairWindowsManagedDataPaths(paths ManagedDataPaths, opts CanonicalOptions
 				continue
 			}
 		}
+		standaloneRepairAfterCheck(target.path)
 		result, _ := EnsureCanonical(target.path, target.kind, opts)
 		results = append(results, result)
 	}

@@ -144,7 +144,10 @@ func RepairWindowsManagedInstall(layout ManagedInstallLayout, opts CanonicalOpti
 				continue
 			}
 		}
-		result, err := EnsureCanonical(target.path, target.kind, opts)
+		standaloneRepairAfterCheck(target.path)
+		targetOpts := opts
+		targetOpts.inPlaceOutOfClass = !target.content && !target.kind.Directory()
+		result, err := EnsureCanonical(target.path, target.kind, targetOpts)
 		if err == nil && result.Outcome != CanonicalBoundary && !target.kind.Directory() {
 			// ReadOnly, Hidden or System set by a user or a hardening tool
 			// stops the next managed write, so the guardian clears them too.
@@ -160,6 +163,11 @@ func RepairWindowsManagedInstall(layout ManagedInstallLayout, opts CanonicalOpti
 // managedInstallRefusesContentDrift is StandaloneRefusesContentDrift; tests
 // replace it.
 var managedInstallRefusesContentDrift = StandaloneRefusesContentDrift
+
+// standaloneRepairAfterCheck runs between a standalone read-only check and the
+// repair of the same object; tests replace it to change the object in between
+// (g582 review 6 S1). The repair judges the object again on its own handle.
+var standaloneRepairAfterCheck = func(string) {}
 
 // standaloneContentRepairRefusal is the recovery step logged with a refused
 // content file.
@@ -185,7 +193,13 @@ func refuseStandaloneFolderRepair(target managedDataTarget, opts CanonicalOption
 	quiet := opts
 	quiet.Quiet = true
 	result, err := AssessCanonical(target.path, target.kind, quiet)
-	if err != nil || result.Outcome != CanonicalBoundary {
+	if err != nil {
+		// A reparse point, a hard link or an object of the wrong type is
+		// reported as it is and never reaches the repair (g582 review 5 L1).
+		reportCanonicalResult(result, opts)
+		return result, true
+	}
+	if result.Outcome != CanonicalBoundary {
 		return CanonicalResult{}, false
 	}
 	result.RepairError = standaloneFolderRepairRefusal
@@ -210,7 +224,11 @@ func refuseStandaloneDataPathRepair(target managedDataTarget, opts CanonicalOpti
 	quiet := opts
 	quiet.Quiet = true
 	result, err := AssessCanonical(target.path, target.kind, quiet)
-	if err != nil || result.Outcome != CanonicalBoundary {
+	if err != nil {
+		reportCanonicalResult(result, opts)
+		return result, true
+	}
+	if result.Outcome != CanonicalBoundary {
 		return CanonicalResult{}, false
 	}
 	result.RepairError = standaloneDataPathRepairRefusal
@@ -229,7 +247,8 @@ func refuseStandaloneContentRepair(target managedDataTarget, opts CanonicalOptio
 	quiet.Quiet = true
 	result, err := AssessCanonical(target.path, target.kind, quiet)
 	if err != nil {
-		return CanonicalResult{}, false
+		reportCanonicalResult(result, opts)
+		return result, true
 	}
 	switch result.Outcome {
 	case CanonicalBoundary:
