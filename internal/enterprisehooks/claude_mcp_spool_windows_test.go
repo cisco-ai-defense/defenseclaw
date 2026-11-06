@@ -279,14 +279,21 @@ func TestWriteWindowsClaudeMCPSpoolMarksASignedOutUser(t *testing.T) {
 	}
 }
 
-// A rejected project file leaves the account unreadable instead of silently
+// A malformed project file leaves the account unreadable instead of silently
 // publishing a partial server set.
-func TestWriteWindowsClaudeMCPSpoolMarksRejectedProject(t *testing.T) {
+func TestWriteWindowsClaudeMCPSpoolMarksMalformedProjectUnreadable(t *testing.T) {
 	original := windowsClaudeProjectWithUserToken
 	windowsClaudeProjectWithUserToken = func(_ *windows.SID, _ string, fn func() error) error { return fn() }
 	t.Cleanup(func() { windowsClaudeProjectWithUserToken = original })
 	home := t.TempDir()
-	project := `\\server\share\project`
+	project := filepath.Join(home, "project")
+	if err := os.Mkdir(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	projectFile := filepath.Join(project, ".mcp.json")
+	if err := os.WriteFile(projectFile, []byte(`{"mcpServers":{"project-srv":{"command":"y"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	state := map[string]any{
 		"mcpServers": map[string]any{"user-srv": map[string]any{"command": "x"}},
 		"projects":   map[string]any{project: map[string]any{}},
@@ -305,8 +312,21 @@ func TestWriteWindowsClaudeMCPSpoolMarksRejectedProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	servers, unreadable, err := ReadClaudeMCPSpool(dir, sid, nil)
-	if err != nil || len(servers) != 0 || unreadable == nil || unreadable.Path != filepath.Join(project, ".mcp.json") {
-		t.Fatalf("servers %v, unreadable %+v (err %v); want rejected project marked unreadable", servers, unreadable, err)
+	if err != nil || unreadable != nil || len(servers) != 2 {
+		t.Fatalf("initial servers %v, unreadable %+v (err %v); want user and project servers", servers, unreadable, err)
+	}
+	if err := os.WriteFile(projectFile, []byte(`{"mcpServers":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteWindowsClaudeMCPSpool(dir, manifest, nil, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	servers, unreadable, err = ReadClaudeMCPSpool(dir, sid, nil)
+	if err != nil || len(servers) != 0 || unreadable == nil || unreadable.Path != projectFile {
+		t.Fatalf("servers %v, unreadable %+v (err %v); want malformed project file marked unreadable", servers, unreadable, err)
+	}
+	if skips := ReadClaudeMCPProjectSkips(dir); len(skips) != 0 {
+		t.Fatalf("malformed project was reported as skipped: %+v", skips)
 	}
 }
 
