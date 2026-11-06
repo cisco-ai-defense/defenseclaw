@@ -1034,6 +1034,11 @@ func withActiveStateTargetMention(
 		return check(facts, request) || placed && check(linkFacts, linkRequest) ||
 			driven && check(driveFacts, driveRequest)
 	}
+	// Structured write tools have no shell command to scan. Their complete
+	// path facts still prove the same mutation, independently of pack rules.
+	if actionfacts.StructuredWriteTool(request.Input.Tool) && throughLink(provenStateMutationPath) {
+		return withProvenActiveStateMutation(request, findings)
+	}
 	// A write through a link the command makes to active state is proven by
 	// the link reading: the mention scan and the whole-action proof do not
 	// follow the new link (GAP-2522), nor read sed -i --follow-symlinks
