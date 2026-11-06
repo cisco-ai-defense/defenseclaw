@@ -94,6 +94,10 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 	if req != nil {
 		connectorName = firstNonEmpty(req.Connector, action.Connector)
 	}
+	if cfg := a.decisionConfig(ctx); cfg != nil {
+		action.StrictPolicy = cfg.SecureClientIntegration() ||
+			cfg.HookPolicyTierForConnector(connectorName) == config.HookPolicyTierStrict
+	}
 	unverified := len(command) == 0 && req != nil && connector.IsShellTool(connectorName, req.Tool)
 	if len(command) == 0 && !unverified {
 		return a.inspectTrustedToolPolicyCtx(ctx, req, action)
@@ -145,6 +149,7 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		EnforcementCapable:            action.EnforcementCapable,
 		balancedSourceDestination:     action.balancedSourceDestination,
 		ManagedHookOverflowHold:       action.ManagedHookOverflowHold,
+		StrictPolicy:                  action.StrictPolicy,
 		DowngradeReadOnlyDataArgs:     action.DowngradeReadOnlyDataArgs,
 		SkipLocalFilesystemResolution: action.SkipLocalFilesystemResolution,
 		ResolvedWriteTargets:          action.ResolvedWriteTargets,

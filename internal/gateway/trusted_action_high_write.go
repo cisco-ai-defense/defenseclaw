@@ -202,7 +202,7 @@ func provedHighWriteFindings(
 		if flavor != hostFlavor || isSandboxHookRequest(ctx) {
 			return instructionNotProved
 		}
-		if info, err := os.Stat(filepath.FromSlash(location)); err == nil && info.Mode().IsRegular() {
+		if info, err := hookpaths.PathStat(filepath.FromSlash(location)); err == nil && info.Mode().IsRegular() {
 			return instructionExistenceProved
 		}
 		return instructionNotProved
