@@ -1867,11 +1867,23 @@ def _root_gateway_remedy(cfg) -> str:
 
 
 def _root_gateway_stop_command(cfg) -> str:
-    """Target the same data home when sudo resets the caller's environment."""
+    """Use the PID-record home and resolve the binary before sudo resets PATH."""
     from defenseclaw.config import default_data_path
+    from defenseclaw.gateway import resolve_gateway_binary
 
     data_dir = _configured_gateway_data_dir(cfg) or os.fspath(default_data_path())
-    return f"sudo env DEFENSECLAW_HOME={shlex.quote(data_dir)} defenseclaw-gateway stop"
+    try:
+        install_home = gateway_home_for_data_dir(data_dir)
+    except (OSError, TypeError, ValueError):
+        install_home = data_dir
+    binary = resolve_gateway_binary()
+    if binary and os.path.isabs(binary) and os.path.isfile(binary) and os.access(binary, os.X_OK):
+        executable = shlex.quote(binary)
+    else:
+        # The caller's shell can still find a just-installed binary when the
+        # Python process was launched with an older PATH.
+        executable = '"$(command -v defenseclaw-gateway)"'
+    return f"sudo env DEFENSECLAW_HOME={shlex.quote(install_home)} {executable} stop"
 
 
 def _root_gateway_record_without_listener(cfg, trust: _GatewayTrust) -> bool:
@@ -1879,7 +1891,6 @@ def _root_gateway_record_without_listener(cfg, trust: _GatewayTrust) -> bool:
     if trust.code not in {"missing_listener", "ambiguous_listener", "unavailable"} or not trust.home_bound:
         return False
     record = trust.record
-    data_dir = _configured_gateway_data_dir(cfg)
     return bool(
         record is not None
         and record.status == "ok"
@@ -1888,8 +1899,7 @@ def _root_gateway_record_without_listener(cfg, trust: _GatewayTrust) -> bool:
         and record.executable
         and record.start_identity
         and record.data_dir
-        and data_dir
-        and paths_same(record.data_dir, data_dir)
+        and _gateway_record_home_matches(cfg, record.data_dir)
         and gateway_executable_name(record.executable, platform_name=sys.platform) in GATEWAY_PROCESS_NAMES
         and (
             (trust.process is None and _process_uid(record.pid) == 0)
@@ -5926,19 +5936,8 @@ def _gateway_process_home_binding(
     data_dir (gateway_home_for_data_dir) is this home as well; setup otherwise
     called its own running gateway foreign and timed out (rel-1-0-6 GAP-0287).
     """
-    homes = [cfg.data_dir]
-    try:
-        install_home = gateway_home_for_data_dir(cfg.data_dir)
-    except (OSError, TypeError, ValueError):
-        install_home = ""
-    if install_home and not paths_same(install_home, cfg.data_dir):
-        homes.append(install_home)
-
-    def bound(value: str) -> bool:
-        return any(paths_same(value, home) for home in homes)
-
     if record.data_dir:
-        matches = bound(record.data_dir)
+        matches = _gateway_record_home_matches(cfg, record.data_dir)
         return matches, not matches
     if not platform_name.startswith("linux"):
         return False, False
@@ -5946,9 +5945,23 @@ def _gateway_process_home_binding(
     for env_name in ("DEFENSECLAW_DATA_DIR", "DEFENSECLAW_HOME"):
         value = _read_linux_process_env_var(process.pid, env_name)
         if value:
-            matches = bound(value)
+            matches = _gateway_record_home_matches(cfg, value)
             return matches, not matches
     return False, False
+
+
+def _gateway_record_home_matches(cfg, recorded_home: str) -> bool:
+    """Accept the configured store or the install home holding gateway.pid."""
+    data_dir = _configured_gateway_data_dir(cfg)
+    if not data_dir or not recorded_home:
+        return False
+    if paths_same(recorded_home, data_dir):
+        return True
+    try:
+        install_home = gateway_home_for_data_dir(data_dir)
+    except (OSError, TypeError, ValueError):
+        return False
+    return paths_same(recorded_home, install_home)
 
 
 def _darwin_origin_main_launch_generation_matches(
@@ -6417,7 +6430,7 @@ def _linux_root_gateway_diagnosis(
         or not record.executable
         or not record.data_dir
         or not data_dir
-        or not paths_same(record.data_dir, data_dir)
+        or not _gateway_record_home_matches(cfg, record.data_dir)
         or gateway_executable_name(record.executable, platform_name="linux") not in GATEWAY_PROCESS_NAMES
         or _process_uid(record.pid) != 0
         or not pid_alive(record.pid)
