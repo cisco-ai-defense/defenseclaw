@@ -33,6 +33,10 @@ func TestGAP0693RemovedAccountLeavesGuardianRepairAttention(t *testing.T) {
 		enterprisehooks.ManifestTarget{User: "removed", UserHome: removedHome, Connector: "hermes"},
 		enterprisehooks.ManifestTarget{User: "live", UserHome: liveHome, Connector: "codex"},
 	)
+	if err := enterprisehooks.SaveUnixEnumeratorState(enterpriseHookEnumeratorStatePath(f.manifest),
+		&enterprisehooks.UnixEnumeratorState{Version: 1, Sources: map[string]string{"removed": "files"}}); err != nil {
+		t.Fatal(err)
+	}
 	f.writeLedger(t, protectedRow("removed", removedHome, "hermes"))
 	previousLocal, previousDirectory := enterpriseHooksEnumerateLocalAccounts, enterpriseHooksEnumerateDirectoryConfigured
 	t.Cleanup(func() {
