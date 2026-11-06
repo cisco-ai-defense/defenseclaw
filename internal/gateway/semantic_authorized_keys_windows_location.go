@@ -71,6 +71,7 @@ func windowsLocationOrdinaryWriteTarget(target string) bool {
 		return false
 	}
 	target = strings.ToLower(strings.ReplaceAll(target, `\`, "/"))
+	target = hookpaths.NormalizeWindowsDevicePrefix(target)
 	parts := strings.Split(target, "/")
 	for i, part := range parts {
 		name := strings.TrimRight(part, ". ")
@@ -97,12 +98,7 @@ func windowsLocationAbsolute(value string) bool {
 }
 
 func windowsLocationCanonical(value string) string {
-	value = strings.ToLower(strings.ReplaceAll(value, `\`, "/"))
-	if strings.HasPrefix(value, "//?/unc/") {
-		value = "//" + strings.TrimPrefix(value, "//?/unc/")
-	} else if strings.HasPrefix(value, "//?/") {
-		value = strings.TrimPrefix(value, "//?/")
-	}
+	value = strings.ToLower(hookpaths.NormalizeWindowsDevicePrefix(value))
 	if len(value) >= 4 && value[0] == '/' && value[2] == '/' &&
 		value[1] >= 'a' && value[1] <= 'z' {
 		value = value[1:2] + ":" + value[2:]
@@ -169,8 +165,8 @@ func windowsLocationAuthorizedKeys(target string, input actionfacts.Input) bool 
 		// On real Windows, file identity also covers an 8.3 or UNC spelling
 		// of an existing directory. Synthetic tests use the path comparison.
 		if runtime.GOOS == "windows" && path.Base(target) == name {
-			gotDir, err1 := os.Stat(filepath.FromSlash(path.Dir(target)))
-			homeDir, err2 := os.Stat(filepath.FromSlash(path.Dir(protected)))
+			gotDir, err1 := hookpaths.PathStat(filepath.FromSlash(path.Dir(target)))
+			homeDir, err2 := hookpaths.PathStat(filepath.FromSlash(path.Dir(protected)))
 			if err1 == nil && err2 == nil && os.SameFile(gotDir, homeDir) {
 				return true
 			}
