@@ -1177,9 +1177,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		return runtime.GOOS != "windows" || windowsLocationOrdinaryWriteTarget(target)
 	}
 	possible := func(target string) bool {
-		if cannotResolveLocally && (truncated || len(clientTargets) == 0) {
-			// Missing, rejected, or bounded user-side evidence cannot
-			// establish an ordinary write behind ProtectHome.
+		if cannotResolveLocally && (len(clientTargets) == 0 ||
+			truncated && clientTargets[target] == "") {
+			// A missing header or an omitted target in a truncated client
+			// map cannot certify this operand behind ProtectHome. A target
+			// the client did resolve keeps its own answer.
 			return true
 		}
 		if !ordinarySpelling(target) {
@@ -1232,6 +1234,19 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if isProtected(target) {
 			return named()
 		}
+		// A plain move onto an existing link replaces the directory entry.
+		// Its old referent is a read-side fact, not this move's write target.
+		// A move into the protected directory still names that directory.
+		if moved := hookpaths.PlainMovePath(target); movedOntoLinks[moved] || windowsMovedOntoLink(moved) {
+			parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(moved))
+			if !ok {
+				return possible(target)
+			}
+			if hookpaths.ProtectedSSHReach(parent, facts.ActiveHome, request.targetMemo) == hookpaths.GradeNamed {
+				return named()
+			}
+			return false
+		}
 		// Positive client and command-link answers take precedence over an
 		// opaque copy scope. The scope alone is only a possible write.
 		if isProtected(clientTargets[target]) {
@@ -1259,10 +1274,6 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if links.CopiedSourceReachesProtected(target, facts.ActiveHome, request.targetMemo) {
 			return named()
 		}
-		if moved := hookpaths.PlainMovePath(target); movedOntoLinks[moved] || windowsMovedOntoLink(moved) {
-			parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(moved))
-			return !ok || isProtected(filepath.Join(parent, filepath.Base(moved)))
-		}
 		if physicalCWD := request.ResolvedWriteTargets[hookpaths.DirectoryFactPrefix+clientCWD]; filepath.IsAbs(physicalCWD) &&
 			strings.HasPrefix(target, clientCWD+string(filepath.Separator)) {
 			relative := strings.TrimPrefix(target, clientCWD+string(filepath.Separator))
@@ -1285,12 +1296,16 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		if !safeRedirect && links.OpaqueTargetWithFacts(target, ownCopy, opaqueFacts) {
 			// A target inside an archive or copy scope, or one for which
-			// bounded client evidence is missing, has no complete ordinary
-			// answer. Keep the scope's existing block after the positive
-			// link and client checks above.
+			// client evidence is incomplete, has no complete ordinary
+			// answer. A later write inside that scope must keep the closed
+			// verdict; only the copy's own destination can use a tier
+			// decision after the positive link and client checks above.
 			info, err := hookpaths.PathLstat(target)
 			if err != nil || info.Mode()&os.ModeCharDevice == 0 {
-				return true
+				if !ownCopy {
+					return true
+				}
+				return possible(target)
 			}
 		}
 		// On a static reading of a call with a runtime-expanded operand
@@ -1307,15 +1322,13 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			case present:
 				// The user's hook could not resolve the operand (a link
 				// loop, a chain past the kernel limit or an unreadable
-				// component). Resolve it here, or fail closed.
+				// component). The unresolved write must retain its closed
+				// verdict behind ProtectHome.
 				if cannotResolveLocally {
-					unresolved := possible(target)
-					if unresolved && request.unresolvedTarget != nil {
+					if request.unresolvedTarget != nil {
 						*request.unresolvedTarget = true
 					}
-					if unresolved {
-						return true
-					}
+					return true
 				}
 			case truncated && cannotResolveLocally:
 				// The bounded map omits this operand, which may be a link
@@ -1431,7 +1444,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		return true
 	}
 	links = hookpaths.CommandLinksWithFacts(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
-	if links.LinkNamesProtectedSource(facts.ActiveHome, request.targetMemo) {
+	if links.LinkNamesProtectedSource(facts.ActiveHome, request.targetMemo, clientTargets) {
 		return named()
 	}
 	safeRedirects = hookpaths.SafeShellRedirectOccurrencesWithFacts(input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)

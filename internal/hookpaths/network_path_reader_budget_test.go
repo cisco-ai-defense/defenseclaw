@@ -70,6 +70,32 @@ func TestG288PendingShareReadKeepsOtherIdentityVisible(t *testing.T) {
 	}
 }
 
+// Many unanswered identities on one share use one first-contact window.
+// Another reached identity can still answer after the first read times out.
+func TestG288PendingShareReadsShareFirstContactBudget(t *testing.T) {
+	root := t.TempDir()
+	paths := []string{"first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth", "eleventh", "twelfth"}
+	oldRead := readPath
+	t.Cleanup(func() { readPath = oldRead })
+	fakeNetworkShare(t, root, 100*time.Millisecond, time.Second, func(string) {})
+	readPath = func(name string, kind pathReadKind) pathReadResult {
+		if strings.HasPrefix(name, root+string(filepath.Separator)) {
+			time.Sleep(250 * time.Millisecond)
+		}
+		return oldRead(name, kind)
+	}
+	start := time.Now()
+	for _, name := range paths {
+		path := filepath.Join(root, name)
+		if _, err := PathStat(path); !ShareUnanswered(err) {
+			t.Fatalf("%s = %v, want unknown share", path, err)
+		}
+	}
+	if elapsed := time.Since(start); elapsed >= 220*time.Millisecond {
+		t.Errorf("pending identities took %v, want one share window", elapsed)
+	}
+}
+
 // After a root probe spends its bound, an identity read cannot spend another
 // full bound on the same unanswered share.
 func TestG288RootPendingDoesNotDoubleChargeIdentity(t *testing.T) {

@@ -4245,11 +4245,12 @@ func (l Links) HasAliases() bool {
 }
 
 // LinkNamesProtectedSource reports a link operation whose source operand
-// names a protected SSH path in the directory where the operation runs.
-// Copied disk links do not add source operands of their own.
-func (l Links) LinkNamesProtectedSource(home string, memo *TargetMemo) bool {
+// reaches a protected SSH path. The client walk supplies identities that a
+// managed gateway cannot read behind the user's home permissions.
+func (l Links) LinkNamesProtectedSource(home string, memo *TargetMemo, facts map[string]string) bool {
 	for _, alias := range l.links.aliases {
-		if alias.sourcePath != "" && ProtectedSSHReach(alias.sourcePath, home, memo) == GradeNamed {
+		if alias.sourcePath != "" && (ProtectedSSHReach(alias.sourcePath, home, memo) == GradeNamed ||
+			ProtectedSSHReach(facts[WalkFactPrefix+alias.sourcePath], home, memo) == GradeNamed) {
 			return true
 		}
 	}

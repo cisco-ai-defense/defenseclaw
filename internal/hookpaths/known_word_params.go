@@ -118,8 +118,9 @@ func cdEnterable(cwd string, facts map[string]string, record bool) func(string) 
 // accepts, the one value every binding of the name gives (f=out.txt, or a
 // for loop over that single name). A copy operand spelled with such a word
 // is that fixed file, so f=out.txt; cp a.txt $f reads as cp a.txt out.txt
-// on the hook client and the gateway alike (rel-1-0-6:GAP-0235). A name
-// bound to more than one value has none.
+// on the hook client and the gateway alike (rel-1-0-6:GAP-0235). A sequence
+// of unconditional assignments uses its last value at each read; a
+// conditional or nested assignment keeps the value unknown.
 func knownWordParameterValues(command string, file *syntax.File, home string) map[*syntax.Word]string {
 	_, values := knownWordParameters(command, file, home, nil, nil)
 	return values
@@ -142,6 +143,7 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 	unsafeNames := map[string]bool{}
 	// bound: the distinct values the bindings of each name give.
 	bound := map[string]map[string]bool{}
+	assignments := map[string][]*syntax.Assign{}
 	bind := func(name, value string) {
 		if bound[name] == nil {
 			bound[name] = map[string]bool{}
@@ -240,6 +242,7 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 				break
 			}
 			name := node.Name.Value
+			assignments[name] = append(assignments[name], node)
 			if name == "IFS" {
 				// Field splitting of every unquoted word changes.
 				rejected = true
@@ -346,6 +349,7 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 		}
 		return stmt, false
 	}
+	unconditional := map[*syntax.Assign]bool{}
 	for i, top := range statements {
 		stmt, fromDirectory := first(top, i == 0)
 		if stmt == nil || len(stmt.Redirs) != 0 {
@@ -357,6 +361,7 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 		}
 		for _, assign := range call.Assigns {
 			if assign.Name != nil {
+				unconditional[assign] = true
 				if _, seen := after[assign.Name.Value]; !seen {
 					after[assign.Name.Value] = stmt.End().Offset()
 					afterDirectory[assign.Name.Value] = fromDirectory
@@ -425,6 +430,31 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 					if quoted || safePlain(value) {
 						values[word] = value + suffix
 					}
+				}
+			} else if known && len(loops[name]) == 0 {
+				// Sequential top-level assignments overwrite their prior value.
+				// Every binding before this use must run unconditionally; a
+				// conditional or nested binding leaves the word unknown.
+				value, latest, complete := "", uint(0), true
+				for _, assign := range assignments[name] {
+					if end := assign.End().Offset(); end < at {
+						if !unconditional[assign] {
+							complete = false
+							break
+						}
+						if end > latest {
+							var fixed bool
+							value, fixed = StaticWord(assign.Value, home)
+							if !fixed {
+								complete = false
+								break
+							}
+							latest = end
+						}
+					}
+				}
+				if complete && latest != 0 && (quoted || safePlain(value)) {
+					values[word] = value + suffix
 				}
 			}
 		}

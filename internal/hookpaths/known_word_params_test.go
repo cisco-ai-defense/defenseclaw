@@ -184,9 +184,9 @@ func BenchmarkKnownWordParameterUses(b *testing.B) {
 	}
 }
 
-// rel-1-0-6:GAP-0235: only a name every binding gives the same plain value
-// has a value; a name with two values, or any unknown binding, has none.
-func TestCopyWordValueIsKnownOnlyWhenEveryBindingGivesTheSameValue(t *testing.T) {
+// A fixed assignment that always runs replaces its prior value. A loop with
+// several values or a conditional binding still leaves the word unknown.
+func TestCopyWordValueTracksUnconditionalBindingAtUse(t *testing.T) {
 	const home = "/home/u"
 	rows := []struct {
 		command, want string
@@ -196,7 +196,9 @@ func TestCopyWordValueIsKnownOnlyWhenEveryBindingGivesTheSameValue(t *testing.T)
 		{`f=out.txt; f=out.txt; cp a.txt ${f}`, "out.txt"},
 		{`for f in out.txt; do cp a.txt $f; done`, "out.txt"},
 		{`for f in out.txt b.txt; do cp a.txt $f; done`, ""},
-		{`f=out.txt; f=b.txt; cp a.txt $f`, ""},
+		{`f=out.txt; f=b.txt; cp a.txt $f`, "b.txt"},
+		{`f=out.txt; if true; then f=b.txt; fi; cp a.txt $f`, ""},
+		{`f=out.txt; false && f=b.txt; cp a.txt $f`, ""},
 		{`f=out.txt; command read f; cp a.txt $f`, ""},
 		{`cp a.txt $f`, ""},
 		{`f=-t; cp a.txt $f`, ""},

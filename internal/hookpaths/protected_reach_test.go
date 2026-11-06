@@ -81,6 +81,8 @@ func TestProtectedReachGradesNamedAndOrdinaryPaths(t *testing.T) {
 		{"state-tree", policy, GradeNamed},
 		{"ordinary-file", ordinary, GradeNone},
 		{"ordinary-missing", filepath.Join(project, "new.txt"), GradeNone},
+		{"ordinary-missing-parent", filepath.Join(project, "new", "nested.txt"), GradeNone},
+		{"ordinary-file-as-parent", filepath.Join(ordinary, "nested.txt"), GradeNone},
 		{"ordinary-ssh-file", knownHosts, GradeNone},
 		{"ordinary-ssh-sibling", filepath.Join(home, ".ssh", "notes.txt"), GradeNone},
 		{"ordinary-state-sibling", filepath.Join(home, ".defenseclaw", "notes.txt"), GradeNone},
@@ -236,7 +238,7 @@ func TestG288LinkSourceUsesPlacedDirectory(t *testing.T) {
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			links := CommandLinksWithFacts("Bash", "env -C ~ ln -s "+row.source+" project/link", project, home, nil)
-			if got := links.LinkNamesProtectedSource(home, NewTargetMemo()); got != row.want {
+			if got := links.LinkNamesProtectedSource(home, NewTargetMemo(), nil); got != row.want {
 				t.Fatalf("link source = %t, want %t", got, row.want)
 			}
 		})

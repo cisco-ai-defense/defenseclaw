@@ -1599,8 +1599,20 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			return findings
 		}
 	}
+	// A structured write that names only a sudoers path belongs to that
+	// protected rule even when the gateway cannot read its target.
+	sudoersWrite := trustedSudoersOnlyWrite(facts)
+	if sudoersWrite {
+		for _, finding := range findings {
+			if finding.RuleID == "PATH-ETC-SUDOERS" && finding.contributesToEnforcement() {
+				// Preserve an existing semantic owner; the fallback below
+				// only fills a missing managed proof.
+				return findings
+			}
+		}
+	}
 	if request.EnforcementCapable &&
-		(mentionGrade == hookpaths.GradeNamed ||
+		(mentionGrade == hookpaths.GradeNamed || sudoersWrite ||
 			trustedAuthorizedKeysWriteProofWith(input, facts, symlinkWrite, clientGlobFacts(request), request.targetMemo, request.StrictPolicy) ||
 			trustedSandboxGuestAuthorizedKeysWrite(request)) {
 		_, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command")
@@ -1610,7 +1622,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			// cannot read) and its severity, but names the sudoers rule of
 			// the pack, not the SSH keys rule (GAP-0190).
 			named := rule
-			if trustedSudoersOnlyWrite(facts) {
+			if sudoersWrite {
 				if _, sudoers, found := trustedActionCatalogRule(generation, "PATH-ETC-SUDOERS"); found {
 					named = sudoers
 				}
