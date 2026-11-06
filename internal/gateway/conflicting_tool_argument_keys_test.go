@@ -29,7 +29,8 @@ type conflictingKeysCase struct {
 	tool      string
 	args      func(home, project string) string
 	// block is the expected verdict; rules are rule IDs the response must
-	// name, as the same call without the extra key is judged.
+	// name, as the same call without the extra key is judged. A call that
+	// does not block and names rules is an alert (rel-1-0-6:GAP-0675).
 	block bool
 	rules []string
 }
@@ -136,14 +137,17 @@ func conflictingKeysCases() []conflictingKeysCase {
 		for _, command := range []struct {
 			text string
 			rule string
+			// alone is the block of the call without the extra key.
+			alone bool
 		}{
-			{persist, "persistence.ssh_authorized_keys_command"},
-			{wipe, "CMD-RM-RF"},
-			{exfil, "PATH-SSH-KEY"},
+			// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+			{persist, "persistence.ssh_authorized_keys_command", false},
+			{wipe, "CMD-RM-RF", true},
+			{exfil, "PATH-SSH-KEY", true},
 		} {
 			cases = append(cases,
 				conflictingKeysCase{harness.connector + "/" + command.rule + "/alone", harness.connector, harness.tool,
-					shell(command.text, `,"description":"d"`), true, []string{command.rule}},
+					shell(command.text, `,"description":"d"`), command.alone, []string{command.rule}},
 				conflictingKeysCase{harness.connector + "/" + command.rule + "/" + harness.key, harness.connector, harness.tool,
 					shell(command.text, `,"`+harness.key+`":"true","description":"d"`), true,
 					[]string{command.rule, conflictingToolArgumentsRuleID}},
@@ -274,6 +278,9 @@ func TestConflictingToolArgumentKeysBlockInActionMode(t *testing.T) {
 			raw, _ := json.Marshal(resp)
 			if got := resp["action"] == "block"; got != c.block {
 				t.Fatalf("blocked = %t, want %t: %.800s", got, c.block, raw)
+			}
+			if !c.block && len(c.rules) > 0 && resp["action"] != "alert" {
+				t.Fatalf("action = %v, want alert: %.800s", resp["action"], raw)
 			}
 			for _, rule := range c.rules {
 				if !strings.Contains(string(raw), rule) {

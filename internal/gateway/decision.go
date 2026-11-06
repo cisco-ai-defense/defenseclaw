@@ -129,11 +129,11 @@ func guardrailActionForConnectorFindings(
 	findings []RuleFinding,
 	confirmable bool,
 ) string {
-	findings = shellProtectedFileFindingsForPosture(findings,
+	findings, floor := profileClassFindings(findings,
 		cfg != nil && cfg.SecureClientIntegration(), rulePackPostureForConnector(cfg, connector))
-	return guardrailActionForFindings(findings, func(severity string) string {
+	return strongerGuardrailAction(floor, guardrailActionForFindings(findings, func(severity string) string {
 		return guardrailActionForConnector(cfg, connector, severity, confirmable)
-	})
+	}))
 }
 
 // profileMeetActionForFindings evaluates each member's own findings under its
@@ -242,11 +242,11 @@ func guardrailActionForGuardrailFindings(
 	findings []RuleFinding,
 	confirmable bool,
 ) string {
-	findings = shellProtectedFileFindingsForPosture(findings,
+	findings, floor := profileClassFindings(findings,
 		ManagedEnterpriseActive(), guardrailRulePackPosture(gc, connector))
-	return guardrailActionForFindings(findings, func(severity string) string {
+	return strongerGuardrailAction(floor, guardrailActionForFindings(findings, func(severity string) string {
 		return guardrailActionForGuardrailConnector(gc, connector, severity, confirmable)
-	})
+	}))
 }
 
 // guardrailActionForFindings maps enforceable findings with actionFor and

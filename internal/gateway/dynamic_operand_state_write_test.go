@@ -173,8 +173,13 @@ func TestDynamicOperandWordManagedHookPeer(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			api.handleAgentHook("codex").ServeHTTP(recorder, req)
 			got := recorder.Body.String()
-			if blocked := strings.HasPrefix(got, `{"action":"block"`); blocked != tc.block {
-				t.Fatalf("blocked = %t, want %t: %.600s", blocked, tc.block, got)
+			if tc.block {
+				// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+				if !strings.HasPrefix(got, `{"action":"alert"`) {
+					t.Fatalf("protected write = %.600s, want alert", got)
+				}
+			} else if strings.HasPrefix(got, `{"action":"block"`) {
+				t.Fatalf("blocked = true, want false: %.600s", got)
 			}
 		})
 	}

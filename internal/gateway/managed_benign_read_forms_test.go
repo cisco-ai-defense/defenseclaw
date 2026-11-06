@@ -31,6 +31,19 @@ func r106Reader2Check(t *testing.T, rows []r106Reader2Row) {
 	r106Reader2CheckWith(t, rows, nil)
 }
 
+// r106AlertVerdict is verdict, a hook verdict a fixture helper returned,
+// with an alert answer read as "alert" however the helper spells it.
+// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a
+// shell-command protected-file write; strict blocks it
+// (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+func r106AlertVerdict(verdict string) string {
+	if verdict == "alert" || strings.HasPrefix(verdict, `{"action":"alert"`) ||
+		strings.HasPrefix(verdict, `status 200 body {"action":"alert"`) {
+		return "alert"
+	}
+	return verdict
+}
+
 // r106Reader2CheckWith is r106Reader2Check with setup run on each fresh
 // fixture after the project files are written.
 func r106Reader2CheckWith(t *testing.T, rows []r106Reader2Row, setup func(*testing.T, b36ManagedHookFixture)) {
@@ -69,8 +82,10 @@ func r106Reader2CheckWith(t *testing.T, rows []r106Reader2Row, setup func(*testi
 			perUser := "allow"
 			if body := recorder.Body.String(); strings.Contains(body, `"deny"`) || strings.Contains(body, `"block"`) {
 				perUser = "block"
+			} else if strings.HasPrefix(body, `{"action":"alert"`) {
+				perUser = "alert"
 			}
-			managed := f.post(t, connector, payload, header)
+			managed := r106AlertVerdict(f.post(t, connector, payload, header))
 			if err := os.Chmod(f.homes, 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -97,10 +112,11 @@ func TestR106PythonLiteralLinkIsReadAsLn(t *testing.T) {
 		{"absolute hard link of a project file", "project", `python3 -c "import os; os.link('{P}/README.md','{P}/kl'); open('{P}/kl','a').write('k')"`, "allow"},
 		{"relative hard link of a project file", "project", `python3 -c "import os; os.link('README.md','kl'); open('kl','a').write('k')"`, "allow"},
 		{"symbolic link to a project file", "project", `python3 -c "import os; os.symlink('README.md','{P}/kl'); open('{P}/kl','a').write('k')"`, "allow"},
-		{"hard link of the keys file", "project", `python3 -c "import os; os.link('{K}','{P}/kl'); open('{P}/kl','a').write('k')"`, "block"},
-		{"hard link through the keys link", "project", `python3 -c "import os; os.link('{P}/keylink','{P}/kl'); open('{P}/kl','a').write('k')"`, "block"},
-		{"relative symbolic link to the keys file", "project", `python3 -c "import os; os.symlink('../.ssh/authorized_keys','kl'); open('kl','a').write('k')"`, "block"},
-		{"computed link source", "project", `python3 -c "import os; s='{K}'; os.link(s,'kl'); open('kl','a').write('k')"`, "block"},
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		{"hard link of the keys file", "project", `python3 -c "import os; os.link('{K}','{P}/kl'); open('{P}/kl','a').write('k')"`, "alert"},
+		{"hard link through the keys link", "project", `python3 -c "import os; os.link('{P}/keylink','{P}/kl'); open('{P}/kl','a').write('k')"`, "alert"},
+		{"relative symbolic link to the keys file", "project", `python3 -c "import os; os.symlink('../.ssh/authorized_keys','kl'); open('kl','a').write('k')"`, "alert"},
+		{"computed link source", "project", `python3 -c "import os; s='{K}'; os.link(s,'kl'); open('kl','a').write('k')"`, "alert"},
 	})
 }
 
@@ -116,11 +132,12 @@ func TestR106DiscardRedirectKeepsAReadOnlyCommand(t *testing.T) {
 		{"ls of */* with stderr discarded", "home", `ls */* 2>/dev/null`, "allow"},
 		{"wc of */* with stdout discarded", "home", `wc -l */* > /dev/null`, "allow"},
 		{"head of */* with stderr copied", "home", `head */* 2>&1`, "allow"},
-		{"append to the keys file after a discard", "home", `echo x 2>/dev/null >> .ssh/authorized_keys`, "block"},
-		{"read redirected onto the keys file", "home", `head -n 1 */* > .ssh/authorized_keys`, "block"},
-		{"read appended onto the keys file", "home", `head */* 2>/dev/null >> .ssh/authorized_keys`, "block"},
-		{"tee into */* reaches the keys link", "home", `tee -a */* < project/README.md 2>/dev/null`, "block"},
-		{"copy onto the keys file", "home", `cp project/README.md .*/authorized_keys 2>/dev/null`, "block"},
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		{"append to the keys file after a discard", "home", `echo x 2>/dev/null >> .ssh/authorized_keys`, "alert"},
+		{"read redirected onto the keys file", "home", `head -n 1 */* > .ssh/authorized_keys`, "alert"},
+		{"read appended onto the keys file", "home", `head */* 2>/dev/null >> .ssh/authorized_keys`, "alert"},
+		{"tee into */* reaches the keys link", "home", `tee -a */* < project/README.md 2>/dev/null`, "alert"},
+		{"copy onto the keys file", "home", `cp project/README.md .*/authorized_keys 2>/dev/null`, "alert"},
 	})
 }
 
@@ -136,13 +153,14 @@ func TestR106MoveWithBackupOntoKeysLinkReplacesTheLink(t *testing.T) {
 		{"backup=numbered with a suffix", "project", `mv --backup=numbered --suffix=.old a.txt keylink`, "allow"},
 		{"-b with -S", "project", `mv -b -S .bak a.txt keylink`, "allow"},
 		{"-b", "project", `mv -b a.txt keylink`, "allow"},
-		{"backup onto the keys file", "project", `mv --backup=simple a.txt ~/.ssh/authorized_keys`, "block"},
-		{"backup into .ssh", "project", `mv -b a.txt ~/.ssh/`, "block"},
-		{"backup into .ssh with -t", "project", `mv --backup=simple -t ~/.ssh a.txt`, "block"},
-		{"move the link then write", "project", `mv -b keylink k2; echo x >> k2`, "block"},
-		{"write through the default backup name", "project", `mv -b a.txt keylink; echo x >> keylink~`, "block"},
-		{"write through a suffix backup name", "project", `mv --backup=simple --suffix=.bak a.txt keylink; echo x >> keylink.bak`, "block"},
-		{"write through a numbered backup name", "project", `mv --backup=numbered a.txt keylink; echo x >> keylink.~1~`, "block"},
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		{"backup onto the keys file", "project", `mv --backup=simple a.txt ~/.ssh/authorized_keys`, "alert"},
+		{"backup into .ssh", "project", `mv -b a.txt ~/.ssh/`, "alert"},
+		{"backup into .ssh with -t", "project", `mv --backup=simple -t ~/.ssh a.txt`, "alert"},
+		{"move the link then write", "project", `mv -b keylink k2; echo x >> k2`, "alert"},
+		{"write through the default backup name", "project", `mv -b a.txt keylink; echo x >> keylink~`, "alert"},
+		{"write through a suffix backup name", "project", `mv --backup=simple --suffix=.bak a.txt keylink; echo x >> keylink.bak`, "alert"},
+		{"write through a numbered backup name", "project", `mv --backup=numbered a.txt keylink; echo x >> keylink.~1~`, "alert"},
 	})
 }
 
@@ -156,13 +174,14 @@ func TestR106PowerShellListingOfSSHIsARead(t *testing.T) {
 		{"Get-ChildItem piped to Select-Object", "project", `pwsh -Command "Get-ChildItem -Force ~/.ssh | Select-Object Name"`, "allow"},
 		{"ls", "project", `pwsh -NoProfile -Command "ls ~/.ssh"`, "allow"},
 		{"Test-Path", "project", `pwsh -NoProfile -Command "Test-Path ~/.ssh"`, "allow"},
-		{"Add-Content to the keys file", "project", `pwsh -NoProfile -Command "Add-Content -Path ~/.ssh/authorized_keys -Value k"`, "block"},
-		{"listing then Set-Content", "project", `pwsh -NoProfile -Command "Get-ChildItem ~/.ssh; Set-Content ~/.ssh/authorized_keys k"`, "block"},
-		{"Copy-Item onto the keys file", "project", `pwsh -NoProfile -Command "Copy-Item notes.txt ~/.ssh/authorized_keys"`, "block"},
-		{"listing piped to Remove-Item", "project", `pwsh -NoProfile -Command "Get-ChildItem ~/.ssh | Remove-Item"`, "block"},
-		{"New-Item in .ssh", "project", `pwsh -NoProfile -Command "New-Item -ItemType File ~/.ssh/authorized_keys2"`, "block"},
-		{"listing redirected onto the keys file", "project", `pwsh -NoProfile -Command "Get-ChildItem ~/.ssh > ~/.ssh/authorized_keys"`, "block"},
-		{"listing with a subexpression", "project", `pwsh -NoProfile -Command "Get-ChildItem $(Set-Content ~/.ssh/authorized_keys k)"`, "block"},
-		{"listing with sort", "project", `pwsh -NoProfile -Command "Get-ChildItem ~/.ssh | sort -o ~/.ssh/authorized_keys"`, "block"},
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		{"Add-Content to the keys file", "project", `pwsh -NoProfile -Command "Add-Content -Path ~/.ssh/authorized_keys -Value k"`, "alert"},
+		{"listing then Set-Content", "project", `pwsh -NoProfile -Command "Get-ChildItem ~/.ssh; Set-Content ~/.ssh/authorized_keys k"`, "alert"},
+		{"Copy-Item onto the keys file", "project", `pwsh -NoProfile -Command "Copy-Item notes.txt ~/.ssh/authorized_keys"`, "alert"},
+		{"listing piped to Remove-Item", "project", `pwsh -NoProfile -Command "Get-ChildItem ~/.ssh | Remove-Item"`, "alert"},
+		{"New-Item in .ssh", "project", `pwsh -NoProfile -Command "New-Item -ItemType File ~/.ssh/authorized_keys2"`, "alert"},
+		{"listing redirected onto the keys file", "project", `pwsh -NoProfile -Command "Get-ChildItem ~/.ssh > ~/.ssh/authorized_keys"`, "alert"},
+		{"listing with a subexpression", "project", `pwsh -NoProfile -Command "Get-ChildItem $(Set-Content ~/.ssh/authorized_keys k)"`, "alert"},
+		{"listing with sort", "project", `pwsh -NoProfile -Command "Get-ChildItem ~/.ssh | sort -o ~/.ssh/authorized_keys"`, "alert"},
 	})
 }

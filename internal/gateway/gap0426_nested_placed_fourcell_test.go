@@ -28,11 +28,12 @@ func TestGAP0426NestedPlacedCopyFourCell(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
 	rows := []struct {
 		name, command, want string
 	}{
 		{"ordinary", `cd ~ && echo $(cp -a project/src project/backup)`, "allow"},
-		{"protected", `cd ~ && echo $(cp project/a.txt project/keylink)`, "block"},
+		{"protected", `cd ~ && echo $(cp project/a.txt project/keylink)`, "alert"},
 	}
 	var payloads [][]byte
 	for _, row := range rows {
@@ -46,7 +47,7 @@ func TestGAP0426NestedPlacedCopyFourCell(t *testing.T) {
 	f.answerAll(t, calls)
 	for i, call := range calls {
 		want := rows[i/4].want
-		if call.verdict != want || want == "block" && !strings.Contains(call.body, "persistence.ssh_authorized_keys_command") {
+		if call.verdict != want || want == "alert" && !strings.Contains(call.body, "persistence.ssh_authorized_keys_command") {
 			t.Errorf("%s: verdict %s, want %s", call.name, call.verdict, want)
 		}
 	}

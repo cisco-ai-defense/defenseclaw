@@ -90,9 +90,11 @@ func TestR107Review5CdConditionsOfTheKnownCopyWord(t *testing.T) {
 					t.Errorf("%s managed=%v %s = %.200s, want allow", connector, managed, command, got)
 				}
 			}
+			// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
 			for _, command := range blocked {
-				if got := postDynamicWordParity(t, home, project, connector, managed, command, nil); !strings.HasPrefix(got, `{"action":"block"`) {
-					t.Errorf("%s managed=%v %s = %.200s, want block", connector, managed, command, got)
+				if got := postDynamicWordParity(t, home, project, connector, managed, command, nil); !strings.HasPrefix(got, `{"action":"alert"`) ||
+					!strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+					t.Errorf("%s managed=%v %s = %.200s, want alert", connector, managed, command, got)
 				}
 			}
 		}
@@ -143,8 +145,10 @@ func TestR107Review6ForgedCdEnterableFact(t *testing.T) {
 	}
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, row := range rows {
-			if got := postDynamicWordParity(t, home, project, connector, true, row.command, row.edit); !strings.HasPrefix(got, `{"action":"block"`) {
-				t.Errorf("%s managed %s: %.200s, want block", connector, row.name, got)
+			// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+			if got := postDynamicWordParity(t, home, project, connector, true, row.command, row.edit); !strings.HasPrefix(got, `{"action":"alert"`) ||
+				!strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+				t.Errorf("%s managed %s: %.200s, want alert", connector, row.name, got)
 			}
 		}
 		// Informational: a forged "1" for a missing dir with no decoy write.
@@ -190,9 +194,11 @@ func TestR107KnownCopyDestinationFolderWord(t *testing.T) {
 					t.Errorf("%s managed=%v %s = %.200s, want allow", connector, managed, command, got)
 				}
 			}
+			// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
 			for _, command := range blocked {
-				if got := postDynamicWordParity(t, home, project, connector, managed, command, nil); !strings.HasPrefix(got, `{"action":"block"`) {
-					t.Errorf("%s managed=%v %s = %.200s, want block", connector, managed, command, got)
+				if got := postDynamicWordParity(t, home, project, connector, managed, command, nil); !strings.HasPrefix(got, `{"action":"alert"`) ||
+					!strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+					t.Errorf("%s managed=%v %s = %.200s, want alert", connector, managed, command, got)
 				}
 			}
 		}

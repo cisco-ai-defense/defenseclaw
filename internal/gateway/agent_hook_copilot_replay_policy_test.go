@@ -23,14 +23,16 @@ func TestCopilotReplayAfterPolicyChangeIsDecidedAgain(t *testing.T) {
 		name    string
 		command string
 		change  func(*config.Config)
+		want    string
 	}{
 		{"tool block", "printf r27", func(cfg *config.Config) {
 			cfg.AssetPolicy.Tool.Denied = append(cfg.AssetPolicy.Tool.Denied,
 				config.AssetPolicyToolRule{Name: "bash", Connector: "copilot"})
-		}},
+		}, "block"},
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
 		{"observe to action", "printf marker >> ~/.ssh/authorized_keys", func(cfg *config.Config) {
 			cfg.Guardrail.Mode = "action"
-		}},
+		}, "alert"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			before := &config.Config{}
@@ -65,7 +67,7 @@ func TestCopilotReplayAfterPolicyChangeIsDecidedAgain(t *testing.T) {
 			// The new policy decides: the block list blocks (an observe
 			// install reports it as would-block), action mode blocks.
 			action, raw, response := post()
-			if raw != "block" || after.Guardrail.Mode == "action" && action != "block" {
+			if raw != tc.want || after.Guardrail.Mode == "action" && action != tc.want {
 				t.Fatalf("replay after the policy change kept the earlier verdict: %s", response)
 			}
 		})

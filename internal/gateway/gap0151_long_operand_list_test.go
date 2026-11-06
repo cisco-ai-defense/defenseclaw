@@ -105,6 +105,8 @@ func (f b36ManagedHookFixture) serve(call *hookCall) (string, string) {
 		return "block", body
 	case strings.HasPrefix(body, `{"action":"allow"`):
 		return "allow", body
+	case strings.HasPrefix(body, `{"action":"alert"`):
+		return "alert", body
 	}
 	return fmt.Sprintf("status %d body %.200s", recorder.Code, body), body
 }
@@ -194,7 +196,8 @@ func TestGAP0151LongOperandListKeepsProtectedTarget(t *testing.T) {
 	for i, call := range calls {
 		want := "allow"
 		if rows[i/4].protected {
-			want = "block"
+			// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+			want = "alert"
 		}
 		if call.verdict != want {
 			t.Errorf("%s: verdict %s, want %s", call.name, call.verdict, want)
@@ -227,8 +230,9 @@ func TestGAP0151DecisionSurvivesFullMap(t *testing.T) {
 			t.Errorf("full map lost the protected-target fact")
 		}
 		for _, connector := range []string{"claudecode", "codex"} {
-			if got := f.post(t, connector, payload, header); got != "block" {
-				t.Errorf("%s: verdict %s, want block", connector, got)
+			// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+			if got := f.post(t, connector, payload, header); got != "alert" {
+				t.Errorf("%s: verdict %s, want alert", connector, got)
 			}
 		}
 	}

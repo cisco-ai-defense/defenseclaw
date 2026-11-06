@@ -56,6 +56,8 @@ func (w gap0146Want) check(t *testing.T, call *hookCall) {
 		t.Errorf("%s: verdict %s, want allow; body %.240s", call.name, call.verdict, call.body)
 	case w.verdict == "block" && (call.verdict != "block" || w.rule != "" && !strings.Contains(call.body, w.rule)):
 		t.Errorf("%s: verdict %s, want block by %q; body %.240s", call.name, call.verdict, w.rule, call.body)
+	case w.verdict == "alert" && (!strings.HasPrefix(call.body, `{"action":"alert"`) || w.rule != "" && !strings.Contains(call.body, w.rule)):
+		t.Errorf("%s: verdict %s, want alert by %q; body %.240s", call.name, call.verdict, w.rule, call.body)
 	case w.forbidden != "" && strings.Contains(call.body, w.forbidden):
 		t.Errorf("%s: named %s; body %.240s", call.name, w.forbidden, call.body)
 	}
@@ -133,9 +135,14 @@ func TestGAP0146OneStatementBudget(t *testing.T) {
 			if rule != "" && n+1 > 128 {
 				rule = limit
 			}
+			verdict := "block"
+			if rule == keys {
+				// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+				verdict = "alert"
+			}
 			commands = append(commands, gap0146Statements("echo_only", n)+tail.text)
 			names = append(names, fmt.Sprintf("echo_only n=%d tail %q", n, tail.text))
-			wants = append(wants, gap0146Want{verdict: "block", rule: rule})
+			wants = append(wants, gap0146Want{verdict: verdict, rule: rule})
 		}
 	}
 	runGAP0146Table(t, f, commands, func(row int, _ bool) gap0146Want { return wants[row] }, names)

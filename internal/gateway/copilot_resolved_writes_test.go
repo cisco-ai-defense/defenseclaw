@@ -196,6 +196,10 @@ func TestManagedCopilotWriteThroughHomeSymlinkUsesTheJudgedCall(t *testing.T) {
 			if row.block {
 				want = "block"
 			}
+			// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+			if row.block && row.name == "shell toolArgs JSON string" {
+				want = "alert"
+			}
 			if verdict["action"] != want {
 				t.Fatalf("action = %v, want %s: %.800s", verdict["action"], want, recorder.Body.String())
 			}

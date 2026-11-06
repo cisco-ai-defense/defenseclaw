@@ -99,11 +99,13 @@ func TestUnquotedGlobAtHomeMatchesAcrossOS(t *testing.T) {
 					api.handleAgentHook(connector).ServeHTTP(recorder, req)
 					got := recorder.Body.String()
 					blocked := strings.HasPrefix(got, `{"action":"block"`)
-					if !blocked && !strings.HasPrefix(got, `{"action":"allow"`) {
+					// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+					alerted := strings.HasPrefix(got, `{"action":"alert"`)
+					if !blocked && !alerted && !strings.HasPrefix(got, `{"action":"allow"`) {
 						t.Fatalf("%q: status %d body %.300s", row.command, recorder.Code, got)
 					}
-					if blocked != row.block {
-						t.Fatalf("%s %q at the home: block=%v, want %v: %.400s", runtime.GOOS, row.command, blocked, row.block, got)
+					if blocked || alerted != row.block {
+						t.Fatalf("%s %q at the home: alert=%v block=%v, want alert %v: %.400s", runtime.GOOS, row.command, alerted, blocked, row.block, got)
 					}
 				})
 			}

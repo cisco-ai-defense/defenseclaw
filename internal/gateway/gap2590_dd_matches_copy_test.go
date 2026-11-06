@@ -19,8 +19,9 @@ func TestR106DDThroughKeysLinkMatchesCopy(t *testing.T) {
 	for _, tc := range []struct {
 		dd, cp, perUser string
 	}{
-		{`dd if=keylink of=out.txt`, `cp keylink out.txt`, "block"},
-		{`dd if=~/.ssh/authorized_keys of=out.txt`, `cp ~/.ssh/authorized_keys out.txt`, "block"},
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		{`dd if=keylink of=out.txt`, `cp keylink out.txt`, "alert"},
+		{`dd if=~/.ssh/authorized_keys of=out.txt`, `cp ~/.ssh/authorized_keys out.txt`, "alert"},
 		{`dd if=notes.txt of=out.txt`, `cp notes.txt out.txt`, "allow"},
 		{`dd if=readlink of=out.txt`, `cp readlink out.txt`, "allow"},
 	} {

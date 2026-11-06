@@ -8,6 +8,7 @@ package gateway
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -98,6 +99,14 @@ func TestRelativeWriteTargetsInASandboxResolveInTheGuest(t *testing.T) {
 			}
 			resp := f.hook(t, v[2], token, test.call.body(t, test.cwd, test.target), headers...)
 			raw, _ := json.Marshal(resp)
+			// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+			// A native write tool keeps its block; a shell call alerts.
+			if test.want && (test.call.tool == "Bash" || test.call.tool == "shell") {
+				if resp["action"] != "alert" || !strings.Contains(string(raw), nativeWriteAuthorizedKeysRule) {
+					t.Fatalf("shell call action = %v, want alert: %.600s", resp["action"], raw)
+				}
+				return
+			}
 			if got := nativeWriteBlocked(t, string(raw)); got != test.want {
 				t.Fatalf("blocked = %t, want %t: %.600s", got, test.want, raw)
 			}

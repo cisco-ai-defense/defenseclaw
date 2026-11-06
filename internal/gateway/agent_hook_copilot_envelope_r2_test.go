@@ -117,7 +117,10 @@ func TestCopilotParallelEnvelopeAuditKeepsEveryCallsFinding(t *testing.T) {
 	calls := `{"id":"c1","name":"bash","args":{"command":` + jsonQuote(persistence) + `}},` +
 		`{"id":"c2","name":"bash","args":{"command":` + jsonQuote(other) + `}}`
 	both, body := postCopilotHook(t, api, "preToolUse", `{"sessionId":"r2-1834-c","cwd":`+jsonQuote(project)+`,"toolCalls":[`+calls+`]}`)
-	if both.Action != "allow" || both.RawAction != first.RawAction {
+	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute). The
+	// keys append alone alerts, so the envelope keeps the stronger raw
+	// verdict of its two calls (the private key read blocks).
+	if both.Action != "allow" || both.RawAction != strongerGuardrailAction(first.RawAction, second.RawAction) {
 		t.Fatalf("envelope verdict changed: %s", body)
 	}
 	for _, finding := range append(append([]string(nil), first.Findings...), second.Findings...) {
@@ -328,8 +331,9 @@ func TestCopilotParallelEnvelopeAuditOmitsAllowMarkers(t *testing.T) {
 	}
 	both, body := postCopilotHook(t, api, "preToolUse", `{"sessionId":"r3-1925-b","cwd":`+jsonQuote(project)+
 		`,"toolCalls":[`+view+`,`+persistence+`]}`)
-	if both.RawAction != "block" || len(both.Findings) == 0 {
-		t.Fatalf("envelope must keep the would-block call's verdict: %s", body)
+	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+	if both.RawAction != "alert" || len(both.Findings) == 0 {
+		t.Fatalf("envelope must keep the alerting call's verdict: %s", body)
 	}
 	for _, finding := range allowOnly.Findings {
 		if slices.Contains(both.Findings, finding) {

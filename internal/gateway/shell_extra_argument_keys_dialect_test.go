@@ -48,12 +48,13 @@ func TestShellExtraArgumentKeysWindowsDialect(t *testing.T) {
 			if verdict == nil {
 				t.Fatalf("%s: no verdict", command)
 			}
-			blocked := verdict.Action == guardrailActionBlock && verdictHasFinding(verdict, "persistence.ssh_authorized_keys_command")
-			if !blocked {
+			// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+			alerted := verdict.Action == guardrailActionAlert && verdictHasFinding(verdict, "persistence.ssh_authorized_keys_command")
+			if !alerted {
 				// A missing hint leaves a file effect whose destination
 				// cannot be proved ordinary. The protected-write class rule
 				// closes that route as well as the inferred PowerShell route.
-				t.Errorf("%s with an extra key (inferred=%v): verdict %s %v, want block", command, inferred, verdict.Action, verdict.Findings)
+				t.Errorf("%s with an extra key (inferred=%v): verdict %s %v, want alert", command, inferred, verdict.Action, verdict.Findings)
 			}
 		}
 	}

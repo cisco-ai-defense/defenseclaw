@@ -86,8 +86,17 @@ func TestProtectHomeLinkAfterCdStaysOrdinary(t *testing.T) {
 				if err := json.Unmarshal([]byte(got), &resp); err != nil {
 					t.Fatalf("verdict %q: %v", got, err)
 				}
-				if blocked := resp["action"] == "block"; blocked != tc.block {
-					t.Fatalf("blocked = %t, want %t: evidence=%v %.600s", blocked, tc.block, evidence, got)
+				// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+				// The keys rows alert; the state row keeps its block.
+				want := "allow"
+				if tc.block {
+					want = "block"
+					if !strings.Contains(tc.command, ".defenseclaw") {
+						want = "alert"
+					}
+				}
+				if resp["action"] != want {
+					t.Fatalf("action = %v, want %s: evidence=%v %.600s", resp["action"], want, evidence, got)
 				}
 				if tc.block && strings.Contains(tc.command, ".defenseclaw") && !strings.Contains(got, "tamper.detector_state_write") {
 					t.Fatalf("blocked by another rule: %.600s", got)

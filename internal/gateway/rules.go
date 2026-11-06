@@ -91,7 +91,7 @@ type RuleFinding struct {
 	// shellProtectedFile marks a finding of the shell-command protected-file
 	// class on a shell command (markShellProtectedFileFindings). It is
 	// private and value-free; the rule-pack posture decides what it does
-	// (shellProtectedFileFindingsForPosture).
+	// (profileClassFindings).
 	shellProtectedFile bool
 }
 

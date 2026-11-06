@@ -15,8 +15,9 @@ func TestR106ManagedPwshKeysWriteBlocksAsPerUser(t *testing.T) {
 		command string
 		want    string
 	}{
-		{`pwsh -NoProfile -Command "Add-Content -Path ~/.ssh/authorized_keys -Value k"`, "block"},
-		{`pwsh -Command "Get-Content notes.txt | Out-File -Append ~/.ssh/authorized_keys"`, "block"},
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		{`pwsh -NoProfile -Command "Add-Content -Path ~/.ssh/authorized_keys -Value k"`, "alert"},
+		{`pwsh -Command "Get-Content notes.txt | Out-File -Append ~/.ssh/authorized_keys"`, "alert"},
 		{`pwsh -NoProfile -Command "Add-Content -Path notes.txt -Value k"`, "allow"},
 		{`pwsh -NoProfile -Command "Get-ChildItem ."`, "allow"},
 		{`git commit -m "document ~/.ssh/authorized_keys handling"`, "allow"},

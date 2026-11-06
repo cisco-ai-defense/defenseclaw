@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -19,12 +20,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
-
-// The classifier tests written before rel-1-0-6:GAP-0675 judge configurations
-// that name no rule pack and assert that a protected write blocks: they keep
-// checking the class as the strict posture decides it
-// (unnamedPackClassPosture). The tests below name their pack.
-func init() { unnamedPackClassPosture = config.HookPolicyTierStrict }
 
 // shellProtectedFileHome is a home with the protected files of the
 // GAP-0675 class and DefenseClaw state, beside a project.
@@ -128,11 +123,9 @@ func TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute(t *testing.T) {
 		{"keys copy", "cp notes.txt ~/.ssh/authorized_keys",
 			map[string]string{"default": "alert", "permissive": "alert", "strict": "block"}, keysRule},
 		{"shell profile append", "echo marker >> ~/.bashrc",
-			map[string]string{"default": "alert", "strict": "block"}, profileRule},
-		// Permissive blocks only CRITICAL, so this HIGH rule is an alert
-		// there, as before this change.
+			map[string]string{"default": "alert", "permissive": "alert", "strict": "block"}, profileRule},
 		{"DefenseClaw state append", "printf changed >> ~/.defenseclaw/config.yaml",
-			map[string]string{"default": "block", "strict": "block"}, stateRule},
+			map[string]string{"default": "block", "permissive": "block", "strict": "block"}, stateRule},
 		{"ordinary write", "echo marker >> notes.txt",
 			map[string]string{"default": "allow", "permissive": "allow", "strict": "allow"}, ""},
 	}
@@ -161,43 +154,56 @@ func TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute(t *testing.T) {
 	}
 }
 
-// The profile decision reads only the class mark: a native write tool and a
-// rule outside the class keep their enforcement, a class finding that could
-// not block stays as it was, and the strict posture and the Secure Client
-// integration change nothing.
+// The profile decision reads only the class mark and the self-protection
+// rules: a native write tool and a rule outside the class keep their
+// enforcement, a finding that could not block stays as it was and sets no
+// floor, a class finding is at least an alert in every posture and a
+// self-protection finding is at least a block in every posture; the strict
+// posture keeps the class enforcing and the Secure Client integration
+// changes nothing.
 func TestGAP0675ShellProtectedFilePostureDecision(t *testing.T) {
 	marked := RuleFinding{RuleID: "persistence.ssh_authorized_keys_command", Severity: "CRITICAL", shellProtectedFile: true}
 	native := RuleFinding{RuleID: "persistence.ssh_authorized_keys_command", Severity: "CRITICAL"}
-	state := RuleFinding{RuleID: "tamper.detector_state_write", Severity: "CRITICAL"}
+	state := RuleFinding{RuleID: "tamper.detector_state_write", Severity: "HIGH"}
 	detection := RuleFinding{RuleID: "PATH-SSH-DIR", Severity: "HIGH", shellProtectedFile: true, enforcement: findingEnforcementDetectionOnly}
-	findings := []RuleFinding{marked, native, state, detection}
+	stateDetection := RuleFinding{RuleID: "tamper.detector_state_write", Severity: "HIGH", enforcement: findingEnforcementDetectionOnly}
 	posture := func(name string) func() string { return func() string { return name } }
 	for _, tc := range []struct {
 		name         string
+		findings     []RuleFinding
 		secureClient bool
 		posture      string
 		alertOnly    []bool
+		floor        string
 	}{
-		{"default", false, "default", []bool{true, false, false, false}},
-		{"permissive", false, "permissive", []bool{true, false, false, false}},
-		{"strict", false, "strict", []bool{false, false, false, false}},
-		{"secure client", true, "default", []bool{false, false, false, false}},
+		{"default", []RuleFinding{marked, native, detection}, false, "default", []bool{true, false, false}, "alert"},
+		{"permissive", []RuleFinding{marked, native, detection}, false, "permissive", []bool{true, false, false}, "alert"},
+		{"strict", []RuleFinding{marked, native, detection}, false, "strict", []bool{false, false, false}, "alert"},
+		{"secure client", []RuleFinding{marked, native, detection}, true, "default", []bool{false, false, false}, "allow"},
+		{"self-protection permissive", []RuleFinding{state, marked}, false, "permissive", []bool{false, true}, "block"},
+		{"self-protection strict", []RuleFinding{state}, false, "strict", []bool{false}, "block"},
+		{"self-protection secure client", []RuleFinding{state}, true, "permissive", []bool{false}, "allow"},
+		{"detection only sets no floor", []RuleFinding{detection, stateDetection, native}, false, "permissive", []bool{false, false, false}, "allow"},
 	} {
-		got := shellProtectedFileFindingsForPosture(findings, tc.secureClient, posture(tc.posture))
+		before := slices.Clone(tc.findings)
+		got, floor := profileClassFindings(tc.findings, tc.secureClient, posture(tc.posture))
+		if floor != tc.floor {
+			t.Errorf("%s: floor=%q want %q", tc.name, floor, tc.floor)
+		}
 		for index, finding := range got {
 			if finding.contributesToAlertOnly() != tc.alertOnly[index] {
 				t.Errorf("%s: finding %d (%s) alert-only=%v want %v", tc.name, index, finding.RuleID, finding.contributesToAlertOnly(), tc.alertOnly[index])
 			}
 		}
-		if findings[0].contributesToAlertOnly() {
+		if !reflect.DeepEqual(before, tc.findings) {
 			t.Fatalf("%s: the decision changed the caller findings", tc.name)
 		}
 	}
-	if got := shellProtectedFileFindingsForPosture(findings[1:3], false, func() string {
+	if got, floor := profileClassFindings([]RuleFinding{native, state}, false, func() string {
 		t.Fatal("posture read without a finding of the class")
 		return ""
-	}); len(got) != 2 {
-		t.Fatalf("findings without the class = %v", got)
+	}); len(got) != 2 || floor != "block" {
+		t.Fatalf("findings without the class = %v floor %q", got, floor)
 	}
 	for _, tc := range []struct {
 		tool, command string
@@ -206,8 +212,14 @@ func TestGAP0675ShellProtectedFilePostureDecision(t *testing.T) {
 		{"Bash", "", true}, {"shell", "", true}, {"exec_command", "", true}, {"terminal", "", true},
 		{"write_file", "", false}, {"Write", "", false}, {"apply_patch", "x", false}, {"persist", "", false},
 		{"anything", "echo x", true},
+		// A command that may name the DefenseClaw state is self-protection.
+		{"Bash", "ln -s ../.defenseclaw d && echo x >> d/config.yaml", false},
+		{"Bash", "d=.Defense; e=Claw; ln -s ../$d$e k; echo x >> k/config.yaml", false},
+		// A patch envelope a shell runs keeps the enforcement of the patch.
+		{"Bash", "apply_patch <<'P'\n*** Begin Patch\n*** Update File: x\n*** End Patch\nP", false},
+		{"exec_command", "cat k.patch | applypatch", false},
 	} {
-		marks := markShellProtectedFileFindings(actionfacts.Input{Tool: tc.tool, Command: tc.command},
+		marks := markShellProtectedFileFindings(trustedActionRequest{Input: actionfacts.Input{Tool: tc.tool, Command: tc.command}},
 			[]RuleFinding{{RuleID: "PERSISTENCE.SSH_AUTHORIZED_KEYS_COMMAND"}, {RuleID: "tamper.detector_state_write"}})
 		if marks[0].shellProtectedFile != tc.shell || marks[1].shellProtectedFile {
 			t.Errorf("%s %q: marks=%v,%v want %v,false", tc.tool, tc.command, marks[0].shellProtectedFile, marks[1].shellProtectedFile, tc.shell)

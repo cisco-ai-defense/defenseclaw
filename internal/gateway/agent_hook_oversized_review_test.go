@@ -64,21 +64,23 @@ func TestOversizedReviewKeepsEveryConnectorsCommandForTheGatewayVerdict(t *testi
 	long := strings.Repeat("d", 20<<10)
 	for _, tc := range []struct {
 		name, connector, path, header, event, body string
+		// want is the action-mode answer at normal size. rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		want string
 	}{
 		{"claude bash after a long description", "claudecode", "claude-code", "", "",
-			`{"hook_event_name":"PreToolUse","session_id":"s","tool_name":"Bash","tool_input":{"description":"` + long + `","command":CMD},"padding":"PAD"}`},
+			`{"hook_event_name":"PreToolUse","session_id":"s","tool_name":"Bash","tool_input":{"description":"` + long + `","command":CMD},"padding":"PAD"}`, "alert"},
 		{"codex exec_command cmd", "codex", "codex", "X-DefenseClaw-Hook-Event", "PreToolUse",
-			`{"hook_event_name":"PreToolUse","session_id":"s","turn_id":"t","tool_name":"exec_command","tool_input":{"justification":"` + long + `","cmd":CMD,"workdir":"/tmp"},"padding":"PAD"}`},
+			`{"hook_event_name":"PreToolUse","session_id":"s","turn_id":"t","tool_name":"exec_command","tool_input":{"justification":"` + long + `","cmd":CMD,"workdir":"/tmp"},"padding":"PAD"}`, "alert"},
 		{"amp bash cmd", "amp", "amp", "", "",
-			`{"hook_event_name":"tool.call","session_id":"s","thread_id":"s","tool_call_id":"c","tool_name":"Bash","tool_input":{"cmd":CMD},"padding":"PAD"}`},
+			`{"hook_event_name":"tool.call","session_id":"s","thread_id":"s","tool_call_id":"c","tool_name":"Bash","tool_input":{"cmd":CMD},"padding":"PAD"}`, "alert"},
 		{"cursor shell command", "cursor", "cursor", "", "",
-			`{"hook_event_name":"beforeShellExecution","conversation_id":"c","generation_id":"g","command":CMD,"cwd":"/tmp","padding":"PAD"}`},
+			`{"hook_event_name":"beforeShellExecution","conversation_id":"c","generation_id":"g","command":CMD,"cwd":"/tmp","padding":"PAD"}`, "alert"},
 		{"opencode bash command", "opencode", "opencode", "", "",
-			`{"hook_event_name":"tool.execute.before","session_id":"s","tool_name":"bash","tool_input":{"command":CMD},"padding":"PAD"}`},
+			`{"hook_event_name":"tool.execute.before","session_id":"s","tool_name":"bash","tool_input":{"command":CMD},"padding":"PAD"}`, "alert"},
 		{"claude write with content first", "claudecode", "claude-code", "", "",
-			`{"hook_event_name":"PreToolUse","session_id":"s","tool_name":"Write","tool_input":{"content":"` + long + `","file_path":"/home/alice/.ssh/authorized_keys"},"padding":"PAD"}`},
+			`{"hook_event_name":"PreToolUse","session_id":"s","tool_name":"Write","tool_input":{"content":"` + long + `","file_path":"/home/alice/.ssh/authorized_keys"},"padding":"PAD"}`, "block"},
 		{"copilot toolArgs cut by the cap", "copilot", "copilot", "X-DefenseClaw-Copilot-Event", "preToolUse",
-			`{"sessionId":"s","toolName":"bash","toolArgs":"{\"command\":` + strings.ReplaceAll(quoted, `"`, `\"`) + `,\"description\":\"PAD\"}"}`},
+			`{"sessionId":"s","toolName":"bash","toolArgs":"{\"command\":` + strings.ReplaceAll(quoted, `"`, `\"`) + `,\"description\":\"PAD\"}"}`, "alert"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			full := strings.Replace(strings.Replace(tc.body, "CMD", quoted, 1), "PAD", strings.Repeat("p", 2<<20), 1)
@@ -120,8 +122,13 @@ func TestOversizedReviewKeepsEveryConnectorsCommandForTheGatewayVerdict(t *testi
 					if body != normal {
 						kind = "bounded review"
 					}
-					if mode == "action" && answer.Action != "block" {
-						t.Fatalf("action mode %s = %.400s, want block", kind, reply.Body.String())
+					// The bounded review keeps its oversize block.
+					want := tc.want
+					if body != normal {
+						want = "block"
+					}
+					if mode == "action" && answer.Action != want {
+						t.Fatalf("action mode %s = %.400s, want %s", kind, reply.Body.String(), want)
 					}
 					if mode == "observe" {
 						events, err := store.ListEvents(50)
@@ -129,11 +136,20 @@ func TestOversizedReviewKeepsEveryConnectorsCommandForTheGatewayVerdict(t *testi
 							t.Fatal(err)
 						}
 						found := false
+						var details []string
 						for _, event := range events {
 							found = found || strings.Contains(event.Details, "authorized_keys")
+							// rel-1-0-6:GAP-0675 (owner 2026-11-06): in the default
+							// profile the keys write of a bounded review is an alert;
+							// the hook row names the oversize finding that decides,
+							// and the keys finding is audited in its CRITICAL
+							// hook-rules scan row.
+							found = found || body != normal && strings.Contains(event.Details, "scanner=hook-rules") &&
+								strings.Contains(event.Details, "max_severity=CRITICAL")
+							details = append(details, event.Action+": "+event.Details)
 						}
 						if !found {
-							t.Fatalf("observe mode %s audit has no command or target: %.300s", kind, reply.Body.String())
+							t.Fatalf("observe mode %s audit has no command or target; events %q", kind, details)
 						}
 					}
 				}

@@ -6,6 +6,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -43,17 +44,23 @@ func TestGAP0395And0397FourCell(t *testing.T) {
 	}
 	rows := []struct{ name, project, command, want string }{
 		{"GAP0396/source-glob-build", "ordinary", `cp *.txt build/`, "allow"},
-		{"GAP0396/source-glob-build-link", "protected", `cp *.txt build/`, "block"},
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		{"GAP0396/source-glob-build-link", "protected", `cp *.txt build/`, "alert"},
 		{"GAP0396/source-glob-out", "ordinary", `cp *.txt out/`, "allow"},
-		{"GAP0396/source-glob-out-link", "protected", `cp *.txt out/`, "block"},
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		{"GAP0396/source-glob-out-link", "protected", `cp *.txt out/`, "alert"},
 		{"GAP0397/copy-file-in-folder", "ordinary", `for f in a.txt b.txt; do cp $f copy/$f; done; echo done > report.txt`, "allow"},
-		{"GAP0397/copy-file-in-folder-link", "protected", `for f in a.txt b.txt; do cp $f copy/$f; done; echo done > report.txt`, "block"},
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		{"GAP0397/copy-file-in-folder-link", "protected", `for f in a.txt b.txt; do cp $f copy/$f; done; echo done > report.txt`, "alert"},
 		{"GAP0395/P06-find-exec-mv", "ordinary", `cd ~/clean && find . -name '*.txt' -exec mv {} build/ \;`, "allow"},
-		{"GAP0395/P06-find-exec-mv-link", "protected", `cd ~/linked && find . -name authorized_keys -exec mv {} ../.ssh/ \;`, "block"},
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		{"GAP0395/P06-find-exec-mv-link", "protected", `cd ~/linked && find . -name authorized_keys -exec mv {} ../.ssh/ \;`, "alert"},
 		{"GAP0395/P07-name-mkdir", "ordinary", `cd ~/clean && NAME=release; mkdir -p $NAME && cp README.md $NAME/ && tar -czf $NAME.tgz $NAME`, "allow"},
-		{"GAP0395/P07-name-mkdir-link", "protected", `cd ~/linked && NAME=../.ssh; mkdir -p $NAME && cp authorized_keys $NAME/ && tar -czf $NAME.tgz $NAME`, "block"},
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		{"GAP0395/P07-name-mkdir-link", "protected", `cd ~/linked && NAME=../.ssh; mkdir -p $NAME && cp authorized_keys $NAME/ && tar -czf $NAME.tgz $NAME`, "alert"},
 		{"GAP0395/P17-D-build-sub", "ordinary", `cd ~/clean && D=build/sub; mkdir -p $D; cp a.txt $D; cp b.txt "$D/"`, "allow"},
-		{"GAP0395/P17-D-build-sub-link", "protected", `cd ~/linked && D=../.ssh; mkdir -p $D; cp authorized_keys $D; cp b.txt "$D/"`, "block"},
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		{"GAP0395/P17-D-build-sub-link", "protected", `cd ~/linked && D=../.ssh; mkdir -p $D; cp authorized_keys $D; cp b.txt "$D/"`, "alert"},
 	}
 	var payloads [][]byte
 	for _, row := range rows {
@@ -69,6 +76,9 @@ func TestGAP0395And0397FourCell(t *testing.T) {
 	f.answerAll(t, calls)
 	for i, call := range calls {
 		want := rows[i/4].want
+		if strings.HasPrefix(call.body, `{"action":"alert"`) {
+			call.verdict = "alert" // rel-1-0-6:GAP-0675
+		}
 		t.Logf("FBROW %s | %s | want %s", call.name, call.verdict, want)
 		if call.verdict != want {
 			t.Errorf("%s: verdict %s, want %s; body %.200s", call.name, call.verdict, want, call.body)
@@ -106,8 +116,9 @@ func TestGAP0397ChangedIFSKeepsProtectedCopy(t *testing.T) {
 	}
 	f.answerAll(t, calls)
 	for _, call := range calls {
-		if call.verdict != "block" {
-			t.Errorf("%s: verdict %s, want block; body %.200s", call.name, call.verdict, call.body)
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		if !strings.HasPrefix(call.body, `{"action":"alert"`) || !strings.Contains(call.body, "persistence.ssh_authorized_keys_command") {
+			t.Errorf("%s: verdict %s, want alert; body %.200s", call.name, call.verdict, call.body)
 		}
 	}
 }

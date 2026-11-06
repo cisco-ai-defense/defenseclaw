@@ -40,7 +40,8 @@ func TestGAP0496BashCReadOnlyGlobFromHomeFourCell(t *testing.T) {
 	for _, row := range []struct{ name, command, want string }{
 		{"listing", `bash -c "ls -d */* | head -3"`, "allow"},
 		{"listing-stderr-discard", `bash -c "ls -d */* 2>/dev/null | head -3"`, "allow"},
-		{"protected-write", `bash -c "echo fixture >> .ssh/authorized_keys"`, "block"},
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		{"protected-write", `bash -c "echo fixture >> .ssh/authorized_keys"`, "alert"},
 	} {
 		payload := mustJSON(t, map[string]any{
 			"session_id": "gap0496", "hook_event_name": "PreToolUse",
@@ -83,8 +84,8 @@ func TestGAP0496BashCReadOnlyGlobFromHomeFourCell(t *testing.T) {
 					if !strings.HasPrefix(body, `{"action":"`+row.want+`"`) {
 						t.Errorf("%q: status %d body %.400s, want %s", row.command, recorder.Code, body, row.want)
 					}
-					if row.want == "block" && !strings.Contains(body, "persistence.ssh_authorized_keys_command") {
-						t.Errorf("%q: wrong block rule: %.400s", row.command, body)
+					if row.want == "alert" && !strings.Contains(body, "persistence.ssh_authorized_keys_command") {
+						t.Errorf("%q: wrong alert rule: %.400s", row.command, body)
 					}
 				})
 			}

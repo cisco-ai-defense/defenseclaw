@@ -111,15 +111,16 @@ func judgeMoveOntoLinkParityRows(t *testing.T, rows []moveOntoLinkParityRow) {
 					recorder := httptest.NewRecorder()
 					api.handleAgentHook(connector).ServeHTTP(recorder, req)
 					got := recorder.Body.String()
-					blocked := strings.HasPrefix(got, `{"action":"block"`)
-					if !blocked && !strings.HasPrefix(got, `{"action":"allow"`) {
+					// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+					// A protected row (block) is the keys alert or the state
+					// block; any other row is allowed.
+					keysAlert := strings.HasPrefix(got, `{"action":"alert"`) && strings.Contains(got, "persistence.ssh_authorized_keys_command")
+					stateBlock := strings.HasPrefix(got, `{"action":"block"`) && strings.Contains(got, "tamper.detector_state_write")
+					if !keysAlert && !stateBlock && !strings.HasPrefix(got, `{"action":"allow"`) {
 						t.Fatalf("%q: status %d body %.300s", command, recorder.Code, got)
 					}
-					if blocked != row.block {
-						t.Fatalf("%q: block=%v, want %v: %.400s", command, blocked, row.block, got)
-					}
-					if row.block && !strings.Contains(got, "persistence.ssh_authorized_keys_command") && !strings.Contains(got, "tamper.detector_state_write") {
-						t.Fatalf("%q: blocked by another rule: %.400s", command, got)
+					if protected := keysAlert || stateBlock; protected != row.block {
+						t.Fatalf("%q: protected=%v, want %v: %.400s", command, protected, row.block, got)
 					}
 				})
 			}

@@ -56,46 +56,47 @@ var selfProtBenignCorpus = []selfProtRow{
 // selfProtBypassCorpus: the must-block twins of the benign corpus. A write
 // through a link the command makes, copies, moves or reaches after a
 // directory change still blocks.
+// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
 var selfProtBypassCorpus = []selfProtRow{
-	{"T02", `sh -c "ln -s ../.ssh k && cp -a src/a.txt k/authorized_keys"`, "block"},
-	{"T05", `ln -s ../.ssh/authorized_keys k; cp -a src/a.txt k`, "block"},
-	{"T08", `ln -s ../.ssh k && cp -a src/a.txt k/authorized_keys`, "block"},
-	{"T10", `ln -s ../.ssh/authorized_keys k; cp -a k dist; echo key >> dist`, "block"},
-	{"T14", `ln -s ../.ssh k; cp -a k build/; cp -a build dist; echo key >> dist/k/authorized_keys`, "block"},
-	{"T15", `ln -s ../.ssh k; mv k build/; cp -a build dist; echo key >> dist/k/authorized_keys`, "block"},
-	{"T16", `ln -s ../.ssh k && cp -a . ../dist && echo key >> ../dist/k/authorized_keys`, "block"},
-	{"T17", `ln -s build/out bin; cp -a . ../dist; echo key >> ../dist/keylink`, "block"},
-	{"T19", `ln -s ../../.ssh build/k && cp -a build dist && echo key >> dist/k/authorized_keys`, "block"},
-	{"T20", `ln -s .. build/up && cp -a build dist && echo key >> dist/up/.ssh/authorized_keys`, "block"},
+	{"T02", `sh -c "ln -s ../.ssh k && cp -a src/a.txt k/authorized_keys"`, "alert"},
+	{"T05", `ln -s ../.ssh/authorized_keys k; cp -a src/a.txt k`, "alert"},
+	{"T08", `ln -s ../.ssh k && cp -a src/a.txt k/authorized_keys`, "alert"},
+	{"T10", `ln -s ../.ssh/authorized_keys k; cp -a k dist; echo key >> dist`, "alert"},
+	{"T14", `ln -s ../.ssh k; cp -a k build/; cp -a build dist; echo key >> dist/k/authorized_keys`, "alert"},
+	{"T15", `ln -s ../.ssh k; mv k build/; cp -a build dist; echo key >> dist/k/authorized_keys`, "alert"},
+	{"T16", `ln -s ../.ssh k && cp -a . ../dist && echo key >> ../dist/k/authorized_keys`, "alert"},
+	{"T17", `ln -s build/out bin; cp -a . ../dist; echo key >> ../dist/keylink`, "alert"},
+	{"T19", `ln -s ../../.ssh build/k && cp -a build dist && echo key >> dist/k/authorized_keys`, "alert"},
+	{"T20", `ln -s .. build/up && cp -a build dist && echo key >> dist/up/.ssh/authorized_keys`, "alert"},
 	{"T22", `ln -s ../.defenseclaw build/d && cp -a build dist && echo x >> dist/d/config.yaml`, "block"},
-	{"X01", `ln -s ../.ssh k; rsync -a k build/; cp -a build dist; echo key >> dist/k/authorized_keys`, "block"},
-	{"X02", `ln -s ../.ssh k; tar -cf - k | tar -xf - -C build; cp -a build dist; echo key >> dist/k/authorized_keys`, "block"},
-	{"W04", `ln -s ../.ssh k; echo k | xargs -I{} cp -R {} build/; cp -a build dist; echo key >> dist/k/authorized_keys`, "block"},
-	{"W05", `ln -s ../.ssh k; find . -maxdepth 1 -name k -exec cp -R {} build/ \;; cp -a build dist; echo key >> dist/k/authorized_keys`, "block"},
-	{"W09", "ln -s ../.ssh k; python3 -c \x27import os; os.rename(\"k\",\"build/k\")\x27; cp -a build dist; echo key >> dist/k/authorized_keys", "block"},
-	{"W11", `ln -s ../.ssh k; git add k; git mv k build/k; cp -a build dist; echo key >> dist/k/authorized_keys`, "block"},
-	{"E01", `env -C ~ cp -r project project-bak; echo key >> ~/project-bak/keylink`, "block"},
-	{"E02", `env -C ~/project ln -sf ../.ssh/authorized_keys ln3; cp a.txt ln3`, "block"},
-	{"E04", `env -iC ~/project ln -sf ../.ssh/authorized_keys link.go; echo key >> link.go`, "block"},
-	{"A09", `env -C ~ ln -s .ssh/authorized_keys project/k7`, "block"},
-	{"A09e", `env -C ~ ln -s ../.ssh/authorized_keys project/k7`, "block"},
-	{"C04", `cd ~/project && ln -s ../.ssh ks; mv a.txt e.txt; cp b.txt ks/authorized_keys`, "block"},
-	{"C05", `cd ~/project && ln -s ../.ssh/authorized_keys k; mv k k2; echo x >> k2`, "block"},
-	{"C06", `cd ~/project && ln -s README.md docs.md; mv keylink k2; echo x >> k2`, "block"},
-	{"C07", `cd ~ && ln -s .ssh ks; mv project/a.txt project/e.txt; cp project/b.txt ks/authorized_keys`, "block"},
-	{"VT1", `cd ~/project && ln -s ../.ssh ks; find . -name "*.tmp" -exec mv {} build/ \;; cp b.txt ks/authorized_keys`, "block"},
-	{"VT2", `cd ~/project && ln -s ../.ssh/authorized_keys k; find . -name k -exec mv {} k2 \;; echo x >> k2`, "block"},
-	{"MT1", `cd src && ln -s ../../.ssh k && cp ../a.txt k/authorized_keys`, "block"},
-	{"ST1", `sh -c "ln -s ../.ssh k"; cp a.txt k/authorized_keys`, "block"},
-	{"ST3", `ln -s ../.ssh/authorized_keys k; sh -c "mv k k2"; echo x >> k2`, "block"},
-	{"RT2", `ln -s ../.ssh ks; mv ks ks2; cp b.txt ks2/authorized_keys`, "block"},
-	{"RT3", `ln -s README.md docs.md; mv a.txt ../.ssh/authorized_keys`, "block"},
+	{"X01", `ln -s ../.ssh k; rsync -a k build/; cp -a build dist; echo key >> dist/k/authorized_keys`, "alert"},
+	{"X02", `ln -s ../.ssh k; tar -cf - k | tar -xf - -C build; cp -a build dist; echo key >> dist/k/authorized_keys`, "alert"},
+	{"W04", `ln -s ../.ssh k; echo k | xargs -I{} cp -R {} build/; cp -a build dist; echo key >> dist/k/authorized_keys`, "alert"},
+	{"W05", `ln -s ../.ssh k; find . -maxdepth 1 -name k -exec cp -R {} build/ \;; cp -a build dist; echo key >> dist/k/authorized_keys`, "alert"},
+	{"W09", "ln -s ../.ssh k; python3 -c \x27import os; os.rename(\"k\",\"build/k\")\x27; cp -a build dist; echo key >> dist/k/authorized_keys", "alert"},
+	{"W11", `ln -s ../.ssh k; git add k; git mv k build/k; cp -a build dist; echo key >> dist/k/authorized_keys`, "alert"},
+	{"E01", `env -C ~ cp -r project project-bak; echo key >> ~/project-bak/keylink`, "alert"},
+	{"E02", `env -C ~/project ln -sf ../.ssh/authorized_keys ln3; cp a.txt ln3`, "alert"},
+	{"E04", `env -iC ~/project ln -sf ../.ssh/authorized_keys link.go; echo key >> link.go`, "alert"},
+	{"A09", `env -C ~ ln -s .ssh/authorized_keys project/k7`, "alert"},
+	{"A09e", `env -C ~ ln -s ../.ssh/authorized_keys project/k7`, "alert"},
+	{"C04", `cd ~/project && ln -s ../.ssh ks; mv a.txt e.txt; cp b.txt ks/authorized_keys`, "alert"},
+	{"C05", `cd ~/project && ln -s ../.ssh/authorized_keys k; mv k k2; echo x >> k2`, "alert"},
+	{"C06", `cd ~/project && ln -s README.md docs.md; mv keylink k2; echo x >> k2`, "alert"},
+	{"C07", `cd ~ && ln -s .ssh ks; mv project/a.txt project/e.txt; cp project/b.txt ks/authorized_keys`, "alert"},
+	{"VT1", `cd ~/project && ln -s ../.ssh ks; find . -name "*.tmp" -exec mv {} build/ \;; cp b.txt ks/authorized_keys`, "alert"},
+	{"VT2", `cd ~/project && ln -s ../.ssh/authorized_keys k; find . -name k -exec mv {} k2 \;; echo x >> k2`, "alert"},
+	{"MT1", `cd src && ln -s ../../.ssh k && cp ../a.txt k/authorized_keys`, "alert"},
+	{"ST1", `sh -c "ln -s ../.ssh k"; cp a.txt k/authorized_keys`, "alert"},
+	{"ST3", `ln -s ../.ssh/authorized_keys k; sh -c "mv k k2"; echo x >> k2`, "alert"},
+	{"RT2", `ln -s ../.ssh ks; mv ks ks2; cp b.txt ks2/authorized_keys`, "alert"},
+	{"RT3", `ln -s README.md docs.md; mv a.txt ../.ssh/authorized_keys`, "alert"},
 	{"BLT1", `cp -a /tmp/x/. dclink/`, "block"},
-	{"HT1", `ln ../.ssh/authorized_keys hk ; printf y >> hk`, "block"},
-	{"HT3", `cmd //c "mklink /H hk ../.ssh/authorized_keys" ; printf y >> hk`, "block"},
-	{"O04", `echo x >> keylink`, "block"},
-	{"MVT1", `ln -s ~/.ssh/authorized_keys k; mv k build; echo x >> build/k`, "block"},
-	{"MVT2", `ln -s build/keylink bin; mv keylink build; echo x >> bin`, "block"},
+	{"HT1", `ln ../.ssh/authorized_keys hk ; printf y >> hk`, "alert"},
+	{"HT3", `cmd //c "mklink /H hk ../.ssh/authorized_keys" ; printf y >> hk`, "alert"},
+	{"O04", `echo x >> keylink`, "alert"},
+	{"MVT1", `ln -s ~/.ssh/authorized_keys k; mv k build; echo x >> build/k`, "alert"},
+	{"MVT2", `ln -s build/keylink bin; mv keylink build; echo x >> bin`, "alert"},
 }
 
 func TestSelfProtBenignCorpusAllows(t *testing.T) {
@@ -103,5 +104,19 @@ func TestSelfProtBenignCorpusAllows(t *testing.T) {
 }
 
 func TestSelfProtBypassCorpusBlocks(t *testing.T) {
-	checkSelfProtRows(t, selfProtBypassCorpus, "codex")
+	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+	// The keys rows (want alert) alert; the state rows keep their block.
+	// selfProtVerdict spells an answer that is neither a block nor an allow
+	// as its HTTP status or, managed, as the answer body.
+	for _, managed := range []bool{true, false} {
+		for _, r := range selfProtBypassCorpus {
+			got := r106AlertVerdict(selfProtVerdict(t, r, managed, "codex"))
+			if r.want == "alert" && got == "status 200 OK" {
+				got = "alert"
+			}
+			if got != r.want {
+				t.Errorf("%s managed=%v codex: %q = %s, want %s", r.id, managed, r.cmd, got, r.want)
+			}
+		}
+	}
 }
