@@ -341,7 +341,9 @@ func snapshotTestMachineRegistry() map[string]string {
 // every DefenseClaw* folder under %ProgramData%\Cisco and
 // %ProgramData%\Cisco\Cisco Secure Client, the DefenseClaw-* staging and dc-*-test-*
 // fixture folders at the top of %ProgramData% and of the system drive,
-// %WINDIR%\Logs\DefenseClaw* and %ProgramFiles%\Cisco\DefenseClaw*. While a
+// %WINDIR%\Logs\DefenseClaw*, %ProgramFiles%\Cisco\DefenseClaw*, and the
+// token's own %LOCALAPPDATA%\DefenseClaw and lifecycle staging in its
+// %LOCALAPPDATA%\Temp. While a
 // DefenseClaw service runs, its data folder and the lifecycle log folder are
 // its own and are left out.
 func snapshotTestMachineState(snapshot map[string]string) {
@@ -389,6 +391,20 @@ func snapshotTestMachineState(snapshot map[string]string) {
 			snapshot["file "+cisco] = "present"
 		}
 		fingerprintTestEntries(snapshot, cisco, defenseClaw, skip)
+	}
+	// g079 review 2 R2c: the token's own per-user DefenseClaw folder (the
+	// Claude settings teardown keeps its transactions there) and the
+	// lifecycle staging in its own temp folder. The sandbox stages in the
+	// run's temp folder, so neither changes.
+	if localAppData, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData); err != nil {
+		snapshot["file %LOCALAPPDATA%"] = "unresolved: " + err.Error()
+	} else {
+		fingerprintTestTree(snapshot, filepath.Join(localAppData, "DefenseClaw"), skip)
+		fingerprintTestEntries(snapshot, filepath.Join(localAppData, "Temp"), func(name string) bool {
+			lower := strings.ToLower(name)
+			return strings.HasPrefix(lower, strings.ToLower(managed.SetupInstallerStagePrefix)) ||
+				strings.HasPrefix(lower, strings.ToLower(managed.SetupPowerShellTempPrefix))
+		}, skip)
 	}
 }
 
@@ -664,8 +680,9 @@ func testSandboxSecretDeploymentAbsent() (bool, error) {
 	return err == nil && !installed, err
 }
 
-// isolateTestRunFolders points the lifecycle lock at the run's temp folder
-// dir (g079 review 2 R2b); with no dir, taking it fails.
+// isolateTestRunFolders points the lifecycle lock and the caller's own temp
+// folder at the run's temp folder dir (g079 review 2 R2b, R2c); with no dir,
+// both fail.
 //
 // The lifecycle lock (DefenseClaw-Lifecycle\lifecycle.lock) is what the hot
 // config, the bundle restore, the generation repair and the credential
@@ -674,12 +691,30 @@ func testSandboxSecretDeploymentAbsent() (bool, error) {
 // it ran: interference without a write, which no fingerprint sees. In the
 // sandbox it is a missing file in dir, so taking it fails as on a computer
 // without a deployment.
+//
+// The caller's own temp folder is where an unelevated lifecycle (the
+// identity the tests pin, pinTestProcessIdentity) stages its scripts
+// (DefenseClaw-Installer-*) and its PowerShell temp. It was the token's own
+// %LOCALAPPDATA%\Temp (for LocalSystem the system profile's), where a
+// helper a test killed left its staging, out of the fingerprint's sight. In
+// the sandbox it is a folder in dir that only the test account, LocalSystem
+// and Administrators can change, as the real one.
 func isolateTestRunFolders(dir string) {
 	noDir := errors.New("the tests have no temp folder for the lifecycle lock and the staging")
-	lock := ""
+	lock, userTemp, userTempErr := "", "", noDir
 	if dir != "" {
 		lock = filepath.Join(dir, "no-lifecycle", "lifecycle.lock")
+		userTemp = filepath.Join(dir, "user-temp")
+		if userTempErr = os.Mkdir(userTemp, 0o700); userTempErr == nil {
+			grantTestTreeToCurrentUser(userTemp)
+		}
 	}
+	sandboxSeam("windowsEnterpriseUserTempDirectory", &windowsEnterpriseUserTempDirectory, func() (string, error) {
+		if userTempErr != nil {
+			return "", userTempErr
+		}
+		return userTemp, nil
+	})
 	takeLock := func(string) (func(), error) {
 		if lock == "" {
 			return nil, noDir
@@ -887,6 +922,15 @@ func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 			t.Fatalf("%s does not take the run's lifecycle lock %s: %v", name, lockPath, err)
 		}
 	}
+	// g079 review 2 R2c: the unelevated staging is in the run's temp folder.
+	if sameTestFunc(windowsEnterpriseUserTempDirectory, trustedWindowsEnterpriseUserTempDirectory) {
+		t.Fatal("the lifecycle stages in the token's own LocalAppData Temp folder")
+	}
+	userTemp, err := windowsEnterpriseUserTempDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inTemp("the caller's staging temp folder", userTemp)
 	// Service control: first that no seam is its production function (one
 	// would stop or start the computer's own gateway), then that each fails.
 	for name, seam := range map[string][2]any{
@@ -944,7 +988,7 @@ func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 		registered[seam.name] = true
 	}
 	for _, name := range []string{"windowsBundleLayout", "windowsSecretLayout", "windowsChangeSpool", "windowsSecretDeploymentAbsent",
-		"windowsEnterpriseHotConfigLock", "windowsSecretLifecycleLock", "windowsSecretLifecycleLockPath",
+		"windowsEnterpriseHotConfigLock", "windowsSecretLifecycleLock", "windowsSecretLifecycleLockPath", "windowsEnterpriseUserTempDirectory",
 		"windowsEnterpriseStandaloneFootprint", "windowsEnterpriseClaudeRegistryPolicyValue",
 		"windowsBundleRestoreGatewayRunning", "windowsStandaloneGatewayPID", "windowsSecretGatewayLive",
 		"windowsEnterpriseHotConfigRestart", "windowsEnterpriseHotConfigRecover", "windowsEnterpriseHotConfigFailClosed",

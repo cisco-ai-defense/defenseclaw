@@ -132,7 +132,7 @@ func newWindowsEnterprisePayloadDirectory() (string, error) {
 	}
 	// Unelevated status runs stage in the caller's own temp directory, whose
 	// per-user ownership the trust gate then confirms.
-	parent, err := trustedWindowsEnterpriseUserTempDirectory()
+	parent, err := windowsEnterpriseUserTempDirectory()
 	if err != nil {
 		return "", err
 	}
