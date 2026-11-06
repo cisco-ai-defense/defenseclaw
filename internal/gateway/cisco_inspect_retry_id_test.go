@@ -76,7 +76,12 @@ func TestCiscoInspectAPIKeyRetryIgnoresToolUseID(t *testing.T) {
 			}
 			mu.Lock()
 			defer mu.Unlock()
-			if want := []string{"structured:event-one", "text", "text"}; !reflect.DeepEqual(formats, want) {
+			want := []string{"structured:event-one", "text", "text"}
+			if tc.action != "block" {
+				// An allow needs a fresh structured verdict on the next invocation.
+				want = []string{"structured:event-one", "text", "structured:event-two", "text"}
+			}
+			if !reflect.DeepEqual(formats, want) {
 				t.Fatalf("request formats = %v, want %v", formats, want)
 			}
 		})
