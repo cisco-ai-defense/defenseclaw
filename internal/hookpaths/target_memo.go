@@ -42,6 +42,9 @@ type TargetMemo struct {
 	files map[string]protectedFiles
 	// reachNames stores both lexical and resolved protected names.
 	reachNames map[string]reachNames
+	// reachParents stores the resolved parent and the grade of every link hop
+	// once for the missing leaves of one evaluation.
+	reachParents map[reachParentKey]reachParentAnswer
 	// work counts the path components the memo walked on the file system
 	// and the candidate checks it computed (Work); candidates counts the
 	// Windows candidate checks among them (WorkParts).

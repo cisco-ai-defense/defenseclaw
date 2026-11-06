@@ -44,6 +44,59 @@ type reachNames struct {
 	trees       []string
 }
 
+type reachParentKey struct{ path, home string }
+type reachParentAnswer struct {
+	resolved string
+	grade    Grade
+}
+
+// parentProtectedReach keeps the complete link reading of a shared parent.
+// A final ordinary directory does not clear a protected intermediate hop.
+func (m *TargetMemo) parentProtectedReach(parent, home string, names reachNames) reachParentAnswer {
+	key := reachParentKey{parent, home}
+	if m != nil {
+		m.mu.Lock()
+		answer, ok := m.reachParents[key]
+		m.mu.Unlock()
+		if ok {
+			return answer
+		}
+	}
+	reached, unread := false, false
+	lstat := func(path string) (os.FileInfo, error) {
+		if names.has(path) {
+			reached = true
+		}
+		info, err := PathLstat(path)
+		unread = unread || ShareUnanswered(err)
+		return info, err
+	}
+	readlink := func(path string) (string, error) {
+		link, err := PathReadlink(path)
+		unread = unread || ShareUnanswered(err)
+		return link, err
+	}
+	resolved, _, _, ok := walkWritePathMemoWithReaders("", parent, 0, false, false, nil, lstat, readlink)
+	answer := reachParentAnswer{resolved: resolved}
+	switch {
+	case reached || ok && names.has(resolved):
+		answer.grade = GradeNamed
+	case unread || !ok:
+		answer.grade = GradePossible
+	}
+	if m != nil {
+		m.mu.Lock()
+		if m.reachParents == nil {
+			m.reachParents = make(map[reachParentKey]reachParentAnswer)
+		}
+		if len(m.reachParents) < maxTargetMemoEntries {
+			m.reachParents[key] = answer
+		}
+		m.mu.Unlock()
+	}
+	return answer
+}
+
 func (s *reachNames) addFile(path string) {
 	path = filepath.Clean(path)
 	if !slices.Contains(s.files, path) {
@@ -158,12 +211,14 @@ func (m *TargetMemo) ProtectedReach(target, home string) Grade {
 	// while linked parents and protected names still receive the same grade.
 	entryInfo, entryErr := PathLstat(target)
 	if os.IsNotExist(entryErr) {
-		if resolved, ok := m.resolveWriteTarget(parent); ok {
-			if names.has(filepath.Join(resolved, filepath.Base(target))) {
-				return GradeNamed
-			}
-			return GradeNone
+		answer := m.parentProtectedReach(parent, home, names)
+		if answer.grade != GradeNone {
+			return answer.grade
 		}
+		if names.has(filepath.Join(answer.resolved, filepath.Base(target))) {
+			return GradeNamed
+		}
+		return GradeNone
 	}
 
 	type answer struct {

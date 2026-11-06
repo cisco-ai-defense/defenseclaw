@@ -34,6 +34,8 @@ func TestProtectedReachGradesNamedAndOrdinaryPaths(t *testing.T) {
 	direct := filepath.Join(project, "direct")
 	relative := filepath.Join(project, "relative")
 	parent := filepath.Join(project, "linked-dir")
+	throughProtected := filepath.Join(project, "through-protected")
+	ordinaryParent := filepath.Join(root, "project-link")
 	hard := filepath.Join(project, "hard")
 	privateHard := filepath.Join(project, "private-hard")
 	if err := os.Symlink(keys, direct); err != nil {
@@ -47,6 +49,16 @@ func TestProtectedReachGradesNamedAndOrdinaryPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(filepath.Dir(keys), parent); err != nil {
+		t.Fatal(err)
+	}
+	protectedOut := filepath.Join(filepath.Dir(keys), "out")
+	if err := os.Symlink(project, protectedOut); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(protectedOut, throughProtected); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(project, ordinaryParent); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Link(keys, hard); err != nil {
@@ -76,6 +88,7 @@ func TestProtectedReachGradesNamedAndOrdinaryPaths(t *testing.T) {
 		{"parent-link-missing", filepath.Join(parent, "authorized_keys2"), GradeNamed},
 		{"parent-link-new-file", filepath.Join(parent, "new-file"), GradeNamed},
 		{"ssh-new-file", filepath.Join(home, ".ssh", "new-file"), GradeNamed},
+		{"intermediate-protected-link", filepath.Join(throughProtected, "new-file"), GradeNamed},
 		{"hard-link", hard, GradeNamed},
 		{"private-hard-link", privateHard, GradeNamed},
 		{"long-chain", chain, GradeNamed},
@@ -83,6 +96,7 @@ func TestProtectedReachGradesNamedAndOrdinaryPaths(t *testing.T) {
 		{"state-tree", policy, GradeNamed},
 		{"ordinary-file", ordinary, GradeNone},
 		{"ordinary-missing", filepath.Join(project, "new.txt"), GradeNone},
+		{"ordinary-parent-link", filepath.Join(ordinaryParent, "new.txt"), GradeNone},
 		{"ordinary-state-sibling", filepath.Join(home, ".defenseclaw", "notes.txt"), GradeNone},
 	} {
 		t.Run(row.name, func(t *testing.T) {
