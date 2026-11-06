@@ -19,9 +19,12 @@ NEARBY_COMMANDS = (
     "cat /srv/sample/item.txt",
     "git clone ssh://sample-host-17/repo",
     "git clone git@sample-host-17:repo",
+    "git clone -q sample-host-17:repo",
     "git remote add origin sample-host-17:repo",
+    "git remote set-url origin sample-host-17:repo",
     "git config user.name sampleacct7",
     "git -c user.email=sampleacct7@example.invalid status",
+    "GIT_AUTHOR_NAME=sampleacct7 git status",
 )
 
 
@@ -34,12 +37,19 @@ class D1ShapeScrubTest(unittest.TestCase):
         for command in (
             "git clone ssh://git@example.invalid/repo",
             "git clone git@example.invalid:repo",
+            "git clone -q example.invalid:repo",
             "git remote add origin example.invalid:repo",
+            "git remote set-url origin example.invalid:repo",
             "git config user.name testuser",
             "git -c user.email=testuser@example.invalid status",
+            "GIT_AUTHOR_NAME=testuser git status",
         ):
             with self.subTest(command=command):
                 self.assertTrue(synthetic_operands({"command": command}))
+
+    def test_identifiers_in_tool_arguments_are_checked(self):
+        self.assertFalse(synthetic_operands({"args": {"content": "git clone sample-host-17:repo"}}))
+        self.assertTrue(synthetic_operands({"args": {"content": "git clone example.invalid:repo"}}))
 
     def test_reviewed_public_subset_passes_scrub(self):
         self.assertEqual(check(CORPUS), [])

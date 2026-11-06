@@ -62,9 +62,14 @@ SUDO_USER = re.compile(r"\bsudo\s+-u\s+([^\s;&|]+)")
 HOST_OPERAND = re.compile(r"\b(?:ssh|ssh-keyscan|scp|rsync|ping|nslookup|dig)\s+(?:-[A-Za-z]+\s+)*([^\s;&|]+)")
 URL = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+")
 USER_AT_HOST = re.compile(r"\b([A-Za-z][A-Za-z0-9_.+-]*)@([A-Za-z][A-Za-z0-9_.-]*)")
-GIT_ACCOUNT = re.compile(r"\buser\.(?:name|email)\s*(?:=|\s)\s*([^\s;&|\"']+)")
-GIT_TRANSPORT = re.compile(r"\bgit\s+(?:clone|fetch|push|pull|ls-remote|remote\s+add\s+\S+)\s+([^\s;&|]+)")
-HOST_ASSIGNMENT = re.compile(r"\b(?:host|hostname|server|remote|user|username|account)=([^\s;&|\"']+)")
+GIT_ACCOUNT = re.compile(r"\buser\.(?:name|email)\s*(?:=|\s)\s*([^\s;&|\"']+)", re.I)
+GIT_IDENTITY = re.compile(r"\bGIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)=([^\s;&|\"']+)", re.I)
+GIT_TRANSPORT = re.compile(
+    r"\bgit\b[^\n;&|]{0,300}\b(?:clone|fetch|push|pull|ls-remote|remote\s+(?:add|set-url))\b([^\n;&|]*)",
+    re.I,
+)
+GIT_SCP_ENDPOINT = re.compile(r"(?<![\w./])(?:([A-Za-z][A-Za-z0-9_.+-]*)@)?([A-Za-z][A-Za-z0-9_.-]*):(?!//)[^\s;&|]+")
+HOST_ASSIGNMENT = re.compile(r"\b(?:host|hostname|server|remote|user|username|account)=([^\s;&|\"']+)", re.I)
 BAD_TEXT = (
     re.compile(
         r"(?<![A-Za-z0-9])/(?:home|Users|root|tmp|var|workspace|mnt|opt|etc|usr|proc|run|private|app)(?:/|\b)", re.I
@@ -131,18 +136,18 @@ def synthetic_operands(row: dict) -> bool:
         for match in USER_AT_HOST.finditer(value):
             if match.group(1) not in ALLOWED_USERS or match.group(2) not in ALLOWED_HOSTS:
                 return False
-        for match in GIT_ACCOUNT.finditer(value):
+        for match in list(GIT_ACCOUNT.finditer(value)) + list(GIT_IDENTITY.finditer(value)):
             account = match.group(1)
             if account not in ALLOWED_USERS and account not in {f"{user}@example.invalid" for user in ALLOWED_USERS}:
                 return False
         for match in GIT_TRANSPORT.finditer(value):
-            endpoint = match.group(1).strip("\"'")
-            if ":" in endpoint and "://" not in endpoint:
-                host = endpoint.split(":", 1)[0]
-                if host not in ALLOWED_HOSTS and not USER_AT_HOST.fullmatch(host):
+            for endpoint in GIT_SCP_ENDPOINT.finditer(match.group(1)):
+                if (endpoint.group(1) and endpoint.group(1) not in ALLOWED_USERS) or endpoint.group(
+                    2
+                ) not in ALLOWED_HOSTS:
                     return False
         for match in HOST_ASSIGNMENT.finditer(value):
-            name = match.group(0).split("=", 1)[0]
+            name = match.group(0).split("=", 1)[0].lower()
             allowed = ALLOWED_USERS if name in {"user", "username", "account"} else ALLOWED_HOSTS
             if match.group(1) not in allowed:
                 return False
