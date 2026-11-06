@@ -1228,6 +1228,9 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					if !protectedDecision {
 						protectedDecision = actionClientLoopCopyDestinationProtected(command, cwd, home)
 					}
+					if !protectedDecision {
+						protectedDecision = actionClientWrappedCopyDestinationProtected(command, cwd, home)
+					}
 				}
 				if !protectedDecision && NoDereferenceTouchShape(command, cwd, home) {
 					noDereferenceTouchSafe, protectedDecision = noDereferenceTouchStatus(command, cwd, home)

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -19,6 +20,52 @@ import (
 // leave the current directory, iterator and link unchanged.
 func actionClientLoopCopyDestinationProtected(command, cwd, home string) bool {
 	return loopCopyDestinationProtected(command, cwd, home, false)
+}
+
+// A copy whose destination is a known shell value has positive client-side
+// evidence even inside a fixed wrapper. SimpleCommands supplies each call's
+// placed directory and expanded known words; the copy option reader supplies
+// its output role. Source words and option values cannot raise this finding.
+func actionClientWrappedCopyDestinationProtected(command, cwd, home string) bool {
+	if !filepath.IsAbs(cwd) || !filepath.IsAbs(home) || !strings.Contains(command, "cp") || !strings.ContainsRune(command, '$') {
+		return false
+	}
+	input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd, ActiveHome: home}
+	facts := actionfacts.Analyze(input)
+	memo := NewTargetMemo()
+	for _, simple := range actionfacts.SimpleCommands(input, facts) {
+		if simple.EvaluationFailure != "" || !filepath.IsAbs(simple.CWD) {
+			continue
+		}
+		file, ok := parseShell(simple.Text)
+		if !ok || len(file.Stmts) != 1 || len(file.Stmts[0].Redirs) != 0 {
+			continue
+		}
+		call, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) < 3 {
+			continue
+		}
+		words, static := make([]string, len(call.Args)), make([]bool, len(call.Args))
+		for i, arg := range call.Args {
+			words[i], static[i] = StaticWord(arg, home)
+		}
+		run, wrapped := actionfacts.StaticPrefixWrapperChild(words, static)
+		if !wrapped {
+			run.Index = 0
+		}
+		if run.Index >= len(words) || !static[run.Index] ||
+			(programBase(words[run.Index]) != "cp" && programBase(words[run.Index]) != "gcp") {
+			continue
+		}
+		copy := cpOperands(words[run.Index+1:], static[run.Index+1:])
+		if !copy.ok {
+			continue
+		}
+		if ProtectedSSHReach(OperandPath(copy.destination, simple.CWD), home, memo) == GradeNamed {
+			return true
+		}
+	}
+	return false
 }
 
 // LoopCopyDestinationProtected checks fixed loop destinations of copy calls

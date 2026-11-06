@@ -7,10 +7,14 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
 func TestGAP0288WrappedCopyVariableDestinationEvidence(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX client evidence")
+	}
 	root := t.TempDir()
 	home, project := filepath.Join(root, "home"), filepath.Join(root, "home", "proj")
 	keys := filepath.Join(home, ".ssh", "authorized_keys")
@@ -34,6 +38,8 @@ func TestGAP0288WrappedCopyVariableDestinationEvidence(t *testing.T) {
 		{"wrapped-known-link", `cd ~ && f=proj/disklink; for x in 1; do env cp proj/a.txt $f; done`, true},
 		{"direct-known-link", `cd ~ && f=proj/disklink; for x in 1; do cp proj/a.txt $f; done`, true},
 		{"wrapped-ordinary", `cd ~ && f=proj/out.txt; for x in 1; do env cp proj/a.txt $f; done`, false},
+		{"wrapped-source-link", `cd ~ && f=proj/out.txt; for x in 1; do env cp proj/disklink $f; done`, false},
+		{"wrapped-suffix", `cd ~ && f=proj/disklink; for x in 1; do env cp proj/a.txt "$f.bak"; done`, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			payload, err := json.Marshal(map[string]any{
