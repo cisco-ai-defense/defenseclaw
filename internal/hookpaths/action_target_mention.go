@@ -198,6 +198,10 @@ func actionPosixTargetMentionAs(command, cwd, home string, depth int, stateOnly 
 		// actionfacts reads /home/$USER/... (GAP-2269).
 		user := filepath.Base(home)
 		values := actionValues{"HOME": home, "PWD": cwd, "USER": user, "LOGNAME": user}
+		// A prior assignment is transient only when every variable write
+		// has a proved ordinary target in this shell reading.
+		safeAssignments := actionClientBindingSyntax(command) &&
+			actionClientProvedSafeVariableTargetsForHook(command, cwd, home)
 		found := false
 		effectiveCWD := cwd
 		var directoryStack []string
@@ -294,10 +298,18 @@ func actionPosixTargetMentionAs(command, cwd, home string, depth int, stateOnly 
 						return false
 					}
 				}
-				for _, assign := range call.Assigns {
-					if assign.Value != nil && checkWord(assign.Value) {
-						found = true
-						return false
+				if len(call.Args) > 0 || !safeAssignments {
+					for _, assign := range call.Assigns {
+						if assign.Value != nil && checkWord(assign.Value) {
+							found = true
+							return false
+						}
+					}
+				} else {
+					for _, assign := range call.Assigns {
+						if assign.Value != nil {
+							judgedWords = append(judgedWords, assign.Value)
+						}
 					}
 				}
 				var moved *syntax.Word

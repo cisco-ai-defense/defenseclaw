@@ -39,6 +39,8 @@ func actionClientVariableWriteCandidate(command, home string) bool {
 			return true
 		}
 		switch programBase(program) {
+		case "cp":
+			found = len(call.Args) >= 3 && actionSoleParameter(call.Args[len(call.Args)-1]) != ""
 		case "install", "rsync":
 			found = len(call.Args) >= 3 && wordExpandsParameter(call.Args[len(call.Args)-1])
 		case "tee":
