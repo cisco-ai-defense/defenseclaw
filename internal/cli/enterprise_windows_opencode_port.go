@@ -175,6 +175,7 @@ func newWindowsOpenCodePortClearCommand() *cobra.Command {
 func appendWindowsOpenCodePortWarnings(result *enterprisestatus.Result) {
 	connectors, err := windowsOpenCodePortConnectorList()
 	if err != nil {
+		result.AddWarning("opencode_port_record_unchecked", "OpenCode port warning status could not be checked because the installed connector list is unavailable: "+err.Error())
 		return
 	}
 	governed := false

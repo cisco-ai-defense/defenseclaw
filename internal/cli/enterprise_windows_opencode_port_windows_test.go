@@ -44,4 +44,10 @@ func TestManagedWindowsOpenCodeStatusNamesAccountAndHeldPort(t *testing.T) {
 	if len(unavailable.Warnings) != 1 || unavailable.Warnings[0].Code != "opencode_port_record_unchecked" {
 		t.Fatalf("unavailable summary warning: %+v", unavailable.Warnings)
 	}
+	windowsOpenCodePortConnectorList = func() ([]string, error) { return nil, errors.New("connector list unavailable") }
+	unavailable = enterprisestatus.New("status", managed.ProfileStandalone, "windows", "test")
+	appendWindowsOpenCodePortWarnings(unavailable)
+	if len(unavailable.Warnings) != 1 || unavailable.Warnings[0].Code != "opencode_port_record_unchecked" {
+		t.Fatalf("unavailable connector list warning: %+v", unavailable.Warnings)
+	}
 }
