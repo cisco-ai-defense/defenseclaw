@@ -79,6 +79,9 @@ func TestPerUserNativeHookDeniesAnUnprovenListenerInTheOutageOpenTier(t *testing
 	fastRestartRetries(t)
 	stop := make(chan struct{})
 	t.Cleanup(func() { close(stop) })
+	// Read once here: a dial that outlives its request must not read the
+	// variable while shortRestartBudget's cleanup restores it.
+	ownerCheckWait := max(gatewayRestartBudget, firstTryConnectWindow) + 300*time.Millisecond
 	type scenario struct {
 		name string
 		// setup returns the client and the listener whose bytes must stay 0.
@@ -108,7 +111,7 @@ func TestPerUserNativeHookDeniesAnUnprovenListenerInTheOutageOpenTier(t *testing
 			opts.APIAddr = peer.addr()
 			opts.HTTPClient = verifiedTestClient(peer.addr(), func(net.Conn) error {
 				select {
-				case <-time.After(max(gatewayRestartBudget, firstTryConnectWindow) + 300*time.Millisecond):
+				case <-time.After(ownerCheckWait):
 				case <-stop:
 				}
 				return errors.New("connected gateway server socket was not found")
