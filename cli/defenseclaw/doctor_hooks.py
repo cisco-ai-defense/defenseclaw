@@ -533,7 +533,82 @@ def _codex_cmd_direct_parts(command: str) -> tuple[str, list[str]] | None:
         return None
     if value != parts[0] + " /d /v:off /c \"" + target + "\" " + " ".join(args):
         return None
+    name = ntpath.basename(target)
+    if name.casefold() == "defenseclaw-hook-guard.exe" and args[:1] == [_CODEX_SIBLING_GUARD]:
+        # The guarded start (rel-1-0-6 GAP-0676): on the events Codex can
+        # block, the guard program starts the defenseclaw-hook.exe beside it
+        # and answers Codex's block when that launcher cannot start.
+        return target[: len(target) - len(name)] + "defenseclaw-hook.exe", args[1:]
     return target, args
+
+
+# The guard argv of the guarded Codex start (hookguard.SiblingSubcommand).
+_CODEX_SIBLING_GUARD = "launcher-guard-sibling"
+
+
+def _launcher_start_message(agent: str) -> str:
+    """hookguard.LauncherMessage(agent, false), the sentence of a launcher that cannot start."""
+    return (
+        f"DefenseClaw blocked this: its {agent} hook launcher cannot start. "
+        "Run the DefenseClaw installer again to repair it."
+    )
+
+
+def _codex_launcher_block(event: str, contract: str, message: str) -> dict[str, Any] | None:
+    """hookguard.CodexBlock: Codex's block of event, None where a launcher that cannot start gets none."""
+    if event == "PreToolUse":
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": message,
+            }
+        }
+    if event == "PermissionRequest":
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {"behavior": "deny", "message": message},
+            }
+        }
+    if event in {"UserPromptSubmit", "PostToolUse"}:
+        return {"decision": "block", "reason": message}
+    if event in {"SessionStart", "PreCompact", "PostCompact"} and contract in {
+        "codex-hooks-v3",
+        "codex-hooks-v3-generic",
+        "codex-hooks-v4",
+    }:
+        return {"continue": False, "stopReason": message}
+    return None
+
+
+def _launcher_start_answer(connector: str, event: str, contract: str) -> str | None:
+    """The statements a per-user bridge answers a launcher that cannot start with.
+
+    It mirrors launcherStartAnswer.powershell (rel-1-0-6 GAP-0676): None for a
+    bridge Setup renders without the answer.
+    """
+    if connector == "kiro":
+        agent, stdout, code = "Kiro", "", 2
+    elif connector == "antigravity":
+        if event != "PreToolUse":
+            return None
+        agent, code = "Antigravity", 0
+        stdout = json.dumps(
+            {"decision": "deny", "reason": _launcher_start_message(agent)}, separators=(",", ":"), sort_keys=True
+        )
+    elif connector == "codex":
+        agent, code = "Codex", 0
+        block = _codex_launcher_block(event, contract, _launcher_start_message(agent))
+        if block is None:
+            return None
+        stdout = json.dumps(block, separators=(",", ":"), sort_keys=True)
+    else:
+        return None
+    text = "try { [Console]::Error.WriteLine(" + powershell_literal(_launcher_start_message(agent)) + ") } catch { }; "
+    if stdout:
+        text += powershell_literal(stdout) + "; "
+    return text + f"exit {code}"
 
 
 def _repair_detail(connector: str, detail: str, *, configured_mode: str = "") -> str:
@@ -1784,7 +1859,10 @@ def _awaited_hook_bridge_match(script: str, connector: str) -> re.Match[str] | N
     host refuses the .NET calls, so the bridge repeats the launcher and its
     arguments in a call-operator branch, which exits 1 when the launcher
     never started; ``fail_closed`` is that exit and is absent from bridges
-    rendered before it existed. ``arguments`` is the Process.Start copy of the
+    rendered before it existed. A per-user bridge since 1.0.9 answers a
+    launcher that cannot start instead (``answer``, the same statements in all
+    three places; rel-1-0-6 GAP-0676), which callers compare with
+    _launcher_start_answer. ``arguments`` is the Process.Start copy of the
     arguments, which callers compare with the call-operator copy.
     """
     _event_suffix, awaited_suffix = _windows_bridge_event_suffixes(connector)
@@ -1798,14 +1876,18 @@ def _awaited_hook_bridge_match(script: str, connector: str) -> re.Match[str] | N
         + r"'"
         + awaited_suffix
         + r" \| Microsoft\.PowerShell\.Core\\Out-Host; "
-        r"(?P<fail_closed>if \(\$null -eq \$LASTEXITCODE\) \{ exit 1 \}; )?"
+        r"(?:(?P<fail_closed>if \(\$null -eq \$LASTEXITCODE\) \{ exit 1 \}; )"
+        r"|if \(\$null -eq \$LASTEXITCODE -or \$LASTEXITCODE -lt 0\) \{ (?P<answer>try \{ \[Console\]::Error\.WriteLine\('[^']*'\) \} "
+        r"catch \{ \}; (?:'[^']*'; )?exit [02]) \}; )?"
         r"exit \$LASTEXITCODE \}; "
         r"\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\('(?P=target)','(?P<arguments>[^']*)'\); "
         r"\$hookStart\.UseShellExecute=\$false; "
         r"\$hookStart\.RedirectStandardError=\$true; "
-        r"\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\); "
+        r"(?(answer)try \{ \$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\) \} catch \{ (?P=answer) \}"
+        r"|\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\)); "
         r"\$hookProcess\.StandardError\.BaseStream\.CopyTo\(\[Console\]::OpenStandardError\(\)\); "
         r"\$hookProcess\.WaitForExit\(\); "
+        r"(?(answer)if \(\$hookProcess\.ExitCode -lt 0\) \{ (?P=answer) \}; )"
         r"exit \$hookProcess\.ExitCode",
         script,
     )
@@ -3271,11 +3353,18 @@ def _command_target(
                         "malformed",
                         "PowerShell EncodedCommand hook starts different arguments in its two launch paths",
                     )
-                if arguments is not None and match.group("fail_closed") is None:
+                answer = match.groupdict().get("answer")
+                if arguments is not None and match.group("fail_closed") is None and answer is None:
                     raise _InspectionError(
                         "stale",
                         "PowerShell EncodedCommand hook exits 0 in Constrained Language mode "
                         "when the launcher cannot start",
+                    )
+                if answer is not None and answer != _launcher_start_answer(connector, event or "", contract_id or ""):
+                    raise _InspectionError(
+                        "malformed",
+                        "PowerShell EncodedCommand hook answers a launcher that cannot start "
+                        "differently from the DefenseClaw bridge",
                     )
                 return target, args, "direct"
             unqualified = re.fullmatch(

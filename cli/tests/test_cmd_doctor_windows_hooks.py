@@ -180,9 +180,10 @@ class WindowsHookDoctorTests(unittest.TestCase):
         unqualified: bool = False,
         start_process: bool = False,
         constrained_fail_open: bool = False,
+        start_answer: str = "",
     ) -> str:
         literal = powershell_literal_body(str(runtime))
-        if legacy + unqualified + start_process + constrained_fail_open > 1:
+        if legacy + unqualified + start_process + constrained_fail_open + bool(start_answer) > 1:
             raise ValueError("launcher fixture flags are mutually exclusive")
         arguments = ["hook", "--connector", connector]
         if event:
@@ -200,6 +201,14 @@ class WindowsHookDoctorTests(unittest.TestCase):
             # before the Constrained Language fail-closed exit lack it.
             quoted = " ".join(f"'{argument}'" for argument in arguments)
             fail_closed = "" if constrained_fail_open else "if ($null -eq $LASTEXITCODE) { exit 1 }; "
+            start = "$hookProcess=[System.Diagnostics.Process]::Start($hookStart); "
+            end = "exit $hookProcess.ExitCode"
+            if start_answer:
+                # The per-user bridge since 1.0.9 answers a launcher that
+                # cannot start (rel-1-0-6 GAP-0676).
+                fail_closed = f"if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -lt 0) {{ {start_answer} }}; "
+                start = f"try {{ $hookProcess=[System.Diagnostics.Process]::Start($hookStart) }} catch {{ {start_answer} }}; "
+                end = f"if ($hookProcess.ExitCode -lt 0) {{ {start_answer} }}; exit $hookProcess.ExitCode"
             script = (
                 "$ErrorActionPreference='Stop'; "
                 "$env:NoDefaultCurrentDirectoryInExePath='1'; "
@@ -209,10 +218,10 @@ class WindowsHookDoctorTests(unittest.TestCase):
                 f"$hookStart=[System.Diagnostics.ProcessStartInfo]::new('{literal}','{' '.join(arguments)}'); "
                 "$hookStart.UseShellExecute=$false; "
                 "$hookStart.RedirectStandardError=$true; "
-                "$hookProcess=[System.Diagnostics.Process]::Start($hookStart); "
-                "$hookProcess.StandardError.BaseStream.CopyTo([Console]::OpenStandardError()); "
+                + start
+                + "$hookProcess.StandardError.BaseStream.CopyTo([Console]::OpenStandardError()); "
                 "$hookProcess.WaitForExit(); "
-                "exit $hookProcess.ExitCode"
+                + end
             )
         else:
             start_process = "Start-Process" if unqualified else r"Microsoft.PowerShell.Management\Start-Process"
@@ -2171,6 +2180,68 @@ class WindowsHookDoctorTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertNotEqual(command, current)
                 self.assertFalse(doctor_hooks._managed_hook_command(command, "codex"))
+
+    def test_codex_guarded_cmd_invocation_reads_as_the_launcher_beside_the_guard(self) -> None:
+        # rel-1-0-6 GAP-0676: on the events Codex can block, Setup starts the
+        # one-line guard program, which runs the defenseclaw-hook.exe beside it
+        # and answers Codex's block when that launcher cannot start.
+        runtime = self._runtime()
+        guard = self._runtime("defenseclaw-hook-guard.exe")
+        bound = ["hook", "--connector", "codex", "--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"]
+        command = (
+            doctor_hooks._windows_system_cmd_path()
+            + " /d /v:off /c \""
+            + str(guard)
+            + "\" launcher-guard-sibling "
+            + " ".join(bound)
+        )
+        self.assertTrue(doctor_hooks._managed_hook_command(command, "codex"))
+        target, args, kind = doctor_hooks._command_target(command, "codex")
+        self.assertEqual((target, args, kind), (str(runtime), bound, "direct"))
+        for name, lookalike in {
+            "other guard program": command.replace("defenseclaw-hook-guard.exe", "other-guard.exe", 1),
+            "launcher-guard argv": command.replace("launcher-guard-sibling", "launcher-guard", 1),
+        }.items():
+            with self.subTest(name=name):
+                try:
+                    observed = doctor_hooks._command_target(lookalike, "codex")[:2]
+                except _InspectionError:
+                    continue
+                self.assertNotEqual(observed, (str(runtime), bound))
+
+    def test_bridge_that_answers_a_launcher_that_cannot_start_is_owned_and_exact(self) -> None:
+        # rel-1-0-6 GAP-0676: the per-user bridge answers a launcher that
+        # cannot start with the agent's block; doctor accepts only the exact
+        # answer Setup renders.
+        runtime = self._runtime()
+        for connector, event, contract in (
+            ("codex", "PreToolUse", "codex-hooks-v4"),
+            ("codex", "UserPromptSubmit", "codex-hooks-v1"),
+            ("antigravity", "PreToolUse", ""),
+        ):
+            with self.subTest(connector=connector, event=event):
+                answer = doctor_hooks._launcher_start_answer(connector, event, contract)
+                self.assertIsNotNone(answer)
+                self.assertIn("hook launcher cannot start", answer)
+                command = self._encoded_hook_command(
+                    runtime, connector, event=event, contract=contract, start_answer=answer
+                )
+                target, args, kind = doctor_hooks._command_target(command, connector)
+                self.assertEqual((target, kind), (str(runtime), "direct"))
+                self.assertIn(event, args)
+                edited = self._encoded_hook_command(
+                    runtime, connector, event=event, contract=contract, start_answer=answer.replace("exit 0", "exit 2")
+                )
+                with self.assertRaises(_InspectionError) as raised:
+                    doctor_hooks._command_target(edited, connector)
+                self.assertEqual(raised.exception.state, "malformed")
+        self.assertIsNone(doctor_hooks._launcher_start_answer("codex", "Stop", "codex-hooks-v4"))
+        self.assertIsNone(doctor_hooks._launcher_start_answer("antigravity", "Stop", ""))
+        self.assertEqual(
+            doctor_hooks._launcher_start_answer("kiro", "", ""),
+            "try { [Console]::Error.WriteLine('DefenseClaw blocked this: its Kiro hook launcher cannot start. "
+            "Run the DefenseClaw installer again to repair it.') } catch { }; exit 2",
+        )
 
     @unittest.skipUnless(os.name == "nt", "Windows Codex registration root proof")
     def test_setup_finds_direct_cmd_codex_hooks_as_root_proof(self) -> None:
