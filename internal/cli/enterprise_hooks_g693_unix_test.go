@@ -156,3 +156,27 @@ func TestGAP0693RemovedTransitionRecordedOnce(t *testing.T) {
 		t.Fatalf("removal transition records = %d, want one: %s", count, log.String())
 	}
 }
+
+func TestGAP0693DirectoryMissIsBoundToTheConnector(t *testing.T) {
+	f := newStandaloneFixture(t, standaloneTestResolver{accounts: map[string]unixidentity.Account{}})
+	if err := enterprisehooks.SaveUnixEnumeratorState(enterpriseHookEnumeratorStatePath(f.manifest),
+		&enterprisehooks.UnixEnumeratorState{Version: 1, Sources: map[string]string{"removed": "directory"},
+			Misses: map[string]int{"removed\x00hermes": 1}}); err != nil {
+		t.Fatal(err)
+	}
+	previousLocal, previousProof := enterpriseHooksEnumerateLocalAccounts, enterpriseHookGuardianFreshAccountGone
+	t.Cleanup(func() {
+		enterpriseHooksEnumerateLocalAccounts, enterpriseHookGuardianFreshAccountGone = previousLocal, previousProof
+	})
+	enterpriseHooksEnumerateLocalAccounts = func(context.Context) (map[string]int, error) { return map[string]int{}, nil }
+	enterpriseHookGuardianFreshAccountGone = func(context.Context, string) bool { return false }
+	row := enterpriseHookReconcileRow{User: "removed", Connector: "hermes",
+		Error: `enterprise hooks: target account "removed" does not exist: no such account`}
+	if !enterpriseHookRemovedAccountRow(row) {
+		t.Fatal("confirmed directory miss was kept in attention")
+	}
+	row.Connector = "codex"
+	if enterpriseHookRemovedAccountRow(row) {
+		t.Fatal("a different connector inherited a removal proof")
+	}
+}
