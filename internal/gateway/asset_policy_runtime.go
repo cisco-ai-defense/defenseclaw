@@ -711,9 +711,6 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 	paths := []string{probe.SourcePath}
 	if strings.TrimSpace(probe.SourcePath) == "" && len(probe.SourcePaths) > 0 {
 		paths = probe.SourcePaths
-		if decision, pending := a.projectSkillScanPending(targetType, connector, runtimeSurface, paths); pending {
-			return decision, true
-		}
 		// A folder of another name that the call loads (its SKILL.md
 		// declares the name) answers to that folder's runtime disable.
 		for _, path := range probe.SourcePaths {
@@ -723,6 +720,9 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 				}
 			}
 		}
+	}
+	if decision, pending := a.projectSkillScanPending(targetType, connector, runtimeSurface, paths); pending {
+		return decision, true
 	}
 	var last config.AssetPolicyDecision
 	for _, path := range paths {
