@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"runtime"
 
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -190,15 +191,26 @@ func publishCause(err error) error {
 }
 
 func atomicFileAlreadyMatches(path string, data []byte, perm os.FileMode) bool {
-	file, err := winpath.OpenReadShared(path)
-	if err != nil {
-		return false
-	}
-	defer file.Close()
+	var matched bool
+	_ = safefile.RetryTransientRead(func() error {
+		file, err := winpath.OpenReadShared(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		matched, err = atomicFileMatchesOpened(file, path, data, perm)
+		return err
+	})
+	return matched
+}
 
+func atomicFileMatchesOpened(file *os.File, path string, data []byte, perm os.FileMode) (bool, error) {
 	openedInfo, err := file.Stat()
-	if err != nil || !openedInfo.Mode().IsRegular() || !atomicFileProtectionMatches(file, openedInfo, perm) {
-		return false
+	if err != nil {
+		return false, err
+	}
+	if !openedInfo.Mode().IsRegular() || !atomicFileProtectionMatches(file, openedInfo, perm) {
+		return false, nil
 	}
 	// The destination is commonly user-owned runtime state. Never size an
 	// allocation from attacker-controlled metadata: a sparse file can advertise
@@ -206,24 +218,38 @@ func atomicFileAlreadyMatches(path string, data []byte, perm os.FileMode) bool {
 	// the exact expected length, and the bounded read below closes a grow-after-
 	// stat race without changing the comparison result.
 	if openedInfo.Size() != int64(len(data)) {
-		return false
+		return false, nil
 	}
 	pathInfo, err := os.Lstat(path)
-	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(openedInfo, pathInfo) {
-		return false
+	if err != nil {
+		return false, err
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(openedInfo, pathInfo) {
+		return false, nil
 	}
 	current, err := io.ReadAll(io.LimitReader(file, int64(len(data))+1))
-	if err != nil || !bytes.Equal(current, data) {
-		return false
+	if err != nil {
+		return false, err
+	}
+	if !bytes.Equal(current, data) {
+		return false, nil
 	}
 	pathInfo, err = os.Lstat(path)
-	return err == nil && pathInfo.Mode()&os.ModeSymlink == 0 && os.SameFile(openedInfo, pathInfo)
+	if err != nil {
+		return false, err
+	}
+	return pathInfo.Mode()&os.ModeSymlink == 0 && os.SameFile(openedInfo, pathInfo), nil
 }
 
 func resolveAtomicWritePath(path string) (string, error) {
 	cur := path
 	for i := 0; i < 16; i++ {
-		info, err := os.Lstat(cur)
+		var info os.FileInfo
+		err := safefile.RetryTransientRead(func() error {
+			var lookupErr error
+			info, lookupErr = os.Lstat(cur)
+			return lookupErr
+		})
 		if err != nil {
 			if os.IsNotExist(err) {
 				return cur, nil
