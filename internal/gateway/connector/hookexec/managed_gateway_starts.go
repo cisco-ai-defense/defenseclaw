@@ -50,8 +50,8 @@ const managedGatewayRestartingReason = "enterprise_managed_gateway_restarting"
 // from the policy the gateway loads at start, the last one applied; a longer
 // one blocks each call within about 3 seconds instead of holding it for the
 // hook's whole budget (#1278, GAP-0094, GAP-0102, GAP-0107). A gateway that
-// is up and evaluating keeps the full budget.
-const gatewayRestartBudget = 3 * time.Second
+// is up and evaluating keeps the full budget. A variable for tests.
+var gatewayRestartBudget = 3 * time.Second
 
 // gatewayRestartRetryDelay is the pause between two tries.
 var gatewayRestartRetryDelay = 200 * time.Millisecond

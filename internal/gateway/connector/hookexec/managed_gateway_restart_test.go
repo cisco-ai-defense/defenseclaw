@@ -30,6 +30,43 @@ func fastRestartRetries(t *testing.T) {
 	t.Cleanup(func() { gatewayRestartRetryDelay = previous })
 }
 
+// shortRestartBudget gives one test a 300 ms restart budget, a tenth of the
+// real 3 s, and retries at most 20 ms apart, so a call into a gateway that
+// refuses or is not running still tries about as many times as it does in
+// production, then gets its outage answer in 0.3 s instead of 3 s
+// (rel-1-0-6 GAP-0660: the package ran past the 11-minute CI limit). The
+// decisions do not depend on the budget's length; the tests that measure
+// the 3 s budget itself (TestManagedRetryEndsAtTheRestartBudgetWhenItCannotConnect,
+// TestPerUserHookBlocksWithinTheBudgetWhenNothingListens) keep it.
+func shortRestartBudget(t *testing.T) {
+	t.Helper()
+	budget, delay := gatewayRestartBudget, gatewayRestartRetryDelay
+	gatewayRestartBudget = 300 * time.Millisecond
+	gatewayRestartRetryDelay = min(delay, 20*time.Millisecond)
+	t.Cleanup(func() { gatewayRestartBudget, gatewayRestartRetryDelay = budget, delay })
+}
+
+// shortRetryAfter sets the length of one second of a 429's Retry-After for
+// one test (zero: a real second).
+func shortRetryAfter(t *testing.T, second time.Duration) {
+	t.Helper()
+	previous := retryAfterSecond
+	if second == 0 {
+		second = time.Second
+	}
+	retryAfterSecond = second
+	t.Cleanup(func() { retryAfterSecond = previous })
+}
+
+// shortAuthRetryDelay makes the pause before a resend of a 401 1 ms for one
+// test.
+func shortAuthRetryDelay(t *testing.T) {
+	t.Helper()
+	previous := hookAuthRetryDelay
+	hookAuthRetryDelay = time.Millisecond
+	t.Cleanup(func() { hookAuthRetryDelay = previous })
+}
+
 // managedCodex makes opts a managed hook in the fail mode its
 // administrator-owned runtime records by default, closed.
 func managedCodex(opts *Options) {

@@ -1532,8 +1532,11 @@ func retryAfterDelay(value string) time.Duration {
 	if err != nil || seconds < 1 {
 		seconds = 1
 	}
-	return time.Duration(min(seconds, 3)) * time.Second
+	return time.Duration(min(seconds, 3)) * retryAfterSecond
 }
+
+// retryAfterSecond is one second of a Retry-After. A variable for tests.
+var retryAfterSecond = time.Second
 
 // managedAuditUnavailableReason is the hook-failure reason of a managed call
 // the gateway refused because it could not write the call's audit record
