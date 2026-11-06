@@ -2976,11 +2976,16 @@ def test_macos_pkg_preinstall_lists_only_the_parents_it_will_create(tmp_path: Pa
     assert rooted != snippet
     state = root / "opt/cisco/defenseclaw/lifecycle"
     (root / "usr/local").mkdir(parents=True)
-    script = f"state={state}\n" + rooted
+    # The Installer runs the script with a 077 umask; the parents it creates
+    # still get the payload's 0755, and only the lifecycle folder 0700.
+    script = f"umask 077\nstate={state}\n" + rooted
     result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
     listed = (state / "created-parent-dirs").read_text(encoding="utf-8").split()
     assert listed == [f"{root}/opt", f"{root}/opt/cisco", f"{root}/usr/local/bin"]
+    for parent in ("opt", "opt/cisco", "opt/cisco/defenseclaw"):
+        assert (root / parent).stat().st_mode & 0o777 == 0o755, parent
+    assert state.stat().st_mode & 0o777 == 0o700
     # Everything present: nothing is listed again.
     (root / "usr/local/bin").mkdir()
     (state / "created-parent-dirs").unlink()

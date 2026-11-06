@@ -487,7 +487,11 @@ for d_parent in /opt /opt/cisco /usr/local /usr/local/bin; do
     fi
 done
 if [ -n "$d_created" ]; then
-    (umask 077 && mkdir -p "$state" && printf '%s' "$d_created" >>"$state/created-parent-dirs") 2>/dev/null || true
+    # The parents get the payload's 0755 and only the lifecycle folder 0700:
+    # mkdir -p under umask 077 made /opt and /opt/cisco 0700 on a fresh Mac,
+    # and standard users could not reach /opt/cisco/defenseclaw.
+    ( (umask 022 && mkdir -p "${state%/*}") &&
+        (umask 077 && mkdir -p "$state" && printf '%s' "$d_created" >>"$state/created-parent-dirs") ) 2>/dev/null || true
 fi
 exit 0
 EOF
