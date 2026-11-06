@@ -676,6 +676,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	if err != nil {
 		return run, err
 	}
+	previousState, _, _ := loadEnterpriseHookGuardianState(cfg.DataDir)
 	run.ManifestSHA256 = manifestSHA256
 	// until 1.1: the OpenHands/OmniGent rows a 1.0.2-1.0.4 enumerator wrote
 	// are not enrolled targets (GAP-2504).
@@ -748,6 +749,23 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			}
 		}
 		account, pendingReason, err := resolveEnterpriseHookStandaloneAccount(target, resolver)
+		if enterpriseHookGuardianTargetRemoved(ctx, target, row, err) {
+			row.Removed = true
+			row.RevokeProtection = true
+			switch {
+			case account.UID > 0:
+				row.UID = account.UID
+			case target.UID != nil && *target.UID > 0:
+				row.UID = *target.UID
+			default:
+				if binding, ok := bindings.Bindings[enterpriseHookProtectedTargetKey(row)]; ok {
+					row.UID = binding.UID
+				}
+			}
+			row.Error = fmt.Sprintf("enterprise hooks: target account %q does not exist: %s", row.User, errEnterpriseHookTargetNotFound)
+			rows = append(rows, row)
+			continue
+		}
 		if reason := enterpriseHookTargetNoHomeReason(err); reason != "" {
 			pendingRow(reason)
 			continue
@@ -1134,6 +1152,10 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	writeEnterpriseHookGuardianNotices(enterpriseHookWorkerLog, cfg.DataDir, notices)
 	reportEnterpriseHookGuardianRepairs(ctx, hookSocket, auditRepairs)
 	stateErr := writeEnterpriseHookGuardianState(cfg.DataDir, enterpriseHookManifest, manifestSHA256, rows, failures, true)
+	if stateErr == nil {
+		removed := logEnterpriseHookRemovedTransitions(enterpriseHookWorkerLog, previousState.Results, rows)
+		reportEnterpriseHookGuardianRemoved(ctx, hookSocket, removed)
+	}
 	if stateErr == nil && bindingsErr != nil {
 		stateErr = fmt.Errorf("persist protected target identity bindings: %w", bindingsErr)
 	}

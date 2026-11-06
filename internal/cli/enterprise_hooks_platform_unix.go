@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -59,10 +60,39 @@ var enterpriseHookRemovedAccountRow = func(row enterpriseHookReconcileRow) bool 
 		!strings.HasSuffix(row.Error, ": "+errEnterpriseHookTargetNotFound.Error()) {
 		return false
 	}
+	return enterpriseHookGuardianTargetRemoved(context.Background(), enterprisehooks.ManifestTarget{User: user}, row, errEnterpriseHookTargetNotFound)
+}
+
+// A fresh Open Directory read avoids the account cache held by a running
+// macOS guardian. Linux uses a fresh account lookup plus the enumerator's
+// local-source evidence. An unavailable directory is never a removal.
+var enterpriseHookGuardianFreshAccountGone = unixidentity.AccountRecordGone
+
+func enterpriseHookGuardianTargetRemoved(
+	ctx context.Context,
+	target enterprisehooks.ManifestTarget,
+	_ enterpriseHookReconcileRow,
+	resolveErr error,
+) bool {
+	user := strings.TrimSpace(target.User)
+	if cfg == nil || !cfg.StandaloneEnterprise() || user == "" {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if enterpriseHookGuardianFreshAccountGone(checkCtx, user) {
+		return true
+	}
+	if !errors.Is(resolveErr, errEnterpriseHookTargetNotFound) {
+		return false
+	}
 	if _, err := enterprisehooks.StandaloneResolver().LookupUser(user); !unixidentity.IsNotFound(err) {
 		return false
 	}
-	local, err := enterpriseHooksEnumerateLocalAccounts(context.Background())
+	local, err := enterpriseHooksEnumerateLocalAccounts(checkCtx)
 	if err != nil {
 		return false
 	}

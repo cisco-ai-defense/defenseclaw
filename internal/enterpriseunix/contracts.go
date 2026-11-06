@@ -32,7 +32,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
+
+var guardianFreshAccountRecordGone = unixidentity.AccountRecordGone
 
 // codeHookContractUnverified names a guardian target whose agent version
 // has no verified DefenseClaw hook contract. The guardian refuses to
@@ -113,7 +116,9 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 			continue
 		}
 		stateFailed[enterprisehooks.CredentialAttestationTarget{Connector: result.Connector, User: result.User, UserHome: result.UserHome}.Key()] = true
-		if (targetAccountMissingError(result.Error) || targetHomeUnavailableError(result.Error)) && l.accountAbsent(ctx, result.User) {
+		missingTarget := targetAccountMissingError(result.Error) || targetHomeUnavailableError(result.Error)
+		freshGone := missingTarget && guardianFreshAccountRecordGone(ctx, result.User)
+		if missingTarget && (freshGone || l.accountAbsent(ctx, result.User)) {
 			// An account that does not resolve, or whose home went with it, is
 			// not a protection failure.
 			// Say it is gone only when the enumerator confirmed it: a directory
@@ -122,7 +127,7 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 			// Even then it says the account does not resolve, not that it
 			// was deleted: while the directory is unreachable the lookup
 			// gives the same answer (GAP-0838).
-			if enterprisehooks.UnixMissConfirmed(enumeration, result.User, result.Connector) {
+			if freshGone || enterprisehooks.UnixMissConfirmed(enumeration, result.User, result.Connector) {
 				message := fmt.Sprintf("%s for user %s: the account does not resolve (the lookup answers \"no such account\"); "+
 					"if it was deleted, the enumerator removes this target after %d consecutive definitive misses, one per "+
 					"enumeration cycle; while the directory does not answer, nothing is removed",
