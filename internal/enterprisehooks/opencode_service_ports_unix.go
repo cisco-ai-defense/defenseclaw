@@ -46,11 +46,16 @@ type unixOpenCodeServicePortsFile struct {
 	Cleared []UnixOpenCodeContestCleared `json:"contested_cleared,omitempty"`
 	// ImportDone records that the import pass committed this record
 	// (REVIEW-gx053-12): the record, bindings and marks are committed before
-	// any user file is rewritten, so a record that exists never reopens the
-	// import window. A record an earlier round wrote has no flag and counts
+	// any user file is rewritten. The load reads it (REVIEW-gx053-13 S2): a
+	// record written with false is not past its import pass, so the next pass
+	// is the import pass; a record without the key (an earlier round's) counts
 	// as done.
-	ImportDone bool `json:"import_done,omitempty"`
+	ImportDone *bool `json:"import_done,omitempty"`
 }
+
+// unixOpenCodeServicePortsTempPattern is the temp file the record writer
+// creates beside the record before the atomic rename.
+const unixOpenCodeServicePortsTempPattern = ".defenseclaw-opencode-ports-*.new"
 
 // UnixOpenCodeServicePortUnknown is one account the last pass could not read
 // or write.
@@ -91,27 +96,15 @@ type UnixOpenCodeServicePort struct {
 // ports from users' files.
 type UnixOpenCodeServicePortsState struct {
 	Exists bool
-	// ImportDone: the record was committed by an import pass (or an earlier
-	// build: a record that exists is done).
+	// ImportDone: the record is past its import pass. Read from the record's
+	// import_done key; a record without the key (an earlier build's) is done.
+	// False only for a record committed with import_done false.
 	ImportDone bool
 	Ports      map[int]int
 	Users      map[int]string
 	Unknown    []UnixOpenCodeServicePortUnknown
 	Contested  []UnixOpenCodeContestedPort
 	Cleared    []UnixOpenCodeContestCleared
-}
-
-// LoadUnixOpenCodeServicePorts reads the record at path (none: empty).
-func LoadUnixOpenCodeServicePorts(path string) (map[int]int, error) {
-	state, err := LoadUnixOpenCodeServicePortsFull(path)
-	return state.Ports, err
-}
-
-// LoadUnixOpenCodeServicePortsState is LoadUnixOpenCodeServicePorts with the
-// accounts the last pass could not read or write.
-func LoadUnixOpenCodeServicePortsState(path string) (map[int]int, []UnixOpenCodeServicePortUnknown, error) {
-	state, err := LoadUnixOpenCodeServicePortsFull(path)
-	return state.Ports, state.Unknown, err
 }
 
 // LoadUnixOpenCodeServicePortsFull reads the whole record at path.
@@ -155,19 +148,13 @@ func LoadUnixOpenCodeServicePortsFull(path string) (UnixOpenCodeServicePortsStat
 		}
 	}
 	state.Unknown, state.Cleared = record.Unknown, record.Cleared
-	state.ImportDone = true // the flag, or a record an earlier round wrote
+	state.ImportDone = record.ImportDone == nil || *record.ImportDone
 	for _, entry := range record.Contested {
 		if entry.Port > 0 && entry.Port <= 65535 {
 			state.Contested = append(state.Contested, entry)
 		}
 	}
 	return state, nil
-}
-
-// WriteUnixOpenCodeServicePorts publishes a record of ports and unknown
-// accounts at path, root-only.
-func WriteUnixOpenCodeServicePorts(path string, ports map[int]int, users map[int]string, unknown []UnixOpenCodeServicePortUnknown) error {
-	return WriteUnixOpenCodeServicePortsFull(path, UnixOpenCodeServicePortsState{Ports: ports, Users: users, Unknown: unknown})
 }
 
 // WriteUnixOpenCodeServicePortsFull publishes the whole record at path,
@@ -177,7 +164,8 @@ func WriteUnixOpenCodeServicePortsFull(path string, state UnixOpenCodeServicePor
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("enterprise hooks: OpenCode service ports path must be absolute: %s", path)
 	}
-	record := unixOpenCodeServicePortsFile{Version: 1, Ports: []UnixOpenCodeServicePort{}, ImportDone: true}
+	importDone := state.ImportDone
+	record := unixOpenCodeServicePortsFile{Version: 1, Ports: []UnixOpenCodeServicePort{}, ImportDone: &importDone}
 	for uid, port := range state.Ports {
 		record.Ports = append(record.Ports, UnixOpenCodeServicePort{UID: uid, User: state.Users[uid], Port: port})
 	}
@@ -194,10 +182,46 @@ func WriteUnixOpenCodeServicePortsFull(path string, state UnixOpenCodeServicePor
 	// Atomic commit: a temp file in the same folder, fsync, rename
 	// (writeUnixRootOnlyRecord), then fsync the folder so the rename is on
 	// disk before any user file is rewritten.
-	if err := writeUnixRootOnlyRecord(path, append(data, '\n'), ".defenseclaw-opencode-ports-*.new", unixOpenCodeServicePortsMaxBytes); err != nil {
+	if err := writeUnixRootOnlyRecord(path, append(data, '\n'), unixOpenCodeServicePortsTempPattern, unixOpenCodeServicePortsMaxBytes); err != nil {
 		return err
 	}
 	return syncUnixDir(filepath.Dir(path))
+}
+
+// SweepUnixOpenCodeServicePortsTemp removes the temp files a killed record
+// write left beside the record at path (REVIEW-gx053-13 S2): regular files in
+// the record's own folder whose name matches the writer's temp pattern and
+// whose modification time is before passStart. A temp file at or after
+// passStart belongs to a writer that is still at work and is kept. The caller
+// holds the guardian reconcile lock of that folder (LockUnixGuardianReconcile),
+// so no writer that takes the lock is mid-write; the sweep follows no link and
+// never descends into a folder. It returns the number of files removed.
+func SweepUnixOpenCodeServicePortsTemp(path string, passStart time.Time) (int, error) {
+	dir := filepath.Dir(filepath.Clean(strings.TrimSpace(path)))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	var firstErr error
+	for _, entry := range entries {
+		if ok, _ := filepath.Match(unixOpenCodeServicePortsTempPattern, entry.Name()); !ok {
+			continue
+		}
+		full := filepath.Join(dir, entry.Name())
+		info, err := os.Lstat(full)
+		if err != nil || !info.Mode().IsRegular() || !info.ModTime().Before(passStart) {
+			continue
+		}
+		if err := os.Remove(full); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		removed++
+	}
+	return removed, firstErr
 }
 
 func syncUnixDir(dir string) error {

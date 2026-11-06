@@ -28,23 +28,23 @@ func TestUnixOpenCodeServicePortsRoundTripAndTrust(t *testing.T) {
 		t.Skipf("test directory chain cannot hold the record: %v", err)
 	}
 	path := filepath.Join(root, UnixOpenCodeServicePortsFileName)
-	if ports, err := LoadUnixOpenCodeServicePorts(path); err != nil || len(ports) != 0 {
-		t.Fatalf("a missing record is empty: %v %v", ports, err)
+	if state, err := LoadUnixOpenCodeServicePortsFull(path); err != nil || len(state.Ports) != 0 {
+		t.Fatalf("a missing record is empty: %v %v", state.Ports, err)
 	}
-	if err := WriteUnixOpenCodeServicePorts(path, map[int]int{1002: 25002, 1001: 25001, 0: 1, 1003: 70000}, map[int]string{1001: "ent1"}, nil); err != nil {
+	if err := WriteUnixOpenCodeServicePortsFull(path, UnixOpenCodeServicePortsState{Ports: map[int]int{1002: 25002, 1001: 25001, 0: 1, 1003: 70000}, Users: map[int]string{1001: "ent1"}, ImportDone: true}); err != nil {
 		t.Fatal(err)
 	}
 	if info, _ := os.Stat(path); info.Mode().Perm() != 0o600 {
 		t.Fatalf("record mode %o, want 0600", info.Mode().Perm())
 	}
-	got, err := LoadUnixOpenCodeServicePorts(path)
-	if err != nil || len(got) != 2 || got[1001] != 25001 || got[1002] != 25002 {
-		t.Fatalf("round trip must keep valid entries only: %v %v", got, err)
+	got, err := LoadUnixOpenCodeServicePortsFull(path)
+	if err != nil || len(got.Ports) != 2 || got.Ports[1001] != 25001 || got.Ports[1002] != 25002 {
+		t.Fatalf("round trip must keep valid entries only: %v %v", got.Ports, err)
 	}
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadUnixOpenCodeServicePorts(path); err == nil {
+	if _, err := LoadUnixOpenCodeServicePortsFull(path); err == nil {
 		t.Fatal("a record others can read must be refused")
 	}
 }
@@ -61,7 +61,7 @@ func TestClearUnixOpenCodeContestedPort(t *testing.T) {
 	}
 	path := filepath.Join(root, UnixOpenCodeServicePortsFileName)
 	state := UnixOpenCodeServicePortsState{Ports: map[int]int{1001: 25001, 1002: 25002}, Users: map[int]string{1001: "a"},
-		Contested: []UnixOpenCodeContestedPort{{Port: 25003, UIDs: []int{1001, 1002}}, {Port: 26000, UIDs: []int{1003, 1004}}}}
+		Contested: []UnixOpenCodeContestedPort{{Port: 25003, UIDs: []int{1001, 1002}}, {Port: 26000, UIDs: []int{1003, 1004}}}, ImportDone: true}
 	if err := WriteUnixOpenCodeServicePortsFull(path, state); err != nil {
 		t.Fatal(err)
 	}
@@ -81,9 +81,10 @@ func TestClearUnixOpenCodeContestedPort(t *testing.T) {
 	}
 }
 
-// REVIEW-gx053-12 MF1: the commit carries the import-done flag; a record an
-// earlier round wrote (no flag) counts as done, so it never reopens the
-// import window.
+// REVIEW-gx053-13 S2: the import-done flag is read from the record. A record
+// without the key (an earlier round's) is done; one committed with
+// import_done false is not past its import pass, so the next pass is the
+// import pass; a clear keeps the flag as it found it.
 func TestUnixOpenCodeServicePortsImportDone(t *testing.T) {
 	root := trustedTestDir(t)
 	current := uint32(os.Getuid())
@@ -97,18 +98,133 @@ func TestUnixOpenCodeServicePortsImportDone(t *testing.T) {
 	if got, err := LoadUnixOpenCodeServicePortsFull(path); err != nil || got.Exists || got.ImportDone {
 		t.Fatalf("no record is the import window: %+v %v", got, err)
 	}
-	if err := WriteUnixOpenCodeServicePortsFull(path, UnixOpenCodeServicePortsState{Ports: map[int]int{1001: 25001}}); err != nil {
+	for _, tc := range []struct {
+		name string
+		body string
+		done bool
+	}{
+		{"no key (an earlier round)", `{"version":1,"ports":[{"uid":1001,"port":25001}]}`, true},
+		{"true", `{"version":1,"import_done":true,"ports":[{"uid":1001,"port":25001}]}`, true},
+		{"false", `{"version":1,"import_done":false,"ports":[{"uid":1001,"port":25001}]}`, false},
+	} {
+		if err := os.WriteFile(path, []byte(tc.body+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := LoadUnixOpenCodeServicePortsFull(path)
+		if err != nil || !got.Exists || got.ImportDone != tc.done || got.Ports[1001] != 25001 {
+			t.Fatalf("%s: import done %v, want %v: %+v %v", tc.name, got.ImportDone, tc.done, got, err)
+		}
+	}
+	// The writer commits the flag it is given, and a clear keeps it.
+	pending := UnixOpenCodeServicePortsState{Ports: map[int]int{1001: 25001}, Contested: []UnixOpenCodeContestedPort{{Port: 26000, UIDs: []int{1001, 1002}}}}
+	if err := WriteUnixOpenCodeServicePortsFull(path, pending); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := LoadUnixOpenCodeServicePortsFull(path); err != nil || got.ImportDone {
+		t.Fatalf("a record committed pending reads done: %+v %v", got, err)
+	}
+	if _, err := ClearUnixOpenCodeContestedPort(path, 26000, "admin", time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := LoadUnixOpenCodeServicePortsFull(path); err != nil || got.ImportDone || len(got.Contested) != 0 {
+		t.Fatalf("a clear changed the flag: %+v %v", got, err)
+	}
+	pending.ImportDone = true
+	if err := WriteUnixOpenCodeServicePortsFull(path, pending); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil || !strings.Contains(string(data), `"import_done": true`) {
 		t.Fatalf("the commit has no import-done flag: %s %v", data, err)
 	}
-	if err := os.WriteFile(path, []byte(`{"version":1,"ports":[{"uid":1001,"port":25001}]}`+"\n"), 0o600); err != nil {
+	if got, err := LoadUnixOpenCodeServicePortsFull(path); err != nil || !got.ImportDone {
+		t.Fatalf("a record committed done reads pending: %+v %v", got, err)
+	}
+}
+
+// REVIEW-gx053-13 S2: a killed record write leaves its temp file; a later pass
+// (holding the reconcile lock) sweeps the files older than the pass start,
+// from the record's own folder only, and never a live writer's file.
+func TestSweepUnixOpenCodeServicePortsTemp(t *testing.T) {
+	root := trustedTestDir(t)
+	current := uint32(os.Getuid())
+	previous := unixManifestTestOwnerAllowed
+	unixManifestTestOwnerAllowed = func(uid uint32) bool { return uid == current }
+	t.Cleanup(func() { unixManifestTestOwnerAllowed = previous })
+	if err := validateRootOwnedDirChain(root); err != nil {
+		t.Skipf("test directory chain cannot hold the record: %v", err)
+	}
+	path := filepath.Join(root, UnixOpenCodeServicePortsFileName)
+	if err := WriteUnixOpenCodeServicePortsFull(path, UnixOpenCodeServicePortsState{Ports: map[int]int{1001: 25001}, ImportDone: true}); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := LoadUnixOpenCodeServicePortsFull(path); err != nil || !got.Exists || !got.ImportDone || got.Ports[1001] != 25001 {
-		t.Fatalf("an earlier round's record is not done: %+v %v", got, err)
+	write := func(dir, name string, age time.Duration) string {
+		full := filepath.Join(dir, name)
+		if err := os.WriteFile(full, []byte("{\"version\":1,"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		when := time.Now().Add(-age)
+		if err := os.Chtimes(full, when, when); err != nil {
+			t.Fatal(err)
+		}
+		return full
+	}
+	orphan1 := write(root, ".defenseclaw-opencode-ports-123456.new", time.Hour)
+	orphan2 := write(root, ".defenseclaw-opencode-ports-7.new", 3*time.Minute)
+	otherRecord := write(root, ".defenseclaw-copilot-vscode-accounts-123.new", time.Hour) // another record's temp
+	unrelated := write(root, "notes.new", time.Hour)
+	lookalike := write(root, ".defenseclaw-opencode-ports-1.new.keep", time.Hour)
+	subdir := filepath.Join(root, "sub")
+	if err := os.Mkdir(subdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nested := write(subdir, ".defenseclaw-opencode-ports-9.new", time.Hour) // another folder
+	dirNamed := filepath.Join(root, ".defenseclaw-opencode-ports-55.new")   // a folder, not a file
+	if err := os.Mkdir(dirNamed, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linkTarget := write(root, "target.txt", time.Hour)
+	link := filepath.Join(root, ".defenseclaw-opencode-ports-77.new")
+	if err := os.Symlink(linkTarget, link); err != nil {
+		t.Fatal(err)
+	}
+	// A writer at work under the guardian lock: its temp file is new (after
+	// the pass start), so the sweep keeps it, and the committed record.
+	passStart := time.Now().Add(-time.Minute)
+	unlock, err := LockUnixGuardianReconcile(context.Background(), root, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := write(root, ".defenseclaw-opencode-ports-999.new", 0)
+	removed, err := SweepUnixOpenCodeServicePortsTemp(path, passStart)
+	unlock()
+	if err != nil || removed != 2 {
+		t.Fatalf("removed %d, want the 2 orphans: %v", removed, err)
+	}
+	for _, gone := range []string{orphan1, orphan2} {
+		if _, err := os.Lstat(gone); !os.IsNotExist(err) {
+			t.Fatalf("the orphan %s is still there: %v", gone, err)
+		}
+	}
+	for _, kept := range []string{live, otherRecord, unrelated, lookalike, nested, dirNamed, link, linkTarget, path} {
+		if _, err := os.Lstat(kept); err != nil {
+			t.Fatalf("%s must stay: %v", kept, err)
+		}
+	}
+	if got, err := LoadUnixOpenCodeServicePortsFull(path); err != nil || got.Ports[1001] != 25001 {
+		t.Fatalf("the record changed: %+v %v", got, err)
+	}
+	// The live writer finishes its commit after the sweep: the real writer
+	// still works beside the kept file.
+	if err := WriteUnixOpenCodeServicePortsFull(path, UnixOpenCodeServicePortsState{Ports: map[int]int{1001: 25001, 1002: 25002}, ImportDone: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(live); err != nil {
+		t.Fatalf("the writer's commit removed a live file: %v", err)
+	}
+	// A pass that starts later sees that file as an orphan.
+	if removed, err := SweepUnixOpenCodeServicePortsTemp(path, time.Now().Add(time.Minute)); err != nil || removed != 1 {
+		t.Fatalf("a later pass removed %d, want the 1 file left: %v", removed, err)
 	}
 }
 
@@ -142,7 +258,7 @@ func TestClearUnixOpenCodeContestedPortRacingAGuardianPass(t *testing.T) {
 	}
 	for i := 0; i < 40; i++ {
 		start := UnixOpenCodeServicePortsState{Ports: map[int]int{1001: 25001, 1002: 25002},
-			Contested: []UnixOpenCodeContestedPort{{Port: 25003, UIDs: []int{1001, 1002}}}}
+			Contested: []UnixOpenCodeContestedPort{{Port: 25003, UIDs: []int{1001, 1002}}}, ImportDone: true}
 		if err := WriteUnixOpenCodeServicePortsFull(path, start); err != nil {
 			t.Fatal(err)
 		}
