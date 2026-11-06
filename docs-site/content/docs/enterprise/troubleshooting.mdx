@@ -346,6 +346,12 @@ shows `transaction_pending` and names the recovery. A refusal with its own cause
 on the port, SELinux, a missing DefenseClaw folder, a bad hook input) keeps its own text. The
 decision does not change: the call is still blocked.
 
+On Windows, a `Setup /repair CONFIG=` over a damaged `config.yaml` on 1.0.6 to 1.0.8 could end
+`1603` with DefenseClawGateway stopped and `transaction_pending`. `/ensure CONFIG=` does not
+recover that computer. Run, as LocalSystem, `DefenseClawSetup-Enterprise-Standalone-x64.exe
+/uninstall FORCE=1 JSON=1`, then `DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure
+CONFIG=<approved config> JSON=1`.
+
 ### Known limits for managed hooks
 
 - GAP-0409: an unexpected Claude Code policy value type, an untrusted key access list, or server-managed settings can still surface as a slower Setup failure instead of an early policy diagnostic. Setup refuses the policy and keeps the last verified state; inspect the named settings source and correct it before retrying.
