@@ -23,6 +23,8 @@ import (
 )
 
 var windowsOpenCodePortClear = enterprisehooks.ClearWindowsOpenCodeContestedPort
+var windowsOpenCodePortWarningRead = readWindowsOpenCodePortWarnings
+var windowsOpenCodePortConnectorList = windowsEnterpriseEnrolledConnectors
 
 const windowsOpenCodePortWarningsFile = "opencode_port_warnings.json"
 
@@ -83,8 +85,12 @@ func readWindowsOpenCodePortWarnings() ([]windowsOpenCodePortWarning, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := os.Lstat(path); err != nil {
+	info, err := os.Lstat(path)
+	if err != nil {
 		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("OpenCode port warning summary is not a regular file")
 	}
 	if err := enterpriseHookGuardianStateFileTrustCheck(path); err != nil {
 		return nil, err
@@ -167,7 +173,7 @@ func newWindowsOpenCodePortClearCommand() *cobra.Command {
 // Status and verify report the same persisted account and contested-port
 // warnings that the guardian produced. Doctor reads these warning codes.
 func appendWindowsOpenCodePortWarnings(result *enterprisestatus.Result) {
-	connectors, err := windowsEnterpriseEnrolledConnectors()
+	connectors, err := windowsOpenCodePortConnectorList()
 	if err != nil {
 		return
 	}
@@ -181,7 +187,7 @@ func appendWindowsOpenCodePortWarnings(result *enterprisestatus.Result) {
 	if !governed {
 		return
 	}
-	warnings, err := readWindowsOpenCodePortWarnings()
+	warnings, err := windowsOpenCodePortWarningRead()
 	if err != nil {
 		result.AddWarning("opencode_port_record_unchecked", fmt.Sprintf("OpenCode port warnings could not be checked (%v); inspect the guardian state in an elevated console", err))
 		return
