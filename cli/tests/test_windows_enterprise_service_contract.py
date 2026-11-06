@@ -7126,6 +7126,8 @@ _RESTAMP_VARIABLES = {
     "$approvedPath": {"ApprovedPolicyFiles"},
     "$secrets": {"CredentialStore"},
     "$item.FullName": {"CredentialFiles"},
+    # The copy of the Codex state the hook reads (GAP-0650).
+    "$codexStateCopy": {"CodexManagedHooksStatePath"},
 }
 
 

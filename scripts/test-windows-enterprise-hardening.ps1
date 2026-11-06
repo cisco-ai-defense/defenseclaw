@@ -6603,7 +6603,7 @@ function Get-NormalModeEnterpriseMachineSnapshot {
         $script:CodexMachinePolicyDirectory,
         $script:CodexRequirementsPath,
         $script:CodexMachineLockPath,
-        $script:CodexManagedStatePath,
+        $script:CodexManagedStateCommittedPath,
         $script:ClaudeManagedPolicyDirectory,
         $script:ClaudeManagedPolicyPath,
         $script:ClaudeManagedStatePath,
@@ -8537,11 +8537,26 @@ function Get-CodexMachinePolicySnapshot {
     $paths = [ordered]@{
         requirements = $script:CodexRequirementsPath
         transaction_lock = $script:CodexMachineLockPath
-        managed_state = $script:CodexManagedStatePath
+        managed_state = $script:CodexManagedStateCommittedPath
         ownership = $script:CodexRequirementsOwnershipPath
         acl_preimage = $script:CodexRequirementsAclBackupPath
         application_control_attestation =
             $script:AgentApplicationControlAttestationPath
+    }
+    # The hook copy of the state holds the writer copy bytes and is
+    # Administrators-owned with a protected DACL that only lets users read.
+    $hookCopy = Get-CodexManagedStateHookCopy
+    $hookSecurity = Get-ManagedUserPathSecurityFingerprint $hookCopy
+    if ((Get-FileDigest $hookCopy) -cne (Get-FileDigest $script:CodexManagedStateCommittedPath) -and
+        (Get-CodexManagedStateHookCopy) -ceq $hookCopy) {
+        throw "the Codex state hook copy $hookCopy does not hold the writer copy"
+    }
+    if ([string]$hookSecurity.owner_sid -ne 'S-1-5-32-544' -or
+        -not [bool]$hookSecurity.access_rules_protected) {
+        throw "the Codex state hook copy $hookCopy is not Administrators-owned with a protected DACL"
+    }
+    foreach ($sid in @($script:PrimarySID, $script:HostileSID)) {
+        Assert-NoStandardUserAccess -Path $hookCopy -SID $sid -DenyWrite
     }
     $snapshot = [ordered]@{}
     foreach ($entry in $paths.GetEnumerator()) {
@@ -8774,7 +8789,7 @@ function Assert-ClaudeOnlyWindowsSecurityContract([string]$Label) {
         $script:CodexManagedStatePath,
         $script:CodexRequirementsOwnershipPath,
         $script:CodexRequirementsAclBackupPath
-    )) {
+    ) + @(Get-CodexManagedStateCopies)) {
         if (Test-Path -LiteralPath $path) {
             throw "$Label Claude-only deployment created a Codex artifact: $path"
         }
@@ -9240,7 +9255,8 @@ function Test-StandardUsersCannotTamperCodexMachinePolicy {
         paths = @(
             $script:CodexRequirementsPath,
             $script:CodexMachineLockPath,
-            $script:CodexManagedStatePath
+            $script:CodexManagedStateCommittedPath,
+            (Get-CodexManagedStateHookCopy)
         )
         icacls = Join-Path $script:System32 'icacls.exe'
     }
@@ -9396,8 +9412,8 @@ function Test-CodexMachinePolicyAutoHeal {
     $baseline = Get-CodexMachinePolicySnapshot
     $requirementsBytes = [IO.File]::ReadAllBytes($script:CodexRequirementsPath)
     $requirementsACL = Get-Acl -LiteralPath $script:CodexRequirementsPath
-    $managedStateBytes = [IO.File]::ReadAllBytes($script:CodexManagedStatePath)
-    $managedStateACL = Get-Acl -LiteralPath $script:CodexManagedStatePath
+    $managedStateBytes = [IO.File]::ReadAllBytes($script:CodexManagedStateCommittedPath)
+    $managedStateACL = Get-Acl -LiteralPath $script:CodexManagedStateCommittedPath
     $observations = [Collections.Generic.List[object]]::new()
     foreach ($case in @(
         'managed-hook-removal',
@@ -9456,8 +9472,14 @@ function Test-CodexMachinePolicyAutoHeal {
                         -Label 'drift-codex-requirements-dacl'
                 }
                 'managed-enrollment-state-delete' {
+                    # Both copies: the writer copy alone would come back
+                    # from the hook copy no transaction reads.
                     Remove-Item `
-                        -LiteralPath $script:CodexManagedStatePath `
+                        -LiteralPath $script:CodexManagedStateCommittedPath `
+                        -Force `
+                        -ErrorAction Stop
+                    Remove-Item `
+                        -LiteralPath (Get-CodexManagedStateHookCopy) `
                         -Force `
                         -ErrorAction Stop
                 }
@@ -9528,12 +9550,14 @@ function Test-CodexMachinePolicyAutoHeal {
             Set-Acl `
                 -LiteralPath $script:CodexRequirementsPath `
                 -AclObject $requirementsACL
+            # The writer copy is where every transaction starts; the next
+            # one writes the hook copy from it.
             [IO.File]::WriteAllBytes(
-                $script:CodexManagedStatePath,
+                $script:CodexManagedStateCommittedPath,
                 $managedStateBytes
             )
             Set-Acl `
-                -LiteralPath $script:CodexManagedStatePath `
+                -LiteralPath $script:CodexManagedStateCommittedPath `
                 -AclObject $managedStateACL
             throw
         }
@@ -10865,7 +10889,7 @@ function Assert-EnterpriseMachinePolicyAbsent([string]$Label) {
         $script:CodexRequirementsPath,
         $script:CodexManagedStatePath,
         $script:CodexMachineLockPath
-    )
+    ) + @(Get-CodexManagedStateCopies)
     $claudePaths = @(
         $script:ClaudeManagedPolicyPath,
         $script:ClaudeManagedStatePath,
@@ -11490,7 +11514,7 @@ function Test-CodexSharedDirectoriesPersistThroughPurge {
         foreach ($owned in @(
             $script:CodexRequirementsPath,
             $script:CodexManagedStatePath
-        )) {
+        ) + @(Get-CodexManagedStateCopies)) {
             if (Test-Path -LiteralPath $owned) {
                 throw "Uninstall -Purge left DefenseClaw-owned Codex policy: $owned"
             }
@@ -16152,7 +16176,7 @@ function Get-ManagedCodexArtifactSet([object]$GuardianJSON) {
         throw "guardian emitted data_dir $dataDir, want exact $($script:PrimaryDataDir)"
     }
     $requirements = $script:CodexRequirementsPath
-    $managedState = $script:CodexManagedStatePath
+    $managedState = $script:CodexManagedStateCommittedPath
     $ownership = $script:CodexRequirementsOwnershipPath
     $reportedConfigs = @(
         $result.hook_config_paths |
@@ -20913,6 +20937,48 @@ $script:CodexManagedStatePath = ConvertTo-CanonicalPath (
         $script:CodexMachinePolicyDirectory `
         '.defenseclaw-managed-hooks.state'
 )
+# GAP-0650: the Codex state lives in the writer copy (Administrators and
+# SYSTEM only) and in the hook copy <state>.<n> the writer lock counter n
+# names; the fixed name above is the logical identity the reports carry.
+$script:CodexManagedStateCommittedPath = $script:CodexManagedStatePath + '.committed'
+
+function Get-CodexManagedStateCopyPath {
+    $lock = [IO.FileInfo]::new($script:CodexMachineLockPath)
+    if (-not $lock.Exists -or $lock.Length -le 0) {
+        return $script:CodexManagedStatePath
+    }
+    $counter = [int64]$lock.Length
+    if (($counter % 2) -ne 0) {
+        $counter++
+    }
+    return ('{0}.{1}' -f $script:CodexManagedStatePath, $counter)
+}
+
+# Get-CodexManagedStateHookCopy returns the hook copy of the Codex state that
+# exists now. A guardian transaction can replace the copy between the counter
+# read and the file read, so it reads again a few times.
+function Get-CodexManagedStateHookCopy {
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        $path = Get-CodexManagedStateCopyPath
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            return $path
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    throw "the Codex managed runtime state the hook reads is missing: $(Get-CodexManagedStateCopyPath)"
+}
+
+# Get-CodexManagedStateCopies lists every copy of the Codex state.
+function Get-CodexManagedStateCopies {
+    if (-not (Test-Path -LiteralPath $script:CodexMachinePolicyDirectory -PathType Container)) {
+        return @()
+    }
+    return @(
+        Get-ChildItem -LiteralPath $script:CodexMachinePolicyDirectory -Force -File |
+            Where-Object { $_.Name -match '^\.defenseclaw-managed-hooks\.state\.(committed|[1-9][0-9]{0,7})$' } |
+            ForEach-Object { $_.FullName }
+    )
+}
 $script:CodexRequirementsOwnershipPath = Assert-PathBelow `
     (Join-Path $script:StateRoot 'install\codex-requirements-ownership.json') `
     $script:StateRoot `
@@ -21563,7 +21629,8 @@ targets:
                 $script:CodexMachinePolicyDirectory,
                 $script:CodexRequirementsPath,
                 $script:CodexMachineLockPath,
-                $script:CodexManagedStatePath,
+                $script:CodexManagedStateCommittedPath,
+                (Get-CodexManagedStateHookCopy),
                 $script:CodexRequirementsOwnershipPath,
                 $script:CodexRequirementsAclBackupPath,
                 $script:AgentApplicationControlAttestationPath
