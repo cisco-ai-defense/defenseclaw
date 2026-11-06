@@ -90,8 +90,8 @@ func TestAvailabilityAnswersByEventAndStartResult(t *testing.T) {
 		{"ordinary nonblocking", "UserPromptSubmit", "7", false, 7},
 		{"wrapped nonblocking", "UserPromptSubmit", "7", true, WrappedExitBase + 7},
 		{"ordinary block", "UserPromptSubmit", "2", false, 2},
-		{"stop does not loop", "Stop", "2", false, 1},
-		{"wrapped stop", "SubagentStop", "2", true, WrappedExitBase + 1},
+		{"started stop policy block", "Stop", "2", false, 2},
+		{"wrapped started stop policy block", "SubagentStop", "2", true, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("DC_HOOKGUARD_AVAILABILITY_TEST_CHILD", tc.child)
@@ -99,9 +99,6 @@ func TestAvailabilityAnswersByEventAndStartResult(t *testing.T) {
 			warning.Reset()
 			code := RunEvent(launcher, args, tc.event, tc.wrapped, nil, &output, &warning)
 			wantWarning := "ordinary note\n"
-			if NeutralEvent(tc.event) && tc.child == "2" {
-				wantWarning += NonBlockingExitMessage + "\n"
-			}
 			if code != tc.want || output.String() != "ordinary answer\n" || warning.String() != wantWarning {
 				t.Fatalf("code=%d stdout=%q stderr=%q, want %d and exact child output", code, output.String(), warning.String(), tc.want)
 			}
