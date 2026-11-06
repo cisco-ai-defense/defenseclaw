@@ -1821,7 +1821,8 @@ func (a *APIServer) hookDecisionMeta(
 	ctx context.Context,
 	req agentHookRequest,
 ) (llmEventMeta, string, bool) {
-	if req.ConnectorName == "opencode" && req.HookEventName == "defenseclaw.plugin.loaded" {
+	if req.ConnectorName == "opencode" && req.HookEventName == "defenseclaw.plugin.loaded" &&
+		(a.decisionConfig(ctx) == nil || !a.decisionConfig(ctx).SecureClientIntegration()) {
 		return llmEventMeta{}, "", false
 	}
 	source := strings.TrimSpace(req.ConnectorName)

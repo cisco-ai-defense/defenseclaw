@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 func TestOpenCodeLoadIsLifecycleBeforeFirstSessionDecision(t *testing.T) {
@@ -64,5 +65,19 @@ func TestOpenCodeLoadIsLifecycleBeforeFirstSessionDecision(t *testing.T) {
 	}
 	if loadRows != 1 || toolRows != 1 {
 		t.Fatalf("load audit rows=%d, tool hook rows=%d; want one each", loadRows, toolRows)
+	}
+}
+
+func TestSecureClientOpenCodeLoadKeepsHookDecision(t *testing.T) {
+	agentIdentityTestSetup(t)
+	cfg := &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "secure_client"}}
+	if !cfg.SecureClientIntegration() {
+		t.Fatal("Secure Client fixture was not selected")
+	}
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+	req := agentHookRequest{ConnectorName: "opencode", HookEventName: "defenseclaw.plugin.loaded", Payload: map[string]interface{}{"load_heartbeat": true}}
+	if _, _, ok := api.hookDecisionMeta(context.Background(), req); !ok {
+		t.Fatal("Secure Client load decision was suppressed")
 	}
 }
