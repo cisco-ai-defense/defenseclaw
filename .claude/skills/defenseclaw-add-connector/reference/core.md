@@ -33,7 +33,6 @@ Paths are repo-relative. Unless noted, Go files are under `internal/gateway/conn
   - `internal/gateway/application_protection.go`
   - `normalizeConnectorTelemetrySource` (`internal/gateway/otel_ingest.go`). This one is a closed allowlist: it also maps `agy` to `antigravity`, and anything missing becomes `unknown`.
   - `normalizeConnector` (`internal/useridentity/email.go`)
-  - `normalizeConnector` (`cmd/defenseclaw-setup/main.go`)
 - **Python:**
   - `normalize_connector` (`cli/defenseclaw/connector_contracts.py`)
   - `normalize` (`cli/defenseclaw/connector_paths.py`; empty input means `openclaw`)
@@ -423,8 +422,7 @@ Helpers are in `internal/gateway/connector/connectortest/connectortest.go`.
   - `hook_only.go` (Cursor runtime: `v8` on Unix, `v9` for the Windows adapter) and `cli/defenseclaw/cursor_contract.py`;
   - `amp.go` and `cli/defenseclaw/fail_mode.py` (`// defenseclaw-managed-plugin v2`);
   - `hook_config_paths.go` (OpenCode, `// defenseclaw-managed-plugin v7`);
-  - `cli/defenseclaw/doctor_hooks.py` (the Copilot adapter, `v7`);
-  - `scripts/windows-native-ci.ps1` and `scripts/live-connector-e2e/run-windows.ps1`.
+  - `cli/defenseclaw/doctor_hooks.py` (the Copilot adapter, `v7`).
 
   Find them all with `git grep -n 'defenseclaw-managed-' -- ':!internal/gateway/connector/hooks'`.
 

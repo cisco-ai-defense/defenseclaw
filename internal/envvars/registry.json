@@ -217,12 +217,12 @@
       "managed": "ignore",
       "consumers": [
         {
-          "location": "cmd/defenseclaw-setup/transaction.go",
-          "description": "Filters ambient copies and passes only the transaction-bound Antigravity home to connector lifecycle children"
+          "location": "internal/nativeinstallstate/state.go",
+          "description": "Go reader"
         },
         {
-          "location": "cmd/defenseclaw-setup/main.go",
-          "description": "Requires one absolute normalized value and converts it to the hidden --config-home argument"
+          "location": "internal/nativeinstallstate/state_test.go",
+          "description": "Go reader (tested)"
         }
       ],
       "since": "0.8.9",
@@ -408,26 +408,6 @@
         }
       ],
       "since": "0.8.11"
-    },
-    {
-      "name": "DEFENSECLAW_AUTHENTICODE_HELPER",
-      "category": "test_fixture",
-      "purpose": "Carries the Authenticode PowerShell helper path to the native unsigned-PE regression fixture.",
-      "default": "unset",
-      "accepted_values": [
-        "test-defined absolute path",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "cli/tests/test_windows_installer_artifacts.py",
-          "description": "Native Windows test fixture; never read by production runtime paths"
-        }
-      ],
-      "since": "0.8.0"
     },
     {
       "name": "DEFENSECLAW_BAKED_HOOK_PATH",
@@ -623,126 +603,6 @@
         {
           "location": "cli/defenseclaw/commands/cmd_skill.py",
           "description": "Windows ClawHub command adapter publishes the selected trusted launcher to its generated batch file"
-        }
-      ],
-      "since": "0.8.0"
-    },
-    {
-      "name": "DEFENSECLAW_CLEANUP_ACK",
-      "category": "hook_internal",
-      "purpose": "Canonical InstallerCache cleanup acknowledgement path used by the bounded post-exit finalizer.",
-      "default": "unset (set and overwritten by native Setup)",
-      "accepted_values": [
-        "absolute installer-cache acknowledgement path",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "cmd/defenseclaw-setup/deferred_uninstall_cleanup_windows.go",
-          "description": "Post-exit finalizer locks and validates the exact cleanup acknowledgement before removing authenticated installer residue"
-        }
-      ],
-      "since": "0.8.8"
-    },
-    {
-      "name": "DEFENSECLAW_CLEANUP_JOURNAL",
-      "category": "hook_internal",
-      "purpose": "Protected native Setup transaction journal used to bind delayed directory cleanup to the uninstall transaction that scheduled it.",
-      "default": "unset (set and overwritten by native Setup)",
-      "accepted_values": [
-        "absolute setup-journal path",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "cmd/defenseclaw-setup/platform_windows.go",
-          "description": "Delayed cleanup helper re-reads and locks the journal before deleting its owned target"
-        }
-      ],
-      "since": "0.8.0"
-    },
-    {
-      "name": "DEFENSECLAW_CLEANUP_PARENT_PID",
-      "category": "hook_internal",
-      "purpose": "Parent process identifier awaited by the bounded delayed InstallerCache cleanup helper.",
-      "default": "unset (set and overwritten by native Setup)",
-      "accepted_values": [
-        "decimal process id",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "cmd/defenseclaw-setup/platform_windows.go",
-          "description": "Delayed cleanup helper waits for the originating Setup process before acquiring the setup mutex"
-        }
-      ],
-      "since": "0.8.0"
-    },
-    {
-      "name": "DEFENSECLAW_CLEANUP_TARGET",
-      "category": "hook_internal",
-      "purpose": "Canonical InstallerCache directory considered for delayed removal.",
-      "default": "unset (set and overwritten by native Setup)",
-      "accepted_values": [
-        "absolute installer-cache path",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "cmd/defenseclaw-setup/platform_windows.go",
-          "description": "Delayed cleanup helper receives the exact cache target"
-        }
-      ],
-      "since": "0.8.0"
-    },
-    {
-      "name": "DEFENSECLAW_CLEANUP_TRANSACTION_ID",
-      "category": "hook_internal",
-      "purpose": "Exact native Setup uninstall transaction identifier expected by the delayed directory cleanup helper.",
-      "default": "unset (set and overwritten by native Setup)",
-      "accepted_values": [
-        "setup transaction identifier",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "cmd/defenseclaw-setup/platform_windows.go",
-          "description": "Delayed cleanup helper refuses deletion when the protected journal belongs to another transaction"
-        }
-      ],
-      "since": "0.8.0"
-    },
-    {
-      "name": "DEFENSECLAW_CLEANUP_WAIT_MS",
-      "category": "hook_internal",
-      "purpose": "Bounded parent-process wait duration for the native Setup delayed directory cleanup helper.",
-      "default": "unset (set and overwritten by native Setup)",
-      "accepted_values": [
-        "non-negative decimal milliseconds",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "cmd/defenseclaw-setup/platform_windows.go",
-          "description": "Delayed cleanup helper exits without deletion if the originating Setup process does not stop within this bound"
         }
       ],
       "since": "0.8.0"
@@ -1103,12 +963,16 @@
       "managed": "ignore",
       "consumers": [
         {
-          "location": "cmd/defenseclaw-setup/transaction.go",
-          "description": "Filters ambient copies and passes only the transaction-bound Cursor home to connector lifecycle children"
+          "location": "cli/defenseclaw/commands/cmd_setup.py",
+          "description": "Python reader"
         },
         {
-          "location": "cmd/defenseclaw-setup/main.go",
-          "description": "Requires one absolute normalized value and converts it to the hidden --config-home argument"
+          "location": "internal/nativeinstallstate/state.go",
+          "description": "Go reader"
+        },
+        {
+          "location": "internal/nativeinstallstate/state_test.go",
+          "description": "Go reader (tested)"
         }
       ],
       "since": "0.8.9",
@@ -1195,86 +1059,6 @@
         }
       ],
       "since": "0.1.0"
-    },
-    {
-      "name": "DEFENSECLAW_DEFERRED_RUN_HELPER_ACK",
-      "category": "test_fixture",
-      "purpose": "Carries the acknowledgement path for the isolated deferred-cleanup Run launch fixture.",
-      "default": "unset",
-      "accepted_values": [
-        "test-defined absolute path",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "cmd/defenseclaw-setup/deferred_uninstall_cleanup_windows_test.go",
-          "description": "Native Windows deferred-cleanup Run launch fixture; never read by production runtime paths"
-        }
-      ],
-      "since": "0.8.8"
-    },
-    {
-      "name": "DEFENSECLAW_DEFERRED_RUN_HELPER_TRANSACTION",
-      "category": "test_fixture",
-      "purpose": "Carries the expected transaction identifier for the isolated deferred-cleanup Run launch fixture.",
-      "default": "unset",
-      "accepted_values": [
-        "test-defined lowercase 32-hex transaction identifier",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "cmd/defenseclaw-setup/deferred_uninstall_cleanup_windows_test.go",
-          "description": "Native Windows deferred-cleanup Run launch fixture; never read by production runtime paths"
-        }
-      ],
-      "since": "0.8.8"
-    },
-    {
-      "name": "DEFENSECLAW_DEFERRED_RUN_ROOT",
-      "category": "test_fixture",
-      "purpose": "Supplies the isolated cache root used to reproduce the former environment-based Run registration.",
-      "default": "unset",
-      "accepted_values": [
-        "test-defined absolute path",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "cmd/defenseclaw-setup/deferred_uninstall_cleanup_windows_test.go",
-          "description": "Native Windows deferred-cleanup Run launch fixture; never read by production runtime paths"
-        }
-      ],
-      "since": "0.8.8"
-    },
-    {
-      "name": "DEFENSECLAW_DEFERRED_VERIFY_PARENT_HELPER",
-      "category": "test_fixture",
-      "purpose": "Selects the isolated parent-process helper used to verify stable deferred-cleanup process identity on Windows.",
-      "default": "unset",
-      "accepted_values": [
-        "1",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "internal/cli/connector_deferred_verify_windows_test.go",
-          "description": "Native Windows parent-process identity fixture; never read by production runtime paths"
-        }
-      ],
-      "since": "0.9.0"
     },
     {
       "name": "DEFENSECLAW_DELEGATION_ENV_SENTINEL",
@@ -1377,14 +1161,6 @@
       "managed": "allow",
       "consumers": [
         {
-          "location": "cmd/defenseclaw-setup/transaction.go",
-          "description": "Scrubs ambient copies and passes only the transaction-bound Devin configuration directory to connector lifecycle children"
-        },
-        {
-          "location": "cmd/defenseclaw-setup/main.go",
-          "description": "Requires one absolute normalized value and converts it to the hidden --config-home argument"
-        },
-        {
           "location": "internal/nativeinstallstate/state.go",
           "description": "Rehydrates the authenticated Devin configuration directory for direct gateway and launcher recovery"
         }
@@ -1405,10 +1181,6 @@
       "surface_in_doctor": false,
       "managed": "ignore",
       "consumers": [
-        {
-          "location": "cmd/defenseclaw-setup/transaction.go",
-          "description": "Scrubs ambient copies and publishes only the Setup-admitted Devin executable to connector lifecycle children"
-        },
         {
           "location": "internal/nativeinstallstate/state.go",
           "description": "Rehydrates the authenticated Devin executable from protected native install state"
@@ -2934,7 +2706,7 @@
       "name": "DEFENSECLAW_INSTALL_ROOT",
       "category": "runtime_path",
       "purpose": "Native Windows installer root injected by the stable defenseclaw.exe launcher so the managed Python CLI can locate the owning packaged install for installer-based upgrade handoff.",
-      "default": "unset (set by DefenseClawSetup-x64.exe launcher)",
+      "default": "unset (set by the native per-user launcher)",
       "accepted_values": [
         "any-absolute-path",
         "unset"
@@ -2991,56 +2763,6 @@
       ],
       "since": "0.8.10",
       "security_note": "Private parent-to-child hook admission proof only. The environment value has no authority without the inherited live-process handle, canonical launcher identity, protected state, and exact transaction and digest match."
-    },
-    {
-      "name": "DEFENSECLAW_INTERNAL_SETUP_CONNECTOR",
-      "category": "upgrade_internal",
-      "purpose": "Identifies the connector selected by the packaged Windows Setup process for its private initialization child. Setup removes inherited copies and sets the exact Antigravity value only for the paired Setup initialization.",
-      "default": "unset",
-      "accepted_values": [
-        "antigravity",
-        "unset"
-      ],
-      "security_impact": "high",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "cmd/defenseclaw-setup/main.go",
-          "description": "Scrubs ambient copies and sets antigravity only for the packaged Setup initialization child"
-        },
-        {
-          "location": "cli/defenseclaw/commands/cmd_init.py",
-          "description": "Requires the exact connector value together with the verified installed-launcher and Setup parent chain before allowing the private Antigravity initialization"
-        }
-      ],
-      "since": "0.8.10",
-      "security_note": "Private paired Setup binding only. The value is not sufficient by itself: the child also requires DEFENSECLAW_INTERNAL_SETUP_PARENT to match the packaged Setup ancestor through the custody-bound installed launcher."
-    },
-    {
-      "name": "DEFENSECLAW_INTERNAL_SETUP_PARENT",
-      "category": "upgrade_internal",
-      "purpose": "Carries the absolute path of the running packaged Windows Setup executable into its private initialization child. Setup removes inherited copies and derives the value from its own executable; the child verifies that its immediate parent is the custody-bound installed launcher and that the launcher's parent image is that exact Setup executable.",
-      "default": "unset",
-      "accepted_values": [
-        "absolute path to the running DefenseClawSetup-x64.exe parent",
-        "unset"
-      ],
-      "security_impact": "high",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "cmd/defenseclaw-setup/main.go",
-          "description": "Scrubs ambient copies, resolves the current Setup executable, and passes its exact path to the initialization child"
-        },
-        {
-          "location": "cli/defenseclaw/commands/cmd_init.py",
-          "description": "Requires an absolute DefenseClawSetup-x64.exe path that exactly matches the installed launcher's parent process image"
-        }
-      ],
-      "since": "0.8.10",
-      "security_note": "Private paired Setup binding only. This is not a public path override and must be accepted only when it names the packaged Setup process above the custody-bound installed launcher."
     },
     {
       "name": "DEFENSECLAW_IPC_SOCKET",
@@ -3722,26 +3444,6 @@
         }
       ],
       "since": "0.3.0"
-    },
-    {
-      "name": "DEFENSECLAW_LONG_PATH_HELPER",
-      "category": "test_fixture",
-      "purpose": "Selects the isolated native Setup long-path helper subprocess.",
-      "default": "unset",
-      "accepted_values": [
-        "test-defined value",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "cmd/defenseclaw-setup/long_path_windows_test.go",
-          "description": "Native Windows test fixture; never read by production runtime paths"
-        }
-      ],
-      "since": "0.8.0"
     },
     {
       "name": "DEFENSECLAW_MANAGED_BREAKAWAY_CHILD",
@@ -5232,66 +4934,6 @@
       "security_note": "Read from the root-owned drop-in only; the helper never reads config.yaml, so a root process with kernel-policy power acts only on what ensure accepted. A malformed value falls back to consume (read only)."
     },
     {
-      "name": "DEFENSECLAW_SETUP_CANCEL_TEST_HELPER",
-      "category": "test_fixture",
-      "purpose": "Selects the parent-cancellation native Setup helper subprocess.",
-      "default": "unset",
-      "accepted_values": [
-        "1",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "cmd/defenseclaw-setup/main_test.go",
-          "description": "Native Windows test fixture; never read by production runtime paths"
-        }
-      ],
-      "since": "0.8.0"
-    },
-    {
-      "name": "DEFENSECLAW_SETUP_LOCK_TEST_HELPER",
-      "category": "test_fixture",
-      "purpose": "Selects the cross-process native Setup mutex fixture.",
-      "default": "unset",
-      "accepted_values": [
-        "test-defined value",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "cmd/defenseclaw-setup/setup_lock_windows_test.go",
-          "description": "Native Windows test fixture; never read by production runtime paths"
-        }
-      ],
-      "since": "0.8.0"
-    },
-    {
-      "name": "DEFENSECLAW_SETUP_MAINTENANCE_TEST_HELPER",
-      "category": "test_fixture",
-      "purpose": "Selects the isolated native Setup maintenance-gateway helper subprocess.",
-      "default": "unset",
-      "accepted_values": [
-        "1",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "cmd/defenseclaw-setup/maintenance_gateway_windows_test.go",
-          "description": "Native Windows test fixture; never read by production runtime paths"
-        }
-      ],
-      "since": "0.8.0"
-    },
-    {
       "name": "DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN",
       "category": "credential",
       "purpose": "Short-lived secret transport for 'defenseclaw setup observability add'. The macOS app sets this in the child process environment so provider tokens are not exposed in command-line arguments; the CLI persists the value under the preset-specific token environment variable.",
@@ -5450,98 +5092,6 @@
         }
       ],
       "since": "1.0.0"
-    },
-    {
-      "name": "DEFENSECLAW_SETUP_SERVICE_CONTROL_TEST_HELPER",
-      "category": "test_fixture",
-      "purpose": "Selects the isolated native Setup gateway and watchdog stop-command helper subprocess.",
-      "default": "unset",
-      "accepted_values": [
-        "1",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "cmd/defenseclaw-setup/maintenance_gateway_windows_test.go",
-          "description": "Native Windows service-control test fixture; never read by production runtime paths"
-        },
-        {
-          "location": "cmd/defenseclaw-setup/recovery_windows_test.go",
-          "description": "Enables the delayed owned-process exit regression fixture"
-        }
-      ],
-      "since": "0.8.6"
-    },
-    {
-      "name": "DEFENSECLAW_SETUP_TEST_GATEWAY_STOP",
-      "category": "test_fixture",
-      "purpose": "Carries the absolute stop-marker path for the delayed native Setup gateway-exit fixture.",
-      "default": "unset",
-      "accepted_values": [
-        "test-defined absolute path",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "cmd/defenseclaw-setup/maintenance_gateway_windows_test.go",
-          "description": "Writes the gateway stop marker from the isolated control subprocess"
-        },
-        {
-          "location": "cmd/defenseclaw-setup/recovery_windows_test.go",
-          "description": "Supplies the private gateway stop-marker path"
-        }
-      ],
-      "since": "0.8.6"
-    },
-    {
-      "name": "DEFENSECLAW_SETUP_TEST_WATCHDOG_STOP",
-      "category": "test_fixture",
-      "purpose": "Carries the absolute stop-marker path for the delayed native Setup watchdog-exit fixture.",
-      "default": "unset",
-      "accepted_values": [
-        "test-defined absolute path",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "cmd/defenseclaw-setup/maintenance_gateway_windows_test.go",
-          "description": "Writes the watchdog stop marker from the isolated control subprocess"
-        },
-        {
-          "location": "cmd/defenseclaw-setup/recovery_windows_test.go",
-          "description": "Supplies the private watchdog stop-marker path"
-        }
-      ],
-      "since": "0.8.6"
-    },
-    {
-      "name": "DEFENSECLAW_SETUP_TIMEOUT_TEST_HELPER",
-      "category": "test_fixture",
-      "purpose": "Selects the bounded native Setup child-timeout helper.",
-      "default": "unset",
-      "accepted_values": [
-        "test-defined value",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "cmd/defenseclaw-setup/main_test.go",
-          "description": "Native Windows test fixture; never read by production runtime paths"
-        }
-      ],
-      "since": "0.8.0"
     },
     {
       "name": "DEFENSECLAW_SHIM_CAPTURE",
@@ -6605,26 +6155,6 @@
       "security_note": "Unix managed-runtime writer identity \u2014 a misconfigured value silently drops trust for the real service account. Change only in coordinated custom-packaging setups; never expose to per-user shells."
     },
     {
-      "name": "DEFENSECLAW_UNSIGNED_PE",
-      "category": "test_fixture",
-      "purpose": "Carries an unsigned portable-executable fixture path to the native Authenticode evidence regression.",
-      "default": "unset",
-      "accepted_values": [
-        "test-defined absolute path",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "cli/tests/test_windows_installer_artifacts.py",
-          "description": "Native Windows test fixture; never read by production runtime paths"
-        }
-      ],
-      "since": "0.8.0"
-    },
-    {
       "name": "DEFENSECLAW_UPDATE_GOLDEN",
       "category": "test_fixture",
       "purpose": "Regenerates the host hook, sandbox artifact, OpenShell policy and provider profile golden files, the bounded chain catalog and the kernel-control digest pin, instead of comparing against them.",
@@ -6717,7 +6247,7 @@
     {
       "name": "DEFENSECLAW_UPGRADE_FRESH_PROCESS",
       "category": "upgrade_internal",
-      "purpose": "Set by 0.8.x upgrade controllers on the processes they start. The 1.x handoff script clears it, and native Setup scopes it to restoring a pre-1.0 gateway during recovery.",
+      "purpose": "Set by 0.8.x upgrade controllers on the processes they start. The 1.x handoff script clears it.",
       "default": "unset",
       "accepted_values": [
         "1",
@@ -6727,10 +6257,6 @@
       "surface_in_doctor": false,
       "managed": "ignore",
       "consumers": [
-        {
-          "location": "cmd/defenseclaw-setup/main.go",
-          "description": "Scrubs ambient delegation and scopes it only to an authenticated prior-gateway launch during durable transaction recovery"
-        },
         {
           "location": "scripts/defenseclaw-upgrade.sh",
           "description": "Clears the 0.8.x controller marker before running the 1.x installer"
