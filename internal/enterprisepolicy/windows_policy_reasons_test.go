@@ -79,7 +79,7 @@ func TestWindowsPolicyDetailsNameTheInstalledCLI(t *testing.T) {
 		cli+"enterprise policy export --connector claudecode --format claude-hklm-json` (from an elevated PowerShell prompt)"; got != want {
 		t.Errorf("windows export = %s, want %s", got, want)
 	}
-	// The Linux and macOS packages put the gateway on no PATH either: the command
+	// On Linux and macOS the gateway is not on the PATH either: the command
 	// names it by its absolute path (cowork-1-0-8 GAP-0081).
 	for goos, gateway := range map[string]string{
 		"linux":  "/opt/defenseclaw/bin/defenseclaw-gateway",

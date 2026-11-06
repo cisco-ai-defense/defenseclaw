@@ -15,9 +15,9 @@ import (
 	"testing"
 )
 
-// The Linux and macOS packages put defenseclaw-gateway on no PATH (only the
-// users' sandbox launcher, /usr/bin/defenseclaw or /usr/local/bin/defenseclaw,
-// is linked), and sudo's secure_path leaves out the install directory. A hint
+// On Linux and macOS defenseclaw-gateway is not on the PATH (the packages link
+// only the users' sandbox launcher, /usr/bin/defenseclaw or
+// /usr/local/bin/defenseclaw), and sudo's secure_path leaves out the install directory. A hint
 // that tells an administrator to run the gateway by its bare name ends in
 // "command not found" (cowork-1-0-8 GAP-0081).
 func TestAdministratorHintsNameTheGatewayByItsFullPath(t *testing.T) {

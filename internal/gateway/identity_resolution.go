@@ -683,9 +683,9 @@ func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, c
 	if standalone {
 		switch runtime.GOOS {
 		case "linux":
-			command = "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user " + user
+			command = "sudo " + managed.StandaloneGatewayPath("linux") + " enterprise linux profile-explain --user " + user
 		case "darwin":
-			command = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain --user " + user
+			command = "sudo " + managed.StandaloneGatewayPath("darwin") + " enterprise macos profile-explain --user " + user
 		case "windows":
 			// The installed CLI under the registered Program Files, with
 			// the user quoted for PowerShell (cowork-1-0-8 GAP-0076).

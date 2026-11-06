@@ -704,7 +704,7 @@ func validateEnterpriseTetragon(t EnterpriseTetragonConfig) error {
 	}
 	for _, ack := range acks {
 		if !tetragonEnforceAckPattern.MatchString(ack) {
-			return fmt.Errorf("config: enterprise.tetragon.enforce_ack %q must be sha256: and 12 lowercase hex digits, the kernel_policy digest that `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for enforce` prints", ack)
+			return fmt.Errorf("config: enterprise.tetragon.enforce_ack %q must be sha256: and 12 lowercase hex digits, the kernel_policy digest that `sudo %s enterprise linux tetragon verify --ready-for enforce` prints", ack, managed.StandaloneGatewayPath("linux"))
 		}
 	}
 	if err := oneOf("enterprise.tetragon.customer_events", t.CustomerEvents,

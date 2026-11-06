@@ -1858,7 +1858,7 @@ _MANAGED_GATEWAY_BINARIES = {
 def _managed_gateway_binary() -> str | None:
     """The enterprise package's gateway on a managed Linux or macOS host.
 
-    An administrator's shell has it on no PATH, and the answer to "gateway
+    It is not on the PATH of an administrator's shell, and the answer to "gateway
     not found" there must not be ``defenseclaw upgrade``, which a managed
     device refuses (GAP-0168).
     """

@@ -99,8 +99,8 @@ func TestEnterpriseSecretCheckReportsTheKeyOutcome(t *testing.T) {
 	}
 }
 
-// The example runs the gateway by its absolute path: the packages put it on no
-// PATH (cowork-1-0-8 GAP-0081).
+// The example runs the gateway by its absolute path: it is not on the PATH
+// (cowork-1-0-8 GAP-0081).
 func TestSecretCheckExampleNamesTheGatewayByItsFullPath(t *testing.T) {
 	example := newEnterpriseSecretCheckCommand().Example
 	want := "sudo " + managedHostGatewayCommand() + " enterprise secret check"

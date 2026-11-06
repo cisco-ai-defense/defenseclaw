@@ -169,12 +169,8 @@ func launchAgentMissing(raw []byte, err error) bool {
 }
 
 // macosRepairCommand is the administrator's repair of a managed Mac, with the
-// gateway by its absolute path: the package puts it on no PATH (cowork-1-0-8
+// gateway by its absolute path: it is not on the PATH (cowork-1-0-8
 // GAP-0081).
 func macosRepairCommand() string {
-	gateway := "defenseclaw-gateway"
-	if layout, err := managed.StandaloneLayoutFor("darwin"); err == nil {
-		gateway = layout.BinDir + "/" + gateway
-	}
-	return "sudo " + gateway + " enterprise macos repair"
+	return "sudo " + managed.StandaloneGatewayPath("darwin") + " enterprise macos repair"
 }

@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -237,5 +238,20 @@ func TestEnterpriseBundleAnchorsVerbIsRegistered(t *testing.T) {
 	cmd, _, err := newEnterpriseBundleCommand().Find([]string{"anchors", "install"})
 	if err != nil || cmd.Name() != "install" || cmd.Flags().Lookup("file") == nil || cmd.Flags().Lookup("lock-wait") == nil {
 		t.Fatalf("anchors install: %v", err)
+	}
+}
+
+// The example is typed by an administrator; the package puts the gateway on no
+// PATH (cowork-1-0-8 GAP-0081).
+func TestBundleAnchorsInstallExampleNamesTheGatewayByItsFullPath(t *testing.T) {
+	var example string
+	for _, sub := range newEnterpriseBundleAnchorsCommand().Commands() {
+		if sub.Name() == "install" {
+			example = sub.Example
+		}
+	}
+	want := "sudo " + managedHostGatewayCommand() + " enterprise bundle anchors install --file "
+	if !strings.Contains(example, want) || strings.Contains(example, "sudo defenseclaw-gateway") || !strings.Contains(example, "/bin/defenseclaw-gateway") {
+		t.Fatalf("example = %q, want it to contain %q", example, want)
 	}
 }

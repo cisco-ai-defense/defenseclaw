@@ -9,7 +9,7 @@ import (
 )
 
 // The administrator the user is told to ask runs the gateway by its absolute
-// path: the standalone packages put it on no PATH (cowork-1-0-8 GAP-0081).
+// path: it is not on the PATH (cowork-1-0-8 GAP-0081).
 func TestProjectSkillPendingHintNamesTheManagedGatewayByItsFullPath(t *testing.T) {
 	previousGOOS, previousStandalone := reasonDisplayGOOS, standaloneEnterpriseActive.Load()
 	t.Cleanup(func() {

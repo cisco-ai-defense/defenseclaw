@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/spf13/cobra"
 )
 
@@ -858,5 +859,21 @@ func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
 	want := fmt.Sprintf("no AI Discovery signal for account %q in the gateway's scan; the account has no AI agent, skill or MCP server found yet, or ai_discovery is off", user)
 	if err := writeWindowsEnterpriseDiscovery(&bytes.Buffer{}, user, false); err == nil || err.Error() != want {
 		t.Fatalf("Secure Client --user %s = %v, want %q", user, err, want)
+	}
+}
+
+// defenseclaw-gateway is not on the PATH, so the hint names it by its
+// full path (cowork-1-0-8 GAP-0081).
+func TestEnterpriseDiscoveryStatusHintNamesTheGatewayByItsFullPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows names the managed CLI; see enterprise_discovery_windows_hint_test.go")
+	}
+	platform := "linux"
+	if runtime.GOOS == "darwin" {
+		platform = "macos"
+	}
+	want := "sudo " + managed.StandaloneGatewayPath(runtime.GOOS) + " enterprise " + platform + " status"
+	if got := enterpriseDiscoveryStatusHint(); got != want || !strings.HasPrefix(got, "sudo /opt/") {
+		t.Fatalf("hint = %q, want %q", got, want)
 	}
 }

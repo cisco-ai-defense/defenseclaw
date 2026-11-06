@@ -106,6 +106,23 @@ func (l StandaloneLayout) KeptSandboxStatePaths() (store, key, record string) {
 		path.Join(l.LifecycleDir, StandaloneKeptOpenShellStateFile)
 }
 
+// StandaloneGatewayBinary is the file name of the standalone gateway in a
+// layout's BinDir.
+const StandaloneGatewayBinary = "defenseclaw-gateway"
+
+// StandaloneGatewayPath is the gateway of a Linux or macOS standalone install
+// by its absolute path, as an administrator types it. The packages put it on
+// no PATH and sudo's secure_path leaves out the install directory, so a hint
+// that names it bare ends in "command not found" (cowork-1-0-8 GAP-0081). For
+// any other goos, which has no Unix layout, it is the bare name.
+func StandaloneGatewayPath(goos string) string {
+	layout, err := StandaloneLayoutFor(goos)
+	if err != nil {
+		return StandaloneGatewayBinary
+	}
+	return layout.BinDir + "/" + StandaloneGatewayBinary
+}
+
 func StandaloneLayoutFor(goos string) (StandaloneLayout, error) {
 	switch goos {
 	case "linux":

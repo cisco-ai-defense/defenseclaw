@@ -497,9 +497,9 @@ func enterpriseDiscoveryStatusHint() string {
 		// Setup puts no DefenseClaw command on PATH (cowork-1-0-8 GAP-0076).
 		return managedWindowsCommand("enterprise", "windows", "status", "--profile", "standalone") + " from an elevated PowerShell prompt"
 	case "darwin":
-		return "defenseclaw-gateway enterprise macos status"
+		return "sudo " + managedHostGatewayCommand() + " enterprise macos status"
 	default:
-		return "defenseclaw-gateway enterprise linux status"
+		return "sudo " + managedHostGatewayCommand() + " enterprise linux status"
 	}
 }
 
