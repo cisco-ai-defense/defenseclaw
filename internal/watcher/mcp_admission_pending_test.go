@@ -164,6 +164,8 @@ func TestGAP0034ColdOutageSnapshotScope(t *testing.T) {
 		want  bool
 	}{
 		{"same account and project", MCPAdmissionQuery{Connector: "CLAUDECODE", Server: "shared", Home: home, CWD: filepath.Join(project, "src")}, true},
+		{"equivalent home with separator", MCPAdmissionQuery{Connector: "claudecode", Server: "shared", Home: home + string(filepath.Separator), CWD: project}, true},
+		{"equivalent home with dot", MCPAdmissionQuery{Connector: "claudecode", Server: "shared", Home: filepath.Join(home, ".") + string(filepath.Separator) + ".", CWD: project}, true},
 		{"other account", MCPAdmissionQuery{Connector: "claudecode", Server: "shared", Home: home + "2", CWD: project}, false},
 		{"other project", MCPAdmissionQuery{Connector: "claudecode", Server: "shared", Home: home, CWD: filepath.Join(home, "other")}, false},
 		{"other connector", MCPAdmissionQuery{Connector: "codex", Server: "shared", Home: home, CWD: project}, false},
@@ -173,6 +175,54 @@ func TestGAP0034ColdOutageSnapshotScope(t *testing.T) {
 				t.Fatalf("stored scope matched=%v, want %v", got, tc.want)
 			}
 		})
+	}
+	other := config.MCPServerEntry{Name: "shared@claudecode#decoy", Connector: "claudecode"}
+	if mcpSnapshotPathServesQuery(MCPEventPath(other), MCPAdmissionQuery{Connector: "claudecode", Server: "shared"}) {
+		t.Fatal("a different server name was read as the ordinary server's scope")
+	}
+}
+
+func TestGAP0034ColdFailedSnapshotUsesStoredIdentityAndNormalizedHome(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Gateway.Watcher.MCP.TakeAction = true
+	cfg.Scanners.MCPScanner.UnverifiedServer = "warn"
+	home := filepath.Join(t.TempDir(), "account")
+	project := filepath.Join(home, "project")
+	failed := config.MCPServerEntry{Name: "notes@claudecode#decoy", Connector: "claudecode",
+		Command: "npx", Args: []string{"-y", "."}, Home: home, Project: project, SourceScope: "project"}
+	ordinary := config.MCPServerEntry{Name: "notes", Connector: "claudecode",
+		Command: "npx", Args: []string{"-y", "."}, Home: home}
+	admitted := New(cfg, nil, nil, store, logger, nil, nil)
+	admitted.SetMCPServerSource(func() ([]config.MCPServerEntry, error) {
+		return []config.MCPServerEntry{failed, ordinary}, nil
+	})
+	admitted.firstCycleDone.Store(true)
+	admitted.scannerFactory = func(InstallEvent) scanner.Scanner {
+		return &failingScanner{countingScanner{name: "mcp-scanner"}}
+	}
+	admitted.AdmitAddedMCPServers([]string{failed.Name})
+	admitted.admitAddedMCPServers(context.Background())
+	if status := admitted.MCPAdmissionStatus(MCPAdmissionQuery{
+		Connector: failed.Connector, Server: config.MCPToolServerName(failed.Connector, failed.Name), Home: home, CWD: project,
+	}); !status.Failed {
+		t.Fatalf("setup: failed scan was not recorded: %+v", status)
+	}
+
+	cold := New(cfg, nil, nil, store, logger, nil, nil)
+	cold.SetMCPServerSource(func() ([]config.MCPServerEntry, error) {
+		return nil, errors.New("server list temporarily unavailable")
+	})
+	cold.firstCycleDone.Store(true)
+	for _, homeVariant := range []string{home, home + string(filepath.Separator), home + string(filepath.Separator) + "."} {
+		q := MCPAdmissionQuery{Connector: failed.Connector,
+			Server: config.MCPToolServerName(failed.Connector, failed.Name), Home: homeVariant, CWD: project}
+		if status := cold.MCPAdmissionStatus(q); !status.Failed || status.Unavailable {
+			t.Errorf("stored failure for equivalent home %q: %+v", homeVariant, status)
+		}
+	}
+	q := MCPAdmissionQuery{Connector: ordinary.Connector, Server: ordinary.Name, Home: home, CWD: project}
+	if status := cold.MCPAdmissionStatus(q); status.Failed || !status.Unavailable {
+		t.Fatalf("ordinary server inherited another failure: %+v", status)
 	}
 }
 
