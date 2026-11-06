@@ -33,14 +33,8 @@ func TestStandaloneUnreadableDescriptorIsABoundary(t *testing.T) {
 			if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			// The owner keeps WRITE_DAC through the OWNER RIGHTS entry, so
-			// the fixture is given back without privileges.
-			setTestFileDACL(t, path, testDACL(t, "D:P(A;;0x40080;;;OW)(A;;FA;;;BG)"), true)
-			t.Cleanup(func() { setTestFileDACL(t, path, testDACL(t, canonicalTestDACL), true) })
-			if handle, err := openCanonicalObject(path, uint32(windows.READ_CONTROL)); err == nil {
-				_ = windows.CloseHandle(handle)
-				t.Skip("this token still reads the descriptor")
-			}
+			requireHiddenDescriptorElevated(t)
+			stampHiddenDescriptorForTest(t, path, hiddenWriterFileSDDL)
 			previous := canonicalRunWithRepairPrivileges
 			calls := 0
 			canonicalRunWithRepairPrivileges = func(func() error) error {
