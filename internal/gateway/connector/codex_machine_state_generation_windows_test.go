@@ -258,7 +258,8 @@ func TestWindowsCodexStateRecoversFromAStoppedWriter(t *testing.T) {
 // never reads the old one under the new counter.
 func TestWindowsCodexStateCounterSkipsAHeldCopyAfterTheWrap(t *testing.T) {
 	f := newWindowsCodexStateTxFixture(t)
-	writeWindowsCodexLockFileForTest(t, f.lock, windowsCodexTransactionCounterWrap-2, windowsCodexWriterLockSDDL)
+	// The last even value before the wrap: the next start (wrap+1) wraps to 1.
+	writeWindowsCodexLockFileForTest(t, f.lock, windowsCodexTransactionCounterWrap, windowsCodexWriterLockSDDL)
 	if err := os.WriteFile(filepath.Join(f.dir, windowsCodexManagedStateCommittedFile), []byte("current"), 0o600); err != nil {
 		t.Fatal(err)
 	}
