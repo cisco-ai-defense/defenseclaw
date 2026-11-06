@@ -533,3 +533,38 @@ func TestWindowsStatusNamesALinkAtAVendorFolderOnce(t *testing.T) {
 		t.Fatalf("no link, but a warning: %+v", result.Warnings)
 	}
 }
+
+// GAP-0650 (owner decision for 1.0.9): a requirements.toml a user holds open
+// is a documented Windows platform limit. Status names the holder and says
+// the enforced policy stays in place; a file nobody holds adds nothing.
+func TestWindowsStatusV2NamesTheHolderOfTheCodexRequirements(t *testing.T) {
+	const path = `C:\ProgramData\OpenAI\Codex\requirements.toml`
+	for _, held := range []bool{true, false} {
+		fakeWindowsStatusV2(t, windowsEnterpriseStatusV2Inputs{
+			cfg: windowsStatusV2Config(),
+			codexRequirementsHold: func() (string, []string, bool) {
+				return path, []string{"codex.exe (PID 4242)"}, held
+			},
+		})
+		result := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.9")
+		result.Installed, result.InstalledVersion = true, "1.0.9"
+		applyWindowsEnterpriseStatusV2(result)
+		found := ""
+		for _, warning := range result.Warnings {
+			if warning.Code == windowsCodexRequirementsHeldCode {
+				found = warning.Message
+			}
+		}
+		if !held {
+			if found != "" {
+				t.Fatalf("a requirements.toml nobody holds is reported held: %s", found)
+			}
+			continue
+		}
+		for _, want := range []string{path, "codex.exe (PID 4242)", "the enforced Codex policy stays in place", "as soon as the file is released"} {
+			if !strings.Contains(found, want) {
+				t.Fatalf("held warning = %q, want %q", found, want)
+			}
+		}
+	}
+}
