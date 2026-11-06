@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
-	"time"
 )
 
 // Grade is the strength of one path finding. Readers combine grades with Max:
@@ -427,7 +426,8 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 
 // stateTreeHardlinkReach compares a multiply linked file with the listed
 // active state trees. A complete reading gives an ordinary alias a definite
-// answer; an exhausted reading keeps an identity that it did not reach closed.
+// answer. The broad mention index has a separate entry bound and cannot
+// decide reach for a particular hard link after that bound is reached.
 func (m *TargetMemo) stateTreeHardlinkReach(info os.FileInfo, home string) Grade {
 	root, ok := m.resolveWriteTarget(filepath.Join(home, ".defenseclaw"))
 	if !ok {
@@ -441,7 +441,7 @@ func (m *TargetMemo) stateTreeHardlinkReach(info os.FileInfo, home string) Grade
 		m.mu.Unlock()
 	}
 	if !found {
-		files, complete := walkActiveStateIdentities(root, time.Time{})
+		files, complete := walkAllActiveStateIdentities(root)
 		index = activeStateIdentityIndex{files: files, complete: complete}
 		if m != nil {
 			m.mu.Lock()
@@ -462,7 +462,7 @@ func (m *TargetMemo) stateTreeHardlinkReach(info os.FileInfo, home string) Grade
 		}
 	}
 	if !index.complete {
-		return GradeNamed
+		return GradePossible
 	}
 	return GradeNone
 }

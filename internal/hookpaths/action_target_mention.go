@@ -2045,6 +2045,66 @@ func walkActiveStateIdentities(activeRoot string, deadline time.Time) ([]activeS
 	return files, complete
 }
 
+// A reach proof for a multiply linked file needs the whole listed set. The
+// bounded index above remains for broad mention scans; its missing entries
+// cannot establish that a particular hard link is ordinary. Follow listed
+// tree links so a relocated state tree has the same identity as a direct one.
+func walkAllActiveStateIdentities(activeRoot string) ([]activeStateIdentity, bool) {
+	activeStateIndexWalks.Add(1)
+	var files []activeStateIdentity
+	complete := true
+	add := func(relative string, info os.FileInfo) {
+		if info.Mode().IsRegular() {
+			files = append(files, activeStateIdentity{relative: relative, info: info})
+		}
+	}
+	for _, name := range activeStateFiles {
+		path := filepath.Join(activeRoot, name)
+		if info, err := pathStat(path); err == nil {
+			add(name, info)
+		} else if !os.IsNotExist(err) {
+			complete = false
+		}
+	}
+	var visited []os.FileInfo
+	var walk func(string, string, int)
+	walk = func(path, relative string, depth int) {
+		if depth > 40 {
+			complete = false
+			return
+		}
+		info, err := pathStat(path)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				complete = false
+			}
+			return
+		}
+		if !info.IsDir() {
+			add(relative, info)
+			return
+		}
+		for _, prior := range visited {
+			if os.SameFile(prior, info) {
+				return
+			}
+		}
+		visited = append(visited, info)
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			complete = false
+			return
+		}
+		for _, entry := range entries {
+			walk(filepath.Join(path, entry.Name()), filepath.Join(relative, entry.Name()), depth+1)
+		}
+	}
+	for _, tree := range activeStateTrees {
+		walk(filepath.Join(activeRoot, tree), tree, 0)
+	}
+	return files, complete
+}
+
 // actionPosixNestedShellMention scans each static shell -c or env -S body as
 // its own command. bodies are the words it scanned without a match.
 func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth int, stateOnly bool, globs *actionGlobs) (bodies []*syntax.Word, found bool) {
