@@ -149,8 +149,7 @@ func SnapshotTarget(root string) (*TargetSnapshot, error) {
 			return nil
 		}
 		if info.IsDir() {
-			base := info.Name()
-			if base == ".git" || base == "node_modules" || base == "__pycache__" || base == ".venv" || base == "venv" {
+			if snapshotSkipsDir(info.Name()) {
 				return filepath.SkipDir
 			}
 			if path != root {
@@ -196,12 +195,7 @@ func SnapshotTarget(root string) (*TargetSnapshot, error) {
 		return nil, err
 	}
 
-	sort.Strings(allHashes)
-	overall := sha256.New()
-	for _, entry := range allHashes {
-		overall.Write([]byte(entry + "\n"))
-	}
-	snap.ContentHash = hex.EncodeToString(overall.Sum(nil))
+	snap.ContentHash = snapshotContentHash(allHashes)
 
 	snap.NetworkEndpoints = make([]string, 0, len(endpointSet))
 	for ep := range endpointSet {
@@ -210,6 +204,25 @@ func SnapshotTarget(root string) (*TargetSnapshot, error) {
 	sort.Strings(snap.NetworkEndpoints)
 
 	return snap, nil
+}
+
+// snapshotSkipsDir reports a folder SnapshotTarget does not hash.
+func snapshotSkipsDir(name string) bool {
+	switch name {
+	case ".git", "node_modules", "__pycache__", ".venv", "venv":
+		return true
+	}
+	return false
+}
+
+// snapshotContentHash is the content hash of sorted "rel:sha256" entries.
+func snapshotContentHash(entries []string) string {
+	sort.Strings(entries)
+	overall := sha256.New()
+	for _, entry := range entries {
+		overall.Write([]byte(entry + "\n"))
+	}
+	return hex.EncodeToString(overall.Sum(nil))
 }
 
 func hashFile(path string) (string, error) {
