@@ -1396,6 +1396,12 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		return failResponse(opts, sp, answeredFailMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	}
 
+	if hookpaths.PatchEvidenceChanged(opts.Connector, hookDialect(opts), opts.Event, payload, opts.requestFacts.evidence()) {
+		// The gateway judged the patch targets the hook read before the
+		// request; one has changed since. Behind ProtectHome only this hook can
+		// read it again (GAP-0488, GAP-0073).
+		return failResponse(opts, sp, "closed", "a patch target changed after DefenseClaw reviewed it")
+	}
 	code := sp.decide(opts, body)
 	if opts.oversizedReview && validUniqueGatewayResponse(body) {
 		var verdict struct {
@@ -1736,6 +1742,14 @@ func (f *hookRequestFacts) set(header http.Header, opts Options, payload []byte)
 	for name, values := range f.header {
 		header[name] = slices.Clone(values)
 	}
+}
+
+// evidence is the write evidence the call sent the gateway, empty when none.
+func (f *hookRequestFacts) evidence() string {
+	if f == nil {
+		return ""
+	}
+	return f.header.Get(hookpaths.Header)
 }
 
 func setHookRequestFacts(header http.Header, opts Options, payload []byte) {
