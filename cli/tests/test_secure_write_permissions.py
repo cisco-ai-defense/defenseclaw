@@ -487,6 +487,9 @@ def test_windows_owner_trust_set_matches_go():
 
     assert len(go_sids) == len(set(go_sids))
     assert frozenset(go_sids) == file_permissions._WINDOWS_TRUSTED_SYSTEM_CONTROLLER_SIDS
+    go_mask = re.search(r"const CustodyWriteMask uint32 = (0x[0-9A-Fa-f]+)", source)
+    assert go_mask is not None
+    assert int(go_mask.group(1), 16) == file_permissions._WINDOWS_CUSTODY_WRITE_MASK == 0x500D0156
 
 
 def test_windows_admin_trusting_write_check_uses_the_owner_trust_set(monkeypatch):
@@ -496,6 +499,62 @@ def test_windows_admin_trusting_write_check_uses_the_owner_trust_set(monkeypatch
     assert file_permissions.windows_acl_write_error("C:\\Users\\a\\.local\\bin") == (
         "owner SID S-1-5-32-544 is not the current user"
     )
+
+
+class _WindowsOs:
+    """``os`` as cmd_setup sees it on Windows; everything else is the real module."""
+
+    name = "nt"
+
+    def __getattr__(self, attribute):
+        return getattr(os, attribute)
+
+
+@pytest.mark.parametrize(
+    ("owner_sid", "extra_entries", "accepted"),
+    [
+        ("S-1-5-32-544", [], True),
+        ("S-1-5-32-544", [(0x1301BF, 1, 0x10, "S-1-5-32-545")], False),
+        ("S-1-5-21-1-2-3-1002", [], False),
+    ],
+    ids=["owned by Administrators", "Users may write", "owned by another account"],
+)
+def test_setup_capture_trusting_administrators_uses_the_owner_trust_set(
+    monkeypatch, tmp_path, owner_sid, extra_entries, accepted
+):
+    # cmd_setup reads its runtime-evidence fingerprint, Codex managed backups
+    # and plugin backup receipt with trust_windows_administrators=True, which
+    # reaches windows_acl_write_error(trust_administrators=True) (g085 review S2).
+    from defenseclaw.commands import cmd_setup
+
+    source = tmp_path / "backup.json"
+    source.write_bytes(b"{}")
+    entries = _profile_entries(owner_sid) + extra_entries
+    monkeypatch.setattr(file_permissions, "_windows_acl_snapshot", lambda _path: (owner_sid, False, entries))
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: _CURRENT_SID)
+    real_os = file_permissions.os
+
+    def windows_acl_write_error(path, **kwargs):
+        # Only the ACL check sees Windows; the no-follow open stays native.
+        file_permissions.os = SimpleNamespace(name="nt", fspath=os.fspath)
+        try:
+            return file_permissions.windows_acl_write_error(path, **kwargs)
+        finally:
+            file_permissions.os = real_os
+
+    monkeypatch.setattr(cmd_setup, "windows_acl_write_error", windows_acl_write_error)
+    monkeypatch.setattr(cmd_setup, "os", _WindowsOs())
+
+    def capture():
+        return cmd_setup._capture_protected_setup_file(
+            os.fspath(source), 1 << 20, "plugin backup", trust_windows_administrators=True
+        )
+
+    if accepted:
+        assert capture()[:2] == (True, b"{}")
+    else:
+        with pytest.raises(cmd_setup.RollbackSourceRefusedError, match="not protected"):
+            capture()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="validates native Windows system-controller inheritance")

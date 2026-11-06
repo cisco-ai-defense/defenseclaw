@@ -342,6 +342,15 @@ _WINDOWS_TRUSTED_SYSTEM_CONTROLLER_SIDS = frozenset(
 )
 
 
+# Every right that lets a principal change a folder's entries or a file's
+# content, DACL or owner: GENERIC_ALL, GENERIC_WRITE, DELETE, WRITE_DAC,
+# WRITE_OWNER, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_WRITE_EA,
+# FILE_DELETE_CHILD and FILE_WRITE_ATTRIBUTES. Go's
+# internal/winowner.CustodyWriteMask holds the same value (the Cowork guard
+# applies it to the removal marker's folder); a test pins the two.
+_WINDOWS_CUSTODY_WRITE_MASK = 0x10000000 | 0x40000000 | 0x000D0156
+
+
 def windows_owner_problem(owner_sid: str, current_sid: str) -> str | None:
     """Return why *owner_sid* is outside the Windows owner trust set, or ``None``.
 
@@ -1729,7 +1738,7 @@ def windows_acl_custody_write_error(
     }
     if trust_current_user:
         trusted_writers.add(current_sid)
-    write_mask = 0x10000000 | 0x40000000 | 0x000D0156
+    write_mask = _WINDOWS_CUSTODY_WRITE_MASK
     ancestor_replace_mask = 0x10000000 | 0x40000000 | 0x00010000 | 0x00040000 | 0x00080000 | 0x40
     for permissions, access_mode, inheritance, sid in entries:
         if access_mode not in (1, 2):
