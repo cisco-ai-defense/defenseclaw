@@ -265,10 +265,9 @@ func TestFileToolExtraArgumentKeysKeepTheirPathFindings(t *testing.T) {
 	}
 }
 
-// TestFileToolUnknownKeysPastTheTargetBoundFailClosed pins that a write
-// tool call whose unknown keys hold more possible targets than are judged
-// is blocked as unverifiable, and that the same count of plain text values
-// is not.
+// TestFileToolUnknownKeysPastTheTargetBoundFailClosed pins the Possible-grade
+// count bound: balanced warns and audits, strict blocks, and plain text
+// values do not trigger the bound.
 func TestFileToolUnknownKeysPastTheTargetBoundFailClosed(t *testing.T) {
 	root := t.TempDir()
 	home, project := filepath.Join(root, "home"), filepath.Join(root, "home", "proj")
@@ -289,10 +288,16 @@ func TestFileToolUnknownKeysPastTheTargetBoundFailClosed(t *testing.T) {
 	}
 	installToolCallCorpusProfileConnector(t, "claudecode", "default")
 	paths := many(func(i int) string { return fmt.Sprintf("%s/out/f%d.txt", project, i) })
-	if got, body := fileToolUnknownKeyVerdict(t, "claudecode", "Write", paths, "default", false, home, project, "bound-paths"); got != "block" ||
-		!strings.Contains(body, "too many possible files") {
+	if got, body := fileToolUnknownKeyVerdict(t, "claudecode", "Write", paths, "default", false, home, project, "bound-paths"); got != "alert" ||
+		!strings.Contains(body, "exceed the target verification bound") {
 		t.Fatalf("24 path-shaped values: %q: %.400s", got, body)
 	}
+	installToolCallCorpusProfileConnector(t, "claudecode", "strict")
+	if got, body := fileToolUnknownKeyVerdict(t, "claudecode", "Write", paths, "strict", false, home, project, "bound-paths-strict"); got != "block" ||
+		!strings.Contains(body, "exceed the target verification bound") {
+		t.Fatalf("24 path-shaped values in strict: %q: %.400s", got, body)
+	}
+	installToolCallCorpusProfileConnector(t, "claudecode", "default")
 	words := many(func(i int) string { return fmt.Sprintf("note %d", i) })
 	if got, body := fileToolUnknownKeyVerdict(t, "claudecode", "Write", words, "default", false, home, project, "bound-words"); got != "allow" {
 		t.Fatalf("24 text values: %q: %.400s", got, body)
