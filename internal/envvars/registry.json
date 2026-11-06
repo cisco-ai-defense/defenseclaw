@@ -2577,7 +2577,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
-      "managed": "tighten_only",
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/hooks/_hardening.sh",

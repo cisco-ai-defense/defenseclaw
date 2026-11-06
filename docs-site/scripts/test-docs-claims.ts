@@ -2592,8 +2592,9 @@ describe('managed env-var rules match the registry (GAP-0045)', () => {
     };
     walk(reg);
     const tighten = entries.filter((e) => e.managed === 'tighten_only').map((e) => e.name).sort();
-    assert.ok(tighten.length >= 3, `parsed ${tighten}`);
+    assert.deepEqual(tighten, ['DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', 'DEFENSECLAW_STRICT_AVAILABILITY']);
     assert.equal(entries.find((e) => e.name === 'DEFENSECLAW_FAIL_MODE')?.managed, 'ignore');
+    assert.equal(entries.find((e) => e.name === 'DEFENSECLAW_HOOK_MAX_BODY')?.managed, 'ignore');
     const catalog = page('reference/env-vars.mdx');
     const tightenRow = catalog.split('| `tighten_only` |')[1].split('\n')[0];
     const ignoreRow = catalog.split('| `ignore` |')[1].split('\n')[0];
@@ -2603,9 +2604,11 @@ describe('managed env-var rules match the registry (GAP-0045)', () => {
       assert.ok(b17.includes('`' + name + '`'), `threat model B17 omits ${name}`);
     }
     // The ignore row's except-list names the tighten_only security opt-outs.
-    for (const name of tighten.filter((n) => n !== 'DEFENSECLAW_HOOK_MAX_BODY')) {
+    for (const name of tighten) {
       assert.ok(ignoreRow.includes('`' + name + '`'), `env-vars ignore row except-list omits ${name}`);
     }
+    assert.ok(ignoreRow.includes('`DEFENSECLAW_HOOK_MAX_BODY`'), 'env-vars ignore row omits the managed hook cap');
+    assert.match(catalog, /`DEFENSECLAW_HOOK_MAX_BODY`<br\/>[^\n]*Managed host: `ignore`/);
     assert.ok(!/`DEFENSECLAW_FAIL_MODE` remains `tighten_only`/.test(b17), 'B17 still calls DEFENSECLAW_FAIL_MODE tighten_only');
     // The ignore row names DEFENSECLAW_FAIL_MODE as ignored, before the
     // tighten_only exception, so it never reads as one of the tighten_only pair.

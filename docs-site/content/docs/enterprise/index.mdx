@@ -189,7 +189,8 @@ enable, approvals (HITL) and discovery are runtime state, not policy.
 Every `DEFENSECLAW_*` variable
 has a `managed` setting in the [registry](/docs/reference/env-vars). `ignore`
 variables read as unset, from the process environment and from `.env` files.
-`tighten_only` variables (`DEFENSECLAW_STRICT_AVAILABILITY`) count only
+`tighten_only` variables (`DEFENSECLAW_STRICT_AVAILABILITY` and
+`DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS`) count only
 when they make the setting stricter. Managed hooks ignore `DEFENSECLAW_HOOK_MAX_BODY`
 and keep their fixed 1 MiB body cap. `allow` variables are read as set. A
 forged `DEFENSECLAW_DEPLOYMENT_MODE` or `DEFENSECLAW_ENTERPRISE_PROFILE`
