@@ -751,7 +751,11 @@ type enterpriseHookReconcileRow struct {
 	OK        bool   `json:"ok"`
 	// Pending is valid only for an administrator-authored deferred manifest
 	// row whose exact WTSActive token is currently unavailable.
-	Pending bool                           `json:"pending,omitempty"`
+	Pending bool `json:"pending,omitempty"`
+	// Removed records a target whose account or profile was confirmed gone.
+	// It remains in the manifest until enumeration catches up, but has no
+	// account in which a repair could run.
+	Removed bool                           `json:"removed,omitempty"`
 	Error   string                         `json:"error,omitempty"`
 	Result  *enterprisehooks.InstallResult `json:"result,omitempty"`
 	// UID and HomeInode identify a standalone Unix target so the gateway
@@ -789,6 +793,16 @@ type enterpriseHookReconcileRun struct {
 	// WatchPathOwners ties owned-file events to their manifest targets. A
 	// failed target must not change how another target's events are handled.
 	WatchPathOwners map[string][]string
+}
+
+func (run enterpriseHookReconcileRun) attentionFailures() int {
+	failures := 0
+	for _, row := range run.Rows {
+		if !row.OK && !row.Pending && !row.Removed {
+			failures++
+		}
+	}
+	return failures
 }
 
 var (
@@ -1151,9 +1165,10 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	attentionFailures := run.attentionFailures()
 	if enterpriseHookJSON {
 		payload := map[string]any{
-			"ok":       run.Failures == 0 && run.StateErr == nil,
+			"ok":       attentionFailures == 0 && run.StateErr == nil,
 			"manifest": run.Manifest,
 			"results":  run.Rows,
 		}
@@ -1161,11 +1176,11 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 			payload["state_error"] = run.StateErr.Error()
 		}
 		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(payload)
-		if run.Failures > 0 || run.StateErr != nil {
+		if attentionFailures > 0 || run.StateErr != nil {
 			if run.StateErr != nil {
 				return fmt.Errorf("enterprise hooks reconcile state write failed: %w", run.StateErr)
 			}
-			return fmt.Errorf("enterprise hooks reconcile failed for %d target(s)", run.Failures)
+			return fmt.Errorf("enterprise hooks reconcile failed for %d target(s)", attentionFailures)
 		}
 		return nil
 	}
@@ -1176,6 +1191,8 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s reconciled%s\n", Style("✓", "fg=green", "bold"), label, enterpriseHookAgentVersionNote(row))
 		} else if row.Pending {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s pending an exact active Windows session\n", Style("•", "fg=yellow", "bold"), label)
+		} else if row.Removed {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s removed: account or profile no longer exists\n", Style("•", "fg=yellow", "bold"), label)
 		} else {
 			fmt.Fprintf(cmd.ErrOrStderr(), "  %s %s: %s\n", Style("✗", "fg=red", "bold"), label, row.Error)
 		}
@@ -1184,8 +1201,8 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "  %s hook guardian state: %s\n", Style("✗", "fg=red", "bold"), run.StateErr.Error())
 		return fmt.Errorf("enterprise hooks reconcile state write failed: %w", run.StateErr)
 	}
-	if run.Failures > 0 {
-		return fmt.Errorf("enterprise hooks reconcile failed for %d target(s)", run.Failures)
+	if attentionFailures > 0 {
+		return fmt.Errorf("enterprise hooks reconcile failed for %d target(s)", attentionFailures)
 	}
 	return nil
 }
@@ -2525,6 +2542,16 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 			row.SID = resolved.sid
 			row.UserHome = resolved.home
 		}
+		if enterpriseHookGuardianTargetRemoved(ctx, target, row, targetErr) {
+			row.Removed = true
+			row.Error = "enterprise hooks: target account or profile removed"
+			run.Failures++
+			if prior, ok := recorded[enterpriseHookProtectedTargetKey(row)]; ok && enterpriseHookRemovedAccountRow(prior) {
+				run.Excused = append(run.Excused, row)
+			}
+			run.Rows = append(run.Rows, row)
+			continue
+		}
 		var previousProtection enterpriseHookPreviousProtection
 		if targetErr == nil {
 			previousProtection, targetErr = previousEnterpriseHookProtection(
@@ -2978,6 +3005,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	if err != nil {
 		return run, err
 	}
+	previousState, _, _ := loadEnterpriseHookGuardianState(cfg.DataDir)
 	reportEnterpriseHookManifestSkippedRowsPlatform(enterpriseHookManifest, manifest.Skipped)
 	run.ManifestSHA256 = manifestSHA256
 	apiAddr := strings.TrimSpace(enterpriseHookAPIAddr)
@@ -3055,6 +3083,18 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		if err == nil {
 			row.SID = strings.TrimSpace(resolved.sid)
 			row.UserHome = strings.TrimSpace(resolved.home)
+		}
+		if enterpriseHookGuardianTargetRemoved(ctx, target, row, err) {
+			row.Removed = true
+			row.RevokeProtection = true
+			row.Error = "enterprise hooks: target account or profile removed"
+			rows = append(rows, row)
+			failures++
+			unenrolled[enterpriseHookEnrollmentUnit(target)] = struct{}{}
+			enterpriseHookTargetHealth.clear(row)
+			continue
+		}
+		if err == nil {
 			var authorizationErr error
 			previousProtection, authorizationErr = previousEnterpriseHookProtection(
 				cfg.DataDir,
@@ -3337,6 +3377,9 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		failures,
 		enrollmentErr == nil,
 	)
+	if stateErr == nil {
+		logEnterpriseHookRemovedTransitions(os.Stderr, previousState.Results, rows)
+	}
 	if stateErr == nil && enrollmentErr != nil {
 		stateErr = fmt.Errorf(
 			"publish exact protected enrollment set: %w",
@@ -3588,7 +3631,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			failedOwnedPaths = enterpriseHookWatchFailedOwnedPaths(run)
 		}
 		status := "ok"
-		if run.Failures > 0 || run.StateErr != nil {
+		if run.attentionFailures() > 0 || run.StateErr != nil {
 			status = "attention"
 		}
 		rowsHash := enterpriseHookReconcileRowsHash(run.Rows)
@@ -4614,7 +4657,7 @@ func writeEnterpriseHookReconcileLog(
 		// outcome names each failing target once. Unchanged reconciles stay a
 		// single line, and `enterprise hooks status` repeats the reasons.
 		for _, row := range run.Rows {
-			if row.OK || row.Pending {
+			if row.OK || row.Pending || row.Removed {
 				continue
 			}
 			fmt.Fprintf(writer, "[hook-guardian] target %s failed: %s\n",
@@ -4637,6 +4680,30 @@ func writeEnterpriseHookReconcileLog(
 		watchDirs,
 		triggerTag,
 	)
+}
+
+// The state file persists the transition marker, so interval and retry
+// passes report a confirmed removal only once. A later enrollment under the
+// same name gets a new live row and can be removed again in a later pass.
+func logEnterpriseHookRemovedTransitions(writer io.Writer, previous, current []enterpriseHookReconcileRow) []enterpriseHookReconcileRow {
+	seen := make(map[string]bool, len(previous))
+	for _, row := range previous {
+		if row.Removed {
+			seen[enterpriseHookProtectedTargetKey(row)] = true
+		}
+	}
+	var removed []enterpriseHookReconcileRow
+	for _, row := range current {
+		key := enterpriseHookProtectedTargetKey(row)
+		if !row.Removed || seen[key] {
+			continue
+		}
+		seen[key] = true
+		removed = append(removed, row)
+		fmt.Fprintf(writer, "[hook-guardian] target %s removed: account or profile no longer exists\n",
+			enterpriseHookReconcileLogDetail(enterpriseHookReconcileRowLabel(row)))
+	}
+	return removed
 }
 
 func enterpriseHooksManagedMutationPreflight() error {
@@ -5007,6 +5074,9 @@ func writeEnterpriseHookGuardianState(
 	for _, row := range rows {
 		if row.OK && row.Pending {
 			return fmt.Errorf("hook guardian reconcile row cannot be both successful and pending")
+		}
+		if row.Removed && (row.OK || row.Pending || row.Result != nil || !row.RevokeProtection || strings.TrimSpace(row.Error) == "") {
+			return fmt.Errorf("hook guardian removed row has an inconsistent disposition")
 		}
 		if row.Pending && (row.Result != nil || strings.TrimSpace(row.Error) != "") {
 			return fmt.Errorf("hook guardian pending row contains result or error state")
@@ -5471,7 +5541,7 @@ func mergeProtectedEnterpriseHookTargets(previous, current []enterpriseHookRecon
 		}
 		// A reused or reassigned uid, or a retired Windows target, must not
 		// inherit the previous authorization through the carried-forward row.
-		if row.RevokeProtection {
+		if row.RevokeProtection || row.Removed {
 			continue
 		}
 		if prior, ok := previousByKey[key]; ok {

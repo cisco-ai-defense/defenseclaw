@@ -77,11 +77,20 @@ const enterpriseHookRemovedAccountNote = " (the account was deleted or its profi
 // profile and run repair again, which could not help (GAP-1657). Tests
 // replace it.
 var enterpriseHookRemovedAccountRow = func(row enterpriseHookReconcileRow) bool {
-	if cfg == nil || !cfg.StandaloneEnterprise() || strings.TrimSpace(row.UserHome) == "" {
+	if cfg == nil || !cfg.StandaloneEnterprise() || strings.TrimSpace(row.SID) == "" {
 		return false
 	}
 	return windowsEnterpriseAccountDeleted(row.SID) ||
-		windowsEnterpriseProfileRemoved(row.SID, row.UserHome)
+		(strings.TrimSpace(row.UserHome) != "" && windowsEnterpriseProfileRemoved(row.SID, row.UserHome))
+}
+
+func enterpriseHookGuardianTargetRemoved(
+	_ context.Context,
+	_ enterprisehooks.ManifestTarget,
+	row enterpriseHookReconcileRow,
+	_ error,
+) bool {
+	return enterpriseHookRemovedAccountRow(row)
 }
 
 // windowsEnterpriseProfileRemoved reports a row whose recorded home is gone

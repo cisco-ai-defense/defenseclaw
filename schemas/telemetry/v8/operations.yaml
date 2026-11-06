@@ -13796,6 +13796,9 @@ producer_identity_sets:
   - event_name: legacy.audit.config.update
     bucket: compliance.activity
     compatibility_only: true
+  - event_name: legacy.audit.connector.hook.account.removed
+    bucket: compliance.activity
+    compatibility_only: true
   - event_name: legacy.audit.connector.hook.repaired
     bucket: compliance.activity
     compatibility_only: true
@@ -16596,6 +16599,26 @@ producer_mappings:
   default_identity:
     event_name: legacy.audit.connector.hook
     bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: connector-hook-account-removed
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.compliance_activity
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  - approval_resolution
+  - alert_mutation
+  - protected_boundary_auth_failure
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.connector.hook.account.removed
+    bucket: compliance.activity
     compatibility_only: true
 - producer: audit_action
   key: connector-hook-repaired
