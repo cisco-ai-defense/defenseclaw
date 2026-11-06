@@ -1576,26 +1576,6 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		!trustedSudoersOnlyWrite(facts) {
 		// The unresolved write retains the filesystem reader's notice.
 		if _, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command"); ok {
-			enforcement := findingEnforcementDetectionOnly
-			if request.strictHookProfile && request.EnforcementCapable {
-				enforcement = findingEnforcementAllowed
-			}
-			findings = append(findings, adjustConfidence(input.Tool, RuleFinding{
-				RuleID: rule.ID, Title: "Possible SSH path mention", Severity: rule.Severity,
-				Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
-				Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
-				enforcement: enforcement,
-			}))
-		}
-	}
-	if possible && !symlinkWrite && !request.StrictPolicy && mentionGrade == hookpaths.GradeNone {
-		// The unresolved write retains the filesystem reader's notice.
-=======
-	if possible && !symlinkWrite && !request.StrictPolicy && !trustedSudoersOnlyWrite(facts) {
-		// The ordinary spelling names no protected target. Keep a visible
-		// notice while the default policy allows the command.
->>>>>>> 71c9b304fe (fix(gateway): GAP-0288 GAP-0482 retain named paths within share budget)
-		if _, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command"); ok {
 			findings = append(findings, adjustConfidence(input.Tool, RuleFinding{
 				RuleID: rule.ID, Title: unresolvedWriteTargetTitle, Severity: rule.Severity,
 				Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
