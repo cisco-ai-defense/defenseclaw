@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
@@ -28,14 +29,15 @@ import (
 const (
 	// hiddenWriterFileSDDL: Administrators own the file, Guests may write
 	// it, and the OWNER RIGHTS entry leaves the owner only
-	// FILE_READ_ATTRIBUTES and WRITE_DAC, so neither SYSTEM nor
+	// FILE_READ_ATTRIBUTES, SYNCHRONIZE and WRITE_DAC, so neither SYSTEM nor
 	// Administrators can open it with READ_CONTROL.
-	hiddenWriterFileSDDL = "O:BAG:SYD:P(A;;0x40080;;;OW)(A;;FA;;;BG)"
+	hiddenWriterFileSDDL = "O:BAG:SYD:P(A;;0x140080;;;OW)(A;;FA;;;BG)"
 	// hiddenWriterFolderSDDL is the folder form; it denies listing too.
-	hiddenWriterFolderSDDL = "O:BAG:SYD:P(A;OICI;0x40080;;;OW)(A;OICI;FA;;;BG)"
-	// hiddenGuestOwnedFileSDDL: Guests own the file and are its only entry
-	// (a user-owned data file hidden from SYSTEM and Administrators).
-	hiddenGuestOwnedFileSDDL = "O:BGG:SYD:P(A;;FA;;;BG)"
+	hiddenWriterFolderSDDL = "O:BAG:SYD:P(A;OICI;0x140080;;;OW)(A;OICI;FA;;;BG)"
+	// hiddenGuestOwnedFileSDDL: Guests own the file, and everyone else may
+	// only read its attributes (a user-owned data file hidden from SYSTEM
+	// and Administrators).
+	hiddenGuestOwnedFileSDDL = "O:BGG:SYD:P(A;;FA;;;BG)(A;;0x100080;;;WD)"
 	// hiddenRestoreSDDL gives the fixture back so the temp folder can be
 	// removed.
 	hiddenRestoreSDDL = "O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)"
@@ -53,6 +55,7 @@ func requireHiddenDescriptorElevated(t *testing.T) {
 // descriptor without them, and gives the object back at cleanup.
 func stampHiddenDescriptorForTest(t *testing.T, path, sddl string) {
 	t.Helper()
+	disableBackupPrivilegesForTest(t)
 	stamp := func(sddl string) error {
 		descriptor, err := windows.SecurityDescriptorFromString(sddl)
 		if err != nil {
@@ -210,6 +213,37 @@ func TestStandaloneManagedDataPathsRepairRefusesAHiddenDataFile(t *testing.T) {
 			}
 			if result.Outcome != CanonicalBoundary || !strings.Contains(result.RepairError, "/remove:g") {
 				t.Fatalf("result = %+v, want a boundary refusal naming the way out", result)
+			}
+		})
+	}
+}
+
+// disableBackupPrivilegesForTest disables SeBackupPrivilege and
+// SeRestorePrivilege on the process token for the test, as on an elevated
+// prompt (an elevated SSH or SYSTEM token has them enabled, and backup
+// semantics then read any descriptor). The repair privileges helpers still
+// enable them on their own impersonation thread.
+func disableBackupPrivilegesForTest(t *testing.T) {
+	t.Helper()
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &token); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = token.Close() })
+	for _, name := range []string{"SeBackupPrivilege", "SeRestorePrivilege"} {
+		var luid windows.LUID
+		if err := windows.LookupPrivilegeValue(nil, windows.StringToUTF16Ptr(name), &luid); err != nil {
+			t.Fatal(err)
+		}
+		state := windows.Tokenprivileges{PrivilegeCount: 1, Privileges: [1]windows.LUIDAndAttributes{{Luid: luid}}}
+		var previous windows.Tokenprivileges
+		var size uint32
+		if err := windows.AdjustTokenPrivileges(token, false, &state, uint32(unsafe.Sizeof(previous)), &previous, &size); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if previous.PrivilegeCount > 0 {
+				_ = windows.AdjustTokenPrivileges(token, false, &previous, 0, nil, nil)
 			}
 		})
 	}
