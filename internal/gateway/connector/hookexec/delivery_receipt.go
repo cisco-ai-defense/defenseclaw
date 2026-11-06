@@ -136,18 +136,25 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 				// No 103 is ambiguous: an earlier gateway waits for the
 				// request body to end, while a current gateway may still be
 				// admitting this call. Ask once before ending its receipt path.
-				probeCtx, cancel := context.WithCancel(req.Context())
+				// A health response must never advertise capability for the
+				// original POST through its inherited HTTP trace.
+				probeCtx, cancel := context.WithCancel(context.Background())
+				stopCancel := context.AfterFunc(req.Context(), cancel)
+				cancelProbe := func() {
+					stopCancel()
+					cancel()
+				}
 				legacy := make(chan bool, 1)
 				go func() { legacy <- olderGateway(probeCtx) }()
 				select {
 				case <-delivery.ready:
-					cancel()
+					cancelProbe()
 					return
 				case <-req.Context().Done():
-					cancel()
+					cancelProbe()
 					return
 				case old := <-legacy:
-					cancel()
+					cancelProbe()
 					if !old {
 						select {
 						case <-delivery.ready:
@@ -211,11 +218,10 @@ func gatewayServiceNotServing(state gatewayServiceState) bool {
 func hookDeliveryWait(opts Options) time.Duration {
 	wait := hookDeliveryCapabilityWait
 	if !opts.ManagedEnterprise && !opts.answerBy.IsZero() {
-		// A per-user call uses half of its ordinary answer window to
-		// obtain the capability. A short window retains its larger retry
-		// reserve for a refused first connection.
+		// Leave an earlier gateway time to read the completed body and
+		// answer. A very short window keeps its larger retry reserve.
 		remaining := max(time.Until(opts.answerBy), 0)
-		wait = remaining / 2
+		wait = min(2*wait, remaining/2)
 		if remaining <= 2*hookDeliveryCapabilityWait {
 			wait = remaining / 4
 		}
