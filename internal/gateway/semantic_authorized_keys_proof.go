@@ -1402,7 +1402,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	}
 	decision := request.targetMemo.ActionCommandGradeInShell(input.Command, input.CWD, facts.ActiveHome, globFacts, trustedPOSIXShellCall(input, facts))
 	if input.DialectHint != "" {
-		decision = request.targetMemo.ActionCommandGradeWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
+		decision = decision.Max(request.targetMemo.ActionCommandGradeWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts))
 	}
 	if decision == hookpaths.GradeNamed {
 		return named()
