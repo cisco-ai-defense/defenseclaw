@@ -4479,7 +4479,11 @@ def _check_component_connector_compatibility(
         elif finding.installed_version:
             detail += f"; installed={finding.installed_version}"
             if finding.connector in rechecked.changed:
-                detail += f" (recorded as {rechecked.changed[finding.connector][:64].strip()} before the agent updated)"
+                # Only a plain semver of the recorded text reaches the row.
+                was = rechecked.changed[finding.connector]
+                detail += (
+                    f" (recorded as {was} before the agent updated)" if was else " (it changed since it was recorded)"
+                )
         if finding.installed_version:
             signal = agents.get(finding.connector) if isinstance(agents, dict) else None
             if getattr(signal, "source", "") == "claude-desktop":
@@ -15346,6 +15350,9 @@ def doctor(
     failed/dependency-blocked repair.
     """
     global _json_mode
+    from defenseclaw.doctor_health import reset_installed_version_probes
+
+    reset_installed_version_probes()  # one version probe per agent for this run (GAP-0723)
     if dry_run and not do_fix:
         raise click.UsageError("--dry-run requires --fix")
     if assume_yes and not do_fix:
@@ -16313,6 +16320,9 @@ def _fix_connector_compatibility_review(cfg, *, assume_yes: bool) -> tuple[str, 
             "fail",
             f"{type(exc).__name__}: bounded connector version discovery failed; no version change was attempted",
         )
+    from defenseclaw.doctor_health import reset_installed_version_probes
+
+    reset_installed_version_probes()  # the refresh just re-read every version
     remaining = _connector_compatibility_problems(cfg)
     if not remaining:
         return ("pass", "refreshed version evidence now matches registered connector contracts")

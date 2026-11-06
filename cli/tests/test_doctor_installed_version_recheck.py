@@ -27,13 +27,23 @@ import json
 from types import SimpleNamespace
 from unittest import mock
 
+import pytest
 from defenseclaw import doctor_health
 from defenseclaw.commands import cmd_doctor
 from defenseclaw.commands.cmd_doctor import _DoctorResult
+from defenseclaw.connector_contracts import KIRO_CLI_HOOK_FLOOR
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.inventory.agent_discovery import AgentDiscovery, AgentSignal
 
 _BINARY = "/opt/codex/bin/codex"
+
+
+@pytest.fixture(autouse=True)
+def _fresh_probe_answers():
+    # One probe answer is shared inside a Doctor run; each test is its own run.
+    doctor_health.reset_installed_version_probes()
+    yield
+    doctor_health.reset_installed_version_probes()
 
 
 def _discovery(version: str = "codex-cli 0.160.0", binary: str = _BINARY) -> AgentDiscovery:
@@ -65,7 +75,7 @@ def test_an_updated_agent_is_reported_at_the_version_it_has_now() -> None:
     row, probe = _row(_discovery(), ("codex-cli 0.167.0", ""))
     assert "installed=0.167.0" in row["detail"]
     assert "installed=0.160.0" not in row["detail"]
-    assert "recorded as codex-cli 0.160.0 before the agent updated" in row["detail"]
+    assert "recorded as 0.160.0 before the agent updated" in row["detail"]
     assert row["status"] == "pass"
     assert probe.call_args.args[:2] == ("codex", _BINARY)
 
@@ -165,7 +175,7 @@ def test_recheck_never_mutates_the_evidence_it_was_given() -> None:
         check = doctor_health.recheck_installed_versions(discovery, ["codex"], "")
     assert discovery.agents["codex"].version == "codex-cli 0.160.0"
     assert check.discovery.agents["codex"].version == "codex-cli 0.167.0"
-    assert dict(check.changed) == {"codex": "codex-cli 0.160.0"}
+    assert dict(check.changed) == {"codex": "0.160.0"}
 
 
 def test_recheck_without_evidence_probes_nothing() -> None:
@@ -173,3 +183,167 @@ def test_recheck_without_evidence_probes_nothing() -> None:
         check = doctor_health.recheck_installed_versions(None, ["codex"], "")
     probe.assert_not_called()
     assert check.discovery is None and not check.changed and not check.unchecked
+
+
+def test_a_recorded_banner_never_reaches_the_row_beyond_its_semver() -> None:
+    # M2: the recorded text is evidence from a file; only a plain version is shown.
+    recorded = "codex-cli 0.160.0 INJECTED-MARKER \x1b[31mred"
+    row, _ = _row(_discovery(version=recorded), ("codex-cli 0.167.0", ""))
+    assert "INJECTED-MARKER" not in row["detail"]
+    assert "\x1b" not in row["detail"]
+    assert "installed=0.167.0" in row["detail"]
+    assert "recorded as 0.160.0 before the agent updated" in row["detail"]
+
+
+def test_a_recorded_text_without_a_plain_version_is_not_quoted() -> None:
+    row, _ = _row(_discovery(version="codex-cli build-INJECTED-MARKER"), ("codex-cli 0.167.0", ""))
+    assert "INJECTED-MARKER" not in row["detail"]
+    assert "installed=0.167.0" in row["detail"]
+
+
+def _proxy_discovery(name: str, version: str, binary: str) -> AgentDiscovery:
+    agents = {
+        n: AgentSignal(name=n, installed=False, config_path="", binary_path="", version="", error="")
+        for n in agent_discovery.DISCOVERABLE_CONNECTORS
+    }
+    agents[name] = AgentSignal(name=name, installed=True, config_path="", binary_path=binary, version=version, error="")
+    return AgentDiscovery(scanned_at="2026-11-06T00:00:00Z", agents=agents, cache_hit=True)
+
+
+@pytest.mark.parametrize("name", ["openclaw", "zeptoclaw"])
+def test_a_proxy_connector_row_reports_the_version_it_has_now(name: str) -> None:
+    # M1: proxy connectors state an installed version too.
+    discovery = _proxy_discovery(name, "2026.9.1", f"/opt/{name}/bin/{name}")
+    probe = mock.Mock(return_value=("2026.10.2", ""))
+    with mock.patch.object(agent_discovery, "_version_for_agent_binary", probe):
+        check = doctor_health.recheck_installed_versions(discovery, [name], "")
+    assert check.discovery.agents[name].version == "2026.10.2"
+    assert dict(check.changed) == {name: "2026.9.1"}
+    probe.assert_called_once()
+
+
+@pytest.mark.parametrize("name", ["openclaw", "zeptoclaw"])
+def test_a_proxy_connector_that_cannot_be_probed_is_called_recorded(name: str) -> None:
+    discovery = _proxy_discovery(name, "2026.9.1", f"/opt/{name}/bin/{name}")
+    with mock.patch.object(
+        agent_discovery, "_version_for_agent_binary", return_value=("", agent_discovery.VERSION_PROBE_TIMED_OUT)
+    ):
+        check = doctor_health.recheck_installed_versions(discovery, [name], "")
+    assert check.discovery is discovery
+    assert dict(check.unchecked) == {name: "the version probe timed out"}
+
+
+def _kiro_discovery(forms: list[dict[str, str]], **fields: str) -> AgentDiscovery:
+    agents = {
+        n: AgentSignal(name=n, installed=False, config_path="", binary_path="", version="", error="")
+        for n in agent_discovery.DISCOVERABLE_CONNECTORS
+    }
+    agents["kiro"] = AgentSignal(
+        name="kiro",
+        installed=True,
+        config_path="",
+        binary_path=forms[0]["path"] if forms else fields.get("binary_path", ""),
+        version=fields.get("version", forms[0]["version"] if forms else ""),
+        error="",
+        kiro_forms=forms,
+    )
+    return AgentDiscovery(scanned_at="2026-11-06T00:00:00Z", agents=agents, cache_hit=True)
+
+
+def _kiro_cli_form(version: str, path: str = "/opt/kiro/bin/kiro-cli") -> dict[str, str]:
+    return {"kind": "cli", "version": f"kiro-cli {version}", "unread": "", "path": path}
+
+
+def _kiro_row(discovery, probe_result) -> dict:
+    r = _DoctorResult()
+    with (
+        mock.patch("defenseclaw.doctor_health.read_cached_discovery", return_value=discovery),
+        mock.patch.object(agent_discovery, "_version_for_agent_binary", mock.Mock(return_value=probe_result)),
+        mock.patch.object(cmd_doctor, "_doctor_component_evidence", return_value=()),
+        mock.patch.object(cmd_doctor, "_connector_enabled", return_value=True),
+        mock.patch.object(cmd_doctor, "_unverified_executable_note", return_value=("", "")),
+    ):
+        cmd_doctor._check_component_connector_compatibility(SimpleNamespace(data_dir=""), ["kiro"], r)
+    return next(c for c in r.checks if c["label"] == "Connector compatibility: kiro")
+
+
+def _below(version: str) -> str:
+    major, minor, patch = (int(x) for x in version.split("."))
+    return f"{major}.{max(minor - 1, 0)}.{patch}" if minor else f"{max(major - 1, 0)}.0.0"
+
+
+def _above(version: str) -> str:
+    major, minor, patch = (int(x) for x in version.split("."))
+    return f"{major}.{minor + 1}.{patch}"
+
+
+def test_kiro_updated_past_its_floor_is_no_longer_failed_on_the_recorded_version() -> None:
+    # M1, reverse update: recorded below the hook floor, current at or above it.
+    old, new = _below(KIRO_CLI_HOOK_FLOOR), _above(KIRO_CLI_HOOK_FLOOR)
+    row = _kiro_row(_kiro_discovery([_kiro_cli_form(old)]), (f"kiro-cli {new}", ""))
+    assert row["status"] == "pass"
+    assert f"installed={new}" in row["detail"]
+    assert f"installed={old}" not in row["detail"]
+
+
+def test_kiro_downgraded_below_its_floor_is_no_longer_called_protected_on_the_recorded_version() -> None:
+    # M1: recorded above the floor, current below it. Must not read as protected.
+    old, new = _above(KIRO_CLI_HOOK_FLOOR), _below(KIRO_CLI_HOOK_FLOOR)
+    row = _kiro_row(_kiro_discovery([_kiro_cli_form(old)]), (f"kiro-cli {new}", ""))
+    assert row["status"] != "pass"
+    assert f"installed={old}" not in row["detail"]
+    assert "recorded=" not in row["detail"]
+
+
+def test_kiro_form_that_cannot_be_read_now_is_called_recorded_not_installed() -> None:
+    version = _above(KIRO_CLI_HOOK_FLOOR)
+    row = _kiro_row(
+        _kiro_discovery([_kiro_cli_form(version)]), ("", agent_discovery.VERSION_PROBE_TIMED_OUT)
+    )
+    assert "installed=" not in row["detail"]
+    assert f"recorded={version} (not re-checked now: the version probe timed out)" in row["detail"]
+
+
+def test_kiro_unchanged_keeps_the_plain_installed_row() -> None:
+    version = _above(KIRO_CLI_HOOK_FLOOR)
+    row = _kiro_row(_kiro_discovery([_kiro_cli_form(version)]), (f"kiro-cli {version}", ""))
+    assert f"installed={version}" in row["detail"]
+    assert "recorded" not in row["detail"]
+
+
+def test_kiro_evidence_that_names_no_path_for_a_form_is_never_called_installed() -> None:
+    version = _above(KIRO_CLI_HOOK_FLOOR)
+    form = _kiro_cli_form(version, path="")
+    probe = mock.Mock(return_value=(f"kiro-cli {version}", ""))
+    with mock.patch.object(agent_discovery, "_version_for_agent_binary", probe):
+        check = doctor_health.recheck_installed_versions(_kiro_discovery([form], binary_path="/x"), ["kiro"], "")
+    probe.assert_not_called()
+    assert "kiro" in check.unchecked
+
+
+def test_one_run_probes_each_agent_once_across_the_gate_the_planner_and_the_row() -> None:
+    # M3: connector safety gate, review planner and final row of one dry-run.
+    probe = mock.Mock(return_value=("codex-cli 0.167.0", ""))
+    with (
+        mock.patch.object(cmd_doctor, "_doctor_active_connectors", return_value=["codex"]),
+        mock.patch.object(cmd_doctor, "_connector_enabled", return_value=True),
+        mock.patch("defenseclaw.doctor_health.read_cached_discovery", return_value=_discovery()),
+        mock.patch.object(agent_discovery, "_version_for_agent_binary", probe),
+        mock.patch.object(cmd_doctor, "_doctor_component_evidence", return_value=()),
+        mock.patch.object(cmd_doctor, "_unverified_executable_note", return_value=("", "")),
+    ):
+        cfg = SimpleNamespace(data_dir="")
+        cmd_doctor._plan_connector_compatibility_gate(cfg)
+        cmd_doctor._plan_connector_compatibility_review(cfg)
+        cmd_doctor._check_component_connector_compatibility(cfg, ["codex"], _DoctorResult())
+    assert probe.call_count == 1
+
+
+def test_a_new_run_probes_again() -> None:
+    probe = mock.Mock(side_effect=[("codex-cli 0.167.0", ""), ("codex-cli 0.168.0", "")])
+    with mock.patch.object(agent_discovery, "_version_for_agent_binary", probe):
+        first = doctor_health.recheck_installed_versions(_discovery(), ["codex"], "")
+        doctor_health.reset_installed_version_probes()
+        second = doctor_health.recheck_installed_versions(_discovery(), ["codex"], "")
+    assert first.discovery.agents["codex"].version == "codex-cli 0.167.0"
+    assert second.discovery.agents["codex"].version == "codex-cli 0.168.0"

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import dataclasses
 import re
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -38,6 +39,7 @@ from typing import Any
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACTS,
     KIRO_CLI_HOOK_FLOOR,
+    KIRO_FORM_CLI,
     KIRO_FORM_IDE,
     KIRO_IDE_GLOBAL_HOOKS_FLOOR,
     PROXY_CONNECTORS,
@@ -47,8 +49,12 @@ from defenseclaw.connector_contracts import (
     STATUS_UNVERSIONED,
     ConnectorContract,
     KiroFormVerdict,
+    assess_kiro,
     assess_kiro_signal,
+    judge_kiro_form,
+    kiro_cli_below_hook_floor,
     kiro_cli_below_hook_floor_reason,
+    kiro_ide_below_hook_floor,
     known_broken_entry,
     known_warning_entry,
     normalize_agent_version,
@@ -321,10 +327,11 @@ def _discovery_from_hook_contract_lock(data_dir: str) -> _LockDiscovery | None:
 class InstalledVersionCheck:
     """Discovery evidence with each agent version re-read now.
 
-    ``changed`` maps a connector to the version the evidence recorded, when
-    the agent reports another one today. ``unchecked`` maps a connector to
-    why its recorded version could not be re-read; its row must call the
-    value recorded, not installed (GAP-0723).
+    ``changed`` maps a connector to the semver the evidence recorded, when
+    the agent reports another one today (empty when the recorded text held no
+    plain version: probe-style evidence never reaches a row). ``unchecked``
+    maps a connector to why its recorded version could not be re-read; its
+    row must call the value recorded, not installed (GAP-0723).
     """
 
     discovery: Any | None
@@ -332,21 +339,145 @@ class InstalledVersionCheck:
     unchecked: Mapping[str, str]
 
 
+#: How long one probe answer is shared. Doctor clears it when a run starts, so
+#: the connector safety gate, the repair planner and the compatibility row of
+#: one run judge the same answer (and a slow probe is paid once); the bound
+#: keeps a caller outside a run from keeping an answer for long.
+_PROBE_SHARE_SECONDS = 120.0
+_probe_answers: dict[tuple[str, str, str], tuple[float, str, str]] = {}
+
+
+def reset_installed_version_probes() -> None:
+    """Forget every shared probe answer (Doctor calls it at the start of a run
+    and after an attended discovery refresh)."""
+
+    _probe_answers.clear()
+
+
+def _probe_agent_version(name: str, path: str, data_dir: str) -> tuple[str, str]:
+    from defenseclaw.inventory import agent_discovery
+
+    key = (name, path, data_dir)
+    now = time.monotonic()
+    hit = _probe_answers.get(key)
+    if hit is not None and now - hit[0] < _PROBE_SHARE_SECONDS:
+        return hit[1], hit[2]
+    spec = agent_discovery._SPECS.get(name)
+    version_args = spec.version_args if spec is not None else ("--version",)
+    found, error = agent_discovery._version_for_agent_binary(name, path, version_args, data_dir=data_dir or None)
+    _probe_answers[key] = (time.monotonic(), found, error)
+    return found, error
+
+
+def _probe_failure_reason(error: str) -> str:
+    from defenseclaw.inventory import agent_discovery
+
+    if error == agent_discovery.UNTRUSTED_PREFIX_ERROR:
+        return "its executable is not in a trusted install location"
+    if error == agent_discovery.VERSION_PROBE_TIMED_OUT:
+        return "the version probe timed out"
+    return "the version probe did not return a version"
+
+
+def _recheck_kiro(signal: Any, data_dir: str) -> tuple[Any, bool, str]:
+    """Re-read every Kiro install the evidence names and re-judge the forms.
+
+    Kiro is judged form by form (assess_kiro_signal), from ``kiro_forms`` and
+    not from ``AgentSignal.version``, so every form is probed on the path the
+    evidence recorded for it. Evidence that names a version without the path
+    of each form it covers cannot be re-read and stays recorded. A form that
+    cannot be read now stays as recorded and the connector is ``unchecked``.
+    Returns ``(signal, changed, unchecked_reason)``.
+    """
+
+    from defenseclaw.inventory import agent_discovery
+
+    recorded_forms = getattr(signal, "kiro_forms", None)
+    if isinstance(recorded_forms, (list, tuple)) and recorded_forms:
+        forms = [{k: str(v or "") for k, v in f.items()} for f in recorded_forms if isinstance(f, dict)]
+        if not forms or any(not f.get("path", "").strip() for f in forms):
+            return signal, False, "an install it recorded has no executable path"
+    else:
+        path = getattr(signal, "binary_path", "")
+        version = getattr(signal, "version", "")
+        if getattr(signal, "kiro_cli_version", "") and getattr(signal, "kiro_ide_version", ""):
+            return signal, False, "the paths of its installs are not recorded"
+        if not isinstance(path, str) or not path.strip():
+            return signal, False, "no executable path is recorded"
+        forms = [{"kind": "", "version": version if isinstance(version, str) else "", "unread": "", "path": path}]
+
+    reason = ""
+    changed = False
+    updated: list[dict[str, str]] = []
+    for form in forms:
+        found, error = _probe_agent_version("kiro", form["path"], data_dir)
+        normalized = normalize_agent_version(found) if found.strip() and not error else ""
+        surface = agent_discovery._kiro_binary_surface(form["path"], found) if normalized else ""
+        if not normalized or not surface:
+            reason = reason or _probe_failure_reason(error)
+            updated.append(form)
+            continue
+        read = f"kiro-cli {normalized}" if surface == KIRO_FORM_CLI else normalized
+        if (
+            normalize_agent_version(form["version"]) != normalized
+            or (form.get("kind", "") and form["kind"] != surface)
+            or form.get("unread", "")
+        ):
+            changed = True
+        updated.append({"kind": surface, "version": read, "unread": "", "path": form["path"]})
+    if not changed:
+        return signal, False, reason
+
+    per_surface: dict[str, tuple[str, str]] = {}
+    for form in updated:
+        if not form["version"] or form["unread"]:
+            continue
+        below = kiro_cli_below_hook_floor if form["kind"] == KIRO_FORM_CLI else kiro_ide_below_hook_floor
+        held = per_surface.get(form["kind"])
+        if held is None or (below(held[1]) and not below(form["version"])):
+            per_surface[form["kind"]] = (form["path"], form["version"])
+    selected = assess_kiro(
+        [judge_kiro_form(f["kind"], f["version"], unread=f["unread"], path=f["path"]) for f in updated]
+    ).selected
+    binary_path = getattr(signal, "binary_path", "")
+    version = getattr(signal, "version", "")
+    if selected is not None and selected.path:
+        binary_path, version = selected.path, selected.version
+    elif per_surface:
+        binary_path, version = per_surface.get(KIRO_FORM_CLI) or per_surface[KIRO_FORM_IDE]
+    return (
+        dataclasses.replace(
+            signal,
+            binary_path=binary_path,
+            version=version,
+            error="",
+            kiro_cli_version=per_surface.get(KIRO_FORM_CLI, ("", ""))[1],
+            kiro_ide_version=per_surface.get(KIRO_FORM_IDE, ("", ""))[1],
+            kiro_forms=updated,
+        ),
+        True,
+        reason,
+    )
+
+
 def recheck_installed_versions(
     discovery: Any | None,
     connectors: Iterable[str],
     data_dir: str,
 ) -> InstalledVersionCheck:
-    """Re-read the version of each hook connector agent, once per run.
+    """Re-read the version of each active connector's agent.
 
     The discovery cache lives a day and the gateway hook contract lock
     keeps the version setup selected the contract from, so after the agent
     updated both still name the old version. Doctor judged compatibility on
     it and printed it as ``installed``. This runs the same bounded,
     trusted-path-only ``--version`` probe discovery uses (never a scan, a
-    write or a terminal) on the executable the evidence names, and returns
-    the evidence with the version found now. A probe that cannot run leaves
-    the recorded version in place and says why in ``unchecked``.
+    write or a terminal) on the executable the evidence names, for every
+    connector row that states a version (hook, proxy and Kiro forms alike),
+    and returns the evidence with the version found now. A probe that cannot
+    run leaves the recorded version in place and says why in ``unchecked``.
+    One probe answer is shared by every caller of a Doctor run
+    (:func:`reset_installed_version_probes`).
     """
 
     agents = getattr(discovery, "agents", None)
@@ -360,41 +491,46 @@ def recheck_installed_versions(
     unchecked: dict[str, str] = {}
     for raw_name, signal in agents.items():
         name = normalize_connector(raw_name) if isinstance(raw_name, str) and len(raw_name) <= 128 else ""
-        spec = agent_discovery._SPECS.get(name)
         recorded = getattr(signal, "version", "")
         if (
             name not in wanted
-            or name not in HOOK_CONTRACTS
-            or name == "kiro"
-            or spec is None
             or not dataclasses.is_dataclass(signal)
             or not getattr(signal, "installed", False)
             or not isinstance(recorded, str)
-            or not recorded.strip()
+            or not (recorded.strip() or name == "kiro")
         ):
+            continue
+        if name == "kiro":
+            before = _kiro_installed_token(signal)
+            fresh, did_change, why = _recheck_kiro(signal, data_dir)
+            if why:
+                unchecked[name] = why
+            if did_change:
+                changed[name] = before
+                updated[raw_name] = fresh
+            continue
+        if name not in agent_discovery._SPECS:
+            unchecked[name] = "no version probe is defined for it"
             continue
         path = getattr(signal, "binary_path", "")
         if not isinstance(path, str) or not path.strip():
             unchecked[name] = "no executable path is recorded"
             continue
-        found, error = agent_discovery._version_for_agent_binary(
-            name, path, spec.version_args, data_dir=data_dir or None
-        )
+        found, error = _probe_agent_version(name, path, data_dir)
         if error or not found.strip():
-            unchecked[name] = (
-                "its executable is not in a trusted install location"
-                if error == agent_discovery.UNTRUSTED_PREFIX_ERROR
-                else "the version probe timed out"
-                if error == agent_discovery.VERSION_PROBE_TIMED_OUT
-                else "the version probe did not return a version"
-            )
+            unchecked[name] = _probe_failure_reason(error)
             continue
         if found.strip() != recorded.strip():
-            changed[name] = recorded
+            changed[name] = _safe_semver_from_agent(recorded)
             updated[raw_name] = dataclasses.replace(signal, version=found, error="")
     if not changed:
         return InstalledVersionCheck(discovery, {}, unchecked)
     return InstalledVersionCheck(dataclasses.replace(discovery, agents=updated), changed, unchecked)
+
+
+def _kiro_installed_token(signal: Any) -> str:
+    selected = assess_kiro_signal(signal).selected
+    return _safe_semver_from_agent(selected.normalized) if selected is not None else ""
 
 
 def assess_component_health(
