@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/skillrootsafe"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
@@ -22,6 +23,18 @@ import (
 )
 
 func TestGAP0613SharedUnavailableSkillRootCoversEveryConnector(t *testing.T) {
+	assertSharedUnavailableSkillRootCoversEveryConnector(t, false)
+}
+
+// An explicit gateway.watcher skill dir replaces every connector's own
+// folders, so an unavailable one is admission coverage lost for every
+// configured connector, not only the primary one.
+func TestGAP0613ExplicitSharedSkillRootCoversEveryConnector(t *testing.T) {
+	assertSharedUnavailableSkillRootCoversEveryConnector(t, true)
+}
+
+func assertSharedUnavailableSkillRootCoversEveryConnector(t *testing.T, explicit bool) {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix ownership checks")
 	}
@@ -48,6 +61,9 @@ func TestGAP0613SharedUnavailableSkillRootCoversEveryConnector(t *testing.T) {
 	}
 	cfg.Gateway.Watcher.Enabled = true
 	cfg.Gateway.Watcher.Skill.Enabled = true
+	if explicit {
+		cfg.Gateway.Watcher.Skill.Dirs = []string{root}
+	}
 	cfg.Gateway.Watcher.Plugin.Enabled = false
 	cfg.Watch.RescanEnabled = false
 	s := &Sidecar{cfg: cfg, store: store, logger: logger, health: NewSidecarHealth()}
@@ -122,6 +138,63 @@ func TestGAP0613SharedUnavailableSkillRootCoversEveryConnector(t *testing.T) {
 	}
 	if names, ok := s.health.Snapshot().Watcher.Details["admission_scanning_off"].([]string); !ok || !slices.Contains(names, "claudecode") || !slices.Contains(names, "amp") {
 		t.Errorf("watcher health affected connectors = %v", names)
+	}
+}
+
+// Every configured connector consumes each explicit skill and plugin dir,
+// while the event owner of an explicit dir stays the primary connector.
+func TestGAP0613ExplicitRootsListEveryConfiguredConnector(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	cfg := config.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"claudecode": {}, "amp": {}, "codex": {},
+	}
+	skillRoot, pluginRoot := filepath.Join(home, "skills"), filepath.Join(home, "plugins")
+	wcfg := cfg.Gateway.Watcher
+	wcfg.Enabled = true
+	wcfg.Skill.Enabled, wcfg.Skill.Dirs = true, []string{skillRoot}
+	wcfg.Plugin.Enabled, wcfg.Plugin.Dirs = true, []string{pluginRoot}
+	conns := watcherConnectors(connector.NewDefaultRegistry(), cfg)
+	if len(conns) != 3 {
+		t.Fatalf("configured connectors = %d, want 3", len(conns))
+	}
+	skillDirs, pluginDirs, roots, src, consumers := resolveWatcherDirsForConnectors(cfg, conns, wcfg)
+	if !slices.Equal(skillDirs, []string{skillRoot}) || !slices.Equal(pluginDirs, []string{pluginRoot}) {
+		t.Fatalf("explicit dirs = %v %v", skillDirs, pluginDirs)
+	}
+	if _, tagged := roots[skillRoot]; tagged {
+		t.Errorf("explicit skill dir got an event owner: %v", roots)
+	}
+	if _, tagged := roots[pluginRoot]; tagged {
+		t.Errorf("explicit plugin dir got an event owner: %v", roots)
+	}
+	enrolled := &enrolledWatchSet{consumers: []watcher.RootConsumer{{Kind: "skill", Path: filepath.Join(home, "user", ".claude", "skills"), Connector: "claudecode"}}}
+	for name, list := range map[string][]watcher.RootConsumer{
+		"per-user": consumers,
+		"enrolled": enrolledRootConsumers(enrolled, consumers, src),
+	} {
+		for _, kind := range []struct{ kind, path string }{{"skill", skillRoot}, {"plugin", pluginRoot}} {
+			for _, conn := range []string{"claudecode", "amp", "codex"} {
+				if !slices.ContainsFunc(list, func(c watcher.RootConsumer) bool {
+					return c.Kind == kind.kind && c.Path == kind.path && c.Connector == conn
+				}) {
+					t.Errorf("%s: explicit %s dir missing %s consumer: %+v", name, kind.kind, conn, list)
+				}
+			}
+		}
+	}
+	if got := enrolledRootConsumers(enrolled, consumers, src); !slices.Contains(got, enrolled.consumers[0]) {
+		t.Errorf("enrolled consumers lost the enrolled user root: %+v", got)
+	}
+	// Without explicit dirs a managed watcher does not watch the gateway's
+	// own connector folders, so they add no consumers there.
+	wcfg.Skill.Dirs, wcfg.Plugin.Dirs = nil, nil
+	_, _, _, src, consumers = resolveWatcherDirsForConnectors(cfg, conns, wcfg)
+	if got := enrolledRootConsumers(enrolled, consumers, src); !slices.Equal(got, enrolled.consumers) {
+		t.Errorf("enrolled consumers with connector-discovered dirs = %+v, want %+v", got, enrolled.consumers)
 	}
 }
 
