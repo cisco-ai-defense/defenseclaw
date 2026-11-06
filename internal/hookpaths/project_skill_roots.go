@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
@@ -60,10 +61,13 @@ func CodexSelectedSkillName(prompt string) string {
 	return name
 }
 
-// projectSkillCallSelection reads a Skill call with the gateway's parser:
-// the top-level event fields first, then the tool input. The name is empty
-// when the gateway could not use it as a selected-folder fact value.
-func projectSkillCallSelection(payload, args json.RawMessage) (name, source string) {
+// projectSkillCallSelection reads a Skill call with the gateway parser. The
+// name is the one the gateway decides on: the top-level event fields first,
+// then the tool input. It is empty when the gateway could not use it as a
+// selected-folder fact value. sources lists every explicit source path in
+// either field set, so a path the gateway does not read next to that name
+// still decides which folder the call selects.
+func projectSkillCallSelection(payload, args json.RawMessage) (name string, sources []string) {
 	for _, raw := range []json.RawMessage{payload, args} {
 		var values map[string]any
 		if json.Unmarshal(raw, &values) != nil {
@@ -73,19 +77,24 @@ func projectSkillCallSelection(payload, args json.RawMessage) (name, source stri
 		if selected == "" {
 			continue
 		}
-		if projectSkillName(selected) != selected {
-			return "", ""
+		if name == "" {
+			if projectSkillName(selected) != selected {
+				return "", nil
+			}
+			name = selected
 		}
-		return selected, path
+		if path != "" && !slices.Contains(sources, path) {
+			sources = append(sources, path)
+		}
 	}
-	return "", ""
+	return name, sources
 }
 
 // addProjectSkillSelectedFacts names the folder a Skill call selects under
-// each unverified root in facts. An explicit source binds the folder by path;
-// a name-only call binds the folder of that name or declared name.
+// each unverified root in facts. Explicit sources bind folders by path; a
+// name-only call binds the folder of that name or declared name.
 func addProjectSkillSelectedFacts(facts map[string]string, payload, args json.RawMessage, cwd string) {
-	name, source := projectSkillCallSelection(payload, args)
+	name, sources := projectSkillCallSelection(payload, args)
 	if name == "" {
 		return
 	}
@@ -96,9 +105,12 @@ func addProjectSkillSelectedFacts(facts map[string]string, payload, args json.Ra
 		}
 	}
 	for _, root := range roots {
-		dirs := projectSkillSelectedFolders(root, name)
-		if source != "" {
-			dirs = projectSkillSourceFolders(root, name, source, cwd)
+		var dirs []string
+		if len(sources) == 0 {
+			dirs = projectSkillSelectedFolders(root, name)
+		}
+		for _, source := range sources {
+			dirs = append(dirs, projectSkillSourceFolders(root, name, source, cwd)...)
 		}
 		for _, dir := range dirs {
 			facts[ProjectSkillSelectedPrefix+dir] = name
@@ -119,21 +131,27 @@ func projectSkillName(raw string) string {
 	return name
 }
 
-const maxProjectSelectedScan = 4096
-
+// projectSkillSelectedFolders returns the folder under root that a name-only
+// call selects: root/name when it holds a manifest, else the folder whose
+// manifest declares name. The lookup reads the whole root as the calling
+// user, so it neither invents a project copy nor misses a late folder. When
+// the caller cannot list the root, root/name counts only if its manifest
+// could not be ruled out; the agent, running as the same user, cannot find
+// a declared-name folder there either.
 func projectSkillSelectedFolders(root, name string) []string {
 	direct := filepath.Join(root, name)
-	if info, err := os.Stat(filepath.Join(direct, "SKILL.md")); err == nil && info.Mode().IsRegular() {
+	info, directErr := os.Stat(filepath.Join(direct, "SKILL.md"))
+	if directErr == nil && info.Mode().IsRegular() {
 		return []string{direct}
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return []string{direct}
-	}
-	for i, entry := range entries {
-		if i >= maxProjectSelectedScan {
+		if directErr != nil && !errors.Is(directErr, fs.ErrNotExist) {
 			return []string{direct}
 		}
+		return nil
+	}
+	for _, entry := range entries {
 		if strings.EqualFold(entry.Name(), name) || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
@@ -179,14 +197,17 @@ func projectSkillSourceFolders(root, name, source, cwd string) []string {
 			return []string{filepath.Join(root, child)}
 		}
 	}
-	// A folder under the root may itself be a link to the source.
+	// A folder under the root may itself be a link or other reparse point
+	// to the source. A plain folder or file resolves under the resolved root,
+	// which the checks above cover, so only the other entries are resolved,
+	// all of them.
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil
 	}
-	for i, entry := range entries {
-		if i >= maxProjectSelectedScan {
-			break
+	for _, entry := range entries {
+		if kind := entry.Type(); kind == 0 || kind == fs.ModeDir {
+			continue
 		}
 		dir := filepath.Join(root, entry.Name())
 		resolved, err := filepath.EvalSymlinks(dir)
