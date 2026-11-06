@@ -599,11 +599,12 @@ func nonbindingPrintfCall(call *syntax.CallExpr, home string) bool {
 }
 
 // namedReadDestinations recognizes Bash read options and explicit plain
-// destinations. The scan marks every destination, including an -a array,
-// unknown and can retain other copy-word names. Unknown options or dynamic
-// words may bind a name the scan cannot identify.
+// destinations. A read without a name writes REPLY, and read -a assigns only
+// its array argument. The scan marks every named destination unknown and can
+// retain other copy-word names. Unknown options or dynamic words may bind a
+// name the scan cannot identify.
 func namedReadDestinations(call *syntax.CallExpr, home string) ([]string, bool) {
-	if call == nil || len(call.Assigns) != 0 || len(call.Args) < 2 {
+	if call == nil || len(call.Assigns) != 0 || len(call.Args) == 0 {
 		return nil, false
 	}
 	program, fixed := literalProgramWord(call.Args[0], home)
@@ -612,6 +613,7 @@ func namedReadDestinations(call *syntax.CallExpr, home string) ([]string, bool) 
 	}
 	names := make([]string, 0, len(call.Args)-1)
 	options := true
+	arrayDestination := false
 	for index := 1; index < len(call.Args); index++ {
 		name, fixed := StaticWord(call.Args[index], home)
 		if !fixed {
@@ -643,6 +645,7 @@ func namedReadDestinations(call *syntax.CallExpr, home string) ([]string, bool) 
 							return nil, false
 						}
 						names = append(names, value)
+						arrayDestination = true
 					}
 					// The remaining bytes belong to this option's value.
 					pos = len(name)
@@ -653,12 +656,17 @@ func namedReadDestinations(call *syntax.CallExpr, home string) ([]string, bool) 
 			continue
 		}
 		options = false
+		if arrayDestination {
+			// Bash ignores positional names after an -a array. StaticWord
+			// above still rejects expansions that could change a name.
+			continue
+		}
 		if !plainShellVariableName(name) {
 			return nil, false
 		}
 		names = append(names, name)
 	}
-	return names, len(names) > 0
+	return names, true
 }
 
 // shellSpecialParameters are names bash sets itself (on every command, at
