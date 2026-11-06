@@ -56,8 +56,9 @@ func claudeChainFilesIn(dir string) claudeChainFiles {
 }
 
 type claudeChainRecord struct {
-	Launcher string `json:"launcher"`
-	Digest   string `json:"guard_sha256"`
+	Launcher   string `json:"launcher"`
+	Digest     string `json:"guard_sha256"`
+	Generation string `json:"generation"`
 }
 
 func readClaudeChainRecord(files claudeChainFiles) (claudeChainRecord, bool) {
@@ -69,13 +70,30 @@ func readClaudeChainRecord(files claudeChainFiles) (claudeChainRecord, bool) {
 	defer file.Close()
 	data, err := io.ReadAll(io.LimitReader(file, 64<<10+1))
 	if err != nil || len(data) > 64<<10 || json.Unmarshal(data, &record) != nil ||
-		!hookguard.AbsoluteHookExecutable(record.Launcher) || len(record.Digest) != 64 {
+		!hookguard.AbsoluteHookExecutable(record.Launcher) || len(record.Digest) != 64 ||
+		!claudeChainGenerationName(record.Generation) {
 		return claudeChainRecord{}, false
 	}
 	if _, err := hex.DecodeString(record.Digest); err != nil {
 		return claudeChainRecord{}, false
 	}
 	return record, true
+}
+
+func claudeChainGenerationName(name string) bool {
+	if !strings.HasPrefix(name, "chain-") || len(name) <= len("chain-") {
+		return false
+	}
+	for _, c := range name[len("chain-"):] {
+		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func claudeChainVersionFiles(root string, record claudeChainRecord) claudeChainFiles {
+	return claudeChainFilesIn(filepath.Join(root, record.Generation))
 }
 
 func claudeWrapperSafe(path string) bool {
@@ -181,15 +199,15 @@ var claudeChainProbe = func(program, dir string) error {
 	return nil
 }
 
-// ensureClaudeChain publishes a guard and a separate approved copy before
-// Setup writes the wrapper. A bad new source never replaces a working chain.
+// ensureClaudeChain publishes a new guard pair before Setup writes the wrapper.
+// Existing registrations keep their pair throughout an update.
 func ensureClaudeChain(launcher string) error {
 	dir := claudeChainDir()
 	if dir == "" || !claudeWrapperSafe(launcher) {
 		return nil
 	}
-	files := claudeChainFilesIn(dir)
-	if !claudeWrapperSafe(files.guard) || !claudeWrapperSafe(files.approved) {
+	rootFiles := claudeChainFilesIn(dir)
+	if !claudeWrapperSafe(rootFiles.guard) || !claudeWrapperSafe(rootFiles.approved) {
 		return fmt.Errorf("the Claude Code hook chain path cannot be rendered by cmd.exe")
 	}
 	claudeChainMu.Lock()
@@ -197,9 +215,13 @@ func ensureClaudeChain(launcher string) error {
 	if err := safefile.ProtectDirectory(dir); err != nil {
 		return fmt.Errorf("protect Claude Code hook chain: %w", err)
 	}
-	record, present := readClaudeChainRecord(files)
+	record, present := readClaudeChainRecord(rootFiles)
 	if present && !pathidentity.Same(record.Launcher, launcher) {
 		present = false
+	}
+	var files claudeChainFiles
+	if present {
+		files = claudeChainVersionFiles(dir, record)
 	}
 	source := claudeChainSource(launcher)
 	if source == "" {
@@ -238,17 +260,35 @@ func ensureClaudeChain(launcher string) error {
 		}
 		return fmt.Errorf("installed Claude Code guard cannot start; run the DefenseClaw installer again: %w", err)
 	}
-	if err := writeClaudeChainFile(files.approved, body); err != nil {
+	versionDir, err := os.MkdirTemp(dir, "chain-")
+	if err != nil {
+		return fmt.Errorf("stage Claude Code guard pair: %w", err)
+	}
+	published := false
+	defer func() {
+		if !published {
+			_ = os.RemoveAll(versionDir)
+		}
+	}()
+	if err := safefile.ProtectDirectory(versionDir); err != nil {
+		return fmt.Errorf("protect Claude Code guard pair: %w", err)
+	}
+	newFiles := claudeChainFilesIn(versionDir)
+	if err := writeClaudeChainFile(newFiles.approved, body); err != nil {
 		return fmt.Errorf("publish approved Claude Code guard: %w", err)
 	}
-	if err := writeClaudeChainFile(files.guard, body); err != nil {
+	if err := writeClaudeChainFile(newFiles.guard, body); err != nil {
 		return fmt.Errorf("publish Claude Code guard: %w", err)
 	}
-	encoded, err := json.Marshal(claudeChainRecord{Launcher: launcher, Digest: want})
+	encoded, err := json.Marshal(claudeChainRecord{Launcher: launcher, Digest: want, Generation: filepath.Base(versionDir)})
 	if err != nil {
 		return err
 	}
-	return writeClaudeChainFile(files.record, append(encoded, '\n'))
+	if err := writeClaudeChainFile(rootFiles.record, append(encoded, '\n')); err != nil {
+		return err
+	}
+	published = true
+	return nil
 }
 
 // EnsureClaudeCodeChain restores the registered per-user guard from its
@@ -284,8 +324,9 @@ var claudeChainFor = func(launcher string) (guard, approved string) {
 	if dir == "" || !claudeWrapperSafe(launcher) {
 		return "", ""
 	}
-	files := claudeChainFilesIn(dir)
-	record, ok := readClaudeChainRecord(files)
+	rootFiles := claudeChainFilesIn(dir)
+	record, ok := readClaudeChainRecord(rootFiles)
+	files := claudeChainVersionFiles(dir, record)
 	if !ok || !pathidentity.Same(record.Launcher, launcher) ||
 		!claudeWrapperSafe(files.guard) || !claudeWrapperSafe(files.approved) {
 		return "", ""
