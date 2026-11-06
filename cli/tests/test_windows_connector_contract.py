@@ -100,3 +100,11 @@ def test_windows_native_required_needs_the_contract_jobs() -> None:
     assert "needs.changes.outputs.windows_contract" in jobs["contract-assets"]["if"]
     for name in ("connector-contract", "install-lifecycle"):
         assert "needs.contract-assets.result == 'success'" in jobs[name]["if"]
+
+
+def test_the_parser_self_test_runs_in_the_powershell_job() -> None:
+    steps = "\n".join(step.get("run", "") for step in _jobs()["powershell-static"]["steps"])
+    assert "run-windows-install.ps1 -Operation self-test" in steps
+    harness = HARNESS.read_text(encoding="utf-8")
+    # Both Codex start forms and both bridge forms (rel-1-0-6 GAP-0676).
+    assert "launcher-guard-sibling" in harness and "(?<answer>" in harness

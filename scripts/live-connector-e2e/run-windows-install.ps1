@@ -28,17 +28,19 @@
         install, version, status, doctor, the TUI at 80x24, a repair re-run of
         install.ps1, then `defenseclaw uninstall --all --binaries --yes` and
         nothing of the install left (files, processes, Run value, Path entry).
+      -Operation self-test
+        the hook command parsers read every form setup renders (no install).
 
     No vendor agent is installed or run: the hook contract is the installed
     DefenseClaw entrypoint. A green cell is not connector certification.
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('contract', 'lifecycle')][string]$Operation = 'contract',
+    [ValidateSet('contract', 'lifecycle', 'self-test')][string]$Operation = 'contract',
     [ValidateSet('codex', 'claudecode', 'amp', 'copilot', 'cursor', 'devin', 'hermes', 'antigravity', 'opencode')]
     [string]$Connector = 'codex',
-    [Parameter(Mandatory = $true)][string]$Assets,
-    [Parameter(Mandatory = $true)][string]$StateRoot,
+    [string]$Assets = '',
+    [string]$StateRoot = '',
     [int]$CommandTimeoutSeconds = 300
 )
 
@@ -47,12 +49,17 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $WorkspaceRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$Assets = (Resolve-Path -LiteralPath $Assets).ProviderPath
+if ($Operation -eq 'self-test') { $StateRoot = Join-Path ([IO.Path]::GetTempPath()) ('dc-contract-self-test-' + [Guid]::NewGuid().ToString('N')) }
+elseif (-not $Assets -or -not $StateRoot) { throw "-Operation $Operation needs -Assets and -StateRoot" }
+else { $Assets = (Resolve-Path -LiteralPath $Assets).ProviderPath }
 New-Item -ItemType Directory -Force -Path $StateRoot | Out-Null
 # Real path: DefenseClaw refuses a data dir reached through a junction.
 $StateRoot = (Get-Item -LiteralPath $StateRoot).FullName
 $script:Results = Join-Path $StateRoot 'results.jsonl'
 $script:Failures = [Collections.Generic.List[string]]::new()
+$script:HarnessBash = $null
+$script:AgentFixtures = @()
+$script:FixtureDirectories = [Collections.Generic.List[string]]::new()
 $WindowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 
 function Write-Result([string]$EventName, [ValidateSet('pass', 'fail', 'skip')][string]$Status, [string]$Detail = '') {
@@ -104,6 +111,21 @@ function Invoke-Tool {
 function Enter-Profile {
     $script:ProfileHome = Join-Path $StateRoot 'home'
     if (Test-Path -LiteralPath $script:ProfileHome) { throw "profile $script:ProfileHome already exists; use a new -StateRoot" }
+    # A real profile's DACL: this account, SYSTEM and Administrators, not
+    # inherited. DefenseClaw refuses private folders other users can write to,
+    # and a state root below a shared folder inherits such grants.
+    New-Item -ItemType Directory -Force -Path $script:ProfileHome | Out-Null
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetAccessRuleProtection($true, $false)
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    foreach ($sid in @($user, [Security.Principal.SecurityIdentifier]::new('S-1-5-18'), [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))) {
+        $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $sid, [Security.AccessControl.FileSystemRights]::FullControl,
+            [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
+            [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow))
+    }
+    $security.SetOwner($user)
+    Set-Acl -LiteralPath $script:ProfileHome -AclObject $security
     # Laid out like a real profile: .NET resolves the known folders from
     # USERPROFILE and answers "" when they are missing.
     foreach ($dir in 'AppData\Local', 'AppData\Roaming', 'AppData\Local\Temp') {
@@ -124,6 +146,9 @@ function Enter-Profile {
         Remove-Item "Env:$name" -ErrorAction SilentlyContinue
     }
     $env:DEFENSECLAW_NO_UPDATE_CHECK = '1'
+    # Hermes resolves its home through the LocalAppData Known Folder, not the
+    # environment, unless HERMES_HOME names it: keep its config in this profile.
+    $env:HERMES_HOME = Join-Path $env:LOCALAPPDATA 'hermes'
     $script:Bin = Join-Path $script:ProfileHome '.local\bin'
     $script:DcHome = Join-Path $script:ProfileHome '.defenseclaw'
     $script:VenvPython = Join-Path $script:DcHome '.venv\Scripts\python.exe'
@@ -172,6 +197,9 @@ config.setdefault("gateway", {})["api_port"] = port
 with open(path, "w", encoding="utf-8") as stream:
     yaml.safe_dump(config, stream, sort_keys=False)
 '@, $config, [string]$script:Port) | Out-Null
+    # Commands that reach the gateway without a connector binding (the Amp
+    # plugin's `defenseclaw-gateway hook` path) use the default port unless told.
+    $env:DEFENSECLAW_GATEWAY_ADDR = "127.0.0.1:$script:Port"
     Write-Result init pass "config v8 with the contract JSONL destination; gateway on 127.0.0.1:$script:Port"
 }
 
@@ -188,6 +216,125 @@ function Wait-Gateway([int]$Timeout = 90) {
 function Stop-Gateway {
     $gateway = Join-Path $script:Bin 'defenseclaw-gateway.exe'
     if (Test-Path -LiteralPath $gateway) { Invoke-Tool $gateway @('stop') -Allowed @(0, 1, 2, 3) -Timeout 60 | Out-Null }
+}
+
+# -- Version-only stand-ins for the vendor clients -------------------------------
+
+# Setup on Windows records the agent executable it guards (Codex, Claude Code,
+# Amp, Hermes, OpenCode) and admits it only from a built-in trusted folder,
+# which it resolves through the Known Folder API, not the environment. These
+# stand-ins answer the version probe (and Codex's app-server policy read) the
+# way the client releases do; they go in the current account's real Known
+# Folders, refuse to replace an existing file and are removed afterwards. They
+# are the fixtures the per-user Setup lanes used. No vendor agent runs.
+
+function Get-KnownFolder([string]$Id) {
+    if (-not ('DefenseClawContract.KnownFolder' -as [type])) {
+        Add-Type -Namespace DefenseClawContract -Name KnownFolder -MemberDefinition @'
+[DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+public static extern int SHGetKnownFolderPath([MarshalAs(UnmanagedType.LPStruct)] Guid rfid, uint dwFlags, IntPtr hToken, out IntPtr ppszPath);
+[DllImport("ole32.dll")]
+public static extern void CoTaskMemFree(IntPtr pv);
+'@
+    }
+    $pointer = [IntPtr]::Zero
+    $hr = [DefenseClawContract.KnownFolder]::SHGetKnownFolderPath([Guid]$Id, 0, [IntPtr]::Zero, [ref]$pointer)
+    if ($hr -ne 0) { throw "SHGetKnownFolderPath $Id failed: $hr" }
+    try { return [Runtime.InteropServices.Marshal]::PtrToStringUni($pointer) } finally { [DefenseClawContract.KnownFolder]::CoTaskMemFree($pointer) }
+}
+
+function New-FixtureExecutable([string]$AssemblyName, [string]$Source, [string]$OutputPath) {
+    # In-process Roslyn (it ships with PowerShell 7): no compiler child process
+    # to race a deadline on a loaded runner. The output references only
+    # mscorlib and carries the default asInvoker manifest.
+    $mscorlib = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\mscorlib.dll'
+    Add-Type -AssemblyName Microsoft.CodeAnalysis, Microsoft.CodeAnalysis.CSharp
+    $compilation = [Microsoft.CodeAnalysis.CSharp.CSharpCompilation]::Create(
+        $AssemblyName,
+        [Microsoft.CodeAnalysis.SyntaxTree[]]@([Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText($Source)),
+        [Microsoft.CodeAnalysis.MetadataReference[]]@([Microsoft.CodeAnalysis.MetadataReference]::CreateFromFile($mscorlib)),
+        [Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions]::new([Microsoft.CodeAnalysis.OutputKind]::ConsoleApplication)
+    )
+    $resources = $compilation.CreateDefaultWin32Resources($true, $false, $null, $null)
+    try {
+        $stream = [IO.File]::Open($OutputPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try { $result = $compilation.Emit($stream, $null, $null, $resources) } finally { $stream.Dispose() }
+    } finally { $resources.Dispose() }
+    if (-not $result.Success) {
+        Remove-Item -LiteralPath $OutputPath -Force -ErrorAction SilentlyContinue
+        throw "fixture $AssemblyName did not compile: $(@($result.Diagnostics | Where-Object Severity -eq 'Error') -join '; ')"
+    }
+}
+
+function Get-VersionFixtureSource([string]$Class, [string]$Version) {
+    return "using System; public static class $Class { public static int Main(string[] arguments) { Console.WriteLine(""$Version""); return 0; } }"
+}
+
+function Install-AgentFixtures {
+    $local = Get-KnownFolder 'F1B32785-6FBA-4FCF-9D55-7B8E7F157091'
+    $profileRoot = Get-KnownFolder '5E6C858F-0E22-4760-9AFE-EA3317B67173'
+    $codexRoot = Join-Path $local 'OpenAI\Codex\bin'
+    $codexBin = Join-Path $codexRoot ('000-defenseclaw-ci-' + [Guid]::NewGuid().ToString('N'))
+    $localBin = Join-Path $profileRoot '.local\bin'
+    # Setup selects Codex only from 0.136.0, the first release with app-server --stdio.
+    $codexSource = @'
+using System;
+public static class CodexVersionFixture {
+    public static int Main(string[] arguments) {
+        if (arguments.Length == 2 && arguments[0] == "app-server" && arguments[1] == "--stdio") {
+            string line;
+            while ((line = Console.ReadLine()) != null) {
+                if (line.IndexOf("\"method\":\"initialize\"", StringComparison.Ordinal) >= 0) {
+                    Console.WriteLine("{\"id\":1,\"result\":{}}"); Console.Out.Flush();
+                } else if (line.IndexOf("\"method\":\"configRequirements/read\"", StringComparison.Ordinal) >= 0) {
+                    Console.WriteLine("{\"id\":2,\"result\":{\"requirements\":{\"allowManagedHooksOnly\":false}}}"); Console.Out.Flush();
+                }
+            }
+            return 0;
+        }
+        Console.WriteLine("codex-cli 0.136.0");
+        return 0;
+    }
+}
+'@
+    $script:AgentFixtures = @(
+        [pscustomobject]@{ Path = Join-Path $codexBin 'codex.exe'; Class = 'CodexVersionFixture'; Source = $codexSource; Version = 'codex-cli 0.136.0' },
+        [pscustomobject]@{ Path = Join-Path $localBin 'claude.exe'; Class = 'ClaudeVersionFixture'; Version = 'claude 2.1.154' },
+        [pscustomobject]@{ Path = Join-Path $localBin 'agent.exe'; Class = 'CursorAgentVersionFixture'; Version = 'cursor-agent 2026.07.23-e383d2b' },
+        [pscustomobject]@{ Path = Join-Path $localBin 'amp.exe'; Class = 'AmpVersionFixture'; Version = 'amp 0.0.1785334225-g9abe75' },
+        [pscustomobject]@{ Path = Join-Path $local 'hermes\hermes-agent\venv\Scripts\hermes.exe'; Class = 'HermesVersionFixture'; Version = 'Hermes Agent v0.20.0 (2026.8.3)' },
+        [pscustomobject]@{ Path = Join-Path $local 'Microsoft\WinGet\Packages\SST.opencode_Microsoft.Winget.Source_8wekyb3d8bbwe\opencode.exe'; Class = 'OpenCodeVersionFixture'; Version = 'opencode 2.1.4' }
+    )
+    $script:FixtureDirectories = [Collections.Generic.List[string]]::new()
+    foreach ($fixture in $script:AgentFixtures) {
+        if (Test-Path -LiteralPath $fixture.Path) { throw "refusing to replace an existing agent executable: $($fixture.Path)" }
+    }
+    foreach ($fixture in $script:AgentFixtures) {
+        # Remember each folder this run creates, deepest last, to remove only those.
+        $missing = [Collections.Generic.List[string]]::new()
+        for ($dir = Split-Path -Parent $fixture.Path; -not (Test-Path -LiteralPath $dir); $dir = Split-Path -Parent $dir) { $missing.Insert(0, $dir) }
+        foreach ($dir in $missing) { New-Item -ItemType Directory -Path $dir | Out-Null; $script:FixtureDirectories.Add($dir) }
+        $source = if ($fixture.PSObject.Properties['Source'] -and $fixture.Source) { $fixture.Source } else { Get-VersionFixtureSource $fixture.Class $fixture.Version }
+        New-FixtureExecutable $fixture.Class $source $fixture.Path
+        $fixture | Add-Member -NotePropertyName Created -NotePropertyValue $true
+        $version = (Invoke-Tool $fixture.Path @('--version') -Timeout 30).StdOut.Trim()
+        if ($version -cne $fixture.Version) { throw "fixture $($fixture.Path) reports '$version'" }
+    }
+    $env:Path = "$localBin;$codexBin;$env:Path"
+    Write-Result agent-fixtures pass "$($script:AgentFixtures.Count) version-only stand-ins in the Known Folder trusted roots"
+}
+
+function Remove-AgentFixtures {
+    foreach ($fixture in @($script:AgentFixtures)) {
+        if ($fixture -and $fixture.PSObject.Properties['Created'] -and (Test-Path -LiteralPath $fixture.Path -PathType Leaf)) {
+            Remove-Item -LiteralPath $fixture.Path -Force
+        }
+    }
+    $dirs = @($script:FixtureDirectories)
+    [array]::Reverse($dirs)
+    foreach ($dir in $dirs) {
+        if ((Test-Path -LiteralPath $dir) -and -not @(Get-ChildItem -LiteralPath $dir -Force).Count) { Remove-Item -LiteralPath $dir -Force }
+    }
 }
 
 # -- Where each connector's vendor config lives on Windows ----------------------
@@ -244,6 +391,11 @@ function Remove-PluginSourceComments([string]$Source) {
 }
 
 # The direct Codex hook command: <system>\cmd.exe /d /v:off /c "<launcher>" <arguments>.
+# On the events Codex can block, the one-line install may start its guard
+# program instead, which runs the defenseclaw-hook.exe beside it (rel-1-0-6
+# GAP-0676): <system>\cmd.exe /d /v:off /c "<bin>\defenseclaw-hook-guard.exe"
+# launcher-guard-sibling <arguments>. Both forms are read (same parser as
+# windows-native-ci.ps1), so the contract holds before and after that change.
 function Get-DirectHookCommand([string]$Command) {
     $match = [regex]::Match(
         $Command,
@@ -253,22 +405,34 @@ function Get-DirectHookCommand([string]$Command) {
     if (-not [string]::Equals($match.Groups['cmd'].Value, (Join-Path ([Environment]::SystemDirectory) 'cmd.exe'), [StringComparison]::OrdinalIgnoreCase)) {
         return $null
     }
-    return [pscustomobject]@{ File = $match.Groups['file'].Value; Arguments = [string[]]@($match.Groups['arguments'].Value.Substring(1).Split(' ')) }
+    $file = $match.Groups['file'].Value
+    $arguments = [string[]]@($match.Groups['arguments'].Value.Substring(1).Split(' '))
+    if ([string]::Equals([IO.Path]::GetFileName($file), 'defenseclaw-hook-guard.exe', [StringComparison]::OrdinalIgnoreCase) -and
+        $arguments.Count -gt 1 -and $arguments[0] -ceq 'launcher-guard-sibling') {
+        $file = Join-Path ([IO.Path]::GetDirectoryName($file)) 'defenseclaw-hook.exe'
+        $arguments = [string[]]@($arguments[1..($arguments.Count - 1)])
+    }
+    return [pscustomobject]@{ File = $file; Arguments = $arguments }
 }
 
 # The awaited PowerShell bridge: Process.Start keeps the CreateProcess handle so
 # a launcher that exits at once still returns its status, and Constrained
-# Language mode falls back to the call operator.
+# Language mode falls back to the call operator. A per-user bridge since 1.0.9
+# answers a launcher that cannot start with the agent's block instead, the
+# same statements in all three places (rel-1-0-6 GAP-0676); both are read.
 function Get-AwaitedHookBridge([string]$Script) {
     $pattern = '^\$ErrorActionPreference=''Stop''; \$env:NoDefaultCurrentDirectoryInExePath=''1''; ' +
         'if \(\$ExecutionContext\.SessionState\.LanguageMode -ne ''FullLanguage''\) \{ \$ErrorActionPreference=''Continue''; ' +
         '& (?<file>''(?:''''|[^''])+'')(?<quoted>(?: ''[^'' ]+'')+) \| Microsoft\.PowerShell\.Core\\Out-Host; ' +
-        'if \(\$null -eq \$LASTEXITCODE\) \{ exit 1 \}; exit \$LASTEXITCODE \}; ' +
+        '(?:if \(\$null -eq \$LASTEXITCODE\) \{ exit 1 \}; |if \(\$null -eq \$LASTEXITCODE -or \$LASTEXITCODE -lt 0\) \{ ' +
+        '(?<answer>try \{ \[Console\]::Error\.WriteLine\(''[^'']*''\) \} catch \{ \}; (?:''[^'']*''; )?exit [02]) \}; )' +
+        'exit \$LASTEXITCODE \}; ' +
         '\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\(\k<file>,''(?<arguments>[^'' ]+(?: [^'' ]+)*)''\); ' +
         '\$hookStart\.UseShellExecute=\$false; \$hookStart\.RedirectStandardError=\$true; ' +
-        '\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\); ' +
+        '(?(answer)try \{ \$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\) \} catch \{ \k<answer> \}|' +
+        '\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\)); ' +
         '\$hookProcess\.StandardError\.BaseStream\.CopyTo\(\[Console\]::OpenStandardError\(\)\); ' +
-        '\$hookProcess\.WaitForExit\(\); exit \$hookProcess\.ExitCode$'
+        '\$hookProcess\.WaitForExit\(\); (?(answer)if \(\$hookProcess\.ExitCode -lt 0\) \{ \k<answer> \}; )exit \$hookProcess\.ExitCode$'
     $match = [regex]::Match($Script, $pattern)
     if (-not $match.Success) { return $null }
     $arguments = @($match.Groups['arguments'].Value.Split(' '))
@@ -302,6 +466,7 @@ function Assert-CodexRegistration([string]$Config) {
         'codex-hooks-v4' = @('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'PreCompact', 'PostCompact', 'Stop', 'SessionEnd')
     }
     $bound = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $contracts = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($entry in $commands) {
         $literal = $entry.Groups['literal'].Value
         $command = if ($literal.StartsWith("'", [StringComparison]::Ordinal)) { $literal.Substring(1, $literal.Length - 2) } else { $literal | ConvertFrom-Json }
@@ -317,9 +482,14 @@ function Assert-CodexRegistration([string]$Config) {
         }
         Assert-InstalledHook $bridge.File "Codex $hookEvent"
         [void]$bound.Add($hookEvent)
+        [void]$contracts.Add($contract)
     }
+    if ($contracts.Count -ne 1) { throw "Codex hooks bind more than one hook contract: $($contracts -join ', ')" }
+    # contract-smoke.sh calls the installed hook with the contract setup bound
+    # for this Codex version (the hook refuses any other).
+    $env:DC_E2E_CODEX_HOOK_CONTRACT = @($contracts)[0]
     if (-not $bound.Contains('PreToolUse')) { throw 'Codex registration has no PreToolUse hook' }
-    return "$($bound.Count) events bound to the installed defenseclaw-hook.exe"
+    return "$($bound.Count) events bound to the installed defenseclaw-hook.exe ($env:DC_E2E_CODEX_HOOK_CONTRACT)"
 }
 
 function Assert-CopilotRegistration([string]$Config) {
@@ -593,6 +763,12 @@ function Assert-Registration {
     if (Test-ObsoleteWindowsHookGuidance $guidance) { throw "$config contains Unix shell guidance on Windows" }
     Write-Result "$Connector`:registration" pass $detail
 
+    if ($Connector -eq 'opencode') {
+        # Doctor checks the plugin's load heartbeat; OpenCode is not running,
+        # so load the installed plugin once the way OpenCode does.
+        Invoke-OpenCodePlugin load 'dc-setup-load' 'load'
+        Write-Result 'opencode:plugin-load' pass 'the installed plugin loaded and sent its heartbeat'
+    }
     $row = Get-DoctorRow (Get-DoctorLabel $Connector)
     if ($row.status -ne 'pass') { throw "doctor rejected the setup-created $Connector registration: $($row.status) $($row.detail)" }
     if (Test-ObsoleteWindowsHookGuidance ([string]$row.detail)) { throw "doctor gave Unix guidance for Windows $Connector hooks: $($row.detail)" }
@@ -684,7 +860,7 @@ function Invoke-ContractSmoke {
 
 # -- OpenCode: the golden commands through the installed plugin ------------------
 
-function Invoke-OpenCodePlugin([ValidateSet('allow', 'block')][string]$Expected, [string]$Command, [string]$Label) {
+function Invoke-OpenCodePlugin([ValidateSet('allow', 'block', 'load')][string]$Expected, [string]$Command, [string]$Label) {
     $node = (Get-Command 'node.exe' -ErrorAction Stop).Source
     $scratch = Join-Path $StateRoot ("opencode-$Label-" + [Guid]::NewGuid().ToString('N') + '.mjs')
     $result = Invoke-Tool $node @(
@@ -826,24 +1002,77 @@ sys.exit(0 if "DefenseClaw" in text and "Traceback" not in text else 1)
     Write-Result 'lifecycle:uninstall' pass 'no files, processes, Run value or Path entry left'
 }
 
+# -- Self-test of the hook command parsers -------------------------------------
+
+function Invoke-ParserSelfTest {
+    $hook = 'C:\Users\u\.local\bin\defenseclaw-hook.exe'
+    $guard = 'C:\Users\u\.local\bin\defenseclaw-hook-guard.exe'
+    $cmd = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
+    $bound = @('hook', '--connector', 'codex', '--event', 'PreToolUse', '--hook-contract', 'codex-hooks-v4')
+    $cases = 0
+    foreach ($case in @(
+        @{ Command = "$cmd /d /v:off /c `"$hook`" $($bound -join ' ')"; File = $hook },
+        @{ Command = "$cmd /d /v:off /c `"$guard`" launcher-guard-sibling $($bound -join ' ')"; File = $hook }
+    )) {
+        $parsed = Get-DirectHookCommand $case.Command
+        if ($null -eq $parsed -or $parsed.File -cne $case.File -or ($parsed.Arguments -join ' ') -cne ($bound -join ' ')) { throw "direct form not read: $($case.Command)" }
+        $cases++
+    }
+    foreach ($lookalike in @(
+        "$cmd /d /v:off /c `"$guard`" launcher-guard $($bound -join ' ')",
+        "$cmd /d /v:off /c `"C:\Users\u\.local\bin\other-guard.exe`" launcher-guard-sibling $($bound -join ' ')"
+    )) {
+        $parsed = Get-DirectHookCommand $lookalike
+        if ($null -ne $parsed -and $parsed.File -ceq $hook -and ($parsed.Arguments -join ' ') -ceq ($bound -join ' ')) { throw "lookalike read as the hook: $lookalike" }
+        $cases++
+    }
+    $arguments = 'hook --connector antigravity --event PreToolUse'
+    $quoted = " 'hook' '--connector' 'antigravity' '--event' 'PreToolUse'"
+    $answer = "try { [Console]::Error.WriteLine('DefenseClaw blocked this: its Antigravity hook launcher cannot start. Run the DefenseClaw installer again to repair it.') } catch { }; exit 2"
+    $head = "`$ErrorActionPreference='Stop'; `$env:NoDefaultCurrentDirectoryInExePath='1'; if (`$ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { `$ErrorActionPreference='Continue'; & '$hook'$quoted | Microsoft.PowerShell.Core\Out-Host; "
+    $start = "`$hookStart=[System.Diagnostics.ProcessStartInfo]::new('$hook','$arguments'); `$hookStart.UseShellExecute=`$false; `$hookStart.RedirectStandardError=`$true; "
+    $copy = "`$hookProcess.StandardError.BaseStream.CopyTo([Console]::OpenStandardError()); `$hookProcess.WaitForExit(); "
+    $old = $head + "if (`$null -eq `$LASTEXITCODE) { exit 1 }; exit `$LASTEXITCODE }; " + $start + "`$hookProcess=[System.Diagnostics.Process]::Start(`$hookStart); " + $copy + "exit `$hookProcess.ExitCode"
+    $answering = $head + "if (`$null -eq `$LASTEXITCODE -or `$LASTEXITCODE -lt 0) { $answer }; exit `$LASTEXITCODE }; " + $start +
+        "try { `$hookProcess=[System.Diagnostics.Process]::Start(`$hookStart) } catch { $answer }; " + $copy + "if (`$hookProcess.ExitCode -lt 0) { $answer }; exit `$hookProcess.ExitCode"
+    foreach ($script in @($old, $answering)) {
+        $bridge = Get-AwaitedHookBridge $script
+        if ($null -eq $bridge -or $bridge.File -cne $hook -or ($bridge.Arguments -join ' ') -cne $arguments) { throw "bridge form not read: $script" }
+        $encoded = '-NoProfile -NonInteractive -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
+        if ((Get-EncodedHookBridge $encoded 'self-test').File -cne $hook) { throw 'encoded bridge not read' }
+        $cases++
+    }
+    # The answer must be the same in all three places.
+    $edited = $answering.Substring(0, $answering.LastIndexOf('exit 2')) + 'exit 0 }; exit $hookProcess.ExitCode'
+    if ($null -ne (Get-AwaitedHookBridge $edited)) { throw 'a bridge whose answers differ was read' }
+    $cases++
+    Write-Result 'self-test:parsers' pass "$cases cases: direct and guard-sibling Codex commands, old and answering bridges, lookalikes refused"
+}
+
 # -- Main -----------------------------------------------------------------------
 
 $exitCode = 0
-try {
-    Enter-Profile
-    Install-DefenseClaw
-    Initialize-DefenseClaw
-    if ($Operation -eq 'lifecycle') {
-        Invoke-Lifecycle
-    } else {
-        Invoke-ObservePhase
-        if ($Connector -eq 'opencode') { Invoke-OpenCodeActionPhase } else { Invoke-ContractSmoke }
-        Assert-ObservabilityV8
+if ($Operation -eq 'self-test') {
+    try { Invoke-ParserSelfTest } catch { Write-Result 'self-test:parsers' fail $_.Exception.Message }
+} else {
+    try {
+        Enter-Profile
+        Install-DefenseClaw
+        Initialize-DefenseClaw
+        if ($Operation -eq 'contract') { Install-AgentFixtures }
+        if ($Operation -eq 'lifecycle') {
+            Invoke-Lifecycle
+        } else {
+            Invoke-ObservePhase
+            if ($Connector -eq 'opencode') { Invoke-OpenCodeActionPhase } else { Invoke-ContractSmoke }
+            Assert-ObservabilityV8
+        }
+    } catch {
+        Write-Result $(if ($Operation -eq 'lifecycle') { 'lifecycle' } else { "$Connector`:contract" }) fail "$($_.Exception.Message) at $($_.InvocationInfo.PositionMessage)"
+    } finally {
+        if ($Operation -ne 'lifecycle') { try { Stop-Gateway } catch { Write-Host "gateway stop: $($_.Exception.Message)" } }
+        try { Remove-AgentFixtures } catch { Write-Result agent-fixtures fail "cleanup: $($_.Exception.Message)" }
     }
-} catch {
-    Write-Result $(if ($Operation -eq 'lifecycle') { 'lifecycle' } else { "$Connector`:contract" }) fail "$($_.Exception.Message) at $($_.InvocationInfo.PositionMessage)"
-} finally {
-    if ($Operation -ne 'lifecycle') { try { Stop-Gateway } catch { Write-Host "gateway stop: $($_.Exception.Message)" } }
 }
 $failed = @(Get-Content -LiteralPath $script:Results -ErrorAction SilentlyContinue | Where-Object { $_ -match '"status":"fail"' })
 if ($failed.Count -or $script:Failures.Count) {
@@ -852,4 +1081,5 @@ if ($failed.Count -or $script:Failures.Count) {
 } else {
     Write-Host "[windows-install] PASSED: $Operation $(if ($Operation -eq 'contract') { $Connector })"
 }
+if ($Operation -eq 'self-test') { Remove-Item -LiteralPath $StateRoot -Recurse -Force -ErrorAction SilentlyContinue }
 exit $exitCode
