@@ -1376,13 +1376,49 @@ func actionFixedForItems(clause *syntax.ForClause, values actionValues, cwd, hom
 	items := make([]string, 0, len(loop.Items))
 	for _, word := range loop.Items {
 		item, known := actionWordValue(word, values, cwd, home)
-		if !known || wordExpandsParameter(word) && strings.ContainsAny(item, " \t\n*?[") ||
-			!wordExpandsParameter(word) && strings.ContainsAny(item, "*?[") {
+		if !known {
+			return "", nil, false
+		}
+		switch {
+		case actionWordOneField(word):
+			// Every expansion is quoted: the word is one item, and its
+			// expanded text is not a pattern.
+		case !wordExpandsParameter(word) && !strings.ContainsAny(item, "*?["):
+		case simpleShellParameter(word) != "" && !strings.ContainsAny(item, "*?["):
+			// An unquoted expansion splits at the default field separators.
+			if _, changed := values["IFS"]; changed {
+				return "", nil, false
+			}
+			fields := strings.Fields(item)
+			if len(items)+len(fields) > 16 {
+				return "", nil, false
+			}
+			items = append(items, fields...)
+			continue
+		default:
 			return "", nil, false
 		}
 		items = append(items, item)
 	}
 	return loop.Name.Value, items, true
+}
+
+// actionWordOneField reports a word whose expansions are all quoted and
+// whose unquoted text has no pattern character, so the shell makes exactly
+// one field of it.
+func actionWordOneField(word *syntax.Word) bool {
+	for _, part := range word.Parts {
+		switch part := part.(type) {
+		case *syntax.SglQuoted, *syntax.DblQuoted:
+		case *syntax.Lit:
+			if strings.ContainsAny(part.Value, "*?[") {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return len(word.Parts) > 0
 }
 
 // actionKeptWhileControl reads a while or until loop whose body runs break
