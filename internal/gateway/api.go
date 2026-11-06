@@ -99,6 +99,8 @@ type APIServer struct {
 	// projectSkills are the project skill folders the install watcher
 	// watches; nil when no watcher shares them (GAP-1063).
 	projectSkills *projectSkillRoots
+	// rootCoverage reports roots whose install admission cannot scan assets.
+	rootCoverage func() []watcher.RootCoverageIssue
 	// hookMCP are the MCP servers the managed Linux and macOS hooks report,
 	// which the install watcher admits (GAP-2591); nil elsewhere.
 	hookMCP *hookReportedMCPServers

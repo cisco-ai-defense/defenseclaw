@@ -1115,6 +1115,27 @@ class DoctorGuardrailTests(unittest.TestCase):
                 if runtime_state == "running":
                     self.assertIn("sidecar is stale", watcher["detail"])
 
+    def test_gap0613_unavailable_watch_root_is_visible_by_tier(self):
+        from defenseclaw.commands import cmd_doctor
+
+        for tier, expected in (("default", "warn"), ("permissive", "warn"), ("strict", "fail")):
+            with self.subTest(tier=tier):
+                cfg = self._sidecar_alignment_cfg(watcher_enabled=True)
+                cfg.guardrail.rule_pack = tier
+                health = self._complete_sidecar_health()
+                health["watcher"] = {
+                    "state": "degraded",
+                    "details": {"watch_roots_unavailable": 1, "admission_scanning_off": ["claudecode"]},
+                }
+                result = self._run_sidecar_health(cfg, health)
+                watcher = self._sidecar_row(result, "watcher")
+                self.assertEqual(watcher["status"], expected)
+                self.assertIn("admission scanning is off for claudecode", watcher["detail"])
+
+        managed_cfg = self._sidecar_alignment_cfg(watcher_enabled=True)
+        managed_cfg.deployment_mode = "managed_enterprise"
+        self.assertEqual(cmd_doctor._watch_root_coverage_severity(managed_cfg, ["claudecode"]), "fail")
+
     def test_sidecar_check_reports_malformed_nested_health_without_crashing(self):
         cases = (
             (
