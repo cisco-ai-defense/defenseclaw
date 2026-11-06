@@ -148,6 +148,15 @@ func (c *OpenClawConnector) AllowedHosts() []string {
 // approvals.plugin config block). Human approval needs it (GAP-1956).
 const OpenClawPluginApprovalsSince = "2026.3.28"
 
+// Stable OpenClaw releases from this version accept the conversation-hook
+// grant needed for the model outage warning in the agent prompt.
+const openClawConversationHooksSince = "2026.4.24"
+
+func openClawConversationHooksSupported(rawVersion string) bool {
+	version := NormalizeAgentVersion("openclaw", rawVersion)
+	return version != "" && CompareAgentVersions(version, openClawConversationHooksSince) >= 0
+}
+
 // OpenClawLacksPluginApprovals reports an observed OpenClaw version older
 // than OpenClawPluginApprovalsSince. An unknown version is not refused.
 func OpenClawLacksPluginApprovals(rawVersion string) bool {
@@ -262,8 +271,10 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 			return fmt.Errorf("openclaw config backup: %w", err)
 		}
 	}
-	dropRejectedApprovals := OpenClawLacksPluginApprovals(openClawObservedVersion(opts))
-	if err := installOpenClawExtension(openClawHome(), opts.HILTEnabled, dropRejectedApprovals); err != nil {
+	observedVersion := openClawObservedVersion(opts)
+	dropRejectedApprovals := OpenClawLacksPluginApprovals(observedVersion)
+	if err := installOpenClawExtension(openClawHome(), opts.HILTEnabled, dropRejectedApprovals,
+		openClawConversationHooksSupported(observedVersion)); err != nil {
 		return fmt.Errorf("openclaw extension install: %w", err)
 	}
 	if keepSnapshot {
@@ -448,7 +459,7 @@ func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 // <ocHome>/extensions/defenseclaw and registers the plugin in
 // <ocHome>/openclaw.json. Idempotent: re-running leaves the config in the
 // same shape (single allow entry, single load path, enabled=true).
-func installOpenClawExtension(ocHome string, enablePluginApprovals, dropRejectedApprovals bool) error {
+func installOpenClawExtension(ocHome string, enablePluginApprovals, dropRejectedApprovals, allowConversationHooks bool) error {
 	extDir := filepath.Join(ocHome, "extensions", "defenseclaw")
 	parentDir := filepath.Join(ocHome, "extensions")
 
@@ -460,7 +471,7 @@ func installOpenClawExtension(ocHome string, enablePluginApprovals, dropRejected
 	}
 
 	configPath := filepath.Join(ocHome, "openclaw.json")
-	if err := patchOpenClawConfig(configPath, extDir, enablePluginApprovals, dropRejectedApprovals); err != nil {
+	if err := patchOpenClawConfig(configPath, extDir, enablePluginApprovals, dropRejectedApprovals, allowConversationHooks); err != nil {
 		return fmt.Errorf("patch openclaw.json: %w", err)
 	}
 	return nil
@@ -537,7 +548,7 @@ func writeEmbeddedTree(fsys embed.FS, srcRoot, dstRoot string, fileMode, dirMode
 // patchOpenClawConfig reads openclaw.json (creates it if missing), ensures
 // the DefenseClaw plugin is allowed, enabled, and has its extension path
 // in plugins.load.paths. Other sections are left untouched.
-func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropRejectedApprovals bool) error {
+func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropRejectedApprovals, allowConversationHooks bool) error {
 	return withFileLock(configPath, func() error {
 		cfg := map[string]interface{}{}
 		original, readErr := os.ReadFile(configPath)
@@ -561,7 +572,9 @@ func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropR
 			entries = map[string]interface{}{}
 		}
 		// Merge, so keys an operator wrote under the entry (hooks, config)
-		// stay (GAP-0596). Only "enabled" is written by DefenseClaw.
+		// stay (GAP-0596). DefenseClaw writes "enabled" and, on OpenClaw
+		// releases that accept it, the conversation-hook grant the model
+		// outage warning needs, unless the operator already set that key.
 		entry, _ := entries["defenseclaw"].(map[string]interface{})
 		if entry == nil {
 			entry = map[string]interface{}{}
@@ -570,6 +583,16 @@ func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropR
 			return err
 		}
 		entry["enabled"] = true
+		if allowConversationHooks {
+			hooks, _ := entry["hooks"].(map[string]interface{})
+			if hooks == nil {
+				hooks = map[string]interface{}{}
+			}
+			if _, set := hooks["allowConversationAccess"]; !set {
+				hooks["allowConversationAccess"] = true
+			}
+			entry["hooks"] = hooks
+		}
 		entries["defenseclaw"] = entry
 		plugins["entries"] = entries
 

@@ -29,9 +29,10 @@
 
 import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createEgressReporter, type EgressReporter } from "./egress-telemetry.js";
 import { loadSidecarConfig } from "./sidecar-config.js";
-import { proveListener, provenCreateConnection } from "./listener-proof.js";
+import { ListenerProofError, proveListener, provenCreateConnection } from "./listener-proof.js";
 import {
   HEADER_DEFENSECLAW_AGENT_ID,
   HEADER_DEFENSECLAW_AGENT_INSTANCE_ID,
@@ -53,6 +54,8 @@ const _require = createRequire(import.meta.url);
 const https = _require("https") as typeof import("https");
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const http = _require("http") as typeof import("http");
+type NodeClientRequest = ReturnType<typeof http.request>;
+const directModelRequest = new AsyncLocalStorage<boolean>();
 
 // undici — Node 18+ backs globalThis.fetch with undici's internal dispatcher.
 // SDKs that capture the pre-patch fetch reference or call undici.request()
@@ -108,7 +111,13 @@ interface InterceptorController {
 interface AdoptedConfig {
   guardrailPort: number;
   getCorrelationHeaders: CorrelationHeadersGetter;
+  getOutageMode?: OutageModeGetter;
+  onOutageWarning?: (message: string) => void;
 }
+
+/** The installed account's saved outage mode, read only after a classified proxy outage. */
+type OutageModeGetter = () => "open" | "closed" | "protected";
+const closedOutageMode: OutageModeGetter = () => "closed";
 
 function getOrCreateSharedState(): InterceptorSharedState {
   const existing = (globalThis as Record<symbol, unknown>)[
@@ -340,8 +349,8 @@ export const DC_AUTH_HEADER = "X-DC-Auth";
  * gets intercepted.
  */
 /**
- * GAP-2428: what a model call shows when the DefenseClaw gateway is down.
- * The proxy hop is refused, so the call fails closed; without this the
+ * GAP-2428: what a strict model call shows when the DefenseClaw gateway is down.
+ * The proxy hop is refused, so the saved closed mode blocks; without this the
  * agent only reported "connection refused by the provider endpoint". The
  * wording avoids "refused", "timeout" and "unavailable" so OpenClaw shows
  * it as is instead of mapping it to its generic transport copy.
@@ -350,10 +359,22 @@ export const GATEWAY_DOWN_MESSAGE =
   "[DefenseClaw] The DefenseClaw gateway is not running, so this request was blocked (fail-closed). " +
   "Run: defenseclaw-gateway start";
 
-function isConnectionRefused(err: unknown): boolean {
-  const e = err as { code?: unknown; cause?: { code?: unknown } } | null;
-  return e?.code === "ECONNREFUSED" || e?.cause?.code === "ECONNREFUSED";
+function isProxyOutage(err: unknown): boolean {
+  const codes = new Set(["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EPIPE", "EHOSTUNREACH", "ENETUNREACH", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_SOCKET"]);
+  let current: unknown = err;
+  for (let depth = 0; depth < 3 && current && typeof current === "object"; depth++) {
+    // A failed listener proof is an outage only when nothing answered: a
+    // listener that answered without the proof is not one (GAP-0594).
+    if (current instanceof ListenerProofError) return current.unreachable;
+    const candidate = current as { code?: unknown; cause?: unknown };
+    if (typeof candidate.code === "string" && codes.has(candidate.code)) return true;
+    current = candidate.cause;
+  }
+  return false;
 }
+
+export const MODEL_OUTAGE_WARNING =
+  "[DEFENSECLAW WARNING] The DefenseClaw gateway is offline. This model request is continuing without inspection under the saved outage mode.";
 
 /** A provider-shaped 503 for a refused fetch hop; OpenAI and Anthropic SDKs both surface its message. */
 export function gatewayDownResponse(): Response {
@@ -364,24 +385,6 @@ export function gatewayDownResponse(): Response {
     }),
     { status: 503, headers: { "Content-Type": "application/json", "x-should-retry": "false" } },
   );
-}
-
-/**
- * Name the DefenseClaw gateway in a refused node:http proxy hop's error,
- * keeping its code so SDK retry logic is unchanged.
- */
-export function explainRefusedProxyHop<T extends { emit: (event: string | symbol, ...args: unknown[]) => boolean }>(
-  req: T,
-): T {
-  const emit = req.emit;
-  if (typeof emit !== "function") return req;
-  req.emit = function (this: T, event: string | symbol, ...args: unknown[]): boolean {
-    if (event === "error" && isConnectionRefused(args[0]) && args[0] instanceof Error) {
-      args[0].message = GATEWAY_DOWN_MESSAGE;
-    }
-    return emit.call(this, event, ...args);
-  } as T["emit"];
-  return req;
 }
 
 function extractHost(urlStr: string): string {
@@ -1342,6 +1345,9 @@ function undiciHeadersToRecord(headers: unknown): Record<string, string> {
 
 export interface CreateFetchInterceptorOptions {
   guardrailPort: number;
+  /** The installed account's saved outage mode, read only after a classified proxy failure. */
+  getOutageMode?: OutageModeGetter;
+  onOutageWarning?: (message: string) => void;
   /**
    * Synchronous snapshot of DefenseClaw X-DefenseClaw-* correlation
    * headers to stamp on every intercepted LLM request. Called once per
@@ -1373,6 +1379,10 @@ export function createFetchInterceptor(
   let getCorrelationHeaders =
     interceptorOpts.getCorrelationHeaders ?? emptyCorrelationHeaders;
   let proxyBase = `http://127.0.0.1:${guardrailPort}`;
+  // The saved outage mode and the warning hook come with the same config:
+  // the copy that owns the patch supplies them (GAP-0745).
+  let getOutageMode: OutageModeGetter = interceptorOpts.getOutageMode ?? closedOutageMode;
+  let onOutageWarning = interceptorOpts.onOutageWarning;
   // Identifies this copy to the controller. The copies served by the patch
   // are kept in load order; the last one supplies the config.
   const self = {};
@@ -1393,6 +1403,95 @@ export function createFetchInterceptor(
   let hostUndici: ReturnType<typeof resolveHostUndici> = null;
   let originalHostDispatch: UndiciDispatchFn | null = null;
   let lastHostProbeDestination = "";
+
+  function openModelOutage(): boolean {
+    try {
+      if (getOutageMode() !== "open") return false;
+    } catch {
+      return false;
+    }
+    console.warn(MODEL_OUTAGE_WARNING);
+    onOutageWarning?.(MODEL_OUTAGE_WARNING);
+    return true;
+  }
+
+  function nodeRequestWithOutageFallback(
+    req: NodeClientRequest,
+    directFactory: () => NodeClientRequest,
+  ): NodeClientRequest {
+    const emit = req.emit;
+    const write = req.write;
+    const end = req.end;
+    const chunks: Buffer[] = [];
+    const maxReplayBytes = 16 << 20;
+    let replayBytes = 0;
+    let replayable = true;
+    let ended = false;
+    let retried = false;
+    let direct: NodeClientRequest | null = null;
+    let proxyAnswered = false;
+
+    const remember = (chunk: unknown, encoding?: unknown): void => {
+      if (chunk === undefined || chunk === null || !replayable || proxyAnswered) return;
+      if (typeof chunk !== "string" && !Buffer.isBuffer(chunk) && !(chunk instanceof Uint8Array)) {
+        replayable = false;
+        chunks.length = 0;
+        return;
+      }
+      const bytes = typeof chunk === "string"
+        ? Buffer.from(chunk, typeof encoding === "string" ? encoding as BufferEncoding : "utf8")
+        : Buffer.from(chunk);
+      replayBytes += bytes.length;
+      if (replayBytes > maxReplayBytes) {
+        replayable = false;
+        chunks.length = 0;
+        return;
+      }
+      chunks.push(bytes);
+    };
+
+    req.write = function (this: NodeClientRequest, ...args: Parameters<NodeClientRequest["write"]>): boolean {
+      if (direct) return direct.write(...args);
+      remember(args[0], args[1]);
+      return write.apply(this, args);
+    } as NodeClientRequest["write"];
+    req.end = function (this: NodeClientRequest, ...args: Parameters<NodeClientRequest["end"]>): NodeClientRequest {
+      if (direct) {
+        direct.end(...args);
+        return this;
+      }
+      remember(args[0], args[1]);
+      ended = true;
+      return end.apply(this, args);
+    } as NodeClientRequest["end"];
+    req.emit = function (this: NodeClientRequest, event: string | symbol, ...args: unknown[]): boolean {
+      if (retried && (event === "error" || event === "response" || event === "close")) return true;
+      if (event === "response") {
+        proxyAnswered = true;
+        chunks.length = 0;
+      }
+      if (event === "error" && !retried && !proxyAnswered && isProxyOutage(args[0])) {
+        if (replayable && openModelOutage()) {
+          retried = true;
+          try {
+            direct = directFactory();
+            direct.on("response", (response) => emit.call(req, "response", response));
+            direct.on("error", (error) => emit.call(req, "error", error));
+            direct.on("close", () => emit.call(req, "close"));
+            for (const chunk of chunks) direct.write(chunk);
+            chunks.length = 0;
+            if (ended) direct.end();
+            return true;
+          } catch (directErr) {
+            return emit.call(req, "error", directErr);
+          }
+        }
+        if (args[0] instanceof Error) args[0].message = GATEWAY_DOWN_MESSAGE;
+      }
+      return emit.call(this, event, ...args);
+    } as NodeClientRequest["emit"];
+    return req;
+  }
 
   function describeOwnLayers(): InterceptorLayers {
     return {
@@ -1478,6 +1577,7 @@ export function createFetchInterceptor(
     layer: "global" | "host",
     next: (opts: UndiciDispatchOptions, handler: unknown) => boolean,
   ): boolean {
+    if (directModelRequest.getStore()) return next(opts, handler);
     const origin = opts.origin?.toString() ?? "";
     const pathStr = opts.path ?? "";
     const urlStr = origin + pathStr;
@@ -1488,6 +1588,7 @@ export function createFetchInterceptor(
       !isKnownSafeDomain(urlStr) &&
       (isLLMUrl(urlStr, guardrailPort) || hasLLMPathSuffix(urlStr))
     ) {
+      const directOpts = { ...opts, origin: opts.origin, headers: opts.headers };
       opts.origin = proxyBase;
       const existingHeaders = undiciHeadersToRecord(opts.headers);
       const providerKey = extractProviderKeyFromRecord(existingHeaders);
@@ -1518,17 +1619,60 @@ export function createFetchInterceptor(
       }
       // The provider key and token go only to a guardrail listener that
       // proves it is this account's gateway right before this request
-      // (GAP-0594). Dispatch once the proof is in; a failed proof, or no
-      // token to prove with, answers as a gateway outage and sends nothing.
+      // (GAP-0594). Dispatch once the proof is in. A proof that found nothing
+      // listening, or timed out, is a gateway outage and follows the saved
+      // outage mode. A listener that answered without the proof, or no token
+      // to prove with, answers as a gateway outage in every tier; nothing is
+      // sent to the guardrail port either way.
+      let proxyHandler = handler;
+      if (handler && typeof handler === "object") {
+        let retried = false;
+        let proxyResponseStarted = false;
+        proxyHandler = new Proxy(handler, {
+          get(target, property) {
+            const method = Reflect.get(target, property) as unknown;
+            if ((property === "onHeaders" || property === "onResponseStart") && typeof method === "function") {
+              return (...args: unknown[]) => {
+                proxyResponseStarted = true;
+                return method.apply(target, args);
+              };
+            }
+            if (property === "onError") {
+              return (err: Error) => {
+                if (!retried && !proxyResponseStarted && isProxyOutage(err) && openModelOutage()) {
+                  retried = true;
+                  try {
+                    next(directOpts, target);
+                    return;
+                  } catch (directErr) {
+                    if (typeof method === "function") return method.call(target, directErr);
+                    throw directErr;
+                  }
+                }
+                if (typeof method === "function") return method.call(target, err);
+              };
+            }
+            return typeof method === "function" ? method.bind(target) : method;
+          },
+        });
+      }
       proveListener("127.0.0.1", guardrailPort, loadSidecarConfig().token).then(
         () => {
           try {
-            next(opts, handler);
+            next(opts, proxyHandler);
           } catch (err) {
             failUndiciHandler(handler, err);
           }
         },
-        () => {
+        (err) => {
+          if (isProxyOutage(err) && openModelOutage()) {
+            try {
+              next(directOpts, handler);
+            } catch (directErr) {
+              failUndiciHandler(handler, directErr);
+            }
+            return;
+          }
           completeUndiciGatewayDown(handler);
         },
       );
@@ -1548,7 +1692,7 @@ export function createFetchInterceptor(
     const controller = _shared.controller;
     if (controller) {
       started = true;
-      controller.adopt(self, { guardrailPort, getCorrelationHeaders });
+      controller.adopt(self, { guardrailPort, getCorrelationHeaders, getOutageMode, onOutageWarning });
       return;
     }
 
@@ -1576,7 +1720,7 @@ export function createFetchInterceptor(
     _shared.installed = true;
     _shared.guardrailPort = guardrailPort;
     _shared.controller = controllerImpl;
-    holders = [{ copy: self, config: { guardrailPort, getCorrelationHeaders } }];
+    holders = [{ copy: self, config: { guardrailPort, getCorrelationHeaders, getOutageMode, onOutageWarning } }];
 
     // Natives are bound here: a call that is still in flight when the patch is
     // taken out must finish through the same transport, not through fields
@@ -1601,6 +1745,7 @@ export function createFetchInterceptor(
       input: RequestInfo | URL,
       init?: RequestInit,
     ): Promise<Response> => {
+      if (directModelRequest.getStore()) return nativeFetch(input, init);
       const urlStr = String(input instanceof Request ? input.url : input);
 
       // Never self-loop: a request already aimed at the guardrail proxy
@@ -1665,16 +1810,6 @@ export function createFetchInterceptor(
         });
       }
 
-      // The provider key and token go only to a guardrail listener that
-      // proved it is this account's gateway (GAP-0594); a failed proof
-      // answers as a gateway outage and sends nothing.
-      // No token to prove with sends nothing either.
-      try {
-        await proveListener("127.0.0.1", guardrailPort, loadSidecarConfig().token);
-      } catch {
-        return gatewayDownResponse();
-      }
-
       // Merge effective headers (Request + init overrides) and add
       // proxy-hop headers. init wins, matching native Fetch (#742).
       const headers = new Headers(effective.headers);
@@ -1693,6 +1828,10 @@ export function createFetchInterceptor(
       let rewriteBody = effective.body;
       if (!hasOwnBody(init) && input instanceof Request && !input.bodyUsed) {
         rewriteBody = input.body ?? effective.body;
+      }
+      let directBody = rewriteBody;
+      if (rewriteBody instanceof ReadableStream) {
+        [rewriteBody, directBody] = rewriteBody.tee();
       }
 
       // Preserve Request metadata and caller init extras (duplex, etc.),
@@ -1734,6 +1873,26 @@ export function createFetchInterceptor(
         referrerPolicy: effective.referrerPolicy,
         ...(duplex ? { duplex } : {}),
       };
+      const directInit: RequestInit = {
+        ...newInit,
+        headers: new Headers(effective.headers),
+        body: directBody,
+      };
+
+      // The provider key and token go only to a guardrail listener that
+      // proved it is this account's gateway (GAP-0594); a failed proof
+      // sends nothing to it, and no token to prove with sends nothing
+      // either. A proof that found nothing listening, or timed out, is a
+      // gateway outage and follows the saved outage mode; any other failed
+      // proof answers as a gateway outage in every tier.
+      try {
+        await proveListener("127.0.0.1", guardrailPort, loadSidecarConfig().token);
+      } catch (err) {
+        if (isProxyOutage(err) && openModelOutage()) {
+          return directModelRequest.run(true, () => nativeFetch(urlStr, directInit));
+        }
+        return gatewayDownResponse();
+      }
 
       if (shapeBranch === "shape") {
         logInfo(
@@ -1749,7 +1908,10 @@ export function createFetchInterceptor(
       try {
         response = await nativeFetch(proxied, newInit);
       } catch (err) {
-        if (!isConnectionRefused(err)) throw err;
+        if (!isProxyOutage(err)) throw err;
+        if (openModelOutage()) {
+          return directModelRequest.run(true, () => nativeFetch(urlStr, directInit));
+        }
         return gatewayDownResponse();
       }
 
@@ -1789,7 +1951,6 @@ export function createFetchInterceptor(
 
     type NodeRequestOptions = Record<string, unknown>;
     type NodeIncomingMessage = unknown;
-    type NodeClientRequest = ReturnType<typeof http.request>;
 
     /**
      * Normalize the varied `https.request` call shapes into a single URL string
@@ -1909,6 +2070,9 @@ export function createFetchInterceptor(
       optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
       callback?: (res: NodeIncomingMessage) => void,
     ): NodeClientRequest {
+      if (directModelRequest.getStore()) {
+        return nativeHttpsRequest(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+      }
       const urlStr = buildUrlStringFromArgs(urlOrOptions, optionsOrCallback);
 
       if (urlStr && shouldPassthroughChatGPTCodexResponseBackendUrl(urlStr)) {
@@ -2057,9 +2221,30 @@ export function createFetchInterceptor(
         // F-1586: now that http.request is also patched, the proxy
         // hop must use the captured original to avoid recursing
         // back into this branch.
-        return explainRefusedProxyHop(
-          nativeHttpRequest(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]),
+        const proxyRequest = nativeHttpRequest(
+          newOpts as unknown as Parameters<typeof http.request>[0],
+          cb as Parameters<typeof http.request>[1],
         );
+        const directFactory = (): NodeClientRequest => {
+          const directOptions: NodeRequestOptions = typeof optionsOrCallback === "object" && optionsOrCallback !== null
+            ? { ...optionsOrCallback } : {};
+          if (typeof proxyRequest.getHeaders === "function") {
+            const headers = { ...proxyRequest.getHeaders() } as Record<string, unknown>;
+            for (const name of Object.keys(headers)) {
+              const lower = name.toLowerCase();
+              if (lower === "host" || lower === "x-ai-auth" || lower.startsWith("x-dc-") ||
+                  lower.startsWith("x-defenseclaw-")) delete headers[name];
+            }
+            directOptions.headers = headers;
+          }
+          const target = typeof urlOrOptions === "object" && !(urlOrOptions instanceof URL)
+            ? { ...urlOrOptions, ...directOptions }
+            : urlOrOptions;
+          return originalUrl.protocol === "http:"
+            ? nativeHttpRequest(target as string, directOptions)
+            : nativeHttpsRequest(target as string, directOptions);
+        };
+        return nodeRequestWithOutageFallback(proxyRequest, directFactory);
       }
 
       // Non-intercepted https.request — report silent passthrough so
@@ -2096,6 +2281,9 @@ export function createFetchInterceptor(
       optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
       callback?: (res: NodeIncomingMessage) => void,
     ): NodeClientRequest {
+      if (directModelRequest.getStore()) {
+        return nativeHttpRequest(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+      }
       const urlStr = buildUrlStringFromArgs(urlOrOptions, optionsOrCallback);
       // Layer 0: known provider domain or registered local LLM port
       // with a recognizable LLM path (original Ollama-only gate).
@@ -2125,8 +2313,12 @@ export function createFetchInterceptor(
         );
       }
       // Re-use the https.request patched path. The proxy hop is
-      // plain http already, so the protocol downgrade is a no-op.
-      return patchedHttpsRequest(urlOrOptions, optionsOrCallback, callback);
+      // plain http already. Keep the caller's protocol when it used an
+      // options bag without an explicit URL, including outage continuation.
+      const originalTarget = typeof urlOrOptions === "object" && !(urlOrOptions instanceof URL)
+        ? { ...urlOrOptions, protocol: "http:" }
+        : urlOrOptions;
+      return patchedHttpsRequest(originalTarget, optionsOrCallback, callback);
     }
 
     http.request = patchedHttpRequest as typeof http.request;
@@ -2417,6 +2609,8 @@ export function createFetchInterceptor(
   function serve(config: AdoptedConfig): void {
     guardrailPort = config.guardrailPort;
     getCorrelationHeaders = config.getCorrelationHeaders;
+    getOutageMode = config.getOutageMode ?? closedOutageMode;
+    onOutageWarning = config.onOutageWarning;
     proxyBase = `http://127.0.0.1:${guardrailPort}`;
     _shared.guardrailPort = guardrailPort;
     egressReporter?.stop();

@@ -112,4 +112,37 @@ describe("proxy hop listener proof", () => {
     expect(hop?.headers.get("x-dc-auth")).toBe(`Bearer ${TOKEN}`);
     expect(hop?.headers.get("x-ai-auth") ?? "").toContain("sk-provider-key");
   });
+
+  // GAP-0580 with GAP-0594: only a proof that found nothing listening, or
+  // timed out, is an outage the saved open mode continues through.
+  function openInterceptor(): void {
+    interceptor.stop();
+    interceptor = createFetchInterceptor({ guardrailPort: 14011, getOutageMode: () => "open" });
+    interceptor.start();
+  }
+
+  it("continues to the provider in the saved open mode when the proof finds nothing listening", async () => {
+    openInterceptor();
+    _setListenerProofForTest(async () => {
+      throw new ListenerProofError("connect ECONNREFUSED 127.0.0.1:14011", true);
+    });
+    const res = await modelCall();
+    expect(res.status).toBe(200);
+    expect(calls.filter((c) => c.url.includes(":14011/v1/chat/completions"))).toEqual([]);
+    const direct = calls.filter((c) => c.url === "https://api.openai.com/v1/chat/completions");
+    expect(direct).toHaveLength(1);
+    expect(direct[0].headers.get("authorization")).toBe("Bearer sk-provider-key");
+    expect(direct[0].headers.get("x-dc-auth")).toBeNull();
+  });
+
+  it("keeps a listener that fails the proof blocked in the saved open mode", async () => {
+    openInterceptor();
+    _setListenerProofForTest(async () => {
+      throw new ListenerProofError("not this account gateway");
+    });
+    const res = await modelCall();
+    expect(res.status).toBe(503);
+    expect((await res.json()).error.message).toBe(GATEWAY_DOWN_MESSAGE);
+    expect(calls.filter((c) => c.url.includes("chat/completions"))).toEqual([]);
+  });
 });
