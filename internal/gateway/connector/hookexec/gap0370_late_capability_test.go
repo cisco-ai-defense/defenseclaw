@@ -74,7 +74,7 @@ func TestGAP0370LateCapabilityCarriesDeadlineBlock(t *testing.T) {
 }
 
 func TestGAP0370EarlierPerUserGatewayStillAllowsBenignCall(t *testing.T) {
-	shortAnswerBudget(t, 1500*time.Millisecond)
+	shortAnswerBudget(t, 2500*time.Millisecond)
 	received := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
@@ -87,6 +87,7 @@ func TestGAP0370EarlierPerUserGatewayStillAllowsBenignCall(t *testing.T) {
 			return
 		}
 		received <- string(body)
+		time.Sleep(1500 * time.Millisecond)
 		_, _ = io.WriteString(w, "{\"action\":\"allow\",\"codex_output\":{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\"}}}\n")
 	}))
 	defer server.Close()
