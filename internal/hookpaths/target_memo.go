@@ -35,6 +35,8 @@ type TargetMemo struct {
 	words map[memoWordKey]bool
 	// homes resolves each home once (actionProtectedStatePath).
 	homes map[string]*actionStateHome
+	// stateDirs keeps one bounded state-root listing per evaluation.
+	stateDirs map[string]activeStateDirectory
 	// keys lists each home's protected key files once
 	// (ProtectedAuthorizedKeysPaths), and files their identities
 	// (newProtectedFiles).
@@ -54,11 +56,12 @@ const maxTargetMemoEntries = 1 << 16
 // NewTargetMemo returns an empty memo for one evaluation.
 func NewTargetMemo() *TargetMemo {
 	return &TargetMemo{
-		prefixes: make(map[string]walkState),
-		words:    make(map[memoWordKey]bool),
-		homes:    make(map[string]*actionStateHome),
-		keys:     make(map[string][]string),
-		files:    make(map[string]protectedFiles),
+		prefixes:  make(map[string]walkState),
+		words:     make(map[memoWordKey]bool),
+		homes:     make(map[string]*actionStateHome),
+		stateDirs: make(map[string]activeStateDirectory),
+		keys:      make(map[string][]string),
+		files:     make(map[string]protectedFiles),
 	}
 }
 

@@ -1963,6 +1963,64 @@ func resolveActiveStateHardlinkTargetResolved(resolved, home string) (string, bo
 	return "", false
 }
 
+// The shared identity index is an acceleration, not a negative proof: its
+// entry and time bounds can leave an active file out. For a recovered write
+// target with multiple links, check a missed identity against the current
+// state tree. An incomplete live check remains reachable.
+func activeStateHardlinkReachResolved(resolved, home string) bool {
+	info, err := pathStat(resolved)
+	if err != nil || !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
+		return false
+	}
+	if _, same := resolveActiveStateHardlinkTargetResolved(resolved, home); same {
+		return true
+	}
+	root := filepath.Join(home, ".defenseclaw")
+	deadline := time.Now().Add(activeStateIndexBudget)
+	for _, name := range activeStateFiles {
+		if time.Now().After(deadline) {
+			return true
+		}
+		if current, err := pathStat(filepath.Join(root, name)); err == nil && os.SameFile(info, current) {
+			return true
+		}
+	}
+	for _, name := range activeStateTrees {
+		if time.Now().After(deadline) {
+			return true
+		}
+		tree, ok := ResolveWriteTarget(filepath.Join(root, filepath.FromSlash(name)))
+		if !ok {
+			return true
+		}
+		found, incomplete := false, false
+		err := filepath.WalkDir(tree, func(path string, entry fs.DirEntry, walkErr error) error {
+			if time.Now().After(deadline) {
+				incomplete = true
+				return fs.SkipAll
+			}
+			if walkErr != nil {
+				if !os.IsNotExist(walkErr) {
+					incomplete = true
+				}
+				return nil
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			if current, err := pathStat(path); err == nil && os.SameFile(info, current) {
+				found = true
+				return fs.SkipAll
+			}
+			return nil
+		})
+		if found || incomplete || err != nil && !os.IsNotExist(err) {
+			return true
+		}
+	}
+	return false
+}
+
 // The identity index of one active state tree is built at most once per
 // activeStateIndexTTL and shared by every operand and request in that time,
 // so a command naming many ordinary hard links costs one bounded walk. The
