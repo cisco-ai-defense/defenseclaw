@@ -1259,6 +1259,12 @@ func (c *hookOnlyConnector) migrateConfigTarget(opts SetupOpts, target, label st
 		equal = strings.EqualFold(oldPath, newPath)
 	}
 	if equal {
+		// An earlier target's notice can outlive the receipt migration.
+		if spec, ok := agentConfigSpecFor(c.name); ok {
+			if err := spec.removeOtherTargetState(opts.DataDir, target); err != nil {
+				return fmt.Errorf("retire previous %s restore state: %w", label, err)
+			}
+		}
 		return nil
 	}
 	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, "config", oldPath)

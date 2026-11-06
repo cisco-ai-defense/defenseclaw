@@ -392,7 +392,7 @@ func (s agentConfigSpec) removeCopies(dataDir string) error {
 }
 
 // removeOtherTargetState retires a valid copy and notice for a different
-// config target when an older install has no managed-file receipt left.
+// config target, including state left after a receipt moved to this target.
 // State with an unreadable target stays in place for recovery review.
 func (s agentConfigSpec) removeOtherTargetState(dataDir, target string) error {
 	var paths []string
@@ -526,6 +526,11 @@ func AgentConfigStatus(connectorName string, opts SetupOpts, since time.Time, re
 	configPath := spec.path(opts)
 	if strings.TrimSpace(configPath) == "" {
 		return ""
+	}
+	if refresh {
+		// A successful verify establishes the current target even if an
+		// earlier target's notice survived its receipt migration.
+		_ = spec.removeOtherTargetState(opts.DataDir, configPath)
 	}
 	status := ""
 	if notice, ok := spec.readNotice(opts.DataDir); ok && sameManagedTargetPath(notice.Path, configPath) {
