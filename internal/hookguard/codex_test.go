@@ -77,11 +77,11 @@ func TestCodexBlockAnswersEveryEventCodexCanBlock(t *testing.T) {
 	}
 }
 
-func TestExceptionStatusIsTheHighBitOfTheExitCode(t *testing.T) {
+func TestSiblingExceptionStatusIsTheHighBitOfTheExitCode(t *testing.T) {
 	for code, want := range map[int]bool{0: false, 1: false, 2: false, 7: false, 9009: false, 0x7fffffff: false,
 		0x80000003: true, 0xc0000005: true, 0xc000007b: true, 0xc0000135: true, 0xc000013a: true, 0xffffffff: true} {
-		if got := ExceptionStatus(code); got != want {
-			t.Errorf("ExceptionStatus(%#x) = %v, want %v", code, got, want)
+		if got := siblingExceptionStatus(code); got != want {
+			t.Errorf("siblingExceptionStatus(%#x) = %v, want %v", code, got, want)
 		}
 	}
 }

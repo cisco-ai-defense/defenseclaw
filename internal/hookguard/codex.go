@@ -114,24 +114,13 @@ func CodexBlock(event, contract, message string) map[string]any {
 
 // RunCodex runs launcher with hookArgs and passes its stdin, stdout, stderr
 // and exit code through. When the launcher cannot start, or ends with a
-// Windows exception status (ExceptionStatus), it prints the Codex sentence
-// and answers CodexBlock for event, exit 0; an event without a block gets
-// the sentence and exit 0.
+// Windows exception status (siblingExceptionStatus), it prints the Codex
+// sentence and answers CodexBlock for event, exit 0; an event without a
+// block gets the sentence and exit 0.
 func RunCodex(launcher string, hookArgs []string, event, contract string, stdin io.Reader, stdout, stderr io.Writer) int {
-	command := exec.Command(launcher, hookArgs...)
-	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, stderr
-	err := command.Run()
-	if err == nil {
-		return 0
-	}
-	missing := false
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() >= 0 {
-		if !ExceptionStatus(exitErr.ExitCode()) {
-			return exitErr.ExitCode()
-		}
-	} else if _, statErr := os.Lstat(launcher); errors.Is(statErr, fs.ErrNotExist) {
-		missing = true
+	code, started, missing := runSiblingLauncher(launcher, hookArgs, stdin, stdout, stderr)
+	if started {
+		return code
 	}
 	message := LauncherMessage("Codex", missing)
 	fmt.Fprintln(stderr, message)
@@ -144,11 +133,35 @@ func RunCodex(launcher string, hookArgs []string, event, contract string, stdin 
 	return 0
 }
 
-// ExceptionStatus reports a Windows process exit code of 0x80000000 or
-// above: the process ended on an exception (a corrupt code section, a loader
-// failure, an access violation), not with a status it chose. No DefenseClaw
-// launcher exits with such a code itself; a Go panic exits 2.
-func ExceptionStatus(code int) bool {
+// runSiblingLauncher runs launcher with hookArgs and passes its stdin,
+// stdout, stderr and exit code through. started is false when the launcher
+// did not run normally: it could not start, or it ended with a Windows
+// exception status; missing then says nothing is at the launcher path.
+func runSiblingLauncher(launcher string, hookArgs []string, stdin io.Reader, stdout, stderr io.Writer) (code int, started, missing bool) {
+	command := exec.Command(launcher, hookArgs...)
+	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, stderr
+	err := command.Run()
+	if err == nil {
+		return 0, true, false
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() >= 0 {
+		if !siblingExceptionStatus(exitErr.ExitCode()) {
+			return exitErr.ExitCode(), true, false
+		}
+		return 0, false, false
+	}
+	_, statErr := os.Lstat(launcher)
+	return 0, false, errors.Is(statErr, fs.ErrNotExist)
+}
+
+// siblingExceptionStatus reports a Windows process exit code of 0x80000000
+// or above: the process ended on an exception (a corrupt code section, a
+// loader failure, an access violation), not with a status it chose. No
+// DefenseClaw launcher exits with such a code itself; a Go panic exits 2.
+// It is private to the sibling guards (Codex, Devin) so it cannot collide
+// with the Claude Code guard's exported ExceptionStatus (fix/r109-g089c).
+func siblingExceptionStatus(code int) bool {
 	return uint32(code) >= 0x80000000 //nolint:gosec // the Windows exit code is a DWORD; the conversion keeps its bits.
 }
 

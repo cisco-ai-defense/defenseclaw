@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // defenseclaw-hook-guard is the one-line Windows install's launcher guard
-// (internal/hookguard) for Claude Code and, on the events Codex can block,
-// for Codex (launcher-guard-sibling, rel-1-0-6 GAP-0676). Release builds link it with
+// (internal/hookguard) for Claude Code and, on the events they can block,
+// for Codex (launcher-guard-sibling) and Devin (launcher-guard-devin),
+// rel-1-0-6 GAP-0676. Release builds link it with
 // -H=windowsgui: the console gateway that was the guard before got a console
 // window of its own whenever a caller without a console started it, and
 // Windows Terminal showed it (GAP-2467). It is its own small file, not the
@@ -24,8 +25,8 @@ var (
 	date    = "unknown"
 )
 
-// guardExecutable is the path of this guard program; the Codex guard starts
-// the launcher beside it. Tests replace it.
+// guardExecutable is the path of this guard program; the Codex and Devin
+// guards start the launcher beside it. Tests replace it.
 var guardExecutable = os.Executable
 
 func main() {
@@ -42,6 +43,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		self, _ := guardExecutable()
 		return hookguard.RunCodex(hookguard.SiblingLauncher(self), hookArgs, event, contract, stdin, stdout, stderr)
 	}
+	if hookArgs, event, ok := hookguard.DevinArgv(args); ok {
+		self, _ := guardExecutable()
+		return hookguard.RunDevin(hookguard.SiblingLauncher(self), hookArgs, event, stdin, stdout, stderr)
+	}
 	if dataDir, launcher, event, ok := hookguard.CoworkArgv(args); ok {
 		return hookguard.RunCowork(dataDir, launcher, event, stdin, stdout, stderr)
 	}
@@ -55,6 +60,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "defenseclaw-hook-guard version %s (commit=%s, built=%s)\n", version, commit, date)
 		return 0
 	}
-	fmt.Fprintf(stderr, "defenseclaw-hook-guard: only %q <defenseclaw-hook.exe> hook --connector claudecode or %q with DefenseClaw hook paths is accepted\n", hookguard.Subcommand, hookguard.CoworkSubcommand)
+	fmt.Fprintf(stderr, "defenseclaw-hook-guard: only %q <defenseclaw-hook.exe> hook --connector claudecode, %q hook --connector codex --event <event> --hook-contract <contract>, %q <event> hook --connector devin, or %q with DefenseClaw hook paths is accepted\n",
+		hookguard.Subcommand, hookguard.SiblingSubcommand, hookguard.DevinSubcommand, hookguard.CoworkSubcommand)
 	return 2
 }
