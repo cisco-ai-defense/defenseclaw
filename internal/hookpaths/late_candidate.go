@@ -115,7 +115,7 @@ func lateKnownStatement(stmt *syntax.Stmt, cwd, home string, depth int, compound
 				return nil, false
 			}
 			option, optionOK := StaticWord(cmd.Args[1], home)
-			body, bodyOK := StaticWord(cmd.Args[2], home)
+			body, bodyOK := lateKnownWord(cmd.Args[2], cwd, home)
 			if !optionOK || !bodyOK || option != "-c" && option != "-lc" {
 				return nil, false
 			}

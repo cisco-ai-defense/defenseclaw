@@ -388,3 +388,43 @@ func TestGAP0518DisplayValuesCheckKnownAliases(t *testing.T) {
 		}
 	}
 }
+
+func TestGAP0518DoubleQuotedKnownValueShellBody(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	ssh := filepath.Join(home, ".ssh")
+	for _, dir := range []string{cwd, ssh} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key := filepath.Join(ssh, "config")
+	if err := os.WriteFile(key, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(cwd, "alias.txt")
+	if err := os.Link(key, alias); err != nil {
+		t.Fatal(err)
+	}
+	note := filepath.Join(cwd, "notes.txt")
+	if err := os.WriteFile(note, []byte("ordinary"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	call := func(command string) []byte {
+		return []byte(`{"hook_event_name":"PreToolUse","tool_name":"Bash","cwd":` + mustJSONString(cwd) + `,"tool_input":{"command":` + mustJSONString(command) + `}}`)
+	}
+	for _, tc := range []struct {
+		command  string
+		ordinary bool
+	}{
+		{`bash -c "echo $PWD"`, true},
+		{`bash -c "cat $PWD/notes.txt"`, true},
+		{`bash -c "cat $PWD/alias.txt"`, false},
+	} {
+		got := ordinaryNoAnswerPayloadInHome(call(tc.command), home)
+		t.Logf("%q ordinary=%t", tc.command, got)
+		if got != tc.ordinary {
+			t.Errorf("%q proof %t want %t", tc.command, got, tc.ordinary)
+		}
+	}
+}
