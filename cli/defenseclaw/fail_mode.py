@@ -30,6 +30,7 @@ from defenseclaw.connector_paths import (
     normalize,
 )
 from defenseclaw.file_lock import _lock_file_exclusive, _unlock_file
+from defenseclaw.winquote import powershell_command_line
 
 _VALID_MODES = frozenset({"open", "closed"})
 _MAX_RUNTIME_FILE = 2 * 1024 * 1024
@@ -158,10 +159,7 @@ def managed_windows_verify_command() -> str:
 
         root = windows_owner._program_files_dir()
     cli = (root.strip().rstrip("\\") or r"C:\Program Files") + r"\Cisco\DefenseClaw\bin\defenseclaw.exe"
-    # PowerShell reads U+2018 to U+201B as single quotes too, so each is
-    # doubled like an apostrophe (managed.PowerShellLiteral).
-    quoted = "".join(ch * 2 if ch in "'\u2018\u2019\u201a\u201b" else ch for ch in cli)
-    return "& '" + quoted + "' enterprise windows verify --profile standalone"
+    return powershell_command_line(cli, "enterprise", "windows", "verify", "--profile", "standalone")
 
 
 @dataclass(frozen=True)

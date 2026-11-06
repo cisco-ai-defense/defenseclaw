@@ -33,6 +33,7 @@ from defenseclaw.codeguard_skill import (
 )
 from defenseclaw.commands.cmd_codeguard import codeguard
 from defenseclaw.context import AppContext
+from defenseclaw.winquote import powershell_command_line
 
 from tests.permissions import assert_owner_only_directory
 
@@ -57,9 +58,7 @@ def _make_runnable(path) -> None:
 def _expected_scan_hint(executable) -> str:
     argv = (os.path.abspath(str(executable)), "scan", "code", "<path to scan>")
     if os.name == "nt":
-        quoted = ("'" + arg.replace("'", "''") + "'" for arg in argv)
-        command = "& " + " ".join(quoted)
-        return f"Scan code now (PowerShell):  {command}"
+        return f"Scan code now (PowerShell):  {powershell_command_line(*argv)}"
     return f"Scan code now:  {shlex.join(argv)}"
 
 

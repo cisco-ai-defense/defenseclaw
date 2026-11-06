@@ -18,6 +18,7 @@ tests/test_powershell_quoting_source.py fails a quote doubled by hand.
 
 from __future__ import annotations
 
+import os
 import shlex
 
 # The characters PowerShell takes as a single quote.
@@ -113,3 +114,49 @@ def split_windows_words(command: str) -> list[str]:
         protected.append(char)
         index += 1
     return [word.replace(_DOUBLED_APOSTROPHE, "''") for word in shlex.split("".join(protected), posix=False)]
+
+
+def powershell_argument(arg: str) -> str:
+    """*arg* as PowerShell passes it to a native command (managed powerShellArgument).
+
+    Unchanged when it is a plain word (a subcommand, a flag, a connector
+    name) or a <placeholder> the reader replaces, a literal otherwise.
+    """
+    if len(arg) > 2 and arg[0] == "<" and arg[-1] == ">" and not any(char in _NOT_IN_PLACEHOLDER for char in arg[1:-1]):
+        return arg
+    if arg == "":
+        return "''"
+    if all(char in _PLAIN_CHARACTERS for char in arg):
+        return arg
+    return powershell_literal(arg)
+
+
+# The characters a <placeholder> may not hold.
+_NOT_IN_PLACEHOLDER = "<>\"`$" + SINGLE_QUOTES
+
+# The characters a bare argument may hold (managed powerShellPlainRune): ASCII
+# letters and digits and - _ . : / = +, none of which PowerShell reads as syntax.
+_PLAIN_CHARACTERS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:/=+"
+)
+
+
+def powershell_command_line(executable: str, *args: str) -> str:
+    """The PowerShell line that runs *executable* with *args* (managed.WindowsCommandLine).
+
+    The executable is a literal after the call operator; plain words stay
+    bare. The line runs only in PowerShell, so the text around it says so
+    (run_instruction).
+    """
+    return " ".join(["&", powershell_literal(executable), *(powershell_argument(arg) for arg in args)])
+
+
+def run_instruction(command: str, *, windows: bool | None = None) -> str:
+    """The words that ask the user to run *command*: "in PowerShell, run" on Windows, else "run".
+
+    A Windows command DefenseClaw prints is a PowerShell line (a call
+    operator, quoted literals), which cmd.exe does not run (REVIEW-1 M4).
+    """
+    if windows is None:
+        windows = os.name == "nt"
+    return f"in PowerShell, run {command}" if windows else f"run {command}"

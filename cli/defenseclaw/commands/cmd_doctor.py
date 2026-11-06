@@ -151,6 +151,7 @@ from defenseclaw.process_liveness import pid_alive
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener, is_symlink
 from defenseclaw.scanner_binary import SKILL_SCANNER_BINARY, resolve_scanner_binary
 from defenseclaw.webhooks import list_webhooks, network_error_text, validate_webhook_url
+from defenseclaw.winquote import powershell_literal, run_instruction
 
 # Doctor status markers, recomputed per emission so the per-call
 # TTY/NO_COLOR gate in ``ux._color_enabled`` takes effect. Caching at
@@ -9846,11 +9847,6 @@ def _managed_plugin_drift(cfg, path: str, connector: str = "opencode") -> str:
     return ""
 
 
-def _powershell_literal(value: str) -> str:
-    """Return one inert single-quoted PowerShell string literal."""
-    return "'" + value.replace("'", "''") + "'"
-
-
 def _connector_health_row(document: str, connector: str) -> dict[str, object] | None:
     try:
         parsed = json.loads(document)
@@ -10253,8 +10249,8 @@ def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
             "$OutputEncoding = [System.Text.Encoding]::UTF8; "
             "Import-Module -ErrorAction Stop -Name "
             f"{_CURSOR_WINDOWS_PROBE_CORE_MODULES}; "
-            f"Get-Content -LiteralPath {_powershell_literal(vendor_input)} -Raw | "
-            f"& {{ $input | & {_powershell_literal(adapter_path)} }}"
+            f"Get-Content -LiteralPath {powershell_literal(vendor_input)} -Raw | "
+            f"& {{ $input | & {powershell_literal(adapter_path)} }}"
         )
         encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
         powershell, windows_directory = _windows_system_powershell()
@@ -18488,6 +18484,8 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
             # Setup re-pins the agent and the guard; refresh never re-pins
             # a changed agent binary.
             fix = cmd_acp.setup_repair_command(cfg, client, agent, data_dir)
+            if os.name == "nt":
+                fix = run_instruction(fix)
         if managed:
             # A managed enrollment keeps its locks in a per-user runtime dir
             # that doctor does not know, so only acp verify can be sure.
@@ -20736,7 +20734,7 @@ def _fix_acp_guard_pins(
         )
         agent_note = (
             f"{', '.join(agent_drift)}: the agent executable changed since setup (for example, it updated); "
-            f"doctor does not re-pin it, so review it and run {commands}"
+            f"doctor does not re-pin it, so review it and {run_instruction(commands)}"
         )
     if not pending:
         current = "the ACP guard pins are current"

@@ -3395,7 +3395,7 @@ def _windows_developer_files(install_root: str) -> list[str]:
 
 
 def _powershell_quoted_paths(files: list[str]) -> str:
-    return ", ".join("'" + path.replace("'", "''") + "'" for path in files)
+    return ", ".join(powershell_literal(path) for path in files)
 
 
 def _windows_developer_removal(files: list[str]) -> str:

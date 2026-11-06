@@ -16,6 +16,7 @@ from click.testing import CliRunner
 from defenseclaw.acp_catalog import ACP_AGENT_ENTRY_POINTS
 from defenseclaw.commands.cmd_acp import _write_token, acp_cmd
 from defenseclaw.config import ACPBinding, ACPProfile
+from defenseclaw.winquote import powershell_literal
 
 from tests.helpers import cleanup_app, make_app_context
 
@@ -27,7 +28,7 @@ def _repair_command(*args: str) -> str:
     pasted path with spaces or quotes stays one argument.
     """
     if os.name == "nt":
-        return "defenseclaw " + " ".join("'" + value.replace("'", "''") + "'" for value in args)
+        return "defenseclaw " + " ".join(powershell_literal(value) for value in args)
     return shlex.join(["defenseclaw", *args])
 
 

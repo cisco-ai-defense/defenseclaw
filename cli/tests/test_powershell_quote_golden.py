@@ -26,10 +26,13 @@ from defenseclaw.doctor_hooks import (
     copilot_setup_command,
 )
 from defenseclaw.winquote import (
+    powershell_command_line,
     powershell_literal,
     powershell_literal_before_typographic_quotes,
     powershell_literal_is_current,
     powershell_literal_value,
+    run_instruction,
+    split_windows_words,
 )
 
 from tests.test_cmd_doctor_windows_copilot import _adapter_body, _powershell_command
@@ -37,6 +40,7 @@ from tests.test_cmd_doctor_windows_hooks import WindowsHookDoctorTests
 
 _GOLDEN = Path(__file__).resolve().parents[2] / "testdata" / "powershell_quotes" / "windows_hook_commands.json"
 _ROWS = json.loads(_GOLDEN.read_text(encoding="utf-8"))["rows"]
+_LINES = json.loads((_GOLDEN.parent / "command_lines.json").read_text(encoding="utf-8"))["rows"]
 _TYPOGRAPHIC = [row for row in _ROWS if row["quote"] != "U+0027"]
 
 
@@ -108,3 +112,27 @@ def test_a_lone_quote_is_kept_and_not_current() -> None:
         assert not powershell_literal_is_current(f"O{quote}Brien")
         assert powershell_literal_value(f"O{quote}{quote}Brien") == f"O{quote}Brien"
     assert powershell_literal_value("O''Brien") == "O'Brien"
+
+
+@pytest.mark.parametrize("row", _LINES, ids=[str(index) for index in range(len(_LINES))])
+def test_python_renders_a_command_line_as_go_does(row: dict) -> None:
+    """g072 review 3 M2: winquote.powershell_command_line is managed.WindowsCommandLine."""
+    line = powershell_command_line(row["executable"], *row["args"])
+    assert line == row["line"]
+    if any(" " in arg for arg in row["args"] if arg[:1] == "<"):
+        return  # a <placeholder> the reader replaces is not one word yet
+    words = split_windows_words(line)
+    assert words[0] == "&"
+    read = [powershell_literal_value(word[1:-1]) if word[:1] == "'" else word for word in words[1:]]
+    assert read == [row["executable"], *row["args"]]
+
+
+def test_the_command_line_golden_has_every_powershell_single_quote() -> None:
+    lines = " ".join(row["line"] for row in _LINES)
+    for quote in "'\u2018\u2019\u201a\u201b":
+        assert f"O{quote}{quote}Brien" in lines, quote
+
+
+def test_run_instruction_names_powershell_on_windows() -> None:
+    assert run_instruction("& 'x' status", windows=True) == "in PowerShell, run & 'x' status"
+    assert run_instruction("defenseclaw status", windows=False) == "run defenseclaw status"
