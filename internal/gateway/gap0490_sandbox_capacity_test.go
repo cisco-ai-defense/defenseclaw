@@ -13,16 +13,30 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
+	"github.com/google/uuid"
 )
 
+// TestGAP0490SandboxReceiptCapacity sends 400 relayed tool calls, 20 at a
+// time, the way the sandbox hook sends them (hooks/_sandbox.sh): the proposal
+// and its receipt each carry an idempotency key, and an attempt that gets no
+// answer, or a 502, 503 or 504, is posted once more with the same key. Each
+// attempt here waits 3 s, a third of the 9 s first attempt of the hook, so a
+// race build on a small runner may need the retry. Every call must still end
+// in an allow, a receipt the gateway acknowledges and exactly one audited
+// verdict: a retry joins its first attempt instead of evaluating the call
+// again, so no call is offered twice and no offered answer is left
+// unacknowledged.
 func TestGAP0490SandboxReceiptCapacity(t *testing.T) {
+	const calls, parallel = 400, 20
 	f := newManagedHookAuditFixture(t, nil)
 	bindings, err := sandboxauth.OpenFileStore(sandboxauth.DefaultStorePath(t.TempDir()), sandboxauth.WithRefreshInterval(0))
 	if err != nil {
@@ -48,39 +62,53 @@ func TestGAP0490SandboxReceiptCapacity(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 	client := &http.Client{Timeout: 3 * time.Second}
+	var retried atomic.Int32
 	post := func(body []byte, receipt bool) (int, []byte, error) {
-		req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/claude-code/hook", bytes.NewReader(body))
-		if err != nil {
-			return 0, nil, err
+		key := uuid.NewString()
+		for attempt := 1; ; attempt++ {
+			req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/claude-code/hook", bytes.NewReader(body))
+			if err != nil {
+				return 0, nil, err
+			}
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-DefenseClaw-Client", "sandbox-hook/1.0")
+			req.Header.Set(SandboxHookIdempotencyHeader, key)
+			if receipt {
+				req.Header.Set(sandboxrelay.HookReceiptHeader, sandboxrelay.HookReceiptHeaderValue)
+			}
+			var status int
+			var out []byte
+			resp, err := client.Do(req)
+			if err == nil {
+				status = resp.StatusCode
+				out, err = io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+			}
+			again := err != nil || status == http.StatusBadGateway ||
+				status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
+			if !again || attempt == 2 {
+				return status, out, err
+			}
+			retried.Add(1)
 		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-DefenseClaw-Client", "sandbox-hook/1.0")
-		if receipt {
-			req.Header.Set(sandboxrelay.HookReceiptHeader, sandboxrelay.HookReceiptHeaderValue)
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return 0, nil, err
-		}
-		defer resp.Body.Close()
-		out, err := io.ReadAll(resp.Body)
-		return resp.StatusCode, out, err
 	}
-	jobs := make(chan int, 400)
-	for i := 0; i < 400; i++ {
+	jobs := make(chan int, calls)
+	for i := 0; i < calls; i++ {
 		jobs <- i
 	}
 	close(jobs)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	problems := make(map[string]int)
-	for worker := 0; worker < 20; worker++ {
+	receipts := make(map[string]string, calls)
+	for worker := 0; worker < parallel; worker++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				status, out, err := post([]byte(managedHookBody(fmt.Sprintf("g490-%d", i), "PreToolUse")), false)
+				session := fmt.Sprintf("g490-%d", i)
+				status, out, err := post([]byte(managedHookBody(session, "PreToolUse")), false)
 				if err != nil || status != http.StatusOK {
 					mu.Lock()
 					problems[fmt.Sprintf("proposal %d %s %v", status, out, err)]++
@@ -97,9 +125,18 @@ func TestGAP0490SandboxReceiptCapacity(t *testing.T) {
 					mu.Unlock()
 					continue
 				}
+				mu.Lock()
+				if other, dup := receipts[answer.DeliveryReceipt]; dup {
+					problems[fmt.Sprintf("receipt %s offered to %s and %s", answer.DeliveryReceipt, other, session)]++
+				}
+				receipts[answer.DeliveryReceipt] = session
+				mu.Unlock()
 				ack, _ := json.Marshal(map[string]string{"delivery_receipt": answer.DeliveryReceipt, "result": "ack"})
 				status, out, err = post(ack, true)
-				if err != nil || status != http.StatusOK {
+				var received struct {
+					Received bool `json:"received"`
+				}
+				if err != nil || status != http.StatusOK || json.Unmarshal(out, &received) != nil || !received.Received {
 					mu.Lock()
 					problems[fmt.Sprintf("receipt %d %s %v", status, out, err)]++
 					mu.Unlock()
@@ -108,8 +145,57 @@ func TestGAP0490SandboxReceiptCapacity(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+	t.Logf("%d calls at %d parallel: %d attempts retried", calls, parallel, retried.Load())
 	if len(problems) != 0 {
-		t.Fatalf("400 calls at 20 parallel: %v", problems)
+		t.Fatalf("%d calls at %d parallel: %v", calls, parallel, problems)
+	}
+	if len(receipts) != calls {
+		t.Fatalf("distinct receipts = %d, want %d", len(receipts), calls)
+	}
+	// One audited verdict per call: the acknowledged allow.
+	events, err := f.store.ListEvents(100 * calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdicts := make(map[string][]string, calls)
+	for _, event := range events {
+		if event.Action != string(audit.ActionConnectorHook) || !strings.HasPrefix(event.SessionID, "g490-") {
+			continue
+		}
+		verdict := "?"
+		for _, field := range strings.Fields(event.Details) {
+			if action, ok := strings.CutPrefix(field, "action="); ok {
+				verdict = action
+			}
+		}
+		verdicts[event.SessionID] = append(verdicts[event.SessionID], verdict)
+	}
+	for i := 0; i < calls; i++ {
+		session := fmt.Sprintf("g490-%d", i)
+		if got := verdicts[session]; len(got) != 1 || got[0] != "allow" {
+			t.Errorf("%s audited verdicts = %v, want one allow", session, got)
+		}
+	}
+	// Every journaled offer was acknowledged: a retry that evaluated a call
+	// again would leave its own offer unsettled.
+	var after audit.HookDeliveryJournalEntry
+	for {
+		entries, err := f.store.HookDeliveries(t.Context(), after, 100, pendingHookJournalLimits.OccurrenceBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			var pending pendingHookOccurrence
+			if json.Unmarshal(entry.Occurrence, &pending) != nil || !pending.Settled {
+				t.Errorf("journal row %s was offered and never acknowledged", entry.ID)
+			} else if receipts[entry.ID] == "" {
+				t.Errorf("journal row %s is not an offered receipt", entry.ID)
+			}
+			after = audit.HookDeliveryJournalEntry{ID: entry.ID, CreatedAt: entry.CreatedAt}
+		}
+		if len(entries) < 100 {
+			break
+		}
 	}
 }
 
