@@ -24418,7 +24418,13 @@ function Publish-DefenseClawEarlyHook {
         $Intent['early_hook_guard_sha256'] = $guardSHA256
     }
     Write-DefenseClawJsonAtomic -Value $Intent -Path $Layout.PendingPath
-    Install-DefenseClawSourceDescriptor -Source $Source -Destination $Layout.HookPath
+    # GAP-0656: standalone keeps a hook that already has the replacement's
+    # bytes (a repair, or an ensure that applies a config change to the
+    # installed release). Replacing it with the same bytes was the only hook
+    # swap of such a run, and an agent starting the hook in the rename's
+    # instant could not start it and ran its tool call unchecked. The checks
+    # on the hook path run either way. Secure Client is unchanged.
+    Install-DefenseClawSourceDescriptor -Source $Source -Destination $Layout.HookPath -SkipIfContentMatches:(Test-DefenseClawStandaloneProfile)
     # GAP-1070: a call the replaced release's hook took before the swap (one
     # still waiting for its input or its answer) is answered by the gateway
     # that runs now, not after the services stop.

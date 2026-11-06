@@ -78,6 +78,16 @@ def test_the_transaction_publishes_the_hook_before_it_stops_the_services() -> No
     swap = publish_body.index("Install-DefenseClawSourceDescriptor -Source $Source -Destination $Layout.HookPath")
     wait = publish_body.index("Wait-DefenseClawPriorHookCalls -HookPath $Layout.HookPath -StartedBefore ([DateTime]::Now)")
     assert swap < wait < publish_body.index("return $preimage")
+    # GAP-0656: a repair or a config-restart ensure republished the hook
+    # with the same bytes, its only hook swap, and a start in the rename's
+    # instant failed (the agent ran the call unchecked). Standalone keeps a
+    # matching hook; Secure Client is unchanged.
+    assert (
+        "Install-DefenseClawSourceDescriptor -Source $Source -Destination $Layout.HookPath "
+        "-SkipIfContentMatches:(Test-DefenseClawStandaloneProfile)\n"
+    ) in publish_body
+    atomic = _function_body(module, "Install-DefenseClawFileAtomic")
+    assert "if ($SkipIfContentMatches -and [IO.File]::Exists($Destination)) {" in atomic
 
 
 
@@ -134,7 +144,7 @@ function Write-DefenseClawJsonAtomic {
     ($Value | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $Path -Encoding utf8
 }
 function Install-DefenseClawSourceDescriptor {
-    param([hashtable]$Source, [string]$Destination)
+    param([hashtable]$Source, [string]$Destination, [switch]$SkipIfContentMatches)
     $previous = if (Test-Path -LiteralPath $Destination) { Get-Content -LiteralPath $Destination -Raw } else { '<absent>' }
     $script:events.Add('publish:' + [IO.Path]::GetFileName($Destination) + ':' + $previous)
     Copy-Item -LiteralPath $Source.path -Destination $Destination -Force
@@ -192,7 +202,7 @@ if ($Case -like 'restorer*') {
     }
     if ($Case -eq 'restorer-persists') {
         function Install-DefenseClawSourceDescriptor {
-            param([hashtable]$Source, [string]$Destination)
+            param([hashtable]$Source, [string]$Destination, [switch]$SkipIfContentMatches)
             $script:events.Add('publish:' + [IO.Path]::GetFileName($Destination))
             Copy-Item -LiteralPath $Source.path -Destination $Destination -Force
             if ([IO.Path]::GetFileName($Destination) -ceq 'defenseclaw-hook.exe' -and $script:restores -gt 0) {
