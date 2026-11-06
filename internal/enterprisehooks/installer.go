@@ -35,7 +35,7 @@ import (
 // installOwnedHooksPresent is the registration read-back used during Install.
 // Tests supply both execution-probe capabilities without depending on the
 // host's user namespace setting.
-var installOwnedHooksPresent = connector.OwnedHooksPresent
+var installOwnedHooksPresent = connector.OwnedHooksPresentForPendingInstall
 
 // InstallOptions describes one explicit enterprise hook install/repair target.
 //
@@ -645,22 +645,10 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			defer unlock()
 			conn.SetCredentials(setupOpts.APIToken, opts.MasterKey)
 			previousLockEntry := connector.LoadHookContractLockEntry(dataDir, conn.Name())
-			lockWriteAttempted := false
 			var beforeSetup dataDirSnapshot
 			var beforeHookConfigs hookConfigSnapshot
 			rollback := func(cause error) error {
 				failures := []error{cause}
-				if lockWriteAttempted {
-					var lockErr error
-					if strings.TrimSpace(previousLockEntry.Connector) == "" {
-						lockErr = connector.ClearHookContractLockEntry(dataDir, conn.Name())
-					} else {
-						lockErr = connector.SaveHookContractLockEntry(dataDir, previousLockEntry)
-					}
-					if lockErr != nil {
-						failures = append(failures, fmt.Errorf("enterprise hooks: restore previous hook contract lock: %w", lockErr))
-					}
-				}
 				// A Secure Client macOS target that was protected keeps its
 				// hooks on a failed repair (keepProtectedHooksOnRepairFailure);
 				// the standalone profile keeps its rollback.
@@ -735,15 +723,10 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			if err != nil {
 				return rollback(fmt.Errorf("enterprise hooks: hash managed hook runtime: %w", err))
 			}
-			lockWriteAttempted = true
-			if err := connector.SaveHookContractLockEntryForMode(dataDir, lockEntry, strictManagedRuntime); err != nil {
-				return rollback(fmt.Errorf("enterprise hooks: save hook contract lock: %w", err))
-			}
-			// Some hosts cannot run a contained Hermes execution probe. Their
-			// registration read-back requires the script digest sealed above.
-			// Apply the same order to every connector and restore the prior
-			// entry through rollback if read-back fails.
-			present, err := installOwnedHooksPresent(conn, setupOpts)
+			// Some hosts cannot run a contained Hermes execution probe. Use the
+			// digest rendered in this transaction for read-back, without making
+			// it visible to ordinary readers before registration is verified.
+			present, err := installOwnedHooksPresent(conn, setupOpts, lockEntry)
 			if err != nil {
 				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err))
 			}
@@ -772,6 +755,11 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				if err := publishEnterpriseHookAPIToken(dataDir, conn.Name(), setupOpts.HookAPIToken); err != nil {
 					return rollback(fmt.Errorf("enterprise hooks: publish connector-scoped hook token: %w", err))
 				}
+			}
+			// Publish the lock after every fallible registration and hardening
+			// check. A rejected install leaves peer lock metadata unchanged.
+			if err := connector.SaveHookContractLockEntryForMode(dataDir, lockEntry, strictManagedRuntime); err != nil {
+				return rollback(fmt.Errorf("enterprise hooks: save hook contract lock: %w", err))
 			}
 			clearProtectedHookRepairFailure(dataDir, conn.Name())
 			result = InstallResult{
