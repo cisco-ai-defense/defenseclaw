@@ -153,10 +153,6 @@ func newManagedWindowsOpenCodePortFixture(t *testing.T) *managedWindowsOpenCodeP
 	previousClaims, previousClaim := enterpriseHookWindowsOpenCodeClaims, enterpriseHookWindowsOpenCodeClaim
 	previousManifest, previousConfig := enterpriseHookManifest, cfg
 	previousTimeout := enterpriseHookWindowsOpenCodeReadTimeout
-	enterpriseHookWindowsOpenCodeUnknown.Lock()
-	previousUnknown := enterpriseHookWindowsOpenCodeUnknown.seen
-	enterpriseHookWindowsOpenCodeUnknown.seen = map[string]bool{}
-	enterpriseHookWindowsOpenCodeUnknown.Unlock()
 	t.Cleanup(func() {
 		enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles = previousOptions, previousProfiles
 		enterpriseHookWindowsOpenCodePortsLoad, enterpriseHookWindowsOpenCodePortsWrite = previousLoad, previousWrite
@@ -165,9 +161,6 @@ func newManagedWindowsOpenCodePortFixture(t *testing.T) *managedWindowsOpenCodeP
 		enterpriseHookWindowsOpenCodeClaims, enterpriseHookWindowsOpenCodeClaim = previousClaims, previousClaim
 		enterpriseHookManifest, cfg = previousManifest, previousConfig
 		enterpriseHookWindowsOpenCodeReadTimeout = previousTimeout
-		enterpriseHookWindowsOpenCodeUnknown.Lock()
-		enterpriseHookWindowsOpenCodeUnknown.seen = previousUnknown
-		enterpriseHookWindowsOpenCodeUnknown.Unlock()
 	})
 	f := &managedWindowsOpenCodePortFixture{
 		homeSID: map[string]string{}, record: map[string]int{}, files: map[string]int{},
@@ -288,7 +281,7 @@ func TestManagedWindowsGuardianContinuesAfterOneClaimFailure(t *testing.T) {
 	}
 }
 
-func TestManagedWindowsGuardianUnknownAccountDefersThePass(t *testing.T) {
+func TestManagedWindowsGuardianUnknownAccountKeepsKnownAssignments(t *testing.T) {
 	const first, second = "S-1-5-21-100-200-300-1001", "S-1-5-21-400-500-600-1002"
 	f := newManagedWindowsOpenCodePortFixture(t)
 	firstHome, secondHome := f.add(t, first), f.add(t, second)
@@ -301,14 +294,14 @@ func TestManagedWindowsGuardianUnknownAccountDefersThePass(t *testing.T) {
 		return previousRead(home)
 	}
 	ports, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
-	if err == nil || !strings.Contains(err.Error(), "exclude it from managed targets") || ports[first] != 0 || ports[second] != 0 || f.record[first] != 25001 || f.files[secondHome] != 0 || f.writes != 0 || len(f.claims) != 0 || f.reads != 1 {
+	if err == nil || !strings.Contains(err.Error(), "exclude it from managed targets") || ports[first] != 0 || ports[second] != 25002 || f.record[first] != 25001 || f.files[secondHome] != 25002 || f.reads != 1 {
 		t.Fatalf("unknown account view changed assignments: ports=%v files=%v claims=%v writes=%d reads=%d err=%v", ports, f.files, f.claims, f.writes, f.reads, err)
 	}
 	ports, err = enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
 	if err == nil || ports[first] != 0 || ports[second] != 25002 || f.files[secondHome] != 25002 || f.record[first] != 25001 {
-		t.Fatalf("persistent unknown account held another account: ports=%v record=%v err=%v", ports, f.record, err)
+		t.Fatalf("persistent unknown account changed a known account: ports=%v record=%v err=%v", ports, f.record, err)
 	}
-	// A healthy pass clears the unknown state and keeps both assignments.
+	// A healthy read restores the account's eligibility and keeps both assignments.
 	enterpriseHookWindowsOpenCodeRead = previousRead
 	ports, err = enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
 	if err != nil || ports[first] != 25001 || ports[second] != 25002 {
@@ -352,13 +345,14 @@ func TestManagedWindowsGuardianMovesKnownConflictWithUnknownAccount(t *testing.T
 		}
 		return previousRead(home)
 	}
-	if ports, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{}); err == nil || len(ports) != 0 || f.files[thirdHome] != 25002 {
-		t.Fatalf("first unknown pass changed a known file: ports=%v files=%v err=%v", ports, f.files, err)
-	}
 	ports, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
 	if err == nil || ports[first] != 0 || ports[second] != 25002 || ports[third] != 25003 ||
 		f.files[thirdHome] != 25003 || f.record[first] != 25001 {
 		t.Fatalf("unknown account held a known conflict: ports=%v files=%v record=%v err=%v", ports, f.files, f.record, err)
+	}
+	stable, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
+	if err == nil || stable[second] != 25002 || stable[third] != 25003 || f.files[thirdHome] != 25003 {
+		t.Fatalf("known conflict moved again: ports=%v files=%v err=%v", stable, f.files, err)
 	}
 }
 
