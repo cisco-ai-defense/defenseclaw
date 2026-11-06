@@ -778,7 +778,8 @@ type enterpriseHookReconcileRun struct {
 	Rows                []enterpriseHookReconcileRow
 	Failures            int
 	Pending             int
-	Repairs             int `json:"-"`
+	Repairs             int      `json:"-"`
+	RestoredPaths       []string `json:"-"` // owned files returned to the last verified fingerprint
 	StateErr            error
 	WatchDirs           []string
 	WatchExclusiveFiles []string // DC-only writers: react to any event
@@ -3458,7 +3459,8 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// Track the fsnotify event that most recently armed the debounce.
 	// Included in the next reconcile log line so a `no_change=true`
 	// churn can be traced to the specific file+op that keeps firing.
-	// Cleared on every reconcile (fsnotify OR interval).
+	// Cleared when the filesystem pass runs or another pass restores that
+	// path; an unrelated interval leaves it for the pending debounce.
 	var lastTriggerPath string
 	var lastTriggerOp fsnotify.Op
 	var repairRetries enterpriseHookWatchRetries
@@ -3489,6 +3491,15 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		reconcileCtx := cmd.Context()
 		if len(overrideCtx) != 0 {
 			reconcileCtx = overrideCtx[0]
+		}
+		// A retry or interval can restore an owned file before its queued
+		// filesystem event gets a pass. Retain the file state at the start of
+		// every standalone Unix pass so that restoration belongs to this pass.
+		var beforeOwned, lastVerifiedOwned map[string]string
+		if !legacyWatch && runtime.GOOS != "windows" {
+			beforeOwned = make(map[string]string, len(exclusiveOwned))
+			lastVerifiedOwned = maps.Clone(ownedSnapshot)
+			takeEnterpriseHookOwnedSnapshot(beforeOwned, exclusiveOwned, nil, enterpriseHookOwnedFileFingerprint)
 		}
 		if !legacyWatch && reason == "fsnotify" && previousRun.ManifestSHA256 != "" {
 			reconcileCtx = context.WithValue(reconcileCtx, enterpriseHookWatchPriorRunKey{}, previousRun)
@@ -3524,7 +3535,6 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			}
 			return false, fmt.Errorf("enterprise hooks watch: synchronize watch directories: %w", err)
 		}
-		previousRun = run
 		// Rebuild the owned-file allowlists from this run. The
 		// manifest itself is treated as exclusive-writer: only the
 		// installer / operator ever edits it, so any change is a real
@@ -3553,6 +3563,13 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			foundSnapshot[k] = v
 		}
 		takeEnterpriseHookOwnedSnapshot(ownedSnapshot, exclusiveOwned, sharedOwned, enterpriseHookOwnedFileFingerprint)
+		if beforeOwned != nil {
+			run.RestoredPaths = enterpriseHookWatchRestoredOwnedFiles(previousRun, lastVerifiedOwned, beforeOwned, ownedSnapshot, run.WatchExclusiveFiles)
+			if len(run.RestoredPaths) > run.Repairs {
+				run.Repairs = len(run.RestoredPaths)
+			}
+		}
+		previousRun = run
 		if !legacyWatch {
 			failedOwnedPaths = enterpriseHookWatchFailedOwnedPaths(run)
 		}
@@ -3564,12 +3581,13 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		changed := enterpriseHookReconcileChanged(rowsHash, lastRowsHash, run.Repairs)
 		lastRowsHash = rowsHash
 		triggerTag := ""
-		if reason == "fsnotify" && lastTriggerPath != "" {
+		if lastTriggerPath != "" && (reason == "fsnotify" || slices.Contains(run.RestoredPaths, lastTriggerPath)) {
 			// Attribute the reconcile to the specific fsnotify event
-			// that armed the debounce. When a `no_change=true` cycle
-			// keeps recurring, this reveals which path is generating
-			// the noise so it can be reclassified or filtered.
+			// that armed the debounce, including a retry or interval that
+			// completed the pending file work before its own debounce fired.
 			triggerTag = fmt.Sprintf(" trigger_path=%q trigger_op=%s", lastTriggerPath, lastTriggerOp)
+			lastTriggerPath = ""
+			lastTriggerOp = 0
 		}
 		writeEnterpriseHookReconcileLog(
 			cmd.ErrOrStderr(),
@@ -3580,8 +3598,6 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			changed,
 			triggerTag,
 		)
-		lastTriggerPath = ""
-		lastTriggerOp = 0
 		if run.StateErr != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] state write failed: %s\n", run.StateErr)
 		}
@@ -4101,6 +4117,44 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	}
 }
 
+// enterpriseHookWatchRestoredOwnedFiles reports files that were different
+// when this pass began and returned to the last pass's verified bytes and
+// mode. Only a file already verified and still owned by the current run can
+// qualify; a first install, an unchanged file and a failed repair do not.
+func enterpriseHookWatchRestoredOwnedFiles(prior enterpriseHookReconcileRun, verified, before, after map[string]string, owned []string) []string {
+	verifiedTargets := make(map[string]bool, len(prior.Rows))
+	for _, row := range prior.Rows {
+		if row.OK {
+			verifiedTargets[enterpriseHookProtectedTargetKey(row)] = true
+		}
+	}
+	var restored []string
+	for _, name := range owned {
+		path := filepath.Clean(name)
+		verifiedOwner := false
+		for _, owner := range prior.WatchPathOwners[path] {
+			if verifiedTargets[owner] {
+				verifiedOwner = true
+				break
+			}
+		}
+		if !verifiedOwner {
+			continue
+		}
+		want, known := verified[path]
+		if !known || want == "absent" || want == "unreadable" || strings.HasPrefix(want, "irregular:") {
+			continue
+		}
+		found, checked := before[path]
+		if !checked || found == want || after[path] != want {
+			continue
+		}
+		restored = append(restored, path)
+	}
+	slices.Sort(restored)
+	return slices.Compact(restored)
+}
+
 // isMissingManifestErr classifies an error from
 // runEnterpriseHookReconcileOnce (which ultimately calls
 // enterprisehooks.LoadManifest) as the specific "targets.yaml is not on
@@ -4485,6 +4539,9 @@ func writeEnterpriseHookReconcileLog(
 	changed bool,
 	triggerTag string,
 ) {
+	for _, path := range run.RestoredPaths {
+		triggerTag += fmt.Sprintf(" repair_path=%q", path)
+	}
 	if changed {
 		fmt.Fprintf(
 			writer,
