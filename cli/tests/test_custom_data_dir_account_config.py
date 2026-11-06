@@ -64,6 +64,24 @@ def test_default_and_unrelated_data_dirs_keep_their_own_config(tmp_path, monkeyp
     assert config_module.config_path_for_data_dir(str(other)) == other / "config.yaml"
 
 
+@pytest.mark.parametrize("mode_source", ["config", "service_pin"])
+def test_explicit_managed_config_keeps_its_runtime_pid_home(tmp_path, monkeypatch, mode_source) -> None:
+    runtime = tmp_path / "managed runtime"
+    runtime.mkdir()
+    active_config = tmp_path / "managed config.yaml"
+    managed_line = "deployment_mode: managed_enterprise\n" if mode_source == "config" else ""
+    active_config.write_text(
+        f"config_version: 8\n{managed_line}data_dir: {runtime}\n"
+    )
+    monkeypatch.delenv("DEFENSECLAW_HOME", raising=False)
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    if mode_source == "service_pin":
+        monkeypatch.setenv("DEFENSECLAW_DEPLOYMENT_MODE", "managed_enterprise")
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(active_config))
+
+    assert config_module.gateway_pid_path(runtime) == str(runtime / "gateway.pid")
+
+
 def test_use_pack_with_a_custom_data_dir_updates_the_account_config(tmp_path, monkeypatch) -> None:
     home, data = _account(tmp_path, monkeypatch)
     root = data / "policies" / "guardrail"
