@@ -142,13 +142,6 @@ func ownedHookCommandNeedlesFor(goos string, opts SetupOpts, conn Connector) []s
 			return uniqueNonEmptyStrings(needles)
 		case "antigravity":
 			return antigravityOwnedHookCommandsForOS(goos, hookScript)
-		case "devin":
-			if goos == "windows" {
-				// Every Windows Devin form DefenseClaw writes, the guarded
-				// start of the block events included (rel-1-0-6 GAP-0676),
-				// matched exactly.
-				return devinOwnedHookCommandsForOS(goos, opts, hookInvocationCommandFor(goos, "devin", hookScript))
-			}
 		}
 	}
 	if goos == "windows" {
