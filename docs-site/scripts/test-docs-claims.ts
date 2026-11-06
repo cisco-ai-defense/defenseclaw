@@ -1258,26 +1258,54 @@ describe('per-user install window refusal (GAP-2173)', () => {
   });
 });
 
-describe('managed launcher refusal on every page (GAP-1387, GAP-1569)', () => {
-  it('quotes launcherRefusal wherever a page quotes the refusal', () => {
-    const refusal = /launcherRefusal = "([^"]+)"/.exec(source('internal/cli/launcher.go'))?.[1];
-    assert.ok(refusal, 'launcher refusal not found');
+// launcherRefusalText mirrors launcherRefusalFor (internal/cli/launcher.go):
+// the shared sentence every platform prints, and the Linux and macOS texts
+// that add the administrator views for the installed gateway path.
+function launcherRefusalText(): { message: string; linux: string; macos: string } {
+  const launcher = source('internal/cli/launcher.go');
+  const message = /message := "([^"]+)"/.exec(launcher)?.[1];
+  const views = /fmt\.Sprintf\("( For administrator views[^"]+)",/.exec(launcher)?.[1];
+  assert.ok(message && views, 'launcher refusal text not found in launcherRefusalFor');
+  const layout = source('internal/managed/standalone_layout.go');
+  const linuxBin = /BinDir:\s+"(\/opt\/defenseclaw\/bin)"/.exec(layout)?.[1];
+  const darwinRoot = /const root = "([^"]+)"\s+return StandaloneLayout\{\s+GOOS:\s+goos,\s+InstallRoot:\s+root,/.exec(layout)?.[1];
+  assert.ok(linuxBin && darwinRoot, 'standalone Linux or macOS bin directory not found');
+  const build = (bin: string, platform: string): string => {
+    const gateway = `${bin}/defenseclaw-gateway`;
+    let at = 0;
+    const args = [gateway, platform, gateway, platform, gateway];
+    return message + views.replace(/%s/g, () => args[at++]);
+  };
+  return { message, linux: build(linuxBin, 'linux'), macos: build(`${darwinRoot}/bin`, 'macos') };
+}
+
+describe('managed launcher refusal on every page (GAP-1387, GAP-1569, GAP-0635)', () => {
+  it('quotes the launcher refusal the code builds for each OS', () => {
+    const { message, linux, macos } = launcherRefusalText();
     let quoted = 0;
     for (const file of enterprisePages(docs)) {
       const text = readFileSync(file, 'utf8').split(/\s+/).join(' ');
-      assert.ok(!text.includes('commands are available here'), `${relative(docs, file)} quotes the retired launcher refusal`);
-      if (text.includes(refusal)) quoted += 1;
+      const name = relative(docs, file);
+      assert.ok(!text.includes('commands are available here'), `${name} quotes the retired launcher refusal`);
+      assert.ok(!text.includes('Other commands require an administrator'), `${name} quotes the retired launcher refusal ending`);
+      if (text.includes(message)) quoted += 1;
     }
     assert.ok(quoted >= 10, `expected the launcher refusal on at least 10 pages, found ${quoted}`);
+    const index = readFileSync(join(docs, 'enterprise/index.mdx'), 'utf8').split(/\s+/).join(' ');
+    assert.ok(index.includes(linux), 'enterprise/index.mdx does not quote the Linux launcher refusal');
+    assert.ok(index.includes(macos), 'enterprise/index.mdx does not quote the macOS launcher refusal');
+    const trouble = readFileSync(join(docs, 'enterprise/troubleshooting.mdx'), 'utf8').split(/\s+/).join(' ');
+    assert.ok(trouble.includes(linux), 'enterprise/troubleshooting.mdx does not quote the Linux launcher refusal');
+    assert.ok(trouble.includes('/opt/cisco/defenseclaw/bin/defenseclaw-gateway') && trouble.includes('enterprise macos'), 'enterprise/troubleshooting.mdx does not name the macOS gateway');
   });
 });
 
 describe('the TUI page on a managed computer (rel-1-0-4 GAP-0597)', () => {
   it('quotes the launcher refusal and links the managed-device steps', () => {
-    const refusal = /launcherRefusal = "([^"]+)"/.exec(source('internal/cli/launcher.go'));
-    assert.ok(refusal, 'launcher refusal not found');
-    const tui = page('tui.mdx');
-    assert.ok(tui.includes(refusal[1]), 'features/tui.mdx does not quote the launcher refusal');
+    const { message } = launcherRefusalText();
+    const tui = page('tui.mdx').split(/\s+/).join(' ');
+    assert.ok(tui.includes(message), 'features/tui.mdx does not quote the launcher refusal');
+    assert.ok(tui.includes('audit export --since 2h'), 'features/tui.mdx does not name the administrator views');
     assert.ok(tui.includes('/docs/tui#on-a-managed-device'));
     assert.ok(page('tui.mdx').includes('#### On a managed device'));
   });
