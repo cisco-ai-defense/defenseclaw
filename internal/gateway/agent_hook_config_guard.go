@@ -19,6 +19,9 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hermespath"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"gopkg.in/yaml.v3"
 )
 
 // An agent's own hook config (GAP-0048). On a per-user install the files
@@ -34,8 +37,8 @@ import (
 // turns DefenseClaw off - disableAllHooks or allowManagedHooksOnly set, a
 // DefenseClaw hook entry removed or changed, Codex's [features] hooks = false,
 // an OpenCode plugin list without the bridge, the bridge file removed or
-// rewritten, or a hook file left unreadable. Every other edit of these files
-// (model, env, permissions, another hook) is allowed and records nothing.
+// rewritten, a reserved hook-process env setting changed, or a hook file
+// left unreadable. Ordinary model, env and permissions edits stay allowed.
 // A shell write whose content the gateway cannot read is
 // tamper.agent_hook_config_write (HIGH: an alert in the default pack, a block
 // in strict). Targets are resolved through links on this host's file
@@ -59,6 +62,9 @@ var agentHookConfigProjectFiles = []struct{ suffix, format string }{
 	{"/.github/hooks/defenseclaw.json", gatewayconnector.AgentHookConfigJSONHooks},
 	{"/.codex/config.toml", gatewayconnector.AgentHookConfigCodexTOML},
 	{"/.devin/hooks.v1.json", gatewayconnector.AgentHookConfigJSONHooks},
+	{"/.kiro/hooks/defenseclaw.json", gatewayconnector.AgentHookConfigJSONHooks},
+	{"/.kiro/agents/defenseclaw.json", gatewayconnector.AgentHookConfigJSONHooks},
+	{"/.kiro/agents/kiro_default.json", gatewayconnector.AgentHookConfigJSONHooks},
 }
 
 // agentHookConfigHomeFiles are the per-user hook files under the calling
@@ -84,6 +90,12 @@ var agentHookConfigHomeFiles = []struct {
 	{[]string{".copilot", "hooks", "defenseclaw.json"}, gatewayconnector.AgentHookConfigJSONHooks},
 	{[]string{".copilot", "settings.json"}, gatewayconnector.AgentHookConfigCopilotSettings},
 	{[]string{".copilot", "config.json"}, gatewayconnector.AgentHookConfigCopilotSettings},
+	{[]string{".config", "amp", "plugins", "defenseclaw.ts"}, gatewayconnector.AgentHookConfigBridge},
+	{[]string{".gemini", "config", "hooks.json"}, gatewayconnector.AgentHookConfigJSONHooks},
+	{[]string{".kiro", "hooks", "defenseclaw.json"}, gatewayconnector.AgentHookConfigJSONHooks},
+	{[]string{".kiro", "agents", "defenseclaw.json"}, gatewayconnector.AgentHookConfigJSONHooks},
+	{[]string{".kiro", "agents", "kiro_default.json"}, gatewayconnector.AgentHookConfigJSONHooks},
+	{[]string{".kiro", "settings", "cli.json"}, gatewayconnector.AgentHookConfigKiroSettings},
 }
 
 // agentHookConfigNames are the base names of every guarded file: a shell
@@ -92,6 +104,7 @@ var agentHookConfigHomeFiles = []struct {
 var agentHookConfigNames = []string{
 	"settings.json", "settings.local.json", "config.toml", "hooks.json", "defenseclaw.js",
 	"config.json", "opencode.json", "opencode.jsonc", "defenseclaw.json", "hooks.v1.json",
+	"defenseclaw.ts", "config.yaml", "cli.json", ".claude", ".codex", ".opencode", ".kiro", ".gemini", ".hermes", "plugins", "hooks", "agents",
 }
 
 func agentHookConfigFoldCase() bool {
@@ -113,11 +126,57 @@ func newAgentHookConfigGuard(cwd, home string) *agentHookConfigGuard {
 				Path: filepath.Join(append([]string{guard.home}, file.parts...)...), Format: file.format,
 			})
 		}
+		if hermes := hermespath.ConfigPathForUserHome(guard.home); hermes != "" {
+			guard.files = append(guard.files, gatewayconnector.AgentHookConfigFile{Path: hermes, Format: gatewayconnector.AgentHookConfigHermesYAML})
+		}
 		if physical, err := filepath.EvalSymlinks(guard.home); err == nil && physical != guard.home {
 			guard.physicalHome = physical
 		}
 	}
+	if filepath.IsAbs(cwd) {
+		for dir := filepath.Clean(cwd); ; dir = filepath.Dir(dir) {
+			for _, file := range agentHookConfigProjectFiles {
+				guard.files = append(guard.files, gatewayconnector.AgentHookConfigFile{
+					Path: filepath.Join(dir, filepath.FromSlash(strings.TrimPrefix(file.suffix, "/"))), Format: file.format,
+				})
+			}
+			if dir == filepath.Dir(dir) || (guard.home != "" && dir == guard.home) {
+				break
+			}
+		}
+	}
 	return guard
+}
+
+// shellTarget covers both a registration file and a directory operation
+// that replaces or removes one of its enclosing connector directories.
+func (g *agentHookConfigGuard) shellTarget(raw string) bool {
+	if g.format(raw) != "" {
+		return true
+	}
+	for _, place := range g.places(raw) {
+		for _, file := range g.files {
+			if !strings.HasPrefix(file.Path, place+string(filepath.Separator)) {
+				continue
+			}
+			// Home and project roots are outside the connector's config tree.
+			if place == g.home || place == g.cwd || place == string(filepath.Separator) {
+				continue
+			}
+			if info, err := os.Stat(place); err == nil && info.IsDir() {
+				return true
+			}
+		}
+		for _, file := range agentHookConfigProjectFiles {
+			parts := strings.Split(strings.TrimPrefix(file.suffix, "/"), "/")
+			for count := 1; count < len(parts); count++ {
+				if strings.HasSuffix(filepath.ToSlash(place), "/"+strings.Join(parts[:count], "/")) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // places are the absolute spellings of a target: as written (~ and the
@@ -196,6 +255,19 @@ func (g *agentHookConfigGuard) format(raw string) string {
 		for _, file := range agentHookConfigProjectFiles {
 			if len(slashed) >= len(file.suffix) && same(slashed[len(slashed)-len(file.suffix):], file.suffix) {
 				return file.format
+			}
+		}
+	}
+	// The instruction-file proof uses the same device/inode identity. It
+	// also covers case and short-name aliases where the host supports them.
+	for _, place := range g.places(raw) {
+		identity := hookpaths.FileIdentity(place)
+		if identity == "" {
+			continue
+		}
+		for _, file := range g.files {
+			if identity == hookpaths.FileIdentity(file.Path) {
+				return file.Format
 			}
 		}
 	}
@@ -544,6 +616,10 @@ func agentHookConfigDocument(format string, body []byte) map[string]any {
 		if toml.Unmarshal(body, &document) != nil {
 			return nil
 		}
+	case gatewayconnector.AgentHookConfigHermesYAML:
+		if yaml.Unmarshal(body, &document) != nil {
+			return nil
+		}
 	case gatewayconnector.AgentHookConfigClaudeSettings:
 		decoder := json.NewDecoder(bytes.NewReader(body))
 		decoder.UseNumber()
@@ -628,7 +704,7 @@ func agentHookConfigPlain(value any) bool {
 func agentHookConfigTurnsOff(format string, before []byte, beforeExists bool, after []byte, afterExists bool) string {
 	if format == gatewayconnector.AgentHookConfigBridge {
 		if beforeExists && (!afterExists || !bytes.Equal(before, after)) {
-			return "removes or rewrites the DefenseClaw OpenCode bridge plugin"
+			return "removes or rewrites a DefenseClaw bridge plugin"
 		}
 		return ""
 	}
@@ -679,6 +755,19 @@ func agentHookConfigTurnsOff(format string, before []byte, beforeExists bool, af
 		if reason := codexHooksSwitchedOff(old, updated); reason != "" {
 			return reason
 		}
+	case gatewayconnector.AgentHookConfigKiroSettings:
+		if old != nil && old["chat.defaultAgent"] != updated["chat.defaultAgent"] {
+			return "changes the Kiro default agent"
+		}
+	}
+	if format == gatewayconnector.AgentHookConfigClaudeSettings || format == gatewayconnector.AgentHookConfigCopilotSettings {
+		oldEnv, _ := old["env"].(map[string]any)
+		newEnv, _ := updated["env"].(map[string]any)
+		for key, value := range newEnv {
+			if agentHookConfigReservedEnv(key) && oldEnv[key] != value {
+				return "changes a reserved hook process environment variable"
+			}
+		}
 	}
 	remaining := agentHookConfigFingerprint(updated[member])
 	for entry, count := range entries {
@@ -690,6 +779,18 @@ func agentHookConfigTurnsOff(format string, before []byte, beforeExists bool, af
 		}
 	}
 	return ""
+}
+
+func agentHookConfigReservedEnv(key string) bool {
+	upper := strings.ToUpper(key)
+	if strings.HasPrefix(upper, "DEFENSECLAW_") || strings.HasPrefix(upper, "LD_") || strings.HasPrefix(upper, "DYLD_") {
+		return true
+	}
+	switch upper {
+	case "PATH", "HOME", "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "IFS", "CDPATH", "GLOBIGNORE", "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "NODE_OPTIONS", "NODE_PATH", "RUBYOPT", "PERL5OPT", "ZDOTDIR", "COMSPEC", "PATHEXT":
+		return true
+	}
+	return false
 }
 
 // codexHooksSwitchedOff names a [features] hooks or codex_hooks switch that
@@ -791,16 +892,31 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 	// the write rule. The hook client's resolved targets carry links the
 	// command text does not name.
 	for operand, resolved := range request.ResolvedWriteTargets {
-		if !strings.HasPrefix(operand, "\x00") && filepath.IsAbs(resolved) && guard.format(resolved) != "" {
+		if !strings.HasPrefix(operand, "\x00") && filepath.IsAbs(resolved) && guard.shellTarget(resolved) {
 			add(agentHookConfigWriteRuleID, "", resolved)
 			return out
 		}
 	}
 	text := strings.ToLower(request.LegacyText + "\n" + request.Input.Command + "\n" + string(request.Input.Args) + "\n" + strings.Join(request.Input.Argv, "\n"))
-	if !slices.ContainsFunc(agentHookConfigNames, func(name string) bool { return strings.Contains(text, name) }) {
+	if !slices.ContainsFunc(agentHookConfigNames, func(name string) bool { return strings.Contains(text, name) }) &&
+		!slices.ContainsFunc([]string{"git ", "claude ", "codex ", "opencode ", "amp ", "copilot ", "kiro-cli ", "hermes ", "cursor-agent ", "devin ", "gemini "},
+			func(name string) bool { return strings.Contains(text, name) }) {
 		return out
 	}
 	facts := actionfacts.Analyze(request.Input)
+	for _, command := range facts.Commands {
+		if reason, target := agentHookConfigRunOverride(command.Argv, guard); reason != "" {
+			add(agentHookConfigDisableRuleID, reason, target)
+		} else if target != "" {
+			add(agentHookConfigWriteRuleID, "", target)
+		}
+		if target := agentHookConfigGitTarget(command.Argv, guard); target != "" {
+			add(agentHookConfigWriteRuleID, "", target)
+		}
+		if target := agentHookConfigDirectoryCopyTarget(command.Argv, guard); target != "" {
+			add(agentHookConfigWriteRuleID, "", target)
+		}
+	}
 	for _, target := range facts.Paths {
 		switch target.Access {
 		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
@@ -813,10 +929,194 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 				candidate = filepath.FromSlash(host)
 			}
 		}
-		if guard.format(filepath.FromSlash(candidate)) != "" {
+		if guard.shellTarget(filepath.FromSlash(candidate)) {
 			add(agentHookConfigWriteRuleID, "", candidate)
 			return out
 		}
 	}
 	return out
+}
+
+func agentHookConfigDirectoryCopyTarget(argv []string, guard *agentHookConfigGuard) string {
+	if len(argv) < 3 {
+		return ""
+	}
+	program := filepath.Base(argv[0])
+	if program != "cp" && program != "mv" && program != "install" && program != "rsync" {
+		return ""
+	}
+	var operands []string
+	for _, arg := range argv[1:] {
+		if arg != "--" && !strings.HasPrefix(arg, "-") {
+			operands = append(operands, arg)
+		}
+	}
+	if len(operands) < 2 {
+		return ""
+	}
+	destination := operands[len(operands)-1]
+	if guard.shellTarget(destination) {
+		return destination
+	}
+	for _, source := range operands[:len(operands)-1] {
+		base := filepath.Base(strings.TrimSuffix(source, string(filepath.Separator)))
+		if base != "." && guard.format(filepath.Join(destination, base)) != "" {
+			return destination
+		}
+	}
+	return ""
+}
+
+func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string {
+	if len(argv) < 2 || filepath.Base(argv[0]) != "git" {
+		return ""
+	}
+	index := 1
+	for index < len(argv) && argv[index] == "-C" && index+1 < len(argv) {
+		index += 2
+	}
+	if index >= len(argv) {
+		return ""
+	}
+	sub := argv[index]
+	switch sub {
+	case "restore", "checkout", "reset", "stash", "apply":
+	default:
+		return ""
+	}
+	if sub == "stash" && !slices.Contains(argv, "pop") && !slices.Contains(argv, "apply") {
+		return ""
+	}
+	if sub == "reset" && !slices.Contains(argv, "--hard") && !slices.Contains(argv, "--merge") {
+		return ""
+	}
+	if sub == "restore" && slices.Contains(argv, "--staged") && !slices.Contains(argv, "--worktree") {
+		return ""
+	}
+	if sub == "apply" && (slices.Contains(argv, "--check") || slices.Contains(argv, "--cached") || slices.Contains(argv, "--stat")) {
+		return ""
+	}
+	if sub == "apply" {
+		for _, arg := range argv[index+1:] {
+			if strings.HasPrefix(arg, "-") {
+				continue
+			}
+			places := guard.places(arg)
+			if len(places) == 0 {
+				break
+			}
+			patch, err := os.ReadFile(places[0])
+			if err != nil || len(patch) > agentHookConfigMaxBytes {
+				break
+			}
+			for _, line := range strings.Split(string(patch), "\n") {
+				for _, prefix := range []string{"+++ b/", "--- a/", "rename to ", "rename from "} {
+					if path, ok := strings.CutPrefix(line, prefix); ok && guard.shellTarget(strings.TrimSpace(path)) {
+						return path
+					}
+				}
+			}
+			return "" // A readable patch with no registration target.
+		}
+	}
+	// Explicit pathspecs are write operands for restore and checkout.
+	pathspec := sub == "restore"
+	for _, arg := range argv[index+1:] {
+		if arg == "--" {
+			pathspec = true
+			continue
+		}
+		if pathspec && !strings.HasPrefix(arg, "-") && guard.shellTarget(arg) {
+			return arg
+		}
+	}
+	// A whole-worktree rewrite can replace any tracked hook document.
+	for _, file := range guard.files {
+		if strings.HasPrefix(file.Path, guard.cwd+string(filepath.Separator)) {
+			if _, err := os.Stat(file.Path); err == nil {
+				return file.Path
+			}
+		}
+	}
+	return ""
+}
+
+func agentHookConfigRunOverride(argv []string, guard *agentHookConfigGuard) (reason, target string) {
+	if len(argv) < 2 {
+		return "", ""
+	}
+	program := strings.ToLower(filepath.Base(argv[0]))
+	if program == "env" {
+		for index := 1; index < len(argv); index++ {
+			if argv[index] == "--" {
+				continue
+			}
+			if strings.HasPrefix(argv[index], "-") || strings.Contains(argv[index], "=") {
+				continue
+			}
+			return agentHookConfigRunOverride(argv[index:], guard)
+		}
+		return "", ""
+	}
+	if program == "exec" || program == "command" || program == "nohup" {
+		return agentHookConfigRunOverride(argv[1:], guard)
+	}
+	format := ""
+	switch program {
+	case "claude", "claude.exe":
+		format = gatewayconnector.AgentHookConfigClaudeSettings
+	case "codex", "codex.exe":
+		format = gatewayconnector.AgentHookConfigCodexTOML
+	case "opencode", "opencode.exe":
+		format = gatewayconnector.AgentHookConfigOpenCodeConfig
+	case "amp", "kiro-cli", "hermes", "cursor-agent", "devin", "gemini":
+		format = gatewayconnector.AgentHookConfigJSONHooks
+	case "copilot", "copilot.exe":
+		format = gatewayconnector.AgentHookConfigCopilotSettings
+	default:
+		return "", ""
+	}
+	for index := 1; index < len(argv); index++ {
+		arg := argv[index]
+		value := ""
+		if arg == "--settings" || arg == "--settings-file" || arg == "--config" || arg == "-c" {
+			if index+1 >= len(argv) {
+				continue
+			}
+			value = argv[index+1]
+			index++
+		} else if key, rest, ok := strings.Cut(arg, "="); ok && (key == "--settings" || key == "--settings-file" || key == "--config") {
+			arg, value = key, rest
+		} else {
+			continue
+		}
+		if arg == "-c" && format == gatewayconnector.AgentHookConfigCodexTOML {
+			key, setting, assigned := strings.Cut(value, "=")
+			key = strings.TrimSpace(key)
+			setting = strings.TrimSpace(setting)
+			if assigned && (key == "features.hooks" || key == "features.codex_hooks") && setting != "true" {
+				return "turns off hooks for a nested agent run", program
+			}
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(value), "{") {
+			if why := agentHookConfigTurnsOff(format, nil, false, []byte(value), true); why != "" {
+				return why, program
+			}
+			if document := agentHookConfigDocument(format, []byte(value)); document != nil {
+				member := "hooks"
+				if format == gatewayconnector.AgentHookConfigOpenCodeConfig {
+					member = "plugin"
+				}
+				if entry, present := document[member]; present && len(agentHookConfigFingerprint(entry)) == 0 {
+					return "omits DefenseClaw registration in per-run settings", program
+				}
+			}
+			continue
+		}
+		if guard.shellTarget(value) || arg == "--settings" || arg == "--settings-file" || arg == "--config" {
+			return "", value
+		}
+	}
+	return "", ""
 }
