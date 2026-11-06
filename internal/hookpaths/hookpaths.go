@@ -102,6 +102,14 @@ const OpaqueScopeFactPrefix = "\x00opaque-scope:"
 // operand its own facts place as such a move destination.
 const ReplacedLinkFactPrefix = "\x00replaced-link:"
 
+// InPlaceEntryFactPrefix keys a sed -i or perl -i operand whose directory
+// entry lies in the DefenseClaw state tree once its directory is followed
+// through links (stateEntry); the value is that entry. The editor replaces
+// the entry, so a final link is not followed. A gateway that cannot walk
+// the user home reads it for an operand its own in-place reading lists
+// (rel-1-0-6:GAP-0681 review 2).
+const InPlaceEntryFactPrefix = "\x00in-place-entry:"
+
 // LinksStableKey is the user-side hook reading of a command that makes
 // links and renames with a static mv, moves with find -exec mv or changes
 // directory in a nested shell or a wrapper: every link it makes and every
@@ -182,16 +190,30 @@ const MaxPayloadBytes = 1 << 20
 // reports a redirect target that is not a static word (a parameter other
 // than HOME, a substitution or a glob), which is not listed.
 func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynamic bool) {
+	operands, _, ok, dynamic = shellWriteOperands(command, cwd, home, "")
+	return operands, ok, dynamic
+}
+
+// shellWriteOperands is ShellWriteOperands that also returns, as known, the
+// dynamic targets that the known values of the action name (knownValueWord
+// with user, ActionKnownUser): <parent>/$USER/f. Only the hook client map
+// lists them, with the state name they reach (stateOperand).
+func shellWriteOperands(command, cwd, home, user string) (operands, known []string, ok, dynamic bool) {
 	file, parsed := parseShell(command)
 	if !parsed {
-		return nil, false, false
+		return nil, nil, false, false
 	}
+	operands, known, dynamic = shellFileWriteOperands(file, cwd, home, user)
+	return operands, known, true, dynamic
+}
+
+// shellFileWriteOperands is shellWriteOperands on a parsed command.
+func shellFileWriteOperands(file *syntax.File, cwd, home, user string) (operands, known []string, dynamic bool) {
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
 	// A definition runs nothing. A body is read once, where it is defined,
 	// when the command may call it (GAP-1430). Expanding each call instead
 	// costs time exponential in the call nesting.
 	called := calledFunctions(file, home)
-	var known []string
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if declaration, isFunction := node.(*syntax.FuncDecl); isFunction {
 			return declaration.Name != nil && called[declaration.Name.Value]
@@ -211,9 +233,11 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 			name, static := staticShellWord(redirect.Word, env, home != "")
 			if !static {
 				dynamic = dynamic || shellWordHasSlash(redirect.Word)
-				if name, static = knownValueWord(redirect.Word, home); static && name != "" && name != "-" &&
-					strings.Trim(name, "0123456789") != "" {
-					known = append(known, OperandPath(name, cwd))
+				if user != "" {
+					if name, static = knownValueWord(redirect.Word, home, user); static && name != "" && name != "-" &&
+						strings.Trim(name, "0123456789") != "" {
+						known = append(known, OperandPath(name, cwd))
+					}
 				}
 				return true
 			}
@@ -228,8 +252,10 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 		name, static := staticShellWord(redirect.Word, env, home != "")
 		if !static {
 			dynamic = true
-			if name, static = knownValueWord(redirect.Word, home); static && name != "" {
-				known = append(known, OperandPath(name, cwd))
+			if user != "" {
+				if name, static = knownValueWord(redirect.Word, home, user); static && name != "" {
+					known = append(known, OperandPath(name, cwd))
+				}
 			}
 			return true
 		}
@@ -239,42 +265,67 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 		operands = append(operands, OperandPath(name, cwd))
 		return true
 	})
-	// A target spelled with USER or LOGNAME (<parent>/$USER/f) stays dynamic
-	// for this reading, and is listed after the static ones as the file the
-	// gateway judges it to be (knownValueWord, as
-	// actionfacts.ShellRedirectTargets reads it): behind ProtectHome the
-	// gateway finds the file it opens only in the hook client map, which
-	// lists these operands, and a link with an ordinary name can lead to
-	// the state (rel-1-0-6:GAP-0630, GAP-0601). They come last so the
-	// static operands keep their order (SafeShellRedirectOccurrences).
-	for _, name := range known {
-		if !slices.Contains(operands, name) {
-			operands = append(operands, name)
-		}
-	}
-	return operands, true, dynamic
+	return operands, known, dynamic
 }
 
-// shellBodyRedirectOperands lists the redirect targets of the static body
-// of each shell -c call of command (literalShellCallBody), read in cwd.
-func shellBodyRedirectOperands(command, cwd, home string) []string {
-	if !strings.Contains(command, ">") {
+// stateOperand is a write operand the hook client map lists only with the
+// name in the DefenseClaw state tree it reaches: a redirect or a sed
+// --follow-symlinks operand follows every link (stateReach), the entry of
+// another in-place editor operand only its directory (stateEntry). A
+// gateway behind ProtectHome reads those names only from the map
+// (rel-1-0-6:GAP-0630, GAP-0601, GAP-0681).
+type stateOperand struct {
+	path  string
+	entry bool
+}
+
+// childStateOperands lists the redirect targets of a child reading of the
+// action (actionfacts.SimpleCommands) that only the known values of the
+// action name (user, ActionKnownUser), and those of the static body of each
+// shell -c call of it (literalShellCallBody), read in cwd: the shell that
+// runs the body inherits the values.
+func childStateOperands(command, cwd, home, user string) []stateOperand {
+	// Every POSIX shell program name holds "sh" (posixShellProgram).
+	named := strings.Contains(command, "USER") || strings.Contains(command, "LOGNAME")
+	if !named && !strings.Contains(command, "sh") {
 		return nil
 	}
 	file, parsed := parseShell(command)
 	if !parsed {
 		return nil
 	}
-	var operands []string
+	var operands []stateOperand
+	if named {
+		_, known, _ := shellFileWriteOperands(file, cwd, home, user)
+		for _, name := range known {
+			operands = append(operands, stateOperand{path: name})
+		}
+	}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if call, isCall := node.(*syntax.CallExpr); isCall {
 			if body := literalShellCallBody(call, home); body != "" {
-				if redirects, ok, _ := ShellWriteOperands(body, cwd, home); ok {
-					operands = append(operands, redirects...)
+				if redirects, known, ok, _ := shellWriteOperands(body, cwd, home, user); ok {
+					for _, name := range append(redirects, known...) {
+						operands = append(operands, stateOperand{path: name})
+					}
 				}
 			}
 		}
 		return true
+	})
+	return operands
+}
+
+// inPlaceStateOperands lists the operands of the sed -i and perl -i calls
+// of command read in cwd with the known values of the action (user): an
+// entry, or a followed name for sed --follow-symlinks.
+func inPlaceStateOperands(command, cwd, home, user string) []stateOperand {
+	if !strings.Contains(command, "sed") && !strings.Contains(command, "perl") {
+		return nil
+	}
+	var operands []stateOperand
+	readInPlaceEdits(command, cwd, home, user, func(name string, followed bool) {
+		operands = append(operands, stateOperand{path: name, entry: !followed})
 	})
 	return operands
 }
@@ -513,22 +564,76 @@ func StaticWord(word *syntax.Word, home string) (string, bool) {
 	return staticShellWord(word, expand.ListEnviron("HOME="+strings.TrimRight(home, "/")), home != "")
 }
 
-// knownValueWord expands one shell word with every value the gateway knows
-// for the active home: HOME, and USER and LOGNAME as the last element of
-// the home, as actionfacts reads <parent>/$USER (userHomeRewriteWord) and
-// the target mention scan reads both names. A reader of the targets of a
-// write to DefenseClaw state uses it, so a known value names the file its
-// literal spelling names (rel-1-0-6:GAP-0681).
-func knownValueWord(word *syntax.Word, home string) (string, bool) {
+// knownValueWord expands one shell word with every value known for the
+// active home: HOME, and USER and LOGNAME as user, the value the action
+// keeps for them (ActionKnownUser; empty when it may bind them). A reader
+// of the targets of a write to DefenseClaw state uses it, so a known value
+// names the file its literal spelling names (rel-1-0-6:GAP-0681).
+func knownValueWord(word *syntax.Word, home, user string) (string, bool) {
+	if user == "" {
+		return StaticWord(word, home)
+	}
 	if word == nil {
 		return "", false
 	}
 	home = strings.TrimRight(home, "/")
-	names := []string{"HOME=" + home}
-	if user := path.Base(home); strings.HasPrefix(home, "/") && user != "/" && user != "." {
-		names = append(names, "USER="+user, "LOGNAME="+user)
+	return staticShellWord(word, expand.ListEnviron("HOME="+home, "USER="+user, "LOGNAME="+user), home != "")
+}
+
+// ActionKnownUser is the value USER and LOGNAME keep through the shell
+// action: the last element of a POSIX home, as actionfacts reads
+// <parent>/$USER (userHomeRewriteWord) and the target mention scan reads
+// both names. It is empty when the action does not name them, or may bind
+// one of them (knownNamesBound): the per-command readings
+// (actionfacts.SimpleCommands) then carry each value where the shell sets
+// it, so USER=x; sed -i d <parent>/$USER/f edits the file of x
+// (rel-1-0-6:GAP-0630 review 2). A reader of one statement or child of the
+// action passes the whole action.
+func ActionKnownUser(action, home string) string {
+	if !strings.Contains(action, "USER") && !strings.Contains(action, "LOGNAME") {
+		return ""
 	}
-	return staticShellWord(word, expand.ListEnviron(names...), home != "")
+	home = strings.TrimRight(home, "/")
+	user := path.Base(home)
+	if !strings.HasPrefix(home, "/") || user == "/" || user == "." || user == "" {
+		return ""
+	}
+	if file, parsed := parseShell(action); !parsed || knownNamesBound(file, home, 0) {
+		return ""
+	}
+	return user
+}
+
+// knownNamesBound reports a binding of USER or LOGNAME in file: an
+// assignment (prefix, plain or declared), a for or select name, an env
+// NAME=value word, or one in the static body of a shell -c call. A
+// dynamic binding (read, eval) leaves the inherited value: its reading
+// stays the protective one.
+func knownNamesBound(file *syntax.File, home string, depth int) bool {
+	known := func(name string) bool { return name == "USER" || name == "LOGNAME" }
+	bound := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.Assign:
+			bound = bound || node.Name != nil && known(node.Name.Value)
+		case *syntax.WordIter:
+			bound = bound || node.Name != nil && known(node.Name.Value)
+		case *syntax.CallExpr:
+			for _, arg := range node.Args {
+				if word, static := StaticWord(arg, home); static {
+					if name, _, cut := strings.Cut(word, "="); cut && known(name) {
+						bound = true
+					}
+				}
+			}
+			if body := literalShellCallBody(node, home); !bound && body != "" {
+				inner, parsed := parseShell(body)
+				bound = !parsed || depth >= 4 || knownNamesBound(inner, home, depth+1)
+			}
+		}
+		return !bound
+	})
+	return bound
 }
 
 func homeParam(param *syntax.ParamExp, haveHome bool) bool {
@@ -1174,6 +1279,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	// its canonical command field. Resolve that exact string as a shell too.
 	truncated := facts.Parse.Status == actionfacts.StatusLimitExceeded || toolConflict || argsConflict
 	var operands, literalOperands, assignedOperands []string
+	var stateOperands []stateOperand
 	var directoryOperands []RedirectOccurrence
 	var directoryUnknown bool
 	links := shellLinks{known: true}
@@ -1303,7 +1409,10 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
 				fallbackFacts := actionfacts.Analyze(fallback)
-				statementMoves, statementNoTarget = plainMoveDestinationsWithStatements(fallback, fallbackFacts)
+				// One per-command reading serves the move and the child
+				// readings below.
+				simples := actionfacts.SimpleCommands(fallback, fallbackFacts)
+				statementMoves, statementNoTarget = plainMoveDestinationsWithStatements(fallback, fallbackFacts, simples)
 				facts.Paths = append(facts.Paths, fallbackFacts.Paths...)
 				truncated = truncated || fallbackFacts.Parse.Status == actionfacts.StatusLimitExceeded
 				// Past the ActionFacts limits, the client checks the whole
@@ -1316,11 +1425,17 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				// A command over the analysis limits has no path facts, but
 				// the gateway still checks each literal redirect operand.
 				var parsed bool
+				knownUser := ActionKnownUser(command, home)
 				if concreteOperands.ready && !strings.Contains(command, ">") {
 					parsed = concreteOperands.shellParsed
 				} else {
-					operands, parsed, _ = ShellWriteOperands(command, cwd, home)
+					var known []string
+					operands, known, parsed, _ = shellWriteOperands(command, cwd, home, knownUser)
+					for _, name := range known {
+						stateOperands = append(stateOperands, stateOperand{path: name})
+					}
 				}
+				stateOperands = append(stateOperands, inPlaceStateOperands(command, cwd, home, knownUser)...)
 				if concreteOperands.ready {
 					literalOperands = concreteOperands.literal
 				} else {
@@ -1405,20 +1520,24 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					// pushd of a bare name as it follows cd. The copy source
 					// facts of those readings are recorded too, so a gateway
 					// behind ProtectHome reads the same answer (GAP-2586).
-					// A child reading spells USER and LOGNAME as the home they
-					// name, also inside a shell body the outer shell expands
-					// (bash -c "echo x > /home/$USER/f"); the gateway reads the
-					// redirect targets of that body behind ProtectHome only
-					// from this map, so they are listed (rel-1-0-6:GAP-0601).
-					knownValues := strings.HasPrefix(home, "/") && strings.Contains(command, ">") &&
-						(strings.Contains(command, "USER") || strings.Contains(command, "LOGNAME"))
-					for _, simple := range actionfacts.SimpleCommands(fallback, fallbackFacts) {
+					// A child reading spells USER and LOGNAME with the values the
+					// shell gives them there, also inside a shell body the outer
+					// shell expands (bash -c "echo x > /home/$USER/f"), and
+					// places an in-place editor where the shell runs it; the
+					// gateway reads the state names those targets reach behind
+					// ProtectHome only from this map (rel-1-0-6:GAP-0601,
+					// GAP-0630 review 2).
+					bodyRedirects := knownUser != "" && strings.Contains(command, ">")
+					for _, simple := range simples {
 						if simple.EvaluationFailure == "" && simple.Text != command && filepath.IsAbs(simple.CWD) &&
 							filepath.Clean(simple.CWD) != filepath.Clean(cwd) {
 							commandLinksWithFacts(simple.Text, simple.CWD, home, sourceFacts, true)
 						}
-						if knownValues && simple.EvaluationFailure == "" && simple.Text != command && filepath.IsAbs(simple.CWD) {
-							literalOperands = append(literalOperands, shellBodyRedirectOperands(simple.Text, simple.CWD, home)...)
+						if simple.EvaluationFailure == "" && simple.Text != command && filepath.IsAbs(simple.CWD) {
+							if bodyRedirects {
+								stateOperands = append(stateOperands, childStateOperands(simple.Text, simple.CWD, home, knownUser)...)
+							}
+							stateOperands = append(stateOperands, inPlaceStateOperands(simple.Text, simple.CWD, home, knownUser)...)
 						}
 					}
 					safeRedirects = SafeShellRedirectOccurrencesWithFacts(command, cwd, home, sourceFacts)
@@ -1575,6 +1694,37 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	}
 	for _, operand := range literalOperands {
 		add(operand, true, false)
+	}
+	// A write that reaches the DefenseClaw state tree only through a known
+	// value or the directory of an in-place editor entry is listed with the
+	// state name (stateOperand). The gateway blocks a state name whatever
+	// file identity it has, so no identity evidence is read for it.
+	for _, operand := range stateOperands {
+		key, state, inState := operand.path, "", false
+		if operand.entry {
+			key = InPlaceEntryFactPrefix + operand.path
+			state, inState = links.stateEntry(operand.path, home, protected)
+		} else {
+			state, inState = links.stateReach(operand.path, home, protected)
+		}
+		if !inState || targets[key] == state {
+			continue
+		}
+		if old, present := targets[key]; present {
+			size -= len(jsonString(key)) + 1 + len(jsonString(old)) + 1
+			delete(targets, key)
+		}
+		if len(operand.path) > MaxWriteTargetPathBytes {
+			truncated = true
+			continue
+		}
+		cost := len(jsonString(key)) + 1 + len(jsonString(state)) + 1
+		if len(targets)-1 >= MaxWriteTargets || size+cost > maxEncodedTargets {
+			truncated, overBudget = true, true
+			continue
+		}
+		size += cost
+		targets[key] = state
 	}
 	// The link walk places copy destinations after a leading cd. In
 	// particular, a destination named by an assignment after `cd DIR &&`
@@ -2179,6 +2329,10 @@ func Decode(value string) (map[string]string, bool) {
 		}
 		if strings.HasPrefix(key, OpaqueScopeFactPrefix) && (value != "0" && value != "c" ||
 			!filepath.IsAbs(strings.TrimPrefix(key, OpaqueScopeFactPrefix))) {
+			return nil, false
+		}
+		if strings.HasPrefix(key, InPlaceEntryFactPrefix) && (!filepath.IsAbs(value) ||
+			!filepath.IsAbs(strings.TrimPrefix(key, InPlaceEntryFactPrefix))) {
 			return nil, false
 		}
 		if strings.HasPrefix(key, ReplacedLinkFactPrefix) && (value != "1" ||
@@ -6062,6 +6216,21 @@ func (l shellLinks) stateTarget(path, home string, protected protectedFiles) (st
 		return protected.has(name) || inState(name)
 	})
 	return resolved, ok && inState(resolved)
+}
+
+// stateReach is the name in the DefenseClaw state tree of home that a
+// write of path reaches through the links of the command and the disk
+// links, the final name followed too.
+func (l shellLinks) stateReach(path, home string, protected protectedFiles) (string, bool) {
+	if target, ok := l.stateTarget(path, home, protected); ok {
+		return target, true
+	}
+	resolved, ok := resolveWritePath(path, 0)
+	if !ok || home == "" {
+		return "", false
+	}
+	_, under := cutPathPrefix(resolved, filepath.Join(home, ".defenseclaw"))
+	return resolved, under
 }
 
 // stateEntry is the name in the DefenseClaw state tree of home that a
