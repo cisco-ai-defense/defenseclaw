@@ -484,6 +484,8 @@ func plainDirectory(info os.FileInfo) bool {
 // object an administrator owns is refused.
 func reclaimPolicyDirs(opts Options, dir string) (policyTakeBack, error) {
 	var result policyTakeBack
+	// recorded is read once, at the first untrusted component on standalone.
+	var recorded *recordedPolicyPaths
 	root, rel, ok := programDataRelative(opts, dir)
 	if !ok {
 		return result, nil
@@ -515,6 +517,32 @@ func reclaimPolicyDirs(opts Options, dir string) (policyTakeBack, error) {
 				return result, fmt.Errorf("%w; it is not a plain directory, and DefenseClaw could not replace it: %v", trustErr, err)
 			}
 			continue
+		}
+		if reclaimRefusesContentDrift() {
+			if recorded == nil {
+				loaded := loadRecordedPolicyPaths(opts)
+				recorded = &loaded
+			}
+			if file := recorded.heldFile(cur); file != "" && !recorded.createdFolder(cur) {
+				// Case c: a vendor folder DefenseClaw did not create that
+				// holds a file DefenseClaw recorded is never taken over. The
+				// recorded file keeps its own administrator-only access list,
+				// which every read and publish judges. That protects it only
+				// while no standard user can delete or replace an entry of
+				// the folder (the ancestor rule); otherwise the connector
+				// fails closed, naming the folder and the fix.
+				replaceErr := trustErr
+				if index == len(parts)-1 {
+					replaceErr = validateTrustedDir(cur)
+				}
+				if replaceErr != nil {
+					return result, &recordedVendorFolderError{dir: cur, file: file, err: replaceErr}
+				}
+				result.left = append(result.left, fmt.Sprintf("left %s as it is: DefenseClaw did not create it and it "+
+					"holds DefenseClaw's %s; standard users may add entries there (%v), but they cannot delete or "+
+					"replace that file, which keeps its own administrator-only access list", cur, file, trustErr))
+				continue
+			}
 		}
 		if refused := refuseStandaloneReclaim(cur, trustErr); refused != nil {
 			return result, refused
@@ -1118,6 +1146,120 @@ func refuseStandaloneReclaim(dir string, trustErr error) error {
 	return managed.RefuseStandaloneMachinePolicyDrift(
 		fmt.Errorf("%w (the folder already holds DefenseClaw's %s)", trustErr, marker))
 }
+
+// windowsOwnershipRecordTrusted is managed.WindowsAdminOnlyRecord; tests
+// replace it.
+var windowsOwnershipRecordTrusted = managed.WindowsAdminOnlyRecord
+
+// recordedPolicyPaths is what the administrator-only ownership records in
+// opts.StateDir (<LifecycleDir>\machine-policy\<connector>.json) name: the
+// vendor files DefenseClaw published into (path) and the folders it created
+// for them (created_dirs). On standalone it decides a vendor folder takeover
+// in reclaimPolicyDirs (g582 review 6 M2, GAP-0652 E3, lead ruling):
+//
+//   - a) A folder DefenseClaw created (a created_dirs entry, or the record's
+//     path itself) is DefenseClaw's own. The repair may re-stamp it, which
+//     is not a takeover, and the marker refusals still apply. The files in
+//     it are judged one by one; a recorded file another account controls is
+//     replaced by a new file from DefenseClaw's own rendering.
+//   - b) A vendor folder DefenseClaw did not create that holds no recorded
+//     file keeps the documented takeover.
+//   - c) A vendor folder DefenseClaw did not create that holds a recorded
+//     file, at any depth, is never taken over. When no standard user can
+//     delete or replace that file there, it is left as it is and the publish
+//     goes on; otherwise the connector fails closed with
+//     recordedVendorFolderError.
+//
+// A record another account can write or owns is not read, so a planted
+// record neither protects nor refuses anything.
+type recordedPolicyPaths struct {
+	files   []string
+	created []string
+}
+
+func loadRecordedPolicyPaths(opts Options) recordedPolicyPaths {
+	var recorded recordedPolicyPaths
+	if strings.TrimSpace(opts.StateDir) == "" {
+		return recorded
+	}
+	entries, err := os.ReadDir(opts.StateDir)
+	if err != nil {
+		return recorded
+	}
+	for _, entry := range entries {
+		connector, ok := strings.CutSuffix(entry.Name(), ".json")
+		if !ok || !entry.Type().IsRegular() || !recordNamePattern.MatchString(connector) {
+			continue
+		}
+		if !windowsOwnershipRecordTrusted(filepath.Join(opts.StateDir, entry.Name())) {
+			continue
+		}
+		record, err := loadRecord(opts, connector)
+		if err != nil || record == nil {
+			continue
+		}
+		if path := recordedWindowsPath(record.Path); path != "" {
+			recorded.files = append(recorded.files, path)
+		}
+		for _, dir := range record.CreatedDirs {
+			if path := recordedWindowsPath(dir); path != "" {
+				recorded.created = append(recorded.created, path)
+			}
+		}
+	}
+	return recorded
+}
+
+func recordedWindowsPath(path string) string {
+	if !windowsAbsolute(path) {
+		return ""
+	}
+	return filepath.Clean(path)
+}
+
+// createdFolder reports whether DefenseClaw created dir (case a).
+func (r *recordedPolicyPaths) createdFolder(dir string) bool {
+	dir = filepath.Clean(dir)
+	for _, list := range [][]string{r.created, r.files} {
+		for _, path := range list {
+			if strings.EqualFold(path, dir) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// heldFile returns a recorded file anywhere under dir, or "".
+func (r *recordedPolicyPaths) heldFile(dir string) string {
+	prefix := strings.ToLower(strings.TrimRight(filepath.Clean(dir), `\`)) + `\`
+	for _, path := range r.files {
+		if strings.HasPrefix(strings.ToLower(path), prefix) {
+			return path
+		}
+	}
+	return ""
+}
+
+// recordedVendorFolderError is case c failing closed: a vendor folder
+// DefenseClaw did not create, holding a file DefenseClaw recorded, lets an
+// account other than SYSTEM, Administrators and TrustedInstaller delete or
+// replace that file. DefenseClaw does not take the folder over, so the
+// connector is not protected until an administrator fixes the folder.
+type recordedVendorFolderError struct {
+	dir, file string
+	err       error
+}
+
+func (e *recordedVendorFolderError) Error() string {
+	return fmt.Sprintf("%s lets an account other than SYSTEM, Administrators and TrustedInstaller delete or replace "+
+		"DefenseClaw's %s in it (%v); DefenseClaw did not create this folder, so a standalone install does not take "+
+		"it over, and this connector is not protected until an administrator fixes the folder: from an elevated "+
+		"prompt remove that entry (icacls \"%s\" /remove:g *<SID>), or give the folder to Administrators "+
+		"(icacls \"%s\" /setowner *S-1-5-32-544), then run Setup /ensure", e.dir, e.file, e.err, e.dir, e.dir)
+}
+
+func (e *recordedVendorFolderError) Unwrap() error { return e.err }
 
 // defenseClawEntryIn returns why dir is a folder DefenseClaw already
 // manages, or "": the shared standalone decision
