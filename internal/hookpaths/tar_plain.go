@@ -107,9 +107,15 @@ func tarArchiveLinkEvidence(program string, args []string, static []bool, cwd st
 		if !record && facts != nil && facts[TarLinkFactPrefix+path] == "1" {
 			return true
 		}
+		readable := ""
 		if tarArchiveKind(path) == 2 {
+			readable = path
+		} else {
+			readable = tarArchivePriorLinkedRewriteNamed(file, extraction, archive, cwd, home)
+		}
+		if readable != "" {
 			if record && facts != nil {
-				for member, target := range tarProtectedLinkMembers(path, archiveDestination(program, args, static, cwd), home) {
+				for member, target := range tarProtectedLinkMembers(readable, archiveDestination(program, args, static, cwd), home) {
 					facts[TarProtectedMemberFactPrefix+member] = target
 				}
 			}
@@ -332,14 +338,17 @@ func tarArchivePriorLinkedRewrite(file *syntax.File, extraction *syntax.CallExpr
 	}
 	for _, archive := range tarArchiveSources(args, static, file, extraction, home) {
 		if archive != "" && archive != "-" && archive != "/dev/stdin" &&
-			tarArchivePriorLinkedRewriteNamed(file, extraction, archive, cwd, home) {
+			tarArchivePriorLinkedRewriteNamed(file, extraction, archive, cwd, home) != "" {
 			return true
 		}
 	}
 	return false
 }
 
-func tarArchivePriorLinkedRewriteNamed(file *syntax.File, extraction *syntax.CallExpr, archive, cwd, home string) bool {
+func tarArchivePriorLinkedRewriteNamed(file *syntax.File, extraction *syntax.CallExpr, archive, cwd, home string) string {
+	if file == nil || extraction == nil {
+		return ""
+	}
 	archivePath := OperandPath(archive, cwd)
 	archiveInfo, _ := os.Stat(archivePath)
 	var redirectRanges [][2]syntax.Pos
@@ -364,7 +373,7 @@ func tarArchivePriorLinkedRewriteNamed(file *syntax.File, extraction *syntax.Cal
 		}
 		return false
 	}
-	linkedRewrite := false
+	linkedRewrite := ""
 	syntax.Walk(file, func(node syntax.Node) bool {
 		candidate, ok := node.(*syntax.CallExpr)
 		if !ok || candidate == extraction || !prior(candidate) || len(candidate.Args) == 0 {
@@ -387,7 +396,7 @@ func tarArchivePriorLinkedRewriteNamed(file *syntax.File, extraction *syntax.Cal
 			}
 			if source != "" && destination != "" && tarArchiveKind(OperandPath(source, cwd)) == 2 &&
 				OperandPath(destination, cwd) == archivePath {
-				linkedRewrite = true
+				linkedRewrite = OperandPath(source, cwd)
 				return false
 			}
 			return true
@@ -400,7 +409,7 @@ func tarArchivePriorLinkedRewriteNamed(file *syntax.File, extraction *syntax.Cal
 				for _, word := range candidate.Args[1:] {
 					if dest, static := StaticWord(word, home); static && !strings.HasPrefix(dest, "-") &&
 						OperandPath(dest, cwd) == archivePath {
-						linkedRewrite = true
+						linkedRewrite = OperandPath(source, cwd)
 						return false
 					}
 				}
@@ -449,11 +458,11 @@ func tarArchivePriorLinkedRewriteNamed(file *syntax.File, extraction *syntax.Cal
 				destinationPath = filepath.Join(destinationPath, filepath.Base(sourcePath))
 			}
 			if destinationPath == archivePath {
-				linkedRewrite = true
+				linkedRewrite = sourcePath
 				return false
 			}
 			if info, err := os.Stat(destinationPath); err == nil && archiveInfo != nil && os.SameFile(info, archiveInfo) {
-				linkedRewrite = true
+				linkedRewrite = sourcePath
 				return false
 			}
 		}
@@ -483,7 +492,7 @@ func tarArchivePriorLinkedRewriteNamed(file *syntax.File, extraction *syntax.Cal
 					continue
 				}
 				if dest, fixed := StaticWord(redir.Word, home); fixed && OperandPath(dest, cwd) == archivePath {
-					linkedRewrite = true
+					linkedRewrite = OperandPath(source, cwd)
 				}
 			}
 		}
