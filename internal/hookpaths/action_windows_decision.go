@@ -677,10 +677,20 @@ func actionWindowsResolvedSpans(words []string, cwd, home string) []actionWindow
 			name, value, attached := strings.Cut(statement[0], "=")
 			if attached && strings.HasPrefix(name, "$") &&
 				actionWindowsEnvAssignment(strings.TrimPrefix(name, "$")+"=x") {
-				if len(statement) == 1 && value != "" && !strings.ContainsAny(value, "$%`") {
-					values[strings.ToLower(name)] = value
-					start = end + 1
-					continue
+				if len(statement) == 1 && value != "" && !strings.ContainsAny(value, "*?[]`") {
+					if strings.ContainsAny(value, "$%") {
+						// Resolve only values whose existing path reader knows the
+						// expansion. An unknown variable remains unbound.
+						if resolved, known := actionWindowsPath(value, effectiveCWD, home); known {
+							values[strings.ToLower(name)] = resolved
+							start = end + 1
+							continue
+						}
+					} else {
+						values[strings.ToLower(name)] = value
+						start = end + 1
+						continue
+					}
 				}
 				if len(statement) == 3 && strings.EqualFold(value, "Join-Path") {
 					parent := statement[1]
@@ -699,10 +709,19 @@ func actionWindowsResolvedSpans(words []string, cwd, home string) []actionWindow
 				}
 			}
 			if len(statement) == 3 && strings.HasPrefix(statement[0], "$") && statement[1] == "=" &&
-				!strings.ContainsAny(statement[2], "$%`") {
-				values[strings.ToLower(statement[0])] = statement[2]
-				start = end + 1
-				continue
+				!strings.ContainsAny(statement[2], "*?[]`") {
+				value := statement[2]
+				if strings.ContainsAny(value, "$%") {
+					if resolved, known := actionWindowsPath(value, effectiveCWD, home); known {
+						values[strings.ToLower(statement[0])] = resolved
+						start = end + 1
+						continue
+					}
+				} else {
+					values[strings.ToLower(statement[0])] = value
+					start = end + 1
+					continue
+				}
 			}
 			if len(statement) == 5 && strings.HasPrefix(statement[0], "$") && statement[1] == "=" &&
 				strings.EqualFold(statement[2], "Join-Path") {

@@ -25,8 +25,12 @@ func sshKeyMentionGrade(request trustedActionRequest) hookpaths.Grade {
 	if input.Command == "" {
 		return hookpaths.GradeNone
 	}
-	if request.ResolvedWriteTargets[hookpaths.ActionDecisionKey] == hookpaths.ProtectedTargetDecision {
+	grade := hookpaths.GradeNone
+	switch request.ResolvedWriteTargets[hookpaths.ActionDecisionKey] {
+	case hookpaths.ProtectedTargetDecision:
 		return hookpaths.GradeNamed
+	case hookpaths.PossibleTargetDecision:
+		grade = hookpaths.GradePossible
 	}
 	ssh := canonicalSemanticPath(filepath.Join(input.ActiveHome, ".ssh"))
 	protectedPaths := hookpaths.ProtectedAuthorizedKeysPaths(input.ActiveHome)
@@ -65,7 +69,6 @@ func sshKeyMentionGrade(request trustedActionRequest) hookpaths.Grade {
 	if os.Getenv("BASH_ENV") != "" && strings.Contains(strings.ToLower(input.Command), "bash") {
 		return hookpaths.GradeNamed
 	}
-	grade := hookpaths.GradeNone
 	for _, dialect := range []actionfacts.Dialect{"", actionfacts.DialectPOSIX, actionfacts.DialectPowerShell} {
 		hit := request.targetMemo.ActionCommandGradeWithDialectAndGlobFacts(
 			input.Command, input.CWD, input.ActiveHome, dialect, clientGlobFacts(request))

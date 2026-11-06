@@ -3225,6 +3225,33 @@ func actionWindowsTargetMentionAsGrade(command, cwd, home string, depth int, sta
 		return grade
 	}
 	originalWords := append([]string(nil), words...)
+	// A bound value is data until a later statement uses it as a target.
+	// Keep the original word indexes because the second scan also reads the
+	// command before assignment substitution.
+	assignmentWords := make(map[int]bool)
+	for start := 0; start < len(originalWords); {
+		end := start
+		for end < len(originalWords) && originalWords[end] != ";" && originalWords[end] != "|" &&
+			originalWords[end] != "||" && originalWords[end] != "&" && originalWords[end] != "&&" {
+			end++
+		}
+		statement := originalWords[start:end]
+		if len(statement) == 1 {
+			name, value, attached := strings.Cut(statement[0], "=")
+			if attached && strings.HasPrefix(name, "$") &&
+				actionWindowsEnvAssignment(strings.TrimPrefix(name, "$")+"=x") &&
+				!strings.Contains(value, "$(") && !strings.Contains(value, "`") {
+				assignmentWords[start] = true
+			}
+		} else if len(statement) == 3 && strings.HasPrefix(statement[0], "$") && statement[1] == "=" &&
+			actionWindowsEnvAssignment(strings.TrimPrefix(statement[0], "$")+"=x") &&
+			!strings.Contains(statement[2], "$(") && !strings.Contains(statement[2], "`") {
+			for j := start; j < end; j++ {
+				assignmentWords[j] = true
+			}
+		}
+		start = end + 1
+	}
 	skip := actionWindowsTextWords(scan, depth, strings.ContainsAny(command, "\r\n"))
 	if !stateOnly {
 		// A printed path pattern remains an input to an unknown consumer.
@@ -3331,7 +3358,7 @@ func actionWindowsTargetMentionAsGrade(command, cwd, home string, depth int, sta
 		return indexes, false
 	}
 	spans := actionWindowsResolvedSpans(words, cwd, home)
-	assignmentWords := make(map[int]bool)
+	copySourceWords := make(map[int]bool)
 	for _, span := range spans {
 		if !stateOnly && actionWindowsNamedContentWritePattern(span.words, effectiveCWD, home) {
 			return ProtectedTargetDecision
@@ -3339,10 +3366,14 @@ func actionWindowsTargetMentionAsGrade(command, cwd, home string, depth int, sta
 		if len(span.words) == 1 && actionWindowsEnvAssignment(span.words[0]) {
 			assignmentWords[span.start] = true
 		}
+		if source := actionWindowsCopySourceIndex(span.words, powerShell); source >= 0 {
+			copySourceWords[span.start+source] = true
+		}
 	}
-	wordHit := func(word, dir string, assignment bool) string {
+	wordHit := func(word, dir string, assignment, copySource bool) string {
 		hit := mentions(word, dir)
-		if assignment && hit == ProtectedTargetDecision {
+		if hit == ProtectedTargetDecision && (assignment ||
+			copySource && actionWindowsCopySourceIsSSHDirectory(word, dir, home)) {
 			return possibleOnlyTargetDecision
 		}
 		return hit
@@ -3382,12 +3413,12 @@ func actionWindowsTargetMentionAsGrade(command, cwd, home string, depth int, sta
 				continue
 			}
 			if skip[span.start+j] || printBodies[word] {
-				if !stateOnly && (wordHit(word, effectiveCWD, false) != "" || strings.ContainsAny(originalWords[span.start+j], "*?[")) {
+				if !stateOnly && (wordHit(word, effectiveCWD, false, false) != "" || strings.ContainsAny(originalWords[span.start+j], "*?[")) {
 					grade = actionMaxTargetGrade(grade, possibleOnlyTargetDecision)
 				}
 				continue
 			}
-			if record(wordHit(word, effectiveCWD, assignmentWords[span.start+j])) {
+			if record(wordHit(word, effectiveCWD, assignmentWords[span.start+j], copySourceWords[span.start+j])) {
 				return ProtectedTargetDecision
 			}
 		}
@@ -3412,16 +3443,64 @@ func actionWindowsTargetMentionAsGrade(command, cwd, home string, depth int, sta
 			}
 		}
 		if skip[i] || printBodies[word] {
-			if !stateOnly && (wordHit(word, cwd, false) != "" || strings.ContainsAny(originalWords[i], "*?[")) {
+			if !stateOnly && (wordHit(word, cwd, false, false) != "" || strings.ContainsAny(originalWords[i], "*?[")) {
 				grade = actionMaxTargetGrade(grade, possibleOnlyTargetDecision)
 			}
 			continue
 		}
-		if record(wordHit(word, cwd, assignmentWords[i])) {
+		if record(wordHit(word, cwd, assignmentWords[i], copySourceWords[i])) {
 			return ProtectedTargetDecision
 		}
 	}
 	return grade
+}
+
+// A copy reads its source and writes its destination. Keep the role at the
+// word hit so another statement's named destination still wins.
+func actionWindowsCopySourceIndex(words []string, powerShell bool) int {
+	if len(words) < 3 {
+		return -1
+	}
+	switch programBase(words[0]) {
+	case "copy-item", "cpi":
+	case "copy", "cp":
+		if !powerShell {
+			return -1
+		}
+	default:
+		return -1
+	}
+	source := -1
+	destination := -1
+	var positional []int
+	for i := 1; i < len(words); i++ {
+		switch strings.ToLower(words[i]) {
+		case "-path", "-literalpath":
+			if i+1 < len(words) {
+				i++
+				source = i
+			}
+		case "-destination":
+			if i+1 < len(words) {
+				i++
+				destination = i
+			}
+		default:
+			if !strings.HasPrefix(words[i], "-") {
+				positional = append(positional, i)
+			}
+		}
+	}
+	if source < 0 && len(positional) > 0 && (destination >= 0 || len(positional) > 1) {
+		source = positional[0]
+	}
+	return source
+}
+
+func actionWindowsCopySourceIsSSHDirectory(word, cwd, home string) bool {
+	path, known := actionWindowsPath(word, cwd, home)
+	ssh, homeKnown := actionWindowsPath(home+"/.ssh", cwd, home)
+	return known && homeKnown && strings.EqualFold(path, ssh)
 }
 
 // A resolved PowerShell value in a content writer's path operand retains its
@@ -3848,13 +3927,19 @@ func actionWindowsPrintOnlyDisplays(scan actionWindowsScanResult, start, end int
 		if k >= len(words) {
 			return false
 		}
-		// env -S can launch a named text display program. Keep this
-		// spelling narrow: an explicitly named executable or a different
-		// command may interpret its input as a script (GAP-0227).
-		if words[k] == "env" && k+2 < len(words) && words[k+1] == "-S" && words[k+2] == "cat -n" &&
-			(k+3 == len(words) || words[k+3] == "|" || words[k+3] == ";" || words[k+3] == "&" || words[k+3] == "&&" || words[k+3] == "||") {
-			k += 2
-		} else if !actionWindowsDisplaySinks[programBase(words[k])] ||
+		if programBase(words[k]) == "env" {
+			stageEnd := k + 1
+			for stageEnd < len(words) && words[stageEnd] != ";" && words[stageEnd] != "|" &&
+				words[stageEnd] != "||" && words[stageEnd] != "&" && words[stageEnd] != "&&" {
+				stageEnd++
+			}
+			if !actionWindowsEnvDisplayStage(words[k:stageEnd], words[:start]) {
+				return false
+			}
+			k = stageEnd
+			continue
+		}
+		if !actionWindowsDisplaySinks[programBase(words[k])] ||
 			programBase(words[k]) == "cat" &&
 				(!strings.EqualFold(words[k], "cat") || !actionWindowsDisplayBindingStable(words[:start])) {
 			// An explicit path or an earlier binding change cannot prove
@@ -3981,40 +4066,100 @@ func actionWindowsPipelineStageReadsScript(stage []string) bool {
 	if strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(stage[0], `\`, "/"))), ".exe") != "env" {
 		return actionWindowsScriptReader(stage[0])
 	}
-	options := true
-	for i := 1; i < len(stage); i++ {
-		word := stage[i]
-		if word == "--" {
+	command, ok := actionWindowsEnvCommand(stage, false)
+	return ok && actionWindowsScriptReader(command[0])
+}
+
+// actionWindowsEnvCommand reads the existing env option and assignment
+// grammar once for both script consumers and display consumers.
+func actionWindowsEnvCommand(stage []string, display bool) ([]string, bool) {
+	if len(stage) == 0 || programBase(stage[0]) != "env" {
+		return nil, false
+	}
+	words := stage[1:]
+	options, split := true, false
+	for i := 0; i < len(words); i++ {
+		word := words[i]
+		if options && word == "--" {
 			options = false
 			continue
 		}
 		if options {
 			switch {
-			case word == "-i" || word == "--ignore-environment" || word == "-0" || word == "--null" || word == "-v" || word == "--debug":
+			case word == "-i" || word == "--ignore-environment" || word == "-0" || word == "--null" ||
+				word == "-v" || word == "--debug":
 				continue
 			case word == "-u" || word == "--unset" || word == "-C" || word == "--chdir":
 				i++
-				if i >= len(stage) {
-					return false
+				if i >= len(words) {
+					return nil, false
 				}
 				continue
 			case strings.HasPrefix(word, "--unset=") || strings.HasPrefix(word, "--chdir="):
 				continue
-			case word == "-S" || word == "--split-string":
-				if i+1 >= len(stage) {
-					return false
+			case !split && (word == "-S" || word == "--split-string" || strings.HasPrefix(word, "--split-string=")):
+				value := strings.TrimPrefix(word, "--split-string=")
+				if value == word {
+					i++
+					if i >= len(words) {
+						return nil, false
+					}
+					value = words[i]
 				}
-				return actionWindowsEnvSplitReadsScript(stage[i+1])
-			case strings.HasPrefix(word, "--split-string="):
-				return actionWindowsEnvSplitReadsScript(strings.TrimPrefix(word, "--split-string="))
+				if display && strings.ContainsAny(value, "'\"\\") {
+					return nil, false
+				}
+				words = append(strings.Fields(value), words[i+1:]...)
+				i = -1
+				split = true
+				options = true
+				continue
+			case strings.HasPrefix(word, "-"):
+				return nil, false
 			}
 		}
 		if actionWindowsEnvAssignment(word) {
+			if display && actionWindowsEnvAssignmentChangesExecution(word) {
+				return nil, false
+			}
 			continue
 		}
-		return actionWindowsScriptReader(word)
+		return words[i:], true
 	}
-	return false
+	return nil, false
+}
+
+func actionWindowsEnvAssignmentChangesExecution(word string) bool {
+	name, _, _ := strings.Cut(strings.ToUpper(word), "=")
+	switch name {
+	case "PATH", "PATHEXT", "IFS", "ENV", "BASH_ENV", "SHELLOPTS", "LD_PRELOAD", "LD_LIBRARY_PATH":
+		return true
+	}
+	return strings.HasPrefix(name, "DYLD_")
+}
+
+func actionWindowsEnvDisplayStage(stage, earlier []string) bool {
+	if len(stage) == 0 || !strings.EqualFold(stage[0], "env") {
+		return false
+	}
+	command, ok := actionWindowsEnvCommand(stage, true)
+	if !ok || !actionWindowsDisplaySinks[programBase(command[0])] ||
+		!strings.EqualFold(command[0], programBase(command[0])) ||
+		!actionWindowsDisplayBindingStable(earlier) {
+		return false
+	}
+	for _, word := range command[1:] {
+		if strings.ContainsAny(word, ";&|<>()`$\\") {
+			return false
+		}
+		if strings.HasPrefix(word, "-") {
+			name, _, _ := strings.Cut(strings.ToLower(word), ":")
+			if !actionWindowsSinkParameters[name] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func actionWindowsEnvAssignment(word string) bool {
@@ -4030,11 +4175,6 @@ func actionWindowsEnvAssignment(word string) bool {
 		return false
 	}
 	return true
-}
-
-func actionWindowsEnvSplitReadsScript(value string) bool {
-	words := strings.Fields(value)
-	return len(words) > 0 && actionWindowsScriptReader(words[0])
 }
 
 // actionWindowsScriptReader reports a program that runs the text it reads

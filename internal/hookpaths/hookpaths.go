@@ -46,8 +46,8 @@ const TruncatedKey = "\x00truncated"
 const PatchCompleteKey = "\x00patch-complete"
 
 // ActionDecisionKey carries the user's hook reading of a shell command:
-// ProtectedTargetDecision when the command's concrete write operands, walked
-// as the user (actionConcreteProtectedWrite), reach a protected file. Only
+// ProtectedTargetDecision when a concrete write reaches a protected file,
+// PossibleTargetDecision when only an uncertain reach remains. Only
 // concrete writes count, not the wider target-mention scan, so a read
 // through a link to the keys file stays allowed. A managed gateway behind
 // ProtectHome cannot repeat that walk of the user's links (a variable or
@@ -60,7 +60,7 @@ const ActionDecisionKey = "\x00action-decision"
 // It applies only to the touch shape checked again by the gateway.
 const NoDereferenceTouchSafeKey = "\x00touch-no-dereference-safe"
 
-// ProtectedTargetDecision is the only ActionDecisionKey value.
+// ProtectedTargetDecision and PossibleTargetDecision are ActionDecisionKey values.
 const ProtectedTargetDecision = "protected-target"
 
 // SourceLinkFactPrefix identifies a copy source inspected by the user-side hook.
@@ -1117,7 +1117,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	opaqueFacts := map[string]string{}
 	var globFacts, walkFacts map[string]string
 	var unprovenReason string
-	var protectedDecision bool
+	var protectedDecision, possibleDecision bool
 	var noDereferenceTouchSafe bool
 	// identities is the file-identity evidence for InstructionIdentityKey:
 	// every existing instruction file a write target names.
@@ -1214,9 +1214,16 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 						// A per-user gateway can resolve a variable write through
 						// the user's links. Carry that positive decision to managed
 						// gateways, excluding an unconditionally overwritten value.
-						protectedDecision = ActionCommandDecision(command, cwd, home) != "" &&
-							!actionClientProvedSafeVariableTargetsForHook(command, cwd, home) &&
-							!actionClientProvedOverwrittenRedirect(command, cwd, home)
+						if !actionClientProvedSafeVariableTargetsForHook(command, cwd, home) &&
+							!actionClientProvedOverwrittenRedirect(command, cwd, home) {
+							switch NewTargetMemo().ActionCommandGradeWithDialectAndGlobFacts(
+								command, cwd, home, hookShellDialect(connector, tool), nil) {
+							case GradeNamed:
+								protectedDecision = true
+							case GradePossible:
+								possibleDecision = true
+							}
+						}
 					}
 					if !protectedDecision {
 						protectedDecision = actionClientLoopCopyDestinationProtected(command, cwd, home)
@@ -1236,7 +1243,13 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				// (GAP-0151).
 				if !protectedDecision && !isApplyPatchToolName(tool) &&
 					(fallbackFacts.Parse.Status == actionfacts.StatusLimitExceeded || callPastArgvBound(command)) {
-					protectedDecision = ActionCommandDecision(command, cwd, home) != ""
+					switch NewTargetMemo().ActionCommandGradeWithDialectAndGlobFacts(
+						command, cwd, home, hookShellDialect(connector, tool), nil) {
+					case GradeNamed:
+						protectedDecision = true
+					case GradePossible:
+						possibleDecision = true
+					}
 				}
 				// A command over the analysis limits has no path facts, but
 				// the gateway still checks each literal redirect operand.
@@ -1381,6 +1394,9 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		// operand the map omits must never read as no protected target.
 		targets[ActionDecisionKey] = ProtectedTargetDecision
 		size += len(jsonString(ActionDecisionKey)) + 1 + len(jsonString(ProtectedTargetDecision)) + 1
+	} else if possibleDecision {
+		targets[ActionDecisionKey] = PossibleTargetDecision
+		size += len(jsonString(ActionDecisionKey)) + 1 + len(jsonString(PossibleTargetDecision)) + 1
 	}
 	if noDereferenceTouchSafe {
 		targets[NoDereferenceTouchSafeKey] = "1"
@@ -2029,7 +2045,8 @@ func Decode(value string) (map[string]string, bool) {
 		(targets[TruncatedKey] != "" && targets[TruncatedKey] != "1") ||
 		(targets[BudgetKey] != "" && (targets[BudgetKey] != "1" || targets[TruncatedKey] != "1")) ||
 		(targets[PatchCompleteKey] != "" && targets[PatchCompleteKey] != "1") ||
-		(targets[ActionDecisionKey] != "" && targets[ActionDecisionKey] != ProtectedTargetDecision) ||
+		(targets[ActionDecisionKey] != "" && targets[ActionDecisionKey] != ProtectedTargetDecision &&
+			targets[ActionDecisionKey] != PossibleTargetDecision) ||
 		(targets[NoDereferenceTouchSafeKey] != "" && targets[NoDereferenceTouchSafeKey] != "1") ||
 		(targets[LinksStableKey] != "" && targets[LinksStableKey] != "1") ||
 		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {

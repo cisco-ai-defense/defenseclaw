@@ -46,6 +46,7 @@ func TestGAP236OrdinaryMentionsMoveToStrictProfile(t *testing.T) {
 		{"GAP-0551 after pwd", `cp ~/.defenseclaw/conf*.yaml project/copy.yaml; pwd`, home, actionfacts.DialectPOSIX},
 		{"GAP-0548 after pwd", `Copy-Item -Recurse -Path .\src -Destination .\build; pwd`, home + `\project`, actionfacts.DialectPowerShell},
 		{"GAP-0548 quoted option", `t="-t $HOME/.ssh"; cp "$t" a.txt`, home + `\project`, actionfacts.DialectPOSIX},
+		{"GAP-0548 Copy-Item source", `$t="$HOME/.ssh"; Copy-Item -Path "$t" -Destination a.txt -Recurse`, home + `\project`, actionfacts.DialectPowerShell},
 	} {
 		for _, tier := range []string{"default", "permissive", "strict"} {
 			for _, managed := range []bool{false, true} {
