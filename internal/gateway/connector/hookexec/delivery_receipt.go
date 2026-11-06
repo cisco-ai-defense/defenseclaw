@@ -28,6 +28,7 @@ const hookDeliveryReceiptTimeout = hookResponseGrace
 
 type hookDeliveryRequest struct {
 	writer *io.PipeWriter
+	cancel context.CancelFunc
 	ready  chan struct{}
 	once   sync.Once
 	mu     sync.Mutex
@@ -198,8 +199,21 @@ func (d *hookDeliveryRequest) close() {
 	defer d.mu.Unlock()
 	if !d.closed {
 		d.closed = true
-		_ = d.writer.Close()
 	}
+	_ = d.writer.Close()
+	if d.cancel != nil {
+		d.cancel()
+	}
+}
+
+func (d *hookDeliveryRequest) setCancel(cancel context.CancelFunc) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		cancel()
+		return
+	}
+	d.cancel = cancel
 }
 
 // release ends the body with HookDeliveryReleased unless the gateway's 103
@@ -243,6 +257,32 @@ func (d *hookDeliveryRequest) acknowledge(localBlock bool) error {
 	return err
 }
 
+// deadline reports the watchdog's committed answer on the same request the
+// gateway is evaluating. A closed or unadvertised request has no in-band
+// witness; its local failure line remains available to the reporter.
+func (d *hookDeliveryRequest) deadline(blocked bool) bool {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return false
+	}
+	select {
+	case <-d.ready:
+	default:
+		d.mu.Unlock()
+		return false
+	}
+	d.closed = true
+	d.mu.Unlock()
+	token := HookDeliveryReceiptOpen
+	if blocked {
+		token = HookDeliveryReceiptLate
+	}
+	_, err := io.WriteString(d.writer, token)
+	_ = d.writer.Close()
+	return err == nil
+}
+
 func (d *hookDeliveryRequest) capabilityReceived() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -260,6 +300,11 @@ func (d *hookDeliveryRequest) capabilityReceived() bool {
 type hookDeliveryResponseBody struct {
 	io.ReadCloser
 	delivery *hookDeliveryRequest
+}
+
+func (b *hookDeliveryResponseBody) Close() error {
+	b.delivery.close()
+	return b.ReadCloser.Close()
 }
 
 func hookDeliveryResponse(body io.ReadCloser) *hookDeliveryRequest {
