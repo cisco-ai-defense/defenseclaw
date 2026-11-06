@@ -39,10 +39,12 @@ func GitMaterializedWrite(input actionfacts.Input, facts actionfacts.Facts) Grad
 		redirectedTree = gitRedirectedMaterialization(input.Command, input.CWD, input.ActiveHome)
 	}
 	var scopes []string
+	var exports gitWorktreeExports
 	for _, simple := range commands {
 		if simple.EvaluationFailure != "" {
 			return GradeNone
 		}
+		exports.update(simple.Text, input.ActiveHome)
 		cwd := simple.CWD
 		if !filepath.IsAbs(cwd) {
 			cwd = input.CWD
@@ -51,13 +53,98 @@ func GitMaterializedWrite(input actionfacts.Input, facts actionfacts.Facts) Grad
 			return GradePossible
 		}
 		if scope, materializes := gitSimpleMaterializationScope(simple.Text, cwd, input.ActiveHome); materializes {
-			if redirectedTree {
+			if redirectedTree || exports.redirected() {
 				scope = ""
 			}
 			scopes = append(scopes, scope)
 		}
 	}
 	return GradeNone
+}
+
+// Git uses exported worktree settings from earlier statements in the same
+// shell. SimpleCommands preserves the order and resolves known values, but
+// omits those settings from the later Git command text. Retain their scope
+// effect until the shell removes the export or unsets the name.
+type gitWorktreeExports struct {
+	worktree bool
+	gitdir   bool
+}
+
+func (s gitWorktreeExports) redirected() bool { return s.worktree || s.gitdir }
+
+func (s *gitWorktreeExports) set(name string, exported bool) {
+	switch name {
+	case "GIT_WORK_TREE":
+		s.worktree = exported
+	case "GIT_DIR":
+		s.gitdir = exported
+	}
+}
+
+func (s *gitWorktreeExports) update(command, home string) {
+	file, ok := parseShell(command)
+	if !ok || len(file.Stmts) != 1 {
+		return
+	}
+	switch cmd := file.Stmts[0].Cmd.(type) {
+	case *syntax.DeclClause:
+		if cmd.Variant == nil {
+			return
+		}
+		mark, change := false, false
+		switch cmd.Variant.Value {
+		case "export":
+			mark, change = true, true
+		case "declare", "typeset":
+		default:
+			return
+		}
+		for _, arg := range cmd.Args {
+			if arg == nil || arg.Name != nil || arg.Value == nil {
+				continue
+			}
+			option, static := staticShellWord(arg.Value, nil, false)
+			if !static || len(option) < 2 {
+				continue
+			}
+			switch {
+			case cmd.Variant.Value == "export" && option[0] == '-' && strings.Contains(option[1:], "n"):
+				mark = false
+			case (cmd.Variant.Value == "declare" || cmd.Variant.Value == "typeset") &&
+				(option[0] == '-' || option[0] == '+') && strings.Contains(option[1:], "x"):
+				mark, change = option[0] == '-', true
+			}
+		}
+		if change {
+			for _, arg := range cmd.Args {
+				if arg != nil && arg.Name != nil {
+					s.set(arg.Name.Value, mark)
+				}
+			}
+		}
+	case *syntax.CallExpr:
+		words, static := gitCallWords(cmd, home)
+		if len(words) == 0 || !static[0] || words[0] != "unset" {
+			return
+		}
+		functionOnly := false
+		for i := 1; i < len(words); i++ {
+			if !static[i] {
+				continue
+			}
+			if words[i] == "--" {
+				continue
+			}
+			if strings.HasPrefix(words[i], "-") {
+				functionOnly = strings.Contains(words[i], "f")
+				continue
+			}
+			if !functionOnly {
+				s.set(words[i], false)
+			}
+		}
+	}
 }
 
 // SimpleCommands drops command-local environment assignments after it has
