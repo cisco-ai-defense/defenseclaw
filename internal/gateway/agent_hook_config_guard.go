@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
+	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -946,14 +947,15 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 	}
 	text := strings.ToLower(request.LegacyText + "\n" + request.Input.Command + "\n" + string(request.Input.Args) + "\n" + strings.Join(request.Input.Argv, "\n"))
 	if !guard.shellMentionsRegistryPath(text) &&
-		!slices.ContainsFunc([]string{"git ", "claude ", "codex ", "opencode ", "amp ", "copilot ", "kiro-cli ", "hermes ", "cursor-agent ", "devin ", "gemini "},
+		!slices.ContainsFunc([]string{"git ", "claude ", "codex ", "opencode ", "amp ", "copilot ", "kiro-cli ", "hermes ", "cursor-agent ", "devin ", "gemini ", "npx "},
 			func(name string) bool { return strings.Contains(text, name) }) {
 		return out
 	}
-	for _, facts := range agentHookConfigShellFacts(request.Input) {
+	shellFacts := agentHookConfigShellFacts(request.Input)
+	for _, facts := range shellFacts {
 		for _, command := range facts.Commands {
 			argv := agentHookConfigExactWords(command)
-			if reason, target := agentHookConfigRunOverride(argv, guard); reason != "" {
+			if reason, target := agentHookConfigRunOverride(argv, guard, shellFacts); reason != "" {
 				add(agentHookConfigDisableRuleID, reason, target)
 			} else if target != "" {
 				add(agentHookConfigWriteRuleID, "", target)
@@ -1014,7 +1016,27 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 			}
 		}
 	}
+	if target := agentHookConfigPrefixOverride(agentHookConfigRawShellCommand(request.Input), shellFacts); target != "" {
+		add(agentHookConfigWriteRuleID, "", target)
+	}
 	return out
+}
+
+func agentHookConfigRawShellCommand(input actionfacts.Input) string {
+	if input.Command != "" {
+		return input.Command
+	}
+	var args map[string]json.RawMessage
+	if json.Unmarshal(input.Args, &args) != nil {
+		return ""
+	}
+	for _, key := range []string{"command", "cmd"} {
+		var command string
+		if json.Unmarshal(args[key], &command) == nil && command != "" {
+			return command
+		}
+	}
+	return ""
 }
 
 // Each parsed shell body is judged as executable commands, including a body
@@ -1416,25 +1438,47 @@ func agentHookConfigPatchTarget(patch []byte, guard *agentHookConfigGuard) (stri
 	return "", anyPath && (!section || seen)
 }
 
-func agentHookConfigRunOverride(argv []string, guard *agentHookConfigGuard) (reason, target string) {
+func agentHookConfigRunOverride(argv []string, guard *agentHookConfigGuard, facts []actionfacts.Facts) (reason, target string) {
 	if len(argv) < 2 {
 		return "", ""
 	}
 	program := strings.ToLower(filepath.Base(argv[0]))
 	if program == "env" {
+		override := false
 		for index := 1; index < len(argv); index++ {
 			if argv[index] == "--" {
 				continue
 			}
 			if strings.HasPrefix(argv[index], "-") || strings.Contains(argv[index], "=") {
+				if agentHookConfigRunHomeAssignment(argv[index]) {
+					override = true
+				}
 				continue
 			}
-			return agentHookConfigRunOverride(argv[index:], guard)
+			reason, target = agentHookConfigRunOverride(argv[index:], guard, facts)
+			if reason == "" && target == "" && override && agentHookConfigRunAgent(argv[index:]) {
+				return "", argv[index]
+			}
+			return reason, target
 		}
 		return "", ""
 	}
 	if program == "exec" || program == "command" || program == "nohup" {
-		return agentHookConfigRunOverride(argv[1:], guard)
+		return agentHookConfigRunOverride(argv[1:], guard, facts)
+	}
+	if program == "npx" || program == "npx.cmd" {
+		for index := 1; index < len(argv); index++ {
+			if argv[index] == "-y" || argv[index] == "--yes" {
+				continue
+			}
+			switch argv[index] {
+			case "@anthropic-ai/claude-code":
+				return agentHookConfigRunOverride(append([]string{"claude"}, argv[index+1:]...), guard, facts)
+			case "@openai/codex":
+				return agentHookConfigRunOverride(append([]string{"codex"}, argv[index+1:]...), guard, facts)
+			}
+			break
+		}
 	}
 	format := ""
 	switch program {
@@ -1454,6 +1498,17 @@ func agentHookConfigRunOverride(argv []string, guard *agentHookConfigGuard) (rea
 	for index := 1; index < len(argv); index++ {
 		arg := argv[index]
 		value := ""
+		if arg == "--setting-sources" || strings.HasPrefix(arg, "--setting-sources=") {
+			if arg == "--setting-sources" && index+1 < len(argv) {
+				value = argv[index+1]
+			} else {
+				value = strings.TrimPrefix(arg, "--setting-sources=")
+			}
+			if format == gatewayconnector.AgentHookConfigClaudeSettings && !strings.Contains(value, "user") {
+				return "", program
+			}
+			continue
+		}
 		if arg == "--settings" || arg == "--settings-file" || arg == "--config" || arg == "-c" {
 			if index+1 >= len(argv) {
 				continue
@@ -1462,15 +1517,14 @@ func agentHookConfigRunOverride(argv []string, guard *agentHookConfigGuard) (rea
 			index++
 		} else if key, rest, ok := strings.Cut(arg, "="); ok && (key == "--settings" || key == "--settings-file" || key == "--config") {
 			arg, value = key, rest
+		} else if strings.HasPrefix(arg, "-c") && len(arg) > 2 && format == gatewayconnector.AgentHookConfigCodexTOML {
+			arg, value = "-c", arg[2:]
 		} else {
 			continue
 		}
-		if arg == "-c" && format == gatewayconnector.AgentHookConfigCodexTOML {
-			key, setting, assigned := strings.Cut(value, "=")
-			key = strings.TrimSpace(key)
-			setting = strings.TrimSpace(setting)
-			if assigned && (key == "features.hooks" || key == "features.codex_hooks") && setting != "true" {
-				return "turns off hooks for a nested agent run", program
+		if (arg == "-c" || arg == "--config") && format == gatewayconnector.AgentHookConfigCodexTOML && strings.Contains(value, "=") {
+			if why := agentHookConfigInlineCodexOverride(value); why != "" {
+				return why, program
 			}
 			continue
 		}
@@ -1478,20 +1532,142 @@ func agentHookConfigRunOverride(argv []string, guard *agentHookConfigGuard) (rea
 			if why := agentHookConfigTurnsOff(format, nil, false, []byte(value), true); why != "" {
 				return why, program
 			}
-			if document := agentHookConfigDocument(format, []byte(value)); document != nil {
-				member := "hooks"
-				if format == gatewayconnector.AgentHookConfigOpenCodeConfig {
-					member = "plugin"
-				}
-				if entry, present := document[member]; present && len(agentHookConfigFingerprint(entry)) == 0 {
-					return "omits DefenseClaw registration in per-run settings", program
+			if format == gatewayconnector.AgentHookConfigOpenCodeConfig {
+				if document := agentHookConfigDocument(format, []byte(value)); document != nil {
+					if plugins, present := document["plugin"]; present && len(agentHookConfigFingerprint(plugins)) == 0 {
+						return "removes DefenseClaw's plugin from a nested OpenCode run", program
+					}
 				}
 			}
 			continue
 		}
-		if guard.shellTarget(value) || arg == "--settings" || arg == "--settings-file" || arg == "--config" {
+		if arg == "--settings" || arg == "--settings-file" || arg == "--config" {
+			if agentHookConfigRunSettingsWritten(value, guard, facts) {
+				return "", value
+			}
+			if body, readable := guard.read(value); readable {
+				if why := agentHookConfigTurnsOff(format, nil, false, body, true); why != "" {
+					return why, value
+				}
+				continue
+			}
 			return "", value
 		}
 	}
 	return "", ""
+}
+
+func agentHookConfigInlineCodexOverride(value string) string {
+	document := agentHookConfigDocument(gatewayconnector.AgentHookConfigCodexTOML, []byte(value))
+	if document == nil {
+		return ""
+	}
+	if reason := agentHookConfigTurnsOff(gatewayconnector.AgentHookConfigCodexTOML, nil, false, []byte(value), true); reason != "" {
+		return reason
+	}
+	if hooks, ok := document["hooks"].(map[string]any); ok {
+		for _, entry := range hooks {
+			if values, ok := entry.([]any); ok && len(values) == 0 {
+				return "empties hooks for a nested Codex run"
+			}
+		}
+	}
+	return ""
+}
+
+func agentHookConfigRunHomeAssignment(word string) bool {
+	key, _, ok := strings.Cut(word, "=")
+	if !ok {
+		return false
+	}
+	switch key {
+	case "CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOME":
+		return true
+	}
+	return false
+}
+
+func agentHookConfigRunAgent(argv []string) bool {
+	if len(argv) == 0 {
+		return false
+	}
+	switch strings.ToLower(filepath.Base(argv[0])) {
+	case "claude", "claude.exe", "codex", "codex.exe", "opencode", "opencode.exe":
+		return true
+	}
+	return false
+}
+
+func agentHookConfigRunSettingsWritten(raw string, guard *agentHookConfigGuard, facts []actionfacts.Facts) bool {
+	settingsPlaces := guard.places(raw)
+	for _, fact := range facts {
+		for _, path := range fact.Paths {
+			switch path.Access {
+			case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
+			default:
+				continue
+			}
+			for _, candidate := range guard.places(firstNonEmpty(path.Resolved, path.Normalized, path.Value)) {
+				if slices.Contains(settingsPlaces, candidate) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// Prefix assignments belong to the launched process, not to the hook
+// request's environment. Parse the shell grammar so quoted text and comments
+// cannot be mistaken for a per-run home change.
+func agentHookConfigPrefixOverride(command string, facts []actionfacts.Facts) string {
+	if target := agentHookConfigPrefixOverrideOne(command); target != "" {
+		return target
+	}
+	for _, fact := range facts {
+		for _, command := range fact.Commands {
+			if target := agentHookConfigPrefixOverrideOne(agentHookConfigNestedShellBody(agentHookConfigExactWords(command))); target != "" {
+				return target
+			}
+		}
+	}
+	return ""
+}
+
+func agentHookConfigPrefixOverrideOne(command string) string {
+	if len(command) > 8192 {
+		return ""
+	}
+	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	if err != nil {
+		return ""
+	}
+	target := ""
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 || !agentHookConfigRunAgent([]string{agentHookConfigLiteralWord(call.Args[0])}) {
+			return true
+		}
+		for _, assignment := range call.Assigns {
+			if assignment.Name != nil && agentHookConfigRunHomeAssignment(assignment.Name.Value+"=x") {
+				target = agentHookConfigLiteralWord(call.Args[0])
+				break
+			}
+		}
+		return true
+	})
+	return target
+}
+
+func agentHookConfigLiteralWord(word *syntax.Word) string {
+	if word == nil || len(word.Parts) != 1 {
+		return ""
+	}
+	switch part := word.Parts[0].(type) {
+	case *syntax.Lit:
+		return part.Value
+	case *syntax.SglQuoted:
+		return part.Value
+	}
+	return ""
 }
