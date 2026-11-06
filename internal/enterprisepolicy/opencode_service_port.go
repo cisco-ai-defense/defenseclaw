@@ -7,7 +7,6 @@ package enterprisepolicy
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -41,27 +40,6 @@ func OpenCodeServiceConfigPath(home string) string {
 // RID of a Windows SID).
 func OpenCodeAccountPort(id uint64) int {
 	return OpenCodeAccountPortBase + int(id%OpenCodeAccountPortSpan)
-}
-
-// OpenCodeServicePortWritable reports whether the account (its worker) can
-// rewrite its service.json in place, as writePrivateUserFile does: the folder
-// is a real folder (no link) it can write, and the file, if there, is a
-// regular file.
-func OpenCodeServicePortWritable(home string) bool {
-	path := OpenCodeServiceConfigPath(filepath.Clean(strings.TrimSpace(home)))
-	dir := filepath.Dir(path)
-	info, err := os.Lstat(dir)
-	if err != nil {
-		// A missing folder is created on write; its parent must be writable.
-		return os.IsNotExist(err) && writableDir(filepath.Dir(dir))
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !writableDir(dir) {
-		return false
-	}
-	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
-		return false
-	}
-	return true
 }
 
 // ReadOpenCodeServicePortAsUser is the port the service.json under home names
@@ -102,24 +80,27 @@ func ReadOpenCodeServicePortAsUser(home string) (int, error) {
 	return port, nil
 }
 
-// OpenCodeServicePortResult is what EnsureOpenCodeServicePort found or did.
+// OpenCodeServicePortResult is what SetOpenCodeServicePort found or did.
 type OpenCodeServicePortResult struct {
-	// Port is the port the account's service.json names after the call (0
-	// when it names none).
+	// Port is the port the account's service.json names after the call.
 	Port int
+	// Previous is the port the file named before the call (0: none).
+	Previous int
 	// Changed reports that this call wrote the port.
 	Changed bool
 	// CreatedDirs are the folders below home the write created.
 	CreatedDirs []string
 }
 
-// EnsureOpenCodeServicePort writes port as "port" into the account's
-// service.json, as the account (the guardian's per-user worker). A port the
-// file already names is kept, whoever set it; the other keys (OpenCode's
-// password) are kept. A missing file is created at 0600; OpenCode adds its
-// password on the next start (checked with 2.2.5). A link, a non-regular
-// file or a file that is not a JSON object is left alone with an error.
-func EnsureOpenCodeServicePort(home string, port int) (OpenCodeServicePortResult, error) {
+// SetOpenCodeServicePort makes the account's service.json name port, as the
+// account (the guardian's per-user worker). The record is the only authority
+// (REVIEW-gx053-9): a file that names another port is rewritten. The other
+// keys (OpenCode's password) are kept; a missing file is created at 0600 and
+// OpenCode adds its password on the next start (checked with 2.2.5). A link
+// in place of the folder, a non-regular file or a file that is not a JSON
+// object is left alone with an error: the guardian then changes nothing in
+// its record and warns.
+func SetOpenCodeServicePort(home string, port int) (OpenCodeServicePortResult, error) {
 	var result OpenCodeServicePortResult
 	home = strings.TrimSpace(home)
 	if home == "" || !filepath.IsAbs(home) {
@@ -145,12 +126,11 @@ func EnsureOpenCodeServicePort(home string, port int) (OpenCodeServicePortResult
 			}
 		}
 		if raw, ok := doc["port"]; ok {
-			var existing int
-			if err := json.Unmarshal(raw, &existing); err != nil || existing <= 0 || existing > 65535 {
-				return result, fmt.Errorf("opencode service port: %s names a port that is not a number; left in place", path)
+			_ = json.Unmarshal(raw, &result.Previous)
+			if result.Previous == port {
+				result.Port = port
+				return result, nil
 			}
-			result.Port = existing
-			return result, nil
 		}
 	}
 	encoded, _ := json.Marshal(port)
@@ -167,227 +147,135 @@ func EnsureOpenCodeServicePort(home string, port int) (OpenCodeServicePortResult
 	return result, nil
 }
 
-// OpenCodePortConflict is a port two accounts claim: Holder keeps it, UID is
-// moved (or, with no new ports allowed, left alone and reported).
+// OpenCodePortConflict is a port an account's file names (an import) that
+// the record gives another account: the account gets a fresh port instead.
 type OpenCodePortConflict struct {
 	UID, Holder, Port int
 }
 
 // OpenCodePortPlan is one guardian pass's decision (PlanOpenCodeServicePorts).
 type OpenCodePortPlan struct {
-	// Ports is the port each eligible account ends the pass with.
+	// Ports is the port each eligible account ends the pass with: its
+	// recorded port, or the port this pass binds for it.
 	Ports map[int]int
-	// Replace names the eligible accounts whose service.json names a port
-	// another account holds: the worker replaces that port (the value) with
-	// the one in Ports.
-	Replace map[int]int
-	// Record is the record after the pass: every eligible account's port and
-	// every other recorded entry (never dropped).
+	// Record is the record after the pass: every recorded binding, unchanged,
+	// and the new ones.
 	Record map[int]int
-	// Conflicts are the ports two accounts claimed, for the log.
+	// Conflicts are imports refused because the record gives the port to
+	// another account, and record entries that paired two accounts.
 	Conflicts []OpenCodePortConflict
 	// NoPort are eligible accounts that get no port this pass: the range is
-	// full, or no new port may be given (allowNew false).
+	// full, or no new binding may be made (allowNew false).
 	NoPort []int
 }
 
-// PlanOpenCodeServicePorts decides every account's OpenCode service port so
-// that no two accounts ever hold the same one (REVIEW-gx053-4). filePorts are
-// the ports the eligible accounts' own service.json files name; recorded is
-// the guardian's record (uid -> port, every account that ever had one).
-// Precedence, earlier holder first:
-//  1. an eligible account whose file names its own recorded port;
-//  2. every other recorded entry (departed, excluded, directory accounts and
-//     eligible accounts whose file names no port);
-//  3. an eligible account's file port that nobody above holds;
-//  4. a new port (allowNew only), the account's recorded port when it is
-//     free, else the first free one from OpenCodeAccountPort.
+// PlanOpenCodeServicePorts binds OpenCode service ports with the guardian's
+// root-owned record as the only authority (REVIEW-gx053-9):
+//  1. a uid's recorded port never changes because of any user's file: the
+//     account gets its recorded port and the worker writes it into the file;
+//  2. a uid with no record entry yet imports the port its own file names
+//     (imports), but only when the record gives that port to no other uid;
+//     otherwise, and with no file port, it gets a fresh port;
+//  3. new ports come from the pool minus every recorded port, so excluded
+//     and departed accounts keep theirs;
+//  4. an unknown uid (its file could not be read) with no record entry gets
+//     nothing this pass; allowNew false (the record could not be read) binds
+//     nothing new.
 //
-// A file port that another account holds is a conflict: that account is
-// moved to a port of its own (Replace) and the conflict is reported. With
-// allowNew false (the record could not be read) nobody gets a new port and
-// nobody is moved.
-func PlanOpenCodeServicePorts(eligible []int, filePorts, recorded map[int]int, allowNew bool) OpenCodePortPlan {
-	return PlanOpenCodeServicePortsHolding(eligible, filePorts, recorded, allowNew, nil, nil)
-}
-
-// PlanOpenCodeServicePortsHolding is PlanOpenCodeServicePorts with accounts
-// whose file could not be read this pass (unknown, REVIEW-gx053-7): such an
-// account keeps its recorded port reserved and nothing changes for it (no
-// new port, no move); every other account is planned as usual from the pool
-// minus every recorded port. A port its file names away from its record is
-// settled on the next readable pass by the clash rule.
-//
-// unwritable names accounts whose service.json cannot be rewritten in place
-// (a linked ~/.config/opencode, a refused write: REVIEW-gx053-8). Such an
-// account cannot be moved, so the port its file names is taken first, like an
-// established holder, and a writable account that shares it is the one moved.
-func PlanOpenCodeServicePortsHolding(eligible []int, filePorts, recorded map[int]int, allowNew bool, unknown, unwritable map[int]bool) OpenCodePortPlan {
-	plan := OpenCodePortPlan{Ports: map[int]int{}, Replace: map[int]int{}, Record: map[int]int{}}
-	sortedEligible := append([]int(nil), eligible...)
-	sort.Ints(sortedEligible)
-	isEligible := map[int]bool{}
-	for _, uid := range sortedEligible {
-		isEligible[uid] = true
-	}
+// A record that pairs two uids with one port (written by an earlier build)
+// keeps the lower uid on it and rebinds the other, reported as a conflict.
+func PlanOpenCodeServicePorts(eligible []int, imports, recorded map[int]int, allowNew bool, unknown map[int]bool) OpenCodePortPlan {
+	plan := OpenCodePortPlan{Ports: map[int]int{}, Record: map[int]int{}}
+	holder := map[int]int{}
 	recordedUIDs := make([]int, 0, len(recorded))
 	for uid := range recorded {
 		recordedUIDs = append(recordedUIDs, uid)
 	}
 	sort.Ints(recordedUIDs)
-	holder := map[int]int{}
-	hold := func(uid, port int) bool {
+	var rebind []int
+	for _, uid := range recordedUIDs {
+		port := recorded[uid]
 		if port <= 0 || port > 65535 {
-			return false
+			continue
 		}
-		if other, taken := holder[port]; taken && other != uid {
-			return false
+		if other, taken := holder[port]; taken {
+			plan.Conflicts = append(plan.Conflicts, OpenCodePortConflict{UID: uid, Holder: other, Port: port})
+			rebind = append(rebind, uid)
+			continue
 		}
 		holder[port] = uid
-		return true
+		plan.Record[uid] = port
 	}
-	// 1. A port named by a file that cannot be rewritten: that account
-	// cannot be moved, so any writable account sharing the port is, even a
-	// recorded holder (REVIEW-gx053-8). Recorded holders first among them.
-	// Then the established: the file names the account's own recorded port.
-	for _, recordedFirst := range []bool{true, false} {
-		for _, uid := range sortedEligible {
-			if _, placed := plan.Ports[uid]; placed || !unwritable[uid] {
-				continue
-			}
-			if port := filePorts[uid]; port > 0 && (recorded[uid] == port) == recordedFirst && hold(uid, port) {
-				plan.Ports[uid] = port
-			}
-		}
-	}
+	sortedEligible := append([]int(nil), eligible...)
+	sort.Ints(sortedEligible)
+	isEligible := map[int]bool{}
 	for _, uid := range sortedEligible {
-		if _, placed := plan.Ports[uid]; placed {
-			continue
-		}
-		if port := filePorts[uid]; port > 0 && recorded[uid] == port && hold(uid, port) {
+		isEligible[uid] = true
+		if port, ok := plan.Record[uid]; ok {
 			plan.Ports[uid] = port
 		}
 	}
-	// 2. Every other recorded entry, ascending uid.
-	var superseded []int
-	for _, uid := range recordedUIDs {
-		if _, placed := plan.Ports[uid]; placed || (isEligible[uid] && filePorts[uid] > 0) {
-			continue
-		}
-		port := recorded[uid]
-		if hold(uid, port) {
-			if isEligible[uid] {
-				plan.Ports[uid] = port
-			} else {
-				plan.Record[uid] = port
-			}
-			continue
-		}
-		switch {
-		case isEligible[uid] && unknown[uid]:
-			// Nothing changes for an unknown account: its entry stays.
-			plan.Record[uid] = port
-		case isEligible[uid]:
-			plan.Conflicts = append(plan.Conflicts, OpenCodePortConflict{UID: uid, Holder: holder[port], Port: port})
-		default:
-			superseded = append(superseded, uid)
-		}
-	}
-	// 3. File ports nobody above holds.
-	var fresh []int
-	for _, uid := range sortedEligible {
-		if _, placed := plan.Ports[uid]; placed || unknown[uid] {
-			continue
-		}
-		port := filePorts[uid]
-		if port <= 0 {
-			fresh = append(fresh, uid)
-			continue
-		}
-		if hold(uid, port) {
-			plan.Ports[uid] = port
-			continue
-		}
-		plan.Conflicts = append(plan.Conflicts, OpenCodePortConflict{UID: uid, Holder: holder[port], Port: port})
-		if allowNew {
-			plan.Replace[uid] = port
-		}
-		fresh = append(fresh, uid)
-	}
-	// 4. New ports.
-	next := func(uid int) int {
-		if port := recorded[uid]; port > 0 && hold(uid, port) {
-			return port
-		}
+	fresh := func(uid int) int {
 		start := OpenCodeAccountPort(uint64(uid))
 		for step := 0; step < OpenCodeAccountPortSpan; step++ {
 			port := OpenCodeAccountPortBase + (start-OpenCodeAccountPortBase+step)%OpenCodeAccountPortSpan
-			if hold(uid, port) {
+			if _, taken := holder[port]; !taken {
+				holder[port] = uid
 				return port
 			}
 		}
 		return 0
 	}
-	sort.Ints(fresh)
-	for _, uid := range fresh {
-		if _, placed := plan.Ports[uid]; placed {
-			continue
+	if !allowNew {
+		for _, uid := range sortedEligible {
+			if _, bound := plan.Ports[uid]; !bound {
+				plan.NoPort = append(plan.NoPort, uid)
+			}
 		}
-		port := 0
-		if allowNew {
-			port = next(uid)
+		for _, uid := range rebind {
+			plan.Record[uid] = recorded[uid]
 		}
-		if port == 0 {
-			plan.NoPort = append(plan.NoPort, uid)
-			delete(plan.Replace, uid)
-			continue
-		}
-		plan.Ports[uid] = port
+		return plan
 	}
-	for _, uid := range superseded {
-		port := 0
-		if allowNew {
-			port = next(uid)
+	// Imports first (ascending uid), so a port a file names is not taken by
+	// a fresh binding made in the same pass.
+	var needFresh []int
+	for _, uid := range sortedEligible {
+		if _, bound := plan.Ports[uid]; bound || unknown[uid] {
+			continue
 		}
+		port := imports[uid]
+		if port <= 0 || port > 65535 {
+			needFresh = append(needFresh, uid)
+			continue
+		}
+		if other, taken := holder[port]; taken {
+			plan.Conflicts = append(plan.Conflicts, OpenCodePortConflict{UID: uid, Holder: other, Port: port})
+			needFresh = append(needFresh, uid)
+			continue
+		}
+		holder[port] = uid
+		plan.Ports[uid], plan.Record[uid] = port, port
+	}
+	for _, uid := range append(rebind, needFresh...) {
+		if _, bound := plan.Ports[uid]; bound {
+			continue
+		}
+		port := fresh(uid)
 		if port == 0 {
-			port = recorded[uid] // nothing free: the entry stays as it was
+			if isEligible[uid] {
+				plan.NoPort = append(plan.NoPort, uid)
+			}
+			if old, ok := recorded[uid]; ok {
+				plan.Record[uid] = old // nothing free: the entry stays
+			}
+			continue
 		}
 		plan.Record[uid] = port
-	}
-	for uid, port := range plan.Ports {
-		if !unknown[uid] || plan.Record[uid] == 0 {
-			plan.Record[uid] = port
+		if isEligible[uid] {
+			plan.Ports[uid] = port
 		}
 	}
 	sort.Ints(plan.NoPort)
 	return plan
-}
-
-// ReplaceOpenCodeServicePort is EnsureOpenCodeServicePort for an account whose
-// service.json names a port another account holds: when the file still names
-// stale, it is replaced with port; any other port the file names is kept.
-func ReplaceOpenCodeServicePort(home string, port, stale int) (OpenCodeServicePortResult, error) {
-	result, err := EnsureOpenCodeServicePort(home, port)
-	if err != nil || result.Changed || result.Port != stale || stale == port {
-		return result, err
-	}
-	path := OpenCodeServiceConfigPath(filepath.Clean(home))
-	current, _, _, err := readUserFile(path, openCodeServiceConfigLimit)
-	if err != nil {
-		return result, fmt.Errorf("opencode service port: read %s: %w", path, err)
-	}
-	doc := map[string]json.RawMessage{}
-	if err := json.Unmarshal(current, &doc); err != nil {
-		return result, fmt.Errorf("opencode service port: %s is not a JSON object; left in place", path)
-	}
-	encoded, _ := json.Marshal(port)
-	doc["port"] = encoded
-	data, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return result, err
-	}
-	if err := writePrivateUserFile(path, append(data, '\n')); err != nil {
-		return result, fmt.Errorf("opencode service port: write %s: %w", path, err)
-	}
-	return OpenCodeServicePortResult{Port: port, Changed: true}, nil
 }
