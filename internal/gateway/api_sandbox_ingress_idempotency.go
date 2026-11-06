@@ -81,6 +81,7 @@ type idempotencyEntry struct {
 	fingerprint [sha256.Size]byte
 	created     time.Time
 	done        chan struct{}
+	attached    int // bounded retries waiting without another hook slot
 
 	// Set once done is closed.
 	cached      bool
@@ -103,6 +104,69 @@ func newHookIdempotencyCache(ttl time.Duration, now func() time.Time) *hookIdemp
 }
 
 var errIdempotencyKeyReused = errors.New("idempotency key reused for a different request")
+
+// replayExisting joins a retry to an admitted request after its binding and
+// route were authorized, before it can take another rate or in-flight slot.
+// A new key keeps the normal admission-before-body-read path.
+func (c *hookIdempotencyCache) replayExisting(w http.ResponseWriter, r *http.Request, binding sandboxauth.Binding, route sandboxauth.Route) bool {
+	if r.Method != http.MethodPost || route != sandboxauth.RouteHook && route != sandboxauth.RouteNotify {
+		return false
+	}
+	key := r.Header.Get(SandboxHookIdempotencyHeader)
+	if key == "" || !idempotencyKeyPattern.MatchString(key) {
+		return false
+	}
+	id := idempotencyKey{binding: binding.ID, key: key}
+	c.mu.Lock()
+	entry := c.entries[id]
+	if entry == nil || entry.isDone() {
+		c.mu.Unlock()
+		return false
+	}
+	// The image posts once and retries once. A small allowance also covers
+	// a dropped relay response without leaving unbounded waiting goroutines.
+	if entry.attached >= 4 {
+		c.mu.Unlock()
+		w.Header().Set("Retry-After", "1")
+		writeSandboxIngressError(w, http.StatusTooManyRequests, "too many retries for one hook")
+		return true
+	}
+	entry.attached++
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		entry.attached--
+		c.mu.Unlock()
+	}()
+	body, err := io.ReadAll(io.LimitReader(r.Body, apiRequestBodyMaxBytes+1))
+	_ = r.Body.Close()
+	if err != nil {
+		writeSandboxIngressError(w, http.StatusBadRequest, "unreadable request body")
+		return true
+	}
+	if int64(len(body)) > apiRequestBodyMaxBytes {
+		writeSandboxIngressError(w, http.StatusRequestEntityTooLarge, "request body too large")
+		return true
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	if entry.fingerprint != idempotencyFingerprint(r, body) {
+		writeSandboxIngressError(w, http.StatusUnprocessableEntity, errIdempotencyKeyReused.Error())
+		return true
+	}
+	select {
+	case <-entry.done:
+	case <-r.Context().Done():
+		writeSandboxIngressError(w, http.StatusServiceUnavailable, "request cancelled")
+		return true
+	}
+	if entry.cached && c.now().Before(entry.expires) {
+		replayIdempotentResponse(w, entry)
+		return true
+	}
+	// The first attempt had no replayable answer. Re-enter normal admission
+	// so a retry cannot evaluate a second hook without its own budget.
+	return false
+}
 
 // middleware applies the cache to hook and notify posts that carry a key.
 func (c *hookIdempotencyCache) middleware(next http.Handler) http.Handler {

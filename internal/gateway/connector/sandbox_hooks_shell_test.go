@@ -289,10 +289,30 @@ func TestSandboxClaudeAndCodexAcknowledgeTheirRelayedToolAnswer(t *testing.T) {
 					t.Fatalf("call %d exposed the bearer on argv: %s", i, argv)
 				}
 			}
+			if maxTime, err := strconv.Atoi(run.calls[1].flagValue("--max-time")); err != nil || maxTime <= 3 {
+				t.Fatalf("receipt first attempt wait = %q, want the shared remaining hook time", run.calls[1].flagValue("--max-time"))
+			}
 			var ack map[string]string
 			if err := json.Unmarshal([]byte(run.calls[1].body), &ack); err != nil ||
 				ack["delivery_receipt"] != receiptID || ack["result"] != "ack" {
 				t.Fatalf("receipt body = %q: %v", run.calls[1].body, err)
+			}
+		})
+		t.Run(tc.connector+"/legacy_no_receipt_after_time", func(t *testing.T) {
+			// An older gateway has no receipt to confirm, even if the first
+			// response used the rest of the hook envelope.
+			cmd := exec.Command("/bin/bash", "-p", "-c", `_dc_jq() { jq "$@"; }
+source "$SANDBOX_HELPER"
+SECONDS=30
+defenseclaw_sandbox_confirm_receipt /hook '{"action":"allow"}'`)
+			cmd.Env = []string{
+				"HOME=" + t.TempDir(), "PATH=/usr/bin:/bin",
+				"DEFENSECLAW_BAKED_HOOK_PATH=" + h.bakedPATH,
+				"DEFENSECLAW_SANDBOX_TOKEN=sandbox-token",
+				"SANDBOX_HELPER=" + h.path(SandboxHookDir+"/_sandbox.sh"),
+			}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("legacy answer refused: %v: %s", err, out)
 			}
 		})
 		t.Run(tc.connector+"/receipt_failure", func(t *testing.T) {
@@ -300,6 +320,9 @@ func TestSandboxClaudeAndCodexAcknowledgeTheirRelayedToolAnswer(t *testing.T) {
 				[]string{`200|{"action":"allow","delivery_receipt":"` + receiptID + `"}`, `503|{}`, `503|{}`})
 			if !tc.blocked(run) || len(run.calls) != 3 {
 				t.Fatalf("failed receipt exit=%d calls=%d stdout=%q stderr=%q", run.exitCode, len(run.calls), run.stdout, run.stderr)
+			}
+			if !strings.Contains(run.stderr, "status 503") {
+				t.Fatalf("failed receipt did not report the response status: %q", run.stderr)
 			}
 		})
 	}

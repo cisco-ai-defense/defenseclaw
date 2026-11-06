@@ -539,7 +539,13 @@ func (a *APIServer) journalHookDelivery(
 	// The journal write is a durable insert (fsync): store I/O, not answer
 	// CPU, so the caller's run slot is free while it waits (GAP-1790).
 	resume := waitWithoutHookRunSlot(ctx)
+	if p.SandboxReceipt != nil {
+		a.sandboxReceiptWriteMu.Lock()
+	}
 	err = a.store.JournalHookDelivery(ctx, p.ID, a.deliveryProcessID(), data, pendingHookJournalLimits)
+	if p.SandboxReceipt != nil {
+		a.sandboxReceiptWriteMu.Unlock()
+	}
 	resume()
 	if errors.Is(err, audit.ErrHookDeliveryJournalFull) {
 		a.drainPendingHooks()
@@ -835,8 +841,8 @@ func (a *APIServer) recoverPendingHook(ctx context.Context, entry audit.HookDeli
 			case <-wait.C:
 			}
 		}
-		sandboxHookReceiptLock(p.ID).Lock()
-		defer sandboxHookReceiptLock(p.ID).Unlock()
+		unlockReceipt := sandboxReceiptLocks.lock(p.ID)
+		defer unlockReceipt()
 		latest, found, err := a.store.HookDelivery(ctx, p.ID)
 		if err != nil {
 			return err
