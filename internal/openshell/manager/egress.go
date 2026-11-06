@@ -1314,8 +1314,8 @@ type egressSink struct {
 	overflow []egress.Event
 	// pendingAudit waits for the bounded OpenShell proxy-open matching window.
 	pendingAudit []pendingProxyAudit
-	// tunnelActors retains an allowed tunnel's resolved opening process for
-	// later records from that same tunnel.
+	// tunnelActors retains the first audit event's process, including an
+	// unknown process, for later records from that same tunnel.
 	tunnelActors map[proxyTunnelKey]proxyTunnelActor
 	// heldAt is when flush last reported what the pacing held back.
 	heldAt time.Time
@@ -1526,18 +1526,25 @@ func (s *egressSink) recordProxyAudit(ctx context.Context, b *box, ev audit.Sand
 }
 
 func (s *egressSink) emitProxyAudit(ctx context.Context, pending pendingProxyAudit, matchComplete bool) {
-	if pending.tunnelID != "" && pending.kind != egress.EventAllowed {
-		// A later record belongs to its opening tunnel, even if another
-		// program opened the proxy near this record's timestamp.
-		key := proxyTunnelKey{box: pending.box, id: pending.tunnelID}
+	var key proxyTunnelKey
+	var actor proxyTunnelActor
+	if pending.tunnelID != "" {
+		key = proxyTunnelKey{box: pending.box, id: pending.tunnelID}
 		s.mu.Lock()
-		actor := s.tunnelActors[key]
-		if pending.kind == egress.EventClosed {
+		retained, seen := s.tunnelActors[key]
+		if seen && pending.kind == egress.EventClosed {
 			delete(s.tunnelActors, key)
 		}
 		s.mu.Unlock()
-		pending.event.Executable, pending.event.PID = actor.binary, actor.pid
-	} else if matchComplete {
+		if seen {
+			// A later record keeps its opening actor, even when it was
+			// unknown and another program has since opened the proxy.
+			pending.event.Executable, pending.event.PID = retained.binary, retained.pid
+			s.m.tel.RecordSandboxEgress(ctx, pending.event)
+			return
+		}
+	}
+	if matchComplete {
 		s.m.mu.Lock()
 		opens := slices.Clone(pending.box.proxyOpens)
 		s.m.mu.Unlock()
@@ -1546,24 +1553,31 @@ func (s *egressSink) emitProxyAudit(ctx context.Context, pending pendingProxyAud
 			at = pending.queued
 		}
 		if binary, pid, _, ok := proxyActor(opens, at); ok {
-			pending.event.Executable, pending.event.PID = binary, pid
-			if pending.tunnelID != "" {
-				key := proxyTunnelKey{box: pending.box, id: pending.tunnelID}
-				s.mu.Lock()
-				if s.tunnelActors == nil {
-					s.tunnelActors = make(map[proxyTunnelKey]proxyTunnelActor)
-				}
-				if _, exists := s.tunnelActors[key]; !exists && len(s.tunnelActors) >= maxProxyTunnelActors {
-					for oldest := range s.tunnelActors {
-						delete(s.tunnelActors, oldest)
-						break
-					}
-				}
-				s.tunnelActors[key] = proxyTunnelActor{binary: binary, pid: pid}
-				s.mu.Unlock()
-			}
+			actor = proxyTunnelActor{binary: binary, pid: pid}
 		}
 	}
+	if pending.tunnelID != "" {
+		s.mu.Lock()
+		if retained, seen := s.tunnelActors[key]; seen {
+			actor = retained
+			if pending.kind == egress.EventClosed {
+				delete(s.tunnelActors, key)
+			}
+		} else if pending.kind != egress.EventClosed {
+			if s.tunnelActors == nil {
+				s.tunnelActors = make(map[proxyTunnelKey]proxyTunnelActor)
+			}
+			if len(s.tunnelActors) >= maxProxyTunnelActors {
+				for oldest := range s.tunnelActors {
+					delete(s.tunnelActors, oldest)
+					break
+				}
+			}
+			s.tunnelActors[key] = actor
+		}
+		s.mu.Unlock()
+	}
+	pending.event.Executable, pending.event.PID = actor.binary, actor.pid
 	s.m.tel.RecordSandboxEgress(ctx, pending.event)
 }
 
