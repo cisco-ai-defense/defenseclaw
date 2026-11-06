@@ -330,7 +330,9 @@ func gatewayNoAnswer(ctx context.Context) bool {
 // noAnswerFailMode uses the current account outage tier for an ordinary
 // per-user call whose gateway did not answer. The shared protected-reach
 // reader must prove that the call names no protected target before the open
-// tier applies. A managed call follows an administrator's open only after a
+// tier applies (lateOrdinaryLook, recorded in lateOrdinaryOpen); this
+// function reads nothing itself, because a watchdog renders its answer
+// before its deadline is armed. A managed call follows an administrator's open only after a
 // stopped-service proof; strict, unusable and unclassified calls stay closed.
 // Secure Client retains its established behavior.
 func noAnswerFailMode(opts Options, failMode string) string {
@@ -347,15 +349,29 @@ func noAnswerFailMode(opts Options, failMode string) string {
 		}
 		return "closed"
 	}
-	if opts.answeredErrorStatus != 0 || opts.ManagedUnixSocket != "" ||
-		opts.StrictAvailability || perUserInstallWindow(opts) || opts.OutageFailModeNow == nil {
+	// The install window is the bounded look at arming (installWindowSeen)
+	// and at the deadline (renderInstallAnswer of the open answer).
+	if !opts.lateOrdinaryOpen || opts.answeredErrorStatus != 0 || opts.ManagedUnixSocket != "" ||
+		opts.StrictAvailability || opts.installWindowSeen {
 		return "closed"
 	}
-	if normalizeFailMode(opts.OutageFailModeNow()) == "open" &&
-		OrdinaryNoAnswerPayload(opts.failurePayload) {
-		return "open"
-	}
-	return "closed"
+	return "open"
+}
+
+// lateOrdinaryLookCall reports a per-user call whose no-answer outcome can
+// follow the account outage tier (noAnswerFailMode).
+func lateOrdinaryLookCall(opts Options) bool {
+	return !opts.SecureClient && !opts.ManagedEnterprise && opts.ManagedUnixSocket == "" &&
+		!opts.StrictAvailability && !opts.installWindowSeen && opts.answeredErrorStatus == 0 &&
+		opts.OutageFailModeNow != nil && len(opts.failurePayload) != 0
+}
+
+// lateOrdinaryLook reads the account outage tier and the payload's
+// protected reach for the request path, which runs after the watchdog is
+// armed. The watchdog reads both itself (startOrdinaryLook, watch).
+func lateOrdinaryLook(opts Options) bool {
+	return lateOrdinaryLookCall(opts) && normalizeFailMode(opts.OutageFailModeNow()) == "open" &&
+		OrdinaryNoAnswerPayload(opts.failurePayload)
 }
 
 // lateOrdinaryCheck is the scan of a per-user tool call that the verified
@@ -379,6 +395,8 @@ func failNoAnswer(opts Options, sp spec, failMode string) int {
 		opts.managedOutageOpen = true
 		opts.managedNoAnswerCode = managedGatewayNotRunningReason
 	}
+	// The request path runs after the watchdog is armed.
+	opts.lateOrdinaryOpen = lateOrdinaryLook(opts)
 	mode, _, _ := lateAnswerOutcome(opts, sp, failMode)
 	return failNoAnswerInMode(opts, sp, mode)
 }
