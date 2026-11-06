@@ -111,7 +111,7 @@ def test_same_home_transient_gateway_status_has_live_health_and_agents(tmp_path:
         "health": {"connectors": [{"name": "claudecode", "state": "running"}]},
     }
     report = {"running": True, "health": {"connectors": [{"name": "claudecode"}]}}
-    with _proof_patches(cfg, report=report):
+    with _proof_patches(cfg, report=report), _as_on_linux():
         assert cmd_doctor._foreign_gateway_port_holder(cfg) == ""
         health = cmd_status._fetch_runtime_bound_health(client, cfg)
     assert health is not None
@@ -134,6 +134,7 @@ def test_status_cli_shows_same_home_transient_gateway_and_agent_running() -> Non
         with (
             _proof_patches(app.cfg, report={"running": True, "health": {}}),
             patch.object(gateway, "OrchestratorClient", return_value=client),
+            _as_on_linux(),
         ):
             human = CliRunner().invoke(cmd_status.status, [], obj=app)
             machine = CliRunner().invoke(cmd_status.status, ["--json"], obj=app)

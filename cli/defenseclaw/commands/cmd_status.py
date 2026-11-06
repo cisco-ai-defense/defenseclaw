@@ -540,7 +540,7 @@ def status(app: AppContext, as_json: bool) -> None:
         try:
             from defenseclaw.commands.cmd_doctor import _foreign_gateway_port_holder, _free_api_port_hint
 
-            holder = _foreign_gateway_port_holder(cfg)
+            holder = _foreign_gateway_port_holder(cfg, status_only=True)
         except Exception:  # noqa: BLE001 - status stays best effort
             holder = ""
             holder_failed = True
@@ -598,7 +598,7 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_application_protection(cfg)
         _print_semantic_routing(cfg)
         _print_hook_guardian(cfg)
-        _print_fleet_health(cfg, client)
+        _print_fleet_health(cfg, None if isinstance(health, _PublicForegroundHealth) else client)
         if holder:
             first_hint = (
                 "Free the port:  stop that process, or run: defenseclaw setup gateway --api-port "
@@ -1089,20 +1089,24 @@ def _print_agents(
                 )
 
 
+class _PublicForegroundHealth(dict):
+    """Public health used for display without authorizing token-bearing calls."""
+
+
 def _fetch_runtime_bound_health(client, cfg) -> dict | None:
     """Fetch health only from this home's verified gateway listener.
 
     ``/health`` is intentionally unauthenticated and a different profile may
-    already own the configured loopback port. The authenticated ``/status``
-    response is accepted only when Doctor's process/listener trust
-    proves the endpoint and its runtime PID plus canonical data directory bind
-    back to that exact listener. Treat missing, malformed, or mismatched
-    identity as unavailable so status never splices another process or
-    profile's connector evidence into this profile's output.
+    already own the configured loopback port. A PID-file-backed gateway uses
+    authenticated ``/status`` with Doctor's existing token-bearing trust.
+    A foreground Windows/macOS gateway uses only public ``/health`` after
+    its listener, process, account, and private runtime record are bound to
+    this data directory. The latter path never calls ``client.status()``.
     """
     try:
         from defenseclaw.commands.cmd_doctor import (
             _authenticated_runtime_matches,
+            _foreground_gateway_status_health,
             _trusted_gateway_listener,
         )
 
@@ -1110,7 +1114,14 @@ def _fetch_runtime_bound_health(client, cfg) -> dict | None:
     except Exception:
         return None
     if not trust.trusted:
-        return None
+        try:
+            foreground = _foreground_gateway_status_health(cfg)
+        except Exception:  # noqa: BLE001 - unverified health is unavailable
+            foreground = None
+        if foreground is None:
+            return None
+        pid, health = foreground
+        return _PublicForegroundHealth({**health, "pid": pid})
     try:
         document = client.status()
     except Exception:
@@ -2367,7 +2378,7 @@ def _status_payload(app) -> dict:
         from defenseclaw.commands.cmd_doctor import _foreign_gateway_port_holder
 
         try:
-            holder = _foreign_gateway_port_holder(cfg)
+            holder = _foreign_gateway_port_holder(cfg, status_only=True)
         except Exception:  # noqa: BLE001 - a failed probe cannot prove the gateway stopped
             payload["sidecar"] = {"running": None, "reason": "API listener inspection failed"}
             # As the human view (hung_pid): a live PID still means a running gateway.
@@ -2409,7 +2420,7 @@ def _status_payload(app) -> dict:
     payload["application_protection"] = _application_protection_status(cfg, health=health)
     payload["semantic_routing"] = _semantic_routing_status(cfg, health=health)
     payload["hook_guardian"] = _hook_guardian_status(cfg)
-    payload["fleet"] = _fleet_health_payload(cfg, client)
+    payload["fleet"] = _fleet_health_payload(cfg, None if isinstance(health, _PublicForegroundHealth) else client)
     payload["native_otlp_delivery"] = _native_delivery_summary(cfg).as_json()
 
     return payload
@@ -2470,6 +2481,9 @@ def _safe_int(val, default=0):
 def _print_fleet_health(cfg, client) -> None:
     """Render a Fleet row when Fleet is enabled; nothing otherwise."""
     if not _fleet_enabled(cfg):
+        return
+    if client is None:
+        _status_row("Fleet", ux.dim("unavailable without authenticated gateway status"))
         return
     data = _fetch_fleet_health(cfg, client)
     if data is None:
