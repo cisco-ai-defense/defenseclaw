@@ -181,26 +181,35 @@ class AlertFindingRowsTests(unittest.TestCase):
         store.db.commit()
         self.assertEqual(store.agent_facts_for_alerts([finding.id])[finding.id], {"user": "alice"})
 
-    def test_alert_identity_prefers_finding_verified_agent_id(self):
+    def test_alert_identity_prefers_verified_inspect_over_finding_logical_id(self):
         now = datetime.now(timezone.utc)
         store = self.app.store
         columns = {row[1] for row in store.db.execute("PRAGMA table_info(audit_events)")}
         if "agent_id" not in columns:
             store.db.execute("ALTER TABLE audit_events ADD COLUMN agent_id TEXT")
-        finding = Event(action="scan-finding", severity="CRITICAL", connector="openclaw",
-                        structured={"user.id": "alice", **FINDING}, timestamp=now)
-        other = Event(action="inspect-tool-block", severity="CRITICAL", connector="openclaw",
-                      structured={"user.id": "alice", "defenseclaw.agent.identity.id": "agt-other"},
-                      timestamp=now)
-        store.log_event(finding)
-        store.log_event(other)
-        store.db.execute("UPDATE audit_events SET request_id=?, agent_id=? WHERE id=?",
-                         ("shared-same-connector", "agt-openclaw", finding.id))
-        store.db.execute("UPDATE audit_events SET request_id=? WHERE id=?",
-                         ("shared-same-connector", other.id))
-        store.db.commit()
-        self.assertEqual(store.agent_facts_for_alerts([finding.id])[finding.id],
-                         {"user": "alice", "agent_identity": "agt-openclaw"})
+        verified = "agt-1111111111111111"
+        for label, claimed in (("prefixed", "agt-2222222222222222"),
+                               ("ordinary", "plugin-session-id"), ("absent", None)):
+            with self.subTest(label=label):
+                finding = Event(action="scan-finding", severity="CRITICAL", connector="openclaw",
+                                structured={"user.id": "alice", **FINDING}, timestamp=now)
+                inspect = Event(action="inspect-tool-block", severity="CRITICAL", connector="openclaw",
+                                structured={"user.id": "alice", "defenseclaw.agent.identity.id": verified},
+                                timestamp=now)
+                store.log_event(finding)
+                store.log_event(inspect)
+                request_id = f"same-request-{label}"
+                store.db.execute("UPDATE audit_events SET request_id=?, agent_id=? WHERE id=?",
+                                 (request_id, claimed, finding.id))
+                store.db.execute("UPDATE audit_events SET request_id=? WHERE id=?", (request_id, inspect.id))
+                store.db.commit()
+                self.assertEqual(store.agent_facts_for_alerts([finding.id])[finding.id],
+                                 {"user": "alice", "agent_identity": verified})
+                listed = [e.id for e in store.list_alerts(10)]
+                shown = self.runner.invoke(alerts, ["--show", str(listed.index(finding.id) + 1)],
+                                           obj=self.app, catch_exceptions=False)
+                self.assertEqual(shown.exit_code, 0, shown.output)
+                self.assertRegex(shown.output, rf"Agent:\s+{verified}")
 
     def test_alert_identity_keeps_finding_structured_identity(self):
         now = datetime.now(timezone.utc)

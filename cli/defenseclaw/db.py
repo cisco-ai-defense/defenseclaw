@@ -1531,10 +1531,10 @@ class Store:
     def agent_facts_for_alerts(self, alert_ids: list[str]) -> dict[str, dict[str, str]]:
         """Map alert IDs to who the alert is about (GAP-0381).
 
-        The user, the agent identity (``agt-``), the agent instance (``ais-``),
-        the session and the sub-agent depth come from the alert row and from
-        a hook-decision or direct-inspect row of the same request; the alert
-        row's own value wins.
+        The user, the verified agent identity (``agt-``), the agent instance
+        (``ais-``), the session and the sub-agent depth come from the alert
+        row's structured facts and from a hook-decision or direct-inspect row
+        of the same request; the alert row's own structured value wins.
         """
         ids = [alert_id for alert_id in alert_ids if alert_id]
         columns, _tables = self._audit_projection_schema()
@@ -1545,11 +1545,6 @@ class Store:
             cols = [f"{alias}.{name}" if name in columns else "NULL" for name in ("session_id", "agent_instance_id")]
             for key in self._ALERT_AGENT_KEYS:
                 value = self._safe_json_extract(self._structured_sql(alias), f'$."{key}"')
-                if alias == "f" and key == "defenseclaw.agent.identity.id" and "agent_id" in columns:
-                    # Keep a finding's structured identity first. Its own
-                    # install identity still wins over same-request rows.
-                    value = (f"COALESCE(NULLIF({value}, ''), CASE WHEN substr(f.agent_id, 1, 4) = 'agt-' "
-                             "THEN f.agent_id END)")
                 cols.append(value)
             return ", ".join(cols)
 
