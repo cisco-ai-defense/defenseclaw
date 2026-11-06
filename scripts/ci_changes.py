@@ -348,7 +348,6 @@ def _outputs(
             "enterprise": managed or on("go", "packaging", "windows"),
             "windows_go": managed or on("go", "windows"),
             "windows_python": managed or on("python", "windows"),
-            "windows_pkg": on("go", "python", "ts", "windows"),
             "pwsh": managed or on("go", "python", "ts", "windows", "pwsh"),
             "code": on("go", "python", "tui", "ts", "rego", "windows", "packaging"),
             "repro": repro,

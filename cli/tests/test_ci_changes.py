@@ -63,7 +63,7 @@ FAKE_REPO = {
     ),
     "internal/cli/docs_paths_test.go": 'var sandboxDoc = "sandboxes.mdx"\n',
     "scripts/gen_envvars_docs.py": 'OUT = "docs-site/content/docs/reference/env-vars.mdx"\n',
-    "scripts/live-connector-e2e/test-windows.ps1": "$ci = '.github\\workflows\\windows-native.yml'\n",
+    "scripts/windows-native-ci.ps1": "$ci = '.github\\workflows\\windows-native.yml'\n",
 }
 
 
@@ -108,7 +108,6 @@ def ran(outputs: dict) -> set[str]:
         "enterprise",
         "windows_go",
         "windows_python",
-        "windows_pkg",
         "pwsh",
         "workflows",
         "managed",
@@ -188,7 +187,7 @@ ALL_GROUPS = ran(ci_changes.everything("test")) - {"go_pinned"}
         ),
         pytest.param(
             ["cli/defenseclaw/commands/cmd_status.py"],
-            {"python", "python_tests", "python_lint", "wheel", "checks", "core", "install", "windows_python", "windows_pkg", "pwsh", "code"},
+            {"python", "python_tests", "python_lint", "wheel", "checks", "core", "install", "windows_python", "pwsh", "code"},
             "",
             [],
             id="python-only",
@@ -202,14 +201,14 @@ ALL_GROUPS = ran(ci_changes.everything("test")) - {"go_pinned"}
         ),
         pytest.param(
             ["internal/gateway/router.go"],
-            {"go", "checks", "core", "install", "enterprise", "windows_go", "windows_pkg", "pwsh", "code"},
+            {"go", "checks", "core", "install", "enterprise", "windows_go", "pwsh", "code"},
             "",
             [],
             id="go-only",
         ),
         pytest.param(
             ["packaging/windows/standalone/build-setup.sh"],
-            {"install", "windows_pkg", "code"} | MANAGED_LANES,
+            {"install", "code"} | MANAGED_LANES,
             "",
             [],
             id="windows-packaging",
@@ -223,7 +222,7 @@ ALL_GROUPS = ran(ci_changes.everything("test")) - {"go_pinned"}
         ),
         pytest.param(
             ["extensions/defenseclaw/src/index.ts"],
-            {"go", "python", "ts", "python_tests", "python_lint", "wheel", "checks", "core", "install", "enterprise", "windows_go", "windows_python", "windows_pkg", "pwsh", "code"},
+            {"go", "python", "ts", "python_tests", "python_lint", "wheel", "checks", "core", "install", "enterprise", "windows_go", "windows_python", "pwsh", "code"},
             "",
             [],
             id="extension-is-embedded",
@@ -237,14 +236,14 @@ ALL_GROUPS = ran(ci_changes.everything("test")) - {"go_pinned"}
         ),
         pytest.param(
             ["cli/defenseclaw/config_writer.py"],
-            {"python", "python_tests", "python_lint", "wheel", "checks", "core", "install", "windows_pkg", "code"} | MANAGED_LANES,
+            {"python", "python_tests", "python_lint", "wheel", "checks", "core", "install", "code"} | MANAGED_LANES,
             "",
             [],
             id="managed-python-predicate-runs-the-managed-lanes",
         ),
         pytest.param(
             ["internal/enterprisehooks/installer.go"],
-            {"go", "checks", "core", "install", "windows_pkg", "code"} | MANAGED_LANES,
+            {"go", "checks", "core", "install", "code"} | MANAGED_LANES,
             "",
             [],
             id="managed-go-runs-the-windows-enterprise-smokes",
@@ -253,7 +252,7 @@ ALL_GROUPS = ran(ci_changes.everything("test")) - {"go_pinned"}
         pytest.param(["somewhere/new.file"], ALL_GROUPS, "", [], id="unknown-path-runs-everything"),
         pytest.param(
             ["docs-site/content/docs/hitl.mdx", "internal/gateway/router.go"],
-            {"go", "checks", "core", "install", "enterprise", "windows_go", "windows_pkg", "pwsh", "code"},
+            {"go", "checks", "core", "install", "enterprise", "windows_go", "pwsh", "code"},
             "",
             [],
             id="mixed-is-the-union",
