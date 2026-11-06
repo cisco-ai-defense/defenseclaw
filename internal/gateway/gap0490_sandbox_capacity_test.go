@@ -44,7 +44,14 @@ import (
 // unacknowledged.
 func TestGAP0490SandboxReceiptCapacity(t *testing.T) {
 	const calls, parallel = 400, 20
-	f := newManagedHookAuditFixture(t, nil)
+	// This disposable fixture writes hundreds of audit and receipt rows.
+	// Keep its synchronous writes off the shared build disk when an
+	// adequately sized private memory-backed test directory is available.
+	scratch := sandboxReceiptScratchDir(t)
+	if scratch == "" {
+		scratch = t.TempDir()
+	}
+	f := newManagedHookAuditFixtureInDir(t, scratch)
 	bindings, err := sandboxauth.OpenFileStore(sandboxauth.DefaultStorePath(t.TempDir()), sandboxauth.WithRefreshInterval(0))
 	if err != nil {
 		t.Fatal(err)
