@@ -2518,4 +2518,6 @@ def test_windows_repair_command_is_pinned_by_a_literal(monkeypatch, deployment_m
         gateway=SimpleNamespace(api_port=18970),
     )
     monkeypatch.setattr(cmd_acp_module, "os", SimpleNamespace(name="nt", path=os.path))
+    # A standalone host: on a Windows test host the probe can find a Secure Client install.
+    monkeypatch.setattr(cmd_acp_module, "is_secure_client", lambda _cfg: False)
     assert cmd_acp_module.setup_repair_command(cfg, "zed", "kiro", data_dir) == expected
