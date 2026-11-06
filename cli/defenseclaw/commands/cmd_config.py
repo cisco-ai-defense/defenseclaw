@@ -1102,7 +1102,7 @@ def _refresh_stopped_gateway_hooks(before: object) -> list[str]:
     refreshed: list[str] = []
     with fail_mode_transaction_lock(after):
         for name, mode in changed:
-            if normalize_connector(name) in {"openclaw", "zeptoclaw"}:
+            if normalize_connector(name) in _PROXY_CONNECTORS:
                 notes.append(
                     f"{name} PATH shims read the saved fail-{mode} mode when they run; "
                     "their installed fallback is refreshed at the next gateway start."
@@ -1244,35 +1244,56 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
     _write_config_change(app, [Change(key, parsed)], expect_sha256, "set", check_candidate=check_candidate)
 
 
-def _configured_connector_selection(document: object) -> tuple[set[str], str]:
-    """Resolve the enabled roster and primary from the written config shape."""
+_PROXY_CONNECTORS = frozenset({"openclaw", "zeptoclaw"})
+
+
+def _configured_connector_selection(document: object) -> tuple[set[str], str, set[str]]:
+    """Resolve what the written config guards, its primary and its disabled entries.
+
+    Mirrors the loaders: the primary is ``guardrail.connector``, else the
+    roster entry ``claw.mode`` names, else the first roster name, else
+    ``claw.mode`` (a missing ``claw.mode`` loads as OpenClaw). The Go hook
+    gates scan a hook connector that has a roster entry or that
+    ``guardrail.connector`` names, unless its entry says ``enabled: false``;
+    a proxy connector is guarded only through the roster
+    (``ActiveConnectors``).
+    """
     if not isinstance(document, dict):
-        return set(), ""
+        return set(), "", set()
     guardrail = document.get("guardrail")
     guardrail = guardrail if isinstance(guardrail, dict) else {}
     claw = document.get("claw")
     claw = claw if isinstance(claw, dict) else {}
     primary = guardrail.get("connector")
     primary = connector_paths.normalize(primary) if isinstance(primary, str) and primary.strip() else ""
-    # A missing claw.mode loads as OpenClaw in Config.load and the Go loader.
     mode = claw.get("mode", "openclaw")
     mode = connector_paths.normalize(mode) if isinstance(mode, str) and mode.strip() else ""
     roster = guardrail.get("connectors")
-    if isinstance(roster, dict) and roster:
-        enabled = {
-            connector_paths.normalize(name)
-            for name, entry in roster.items()
-            if isinstance(name, str) and isinstance(entry, dict) and entry.get("enabled") is not False
-        }
-        names = sorted(connector_paths.normalize(name) for name in roster if isinstance(name, str))
-        selected = primary or (mode if mode in names else names[0] if names else "")
-        return enabled, selected
-    selected = primary or mode
-    return ({selected} if selected else set()), selected
+    if not isinstance(roster, dict) or not roster:
+        selected = primary or mode
+        return ({selected} if selected else set()), selected, set()
+    names = {connector_paths.normalize(name) for name in roster if isinstance(name, str)}
+    disabled = {
+        connector_paths.normalize(name)
+        for name, entry in roster.items()
+        if isinstance(name, str) and isinstance(entry, dict) and entry.get("enabled") is False
+    }
+    guarded = names - disabled
+    if primary and primary not in disabled and primary not in _PROXY_CONNECTORS:
+        guarded.add(primary)
+    selected = primary or (mode if mode in names else min(names) if names else "")
+    return guarded, selected, disabled
 
 
 def _check_config_connector_selection(path: str, candidate: bytes, *, allow_removal: bool = False) -> None:
-    """A settings edit cannot select another live connector as a side effect."""
+    """A settings edit cannot select, enable or unguard a connector as a side effect (GAP-0588).
+
+    It may store an entry for a connector that is not on the roster while
+    the primary and every guarded connector stay as they were. The primary
+    changes, a disabled entry is enabled, and a guarded connector leaves the
+    roster only through setup or a connector command; a whole-entry unset
+    may remove its own entry (it says so, GAP-1021).
+    """
     from defenseclaw import config_writer
 
     after = config_writer._parse_config_document(candidate)
@@ -1280,13 +1301,10 @@ def _check_config_connector_selection(path: str, candidate: bytes, *, allow_remo
         return
     current, _, _ = config_writer._read_current(path)
     before = config_writer._parse_config_document(current) if current else {}
-    active_before, primary_before = _configured_connector_selection(before)
-    active_after, primary_after = _configured_connector_selection(after)
-    # A whole-entry unset explicitly removes its guardrail scope and already
-    # reports that to the operator. It may drop an enabled name, but cannot
-    # select a new primary or enable another entry in the same batch.
-    enabled_changed = (active_after - active_before) if allow_removal else (active_after ^ active_before)
-    if enabled_changed or primary_after != primary_before:
+    guarded_before, primary_before, disabled_before = _configured_connector_selection(before)
+    guarded_after, primary_after, _ = _configured_connector_selection(after)
+    unguarded = set() if allow_removal else guarded_before - guarded_after
+    if primary_after != primary_before or unguarded or disabled_before & guarded_after:
         raise config_writer.ConfigWriteError(
             "connector selection requires setup; use defenseclaw setup or a connector command "
             "to change the active connector"
@@ -1312,11 +1330,11 @@ def _check_guardrail_connector_roster(_path: str, candidate: bytes) -> None:
         for name, entry in roster.items()
         if isinstance(name, str) and isinstance(entry, dict) and entry.get("enabled") is not False
     }
-    proxies = sorted(enabled & {"openclaw", "zeptoclaw"})
+    proxies = sorted(enabled & _PROXY_CONNECTORS)
     if proxies:
         proxy = proxies[0]
         others = sorted(configured - {proxy})
-        label = "hook connectors" if not set(others) & {"openclaw", "zeptoclaw"} else "other connectors"
+        label = "hook connectors" if not set(others) & _PROXY_CONNECTORS else "other connectors"
         raise config_writer.ConfigWriteError(
             f"{proxy} needs a proxy binding and cannot share a gateway process "
             f"with {label} ({', '.join(others)})."

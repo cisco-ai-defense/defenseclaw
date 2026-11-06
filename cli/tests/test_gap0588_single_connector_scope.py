@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 from click.testing import CliRunner
 from defenseclaw import config as dcconfig
 from defenseclaw import config_writer
@@ -317,20 +318,20 @@ def test_config_set_refuses_zeptoclaw_in_final_multi_roster(tmp_path: Path) -> N
             "guardrail.connectors.kiro.hook_fail_mode", "open", False,
         ),
         (
-            "  connector: kiro\n  connectors:\n    kiro: {}\n",
-            "guardrail.connectors.codex.hook_fail_mode", "closed", False,
+            "  connector: kiro\n  connectors:\n    kiro: {}\n    codex: {}\n",
+            "guardrail.connector", "codex", False,
         ),
         (
-            "  connector: kiro\n  connectors:\n    kiro: {}\n",
-            "guardrail.connectors", '{"kiro": {}, "codex": {}}', True,
-        ),
-        (
-            "  connector: kiro\n  connectors:\n    kiro: {}\n",
-            "guardrail", '{"connector": "kiro", "connectors": {"kiro": {}, "codex": {}}}', True,
+            "  connector: kiro\n  connectors:\n    kiro: {}\n    codex:\n      enabled: false\n",
+            "guardrail.connectors.codex.enabled", "true", False,
         ),
         (
             "  connector: kiro\n  connectors:\n    kiro: {}\n    codex: {}\n",
-            "guardrail.connector", "codex", False,
+            "guardrail.connectors.codex.enabled", "false", False,
+        ),
+        (
+            "  connector: kiro\n  connectors:\n    kiro: {}\n    codex: {}\n",
+            "guardrail.connectors", '{"kiro": {}}', True,
         ),
     ],
 )
@@ -342,6 +343,54 @@ def test_config_set_does_not_change_active_connector_selection(
     assert result.exit_code != 0
     assert "connector selection requires setup" in result.output
     assert after == before
+
+
+@pytest.mark.parametrize(
+    ("roster", "key", "value", "as_json", "stored"),
+    [
+        (
+            "  connector: claudecode\n",
+            "guardrail.connectors.codex.hook_fail_mode", "closed", False, "codex",
+        ),
+        (
+            "  connector: kiro\n  connectors:\n    kiro: {}\n",
+            "guardrail.connectors.codex.hook_fail_mode", "closed", False, "codex",
+        ),
+        (
+            "  connector: kiro\n  connectors:\n    kiro: {}\n",
+            "guardrail.connectors", '{"kiro": {}, "codex": {}}', True, "codex",
+        ),
+        (
+            "  connector: kiro\n  connectors:\n    kiro: {}\n",
+            "guardrail", '{"connector": "kiro", "connectors": {"kiro": {}, "codex": {}}}', True, "codex",
+        ),
+        (
+            "  connector: openclaw\n  connectors:\n    openclaw:\n      enabled: false\n",
+            "guardrail.connectors.kiro.hook_fail_mode", "closed", False, "kiro",
+        ),
+        (
+            "  connector: claudecode\n  connectors:\n    claudecode: {}\n",
+            "guardrail.connectors.claude.hook_fail_mode", "closed", False, "claude",
+        ),
+    ],
+)
+def test_config_set_stores_an_off_roster_entry_without_changing_selection(
+    tmp_path: Path, roster: str, key: str, value: str, as_json: bool, stored: str
+) -> None:
+    # GAP-0588 ruling (lead 11-06): the set succeeds and stores the entry; the
+    # primary stays, every guarded connector stays guarded, nothing disabled
+    # turns on.
+    app = _app(tmp_path, ["kiro"])
+    result, before, after = _set_in_file(tmp_path, app, roster, key, value, as_json=as_json)
+    assert result.exit_code == 0, result.output
+    assert stored in yaml.safe_load(after)["guardrail"]["connectors"]
+    guarded_before, primary_before, disabled_before = cmd_config._configured_connector_selection(
+        yaml.safe_load(before)
+    )
+    guarded_after, primary_after, _ = cmd_config._configured_connector_selection(yaml.safe_load(after))
+    assert primary_after == primary_before
+    assert guarded_before <= guarded_after
+    assert not disabled_before & guarded_after
 
 
 def test_config_set_existing_connector_setting_stays_available(tmp_path: Path) -> None:
@@ -433,16 +482,8 @@ def test_config_unset_rejects_selection_or_enable_change_without_retained_enable
             "guardrail.connectors.codex.hook_fail_mode", "closed",
         ),
         (
-            "  connector: openclaw\n  connectors:\n    openclaw:\n      enabled: false\n",
-            "guardrail.connectors.kiro.hook_fail_mode", "closed",
-        ),
-        (
             "  connector: claudecode\n  connectors:\n    claudecode: {}\n",
             "guardrail.connector", "claude",
-        ),
-        (
-            "  connector: claudecode\n  connectors:\n    claudecode: {}\n",
-            "guardrail.connectors.claude.hook_fail_mode", "closed",
         ),
     ],
 )
