@@ -449,11 +449,24 @@ _ADMISSION_TYPES = ("skill", "mcp", "plugin")
 _TRUST_KEY = ["guardrail", "cisco_trust_level"]
 
 
+def _hook_fail_mode_connector(parts: list) -> str | None:
+    """The connector ("" for the global key) of a guardrail hook_fail_mode key, else None."""
+    if parts == ["guardrail", "hook_fail_mode"]:
+        return ""
+    if len(parts) == 4 and parts[:2] == ["guardrail", "connectors"] and parts[3] == "hook_fail_mode":
+        return parts[2]
+    return None
+
+
 def _resolves_when_unset(parts: list) -> bool:
     """Keys whose default is resolved (a rule pack level, the Cisco trust
-    level, the admission and update sections) rather than blank."""
-    return parts[0] in ("admission", "update") or parts == _TRUST_KEY or (
-        parts[0] == "guardrail" and parts[-1] in _LEVEL_KEYS
+    level, the hook fail mode, the admission and update sections) rather than
+    blank."""
+    return (
+        parts[0] in ("admission", "update")
+        or parts == _TRUST_KEY
+        or (parts[0] == "guardrail" and parts[-1] in _LEVEL_KEYS)
+        or _hook_fail_mode_connector(parts) is not None
     )
 
 
@@ -503,6 +516,12 @@ def _effective_value(app: AppContext, parts: list[str]) -> tuple[object, str] | 
         if which == "alert_at" and levels.alert_clamped:
             label += " (clamped to block_at)"
         return value, label
+    hook_connector = _hook_fail_mode_connector(parts)
+    if hook_connector is not None:
+        # The one resolver the hooks, init, doctor and status read: a key
+        # config.yaml leaves out is the mode the deployment runs, never the
+        # model placeholder.
+        return cfg.guardrail.hook_fail_mode_resolution(hook_connector)
     if parts == _TRUST_KEY:
         written = str(getattr(cfg.guardrail, "cisco_trust_level", "") or "").strip().lower()
         if written in ("full", "advisory", "none"):

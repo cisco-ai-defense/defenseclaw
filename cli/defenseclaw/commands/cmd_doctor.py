@@ -11865,7 +11865,7 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
             lock_drift,
         )
 
-    configured_mode = str(fail_mode.get("configured") or "")
+    configured_mode = str(fail_mode.get("configured") or fail_mode.get("desired") or "")
     lock_mode_target = configured_mode
     # Runtime locks are rendered from the mode-aware desired posture.  The
     # report keeps the raw legacy/global value in ``configured`` so Status can
