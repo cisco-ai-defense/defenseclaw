@@ -391,6 +391,33 @@ func (s agentConfigSpec) removeCopies(dataDir string) error {
 	return errors.Join(errs...)
 }
 
+// removeOtherTargetState retires a valid copy and notice for a different
+// config target when an older install has no managed-file receipt left.
+// State with an unreadable target stays in place for recovery review.
+func (s agentConfigSpec) removeOtherTargetState(dataDir, target string) error {
+	var paths []string
+	if notice, ok := s.readNotice(dataDir); ok && notice.Path != "" && !sameManagedTargetPath(notice.Path, target) {
+		paths = append(paths, s.noticePath(dataDir), s.seenPath(dataDir))
+	}
+	if data, info, err := readManagedTarget(s.copyPath(dataDir)); err == nil && info != nil &&
+		info.Mode().IsRegular() && len(data) <= 4*agentConfigMaxBytes {
+		var copy agentConfigCopy
+		if json.Unmarshal(data, &copy) == nil && copy.Path != "" &&
+			!sameManagedTargetPath(copy.Path, target) {
+			if _, ok := s.readCopy(dataDir, copy.Path); ok {
+				paths = append(paths, s.copyPath(dataDir))
+			}
+		}
+	}
+	var errs []error
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // seedMissingAgentConfig and recordAgentConfigCopy are setup's: no-ops for
 // a connector without an agent config spec.
 func seedMissingAgentConfig(connectorName, dataDir, configPath string) error {

@@ -67,9 +67,9 @@ func recordDirsNowPresent(dataDir string, missing []string) {
 			created = append(created, dir)
 		}
 	}
-	if len(created) > 0 {
-		_ = recordCreatedDirs(filepath.Join(dataDir, watcherCreatedDirsFile), created)
-	}
+	// Refresh the record even when this setup created no folders: an older
+	// workspace can have been removed since another connector last wrote it.
+	_ = recordCreatedDirs(filepath.Join(dataDir, watcherCreatedDirsFile), created)
 }
 
 // prepareOpenCodePluginArtifactDestination creates the plugin folder of
@@ -201,10 +201,25 @@ func belowDir(root, path string) bool {
 // recordCreatedDirs adds dirs to the created-folder list at path.
 func recordCreatedDirs(path string, dirs []string) error {
 	record := readWatcherCreatedDirs(path)
+	if len(record.Dirs) == 0 && len(dirs) == 0 {
+		return nil
+	}
 	known := make(map[string]struct{}, len(record.Dirs)+len(dirs))
+	kept := record.Dirs[:0]
+	changed := false
 	for _, dir := range record.Dirs {
+		// A removed or replaced folder is no longer one DefenseClaw can
+		// later clean up. Keep entries whose state cannot be read so a
+		// transient error does not lose the cleanup record.
+		info, err := os.Lstat(dir)
+		if errors.Is(err, os.ErrNotExist) || (err == nil && info.Mode().Type() != fs.ModeDir) {
+			changed = true
+			continue
+		}
+		kept = append(kept, dir)
 		known[dir] = struct{}{}
 	}
+	record.Dirs = kept
 	for _, dir := range dirs {
 		dir = filepath.Clean(dir)
 		if _, seen := known[dir]; seen || !filepath.IsAbs(dir) {
@@ -212,6 +227,16 @@ func recordCreatedDirs(path string, dirs []string) error {
 		}
 		known[dir] = struct{}{}
 		record.Dirs = append(record.Dirs, dir)
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	if len(record.Dirs) == 0 {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
 	}
 	return writeWatcherCreatedDirs(path, record.Dirs)
 }
