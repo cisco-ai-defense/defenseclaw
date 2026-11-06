@@ -5959,10 +5959,11 @@ def test_uninstall_returns_shared_vendor_directories_to_their_prior_state() -> N
     assert "ClaudeManagedHooksLockPath" in module
     assert "Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout $Layout" in module
     # A standalone purge then removes the runtime selector state (GAP-0262)
-    # and the Claude Code folders Setup created once they are empty
-    # (GAP-0100), and stale protected PowerShell temp
-    # folders (GAP-1734), and reports what it kept (behaviour in
-    # enterprise-standalone-machine-leftovers-purge-smoke.ps1).
+    # and stale protected PowerShell temp folders (GAP-1734), and reports
+    # what it kept (behaviour in
+    # enterprise-standalone-machine-leftovers-purge-smoke.ps1). The Claude
+    # Code folders go with the other recorded vendor folders, last
+    # (GAP-0091, test_purge_removes_only_the_vendor_folders_it_recorded).
     assert (
         "Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout $Layout\n"
         "    $machineStateRemaining = [string[]]@()\n"
@@ -5970,7 +5971,6 @@ def test_uninstall_returns_shared_vendor_directories_to_their_prior_state() -> N
         "        $machineStateRemaining = [string[]]@(\n"
         "            @(Remove-DefenseClawRuntimeSelectorState -HookPath ([string]$Layout.HookPath) -Directories @("
     ) in module
-    assert "@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles $script:ProgramFiles)" in module
     # GAP-2057: stale installer staging and bootstrap folders go too.
     assert (
         "@(Remove-DefenseClawStaleRunDirectories -ProgramData $script:ProgramData "
@@ -6000,6 +6000,78 @@ def test_uninstall_returns_shared_vendor_directories_to_their_prior_state() -> N
     assert "Get-DefenseClawServiceSIDForRecovery" in module
     assert "GetDirectorySecuritySnapshotNoFollow" in module
     assert "SetDirectoryDaclNoFollow" in module
+
+
+def _psm1_function(module: str, name: str) -> str:
+    body = module[module.index(f"function {name} {{") :]
+    return body[: body.index("\nfunction ", 1)]
+
+
+def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
+    """GAP-0091: a purge removes a vendor folder only when DefenseClaw recorded
+    creating it and it is empty, last, deepest first. Setup and the Go writer
+    share one write-once record; nothing removes a vendor folder by name."""
+    module = read(MODULE)
+    go = read(ROOT / "internal" / "enterprisehooks" / "created_folders_windows.go")
+    ensure = read(ROOT / "internal" / "enterprisehooks" / "managed_policy_windows.go")
+
+    # One record format on both sides: folder name, schema, file name, ACL.
+    assert "[IO.Path]::Combine(\n        [string](Get-DefenseClawProfileRoots -EnterpriseProfile Standalone).LifecycleDirectory,\n        'created-folders'" in module
+    assert 'windowsCreatedFolderRecordDirName = "created-folders"' in go
+    assert "$script:CreatedFolderRecordSchema = 1" in module
+    assert "windowsCreatedFolderRecordSchema  = 1" in go
+    assert "$full.ToLowerInvariant()" in _psm1_function(module, "Get-DefenseClawCreatedFolderRecordName")
+    assert "sha256.Sum256([]byte(strings.ToLower(filepath.Clean(path))))" in go
+    protected = _psm1_function(module, "New-DefenseClawProtectedDirectory")
+    assert "$sddl = 'O:BAG:BAD:P'" in protected and "(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" in protected
+    assert '"O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"' in go
+    assert "windows.CREATE_NEW" in go
+
+    # Every writer records only what it created, and only on standalone.
+    root = _psm1_function(module, "Initialize-DefenseClawManagedRoot")
+    assert "if (-not $isLeaf -and $createdThisComponent) {" in root
+    assert "Add-DefenseClawStandaloneCreatedFolderRecord -Path $createdAncestors.ToArray()" in root
+    codex = _psm1_function(module, "Initialize-DefenseClawCodexMachinePolicyParent")
+    assert "Add-DefenseClawStandaloneCreatedFolderRecord -Path @($directory)" in codex
+    record = _psm1_function(module, "Add-DefenseClawStandaloneCreatedFolderRecord")
+    assert "if (-not (Test-DefenseClawStandaloneProfile) -or @($Path).Count -eq 0) {" in record
+    assert "[IO.FileMode]::CreateNew" in record
+    assert "_ = windowsCreatedFolderRecorder(created)" in ensure
+    assert "!windowsEnterpriseStandaloneProcess()" in go
+
+    # The consumer: only with no deployment, no pending finalizer and no
+    # other scope's state in the lifecycle folder; removal keeps anything
+    # that holds an entry or is a link.
+    pop = _psm1_function(module, "Pop-DefenseClawStandaloneCreatedFolderRecords")
+    assert "Test-DefenseClawStandaloneNoDeploymentLeft -Layout $Layout" in pop
+    assert "SelfUninstallReceiptPath" in pop
+    assert "$entry.Name -cne 'lifecycle.lock' -and $entry.Name -cne $recordName" in pop
+    assert "(Get-DefenseClawCreatedFolderRecordName -Path $recorded) -cne $item.Name" in pop
+    remove = _psm1_function(module, "Remove-DefenseClawStandaloneCreatedFolders")
+    assert "Sort-Object -Property Length -Descending" in remove
+    assert "[IO.FileAttributes]::ReparsePoint" in remove
+    assert "[IO.Directory]::Delete($folder, $false)" in remove
+    assert "Remove-Item" not in remove
+    leftover = _psm1_function(module, "Remove-DefenseClawStandaloneLifecycleLockLeftover")
+    assert leftover.index("[IO.FileOptions]::DeleteOnClose") < leftover.index("Pop-DefenseClawStandaloneCreatedFolderRecords")
+    assert leftover.index("Pop-DefenseClawStandaloneCreatedFolderRecords") < leftover.index("$stream.Dispose()")
+
+    # Both last steps remove the recorded folders after the lock folder (and,
+    # in the lifecycle, after the MDM journal).
+    lifecycle = _psm1_function(module, "Invoke-DefenseClawEnterpriseLifecycle")
+    tail = lifecycle[lifecycle.index("$createdFolders = [string[]]@(Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout)") :]
+    assert tail.index("Remove-DefenseClawMdmRotationJournal -Purge") < tail.index(
+        "Remove-DefenseClawStandaloneCreatedFolders -Path $createdFolders"
+    )
+    finalizer = _psm1_function(module, "Complete-DefenseClawSelfUninstallRetirement")
+    assert "Remove-DefenseClawStandaloneCreatedFolders -Path @(\n                    Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout)" in finalizer
+
+    # The by-name removals are gone (they deleted a folder that existed before).
+    for retired in (
+        "Remove-DefenseClawEmptyClaudeManagedSettingsFolders",
+        "Remove-DefenseClawEmptyStandaloneInstallParent",
+    ):
+        assert retired not in module
 
 
 def test_state_absent_purge_uses_only_exact_pinned_scope() -> None:

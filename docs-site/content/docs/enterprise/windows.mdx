@@ -958,7 +958,14 @@ removed it also removes the files the managed runtime wrote in
 `%USERPROFILE%\.defenseclaw` (see **Per-user runtime files** below); the account keeps
 its other files there and the per-user binaries. Add `PURGE=1` to Setup or `--purge`
 to the CLI to remove those too. The marker key, the Add/Remove Programs entry and a `DisableSelfUpdate`
-value the lifecycle wrote are removed, and the lifecycle log stays. A standalone
+value the lifecycle wrote are removed, and the lifecycle log stays.
+Once nothing of the deployment is left, uninstall also removes the vendor folders DefenseClaw
+created, such as `C:\ProgramData\Cisco`, `C:\Program Files\Cisco`, `C:\ProgramData\Cursor`,
+`C:\ProgramData\OpenAI\Codex` and `C:\Program Files\ClaudeCode`, if they are empty. A folder
+that existed before the install, or that holds another program's files, stays, and so does every
+folder above it. Setup records each folder it creates in
+`C:\ProgramData\Cisco\DefenseClaw-Lifecycle\created-folders`; releases before 1.0.9 kept no
+record, so on a computer installed with one of them these folders stay until you remove them. A standalone
 Setup uninstall removes the administrator-only
 `C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock` and its directory even
 without `PURGE=1`. A plain installed CLI uninstall leaves the lock file and its folder

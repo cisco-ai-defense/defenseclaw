@@ -4,9 +4,12 @@
 #Requires -Version 5.1
 
 # What a standalone purge removes outside StateRoot, and what it reports.
-# GAP-0100: the Claude Code managed-settings.d and ClaudeCode folders Setup
-# created go once dropping the serialization lock leaves them empty, and stay
-# while they hold anything else. GAP-1734: stale protected
+# GAP-0091: the vendor folders DefenseClaw recorded creating (C:\ProgramData\Cisco,
+# Cursor, OpenAI\Codex, C:\Program Files\Cisco and ClaudeCode) go once they are
+# empty, deepest first; a folder that existed before, or that holds another
+# program's file, stays, and the walk up stops at the first folder
+# DefenseClaw did not create. This replaces the GAP-0100 and GAP-0526
+# removals, which deleted those folders whenever they were empty. GAP-1734: stale protected
 # DefenseClaw-PowerShell-<32 hex> temp folders go, except the one this run
 # uses and the launching CLI's own (GAP-1853: install-enterprise.ps1 moves
 # TEMP into its bootstrap folder, and the CLI still removes its folder after
@@ -55,33 +58,6 @@ $failures = & $module {
     $failures = [Collections.Generic.List[string]]::new()
     $savedTemp = $env:TEMP
     try {
-        # GAP-0100
-        $empty = Microsoft.PowerShell.Management\Join-Path $Scratch 'empty'
-        [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($empty, 'ClaudeCode', 'managed-settings.d'))
-        $out = @(Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles $empty)
-        if ($out.Count -ne 0 -or (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::Combine($empty, 'ClaudeCode')))) {
-            $failures.Add("empty ClaudeCode\managed-settings.d was not removed cleanly: $($out -join '; ')")
-        }
-        $kept = Microsoft.PowerShell.Management\Join-Path $Scratch 'kept'
-        $dropIns = [IO.Path]::Combine($kept, 'ClaudeCode', 'managed-settings.d')
-        [void][IO.Directory]::CreateDirectory($dropIns)
-        [IO.File]::WriteAllText([IO.Path]::Combine($dropIns, '50-other-vendor.json'), '{}')
-        [void]@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles $kept)
-        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::Combine($dropIns, '50-other-vendor.json')))) {
-            $failures.Add('a managed-settings.d holding another file was removed')
-        }
-        $other = Microsoft.PowerShell.Management\Join-Path $Scratch 'other'
-        [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($other, 'ClaudeCode', 'managed-settings.d'))
-        [IO.File]::WriteAllText([IO.Path]::Combine($other, 'ClaudeCode', 'managed-settings.json'), '{}')
-        [void]@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles $other)
-        if ((Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::Combine($other, 'ClaudeCode', 'managed-settings.d'))) -or
-            -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::Combine($other, 'ClaudeCode', 'managed-settings.json')))) {
-            $failures.Add('a ClaudeCode folder holding another file lost it, or kept its empty managed-settings.d')
-        }
-        if (@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles (Microsoft.PowerShell.Management\Join-Path $Scratch 'absent')).Count -ne 0) {
-            $failures.Add('an absent ClaudeCode folder was reported')
-        }
-
         # GAP-1145 (standalone runs PowerShell 7)
         if ($PSVersionTable.PSVersion.Major -ge 7) {
             $exactTree = Microsoft.PowerShell.Management\Join-Path $Scratch 'exact-names'
@@ -220,28 +196,133 @@ $failures = & $module {
             }
         }
 
-        # GAP-0526: once a CLI uninstall's finalizer removed the install
-        # root, the empty C:\Program Files\Cisco it sat in goes; a Cisco
-        # folder that holds anything else stays.
+        # GAP-0091: the created-folder record. The protected-directory and
+        # ACL writers need a real machine root, so they are replaced in this
+        # block; the record, its consumer and the removal rule are under test.
         $savedProfile = Get-DefenseClawEnterpriseProfile
-        $savedProgramFiles = $script:ProgramFiles
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
         try {
-            $script:ProgramFiles = Microsoft.PowerShell.Management\Join-Path $Scratch 'PF'
-            $vendor = [IO.Path]::Combine($script:ProgramFiles, 'Cisco')
-            [void][IO.Directory]::CreateDirectory($vendor)
-            Remove-DefenseClawEmptyStandaloneInstallParent -Layout @{ InstallRoot = [IO.Path]::Combine($vendor, 'DefenseClaw') }
-            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $vendor) {
-                $failures.Add('an empty Program Files\Cisco was kept after the install root went')
-            }
-            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($vendor, 'Other'))
-            Remove-DefenseClawEmptyStandaloneInstallParent -Layout @{ InstallRoot = [IO.Path]::Combine($vendor, 'DefenseClaw') }
-            if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::Combine($vendor, 'Other')))) {
-                $failures.Add('a Program Files\Cisco holding another folder was removed')
+            & {
+                function New-DefenseClawProtectedDirectory {
+                    param([string]$Path, [switch]$AllowUsersRead)
+                    [void][IO.Directory]::CreateDirectory($Path)
+                    return $true
+                }
+                function Set-DefenseClawPathAcl {
+                    param([string]$Path, [string]$Kind, [string]$GatewayServiceSID)
+                }
+                $root = Microsoft.PowerShell.Management\Join-Path $Scratch 'gap0091'
+                $pd = [IO.Path]::Combine($root, 'ProgramData')
+                $pf = [IO.Path]::Combine($root, 'Program Files')
+                $roots = @($pd, $pf)
+                $vendor = [IO.Path]::Combine($pd, 'Cisco')
+                $life = [IO.Path]::Combine($vendor, 'DefenseClaw-Lifecycle')
+                $records = [IO.Path]::Combine($life, 'created-folders')
+                $cursor = [IO.Path]::Combine($pd, 'Cursor')
+                $openai = [IO.Path]::Combine($pd, 'OpenAI')
+                $codex = [IO.Path]::Combine($openai, 'Codex')
+                $before = [IO.Path]::Combine($pd, 'Preexisting')
+                $claude = [IO.Path]::Combine($pf, 'ClaudeCode')
+                $dropIns = [IO.Path]::Combine($claude, 'managed-settings.d')
+                $foreignFile = [IO.Path]::Combine($dropIns, '50-other-vendor.json')
+                $shared = [IO.Path]::Combine($pd, 'Shared')
+                $sharedSub = [IO.Path]::Combine($shared, 'Sub')
+                $layout = @{ SelfUninstallReceiptPath = [IO.Path]::Combine($life, ('self-uninstall-' + ('0' * 64) + '.json')) }
+                foreach ($folder in @($life, $cursor, $codex, $before, $dropIns, $sharedSub)) {
+                    [void][IO.Directory]::CreateDirectory($folder)
+                }
+                [IO.File]::WriteAllText($foreignFile, '{}')
+                [IO.File]::WriteAllText([IO.Path]::Combine($life, 'lifecycle.lock'), '')
+                # Recorded: what DefenseClaw created. Not recorded: Preexisting
+                # and Shared, which existed before.
+                Add-DefenseClawStandaloneCreatedFolderRecord -Path @($vendor, $cursor, $openai, $codex, $claude, $dropIns, $sharedSub) -RecordDirectory $records -Roots $roots
+                Add-DefenseClawStandaloneCreatedFolderRecord -Path @($cursor, ($cursor + '\'), [IO.Path]::Combine($root, 'Elsewhere'), $pd) -RecordDirectory $records -Roots $roots
+                $files = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $records -Force)
+                if ($files.Count -ne 7) {
+                    $failures.Add("GAP-0091: want 7 write-once records (no duplicate, nothing outside or at a root), got $($files.Count)")
+                }
+                $cursorRecord = [IO.Path]::Combine($records, (Get-DefenseClawCreatedFolderRecordName -Path $cursor))
+                $document = [IO.File]::ReadAllText($cursorRecord) | Microsoft.PowerShell.Utility\ConvertFrom-Json
+                if ([int]$document.schema_version -ne 1 -or [string]$document.path -cne $cursor) {
+                    $failures.Add("GAP-0091: the Cursor record is not schema 1 naming its path: $([IO.File]::ReadAllText($cursorRecord))")
+                }
+                # The Go writer names a record the same way (sha256 of the
+                # lower-case path).
+                $sha = [Security.Cryptography.SHA256]::Create()
+                $want = -join @($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($cursor.ToLowerInvariant())) | Microsoft.PowerShell.Core\ForEach-Object { $_.ToString('x2') })
+                $sha.Dispose()
+                if ((Get-DefenseClawCreatedFolderRecordName -Path $cursor.ToUpperInvariant()) -cne ($want + '.json')) {
+                    $failures.Add('GAP-0091: the record name is not the sha256 of the lower-case path')
+                }
+
+                # Not consumed while a self-uninstall finalizer is pending, or
+                # while the lifecycle folder holds another scope's state.
+                [IO.File]::WriteAllText($layout.SelfUninstallReceiptPath, '{}')
+                if (@(Pop-DefenseClawStandaloneCreatedFolderRecords -Layout $layout -RecordDirectory $records -SkipDeploymentCheck).Count -ne 0 -or
+                    @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $records -Force).Count -ne 7) {
+                    $failures.Add('GAP-0091: the record was consumed while a self-uninstall finalizer was pending')
+                }
+                [IO.File]::Delete($layout.SelfUninstallReceiptPath)
+                $rollback = [IO.Path]::Combine($life, ('install-rollback-' + ('1' * 64) + '.json'))
+                [IO.File]::WriteAllText($rollback, '{}')
+                if (@(Pop-DefenseClawStandaloneCreatedFolderRecords -Layout $layout -RecordDirectory $records -SkipDeploymentCheck).Count -ne 0) {
+                    $failures.Add('GAP-0091: the record was consumed while the lifecycle folder held another receipt')
+                }
+                [IO.File]::Delete($rollback)
+                # A record whose name is not its path's is not used, and stays.
+                $planted = [IO.Path]::Combine($records, ('f' * 64) + '.json')
+                [IO.File]::WriteAllText($planted, ('{"schema_version":1,"path":"' + $before.Replace('\', '\\') + '"}'))
+
+                $popped = @(Pop-DefenseClawStandaloneCreatedFolderRecords -Layout $layout -RecordDirectory $records -SkipDeploymentCheck)
+                if ($popped.Count -ne 7 -or $popped -contains $before) {
+                    $failures.Add("GAP-0091: want the 7 recorded folders, got: $($popped -join '; ')")
+                }
+                if (-not [IO.File]::Exists($planted) -or @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $records -Force).Count -ne 1) {
+                    $failures.Add('GAP-0091: the consumed records were not deleted, or the planted record was')
+                }
+                [IO.File]::Delete($planted)
+                [IO.Directory]::Delete($records)
+                # The lock and its folder go first (Remove-DefenseClawStandaloneLifecycleLockLeftover).
+                [IO.File]::Delete([IO.Path]::Combine($life, 'lifecycle.lock'))
+                [IO.Directory]::Delete($life)
+
+                Remove-DefenseClawStandaloneCreatedFolders -Path $popped -Roots $roots
+                foreach ($case in @(
+                        @('a created empty folder', $cursor, $false),
+                        @('a created empty vendor folder above the lifecycle folder', $vendor, $false),
+                        @('a created folder and the created parent above it', $openai, $false),
+                        @('a folder that existed before', $before, $true),
+                        @('a created folder holding another program''s file', $foreignFile, $true),
+                        @('the created parent of a folder holding another program''s file', $claude, $true),
+                        @('a created folder below one that existed before', $sharedSub, $false),
+                        @('a folder that existed before, above a created one', $shared, $true))) {
+                    if ((Microsoft.PowerShell.Management\Test-Path -LiteralPath $case[1]) -ne $case[2]) {
+                        $failures.Add("GAP-0091: $($case[0]) ($($case[1])) present=$(-not $case[2]), want present=$($case[2])")
+                    }
+                }
+                # Never a path outside the roots, even when handed one.
+                $outside = [IO.Path]::Combine($root, 'Outside')
+                [void][IO.Directory]::CreateDirectory($outside)
+                Remove-DefenseClawStandaloneCreatedFolders -Path @($outside) -Roots $roots
+                if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $outside)) {
+                    $failures.Add('GAP-0091: a folder outside ProgramData and Program Files was removed')
+                }
+
+                # Secure Client keeps no record and removes nothing.
+                Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
+                $scLife = [IO.Path]::Combine($root, 'sc', 'Lifecycle')
+                $scFolder = [IO.Path]::Combine($pd, 'SecureClientVendor')
+                [void][IO.Directory]::CreateDirectory($scLife)
+                [void][IO.Directory]::CreateDirectory($scFolder)
+                Add-DefenseClawStandaloneCreatedFolderRecord -Path @($scFolder) -RecordDirectory ([IO.Path]::Combine($scLife, 'created-folders')) -Roots $roots
+                Remove-DefenseClawStandaloneCreatedFolders -Path @($scFolder) -Roots $roots
+                if ((Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::Combine($scLife, 'created-folders'))) -or
+                    -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $scFolder)) {
+                    $failures.Add('GAP-0091: the Secure Client profile recorded or removed a folder')
+                }
             }
         }
         finally {
-            $script:ProgramFiles = $savedProgramFiles
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile $savedProfile
         }
 
@@ -277,8 +358,9 @@ $failures = & $module {
                 @(Remove-DefenseClawUnattributedStandaloneHookRuntime -Layout $layout533) +
                 @(Remove-DefenseClawStandaloneOrphanedHookMachineState -Layout $layout533)
             )
+            # The emptied folders stay for the created-folder step (GAP-0091).
             if ($left.Count -ne 0 -or
-                (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::Combine($script:ProgramFiles, 'ClaudeCode'))) -or
+                @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $claudeDropIns -Force).Count -ne 0 -or
                 (Microsoft.PowerShell.Management\Test-Path -LiteralPath $hookRuntime)) {
                 $failures.Add("a state-absent uninstall left DefenseClaw's machine-wide hook files: $($left -join '; ')")
             }
@@ -299,12 +381,9 @@ $failures = & $module {
             [IO.File]::SetAttributes($file, [IO.FileAttributes]::Hidden)
         }
         $ownHook = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe'
-        $left = @(
-            @(Remove-DefenseClawRuntimeSelectorState -HookPath $ownHook -Directories @($selectorDropIns, '', [IO.Path]::Combine($selector, 'absent'))) +
-            @(Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles $selector)
-        )
-        if ($left.Count -ne 0 -or (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::Combine($selector, 'ClaudeCode')))) {
-            $failures.Add("the runtime selector state kept ClaudeCode\managed-settings.d: $($left -join '; ')")
+        $left = @(Remove-DefenseClawRuntimeSelectorState -HookPath $ownHook -Directories @($selectorDropIns, '', [IO.Path]::Combine($selector, 'absent')))
+        if ($left.Count -ne 0 -or @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $selectorDropIns -Force).Count -ne 0) {
+            $failures.Add("the runtime selector state stayed in ClaudeCode\managed-settings.d: $($left -join '; ')")
         }
 
         # GAP-1158: a selector that also holds another deployment's target
@@ -364,7 +443,7 @@ $failures = & $module {
             [IO.File]::WriteAllText($otherSelector, '{"targets":[{"hook_executable":"C:\\Other\\defenseclaw-hook.exe"}]}')
             $orphanLayout = @{ HookPath = $hook; CodexMachinePolicyDirectory = $codexPolicy }
             $left = @(Remove-DefenseClawStandaloneOrphanedHookMachineState -Layout $orphanLayout -ProgramFiles $orphanFiles -ProgramData $orphanData)
-            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::Combine($orphanFiles, 'ClaudeCode'))) {
+            if (@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $claudeDropIns -Force).Count -ne 0) {
                 $failures.Add('the orphaned Claude Code hook machine state was not removed')
             }
             if (-not [IO.File]::Exists($otherSelector) -or $left.Count -ne 1 -or
