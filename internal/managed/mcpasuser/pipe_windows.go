@@ -210,7 +210,7 @@ func verifyPipeClient(pipe windows.Handle, gatewaySID *windows.SID) error {
 
 // errEnumeratorNotServing says that the as-user pipe does not exist.
 var errEnumeratorNotServing = errors.New("the DefenseClaw hook enumerator service is not serving MCP as-user scans; " +
-	"it starts them once it runs (Setup /repair restarts it)")
+	"it starts them once it runs (an administrator's repair restarts it)")
 
 // refreshPipeAbsentGrace is how long a refresh waits for the as-user pipe to
 // exist. The pipe exists while the hook enumerator serves it (when all its

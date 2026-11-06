@@ -19,6 +19,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -26,7 +27,19 @@ import (
 // lifecycle. The Windows-only wrapper feeds these the installer's report;
 // the logic itself is platform-neutral so every platform tests it.
 
-const windowsEnterpriseStandaloneSetupName = "DefenseClawSetup-Enterprise-Standalone-x64.exe"
+// windowsEnterpriseSetupCommand is the standalone Setup run with args, as a
+// PowerShell command in backticks: `& '.\DefenseClawSetup-Enterprise-Standalone-x64.exe' ...`.
+// Setup is not installed on a managed computer (cowork-1-0-8 GAP-0095), so
+// the bare name a hint printed was not a command that runs there. A hint that
+// names it ends with windowsEnterpriseSetupSourceNote, once; one that needs no
+// payload names the installed CLI instead (windowsEnterpriseAdminCommand).
+func windowsEnterpriseSetupCommand(args ...string) string {
+	return "`" + managed.WindowsSetupCommand(args...) + "`"
+}
+
+// windowsEnterpriseSetupSourceNote ends a hint that names a Setup command: it
+// says that Setup is not on the computer and where it comes from.
+const windowsEnterpriseSetupSourceNote = " " + managed.WindowsSetupSource + "."
 
 type windowsEnterpriseIgnoredDeploymentRecord struct {
 	profile string
@@ -42,7 +55,8 @@ func windowsEnterpriseConfigRecoveryGuidance(result *enterprisestatus.Result, bu
 		return
 	}
 	const ordinary = "; run ensure with the intended config to put the managed config back"
-	const bundle = "; run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1 from an elevated prompt to restore the confirmed policy bundle"
+	bundle := "; run " + windowsEnterpriseSetupCommand("/repair", "JSON=1") + " from an elevated PowerShell prompt to restore the confirmed policy bundle (" +
+		managed.WindowsSetupSource + ")"
 	for i := range result.Warnings {
 		if result.Warnings[i].Code == "config_edited_outside_lifecycle" {
 			result.Warnings[i].Message = strings.Replace(result.Warnings[i].Message, ordinary, bundle, 1)
@@ -61,9 +75,9 @@ func windowsEnterpriseConfigRecoveryGuidance(result *enterprisestatus.Result, bu
 // record behind, so the owner has to be restored before the last resort.
 func windowsEnterpriseDeploymentRecordOwnerNextStep() string {
 	return " Next step: as an administrator, inspect the deployment record owner and restore its expected owner and group (BUILTIN\\Administrators) if this record belongs to the DefenseClaw deployment." +
-		" If /ensure still refuses, as a last resort run " + windowsEnterpriseStandaloneSetupName +
-		" /uninstall FORCE=1 PURGE=1 JSON=1 as LocalSystem, then run " +
-		windowsEnterpriseStandaloneSetupName + " /ensure CONFIG=<config.yaml> JSON=1 with an administrator-only config."
+		" If /ensure still refuses, as a last resort run " + windowsEnterpriseSetupCommand("/uninstall", "FORCE=1", "PURGE=1", "JSON=1") +
+		" as LocalSystem, then run " + windowsEnterpriseSetupCommand("/ensure", "CONFIG=<config.yaml>", "JSON=1") +
+		" with an administrator-only config." + windowsEnterpriseSetupSourceNote
 }
 
 func windowsEnterpriseUntrustedDeploymentRecordMessage(record windowsEnterpriseIgnoredDeploymentRecord) string {
@@ -84,7 +98,7 @@ func windowsEnterpriseUntrustedDeploymentRecordMessage(record windowsEnterpriseI
 	return "ignored an untrusted deployment record: " + detail +
 		" Next step: as an administrator, inspect the named trust failure. For this standalone deployment, remove the untrusted deployment record after confirming its origin, replace any reparse point with a regular path, and correct unsafe permissions on the named path and affected ancestors." +
 		" A forced /uninstall FORCE=1 PURGE=1 can keep StateRoot and the bad record, so remove or fix those paths before running " +
-		windowsEnterpriseStandaloneSetupName + " /ensure CONFIG=<config.yaml> JSON=1 with an administrator-only config."
+		windowsEnterpriseSetupCommand("/ensure", "CONFIG=<config.yaml>", "JSON=1") + " with an administrator-only config." + windowsEnterpriseSetupSourceNote
 }
 
 func windowsEnterpriseRecordOwnerMismatchNextStep(message string) string {
@@ -348,7 +362,7 @@ func windowsEnterpriseCommittedJournalNextStep(original string, installed bool) 
 				" have that user run `defenseclaw uninstall --all --binaries --yes`, or move the folder out of the profile."
 		}
 	}
-	return step + " Next step: run Setup /ensure again; it removes the stale journal and converges."
+	return step + " Next step: run " + windowsEnterpriseAdminCommand("ensure") + " from an elevated PowerShell prompt again; it removes the stale journal and converges."
 }
 
 // windowsEnterpriseANSIPattern matches the color sequences PowerShell may
@@ -391,7 +405,7 @@ func windowsEnterpriseRolledBackMessage(version string) string {
 	}
 	return "ensure rolled back an interrupted lifecycle change (for example an upgrade cut off by a restart or a power loss), and " +
 		restored + " runs again. The interrupted change did not finish: run the Setup that started it again with /ensure " +
-		"(" + windowsEnterpriseStandaloneSetupName + " of that release, or let the MDM retry its app assignment)"
+		"(the Setup of that release from your MDM package or the release download, or let the MDM retry its app assignment)"
 }
 
 // windowsEnterpriseInvalidRuntimeBundleNextStep names the next step when a
@@ -422,7 +436,8 @@ func windowsEnterpriseMissingArtifactNextStep(original string, hasPayload bool) 
 		return ""
 	}
 	return ". The installed CLI carries no payload to restore it from. Next step: run DefenseClaw Setup of the installed release as LocalSystem: " +
-		windowsEnterpriseStandaloneSetupName + " /repair JSON=1 (or /ensure CONFIG=<config.yaml> JSON=1); it restores the file from its own payload"
+		windowsEnterpriseSetupCommand("/repair", "JSON=1") + " (or " + windowsEnterpriseSetupCommand("/ensure", "CONFIG=<config.yaml>", "JSON=1") +
+		"); it restores the file from its own payload. " + managed.WindowsSetupSource
 }
 
 // windowsEnterpriseLifecycleLogPath is the lifecycle log Setup and the CLI
@@ -487,9 +502,9 @@ func windowsEnterpriseFirstWindowsPath(text string) string {
 func windowsEnterpriseStandaloneSetupCommand(action, configPath string, purge bool) string {
 	if action == "uninstall" {
 		if purge {
-			return windowsEnterpriseStandaloneSetupName + " /uninstall PURGE=1 JSON=1"
+			return windowsEnterpriseSetupCommand("/uninstall", "PURGE=1", "JSON=1")
 		}
-		return windowsEnterpriseStandaloneSetupName + " /uninstall JSON=1"
+		return windowsEnterpriseSetupCommand("/uninstall", "JSON=1")
 	}
 	config := strings.TrimSpace(configPath)
 	switch {
@@ -498,7 +513,10 @@ func windowsEnterpriseStandaloneSetupCommand(action, configPath string, purge bo
 	case strings.ContainsAny(config, " \t"):
 		config = `"` + config + `"`
 	}
-	return windowsEnterpriseStandaloneSetupName + " /ensure CONFIG=" + config + " JSON=1"
+	// CONFIG= stays one bare word: the MDM wrapper swaps its staging copy of
+	// the config for the administrator's own path in this text
+	// (ConvertTo-WrapperPublicText), and PowerShell passes the word on.
+	return "`" + managed.WindowsSetupCommand("/ensure") + " CONFIG=" + config + " JSON=1`"
 }
 
 // windowsEnterprisePendingInspectionStep is what status and verify say about
@@ -508,7 +526,8 @@ func windowsEnterpriseStandaloneSetupCommand(action, configPath string, purge bo
 func windowsEnterprisePendingInspectionStep(configPath string) string {
 	return "A lifecycle transaction is pending; check the reported service states until it finishes or is recovered. " +
 		"If no DefenseClaw Setup or lifecycle command is running now, run DefenseClaw Setup (this release or a newer one) as LocalSystem: " +
-		windowsEnterpriseStandaloneSetupCommand("ensure", configPath, false) + "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
+		windowsEnterpriseStandaloneSetupCommand("ensure", configPath, false) + "; as LocalSystem, Setup recovers the transaction with its own verified gateway." +
+		windowsEnterpriseSetupSourceNote
 }
 
 // windowsEnterprisePendingLead says what a pending transaction means for the
@@ -568,6 +587,25 @@ func windowsEnterpriseStandaloneNextStep(
 	refusal *windowsEnterpriseRecoveryGatewayRefusal,
 	services []enterprisestatus.Service,
 ) string {
+	step := windowsEnterpriseStandaloneNextStepText(action, configPath, purge, busy, force, pending, runs, refusal, services)
+	if step == "" {
+		return ""
+	}
+	// Every branch runs Setup, which a managed computer does not keep.
+	return step + windowsEnterpriseSetupSourceNote
+}
+
+func windowsEnterpriseStandaloneNextStepText(
+	action string,
+	configPath string,
+	purge bool,
+	busy bool,
+	force bool,
+	pending bool,
+	runs []windowsEnterpriseRecoveryGatewayRun,
+	refusal *windowsEnterpriseRecoveryGatewayRefusal,
+	services []enterprisestatus.Service,
+) string {
 	command := windowsEnterpriseStandaloneSetupCommand(action, configPath, purge)
 	if busy {
 		// The lock is held by a live lifecycle run, and a pending
@@ -586,7 +624,7 @@ func windowsEnterpriseStandaloneNextStep(
 		// it is never told to run itself "otherwise" (GAP-0848). What stops
 		// it is a program that keeps a DefenseClaw file open, which the
 		// error names; a restart closes every such program.
-		forced := windowsEnterpriseStandaloneSetupName + " /uninstall FORCE=1 JSON=1"
+		forced := windowsEnterpriseSetupCommand("/uninstall", "FORCE=1", "JSON=1")
 		return lead + " The forced uninstall did not finish." +
 			" Next step: end or close each program the error above says holds a DefenseClaw file (or fix what else it names), then run " + forced + " again as LocalSystem." +
 			" If the error names no program, or the program cannot be ended, restart Windows and run " + forced + " as LocalSystem before any other DefenseClaw Setup;" +
@@ -597,7 +635,7 @@ func windowsEnterpriseStandaloneNextStep(
 	// The last resort when no recovery finishes: it removes the deployment
 	// without recovering the transaction (GAP-0920, GAP-1041).
 	lastResort := " If you cannot wait for that, remove the deployment without recovering the transaction, as LocalSystem: " +
-		windowsEnterpriseStandaloneSetupName + " /uninstall FORCE=1 JSON=1, then install again with /ensure."
+		windowsEnterpriseSetupCommand("/uninstall", "FORCE=1", "JSON=1") + ", then install again with /ensure."
 	if len(runs) != 0 {
 		return lead + " Recovery ran with this Setup's verified gateway and still did not finish." +
 			" Next step: leave DefenseClaw files and permissions as they are, send the lifecycle log to DefenseClaw support," +
@@ -645,7 +683,7 @@ func windowsEnterpriseStandaloneNextStep(
 			return lead + " This run was LocalSystem and its recovery did not finish, so running it again unchanged fails the same way." +
 				" Next step: if the error above names something to fix (a path, an account or an icacls command), fix it and run " + command +
 				". Otherwise, or if it fails the same way, remove the deployment without recovering the transaction, as LocalSystem: " +
-				windowsEnterpriseStandaloneSetupName + " /uninstall FORCE=1 JSON=1, then install again with /ensure, and send the lifecycle log (" +
+				windowsEnterpriseSetupCommand("/uninstall", "FORCE=1", "JSON=1") + ", then install again with /ensure, and send the lifecycle log (" +
 				windowsEnterpriseLifecycleLogPath + ") to DefenseClaw support."
 		}
 		return lead + " Next step: run DefenseClaw Setup (this release or a newer one) as LocalSystem: " + command + recovers
@@ -665,8 +703,8 @@ func windowsEnterpriseStoppedServiceNextStep(services []enterprisestatus.Service
 	if len(stopped) == 0 {
 		return ""
 	}
-	return ". Next step: from an elevated PowerShell prompt run " + windowsEnterpriseAdminCommand("repair") + ", or " +
-		windowsEnterpriseStandaloneSetupName + " /repair JSON=1, to start " + strings.Join(stopped, ", ") + " again"
+	return ". Next step: from an elevated PowerShell prompt run " + windowsEnterpriseAdminCommand("repair") +
+		" to start " + strings.Join(stopped, ", ") + " again"
 }
 
 // windowsEnterpriseAdminCommand is an `enterprise windows <action>` command

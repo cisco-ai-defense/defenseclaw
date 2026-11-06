@@ -468,7 +468,8 @@ func windowsEnterpriseStandaloneRepairRulePackPreflight(suppliedConfig string) e
 		return nil
 	}
 	if err := windowsEnterpriseStandaloneRulePackBuild(runtime); err != nil {
-		return fmt.Errorf("the gateway cannot load the guardrail rule packs that the installed config %s selects, so a repair would restart it into a failed start: %v. The running gateway keeps its last good policy. Put the pack back as its digest pin names it, or apply a config with the new digest with Setup /ensure CONFIG=, then run the repair again (nothing was changed)", layout.ConfigPath, err)
+		return fmt.Errorf("the gateway cannot load the guardrail rule packs that the installed config %s selects, so a repair would restart it into a failed start: %v. The running gateway keeps its last good policy. Put the pack back as its digest pin names it, or apply a config with the new digest with %s from an elevated PowerShell prompt (%s), then run the repair again (nothing was changed)", layout.ConfigPath, err,
+			windowsEnterpriseSetupCommand("/ensure", "CONFIG=<config path>"), managed.WindowsSetupSource)
 	}
 	return nil
 }

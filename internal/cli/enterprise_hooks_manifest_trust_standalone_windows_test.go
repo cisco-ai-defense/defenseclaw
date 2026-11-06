@@ -51,7 +51,7 @@ func TestEnterpriseHookManifestTrustCheckStandaloneDrift(t *testing.T) {
 
 	err := check(manifest)
 	if err == nil || !strings.Contains(err.Error(), "untrusted Windows principal") ||
-		!strings.Contains(err.Error(), "Setup /ensure") {
+		!strings.Contains(err.Error(), `.\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure`) {
 		t.Fatalf("drifted manifest = %v, want the strict verdict and the Setup step", err)
 	}
 	if calls != 0 {

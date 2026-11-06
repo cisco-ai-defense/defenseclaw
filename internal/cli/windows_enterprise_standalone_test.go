@@ -2233,7 +2233,8 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 	// run was not LocalSystem, and names the next step.
 	if !strings.Contains(got[0].Message, "2 user connector registration(s) because this uninstall did not run as LocalSystem") ||
 		!strings.Contains(got[0].Message, sid+": devin, hermes") ||
-		!strings.Contains(got[0].Message, "Setup /ensure and then /uninstall, both as LocalSystem") {
+		!strings.Contains(got[0].Message, windowsEnterpriseSetupCommand("/ensure")+" and then "+windowsEnterpriseSetupCommand("/uninstall")+", both as LocalSystem") ||
+		!strings.Contains(got[0].Message, managed.WindowsSetupSource) {
 		t.Fatalf("warnings = %+v", got)
 	}
 	// A removal that was attempted and failed is still reported.
@@ -2242,7 +2243,7 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 	if len(attempted) != 2 || attempted[1].Code != "user_registrations_failed" ||
 		!strings.Contains(attempted[1].Message, `defenseclaw.json still holds`) ||
 		// GAP-1932: a failed removal names a next step.
-		!strings.Contains(attempted[1].Message, "remove the named DefenseClaw entries from those files as that user, or run DefenseClaw Setup /ensure and then /uninstall") {
+		!strings.Contains(attempted[1].Message, "remove the named DefenseClaw entries from those files as that user, or run "+windowsEnterpriseSetupCommand("/ensure")+" and then "+windowsEnterpriseSetupCommand("/uninstall")) {
 		t.Fatalf("attempted-failure warnings = %+v", attempted)
 	}
 	failedReport, err := parseWindowsEnterpriseInstallerReport([]byte(base + `,"user_registrations_failed":["claudecode/` + sid + `: settings still holds DefenseClaw's hook"]}`))
@@ -2414,7 +2415,8 @@ func TestWindowsEnterpriseFailedLifecycleNamesTheRecoveryStep(t *testing.T) {
 	for _, want := range []string{
 		`the permissions on C:\Users\alice\.defenseclaw\hooks are not the ones DefenseClaw set`,
 		"Next step: run the same Setup as LocalSystem",
-		`DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=C:\Staging\config.yaml JSON=1`,
+		`& '.\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure CONFIG=C:\Staging\config.yaml JSON=1`,
+		managed.WindowsSetupSource,
 	} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("error %q does not contain %q", message, want)
@@ -2477,7 +2479,7 @@ func TestWindowsEnterpriseFailedLifecycleNamesTheRecoveryStep(t *testing.T) {
 		}
 	}
 	if len(leftovers) != 2 ||
-		!strings.Contains(leftovers[0], "bob (S-1-5-21-1-2-3-1019) [codex, cursor]: DefenseClaw's agent registrations, because the account is not signed in; to remove it, run DefenseClaw Setup /ensure and then /uninstall") ||
+		!strings.Contains(leftovers[0], "bob (S-1-5-21-1-2-3-1019) [codex, cursor]: DefenseClaw's agent registrations, because the account is not signed in; to remove it, run "+windowsEnterpriseSetupCommand("/ensure")+" and then "+windowsEnterpriseSetupCommand("/uninstall")) ||
 		!strings.HasSuffix(leftovers[1], `hooks.json, which changed after DefenseClaw wrote it; remove DefenseClaw's entries from that file by hand`) {
 		t.Fatalf("rollback leftovers = %q", leftovers)
 	}
@@ -2773,7 +2775,7 @@ func TestWindowsEnterpriseResultNamesUntrustedUserRuntimeFolders(t *testing.T) {
 	}
 	if len(skipped) != 1 || !strings.Contains(skipped[0], "of 1 account(s)") ||
 		!strings.Contains(skipped[0], `C:\Users\stale\.defenseclaw\hooks`) ||
-		!strings.Contains(skipped[0], "run Setup /ensure again") {
+		!strings.Contains(skipped[0], "run "+windowsEnterpriseAdminCommand("ensure")+" again from an elevated PowerShell prompt") {
 		t.Fatalf("skipped folder warning = %q", skipped)
 	}
 	if len(result.Errors) != 0 {

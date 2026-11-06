@@ -34,7 +34,7 @@ func TestEnterpriseSecurityIncompleteNamesItsReasons(t *testing.T) {
 	}
 	message := result.Warnings[0].Message
 	if !strings.Contains(message, "claudecode machine policy") || strings.Contains(message, "codex machine policy") ||
-		!strings.Contains(message, "/repair ATTESTCLAUDEEFFECTIVEPOLICY=1") ||
+		!strings.Contains(message, "enterprise windows repair --profile standalone --attest-claude-effective-policy") ||
 		!strings.Contains(message, "4 per-user enrollment(s) are pending (waiting for an active, connected session") ||
 		!strings.Contains(message, "each pending or failed account's Account line (enrollment.accounts[].reason in --json) says why") {
 		t.Fatalf("message = %q", message)
@@ -81,7 +81,7 @@ func TestEnterpriseSecurityIncompleteNamesActionableReasonsBesideTheHookProcessR
 	result.AddWarning(enterprisestatus.CodeHookProcessFailOpen, "codex: may continue")
 	addEnterpriseSecurityIncompleteReasons(result, false)
 	if len(result.Warnings) != 3 || result.Warnings[2].Code != "security_incomplete" ||
-		!strings.Contains(result.Warnings[2].Message, "ATTESTCLAUDEEFFECTIVEPOLICY=1") {
+		!strings.Contains(result.Warnings[2].Message, "--attest-claude-effective-policy") {
 		t.Fatalf("the residual hid the attestation reason: %+v", result.Warnings)
 	}
 	result.MachinePolicy["claudecode"] = enterprisestatus.MachinePolicyState{Ownership: "merge", Lock: "enforce", EffectiveLock: "enforce"}
@@ -105,7 +105,7 @@ func TestEnterpriseSecurityIncompleteIgnoresInformationalWarnings(t *testing.T) 
 	result.AddWarning("stale_lifecycle_journal_removed", "removed")
 	addEnterpriseSecurityIncompleteReasons(result, false)
 	if len(result.Warnings) != 3 || result.Warnings[2].Code != "security_incomplete" ||
-		!strings.Contains(result.Warnings[2].Message, "ATTESTCLAUDEEFFECTIVEPOLICY=1") {
+		!strings.Contains(result.Warnings[2].Message, "--attest-claude-effective-policy") {
 		t.Fatalf("warnings = %+v", result.Warnings)
 	}
 
@@ -162,7 +162,7 @@ func TestEnterpriseSecurityIncompleteNamesTheAttestationBesideTheHermesResiduals
 	}
 	addEnterpriseSecurityIncompleteReasons(result, false)
 	if len(result.Warnings) != 6 || result.Warnings[5].Code != "security_incomplete" ||
-		!strings.Contains(result.Warnings[5].Message, "ATTESTCLAUDEEFFECTIVEPOLICY=1") {
+		!strings.Contains(result.Warnings[5].Message, "--attest-claude-effective-policy") {
 		t.Fatalf("the Hermes residuals hid the attestation reason: %+v", result.Warnings)
 	}
 	result.Warnings = result.Warnings[:5]

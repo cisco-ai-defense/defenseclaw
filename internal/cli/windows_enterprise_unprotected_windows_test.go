@@ -399,7 +399,7 @@ func TestWindowsStandaloneInspectionNamesAPendingTransaction(t *testing.T) {
 		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.0")
 		applyWindowsEnterpriseInstallerReport(result, &windowsEnterpriseLifecycleOptions{}, report, windowsEnterpriseStandaloneRun{ExitCode: 1})
 		text := fmt.Sprintf("%+v %+v", result.Errors, result.Warnings)
-		if !strings.Contains(text, "as LocalSystem: "+windowsEnterpriseStandaloneSetupName+" /ensure") || strings.Contains(text, "run Repair") {
+		if !strings.Contains(text, "as LocalSystem: "+windowsEnterpriseSetupCommand("/ensure", "CONFIG=<config.yaml>", "JSON=1")) || strings.Contains(text, "run Repair") {
 			t.Fatalf("%s of a pending transaction: %s", action, text)
 		}
 	}

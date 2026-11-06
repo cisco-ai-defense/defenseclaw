@@ -37,6 +37,25 @@ var managedWindowsBareCommandAllowed = map[string][]string{
 	"internal/hookruntime/unavailable_windows.go": {"Run `defenseclaw doctor`"},
 }
 
+// managedWindowsBareSetupAllowed lists, by path prefix below the module root,
+// the sources that may name a Setup action ("Setup /ensure", the file name
+// with a switch) as plain text, with the reason. Setup is not installed on a
+// managed computer, so a hint that sends an administrator to it runs it with
+// managed.WindowsSetupCommand and says where it comes from
+// (managed.WindowsSetupSource); the installed CLI's own command
+// (managed.WindowsAdminCommand) is named instead where it does the same work
+// (cowork-1-0-8 GAP-0095). An entry no literal uses fails the test.
+var managedWindowsBareSetupAllowed = map[string]string{
+	"cmd/defenseclaw-enterprise-setup/":                        "Setup's own usage and refusals: the administrator who reads them is running that Setup",
+	"internal/cli/enterprise_bundle_apply_windows.go":          "names the Setup switch that is the other way to deliver a bundle; whoever delivers one holds Setup",
+	"internal/cli/windows_enterprise_bundle.go":                "says which Setup switch takes BUNDLE= and TRUSTANCHORS=; the MDM that delivers them holds Setup",
+	"internal/cli/windows_managed_hooks_lifecycle.go":          "the Secure Client branch of the managed-hook lifecycle keeps the text it always had",
+	"internal/cli/enterprise_hooks_hook_binary_windows.go":     "states what restores a hook binary, for the standalone profile and Secure Client alike (no instruction); Secure Client text is unchanged",
+	"internal/cli/enterprise_hooks_platform_windows.go":        "states what prunes a deleted account's rows, for the standalone profile and Secure Client alike (no instruction); Secure Client text is unchanged",
+	"internal/enterprisehooks/install_windows.go":              "states what prunes a deleted account's rows, for the standalone profile and Secure Client alike (no instruction); Secure Client text is unchanged",
+	"internal/enterprisehooks/managed_policy_drift_windows.go": "the Secure Client branch keeps the text it always had",
+}
+
 // managedWindowsCallAllowed lists, by path prefix below the module root,
 // the sources that build a PowerShell call operator (`& `) themselves, with
 // the reason. Each writes or reads an agent's hook command, which is not text
@@ -103,7 +122,12 @@ var (
 	// is not one: per-user help names Windows paths beside the per-user
 	// commands, which are on PATH.
 	// Setup's /switches are Windows-only too.
-	managedWindowsContext = regexp.MustCompile(`(?i)elevated|powershell|administrator prompt|\bSetup /[a-z]|DefenseClawSetup`)
+	// managedWindowsBareSetup is Setup named as a command in plain text: the
+	// file name with a switch, or "Setup /repair". It is not a command that
+	// runs on a managed computer, where Setup is not installed
+	// (cowork-1-0-8 GAP-0095).
+	managedWindowsBareSetup = regexp.MustCompile("(?i)DefenseClawSetup-Enterprise-Standalone-x64\\.exe[`'\"]?\\s+/[a-z]|\\bSetup\\s+/(?:repair|ensure|uninstall|install|upgrade|reconcile|recover|verify)\\b")
+	managedWindowsContext   = regexp.MustCompile(`(?i)elevated|powershell|administrator prompt|\bSetup /[a-z]|DefenseClawSetup`)
 )
 
 // cowork-1-0-8 GAP-0076, as a source check: the behavioural tables list
@@ -175,6 +199,11 @@ func TestManagedWindowsCommandsComeFromTheRenderer(t *testing.T) {
 			if !used[rel+"\x00"+words] {
 				t.Errorf("managedWindowsBareCommandAllowed[%q] lists %q, which no literal of that file names", rel, words)
 			}
+		}
+	}
+	for prefix := range managedWindowsBareSetupAllowed {
+		if !used["setup\x00"+prefix] {
+			t.Errorf("managedWindowsBareSetupAllowed lists %q, where no literal names a Setup action in plain text", prefix)
 		}
 	}
 	for prefix := range managedWindowsCallAllowed {
@@ -483,6 +512,13 @@ func managedWindowsLiteralProblems(rel, value string, windowsOnly bool, used map
 	if !renderer && strings.Contains(value, `Cisco\DefenseClaw\bin\defenseclaw`) {
 		problems = append(problems, "a hard-coded install path: use managed.WindowsAdminCommand or WindowsStandaloneAdminCLI")
 	}
+	if !renderer && managedWindowsBareSetup.MatchString(value) {
+		if prefix, ok := managedWindowsBareSetupPrefix(rel); ok {
+			used["setup\x00"+prefix] = true
+		} else {
+			problems = append(problems, "names Setup as a command in plain text, which is not installed on a managed computer: use managed.WindowsSetupCommand with managed.WindowsSetupSource, or the installed CLI's command (managed.WindowsAdminCommand)")
+		}
+	}
 	if managedWindowsBareAnywhere.MatchString(value) {
 		problems = append(problems, "names a bare DefenseClaw executable or Windows-only command, which is not on PATH")
 		return problems
@@ -562,6 +598,17 @@ func managedWindowsSentenceProblems(rel, joined string, parts []string, windowsO
 // covers file rel.
 func managedWindowsCallPrefix(rel string) (string, bool) {
 	for prefix := range managedWindowsCallAllowed {
+		if rel == prefix || strings.HasSuffix(prefix, "/") && strings.HasPrefix(rel, prefix) {
+			return prefix, true
+		}
+	}
+	return "", false
+}
+
+// managedWindowsBareSetupPrefix is the managedWindowsBareSetupAllowed entry
+// that covers file rel.
+func managedWindowsBareSetupPrefix(rel string) (string, bool) {
+	for prefix := range managedWindowsBareSetupAllowed {
 		if rel == prefix || strings.HasSuffix(prefix, "/") && strings.HasPrefix(rel, prefix) {
 			return prefix, true
 		}
@@ -668,13 +715,22 @@ func TestManagedWindowsLiteralProblems(t *testing.T) {
 		{"prose", "internal/cli/x_windows.go", "DefenseClaw is managed by your organization", true, 0},
 		// g072 review 2 M3: a run instruction without the executable.
 		{"verb-only run, backticked", "internal/cli/x_windows.go", "run `enterprise windows ensure --profile standalone` first", true, 1},
-		{"verb-only run, unquoted", "internal/cli/x_windows.go", "; run enterprise windows repair, or DefenseClawSetup-Enterprise-Standalone-x64.exe /repair", true, 1},
+		{"verb-only run, unquoted", "internal/cli/x_windows.go", "; run enterprise windows repair, or DefenseClawSetup-Enterprise-Standalone-x64.exe /repair", true, 2},
+		// cowork-1-0-8 GAP-0095: Setup is not installed on a managed computer.
+		{"Setup file name with a switch", "internal/cli/x.go", "then run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1", false, 1},
+		{"Setup file name in backticks", "internal/cli/x_windows.go", "run `DefenseClawSetup-Enterprise-Standalone-x64.exe` /ensure", true, 1},
+		{"Setup short form", "internal/cli/x_windows.go", "run Setup /ensure again", true, 1},
+		{"Setup short form, uninstall", "internal/enterpriseunix/x.go", "then Setup /uninstall PURGE=1", false, 1},
+		{"Setup in Setup's own output", "cmd/defenseclaw-enterprise-setup/host_busy.go", "run Setup /ensure again when the computer is less busy", true, 0},
+		{"Setup rendered by the renderer", "internal/cli/x_windows.go", "run %s from an elevated PowerShell prompt", true, 0},
+		{"Setup named without a switch", "internal/cli/x_windows.go", "the next Setup run", true, 0},
+		{"the renderer's own doc", "internal/managed/windows_admin_cli.go", "Setup /repair", false, 0},
 		{"verb-only run, capitalised", "internal/cli/x_windows.go", "Run enterprise windows repair to unpack it", true, 1},
 		{"verb-only rerun", "internal/cli/x_windows.go", "rerun 'enterprise windows ensure'", true, 1},
 		{"verb-only Run:", "internal/cli/x_windows.go", "Run: enterprise acp setup --client zed", true, 1},
 		{"verb-only with", "internal/cli/x_windows.go", "store its key with `enterprise secret set`", true, 1},
 		{"verb-only by", "internal/cli/x_windows.go", "its key stored by `enterprise secret set`", true, 1},
-		{"verb-only or", "internal/cli/x.go", "run Setup /repair ATTESTCLAUDEEFFECTIVEPOLICY=1, or `enterprise windows repair --profile standalone`", false, 1},
+		{"verb-only or", "internal/cli/x.go", "run Setup /repair ATTESTCLAUDEEFFECTIVEPOLICY=1, or `enterprise windows repair --profile standalone`", false, 2},
 		{"a flag's rule is not an instruction", "internal/cli/x_windows.go", "--purge is valid only with enterprise windows uninstall", true, 0},
 		{"verb-only, two spaces", "internal/cli/x_windows.go", "run  enterprise  windows  ensure", true, 1},
 		{"verb-only run in elevated text of a portable file", "internal/cli/x.go",

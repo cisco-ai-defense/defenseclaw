@@ -730,10 +730,11 @@ func runWindowsEnterpriseLifecycle(
 				"only the installed CLI can uninstall from its own folder: %s would keep that folder "+
 					"in use, so the uninstall would stop halfway. From a prompt whose folder is outside %s "+
 					"(for example, cd /d C:\\ first), run \"%s\" enterprise windows uninstall --profile standalone, "+
-					"or run DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall",
+					"or run %s. %s",
 				filepath.Base(executable),
 				filepath.Dir(filepath.Dir(executable)),
 				filepath.Join(filepath.Dir(executable), "defenseclaw.exe"),
+				windowsEnterpriseSetupCommand("/uninstall"), managed.WindowsSetupSource,
 			))
 		}
 		if callerPID, ok := windowsEnterpriseSelfUninstallCaller(
