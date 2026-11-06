@@ -23,17 +23,24 @@ import (
 )
 
 func TestGAP0613SharedUnavailableSkillRootCoversEveryConnector(t *testing.T) {
-	assertSharedUnavailableSkillRootCoversEveryConnector(t, false)
+	assertSharedUnavailableSkillRootCoversEveryConnector(t, false, false)
 }
 
 // An explicit gateway.watcher skill dir replaces every connector's own
 // folders, so an unavailable one is admission coverage lost for every
 // configured connector, not only the primary one.
 func TestGAP0613ExplicitSharedSkillRootCoversEveryConnector(t *testing.T) {
-	assertSharedUnavailableSkillRootCoversEveryConnector(t, true)
+	assertSharedUnavailableSkillRootCoversEveryConnector(t, true, false)
 }
 
-func assertSharedUnavailableSkillRootCoversEveryConnector(t *testing.T, explicit bool) {
+// A connector named only under enterprise.machine_policy.connectors is
+// protected by a standalone managed gateway, so it depends on an explicit
+// skill dir exactly like an active connector does.
+func TestGAP0613ExplicitSkillRootCoversMachinePolicyOnlyConnector(t *testing.T) {
+	assertSharedUnavailableSkillRootCoversEveryConnector(t, true, true)
+}
+
+func assertSharedUnavailableSkillRootCoversEveryConnector(t *testing.T, explicit, policyOnly bool) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix ownership checks")
@@ -58,6 +65,12 @@ func assertSharedUnavailableSkillRootCoversEveryConnector(t *testing.T, explicit
 	cfg.Guardrail.Connector = "claudecode"
 	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
 		"claudecode": {}, "amp": {},
+	}
+	if policyOnly {
+		cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"claudecode": {}}
+		cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+		cfg.Enterprise.Profile = managed.ProfileStandalone
+		cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"amp": {}}
 	}
 	cfg.Gateway.Watcher.Enabled = true
 	cfg.Gateway.Watcher.Skill.Enabled = true
@@ -181,6 +194,29 @@ func TestGAP0613ExplicitRootsListEveryConfiguredConnector(t *testing.T) {
 				if !slices.ContainsFunc(list, func(c watcher.RootConsumer) bool {
 					return c.Kind == kind.kind && c.Path == kind.path && c.Connector == conn
 				}) {
+					t.Errorf("%s: explicit %s dir missing %s consumer: %+v", name, kind.kind, conn, list)
+				}
+			}
+		}
+	}
+	// A connector only the standalone machine policy names, and an enrolled
+	// connector with no folder of its own, also consume each explicit dir.
+	cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	cfg.Enterprise.Profile = managed.ProfileStandalone
+	cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"cursor": {}}
+	enrolled.connectors = []string{"claudecode", "kiro"}
+	_, _, _, src, consumers = resolveWatcherDirsForConnectors(cfg, conns, wcfg)
+	for name, list := range map[string][]watcher.RootConsumer{
+		"per-user": consumers,
+		"enrolled": enrolledRootConsumers(enrolled, consumers, src),
+	} {
+		want := []string{"cursor"}
+		if name == "enrolled" {
+			want = append(want, "kiro")
+		}
+		for _, conn := range want {
+			for _, kind := range []struct{ kind, path string }{{"skill", skillRoot}, {"plugin", pluginRoot}} {
+				if !slices.Contains(list, watcher.RootConsumer{Kind: kind.kind, Path: kind.path, Connector: conn}) {
 					t.Errorf("%s: explicit %s dir missing %s consumer: %+v", name, kind.kind, conn, list)
 				}
 			}
