@@ -64,6 +64,7 @@ func TestGAP0048Round2Variants(t *testing.T) {
 		hermesConfig:                           "hooks:\n  pre_tool_call:\n    - command: defenseclaw-hook\n",
 		filepath.Join(h.project, "safe.patch"): "--- a/notes.txt\n+++ b/notes.txt\n@@ -1 +1 @@\n-x\n+y\n",
 		filepath.Join(h.project, "hook.patch"): "--- a/.claude/settings.json\n+++ b/.claude/settings.json\n@@ -1 +1 @@\n-{}\n+{}\n",
+		filepath.Join(h.project, "unknown.patch"): "diff --git \"a/.claude/settings.json\" \"b/.claude/settings.json\"\nGIT binary patch\n",
 	} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
@@ -109,6 +110,8 @@ func TestGAP0048Round2Variants(t *testing.T) {
 		{"S10b git reset hard in project", "claudecode", "Bash", "shell", b("git reset --hard HEAD~1")},
 		{"S10c git apply in project", "claudecode", "Bash", "shell", b("git apply change.patch")},
 		{"S10d git apply registration patch", "claudecode", "Bash", "shell", b("git apply hook.patch")},
+		{"S10e git apply unknown patch section", "claudecode", "Bash", "shell", b("git apply unknown.patch")},
+		{"S10f git apply multiple patches", "claudecode", "Bash", "shell", b("git apply safe.patch hook.patch")},
 		{"S11 redirect via $HOME spelling", "claudecode", "Bash", "shell", b(`echo '{}' > "$HOME/.claude/settings.json"`)},
 		{"S12 redirect via absolute spelling", "claudecode", "Bash", "shell", b("echo '{}' > " + S(user))},
 		{"S13 folder link swap", "claudecode", "Bash", "shell", b("ln -sfn " + S(src) + " ~/.claude")},
