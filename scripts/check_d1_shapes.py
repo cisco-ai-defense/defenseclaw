@@ -180,6 +180,25 @@ def synthetic_network_operands(value: str) -> bool:
         host_header = re.fullmatch(r"\s*(?:Host|:authority|X-Forwarded-Host)\s*:\s*(.+)", header, re.I)
         return not host_header or approved_endpoint(host_header.group(1))
 
+    def approved_endpoint_option(option: str, endpoint: str) -> bool:
+        if option == "--resolve":
+            parts = endpoint.split(":", 2)
+            return (
+                len(parts) == 3
+                and parts[0] in ALLOWED_HOSTS
+                and parts[1].isdecimal()
+                and all(approved_endpoint(address) for address in parts[2].split(","))
+            )
+        if option == "--connect-to":
+            parts = endpoint.split(":")
+            return (
+                len(parts) == 4
+                and parts[0] in ALLOWED_HOSTS
+                and parts[2] in ALLOWED_HOSTS
+                and all(port.isdecimal() for port in (parts[1], parts[3]))
+            )
+        return approved_endpoint(endpoint)
+
     # Shell ANSI-C strings can construct an endpoint or header name from
     # escaped bytes. The public corpus uses literal network identities.
     if "$'" in value:
@@ -260,7 +279,7 @@ def synthetic_network_operands(value: str) -> bool:
                 continue
             if option in NETWORK_ENDPOINT_OPTIONS:
                 endpoint = inline if separator else (words[index + 1] if index + 1 < len(words) else "")
-                if not approved_endpoint(endpoint):
+                if not approved_endpoint_option(option, endpoint):
                     return False
                 index += 1 if separator else 2
                 continue
