@@ -257,7 +257,7 @@ func runWindowsCursorManagedTransaction(teardown bool, fn func() error) error {
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("enterprise hooks: refusing non-regular Cursor transaction lock: %s", lockPath)
 		}
-		if _, err := repairWindowsManagedMachineFile(lockPath, false, windowsManagedPolicyFileTrustCheck); err != nil {
+		if _, err := repairWindowsManagedLockFile(lockPath, false, windowsManagedPolicyFileTrustCheck); err != nil {
 			return fmt.Errorf("enterprise hooks: Cursor transaction lock is untrusted: %w", err)
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
@@ -364,7 +364,9 @@ func snapshotWindowsCursorManagedArtifacts() (windowsCursorManagedArtifacts, err
 // administrator-only descriptor on an existing rollback receipt whose owner or
 // DACL drifted, before its metadata is captured. Only a privileged caller can
 // repair; for anyone else, or when the repair is refused, the receipt is left
-// as it is and judged by the validators.
+// as it is and judged by the validators. On standalone a receipt an untrusted
+// account can write or owns is refused by repairWindowsManagedMachineFile and
+// left as it is, so the readers refuse it (g582 review 3 M2).
 func repairWindowsCursorPrivateReceiptProtection(path string) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
