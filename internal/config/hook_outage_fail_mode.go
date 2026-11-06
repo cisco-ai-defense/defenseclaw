@@ -81,11 +81,18 @@ func RegisterPinnedRulePackPostureCheck(check func(dir, pin string) (string, boo
 // A config-only caller without a loaded generation reads the manifest itself.
 // A real built-in selection keeps its tier when no policy directory has been
 // resolved; a custom pack may use the same name and takes its own posture.
+// A selected custom_packs entry that fails CustomRulePackError is strict.
 func (c *Config) HookPolicyTierForConnector(connector string) string {
 	if c == nil {
 		return HookPolicyTierDefault
 	}
 	ref := c.EffectiveRulePackRefForConnector(connector)
+	if c.brokenCustomRulePackSelected(ref) {
+		// A broken custom_packs entry is a config error, whatever its name:
+		// the gateway loads its built-in fallback and status names the
+		// error, but it is no evidence of a posture that opens an outage.
+		return HookPolicyTierStrict
+	}
 	dir := strings.TrimSpace(c.ResolveRulePackDir(ref))
 	if dir == "" {
 		dir = strings.TrimSpace(ref.Dir)
@@ -96,7 +103,7 @@ func (c *Config) HookPolicyTierForConnector(connector string) string {
 		}
 		return packFolderPosture(dir)
 	}
-	if custom, selected := c.Guardrail.CustomPacks[ref.Name]; selected && strings.TrimSpace(custom.Digest) != "" {
+	if custom, selected := c.UsableCustomRulePack(ref.Name); selected && strings.TrimSpace(custom.Digest) != "" {
 		// A standalone hook has no rule generation. Require both a valid
 		// loaded pack and its selected content pin before its posture can
 		// set an outage tier.

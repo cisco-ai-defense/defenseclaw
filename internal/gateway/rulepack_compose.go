@@ -129,8 +129,7 @@ func loadGlobalRulePack(cache *guardrail.RulePackCache, cfg *config.Config, scop
 // pack, whose absence stays a load error.
 func bundledDefaultRulePack(cfg *config.Config, ref config.RulePackRef) bool {
 	if ref.Name != "" {
-		_, custom := cfg.Guardrail.CustomPacks[ref.Name]
-		return ref.Name == "default" && !custom
+		return cfg.BuiltinRulePackFor(ref.Name) == "default"
 	}
 	dir := filepath.Clean(strings.TrimSpace(ref.Dir))
 	for _, root := range []string{
@@ -183,7 +182,8 @@ func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s ru
 	if err != nil {
 		return nil, err
 	}
-	if custom, ok := cfg.Guardrail.CustomPacks[s.ref.Name]; ok && s.ref.Name != "" {
+	custom, isCustom := cfg.UsableCustomRulePack(s.ref.Name)
+	if isCustom {
 		// The pin covers the pack's own files (FilesDigest), not the
 		// embedded defaults it inherits for missing components.
 		got := "sha256:" + base.FilesDigest()
@@ -204,15 +204,13 @@ func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s ru
 	// A read-only v8 load pins the original custom pack, then runs the same
 	// rebase as a committed migration in this generation. Keep the disk pin
 	// check above: an edited source pack still refuses the load.
-	if cfg.RuntimeV8RulePackRebase && s.ref.Name != "" {
-		if _, custom := cfg.Guardrail.CustomPacks[s.ref.Name]; custom {
-			base, err = guardrail.RebaseLoadedRulePack(s.dir, base)
-			if err != nil {
-				return nil, fmt.Errorf("%s rule pack %q: rebase the 0.8.x pack in memory: %w", scope, s.dir, err)
-			}
+	if cfg.RuntimeV8RulePackRebase && isCustom {
+		base, err = guardrail.RebaseLoadedRulePack(s.dir, base)
+		if err != nil {
+			return nil, fmt.Errorf("%s rule pack %q: rebase the 0.8.x pack in memory: %w", scope, s.dir, err)
 		}
 	}
-	if _, custom := cfg.Guardrail.CustomPacks[s.ref.Name]; custom && s.ref.Name != "" {
+	if isCustom {
 		// A custom pack the 0.8.x upgrade of 1.0.0 to 1.0.3 rebased carries
 		// no migrated_literal marks: its migration record names the rules.
 		base = guardrail.MarkMigratedLiteralRules(base, config.ExpressedRulePackRules(migrationConfigPath(cfg)))
@@ -242,6 +240,22 @@ func (s *Sidecar) reportUnrebasedRulePacks(ctx context.Context) {
 		fmt.Fprintln(os.Stderr, "[guardrail] WARNING: "+failure)
 		_ = s.logger.LogActionCtxSeverity(ctx, string(audit.ActionUpgrade), "rule-pack",
 			"rule_pack_rebase=failed "+failure, "HIGH")
+	}
+}
+
+// reportBrokenCustomRulePacks warns at start of each guardrail.custom_packs
+// entry that fails config.CustomRulePackError: a selection of it loads its
+// built-in fallback pack, and status names the same error.
+func (s *Sidecar) reportBrokenCustomRulePacks(ctx context.Context) {
+	cfg := s.currentConfig()
+	if cfg == nil || s.logger == nil {
+		return
+	}
+	for _, problem := range cfg.CustomRulePackErrors() {
+		failure := problem.Error() + "; a setting that selects it loads its built-in pack"
+		fmt.Fprintln(os.Stderr, "[guardrail] WARNING: "+failure)
+		_ = s.logger.LogActionCtxSeverity(ctx, string(audit.ActionConfigUpdate), "rule-pack",
+			"custom_pack=invalid "+failure, "HIGH")
 	}
 }
 

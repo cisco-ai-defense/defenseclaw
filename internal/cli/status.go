@@ -515,6 +515,11 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	printGatewayStatusBanner()
 	printGatewayKV("Started", snap.StartedAt.Format(time.RFC3339))
 	printGatewayKV("Uptime", formatDuration(uptime))
+	for _, problem := range cfg.CustomRulePackErrors() {
+		// The gateway runs the selection's built-in pack meanwhile.
+		Warn("Config error: " + problem.Error())
+		Subhead("A setting that selects this pack loads its built-in pack until the entry is fixed")
+	}
 	if !cfg.StandaloneEnterprise() && !managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) &&
 		gatewayRunsReplacedBinary() {
 		Warn("This account's gateway is running a binary that was replaced after it started")

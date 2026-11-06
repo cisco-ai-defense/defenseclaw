@@ -308,16 +308,18 @@ func TestStandaloneGatewayConfigCheckGrantsOnAnExistingFolder(t *testing.T) {
 // GAP-0039: a connector that inherits the selected custom pack is not the key
 // a refusal names, and a custom_packs entry nothing selects is not loaded.
 func TestStandaloneGatewayRulePackDirsNameTheKeysTheAdminWrote(t *testing.T) {
+	// A selected entry must be a readable folder (config.CustomRulePackError).
+	acme, unused := t.TempDir(), t.TempDir()
 	cfg := &config.Config{}
 	cfg.Guardrail.RulePack = "acme"
 	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{
-		"acme":   {Path: "/packs/acme"},
-		"unused": {Path: "/packs/unused"},
+		"acme":   {Path: acme},
+		"unused": {Path: unused},
 	}
 	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"amp": {}, "codex": {}}
 	got := standaloneGatewayRulePackDirs(cfg)
-	if len(got) != 1 || got[0].label != "guardrail.rule_pack" || got[0].dir != "/packs/acme" {
-		t.Fatalf("rule pack checks = %+v, want one guardrail.rule_pack /packs/acme", got)
+	if len(got) != 1 || got[0].label != "guardrail.rule_pack" || got[0].dir != acme {
+		t.Fatalf("rule pack checks = %+v, want one guardrail.rule_pack %s", got, acme)
 	}
 }
 
