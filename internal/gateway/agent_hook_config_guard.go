@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"sort"
@@ -756,7 +757,7 @@ func agentHookConfigTurnsOff(format string, before []byte, beforeExists bool, af
 			return reason
 		}
 	case gatewayconnector.AgentHookConfigKiroSettings:
-		if old != nil && old["chat.defaultAgent"] != updated["chat.defaultAgent"] {
+		if old != nil && !reflect.DeepEqual(old["chat.defaultAgent"], updated["chat.defaultAgent"]) {
 			return "changes the Kiro default agent"
 		}
 	}
@@ -764,7 +765,7 @@ func agentHookConfigTurnsOff(format string, before []byte, beforeExists bool, af
 		oldEnv, _ := old["env"].(map[string]any)
 		newEnv, _ := updated["env"].(map[string]any)
 		for key, value := range newEnv {
-			if agentHookConfigReservedEnv(key) && oldEnv[key] != value {
+			if agentHookConfigReservedEnv(key) && !reflect.DeepEqual(oldEnv[key], value) {
 				return "changes a reserved hook process environment variable"
 			}
 		}
@@ -787,7 +788,7 @@ func agentHookConfigReservedEnv(key string) bool {
 		return true
 	}
 	switch upper {
-	case "PATH", "HOME", "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "IFS", "CDPATH", "GLOBIGNORE", "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "NODE_OPTIONS", "NODE_PATH", "RUBYOPT", "PERL5OPT", "ZDOTDIR", "COMSPEC", "PATHEXT":
+	case "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "NODE_OPTIONS":
 		return true
 	}
 	return false
