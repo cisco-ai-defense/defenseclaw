@@ -67,6 +67,16 @@ def test_both_recovery_sites_stop_after_the_activation_check() -> None:
         # The stop returns the restored deployment's status.
         after = code[call : call + 700]
         assert "Get-DefenseClawRecoveryRestoredOtherReleaseResult" in after
+        assert "-Action $Action" in after[after.index("Get-DefenseClawRecoveryRestoredOtherReleaseResult") :]
+    # An installed-CLI Uninstall stops there too and fails with the next step
+    # instead of removing a restored release with this module (g649 review F4).
+    stop = _code(_function(text, "Test-DefenseClawRecoveryRestoredOtherRelease"))
+    assert "$Action -notin @('Repair', 'Uninstall')" in stop
+    assert "$Sources.ContainsKey('gateway')" in stop
+    result = _code(_function(text, "Get-DefenseClawRecoveryRestoredOtherReleaseResult"))
+    uninstall = result.index("if ($Action -eq 'Uninstall') {")
+    assert uninstall < result.index("throw", uninstall) < result.index("Get-DefenseClawLifecycleStatus")
+    assert "nothing was removed. Run the same uninstall again" in result
 
 
 def test_module_readmits_the_pinned_pair_only_for_a_hash_pinned_record() -> None:

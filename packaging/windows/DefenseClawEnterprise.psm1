@@ -23647,7 +23647,11 @@ function Test-DefenseClawRecoveryRestoredOtherRelease {
         failed 1603). Repair then ends with the recovery: Setup re-plans an
         upgrade with its own payload, and the installed CLI reports the
         rollback. A Repair that brings its own gateway restages the payload
-        and continues, as before.
+        and continues, as before. An Uninstall from the installed CLI (Add or
+        Remove Programs) stops the same way, before it removes anything with
+        this module's flags; run again, it uses the restored release's own
+        installer (g649 review F4). Setup /uninstall brings its gateway and
+        continues.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -23655,7 +23659,7 @@ function Test-DefenseClawRecoveryRestoredOtherRelease {
         [Parameter(Mandatory)][string]$Action,
         [hashtable]$Sources = @{}
     )
-    if ($Action -ne 'Repair' -or
+    if ($Action -notin @('Repair', 'Uninstall') -or
         -not (Test-DefenseClawStandaloneProfile) -or
         -not [bool]$Recovery.recovered -or
         [bool]$Recovery.fresh_install_rollback -or
@@ -23675,13 +23679,23 @@ function Get-DefenseClawRecoveryRestoredOtherReleaseResult {
     <#
         The result of a Repair that stopped after its recovery restored another
         release (Test-DefenseClawRecoveryRestoredOtherRelease): the restored
-        deployment's status, with a warning that names what happened.
+        deployment's status, with a warning that names what happened. An
+        Uninstall that stopped there fails with the next step: nothing was
+        removed, and the same uninstall run again now uses the restored
+        release's installer (g649 review F4).
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
-        [Parameter(Mandatory)][string]$GuardianServiceName
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [string]$Action = 'Repair'
     )
+    if ($Action -eq 'Uninstall') {
+        throw (
+            'uninstall rolled back an interrupted lifecycle change and restored the release it replaced; ' +
+            'nothing was removed. Run the same uninstall again: it now uses the restored release''s own installer'
+        )
+    }
     $result = Get-DefenseClawLifecycleStatus `
         -Action 'Repair' `
         -Layout $Layout `
@@ -23733,14 +23747,24 @@ function Write-DefenseClawTransactionLifecyclePins {
             throw 'transaction lifecycle pins need the SHA-256 of the installer and module sources'
         }
     }
-    $path = Microsoft.PowerShell.Management\Join-Path `
-        ([IO.Path]::GetDirectoryName($SnapshotPath)) `
-        'lifecycle-pins.json'
-    Write-DefenseClawJsonAtomic -Value ([ordered]@{
+    $pins = [ordered]@{
         schema_version = 1
         installer = $installer
         module = $module
-    }) -Path $path
+    }
+    if ($Sources.ContainsKey('cli')) {
+        # The CLI is staged right after the pair; an installed-CLI uninstall
+        # runs it as its native cleanup executable (g649 review F4).
+        $cli = ([string]$Sources['cli'].sha256).ToLowerInvariant()
+        if ($cli -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'transaction lifecycle pins need the SHA-256 of the cli source'
+        }
+        $pins['cli'] = $cli
+    }
+    $path = Microsoft.PowerShell.Management\Join-Path `
+        ([IO.Path]::GetDirectoryName($SnapshotPath)) `
+        'lifecycle-pins.json'
+    Write-DefenseClawJsonAtomic -Value $pins -Path $path
     Set-DefenseClawPathAcl `
         -Path $path `
         -Kind AdminFile `
@@ -40829,6 +40853,7 @@ function Invoke-DefenseClawPreLayoutRecovery {
                         handled = $true
                         result = (Get-DefenseClawRecoveryRestoredOtherReleaseResult `
                             -Layout $Layout `
+                            -Action $Action `
                             -GatewayServiceName $GatewayServiceName `
                             -GuardianServiceName $GuardianServiceName)
                     }
@@ -46248,6 +46273,28 @@ function Initialize-DefenseClawRecordedPayloadTrust {
             $script:DefenseClawPinnedPayloadSHA256[$leaf] = $entry[1]
         }
     }
+    # The CLI the transaction staged right after the pair, by the same rule
+    # and only while the file on disk is it: an installed-CLI uninstall runs
+    # it as its native cleanup executable (g649 review F4).
+    $cliPath = [string]$Layout['CLIPath']
+    if ([string]::IsNullOrEmpty([string]$transactionPins.cli) -or
+        [string]::IsNullOrWhiteSpace($cliPath) -or
+        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $cliPath -PathType Leaf)) {
+        return
+    }
+    $cliOnDisk = (
+        Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $cliPath -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ($cliOnDisk -cne [string]$transactionPins.cli) {
+        return
+    }
+    $cliLeaf = [IO.Path]::GetFileName($cliPath).ToLowerInvariant()
+    $recordedCli = $Metadata.hashes.PSObject.Properties['cli']
+    if (-not $script:DefenseClawPinnedPayloadSHA256.ContainsKey($cliLeaf) -or
+        ($null -ne $recordedCli -and
+            $script:DefenseClawPinnedPayloadSHA256[$cliLeaf] -ceq ([string]$recordedCli.Value).ToLowerInvariant())) {
+        $script:DefenseClawPinnedPayloadSHA256[$cliLeaf] = [string]$transactionPins.cli
+    }
 }
 
 function Get-DefenseClawPendingTransactionLifecyclePins {
@@ -46309,9 +46356,18 @@ function Get-DefenseClawPendingTransactionLifecyclePins {
             $null -eq $module -or [string]$module.Value -cnotmatch '^[0-9a-f]{64}$') {
             return $null
         }
+        $cli = $pins.PSObject.Properties['cli']
+        $cliDigest = ''
+        if ($null -ne $cli) {
+            if ([string]$cli.Value -cnotmatch '^[0-9a-f]{64}$') {
+                return $null
+            }
+            $cliDigest = [string]$cli.Value
+        }
         return [pscustomobject]@{
             installer = [string]$installer.Value
             module = [string]$module.Value
+            cli = $cliDigest
         }
     }
     catch {
@@ -47386,6 +47442,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                         -Sources $sources) {
                     return Get-DefenseClawRecoveryRestoredOtherReleaseResult `
                         -Layout $layout `
+                        -Action $Action `
                         -GatewayServiceName $GatewayServiceName `
                         -GuardianServiceName $GuardianServiceName
                 }

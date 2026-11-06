@@ -476,6 +476,7 @@ else {
             'installer' { return $Layout.InstallerPath }
             'module' { return $Layout.ModulePath }
             'gateway' { return $Layout.GatewayPath }
+            'cli' { return $Layout.CLIPath }
             default { throw "unknown managed artifact: $Name" }
         }
     }
@@ -508,6 +509,7 @@ else {
             InstallerPath = [IO.Path]::Combine($libexec, 'install-enterprise.ps1')
             ModulePath = [IO.Path]::Combine($libexec, 'DefenseClawEnterprise.psm1')
             GatewayPath = [IO.Path]::Combine($root, 'defenseclaw-gateway.exe')
+            CLIPath = [IO.Path]::Combine($root, 'defenseclaw.exe')
         }
         $pinsPath = [IO.Path]::Combine($transaction, 'lifecycle-pins.json')
         function Set-TestText([string]$Path, [string]$Text) { [IO.File]::WriteAllText($Path, $Text, $utf8) }
@@ -523,10 +525,12 @@ else {
         $oldInstallerHash = Get-TextSHA256 $oldInstaller; $newInstallerHash = Get-TextSHA256 $newInstaller
         $oldModuleHash = Get-TextSHA256 $oldModule; $newModuleHash = Get-TextSHA256 $newModule
         $gatewayHash = 'e' * 64
+        $oldCli = '# 1.0.8 cli'; $newCli = '# 1.0.9 cli'
+        $oldCliHash = Get-TextSHA256 $oldCli; $newCliHash = Get-TextSHA256 $newCli
         function Write-ModuleJson([string]$Path, $Document) {
             [IO.File]::WriteAllText($Path, ($Document | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 4), $utf8)
         }
-        Write-ModuleJson $pinsPath ([ordered]@{ schema_version = 1; installer = $newInstallerHash; module = $newModuleHash })
+        Write-ModuleJson $pinsPath ([ordered]@{ schema_version = 1; installer = $newInstallerHash; module = $newModuleHash; cli = $newCliHash })
 
         # Reader.
         if ($null -ne (Get-DefenseClawPendingTransactionLifecyclePins -Layout $layout)) {
@@ -534,9 +538,14 @@ else {
         }
         Write-ModuleJson $layout.PendingPath @{ snapshot = [IO.Path]::Combine($transaction, 'snapshot.json') }
         $read = Get-DefenseClawPendingTransactionLifecyclePins -Layout $layout
-        if ($null -eq $read -or $read.installer -cne $newInstallerHash -or $read.module -cne $newModuleHash) {
+        if ($null -eq $read -or $read.installer -cne $newInstallerHash -or $read.module -cne $newModuleHash -or $read.cli -cne $newCliHash) {
             $failures.Add('module pins reader: trusted pins of the pending transaction were not returned')
         }
+        Write-ModuleJson $pinsPath ([ordered]@{ schema_version = 1; installer = $newInstallerHash; module = $newModuleHash; cli = 'not-a-digest' })
+        if ($null -ne (Get-DefenseClawPendingTransactionLifecyclePins -Layout $layout)) {
+            $failures.Add('module pins reader: pins with a malformed cli digest were returned')
+        }
+        Write-ModuleJson $pinsPath ([ordered]@{ schema_version = 1; installer = $newInstallerHash; module = $newModuleHash; cli = $newCliHash })
         $script:UntrustedWriteAce = $pinsPath
         if ($null -ne (Get-DefenseClawPendingTransactionLifecyclePins -Layout $layout)) {
             $failures.Add('module pins reader: pins with a Users write ACE were returned')
@@ -560,8 +569,9 @@ else {
         # Re-admission (swap).
         $metadata = [pscustomobject]@{
             trust_mode = 'hash_pinned'
-            hashes = [pscustomobject]@{ installer = $oldInstallerHash; module = $oldModuleHash; gateway = $gatewayHash }
+            hashes = [pscustomobject]@{ installer = $oldInstallerHash; module = $oldModuleHash; gateway = $gatewayHash; cli = $oldCliHash }
         }
+        Set-TestText $layout.CLIPath $oldCli
         function Test-Swap([string]$Label, [string]$InstallerText, [string]$ModuleText, [string]$WantInstaller, [string]$WantModule, $Metadata = $metadata, [hashtable]$Preset = @{}) {
             Set-TestText $layout.InstallerPath $InstallerText
             Set-TestText $layout.ModulePath $ModuleText
@@ -587,6 +597,21 @@ else {
             $metadata @{ 'defenseclawenterprise.psm1' = $manifestModule })
         $authenticodeMetadata = [pscustomobject]@{ trust_mode = 'authenticode'; hashes = $metadata.hashes }
         [void](Test-Swap 'swap: an Authenticode deployment admits nothing by hash' $newInstaller $newModule '' '' $authenticodeMetadata)
+        # The CLI follows the pair, only while the file on disk is its pin (g649 review F4).
+        Set-TestText $layout.CLIPath $newCli
+        $map = Test-Swap 'swap: the pair and the pinned CLI' $newInstaller $newModule $newInstallerHash $newModuleHash
+        if ([string]$map['defenseclaw.exe'] -cne $newCliHash) {
+            $failures.Add("swap: the pinned CLI on disk was not admitted ('$([string]$map['defenseclaw.exe'])')")
+        }
+        $map = Test-Swap 'swap: the pinned CLI without the pair' $newInstaller $oldModule $oldInstallerHash $oldModuleHash
+        if ([string]$map['defenseclaw.exe'] -cne $oldCliHash) {
+            $failures.Add('swap: the pinned CLI was admitted without the pinned pair')
+        }
+        Set-TestText $layout.CLIPath $oldCli
+        $map = Test-Swap 'swap: the pair with the recorded CLI' $newInstaller $newModule $newInstallerHash $newModuleHash
+        if ([string]$map['defenseclaw.exe'] -cne $oldCliHash) {
+            $failures.Add('swap: a CLI that is not the pinned one replaced the recorded pin')
+        }
         Remove-Item -LiteralPath $layout.PendingPath -Force
         [void](Test-Swap 'swap: no pending transaction keeps the recorded pair' $newInstaller $newModule $oldInstallerHash $oldModuleHash)
 
@@ -596,12 +621,13 @@ else {
         $sources = @{
             installer = @{ sha256 = $newInstallerHash.ToUpperInvariant() }
             module = @{ sha256 = $newModuleHash }
+            cli = @{ sha256 = $newCliHash }
             gateway = @{ sha256 = $gatewayHash }
         }
         $script:AclStamps.Clear()
         Write-DefenseClawTransactionLifecyclePins -SnapshotPath $snapshotPath -Sources $sources
         $written = Get-Content -LiteralPath $pinsPath -Raw | ConvertFrom-Json
-        if ([string]$written.schema_version -cne '1' -or $written.installer -cne $newInstallerHash -or $written.module -cne $newModuleHash) {
+        if ([string]$written.schema_version -cne '1' -or $written.installer -cne $newInstallerHash -or $written.module -cne $newModuleHash -or $written.cli -cne $newCliHash) {
             $failures.Add("pins write: wrote '$(Get-Content -LiteralPath $pinsPath -Raw)'")
         }
         if ($script:AclStamps.Count -ne 1 -or $script:AclStamps[0] -cne "AdminFile $pinsPath") {
@@ -629,6 +655,17 @@ else {
                 $failures.Add('pins write: a malformed source digest left a pins file')
             }
         }
+        try {
+            Write-DefenseClawTransactionLifecyclePins -SnapshotPath $snapshotPath -Sources @{
+                installer = @{ sha256 = $newInstallerHash }; module = @{ sha256 = $newModuleHash }; cli = @{ sha256 = '' }
+            }
+            $failures.Add('pins write: a malformed cli digest was accepted')
+        }
+        catch {
+            if (Test-Path -LiteralPath $pinsPath) {
+                $failures.Add('pins write: a malformed cli digest left a pins file')
+            }
+        }
 
         # Repair stop after a recovery that restored another release.
         Set-TestText $layout.ModulePath $oldModule
@@ -642,6 +679,8 @@ else {
         }
         Test-Stop 'Repair that restored another module' $true
         Test-Stop 'Upgrade' $false 'Upgrade'
+        Test-Stop 'installed-CLI Uninstall that restored another module' $true 'Uninstall'
+        Test-Stop 'Setup Uninstall that brings its own gateway' $false 'Uninstall' $recovered @{ gateway = @{ sha256 = $gatewayHash } }
         Test-Stop 'Install' $false 'Install'
         Test-Stop 'fresh install rollback' $false 'Repair' ([pscustomobject]@{ recovered = $true; fresh_install_rollback = $true })
         Test-Stop 'nothing recovered' $false 'Repair' ([pscustomobject]@{ recovered = $false; fresh_install_rollback = $false })
