@@ -165,26 +165,7 @@ func DiscoverTrusted(root string, directoryLimit int) ([]Entry, error) {
 	if !IsRoot(root) && !IsProfileRoot(root) {
 		return nil, fmt.Errorf("not a Hermes skills root: %s", root)
 	}
-	resolved, err := skillrootsafe.Resolve(root, evalSymlinks)
-	if err != nil {
-		return nil, err
-	}
-	walkRoot := root
-	if info, err := os.Lstat(root); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		walkRoot = resolved
-	}
-	entries, err := discover(walkRoot, walkRoot, directoryLimit)
-	if err != nil || samePath(walkRoot, root) {
-		return entries, err
-	}
-	for i := range entries {
-		relative, relErr := filepath.Rel(walkRoot, entries[i].Path)
-		if relErr != nil {
-			return nil, relErr
-		}
-		entries[i].Path = filepath.Join(root, relative)
-	}
-	return entries, nil
+	return discoverTrusted(root, root, directoryLimit)
 }
 
 // DiscoverUnderTrusted applies the same root proof to an event subtree. A
@@ -202,7 +183,42 @@ func DiscoverUnderTrusted(root, subtree string, directoryLimit int) ([]Entry, er
 			return nil, fmt.Errorf("linked or unavailable Hermes skill subtree: %s", subtree)
 		}
 	}
-	return discover(root, subtree, directoryLimit)
+	return discoverTrusted(root, subtree, directoryLimit)
+}
+
+// Discover through the validated physical root so the vendor digest proof
+// sees ordinary paths even when a configured ancestor is linked. Keep the
+// configured spelling in returned entries for watcher identity and events.
+func discoverTrusted(root, subtree string, directoryLimit int) ([]Entry, error) {
+	walkRoot, err := skillrootsafe.Resolve(root, evalSymlinks)
+	if err != nil {
+		return nil, err
+	}
+	absoluteRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	absoluteSubtree, err := filepath.Abs(subtree)
+	if err != nil {
+		return nil, err
+	}
+	relative, err := filepath.Rel(absoluteRoot, absoluteSubtree)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("Hermes subtree outside skills root: %s", subtree)
+	}
+	walkSubtree := filepath.Join(walkRoot, relative)
+	entries, err := discover(walkRoot, walkSubtree, directoryLimit)
+	if err != nil {
+		return nil, err
+	}
+	for i := range entries {
+		relative, err := filepath.Rel(walkRoot, entries[i].Path)
+		if err != nil {
+			return nil, err
+		}
+		entries[i].Path = filepath.Join(root, relative)
+	}
+	return entries, nil
 }
 
 // profileRootUnlinked is canonicalPath for a profile's skills root. The
