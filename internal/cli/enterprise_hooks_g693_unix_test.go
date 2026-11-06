@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,6 +144,66 @@ func TestGAP0693FreshRecordRetiresStaleMacAccountOnce(t *testing.T) {
 		if verify.AuthorizationErr != nil || verify.Failures != 1 || len(verify.Excused) != 1 || !verify.Rows[1].OK {
 			t.Fatalf("pass %d verify = %+v", pass, verify)
 		}
+	}
+}
+
+// A reused name must not keep the old UID's authorization when the
+// guardian's process resolver still answers with the previous account.
+func TestGAP0693ReusedNameRetiresRecordedUID(t *testing.T) {
+	oldUID, gid := os.Getuid(), os.Getgid()
+	for _, tc := range []struct {
+		name       string
+		localUID   int
+		localErr   error
+		uidGone    bool
+		wantRetire bool
+	}{
+		{name: "fresh local name has another UID", localUID: oldUID + 1, wantRetire: true},
+		{name: "fresh directory search confirms old UID left", localErr: errors.New("local listing unavailable"), uidGone: true, wantRetire: true},
+		{name: "same account remains", localUID: oldUID},
+		{name: "uncertain local listing", localErr: errors.New("local listing unavailable")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+			f := newStandaloneFixture(t, resolver)
+			home := f.home(t, "reused", 0o700)
+			resolver.accounts["reused"] = unixidentity.Account{Name: "reused", UID: oldUID, GID: gid, Home: home}
+			f.writeManifest(t, enterprisehooks.ManifestTarget{User: "reused", UserHome: home,
+				UID: &oldUID, GID: &gid, Connector: "hermes"})
+			f.writeLedger(t, protectedRow("reused", home, "hermes"))
+			previousLocal, previousNameGone, previousUIDGone := enterpriseHooksEnumerateLocalAccounts,
+				enterpriseHookGuardianFreshAccountGone, enterpriseHookRecordedAccountGone
+			t.Cleanup(func() {
+				enterpriseHooksEnumerateLocalAccounts = previousLocal
+				enterpriseHookGuardianFreshAccountGone = previousNameGone
+				enterpriseHookRecordedAccountGone = previousUIDGone
+			})
+			enterpriseHooksEnumerateLocalAccounts = func(context.Context) (map[string]int, error) {
+				if tc.localErr != nil {
+					return nil, tc.localErr
+				}
+				return map[string]int{"reused": tc.localUID}, nil
+			}
+			enterpriseHookGuardianFreshAccountGone = func(context.Context, string) bool { return false }
+			enterpriseHookRecordedAccountGone = func(_ context.Context, user string, uid int) bool {
+				if user != "reused" || uid != oldUID {
+					t.Fatalf("fresh UID check asked for %q uid %d", user, uid)
+				}
+				return tc.uidGone
+			}
+			run, err := runEnterpriseHookReconcileOnce(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			requireLedgerOrStateTrust(t, run.StateErr)
+			if len(run.Rows) != 1 || run.Rows[0].Removed != tc.wantRetire ||
+				run.Rows[0].RevokeProtection != tc.wantRetire || run.Rows[0].OK == tc.wantRetire {
+				t.Fatalf("removed disposition = %+v, want retired=%v", run.Rows, tc.wantRetire)
+			}
+			if got := len(f.ledger(t).ProtectedTargets); (got == 0) != tc.wantRetire {
+				t.Fatalf("protected targets = %d, want retired=%v", got, tc.wantRetire)
+			}
+		})
 	}
 }
 

@@ -71,7 +71,7 @@ var enterpriseHookGuardianFreshAccountGone = unixidentity.AccountRecordGone
 func enterpriseHookGuardianTargetRemoved(
 	ctx context.Context,
 	target enterprisehooks.ManifestTarget,
-	_ enterpriseHookReconcileRow,
+	row enterpriseHookReconcileRow,
 	resolveErr error,
 ) bool {
 	user := strings.TrimSpace(target.User)
@@ -83,7 +83,25 @@ func enterpriseHookGuardianTargetRemoved(
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if enterpriseHookGuardianFreshAccountGone(checkCtx, user) {
+	recordedUID := row.UID
+	if target.UID != nil {
+		recordedUID = *target.UID
+	}
+	if recordedUID > 0 {
+		if enterpriseHookRecordedAccountGone(checkCtx, user, recordedUID) {
+			return true
+		}
+		// A fresh local record under the same name but another UID replaces
+		// this target's identity even when the process resolver is stale.
+		local, err := enterpriseHooksEnumerateLocalAccounts(checkCtx)
+		if err == nil {
+			if currentUID, present := local[user]; present && currentUID > 0 && currentUID != recordedUID {
+				return true
+			}
+		}
+	}
+	if (recordedUID <= 0 || errors.Is(resolveErr, errEnterpriseHookTargetNotFound)) &&
+		enterpriseHookGuardianFreshAccountGone(checkCtx, user) {
 		return true
 	}
 	if !errors.Is(resolveErr, errEnterpriseHookTargetNotFound) {
