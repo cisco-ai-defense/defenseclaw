@@ -14,7 +14,8 @@ import (
 // RunClaudeCodeLauncherGuard runs launcher with hookArgs and passes its stdin,
 // stdout, stderr and exit code through, as the cmd.exe guard of the other
 // Claude Code events does. When the launcher is missing or cannot start it
-// prints the guard sentence and exits 2, which Claude Code treats as a block;
+// prints a guard sentence that says which and exits 2, which Claude Code
+// treats as a block;
 // a direct start of a missing launcher was a non-blocking error that let the
 // tool call run unchecked.
 func RunClaudeCodeLauncherGuard(launcher string, hookArgs []string, stdin io.Reader, stdout, stderr io.Writer) int {

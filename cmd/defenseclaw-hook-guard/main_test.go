@@ -104,22 +104,31 @@ func TestHookGuardRunsTheLauncherWithTheHookArgvAndPassesItsAnswer(t *testing.T)
 }
 
 // A tool call of a turn that began before antivirus removed the launcher is
-// blocked, also when the launcher is there but cannot start (GAP-1011).
+// blocked, also when the launcher is there but cannot start (GAP-1011). The
+// sentence says "missing" only when nothing is there (cowork-1-0-8 GAP-0086).
 func TestHookGuardBlocksWhenTheLauncherIsMissingOrCannotStart(t *testing.T) {
 	dir := t.TempDir()
 	directory := filepath.Join(dir, "dir", "defenseclaw-hook.exe")
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for name, launcher := range map[string]string{
-		"missing":     filepath.Join(dir, "gone", "defenseclaw-hook.exe"),
-		"a directory": directory,
+	notAProgram := filepath.Join(dir, "damaged", "defenseclaw-hook.exe")
+	if err := os.MkdirAll(filepath.Dir(notAProgram), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(notAProgram, []byte("this is not a program file\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct{ launcher, sentence string }{
+		"missing":       {filepath.Join(dir, "gone", "defenseclaw-hook.exe"), hookguard.MissingMessage},
+		"a directory":   {directory, hookguard.CannotStartMessage},
+		"not a program": {notAProgram, hookguard.CannotStartMessage},
 	} {
 		t.Run(name, func(t *testing.T) {
-			code, stdout, stderr := runGuard([]string{"launcher-guard", launcher, "hook", "--connector", "claudecode"},
+			code, stdout, stderr := runGuard([]string{"launcher-guard", tc.launcher, "hook", "--connector", "claudecode"},
 				`{"session_id":"s","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo ok"}}`)
-			if code != 2 || stdout != "" || strings.TrimSpace(stderr) != hookguard.MissingMessage {
-				t.Fatalf("exit %d, stdout %q, stderr %q; want exit 2 with the guard sentence", code, stdout, stderr)
+			if code != 2 || stdout != "" || strings.TrimSpace(stderr) != tc.sentence {
+				t.Fatalf("exit %d, stdout %q, stderr %q; want exit 2 with %q", code, stdout, stderr, tc.sentence)
 			}
 		})
 	}
