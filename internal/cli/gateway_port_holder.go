@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -82,6 +83,8 @@ func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string 
 	switch {
 	case holderErr == nil && holder.UID >= 0 && holder.UID != ownUID:
 		return fmt.Sprintf("%s is held by %s, not by this account's gateway", addr, who)
+	// Windows names no UID for the holder or this account (both -1); its
+	// platform proof compares the process token's user instead.
 	case holderErr == nil && holder.UID == ownUID && sameHomeGatewayProcess(holder.PID, config.DefaultDataPath()):
 		return ""
 	case holderErr != nil:
@@ -107,10 +110,64 @@ func sameHomeGatewayProcess(pid int, home string) bool {
 		return false
 	}
 	executable, err := gatewayExecutable()
-	if err != nil || filepath.Base(executable) != "defenseclaw-gateway" {
+	if err != nil || !gatewayExecutableName(executable, runtime.GOOS) {
 		return false
 	}
 	return sameHomeGatewayProcessPlatform(pid, home, executable)
+}
+
+// gatewayExecutableName reports whether executable is the gateway program:
+// defenseclaw-gateway, or defenseclaw-gateway.exe on Windows (GAP-0694).
+func gatewayExecutableName(executable, goos string) bool {
+	if goos == "windows" {
+		return strings.EqualFold(filepath.Base(executable), "defenseclaw-gateway.exe")
+	}
+	return filepath.Base(executable) == "defenseclaw-gateway"
+}
+
+// foregroundLaunchHome is the DefenseClaw home of a gateway launched with
+// environment, by the rule of config.DefaultDataPath: a non-empty
+// DEFENSECLAW_HOME, otherwise HOME's .defenseclaw. Linux and macOS share it,
+// so a foreground gateway on the default home is recognised on both
+// (GAP-0705). A relative or repeated value proves nothing.
+func foregroundLaunchHome(environment []string) (string, bool) {
+	var override, userHome string
+	seenOverride, seenHome := false, false
+	for _, entry := range environment {
+		switch {
+		case strings.HasPrefix(entry, "DEFENSECLAW_HOME="):
+			if seenOverride {
+				return "", false
+			}
+			seenOverride, override = true, strings.TrimPrefix(entry, "DEFENSECLAW_HOME=")
+		case strings.HasPrefix(entry, "HOME="):
+			if seenHome {
+				return "", false
+			}
+			seenHome, userHome = true, strings.TrimPrefix(entry, "HOME=")
+		}
+	}
+	if override != "" {
+		if !filepath.IsAbs(override) {
+			return "", false
+		}
+		return override, true
+	}
+	if filepath.IsAbs(userHome) {
+		return filepath.Join(userHome, config.DefaultDataDirName), true
+	}
+	return "", false
+}
+
+// sameForegroundFile reports whether two absolute paths name one file, so a
+// link to the gateway counts and a copy of it does not.
+func sameForegroundFile(left, right string) bool {
+	if !filepath.IsAbs(left) || !filepath.IsAbs(right) {
+		return false
+	}
+	leftInfo, leftErr := os.Stat(left)
+	rightInfo, rightErr := os.Stat(right)
+	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
 }
 
 // otherAccountListenerAt explains a listener on host:port that belongs to
