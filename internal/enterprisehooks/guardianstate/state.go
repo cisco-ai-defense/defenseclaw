@@ -182,7 +182,9 @@ func WriteState(path, state string) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("guardianstate: close temp file: %w", err)
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := safefile.InDataFileTransaction(tmpPath, path, func() error {
+		return os.Rename(tmpPath, path)
+	}); err != nil {
 		return fmt.Errorf("guardianstate: rename %s -> %s: %w", tmpPath, path, err)
 	}
 	return nil

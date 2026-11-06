@@ -2993,7 +2993,7 @@ func writeWindowsManagedHooksLifecycleJournal(
 	); err != nil {
 		return err
 	}
-	if err := safefile.ReplaceFile(tmpPath, path); err != nil {
+	if err := safefile.ReplaceDataFile(tmpPath, path); err != nil {
 		return err
 	}
 	if err := setEnterpriseWindowsManagedProtection(

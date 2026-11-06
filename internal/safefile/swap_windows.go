@@ -86,9 +86,8 @@ type SwapResult struct {
 //     It still refuses writers, so the compared bytes cannot change, and it
 //     shares deletion so that the swap can replace the file.
 //   - The swap then renames source over destination in one step (POSIX
-//     semantics). destination names the old file or the new one at every
-//     instant: an agent that loads its policy during the swap never finds it
-//     missing. Just before the rename it opens destination again and checks
+//     semantics), in a file transaction when available for data files. Just
+//     before the rename it opens destination again and checks
 //     that it still names the held file, so a POSIX-semantics replacement,
 //     deletion or rename by another process after the comparison is refused
 //     as a race; only one that lands in the instant between that check and
@@ -266,20 +265,20 @@ func holdMatchedFileForReplace(
 }
 
 // replaceHeldFile renames source over destination while destination still
-// names held. Each attempt first opens destination for deletion, which
-// succeeds only while every other handle on it shares deletion, and keeps
-// that handle until the rename is done: Windows can briefly drop the name of
-// a file whose POSIX replacement fails on a handle that does not share
-// deletion, so the swap never tries the rename while such a handle is open.
-// It waits a short while for a reader that has destination open without
-// sharing deletion.
+// names held. A data-file rename runs in a file transaction and keeps the
+// destination available to concurrent openers. The identity check holds a
+// read handle through the commit. On a volume without file transactions, the
+// existing deletion-sharing guard keeps a refused rename from changing the
+// destination. It waits briefly for readers to release that guard.
 //
 // beforeRename runs just before each rename attempt, while held still names
 // the file at destination.
 func replaceHeldFile(source, destination string, held *os.File, beforeRename func()) error {
 	deadline := time.Now().Add(swapLockTimeout)
+	transacted := dataTransactionsAvailable() &&
+		!dataFileMayBeProgramImage(source) && !dataFileMayBeProgramImage(destination)
 	for {
-		target, err := openFileForReplace(destination)
+		target, err := openFileForReplace(destination, transacted)
 		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
 			return swapRaced(destination)
 		}
@@ -290,8 +289,21 @@ func replaceHeldFile(source, destination string, held *os.File, beforeRename fun
 			}
 			if err == nil {
 				beforeRename()
-				err = swapRenameReplace(source, destination, windows.FileRenameInfoEx,
-					fileRenameReplaceIfExists|fileRenamePOSIXSemantics|fileRenameIgnoreReadOnlyAttribute)
+				rename := func() error {
+					return swapRenameReplace(source, destination, windows.FileRenameInfoEx,
+						fileRenameReplaceIfExists|fileRenamePOSIXSemantics|fileRenameIgnoreReadOnlyAttribute)
+				}
+				if transacted {
+					var used bool
+					used, err = runDataFileTransaction(rename)
+					if !used || dataTransactionUnsupported(err) {
+						transacted = false
+						_ = target.Close()
+						continue
+					}
+				} else {
+					err = rename()
+				}
 			}
 			_ = target.Close()
 			if err == nil {
@@ -316,7 +328,8 @@ func replaceHeldFile(source, destination string, held *os.File, beforeRename fun
 func swapBusy(err error) bool {
 	return errors.Is(err, windows.ERROR_SHARING_VIOLATION) ||
 		errors.Is(err, windows.ERROR_ACCESS_DENIED) ||
-		errors.Is(err, windows.ERROR_LOCK_VIOLATION)
+		errors.Is(err, windows.ERROR_LOCK_VIOLATION) ||
+		errors.Is(err, windows.ERROR_TRANSACTIONAL_CONFLICT)
 }
 
 type swapFileIdentity struct {
@@ -343,18 +356,25 @@ func sameFile(a, b *os.File) (bool, error) {
 	return first == second, nil
 }
 
-// openFileForReplace opens path for deletion, sharing reads and deletion:
-// it fails while another handle on path does not share deletion, and while
-// it is open no such handle can be opened.
-func openFileForReplace(path string) (*os.File, error) {
+// openFileForReplace opens the destination for an identity check. Plain
+// publication also requests deletion access to exclude incompatible readers.
+func openFileForReplace(path string, transacted bool) (*os.File, error) {
 	name, err := winpath.UTF16Ptr(path)
 	if err != nil {
 		return nil, err
 	}
+	access := uint32(windows.DELETE | windows.FILE_READ_ATTRIBUTES)
+	share := uint32(windows.FILE_SHARE_READ | windows.FILE_SHARE_DELETE)
+	if transacted {
+		// A transacted replacement cannot commit while this identity check
+		// holds DELETE access to the previous destination.
+		access = windows.FILE_READ_ATTRIBUTES
+		share |= windows.FILE_SHARE_WRITE
+	}
 	handle, err := windows.CreateFile(
 		name,
-		windows.DELETE|windows.FILE_READ_ATTRIBUTES,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_DELETE,
+		access,
+		share,
 		nil,
 		windows.OPEN_EXISTING,
 		windows.FILE_FLAG_OPEN_REPARSE_POINT,

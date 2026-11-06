@@ -1888,7 +1888,7 @@ func writeWindowsCodexMachineFile(path string, data []byte, limit int, label str
 				"could not restore ReadOnly attribute after publication: "+restoreErr.Error(), nil)
 		}
 	}()
-	if err := safefile.ReplaceFile(tmpPath, path); err != nil {
+	if err := safefile.ReplaceDataFile(tmpPath, path); err != nil {
 		cleanup()
 		return fmt.Errorf("publish %s: %w", label, err)
 	}

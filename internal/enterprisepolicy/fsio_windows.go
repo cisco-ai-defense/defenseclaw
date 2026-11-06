@@ -852,7 +852,11 @@ func atomicWrite(_ Options, path string, data []byte, public bool) error {
 // atomicWriteSDDL writes data beside path, applies sddl and renames it
 // into place.
 func atomicWriteSDDL(path string, data []byte, sddl string) error {
-	return atomicWriteSDDLWith(path, data, sddl, func(tmp string) error { return os.Rename(tmp, path) })
+	return atomicWriteSDDLWith(path, data, sddl, func(tmp string) error {
+		return safefile.InDataFileTransaction(tmp, path, func() error {
+			return os.Rename(tmp, path)
+		})
+	})
 }
 
 // atomicWriteSDDLWith is atomicWriteSDDL with the final move of the

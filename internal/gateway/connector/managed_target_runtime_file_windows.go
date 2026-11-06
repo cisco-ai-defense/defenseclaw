@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"golang.org/x/sys/windows"
 )
 
@@ -34,6 +35,20 @@ func writeManagedTargetRuntimeFilePlatform(path string, data []byte, replace boo
 }
 
 func writeManagedTargetRuntimeFileForTarget(
+	path string,
+	data []byte,
+	replace bool,
+	target *windows.SID,
+) error {
+	if !replace {
+		return writeManagedTargetRuntimeFileForTargetOnce(path, data, replace, target)
+	}
+	return safefile.InDataBytesTransaction(data, path, func() error {
+		return writeManagedTargetRuntimeFileForTargetOnce(path, data, replace, target)
+	})
+}
+
+func writeManagedTargetRuntimeFileForTargetOnce(
 	path string,
 	data []byte,
 	replace bool,

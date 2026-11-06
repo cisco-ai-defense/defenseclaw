@@ -21,7 +21,7 @@ var (
 		return managed.ValidateTrustedDirectoryAncestor(path, "hook guardian manifest parent")
 	}
 	windowsTargetsManifestProtect = protectWindowsTargetsManifestObject
-	windowsTargetsManifestReplace = safefile.ReplaceFile
+	windowsTargetsManifestReplace = safefile.ReplaceDataFile
 	// The standalone content-drift rule and the strict walk the manifest
 	// gate uses (GAP-0561). Tests replace them.
 	windowsTargetsManifestRefusesContentDrift = managed.StandaloneRefusesContentDrift

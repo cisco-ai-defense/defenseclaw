@@ -85,6 +85,22 @@ def _function_body(text: str, name: str) -> str:
     return text[start : end + 3]
 
 
+def test_data_file_publication_keeps_image_swap_separate() -> None:
+    module = _text(MODULE)
+    helper = _function_body(module, "Move-DefenseClawDataFileReplacing")
+    assert "ReplaceDataFileInTransaction" in helper
+    assert "move:32" in helper and "move:33" in helper
+    assert "AddSeconds(3)" in helper
+    for name in ("Write-DefenseClawJsonAtomic", "Write-DefenseClawDeploymentMetadataBytes"):
+        assert "Move-DefenseClawDataFileReplacing" in _function_body(module, name)
+    json_writer = _function_body(module, "Write-DefenseClawJsonAtomic")
+    assert "Test-DefenseClawStandaloneProfile" in json_writer
+    assert "Move-Item -LiteralPath $temporary -Destination $Path -Force" in json_writer
+    assert "Move-DefenseClawDataFileReplacing" not in _function_body(
+        module, "Invoke-DefenseClawLaunchableFileSwap"
+    )
+
+
 def test_upgrade_restores_owner_rewritten_account_state_before_guardian_activation() -> None:
     # GAP-0513: the signed-out account's old hook lock must be readable before
     # the new guardian classifies its hooks as awaiting the next sign-in.
@@ -1815,6 +1831,7 @@ def test_repair_rebuilds_deployment_metadata_that_is_not_json(tmp_path: Path) ->
             "ConvertFrom-DefenseClawDeploymentMetadataText",
             "Get-DefenseClawDeploymentMetadata",
             "Repair-DefenseClawUnreadableDeploymentMetadata",
+            "Move-DefenseClawDataFileReplacing",
             "Write-DefenseClawJsonAtomic",
             "Clear-DefenseClawRestrictiveFileAttributes",
         )
