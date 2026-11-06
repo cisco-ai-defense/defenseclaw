@@ -1262,6 +1262,8 @@ The moved keys, sample output and the way back are in [Migrate to config version
 | `defenseclaw uninstall --stop-sandboxes` | Stop and delete running OpenShell sandboxes during teardown, including copy-mode work not pulled back. Without it, a running sandbox stops uninstall before any change. For copy mode, use `defenseclaw sandbox pull NAME --apply` (or `--branch` or `--patch-out FILE`) and confirm the project, branch or patch file contains the work before `defenseclaw sandbox stop NAME`. For mount mode, use `defenseclaw sandbox review NAME` before stopping it. `reset` takes this option too. |
 | `defenseclaw reset --yes` | Wipe `~/.defenseclaw/` so `defenseclaw quickstart` starts clean — keeps binaries and the OpenClaw plugin in place. Like `uninstall`, it prints the Cowork removal step when `setup cowork` built a plugin. |
 
+On Windows, `uninstall` also removes a DefenseClaw Setup 0.8.x install that the installer left in place because its data is in another folder (`DEFENSECLAW_HOME`). It stops that install, removes its program folder, cached Setup, Apps & Features entry, sign-in start and `PATH` entry, and turns its hook launcher off. It never runs that install's programs and keeps its data folder.
+
 `uninstall` and `reset` cannot remove the Claude Cowork plugin that `defenseclaw setup cowork` adds to your Claude account, and they say so when one was built. In Claude Desktop, open **Customize > Plugins**, then the **...** menu on DefenseClaw, and choose **Remove**. Until you remove the plugin, Cowork tool calls are blocked. `uninstall --dry-run` lists the step. See [Remove the Cowork plugin](/docs/connectors/cowork#remove).
 
 When the sandbox teardown would run, `uninstall` and `reset` also stop before
