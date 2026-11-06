@@ -127,29 +127,15 @@ func (f *hermesPluginFixture) refused(path string) {
 	}
 }
 
-// unscannedVendor requires a never-scanned shipped plugin with a baseline.
+// unscannedVendor requires a shipped plugin that was never scanned and has
+// no stored scan: nothing about its vendor content is kept.
 func (f *hermesPluginFixture) unscannedVendor(path string) {
 	f.t.Helper()
 	if n := f.scan.scans(path); n != 0 {
 		f.t.Fatalf("vendor plugin %s scanned %d times", path, n)
 	}
-	f.vendorBaseline(path)
-}
-
-// vendorBaseline requires a shipped-plugin baseline for path, marked with
-// the content hash of its current bytes.
-func (f *hermesPluginFixture) vendorBaseline(path string) {
-	f.t.Helper()
-	row, err := f.store.GetTargetSnapshot("plugin", path)
-	if err != nil || row == nil {
-		f.t.Fatalf("vendor plugin %s has no baseline: %v", path, err)
-	}
-	snap, err := SnapshotTarget(path)
-	if err != nil {
-		f.t.Fatal(err)
-	}
-	if row.ContentHash != snap.ContentHash || !strings.HasSuffix(row.ScannerFingerprint, hermesVendorMark+snap.ContentHash) {
-		f.t.Fatalf("vendor plugin %s baseline = %#v, want content %s marked", path, row, snap.ContentHash)
+	if row, err := f.store.GetTargetSnapshot("plugin", path); err == nil && row != nil && row.ScanID != "" {
+		f.t.Fatalf("vendor plugin %s has a stored scan: %#v", path, row)
 	}
 }
 
@@ -178,7 +164,7 @@ func (f *hermesPluginFixture) plugin(root, name string) string {
 // pinVendor records the current bytes of a plugin as the vendor digest.
 func (f *hermesPluginFixture) pinVendor(name, path string) {
 	f.t.Helper()
-	digest, _, err := hermesPluginTreeDigest(path)
+	digest, err := hermesPluginTreeDigest(path)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -232,9 +218,9 @@ func onlyHermes(t *testing.T, connectors []string) {
 }
 
 // GAP-0645: a Hermes shipped plugin whose bytes match the pinned vendor
-// digest is not scanned or alerted on a fresh account but gets a baseline;
-// every scanned Hermes plugin is attributed to hermes, and a changed shipped
-// plugin is admitted as a changed plugin with a baseline is.
+// digest is not scanned or alerted on a fresh account and keeps no baseline;
+// every scanned Hermes plugin is attributed to hermes, and a shipped plugin
+// that differs from its digest is scanned with its real severity.
 func TestRescanAttributesBundledPluginFindingsAndKeepsFirstSightOutOfAlerts(t *testing.T) {
 	f := newHermesPluginFixture(t)
 	vendor := f.plugin(f.bundledRoot, "web/ddgs")
@@ -278,8 +264,8 @@ func TestRescanAttributesBundledPluginFindingsAndKeepsFirstSightOutOfAlerts(t *t
 		t.Fatalf("vendor plugin with a bytecode cache scanned %d times", n)
 	}
 
-	// A change to shipped bytes or an added file is not vendor code: the
-	// baseline makes it a change, so install admission decides it.
+	// A change to shipped bytes or an added file is not vendor code: it is
+	// scanned and its finding is active.
 	writePluginFile(t, filepath.Join(vendor, "provider.py"), "VENDOR = False\n")
 	writePluginFile(t, filepath.Join(platform, "extra.py"), "EXTRA = True\n")
 	f.w.runRescanCycle(context.Background())
@@ -287,7 +273,7 @@ func TestRescanAttributesBundledPluginFindingsAndKeepsFirstSightOutOfAlerts(t *t
 		if f.scan.scans(path) != 1 {
 			t.Fatalf("changed shipped plugin %s scans = %d, want 1", path, f.scan.scans(path))
 		}
-		f.refused(path)
+		f.activeScan(path)
 	}
 	changed := f.findingConnectors()
 	onlyHermes(t, changed)
@@ -361,17 +347,12 @@ func TestRescanHermesVendorPluginDecisionUsesBytesRead(t *testing.T) {
 	if f.scan.scans(linked) != before {
 		t.Fatalf("restored vendor plugin scanned in the cycle that read vendor bytes")
 	}
-	// The baseline records the bytes that matched, not the later ones.
-	if row, err := f.store.GetTargetSnapshot("plugin", linked); err != nil || row == nil ||
-		!strings.HasSuffix(row.ScannerFingerprint, hermesVendorMark+row.ContentHash) {
-		t.Fatalf("restored vendor plugin baseline = %#v, %v", row, err)
-	}
 	f.scan.onScan = nil
 	f.w.runRescanCycle(context.Background())
 	if f.scan.scans(linked) != before+1 {
 		t.Fatalf("plugin left changed after the read was not scanned next cycle")
 	}
-	f.refused(linked)
+	f.activeScan(linked)
 	onlyHermes(t, f.findingConnectors())
 	for _, path := range []string{shipped, linked, sibling} {
 		row, err := f.store.GetTargetSnapshot("plugin", path)
@@ -389,18 +370,10 @@ func TestHermesPluginTreeDigestCoversEveryReadByte(t *testing.T) {
 	dir := t.TempDir()
 	writePluginFile(t, filepath.Join(dir, "plugin.yaml"), "name: a\n")
 	writePluginFile(t, filepath.Join(dir, "lib", "a.py"), "A = 1\n")
-	sameContent := func(content string) {
-		t.Helper()
-		snap, err := SnapshotTarget(dir)
-		if err != nil || snap.ContentHash != content {
-			t.Fatalf("content hash %s, snapshot %#v, %v", content, snap, err)
-		}
-	}
-	base, content, err := hermesPluginTreeDigest(dir)
+	base, err := hermesPluginTreeDigest(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sameContent(content)
 	seen := []string{base}
 	for _, change := range []func(){
 		func() { writePluginFile(t, filepath.Join(dir, "lib", "a.py"), "A = 2\n") },
@@ -409,22 +382,21 @@ func TestHermesPluginTreeDigestCoversEveryReadByte(t *testing.T) {
 		func() { writePluginFile(t, filepath.Join(dir, "node_modules", "x.js"), "") },
 	} {
 		change()
-		got, content, err := hermesPluginTreeDigest(dir)
+		got, err := hermesPluginTreeDigest(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		sameContent(content)
 		if slices.Contains(seen, got) {
 			t.Fatalf("digest did not change: %s", got)
 		}
 		seen = append(seen, got)
 	}
 	writePluginFile(t, filepath.Join(dir, "lib", "__pycache__", "a.pyc"), "cache")
-	if got, _, err := hermesPluginTreeDigest(dir); err != nil || got != seen[len(seen)-1] {
+	if got, err := hermesPluginTreeDigest(dir); err != nil || got != seen[len(seen)-1] {
 		t.Fatalf("bytecode cache changed the digest: %s, %v", got, err)
 	}
 	writePluginFile(t, filepath.Join(dir, "lib", "__pycache__", "x.node"), "native")
-	if _, _, err := hermesPluginTreeDigest(dir); err == nil {
+	if _, err := hermesPluginTreeDigest(dir); err == nil {
 		t.Fatal("a native payload in a bytecode cache produced a vendor digest")
 	}
 	if err := os.Remove(filepath.Join(dir, "lib", "__pycache__", "x.node")); err != nil {
@@ -433,8 +405,39 @@ func TestHermesPluginTreeDigestCoversEveryReadByte(t *testing.T) {
 	if err := os.Symlink(filepath.Join(dir, "plugin.yaml"), filepath.Join(dir, "link.yaml")); err != nil {
 		t.Skipf("symlink: %v", err)
 	}
-	if _, _, err := hermesPluginTreeDigest(dir); err == nil {
+	if _, err := hermesPluginTreeDigest(dir); err == nil {
 		t.Fatal("a linked entry produced a vendor digest")
+	}
+}
+
+// The snapshot leaves out folders and links; the hash of what it leaves out
+// changes with each of them, and not with a bytecode cache Hermes writes.
+func TestSkippedTreeHashCoversWhatTheSnapshotLeavesOut(t *testing.T) {
+	dir := t.TempDir()
+	writePluginFile(t, filepath.Join(dir, "plugin.yaml"), "name: a\n")
+	if got := skippedTreeHash(dir); got != "" {
+		t.Fatalf("plain plugin skipped-tree hash = %q, want empty", got)
+	}
+	writePluginFile(t, filepath.Join(dir, "__pycache__", "a.cpython-312.pyc"), "cache")
+	writePluginFile(t, filepath.Join(dir, "lib", "__pycache__", "a.cpython-312.pyc"), "cache")
+	if got := skippedTreeHash(dir); got != "" {
+		t.Fatalf("bytecode cache skipped-tree hash = %q, want empty", got)
+	}
+	var seen []string
+	for _, change := range []func(){
+		func() { writePluginFile(t, filepath.Join(dir, "node_modules", "x.js"), "1") },
+		func() { writePluginFile(t, filepath.Join(dir, "node_modules", "x.js"), "2") },
+		func() { writePluginFile(t, filepath.Join(dir, ".git", "HEAD"), "ref") },
+		func() { writePluginFile(t, filepath.Join(dir, ".venv", "notes.txt"), "n") },
+		func() { writePluginFile(t, filepath.Join(dir, "lib", "__pycache__", "x.dll"), "native") },
+		func() { _ = os.Symlink(filepath.Join(dir, "plugin.yaml"), filepath.Join(dir, "link.yaml")) },
+	} {
+		change()
+		got := skippedTreeHash(dir)
+		if got == "" || slices.Contains(seen, got) {
+			t.Fatalf("skipped-tree hash did not change: %q", got)
+		}
+		seen = append(seen, got)
 	}
 }
 
@@ -487,8 +490,8 @@ func TestHermesVendorPluginHonorsExplicitDeny(t *testing.T) {
 }
 
 // GAP-0645 review 5: a shipped plugin installed while the watcher runs is
-// admitted on the live path without a scan, and its baseline makes a later
-// edit an admission; an edited shipped plugin is scanned and refused there.
+// admitted on the live path without a scan and keeps no baseline; an edited
+// shipped plugin is scanned and refused there, and a later edit is scanned.
 func TestHermesVendorPluginLiveAdmission(t *testing.T) {
 	for _, name := range []string{"security-guidance", "web/ddgs"} {
 		t.Run(name, func(t *testing.T) {
@@ -530,56 +533,112 @@ func TestHermesVendorPluginLiveAdmission(t *testing.T) {
 			if f.scan.scans(path) != 1 {
 				t.Fatalf("edited live shipped plugin scans = %d, want 1", f.scan.scans(path))
 			}
-			f.refused(path)
+			f.activeScan(path)
 		})
 	}
 }
 
-// GAP-0645 review 5: a shipped-plugin baseline never had a scan, so content
-// other than the bytes that matched the digest is admitted. That holds when
-// the snapshot stored with the mark describes other bytes than the ones
-// that matched, and when scan gating is off.
-func TestRescanHermesVendorBaselineAdmitsOtherContent(t *testing.T) {
-	t.Run("mark of other bytes", func(t *testing.T) {
-		f := newHermesPluginFixture(t)
-		path := f.plugin(f.bundledRoot, "kanban")
-		f.pinVendor("kanban", path)
-		_, verified, err := hermesPluginTreeDigest(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		writePluginFile(t, filepath.Join(path, "provider.py"), "VENDOR = False\n")
-		snap, err := SnapshotTarget(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		evt := InstallEvent{Type: InstallPlugin, Name: "kanban", Path: path, Connector: "hermes"}
-		if err := f.store.SetTargetSnapshot("plugin", path, snap.ContentHash, "{}", "{}", "[]", "",
-			f.w.scannerFingerprint(evt)+hermesVendorMark+verified); err != nil {
-			t.Fatal(err)
-		}
-		f.w.startupRescanDone = true
+// GAP-0645 r9: a shipped plugin is decided from the bytes read in each scan,
+// with scan gating on or off: pristine twice is not scanned, an edit is, and
+// an edit that returns to the vendor bytes is vendor content again.
+func TestRescanHermesVendorPluginIsDecidedOnEveryScan(t *testing.T) {
+	for _, gated := range []bool{true, false} {
+		t.Run(map[bool]string{true: "gating on", false: "gating off"}[gated], func(t *testing.T) {
+			f := newHermesPluginFixture(t)
+			f.cfg.Watch.RescanContentGated = gated
+			path := f.plugin(f.bundledRoot, "kanban")
+			f.pinVendor("kanban", path)
+			source := filepath.Join(path, "provider.py")
+			f.w.runRescanCycle(context.Background())
+			f.w.runRescanCycle(context.Background())
+			f.unscannedVendor(path)
+			writePluginFile(t, source, "VENDOR = False\n")
+			f.w.runRescanCycle(context.Background())
+			if f.scan.scans(path) != 1 {
+				t.Fatalf("edited plugin scans = %d, want 1", f.scan.scans(path))
+			}
+			f.activeScan(path)
+			writePluginFile(t, source, "VENDOR = True\n")
+			before := len(f.findingConnectors())
+			f.w.runRescanCycle(context.Background())
+			if n := f.scan.scans(path); n != 1 {
+				t.Fatalf("plugin restored to vendor bytes scans = %d, want 1", n)
+			}
+			if got := len(f.findingConnectors()); got != before {
+				t.Fatalf("plugin restored to vendor bytes logged %d findings", got-before)
+			}
+			onlyHermes(t, f.findingConnectors())
+		})
+	}
+}
+
+// GAP-0645 review 8: after an ordinary edit was scanned, a later change in a
+// folder the snapshot leaves out reaches a scan, and is refused when HIGH:
+// no earlier admission skips any folder. A bytecode cache without a native
+// file stays no change.
+func TestHermesShippedPluginChangeAfterEditIsScanned(t *testing.T) {
+	cases := []struct{ dir, file string }{
+		{"__pycache__", "payload.node"},
+		{"node_modules", "payload.node"},
+		{".git", "payload.dll"},
+		{".venv", "payload.wasm"},
+		{".venv", "notes.txt"},
+		{"lib/node_modules", "index.js"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.dir+"/"+tc.file, func(t *testing.T) {
+			f := newHermesPluginFixture(t)
+			path := f.plugin(f.bundledRoot, "web/ddgs")
+			f.pinVendor("web/ddgs", path)
+			f.w.runRescanCycle(context.Background())
+			f.unscannedVendor(path)
+			writePluginFile(t, filepath.Join(path, "provider.py"), "VENDOR = False\n")
+			f.w.runRescanCycle(context.Background())
+			if f.scan.scans(path) != 1 {
+				t.Fatalf("edited plugin scans = %d, want 1", f.scan.scans(path))
+			}
+			f.activeScan(path)
+
+			writePluginFile(t, filepath.Join(path, "__pycache__", "provider.cpython-312.pyc"), "cache")
+			f.w.runRescanCycle(context.Background())
+			if f.scan.scans(path) != 1 {
+				t.Fatalf("bytecode cache after the edit scans = %d, want 1", f.scan.scans(path))
+			}
+
+			writePluginFile(t, filepath.Join(path, filepath.FromSlash(tc.dir), tc.file), "payload")
+			f.w.runRescanCycle(context.Background())
+			if f.scan.scans(path) != 2 {
+				t.Fatalf("plugin scans after %s/%s = %d, want 2", tc.dir, tc.file, f.scan.scans(path))
+			}
+			f.refused(path)
+			onlyHermes(t, f.findingConnectors())
+		})
+	}
+}
+
+// GAP-0645 r9: a pristine shipped plugin is reported once as informational
+// vendor content, under no connector finding, and again after a restart.
+func TestRescanReportsVendorPluginOnceAsInformational(t *testing.T) {
+	f := newHermesPluginFixture(t)
+	path := f.plugin(f.bundledRoot, "web/ddgs")
+	f.pinVendor("web/ddgs", path)
+	for range 3 {
 		f.w.runRescanCycle(context.Background())
-		if f.scan.scans(path) != 1 {
-			t.Fatalf("plugin scans = %d, want 1", f.scan.scans(path))
+	}
+	logs, _ := f.runtime.snapshot()
+	reports := 0
+	for _, record := range logs {
+		if record.EventName() == "legacy.audit.install.allowed" {
+			reports++
 		}
-		f.refused(path)
-	})
-	t.Run("gating off", func(t *testing.T) {
-		f := newHermesPluginFixture(t)
-		f.cfg.Watch.RescanContentGated = false
-		path := f.plugin(f.bundledRoot, "kanban")
-		f.pinVendor("kanban", path)
-		f.w.runRescanCycle(context.Background())
-		f.w.runRescanCycle(context.Background())
-		f.unscannedVendor(path)
-		writePluginFile(t, filepath.Join(path, "provider.py"), "VENDOR = False\n")
-		f.w.runRescanCycle(context.Background())
-		if f.scan.scans(path) != 1 {
-			t.Fatalf("plugin scans = %d, want 1", f.scan.scans(path))
-		}
-		f.refused(path)
-	})
+	}
+	if reports != 1 {
+		t.Fatalf("vendor plugin reported %d times, want 1", reports)
+	}
+	f.unscannedVendor(path)
+	if logs := f.findingConnectors(); len(logs) != 0 {
+		t.Fatalf("vendor plugin raised findings: %q", logs)
+	}
 }
 
 // GAP-0645 review 5: shipped plugins that appear while the gateway is
@@ -611,7 +670,7 @@ func TestHermesVendorPluginAddedWhileStoppedIsNotScanned(t *testing.T) {
 
 // GAP-0645 review 6: the plugin scanner reports a native payload in a folder
 // it otherwise skips, so a digest match must not vouch for one, and a
-// pristine shipped plugin that gains one is admitted, whichever folder it
+// pristine shipped plugin that gains one is scanned, whichever folder it
 // hides in. Bytecode caches without a native payload stay out of the way.
 func TestHermesVendorPluginNativePayloadInScannerSkippedDir(t *testing.T) {
 	cases := []struct{ dir, file string }{
@@ -635,7 +694,7 @@ func TestHermesVendorPluginNativePayloadInScannerSkippedDir(t *testing.T) {
 				if f.scan.scans(path) != 1 {
 					t.Fatalf("plugin scans = %d, want 1", f.scan.scans(path))
 				}
-				f.refused(path)
+				f.activeScan(path)
 				onlyHermes(t, f.findingConnectors())
 			})
 			t.Run("live", func(t *testing.T) {

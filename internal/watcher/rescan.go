@@ -1036,8 +1036,8 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				fmt.Fprintf(os.Stderr, "[rescan] mcp %s was configured before the upgrade; recording its baseline without install admission\n", evt.Name)
 				_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path, "type=mcp reason=configured-before-upgrade")
 			}
-			if w.rescanHermesVendorPlugin(evt, currentSnap, nil, fingerprint) {
-				return rescanSkipped // a pinned Hermes shipped plugin (GAP-0645)
+			if w.rescanHermesVendorPlugin(evt) {
+				return rescanSkipped // vendor content, decided on this read (GAP-0645)
 			}
 			// First time we've seen this target: scan once to establish a
 			// baseline that future cycles can diff against.
@@ -1050,14 +1050,6 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		}
 		fmt.Fprintf(os.Stderr, "[rescan] get baseline %s: %v\n", evt.Path, err)
 		return rescanSkipped
-	}
-
-	// A Hermes shipped plugin recorded without a scan is admitted once its
-	// content is not the bytes that matched its digest (GAP-0645).
-	recorded := baseline
-	baseline, vendorChanged := w.unmarkHermesVendorBaseline(evt, baseline, currentSnap)
-	if vendorChanged && !w.secureClientActive() {
-		return w.readmitChanged(ctx, evt, baseline, currentSnap, compareSnapshots(baseline, currentSnap), fingerprint, "rescan")
 	}
 
 	// An unfinished MCP install scan was kept under the unverified-server
@@ -1146,8 +1138,8 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint, "rescan")
 	}
 
-	if w.rescanHermesVendorPlugin(evt, currentSnap, recorded, fingerprint) {
-		return rescanSkipped // a pinned Hermes shipped plugin (GAP-0645)
+	if w.rescanHermesVendorPlugin(evt) {
+		return rescanSkipped // vendor content, decided on this read (GAP-0645)
 	}
 
 	fmt.Fprintf(os.Stderr, "[rescan] scanning %s %s (%s)\n", evt.Type, evt.Name, reason)
@@ -1271,9 +1263,6 @@ func (w *InstallWatcher) admissionFingerprint(res AdmissionResult, fingerprint s
 	if w.secureClientActive() {
 		return fingerprint
 	}
-	if res.vendorContent != "" {
-		return fingerprint + hermesVendorMark + res.vendorContent
-	}
 	if res.Unenforced {
 		return fingerprint + unenforcedRejectionMark
 	}
@@ -1318,7 +1307,7 @@ func (w *InstallWatcher) readmitUnenforcedRejection(ctx context.Context, evt Ins
 	res := w.runAdmission(ctx, evt)
 	w.notifyAdmission(res)
 	moved := w.movedByAdmission(evt)
-	if res.Interrupted || res.ScanID == "" && res.vendorContent == "" || moved {
+	if res.Interrupted || res.ScanID == "" || moved {
 		return rescanScanned
 	}
 	if w.targetStillPresent(evt) {
@@ -1542,7 +1531,7 @@ func (w *InstallWatcher) admissionSnapshot(evt InstallEvent) *TargetSnapshot {
 // alerts for one install (GAP-2507). A target admission moved away gets no
 // baseline.
 func (w *InstallWatcher) recordAdmissionBaseline(evt InstallEvent, snap *TargetSnapshot, res AdmissionResult) {
-	if w.movedByAdmission(evt) || snap == nil || res.ScanID == "" && res.vendorContent == "" {
+	if w.movedByAdmission(evt) || snap == nil || res.ScanID == "" {
 		return
 	}
 	if _, err := os.Lstat(evt.Path); err != nil {
@@ -2176,7 +2165,19 @@ func (w *InstallWatcher) snapshotForEvent(evt InstallEvent) (*TargetSnapshot, er
 		if _, err := os.Stat(path); err != nil {
 			return nil, err
 		}
-		return SnapshotTarget(path)
+		snap, err := SnapshotTarget(path)
+		if err != nil {
+			return nil, err
+		}
+		// The snapshot leaves out folders and links the plugin scanner
+		// audits; a shipped Hermes plugin binds them into its content hash.
+		if _, shipped := w.hermesShippedPlugin(evt); shipped {
+			if extra := skippedTreeHash(path); extra != "" {
+				sum := sha256.Sum256([]byte(snap.ContentHash + "\n" + extra))
+				snap.ContentHash = hex.EncodeToString(sum[:])
+			}
+		}
+		return snap, nil
 	}
 }
 

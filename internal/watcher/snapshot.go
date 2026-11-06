@@ -195,7 +195,12 @@ func SnapshotTarget(root string) (*TargetSnapshot, error) {
 		return nil, err
 	}
 
-	snap.ContentHash = snapshotContentHash(allHashes)
+	sort.Strings(allHashes)
+	overall := sha256.New()
+	for _, entry := range allHashes {
+		overall.Write([]byte(entry + "\n"))
+	}
+	snap.ContentHash = hex.EncodeToString(overall.Sum(nil))
 
 	snap.NetworkEndpoints = make([]string, 0, len(endpointSet))
 	for ep := range endpointSet {
@@ -213,16 +218,6 @@ func snapshotSkipsDir(name string) bool {
 		return true
 	}
 	return false
-}
-
-// snapshotContentHash is the content hash of sorted "rel:sha256" entries.
-func snapshotContentHash(entries []string) string {
-	sort.Strings(entries)
-	overall := sha256.New()
-	for _, entry := range entries {
-		overall.Write([]byte(entry + "\n"))
-	}
-	return hex.EncodeToString(overall.Sum(nil))
 }
 
 func hashFile(path string) (string, error) {

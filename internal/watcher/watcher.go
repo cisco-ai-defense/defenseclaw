@@ -111,10 +111,6 @@ type AdmissionResult struct {
 	// type, so nothing was blocked or quarantined. Its rescan baseline keeps
 	// a mark, and admission runs again once take_action is on (GAP-0774).
 	Unenforced bool
-	// vendorContent is the content hash of a Hermes shipped plugin admitted
-	// without a scan because those bytes matched its pinned digest. Its
-	// baseline carries the hash, so other content is admitted (GAP-0645).
-	vendorContent string
 }
 
 // OnAdmission is called after each install event is processed.
@@ -168,6 +164,9 @@ type InstallWatcher struct {
 	// audited, so a scanner that stays down writes one row per target.
 	rescanFailureMu     sync.Mutex
 	rescanFailureLogged map[string]bool
+	// hermesVendorNoted holds the shipped Hermes plugins already reported as
+	// vendor content in this process, so a rescan cycle reports each once.
+	hermesVendorNoted sync.Map
 	// markedWatchRoots caches the root markers written by this process
 	// (rescan goroutine only).
 	markedWatchRoots map[string]bool
@@ -2141,11 +2140,10 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 
 	// A Hermes shipped plugin whose bytes match their pinned digest is not
 	// scanned: the block, deny and allow decisions above still apply.
-	if content, vendor := w.hermesVendorPluginContent(evt); vendor {
-		_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
-			fmt.Sprintf("type=%s reason=%s", targetType, hermesVendorPluginReason))
+	if w.hermesVendorPlugin(evt) {
+		w.logHermesVendorPlugin(evt, targetType)
 		w.recordAdmission(ctx, "allowed", targetType)
-		res = AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: hermesVendorPluginReason, vendorContent: content}
+		res = AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: hermesVendorPluginReason}
 		return res
 	}
 
