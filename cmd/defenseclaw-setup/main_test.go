@@ -135,6 +135,47 @@ func TestStageHookLauncherCopiesCanonicalPayloadToInstalledSource(t *testing.T) 
 	}
 }
 
+func TestExtractGatewayInstallsSmallClaudeHookGuard(t *testing.T) {
+	root := t.TempDir()
+	archivePath := filepath.Join(root, "gateway.zip")
+	archive, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(archive)
+	for name, body := range map[string]string{
+		"defenseclaw.exe":            "gateway",
+		"defenseclaw-hook.exe":       "hook",
+		"defenseclaw-hook-guard.exe": "small guard",
+		"defenseclaw-acp.exe":        "acp",
+	} {
+		file, err := writer.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(file, body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractGateway(loadedPayload{Root: root, Manifest: payloadManifest{GatewayArchive: "gateway.zip"}}, bin); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(bin, "defenseclaw-hook-guard.exe"))
+	if err != nil || string(got) != "small guard" {
+		t.Fatalf("packaged guard = %q, %v", got, err)
+	}
+}
+
 func TestRenameInstallTreeRetriesTransientErrors(t *testing.T) {
 	for _, errno := range []syscall.Errno{5, 32, 33} {
 		errno := errno

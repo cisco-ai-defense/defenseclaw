@@ -1889,6 +1889,9 @@ func extractGateway(payload loadedPayload, binDir string) error {
 	if err := copyFile(filepath.Join(tmp, "defenseclaw-hook.exe"), filepath.Join(binDir, "defenseclaw-hook.exe")); err != nil {
 		return fmt.Errorf("install hook launcher: %w", err)
 	}
+	if err := copyFile(filepath.Join(tmp, "defenseclaw-hook-guard.exe"), filepath.Join(binDir, "defenseclaw-hook-guard.exe")); err != nil {
+		return fmt.Errorf("install hook guard: %w", err)
+	}
 	if err := copyFile(filepath.Join(tmp, "defenseclaw-acp.exe"), filepath.Join(binDir, "defenseclaw-acp.exe")); err != nil {
 		return fmt.Errorf("install ACP guard: %w", err)
 	}

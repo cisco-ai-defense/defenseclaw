@@ -50,6 +50,7 @@ var (
 		"bin/defenseclaw-gateway.exe",
 		"bin/defenseclaw-acp.exe",
 		"bin/defenseclaw-hook.exe",
+		"bin/defenseclaw-hook-guard.exe",
 		hookLauncherInstalledPath,
 	}
 )

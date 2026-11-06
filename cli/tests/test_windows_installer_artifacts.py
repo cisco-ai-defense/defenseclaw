@@ -218,6 +218,7 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
         {
             "defenseclaw.exe": b"gateway",
             "defenseclaw-hook.exe": b"hook",
+            "defenseclaw-hook-guard.exe": b"hook guard",
             "defenseclaw-acp.exe": b"acp guard",
         },
     )
@@ -289,6 +290,7 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
     with zipfile.ZipFile(payload / gateway_name) as gateway:
         gateway_sha256 = hashlib.sha256(gateway.read("defenseclaw.exe")).hexdigest()
         hook_sha256 = hashlib.sha256(gateway.read("defenseclaw-hook.exe")).hexdigest()
+        hook_guard_sha256 = hashlib.sha256(gateway.read("defenseclaw-hook-guard.exe")).hexdigest()
         acp_sha256 = hashlib.sha256(gateway.read("defenseclaw-acp.exe")).hexdigest()
     module_sum = "h1:" + base64.b64encode(b"\x01" * 32).decode()
     dependency = {"path": "example.com/security/module", "version": "v1.2.3", "sum": module_sum}
@@ -296,6 +298,7 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
         "setup": _sha256(setup),
         "gateway": gateway_sha256,
         "hook": hook_sha256,
+        "hook-guard": hook_guard_sha256,
         "acp-guard": acp_sha256,
         "hook-launcher": _sha256(payload / "defenseclaw-hook-launcher.exe"),
         "launcher": _sha256(payload / "defenseclaw-launcher.exe"),
@@ -329,6 +332,7 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
     )
     add_evidence("bin/defenseclaw-gateway.exe", "./expanded/gateway/defenseclaw.exe", gateway_sha256)
     add_evidence("bin/defenseclaw-hook.exe", "./expanded/gateway/defenseclaw-hook.exe", hook_sha256)
+    add_evidence("bin/defenseclaw-hook-guard.exe", "./expanded/gateway/defenseclaw-hook-guard.exe", hook_guard_sha256)
     add_evidence("bin/defenseclaw-acp.exe", "./expanded/gateway/defenseclaw-acp.exe", acp_sha256)
     add_evidence(
         "bin/defenseclaw-hook-launcher.exe",
@@ -881,6 +885,18 @@ def test_reproducible_launcher_builds_include_final_pe_resources() -> None:
     assert "[Environment]::SetEnvironmentVariable('GOARCH', 'amd64')" in body
 
 
+def test_packaged_hook_guard_is_installed_and_inventoried() -> None:
+    build = BUILD_PS1.read_text(encoding="utf-8")
+    setup = (ROOT / "cmd/defenseclaw-setup/main.go").read_text(encoding="utf-8")
+    inventory = (ROOT / "cmd/defenseclaw-setup/authenticode.go").read_text(encoding="utf-8")
+    assert "'defenseclaw-hook-guard.exe', 'defenseclaw-acp.exe'" in build
+    assert "Set-WindowsExecutableResource $hookGuardBinary 'hook-guard' -VerifyOnly" in build
+    assert "Installed = 'bin/defenseclaw-hook-guard.exe'" in build
+    assert "'--component', \"hook-guard=$hookGuardBinary\"" in build
+    assert 'copyFile(filepath.Join(tmp, "defenseclaw-hook-guard.exe"), filepath.Join(binDir, "defenseclaw-hook-guard.exe"))' in setup
+    assert '"bin/defenseclaw-hook-guard.exe"' in inventory
+
+
 def test_hook_launcher_size_signing_and_inventory_order_is_fail_closed() -> None:
     build = BUILD_PS1.read_text(encoding="utf-8")
     size_gate = "Assert-HookLauncherArtifact $hookLauncher"
@@ -1292,7 +1308,7 @@ def test_merged_spdx_covers_exact_and_expanded_windows_payload(tmp_path: Path) -
     assert summary["python_distributions"] == 2
     assert summary["go_modules"] == 2
     assert summary["payload_digests"] == 12
-    assert summary["authenticode_files"] == 12
+    assert summary["authenticode_files"] == 13
     assert {package["name"] for package in document["packages"]} >= {
         "DefenseClaw Windows Setup",
         "DefenseClaw embedded installer payload",
@@ -1300,6 +1316,7 @@ def test_merged_spdx_covers_exact_and_expanded_windows_payload(tmp_path: Path) -
         "Microsoft Visual C++ app-local runtime",
         "DefenseClaw gateway executable",
         "DefenseClaw hook executable",
+        "DefenseClaw hook guard executable",
         "DefenseClaw ACP guard executable",
         "DefenseClaw stable HookRuntime launcher",
         "DefenseClaw native CLI launcher",
@@ -1316,6 +1333,7 @@ def test_merged_spdx_covers_exact_and_expanded_windows_payload(tmp_path: Path) -
     assert "./expanded/vc-runtime/msvcp140_1.dll" in file_names
     assert "./expanded/site-packages/defenseclaw/__init__.py" in file_names
     assert "./expanded/gateway/defenseclaw-hook.exe" in file_names
+    assert "./expanded/gateway/defenseclaw-hook-guard.exe" in file_names
     assert "./expanded/gateway/defenseclaw-acp.exe" in file_names
     assert "./payload/defenseclaw-hook-launcher.exe" in file_names
     setup_package = next(package for package in document["packages"] if package["name"] == "DefenseClaw Windows Setup")
@@ -1326,6 +1344,10 @@ def test_merged_spdx_covers_exact_and_expanded_windows_payload(tmp_path: Path) -
         file for file in document["files"] if file["fileName"] == "./expanded/gateway/defenseclaw-hook.exe"
     )
     assert '"installed_path":"bin/defenseclaw-hook.exe"' in hook_file["comment"]
+    hook_guard_file = next(
+        file for file in document["files"] if file["fileName"] == "./expanded/gateway/defenseclaw-hook-guard.exe"
+    )
+    assert '"installed_path":"bin/defenseclaw-hook-guard.exe"' in hook_guard_file["comment"]
     hook_launcher_file = next(
         file for file in document["files"] if file["fileName"] == "./payload/defenseclaw-hook-launcher.exe"
     )

@@ -1246,11 +1246,12 @@ def build_sbom(args: argparse.Namespace) -> dict:
         payload_files[required["gateway_archive"]],
         "./expanded/gateway",
         component_packages[required["gateway_archive"]],
-        required=("defenseclaw.exe", "defenseclaw-hook.exe", "defenseclaw-acp.exe"),
+        required=("defenseclaw.exe", "defenseclaw-hook.exe", "defenseclaw-hook-guard.exe", "defenseclaw-acp.exe"),
     )
     for member, display_name in (
         ("defenseclaw.exe", "DefenseClaw gateway executable"),
         ("defenseclaw-hook.exe", "DefenseClaw hook executable"),
+        ("defenseclaw-hook-guard.exe", "DefenseClaw hook guard executable"),
         ("defenseclaw-acp.exe", "DefenseClaw ACP guard executable"),
     ):
         file_id, sha256, _ = gateway_entries[member]
@@ -1269,6 +1270,7 @@ def build_sbom(args: argparse.Namespace) -> dict:
         component = {
             "defenseclaw.exe": "gateway",
             "defenseclaw-hook.exe": "hook",
+            "defenseclaw-hook-guard.exe": "hook-guard",
             "defenseclaw-acp.exe": "acp-guard",
         }[member]
         go_component_packages[component] = package_id

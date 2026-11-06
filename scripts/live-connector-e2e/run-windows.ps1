@@ -6907,15 +6907,69 @@ function Get-ClaudeCodeLauncherGuardExecView([object]$Handler) {
     }
     $guardArgs = @($argsProperty.Value)
     if (@($guardArgs | Where-Object { $_ -isnot [string] }).Count -gt 0) { return $Handler }
+    # The current per-user chain has a checked guard on every event except
+    # PreToolUse. Read only its exact generated form as the launcher it runs.
+    if ($guardArgs.Count -gt 50 -and $guardArgs[0] -ceq '/d' -and $guardArgs[1] -ceq '/v:on' -and
+        $guardArgs[2] -ceq '/c' -and $guardArgs[3] -ceq 'if' -and $guardArgs[4] -ceq 'not' -and
+        $guardArgs[5] -ceq 'exist') {
+        $guard = [string]$guardArgs[6]
+        $systemCmd = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
+        $compare = Join-Path ([Environment]::SystemDirectory) 'fc.exe'
+        $compareAt = [Array]::IndexOf($guardArgs, $compare)
+        $wrappedAt = [Array]::IndexOf($guardArgs, 'launcher-guard-wrapped')
+        if ($compareAt -ge 0 -and $compareAt + 3 -lt $guardArgs.Count -and
+            $wrappedAt -ge 1 -and $wrappedAt + 6 -lt $guardArgs.Count) {
+            $approved = [string]$guardArgs[$compareAt + 3]
+            $launcher = [string]$guardArgs[$wrappedAt + 1]
+            $eventName = [string]$guardArgs[$wrappedAt + 6]
+            if ([string]::Equals([string]$commandProperty.Value, $systemCmd, [StringComparison]::OrdinalIgnoreCase) -and
+                [IO.Path]::IsPathRooted($guard) -and [IO.Path]::IsPathRooted($approved) -and
+                [IO.Path]::IsPathRooted($launcher) -and
+                [IO.Path]::GetFileName($guard) -ieq 'defenseclaw-hook-guard.exe' -and
+                [IO.Path]::GetFileName($approved) -ieq 'defenseclaw-hook-guard.approved' -and
+                [IO.Path]::GetFileName($launcher) -ieq 'defenseclaw-hook.exe' -and
+                $guardArgs[$wrappedAt - 1] -ceq $guard -and
+                $guardArgs[$wrappedAt + 2] -ceq 'hook' -and $guardArgs[$wrappedAt + 3] -ceq '--connector' -and
+                $guardArgs[$wrappedAt + 4] -ceq 'claudecode' -and $guardArgs[$wrappedAt + 5] -ceq '--event' -and
+                $eventName -cmatch '^[A-Za-z0-9]{1,64}$') {
+                $failCode = '2'
+                if ($eventName -cin @('Stop', 'SubagentStop', 'TeammateIdle', 'StopFailure', 'SessionEnd')) { $failCode = '1' }
+                $warning = @('echo') + @(('DefenseClaw could not start its Claude Code hook guard. ' +
+                    'Run the DefenseClaw installer again to repair it.') -split ' ') +
+                    @('1>&2', '&', 'exit', '/b', $failCode)
+                $expected = @('/d', '/v:on', '/c', 'if', 'not', 'exist', $guard, '(') + $warning +
+                    @(')', '&', $compare, '/b', $guard, $approved, '>nul', '2>&1', '||', '(') + $warning +
+                    @(')', '&', $guard, 'launcher-guard-wrapped', $launcher, 'hook', '--connector', 'claudecode',
+                      '--event', $eventName, '&', 'set', 'dc_hook_status=!errorlevel!',
+                      '&', 'if', '!dc_hook_status!', 'equ', '0', 'exit', '/b', '0',
+                      '&', 'if', '!dc_hook_status!', 'equ', '2', 'exit', '/b', '2',
+                      '&', 'if', '!dc_hook_status!', 'geq', '65537', 'if', '!dc_hook_status!', 'leq', '131071',
+                      '(', 'set', '/a', 'dc_hook_result=!dc_hook_status!-65536', '>nul',
+                      '&', 'exit', '/b', '!dc_hook_result!', ')', '&') + $warning
+                if ($expected.Count -eq $guardArgs.Count) {
+                    $same = $true
+                    for ($i = 0; $i -lt $expected.Count; $i++) {
+                        if ($expected[$i] -cne $guardArgs[$i]) { $same = $false; break }
+                    }
+                    if ($same) {
+                        return [pscustomobject]@{ command = $launcher; args = @('hook', '--connector', 'claudecode') }
+                    }
+                }
+            }
+        }
+        return $Handler
+    }
     # The PreToolUse guard (GAP-1011): the installed full hook of a packaged
     # install, or the one-line install's gateway, started with launcher-guard.
-    if ($guardArgs.Count -eq 5 -and $guardArgs[0] -ceq 'launcher-guard' -and $guardArgs[2] -ceq 'hook' -and
-        $guardArgs[3] -ceq '--connector' -and $guardArgs[4] -ceq 'claudecode') {
+    if ($guardArgs.Count -in @(5, 7) -and $guardArgs[0] -ceq 'launcher-guard' -and $guardArgs[2] -ceq 'hook' -and
+        $guardArgs[3] -ceq '--connector' -and $guardArgs[4] -ceq 'claudecode' -and
+        ($guardArgs.Count -eq 5 -or ($guardArgs[5] -ceq '--event' -and $guardArgs[6] -ceq 'PreToolUse'))) {
         $program = [string]$commandProperty.Value
         $launcher = [string]$guardArgs[1]
         $programName = [IO.Path]::GetFileName($program)
         if ([IO.Path]::IsPathRooted($program) -and [IO.Path]::IsPathRooted($launcher) -and
-            ($programName -ieq 'defenseclaw-hook.exe' -or $programName -ieq 'defenseclaw-gateway.exe') -and
+            ($programName -ieq 'defenseclaw-hook.exe' -or $programName -ieq 'defenseclaw-hook-guard.exe' -or
+                $programName -ieq 'defenseclaw-gateway.exe') -and
             [IO.Path]::GetFileName($launcher) -ieq 'defenseclaw-hook.exe' -and
             -not [string]::Equals($program, $launcher, [StringComparison]::OrdinalIgnoreCase)) {
             return [pscustomobject]@{ command = $launcher; args = @('hook', '--connector', 'claudecode') }

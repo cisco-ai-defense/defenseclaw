@@ -956,7 +956,7 @@ try {
 $gatewayArchive = [IO.Compression.ZipFile]::OpenRead($gatewayZip)
 try {
     $entryNames = @($gatewayArchive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
-    foreach ($required in @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe', 'defenseclaw-acp.exe')) {
+    foreach ($required in @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe', 'defenseclaw-hook-guard.exe', 'defenseclaw-acp.exe')) {
         if ($required -notin $entryNames) { throw "Gateway archive is missing $required." }
     }
 } finally { $gatewayArchive.Dispose() }
@@ -1202,9 +1202,11 @@ Move-Item -LiteralPath (Join-Path $gatewayPayloadDir 'defenseclaw-gateway.exe') 
     -Destination (Join-Path $gatewayPayloadDir 'defenseclaw.exe')
 $gatewayBinary = Join-Path $gatewayPayloadDir 'defenseclaw.exe'
 $hookBinary = Join-Path $gatewayPayloadDir 'defenseclaw-hook.exe'
+$hookGuardBinary = Join-Path $gatewayPayloadDir 'defenseclaw-hook-guard.exe'
 $acpBinary = Join-Path $gatewayPayloadDir 'defenseclaw-acp.exe'
 Set-WindowsExecutableResource $gatewayBinary 'gateway' -VerifyOnly
 Set-WindowsExecutableResource $hookBinary 'hook' -VerifyOnly
+Set-WindowsExecutableResource $hookGuardBinary 'hook-guard' -VerifyOnly
 Set-WindowsExecutableResource $acpBinary 'acp-guard' -VerifyOnly
 . $WindowsBinaryIdentityHelper
 Assert-DefenseClawBinaryIdentity `
@@ -1214,16 +1216,20 @@ Assert-DefenseClawBinaryIdentity `
     -Path $hookBinary -ExpectedName 'defenseclaw-hook' `
     -ExpectedVersion $Version -ExpectedCommit $sourceCommit | Out-Null
 Assert-DefenseClawBinaryIdentity `
+    -Path $hookGuardBinary -ExpectedName 'defenseclaw-hook-guard' `
+    -ExpectedVersion $Version -ExpectedCommit $sourceCommit | Out-Null
+Assert-DefenseClawBinaryIdentity `
     -Path $acpBinary -ExpectedName 'defenseclaw-acp' `
     -ExpectedVersion $Version -ExpectedCommit $sourceCommit | Out-Null
 $payloadSigned = Set-FileSignaturesIfConfigured @(
-    $launcher, $startupLauncher, $gatewayBinary, $hookBinary, $acpBinary, $hookLauncher
+    $launcher, $startupLauncher, $gatewayBinary, $hookBinary, $hookGuardBinary, $acpBinary, $hookLauncher
 ) $build
 foreach ($resourceContract in @(
     [pscustomobject]@{ Path = $launcher; Component = 'launcher' },
     [pscustomobject]@{ Path = $startupLauncher; Component = 'startup' },
     [pscustomobject]@{ Path = $gatewayBinary; Component = 'gateway' },
     [pscustomobject]@{ Path = $hookBinary; Component = 'hook' },
+    [pscustomobject]@{ Path = $hookGuardBinary; Component = 'hook-guard' },
     [pscustomobject]@{ Path = $acpBinary; Component = 'acp-guard' },
     [pscustomobject]@{ Path = $hookLauncher; Component = 'hook' }
 )) {
@@ -1278,6 +1284,7 @@ foreach ($mapping in @(
     [pscustomobject]@{ Installed = 'bin/defenseclaw-startup.exe'; Source = $startupLauncher; Sbom = './payload/defenseclaw-startup.exe' },
     [pscustomobject]@{ Installed = 'bin/defenseclaw-gateway.exe'; Source = $gatewayBinary; Sbom = './expanded/gateway/defenseclaw.exe' },
     [pscustomobject]@{ Installed = 'bin/defenseclaw-hook.exe'; Source = $hookBinary; Sbom = './expanded/gateway/defenseclaw-hook.exe' },
+    [pscustomobject]@{ Installed = 'bin/defenseclaw-hook-guard.exe'; Source = $hookGuardBinary; Sbom = './expanded/gateway/defenseclaw-hook-guard.exe' },
     [pscustomobject]@{ Installed = 'bin/defenseclaw-acp.exe'; Source = $acpBinary; Sbom = './expanded/gateway/defenseclaw-acp.exe' },
     [pscustomobject]@{ Installed = 'bin/defenseclaw-hook-launcher.exe'; Source = $hookLauncher; Sbom = './payload/defenseclaw-hook-launcher.exe' }
 )) {
@@ -1437,6 +1444,7 @@ try {
         '--component', "setup=$setupPath",
         '--component', "gateway=$gatewayBinary",
         '--component', "hook=$hookBinary",
+        '--component', "hook-guard=$hookGuardBinary",
         '--component', "acp-guard=$acpBinary",
         '--component', "hook-launcher=$hookLauncher",
         '--component', "launcher=$launcher",

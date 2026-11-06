@@ -16,60 +16,24 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
-// Claude Code on Windows spawns a hook's command directly. When the per-user
-// defenseclaw-hook.exe is gone (an antivirus quarantine, a cleanup tool) that
-// spawn fails with ENOENT, which Claude Code treats as a non-blocking error:
-// the prompt and every tool call ran unguarded even in action mode with fail
-// mode closed (GAP-1091). Per-user Setup therefore registers the launcher
-// through the system command processor, which is always present:
+// Per-user Windows Claude Code registers a stable hook chain. The system
+// cmd.exe starts each event except PreToolUse: it compares the small guard
+// with Setup's approved copy, starts that guard, and maps its answer to the
+// native hook status. The guard starts the launcher with CreateProcess, so a
+// path that exists but cannot start gets the same documented answer as a
+// missing launcher. Neutral lifecycle events get a warning and a nonblocking
+// status. A launcher that runs keeps its ordinary fail-mode decision.
 //
-//	cmd.exe /d /c if exist "<launcher>" ( "<launcher>" hook --connector claudecode )
-//	        else ( echo <guard sentence> 1>&2 & exit /b 2 )
+// PreToolUse starts the small guard directly. Cursor imports Claude Code's
+// settings but starts this handler without arguments; a cmd.exe command there
+// interrupted ordinary Cursor tool calls. The guard gives that argument-free
+// start no answer. Its copy is kept outside the replaceable install tree and
+// the gateway repairs it from an approved copy during its hook audit. Managed
+// and Secure Client hook registrations retain their exec form.
 //
-// cmd.exe waits for the launcher, passes its stdin, stdout, stderr and exit
-// code through, and blocks with exit 2 and one sentence when the launcher is
-// missing, as the Unix hook command does. Managed installs keep the exec form
-// their guardian restores.
-//
-// PreToolUse is the exception. Cursor imports the hooks in
-// ~/.claude/settings.json and runs a handler's command without its args, and
-// an argument-free cmd.exe made Cursor block every tool call (GAP-1011). The
-// PreToolUse handler of a packaged per-user install therefore starts the
-// installed full hook, a separate file from the stable launcher:
-//
-//	<install>\bin\defenseclaw-hook.exe launcher-guard <launcher> hook --connector claudecode
-//
-// It runs the launcher as cmd.exe does and blocks with exit 2 and the same
-// sentence when the launcher is missing or cannot start, so a tool call of a
-// turn that began before the launcher went missing is not let through. Started
-// by Cursor without arguments it gives no answer. The launcher delegates every
-// call to that same installed hook, so its absence already leaves no hook to
-// run; the guard adds no file a call depends on.
-//
-// The one-line install has no separate installed hook: its launcher is
-// ~/.local/bin\defenseclaw-hook.exe. Its PreToolUse handler starts the
-// defenseclaw-hook-guard.exe beside that launcher (cmd/defenseclaw-hook-guard,
-// a small GUI-subsystem program) as the same guard, with the same argv:
-//
-//	<bin>\defenseclaw-hook-guard.exe launcher-guard <launcher> hook --connector claudecode
-//
-// so a launcher removed in the middle of a turn still blocks the next tool
-// call; a direct start of the missing launcher was a non-blocking error that
-// let the call run uninspected. The guard is its own file, built apart from
-// the launcher, so whatever removes the launcher leaves it. It must not be a
-// console program: Claude Code started defenseclaw-gateway.exe, the guard
-// until GAP-2467, without a console when a session ended, Windows gave it a
-// new console, and Windows Terminal (the default terminal) opened a window
-// that stayed with error 0x800700e8. A one-line install without the guard file
-// (a repository build) still runs the gateway beside the launcher as the
-// guard; it answers the same argv. Started by Cursor without arguments and a
-// Cursor event on stdin, neither guard gives an answer. Only a launcher
-// with no guard program beside it keeps the exec form
-// (command = launcher, args = hook --connector claudecode) on PreToolUse. The
-// cmd.exe guard is never the PreToolUse command: Cursor starts cmd.exe with no
-// arguments and the tool call event on stdin, so cmd.exe printed its banner
-// instead of JSON and read that event as commands; every Cursor tool call was
-// blocked (GAP-1011).
+// An older cmd.exe guard and a direct launcher guard remain recognizable for
+// supported upgrade, teardown and rollback. A custom hook layout without the
+// small guard keeps its earlier form.
 //
 // Hook-shape compatibility rule (GAP-1284): a hook entry that release N
 // writes must keep a shape that every earlier 1.x teardown recognises, or
@@ -126,6 +90,9 @@ func claudeCodeLauncherGuardArgs(launcher string, hookArgs []string) []string {
 // generated guard, the cmd.exe guard or the PreToolUse guard; any other
 // handler, including an edited guard, is not one.
 func claudeCodeLauncherGuardParts(hook map[string]interface{}) (string, []string, bool) {
+	if launcher, hookArgs, ok := claudeGuardWrapperParts(hook); ok {
+		return launcher, hookArgs, true
+	}
 	if launcher, hookArgs, ok := claudeCodeCmdGuardParts(hook); ok {
 		return launcher, hookArgs, true
 	}
@@ -212,7 +179,10 @@ func claudeCodePreToolGuardParts(hook map[string]interface{}) (string, []string,
 		return "", nil, false
 	}
 	args, ok := claudeCodeNativeExecArguments(hook)
-	if !ok {
+	if !ok || len(args) == 0 || args[0] != hookguard.Subcommand {
+		return "", nil, false
+	}
+	if len(args) == 7 && (args[5] != "--event" || args[6] != "PreToolUse") {
 		return "", nil, false
 	}
 	launcher, hookArgs, ok := ClaudeCodeLauncherGuardArgv(args)
@@ -323,28 +293,22 @@ func claudeCodeWindowsHookInvocation(opts SetupOpts, executable string) (string,
 	return executable, args
 }
 
-// claudeCodeHandlerInvocation is the argv of the handler Setup writes for
-// eventType. Cursor imports the hooks in ~/.claude/settings.json (its
-// third-party hooks, on by default) and runs only a handler's command,
-// without its args. For the cmd.exe guard that started an interactive
-// cmd.exe, which printed its banner instead of JSON, and Cursor blocks a
-// tool call whose pre-tool hook answers with something other than JSON: every
-// Cursor tool call was blocked, also with no Cursor hooks set up (GAP-1011).
-// PreToolUse is the only Claude Code event Cursor runs as a pre-tool check,
-// so that handler runs the PreToolUse guard instead (see the top of this
-// file): started by Cursor with no arguments it gives no answer, and started
-// by Claude Code it blocks when the launcher is missing, also in a turn that
-// began before the launcher went missing. The one-line install runs its
-// gateway as that guard; only a launcher with neither guard program runs in
-// the exec form on PreToolUse (see the top of this file). Every other event
-// keeps the cmd.exe guard (GAP-1091).
+// claudeCodeHandlerInvocation binds each event to the per-user Windows
+// chain when Setup installed one. The exact old forms remain available for a
+// supported custom layout and for release upgrade.
 func claudeCodeHandlerInvocation(eventType, command string, args []string) (string, []string) {
-	if eventType != "PreToolUse" {
-		return command, args
-	}
 	hook := map[string]interface{}{"command": command, "args": args}
 	launcher, hookArgs, ok := claudeCodeCmdGuardParts(hook)
 	if !ok {
+		return command, args
+	}
+	if guard, approved := claudeChainFor(launcher); guard != "" {
+		if eventType == "PreToolUse" {
+			return guard, claudeGuardEventArgs(launcher, hookArgs, eventType, false)
+		}
+		return claudeCodeWindowsCommandProcessor(), claudeGuardWrapperArgs(guard, approved, launcher, eventType, hookArgs)
+	}
+	if eventType != "PreToolUse" {
 		return command, args
 	}
 	guardArgs := claudeCodePreToolGuardArgs(launcher, hookArgs)

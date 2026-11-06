@@ -28,8 +28,8 @@ func main() {
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if launcher, hookArgs, ok := hookguard.Argv(args); ok {
-		return hookguard.Run(launcher, hookArgs, stdin, stdout, stderr)
+	if launcher, hookArgs, event, wrapped, ok := hookguard.ParseInvocation(args); ok {
+		return hookguard.RunEvent(launcher, hookArgs, event, wrapped, stdin, stdout, stderr)
 	}
 	if dataDir, launcher, event, ok := hookguard.CoworkArgv(args); ok {
 		return hookguard.RunCowork(dataDir, launcher, event, stdin, stdout, stderr)
