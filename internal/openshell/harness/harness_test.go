@@ -535,7 +535,8 @@ func TestEnv(t *testing.T) {
 		t.Skip("OpenShell sandbox artifacts are not rendered on Windows hosts")
 	}
 	const proxy = "http://b1:secret@host.openshell.internal:18972"
-	mantleWest := "bedrock-mantle.us-west-2.api.aws,host.openshell.internal"
+	const localSuffix = ",localhost,127.0.0.1,127.0.0.0/8,::1"
+	mantleWest := "bedrock-mantle.us-west-2.api.aws,host.openshell.internal" + localSuffix
 	for _, tc := range []struct {
 		name string
 		spec *Spec
@@ -546,15 +547,15 @@ func TestEnv(t *testing.T) {
 			CredentialProfile: profiles.ClaudeBedrockMantleID, BedrockRegion: "us-east-1"}, map[string]string{
 			"DISABLE_AUTOUPDATER": "1", "DEFENSECLAW_SANDBOX_ID": "sb-1", "DEFENSECLAW_SANDBOX_NAME": "dc-claudecode-myapp-7f3a",
 			"http_proxy": proxy, "NODE_USE_ENV_PROXY": "1", "ANTHROPIC_BASE_URL": "https://bedrock-mantle.us-east-1.api.aws/anthropic",
-			"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1", "NO_PROXY": "bedrock-mantle.us-east-1.api.aws,host.openshell.internal",
+			"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1", "NO_PROXY": "bedrock-mantle.us-east-1.api.aws,host.openshell.internal" + localSuffix,
 		}},
-		{"codex strict", Codex, EnvOptions{CredentialProfile: profiles.OpenAIID}, map[string]string{"NO_PROXY": "api.openai.com,host.openshell.internal"}},
+		{"codex strict", Codex, EnvOptions{CredentialProfile: profiles.OpenAIID}, map[string]string{"NO_PROXY": "api.openai.com,host.openshell.internal" + localSuffix}},
 		{"opencode mantle", OpenCode, EnvOptions{EgressProxyURL: proxy, CredentialProfile: profiles.OpenCodeBedrockMantleID, BedrockRegion: "us-west-2"}, map[string]string{
 			"OPENCODE_DISABLE_AUTOUPDATE": "1", "NO_PROXY": mantleWest,
 			"OPENCODE_CONFIG_CONTENT": strings.ReplaceAll(openCodeMantleConfig, bedrockHostToken, "bedrock-mantle.us-west-2.api.aws"),
 		}},
 		{"opencode anthropic", OpenCode, EnvOptions{EgressProxyURL: proxy, CredentialProfile: profiles.OpenCodeAnthropicID},
-			map[string]string{"OPENCODE_DISABLE_AUTOUPDATE": "1", "NO_PROXY": "api.anthropic.com,host.openshell.internal"}},
+			map[string]string{"OPENCODE_DISABLE_AUTOUPDATE": "1", "NO_PROXY": "api.anthropic.com,host.openshell.internal" + localSuffix}},
 		// A Copilot BYOK profile must run offline; the GitHub-token one cannot.
 		{"copilot mantle", Copilot, EnvOptions{EgressProxyURL: proxy, CredentialProfile: profiles.CopilotBedrockMantleID, BedrockRegion: "us-west-2"}, map[string]string{
 			"COPILOT_AUTO_UPDATE": "false", "COPILOT_PKG_CACHE_HOME": CopilotPackageCache, "COPILOT_OFFLINE": "true",
@@ -563,21 +564,21 @@ func TestEnv(t *testing.T) {
 		}},
 		{"copilot github", Copilot, EnvOptions{EgressProxyURL: proxy, CredentialProfile: profiles.CopilotGitHubID}, map[string]string{
 			"COPILOT_AUTO_UPDATE": "false", "COPILOT_OFFLINE": "",
-			"NO_PROXY": "api.business.githubcopilot.com,api.enterprise.githubcopilot.com,api.github.com,api.githubcopilot.com,api.individual.githubcopilot.com,host.openshell.internal",
+			"NO_PROXY": "api.business.githubcopilot.com,api.enterprise.githubcopilot.com,api.github.com,api.githubcopilot.com,api.individual.githubcopilot.com,host.openshell.internal" + localSuffix,
 		}},
 		{"amp", Amp, EnvOptions{EgressProxyURL: proxy, CredentialProfile: profiles.AmpID},
-			map[string]string{"AMP_SKIP_UPDATE_CHECK": "1", "NO_PROXY": "ampcode.com,host.openshell.internal"}},
+			map[string]string{"AMP_SKIP_UPDATE_CHECK": "1", "NO_PROXY": "ampcode.com,host.openshell.internal" + localSuffix}},
 		{"cursor", Cursor, EnvOptions{EgressProxyURL: proxy, CredentialProfile: profiles.CursorID},
-			map[string]string{"NO_PROXY": "api2.cursor.sh,api3.cursor.sh,host.openshell.internal,repo42.cursor.sh"}},
+			map[string]string{"NO_PROXY": "api2.cursor.sh,api3.cursor.sh,host.openshell.internal,repo42.cursor.sh" + localSuffix}},
 		{"kiro", Kiro, EnvOptions{EgressProxyURL: proxy, CredentialProfile: profiles.KiroID}, map[string]string{
 			connector.KiroSandboxAgentDirEnv: connector.KiroSandboxAgentDir,
-			"NO_PROXY":                       "host.openshell.internal,management.us-east-1.kiro.dev,prod.us-east-1.auth.desktop.kiro.dev,q.us-east-1.amazonaws.com,runtime.us-east-1.kiro.dev",
+			"NO_PROXY":                       "host.openshell.internal,management.us-east-1.kiro.dev,prod.us-east-1.auth.desktop.kiro.dev,q.us-east-1.amazonaws.com,runtime.us-east-1.kiro.dev" + localSuffix,
 		}},
 		{"hermes mantle", Hermes, EnvOptions{CredentialProfile: profiles.BedrockMantleOpenAIID, BedrockRegion: "us-west-2"}, map[string]string{
 			connector.HermesSandboxProviderBaseURLEnv: "https://bedrock-mantle.us-west-2.api.aws/v1", "NO_PROXY": mantleWest,
 		}},
 		{"antigravity gemini", Antigravity, EnvOptions{CredentialProfile: profiles.GeminiID},
-			map[string]string{"NO_PROXY": "generativelanguage.googleapis.com,host.openshell.internal"}},
+			map[string]string{"NO_PROXY": "generativelanguage.googleapis.com,host.openshell.internal" + localSuffix}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := tc.opts
