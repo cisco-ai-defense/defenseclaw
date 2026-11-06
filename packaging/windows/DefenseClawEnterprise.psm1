@@ -16916,7 +16916,9 @@ function Assert-DefenseClawStandaloneContentTrusted {
         if (-not [string]::IsNullOrWhiteSpace($secrets) -and
             (Microsoft.PowerShell.Management\Test-Path -LiteralPath $secrets -PathType Container)) {
             $entries.Add([pscustomobject]@{ Path = $secrets; Writer = 'Admin'; Recovery = $secret })
-            foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $secrets -Force)) {
+            # A credential store Setup cannot list stops the check, so no
+            # credential in it is left unjudged (g582 review 4 L4).
+            foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $secrets -Force -ErrorAction Stop)) {
                 if (-not $item.PSIsContainer -and $item.Name -cmatch '^[a-z0-9][a-z0-9-]{0,62}\z') {
                     $entries.Add([pscustomobject]@{ Path = $item.FullName; Writer = 'Admin'; Recovery = $secret })
                 }
