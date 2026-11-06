@@ -132,7 +132,7 @@ func (a *APIServer) mcpAccountRuntimeBlock(ctx context.Context, pe *enforce.Poli
 	}
 	home, _ := callerHomeForAssets(ctx)
 	for _, row := range rows {
-		if row.Actions.Runtime != "disable" || row.TargetName == server {
+		if row.Actions.Runtime != "disable" || row.TargetName == server || row.SourcePath != row.TargetName {
 			continue
 		}
 		connector := strings.ToLower(strings.TrimSpace(req.Connector))
@@ -142,12 +142,13 @@ func (a *APIServer) mcpAccountRuntimeBlock(ctx context.Context, pe *enforce.Poli
 			continue
 		}
 		query := watcher.MCPAdmissionQuery{Connector: connector, Server: server, Home: home, CWD: req.callerCWD}
+		if !watcher.MCPAccountJournalServes(row.TargetName, query) {
+			continue
+		}
 		var snapshot *audit.SnapshotRow
-		if strings.Contains(row.TargetName, "@") || strings.HasPrefix(row.TargetName, "mcp:v2:") {
-			snapshot, err = a.store.GetTargetSnapshot("mcp", row.TargetName)
-			if err != nil && !errors.Is(err, sql.ErrNoRows) {
-				return true, fmt.Sprintf("mcp server %q block check failed — failing closed: %v", server, err)
-			}
+		snapshot, err = a.store.GetTargetSnapshot("mcp", row.TargetName)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return true, fmt.Sprintf("mcp server %q block check failed — failing closed: %v", server, err)
 		}
 		if !watcher.MCPAccountJournalServesSnapshot(row.TargetName, snapshot, query) {
 			continue

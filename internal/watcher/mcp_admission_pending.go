@@ -6,7 +6,6 @@ package watcher
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"path/filepath"
 	"runtime"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/mcpkey"
 )
 
 // MCPAdmissionQuery names the MCP server a tool call reaches.
@@ -46,13 +46,8 @@ type mcpKnownDefinition struct {
 const mcpSnapshotIdentityKey = "mcp.snapshot.identity.v1"
 
 // mcpSnapshotIdentity keeps the fields needed to match a call when the source
-// list is unavailable. This also validates older snapshot paths.
-type mcpSnapshotIdentity struct {
-	Name      string `json:"name"`
-	Connector string `json:"connector"`
-	Home      string `json:"home"`
-	Project   string `json:"project"`
-}
+// list is unavailable and validates versioned snapshot paths.
+type mcpSnapshotIdentity mcpkey.Identity
 
 func mcpIdentityForServer(server config.MCPServerEntry) mcpSnapshotIdentity {
 	return mcpSnapshotIdentity{server.Name, server.Connector, server.Home, server.Project}
@@ -168,79 +163,11 @@ func (w *InstallWatcher) mcpFailedFromLastRead(q MCPAdmissionQuery) MCPAdmission
 	return MCPAdmissionStatus{}
 }
 
-// A stored MCP baseline includes its configured name and, for current rows,
-// a structured identity. A versioned path can be decoded directly. An older
-// path is never split to infer project scope from raw home or name text.
+// A failed baseline is usable only when its stored identity matches its
+// versioned key. Older rows cannot establish an account scope.
 func mcpFailedSnapshotServesQuery(path string, row *audit.SnapshotRow, q MCPAdmissionQuery) bool {
-	if identity, ok := mcpStoredSnapshotIdentity(path, row); ok {
-		return mcpServerServesQuery(identity.server(), q)
-	}
-	var hashes map[string]string
-	if row != nil && json.Unmarshal([]byte(row.ConfigHashes), &hashes) == nil {
-		if _, ok := hashes[mcpSnapshotIdentityKey]; ok {
-			return false
-		}
-		name := ""
-		hasStoredName := false
-		for key, hash := range hashes {
-			if !strings.HasPrefix(key, "mcp.servers.") {
-				continue
-			}
-			hasStoredName = true
-			if hash == row.ContentHash && hash != "" {
-				if name != "" {
-					return false
-				}
-				name = strings.TrimPrefix(key, "mcp.servers.")
-			}
-		}
-		if name != "" {
-			if path == name {
-				return config.SameMCPToolServer(q.Connector, name, q.Server)
-			}
-			if identity, ok := decodeMCPEventPath(path); ok {
-				return identity.Name == name && mcpSnapshotPathServesQuery(path, q)
-			}
-			return mcpLegacyNamedPathServesQuery(path, name, q)
-		}
-		if hasStoredName {
-			return false
-		}
-	}
-	// A path-only row has no provenance. The entire key is its old literal
-	// name, even if the bytes also decode as a versioned tuple.
-	return config.SameMCPToolServer(q.Connector, path, q.Server)
-}
-
-// mcpSnapshotPathServesQuery matches a versioned path whose stored server
-// name has already been checked against the decoded name.
-func mcpSnapshotPathServesQuery(path string, q MCPAdmissionQuery) bool {
-	if identity, ok := decodeMCPEventPath(path); ok {
-		return mcpServerServesQuery(identity.server(), q)
-	}
-	return config.SameMCPToolServer(q.Connector, path, q.Server)
-}
-
-func mcpLegacyNamedPathServesQuery(path, name string, q MCPAdmissionQuery) bool {
-	if !config.SameMCPToolServer(q.Connector, name, q.Server) {
-		return false
-	}
-	if path == name {
-		return true
-	}
-	if q.Connector == "" {
-		return false
-	}
-	marker := "@" + q.Connector
-	if strings.EqualFold(path, name+marker) {
-		return true
-	}
-	prefix := name + marker + ":"
-	if len(path) <= len(prefix) || !strings.EqualFold(path[:len(prefix)], prefix) {
-		return false
-	}
-	home := path[len(prefix):]
-	return q.Home == "" || sameMCPFolder(home, q.Home)
+	identity, ok := mcpStoredSnapshotIdentity(path, row)
+	return ok && mcpServerServesQuery(identity.server(), q)
 }
 
 func mcpSnapshotFailed(row *audit.SnapshotRow) bool {
