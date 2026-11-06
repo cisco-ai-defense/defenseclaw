@@ -788,6 +788,33 @@ class _WindowsShareModel:
         monkeypatch.setattr(vendor_identity, "Path", PureWindowsPath)
 
 
+def _windows_peer_identity(monkeypatch, provider, links, data_dir):
+    """Decide a Windows provider whose published bytes and tree are stable.
+
+    The other tests cover the bytes and the tree; this isolates the peer
+    decision on Windows paths.
+    """
+    import ntpath
+
+    pinned = vendor_identity.VENDOR_DIGESTS[("@openclaw/amazon-bedrock-provider", "2026.10.9")]
+    provider_manifest = json.dumps({
+        "name": "@openclaw/amazon-bedrock-provider", "version": "2026.10.9",
+        "peerDependencies": {"openclaw": "*"},
+    }).encode()
+
+    def manifest(path, **_kwargs):
+        if ntpath.normcase(path) == ntpath.normcase(ntpath.join(provider, "package.json")):
+            return provider_manifest
+        return json.dumps({"name": "openclaw"}).encode()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(vendor_identity, "_read_regular_file", manifest)
+        patch.setattr(vendor_identity, "_tree_sha256", lambda *_args, **_kwargs: pinned)
+        patch.setattr(vendor_identity, "_tree_entry_state", lambda _root: ("stable",))
+        _WindowsShareModel(links).install(patch)
+        return vendor_identity.inspect_official_provider_tree(provider, data_dir=data_dir)
+
+
 def test_r109_g610_unc_share_peers_judged_as_whole_paths(monkeypatch) -> None:
     """A UNC server and share are part of the path the peer validation judges.
 
@@ -827,29 +854,11 @@ def test_r109_g610_unc_share_peers_judged_as_whole_paths(monkeypatch) -> None:
         ("state-share-root-alias", "symlink", alias, data_dir + sep, False),
         ("state-share-child", "junction", data_dir + sep + sep.join(("node_modules", "openclaw")), None, False),
     )
-    pinned = vendor_identity.VENDOR_DIGESTS[("@openclaw/amazon-bedrock-provider", "2026.10.9")]
-    provider_manifest = json.dumps({
-        "name": "@openclaw/amazon-bedrock-provider", "version": "2026.10.9",
-        "peerDependencies": {"openclaw": "*"},
-    }).encode()
-
-    def manifest(path, **_kwargs):
-        if ntpath.normcase(path) == ntpath.normcase(provider + sep + "package.json"):
-            return provider_manifest
-        return json.dumps({"name": "openclaw"}).encode()
-
-    # The published bytes and a stable tree are preconditions here; the other
-    # tests cover them. This isolates the peer decision on Windows paths.
-    monkeypatch.setattr(vendor_identity, "_read_regular_file", manifest)
-    monkeypatch.setattr(vendor_identity, "_tree_sha256", lambda *_args, **_kwargs: pinned)
-    monkeypatch.setattr(vendor_identity, "_tree_entry_state", lambda _root: ("stable",))
     for label, kind, target, alias_target, possible in cases:
         links = {peer: (kind, target)}
         if alias_target is not None:
             links[alias] = ("junction", alias_target)
-        with monkeypatch.context() as patch:
-            _WindowsShareModel(links).install(patch)
-            identity = vendor_identity.inspect_official_provider_tree(provider, data_dir=data_dir)
+        identity = _windows_peer_identity(monkeypatch, provider, links, data_dir)
         assert (identity is not None) is possible, label
         if possible:
             assert identity.possible_peer, label
@@ -861,3 +870,59 @@ def test_r109_g610_unc_share_peers_judged_as_whole_paths(monkeypatch) -> None:
         assert within(data_dir + sep, data_dir + sep + "openclaw")
         assert not within(data_dir, data_dir + "-other" + sep + "openclaw")
         assert not within(sep.join(("C:", "provider")), sep.join(("D:", "provider")))
+
+
+def test_r109_g610_verbatim_peer_paths_judged_by_actual_names(monkeypatch) -> None:
+    """An extended-length path names the entries it spells, as Windows does.
+
+    Windows drops trailing dots and spaces from the names of an ordinary path,
+    so an ordinary ``.ssh.`` names ``.ssh`` and is refused. An extended-length
+    path is not normalized: ``.ssh.`` there is a distinct ordinary directory
+    and is admitted, while ``.ssh`` is refused. A device or extended-length
+    spelling of the configured state names the state and is refused.
+    """
+    import ntpath
+
+    sep = ntpath.sep
+    provider = sep.join(("C:", "provider"))
+    peer = sep.join((provider, "node_modules", "openclaw"))
+    alias = sep.join(("C:", "alias"))
+    local_state = sep.join(("C:", "state"))
+    share_state = sep * 2 + sep.join(("server", "state"))
+    verbatim = sep * 2 + "?" + sep
+    package = ("node_modules", "openclaw")
+
+    def spelled(prefix, *names):
+        return prefix + sep.join((*names, *package))
+
+    # (label, peer target, alias target, configured state, admitted with a possible peer)
+    cases = (
+        ("verbatim-period", spelled(verbatim, "C:", "ordinary", ".ssh."), None, local_state, True),
+        ("verbatim-space", spelled(verbatim, "C:", "ordinary", ".ssh "), None, local_state, True),
+        ("verbatim-share-period", spelled(verbatim, "UNC", "server", ".ssh."), None, local_state, True),
+        ("verbatim-alias-period", alias + sep + sep.join(package),
+         verbatim + sep.join(("C:", "ordinary", ".aws.")), local_state, True),
+        ("verbatim-ordinary", spelled(verbatim, "C:", "ordinary", "packages"), None, local_state, True),
+        ("verbatim-state-period", spelled(verbatim, "C:", "state."), None, local_state, True),
+        ("verbatim-protected", spelled(verbatim, "C:", "ordinary", ".ssh"), None, local_state, False),
+        ("verbatim-protected-upper", spelled(verbatim, "C:", "ordinary", ".SSH"), None, local_state, False),
+        ("verbatim-share-protected", spelled(verbatim, "UNC", "server", ".ssh"), None, local_state, False),
+        ("verbatim-alias-protected", alias + sep + sep.join(package),
+         verbatim + sep.join(("C:", "ordinary", ".aws")), local_state, False),
+        ("ordinary-period", spelled("", "C:", "ordinary", ".ssh."), None, local_state, False),
+        ("ordinary-space", spelled("", "C:", "ordinary", ".ssh "), None, local_state, False),
+        ("forward-slash-device-period", spelled("//?/", "C:", "ordinary", ".ssh."),
+         None, local_state, False),
+        ("verbatim-local-state", spelled(verbatim, "C:", "state"), None, local_state, False),
+        ("device-local-state", spelled(sep * 2 + "." + sep, "C:", "state"), None, local_state, False),
+        ("verbatim-share-state", spelled(verbatim, "UNC", "server", "state"), None, share_state, False),
+        ("ordinary-state-period", spelled("", "C:", "state."), None, local_state, False),
+    )
+    for label, target, alias_target, data_dir, possible in cases:
+        links = {peer: ("junction", target)}
+        if alias_target is not None:
+            links[alias] = ("junction", alias_target)
+        identity = _windows_peer_identity(monkeypatch, provider, links, data_dir)
+        assert (identity is not None) is possible, label
+        if possible:
+            assert identity.possible_peer, label
