@@ -531,7 +531,7 @@ func (w *InstallWatcher) admitAddedMCPServers(ctx context.Context) {
 }
 
 func (w *InstallWatcher) admitAddedMCPServer(ctx context.Context, evt InstallEvent) {
-	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
+	baseline, err := w.mcpSnapshotForEvent(evt)
 	if err == nil {
 		w.readmitChangedMCPServer(ctx, evt, baseline)
 		return // admitted or baselined already
@@ -720,7 +720,7 @@ func (w *InstallWatcher) discoverAddedMCPServers() {
 		if firstCycle && w.listedAtStartup(path) {
 			continue
 		}
-		baseline, err := w.store.GetTargetSnapshot(string(InstallMCP), path)
+		baseline, err := mcpSnapshotForServer(w.store, server)
 		if err != nil {
 			// A read error other than no rows is retried by admission,
 			// which says so.
@@ -765,7 +765,7 @@ func (w *InstallWatcher) readMCPServers() ([]config.MCPServerEntry, error) {
 			known = append(known, mcpKnownDefinition{
 				server: config.MCPServerEntry{Name: server.Name, Connector: server.Connector,
 					Home: server.Home, Project: server.Project, Bundled: server.Bundled},
-				path: MCPEventPath(server), hash: hash,
+				hash: hash,
 			})
 		}
 		w.mcpAdmissionMu.Lock()
@@ -2106,6 +2106,9 @@ func (w *InstallWatcher) eventConnector(evt InstallEvent) string {
 // Rego policy; otherwise it falls back to the built-in Go logic.
 func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (res AdmissionResult) {
 	w.admissionNotes.Delete(evt.Path)
+	if err := w.migrateLegacyMCPJournal(evt); err != nil {
+		fmt.Fprintf(os.Stderr, "[watch] mcp %s: retain old journal row: %v\n", evt.Name, err)
+	}
 	defer func() { w.settleAdmissionIssue(evt, res) }()
 	if evt.Type == InstallPlugin && w.isManagedArtifact(evt.Path) {
 		return AdmissionResult{
