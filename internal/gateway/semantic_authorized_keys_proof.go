@@ -1186,8 +1186,16 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// cwd) is placed in the client's cwd, as the client keyed it.
 		target = hookpaths.OperandPath(target, clientCWD)
 		if request.patchTarget && (request.SandboxGuestCWD == "" || request.patchHostView) {
-			if _, ok := hookpaths.ResolvePatchWriteTarget(target); !ok {
-				return true
+			// A managed gateway cannot walk the user's project (ProtectHome).
+			// The managed hook walked every V4A header target as the user
+			// under the same patch-target rule and attested the complete
+			// patch; a target it found to be no link is judged by the checks
+			// below, as a write_file target is (GAP-0488). Any other target
+			// is walked here, and fails closed where it cannot be.
+			if !hermesClientPatchTarget(request, clientTargets, clientCWD, target) {
+				if _, ok := hookpaths.ResolvePatchWriteTarget(target); !ok {
+					return true
+				}
 			}
 		}
 		// Only the event cwd can interpret the process-dependent alias.
@@ -2077,4 +2085,20 @@ func interpreterCommentStart(code string, i int, language string) bool {
 	default:
 		return false
 	}
+}
+
+// hermesClientPatchTarget reports that the managed hook proved one Hermes V4A
+// patch target ordinary: behind ProtectHome only, in a complete map the hook
+// keyed in clientCWD that attests every patch target (hookpaths.
+// PatchCompleteKey), with the target resolved to itself. The hook lists a V4A
+// target only after its own patch-target walk accepted it. A target the hook
+// resolved through a link is not proved here: this gateway cannot read the
+// link again, and the link can change after the hook read it.
+func hermesClientPatchTarget(request trustedActionRequest, clientTargets map[string]string, clientCWD, target string) bool {
+	return request.ProtectedHomeHook && filepath.IsAbs(clientCWD) && filepath.IsAbs(target) &&
+		clientTargets[hookpaths.CWDKey] == clientCWD &&
+		clientTargets[hookpaths.PatchCompleteKey] == "1" &&
+		clientTargets[hookpaths.TruncatedKey] == "" &&
+		clientTargets[hookpaths.UnprovenReasonKey] == "" &&
+		clientTargets[target] == target
 }
