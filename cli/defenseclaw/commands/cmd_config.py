@@ -1241,26 +1241,6 @@ def _stored_connector_entry(parts: list, parsed: object) -> str:
     return "" if name in {"openclaw", "zeptoclaw"} else name
 
 
-def _named_hook_primary(document: object) -> str:
-    """The hook connector ``guardrail.connector`` names, unless its entry says ``enabled: false``.
-
-    The Go hook gate scans that connector whether or not the roster lists it
-    (``NamesConnector``); a proxy connector is set up only from the roster.
-    """
-    guardrail = document.get("guardrail") if isinstance(document, dict) else None
-    guardrail = guardrail if isinstance(guardrail, dict) else {}
-    name = guardrail.get("connector")
-    name = connector_paths.normalize(name) if isinstance(name, str) else ""
-    if name in {"", "openclaw", "zeptoclaw"}:
-        return ""
-    roster = guardrail.get("connectors")
-    for key, entry in (roster.items() if isinstance(roster, dict) else ()):
-        if isinstance(key, str) and connector_paths.normalize(key) == name and isinstance(entry, dict):
-            if entry.get("enabled") is False:
-                return ""
-    return name
-
-
 def _configured_connector_selection(document: object) -> tuple[set[str], str, set[str]]:
     """Resolve the enabled roster, the primary and the listed names from the written config shape."""
     if not isinstance(document, dict):
@@ -1288,18 +1268,34 @@ def _configured_connector_selection(document: object) -> tuple[set[str], str, se
     return ({selected} if selected else set()), selected, ({selected} if selected else set())
 
 
+def _booted_connectors(enabled: set[str], primary: str, listed: set[str]) -> set[str]:
+    """The connectors the gateway sets up for this shape (``runActiveGuardrail``).
+
+    More than one roster key, disabled entries included, selects the
+    multi-connector boot of the enabled entries; otherwise the gateway boots
+    the primary alone, whether or not the roster lists it.
+    """
+    if len(listed) > 1:
+        return set(enabled)
+    return {primary} - (listed - enabled) if primary else set()
+
+
 def _check_config_connector_selection(
     path: str, candidate: bytes, *, allow_removal: bool = False, stored: str = ""
 ) -> None:
-    """A settings edit cannot select, enable or unguard a connector as a side effect (GAP-0588).
+    """A settings edit cannot select, set up, enable or unguard a connector as a side effect (GAP-0588).
 
-    ``stored`` is the connector of a set that writes one setting under its
-    own entry (``_stored_connector_entry``). When the roster did not list it
-    and the primary was guarded, the new entry joins the roster beside the
-    primary, which stays the primary and stays guarded: a primary that
-    ``guardrail.connector`` names is still scanned off the roster. Nothing
-    else is written. Every other change of the enabled roster or the primary
-    needs setup or a connector command.
+    An edit keeps the primary, the enabled roster and the connectors the
+    gateway boots (``_booted_connectors``). ``stored`` is the connector of a
+    set that writes one setting under its own entry
+    (``_stored_connector_entry``): when the roster did not list it and the
+    primary is a hook connector, the entry may join the roster as long as the
+    gateway still boots exactly the same connectors, so the primary stays
+    guarded. A whole-entry unset explicitly removes its guardrail scope and
+    already reports that to the operator: it may drop an enabled name, and
+    the primary the gateway already booted may reappear in the roster view,
+    but it cannot select or enable anything else. Every other change needs
+    setup or a connector command.
     """
     from defenseclaw import config_writer
 
@@ -1309,17 +1305,18 @@ def _check_config_connector_selection(
     current, _, _ = config_writer._read_current(path)
     before = config_writer._parse_config_document(current) if current else {}
     active_before, primary_before, listed_before = _configured_connector_selection(before)
-    active_after, primary_after, _ = _configured_connector_selection(after)
-    # A whole-entry unset explicitly removes its guardrail scope and already
-    # reports that to the operator. It may drop an enabled name, but cannot
-    # select a new primary or enable another entry in the same batch.
+    active_after, primary_after, listed_after = _configured_connector_selection(after)
+    booted_before = _booted_connectors(active_before, primary_before, listed_before)
+    booted_after = _booted_connectors(active_after, primary_after, listed_after)
     gained = active_after - active_before
     lost = set() if allow_removal else active_before - active_after
-    named = _named_hook_primary(before)
-    if stored and stored not in listed_before and primary_before in active_before | {named} - {""}:
+    if stored and stored not in listed_before and primary_before not in {"openclaw", "zeptoclaw"}:
         gained.discard(stored)
-        lost.discard(named)
-    if gained or lost or primary_after != primary_before:
+        lost -= booted_after
+    if allow_removal:
+        gained -= booted_before
+    reboot = not allow_removal and booted_after != booted_before
+    if gained or lost or reboot or primary_after != primary_before:
         raise config_writer.ConfigWriteError(
             "connector selection requires setup; use defenseclaw setup or a connector command "
             "to change the active connector"
