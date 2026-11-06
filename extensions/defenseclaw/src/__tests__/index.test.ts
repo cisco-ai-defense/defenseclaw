@@ -16,6 +16,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import type { ScanResult } from "../types.js";
@@ -44,7 +47,7 @@ const { mockDaemonClient, mockEnforcer, mockRunSkillScan, mockRunPluginScan, moc
     mockRunPluginScan: vi.fn(),
     mockRunCodeScan: vi.fn(),
     mockScanMCPServer: vi.fn(),
-    mockOutageMode: vi.fn((_tool?: { args?: Record<string, unknown> }) => "closed"),
+    mockOutageMode: vi.fn((_tool?: { args?: Record<string, unknown>; cwd?: string }) => "closed"),
   }));
 
 vi.mock("../sidecar-config.js", async (importOriginal) => ({
@@ -129,6 +132,7 @@ import { DaemonClient } from "../client.js";
 describe("DefenseClaw OpenClaw Plugin", () => {
   let listeners: Record<string, EventHandler>;
   let commands: Record<string, { handler: (ctx: { args: Record<string, unknown> }) => Promise<{ text: string }> }>;
+  let hostApi: ReturnType<typeof createMockContext>["ctx"]["api"];
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -145,6 +149,7 @@ describe("DefenseClaw OpenClaw Plugin", () => {
     mockDaemonClient.getEchoedSidecarInstanceId.mockReturnValue(undefined);
 
     const mock = createMockContext();
+    hostApi = mock.ctx.api;
     listeners = mock.listeners;
     commands = mock.commands;
     (pluginSetup as (api: unknown) => void)(mock.ctx.api);
@@ -473,6 +478,96 @@ describe("DefenseClaw OpenClaw Plugin", () => {
       expect(result.message.content[0].text).toBe("today");
       expect(result.message.content[1].text).toContain("DefenseClaw warning:");
       expect(result.message.content[1].text).toContain("without inspection");
+    });
+
+    it("resolves outage targets from the agent workspace and relative tool workdir", async () => {
+      (hostApi.config.agents.defaults as Record<string, unknown>).workspace = "/tmp/openclaw-agent-workspace";
+      mockOutageMode.mockImplementation((tool) =>
+        tool?.cwd === "/tmp/openclaw-agent-workspace" ? "protected" : "open");
+      mockDaemonClient.postRaw.mockResolvedValue({
+        status: 0, body: "", error: "connect ECONNREFUSED 127.0.0.1:18970", outage: true,
+      });
+      for (const workdir of [undefined, "../.defenseclaw"]) {
+        const params = { command: "printf x >> config.yaml", ...(workdir ? { workdir } : {}) };
+        await expect(listeners.before_tool_call(
+          { toolName: "exec", params },
+          { agentId: "main", sessionKey: "agent:main:main", toolName: "exec" },
+        )).resolves.toMatchObject({ block: true });
+        expect(mockOutageMode).toHaveBeenLastCalledWith({ name: "exec", args: params, cwd: "/tmp/openclaw-agent-workspace" });
+      }
+
+      mockOutageMode.mockImplementation((tool) =>
+        tool?.cwd === "/tmp/openclaw-agent-workspace" ? "open" : "protected");
+      await expect(listeners.before_tool_call(
+        { toolName: "exec", params: { command: "printf x >> notes.txt" } },
+        { agentId: "main", toolName: "exec" },
+      )).resolves.toBeUndefined();
+    });
+
+    it("uses the selected agent's configured workspace during an outage", async () => {
+      (hostApi.config.agents as Record<string, unknown>).list = [
+        { id: "main", default: true, workspace: "/tmp/openclaw-main" },
+        { id: "research", workspace: "/tmp/openclaw-research" },
+      ];
+      mockOutageMode.mockReturnValue("open");
+      mockDaemonClient.postRaw.mockResolvedValue({
+        status: 0, body: "", error: "connect ECONNREFUSED 127.0.0.1:18970", outage: true,
+      });
+      await listeners.before_tool_call(
+        { toolName: "exec", params: { command: "date" } },
+        { agentId: "research", sessionKey: "agent:research:main", toolName: "exec" },
+      );
+      expect(mockOutageMode).toHaveBeenLastCalledWith({
+        name: "exec", args: { command: "date" }, cwd: "/tmp/openclaw-research",
+      });
+    });
+
+    it("uses OpenClaw's normalized agent id and home-relative workspace", async () => {
+      vi.stubEnv("OPENCLAW_HOME", "~/openclaw-home");
+      try {
+        (hostApi.config.agents as Record<string, unknown>).list = [
+          { id: "Research Team", workspace: "~/agent-workspace" },
+        ];
+        mockOutageMode.mockReturnValue("open");
+        mockDaemonClient.postRaw.mockResolvedValue({
+          status: 0, body: "", error: "connect ECONNREFUSED 127.0.0.1:18970", outage: true,
+        });
+        await listeners.before_tool_call(
+          { toolName: "exec", params: { command: "date" } },
+          { agentId: "research-team", toolName: "exec" },
+        );
+        const osHome = process.env.HOME?.trim() || process.env.USERPROFILE?.trim() || homedir();
+        expect(mockOutageMode).toHaveBeenLastCalledWith({
+          name: "exec", args: { command: "date" },
+          cwd: resolve(osHome, "openclaw-home", "agent-workspace"),
+        });
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("uses the legacy state directory for an unconfigured secondary agent", async () => {
+      const home = mkdtempSync(join(tmpdir(), "openclaw-workspace-"));
+      mkdirSync(join(home, ".clawdbot"));
+      vi.stubEnv("OPENCLAW_HOME", home);
+      vi.stubEnv("OPENCLAW_STATE_DIR", "");
+      try {
+        mockOutageMode.mockReturnValue("open");
+        mockDaemonClient.postRaw.mockResolvedValue({
+          status: 0, body: "", error: "connect ECONNREFUSED 127.0.0.1:18970", outage: true,
+        });
+        await listeners.before_tool_call(
+          { toolName: "exec", params: { command: "date" } },
+          { agentId: "research", toolName: "exec" },
+        );
+        expect(mockOutageMode).toHaveBeenLastCalledWith({
+          name: "exec", args: { command: "date" },
+          cwd: join(home, ".clawdbot", "workspace-research"),
+        });
+      } finally {
+        vi.unstubAllEnvs();
+        rmSync(home, { recursive: true, force: true });
+      }
     });
 
     it.each([
