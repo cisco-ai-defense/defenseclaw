@@ -103,6 +103,10 @@ func windowsEnterpriseUserStateRemainingMessage(count int, accounts string, reru
 // %USERPROFILE%\.local\bin ("none" when it held no DefenseClaw file).
 const windowsManagedHooksPurgedBinariesMarker = ` | .local\bin: `
 
+// A purge can leave account files in .defenseclaw after removing the managed
+// entries. Keep the retained names with the account's result.
+const windowsManagedHooksKeptEntriesMarker = " | kept account entries: "
+
 // windowsManagedHooksPurgedLabel appends to a purged account's label the
 // file names its binaries purge removed, so the result does not claim
 // binaries an account never had (GAP-1735).
@@ -133,7 +137,14 @@ func windowsManagedHooksPurgedLabel(label string, removed []string) string {
 // that did not report its binaries.
 func windowsEnterprisePurgedUserStateChange(entry string) string {
 	account, binaries, found := strings.Cut(entry, windowsManagedHooksPurgedBinariesMarker)
+	kept := ""
+	if before, after, hasKept := strings.Cut(account, windowsManagedHooksKeptEntriesMarker); hasKept {
+		account, kept = before, after
+	}
 	line := "removed all DefenseClaw per-user data of " + account + " (hook scripts and foreign-hooks-backup included)"
+	if kept != "" {
+		line = "removed DefenseClaw-owned per-user entries of " + account + "; kept account entries in .defenseclaw: " + kept
+	}
 	switch {
 	case !found:
 		return line + " and any DefenseClaw per-user binaries in %USERPROFILE%\\.local\\bin"

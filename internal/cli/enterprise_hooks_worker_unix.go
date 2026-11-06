@@ -346,8 +346,7 @@ type enterpriseHookWorkerTargetResult struct {
 	// Hermes or Devin config put back or recreated, GAP-0564). It is kept
 	// out of the result, which the guardian state stores.
 	AgentConfig string `json:"agent_config,omitempty"`
-	// Purged is what a purge target found and removed (booleans only, so
-	// nothing the account controls reaches the administrator's output).
+	// Purged is what a purge target found, removed and kept.
 	Purged *enterpriseHookPurgeDetail `json:"purged,omitempty"`
 	// Remove reports are produced as the account, before and after teardown.
 	// Presence distinguishes an empty path set from an older worker response.
@@ -363,11 +362,12 @@ type enterpriseHookWorkerTargetResult struct {
 // Kept says ~/.defenseclaw holds the account's own per-user install, which
 // the purge left as it is (GAP-0727).
 type enterpriseHookPurgeDetail struct {
-	Data     bool `json:"data,omitempty"`
-	Kept     bool `json:"kept,omitempty"`
-	Binaries bool `json:"binaries,omitempty"`
-	Gateway  bool `json:"gateway,omitempty"`
-	UVCache  bool `json:"uv_cache,omitempty"`
+	Data        bool     `json:"data,omitempty"`
+	Kept        bool     `json:"kept,omitempty"`
+	KeptEntries []string `json:"kept_entries,omitempty"`
+	Binaries    bool     `json:"binaries,omitempty"`
+	Gateway     bool     `json:"gateway,omitempty"`
+	UVCache     bool     `json:"uv_cache,omitempty"`
 	// RemovedConnectorBackups names the folders the OpenHands/OmniGent
 	// backups were moved to, comma separated (GAP-2015).
 	RemovedConnectorBackups string `json:"removed_connector_backups,omitempty"`
@@ -834,7 +834,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 			var summary enterprisehooks.PurgeSummary
 			if summary, err = enterpriseHookWorkerPurger(ctx, opts); err == nil {
-				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Kept: summary.Kept, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache, RemovedConnectorBackups: strings.Join(summary.KeptRemovedConnectorBackups, ", "), UnrestorableConnectorBackups: strings.Join(summary.KeptUnrestorableConnectorBackups, ", ")}
+				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Kept: summary.Kept, KeptEntries: summary.KeptEntries, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache, RemovedConnectorBackups: strings.Join(summary.KeptRemovedConnectorBackups, ", "), UnrestorableConnectorBackups: strings.Join(summary.KeptUnrestorableConnectorBackups, ", ")}
 			}
 		case enterpriseHookWorkerModeRestoreOwnInstall:
 			if purgeBlocked != "" {

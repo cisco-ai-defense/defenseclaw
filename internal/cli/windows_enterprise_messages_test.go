@@ -44,6 +44,17 @@ func TestWindowsEnterprisePurgedUserStateNamesWhatWent(t *testing.T) {
 	}
 }
 
+func TestGAP0669WindowsPurgeResultNamesRetainedAccountFile(t *testing.T) {
+	account := `dcw-std1: C:\Users\dcw-std1\.defenseclaw`
+	entry := windowsManagedHooksPurgedLabel(account+windowsManagedHooksKeptEntriesMarker+"personal.txt", nil)
+	change := windowsEnterprisePurgedUserStateChange(entry)
+	if !strings.Contains(change, "removed DefenseClaw-owned per-user entries") ||
+		!strings.Contains(change, "personal.txt") ||
+		strings.Contains(change, "removed all DefenseClaw per-user data") {
+		t.Fatalf("purge change = %q", change)
+	}
+}
+
 // GAP-1756 and GAP-1720: the remedies name an active (connected) session,
 // and a standard user's status is a refusal with the administrator's step,
 // not installer internals.
