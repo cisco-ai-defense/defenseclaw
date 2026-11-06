@@ -47,7 +47,7 @@ import click
 import yaml
 
 from defenseclaw import config as config_module
-from defenseclaw import connector_paths, ux
+from defenseclaw import ux
 from defenseclaw.config import gateway_pid_path
 from defenseclaw.config_inspect import (
     ConfigInspectError,
@@ -1214,113 +1214,8 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
             f"an empty value does not set {key}; use defenseclaw config unset {key}"
         )
     roster_change = parts == ["guardrail"] or parts[:2] == ["guardrail", "connectors"]
-    selection_change = parts and parts[0] in {"guardrail", "claw"}
-    stored = _stored_connector_entry(parts, parsed)
-
-    def _check_candidate(path: str, candidate: bytes) -> None:
-        if roster_change:
-            _check_guardrail_connector_roster(path, candidate)
-        _check_config_connector_selection(path, candidate, stored=stored)
-
-    check_candidate = _check_candidate if selection_change else None
+    check_candidate = _check_guardrail_connector_roster if roster_change else None
     _write_config_change(app, [Change(key, parsed)], expect_sha256, "set", check_candidate=check_candidate)
-
-
-def _stored_connector_entry(parts: list, parsed: object) -> str:
-    """The hook connector whose settings a ``config set`` stores under its own entry (GAP-0588).
-
-    ``guardrail.connectors.<C>.<key>``, or the whole entry as a mapping,
-    writes only that key. A write that names ``enabled`` is not a store, and
-    a proxy connector cannot share the roster with a hook connector.
-    """
-    if len(parts) < 3 or parts[:2] != ["guardrail", "connectors"] or not isinstance(parts[2], str):
-        return ""
-    if parts[3:4] == ["enabled"] or (len(parts) == 3 and (not isinstance(parsed, dict) or "enabled" in parsed)):
-        return ""
-    name = connector_paths.normalize(parts[2])
-    return "" if name in {"openclaw", "zeptoclaw"} else name
-
-
-def _configured_connector_selection(document: object) -> tuple[set[str], str, set[str]]:
-    """Resolve the enabled roster, the primary and the listed names from the written config shape."""
-    if not isinstance(document, dict):
-        return set(), "", set()
-    guardrail = document.get("guardrail")
-    guardrail = guardrail if isinstance(guardrail, dict) else {}
-    claw = document.get("claw")
-    claw = claw if isinstance(claw, dict) else {}
-    primary = guardrail.get("connector")
-    primary = connector_paths.normalize(primary) if isinstance(primary, str) and primary.strip() else ""
-    # A missing claw.mode loads as OpenClaw in Config.load and the Go loader.
-    mode = claw.get("mode", "openclaw")
-    mode = connector_paths.normalize(mode) if isinstance(mode, str) and mode.strip() else ""
-    roster = guardrail.get("connectors")
-    if isinstance(roster, dict) and roster:
-        enabled = {
-            connector_paths.normalize(name)
-            for name, entry in roster.items()
-            if isinstance(name, str) and isinstance(entry, dict) and entry.get("enabled") is not False
-        }
-        names = sorted(connector_paths.normalize(name) for name in roster if isinstance(name, str))
-        selected = primary or (mode if mode in names else names[0] if names else "")
-        return enabled, selected, set(names)
-    selected = primary or mode
-    return ({selected} if selected else set()), selected, ({selected} if selected else set())
-
-
-def _booted_connectors(enabled: set[str], primary: str, listed: set[str]) -> set[str]:
-    """The connectors the gateway sets up for this shape (``runActiveGuardrail``).
-
-    More than one roster key, disabled entries included, selects the
-    multi-connector boot of the enabled entries; otherwise the gateway boots
-    the primary alone, whether or not the roster lists it.
-    """
-    if len(listed) > 1:
-        return set(enabled)
-    return {primary} - (listed - enabled) if primary else set()
-
-
-def _check_config_connector_selection(
-    path: str, candidate: bytes, *, allow_removal: bool = False, stored: str = ""
-) -> None:
-    """A settings edit cannot select, set up, enable or unguard a connector as a side effect (GAP-0588).
-
-    An edit keeps the primary, the enabled roster and the connectors the
-    gateway boots (``_booted_connectors``). ``stored`` is the connector of a
-    set that writes one setting under its own entry
-    (``_stored_connector_entry``): when the roster did not list it and the
-    primary is a hook connector, the entry may join the roster as long as the
-    gateway still boots exactly the same connectors, so the primary stays
-    guarded. A whole-entry unset explicitly removes its guardrail scope and
-    already reports that to the operator: it may drop an enabled name, and
-    the primary the gateway already booted may reappear in the roster view,
-    but it cannot select or enable anything else. Every other change needs
-    setup or a connector command.
-    """
-    from defenseclaw import config_writer
-
-    after = config_writer._parse_config_document(candidate)
-    if config_writer.secure_client_document(after):
-        return
-    current, _, _ = config_writer._read_current(path)
-    before = config_writer._parse_config_document(current) if current else {}
-    active_before, primary_before, listed_before = _configured_connector_selection(before)
-    active_after, primary_after, listed_after = _configured_connector_selection(after)
-    booted_before = _booted_connectors(active_before, primary_before, listed_before)
-    booted_after = _booted_connectors(active_after, primary_after, listed_after)
-    gained = active_after - active_before
-    lost = set() if allow_removal else active_before - active_after
-    if stored and stored not in listed_before and primary_before not in {"openclaw", "zeptoclaw"}:
-        gained.discard(stored)
-        lost -= booted_after
-    if allow_removal:
-        gained -= booted_before
-    reboot = not allow_removal and booted_after != booted_before
-    if gained or lost or reboot or primary_after != primary_before:
-        raise config_writer.ConfigWriteError(
-            "connector selection requires setup; use defenseclaw setup or a connector command "
-            "to change the active connector"
-        )
 
 
 def _check_guardrail_connector_roster(_path: str, candidate: bytes) -> None:
@@ -1407,16 +1302,7 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
         parts == ["guardrail"] or parts[:2] == ["guardrail", "connectors"]
         for _key, parts in parsed
     )
-    selection_change = any(
-        parts and parts[0] in {"guardrail", "claw"} for _key, parts in parsed
-    )
-
-    def _check_candidate(path: str, candidate: bytes) -> None:
-        if roster_change:
-            _check_guardrail_connector_roster(path, candidate)
-        _check_config_connector_selection(path, candidate, allow_removal=True)
-
-    check_candidate = _check_candidate if selection_change else None
+    check_candidate = _check_guardrail_connector_roster if roster_change else None
     if _write_config_change(app, changes, expect_sha256, "unset", check_candidate=check_candidate):
         for note in _left_roster_notes(parsed, roster):
             click.echo(note)
