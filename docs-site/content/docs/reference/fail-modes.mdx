@@ -91,6 +91,10 @@ On a per-user Windows install, a sustained flood of about 10 hook calls a second
 
 The hold stays under the hook's 3.5-second answer budget, so it does not block a call by itself. A host that stalls for longer (up to 12 seconds was seen on a busy shared Windows host) can still push calls past the budget, and those calls then follow the rules above. Removing this hold needs a change to how the audit records are written; until then it is a known limit.
 
+### A hook held past its time budget
+
+A hook's time budget counts from when the operating system started the hook process. Since 1.0.9, a hook the computer froze past its budget, for example during sleep, is blocked in every fail mode, never allowed. Before, a hook held for more than 30 seconds got a new budget and could still be allowed. Secure Client hooks are unchanged.
+
 ### Claude Cowork
 
 Claude Cowork has no fail mode of its own. Its plugin and the managed drop-in run the Claude Code connector's hook, so Cowork follows the Claude Code fail mode in every table on this page. The one-time outage warning that a per-user hook prints is never shown inside Cowork. A Cowork task keeps running with no visible warning while the gateway is down. See the outage in `defenseclaw status`, `defenseclaw doctor`, the TUI and `hook-failures.jsonl` ([Claude Cowork](/docs/connectors/cowork#limits)).
