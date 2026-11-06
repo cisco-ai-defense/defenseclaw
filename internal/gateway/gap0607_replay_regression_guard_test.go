@@ -71,14 +71,19 @@ func gap0607PendingCells(gap string, want map[string]string, current d1ReplayVer
 	return pending
 }
 
-// The ratified 1.0.9 verdicts follow rel-1-0-6 GAP-0675: a protected user
-// file finding alerts in the balanced tiers and blocks in strict. Its policy
-// change (fix/r109-ghpw) is not yet on the release branch, so the balanced
-// cells are pinned to the current block and fail once it lands, for review.
-// The detection redesign of these shapes is the 1.0.10 round (#1189).
+// The ratified 1.0.9 verdicts follow rel-1-0-6 GAP-0675: an ordinary command
+// that only names a protected user file (data, a log line, a read, a copy
+// out) runs in the balanced tiers with a visible alert and blocks in strict.
+// Its policy change (fix/r109-ghpw) is not yet on the release branch, so the
+// balanced cells are pinned to the current block and fail once it lands, for
+// review. A write to a protected file named directly, through a known value
+// or through an existing link blocks in every tier (wave-3 owner rule), with
+// no pin. The detection redesign of these shapes is the 1.0.10 round (#1189).
+// {HOME} is the test's synthetic home directory.
 func gap0607ReplayGuards() []gap0607ReplayGuard {
 	finding := gap0607Tiered("alert", "block")
 	ordinary := gap0607Tiered("allow", "allow")
+	protected := gap0607Tiered("block", "block")
 	block := d1ReplayVerdict{Decision: "block", RuleID: "persistence.ssh_authorized_keys_command"}
 	allow := d1ReplayVerdict{Decision: "allow", RuleID: "-"}
 	policy := func(command, replay, gap string) gap0607ReplayGuard {
@@ -91,11 +96,14 @@ func gap0607ReplayGuards() []gap0607ReplayGuard {
 		{Replay: "R2-T1-24", Gap: "GAP-0493", Command: `git -C sub pull && echo marker >> future`, Want: finding,
 			Pending: gap0607PendingCells("GAP-0675 #1189", finding, allow, "oss", "managed-balanced", "strict")},
 		{Replay: "R2-T1-24 twin", Gap: "GAP-0493", Command: `git -C sub pull && echo marker >> notes.txt`, Want: ordinary},
-		policy(`node -e "require(fs).writeFileSync(/tmp/report.txt, see /Users/vnarajal/.ssh/authorized_keys)"`, "R8-T1-17 data", "GAP-1266"),
+		policy(`node -e 'require("fs").writeFileSync("/tmp/report.txt", "see {HOME}/.ssh/authorized_keys\n")'`, "R8-T1-17 data", "GAP-1266"),
+		policy(`node -e 'require("fs").writeFileSync(require("os").homedir() + "/report.json", JSON.stringify({path: "{HOME}/.ssh/authorized_keys"}))'`, "R8-T1-17 data variant", "GAP-1266"),
 		policy(`echo "check ~/.ssh/authorized_keys" >> ~/app.log`, "R8-T1-17 log", "GAP-1267"),
 		policy(`diff ~/.ssh/authorized_keys ~/.ssh/authorized_keys.bak`, "R5-T1-08 diff", "GAP-1183"),
 		policy(`cp ~/.ssh/authorized_keys /var/tmp/keys.bak`, "R5-T1-08 copy", "GAP-1183"),
-		policy(`echo marker >> ~/.ssh/authorized_keys`, "protected twin", "GAP-1267"),
+		{Replay: "protected twin", Gap: "GAP-1267", Command: `echo marker >> ~/.ssh/authorized_keys`, Want: protected},
+		{Replay: "protected known value", Gap: "GAP-1267", Command: `keys={HOME}/.ssh/authorized_keys; echo marker >> "$keys"`, Want: protected},
+		{Replay: "protected link", Gap: "GAP-1267", Command: `echo marker >> keylink`, Want: protected},
 		{Replay: "benign twin", Gap: "GAP-1267", Command: `echo marker >> ~/app.log`, Want: ordinary},
 	}
 }
@@ -111,6 +119,9 @@ func TestGAP0607ReplayRegressionGuards(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte("marker\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "keylink")); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", home)
 	apis := make(map[string]*APIServer)
 	for _, connector := range []string{"claudecode", "codex"} {
@@ -120,7 +131,8 @@ func TestGAP0607ReplayRegressionGuards(t *testing.T) {
 	record := os.Getenv("DC_GUARD_RECORD") == "1"
 	for _, guard := range gap0607ReplayGuards() {
 		t.Run(guard.Replay+" "+guard.Gap, func(t *testing.T) {
-			row := d1ReplayRow{ID: guard.Replay, Kind: "shell", Command: guard.Command, Expected: guard.Want}
+			command := strings.ReplaceAll(guard.Command, "{HOME}", home)
+			row := d1ReplayRow{ID: guard.Replay, Kind: "shell", Command: command, Expected: guard.Want}
 			for _, cell := range gap0607Cells() {
 				connector, tier, _ := strings.Cut(cell, "/")
 				api := apis[connector+"/balanced"]
