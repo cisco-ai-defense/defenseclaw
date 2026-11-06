@@ -309,9 +309,8 @@ func TestGAP0570MicroVMRootOwnerRule(t *testing.T) {
 	}
 }
 
-// The real guest script distinguishes a workload-owned root protected by
-// Landlock from one the workload can edit. Docker gives this test an
-// isolated root directory with the same ownership as the VM guest.
+// The running fixture sets ownership after Docker starts, then checks the
+// same guest script and filesystem rights as a MicroVM workload.
 func TestGAP0570MicroVMRootOwnerRuleInGuestShell(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the guest check uses Linux /proc and Landlock")
@@ -322,74 +321,89 @@ func TestGAP0570MicroVMRootOwnerRuleInGuestShell(t *testing.T) {
 		}
 	}
 	dir := t.TempDir()
-	source, err := os.ReadFile(filepath.Join("testdata", "landlock-root-check.c"))
+	var sources []byte
+	for _, name := range []string{"landlock-root-check.c", "root-check-selective-denial.c"} {
+		source, err := os.ReadFile(filepath.Join("testdata", name))
+		must(t, err)
+		sources = append(sources, source...)
+		must(t, os.WriteFile(filepath.Join(dir, name), source, 0o600))
+	}
+	resolverSource, err := os.ReadFile(filepath.Join("..", "image", "testdata", "localhost-resolver.c"))
 	must(t, err)
-	must(t, os.WriteFile(filepath.Join(dir, "landlock-root-check.c"), source, 0o600))
+	sources = append(sources, resolverSource...)
+	must(t, os.WriteFile(filepath.Join(dir, "localhost-resolver.c"), resolverSource, 0o600))
 	dockerfile := "FROM " + openshell.DefaultBaseImage + "\nUSER root\n" +
-		"COPY landlock-root-check.c /tmp/landlock-root-check.c\n" +
-		"RUN gcc -O2 -Wall -Wextra -Werror -o /usr/local/bin/landlock-root-check /tmp/landlock-root-check.c && chown 1000:1000 /\n" +
+		"COPY landlock-root-check.c root-check-selective-denial.c localhost-resolver.c /tmp/\n" +
+		"RUN gcc -O2 -Wall -Wextra -Werror -o /usr/local/bin/landlock-root-check /tmp/landlock-root-check.c && " +
+		"gcc -O2 -Wall -Wextra -Werror -o /usr/local/bin/root-check-selective-denial /tmp/root-check-selective-denial.c && " +
+		"mkdir -p /usr/local/lib/defenseclaw && gcc -O2 -Wall -Wextra -Werror -o /usr/local/lib/defenseclaw/localhost-resolver /tmp/localhost-resolver.c\n" +
 		"USER 1000:1000\n"
 	must(t, os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfile), 0o600))
-	sum := sha256.Sum256(source)
+	sum := sha256.Sum256(sources)
 	tag := fmt.Sprintf("dc-g570-root:%x", sum[:6])
 	if out, err := exec.CommandContext(t.Context(), "docker", "build", "--pull=false", "-t", tag, dir).CombinedOutput(); err != nil {
 		t.Fatalf("build guest fixture: %v\n%s", err, out)
 	}
 	t.Cleanup(func() { _ = exec.Command("docker", "image", "rm", "-f", tag).Run() })
-	readonlyTag := tag + "-readonly"
-	readonlyDockerfile := "FROM " + tag + "\nUSER root\nRUN chmod 0555 /\nUSER 1000:1000\n"
-	must(t, os.WriteFile(filepath.Join(dir, "Dockerfile.readonly"), []byte(readonlyDockerfile), 0o600))
-	if out, err := exec.CommandContext(t.Context(), "docker", "build", "--pull=false", "-f", "Dockerfile.readonly", "-t", readonlyTag, dir).CombinedOutput(); err != nil {
-		t.Fatalf("build read-only root fixture: %v\n%s", err, out)
-	}
-	t.Cleanup(func() { _ = exec.Command("docker", "image", "rm", "-f", readonlyTag).Run() })
-	run := func(imageTag, entrypoint string, argv ...string) ([]byte, error) {
+	run := func(setup string, argv ...string) ([]byte, error) {
 		t.Helper()
-		args := []string{"run", "--rm", "--network=none", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--security-opt=seccomp=unconfined", "--user", "1000:1000", "--entrypoint", entrypoint, imageTag}
+		args := []string{"run", "--rm", "--network=none", "--cap-drop=ALL", "--cap-add=CHOWN", "--cap-add=SETUID", "--cap-add=SETGID", "--cap-add=FOWNER",
+			"--security-opt=no-new-privileges", "--security-opt=seccomp=unconfined", "--user", "0:0", "--entrypoint", "/bin/sh", tag,
+			"-c", "set -eu; chown 1000:1000 /sandbox; " + setup + "; exec /usr/bin/setpriv --reuid=1000 --regid=1000 --clear-groups \"$@\"", "fixture"}
 		args = append(args, argv...)
 		return exec.CommandContext(t.Context(), "docker", args...).CombinedOutput()
 	}
 	check := verifyArgv(verifyRecord{}, true)
+	vm, _ := openshell.LookupDriver("vm")
 	for _, tc := range []struct {
-		name, imageTag, entrypoint, want string
-		args                             []string
+		name, setup, boundary, rootdir string
+		localhostOK                    bool
 	}{
-		{"root-owned guest", openshell.DefaultBaseImage, check[0], "root", check[1:]},
-		{"workload-owned root without a boundary", tag, "/bin/sh", "writable", append([]string{"-c", `"$@"; for p in /.defenseclaw-verify-*; do [ ! -e "$p" ] || { echo probe-leaked; exit 1; }; done`, "check"}, check...)},
-		{"preexisting probe entry", tag, "/bin/sh", "writable", append([]string{"-c", `mkdir "/.defenseclaw-verify-$$"; exec "$@"`, "check"}, check...)},
-		{"owner write bit removed before the check", readonlyTag, check[0], "writable", check[1:]},
-		{"workload-owned root under Landlock", tag, "/usr/local/bin/landlock-root-check", "fixed", check},
+		{"root-owned guest", "test \"$(stat -c %u /)\" = 0", "", "root", true},
+		{"workload-owned root without a boundary", "chown 1000:1000 /; test \"$(stat -c %u /)\" = 1000", "", "writable", false},
+		{"read-only mode without a boundary", "chown 1000:1000 /; chmod 0555 /", "", "writable", false},
+		{"workload-owned root under Landlock", "chown 1000:1000 /", "landlock-root-check", "fixed", true},
+		{"read-only mode under Landlock", "chown 1000:1000 /; chmod 0555 /", "landlock-root-check", "fixed", true},
+		{"preexisting probe entry", "ln -s /tmp \"/.defenseclaw-verify-$$\"; chown 1000:1000 /", "landlock-root-check", "writable", false},
+		{"workload-owned usr under Landlock", "chown 1000:1000 / /usr", "landlock-root-check", "fixed", false},
+		{"workload-owned etc under Landlock", "chown 1000:1000 / /etc", "landlock-root-check", "fixed", true},
+		{"symlinked resolver under Landlock", "chown 1000:1000 /; mv /usr/local/lib/defenseclaw/localhost-resolver /usr/local/lib/defenseclaw/localhost-resolver.real; ln -s localhost-resolver.real /usr/local/lib/defenseclaw/localhost-resolver", "landlock-root-check", "fixed", false},
+		{"selective creation denial", "chown 1000:1000 /", "root-check-selective-denial", "writable", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			out, err := run(tc.imageTag, tc.entrypoint, tc.args...)
-			if tc.want == "fixed" {
-				var exit *exec.ExitError
-				if errors.As(err, &exit) && exit.ExitCode() == 77 {
-					t.Skip("Landlock ABI 3 is unavailable in this container")
-				}
+			argv := check
+			if tc.boundary != "" {
+				argv = append([]string{"/usr/local/bin/" + tc.boundary}, argv...)
 			}
-			must(t, err)
-			if strings.Contains(string(out), "probe-leaked") {
-				t.Fatalf("the root probe left an entry: %s", out)
+			out, err := run(tc.setup, argv...)
+			var exit *exec.ExitError
+			if tc.boundary == "landlock-root-check" && errors.As(err, &exit) && exit.ExitCode() == 77 {
+				t.Skip("Landlock ABI 3 is unavailable in this container")
+			}
+			if err != nil {
+				t.Fatalf("guest check: %v\n%s", err, out)
 			}
 			facts, err := parseWorkloadFacts(out)
 			must(t, err)
-			if facts.RootDir != tc.want {
-				t.Fatalf("rootdir = %q, want %q; output:\n%s", facts.RootDir, tc.want, out)
+			if facts.RootDir != tc.rootdir || !facts.LocalhostReported || facts.LocalhostOK != tc.localhostOK {
+				t.Fatalf("rootdir %q, localhost %v, want %q and %v; output:\n%s", facts.RootDir, facts.LocalhostOK, tc.rootdir, tc.localhostOK, out)
+			}
+			facts.DirectResolverOK = true
+			problems := workloadProblems(verifyRecord{UID: 1000, GID: 1000, LocalhostResolver: true}, facts, vm, workloadLimits{})
+			if (len(problems) == 0) != (tc.rootdir == "root" || tc.rootdir == "fixed" && tc.localhostOK) {
+				t.Fatalf("workload problems = %v; output:\n%s", problems, out)
 			}
 		})
 	}
-	rootArgs := []string{"run", "--rm", "--network=none", "--cap-drop=ALL", "--user", "0:0", "--entrypoint", check[0], openshell.DefaultBaseImage}
-	rootArgs = append(rootArgs, check[1:]...)
-	rootOut, err := exec.CommandContext(t.Context(), "docker", rootArgs...).CombinedOutput()
-	must(t, err)
-	rootFacts, err := parseWorkloadFacts(rootOut)
-	must(t, err)
-	if rootFacts.RootDir != "writable" {
-		t.Fatalf("a root workload without the boundary: rootdir %q, want writable", rootFacts.RootDir)
-	}
+	t.Run("probe entries are removed", func(t *testing.T) {
+		argv := append([]string{"/bin/sh", "-c", `"$@"; for p in /.defenseclaw-verify-* /sandbox/.defenseclaw-verify-*; do [ ! -e "$p" ] && [ ! -L "$p" ] || exit 1; done`, "inspect"}, check...)
+		out, err := run("chown 1000:1000 /", argv...)
+		if err != nil {
+			t.Fatalf("guest probe cleanup: %v\n%s", err, out)
+		}
+	})
 	for _, command := range []string{"mv /usr /usr.x", "mkdir /x", "ln -s /usr /x"} {
-		out, err := run(tag, "/usr/local/bin/landlock-root-check", "/bin/sh", "-c", command)
+		out, err := run("chown 1000:1000 /", "/usr/local/bin/landlock-root-check", "/bin/sh", "-c", command)
 		var exit *exec.ExitError
 		if errors.As(err, &exit) && exit.ExitCode() == 77 {
 			t.Skip("Landlock ABI 3 is unavailable in this container")

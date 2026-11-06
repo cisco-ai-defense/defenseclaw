@@ -94,6 +94,68 @@ while read -r key value rest; do
   [ "$key" = MemTotal: ] && printf 'memtotal %s\n' "$value"
 done < /proc/meminfo
 if [ "$0" = defenseclaw-verify-vm ]; then
+  root_entries_fixed() {
+    probe=/.defenseclaw-verify-$$
+    control=$HOME/.defenseclaw-verify-$$
+    moved=$control.moved
+    [ ! -e "$probe" ] && [ ! -L "$probe" ] &&
+      [ ! -e "$control" ] && [ ! -L "$control" ] &&
+      [ ! -e "$moved" ] && [ ! -L "$moved" ] || return 1
+    # A move from another mount may copy instead of testing rename.
+    root_mount=$(/usr/bin/stat -c %m /) || return 1
+    home_mount=$(/usr/bin/stat -L -c %m "$HOME") || return 1
+    [ "$root_mount" = "$home_mount" ] || return 1
+    changed_mode=false
+    if [ $((0$root_mode & 0200)) -eq 0 ]; then
+      /usr/bin/chmod u+w / 2>/dev/null || return 1
+      changed_mode=true
+    fi
+    (
+      trap '/usr/bin/rm -f -- "$control" "$moved" 2>/dev/null' EXIT
+      # A denial only proves the root boundary when these same operations
+      # work in the workload's writable home.
+      /usr/bin/mkdir -- "$control" 2>/dev/null || exit 1
+      /usr/bin/rmdir -- "$control" 2>/dev/null || exit 1
+      : > "$control" || exit 1
+      /usr/bin/mv -- "$control" "$moved" 2>/dev/null || exit 1
+      /usr/bin/mv -- "$moved" "$control" 2>/dev/null || exit 1
+      /usr/bin/ln -s -- /usr "$moved" 2>/dev/null || exit 1
+      /usr/bin/rm -f -- "$moved" 2>/dev/null || exit 1
+      ( set -C; : > "$moved" ) 2>/dev/null || exit 1
+      /usr/bin/rm -f -- "$moved" 2>/dev/null || exit 1
+      if /usr/bin/mkdir -- "$probe" 2>/dev/null; then
+        /usr/bin/rmdir -- "$probe" 2>/dev/null
+        exit 1
+      fi
+      if ( : > "$probe" ) 2>/dev/null; then
+        /usr/bin/rm -f -- "$probe" 2>/dev/null
+        exit 1
+      fi
+      if ( set -C; : > "$probe" ) 2>/dev/null; then
+        /usr/bin/rm -f -- "$probe" 2>/dev/null
+        exit 1
+      fi
+      if /usr/bin/ln -s -- /usr "$probe" 2>/dev/null; then
+        /usr/bin/rm -f -- "$probe" 2>/dev/null
+        exit 1
+      fi
+      [ -f "$control" ] && [ ! -L "$control" ] || exit 1
+      if /usr/bin/mv -- "$control" "$probe" 2>/dev/null; then
+        /usr/bin/rm -f -- "$probe" 2>/dev/null
+        exit 1
+      fi
+      [ -f "$control" ] && [ ! -L "$control" ] || exit 1
+      /usr/bin/rm -f -- "$control" 2>/dev/null || exit 1
+      [ ! -e "$probe" ] && [ ! -L "$probe" ] &&
+        [ ! -e "$control" ] && [ ! -L "$control" ] &&
+        [ ! -e "$moved" ] && [ ! -L "$moved" ]
+    )
+    fixed=$?
+    if [ "$changed_mode" = true ]; then
+      /usr/bin/chmod "$root_mode" / 2>/dev/null || return 1
+    fi
+    return "$fixed"
+  }
   rootdir=writable
   if [ ! -L / ] && [ -d / ]; then
     root_owner=$(/usr/bin/stat -c %u /) || root_owner=
@@ -102,20 +164,7 @@ if [ "$0" = defenseclaw-verify-vm ]; then
       if [ "$root_owner" = 0 ] && [ "$workload_uid" != 0 ]; then
         rootdir=root
       elif [ "$root_owner" = "$workload_uid" ]; then
-        # The owner can restore its own write bit after the check, so a
-        # non-writable mode cannot establish the mandatory boundary.
-        if [ $((0$root_mode & 0200)) -ne 0 ]; then
-          probe=/.defenseclaw-verify-$$
-          if [ ! -e "$probe" ] && [ ! -L "$probe" ]; then
-            if /usr/bin/mkdir -- "$probe" 2>/dev/null; then
-              /usr/bin/rmdir -- "$probe" 2>/dev/null || :
-            elif ( set -C; : > "$probe" ) 2>/dev/null; then
-              /usr/bin/rm -f -- "$probe" 2>/dev/null || :
-            elif [ ! -e "$probe" ] && [ ! -L "$probe" ]; then
-              rootdir=fixed
-            fi
-          fi
-        fi
+        if root_entries_fixed; then rootdir=fixed; fi
       else
         rootdir="owner $root_owner"
       fi

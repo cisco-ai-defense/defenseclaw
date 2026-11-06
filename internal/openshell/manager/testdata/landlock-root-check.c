@@ -55,6 +55,27 @@ int main(int argc, char **argv) {
         close(child);
     }
     closedir(root);
+    int home = open("/sandbox", O_PATH | O_CLOEXEC);
+    if (home < 0) return 12;
+    struct landlock_path_beneath_attr home_rule = {
+        .allowed_access = rights, .parent_fd = home,
+    };
+    if (syscall(SYS_landlock_add_rule, fd, LANDLOCK_RULE_PATH_BENEATH,
+                &home_rule, 0) != 0) return 13;
+    close(home);
+    int devnull = open("/dev/null", O_PATH | O_CLOEXEC);
+    if (devnull < 0) return 14;
+    unsigned long long null_rights = LANDLOCK_ACCESS_FS_READ_FILE |
+                                      LANDLOCK_ACCESS_FS_WRITE_FILE;
+#ifdef LANDLOCK_ACCESS_FS_TRUNCATE
+    null_rights |= LANDLOCK_ACCESS_FS_TRUNCATE;
+#endif
+    struct landlock_path_beneath_attr null_rule = {
+        .allowed_access = null_rights, .parent_fd = devnull,
+    };
+    if (syscall(SYS_landlock_add_rule, fd, LANDLOCK_RULE_PATH_BENEATH,
+                &null_rule, 0) != 0) return 15;
+    close(devnull);
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return 9;
     if (syscall(SYS_landlock_restrict_self, fd, 0) != 0) return 10;
     close(fd);
