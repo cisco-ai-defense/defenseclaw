@@ -427,6 +427,13 @@ func dispatchTrustedAction(
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
 		}()
 	}
+	// A file-tool call with an argument key outside its reviewed schema is
+	// judged as each reading the harness may run (gas-ux-r1 GAP-0076).
+	for _, twin := range unknownKeyTwinRequests(request, facts) {
+		defer func() {
+			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
 	if conflict, ok := conflictingToolArgumentKeys(request, facts); ok {
 		// Two argument keys name one field: judge each candidate (GAP-0678).
 		return dispatchConflictingToolArguments(parent, request, conflict)

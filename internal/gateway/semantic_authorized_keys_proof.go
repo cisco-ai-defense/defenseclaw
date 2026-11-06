@@ -1523,74 +1523,71 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			}
 		}
 	}
-	// A native write call with a key outside its reviewed schema stays
-	// partial and names no path; the harness still writes the file its
-	// target key names (actionfacts.UnknownKeyWriteTargetViews), which the
-	// hook's write evidence lists, so each such target is judged as well.
-	views := append([]actionfacts.Facts{facts}, actionfacts.UnknownKeyWriteTargetViews(request.Input, facts)...)
-	for _, view := range views {
-		for _, candidate := range view.Paths {
-			if candidate.Access != actionfacts.PathAccessWrite &&
-				candidate.Access != actionfacts.PathAccessAppend {
-				continue
-			}
-			command, ok := integrityCommandByID(view, candidate.CommandID)
-			if !ok || !integrityCommandMutatesPath(command, candidate) ||
-				((!(integrityExplicitCommandMutator(command, candidate)) && (command.Program != "dd" || !(command.ArgvComplete))) && !(integrityStructuredFileMutator(view, command))) {
-				continue
-			}
-			target := candidate.Resolved
-			// A POSIX shell running on Windows can leave a relative path
-			// unresolved because ActionFacts does not reinterpret the Windows CWD
-			// as a POSIX root. The owned, literal redirect still names a local
-			// file relative to that CWD.
-			if target == "" && command.Dialect == actionfacts.DialectPOSIX &&
-				candidate.Flavor == actionfacts.PathFlavorPOSIX &&
-				candidate.Normalized != "" && !isAbsoluteSemanticPath(candidate.Normalized) &&
-				!strings.ContainsAny(candidate.Value, "*?[]$`\\") &&
-				!strings.HasPrefix(candidate.Value, "~") &&
-				integrityCommandOwnsStaticRedirect(command, candidate) {
-				target = filepath.Join(view.CWD, filepath.FromSlash(candidate.Normalized))
-			}
-			// A structured write names its target from the event cwd. A
-			// gateway that could not validate that cwd (ProtectHome) has no
-			// resolved path for a relative target: place it in the client's
-			// cwd, as the hook keyed it (hookpaths.ResolveConnector), or the
-			// write through a link there was never judged.
-			if target == "" && candidate.Normalized != "" && integrityStructuredFileMutator(view, command) &&
-				!strings.ContainsAny(candidate.Normalized, "*?[]$`") && !strings.HasPrefix(candidate.Normalized, "~") {
-				target = candidate.Normalized
-			}
-			if raw, ok := hookpaths.RawDotDotOperand(candidate.Value, clientCWD); ok {
-				target = raw
-			}
-			// The own destination of the copy, also after a directory change
-			// that the path facts follow (GAP-2579).
-			ownCopy := hookpaths.IsCopyProgram(command.Argv) &&
-				(target == hookpaths.CopyDestination(command.Argv, clientCWD) ||
-					candidate.Value != "" && candidate.Value == hookpaths.CopyDestinationOperand(command.Argv))
-			if slices.Contains(operands, target) && integrityCommandOwnsStaticRedirect(command, candidate) {
-				continue
-			}
-			if replacedBySed[target] && !isProtected(target) {
-				continue
-			}
-			if ownCopy && !links.IsCopyDestination(target) {
-				// A copy after a directory change writes its destination where
-				// the statement walk placed the call; the path fact read in the
-				// starting directory names no write of it (GAP-2579).
-				if placed := links.PlacedCopyDestinations(candidate.Value); len(placed) > 0 {
-					for _, destination := range placed {
-						if writeTarget(destination, false, true) {
-							return true
-						}
+	// A native write call with a key outside its reviewed schema is judged
+	// as each of its readings by dispatchTrustedAction
+	// (unknownKeyTwinRequests), with its own facts.
+	view := facts
+	for _, candidate := range view.Paths {
+		if candidate.Access != actionfacts.PathAccessWrite &&
+			candidate.Access != actionfacts.PathAccessAppend {
+			continue
+		}
+		command, ok := integrityCommandByID(view, candidate.CommandID)
+		if !ok || !integrityCommandMutatesPath(command, candidate) ||
+			((!(integrityExplicitCommandMutator(command, candidate)) && (command.Program != "dd" || !(command.ArgvComplete))) && !(integrityStructuredFileMutator(view, command))) {
+			continue
+		}
+		target := candidate.Resolved
+		// A POSIX shell running on Windows can leave a relative path
+		// unresolved because ActionFacts does not reinterpret the Windows CWD
+		// as a POSIX root. The owned, literal redirect still names a local
+		// file relative to that CWD.
+		if target == "" && command.Dialect == actionfacts.DialectPOSIX &&
+			candidate.Flavor == actionfacts.PathFlavorPOSIX &&
+			candidate.Normalized != "" && !isAbsoluteSemanticPath(candidate.Normalized) &&
+			!strings.ContainsAny(candidate.Value, "*?[]$`\\") &&
+			!strings.HasPrefix(candidate.Value, "~") &&
+			integrityCommandOwnsStaticRedirect(command, candidate) {
+			target = filepath.Join(view.CWD, filepath.FromSlash(candidate.Normalized))
+		}
+		// A structured write names its target from the event cwd. A
+		// gateway that could not validate that cwd (ProtectHome) has no
+		// resolved path for a relative target: place it in the client's
+		// cwd, as the hook keyed it (hookpaths.ResolveConnector), or the
+		// write through a link there was never judged.
+		if target == "" && candidate.Normalized != "" && integrityStructuredFileMutator(view, command) &&
+			!strings.ContainsAny(candidate.Normalized, "*?[]$`") && !strings.HasPrefix(candidate.Normalized, "~") {
+			target = candidate.Normalized
+		}
+		if raw, ok := hookpaths.RawDotDotOperand(candidate.Value, clientCWD); ok {
+			target = raw
+		}
+		// The own destination of the copy, also after a directory change
+		// that the path facts follow (GAP-2579).
+		ownCopy := hookpaths.IsCopyProgram(command.Argv) &&
+			(target == hookpaths.CopyDestination(command.Argv, clientCWD) ||
+				candidate.Value != "" && candidate.Value == hookpaths.CopyDestinationOperand(command.Argv))
+		if slices.Contains(operands, target) && integrityCommandOwnsStaticRedirect(command, candidate) {
+			continue
+		}
+		if replacedBySed[target] && !isProtected(target) {
+			continue
+		}
+		if ownCopy && !links.IsCopyDestination(target) {
+			// A copy after a directory change writes its destination where
+			// the statement walk placed the call; the path fact read in the
+			// starting directory names no write of it (GAP-2579).
+			if placed := links.PlacedCopyDestinations(candidate.Value); len(placed) > 0 {
+				for _, destination := range placed {
+					if writeTarget(destination, false, true) {
+						return true
 					}
-					continue
 				}
+				continue
 			}
-			if writeTarget(target, false, ownCopy) {
-				return true
-			}
+		}
+		if writeTarget(target, false, ownCopy) {
+			return true
 		}
 	}
 	// An apply_patch edit (its own tool or a shell wrapper) names its files
