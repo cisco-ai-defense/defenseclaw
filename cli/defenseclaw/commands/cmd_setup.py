@@ -5319,6 +5319,13 @@ def setup_gateway(
             gw.port = port
         if api_port is not None:
             gw.api_port = api_port
+        if api_port is not None or port is not None:
+            from defenseclaw.bootstrap import port_layout_conflict
+
+            if conflict := port_layout_conflict(
+                gw.api_port, int(app.cfg.guardrail.port or 0), gw.port if uses_openclaw else 0
+            ):
+                raise click.UsageError(conflict)
         if token is not None:
             _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", token, data_dir)
             gw.token = ""
@@ -6144,8 +6151,16 @@ def _connector_contract_upgrade_guidance(
     key = normalize_connector(connector)
     rerun = rerun or f"defenseclaw setup {'claude-code' if key == 'claudecode' else key}"
     if key == "opencode":
+        # V1 (opencode-ai) and V2 install the same `opencode` command, so npm
+        # refuses V2 beside an npm-installed V1 (GAP-0053).
+        remove_v1 = (
+            "Remove OpenCode V1 first: 'npm uninstall -g opencode-ai' (with the same --prefix if you gave one). "
+            if normalized_version.split(".", 1)[0] == "1"
+            else ""
+        )
         return (
-            f"Install OpenCode V2 with 'npm install -g @opencode/cli@2' (where you cannot write npm's global "
+            f"{remove_v1}Install OpenCode V2 with 'npm install -g @opencode/cli@2' "
+            "(where you cannot write npm's global "
             "prefix, for your account: 'npm install -g --prefix ~/.npm-global @opencode/cli@2', with "
             f"~/.npm-global/bin first on PATH), then run: {rerun}."
         )
@@ -6689,7 +6704,12 @@ def _refuse_opencode_v1_before_questions(app: AppContext) -> None:
     raw = (getattr(signal, "version", "") or "").strip() if signal is not None else ""
     if signal is None or not signal.installed or not raw or not opencode_requires_v2_upgrade(raw):
         return
-    ux.err(_opencode_v2_required(raw.rstrip("."), _connector_contract_upgrade_guidance("opencode", "OpenCode")))
+    ux.err(
+        _opencode_v2_required(
+            raw.rstrip("."),
+            _connector_contract_upgrade_guidance("opencode", "OpenCode", normalize_agent_version(raw)),
+        )
+    )
     raise click.ClickException("OpenCode setup stopped before any change; nothing was changed")
 
 
@@ -7806,6 +7826,15 @@ def setup_guardrail(
         if cisco_timeout_ms is not None:
             aid.timeout_ms = cisco_timeout_ms
         gc.port = guard_port or gc.port or 4000
+        if guard_port:
+            from defenseclaw.bootstrap import port_layout_conflict
+
+            if conflict := port_layout_conflict(
+                int(app.cfg.gateway.api_port or 0),
+                gc.port,
+                app.cfg.gateway.port if "openclaw" in app.cfg.active_connectors() else 0,
+            ):
+                raise click.UsageError(conflict)
         if block_message is not None and per_connector_target:
             gc.connectors[target_connector].block_message = block_message
         elif block_message is not None:
@@ -16581,8 +16610,13 @@ def _restart_services(
         # wait, so that wait sees the plugin the restarted server loads.
         from defenseclaw import opencode_service
 
+        opencode_binary = opencode_service.account_binary(data_dir)
+        if not teardown:
+            # Its default port is shared by every account on a computer
+            # (GAP-0053); set before the restart so the server moves now.
+            opencode_service.report_port(opencode_service.ensure_account_port())
         opencode_service.report(
-            opencode_service.restart_if_running(opencode_service.account_binary(data_dir)),
+            opencode_service.restart_if_running(opencode_binary),
             what="runs the plugin as it is now",
         )
 

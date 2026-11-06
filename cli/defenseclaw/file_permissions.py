@@ -2385,7 +2385,10 @@ def _validate_unmodified_parent(path: str) -> None:
             raise OSError(f"unsafe export parent {path}: {problem}")
         return
     info = os.stat(path)
-    writable_by_others = info.st_mode & 0o022
+    # The parent is a folder the operator or an agent made under its umask (an
+    # export target, OpenCode's ~/.config/opencode): group write by the owner's
+    # own private group is the owner's (GAP-0053).
+    writable_by_others = other_accounts_can_write(path, info)
     sticky = info.st_mode & 0o1000
     if writable_by_others and not sticky:
         raise OSError(f"unsafe group/world-writable export parent: {path}")

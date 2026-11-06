@@ -2347,6 +2347,8 @@ def validate_config() -> ValidationResult:
         if inspected.valid is not True:
             res.errors.append("the configuration validator returned no validity decision")
         res.warnings.extend(inspected.warnings)
+        if res.ok:
+            res.warnings.extend(_port_layout_warnings())
         if os.name == "nt" and res.ok:
             source = load_masked_v8(_bounded_source(cfg_path) or b"", source_name=cfg_path)
             res.warnings.extend(_per_user_windows_group_warnings(source))
@@ -2363,6 +2365,20 @@ def validate_config() -> ValidationResult:
         return res
     res.errors.append(_not_current_message(cfg_path))
     return res
+
+
+def _port_layout_warnings() -> list[str]:
+    """Ports in the config that collide with each other (GAP-0053)."""
+    from defenseclaw.bootstrap import port_layout_conflict
+
+    try:
+        cfg = config_module.load()
+    except Exception:  # noqa: BLE001 - the validator above already judged the file
+        return []
+    openclaw = int(cfg.gateway.port or 0) if "openclaw" in cfg.active_connectors() else 0
+    if conflict := port_layout_conflict(int(cfg.gateway.api_port or 0), int(cfg.guardrail.port or 0), openclaw):
+        return [f"gateway.api_port / guardrail.port: {conflict}"]
+    return []
 
 
 def _per_user_windows_group_warnings(source: dict) -> list[str]:
