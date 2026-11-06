@@ -49,10 +49,22 @@ _RENDERERS = {"powershell_literal", "powershell_command_line", "powershell_argum
 _READER_CALLS = {"startswith", "endswith", "find", "index", "count", "partition", "rpartition", "removeprefix"}
 
 # A call operator before a quote, a formatted value, or the end of a literal
-# that a concatenation continues: "& '", f"& {x}", "& " + x, "&'" and "&\t'".
-_CALL_OPERATOR = re.compile(r"(?:^|[^&>\w])&(?:[ \t]*['\u2018-\u201b]|[ \t]*\x00|[ \t]+$)")
-# A quote doubled by hand: x * 2 if x in "'..."
-_DOUBLED_BY_HAND = re.compile(r"\*\s*2\s+if\s+\w+\s+in\s+(?:[rbuf]*[\"']{1,3}'|SINGLE_QUOTES)")
+# that a concatenation continues: "& '", f"& {x}", "& " + x, "&'" and "&\t'";
+# since g072 review 4 M2 also a %-format or str.format field ("& %s",
+# "& {}", "& {0!r}"), and a no-break space, which PowerShell reads as a
+# blank. A scriptblock ("& { $input | ... }") is not a format field.
+_CALL_OPERATOR = re.compile(
+    r"(?:^|[^&>\w])&(?:[ \t\u00a0]*['\u2018-\u201b]|[ \t\u00a0]*\x00"
+    r"|[ \t\u00a0]+(?:%[-+# 0-9.*]*[sqr]|\{[\w.\[\]]*(?:![rsa])?(?::[^{}\s]*)?\}|$))"
+)
+# A quote doubled by hand: x * 2 if x in "'...", or x + x if x == "'".
+_DOUBLED_BY_HAND = re.compile(r"(?:\*\s*2|\b(\w+)\s*\+\s*\1)\s+if\s+\w+\s+(?:in|==)\s+(?:[rbuf]*[\"']{1,3}['\u2018-\u201b]|SINGLE_QUOTES)")
+# A run instruction built by hand around a winquote render ("L") or a call
+# operator that does not say the shell: cmd.exe does not run a PowerShell line
+# (use winquote.run_instruction, which says "in PowerShell, run").
+_RUN_WITHOUT_SHELL = re.compile(r"(?i)\brun:?\s+[`'\"]?(?:L\b|&\s)")
+# PowerShell's single quotes, as winquote.SINGLE_QUOTES.
+_QUOTES = "'\u2018\u2019\u201a\u201b"
 _REGEX_CALLS = {"compile", "fullmatch", "match", "search", "finditer", "findall", "sub", "subn", "split"}
 
 
@@ -106,22 +118,92 @@ def _is_regex_call(node: ast.AST) -> bool:
     )
 
 
+def _constant(node: ast.AST) -> str | None:
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+
+def _quote_of(pattern: str | None) -> str | None:
+    """The PowerShell quote *pattern* is: the quote itself, or a regex class holding one."""
+    if pattern is None:
+        return None
+    if len(pattern) == 1 and pattern in _QUOTES:
+        return pattern
+    if pattern.startswith("[") and pattern.endswith("]"):
+        held = [quote for quote in _QUOTES if quote in pattern]
+        return held[0] if held else None
+    return None
+
+
+def _doubles(new: str | None, quote: str) -> bool:
+    return new in (quote * 2, "''", "\\g<0>\\g<0>", "\\0\\0")
+
+
 def _is_quote_replace(node: ast.AST) -> bool:
-    """x.replace("'", "''") or x.replace("''", "'")."""
-    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "replace"):
+    """A PowerShell quote doubled, or a doubled one read back, by hand (g072 review 4 M2).
+
+    x.replace(q, q + q) and back, re.sub(q or a class holding q, q + q or
+    "\\g<0>\\g<0>", x), x.translate({ord(q): q + q}) or maketrans, and
+    "''".join(x.split("'")).
+    """
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
         return False
-    values = [arg.value for arg in node.args if isinstance(arg, ast.Constant)]
-    return values in (["'", "''"], ["''", "'"])
+    attr = node.func.attr
+    args = [_constant(arg) for arg in node.args]
+    if attr == "replace" and len(args) >= 2:
+        old, new = args[0], args[1]
+        if (quote := _quote_of(old)) is not None and _doubles(new, quote):
+            return True
+        return new is not None and len(new) == 1 and new in _QUOTES and old in (new * 2, "''")
+    if attr == "sub" and isinstance(node.func.value, ast.Name) and node.func.value.id == "re" and len(args) >= 2:
+        quote = _quote_of(args[0])
+        return quote is not None and _doubles(args[1], quote)
+    if attr in {"translate", "maketrans"}:
+        for arg in node.args:
+            if isinstance(arg, ast.Dict):
+                for value in arg.values:
+                    text = _constant(value)
+                    if text is not None and len(text) == 2 and text[0] == text[1] and text[0] in _QUOTES:
+                        return True
+        # The two-string maketrans form maps one character to one, so it cannot double.
+        return False
+    if attr == "join" and (joiner := _constant(node.func.value)) is not None:
+        if len(joiner) == 2 and joiner[0] == joiner[1] and joiner[0] in _QUOTES and node.args:
+            split = node.args[0]
+            return (
+                isinstance(split, ast.Call)
+                and isinstance(split.func, ast.Attribute)
+                and split.func.attr == "split"
+                and bool(split.args)
+                and _constant(split.args[0]) == joiner[0]
+            )
+    return False
 
 
-def _is_join_or_sequence(parent: ast.AST | None) -> bool:
+def _is_join_or_sequence(node: ast.AST, parent: ast.AST | None) -> bool:
+    """A lone "&" joined into a command: a sequence, a join, a str.format argument
+    (g072 review 4 M2), or a + operand whose sibling starts with a blank or a quote."""
     if isinstance(parent, (ast.List, ast.Tuple, ast.Set)):
         return True
-    return (
-        isinstance(parent, ast.Call)
-        and isinstance(parent.func, ast.Attribute)
-        and parent.func.attr == "join"
-    )
+    if isinstance(parent, ast.Call) and isinstance(parent.func, ast.Attribute):
+        return parent.func.attr == "join" or (parent.func.attr == "format" and node in parent.args)
+    if isinstance(parent, ast.BinOp) and isinstance(parent.op, ast.Add):
+        sibling = parent.right if parent.left is node else parent.left
+        while isinstance(sibling, ast.BinOp) and isinstance(sibling.op, ast.Add):
+            sibling = sibling.left if parent.left is node else sibling.right
+        text = _text(sibling)
+        return text is None or text[:1] in (" ", "\t", "\u00a0") or (text[:1] != "" and text[0] in _QUOTES)
+    return False
+
+
+def _in_run_instruction(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
+    while node in parents:
+        node = parents[node]
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else ""
+            if name == "run_instruction":
+                return True
+    return False
 
 
 def problems(source: str, name: str = "<probe>", used: set[tuple[str, str]] | None = None) -> list[str]:
@@ -150,8 +232,14 @@ def problems(source: str, name: str = "<probe>", used: set[tuple[str, str]] | No
         problem = ""
         if _CALL_OPERATOR.search(text):
             problem = "a PowerShell call-operator line built by hand (use winquote)"
-        elif text.strip() == "&" and _is_join_or_sequence(parent):
+        elif text.strip() == "&" and _is_join_or_sequence(node, parent):
             problem = "a call operator joined into a command by hand (use winquote)"
+        elif (
+            _RUN_WITHOUT_SHELL.search(text)
+            and "powershell" not in text.lower()
+            and not _in_run_instruction(node, parents)
+        ):
+            problem = "a PowerShell line in a run instruction that does not say PowerShell (use winquote.run_instruction)"
         if problem:
             key = (name, _function(node, parents))
             if key in _ALLOWED_FUNCTIONS:
@@ -198,6 +286,18 @@ def test_the_python_cli_renders_powershell_through_winquote() -> None:
         "x = body.replace(\"''\", \"'\")",
         "x = \"\".join(ch * 2 if ch in \"'\\u2019\" else ch for ch in value)",
         "x = \"; \".join([a, f\"if (x) {{ & {binary} hook }}\"])",
+        # g072 review 4 M2.
+        "x = \"& %s status\" % lit",
+        "x = \"& {} status\".format(lit)",
+        "x = \"&\" + \" \" + lit",
+        "x = \"{} {}\".format(\"&\", lit)",
+        "x = re.sub(\"'\", \"''\", v)",
+        "x = v.replace(\"\u2019\", \"\u2019\u2019\")",
+        "x = \"''\".join(v.split(\"'\"))",
+        "x = v.translate({ord(\"'\"): \"''\"})",
+        "x = \"\".join(c + c if c in \"'\" else c for c in v)",
+        "x = \"&\\u00a0'\" + v",
+        "x = f\"run {powershell_command_line(exe, 'status')}\"",
     ],
 )
 def test_the_check_catches_hand_built_quoting(source: str) -> None:
@@ -219,6 +319,10 @@ def test_the_check_catches_hand_built_quoting(source: str) -> None:
         "x = f\"& {powershell_literal(path)} -Event {powershell_literal(event)}\"",
         "def f():\n    \"\"\"Reads a ``& '...'`` command.\"\"\"",
         "ok = lowered.startswith(\"& \")",
+        "x = f\"in PowerShell, run {powershell_command_line(exe, 'status')}\"",
+        "x = run_instruction(f\"{powershell_command_line(exe, 'status')}\")",
+        "x = f\"Get-Content -Raw | & {{ $input | & {powershell_literal(path)} }}\"",
+        "x = value.replace(\"'\", \"\\\\'\")",
     ],
 )
 def test_the_check_passes_its_benign_twins(source: str) -> None:
