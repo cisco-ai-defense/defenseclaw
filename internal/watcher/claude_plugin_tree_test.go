@@ -148,3 +148,78 @@ func TestClaudePluginStagingIsNotAPlugin(t *testing.T) {
 		t.Fatalf("rescan targets %v, want %s and %s", plugins, final, marketplace)
 	}
 }
+
+// #1428: Claude Code's "plugin update" clones into
+// cache/temp_subdir_<n>_<rand>.clone/ and fills .git/{objects,hooks,...}.
+// Those look like <marketplace>/<plugin>/<version> and were quarantined as
+// .git@temp_subdir_*.clone (MANIFEST-MISSING), so every update failed.
+// Staging clones are left alone; .git internals are never plugins; a real
+// marketplace version folder is still a plugin.
+func TestClaudePluginUpdateStagingCloneIsNotAPlugin(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Guardrail.Connector = "claudecode"
+	cache := filepath.Join(t.TempDir(), ".claude", "plugins", "cache")
+	staging := filepath.Join(cache, "temp_subdir_1793946491108_t2ymk0.clone")
+	gitHooks := filepath.Join(staging, ".git", "hooks")
+	gitObjects := filepath.Join(staging, ".git", "objects")
+	final := filepath.Join(cache, "epa-market", "epa-plug-ok", "1.0.0")
+	for _, dir := range []string{gitHooks, gitObjects, final} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := New(cfg, nil, []string{cache}, store, logger, nil, nil)
+
+	if !isPluginStagingFolder(filepath.Base(staging)) {
+		t.Fatal("temp_subdir_*.clone is not a staging folder")
+	}
+	if isPluginStagingFolder("epa-market") || isPluginStagingFolder("temp_subdir") {
+		t.Fatal("marketplace names must not look like staging")
+	}
+	for _, path := range []string{staging, gitHooks, gitObjects} {
+		if !w.inClaudePluginStaging(path, 0) {
+			t.Fatalf("%s is not under staging", path)
+		}
+	}
+	if w.inClaudePluginStaging(final, 0) {
+		t.Fatal("final version folder must not be staging")
+	}
+	if id, ok := w.claudePluginIdentity(gitHooks); ok {
+		t.Fatalf("claudePluginIdentity(.git/hooks) = %q, want not a plugin", id)
+	}
+	if id, ok := w.claudePluginIdentity(final); !ok || id != "epa-plug-ok@epa-market" {
+		t.Fatalf("claudePluginIdentity(final) = %q ok=%v", id, ok)
+	}
+
+	var plugins []string
+	for _, evt := range w.enumerateTargets() {
+		plugins = append(plugins, evt.Path)
+	}
+	if len(plugins) != 1 || plugins[0] != final {
+		t.Fatalf("rescan targets %v, want only %s", plugins, final)
+	}
+
+	w.queueExistingClaudePlugins(context.Background(), cache, 0)
+	if len(w.pending) != 1 {
+		t.Fatalf("queued %d folders, want 1 (final only): %v", len(w.pending), w.pending)
+	}
+	if _, ok := w.pending[final]; !ok {
+		t.Fatalf("queued %v, want %s", w.pending, final)
+	}
+}
+
+func TestPathHasGitDirSegment(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{filepath.Join("cache", "temp_subdir_1.clone", ".git", "hooks"), true},
+		{filepath.Join("cache", "mkt", "plug", "1.0.0"), false},
+		{filepath.Join("cache", "mkt", "plug", "1.0.0", "README.md"), false},
+		{".git", true},
+	} {
+		if got := pathHasGitDirSegment(tc.path); got != tc.want {
+			t.Errorf("pathHasGitDirSegment(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}

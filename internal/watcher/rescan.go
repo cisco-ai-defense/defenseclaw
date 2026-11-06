@@ -921,7 +921,11 @@ func enumerateClaudeWatcherPlugins(root string) []string {
 		// Anthropic's cache boundary is
 		// <marketplace>/<plugin>/<version>; plugin.json is optional. Admit
 		// exactly that directory and never let a nested dependency manifest
-		// manufacture a second plugin identity.
+		// manufacture a second plugin identity. Skip .git internals that
+		// land at that depth inside a staging clone (#1428).
+		if depth == 3 && pathHasGitDirSegment(relative) {
+			return filepath.SkipDir
+		}
 		if depth == 3 || depth == 1 && isCachePluginCopy(path) {
 			out = append(out, path)
 			return filepath.SkipDir
