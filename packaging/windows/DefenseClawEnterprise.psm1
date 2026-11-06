@@ -16719,14 +16719,46 @@ $script:StandaloneContentGateOutOfClass = @(
         Paths  = @('StateRootAncestors')
     },
     [pscustomobject]@{
-        Reason = "Setup's copy of an approved source: Repair restores from it only when its access list is administrator-only and its bytes match the digest deployment.json records (GAP-0568)"
-        Paths  = @('ApprovedPolicyFiles')
-    },
-    [pscustomobject]@{
         Reason = 'Secure Client only: the standalone profile has no install marker'
         Paths  = @('SecureClientInstallMarker')
     }
 )
+
+function Get-DefenseClawContentGateWalk {
+    <#
+        Every descendant of Root that a walking re-stamp gives a trusted
+        descriptor back in place (g582 review 2 S2):
+        Set-DefenseClawRetainedRuntimeAcls adopts every runtime child for the
+        gateway (an install over retained state, the ACL drift repair), and
+        Set-DefenseClawPreservedStateAcls re-stamps every state-root
+        descendant administrator-only on a non-purge uninstall. Read only,
+        and it never descends through a reparse point or into a folder this
+        account cannot list: the re-stamps refuse the first and adopt the
+        second top-down, as before.
+    #>
+    param([string]$Root)
+    $paths = [Collections.Generic.List[string]]::new()
+    if ([string]::IsNullOrWhiteSpace($Root) -or
+        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Root -PathType Container)) {
+        return , $paths
+    }
+    $pending = [Collections.Generic.Stack[string]]::new()
+    $pending.Push($Root)
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        $children = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $directory -Force -ErrorAction SilentlyContinue)
+        foreach ($child in $children) {
+            if (($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                continue
+            }
+            $paths.Add([string]$child.FullName)
+            if ($child.PSIsContainer) {
+                $pending.Push([string]$child.FullName)
+            }
+        }
+    }
+    return , $paths
+}
 
 function Assert-DefenseClawStandaloneContentTrusted {
     <#
@@ -16785,6 +16817,7 @@ function Assert-DefenseClawStandaloneContentTrusted {
     $secret = "Setup does not write a credential: remove that entry, then set the credential again (defenseclaw-gateway enterprise secret set) and $again$purgeDeletes"
     $config = "run Setup /ensure CONFIG=<the approved administrator-only config>: Setup writes a new config.yaml from it$then"
     $manifest = "run Setup /ensure CONFIG=<the approved config>: Setup writes a new targets.yaml enumerated from it, or from MANIFEST=<the approved administrator-only targets.yaml> in manifest enrollment mode$then"
+    $approved = "run Setup /ensure CONFIG=<the approved administrator-only config> (and MANIFEST=<the approved targets.yaml> in manifest enrollment mode): Setup publishes a fresh copy of the approved source$then"
     $every = @('Lifecycle', 'Retain', 'Purge')
     $kept = @('Lifecycle', 'Retain')
     $rows = @(
@@ -16823,6 +16856,23 @@ function Assert-DefenseClawStandaloneContentTrusted {
                 Writer   = 'Admin'
                 Recovery = [string]$row[1]
             })
+        }
+    }
+    # Setup's copies of the approved sources (GAP-0568) are judged too: an
+    # entry an untrusted account holds is never removed in place, which kept
+    # that account's handle and erased the evidence (g582 review 2 S5). A run
+    # that writes config.yaml or targets.yaml new from a supplied source
+    # publishes a fresh copy with it, so that copy is skipped with its file.
+    if ($Scope -ne 'Purge' -and -not [string]::IsNullOrWhiteSpace(
+            [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name InstallStateDirectory))) {
+        foreach ($copy in @(@('config', 'ConfigPath'), @('manifest', 'ManifestPath'))) {
+            if ($copy[1] -notin $Except) {
+                $entries.Add([pscustomobject]@{
+                    Path     = [string](Get-DefenseClawApprovedPolicyPath -Layout $Layout -Name $copy[0])
+                    Writer   = 'Admin'
+                    Recovery = $approved
+                })
+            }
         }
     }
     $authorizationDirectory = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name AuthorizationDirectory)
@@ -16865,8 +16915,47 @@ function Assert-DefenseClawStandaloneContentTrusted {
             }
         }
     }
+    # The walking re-stamps (g582 review 2 S2): the runtime adoption gives
+    # every runtime child back to the gateway (Lifecycle and Retain), and a
+    # non-purge uninstall re-stamps every state-root descendant
+    # administrator-only for the next install to adopt (Retain). Each is
+    # judged with its writer: the gateway in the runtime and IPC folders,
+    # administrators elsewhere. Logs stay out of class (never read as policy
+    # or as a record).
+    if ($Scope -ne 'Purge') {
+        $walkRoot = if ($Scope -ceq 'Retain') { 'StateRoot' } else { 'RuntimeDirectory' }
+        $judged = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($entry in $entries) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$entry.Path)) {
+                [void]$judged.Add([IO.Path]::GetFullPath([string]$entry.Path).TrimEnd('\'))
+            }
+        }
+        $under = {
+            param([string]$Path, [string]$Key)
+            $root = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name $Key)
+            if ([string]::IsNullOrWhiteSpace($root)) { return $false }
+            $root = [IO.Path]::GetFullPath($root).TrimEnd('\')
+            return $Path.Equals($root, [StringComparison]::OrdinalIgnoreCase) -or
+                $Path.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)
+        }
+        $walk = Get-DefenseClawContentGateWalk -Root ([string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name $walkRoot))
+        foreach ($descendant in $walk) {
+            $full = [IO.Path]::GetFullPath($descendant).TrimEnd('\')
+            if (-not $judged.Add($full) -or (& $under $full 'LogDirectory')) {
+                continue
+            }
+            $writer = 'Admin'
+            if ((& $under $full 'RuntimeDirectory') -or (& $under $full 'ManagedIPCDirectory')) {
+                $writer = 'Gateway'
+            }
+            $entries.Add([pscustomobject]@{ Path = $full; Writer = $writer; Recovery = $state })
+        }
+    }
     $ownerSIDs = @($adminWriters + @(Get-DefenseClawCurrentProcessUserSID))
     $gatewaySID = ''
+    # Every refused path is named in one refusal, so one run shows the admin
+    # the whole fix (g582 review 2 S3).
+    $refusals = [Collections.Generic.List[string]]::new()
     foreach ($entry in $entries) {
         $path = [string]$entry.Path
         if ([string]::IsNullOrWhiteSpace($path) -or
@@ -16891,13 +16980,27 @@ function Assert-DefenseClawStandaloneContentTrusted {
                 -IgnoreCreatorTemplates
         }
         catch {
-            # The verdict comes last: the result names its account and the
-            # icacls fix from it.
-            throw ('refusing to change the deployment, and nothing was changed (DefenseClaw does not give a file ' +
-                'another account owns or could change a trusted access list back in place; ' + [string]$entry.Recovery +
-                "): $($_.Exception.Message)")
+            $refusals.Add(([string]$entry.Recovery + "): $($_.Exception.Message)"))
         }
     }
+    if ($refusals.Count -eq 0) {
+        return
+    }
+    # The verdict comes last in each part: the result names its account and
+    # the icacls fix from it.
+    $message = 'refusing to change the deployment, and nothing was changed (DefenseClaw does not give a file ' +
+        'another account owns or could change a trusted access list back in place; ' + $refusals[0]
+    $shown = [Math]::Min($refusals.Count, 20)
+    if ($refusals.Count -gt 1) {
+        $message += " Refused too, for the same reason ($($refusals.Count - 1) more):"
+        for ($index = 1; $index -lt $shown; $index++) {
+            $message += " ($index) (" + $refusals[$index]
+        }
+        if ($refusals.Count -gt $shown) {
+            $message += " and $($refusals.Count - $shown) more; fix these and run Setup again to see the rest"
+        }
+    }
+    throw $message
 }
 
 function Repair-DefenseClawDeploymentAclDrift {
