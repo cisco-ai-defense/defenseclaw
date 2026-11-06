@@ -625,6 +625,23 @@ func testProcessPriority() string {
 	return fmt.Sprintf("%#x", class)
 }
 
+// testProcessStartPriority is the class the test binary was started at,
+// read at package initialization, before TestMain and any test runs. The
+// harness decides it: a developer's shell starts normal (0x20), a CI runner
+// can start below normal (0x4000). A test compares the current class with
+// this one, never with a fixed class.
+var testProcessStartPriority = testProcessPriority()
+
+// testProcessClassOf is the CPU priority class of another process.
+func testProcessClassOf(pid int) (uint32, error) {
+	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return 0, err
+	}
+	defer windows.CloseHandle(handle)
+	return windows.GetPriorityClass(handle)
+}
+
 // isolateTestDeploymentReaders makes the computer's own standalone
 // deployment read as absent, as on a build box, for the whole package: its
 // deployment records, its installed config (and its enterprise.trust) and
