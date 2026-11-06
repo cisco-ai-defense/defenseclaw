@@ -199,12 +199,14 @@ func hookDeliveryWait(opts Options) time.Duration {
 }
 
 func (d *hookDeliveryRequest) close() {
+	// A receipt write can be waiting for the transport to read the pipe
+	// while holding mu. Close the pipe first so that write can return.
+	_ = d.writer.Close()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if !d.closed {
 		d.closed = true
 	}
-	_ = d.writer.Close()
 	if d.cancel != nil {
 		d.cancel()
 	}
