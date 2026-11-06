@@ -173,11 +173,11 @@ func shellLauncherNext(program string, words []string, at int) (int, bool) {
 	case "timeout":
 		for i < len(words) && strings.HasPrefix(words[i], "-") {
 			word := words[i]
-			switch {
-			case word == "--":
+			switch word {
+			case "--":
 				i++
 				return i + 1, i < len(words)
-			case word == "--foreground" || word == "--preserve-status" || word == "-v" || word == "--verbose":
+			case "--foreground", "--preserve-status", "-v", "--verbose":
 				i++
 			default:
 				n, ok := value(word, "-s", "--signal", "-k", "--kill-after")
