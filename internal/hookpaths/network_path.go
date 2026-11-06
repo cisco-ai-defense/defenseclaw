@@ -294,9 +294,9 @@ func boundedPathRead(name string, kind pathReadKind, identityRead bool) pathRead
 	}
 	wait := networkShareAnswerWait - time.Since(started)
 	if identityRead {
-		// A hook path scan may already have spent the root probe's
-		// answer budget. Give a reachable identity a brief chance to
-		// answer without charging another full budget to this call.
+		// A pending root probe does not disprove a reachable file identity.
+		// A read begun with the probe gets its remaining answer window;
+		// a late read gets a brief chance without a second full wait.
 		networkShares.mu.Lock()
 		probe := networkShares.probes[root]
 		if probe != nil {
@@ -310,12 +310,7 @@ func boundedPathRead(name string, kind pathReadKind, identityRead bool) pathRead
 			}
 		}
 		networkShares.mu.Unlock()
-		// Give a reachable identity room to answer under load while keeping
-		// the caller's first-contact share verdict within one second.
 		if wait < 150*time.Millisecond {
-			wait = 150 * time.Millisecond
-		}
-		if pending && wait > 150*time.Millisecond {
 			wait = 150 * time.Millisecond
 		}
 	}

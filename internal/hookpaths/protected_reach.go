@@ -65,13 +65,20 @@ func (s *reachNames) addTree(path string) {
 }
 func (s *reachNames) has(path string) bool {
 	path = filepath.Clean(path)
-	for _, file := range s.files {
-		if samePathName(path, file) {
+	for _, dir := range s.directories {
+		if samePathName(path, dir) {
 			return true
 		}
 	}
-	for _, dir := range s.directories {
-		if samePathName(path, dir) {
+	return s.hasCandidate(path)
+}
+
+// An exact protected directory is a protected destination, but passing
+// through it does not make every unlisted child a protected file.
+func (s *reachNames) hasCandidate(path string) bool {
+	path = filepath.Clean(path)
+	for _, file := range s.files {
+		if samePathName(path, file) {
 			return true
 		}
 	}
@@ -197,7 +204,7 @@ func (m *TargetMemo) ProtectedReach(target, home string) Grade {
 				matches <- identityMatch{matched: err == nil && os.SameFile(directory.info, info), unknown: ShareUnanswered(err)}
 			}(path)
 		}
-		for _, path := range append(slices.Clone(names.directories), names.trees...) {
+		for _, path := range names.trees {
 			wg.Add(1)
 			go func(path string) {
 				defer wg.Done()
@@ -244,11 +251,16 @@ func (m *TargetMemo) ProtectedReach(target, home string) Grade {
 		}
 		return GradeNone
 	}
+	if ShareUnanswered(entry.err) && directory.err == nil && !unknownParents {
+		// The final entry gave no answer. Its reached ordinary parent
+		// cannot make that unread identity a named protected file.
+		return GradePossible
+	}
 
 	reached := false
 	unread := false
 	lstat := func(path string) (os.FileInfo, error) {
-		if names.has(path) {
+		if names.hasCandidate(path) {
 			reached = true
 		}
 		info, err := PathLstat(path)
