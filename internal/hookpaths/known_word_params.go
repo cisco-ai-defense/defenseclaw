@@ -260,8 +260,21 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 			if !balanced || node.Name == nil || balancedFunctions[node.Name.Value] != node {
 				rejected = true
 			}
+		case *syntax.DeclClause:
+			if !balanced {
+				rejected = true
+				break
+			}
+			names, ok := declarationDestinations(node)
+			if !ok {
+				rejected = true
+				break
+			}
+			for _, name := range names {
+				unsafeNames[name] = true
+			}
 		case *syntax.ArithmCmd, *syntax.ArithmExp, *syntax.LetClause, *syntax.TestClause,
-			*syntax.DeclClause, *syntax.CoprocClause, *syntax.ProcSubst:
+			*syntax.CoprocClause, *syntax.ProcSubst:
 			rejected = true
 		case *syntax.Assign:
 			// An index is arithmetic, which can assign (a[f=-3]=x).
@@ -333,11 +346,8 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 				// parameter word (rel-1-0-6:GAP-0320, GAP-0362).
 				break
 			}
-			if balanced && static && program == "printf" && nonbindingPrintfCall(node, home) {
-				break
-			}
-			if balanced && static && program == "read" {
-				if names, ok := namedReadDestinations(node, home); ok {
+			if balanced && static {
+				if names, ok := shellBinderDestinations(node, home); ok {
 					for _, name := range names {
 						unsafeNames[name] = true
 					}
@@ -515,14 +525,27 @@ func balancedFunctionBody(fn *syntax.FuncDecl, home string) bool {
 	if fn == nil || fn.Body == nil {
 		return false
 	}
+	declarationArgs := map[*syntax.Assign]bool{}
+	syntax.Walk(fn.Body, func(node syntax.Node) bool {
+		if decl, ok := node.(*syntax.DeclClause); ok {
+			for _, arg := range decl.Args {
+				declarationArgs[arg] = true
+			}
+		}
+		return true
+	})
 	safe := true
 	syntax.Walk(fn.Body, func(node syntax.Node) bool {
 		if !safe {
 			return false
 		}
 		switch node := node.(type) {
-		case *syntax.Assign, *syntax.FuncDecl, *syntax.ForClause, *syntax.ArithmCmd,
-			*syntax.ArithmExp, *syntax.LetClause, *syntax.TestClause, *syntax.DeclClause,
+		case *syntax.Assign:
+			safe = declarationArgs[node]
+		case *syntax.DeclClause:
+			_, safe = declarationDestinations(node)
+		case *syntax.FuncDecl, *syntax.ForClause, *syntax.ArithmCmd,
+			*syntax.ArithmExp, *syntax.LetClause, *syntax.TestClause,
 			*syntax.CoprocClause, *syntax.ProcSubst:
 			safe = false
 		case *syntax.CallExpr:
@@ -530,39 +553,21 @@ func balancedFunctionBody(fn *syntax.FuncDecl, home string) bool {
 				return true
 			}
 			program, fixed := literalProgramWord(node.Args[0], home)
-			safe = fixed && (slices.Contains(knownWordPrograms, programBase(program)) ||
-				program == "printf" && nonbindingPrintfCall(node, home))
+			_, binder := shellBinderDestinations(node, home)
+			safe = fixed && (slices.Contains(knownWordPrograms, programBase(program)) || binder)
 		}
 		return safe
 	})
 	return safe
 }
 
-// nonbindingPrintfCall accepts only print forms of the shell builtin. The
-// end-of-options marker makes a later -v a format word. The format itself
-// must be fixed and cannot use %n, which assigns a named shell variable.
-func nonbindingPrintfCall(call *syntax.CallExpr, home string) bool {
-	if call == nil || len(call.Args) < 2 {
+// printfFormatDoesNotBind checks a fixed format for %n, which can assign a
+// variable named by any later argument. The caller has parsed -v separately.
+func printfFormatDoesNotBind(args []*syntax.Word, formatIndex int, home string) bool {
+	if formatIndex >= len(args) {
 		return false
 	}
-	program, fixed := literalProgramWord(call.Args[0], home)
-	if !fixed || program != "printf" {
-		return false
-	}
-	formatIndex := 1
-	first, fixed := StaticWord(call.Args[formatIndex], home)
-	if !fixed {
-		return false
-	}
-	if first == "--" {
-		formatIndex++
-	} else if strings.HasPrefix(first, "-") {
-		return false
-	}
-	if formatIndex >= len(call.Args) {
-		return false
-	}
-	format, fixed := StaticWord(call.Args[formatIndex], home)
+	format, fixed := StaticWord(args[formatIndex], home)
 	if !fixed {
 		return false
 	}
@@ -598,67 +603,183 @@ func nonbindingPrintfCall(call *syntax.CallExpr, home string) bool {
 	return true
 }
 
-// namedReadDestinations recognizes Bash read options and explicit plain
-// destinations. A read without a name writes REPLY, and read -a assigns only
-// its array argument. The scan marks every named destination unknown and can
-// retain other copy-word names. Unknown options or dynamic words may bind a
-// name the scan cannot identify.
-func namedReadDestinations(call *syntax.CallExpr, home string) ([]string, bool) {
+type binderOperandRole uint8
+
+const (
+	binderNoPosition binderOperandRole = iota
+	binderAllPositions
+	binderFirstPosition
+)
+
+type shellBinderSpec struct {
+	flags, values, destinations, reject string
+	position                            binderOperandRole
+}
+
+// Bash option roles are checked before retaining a known copy word. An
+// unrecognized option or dynamic destination leaves the entire proof unknown.
+var shellBinderSpecs = map[string]shellBinderSpec{
+	"read":      {"ers", "adinNptu", "a", "", binderAllPositions},
+	"mapfile":   {"t", "cCdOnsu", "", "C", binderFirstPosition},
+	"readarray": {"t", "cCdOnsu", "", "C", binderFirstPosition},
+	"printf":    {"", "v", "v", "", binderNoPosition},
+	"wait":      {"fn", "p", "p", "", binderNoPosition},
+	"pwd":       {"LP", "", "", "", binderNoPosition},
+}
+
+// shellBinderDestinations returns only variables a supported Bash builtin
+// can write. builtin and command select the builtin directly; an option on
+// either wrapper is left unknown. This proof never changes the strict scan.
+func shellBinderDestinations(call *syntax.CallExpr, home string) ([]string, bool) {
 	if call == nil || len(call.Assigns) != 0 || len(call.Args) == 0 {
 		return nil, false
 	}
-	program, fixed := literalProgramWord(call.Args[0], home)
-	if !fixed || program != "read" {
+	args := call.Args
+	for len(args) > 1 {
+		wrapper, fixed := literalProgramWord(args[0], home)
+		if !fixed || wrapper != "builtin" && wrapper != "command" {
+			break
+		}
+		args = args[1:]
+	}
+	program, fixed := literalProgramWord(args[0], home)
+	if !fixed {
 		return nil, false
 	}
-	names := make([]string, 0, len(call.Args)-1)
+	if program == "getopts" {
+		if len(args) < 3 {
+			return nil, false
+		}
+		if _, fixed := StaticWord(args[1], home); !fixed {
+			return nil, false
+		}
+		name, fixed := StaticWord(args[2], home)
+		return []string{name}, fixed && plainShellVariableName(name)
+	}
+	if program == "declare" || program == "typeset" || program == "local" ||
+		program == "export" || program == "readonly" {
+		return declarationWordDestinations(args[1:], home)
+	}
+	spec, found := shellBinderSpecs[program]
+	if !found {
+		return nil, false
+	}
+	names := make([]string, 0, 2)
+	positional := make([]string, 0, len(args)-1)
 	options := true
 	arrayDestination := false
-	for index := 1; index < len(call.Args); index++ {
-		name, fixed := StaticWord(call.Args[index], home)
+	for index := 1; index < len(args); index++ {
+		word, fixed := StaticWord(args[index], home)
 		if !fixed {
 			return nil, false
 		}
-		if options && name == "--" {
+		if options && word == "--" {
 			options = false
 			continue
 		}
-		if options && strings.HasPrefix(name, "-") && len(name) > 1 {
-			for pos := 1; pos < len(name); pos++ {
-				switch name[pos] {
-				case 'e', 'r', 's':
-					// These flags do not bind a shell variable.
-				case 'a', 'd', 'i', 'n', 'N', 'p', 't', 'u':
-					value := name[pos+1:]
-					if value == "" {
-						index++
-						if index == len(call.Args) {
-							return nil, false
-						}
-						value, fixed = StaticWord(call.Args[index], home)
-						if !fixed {
-							return nil, false
-						}
-					}
-					if name[pos] == 'a' {
-						if !plainShellVariableName(value) {
-							return nil, false
-						}
-						names = append(names, value)
-						arrayDestination = true
-					}
-					// The remaining bytes belong to this option's value.
-					pos = len(name)
-				default:
+		if options && strings.HasPrefix(word, "-") && len(word) > 1 {
+			for pos := 1; pos < len(word); pos++ {
+				option := word[pos]
+				if strings.ContainsRune(spec.reject, rune(option)) {
 					return nil, false
 				}
+				if strings.ContainsRune(spec.flags, rune(option)) {
+					continue
+				}
+				if !strings.ContainsRune(spec.values, rune(option)) {
+					return nil, false
+				}
+				value := word[pos+1:]
+				if value == "" {
+					index++
+					if index == len(args) {
+						return nil, false
+					}
+					value, fixed = StaticWord(args[index], home)
+					if !fixed {
+						return nil, false
+					}
+				}
+				if strings.ContainsRune(spec.destinations, rune(option)) {
+					if !plainShellVariableName(value) {
+						return nil, false
+					}
+					names = append(names, value)
+					arrayDestination = program == "read" && option == 'a'
+				}
+				break // the rest of this word is the option value
 			}
 			continue
 		}
 		options = false
-		if arrayDestination {
-			// Bash ignores positional names after an -a array. StaticWord
-			// above still rejects expansions that could change a name.
+		positional = append(positional, word)
+	}
+	switch spec.position {
+	case binderAllPositions:
+		if !arrayDestination {
+			names = append(names, positional...)
+		}
+	case binderFirstPosition:
+		if len(positional) > 0 {
+			names = append(names, positional[0])
+		}
+	}
+	for _, name := range names {
+		if !plainShellVariableName(name) {
+			return nil, false
+		}
+	}
+	if program == "printf" {
+		formatAt := len(args) - len(positional)
+		if len(positional) == 0 || !printfFormatDoesNotBind(args, formatAt, home) {
+			return nil, false
+		}
+	}
+	return names, true
+}
+
+func declarationWordDestinations(args []*syntax.Word, home string) ([]string, bool) {
+	names := make([]string, 0, len(args))
+	options := true
+	for _, arg := range args {
+		word, fixed := StaticWord(arg, home)
+		if !fixed {
+			return nil, false
+		}
+		if options && word == "--" {
+			options = false
+			continue
+		}
+		if options && len(word) > 1 && (word[0] == '-' || word[0] == '+') {
+			if strings.ContainsRune(word[1:], 'n') {
+				return nil, false // nameref can write through another name
+			}
+			continue
+		}
+		options = false
+		name, _, _ := strings.Cut(word, "=")
+		if !plainShellVariableName(name) {
+			return nil, false
+		}
+		names = append(names, name)
+	}
+	return names, true
+}
+
+func declarationDestinations(decl *syntax.DeclClause) ([]string, bool) {
+	if decl == nil || decl.Variant == nil || decl.Variant.Value == "nameref" {
+		return nil, false
+	}
+	names := make([]string, 0, len(decl.Args))
+	for _, arg := range decl.Args {
+		if arg.Name == nil {
+			return nil, false
+		}
+		name := arg.Name.Value
+		if strings.HasPrefix(name, "-") || strings.HasPrefix(name, "+") {
+			if strings.ContainsRune(name[1:], 'n') {
+				return nil, false
+			}
 			continue
 		}
 		if !plainShellVariableName(name) {
