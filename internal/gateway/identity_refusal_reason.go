@@ -6,6 +6,8 @@ package gateway
 import (
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
@@ -60,17 +62,8 @@ var identityKnownClauses = func() []string {
 	return known
 }()
 
-var (
-	// A fact outside the table: "<field>:<state>", both lower-case words.
-	identityUnnamedFactClause = lazyregexp.New(`^identity fact [a-z_]+:[a-z_]+ is unconfirmed$`)
-	// The explain command of profileExplainCommand on each platform.
-	identityExplainCommand = lazyregexp.New(`^(?:defenseclaw guardrail profile list|` +
-		`(?:defenseclaw guardrail profile explain|` +
-		`sudo /opt/(?:cisco/)?defenseclaw/bin/defenseclaw-gateway enterprise (?:linux|macos) profile-explain|` +
-		`& \x27[^\x27\x60;$\r\n]{1,300}\x27 enterprise windows profile-explain)` +
-		` --user (?:[A-Za-z0-9._:/=+-]{1,130}|<user>)` +
-		`(?: --connector [A-Za-z0-9._-]{1,64})?(?: --agent [A-Za-z0-9._-]{1,64})?)$`)
-)
+// A fact outside the table: "<field>:<state>", both lower-case words.
+var identityUnnamedFactClause = lazyregexp.New(`^identity fact [a-z_]+:[a-z_]+ is unconfirmed$`)
 
 // identityClauseConsumed returns rest without its first clause when rest
 // opens with one the producer writes.
@@ -107,7 +100,7 @@ func trustedIdentityRefusalReason(reason string) bool {
 		return false
 	}
 	clauses, command, ok := strings.Cut(body, "; run `")
-	if !ok || clauses == "" || !identityExplainCommand.MatchString(command) {
+	if !ok || clauses == "" || !trustedIdentityExplainCommand(command) {
 		return false
 	}
 	for n := 0; clauses != ""; n++ {
@@ -119,4 +112,59 @@ func trustedIdentityRefusalReason(reason string) bool {
 		}
 	}
 	return true
+}
+
+// identityWindowsAdminCLI is the installed defenseclaw.exe the Windows
+// explain command names (managed.WindowsStandaloneAdminCLI); a test replaces
+// it to render a registered Program Files of another shape.
+var identityWindowsAdminCLI = managed.WindowsStandaloneAdminCLI
+
+// trustedIdentityExplainCommand reports an explain command exactly as
+// profileExplainCommand writes it: one of its fixed forms, a verified user
+// ID or the placeholder, and the --connector and --agent values that pass
+// profileCommandConnector and profileCommandAgent. The Windows form is
+// rendered again by the shared PowerShell renderer around the installed
+// executable, so whatever quoting the renderer applies to that path is
+// accepted and a command that names another executable is not. A value
+// outside those predicates, in any position, makes the text free-form.
+func trustedIdentityExplainCommand(command string) bool {
+	if command == profileExplainList {
+		return true
+	}
+	rest := command
+	if head, agent, ok := cutLastWord(rest, " --agent "); ok {
+		if !profileCommandAgent(agent) {
+			return false
+		}
+		rest = head
+	}
+	if head, name, ok := cutLastWord(rest, " --connector "); ok {
+		if !profileCommandConnector(name) {
+			return false
+		}
+		rest = head
+	}
+	base, user, ok := strings.Cut(rest, " --user ")
+	if !ok || (user != profileExplainUserPlaceholder && !profileCommandUser(user)) {
+		return false
+	}
+	switch base {
+	case profileExplainOSS, profileExplainLinux, profileExplainDarwin,
+		managed.WindowsCommandLine(identityWindowsAdminCLI(), "enterprise", "windows", "profile-explain"):
+		return true
+	}
+	return false
+}
+
+// cutLastWord splits text at the last sep when what follows is one word.
+func cutLastWord(text, sep string) (head, word string, ok bool) {
+	i := strings.LastIndex(text, sep)
+	if i < 0 {
+		return text, "", false
+	}
+	word = text[i+len(sep):]
+	if word == "" || strings.ContainsAny(word, " \t\r\n") {
+		return text, "", false
+	}
+	return text[:i], word, true
 }

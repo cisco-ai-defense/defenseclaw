@@ -11,7 +11,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -652,47 +654,80 @@ func (set *guardrailProfileSet) profileExplainPrompt() string {
 // commands do not run there (GAP-1692).
 func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, connectorName, agent string, agentNeeded bool) string {
 	user := ""
-	if subject != nil && subject.UserID == strings.TrimSpace(subject.UserID) && useridentity.KindForID(subject.UserID) != "" {
+	if subject != nil && profileCommandUser(subject.UserID) {
 		user = subject.UserID
 	}
 	standalone := set.base != nil && set.base.StandaloneEnterprise()
 	if user == "" {
 		if !standalone {
-			return "defenseclaw guardrail profile list"
+			return profileExplainList
 		}
-		user = "<user>"
+		user = profileExplainUserPlaceholder
 	}
-	command := "defenseclaw guardrail profile explain --user " + user
+	command := profileExplainOSS + " --user " + user
 	if standalone {
 		switch runtime.GOOS {
 		case "linux":
-			command = "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user " + user
+			command = profileExplainLinux + " --user " + user
 		case "darwin":
-			command = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain --user " + user
+			command = profileExplainDarwin + " --user " + user
 		case "windows":
 			// The installed CLI under the registered Program Files, with
 			// the user quoted for PowerShell (cowork-1-0-8 GAP-0076).
 			command = managed.WindowsAdminCommand("enterprise", "windows", "profile-explain", "--user", user)
 		}
 	}
-	if profileCommandToken(connectorName) {
-		command += " --connector " + connectorName
-	}
-	if agentNeeded && profileCommandToken(agent) {
-		command += " --agent " + agent
-	}
-	return command
+	return command + profileCommandSuffix(connectorName, agent, agentNeeded)
 }
 
-func profileCommandToken(value string) bool {
-	if value == "" || len(value) > 64 {
+// The explain command of each platform up to its --user argument, and the
+// placeholder for an account without a verified ID. They are the one source
+// of the producer above and of the display recognizer
+// (trustedIdentityExplainCommand): a variable part of the command is only
+// ever a value that passes the matching predicate below.
+const (
+	profileExplainList            = "defenseclaw guardrail profile list"
+	profileExplainOSS             = "defenseclaw guardrail profile explain"
+	profileExplainLinux           = "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain"
+	profileExplainDarwin          = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain"
+	profileExplainUserPlaceholder = "<user>"
+)
+
+// profileCommandSuffix is the --connector and --agent arguments of an
+// explain command: a connector the build ships and the verified agent ID,
+// never another value.
+func profileCommandSuffix(connectorName, agent string, agentNeeded bool) string {
+	suffix := ""
+	if profileCommandConnector(connectorName) {
+		suffix += " --connector " + connectorName
+	}
+	if agentNeeded && profileCommandAgent(agent) {
+		suffix += " --agent " + agent
+	}
+	return suffix
+}
+
+// profileCommandUser reports a verified account ID: a SID or a decimal uid.
+func profileCommandUser(id string) bool {
+	return id == strings.TrimSpace(id) && useridentity.KindForID(id) != ""
+}
+
+// profileCommandConnector reports a connector name the build ships.
+func profileCommandConnector(name string) bool {
+	return connector.IsKnownBuiltinConnector(name)
+}
+
+// profileCommandAgent reports an agent ID as agentidentity derives it:
+// the prefix and 16 lower-case hex digits.
+func profileCommandAgent(id string) bool {
+	digits, ok := strings.CutPrefix(id, agentidentity.AgentIDPrefix)
+	if !ok || len(digits) != 16 {
 		return false
 	}
-	for _, r := range value {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
-			continue
+	for _, r := range digits {
+		if r < '0' || r > '9' && r < 'a' || r > 'f' {
+			return false
 		}
-		return false
 	}
 	return true
 }
