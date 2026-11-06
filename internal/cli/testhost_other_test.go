@@ -13,6 +13,9 @@ func isolateTestHost() func() { return func() {} }
 // guardTestMachine is a no-op off Windows.
 func guardTestMachine() func() error { return func() error { return nil } }
 
+// guardTestSandbox is a no-op off Windows.
+func guardTestSandbox() func() error { return func() error { return nil } }
+
 // testProcessPriority is not tracked off Windows.
 func testProcessPriority() string { return "" }
 

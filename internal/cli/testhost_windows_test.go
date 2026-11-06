@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -45,28 +46,28 @@ import (
 // of a managed computer, and a test that did not pin the identity gave
 // another answer as LocalSystem or as a standard user.
 func isolateTestHost() func() {
-	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	sandboxSeam("managedHostWindowsStandalone", &managedHostWindowsStandalone, func() (string, bool) { return "", false })
 	// GAP-2572: on a managed lane host the HKLM marker key exists, so the
 	// "marker present but unverified" check read it and closed every
 	// per-user outage case; Secure Client and the runtime descriptor are the
 	// other two machine signals the outage mode reads.
-	managedHostWindowsMarkerUncertain = func() bool { return false }
-	secureClientHost = func() bool { return false }
+	sandboxSeam("managedHostWindowsMarkerUncertain", &managedHostWindowsMarkerUncertain, func() bool { return false })
+	sandboxSeam("secureClientHost", &secureClientHost, func() bool { return false })
 	pinTestProcessIdentity()
 	normalizeTestTokenDefaultOwner()
 	dir, err := os.MkdirTemp("", "defenseclaw-cli-test-")
 	if err != nil {
-		windowsScannerRuntimeDir = func() (string, error) { return "", err }
-		managedHostDescriptorPath = func() string { return "" }
+		sandboxSeam("windowsScannerRuntimeDir", &windowsScannerRuntimeDir, func() (string, error) { return "", err })
+		sandboxSeam("managedHostDescriptorPath", &managedHostDescriptorPath, func() string { return "" })
 		isolateTestDeploymentReaders(os.TempDir())
 		return isolateTestMachineWriters("")
 	}
 	isolateTestDeploymentReaders(dir)
 	missingDescriptor := filepath.Join(dir, "no-runtime-descriptor")
-	managedHostDescriptorPath = func() string { return missingDescriptor }
+	sandboxSeam("managedHostDescriptorPath", &managedHostDescriptorPath, func() string { return missingDescriptor })
 	// Absent like on a computer without a deployment.
 	runtimeDir := filepath.Join(dir, "scanners")
-	windowsScannerRuntimeDir = func() (string, error) { return runtimeDir, nil }
+	sandboxSeam("windowsScannerRuntimeDir", &windowsScannerRuntimeDir, func() (string, error) { return runtimeDir, nil })
 	restoreMachine := isolateTestMachineWriters(filepath.Join(dir, "lifecycle-logs"))
 	return func() {
 		restoreMachine()
@@ -105,19 +106,19 @@ func normalizeTestTokenDefaultOwner() {
 // runs the tests: a standard user, LocalSystem or an elevated administrator.
 // A test that needs another identity sets its own and restores it.
 func pinTestProcessIdentity() {
-	windowsEnterpriseIsElevated = func() bool { return true }
-	windowsSecretIsElevated = func() bool { return true }
-	windowsCoworkElevated = func() bool { return true }
-	windowsEnterpriseRunningAsLocalSystem = func() bool { return false }
-	windowsClaudeSettingsCheckerIsLocalSystem = func() bool { return false }
-	enterpriseHookWindowsUserCleanupIdentity = func() error { return enterprisehooks.ErrWindowsEnterpriseNotLocalSystem }
+	sandboxSeam("windowsEnterpriseIsElevated", &windowsEnterpriseIsElevated, func() bool { return true })
+	sandboxSeam("windowsSecretIsElevated", &windowsSecretIsElevated, func() bool { return true })
+	sandboxSeam("windowsCoworkElevated", &windowsCoworkElevated, func() bool { return true })
+	sandboxSeam("windowsEnterpriseRunningAsLocalSystem", &windowsEnterpriseRunningAsLocalSystem, func() bool { return false })
+	sandboxSeam("windowsClaudeSettingsCheckerIsLocalSystem", &windowsClaudeSettingsCheckerIsLocalSystem, func() bool { return false })
+	sandboxSeam("enterpriseHookWindowsUserCleanupIdentity", &enterpriseHookWindowsUserCleanupIdentity, func() error { return enterprisehooks.ErrWindowsEnterpriseNotLocalSystem })
 	// The enterprise hooks commands ask the token through this seam too
 	// (g079 review F3): it answers as the elevated runner.
-	enterpriseHooksPlatformPreflight = func() error { return nil }
+	sandboxSeam("enterpriseHooksPlatformPreflight", &enterpriseHooksPlatformPreflight, func() error { return nil })
 	// The lifecycle stages in the caller's own temp folder, which every
 	// identity can build, never in the computer's ProgramData. A test of the
 	// ProgramData staging sets useTestTokenForStaging.
-	windowsEnterpriseStagingElevated = func() bool { return false }
+	sandboxSeam("windowsEnterpriseStagingElevated", &windowsEnterpriseStagingElevated, func() bool { return false })
 }
 
 // useTestTokenForStaging makes the lifecycle staging follow the test
@@ -137,35 +138,35 @@ func useTestTokenForStaging(t *testing.T) {
 // Program Files\Cisco removal at no-ops. The returned function removes the
 // sandbox key.
 func isolateTestMachineWriters(logDir string) func() {
-	windowsBundleSyncMarker = func(*enterprisebundle.Store) error { return nil }
-	windowsEnterpriseEventWriter = func(string, uint32, string, string) error { return nil }
-	windowsEnterpriseLogDirectory = func() (string, error) {
+	sandboxSeam("windowsBundleSyncMarker", &windowsBundleSyncMarker, func(*enterprisebundle.Store) error { return nil })
+	sandboxSeam("windowsEnterpriseEventWriter", &windowsEnterpriseEventWriter, func(string, uint32, string, string) error { return nil })
+	sandboxSeam("windowsEnterpriseLogDirectory", &windowsEnterpriseLogDirectory, func() (string, error) {
 		if logDir == "" {
 			return "", errors.New("the tests have no temp folder for the lifecycle log")
 		}
 		return logDir, nil
-	}
-	windowsEnterpriseLogDirectoryEnsurer = func(directory string) error { return os.MkdirAll(directory, 0o700) }
-	removeEmptyWindowsEnterpriseInstallParent = func() {}
-	windowsEnterpriseRestoreStartModes = func(*windowsEnterpriseInstallerReport) error { return nil }
-	windowsEnterpriseRepairDataDirBeforePlan = func() string { return "" }
-	windowsEnterpriseRemoveReplacementCopies = func() []string { return nil }
+	})
+	sandboxSeam("windowsEnterpriseLogDirectoryEnsurer", &windowsEnterpriseLogDirectoryEnsurer, func(directory string) error { return os.MkdirAll(directory, 0o700) })
+	sandboxSeam("removeEmptyWindowsEnterpriseInstallParent", &removeEmptyWindowsEnterpriseInstallParent, func() {})
+	sandboxSeam("windowsEnterpriseRestoreStartModes", &windowsEnterpriseRestoreStartModes, func(*windowsEnterpriseInstallerReport) error { return nil })
+	sandboxSeam("windowsEnterpriseRepairDataDirBeforePlan", &windowsEnterpriseRepairDataDirBeforePlan, func() string { return "" })
+	sandboxSeam("windowsEnterpriseRemoveReplacementCopies", &windowsEnterpriseRemoveReplacementCopies, func() []string { return nil })
 	// The priority class is process state: a lifecycle test that lowered it
 	// left every later test, and cmd.exe and the other programs they start,
 	// below normal. TestWindowsLifecycleRunYieldsTheCPUToTheHooks checks the
 	// real yield in a child process.
-	windowsEnterpriseLifecycleYield = func() {}
+	sandboxSeam("windowsEnterpriseLifecycleYield", &windowsEnterpriseLifecycleYield, func() {})
 	// The same for the sidecar, which raises its class to above normal
 	// (TestSidecarAnswersAtTheHookPriorityClass checks it in a child).
-	sidecarRaisePriority = func() {}
+	sandboxSeam("sidecarRaisePriority", &sidecarRaisePriority, func() {})
 	// g079 review F1: service control of the DefenseClaw gateway and hook
 	// guardian fails in tests.
-	windowsEnterpriseHotConfigRestart = func() (bool, error) { return false, errTestSandboxNoServiceControl }
-	windowsEnterpriseHotConfigRecover = func() (bool, error) { return false, errTestSandboxNoServiceControl }
-	windowsEnterpriseHotConfigFailClosed = func() error { return errTestSandboxNoServiceControl }
-	windowsEnterpriseHotConfigGuardianReconcile = testSandboxGuardianReconcile
-	windowsSecretRestartGateway = func(func() error) (bool, error) { return false, errTestSandboxNoServiceControl }
-	windowsSecretSpawnRecovery = func() (windowsSecretRecoveryControl, error) { return nil, errTestSandboxNoServiceControl }
+	sandboxSeam("windowsEnterpriseHotConfigRestart", &windowsEnterpriseHotConfigRestart, func() (bool, error) { return false, errTestSandboxNoServiceControl })
+	sandboxSeam("windowsEnterpriseHotConfigRecover", &windowsEnterpriseHotConfigRecover, func() (bool, error) { return false, errTestSandboxNoServiceControl })
+	sandboxSeam("windowsEnterpriseHotConfigFailClosed", &windowsEnterpriseHotConfigFailClosed, func() error { return errTestSandboxNoServiceControl })
+	sandboxSeam("windowsEnterpriseHotConfigGuardianReconcile", &windowsEnterpriseHotConfigGuardianReconcile, testSandboxGuardianReconcile)
+	sandboxSeam("windowsSecretRestartGateway", &windowsSecretRestartGateway, func(func() error) (bool, error) { return false, errTestSandboxNoServiceControl })
+	sandboxSeam("windowsSecretSpawnRecovery", &windowsSecretSpawnRecovery, func() (windowsSecretRecoveryControl, error) { return nil, errTestSandboxNoServiceControl })
 
 	// One sandbox per run: the test binary's helper children (daemon probes,
 	// re-executed helpers) use their parent's, which the parent removes. A
@@ -184,7 +185,7 @@ func isolateTestMachineWriters(logDir string) func() {
 		// reports it).
 		key = 0
 	}
-	windowsEnterpriseMachineRegistry = key
+	windowsEnterpriseMachineRegistry, testMachineRegistrySandboxKey = key, key
 	return func() {
 		windowsEnterpriseMachineRegistry = 0
 		if key != 0 {
@@ -201,8 +202,79 @@ const (
 	testMachineRegistrySandboxPrefix = `Software\DefenseClaw-test-`
 )
 
-// testMachineRegistrySandbox is this run's HKCU sandbox key.
-var testMachineRegistrySandbox string
+// testMachineRegistrySandbox is this run's HKCU sandbox key, and
+// testMachineRegistrySandboxKey its open handle.
+var (
+	testMachineRegistrySandbox    string
+	testMachineRegistrySandboxKey registry.Key
+)
+
+// testSandboxSeam is one package seam isolateTestHost points at the
+// sandbox: its name, a reader of its value now, and the function it set.
+type testSandboxSeam struct {
+	name    string
+	current func() uintptr
+	want    uintptr
+}
+
+// testSandboxSeams is every seam isolateTestHost set.
+var testSandboxSeams []testSandboxSeam
+
+// sandboxSeam sets *seam to value and registers it, so the TestMain guard
+// tells when a test left it reassigned (g079 review F2).
+func sandboxSeam[T any](name string, seam *T, value T) {
+	*seam = value
+	testSandboxSeams = append(testSandboxSeams, testSandboxSeam{name: name,
+		current: func() uintptr { return reflect.ValueOf(*seam).Pointer() },
+		want:    reflect.ValueOf(value).Pointer()})
+}
+
+// testSandboxProblems lists where the package is no longer in its sandbox:
+// a registered seam that is not the function isolateTestHost set, a
+// registry root that is not the HKCU sandbox key, an identity seam that no
+// longer answers as pinned, a lifecycle log outside the temp folder, or a
+// deployment record that reads as present.
+func testSandboxProblems() []string {
+	var problems []string
+	for _, seam := range testSandboxSeams {
+		if seam.current() != seam.want {
+			problems = append(problems, "seam "+seam.name+" is not the sandbox's (a test reassigned it and did not set it back)")
+		}
+	}
+	if testMachineRegistrySandboxKey == 0 || windowsEnterpriseMachineRegistry != testMachineRegistrySandboxKey {
+		problems = append(problems, fmt.Sprintf("the machine registry root is %#x, not the HKCU sandbox %s", windowsEnterpriseMachineRegistry, testMachineRegistrySandbox))
+	}
+	if !windowsEnterpriseIsElevated() || !windowsSecretIsElevated() || !windowsCoworkElevated() ||
+		windowsEnterpriseRunningAsLocalSystem() || windowsClaudeSettingsCheckerIsLocalSystem() ||
+		!errors.Is(enterpriseHookWindowsUserCleanupIdentity(), enterprisehooks.ErrWindowsEnterpriseNotLocalSystem) ||
+		enterpriseHooksPlatformPreflight() != nil || windowsEnterpriseStagingElevated() {
+		problems = append(problems, "the identity seams do not answer as "+testProcessIdentityNote)
+	}
+	if logDir, err := windowsEnterpriseLogDirectory(); err != nil {
+		problems = append(problems, "the lifecycle log: "+err.Error())
+	} else if rel, err := filepath.Rel(os.TempDir(), logDir); err != nil || strings.HasPrefix(rel, "..") {
+		problems = append(problems, "the lifecycle log "+logDir+" is outside the temp folder")
+	}
+	for _, profile := range []string{managed.ProfileStandalone, managed.ProfileSecureClient} {
+		if deployment, err := windowsEnterpriseDeploymentInspector(profile); err != nil || deployment.State != winpath.EnterpriseDeploymentAbsent {
+			problems = append(problems, fmt.Sprintf("the %s deployment record reads as %q (%v), not absent", profile, deployment.State, err))
+		}
+	}
+	return problems
+}
+
+// guardTestSandbox fails the run when a test left the package outside its
+// sandbox for every test after it (g079 review F2).
+func guardTestSandbox() func() error {
+	return func() error {
+		problems := testSandboxProblems()
+		if len(problems) == 0 {
+			return nil
+		}
+		return fmt.Errorf("GAP-0079: a test left the package outside its machine sandbox for the tests after it "+
+			"(set each seam back in t.Cleanup):\n  %s", strings.Join(problems, "\n  "))
+	}
+}
 
 // deleteTestRegistryTree removes path and everything under it.
 func deleteTestRegistryTree(root registry.Key, path string) error {
@@ -252,7 +324,156 @@ func snapshotTestMachineRegistry() map[string]string {
 	for _, path := range keys {
 		snapshotTestRegistryKey(snapshot, path)
 	}
+	// The empty-parent removal (removeEmptyWindowsRegistryKey) can take
+	// HKLM\SOFTWARE\Cisco itself; other Cisco products own its values.
+	if key, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Cisco`, registry.QUERY_VALUE|registry.WOW64_64KEY); err == nil {
+		_ = key.Close()
+		snapshot[`SOFTWARE\Cisco`] = "key (presence only)"
+	}
 	return snapshot
+}
+
+// snapshotTestMachineState adds what a test could change outside the
+// registry to snapshot (g079 review F2): the run state and process of each
+// DefenseClaw service, and a fingerprint (kind, size, modification time) of
+// %ProgramData%\Cisco\DefenseClaw, the DefenseClaw-* staging and dc-*-test-*
+// fixture folders at the top of %ProgramData% and of the system drive,
+// %WINDIR%\Logs\DefenseClaw* and %ProgramFiles%\Cisco\DefenseClaw*. While a
+// DefenseClaw service runs, its data folder and the lifecycle log folder are
+// its own and are left out.
+func snapshotTestMachineState(snapshot map[string]string) {
+	running := snapshotTestServices(snapshot)
+	var skip []string
+	if running {
+		if layout, err := managed.StandaloneWindowsLayout(); err == nil {
+			skip = append(skip, layout.DataDir)
+		}
+	}
+	stagingOrFixture := func(name string) bool {
+		lower := strings.ToLower(name)
+		return strings.HasPrefix(lower, "defenseclaw-") || strings.HasPrefix(lower, "dc-") && strings.Contains(lower, "-test-")
+	}
+	defenseClaw := func(name string) bool { return strings.HasPrefix(strings.ToLower(name), "defenseclaw") }
+	if programData, err := winpath.TrustedProgramData(); err != nil {
+		snapshot["file %ProgramData%"] = "unresolved: " + err.Error()
+	} else {
+		fingerprintTestTree(snapshot, filepath.Join(programData, "Cisco", "DefenseClaw"), skip)
+		fingerprintTestEntries(snapshot, programData, stagingOrFixture, skip)
+	}
+	if drive := os.Getenv("SystemDrive"); drive != "" {
+		fingerprintTestEntries(snapshot, drive+`\`, func(name string) bool {
+			lower := strings.ToLower(name)
+			return strings.HasPrefix(lower, "dc-") && strings.Contains(lower, "-test-")
+		}, skip)
+	}
+	if windir, err := windows.GetSystemWindowsDirectory(); err != nil {
+		snapshot["file %WINDIR%"] = "unresolved: " + err.Error()
+	} else if running {
+		snapshot["file "+filepath.Join(windir, "Logs", "DefenseClaw")] = "left out: a DefenseClaw service runs"
+	} else {
+		fingerprintTestEntries(snapshot, filepath.Join(windir, "Logs"), defenseClaw, skip)
+	}
+	if programFiles, err := winpath.TrustedProgramFiles(); err != nil {
+		snapshot["file %ProgramFiles%"] = "unresolved: " + err.Error()
+	} else {
+		cisco := filepath.Join(programFiles, "Cisco")
+		if _, err := os.Lstat(cisco); err == nil {
+			snapshot["file "+cisco] = "present"
+		}
+		fingerprintTestEntries(snapshot, cisco, defenseClaw, skip)
+	}
+}
+
+// snapshotTestServices records each DefenseClaw service's state and process
+// id, and reports whether any of them runs. A standard user can query them.
+func snapshotTestServices(snapshot map[string]string) bool {
+	manager, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+	if err != nil {
+		snapshot["service manager"] = "unreadable: " + err.Error()
+		return false
+	}
+	defer func() { _ = windows.CloseServiceHandle(manager) }()
+	running := false
+	for _, service := range winpath.EnterpriseStandaloneServices {
+		name, err := windows.UTF16PtrFromString(service.Name)
+		if err != nil {
+			continue
+		}
+		handle, err := windows.OpenService(manager, name, windows.SERVICE_QUERY_STATUS)
+		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+			continue
+		}
+		if err != nil {
+			snapshot["service "+service.Name] = "unreadable: " + err.Error()
+			continue
+		}
+		var status windows.SERVICE_STATUS_PROCESS
+		var needed uint32
+		err = windows.QueryServiceStatusEx(handle, windows.SC_STATUS_PROCESS_INFO, (*byte)(unsafe.Pointer(&status)), uint32(unsafe.Sizeof(status)), &needed)
+		_ = windows.CloseServiceHandle(handle)
+		if err != nil {
+			snapshot["service "+service.Name] = "unreadable: " + err.Error()
+			continue
+		}
+		snapshot["service "+service.Name] = fmt.Sprintf("state %d pid %d", status.CurrentState, status.ProcessId)
+		if status.CurrentState != windows.SERVICE_STOPPED {
+			running = true
+		}
+	}
+	return running
+}
+
+// fingerprintTestTree records root and everything under it as
+// "file <path>" = "<kind> <size> <modified>", without following links;
+// an unreadable folder is recorded as such. A path in skip is left out.
+func fingerprintTestTree(snapshot map[string]string, root string, skip []string) {
+	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		for _, left := range skip {
+			if left != "" && strings.EqualFold(filepath.Clean(path), filepath.Clean(left)) {
+				snapshot["file "+path] = "left out: a DefenseClaw service runs"
+				return filepath.SkipDir
+			}
+		}
+		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				snapshot["file "+path] = "unreadable: " + err.Error()
+			}
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			snapshot["file "+path] = "unreadable: " + err.Error()
+			return nil
+		}
+		kind := "file"
+		switch {
+		case entry.IsDir():
+			kind = "folder"
+		case entry.Type()&fs.ModeSymlink != 0:
+			kind = "link"
+		case !entry.Type().IsRegular():
+			kind = "other"
+		}
+		snapshot["file "+path] = fmt.Sprintf("%s %d %s", kind, info.Size(), info.ModTime().UTC().Format(time.RFC3339Nano))
+		return nil
+	})
+}
+
+// fingerprintTestEntries fingerprints each entry of parent whose name
+// matches.
+func fingerprintTestEntries(snapshot map[string]string, parent string, match func(string) bool, skip []string) {
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			snapshot["file "+parent] = "unreadable: " + err.Error()
+		}
+		return
+	}
+	for _, entry := range entries {
+		if match(entry.Name()) {
+			fingerprintTestTree(snapshot, filepath.Join(parent, entry.Name()), skip)
+		}
+	}
 }
 
 func snapshotTestRegistryKey(snapshot map[string]string, path string) {
@@ -306,17 +527,29 @@ func diffTestMachineRegistry(before, after map[string]string) []string {
 }
 
 // guardTestMachine snapshots the computer's DefenseClaw machine registry
+// and, in the top-level run, its DefenseClaw services and machine folders
 // before the package runs. The returned check fails the run when any test
-// changed it (GAP-0079).
+// changed them (GAP-0079, g079 review F2). A helper child (started by a
+// test, so testProcessGuardChildEnv is set) checks the registry only: it is
+// short, and the parent's check after it sees what it left behind. TestMain
+// calls this before guardTestProcessState sets that variable.
 func guardTestMachine() func() error {
-	before := snapshotTestMachineRegistry()
+	child := os.Getenv(testProcessGuardChildEnv) != ""
+	snapshot := func() map[string]string {
+		state := snapshotTestMachineRegistry()
+		if !child {
+			snapshotTestMachineState(state)
+		}
+		return state
+	}
+	before := snapshot()
 	return func() error {
-		changes := diffTestMachineRegistry(before, snapshotTestMachineRegistry())
+		changes := diffTestMachineRegistry(before, snapshot())
 		if len(changes) == 0 {
 			return nil
 		}
-		return fmt.Errorf("GAP-0079: the internal/cli tests changed the computer's own DefenseClaw machine registry "+
-			"(every machine writer must reach the test sandbox HKCU\\%s):\n  %s",
+		return fmt.Errorf("GAP-0079: the internal/cli tests changed the computer's own DefenseClaw machine registry, services or folders "+
+			"(every machine writer must reach the test sandbox HKCU\\%s or a temp folder):\n  %s",
 			testMachineRegistrySandbox, strings.Join(changes, "\n  "))
 	}
 }
@@ -345,33 +578,33 @@ func testProcessPriority() string {
 // fail as they do on a computer without a deployment. A test that needs one
 // of them sets its own.
 func isolateTestDeploymentReaders(dir string) {
-	windowsEnterpriseRecordInspector = func(profile string) (winpath.EnterpriseDeployment, error) {
+	sandboxSeam("windowsEnterpriseRecordInspector", &windowsEnterpriseRecordInspector, func(profile string) (winpath.EnterpriseDeployment, error) {
 		return winpath.EnterpriseDeployment{Profile: profile, State: winpath.EnterpriseDeploymentAbsent}, nil
-	}
+	})
 	missing, err := managed.StandaloneWindowsLayoutForRoots(filepath.Join(dir, "no-program-files"), filepath.Join(dir, "no-program-data"))
 	if err != nil {
 		missing = managed.StandaloneLayout{ConfigPath: filepath.Join(dir, "no-config.yaml"),
 			ManifestPath: filepath.Join(dir, "no-manifest.json"), DataDir: filepath.Join(dir, "no-data")}
 	}
-	windowsEnterpriseInstalledConfigPath = func() (string, error) { return missing.ConfigPath, nil }
-	windowsEnterpriseInstalledConfigForStatus = func() (*config.Config, error) {
+	sandboxSeam("windowsEnterpriseInstalledConfigPath", &windowsEnterpriseInstalledConfigPath, func() (string, error) { return missing.ConfigPath, nil })
+	sandboxSeam("windowsEnterpriseInstalledConfigForStatus", &windowsEnterpriseInstalledConfigForStatus, func() (*config.Config, error) {
 		return loadWindowsEnterpriseStandaloneConfig(missing.ConfigPath)
-	}
-	windowsEnterpriseEnrolledConnectors = func() ([]string, error) { return windowsEnterpriseConfigConnectors(missing.ConfigPath) }
-	windowsEnterpriseEnrolledTargets = func() (map[string]bool, error) {
+	})
+	sandboxSeam("windowsEnterpriseEnrolledConnectors", &windowsEnterpriseEnrolledConnectors, func() ([]string, error) { return windowsEnterpriseConfigConnectors(missing.ConfigPath) })
+	sandboxSeam("windowsEnterpriseEnrolledTargets", &windowsEnterpriseEnrolledTargets, func() (map[string]bool, error) {
 		if _, err := enterprisehooks.LoadManifest(missing.ManifestPath); err != nil {
 			return nil, err
 		}
 		return map[string]bool{}, nil
-	}
-	windowsEnterpriseGuardianRestores = func() (map[string]time.Time, error) {
+	})
+	sandboxSeam("windowsEnterpriseGuardianRestores", &windowsEnterpriseGuardianRestores, func() (map[string]time.Time, error) {
 		return readEnterpriseHookGuardianRestores(missing.DataDir)
-	}
-	windowsEnterpriseUnprotectedAgentsReader = func() ([]enterprisehooks.UnprotectedAgent, error) {
+	})
+	sandboxSeam("windowsEnterpriseUnprotectedAgentsReader", &windowsEnterpriseUnprotectedAgentsReader, func() ([]enterprisehooks.UnprotectedAgent, error) {
 		return enterprisehooks.ReadWindowsUnprotectedAgents(missing.ManifestPath)
-	}
+	})
 	registry := connector.NewDefaultRegistry()
-	windowsEnterpriseStatusV2Read = func() windowsEnterpriseStatusV2Inputs {
+	sandboxSeam("windowsEnterpriseStatusV2Read", &windowsEnterpriseStatusV2Read, func() windowsEnterpriseStatusV2Inputs {
 		return windowsEnterpriseStatusV2Inputs{
 			configErr:     os.ErrNotExist,
 			manifestErr:   os.ErrNotExist,
@@ -382,31 +615,31 @@ func isolateTestDeploymentReaders(dir string) {
 				return ok
 			},
 		}
-	}
-	windowsEnterpriseGuardianStateForStatus = func() (enterpriseHookGuardianState, bool, error) {
+	})
+	sandboxSeam("windowsEnterpriseGuardianStateForStatus", &windowsEnterpriseGuardianStateForStatus, func() (enterpriseHookGuardianState, bool, error) {
 		return enterpriseHookGuardianState{}, false, nil
-	}
-	windowsEnterpriseUserCleanupsForStatus = func() ([]enterpriseHookUserCleanup, error) { return nil, nil }
-	windowsEnterpriseAgentSettingsNotices = func() []string { return nil }
-	windowsEnterpriseNativeOTLPNotices = func() []string { return nil }
-	windowsEnterpriseAmpMachineFolderProblems = func() []string { return nil }
-	windowsEnterpriseDiscoveryHomeDirs = func() ([]string, error) { return nil, nil }
+	})
+	sandboxSeam("windowsEnterpriseUserCleanupsForStatus", &windowsEnterpriseUserCleanupsForStatus, func() ([]enterpriseHookUserCleanup, error) { return nil, nil })
+	sandboxSeam("windowsEnterpriseAgentSettingsNotices", &windowsEnterpriseAgentSettingsNotices, func() []string { return nil })
+	sandboxSeam("windowsEnterpriseNativeOTLPNotices", &windowsEnterpriseNativeOTLPNotices, func() []string { return nil })
+	sandboxSeam("windowsEnterpriseAmpMachineFolderProblems", &windowsEnterpriseAmpMachineFolderProblems, func() []string { return nil })
+	sandboxSeam("windowsEnterpriseDiscoveryHomeDirs", &windowsEnterpriseDiscoveryHomeDirs, func() ([]string, error) { return nil, nil })
 	// g079 review F1: the bundle store, the protected credentials and the
 	// change spool of the computer's own layout, the uninstall footprint
 	// (SCM services and machine roots), the Claude Code machine policy and
 	// the gateway service's process. On a managed computer a secret test
 	// that missed its spool stub wrote the real change spool as SYSTEM.
-	windowsBundleLayout = func() (managed.StandaloneLayout, error) { return missing, nil }
-	windowsSecretLayout = func() (managed.StandaloneLayout, error) { return missing, nil }
+	sandboxSeam("windowsBundleLayout", &windowsBundleLayout, func() (managed.StandaloneLayout, error) { return missing, nil })
+	sandboxSeam("windowsSecretLayout", &windowsSecretLayout, func() (managed.StandaloneLayout, error) { return missing, nil })
 	spool := filepath.Join(dir, "change-spool")
-	windowsChangeSpool = func(managed.StandaloneLayout) (enterprisestatus.ChangeSpool, error) {
+	sandboxSeam("windowsChangeSpool", &windowsChangeSpool, func(managed.StandaloneLayout) (enterprisestatus.ChangeSpool, error) {
 		return enterprisestatus.ChangeSpool{Dir: filepath.Join(spool, enterprisestatus.ChangeEventsDirName), StateDir: spool}, nil
-	}
-	windowsEnterpriseStandaloneFootprint = func() (bool, error) { return false, nil }
-	windowsEnterpriseClaudeRegistryPolicyValue = func() (string, error) { return "", nil }
-	windowsBundleRestoreGatewayRunning = func() bool { return false }
-	windowsStandaloneGatewayPID = func() uint32 { return 0 }
-	windowsSecretGatewayLive = func() (bool, error) { return false, nil }
+	})
+	sandboxSeam("windowsEnterpriseStandaloneFootprint", &windowsEnterpriseStandaloneFootprint, func() (bool, error) { return false, nil })
+	sandboxSeam("windowsEnterpriseClaudeRegistryPolicyValue", &windowsEnterpriseClaudeRegistryPolicyValue, func() (string, error) { return "", nil })
+	sandboxSeam("windowsBundleRestoreGatewayRunning", &windowsBundleRestoreGatewayRunning, func() bool { return false })
+	sandboxSeam("windowsStandaloneGatewayPID", &windowsStandaloneGatewayPID, func() uint32 { return 0 })
+	sandboxSeam("windowsSecretGatewayLive", &windowsSecretGatewayLive, func() (bool, error) { return false, nil })
 }
 
 // errTestSandboxNoServiceControl is what the gateway and guardian service
@@ -585,6 +818,27 @@ func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 		t.Fatalf("a test folder is owned by %v, not the test account", owner)
 	}
 
+	// g079 review F2: every seam above is registered with the TestMain
+	// guard, and none has left the sandbox.
+	registered := map[string]bool{}
+	for _, seam := range testSandboxSeams {
+		registered[seam.name] = true
+	}
+	for _, name := range []string{"windowsBundleLayout", "windowsSecretLayout", "windowsChangeSpool",
+		"windowsEnterpriseStandaloneFootprint", "windowsEnterpriseClaudeRegistryPolicyValue",
+		"windowsBundleRestoreGatewayRunning", "windowsStandaloneGatewayPID", "windowsSecretGatewayLive",
+		"windowsEnterpriseHotConfigRestart", "windowsEnterpriseHotConfigRecover", "windowsEnterpriseHotConfigFailClosed",
+		"windowsEnterpriseHotConfigGuardianReconcile", "windowsSecretRestartGateway", "windowsSecretSpawnRecovery",
+		"enterpriseHooksPlatformPreflight", "windowsEnterpriseStagingElevated", "windowsBundleSyncMarker",
+		"windowsEnterpriseLifecycleYield", "sidecarRaisePriority", "windowsEnterpriseRecordInspector"} {
+		if !registered[name] {
+			t.Errorf("seam %s is not registered with the sandbox guard", name)
+		}
+	}
+	if problems := testSandboxProblems(); len(problems) != 0 {
+		t.Fatalf("the package is outside its sandbox:\n%s", strings.Join(problems, "\n"))
+	}
+
 	// GAP-0079: the identity is pinned.
 	if !windowsEnterpriseIsElevated() || !windowsSecretIsElevated() || !windowsCoworkElevated() ||
 		windowsEnterpriseRunningAsLocalSystem() || windowsClaudeSettingsCheckerIsLocalSystem() ||
@@ -652,5 +906,65 @@ func TestTestMachineRegistryGuardReportsEveryChange(t *testing.T) {
 	}
 	if changes := diffTestMachineRegistry(before, before); len(changes) != 0 {
 		t.Fatalf("an unchanged snapshot reported %v", changes)
+	}
+}
+
+// g079 review F2: the sandbox guard names a seam a test left reassigned,
+// and is quiet once it is set back.
+func TestTestSandboxGuardNamesALeakedSeam(t *testing.T) {
+	if problems := testSandboxProblems(); len(problems) != 0 {
+		t.Fatalf("the package is outside its sandbox before the test: %v", problems)
+	}
+	saved := windowsBundleRestoreGatewayRunning
+	windowsBundleRestoreGatewayRunning = func() bool { return false }
+	problems := strings.Join(testSandboxProblems(), "\n")
+	windowsBundleRestoreGatewayRunning = saved
+	if !strings.Contains(problems, "seam windowsBundleRestoreGatewayRunning is not the sandbox's") {
+		t.Fatalf("a leaked seam was not named: %q", problems)
+	}
+	if problems := testSandboxProblems(); len(problems) != 0 {
+		t.Fatalf("the restored seam is still reported: %v", problems)
+	}
+}
+
+// g079 review F2: the folder fingerprint sees an added, a changed and a
+// removed file, and leaves out a skipped folder.
+func TestTestMachineFolderFingerprintSeesEveryChange(t *testing.T) {
+	root := t.TempDir()
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, name)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(`etc\kept.json`, "1")
+	write(`etc\changed.json`, "1")
+	write(`etc\removed.json`, "1")
+	write(`data\gateway.log`, "1")
+	skip := []string{filepath.Join(root, "data")}
+	fingerprint := func() map[string]string {
+		snapshot := map[string]string{}
+		fingerprintTestTree(snapshot, root, skip)
+		return snapshot
+	}
+	before := fingerprint()
+	write(`etc\changed.json`, "12")
+	write(`etc\added.json`, "1")
+	write(`data\gateway.log`, "12")
+	if err := os.Remove(filepath.Join(root, `etc\removed.json`)); err != nil {
+		t.Fatal(err)
+	}
+	changes := strings.Join(diffTestMachineRegistry(before, fingerprint()), "\n")
+	for _, want := range []string{"added file " + filepath.Join(root, `etc\added.json`),
+		"changed file " + filepath.Join(root, `etc\changed.json`), "removed file " + filepath.Join(root, `etc\removed.json`)} {
+		if !strings.Contains(changes, want) {
+			t.Errorf("the fingerprint diff has no %q:\n%s", want, changes)
+		}
+	}
+	if strings.Contains(changes, "gateway.log") || strings.Contains(changes, "kept.json") {
+		t.Errorf("the fingerprint diff reports a skipped or unchanged file:\n%s", changes)
 	}
 }
