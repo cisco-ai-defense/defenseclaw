@@ -107,17 +107,36 @@ def test_the_transaction_publishes_the_hook_before_it_stops_the_services() -> No
     for needle in (
         "GetRegularFileLinkCountNoFollow(path)",
         "if (links != 1)",
-        "if (!allowed.Contains(owner))",
         "if (descriptor.DiscretionaryAcl == null)",
-        '!allowed.Contains(sid) && sid != "S-1-3-4"',
+        "if (!allowedOwners.Contains(owner))",
+        "!allowedWriters.Contains(sid) &&",
+        '!(sid == "S-1-3-4" && allowedWriters.Contains(owner))',
         "GetReadOpenWithoutWriteSharingError(path)",
     ):
         assert needle in kept, needle
     # A writer handle on the installed hook refused Copy-Item and
     # Get-FileHash, so the repair that would replace it failed (1603).
-    assert "$liveHash = Copy-DefenseClawHookPreimage -Path $Layout.HookPath -Destination $preimage" in publish_body
+    # Review M3: standalone checks that read against the digest the
+    # deployment records and records that digest, never the copy's own;
+    # Secure Client keeps the earlier two-read comparison.
+    assert "$preimageSHA256 = Copy-DefenseClawRecordedHookPreimage -Layout $Layout -Destination $preimage" in publish_body
+    assert "$Intent['early_hook_preimage_sha256'] = $preimageSHA256" in publish_body
+    assert "copiedHash.ToLowerInvariant()" not in publish_body
+    secure_client = publish_body[publish_body.index("    else {\n        Microsoft.PowerShell.Management\\Copy-Item"):]
+    assert "Get-FileHash -LiteralPath $Layout.HookPath" in secure_client
     preimage = _function_body(module, "Copy-DefenseClawHookPreimage")
     assert "([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))" in preimage
+    recorded = _function_body(module, "Copy-DefenseClawRecordedHookPreimage")
+    assert "Get-DefenseClawRecordedHookSHA256 -Layout $Layout" in recorded
+    assert "[IO.Path]::Combine([string]$Layout.GuardianDirectory, 'payload', 'defenseclaw-hook.exe')" in recorded
+    assert recorded.index("$live -ceq $expected") < recorded.index("$guardianDigest -ceq $expected") < recorded.index("throw (\"refusing to replace")
+    # The check runs before the intent, the directory and any service change.
+    transaction = _function_body(module, "New-DefenseClawTransaction")
+    preflight = transaction.index("Assert-DefenseClawHookPreimageAvailable")
+    assert transaction.index("Assert-DefenseClawHookNotHeld -Layout $Layout") < preflight
+    assert preflight < transaction.index("New-DefenseClawDirectory -Path $directory")
+    assert preflight < transaction.index("Set-DefenseClawServiceStartMode")
+    assert preflight < transaction.index("Stop-DefenseClawService -Name $GuardianServiceName")
     probe = native[native.index("public static int GetReadOpenWithoutWriteSharingError(") :]
     probe = probe[: probe.index("\n        }\n")]
     assert "CreateFileW(path, GENERIC_READ,\n                FILE_SHARE_READ | FILE_SHARE_DELETE," in probe
@@ -161,7 +180,7 @@ $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
-foreach ($name in @('Copy-DefenseClawHookPreimage', 'Publish-DefenseClawEarlyHook', 'Assert-DefenseClawEarlyHookPublished', 'Restore-DefenseClawEarlyHook', 'Get-DefenseClawEarlyHookField', 'Hold-DefenseClawEarlyHookGuard', 'Restore-DefenseClawSnapshotHookAfterActivation', 'Wait-DefenseClawPriorHookCalls', 'Get-DefenseClawPriorHookProcessIds', 'Assert-DefenseClawInstalledHookCallsEnded', 'Assert-DefenseClawHookNotHeld', 'Wait-DefenseClawServiceProcessExit', 'Test-DefenseClawProcessIdentityRunning', 'Format-DefenseClawSetupAction', 'Format-DefenseClawRerunStep')) {
+foreach ($name in @('Copy-DefenseClawHookPreimage', 'Copy-DefenseClawRecordedHookPreimage', 'Assert-DefenseClawHookPreimageAvailable', 'Publish-DefenseClawEarlyHook', 'Assert-DefenseClawEarlyHookPublished', 'Restore-DefenseClawEarlyHook', 'Get-DefenseClawEarlyHookField', 'Hold-DefenseClawEarlyHookGuard', 'Restore-DefenseClawSnapshotHookAfterActivation', 'Wait-DefenseClawPriorHookCalls', 'Get-DefenseClawPriorHookProcessIds', 'Assert-DefenseClawInstalledHookCallsEnded', 'Assert-DefenseClawHookNotHeld', 'Wait-DefenseClawServiceProcessExit', 'Test-DefenseClawProcessIdentityRunning', 'Format-DefenseClawSetupAction', 'Format-DefenseClawRerunStep')) {
     $definition = $ast.Find({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -183,6 +202,10 @@ function Install-DefenseClawSourceDescriptor {
     Copy-Item -LiteralPath $Source.path -Destination $Destination -Force
 }
 function Test-DefenseClawStandaloneProfile { return $true }
+# The digest the deployment metadata records for the installed hook
+# (hashes.hook); set from the hook the case starts with.
+$script:recordedHook = ''
+function Get-DefenseClawRecordedHookSHA256 { param([hashtable]$Layout) return [string]$script:recordedHook }
 function Assert-DefenseClawDescendant { param([string]$Path, [string]$Root, [string]$Label) return $Path }
 function Write-DefenseClawLifecyclePhase {
     param([string]$Stage)
@@ -260,9 +283,10 @@ $hook = Join-Path $bin 'defenseclaw-hook.exe'
 $new = Join-Path $Scratch 'new-hook.exe'
 Set-Content -LiteralPath $hook -Value 'hook-1.0.2' -NoNewline
 Set-Content -LiteralPath $new -Value 'hook-1.0.4' -NoNewline
+$script:recordedHook = (Get-FileHash -LiteralPath $hook -Algorithm SHA256).Hash.ToLowerInvariant()
 # An authenticated source descriptor carries the digest it was admitted by.
 $newSource = @{ path = $new; sha256 = (Get-FileHash -LiteralPath $new -Algorithm SHA256).Hash }
-$layout = @{ HookPath = $hook; PendingPath = (Join-Path $Scratch 'pending.json'); StateRoot = $Scratch }
+$layout = @{ HookPath = $hook; PendingPath = (Join-Path $Scratch 'pending.json'); StateRoot = $Scratch; GuardianDirectory = (Join-Path $Scratch 'hook-guardian') }
 $intent = [ordered]@{ schema_version = 1; phase = 'quiescing' }
 $result = [ordered]@{ case = $Case; threw = '' }
 try {
@@ -274,6 +298,8 @@ try {
             $result.hook = Get-Content -LiteralPath $hook -Raw
             $result.guard = Get-Content -LiteralPath $intent['early_hook_guard_copy'] -Raw
             $result.pending = (Get-Content -LiteralPath $layout.PendingPath -Raw | ConvertFrom-Json).early_hook_preimage
+            $result.intent_sha256 = $intent['early_hook_preimage_sha256']
+            $result.recorded = $script:recordedHook
             # Recovery reads the intent back from pending.json.
             $read = Get-Content -LiteralPath $layout.PendingPath -Raw | ConvertFrom-Json
             Restore-DefenseClawEarlyHook -Layout $layout -Intent $read -TransactionDirectory $transaction
@@ -399,6 +425,37 @@ try {
             $result.before = @(Get-DefenseClawPriorHookProcessIds -HookPath (Join-Path $bin $image) -StartedBefore ([DateTime]::Now)) -contains $self.Id
             $result.after = @(Get-DefenseClawPriorHookProcessIds -HookPath (Join-Path $bin $image) -StartedBefore $self.StartTime.AddSeconds(-1)) -contains $self.Id
         }
+        'drifted-guardian' {
+            # Review M3: the installed hook has other bytes than the
+            # deployment records (a user wrote them): the guardian's
+            # protected copy is the rollback copy.
+            Set-Content -LiteralPath $hook -Value 'user-bytes' -NoNewline
+            New-Item -ItemType Directory -Path (Join-Path $layout.GuardianDirectory 'payload') -Force | Out-Null
+            Set-Content -LiteralPath ([IO.Path]::Combine($layout.GuardianDirectory, 'payload', 'defenseclaw-hook.exe')) -Value 'hook-1.0.2' -NoNewline
+            $result.preimage = Publish-DefenseClawEarlyHook -Layout $layout -Source $newSource -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive
+            $result.preimage_bytes = Get-Content -LiteralPath $result.preimage -Raw
+            $result.intent_sha256 = $intent['early_hook_preimage_sha256']
+            $result.recorded = $script:recordedHook
+            $result.hook = Get-Content -LiteralPath $hook -Raw
+            Restore-DefenseClawEarlyHook -Layout $layout -Intent $intent -TransactionDirectory $transaction
+            $result.restored = Get-Content -LiteralPath $hook -Raw
+        }
+        { $_ -in 'drifted-refused', 'preflight-refused' } {
+            Set-Content -LiteralPath $hook -Value 'user-bytes' -NoNewline
+            try {
+                if ($Case -eq 'preflight-refused') {
+                    Assert-DefenseClawHookPreimageAvailable -Layout $layout -Source $newSource -PriorDeploymentActive
+                }
+                else {
+                    [void](Publish-DefenseClawEarlyHook -Layout $layout -Source $newSource -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive)
+                }
+            }
+            finally {
+                $result.hook = Get-Content -LiteralPath $hook -Raw
+                $result.preimage_left = Test-Path -LiteralPath (Join-Path $transaction 'early-hook.bak')
+                $result.intent_keys = @($intent.Keys)
+            }
+        }
         'foreign-preimage' {
             $intent['early_hook_preimage'] = (Join-Path $Scratch 'elsewhere.exe')
             Set-Content -LiteralPath $intent['early_hook_preimage'] -Value 'attacker' -NoNewline
@@ -428,6 +485,8 @@ $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tok
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
 foreach ($name in @(
         'Copy-DefenseClawHookPreimage',
+        'Copy-DefenseClawRecordedHookPreimage',
+        'Assert-DefenseClawHookPreimageAvailable',
         'Publish-DefenseClawEarlyHook',
         'Assert-DefenseClawEarlyHookPublished',
         'Hold-DefenseClawEarlyHookGuard',
@@ -471,6 +530,8 @@ function Resolve-DefenseClawFullPath {
 function Assert-DefenseClawTrustedSource { param([string]$Path, [string]$Label) return $Path }
 function Assert-DefenseClawNoReparsePath { param([string]$Path, [switch]$AllowMissingLeaf) }
 function Test-DefenseClawStandaloneProfile { return $true }
+$script:recordedHook = ''
+function Get-DefenseClawRecordedHookSHA256 { param([hashtable]$Layout) return [string]$script:recordedHook }
 function Write-DefenseClawJsonAtomic {
     param($Value, [string]$Path)
     ($Value | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $Path -Encoding utf8
@@ -501,6 +562,7 @@ $staged = Join-Path $stage 'defenseclaw-hook.exe'
 $hook = Join-Path $bin 'defenseclaw-hook.exe'
 Set-Content -LiteralPath $staged -Value 'hook-1.0.4' -NoNewline
 Set-Content -LiteralPath $hook -Value 'hook-1.0.2' -NoNewline
+$script:recordedHook = Get-TestSHA256 $hook
 $swapped = Join-Path $Scratch 'swapped.bin'
 Set-Content -LiteralPath $swapped -Value 'swapped' -NoNewline
 $script:DefenseClawAllowedSignerSHA256 = @()
@@ -518,7 +580,7 @@ switch ($Case) {
     }
     'hook-swapped' { $script:SwapLeaf = 'defenseclaw-hook.exe' }
 }
-$layout = @{ HookPath = $hook; PendingPath = (Join-Path $Scratch 'pending.json'); StateRoot = $Scratch }
+$layout = @{ HookPath = $hook; PendingPath = (Join-Path $Scratch 'pending.json'); StateRoot = $Scratch; GuardianDirectory = (Join-Path $Scratch 'hook-guardian') }
 $intent = [ordered]@{ schema_version = 1; phase = 'quiescing' }
 $result = [ordered]@{ case = $Case; threw = ''; pin = (Get-TestSHA256 $staged) }
 try {
@@ -585,6 +647,38 @@ def test_a_failed_snapshot_puts_the_prior_hook_back(tmp_path: Path) -> None:
     result = _run(tmp_path, "snapshot-failure")
     assert result["threw"] == "", result
     assert result["restored"] == "hook-1.0.2", result
+
+
+def test_the_rollback_copy_is_checked_against_the_recorded_digest(tmp_path: Path) -> None:
+    """GAP-0656 review M3: the digest recorded as the previous hook is the
+    deployment's, not the copy's own."""
+    result = _run(tmp_path, "publish")
+    assert result["threw"] == "", result
+    assert result["intent_sha256"] == result["recorded"], result
+
+
+def test_a_hook_that_is_not_the_recorded_one_is_never_the_rollback_copy(tmp_path: Path) -> None:
+    """GAP-0656 review M3: bytes a user wrote into the hook (or a writer
+    changed during the copy) are refused as the preimage; the guardian's
+    protected copy, which has the recorded digest, is used, and the rollback
+    restores the recorded bytes."""
+    result = _run(tmp_path, "drifted-guardian")
+    assert result["threw"] == "", result
+    assert result["preimage_bytes"] == "hook-1.0.2", result
+    assert result["intent_sha256"] == result["recorded"], result
+    assert result["hook"] == "hook-1.0.4", result
+    assert result["restored"] == "hook-1.0.2", result
+
+
+@pytest.mark.parametrize("case", ["drifted-refused", "preflight-refused"])
+def test_a_drifted_hook_without_a_matching_guardian_copy_stops_the_run_first(tmp_path: Path, case: str) -> None:
+    result = _run(tmp_path, case)
+    assert result["threw"].startswith("refusing to replace the installed hook: "), result
+    assert "Nothing was stopped or changed" in result["threw"], result
+    assert result["hook"] == "user-bytes", result
+    assert result["preimage_left"] is False, result
+    assert "early_hook_preimage" not in result["intent_keys"], result
+    assert not any(e.startswith("publish:") for e in result["events"]), result
 
 
 def test_recovery_republishes_closed_hook_until_restored_gateway_is_ready(tmp_path: Path) -> None:

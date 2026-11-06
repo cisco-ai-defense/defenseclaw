@@ -2047,10 +2047,14 @@ namespace $nativeNamespace
 
         // GAP-0656 review M2 (the g582 trust class): "" when path is an object
         // Setup could have made, otherwise what is wrong with it: more than
-        // one name, an owner or a writer outside trusted (OWNER RIGHTS counts
-        // as the owner), a null or unreadable access list, or a handle open
-        // for writing. Deny and inherit-only entries grant nothing here.
-        public static string GetKeptFileDrift(string path, string[] trusted)
+        // one name, an owner outside owners or a writer outside writers
+        // (OWNER RIGHTS counts as the owner, so it may write only when the
+        // owner is a trusted writer), a null or unreadable access list, or a
+        // handle open for writing. Deny and inherit-only entries grant
+        // nothing here. As in Assert-DefenseClawStandaloneContentTrusted
+        // (GAP-0603), the account Setup runs as is trusted as an owner only,
+        // never as a writer (review L4).
+        public static string GetKeptFileDrift(string path, string[] owners, string[] writers)
         {
             const int WRITE_LIKE = 0x00000002 | 0x00000004 | 0x00000010 | 0x00000040 |
                 0x00000100 | 0x00010000 | 0x00040000 | 0x00080000 |
@@ -2058,14 +2062,18 @@ namespace $nativeNamespace
             uint links = GetRegularFileLinkCountNoFollow(path);
             if (links != 1)
                 return "it has " + links.ToString(System.Globalization.CultureInfo.InvariantCulture) + " names (hard links)";
-            HashSet<string> allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (string sid in trusted)
+            HashSet<string> allowedOwners = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string sid in owners)
                 if (!String.IsNullOrEmpty(sid))
-                    allowed.Add(sid);
+                    allowedOwners.Add(sid);
+            HashSet<string> allowedWriters = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string sid in writers)
+                if (!String.IsNullOrEmpty(sid))
+                    allowedWriters.Add(sid);
             System.Security.AccessControl.RawSecurityDescriptor descriptor =
                 new System.Security.AccessControl.RawSecurityDescriptor(GetFileSecurityDescriptor(path), 0);
             string owner = descriptor.Owner == null ? "" : descriptor.Owner.Value;
-            if (!allowed.Contains(owner))
+            if (!allowedOwners.Contains(owner))
                 return "its owner " + (owner.Length == 0 ? "(none)" : owner) +
                     " is not SYSTEM, Administrators, TrustedInstaller or the account Setup runs as";
             if (descriptor.DiscretionaryAcl == null)
@@ -2084,7 +2092,8 @@ namespace $nativeNamespace
                 if (known == null)
                     return "its access list has an entry of type " + type.ToString();
                 string sid = known.SecurityIdentifier.Value;
-                if ((known.AccessMask & WRITE_LIKE) != 0 && !allowed.Contains(sid) && sid != "S-1-3-4")
+                if ((known.AccessMask & WRITE_LIKE) != 0 && !allowedWriters.Contains(sid) &&
+                    !(sid == "S-1-3-4" && allowedWriters.Contains(owner)))
                     return "the access entry for " + sid + " can change it";
             }
             int open = GetReadOpenWithoutWriteSharingError(path);
@@ -9399,9 +9408,11 @@ function Get-DefenseClawKeptFileDrift {
         GAP-0656 review M2 (the g582 trust class): Install-DefenseClawFileAtomic
         -SkipIfContentMatches keeps a standalone file that already has the
         replacement's bytes only when its object is one Setup could have made:
-        exactly one name, an owner and every writer among SYSTEM,
-        Administrators, TrustedInstaller and the account Setup runs as, and no
-        handle open for writing (an open for reading that shares only read and
+        exactly one name, an owner among SYSTEM, Administrators,
+        TrustedInstaller and the account Setup runs as, every writer among
+        SYSTEM, Administrators and TrustedInstaller (the account Setup runs
+        as is an owner only, as in Assert-DefenseClawStandaloneContentTrusted;
+        review L4), and no handle open for writing (an open for reading that shares only read and
         delete, as a program start opens the file, succeeds). Returns '' for
         such a file, otherwise what is wrong with it (NativeSecurity
         GetKeptFileDrift). A file that cannot be inspected counts as drifted:
@@ -9409,14 +9420,17 @@ function Get-DefenseClawKeptFileDrift {
     #>
     param([Parameter(Mandatory)][string]$Path)
     $native = Initialize-DefenseClawNativeSecurity
-    $trusted = [string[]]@(
+    $writers = [string[]]@(
         $script:SystemSID,
         $script:AdministratorsSID,
-        $script:TrustedInstallerSID,
+        $script:TrustedInstallerSID
+    )
+    $owners = [string[]]@(
+        $writers
         [string][Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     )
     try {
-        return [string]$native::GetKeptFileDrift($Path, $trusted)
+        return [string]$native::GetKeptFileDrift($Path, $owners, $writers)
     }
     catch {
         $failure = $_.Exception
@@ -16317,6 +16331,13 @@ function New-DefenseClawTransaction {
         # there either, so the transaction stayed pending with the guardian
         # and enumerator stopped. It is found before anything changes.
         Assert-DefenseClawHookNotHeld -Layout $Layout
+        # GAP-0656 review M3: a hook that is not the recorded one, with no
+        # guardian copy that is, has no rollback copy that can be checked.
+        # The run stops here, before the guardian or any service is touched.
+        Assert-DefenseClawHookPreimageAvailable `
+            -Layout $Layout `
+            -Source $EarlyHookSource `
+            -PriorDeploymentActive:$PriorDeploymentActive
     }
     $id = [Guid]::NewGuid().ToString('N')
     $directory = Assert-DefenseClawDescendant `
@@ -24545,15 +24566,17 @@ function Remove-DefenseClawCommittedManagedHooksTeardownJournal {
 
 function Copy-DefenseClawHookPreimage {
     <#
-        GAP-0656 review M2: copies the installed hook to Destination through
-        one read that shares read, write and delete, so a handle another
-        program holds open for writing does not stop the run, and returns the
-        SHA-256 of the bytes it copied. Publish-DefenseClawEarlyHook checks the
-        copy against it.
+        GAP-0656 review M2: reads the hook at Path through one read that
+        shares read, write and delete, so a handle another program holds open
+        for writing does not stop the run, copies it to Destination (nothing
+        is written when Destination is empty) and returns the SHA-256 of the
+        bytes it read. That digest is of the stream only: a caller compares it
+        with the digest the deployment records (Copy-DefenseClawRecordedHookPreimage,
+        review M3), never with the copy's own.
     #>
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][string]$Destination
+        [AllowEmptyString()][string]$Destination = ''
     )
     $sha = [Security.Cryptography.SHA256]::Create()
     $source = [IO.File]::Open(
@@ -24562,18 +24585,29 @@ function Copy-DefenseClawHookPreimage {
         [IO.FileAccess]::Read,
         ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
     try {
-        $target = [IO.File]::Open($Destination, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $target = if ([string]::IsNullOrEmpty($Destination)) {
+            $null
+        }
+        else {
+            [IO.File]::Open($Destination, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        }
         try {
             $buffer = [byte[]]::new(1048576)
             while (($read = $source.Read($buffer, 0, $buffer.Length)) -gt 0) {
-                $target.Write($buffer, 0, $read)
+                if ($null -ne $target) {
+                    $target.Write($buffer, 0, $read)
+                }
                 [void]$sha.TransformBlock($buffer, 0, $read, $null, 0)
             }
             [void]$sha.TransformFinalBlock($buffer, 0, 0)
-            $target.Flush($true)
+            if ($null -ne $target) {
+                $target.Flush($true)
+            }
         }
         finally {
-            $target.Dispose()
+            if ($null -ne $target) {
+                $target.Dispose()
+            }
         }
     }
     finally {
@@ -24585,6 +24619,123 @@ function Copy-DefenseClawHookPreimage {
     finally {
         $sha.Dispose()
     }
+}
+
+function Get-DefenseClawRecordedHookSHA256 {
+    <#
+        GAP-0656 review M3: the SHA-256 the deployment metadata records for
+        the installed hook (hashes.hook), the digest the guardian checks the
+        hook and its protected copy against. '' when none is recorded.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
+    if ($null -eq $metadata) { return '' }
+    $hashes = $metadata.PSObject.Properties['hashes']
+    if ($null -eq $hashes -or $null -eq $hashes.Value) { return '' }
+    $hook = $hashes.Value.PSObject.Properties['hook']
+    if ($null -eq $hook) { return '' }
+    $digest = ([string]$hook.Value).ToLowerInvariant()
+    if ($digest -cnotmatch '^[0-9a-f]{64}$') { return '' }
+    return $digest
+}
+
+function Copy-DefenseClawRecordedHookPreimage {
+    <#
+        GAP-0656 review M3 (the g582 trust class): puts at Destination the
+        bytes the deployment recorded for the installed hook, and returns
+        their digest, the recorded one. The installed hook is read through a
+        writer-tolerant read (Copy-DefenseClawHookPreimage), so the digest of
+        what that read streamed says nothing until it is compared with the
+        recorded digest: a hook a standard user rewrote, or that was read
+        while a writer changed it, must never become the rollback copy, which
+        a rollback or a recovery puts back as a fresh, trusted object. When
+        the installed hook does not have the recorded digest (or cannot be
+        read), the copy is the guardian's protected copy, taken only when it
+        has that digest. When neither does, this throws, so the run stops
+        with the prior release intact. Nothing is written when Destination
+        is empty (a check before anything is stopped).
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [AllowEmptyString()][string]$Destination = ''
+    )
+    $expected = Get-DefenseClawRecordedHookSHA256 -Layout $Layout
+    if ([string]::IsNullOrEmpty($expected)) {
+        throw ('refusing to replace the installed hook: the deployment metadata records no digest for it, so a rollback copy cannot be checked. Next step: for the installed release, run ' +
+            (Format-DefenseClawSetupAction -Action '/repair') + ', then ' + (Format-DefenseClawRerunStep -SameSetupCommand))
+    }
+    $write = -not [string]::IsNullOrEmpty($Destination)
+    $live = ''
+    $liveProblem = ''
+    try {
+        $live = (Copy-DefenseClawHookPreimage -Path $Layout.HookPath -Destination $Destination).ToLowerInvariant()
+    }
+    catch {
+        $liveProblem = $_.Exception.Message
+    }
+    if ($live -ceq $expected) {
+        if ($write) {
+            Assert-DefenseClawNoReparsePath -Path $Destination
+            $copied = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($copied -cne $expected) {
+                throw 'the installed hook changed while its preimage was copied'
+            }
+        }
+        return $expected
+    }
+    $guardian = [IO.Path]::Combine([string]$Layout.GuardianDirectory, 'payload', 'defenseclaw-hook.exe')
+    $guardianDigest = ''
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $guardian -PathType Leaf) {
+        Assert-DefenseClawNoReparsePath -Path $guardian
+        try {
+            $guardianDigest = (Copy-DefenseClawHookPreimage -Path $guardian -Destination $Destination).ToLowerInvariant()
+        }
+        catch {
+            $guardianDigest = ''
+        }
+    }
+    if ($guardianDigest -ceq $expected) {
+        if ($write) {
+            Assert-DefenseClawNoReparsePath -Path $Destination
+            $copied = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($copied -cne $expected) {
+                throw 'the guardian copy of the hook changed while its preimage was copied'
+            }
+        }
+        if ($write) {
+            $installed = if ($liveProblem) { "cannot be read ($liveProblem)" } else { "has sha256 $live" }
+            Write-DefenseClawLifecyclePhase -Stage (
+                "notice: the installed hook $installed, not the $expected the deployment records; " +
+                "its rollback copy is the guardian's protected copy (GAP-0656)")
+        }
+        return $expected
+    }
+    if ($write -and [IO.File]::Exists($Destination)) {
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+    }
+    $installed = if ($liveProblem) { "cannot be read ($liveProblem)" } else { "has sha256 $live" }
+    $protected = if ([string]::IsNullOrEmpty($guardianDigest)) { 'is missing or unreadable' } else { "has sha256 $guardianDigest" }
+    throw ("refusing to replace the installed hook: it $installed and the guardian's protected copy $protected, but the deployment records $expected, so no rollback copy can be checked. Nothing was stopped or changed. Next step: let the installed release's guardian restore its hook (about 5 seconds), or, for the installed release, run " + (Format-DefenseClawSetupAction -Action '/repair') + ", then " + (Format-DefenseClawRerunStep -SameSetupCommand))
+}
+
+function Assert-DefenseClawHookPreimageAvailable {
+    <#
+        GAP-0656 review M3: before the transaction stops any service, checks
+        that Publish-DefenseClawEarlyHook can take a rollback copy that has
+        the recorded digest (Copy-DefenseClawRecordedHookPreimage with no
+        destination), under the same conditions as the publish.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [AllowNull()][hashtable]$Source,
+        [switch]$PriorDeploymentActive
+    )
+    if ($null -eq $Source -or -not $PriorDeploymentActive -or
+        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.HookPath -PathType Leaf)) {
+        return
+    }
+    Assert-DefenseClawNoReparsePath -Path $Layout.HookPath
+    [void](Copy-DefenseClawRecordedHookPreimage -Layout $Layout)
 }
 
 function Publish-DefenseClawEarlyHook {
@@ -24609,17 +24760,28 @@ function Publish-DefenseClawEarlyHook {
     }
     Assert-DefenseClawNoReparsePath -Path $Layout.HookPath
     $preimage = Microsoft.PowerShell.Management\Join-Path $TransactionDirectory 'early-hook.bak'
-    # GAP-0656 review M2: another program can hold the installed hook open
-    # for writing (sharing read and delete); every start of it then fails.
-    # Copy-Item and Get-FileHash refuse such a file, so the run that would
-    # replace it failed (1603) and left it in place. The preimage is read
-    # with read, write and delete sharing; the swap below then moves the
-    # name to a fresh object (Install-DefenseClawFileAtomic).
-    $liveHash = Copy-DefenseClawHookPreimage -Path $Layout.HookPath -Destination $preimage
-    Assert-DefenseClawNoReparsePath -Path $preimage
-    $copiedHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $preimage -Algorithm SHA256).Hash
-    if (-not [string]::Equals($liveHash, $copiedHash, [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'the installed hook changed while its preimage was copied'
+    if (Test-DefenseClawStandaloneProfile) {
+        # GAP-0656 review M2: another program can hold the installed hook open
+        # for writing (sharing read and delete); every start of it then fails.
+        # Copy-Item and Get-FileHash refuse such a file, so the run that would
+        # replace it failed (1603) and left it in place. The preimage is read
+        # with read, write and delete sharing; the swap below then moves the
+        # name to a fresh object (Install-DefenseClawFileAtomic).
+        # Review M3: that read is checked against the digest the deployment
+        # records for the hook, not against itself, and a hook that does not
+        # match is not the rollback copy: the guardian's protected copy is,
+        # or the run throws before anything is stopped.
+        $preimageSHA256 = Copy-DefenseClawRecordedHookPreimage -Layout $Layout -Destination $preimage
+        Assert-DefenseClawNoReparsePath -Path $preimage
+    }
+    else {
+        Microsoft.PowerShell.Management\Copy-Item -LiteralPath $Layout.HookPath -Destination $preimage -Force
+        Assert-DefenseClawNoReparsePath -Path $preimage
+        $liveHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Layout.HookPath -Algorithm SHA256).Hash
+        $copiedHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $preimage -Algorithm SHA256).Hash
+        if (-not [string]::Equals($liveHash, $copiedHash, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'the installed hook changed while its preimage was copied'
+        }
     }
     # Keep a protected copy of this release's standalone hook for in-process
     # and crash recovery. Restoring the 1.0.2/1.0.3 image while SCM is down
@@ -24637,7 +24799,8 @@ function Publish-DefenseClawEarlyHook {
         if ($guardCopied -cne $guardSHA256) {
             throw 'the closed hook guard copy does not match its admitted source'
         }
-        $Intent['early_hook_preimage_sha256'] = $copiedHash.ToLowerInvariant()
+        # The recorded digest (review M3), never the copy's own.
+        $Intent['early_hook_preimage_sha256'] = $preimageSHA256
         $Intent['early_hook_guard_copy'] = $guardCopy
         $Intent['early_hook_guard_sha256'] = $guardSHA256
     }

@@ -14,6 +14,12 @@
 #     foreign owner, an access entry that lets Users write, and a handle open
 #     for writing that shares read and delete. While that handle is open every
 #     start fails with a sharing violation; after the swap starts succeed.
+#   - Setup's own account may own a kept file but not write it (review L4);
+#   - a healthy install keeps every payload file a repair rewrites with
+#     -SkipIfContentMatches, with no "is not kept" notice (review S7);
+#   - the rollback copy of the installed hook has the digest the deployment
+#     records, or is the guardian's protected copy with it, or the run throws
+#     before anything stops (review M3).
 # The fresh object is the release's bytes with one name and a trusted owner
 # and access list. Runs elevated in a disposable directory under Windows
 # PowerShell 5.1 and PowerShell 7; no service or machine root is touched.
@@ -50,6 +56,13 @@ try {
         $originalProfile = Get-DefenseClawEnterpriseProfile
         $native = Initialize-DefenseClawNativeSecurity
         $installFileSddl = 'O:BAG:SYD:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)'
+        # The scratch folder is protected like the install folder, so a fresh
+        # object inherits SYSTEM, Administrators and Users read only. Under a
+        # profile's temporary folder it would inherit the elevated account's
+        # own full-control entry, which is a writer outside the trusted set
+        # (review L4) and has nothing to do with a real install.
+        [void]$native::SetPathSecurityDescriptorPrivilegedNoFollow(
+            $Root, 'O:BAG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)', $true)
         $build = [IO.Path]::Combine($Root, 'build.exe')
         [IO.File]::Copy([IO.Path]::Combine([Environment]::SystemDirectory, 'PING.EXE'), $build)
         $want = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $build -Algorithm SHA256).Hash
@@ -191,6 +204,188 @@ try {
             Install-DefenseClawFileAtomic -Source $build -Destination $hook -ExpectedSHA256 $want -SkipIfContentMatches
             Assert-SmokeFreshObject -Case 'handle' -Path $hook -Before $before
             $lines.Add("handle: a start while the writer held the hook failed: $blocked")
+
+            # Review L4: the account Setup runs as owns a kept file, as in
+            # Assert-DefenseClawStandaloneContentTrusted (GAP-0603), but is
+            # not a trusted writer. A foreign account stays refused.
+            $setupSid = [string][Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            if ($setupSid -in @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)) {
+                $lines.Add("setup account: skipped ($setupSid is a trusted writer)")
+            }
+            else {
+                $hook = New-SmokeHook -Name 'setup-owner' -Sddl "O:${setupSid}G:SYD:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)"
+                $drift = Get-DefenseClawKeptFileDrift -Path $hook
+                if (-not [string]::IsNullOrEmpty($drift)) {
+                    $failures.Add("setup-owner: Setup's own account as owner was reported: $drift")
+                }
+                $hook = New-SmokeHook -Name 'setup-writer' -Sddl "O:BAG:SYD:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301bf;;;${setupSid})"
+                $before = $native::GetFileIdentity($hook)
+                if ((Get-DefenseClawKeptFileDrift -Path $hook) -notlike "*${setupSid} can change it*") {
+                    $failures.Add("setup-writer: Setup's account with a write entry was not reported")
+                }
+                Install-DefenseClawFileAtomic -Source $build -Destination $hook -ExpectedSHA256 $want -SkipIfContentMatches
+                Assert-SmokeFreshObject -Case 'setup-writer' -Path $hook -Before $before
+            }
+
+            # Review S7: a healthy standalone install keeps every payload
+            # file a repair or an ensure writes with -SkipIfContentMatches
+            # (the payload loop, the config and manifest restores, the
+            # Cowork files), whatever access list its own stamp gives it: no
+            # "is not kept" notice and the same object. The stamps are the
+            # product's (Set-DefenseClawPathAcl, the kinds Set-DefenseClawManagedAcls
+            # gives each file).
+            $script:SmokePhases = [Collections.Generic.List[string]]::new()
+            function script:Write-DefenseClawLifecyclePhase { param([string]$Stage) $script:SmokePhases.Add($Stage) }
+            $gatewaySid = try {
+                Get-DefenseClawDeterministicServiceSID -ServiceName 'DefenseClawGateway'
+            }
+            catch {
+                'S-1-5-19'
+            }
+            $payloadDir = [IO.Path]::Combine($Root, 'payload', 'bin')
+            [void][IO.Directory]::CreateDirectory($payloadDir)
+            $payload = [ordered]@{
+                'defenseclaw-gateway.exe'     = 'ServiceInstallFile'
+                'defenseclaw-acp.exe'         = 'InstallFile'
+                'defenseclaw-hook.exe'        = 'InstallFile'
+                'defenseclaw-sensor-helper.exe' = 'InstallFile'
+                'defenseclaw.exe'             = 'InstallFile'
+                'defenseclaw-installer.exe'   = 'InstallFile'
+                'DefenseClawEnterprise.psm1'  = 'InstallFile'
+                'config.yaml'                 = 'ConfigFile'
+                'targets.yaml'                = 'AdminFile'
+            }
+            $identities = @{}
+            foreach ($name in $payload.Keys) {
+                $path = [IO.Path]::Combine($payloadDir, $name)
+                Install-DefenseClawFileAtomic -Source $build -Destination $path -ExpectedSHA256 $want
+                Set-DefenseClawPathAcl -Path $path -Kind $payload[$name] -GatewayServiceSID $gatewaySid
+                $identities[$name] = $native::GetFileIdentity($path)
+            }
+            foreach ($run in 1..2) {
+                foreach ($name in $payload.Keys) {
+                    $path = [IO.Path]::Combine($payloadDir, $name)
+                    Install-DefenseClawFileAtomic -Source $build -Destination $path -ExpectedSHA256 $want -SkipIfContentMatches
+                    Set-DefenseClawPathAcl -Path $path -Kind $payload[$name] -GatewayServiceSID $gatewaySid
+                }
+            }
+            foreach ($name in $payload.Keys) {
+                $after = $native::GetFileIdentity([IO.Path]::Combine($payloadDir, $name))
+                if ($after -cne $identities[$name]) {
+                    $failures.Add("payload ${name}: the healthy file was replaced by a repair (file ID $($identities[$name]) -> $after)")
+                }
+            }
+            $notKept = @($script:SmokePhases | Where-Object { $_ -like '*is not kept*' })
+            if ($notKept.Count -gt 0) {
+                $failures.Add("payload: a healthy install got 'is not kept' notices: $($notKept -join ' | ')")
+            }
+            if (@([IO.Directory]::GetFiles($payloadDir)).Count -ne $payload.Count) {
+                $failures.Add('payload: a repair left files beside the payload')
+            }
+            $lines.Add("payload: $($payload.Count) healthy files kept twice, $($notKept.Count) not-kept notices")
+
+            # Review M3 (the g582 trust class): the rollback copy of the
+            # installed hook has the digest the deployment records, or it is
+            # the guardian's protected copy with that digest, or the run
+            # throws before anything is stopped. The drifted hook is made as
+            # Administrator by writing other bytes into the file.
+            $script:SmokeRecorded = ''
+            function script:Get-DefenseClawRecordedHookSHA256 { param($Layout) return [string]$script:SmokeRecorded }
+            $recordedBytes = [Text.Encoding]::ASCII.GetBytes('recorded-hook-release-bytes')
+            $driftedBytes = [Text.Encoding]::ASCII.GetBytes('bytes-a-user-wrote-into-the-hook')
+            $recordedHash = ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($recordedBytes)) -replace '-', '').ToLowerInvariant()
+            function New-PreimageCase {
+                param([string]$Name, [byte[]]$HookBytes, [byte[]]$GuardianBytes)
+                $dir = [IO.Path]::Combine($Root, $Name)
+                $hookPath = [IO.Path]::Combine($dir, 'bin', 'defenseclaw-hook.exe')
+                $guardianDir = [IO.Path]::Combine($dir, 'hook-guardian')
+                [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($hookPath))
+                [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($guardianDir, 'payload'))
+                [IO.File]::WriteAllBytes($hookPath, $HookBytes)
+                if ($null -ne $GuardianBytes) {
+                    [IO.File]::WriteAllBytes([IO.Path]::Combine($guardianDir, 'payload', 'defenseclaw-hook.exe'), $GuardianBytes)
+                }
+                return @{
+                    Dir = $dir
+                    Hook = $hookPath
+                    Preimage = [IO.Path]::Combine($dir, 'early-hook.bak')
+                    Layout = @{ HookPath = $hookPath; GuardianDirectory = $guardianDir }
+                }
+            }
+            function Test-SmokeRefused {
+                param([scriptblock]$Action)
+                try { & $Action; return '' } catch { return $_.Exception.Message }
+            }
+            $script:SmokeRecorded = $recordedHash
+
+            # The installed hook has the recorded digest: it is the copy.
+            $case = New-PreimageCase -Name 'm3-match' -HookBytes $recordedBytes -GuardianBytes $recordedBytes
+            $script:SmokePhases.Clear()
+            $digest = Copy-DefenseClawRecordedHookPreimage -Layout $case.Layout -Destination $case.Preimage
+            if ($digest -cne $recordedHash -or
+                [Convert]::ToBase64String([IO.File]::ReadAllBytes($case.Preimage)) -cne [Convert]::ToBase64String($recordedBytes)) {
+                $failures.Add('m3-match: the preimage is not the recorded hook')
+            }
+            if (@($script:SmokePhases | Where-Object { $_ -like '*guardian*' }).Count -ne 0) {
+                $failures.Add('m3-match: the guardian copy was used for a matching hook')
+            }
+            Assert-DefenseClawHookPreimageAvailable -Layout $case.Layout -Source @{ path = $build } -PriorDeploymentActive
+
+            # Other bytes in the hook: refused as the preimage; the guardian
+            # copy is used, and the recorded digest is returned, not the
+            # digest of the other bytes.
+            $case = New-PreimageCase -Name 'm3-drift' -HookBytes $driftedBytes -GuardianBytes $recordedBytes
+            $script:SmokePhases.Clear()
+            $digest = Copy-DefenseClawRecordedHookPreimage -Layout $case.Layout -Destination $case.Preimage
+            if ($digest -cne $recordedHash) { $failures.Add("m3-drift: returned $digest, not the recorded $recordedHash") }
+            if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($case.Preimage)) -cne [Convert]::ToBase64String($recordedBytes)) {
+                $failures.Add('m3-drift: the preimage is not the guardian copy of the recorded hook')
+            }
+            if (@($script:SmokePhases | Where-Object { $_ -like "*protected copy*" }).Count -ne 1) {
+                $failures.Add('m3-drift: no notice that the guardian copy was used')
+            }
+            if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($case.Hook)) -cne [Convert]::ToBase64String($driftedBytes)) {
+                $failures.Add('m3-drift: the installed hook was changed')
+            }
+
+            # A writer holds the hook and has written other bytes into it: the
+            # tolerant read copies them, and the digest check refuses them.
+            $case = New-PreimageCase -Name 'm3-writer' -HookBytes $recordedBytes -GuardianBytes $recordedBytes
+            $writer = [IO.File]::Open($case.Hook, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]'Read, Delete')
+            $handles.Add($writer)
+            $writer.Write($driftedBytes, 0, $driftedBytes.Length)
+            $writer.Flush($true)
+            $digest = Copy-DefenseClawRecordedHookPreimage -Layout $case.Layout -Destination $case.Preimage
+            if ($digest -cne $recordedHash -or
+                [Convert]::ToBase64String([IO.File]::ReadAllBytes($case.Preimage)) -cne [Convert]::ToBase64String($recordedBytes)) {
+                $failures.Add('m3-writer: the bytes a writer put into the hook became the preimage')
+            }
+
+            # No guardian copy, or one that is not the recorded release, or no
+            # recorded digest: refused, nothing written, and the check that
+            # runs before any service stops refuses too.
+            foreach ($shape in @(
+                    @{ Name = 'm3-noguardian'; Guardian = $null; Recorded = $recordedHash },
+                    @{ Name = 'm3-badguardian'; Guardian = $driftedBytes; Recorded = $recordedHash },
+                    @{ Name = 'm3-norecord'; Guardian = $recordedBytes; Recorded = '' })) {
+                $case = New-PreimageCase -Name $shape.Name -HookBytes $driftedBytes -GuardianBytes $shape.Guardian
+                $script:SmokeRecorded = $shape.Recorded
+                $message = Test-SmokeRefused { Copy-DefenseClawRecordedHookPreimage -Layout $case.Layout -Destination $case.Preimage }
+                if ($message -notlike 'refusing to replace the installed hook*') {
+                    $failures.Add("$($shape.Name): the drifted hook was accepted as a preimage ($message)")
+                }
+                if ([IO.File]::Exists($case.Preimage)) {
+                    $failures.Add("$($shape.Name): a preimage file was left")
+                }
+                $message = Test-SmokeRefused { Assert-DefenseClawHookPreimageAvailable -Layout $case.Layout -Source @{ path = $build } -PriorDeploymentActive }
+                if ($message -notlike 'refusing to replace the installed hook*') {
+                    $failures.Add("$($shape.Name): the check before the services stop did not refuse ($message)")
+                }
+                if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($case.Hook)) -cne [Convert]::ToBase64String($driftedBytes)) {
+                    $failures.Add("$($shape.Name): the installed hook was changed")
+                }
+            }
+            $lines.Add('m3: matching hook copied; drifted hook refused, guardian copy used; neither: refused before anything stops')
         }
         finally {
             foreach ($handle in $handles) { $handle.Dispose() }
