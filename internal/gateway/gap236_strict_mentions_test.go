@@ -24,6 +24,8 @@ func TestGAP236OrdinaryMentionsMoveToStrictProfile(t *testing.T) {
 		{"GAP-0496 spaced", `bash  -c 'ls -d */* | head -3'`, home, actionfacts.DialectPOSIX},
 		{"GAP-0496 env", `env bash -c 'ls -d */* | head -3'`, home, actionfacts.DialectPOSIX},
 		{"GAP-0496 native form", `bash -c "ls -d */* 2>/dev/null | head -3"`, home, actionfacts.DialectPOSIX},
+		{"GAP-0496 quoted head option", `bash -c 'ls -d */* | head "-3"'`, home, actionfacts.DialectPOSIX},
+		{"GAP-0496 quoted head number", `bash -c 'ls -d */* | head -n "3"'`, home, actionfacts.DialectPOSIX},
 		{"GAP-0548 quoted option", `t="-t $HOME/.ssh"; cp "$t" a.txt`, home + `\project`, actionfacts.DialectPOSIX},
 	} {
 		for _, tier := range []string{"default", "permissive", "strict"} {

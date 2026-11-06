@@ -59,7 +59,7 @@ func SSHKeyMentionGrade(command, cwd, home string) string {
 		if actionWindowsInvokedTextMention(scan.words, cwd, home, 0, false, memo) {
 			return ProtectedTargetDecision
 		}
-		check := func(word string, consumed bool) bool {
+		check := func(word, dir string, consumed bool) bool {
 			for _, candidate := range strings.FieldsFunc(word, func(r rune) bool {
 				return strings.ContainsRune(" \t\r\n'\"(),;|&<>{}=", r)
 			}) {
@@ -68,35 +68,37 @@ func SSHKeyMentionGrade(command, cwd, home string) string {
 					continue
 				}
 				if strings.ContainsAny(candidate, "*?[") {
-					if actionWindowsProtectedGlobReach(candidate, cwd, home) || actionWindowsDynamicKeyPath(candidate) {
+					if actionWindowsProtectedGlobReach(candidate, dir, home) || actionWindowsDynamicKeyPath(candidate) {
 						possible = true
 						if consumed && !readOnly {
 							return true
 						}
-						if !readOnly && runtime.GOOS == "windows" && actionWindowsGlobNamesKeyFile(candidate, cwd, home, memo) {
+						if !readOnly && runtime.GOOS == "windows" && actionWindowsGlobNamesKeyFile(candidate, dir, home, memo) {
 							return true
 						}
 					}
 					continue
 				}
-				if protected, _ := actionWindowsProtected(candidate, cwd, home, false); protected {
+				if protected, _ := actionWindowsProtected(candidate, dir, home, false); protected {
 					return true
 				}
-				if resolved, ok := actionWindowsPath(candidate, cwd, home); ok {
+				if resolved, ok := actionWindowsPath(candidate, dir, home); ok {
 					if actionWindowsLinkReachesKeyFile(resolved, home, memo) {
 						return true
 					}
-				} else if actionWindowsUnresolvedUnderSSH(candidate, cwd, home) || actionWindowsDynamicKeyPath(candidate) {
+				} else if actionWindowsUnresolvedUnderSSH(candidate, dir, home) || actionWindowsDynamicKeyPath(candidate) {
 					possible = true
 				}
 			}
 			return false
 		}
 		for _, word := range scan.words {
-			if check(word, false) {
+			if check(word, cwd, false) {
 				return ProtectedTargetDecision
 			}
 		}
+		effectiveCWD := cwd
+		var directoryStack []string
 		for _, span := range actionWindowsResolvedSpans(scan.words, cwd, home) {
 			consumed := len(span.words) > 0 && !actionWindowsTextStatement(span.words) &&
 				!actionKnownReadOnlyWindowsStatement(span.words)
@@ -105,10 +107,11 @@ func SSHKeyMentionGrade(command, cwd, home string) string {
 				consumed = true
 			}
 			for _, word := range span.words {
-				if check(word, consumed) {
+				if check(word, effectiveCWD, consumed) {
 					return ProtectedTargetDecision
 				}
 			}
+			actionWindowsAdvanceDirectory(span.words, home, &effectiveCWD, &directoryStack)
 		}
 	}
 	if possible {
@@ -163,7 +166,9 @@ func actionKnownPOSIXCopyTargets(command, cwd, home string) []string {
 	if !parsed {
 		return nil
 	}
-	values := actionValues{"HOME": home}
+	values := actionValues{"HOME": home, "PWD": cwd}
+	effectiveCWD := cwd
+	var directoryStack []string
 	var targets []string
 	for _, stmt := range file.Stmts {
 		call, ok := stmt.Cmd.(*syntax.CallExpr)
@@ -172,23 +177,18 @@ func actionKnownPOSIXCopyTargets(command, cwd, home string) []string {
 			values["HOME"] = home
 			continue
 		}
-		if len(call.Args) == 0 && len(call.Assigns) == 1 {
-			assignment := call.Assigns[0]
-			if assignment.Name != nil && assignment.Value != nil && !assignment.Append {
-				if value, known := actionWordValue(assignment.Value, values, cwd, home); known {
-					values[assignment.Name.Value] = value
-					continue
-				}
-			}
-		}
+		values["PWD"] = effectiveCWD
+		actionUpdateValues(stmt, values, effectiveCWD, home)
 		if len(call.Args) > 1 {
-			if target, known := actionPosixCopyVariableTarget(call, values, cwd, home); known {
-				targets = append(targets, target)
+			if target, known := actionPosixCopyVariableTarget(call, values, effectiveCWD, home); known {
+				if resolved, ok := actionWindowsPath(target, effectiveCWD, home); ok {
+					targets = append(targets, resolved)
+				}
 			} else if program, fixed := StaticWord(call.Args[0], home); fixed &&
 				(programBase(program) == "cp" || programBase(program) == "gcp") {
 				args := make([]string, 0, len(call.Args)-1)
 				for _, word := range call.Args[1:] {
-					value, known := actionWordValue(word, values, cwd, home)
+					value, known := actionWordValue(word, values, effectiveCWD, home)
 					if !known || strings.ContainsAny(value, "*?[]\x00 \t\n") {
 						args = nil
 						break
@@ -197,13 +197,14 @@ func actionKnownPOSIXCopyTargets(command, cwd, home string) []string {
 				}
 				if len(args) > 0 {
 					if parsed := cpOperands(args, makeStatic(len(args))); parsed.ok {
-						targets = append(targets, parsed.destination)
+						if resolved, ok := actionWindowsPath(parsed.destination, effectiveCWD, home); ok {
+							targets = append(targets, resolved)
+						}
 					}
 				}
 			}
 		}
-		clear(values)
-		values["HOME"] = home
+		actionPosixAdvanceDirectory(call, values, home, &effectiveCWD, &directoryStack)
 	}
 	return targets
 }
@@ -239,11 +240,22 @@ func actionReadOnlyNestedShellPattern(command, home string) bool {
 		return false
 	}
 	body := actionWordLiteralText(args[2])
-	if body == "" || strings.ContainsAny(body, "$`\\%!^\"'\r\n") {
+	if body == "" || strings.ContainsAny(body, "$`\\%!^'\r\n") {
+		return false
+	}
+	// A single-quoted outer word passes inner double quotes to bash
+	// literally. Other outer forms can reinterpret them before the child
+	// parser sees the body.
+	if strings.Contains(body, `"`) && (len(args[2].Parts) != 1 || !actionSingleQuotedWord(args[2])) {
 		return false
 	}
 	child, parsed := parseShell(body)
 	return parsed && actionKnownReadOnlyShell(child, home)
+}
+
+func actionSingleQuotedWord(word *syntax.Word) bool {
+	_, ok := word.Parts[0].(*syntax.SglQuoted)
+	return ok
 }
 
 // A complete native expansion can turn a pattern into a named disk target.

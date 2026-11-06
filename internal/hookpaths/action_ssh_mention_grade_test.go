@@ -12,6 +12,8 @@ func TestSSHKeyMentionGradeRoles(t *testing.T) {
 		{"display direct", "Write-Output @'\n.ssh/authorized_k*\n'@", PossibleTargetDecision},
 		{"writer consumes text", "$t = @'\n.ssh/authorized_k*\n'@; Add-Content -Path $t -Value k", ProtectedTargetDecision},
 		{"read-only Bash", `bash  -c 'ls -d */* | head -3'`, PossibleTargetDecision},
+		{"read-only Bash quoted option", `bash -c 'ls -d */* | head "-3"'`, PossibleTargetDecision},
+		{"read-only Bash quoted number", `bash -c 'ls -d */* | head -n "3"'`, PossibleTargetDecision},
 		{"read-only Bash discard", `bash -c "ls -d */* 2>/dev/null | head -3"`, PossibleTargetDecision},
 		{"read-only listing", `ls -d */* | head -3`, PossibleTargetDecision},
 		{"known file", `echo k >> .ssh/authorized_keys`, ProtectedTargetDecision},
@@ -20,6 +22,10 @@ func TestSSHKeyMentionGradeRoles(t *testing.T) {
 		{"direct copy destination", `cp -t "$HOME/.ssh" a.txt`, ProtectedTargetDecision},
 		{"project glob", `cp *.txt build/`, PossibleTargetDecision},
 		{"Copy-Item option", `Copy-Item -Recurse -Path .\src -Destination .\build`, PossibleTargetDecision},
+		{"possible then named directory write", `ls */*; cd .ssh; echo k >> authorized_keys`, ProtectedTargetDecision},
+		{"possible copy then named directory write", `Copy-Item -Recurse -Path .\src -Destination .\build; cd .ssh; Set-Content authorized_keys k`, ProtectedTargetDecision},
+		{"possible text then named directory write", "$t = @'\n.ssh/authorized_k*\n'@; Write-Output $t; cd .ssh; echo k >> authorized_keys", ProtectedTargetDecision},
+		{"known POSIX value after directory change", `t=authorized_keys; cd .ssh; cp a "$t"`, ProtectedTargetDecision},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if got := SSHKeyMentionGrade(row.command, home, home); got != row.want {

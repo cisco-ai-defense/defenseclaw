@@ -99,3 +99,45 @@ func TestGAP0548BalancedQuotedOptionAndSwitches(t *testing.T) {
 		}
 	}
 }
+
+func TestGAP236PossiblePrefixKeepsNamedWrite(t *testing.T) {
+	const home = `C:\Users\review`
+	for _, row := range []struct {
+		name, command, cwd string
+		dialect            actionfacts.Dialect
+	}{
+		{"listing", `ls */*; cd .ssh; echo k >> authorized_keys`, home, actionfacts.DialectPOSIX},
+		{"project glob", `cp *.txt build/; cd ../.ssh; echo k >> authorized_keys`, home + `\project`, actionfacts.DialectPOSIX},
+		{"config copy", `cp ~/.defenseclaw/conf*.yaml project/copy.yaml; cd .ssh; echo k >> authorized_keys`, home, actionfacts.DialectPOSIX},
+		{"copy switch redirect", `Copy-Item -Recurse -Path .\src -Destination .\build; cd .ssh; echo k >> authorized_keys`, home, actionfacts.DialectPowerShell},
+		{"copy switch writer", `Copy-Item -Recurse -Path .\src -Destination .\build; cd .ssh; Set-Content authorized_keys k`, home, actionfacts.DialectPowerShell},
+		{"text print", "$t = @'\n.ssh/authorized_k*\n'@; Write-Output $t; cd .ssh; echo k >> authorized_keys", home, actionfacts.DialectPowerShell},
+		{"known value", `t=authorized_keys; cd .ssh; cp a "$t"`, home, actionfacts.DialectPOSIX},
+		{"quoted child writer", `bash -c 'ls -d */* | head "-3"; cd .ssh; echo k >> authorized_keys'`, home, actionfacts.DialectPOSIX},
+	} {
+		for _, connector := range []string{"codex", "claudecode"} {
+			t.Run(row.name+"/"+connector, func(t *testing.T) {
+				if got := gap236BalancedAction(t, row.command, row.cwd, home, connector, row.dialect, false); got != "block" {
+					t.Errorf("verdict %s, want block", got)
+				}
+			})
+		}
+	}
+}
+
+func TestGAP0496QuotedHeadReadOnlyListing(t *testing.T) {
+	const home = `C:\Users\review`
+	for _, command := range []string{
+		`bash -c 'ls -d */* | head "-3"'`,
+		`bash -c 'ls -d */* | head -n "3"'`,
+		`env bash -c 'ls -d */* | head "-3"'`,
+	} {
+		for _, connector := range []string{"codex", "claudecode"} {
+			t.Run(command+"/"+connector, func(t *testing.T) {
+				if got := gap236BalancedAction(t, command, home, home, connector, actionfacts.DialectPOSIX, false); got != "allow" {
+					t.Errorf("verdict %s, want allow", got)
+				}
+			})
+		}
+	}
+}
