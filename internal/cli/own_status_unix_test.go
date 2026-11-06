@@ -38,7 +38,7 @@ func TestLauncherStatusShowsOwnState(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		root.SetOut(&stdout)
 		root.SetErr(&stderr)
-		code := executeLauncher(context.Background(), root, args)
+		code := executeLauncherInTest(t, root, args)
 		if len(ran) != 0 {
 			t.Fatalf("%v ran the gateway's %v", args, ran)
 		}

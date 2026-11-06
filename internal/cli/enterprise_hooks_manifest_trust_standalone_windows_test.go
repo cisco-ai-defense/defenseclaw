@@ -21,6 +21,7 @@ import (
 // trusted descriptor; only a trusted rewrite recovers it. The Secure Client
 // twin is TestEnterpriseHooksReconcileManagedUntrustedWriterOnManifest.
 func TestEnterpriseHookManifestTrustCheckStandaloneDrift(t *testing.T) {
+	requireAdministratorTestToken(t, "the product trusts only administrator-owned state folders; a standard user's test folder is untrusted by design")
 	skipIfLocalSystem(t, "LocalSystem owns its t.TempDir() tree, so the fixture cannot stand in for a file a standard account owns")
 	check := enterpriseHookManifestFileTrustCheck
 	originalRepair, originalGOOS := enterpriseHookManifestACLRepair, enterpriseHooksRuntimeGOOS

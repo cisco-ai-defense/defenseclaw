@@ -81,19 +81,11 @@ import { HealthMonitor } from "./health-monitor.js";
 
 const INSPECT_ACTIONS = new Set(["allow", "alert", "confirm", "block"]);
 const INSPECT_MODES = new Set(["action", "observe"]);
-const INSPECT_SEVERITIES = new Set([
-  "NONE",
-  "INFO",
-  "LOW",
-  "MEDIUM",
-  "HIGH",
-  "CRITICAL",
-]);
 
 type InspectVerdict = {
   action: "allow" | "alert" | "confirm" | "block";
-  raw_action?: "allow" | "alert" | "confirm" | "block";
-  severity: "NONE" | "INFO" | "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  raw_action?: string;
+  severity: string;
   reason: string;
   mode: "action" | "observe";
   approval_timeout_ms?: number;
@@ -101,17 +93,7 @@ type InspectVerdict = {
 
 function hasValidInspectActionContract(verdict: Record<string, unknown>): boolean {
   if (verdict.mode === "observe" && verdict.action !== "allow") return false;
-
-  const rawAction = verdict.raw_action;
-  if (rawAction === undefined) return true;
-  if (typeof rawAction !== "string" || !INSPECT_ACTIONS.has(rawAction)) {
-    return false;
-  }
-  if (verdict.mode === "observe" || rawAction === verdict.action) return true;
-
-  // The gateway may turn an unsupported native confirmation into an effective
-  // block after applyMode(), while retaining "confirm" as the raw decision.
-  return verdict.action === "block" && rawAction === "confirm";
+  return verdict.raw_action === undefined || typeof verdict.raw_action === "string";
 }
 
 function isInspectVerdict(value: unknown): value is InspectVerdict {
@@ -125,7 +107,7 @@ function isInspectVerdict(value: unknown): value is InspectVerdict {
     typeof verdict.mode === "string" &&
     INSPECT_MODES.has(verdict.mode) &&
     typeof verdict.severity === "string" &&
-    INSPECT_SEVERITIES.has(verdict.severity) &&
+    verdict.severity.length > 0 &&
     typeof verdict.reason === "string" &&
     hasValidInspectActionContract(verdict) &&
     (verdict.approval_timeout_ms === undefined ||
@@ -167,6 +149,12 @@ function unavailableVerdict(reason: string): InspectVerdict {
 
 function approvalSeverity(severity: string): "info" | "warning" | "critical" {
   return severity.toUpperCase() === "CRITICAL" ? "critical" : severity.toUpperCase() === "NONE" ? "info" : "warning";
+}
+
+function logInspectWarning(toolName: string, verdict: InspectVerdict): void {
+  if (verdict.action === "allow" && verdict.severity === "WARN") {
+    console.warn(`[defenseclaw] tool:${toolName} warning:${verdict.reason}`);
+  }
 }
 
 function approvalDescription(toolName: string, verdict: InspectVerdict): string {
@@ -512,6 +500,7 @@ export default function (api: DefenseClawPluginHost) {
       console.log(
         `[defenseclaw] message-tool verdict:${verdict.action} severity:${verdict.severity}`,
       );
+      logInspectWarning("message", verdict);
 
       if (verdict.action === "block" && verdict.mode === "action") {
         return { block: true, blockReason: `DefenseClaw: outbound blocked — ${verdict.reason}` };
@@ -533,6 +522,7 @@ export default function (api: DefenseClawPluginHost) {
     console.log(
       `[defenseclaw] tool:${event.toolName} verdict:${verdict.action} severity:${verdict.severity}`,
     );
+    logInspectWarning(event.toolName, verdict);
 
     if (verdict.action === "block" && verdict.mode === "action") {
       return { block: true, blockReason: `DefenseClaw: ${verdict.reason}` };

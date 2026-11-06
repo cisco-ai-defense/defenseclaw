@@ -63,13 +63,16 @@ export const LISTENER_PROOF_DEADLINE_MS = 2_000;
  * A deadline that expires only after pending I/O has had its turn: the
  * timer schedules the expiry with setImmediate, which runs after the poll
  * phase, so an event-loop stall cannot fire it ahead of a connect event or a
- * proof answer already in the socket buffer. Unref'd. Returns the cancel.
+ * proof answer already in the socket buffer. The timer is unref'd; the
+ * immediate stays ref'd, because an unref'd immediate does not wake the poll
+ * phase: it would run only at the next unrelated timer or I/O event, which
+ * in a quiet process can be the kernel's ~127 s connect timeout. Returns the
+ * cancel.
  */
 function deadlineTimer(ms: number, onExpire: () => void): () => void {
   let immediate: ReturnType<typeof setImmediate> | undefined;
   const timer = setTimeout(() => {
     immediate = setImmediate(onExpire);
-    immediate.unref?.();
   }, Math.max(0, ms));
   timer.unref?.();
   return () => {

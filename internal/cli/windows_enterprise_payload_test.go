@@ -32,6 +32,7 @@ const windowsEnterpriseRestrictedStagingHelperEnv = "DEFENSECLAW_TEST_RESTRICTED
 
 func TestWindowsEnterpriseEmbeddedPayloadStagingWithRestrictedEnvironment(t *testing.T) {
 	if os.Getenv(windowsEnterpriseRestrictedStagingHelperEnv) == "1" {
+		useTestTokenForStaging(t)
 		if _, present := os.LookupEnv("ProgramData"); present {
 			t.Fatal("restricted staging helper inherited ProgramData")
 		}
