@@ -1322,6 +1322,12 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				return true
 			}
 		}
+		if hookpaths.SharePath(target) {
+			if trustedShareKnownProtectedTarget(target, protectedPaths, isProtected) {
+				return true
+			}
+			return possible(target)
+		}
 		info, err := hookpaths.PathLstat(target)
 		if err != nil && !os.IsNotExist(err) {
 			if !hookpaths.ShareUnanswered(err) {
@@ -1702,6 +1708,53 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	for _, target := range patchTargets {
 		if writeTarget(target, false, false) {
 			return true
+		}
+	}
+	return false
+}
+
+// trustedShareKnownProtectedTarget checks reachable file and parent identity
+// while the share probe is pending. Each independent read can use the same
+// bounded answer window; a stalled file read does not hide a reachable parent.
+func trustedShareKnownProtectedTarget(target string, protectedPaths []string, isProtected func(string) bool) bool {
+	type answer struct {
+		info os.FileInfo
+		err  error
+	}
+	fileAnswer := make(chan answer, 1)
+	parentAnswer := make(chan answer, 1)
+	entryAnswer := make(chan answer, 1)
+	parent := filepath.Dir(target)
+	go func() {
+		info, err := hookpaths.PathStat(target)
+		fileAnswer <- answer{info, err}
+	}()
+	go func() {
+		info, err := hookpaths.PathStat(parent)
+		parentAnswer <- answer{info, err}
+	}()
+	go func() {
+		info, err := hookpaths.PathLstat(target)
+		entryAnswer <- answer{info, err}
+	}()
+	file, directory, entry := <-fileAnswer, <-parentAnswer, <-entryAnswer
+	for _, path := range protectedPaths {
+		if file.err == nil {
+			if protectedFile, err := hookpaths.PathStat(path); err == nil && os.SameFile(file.info, protectedFile) {
+				return true
+			}
+		}
+		if directory.err == nil && filepath.Base(target) == filepath.Base(path) {
+			if protectedDir, err := hookpaths.PathStat(filepath.Dir(path)); err == nil && os.SameFile(directory.info, protectedDir) {
+				return true
+			}
+		}
+	}
+	if entry.err == nil && entry.info.Mode()&os.ModeSymlink != 0 {
+		if link, err := hookpaths.PathReadlink(target); err == nil {
+			if filepath.IsAbs(link) && isProtected(link) || !filepath.IsAbs(link) && isProtected(filepath.Join(parent, link)) {
+				return true
+			}
 		}
 	}
 	return false

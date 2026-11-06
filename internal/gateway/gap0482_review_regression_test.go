@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 )
 
 // Run these with the slow-share overlay in testdata to model a share whose
@@ -270,5 +271,175 @@ func TestGAP0482SlowShareLinkChain(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGAP0482KnownAndOrdinaryShareLinks(t *testing.T) {
+	for _, row := range []struct {
+		name      string
+		depth     int
+		parent    bool
+		protected bool
+		slow80    bool
+	}{
+		{"ordinary-parent-2", 2, true, false, false},
+		{"ordinary-parent-2-selective-slow", 2, true, false, false},
+		{"ordinary-parent-20", 20, true, false, false},
+		{"protected-parent-20", 20, true, true, false},
+		{"protected-file-link-80ms", 1, false, true, true},
+		{"protected-hard-link-80ms", 0, false, true, true},
+		{"protected-file-link-120ms", 1, false, true, false},
+		{"protected-hard-link-120ms", 0, false, true, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			root := t.TempDir()
+			home, project := filepath.Join(root, "home"), filepath.Join(root, "project")
+			ordinaryDir := filepath.Join(root, "ordinary-dir")
+			for _, dir := range []string{filepath.Join(home, ".ssh"), project, ordinaryDir} {
+				if err := os.MkdirAll(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			keys := filepath.Join(home, ".ssh", "authorized_keys")
+			if err := os.WriteFile(keys, []byte("placeholder\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			ordinary := filepath.Join(ordinaryDir, "ordinary.txt")
+			if err := os.WriteFile(ordinary, []byte("notes\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			target := ""
+			if row.parent {
+				for i := row.depth - 1; i >= 0; i-- {
+					name := filepath.Join(project, "p"+strconv.Itoa(i))
+					destination := filepath.Join(project, "p"+strconv.Itoa(i+1))
+					if i == row.depth-1 {
+						destination = ordinaryDir
+						if row.protected {
+							destination = filepath.Join(home, ".ssh")
+						}
+					}
+					if err := os.Symlink(destination, name); err != nil {
+						t.Skipf("symlink unavailable: %v", err)
+					}
+				}
+				basename := "ordinary.txt"
+				if row.protected {
+					basename = "authorized_keys"
+				}
+				target = filepath.Join(project, "p0", basename)
+				t.Setenv("R482_DELAY_TARGET", target)
+				t.Setenv("R482_FAKE_SHARE_DELAY", "1")
+				if row.name == "ordinary-parent-2-selective-slow" {
+					t.Setenv("R482_SLOW_STEP", filepath.Join(project, "p1"))
+				}
+			} else {
+				target = filepath.Join(project, "ordinary.txt")
+				var err error
+				if row.depth == 0 {
+					err = os.Link(keys, target)
+				} else {
+					err = os.Symlink(keys, target)
+				}
+				if err != nil {
+					t.Skipf("link unavailable: %v", err)
+				}
+				if row.slow80 {
+					t.Setenv("R482_FAKE_SHARE_DELAY80", "1")
+				} else {
+					t.Setenv("R482_FAKE_SHARE_DELAY120", "1")
+				}
+			}
+			t.Setenv("R482_FAKE_SHARE", project)
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			payload := mustJSON(t, map[string]any{
+				"session_id": "g288-near", "hook_event_name": "PreToolUse", "tool_name": "Bash",
+				"tool_use_id": "toolu_g288_near", "cwd": project, "permission_mode": "default",
+				"tool_input": map[string]any{"command": "echo marker >> " + filepath.ToSlash(target)},
+			})
+			started := time.Now()
+			got := gap0482ProfileVerdict(t, payload, "default")
+			t.Logf("default verdict=%s elapsed=%v", got, time.Since(started))
+			want := "allow"
+			if row.protected {
+				want = "block"
+			}
+			if got != want {
+				t.Errorf("default verdict=%s, want %s", got, want)
+			}
+		})
+	}
+}
+
+func TestGAP0482PythonHardLinkSlowShare(t *testing.T) {
+	root := t.TempDir()
+	home, project := filepath.Join(root, "home"), filepath.Join(root, "project")
+	for _, dir := range []string{filepath.Join(home, ".ssh"), project} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	if err := os.WriteFile(keys, []byte("placeholder\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(project, "linked.txt")
+	if err := os.Link(keys, alias); err != nil {
+		t.Skipf("hardlink unavailable: %v", err)
+	}
+	t.Setenv("R482_FAKE_SHARE", project)
+	t.Setenv("R482_FAKE_SHARE_DELAY80", "1")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	code := `from pathlib import Path; p = Path.home() / '.ssh' / 'authorized_keys'; p = Path('linked.txt'); p.write_text('hello')`
+	payload := mustJSON(t, map[string]any{
+		"session_id": "g288-python-hardlink", "hook_event_name": "PreToolUse", "tool_name": "Bash",
+		"tool_use_id": "toolu_g288_python_hardlink", "cwd": project, "permission_mode": "default",
+		"tool_input": map[string]any{"command": "python3 -c " + strconv.Quote(code)},
+	})
+	got := gap0482ProfileVerdict(t, payload, "default")
+	t.Logf("default verdict=%s", got)
+	if got != "block" {
+		t.Errorf("protected hardlink allowed")
+	}
+}
+
+func TestGAP0482NestedSlowShareBudget(t *testing.T) {
+	root := t.TempDir()
+	home, project := filepath.Join(root, "home"), filepath.Join(root, "project")
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	dir := project
+	for i := 0; i < 16; i++ {
+		dir = filepath.Join(dir, "nested"+strconv.Itoa(i))
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := filepath.Join(dir, "ordinary.txt")
+	if err := os.WriteFile(target, []byte("notes\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("R482_FAKE_SHARE", project)
+	t.Setenv("R482_FAKE_SHARE_DELAY", "1")
+	t.Setenv("R482_DELAY_TARGET", target)
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	payload := mustJSON(t, map[string]any{
+		"session_id": "g288-nested", "hook_event_name": "PreToolUse", "tool_name": "Bash",
+		"tool_use_id": "toolu_g288_nested", "cwd": project, "permission_mode": "default",
+		"tool_input": map[string]any{"command": "echo marker >> " + filepath.ToSlash(target)},
+	})
+	start := time.Now()
+	got := gap0482ProfileVerdict(t, payload, "default")
+	elapsed := time.Since(start)
+	t.Logf("default verdict=%s elapsed=%v", got, elapsed)
+	if got != "allow" {
+		t.Errorf("ordinary nested share write blocked")
+	}
+	if elapsed >= time.Second {
+		t.Errorf("ordinary nested share answer exceeded one second: %v", elapsed)
 	}
 }
