@@ -948,7 +948,7 @@ func TestManagedGuardianOpenCodeAttackerSkipsTheImportPass(t *testing.T) {
 			writeOpenCodePortFile(t, homes[1002], victim.port) // the victim's file
 			writeOpenCodePortFile(t, homes[1003], victim.port) // another account names it too: a contest
 			writeOpenCodePortFile(t, homes[1001], victim.port) // mallory's copy
-			openCodeReadFails[1001] = true                    // linked, chmod 000, or a hung read
+			openCodeReadFails[1001] = true                     // linked, chmod 000, or a hung read
 			runOpenCodePortPass(t)
 			openCodeReadFails[1001] = false
 			for pass := 2; pass <= 4; pass++ {
