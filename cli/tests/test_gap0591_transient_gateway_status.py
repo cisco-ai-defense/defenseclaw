@@ -4,8 +4,9 @@ The proof is Linux-only by design (GAP-0591): a gateway started as a
 transient ``systemd --user`` unit has no PID file, and only Linux lets the
 CLI prove that no other account listens on the port (``/proc/net`` socket
 owners). Elsewhere a PID-file-less holder stays reported as a port holder.
-The proof itself is exercised on every OS through ``platform_name``; the
-end-to-end status checks run where the proof applies.
+The proof and its refusals are exercised on every OS by running it as on
+Linux (``platform_name``, or ``_as_on_linux`` for the status helpers); the
+end-to-end status checks with the real platform run where the proof applies.
 """
 
 from __future__ import annotations
@@ -70,6 +71,35 @@ def _proof_patches(cfg, *, report: dict, foreign_accounts: str = "") -> ExitStac
         )
     )
     return stack
+
+
+def _as_on_linux() -> ExitStack:
+    """Run the status helpers' listener proof as it runs on Linux, on any OS."""
+    original = cmd_doctor._trusted_gateway_listener
+
+    def linux_proof(cfg, **kwargs):
+        kwargs["platform_name"] = kwargs.get("platform_name") or "linux"
+        return original(cfg, **kwargs)
+
+    stack = ExitStack()
+    stack.enter_context(patch.object(cmd_doctor, "_trusted_gateway_listener", side_effect=linux_proof))
+    return stack
+
+
+def test_status_helpers_reach_the_linux_proof_on_every_os(tmp_path: Path) -> None:
+    # The control for the refusal tests below: with the Linux proof, this
+    # home's listener is trusted, so their refusals come from the proof.
+    cfg = _config(tmp_path)
+    client = MagicMock()
+    client.status.return_value = {
+        "runtime": {"pid": 4242, "data_dir": cfg.data_dir},
+        "health": {"connectors": [{"name": "claudecode", "state": "running"}]},
+    }
+    with _proof_patches(cfg, report={"running": True, "health": {}}), _as_on_linux():
+        assert cmd_doctor._foreign_gateway_port_holder(cfg) == ""
+        health = cmd_status._fetch_runtime_bound_health(client, cfg)
+    assert health is not None
+    assert health["pid"] == 4242
 
 
 @linux_only
@@ -153,7 +183,7 @@ def test_foreign_or_unhealthy_port_holder_is_not_reported_running(
 ) -> None:
     cfg = _config(tmp_path)
     client = MagicMock()
-    with _proof_patches(cfg, report=report, foreign_accounts=foreign_accounts):
+    with _proof_patches(cfg, report=report, foreign_accounts=foreign_accounts), _as_on_linux():
         assert "PID 4242" in cmd_doctor._foreign_gateway_port_holder(cfg)
         assert cmd_status._fetch_runtime_bound_health(client, cfg) is None
     client.status.assert_not_called()
@@ -166,14 +196,14 @@ def test_transient_gateway_authenticated_runtime_must_match_listener(tmp_path: P
         "runtime": {"pid": 4343, "data_dir": cfg.data_dir},
         "health": {"connectors": [{"name": "claudecode", "state": "running"}]},
     }
-    with _proof_patches(cfg, report={"running": True, "health": {}}):
+    with _proof_patches(cfg, report={"running": True, "health": {}}), _as_on_linux():
         assert cmd_status._fetch_runtime_bound_health(client, cfg) is None
 
 
 @pytest.mark.parametrize("endpoint", [None, "http://127.0.0.1:18790/health"])
 def test_transient_gateway_report_must_name_inspected_endpoint(tmp_path: Path, endpoint: str | None) -> None:
     cfg = _config(tmp_path)
-    with _proof_patches(cfg, report={"running": True, "endpoint": endpoint, "health": {}}):
+    with _proof_patches(cfg, report={"running": True, "endpoint": endpoint, "health": {}}), _as_on_linux():
         assert "PID 4242" in cmd_doctor._foreign_gateway_port_holder(cfg)
 
 
@@ -187,4 +217,4 @@ def test_transient_gateway_listener_pid_must_remain_stable(tmp_path: Path) -> No
             side_effect=[ListenerEvidence("ok", pid=4242), ListenerEvidence("ok", pid=4343)],
         ),
     ):
-        assert not cmd_doctor._trusted_gateway_listener(cfg).trusted
+        assert not cmd_doctor._trusted_gateway_listener(cfg, platform_name="linux").trusted
