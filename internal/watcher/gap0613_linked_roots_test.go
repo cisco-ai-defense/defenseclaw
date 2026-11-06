@@ -5,15 +5,54 @@ package watcher
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/fsnotify/fsnotify"
 )
+
+func TestGAP0613SharedRootCoverageKeepsAssetKindsSeparate(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Guardrail.Connector = "claudecode"
+	root := filepath.Join(t.TempDir(), "shared")
+	w := New(cfg, []string{root}, []string{root}, store, logger, nil, nil)
+	w.SetRootConnectors(map[string]string{root: "claudecode"})
+	w.SetRootConsumers([]RootConsumer{
+		{Kind: "skill", Path: root, Connector: "claudecode"},
+		{Kind: "skill", Path: root, Connector: "amp"},
+		{Kind: "plugin", Path: root, Connector: "claudecode"},
+	})
+	w.setRootCoverage("skill", root, errors.New("unavailable"))
+	w.setRootCoverage("plugin", root, errors.New("unavailable"))
+	issues := w.RootCoverageIssues()
+	if len(issues) != 2 || w.connectorForPath(filepath.Join(root, "ordinary")) != "claudecode" {
+		t.Fatalf("shared root coverage = %+v", issues)
+	}
+	for _, issue := range issues {
+		switch issue.Kind {
+		case "skill":
+			if !slices.Equal(issue.Connectors, []string{"claudecode", "amp"}) {
+				t.Errorf("skill consumers = %v", issue.Connectors)
+			}
+		case "plugin":
+			if !slices.Equal(issue.Connectors, []string{"claudecode"}) {
+				t.Errorf("plugin consumers = %v", issue.Connectors)
+			}
+		default:
+			t.Errorf("unexpected coverage issue = %+v", issue)
+		}
+	}
+	w.setRootCoverage("skill", root, nil)
+	if remaining := w.RootCoverageIssues(); len(remaining) != 1 || remaining[0].Kind != "plugin" {
+		t.Errorf("plugin root coverage after skill recovery = %+v", remaining)
+	}
+}
 
 func TestGAP0613LinkedAgentDirectoryAdmitsAndQuarantinesNewSkill(t *testing.T) {
 	if runtime.GOOS == "windows" {
