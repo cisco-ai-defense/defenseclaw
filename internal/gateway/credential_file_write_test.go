@@ -438,21 +438,43 @@ func TestCredentialFileWritesOutsideTheActiveHomeKeepTheirVerdict(t *testing.T) 
 	}
 }
 
-// TestCredentialFileCopiedIntoAnotherKeepsTheReadVerdict: a command that
-// reads one credential file and writes it into another (dd if=A of=B) keeps
-// the read rule's finding of A, and the write of B is the write leg's: it
-// alerts in balanced and permissive and blocks in strict. It is never weaker
-// than base 38197e3501, which alerts in balanced and strict and allows in
-// permissive (gx052 review M2; on the older base d37eafc351 these blocked
-// in balanced through the read rule taking B as its mutation).
+// credentialCrossCommandCopies are the ways an action reads credential file
+// from in one command and writes credential file to in another: a pipe,
+// &&, ;, ||, a subshell and a command substitution (gx052 review N1).
+func credentialCrossCommandCopies(from, to string) []string {
+	return []string{
+		"cat " + from + " | tee " + to,
+		"cat " + from + " | tee -a " + to,
+		"base64 " + from + " | tee " + to,
+		"cat " + from + " | base64 | base64 -d | tee " + to,
+		"cat " + from + " > /tmp/s && cp /tmp/s " + to,
+		"cat " + from + " > /tmp/s; cp /tmp/s " + to,
+		"cat " + from + " > /tmp/s || cp /tmp/s " + to,
+		"(cat " + from + ") | tee " + to,
+		"printf '%s' \"$(cat " + from + ")\" > " + to,
+	}
+}
+
+// TestCredentialFileCopiedIntoAnotherKeepsTheReadVerdict: an action that
+// reads one credential file and writes another keeps the read rule's
+// mutation proof, so the write leg never narrows what the read rule judged
+// before it existed (gx052 review M2, N1):
+//   - in one command (dd if=A of=B, absolute paths), base 38197e3501 alerts
+//     in balanced and strict and allows in permissive; head keeps the read
+//     finding, adds the leg, and alerts, alerts and blocks;
+//   - across commands of the same action (credentialCrossCommandCopies), and
+//     with ~ spellings, the CRITICAL read rule blocks in every profile, on
+//     base and head.
 func TestCredentialFileCopiedIntoAnotherKeepsTheReadVerdict(t *testing.T) {
 	pairs := []struct{ from, to, rule string }{
-		{".aws/credentials", ".git-credentials", "PATH-AWS-CREDS"},
-		{".aws/credentials", ".netrc", "PATH-AWS-CREDS"},
-		{".config/gh/hosts.yml", ".aws/credentials", "secrets.cloud_credential_read"},
-		{".git-credentials", ".aws/credentials", "PATH-GIT-CREDS"},
-		{".netrc", ".aws/credentials", "PATH-GIT-CREDS"}, // PATH-NETRC reports as its alias
-		{".ssh/id_ed25519", ".aws/credentials", "PATH-SSH-KEY"},
+		{"{H}/.aws/credentials", "{H}/.git-credentials", "PATH-AWS-CREDS"},
+		{"{H}/.aws/credentials", "{H}/.netrc", "PATH-AWS-CREDS"},
+		{"{H}/.config/gh/hosts.yml", "{H}/.aws/credentials", "secrets.cloud_credential_read"},
+		{"{H}/.git-credentials", "{H}/.aws/credentials", "PATH-GIT-CREDS"},
+		{"{H}/.netrc", "{H}/.aws/credentials", "PATH-GIT-CREDS"}, // PATH-NETRC reports as its alias
+		{"{H}/.ssh/id_ed25519", "{H}/.aws/credentials", "PATH-SSH-KEY"},
+		{"~/.git-credentials", "~/.netrc", "PATH-GIT-CREDS"},
+		{"/home/bob/.aws/credentials", "~/.aws/credentials", "PATH-AWS-CREDS"},
 	}
 	for _, profile := range []string{"default", "permissive", "strict"} {
 		for _, managed := range []bool{false, true} {
@@ -460,15 +482,22 @@ func TestCredentialFileCopiedIntoAnotherKeepsTheReadVerdict(t *testing.T) {
 				f := newCredentialFileFixture(t)
 				hook := newCredentialFileHook(t, f, profile, managed)
 				for _, pair := range pairs {
-					from, to := filepath.Join(f.home, pair.from), filepath.Join(f.home, pair.to)
-					for _, connector := range []string{"claudecode", "codex"} {
-						call := credentialFileHookCall{connector, "Bash", map[string]any{"command": "dd if=" + from + " of=" + to}}
-						got, out := hook.post(t, call)
-						want := credentialFileVerdict(profile, "HIGH")
-						if got != want || !strings.Contains(out, credentialFileWriteRule) ||
-							profile != "permissive" && !strings.Contains(out, pair.rule) {
-							t.Errorf("%s: decision %s, want %s with %s and the %s read finding: %.400s",
-								call, got, want, credentialFileWriteRule, pair.rule, out)
+					from, to := f.path(pair.from), f.path(pair.to)
+					commands := credentialCrossCommandCopies(from, to)
+					if strings.HasPrefix(from, f.home) && strings.HasPrefix(to, f.home) {
+						commands = append(commands, "dd if="+from+" of="+to)
+					}
+					for _, command := range commands {
+						want := "block"
+						if strings.HasPrefix(command, "dd ") {
+							want = credentialFileVerdict(profile, "HIGH")
+						}
+						for _, connector := range []string{"claudecode", "codex"} {
+							call := credentialFileHookCall{connector, "Bash", map[string]any{"command": command}}
+							got, out := hook.post(t, call)
+							if got != want || profile != "permissive" && !strings.Contains(out, pair.rule) {
+								t.Errorf("%s: decision %s, want %s with the %s read finding: %.400s", call, got, want, pair.rule, out)
+							}
 						}
 					}
 				}

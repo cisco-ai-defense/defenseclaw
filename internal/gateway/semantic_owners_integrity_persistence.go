@@ -2840,9 +2840,12 @@ func findingWithRuleID(findings []RuleFinding, ruleID string) bool {
 // credentialFileWriteLegJudgesWrite reports a write candidate of a
 // credential read rule that the rule leaves to its write leg: the rule has a
 // leg in credentialFileWriteLegs, the leg itself covers the path (the
-// active home), and the command reads no credential file. Every other write
-// keeps the read rule's own mutation proof, so the leg never narrows what
-// the read rule judged before it existed.
+// active home), and no command of the action reads a credential file. Every
+// other write keeps the read rule's own mutation proof, so the leg never
+// narrows what the read rule judged before it existed. The read may be in
+// any command of the action, as the write may (a pipe, &&, ;, ||, a
+// subshell, a command substitution): the hand-off is decided over the whole
+// action, never over the writing command alone (gx052 review N1).
 func credentialFileWriteLegJudgesWrite(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
@@ -2850,7 +2853,25 @@ func credentialFileWriteLegJudgesWrite(
 ) bool {
 	return credentialFileWriteLegOwnsReadRule(ruleID) &&
 		matchesActiveCredentialFileWrite(facts, candidate) &&
-		!commandReadsCredentialFile(facts, candidate.CommandID)
+		!actionReadsCredentialFile(facts)
+}
+
+// credentialReadIsMoveSource reports the read fact of a move source: mv
+// reads and deletes the file it moves. Moving a credential file is a write
+// of it (the leg judges the move away), not a copy of its content into
+// another file.
+func credentialReadIsMoveSource(facts actionfacts.Facts, read actionfacts.PathFact) bool {
+	command, ok := integrityCommandByID(facts, read.CommandID)
+	if !ok || !hasOperation(command, actionfacts.OperationMove) {
+		return false
+	}
+	for _, other := range facts.Paths {
+		if other.CommandID == read.CommandID && other.Access == actionfacts.PathAccessDelete &&
+			semanticPathValue(other) == semanticPathValue(read) {
+			return true
+		}
+	}
+	return false
 }
 
 // credentialFileWriteLegOwnsReadRule reports a read rule with a leg in
@@ -2878,12 +2899,15 @@ func credentialReadRuleIDs() []string {
 	return ids
 }
 
-// commandReadsCredentialFile reports a read, by the command commandID, of a
-// path any credential read rule matches, with the same matchers the trusted
-// disposition uses for those rules (any home, not only the active one).
-func commandReadsCredentialFile(facts actionfacts.Facts, commandID int64) bool {
+// actionReadsCredentialFile reports a read, by any executing command of the
+// action, of a path any credential read rule matches, with the same matchers
+// the trusted disposition uses for those rules (any home, not only the
+// active one).
+func actionReadsCredentialFile(facts actionfacts.Facts) bool {
 	for _, candidate := range facts.Paths {
-		if candidate.CommandID != commandID || candidate.Access != actionfacts.PathAccessRead {
+		if candidate.Access != actionfacts.PathAccessRead ||
+			!trustedActionExecutingCommand(facts, candidate.CommandID) ||
+			credentialReadIsMoveSource(facts, candidate) {
 			continue
 		}
 		for _, ruleID := range credentialReadRuleIDs() {
