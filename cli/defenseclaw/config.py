@@ -2955,6 +2955,14 @@ class GuardrailConfig:
     def effective_hook_fail_mode(self, connector: str = "") -> str:
         """Resolve hook failure behavior for this deployment profile.
 
+        The value of :meth:`hook_fail_mode_resolution`, the one place every
+        reader (config get, init, doctor, status, the hooks) takes it from.
+        """
+        return self.hook_fail_mode_resolution(connector)[0]
+
+    def hook_fail_mode_resolution(self, connector: str = "") -> tuple[str, str]:
+        """Resolve hook failure behavior and name where it comes from.
+
         Mirrors Go ``Config.EffectiveHookFailModeForConnector``:
 
         - a managed config (Secure Client or the standalone profile,
@@ -2970,6 +2978,10 @@ class GuardrailConfig:
           ``closed`` for strict and ``open`` for default and permissive. Every failure that is
           not an outage (an answer the gateway gave, a malformed or partial
           one, a missing token, the install window) blocks in every tier.
+
+        The source is ``config:<key>`` for a saved value, ``managed-default``
+        or ``secure-client-default`` for an unset one on those profiles, and
+        ``default:<tier>`` for an unset per-user one.
         """
         owner = getattr(self, "_owner", None)
         cfg = owner() if callable(owner) else None
@@ -2981,15 +2993,24 @@ class GuardrailConfig:
                 override = application._connector_override(connector)
                 overlay = override.guardrail if override is not None else application.guardrail
                 if overlay.hook_fail_mode.strip():
-                    return _normalize_hook_fail_mode(overlay.hook_fail_mode)
+                    return (
+                        _normalize_hook_fail_mode(overlay.hook_fail_mode),
+                        "config:application_protection.guardrail.hook_fail_mode",
+                    )
         pc = self._connector_override(connector)
         if pc is not None and pc.hook_fail_mode.strip():
-            return _normalize_hook_fail_mode(pc.hook_fail_mode)
+            return (
+                _normalize_hook_fail_mode(pc.hook_fail_mode),
+                f"config:guardrail.connectors.{connector_paths.normalize(connector)}.hook_fail_mode",
+            )
         if getattr(self, "_hook_fail_mode_saved", False) and self.hook_fail_mode.strip():
-            return _normalize_hook_fail_mode(self.hook_fail_mode)
-        if standalone or self.secure_client_hook_fail_modes():
-            return "closed" if standalone else "open"
-        return "closed" if self.hook_policy_tier(connector) == "strict" else "open"
+            return _normalize_hook_fail_mode(self.hook_fail_mode), "config:guardrail.hook_fail_mode"
+        if standalone:
+            return "closed", "managed-default"
+        if self.secure_client_hook_fail_modes():
+            return "open", "secure-client-default"
+        tier = self.hook_policy_tier(connector)
+        return ("closed" if tier == "strict" else "open"), f"pack-default:{tier}"
 
     def effective_hook_outage_fail_mode(self, connector: str = "") -> str:
         """What ``connector``'s hooks do while the gateway is down.
