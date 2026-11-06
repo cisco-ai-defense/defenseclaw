@@ -6,6 +6,7 @@ package watcher
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"runtime"
@@ -137,11 +138,8 @@ func (w *InstallWatcher) mcpFailedFromLastRead(q MCPAdmissionQuery) MCPAdmission
 		paths, err := w.store.ListTargetSnapshotPaths(string(InstallMCP))
 		if err == nil {
 			for _, path := range paths {
-				if !mcpSnapshotPathServesQuery(path, q) {
-					continue
-				}
 				row, err := w.store.GetTargetSnapshot(string(InstallMCP), path)
-				if err == nil && mcpSnapshotFailed(row) {
+				if err == nil && mcpSnapshotFailed(row) && mcpFailedSnapshotServesQuery(path, row, q) {
 					return MCPAdmissionStatus{Name: q.Server, Failed: true}
 				}
 			}
@@ -150,11 +148,31 @@ func (w *InstallWatcher) mcpFailedFromLastRead(q MCPAdmissionQuery) MCPAdmission
 	return MCPAdmissionStatus{}
 }
 
-// mcpSnapshotPathServesQuery checks the stored scope when no live server
-// definition has been listed yet. The path is built by MCPEventPath.
+// A stored MCP baseline includes the configured name in its config hashes.
+// Use it as the name boundary: MCPEventPath does not escape punctuation in a
+// name, home or project, so splitting the path alone can select another server.
+func mcpFailedSnapshotServesQuery(path string, row *audit.SnapshotRow, q MCPAdmissionQuery) bool {
+	var hashes map[string]string
+	if row != nil && json.Unmarshal([]byte(row.ConfigHashes), &hashes) == nil {
+		name := ""
+		for key, hash := range hashes {
+			if strings.HasPrefix(key, "mcp.servers.") && hash == row.ContentHash && hash != "" {
+				if name != "" {
+					return false
+				}
+				name = strings.TrimPrefix(key, "mcp.servers.")
+			}
+		}
+		if name != "" {
+			return mcpSnapshotNamedPathServesQuery(path, name, q)
+		}
+	}
+	return mcpSnapshotPathServesQuery(path, q)
+}
+
+// mcpSnapshotPathServesQuery handles older rows with no stored name. Scope
+// parsing here is conservative when punctuation could also belong to a name.
 func mcpSnapshotPathServesQuery(path string, q MCPAdmissionQuery) bool {
-	// A scoped path must not be normalized as though its entire key were a
-	// server name; the scope may contain the same punctuation as a tool name.
 	if path == q.Server || (!strings.Contains(path, "@") && config.SameMCPToolServer(q.Connector, path, q.Server)) {
 		return true
 	}
@@ -172,33 +190,70 @@ func mcpSnapshotPathServesQuery(path string, q MCPAdmissionQuery) bool {
 		if len(path)-index < len(marker) || !strings.EqualFold(path[index:index+len(marker)], marker) {
 			continue
 		}
-		if !config.SameMCPToolServer(q.Connector, path[:index], q.Server) {
+		rest := path[index+len(marker):]
+		if strings.HasPrefix(rest, "#") && (!filepath.IsAbs(rest[1:]) ||
+			strings.Contains(strings.ToLower(rest[1:]), strings.ToLower(marker))) {
 			continue
 		}
-		rest := path[index+len(marker):]
-		switch {
-		case rest == "":
+		if mcpSnapshotNamedPathServesQuery(path, path[:index], q) {
 			return true
-		case strings.HasPrefix(rest, "#"):
-			if q.CWD == "" || mcpFolderWithin(q.CWD, rest[1:]) {
-				return true
-			}
-		case strings.HasPrefix(rest, ":") && q.Home != "":
-			if len(rest) < 1+len(q.Home) || !sameMCPFolder(rest[1:1+len(q.Home)], q.Home) {
-				continue
-			}
-			remaining := rest[1+len(q.Home):]
-			if remaining == "" {
-				return true
-			}
-			if len(remaining) > len(marker) && strings.EqualFold(remaining[:len(marker)], marker) &&
-				remaining[len(marker)] == '#' &&
-				(q.CWD == "" || mcpFolderWithin(q.CWD, remaining[len(marker)+1:])) {
-				return true
-			}
 		}
 	}
 	return false
+}
+
+func mcpSnapshotNamedPathServesQuery(path, name string, q MCPAdmissionQuery) bool {
+	if !config.SameMCPToolServer(q.Connector, name, q.Server) {
+		return false
+	}
+	rest, ok := strings.CutPrefix(path, name)
+	if !ok {
+		return false
+	}
+	if rest == "" {
+		return true
+	}
+	marker := "@" + q.Connector
+	if q.Connector == "" || len(rest) < len(marker) || !strings.EqualFold(rest[:len(marker)], marker) {
+		return false
+	}
+	rest = rest[len(marker):]
+	switch {
+	case rest == "":
+		return true
+	case strings.HasPrefix(rest, "#"):
+		return q.CWD == "" || mcpFolderWithin(q.CWD, rest[1:])
+	case strings.HasPrefix(rest, ":"):
+		return mcpSnapshotHomeServesQuery(rest[1:], marker, q)
+	default:
+		return false
+	}
+}
+
+func mcpSnapshotHomeServesQuery(scope, marker string, q MCPAdmissionQuery) bool {
+	if q.Home != "" && sameMCPFolder(scope, q.Home) {
+		return true
+	}
+	projectMarker := marker + "#"
+	for start := 0; start < len(scope); {
+		index := strings.IndexByte(scope[start:], '@')
+		if index < 0 {
+			break
+		}
+		index += start
+		start = index + 1
+		if len(scope)-index < len(projectMarker) || !strings.EqualFold(scope[index:index+len(projectMarker)], projectMarker) {
+			continue
+		}
+		if q.Home != "" && !sameMCPFolder(scope[:index], q.Home) {
+			continue
+		}
+		project := scope[index+len(projectMarker):]
+		if q.CWD == "" || mcpFolderWithin(q.CWD, project) {
+			return true
+		}
+	}
+	return q.Home == "" && !strings.Contains(strings.ToLower(scope), strings.ToLower(projectMarker))
 }
 
 func mcpSnapshotFailed(row *audit.SnapshotRow) bool {
