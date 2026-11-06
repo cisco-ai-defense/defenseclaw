@@ -157,3 +157,25 @@ func TestOpenCodePortImportRules(t *testing.T) {
 		t.Fatalf("record %v conflicts %v", plan.Record, plan.Conflicts)
 	}
 }
+
+// REVIEW-gx053-10: claims are collected before any is granted, so the order
+// of uids decides nothing; a port two unrecorded files name is given to
+// nobody, nor handed out fresh; OpenCode's defaults are not imported.
+func TestOpenCodePortContestedImport(t *testing.T) {
+	for _, order := range [][]int{{1001, 1002, 1003}, {1003, 1002, 1001}} {
+		plan := PlanOpenCodeServicePorts(order, map[int]int{1001: 25002, 1002: 25002, 1003: OpenCodeDefaultServicePort}, nil, true, nil)
+		for _, uid := range order {
+			if port := plan.Ports[uid]; port == 0 || port == 25002 || port == OpenCodeDefaultServicePort {
+				t.Fatalf("order %v: uid %d got %d", order, uid, port)
+			}
+		}
+		if got := plan.Contested[25002]; len(got) != 2 || got[0] != 1001 || got[1] != 1002 {
+			t.Fatalf("contested %v", plan.Contested)
+		}
+	}
+	// With a record, the record decides: bob keeps 25002, the copy is refused.
+	plan := PlanOpenCodeServicePorts([]int{1001, 1002}, map[int]int{1001: 25002}, map[int]int{1002: 25002}, true, nil)
+	if plan.Ports[1002] != 25002 || plan.Ports[1001] == 25002 {
+		t.Fatalf("ports %v", plan.Ports)
+	}
+}

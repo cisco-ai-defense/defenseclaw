@@ -379,9 +379,28 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			}
 			return fmt.Sprintf("uid %d", uid)
 		}
+		gets := func(uid int) string {
+			if port := openCodePlan.Record[uid]; port > 0 {
+				return fmt.Sprintf("port %d", port)
+			}
+			return "no port (every port of the range is held)"
+		}
 		for _, conflict := range openCodePlan.Conflicts {
-			fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: OpenCode background server port %d of %s is recorded for %s; %s gets port %d instead\n",
-				conflict.Port, name(conflict.UID), name(conflict.Holder), name(conflict.UID), openCodePlan.Record[conflict.UID])
+			fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: OpenCode background server port %d of %s is recorded for %s; %s gets %s instead\n",
+				conflict.Port, name(conflict.UID), name(conflict.Holder), name(conflict.UID), gets(conflict.UID))
+		}
+		contestedPorts := make([]int, 0, len(openCodePlan.Contested))
+		for port := range openCodePlan.Contested {
+			contestedPorts = append(contestedPorts, port)
+		}
+		sort.Ints(contestedPorts)
+		for _, port := range contestedPorts {
+			claimants := make([]string, 0, len(openCodePlan.Contested[port]))
+			for _, uid := range openCodePlan.Contested[port] {
+				claimants = append(claimants, fmt.Sprintf("%s -> %s", name(uid), gets(uid)))
+			}
+			fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: OpenCode background server port %d is named by the files of several accounts with no record entry, so it is given to none of them: %s. To give one of them that port, an administrator edits the record, then that account's service.json is rewritten on the next pass\n",
+				port, strings.Join(claimants, ", "))
 		}
 		if openCodePortsErr == nil {
 			for _, uid := range openCodePlan.NoPort {

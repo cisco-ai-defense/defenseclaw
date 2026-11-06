@@ -20,8 +20,9 @@ import (
 // scheme for per-user installs; the guardian uses it for managed ones.
 const (
 	// OpenCodeDefaultServicePort is OpenCode 2.2.5's port for the latest,
-	// dev, beta and next channels.
+	// dev, beta and next channels; openCodeLocalChannelPort its local one.
 	OpenCodeDefaultServicePort = 49374
+	openCodeLocalChannelPort   = 49375
 	// OpenCodeAccountPortBase and OpenCodeAccountPortSpan: an account's port
 	// is base + (id mod span), below Linux's ephemeral range.
 	OpenCodeAccountPortBase = 24000
@@ -164,6 +165,10 @@ type OpenCodePortPlan struct {
 	// Conflicts are imports refused because the record gives the port to
 	// another account, and record entries that paired two accounts.
 	Conflicts []OpenCodePortConflict
+	// Contested are ports two or more unrecorded accounts' files name in one
+	// pass (port -> the claimants, ascending): nobody is given such a port,
+	// every claimant gets a fresh one (REVIEW-gx053-10).
+	Contested map[int][]int
 	// NoPort are eligible accounts that get no port this pass: the range is
 	// full, or no new binding may be made (allowNew false).
 	NoPort []int
@@ -174,8 +179,13 @@ type OpenCodePortPlan struct {
 //  1. a uid's recorded port never changes because of any user's file: the
 //     account gets its recorded port and the worker writes it into the file;
 //  2. a uid with no record entry yet imports the port its own file names
-//     (imports), but only when the record gives that port to no other uid;
-//     otherwise, and with no file port, it gets a fresh port;
+//     (imports), but only when the record gives that port to no other uid
+//     and no other unrecorded uid's file names it in the same pass: every
+//     claim is collected before any is granted, a contested port is given to
+//     nobody, and each claimant gets a fresh port (nothing a user controls,
+//     not uid order and not a listener, decides). OpenCode's own defaults
+//     (49374, 49375) are not imported. Otherwise, and with no file port, a
+//     fresh port;
 //  3. new ports come from the pool minus every recorded port, so excluded
 //     and departed accounts keep theirs;
 //  4. an unknown uid (its file could not be read) with no record entry gets
@@ -215,11 +225,12 @@ func PlanOpenCodeServicePorts(eligible []int, imports, recorded map[int]int, all
 			plan.Ports[uid] = port
 		}
 	}
+	contested := map[int]bool{}
 	fresh := func(uid int) int {
 		start := OpenCodeAccountPort(uint64(uid))
 		for step := 0; step < OpenCodeAccountPortSpan; step++ {
 			port := OpenCodeAccountPortBase + (start-OpenCodeAccountPortBase+step)%OpenCodeAccountPortSpan
-			if _, taken := holder[port]; !taken {
+			if _, taken := holder[port]; !taken && !contested[port] {
 				holder[port] = uid
 				return port
 			}
@@ -237,26 +248,49 @@ func PlanOpenCodeServicePorts(eligible []int, imports, recorded map[int]int, all
 		}
 		return plan
 	}
-	// Imports first (ascending uid), so a port a file names is not taken by
-	// a fresh binding made in the same pass.
+	// Collect every import claim of the pass before granting any (order
+	// independent), so a claim decides nothing by uid order.
+	claims := map[int][]int{}
 	var needFresh []int
 	for _, uid := range sortedEligible {
 		if _, bound := plan.Ports[uid]; bound || unknown[uid] {
 			continue
 		}
 		port := imports[uid]
-		if port <= 0 || port > 65535 {
+		if port <= 0 || port > 65535 || port == OpenCodeDefaultServicePort || port == openCodeLocalChannelPort {
 			needFresh = append(needFresh, uid)
 			continue
 		}
+		claims[port] = append(claims[port], uid)
+	}
+	ports := make([]int, 0, len(claims))
+	for port := range claims {
+		ports = append(ports, port)
+	}
+	sort.Ints(ports)
+	for _, port := range ports {
+		claimants := claims[port]
 		if other, taken := holder[port]; taken {
-			plan.Conflicts = append(plan.Conflicts, OpenCodePortConflict{UID: uid, Holder: other, Port: port})
-			needFresh = append(needFresh, uid)
+			for _, uid := range claimants {
+				plan.Conflicts = append(plan.Conflicts, OpenCodePortConflict{UID: uid, Holder: other, Port: port})
+			}
+			needFresh = append(needFresh, claimants...)
 			continue
 		}
+		if len(claimants) > 1 {
+			contested[port] = true
+			if plan.Contested == nil {
+				plan.Contested = map[int][]int{}
+			}
+			plan.Contested[port] = claimants
+			needFresh = append(needFresh, claimants...)
+			continue
+		}
+		uid := claimants[0]
 		holder[port] = uid
 		plan.Ports[uid], plan.Record[uid] = port, port
 	}
+	sort.Ints(needFresh)
 	for _, uid := range append(rebind, needFresh...) {
 		if _, bound := plan.Ports[uid]; bound {
 			continue
