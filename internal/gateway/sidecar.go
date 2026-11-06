@@ -4496,13 +4496,38 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		watcherState = StateDegraded
 		watcherDetail = "skill and plugin folders inside user profiles are not watched by the LocalSystem gateway"
 	}
-	s.health.SetWatcher(watcherState, watcherDetail, watcherDetails(map[string]interface{}{
+	baseWatcherDetails := watcherDetails(map[string]interface{}{
 		"skill_dirs":         len(skillDirs),
 		"plugin_dirs":        len(pluginDirs),
 		"skill_take_action":  wcfg.Skill.TakeAction,
 		"plugin_take_action": wcfg.Plugin.TakeAction,
 		"mcp_take_action":    wcfg.MCP.TakeAction,
-	}))
+	})
+	s.health.SetWatcher(watcherState, watcherDetail, baseWatcherDetails)
+	w.SetRootCoverageHandler(func(issues []watcher.RootCoverageIssue) {
+		details := make(map[string]interface{}, len(baseWatcherDetails)+2)
+		for key, value := range baseWatcherDetails {
+			details[key] = value
+		}
+		if len(issues) == 0 {
+			s.health.SetWatcher(watcherState, watcherDetail, details)
+			return
+		}
+		connectors := make(map[string]bool)
+		for _, issue := range issues {
+			if issue.Connector != "" {
+				connectors[issue.Connector] = true
+			}
+		}
+		names := make([]string, 0, len(connectors))
+		for name := range connectors {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		details["watch_roots_unavailable"] = len(issues)
+		details["admission_scanning_off"] = names
+		s.health.SetWatcher(StateDegraded, "admission scanning is off for one or more connector roots; the gateway log names each root", details)
+	})
 
 	if enrolled != nil {
 		go s.pollEnrolledWatchSet(watchCtx, reg, wcfg, *enrolled, enrolledProjectRoots, w, changed)
@@ -8912,6 +8937,12 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		api.initGuardrailProfiles(api.scannerCfg)
 	}
 	api.projectSkills = &s.projectSkills
+	api.rootCoverage = func() []watcher.RootCoverageIssue {
+		if current := s.installWatcher.Load(); current != nil {
+			return current.RootCoverageIssues()
+		}
+		return nil
+	}
 	api.hookMCP = &s.hookMCP
 	s.setAPIServer(api)
 	defer s.setAPIServer(nil)

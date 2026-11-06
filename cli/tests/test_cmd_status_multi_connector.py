@@ -835,6 +835,14 @@ class TestStatusHeaderAndConfigProblems(unittest.TestCase):
         self.assertEqual(detail, " (PID 4242, up 1h 2m, API http://127.0.0.1:19030)")
         self.assertEqual(cmd_status._sidecar_running_detail({}, "", 0), "")
 
+    def test_gap0613_status_names_unavailable_admission_connector(self):
+        with patch.object(cmd_status, "_status_row") as row:
+            cmd_status._print_watch_root_coverage({"watcher": {"details": {
+                "watch_roots_unavailable": 1, "admission_scanning_off": ["claudecode"]
+            }}})
+        self.assertEqual(row.call_args.args[0], "Admission scan")
+        self.assertIn("off for claudecode", row.call_args.args[1])
+
     def test_header_names_version_and_footer_skips_status_itself(self):
         from defenseclaw import __version__
 
