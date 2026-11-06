@@ -302,6 +302,10 @@ func TestRV054R2Probe(t *testing.T) {
 		{"M38", "ln sshdir.tar alias.tar && tar -xf alias.tar -C d1 && mv a.txt d1/s/config"},
 		{"M39", "ln -s sshdir.tar alias.tar && tar -xf alias.tar -C d1 && mv a.txt d1/s/config"},
 		{"M40", "cat sshdir.tar > alias.tar && tar -xf alias.tar -C d1 && mv a.txt d1/s/config"},
+		{"M41", "tar -xf - -C d1 < sshdir.tar && mv a.txt d1/s/config"},
+		{"M42", "cat sshdir.tar | tar -xf - -C d1 && mv a.txt d1/s/config"},
+		{"M43", "cat sshdir.tar > alias.tar && cat alias.tar | tar -xf - -C d1 && mv a.txt d1/s/config"},
+		{"M44", "ln -s sshdir.tar alias.tar && tar -xf - -C d1 < alias.tar && mv a.txt d1/s/config"},
 		// round 2: managed home spellings
 		{"H03", "tar -xzf ${HOME}/project/missing.tgz -C ${HOME}/project/app && mv ${HOME}/project/app/pkg-1.0 ${HOME}/project/app/pkg"},
 		{"H04", "tar -xzf ~/project/missing.tgz -C ~/project/app && cp -r ~/project/app/pkg-1.0 ~/project/app/pkg"},
@@ -369,7 +373,8 @@ func TestRV054R2Probe(t *testing.T) {
 					}
 				}
 				if row.id == "M19" || row.id == "M20" || row.id == "M21" || row.id == "M33" ||
-					row.id == "M37" || row.id == "M38" || row.id == "M39" || row.id == "M40" {
+					row.id == "M37" || row.id == "M38" || row.id == "M39" || row.id == "M40" ||
+					row.id == "M41" || row.id == "M42" || row.id == "M43" || row.id == "M44" {
 					for i, got := range strings.Fields(cells) {
 						if got == "A" {
 							t.Errorf("%s cell %d: known extracted SSH link allowed", row.id, i)
