@@ -58,7 +58,16 @@ type windowsEnterpriseStatusV2Inputs struct {
 	// accountJoin computes the account join keys (nil: omitted); the
 	// result carries only their summary.
 	accountJoin func() *accountjoin.Report
+	// codexRequirementsHold reports a requirements.toml another process
+	// holds open (nil: not checked).
+	codexRequirementsHold func() (path string, holders []string, held bool)
 }
+
+// windowsCodexRequirementsHeldCode is the status warning for a held Codex
+// requirements.toml, a documented Windows platform limit (GAP-0650): the
+// enforced policy stays in place and DefenseClaw writes the update as soon
+// as the file is released.
+const windowsCodexRequirementsHeldCode = "codex_requirements_held"
 
 // windowsEnterpriseStatusV2Read reads the inputs of an installed deployment;
 // tests replace it.
@@ -72,9 +81,10 @@ var windowsManagedHermesCoverageAudit = func() error {
 
 func readWindowsEnterpriseStatusV2Inputs() windowsEnterpriseStatusV2Inputs {
 	in := windowsEnterpriseStatusV2Inputs{
-		machinePolicy:       enterprisehooks.WindowsStandaloneMachinePolicyHook,
-		machinePolicyStates: inspectWindowsEnterpriseMachinePolicy,
-		gatewayHealth:       windowsStandaloneGatewayHealth,
+		machinePolicy:         enterprisehooks.WindowsStandaloneMachinePolicyHook,
+		machinePolicyStates:   inspectWindowsEnterpriseMachinePolicy,
+		gatewayHealth:         windowsStandaloneGatewayHealth,
+		codexRequirementsHold: connector.WindowsCodexRequirementsHold,
 	}
 	registry := connector.NewDefaultRegistry()
 	in.knownConnector = func(name string) bool {
@@ -186,6 +196,11 @@ func applyWindowsEnterpriseStatusV2(result *enterprisestatus.Result) {
 	result.AddHookProcessFailureWarnings(block)
 	if !publish {
 		return
+	}
+	if in.codexRequirementsHold != nil {
+		if path, holders, held := in.codexRequirementsHold(); held {
+			result.AddWarning(windowsCodexRequirementsHeldCode, connector.WindowsCodexRequirementsHoldLine(path, holders))
+		}
 	}
 	// Enterprise OpenShell runs on Linux and macOS only.
 	result.OpenShell = enterprisestatus.OpenShellUnsupportedCapability()
