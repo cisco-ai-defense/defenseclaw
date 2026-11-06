@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestProtectedReachGradesNamedAndOrdinaryPaths(t *testing.T) {
@@ -129,6 +131,111 @@ func TestGradeMaximumKeepsNamedThroughPossibleSegments(t *testing.T) {
 		}
 		if got != row.want {
 			t.Fatalf("maximum %v = %s, want %s", row.parts, got, row.want)
+		}
+	}
+}
+
+func TestG288ProtectedDirectoryAliasClosure(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	project := filepath.Join(root, "project")
+	ssh := filepath.Join(home, ".ssh")
+	policies := filepath.Join(home, ".defenseclaw", "policies")
+	for _, dir := range []string{ssh, policies, project} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, row := range []struct {
+		name, destination string
+		grade             Grade
+	}{
+		{"ssh", ssh, GradeNamed},
+		{"policies", policies, GradeNamed},
+	} {
+		alias := filepath.Join(project, row.name)
+		if err := os.Symlink(row.destination, alias); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		for _, target := range []struct {
+			name string
+			path string
+			want Grade
+		}{
+			{"directory", alias, row.grade},
+			{"listed child", filepath.Join(alias, "authorized_keys"), GradeNamed},
+		} {
+			if row.name == "policies" && target.name == "listed child" {
+				target.path = filepath.Join(alias, "rule.yaml")
+			}
+			t.Run(row.name+"/"+target.name, func(t *testing.T) {
+				if got := ProtectedReach(target.path, home, NewTargetMemo()); got != target.want {
+					t.Fatalf("reach %s = %s, want %s", target.path, got, target.want)
+				}
+			})
+		}
+	}
+	// The SSH directory itself is protected, while an unlisted sibling
+	// reached through it is an ordinary file.
+	if got := ProtectedSSHReach(filepath.Join(project, "ssh", "notes.txt"), home, NewTargetMemo()); got != GradeNone {
+		t.Fatalf("unlisted SSH sibling = %s, want none", got)
+	}
+	if got := ProtectedSSHReach(filepath.Join(project, "policies", "rule.yaml"), home, NewTargetMemo()); got != GradeNone {
+		t.Fatalf("state tree under SSH rule = %s, want none", got)
+	}
+}
+
+func TestG288ProtectedReachAnsweredShareDelay(t *testing.T) {
+	for _, delayMS := range []int{0, 40, 80, 120, 300, 700} {
+		for _, kind := range []string{"hard", "link", "ordinary"} {
+			t.Run(strconv.Itoa(delayMS)+"ms/"+kind, func(t *testing.T) {
+				root := t.TempDir()
+				home := filepath.Join(root, "home")
+				project := filepath.Join(root, "project")
+				if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(project, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				keys := filepath.Join(home, ".ssh", "authorized_keys")
+				if err := os.WriteFile(keys, []byte("fixture"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				target := filepath.Join(project, kind)
+				switch kind {
+				case "hard":
+					if err := os.Link(keys, target); err != nil {
+						t.Skipf("hard link unavailable: %v", err)
+					}
+				case "link":
+					if err := os.Symlink(keys, target); err != nil {
+						t.Skipf("symlink unavailable: %v", err)
+					}
+				default:
+					if err := os.WriteFile(target, []byte("ordinary"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				fakeNetworkShare(t, root, 750*time.Millisecond, 5*time.Second, func(string) {
+					time.Sleep(2 * time.Second)
+				})
+				oldRead := readPath
+				t.Cleanup(func() { readPath = oldRead })
+				readPath = func(name string, kind pathReadKind) pathReadResult {
+					if name == root || strings.HasPrefix(name, root+string(filepath.Separator)) {
+						time.Sleep(time.Duration(delayMS) * time.Millisecond)
+					}
+					return oldRead(name, kind)
+				}
+				want := GradeNamed
+				if kind == "ordinary" {
+					want = GradePossible
+				}
+				if got := ProtectedReach(target, home, NewTargetMemo()); got != want {
+					t.Fatalf("delay %dms reach %s = %s, want %s", delayMS, kind, got, want)
+				}
+			})
 		}
 	}
 }
