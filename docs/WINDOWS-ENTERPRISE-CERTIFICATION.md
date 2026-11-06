@@ -119,8 +119,8 @@ retarget, take ownership of, or change the DACL on another hard-link name.
   preference variables from reaching bootstrap. Outside the harness, start
   this fixed engine from a clean endpoint-management process: a script cannot
   undo loader injection that acted before the script began.
-- Use the signed `defenseclaw enterprise windows ...` CLI for interactive
-  administrator lifecycle operations. Direct `install-enterprise.ps1`
+- Use the signed `defenseclaw.exe enterprise windows` CLI, by its full
+  path (it is on no `PATH`), for interactive administrator lifecycle operations. Direct `install-enterprise.ps1`
   execution is supported only from a trusted LocalSystem or
   endpoint-management startup context whose loader environment was protected
   before PowerShell started. Its internal protected bootstrap directory

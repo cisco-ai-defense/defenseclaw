@@ -580,8 +580,8 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status --js
 
 These status commands report deployment health. To check ignored overrides, compare
 the administrator-owned service environment's variable names with this catalog's
-`ignore` and `tighten_only` rows. On managed Windows, use `enterprise windows status --json`
-from an elevated prompt; its `doctor` command only prints administrator guidance.
+`ignore` and `tighten_only` rows. On managed Windows, run `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --json`
+from an elevated PowerShell prompt; its `doctor` command only prints administrator guidance.
 For Fleet and Edge services, inspect their supervisor's environment and resolved `config.yaml`.
 
 See also [Keys](/docs/reference/keys), [Redaction](/docs/observability/redaction), and [Fail modes](/docs/reference/fail-modes) for `DEFENSECLAW_FAIL_MODE` and `DEFENSECLAW_STRICT_AVAILABILITY`.
