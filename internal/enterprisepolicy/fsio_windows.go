@@ -117,6 +117,60 @@ func validateTrustedPolicyFile(_ Options, path string) error {
 	return validateTrustedFile(path)
 }
 
+// validateTrustedFileItself validates a policy file itself with the leaf
+// rules, and not the folders above it; tests replace it.
+var validateTrustedFileItself = func(path string) error {
+	return managed.ValidateTrustedFileLeaf(path, "machine policy file")
+}
+
+// readUnprotectedRecordedFile reads a recorded policy file in a vendor
+// folder that does not protect it (restoreOrStripUnprotected): only a
+// regular single-link file that no account other than SYSTEM,
+// Administrators and TrustedInstaller owns or can change. The folders above
+// it are not judged; the caller knows the nearest one does not protect it.
+// It returns why the file is not trusted, or "".
+func readUnprotectedRecordedFile(opts Options, path string) ([]byte, bool, string) {
+	path = platformPath(opts, path)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, ""
+	}
+	if err != nil {
+		return nil, false, err.Error()
+	}
+	if !info.Mode().IsRegular() {
+		return nil, false, "it is not a regular file"
+	}
+	data, exists, err := readPolicyFileWith(opts, path, func(_ Options, path string) error {
+		if err := requireSingleLinkFile(path); err != nil {
+			return err
+		}
+		return validateTrustedFileItself(path)
+	})
+	if err != nil {
+		return nil, false, err.Error()
+	}
+	return data, exists, ""
+}
+
+// requireSingleLinkFile refuses a file with another hard link: another
+// account could change it through that name.
+func requireSingleLinkFile(path string) error {
+	file, err := openNoFollow(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &info); err != nil {
+		return fmt.Errorf("inspect %s: %w", path, err)
+	}
+	if info.NumberOfLinks != 1 {
+		return fmt.Errorf("%s has %d hard links", path, info.NumberOfLinks)
+	}
+	return nil
+}
+
 // validateOpenCodePluginFile applies the machine policy trust rules to the
 // managed OpenCode plugin, with its own rule for the file (see
 // openCodePluginLoadable): ancestors as for every policy file.
@@ -483,6 +537,12 @@ func plainDirectory(info os.FileInfo) bool {
 // its place at once. Directories outside ProgramData are left alone, and an
 // object an administrator owns is refused.
 func reclaimPolicyDirs(opts Options, dir string) (policyTakeBack, error) {
+	return reclaimPolicyDirsFor(opts, dir, policyFolderUse{})
+}
+
+// reclaimPolicyDirsFor is reclaimPolicyDirs for a folder the vendor uses as
+// use says (case c below).
+func reclaimPolicyDirsFor(opts Options, dir string, use policyFolderUse) (policyTakeBack, error) {
 	var result policyTakeBack
 	// recorded is read once, at the first untrusted component on standalone.
 	var recorded *recordedPolicyPaths
@@ -529,18 +589,34 @@ func reclaimPolicyDirs(opts Options, dir string) (policyTakeBack, error) {
 				// recorded file keeps its own administrator-only access list,
 				// which every read and publish judges. That protects it only
 				// while no standard user can delete or replace an entry of
-				// the folder (the ancestor rule); otherwise the connector
-				// fails closed, naming the folder and the fix.
-				replaceErr := trustErr
-				if index == len(parts)-1 {
-					replaceErr = validateTrustedDir(cur)
+				// the folder (the ancestor rule), and, in the folder that
+				// holds the policy file, while no standard user can add a
+				// file the vendor loads beside it (Copilot's policy.d,
+				// OpenCode's opencode.jsonc: g582 review 7 M1). Otherwise the
+				// connector fails closed, naming the folder and the fix; a
+				// removal walk reports the folder and goes on (S1).
+				refused := (*recordedVendorFolderError)(nil)
+				switch {
+				case index != len(parts)-1:
+					refused = &recordedVendorFolderError{dir: cur, file: file, err: trustErr}
+				default:
+					if replaceErr := validateTrustedDir(cur); replaceErr != nil {
+						refused = &recordedVendorFolderError{dir: cur, file: file, err: replaceErr}
+					} else if use.siblings != "" {
+						refused = &recordedVendorFolderError{dir: cur, file: file, err: trustErr, siblings: use.siblings}
+					}
 				}
-				if replaceErr != nil {
-					return result, &recordedVendorFolderError{dir: cur, file: file, err: replaceErr}
+				if refused != nil {
+					if use.removal {
+						result.unprotected = append(result.unprotected, refused.folder())
+						return result, nil
+					}
+					return result, refused
 				}
 				result.left = append(result.left, fmt.Sprintf("left %s as it is: DefenseClaw did not create it and it "+
 					"holds DefenseClaw's %s; standard users may add entries there (%v), but they cannot delete or "+
-					"replace that file, which keeps its own administrator-only access list", cur, file, trustErr))
+					"replace that file, which keeps its own administrator-only access list, and the vendor reads "+
+					"only that file name there", cur, file, trustErr))
 				continue
 			}
 		}
@@ -1249,17 +1325,126 @@ func (r *recordedPolicyPaths) heldFile(dir string) string {
 type recordedVendorFolderError struct {
 	dir, file string
 	err       error
+	// siblings is set when standard users may only add files to the folder,
+	// and says what else the vendor loads from it (policyFolderUse).
+	siblings string
 }
 
 func (e *recordedVendorFolderError) Error() string {
-	return fmt.Sprintf("%s lets an account other than SYSTEM, Administrators and TrustedInstaller delete or replace "+
-		"DefenseClaw's %s in it (%v); DefenseClaw did not create this folder, so a standalone install does not take "+
-		"it over, and this connector is not protected until an administrator fixes the folder: from an elevated "+
-		"prompt remove that entry (icacls \"%s\" /remove:g *<SID>), or give the folder to Administrators "+
-		"(icacls \"%s\" /setowner *S-1-5-32-544), then run Setup /ensure", e.dir, e.file, e.err, e.dir, e.dir)
+	return fmt.Sprintf("%s; DefenseClaw did not create this folder, so a standalone install does not take it over, "+
+		"and this connector is not protected until an administrator fixes the folder: from an elevated prompt run %s, "+
+		"then run Setup /ensure", e.reason(), e.fix())
 }
 
 func (e *recordedVendorFolderError) Unwrap() error { return e.err }
+
+// reason says why the folder does not protect DefenseClaw's file.
+func (e *recordedVendorFolderError) reason() string {
+	if e.siblings != "" {
+		return fmt.Sprintf("%s lets an account other than SYSTEM, Administrators and TrustedInstaller add files to it "+
+			"(%v), and %s, so a file that account adds there applies beside or instead of DefenseClaw's %s",
+			e.dir, e.err, e.siblings, e.file)
+	}
+	return fmt.Sprintf("%s lets an account other than SYSTEM, Administrators and TrustedInstaller delete or replace "+
+		"DefenseClaw's %s in it (%v)", e.dir, e.file, e.err)
+}
+
+// fix is the administrator's commands for the folder, joined for the
+// message.
+func (e *recordedVendorFolderError) fix() string {
+	commands := recordedVendorFolderFix(e.dir, e.err)
+	rendered := make([]string, 0, len(commands))
+	for _, command := range commands {
+		rendered = append(rendered, renderWindowsCommand(command))
+	}
+	return strings.Join(rendered, ", then ")
+}
+
+func (e *recordedVendorFolderError) folder() unprotectedVendorFolder {
+	return unprotectedVendorFolder{dir: e.dir, reason: e.reason(), fix: e.fix()}
+}
+
+// recordedVendorFolderFix is the administrator's fix for a case c folder, as
+// commands to run in order from an elevated prompt. It gives the folder to
+// Administrators and replaces its access list, inherited entries included,
+// with the one DefenseClaw gives the vendor folders it holds: SYSTEM and
+// Administrators full control, Users read and execute. icacls /remove:g and
+// /setowner alone leave an inherited entry, such as ProgramData's "Users may
+// add files and folders", in place; /inheritance:r removes the inherited
+// entries and /grant:r replaces the explicit Users entry. An explicit entry
+// of another account survives both, so every such account (the folder's
+// own allow entries, and the account the check named) is removed by name.
+// The grants are for the folder; files inherit them, and DefenseClaw's own
+// file keeps its protected access list.
+func recordedVendorFolderFix(dir string, err error) [][]string {
+	fix := [][]string{
+		{"icacls", dir, "/setowner", "*" + adminOwnerSIDStr},
+		{"icacls", dir, "/inheritance:r", "/grant:r",
+			"*" + systemSIDStr + ":(OI)(CI)F", "*" + adminOwnerSIDStr + ":(OI)(CI)F", "*" + usersSIDStr + ":(OI)(CI)RX"},
+	}
+	others := explicitOtherAllowSIDs(dir)
+	var principal *managed.UntrustedPrincipalError
+	if errors.As(err, &principal) && principal.SID != "" && !principal.Owner {
+		others = append(others, principal.SID)
+	}
+	remove := []string{"icacls", dir, "/remove:g"}
+	seen := map[string]bool{}
+	for _, sid := range others {
+		switch sid {
+		case systemSIDStr, adminOwnerSIDStr, usersSIDStr, trustedInstallerSIDStr:
+			continue
+		}
+		if !seen[sid] {
+			seen[sid] = true
+			remove = append(remove, "*"+sid)
+		}
+	}
+	if len(remove) > 3 {
+		fix = append(fix, remove)
+	}
+	return fix
+}
+
+// explicitOtherAllowSIDs lists the accounts dir's own (not inherited) allow
+// entries name, in order. It is best effort: a descriptor it cannot read
+// adds nothing.
+func explicitOtherAllowSIDs(dir string) []string {
+	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return nil
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil {
+		return nil
+	}
+	var sids []string
+	for index := uint32(0); index < uint32(dacl.AceCount); index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, index, &ace); err != nil {
+			return sids
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags&windows.INHERITED_ACE != 0 {
+			continue
+		}
+		sids = append(sids, (*windows.SID)(unsafe.Pointer(&ace.SidStart)).String())
+	}
+	return sids
+}
+
+// renderWindowsCommand quotes every argument but the program and the
+// switches, so the command runs the same in cmd.exe and in PowerShell, where
+// an unquoted (OI) is a subexpression.
+func renderWindowsCommand(command []string) string {
+	parts := make([]string, 0, len(command))
+	for index, argument := range command {
+		if index == 0 || (strings.HasPrefix(argument, "/") && !strings.ContainsAny(argument, ` *()`)) {
+			parts = append(parts, argument)
+			continue
+		}
+		parts = append(parts, `"`+argument+`"`)
+	}
+	return strings.Join(parts, " ")
+}
 
 // defenseClawEntryIn returns why dir is a folder DefenseClaw already
 // manages, or "": the shared standalone decision
@@ -1272,6 +1457,7 @@ func defenseClawEntryIn(dir string) string {
 const (
 	trustedInstallerSIDStr = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 	usersSIDStr            = "S-1-5-32-545"
+	systemSIDStr           = "S-1-5-18"
 
 	// Conditional (callback) ACE types; x/sys/windows names only the plain ones.
 	accessAllowedCallbackACEType = 0x9

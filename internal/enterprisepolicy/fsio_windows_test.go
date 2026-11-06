@@ -98,12 +98,15 @@ func testWindowsTrust(t *testing.T, root string) {
 		return nil
 	}
 	previousDir, previousLeaf, previousFile, previousReclaim := validateTrustedDir, validateTrustedLeafDir, validateTrustedFile, reclaimDirHandle
+	previousItself := validateTrustedFileItself
 	validateTrustedDir = func(path string) error { return walkFrom(path, false) }
 	validateTrustedLeafDir = func(path string) error { return walkFrom(path, true) }
 	validateTrustedFile = func(path string) error { return walkFrom(path, false) }
+	validateTrustedFileItself = func(path string) error { return check(path, true) }
 	reclaimDirHandle = func(_ string, reclaim func() error) error { return reclaim() }
 	t.Cleanup(func() {
 		validateTrustedDir, validateTrustedLeafDir, validateTrustedFile, reclaimDirHandle = previousDir, previousLeaf, previousFile, previousReclaim
+		validateTrustedFileItself = previousItself
 	})
 }
 
@@ -926,8 +929,8 @@ func TestWindowsCopilotRemovalTakesBackAUserCreatedPolicyDir(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "50-user.json"), []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := takeBackWindowsGoOwnedForRemoval(opts, copilotTarget{}); err != nil {
-		t.Fatalf("a user-created policy.d must not block the uninstall: %v", err)
+	if unprotected, err := takeBackWindowsGoOwnedForRemoval(opts, copilotTarget{}); err != nil || len(unprotected) != 0 {
+		t.Fatalf("a user-created policy.d must not block the uninstall: %v (unprotected %v)", err, unprotected)
 	}
 	for _, path := range []string{github, filepath.Dir(dir), dir} {
 		requireProtected(t, path)

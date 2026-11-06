@@ -27,6 +27,7 @@ package enterprisepolicy
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -151,6 +152,32 @@ type Options struct {
 	// still removes DefenseClaw's entry at its other paths (GAP-0758). Set
 	// only by RemoveWindowsGoOwned.
 	keptLinks map[string]bool
+	// unprotected are the vendor folders a removal found that do not protect
+	// the file DefenseClaw recorded in them (Windows, case c); the removal
+	// strips DefenseClaw's entry there only from a file it can still trust.
+	unprotected []unprotectedVendorFolder
+}
+
+// removingFrom is opts for a removal that found the unprotected folders.
+func (o Options) removingFrom(unprotected []unprotectedVendorFolder) Options {
+	o.unprotected = unprotected
+	return o
+}
+
+// unprotectedFolderOf returns the unprotected folder path lies in, at any
+// depth.
+func (o Options) unprotectedFolderOf(path string) (unprotectedVendorFolder, bool) {
+	if path == "" {
+		return unprotectedVendorFolder{}, false
+	}
+	clean := strings.ToLower(filepath.Clean(platformPath(o, path)))
+	for _, folder := range o.unprotected {
+		dir := strings.ToLower(strings.TrimRight(filepath.Clean(folder.dir), `\/`))
+		if strings.HasPrefix(clean, dir+string(filepath.Separator)) {
+			return folder, true
+		}
+	}
+	return unprotectedVendorFolder{}, false
 }
 
 func runtimeGOOS() string { return runtime.GOOS }
@@ -229,8 +256,11 @@ type State struct {
 	Conflicts        []string `json:"conflicts,omitempty"`
 	Pending          []string `json:"pending,omitempty"`
 	Details          []string `json:"details,omitempty"`
-	Changed          bool     `json:"changed"`
-	Covered          bool     `json:"covered"`
+	// Warnings are what the administrator must act on although the pass
+	// went on, for example a vendor folder an uninstall left unprotected.
+	Warnings []string `json:"warnings,omitempty"`
+	Changed  bool     `json:"changed"`
+	Covered  bool     `json:"covered"`
 	// Drift marks DefenseClaw entries that are in place but differ from
 	// what the next publish writes (a policy file mode agents cannot read
 	// through, a Claude Code floor drop-in it must withdraw). A conflict
@@ -287,6 +317,10 @@ func (s *State) entryConflict(format string, args ...any) {
 
 func (s *State) detail(format string, args ...any) {
 	s.Details = append(s.Details, fmt.Sprintf(format, args...))
+}
+
+func (s *State) warn(format string, args ...any) {
+	s.Warnings = append(s.Warnings, fmt.Sprintf(format, args...))
 }
 
 func (s *State) finish() {

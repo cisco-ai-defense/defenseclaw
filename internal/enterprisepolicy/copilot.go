@@ -416,7 +416,7 @@ func (t copilotTarget) Reconcile(opts Options) (State, error) {
 		state.Route = RouteUnsupported
 		return state, nil
 	case config.MachinePolicyOwnershipMerge:
-		created, err := takeBackPolicyPath(opts, paths[0], &state)
+		created, _, err := takeBackPolicyPathFor(opts, paths[0], copilotFolderUse, &state)
 		if err != nil {
 			return state, err
 		}

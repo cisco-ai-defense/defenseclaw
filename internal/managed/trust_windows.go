@@ -160,6 +160,28 @@ func ValidateTrustedFilePath(path, label string) error {
 	return validateTrustedWindowsFilePath(path, label, nil, windowsTrustLeaf, windowsAncestorScope)
 }
 
+// ValidateTrustedFileLeaf checks a regular file itself with the leaf rules of
+// ValidateTrustedFilePath and not the folders above it, for a caller that
+// already knows a folder above does not protect the file and only asks
+// whether the file is still administrator-controlled (an uninstall in a
+// vendor folder DefenseClaw does not take over, g582 review 7 S1).
+func ValidateTrustedFileLeaf(path, label string) error {
+	if label == "" {
+		label = "managed file"
+	}
+	if path == "" {
+		return fmt.Errorf("%s path is empty", label)
+	}
+	clean, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	if _, err := winpath.ValidateFixedNTFSMountedPath(clean); err != nil {
+		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
+	}
+	return validateTrustedWindowsPathElementWithWriter(clean, false, label, nil, windowsTrustLeaf)
+}
+
 // ValidateTrustedSecureClientHostFile checks an installed file while the
 // Secure Client host classifier is being established. The classifier cannot
 // call the process-and-state-tree verifier that depends on its own result.
