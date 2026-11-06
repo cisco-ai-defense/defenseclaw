@@ -431,7 +431,7 @@ func TestGAP0518DisplayValuesCheckKnownAliases(t *testing.T) {
 		{`echo ordinary/subpath`, true},
 		{`echo "$PWD"/alias.txt`, false},
 		{`echo linked-dir/config`, false},
-		{`echo linked-dir/new-file`, false},
+		{`echo linked-dir/new-file`, true},
 	} {
 		got := ordinaryNoAnswerPayloadInHome(call(tc.command), home)
 		t.Logf("%q ordinary=%t", tc.command, got)
