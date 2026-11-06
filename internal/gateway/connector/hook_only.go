@@ -1082,8 +1082,13 @@ func (c *hookOnlyConnector) checkAgentSettings(opts SetupOpts) error {
 }
 
 // hermesSetupWarningOutput receives Setup's warning about a Hermes release
-// whose TUI runs tools without the hooks (the gateway's log).
+// whose TUI runs tools without the hooks (the gateway's log), and teardown's
+// notice about edited DefenseClaw entries it removed.
 var hermesSetupWarningOutput io.Writer = os.Stderr
+
+// hermesEditedHooksBackupSuffix names the copy teardown keeps of a Hermes
+// config.yaml before it removes edited DefenseClaw entries from it.
+const hermesEditedHooksBackupSuffix = ".defenseclaw-edited-hooks.bak"
 
 func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if err := RequireOpenCodeV2(c.name, opts.AgentVersion); err != nil {
@@ -5118,6 +5123,7 @@ func removeHermesHooks(path, hookScript string, backup *managedFileBackup) error
 	if !ok {
 		return nil
 	}
+	edited := hermesEditedHookEntryCount(hooks, hookScript)
 	for event, raw := range hooks {
 		hooks[event] = removeOwnedFlatHooks(raw, hookScript)
 	}
@@ -5141,10 +5147,40 @@ func removeHermesHooks(path, hookScript string, backup *managedFileBackup) error
 			return err
 		}
 	}
-	if current, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(current, data) {
+	current, readErr := os.ReadFile(path)
+	if readErr == nil && bytes.Equal(current, data) {
 		return nil
 	}
+	if edited > 0 && readErr == nil {
+		// An edited entry is removed as DefenseClaw's (GAP-0625); the file
+		// as it was is kept next to it and the removal is reported once.
+		copyPath := path + hermesEditedHooksBackupSuffix
+		if err := atomicWriteFile(copyPath, current, 0o600); err != nil {
+			return fmt.Errorf("keep a copy of %s before removing edited DefenseClaw hook entries: %w", path, err)
+		}
+		fmt.Fprintf(hermesSetupWarningOutput, "[connector] hermes teardown: removed %d edited DefenseClaw hook entries from %s; the previous file is at %s\n", edited, path, copyPath)
+	}
 	return atomicWriteFile(path, data, 0o600)
+}
+
+// hermesEditedHookEntryCount counts the DefenseClaw entries that are not a
+// command Setup records: teardown removes them as well and reports them.
+func hermesEditedHookEntryCount(hooks map[string]interface{}, hookScript string) int {
+	recognized := hermesRecognizedHookCommands(hermesConfiguredHookCommand(hookScript, ""))
+	count := 0
+	for _, raw := range hooks {
+		entries, _ := hermesHookList(raw)
+		for _, entry := range entries {
+			command, _ := hermesHookEntryCommand(entry)
+			if _, exact := recognized[command]; exact || containsHookScript(entry, hookScript) {
+				continue
+			}
+			if hermesOwnedHookCommand(command, hookScript, recognized) {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 // hermesPristineHasOwnHooksField reports whether the config.yaml copy Setup
