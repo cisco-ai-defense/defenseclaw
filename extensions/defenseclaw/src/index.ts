@@ -36,6 +36,9 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 import type { PluginApi, ToolContext } from "@openclaw/plugin-sdk";
 import {
   bootstrapPluginIdentity,
@@ -144,12 +147,64 @@ function failClosedVerdict(reason: string): InspectVerdict {
   };
 }
 
+function normalizeWorkspaceAgentId(raw?: string): string {
+  const value = raw?.trim() ?? "";
+  if (!value) return "main";
+  if (/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(value)) return value.toLowerCase();
+  return value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "").slice(0, 64) || "main";
+}
+
+function openClawWorkspaceHome(): string {
+  const osHome = process.env.HOME?.trim() || process.env.USERPROFILE?.trim() || homedir();
+  const configured = process.env.OPENCLAW_HOME?.trim();
+  if (!configured || configured === "undefined" || configured === "null") return resolve(osHome);
+  if (configured === "~") return resolve(osHome);
+  if (configured.startsWith("~/") || configured.startsWith("~\\")) {
+    return resolve(osHome, configured.slice(2));
+  }
+  return resolve(configured);
+}
+
+// OpenClaw runs file and exec tools from the agent workspace by default.
+// The extension's process directory can differ from that workspace, so use
+// the host's agent config when deciding relative targets during an outage.
+function toolWorkspaceCwd(api: DefenseClawPluginHost, ctx?: ToolContext): string {
+  const runtimeWorkspace = (ctx as ToolContext & { workspaceDir?: string } | undefined)?.workspaceDir;
+  if (runtimeWorkspace && isAbsolute(runtimeWorkspace)) return runtimeWorkspace;
+
+  const config = api.config as {
+    agents?: { defaults?: { workspace?: string }; list?: Array<{ id?: string; default?: boolean; workspace?: string }> };
+  } | undefined;
+  const entries = Array.isArray(config?.agents?.list) ? config.agents.list : [];
+  const defaultId = normalizeWorkspaceAgentId(entries.find((entry) => entry?.default)?.id ?? entries[0]?.id);
+  const sessionId = ctx?.sessionKey?.match(/^agent:([^:]+):/i)?.[1];
+  const agentId = normalizeWorkspaceAgentId(ctx?.agentId ?? sessionId ?? defaultId);
+
+  const home = openClawWorkspaceHome();
+  const userPath = (path: string): string => path === "~" ? home :
+    path.startsWith("~/") || path.startsWith("~\\") ? resolve(home, path.slice(2)) : resolve(path);
+  const configured = entries.find((entry) => normalizeWorkspaceAgentId(entry?.id) === agentId)?.workspace?.trim();
+  if (configured) return userPath(configured);
+  if (agentId === defaultId) {
+    const defaultWorkspace = config?.agents?.defaults?.workspace?.trim();
+    if (defaultWorkspace) return userPath(defaultWorkspace);
+    const profile = process.env.OPENCLAW_PROFILE?.trim();
+    return join(home, ".openclaw", profile && profile.toLowerCase() !== "default" ? `workspace-${profile}` : "workspace");
+  }
+  const stateDir = process.env.OPENCLAW_STATE_DIR?.trim();
+  const newStateDir = join(home, ".openclaw");
+  const legacyStateDir = process.env.OPENCLAW_TEST_FAST === "1" || existsSync(newStateDir)
+    ? undefined : [join(home, ".clawdbot"), join(home, ".moldbot")].find(existsSync);
+  return join(stateDir ? userPath(stateDir) : legacyStateDir ?? newStateDir, `workspace-${agentId}`);
+}
+
 // Only a classified outage or timeout can use the account's saved mode.
-function unavailableVerdict(reason: string, payload: Record<string, unknown>): InspectVerdict {
+function unavailableVerdict(reason: string, payload: Record<string, unknown>, cwd: string): InspectVerdict {
   const tool = typeof payload.tool === "string" ? payload.tool : "";
   const args = payload.args && typeof payload.args === "object" && !Array.isArray(payload.args)
     ? payload.args as Record<string, unknown> : {};
-  const mode = loadOpenClawOutageMode({ name: tool, args, cwd: process.cwd() });
+  const mode = loadOpenClawOutageMode({ name: tool, args, cwd });
   if (mode === "protected") return failClosedVerdict("tool targets protected state");
   if (mode === "open") {
     const warning = `DefenseClaw warning: ${reason}; tool call is running without inspection.`;
@@ -527,7 +582,7 @@ export default function (api: DefenseClawPluginHost) {
         }
         const msg = err instanceof Error ? err.message : String(err);
         return isOutageOrTimeout(err)
-          ? unavailableVerdict(`sidecar body unavailable: ${msg}`, payload)
+          ? unavailableVerdict(`sidecar body unavailable: ${msg}`, payload, toolWorkspaceCwd(api, toolCtx))
           : failClosedVerdict(`sidecar body unavailable: ${msg}`);
       }
     } catch (err) {
@@ -541,7 +596,7 @@ export default function (api: DefenseClawPluginHost) {
       });
       const msg = err instanceof Error ? err.message : String(err);
       return isOutageOrTimeout(err)
-        ? unavailableVerdict(`sidecar unreachable: ${msg}`, payload)
+        ? unavailableVerdict(`sidecar unreachable: ${msg}`, payload, toolWorkspaceCwd(api, toolCtx))
         : failClosedVerdict(`sidecar request failed: ${msg}`);
     } finally {
       clearTimeout(timer);

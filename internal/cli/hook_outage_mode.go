@@ -23,6 +23,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // hookOutageFailModeNow is the gateway-outage mode the config of the per-user
@@ -500,6 +501,10 @@ func outagePayloadNamesProtected(value interface{}, key, cwd, home, dataDir stri
 			env = ownEnv
 		}
 		for childKey, child := range item {
+			if strings.EqualFold(childKey, "env") {
+				// Environment values are data until the command expands them.
+				continue
+			}
 			if outagePayloadNamesProtected(child, childKey, cwd, home, dataDir, env, depth+1) {
 				return true
 			}
@@ -520,7 +525,8 @@ func outagePayloadNamesProtected(value interface{}, key, cwd, home, dataDir stri
 			return hookpaths.ActionStateTargetMention(item, cwd, home) ||
 				hookpaths.ActionCommandDecision(command, cwd, home) == "protected-target" ||
 				outageExpandedCommandTargetsProtected(command, cwd, home, dataDir) ||
-				outageCommandTargetsDataRoot(command, cwd, home, dataDir)
+				outageCommandTargetsDataRoot(command, cwd, home, dataDir) ||
+				outageNestedShellTargetsProtected(command, env, cwd, home, dataDir, 0)
 		case "path", "file", "filepath", "file_path", "target", "destination", "dest", "output", "output_path", "filename":
 			path := strings.ReplaceAll(strings.ReplaceAll(item, "${HOME}", home), "$HOME", home)
 			if path == "~" {
@@ -589,22 +595,43 @@ func outageCommandWithEnv(command string, env map[string]interface{}) string {
 			for end < len(command) && outageEnvNamePart(command[end]) {
 				end++
 			}
-			if !braced || end < len(command) && command[end] == '}' {
-				if value, ok := env[command[start:end]].(string); ok {
-					if quote == '"' {
-						replacer := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`, "`", "\\`")
-						expanded.WriteString(replacer.Replace(value))
-					} else {
-						expanded.WriteByte('\'')
-						expanded.WriteString(strings.ReplaceAll(value, "'", "'\\''"))
-						expanded.WriteByte('\'')
-					}
-					i = end
-					if braced {
-						i++
-					}
-					continue
+			value, known := env[command[start:end]].(string)
+			close := end
+			if braced && close < len(command) && command[close] != '}' {
+				// POSIX default and assignment forms use the known value when
+				// set; a default is used only for an absent or empty value.
+				colon := command[close] == ':'
+				if colon {
+					close++
 				}
+				if close < len(command) && (command[close] == '-' || command[close] == '=') {
+					fallbackStart := close + 1
+					close = strings.IndexByte(command[fallbackStart:], '}')
+					if close >= 0 {
+						close += fallbackStart
+						if !known || colon && value == "" {
+							value = command[fallbackStart:close]
+							known = true
+						}
+					}
+				} else {
+					close = -1
+				}
+			}
+			if (!braced || close >= 0 && close < len(command) && command[close] == '}') && known {
+				if quote == '"' {
+					replacer := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`, "`", "\\`")
+					expanded.WriteString(replacer.Replace(value))
+				} else {
+					expanded.WriteByte('\'')
+					expanded.WriteString(strings.ReplaceAll(value, "'", "'\\''"))
+					expanded.WriteByte('\'')
+				}
+				i = close
+				if braced {
+					i++
+				}
+				continue
 			}
 		}
 		expanded.WriteByte(c)
@@ -619,6 +646,58 @@ func outageEnvNameStart(c byte) bool {
 
 func outageEnvNamePart(c byte) bool {
 	return outageEnvNameStart(c) || c >= '0' && c <= '9'
+}
+
+// A shell passed through -c expands its quoted program in a new shell.
+// Inspect that program with the same known environment as the outer call.
+func outageNestedShellTargetsProtected(command string, env map[string]interface{}, cwd, home, dataDir string, depth int) bool {
+	if depth >= 16 || runtime.GOOS == "windows" || len(env) == 0 {
+		return false
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
+	if err != nil {
+		return false
+	}
+	protected := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if protected {
+			return false
+		}
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) < 3 {
+			return true
+		}
+		words := make([]string, len(call.Args))
+		for i, arg := range call.Args {
+			value, known := hookpaths.StaticWord(arg, home)
+			if !known {
+				return true
+			}
+			words[i] = value
+		}
+		switch filepath.Base(words[0]) {
+		case "sh", "bash", "dash", "zsh", "ksh":
+		default:
+			return true
+		}
+		for i := 1; i < len(words)-1; i++ {
+			option := words[i]
+			if option != "-c" && (len(option) < 3 || option[0] != '-' ||
+				strings.Trim(option[1:], "abcefilmnpsuvxBCEHPT") != "" || !strings.ContainsRune(option[1:], 'c')) {
+				continue
+			}
+			body := outageCommandWithEnv(words[i+1], env)
+			if hookpaths.ActionCommandDecision(body, cwd, home) == "protected-target" ||
+				outageExpandedCommandTargetsProtected(body, cwd, home, dataDir) ||
+				outageCommandTargetsDataRoot(body, cwd, home, dataDir) ||
+				outageNestedShellTargetsProtected(body, env, cwd, home, dataDir, depth+1) {
+				protected = true
+			}
+			break
+		}
+		return true
+	})
+	return protected
 }
 
 func outageExpandedCommandTargetsProtected(command, cwd, home, dataDir string) bool {
