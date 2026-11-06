@@ -7046,12 +7046,12 @@ def test_untrusted_config_acl_is_refused_before_the_transaction_stops_a_service(
     # can change before the transaction stops anything, and before Repair
     # re-stamps those paths in place (Set-DefenseClawManagedAcls).
     lifecycle = _function_text(module, "Invoke-DefenseClawInstallLikeLifecycle")
-    gate = lifecycle.index("Assert-DefenseClawStandaloneContentTrusted -Layout $Layout")
+    gate = lifecycle.index("Assert-DefenseClawStandaloneContentTrusted `")
     assert gate < lifecycle.index("$snapshot = New-DefenseClawTransaction")
     assert gate < lifecycle.index("Set-DefenseClawManagedAcls `")
     # GAP-0590 review M3: a fresh install and a reinstall over a tombstone too.
-    guard = lifecycle.rindex("if (", 0, gate)
-    assert lifecycle[guard : lifecycle.index("\n", guard)] == "if (Test-DefenseClawStandaloneProfile) {"
+    guard = lifecycle.rindex("\n    if (", 0, gate) + 1
+    assert lifecycle[guard : lifecycle.index("\n", guard)] == "    if (Test-DefenseClawStandaloneProfile) {"
     content = _function_text(module, "Assert-DefenseClawStandaloneContentTrusted")
     restamped = _function_text(module, "Set-DefenseClawManagedAcls")
     for path in (
@@ -7069,20 +7069,45 @@ def test_untrusted_config_acl_is_refused_before_the_transaction_stops_a_service(
 _LAYOUT_PATH_KEY = r"(\w+(?:Path|Directory|Root|Ancestors))"
 
 
+_RESTAMP_CALL = re.compile(
+    r"(?:Set-DefenseClawPathAcl|Set-DefenseClawSharedPathAcl|Set-DefenseClawStandaloneSecretSddl)\s+(?:`\s+)?-Path\s+(\S+)"
+)
+
+# The variables the two re-stamp functions pass as -Path, by the layout keys
+# or leaf names they hold. A new variable is unmapped and fails the contract
+# until it is mapped here and gated or named out of class.
+_RESTAMP_VARIABLES = {
+    "$path": {"ACPPath", "HookPath", "SensorHelperPath", "InstallerPath", "ModulePath", "BrokerPath"},
+    "$directory": {"CompilerLibDirectory", "CompilerDirectory"},
+    "$compilerPath": {"CompilerPath"},
+    "$runtimeEnv": {".env"},
+    "$authorizationFile": {"AuthorizationLedgerPath", "activation.json"},
+    "$approvedPath": {"ApprovedPolicyFiles"},
+    "$secrets": {"CredentialStore"},
+    "$item.FullName": {"CredentialFiles"},
+}
+
+
 def _restamped_managed_paths(managed_acls: str, secrets_acls: str) -> set[str]:
     """The paths Set-DefenseClawManagedAcls and Set-DefenseClawStandaloneSecretsAcls
-    re-stamp in place: layout keys, leaf names, the bundle tree and the
-    credential store."""
+    re-stamp in place: the -Path of every re-stamp call (a layout key, or a
+    mapped variable), every layout path key the function reads, the bundle
+    tree, the state-root ancestors and the Secure Client marker."""
 
-    names = set(re.findall(r"\$Layout\." + _LAYOUT_PATH_KEY + r"\b", managed_acls))
+    names: set[str] = set()
+    for body in (managed_acls, secrets_acls):
+        for target in _RESTAMP_CALL.findall(body):
+            layout = re.fullmatch(r"\$Layout\.(\w+)", target)
+            names |= {layout.group(1)} if layout else _RESTAMP_VARIABLES.get(target, {f"<unmapped {target}>"})
+    names |= set(re.findall(r"\$Layout\." + _LAYOUT_PATH_KEY + r"\b", managed_acls))
     names |= set(re.findall(r"-Name " + _LAYOUT_PATH_KEY + r"\b", managed_acls))
-    names |= set(re.findall(r"'([.\w-]*\.\w+)'\)", managed_acls))
-    if "Invoke-DefenseClawBundleAclContract -Layout $Layout" in managed_acls:
-        names.add("BundleTree")
-    if "Set-DefenseClawSecureClientInstallMarker -Layout $Layout" in managed_acls:
-        names.add("SecureClientInstallMarker")
-    for directory in re.findall(r"Set-DefenseClawStandaloneSecretSddl `\s+-Path \S+ `\s+-IsDirectory \$(true|false)", secrets_acls):
-        names.add("CredentialStore" if directory == "true" else "CredentialFiles")
+    for call, name in (
+        ("Invoke-DefenseClawBundleAclContract -Layout $Layout", "BundleTree"),
+        ("Set-DefenseClawSecureClientInstallMarker -Layout $Layout", "SecureClientInstallMarker"),
+        ("Grant-DefenseClawStateAncestorTraverse -Path $ancestor", "StateRootAncestors"),
+    ):
+        if call in managed_acls:
+            names.add(name)
     return names
 
 
@@ -7108,7 +7133,7 @@ def _ungated_restamps(module: str) -> tuple[set[str], set[str], set[str]]:
     start = module.index("$script:StandaloneContentGateOutOfClass = @(")
     table = module[start : module.index("\n)\n", start)]
     out_of_class = set(re.findall(r"'(\w+)'", "\n".join(re.findall(r"Paths\s+= @\(([^)]*)\)", table))))
-    assert table.count("Reason = '") == table.count("Paths  = @(") > 0
+    assert len(re.findall(r"Reason = [\x27\x22]\S", table)) == table.count("Paths  = @(") > 0
     return restamped - gated - out_of_class, out_of_class - restamped, gated & out_of_class
 
 
@@ -7152,6 +7177,17 @@ def test_every_restamped_path_is_gated_or_named_out_of_class() -> None:
     )
     assert planted != module
     assert _ungated_restamps(planted)[0] == {"PolicyCachePath"}
+    planted = module.replace(
+        managed,
+        managed.replace(
+            "    Set-DefenseClawPathAcl -Path $Layout.ConfigPath -Kind ConfigFile",
+            "    Set-DefenseClawPathAcl -Path $policyCache -Kind AdminFile -GatewayServiceSID $gatewaySID\n"
+            "    Set-DefenseClawPathAcl -Path $Layout.ConfigPath -Kind ConfigFile",
+            1,
+        ),
+        1,
+    )
+    assert _ungated_restamps(planted)[0] == {"<unmapped $policyCache>"}
 
     # The gateway service writes the runtime and IPC folders and owns what it
     # creates there; every other path allows only SYSTEM, Administrators and
@@ -7168,7 +7204,7 @@ def test_every_restamped_path_is_gated_or_named_out_of_class() -> None:
 
     # Repair re-stamps the credential store after the stop: the gate comes first.
     lifecycle = _function_text(module, "Invoke-DefenseClawInstallLikeLifecycle")
-    gated = lifecycle.index("Assert-DefenseClawStandaloneContentTrusted -Layout $Layout")
+    gated = lifecycle.index("Assert-DefenseClawStandaloneContentTrusted")
     assert gated < lifecycle.index("Set-DefenseClawStandaloneSecretsAcls `")
 
 
@@ -7184,8 +7220,24 @@ def test_every_restamping_lifecycle_runs_the_content_gate_first() -> None:
 
     module = read(MODULE).replace("\r\n", "\n")
     lifecycle = _function_text(module, "Invoke-DefenseClawInstallLikeLifecycle")
-    gate = lifecycle.index("Assert-DefenseClawStandaloneContentTrusted -Layout $Layout -GatewayServiceName $GatewayServiceName")
-    assert lifecycle.count("Assert-DefenseClawStandaloneContentTrusted") == 1
+    gate = lifecycle.index(
+        "Assert-DefenseClawStandaloneContentTrusted `\n"
+        "            -Layout $Layout `\n"
+        "            -GatewayServiceName $GatewayServiceName `\n"
+        "            -Except $writtenFresh"
+    )
+    assert lifecycle.count("Assert-DefenseClawStandaloneContentTrusted") == 2
+    # Install writes config.yaml and targets.yaml new from supplied sources;
+    # Repair restores them from Setup's approved copies (GAP-0568) and judges
+    # them right after that, before anything else reads them.
+    written = lifecycle[lifecycle.rindex("$writtenFresh = @()", 0, gate) : gate]
+    assert "$writtenFresh = @('ConfigPath', 'ManifestPath')" in written
+    assert "if ($Sources.ContainsKey('config')) { $writtenFresh += 'ConfigPath' }" in written
+    assert "if ($Sources.ContainsKey('manifest')) { $writtenFresh += 'ManifestPath' }" in written
+    recovery = lifecycle.index("Invoke-DefenseClawRepairApprovedPolicyRecovery `")
+    repaired = lifecycle.index("Assert-DefenseClawStandaloneContentTrusted -Layout $Layout -GatewayServiceName $GatewayServiceName")
+    assert gate < recovery < repaired < lifecycle.index("Assert-DefenseClawCodexMachinePolicyFilePreflight -Layout $Layout")
+    assert lifecycle.rindex("if ($Action -eq 'Repair' -and (Test-DefenseClawStandaloneProfile)) {", 0, recovery) > gate
     for consumer in (
         "Remove-DefenseClawUnclaimedInstallPreparationIntent `",
         "Remove-DefenseClawCommittedManagedHooksTeardownJournal `",
@@ -7196,7 +7248,7 @@ def test_every_restamping_lifecycle_runs_the_content_gate_first() -> None:
         "Set-DefenseClawStandaloneSecretsAcls `",
     ):
         assert gate < lifecycle.index(consumer), consumer
-    assert "$priorDeploymentActive" not in lifecycle[lifecycle.rindex("\n    if (", 0, gate) : gate]
+    assert "$priorDeploymentActive" not in lifecycle[lifecycle.rindex("\n    if (Test-DefenseClawStandaloneProfile) {", 0, gate) : gate]
 
     uninstall = _function_text(module, "Invoke-DefenseClawUninstallLifecycle")
     gate = uninstall.index("Assert-DefenseClawStandaloneContentTrusted `")
@@ -7226,7 +7278,8 @@ def test_every_restamping_lifecycle_runs_the_content_gate_first() -> None:
     # Purge skips only what it deletes unread; Retain skips only the install
     # tree the uninstall removes.
     content = _function_text(module, "Assert-DefenseClawStandaloneContentTrusted")
-    assert "[ValidateSet('Lifecycle', 'Retain', 'Purge')][string]$Scope = 'Lifecycle'" in content
+    assert "[ValidateSet('Lifecycle', 'Retain', 'Purge')][string]$Scope = 'Lifecycle'," in content
+    assert "if ($Scope -in $row[2] -and $row[0] -notin $Except) {" in content
     for name in ("InstallRoot", "BinDirectory", "LibexecDirectory", "CompilerLibDirectory", "CompilerDirectory"):
         assert f"@('{name}', $folder, @('Lifecycle'))," in content or f"@('{name}', $folder, @('Lifecycle'))\n" in content, name
     assert "@('BrokerStateDirectory', $state, $kept)," in content
