@@ -6049,12 +6049,13 @@ func suppliedArchiveModeTwin(command string, depth int) (string, bool) {
 		if from < 0 || to > len(command) || from >= to {
 			return true
 		}
-		body, first := literalShellCallBody(call, ""), len(call.Args)-1
+		body, first, last := shellCallBodyWord(call)
 		if body == "" {
 			body, first = staticEvalBody(call)
+			last = len(call.Args) - 1
 		}
 		if body != "" {
-			bodyFrom, bodyTo := int(call.Args[first].Pos().Offset()), int(call.Args[len(call.Args)-1].End().Offset())
+			bodyFrom, bodyTo := int(call.Args[first].Pos().Offset()), int(call.Args[last].End().Offset())
 			if bodyTwin, twinned := suppliedArchiveModeTwin(body, depth+1); twinned &&
 				bodyFrom >= from && bodyTo <= to && bodyFrom < bodyTo {
 				edits = append(edits, edit{bodyFrom, bodyTo, singleQuotedShellWord(bodyTwin)})
@@ -6113,6 +6114,27 @@ func SuppliedArchiveMayLink(command string) bool {
 		return !found
 	})
 	return found
+}
+
+// shellCallBodyWord is the body of a shell -c call read by shellCommandCall
+// (env sh -c BODY, sudo -u x bash -lc BODY, sh -c -- BODY, sh -c BODY sh a b)
+// and the index of its word, twice (first and last word of the body), or ""
+// when the launcher, shell and option words are not all static or the body
+// does not parse.
+func shellCallBodyWord(call *syntax.CallExpr) (string, int, int) {
+	words := make([]string, len(call.Args))
+	static := make([]bool, len(call.Args))
+	for i, arg := range call.Args {
+		words[i], static[i] = StaticWord(arg, "")
+	}
+	_, at, ok := shellCommandCall(words)
+	if !ok || at >= len(words) || slices.Contains(static[:at+1], false) {
+		return "", 0, 0
+	}
+	if _, parsed := parseShell(words[at]); !parsed {
+		return "", 0, 0
+	}
+	return words[at], at, at
 }
 
 // staticEvalBody is the body eval runs, its static argument words joined by

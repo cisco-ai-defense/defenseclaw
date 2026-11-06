@@ -2114,6 +2114,9 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 				}
 				if option == "-c" || len(option) > 2 && !strings.HasPrefix(option, "--") &&
 					!strings.ContainsAny(option, "=/") && strings.Contains(option[1:], "c") {
+					if end, static := StaticWord(call.Args[j+1], home); static && end == "--" && j+2 < len(call.Args) {
+						j++ // sh -c -- BODY: "--" ends the options, BODY is the command.
+					}
 					if child, static := StaticWord(call.Args[j+1], home); static {
 						if actionPosixShellBodyMention(child, cwd, home, depth+1, stateOnly, globs) {
 							found = true
@@ -3298,6 +3301,9 @@ func actionWindowsPOSIXShellMention(words []string, cwd, home string, depth int,
 		}
 		if option == "-c" || len(option) > 2 && !strings.HasPrefix(option, "--") &&
 			!strings.ContainsAny(option, "=/") && strings.Contains(option[1:], "c") {
+			if words[j+1] == "--" && j+2 < len(words) {
+				j++ // sh -c -- BODY
+			}
 			script := actionWindowsHereStringBody(words[j+1])
 			return actionPosixTargetMention(script, cwd, home, depth+1, stateOnly, (*actionGlobs)(nil).forCommandWith(script, memo)) ||
 				!stateOnly && actionConcreteProtectedWriteOnWith(script, cwd, home, true, memo)
