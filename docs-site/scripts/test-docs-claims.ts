@@ -1665,7 +1665,10 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2287", page: "enterprise/troubleshooting.mdx", has: ["`installed_version` is the recorded version when an administrator gave an unknown `--profile`; it is omitted for a standard account, which cannot read the deployment record."], lacks: ["because they were not checked, and `installed_version` is omitted."] },
   { gap: "GAP-2300", page: "enterprise/configuration.mdx", section: "Files next to the config", has: ["on Windows an `ensure` that repairs a missing record keeps the proven count and says `(recovered config generation)` in `reason` instead"] },
   { gap: "GAP-2301", page: "enterprise/configuration.mdx", section: "Where the config lives", has: ["(Administrators and SYSTEM full control; the gateway service, `NT SERVICE\\DefenseClawGateway`, can only read it)"], lacks: ["config.yaml` (Administrators only)"] },
-  { gap: "GAP-1461", page: "policies/defaults.mdx", has: ["Writes to the active user's `authorized_keys` are blocked in action mode when a direct command, a file tool or a supported literal interpreter form proves the target; in observe mode the same write raises a CRITICAL would-block alert and runs."], lacks: ["Writes to the active user's `authorized_keys` are blocked when"] },
+  { gap: "GAP-1461", page: "policies/defaults.mdx", has: ["A native file tool (Write, Edit, apply_patch) that writes the active user's `authorized_keys` is still blocked in action mode in every pack", "In observe mode a write that would block raises a CRITICAL would-block alert and runs."], lacks: ["Writes to the active user's `authorized_keys` are blocked"] },
+  { gap: "rel-1-0-6 GAP-0675", page: "policies/defaults.mdx", has: ["raises an alert that names the rule and runs in `default` and `permissive`, per-user and managed, even when the command names the file; `strict` (and a managed strict policy) blocks it in action mode."] },
+  { gap: "rel-1-0-6 GAP-0675", page: "guardrail/protected-files.mdx", has: ["## The hook rules for these files", "block in every pack. To block these commands, use the `strict` pack."], lacks: ["(and block it in action mode)"] },
+  { gap: "rel-1-0-6 GAP-0675", page: "enterprise/threat-model.mdx", has: ["**A shell command that writes a protected file of the user runs with an alert in the default policy.**"] },
   { gap: "GAP-0044", page: "sandboxes/guide.mdx", has: ["A stop DefenseClaw makes for your organization's policy (a hook alarm, a revoked registration) does not end a MicroVM whose disk could not sync either"], lacks: ["still goes ahead and the activity feed says what may be lost"] },
   { gap: "GAP-0044", page: "reference/sandbox-cli.mdx", has: ["A stop DefenseClaw makes for your organization's policy (a hook alarm, a revoked registration) does not end a MicroVM whose disk could not sync either"], lacks: ["still goes ahead and the activity feed says what may be lost"] },
   { gap: "GAP-2192", page: "enterprise/identity-entra-id.mdx", has: ['<Callout type="warn" title="Not part of the release certification">', "Active Directory is the certified identity stack. The Entra setups below were last verified live in October 2026"], lacks: ["1.0.4 certification", "certified identity stack in 1.0.4"] },
@@ -2040,6 +2043,20 @@ describe('authorized_keys writes block in action mode and alert in observe (GAP-
       assert.ok(rule, `${pack}: no persistence.ssh_authorized_keys_command rule`);
       assert.match(rule, /^ {4}severity: CRITICAL$/m, `${pack}: not CRITICAL (GAP-1461 sentence)`);
     }
+  });
+});
+
+// rel-1-0-6 GAP-0675: the pages and the CHANGELOG name the rules of the
+// shell-command protected-file class the gateway decides by posture.
+describe('shell-command protected-file class matches the pages (rel-1-0-6 GAP-0675)', () => {
+  it('lists the same four rules in the gateway and the CHANGELOG', () => {
+    const go = source('internal/gateway/shell_protected_file_profile.go');
+    const changelog = source('CHANGELOG.md');
+    for (const rule of ['persistence.ssh_authorized_keys_command', 'PATH-SSH-DIR', 'persistence.shell_profile_write', 'persistence.git_hook_write']) {
+      assert.ok(go.split('\n').some((line) => line.trim().replace(/\s+/g, ' ') === `"${rule.toUpperCase()}": true,`), `gateway class lacks ${rule}`);
+      assert.ok(changelog.includes(`\`${rule}\``), `CHANGELOG lacks ${rule}`);
+    }
+    assert.equal((go.match(/^\t"[A-Z0-9_.-]+":\s+true,$/gm) ?? []).length, 4, 'the gateway class changed: re-check the pages and the CHANGELOG');
   });
 });
 
