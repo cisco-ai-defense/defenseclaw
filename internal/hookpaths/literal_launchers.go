@@ -218,7 +218,11 @@ func literalProgramOperandsKnown(words []string, stmt *syntax.Stmt, cwd, home st
 			writes, _ := literalWriteOperandsWithParsedKnown(body, cwd, home, depth+1, nil, environment, include)
 			return writes
 		case "find":
-			return literalFindOperands(words, cwd, home, depth)
+			operands := literalFindOperands(words, cwd, home, depth)
+			if include != nil {
+				operands = append(operands, knownFindChangeOperands(words, cwd)...)
+			}
+			return operands
 		case ".", "source":
 			if allowFileRead {
 				return literalSourceFileOperands(words, cwd, home, depth)
@@ -240,7 +244,11 @@ func literalProgramOperandsKnown(words []string, stmt *syntax.Stmt, cwd, home st
 			if allowFileRead && strings.HasSuffix(program, ".sh") && actionScriptInsideCWD(words[0], cwd) {
 				return literalLocalShellScriptOperands(words[0], cwd, home, depth)
 			}
-			return directLiteralProgramOperands(words, stmt, cwd, home, allowFileRead)
+			operands := directLiteralProgramOperands(words, stmt, cwd, home, allowFileRead)
+			if include != nil {
+				operands = append(operands, knownEntryChangeOperands(words, cwd)...)
+			}
+			return operands
 		}
 	}
 	return nil
@@ -814,4 +822,108 @@ func literalGeneratedScriptOperands(file *syntax.File, cwd, home string, depth i
 		return nil
 	}
 	return append(redirects, literalWriteOperandsDepth(script, cwd, home, depth+1)...)
+}
+
+// knownEntryChangeOperands lists the operands a command changes without
+// writing content: it removes or renames the entry, or changes its mode,
+// owner or times. The known-environment reader judges these operands like
+// writer targets, so a protected file named through a known value is read
+// the same as the literal name. Read-only operands (a cp or install source,
+// a reference file) are not listed.
+func knownEntryChangeOperands(words []string, cwd string) []string {
+	if len(words) < 2 {
+		return nil
+	}
+	var valued map[string]bool
+	lastOnly := false
+	switch programBase(words[0]) {
+	case "rm", "grm", "unlink", "gunlink", "rmdir", "grmdir", "chmod", "gchmod", "chown", "gchown", "chgrp", "gchgrp":
+	case "shred", "gshred":
+		valued = map[string]bool{"-n": true, "-s": true, "--iterations": true, "--size": true}
+	case "mv", "gmv":
+		valued = map[string]bool{"-S": true, "--suffix": true}
+	case "touch", "gtouch":
+		valued = map[string]bool{"-d": true, "-t": true, "-r": true, "--date": true, "--reference": true}
+	case "install", "ginstall":
+		valued = map[string]bool{"-m": true, "-o": true, "-g": true, "-S": true, "--mode": true, "--owner": true, "--group": true, "--suffix": true}
+		lastOnly = true
+	case "sed", "gsed":
+		names := sedInPlaceFiles(words)
+		for i, name := range names {
+			names[i] = OperandPath(name, cwd)
+		}
+		return names
+	default:
+		return nil
+	}
+	var operands, targets []string
+	for i := 1; i < len(words); i++ {
+		word := words[i]
+		switch {
+		case word == "--":
+			operands = append(operands, words[i+1:]...)
+			i = len(words)
+		case word == "-t" || word == "--target-directory":
+			// mv -t and install -t name the directory that receives the
+			// entries.
+			if i+1 < len(words) {
+				targets = append(targets, words[i+1])
+				i++
+			}
+		case strings.HasPrefix(word, "--target-directory="):
+			targets = append(targets, strings.TrimPrefix(word, "--target-directory="))
+		case valued[word]:
+			i++
+		case strings.HasPrefix(word, "-"):
+		default:
+			operands = append(operands, word)
+		}
+	}
+	if lastOnly {
+		// install reads its sources and writes only its destination.
+		if len(targets) > 0 {
+			operands = nil
+		} else if len(operands) > 1 {
+			operands = operands[len(operands)-1:]
+		}
+	}
+	operands = append(operands, targets...)
+	for i, name := range operands {
+		operands[i] = OperandPath(name, cwd)
+	}
+	return operands
+}
+
+// knownFindChangeOperands lists the start points of a find that removes
+// or changes what it finds, through -delete or an -exec entry change.
+func knownFindChangeOperands(words []string, cwd string) []string {
+	var roots []string
+	index := 1
+	for index < len(words) && !strings.HasPrefix(words[index], "-") && words[index] != "(" && words[index] != "!" {
+		roots = append(roots, words[index])
+		index++
+	}
+	var operands []string
+	for i := index; i < len(words); i++ {
+		switch words[i] {
+		case "-delete":
+			for _, root := range roots {
+				operands = append(operands, OperandPath(root, cwd))
+			}
+		case "-exec", "-execdir", "-ok", "-okdir":
+			end := i + 1
+			for end < len(words) && words[end] != ";" && words[end] != "+" {
+				end++
+			}
+			for _, root := range roots {
+				child := append([]string(nil), words[i+1:end]...)
+				for j := range child {
+					child[j] = strings.ReplaceAll(child[j], "{}", root)
+				}
+				operands = append(operands, knownEntryChangeOperands(child, cwd)...)
+			}
+			i = end
+		}
+	}
+	return operands
 }
