@@ -637,11 +637,16 @@ class TestPerConnectorWriteSurface(_BaseSetup):
 
     def test_additive_setup_selects_complete_roster_before_first_gateway_start(self):
         self._seed_map("amp", "claudecode", "codex", "cursor")
+        atomic_write_private_bytes(os.path.join(self.tmp_dir, "defenseclaw-hook.exe"), b"installed fixture")
 
         with (
             patch(
                 "defenseclaw.commands.cmd_setup.platform_support.host_os",
                 return_value="windows",
+            ),
+            patch(
+                "defenseclaw.gateway.canonical_install_path",
+                return_value=os.path.join(self.tmp_dir, "defenseclaw-gateway.exe"),
             ),
             patch(
                 "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
