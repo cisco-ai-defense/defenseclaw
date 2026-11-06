@@ -90,7 +90,7 @@ func stageWindowsEnterprisePayloadIn(
 // status staging remains owned by the calling user and is validated against
 // that same user's trusted temporary-directory boundary.
 func protectWindowsEnterpriseStagedPayload(path string) error {
-	if !windows.GetCurrentProcessToken().IsElevated() {
+	if !windowsEnterpriseStagingElevated() {
 		return nil
 	}
 	administrators, err := windows.CreateWellKnownSid(
@@ -115,7 +115,7 @@ func protectWindowsEnterpriseStagedPayload(path string) error {
 // Administrators can write, so nobody can swap a script between this write and
 // the read PowerShell makes.
 func newWindowsEnterprisePayloadDirectory() (string, error) {
-	if windows.GetCurrentProcessToken().IsElevated() {
+	if windowsEnterpriseStagingElevated() {
 		parent, err := windowsEnterpriseProgramDataResolver()
 		if err != nil {
 			return "", fmt.Errorf("resolve the trusted ProgramData directory: %w", err)

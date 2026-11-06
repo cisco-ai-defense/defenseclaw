@@ -530,11 +530,11 @@ func createWindowsBundleDirectory(path, sddl string) error {
 		if !windowsEnterpriseIsElevated() {
 			return fmt.Errorf("bundle directory has an unexpected owner: %s", path)
 		}
-		user, err := windows.GetCurrentProcessToken().GetTokenUser()
+		user, err := windowsEnterpriseProcessUserSID()
 		if err != nil {
 			return err
 		}
-		if user == nil || !windowsEnterpriseSIDEqual(actualOwner, user.User.Sid) {
+		if user == nil || !windowsEnterpriseSIDEqual(actualOwner, user) {
 			return fmt.Errorf("bundle directory has an unexpected owner: %s", path)
 		}
 	}

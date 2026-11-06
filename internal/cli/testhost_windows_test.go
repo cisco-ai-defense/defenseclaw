@@ -109,6 +109,22 @@ func pinTestProcessIdentity() {
 	windowsEnterpriseRunningAsLocalSystem = func() bool { return false }
 	windowsClaudeSettingsCheckerIsLocalSystem = func() bool { return false }
 	enterpriseHookWindowsUserCleanupIdentity = func() error { return enterprisehooks.ErrWindowsEnterpriseNotLocalSystem }
+	// The enterprise hooks commands ask the token through this seam too
+	// (g079 review F3): it answers as the elevated runner.
+	enterpriseHooksPlatformPreflight = func() error { return nil }
+	// The lifecycle stages in the caller's own temp folder, which every
+	// identity can build, never in the computer's ProgramData. A test of the
+	// ProgramData staging sets useTestTokenForStaging.
+	windowsEnterpriseStagingElevated = func() bool { return false }
+}
+
+// useTestTokenForStaging makes the lifecycle staging follow the test
+// binary's own token, for a test of the elevated ProgramData staging itself.
+func useTestTokenForStaging(t *testing.T) {
+	t.Helper()
+	saved := windowsEnterpriseStagingElevated
+	t.Cleanup(func() { windowsEnterpriseStagingElevated = saved })
+	windowsEnterpriseStagingElevated = testTokenIsElevated
 }
 
 // isolateTestMachineWriters points every machine writer of the standalone
@@ -462,8 +478,12 @@ func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 	// GAP-0079: the identity is pinned.
 	if !windowsEnterpriseIsElevated() || !windowsSecretIsElevated() || !windowsCoworkElevated() ||
 		windowsEnterpriseRunningAsLocalSystem() || windowsClaudeSettingsCheckerIsLocalSystem() ||
-		!errors.Is(enterpriseHookWindowsUserCleanupIdentity(), enterprisehooks.ErrWindowsEnterpriseNotLocalSystem) {
+		!errors.Is(enterpriseHookWindowsUserCleanupIdentity(), enterprisehooks.ErrWindowsEnterpriseNotLocalSystem) ||
+		enterpriseHooksPlatformPreflight() != nil {
 		t.Fatalf("the package's tests do not run as %s", testProcessIdentityNote)
+	}
+	if windowsEnterpriseStagingElevated() {
+		t.Fatal("the lifecycle stages its scripts in the computer's ProgramData, not the caller's temp folder")
 	}
 }
 

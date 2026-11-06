@@ -1718,6 +1718,7 @@ func TestPrepareWindowsEnterprisePowerShellTempElevatedDescriptorRepairAndCleanu
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		t.Skip("protected ProgramData temp creation requires an elevated process token")
 	}
+	useTestTokenForStaging(t)
 	path, cleanup, err := prepareWindowsEnterprisePowerShellTemp()
 	if err != nil {
 		t.Fatalf("prepareWindowsEnterprisePowerShellTemp: %v", err)

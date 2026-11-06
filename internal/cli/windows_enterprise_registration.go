@@ -112,8 +112,24 @@ var windowsEnterpriseMachineRegistry = registry.LOCAL_MACHINE
 
 var (
 	windowsEnterpriseIsElevated = func() bool { return windows.GetCurrentProcessToken().IsElevated() }
-	windowsEnterpriseNow        = time.Now
-	windowsEnterpriseLogLimit   = int64(windowsEnterpriseLogMaxBytes)
+	// windowsEnterpriseStagingElevated says whether the lifecycle stages its
+	// scripts and its PowerShell temp folder under the Administrators-only
+	// ProgramData root (an elevated token) or in the caller's own temp
+	// folder. The package's tests pin it to the caller's temp folder: the
+	// ProgramData staging writes the computer's own ProgramData, and only an
+	// administrator token can build it (GAP-0079).
+	windowsEnterpriseStagingElevated = func() bool { return windows.GetCurrentProcessToken().IsElevated() }
+	// windowsEnterpriseProcessUserSID is the account of this process's
+	// token.
+	windowsEnterpriseProcessUserSID = func() (*windows.SID, error) {
+		user, err := windows.GetCurrentProcessToken().GetTokenUser()
+		if err != nil || user == nil {
+			return nil, err
+		}
+		return user.User.Sid, nil
+	}
+	windowsEnterpriseNow      = time.Now
+	windowsEnterpriseLogLimit = int64(windowsEnterpriseLogMaxBytes)
 )
 
 // observeWindowsEnterpriseStandaloneResult records a finished standalone

@@ -91,7 +91,7 @@ func runWindowsTargetRuntimeAction(cmd *cobra.Command, action string, opts *wind
 	}
 	// Authorization precedes every protected-file read so an unelevated caller
 	// cannot use this hidden command as a manifest/transaction oracle.
-	if err := enterpriseHooksNativePlatformPreflight(); err != nil {
+	if err := enterpriseHooksPlatformPreflight(); err != nil {
 		return err
 	}
 	output, err := requireWindowsTargetRuntimeProtectedPath(opts.output, "target-runtime output")

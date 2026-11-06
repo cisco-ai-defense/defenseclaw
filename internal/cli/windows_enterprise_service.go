@@ -1635,7 +1635,7 @@ func prepareWindowsEnterprisePowerShellTemp() (string, func() error, error) {
 	return prepareWindowsEnterprisePowerShellTempWithOps(
 		windowsEnterprisePowerShellTempOps{
 			isElevated: func() bool {
-				return windows.GetCurrentProcessToken().IsElevated()
+				return windowsEnterpriseStagingElevated()
 			},
 			userTemp: trustedWindowsEnterpriseUserTempDirectory,
 			elevatedTempRoot: func() (string, error) {
