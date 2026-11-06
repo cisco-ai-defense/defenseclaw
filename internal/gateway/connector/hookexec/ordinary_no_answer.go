@@ -5,7 +5,6 @@ package hookexec
 
 import (
 	"encoding/json"
-	"os"
 	osuser "os/user"
 	"path/filepath"
 	"strings"
@@ -13,9 +12,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
-// OrdinaryNoAnswerPayload is a local proof for a small per-user tool call
-// whose verified gateway connection reaches the answer deadline. It does
-// not turn an unknown tool or an unproved target into an allowed call.
+// OrdinaryNoAnswerPayload reports that a verified late call has no protected
+// candidate in the shared path reader. Unknown input keeps the closed answer.
 func OrdinaryNoAnswerPayload(body []byte) bool {
 	account, err := osuser.Current()
 	return err == nil && ordinaryNoAnswerPayloadInHome(body, account.HomeDir)
@@ -41,34 +39,17 @@ func ordinaryNoAnswerPayloadInHome(body []byte, home string) bool {
 	}
 	switch call.Tool {
 	case "Bash":
-		return ordinaryNoAnswerCommand(input["command"], call.CWD, home)
+		return lateCommandGrade(input["command"], call.CWD, home) == hookpaths.GradeNone
 	case "exec_command":
 		if len(input["command"]) != 0 {
 			return false
 		}
-		return ordinaryNoAnswerCommand(input["cmd"], commandWorkdir(input, call.CWD), home)
+		return lateCommandGrade(input["cmd"], commandWorkdir(input, call.CWD), home) == hookpaths.GradeNone
 	case "shell", "shell_command":
-		return ordinaryNoAnswerCommand(input["command"], commandWorkdir(input, call.CWD), home)
+		return lateCommandGrade(input["command"], commandWorkdir(input, call.CWD), home) == hookpaths.GradeNone
 	case "Read":
 		var path string
-		if json.Unmarshal(input["file_path"], &path) != nil || !filepath.IsAbs(path) ||
-			strings.ContainsAny(path, " \t\r\n'\"\\$`*?[];|&<>(){}") {
-			return false
-		}
-		cwd, err := filepath.EvalSymlinks(call.CWD)
-		if err != nil {
-			return false
-		}
-		resolved, err := filepath.EvalSymlinks(path)
-		if err != nil {
-			return false
-		}
-		rel, err := filepath.Rel(cwd, resolved)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return false
-		}
-		info, err := os.Stat(resolved)
-		if err != nil || !info.Mode().IsRegular() {
+		if json.Unmarshal(input["file_path"], &path) != nil || !filepath.IsAbs(path) {
 			return false
 		}
 		return hookpaths.ProtectedReach(path, home, hookpaths.NewTargetMemo()) == hookpaths.GradeNone
@@ -88,122 +69,23 @@ func commandWorkdir(input map[string]json.RawMessage, cwd string) string {
 	return workdir
 }
 
-func ordinaryNoAnswerCommand(raw json.RawMessage, cwd, home string) bool {
+func lateCommandGrade(raw json.RawMessage, cwd, home string) hookpaths.Grade {
 	if !filepath.IsAbs(cwd) || len(raw) == 0 {
-		return false
+		return hookpaths.GradePossible
 	}
 	var command string
 	if json.Unmarshal(raw, &command) != nil {
-		// Codex shell also sends a shell argv. Only an exact single shell
-		// command has the same meaning as the string form.
+		// A shell argv has the same meaning only for one exact command body.
 		var argv []string
 		if json.Unmarshal(raw, &argv) != nil || len(argv) != 3 ||
 			(argv[0] != "bash" && argv[0] != "sh" && argv[0] != "zsh") ||
 			(argv[1] != "-c" && argv[1] != "-lc") {
-			return false
+			return hookpaths.GradePossible
 		}
 		command = argv[2]
 	}
 	if strings.TrimSpace(command) == "" {
-		return false
+		return hookpaths.GradePossible
 	}
-	return !commandMayNameLink(command, cwd, home)
-}
-
-// commandMayNameLink closes an unresolved operand at a no-answer deadline.
-// The shell's words must be resolved before checking file identity; a known
-// PWD or HOME value can otherwise hide a protected link behind an alias.
-func commandMayNameLink(command, cwd, home string) bool {
-	calls, known := hookpaths.LateKnownCalls(command, cwd, home)
-	if !known {
-		return true
-	}
-	memo := hookpaths.NewTargetMemo()
-	for _, words := range calls {
-		if commandWordsMayNameLink(words, cwd, home, memo) {
-			return true
-		}
-	}
-	return false
-}
-
-func commandWordsMayNameLink(words []string, cwd, home string, memo *hookpaths.TargetMemo) bool {
-	endOptions := false
-	for i, word := range words {
-		if i == 0 && !strings.ContainsAny(word, "/\\") {
-			continue
-		}
-		if !endOptions && word == "--" {
-			endOptions = true
-			continue
-		}
-		if !endOptions && strings.HasPrefix(word, "-") {
-			_, value, assigned := strings.Cut(word, "=")
-			if assigned {
-				word = value
-			} else {
-				var known bool
-				word, known = attachedFileOptionValue(words[0], word)
-				if !known {
-					// An unfamiliar attached option may carry a file name.
-					// Inspect its bounded suffixes before granting a late proof.
-					for start := 2; start < len(words[i]); start++ {
-						if pathWordMayNameLink(words[i][start:], cwd, home, memo) {
-							return true
-						}
-					}
-					continue
-				}
-			}
-		}
-		if word == "" {
-			continue
-		}
-		if pathWordMayNameLink(word, cwd, home, memo) {
-			return true
-		}
-	}
-	return false
-}
-
-func pathWordMayNameLink(word, cwd, home string, memo *hookpaths.TargetMemo) bool {
-	path := word
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(cwd, path)
-	}
-	return hookpaths.ProtectedReach(path, home, memo) != hookpaths.GradeNone
-}
-
-// attachedFileOptionValue reads the file operand of a short option, including
-// a cluster of no-value switches before it. Options that consume non-file
-// text stop the scan, so a search pattern is not mistaken for a file name.
-func attachedFileOptionValue(program, option string) (string, bool) {
-	if len(option) < 3 || option[0] != '-' || option[1] == '-' {
-		return "", false
-	}
-	var fileOptions, textOptions, switches string
-	switch filepath.Base(program) {
-	case "grep", "egrep", "fgrep":
-		fileOptions, textOptions = "f", "eABCm"
-		switches = "EFGivnHhroqwslLaxZzUuPp"
-	case "sed":
-		fileOptions, textOptions = "f", "ei"
-		switches = "nErsuz"
-	case "awk", "gawk", "mawk", "nawk":
-		fileOptions, textOptions = "f", "FvW"
-		switches = ""
-	default:
-		// A direct -fFILE is a conventional file operand for other tools.
-		fileOptions = "f"
-	}
-	for i := 1; i < len(option); i++ {
-		if strings.IndexByte(fileOptions, option[i]) >= 0 {
-			return option[i+1:], true
-		}
-		if strings.IndexByte(textOptions, option[i]) >= 0 ||
-			strings.IndexByte(switches, option[i]) < 0 {
-			return "", strings.IndexByte(textOptions, option[i]) >= 0
-		}
-	}
-	return "", true
+	return hookpaths.LateCallGrade(command, cwd, home)
 }

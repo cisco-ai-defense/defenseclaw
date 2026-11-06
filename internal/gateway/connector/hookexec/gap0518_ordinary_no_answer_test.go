@@ -52,6 +52,58 @@ func TestGAP0518VerifiedOrdinaryNoAnswerFollowsTier(t *testing.T) {
 	}
 }
 
+func TestGAP0518LateKnownAliasesAndDisplays(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "project")
+	ssh := filepath.Join(home, ".ssh")
+	cache := filepath.Join(home, ".defenseclaw", "cache")
+	for _, dir := range []string{project, ssh, cache} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key := filepath.Join(ssh, "authorized_keys")
+	state := filepath.Join(cache, "entry")
+	ordinary := filepath.Join(project, "notes")
+	for _, path := range []string{key, state, ordinary} {
+		if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for source, alias := range map[string]string{
+		key:   filepath.Join(project, "key-alias"),
+		state: filepath.Join(project, "state-alias"),
+	} {
+		if err := os.Link(source, alias); err != nil {
+			t.Fatal(err)
+		}
+	}
+	call := func(tool, field, value string) []byte {
+		return []byte(`{"hook_event_name":"PreToolUse","tool_name":` + mustJSONString(tool) +
+			`,"cwd":` + mustJSONString(project) + `,"tool_input":{` + mustJSONString(field) + `:` + mustJSONString(value) + `}}`)
+	}
+	for _, row := range []struct {
+		name, tool, field, value string
+		ordinary                 bool
+	}{
+		{"key alias", "Bash", "command", "cat key-alias", false},
+		{"attached key alias", "Bash", "command", "grep -fkey-alias /dev/null", false},
+		{"nested key alias", "Bash", "command", "eval 'grep -fkey-alias /dev/null'", false},
+		{"state alias", "Bash", "command", "cat state-alias", false},
+		{"state read", "Read", "file_path", filepath.Join(project, "state-alias"), false},
+		{"ordinary file", "Bash", "command", "cat notes", true},
+		{"ordinary display", "Bash", "command", `echo "$PATH"`, true},
+		{"ordinary shell display", "Bash", "command", `printf '%s\n' "$SHELL"`, true},
+		{"ordinary nested display", "Bash", "command", "eval 'echo hello'", true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			if got := ordinaryNoAnswerPayloadInHome(call(row.tool, row.field, row.value), home); got != row.ordinary {
+				t.Fatalf("ordinary late proof = %t, want %t", got, row.ordinary)
+			}
+		})
+	}
+}
+
 func TestGAP0518OrdinaryProofRejectsProtectedLinkAndKnownValue(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")

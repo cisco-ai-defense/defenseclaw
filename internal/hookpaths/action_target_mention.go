@@ -1961,16 +1961,21 @@ type activeStateIdentity struct {
 }
 
 type activeStateIdentityIndex struct {
-	built time.Time
-	files []activeStateIdentity
+	built    time.Time
+	files    []activeStateIdentity
+	complete bool
 }
 
 func activeStateIdentities(activeRoot string) []activeStateIdentity {
+	return activeStateIdentityIndexForRoot(activeRoot).files
+}
+
+func activeStateIdentityIndexForRoot(activeRoot string) activeStateIdentityIndex {
 	activeStateIndex.Lock()
 	defer activeStateIndex.Unlock()
 	now := time.Now()
 	if index, ok := activeStateIndex.byRoot[activeRoot]; ok && now.Sub(index.built) < activeStateIndexTTL {
-		return index.files
+		return index
 	}
 	for root, index := range activeStateIndex.byRoot {
 		if now.Sub(index.built) >= activeStateIndexTTL {
@@ -1980,27 +1985,35 @@ func activeStateIdentities(activeRoot string) []activeStateIdentity {
 	if activeStateIndex.byRoot == nil {
 		activeStateIndex.byRoot = make(map[string]activeStateIdentityIndex)
 	}
-	files := walkActiveStateIdentities(activeRoot, now.Add(activeStateIndexBudget))
-	activeStateIndex.byRoot[activeRoot] = activeStateIdentityIndex{built: now, files: files}
-	return files
+	files, complete := walkActiveStateIdentities(activeRoot, now.Add(activeStateIndexBudget))
+	index := activeStateIdentityIndex{built: now, files: files, complete: complete}
+	activeStateIndex.byRoot[activeRoot] = index
+	return index
 }
 
-func walkActiveStateIdentities(activeRoot string, deadline time.Time) []activeStateIdentity {
+func walkActiveStateIdentities(activeRoot string, deadline time.Time) ([]activeStateIdentity, bool) {
 	activeStateIndexWalks.Add(1)
 	var files []activeStateIdentity
 	visited := 0
+	complete := true
 	exhausted := func() bool {
 		visited++
-		return visited > activeStateIndexEntries || time.Now().After(deadline)
+		if visited > activeStateIndexEntries || !deadline.IsZero() && time.Now().After(deadline) {
+			complete = false
+			return true
+		}
+		return false
 	}
 	add := func(path, relative string) {
 		if info, err := pathStat(path); err == nil && info.Mode().IsRegular() {
 			files = append(files, activeStateIdentity{relative: relative, info: info})
+		} else if err != nil && !os.IsNotExist(err) {
+			complete = false
 		}
 	}
 	for _, name := range activeStateFiles {
 		if exhausted() {
-			return files
+			return files, false
 		}
 		add(filepath.Join(activeRoot, name), name)
 	}
@@ -2011,7 +2024,13 @@ func walkActiveStateIdentities(activeRoot string, deadline time.Time) []activeSt
 				stopped = true
 				return fs.SkipAll
 			}
-			if walkErr != nil || entry.IsDir() {
+			if walkErr != nil {
+				if !os.IsNotExist(walkErr) {
+					complete = false
+				}
+				return nil
+			}
+			if entry.IsDir() {
 				return nil
 			}
 			if relative, err := filepath.Rel(activeRoot, path); err == nil {
@@ -2023,7 +2042,7 @@ func walkActiveStateIdentities(activeRoot string, deadline time.Time) []activeSt
 			break
 		}
 	}
-	return files
+	return files, complete
 }
 
 // actionPosixNestedShellMention scans each static shell -c or env -S body as

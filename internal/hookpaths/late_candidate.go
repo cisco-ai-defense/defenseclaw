@@ -4,11 +4,112 @@
 package hookpaths
 
 import (
+	"path/filepath"
 	"strings"
 
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
+
+// LateCallGrade combines every known word of a late shell call with the
+// shared protected-reach reader. An unreadable shell shape remains Possible;
+// it never clears a Named candidate found in another segment.
+func LateCallGrade(command, cwd, home string) Grade {
+	if !filepath.IsAbs(cwd) || !filepath.IsAbs(home) || len(command) > MaxPayloadBytes {
+		return GradePossible
+	}
+	calls, known := LateKnownCalls(command, cwd, home)
+	if !known {
+		return GradePossible
+	}
+	memo := NewTargetMemo()
+	grade := GradeNone
+	wordGrade := func(word string) Grade {
+		if word == "" {
+			return GradeNone
+		}
+		return ProtectedReach(OperandPath(word, cwd), home, memo)
+	}
+	for _, words := range calls {
+		if len(words) == 0 {
+			return GradePossible
+		}
+		program := programBase(words[0])
+		endOptions := false
+		for i, word := range words {
+			if i == 0 && !strings.ContainsAny(word, `/\`) {
+				continue
+			}
+			if i > 0 && !endOptions && word == "--" {
+				endOptions = true
+				continue
+			}
+			if i > 0 && !endOptions && strings.HasPrefix(word, "-") {
+				if strings.HasPrefix(word, "--") {
+					if option, value, assigned := strings.Cut(word, "="); assigned &&
+						!lateTextLongOption(program, option) {
+						grade = grade.Max(wordGrade(value))
+					}
+				} else if value, known := lateAttachedFileOptionValue(program, word); known {
+					grade = grade.Max(wordGrade(value))
+				} else {
+					for start := 2; start < len(word); start++ {
+						grade = grade.Max(wordGrade(word[start:]))
+					}
+				}
+			} else {
+				grade = grade.Max(wordGrade(word))
+			}
+			if grade == GradeNamed {
+				return grade
+			}
+		}
+	}
+	return grade
+}
+
+func lateTextLongOption(program, option string) bool {
+	switch program {
+	case "grep", "egrep", "fgrep":
+		return option == "--regexp" || option == "--max-count" || option == "--after-context" ||
+			option == "--before-context" || option == "--context"
+	case "sed":
+		return option == "--expression"
+	case "awk", "gawk", "mawk", "nawk":
+		return option == "--field-separator" || option == "--assign"
+	}
+	return false
+}
+
+// File-valued attached options are candidates; text-valued options are not.
+// Unknown clusters are checked at every suffix by LateCallGrade.
+func lateAttachedFileOptionValue(program, option string) (string, bool) {
+	if len(option) < 3 || option[0] != '-' || option[1] == '-' {
+		return "", false
+	}
+	var fileOptions, textOptions, switches string
+	switch program {
+	case "grep", "egrep", "fgrep":
+		fileOptions, textOptions = "f", "eABCm"
+		switches = "EFGivnHhroqwslLaxZzUuPp"
+	case "sed":
+		fileOptions, textOptions = "f", "ei"
+		switches = "nErsuz"
+	case "awk", "gawk", "mawk", "nawk":
+		fileOptions, textOptions = "f", "FvW"
+	default:
+		fileOptions = "f"
+	}
+	for i := 1; i < len(option); i++ {
+		if strings.IndexByte(fileOptions, option[i]) >= 0 {
+			return option[i+1:], true
+		}
+		if strings.IndexByte(textOptions, option[i]) >= 0 || strings.IndexByte(switches, option[i]) < 0 {
+			return "", strings.IndexByte(textOptions, option[i]) >= 0
+		}
+	}
+	return "", true
+}
 
 // LateKnownCalls supplies literal operands for a local late answer. Each
 // simple call keeps its own option boundary. A shell wrapper is read as a
@@ -60,13 +161,18 @@ func lateKnownStatement(stmt *syntax.Stmt, cwd, home string, depth int, compound
 		if !fixed || compound && lateChangesShellContext(program) {
 			return nil, false
 		}
-		if program == "bash" || program == "sh" || program == "zsh" {
-			if len(cmd.Args) != 3 {
+		if program == "bash" || program == "sh" || program == "zsh" || program == "eval" {
+			if program == "eval" && len(cmd.Args) != 2 || program != "eval" && len(cmd.Args) != 3 {
 				return nil, false
 			}
-			option, optionOK := StaticWord(cmd.Args[1], home)
-			body, bodyOK := lateKnownWord(cmd.Args[2], cwd, home)
-			if !optionOK || !bodyOK || option != "-c" && option != "-lc" {
+			bodyIndex := 2
+			if program == "eval" {
+				bodyIndex = 1
+			} else if option, known := StaticWord(cmd.Args[1], home); !known || option != "-c" && option != "-lc" {
+				return nil, false
+			}
+			body, bodyOK := lateKnownWord(cmd.Args[bodyIndex], cwd, home)
+			if !bodyOK {
 				return nil, false
 			}
 			inner, ok := lateKnownCalls(body, cwd, home, depth+1)
@@ -176,7 +282,8 @@ func lateDisplayValueWord(word *syntax.Word) bool {
 				}
 			case *syntax.ParamExp:
 				if !latePlainParam(part) ||
-					part.Param.Value != "USER" && part.Param.Value != "LOGNAME" {
+					part.Param.Value != "USER" && part.Param.Value != "LOGNAME" &&
+						part.Param.Value != "PATH" && part.Param.Value != "SHELL" {
 					return false
 				}
 				seen = true
@@ -190,7 +297,8 @@ func lateDisplayValueWord(word *syntax.Word) bool {
 }
 
 func lateValueParam(name string) bool {
-	return name == "HOME" || name == "PWD" || name == "USER" || name == "LOGNAME"
+	return name == "HOME" || name == "PWD" || name == "USER" || name == "LOGNAME" ||
+		name == "PATH" || name == "SHELL"
 }
 
 func lateKnownWordParts(word *syntax.Word) bool {

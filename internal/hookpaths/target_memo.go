@@ -45,6 +45,9 @@ type TargetMemo struct {
 	// reachParents stores the resolved parent and the grade of every link hop
 	// once for the missing leaves of one evaluation.
 	reachParents map[reachParentKey]reachParentAnswer
+	// stateIndices is a fresh, bounded identity reading for a multiply linked
+	// target. It is shared by paths in one evaluation and never reused later.
+	stateIndices map[string]activeStateIdentityIndex
 	// work counts the path components the memo walked on the file system
 	// and the candidate checks it computed (Work); candidates counts the
 	// Windows candidate checks among them (WorkParts).
@@ -59,11 +62,12 @@ const maxTargetMemoEntries = 1 << 16
 // NewTargetMemo returns an empty memo for one evaluation.
 func NewTargetMemo() *TargetMemo {
 	return &TargetMemo{
-		prefixes: make(map[string]walkState),
-		words:    make(map[memoWordKey]bool),
-		homes:    make(map[string]*actionStateHome),
-		keys:     make(map[string][]string),
-		files:    make(map[string]protectedFiles),
+		prefixes:     make(map[string]walkState),
+		words:        make(map[memoWordKey]bool),
+		homes:        make(map[string]*actionStateHome),
+		keys:         make(map[string][]string),
+		files:        make(map[string]protectedFiles),
+		stateIndices: make(map[string]activeStateIdentityIndex),
 	}
 }
 

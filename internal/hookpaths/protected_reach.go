@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"time"
 )
 
 // Grade is the strength of one path finding. Readers combine grades with Max:
@@ -62,12 +63,19 @@ func (m *TargetMemo) parentProtectedReach(parent, home string, names reachNames)
 			return answer
 		}
 	}
-	reached, unread := false, false
+	reached, linkedInProtectedDir, unread := false, false, false
 	lstat := func(path string) (os.FileInfo, error) {
 		if names.hasCandidate(path) {
 			reached = true
 		}
 		info, err := PathLstat(path)
+		if err == nil && info.Mode()&os.ModeSymlink != 0 {
+			for _, dir := range names.directories {
+				if pathAtOrUnder(path, dir) {
+					linkedInProtectedDir = true
+				}
+			}
+		}
 		unread = unread || ShareUnanswered(err)
 		return info, err
 	}
@@ -81,6 +89,8 @@ func (m *TargetMemo) parentProtectedReach(parent, home string, names reachNames)
 	switch {
 	case reached || ok && names.hasCandidate(resolved):
 		answer.grade = GradeNamed
+	case linkedInProtectedDir || ok && !samePathName(parent, resolved) && names.has(resolved):
+		answer.grade = GradePossible
 	case unread || !ok:
 		answer.grade = GradePossible
 	}
@@ -238,19 +248,23 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 		return GradeNamed
 	}
 	parent := filepath.Dir(target)
+	share := SharePath(target) || SharePath(home)
 	// A missing leaf cannot be a hard link. Resolve its parent through the
-	// evaluation memo, so long ordinary calls pay one leaf read per operand
-	// while linked parents and protected names still receive the same grade.
-	entryInfo, entryErr := PathLstat(target)
-	if os.IsNotExist(entryErr) {
-		answer := m.parentProtectedReach(parent, home, names)
-		if answer.grade != GradeNone {
+	// evaluation memo. A regular local file with one link cannot alias a
+	// protected file either; its parent reading is shared by every operand.
+	// Share reads start together below to preserve their answer window.
+	var entryInfo os.FileInfo
+	var entryErr error
+	if !share {
+		entryInfo, entryErr = PathLstat(target)
+		if os.IsNotExist(entryErr) || entryErr == nil &&
+			(entryInfo.IsDir() || entryInfo.Mode().IsRegular() && linkCount(target, entryInfo) == 1) {
+			answer := m.parentProtectedReach(parent, home, names)
+			if names.has(filepath.Join(answer.resolved, filepath.Base(target))) {
+				return GradeNamed
+			}
 			return answer.grade
 		}
-		if names.has(filepath.Join(answer.resolved, filepath.Base(target))) {
-			return GradeNamed
-		}
-		return GradeNone
 	}
 
 	type answer struct {
@@ -263,7 +277,6 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 		answer
 	}
 	protectedReady := make(map[string]*protectedRead)
-	share := SharePath(target) || SharePath(home)
 	if share {
 		start := func(path string) {
 			if _, started := protectedReady[path]; started {
@@ -292,9 +305,17 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 		return PathStat(path)
 	}
 	fileReady, parentReady := make(chan answer, 1), make(chan answer, 1)
+	var entryReady chan answer
+	if share {
+		entryReady = make(chan answer, 1)
+		go func() { info, err := PathLstat(target); entryReady <- answer{info, err} }()
+	}
 	go func() { info, err := PathStat(target); fileReady <- answer{info, err} }()
 	go func() { info, err := PathStat(parent); parentReady <- answer{info, err} }()
 	file, directory, entry := <-fileReady, <-parentReady, answer{entryInfo, entryErr}
+	if share {
+		entry = <-entryReady
+	}
 
 	// A reached file can be a hard link; a reached parent can be a linked
 	// directory whose final child has not been created yet.
@@ -381,6 +402,12 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 		}
 	}
 	if file.err == nil {
+		if !sshOnly && entry.info != nil && entry.info.Mode().IsRegular() &&
+			linkCount(target, entry.info) > 1 {
+			if grade := m.stateTreeHardlinkReach(file.info, home); grade != GradeNone {
+				return grade
+			}
+		}
 		if unknownFiles {
 			return GradePossible
 		}
@@ -394,6 +421,48 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 
 	if unread || unknownParents || ShareUnanswered(file.err) || ShareUnanswered(entry.err) || ShareUnanswered(directory.err) || !ok {
 		return GradePossible
+	}
+	return GradeNone
+}
+
+// stateTreeHardlinkReach compares a multiply linked file with the listed
+// active state trees. A complete reading gives an ordinary alias a definite
+// answer; an exhausted reading keeps an identity that it did not reach closed.
+func (m *TargetMemo) stateTreeHardlinkReach(info os.FileInfo, home string) Grade {
+	root, ok := m.resolveWriteTarget(filepath.Join(home, ".defenseclaw"))
+	if !ok {
+		return GradeNamed
+	}
+	var index activeStateIdentityIndex
+	var found bool
+	if m != nil {
+		m.mu.Lock()
+		index, found = m.stateIndices[root]
+		m.mu.Unlock()
+	}
+	if !found {
+		files, complete := walkActiveStateIdentities(root, time.Time{})
+		index = activeStateIdentityIndex{files: files, complete: complete}
+		if m != nil {
+			m.mu.Lock()
+			if m.stateIndices == nil {
+				m.stateIndices = make(map[string]activeStateIdentityIndex)
+			}
+			m.stateIndices[root] = index
+			m.mu.Unlock()
+		}
+	}
+	for _, file := range index.files {
+		if !os.SameFile(info, file.info) {
+			continue
+		}
+		current, err := PathStat(filepath.Join(root, filepath.FromSlash(file.relative)))
+		if err == nil && os.SameFile(info, current) {
+			return GradeNamed
+		}
+	}
+	if !index.complete {
+		return GradeNamed
 	}
 	return GradeNone
 }
