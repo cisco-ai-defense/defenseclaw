@@ -31,16 +31,16 @@ func openCodePortGuardian(t *testing.T, governed bool, uids ...int) (map[int]str
 }
 
 // openCodePortGuardianWith also returns a setter for the eligible uids (an
-// exclusion, a new account); every uid given here keeps its home, and every
-// uid resolves unless gone names it.
-func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int]string, *map[int]int, func(gone map[int]bool, eligible ...int)) {
+// exclusion, a new account) and the accounts whose home is not available this
+// pass; every uid keeps its home.
+func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int]string, *map[int]int, func(pending map[int]bool, eligible ...int)) {
 	t.Helper()
 	previousManifest, previousMachinePolicy := enterpriseHookManifest, enterpriseHookStandaloneMachinePolicySet
 	previousLoad, previousCheck, previousRunner := enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner
 	previousLoadPorts, previousWritePorts := enterpriseHookLoadOpenCodePorts, enterpriseHookWriteOpenCodePorts
-	previousResolves := enterpriseHookUIDResolves
+	previousHomeCheck := enterpriseHookCheckHome
 	t.Cleanup(func() {
-		enterpriseHookUIDResolves = previousResolves
+		enterpriseHookCheckHome = previousHomeCheck
 		enterpriseHookManifest, enterpriseHookStandaloneMachinePolicySet = previousManifest, previousMachinePolicy
 		enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner = previousLoad, previousCheck, previousRunner
 		enterpriseHookLoadOpenCodePorts, enterpriseHookWriteOpenCodePorts = previousLoadPorts, previousWritePorts
@@ -72,10 +72,18 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 	for _, account := range accounts {
 		byUID[account.UID] = account
 	}
-	gone := map[int]bool{}
-	enterpriseHookUIDResolves = func(uid int) bool { return !gone[uid] }
-	setEligible := func(nowGone map[int]bool, eligible ...int) {
-		gone = nowGone
+	unavailable := map[int]bool{}
+	enterpriseHookCheckHome = func(_ string, uid int) enterprisehooks.HomeCheck {
+		if unavailable[uid] {
+			return enterprisehooks.HomeCheck{State: enterprisehooks.HomePending}
+		}
+		return enterprisehooks.HomeCheck{State: enterprisehooks.HomeAvailable}
+	}
+	setEligible := func(pending map[int]bool, eligible ...int) {
+		unavailable = map[int]bool{}
+		for uid := range pending {
+			unavailable[uid] = true
+		}
 		accounts = nil
 		for _, uid := range eligible {
 			account, ok := byUID[uid]
@@ -255,10 +263,79 @@ func TestManagedGuardianKeepsTheOpenCodePortOfAnExcludedAccount(t *testing.T) {
 	if openCodePortIn(t, homes[1001]) != first[1001] {
 		t.Fatalf("re-enrolled 1001 moved off %d\n%s", first[1001], log)
 	}
-	// 1001 is deleted (its uid no longer resolves): its entry goes.
-	setEligible(map[int]bool{1001: true}, 1002, 9001)
+	// 1001 is deleted: its entry stays (REVIEW-gx053-3 MF2, below).
+	setEligible(nil, 1002, 9001)
 	runOpenCodePortPass(t)
-	if _, ok := (*record)[1001]; ok {
-		t.Fatalf("a deleted account kept its record entry: %v", *record)
+	if (*record)[1001] != first[1001] {
+		t.Fatalf("a departed account lost its record entry: %v", *record)
+	}
+}
+
+// REVIEW-gx053-3 MF1: a directory (AD, SSSD, LDAP) account the guardian's
+// static lookup cannot see, and an eligible account whose home is not
+// available this pass, keep their ports: no entry is ever dropped.
+func TestManagedGuardianNeverDropsAnOpenCodePortEntry(t *testing.T) {
+	const directory = 94401103 // dcad-alice on dc-ent-rhel: not in /etc/passwd
+	homes, record, setEligible := openCodePortGuardianWith(t, true, directory, 1002)
+	runOpenCodePortPass(t)
+	held := map[int]int{directory: openCodePortIn(t, homes[directory]), 1002: openCodePortIn(t, homes[1002])}
+	// The directory account is excluded; a new account starting on its port
+	// (same uid mod 8000) is enrolled.
+	newcomer := directory + 8000
+	setEligible(nil, 1002, newcomer)
+	runOpenCodePortPass(t)
+	if got := openCodePortIn(t, homes[newcomer]); got == held[directory] || got == held[1002] || got == 0 {
+		t.Fatalf("the newcomer got %d, held by another account (%v, record %v)", got, held, *record)
+	}
+	// 1002's home is not available (automount, homed): no worker answers
+	// for it; its entry stays and nobody else is given its port.
+	other := 1002 + 8000
+	setEligible(map[int]bool{1002: true}, 1002, newcomer, other)
+	runOpenCodePortPass(t)
+	if (*record)[1002] != held[1002] || (*record)[directory] != held[directory] {
+		t.Fatalf("an entry was dropped: %v (held %v)", *record, held)
+	}
+	if got := openCodePortIn(t, homes[other]); got == held[1002] || got == held[directory] {
+		t.Fatalf("account %d got %d, held by another account (%v)", other, got, held)
+	}
+}
+
+// REVIEW-gx053-3 MF2: an account deleted (userdel without -r) and created
+// again with its old home keeps its port; the account added in between got
+// another one.
+func TestManagedGuardianOpenCodePortForAnAccountThatComesBack(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
+	runOpenCodePortPass(t)
+	before := openCodePortIn(t, homes[1001])
+	setEligible(nil) // deleted: nobody eligible
+	runOpenCodePortPass(t)
+	setEligible(nil, 17001) // a new account whose first port is 1001's
+	runOpenCodePortPass(t)
+	setEligible(nil, 1001, 17001) // 1001 comes back with its old home
+	log := runOpenCodePortPass(t)
+	a, b := openCodePortIn(t, homes[1001]), openCodePortIn(t, homes[17001])
+	if a != before || a == b || b == 0 {
+		t.Fatalf("returning 1001 %d (was %d), 17001 %d, record %v\n%s", a, before, b, *record, log)
+	}
+}
+
+// With every port of the range taken an eligible account gets none: the
+// guardian writes nothing for it, says so, and no account shares a port.
+func TestManagedGuardianOpenCodePortRangeExhausted(t *testing.T) {
+	homes, record, _ := openCodePortGuardianWith(t, true, 1001)
+	full := map[int]int{}
+	for i := 0; i < enterprisepolicy.OpenCodeAccountPortSpan; i++ {
+		full[100000+i] = enterprisepolicy.OpenCodeAccountPortBase + i
+	}
+	*record = full
+	log := runOpenCodePortPass(t)
+	if port := openCodePortIn(t, homes[1001]); port != 0 {
+		t.Fatalf("1001 was given %d although every port is taken", port)
+	}
+	if !strings.Contains(log, "no free OpenCode background server port for ent1001") {
+		t.Fatalf("exhaustion is not logged:\n%s", log)
+	}
+	if len(*record) != enterprisepolicy.OpenCodeAccountPortSpan {
+		t.Fatalf("record changed size: %d", len(*record))
 	}
 }

@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/user"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -71,13 +70,6 @@ var (
 	enterpriseHookLoadOpenCodePorts  = enterprisehooks.LoadUnixOpenCodeServicePorts
 	enterpriseHookWriteOpenCodePorts = enterprisehooks.WriteUnixOpenCodeServicePorts
 	enterpriseHookReadOpenCodePort   = enterprisepolicy.ReadOpenCodeServicePort
-	// enterpriseHookUIDResolves reports that a uid still names an account:
-	// a recorded OpenCode port stays taken until then (MF1, the GAP-1704 rule
-	// for API-port claims), even while the account is not eligible.
-	enterpriseHookUIDResolves = func(uid int) bool {
-		_, err := user.LookupId(strconv.Itoa(uid))
-		return err == nil
-	}
 )
 
 var enterpriseHookForeignCleanupState struct {
@@ -291,6 +283,13 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			}
 		}
 		openCodePorts = enterprisepolicy.AssignOpenCodeServicePorts(uids, kept)
+		for _, account := range accounts {
+			if openCodePorts[account.UID] == 0 {
+				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: no free OpenCode background server port for %s: every port from %d to %d is taken; %s keeps OpenCode's default\n",
+					account.User, enterprisepolicy.OpenCodeAccountPortBase,
+					enterprisepolicy.OpenCodeAccountPortBase+enterprisepolicy.OpenCodeAccountPortSpan-1, account.User)
+			}
+		}
 	}
 	leftovers := func(user string) []string {
 		out := []string{}
@@ -941,20 +940,21 @@ func enterpriseHookOpenCodePortsPath(manifestPath string) string {
 }
 
 // nextOpenCodeServicePorts is the record after a pass: the ports the workers
-// reported for the eligible accounts, and every other recorded port while
-// its uid still names an account. An account that left the eligible set
-// keeps its port (its OpenCode still listens there), so no new account is
-// given it (MF1); the entry goes only when the account is gone.
+// reported for the eligible accounts, and every other recorded port. An entry
+// is never dropped (REVIEW-gx053-3, the rule GAP-1704 keeps for API-port
+// claims): an account that left the eligible set, one whose home was not
+// available this pass, one the guardian's lookup cannot see (directory
+// accounts in a static build), and one deleted and created again with its old
+// home all keep their port, so no other account is given it. The range holds
+// 8000 ports, one entry per account that ever had OpenCode here.
 func nextOpenCodeServicePorts(recorded, seen map[int]int, accounts []enterprisehooks.UnixEligibleAccount) (map[int]int, bool) {
 	next := map[int]int{}
+	for uid, port := range recorded {
+		next[uid] = port
+	}
 	for _, account := range accounts {
 		if port, ok := seen[account.UID]; ok {
 			next[account.UID] = port
-		}
-	}
-	for uid, port := range recorded {
-		if _, ok := next[uid]; !ok && enterpriseHookUIDResolves(uid) {
-			next[uid] = port
 		}
 	}
 	changed := len(next) != len(recorded)
