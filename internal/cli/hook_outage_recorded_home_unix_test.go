@@ -49,13 +49,13 @@ func TestHookOutageFailModeNowFollowsTheRecordedInstallHome(t *testing.T) {
 		{name: "record writable by others", config: outageNowDefaultConfig, want: "closed",
 			prepare: func(t *testing.T, r, x string) {
 				for _, dir := range []string{r, x} {
-					chmod(t, filepath.Join(dir, "hooks", hookConfigRecordName), 0o666)
+					chmod(t, filepath.Join(dir, "hooks", ".config-record"), 0o666)
 				}
 			}},
 		{name: "record is a link", config: outageNowDefaultConfig, want: "closed",
 			prepare: func(t *testing.T, r, x string) {
 				for _, dir := range []string{r, x} {
-					rec := filepath.Join(dir, "hooks", hookConfigRecordName)
+					rec := filepath.Join(dir, "hooks", ".config-record")
 					raw, err := os.ReadFile(rec)
 					if err != nil {
 						t.Fatal(err)
@@ -142,7 +142,7 @@ func chmod(t *testing.T, path string, mode os.FileMode) {
 
 func writeRecord(t *testing.T, dataDir, target string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dataDir, "hooks", hookConfigRecordName), []byte(target+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dataDir, "hooks", ".config-record"), []byte(target+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }

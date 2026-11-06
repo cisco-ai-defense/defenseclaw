@@ -74,10 +74,19 @@ func perUserRootGatewayReason(opts Options) string {
 	if holderErr != nil {
 		holder = daemon.PortHolder{UID: -1}
 	}
-	if perUserListenerClass(host, port, opts.Home, holder, holderErr, true) != daemon.PerUserListenerOwnGatewayRunAsRoot {
-		return ""
+	for _, home := range perUserRecordHomes(opts) {
+		if perUserListenerClass(host, port, home, holder, holderErr, true) == daemon.PerUserListenerOwnGatewayRunAsRoot {
+			return daemon.RootGatewayListenerReason + " " + daemon.RootGatewayListenerRemedy(home)
+		}
 	}
-	return daemon.RootGatewayListenerReason + " " + daemon.RootGatewayListenerRemedy(opts.Home)
+	return ""
+}
+
+// PerUserRootGatewayReason returns the verified root-gateway diagnosis for a
+// shell hook's current data store. It only describes the listener; the hook's
+// connected-peer check continues to decide whether a call can be sent.
+func PerUserRootGatewayReason(apiAddr, dataDir string) string {
+	return perUserRootGatewayReason(Options{APIAddr: apiAddr, Home: dataDir})
 }
 
 func perUserPeerRefusal(reason string) bool {
