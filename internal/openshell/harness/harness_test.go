@@ -237,7 +237,8 @@ func TestNpmPinnedInstallChecksDigests(t *testing.T) {
 		{Codex, codexPin, "npm uninstall -g '@openai/codex'", nil},
 		{OpenCode, openCodePin, "npm uninstall -g 'opencode-ai'", nil},
 		{Copilot, copilotPin, "npm uninstall -g '@github/copilot'", []string{
-			`COPILOT_PKG_CACHE_HOME="$cache" /usr/local/bin/copilot --version`, "'GitHub Copilot CLI 1.0.88.'",
+			`COPILOT_PKG_CACHE_HOME="$cache" /usr/local/bin/copilot --version`,
+			`got="${got#GitHub Copilot CLI }"; got="${got%.}"`, pinVersionCheck("Copilot", copilotPin.Version),
 			"-name .extraction-complete", `chown -R root:root "$cache"; chmod -R go-w "$cache"`,
 		}},
 		{Amp, ampPin, "", nil},
@@ -377,9 +378,9 @@ func TestTarballPinnedInstallChecksDigests(t *testing.T) {
 		pin     tarballPin
 		version string
 	}{
-		{Cursor, cursorPin, `[ "$got" = '2026.07.23-e383d2b' ]`},
-		{Kiro, kiroPin, `[ "$got" = 'kiro-cli-chat 2.24.1' ]`},
-		{Devin, devinPin, `[ "$got" = '3000.4.25' ]`},
+		{Cursor, cursorPin, pinVersionCheck("Cursor Agent", cursorPin.Version)},
+		{Kiro, kiroPin, `got="${got#kiro-cli-chat }"; ` + pinVersionCheck("Kiro CLI", kiroPin.Version)},
+		{Devin, devinPin, pinVersionCheck("Devin CLI", devinPin.Version)},
 	} {
 		t.Run(tc.spec.Name, func(t *testing.T) {
 			steps, err := tc.spec.InstallSteps("")
@@ -636,16 +637,26 @@ func TestProbeVersionPatterns(t *testing.T) {
 		want string
 	}{
 		{ClaudeCode, "2.1.156 (Claude Code)\n", "2.1.156"},
+		{ClaudeCode, "v2.1.156 (Claude Code)\n", "2.1.156"},
 		{Codex, "codex-cli 0.146.0\n", "0.146.0"},
+		{Codex, "codex-cli v0.146.0\n", "0.146.0"},
 		{OpenCode, "2.1.4", "2.1.4"},
+		{OpenCode, "opencode v2.1.4", "2.1.4"},
 		// The probe keeps only [A-Za-z0-9 ._()+-] of the first line.
 		{Copilot, "GitHub Copilot CLI 1.0.88.", "1.0.88"},
+		{Copilot, "GitHub Copilot CLI v1.0.88.", "1.0.88"},
 		{Amp, "0.0.1785334225-g9abe75 (released 2026-07-29T141025.000Z 1mo ago)", "0.0.1785334225-g9abe75"},
+		{Amp, "v0.0.1785334225-g9abe75 (released 2026-07-29T141025.000Z 1mo ago)", "0.0.1785334225-g9abe75"},
 		{Cursor, "2026.07.23-e383d2b", "2026.07.23-e383d2b"},
+		{Cursor, "v2026.07.23-e383d2b", "2026.07.23-e383d2b"},
 		{Kiro, "kiro-cli-chat 2.24.1", "2.24.1"},
+		{Kiro, "kiro-cli-chat v2.24.1", "2.24.1"},
 		{Devin, "devin 3000.4.25 (7e8e528a)", "3000.4.25"},
+		{Devin, "devin v3000.4.25 (7e8e528a)", "3000.4.25"},
 		{Hermes, "Hermes Agent v0.19.0 (2026.7.20)\n", "0.19.0"},
+		{Hermes, "Hermes Agent 0.19.0 (2026.7.20)\n", "0.19.0"},
 		{Antigravity, "1.2.12\n", "1.2.12"},
+		{Antigravity, "v1.2.12\n", "1.2.12"},
 	} {
 		if m := tc.spec.Probe().VersionRE.FindStringSubmatch(strings.TrimSpace(tc.out)); len(m) != 2 || m[1] != tc.want {
 			t.Errorf("%s version pattern on %q = %v", tc.spec.Name, tc.out, m)
@@ -653,6 +664,50 @@ func TestProbeVersionPatterns(t *testing.T) {
 	}
 	if !strings.Contains(Hermes.Probe().NetworkBinaries, "/opt/defenseclaw-harness/hermes/tools/hermes-agent/bin/python") {
 		t.Fatalf("hermes network binary probe = %s", Hermes.Probe().NetworkBinaries)
+	}
+}
+
+func TestHarnessImageVersionChecksUsePinnedRelease(t *testing.T) {
+	for _, tc := range []struct {
+		spec    *Spec
+		display string
+	}{
+		{ClaudeCode, "Claude Code"}, {Codex, "Codex"},
+		{OpenCode, "OpenCode"}, {Copilot, "Copilot"},
+		{Amp, "Amp"}, {Cursor, "Cursor Agent"},
+		{Kiro, "Kiro CLI"}, {Devin, "Devin CLI"},
+		{Hermes, "Hermes Agent"}, {Antigravity, "Antigravity CLI"},
+	} {
+		t.Run(tc.spec.Name, func(t *testing.T) {
+			check := pinVersionCheck(tc.display, tc.spec.DefaultVersion)
+			steps, err := tc.spec.InstallSteps("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var run strings.Builder
+			for _, step := range steps {
+				run.WriteString(step.Run)
+			}
+			if !strings.Contains(run.String(), check) {
+				t.Fatal("image install does not use the shared pinned version check")
+			}
+			for _, sample := range []struct {
+				value string
+				allow bool
+			}{
+				{tc.spec.DefaultVersion, true},
+				{"v" + tc.spec.DefaultVersion, true},
+				{tc.spec.DefaultVersion + ".1", false},
+				{"vv" + tc.spec.DefaultVersion, false},
+			} {
+				cmd := exec.Command("/bin/sh", "-c", `got="$VERSION_REPLY"; `+check)
+				cmd.Env = append(os.Environ(), "VERSION_REPLY="+sample.value)
+				out, err := cmd.CombinedOutput()
+				if (err == nil) != sample.allow {
+					t.Errorf("version %q: allowed=%t, want %t: %s", sample.value, err == nil, sample.allow, out)
+				}
+			}
+		})
 	}
 }
 
