@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -148,6 +150,16 @@ func TestValidateWindowsStagedRetireGatewayImage(t *testing.T) {
 		}
 	}
 	setDACL(t, root, programDataLike)
+	// A refusal names its principal: BUILTIN\Users for an access rule, the
+	// test account for its own owner (g079 review 2 R3).
+	usersSID, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
 	cases := []struct {
 		name      string
 		folder    string
@@ -197,6 +209,10 @@ func TestValidateWindowsStagedRetireGatewayImage(t *testing.T) {
 			if !tc.admitted && err == nil {
 				t.Fatalf("gateway another user can change was admitted: %s", executable)
 			}
+			var refusal *managed.UntrustedPrincipalError
+			if !tc.admitted && !errors.As(err, &refusal) {
+				t.Fatalf("refusal = %v, want an untrusted principal", err)
+			}
 			// The resolver applies this check before it uses the gateway.
 			_, resolveErr := resolveWindowsStagedRetireInstallRoot(executable)
 			if resolveErr == nil {
@@ -208,6 +224,25 @@ func TestValidateWindowsStagedRetireGatewayImage(t *testing.T) {
 			if tc.admitted && strings.Contains(resolveErr.Error(), tc.folder) {
 				t.Fatalf("resolver refused the admitted gateway: %v", resolveErr)
 			}
+			if tc.admitted {
+				return
+			}
+			if elevated {
+				// The chain is Administrators-owned, so the refusal is the
+				// access rule: the write-like entry of BUILTIN\Users.
+				if refusal.Owner || refusal.SID != usersSID.String() {
+					t.Fatalf("refusal = %v, want the write-like entry of BUILTIN\\Users (%s)", err, usersSID)
+				}
+				return
+			}
+			// Unelevated, the test account owns the chain it created, and the
+			// validator checks the owner before the DACL.
+			if !refusal.Owner || refusal.SID != account.User.Sid.String() {
+				t.Fatalf("refusal = %v, want the test account %s refused as the owner", err, account.User.Sid)
+			}
+			t.Skip("the access-rule refusal runs only elevated: an unelevated account can make no other principal the owner of what it creates " +
+				"(that needs SeRestorePrivilege, which only an administrator token holds), and the validator refuses the account's own owner " +
+				"before it reads the DACL; the owner refusal was checked")
 		})
 	}
 }
