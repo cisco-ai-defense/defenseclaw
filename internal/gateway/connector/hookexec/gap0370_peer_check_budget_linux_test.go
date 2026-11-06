@@ -22,6 +22,16 @@ import (
 // admission work. The watchdog must still leave its delivered block witness
 // when local failure-log opens are delayed.
 func TestGAP0370HealthBeyondWindowStillCarriesDeadlineBlock(t *testing.T) {
+	testGAP0370HealthBeyondWindowStillCarriesDeadlineBlock(t, http.StatusOK)
+}
+
+// A failed health request is unrelated to the accepted POST. Its later 103
+// must still reserve the body for the watchdog's delivered block receipt.
+func TestGAP0370FailedHealthStillCarriesDeadlineBlock(t *testing.T) {
+	testGAP0370HealthBeyondWindowStillCarriesDeadlineBlock(t, http.StatusServiceUnavailable)
+}
+
+func testGAP0370HealthBeyondWindowStillCarriesDeadlineBlock(t *testing.T, healthStatus int) {
 	shortAnswerBudget(t, time.Second)
 	stall := make(chan struct{})
 	previous := openHookFailureLog
@@ -42,8 +52,10 @@ func TestGAP0370HealthBeyondWindowStillCarriesDeadlineBlock(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
 			time.Sleep(400 * time.Millisecond)
-			w.Header().Set(HookDeliveryCapabilityHeader, "1")
-			w.WriteHeader(http.StatusOK)
+			if healthStatus == http.StatusOK {
+				w.Header().Set(HookDeliveryCapabilityHeader, "1")
+			}
+			w.WriteHeader(healthStatus)
 			return
 		}
 		controller := http.NewResponseController(w)
