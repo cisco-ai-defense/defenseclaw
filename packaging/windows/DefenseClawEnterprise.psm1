@@ -5152,33 +5152,6 @@ function Test-DefenseClawReplacementRights {
     return (($rightsValue -band ($replacementMask -bor $genericReplacementMask)) -ne 0)
 }
 
-# The PowerShell counterpart of managed.PlatformInstallerOwnedRoots. The
-# AIFW-34262 advisory covers directories whose permissions belong to the Cisco
-# Secure Client installer (AVC), which shares and re-ACLs them on its own
-# schedule. Everything else - C:\, C:\ProgramData and C:\Program Files
-# themselves, any third-party prefix - has no other claimant, so an untrusted
-# owner or replacement grant there stays fatal exactly as it was before
-# AIFW-34262. C:\ProgramData\Cisco is always included, even if %ProgramData% is
-# redirected, so the canonical managed tree is never judged foreign.
-function Get-DefenseClawPlatformInstallerOwnedRoots {
-    $roots = [Collections.Generic.List[string]]::new()
-    $roots.Add('C:\ProgramData\Cisco')
-    foreach ($base in @($script:ProgramData, $script:ProgramFiles)) {
-        if ([string]::IsNullOrWhiteSpace($base)) {
-            continue
-        }
-        $root = [IO.Path]::GetFullPath(
-            [IO.Path]::Combine($base, 'Cisco')
-        ).TrimEnd('\')
-        if (-not ($roots | Microsoft.PowerShell.Core\Where-Object {
-            [string]::Equals($_, $root, [StringComparison]::OrdinalIgnoreCase)
-        })) {
-            $roots.Add($root)
-        }
-    }
-    return $roots.ToArray()
-}
-
 function Test-DefenseClawTrustStrictAncestors {
     $raw = [Environment]::GetEnvironmentVariable(
         $script:TrustStrictAncestorsEnv,
