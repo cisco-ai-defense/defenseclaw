@@ -96,15 +96,25 @@ func TestOpenClawOutageExecContextTargets(t *testing.T) {
 	}{
 		{"ordinary", map[string]interface{}{"command": "date"}, "open"},
 		{"unused environment path", map[string]interface{}{"command": "date", "env": map[string]interface{}{"OUT": protected}}, "open"},
+		{"unused FILE", map[string]interface{}{"command": "printf x >> notes.txt", "env": map[string]interface{}{"FILE": protected}}, "open"},
+		{"unused TARGET", map[string]interface{}{"command": "printf x >> notes.txt", "env": map[string]interface{}{"TARGET": protected}}, "open"},
+		{"unused DEST", map[string]interface{}{"command": "printf x >> notes.txt", "env": map[string]interface{}{"DEST": protected}}, "open"},
 		{"literal environment spelling", map[string]interface{}{"command": "printf x >> '$OUT'", "env": map[string]interface{}{"OUT": protected}}, "open"},
 		{"read-only environment path", map[string]interface{}{"command": "printf '%s' \"$OUT\"", "env": map[string]interface{}{"OUT": protected}}, "open"},
 		{"read environment to ordinary file", map[string]interface{}{"command": "printf '%s' \"$OUT\" > " + filepath.Join(other, "notes.txt"), "env": map[string]interface{}{"OUT": protected}}, "open"},
+		{"nested read environment to ordinary file", map[string]interface{}{"command": `sh -c 'printf "%s" "$OUT" > notes.txt'`, "env": map[string]interface{}{"OUT": protected}}, "open"},
+		{"empty environment uses ordinary default", map[string]interface{}{"command": `printf x >> "${OUT:-notes.txt}"`, "env": map[string]interface{}{"OUT": ""}}, "open"},
 		{"direct", map[string]interface{}{"command": "printf x >> " + protected}, "protected"},
 		{"workdir", map[string]interface{}{"command": "printf x >> config.yaml", "workdir": dataDir}, "protected"},
 		{"home workdir", map[string]interface{}{"command": "printf x >> .defenseclaw/config.yaml", "workdir": "~"}, "protected"},
 		{"env", map[string]interface{}{"command": "printf x >> \"$OUT\"", "env": map[string]interface{}{"OUT": protected}}, "protected"},
 		{"unquoted env", map[string]interface{}{"command": "printf x >> $OUT", "env": map[string]interface{}{"OUT": protected}}, "protected"},
 		{"braced env", map[string]interface{}{"command": "printf x >> \"${OUT}\"", "env": map[string]interface{}{"OUT": protected}}, "protected"},
+		{"defaulted braced env", map[string]interface{}{"command": "printf x >> \"${OUT:-notes.txt}\"", "env": map[string]interface{}{"OUT": protected}}, "protected"},
+		{"alternate braced env", map[string]interface{}{"command": "printf x >> \"${OUT-notes.txt}\"", "env": map[string]interface{}{"OUT": protected}}, "protected"},
+		{"nested sh env", map[string]interface{}{"command": `sh -c 'printf x >> "$OUT"'`, "env": map[string]interface{}{"OUT": protected}}, "protected"},
+		{"nested bash env", map[string]interface{}{"command": `bash -c 'printf x >> "$OUT"'`, "env": map[string]interface{}{"OUT": protected}}, "protected"},
+		{"nested bash flags env", map[string]interface{}{"command": `bash -lc 'printf x >> "${OUT:-notes.txt}"'`, "env": map[string]interface{}{"OUT": protected}}, "protected"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			blob, err := json.Marshal(outageToolPayload{Name: "exec", Args: tc.args, CWD: other})
