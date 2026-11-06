@@ -6020,8 +6020,18 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     assert 'windowsCreatedFolderRecordDirName = "created-folders"' in go
     assert "$script:CreatedFolderRecordSchema = 1" in module
     assert "windowsCreatedFolderRecordSchema  = 1" in go
-    assert "$full.ToLowerInvariant()" in _psm1_function(module, "Get-DefenseClawCreatedFolderRecordName")
-    assert "sha256.Sum256([]byte(strings.ToLower(filepath.Clean(path))))" in go
+    # Both sides fold only A-Z (review L3); the smoke and the Go test pin one
+    # name for the same non-ASCII path.
+    assert "(ConvertTo-DefenseClawAsciiLowerCase -Value $full)" in _psm1_function(module, "Get-DefenseClawCreatedFolderRecordName")
+    assert "if ($code -ge 0x41 -and $code -le 0x5A) {" in _psm1_function(module, "ConvertTo-DefenseClawAsciiLowerCase")
+    assert "sha256.Sum256([]byte(asciiLowerCase(filepath.Clean(path))))" in go
+    assert "if 'A' <= r && r <= 'Z' {" in go
+    pinned = "cb0ed1e34f5e1961147f1101c3b7a237146fc893cc261ebfaaadb52ada704767"
+    path = "C:\\ProgramData\\\u00dcn\u00efcode \u0130\\Codex"
+    folded = "".join(chr(ord(c) + 32) if "A" <= c <= "Z" else c for c in path)
+    assert hashlib.sha256(folded.encode("utf-8")).hexdigest() == pinned
+    assert pinned in read(ROOT / "internal" / "enterprisehooks" / "created_folders_windows_test.go")
+    assert pinned in read(ROOT / "packaging" / "windows" / "tests" / "enterprise-standalone-machine-leftovers-purge-smoke.ps1")
     protected = _psm1_function(module, "New-DefenseClawProtectedDirectory")
     assert "$sddl = 'O:BAG:BAD:P'" in protected and "(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" in protected
     assert '"O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"' in go
@@ -6040,21 +6050,53 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     assert "!windowsEnterpriseStandaloneProcess()" in go
 
     # The consumer: only with no deployment, no pending finalizer and no
-    # other scope's state in the lifecycle folder; removal keeps anything
-    # that holds an entry or is a link.
-    pop = _psm1_function(module, "Pop-DefenseClawStandaloneCreatedFolderRecords")
-    assert "Test-DefenseClawStandaloneNoDeploymentLeft -Layout $Layout" in pop
-    assert "SelfUninstallReceiptPath" in pop
-    assert "$entry.Name -cne 'lifecycle.lock' -and $entry.Name -cne $recordName" in pop
-    assert "(Get-DefenseClawCreatedFolderRecordName -Path $recorded) -cne $item.Name" in pop
+    # other scope's state in the lifecycle folder, under the lock (review
+    # L2); a record goes only once its folder is gone (L1).
+    consumer = _psm1_function(module, "Invoke-DefenseClawStandaloneCreatedFolderRemoval")
+    assert "Test-DefenseClawStandaloneNoDeploymentLeft -Layout $Layout" in consumer
+    assert "SelfUninstallReceiptPath" in consumer
+    assert "$entry.Name -cne 'lifecycle.lock' -and $entry.Name -cne $recordName" in consumer
+    assert "(Get-DefenseClawCreatedFolderRecordName -Path $recorded) -cne $item.Name" in consumer
+    assert (
+        "if ([string]::IsNullOrEmpty((Remove-DefenseClawStandaloneCreatedFolder -Path $record.Folder -Roots $Roots))) {\n"
+        "            [IO.File]::Delete($record.File)"
+    ) in consumer
+    assert "Pop-DefenseClawStandaloneCreatedFolderRecords" not in module
+    leftover = _psm1_function(module, "Remove-DefenseClawStandaloneLifecycleLockLeftover")
+    assert leftover.index("[IO.FileOptions]::DeleteOnClose") < leftover.index("Invoke-DefenseClawStandaloneCreatedFolderRemoval")
+    assert leftover.index("Invoke-DefenseClawStandaloneCreatedFolderRemoval") < leftover.index("$stream.Dispose()")
+    # One folder: the whole chain is free of reparse points, the folder and
+    # its parent are administrator-only (review M1), it is empty, and the
+    # delete is non-recursive. A folder that stays is logged.
+    one = _psm1_function(module, "Remove-DefenseClawStandaloneCreatedFolder")
+    assert one.index("Assert-DefenseClawCreatedFolderRemovable -Path $folder -Roots $Roots") < one.index("[IO.Directory]::Delete($folder, $false)")
+    assert "Write-DefenseClawResilienceEvent -Marker defenseclaw_skip" in one
+    assert "Remove-Item" not in one
+    removable = _psm1_function(module, "Assert-DefenseClawCreatedFolderRemovable")
+    assert "$null = Assert-DefenseClawNoReparsePath -Path $Path\n" in removable
+    assert removable.count("Assert-DefenseClawPathAcl -Path") == 2
+    assert "Assert-DefenseClawTrustedAncestor -Path $parent -Strict" in removable
     remove = _psm1_function(module, "Remove-DefenseClawStandaloneCreatedFolders")
     assert "Sort-Object -Property Length -Descending" in remove
-    assert "[IO.FileAttributes]::ReparsePoint" in remove
-    assert "[IO.Directory]::Delete($folder, $false)" in remove
-    assert "Remove-Item" not in remove
-    leftover = _psm1_function(module, "Remove-DefenseClawStandaloneLifecycleLockLeftover")
-    assert leftover.index("[IO.FileOptions]::DeleteOnClose") < leftover.index("Pop-DefenseClawStandaloneCreatedFolderRecords")
-    assert leftover.index("Pop-DefenseClawStandaloneCreatedFolderRecords") < leftover.index("$stream.Dispose()")
+    assert "Remove-DefenseClawStandaloneCreatedFolder -Path $folder -Roots $Roots" in remove
+    # A rollback that removes a Codex folder it created retracts its record.
+    rollback = _psm1_function(module, "Remove-DefenseClawTransactionCreatedSharedDirectories")
+    assert rollback.count("Remove-DefenseClawStandaloneCreatedFolderRecord -Path $directory") == 3
+    # The upgrade back-fill: only the two Cisco folders, only with Setup's
+    # exact descriptor and nothing but DefenseClaw folders inside.
+    backfill = _psm1_function(module, "Add-DefenseClawStandaloneUpgradeVendorFolderRecords")
+    assert "GetDirectoryName([string]$profileRoots.StateRoot)" in backfill
+    assert "GetDirectoryName([string]$profileRoots.InstallRoot)" in backfill
+    refusal = _psm1_function(module, "Get-DefenseClawVendorFolderBackfillRefusal")
+    assert "DiscretionaryAclProtected" in refusal and "Get-DefenseClawVendorUsersReadGrantRecord -Path $Path" in refusal
+    assert "'^DefenseClaw(-[A-Za-z]+)?$'" in refusal
+    lifecycle_body = _psm1_function(module, "Invoke-DefenseClawEnterpriseLifecycle")
+    assert (
+        "if ($Action -in @('Install', 'Upgrade', 'Repair')) {\n"
+        "                    # A computer installed before 1.0.9 has no record of the\n"
+        "                    # two Cisco folders Setup created (GAP-0526, GAP-0091).\n"
+        "                    Add-DefenseClawStandaloneUpgradeVendorFolderRecords"
+    ) in lifecycle_body
 
     # Both last steps remove the recorded folders after the lock folder (and,
     # in the lifecycle, after the MDM journal).

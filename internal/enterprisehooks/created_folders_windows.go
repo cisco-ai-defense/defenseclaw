@@ -115,10 +115,24 @@ func windowsCreatedFolderRecordable(path string, roots ...string) bool {
 }
 
 // windowsCreatedFolderRecordName is the record file name for path: the
-// SHA-256 of its lower-case clean form. The lifecycle computes the same name.
+// SHA-256 of its clean form with the ASCII letters A-Z in lower case. The
+// lifecycle (Get-DefenseClawCreatedFolderRecordName) folds the same way;
+// strings.ToLower and .NET ToLowerInvariant disagree on some other letters
+// (U+0130 for one), so a full Unicode fold would let one side refuse the
+// other's record.
 func windowsCreatedFolderRecordName(path string) string {
-	sum := sha256.Sum256([]byte(strings.ToLower(filepath.Clean(path))))
+	sum := sha256.Sum256([]byte(asciiLowerCase(filepath.Clean(path))))
 	return hex.EncodeToString(sum[:]) + ".json"
+}
+
+// asciiLowerCase folds A-Z to a-z and leaves every other rune as it is.
+func asciiLowerCase(value string) string {
+	return strings.Map(func(r rune) rune {
+		if 'A' <= r && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, value)
 }
 
 func writeWindowsCreatedFolderRecord(lifecycleDir, path string) error {

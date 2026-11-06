@@ -86,9 +86,9 @@ func readCreatedFolderRecords(t *testing.T, dir string) map[string]string {
 }
 
 // GAP-0091: each folder a writer created under ProgramData or Program Files
-// gets one write-once record, named by the SHA-256 of its lower-case path
-// (the lifecycle's Get-DefenseClawCreatedFolderRecordName). Nothing outside
-// those roots, and never a root itself.
+// gets one write-once record, named by the SHA-256 of its path with ASCII
+// letters in lower case (the lifecycle's Get-DefenseClawCreatedFolderRecordName).
+// Nothing outside those roots, and never a root itself.
 func TestStandaloneCreatedFolderRecordNamesEachCreatedVendorFolderOnce(t *testing.T) {
 	fixture := useCreatedFolderFixture(t, true, trustAll)
 	cursor := filepath.Join(fixture.programData, "Cursor")
@@ -111,6 +111,25 @@ func TestStandaloneCreatedFolderRecordNamesEachCreatedVendorFolderOnce(t *testin
 		if records[name] != path {
 			t.Fatalf("record %s = %q, want %q", name, records[name], path)
 		}
+	}
+}
+
+// GAP-0091 review L3: the record name folds only A-Z, the same on both
+// sides. The lifecycle smoke (enterprise-standalone-machine-leftovers-purge-smoke.ps1)
+// pins the same name for the same path, so a non-ASCII vendor folder the
+// hooks record is a record the lifecycle accepts.
+func TestStandaloneCreatedFolderRecordNameFoldsOnlyASCIILetters(t *testing.T) {
+	const path = "C:\\ProgramData\\\u00dcn\u00efcode \u0130\\Codex"
+	const want = "cb0ed1e34f5e1961147f1101c3b7a237146fc893cc261ebfaaadb52ada704767.json"
+	if got := windowsCreatedFolderRecordName(path); got != want {
+		t.Fatalf("record name of %q = %s, want %s", path, got, want)
+	}
+	if got := windowsCreatedFolderRecordName("c:\\PROGRAMDATA\\\u00dcN\u00efCODE \u0130\\codex"); got != want {
+		t.Fatalf("an ASCII case change renamed the record: %s", got)
+	}
+	// A full Unicode fold would map U+0130 and U+00DC and give another name.
+	if got := windowsCreatedFolderRecordName(strings.ToLower(path)); got == want {
+		t.Fatal("non-ASCII letters were folded")
 	}
 }
 

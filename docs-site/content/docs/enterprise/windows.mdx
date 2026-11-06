@@ -964,8 +964,13 @@ created, such as `C:\ProgramData\Cisco`, `C:\Program Files\Cisco`, `C:\ProgramDa
 `C:\ProgramData\OpenAI\Codex` and `C:\Program Files\ClaudeCode`, if they are empty. A folder
 that existed before the install, or that holds another program's files, stays, and so does every
 folder above it. Setup records each folder it creates in
-`C:\ProgramData\Cisco\DefenseClaw-Lifecycle\created-folders`; releases before 1.0.9 kept no
-record, so on a computer installed with one of them these folders stay until you remove them. A standalone
+`C:\ProgramData\Cisco\DefenseClaw-Lifecycle\created-folders`. A folder is removed only while
+it is still administrator-owned and only administrators can change it or its parent; a folder that
+stays keeps its record, so the next purge tries again, and the lifecycle log says why it stayed.
+Releases before 1.0.9 kept no record. On a computer installed with one of them, the first 1.0.9
+install, upgrade or repair records `C:\Program Files\Cisco` and `C:\ProgramData\Cisco` when they
+still have the permissions Setup gave them and hold only DefenseClaw folders. The other vendor
+folders, such as `C:\Program Files\ClaudeCode\managed-settings.d`, stay until you remove them. A standalone
 Setup uninstall removes the administrator-only
 `C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock` and its directory even
 without `PURGE=1`. A plain installed CLI uninstall leaves the lock file and its folder
