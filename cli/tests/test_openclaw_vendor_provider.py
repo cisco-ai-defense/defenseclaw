@@ -610,6 +610,14 @@ def test_r109_g610_windows_junction_peers_match_link_peers(tmp_path, monkeypatch
     ):
         aliases[label] = tmp_path / label
         aliases[label].symlink_to(target, target_is_directory=True)
+    # Windows resolves a parent name when it creates a link, so the stored
+    # target of the alias that goes through a private name never names it there;
+    # that case is then an ordinary link. Linux keeps the name and resolves it
+    # on every walk. The stored form that keeps the parent name, written by a
+    # tool that does not normalize, is covered with Windows paths in
+    # test_r109_g724_stored_parent_name_after_private_name_is_judged.
+    stored = os.readlink(aliases["named-private-alias"])
+    assert (".." not in PureWindowsPath(stored).parts) is (os.name == "nt")
 
     # (label, peer target, peer entry is a junction, admitted with a possible peer)
     cases = (
@@ -621,7 +629,8 @@ def test_r109_g610_windows_junction_peers_match_link_peers(tmp_path, monkeypatch
         ("link-through-private-junction", aliases["private-alias"] / "node_modules/openclaw", False, False),
         ("junction-through-private-junction", aliases["private-alias"] / "node_modules/openclaw", True, False),
         ("link-through-state-junction", aliases["state-alias"] / "node_modules/openclaw", False, False),
-        ("link-through-named-private-junction", aliases["named-private-alias"] / "node_modules/openclaw", False, False),
+        ("link-through-named-private-junction", aliases["named-private-alias"] / "node_modules/openclaw",
+         False, os.name == "nt"),
         ("extra-junction", ordinary, True, False),
     )
     trees = {}
@@ -1069,6 +1078,125 @@ def test_r109_g610_verbatim_peer_paths_judged_by_actual_names(monkeypatch) -> No
         links = {peer: ("junction", target)}
         if alias_target is not None:
             links[alias] = ("junction", alias_target)
+        identity = _windows_peer_identity(monkeypatch, provider, links, data_dir)
+        assert (identity is not None) is possible, label
+        if possible:
+            assert identity.possible_peer, label
+
+
+class _WindowsListingEntry:
+    """A directory-listing entry as Windows reports it.
+
+    The listing carries no volume or file ID, and the modification time of a
+    subdirectory moves between two listings of an unchanged tree (NTFS flushes
+    it to the parent index late). Every call to ``stat`` sees a later time.
+    """
+
+    ticks = 0
+
+    def __init__(self, entry: os.DirEntry) -> None:
+        self.name = entry.name
+        self.path = entry.path
+        self._entry = entry
+
+    def stat(self, *, follow_symlinks: bool = True):
+        real = self._entry.stat(follow_symlinks=follow_symlinks)
+        type(self).ticks += 1
+        moved = stat.S_ISDIR(real.st_mode) and not stat.S_ISLNK(real.st_mode)
+        return SimpleNamespace(
+            st_mode=real.st_mode, st_dev=0, st_ino=0, st_size=real.st_size,
+            st_mtime_ns=real.st_mtime_ns + (type(self).ticks if moved else 0),
+            st_ctime_ns=real.st_ctime_ns,
+        )
+
+
+class _OsWithWindowsListing:
+    """The os module, except that scandir answers like a Windows listing."""
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+    @staticmethod
+    def scandir(path):
+        return _WindowsListing(path)
+
+
+class _WindowsListing:
+    def __init__(self, path) -> None:
+        self._scan = os.scandir(path)
+
+    def __enter__(self):
+        self._scan.__enter__()
+        return (_WindowsListingEntry(entry) for entry in self._scan)
+
+    def __exit__(self, *exc):
+        return self._scan.__exit__(*exc)
+
+
+@requires_symlink_privilege
+def test_r109_g724_tree_state_does_not_read_directory_listing_metadata(
+    tmp_path, monkeypatch,
+) -> None:
+    """GAP-0724: Windows listing data must not make an unchanged tree look edited.
+
+    The tree state is taken twice around the digest. When it read the entries
+    from the directory listing, a subdirectory time that NTFS flushes late made
+    the two states differ, and the installed provider was rejected on Windows
+    only. The state is read from each path, so it is the same on every system;
+    this test feeds the listing a Windows-shaped answer to prove it is unused.
+    """
+
+    peer = _openclaw_peer(tmp_path)
+    installed = _linked_provider(tmp_path, monkeypatch, peer)
+    expected = vendor_identity._tree_entry_state(str(installed))
+    assert expected is not None
+    files = {entry[0]: entry[2] for entry in expected}
+    assert files["index.js"][1] != 0  # the file ID is part of the state
+
+    with monkeypatch.context() as patch:
+        # Only this module sees the Windows-shaped listing.
+        patch.setattr(vendor_identity, "os", _OsWithWindowsListing())
+        assert vendor_identity._tree_entry_state(str(installed)) == expected
+        assert vendor_identity._tree_entry_state(str(installed)) == expected
+        identity = vendor_identity.inspect_official_provider_tree(str(installed))
+        assert identity is not None and identity.possible_peer
+
+        # A real edit made after the digest is still found: the provider is
+        # then scanned like any other plugin.
+        original = vendor_identity._tree_sha256
+
+        def edit_after_hash(path, **kwargs):
+            result = original(path, **kwargs)
+            with open(installed / "index.js", "a", encoding="utf-8") as handle:
+                handle.write("exec(changed);\n")
+            return result
+
+        patch.setattr(vendor_identity, "_tree_sha256", edit_after_hash)
+        assert vendor_identity.inspect_official_provider_tree(str(installed)) is None
+
+
+def test_r109_g724_stored_parent_name_after_private_name_is_judged(monkeypatch) -> None:
+    # A stored alias target keeps its parent name and the private name before
+    # it: Windows normalizes the parent name only when it creates a link, and
+    # reparse data written by another tool keeps it, so the walk reaches the
+    # private name. The same target without a private name stays admitted.
+    import ntpath
+
+    sep = ntpath.sep
+    provider = sep.join(("C:", "provider"))
+    peer = sep.join((provider, "node_modules", "openclaw"))
+    alias = sep.join(("C:", "alias"))
+    data_dir = sep.join(("C:", "state"))
+    cases = (
+        ("private-then-parent", sep.join(("C:", "ordinary", ".ssh", "..", "packages")), False),
+        ("private-upper-then-parent", sep.join(("C:", "ordinary", ".SSH", "..", "packages")), False),
+        ("ordinary-then-parent", sep.join(("C:", "ordinary", "other", "..", "packages")), True),
+    )
+    for label, alias_target, possible in cases:
+        links = {
+            peer: ("junction", alias + sep + sep.join(("node_modules", "openclaw"))),
+            alias: ("junction", alias_target),
+        }
         identity = _windows_peer_identity(monkeypatch, provider, links, data_dir)
         assert (identity is not None) is possible, label
         if possible:

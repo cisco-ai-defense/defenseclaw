@@ -103,7 +103,14 @@ def inspect_official_provider_tree(plugin_dir: str, *, data_dir: str = "") -> Pr
 
 
 def _tree_entry_state(root: str) -> tuple | None:
-    """Record every in-root entry so the digest describes the final tree."""
+    """Record every in-root entry so the digest describes the final tree.
+
+    Each entry is read with ``os.stat`` on its own path, never with the
+    ``DirEntry`` the listing hands out. On Windows that is directory-listing
+    data: it carries no volume or file ID, and it shows the modification time
+    of a subdirectory only after NTFS has flushed it to the parent index, so
+    two listings of an unchanged tree can differ.
+    """
 
     try:
         root_info = os.stat(root, follow_symlinks=False)
@@ -115,7 +122,7 @@ def _tree_entry_state(root: str) -> tuple | None:
             current, parent = pending.pop()
             with os.scandir(current) as children:
                 for child in children:
-                    info = child.stat(follow_symlinks=False)
+                    info = os.stat(child.path, follow_symlinks=False)
                     relative = os.path.join(parent, child.name).replace("\\", "/")
                     target = os.readlink(child.path) if _is_link_or_junction(info) else None
                     entries.append((relative, info.st_mode, _filesystem_identity(info), target))
