@@ -940,6 +940,11 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 	paths := []string{probe.SourcePath}
 	if strings.TrimSpace(probe.SourcePath) == "" && len(probe.SourcePaths) > 0 {
 		paths = probe.SourcePaths
+	}
+	if decision, unavailable := a.unavailableRootDecision(cfg, targetType, connector, runtimeSurface, probe.SkillName, paths); unavailable {
+		return decision, true
+	}
+	if strings.TrimSpace(probe.SourcePath) == "" && len(probe.SourcePaths) > 0 {
 		if decision, pending := a.projectSkillScanPending(targetType, connector, runtimeSurface, paths); pending {
 			return decision, true
 		}
@@ -965,6 +970,46 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 		last = decision
 	}
 	return last, false
+}
+
+// unavailableRootDecision holds a named skill or plugin only when its
+// connector's admission root is unavailable and policy requires fail closed.
+// Balanced and permissive hosts keep working; watcher health names the gap.
+func (a *APIServer) unavailableRootDecision(
+	cfg *config.Config, targetType, connector, surface, name string, paths []string,
+) (config.AssetPolicyDecision, bool) {
+	if a == nil || a.rootCoverage == nil || cfg == nil || cfg.SecureClientIntegration() ||
+		(!managed.IsManagedEnterprise(cfg.DeploymentMode) && cfg.HookPolicyTierForConnector(connector) != config.HookPolicyTierStrict) {
+		return config.AssetPolicyDecision{}, false
+	}
+	for _, issue := range a.rootCoverage() {
+		if issue.Kind != targetType || (issue.Connector != "" && issue.Connector != connector) {
+			continue
+		}
+		matched := false
+		hasPath := false
+		for _, path := range paths {
+			if path == "" {
+				continue
+			}
+			hasPath = true
+			if insideHome(issue.Path, path) {
+				matched = true
+				break
+			}
+			if resolved, err := filepath.EvalSymlinks(issue.Path); err == nil && insideHome(resolved, path) {
+				matched = true
+				break
+			}
+		}
+		if !matched && hasPath {
+			continue
+		}
+		return runtimeAssetDisableBlockDecision(targetType, name, connector, surface,
+			fmt.Sprintf("%s %q cannot be checked while admission scanning is off for a connector root; see watcher health", targetType, name),
+			"watch-root-unavailable"), true
+	}
+	return config.AssetPolicyDecision{}, false
 }
 
 // runtimeSkillPathDecision is the asset_policy decision for one folder a

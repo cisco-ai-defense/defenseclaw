@@ -1817,6 +1817,13 @@ def _doctor_managed(cfg) -> bool:
     return str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
 
 
+def _watch_root_coverage_severity(cfg, connectors: list[str]) -> str:
+    if _doctor_managed(cfg):
+        return "fail"
+    tier = getattr(getattr(cfg, "guardrail", None), "hook_policy_tier", None)
+    return "fail" if callable(tier) and any(tier(name) == "strict" for name in connectors) else "warn"
+
+
 def _root_owned_file(path: str) -> bool:
     """Whether *path* is a regular file owned by root while doctor runs as another account."""
     try:
@@ -5723,6 +5730,19 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                     continue
                 state = raw_state.strip() or "unknown"
                 normalized_state = state.lower()
+                unavailable = details.get("watch_roots_unavailable") if isinstance(details, dict) else None
+                if sub == "watcher" and isinstance(unavailable, int) and unavailable > 0:
+                    names = details.get("admission_scanning_off")
+                    connectors = [name for name in names if isinstance(name, str)] if isinstance(names, list) else []
+                    severity = _watch_root_coverage_severity(cfg, connectors)
+                    label = ", ".join(connectors) if connectors else "configured connectors"
+                    _emit(
+                        severity,
+                        f"  └─ {sub}",
+                        f"admission scanning is off for {label}; {unavailable} root(s) unavailable; the gateway log names each root",
+                        r=r,
+                    )
+                    continue
                 if normalized_state in ("running", "healthy"):
                     if expected is False and sub in {
                         "gateway",
