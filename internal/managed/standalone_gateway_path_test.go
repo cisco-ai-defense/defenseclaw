@@ -5,8 +5,8 @@ package managed
 
 import "testing"
 
-// The Linux and macOS packages put defenseclaw-gateway on no PATH, so every
-// hint names it by this path (cowork-1-0-8 GAP-0081).
+// On Linux and macOS defenseclaw-gateway is not on the PATH, so every hint
+// names it by this path (cowork-1-0-8 GAP-0081).
 func TestStandaloneGatewayPath(t *testing.T) {
 	for goos, want := range map[string]string{
 		"linux":   "/opt/defenseclaw/bin/defenseclaw-gateway",

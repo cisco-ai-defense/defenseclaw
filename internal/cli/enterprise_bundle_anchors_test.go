@@ -22,6 +22,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -241,8 +243,8 @@ func TestEnterpriseBundleAnchorsVerbIsRegistered(t *testing.T) {
 	}
 }
 
-// The example is typed by an administrator; the package puts the gateway on no
-// PATH (cowork-1-0-8 GAP-0081).
+// The example is typed by an administrator; the gateway is not on the PATH
+// (cowork-1-0-8 GAP-0081).
 func TestBundleAnchorsInstallExampleNamesTheGatewayByItsFullPath(t *testing.T) {
 	var example string
 	for _, sub := range newEnterpriseBundleAnchorsCommand().Commands() {
@@ -253,5 +255,22 @@ func TestBundleAnchorsInstallExampleNamesTheGatewayByItsFullPath(t *testing.T) {
 	want := "sudo " + managedHostGatewayCommand() + " enterprise bundle anchors install --file "
 	if !strings.Contains(example, want) || strings.Contains(example, "sudo defenseclaw-gateway") || !strings.Contains(example, "/bin/defenseclaw-gateway") {
 		t.Fatalf("example = %q, want it to contain %q", example, want)
+	}
+}
+
+// The anchors install example names the standalone gateway by its path. A
+// Secure Client computer has no enterprise bundle group, so it never shows
+// that example (review round 4, S1).
+func TestBundleAnchorsInstallExampleIsAbsentFromSecureClient(t *testing.T) {
+	saved := secureClientHost
+	t.Cleanup(func() { secureClientHost = saved })
+	secureClientHost = func() bool { return true }
+	root := &cobra.Command{Use: "defenseclaw-gateway"}
+	enterprise := &cobra.Command{Use: "enterprise"}
+	enterprise.AddCommand(newEnterpriseBundleCommand())
+	root.AddCommand(enterprise)
+	keepCommandTreeOfMainOnSecureClient(root)
+	if found, _, err := root.Find([]string{"enterprise", "bundle", "anchors", "install"}); err == nil && found.Name() == "install" {
+		t.Fatalf("Secure Client still has %q with example %q", found.CommandPath(), found.Example)
 	}
 }

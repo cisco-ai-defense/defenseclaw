@@ -873,7 +873,46 @@ func TestEnterpriseDiscoveryStatusHintNamesTheGatewayByItsFullPath(t *testing.T)
 		platform = "macos"
 	}
 	want := "sudo " + managed.StandaloneGatewayPath(runtime.GOOS) + " enterprise " + platform + " status"
-	if got := enterpriseDiscoveryStatusHint(); got != want || !strings.HasPrefix(got, "sudo /opt/") {
+	if got := enterpriseDiscoveryStatusHint(true); got != want || !strings.HasPrefix(got, "sudo /opt/") {
 		t.Fatalf("hint = %q, want %q", got, want)
+	}
+}
+
+// Any other profile, Secure Client included, keeps the text of release 1.0.5
+// (review round 4, S1): the bare gateway name, no sudo.
+func TestEnterpriseDiscoveryStatusHintOnSecureClientKeepsTheReleasedText(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows names the managed CLI for every profile; see enterprise_discovery_windows_hint_test.go")
+	}
+	platform := "linux"
+	if runtime.GOOS == "darwin" {
+		platform = "macos"
+	}
+	want := "defenseclaw-gateway enterprise " + platform + " status"
+	for name, profile := range map[string]string{"explicit": managed.ProfileSecureClient, "default": ""} {
+		c := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+		c.Enterprise.Profile = profile
+		if !c.SecureClientIntegration() || c.StandaloneEnterprise() {
+			t.Fatalf("%s: the fixture is not a Secure Client config", name)
+		}
+		if got := enterpriseDiscoveryStatusHint(c.StandaloneEnterprise()); got != want {
+			t.Errorf("%s: hint = %q, want %q", name, got, want)
+		}
+	}
+	if got := enterpriseDiscoveryStatusHint((*config.Config)(nil).StandaloneEnterprise()); got != want {
+		t.Errorf("no config: hint = %q, want %q", got, want)
+	}
+}
+
+// managedHostGatewayCommand gives the text it gave in release 1.0.5: the
+// standalone layout's gateway on Linux and macOS, the bare name elsewhere. The
+// hints that call it are the same on Secure Client (review round 4, S1).
+func TestManagedHostGatewayCommandKeepsTheReleasedValue(t *testing.T) {
+	want := "defenseclaw-gateway"
+	if layout, err := managed.StandaloneLayoutFor(runtime.GOOS); err == nil {
+		want = layout.BinDir + "/defenseclaw-gateway"
+	}
+	if got := managedHostGatewayCommand(); got != want {
+		t.Fatalf("managedHostGatewayCommand() = %q, want %q", got, want)
 	}
 }

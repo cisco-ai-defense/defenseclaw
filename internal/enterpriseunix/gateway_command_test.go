@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
 // On Linux and macOS defenseclaw-gateway is not on the PATH (the packages link
@@ -81,5 +83,39 @@ func TestNoAdministratorHintNamesTheGatewayBare(t *testing.T) {
 				t.Errorf("%s:%d names the gateway by its bare name; use Env.gatewayCommand: %s", file, number+1, trimmed)
 			}
 		}
+	}
+}
+
+// The standalone lifecycle never runs on a Secure Client computer: an install
+// is refused as a profile conflict, and a status with no standalone record
+// does not read the gateway, so none of the lines that name the gateway by its
+// layout path (the bundle commands, the optional destination hint) reaches a
+// Secure Client computer (review round 4, S1).
+func TestStandaloneGatewayHintsDoNotReachASecureClientComputer(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			if err := os.MkdirAll(h.env.P("/opt/cisco/secureclient/defenseclaw"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			healthReads := 0
+			h.env.HealthGet = func(context.Context) (int, []byte, error) {
+				healthReads++
+				return 200, []byte(`{"api":{"state":"running"},"telemetry":{"details":{"optional_destination_state":"degraded","optional_destination_failure_summary":"archive:failing:no_space"}}}`), nil
+			}
+			install := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
+			requireError(t, install, codeProfileConflict)
+			status := h.run(Options{Action: ActionStatus})
+			if healthReads != 0 {
+				t.Fatalf("the gateway health was read %d times on a Secure Client computer", healthReads)
+			}
+			for _, result := range []*enterprisestatus.Result{install, status} {
+				for _, m := range append(append([]enterprisestatus.Message{}, result.Errors...), result.Warnings...) {
+					if m.Code == codeOptionalDestination || strings.Contains(m.Message, "bundle apply") || strings.Contains(m.Message, "bundle anchors install") {
+						t.Errorf("%s message on a Secure Client computer: %+v", goos, m)
+					}
+				}
+			}
+		})
 	}
 }

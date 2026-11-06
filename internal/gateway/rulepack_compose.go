@@ -150,11 +150,13 @@ func loadConnectorRulePack(cache *guardrail.RulePackCache, cfg *config.Config, c
 }
 
 // rulePackValidateCommand is the `rulepack validate` an operator runs to print
-// a pack's pin. On a managed install the gateway is not on the PATH, so it is named
-// by its path (cowork-1-0-8 GAP-0081; Windows by the managed renderer, GAP-0076);
-// a per-user install has it on the PATH.
+// a pack's pin. On a standalone managed install the gateway is not on the PATH,
+// so it is named by its path (cowork-1-0-8 GAP-0081; Windows by the managed
+// renderer, GAP-0076); a per-user install has it on the PATH. Every other
+// profile, Secure Client included, keeps the text of release 1.0.5 (review
+// round 4, S1).
 func rulePackValidateCommand(cfg *config.Config, goos string) string {
-	if cfg.EnterpriseProfile() == "" {
+	if cfg.EnterpriseProfile() != managed.ProfileStandalone {
 		return "defenseclaw-gateway rulepack validate --dir <pack dir>"
 	}
 	if goos == "windows" {
