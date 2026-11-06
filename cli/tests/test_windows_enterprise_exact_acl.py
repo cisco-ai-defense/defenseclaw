@@ -953,6 +953,15 @@ def test_install_recovers_from_leftover_state_and_reconcile_repairs_services() -
     assert loop.index("return Invoke-DefenseClawInstallLikeLifecycle") < loop.index(
         "$installRecoveryReason = [string]$_.Exception.Message"
     )
+    # The recovery purge removes the hook-guardian log. The retry writes the
+    # first attempt's installer lines (a skipped user) back once its layout
+    # directories exist again, before the Install runs.
+    restore = loop.index("Restore-DefenseClawGuardianLogInstallerLines -Layout $layout")
+    assert loop.rfind("if ($installRecoveryAttempted) {", 0, restore) > loop.rfind(
+        "New-DefenseClawLayoutDirectories -Layout $layout", 0, restore
+    )
+    assert restore < loop.index("return Invoke-DefenseClawInstallLikeLifecycle")
+    assert "$script:GuardianLogInstallerLines.Clear()" in lifecycle
     recovery = _extract_function_body(
         source,
         "function Invoke-DefenseClawInstallAutoRecovery",
