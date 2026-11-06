@@ -130,7 +130,14 @@ func (w *managedPolicyViewWatch) refresh() {
 		stamp = enterprisepolicy.PolicyViewStamp(w.opts, w.connectors, w.descriptorPath)
 	}
 	w.stamp, w.generation, w.computed = stamp, generation, true
-	w.api.publishManagedPolicyView(computeManagedPolicyViewFor(w.opts, descriptor))
+	view := computeManagedPolicyViewFor(w.opts, descriptor)
+	if view != nil && w.authorizer != nil {
+		view.admitted = make(map[string]bool, len(w.authorized))
+		for _, connector := range w.authorized {
+			view.admitted[connector] = true
+		}
+	}
+	w.api.publishManagedPolicyView(view)
 }
 
 func admittedMachinePolicyConnectors(goos string, viewOpts enterprisepolicy.Options, generation *Generation, previous []string, descriptor *managed.RuntimeDescriptor, initial bool) []string {
