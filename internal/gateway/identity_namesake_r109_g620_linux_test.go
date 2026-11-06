@@ -90,3 +90,61 @@ func TestGAP0620UnconfirmedLocalNamesakeUsesOSSDefaultWithWarning(t *testing.T) 
 		t.Errorf("directory namesake = %+v; want its assigned profile", got)
 	}
 }
+
+func TestReviewG620ProvenConnectorAssignmentKeepsOrdinaryOSSWork(t *testing.T) {
+	subject := profileSubjectFromVerified(VerifiedSubject{
+		UserID: "700002", IDKind: useridentity.KindPOSIXUID, UserName: "alice",
+		Directory: useridentity.DirectoryFacts{Source: useridentity.SourceProcessCredentials,
+			HolderUnproven: true, Groups: []string{"staff"},
+			Assurance: useridentity.AssuranceVerified, ResolvedAt: time.Now()},
+		Source: subjectSourceProcessOwner,
+	}, true)
+	for _, selected := range []string{"watch", "tooling"} {
+		for _, pack := range []string{"", "permissive", "strict"} {
+			set := identityTestSet(t, identityTestPlatforms[0], "watch",
+				config.ProfileAssignment{Profile: selected, Match: config.ProfileMatch{Connectors: []string{"claudecode"}}},
+				config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Users: []string{"alice@corp.example"}}})
+			set.base.Guardrail.RulePack = pack
+			got := set.match(&subject, profileSubjectProcessOwner, "claudecode", "")
+			if pack == "strict" {
+				if got.Refused == "" {
+					t.Errorf("strict tier with %q assignment allowed uncertain holder: %+v", selected, got)
+				}
+			} else if got.Refused != "" || got.Name != selected || got.Assignment != 1 ||
+				!slices.Equal(got.Unproven, []string{"account:unknown"}) {
+				t.Errorf("OSS tier %q with %q assignment did not retain proven profile: %+v", pack, selected, got)
+			} else if warnings := profileExplainWarnings(set, got, &subject); !slices.ContainsFunc(warnings, func(note string) bool {
+				return strings.Contains(note, "account holder is unconfirmed") && strings.Contains(note, "proven connector assignment")
+			}) {
+				t.Errorf("OSS tier %q with %q assignment has no holder warning: %q", pack, selected, warnings)
+			}
+		}
+	}
+}
+
+func TestReviewG620UnprovenAssignmentMustKeepApprovalControl(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"base": {Mode: "action", BlockAt: "CRITICAL"},
+		"approval": {Mode: "action", BlockAt: "HIGH",
+			HILT: &config.HILTConfig{Enabled: true, MinSeverity: "LOW"}},
+	}
+	cfg.Guardrail.DefaultProfile = "base"
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{{Profile: "approval",
+		Match: config.ProfileMatch{Users: []string{"alice@corp.example"}}}}
+	set, err := newGuardrailProfileSet(cfg, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subject := profileSubjectFromVerified(VerifiedSubject{
+		UserID: "700002", IDKind: useridentity.KindPOSIXUID, UserName: "alice",
+		Directory: useridentity.DirectoryFacts{Source: useridentity.SourceProcessCredentials,
+			HolderUnproven: true, Groups: []string{"staff"},
+			Assurance: useridentity.AssuranceVerified, ResolvedAt: time.Now()},
+		Source: subjectSourceProcessOwner,
+	}, true)
+	if got := set.match(&subject, profileSubjectProcessOwner, "claudecode", ""); got.Refused == "" && got.Name == "base" {
+		t.Errorf("uncertain approval profile silently fell to base without HILT: %+v", got)
+	}
+}

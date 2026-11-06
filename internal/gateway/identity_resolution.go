@@ -376,11 +376,18 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	var yes []hit
 	var maybe []string
 	var maybeNeeds [][]string
+	// A connector-only match is independent of the account holder. Matches
+	// involving a user, group, or agent keep their normal proof requirement.
+	provenRouteOnly := true
 	for i, assignment := range set.assignments {
 		state, reason, group, needs := set.assignmentState(assignment.Match, subject, res, verified, connectorName, agent)
 		switch state {
 		case matchYes:
 			yes = append(yes, hit{index: i + 1, profile: strings.TrimSpace(assignment.Profile), reason: reason, group: group})
+			if len(assignment.Match.Connectors) == 0 || len(assignment.Match.Users) > 0 ||
+				len(assignment.Match.Groups) > 0 || len(assignment.Match.Agents) > 0 {
+				provenRouteOnly = false
+			}
 		case matchMaybe:
 			maybe = append(maybe, strings.TrimSpace(assignment.Profile))
 			maybeNeeds = append(maybeNeeds, needs)
@@ -403,12 +410,28 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	// weaker assignment cannot silently replace a stronger default. A
 	// pathless selection still needs proof before naming a different profile.
 	proven := set.defaultProfile
+	provenSingle := true
+	var provenMembers []string
 	if len(yes) > 0 {
 		matched := make([]string, 0, len(yes))
 		for _, h := range yes {
 			matched = append(matched, h.profile)
 		}
-		proven, _ = set.meetOf(compactProfiles(matched), scans)
+		provenMembers = compactProfiles(matched)
+		proven, provenSingle = set.meetOf(provenMembers, scans)
+	}
+	provenDecision := func() profileDecision {
+		decision, ok := definite(proven)
+		if !ok || !provenSingle {
+			// Overlapping proven assignments keep their combined policy.
+			decision = set.decision(proven, yes[0].reason, yes[0].group, source)
+			decision.Assignment = yes[0].index
+			decision.Candidates = provenMembers
+		}
+		if len(provenMembers) > 1 {
+			decision.provenMembers = provenMembers
+		}
+		return decision
 	}
 	var needed []string
 	var uncoveredMaybe []string
@@ -428,16 +451,20 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	// A per-user gateway can prove its process groups while only root can
 	// confirm that SSSD has no second holder of its uid. When this is the
 	// sole missing fact and the unproven profile differs only in its hook
-	// threshold, the OSS default and permissive tiers use their configured
-	// default on hook decisions and pathless explanations. Inspection, a
+	// threshold, the OSS default and permissive tiers use the profile selected
+	// by a proven connector-only assignment on hook decisions and pathless
+	// explanations. Inspection, a
 	// different sandbox, or a different rule pack still needs account proof.
 	// Strict and managed installs keep their proof requirement.
-	if verified && subject.holderUnproven && !subject.LookupFailed &&
-		path != profilePathInspect && len(yes) == 0 && slices.Equal(needed, []string{"account:unknown"}) &&
+	if verified && subject.holderUnproven && !subject.LookupFailed && provenRouteOnly &&
+		path != profilePathInspect && slices.Equal(needed, []string{"account:unknown"}) &&
 		set.base != nil && !managed.IsManagedEnterprise(set.base.DeploymentMode) &&
 		set.base.HookPolicyTierForConnector(connectorName) != config.HookPolicyTierStrict &&
-		set.unconfirmedHolderOnlyTightensHook(uncoveredMaybe, connectorName) {
-		decision := set.decision(set.defaultProfile, profileMatchDefaultLookupFailed, "", source)
+		set.unconfirmedHolderOnlyTightensHook(uncoveredMaybe, proven, connectorName) {
+		decision := set.decision(proven, profileMatchDefaultLookupFailed, "", source)
+		if len(yes) > 0 {
+			decision = provenDecision()
+		}
 		decision.Unproven = []string{"account:unknown"}
 		return decision
 	}
@@ -457,23 +484,7 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 			}
 			decision = set.decision(set.defaultProfile, reason, "", source)
 		} else {
-			var matched []string
-			for _, h := range yes {
-				matched = append(matched, h.profile)
-			}
-			matched = compactProfiles(matched)
-			name, single := set.meetOf(matched, scans)
-			var ok bool
-			if decision, ok = definite(name); !ok || !single {
-				// Overlapping assignments whose profiles enforce different
-				// rules: their meet, reported as the first one matched.
-				decision = set.decision(name, yes[0].reason, yes[0].group, source)
-				decision.Assignment = yes[0].index
-				decision.Candidates = matched
-			}
-			if len(matched) > 1 {
-				decision.provenMembers = matched
-			}
+			decision = provenDecision()
 		}
 		if verified && res.proven() {
 			set.provenProfiles.note(res.Incarnation, decision.Name)
@@ -507,18 +518,25 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	return decision
 }
 
-// unconfirmedHolderOnlyTightensHook allows the OSS default when an
+// unconfirmedHolderOnlyTightensHook allows the OSS proven selection when an
 // unconfirmed named account could select a stricter hook threshold but no
-// different rule pack or sandbox floor. Those latter controls need proof.
-func (set *guardrailProfileSet) unconfirmedHolderOnlyTightensHook(names []string, connectorName string) bool {
+// different rule pack, sandbox floor, or approval control.
+func (set *guardrailProfileSet) unconfirmedHolderOnlyTightensHook(names []string, proven, connectorName string) bool {
 	if len(names) == 0 {
 		return false
 	}
+	selected := set.profileConfig(proven)
 	for _, name := range names {
-		if !set.profileStricter(name, set.defaultProfile, connectorName) ||
-			!reflect.DeepEqual(set.profileSandbox(name), set.profileSandbox(set.defaultProfile)) ||
-			!set.scansRulePacksOf(set.defaultProfile, name, connectorName, profilePathAny) ||
-			!set.scansRulePacksOf(name, set.defaultProfile, connectorName, profilePathAny) {
+		possible := set.profileConfig(name)
+		if selected == nil || possible == nil ||
+			!set.profileStricter(name, proven, connectorName) ||
+			!reflect.DeepEqual(set.profileSandbox(name), set.profileSandbox(proven)) ||
+			!set.scansRulePacksOf(proven, name, connectorName, profilePathAny) ||
+			!set.scansRulePacksOf(name, proven, connectorName, profilePathAny) ||
+			!hiltCovers(hiltEnabledForConfig(selected, connectorName), hiltMinRankForConfig(selected, connectorName),
+				hiltEnabledForConfig(possible, connectorName), hiltMinRankForConfig(possible, connectorName)) ||
+			!hiltCovers(hiltEnabled(&selected.Guardrail, connectorName), hiltMinRank(&selected.Guardrail, connectorName),
+				hiltEnabled(&possible.Guardrail, connectorName), hiltMinRank(&possible.Guardrail, connectorName)) {
 			return false
 		}
 	}
