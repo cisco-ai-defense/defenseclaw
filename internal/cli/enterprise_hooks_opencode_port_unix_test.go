@@ -120,8 +120,10 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 	}
 	record := map[int]int{}
 	openCodeRecordUnreadable, openCodeRecordUnknown, openCodeRecordContested, openCodeRecordExists = nil, nil, nil, false
+	openCodeRecordImportPending = false
 	t.Cleanup(func() {
 		openCodeRecordUnreadable, openCodeRecordUnknown, openCodeRecordContested, openCodeRecordExists = nil, nil, nil, false
+		openCodeRecordImportPending = false
 	})
 	enterpriseHookLoadOpenCodePorts = func(string) (enterprisehooks.UnixOpenCodeServicePortsState, error) {
 		state := enterprisehooks.UnixOpenCodeServicePortsState{Ports: map[int]int{}, Users: map[int]string{}}
@@ -133,7 +135,7 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 			state.Ports[uid] = port
 		}
 		state.Exists = openCodeRecordExists || len(record) > 0
-		state.ImportDone = state.Exists
+		state.ImportDone = state.Exists && !openCodeRecordImportPending
 		state.Unknown, state.Contested = openCodeRecordUnknown, openCodeRecordContested
 		return state, nil
 	}
@@ -147,6 +149,7 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 			}
 		}
 		openCodeRecordUnknown, openCodeRecordContested = state.Unknown, state.Contested
+		openCodeRecordImportPending = !state.ImportDone
 		openCodeRecordWrites++
 		openCodeRecordExists = true
 		record = map[int]int{}
@@ -210,6 +213,9 @@ var (
 	openCodeRecordUnknown    []enterprisehooks.UnixOpenCodeServicePortUnknown
 	openCodeRecordContested  []enterprisehooks.UnixOpenCodeContestedPort
 	openCodeRecordExists     bool
+	// openCodeRecordImportPending: the record exists but was committed with
+	// import_done false, so the next pass is still the import pass.
+	openCodeRecordImportPending bool
 	// Fault injection (REVIEW-gx053-12 MF1): openCodeOnCommit runs at each
 	// record commit and can fail it; openCodeAfterRewrite runs after each
 	// user-file rewrite; once openCodeCrashed is set no rewrite and no
@@ -706,8 +712,10 @@ func TestManagedGuardianOpenCodeLinkedBlindThenRecover(t *testing.T) {
 }
 
 // Two linked files name the same port: contested, so neither import is
-// granted; the fresh bindings cannot be written through the links, so none is
-// recorded, and both accounts are warned with the admin step.
+// granted. Each claimant gets a fresh binding that is committed before the
+// writes (write-ahead); the writes through the links fail, so both bindings
+// stay recorded for the next pass and both accounts are warned with the admin
+// step.
 func TestManagedGuardianOpenCodeImportCollisionCannotBeWritten(t *testing.T) {
 	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
 	linkOpenCodeConfig(t, homes[1001], 26000)
@@ -956,6 +964,66 @@ func TestManagedGuardianOpenCodeEarlierRecordDecides(t *testing.T) {
 	got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002, 1003}, log)
 	if got[1002] != 25002 || (*record)[1002] != 25002 || got[1001] == 25002 || got[1003] == 26500 || got[1003] == 0 {
 		t.Fatalf("ports %v record %v\n%s", got, *record, log)
+	}
+}
+
+// REVIEW-gx053-13 S2: the import-done flag decides, not the existence of the
+// record. A record committed with import_done false (an older format) is not
+// past its import pass: the next pass imports for the uids with no entry (the
+// recorded uid keeps its port), commits the flag done, and after that pass no
+// file is input again.
+func TestManagedGuardianOpenCodeRecordWithoutImportDoneIsTheImportPass(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1002)
+	(*record)[1002] = 25002
+	openCodeRecordImportPending = true
+	setEligible(nil, 1001, 1002, 1003)
+	writeOpenCodePortFile(t, homes[1001], 26500) // no entry, free: imported in the import pass
+	writeOpenCodePortFile(t, homes[1002], 26111) // recorded: the record wins
+	log := runOpenCodePortPass(t)
+	got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002, 1003}, log)
+	if got[1001] != 26500 || (*record)[1001] != 26500 || got[1002] != 25002 || got[1003] == 0 || openCodeRecordImportPending {
+		t.Fatalf("ports %v record %v pending %v\n%s", got, *record, openCodeRecordImportPending, log)
+	}
+	// The window is closed now: a new account's file is not imported.
+	setEligible(nil, 1001, 1002, 1003, 1004)
+	writeOpenCodePortFile(t, homes[1004], 26700)
+	log = runOpenCodePortPass(t)
+	if got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002, 1003, 1004}, log); got[1004] == 26700 || got[1004] == 0 {
+		t.Fatalf("a file was input after the import pass: %v\n%s", got, log)
+	}
+}
+
+// REVIEW-gx053-13 S2: a pass sweeps the temp files a killed record write left
+// in the record's folder: the old orphan goes, a file newer than the pass
+// start (a writer at work) and files that are not the record's temp files
+// stay.
+func TestManagedGuardianOpenCodeSweepsOrphanRecordTempFiles(t *testing.T) {
+	openCodePortGuardianWith(t, true, 1001)
+	dir := t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, dir) // after the guardian helper, which sets its own
+	cfg.DataDir = filepath.Join(t.TempDir(), "data")       // the record lives in the authorization folder (the env above)
+	plant := func(name string, offset time.Duration) string {
+		full := filepath.Join(dir, name)
+		if err := os.WriteFile(full, []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		when := time.Now().Add(offset)
+		if err := os.Chtimes(full, when, when); err != nil {
+			t.Fatal(err)
+		}
+		return full
+	}
+	orphan := plant(".defenseclaw-opencode-ports-123456.new", -time.Hour)
+	live := plant(".defenseclaw-opencode-ports-777.new", time.Hour) // created after the pass started
+	other := plant(".defenseclaw-copilot-vscode-accounts-5.new", -time.Hour)
+	log := runOpenCodePortPass(t)
+	if _, err := os.Lstat(orphan); !os.IsNotExist(err) || !strings.Contains(log, "removed 1 leftover temp file") {
+		t.Fatalf("the orphan is still there (%v)\n%s", err, log)
+	}
+	for _, kept := range []string{live, other} {
+		if _, err := os.Lstat(kept); err != nil {
+			t.Fatalf("%s must stay: %v", kept, err)
+		}
 	}
 }
 
