@@ -109,3 +109,56 @@ func TestInstalledSandboxDaemonCopyRequiresContentAddressedFile(t *testing.T) {
 		t.Fatal("symlinked copy was accepted")
 	}
 }
+
+func TestInstalledSandboxDaemonCopyResolvesLauncher(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canonical := filepath.Join(bin, "defenseclaw-gateway")
+	content := []byte("installed gateway file")
+	if err := os.WriteFile(canonical, content, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := fileSHA256(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyPath := filepath.Join(bin, "launch-agents", digest, "defenseclaw-gateway")
+	if err := os.MkdirAll(filepath.Dir(copyPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(copyPath, content, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	launcher := filepath.Join(root, "usr", "local", "bin", "defenseclaw")
+	if err := os.MkdirAll(filepath.Dir(launcher), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(canonical, launcher); err != nil {
+		t.Fatal(err)
+	}
+	if !installedSandboxDaemonCopy(canonical, copyPath) {
+		t.Fatal("direct gateway file was not recognized")
+	}
+	if !installedSandboxDaemonCopy(launcher, copyPath) {
+		t.Fatal("installed launcher target was not recognized")
+	}
+	other := filepath.Join(root, "other", "defenseclaw-gateway")
+	if err := os.MkdirAll(filepath.Dir(other), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(other, content, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(launcher); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, launcher); err != nil {
+		t.Fatal(err)
+	}
+	if installedSandboxDaemonCopy(launcher, copyPath) {
+		t.Fatal("launcher pointing outside the installed gateway directory was recognized")
+	}
+}
