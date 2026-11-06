@@ -881,14 +881,29 @@ def _unguarded_tool_events(cfg: Any, connector: str, document: Any, path: Path) 
     if section is None:
         return False, []
     strict = _tool_inspection_strict(cfg)
+    native = None
+    if connector == "claudecode" and strict:
+        # The native launcher sits outside hooks/. Share its exact invocation
+        # with the registration check before inspecting the tool event fields.
+        from defenseclaw.fail_mode import _claude_native_primary_handler, _claude_per_user_native_registration
+
+        native = _claude_per_user_native_registration(cfg)
 
     def owns(handler: Any) -> bool:
+        if native is not None:
+            return isinstance(handler, dict) and _claude_native_primary_handler(handler, native)
         return any(
             _defenseclaw_hook_command(cfg, connector, command, strict=strict)
             for command in hook_handler_command_lines(handler, connector)
         )
 
-    if not any(
+    if native is not None:
+        from defenseclaw.hook_guard_matrix import _entries
+
+        spec = TOOL_GUARD_HOOKS[connector]
+        if not any(owns(entry.handler) for event in spec.events for entry in _entries(spec, document, event)):
+            return False, []
+    elif not any(
         _defenseclaw_hook_command(cfg, connector, command, strict=strict)
         for command in _hook_command_lines(section, connector)
     ):

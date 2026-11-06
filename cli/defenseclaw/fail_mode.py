@@ -1767,6 +1767,39 @@ def _claude_owned_handler(handler: dict[str, Any], data_dir: str) -> bool:
     return False
 
 
+def _claude_native_primary_handler(handler: dict[str, Any], expected: _ClaudeNativeRegistration) -> bool:
+    """Whether a handler names the native invocation Setup registers for an event."""
+
+    if expected.guard:
+        return handler.get("command") == expected.guard and handler.get("args") == [
+            "guard-user-hook", expected.native, *expected.hook_args
+        ]
+    return handler.get("args") is None and handler.get("command") == _claude_native_shell_command(expected)
+
+
+def _claude_native_event_fields_current(event: str, group: dict[str, Any], handler: dict[str, Any]) -> bool:
+    """Whether a native handler keeps the fields Setup renders for its event."""
+
+    from defenseclaw.doctor_hooks import _CLAUDE_REQUIRED_HOOKS, _matcher_covers
+
+    required = _CLAUDE_REQUIRED_HOOKS.get(event)
+    if required is None:
+        return True
+    matcher, timeout = required
+    if not _matcher_covers(event, group.get("matcher"), matcher):
+        return False
+    if type(handler.get("timeout")) is not int or handler["timeout"] != timeout:
+        return False
+    if handler.get("async", False) is not (event == "MessageDisplay") or group.get("async") is True:
+        return False
+    return all(
+        item.get("asyncRewake") is not True
+        and item.get("async_rewake") is not True
+        and item.get("if", "") == ""
+        for item in (group, handler)
+    )
+
+
 def _claude_native_registration_problem(
     registration: str, expected: _ClaudeNativeRegistration, data_dir: str
 ) -> str | None:
@@ -1779,8 +1812,9 @@ def _claude_native_registration_problem(
     without the guard, the launcher's shell command behind the missing-hook
     guard. Any other DefenseClaw handler is stale: a 1.0.7 shell entry left
     behind, another binary or data directory, edited arguments or a missing
-    companion. Event coverage is claude_missing_registration's check (doctor
-    and status), matchers and timeouts are doctor's.
+    companion. Event coverage is claude_missing_registration's check. Known
+    event fields use Doctor's required-hook table; the tool-guard field matrix
+    also checks that PreToolUse covers every call for Doctor and status.
     testdata/claudecode_linux_peruser_handlers.json pins this to the Go render.
     """
 
@@ -1792,11 +1826,9 @@ def _claude_native_registration_problem(
     hooks = settings.get("hooks") if isinstance(settings, dict) else None
     if not isinstance(hooks, dict):
         return stale
-    primary_args = ["guard-user-hook", expected.native, *expected.hook_args]
     companion_args = ["fallback-guard-user-hook", expected.guard, *expected.hook_args]
-    shell_command = _claude_native_shell_command(expected)
     primaries = 0
-    for groups in hooks.values():
+    for event, groups in hooks.items():
         if not isinstance(groups, list):
             continue
         for group in groups:
@@ -1807,16 +1839,15 @@ def _claude_native_registration_problem(
             for handler in handlers:
                 if not isinstance(handler, dict) or not _claude_owned_handler(handler, data_dir):
                     continue
+                if not _claude_native_event_fields_current(event, group, handler):
+                    return stale
                 command, args = handler.get("command"), handler.get("args")
                 if handler.get("type") != "command":
                     return stale
-                if not expected.guard:
-                    if args is not None or command != shell_command:
-                        return stale
+                if _claude_native_primary_handler(handler, expected):
                     primaries += 1
-                elif command == expected.guard and args == primary_args:
-                    primaries += 1
-                    synchronous += handler.get("async") is not True
+                    if expected.guard:
+                        synchronous += handler.get("async") is not True
                 elif command == expected.native and args == companion_args:
                     companions += 1
                 else:
@@ -1874,27 +1905,26 @@ def claude_missing_registration(cfg: Any, settings: Any) -> tuple[str, str] | No
         hooks = {}
     native = _claude_per_user_native_registration(cfg)
     if native is not None:
-        primary_args = ["guard-user-hook", native.native, *native.hook_args]
         companion_args = ["fallback-guard-user-hook", native.guard, *native.hook_args]
-        shell_command = _claude_native_shell_command(native)
 
-    def guard(handler: dict[str, Any], synchronous: bool) -> bool:
+    def guard(handler: dict[str, Any], group: dict[str, Any], event: str, synchronous: bool) -> bool:
         if handler.get("type") != "command" or (synchronous and handler.get("async") is True):
             return False
-        command, args = handler.get("command"), handler.get("args")
         if native is None:
             # Which copy of the script runs is the freshness and edited-hook
             # checks' question; this one asks whether the event runs it at all.
+            command = handler.get("command")
             return isinstance(command, str) and "claude-code-hook.sh" in command
-        if not native.guard:
-            return args is None and command == shell_command
-        return command == native.guard and args == primary_args
+        return _claude_native_event_fields_current(event, group, handler) and _claude_native_primary_handler(
+            handler, native
+        )
 
-    def companion(handler: dict[str, Any]) -> bool:
+    def companion(handler: dict[str, Any], group: dict[str, Any], event: str) -> bool:
         return (
             native is not None
             and handler.get("type") == "command"
             and handler.get("async") is not True
+            and _claude_native_event_fields_current(event, group, handler)
             and handler.get("command") == native.native
             and handler.get("args") == companion_args
         )
@@ -1909,10 +1939,10 @@ def claude_missing_registration(cfg: Any, settings: Any) -> tuple[str, str] | No
             if not isinstance(handlers, list):
                 continue
             handlers = [handler for handler in handlers if isinstance(handler, dict)]
-            if not any(guard(handler, synchronous) for handler in handlers):
+            if not any(guard(handler, group, event, synchronous) for handler in handlers):
                 continue
             guarded = True
-            if not (needs_companion and synchronous) or any(companion(handler) for handler in handlers):
+            if not (needs_companion and synchronous) or any(companion(handler, group, event) for handler in handlers):
                 break
         else:
             if not guarded:

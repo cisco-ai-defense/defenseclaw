@@ -2926,6 +2926,101 @@ def test_gap0612_status_and_quickstart_share_native_registration_verdict(
     assert hook_integrity.hook_registration_problems(cfg, "claudecode") == []
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the Linux per-user native registration")
+@pytest.mark.parametrize("form", ["direct", "shell"])
+@pytest.mark.parametrize(
+    "edit", ["current", "matcher", "timeout", "condition", "lifecycle_matcher", "lifecycle_timeout"]
+)
+def test_gap0612_native_tool_guard_fields_share_registration_verdict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, form: str, edit: str
+) -> None:
+    from defenseclaw import bootstrap, hook_integrity
+    from defenseclaw.commands import cmd_status
+
+    if form == "direct":
+        cfg, home, _app = _claude_native_runtime(monkeypatch, tmp_path, "open")
+        hooks = _claude_contract_hooks(_claude_golden_hooks(home))
+    else:
+        cfg, home = _claude_native_layout(monkeypatch, tmp_path, hook_post=False)
+        settings = home / ".claude" / "settings.json"
+        (Path(cfg.data_dir) / "hook_contract_lock.json").write_text(
+            json.dumps(
+                {
+                    "connectors": {
+                        "claudecode": {
+                            "contract_id": "claudecode-hooks-v1",
+                            "locations": {"hook_config_paths": [str(settings)]},
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        native = fail_mode_runtime._claude_per_user_native_registration(cfg)
+        assert native is not None
+        command = fail_mode_runtime._claude_native_shell_command(native)
+        hooks = {}
+        for event in _CLAUDE_CONTRACT_EVENTS["claudecode-hooks-v1"]:
+            matcher, timeout = _CLAUDE_REQUIRED_HOOKS[event]
+            group = {"hooks": [{"type": "command", "command": command, "timeout": timeout}]}
+            if matcher is not None:
+                group["matcher"] = matcher
+            if event == "MessageDisplay":
+                group["hooks"][0]["async"] = True
+            hooks[event] = [group]
+
+    group = hooks["PreToolUse"][0]
+    if edit == "matcher":
+        group["matcher"] = "Read"
+    elif edit == "timeout":
+        group["hooks"][0]["timeout"] = 1
+    elif edit == "condition":
+        group["if"] = "Bash(git *)"
+    elif edit == "lifecycle_matcher":
+        hooks["SessionStart"][0]["matcher"] = "startup"
+    elif edit == "lifecycle_timeout":
+        hooks["Stop"][0]["hooks"][0]["timeout"] = 1
+    _write_claude_hooks(home, hooks)
+
+    problems = hook_integrity.hook_registration_problems(cfg, "claudecode")
+    status = cmd_status._hook_runtime_degraded_suffix(cfg, "claudecode")
+    readiness = bootstrap._connector_runtime_readiness(cfg, "claudecode")
+    doctor = _doctor_claude_hooks_row(cfg, home)
+    if edit == "current":
+        assert not problems
+        assert "DEGRADED" not in status
+        assert readiness is None
+        assert doctor["status"] == "pass"
+    else:
+        assert problems
+        assert "DEGRADED" in status
+        assert readiness is not None
+        assert doctor["status"] == "fail"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux per-user native registration")
+@pytest.mark.parametrize("edit", ["timeout", "condition"])
+def test_gap0612_native_companion_fields_share_registration_verdict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, edit: str
+) -> None:
+    from defenseclaw import bootstrap, hook_integrity
+    from defenseclaw.commands import cmd_status
+
+    cfg, home, _app = _claude_native_runtime(monkeypatch, tmp_path, "open")
+    hooks = _claude_contract_hooks(_claude_golden_hooks(home))
+    companion = hooks["PreToolUse"][0]["hooks"][1]
+    if edit == "timeout":
+        companion["timeout"] = 1
+    else:
+        companion["if"] = "Bash(git *)"
+    _write_claude_hooks(home, hooks)
+
+    assert hook_integrity.hook_registration_problems(cfg, "claudecode")
+    assert "DEGRADED" in cmd_status._hook_runtime_degraded_suffix(cfg, "claudecode")
+    assert bootstrap._connector_runtime_readiness(cfg, "claudecode") is not None
+    assert _doctor_claude_hooks_row(cfg, home)["status"] == "fail"
+
+
 def _doctor_claude_hooks_row(cfg: SimpleNamespace, home: Path) -> dict:
     result = cmd_doctor._DoctorResult()
     cmd_doctor._check_claudecode_hooks(
@@ -3135,14 +3230,14 @@ def test_claude_native_registration_without_guard_uses_the_launcher_shell_form(
     assert command == fail_mode_runtime._claude_native_shell_command(
         fail_mode_runtime._claude_per_user_native_registration(cfg)
     )
-    _write_claude_hooks(home, {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": command}]}]})
+    _write_claude_hooks(home, {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": command, "timeout": 30}]}]})
     assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
     assert hook_integrity.hook_registration_problems(cfg, "claudecode") == []
     _write_claude_hooks(
         home,
         {
             "PreToolUse": [
-                {"matcher": "*", "hooks": [{"type": "command", "command": command.replace("exit 2; }", "exit 0; }")}]}
+                {"matcher": "*", "hooks": [{"type": "command", "command": command.replace("exit 2; }", "exit 0; }"), "timeout": 30}]}
             ]
         },
     )
