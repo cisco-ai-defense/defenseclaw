@@ -14959,7 +14959,9 @@ function Get-DefenseClawLayout {
         CodexMachinePolicyPath = (Microsoft.PowerShell.Management\Join-Path $codexMachinePolicyDirectory 'requirements.toml')
         CodexManagedHooksDirectory = $bin
         CodexManagedHooksStatePath = (Microsoft.PowerShell.Management\Join-Path $codexMachinePolicyDirectory '.defenseclaw-managed-hooks.state')
-        CodexManagedHooksLockPath = (Microsoft.PowerShell.Management\Join-Path $codexMachinePolicyDirectory '.defenseclaw-managed-hooks.lock')
+        # The Codex writer lock (GAP-0650). The lock of 1.0.8 and earlier,
+        # '.defenseclaw-managed-hooks.lock' beside it, is removed with it.
+        CodexManagedHooksLockPath = (Microsoft.PowerShell.Management\Join-Path $codexMachinePolicyDirectory '.defenseclaw-managed-hooks.writer.lock')
         ClaudeManagedHooksLockPath = (
             Microsoft.PowerShell.Management\Join-Path `
                 (Microsoft.PowerShell.Management\Join-Path `
@@ -19138,6 +19140,11 @@ function Remove-DefenseClawCodexPolicySerializationLock {
     Remove-DefenseClawManagedHooksSerializationLock `
         -Path $lockPath `
         -Label 'Codex policy serialization lock'
+    # The lock of 1.0.8 and earlier, which writers no longer take (GAP-0650).
+    # Kept while upgrades from 1.0.8 are supported.
+    Remove-DefenseClawManagedHooksSerializationLock `
+        -Path ([IO.Path]::Combine($Directory, '.defenseclaw-managed-hooks.lock')) `
+        -Label 'Codex policy serialization lock of an earlier release'
 }
 
 # Both locks sit in shared vendor directories the lifecycle never claims, so the
@@ -19155,23 +19162,29 @@ function Remove-DefenseClawCommittedManagedHooksSerializationLocks {
         if ([string]::IsNullOrWhiteSpace($path)) {
             continue
         }
-        $full = [IO.Path]::GetFullPath($path)
+        $path = [IO.Path]::GetFullPath($path)
         # A link at the lock folder or above it (GAP-0758): the lock is not
         # looked for behind it, the uninstall goes on, and the folder is named.
         try {
-            Assert-DefenseClawNoReparsePath -Path ([IO.Path]::GetDirectoryName($full)) -AllowMissingLeaf
+            Assert-DefenseClawNoReparsePath -Path ([IO.Path]::GetDirectoryName($path)) -AllowMissingLeaf
         }
         catch {
             if ($_.Exception.Message -notmatch '^reparse points are not allowed in managed path: ') {
                 throw
             }
-            Add-DefenseClawCreatedFolderKept -Folder ([IO.Path]::GetDirectoryName($full)) -Note ('kept: a link sits on its path, so the ' + $lock.Label + ' is not looked for behind it: ' +
+            Add-DefenseClawCreatedFolderKept -Folder ([IO.Path]::GetDirectoryName($path)) -Note ('kept: a link sits on its path, so the ' + $lock.Label + ' is not looked for behind it: ' +
                 (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512))
             continue
         }
         Remove-DefenseClawManagedHooksSerializationLock `
-            -Path $full `
+            -Path $path `
             -Label $lock.Label
+        if ($lock.Key -ceq 'CodexManagedHooksLockPath') {
+            # The lock of 1.0.8 and earlier beside it (GAP-0650).
+            Remove-DefenseClawManagedHooksSerializationLock `
+                -Path ([IO.Path]::Combine([IO.Path]::GetDirectoryName($path), '.defenseclaw-managed-hooks.lock')) `
+                -Label 'Codex policy serialization lock of an earlier release'
+        }
     }
 }
 
@@ -46102,7 +46115,7 @@ function Restore-DefenseClawForcedUninstallCodexPolicy {
     if ($outcome -ceq 'kept') {
         return ($warnings -join '; ')
     }
-    foreach ($leaf in @('.defenseclaw-managed-hooks.state', '.defenseclaw-managed-hooks.lock')) {
+    foreach ($leaf in @('.defenseclaw-managed-hooks.state', '.defenseclaw-managed-hooks.writer.lock', '.defenseclaw-managed-hooks.lock')) {
         $remaining = [Collections.Generic.List[string]]::new()
         [void](Remove-DefenseClawNuclearPath -Path ([IO.Path]::Combine($folder, $leaf)) -Remaining $remaining)
     }
@@ -48124,6 +48137,7 @@ function Invoke-DefenseClawNuclearUninstall {
         [IO.Path]::Combine($claudeManaged, '.defenseclaw-managed-runtime-selector.lock'),
         # Codex managed hooks sidecars.
         [IO.Path]::Combine($codexManaged, '.defenseclaw-managed-hooks.state'),
+        [IO.Path]::Combine($codexManaged, '.defenseclaw-managed-hooks.writer.lock'),
         [IO.Path]::Combine($codexManaged, '.defenseclaw-managed-hooks.lock'),
         [IO.Path]::Combine($codexManaged, '.defenseclaw-managed-hooks.receipt'),
         [IO.Path]::Combine($codexManaged, '.defenseclaw-managed-runtime-selector.state'),

@@ -31,8 +31,20 @@ const (
 	windowsCodexMachineOwnershipLimit            = 4 << 20
 	windowsCodexManagedStateLimit                = 1 << 20
 	windowsCodexManagedStateFile                 = ".defenseclaw-managed-hooks.state"
-	windowsCodexManagedLockFile                  = ".defenseclaw-managed-hooks.lock"
+	// windowsCodexManagedLegacyLockFile is the transaction lock of 1.0.8 and
+	// earlier. Standard users could read it, so one of them could hold it and
+	// time out every Codex policy transaction (GAP-0650). Writers no longer
+	// take it; the hook reads under it only while no writer lock exists yet
+	// (an upgrade from 1.0.8 or earlier, until the first transaction of this
+	// release removes it). Keep it while upgrades from 1.0.8 are supported.
+	windowsCodexManagedLegacyLockFile = ".defenseclaw-managed-hooks.lock"
 )
+
+// WindowsCodexManagedWriterLockFile is the Codex machine-policy transaction
+// lock in the Codex policy folder. Only Administrators and SYSTEM can open it
+// for data; BUILTIN\Users can read its attributes, its size being the
+// transaction counter the hook-side reader checks (GAP-0650).
+const WindowsCodexManagedWriterLockFile = ".defenseclaw-managed-hooks.writer.lock"
 
 const (
 	// WindowsClaudeEffectivePolicyUnverifiedReason is returned because
