@@ -3,9 +3,14 @@
 
 package hookpaths
 
-import "testing"
+import (
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestGAP0518LateCandidateText(t *testing.T) {
+	home := t.TempDir()
 	for _, row := range []struct {
 		text string
 		want bool
@@ -22,9 +27,25 @@ func TestGAP0518LateCandidateText(t *testing.T) {
 		{"printf '%s' \"$USER\"", false},
 		{"cat $unknown", true},
 		{"cat $PWD/.ssh/config", true},
-		{"cat project/authorized_keys", true},
+		{"cat project/authorized_keys", false},
 	} {
-		if got := CallMayReachProtected(row.text, "/home/test"); got != row.want {
+		command := strings.ReplaceAll(row.text, "/home/test", home)
+		calls, known := LateKnownCalls(command, home, home)
+		got := !known
+		memo := NewTargetMemo()
+		for _, words := range calls {
+			for i, word := range words {
+				if i == 0 || word == "" {
+					continue
+				}
+				path := word
+				if !filepath.IsAbs(path) {
+					path = filepath.Join(home, path)
+				}
+				got = got || ProtectedReach(path, home, memo) != GradeNone
+			}
+		}
+		if got != row.want {
 			t.Errorf("candidate %q = %t, want %t", row.text, got, row.want)
 		}
 	}

@@ -14,6 +14,7 @@ func TestProtectedReachGradesNamedAndOrdinaryPaths(t *testing.T) {
 	root := t.TempDir()
 	home, project := filepath.Join(root, "home"), filepath.Join(root, "project")
 	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	privateKey := filepath.Join(home, ".ssh", "id_ed25519")
 	state := filepath.Join(home, ".defenseclaw", "config.yaml")
 	policy := filepath.Join(home, ".defenseclaw", "policies", "rule.yaml")
 	for _, dir := range []string{filepath.Dir(keys), filepath.Dir(policy), project} {
@@ -21,7 +22,7 @@ func TestProtectedReachGradesNamedAndOrdinaryPaths(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, file := range []string{keys, state, policy} {
+	for _, file := range []string{keys, privateKey, state, policy} {
 		if err := os.WriteFile(file, []byte("fixture\n"), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -34,6 +35,7 @@ func TestProtectedReachGradesNamedAndOrdinaryPaths(t *testing.T) {
 	relative := filepath.Join(project, "relative")
 	parent := filepath.Join(project, "linked-dir")
 	hard := filepath.Join(project, "hard")
+	privateHard := filepath.Join(project, "private-hard")
 	if err := os.Symlink(keys, direct); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
@@ -49,6 +51,9 @@ func TestProtectedReachGradesNamedAndOrdinaryPaths(t *testing.T) {
 	}
 	if err := os.Link(keys, hard); err != nil {
 		t.Skipf("hard link unavailable: %v", err)
+	}
+	if err := os.Link(privateKey, privateHard); err != nil {
+		t.Fatal(err)
 	}
 	chain := filepath.Join(project, "step0")
 	for i := 0; i < 20; i++ {
@@ -70,6 +75,7 @@ func TestProtectedReachGradesNamedAndOrdinaryPaths(t *testing.T) {
 		{"parent-link", filepath.Join(parent, "authorized_keys"), GradeNamed},
 		{"parent-link-missing", filepath.Join(parent, "authorized_keys2"), GradeNamed},
 		{"hard-link", hard, GradeNamed},
+		{"private-hard-link", privateHard, GradeNamed},
 		{"long-chain", chain, GradeNamed},
 		{"state-file", state, GradeNamed},
 		{"state-tree", policy, GradeNamed},

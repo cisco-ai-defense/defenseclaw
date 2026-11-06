@@ -10,53 +10,6 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// CallMayReachProtected is the bounded text phase of a late hook answer.
-// Names must be complete path components: a project file whose name merely
-// contains a protected component is still an ordinary file.
-func CallMayReachProtected(text, home string) bool {
-	if text == "" || home == "" {
-		return true
-	}
-	lower := strings.ToLower(text)
-	for _, name := range []string{
-		"authorized_keys", ".ssh", ".defenseclaw", "id_rsa", "id_ed25519",
-		"id_ecdsa", "id_dsa", "administrators_authorized_keys",
-	} {
-		if lateTextHasPathComponent(lower, name) {
-			return true
-		}
-	}
-	for _, spelling := range []string{"~/", "%USERPROFILE%\\"} {
-		if strings.Contains(text, spelling) {
-			return true
-		}
-	}
-	// Expansions and patterns can supply a name absent from the literal text.
-	if strings.ContainsAny(text, "*?[]`") {
-		return true
-	}
-	for i := 0; i < len(text); i++ {
-		if text[i] != '$' {
-			continue
-		}
-		length := 0
-		for _, value := range []string{"$HOME", "${HOME}", "$PWD", "${PWD}",
-			"$USER", "${USER}", "$LOGNAME", "${LOGNAME}"} {
-			if strings.HasPrefix(text[i:], value) {
-				length = len(value)
-				break
-			}
-		}
-		if length == 0 || i+length < len(text) && text[i+1] != '{' &&
-			lateShellNameByte(text[i+length]) ||
-			i > 0 && (text[i-1] == '/' || text[i-1] == '\\') {
-			return true
-		}
-		i += length - 1
-	}
-	return false
-}
-
 // LateKnownCalls supplies literal operands for a local late answer. Each
 // simple call keeps its own option boundary. A shell wrapper is read as a
 // nested command, so its quoted body cannot hide a known path value.
@@ -288,31 +241,4 @@ func latePlainParam(param *syntax.ParamExp) bool {
 
 func lateKnownParam(param *syntax.ParamExp) bool {
 	return latePlainParam(param) && (param.Param.Value == "HOME" || param.Param.Value == "PWD")
-}
-
-func lateTextHasPathComponent(text, name string) bool {
-	for start := 0; start < len(text); {
-		index := strings.Index(text[start:], name)
-		if index < 0 {
-			return false
-		}
-		index += start
-		before := index == 0 || lateNameBoundary(text[index-1])
-		end := index + len(name)
-		after := end == len(text) || lateNameBoundary(text[end])
-		if before && after {
-			return true
-		}
-		start = index + 1
-	}
-	return false
-}
-
-func lateNameBoundary(c byte) bool {
-	return strings.ContainsRune("/\\ \t\r\n'\"=;|&<>(){}:,", rune(c))
-}
-
-func lateShellNameByte(c byte) bool {
-	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' ||
-		c >= '0' && c <= '9' || c == '_'
 }

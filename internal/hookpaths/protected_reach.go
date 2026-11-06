@@ -109,6 +109,9 @@ func (m *TargetMemo) protectedReachNames(home string) reachNames {
 	for _, name := range SSHControlFiles {
 		addResolved(filepath.Join(ssh, name), names.addFile)
 	}
+	for _, name := range actionPrivateKeyNames {
+		addResolved(filepath.Join(ssh, name), names.addFile)
+	}
 	for _, name := range activeStateFiles {
 		addResolved(filepath.Join(state, name), names.addFile)
 	}
@@ -149,17 +152,26 @@ func (m *TargetMemo) ProtectedReach(target, home string) Grade {
 	if names.has(target) {
 		return GradeNamed
 	}
+	parent := filepath.Dir(target)
+	// A missing leaf cannot be a hard link. Resolve its parent through the
+	// evaluation memo, so long ordinary calls pay one leaf read per operand
+	// while linked parents and protected names still receive the same grade.
+	entryInfo, entryErr := PathLstat(target)
+	if os.IsNotExist(entryErr) {
+		if resolved, ok := m.resolveWriteTarget(parent); ok &&
+			!names.has(filepath.Join(resolved, filepath.Base(target))) {
+			return GradeNone
+		}
+	}
 
 	type answer struct {
 		info os.FileInfo
 		err  error
 	}
-	fileReady, parentReady, entryReady := make(chan answer, 1), make(chan answer, 1), make(chan answer, 1)
-	parent := filepath.Dir(target)
+	fileReady, parentReady := make(chan answer, 1), make(chan answer, 1)
 	go func() { info, err := PathStat(target); fileReady <- answer{info, err} }()
 	go func() { info, err := PathStat(parent); parentReady <- answer{info, err} }()
-	go func() { info, err := PathLstat(target); entryReady <- answer{info, err} }()
-	file, directory, entry := <-fileReady, <-parentReady, <-entryReady
+	file, directory, entry := <-fileReady, <-parentReady, answer{entryInfo, entryErr}
 
 	// A reached file can be a hard link; a reached parent can be a linked
 	// directory whose final child has not been created yet.

@@ -22,7 +22,7 @@ func OrdinaryNoAnswerPayload(body []byte) bool {
 }
 
 func ordinaryNoAnswerPayloadInHome(body []byte, home string) bool {
-	if len(body) == 0 || len(body) > 64<<10 || !filepath.IsAbs(home) || !validUniqueGatewayResponse(body) {
+	if len(body) == 0 || len(body) > hookpaths.MaxPayloadBytes || !filepath.IsAbs(home) || !validUniqueGatewayResponse(body) {
 		return false
 	}
 	var call struct {
@@ -50,9 +50,6 @@ func ordinaryNoAnswerPayloadInHome(body []byte, home string) bool {
 	case "shell", "shell_command":
 		return ordinaryNoAnswerCommand(input["command"], commandWorkdir(input, call.CWD), home)
 	case "Read":
-		if len(body) > 4096 {
-			return false
-		}
 		var path string
 		if json.Unmarshal(input["file_path"], &path) != nil || !filepath.IsAbs(path) ||
 			strings.ContainsAny(path, " \t\r\n'\"\\$`*?[];|&<>(){}") {
@@ -74,14 +71,7 @@ func ordinaryNoAnswerPayloadInHome(body []byte, home string) bool {
 		if err != nil || !info.Mode().IsRegular() {
 			return false
 		}
-		if hookpaths.CallMayReachProtected(path, home) ||
-			pathMayNameProtectedLink(path, resolved, home, info) {
-			return false
-		}
-		command := "cat " + path
-		return hookpaths.ActionCommandDecision(command, call.CWD, home) == "" &&
-			!hookpaths.ActionStateTargetMention(command, call.CWD, home) &&
-			!hookpaths.ActionPrivateKeyRead(command, call.CWD, home)
+		return hookpaths.ProtectedReach(path, home, hookpaths.NewTargetMemo()) == hookpaths.GradeNone
 	default:
 		return false
 	}
@@ -114,19 +104,10 @@ func ordinaryNoAnswerCommand(raw json.RawMessage, cwd, home string) bool {
 		}
 		command = argv[2]
 	}
-	if strings.TrimSpace(command) == "" || hookpaths.CallMayReachProtected(command, home) {
+	if strings.TrimSpace(command) == "" {
 		return false
 	}
-	if hookpaths.OrdinaryLongTouchMissingLeaves(command, cwd, home) {
-		return true
-	}
-	if commandMayNameLink(command, cwd, home) {
-		return false
-	}
-	return hookpaths.ActionCommandDecision(command, cwd, home) == "" &&
-		!hookpaths.ActionStateTargetMention(command, cwd, home) &&
-		!hookpaths.ActionPrivateKeyRead(command, cwd, home) &&
-		hookpaths.UnprovenProtectedWrite(command, cwd, home) == ""
+	return !commandMayNameLink(command, cwd, home)
 }
 
 // commandMayNameLink closes an unresolved operand at a no-answer deadline.
@@ -137,16 +118,16 @@ func commandMayNameLink(command, cwd, home string) bool {
 	if !known {
 		return true
 	}
+	memo := hookpaths.NewTargetMemo()
 	for _, words := range calls {
-		if commandWordsMayNameLink(words, cwd, home) {
+		if commandWordsMayNameLink(words, cwd, home, memo) {
 			return true
 		}
 	}
 	return false
 }
 
-func commandWordsMayNameLink(words []string, cwd, home string) bool {
-	display := len(words) != 0 && (words[0] == "echo" || words[0] == "printf")
+func commandWordsMayNameLink(words []string, cwd, home string, memo *hookpaths.TargetMemo) bool {
 	endOptions := false
 	for i, word := range words {
 		if i == 0 && !strings.ContainsAny(word, "/\\") {
@@ -164,16 +145,10 @@ func commandWordsMayNameLink(words []string, cwd, home string) bool {
 				var known bool
 				word, known = attachedFileOptionValue(words[0], word)
 				if !known {
-					if display {
-						continue
-					}
 					// An unfamiliar attached option may carry a file name.
 					// Inspect its bounded suffixes before granting a late proof.
-					if len(words[i]) > 18 {
-						return true
-					}
 					for start := 2; start < len(words[i]); start++ {
-						if pathWordMayNameLink(words[i][start:], cwd, home, false) {
+						if pathWordMayNameLink(words[i][start:], cwd, home, memo) {
 							return true
 						}
 					}
@@ -184,44 +159,19 @@ func commandWordsMayNameLink(words []string, cwd, home string) bool {
 		if word == "" {
 			continue
 		}
-		if pathWordMayNameLink(word, cwd, home, display) {
+		if pathWordMayNameLink(word, cwd, home, memo) {
 			return true
 		}
 	}
 	return false
 }
 
-func pathWordMayNameLink(word, cwd, home string, display bool) bool {
+func pathWordMayNameLink(word, cwd, home string, memo *hookpaths.TargetMemo) bool {
 	path := word
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(cwd, path)
 	}
-	parent := filepath.Dir(path)
-	resolvedParent, parentErr := filepath.EvalSymlinks(parent)
-	if parentErr != nil && (!display || !os.IsNotExist(parentErr)) ||
-		parentErr == nil && hookpaths.CallMayReachProtected(resolvedParent, home) {
-		return true
-	}
-	info, err := os.Lstat(path)
-	if err != nil && !os.IsNotExist(err) {
-		return true
-	}
-	if err == nil {
-		resolved, resolveErr := filepath.EvalSymlinks(path)
-		if resolveErr != nil {
-			return true
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			info, err = os.Stat(path)
-			if err != nil {
-				return true
-			}
-		}
-		if pathMayNameProtectedIdentity(resolved, home, info) {
-			return true
-		}
-	}
-	return false
+	return hookpaths.ProtectedReach(path, home, memo) != hookpaths.GradeNone
 }
 
 // attachedFileOptionValue reads the file operand of a short option, including
@@ -256,32 +206,4 @@ func attachedFileOptionValue(program, option string) (string, bool) {
 		}
 	}
 	return "", true
-}
-
-func pathMayNameProtectedLink(path, resolved, home string, info os.FileInfo) bool {
-	if resolved != filepath.Clean(path) {
-		entry, err := os.Lstat(path)
-		if err != nil || entry.Mode()&os.ModeSymlink != 0 {
-			return true
-		}
-		parent, err := filepath.EvalSymlinks(filepath.Dir(path))
-		if err != nil || hookpaths.CallMayReachProtected(parent, home) {
-			return true
-		}
-	}
-	return pathMayNameProtectedIdentity(resolved, home, info)
-}
-
-func pathMayNameProtectedIdentity(resolved, home string, info os.FileInfo) bool {
-	if hookpaths.CallMayReachProtected(resolved, home) {
-		return true
-	}
-	for _, protected := range hookpaths.ProtectedAuthorizedKeysPaths(home) {
-		other, err := os.Stat(protected)
-		if err == nil && os.SameFile(info, other) {
-			return true
-		}
-	}
-	_, protected := hookpaths.ResolveActiveStateHardlinkTarget(resolved, home)
-	return protected
 }

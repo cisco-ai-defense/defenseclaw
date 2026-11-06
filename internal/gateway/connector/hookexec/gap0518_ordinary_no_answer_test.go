@@ -468,7 +468,7 @@ func TestGAP0518LateProofChecksAttachedFilesAndResolvedProject(t *testing.T) {
 	}
 	for _, command := range []string{
 		"echo hello", `printf '%s' hello`, "cat notes.txt", "grep -fnotes.txt /dev/null",
-		`grep -ealias /dev/null`, `echo "user=$USER"`, `echo "logname:$LOGNAME"`,
+		`grep -ealias /dev/null`, `echo -n hello`, `echo "user=$USER"`, `echo "logname:$LOGNAME"`,
 		`echo "$HOME-suffix"`,
 	} {
 		if !ordinaryNoAnswerPayloadInHome(call(command), home) {
@@ -480,7 +480,7 @@ func TestGAP0518LateProofChecksAttachedFilesAndResolvedProject(t *testing.T) {
 		`grep -f"$PWD/alias" /dev/null`, "grep --file=alias /dev/null",
 		"grep -Ffalias /dev/null", "sed -falias /dev/null", "sed -nfalias /dev/null",
 		`sed -f"$PWD"/alias /dev/null`, "awk -falias /dev/null",
-		`awk -f"$PWD"/alias /dev/null`, "sort -oalias notes.txt", `echo "$PWD"/alias`,
+		`awk -f"$PWD"/alias /dev/null`, "sort -oalias notes.txt", `echo "$PWD"/alias`, `echo -falias`,
 		`bash -c 'grep -falias /dev/null'`,
 	} {
 		if ordinaryNoAnswerPayloadInHome(call(command), home) {
