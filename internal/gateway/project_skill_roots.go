@@ -80,8 +80,8 @@ func (p *projectSkillRoots) changes() chan struct{} {
 	return p.changed
 }
 
-// add registers root for connector and tells the watcher; false when root
-// is already registered or the watcher does not use project folders.
+// add registers root for connector and tells the watcher; false when the
+// connector already registered it or the watcher does not use project folders.
 // Every registered root must remain visible to the pending-admission check;
 // a registration cap would let later project skills run without admission.
 func (p *projectSkillRoots) add(connector, root string) bool {
@@ -95,7 +95,7 @@ func (p *projectSkillRoots) add(connector, root string) bool {
 	}
 	key := projectRootKey(root)
 	for _, r := range p.roots {
-		if projectRootKey(r.Path) == key {
+		if projectRootKey(r.Path) == key && r.Connector == connector {
 			return false
 		}
 	}
