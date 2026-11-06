@@ -19,6 +19,16 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
+type verifiedDoctorStatusAPI struct {
+	API
+	pid int
+}
+
+func (a verifiedDoctorStatusAPI) StatusWithPeer(ctx context.Context) (*sandboxapi.Status, int, error) {
+	st, err := a.API.Status(ctx)
+	return st, a.pid, err
+}
+
 func TestDoctorDoesNotCallAnAdvertisedButUnboundIngressPortServed(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.daemon.status.Available = false // The manager's listener probe failed.
@@ -102,6 +112,7 @@ func TestManagedDoctorProvesOnlyItsOwnSandboxDaemonPorts(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ta := newTestApp(t, "")
+			ta.API = verifiedDoctorStatusAPI{API: ta.API, pid: os.Getpid()}
 			ta.daemon.status.Managed = managedStatusFixture()
 			ta.daemon.status.Available = false
 			ta.daemon.status.IngressAddr, ta.daemon.status.EgressAddr = "", ""

@@ -431,9 +431,12 @@ type Doctor struct {
 	// DaemonUID is the DefenseClaw daemon's uid when known; the gateway
 	// must run as the same user.
 	DaemonUID *int
-	// DaemonPID is the process that answered the sandbox daemon's status
-	// request. A busy port is accepted only when this process owns it.
+	// DaemonPID is the process named in the sandbox daemon's status response.
+	// It is not port ownership proof without a matching ResponderPID.
 	DaemonPID int
+	// ResponderPID is the kernel-verified process that supplied that status
+	// response over the managed Unix socket.
+	ResponderPID int
 	// Managed limits the report to the checks of this account's own
 	// process (platform and user), for a managed computer: there the
 	// administrator's lifecycle owns OpenShell (its install, gateway
@@ -2455,7 +2458,7 @@ func (r *doctorRun) checkPorts(ctx context.Context) {
 			case err == nil:
 				_ = ln.Close()
 				c.Status, c.Detail = StatusPass, addr+" is free"
-			case p.ServedByDaemon:
+			case p.ServedByDaemon && !r.Managed:
 				c.Status, c.Detail = StatusPass, addr+" is served by the DefenseClaw daemon"
 			default:
 				var found daemon.PortHolder

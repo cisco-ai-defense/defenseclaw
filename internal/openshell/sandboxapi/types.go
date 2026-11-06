@@ -139,9 +139,9 @@ type Status struct {
 	// it drives the user's OpenShell gateway and mounts the user's files, so
 	// the doctor checks it is the user's own.
 	DaemonUID *int `json:"daemon_uid,omitempty"`
-	// DaemonPID identifies the process that answered this status request.
-	// Doctor compares it with a busy sandbox port's socket owner before
-	// treating that port as served by this daemon.
+	// DaemonPID is the process the status response names. Doctor compares
+	// it with the kernel-verified response sender and a busy port's owner
+	// before treating that port as served by this daemon.
 	DaemonPID int `json:"daemon_pid,omitempty"`
 	// DockerGroupMissing reports that the daemon's user is in the docker
 	// group but the daemon started before that, so it cannot reach Docker
