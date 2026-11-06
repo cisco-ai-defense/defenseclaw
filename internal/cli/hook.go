@@ -39,7 +39,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 func init() {
@@ -747,7 +749,14 @@ func readHookSidecar(path string) map[string]string {
 	if err != nil || !info.Mode().IsRegular() || info.Size() > gwconnector.HookSidecarMaxBytes {
 		return out
 	}
-	data, err := os.ReadFile(path)
+	// Share deletion and retry a transient open error without holding a
+	// replacement in place (GAP-0655).
+	var data []byte
+	err = safefile.RetryTransientRead(func() error {
+		var err error
+		data, err = winpath.ReadFileShared(path)
+		return err
+	})
 	if err != nil || len(data) > gwconnector.HookSidecarMaxBytes {
 		return out
 	}

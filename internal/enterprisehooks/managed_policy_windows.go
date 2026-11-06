@@ -2184,7 +2184,14 @@ func readTrustedWindowsManagedPolicyFile(path string) ([]byte, bool, error) {
 	if err := windowsManagedPolicyFileTrustCheck(path); err != nil {
 		return nil, false, fmt.Errorf("enterprise hooks: untrusted Claude Code managed policy source %s: %w", path, err)
 	}
-	file, err := os.Open(path)
+	// Share deletion and retry a transient open error without holding a
+	// replacement in place (GAP-0655).
+	var file *os.File
+	err = safefile.RetryTransientRead(func() error {
+		var err error
+		file, err = winpath.OpenReadShared(path)
+		return err
+	})
 	if err != nil {
 		return nil, false, fmt.Errorf("enterprise hooks: open Claude Code managed policy %s: %w", path, err)
 	}
@@ -2558,8 +2565,17 @@ func writeWindowsManagedFile(path string, data []byte, userReadable bool) error 
 		if err := windowsManagedPolicyFileTrustCheck(path); err != nil {
 			return err
 		}
-		if current, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(current, data) {
-			return nil
+		var current []byte
+		readErr := safefile.RetryTransientRead(func() error {
+			var err error
+			current, err = winpath.ReadFileShared(path)
+			return err
+		})
+		if readErr != nil {
+			return fmt.Errorf("enterprise hooks: read existing managed policy %s: %w", path, readErr)
+		}
+		if bytes.Equal(current, data) {
+			return windowsManagedPolicyFileTrustCheck(path)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -2585,9 +2601,8 @@ func writeWindowsManagedFile(path string, data []byte, userReadable bool) error 
 	if err := setWindowsManagedPolicyProtection(tempPath, false, userReadable); err != nil {
 		return err
 	}
-	// One rename: a reader (Cursor loads the adapter its hooks.json names)
-	// finds the old file or the new one, never none (GAP-2572). The temp file
-	// already carries the protection, so nothing is merged from the old one.
+	// Publish the protected stage with one rename. The unchanged-content
+	// check above avoids replacing a stable name during an ordinary ensure.
 	if err := safefile.ReplaceFileAtomically(tempPath, path); err != nil {
 		return fmt.Errorf("enterprise hooks: publish managed policy %s: %w", path, err)
 	}
