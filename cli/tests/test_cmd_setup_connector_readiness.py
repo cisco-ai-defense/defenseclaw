@@ -830,6 +830,7 @@ def test_batch_readiness_requires_every_selected_connector(monkeypatch, tmp_path
 def test_opencode_writable_plugin_folder_is_named_before_restart(monkeypatch, tmp_path: Path) -> None:
     from defenseclaw import connector_paths
 
+    monkeypatch.setattr("defenseclaw.file_permissions.owner_private_group", lambda *_: False)
     folder = tmp_path / ".config" / "opencode" / "plugins"
     folder.mkdir(parents=True)
     folder.chmod(0o775)
@@ -851,6 +852,7 @@ def test_opencode_preflight_precedes_config_write(monkeypatch, tmp_path: Path, b
     from defenseclaw import connector_paths
     from defenseclaw.context import AppContext
 
+    monkeypatch.setattr("defenseclaw.file_permissions.owner_private_group", lambda *_: False)
     folder = tmp_path / "plugins"
     folder.mkdir(mode=0o775)
     folder.chmod(0o775)

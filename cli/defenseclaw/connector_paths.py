@@ -3099,26 +3099,31 @@ def devin_rule_files(workspace_dir: str | None = None) -> list[str]:
 
 
 def opencode_writable_plugin_folder(plugin_paths: list[str]) -> str:
-    """Return a folder of an OpenCode plugin destination that group or other can write.
+    """Return the first unsafe ancestor of an OpenCode plugin destination.
 
-    The gateway refuses to install its plugin there and does not start.
-    Linux distributions with a umask of 002 create ~/.config/opencode/plugins
-    as 0775. Only the folders inside the home directory are checked.
+    Only folders inside the account's home are checked here. The gateway's
+    connector directory check accepts group write by the owner's private group.
     """
     if os.name == "nt":
         return ""
+    from defenseclaw.file_permissions import other_accounts_can_write
+
     home = os.path.realpath(os.path.expanduser("~"))
     for plugin_path in plugin_paths:
         folder = os.path.dirname(os.path.realpath(plugin_path))
-        while folder.startswith(home + os.sep):
-            try:
-                mode = os.lstat(folder).st_mode
-            except OSError:
-                folder = os.path.dirname(folder)
-                continue
-            if stat.S_ISDIR(mode) and stat.S_IMODE(mode) & 0o022:
-                return folder
+        ancestors = []
+        while folder == home or folder.startswith(home + os.sep):
+            ancestors.append(folder)
+            if folder == home:
+                break
             folder = os.path.dirname(folder)
+        for folder in reversed(ancestors):
+            try:
+                info = os.lstat(folder)
+            except OSError:
+                continue
+            if stat.S_ISDIR(info.st_mode) and other_accounts_can_write(folder, info):
+                return folder
     return ""
 
 
