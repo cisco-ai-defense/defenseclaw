@@ -308,14 +308,13 @@ func boundedPathRead(name string, kind pathReadKind, identityRead bool) pathRead
 		// bound, so one slow file read does not consume a separate budget.
 		identityWait := min(networkShareIdentityAnswerWait, networkShareAnswerWait*4/3)
 		wait = identityWait - time.Since(started)
-		if pending {
-			wait = min(wait, identityWait-time.Since(pendingStarted))
-		}
+		rootAnswered := false
 		networkShares.mu.Lock()
 		probe := networkShares.probes[root]
 		if probe != nil {
 			select {
 			case <-probe.done:
+				rootAnswered = true
 			default:
 				remaining := identityWait - time.Since(probe.started)
 				if remaining < wait {
@@ -324,6 +323,15 @@ func boundedPathRead(name string, kind pathReadKind, identityRead bool) pathRead
 			}
 		}
 		networkShares.mu.Unlock()
+		if pending {
+			if rootAnswered {
+				// One stalled file does not hide another reached identity on
+				// a share whose root has already answered.
+				wait = min(wait, 150*time.Millisecond)
+			} else {
+				wait = min(wait, identityWait-time.Since(pendingStarted))
+			}
+		}
 	}
 	if wait <= 0 {
 		return pathReadResult{err: networkShareError("read", name)}

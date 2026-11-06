@@ -282,12 +282,16 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 	// A successful Stat can otherwise hide a protected directory reached by a
 	// link, and an ordinary missing child can hide a protected link hop.
 	reached := false
+	sawLink := false
 	unread := false
 	lstat := func(path string) (os.FileInfo, error) {
 		if names.hasCandidate(path) {
 			reached = true
 		}
 		info, err := PathLstat(path)
+		if err == nil && info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			sawLink = true
+		}
 		if ShareUnanswered(err) {
 			unread = true
 		}
@@ -303,6 +307,15 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 	resolved, _, _, ok := walkWritePathMemoWithReaders("", target, 0, false, false, nil, lstat, readlink)
 	if reached || ok && names.has(resolved) {
 		return GradeNamed
+	}
+	if directory.err == nil && !directory.info.IsDir() && !sawLink && !unread && !unknownParents {
+		// A reached non-directory cannot contain the final name. This is
+		// an ordinary failed path, independent of a protected home.
+		return GradeNone
+	}
+	if !sawLink && os.IsNotExist(file.err) && os.IsNotExist(entry.err) &&
+		os.IsNotExist(directory.err) && !unread && !unknownParents {
+		return GradeNone
 	}
 
 	// The ordinary parent of a missing local file is a complete answer even

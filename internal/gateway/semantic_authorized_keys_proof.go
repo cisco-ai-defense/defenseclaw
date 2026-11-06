@@ -1232,6 +1232,13 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if isProtected(target) {
 			return named()
 		}
+		// A move onto a link replaces the directory entry. Classify the
+		// entry's parent before following the old link identity, which the
+		// move does not write.
+		if moved := hookpaths.PlainMovePath(target); movedOntoLinks[moved] || windowsMovedOntoLink(moved) {
+			parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(moved))
+			return !ok || isProtected(filepath.Join(parent, filepath.Base(moved)))
+		}
 		// Positive client and command-link answers take precedence over an
 		// opaque copy scope. The scope alone is only a possible write.
 		if isProtected(clientTargets[target]) {
@@ -1255,13 +1262,14 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			if isProtected(linked) {
 				return named()
 			}
+			if request.ProtectedHomeHook {
+				if walked, ok := hookpaths.WalkFactTarget(clientTargets, linked); ok && isProtected(walked) {
+					return named()
+				}
+			}
 		}
 		if links.CopiedSourceReachesProtected(target, facts.ActiveHome, request.targetMemo) {
 			return named()
-		}
-		if moved := hookpaths.PlainMovePath(target); movedOntoLinks[moved] || windowsMovedOntoLink(moved) {
-			parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(moved))
-			return !ok || isProtected(filepath.Join(parent, filepath.Base(moved)))
 		}
 		if physicalCWD := request.ResolvedWriteTargets[hookpaths.DirectoryFactPrefix+clientCWD]; filepath.IsAbs(physicalCWD) &&
 			strings.HasPrefix(target, clientCWD+string(filepath.Separator)) {
@@ -1309,13 +1317,10 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				// loop, a chain past the kernel limit or an unreadable
 				// component). Resolve it here, or fail closed.
 				if cannotResolveLocally {
-					unresolved := possible(target)
-					if unresolved && request.unresolvedTarget != nil {
+					if request.unresolvedTarget != nil {
 						*request.unresolvedTarget = true
 					}
-					if unresolved {
-						return true
-					}
+					return true
 				}
 			case truncated && cannotResolveLocally:
 				// The bounded map omits this operand, which may be a link
@@ -1359,6 +1364,17 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		case hookpaths.GradeNamed:
 			return true
 		case hookpaths.GradePossible:
+			if !hookpaths.SharePath(target) {
+				if entry, err := hookpaths.PathLstat(target); err == nil &&
+					entry.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+					if _, resolved := hookpaths.ResolveWriteTarget(target); !resolved {
+						if request.unresolvedTarget != nil {
+							*request.unresolvedTarget = true
+						}
+						return true
+					}
+				}
+			}
 			return possible(target)
 		default:
 			return false
