@@ -651,12 +651,17 @@ func TestWindowsEnterpriseEnsureRewritesAContentFileAnotherAccountCanChange(t *t
 		self         bool   // the supplied source is the installed file
 		sourceDrift  bool   // the supplied source is writable by a standard user
 		pending      bool
-		manifestFlag bool // MANIFEST= is supplied
-		manifestMode bool // enrollment mode manifest: nothing to enumerate
+		manifestFlag bool   // MANIFEST= is supplied
+		manifestMode bool   // enrollment mode manifest: nothing to enumerate
+		acl          string // the drift is the access list itself: "null" or "unsupported"
 		replaced     bool
 	}{
 		{name: "config.yaml writer", file: "config.yaml", replaced: true},
 		{name: "config.yaml owner", file: "config.yaml", owner: true, replaced: true},
+		// GAP-0590 review S1: an access list that is itself untrusted.
+		{name: "config.yaml null DACL", file: "config.yaml", acl: "null", replaced: true},
+		{name: "config.yaml unsupported entry", file: "config.yaml", acl: "unsupported", replaced: true},
+		{name: "targets.yaml null DACL", file: "targets.yaml", acl: "null", replaced: true},
 		{name: "config.yaml folder drift", file: "config.yaml", folderDrift: true},
 		{name: "config.yaml self source", file: "config.yaml", self: true},
 		{name: "config.yaml untrusted source", file: "config.yaml", sourceDrift: true},
@@ -741,7 +746,8 @@ func TestWindowsEnterpriseEnsureRewritesAContentFileAnotherAccountCanChange(t *t
 				if tc.folderDrift || !windowsEnterpriseSamePath(path, target) || !strings.Contains(hotConfigTestDACL(t, path), ";;;BU)") {
 					return nil
 				}
-				return &managed.UntrustedPrincipalError{Path: path, SID: "S-1-5-32-545", Owner: tc.owner}
+				sid := map[string]string{"": "S-1-5-32-545", "null": "S-1-1-0", "unsupported": ""}[tc.acl]
+				return &managed.UntrustedPrincipalError{Path: path, SID: sid, Owner: tc.owner, ACL: tc.acl}
 			}
 			old := openHotConfigTestHandle(t, target)
 			failedVerify := installedStatus("Verify")
@@ -800,8 +806,13 @@ func TestWindowsEnterpriseEnsureRewritesAContentFileAnotherAccountCanChange(t *t
 				t.Fatalf("%s = %q (%v), want the replaced file's bytes", rejected, kept, keptErr)
 			}
 			problem := "can be changed by S-1-5-32-545"
-			if tc.owner {
+			switch {
+			case tc.owner:
 				problem = "is owned by S-1-5-32-545"
+			case tc.acl == "null":
+				problem = "has no access list, so any account can change it"
+			case tc.acl == "unsupported":
+				problem = "has an access entry of a type DefenseClaw cannot read"
 			}
 			if !strings.Contains(changes, "the installed "+tc.file+" "+problem) || !strings.Contains(changes, rejected) {
 				t.Fatalf("changes %q do not name %s, the account and the kept file", changes, tc.file)

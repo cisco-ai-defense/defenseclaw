@@ -1714,6 +1714,12 @@ func windowsEnterpriseConfigParses(body []byte) bool {
 // windowsEnterpriseUntrustedProblem says, for a message, what is wrong
 // with a managed file another account owns or can change.
 func windowsEnterpriseUntrustedProblem(untrusted *managed.UntrustedPrincipalError) string {
+	switch untrusted.ACL {
+	case "null":
+		return "has no access list, so any account can change it, which only SYSTEM, Administrators and TrustedInstaller may do"
+	case "unsupported":
+		return "has an access entry of a type DefenseClaw cannot read, so it cannot tell which account can change it"
+	}
 	if untrusted.Owner {
 		return "is owned by " + untrusted.SID + ", which only SYSTEM, Administrators or TrustedInstaller may be"
 	}
