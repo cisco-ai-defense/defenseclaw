@@ -1195,41 +1195,6 @@ func writeWindowsEnterprisePolicyState(state *enterprisestatus.PolicyState) erro
 	return writeFileKeepingDACL(filepath.Join(filepath.Dir(deployment.MetadataPath), enterprisestatus.PolicyStateFileName), append(data, '\n'), deployment.MetadataPath)
 }
 
-// writeFileKeepingDACL replaces path with data, giving the new file the
-// DACL of sibling before it is renamed into place, so it is never readable
-// by more than sibling is. Each write stages in its own exclusively created
-// file beside path: two lifecycle runs that finish at the same time shared
-// path+".tmp" before, so one could publish the other's bytes or fail on a
-// staging file the other had already renamed (GAP-1404).
-func writeFileKeepingDACL(path string, data []byte, sibling string) error {
-	restore, err := keepConfigDACL(sibling)
-	if err != nil {
-		return err
-	}
-	staging, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	temporary := staging.Name()
-	_, writeErr := staging.Write(data)
-	if closeErr := staging.Close(); writeErr == nil {
-		writeErr = closeErr
-	}
-	if writeErr != nil {
-		_ = os.Remove(temporary)
-		return writeErr
-	}
-	if err := restore(temporary); err != nil {
-		_ = os.Remove(temporary)
-		return err
-	}
-	if err := os.Rename(temporary, path); err != nil {
-		_ = os.Remove(temporary)
-		return err
-	}
-	return nil
-}
-
 // windowsStandaloneGatewayHealth reads /health of the standalone gateway on
 // the gateway.api_port of the installed config, the port /status is read on:
 // the default port may be another listener (GAP-1351). This advisory read is

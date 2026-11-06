@@ -350,7 +350,7 @@ func logHookFailureOf(opts Options, sp spec, reason, category, failMode string, 
 		return
 	}
 	if f == nil {
-		f, err = openHookFailureLog(filepath.Join(logDir, "hook-failures.jsonl"),
+		f, err = opts.failureLog.opener()(filepath.Join(logDir, "hook-failures.jsonl"),
 			os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 		if err != nil {
 			noteUnrecordedLocalDeny(opts, eventID, "the account's hook-failure log cannot be opened")

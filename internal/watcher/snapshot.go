@@ -122,6 +122,12 @@ func isIgnoredEndpoint(raw string) bool {
 
 // SnapshotTarget walks a directory and captures hashed state for drift detection.
 func SnapshotTarget(root string) (*TargetSnapshot, error) {
+	return snapshotTarget(root, false)
+}
+
+// snapshotTarget includes every in-root entry for plugins because their
+// published identity covers bundled dependencies and otherwise skipped files.
+func snapshotTarget(root string, fullTree bool) (*TargetSnapshot, error) {
 	snap := &TargetSnapshot{
 		DependencyHashes: make(map[string]string),
 		ConfigHashes:     make(map[string]string),
@@ -139,6 +145,12 @@ func SnapshotTarget(root string) (*TargetSnapshot, error) {
 	var walkErrors int
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			if fullTree {
+				// An unreadable entry is part of this snapshot. If it becomes
+				// readable, the hash changes and the plugin is scanned again.
+				allHashes = append(allHashes, path+":walk-error:"+err.Error())
+				return nil
+			}
 			walkErrors++
 			if walkErrors <= 5 {
 				fmt.Fprintf(os.Stderr, "[snapshot] walk error %s: %v\n", path, err)
@@ -146,11 +158,23 @@ func SnapshotTarget(root string) (*TargetSnapshot, error) {
 			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
+			if fullTree {
+				rel, relErr := filepath.Rel(root, path)
+				if relErr != nil {
+					return relErr
+				}
+				target, readErr := os.Readlink(path)
+				if readErr != nil {
+					allHashes = append(allHashes, rel+":link-error:"+readErr.Error())
+					return nil
+				}
+				allHashes = append(allHashes, rel+":link:"+target)
+			}
 			return nil
 		}
 		if info.IsDir() {
 			base := info.Name()
-			if base == ".git" || base == "node_modules" || base == "__pycache__" || base == ".venv" || base == "venv" {
+			if !fullTree && snapshotSkippedDir(base) {
 				return filepath.SkipDir
 			}
 			if path != root {
@@ -165,9 +189,21 @@ func SnapshotTarget(root string) (*TargetSnapshot, error) {
 		rel, _ := filepath.Rel(root, path)
 		base := filepath.Base(path)
 		ext := strings.ToLower(filepath.Ext(path))
+		if !info.Mode().IsRegular() {
+			if fullTree {
+				// A special entry can wait for a peer when opened. Keep its mode
+				// in the plugin snapshot without changing the legacy scope.
+				allHashes = append(allHashes, rel+":special:"+info.Mode().String())
+			}
+			return nil
+		}
 
 		h, hashErr := hashFile(path)
 		if hashErr != nil {
+			if fullTree {
+				allHashes = append(allHashes, rel+":hash-error:"+hashErr.Error())
+				return nil
+			}
 			walkErrors++
 			if walkErrors <= 5 {
 				fmt.Fprintf(os.Stderr, "[snapshot] hash error %s: %v\n", path, hashErr)
@@ -183,7 +219,7 @@ func SnapshotTarget(root string) (*TargetSnapshot, error) {
 			snap.ConfigHashes[rel] = h
 		}
 
-		if codeExtensions[ext] {
+		if codeExtensions[ext] && (!fullTree || !snapshotUnderSkippedDir(rel)) {
 			endpoints := extractEndpoints(path)
 			for _, ep := range endpoints {
 				endpointSet[ep] = true
@@ -212,12 +248,32 @@ func SnapshotTarget(root string) (*TargetSnapshot, error) {
 	return snap, nil
 }
 
+func snapshotSkippedDir(name string) bool {
+	return name == ".git" || name == "node_modules" || name == "__pycache__" || name == ".venv" || name == "venv"
+}
+
+func snapshotUnderSkippedDir(rel string) bool {
+	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
+		if snapshotSkippedDir(part) {
+			return true
+		}
+	}
+	return false
+}
+
 func hashFile(path string) (string, error) {
-	f, err := os.Open(path)
+	f, err := openSnapshotFile(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("snapshot entry is not a regular file: %s", path)
+	}
 
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
@@ -227,14 +283,20 @@ func hashFile(path string) (string, error) {
 }
 
 func extractEndpoints(path string) []string {
-	data, err := os.ReadFile(path)
+	f, err := openSnapshotFile(path)
 	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
 		return nil
 	}
 
 	const maxScanSize = 512 * 1024
-	if len(data) > maxScanSize {
-		data = data[:maxScanSize]
+	data, err := io.ReadAll(io.LimitReader(f, maxScanSize))
+	if err != nil {
+		return nil
 	}
 
 	matches := urlPattern.FindAllString(string(data), -1)

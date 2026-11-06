@@ -160,6 +160,23 @@ def test_no_bare_managed_windows_command_in_the_docs() -> None:
     )
 
 
+# A sentence that calls the bare `defenseclaw` the managed Windows administrator's command: the
+# command there is defenseclaw.exe, by its full path (cowork-1-0-8 GAP-0081).
+_BARE_ADMIN_COMMAND = re.compile(
+    r"\b(?:native |managed )?windows\b[^.\n]{0,60}`defenseclaw`\s+is\s+the\s+administrator", re.IGNORECASE
+)
+
+
+def test_no_page_calls_the_bare_name_the_windows_administrators_command() -> None:
+    hits = [
+        f"{path.relative_to(ROOT).as_posix()}:{number}"
+        for path in _doc_files()
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if _BARE_ADMIN_COMMAND.search(line)
+    ]
+    assert not hits, f"name `defenseclaw.exe` as the Windows administrator's command, not `defenseclaw`: {hits}"
+
+
 def test_per_user_allowlist_has_no_stale_entries() -> None:
     used = {hit[0] for hit in _findings()}
     stale = sorted(set(PER_USER_PAGES) - used)

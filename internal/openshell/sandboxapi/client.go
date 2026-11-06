@@ -55,6 +55,8 @@ type Client struct {
 	UserAgent string
 	// Only per-user CLI reads retry a transient verified connection failure.
 	retryReadTransport bool
+	// unixSocketPath is set only for the managed per-user daemon client.
+	unixSocketPath string
 }
 
 // NewClient returns a client for baseURL authenticated with token.
@@ -178,16 +180,20 @@ func ManagedStateDir(goos, home string) string {
 func NewUnixClient(path string) *Client {
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			if err := checkDaemonSocket(path); err != nil {
-				return nil, err
-			}
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", path)
+			return dialDaemonSocket(ctx, path)
 		},
 		MaxIdleConnsPerHost: 2,
 		IdleConnTimeout:     30 * time.Second,
 	}
-	return &Client{BaseURL: managedDaemonBaseURL, HTTP: &http.Client{Transport: transport}}
+	return &Client{BaseURL: managedDaemonBaseURL, HTTP: &http.Client{Transport: transport}, unixSocketPath: path}
+}
+
+func dialDaemonSocket(ctx context.Context, path string) (net.Conn, error) {
+	if err := checkDaemonSocket(path); err != nil {
+		return nil, err
+	}
+	var d net.Dialer
+	return d.DialContext(ctx, "unix", path)
 }
 
 // ClientForHost returns the client of the caller's own sandbox daemon when

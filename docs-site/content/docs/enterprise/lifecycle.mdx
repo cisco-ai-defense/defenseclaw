@@ -488,7 +488,7 @@ the same way. In order, on Linux and macOS:
    every protected credential the file names. A failure is `config_invalid` and the
    installed config stays.
 2. **Migrate a version 8 config.** A `config_version: 8` config is migrated to version 9 in
-   memory by the same library as `defenseclaw-gateway config migrate`, validated again, and
+   memory by the same library as the gateway's `config migrate`, validated again, and
    installed in place of the version 8 bytes. No `defenseclaw` CLI is needed on the host. If
    your configuration management puts the same version 8 file back, `ensure` leaves its
    bytes in place and the gateway migrates it in memory.
@@ -959,8 +959,8 @@ deployment was activated, with the `agent_sessions_restart_required` warning.
    the Windows Application event log and `%WINDIR%\Logs\DefenseClaw` are not removed. See
    [Logs and events](/docs/enterprise/operations#logs-and-events). To review a retained audit
    database after purge, keep its `audit.db` and companion `audit.db-wal` and `audit.db-shm` files
-   together, then run `defenseclaw-gateway audit export --db <copied-audit.db>` as root on Linux or
-   from an elevated Administrator prompt on Windows. The export opens the copy read-only and does
+   together, then run `/opt/defenseclaw/bin/defenseclaw-gateway audit export --db <copied-audit.db>` as root on Linux (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS) or
+   `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' audit export --db <copied-audit.db>` from an elevated Administrator prompt on Windows. The export opens the copy read-only and does
    not need the former deployment's config.
 3. **Uninstall with purge**, as in [Uninstall](#uninstall).
 4. **Confirm that nothing remains:**
@@ -988,7 +988,7 @@ deployment was activated, with the `agent_sessions_restart_required` warning.
   [Review the audit log](/docs/enterprise/windows#review-the-audit-log)).
 - **Check the machine policy after removal.** On managed Windows, Claude Code, Codex and Cursor must
   refuse the cut-off account even with zero enrolled users for that agent. Run
-  `defenseclaw-gateway enterprise policy verify --json` and review each enabled agent. If its policy
+  `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy verify --json` and review each enabled agent. If its policy
   is missing, keep the account disabled, stop that agent with application control, and repair the
   deployment before allowing agent use. On Linux and macOS the policy stays machine-wide; use
   `unenrolled_users: deny` when enrollment alone must refuse a call.

@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
@@ -33,6 +34,17 @@ func appendAdmissionIssueWarnings(result *enterprisestatus.Result, dataDir, guar
 	// (GAP-0829).
 	for _, state := range enterprisehooks.ReadClaudeStateUnreadable(enterprisehooks.ClaudeMCPSpoolDir(guardianDir)) {
 		result.AddWarning("claude_state_unreadable", state.Blocked("Claude Code"))
+	}
+	for _, note := range enterprisehooks.ReadClaudeMCPProjectSkips(enterprisehooks.ClaudeMCPSpoolDir(guardianDir)) {
+		for _, project := range note.Projects {
+			result.AddWarning("claude_project_skipped", fmt.Sprintf(
+				"the Claude Code MCP project %s of %s was skipped by the hook enumerator (%s); servers from other projects remain available",
+				project.Project, note.Account(), project.Reason))
+		}
+		if note.Omitted > 0 {
+			result.AddWarning("claude_project_skipped", fmt.Sprintf(
+				"%d more Claude Code MCP projects of %s were skipped by the hook enumerator", note.Omitted, note.Account()))
+		}
 	}
 	// The same for an enrolled user whose ~/.kiro/settings/mcp.json it could
 	// not read (GAP-1468).

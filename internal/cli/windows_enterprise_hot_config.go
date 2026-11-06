@@ -1691,11 +1691,13 @@ var windowsEnterpriseLifecycleLockWait = 5 * time.Second
 
 // tryWindowsEnterpriseLifecycleLock opens lifecycle.lock with no sharing,
 // once: the error wraps windows.ERROR_SHARING_VIOLATION when another process
-// holds it, and fs.ErrNotExist when there is no lock file.
+// holds it, and fs.ErrNotExist when there is no lock file. A lock that is not
+// there says so as the base did ("is not a regular file"), and still wraps
+// the cause (GAP-0646 review L1, the port of 93d99c758d).
 func tryWindowsEnterpriseLifecycleLock(path string) (func(), error) {
 	info, err := os.Lstat(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("lifecycle lock %s is not a regular file: %w", path, err)
 	}
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("lifecycle lock %s is not a regular file", path)

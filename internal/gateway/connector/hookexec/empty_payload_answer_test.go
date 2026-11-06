@@ -14,6 +14,7 @@ import (
 // output. A running gateway refuses the body as malformed and the hook
 // blocks; with the gateway down it answers by its fail mode, in words.
 func TestEmptyHookPayloadIsNeverASilentAllow(t *testing.T) {
+	shortRestartBudget(t)
 	refusing := gatewayAt(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)

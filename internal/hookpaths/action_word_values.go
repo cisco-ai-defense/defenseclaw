@@ -21,6 +21,26 @@ import (
 // an unset, append, read or command substitution changed it.
 type actionValues map[string]string
 
+// DeclaredRedirectWriteOperands lists a variable redirect whose pathname was
+// established by an earlier assignment on the same execution path. The
+// client resolves these paths through links before a managed gateway loses
+// access to the caller's home.
+func DeclaredRedirectWriteOperands(command, cwd, home string) []string {
+	if !strings.Contains(command, "$") {
+		return nil
+	}
+	file, ok := parseShell(command)
+	if !ok || !filepath.IsAbs(cwd) {
+		return nil
+	}
+	walker := newDeclaredRedirectWalker(file, cwd, home)
+	walker.walkList(file.Stmts, []actionValues{{"HOME": home, "PWD": cwd}}, 0)
+	if walker.exhausted {
+		walker.anyAssignedValue(file)
+	}
+	return walker.paths
+}
+
 const actionReadonlyValuePrefix = "\x00readonly:"
 
 // AdjacentAssignedWriteOperands proves a redirect whose immediately preceding
@@ -1341,6 +1361,9 @@ func actionUpdateValuesAs(stmt *syntax.Stmt, values actionValues, cwd, home stri
 					update(assign)
 				}
 				values[actionReadonlyValuePrefix+assign.Name.Value] = "1"
+			} else if declaration.Variant != nil && declaration.Variant.Value == "export" && assign.Naked && assign.Value == nil {
+				// export NAME keeps the value NAME already has.
+				continue
 			} else {
 				update(assign)
 			}
