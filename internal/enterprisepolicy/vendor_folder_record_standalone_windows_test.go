@@ -46,6 +46,24 @@ type vendorFolderCase struct {
 	// folder standard users may add files to does not protect the connector
 	// (g582 review 7 M1).
 	siblings bool
+	// dropIn: after a publish the folder holds a DefenseClaw-named file
+	// (Copilot's 90-defenseclaw.json), so on standalone the round 4-6 marker
+	// refusal applies to it before any takeover or re-stamp: it is refused
+	// and named, never re-stamped in place.
+	dropIn bool
+}
+
+// requireMarkerRefusal checks the round 4-6 marker refusal of a folder that
+// holds DefenseClaw's named drop-in: refused by name, left as it was.
+func requireMarkerRefusal(t *testing.T, state State, err error, folder, before string) {
+	t.Helper()
+	if err == nil || state.Covered || !strings.Contains(err.Error(), folder) ||
+		!strings.Contains(err.Error(), "already holds DefenseClaw's "+DefenseClawDropInName) {
+		t.Fatalf("publish: state = %+v, err = %v; want %s refused by name (it holds DefenseClaw's drop-in)", state, err, folder)
+	}
+	if after := folderSDDL(t, folder); after != before {
+		t.Fatalf("the folder holding DefenseClaw's drop-in was changed in place: %s, was %s", after, before)
+	}
 }
 
 func vendorFolderCases() []vendorFolderCase {
@@ -123,6 +141,7 @@ func vendorFolderCases() []vendorFolderCase {
 				vendorDirs(t, github, filepath.Join(github, "Copilot"), filepath.Dir(file))
 			},
 			siblings: true,
+			dropIn:   true,
 		},
 	}
 }
@@ -519,8 +538,13 @@ func TestStandaloneVendorFolderDefenseClawCreatedIsRestamped(t *testing.T) {
 			if err := applySDDL(file, usersWritableRecordDACL); err != nil {
 				t.Fatal(err)
 			}
+			before := folderSDDL(t, folder)
 
 			state, err := publishVendorCase(t, tc, opts)
+			if tc.dropIn {
+				requireMarkerRefusal(t, state, err, folder, before)
+				return
+			}
 			if trustErr := validateTrustedLeafDir(folder); trustErr != nil {
 				t.Fatalf("the created folder was not re-stamped: %v", trustErr)
 			}
@@ -567,8 +591,15 @@ func TestVendorFolderWithoutAnAdministratorRecordKeepsTheTakeover(t *testing.T) 
 				if err := applySDDL(folder, vendorFolderReplaceableDACL); err != nil {
 					t.Fatal(err)
 				}
+				before := folderSDDL(t, folder)
 
 				state, err := publishVendorCase(t, tc, opts)
+				if tc.dropIn && variant == "users-writable record" {
+					// No administrator record, but the folder holds DefenseClaw's
+					// drop-in: the marker refusal, not the takeover.
+					requireMarkerRefusal(t, state, err, folder, before)
+					return
+				}
 				if err != nil || !state.Covered {
 					t.Fatalf("publish: state = %+v, err = %v; want the takeover and the publish", state, err)
 				}
