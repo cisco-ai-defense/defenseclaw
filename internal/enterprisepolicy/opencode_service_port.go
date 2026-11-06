@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -45,6 +46,27 @@ func OpenCodeServiceConfigPath(home string) string {
 // RID of a Windows SID).
 func OpenCodeAccountPort(id uint64) int {
 	return OpenCodeAccountPortBase + int(id%OpenCodeAccountPortSpan)
+}
+
+// OpenCodeServicePortWritable reports whether the account (its worker) can
+// rewrite its service.json in place, as writePrivateUserFile does: the folder
+// is a real folder (no link) it can write, and the file, if there, is a
+// regular file.
+func OpenCodeServicePortWritable(home string) bool {
+	path := OpenCodeServiceConfigPath(filepath.Clean(strings.TrimSpace(home)))
+	dir := filepath.Dir(path)
+	info, err := os.Lstat(dir)
+	if err != nil {
+		// A missing folder is created on write; its parent must be writable.
+		return os.IsNotExist(err) && writableDir(filepath.Dir(dir))
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !writableDir(dir) {
+		return false
+	}
+	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+		return false
+	}
+	return true
 }
 
 // ReadOpenCodeServicePortAsUser is the port the service.json under home names
@@ -191,7 +213,7 @@ type OpenCodePortPlan struct {
 // allowNew false (the record could not be read) nobody gets a new port and
 // nobody is moved.
 func PlanOpenCodeServicePorts(eligible []int, filePorts, recorded map[int]int, allowNew bool) OpenCodePortPlan {
-	return PlanOpenCodeServicePortsHolding(eligible, filePorts, recorded, allowNew, nil)
+	return PlanOpenCodeServicePortsHolding(eligible, filePorts, recorded, allowNew, nil, nil)
 }
 
 // PlanOpenCodeServicePortsHolding is PlanOpenCodeServicePorts with accounts
@@ -200,7 +222,12 @@ func PlanOpenCodeServicePorts(eligible []int, filePorts, recorded map[int]int, a
 // new port, no move); every other account is planned as usual from the pool
 // minus every recorded port. A port its file names away from its record is
 // settled on the next readable pass by the clash rule.
-func PlanOpenCodeServicePortsHolding(eligible []int, filePorts, recorded map[int]int, allowNew bool, unknown map[int]bool) OpenCodePortPlan {
+//
+// unwritable names accounts whose service.json cannot be rewritten in place
+// (a linked ~/.config/opencode, a refused write: REVIEW-gx053-8). Such an
+// account cannot be moved, so the port its file names is taken first, like an
+// established holder, and a writable account that shares it is the one moved.
+func PlanOpenCodeServicePortsHolding(eligible []int, filePorts, recorded map[int]int, allowNew bool, unknown, unwritable map[int]bool) OpenCodePortPlan {
 	plan := OpenCodePortPlan{Ports: map[int]int{}, Replace: map[int]int{}, Record: map[int]int{}}
 	sortedEligible := append([]int(nil), eligible...)
 	sort.Ints(sortedEligible)
@@ -224,8 +251,24 @@ func PlanOpenCodeServicePortsHolding(eligible []int, filePorts, recorded map[int
 		holder[port] = uid
 		return true
 	}
-	// 1. Established: the file names the account's own recorded port.
+	// 1. A port named by a file that cannot be rewritten: that account
+	// cannot be moved, so any writable account sharing the port is, even a
+	// recorded holder (REVIEW-gx053-8). Recorded holders first among them.
+	// Then the established: the file names the account's own recorded port.
+	for _, recordedFirst := range []bool{true, false} {
+		for _, uid := range sortedEligible {
+			if _, placed := plan.Ports[uid]; placed || !unwritable[uid] {
+				continue
+			}
+			if port := filePorts[uid]; port > 0 && (recorded[uid] == port) == recordedFirst && hold(uid, port) {
+				plan.Ports[uid] = port
+			}
+		}
+	}
 	for _, uid := range sortedEligible {
+		if _, placed := plan.Ports[uid]; placed {
+			continue
+		}
 		if port := filePorts[uid]; port > 0 && recorded[uid] == port && hold(uid, port) {
 			plan.Ports[uid] = port
 		}

@@ -34,6 +34,19 @@ type unixOpenCodeServicePortsFile struct {
 	// port was given that pass. Status and verify name them. Additive to
 	// version 1: an earlier loader ignores it.
 	Unknown []UnixOpenCodeServicePortUnknown `json:"unknown,omitempty"`
+	// Shared are pairs the last pass found on one port and could not part
+	// (neither file could be rewritten). Status and verify name both.
+	Shared []UnixOpenCodeServicePortShare `json:"shared,omitempty"`
+}
+
+// UnixOpenCodeServicePortShare is one account left sharing Port with Other.
+type UnixOpenCodeServicePortShare struct {
+	UID   int    `json:"uid"`
+	User  string `json:"user"`
+	Other int    `json:"other_uid"`
+	Port  int    `json:"port"`
+	Path  string `json:"path,omitempty"`
+	Fix   string `json:"fix,omitempty"`
 }
 
 // UnixOpenCodeServicePortUnknown is one account the last pass could not read.
@@ -63,45 +76,52 @@ func LoadUnixOpenCodeServicePorts(path string) (map[int]int, error) {
 // LoadUnixOpenCodeServicePortsState is LoadUnixOpenCodeServicePorts with the
 // accounts the last pass could not read.
 func LoadUnixOpenCodeServicePortsState(path string) (map[int]int, []UnixOpenCodeServicePortUnknown, error) {
+	ports, unknown, _, err := LoadUnixOpenCodeServicePortsProblems(path)
+	return ports, unknown, err
+}
+
+// LoadUnixOpenCodeServicePortsProblems also returns the pairs left sharing a
+// port.
+func LoadUnixOpenCodeServicePortsProblems(path string) (map[int]int, []UnixOpenCodeServicePortUnknown, []UnixOpenCodeServicePortShare, error) {
 	ports := map[int]int{}
 	path = filepath.Clean(strings.TrimSpace(path))
 	if err := validateRootOwnedDirChain(filepath.Dir(path)); err != nil {
-		return ports, nil, err
+		return ports, nil, nil, err
 	}
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return ports, nil, nil
+		return ports, nil, nil, nil
 	}
 	if err != nil {
-		return ports, nil, err
+		return ports, nil, nil, err
 	}
 	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
-		return ports, nil, fmt.Errorf("enterprise hooks: OpenCode service ports record %s must be a 0600 regular file", path)
+		return ports, nil, nil, fmt.Errorf("enterprise hooks: OpenCode service ports record %s must be a 0600 regular file", path)
 	}
 	if st, ok := info.Sys().(*syscall.Stat_t); !ok || (st.Uid != 0 && !unixManifestTestOwnerAllowed(st.Uid)) || st.Nlink != 1 {
-		return ports, nil, fmt.Errorf("enterprise hooks: OpenCode service ports record %s is not a root-owned single-link file", path)
+		return ports, nil, nil, fmt.Errorf("enterprise hooks: OpenCode service ports record %s is not a root-owned single-link file", path)
 	}
 	data, err := readBoundedFile(path, unixOpenCodeServicePortsMaxBytes)
 	if err != nil {
-		return ports, nil, err
+		return ports, nil, nil, err
 	}
 	var record unixOpenCodeServicePortsFile
 	if err := json.Unmarshal(data, &record); err != nil {
-		return ports, nil, fmt.Errorf("enterprise hooks: parse OpenCode service ports record: %w", err)
+		return ports, nil, nil, fmt.Errorf("enterprise hooks: parse OpenCode service ports record: %w", err)
 	}
 	if record.Version != 1 {
-		return ports, nil, fmt.Errorf("enterprise hooks: OpenCode service ports record version %d is not supported", record.Version)
+		return ports, nil, nil, fmt.Errorf("enterprise hooks: OpenCode service ports record version %d is not supported", record.Version)
 	}
 	for _, entry := range record.Ports {
 		if entry.UID > 0 && entry.Port > 0 && entry.Port <= 65535 {
 			ports[entry.UID] = entry.Port
 		}
 	}
-	return ports, record.Unknown, nil
+	return ports, record.Unknown, record.Shared, nil
 }
 
 // WriteUnixOpenCodeServicePorts publishes the record at path, root-only.
-func WriteUnixOpenCodeServicePorts(path string, ports map[int]int, users map[int]string, unknown []UnixOpenCodeServicePortUnknown) error {
+func WriteUnixOpenCodeServicePorts(path string, ports map[int]int, users map[int]string, unknown []UnixOpenCodeServicePortUnknown, shared []UnixOpenCodeServicePortShare) error {
 	path = filepath.Clean(strings.TrimSpace(path))
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("enterprise hooks: OpenCode service ports path must be absolute: %s", path)
@@ -113,6 +133,8 @@ func WriteUnixOpenCodeServicePorts(path string, ports map[int]int, users map[int
 	sort.Slice(record.Ports, func(i, j int) bool { return record.Ports[i].UID < record.Ports[j].UID })
 	record.Unknown = append(record.Unknown, unknown...)
 	sort.Slice(record.Unknown, func(i, j int) bool { return record.Unknown[i].UID < record.Unknown[j].UID })
+	record.Shared = append(record.Shared, shared...)
+	sort.Slice(record.Shared, func(i, j int) bool { return record.Shared[i].UID < record.Shared[j].UID })
 	data, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
 		return err

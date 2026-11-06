@@ -1661,6 +1661,7 @@ _OPENCODE_PORT_RECORD_CODES = (
     "opencode_port_record_unreadable",
     "opencode_port_record_unchecked",
     "opencode_port_account_unknown",
+    "opencode_port_shared",
 )
 
 

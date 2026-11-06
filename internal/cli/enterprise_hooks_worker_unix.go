@@ -424,6 +424,9 @@ type enterpriseHookWorkerOpenCodePortReport struct {
 	Replaced int      `json:"replaced,omitempty"`
 	Created  []string `json:"created,omitempty"`
 	Error    string   `json:"error,omitempty"`
+	// NotWritable (opencode_port_read): the file cannot be rewritten in place
+	// (a linked folder), so the account cannot be moved.
+	NotWritable bool `json:"not_writable,omitempty"`
 }
 
 // enterpriseHookWorkerAccount is the resolved target the parent spawns
@@ -595,7 +598,7 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		return respond(runEnterpriseHookWorkerNativeOTLPCheck(request), 0)
 	case enterpriseHookWorkerOpOpenCodePortRead:
 		port, err := enterprisepolicy.ReadOpenCodeServicePortAsUser(filepath.Clean(request.Home))
-		report := &enterpriseHookWorkerOpenCodePortReport{Port: port}
+		report := &enterpriseHookWorkerOpenCodePortReport{Port: port, NotWritable: !enterprisepolicy.OpenCodeServicePortWritable(filepath.Clean(request.Home))}
 		if err != nil {
 			report.Error = err.Error()
 		}

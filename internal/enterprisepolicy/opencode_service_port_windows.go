@@ -50,3 +50,9 @@ func writeOpenCodeServiceConfig(home, path string, data []byte) error {
 	}
 	return safefile.Write(path, data)
 }
+
+// writableDir reports whether dir is a folder; the write itself decides.
+func writableDir(dir string) bool {
+	info, err := os.Stat(dir)
+	return err == nil && info.IsDir()
+}

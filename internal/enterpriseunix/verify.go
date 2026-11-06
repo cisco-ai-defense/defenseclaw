@@ -1594,12 +1594,21 @@ func (env *Env) warnOpenCodePortsRecord(r *enterprisestatus.Result) {
 		}
 		return
 	}
-	_, unknown, err := enterprisehooks.LoadUnixOpenCodeServicePortsState(env.P(path))
+	_, unknown, shared, err := enterprisehooks.LoadUnixOpenCodeServicePortsProblems(env.P(path))
 	if err != nil {
 		r.AddWarning("opencode_port_record_unreadable", fmt.Sprintf(
 			"the guardian's OpenCode service ports record %s cannot be read (%v), so no account gets a new OpenCode port; ports already in service.json files are kept. Remove it to rebuild it on the next pass: sudo rm %s",
 			path, err, path))
 		return
+	}
+	if len(shared) > 0 {
+		pairs := make([]string, 0, len(shared))
+		for _, entry := range shared {
+			pairs = append(pairs, fmt.Sprintf("%s (uid %d) and uid %d on port %d (%s); to clear it: %s", entry.User, entry.UID, entry.Other, entry.Port, entry.Path, entry.Fix))
+		}
+		r.AddWarning("opencode_port_shared", fmt.Sprintf(
+			"two accounts' OpenCode background servers are left on one port and the guardian could not move either: %s",
+			strings.Join(pairs, "; ")))
 	}
 	if len(unknown) > 0 {
 		names := make([]string, 0, len(unknown))
