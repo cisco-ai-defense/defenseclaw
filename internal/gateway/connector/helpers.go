@@ -913,10 +913,13 @@ func windowsAntigravityHookCommand() string {
 // event to the trusted registration and passes it as a DefenseClaw launcher
 // argument. Unix retains agy's direct command-tokenization contract; Windows
 // uses the system PowerShell EncodedCommand bridge so GUI-subsystem launchers
-// are awaited and stdin/stdout remain attached.
+// are awaited and stdin/stdout remain attached. The PreToolUse bridge denies
+// the call when the launcher cannot start (antigravityLauncherStartAnswer,
+// rel-1-0-6 GAP-0676); releases before 1.0.9 rendered it without that answer
+// (windowsNativePowerShellHookCommandForEvent), which stays owned.
 func antigravityHookInvocationCommandForEvent(goos, event, unixCommand string) string {
 	if goos == "windows" {
-		return windowsNativePowerShellHookCommandForEvent("antigravity", event, defenseclawHookBinary())
+		return windowsAnsweringPowerShellHookCommand("antigravity", event, "", defenseclawHookBinary(), antigravityLauncherStartAnswer(event))
 	}
 	return strings.TrimSpace(unixCommand) + " " + event
 }
@@ -954,18 +957,28 @@ func windowsNativePowerShellHookCommandForBoundEvent(connector, event, contractI
 }
 
 // windowsCodexHookCommandForBinaryEvent is the per-user Codex command for
-// one event: the direct cmd.exe start of the launcher
+// one event. On an event Codex can block (codexLauncherStartAnswer) it is
+// the direct cmd.exe start of the guard program beside the launcher
+// (windowsCodexGuardedHookCommand), which answers Codex's block when the
+// launcher cannot start (rel-1-0-6 GAP-0676). Otherwise, and without a guard
+// program, it is the direct cmd.exe start of the launcher
 // (windowsCmdDirectHookCommand), or, for a launcher path that form cannot
-// carry, the encoded system PowerShell bridge
-// (windowsNativePowerShellHookCommandForCodexEvent). Releases up to 1.0.4
-// registered the bridge for every path; it stays owned for repair and
-// teardown (nativeHookExactCommands) while those releases are upgrade
-// sources.
+// carry, the encoded system PowerShell bridge, which answers a launcher that
+// cannot start itself (windowsCodexAnsweringBridgeHookCommand). The forms
+// earlier releases registered stay owned for repair and teardown
+// (windowsCodexPerUserHookCommands) while those releases are upgrade sources.
 func windowsCodexHookCommandForBinaryEvent(event, contractID, hookBinary string) string {
+	if codexLauncherStartAnswer(event, contractID) != nil {
+		if guard := windowsCodexLauncherGuard(hookBinary); guard != "" {
+			if command, ok := windowsCodexGuardedHookCommand(guard, event, contractID); ok {
+				return command
+			}
+		}
+	}
 	if command, ok := windowsCmdDirectHookCommand(hookBinary, nativeHookBridgeArguments("codex", event, contractID, nil)); ok {
 		return command
 	}
-	return windowsNativePowerShellHookCommandForCodexEvent(event, contractID, hookBinary)
+	return windowsCodexAnsweringBridgeHookCommand(event, contractID, hookBinary)
 }
 
 // windowsCmdDirectHookCommand renders a hook command that starts the
@@ -1090,23 +1103,44 @@ func nativeHookBridgeArguments(connector, event, contractID string, extra []stri
 // Out-Host is module-qualified, so a fresh Windows PowerShell process does
 // not run a broad first-use module discovery scan.
 func windowsAwaitedHookStatements(hookBinary string, arguments []string) []string {
+	return windowsAwaitedHookStatementsAnswering(hookBinary, arguments, nil)
+}
+
+// windowsAwaitedHookStatementsAnswering is windowsAwaitedHookStatements
+// whose statements answer a launcher that cannot start with answer
+// (rel-1-0-6 GAP-0676): a Process.Start that throws (missing, a folder, a
+// damaged or empty image, no right to run it), a Constrained Language start
+// that set no exit status, and a launcher that ended with a Windows exception
+// status (negative as a .NET exit code). A nil answer renders
+// windowsAwaitedHookStatements unchanged.
+func windowsAwaitedHookStatementsAnswering(hookBinary string, arguments []string, answer *launcherStartAnswer) []string {
 	quoted := make([]string, len(arguments))
 	escaped := make([]string, len(arguments))
 	for i, argument := range arguments {
 		quoted[i] = powershellQuoteLiteral(argument)
 		escaped[i] = windowsCommandLineArgument(argument)
 	}
+	fallbackEnd := windowsAwaitedHookFallbackExit
+	start := "$hookProcess=[System.Diagnostics.Process]::Start($hookStart)"
+	end := "exit $hookProcess.ExitCode"
+	if answer != nil {
+		cannotStart := answer.powershell()
+		fallbackEnd = " | Microsoft.PowerShell.Core\\Out-Host; if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -lt 0) { " +
+			cannotStart + " }; exit $LASTEXITCODE }"
+		start = "try { " + start + " } catch { " + cannotStart + " }"
+		end = "if ($hookProcess.ExitCode -lt 0) { " + cannotStart + " }; " + end
+	}
 	return []string{
 		"if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { $ErrorActionPreference='Continue'; & " +
-			powershellQuoteLiteral(hookBinary) + " " + strings.Join(quoted, " ") + windowsAwaitedHookFallbackExit,
+			powershellQuoteLiteral(hookBinary) + " " + strings.Join(quoted, " ") + fallbackEnd,
 		"$hookStart=[System.Diagnostics.ProcessStartInfo]::new(" + powershellQuoteLiteral(hookBinary) + "," +
 			powershellQuoteLiteral(strings.Join(escaped, " ")) + ")",
 		"$hookStart.UseShellExecute=$false",
 		"$hookStart.RedirectStandardError=$true",
-		"$hookProcess=[System.Diagnostics.Process]::Start($hookStart)",
+		start,
 		"$hookProcess.StandardError.BaseStream.CopyTo([Console]::OpenStandardError())",
 		"$hookProcess.WaitForExit()",
-		"exit $hookProcess.ExitCode",
+		end,
 	}
 }
 
@@ -1518,8 +1552,9 @@ func nativeHookExactCommands(hookBinaries []string) map[string]struct{} {
 	for _, hookBinary := range hookBinaries {
 		for _, contract := range codexContracts {
 			for _, event := range contract.Events {
-				add(windowsNativePowerShellHookCommandForCodexEvent(event, contract.ContractID, hookBinary))
-				add(windowsCodexHookCommandForBinaryEvent(event, contract.ContractID, hookBinary))
+				for _, command := range windowsCodexPerUserHookCommands(event, contract.ContractID, hookBinary) {
+					add(command)
+				}
 			}
 		}
 	}

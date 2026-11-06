@@ -6012,11 +6012,18 @@ func antigravityOwnedHookCommands(hookScript string) []string {
 func antigravityOwnedHookCommandsForOS(goos, hookScript string) []string {
 	commands := []string{hookScript}
 	for _, event := range antigravityLifecycleEvents {
-		command := antigravityHookInvocationCommandForEvent(goos, event, hookScript)
-		commands = append(commands, command)
-		// The 1.0.x render of the Windows bridge stays owned for teardown.
-		if legacy, ok := legacyWindowsAwaitedHookCommand(command); ok {
-			commands = append(commands, legacy)
+		forms := []string{antigravityHookInvocationCommandForEvent(goos, event, hookScript)}
+		if goos == "windows" {
+			// The bridge releases before 1.0.9 rendered, without the
+			// launcher-start answer (rel-1-0-6 GAP-0676).
+			forms = append(forms, windowsNativePowerShellHookCommandForEvent("antigravity", event, defenseclawHookBinary()))
+		}
+		for _, command := range forms {
+			commands = append(commands, command)
+			// The 1.0.x render of the Windows bridge stays owned for teardown.
+			if legacy, ok := legacyWindowsAwaitedHookCommand(command); ok {
+				commands = append(commands, legacy)
+			}
 		}
 	}
 	return uniqueNonEmptyStrings(commands)
