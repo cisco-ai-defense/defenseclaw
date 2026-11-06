@@ -4,10 +4,12 @@
 package hookpaths
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"sync"
+	"syscall"
 )
 
 // Grade is the strength of one path finding. Readers combine grades with Max:
@@ -303,6 +305,12 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 	resolved, _, _, ok := walkWritePathMemoWithReaders("", target, 0, false, false, nil, lstat, readlink)
 	if reached || ok && names.has(resolved) {
 		return GradeNamed
+	}
+	// A missing local component or a regular file used as a directory
+	// cannot lead this write to another path. The walk above has already
+	// checked every reached link and protected name.
+	if !SharePath(target) && !unread && (os.IsNotExist(file.err) || errors.Is(file.err, syscall.ENOTDIR)) {
+		return GradeNone
 	}
 
 	// The ordinary parent of a missing local file is a complete answer even

@@ -43,11 +43,10 @@ var (
 	// networkShareAnswerWait bounds how long a call waits for the first
 	// answer of a share.
 	networkShareAnswerWait = 680 * time.Millisecond
-	// Identity reads get the remainder of this first-contact budget while
-	// the root is pending. The ordinary root probe still has the shorter
-	// answer wait above, so dead shares return within the hook's one-second
-	// requirement while a reached file can answer after that probe.
-	networkShareIdentityAnswerWait = 900 * time.Millisecond
+	// A reached identity gets a small extension to the first-contact wait.
+	// Keep it relative to that wait so a shorter share budget also bounds
+	// the identity read.
+	networkShareIdentityExtension = 220 * time.Millisecond
 	// networkShareDeadAfter is how long a probe may take and still count as
 	// the answer of a live (slow) share.
 	networkShareDeadAfter = 5 * time.Second
@@ -61,6 +60,10 @@ var (
 	networkShareRootOf = networkShareRoot
 	probeNetworkShare  = func(root string) { _, _ = os.Stat(root) }
 )
+
+func networkShareIdentityWait() time.Duration {
+	return networkShareAnswerWait + min(networkShareAnswerWait/3, networkShareIdentityExtension)
+}
 
 // networkShareProbeLimit bounds the shares remembered at once.
 const networkShareProbeLimit = 256
@@ -303,9 +306,12 @@ func boundedPathRead(name string, kind pathReadKind, identityRead bool) pathRead
 	}
 	wait := networkShareAnswerWait - time.Since(started)
 	if identityRead {
-		wait = networkShareIdentityAnswerWait - time.Since(started)
+		wait = networkShareIdentityWait() - time.Since(started)
 		if pending {
-			wait = min(wait, networkShareIdentityAnswerWait-time.Since(pendingStarted))
+			// Reached identity reads may still answer after a different file
+			// stalls. Give each a brief chance, without charging a fresh full
+			// share window to the same hook decision.
+			wait = min(wait, max(15*time.Millisecond, networkShareIdentityWait()-time.Since(pendingStarted)))
 		}
 		networkShares.mu.Lock()
 		probe := networkShares.probes[root]
@@ -313,7 +319,7 @@ func boundedPathRead(name string, kind pathReadKind, identityRead bool) pathRead
 			select {
 			case <-probe.done:
 			default:
-				remaining := networkShareIdentityAnswerWait - time.Since(probe.started)
+				remaining := networkShareIdentityWait() - time.Since(probe.started)
 				if remaining < wait {
 					wait = remaining
 				}
