@@ -104,7 +104,6 @@ func TestLauncherNeedsTheDefenseclawNameAndATrustedManagedRecord(t *testing.T) {
 	}
 }
 
-// launcherTestRoot is a stand-in for the gateway's command tree.
 // executeLauncherInTest runs executeLauncher over a test root and puts back
 // the package state it changes: installUsageArgChecks installs once per
 // process, so a launcher test that ran first left rootCmd without its usage
@@ -125,6 +124,7 @@ func executeLauncherInTest(t *testing.T, root *cobra.Command, args []string) int
 	return executeLauncher(context.Background(), root, args)
 }
 
+// launcherTestRoot is a stand-in for the gateway's command tree.
 func launcherTestRoot(ran *[]string) *cobra.Command {
 	root := &cobra.Command{
 		Use:          "defenseclaw-gateway",

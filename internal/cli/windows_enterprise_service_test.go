@@ -2017,8 +2017,6 @@ func TestWindowsEnterpriseLeaveInstallRootMovesTheWorkingDirectoryOut(t *testing
 	}
 }
 
-// GAP-1794: a self-uninstall typed into cmd.exe whose folder is inside
-// InstallRoot is refused before anything changes, and says how to proceed.
 // windowsTestProcessState says whether a child process still runs, or the
 // status it exited with.
 func windowsTestProcessState(pid int) string {
@@ -2037,6 +2035,8 @@ func windowsTestProcessState(pid int) string {
 	return fmt.Sprintf("process %d exited with %#x", pid, code)
 }
 
+// GAP-1794: a self-uninstall typed into cmd.exe whose folder is inside
+// InstallRoot is refused before anything changes, and says how to proceed.
 func TestWindowsEnterpriseSelfUninstallRefusesAPromptInsideInstallRoot(t *testing.T) {
 	installRoot := t.TempDir()
 	bin := filepath.Join(installRoot, "bin")

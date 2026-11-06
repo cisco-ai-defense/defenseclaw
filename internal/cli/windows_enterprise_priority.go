@@ -18,11 +18,6 @@ import "golang.org/x/sys/windows"
 // of the lifecycle nice value on Linux and macOS (internal/enterpriseunix).
 // The gateway and guardian services are started by the service manager and
 // keep their own class. A class already lower (idle) is kept.
-// windowsEnterpriseLifecycleYield is windowsLifecycleYieldToHooks; the
-// package's tests replace it, so a lifecycle test does not lower the class
-// of the test binary, and of every test and program after it (GAP-0079).
-var windowsEnterpriseLifecycleYield = windowsLifecycleYieldToHooks
-
 func windowsLifecycleYieldToHooks() {
 	process := windows.CurrentProcess()
 	current, err := windows.GetPriorityClass(process)
@@ -35,3 +30,8 @@ func windowsLifecycleYieldToHooks() {
 	}
 	_ = windows.SetPriorityClass(process, windows.BELOW_NORMAL_PRIORITY_CLASS)
 }
+
+// windowsEnterpriseLifecycleYield is windowsLifecycleYieldToHooks; the
+// package's tests replace it, so a lifecycle test does not lower the class
+// of the test binary, and of every test and program after it (GAP-0079).
+var windowsEnterpriseLifecycleYield = windowsLifecycleYieldToHooks
