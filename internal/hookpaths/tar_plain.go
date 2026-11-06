@@ -130,7 +130,7 @@ func xzDictionaryCap(reader *bufio.Reader) int {
 // fact and its own read of the archive. Anything else keeps the opaque
 // reading. A process outside the command can still replace the archive
 // between the check and the run, as it can any file a disk walk reads.
-func tarArchiveHoldsNoLink(program string, args []string, static []bool, cwd, command string, facts map[string]string, record bool) bool {
+func tarArchiveHoldsNoLink(program string, args []string, static []bool, cwd, command string, facts map[string]string, record bool, kind func(string) int) bool {
 	if !strings.HasSuffix(program, "tar") || !filepath.IsAbs(cwd) {
 		return false
 	}
@@ -148,9 +148,9 @@ func tarArchiveHoldsNoLink(program string, args []string, static []bool, cwd, co
 		// A client claim alone does not clear the scope: the gateway reads
 		// the archive itself and needs the fact as well. One that cannot
 		// read it (ProtectHome) keeps the opaque reading (review 8).
-		return facts[key] == "1" && tarArchivePlain(path)
+		return facts[key] == "1" && kind(path) == 1
 	}
-	plain := tarArchivePlain(path)
+	plain := kind(path) == 1
 	if record && facts != nil && plain {
 		facts[key] = "1"
 	}
@@ -159,7 +159,7 @@ func tarArchiveHoldsNoLink(program string, args []string, static []bool, cwd, co
 
 // tarArchiveLinkEvidence records or reads positive scope-retaining tar evidence.
 // Unlike a plain proof, a positive reading is useful in any command shape.
-func tarArchiveLinkEvidence(program string, args []string, static []bool, cwd string, file *syntax.File, extraction *syntax.CallExpr, home string, facts map[string]string, record bool) bool {
+func tarArchiveLinkEvidence(program string, args []string, static []bool, cwd string, file *syntax.File, extraction *syntax.CallExpr, home string, facts map[string]string, record bool, kindOf func(string) int) bool {
 	if !strings.HasSuffix(program, "tar") || !filepath.IsAbs(cwd) {
 		return false
 	}
@@ -175,9 +175,6 @@ func tarArchiveLinkEvidence(program string, args []string, static []bool, cwd st
 			}
 			for _, archive := range resolved {
 				if !record && facts != nil && facts[TarProtectedAbsoluteLinkFactPrefix+archive] == "1" {
-					return true
-				}
-				if !record && facts != nil && facts[TarLinkFactPrefix+archive] == "1" {
 					return true
 				}
 				if len(tarProtectedAbsoluteLinkMembers(archive, cwd, home)) != 0 {
@@ -205,7 +202,7 @@ func tarArchiveLinkEvidence(program string, args []string, static []bool, cwd st
 			return true
 		}
 		readable := ""
-		kind := tarArchiveKind(path)
+		kind := kindOf(path)
 		readSource = readSource || kind != 0
 		if kind == 2 {
 			readable = path
@@ -304,7 +301,8 @@ func tarProtectedLinkMembersMode(path, destination, home string, absoluteOnly bo
 		defer decoded.Close()
 		stream = decoded
 	}
-	reader := tar.NewReader(&boundedReader{r: stream, n: maxTarPlainBytes})
+	bound := &boundedReader{r: stream, n: maxTarPlainBytes}
+	reader := tar.NewReader(bound)
 	for count := 0; count < maxTarPlainMembers; count++ {
 		header, err := reader.Next()
 		if err == io.EOF {
@@ -313,13 +311,20 @@ func tarProtectedLinkMembersMode(path, destination, home string, absoluteOnly bo
 		if err != nil {
 			return result
 		}
+		oversize := header.Size >= bound.n
 		if header.Typeflag != tar.TypeSymlink && header.Typeflag != tar.TypeLink ||
 			absoluteOnly && !filepath.IsAbs(header.Linkname) {
+			if oversize {
+				return result
+			}
 			continue
 		}
 		name := filepath.ToSlash(header.Name)
 		if name == "" || filepath.IsAbs(name) || strings.Contains(name, "\\") ||
 			strings.HasPrefix(name, "../") || strings.Contains(name, "/../") {
+			if oversize {
+				return result
+			}
 			continue
 		}
 		member := filepath.Join(destination, name)
@@ -337,6 +342,9 @@ func tarProtectedLinkMembersMode(path, destination, home string, absoluteOnly bo
 		}
 		if target == ssh || strings.HasPrefix(target, ssh+string(filepath.Separator)) {
 			result[member] = target
+		}
+		if oversize {
+			return result
 		}
 	}
 	return result
@@ -692,13 +700,6 @@ func tarArchiveWord(args []string, static []bool) (string, bool) {
 	return archive, found == 1
 }
 
-// tarArchivePlain reads the archive at path and reports that every member
-// is a regular file or a directory with a relative name and no ..
-// component, within the bounds.
-func tarArchivePlain(path string) bool {
-	return tarArchiveKind(path) == 1
-}
-
 // tarArchiveKind is unknown (0), plain (1), link or unsafe member (2), or
 // incomplete because a read bound was reached (3). Only 2 is positive evidence.
 func tarArchiveKind(path string) int {
@@ -745,7 +746,8 @@ func tarArchiveKind(path string) int {
 		defer decoded.Close()
 		stream = decoded
 	}
-	reader := tar.NewReader(&boundedReader{r: stream, n: maxTarPlainBytes})
+	bound := &boundedReader{r: stream, n: maxTarPlainBytes}
+	reader := tar.NewReader(bound)
 	members := 0
 	nonPlain := false
 	for {
@@ -790,6 +792,14 @@ func tarArchiveKind(path string) int {
 			if part == ".." {
 				return 2
 			}
+		}
+		// The next payload cannot fit inside this read. A link already
+		// named by a header stays positive; the rest is only Possible.
+		if header.Size >= bound.n {
+			if nonPlain {
+				return 2
+			}
+			return 3
 		}
 	}
 }

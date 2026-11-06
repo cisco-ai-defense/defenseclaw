@@ -1,4 +1,7 @@
-// Reviewer probe round 2 (not committed): gx054 near variants, base vs head.
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+// Reviewer probe round 2: gx054 archive and write variants.
 package gateway
 
 import (

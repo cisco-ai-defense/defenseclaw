@@ -1378,7 +1378,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {
 		return true
 	}
-	links = hookpaths.CommandLinksWithFactsForTier(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets, request.balancedArchiveScope)
+	links = hookpaths.CommandLinksWithFactsForTier(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets, request.balancedArchiveScope, request.targetMemo)
 	if !request.balancedArchiveScope &&
 		hookpaths.UnverifiableArchiveDestinationBeforeWrite(input.Command, input.CWD, facts.ActiveHome) {
 		return true
@@ -1393,7 +1393,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return true
 		}
 	}
-	if hookpaths.ProtectedArchiveMoveName(input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets) {
+	if hookpaths.ProtectedArchiveMoveName(input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets, request.targetMemo) {
 		return true
 	}
 	safeRedirects = hookpaths.SafeShellRedirectOccurrencesWithFacts(input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)

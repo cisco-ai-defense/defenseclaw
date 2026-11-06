@@ -1646,7 +1646,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				clientNamedProtected = clientNamedProtected || hookpaths.NamedSSHWriteOperand(input.Command, input.CWD, facts.ActiveHome)
 			}
 			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) &&
-				!hookpaths.ProtectedArchiveMoveName(input.Command, input.CWD, input.ActiveHome, request.ResolvedWriteTargets) &&
+				!hookpaths.ProtectedArchiveMoveName(input.Command, input.CWD, input.ActiveHome, request.ResolvedWriteTargets, request.targetMemo) &&
 				!clientNamedProtected &&
 				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) {
 				title = archiveBeforeWriteTitle

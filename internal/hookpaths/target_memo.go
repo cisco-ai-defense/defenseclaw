@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"maps"
 	"slices"
 	"sync"
 )
@@ -40,6 +41,10 @@ type TargetMemo struct {
 	// (newProtectedFiles).
 	keys  map[string][]string
 	files map[string]protectedFiles
+	// Archive reads belong to this one hook evaluation. A later call starts
+	// with a new memo and cannot reuse evidence after the file changes.
+	archiveKinds   map[string]int
+	archiveMembers map[archiveMemberKey]map[string]string
 	// work counts the path components the memo walked on the file system
 	// and the candidate checks it computed (Work); candidates counts the
 	// Windows candidate checks among them (WorkParts).
@@ -54,12 +59,64 @@ const maxTargetMemoEntries = 1 << 16
 // NewTargetMemo returns an empty memo for one evaluation.
 func NewTargetMemo() *TargetMemo {
 	return &TargetMemo{
-		prefixes: make(map[string]walkState),
-		words:    make(map[memoWordKey]bool),
-		homes:    make(map[string]*actionStateHome),
-		keys:     make(map[string][]string),
-		files:    make(map[string]protectedFiles),
+		prefixes:       make(map[string]walkState),
+		words:          make(map[memoWordKey]bool),
+		homes:          make(map[string]*actionStateHome),
+		keys:           make(map[string][]string),
+		files:          make(map[string]protectedFiles),
+		archiveKinds:   make(map[string]int),
+		archiveMembers: make(map[archiveMemberKey]map[string]string),
 	}
+}
+
+type archiveMemberKey struct {
+	path, destination, home string
+	absoluteOnly            bool
+}
+
+func (m *TargetMemo) tarKind(path string) int {
+	if m == nil {
+		return tarArchiveKind(path)
+	}
+	m.mu.Lock()
+	kind, found := m.archiveKinds[path]
+	m.mu.Unlock()
+	if found {
+		return kind
+	}
+	kind = tarArchiveKind(path)
+	m.mu.Lock()
+	if m.archiveKinds == nil {
+		m.archiveKinds = make(map[string]int)
+	}
+	if len(m.archiveKinds) < maxTargetMemoEntries {
+		m.archiveKinds[path] = kind
+	}
+	m.mu.Unlock()
+	return kind
+}
+
+func (m *TargetMemo) tarMembers(path, destination, home string, absoluteOnly bool) map[string]string {
+	if m == nil {
+		return tarProtectedLinkMembersMode(path, destination, home, absoluteOnly)
+	}
+	key := archiveMemberKey{path, destination, home, absoluteOnly}
+	m.mu.Lock()
+	members, found := m.archiveMembers[key]
+	m.mu.Unlock()
+	if found {
+		return maps.Clone(members)
+	}
+	members = tarProtectedLinkMembersMode(path, destination, home, absoluteOnly)
+	m.mu.Lock()
+	if m.archiveMembers == nil {
+		m.archiveMembers = make(map[archiveMemberKey]map[string]string)
+	}
+	if len(m.archiveMembers) < maxTargetMemoEntries {
+		m.archiveMembers[key] = maps.Clone(members)
+	}
+	m.mu.Unlock()
+	return members
 }
 
 // protectedFiles is newProtectedFiles of home, once per memo.

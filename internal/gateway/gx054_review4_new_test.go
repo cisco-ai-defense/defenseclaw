@@ -1,4 +1,7 @@
-// Reviewer probe round 3 (not committed): gx054 r3 new forms, base vs head.
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+// Reviewer probe round 3: gx054 producer forms and archive bounds.
 package gateway
 
 import (

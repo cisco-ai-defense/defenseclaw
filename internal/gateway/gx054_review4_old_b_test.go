@@ -1,4 +1,7 @@
-// Reviewer probe round 2b (not committed): stdin, prior rewrite, known values.
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+// Reviewer probe round 2b: stdin, prior rewrite, known values.
 package gateway
 
 import (

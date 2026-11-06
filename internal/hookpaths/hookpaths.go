@@ -2883,19 +2883,27 @@ func withDirectoryStackOperands(args []*syntax.Word, words []string, static []bo
 }
 
 func commandLinksWithFacts(command, cwd, home string, facts map[string]string, record bool) shellLinks {
-	return commandLinks(command, cwd, home, facts, record, false)
+	return commandLinks(command, cwd, home, facts, record, false, nil)
+}
+
+func commandLinksWithFactsMemo(command, cwd, home string, facts map[string]string, record bool, memo *TargetMemo) shellLinks {
+	return commandLinks(command, cwd, home, facts, record, false, memo)
 }
 
 // commandLinks reads the links of command. A nested literal shell body
 // returns its facts without the end checks: its caller runs them once
 // over its own links and the body links together.
-func commandLinks(command, cwd, home string, facts map[string]string, record, nested bool) shellLinks {
-	links, fallback := commandLinksRead(command, cwd, home, facts, record, nested, true)
+func commandLinks(command, cwd, home string, facts map[string]string, record, nested bool, memo ...*TargetMemo) shellLinks {
+	var evaluation *TargetMemo
+	if len(memo) != 0 {
+		evaluation = memo[0]
+	}
+	links, fallback := commandLinksRead(command, cwd, home, facts, record, nested, true, evaluation)
 	if fallback {
 		// A copy of links on disk that the end of the command does not let
 		// us read is read as before, an opaque copy scope at the copy call
 		// (rel-1-0-6:GAP-0274).
-		links, _ = commandLinksRead(command, cwd, home, facts, record, nested, false)
+		links, _ = commandLinksRead(command, cwd, home, facts, record, nested, false, evaluation)
 	}
 	return links
 }
@@ -2903,8 +2911,19 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 // commandLinksRead is commandLinks; readDisk reads the link-keeping copies
 // of links on disk as those links (copyDiskLinks). fallback reports such a
 // copy that could not be read so.
-func commandLinksRead(command, cwd, home string, facts map[string]string, record, nested, readDisk bool) (shellLinks, bool) {
+func commandLinksRead(command, cwd, home string, facts map[string]string, record, nested, readDisk bool, memo *TargetMemo) (shellLinks, bool) {
 	links := shellLinks{known: true, callAt: -1}
+	// One shell evaluation reads each archive's on-disk bytes once. The map
+	// belongs to this invocation, so a later hook call always reads afresh.
+	archiveKinds := make(map[string]int)
+	archiveKind := func(path string) int {
+		if kind, found := archiveKinds[path]; found {
+			return kind
+		}
+		kind := memo.tarKind(path)
+		archiveKinds[path] = kind
+		return kind
+	}
 	file, parsed := parseShell(command)
 	if !parsed {
 		// Resolve already marks a command that does not parse incomplete.
@@ -3257,8 +3276,8 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 					// A plain reading may clear uncertainty only for a simple
 					// command. Positive evidence is independent of that proof.
 					plain := onlyDirectoryStatementsBefore(file, call, home) &&
-						tarArchiveHoldsNoLink(program, words[1:], static[1:], dir, command, facts, record)
-					linked := !plain && tarArchiveLinkEvidence(program, words[1:], static[1:], dir, file, call, home, facts, record)
+						tarArchiveHoldsNoLink(program, words[1:], static[1:], dir, command, facts, record, archiveKind)
+					linked := !plain && tarArchiveLinkEvidence(program, words[1:], static[1:], dir, file, call, home, facts, record, archiveKind)
 					if tarArchivePriorLinkedRewrite(file, call, words[1:], static[1:], dir, home) ||
 						(program != "cpio" && program != "bsdcpio" && program != "pax" &&
 							archiveNamesEscape(program, words[1:], static[1:])) ||
@@ -3327,7 +3346,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				// placed its call (rel-1-0-6:GAP-0260).
 				bodyDir, placedBody = callDirs[0], true
 			}
-			inner := commandLinks(body, bodyDir, home, facts, record, true)
+			inner := commandLinks(body, bodyDir, home, facts, record, true, memo)
 			links.merge(inner)
 			renames = renames || inner.renames
 			cds = cds || inner.cds
@@ -4252,11 +4271,15 @@ func CommandLinks(tool, command, cwd, home string) Links {
 }
 
 // CommandLinksWithFacts uses copy-source link evidence from the user-side hook.
-func CommandLinksWithFacts(tool, command, cwd, home string, facts map[string]string) Links {
+func CommandLinksWithFacts(tool, command, cwd, home string, facts map[string]string, memo ...*TargetMemo) Links {
 	if command == "" || isApplyPatchToolName(tool) {
 		return Links{links: shellLinks{known: true}}
 	}
-	links := Links{links: commandLinksWithFacts(command, cwd, home, facts, false)}
+	var evaluation *TargetMemo
+	if len(memo) != 0 {
+		evaluation = memo[0]
+	}
+	links := Links{links: commandLinksWithFactsMemo(command, cwd, home, facts, false, evaluation)}
 	if len(links.links.aliases) > 0 {
 		links.protected = newProtectedFiles(home)
 	}
@@ -4265,8 +4288,8 @@ func CommandLinksWithFacts(tool, command, cwd, home string, facts map[string]str
 
 // CommandLinksWithFactsForTier keeps strict's existing opaque reading while
 // balanced ignores only archive scopes with no concrete link evidence.
-func CommandLinksWithFactsForTier(tool, command, cwd, home string, facts map[string]string, balanced bool) Links {
-	links := CommandLinksWithFacts(tool, command, cwd, home, facts)
+func CommandLinksWithFactsForTier(tool, command, cwd, home string, facts map[string]string, balanced bool, memo ...*TargetMemo) Links {
+	links := CommandLinksWithFacts(tool, command, cwd, home, facts, memo...)
 	links.balancedArchiveScope = balanced
 	return links
 }
@@ -4424,7 +4447,7 @@ func HomeSpelledWriteOperands(command, cwd, home string) []string {
 
 // ProtectedArchiveMoveName reports a move or copier write into the user's SSH
 // tree or through a proved protected link member of an earlier extraction.
-func ProtectedArchiveMoveName(command, cwd, home string, facts map[string]string) bool {
+func ProtectedArchiveMoveName(command, cwd, home string, facts map[string]string, memo ...*TargetMemo) bool {
 	if !strings.Contains(command, "tar") && !strings.Contains(command, "zip") &&
 		!strings.Contains(command, "cpio") && !strings.Contains(command, "pax") &&
 		!strings.Contains(command, "7z") && !strings.Contains(command, "jar") &&
@@ -4434,6 +4457,10 @@ func ProtectedArchiveMoveName(command, cwd, home string, facts map[string]string
 	file, parsed := parseShell(command)
 	if !parsed {
 		return false
+	}
+	var evaluation *TargetMemo
+	if len(memo) != 0 {
+		evaluation = memo[0]
 	}
 	// A producer pipeline is not a linear shell statement, but a write in a
 	// later statement can still reach a link extracted from its bytes.
@@ -4531,11 +4558,11 @@ func ProtectedArchiveMoveName(command, cwd, home string, facts map[string]string
 					for _, archive := range resolved {
 						if destination == "" &&
 							(facts[TarProtectedAbsoluteLinkFactPrefix+archive] == "1" ||
-								len(tarProtectedAbsoluteLinkMembers(archive, cwd, home)) != 0) &&
+								len(evaluation.tarMembers(archive, cwd, home, true)) != 0) &&
 							(ArchiveBeforeWrite(command, home) || pipelineWriteAfter(call)) {
 							named = true
 						}
-						for member, target := range tarProtectedLinkMembers(OperandPath(archive, cwd), destination, home) {
+						for member, target := range evaluation.tarMembers(OperandPath(archive, cwd), destination, home, false) {
 							members[member] = target
 						}
 					}
