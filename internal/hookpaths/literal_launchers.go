@@ -828,63 +828,167 @@ func literalGeneratedScriptOperands(file *syntax.File, cwd, home string, depth i
 	return append(redirects, literalWriteOperandsDepth(script, cwd, home, depth+1)...)
 }
 
+// entryChangeOptions is the option grammar of a command that removes,
+// renames or changes the mode, owner or times of its operands. short lists
+// the short options that take a value; long maps each long option to 1 when
+// it takes a value and 2 when its value is optional (only the --name=value
+// form). target names the options whose value is the directory that
+// receives the entries. A value of any other option is read, not changed.
+type entryChangeOptions struct {
+	short, target string
+	long          map[string]int
+	// leading: the first operand is a mode or owner, unless a reference
+	// file stands in for it.
+	leading bool
+	// lastOnly: the command reads its sources and changes only its last
+	// operand, unless it names a target directory or creates directories.
+	lastOnly bool
+}
+
+var (
+	entryChangeOwnerOptions = entryChangeOptions{leading: true, long: map[string]int{
+		"changes": 0, "dereference": 0, "no-dereference": 0, "from": 1, "no-preserve-root": 0,
+		"preserve-root": 0, "quiet": 0, "silent": 0, "reference": 1, "recursive": 0, "verbose": 0, "help": 0, "version": 0,
+	}}
+	entryChangeGrammars = map[string]entryChangeOptions{
+		"rm": {long: map[string]int{
+			"force": 0, "interactive": 2, "one-file-system": 0, "no-preserve-root": 0, "preserve-root": 2,
+			"recursive": 0, "dir": 0, "verbose": 0, "help": 0, "version": 0,
+		}},
+		"unlink": {long: map[string]int{"help": 0, "version": 0}},
+		"rmdir":  {long: map[string]int{"ignore-fail-on-non-empty": 0, "parents": 0, "verbose": 0, "help": 0, "version": 0}},
+		"chmod": {leading: true, long: map[string]int{
+			"changes": 0, "silent": 0, "quiet": 0, "verbose": 0, "no-preserve-root": 0, "preserve-root": 0,
+			"reference": 1, "recursive": 0, "help": 0, "version": 0,
+		}},
+		"chown": entryChangeOwnerOptions,
+		"chgrp": entryChangeOwnerOptions,
+		"shred": {short: "ns", long: map[string]int{
+			"force": 0, "iterations": 1, "random-source": 1, "remove": 2, "size": 1, "exact": 0, "zero": 0,
+			"verbose": 0, "help": 0, "version": 0,
+		}},
+		"mv": {short: "St", target: "t", long: map[string]int{
+			"backup": 2, "force": 0, "interactive": 0, "no-clobber": 0, "no-copy": 0, "strip-trailing-slashes": 0,
+			"suffix": 1, "target-directory": 1, "no-target-directory": 0, "update": 2, "verbose": 0, "context": 0,
+			"exchange": 0, "debug": 0, "help": 0, "version": 0,
+		}},
+		"touch": {short: "drt", long: map[string]int{
+			"date": 1, "no-create": 0, "no-dereference": 0, "reference": 1, "time": 1, "help": 0, "version": 0,
+		}},
+		"install": {short: "gmoSt", target: "t", lastOnly: true, long: map[string]int{
+			"backup": 2, "compare": 0, "directory": 0, "group": 1, "mode": 1, "owner": 1, "preserve-timestamps": 0,
+			"strip": 0, "strip-program": 1, "suffix": 1, "target-directory": 1, "no-target-directory": 0,
+			"verbose": 0, "preserve-context": 0, "context": 2, "debug": 0, "help": 0, "version": 0,
+		}},
+	}
+)
+
+// entryChangeLongOption resolves a long option name, or its unambiguous
+// prefix, the way getopt_long does.
+func entryChangeLongOption(long map[string]int, name string) (string, int, bool) {
+	if kind, ok := long[name]; ok {
+		return name, kind, true
+	}
+	match, kind, matches := "", 0, 0
+	for option, optionKind := range long {
+		if strings.HasPrefix(option, name) {
+			match, kind, matches = option, optionKind, matches+1
+		}
+	}
+	return match, kind, matches == 1
+}
+
+// chmodModeWord reports a chmod mode written like an option (-w, -x+r).
+func chmodModeWord(word string) bool {
+	return len(word) > 1 && strings.HasPrefix(word, "-") && strings.Trim(word, "rwxXstugoa,+-=01234567") == ""
+}
+
 // knownEntryChangeOperands lists the operands a command changes without
 // writing content: it removes or renames the entry, or changes its mode,
 // owner or times. The known-environment reader judges these operands like
 // writer targets, so a protected file named through a known value is read
-// the same as the literal name. Read-only operands (a cp or install source,
-// a reference file) are not listed.
+// the same as the literal name. The options are read with the grammar of
+// the command, so a value an option only reads (a reference file, a random
+// source) and the leading mode or owner are not listed.
 func knownEntryChangeOperands(words []string, cwd string) []string {
 	if len(words) < 2 {
 		return nil
 	}
-	var valued map[string]bool
-	lastOnly := false
-	switch programBase(words[0]) {
-	case "rm", "grm", "unlink", "gunlink", "rmdir", "grmdir", "chmod", "gchmod", "chown", "gchown", "chgrp", "gchgrp":
-	case "shred", "gshred":
-		valued = map[string]bool{"-n": true, "-s": true, "--iterations": true, "--size": true}
-	case "mv", "gmv":
-		valued = map[string]bool{"-S": true, "--suffix": true}
-	case "touch", "gtouch":
-		valued = map[string]bool{"-d": true, "-t": true, "-r": true, "--date": true, "--reference": true}
-	case "install", "ginstall":
-		valued = map[string]bool{"-m": true, "-o": true, "-g": true, "-S": true, "--mode": true, "--owner": true, "--group": true, "--suffix": true}
-		lastOnly = true
-	case "sed", "gsed":
+	program := programBase(words[0])
+	if program == "sed" || program == "gsed" {
 		names := sedInPlaceFiles(words)
 		for i, name := range names {
 			names[i] = OperandPath(name, cwd)
 		}
 		return names
-	default:
-		return nil
+	}
+	grammar, ok := entryChangeGrammars[program]
+	if !ok {
+		// The GNU g-prefixed names of a BSD system.
+		program = strings.TrimPrefix(program, "g")
+		if grammar, ok = entryChangeGrammars[program]; !ok {
+			return nil
+		}
 	}
 	var operands, targets []string
+	reference, directories, mode := false, false, false
 	for i := 1; i < len(words); i++ {
 		word := words[i]
 		switch {
 		case word == "--":
 			operands = append(operands, words[i+1:]...)
 			i = len(words)
-		case word == "-t" || word == "--target-directory":
-			// mv -t and install -t name the directory that receives the
-			// entries.
-			if i+1 < len(words) {
-				targets = append(targets, words[i+1])
-				i++
+		case program == "chmod" && !mode && !reference && chmodModeWord(word):
+			// GNU chmod takes -w and the like as its mode operand.
+			mode = true
+		case strings.HasPrefix(word, "--"):
+			name, value, attached := strings.Cut(word[2:], "=")
+			option, kind, known := entryChangeLongOption(grammar.long, name)
+			if !known {
+				continue
 			}
-		case strings.HasPrefix(word, "--target-directory="):
-			targets = append(targets, strings.TrimPrefix(word, "--target-directory="))
-		case valued[word]:
-			i++
-		case strings.HasPrefix(word, "-"):
+			if kind == 1 && !attached && i+1 < len(words) {
+				i++
+				value = words[i]
+			}
+			switch option {
+			case "reference":
+				reference = true
+			case "directory":
+				directories = true
+			case "target-directory":
+				targets = append(targets, value)
+			}
+		case len(word) > 1 && strings.HasPrefix(word, "-"):
+			for j := 1; j < len(word); j++ {
+				letter := word[j : j+1]
+				if !strings.Contains(grammar.short, letter) {
+					if program == "install" && letter == "d" {
+						directories = true
+					}
+					continue
+				}
+				value := word[j+1:]
+				if value == "" && i+1 < len(words) {
+					i++
+					value = words[i]
+				}
+				if strings.Contains(grammar.target, letter) {
+					targets = append(targets, value)
+				}
+				if program == "touch" && letter == "r" {
+					reference = true
+				}
+				break
+			}
 		default:
 			operands = append(operands, word)
 		}
 	}
-	if lastOnly {
-		// install reads its sources and writes only its destination.
+	if grammar.leading && !mode && !reference && len(operands) > 0 {
+		operands = operands[1:]
+	}
+	if grammar.lastOnly && !directories {
 		if len(targets) > 0 {
 			operands = nil
 		} else if len(operands) > 1 {
