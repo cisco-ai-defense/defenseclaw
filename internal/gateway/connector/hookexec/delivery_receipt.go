@@ -19,8 +19,9 @@ import (
 
 // The managed hook and gateway use the same HTTP request for the verdict and
 // its delivery receipt. An old gateway does not send 103 Early Hints, so the
-// body ends with HookDeliveryReleased after this compatibility wait. A 1.0.4
-// gateway whose 103 comes later reads the same marker in place of a receipt.
+// body ends with HookDeliveryReleased when an earlier gateway begins reading
+// it, or after this compatibility wait. A 1.0.4 gateway whose 103 comes later
+// reads the same marker in place of a receipt.
 const hookDeliveryCapabilityWait = 250 * time.Millisecond
 
 // The agent has its answer before this wait starts. Limit a missing HTTP
@@ -32,8 +33,10 @@ type hookDeliveryRequest struct {
 	writer      *io.PipeWriter
 	cancel      context.CancelFunc
 	ready       chan struct{}
+	reading     chan struct{}
 	payloadDone chan struct{}
 	once        sync.Once
+	readOnce    sync.Once
 	mu          sync.Mutex
 	closed      bool
 	conn        net.Conn
@@ -83,14 +86,19 @@ func wantsHookDeliveryReceipt(opts Options) bool {
 
 func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Duration, starting func(context.Context) bool, currentGateway func(context.Context, net.Conn) bool) (*http.Request, *hookDeliveryRequest) {
 	reader, writer := io.Pipe()
-	delivery := &hookDeliveryRequest{writer: writer, ready: make(chan struct{}), payloadDone: make(chan struct{})}
+	delivery := &hookDeliveryRequest{writer: writer, ready: make(chan struct{}), reading: make(chan struct{}), payloadDone: make(chan struct{})}
 	req.Body = reader
 	req.ContentLength = -1
 	req.GetBody = nil
 	req.Header.Set(HookDeliveryReceiptHeader, "1")
 	req.Header.Set(HookDeliveryPayloadBytesHeader, strconv.Itoa(len(payload)))
 	trace := &httptrace.ClientTrace{Got1xxResponse: func(code int, _ textproto.MIMEHeader) error {
-		if code == http.StatusEarlyHints {
+		switch code {
+		case http.StatusContinue:
+			// Earlier Go gateways send 100 when they begin reading the
+			// body. They need its end before they can return an answer.
+			delivery.readOnce.Do(func() { close(delivery.reading) })
+		case http.StatusEarlyHints:
 			delivery.once.Do(func() { close(delivery.ready) })
 		}
 		return nil
@@ -127,6 +135,8 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 			verified = nil
 			select {
 			case <-delivery.ready:
+				return
+			case <-delivery.reading:
 				return
 			default:
 			}
@@ -172,6 +182,9 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 			select {
 			case <-delivery.ready:
 				return
+			case <-delivery.reading:
+				delivery.release()
+				return
 			case <-req.Context().Done():
 				return
 			case same := <-verified:
@@ -209,6 +222,9 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 					verified = nil
 				case <-delivery.ready:
 					return
+				case <-delivery.reading:
+					delivery.release()
+					return
 				case <-req.Context().Done():
 					return
 				}
@@ -230,6 +246,31 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 		}
 	}()
 	return req, delivery
+}
+
+// hookDeliveryContinueClient sends the request body immediately while still
+// asking an earlier Go gateway to signal when it begins reading it. A custom
+// transport with unknown Expect handling keeps the existing peer-check path.
+func hookDeliveryContinueClient(client *http.Client) (*http.Client, bool) {
+	if client == nil {
+		return nil, false
+	}
+	transport := client.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	base, ok := transport.(*http.Transport)
+	if !ok {
+		return client, false
+	}
+	if base.ExpectContinueTimeout == 0 {
+		return client, true
+	}
+	copyClient := *client
+	copyTransport := base.Clone()
+	copyTransport.ExpectContinueTimeout = 0
+	copyClient.Transport = copyTransport
+	return &copyClient, true
 }
 
 // hookDeliveryStartPoll is how often a hook whose capability wait passed

@@ -1721,8 +1721,16 @@ func sendHookRequest(
 		req.Header.Set("tracestate", v)
 	}
 	opts.requestFacts.set(req.Header, opts, payload)
+	requestClient := opts.HTTPClient
 	var delivery *hookDeliveryRequest
 	if wantsHookDeliveryReceipt(opts) {
+		if !opts.ManagedEnterprise {
+			var continueSignal bool
+			requestClient, continueSignal = hookDeliveryContinueClient(requestClient)
+			if continueSignal {
+				req.Header.Set("Expect", "100-continue")
+			}
+		}
 		// The answer timer ends the hook's wait, but the request body must
 		// remain writable long enough to carry the watchdog's outcome once
 		// this request's gateway has advertised receipt support. Until then,
@@ -1738,7 +1746,7 @@ func sendHookRequest(
 		var currentGateway func(context.Context, net.Conn) bool
 		if !opts.ManagedEnterprise {
 			target := req.URL.String()
-			client := opts.HTTPClient
+			client := requestClient
 			currentGateway = func(ctx context.Context, postConn net.Conn) bool {
 				return hookDeliveryCurrentGateway(ctx, client, target, postConn)
 			}
@@ -1765,7 +1773,7 @@ func sendHookRequest(
 			}
 		},
 	}))
-	resp, err := opts.HTTPClient.Do(req)
+	resp, err := requestClient.Do(req)
 	if err != nil {
 		if delivery != nil {
 			delivery.close()
