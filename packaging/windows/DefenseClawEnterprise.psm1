@@ -9207,6 +9207,32 @@ function Assert-DefenseClawPathAcl {
                         ($_.Kind -eq 'Rights' -and $_.Severity -eq 'Broad'))
                 }
         )
+        if ($standalone -and $repairable.Count -gt 0) {
+            # The re-stamp writes the owner and the whole DACL, and the
+            # verdicts are read again after it. On standalone it therefore
+            # runs only when every verdict is one it may repair: an untrusted
+            # owner (whose implicit WRITE_DAC can add a deny entry or remove
+            # SYSTEM's or the gateway's rights), an untrusted writer, a
+            # missing DACL or a lost protected flag beside a repairable
+            # verdict used to be re-stamped with it, and the second reading
+            # found nothing left, so the file was trusted in place (GAP-0603
+            # review M1). The path is refused and named instead.
+            $unrepairable = @(
+                $verdicts |
+                    Microsoft.PowerShell.Core\Where-Object {
+                        $_.Kind -notin $repairableKinds -or
+                        ($_.Kind -eq 'Contract' -and $_.Severity -in $untrustedContract)
+                    }
+            )
+            if ($unrepairable.Count -gt 0) {
+                # The verdict comes last: the result names its account and
+                # the icacls fix from it.
+                throw ('refusing to re-stamp a managed path in place (DefenseClaw does not give a path another ' +
+                    'account owns or could change a trusted access list back: remove that entry, or give the path ' +
+                    'back to Administrators, and check it or restore it from its approved source, then run Setup ' +
+                    "/ensure again): $([string]$unrepairable[0].Reason)")
+            }
+        }
         if ($repairable.Count -gt 0) {
             if ([string]::IsNullOrWhiteSpace($SelfHealGatewayServiceSID)) {
                 throw "-SelfHealKind requires -SelfHealGatewayServiceSID: $Path"
