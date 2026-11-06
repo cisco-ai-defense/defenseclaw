@@ -4,9 +4,61 @@
 package hookpaths
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
+
+func TestGAP0288WrappedCopyVariableDestinationEvidence(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX client evidence")
+	}
+	root := t.TempDir()
+	home, project := filepath.Join(root, "home"), filepath.Join(root, "home", "proj")
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	if err := os.MkdirAll(filepath.Dir(keys), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keys, []byte("fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../.ssh/authorized_keys", filepath.Join(project, "disklink")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	for _, row := range []struct {
+		name, command string
+		protected     bool
+	}{
+		{"wrapped-known-link", `cd ~ && f=proj/disklink; for x in 1; do env cp proj/a.txt $f; done`, true},
+		{"direct-known-link", `cd ~ && f=proj/disklink; for x in 1; do cp proj/a.txt $f; done`, true},
+		{"wrapped-ordinary", `cd ~ && f=proj/out.txt; for x in 1; do env cp proj/a.txt $f; done`, false},
+		{"wrapped-source-link", `cd ~ && f=proj/out.txt; for x in 1; do env cp proj/disklink $f; done`, false},
+		{"wrapped-suffix", `cd ~ && f=proj/disklink; for x in 1; do env cp proj/a.txt "$f.bak"; done`, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			payload, err := json.Marshal(map[string]any{
+				"session_id": "g288", "hook_event_name": "PreToolUse", "cwd": project,
+				"tool_name": "Bash", "tool_input": map[string]any{"command": row.command},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			targets, ok := Decode(Resolve(payload))
+			if !ok {
+				t.Fatal("client evidence did not decode")
+			}
+			if got := targets[ActionDecisionKey] == ProtectedTargetDecision; got != row.protected {
+				t.Errorf("client protected decision = %v, want %v", got, row.protected)
+			}
+		})
+	}
+}
 
 func TestActionClientWriteCandidate(t *testing.T) {
 	for _, row := range []struct {
