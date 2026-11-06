@@ -1676,6 +1676,8 @@ func (w *InstallWatcher) scannerFingerprint(evt InstallEvent) string {
 		parts = append(parts,
 			"binary="+bin,
 			"binver="+w.scannerBinaryVersion(bin),
+			"policy="+pluginScannerPolicy(cfg, w.eventConnector(evt)),
+			fmt.Sprintf("vendor_identity_disabled=%t", cfg.SecureClientIntegration()),
 			"llm_model="+llm.Model,
 			"llm_provider="+llm.Provider,
 			"llm_base_url="+llm.BaseURL,
@@ -2166,7 +2168,7 @@ func (w *InstallWatcher) snapshotForEvent(evt InstallEvent) (*TargetSnapshot, er
 		if _, err := os.Stat(path); err != nil {
 			return nil, err
 		}
-		return SnapshotTarget(path)
+		return snapshotTarget(path, evt.Type == InstallPlugin)
 	}
 }
 

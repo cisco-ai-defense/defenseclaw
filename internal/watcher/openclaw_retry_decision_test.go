@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -102,5 +103,104 @@ func TestR109G501BRescanDisabledKeepsDecision(t *testing.T) {
 				t.Fatal("changed plugin was not queued for a new decision")
 			}
 		})
+	}
+}
+
+func TestR109G501BPluginSnapshotCoversBundledTree(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	root := filepath.Join(t.TempDir(), "extensions")
+	plugin := filepath.Join(root, "provider")
+	dependency := filepath.Join(plugin, "node_modules", "dependency")
+	if err := os.MkdirAll(dependency, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for path, content := range map[string]string{
+		filepath.Join(plugin, "package.json"): `{"name":"provider","version":"1.0.0"}`,
+		filepath.Join(dependency, "index.js"): "export const value = 1;\n",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := New(cfg, nil, []string{root}, store, logger, nil, nil)
+	evt := InstallEvent{Type: InstallPlugin, Name: "provider", Path: plugin, Connector: "openclaw"}
+	before, err := w.snapshotForEvent(evt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unchanged, err := w.snapshotForEvent(evt)
+	if err != nil || unchanged.ContentHash != before.ContentHash {
+		t.Fatalf("unchanged plugin snapshot changed: %v", err)
+	}
+	baseline := &audit.SnapshotRow{ContentHash: before.ContentHash, ScanID: "scan-1", ScannerFingerprint: "scanner-1"}
+	if rescan, _ := shouldRescan(baseline, unchanged, "scanner-1", true); rescan {
+		t.Fatal("unchanged plugin was queued")
+	}
+	if err := os.WriteFile(filepath.Join(dependency, "index.js"), []byte("export const value = 2;\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	after, err := w.snapshotForEvent(evt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rescan, reason := shouldRescan(baseline, after, "scanner-1", true); !rescan || reason != "content-changed" {
+		t.Fatalf("bundled dependency change: rescan=%t reason=%s", rescan, reason)
+	}
+}
+
+func TestR109G501BPluginSnapshotRetainsUnreadableEntry(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires local file permissions")
+	}
+	cfg, store, logger, _ := setupTestEnv(t)
+	root := t.TempDir()
+	plugin := filepath.Join(root, "provider")
+	dependency := filepath.Join(plugin, "node_modules", "dependency")
+	if err := os.MkdirAll(dependency, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entry := filepath.Join(dependency, "index.js")
+	if err := os.WriteFile(entry, []byte("export const value = 1;\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, nil, []string{root}, store, logger, nil, nil)
+	evt := InstallEvent{Type: InstallPlugin, Name: "provider", Path: plugin, Connector: "openclaw"}
+	if err := os.Chmod(entry, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(entry, 0o600) })
+	unreadable, err := w.snapshotForEvent(evt)
+	if err != nil || unreadable == nil || unreadable.ContentHash == "" {
+		t.Fatalf("unreadable plugin entry has no snapshot: %v", err)
+	}
+	if err := os.Chmod(entry, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	readable, err := w.snapshotForEvent(evt)
+	if err != nil || readable.ContentHash == unreadable.ContentHash {
+		t.Fatalf("entry permission repair did not change snapshot: %v", err)
+	}
+}
+
+func TestR109G501BWatcherPluginPolicy(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.DeploymentMode = "managed_enterprise"
+	cfg.Enterprise.Profile = "standalone"
+	cfg.Guardrail.RulePack = "strict"
+	w := New(cfg, nil, nil, store, logger, nil, nil)
+	evt := InstallEvent{Type: InstallPlugin, Connector: "openclaw"}
+	plugin, ok := w.scannerFor(evt).(*scanner.PluginScanner)
+	if !ok || plugin.Policy != "strict" || plugin.DisableVendorIdentity {
+		t.Fatalf("managed strict plugin scanner: %+v", plugin)
+	}
+	cfg.Guardrail.RulePack = "default"
+	plugin = w.scannerFor(evt).(*scanner.PluginScanner)
+	if plugin.Policy != "" || plugin.DisableVendorIdentity {
+		t.Fatalf("managed default plugin scanner: %+v", plugin)
+	}
+	cfg.Enterprise.Profile = "secure_client"
+	plugin = w.scannerFor(evt).(*scanner.PluginScanner)
+	if plugin.Policy != "" || !plugin.DisableVendorIdentity {
+		t.Fatalf("Secure Client plugin scanner: %+v", plugin)
 	}
 }

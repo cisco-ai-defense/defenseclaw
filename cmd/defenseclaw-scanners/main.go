@@ -15,7 +15,7 @@
 //
 //	defenseclaw-scanners skill-scanner <skill-scanner arguments>
 //	defenseclaw-scanners mcp-scan --input-stdin <url>
-//	defenseclaw-scanners plugin-scan <plugin dir> [--policy p] [--profile p] [--connector c] [--include-self]
+//	defenseclaw-scanners plugin-scan <plugin dir> [--policy p] [--profile p] [--connector c] [--include-self] [--disable-vendor-identity]
 //	defenseclaw-scanners versions | --version | prepare | prune
 package main
 
@@ -102,6 +102,8 @@ while i<len(a):
         i+=2
     elif x=="--include-self":
         o.include_self=True; i+=1
+    elif x=="--disable-vendor-identity":
+        o.disable_vendor_identity=True; i+=1
     elif t is None and not x.startswith("--"):
         t=x; i+=1
     else:

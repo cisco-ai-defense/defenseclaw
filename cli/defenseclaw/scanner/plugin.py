@@ -112,6 +112,7 @@ class PluginScannerWrapper:
         llm_consensus_runs: int = 0,
         disable_meta: bool = False,
         include_self: bool = False,
+        disable_vendor_identity: bool = False,
         trusted_self_paths: tuple[str, ...] = (),
         lenient: bool = False,
     ) -> ScanResult:
@@ -129,6 +130,7 @@ class PluginScannerWrapper:
         # actually skipped by the scanner pipeline (F-0302).
         options.disable_meta = disable_meta
         options.include_self = include_self
+        options.disable_vendor_identity = disable_vendor_identity
         options.trusted_self_paths = trusted_self_paths
 
         # Build the LLM override:
