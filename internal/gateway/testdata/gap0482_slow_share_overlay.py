@@ -37,6 +37,10 @@ read_old = 'var readPath = func(name string, kind pathReadKind) (result pathRead
 if read_old in original:
     read_new = '''var readPath = func(name string, kind pathReadKind) (result pathReadResult) {
         root := os.Getenv("R482_FAKE_SHARE")
+        if os.Getenv("R482_FAKE_SHARE_DELAY") == "1" && root != "" &&
+            (name == root || strings.HasPrefix(name, root+string(filepath.Separator))) {
+            time.Sleep(40 * time.Millisecond)
+        }
         if os.Getenv("R482_FAKE_SHARE_UNANSWERED") == "1" && root != "" &&
             (name == root || strings.HasPrefix(name, root+string(filepath.Separator))) {
             time.Sleep(2 * time.Second)

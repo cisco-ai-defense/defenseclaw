@@ -716,14 +716,19 @@ func ResolveWriteTarget(path string) (string, bool) {
 
 // ResolveWriteTargetIdentity gives a reachable link on a pending share one
 // bounded identity walk. It uses the same readers as ResolveWriteTarget and
-// shares one short deadline across every component and link hop.
-func ResolveWriteTargetIdentity(path string) (string, bool) {
-	deadline := time.Now().Add(100 * time.Millisecond)
+// shares the network answer budget across every component and link hop.
+func ResolveWriteTargetIdentity(path string) (string, bool, bool) {
+	deadline := time.Now().Add(networkShareAnswerWait)
+	seenLink := false
 	lstat := func(name string) (os.FileInfo, error) {
 		if time.Now().After(deadline) {
 			return nil, networkShareError("read", name)
 		}
-		return PathLstat(name)
+		info, err := PathLstat(name)
+		if err == nil && info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			seenLink = true
+		}
+		return info, err
 	}
 	readlink := func(name string) (string, error) {
 		if time.Now().After(deadline) {
@@ -733,7 +738,7 @@ func ResolveWriteTargetIdentity(path string) (string, bool) {
 	}
 	writeTargetWalks.Add(1)
 	resolved, _, _, ok := walkWritePathMemoWithReaders("", path, 0, false, false, nil, lstat, readlink)
-	return resolved, ok
+	return resolved, ok, seenLink
 }
 
 // ResolvePatchWriteTarget rejects a link whose target contains a line break:

@@ -1329,8 +1329,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			}
 			// A linked parent can name a protected final file even if that
 			// file does not exist yet. Its reachable parent is positive proof.
-			parent, ok := hookpaths.ResolveWriteTargetIdentity(filepath.Dir(target))
-			return ok && isProtected(filepath.Join(parent, filepath.Base(target))) || possible(target)
+			parent, ok, linked := hookpaths.ResolveWriteTargetIdentity(filepath.Dir(target))
+			return ok && isProtected(filepath.Join(parent, filepath.Base(target))) || !ok && linked || possible(target)
 		}
 		if err == nil {
 			// A reachable link and a hard link both name the protected file
@@ -1358,7 +1358,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 					return true
 				}
 				if !filepath.IsAbs(link) {
-					parent, ok := hookpaths.ResolveWriteTargetIdentity(filepath.Dir(target))
+					parent, ok, _ := hookpaths.ResolveWriteTargetIdentity(filepath.Dir(target))
 					if ok && isProtected(filepath.Join(parent, link)) {
 						return true
 					}
@@ -1369,12 +1369,13 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// file that the redirect would create is covered as well.
 		resolved, ok := hookpaths.ResolveWriteTarget(target)
 		if !ok && hookpaths.SharePath(target) {
-			resolved, ok = hookpaths.ResolveWriteTargetIdentity(target)
+			resolved, ok, _ = hookpaths.ResolveWriteTargetIdentity(target)
 		}
-		// An existing link whose target cannot be resolved is still a
-		// possible write into the protected home. The client and gateway
-		// must both fail closed on a linked component before "..".
-		return isProtected(resolved) || !ok && possible(target)
+		// A link entry already reached by the bounded read remains a
+		// protected possibility if a later hop exhausts the shared budget.
+		// Only an ordinary target with no reached link takes the balanced
+		// unanswered-share fallback.
+		return isProtected(resolved) || !ok && (err == nil && info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 || possible(target))
 	}
 	// Partial command projections can omit a redirect PathFact. The shell AST
 	// still gives an exact write operand, which the user's hook resolved.

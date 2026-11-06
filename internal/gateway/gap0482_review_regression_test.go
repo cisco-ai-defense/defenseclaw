@@ -192,3 +192,83 @@ func TestGAP0482ReviewSlowShareSymlink(t *testing.T) {
 		})
 	}
 }
+
+// The slow-share overlay delays each reachable file read while its root
+// probe is pending. A known chain must retain the protected final name.
+func TestGAP0482SlowShareLinkChain(t *testing.T) {
+	for _, row := range []struct {
+		name     string
+		depth    int
+		missing  bool
+		relative bool
+		ordinary bool
+	}{
+		{"direct-missing", 1, true, false, false},
+		{"two-hop-missing", 2, true, false, false},
+		{"two-hop-relative-missing", 2, true, true, false},
+		{"three-hop-missing", 3, true, false, false},
+		{"eight-hop-missing", 8, true, false, false},
+		{"two-hop-existing", 2, false, false, false},
+		{"ordinary-two-hop", 2, false, false, true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			root := t.TempDir()
+			home := filepath.Join(root, "home")
+			project := filepath.Join(root, "project")
+			for _, dir := range []string{filepath.Join(home, ".ssh"), project} {
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			keys := filepath.Join(home, ".ssh", "authorized_keys")
+			if row.ordinary {
+				keys = filepath.Join(project, "notes.txt")
+			}
+			if !row.missing {
+				if err := os.WriteFile(keys, []byte("placeholder\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			names := make([]string, row.depth)
+			names[0] = filepath.Join(project, "ordinary.txt")
+			for i := 1; i < len(names); i++ {
+				names[i] = filepath.Join(project, "step"+strconv.Itoa(i)+".txt")
+			}
+			for i := 0; i < row.depth; i++ {
+				destination := keys
+				if i+1 < row.depth {
+					destination = names[i+1]
+				}
+				if row.relative {
+					var err error
+					destination, err = filepath.Rel(project, destination)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.Symlink(destination, names[i]); err != nil {
+					t.Skipf("symlink unavailable: %v", err)
+				}
+			}
+			t.Setenv("R482_FAKE_SHARE", project)
+			t.Setenv("R482_FAKE_SHARE_DELAY", "1")
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			payload := mustJSON(t, map[string]any{
+				"session_id": "gap0482-link-chain", "hook_event_name": "PreToolUse",
+				"tool_name": "Bash", "tool_use_id": "toolu_gap0482_link_chain",
+				"cwd": project, "permission_mode": "default",
+				"tool_input": map[string]any{"command": "echo marker >> ordinary.txt"},
+			})
+			for _, profile := range []string{"default", "strict"} {
+				want := "block"
+				if row.ordinary {
+					want = "allow"
+				}
+				if got := gap0482ProfileVerdict(t, payload, profile); got != want {
+					t.Errorf("%s linked file = %s, want %s", profile, got, want)
+				}
+			}
+		})
+	}
+}
