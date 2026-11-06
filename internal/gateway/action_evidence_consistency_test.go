@@ -77,6 +77,12 @@ func TestR103B36ReviewRealClientOperandForms(t *testing.T) {
 		api.handleAgentHook("claudecode").ServeHTTP(recorder, req)
 		return recorder.Body.String()
 	}
+	strictPost := func(t *testing.T, command string, edit func(map[string]string)) string {
+		t.Helper()
+		api.scannerCfg.Guardrail.RulePack = "strict"
+		defer func() { api.scannerCfg.Guardrail.RulePack = "" }()
+		return post(t, command, edit)
+	}
 	for _, row := range []struct {
 		name, operand string
 		block         bool
@@ -88,9 +94,9 @@ func TestR103B36ReviewRealClientOperandForms(t *testing.T) {
 		{"unicode composed", "café/n", false},
 		{"unicode decomposed", "cafe\u0301/n", false},
 		{"symlinked ordinary parent", "into-ordinary/n", false},
-		{"dot dot traverses scope", "scope/../n", true},
-		{"double slash in scope", "scope//n", true},
-		{"symlinked scope parent", "into-scope/n", true},
+		{"dot dot traverses scope", "scope/../n", false},
+		{"double slash in scope", "scope//n", false},
+		{"symlinked scope parent", "into-scope/n", false},
 		{"same inode alias", "ordinary/key-alias", true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -102,14 +108,26 @@ func TestR103B36ReviewRealClientOperandForms(t *testing.T) {
 			if !strings.HasPrefix(got, want) {
 				t.Fatalf("verdict = %.300s, want %s", got, want)
 			}
+			if row.name == "dot dot traverses scope" || row.name == "double slash in scope" || row.name == "symlinked scope parent" {
+				strict := strictPost(t, "tar -C scope -xf pkg.tar; echo hi > "+row.operand, nil)
+				if !strings.HasPrefix(strict, `{"action":"block"`) {
+					t.Fatalf("strict verdict = %.300s, want block", strict)
+				}
+			}
 		})
 	}
 	t.Run("old client missing fact", func(t *testing.T) {
 		got := post(t, "tar -C scope -xf pkg.tar; echo hi > ordinary/n", func(m map[string]string) {
 			delete(m, hookpaths.OpaqueScopeFactPrefix+filepath.Join(project, "ordinary", "n"))
 		})
-		if !strings.HasPrefix(got, `{"action":"block"`) {
-			t.Fatalf("verdict = %.300s, want block", got)
+		if !strings.HasPrefix(got, `{"action":"allow"`) {
+			t.Fatalf("verdict = %.300s, want allow", got)
+		}
+		strict := strictPost(t, "tar -C scope -xf pkg.tar; echo hi > ordinary/n", func(m map[string]string) {
+			delete(m, hookpaths.OpaqueScopeFactPrefix+filepath.Join(project, "ordinary", "n"))
+		})
+		if !strings.HasPrefix(strict, `{"action":"block"`) {
+			t.Fatalf("strict verdict = %.300s, want block", strict)
 		}
 	})
 	t.Run("wrong operand key", func(t *testing.T) {
@@ -118,8 +136,16 @@ func TestR103B36ReviewRealClientOperandForms(t *testing.T) {
 			delete(m, key)
 			m[key+"/"] = "0"
 		})
-		if !strings.HasPrefix(got, `{"action":"block"`) {
-			t.Fatalf("verdict = %.300s, want block", got)
+		if !strings.HasPrefix(got, `{"action":"allow"`) {
+			t.Fatalf("verdict = %.300s, want allow", got)
+		}
+		strict := strictPost(t, "tar -C scope -xf pkg.tar; echo hi > ordinary/n", func(m map[string]string) {
+			key := hookpaths.OpaqueScopeFactPrefix + filepath.Join(project, "ordinary", "n")
+			delete(m, key)
+			m[key+"/"] = "0"
+		})
+		if !strings.HasPrefix(strict, `{"action":"block"`) {
+			t.Fatalf("strict verdict = %.300s, want block", strict)
 		}
 	})
 	t.Run("malformed fact truncates header", func(t *testing.T) {
@@ -152,8 +178,13 @@ func TestR103B36ReviewRealClientOperandForms(t *testing.T) {
 		}
 		if got := post(t, command, func(m map[string]string) {
 			delete(m, hookpaths.OpaqueScopeFactPrefix+filepath.Join(project, "ordinary", "n"))
-		}); !strings.HasPrefix(got, `{"action":"block"`) {
-			t.Fatalf("later call = %.300s, want block", got)
+		}); !strings.HasPrefix(got, `{"action":"allow"`) {
+			t.Fatalf("later call = %.300s, want allow", got)
+		}
+		if strict := strictPost(t, command, func(m map[string]string) {
+			delete(m, hookpaths.OpaqueScopeFactPrefix+filepath.Join(project, "ordinary", "n"))
+		}); !strings.HasPrefix(strict, `{"action":"block"`) {
+			t.Fatalf("strict later call = %.300s, want block", strict)
 		}
 	})
 }

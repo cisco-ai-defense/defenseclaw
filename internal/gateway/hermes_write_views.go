@@ -43,6 +43,9 @@ func (a *APIServer) inspectHermesWriteToolPolicyCtx(
 	commandTool string,
 	views []connector.HermesWriteView,
 ) *ToolInspectVerdict {
+	if a.scannerCfg != nil && !a.scannerCfg.SecureClientIntegration() && action.Connector != "" {
+		action.balancedArchiveScope = !a.strictPolicyTierForHook(ctx, action.Connector)
+	}
 	if len(views) == 0 {
 		return a.inspectSandboxShellToolPolicyCtx(ctx, req, action, command, commandTool)
 	}

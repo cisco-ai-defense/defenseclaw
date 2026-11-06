@@ -175,6 +175,8 @@ type trustedActionRequest struct {
 	// ProtectedHomeHook is set only from a kernel-verified managed hook peer.
 	// Its gateway cannot inspect the caller's home when ProtectHome is active.
 	ProtectedHomeHook bool
+	// balancedArchiveScope is server policy, never a client-supplied fact.
+	balancedArchiveScope bool
 	// ManagedHookOverflowHold retains a bounded state reading on an
 	// authenticated managed Windows hook without changing path resolution.
 	ManagedHookOverflowHold bool

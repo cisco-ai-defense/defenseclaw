@@ -1109,6 +1109,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				strings.HasPrefix(operand, hookpaths.SourceLinksFactPrefix) ||
 				strings.HasPrefix(operand, hookpaths.CdEnterableFactPrefix) ||
 				strings.HasPrefix(operand, hookpaths.TarPlainFactPrefix) ||
+				strings.HasPrefix(operand, hookpaths.TarLinkFactPrefix) ||
+				strings.HasPrefix(operand, hookpaths.UnreadArchiveTargetPrefix) ||
 				directoryFact && (changedDirectory ||
 					canonicalSemanticPath(resolved) == canonicalSemanticPath(filepath.Join(facts.ActiveHome, ".ssh"))) ||
 				operand == hookpaths.CWDKey && (changedDirectory || truncated) ||
@@ -1232,6 +1234,19 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			if info, err := os.Lstat(target); err != nil || info.Mode()&os.ModeCharDevice == 0 {
 				return true
 			}
+		}
+		if request.balancedArchiveScope && request.ProtectedHomeHook &&
+			clientTargets[target] == "" &&
+			(links.UnreadArchiveTargetOnly(target, opaqueFacts) ||
+				clientTargets[hookpaths.UnreadArchiveTargetPrefix+target] != "") {
+			// The client keeps its strict unresolved target and sends this
+			// independent disk reading for balanced. Missing or conflicting
+			// evidence retains the managed fail-closed decision.
+			if _, conflict := opaqueFacts[hookpaths.OpaqueScopeFactPrefix+target]; conflict {
+				return true
+			}
+			resolved := clientTargets[hookpaths.UnreadArchiveTargetPrefix+target]
+			return resolved == "" || isProtected(resolved)
 		}
 		// On a static reading of a call with a runtime-expanded operand
 		// word, the client answer of that reading decides an operand the
@@ -1360,7 +1375,10 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {
 		return true
 	}
-	links = hookpaths.CommandLinksWithFacts(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
+	links = hookpaths.CommandLinksWithFactsForTier(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets, request.balancedArchiveScope)
+	if hookpaths.ProtectedArchiveMoveName(input.Command, input.CWD, facts.ActiveHome) {
+		return true
+	}
 	safeRedirects = hookpaths.SafeShellRedirectOccurrencesWithFacts(input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
 	replacedBySed := hookpaths.SedReplacedOperands(input.Command, input.CWD, facts.ActiveHome)
 	// The claudecode scoping above drops the client's reading of the

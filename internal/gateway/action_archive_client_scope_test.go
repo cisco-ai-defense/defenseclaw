@@ -27,10 +27,14 @@ func TestR103B36ManagedArchiveScopeUsesClientWalk(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root can search a mode 0 directory")
 	}
-	root := t.TempDir()
+	root, err := os.MkdirTemp("", "gxscope-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	homes := filepath.Join(root, "home")
-	home := filepath.Join(homes, "dcad-r103-eng1@dclab.test")
-	project := filepath.Join(home, "r103-t8a-b36-proj")
+	home := filepath.Join(homes, "alice")
+	project := filepath.Join(home, "project")
 	for _, dir := range []string{filepath.Join(home, ".ssh"), filepath.Join(project, "build"), filepath.Join(project, "unpack"), filepath.Join(project, "out")} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
@@ -54,6 +58,7 @@ func TestR103B36ManagedArchiveScopeUsesClientWalk(t *testing.T) {
 			"permission_mode": "default", "tool_name": "Bash", "tool_use_id": "toolu_fp",
 			"tool_input": map[string]any{"command": command, "description": "Run test fixture command"}})
 	}
+	pack := ""
 	var send func(t *testing.T, connector string, payload []byte, header string) string
 	post := func(t *testing.T, connector, command string, edit func(map[string]string)) string {
 		t.Helper()
@@ -85,6 +90,7 @@ func TestR103B36ManagedArchiveScopeUsesClientWalk(t *testing.T) {
 		cfg := &config.Config{}
 		cfg.Guardrail.Mode = "action"
 		cfg.Guardrail.Connector = connector
+		cfg.Guardrail.RulePack = pack
 		api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(payload)))
 		req.Header.Set(hookpaths.Header, header)
@@ -97,25 +103,25 @@ func TestR103B36ManagedArchiveScopeUsesClientWalk(t *testing.T) {
 		return recorder.Body.String()
 	}
 	allowed := []string{
+		"tar -C unpack -xf keys.tar && echo k >> unpack/n1.txt",
+		"tar xzf pkg.tgz && ./configure > build.log",
+		"tar -C unpack -xf keys.tar && echo k >> outlink",
 		"tar -xzf pkg.tgz --strip-components=1 -C build; echo hi > report.txt", // FP-0001
 		"tar -xzf pkg.tgz --exclude=docs -C build; echo hi > report.txt",       // FP-0002
 		"tar -a -xf pkg.tar -C build; echo hi > report.txt",                    // FP-0003
-		"cp -c notes.txt r2.txt",       // FP-0006
-		"cp -X notes.txt r2.txt",       // FP-0007
-		"cp -N notes.txt r2.txt",       // FP-0008
-		"cp -Z notes.txt r2.txt",       // FP-0009
-		"> out/build.log",              // PAN-0001
-		"> out/build.log && echo done", // PAN-0002
-		"true && > out/build.log",      // PAN-0005
-		"  >> out/build.log",           // PAN-0006
+		"cp -c notes.txt r2.txt",                                               // FP-0006
+		"cp -X notes.txt r2.txt",                                               // FP-0007
+		"cp -N notes.txt r2.txt",                                               // FP-0008
+		"cp -Z notes.txt r2.txt",                                               // FP-0009
+		"> out/build.log",                                                      // PAN-0001
+		"> out/build.log && echo done",                                         // PAN-0002
+		"true && > out/build.log",                                              // PAN-0005
+		"  >> out/build.log",                                                   // PAN-0006
 		"tar -C unpack -xf keys.tar; echo hi > report.txt",
 		`for f in *.txt; do cp "$f" build/; done; echo ok > report.txt`,
 		`cp "$F" out.txt && echo done > report.txt`,
 	}
 	blocked := []string{
-		"tar -C unpack -xf keys.tar && echo k >> unpack/n1.txt",
-		"tar xzf pkg.tgz && ./configure > build.log",
-		"tar -C unpack -xf keys.tar && echo k >> outlink",
 		`read X <<< "--target-directory=$HOME/.ssh"; printf marker > authorized_keys; cp "$X" authorized_keys`, // FG3-CP-B001
 	}
 	if runtime.GOOS == "linux" {
@@ -130,18 +136,33 @@ func TestR103B36ManagedArchiveScopeUsesClientWalk(t *testing.T) {
 					t.Errorf("%s = %.300s, want allow", command, got)
 				}
 			}
+			pack = "strict"
+			for _, command := range allowed[:3] {
+				if got := post(t, connector, command, nil); !strings.HasPrefix(got, block) {
+					t.Errorf("%s = %.300s, want strict block", command, got)
+				}
+			}
+			pack = ""
 			for _, command := range blocked {
 				if got := post(t, connector, command, nil); !strings.HasPrefix(got, block) {
 					t.Errorf("%s = %.300s, want block", command, got)
 				}
 			}
-			// An older client sends no fact: the operand stays unknown.
-			if got := post(t, connector, allowed[0], func(targets map[string]string) {
+			// An ordinary write outside the archive scope needs no scope fact
+			// in balanced; strict retains the earlier conservative reading.
+			if got := post(t, connector, allowed[3], func(targets map[string]string) {
+				delete(targets, hookpaths.OpaqueScopeFactPrefix+report)
+			}); !strings.HasPrefix(got, allow) {
+				t.Errorf("missing opaque-scope fact = %.300s, want allow", got)
+			}
+			pack = "strict"
+			if got := post(t, connector, allowed[3], func(targets map[string]string) {
 				delete(targets, hookpaths.OpaqueScopeFactPrefix+report)
 			}); !strings.HasPrefix(got, block) {
-				t.Errorf("missing opaque-scope fact = %.300s, want block", got)
+				t.Errorf("missing opaque-scope fact = %.300s, want strict block", got)
 			}
-			if got := post(t, connector, allowed[0], func(targets map[string]string) {
+			pack = ""
+			if got := post(t, connector, allowed[3], func(targets map[string]string) {
 				targets[hookpaths.OpaqueScopeFactPrefix+report] = "invalid"
 			}); !strings.HasPrefix(got, block) {
 				t.Errorf("malformed opaque-scope fact = %.300s, want block", got)
