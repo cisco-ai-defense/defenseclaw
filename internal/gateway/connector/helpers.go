@@ -358,28 +358,100 @@ func hookCommandNamesHookDir(command, hookScript string) bool {
 			continue
 		}
 		text := hookCommandPathText(command, normalizeHookPath(filepath.Clean(home), fold), fold)
-		for _, managed := range dirs {
-			if strings.Contains(text, managed+"/") {
-				return true
-			}
+		candidates := hookCommandPathCandidates(text, fold)
+		if hookPathCandidatesNameDir(candidates, files, dirs, fold, false) ||
+			hookPathCandidatesNameDir(candidates, files, dirs, fold, true) {
+			return true
 		}
-		for _, word := range strings.FieldsFunc(text, func(r rune) bool { return hookCommandPathDelimiter(r, fold) }) {
-			if !strings.HasPrefix(word, "/") && !(fold && len(word) > 2 && word[1] == ':') {
+	}
+	return false
+}
+
+// hookPathCandidatesNameDir reports whether any candidate, cleaned (and, with
+// resolve, with its existing ancestors and links resolved), is a managed hook
+// file or lies in a managed hook directory. Cleaning happens before the
+// comparison: "<hooks>/../user.sh" and "/other<hooks>/x" are not managed.
+func hookPathCandidatesNameDir(candidates, files, dirs []string, fold, resolve bool) bool {
+	for _, word := range candidates {
+		name := filepath.FromSlash(word)
+		form := normalizeHookPath(filepath.Clean(name), fold)
+		if resolve {
+			resolved, ok := resolveHookPathAllowMissing(name)
+			if !ok {
 				continue
 			}
-			for _, candidate := range appendHookPathForms(nil, filepath.FromSlash(word), fold) {
-				if slices.Contains(files, candidate) {
-					return true
-				}
-				for _, managed := range dirs {
-					if candidate == managed || strings.HasPrefix(candidate, managed+"/") {
-						return true
-					}
-				}
+			form = normalizeHookPath(resolved, fold)
+		}
+		if slices.Contains(files, form) {
+			return true
+		}
+		for _, managed := range dirs {
+			if form == managed || strings.HasPrefix(form, managed+"/") {
+				return true
 			}
 		}
 	}
 	return false
+}
+
+// maxHookPathEnds bounds the path-word ends tried from one start.
+const maxHookPathEnds = 32
+
+// hookCommandPathCandidates returns the path words in hook command text (as
+// built by hookCommandPathText). A word starts at an absolute path after the
+// start of the text or a delimiter, and "NAME=" counts as a delimiter only
+// before the first "/" of a word. Because ordinary file names hold spaces,
+// commas and equals signs, each start yields every span up to a later
+// delimiter, and the rest of the text, so a complete name is always among
+// the candidates. The text is never run.
+func hookCommandPathCandidates(text string, fold bool) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(word string) {
+		if word != "" && !seen[word] {
+			seen[word] = true
+			out = append(out, word)
+		}
+	}
+	startOK, wordSlash := true, false
+	for i, r := range text {
+		if startOK && hookPathStart(text, i, fold) {
+			ends := 0
+			for j, next := range text[i+1:] {
+				if ends >= maxHookPathEnds {
+					break
+				}
+				if hookCommandPathDelimiter(next, fold) {
+					add(text[i : i+1+j])
+					ends++
+				}
+			}
+			add(text[i:])
+		}
+		switch {
+		case unicode.IsSpace(r) || strings.ContainsRune(";|&()<>{}[]$", r):
+			startOK, wordSlash = true, false
+		case r == ',' || (r == ':' && !fold):
+			startOK = true
+		case r == '=':
+			startOK = !wordSlash
+		default:
+			startOK = false
+		}
+		if r == '/' {
+			wordSlash = true
+		}
+	}
+	return out
+}
+
+// hookPathStart reports whether text holds an absolute path at i.
+func hookPathStart(text string, i int, fold bool) bool {
+	if text[i] == '/' {
+		return true
+	}
+	return fold && i+2 < len(text) && text[i+1] == ':' && text[i+2] == '/' &&
+		text[i] >= 'a' && text[i] <= 'z'
 }
 
 // appendHookPathForms appends the cleaned and the resolved form of name.
