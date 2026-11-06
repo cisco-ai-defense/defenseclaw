@@ -178,6 +178,8 @@ type trustedActionRequest struct {
 	// StrictPolicy keeps uncertain path proofs closed for the strict rule pack.
 	// Secure Client uses the same conservative path behavior as before.
 	StrictPolicy bool
+	// balancedArchiveScope is server policy, never a client-supplied fact.
+	balancedArchiveScope bool
 	// ManagedHookOverflowHold retains a bounded state reading on an
 	// authenticated managed Windows hook without changing path resolution.
 	ManagedHookOverflowHold bool

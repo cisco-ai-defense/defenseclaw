@@ -12,8 +12,8 @@ import "testing"
 // read in every directory a statement may stand in, a literal sh -c body
 // runs where the statement walk placed its call (the GAP-2582 N03 and N04
 // forms after cd), and a mkdir after cd is no write operand, as without
-// the cd. The cd twins of the write into the extraction scope and of the
-// sh -c link to the keys file still block.
+// the cd. Balanced permits ordinary writes into an unread archive scope;
+// the sh -c link to the keys file remains blocked.
 func TestR107LinkScopeOfAnArchiveAfterCdIsReadWhereTheWriteLands(t *testing.T) {
 	r106Reader2Check(t, []r106Reader2Row{
 		{"FP-0001 without cd", "project", `tar -xzf pkg.tgz --strip-components=1 -C build; echo hi > report.txt`, "allow"},
@@ -25,9 +25,9 @@ func TestR107LinkScopeOfAnArchiveAfterCdIsReadWhereTheWriteLands(t *testing.T) {
 		{"FP-0001 from a subdirectory after cd", "project", `cd {P}/sub && tar -xzf ../pkg.tgz -C ../build; echo hi > r.txt`, "allow"},
 		{"GAP-2582 N03 after cd", "project", `cd {P} && sh -c "ln -s build/out bin && cp -a build dist"`, "allow"},
 		{"GAP-2582 N04 after cd", "project", `cd {P} && ln -s build/out bin; sh -c "cp -a src dist"; echo x > notes.txt`, "allow"},
-		{"write into the extraction scope", "project", `tar -C unpack -xf keys.tar; echo k >> unpack/n1.txt`, "block"},
-		{"write into the extraction scope after cd", "project", `cd {P} && tar -C unpack -xf keys.tar; echo k >> unpack/n1.txt`, "block"},
-		{"mkdir, then write into the extraction scope after cd", "project", `cd {P} && mkdir -p unpack && tar -C unpack -xf keys.tar; echo k >> unpack/n1.txt`, "block"},
+		{"write into the extraction scope", "project", `tar -C unpack -xf keys.tar; echo k >> unpack/n1.txt`, "allow"},
+		{"write into the extraction scope after cd", "project", `cd {P} && tar -C unpack -xf keys.tar; echo k >> unpack/n1.txt`, "allow"},
+		{"mkdir, then write into the extraction scope after cd", "project", `cd {P} && mkdir -p unpack && tar -C unpack -xf keys.tar; echo k >> unpack/n1.txt`, "allow"},
 		{"source after cd, then write into the extraction scope's name", "project", `cd {P} && tar -C unpack -xf keys.tar; . ./x.sh; echo k >> n1.txt`, "block"},
 		{"source in an && chain after cd, then write", "project", `cd {P} && tar -C unpack -xf keys.tar && source ./x.sh && echo k >> n1.txt`, "block"},
 		{"trap cd DEBUG after cd, then write", "project", `cd {P} && tar -C unpack -xf keys.tar; trap "cd unpack" DEBUG; echo k >> n1.txt`, "block"},

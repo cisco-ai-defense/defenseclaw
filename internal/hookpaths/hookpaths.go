@@ -76,6 +76,16 @@ const SourceLinkFactPrefix = "\x00source-link:"
 // (rel-1-0-6:GAP-0339 review 8).
 const TarPlainFactPrefix = "\x00tar-plain:"
 
+// TarLinkFactPrefix is a positive client reading that retains the conservative
+// tar scope: a non-plain member, unsafe name, or exceeded bound. It preserves
+// that evidence behind ProtectHome.
+const TarLinkFactPrefix = "\x00tar-link:"
+
+// UnreadArchiveTargetPrefix is the client's positive disk reading of an
+// operand under an unread extraction scope. The ordinary target map keeps
+// its historical unresolved answer for the strict tier.
+const UnreadArchiveTargetPrefix = "\x00unread-archive-target:"
+
 // CdEnterableFactPrefix keys the hook client's check that the directory a
 // leading cd names exists and that the user may enter it (search
 // permission). "1" is the only value. A gateway that cannot search the
@@ -1022,6 +1032,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	if copilot {
 		tool = copilotargs.LocalActionTool(tool)
 	}
+	tool = ConnectorActionTool(connector, tool)
 	if len(args) == 0 && !toolConflict && !argsConflict {
 		return ""
 	}
@@ -1245,6 +1256,11 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				} else {
 					literalOperands = LiteralWriteOperands(command, cwd, home)
 				}
+				if strings.Contains(command, "sed") && strings.Contains(command, "-i") {
+					for target := range SedReplacedOperands(command, cwd, home) {
+						literalOperands = append(literalOperands, target)
+					}
+				}
 				// A bound pathname pattern has no fixed operand to list; the
 				// gateway reads the same result and fails closed on it.
 				if strings.Contains(command, ">") {
@@ -1363,6 +1379,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		replacedLinks = movedOntoLinkEntriesOf(destinations, noTarget)
 	}
 	targets := map[string]string{CWDKey: cwd}
+	unreadTargets := make(map[string]string)
 	// The fixed part counts the truncation marker, so setting it never
 	// exceeds the budget.
 	protected := newProtectedFiles(home)
@@ -1390,6 +1407,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			return
 		}
 		path = OperandPath(path, cwd)
+		delete(unreadTargets, UnreadArchiveTargetPrefix+path)
 		if old, present := targets[path]; present {
 			if safeRedirect {
 				return
@@ -1426,6 +1444,11 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			}
 		} else if aliasKnown && links.opaque && (!links.opaqueTarget(resolutionPath) || !links.opaqueTargetExceptCopy(resolutionPath, resolutionPath) && links.placedCopyDestination(resolutionPath)) {
 			resolved, ok = links.resolve(resolutionPath, protected)
+		}
+		if aliasKnown && links.onlyUnreadArchiveAt(resolutionPath, nil) {
+			if diskTarget, diskKnown := links.withoutUnreadArchives().resolve(resolutionPath, protected); diskKnown {
+				unreadTargets[UnreadArchiveTargetPrefix+path] = diskTarget
+			}
 		}
 		// A plain archive can leave no client-side opaque scope even when
 		// the managed gateway cannot read it. Preserve the copy's own-write
@@ -1653,7 +1676,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	}
 	// A fact that does not fit is omitted; the gateway reads a missing fact
 	// as unknown, so the map need not be marked truncated for it.
-	for _, extra := range []map[string]string{opaqueFacts, globFacts, walkFacts, readingTargets} {
+	for _, extra := range []map[string]string{opaqueFacts, unreadTargets, globFacts, walkFacts, readingTargets} {
 		for _, key := range slices.Sorted(maps.Keys(extra)) {
 			entry := len(jsonString(key)) + 1 + len(jsonString(extra[key])) + 1
 			if len(targets)-1 >= MaxWriteTargets || size+entry > maxEncodedTargets {
@@ -2079,6 +2102,14 @@ func Decode(value string) (map[string]string, bool) {
 			(value != "1" || !filepath.IsAbs(strings.TrimPrefix(key, TarPlainFactPrefix))) {
 			return nil, false
 		}
+		if strings.HasPrefix(key, TarLinkFactPrefix) &&
+			(value != "1" || !filepath.IsAbs(strings.TrimPrefix(key, TarLinkFactPrefix))) {
+			return nil, false
+		}
+		if strings.HasPrefix(key, UnreadArchiveTargetPrefix) &&
+			(!filepath.IsAbs(strings.TrimPrefix(key, UnreadArchiveTargetPrefix)) || !filepath.IsAbs(value)) {
+			return nil, false
+		}
 		if strings.HasPrefix(key, CdEnterableFactPrefix) &&
 			(value != "1" || !filepath.IsAbs(strings.TrimPrefix(key, CdEnterableFactPrefix))) {
 			return nil, false
@@ -2279,6 +2310,9 @@ type shellLinks struct {
 	opaque       bool
 	relative     bool // a link operand is relative to the working directory
 	globalOpaque bool
+	// An unread archive may have an unbounded extraction scope (cpio/pax).
+	// Keep other unbounded link uncertainty separate for the balanced tier.
+	globalUnreadArchive, globalConcreteOpaque bool
 	// cdScopes: the scopes follow a static top-level directory change that
 	// the statement walk placed them after. Every write is opaque but the own
 	// destination of a placed copy, which that walk places too (GAP-2579).
@@ -2341,6 +2375,8 @@ func (l *shellLinks) merge(inner shellLinks) {
 	l.opaque = l.opaque || inner.opaque
 	l.relative = l.relative || inner.relative
 	l.globalOpaque = l.globalOpaque || inner.globalOpaque
+	l.globalUnreadArchive = l.globalUnreadArchive || inner.globalUnreadArchive
+	l.globalConcreteOpaque = l.globalConcreteOpaque || inner.globalConcreteOpaque
 	l.globalOther = l.globalOther || inner.globalOpaque
 	l.opaqueScopes = append(l.opaqueScopes, inner.opaqueScopes...)
 	l.copyDestinations = append(l.copyDestinations, inner.copyDestinations...)
@@ -2535,6 +2571,7 @@ func (l *shellLinks) unknown(opaque bool) {
 	l.unread = true
 	l.opaque = l.opaque || opaque
 	l.globalOpaque = l.globalOpaque || opaque
+	l.globalConcreteOpaque = l.globalConcreteOpaque || opaque
 	l.globalOther = l.globalOther || opaque
 }
 
@@ -2568,22 +2605,30 @@ func (l shellLinks) globalCopyScopesAfter(ownCopy string) bool {
 type opaqueScope struct {
 	path string
 	copy bool
+	// unread marks an archive whose contents supplied no link evidence.
+	unread bool
 }
 
 // unknownIn confines an archive to its destination directory.
 func (l *shellLinks) unknownIn(scope string) {
-	l.addOpaqueScope(scope, false)
+	l.addOpaqueScope(scope, false, false)
+}
+
+func (l *shellLinks) unreadArchiveIn(scope string) {
+	l.addOpaqueScope(scope, false, true)
 }
 
 func (l *shellLinks) unknownCopyIn(scope string) {
-	l.addOpaqueScope(scope, true)
+	l.addOpaqueScope(scope, true, false)
 }
 
-func (l *shellLinks) addOpaqueScope(scope string, copyScope bool) {
+func (l *shellLinks) addOpaqueScope(scope string, copyScope, unread bool) {
 	l.known = false
 	l.opaque = true
 	if scope == "" {
 		l.globalOpaque = true
+		l.globalUnreadArchive = l.globalUnreadArchive || unread
+		l.globalConcreteOpaque = l.globalConcreteOpaque || !unread
 		if copyScope && l.callAt >= 0 {
 			l.globalCopyAt = append(l.globalCopyAt, l.callAt)
 		} else {
@@ -2591,7 +2636,46 @@ func (l *shellLinks) addOpaqueScope(scope string, copyScope bool) {
 		}
 		return
 	}
-	l.opaqueScopes = append(l.opaqueScopes, opaqueScope{filepath.Clean(scope), copyScope})
+	l.opaqueScopes = append(l.opaqueScopes, opaqueScope{path: filepath.Clean(scope), copy: copyScope, unread: unread})
+}
+
+// withoutUnreadArchives retains concrete link and other opaque evidence.
+func (l shellLinks) withoutUnreadArchives() shellLinks {
+	hasUnread := l.globalUnreadArchive
+	for _, scope := range l.opaqueScopes {
+		hasUnread = hasUnread || scope.unread
+	}
+	if !hasUnread {
+		return l
+	}
+	kept := make([]opaqueScope, 0, len(l.opaqueScopes))
+	for _, scope := range l.opaqueScopes {
+		if !scope.unread {
+			kept = append(kept, scope)
+		}
+	}
+	l.opaqueScopes = kept
+	if l.globalUnreadArchive && !l.globalConcreteOpaque {
+		l.globalOpaque = false
+		l.globalOther = false
+	}
+	if len(kept) == 0 && !l.globalOpaque {
+		l.opaque = false
+	}
+	return l
+}
+
+func (l shellLinks) onlyUnreadArchiveAt(path string, facts map[string]string) bool {
+	if !l.globalUnreadArchive {
+		unread := false
+		for _, scope := range l.opaqueScopes {
+			unread = unread || scope.unread
+		}
+		if !unread {
+			return false
+		}
+	}
+	return l.opaqueTargetWithFacts(path, "", facts) && !l.withoutUnreadArchives().opaqueTargetWithFacts(path, "", facts)
 }
 
 func (l shellLinks) opaqueTarget(path string) bool {
@@ -3162,7 +3246,14 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				if archiveMayLink(program, words[1:], static[1:]) &&
 					(!onlyDirectoryStatementsBefore(file, call, home) ||
 						!tarArchiveHoldsNoLink(program, words[1:], static[1:], dir, command, facts, record)) {
-					links.unknownIn(archiveDestination(program, words[1:], static[1:], dir))
+					if (program != "cpio" && program != "bsdcpio" && program != "pax" &&
+						archiveNamesEscape(program, words[1:], static[1:])) ||
+						onlyDirectoryStatementsBefore(file, call, home) &&
+							tarArchiveLinkEvidence(program, words[1:], static[1:], dir, command, facts, record) {
+						links.unknownIn(archiveDestination(program, words[1:], static[1:], dir))
+					} else {
+						links.unreadArchiveIn(archiveDestination(program, words[1:], static[1:], dir))
+					}
 				}
 				if archiveCopiesLinks(program, words[1:], static[1:]) {
 					destination := archiveDestination(program, words[1:], static[1:], dir)
@@ -4064,8 +4155,8 @@ func SafeShellRedirectOccurrencesWithFacts(command, cwd, home string, facts map[
 	return result
 }
 
-// ArchiveBeforeWrite reports an extraction followed by a shell redirect.
-// The redirect on the extracting statement itself opens before extraction.
+// ArchiveBeforeWrite reports an extraction followed by a write statement.
+// A redirect on the extracting statement itself opens before extraction.
 func ArchiveBeforeWrite(command, home string) bool {
 	file, ok := parseShell(command)
 	if !ok {
@@ -4081,6 +4172,15 @@ func ArchiveBeforeWrite(command, home string) bool {
 			for _, redirect := range stmt.Redirs {
 				switch redirect.Op {
 				case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+					return true
+				}
+			}
+			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) > 0 {
+				program, fixed := StaticWord(call.Args[0], home)
+				if fixed && (slices.Contains(renamePrograms, programBase(program)) ||
+					slices.Contains(copyPrograms, programBase(program)) ||
+					programBase(program) == "rsync" || programBase(program) == "install" ||
+					programBase(program) == "sed" || programBase(program) == "gsed") {
 					return true
 				}
 			}
@@ -4110,8 +4210,9 @@ func ArchiveBeforeWrite(command, home string) bool {
 
 // Links are the links one shell command creates, read as Resolve reads them.
 type Links struct {
-	links     shellLinks
-	protected protectedFiles
+	links                shellLinks
+	protected            protectedFiles
+	balancedArchiveScope bool
 }
 
 // CommandLinks reads the links that the shell command of a tool call
@@ -4146,6 +4247,17 @@ func CommandLinksWithFactsBalanced(tool, command, cwd, home string, facts map[st
 	return links
 }
 
+// CommandLinksWithFactsForTier keeps strict's existing opaque reading while
+// balanced ignores only archive scopes with no concrete link evidence.
+func CommandLinksWithFactsForTier(tool, command, cwd, home string, facts map[string]string, balanced bool) Links {
+	links := CommandLinksWithFacts(tool, command, cwd, home, facts)
+	if balanced {
+		links = CommandLinksWithFactsBalanced(tool, command, cwd, home, facts)
+	}
+	links.balancedArchiveScope = balanced
+	return links
+}
+
 // OpaqueTargetWithFacts reports whether an unreadable link operation can
 // affect path. Such operations include a wrapper or multicall binary running
 // ln, an interpreter or Windows link call, an archive or sync link option, or
@@ -4157,10 +4269,105 @@ func CommandLinksWithFactsBalanced(tool, command, cwd, home string, facts map[st
 // home; nil keeps the local walk as the only evidence.
 func (l Links) OpaqueTargetWithFacts(path string, ownCopy bool, facts map[string]string) bool {
 	path = linksDrivePath(path)
+	if l.balancedArchiveScope {
+		l.links = l.links.withoutUnreadArchives()
+	}
 	if ownCopy {
 		return l.links.opaqueTargetWithFacts(path, path, facts)
 	}
 	return l.links.opaqueTargetWithFacts(path, "", facts)
+}
+
+// UnreadArchiveTargetOnly reports that archive uncertainty is the sole
+// remaining reason this operand could not be resolved by the hook client.
+func (l Links) UnreadArchiveTargetOnly(path string, facts map[string]string) bool {
+	return l.links.onlyUnreadArchiveAt(linksDrivePath(path), facts)
+}
+
+// ProtectedArchiveMoveName reports a protected entry name in a move after
+// extraction. This lexical control does not depend on gateway filesystem
+// access or the policy tier.
+func ProtectedArchiveMoveName(command, cwd, home string) bool {
+	if !strings.Contains(command, "mv") {
+		return false
+	}
+	file, parsed := parseShell(command)
+	if !parsed {
+		return false
+	}
+	protectedName := func(name string) bool {
+		name = strings.TrimRight(filepath.Base(name), ". ")
+		if strings.EqualFold(name, ".ssh") {
+			return true
+		}
+		for _, protected := range append(AuthorizedKeysFiles[:], SSHControlFiles[:]...) {
+			if strings.EqualFold(name, protected) {
+				return true
+			}
+		}
+		return false
+	}
+	seenArchive, named := false, false
+	values := actionValues{"HOME": home, "PWD": cwd}
+	var visit func(*syntax.Stmt)
+	visit = func(stmt *syntax.Stmt) {
+		if stmt == nil || named {
+			return
+		}
+		if pair, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && pair.Op == syntax.AndStmt {
+			visit(pair.X)
+			visit(pair.Y)
+			return
+		}
+		syntax.Walk(stmt, func(node syntax.Node) bool {
+			call, ok := node.(*syntax.CallExpr)
+			if !ok || len(call.Args) == 0 || named {
+				return !named
+			}
+			program, fixed := StaticWord(call.Args[0], home)
+			if !fixed {
+				return true
+			}
+			program = programBase(program)
+			if slices.Contains(archivePrograms, program) && program != "rsync" {
+				seenArchive = true
+				return true
+			}
+			if !seenArchive || !slices.Contains(renamePrograms, program) {
+				return true
+			}
+			args := make([]string, 0, len(call.Args)-1)
+			for _, word := range call.Args[1:] {
+				value, fixed := StaticWord(word, home)
+				if !fixed {
+					value, fixed = actionWordValue(word, values, cwd, home)
+				}
+				if !fixed {
+					return true
+				}
+				args = append(args, value)
+			}
+			op, ok := parseRename(args, "")
+			if !ok {
+				return true
+			}
+			if protectedName(op.dest) || protectedName(op.targetDir) {
+				named = true
+			}
+			for _, source := range op.sources {
+				name := filepath.Base(source)
+				if protectedName(name) || op.backup && op.suffix != "" && protectedName(name+op.suffix) {
+					named = true
+				}
+			}
+			return !named
+		})
+		actionUpdateValues(stmt, values, cwd, home)
+	}
+	for _, stmt := range file.Stmts {
+		visit(stmt)
+	}
+	return named
 }
 
 // SplitOpaqueScopeFacts separates the OpaqueScopeFactPrefix entries from the
@@ -4833,16 +5040,18 @@ func (l *shellLinks) copyScopedTrees(copies []treeCopy) {
 				continue
 			}
 			reaches := !copied.known || l.globalOpaque
+			unreadOnly := copied.known && (!l.globalOpaque || l.globalUnreadArchive && !l.globalConcreteOpaque)
 			for _, source := range copied.sources {
 				for _, scope := range l.opaqueScopes {
 					if scope.path != copied.destination && pathsOverlap(source, scope.path) {
 						reaches = true
+						unreadOnly = unreadOnly && scope.unread
 					}
 				}
 			}
 			if reaches {
 				done[i], changed = true, true
-				l.unknownCopyIn(copied.destination)
+				l.addOpaqueScope(copied.destination, true, unreadOnly)
 			}
 		}
 	}

@@ -87,6 +87,9 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 	command json.RawMessage,
 	commandTool string,
 ) *ToolInspectVerdict {
+	if a.scannerCfg != nil && !a.scannerCfg.SecureClientIntegration() && action.Connector != "" {
+		action.balancedArchiveScope = !a.strictPolicyTierForHook(ctx, action.Connector)
+	}
 	connectorName := action.Connector
 	if req != nil {
 		connectorName = firstNonEmpty(req.Connector, action.Connector)
@@ -149,6 +152,7 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		DowngradeReadOnlyDataArgs:     action.DowngradeReadOnlyDataArgs,
 		SkipLocalFilesystemResolution: action.SkipLocalFilesystemResolution,
 		ResolvedWriteTargets:          action.ResolvedWriteTargets,
+		balancedArchiveScope:          action.balancedArchiveScope,
 		SandboxGuestCWD:               action.SandboxGuestCWD,
 	})
 	return mergeSandboxShellCommandVerdict(ctx, a.decisionConfig(ctx), connectorName, verdict, findings)

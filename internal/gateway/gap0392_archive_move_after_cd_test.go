@@ -10,8 +10,8 @@ import (
 )
 
 // GAP-0392: a placed cd does not turn an absolute archive extraction and
-// safe rename into an unbounded link write. A later write into that scope
-// still keeps the conservative protected decision.
+// safe rename into an unbounded link write. A later ordinary write into the
+// archive scope follows the balanced policy decision.
 func TestGAP0392ArchiveMoveAfterCdFourCell(t *testing.T) {
 	f := newB36ManagedHookFixture(t)
 	clean := filepath.Join(f.home, "clean")
@@ -26,7 +26,7 @@ func TestGAP0392ArchiveMoveAfterCdFourCell(t *testing.T) {
 		{"semicolon-cd", `cd ~/clean; tar -xzf out.tgz -C /tmp; mv /tmp/src /tmp/src-old; echo done`, "allow"},
 		{"redirected-cd", `cd ~/clean && tar -xzf out.tgz -C /tmp 2>/dev/null; mv /tmp/src /tmp/src-old 2>/dev/null; echo done`, "allow"},
 		{"no-cd-control", `tar -xzf out.tgz -C /tmp && mv /tmp/src /tmp/src-old && echo done`, "allow"},
-		{"scope-write-after-rename", `cd ~/clean && tar -xzf out.tgz -C /tmp && mv /tmp/src /tmp/src-old && echo x >> /tmp/src-old/authorized_keys`, "block"},
+		{"scope-write-after-rename", `cd ~/clean && tar -xzf out.tgz -C /tmp && mv /tmp/src /tmp/src-old && echo x >> /tmp/src-old/authorized_keys`, "allow"},
 		{"keys-link-write-after-rename", `cd ~/clean && tar -xzf out.tgz -C /tmp && mv /tmp/src /tmp/src-old && echo x >> ~/clean/keylink`, "block"},
 	}
 	if err := os.Symlink("../.ssh/authorized_keys", filepath.Join(clean, "keylink")); err != nil {
@@ -48,6 +48,14 @@ func TestGAP0392ArchiveMoveAfterCdFourCell(t *testing.T) {
 		want := rows[i/4].want
 		if call.verdict != want {
 			t.Errorf("%s: verdict %s, want %s; body %.200s", call.name, call.verdict, want, call.body)
+		}
+	}
+	for _, connector := range []string{"claudecode", "codex"} {
+		for _, managed := range []bool{false, true} {
+			got := gx054Verdict(t, f, connector, "strict", payloads[4], headers[4], managed)
+			if got == "allow" {
+				t.Errorf("%s managed=%t: strict permitted ordinary archive scope write", connector, managed)
+			}
 		}
 	}
 }
