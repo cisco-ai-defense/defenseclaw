@@ -614,8 +614,13 @@ function Assert-DevinRegistration([string]$Config) {
     $command = [string]@($settings.hooks.PreToolUse)[0].hooks[0].command
     $target = (Join-Path $script:Bin 'defenseclaw-hook.exe').Replace('\', '/')
     $expected = "'" + $target.Replace("'", "'\''") + "' hook --connector devin"
+    # A one-line install starts the guard program beside the launcher on
+    # PreToolUse (rel-1-0-6 GAP-0676).
+    $guard = (Join-Path $script:Bin 'defenseclaw-hook-guard.exe').Replace('\', '/')
+    $guarded = "'" + $guard.Replace("'", "'\''") + "' launcher-guard-devin PreToolUse hook --connector devin"
+    if ([string]::Equals($command, $guarded, [StringComparison]::Ordinal)) { return "PreToolUse runs $guarded" }
     if (-not [string]::Equals($command, $expected, [StringComparison]::Ordinal)) {
-        throw "Devin PreToolUse is not the exact POSIX-quoted direct native command: $command (want $expected)"
+        throw "Devin PreToolUse is not the exact POSIX-quoted direct native command or its guarded start: $command (want $expected)"
     }
     return "PreToolUse runs $expected"
 }
@@ -1048,7 +1053,23 @@ function Invoke-ParserSelfTest {
     $edited = $answering.Substring(0, $answering.LastIndexOf('exit 2')) + 'exit 0 }; exit $hookProcess.ExitCode'
     if ($null -ne (Get-AwaitedHookBridge $edited)) { throw 'a bridge whose answers differ was read' }
     $cases++
-    Write-Result 'self-test:parsers' pass "$cases cases: direct and guard-sibling Codex commands, old and answering bridges, lookalikes refused"
+    # Devin's direct command and its guarded start (rel-1-0-6 GAP-0676).
+    $script:Bin = 'C:\Users\u\.local\bin'
+    foreach ($command in @(
+        "'C:/Users/u/.local/bin/defenseclaw-hook.exe' hook --connector devin",
+        "'C:/Users/u/.local/bin/defenseclaw-hook-guard.exe' launcher-guard-devin PreToolUse hook --connector devin"
+    )) {
+        $config = @{ hooks = @{ PreToolUse = @(@{ hooks = @(@{ command = $command }) }) } } | ConvertTo-Json -Depth 6
+        $null = Assert-DevinRegistration $config
+        $cases++
+    }
+    $lookalike = @{ hooks = @{ PreToolUse = @(@{ hooks = @(@{ command = "'C:/Users/u/.local/bin/defenseclaw-hook-guard.exe' launcher-guard-devin Stop hook --connector devin" }) }) } } | ConvertTo-Json -Depth 6
+    $refused = $false
+    try { $null = Assert-DevinRegistration $lookalike } catch { $refused = $true }
+    if (-not $refused) { throw 'a Devin guard start bound to another event was accepted' }
+    $cases++
+    $script:Bin = ''
+    Write-Result 'self-test:parsers' pass "$cases cases: direct and guard-sibling Codex commands, old and answering bridges, direct and guarded Devin, lookalikes refused"
 }
 
 # -- Main -----------------------------------------------------------------------
