@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -398,6 +399,9 @@ func windowsHookBinaryStructuralDamage(path string) (string, error) {
 // copyWindowsManagedFile copies source to destination through a temporary
 // sibling, with the protected access list sddl when it is not empty, and
 // renames it into place, replacing a file already there only with replace.
+// A regular file already there is replaced with
+// swapWindowsLaunchableFile, so an agent starting the hook meanwhile starts
+// the old program or the new one (GAP-0656).
 func copyWindowsManagedFile(source, destination, sddl string, replace bool) error {
 	body, err := os.ReadFile(source)
 	if err != nil {
@@ -435,6 +439,15 @@ func copyWindowsManagedFile(source, destination, sddl string, replace bool) erro
 		_ = os.Remove(temporary)
 		return err
 	}
+	if replace {
+		if info, err := os.Lstat(destination); err == nil && info.Mode().IsRegular() {
+			if err := swapWindowsLaunchableFile(temporary, destination); err != nil {
+				_ = os.Remove(temporary)
+				return err
+			}
+			return nil
+		}
+	}
 	flags := uint32(windows.MOVEFILE_WRITE_THROUGH)
 	if replace {
 		flags |= windows.MOVEFILE_REPLACE_EXISTING
@@ -443,6 +456,40 @@ func copyWindowsManagedFile(source, destination, sddl string, replace bool) erro
 		_ = os.Remove(temporary)
 		return err
 	}
+	return nil
+}
+
+// swapWindowsLaunchableFile puts temporary at destination the way Setup
+// does (SwapLaunchableFile in the lifecycle module, GAP-0240): the old file
+// first gets a second name, <destination>.backup.<32 hex>, then one
+// POSIX-semantics rename replaces destination. Windows refuses to remove
+// the last name of a running program, so the MoveFileEx replacement used
+// before failed while any hook call ran, and a hook that could not start
+// let its tool call run unchecked (GAP-0656). The backup goes at once when
+// no program runs it, otherwise removeWindowsReplacementCopies or the next
+// Setup run deletes it.
+func swapWindowsLaunchableFile(temporary, destination string) error {
+	suffix := make([]byte, 16)
+	if _, err := rand.Read(suffix); err != nil {
+		return err
+	}
+	backup := destination + ".backup." + hex.EncodeToString(suffix)
+	from, err := windows.UTF16PtrFromString(destination)
+	if err != nil {
+		return err
+	}
+	link, err := windows.UTF16PtrFromString(backup)
+	if err != nil {
+		return err
+	}
+	if err := windows.CreateHardLink(link, from, 0); err != nil {
+		return fmt.Errorf("keep the old file as %s: %w", backup, err)
+	}
+	if err := safefile.ReplaceFileAtomically(temporary, destination); err != nil {
+		_ = os.Remove(backup)
+		return err
+	}
+	_ = os.Remove(backup)
 	return nil
 }
 
