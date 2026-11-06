@@ -106,7 +106,8 @@ func TestWindowsManagedRuntimeSelectorStandaloneNeverRestampsAnUntrustedSelector
 					if after != before {
 						t.Fatalf("the selector %s re-stamped an untrusted selector in place: %s -> %s", via, before, after)
 					}
-					if !isGAP633Refusal(err) || !strings.Contains(err.Error(), "does not repair this file in place") {
+					if !isGAP633Refusal(err) || !strings.Contains(err.Error(), "does not repair this file in place") ||
+						!strings.Contains(err.Error(), "delete the file") {
 						t.Fatalf("the selector %s did not return the standalone refusal: %v", via, err)
 					}
 					if called {
