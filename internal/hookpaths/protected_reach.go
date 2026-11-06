@@ -91,10 +91,14 @@ func (s *reachNames) hasCandidate(path string) bool {
 
 // protectedReachNames resolves the protected side once per evaluation. A
 // lexical name remains protected even when its physical path cannot be read.
-func (m *TargetMemo) protectedReachNames(home string) reachNames {
+func (m *TargetMemo) protectedReachNames(home string, sshOnly bool) reachNames {
+	key := home
+	if sshOnly {
+		key = "ssh:" + home
+	}
 	if m != nil {
 		m.mu.Lock()
-		names, ok := m.reachNames[home]
+		names, ok := m.reachNames[key]
 		m.mu.Unlock()
 		if ok {
 			return names
@@ -102,10 +106,16 @@ func (m *TargetMemo) protectedReachNames(home string) reachNames {
 	}
 	names := reachNames{}
 	ssh := filepath.Join(home, ".ssh")
-	state := filepath.Join(home, ".defenseclaw")
 	names.addDirectory(ssh)
 	addResolved := func(path string, add func(string)) {
 		add(path)
+		// A share's lexical protected names remain valid while its root is
+		// pending. Resolve its physical side through the identity reads below,
+		// in parallel with the target, so one slow root does not consume the
+		// target's entire answer window.
+		if SharePath(path) {
+			return
+		}
 		if resolved, ok := m.resolveWriteTarget(path); ok {
 			add(resolved)
 		}
@@ -116,24 +126,29 @@ func (m *TargetMemo) protectedReachNames(home string) reachNames {
 	for _, name := range SSHControlFiles {
 		addResolved(filepath.Join(ssh, name), names.addFile)
 	}
-	for _, name := range activeStateFiles {
-		addResolved(filepath.Join(state, name), names.addFile)
+	if !sshOnly {
+		state := filepath.Join(home, ".defenseclaw")
+		for _, name := range activeStateFiles {
+			addResolved(filepath.Join(state, name), names.addFile)
+		}
+		for _, name := range activeStateTrees {
+			addResolved(filepath.Join(state, name), names.addTree)
+		}
 	}
-	for _, name := range activeStateTrees {
-		addResolved(filepath.Join(state, name), names.addTree)
-	}
-	if resolved, ok := m.resolveWriteTarget(ssh); ok {
-		names.addDirectory(resolved)
+	if !SharePath(ssh) {
+		if resolved, ok := m.resolveWriteTarget(ssh); ok {
+			names.addDirectory(resolved)
+		}
 	}
 	if m != nil {
 		m.mu.Lock()
 		if m.reachNames == nil {
 			m.reachNames = make(map[string]reachNames)
 		}
-		if prior, ok := m.reachNames[home]; ok {
+		if prior, ok := m.reachNames[key]; ok {
 			names = prior
 		} else {
-			m.reachNames[home] = names
+			m.reachNames[key] = names
 		}
 		m.mu.Unlock()
 	}
@@ -148,10 +163,20 @@ func ProtectedReach(target, home string, memo *TargetMemo) Grade {
 }
 
 func (m *TargetMemo) ProtectedReach(target, home string) Grade {
+	return m.protectedReach(target, home, false)
+}
+
+// ProtectedSSHReach applies the same two-sided resolver to the SSH rule's
+// protected set. State files belong to their own rule.
+func ProtectedSSHReach(target, home string, memo *TargetMemo) Grade {
+	return memo.protectedReach(target, home, true)
+}
+
+func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 	if !filepath.IsAbs(target) || !filepath.IsAbs(home) {
 		return GradePossible
 	}
-	names := m.protectedReachNames(home)
+	names := m.protectedReachNames(home, sshOnly)
 	target = filepath.Clean(target)
 	if names.has(target) {
 		return GradeNamed
@@ -160,6 +185,41 @@ func (m *TargetMemo) ProtectedReach(target, home string) Grade {
 	type answer struct {
 		info os.FileInfo
 		err  error
+	}
+	// On a share the two sides of an identity comparison must read within
+	// the same first-contact window. Starting the protected reads only after
+	// the target returns would misgrade a reachable link as unanswered.
+	type protectedRead struct {
+		done chan struct{}
+		answer
+	}
+	protectedReady := make(map[string]*protectedRead)
+	if SharePath(target) || SharePath(home) {
+		start := func(path string) {
+			if _, started := protectedReady[path]; started {
+				return
+			}
+			read := &protectedRead{done: make(chan struct{})}
+			protectedReady[path] = read
+			go func() {
+				read.info, read.err = PathStat(path)
+				close(read.done)
+			}()
+		}
+		for _, path := range names.files {
+			start(path)
+			start(filepath.Dir(path))
+		}
+		for _, path := range names.trees {
+			start(path)
+		}
+	}
+	readProtected := func(path string) (os.FileInfo, error) {
+		if read := protectedReady[path]; read != nil {
+			<-read.done
+			return read.info, read.err
+		}
+		return PathStat(path)
 	}
 	fileReady, parentReady, entryReady := make(chan answer, 1), make(chan answer, 1), make(chan answer, 1)
 	parent := filepath.Dir(target)
@@ -179,7 +239,7 @@ func (m *TargetMemo) ProtectedReach(target, home string) Grade {
 			wg.Add(1)
 			go func(path string) {
 				defer wg.Done()
-				info, err := PathStat(path)
+				info, err := readProtected(path)
 				matches <- identityMatch{matched: err == nil && os.SameFile(file.info, info), unknown: ShareUnanswered(err), file: true}
 			}(path)
 		}
@@ -192,7 +252,7 @@ func (m *TargetMemo) ProtectedReach(target, home string) Grade {
 			wg.Add(1)
 			go func(path string) {
 				defer wg.Done()
-				info, err := PathStat(filepath.Dir(path))
+				info, err := readProtected(filepath.Dir(path))
 				matches <- identityMatch{matched: err == nil && os.SameFile(directory.info, info), unknown: ShareUnanswered(err)}
 			}(path)
 		}
@@ -200,7 +260,7 @@ func (m *TargetMemo) ProtectedReach(target, home string) Grade {
 			wg.Add(1)
 			go func(path string) {
 				defer wg.Done()
-				info, err := PathStat(path)
+				info, err := readProtected(path)
 				matches <- identityMatch{matched: err == nil && os.SameFile(directory.info, info), unknown: ShareUnanswered(err)}
 			}(path)
 		}
@@ -218,25 +278,9 @@ func (m *TargetMemo) ProtectedReach(target, home string) Grade {
 		}
 	}
 
-	// The ordinary parent of a missing local file is a complete answer even
-	// when another, unrelated share is pending.
-	if os.IsNotExist(entry.err) && directory.err == nil {
-		if resolved, ok := m.resolveWriteTarget(parent); ok && !names.has(filepath.Join(resolved, filepath.Base(target))) {
-			return GradeNone
-		}
-	}
-	if file.err == nil {
-		if unknownFiles {
-			return GradePossible
-		}
-		return GradeNone
-	}
-	if ShareUnanswered(entry.err) && directory.err == nil && !unknownParents {
-		// The final entry gave no answer. Its reached ordinary parent
-		// cannot make that unread identity a named protected file.
-		return GradePossible
-	}
-
+	// Resolve the complete target before accepting an ordinary file or parent.
+	// A successful Stat can otherwise hide a protected directory reached by a
+	// link, and an ordinary missing child can hide a protected link hop.
 	reached := false
 	unread := false
 	lstat := func(path string) (os.FileInfo, error) {
@@ -260,6 +304,26 @@ func (m *TargetMemo) ProtectedReach(target, home string) Grade {
 	if reached || ok && names.has(resolved) {
 		return GradeNamed
 	}
+
+	// The ordinary parent of a missing local file is a complete answer even
+	// when another, unrelated share is pending.
+	if os.IsNotExist(entry.err) && directory.err == nil {
+		if resolved, ok := m.resolveWriteTarget(parent); ok && !names.has(filepath.Join(resolved, filepath.Base(target))) {
+			return GradeNone
+		}
+	}
+	if file.err == nil {
+		if unknownFiles {
+			return GradePossible
+		}
+		return GradeNone
+	}
+	if ShareUnanswered(entry.err) && directory.err == nil && !unknownParents {
+		// The final entry gave no answer. Its reached ordinary parent
+		// cannot make that unread identity a named protected file.
+		return GradePossible
+	}
+
 	if unread || unknownParents || ShareUnanswered(file.err) || ShareUnanswered(entry.err) || ShareUnanswered(directory.err) || !ok {
 		return GradePossible
 	}
