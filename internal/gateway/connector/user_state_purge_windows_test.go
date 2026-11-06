@@ -46,3 +46,26 @@ func TestPurgeUserStateInRootHandlesReadOnlyFiles(t *testing.T) {
 		t.Fatalf("the hooks folder stayed: %v", err)
 	}
 }
+
+func TestGAP0669WindowsPurgeKeepsDirectoryAtManagedFileName(t *testing.T) {
+	dataDir := t.TempDir()
+	keptDir := filepath.Join(dataDir, "hooks", "codex-hook.ps1")
+	if err := os.MkdirAll(keptDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	accountFile := filepath.Join(keptDir, "personal.txt")
+	if err := os.WriteFile(accountFile, []byte("account note"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := PurgeUserStateInRoot(root, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(accountFile); err != nil || string(got) != "account note" {
+		t.Fatalf("account file changed: %q, %v", got, err)
+	}
+}

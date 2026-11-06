@@ -99,6 +99,33 @@ func TestRemovalLeavingNoNewDirs(t *testing.T) {
 	}
 }
 
+func TestGAP0669RemovalLeavingNoNewDirsKeepsAccountFile(t *testing.T) {
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	conn := &createdDirsConnector{stubConnector: stubConnector{name: "fake"}}
+	opts := SetupOpts{DataDir: dataDir}
+	err := WithUserHomeDir(home, func() error {
+		return RemovalLeavingNoNewDirs(conn, opts, func() error {
+			if err := os.MkdirAll(filepath.Join(dataDir, "hooks"), 0o700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(dataDir, "hooks", "codex-hook.sh"), []byte("managed"), 0o600); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(dataDir, "personal.txt"), []byte("account note"), 0o600)
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dataDir, "hooks", "codex-hook.sh")); !os.IsNotExist(err) {
+		t.Fatalf("managed file stayed: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dataDir, "personal.txt")); err != nil || string(got) != "account note" {
+		t.Fatalf("account file changed: %q, %v", got, err)
+	}
+}
+
 // The OpenCode plugin folder is made before any Setup (the gateway's
 // registration snapshot) and is not a hook config path, so it was never
 // listed and stayed after uninstall --all --binaries, empty.

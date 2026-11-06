@@ -1944,6 +1944,10 @@ func windowsEnterpriseNoStartMessages(
 func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
 	for _, entry := range windowsEnterpriseReportStrings(report.UserStatePurged) {
 		result.Changes = append(result.Changes, windowsEnterprisePurgedUserStateChange(entry))
+		if account, kept, found := strings.Cut(entry, windowsManagedHooksKeptEntriesMarker); found {
+			kept, _, _ = strings.Cut(kept, windowsManagedHooksPurgedBinariesMarker)
+			result.AddWarning("per_user_state_remaining", "kept account entries in .defenseclaw of "+account+": "+kept)
+		}
 	}
 	var notLocalSystem, pathEntryKept, keptForRegistrations, accountLinksKept, remaining []string
 	for _, entry := range windowsEnterpriseReportStrings(report.UserStateRemaining) {

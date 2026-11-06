@@ -441,6 +441,9 @@ func windowsManagedHooksStandaloneUserState(
 				binaries, err = windowsManagedHooksStandaloneUserBinariesPurger(home, sid)
 			}
 			if err == nil {
+				if kept := connector.RemainingUserStateEntries(dataDir); len(kept) > 0 {
+					label += windowsManagedHooksKeptEntriesMarker + strings.Join(kept, ", ")
+				}
 				purged = append(purged, windowsManagedHooksPurgedLabel(label, binaries))
 				continue
 			}
