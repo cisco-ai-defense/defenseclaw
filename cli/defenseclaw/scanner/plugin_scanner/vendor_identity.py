@@ -68,6 +68,9 @@ def inspect_official_provider_tree(plugin_dir: str) -> str | None:
         except (OSError, ValueError, TypeError, AttributeError):
             return None
 
+    before_tree = _tree_entry_state(root)
+    if before_tree is None:
+        return None
     if _tree_sha256(plugin_dir, tolerated_links=frozenset(tolerated)) != want:
         return None
     for peer, (link, before) in links.items():
@@ -76,7 +79,33 @@ def inspect_official_provider_tree(plugin_dir: str) -> str | None:
                 return None
         except (OSError, ValueError, TypeError, AttributeError):
             return None
+    if before_tree != _tree_entry_state(root):
+        return None
     return name
+
+
+def _tree_entry_state(root: str) -> tuple | None:
+    """Record every in-root entry so the digest describes the final tree."""
+
+    try:
+        root_info = os.stat(root, follow_symlinks=False)
+        if not _is_real_directory(root_info):
+            return None
+        entries = [(".", root_info.st_mode, _filesystem_identity(root_info), None)]
+        pending = [(root, "")]
+        while pending:
+            current, parent = pending.pop()
+            with os.scandir(current) as children:
+                for child in children:
+                    info = child.stat(follow_symlinks=False)
+                    relative = os.path.join(parent, child.name).replace("\\", "/")
+                    target = os.readlink(child.path) if stat.S_ISLNK(info.st_mode) else None
+                    entries.append((relative, info.st_mode, _filesystem_identity(info), target))
+                    if _is_real_directory(info):
+                        pending.append((child.path, relative))
+        return tuple(sorted(entries))
+    except (OSError, ValueError):
+        return None
 
 
 def _validated_peer_link(link: str, root: str, peer: str) -> tuple:

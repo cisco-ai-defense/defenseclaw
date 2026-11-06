@@ -190,9 +190,11 @@ func snapshotTarget(root string, fullTree bool) (*TargetSnapshot, error) {
 		base := filepath.Base(path)
 		ext := strings.ToLower(filepath.Ext(path))
 		if !info.Mode().IsRegular() {
-			// A special entry can wait for a peer when opened. Keep its mode
-			// in the snapshot so replacing it changes the plugin identity.
-			allHashes = append(allHashes, rel+":special:"+info.Mode().String())
+			if fullTree {
+				// A special entry can wait for a peer when opened. Keep its mode
+				// in the plugin snapshot without changing the legacy scope.
+				allHashes = append(allHashes, rel+":special:"+info.Mode().String())
+			}
 			return nil
 		}
 
