@@ -42,8 +42,10 @@ config. Administrators validate a custom pack with this command before`
 
 var safeRulePackWireCode = lazyregexp.New(`^[a-z][a-z0-9_]{0,63}$`)
 
-// These IDs use the shipped regex fallback without a semantic expression.
-// List IDs here so a copied pack can distinguish its own new rules from them.
+// These shipped tool_call_only IDs have no semantic expression: a regex
+// fallback, or a code-owned lane (exactFallbackContracts) behind a pattern
+// that never matches. List IDs here so a copied pack can distinguish its own
+// new rules from them.
 var shippedToolCallRegexIDs = map[string]bool{
 	"CMD-REVSHELL-POWERSHELL-TCP":                     true,
 	"SEC-ENV-DUMP-REQUEST":                            true,
@@ -59,6 +61,10 @@ var shippedToolCallRegexIDs = map[string]bool{
 	"lateral.workload_exec":                           true,
 	"impact.fork_bomb":                                true,
 	"impact.unbounded_cpu_fanout":                     true,
+	// GAP-0052: code-owned (credentialFileWritePrerequisite); pattern a^.
+	// A CEL expression would put the default pack over the partner semantic
+	// budget (TestDefaultCatalogPreservesPartnerExtensionHeadroom).
+	"secrets.credential_file_write": true,
 }
 
 type rulePackWireDiagnostic struct {

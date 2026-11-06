@@ -2712,30 +2712,6 @@ var credentialFileWriteLegs = []credentialFileWriteLeg{
 	{[]string{"PATH-GNUPG"}, matchesActiveGnuPGFile},
 }
 
-// credentialReadRulesWithoutFileWriteLeg names the credential-tagged
-// sensitive-path rules that need no leg in credentialFileWriteLegs, and why.
-var credentialReadRulesWithoutFileWriteLeg = map[string]string{
-	"PATH-SSH-DIR":                           "is the write leg of SSH keys (sshDirectoryPrerequisite)",
-	"PATH-SSH-KEY":                           "its write leg is PATH-SSH-DIR (GAP-1666)",
-	"PATH-HISTORY":                           "owns history mutations itself",
-	"PATH-ETC-SHADOW":                        "owns shadow mutations itself (shadowContentAccessPrerequisite)",
-	"PATH-ENV-FILE":                          "creating or editing a project .env file is ordinary work",
-	"PATH-PROC-ENVIRON":                      "a process environment is not a writable file",
-	"PATH-PASSWORD-CRACKER-POTFILE":          "a recovered-password store no tool trusts for identity",
-	"secrets.cloud_metadata_credential_read": "a metadata endpoint, not a file",
-	"secrets.structured_credential_extract":  "an extraction tool, not a file",
-	"secrets.workload_identity_token_read":   "a read-only projected service-account mount",
-	"secrets.browser_session_store_read":     "browser stores: write detection is 1.0.10 (#1189)",
-	"secrets.credential_file_write":          "is the write leg",
-	"PATH-WIN-SSH-KEY":                       "its write leg is PATH-SSH-DIR (GAP-1666)",
-	"PATH-WIN-PS-HISTORY":                    "PATH-HISTORY owns history mutations",
-	"PATH-WIN-CREDENTIAL-MANAGER":            "an OS store written through its API: 1.0.10 (#1189)",
-	"PATH-WIN-DPAPI":                         "an OS store written through its API: 1.0.10 (#1189)",
-	"PATH-WIN-SAM":                           "a registry hive the OS holds open",
-	"PATH-WIN-SECURITY-HIVE":                 "a registry hive the OS holds open",
-	"PATH-WIN-SYSTEM-HIVE":                   "a registry hive the OS holds open",
-}
-
 // credentialFileWritePrerequisite proves secrets.credential_file_write: an
 // executing command that writes, appends, truncates, deletes, or copies,
 // moves or links onto a file of a credentialFileWriteLegs leg, or moves it
