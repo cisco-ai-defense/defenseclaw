@@ -1234,8 +1234,9 @@ func writeWindowsEnterprisePolicyState(state *enterprisestatus.PolicyState) erro
 	return writeFileKeepingDACL(filepath.Join(filepath.Dir(deployment.MetadataPath), enterprisestatus.PolicyStateFileName), append(data, '\n'), deployment.MetadataPath)
 }
 
-// writeFreshFileWithDACL replaces path with a new file object that holds
-// data under the protected DACL of sddl, as Setup's [IO.File]::Replace does:
+// writeFreshFileWithDACL replaces path, or creates it, with a new file
+// object that holds data under the protected DACL of sddl, as Setup's
+// [IO.File]::Replace does:
 // the old file is renamed aside before the new one takes the name, so a
 // handle another account opened on it while it could write it keeps pointing
 // at the replaced object, which is then deleted (GAP-0561, GAP-0590). A
@@ -1282,16 +1283,23 @@ func writeFreshFileWithDACL(path string, data []byte, sddl string) error {
 		return writeErr
 	}
 	aside := temporary + ".replaced"
-	if err := os.Rename(path, aside); err != nil {
+	if err := os.Rename(path, aside); errors.Is(err, os.ErrNotExist) {
+		aside = ""
+	} else if err != nil {
 		_ = os.Remove(temporary)
 		return err
 	}
 	if err := os.Rename(temporary, path); err != nil {
-		if restoreErr := os.Rename(aside, path); restoreErr != nil {
-			err = fmt.Errorf("%w; the previous file stays at %s: %v", err, aside, restoreErr)
+		if aside != "" {
+			if restoreErr := os.Rename(aside, path); restoreErr != nil {
+				err = fmt.Errorf("%w; the previous file stays at %s: %v", err, aside, restoreErr)
+			}
 		}
 		_ = os.Remove(temporary)
 		return err
+	}
+	if aside == "" {
+		return nil
 	}
 	if err := os.Remove(aside); err != nil {
 		return fmt.Errorf("the new %s is in place, but the replaced file %s could not be deleted: %w", path, aside, err)
