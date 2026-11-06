@@ -40,6 +40,11 @@ func TestReviewG271LateCapabilityStillCarriesDeadlineBlock(t *testing.T) {
 	token := make(chan string, 1)
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.Header().Set(HookDeliveryCapabilityHeader, "1")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		controller := http.NewResponseController(w)
 		if err := controller.EnableFullDuplex(); err != nil {
 			token <- err.Error()

@@ -112,3 +112,26 @@ func TestReviewG271UpgradeHealthDoesNotVouchForOlderPOST(t *testing.T) {
 		t.Fatalf("ordinary allow on prior accepted POST became block after %s: code=%d stdout=%q stderr=%q, connections=%d", elapsed, result.code, result.stdout, result.stderr, connections.Load())
 	}
 }
+
+func TestGAP0370LegacySlowHealthLateAllow(t *testing.T) {
+	shortAnswerBudget(t, 3*time.Second)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			time.Sleep(150 * time.Millisecond)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if _, err := io.ReadAll(r.Body); err != nil {
+			return
+		}
+		time.Sleep(2600 * time.Millisecond)
+		_, _ = io.WriteString(w, "{\"action\":\"allow\",\"codex_output\":{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\"}}}\n")
+	}))
+	defer server.Close()
+	result, elapsed := runAgainstGateway(t, "codex", server.Listener.Addr().String(), func(opts *Options) {
+		opts.FailMode = "open"
+	})
+	if blocked(result) {
+		t.Fatalf("older gateway's ordinary allow became block after %s: code=%d stdout=%q stderr=%q", elapsed, result.code, result.stdout, result.stderr)
+	}
+}
