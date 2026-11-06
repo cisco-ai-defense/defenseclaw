@@ -599,7 +599,9 @@ func (h *testHost) run(opts Options) *enterprisestatus.Result {
 		} else if !os.IsNotExist(err) {
 			h.t.Fatal(err)
 		}
-		data, err := enterprisehooks.MarshalUnprotectedAgents(nil)
+		// The fake enumerator's completed first scan covers the config that
+		// install just committed. An unstamped record is deliberately pending.
+		data, err := h.marshalCompletedScan(nil)
 		if err != nil {
 			h.t.Fatal(err)
 		}
@@ -608,6 +610,15 @@ func (h *testHost) run(opts Options) *enterprisestatus.Result {
 		}
 	}
 	return result
+}
+
+func (h *testHost) marshalCompletedScan(agents []enterprisehooks.UnprotectedAgent) ([]byte, error) {
+	h.t.Helper()
+	state, err := configwrite.ReadGenerationState(h.env.P(h.env.Layout.ConfigPath))
+	if err != nil || state.Generation == 0 {
+		return nil, fmt.Errorf("read installed config generation: %+v, %v", state, err)
+	}
+	return enterprisehooks.MarshalUnprotectedAgentsForConfig(agents, state.Generation)
 }
 
 func (h *testHost) read(canonical string) string {
