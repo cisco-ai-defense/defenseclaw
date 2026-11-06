@@ -105,3 +105,53 @@ func TestGAP0483PlainTouchMissingLeavesSkipPathWalk(t *testing.T) {
 		t.Fatalf("existing link = %q, want protected-target", got)
 	}
 }
+
+func TestGAP0483LiteralLeafSpellingsStayBounded(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	key := filepath.Join(home, ".ssh", "authorized_keys")
+	for _, dir := range []string{cwd, filepath.Dir(key)} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(key, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bare, spaced, absolute, absoluteDot := make([]string, 2000), make([]string, 2000), make([]string, 2000), make([]string, 2000)
+	for i := range bare {
+		bare[i] = fmt.Sprintf("leaf%d.txt", i)
+		spaced[i] = fmt.Sprintf("%q", fmt.Sprintf("leaf %d.txt", i))
+		absolute[i] = filepath.Join(cwd, bare[i])
+		absoluteDot[i] = cwd + string(filepath.Separator) + "." + string(filepath.Separator) + bare[i]
+	}
+	for _, tc := range []struct{ name, command string }{
+		{"quoted spaced leaves", "touch " + strings.Join(spaced, " ")},
+		{"attached timestamp", "touch -t202611060101 " + strings.Join(bare, " ")},
+		{"absolute same-directory leaves", "touch " + strings.Join(absolute, " ")},
+		{"absolute dot leaves", "touch " + strings.Join(absoluteDot, " ")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			memo := NewTargetMemo()
+			if decision := memo.ActionCommandDecisionWithDialectAndGlobFacts(tc.command, cwd, home, actionfacts.DialectPOSIX, nil); decision != "" {
+				t.Fatalf("ordinary touch decision = %q", decision)
+			}
+			if walked, _ := memo.WorkParts(); walked > 64 {
+				t.Fatalf("ordinary touch walked %d path parts", walked)
+			}
+			if !OrdinaryLongTouchMissingLeaves(tc.command, cwd, home) {
+				t.Fatal("ordinary touch has no late proof")
+			}
+		})
+	}
+	alias := filepath.Join(cwd, "alias with space.txt")
+	if err := os.Link(key, alias); err != nil {
+		t.Fatal(err)
+	}
+	withAlias := append([]string(nil), spaced...)
+	withAlias[len(withAlias)/2] = fmt.Sprintf("%q", filepath.Base(alias))
+	command := "touch -t202611060101 " + strings.Join(withAlias, " ")
+	if OrdinaryLongTouchMissingLeaves(command, cwd, home) || ActionCommandDecision(command, cwd, home) != "protected-target" {
+		t.Fatal("linked protected leaf received an ordinary proof")
+	}
+}

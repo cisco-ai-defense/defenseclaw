@@ -49,6 +49,9 @@ func plainTouchMissingLeaves(command, cwd, home string, memo *TargetMemo) ([]str
 			}
 			continue
 		}
+		if !endOptions && strings.HasPrefix(word, "-t") && plainTouchTimestamp(word[2:]) {
+			continue
+		}
 		if !endOptions && len(word) > 1 && word[0] == '-' && word[1] != '-' &&
 			strings.Trim(word[1:], "amcfh") == "" {
 			continue
@@ -56,18 +59,23 @@ func plainTouchMissingLeaves(command, cwd, home string, memo *TargetMemo) ([]str
 		if !endOptions && strings.HasPrefix(word, "-") {
 			return nil, false
 		}
-		// A leading ./ still denotes one leaf of the proved directory.
-		// Repeated prefixes have the same meaning and need no path walk.
+		// Both relative and absolute words must name one leaf of the same
+		// proved directory. Other paths keep the full link-aware reader.
+		if filepath.IsAbs(word) {
+			prefix := filepath.Clean(cwd)
+			if prefix != string(filepath.Separator) {
+				prefix += string(filepath.Separator)
+			}
+			if !strings.HasPrefix(word, prefix) {
+				return nil, false
+			}
+			word = strings.TrimPrefix(word, prefix)
+		}
 		for strings.HasPrefix(word, "./") {
 			word = word[2:]
 		}
-		if len(word) == 0 || !plainTouchNameStart(word[0]) {
+		if word == "" || word == "." || word == ".." || strings.ContainsAny(word, "/\x00") {
 			return nil, false
-		}
-		for i := 1; i < len(word); i++ {
-			if !plainTouchNamePart(word[i]) {
-				return nil, false
-			}
 		}
 		names = append(names, word)
 	}
@@ -139,7 +147,7 @@ func plainTouchWords(command, home string) ([]string, bool) {
 	}
 	words := make([]string, 0, len(call.Args))
 	for _, arg := range call.Args {
-		if !noDereferenceTouchLiteralWord(arg) {
+		if !noDereferenceTouchLiteralWord(arg) || actionWordHasUnquotedGlob(arg, command) {
 			return nil, false
 		}
 		value, ok := StaticWord(arg, home)
@@ -172,12 +180,4 @@ func plainTouchTimestamp(value string) bool {
 func OrdinaryLongTouchMissingLeaves(command, cwd, home string) bool {
 	_, ok := plainTouchMissingLeaves(command, cwd, home, NewTargetMemo())
 	return ok
-}
-
-func plainTouchNameStart(c byte) bool {
-	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
-}
-
-func plainTouchNamePart(c byte) bool {
-	return plainTouchNameStart(c) || c == '_' || c == '-' || c == '.'
 }
