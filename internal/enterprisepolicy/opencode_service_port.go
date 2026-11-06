@@ -143,7 +143,7 @@ func EnsureOpenCodeServicePort(home string, port int) (OpenCodeServicePortResult
 		return result, err
 	}
 	missing := missingDirsBelow(home, path)
-	if err := writePrivateUserFile(path, append(data, '\n')); err != nil {
+	if err := writeOpenCodeServiceConfig(home, path, append(data, '\n')); err != nil {
 		return result, fmt.Errorf("opencode service port: write %s: %w", path, err)
 	}
 	result.Port, result.Changed, result.CreatedDirs = port, true, missing
@@ -348,7 +348,7 @@ func ReplaceOpenCodeServicePort(home string, port, stale int) (OpenCodeServicePo
 	if err != nil {
 		return result, err
 	}
-	if err := writePrivateUserFile(path, append(data, '\n')); err != nil {
+	if err := writeOpenCodeServiceConfig(filepath.Clean(home), path, append(data, '\n')); err != nil {
 		return result, fmt.Errorf("opencode service port: write %s: %w", path, err)
 	}
 	return OpenCodeServicePortResult{Port: port, Changed: true}, nil

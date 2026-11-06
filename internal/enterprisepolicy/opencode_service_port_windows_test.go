@@ -62,6 +62,9 @@ func TestManagedWindowsOpenCodePortReadSeesAccountLinkedFolder(t *testing.T) {
 	if got, err := ReadOpenCodeServicePortAsUser(home); err != nil || got != 25001 {
 		t.Fatalf("regular folder port = %d, err=%v", got, err)
 	}
+	if !OpenCodeServicePortWritableAsUser(home) {
+		t.Fatal("regular account folder was not writable in place")
+	}
 	target := filepath.Join(home, "held-config")
 	if err := os.Rename(config, target); err != nil {
 		t.Fatal(err)
@@ -71,5 +74,11 @@ func TestManagedWindowsOpenCodePortReadSeesAccountLinkedFolder(t *testing.T) {
 	}
 	if got, err := ReadOpenCodeServicePortAsUser(home); err != nil || got != 25001 {
 		t.Fatalf("account-linked folder port = %d, err=%v", got, err)
+	}
+	if OpenCodeServicePortWritableAsUser(home) {
+		t.Fatal("linked account folder was treated as writable in place")
+	}
+	if _, err := ReplaceOpenCodeServicePort(home, 25002, 25001); err == nil {
+		t.Fatal("linked account folder was changed through the protected writer")
 	}
 }

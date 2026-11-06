@@ -28,6 +28,7 @@ var (
 	enterpriseHookWindowsOpenCodePortsLoad   = enterprisehooks.LoadWindowsOpenCodeServicePorts
 	enterpriseHookWindowsOpenCodePortsWrite  = enterprisehooks.WriteWindowsOpenCodeServicePorts
 	enterpriseHookWindowsOpenCodeRead        = enterprisepolicy.ReadOpenCodeServicePortAsUser
+	enterpriseHookWindowsOpenCodeWritable    = enterprisepolicy.OpenCodeServicePortWritableAsUser
 	enterpriseHookWindowsOpenCodeEnsure      = enterprisepolicy.EnsureOpenCodeServicePort
 	enterpriseHookWindowsOpenCodeReplace     = enterprisepolicy.ReplaceOpenCodeServicePort
 	enterpriseHookWindowsOpenCodeRunAs       = enterprisehooks.RunAsTargetWithS4U
@@ -40,47 +41,52 @@ var (
 // number of timed-out readers may remain while Windows completes their I/O.
 var enterpriseHookWindowsOpenCodeReadSlots = make(chan struct{}, 4)
 
-func readWindowsOpenCodePortAsAccount(ctx context.Context, profile enterprisehooks.TargetCredentials) (int, error) {
+func readWindowsOpenCodePortAsAccount(ctx context.Context, profile enterprisehooks.TargetCredentials) (int, bool, error) {
 	select {
 	case enterpriseHookWindowsOpenCodeReadSlots <- struct{}{}:
 	case <-ctx.Done():
-		return 0, ctx.Err()
+		return 0, false, ctx.Err()
 	default:
-		return 0, fmt.Errorf("account reads are busy")
+		return 0, false, fmt.Errorf("account reads are busy")
 	}
 	type outcome struct {
-		port int
-		err  error
+		port     int
+		writable bool
+		err      error
 	}
 	done := make(chan outcome, 1)
 	go func() {
 		defer func() { <-enterpriseHookWindowsOpenCodeReadSlots }()
 		var port int
+		var writable bool
 		err := enterpriseHookWindowsOpenCodeRunAs(profile, func() (readErr error) {
 			port, readErr = enterpriseHookWindowsOpenCodeRead(profile.UserHome)
+			if readErr == nil {
+				writable = enterpriseHookWindowsOpenCodeWritable(profile.UserHome)
+			}
 			return readErr
 		})
-		done <- outcome{port: port, err: err}
+		done <- outcome{port: port, writable: writable, err: err}
 	}()
 	timer := time.NewTimer(enterpriseHookWindowsOpenCodeReadTimeout)
 	defer timer.Stop()
 	select {
 	case result := <-done:
-		return result.port, result.err
+		return result.port, result.writable, result.err
 	case <-timer.C:
 		select {
 		case result := <-done:
-			return result.port, result.err
+			return result.port, result.writable, result.err
 		default:
 		}
-		return 0, fmt.Errorf("account read timed out")
+		return 0, false, fmt.Errorf("account read timed out")
 	case <-ctx.Done():
 		select {
 		case result := <-done:
-			return result.port, result.err
+			return result.port, result.writable, result.err
 		default:
 		}
-		return 0, ctx.Err()
+		return 0, false, ctx.Err()
 	}
 }
 
@@ -132,6 +138,7 @@ func enterpriseHookStandaloneOpenCodePorts(ctx context.Context, manifest enterpr
 	}
 	ids := map[string]uint64{}
 	filePorts := map[string]int{}
+	unwritable := map[string]bool{}
 	eligible := map[string]enterprisehooks.TargetCredentials{}
 	unreadable := map[string]bool{}
 	var problems error
@@ -165,7 +172,7 @@ func enterpriseHookStandaloneOpenCodePorts(ctx context.Context, manifest enterpr
 			markUnknown(key, fmt.Errorf("home is unavailable"))
 			continue
 		}
-		port, err := readWindowsOpenCodePortAsAccount(ctx, profile)
+		port, writable, err := readWindowsOpenCodePortAsAccount(ctx, profile)
 		if err != nil {
 			if errors.Is(err, enterprisepolicy.ErrOpenCodeServicePortContent) {
 				unreadable[key] = true
@@ -178,6 +185,7 @@ func enterpriseHookStandaloneOpenCodePorts(ctx context.Context, manifest enterpr
 		eligible[key] = profile
 		if port > 0 {
 			filePorts[key] = port
+			unwritable[key] = !writable
 		}
 	}
 	claims, err := enterpriseHookWindowsOpenCodeClaims()
@@ -201,6 +209,29 @@ func enterpriseHookStandaloneOpenCodePorts(ctx context.Context, manifest enterpr
 	sort.Strings(keys)
 	if len(keys) == 0 && problems != nil {
 		return nil, problems
+	}
+	// A readable file that the account-side writer cannot safely replace
+	// keeps its port. Move a readable, writable holder instead. Do not take
+	// a reservation from an absent or unreadable account.
+	for _, key := range keys {
+		port := filePorts[key]
+		if port == 0 || !unwritable[key] {
+			continue
+		}
+		canHold := true
+		for other, held := range recorded {
+			if other != key && held == port && eligible[other].SID == "" {
+				canHold = false
+				break
+			}
+		}
+		if owner := claims[port]; owner != "" && owner != key &&
+			(eligible[owner].SID == "" || unwritable[owner]) {
+			canHold = false
+		}
+		if canHold {
+			claims[port] = key
+		}
 	}
 	plan := enterprisepolicy.PlanOpenCodeServicePortsByAccountWithClaims(ids, keys, filePorts, recorded, claims, true)
 	resultRecord := plan.Record
@@ -248,6 +279,7 @@ func enterpriseHookStandaloneOpenCodePorts(ctx context.Context, manifest enterpr
 			conflict.Port, conflict.Account, conflict.Holder, plan.Ports[conflict.Account])
 	}
 	claimed := map[string]bool{}
+	failedMoves := map[string]int{}
 	for _, key := range keys {
 		if err := ctx.Err(); err != nil {
 			return nil, errors.Join(problems, err)
@@ -293,6 +325,72 @@ func enterpriseHookStandaloneOpenCodePorts(ctx context.Context, manifest enterpr
 		if err != nil {
 			problems = errors.Join(problems, fmt.Errorf("OpenCode service port for %s: %w", key, err))
 			keepPreviousRecord(key)
+			if stale := plan.Replace[key]; stale > 0 {
+				failedMoves[key] = stale
+			}
+		} else {
+			filePorts[key] = port
+		}
+	}
+	// If a file cannot be moved from a held port, try moving the account
+	// currently holding it. A write refusal must not leave both files on the
+	// same port indefinitely when the other account can move.
+	for _, failed := range keys {
+		stale := failedMoves[failed]
+		if stale == 0 {
+			continue
+		}
+		for _, other := range keys {
+			if other == failed || !claimed[other] || plan.Ports[other] != stale || filePorts[other] != stale {
+				continue
+			}
+			used := map[int]bool{}
+			for port := range claims {
+				used[port] = true
+			}
+			for _, group := range []map[string]int{recorded, resultRecord, filePorts, plan.Ports} {
+				for _, port := range group {
+					used[port] = true
+				}
+			}
+			start := enterprisepolicy.OpenCodeAccountPort(ids[other]) - enterprisepolicy.OpenCodeAccountPortBase
+			newPort := 0
+			for step := 0; step < enterprisepolicy.OpenCodeAccountPortSpan; step++ {
+				candidate := enterprisepolicy.OpenCodeAccountPortBase + (start+step)%enterprisepolicy.OpenCodeAccountPortSpan
+				if !used[candidate] {
+					newPort = candidate
+					break
+				}
+			}
+			if newPort == 0 {
+				problems = errors.Join(problems, fmt.Errorf("OpenCode service ports: no alternate port is available for %s", other))
+				break
+			}
+			if err := enterpriseHookWindowsOpenCodeClaim(other, newPort); err != nil {
+				problems = errors.Join(problems, fmt.Errorf("OpenCode service port claim for %s: %w", other, err))
+				break
+			}
+			claims[newPort] = other
+			profile := eligible[other]
+			err := enterpriseHookWindowsOpenCodeRunAs(profile, func() error {
+				result, err := enterpriseHookWindowsOpenCodeReplace(profile.UserHome, newPort, stale)
+				if err != nil {
+					return err
+				}
+				if result.Port != newPort {
+					return fmt.Errorf("account port %d differs from assigned port %d", result.Port, newPort)
+				}
+				return nil
+			})
+			if err != nil {
+				problems = errors.Join(problems, fmt.Errorf("OpenCode service port for %s: %w", other, err))
+				break
+			}
+			resultRecord[other] = newPort
+			filePorts[other] = newPort
+			unavailable[other] = false
+			fmt.Fprintf(os.Stderr, "defenseclaw: enterprise hooks: OpenCode service port %d for %s could not move; %s moved to %d\n", stale, failed, other, newPort)
+			break
 		}
 	}
 	if err := enterpriseHookWindowsOpenCodePortsWrite(path, resultRecord); err != nil {
