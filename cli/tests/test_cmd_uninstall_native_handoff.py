@@ -1228,3 +1228,54 @@ def test_native_setup_cowork_marker_refusal_reports_after_setup(
     else:
         assert Path(cowork.uninstalled_marker_path(str(data))).read_text() == "removed\n"
         assert "could not record" not in out
+
+
+@pytest.mark.parametrize("refused", [False, True])
+@pytest.mark.parametrize("wipe_data", [False, True])
+def test_native_setup_restart_required_records_the_cowork_removal(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], refused: bool, wipe_data: bool
+) -> None:
+    # Setup exit 3010 removes the data at the restart, so the marker is written
+    # now, as on exit 0; a refused marker is reported and the exit code stays
+    # 3010 (cowork-1-0-8 GAP-0088).
+    from defenseclaw import cowork
+
+    data = tmp_path / ".defenseclaw"
+    state = Path(cowork.state_path(str(data)))
+    state.parent.mkdir(parents=True)
+    state.write_text("{}", encoding="utf-8")
+    problem = "unsafe export parent C:\\Users\\a: owner SID S-1-5-21-1-2-3-1002 is not this account"
+    request = _request(tmp_path, wipe_data=wipe_data)
+    mark = patch.object(
+        cowork,
+        "mark_uninstalled",
+        side_effect=OSError(problem) if refused else None,
+        wraps=None if refused else cowork.mark_uninstalled,
+    )
+    with (
+        patch.object(native, "prepare_native_windows_uninstall", return_value=request),
+        patch.object(
+            native, "execute_native_windows_uninstall", return_value=native.NativeWindowsUninstallOutcome(3010)
+        ),
+        patch.object(cmd_uninstall.config_module, "default_data_path", return_value=data),
+        mark as marked,
+        pytest.raises(SystemExit) as raised,
+    ):
+        cmd_uninstall._dispatch_native_windows_uninstall(wipe_data=wipe_data, dry_run=False, yes=True)
+    assert raised.value.code == 3010
+    out = " ".join(capsys.readouterr().out.split())
+    assert "restart required (Windows exit code 3010)" in out
+    marker = Path(cowork.uninstalled_marker_path(str(data)))
+    if not wipe_data:
+        # Data kept: no removal to record, as on exit 0.
+        marked.assert_not_called()
+        assert not marker.exists()
+        return
+    marked.assert_called_once_with(str(data))
+    if refused:
+        assert f"DefenseClaw could not record its removal for the Cowork plugin: {problem}" in out
+        assert "it blocks every Cowork tool call" in out
+        assert not marker.exists()
+    else:
+        assert marker.read_text() == "removed\n"
+        assert "could not record" not in out
