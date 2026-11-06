@@ -1612,7 +1612,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			if clientTargets[hookpaths.ActionDecisionKey] == hookpaths.ProtectedTargetDecision {
 				return true
 			}
-			if resolved := clientTargets[target]; !(request.ProtectedHomeHook && !truncated && resolved != "") {
+			if resolved := clientTargets[target]; !(request.ProtectedHomeHook && !truncated && resolved == target) {
 				if _, ok := hookpaths.ResolvePatchWriteTarget(target); !ok {
 					return true
 				}
