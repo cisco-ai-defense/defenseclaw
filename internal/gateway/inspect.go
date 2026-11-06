@@ -980,6 +980,9 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	req *ToolInspectRequest,
 	action trustedActionRequest,
 ) *ToolInspectVerdict {
+	if a.scannerCfg != nil && !a.scannerCfg.SecureClientIntegration() && action.Connector != "" {
+		action.balancedArchiveScope = !a.strictPolicyTierForHook(ctx, action.Connector)
+	}
 	// managed_enterprise: Cisco AI Defense is the sole decision-maker.
 	// Skip static block/allow + MCP-server block, connector regex packs,
 	// CodeGuard, and the judge lane; AID inspects the tool call directly

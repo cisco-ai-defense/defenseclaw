@@ -3830,9 +3830,7 @@ func agentHookWindowsShellDialect(input actionfacts.Input) actionfacts.Dialect {
 // belong at this server-owned boundary, without trusting a payload-supplied
 // dialect hint or changing the recorded tool identity.
 func agentHookTrustedActionTool(connectorName, toolName, platformName string) string {
-	if strings.EqualFold(strings.TrimSpace(connectorName), "opencode") && toolName == "patch" {
-		return "apply_patch"
-	}
+	toolName = hookpaths.ConnectorActionTool(connectorName, toolName)
 	if strings.EqualFold(strings.TrimSpace(platformName), "windows") {
 		connectorName = strings.TrimSpace(connectorName)
 		toolName = strings.TrimSpace(toolName)

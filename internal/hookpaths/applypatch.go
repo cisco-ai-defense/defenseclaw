@@ -292,6 +292,16 @@ func isApplyPatchToolName(tool string) bool {
 	return false
 }
 
+// ConnectorActionTool gives the hook client and gateway the same parser name
+// for a connector's native tool while preserving its reported label elsewhere.
+func ConnectorActionTool(connector, tool string) string {
+	if strings.EqualFold(strings.TrimSpace(connector), "opencode") &&
+		(strings.EqualFold(strings.TrimSpace(tool), "patch") || strings.EqualFold(strings.TrimSpace(tool), "apply_patch")) {
+		return "apply_patch"
+	}
+	return tool
+}
+
 // patchTextField reads a string field, or an argv array (["apply_patch",
 // "<envelope>"], ["bash", "-lc", "<script>"]) joined by newlines.
 func patchTextField(raw json.RawMessage) string {

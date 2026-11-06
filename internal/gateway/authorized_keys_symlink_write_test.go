@@ -948,7 +948,12 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX hook paths")
 	}
-	home := filepath.Join(t.TempDir(), "home")
+	root, err := os.MkdirTemp("", "gxcmd-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	home := filepath.Join(root, "home")
 	project := filepath.Join(home, "proj")
 	keys := filepath.Join(home, ".ssh", "authorized_keys")
 	for _, dir := range []string{filepath.Dir(keys), project} {
@@ -1299,6 +1304,44 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`cp -a src dst && echo hi > report.txt`,
 		`grep -rn "os.symlink(" src | head -5 > hits.txt`,
 	}
+	// Balanced permits these ordinary operations after unread archive input.
+	// The loop below replays every one in strict, which keeps the prior block.
+	balancedArchive := map[string]bool{
+		`echo ok > first.txt; tar xf keys.tar; cd build && echo ok > notes.txt`: true,
+		`tar -xf keys.tar -C../out && echo k >> ../out/n`:                       true,
+		`tar -xC ../out -f keys.tar && echo k >> ../out/n`:                      true,
+		`tar xfC keys.tar ../out && echo k >> ../out/n`:                         true,
+		`tar -xf keys.tar --dir=../out && echo k >> ../out/n`:                   true,
+		`tar -xf keys.tar --direc ../out && echo k >> ../out/n`:                 true,
+		`bsdtar -xf keys.tar --cd ../out && echo k >> ../out/n`:                 true,
+		`X=1 tar -xf keys.tar -C../out; echo k >> ../out/n`:                     true,
+		`tar -x -f keys.tar --one-top-level=../out; echo k >> ../out/n`:         true,
+		`unzip keys.zip -d../out && echo k >> ../out/n`:                         true,
+		`tar -C unpack -xf evil.tar && echo k >> outlink`:                       true,
+		`tar -C unpack -xf evil.tar && echo k >> dlink/n`:                       true,
+		`tar -C unpack -xf evil.tar && echo k >> outlink2`:                      true,
+		`tar -C unpack -xf evil.tar && echo k >> a2/l`:                          true,
+		`echo a > n1.txt; tar xf evil.tar; cp payload n1.txt`:                   true,
+		`echo a > n1.txt; tar xf evil.tar; install -m 600 payload n1.txt`:       true,
+		`echo a > n1.txt; tar xf evil.tar; dd if=payload of=n1.txt`:             true,
+		`echo a > n1.txt; tar xf evil.tar && tee -a n1.txt < payload`:           true,
+		`cpio -id < keys.cpio; echo k >> notes.txt`:                             true,
+		`pax -r -f keys.pax; echo k >> notes.txt`:                               true,
+		`pax -r < keys.pax; echo k >> notes.txt`:                                true,
+		`bsdcpio -id < keys.cpio; echo k >> notes.txt`:                          true,
+		`unzip -o keys.zip; echo k >> notes.txt`:                                true,
+		`7z x keys.7z; echo k >> notes.txt`:                                     true,
+		`7z x keys.7z -o../outside; echo k >> ../outside/n`:                     true,
+		`cpio -id -D ../outside < keys.cpio; echo k >> ../outside/n`:            true,
+		`busybox cpio -i < keys.cpio; echo k >> notes.txt`:                      true,
+		`busybox unzip keys.zip; echo k >> notes.txt`:                           true,
+		`tar xzf node.tgz && ./configure > build.log`:                           true,
+		`tar xzf x.tgz && ./configure > build.log`:                              true,
+		`tar -C unpack -xf keys.tar; echo k >> unpack/n1.txt`:                   true,
+		`for i in 1 2; do echo k >> notes.txt; tar xf keys.tar; done`:           true,
+		`cd ~/x && tar -C ~/x -xf keys.tar && echo k >> n1.txt`:                 true,
+		`cpio -id -D unpack < keys.cpio; echo k >> notes.txt`:                   true,
+	}
 	// Login startup input can change the directory, so the child walk cannot
 	// assert a protected write through this ordinary relative redirect.
 	const uncertainLoginShell = `bash -lc "cp a b" > out.txt`
@@ -1306,11 +1349,12 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 	const block, allow = `{"action":"block"`, `{"action":"allow"`
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, managed := range []bool{true, false} {
-			post := func(t *testing.T, command string, cwdOverride ...string) string {
+			postWithPack := func(t *testing.T, command, pack string, cwdOverride ...string) string {
 				t.Helper()
 				cfg := &config.Config{}
 				cfg.Guardrail.Mode = "action"
 				cfg.Guardrail.Connector = connector
+				cfg.Guardrail.RulePack = pack
 				api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 				eventCWD := project
 				if len(cwdOverride) > 0 {
@@ -1326,12 +1370,16 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 					// Only a managed hook client sends its write evidence
 					// (hookexec setHookRequestFacts); a per-user cell is judged
 					// without it, as shipped (rel-1-0-2 GAP-0409).
-					req.Header.Set(hookpaths.Header, hookpaths.Resolve(body))
+					header := hookpaths.Resolve(body)
+					req.Header.Set(hookpaths.Header, header)
 					req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
 				}
 				recorder := httptest.NewRecorder()
 				api.handleAgentHook(connector).ServeHTTP(recorder, req)
 				return recorder.Body.String()
+			}
+			post := func(t *testing.T, command string, cwdOverride ...string) string {
+				return postWithPack(t, command, "", cwdOverride...)
 			}
 			name := fmt.Sprintf("%s managed=%v", connector, managed)
 			t.Run(name, func(t *testing.T) {
@@ -1340,13 +1388,19 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 				}
 				for _, command := range blocked {
 					got := post(t, command)
+					if balancedArchive[command] {
+						if !strings.HasPrefix(got, allow) {
+							t.Errorf("%s = %.300s, want balanced allow", command, got)
+						}
+						strict := postWithPack(t, command, "strict")
+						if !strings.HasPrefix(strict, block) || !strings.Contains(strict, "persistence.ssh_authorized_keys_command") {
+							t.Errorf("%s = %.300s, want strict block", command, strict)
+						}
+						continue
+					}
 					if !strings.HasPrefix(got, block) ||
 						!strings.Contains(got, "persistence.ssh_authorized_keys_command") {
 						t.Errorf("%s = %.300s, want block", command, got)
-					}
-					if command == `tar xzf node.tgz && ./configure > build.log` &&
-						!strings.Contains(got, "Run the extraction and the write as separate commands") {
-						t.Errorf("%s = %.300s, want archive chain guidance", command, got)
 					}
 				}
 				for _, command := range allowed {
