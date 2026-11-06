@@ -274,7 +274,9 @@ def validate_cursor_registration(
         )
     if is_windows and not _call_operator_literals_current(command):
         # g072 review 3 M3: the render of a release before 1.0.9 doubled only
-        # the apostrophe; it stays DefenseClaw's, and setup rewrites it.
+        # the apostrophe. Go's Cursor setup and teardown own that form
+        # (cursorManagedHookCommands, cursorOwnedHookCommands; g072 review 4
+        # M1), so setup rewrites it and uninstall removes it.
         return CursorRegistrationValidation(
             False,
             "configured Cursor hook was written before 1.0.9 and does not run: PowerShell ends its "

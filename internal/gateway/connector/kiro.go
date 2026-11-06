@@ -638,11 +638,13 @@ func kiroWindowsOwnedHookCommands() []string {
 				windowsKiroHookCommandForBinary(binary, "", managed),
 				windowsKiroHookCommandForBinary(binary, KiroHookSurfaceV3, managed),
 			} {
-				commands = append(commands, command)
+				// So does the pre-1.0.9 render of a profile path with a
+				// typographic quote (g072 review 4 M1).
+				commands = appendWithPreTypographicQuoteForm(commands, command)
 				// The 1.0.x render of the bridge stays owned, so setup
 				// rewrites it and teardown removes it.
 				if legacy, ok := legacyWindowsAwaitedHookCommand(command); ok {
-					commands = append(commands, legacy)
+					commands = appendWithPreTypographicQuoteForm(commands, legacy)
 				}
 			}
 		}

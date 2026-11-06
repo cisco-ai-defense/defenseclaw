@@ -868,12 +868,18 @@ func powershellLiteralValue(body string) string {
 // preTypographicQuoteHookCommand is cmd as a release before 1.0.9 rendered
 // it, when cmd quotes a path with a typographic quote: those releases doubled
 // only the apostrophe (managed.PowerShellLiteralBeforeTypographicQuotes). An
-// encoded bridge is compared by its script. The form stays owned, so setup
-// rewrites it and teardown removes it.
+// encoded bridge, alone or inside Kiro's cmd.exe wrapper, is compared by the
+// script of its -EncodedCommand value (g072 review 4 M1). The form stays
+// owned, so setup rewrites it and teardown removes it.
 func preTypographicQuoteHookCommand(cmd string) (string, bool) {
-	prefix := windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand "
-	if encoded, ok := strings.CutPrefix(cmd, prefix); ok {
-		script, decoded := powershellDecodedCommand(encoded)
+	const marker = " -EncodedCommand "
+	if index := strings.Index(cmd, marker); index >= 0 {
+		start := index + len(marker)
+		end := start
+		for end < len(cmd) && !unicode.IsSpace(rune(cmd[end])) {
+			end++
+		}
+		script, decoded := powershellDecodedCommand(cmd[start:end])
 		if !decoded {
 			return "", false
 		}
@@ -881,9 +887,20 @@ func preTypographicQuoteHookCommand(cmd string) (string, bool) {
 		if !changed {
 			return "", false
 		}
-		return prefix + powershellEncodedCommand(old), true
+		return cmd[:start] + powershellEncodedCommand(old) + cmd[end:], true
 	}
 	return managed.PowerShellLiteralBeforeTypographicQuotes(cmd)
+}
+
+// appendWithPreTypographicQuoteForm appends command and, when it quotes a
+// path with a typographic quote, its pre-1.0.9 render
+// (preTypographicQuoteHookCommand), for an exact-string ownership list.
+func appendWithPreTypographicQuoteForm(commands []string, command string) []string {
+	commands = append(commands, command)
+	if old, ok := preTypographicQuoteHookCommand(command); ok {
+		commands = append(commands, old)
+	}
+	return commands
 }
 
 func windowsAntigravityHookCommand() string {

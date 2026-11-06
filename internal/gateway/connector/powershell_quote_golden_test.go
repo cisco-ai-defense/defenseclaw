@@ -98,6 +98,12 @@ func TestWindowsHookCommandsMatchThePythonReadersGolden(t *testing.T) {
 			if _, ok := nativeHookExactCommands([]string{hook})[row.CodexBridgeBefore109]; !ok {
 				t.Errorf("%s: the pre-1.0.9 bridge is not owned", row.Quote)
 			}
+			// Cursor's exact-string rail owns its pre-1.0.9 adapter command
+			// too (g072 review 4 M1).
+			cursorBefore := map[string]interface{}{"type": "command", "command": row.CursorCommandBefore}
+			if !newCursorHookCommandMatcher(cursorManagedHookCommands(row.CursorCommand, hooks+"cursor-hook.sh")).matches(cursorBefore) {
+				t.Errorf("%s: setup does not own the pre-1.0.9 Cursor command", row.Quote)
+			}
 		}
 		restore()
 		rows = append(rows, row)
