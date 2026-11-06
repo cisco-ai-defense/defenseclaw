@@ -2703,12 +2703,16 @@ function Get-DefenseClawBootstrapRecordedModulePin {
         leaves its path and reason in
         $script:DefenseClawBootstrapUnreadableRecord, so the caller names
         the damaged record instead of the module signature (GAP-0164).
+        $script:DefenseClawBootstrapRecordedHashPinned says whether a trusted
+        record of a hash-pinned standalone deployment was found, whatever
+        installer it pins (g649 review F1).
     #>
     param(
         [Parameter(Mandatory)][string]$MetadataPath,
         [Parameter(Mandatory)][string]$InstallerPath
     )
     $script:DefenseClawBootstrapUnreadableRecord = ''
+    $script:DefenseClawBootstrapRecordedHashPinned = $false
     try {
         if (-not [IO.File]::Exists($MetadataPath)) {
             return ''
@@ -2746,6 +2750,7 @@ function Get-DefenseClawBootstrapRecordedModulePin {
             $null -eq $hashes -or $null -eq $hashes.Value) {
             return ''
         }
+        $script:DefenseClawBootstrapRecordedHashPinned = $true
         $module = $hashes.Value.PSObject.Properties['module']
         $installer = $hashes.Value.PSObject.Properties['installer']
         if ($null -eq $module -or [string]$module.Value -cnotmatch '^[0-9a-f]{64}$' -or
@@ -2765,6 +2770,53 @@ function Get-DefenseClawBootstrapRecordedModulePin {
         # requirement then applies unchanged.
         return ''
     }
+}
+
+function Get-DefenseClawBootstrapInstalledModulePin {
+    <#
+        Standalone only: the module SHA-256 the installed CLI's bootstrap
+        admits, or '' (a valid signature is then required). It is the pin the
+        trusted hash-pinned deployment record names
+        (Get-DefenseClawBootstrapRecordedModulePin). While a lifecycle
+        transaction is pending, an interrupted transaction may already have
+        installed its own installer and module (rel-1-0-6 GAP-0649): its pins
+        are chosen when the recorded pair does not apply to the running
+        installer, or when the module on disk is the transaction's. Those
+        pins count only for a deployment whose trusted record is hash-pinned
+        standalone, as on the module side: an Authenticode deployment never
+        admits a module by a transaction's hash (g649 review F1). The module
+        must still match the chosen digest.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$StateRoot,
+        [Parameter(Mandatory)][string]$InstallerPath,
+        [Parameter(Mandatory)][string]$ModulePath
+    )
+    $recorded = Get-DefenseClawBootstrapRecordedModulePin `
+        -MetadataPath ([IO.Path]::Combine($StateRoot, 'install', 'deployment.json')) `
+        -InstallerPath $InstallerPath
+    if (-not [bool]$script:DefenseClawBootstrapRecordedHashPinned) {
+        return $recorded
+    }
+    $transactionPin = Get-DefenseClawBootstrapTransactionModulePin `
+        -StateRoot $StateRoot `
+        -InstallerPath $InstallerPath
+    if ([string]::IsNullOrEmpty($transactionPin)) {
+        return $recorded
+    }
+    $moduleOnDisk = ''
+    try {
+        $moduleOnDisk = (Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $ModulePath `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    catch {
+        $moduleOnDisk = ''
+    }
+    if ([string]::IsNullOrEmpty($recorded) -or $moduleOnDisk -ceq $transactionPin) {
+        return $transactionPin
+    }
+    return $recorded
 }
 
 # ---------------------------------------------------------------------------
@@ -4516,34 +4568,13 @@ try {
         # Nothing keeps a payload manifest after a hash-pinned install, so the
         # installed CLI (Add/Remove Programs, MDM detect and uninstall
         # scripts) arrives here with no pin. Admit the installed module by the
-        # digest the deployment's protected metadata recorded; the module then
+        # digest the deployment's protected metadata recorded, or by the pins
+        # of its pending transaction (rel-1-0-6 GAP-0649); the module then
         # re-admits the rest of its installed payload the same way.
-        $bootstrapPinnedModuleSHA256 = Get-DefenseClawBootstrapRecordedModulePin `
-            -MetadataPath ([IO.Path]::Combine($StateRoot, 'install', 'deployment.json')) `
-            -InstallerPath $PSCommandPath
-        # An interrupted transaction may already have installed its own
-        # installer and module (rel-1-0-6 GAP-0649). Admit that exact pair
-        # by the transaction's pins when the recorded pair does not apply to
-        # the running installer, or when the module on disk is the
-        # transaction's; the module must still match the chosen digest.
-        $transactionPin = Get-DefenseClawBootstrapTransactionModulePin `
+        $bootstrapPinnedModuleSHA256 = Get-DefenseClawBootstrapInstalledModulePin `
             -StateRoot $StateRoot `
-            -InstallerPath $PSCommandPath
-        if (-not [string]::IsNullOrEmpty($transactionPin)) {
-            $moduleOnDisk = ''
-            try {
-                $moduleOnDisk = (Microsoft.PowerShell.Utility\Get-FileHash `
-                    -LiteralPath $modulePath `
-                    -Algorithm SHA256).Hash.ToLowerInvariant()
-            }
-            catch {
-                $moduleOnDisk = ''
-            }
-            if ([string]::IsNullOrEmpty($bootstrapPinnedModuleSHA256) -or
-                $moduleOnDisk -ceq $transactionPin) {
-                $bootstrapPinnedModuleSHA256 = $transactionPin
-            }
-        }
+            -InstallerPath $PSCommandPath `
+            -ModulePath $modulePath
     }
     $bootstrapAllowedSigners = @()
     if ($EnterpriseProfile -ceq 'Standalone') {
