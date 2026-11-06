@@ -889,6 +889,11 @@ def test_packaged_hook_guard_is_installed_and_inventoried() -> None:
     build = BUILD_PS1.read_text(encoding="utf-8")
     setup = (ROOT / "cmd/defenseclaw-setup/main.go").read_text(encoding="utf-8")
     inventory = (ROOT / "cmd/defenseclaw-setup/authenticode.go").read_text(encoding="utf-8")
+    resource_function = re.search(r"(?ms)^function Set-WindowsExecutableResource\b.*?(?=^function |\Z)", build)
+    assert resource_function is not None
+    resource_components = re.search(r"\[ValidateSet\(([^)]*)\)\]", resource_function.group(0))
+    assert resource_components is not None
+    assert "'hook-guard'" in resource_components.group(1)
     assert "'defenseclaw-hook-guard.exe', 'defenseclaw-acp.exe'" in build
     assert "Set-WindowsExecutableResource $hookGuardBinary 'hook-guard' -VerifyOnly" in build
     assert "Installed = 'bin/defenseclaw-hook-guard.exe'" in build
