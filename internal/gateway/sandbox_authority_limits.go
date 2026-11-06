@@ -34,17 +34,19 @@ import (
 // 25/s burst 100) is the first limit one sandbox meets; sandbox-hook at
 // 100/s carries four sandboxes at that rate and burst 200 lets two burst
 // at once. The delivery receipt that confirms an allowed answer is a second
-// post on the hook route: sandbox-receipt, the same size, counts those
-// (hookCallerAdmissionKey), so the hook classes carry the documented hook
-// rate and a receipt never waits on or is refused by the evaluations
-// (GAP-0490). The 60 s policy/current poll is one call a minute per live
-// registration.
+// post on the hook route: sandbox-receipt, the same rate and burst, counts
+// those (hookCallerAdmissionKey), so a receipt never spends the evaluation
+// rate. Four bindings can each have 32 admitted hooks in flight. Their
+// shared gateway hook admission must hold that aggregate, while each
+// binding's own 32-request limit remains in force (GAP-0490). The 60 s
+// policy/current poll is one call a minute per live registration.
 const (
-	sandboxBudgetHook    = "sandbox-hook"
-	sandboxBudgetReceipt = "sandbox-receipt"
-	sandboxBudgetPending = "sandbox-pending"
-	sandboxBudgetPolicy  = "sandbox-policy"
-	sandboxBudgetEvents  = "sandbox-events"
+	sandboxBudgetHook       = "sandbox-hook"
+	sandboxBudgetReceipt    = "sandbox-receipt"
+	sandboxBudgetPending    = "sandbox-pending"
+	sandboxBudgetPolicy     = "sandbox-policy"
+	sandboxBudgetEvents     = "sandbox-events"
+	sandboxUserHookInFlight = 4 * 32
 )
 
 // sandboxBudgetLimit is one class's rate, burst and in-flight bound per
@@ -55,8 +57,8 @@ type sandboxBudgetLimit struct {
 
 // sandboxBudgetLimits is the per-class table; tests replace entries.
 var sandboxBudgetLimits = map[string]sandboxBudgetLimit{
-	sandboxBudgetHook:    {Rate: 100, Burst: 200, InFlight: 32},
-	sandboxBudgetReceipt: {Rate: 100, Burst: 200, InFlight: 32},
+	sandboxBudgetHook:    {Rate: 100, Burst: 200, InFlight: sandboxUserHookInFlight},
+	sandboxBudgetReceipt: {Rate: 100, Burst: 200, InFlight: sandboxUserHookInFlight},
 	sandboxBudgetPolicy:  {Rate: 10, Burst: 20, InFlight: 8},
 	// The daemon posts its lifecycle and egress records every 2 s, one batch
 	// per sandbox (daemonRelayTelemetry), and stops a pass at its first
