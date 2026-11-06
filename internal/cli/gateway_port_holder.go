@@ -25,6 +25,7 @@ var (
 	gatewayManagedState       = func() (bool, int) { return daemon.New(config.DefaultDataPath()).IsRunning() }
 	gatewayRunsReplacedBinary = func() bool { return daemon.New(config.DefaultDataPath()).RunsReplacedExecutable() }
 	gatewayExecutable         = os.Executable
+	gatewayListenerClass      = daemon.ClassifyPerUserListener
 )
 
 // foreignGatewayListener explains a listener on the configured API port that
@@ -55,14 +56,20 @@ func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string 
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	holder, holderErr := gatewayPortHolder(host, port)
 	// lsof on macOS does not list another account's sockets, so a missing
-	// holder is confirmed with a connection attempt. Such a holder can still
-	// be this account's gateway: the macOS app's privileged helper runs it as
-	// root for this home, and this home's live PID record (IsRunning) says so.
+	// holder is confirmed with a connection attempt. The PID record may then
+	// identify a root-run gateway for this home for diagnosis only.
 	if holderErr != nil && !gatewayPortAnswers(addr) {
 		return ""
 	}
 	if holderErr != nil {
 		holder = daemon.PortHolder{UID: -1}
+	}
+	class := gatewayListenerClass(host, port, config.DefaultDataPath(), holder, holderErr, holderErr != nil)
+	if class == daemon.PerUserListenerOwnGatewayRunAsRoot {
+		return daemon.RootGatewayListenerReason
+	}
+	if class == daemon.PerUserListenerOwnGateway {
+		return ""
 	}
 	running, managedPID := gatewayManagedState()
 	ownUID := os.Getuid()
@@ -75,6 +82,8 @@ func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string 
 		return fmt.Sprintf("%s is held by %s, not by this account's gateway", addr, who)
 	case holderErr == nil && holder.UID == ownUID && sameHomeGatewayProcess(holder.PID, config.DefaultDataPath()):
 		return ""
+	case holderErr != nil:
+		return fmt.Sprintf("%s is held by %s, not by this account's verified gateway", addr, who)
 	case !running:
 		return fmt.Sprintf(
 			"%s is held by %s, not by this account's gateway: no gateway started for %s is running",
@@ -157,6 +166,14 @@ func foreignGatewayListenerFix(cfg *config.Config) string {
 // foreignGatewayListenerFixAt is foreignGatewayListenerFix for the API
 // listener at host:apiPort (the observability-v8 helpers, GAP-1670).
 func foreignGatewayListenerFixAt(host string, apiPort int) string {
+	holder, err := gatewayPortHolder(host, apiPort)
+	if err != nil {
+		holder = daemon.PortHolder{UID: -1}
+	}
+	if gatewayListenerClass(host, apiPort, config.DefaultDataPath(), holder, err,
+		err != nil && gatewayPortAnswers(net.JoinHostPort(host, strconv.Itoa(apiPort)))) == daemon.PerUserListenerOwnGatewayRunAsRoot {
+		return daemon.RootGatewayListenerRemedy
+	}
 	port := "<free port>"
 	if free := freeGatewayAPIPort(host, apiPort); free > 0 {
 		port = strconv.Itoa(free)

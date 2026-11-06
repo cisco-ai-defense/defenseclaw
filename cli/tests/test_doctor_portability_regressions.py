@@ -854,16 +854,12 @@ def test_doctor_names_sudo_runtime_leftovers(monkeypatch, tmp_path) -> None:
 
 
 def _gateway_account_fixture(monkeypatch, tmp_path, *, process_uid, deployment_mode=""):
-    pid_path = os.path.join(os.fspath(tmp_path), "gateway.pid")
+    code = "root_gateway" if process_uid == 0 and deployment_mode != "managed_enterprise" else "trusted"
     monkeypatch.setattr(
         cmd_doctor,
-        "read_pid_record",
-        lambda path: (
-            doctor_gateway.PIDRecord("ok", pid=4242) if path == pid_path else doctor_gateway.PIDRecord("missing")
-        ),
+        "_trusted_gateway_listener",
+        lambda _cfg: cmd_doctor._GatewayTrust(code, "fixture", pid=4242),
     )
-    monkeypatch.setattr(cmd_doctor, "pid_alive", lambda pid: pid == 4242)
-    monkeypatch.setattr(cmd_doctor, "_process_uid", lambda pid: process_uid if pid == 4242 else None)
     result = cmd_doctor._DoctorResult(quiet=True)
     cmd_doctor._check_gateway_account(
         SimpleNamespace(data_dir=os.fspath(tmp_path), deployment_mode=deployment_mode),
@@ -879,7 +875,7 @@ def test_doctor_warns_when_per_user_gateway_runs_as_root(monkeypatch, tmp_path) 
     check = result.checks[-1]
     assert check["status"] == "warn"
     assert check["label"] == "Gateway account"
-    assert "runs as root" in check["detail"]
+    assert "running as root" in check["detail"]
     assert check["reason_code"] == "per-user-gateway-runs-as-root"
     assert "DefenseClawMac" in check["remediation"]
     assert "sudo defenseclaw-gateway stop" in check["remediation"]

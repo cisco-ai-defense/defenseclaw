@@ -2896,7 +2896,7 @@ const perUserGatewayStatusHint = " `defenseclaw-gateway status` shows its state.
 // line names the blocked or allowed event instead, a prompt rather than a
 // tool for UserPromptSubmit (GAP-1706).
 func unreachableLead(opts Options, sp spec, reason, verdict string) string {
-	if strings.HasPrefix(reason, foreignListenerReasonPrefix) {
+	if perUserPeerRefusal(reason) {
 		return verdict + " this " + hookEventSubject(opts.Event)
 	}
 	return "gateway unreachable, " + verdict + " " + sp.subject
@@ -2910,7 +2910,7 @@ const perUserNotOutageNote = "not a gateway outage, so it is blocked in every fa
 // outage mode, so a block says "fail mode closed". A listener DefenseClaw
 // cannot verify is not an outage and says so (GAP-1735).
 func unreachableModeNote(opts Options, reason string) string {
-	notOutage := strings.HasPrefix(reason, foreignListenerReasonPrefix)
+	notOutage := perUserPeerRefusal(reason)
 	if notOutage && !opts.perUserOutage && !opts.ManagedEnterprise && opts.ManagedUnixSocket == "" &&
 		!opts.SecureClient && !opts.StrictAvailability && !perUserInstallWindow(opts) {
 		return perUserNotOutageNote
@@ -2955,7 +2955,7 @@ const perUserInstallWindowDetail = "DefenseClaw is being installed or upgraded f
 // gateway's own error answer nor a listener DefenseClaw cannot verify,
 // which keep their cause.
 func perUserInstallWindowNamesTheInstall(opts Options, reason string) bool {
-	return opts.gatewayRefusal == "" && !strings.HasPrefix(reason, foreignListenerReasonPrefix) && perUserInstallWindow(opts)
+	return opts.gatewayRefusal == "" && !perUserPeerRefusal(reason) && perUserInstallWindow(opts)
 }
 
 // perUserGatewayDownText is what a per-user hook that fails closed because
@@ -2969,7 +2969,7 @@ func perUserGatewayDownText(opts Options, reason string) string {
 		// The gateway answered with an error of its own (perUserRefusalText).
 		return opts.gatewayRefusal
 	}
-	if strings.HasPrefix(reason, foreignListenerReasonPrefix) && !opts.ManagedEnterprise {
+	if perUserPeerRefusal(reason) && !opts.ManagedEnterprise {
 		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": " + reason + "."
 	}
 	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
