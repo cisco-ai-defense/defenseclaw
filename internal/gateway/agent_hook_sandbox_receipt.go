@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -86,17 +85,9 @@ func claimsSandboxHookReceipt(r *http.Request) bool {
 	return r.Method == http.MethodPost && len(r.Header.Values(sandboxrelay.HookReceiptHeader)) != 0
 }
 
-// Striped locks serialize receipt retries with journal recovery. Their fixed
-// size avoids an unbounded map of one lock per hook call.
-var sandboxReceiptLocks [1024]sync.Mutex
-
-func sandboxHookReceiptLock(id string) *sync.Mutex {
-	var hash uint32 = 2166136261
-	for i := 0; i < len(id); i++ {
-		hash = (hash ^ uint32(id[i])) * 16777619
-	}
-	return &sandboxReceiptLocks[hash%uint32(len(sandboxReceiptLocks))]
-}
+// The keyed lock keeps retries of one receipt together while unrelated
+// receipts can settle independently. Entries leave the map on unlock.
+var sandboxReceiptLocks keyedMutex
 
 // scheduleSandboxHookReceiptRecovery finalizes an unanswered sandbox proposal
 // after its bounded receipt window. It also removes acknowledged journal rows
@@ -157,9 +148,8 @@ func (a *APIServer) handleSandboxHookReceipt(w http.ResponseWriter, r *http.Requ
 		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "sandbox hook receipt is not authorized"})
 		return
 	}
-	lock := sandboxHookReceiptLock(id)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock := sandboxReceiptLocks.lock(id)
+	defer unlock()
 	if a.store == nil {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "hook audit is unavailable"})
 		return

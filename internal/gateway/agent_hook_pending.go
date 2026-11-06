@@ -835,8 +835,8 @@ func (a *APIServer) recoverPendingHook(ctx context.Context, entry audit.HookDeli
 			case <-wait.C:
 			}
 		}
-		sandboxHookReceiptLock(p.ID).Lock()
-		defer sandboxHookReceiptLock(p.ID).Unlock()
+		unlockReceipt := sandboxReceiptLocks.lock(p.ID)
+		defer unlockReceipt()
 		latest, found, err := a.store.HookDelivery(ctx, p.ID)
 		if err != nil {
 			return err

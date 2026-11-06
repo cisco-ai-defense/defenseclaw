@@ -810,6 +810,12 @@ func (a *APIServer) sandboxIngressAuthorize(
 			}
 			return
 		}
+		if st.idem.replayExisting(w, r, binding, route.class) {
+			if observed {
+				st.observeHookFailure(binding, route, sw, false)
+			}
+			return
+		}
 		// A delivery receipt confirms an answer the hook budget already
 		// admitted: it takes the receipt bucket (GAP-0490).
 		var release func()
