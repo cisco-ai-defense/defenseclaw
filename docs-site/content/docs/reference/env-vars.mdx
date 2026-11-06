@@ -356,7 +356,7 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 155 test-only variables">
+<Accordion title="Show the 157 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -365,6 +365,8 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_AUTHENTICODE_HELPER`<br/>Default: `unset`<br/>Values: `test-defined absolute path`, `unset`<br/>Managed host: `ignore` | Carries the Authenticode PowerShell helper path to the native unsigned-PE regression fixture.<br/>**Read by:** `cli/tests/test_windows_installer_artifacts.py` |
 | `DEFENSECLAW_BOUNDED_DIGEST_ROOT`<br/>Default: `unset`<br/>Values: `absolute Windows path`, `unset`<br/>Managed host: `ignore` | Root directory the bounded artifact-digest test harness writes its managed.token fixture under.<br/>**Read by:** `cmd/defenseclaw/service_windows_test.go` |
 | `DEFENSECLAW_CISCO_CA_BUNDLE`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `<path to PEM bundle>`, `unset`<br/>Managed host: `ignore` | CI/test-only trust-root override for the POSIX Cisco Authenticode signature check in packaging/scripts/lib/assert-cisco-signature.sh.<br/>**Read by:** `packaging/scripts/lib/assert-cisco-signature.sh`, `.github/workflows/windows-deterministic-build.yml` |
+| `DEFENSECLAW_CLI_TEST_GUARDED_PARENT`<br/>Default: `unset`<br/>Values: `parent test process PID`, `unset`<br/>Managed host: `ignore` | Set by the top-level internal/cli test run to its own PID, so the helper child processes it starts with os.Args[0] inherit it and skip the TestMain process-state guard; a helper changes its priority class or environment on purpose and exits (GAP-0079).<br/>**Read by:** `internal/cli/testprocess_guard_test.go`, `internal/cli/testhost_windows_test.go` |
+| `DEFENSECLAW_CLI_TEST_REGISTRY_SANDBOX`<br/>Default: `unset`<br/>Values: `HKCU subkey under Software\DefenseClaw-test-`, `unset`<br/>Managed host: `ignore` | Passes the internal/cli Windows test run's HKCU sandbox key (Software\DefenseClaw-test-&lt;id>) to its helper child processes, so every registry write of the run lands in one per-run sandbox instead of the machine registry (GAP-0079).<br/>**Read by:** `internal/cli/testhost_windows_test.go` |
 | `DEFENSECLAW_CODEX_POLICY_ENTRY_PATH`<br/>Default: `unset`<br/>Values: `absolute test marker path`, `unset`<br/>Managed host: `ignore` | Test-only marker path used by the Codex effective-policy subprocess fixture to record helper entry.<br/>**Read by:** `internal/gateway/connector/codex_policy_windows_test.go` |
 | `DEFENSECLAW_CODEX_POLICY_GRANDCHILD_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the Codex policy grandchild fixture used to verify process-tree containment.<br/>**Read by:** `internal/gateway/connector/codex_policy_windows_test.go` |
 | `DEFENSECLAW_CODEX_POLICY_HANG_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the Codex policy subprocess fixture that deliberately blocks for timeout coverage.<br/>**Read by:** `internal/gateway/connector/codex_policy_test.go` |
