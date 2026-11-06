@@ -168,7 +168,7 @@ func snapshotTarget(root string, fullTree bool) (*TargetSnapshot, error) {
 					allHashes = append(allHashes, rel+":link-error:"+readErr.Error())
 					return nil
 				}
-				allHashes = append(allHashes, rel+":link:"+target)
+				allHashes = append(allHashes, rel+":link:"+target+":resolves:"+linkResolution(path, target))
 			}
 			return nil
 		}
@@ -195,10 +195,10 @@ func snapshotTarget(root string, fullTree bool) (*TargetSnapshot, error) {
 				// in the plugin snapshot without changing the legacy scope. A
 				// reparse entry that is not reported as a symlink, such as a
 				// Windows junction (ModeIrregular), still names a target:
-				// record it, so a retarget changes the snapshot.
+				// record it like a symlink, so a retarget changes the snapshot.
 				entry := rel + ":special:" + info.Mode().String()
 				if target, readErr := os.Readlink(path); readErr == nil {
-					entry += ":link:" + target
+					entry += ":link:" + target + ":resolves:" + linkResolution(path, target)
 				}
 				allHashes = append(allHashes, entry)
 			}
@@ -253,6 +253,85 @@ func snapshotTarget(root string, fullTree bool) (*TargetSnapshot, error) {
 	sort.Strings(snap.NetworkEndpoints)
 
 	return snap, nil
+}
+
+// Bounds that match the plugin admission walk of a link target.
+const (
+	linkResolutionMaxSteps = 256
+	linkResolutionMaxLinks = 40
+)
+
+// linkResolution describes everything plugin admission reads to validate a
+// link in the plugin tree: the text of every link on the way to its target,
+// including links outside the plugin root, the final location, and the
+// package manifest there. A change to any of them changes the plugin
+// snapshot, so an allowed baseline is not reused for a link whose validated
+// resolution changed.
+func linkResolution(link, target string) string {
+	var out strings.Builder
+	current := filepath.Dir(link)
+	if filepath.IsAbs(target) {
+		current = linkPathAnchor(target)
+	}
+	pending := linkPathNames(target)
+	for steps, links := 0, 0; len(pending) > 0; {
+		if steps++; steps > linkResolutionMaxSteps {
+			out.WriteString("|too-deep")
+			break
+		}
+		name := pending[0]
+		pending = pending[1:]
+		switch name {
+		case ".":
+			continue
+		case "..":
+			current = filepath.Dir(current)
+			continue
+		}
+		current = filepath.Join(current, name)
+		next, err := os.Readlink(current)
+		if err != nil {
+			continue
+		}
+		if links++; links > linkResolutionMaxLinks {
+			out.WriteString("|too-many-links")
+			break
+		}
+		out.WriteString("|" + current + "->" + next)
+		if filepath.IsAbs(next) {
+			current = linkPathAnchor(next)
+		} else {
+			current = filepath.Dir(current)
+		}
+		pending = append(linkPathNames(next), pending...)
+	}
+	resolved, err := filepath.EvalSymlinks(link)
+	if err != nil {
+		out.WriteString("|resolve-error:" + err.Error())
+		return out.String()
+	}
+	out.WriteString("|resolved:" + resolved)
+	if info, statErr := os.Stat(resolved); statErr == nil && info.IsDir() {
+		if h, hashErr := hashFile(filepath.Join(resolved, "package.json")); hashErr == nil {
+			out.WriteString("|manifest:" + h)
+		} else {
+			out.WriteString("|manifest-error:" + hashErr.Error())
+		}
+	}
+	return out.String()
+}
+
+// linkPathAnchor returns the volume and root of an absolute path.
+func linkPathAnchor(path string) string {
+	return filepath.VolumeName(path) + string(filepath.Separator)
+}
+
+// linkPathNames returns the names after the volume and root, unchanged, so
+// a name followed by ".." is still walked.
+func linkPathNames(path string) []string {
+	return strings.FieldsFunc(path[len(filepath.VolumeName(path)):], func(r rune) bool {
+		return r < 0x80 && os.IsPathSeparator(uint8(r))
+	})
 }
 
 func snapshotSkippedDir(name string) bool {
