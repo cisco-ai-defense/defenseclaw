@@ -27,13 +27,14 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
+import click
 import pytest
 from click.testing import CliRunner
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw import cowork
-from defenseclaw.commands import cmd_doctor, cmd_setup, cmd_status, cmd_uninstall
+from defenseclaw.commands import cmd_doctor, cmd_setup, cmd_setup_cowork, cmd_status, cmd_uninstall
 from defenseclaw.commands.cmd_setup import setup as setup_group
 from defenseclaw.config import PerConnectorGuardrailConfig
 from defenseclaw.inventory import claude_desktop
@@ -96,6 +97,32 @@ def _setup(app, *args: str, gateway=None, input: str | None = None):
 
 def _data_dir(app) -> str:
     return str(app.cfg.data_dir)
+
+
+def test_cowork_names_found_gateway_with_unsafe_acl(app) -> None:
+    reason = "refusing to run the gateway: ACL grants write access to untrusted SID S-1-5-32-545; Restore its ACL"
+    with (
+        patch.object(cmd_setup, "_gateway_lifecycle_executable", return_value=None),
+        patch.object(cmd_setup, "_refused_gateway_lifecycle_candidate", return_value=reason),
+    ):
+        with pytest.raises(click.ClickException) as exc:
+            cmd_setup_cowork._render_hooks(app.cfg)
+
+    assert "S-1-5-32-545" in str(exc.value)
+    assert "Restore its ACL" in str(exc.value)
+    assert "was not found" not in str(exc.value)
+
+
+def test_cowork_missing_gateway_keeps_install_guidance(app) -> None:
+    with (
+        patch.object(cmd_setup, "_gateway_lifecycle_executable", return_value=None),
+        patch.object(cmd_setup, "_refused_gateway_lifecycle_candidate", return_value=""),
+    ):
+        with pytest.raises(click.ClickException) as exc:
+            cmd_setup_cowork._render_hooks(app.cfg)
+
+    assert "was not found" in str(exc.value)
+    assert "Run the DefenseClaw installer" in str(exc.value)
 
 
 def test_plugin_zip_has_only_the_manifest_and_hooks() -> None:

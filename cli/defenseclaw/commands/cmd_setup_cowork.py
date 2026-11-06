@@ -85,11 +85,14 @@ def _render_hooks(cfg, *, allow_not_set_up: bool = False) -> dict | None:
     is not set up" returns None: it can build the plugin once that connector
     runs. Every other refusal stops setup before anything is written.
     """
-    from defenseclaw.commands.cmd_setup import _gateway_lifecycle_executable
+    from defenseclaw.commands.cmd_setup import _gateway_lifecycle_executable, _refused_gateway_lifecycle_candidate
     from defenseclaw.pinned_exec import UnsafePathError, run_pinned_executable
 
     executable = _gateway_lifecycle_executable()
     if not executable:
+        refused = _refused_gateway_lifecycle_candidate()
+        if refused:
+            raise click.ClickException(f"The Cowork plugin was not built: {refused}. Nothing was changed.")
         raise click.ClickException(
             "defenseclaw-gateway was not found, so the Cowork plugin cannot be built. "
             "Run the DefenseClaw installer, then defenseclaw setup cowork again."
