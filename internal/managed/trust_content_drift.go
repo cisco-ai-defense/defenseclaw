@@ -109,20 +109,28 @@ const (
 // owns is never given a trusted descriptor back in place). It reads the
 // object's own descriptor (AssessCanonical as kind) without writing and
 // returns a StandaloneContentDriftError that names the object and the way
-// out when an untrusted principal can write or owns it. It is nil off
-// standalone, for trusted-only drift, and for a missing or structurally bad
-// object, which the caller's own checks report.
+// out when an untrusted principal can write or owns it, or when the object
+// cannot be judged at all (an assessment error other than a missing object:
+// a descriptor nobody can read, a reparse point, a hard link), because a
+// repair of what was not judged would trust it blind (g582 review 4 F1). It
+// is nil off standalone, for trusted-only drift, and for a missing object.
 func RefuseStandaloneInPlaceRepair(path string, kind ObjectKind) error {
 	if !StandaloneRefusesContentDrift() {
-		return nil
-	}
-	result, err := AssessCanonical(path, kind, CanonicalOptions{Quiet: true})
-	if err != nil || result.Outcome != CanonicalBoundary {
 		return nil
 	}
 	recovery := standaloneInPlaceFileRecovery
 	if kind.Directory() {
 		recovery = standaloneInPlaceFolderRecovery
+	}
+	result, err := AssessCanonical(path, kind, CanonicalOptions{Quiet: true})
+	if err != nil {
+		return &StandaloneContentDriftError{
+			Err:      fmt.Errorf("cannot judge who can write or owns %s: %w", path, err),
+			Recovery: recovery,
+		}
+	}
+	if result.Outcome != CanonicalBoundary {
+		return nil
 	}
 	return &StandaloneContentDriftError{
 		Err:      fmt.Errorf("an untrusted principal can write or owns %s: %s", path, strings.Join(result.Drift, "; ")),
