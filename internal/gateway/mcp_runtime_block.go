@@ -18,12 +18,9 @@ package gateway
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"strings"
 
-	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
@@ -132,7 +129,7 @@ func (a *APIServer) mcpAccountRuntimeBlock(ctx context.Context, pe *enforce.Poli
 	}
 	home, _ := callerHomeForAssets(ctx)
 	for _, row := range rows {
-		if row.Actions.Runtime != "disable" || row.TargetName == server || row.SourcePath != row.TargetName {
+		if row.TargetName == server || !watcher.MCPAccountRuntimeDisabled(row) {
 			continue
 		}
 		connector := strings.ToLower(strings.TrimSpace(req.Connector))
@@ -143,14 +140,6 @@ func (a *APIServer) mcpAccountRuntimeBlock(ctx context.Context, pe *enforce.Poli
 		}
 		query := watcher.MCPAdmissionQuery{Connector: connector, Server: server, Home: home, CWD: req.callerCWD}
 		if !watcher.MCPAccountJournalServes(row.TargetName, query) {
-			continue
-		}
-		var snapshot *audit.SnapshotRow
-		snapshot, err = a.store.GetTargetSnapshot("mcp", row.TargetName)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return true, fmt.Sprintf("mcp server %q block check failed — failing closed: %v", server, err)
-		}
-		if !watcher.MCPAccountJournalServesSnapshot(row.TargetName, snapshot, query) {
 			continue
 		}
 		note := fmt.Sprintf("mcp server %q is disabled because its install admission rejected it", server)
