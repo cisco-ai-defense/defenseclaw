@@ -121,24 +121,26 @@ def classify_test_result(command: list[str], returncode: int, output: str) -> st
     return "UNCLASSIFIED_FAIL"
 
 
-def overlay_new_go_fixtures(repo: Path, worktree: Path, commit: str, base: str, directory: str) -> None:
-    """Bring fixtures introduced after the release into the old test tree."""
+def overlay_go_fixtures(repo: Path, worktree: Path, commit: str, directory: str) -> None:
+    """Run an old product with the test commit's complete package fixtures."""
     names = git(repo, "ls-tree", "-r", "--name-only", commit, "--", f"{directory}/testdata")
-    for name in names.splitlines():
-        exists_on_base = (
-            subprocess.run(
-                ["git", "-C", str(repo), "cat-file", "-e", f"{base}:{name}"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            ).returncode
-            == 0
+    if names:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree),
+                "restore",
+                "--source",
+                commit,
+                "--staged",
+                "--worktree",
+                "--",
+                f"{directory}/testdata",
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
         )
-        if exists_on_base:
-            continue
-        content = subprocess.check_output(["git", "-C", str(repo), "show", f"{commit}:{name}"])
-        target = worktree / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)
 
 
 def run_one(repo: Path, worktree: Path, commit: str, files: list[str], tests: list[str], base: str) -> str:
@@ -166,7 +168,7 @@ def run_one(repo: Path, worktree: Path, commit: str, files: list[str], tests: li
             )
         ]
         if names:
-            overlay_new_go_fixtures(repo, worktree, commit, base, directory)
+            overlay_go_fixtures(repo, worktree, commit, directory)
             commands.append(
                 [
                     "nice",
