@@ -804,10 +804,10 @@ func (a *openshellApplied) switchKey() string {
 	version := a.Version
 	if a.Install != config.EnterpriseOpenShellInstallSetup {
 		// Supported prerequisite pin changes replace nothing in an account.
-		// Moving an old exact pin across the floor does require a switch;
+		// Moving any old requirement across the floor does require a switch;
 		// keep a running legacy sandbox until OpenShell reports it stopped.
 		version = ""
-		if v, err := openshell.ParseVersion(a.Version); err == nil && openshell.CheckSandboxRelease(v) != nil {
+		if _, raised, possible := openshell.ManagedVersionPin(a.Version); raised || !possible {
 			version = "below-floor"
 		}
 	}

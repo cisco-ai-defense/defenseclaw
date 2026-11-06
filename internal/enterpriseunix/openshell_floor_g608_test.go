@@ -105,6 +105,78 @@ func TestGAP0608PrerequisiteFloorSwitchWaitsForSandboxes(t *testing.T) {
 	}
 }
 
+func TestGAP0608PrerequisiteRangeFloorSwitchWaitsForSandboxes(t *testing.T) {
+	for _, tc := range []struct {
+		name, applied, effective string
+		wantSwitch               bool
+	}{
+		{"legacy bounded range", ">=0.1.1 <0.2.0", ">=0.1.6 <0.2.0", true},
+		{"legacy open range", ">=0.1.5", ">=0.1.6", true},
+		{"supported range", ">=0.1.6 <0.2.0", ">=0.1.6 <0.2.0", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := gap0608Host(t, openshell.SupportedMin)
+			initial := sandboxConfig(t, "linux", true, map[string]any{
+				"install": "prerequisite", "driver": "docker", "version": tc.effective,
+			})
+			requireOK(t, h.ensure(initial))
+			state := h.env.loadOpenShellState()
+			state.Applied.Version = tc.applied
+			if err := h.env.saveOpenShellState(state); err != nil {
+				t.Fatal(err)
+			}
+			h.ops.status[h.alice.UID] = SandboxStatus{Active: true, Running: 1, Live: 1}
+			configured := sandboxConfig(t, "linux", true, map[string]any{
+				"install": "prerequisite", "driver": "docker", "version": tc.applied,
+			})
+			r := h.ensure(configured)
+			requireOK(t, r)
+			state = h.env.loadOpenShellState()
+			if state.Applied == nil || state.Applied.Version != tc.effective {
+				t.Fatalf("applied = %+v, want version %q", state.Applied, tc.effective)
+			}
+			entry, waiting := state.Pending[fmt.Sprint(h.alice.UID)]
+			if waiting != tc.wantSwitch || len(h.ops.stopped()) != 0 {
+				t.Fatalf("pending = %+v, waiting %v, stops %v", entry, waiting, h.ops.stopped())
+			}
+			if !tc.wantSwitch {
+				return
+			}
+			if entry.Kind != "switch" || entry.Sandboxes != 1 || entry.From == nil || entry.From.Version != tc.applied ||
+				!strings.Contains(entry.Reason, fmt.Sprintf("version %q -> %q", tc.applied, tc.effective)) {
+				t.Fatalf("pending transition = %+v", entry)
+			}
+			h.ops.status[h.alice.UID] = SandboxStatus{Active: true}
+			requireOK(t, h.ensure(configured))
+			if _, waiting := h.env.loadOpenShellState().Pending[fmt.Sprint(h.alice.UID)]; waiting {
+				t.Error("the idle account still has a pending range transition")
+			}
+		})
+	}
+}
+
+func TestGAP0608PrerequisiteBreakingReleaseAdvice(t *testing.T) {
+	for _, tc := range []struct {
+		release, want string
+		allowed       bool
+	}{
+		{"0.0.36", "back up what you need", false},
+		{"0.0.37", "upgrade it in place", false},
+		{"0.1.5", "runs no DefenseClaw sandbox", false},
+		{"0.1.6", "", true},
+	} {
+		v, err := openshell.ParseVersion(tc.release)
+		if err != nil {
+			t.Fatal(err)
+		}
+		allowed, why := versionAllowed("", v)
+		if allowed != tc.allowed || (tc.want == "" && why != "") || (tc.want != "" && !strings.Contains(why, tc.want)) ||
+			strings.Contains(why, "clean up with the old CLI") != (tc.release == "0.0.36") {
+			t.Errorf("%s: allowed=%v, advice=%q", tc.release, allowed, why)
+		}
+	}
+}
+
 func TestGAP0608ImpossiblePrerequisiteRangeKeepsAppliedState(t *testing.T) {
 	h := gap0608Host(t, openshell.SupportedMin)
 	requireOK(t, h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "prerequisite", "driver": "docker", "version": "0.1.6"})))
