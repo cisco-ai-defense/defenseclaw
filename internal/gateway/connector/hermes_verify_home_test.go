@@ -449,7 +449,7 @@ func TestManagedHermesReleasesTheEarlierDefaultHome(t *testing.T) {
 	}
 	owned := func(config string) bool {
 		t.Helper()
-		hooks, approvals, err := hermesHomeHoldsOwnedEntries(config, hookScript, command)
+		hooks, approvals, err := hermesHomeHoldsOwnedEntries(config, hookScript)
 		if err != nil {
 			t.Fatal(err)
 		}
