@@ -108,11 +108,11 @@ func TestGX054ProtectedMoveNamesAndToolMapping(t *testing.T) {
 		protected bool
 	}{
 		{"tar -xf missing.tar -C app && mv app/pkg-1.0 app/pkg", false},
-		{"tar -xf missing.tar -C app && mv app/authorized_keys app/pkg", true},
-		{"tar -xf missing.tar -C app && mv app/.ssh app/pkg", true},
-		{"tar -xf missing.tar -C app && mv --suffix=_keys authorized app/pkg", true},
-		{"F=app/authorized_keys; tar -xf missing.tar -C app && mv \"$F\" app/pkg", true},
-		{"D=app/authorized_keys; tar -xf missing.tar -C app && mv app/pkg \"$D\"", true},
+		{"tar -xf missing.tar -C app && mv app/authorized_keys app/pkg", false},
+		{"tar -xf missing.tar -C app && mv app/.ssh app/pkg", false},
+		{"tar -xf missing.tar -C app && mv --suffix=_keys authorized app/pkg", false},
+		{"F=app/authorized_keys; tar -xf missing.tar -C app && mv \"$F\" app/pkg", false},
+		{"D=app/authorized_keys; tar -xf missing.tar -C app && mv app/pkg \"$D\"", false},
 		{"tar -xf missing.tar -C app && mv conf/config.sample conf/config", false},
 		{"tar -czf out.tar conf && mv conf/config.sample conf/config", false},
 		{"tar -tf out.tar && mv conf/rc.sample conf/rc", false},
@@ -120,7 +120,7 @@ func TestGX054ProtectedMoveNamesAndToolMapping(t *testing.T) {
 		{"tar -xf missing.tar -C app && mv conf/config.sample ~/.ssh/config", true},
 		{"tar -xf missing.tar -C app && mv ~/.ssh/environment conf/environment", true},
 	} {
-		if got := ProtectedArchiveMoveName(row.command, "/home/test/project", "/home/test"); got != row.protected {
+		if got := ProtectedArchiveMoveName(row.command, "/home/test/project", "/home/test", nil); got != row.protected {
 			t.Errorf("%q: got %t", row.command, got)
 		}
 	}

@@ -11,6 +11,7 @@ require (
 	github.com/godbus/dbus/v5 v5.2.2
 	github.com/google/cel-go v0.30.0
 	github.com/google/uuid v1.6.0
+	github.com/klauspost/compress v1.18.6
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/maximhq/bifrost/core v1.7.3
 	github.com/open-policy-agent/opa v1.15.2
@@ -23,6 +24,7 @@ require (
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
 	github.com/tc-hib/winres v0.2.1
+	github.com/ulikunitz/xz v0.5.15
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.43.0
@@ -100,7 +102,6 @@ require (
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/invopop/jsonschema v0.13.0 // indirect
-	github.com/klauspost/compress v1.18.6 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/lestrrat-go/blackmagic v1.0.4 // indirect

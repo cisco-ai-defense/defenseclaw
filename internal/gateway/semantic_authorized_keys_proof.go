@@ -1110,6 +1110,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				strings.HasPrefix(operand, hookpaths.CdEnterableFactPrefix) ||
 				strings.HasPrefix(operand, hookpaths.TarPlainFactPrefix) ||
 				strings.HasPrefix(operand, hookpaths.TarLinkFactPrefix) ||
+				strings.HasPrefix(operand, hookpaths.TarProtectedMemberFactPrefix) ||
 				strings.HasPrefix(operand, hookpaths.UnreadArchiveTargetPrefix) ||
 				directoryFact && (changedDirectory ||
 					canonicalSemanticPath(resolved) == canonicalSemanticPath(filepath.Join(facts.ActiveHome, ".ssh"))) ||
@@ -1376,12 +1377,21 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		return true
 	}
 	links = hookpaths.CommandLinksWithFactsForTier(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets, request.balancedArchiveScope)
-	if !request.balancedArchiveScope && request.ProtectedHomeHook &&
-		hookpaths.HomeSpelledRename(input.Command) &&
-		len(links.UnreadArchiveRenameOperands(opaqueFacts)) != 0 {
+	if !request.balancedArchiveScope &&
+		hookpaths.UnverifiableArchiveDestinationBeforeWrite(input.Command, input.CWD, facts.ActiveHome) {
 		return true
 	}
-	if hookpaths.ProtectedArchiveMoveName(input.Command, input.CWD, facts.ActiveHome) {
+	if !request.balancedArchiveScope && request.ProtectedHomeHook && hookpaths.HomeSpelledWriter(input.Command) {
+		for _, path := range hookpaths.HomeSpelledWriteOperands(input.Command, input.CWD, facts.ActiveHome) {
+			if clientTargets[hookpaths.UnreadArchiveTargetPrefix+path] != "" || links.UnreadArchiveTargetOnly(path, opaqueFacts) {
+				return true
+			}
+		}
+		if len(links.UnreadArchiveRenameOperands(opaqueFacts)) != 0 {
+			return true
+		}
+	}
+	if hookpaths.ProtectedArchiveMoveName(input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets) {
 		return true
 	}
 	safeRedirects = hookpaths.SafeShellRedirectOccurrencesWithFacts(input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)

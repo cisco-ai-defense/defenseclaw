@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/klauspost/compress/zstd"
+	"github.com/ulikunitz/xz"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -90,14 +92,14 @@ func tarArchiveHoldsNoLink(program string, args []string, static []bool, cwd, co
 
 // tarArchiveLinkEvidence records or reads positive scope-retaining tar evidence.
 // Unlike a plain proof, a positive reading is useful in any command shape.
-func tarArchiveLinkEvidence(program string, args []string, static []bool, cwd string, facts map[string]string, record bool) bool {
+func tarArchiveLinkEvidence(program string, args []string, static []bool, cwd string, file *syntax.File, extraction *syntax.CallExpr, home string, facts map[string]string, record bool) bool {
 	if !strings.HasSuffix(program, "tar") || !filepath.IsAbs(cwd) {
 		return false
 	}
 	if _, _, extract, ok := tarScan(args, static, cwd); !ok || !extract {
 		return false
 	}
-	for _, archive := range tarArchiveWords(args, static) {
+	for _, archive := range tarArchiveSources(args, static, file, extraction, home) {
 		if archive == "" || archive == "-" || strings.ContainsAny(archive, "*?[$`") {
 			continue
 		}
@@ -107,12 +109,158 @@ func tarArchiveLinkEvidence(program string, args []string, static []bool, cwd st
 		}
 		if tarArchiveKind(path) == 2 {
 			if record && facts != nil {
+				for member, target := range tarProtectedLinkMembers(path, archiveDestination(program, args, static, cwd), home) {
+					facts[TarProtectedMemberFactPrefix+member] = target
+				}
+			}
+			if record && facts != nil {
 				facts[TarLinkFactPrefix+path] = "1"
 			}
 			return true
 		}
 	}
 	return false
+}
+
+// tarProtectedLinkMembers returns only members whose link text reaches the
+// active SSH tree. The archive is bounded by the same byte and member caps as
+// the plain reader. An incomplete read supplies no clearing evidence.
+func tarProtectedLinkMembers(path, destination, home string) map[string]string {
+	result := make(map[string]string)
+	if home == "" || destination == "" {
+		return result
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxTarPlainBytes {
+		return result
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return result
+	}
+	defer f.Close()
+	buffered := bufio.NewReader(io.LimitReader(f, maxTarPlainBytes))
+	magic, _ := buffered.Peek(6)
+	var stream io.Reader = buffered
+	switch {
+	case len(magic) >= 2 && magic[0] == 0x1f && magic[1] == 0x8b:
+		zipped, err := gzip.NewReader(buffered)
+		if err != nil {
+			return result
+		}
+		defer zipped.Close()
+		stream = zipped
+	case len(magic) >= 3 && string(magic[:3]) == "BZh":
+		stream = bzip2.NewReader(buffered)
+	case len(magic) >= 6 && string(magic[:6]) == "\xfd7zXZ\x00":
+		decoded, err := xz.NewReader(buffered)
+		if err != nil {
+			return result
+		}
+		stream = decoded
+	case len(magic) >= 4 && string(magic[:4]) == "\x28\xb5\x2f\xfd":
+		decoded, err := zstd.NewReader(buffered, zstd.WithDecoderConcurrency(1))
+		if err != nil {
+			return result
+		}
+		defer decoded.Close()
+		stream = decoded
+	}
+	reader := tar.NewReader(&boundedReader{r: stream, n: maxTarPlainBytes})
+	for count := 0; count < maxTarPlainMembers; count++ {
+		header, err := reader.Next()
+		if err == io.EOF {
+			return result
+		}
+		if err != nil {
+			return result
+		}
+		if header.Typeflag != tar.TypeSymlink && header.Typeflag != tar.TypeLink {
+			continue
+		}
+		name := filepath.ToSlash(header.Name)
+		if name == "" || filepath.IsAbs(name) || strings.Contains(name, "\\") ||
+			strings.HasPrefix(name, "../") || strings.Contains(name, "/../") {
+			continue
+		}
+		member := filepath.Join(destination, name)
+		var target string
+		if filepath.IsAbs(header.Linkname) {
+			target = filepath.Clean(header.Linkname)
+		} else if header.Typeflag == tar.TypeLink {
+			target = filepath.Join(destination, header.Linkname)
+		} else {
+			target = filepath.Join(filepath.Dir(member), header.Linkname)
+		}
+		ssh := filepath.Join(home, ".ssh")
+		if resolved, ok := ResolveWriteTarget(target); ok {
+			target = resolved
+		}
+		if target == ssh || strings.HasPrefix(target, ssh+string(filepath.Separator)) {
+			result[member] = target
+		}
+	}
+	return result
+}
+
+// tarArchiveSources follows the static file supplying tar's input. A tar
+// option, input redirection and a producer in the same pipeline are all
+// readings of the same archive bytes.
+func tarArchiveSources(args []string, static []bool, file *syntax.File, extraction *syntax.CallExpr, home string) []string {
+	archives := tarArchiveWords(args, static)
+	if file == nil || extraction == nil {
+		return archives
+	}
+	stdin := len(archives) == 0
+	for _, archive := range archives {
+		stdin = stdin || archive == "-" || archive == "/dev/stdin"
+	}
+	if !stdin {
+		return archives
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		stmt, ok := node.(*syntax.Stmt)
+		if !ok || stmt.Cmd != syntax.Command(extraction) {
+			return true
+		}
+		for _, redir := range stmt.Redirs {
+			if redir.Op != syntax.RdrIn || redir.Word == nil {
+				continue
+			}
+			if source, fixed := StaticWord(redir.Word, home); fixed {
+				archives = append(archives, source)
+			}
+		}
+		return false
+	})
+	// Only a pipe whose right side contains this tar call supplies stdin.
+	syntax.Walk(file, func(node syntax.Node) bool {
+		pipe, ok := node.(*syntax.BinaryCmd)
+		if !ok || pipe.Op != syntax.Pipe || extraction.Pos().Offset() < pipe.Y.Pos().Offset() || extraction.End().Offset() > pipe.Y.End().Offset() {
+			return true
+		}
+		syntax.Walk(pipe.X, func(node syntax.Node) bool {
+			call, ok := node.(*syntax.CallExpr)
+			if !ok || len(call.Args) == 0 {
+				return true
+			}
+			program, fixed := StaticWord(call.Args[0], home)
+			if !fixed {
+				return true
+			}
+			switch programBase(program) {
+			case "cat", "gzip", "zcat", "xz", "zstd", "bzip2", "bzcat", "xzcat", "zstdcat":
+				for _, word := range call.Args[1:] {
+					if source, fixed := StaticWord(word, home); fixed && source != "-" && !strings.HasPrefix(source, "-") {
+						archives = append(archives, source)
+					}
+				}
+			}
+			return true
+		})
+		return false
+	})
+	return archives
 }
 
 // tarArchiveWords collects static file options without requiring that the
@@ -179,10 +327,19 @@ func tarArchiveWords(args []string, static []bool) []string {
 // hard-linked name of that archive. Redirection substitutions on the tar
 // statement run before tar opens its archive, so their calls count too.
 func tarArchivePriorLinkedRewrite(file *syntax.File, extraction *syntax.CallExpr, args []string, static []bool, cwd, home string) bool {
-	archive, ok := tarArchiveWord(args, static)
-	if !ok || archive == "" || archive == "-" || file == nil || extraction == nil {
+	if file == nil || extraction == nil {
 		return false
 	}
+	for _, archive := range tarArchiveSources(args, static, file, extraction, home) {
+		if archive != "" && archive != "-" && archive != "/dev/stdin" &&
+			tarArchivePriorLinkedRewriteNamed(file, extraction, archive, cwd, home) {
+			return true
+		}
+	}
+	return false
+}
+
+func tarArchivePriorLinkedRewriteNamed(file *syntax.File, extraction *syntax.CallExpr, archive, cwd, home string) bool {
 	archivePath := OperandPath(archive, cwd)
 	archiveInfo, _ := os.Stat(archivePath)
 	var redirectRanges [][2]syntax.Pos
@@ -210,12 +367,52 @@ func tarArchivePriorLinkedRewrite(file *syntax.File, extraction *syntax.CallExpr
 	linkedRewrite := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		candidate, ok := node.(*syntax.CallExpr)
-		if !ok || candidate == extraction || !prior(candidate) || len(candidate.Args) < 3 {
+		if !ok || candidate == extraction || !prior(candidate) || len(candidate.Args) == 0 {
 			return true
 		}
 		program, fixed := StaticWord(candidate.Args[0], home)
+		if fixed && programBase(program) == "dd" {
+			source, destination := "", ""
+			for _, word := range candidate.Args[1:] {
+				value, static := StaticWord(word, home)
+				if !static {
+					return true
+				}
+				if strings.HasPrefix(value, "if=") {
+					source = strings.TrimPrefix(value, "if=")
+				}
+				if strings.HasPrefix(value, "of=") {
+					destination = strings.TrimPrefix(value, "of=")
+				}
+			}
+			if source != "" && destination != "" && tarArchiveKind(OperandPath(source, cwd)) == 2 &&
+				OperandPath(destination, cwd) == archivePath {
+				linkedRewrite = true
+				return false
+			}
+			return true
+		}
+		if fixed && programBase(program) == "tee" {
+			for _, source := range tarArchiveSources(nil, nil, file, candidate, home) {
+				if tarArchiveKind(OperandPath(source, cwd)) != 2 {
+					continue
+				}
+				for _, word := range candidate.Args[1:] {
+					if dest, static := StaticWord(word, home); static && !strings.HasPrefix(dest, "-") &&
+						OperandPath(dest, cwd) == archivePath {
+						linkedRewrite = true
+						return false
+					}
+				}
+			}
+			return true
+		}
+		if len(candidate.Args) < 3 {
+			return true
+		}
 		if !fixed || programBase(program) != "cp" && programBase(program) != "gcp" &&
-			programBase(program) != "mv" && programBase(program) != "gmv" && programBase(program) != "install" {
+			programBase(program) != "mv" && programBase(program) != "gmv" && programBase(program) != "install" &&
+			programBase(program) != "ln" && programBase(program) != "gln" {
 			return true
 		}
 		words := make([]string, 0, len(candidate.Args)-1)
@@ -258,6 +455,36 @@ func tarArchivePriorLinkedRewrite(file *syntax.File, extraction *syntax.CallExpr
 			if info, err := os.Stat(destinationPath); err == nil && archiveInfo != nil && os.SameFile(info, archiveInfo) {
 				linkedRewrite = true
 				return false
+			}
+		}
+		return true
+	})
+	// A shell redirection can write the archive path from a readable source.
+	syntax.Walk(file, func(node syntax.Node) bool {
+		stmt, ok := node.(*syntax.Stmt)
+		if !ok || stmt.Pos().Offset() >= extraction.Pos().Offset() || stmt.Cmd == syntax.Command(extraction) {
+			return true
+		}
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) < 2 {
+			return true
+		}
+		program, fixed := StaticWord(call.Args[0], home)
+		if !fixed || programBase(program) != "cat" {
+			return true
+		}
+		for _, word := range call.Args[1:] {
+			source, fixed := StaticWord(word, home)
+			if !fixed || tarArchiveKind(OperandPath(source, cwd)) != 2 {
+				continue
+			}
+			for _, redir := range stmt.Redirs {
+				if redir.Op != syntax.RdrOut || redir.Word == nil {
+					continue
+				}
+				if dest, fixed := StaticWord(redir.Word, home); fixed && OperandPath(dest, cwd) == archivePath {
+					linkedRewrite = true
+				}
 			}
 		}
 		return true
@@ -346,7 +573,7 @@ func tarArchiveKind(path string) int {
 	}
 	defer file.Close()
 	buffered := bufio.NewReader(io.LimitReader(file, maxTarPlainBytes))
-	magic, _ := buffered.Peek(3)
+	magic, _ := buffered.Peek(6)
 	var stream io.Reader = buffered
 	switch {
 	case len(magic) >= 2 && magic[0] == 0x1f && magic[1] == 0x8b:
@@ -356,8 +583,21 @@ func tarArchiveKind(path string) int {
 		}
 		defer zipped.Close()
 		stream = zipped
-	case len(magic) == 3 && string(magic) == "BZh":
+	case len(magic) >= 3 && string(magic[:3]) == "BZh":
 		stream = bzip2.NewReader(buffered)
+	case len(magic) >= 6 && string(magic[:6]) == "\xfd7zXZ\x00":
+		decoded, err := xz.NewReader(buffered)
+		if err != nil {
+			return 0
+		}
+		stream = decoded
+	case len(magic) >= 4 && string(magic[:4]) == "\x28\xb5\x2f\xfd":
+		decoded, err := zstd.NewReader(buffered, zstd.WithDecoderConcurrency(1))
+		if err != nil {
+			return 0
+		}
+		defer decoded.Close()
+		stream = decoded
 	}
 	reader := tar.NewReader(&boundedReader{r: stream, n: maxTarPlainBytes})
 	members := 0
