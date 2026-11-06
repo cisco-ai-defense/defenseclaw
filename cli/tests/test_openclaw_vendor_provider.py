@@ -412,6 +412,7 @@ def test_r109_g610_peer_package_provenance_matrix(tmp_path, monkeypatch) -> None
     assert not _high_rules(benign)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell wrappers")
 @requires_symlink_privilege
 @pytest.mark.parametrize("wrapper_form", (
     "exec", "set-e", "inline-comment", "shebang-option", "package-local",
