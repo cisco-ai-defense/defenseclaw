@@ -86,7 +86,7 @@ func TestWindowsChangeSpoolParentDescriptorForEveryCreationStep(t *testing.T) {
 }
 
 func TestWindowsFirstChangeEventAndReservationKeepCanonicalACLs(t *testing.T) {
-	if !windowsEnterpriseIsElevated() {
+	if !testTokenIsElevated() {
 		t.Skip("setting the Administrators owner requires elevation")
 	}
 	const sid = "S-1-5-80-1-2-3-4-5"
@@ -430,7 +430,7 @@ func TestWindowsAnchorsLockRefusalRecordsOneChangeEvent(t *testing.T) {
 // The real Windows creator must stamp both directories, including the
 // protected flag, on a never-bundled install and on an inherited parent.
 func TestWindowsChangeSpoolProtectsTheBundleParent(t *testing.T) {
-	if !windowsEnterpriseIsElevated() {
+	if !testTokenIsElevated() {
 		t.Skip("setting the Administrators owner requires elevation")
 	}
 	service, err := managed.WindowsServiceAccountSID(`NT SERVICE\` + managed.StandaloneWindowsGatewaySvc)

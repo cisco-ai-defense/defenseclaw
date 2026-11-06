@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -60,9 +61,19 @@ func diffTestProcessState(before, after testProcessState) []string {
 	return changes
 }
 
+// testProcessGuardChildEnv marks the test binary's own child processes (the
+// helper processes some tests start with os.Args[0]). A helper changes the
+// process state on purpose (its priority class, its environment) and exits,
+// so only the top-level run is guarded.
+const testProcessGuardChildEnv = "DEFENSECLAW_CLI_TEST_GUARDED_PARENT"
+
 // guardTestProcessState fails the run when a test left the process state
 // changed: every test after it, in any order, inherited it (GAP-0079).
 func guardTestProcessState() func() error {
+	if os.Getenv(testProcessGuardChildEnv) != "" {
+		return func() error { return nil }
+	}
+	_ = os.Setenv(testProcessGuardChildEnv, strconv.Itoa(os.Getpid()))
 	before := readTestProcessState()
 	return func() error {
 		changes := diffTestProcessState(before, readTestProcessState())

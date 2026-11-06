@@ -183,7 +183,9 @@ func TestLauncherTUIPointsToTheManagedDailyView(t *testing.T) {
 }
 
 func TestLauncherHelpShowsOnlySandbox(t *testing.T) {
-	for _, args := range [][]string{nil, {"--help"}, {"help"}} {
+	// No arguments is an empty list: a nil list makes cobra read the test
+	// binary's own command line (GAP-0079).
+	for _, args := range [][]string{{}, {"--help"}, {"help"}} {
 		var ran []string
 		root := launcherTestRoot(&ran)
 		var stdout, stderr bytes.Buffer

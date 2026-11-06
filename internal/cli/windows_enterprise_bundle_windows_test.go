@@ -433,7 +433,7 @@ func TestWindowsBundleVersionACLGrantsServiceReadOnly(t *testing.T) {
 }
 
 func TestWindowsBundleReceiptsDirectoryCreatedProtected(t *testing.T) {
-	if !windowsEnterpriseIsElevated() {
+	if !testTokenIsElevated() {
 		t.Skip("setting the Administrators owner requires elevation")
 	}
 	path := filepath.Join(t.TempDir(), "install", enterprisebundle.ReceiptsDirName)
@@ -470,7 +470,7 @@ func TestWindowsBundleReceiptsDirectoryCreatedProtected(t *testing.T) {
 }
 
 func TestWindowsBundlePublicReceiptEventsCreatedProtected(t *testing.T) {
-	if !windowsEnterpriseIsElevated() {
+	if !testTokenIsElevated() {
 		t.Skip("setting the Administrators owner requires elevation")
 	}
 	const sid = "S-1-5-80-1-2-3-4-5"
@@ -547,7 +547,7 @@ func TestWindowsBundlePublicReceiptEventsCreatedProtected(t *testing.T) {
 }
 
 func TestWindowsBundleInheritedDirectoriesRepairExactACL(t *testing.T) {
-	if !windowsEnterpriseIsElevated() {
+	if !testTokenIsElevated() {
 		t.Skip("setting the Administrators owner requires elevation")
 	}
 	const sid = "S-1-5-80-1-2-3-4-5"
@@ -608,7 +608,7 @@ func TestWindowsBundleInheritedDirectoriesRepairExactACL(t *testing.T) {
 }
 
 func TestWindowsBundleStageDirectoryRepeatedCreationRepairsExactACL(t *testing.T) {
-	if !windowsEnterpriseIsElevated() {
+	if !testTokenIsElevated() {
 		t.Skip("setting the Administrators owner requires elevation")
 	}
 	root := filepath.Join(t.TempDir(), ".staging-test")

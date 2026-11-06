@@ -23,6 +23,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // isolateTestHost keeps the package's tests off the computer's own managed
@@ -46,6 +47,14 @@ func isolateTestHost() func() {
 	// other two machine signals the outage mode reads.
 	managedHostWindowsMarkerUncertain = func() bool { return false }
 	secureClientHost = func() bool { return false }
+	// GAP-0079: the computer's own deployment record reads as absent, as on
+	// a build box. Every "is a standalone deployment installed" reader
+	// (secret and anchor change refusals, activation, bundle status) goes
+	// through it; on a managed computer a secret test recorded its refused
+	// change events in the real change spool.
+	windowsEnterpriseRecordInspector = func(profile string) (winpath.EnterpriseDeployment, error) {
+		return winpath.EnterpriseDeployment{Profile: profile, State: winpath.EnterpriseDeploymentAbsent}, nil
+	}
 	pinTestProcessIdentity()
 	dir, err := os.MkdirTemp("", "defenseclaw-cli-test-")
 	if err != nil {
@@ -297,6 +306,12 @@ func isolateWindowsEnterpriseHostReaders(t *testing.T) {
 	windowsEnterpriseDiscoveryHomeDirs = func() ([]string, error) { return nil, nil }
 }
 
+// testTokenIsElevated reports whether the test binary's own token is
+// elevated. A fixture that needs a privilege (an Administrators owner) asks
+// the real token; windowsEnterpriseIsElevated answers for the product and is
+// pinned (pinTestProcessIdentity).
+func testTokenIsElevated() bool { return windows.GetCurrentProcessToken().IsElevated() }
+
 // skipIfLocalSystem skips a test whose fixture cannot hold when it runs as
 // LocalSystem, saying why.
 func skipIfLocalSystem(t *testing.T, why string) {
@@ -352,6 +367,13 @@ func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 	// The no-op writers (bundle marker sync, start-mode restore, runtime
 	// folder repair, bin cleanup) are not called here: on a regression they
 	// would change the computer. The TestMain registry guard catches them.
+
+	// GAP-0079: the computer's own deployment record is not read.
+	for _, profile := range []string{managed.ProfileStandalone, managed.ProfileSecureClient} {
+		if deployment, err := windowsEnterpriseDeploymentInspector(profile); err != nil || deployment.State != winpath.EnterpriseDeploymentAbsent {
+			t.Fatalf("the %s deployment record of the computer is read: %+v %v", profile, deployment, err)
+		}
+	}
 
 	// GAP-0079: the identity is pinned.
 	if !windowsEnterpriseIsElevated() || !windowsSecretIsElevated() || !windowsCoworkElevated() ||
