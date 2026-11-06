@@ -962,6 +962,17 @@ func clearWindowsTargetsManifestRestrictiveAttributes(path string) error {
 // tests replace it.
 var windowsTargetsManifestParentRefusal = managed.RefuseStandaloneInPlaceRepair
 
+// windowsTargetsManifestStandaloneProtect stamps the AdminDirectory contract
+// on the hook guardian folder through managed.StampStandaloneTrustedObject;
+// tests replace it.
+var windowsTargetsManifestStandaloneProtect = func(path string, directory bool) error {
+	kind, sddl := managed.ObjectAdminFile, windowsTargetsManifestAdminFileSDDL
+	if directory {
+		kind, sddl = managed.ObjectAdminDirectory, windowsTargetsManifestAdminDirectorySDDL
+	}
+	return managed.StampStandaloneTrustedObject(path, kind, sddl)
+}
+
 // ensureWindowsTargetsManifestParentProtected is deliberately repair-on-drift,
 // not stamp-on-every-tick. AVC may replace the DefenseClaw-owned parent ACL
 // after installation; the LocalSystem enumerator can restore the exact
@@ -978,7 +989,13 @@ func ensureWindowsTargetsManifestParentProtected(path string) error {
 		return fmt.Errorf("protected hook guardian manifest parent was not repaired: %w", errors.Join(driftErr, refused))
 	}
 
-	if err := windowsTargetsManifestProtect(path, true); err != nil {
+	protect := windowsTargetsManifestProtect
+	if windowsTargetsManifestRefusesContentDrift() {
+		// The refusal above is a read-only check; the stamp judges the
+		// folder again on the handle it writes (g582 review 6 S1).
+		protect = windowsTargetsManifestStandaloneProtect
+	}
+	if err := protect(path, true); err != nil {
 		return fmt.Errorf(
 			"repair protected hook guardian manifest parent: %w",
 			errors.Join(driftErr, err),
