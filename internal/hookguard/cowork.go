@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/winowner"
 )
 
 // CoworkSubcommand is the account plugin's native Windows entrypoint. Paths
@@ -63,10 +65,22 @@ func CoworkUninstalledJSON(event string, notice bool) string {
 	return string(data)
 }
 
+// coworkOwnersTrusted applies the Windows owner trust set to the removal
+// marker and the folder that holds it (cowork-1-0-8 GAP-0085). The uninstall
+// writes no marker into a folder whose owner is outside the set, and the
+// guard ignores one found there: whoever owns a folder controls it, and could
+// otherwise rename the data folder away and leave a marker so that Cowork
+// looked uninstalled. A marker another account planted is owned by that
+// account (an account cannot give a file it creates to someone else), so it
+// is ignored too, and the guard keeps running the installed launcher.
+func coworkOwnersTrusted(markerOwner, folderOwner, current string) bool {
+	return winowner.Trusted(markerOwner, current) && winowner.Trusted(folderOwner, current)
+}
+
 func coworkRemovalComplete(dataDir string) bool {
 	marker, installed := CoworkRemovalPaths(dataDir)
 	info, err := os.Lstat(marker)
-	if err != nil || !info.Mode().IsRegular() {
+	if err != nil || !info.Mode().IsRegular() || !coworkMarkerOwnerTrusted(marker) {
 		return false
 	}
 	for _, path := range installed {
