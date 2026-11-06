@@ -14,10 +14,10 @@ import "github.com/defenseclaw/defenseclaw/internal/actionfacts"
 // key rules (gas-ux-r1 GAP-0076). Only what a reading proves counts
 // (withOverLimitTwinFindings): a reading never removes a finding of the
 // call.
-func unknownKeyTwinRequests(request trustedActionRequest, facts actionfacts.Facts) []trustedActionRequest {
-	twins, _ := actionfacts.UnknownKeyTwins(request.Input, facts)
+func unknownKeyTwinRequests(request trustedActionRequest, facts actionfacts.Facts) ([]trustedActionRequest, bool) {
+	twins, overflow := actionfacts.UnknownKeyTwins(request.Input, facts)
 	if len(twins) == 0 {
-		return nil
+		return nil, overflow
 	}
 	out := make([]trustedActionRequest, 0, len(twins))
 	for _, reading := range twins {
@@ -28,5 +28,5 @@ func unknownKeyTwinRequests(request trustedActionRequest, facts actionfacts.Fact
 		twin.record, twin.recordTelemetry = nil, nil
 		out = append(out, twin)
 	}
-	return out
+	return out, overflow
 }

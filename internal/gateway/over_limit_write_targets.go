@@ -42,7 +42,7 @@ func appendTrustedWriteTargetFindings(
 	request trustedActionRequest,
 	facts actionfacts.Facts,
 ) []RuleFinding {
-	if request.UnknownKeyPossibleOverflow || actionfacts.UnknownKeyTargetOverflow(request.Input, facts) {
+	if request.UnknownKeyPossibleOverflow {
 		findings = appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, request, facts)
 		return appendUnknownKeyOverflowFinding(findings, generation, request)
 	}

@@ -432,7 +432,9 @@ func dispatchTrustedAction(
 	}
 	// A file-tool call with an argument key outside its reviewed schema is
 	// judged as each reading the harness may run (gas-ux-r1 GAP-0076).
-	for _, twin := range unknownKeyTwinRequests(request, facts) {
+	twins, overflow := unknownKeyTwinRequests(request, facts)
+	request.UnknownKeyPossibleOverflow = request.UnknownKeyPossibleOverflow || overflow
+	for _, twin := range twins {
 		defer func() {
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
 		}()
