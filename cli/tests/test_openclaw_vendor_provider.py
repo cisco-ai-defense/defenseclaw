@@ -8,9 +8,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 from types import SimpleNamespace
 
 import pytest
+from defenseclaw import hermes_skills
 from defenseclaw.commands.cmd_plugin import _build_scan_options
 from defenseclaw.enforce import asset_lists
 from defenseclaw.scanner.plugin_scanner import vendor_identity
@@ -484,6 +486,116 @@ def test_r109_g610_cross_volume_peer_is_outside_provider(tmp_path, monkeypatch) 
             assert ("SRC-EXEC" in high) is (profile == "strict" or not possible), (label, profile)
             visible = {f.rule_id for f in result.findings if f.severity == "INFO"}
             assert ("VENDOR-PEER-POSSIBLE" in visible) is (possible and profile != "strict")
+
+
+class _JunctionStat:
+    """``lstat`` of a Windows directory junction: a mount-point directory."""
+
+    def __init__(self, info) -> None:
+        self._info = info
+        self.st_mode = (info.st_mode & ~stat.S_IFMT(info.st_mode)) | stat.S_IFDIR
+        self.st_file_attributes = (
+            stat.FILE_ATTRIBUTE_DIRECTORY | stat.FILE_ATTRIBUTE_REPARSE_POINT
+        )
+        self.st_reparse_tag = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003)
+
+    def __getattr__(self, name):
+        return getattr(self._info, name)
+
+
+def _model_junctions(monkeypatch, *aliases) -> None:
+    """Show the given symlinks to the identity code as Windows junctions.
+
+    As on Windows, ``lstat`` reports a directory with a mount-point reparse
+    tag and ``os.path.islink`` is false, while ``os.readlink`` and
+    ``os.path.realpath`` still follow the alias.
+    """
+    junctions = {os.path.abspath(alias) for alias in aliases}
+
+    def is_junction(path) -> bool:
+        return isinstance(path, (str, os.PathLike)) and os.path.abspath(path) in junctions
+
+    def lstat(path, *args, **kwargs):
+        info = os.lstat(path, *args, **kwargs)
+        return _JunctionStat(info) if is_junction(path) else info
+
+    def stat_(path, *args, follow_symlinks=True, **kwargs):
+        info = os.stat(path, *args, follow_symlinks=follow_symlinks, **kwargs)
+        return _JunctionStat(info) if not follow_symlinks and is_junction(path) else info
+
+    path_module = SimpleNamespace(**{
+        name: getattr(os.path, name) for name in dir(os.path) if not name.startswith("__")
+    })
+    path_module.islink = lambda path: not is_junction(path) and os.path.islink(path)
+    windows_os = SimpleNamespace(**{
+        name: getattr(os, name) for name in dir(os) if not name.startswith("__")
+    })
+    windows_os.lstat, windows_os.stat, windows_os.path = lstat, stat_, path_module
+    monkeypatch.setattr(vendor_identity, "os", windows_os)
+    monkeypatch.setattr(hermes_skills, "os", windows_os)
+
+
+@requires_symlink_privilege
+def test_r109_g610_windows_junction_peers_match_link_peers(tmp_path, monkeypatch) -> None:
+    """A junction peer or alias is judged like the same symlink peer or alias."""
+    ordinary = _openclaw_peer(tmp_path, "ordinary")
+    data_dir = tmp_path / "state"
+    state_peer = data_dir / "node_modules" / "openclaw"
+    state_peer.mkdir(parents=True)
+    (state_peer / "package.json").write_text('{"name":"openclaw"}', encoding="utf-8")
+    private_peer = tmp_path / ".ssh" / "node_modules" / "openclaw"
+    private_peer.mkdir(parents=True)
+    (private_peer / "package.json").write_text('{"name":"openclaw"}', encoding="utf-8")
+    aliases = {}
+    for label, target in (
+        ("ordinary-alias", ordinary.parent.parent),
+        ("private-alias", private_peer.parent.parent),
+        ("state-alias", data_dir),
+        ("named-private-alias", tmp_path / ".ssh" / ".." / "ordinary"),
+    ):
+        aliases[label] = tmp_path / label
+        aliases[label].symlink_to(target, target_is_directory=True)
+
+    # (label, peer target, peer entry is a junction, admitted with a possible peer)
+    cases = (
+        ("junction-peer", ordinary, True, True),
+        ("link-through-junction", aliases["ordinary-alias"] / "node_modules/openclaw", False, True),
+        ("junction-through-junction", aliases["ordinary-alias"] / "node_modules/openclaw", True, True),
+        ("junction-peer-private", private_peer, True, False),
+        ("junction-peer-state", state_peer, True, False),
+        ("link-through-private-junction", aliases["private-alias"] / "node_modules/openclaw", False, False),
+        ("junction-through-private-junction", aliases["private-alias"] / "node_modules/openclaw", True, False),
+        ("link-through-state-junction", aliases["state-alias"] / "node_modules/openclaw", False, False),
+        ("link-through-named-private-junction", aliases["named-private-alias"] / "node_modules/openclaw", False, False),
+        ("extra-junction", ordinary, True, False),
+    )
+    trees = {}
+    for label, target, _, _ in cases:
+        trees[label] = _linked_provider(tmp_path / f"provider-{label}", monkeypatch, target)
+    extra = trees["extra-junction"] / "lib-alias"
+    extra.symlink_to(ordinary, target_is_directory=True)
+    _model_junctions(monkeypatch, *aliases.values(), extra, *(
+        trees[label] / "node_modules" / "openclaw" for label, _, junction, _ in cases if junction
+    ))
+
+    for label, _, _, possible in cases:
+        tree = trees[label]
+        identity = vendor_identity.inspect_official_provider_tree(
+            str(tree), data_dir=str(data_dir),
+        )
+        assert (identity is not None) is possible, label
+        if possible:
+            assert identity.possible_peer, label
+        for profile in ("default", "permissive", "strict"):
+            result = scan_plugin(
+                str(tree), PluginScanOptions(policy=profile, data_dir=str(data_dir)),
+            )
+            high = {f.rule_id for f in result.findings if f.severity == "HIGH"}
+            assert ("SRC-EXEC" in high) is (profile == "strict" or not possible), (label, profile)
+            visible = {f.rule_id for f in result.findings if f.severity == "INFO"}
+            assert ("VENDOR-PEER-POSSIBLE" in visible) is (possible and profile != "strict"), (
+                label, profile,
+            )
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Unix shell wrappers")

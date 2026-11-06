@@ -14,6 +14,7 @@ from typing import NamedTuple
 
 from defenseclaw.hermes_skills import (
     _filesystem_identity,
+    _is_link_or_junction,
     _is_real_directory,
     _read_regular_file,
     _tree_sha256,
@@ -116,7 +117,7 @@ def _tree_entry_state(root: str) -> tuple | None:
                 for child in children:
                     info = child.stat(follow_symlinks=False)
                     relative = os.path.join(parent, child.name).replace("\\", "/")
-                    target = os.readlink(child.path) if stat.S_ISLNK(info.st_mode) else None
+                    target = os.readlink(child.path) if _is_link_or_junction(info) else None
                     entries.append((relative, info.st_mode, _filesystem_identity(info), target))
                     if _is_real_directory(info):
                         pending.append((child.path, relative))
@@ -148,8 +149,8 @@ def _validated_peer_link(link: str, root: str, peer: str, data_dir: str) -> tupl
         info = os.lstat(link)
     except FileNotFoundError:
         return tuple(ancestors), None
-    if not stat.S_ISLNK(info.st_mode):
-        raise ValueError("peer entry is not a link")
+    if not _is_link_or_junction(info):
+        raise ValueError("peer entry is not a link or junction")
     if _peer_path_uses_private_state(link, data_dir):
         raise ValueError("peer link points into private state")
     destination = os.path.realpath(link)
@@ -168,7 +169,13 @@ def _validated_peer_link(link: str, root: str, peer: str, data_dir: str) -> tupl
 
 
 def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
-    """Check every named target before symlink resolution can hide a name."""
+    """Check every named and every resolved location on the way to the peer.
+
+    A protected name can appear in a link or junction target, where a later
+    alias could hide it, or only after resolution, behind an alias with an
+    ordinary name. Both are checked at every hop, so an alias kind this walk
+    does not expand is still judged by where it resolves.
+    """
 
     from defenseclaw.config import default_data_path
 
@@ -196,9 +203,15 @@ def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
             return True
         current = os.path.join(current, part)
         resolved = os.path.realpath(current)
-        if any(_path_within(root, resolved) for root in roots):
+        if _names_private_state(resolved) or any(
+            _path_within(root, resolved) for root in roots
+        ):
             return True
-        if os.path.islink(current):
+        try:
+            alias = _is_link_or_junction(os.lstat(current))
+        except FileNotFoundError:
+            alias = False
+        if alias:
             links += 1
             if links > 40:
                 raise ValueError("peer path has too many links")
@@ -211,6 +224,10 @@ def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
                 current = os.path.dirname(current)
                 pending = list(target_parts) + pending
     return False
+
+
+def _names_private_state(path: str) -> bool:
+    return any(part.casefold() in _PRIVATE_INSTALL_COMPONENTS for part in Path(path).parts)
 
 
 def _path_within(root: str, path: str) -> bool:
