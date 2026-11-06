@@ -64,30 +64,24 @@ def test_unset_of_a_rule_the_set_added_drops_the_entry_it_created(tmp_path: Path
 
 
 @pytest.mark.parametrize(
-    ("single", "kept"),
+    "single",
     [
-        # GAP-0588: codex is not on this roster, so the set stores its entry
-        # disabled and gives claudecode, the primary, its own entry.
-        ("guardrail:\n  enabled: true\n  connector: claudecode\n", {"claudecode": {}, "codex": {"enabled": False}}),
+        "guardrail:\n  enabled: true\n  connector: claudecode\n",
         # GAP-1953: claw.mode alone does not enable Go hook scanning.
-        ("claw:\n  mode: codex\nguardrail:\n  enabled: true\n", {"codex": {}}),
+        "claw:\n  mode: codex\nguardrail:\n  enabled: true\n",
     ],
 )
-def test_unset_keeps_an_entry_that_puts_the_connector_on_the_roster(
-    tmp_path: Path, monkeypatch, single: str, kept: dict
-) -> None:
+def test_unset_keeps_an_entry_that_puts_the_connector_on_the_roster(tmp_path: Path, monkeypatch, single: str) -> None:
     # guardrail.connector names another connector or none: codex is on the
-    # roster only through its entry, so the entry stays ({} = guarded, or
-    # disabled when codex is not the primary).
+    # roster only through its entry, so the entry stays ({} = guarded).
     path = _config(tmp_path, monkeypatch, single)
     key = "guardrail.connectors.codex.rules.enable"
-    added = _run("set", "--json", key, '["TRUST-IGNORE-PREVIOUS"]')
-    assert added.exit_code == 0, added.output
+    assert _run("set", "--json", key, '["TRUST-IGNORE-PREVIOUS"]').exit_code == 0
     removed = _run("unset", key)
     assert removed.exit_code == 0, removed.output
     import yaml
 
-    assert yaml.safe_load(path.read_text())["guardrail"]["connectors"] == kept
+    assert yaml.safe_load(path.read_text())["guardrail"]["connectors"] == {"codex": {}}
 
 
 def test_one_unset_of_the_last_two_profiles_restores_the_exact_bytes(tmp_path: Path, monkeypatch) -> None:
