@@ -180,7 +180,7 @@ var standaloneContentRepairRefusal = "not repaired in place on a standalone inst
 // managed folder.
 const standaloneFolderRepairRefusal = "not repaired in place on a standalone install, because an account that " +
 	"could change this folder may have put or replaced files in it: from an elevated prompt remove that entry " +
-	"(icacls \"<folder>\" /remove:g *<SID>), or give the folder back to Administrators " +
+	"(icacls \"<folder>\" /remove:g *<SID>; for an inherited entry first run icacls \"<folder>\" /inheritance:d, which keeps copies of the inherited entries), or give the folder back to Administrators " +
 	"(icacls \"<folder>\" /setowner *S-1-5-32-544), check what is in it, then run Setup /ensure and Setup /verify (GAP-0561)"
 
 // refuseStandaloneFolderRepair reads a managed folder's descriptor without
@@ -211,7 +211,7 @@ func refuseStandaloneFolderRepair(target managedDataTarget, opts CanonicalOption
 // gateway data file (a token, a database, the log).
 const standaloneDataPathRepairRefusal = "not repaired in place on a standalone install, because an account that " +
 	"could write this file may have changed it: from an elevated prompt remove that entry " +
-	"(icacls \"<path>\" /remove:g *<SID>), or give it back to Administrators (icacls \"<path>\" /setowner *S-1-5-32-544), " +
+	"(icacls \"<path>\" /remove:g *<SID>; for an inherited entry first run icacls \"<path>\" /inheritance:d, which keeps copies of the inherited entries), or give it back to Administrators (icacls \"<path>\" /setowner *S-1-5-32-544), " +
 	"check it, then run Setup /ensure and Setup /verify (GAP-0561)"
 
 // refuseStandaloneDataPathRepair is refuseStandaloneFolderRepair for every

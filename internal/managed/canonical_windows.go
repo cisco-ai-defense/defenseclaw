@@ -612,7 +612,7 @@ func objectDescriptorFromSD(sd *windows.SECURITY_DESCRIPTOR) (objectDescriptor, 
 // standaloneInPlaceRepairRefused is the RepairError of an object the
 // standalone repair refused to re-stamp in place.
 const standaloneInPlaceRepairRefused = "not repaired in place on a standalone install, because an untrusted " +
-	"principal can write or owns it: from an elevated prompt remove that entry (icacls \"<path>\" /remove:g *<SID>), " +
+	"principal can write or owns it: from an elevated prompt remove that entry (icacls \"<path>\" /remove:g *<SID>; for an inherited entry first run icacls \"<path>\" /inheritance:d, which keeps copies of the inherited entries), " +
 	"or give it back to Administrators (icacls \"<path>\" /setowner *S-1-5-32-544), check it, then run Setup " +
 	"/ensure and Setup /verify (GAP-0561)"
 
