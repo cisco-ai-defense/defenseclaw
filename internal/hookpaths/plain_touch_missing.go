@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // plainTouchMissingLeaves proves that a long, literal touch call creates
@@ -18,7 +20,10 @@ func plainTouchMissingLeaves(command, cwd, home string, memo *TargetMemo) ([]str
 		len(command) > MaxPayloadBytes || strings.ContainsAny(command, "\r\n") {
 		return nil, false
 	}
-	words := strings.Fields(command)
+	words, literal := plainTouchWords(command, home)
+	if !literal {
+		return nil, false
+	}
 	if len(words) < 129 || words[0] != "touch" {
 		return nil, false
 	}
@@ -26,7 +31,8 @@ func plainTouchMissingLeaves(command, cwd, home string, memo *TargetMemo) ([]str
 	// reference, date, or unfamiliar option takes the full path reader.
 	names := make([]string, 0, len(words)-1)
 	endOptions := false
-	for _, word := range words[1:] {
+	for i := 1; i < len(words); i++ {
+		word := words[i]
 		if !endOptions && word == "--" {
 			endOptions = true
 			continue
@@ -34,6 +40,13 @@ func plainTouchMissingLeaves(command, cwd, home string, memo *TargetMemo) ([]str
 		if !endOptions && (word == "--no-create" || word == "--time=access" ||
 			word == "--time=modify" || word == "--time=atime" || word == "--time=mtime" ||
 			word == "--no-dereference") {
+			continue
+		}
+		if !endOptions && word == "-t" {
+			i++
+			if i == len(words) || !plainTouchTimestamp(words[i]) {
+				return nil, false
+			}
 			continue
 		}
 		if !endOptions && len(word) > 1 && word[0] == '-' && word[1] != '-' &&
@@ -103,6 +116,55 @@ func plainTouchMissingLeaves(command, cwd, home string, memo *TargetMemo) ([]str
 		}
 	}
 	return names, true
+}
+
+// The fast spelling remains allocation-light. Other shell spellings use the
+// same literal-word parser as the ordinary path reader; expansions and extra
+// statements cannot acquire a missing-leaf proof.
+func plainTouchWords(command, home string) ([]string, bool) {
+	if !strings.ContainsAny(command, "'\"\\;|&<>(){}$`*?[]#") {
+		return strings.Fields(command), true
+	}
+	file, ok := parseShell(command)
+	if !ok || len(file.Stmts) != 1 {
+		return nil, false
+	}
+	stmt := file.Stmts[0]
+	if stmt.Negated || stmt.Background || stmt.Coprocess || len(stmt.Redirs) != 0 {
+		return nil, false
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) != 0 {
+		return nil, false
+	}
+	words := make([]string, 0, len(call.Args))
+	for _, arg := range call.Args {
+		if !noDereferenceTouchLiteralWord(arg) {
+			return nil, false
+		}
+		value, ok := StaticWord(arg, home)
+		if !ok {
+			return nil, false
+		}
+		words = append(words, value)
+	}
+	return words, true
+}
+
+func plainTouchTimestamp(value string) bool {
+	if len(value) != 8 && len(value) != 10 && len(value) != 12 &&
+		len(value) != 11 && len(value) != 13 && len(value) != 15 {
+		return false
+	}
+	for i, c := range value {
+		if c == '.' && i == len(value)-3 {
+			continue
+		}
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // OrdinaryLongTouchMissingLeaves proves the bounded long-touch case for a

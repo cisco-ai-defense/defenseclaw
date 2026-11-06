@@ -59,6 +59,34 @@ func TestGAP0483PlainTouchMissingLeavesSkipPathWalk(t *testing.T) {
 			}
 		}
 	}
+	quoted := make([]string, len(names))
+	for i, name := range names {
+		quoted[i] = fmt.Sprintf("%q", name)
+	}
+	for _, command := range []string{
+		"touch " + strings.Join(quoted, " "),
+		"touch -t 202611060101 " + strings.Join(names, " "),
+		"touch -c -- " + strings.Join(quoted, " "),
+	} {
+		memo := NewTargetMemo()
+		if decision := memo.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, actionfacts.DialectPOSIX, nil); decision != "" {
+			t.Fatalf("ordinary literal touch = %q", decision)
+		}
+		if walked, _ := memo.WorkParts(); walked > 64 {
+			t.Fatalf("ordinary literal touch walked %d path parts", walked)
+		}
+		if !OrdinaryLongTouchMissingLeaves(command, cwd, home) {
+			t.Fatal("ordinary literal touch has no late proof")
+		}
+	}
+	for _, index := range []int{0, len(names) / 2, len(names) - 1} {
+		withKey := append([]string(nil), quoted...)
+		withKey[index] = `"../.ssh/authorized_keys"`
+		command := "touch -t 202611060101 -- " + strings.Join(withKey, " ")
+		if OrdinaryLongTouchMissingLeaves(command, cwd, home) || ActionCommandDecision(command, cwd, home) != "protected-target" {
+			t.Fatalf("protected literal touch at %d did not close", index)
+		}
+	}
 	if OrdinaryLongTouchMissingLeaves("touch "+strings.Join(names[:128], " ")+"\necho hello", cwd, home) {
 		t.Fatal("a second shell statement received a touch-only proof")
 	}
