@@ -569,8 +569,11 @@ func (w *answerWatchdog) restartWindowContact(opts Options, sp spec, failMode st
 		return
 	}
 	home := opts.Home
+	// Read now: the proof runs on a goroutine that a proof past
+	// restartProofWait leaves running (provenWithin, GAP-0680).
+	proof := perUserRestartWindowProof
 	w.mu.Lock()
-	w.restartProof = func() restartProofResult { return perUserRestartWindowProof(home, check) }
+	w.restartProof = func() restartProofResult { return proof(home, check) }
 	prepared := w.restart != nil
 	w.mu.Unlock()
 	if !perUserGatewayRecentlyStarted(home) {
