@@ -47,7 +47,7 @@ import click
 import yaml
 
 from defenseclaw import config as config_module
-from defenseclaw import ux
+from defenseclaw import connector_paths, ux
 from defenseclaw.config import gateway_pid_path
 from defenseclaw.config_inspect import (
     ConfigInspectError,
@@ -1234,27 +1234,25 @@ def _configured_connector_selection(document: object) -> tuple[set[str], str]:
     claw = document.get("claw")
     claw = claw if isinstance(claw, dict) else {}
     primary = guardrail.get("connector")
-    primary = normalize_connector(primary) if isinstance(primary, str) and primary.strip() else ""
+    primary = connector_paths.normalize(primary) if isinstance(primary, str) and primary.strip() else ""
     # A missing claw.mode loads as OpenClaw in Config.load and the Go loader.
     mode = claw.get("mode", "openclaw")
-    mode = normalize_connector(mode) if isinstance(mode, str) and mode.strip() else ""
+    mode = connector_paths.normalize(mode) if isinstance(mode, str) and mode.strip() else ""
     roster = guardrail.get("connectors")
     if isinstance(roster, dict) and roster:
         enabled = {
-            normalize_connector(name)
+            connector_paths.normalize(name)
             for name, entry in roster.items()
             if isinstance(name, str) and isinstance(entry, dict) and entry.get("enabled") is not False
         }
-        names = sorted(normalize_connector(name) for name in roster if isinstance(name, str))
+        names = sorted(connector_paths.normalize(name) for name in roster if isinstance(name, str))
         selected = primary or (mode if mode in names else names[0] if names else "")
         return enabled, selected
     selected = primary or mode
     return ({selected} if selected else set()), selected
 
 
-def _check_config_connector_selection(
-    path: str, candidate: bytes, *, activation_only: bool = False
-) -> None:
+def _check_config_connector_selection(path: str, candidate: bytes, *, allow_removal: bool = False) -> None:
     """A settings edit cannot select another live connector as a side effect."""
     from defenseclaw import config_writer
 
@@ -1265,21 +1263,11 @@ def _check_config_connector_selection(
     before = config_writer._parse_config_document(current) if current else {}
     active_before, primary_before = _configured_connector_selection(before)
     active_after, primary_after = _configured_connector_selection(after)
-    # An unset may intentionally remove the last selected entry. It must not
-    # enable a second entry while an existing one stays selected.
-    if activation_only:
-        retained = bool(active_before & active_after)
-        primary_changed_to_active = (
-            primary_after != primary_before and primary_after in active_after
-        )
-        changed = retained and bool(
-            (active_after - active_before) or primary_changed_to_active
-        )
-    else:
-        changed = bool(
-            active_before and (active_after != active_before or primary_after != primary_before)
-        )
-    if changed:
+    # A whole-entry unset explicitly removes its guardrail scope and already
+    # reports that to the operator. It may drop an enabled name, but cannot
+    # select a new primary or enable another entry in the same batch.
+    enabled_changed = (active_after - active_before) if allow_removal else (active_after ^ active_before)
+    if enabled_changed or primary_after != primary_before:
         raise config_writer.ConfigWriteError(
             "connector selection requires setup; use defenseclaw setup or a connector command "
             "to change the active connector"
@@ -1377,7 +1365,7 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
     def _check_candidate(path: str, candidate: bytes) -> None:
         if roster_change:
             _check_guardrail_connector_roster(path, candidate)
-        _check_config_connector_selection(path, candidate, activation_only=True)
+        _check_config_connector_selection(path, candidate, allow_removal=True)
 
     check_candidate = _check_candidate if selection_change else None
     if _write_config_change(app, changes, expect_sha256, "unset", check_candidate=check_candidate):
