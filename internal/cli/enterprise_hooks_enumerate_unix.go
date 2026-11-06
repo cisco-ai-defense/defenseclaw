@@ -152,7 +152,7 @@ func runEnterpriseHooksRevokeGone(ctx context.Context, stdout, stderr io.Writer,
 	if err := enterpriseHooksRevokeGoneRootCheck(); err != nil {
 		return err
 	}
-	current, err := enterpriseHooksEnumerateConfigLoader()
+	current, _, err := enterpriseHooksEnumerateConfigLoader()
 	if err != nil {
 		return fmt.Errorf("enterprise hooks revoke-gone: load managed config: %w", err)
 	}
@@ -278,10 +278,14 @@ func enterpriseHookEnumeratorStatePath(manifestPath string) string {
 	return filepath.Join(filepath.Dir(manifestPath), enterpriseHookEnumeratorStateFile)
 }
 
-// enterpriseHooksEnumerateConfigLoader is replaceable in tests.
-var enterpriseHooksEnumerateConfigLoader = func() (*config.Config, error) {
-	loaded, _, err := loadGatewayConfigV8(config.ConfigPath())
-	return loaded, err
+// enterpriseHooksEnumerateConfigLoader returns the config and the sha256 of
+// the file bytes it was parsed from. It is replaceable in tests.
+var enterpriseHooksEnumerateConfigLoader = func() (*config.Config, string, error) {
+	loaded, _, source, err := loadGatewayConfigV8Source(config.ConfigPath())
+	if err != nil {
+		return nil, "", err
+	}
+	return loaded, configwrite.SHA256Hex(source), nil
 }
 
 func runEnterpriseHooksEnumerateCycle(
@@ -295,18 +299,26 @@ func runEnterpriseHooksEnumerateCycle(
 	// Capture before loading the config. A lifecycle update during this
 	// cycle leaves its record on the older generation, so status waits for
 	// a later scan of the new inputs (GAP-0640).
-	// The digest travels with the number: a rebuilt generation record can
-	// reuse a number, never a digest of different bytes.
 	var configGeneration uint64
-	var configSHA256 string
+	var snapshotSHA256 string
 	if state, err := configwrite.ReadGenerationState(config.ConfigPath()); err == nil {
-		configGeneration, configSHA256 = state.Generation, state.ConfigSHA256
+		configGeneration, snapshotSHA256 = state.Generation, state.ConfigSHA256
 	}
-	// Reload each cycle so an administrator's enrollment change applies
+	// Reload each cycle so an administrator enrollment change applies
 	// without restarting the service.
-	current, err := enterpriseHooksEnumerateConfigLoader()
+	current, loadedSHA256, err := enterpriseHooksEnumerateConfigLoader()
 	if err != nil {
 		return report, fmt.Errorf("load managed config: %w", err)
+	}
+	// The stamp names the bytes this scan parsed. A generation number can be
+	// reused after the record is rebuilt, and a digest read in a separate
+	// step can name a file edited and restored around the load, so the digest
+	// comes from the load itself and the number counts only while both agree.
+	// A scan whose snapshot and loaded bytes differ is stamped empty and
+	// waits for the next cycle.
+	configSHA256 := loadedSHA256
+	if loadedSHA256 == "" || snapshotSHA256 != loadedSHA256 {
+		configGeneration, configSHA256 = 0, ""
 	}
 	if !current.StandaloneEnterprise() {
 		return report, errors.New("the managed config is no longer the standalone profile")
