@@ -30,6 +30,7 @@ const (
 	findingProofActionFactsSubgraph
 	findingProofExactCodeGuard
 	findingProofExactFallback
+	findingProofResolvedPath
 	findingProofParserShadow
 	findingProofEvaluationFailure
 	findingProofActiveStateMutation
@@ -118,6 +119,13 @@ func newExactFallbackFindingProof(
 	)
 }
 
+// A bounded path walk can prove a named protected destination even when
+// unrelated shell structure leaves ActionFacts partial. A possible path
+// never authorizes this proof.
+func newResolvedPathFindingProof(ruleID string, named bool) findingProof {
+	return newFindingProof(findingProofResolvedPath, ruleID, named)
+}
+
 func newParserShadowFindingProof(ruleID string) findingProof {
 	return newFindingProof(findingProofParserShadow, ruleID, false)
 }
@@ -160,6 +168,7 @@ func (p findingProof) authorizes(ruleID string) bool {
 		findingProofActiveStateMutation,
 		findingProofExactCodeGuard,
 		findingProofExactFallback,
+		findingProofResolvedPath,
 		findingProofEvaluationFailure:
 		return true
 	default:

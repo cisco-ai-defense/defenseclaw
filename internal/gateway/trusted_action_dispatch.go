@@ -183,6 +183,8 @@ type trustedActionRequest struct {
 	StrictPolicy bool
 	// possibleTarget records a write whose spelling is ordinary but identity is unknown.
 	possibleTarget *bool
+	// namedTarget records a resolved protected write in the bounded path proof.
+	namedTarget *bool
 	// ManagedHookOverflowHold retains a bounded state reading on an
 	// authenticated managed Windows hook without changing path resolution.
 	ManagedHookOverflowHold bool
