@@ -106,6 +106,10 @@ func TestGAP0034LiteralVersionedSpellingDoesNotBecomeAccountAction(t *testing.T)
 	if err := store.SetSourcePathForConnector("mcp", key, "claudecode", key); err != nil {
 		t.Fatal(err)
 	}
+	// The earlier release stored the literal server's baseline under its name.
+	if err := store.SetTargetSnapshot("mcp", key, "hash", "{}", `{"mcp.servers.`+key+`":"hash"}`, "[]", "", "fingerprint"); err != nil {
+		t.Fatal(err)
+	}
 	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})
 	call := func() *ToolInspectVerdict {
 		return api.inspectToolPolicyCtx(ctx, &ToolInspectRequest{Tool: "mcp__notes__ping", Args: json.RawMessage(`{}`),
@@ -127,5 +131,38 @@ func TestGAP0034LiteralVersionedSpellingDoesNotBecomeAccountAction(t *testing.T)
 	}
 	if got := call(); !hasFinding(got.Findings, "MCP-BLOCK") {
 		t.Fatalf("versioned account action was lost: %+v", got)
+	}
+}
+
+// Admission writes install=block, the versioned source path and
+// runtime=disable before it stores the scan snapshot; the decision holds in
+// that interval and when the snapshot write fails.
+func TestGAP0034FreshFailedAccountActionBlocksBeforeSnapshot(t *testing.T) {
+	api, store := toolPolicyAPI(t, "action")
+	api.scannerCfg.Guardrail.RulePack = "default"
+	api.scannerCfg.AssetPolicy = config.DefaultAssetPolicy()
+	home := filepath.Join(t.TempDir(), "account")
+	server := config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: home}
+	key := watcher.MCPEventPath(server)
+	reason := "scanner failure (fail-closed): test"
+	if err := store.SetActionFieldForConnector("mcp", key, "claudecode", "install", "block", reason); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSourcePathForConnector("mcp", key, "claudecode", key); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetActionFieldForConnector("mcp", key, "claudecode", "runtime", "disable", reason); err != nil {
+		t.Fatal(err)
+	}
+	call := func(callerHome string) *ToolInspectVerdict {
+		ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: callerHome})
+		return api.inspectToolPolicyCtx(ctx, &ToolInspectRequest{Tool: "mcp__notes__ping", Args: json.RawMessage(`{}`),
+			Direction: "tool_call", Connector: "claudecode"})
+	}
+	failed := call(home)
+	ordinary := call(filepath.Join(t.TempDir(), "ordinary"))
+	if !hasFinding(failed.Findings, "MCP-BLOCK") || hasFinding(ordinary.Findings, "MCP-BLOCK") {
+		t.Fatalf("decision before its snapshot: failed=%s/%v ordinary=%s/%v", failed.Action, failed.Findings,
+			ordinary.Action, ordinary.Findings)
 	}
 }
