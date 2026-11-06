@@ -17782,7 +17782,8 @@ def _gateway_lifecycle_executable(
     if packaged_windows_install_root():
         # A corroborated package with a missing sibling is broken; fail closed
         # instead of allowing PATH/current-directory executable shadowing.
-        return packaged_windows_gateway_path()
+        packaged = packaged_windows_gateway_path()
+        return _trusted_gateway_lifecycle_executable(packaged) if packaged else None
     raw_search_path = os.environ.get("PATH", os.defpath) if search_path is None else search_path
     current_directory = os.path.normcase(os.path.realpath(os.curdir))
     search_directories: list[str] = []
@@ -17838,20 +17839,18 @@ def _trusted_gateway_lifecycle_executable(executable: str) -> str | None:
         except OSError:
             return None
 
-    from defenseclaw.file_permissions import windows_acl_write_error
-    from defenseclaw.gateway import packaged_windows_gateway_path
-
-    packaged = packaged_windows_gateway_path()
-    if packaged:
-        try:
-            if os.path.samefile(resolved, packaged):
-                return resolved
-        except OSError:
-            pass
-    for candidate in (resolved, os.path.dirname(resolved)):
-        if windows_acl_write_error(candidate, trust_administrators=True) is not None:
-            return None
+    if _windows_gateway_lifecycle_custody_problem(resolved) is not None:
+        return None
     return resolved
+
+
+def _windows_gateway_lifecycle_custody_problem(executable: str) -> tuple[str, str] | None:
+    """Check the executable and its folder against the shared Windows custody set."""
+    for candidate in (executable, os.path.dirname(executable)):
+        problem = windows_acl_custody_write_error(candidate, allow_current_user=True)
+        if problem is not None:
+            return candidate, problem
+    return None
 
 
 def _refused_gateway_lifecycle_candidate(search_path: str | None = None) -> str:
@@ -17864,14 +17863,17 @@ def _refused_gateway_lifecycle_candidate(search_path: str | None = None) -> str:
     from defenseclaw.gateway import GATEWAY_BIN_NAME, canonical_install_path, packaged_windows_install_root
 
     if os.name == "nt" and packaged_windows_install_root():
-        return ""
-    raw_search_path = os.environ.get("PATH", os.defpath) if search_path is None else search_path
-    found = shutil.which(GATEWAY_BIN_NAME, path=raw_search_path)
-    if (not found or not os.path.isabs(found)) and os.name == "nt":
-        # The per-user installer's folder, which the lifecycle also falls
-        # back to.
-        canonical = canonical_install_path()
-        found = canonical if os.path.isfile(canonical) else ""
+        from defenseclaw.gateway import packaged_windows_gateway_path
+
+        found = packaged_windows_gateway_path()
+    else:
+        raw_search_path = os.environ.get("PATH", os.defpath) if search_path is None else search_path
+        found = shutil.which(GATEWAY_BIN_NAME, path=raw_search_path)
+        if (not found or not os.path.isabs(found)) and os.name == "nt":
+            # The per-user installer's folder, which the lifecycle also falls
+            # back to.
+            canonical = canonical_install_path()
+            found = canonical if os.path.isfile(canonical) else ""
     if not found or not os.path.isabs(found):
         return ""
     found = str(Path(found).resolve())
@@ -17883,17 +17885,15 @@ def _refused_gateway_lifecycle_candidate(search_path: str | None = None) -> str:
         except UnsafePathError as exc:
             return f"refusing to run {found}: {unsafe_gateway_remedy(exc)}"
         return ""
-    from defenseclaw.file_permissions import windows_acl_write_error
-
-    for candidate in (found, os.path.dirname(found)):
-        problem = windows_acl_write_error(candidate, trust_administrators=True)
-        if problem is not None:
-            return (
-                f"refusing to run {found}: {candidate}: {problem}; only this account, SYSTEM and "
-                "Administrators may write the gateway and its folder. Run the DefenseClaw installer "
-                "again, which restricts "
-                "the folder, or remove the other accounts' write access"
-            )
+    custody_problem = _windows_gateway_lifecycle_custody_problem(found)
+    if custody_problem is not None:
+        candidate, problem = custody_problem
+        return (
+            f"refusing to run {found}: {candidate}: {problem}. Restore ownership and write access "
+            "to this account or a trusted Windows system controller (SYSTEM, BUILTIN Administrators, "
+            "TrustedInstaller), then retry. For an installed gateway, rerun the DefenseClaw installer "
+            "to restore its permissions"
+        )
     return ""
 
 
