@@ -141,7 +141,16 @@ func isolateTestMachineWriters(logDir string) func() {
 	// (TestSidecarAnswersAtTheHookPriorityClass checks it in a child).
 	sidecarRaisePriority = func() {}
 
-	path := testMachineRegistrySandboxPath()
+	// One sandbox per run: the test binary's helper children (daemon probes,
+	// re-executed helpers) use their parent's, which the parent removes. A
+	// child that a test kills never runs its own cleanup, so a sandbox of
+	// its own stayed behind in the account's HKCU.
+	path, owned := os.Getenv(testMachineRegistrySandboxEnv), false
+	if !strings.HasPrefix(path, testMachineRegistrySandboxPrefix) {
+		path, owned = fmt.Sprintf("%s%d", testMachineRegistrySandboxPrefix, os.Getpid()), true
+		_ = os.Setenv(testMachineRegistrySandboxEnv, path)
+	}
+	testMachineRegistrySandbox = path
 	key, _, err := registry.CreateKey(registry.CURRENT_USER, path, registry.ALL_ACCESS)
 	if err != nil {
 		// No sandbox: an invalid root makes every machine write fail rather
@@ -155,13 +164,19 @@ func isolateTestMachineWriters(logDir string) func() {
 		if key != 0 {
 			_ = key.Close()
 		}
-		_ = deleteTestRegistryTree(registry.CURRENT_USER, path)
+		if owned {
+			_ = deleteTestRegistryTree(registry.CURRENT_USER, path)
+		}
 	}
 }
 
-func testMachineRegistrySandboxPath() string {
-	return fmt.Sprintf(`Software\DefenseClaw-test-%d`, os.Getpid())
-}
+const (
+	testMachineRegistrySandboxEnv    = "DEFENSECLAW_CLI_TEST_REGISTRY_SANDBOX"
+	testMachineRegistrySandboxPrefix = `Software\DefenseClaw-test-`
+)
+
+// testMachineRegistrySandbox is this run's HKCU sandbox key.
+var testMachineRegistrySandbox string
 
 // deleteTestRegistryTree removes path and everything under it.
 func deleteTestRegistryTree(root registry.Key, path string) error {
@@ -276,7 +291,7 @@ func guardTestMachine() func() error {
 		}
 		return fmt.Errorf("GAP-0079: the internal/cli tests changed the computer's own DefenseClaw machine registry "+
 			"(every machine writer must reach the test sandbox HKCU\\%s):\n  %s",
-			testMachineRegistrySandboxPath(), strings.Join(changes, "\n  "))
+			testMachineRegistrySandbox, strings.Join(changes, "\n  "))
 	}
 }
 
