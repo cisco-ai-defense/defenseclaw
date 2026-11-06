@@ -58,7 +58,33 @@ type UnknownKeyTwin struct {
 func UnknownKeyTwins(input Input, facts Facts) ([]UnknownKeyTwin, bool) {
 	_ = facts
 	if input.Command != "" || len(input.Argv) != 0 || !unknownKeyFileTool(input.Tool) ||
-		len(input.Args) == 0 || validateJSONWithStringLimit(input.Args, len(input.Args)) != "" {
+		len(input.Args) == 0 {
+		return nil, false
+	}
+	// Most file calls have only their tool's reviewed keys. Check those keys
+	// before the bounded value parser, which otherwise scans the JSON again
+	// even though no alternate reading can exist. A patch envelope needs its
+	// values to select the reviewed field, so it takes the full path below.
+	if !isApplyPatchTool(input.Tool) {
+		var rawFields map[string]json.RawMessage
+		if json.Unmarshal(input.Args, &rawFields) == nil && rawFields != nil {
+			keys := make(map[string]any, len(rawFields))
+			for key := range rawFields {
+				keys[key] = nil
+			}
+			onlyReviewed := true
+			for key := range rawFields {
+				if !reviewedFileToolArgumentKey(input.Tool, key, keys) {
+					onlyReviewed = false
+					break
+				}
+			}
+			if onlyReviewed {
+				return nil, false
+			}
+		}
+	}
+	if validateJSONWithStringLimit(input.Args, len(input.Args)) != "" {
 		return nil, false
 	}
 	// An oversized extra value does not make the reviewed target disappear.
