@@ -551,7 +551,7 @@ func nonbindingPrintfCall(call *syntax.CallExpr, home string) bool {
 	}
 	formatIndex := 1
 	first, fixed := StaticWord(call.Args[formatIndex], home)
-	if !fixed || first == "" {
+	if !fixed {
 		return false
 	}
 	if first == "--" {
@@ -598,9 +598,10 @@ func nonbindingPrintfCall(call *syntax.CallExpr, home string) bool {
 	return true
 }
 
-// namedReadDestinations recognizes explicit plain read destinations. The
-// scan marks those names unknown and can retain other copy-word names.
-// Other read forms may bind a name the scan cannot identify.
+// namedReadDestinations recognizes Bash read options and explicit plain
+// destinations. The scan marks every destination, including an -a array,
+// unknown and can retain other copy-word names. Unknown options or dynamic
+// words may bind a name the scan cannot identify.
 func namedReadDestinations(call *syntax.CallExpr, home string) ([]string, bool) {
 	if call == nil || len(call.Assigns) != 0 || len(call.Args) < 2 {
 		return nil, false
@@ -609,22 +610,55 @@ func namedReadDestinations(call *syntax.CallExpr, home string) ([]string, bool) 
 	if !fixed || program != "read" {
 		return nil, false
 	}
-	index := 1
-	if option, fixed := StaticWord(call.Args[index], home); fixed && option == "-r" {
-		index++
-	}
-	if index == len(call.Args) {
-		return nil, false
-	}
-	names := make([]string, 0, len(call.Args)-index)
-	for _, word := range call.Args[index:] {
-		name, fixed := StaticWord(word, home)
-		if !fixed || !plainShellVariableName(name) {
+	names := make([]string, 0, len(call.Args)-1)
+	options := true
+	for index := 1; index < len(call.Args); index++ {
+		name, fixed := StaticWord(call.Args[index], home)
+		if !fixed {
+			return nil, false
+		}
+		if options && name == "--" {
+			options = false
+			continue
+		}
+		if options && strings.HasPrefix(name, "-") && len(name) > 1 {
+			for pos := 1; pos < len(name); pos++ {
+				switch name[pos] {
+				case 'e', 'r', 's':
+					// These flags do not bind a shell variable.
+				case 'a', 'd', 'i', 'n', 'N', 'p', 't', 'u':
+					value := name[pos+1:]
+					if value == "" {
+						index++
+						if index == len(call.Args) {
+							return nil, false
+						}
+						value, fixed = StaticWord(call.Args[index], home)
+						if !fixed {
+							return nil, false
+						}
+					}
+					if name[pos] == 'a' {
+						if !plainShellVariableName(value) {
+							return nil, false
+						}
+						names = append(names, value)
+					}
+					// The remaining bytes belong to this option's value.
+					pos = len(name)
+				default:
+					return nil, false
+				}
+			}
+			continue
+		}
+		options = false
+		if !plainShellVariableName(name) {
 			return nil, false
 		}
 		names = append(names, name)
 	}
-	return names, true
+	return names, len(names) > 0
 }
 
 // shellSpecialParameters are names bash sets itself (on every command, at
