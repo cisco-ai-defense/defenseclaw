@@ -8,6 +8,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/mcpkey"
 )
 
 func testStore(t *testing.T) *audit.Store {
@@ -143,5 +144,44 @@ func TestMCPRuntimeBlockReadsCommandPins(t *testing.T) {
 	blocked, err := pe.IsMCPBlockedForConnector("demo", "openclaw")
 	if err != nil || !blocked {
 		t.Fatalf("command-pinned runtime deny = %v, %v; want blocked", blocked, err)
+	}
+}
+
+func TestGAP0034LegacyMCPAdmissionJournalIsIgnoredOutsideSecureClient(t *testing.T) {
+	store := testStore(t)
+	if err := store.SetActionFieldForConnector("mcp", "notes", "claudecode", "runtime", "disable", "previous admission"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSourcePathForConnector("mcp", "notes", "claudecode", "notes@claudecode"); err != nil {
+		t.Fatal(err)
+	}
+	oss := NewPolicyEngine(store)
+	if disabled, err := oss.IsDisabledForConnector("mcp", "notes", "claudecode"); err != nil || disabled {
+		t.Fatalf("old admission row was served: disabled=%v err=%v", disabled, err)
+	}
+	if reason, disabled, err := oss.RuntimeDisableReason("mcp", "notes", "claudecode"); err != nil || disabled || reason != "" {
+		t.Fatalf("old admission reason was served: reason=%q disabled=%v err=%v", reason, disabled, err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	secureClient := NewPolicyEngine(store).WithConfig(func() *config.Config { return cfg })
+	if disabled, err := secureClient.IsDisabledForConnector("mcp", "notes", "claudecode"); err != nil || !disabled {
+		t.Fatalf("Secure Client journal changed: disabled=%v err=%v", disabled, err)
+	}
+	if err := store.SetSourcePathForConnector("mcp", "notes", "claudecode", ""); err != nil {
+		t.Fatal(err)
+	}
+	if disabled, err := oss.IsDisabledForConnector("mcp", "notes", "claudecode"); err != nil || disabled {
+		t.Fatalf("source-free old admission row was served: disabled=%v err=%v", disabled, err)
+	}
+	if disabled, err := secureClient.IsDisabledForConnector("mcp", "notes", "claudecode"); err != nil || !disabled {
+		t.Fatalf("Secure Client source-free journal changed: disabled=%v err=%v", disabled, err)
+	}
+	current := mcpkey.Encode(mcpkey.Identity{Name: "notes", Connector: "claudecode"})
+	if err := store.SetSourcePathForConnector("mcp", "notes", "claudecode", current); err != nil {
+		t.Fatal(err)
+	}
+	if disabled, err := oss.IsDisabledForConnector("mcp", "notes", "claudecode"); err != nil || !disabled {
+		t.Fatalf("current admission row was lost: disabled=%v err=%v", disabled, err)
 	}
 }

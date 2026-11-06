@@ -4422,9 +4422,9 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		// earlier versions kept under the bare name move to their account
 		// before the watcher runs (GAP-0216).
 		if moved, kept, err := watcher.MigrateAccountMCPJournal(s.store); err != nil {
-			fmt.Fprintf(os.Stderr, "[watcher] move MCP journal rows to their accounts: %v (bare rows stay and keep refusing by name)\n", err)
+			fmt.Fprintf(os.Stderr, "[watcher] move MCP journal rows to their accounts: %v\n", err)
 		} else if moved > 0 || kept > 0 {
-			fmt.Fprintf(os.Stderr, "[watcher] moved %d MCP journal rows to their accounts; %d blocking rows stay by name\n", moved, kept)
+			fmt.Fprintf(os.Stderr, "[watcher] moved %d MCP journal rows to their accounts; %d bare rows retained\n", moved, kept)
 		}
 		// Retries a server whose admission could not run at the poll.
 		w.SetMCPDiscoveryPoll(true)

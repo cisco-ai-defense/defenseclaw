@@ -159,6 +159,10 @@ func TestGAP0034ColdOutageSnapshotScope(t *testing.T) {
 	project := filepath.Join(home, "project")
 	server := config.MCPServerEntry{Name: "shared", Connector: "claudecode", Home: home, Project: project}
 	path := MCPEventPath(server)
+	identity, ok := decodeMCPEventPath(path)
+	if !ok {
+		t.Fatal("versioned path did not decode")
+	}
 	for _, tc := range []struct {
 		name  string
 		query MCPAdmissionQuery
@@ -172,13 +176,14 @@ func TestGAP0034ColdOutageSnapshotScope(t *testing.T) {
 		{"other connector", MCPAdmissionQuery{Connector: "codex", Server: "shared", Home: home, CWD: project}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := mcpSnapshotPathServesQuery(path, tc.query); got != tc.want {
+			if got := mcpServerServesQuery(identity.server(), tc.query); got != tc.want {
 				t.Fatalf("stored scope matched=%v, want %v", got, tc.want)
 			}
 		})
 	}
 	other := config.MCPServerEntry{Name: "shared@claudecode#decoy", Connector: "claudecode"}
-	if mcpSnapshotPathServesQuery(MCPEventPath(other), MCPAdmissionQuery{Connector: "claudecode", Server: "shared"}) {
+	otherIdentity, ok := decodeMCPEventPath(MCPEventPath(other))
+	if !ok || mcpServerServesQuery(otherIdentity.server(), MCPAdmissionQuery{Connector: "claudecode", Server: "shared"}) {
 		t.Fatal("a different server name was read as the ordinary server's scope")
 	}
 }
@@ -294,7 +299,7 @@ func TestGAP0034ColdFailedHomeDelimiterWithUnresolvedCaller(t *testing.T) {
 	}
 }
 
-func TestGAP0034LegacyScopeRequiresCallerEvidence(t *testing.T) {
+func TestGAP0034UnstructuredVersionedNameIgnoredDuringOutage(t *testing.T) {
 	cfg, store, logger, _ := setupTestEnv(t)
 	cfg.Gateway.Watcher.MCP.TakeAction = true
 	other := config.MCPServerEntry{Name: "notes@claudecode#" + t.TempDir()}
@@ -311,12 +316,12 @@ func TestGAP0034LegacyScopeRequiresCallerEvidence(t *testing.T) {
 	if got := cold.MCPAdmissionStatus(MCPAdmissionQuery{Connector: "claudecode", Server: "notes"}); got.Failed || !got.Unavailable {
 		t.Fatalf("ambiguous legacy scope selected another name: %+v", got)
 	}
-	if got := cold.MCPAdmissionStatus(MCPAdmissionQuery{Connector: "claudecode", Server: other.Name}); !got.Failed {
-		t.Fatalf("exact legacy name lost its failed scan: %+v", got)
+	if got := cold.MCPAdmissionStatus(MCPAdmissionQuery{Connector: "claudecode", Server: other.Name}); got.Failed || !got.Unavailable {
+		t.Fatalf("unstructured versioned row was served: %+v", got)
 	}
 }
 
-func TestGAP0034NamedLegacyProjectDoesNotCrossUnknownHome(t *testing.T) {
+func TestGAP0034UnstructuredVersionedProjectIgnoredDuringOutage(t *testing.T) {
 	cfg, store, logger, _ := setupTestEnv(t)
 	cfg.Gateway.Watcher.MCP.TakeAction = true
 	server := config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: t.TempDir(), Project: t.TempDir()}
@@ -326,16 +331,10 @@ func TestGAP0034NamedLegacyProjectDoesNotCrossUnknownHome(t *testing.T) {
 	cold := New(cfg, nil, nil, store, logger, nil, nil)
 	cold.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return nil, errors.New("source list unavailable") })
 	cold.firstCycleDone.Store(true)
-	for _, tc := range []struct {
-		cwd    string
-		failed bool
-	}{
-		{server.Project, true},
-		{t.TempDir(), false},
-	} {
-		got := cold.MCPAdmissionStatus(MCPAdmissionQuery{Connector: "claudecode", Server: "notes", CWD: tc.cwd})
-		if got.Failed != tc.failed || got.Unavailable == tc.failed {
-			t.Errorf("legacy project at %q: %+v, want failed=%v", tc.cwd, got, tc.failed)
+	for _, cwd := range []string{server.Project, t.TempDir()} {
+		got := cold.MCPAdmissionStatus(MCPAdmissionQuery{Connector: "claudecode", Server: "notes", CWD: cwd})
+		if got.Failed || !got.Unavailable {
+			t.Errorf("unstructured project row at %q was served: %+v", cwd, got)
 		}
 	}
 }
