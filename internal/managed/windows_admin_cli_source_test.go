@@ -4,6 +4,7 @@
 package managed
 
 import (
+	"fmt"
 	"go/ast"
 	"go/build"
 	"go/parser"
@@ -48,6 +49,7 @@ var managedWindowsCallAllowed = map[string]string{
 	"internal/legacyconnector/":                     "the retired desktop connector's hook-command builder and teardown matcher",
 	"internal/cli/windows_managed_hook_settings.go": "reads registered hook commands: strips the call operator before the ownership check",
 	"internal/gateway/agent_not_installed.go":       "reads a cmd.exe shim prefix, where & is cmd's command separator",
+	"internal/gateway/windows_command.go":           "quoteWindowsArg's set of characters that need quoting (&'\") re-renders a parsed argv for policy matching",
 }
 
 // managedWindowsQuoteAllowed lists the files that double or read a
@@ -63,10 +65,15 @@ var managedWindowsQuoteAllowed = map[string]string{
 }
 
 var (
-	// managedWindowsCall is PowerShell's call operator before a quoted path,
-	// or at the end of a literal that a path is appended to: a command built
-	// by hand. && and >& are POSIX shell syntax.
-	managedWindowsCall = regexp.MustCompile(`(^|[^&>])& (['"]|$)`)
+	// managedWindowsCall is PowerShell's call operator before a quoted path
+	// (an apostrophe, a double quote or a typographic quote, after spaces or
+	// a tab, or after none where a word starts), before a fmt verb, or at the
+	// end of a literal that a path is appended to: a command built by hand
+	// (g072 review 3 M1). && and >& are POSIX shell syntax, &' inside a word
+	// is a character set ("!$&'()"), &%s; an XML entity, and a lone "&" (a
+	// token a reader compares with) is not a command; joined into one it is
+	// (managedWindowsAmpersandWord).
+	managedWindowsCall = regexp.MustCompile(`(^|[\s|;{(])&['"\x{2018}-\x{201B}]|(^|[^&>])&[ \t]+(?:['"\x{2018}-\x{201B}]|%[-+# 0-9.]*[sqvc]|$)`)
 	// managedWindowsVerbOnly is an instruction to run a DefenseClaw
 	// subcommand that names no executable ("run `enterprise windows ensure
 	// ...`", "with enterprise secret set"): a managed Windows computer has no
@@ -75,12 +82,16 @@ var (
 	// instruction and stays allowed.
 	// "with", "by" and "or" count only before a backticked command: "--purge
 	// is valid only with enterprise windows uninstall" describes a flag.
-	managedWindowsVerbOnly = regexp.MustCompile("(?i)(\\b(?:re)?run:?\\s+[`'\"]?|\\b(?:with|by|or)\\s+`)enterprise\\s+[a-z]+\\s+[a-z]")
+	// A fmt verb counts as a word: "run `enterprise windows %s`" (g072
+	// review 3 M1).
+	managedWindowsVerbOnly = regexp.MustCompile("(?i)(\\b(?:(?:re)?run:?|use)\\s+[`'\"]?|\\b(?:with|by|or)\\s+`)enterprise\\s+(?:[a-z]+|%[sqv])\\s+(?:[a-z]|%[sqv])")
 	// managedWindowsBareAnywhere is a bare executable with a subcommand, or
 	// a bare Windows-only subcommand: neither is on PATH on any computer.
-	managedWindowsBareAnywhere = regexp.MustCompile(`(^|[^\\/\w.-])defenseclaw(-gateway)?(\.exe)? enterprise windows|(^|[^\\/\w.-])defenseclaw(-gateway)?\.exe [a-z-]`)
+	// A closing quote or backtick may sit between the name and its first
+	// argument ("`defenseclaw.exe` status"), and a fmt verb counts as a word.
+	managedWindowsBareAnywhere = regexp.MustCompile("(^|[^\\\\/\\w.-])defenseclaw(-gateway)?(\\.exe)?[`'\"]?\\s+enterprise\\s+windows|(^|[^\\\\/\\w.-])defenseclaw(-gateway)?\\.exe[`'\"]?\\s+(?:[a-z-]|%[sqv])")
 	// managedWindowsBareCommand is any bare DefenseClaw command.
-	managedWindowsBareCommand = regexp.MustCompile(`(^|[^\\/\w.-])defenseclaw(-gateway)?(\.exe)? [a-z-]`)
+	managedWindowsBareCommand = regexp.MustCompile("(^|[^\\\\/\\w.-])defenseclaw(-gateway)?(\\.exe)?[`'\"]?\\s+(?:[a-z-]|%[sqv])")
 	// managedWindowsContext is a sentence for the administrator of a
 	// Windows computer, in a file that builds for every OS: the words
 	// managed Windows answers use for where a command runs. "Windows" alone
@@ -142,39 +153,8 @@ func TestManagedWindowsCommandsComeFromTheRenderer(t *testing.T) {
 				return err
 			}
 			files++
-			windowsOnly := windowsOnlySource(t, path)
-			chained := map[*ast.BinaryExpr]bool{}
-			ast.Inspect(file, func(node ast.Node) bool {
-				if call, ok := node.(*ast.CallExpr); ok {
-					if problem := powerShellQuoteByHand(call); problem != "" {
-						if _, allowed := managedWindowsQuoteAllowed[rel]; allowed {
-							used["quote\x00"+rel] = true
-						} else {
-							t.Errorf("%s: %s", fset.Position(call.Pos()), problem)
-						}
-					}
-					return true
-				}
-				if sum, ok := node.(*ast.BinaryExpr); ok && sum.Op == token.ADD && !chained[sum] {
-					joined, parts := managedWindowsSentence(sum, chained)
-					for _, problem := range managedWindowsSentenceProblems(rel, joined, parts, windowsOnly) {
-						t.Errorf("%s: %s: %q", fset.Position(sum.Pos()), problem, joined)
-					}
-					return true
-				}
-				lit, ok := node.(*ast.BasicLit)
-				if !ok || lit.Kind != token.STRING {
-					return true
-				}
-				value, err := strconv.Unquote(lit.Value)
-				if err != nil {
-					t.Errorf("%s: %v", fset.Position(lit.Pos()), err)
-					return true
-				}
-				for _, problem := range managedWindowsLiteralProblems(rel, value, windowsOnly, used) {
-					t.Errorf("%s: %s: %q", fset.Position(lit.Pos()), problem, value)
-				}
-				return true
+			checkManagedWindowsFile(file, rel, windowsOnlySource(t, path), used, func(pos token.Pos, problem string) {
+				t.Errorf("%s: %s", fset.Position(pos), problem)
 			})
 			return nil
 		})
@@ -204,16 +184,196 @@ func TestManagedWindowsCommandsComeFromTheRenderer(t *testing.T) {
 	}
 }
 
+// checkManagedWindowsFile runs every rule of
+// TestManagedWindowsCommandsComeFromTheRenderer over one parsed file of rel,
+// marks in used the allowlist entries it needs, and reports each problem.
+// The probe test runs planted variants through it.
+func checkManagedWindowsFile(file *ast.File, rel string, windowsOnly bool, used map[string]bool, report func(token.Pos, string)) {
+	chained := map[*ast.BinaryExpr]bool{}
+	ast.Inspect(file, func(node ast.Node) bool {
+		switch n := node.(type) {
+		case *ast.CallExpr:
+			if problem := powerShellQuoteByHand(n); problem != "" {
+				if _, allowed := managedWindowsQuoteAllowed[rel]; allowed {
+					used["quote\x00"+rel] = true
+				} else {
+					report(n.Pos(), problem)
+				}
+			}
+			if joined, parts, ok := managedWindowsFormatted(n); ok {
+				for _, problem := range managedWindowsSentenceProblems(rel, joined, parts, windowsOnly) {
+					report(n.Pos(), fmt.Sprintf("%s: %q", strings.Replace(problem, "in the joined sentence", "in the formatted text", 1), joined))
+				}
+			}
+			for _, arg := range managedWindowsFmtOrJoinArgs(n) {
+				if managedWindowsAmpersandWord(arg) {
+					managedWindowsReportWord(rel, arg.Pos(), used, report)
+				}
+			}
+		case *ast.CompositeLit:
+			for _, element := range n.Elts {
+				if managedWindowsAmpersandWord(element) {
+					managedWindowsReportWord(rel, element.Pos(), used, report)
+				}
+			}
+		case *ast.BinaryExpr:
+			if n.Op == token.ADD && !chained[n] {
+				joined, parts := managedWindowsSentence(n, chained)
+				for _, problem := range managedWindowsSentenceProblems(rel, joined, parts, windowsOnly) {
+					report(n.Pos(), fmt.Sprintf("%s: %q", problem, joined))
+				}
+			}
+		case *ast.BasicLit:
+			if n.Kind != token.STRING {
+				return true
+			}
+			value, err := strconv.Unquote(n.Value)
+			if err != nil {
+				report(n.Pos(), err.Error())
+				return true
+			}
+			for _, problem := range managedWindowsLiteralProblems(rel, value, windowsOnly, used) {
+				report(n.Pos(), fmt.Sprintf("%s: %q", problem, value))
+			}
+		}
+		return true
+	})
+}
+
+// managedWindowsAmpersandWord reports whether expr is the literal "&" or
+// "& ": a call operator that a strings.Join, a fmt.Sprint or a []string
+// turns into a command (g072 review 3 M1).
+func managedWindowsAmpersandWord(expr ast.Expr) bool {
+	lit, ok := expr.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return false
+	}
+	value, err := strconv.Unquote(lit.Value)
+	return err == nil && strings.TrimRight(value, " \t") == "&"
+}
+
+func managedWindowsReportWord(rel string, pos token.Pos, used map[string]bool, report func(token.Pos, string)) {
+	if strings.HasPrefix(rel, "internal/managed/") {
+		return
+	}
+	if prefix, ok := managedWindowsCallPrefix(rel); ok {
+		used["call\x00"+prefix] = true
+		return
+	}
+	report(pos, "a PowerShell call operator joined into a command by hand: use managed.WindowsCommandLine, and say PowerShell")
+}
+
+// managedWindowsFmtOrJoinArgs are the arguments of a strings.Join or a
+// fmt.Sprint, Sprintln or Sprintf call, whose literals end up in one string.
+func managedWindowsFmtOrJoinArgs(call *ast.CallExpr) []ast.Expr {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return nil
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return nil
+	}
+	switch {
+	case pkg.Name == "strings" && sel.Sel.Name == "Join":
+		return call.Args
+	case pkg.Name == "fmt" && strings.HasPrefix(sel.Sel.Name, "Sprint"):
+		return call.Args
+	}
+	return nil
+}
+
+// managedWindowsFormatted is a fmt.Sprintf, Errorf, Printf or Fprintf call
+// whose format is a literal, rendered with each literal argument (a string
+// or a rune) in place of its verb, the other verbs kept; parts are the
+// format and those arguments. ok is false when no argument is a literal:
+// the format is then checked as a literal already. "%c %s" with '&' is
+// "& %s", and "run `%s enterprise windows ensure`" with "defenseclaw" is a
+// bare command (g072 review 3 M1).
+func managedWindowsFormatted(call *ast.CallExpr) (string, []string, bool) {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return "", nil, false
+	}
+	if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "fmt" {
+		return "", nil, false
+	}
+	first := 0
+	switch sel.Sel.Name {
+	case "Sprintf", "Errorf", "Printf":
+	case "Fprintf":
+		first = 1
+	default:
+		return "", nil, false
+	}
+	if len(call.Args) <= first {
+		return "", nil, false
+	}
+	format, ok := managedWindowsLiteralValue(call.Args[first])
+	if !ok {
+		return "", nil, false
+	}
+	args := call.Args[first+1:]
+	parts := []string{format}
+	var out strings.Builder
+	next := 0
+	for i := 0; i < len(format); i++ {
+		if format[i] != '%' {
+			out.WriteByte(format[i])
+			continue
+		}
+		j := i + 1
+		for j < len(format) && strings.IndexByte("+-# 0123456789.[]*", format[j]) >= 0 {
+			j++
+		}
+		if j >= len(format) {
+			out.WriteString(format[i:])
+			break
+		}
+		verb := format[i : j+1]
+		i = j
+		if format[j] == '%' {
+			out.WriteByte('%')
+			continue
+		}
+		if next < len(args) {
+			if value, ok := managedWindowsLiteralValue(args[next]); ok {
+				out.WriteString(value)
+				parts = append(parts, value)
+				next++
+				continue
+			}
+		}
+		next++
+		out.WriteString(verb)
+	}
+	return out.String(), parts, len(parts) > 1
+}
+
+// managedWindowsLiteralValue is expr's value when it is a string or rune literal.
+func managedWindowsLiteralValue(expr ast.Expr) (string, bool) {
+	lit, ok := expr.(*ast.BasicLit)
+	if !ok {
+		return "", false
+	}
+	switch lit.Kind {
+	case token.STRING:
+		value, err := strconv.Unquote(lit.Value)
+		return value, err == nil
+	case token.CHAR:
+		value, _, _, err := strconv.UnquoteChar(lit.Value[1:len(lit.Value)-1], '\'')
+		return string(value), err == nil
+	}
+	return "", false
+}
+
 // powerShellQuoteByHand is a problem when call is strings.ReplaceAll or
 // strings.Replace turning ' into ” (a PowerShell literal quoted by hand) or
 // ” into ' (one read by hand): either misses the typographic quotes
 // PowerShell reads as single quotes.
 func powerShellQuoteByHand(call *ast.CallExpr) string {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || len(call.Args) < 3 || sel.Sel.Name != "ReplaceAll" && sel.Sel.Name != "Replace" {
-		return ""
-	}
-	if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "strings" {
+	if !ok {
 		return ""
 	}
 	literal := func(expr ast.Expr) string {
@@ -227,7 +387,32 @@ func powerShellQuoteByHand(call *ast.CallExpr) string {
 		}
 		return value
 	}
-	switch old, replacement := literal(call.Args[1]), literal(call.Args[2]); {
+	pkg, _ := sel.X.(*ast.Ident)
+	switch {
+	case pkg != nil && pkg.Name == "strings" && sel.Sel.Name == "NewReplacer":
+		// strings.NewReplacer("'", "''") (g072 review 3 M1).
+		for i := 0; i+1 < len(call.Args); i += 2 {
+			if problem := powerShellQuotePair(literal(call.Args[i]), literal(call.Args[i+1])); problem != "" {
+				return problem
+			}
+		}
+		return ""
+	case (sel.Sel.Name == "ReplaceAllString" || sel.Sel.Name == "ReplaceAllLiteralString") && len(call.Args) == 2:
+		// A regexp replacing a quote with '' (g072 review 3 M1).
+		if replacement := literal(call.Args[1]); replacement == "''" || replacement == "$0$0" || replacement == "${0}${0}" {
+			return "a PowerShell literal quoted by hand: use managed.PowerShellLiteral or PowerShellLiteralBody (typographic quotes too)"
+		}
+		return ""
+	case pkg == nil || pkg.Name != "strings" || len(call.Args) < 3 || sel.Sel.Name != "ReplaceAll" && sel.Sel.Name != "Replace":
+		return ""
+	}
+	return powerShellQuotePair(literal(call.Args[1]), literal(call.Args[2]))
+}
+
+// powerShellQuotePair is a problem when replacing old with replacement
+// quotes a PowerShell literal by hand or reads one.
+func powerShellQuotePair(old, replacement string) string {
+	switch {
 	case old == "'" && replacement == "''":
 		return "a PowerShell literal quoted by hand: use managed.PowerShellLiteral or PowerShellLiteralBody (typographic quotes too)"
 	case old == "''" && replacement == "'":
@@ -243,10 +428,18 @@ func TestPowerShellQuoteByHand(t *testing.T) {
 		`strings.Replace(p, "'", "''", -1)`:            true,
 		`strings.ReplaceAll(p[1:len(p)-1], "''", "'")`: true,
 		"strings.ReplaceAll(p, \"'\", `'\\''`)":        false,
-		`strings.ReplaceAll(p, "/", "\\")`:             false,
-		`bytes.ReplaceAll(p, "'", "''")`:               false,
-		`strings.ReplaceAll(p, quote, "''")`:           false,
-		`managed.PowerShellLiteral(p)`:                 false,
+		// g072 review 3 M1.
+		`strings.NewReplacer("'", "''").Replace(p)`:           true,
+		`strings.NewReplacer("a", "b", "'", "''").Replace(p)`: true,
+		`strings.NewReplacer("''", "'")`:                      true,
+		`regexp.MustCompile("'").ReplaceAllString(p, "''")`:   true,
+		`quote.ReplaceAllLiteralString(p, "''")`:              true,
+		`strings.NewReplacer("\\", "/")`:                      false,
+		`quote.ReplaceAllString(p, "_")`:                      false,
+		`strings.ReplaceAll(p, "/", "\\")`:                    false,
+		`bytes.ReplaceAll(p, "'", "''")`:                      false,
+		`strings.ReplaceAll(p, quote, "''")`:                  false,
+		`managed.PowerShellLiteral(p)`:                        false,
 	} {
 		expr, err := parser.ParseExpr(source)
 		if err != nil {
@@ -255,6 +448,11 @@ func TestPowerShellQuoteByHand(t *testing.T) {
 		call, ok := expr.(*ast.CallExpr)
 		if !ok {
 			t.Fatalf("%s: not a call", source)
+		}
+		if outer, ok := call.Fun.(*ast.SelectorExpr); ok && outer.Sel.Name == "Replace" {
+			if inner, ok := outer.X.(*ast.CallExpr); ok {
+				call = inner // strings.NewReplacer(...).Replace(p)
+			}
 		}
 		if got := powerShellQuoteByHand(call) != ""; got != want {
 			t.Errorf("powerShellQuoteByHand(%s) = %t, want %t", source, got, want)
@@ -492,9 +690,84 @@ func TestManagedWindowsLiteralProblems(t *testing.T) {
 		{"POSIX and", "internal/firewall/iptables/iptables.go", "sudo iptables -F OUTPUT && ", false, 0},
 		{"POSIX redirect", "internal/actionfacts/x.go", " -i >& ", false, 0},
 		{"the renderer builds the call", "internal/managed/windows_admin_cli.go", "& ", false, 0},
+		// g072 review 3 M1: near variants of a hand-built call.
+		{"call operator before a fmt verb", "internal/cli/x.go", "& %s enterprise windows status", false, 1},
+		{"call operator before a quoted fmt verb", "internal/cli/x.go", "& %q status", false, 1},
+		{"call operator without a space", "internal/cli/x.go", "&'", false, 1},
+		{"call operator, two spaces", "internal/cli/x.go", "&  '", false, 1},
+		{"call operator, a tab", "internal/cli/x.go", "&\t'", false, 1},
+		{"call operator before a typographic quote", "internal/cli/x.go", "& \u2018", false, 1},
+		{"call operator before U+201B", "internal/cli/x.go", "&\u201b", false, 1},
+		{"a lone ampersand is a token", "internal/actionfacts/x.go", "&", false, 0},
+		{"a cmd.exe chain", "internal/gateway/x.go", "a & b", false, 0},
+		{"a character set", "internal/watcher/x.go", "[!$&'()*+,;=%]", false, 0},
+		{"an XML entity", "internal/cli/x.go", "unknown reference &%s;", false, 0},
+		{"call operator after a pipe, no space", "internal/cli/x.go", "$payload |&'", false, 1},
+		{"bare command with a fmt verb", "internal/cli/x_windows.go", "run `defenseclaw %s` from an elevated PowerShell prompt", true, 1},
+		{"verb-only with a fmt verb", "internal/cli/x_windows.go", "run `enterprise windows %s --profile standalone`", true, 1},
+		{"verb-only family as a fmt verb", "internal/cli/x_windows.go", "run `enterprise %s status`", true, 1},
+		{"verb-only use", "internal/cli/x_windows.go", "use `enterprise windows ensure --profile standalone`", true, 1},
+		{"bare exe, backtick before the argument", "internal/cli/x.go", "run `defenseclaw.exe` enterprise windows status", false, 1},
+		{"bare exe, quote before the argument", "internal/cli/x_windows.go", "run 'defenseclaw.exe' status", true, 1},
+		{"bare command, backticked name", "internal/cli/x_windows.go", "run `defenseclaw` doctor", true, 1},
+		{"a backticked name in prose", "internal/cli/x_windows.go", "the `defenseclaw` launcher is per-user", true, 1},
+		{"a quoted install path", "internal/cli/x_windows.go", "run 'C:\\x\\defenseclaw.exe' status", true, 0},
 	} {
 		if got := len(managedWindowsLiteralProblems(row.rel, row.value, row.windowsOnly, map[string]bool{})); got != row.want {
 			t.Errorf("%s: %d problems, want %d", row.name, got, row.want)
 		}
+	}
+}
+
+// g072 review 3 M1: the review's probes, planted in a windows-only file and
+// run through the same file check as the source walk; each must fail.
+func TestManagedWindowsProbeVariantsAreCaught(t *testing.T) {
+	for name, expr := range map[string]string{
+		"raw call operator":                  "`& '` + p",
+		"split install path":                 `"C:\\Program Files\\Cisco\\" + "DefenseClaw\\bin\\defenseclaw.exe" + " status"`,
+		"Sprintf call operator":              `fmt.Sprintf("& %s enterprise windows status", p)`,
+		"Sprintf %c ampersand":               `fmt.Sprintf("%c %s", '&', p)`,
+		"joined call operator":               `"&" + " " + p`,
+		"strings.Join call operator":         `strings.Join([]string{"&", p, "status"}, " ")`,
+		"no space":                           `"&'" + p + "'"`,
+		"two spaces":                         `"&  '" + p`,
+		"a tab":                              `"&\t'" + p`,
+		"typographic quote":                  `"& \u2018" + p`,
+		"NewReplacer quoting":                `strings.NewReplacer("'", "''").Replace(p)`,
+		"Sprintf bare command":               "fmt.Sprintf(\"run `defenseclaw %s` from an elevated PowerShell prompt\", v)",
+		"Sprintf verb-only":                  "fmt.Sprintf(\"run `enterprise windows %s --profile standalone`\", v)",
+		"Sprintf name as an argument":        "fmt.Sprintf(\"run `%s enterprise windows ensure`\", \"defenseclaw\")",
+		"backtick between name and argument": "\"run \" + \"`defenseclaw.exe` \" + \"enterprise windows status\"",
+	} {
+		src := "package cli\n\nfunc probe(p, v string) any { return " + expr + " }\n"
+		file, err := parser.ParseFile(token.NewFileSet(), "zz_probe_windows.go", src, 0)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var problems []string
+		checkManagedWindowsFile(file, "internal/cli/zz_probe_windows.go", true, map[string]bool{}, func(_ token.Pos, problem string) {
+			problems = append(problems, problem)
+		})
+		if len(problems) == 0 {
+			t.Errorf("%s: %s passes the source check", name, expr)
+		}
+	}
+	// Benign twins: a token compared with, a renderer's line, a cmd.exe chain.
+	for name, expr := range map[string]string{
+		"a token compared with": `p == "&"`,
+		"the renderer":          `WindowsCommandLine(p, "status")`,
+		"a cmd.exe chain":       `p + " & echo " + v`,
+		"Sprintf POSIX and":     `fmt.Sprintf("%s && %s", p, v)`,
+		"a character set":       `strings.ContainsAny(p, "!$&'()*")`,
+		"an XML entity":         `fmt.Errorf("unknown reference &%s;", p)`,
+	} {
+		src := "package cli\n\nfunc probe(p, v string) any { return " + expr + " }\n"
+		file, err := parser.ParseFile(token.NewFileSet(), "zz_probe.go", src, 0)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		checkManagedWindowsFile(file, "internal/cli/zz_probe.go", false, map[string]bool{}, func(_ token.Pos, problem string) {
+			t.Errorf("%s: %s: %s", name, expr, problem)
+		})
 	}
 }
