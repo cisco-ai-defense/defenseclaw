@@ -303,7 +303,7 @@ func boundedPathRead(name string, kind pathReadKind, identityRead bool) pathRead
 	}
 	wait := networkShareAnswerWait - time.Since(started)
 	if identityRead {
-		wait = networkShareIdentityAnswerWait - time.Since(started)
+		wait = min(networkShareIdentityAnswerWait, networkShareAnswerWait) - time.Since(started)
 		if pending {
 			wait = min(wait, networkShareIdentityAnswerWait-time.Since(pendingStarted))
 		}

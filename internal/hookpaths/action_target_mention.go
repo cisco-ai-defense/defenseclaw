@@ -3229,6 +3229,9 @@ func actionWindowsTargetMentionAsGrade(command, cwd, home string, depth int, sta
 	// Keep the original word indexes because the second scan also reads the
 	// command before assignment substitution.
 	assignmentWords := make(map[int]bool)
+	assignmentCWD := cwd
+	var assignmentDirectoryStack []string
+	boundPatterns := make(map[string]string)
 	for start := 0; start < len(originalWords); {
 		end := start
 		for end < len(originalWords) && originalWords[end] != ";" && originalWords[end] != "|" &&
@@ -3236,20 +3239,54 @@ func actionWindowsTargetMentionAsGrade(command, cwd, home string, depth int, sta
 			end++
 		}
 		statement := originalWords[start:end]
+		// Track literal pattern values only until their next assignment. A
+		// content writer can use one as a path even when the ordinary span
+		// resolver leaves wildcard values unsubstituted.
+		if len(statement) >= 3 && strings.HasPrefix(statement[0], "$") && statement[1] == "=" {
+			name := strings.ToLower(statement[0])
+			value := strings.TrimSpace(actionWindowsHereStringBody(statement[2]))
+			if len(statement) == 3 && strings.ContainsAny(value, "*?[") && !strings.ContainsAny(value, "`$") {
+				boundPatterns[name] = value
+			} else {
+				delete(boundPatterns, name)
+			}
+		} else if len(statement) == 1 && strings.HasPrefix(statement[0], "$") {
+			name, value, attached := strings.Cut(statement[0], "=")
+			if attached {
+				name = strings.ToLower(name)
+				value = strings.TrimSpace(actionWindowsHereStringBody(value))
+				if strings.ContainsAny(value, "*?[") && !strings.ContainsAny(value, "`$") {
+					boundPatterns[name] = value
+				} else {
+					delete(boundPatterns, name)
+				}
+			}
+		} else if len(boundPatterns) > 0 && !stateOnly {
+			resolved := append([]string(nil), statement...)
+			for i, word := range resolved {
+				if value, known := boundPatterns[strings.ToLower(word)]; known {
+					resolved[i] = value
+				}
+			}
+			if actionWindowsNamedContentWritePattern(resolved, assignmentCWD, home) {
+				return ProtectedTargetDecision
+			}
+		}
 		if len(statement) == 1 {
 			name, value, attached := strings.Cut(statement[0], "=")
 			if attached && strings.HasPrefix(name, "$") &&
 				actionWindowsEnvAssignment(strings.TrimPrefix(name, "$")+"=x") &&
-				!strings.Contains(value, "$(") && !strings.Contains(value, "`") {
+				actionWindowsCopySourceIsSSHDirectory(value, assignmentCWD, home) {
 				assignmentWords[start] = true
 			}
 		} else if len(statement) == 3 && strings.HasPrefix(statement[0], "$") && statement[1] == "=" &&
 			actionWindowsEnvAssignment(strings.TrimPrefix(statement[0], "$")+"=x") &&
-			!strings.Contains(statement[2], "$(") && !strings.Contains(statement[2], "`") {
+			actionWindowsCopySourceIsSSHDirectory(statement[2], assignmentCWD, home) {
 			for j := start; j < end; j++ {
 				assignmentWords[j] = true
 			}
 		}
+		actionWindowsAdvanceDirectory(statement, home, &assignmentCWD, &assignmentDirectoryStack)
 		start = end + 1
 	}
 	skip := actionWindowsTextWords(scan, depth, strings.ContainsAny(command, "\r\n"))
@@ -3413,6 +3450,10 @@ func actionWindowsTargetMentionAsGrade(command, cwd, home string, depth int, sta
 				continue
 			}
 			if skip[span.start+j] || printBodies[word] {
+				if !stateOnly && strings.Contains(word, "::") &&
+					wordHit(word, effectiveCWD, false, false) == ProtectedTargetDecision {
+					return ProtectedTargetDecision
+				}
 				if !stateOnly && (wordHit(word, effectiveCWD, false, false) != "" || strings.ContainsAny(originalWords[span.start+j], "*?[")) {
 					grade = actionMaxTargetGrade(grade, possibleOnlyTargetDecision)
 				}
@@ -3443,6 +3484,10 @@ func actionWindowsTargetMentionAsGrade(command, cwd, home string, depth int, sta
 			}
 		}
 		if skip[i] || printBodies[word] {
+			if !stateOnly && strings.Contains(word, "::") &&
+				wordHit(word, cwd, false, false) == ProtectedTargetDecision {
+				return ProtectedTargetDecision
+			}
 			if !stateOnly && (wordHit(word, cwd, false, false) != "" || strings.ContainsAny(originalWords[i], "*?[")) {
 				grade = actionMaxTargetGrade(grade, possibleOnlyTargetDecision)
 			}
