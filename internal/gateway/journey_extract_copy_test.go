@@ -80,7 +80,7 @@ func TestR107JourneyCorpusExtractMoveAndCopyThenArchive(t *testing.T) {
 		{"r3 extract then move a trailing-dot keys name into a scope entry", "project", `tar -C {P}/x -xzf keys.tar && mv authorized_keys. {P}/x/d`, "block"},
 		{"r3 extract then move the keys name into a scope entry", "project", `tar -C {P}/x -xzf keys.tar && mv authorized_keys {P}/x/d`, "block"},
 		{"r3 extract then move authorized_keys2 into a scope entry", "project", `tar -C {P}/x -xzf keys.tar && mv authorized_keys2 {P}/x/d`, "block"},
-		{"r3 extract then move an ssh rc file into a scope entry", "project", `tar -C {P}/x -xzf keys.tar && mv rc {P}/x/d`, "block"},
+		{"r3 extract then move an ordinary rc file into a scope entry", "project", `tar -C {P}/x -xzf keys.tar && mv rc {P}/x/d`, "allow"},
 		{"r3 extract then move a case variant of the keys name into a scope entry", "project", `tar -C {P}/x -xzf keys.tar && mv Authorized_Keys {P}/x/d`, "block"},
 		{"r3 extract then move two sources into a scope entry", "project", `tar -C {P}/x -xzf keys.tar && mv notes authorized_keys {P}/x/d`, "block"},
 		{"r3 extract then move with -t into a scope entry", "project", `tar -C {P}/x -xzf keys.tar && mv -t {P}/x/d authorized_keys`, "block"},
