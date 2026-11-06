@@ -15,6 +15,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/skillrootsafe"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
 
@@ -148,6 +149,90 @@ func TestGAP0613StrictUnavailableRootRequiresProvenOutsidePath(t *testing.T) {
 			})
 			if blocked != tc.blocked || blocked && decision.Action != "block" {
 				t.Fatalf("source=%q blocked=%v decision=%+v, want blocked=%v", tc.source, blocked, decision, tc.blocked)
+			}
+		})
+	}
+}
+
+func TestGAP0613UnavailableRootAliasesStayCovered(t *testing.T) {
+	home := t.TempDir()
+	physicalRoot := filepath.Join(home, "shared", "skills")
+	linkedRoot := filepath.Join(home, ".claude", "skills")
+	linkedParent := filepath.Join(home, "linked-agent")
+	linkedParentRoot := filepath.Join(linkedParent, "skills")
+	rootAlias := filepath.Join(home, "other", "skills")
+	parentAlias := filepath.Join(home, "shared-alias")
+	for _, dir := range []string{
+		filepath.Join(physicalRoot, "ordinary"), filepath.Dir(linkedRoot), filepath.Dir(rootAlias),
+	} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(filepath.Dir(physicalRoot), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	for _, link := range []struct{ name, target string }{
+		{linkedRoot, physicalRoot},
+		{linkedParent, filepath.Dir(physicalRoot)},
+		{rootAlias, physicalRoot},
+		{parentAlias, filepath.Dir(physicalRoot)},
+	} {
+		if err := os.Symlink(link.target, link.name); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	}
+	if runtime.GOOS != "windows" {
+		if _, err := skillrootsafe.Resolve(linkedRoot, nil); err == nil {
+			t.Fatal("unavailable linked root was accepted")
+		}
+	}
+	missingAlias := filepath.Join(home, "missing-alias")
+	if err := os.Symlink(filepath.Join(physicalRoot, "pending"), missingAlias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	for _, root := range []string{linkedRoot, linkedParentRoot} {
+		t.Run(filepath.Base(filepath.Dir(root)), func(t *testing.T) {
+			for _, tier := range []string{"strict", "managed", "default", "permissive"} {
+				t.Run(tier, func(t *testing.T) {
+					cfg := config.DefaultConfig()
+					cfg.AssetPolicy = config.DefaultAssetPolicy()
+					cfg.Guardrail.RulePack = tier
+					if tier == "managed" {
+						cfg.Guardrail.RulePack = "default"
+						cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+						cfg.Enterprise.Profile = managed.ProfileStandalone
+					}
+					api := &APIServer{store: store, logger: logger, scannerCfg: cfg,
+						rootCoverage: func() []watcher.RootCoverageIssue {
+							return []watcher.RootCoverageIssue{{Kind: "skill", Path: root, Connector: "claudecode"}}
+						}}
+					for _, source := range []struct {
+						name, path string
+						underRoot  bool
+					}{
+						{"physical", filepath.Join(physicalRoot, "ordinary"), true},
+						{"root-alias", filepath.Join(rootAlias, "ordinary"), true},
+						{"parent-alias", filepath.Join(parentAlias, "skills", "ordinary"), true},
+						{"unresolved-alias", filepath.Join(missingAlias, "ordinary"), true},
+						{"outside", filepath.Join(home, "outside", "ordinary"), false},
+					} {
+						t.Run(source.name, func(t *testing.T) {
+							name, path, _ := skillFromMap(map[string]interface{}{"skill_name": "ordinary", "skill_path": source.path})
+							if name != "ordinary" || path != source.path {
+								t.Fatalf("hook source changed: %q %q", name, path)
+							}
+							decision, blocked := api.runtimeSkillAssetPolicyDecision(context.Background(), "claudecode", skillRuntimeProbe{
+								Matched: true, SkillName: name, SourcePath: path,
+							})
+							wantBlock := (tier == "strict" || tier == "managed") && source.underRoot
+							if blocked != wantBlock || wantBlock && (decision.Action != "block" || decision.Source != "watch-root-unavailable") {
+								t.Fatalf("source=%q blocked=%v decision=%+v, want blocked=%v", path, blocked, decision, wantBlock)
+							}
+						})
+					}
+				})
 			}
 		})
 	}
