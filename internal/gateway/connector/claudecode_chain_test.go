@@ -64,6 +64,19 @@ func TestClaudeCodeChainRendersEveryEventAndKeepsForeignCommands(t *testing.T) {
 	if len(seen) != 29 {
 		t.Fatalf("rendered %d events, want 29", len(seen))
 	}
+	hooks := map[string]interface{}{}
+	appendClaudeCodeHookGroups(hooks, baseCommand, baseArgs, claudeCodeAllHookGroups)
+	settings := map[string]interface{}{"hooks": hooks}
+	owned := func(path string) bool { return path == launcher }
+	if changed := claudeCodeHooksInEarlierReleaseForm(settings, "windows", "", owned); changed != len(seen) {
+		t.Fatalf("rollback converted %d handlers, want %d", changed, len(seen))
+	}
+	for event := range seen {
+		handler := claudeHandlersOf(t, hooks, event)[0]
+		if handler["command"] != launcher || !codexValueMatches(handler["args"], hookArgs) {
+			t.Fatalf("%s rollback did not restore the earlier exec form: %#v", event, handler)
+		}
+	}
 
 	ordinary := []string{"hook", "--connector", "claudecode", "--enterprise-managed"}
 	if command, args := claudeCodeHandlerInvocation("UserPromptSubmit", launcher, ordinary); command != launcher || !reflect.DeepEqual(args, ordinary) {
