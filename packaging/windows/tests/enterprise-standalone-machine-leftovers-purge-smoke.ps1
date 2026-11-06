@@ -211,8 +211,10 @@ $failures = & $module {
         try {
             & {
                 # The GAP-1734 rows above replace the ACL check; this block
-                # needs the module's own.
-                ${function:Assert-DefenseClawPathAcl} = ${function:script:Assert-DefenseClawPathAcl}
+                # needs the module's own. A local wrapper, so the stub the
+                # rows below rely on stays as it is.
+                $modulePathAcl = ${function:script:Assert-DefenseClawPathAcl}
+                function Assert-DefenseClawPathAcl { & $modulePathAcl @args }
                 $adminOnly = 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
                 $native = Initialize-DefenseClawNativeSecurity
                 [void][IO.Directory]::CreateDirectory($Scratch)

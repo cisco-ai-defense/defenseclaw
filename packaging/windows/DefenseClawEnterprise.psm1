@@ -18803,7 +18803,9 @@ function Get-DefenseClawVendorFolderBackfillRefusal {
         if ($null -eq $dacl -or $dacl.Count -lt 3) {
             return 'its permissions are not the ones Setup gives a folder it creates'
         }
-        $inherit = [Security.AccessControl.AceFlags]::ObjectInherit -bor [Security.AccessControl.AceFlags]::ContainerInherit
+        # Cast from the name list: -bor on this byte enum throws in
+        # Windows PowerShell 5.1.
+        $inherit = [Security.AccessControl.AceFlags]'ObjectInherit, ContainerInherit'
         $usersFlags = if ($UsersInherit) { $inherit } else { [Security.AccessControl.AceFlags]::None }
         $expected = @(
             @($script:SystemSID, 0x1F01FF, $inherit),
