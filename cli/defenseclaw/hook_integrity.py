@@ -932,13 +932,22 @@ def _claude_chain_wrapper_parts(handler: Any) -> tuple[str, list[str], str, str]
 
 
 def _claude_chain_files_match(guard: str, approved: str) -> bool:
-    record = os.path.join(os.path.dirname(guard), "chain.json")
+    pair_dir = os.path.dirname(guard)
+    generation = os.path.basename(pair_dir)
+    if (not generation.startswith("chain-") or not generation[6:].isascii()
+            or not generation[6:].isalnum()
+            or os.path.normcase(os.path.dirname(approved)) != os.path.normcase(pair_dir)):
+        return False
+    record = os.path.join(os.path.dirname(pair_dir), "chain.json")
     try:
         with open(record, "rb") as fh:
             raw = fh.read(64 * 1024 + 1)
         if len(raw) > 64 * 1024:
             return False
-        digest = json.loads(raw).get("guard_sha256")
+        payload = json.loads(raw)
+        if payload.get("generation") != generation:
+            return False
+        digest = payload.get("guard_sha256")
         if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
             return False
         for path in (guard, approved):
