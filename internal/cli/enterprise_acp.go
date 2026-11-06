@@ -594,15 +594,13 @@ func enterpriseACPPOSIXQuote(value string) string {
 
 // enterpriseACPPOSIXPlain reports an argument a POSIX shell passes as typed.
 func enterpriseACPPOSIXPlain(arg string) bool {
-	if arg == "" {
-		return false
-	}
-	for _, r := range arg {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-_.:/=+,@%", r)) {
-			return false
-		}
-	}
-	return true
+	return arg != "" && strings.IndexFunc(arg, enterpriseACPPOSIXSyntaxRune) < 0
+}
+
+// enterpriseACPPOSIXSyntaxRune reports a character a POSIX shell may read
+// as syntax: anything but a letter, a digit or one of - _ . : / = + , @ %.
+func enterpriseACPPOSIXSyntaxRune(r rune) bool {
+	return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && !strings.ContainsRune("-_.:/=+,@%", r)
 }
 
 // enterpriseACPRunInstruction is "Run", or "In PowerShell, run" for a
