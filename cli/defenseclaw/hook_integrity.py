@@ -383,6 +383,21 @@ def _windows_hook_programs(cfg: Any, connector: str) -> tuple[list[str], list[st
             document = _load_agent_document(path)
         except (OSError, ValueError):
             continue
+        if connector == "claudecode":
+            hooks = document.get("hooks") if isinstance(document, dict) else None
+            for groups in hooks.values() if isinstance(hooks, dict) else ():
+                for group in groups if isinstance(groups, list) else ():
+                    handlers = group.get("hooks") if isinstance(group, dict) else None
+                    for handler in handlers if isinstance(handlers, list) else ():
+                        parts = _claude_chain_wrapper_parts(handler)
+                        if parts is not None:
+                            _launcher, _inner, guard, approved = parts
+                            if not _claude_chain_files_match(guard, approved):
+                                return [HookProblem(
+                                    f"the Claude Code hook guard {guard} is missing or changed, "
+                                    "so the registered hook cannot check events",
+                                    "run `defenseclaw setup claude-code --yes`; it restores the hook guard",
+                                )]
         for value in _strings(document):
             launchers += [launcher for launcher in _launcher_paths(value) if launcher not in launchers]
             guard = hook_guard_program(connector, value)
@@ -838,6 +853,107 @@ CLAUDE_LAUNCHER_GUARD_WORDS = (
 # guard instead of cmd.exe, which Cursor's argument-free import of the hook
 # could not run (GAP-1011). Keep it identical to ClaudeCodeLauncherGuardArgv.
 CLAUDE_LAUNCHER_GUARD_SUBCOMMAND = "launcher-guard"
+_CLAUDE_WRAPPED_GUARD_SUBCOMMAND = "launcher-guard-wrapped"
+_CLAUDE_WRAPPED_EXIT_BASE = 65536
+_CLAUDE_NEUTRAL_EVENTS = frozenset({"Stop", "SubagentStop", "TeammateIdle", "StopFailure", "SessionEnd"})
+_CLAUDE_CHAIN_WARNING = (
+    "DefenseClaw could not start its Claude Code hook guard. "
+    "Run the DefenseClaw installer again to repair it."
+).split()
+
+
+def _claude_wrapper_safe(path: str) -> bool:
+    return (
+        bool(path)
+        and path.strip() == path
+        and not any(ch in path for ch in '"%!\r\n')
+        and (ntpath.isabs(path) or os.path.isabs(path))
+        and (any(ch in path for ch in " \t") or not any(ch in path for ch in "&|<>^(),;="))
+    )
+
+
+def _claude_chain_wrapper_words(compare: str, guard: str, approved: str, launcher: str, event: str) -> list[str]:
+    fail_code = "1" if event in _CLAUDE_NEUTRAL_EVENTS else "2"
+    warning = ["echo", *_CLAUDE_CHAIN_WARNING, "1>&2", "&", "exit", "/b", fail_code]
+    return [
+        "/d", "/v:on", "/c", "if", "not", "exist", guard, "(", *warning, ")",
+        "&", compare, "/b", guard, approved, ">nul", "2>&1", "||", "(", *warning, ")",
+        "&", guard, _CLAUDE_WRAPPED_GUARD_SUBCOMMAND, launcher, "hook", "--connector", "claudecode",
+        "--event", event,
+        "&", "set", "dc_hook_status=!errorlevel!",
+        "&", "if", "!dc_hook_status!", "equ", "0", "exit", "/b", "0",
+        "&", "if", "!dc_hook_status!", "equ", "2", "exit", "/b", "2",
+        "&", "if", "!dc_hook_status!", "geq", str(_CLAUDE_WRAPPED_EXIT_BASE + 1),
+        "if", "!dc_hook_status!", "leq", str(2 * _CLAUDE_WRAPPED_EXIT_BASE - 1),
+        "(", "set", "/a", f"dc_hook_result=!dc_hook_status!-{_CLAUDE_WRAPPED_EXIT_BASE}", ">nul",
+        "&", "exit", "/b", "!dc_hook_result!", ")", "&", *warning,
+    ]
+
+
+def _claude_chain_wrapper_parts(handler: Any) -> tuple[str, list[str], str, str] | None:
+    if not isinstance(handler, dict):
+        return None
+    command, args = handler.get("command"), handler.get("args")
+    if not isinstance(command, str) or not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        return None
+    system_root = os.environ.get("SystemRoot") or "C:\\Windows"
+    processor = ntpath.join(system_root, "System32", "cmd.exe")
+    compare = ntpath.join(system_root, "System32", "fc.exe")
+    if ntpath.normcase(ntpath.normpath(command)) != ntpath.normcase(ntpath.normpath(processor)):
+        return None
+    if len(args) < 30 or args[:6] != ["/d", "/v:on", "/c", "if", "not", "exist"]:
+        return None
+    guard = args[6]
+    if not _claude_wrapper_safe(guard) or ntpath.basename(guard).lower() != "defenseclaw-hook-guard.exe":
+        return None
+    approved = next(
+        (args[i + 3] for i in range(8, len(args) - 3)
+         if ntpath.normcase(ntpath.normpath(args[i])) == ntpath.normcase(ntpath.normpath(compare))
+         and args[i + 1:i + 3] == ["/b", guard]),
+        "",
+    )
+    if not _claude_wrapper_safe(approved) or ntpath.basename(approved).lower() != "defenseclaw-hook-guard.approved":
+        return None
+    for i in range(len(args) - 8):
+        if args[i:i + 2] != [guard, _CLAUDE_WRAPPED_GUARD_SUBCOMMAND]:
+            continue
+        launcher = args[i + 2]
+        inner = args[i + 3:i + 6]
+        if not _claude_guardable_hook_executable(launcher) or inner != ["hook", "--connector", "claudecode"]:
+            return None
+        if args[i + 6] != "--event":
+            return None
+        event = args[i + 7]
+        if not event or len(event) > 64 or not event.isascii() or not event.isalnum():
+            return None
+        if args == _claude_chain_wrapper_words(compare, guard, approved, launcher, event):
+            return launcher, inner, guard, approved
+    return None
+
+
+def _claude_chain_files_match(guard: str, approved: str) -> bool:
+    record = os.path.join(os.path.dirname(guard), "chain.json")
+    try:
+        with open(record, "rb") as fh:
+            raw = fh.read(64 * 1024 + 1)
+        if len(raw) > 64 * 1024:
+            return False
+        digest = json.loads(raw).get("guard_sha256")
+        if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            return False
+        for path in (guard, approved):
+            info = os.lstat(path)
+            if not stat.S_ISREG(info.st_mode) or info.st_size == 0 or info.st_size > 64 * 1024 * 1024:
+                return False
+            hasher = hashlib.sha256()
+            with open(path, "rb") as fh:
+                for block in iter(lambda: fh.read(1024 * 1024), b""):
+                    hasher.update(block)
+            if hasher.hexdigest() != digest:
+                return False
+        return True
+    except (OSError, ValueError, AttributeError, TypeError):
+        return False
 
 
 def _claude_guardable_hook_executable(path: str) -> bool:
@@ -868,9 +984,11 @@ def _claude_pretool_guard_program(path: str) -> bool:
 
 
 def _claude_pretool_guard_view(handler: dict, command: str, args: list[str]) -> dict | None:
-    if len(args) != 5 or args[0] != CLAUDE_LAUNCHER_GUARD_SUBCOMMAND:
+    if len(args) not in (5, 7) or args[0] != CLAUDE_LAUNCHER_GUARD_SUBCOMMAND:
         return None
-    if args[2:] != ["hook", "--connector", "claudecode"]:
+    if args[2:5] != ["hook", "--connector", "claudecode"]:
+        return None
+    if len(args) == 7 and args[5:] != ["--event", "PreToolUse"]:
         return None
     launcher = args[1]
     if not _claude_pretool_guard_program(command) or not _claude_guardable_hook_executable(launcher):
@@ -895,6 +1013,12 @@ def claude_launcher_guard_view(handler: Any) -> Any:
     command, args = handler.get("command"), handler.get("args")
     if not isinstance(command, str) or not isinstance(args, list) or not all(isinstance(a, str) for a in args):
         return handler
+    chain = _claude_chain_wrapper_parts(handler)
+    if chain is not None:
+        launcher, inner, _guard, _approved = chain
+        view = dict(handler)
+        view["command"], view["args"] = launcher, inner
+        return view
     pretool = _claude_pretool_guard_view(handler, command, args)
     if pretool is not None:
         return pretool
