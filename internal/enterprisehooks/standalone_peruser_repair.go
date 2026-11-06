@@ -11,6 +11,7 @@
 package enterprisehooks
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -210,8 +211,8 @@ const standaloneHookRuntimeRecordMaxBytes = 4 << 20
 // shared inspect scripts and _hardening.sh, a managed plugin) is still there
 // with the recorded bytes (a deleted hermes-hook.sh stayed missing
 // and every check stayed green); the hooks were rendered for the fail mode
-// and guardrail mode the configuration selects now (an
-// observe-to-action change never reached ~/.defenseclaw/hooks); and the
+// mode the configuration selects now (an observe-to-action change that
+// changes the rendered hook must reach ~/.defenseclaw/hooks); and the
 // runtime records the hook scripts read (.hookcfg and .hookcfg.<connector>)
 // carry that fail mode. Every hook runtime file DefenseClaw renders for the
 // user (a managed in-agent plugin for Amp and OpenCode, the hook scripts
@@ -235,10 +236,10 @@ func verifyStandaloneHookRuntime(conn connector.Connector, setupOpts connector.S
 	if recorded := strings.TrimSpace(lock.HookFailMode); recorded != "" && recorded != expected.HookFailMode {
 		return fmt.Errorf("enterprise hooks: connector %s hooks were rendered for fail mode %q; the configuration now selects %q", name, recorded, expected.HookFailMode)
 	}
-	if lock.RegistrationPosture != nil && expected.RegistrationPosture != nil &&
-		lock.RegistrationPosture.GuardrailMode != expected.RegistrationPosture.GuardrailMode {
-		return fmt.Errorf("enterprise hooks: connector %s hooks were rendered for guardrail mode %q; the configuration now selects %q", name, lock.RegistrationPosture.GuardrailMode, expected.RegistrationPosture.GuardrailMode)
-	}
+	// The guardrail mode in the lock records policy at the last install. A
+	// mode change alone does not mean the target changed: the template,
+	// sidecar, token and registration checks below establish whether the
+	// current mode actually requires a new render.
 
 	shared, err := readSharedHookScriptDigests(opts.DataDir)
 	if err != nil {
@@ -284,6 +285,34 @@ func verifyStandaloneHookRuntime(conn connector.Connector, setupOpts connector.S
 		return err
 	}
 	return verifyHookRuntimeRecords(hookDir, name, connector.CapableHookFailMode(opts, conn, expected.HookFailMode))
+}
+
+// PreviousHookRuntimeIntactForPolicyChange distinguishes a configuration
+// rerender from repair of a changed target. It verifies the installed runtime
+// against the modes recorded at its last successful install; any independent
+// drift keeps the ordinary repair classification.
+func PreviousHookRuntimeIntactForPolicyChange(ctx context.Context, opts InstallOptions) bool {
+	if runtime.GOOS == "windows" || !standaloneProfileProcess() || os.Geteuid() == 0 {
+		return false
+	}
+	dataDir := strings.TrimSpace(opts.DataDir)
+	if dataDir == "" {
+		dataDir = filepath.Join(opts.UserHome, ".defenseclaw")
+	}
+	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
+	lock, err := connector.LoadHookContractLockEntryForMode(dataDir, name, false)
+	if err != nil || lock.Connector != name || lock.RegistrationPosture == nil || strings.TrimSpace(lock.HookFailMode) == "" {
+		return false
+	}
+	previous := opts
+	previous.HookFailMode = lock.HookFailMode
+	previous.GuardrailMode = lock.RegistrationPosture.GuardrailMode
+	if strings.TrimSpace(previous.HookFailMode) == strings.TrimSpace(opts.HookFailMode) &&
+		strings.TrimSpace(previous.GuardrailMode) == strings.TrimSpace(opts.GuardrailMode) {
+		return false
+	}
+	_, err = Verify(ctx, previous)
+	return err == nil
 }
 
 // verifyHookRuntimeToken requires the connector-scoped token file the hook
