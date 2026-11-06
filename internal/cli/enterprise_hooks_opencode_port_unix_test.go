@@ -26,11 +26,21 @@ import (
 // the machine policy when governed, an in-memory OpenCode ports record, and
 // a worker that runs the as-the-user step in this process.
 func openCodePortGuardian(t *testing.T, governed bool, uids ...int) (map[int]string, *map[int]int) {
+	homes, record, _ := openCodePortGuardianWith(t, governed, uids...)
+	return homes, record
+}
+
+// openCodePortGuardianWith also returns a setter for the eligible uids (an
+// exclusion, a new account); every uid given here keeps its home, and every
+// uid resolves unless gone names it.
+func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int]string, *map[int]int, func(gone map[int]bool, eligible ...int)) {
 	t.Helper()
 	previousManifest, previousMachinePolicy := enterpriseHookManifest, enterpriseHookStandaloneMachinePolicySet
 	previousLoad, previousCheck, previousRunner := enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner
 	previousLoadPorts, previousWritePorts := enterpriseHookLoadOpenCodePorts, enterpriseHookWriteOpenCodePorts
+	previousResolves := enterpriseHookUIDResolves
 	t.Cleanup(func() {
+		enterpriseHookUIDResolves = previousResolves
 		enterpriseHookManifest, enterpriseHookStandaloneMachinePolicySet = previousManifest, previousMachinePolicy
 		enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner = previousLoad, previousCheck, previousRunner
 		enterpriseHookLoadOpenCodePorts, enterpriseHookWriteOpenCodePorts = previousLoadPorts, previousWritePorts
@@ -58,6 +68,29 @@ func openCodePortGuardian(t *testing.T, governed bool, uids ...int) (map[int]str
 		accounts = append(accounts, enterprisehooks.UnixEligibleAccount{User: filepath.Base(home), UID: uid, GID: uid, Home: home})
 	}
 	enterpriseHookLoadEligibleAccounts = func(string) ([]enterprisehooks.UnixEligibleAccount, error) { return accounts, nil }
+	byUID := map[int]enterprisehooks.UnixEligibleAccount{}
+	for _, account := range accounts {
+		byUID[account.UID] = account
+	}
+	gone := map[int]bool{}
+	enterpriseHookUIDResolves = func(uid int) bool { return !gone[uid] }
+	setEligible := func(nowGone map[int]bool, eligible ...int) {
+		gone = nowGone
+		accounts = nil
+		for _, uid := range eligible {
+			account, ok := byUID[uid]
+			if !ok {
+				home := filepath.Join(root, fmt.Sprintf("ent%d", uid))
+				if err := os.MkdirAll(home, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				homes[uid] = home
+				account = enterprisehooks.UnixEligibleAccount{User: filepath.Base(home), UID: uid, GID: uid, Home: home}
+				byUID[uid] = account
+			}
+			accounts = append(accounts, account)
+		}
+	}
 	enterpriseHookCheckHome = func(string, int) enterprisehooks.HomeCheck {
 		return enterprisehooks.HomeCheck{State: enterprisehooks.HomeAvailable}
 	}
@@ -84,7 +117,7 @@ func openCodePortGuardian(t *testing.T, governed bool, uids ...int) (map[int]str
 		}
 		return response, nil
 	}
-	return homes, &record
+	return homes, &record, setEligible
 }
 
 func openCodePortIn(t *testing.T, home string) int {
@@ -184,5 +217,48 @@ func TestManagedGuardianLeavesOpenCodeAloneWhenNotGoverned(t *testing.T) {
 	}
 	if len(*record) != 0 {
 		t.Fatalf("record written: %v", *record)
+	}
+}
+
+// REVIEW-gx053-2 MF1: an account that leaves the eligible set (manifest
+// exclusion, group removal) keeps its port: its service.json and its OpenCode
+// still use it. A new account must not be given that port, and the account
+// enrolled again keeps it. The entry goes only when the uid no longer
+// resolves.
+func TestManagedGuardianKeepsTheOpenCodePortOfAnExcludedAccount(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001, 1002)
+	runOpenCodePortPass(t)
+	first := map[int]int{1001: openCodePortIn(t, homes[1001]), 1002: openCodePortIn(t, homes[1002])}
+	if first[1001] != 25001 || first[1002] != 25002 {
+		t.Fatalf("first pass ports %v", first)
+	}
+	// 1001 is excluded; 9001 (same first port as 1001) is enrolled.
+	setEligible(nil, 1002, 9001)
+	log := runOpenCodePortPass(t)
+	if got := openCodePortIn(t, homes[9001]); got == first[1001] || got == first[1002] || got == 0 {
+		t.Fatalf("new account 9001 got %d, a port another account holds (%v)\n%s", got, first, log)
+	}
+	if (*record)[1001] != first[1001] {
+		t.Fatalf("the excluded account's port left the record: %v", *record)
+	}
+	// 1001 is enrolled again: it keeps its port; nobody shares.
+	setEligible(nil, 1001, 1002, 9001)
+	log = runOpenCodePortPass(t)
+	seen := map[int]int{}
+	for _, uid := range []int{1001, 1002, 9001} {
+		port := openCodePortIn(t, homes[uid])
+		if other, dup := seen[port]; dup {
+			t.Fatalf("uids %d and %d share port %d\n%s", other, uid, port, log)
+		}
+		seen[port] = uid
+	}
+	if openCodePortIn(t, homes[1001]) != first[1001] {
+		t.Fatalf("re-enrolled 1001 moved off %d\n%s", first[1001], log)
+	}
+	// 1001 is deleted (its uid no longer resolves): its entry goes.
+	setEligible(map[int]bool{1001: true}, 1002, 9001)
+	runOpenCodePortPass(t)
+	if _, ok := (*record)[1001]; ok {
+		t.Fatalf("a deleted account kept its record entry: %v", *record)
 	}
 }

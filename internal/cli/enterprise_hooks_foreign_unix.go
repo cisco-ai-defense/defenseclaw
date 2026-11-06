@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -70,6 +71,13 @@ var (
 	enterpriseHookLoadOpenCodePorts  = enterprisehooks.LoadUnixOpenCodeServicePorts
 	enterpriseHookWriteOpenCodePorts = enterprisehooks.WriteUnixOpenCodeServicePorts
 	enterpriseHookReadOpenCodePort   = enterprisepolicy.ReadOpenCodeServicePort
+	// enterpriseHookUIDResolves reports that a uid still names an account:
+	// a recorded OpenCode port stays taken until then (MF1, the GAP-1704 rule
+	// for API-port claims), even while the account is not eligible.
+	enterpriseHookUIDResolves = func(uid int) bool {
+		_, err := user.LookupId(strconv.Itoa(uid))
+		return err == nil
+	}
 )
 
 var enterpriseHookForeignCleanupState struct {
@@ -265,12 +273,18 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		}
 		// A port an account's service.json already names is kept, and no
 		// other account is given it; the record keeps the rest stable.
+		// Every recorded port stays taken, also for an account that left the
+		// eligible set (excluded, out of the groups): its service.json and
+		// its OpenCode still use the port (MF1).
 		kept := map[int]int{}
-		uids := make([]int, 0, len(accounts))
+		uids := make([]int, 0, len(accounts)+len(openCodeRecorded))
+		for uid, port := range openCodeRecorded {
+			kept[uid] = port
+			uids = append(uids, uid)
+		}
 		for _, account := range accounts {
-			uids = append(uids, account.UID)
-			if port, ok := openCodeRecorded[account.UID]; ok {
-				kept[account.UID] = port
+			if _, ok := kept[account.UID]; !ok {
+				uids = append(uids, account.UID)
 			}
 			if port := enterpriseHookReadOpenCodePort(account.Home); port > 0 {
 				kept[account.UID] = port
@@ -927,15 +941,20 @@ func enterpriseHookOpenCodePortsPath(manifestPath string) string {
 }
 
 // nextOpenCodeServicePorts is the record after a pass: the ports the workers
-// reported for the eligible accounts, and the recorded ports of eligible
-// accounts no worker answered for. Accounts no longer eligible drop out.
+// reported for the eligible accounts, and every other recorded port while
+// its uid still names an account. An account that left the eligible set
+// keeps its port (its OpenCode still listens there), so no new account is
+// given it (MF1); the entry goes only when the account is gone.
 func nextOpenCodeServicePorts(recorded, seen map[int]int, accounts []enterprisehooks.UnixEligibleAccount) (map[int]int, bool) {
 	next := map[int]int{}
 	for _, account := range accounts {
 		if port, ok := seen[account.UID]; ok {
 			next[account.UID] = port
-		} else if port, ok := recorded[account.UID]; ok {
-			next[account.UID] = port
+		}
+	}
+	for uid, port := range recorded {
+		if _, ok := next[uid]; !ok && enterpriseHookUIDResolves(uid) {
+			next[uid] = port
 		}
 	}
 	changed := len(next) != len(recorded)
