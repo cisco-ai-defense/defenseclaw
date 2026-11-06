@@ -1065,6 +1065,20 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				resp.HookOutput = hookOutputFor(req, resp.Action, resp.RawAction, resp.Reason, resp.AdditionalContext, profile.Capabilities)
 			}
 		}
+		if resp.Action == "allow" && resp.RawAction == "allow" && slices.ContainsFunc(resp.Findings, func(finding string) bool {
+			return strings.Contains(finding, unresolvedWriteTargetTitle)
+		}) {
+			warning := "DefenseClaw could not confirm a write target's file identity. The default policy allowed this command."
+			resp.AdditionalContext = strings.TrimSpace(resp.AdditionalContext + " " + warning)
+			if profile.Respond != nil {
+				resp.HookOutput = profile.Respond(connector.HookRespondInput{
+					Req: hookProfileRequestFromAgentHook(req), Action: resp.Action, RawAction: resp.RawAction,
+					Reason: resp.Reason, AdditionalContext: resp.AdditionalContext, Caps: profile.Capabilities,
+				}).Output
+			} else {
+				resp.HookOutput = hookOutputFor(req, resp.Action, resp.RawAction, resp.Reason, resp.AdditionalContext, profile.Capabilities)
+			}
+		}
 		// Re-inject the cloud-controlled per-inspection redaction
 		// directive the evaluator resolved (evaluate*'s ctx-injection is
 		// local to that call) so finalizeAgentHookAnswer emits the

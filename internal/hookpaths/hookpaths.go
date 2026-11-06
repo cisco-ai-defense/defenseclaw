@@ -490,11 +490,11 @@ func resolveWritePath(path string, linkDepth int) (string, bool) {
 // link (GAP-1515: with sshlink -> ~\.ssh, sshlink\authorized_keys looked
 // like a project file). An irregular entry that names no target stays a
 // plain component.
-func windowsMountPointLink(candidate string, info os.FileInfo) bool {
+func windowsMountPointLink(candidate string, info os.FileInfo, readlink func(string) (string, error)) bool {
 	if runtime.GOOS != "windows" || info.Mode()&os.ModeIrregular == 0 {
 		return false
 	}
-	_, err := pathReadlink(candidate)
+	_, err := readlink(candidate)
 	return err == nil
 }
 
@@ -514,6 +514,12 @@ func walkWritePath(base, path string, linkDepth int, collect, patchTarget bool) 
 // prefix depends only on that prefix and the file system, so a memo walk
 // answers exactly what a fresh walk answers while the files stay as they are.
 func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bool, memo *TargetMemo) (string, []string, int, bool) {
+	return walkWritePathMemoWithReaders(base, path, linkDepth, collect, patchTarget, memo, pathLstat, pathReadlink)
+}
+
+func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, patchTarget bool, memo *TargetMemo,
+	lstat func(string) (os.FileInfo, error), readlink func(string) (string, error),
+) (string, []string, int, bool) {
 	if linkDepth > maxWriteTargetLinkDepth {
 		return "", nil, linkDepth, false
 	}
@@ -593,18 +599,18 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 				return fail()
 			}
 			memo.noteWork()
-			info, err := pathLstat(candidate)
+			info, err := lstat(candidate)
 			if err != nil && !os.IsNotExist(err) {
 				return fail()
 			}
 			unknown := os.IsNotExist(err)
-			if err == nil && (info.Mode()&os.ModeSymlink != 0 || windowsMountPointLink(candidate, info)) {
+			if err == nil && (info.Mode()&os.ModeSymlink != 0 || windowsMountPointLink(candidate, info, readlink)) {
 				// The cwd proc link is interpreted by the process opening the
 				// operand. Resolving it in the hook would prove a different path.
 				if ProcCWDWriteOperand(candidate) {
 					return fail()
 				}
-				link, err := pathReadlink(candidate)
+				link, err := readlink(candidate)
 				if err != nil {
 					return fail()
 				}
@@ -617,13 +623,13 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 				var extra []string
 				var nextDepth int
 				var ok bool
-				current, extra, nextDepth, ok = walkWritePath(current, link, linkDepth+1, collect, patchTarget)
+				current, extra, nextDepth, ok = walkWritePathMemoWithReaders(current, link, linkDepth+1, collect, patchTarget, nil, lstat, readlink)
 				if !ok || collect && len(forms)+len(extra) > maxOpaquePathForms {
 					return fail()
 				}
 				linkDepth = nextDepth
 				forms = append(forms, extra...)
-				_, err = pathLstat(current)
+				_, err = lstat(current)
 				if err != nil && !os.IsNotExist(err) {
 					return fail()
 				}
@@ -2288,10 +2294,11 @@ type shellLinks struct {
 	cdDirs []string
 	// scopedMoves: destinations of plain mv calls that land directly in an
 	// opaque scope and can only rename an entry there (scopedMoveSafe).
-	scopedMoves            map[string]bool
-	opaqueScopes           []opaqueScope
-	copyDestinations       []string
-	placedCopyDestinations []string // copy destinations placed by the statement walk
+	scopedMoves             map[string]bool
+	opaqueScopes            []opaqueScope
+	copyDestinations        []string
+	placedCopyDestinations  []string // copy destinations placed by the statement walk
+	dereferencedSourceLinks []string // copy destinations whose source may contain a followed link
 	// copyEnds: the end offset of the copy call that wrote a destination,
 	// when that call is a plain top-level statement of a ; / && / || list
 	// (runs once, in order), else -1. globalCopyAt: the offsets of the copy
@@ -2340,6 +2347,7 @@ func (l *shellLinks) merge(inner shellLinks) {
 	l.opaqueScopes = append(l.opaqueScopes, inner.opaqueScopes...)
 	l.copyDestinations = append(l.copyDestinations, inner.copyDestinations...)
 	l.placedCopyDestinations = append(l.placedCopyDestinations, inner.placedCopyDestinations...)
+	l.dereferencedSourceLinks = append(l.dereferencedSourceLinks, inner.dereferencedSourceLinks...)
 	for _, destination := range inner.copyDestinations {
 		l.noteCopyEnd(destination, -1)
 	}
@@ -3089,6 +3097,9 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 					readable = readable && !option && !dynamic && !nested && movedDir == "" && len(callDirs) == 1
 					diskRead := false
 					if diskLink {
+						if cpOperands(words[1:], static[1:]).dereference && destination != "" {
+							links.dereferencedSourceLinks = append(links.dereferencedSourceLinks, destination)
+						}
 						// A copy of links already on disk whose texts the
 						// hook client read is read at the end as the same
 						// links at the copy's names (rel-1-0-6:GAP-0274).
@@ -4176,6 +4187,13 @@ func (l Links) IsCopyDestination(path string) bool {
 	return slices.Contains(l.links.copyDestinations, linksDrivePath(path))
 }
 
+// DereferencedSourceLink reports an existing source link that this copy
+// follows. The source fact comes from the same client or local walk as the
+// ordinary copy-scope proof.
+func (l Links) DereferencedSourceLink(path string) bool {
+	return slices.Contains(l.links.dereferencedSourceLinks, linksDrivePath(path))
+}
+
 // linksDrivePath spells a Windows drive path as the link reading records its
 // scopes and copy destinations (backslashes, cleaned). The gateway reads a
 // Git Bash operand as C:/x/y, so env -C ~ cp -r project project-bak was not
@@ -4815,7 +4833,7 @@ func (c *linkCopy) readDiskLinks(facts map[string]string, record bool) bool {
 // the disk. ok is false when path cannot be read, the walk fails or is over
 // its bounds, or a link names a missing entry or another link.
 func sourceDiskLinks(path string) ([]diskLink, bool) {
-	info, err := os.Lstat(path)
+	info, err := pathLstat(path)
 	if err != nil {
 		// The disk-link check read this source as one that may hold a
 		// link; a gateway behind ProtectHome sees ENOENT for it.
@@ -4823,7 +4841,7 @@ func sourceDiskLinks(path string) ([]diskLink, bool) {
 	}
 	var found []diskLink
 	add := func(name, rest string) bool {
-		text, err := os.Readlink(name)
+		text, err := pathReadlink(name)
 		if err != nil || text == "" || len(found) >= maxSourceLinks {
 			return false
 		}
@@ -4831,7 +4849,7 @@ func sourceDiskLinks(path string) ([]diskLink, bool) {
 		if !filepath.IsAbs(target) {
 			target = filepath.Join(filepath.Dir(name), text)
 		}
-		if hop, err := os.Lstat(target); err != nil || hop.Mode()&os.ModeSymlink != 0 {
+		if hop, err := pathLstat(target); err != nil || hop.Mode()&os.ModeSymlink != 0 {
 			return false
 		}
 		found = append(found, diskLink{rest: rest, text: text})
@@ -5095,7 +5113,7 @@ func cpDiskSymlink(args []string, static []bool, cwd, home string, facts map[str
 		return true
 	}
 	for _, source := range parsed.sources {
-		if diskSourceMayLink(source, cwd, home, facts, record, os.Lstat) {
+		if diskSourceMayLink(source, cwd, home, facts, record, pathLstat) {
 			return true
 		}
 	}
@@ -5126,7 +5144,7 @@ func archiveCopiesDiskSymlink(program string, args []string, static []bool, cwd,
 			// materialize a link at any name in the destination tree.
 			return true
 		}
-		if diskSourceMayLink(source, cwd, home, facts, record, os.Lstat) {
+		if diskSourceMayLink(source, cwd, home, facts, record, pathLstat) {
 			return true
 		}
 	}
