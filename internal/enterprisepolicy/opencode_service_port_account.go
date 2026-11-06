@@ -23,10 +23,11 @@ type OpenCodeAccountPortPlan struct {
 }
 
 // PlanOpenCodeServicePortsByAccountWithClaims keeps the full SID as the key.
-// Recorded reservations win before new file ports; a live file naming its own
-// recorded port wins first. Other file ports then win before any new port.
-// Existing claim files reserve candidates for their owner, including accounts
-// that are not currently eligible. A conflict asks the caller to replace the
+// Existing claim files reserve ports for their owner, including accounts that
+// are not currently eligible. A recorded reservation or file port can keep a
+// claimed port only when the claim belongs to that same account. Other recorded
+// reservations win before new file ports; a live file naming its own recorded
+// port wins first. A conflict asks the caller to replace the
 // losing file's port under its account token. When allowNew is false, the
 // caller must not write the returned record or replace any file.
 func PlanOpenCodeServicePortsByAccountWithClaims(ids map[string]uint64, eligible []string, filePorts, recorded map[string]int, claims map[int]string, allowNew bool) OpenCodeAccountPortPlan {
@@ -53,6 +54,21 @@ func PlanOpenCodeServicePortsByAccountWithClaims(ids map[string]uint64, eligible
 		holder[port] = sid
 		return true
 	}
+	claimPorts := make([]int, 0, len(claims))
+	for port := range claims {
+		claimPorts = append(claimPorts, port)
+	}
+	sort.Ints(claimPorts)
+	for _, port := range claimPorts {
+		if port <= 0 || port > 65535 {
+			continue
+		}
+		owner := claims[port]
+		if owner == "" {
+			owner = "!"
+		}
+		holder[port] = owner
+	}
 	for _, sid := range eligible {
 		if port := filePorts[sid]; port > 0 && port == recorded[sid] && hold(sid, port) {
 			plan.Ports[sid] = port
@@ -76,20 +92,6 @@ func PlanOpenCodeServicePortsByAccountWithClaims(ids map[string]uint64, eligible
 			plan.Conflicts = append(plan.Conflicts, OpenCodeAccountPortConflict{sid, holder[port], port})
 		} else {
 			superseded = append(superseded, sid)
-		}
-	}
-	claimPorts := make([]int, 0, len(claims))
-	for port := range claims {
-		claimPorts = append(claimPorts, port)
-	}
-	sort.Ints(claimPorts)
-	for _, port := range claimPorts {
-		if port > 0 && port <= 65535 && holder[port] == "" {
-			owner := claims[port]
-			if owner == "" {
-				owner = "!"
-			}
-			holder[port] = owner
 		}
 	}
 	var fresh []string

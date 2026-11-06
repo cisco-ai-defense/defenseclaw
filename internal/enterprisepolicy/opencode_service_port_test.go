@@ -131,3 +131,56 @@ func TestManagedWindowsOpenCodePlanResolvesFileAndRecordConflicts(t *testing.T) 
 		t.Fatalf("unreadable record made a new assignment: %+v", plan)
 	}
 }
+
+func TestManagedWindowsOpenCodeClaimOwnsPortBeforeAnOlderRecord(t *testing.T) {
+	const (
+		first  = "S-1-5-21-100-200-300-1001"
+		second = "S-1-5-21-400-500-600-1001"
+		third  = "S-1-5-21-700-800-900-1003"
+	)
+	ids := map[string]uint64{first: 1001, second: 1001, third: 1003}
+	claim := map[int]string{25001: second}
+	recorded := map[string]int{first: 25001, third: 25003}
+	files := map[string]int{first: 25001, second: 25001, third: 25003}
+	plan := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, second, third}, files, recorded, claim, true)
+	if plan.Ports[first] != 25002 || plan.Ports[second] != 25001 || plan.Ports[third] != 25003 ||
+		plan.Replace[first] != 25001 || plan.Record[first] == plan.Record[second] {
+		t.Fatalf("claim ownership was not reconciled with the older record: %+v", plan)
+	}
+	// The recorded account may have been excluded when the other account
+	// claimed the port. Its entry remains reserved for its return.
+	excluded := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{second, third}, files, recorded, claim, true)
+	if excluded.Record[first] != 25002 || excluded.Record[second] != 25001 || excluded.Ports[third] != 25003 {
+		t.Fatalf("excluded account's reservation was lost: %+v", excluded)
+	}
+	returned := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, second, third}, files, excluded.Record, claim, true)
+	if returned.Ports[first] != 25002 || returned.Replace[first] != 25001 || returned.Ports[second] != 25001 {
+		t.Fatalf("returning account could not reconcile its service file: %+v", returned)
+	}
+	files[first] = 25002
+	stable := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, second, third}, files, returned.Record, claim, true)
+	if stable.Ports[first] != 25002 || stable.Ports[second] != 25001 || len(stable.Replace) != 0 {
+		t.Fatalf("reconciled accounts were not stable: %+v", stable)
+	}
+	// A per-user uninstall can remove the first account's claim while its
+	// guardian record and service file remain. Another account can then run
+	// per-user setup on that port before the first account is re-enrolled.
+	initial := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, third},
+		map[string]int{first: 25001, third: 25003}, nil, map[int]string{25001: first}, true)
+	uninstalled := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{third},
+		map[string]int{third: 25003}, initial.Record, nil, true)
+	setup := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{second, third},
+		map[string]int{second: 25001, third: 25003}, uninstalled.Record, claim, true)
+	reenrolled := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, second, third},
+		map[string]int{first: 25001, second: 25001, third: 25003}, setup.Record, claim, true)
+	if initial.Record[first] != 25001 || uninstalled.Record[first] != 25001 ||
+		setup.Ports[second] != 25001 || reenrolled.Ports[first] != 25002 || reenrolled.Replace[first] != 25001 {
+		t.Fatalf("uninstall and re-enrollment did not reconcile: initial=%+v uninstalled=%+v setup=%+v re-enrolled=%+v",
+			initial, uninstalled, setup, reenrolled)
+	}
+	// A claim by the recorded owner keeps the ordinary stable case.
+	owned := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, third}, map[string]int{first: 25001, third: 25003}, recorded, map[int]string{25001: first}, true)
+	if owned.Ports[first] != 25001 || owned.Ports[third] != 25003 || len(owned.Replace) != 0 {
+		t.Fatalf("matching claim moved an account: %+v", owned)
+	}
+}

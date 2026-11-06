@@ -5,8 +5,6 @@
 
 package enterprisepolicy
 
-func openCodeServiceDirIsReal(string) bool { return true }
-
 func writeOpenCodeServiceConfig(_ string, path string, data []byte) error {
 	return writePrivateUserFile(path, data)
 }

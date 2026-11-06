@@ -45,12 +45,12 @@ func TestManagedWindowsOpenCodePortWriteIsAccountPrivate(t *testing.T) {
 	if err := safefile.ValidatePrivateFile(path); err != nil {
 		t.Fatalf("replaced service.json is not account-private: %v", err)
 	}
-	if got := ReadOpenCodeServicePort(home); got != 25002 {
-		t.Fatalf("replaced service.json port = %d", got)
+	if got, err := ReadOpenCodeServicePortAsUser(home); err != nil || got != 25002 {
+		t.Fatalf("replaced service.json port = %d, err=%v", got, err)
 	}
 }
 
-func TestManagedWindowsOpenCodePortReadRefusesReparseFolder(t *testing.T) {
+func TestManagedWindowsOpenCodePortReadSeesAccountLinkedFolder(t *testing.T) {
 	home := t.TempDir()
 	config := filepath.Join(home, ".config")
 	if err := os.MkdirAll(filepath.Join(config, "opencode"), 0o700); err != nil {
@@ -59,8 +59,8 @@ func TestManagedWindowsOpenCodePortReadRefusesReparseFolder(t *testing.T) {
 	if err := os.WriteFile(OpenCodeServiceConfigPath(home), []byte(`{"port":25001}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := ReadOpenCodeServicePort(home); got != 25001 {
-		t.Fatalf("regular folder port = %d", got)
+	if got, err := ReadOpenCodeServicePortAsUser(home); err != nil || got != 25001 {
+		t.Fatalf("regular folder port = %d, err=%v", got, err)
 	}
 	target := filepath.Join(home, "held-config")
 	if err := os.Rename(config, target); err != nil {
@@ -69,7 +69,7 @@ func TestManagedWindowsOpenCodePortReadRefusesReparseFolder(t *testing.T) {
 	if err := os.Symlink(target, config); err != nil {
 		t.Skipf("this Windows runner cannot create a directory link: %v", err)
 	}
-	if got := ReadOpenCodeServicePort(home); got != 0 {
-		t.Fatalf("linked folder exposed port %d", got)
+	if got, err := ReadOpenCodeServicePortAsUser(home); err != nil || got != 25001 {
+		t.Fatalf("account-linked folder port = %d, err=%v", got, err)
 	}
 }

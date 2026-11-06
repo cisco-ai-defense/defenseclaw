@@ -9,13 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
-	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
-
-// Windows reparse points include forms that os.Lstat does not call symlinks.
-func openCodeServiceDirIsReal(path string) bool {
-	return winpath.RejectReparseChain(path) == nil
-}
 
 // service.json may carry OpenCode's password. Its new content gets the
 // effective account's private file DACL while existing vendor directories
