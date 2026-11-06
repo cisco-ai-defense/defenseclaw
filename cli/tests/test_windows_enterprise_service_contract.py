@@ -7018,7 +7018,9 @@ def test_untrusted_config_acl_is_refused_before_the_transaction_stops_a_service(
 
     module = read(MODULE).replace("\r\n", "\n")
     transaction = _function_text(module, "New-DefenseClawTransaction")
-    check = transaction.index("-RedactionKeyClass $precheckRedactionKeyClass `\n                -CheckOnly)")
+    check = transaction.index(
+        "-RedactionKeyClass $precheckRedactionKeyClass `\n                -ContentGateScope $ContentGateScope `\n                -CheckOnly)"
+    )
     assert check < transaction.index("Write-DefenseClawJsonAtomic `\n            -Value $quiescingIntent")
     assert check < transaction.index("Set-DefenseClawServiceStartMode -Name $name -StartMode 4")
     assert check < transaction.index("Stop-DefenseClawService -Name $enumeratorServiceName")
@@ -7026,6 +7028,15 @@ def test_untrusted_config_acl_is_refused_before_the_transaction_stops_a_service(
     assert "(Test-DefenseClawStandaloneProfile) -and $PriorDeploymentActive" in guard
     assert "Test-DefenseClawServiceExists -Name $GatewayServiceName" in guard
     assert transaction.count("Repair-DefenseClawDeploymentAclDrift `") == 3
+    # g582 review 2 S1: every drift repair in the transaction gates with the
+    # caller's scope, and the uninstall passes the scope its own gate ran, so
+    # PURGE=1 is not refused for a credential it deletes unread.
+    assert transaction.count("-ContentGateScope $ContentGateScope") == 3
+    assert "[ValidateSet('Lifecycle', 'Retain', 'Purge')][string]$ContentGateScope = 'Lifecycle'" in transaction
+    drift = _function_text(module, "Repair-DefenseClawDeploymentAclDrift")
+    assert "-GatewayServiceName $GatewayServiceName `\n            -Scope $ContentGateScope" in drift
+    uninstall = _function_text(module, "Invoke-DefenseClawUninstallLifecycle")
+    assert "-SkipRedactionKeySnapshot `\n            -ContentGateScope $(if ($Purge) { 'Purge' } else { 'Retain' })" in uninstall
     repair = _function_text(module, "Repair-DefenseClawDeploymentAclDrift")
     assert repair.index("Assert-DefenseClawRepairableConfigAcl -Layout $Layout") < repair.index(
         "if ($CheckOnly) {"
