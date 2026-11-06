@@ -1797,7 +1797,7 @@ func (f *hookRequestFacts) watch() *hookpaths.PatchTargetWatch {
 func setHookRequestFacts(header http.Header, opts Options, payload []byte) (patchWatch *hookpaths.PatchTargetWatch) {
 	startupEvent := hookpaths.IsSessionStartEvent(opts.Event)
 	if opts.ManagedEnterprise && !opts.SecureClient &&
-		(runtime.GOOS != "windows" || startupEvent) {
+		(runtime.GOOS != "windows" || startupEvent || hookpaths.ProjectSkillHookCall(opts.Connector, payload)) {
 		// The surface and bound event are the ones this call sends the
 		// gateway (HookDialectHeader, X-DefenseClaw-Copilot-Event), so the
 		// evidence reads the body in the dialect the gateway judges.
