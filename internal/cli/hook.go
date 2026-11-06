@@ -114,7 +114,9 @@ func newHookCmd() *cobra.Command {
 				// have no platform record to send them to.
 				hookexec.InstallManagedHookDiagnosticSinks()
 			}
-			startedAt := hookInvocationStart()
+			// Read once: it looks at the machine's install and service.
+			secureClient := enterpriseManaged && secureClientHost()
+			startedAt := hookInvocationStart(secureClient)
 			// At the answer deadline of a tool call the hook writes its
 			// fail-closed answer and ends, even while its own work is held
 			// up (GAP-0155).
@@ -124,7 +126,7 @@ func newHookCmd() *cobra.Command {
 			var stdin io.Reader
 			var watchdog *hookexec.AnswerWatchdog
 			if inputFile == "" {
-				stdin, watchdog = armHookAnswerWatchdog(connector, event, failMode, hookSurface, enterpriseManaged, startedAt, exit)
+				stdin, watchdog = armHookAnswerWatchdog(connector, event, failMode, hookSurface, enterpriseManaged, secureClient, startedAt, exit)
 			}
 			if enterpriseManaged && prepareEnterpriseManagedHookRuntime(connector) {
 				endHookBeforeRun(watchdog)
@@ -242,7 +244,7 @@ func newHookSessionFactsCmd() *cobra.Command {
 // descriptor, account and sidecar reads before Run count against the call's
 // budget too (GAP-0155). It returns the hook's stdin, the payload read
 // followed by the rest, so Run reads exactly what the agent wrote.
-func armHookAnswerWatchdog(connectorName, event, failMode, surface string, managed bool, startedAt time.Time, exit func(int)) (io.Reader, *hookexec.AnswerWatchdog) {
+func armHookAnswerWatchdog(connectorName, event, failMode, surface string, managed, secureClient bool, startedAt time.Time, exit func(int)) (io.Reader, *hookexec.AnswerWatchdog) {
 	payload, _ := io.ReadAll(io.LimitReader(os.Stdin, hookexec.DefaultMaxBody+1))
 	// A Windows PowerShell wrapper can put a UTF-8 byte order mark ahead of
 	// the JSON (GAP-2449): every reader after this one sees the payload
@@ -255,7 +257,7 @@ func armHookAnswerWatchdog(connectorName, event, failMode, surface string, manag
 		FailMode:          failMode,
 		HookSurface:       strings.TrimSpace(surface),
 		ManagedEnterprise: managed,
-		SecureClient:      managed && secureClientHost(),
+		SecureClient:      managed && secureClient,
 		StartedAt:         startedAt,
 		Exit:              exit,
 	}
@@ -291,10 +293,15 @@ func endHookBeforeRun(watchdog *hookexec.AnswerWatchdog) {
 // hookInvocationStart is when this hook call began, which its time budgets
 // count from. A process the agent launched for the call (its first argument
 // is `hook`) began when the system created it: the launch and the runtime
-// resolution before Run can take seconds on a busy host (GAP-0155). Any
-// other caller (a test running the command in process) began now.
-func hookInvocationStart() time.Time {
+// resolution before Run can take seconds on a busy host (GAP-0155). A
+// Secure Client hook keeps the 1.0.8 start until the Secure Client round
+// (hookexec.SecureClientProcessStartTime). Any other caller (a test running
+// the command in process) began now.
+func hookInvocationStart(secureClient bool) time.Time {
 	if len(os.Args) > 1 && os.Args[1] == "hook" {
+		if secureClient {
+			return hookexec.SecureClientProcessStartTime()
+		}
 		return hookexec.ProcessStartTime()
 	}
 	return time.Now()
