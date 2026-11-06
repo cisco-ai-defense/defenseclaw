@@ -4,8 +4,12 @@
 package hookpaths
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/hermespatch"
 )
 
 // hermesReplaceEditArgs is the Claude Code edit call {file_path, old_string,
@@ -45,4 +49,66 @@ func hermesReplaceEditArgs(args json.RawMessage) (json.RawMessage, bool) {
 	}
 	encoded, err := json.Marshal(edit)
 	return encoded, err == nil
+}
+
+// hermesV4APatchTargets reads the same headers that the gateway judges and
+// places every changed file in the hook's target walk. A malformed argument
+// object leaves the write targets unverified.
+func hermesV4APatchTargets(args json.RawMessage, cwd, home string) ([]string, bool) {
+	dec := json.NewDecoder(bytes.NewReader(args))
+	start, err := dec.Token()
+	if err != nil || start != json.Delim('{') {
+		return nil, false
+	}
+	fields := make(map[string]json.RawMessage)
+	for dec.More() {
+		key, err := dec.Token()
+		name, ok := key.(string)
+		if err != nil || !ok {
+			return nil, false
+		}
+		if _, duplicate := fields[name]; duplicate {
+			return nil, false
+		}
+		var raw json.RawMessage
+		if dec.Decode(&raw) != nil {
+			return nil, false
+		}
+		fields[name] = raw
+	}
+	end, err := dec.Token()
+	if err != nil || end != json.Delim('}') {
+		return nil, false
+	}
+	var extra any
+	if dec.Decode(&extra) != io.EOF {
+		return nil, false
+	}
+	var mode, body string
+	if json.Unmarshal(fields["mode"], &mode) != nil || mode != "patch" ||
+		json.Unmarshal(fields["patch"], &body) != nil || body == "" {
+		return nil, false
+	}
+	if raw, present := fields["path"]; present && strings.TrimSpace(string(raw)) != "null" {
+		var path string
+		if json.Unmarshal(raw, &path) != nil || !hermespatch.PlainPath(path) {
+			return nil, false
+		}
+	}
+	targets, parsed := hermespatch.Targets(body)
+	if !parsed || len(targets) > 256 {
+		return nil, false
+	}
+	paths := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if !hermespatch.PlainPath(target.Path) {
+			return nil, false
+		}
+		placed, ok := patchTargetPaths(target.Path, cwd, home, false)
+		if !ok {
+			return nil, false
+		}
+		paths = append(paths, placed...)
+	}
+	return paths, true
 }

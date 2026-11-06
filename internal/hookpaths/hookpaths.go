@@ -1069,11 +1069,26 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			args = clean
 		}
 	}
+	var hermesPatchTargets []string
+	var hermesPatchUnverified bool
+	var hermesPatchProtected bool
 	if tool == "patch" && strings.EqualFold(strings.TrimSpace(connector), "hermes") {
-		// The gateway judges a Hermes replace patch as the edit it makes:
-		// describe that call, as write_file is described (GAP-0680).
+		// Use the gateway's target reading for both Hermes patch modes.
 		if edit, ok := hermesReplaceEditArgs(args); ok {
 			tool, args = "edit", edit
+		} else {
+			var known bool
+			hermesPatchTargets, known = hermesV4APatchTargets(args, cwd, home)
+			hermesPatchUnverified = !known
+			if known {
+				protected := newProtectedFiles(home).keysOnlyWith(home, nil)
+				for _, target := range hermesPatchTargets {
+					if protectedReachPath(target, protected, filepath.Join(home, ".ssh")) {
+						hermesPatchProtected = true
+						break
+					}
+				}
+			}
 		}
 	}
 	input := actionfacts.Input{Tool: tool, Args: args, CWD: cwd, ActiveHome: home}
@@ -1111,7 +1126,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	opaqueFacts := map[string]string{}
 	var globFacts, walkFacts map[string]string
 	var unprovenReason string
-	var protectedDecision bool
+	protectedDecision := hermesPatchProtected
 	var noDereferenceTouchSafe bool
 	// identities is the file-identity evidence for InstructionIdentityKey:
 	// every existing instruction file a write target names.
@@ -1555,6 +1570,8 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	// An apply_patch edit names its files in the patch envelope, not in a
 	// redirect. Unknown targets make the map incomplete.
 	patchTargets, patchKnown := ApplyPatchWriteTargets(tool, args, "", cwd, home)
+	patchTargets = append(patchTargets, hermesPatchTargets...)
+	patchKnown = patchKnown && !hermesPatchUnverified
 	truncated = truncated || !patchKnown
 	patchListed := patchKnown && len(patchTargets) > 0
 	for _, target := range patchTargets {

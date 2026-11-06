@@ -1593,7 +1593,17 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// cwd) is placed in the client's cwd, as the client keyed it.
 		target = hookpaths.OperandPath(target, clientCWD)
 		if request.patchTarget && (request.SandboxGuestCWD == "" || request.patchHostView) {
-			if _, ok := hookpaths.ResolvePatchWriteTarget(target); !ok {
+			// A managed gateway cannot traverse the user's project. The hook
+			// has already resolved every V4A header target as that user and
+			// carries a separate positive protected-target decision.
+			if clientTargets[hookpaths.ActionDecisionKey] == hookpaths.ProtectedTargetDecision {
+				return true
+			}
+			if resolved := clientTargets[target]; !(request.ProtectedHomeHook && !truncated && resolved != "") {
+				if _, ok := hookpaths.ResolvePatchWriteTarget(target); !ok {
+					return true
+				}
+			} else if isProtected(resolved) {
 				return true
 			}
 		}
