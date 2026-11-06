@@ -108,16 +108,19 @@ def owner_private_group(path: str, info: os.stat_result) -> bool:
     if passwd is None or groups is None:
         return False
     try:
-        names = {rec[0] for rec in passwd if len(rec) >= 4 and int(rec[2]) == uid}
-        if len(names) != 1:
+        owners = [rec for rec in passwd if len(rec) >= 4 and int(rec[2]) == uid]
+        if len(owners) != 1:
             return False
-        name = next(iter(names))
+        name = owners[0][0]
+        if not name:
+            return False
         for rec in passwd:
             if len(rec) < 4:
                 return False
-            if int(rec[3]) == gid and rec[0] != name:
+            record_uid, record_gid = int(rec[2]), int(rec[3])
+            if record_gid == gid and record_uid != uid:
                 return False
-            if rec[0] == name and int(rec[3]) != gid:
+            if rec[0] == name and (record_uid != uid or record_gid != gid):
                 return False
         matches = [rec for rec in groups if len(rec) >= 4 and int(rec[2]) == gid]
     except ValueError:

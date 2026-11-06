@@ -95,3 +95,13 @@ def test_gap0657_group_member_keeps_folder_untrusted(monkeypatch: pytest.MonkeyP
     _account_records(monkeypatch, tmp_path, config.stat().st_gid, shared=True)
     config.chmod(0o775)
     assert connector_paths.opencode_writable_plugin_folder([str(plugin)]) == str(config)
+
+
+def test_gap0657_duplicate_login_name_keeps_folder_untrusted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config, _, plugin = _folder_tree(monkeypatch, tmp_path)
+    gid = config.stat().st_gid
+    _account_records(monkeypatch, tmp_path, gid)
+    passwd = Path(file_permissions._PASSWD_FILE)
+    passwd.write_text(passwd.read_text(encoding="utf-8") + f"me:x:{os.geteuid() + 1}:{gid}::/home/other:/bin/sh\n", encoding="utf-8")
+    config.chmod(0o775)
+    assert connector_paths.opencode_writable_plugin_folder([str(plugin)]) == str(config)
