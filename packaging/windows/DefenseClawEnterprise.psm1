@@ -18500,9 +18500,11 @@ function Remove-DefenseClawStandaloneCreatedFolderRecord {
 # administrator deletes it), so the record alone is not enough: no component
 # of the path may be a reparse point, the folder must be owned by SYSTEM,
 # Administrators or TrustedInstaller with no one else able to write it, and
-# so must its parent, so no one can swap a component between this check and
-# the delete. A parent that is ProgramData or Program Files itself is the
-# operating system's folder and is judged as an ancestor
+# so must every folder above it up to ProgramData or Program Files, so no
+# one can rename or swap a component between this check and the delete
+# (review 2 L2: today every recorded folder is at most two levels below the
+# root, but a deeper one gets the same check). ProgramData or Program Files
+# itself is the operating system's folder and is judged as an ancestor
 # (Assert-DefenseClawTrustedAncestor -Strict): its stock permissions let
 # standard users add folders, not delete, rename or take over one they did
 # not create. A folder a user or a vendor made again at a recorded path
@@ -18515,19 +18517,22 @@ function Assert-DefenseClawCreatedFolderRemovable {
     $writers = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
     $null = Assert-DefenseClawNoReparsePath -Path $Path
     $null = Assert-DefenseClawPathAcl -Path $Path -AllowedWriterSIDs $writers -AllowInheritance -IgnoreCreatorTemplates
-    $parent = [IO.Path]::GetDirectoryName($Path)
-    $parentIsRoot = $false
-    foreach ($root in $Roots) {
-        if (-not [string]::IsNullOrWhiteSpace($root) -and
-            [string]::Equals([IO.Path]::GetFullPath($root).TrimEnd('\'), $parent, [StringComparison]::OrdinalIgnoreCase)) {
-            $parentIsRoot = $true
+    $fullRoots = @($Roots |
+        Microsoft.PowerShell.Core\Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Microsoft.PowerShell.Core\ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\') })
+    $ancestor = [IO.Path]::GetDirectoryName($Path)
+    while ($true) {
+        if ([string]::IsNullOrEmpty($ancestor)) {
+            throw "it is not below ProgramData or Program Files: $Path"
         }
-    }
-    if ($parentIsRoot) {
-        $null = Assert-DefenseClawTrustedAncestor -Path $parent -Strict
-    }
-    else {
-        $null = Assert-DefenseClawPathAcl -Path $parent -AllowedWriterSIDs $writers -AllowInheritance -IgnoreCreatorTemplates
+        $isRoot = @($fullRoots | Microsoft.PowerShell.Core\Where-Object {
+                [string]::Equals($_, $ancestor, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+        if ($isRoot) {
+            $null = Assert-DefenseClawTrustedAncestor -Path $ancestor -Strict
+            return
+        }
+        $null = Assert-DefenseClawPathAcl -Path $ancestor -AllowedWriterSIDs $writers -AllowInheritance -IgnoreCreatorTemplates
+        $ancestor = [IO.Path]::GetDirectoryName($ancestor)
     }
 }
 
@@ -18566,14 +18571,51 @@ function Write-DefenseClawLifecycleLogDiagnostic {
     }
 }
 
+# The recorded folders a purge kept, as "path: reason" (GAP-0091 review 2
+# L3). install-enterprise.ps1 copies them into the result
+# (created_folders_kept), so the Setup and CLI JSON name them; the CLI's
+# lifecycle log line carries that result. The self-uninstall finalizer runs
+# after the CLI exited, so there the module names each kept folder in the
+# lifecycle log itself ($script:DefenseClawCreatedFolderLogToLifecycleLog),
+# and the result carries what the purge found before it
+# (Get-DefenseClawStandaloneCreatedFolderPreview).
+$script:DefenseClawCreatedFoldersKept = [Collections.Generic.List[string]]::new()
+$script:DefenseClawCreatedFolderLogToLifecycleLog = $false
+
+function Get-DefenseClawCreatedFoldersKept {
+    return [string[]]@($script:DefenseClawCreatedFoldersKept)
+}
+
+function Add-DefenseClawCreatedFolderKept {
+    param(
+        [Parameter(Mandatory)][string]$Folder,
+        [Parameter(Mandatory)][string]$Note
+    )
+    $prefix = "${Folder}: "
+    if (@($script:DefenseClawCreatedFoldersKept | Microsoft.PowerShell.Core\Where-Object {
+                ([string]$_).StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 0) {
+        $script:DefenseClawCreatedFoldersKept.Add($prefix + $Note)
+    }
+    Write-DefenseClawResilienceEvent -Marker defenseclaw_skip -Fields @{
+        path   = $Folder
+        reason = $Note
+    }
+    if ($script:DefenseClawCreatedFolderLogToLifecycleLog) {
+        Write-DefenseClawLifecycleLogDiagnostic -Message "defenseclaw_skip path=${Folder}: $Note"
+    }
+}
+
 # Removes one recorded folder when it is empty and may go
 # (Assert-DefenseClawCreatedFolderRemovable). Returns '' when the folder is
 # gone (removed now, or already absent with no reparse point on the way),
-# otherwise why it stays; a folder that stays is named in the lifecycle log.
+# otherwise why it stays; a folder that stays is reported
+# (Add-DefenseClawCreatedFolderKept). -RecordGone: its record went already
+# (a folder above the lifecycle folder, whose record lived in it).
 function Remove-DefenseClawStandaloneCreatedFolder {
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][string[]]$Roots
+        [Parameter(Mandatory)][string[]]$Roots,
+        [switch]$RecordGone
     )
     $folder = $Path
     $reason = ''
@@ -18606,14 +18648,147 @@ function Remove-DefenseClawStandaloneCreatedFolder {
     catch {
         $reason = [string]$_.Exception.Message
     }
-    $stays = 'a folder DefenseClaw created stays, and so does its record: ' +
-        (ConvertTo-DefenseClawBoundedDiagnostic -Value $reason -MaxLength 512)
-    Write-DefenseClawResilienceEvent -Marker defenseclaw_skip -Fields @{
-        path   = $folder
-        reason = $stays
+    $because = ConvertTo-DefenseClawBoundedDiagnostic -Value $reason -MaxLength 512
+    $stays = if ($RecordGone) {
+        # Review 2 L1: the record lived in the lifecycle folder, which is gone.
+        'a folder DefenseClaw created stays; its record went with the lifecycle folder in it, and the next install, upgrade or repair records it again while it has Setup''s permissions: ' + $because
     }
-    Write-DefenseClawLifecycleLogDiagnostic -Message "defenseclaw_skip path=${folder}: $stays"
+    else {
+        'a folder DefenseClaw created stays, and so does its record: ' + $because
+    }
+    Add-DefenseClawCreatedFolderKept -Folder $folder -Note $stays
     return $reason
+}
+
+# The first entry of Folder, or of a folder between it and Toward, that is
+# not on the way to Toward; '' when Folder holds nothing but that way.
+function Get-DefenseClawCreatedFolderOtherEntry {
+    param(
+        [Parameter(Mandatory)][string]$Folder,
+        [Parameter(Mandatory)][string]$Toward
+    )
+    $current = $Folder
+    while ($Toward.StartsWith($current + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        $next = $Toward.Substring($current.Length + 1).Split('\')[0]
+        foreach ($entry in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $current -Force)) {
+            if (-not [string]::Equals($entry.Name, $next, [StringComparison]::OrdinalIgnoreCase)) {
+                return [IO.Path]::Combine($current, $entry.Name)
+            }
+        }
+        $current = [IO.Path]::Combine($current, $next)
+    }
+    return ''
+}
+
+# The usable records in RecordDirectory, as Folder and File: the folder must
+# be administrator-only with no reparse point on its path, and so must each
+# record, which must be this schema and named for its path. Any other file
+# is not used, and stays.
+function Get-DefenseClawStandaloneCreatedFolderRecords {
+    param([Parameter(Mandatory)][string]$RecordDirectory)
+    Assert-DefenseClawNoReparsePath -Path $RecordDirectory
+    Assert-DefenseClawPathAcl `
+        -Path $RecordDirectory `
+        -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+    $records = [Collections.Generic.List[object]]::new()
+    foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $RecordDirectory -Force)) {
+        if ($item.PSIsContainer -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $item.Name -cnotmatch '^[0-9a-f]{64}\.json$' -or
+            $item.Length -gt 4096) {
+            continue
+        }
+        try {
+            Assert-DefenseClawPathAcl `
+                -Path $item.FullName `
+                -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+            $document = [IO.File]::ReadAllText($item.FullName) | Microsoft.PowerShell.Utility\ConvertFrom-Json -ErrorAction Stop
+            $recorded = [string]$document.path
+            if ([int]$document.schema_version -ne $script:CreatedFolderRecordSchema -or
+                [string]::IsNullOrWhiteSpace($recorded) -or
+                -not [IO.Path]::IsPathRooted($recorded) -or
+                (Get-DefenseClawCreatedFolderRecordName -Path $recorded) -cne $item.Name) {
+                continue
+            }
+        }
+        catch {
+            continue
+        }
+        $records.Add([pscustomobject]@{
+            Folder = [IO.Path]::GetFullPath($recorded).TrimEnd('\')
+            File   = $item.FullName
+        })
+    }
+    return $records.ToArray()
+}
+
+# What the self-uninstall finalizer will keep, for the result it cannot add
+# to (review 2 L3): with a finalizer pending, each recorded folder that is
+# there and fails the removal checks, or holds anything but other recorded
+# folders and, in a Cisco folder, DefenseClaw's own folders (the finalizer
+# removes the retired install root and the lifecycle folder first). The
+# finalizer checks again and names in the lifecycle log what it keeps.
+# Returns Folder and Note; nothing without a pending finalizer.
+function Get-DefenseClawStandaloneCreatedFolderPreview {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [string]$RecordDirectory,
+        [string[]]$Roots = @($script:ProgramData, $script:ProgramFiles)
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    try {
+        $receipt = Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name SelfUninstallReceiptPath
+        if ([string]::IsNullOrWhiteSpace($receipt) -or -not [IO.File]::Exists($receipt)) {
+            return
+        }
+        if ([string]::IsNullOrWhiteSpace($RecordDirectory)) {
+            $RecordDirectory = Get-DefenseClawStandaloneCreatedFolderRecordDirectory
+        }
+        if (-not [IO.Directory]::Exists($RecordDirectory)) {
+            return
+        }
+        $records = @(Get-DefenseClawStandaloneCreatedFolderRecords -RecordDirectory $RecordDirectory)
+        $folders = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($record in $records) {
+            [void]$folders.Add($record.Folder)
+        }
+        foreach ($record in $records) {
+            $folder = $record.Folder
+            if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $folder)) {
+                continue
+            }
+            $reason = ''
+            try {
+                Assert-DefenseClawCreatedFolderRemovable -Path $folder -Roots $Roots
+                $cisco = [string]::Equals([IO.Path]::GetFileName($folder), 'Cisco', [StringComparison]::OrdinalIgnoreCase)
+                foreach ($entry in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $folder -Force)) {
+                    if ($folders.Contains($entry.FullName.TrimEnd('\')) -or
+                        ($cisco -and $entry.PSIsContainer -and
+                            ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -and
+                            $entry.Name -cmatch '^DefenseClaw(-[A-Za-z]+)?(\.retired-[0-9a-f]{32})?$')) {
+                        continue
+                    }
+                    $reason = "it holds $($entry.Name)"
+                    break
+                }
+            }
+            catch {
+                $reason = [string]$_.Exception.Message
+            }
+            if (-not [string]::IsNullOrEmpty($reason)) {
+                [pscustomobject]@{
+                    Folder = $folder
+                    Note   = 'a folder DefenseClaw created stays, and so does its record (found before the cleanup that runs after this command): ' +
+                        (ConvertTo-DefenseClawBoundedDiagnostic -Value $reason -MaxLength 512)
+                }
+            }
+        }
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Verbose "created-folder preview skipped: $($_.Exception.Message)"
+    }
 }
 
 # Runs under the lifecycle lock (Remove-DefenseClawStandaloneLifecycleLockLeftover
@@ -18661,39 +18836,7 @@ function Invoke-DefenseClawStandaloneCreatedFolderRemoval {
             return
         }
     }
-    Assert-DefenseClawNoReparsePath -Path $RecordDirectory
-    Assert-DefenseClawPathAcl `
-        -Path $RecordDirectory `
-        -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
-    $records = [Collections.Generic.List[object]]::new()
-    foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $RecordDirectory -Force)) {
-        if ($item.PSIsContainer -or
-            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-            $item.Name -cnotmatch '^[0-9a-f]{64}\.json$' -or
-            $item.Length -gt 4096) {
-            continue
-        }
-        try {
-            Assert-DefenseClawPathAcl `
-                -Path $item.FullName `
-                -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
-            $document = [IO.File]::ReadAllText($item.FullName) | Microsoft.PowerShell.Utility\ConvertFrom-Json -ErrorAction Stop
-            $recorded = [string]$document.path
-            if ([int]$document.schema_version -ne $script:CreatedFolderRecordSchema -or
-                [string]::IsNullOrWhiteSpace($recorded) -or
-                -not [IO.Path]::IsPathRooted($recorded) -or
-                (Get-DefenseClawCreatedFolderRecordName -Path $recorded) -cne $item.Name) {
-                continue
-            }
-        }
-        catch {
-            continue
-        }
-        $records.Add([pscustomobject]@{
-            Folder = [IO.Path]::GetFullPath($recorded).TrimEnd('\')
-            File   = $item.FullName
-        })
-    }
+    $records = @(Get-DefenseClawStandaloneCreatedFolderRecords -RecordDirectory $RecordDirectory)
     $lifecycleFull = [IO.Path]::GetFullPath($lifecycle).TrimEnd('\')
     $deferred = [Collections.Generic.List[object]]::new()
     $stayed = $false
@@ -18711,13 +18854,30 @@ function Invoke-DefenseClawStandaloneCreatedFolderRemoval {
     }
     if ($stayed) {
         foreach ($record in $deferred) {
-            $stays = 'a folder DefenseClaw created stays, and so does its record: the lifecycle folder in it keeps the records of the folders that stayed'
-            Write-DefenseClawResilienceEvent -Marker defenseclaw_skip -Fields @{
-                path   = $record.Folder
-                reason = $stays
-            }
-            Write-DefenseClawLifecycleLogDiagnostic -Message "defenseclaw_skip path=$($record.Folder): $stays"
+            Add-DefenseClawCreatedFolderKept -Folder $record.Folder -Note 'a folder DefenseClaw created stays, and so does its record: the lifecycle folder in it keeps the records of the folders that stayed'
         }
+        return
+    }
+    # Review 2 L1: the record of a folder above the lifecycle folder must go
+    # before the folder can (it lives in it), so it goes only when that
+    # folder holds nothing but the way to the lifecycle folder; anything else
+    # (a kept MDM journal, another product's folder) keeps the folder, and
+    # its record stays with it.
+    $holding = $false
+    foreach ($record in $deferred) {
+        try {
+            $other = Get-DefenseClawCreatedFolderOtherEntry -Folder $record.Folder -Toward $lifecycleFull
+        }
+        catch {
+            $other = [string]$_.Exception.Message
+        }
+        if (-not [string]::IsNullOrEmpty($other)) {
+            $holding = $true
+            Add-DefenseClawCreatedFolderKept -Folder $record.Folder -Note ('a folder DefenseClaw created stays, and so does its record: it holds ' +
+                (ConvertTo-DefenseClawBoundedDiagnostic -Value $other -MaxLength 512))
+        }
+    }
+    if ($holding) {
         return
     }
     foreach ($record in $deferred) {
@@ -18751,7 +18911,7 @@ function Remove-DefenseClawStandaloneCreatedFolders {
         Microsoft.PowerShell.Utility\Sort-Object -Unique |
         Microsoft.PowerShell.Utility\Sort-Object -Property Length -Descending)
     foreach ($folder in $ordered) {
-        [void](Remove-DefenseClawStandaloneCreatedFolder -Path $folder -Roots $Roots)
+        [void](Remove-DefenseClawStandaloneCreatedFolder -Path $folder -Roots $Roots -RecordGone)
     }
 }
 
@@ -38274,9 +38434,16 @@ function Complete-DefenseClawSelfUninstallRetirement {
                 $script:DefenseClawRemoveLifecycleLockOnExit = $false
                 # Last: the folders this deployment created, now empty
                 # (GAP-0091), C:\Program Files\Cisco once the retired root
-                # is gone among them.
-                Remove-DefenseClawStandaloneCreatedFolders -Path @(
-                    Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout)
+                # is gone among them. No result follows this finalizer, so a
+                # folder that stays is named in the lifecycle log.
+                $script:DefenseClawCreatedFolderLogToLifecycleLog = $true
+                try {
+                    Remove-DefenseClawStandaloneCreatedFolders -Path @(
+                        Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout)
+                }
+                finally {
+                    $script:DefenseClawCreatedFolderLogToLifecycleLog = $false
+                }
             }
         }
         if ($null -eq $cleanupFailure) {
@@ -48189,10 +48356,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         Exit-DefenseClawLifecycleLock -Lock $lifecycleLock
         $leftNothing = Test-DefenseClawStandaloneUninstallLeftNothing -Action $Action -Layout $layout
         $createdFolders = [string[]]@()
-        if ($script:DefenseClawRemoveLifecycleLockOnExit -or $leftNothing) {
-            $script:DefenseClawRemoveLifecycleLockOnExit = $false
-            $createdFolders = [string[]]@(Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout)
-        }
+        $script:DefenseClawCreatedFoldersKept.Clear()
         $script:DefenseClawMdmRotationJournalKept = ''
         if ($leftNothing) {
             # LEAD STEER (GAP-1913): a purge removes the kit's journal; a
@@ -48219,9 +48383,24 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 Microsoft.PowerShell.Utility\Write-Warning -Message $script:DefenseClawMdmRotationJournalKept
             }
         }
-        # Last, once the lock, its folder and the MDM journal are gone: the
-        # vendor folders this deployment created, if they are empty (GAP-0091).
+        # Then the lock and the recorded folders below C:\ProgramData\Cisco,
+        # once the MDM journal is gone (a journal kept there keeps that
+        # folder and its record, review 2 L1).
+        if ($script:DefenseClawRemoveLifecycleLockOnExit -or $leftNothing) {
+            $script:DefenseClawRemoveLifecycleLockOnExit = $false
+            $createdFolders = [string[]]@(Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout)
+        }
+        # Last, once the lock and its folder are gone: the vendor folders
+        # this deployment created, if they are empty (GAP-0091).
         Remove-DefenseClawStandaloneCreatedFolders -Path $createdFolders
+        # A self-uninstall leaves the recorded folders to its finalizer, which
+        # runs after this result; the result names the ones it will keep
+        # (review 2 L3).
+        if ($Action -ceq 'Uninstall') {
+            foreach ($kept in @(Get-DefenseClawStandaloneCreatedFolderPreview -Layout $layout)) {
+                Add-DefenseClawCreatedFolderKept -Folder $kept.Folder -Note $kept.Note
+            }
+        }
     }
 }
 
@@ -48320,4 +48499,4 @@ function Test-DefenseClawStandaloneUninstallLeftNothing {
     return $true
 }
 
-Microsoft.PowerShell.Core\Export-ModuleMember -Function Invoke-DefenseClawEnterpriseLifecycle, Get-DefenseClawMdmRotationJournalKept
+Microsoft.PowerShell.Core\Export-ModuleMember -Function Invoke-DefenseClawEnterpriseLifecycle, Get-DefenseClawMdmRotationJournalKept, Get-DefenseClawCreatedFoldersKept

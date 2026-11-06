@@ -6056,7 +6056,14 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     assert "Test-DefenseClawStandaloneNoDeploymentLeft -Layout $Layout" in consumer
     assert "SelfUninstallReceiptPath" in consumer
     assert "$entry.Name -cne 'lifecycle.lock' -and $entry.Name -cne $recordName" in consumer
-    assert "(Get-DefenseClawCreatedFolderRecordName -Path $recorded) -cne $item.Name" in consumer
+    assert "@(Get-DefenseClawStandaloneCreatedFolderRecords -RecordDirectory $RecordDirectory)" in consumer
+    reader = _psm1_function(module, "Get-DefenseClawStandaloneCreatedFolderRecords")
+    assert "(Get-DefenseClawCreatedFolderRecordName -Path $recorded) -cne $item.Name" in reader
+    # Review 2 L1: the record of the folder above the lifecycle folder goes
+    # only when that folder holds nothing but the way to the lifecycle folder.
+    assert consumer.index("Get-DefenseClawCreatedFolderOtherEntry -Folder $record.Folder -Toward $lifecycleFull") < consumer.index(
+        "foreach ($record in $deferred) {\n        [IO.File]::Delete($record.File)"
+    )
     assert (
         "if ([string]::IsNullOrEmpty((Remove-DefenseClawStandaloneCreatedFolder -Path $record.Folder -Roots $Roots))) {\n"
         "            [IO.File]::Delete($record.File)"
@@ -6070,11 +6077,16 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     # delete is non-recursive. A folder that stays is logged.
     one = _psm1_function(module, "Remove-DefenseClawStandaloneCreatedFolder")
     assert one.index("Assert-DefenseClawCreatedFolderRemovable -Path $folder -Roots $Roots") < one.index("[IO.Directory]::Delete($folder, $false)")
-    assert "Write-DefenseClawResilienceEvent -Marker defenseclaw_skip" in one
+    assert "Add-DefenseClawCreatedFolderKept -Folder $folder -Note $stays" in one
+    kept = _psm1_function(module, "Add-DefenseClawCreatedFolderKept")
+    assert "Write-DefenseClawResilienceEvent -Marker defenseclaw_skip" in kept
     # The finalizer runs after the CLI wrote the lifecycle log, so the folder
     # that stays is named there by the module itself, in a line without an
-    # event record (the event check skips it).
-    assert 'Write-DefenseClawLifecycleLogDiagnostic -Message "defenseclaw_skip path=${folder}: $stays"' in one
+    # event record (the event check skips it); a lifecycle run puts it in the
+    # result (created_folders_kept, review 2 L3), which the CLI logs.
+    assert "if ($script:DefenseClawCreatedFolderLogToLifecycleLog) {" in kept
+    assert 'Write-DefenseClawLifecycleLogDiagnostic -Message "defenseclaw_skip path=${Folder}: $Note"' in kept
+    assert "$script:DefenseClawCreatedFoldersKept.Add($prefix + $Note)" in kept
     note = _psm1_function(module, "Write-DefenseClawLifecycleLogDiagnostic")
     assert "'enterprise-lifecycle.log'" in note and "[IO.Directory]::Exists($directory)" in note
     assert "event" not in note.split("$line = [ordered]@{", 1)[1].split("}", 1)[0]
@@ -6082,7 +6094,10 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     removable = _psm1_function(module, "Assert-DefenseClawCreatedFolderRemovable")
     assert "$null = Assert-DefenseClawNoReparsePath -Path $Path\n" in removable
     assert removable.count("Assert-DefenseClawPathAcl -Path") == 2
-    assert "Assert-DefenseClawTrustedAncestor -Path $parent -Strict" in removable
+    # Review 2 L2: every folder above it up to the root, the root strictly.
+    assert "$null = Assert-DefenseClawPathAcl -Path $ancestor -AllowedWriterSIDs $writers" in removable
+    assert "$ancestor = [IO.Path]::GetDirectoryName($ancestor)" in removable
+    assert "Assert-DefenseClawTrustedAncestor -Path $ancestor -Strict" in removable
     remove = _psm1_function(module, "Remove-DefenseClawStandaloneCreatedFolders")
     assert "Sort-Object -Property Length -Descending" in remove
     assert "Remove-DefenseClawStandaloneCreatedFolder -Path $folder -Roots $Roots" in remove
@@ -6105,15 +6120,41 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
         "                    Add-DefenseClawStandaloneUpgradeVendorFolderRecords"
     ) in lifecycle_body
 
-    # Both last steps remove the recorded folders after the lock folder (and,
-    # in the lifecycle, after the MDM journal).
+    # Both last steps remove the recorded folders after the lock folder; in
+    # the lifecycle the MDM journal goes first (a journal kept in
+    # C:\\ProgramData\\Cisco keeps that folder and its record, review 2 L1).
     lifecycle = _psm1_function(module, "Invoke-DefenseClawEnterpriseLifecycle")
-    tail = lifecycle[lifecycle.index("$createdFolders = [string[]]@(Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout)") :]
+    tail = lifecycle[lifecycle.index("$script:DefenseClawCreatedFoldersKept.Clear()") :]
     assert tail.index("Remove-DefenseClawMdmRotationJournal -Purge") < tail.index(
-        "Remove-DefenseClawStandaloneCreatedFolders -Path $createdFolders"
+        "$createdFolders = [string[]]@(Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout)"
+    ) < tail.index("Remove-DefenseClawStandaloneCreatedFolders -Path $createdFolders") < tail.index(
+        "Get-DefenseClawStandaloneCreatedFolderPreview -Layout $layout"
     )
     finalizer = _psm1_function(module, "Complete-DefenseClawSelfUninstallRetirement")
-    assert "Remove-DefenseClawStandaloneCreatedFolders -Path @(\n                    Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout)" in finalizer
+    assert (
+        "$script:DefenseClawCreatedFolderLogToLifecycleLog = $true\n"
+        "                try {\n"
+        "                    Remove-DefenseClawStandaloneCreatedFolders -Path @(\n"
+        "                        Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout)"
+    ) in finalizer
+    # Review 2 L3: Setup and the CLI JSON name each kept folder.
+    installer = read(ROOT / "packaging" / "windows" / "install-enterprise.ps1")
+    assert "DefenseClawEnterprise\\Get-DefenseClawCreatedFoldersKept" in installer
+    assert "-Name created_folders_kept" in installer
+    assert "Get-DefenseClawCreatedFoldersKept" in module.split("Export-ModuleMember -Function", 1)[1].splitlines()[0]
+    standalone_go = read(ROOT / "internal" / "cli" / "windows_enterprise_standalone.go")
+    assert 'CreatedFoldersKept []string `json:"created_folders_kept"`' in standalone_go
+    assert 'result.AddWarning("created_folders_kept", windowsEnterpriseBoundedDiagnostic(note))' in standalone_go
+    # Review 2 S1: no Go path removes a recorded folder and keeps its
+    # record. The Claude publish creates no folder (its rollback removes
+    # none), DefenseClaw's own folders get no record, and the CLI removes
+    # C:\\Program Files\\Cisco only through its record.
+    assert "removeCreatedDirs" not in ensure
+    assert "return !windowsDefenseClawOwnFolder(path, root)" in go
+    assert "if err := os.Remove(recordPath); err != nil" in go
+    registration = read(ROOT / "internal" / "cli" / "windows_enterprise_registration.go")
+    assert "enterprisehooks.RemoveWindowsCreatedFolderIfEmpty(filepath.Dir(root))" in registration
+    assert 'strings.EqualFold(filepath.Base(parent), "Cisco")' not in registration
 
     # The by-name removals are gone (they deleted a folder that existed before).
     for retired in (
