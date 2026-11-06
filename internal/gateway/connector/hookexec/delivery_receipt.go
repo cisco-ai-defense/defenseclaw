@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/textproto"
+	"net/url"
 	"strconv"
 	"sync"
 	"time"
@@ -78,7 +79,7 @@ func wantsHookDeliveryReceipt(opts Options) bool {
 	return !opts.SecureClient && opts.answerWatch != nil && !opts.answerBy.IsZero()
 }
 
-func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Duration, starting func(context.Context) bool) (*http.Request, *hookDeliveryRequest) {
+func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Duration, starting, olderGateway func(context.Context) bool) (*http.Request, *hookDeliveryRequest) {
 	reader, writer := io.Pipe()
 	delivery := &hookDeliveryRequest{writer: writer, ready: make(chan struct{}), payloadDone: make(chan struct{})}
 	req.Body = reader
@@ -130,6 +131,31 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 				seenStarting, starting = false, nil
 				timer.Reset(wait)
 				continue
+			}
+			if olderGateway != nil {
+				// No 103 is ambiguous: an earlier gateway waits for the
+				// request body to end, while a current gateway may still be
+				// admitting this call. Ask once before ending its receipt path.
+				probeCtx, cancel := context.WithCancel(req.Context())
+				legacy := make(chan bool, 1)
+				go func() { legacy <- olderGateway(probeCtx) }()
+				select {
+				case <-delivery.ready:
+					cancel()
+					return
+				case <-req.Context().Done():
+					cancel()
+					return
+				case old := <-legacy:
+					cancel()
+					if !old {
+						select {
+						case <-delivery.ready:
+						case <-req.Context().Done():
+						}
+						return
+					}
+				}
 			}
 			delivery.release()
 			return
@@ -185,9 +211,14 @@ func gatewayServiceNotServing(state gatewayServiceState) bool {
 func hookDeliveryWait(opts Options) time.Duration {
 	wait := hookDeliveryCapabilityWait
 	if !opts.ManagedEnterprise && !opts.answerBy.IsZero() {
-		// Keep room for a per-user call to retry a refused first connection.
-		// The normal answer window still gets the full capability wait.
-		wait = min(wait, max(time.Until(opts.answerBy)/4, 0))
+		// A per-user call uses half of its ordinary answer window to
+		// obtain the capability. A short window retains its larger retry
+		// reserve for a refused first connection.
+		remaining := max(time.Until(opts.answerBy), 0)
+		wait = remaining / 2
+		if remaining <= 2*hookDeliveryCapabilityWait {
+			wait = remaining / 4
+		}
 	}
 	if deadline := gatewayRestartDeadline(opts, opts.StartedAt); !deadline.IsZero() {
 		remaining := time.Until(deadline) / 4
@@ -196,6 +227,28 @@ func hookDeliveryWait(opts Options) time.Duration {
 		}
 	}
 	return wait
+}
+
+// hookDeliveryOlderGateway asks the same local listener whether it supports
+// a receipt. Only a completed response without the capability header proves
+// that the compatibility body release is needed. A delayed or unavailable
+// probe leaves the original request available for its 103 and watchdog token.
+func hookDeliveryOlderGateway(ctx context.Context, client *http.Client, target string) bool {
+	endpoint, err := url.Parse(target)
+	if err != nil {
+		return false
+	}
+	endpoint.Path, endpoint.RawPath, endpoint.RawQuery, endpoint.Fragment = "/health", "", "", ""
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return false
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK && resp.Header.Get(HookDeliveryCapabilityHeader) != "1"
 }
 
 func (d *hookDeliveryRequest) close() {
