@@ -6,11 +6,14 @@
 package watcher
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
 
 func TestR109G501BSnapshotSpecialEntryIsBounded(t *testing.T) {
@@ -59,5 +62,45 @@ func TestR109G501BSnapshotSpecialEntryIsBounded(t *testing.T) {
 	}
 	if before.ContentHash == after.ContentHash {
 		t.Fatal("special entry replacement did not change the snapshot")
+	}
+}
+
+func TestR109G501BSecureClientSpecialEntryKeepsSnapshotScope(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.DeploymentMode = "managed_enterprise"
+	cfg.Enterprise.Profile = "secure_client"
+	cfg.Watch.RescanContentGated = true
+	root, err := os.MkdirTemp("", "g501b-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	plugin := filepath.Join(root, "provider")
+	if err := os.MkdirAll(plugin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(plugin, "package.json"), []byte(`{"name":"provider"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, nil, []string{root}, store, logger, nil, nil)
+	evt := InstallEvent{Type: InstallPlugin, Name: "provider", Path: plugin, Connector: "openclaw"}
+	before, err := w.snapshotForEvent(evt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", filepath.Join(plugin, "runtime.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	after, err := w.snapshotForEvent(evt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := &audit.SnapshotRow{
+		ContentHash: before.ContentHash, ScanID: "scan-1", ScannerFingerprint: "scanner-1",
+	}
+	if rescan, reason := shouldRescan(baseline, after, "scanner-1", true); rescan {
+		t.Fatalf("Secure Client rescanned after an ignored entry: %s", reason)
 	}
 }

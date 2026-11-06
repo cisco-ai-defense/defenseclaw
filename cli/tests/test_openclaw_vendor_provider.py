@@ -256,6 +256,65 @@ def test_r109_g501_peer_ancestor_revalidated_after_hash(tmp_path, monkeypatch) -
     assert "SRC-EXEC" in _high_rules(installed)
 
 
+@requires_symlink_privilege
+def test_r109_g501_whole_tree_revalidated_after_hash(tmp_path, monkeypatch) -> None:
+    published = tmp_path / "published"
+    (published / "runtime" / "child").mkdir(parents=True)
+    (published / "node_modules").mkdir()
+    (published / "package.json").write_text(json.dumps({
+        "name": "@openclaw/amazon-bedrock-provider",
+        "version": "2026.10.9",
+        "peerDependencies": {"openclaw": ">=2026.10.9"},
+    }), encoding="utf-8")
+    (published / "index.js").write_text("const match = /region/.exec(value);\n", encoding="utf-8")
+    (published / "runtime" / "child" / "entry.js").write_text(
+        "export const value = 1;\n", encoding="utf-8",
+    )
+    digest = vendor_identity._tree_sha256(str(published))
+    assert digest
+    monkeypatch.setitem(
+        vendor_identity.VENDOR_DIGESTS,
+        ("@openclaw/amazon-bedrock-provider", "2026.10.9"), digest,
+    )
+    peer = tmp_path / "peer"
+    peer.mkdir()
+    (peer / "package.json").write_text('{"name":"openclaw"}', encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "entry.js").write_text("exec('changed command');\n", encoding="utf-8")
+    original = vendor_identity._tree_sha256
+
+    for profile in ("default", "permissive"):
+        installed = tmp_path / profile
+        shutil.copytree(published, installed)
+        (installed / "node_modules" / "openclaw").symlink_to(
+            peer, target_is_directory=True,
+        )
+        assert not {f.rule_id for f in scan_plugin(
+            str(installed), PluginScanOptions(policy=profile),
+        ).findings if f.severity == "HIGH"}
+
+        changed = False
+
+        def change_unrelated_entry(path, **kwargs):
+            nonlocal changed
+            result = original(path, **kwargs)
+            if path == str(installed) and not changed:
+                (installed / "runtime" / "child").rename(tmp_path / f"saved-{profile}")
+                (installed / "runtime" / "child").symlink_to(
+                    outside, target_is_directory=True,
+                )
+                changed = True
+            return result
+
+        with monkeypatch.context() as patch:
+            patch.setattr(vendor_identity, "_tree_sha256", change_unrelated_entry)
+            assert "SRC-EXEC" in {f.rule_id for f in scan_plugin(
+                str(installed), PluginScanOptions(policy=profile),
+            ).findings if f.severity == "HIGH"}
+        assert changed
+
+
 def test_r109_g501_secure_client_scan_options(monkeypatch) -> None:
     from defenseclaw.commands.cmd_plugin import _scan_options_for_connector
 
