@@ -76,6 +76,45 @@ func AssignOpenCodeServicePorts(ids []int, kept map[int]int) map[int]int {
 	return assigned
 }
 
+// AssignOpenCodeServicePortsByAccountWithClaims uses the same candidate range
+// for accounts whose numeric ids can collide. On Windows the id is a SID's
+// RID, while the full SID remains the assignment key across domains and
+// passes. Callers include every account from the protected record even when
+// it is no longer eligible or Windows cannot currently resolve it. A claim
+// owned by another account, including an unreadable claim, excludes that
+// port from a new assignment;
+// it never displaces an existing reservation.
+func AssignOpenCodeServicePortsByAccountWithClaims(ids map[string]uint64, kept map[string]int, claims map[int]string) map[string]int {
+	keys := make([]string, 0, len(ids))
+	for key := range ids {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	assigned := make(map[string]int, len(keys))
+	taken := make(map[int]bool, len(keys))
+	for _, key := range keys {
+		if port := kept[key]; port > 0 && port <= 65535 && !taken[port] {
+			assigned[key] = port
+			taken[port] = true
+		}
+	}
+	for _, key := range keys {
+		if assigned[key] != 0 {
+			continue
+		}
+		start := OpenCodeAccountPort(ids[key]) - OpenCodeAccountPortBase
+		for step := 0; step < OpenCodeAccountPortSpan; step++ {
+			port := OpenCodeAccountPortBase + (start+step)%OpenCodeAccountPortSpan
+			if !taken[port] && (claims[port] == "" || claims[port] == key) {
+				assigned[key] = port
+				taken[port] = true
+				break
+			}
+		}
+	}
+	return assigned
+}
+
 // ReadOpenCodeServicePort is the port the service.json under home names, or 0
 // (no file, a link, not a regular file, no port, unreadable). The guardian
 // reads it as root before it assigns ports, so a new port never takes one
@@ -89,7 +128,7 @@ func ReadOpenCodeServicePort(home string) int {
 	// Read through real folders only: a link the account put in place of
 	// ~/.config or ~/.config/opencode would point the root read elsewhere.
 	for _, dir := range []string{filepath.Join(home, ".config"), filepath.Join(home, ".config", "opencode")} {
-		if info, err := os.Lstat(dir); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		if info, err := os.Lstat(dir); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !openCodeServiceDirIsReal(dir) {
 			return 0
 		}
 	}
@@ -168,7 +207,7 @@ func EnsureOpenCodeServicePort(home string, port int) (OpenCodeServicePortResult
 		return result, err
 	}
 	missing := missingDirsBelow(home, path)
-	if err := writePrivateUserFile(path, append(data, '\n')); err != nil {
+	if err := writeOpenCodeServiceConfig(home, path, append(data, '\n')); err != nil {
 		return result, fmt.Errorf("opencode service port: write %s: %w", path, err)
 	}
 	result.Port, result.Changed, result.CreatedDirs = port, true, missing

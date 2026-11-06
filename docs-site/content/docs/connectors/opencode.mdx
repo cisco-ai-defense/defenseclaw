@@ -146,7 +146,7 @@ The image pins OpenCode 2.1.4 from the official `@opencode/cli` package, with pa
 - The plugin checks tool calls and their results; it does not intercept model traffic.
 - There is no native approval: a confirm verdict runs with a notice.
 - OpenCode 2.2.5 has no pure mode: there is no `--pure` flag, and it does not read `OPENCODE_PURE` (OpenCode V1 skipped plugins with them).
-- The background server's port: setup (Linux, macOS and Windows) and, on a managed Linux or macOS computer, the guardian give each account its own port in OpenCode's `~/.config/opencode/service.json` when it names none; a port already there is kept. A running server moves at its next start (`opencode service restart`). On a managed Windows computer, give each account its own with `opencode service set port <port>`.
+- The background server's port: setup (Linux, macOS and Windows) and the managed guardian give each eligible account its own port in OpenCode's `~/.config/opencode/service.json` when it names none; a port already there is kept. A running server moves at its next start (`opencode service restart`). On managed Windows, if the guardian could not reach an account's profile, that account can set a distinct port after sign-in with `opencode service set port <port>`; the next guardian pass keeps it.
 - OpenCode keeps runtime files in `/tmp/opencode`, which belongs to the first account that ran it; another account's OpenCode then fails with `EACCES`. Point `TMPDIR` at a folder of your own before you start OpenCode (for example `export TMPDIR=$HOME/.cache/tmp`, after `mkdir -p` of it). Both are OpenCode's own behavior.
 
 ## Disable

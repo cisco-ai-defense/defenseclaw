@@ -33,6 +33,10 @@ import (
 
 func init() {
 	enterprisehooks.SetWindowsOpenCodeMachinePolicy(windowsOpenCodeMachinePolicy)
+	enterprisehooks.SetWindowsOpenCodeServicePortWriter(func(home string, port int) (int, error) {
+		result, err := enterprisepolicy.EnsureOpenCodeServicePort(home, port)
+		return result.Port, err
+	})
 	enterprisehooks.SetWindowsClaudeManagedHooksOnlyPolicy(windowsClaudeManagedHooksOnlyEnforced)
 	enterprisehooks.SetWindowsCopilotVSCodeUser(windowsCopilotVSCodeUser)
 	enterpriseHookVerifyRunScope = func() func() {

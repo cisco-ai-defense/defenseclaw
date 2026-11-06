@@ -114,3 +114,39 @@ func TestEnsureOpenCodeServicePortKeepsAndWrites(t *testing.T) {
 		}
 	}
 }
+
+func TestManagedWindowsOpenCodePortsKeepFullSIDReservations(t *testing.T) {
+	const (
+		first  = "S-1-5-21-100-200-300-1001"
+		second = "S-1-5-21-400-500-600-1001"
+		third  = "S-1-5-21-700-800-900-1002"
+	)
+	ids := map[string]uint64{first: 1001, second: 1001}
+	ports := AssignOpenCodeServicePortsByAccountWithClaims(ids, nil, nil)
+	if ports[first] != 25001 || ports[second] != 25002 {
+		t.Fatalf("same-RID accounts share or move a port: %v", ports)
+	}
+	// The first account becomes ineligible, possibly with its SID unresolved.
+	// Its record remains in ids and keeps its port reserved for a newcomer.
+	ids[third] = 1002
+	next := AssignOpenCodeServicePortsByAccountWithClaims(ids, ports, nil)
+	if next[first] != ports[first] || next[second] != ports[second] || next[third] == ports[first] || next[third] == ports[second] {
+		t.Fatalf("returning account lost its reservation: before=%v after=%v", ports, next)
+	}
+	if again := AssignOpenCodeServicePortsByAccountWithClaims(ids, next, nil); again[first] != next[first] || again[second] != next[second] || again[third] != next[third] {
+		t.Fatalf("repeated ensure moved a port: %v -> %v", next, again)
+	}
+	// A user-chosen port is kept and excluded from automatic assignments.
+	chosen := AssignOpenCodeServicePortsByAccountWithClaims(ids, map[string]int{first: 49375}, nil)
+	if chosen[first] != 49375 || chosen[second] == 49375 || chosen[third] == 49375 {
+		t.Fatalf("user-chosen port was not preserved: %v", chosen)
+	}
+	claimed := AssignOpenCodeServicePortsByAccountWithClaims(ids, nil, map[int]string{25001: "S-1-5-21-10-20-30-1001"})
+	if claimed[first] == 25001 || claimed[second] == 25001 || claimed[first] == claimed[second] {
+		t.Fatalf("per-user claim was reused by another SID: %v", claimed)
+	}
+	reserved := AssignOpenCodeServicePortsByAccountWithClaims(ids, ports, map[int]string{ports[first]: "!"})
+	if reserved[first] != ports[first] || reserved[second] != ports[second] {
+		t.Fatalf("an untrusted claim moved a recorded account: %v -> %v", ports, reserved)
+	}
+}
