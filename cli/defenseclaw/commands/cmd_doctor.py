@@ -55,6 +55,7 @@ import urllib.request
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from dataclasses import replace as _dc_replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -7691,7 +7692,7 @@ def _check_windows_native_hooks(
     if _hermes_passive_unverified(check, r):
         _emit("warn", label, f"{check.state}: {check.detail}", r=r, remediation=_HERMES_PASSIVE_STEP)
         return
-    if connector == "hermes" and check.state == "pending-reload":
+    if connector == "hermes" and check.state == "pending-reload" and check.execution_proven:
         host_detail, step = _hermes_running_host_warning()
         _emit("warn", label, f"{check.state}: {check.detail}; {host_detail}", r=r,
               remediation=f"{step}; run 'defenseclaw doctor'")
@@ -8178,7 +8179,7 @@ def _hermes_windows_execution_probe(check: WindowsHookCheck) -> WindowsHookCheck
         [check.target, "hook", "--connector", "hermes", "--defenseclaw-execution-probe"],
     )
     if returncode == 0 and stdout == _HERMES_EXECUTION_PROBE_RESPONSE:
-        return check
+        return _dc_replace(check, execution_proven=True)
     return WindowsHookCheck(
         "unexecutable", "registered Hermes command did not complete its active runtime execution probe",
         check.command, check.target, check.raw_target,
@@ -18226,6 +18227,7 @@ def _check_hook_contract_lock(
         connector == "hermes"
         and native_runtime is not None
         and native_runtime.state == "pending-reload"
+        and native_runtime.execution_proven
         and status in {"known", "unversioned"}
     ):
         host_detail, step = _hermes_running_host_warning()
