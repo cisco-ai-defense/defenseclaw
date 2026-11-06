@@ -38,10 +38,28 @@ type UntrustedPrincipalError struct {
 	SID string
 	// Owner is true for an untrusted owner and false for a write-like entry.
 	Owner bool
-	text  string
+	// ACL is "null" or "unsupported" when StandaloneFileLeafDrift stands
+	// this principal in for an access list that is itself untrusted (SID is
+	// then Everyone, or empty), and "" otherwise (GAP-0590 review S1).
+	ACL  string
+	text string
 }
 
 func (e *UntrustedPrincipalError) Error() string { return e.text }
+
+// UntrustedDACLError is a path element whose access list itself is not
+// trusted: it is null, so any account may change the path, or it holds an
+// allow entry whose layout the walk cannot read, so nobody can say who may.
+// Error keeps the text both verdicts always had (GAP-0590 review S1).
+type UntrustedDACLError struct {
+	// Path is the file or folder that failed the check.
+	Path string
+	// Null is true for a null DACL and false for an unreadable allow entry.
+	Null bool
+	text string
+}
+
+func (e *UntrustedDACLError) Error() string { return e.text }
 
 // ValidateTrustedConfigPath validates config.yaml. On Secure Client drift on
 // its owner or DACL is repaired first when the caller can (a LocalSystem
@@ -985,9 +1003,9 @@ func validateTrustedWindowsPathElementWithWriter(
 		if scope.code {
 			reportCodeIntegrityFinding(path, label, "Everyone", "null DACL")
 		}
-		return scope.relaxVerdict(path, label, fmt.Errorf(
-			"%s: null Windows DACL is not trusted", path,
-		))
+		return scope.relaxVerdict(path, label, &UntrustedDACLError{
+			Path: path, Null: true, text: fmt.Sprintf("%s: null Windows DACL is not trusted", path),
+		})
 	}
 	return rejectUntrustedWindowsWriteACEsWithWriter(path, label, dacl, allowedWriter, scope)
 }
@@ -1027,9 +1045,9 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 			// Only a drift scope (the broker's own objects) accepts them,
 			// because there the product decision is to never stop on
 			// permissions alone.
-			verdict := fmt.Errorf(
-				"%s: unsupported allow ACE type 0x%x; refusing managed trust", path, ace.Header.AceType,
-			)
+			verdict := &UntrustedDACLError{
+				Path: path, text: fmt.Sprintf("%s: unsupported allow ACE type 0x%x; refusing managed trust", path, ace.Header.AceType),
+			}
 			if !scope.driftTolerated() {
 				return verdict
 			}
