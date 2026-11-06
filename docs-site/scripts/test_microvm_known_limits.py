@@ -57,6 +57,27 @@ class MicroVMKnownLimitsTest(unittest.TestCase):
         changed = section("CHANGELOG.md", "## [Unreleased] — 1.0.8", "### Known limits")
         self.assertNotIn("Known limits for MicroVMs on a per-user OpenShell gateway", changed)
 
+    def test_gap0615_landlock_guidance_and_cli_reference(self):
+        linux = "docs-site/content/docs/sandboxes/linux.mdx"
+        cli = "docs-site/content/docs/reference/sandbox-cli.mdx"
+        landlock_fix = section(linux, "### The Landlock check fails", "### Docker is rootless or too old")
+        setup = section(cli, "### `sandbox setup`", "## Requirements and platform facts")
+        requirements = section(cli, "### MicroVMs with KVM on Linux", "### One OpenShell gateway per machine (Linux)")
+
+        self.assertIn("OpenShell 0.1.6", landlock_fix)
+        self.assertIn("do not start", landlock_fix)
+        self.assertIn("then use Docker", landlock_fix)
+        self.assertNotIn("or switch to MicroVMs on a KVM host", landlock_fix)
+        self.assertIn("OpenShell 0.1.6", setup)
+        self.assertIn("do not start", setup)
+        for phrase in (
+            "OpenShell 0.1.6", "do not start", "per-user", "managed",
+            "Landlock ABI 3", "defenseclaw sandbox setup",
+            "enterprise.openshell.driver: docker", "driver_fallback: docker",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, requirements)
+
     def test_gap0615_docker_default_and_macos_caveat(self):
         self.assertIn("The compute driver is `docker` unless you choose MicroVMs.",
                       read("docs-site/content/docs/sandboxes/linux.mdx"))

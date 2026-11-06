@@ -236,7 +236,7 @@ Run `defenseclaw sandbox doctor` first. These are the Linux-only failures it rep
 
 **Cause:** the kernel does not report Landlock ABI 3 or newer with `landlock` in its `lsm=` list. OpenShell refuses to start a sandbox without it.
 
-**Fix:** boot a kernel with Landlock ABI 3 or newer (6.2 or newer upstream, or a distribution kernel with a backport), or switch to MicroVMs on a KVM host ([Linux setup](/docs/sandboxes/linux#run-sandboxes-in-microvms-with-kvm)).
+**Fix:** boot a kernel with Landlock ABI 3 or newer (6.2 or newer upstream, or a distribution kernel with a backport), then use Docker. With OpenShell 0.1.6, MicroVM sandboxes on Linux with KVM do not start on per-user or managed computers, so selecting MicroVMs does not resolve this check ([known limit](/docs/sandboxes/linux#run-sandboxes-in-microvms-with-kvm)).
 
 **Check:** `cat /sys/kernel/security/lsm` lists `landlock` and the check passes.
 
