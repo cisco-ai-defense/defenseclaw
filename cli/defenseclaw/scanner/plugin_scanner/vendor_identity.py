@@ -153,7 +153,7 @@ def _validated_peer_link(link: str, root: str, peer: str, data_dir: str) -> tupl
     if _peer_path_uses_private_state(link, data_dir):
         raise ValueError("peer link points into private state")
     destination = os.path.realpath(link)
-    if os.path.commonpath((os.path.realpath(root), destination)) == os.path.realpath(root):
+    if _path_within(os.path.realpath(root), destination):
         raise ValueError("peer link points inside the package")
     if peer != "openclaw":
         raise ValueError("peer link is not the OpenClaw package")
@@ -172,9 +172,9 @@ def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
 
     from defenseclaw.config import default_data_path
 
-    roots = {os.path.normcase(os.path.realpath(str(default_data_path())))}
+    roots = {os.path.realpath(str(default_data_path()))}
     if data_dir:
-        roots.add(os.path.normcase(os.path.realpath(data_dir)))
+        roots.add(os.path.realpath(data_dir))
     target = os.readlink(link)
     path = target if os.path.isabs(target) else os.path.join(os.path.dirname(link), target)
     if not os.path.isabs(path):
@@ -195,13 +195,9 @@ def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
         if part.casefold() in _PRIVATE_INSTALL_COMPONENTS:
             return True
         current = os.path.join(current, part)
-        resolved = os.path.normcase(os.path.realpath(current))
-        for root in roots:
-            try:
-                if os.path.commonpath((root, resolved)) == root:
-                    return True
-            except ValueError:
-                continue
+        resolved = os.path.realpath(current)
+        if any(_path_within(root, resolved) for root in roots):
+            return True
         if os.path.islink(current):
             links += 1
             if links > 40:
@@ -215,3 +211,13 @@ def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
                 current = os.path.dirname(current)
                 pending = list(target_parts) + pending
     return False
+
+
+def _path_within(root: str, path: str) -> bool:
+    """Containment for resolved absolute paths; another drive or share is outside."""
+
+    root = os.path.normcase(root)
+    try:
+        return os.path.commonpath((root, os.path.normcase(path))) == root
+    except ValueError:
+        return False

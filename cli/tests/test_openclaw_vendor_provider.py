@@ -412,6 +412,80 @@ def test_r109_g610_peer_package_provenance_matrix(tmp_path, monkeypatch) -> None
     assert not _high_rules(benign)
 
 
+@requires_symlink_privilege
+def test_r109_g610_cross_volume_peer_is_outside_provider(tmp_path, monkeypatch) -> None:
+    """A peer on another drive or share is outside the provider, not invalid."""
+    import ntpath
+
+    sep = ntpath.sep
+    for other_volume in ("D:" + sep + "openclaw", sep * 2 + sep.join(("server", "share", "openclaw"))):
+        with pytest.raises(ValueError):
+            ntpath.commonpath(("C:" + sep + "provider", other_volume))
+
+    provider_volume = tmp_path / "volume-c"
+    peer_volume = tmp_path / "volume-d"
+    provider_volume.mkdir()
+    peer_volume.mkdir()
+    ordinary = _openclaw_peer(peer_volume, "ordinary")
+    data_dir = peer_volume / "state"
+    state_peer = data_dir / "node_modules" / "openclaw"
+    state_peer.mkdir(parents=True)
+    (state_peer / "package.json").write_text('{"name":"openclaw"}', encoding="utf-8")
+    private_peer = peer_volume / ".ssh" / "node_modules" / "openclaw"
+    private_peer.mkdir(parents=True)
+    (private_peer / "package.json").write_text('{"name":"openclaw"}', encoding="utf-8")
+    state_alias = provider_volume / "state-alias"
+    state_alias.symlink_to(data_dir, target_is_directory=True)
+    other = peer_volume / "other-package"
+    other.mkdir()
+    (other / "package.json").write_text('{"name":"other"}', encoding="utf-8")
+
+    real_commonpath = os.path.commonpath
+    volumes = tuple(os.path.realpath(v) for v in (provider_volume, peer_volume))
+
+    def volume(path):
+        for index, root in enumerate(volumes):
+            try:
+                if os.path.normcase(real_commonpath((root, path))) == os.path.normcase(root):
+                    return index
+            except ValueError:
+                continue
+        return -1
+
+    def cross_volume_commonpath(paths):
+        paths = [os.fspath(path) for path in paths]
+        if len({volume(path) for path in paths}) > 1:
+            raise ValueError("Paths don't have the same drive")
+        return real_commonpath(paths)
+
+    cases = (
+        ("ordinary", ordinary, True),
+        ("private", private_peer, False),
+        ("state", state_peer, False),
+        ("state-alias", state_alias / "node_modules/openclaw", False),
+        ("other-package", other, False),
+    )
+    trees = {
+        label: _linked_provider(provider_volume / f"provider-{label}", monkeypatch, target)
+        for label, target, _ in cases
+    }
+    monkeypatch.setattr(os.path, "commonpath", cross_volume_commonpath)
+    for label, _, possible in cases:
+        tree = trees[label]
+        identity = vendor_identity.inspect_official_provider_tree(
+            str(tree), data_dir=str(data_dir),
+        )
+        assert (identity is not None) is possible, label
+        for profile in ("default", "permissive", "strict"):
+            result = scan_plugin(
+                str(tree), PluginScanOptions(policy=profile, data_dir=str(data_dir)),
+            )
+            high = {f.rule_id for f in result.findings if f.severity == "HIGH"}
+            assert ("SRC-EXEC" in high) is (profile == "strict" or not possible), (label, profile)
+            visible = {f.rule_id for f in result.findings if f.severity == "INFO"}
+            assert ("VENDOR-PEER-POSSIBLE" in visible) is (possible and profile != "strict")
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Unix shell wrappers")
 @requires_symlink_privilege
 @pytest.mark.parametrize("wrapper_form", (
