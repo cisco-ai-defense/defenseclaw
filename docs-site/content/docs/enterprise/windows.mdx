@@ -569,15 +569,16 @@ profile asset still gets no install scan or quarantine. Hooks refuse denied
 names regardless.
 Windows `status` and `verify` do not warn when a default or registry rule goes
 unenforced; the gateway log is the only signal. Keep shared skills outside
-profiles. A profile asset is never admission-blocked or quarantined. Ordinary
-project skill folders inside profiles are not watched or admission-scanned, get
-no install scan and receive no "is not scanned yet" refusal. At hook time, a
-project skill folder reached through a link outside the caller's profile, or
-writable by another user, is reported as unverified. The gateway logs the
-folder, `/health` counts it in `project_skill_roots_unverified`, and enterprise
-status shows a `project_skill_root_unverified` warning. `asset_policy.mode:
-action` refuses its skills; observe mode allows them with a warning. Watcher
-rows for roots outside profiles carry no per-user attribution.
+profiles. A profile asset is never admission-blocked or quarantined. Ordinary project skill
+folders inside profiles are not watched or admission-scanned and do not receive
+an "is not scanned yet" refusal. At hook time, a project skill folder reached
+through a link outside the caller's profile, or writable by another user, is
+reported as unverified. The gateway logs the folder, `/health` counts it in
+`project_skill_roots_unverified`, and enterprise status shows a
+`project_skill_root_unverified` warning. A selected skill under an unverified
+root is refused in every asset policy mode until a fresh caller inspection
+verifies that the root is ordinary. Watcher rows for roots outside
+profiles carry no per-user attribution.
 The scan and scan-finding rows of a `scan skill` or `scan plugin` run of the installed `defenseclaw.exe`
 on an asset in an enrolled user's folder name that user (`user.id`,
 `defenseclaw.user.name`), and the judge model when the judge ran
