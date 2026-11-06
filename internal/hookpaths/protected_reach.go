@@ -243,7 +243,8 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 		return GradePossible
 	}
 	names := m.protectedReachNames(home, sshOnly)
-	target = filepath.Clean(target)
+	raw := target
+	target = filepath.Clean(raw)
 	if names.has(target) {
 		return GradeNamed
 	}
@@ -251,6 +252,9 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 		// The kernel resolves this hop for the process that opens it; the
 		// hook's own reading proves a different path.
 		return GradePossible
+	}
+	if hasDotDotStep(raw) {
+		return m.dotDotReach(raw, target, home, sshOnly)
 	}
 	parent := filepath.Dir(target)
 	share := SharePath(target) || SharePath(home)
@@ -429,6 +433,26 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 		return GradePossible
 	}
 	return GradeNone
+}
+
+// dotDotReach grades a spelling with a dot-dot step. The kernel follows a
+// directory link before it applies the step, so the lexical form proves only
+// the clean spelling; the path the kernel opens is the one read link by link.
+// A step after a process-relative link is that process's own directory, so it
+// stays unproved. A walk that cannot cross a step stays unproved too.
+func (m *TargetMemo) dotDotReach(raw, clean, home string, sshOnly bool) Grade {
+	steps := strings.Split(filepath.ToSlash(raw), "/")
+	for i, step := range steps {
+		if step == ".." && processRelativeLink(strings.Join(steps[:i], "/")) {
+			return GradePossible
+		}
+	}
+	grade := m.protectedReach(clean, home, sshOnly)
+	physical, ok := m.resolveWriteTarget(raw)
+	if !ok {
+		return grade.Max(GradePossible)
+	}
+	return grade.Max(m.protectedReach(physical, home, sshOnly))
 }
 
 // stateTreeHardlinkReach compares a multiply linked file with the active
