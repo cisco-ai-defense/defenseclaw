@@ -296,6 +296,54 @@ func TestAManagedVerdictReadAfterTheDeadlineGetsTheWatchdogsAnswer(t *testing.T)
 	}
 }
 
+// GAP-0648 review R2-2: the service watch is stopped before the start of the
+// installer-owned gateway also for a call a gateway took. The first try
+// connects and the stopping gateway drops it; the next tries are refused
+// until the restart budget; the service reads not running while the gateway
+// starts. The watch, which a connection arms, would end that start.
+func TestManagedGatewayRecoveryAfterAConnectionRunsPastTheServiceWatch(t *testing.T) {
+	fastRestartRetries(t)
+	stubManagedLifecycle(t, func() bool { return false })
+	previousInterval := managedGatewayServiceWatchInterval
+	managedGatewayServiceWatchInterval = 20 * time.Millisecond
+	t.Cleanup(func() { managedGatewayServiceWatchInterval = previousInterval })
+	var starting, started atomic.Bool
+	stubManagedServiceRunning(t, func(string) (bool, bool) {
+		// Not running only while the gateway starts: the watch cannot end
+		// the call before the start begins.
+		return !starting.Load() || started.Load(), true
+	})
+	rt := &stubRT{onRequest: func(s *stubRT, req *http.Request) (*http.Response, error) {
+		switch {
+		case started.Load():
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"action":"allow"}`)), Header: make(http.Header)}, nil
+		case s.requests == 1:
+			// The stopping gateway takes the first try and drops it.
+			gotConn(req.Context())
+			return nil, syscall.ECONNRESET
+		}
+		return nil, syscall.ECONNREFUSED
+	}}
+	var recoveries atomic.Int64
+	r := run(t, "codex", rt, func(opts *Options) {
+		managedWindowsStandalone(opts)
+		opts.ManagedGatewayServiceName = "DefenseClawGateway"
+		opts.StartedAt = time.Now().Add(-gatewayRestartBudget + 300*time.Millisecond)
+		opts.GatewayRecovery = func(context.Context, error) error {
+			recoveries.Add(1)
+			starting.Store(true)
+			// The watch reads the service about ten times meanwhile.
+			time.Sleep(200 * time.Millisecond)
+			started.Store(true)
+			return nil
+		}
+	})
+	if r.code != 0 || blocked(r) || recoveries.Load() != 1 || rt.requests < 3 {
+		t.Fatalf("code=%d recoveries=%d requests=%d stdout=%q stderr=%q, want the started gateway's verdict",
+			r.code, recoveries.Load(), rt.requests, r.stdout, r.stderr)
+	}
+}
+
 // sleepClock is the sleep-counting clock of a computer that slept for slept
 // after the test began: the awake clock and the timers did not see it.
 type sleepClock struct{ slept atomic.Int64 }
