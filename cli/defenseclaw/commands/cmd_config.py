@@ -805,6 +805,7 @@ def _shadowed_hilt_notes(changes: list) -> list[str]:
 # patched (teardown restores it).
 _MOVED_DATA_DIR_RECORD = "agent_discovery.json"
 _MOVED_DATA_DIR_BACKUP_SUFFIX = "_backup.json"
+_HOOK_CREDENTIAL_PATTERN = re.compile(rb"[0-9a-f]{64}")
 
 
 def _carry_connector_records(old_dir: str, new_dir: str) -> list[str]:
@@ -875,6 +876,93 @@ def _carry_connector_records(old_dir: str, new_dir: str) -> list[str]:
     return notes
 
 
+def _read_moved_hook_credential(path: str) -> bytes:
+    """Read an account-owned scoped credential from a private regular file."""
+    from defenseclaw.file_permissions import open_regular_file_no_follow
+
+    info = os.lstat(path)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077):
+        raise OSError("hook credential is not an account-private regular file")
+    with os.fdopen(open_regular_file_no_follow(path, expected_stat=info), "rb") as handle:
+        data = handle.read(4097)
+    token = data.strip()
+    if len(data) > 4096 or not _HOOK_CREDENTIAL_PATTERN.fullmatch(token):
+        raise OSError("hook credential is not valid")
+    return token
+
+
+def _carry_hook_credentials(old_dir: str, new_dir: str, connectors: list[str]) -> list[str]:
+    """Keep existing sessions' scoped credentials valid after a store move."""
+    if os.name == "nt" or config_module._is_admin_process() or not old_dir or not new_dir:
+        return []
+    try:
+        if os.path.samefile(old_dir, new_dir):
+            return []
+    except OSError:
+        if os.path.abspath(old_dir) == os.path.abspath(new_dir):
+            return []
+    from defenseclaw.file_permissions import atomic_write_private_bytes, make_private_directory
+
+    old_hooks = os.path.join(old_dir, "hooks")
+    try:
+        for directory in (old_dir, old_hooks):
+            info = os.lstat(directory)
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                    or info.st_mode & 0o022):
+                raise OSError("hook credential directory is not account-owned and private")
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return [
+            "warning: existing hook credentials could not be carried to the new data_dir; "
+            "restart active agent sessions after the gateway restart."
+        ]
+
+    new_hooks = os.path.join(new_dir, "hooks")
+    carried: list[str] = []
+    unavailable: list[str] = []
+    for name in sorted({normalize_connector(name) for name in connectors}):
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", name):
+            continue
+        source = os.path.join(old_hooks, f".hook-{name}.token")
+        if not os.path.lexists(source):
+            continue
+        target = os.path.join(new_hooks, f".hook-{name}.token")
+        try:
+            token = _read_moved_hook_credential(source)
+            make_private_directory(new_dir)
+            make_private_directory(new_hooks)
+            for directory in (new_dir, new_hooks):
+                info = os.lstat(directory)
+                if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                        or info.st_mode & 0o022):
+                    raise OSError("new hook credential directory is not account-owned and private")
+            if os.path.lexists(target):
+                info = os.lstat(target)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+                    raise OSError("new hook credential is not an account-owned regular file")
+                try:
+                    current = _read_moved_hook_credential(target)
+                except OSError:
+                    current = b""
+                if current == token:
+                    continue
+            atomic_write_private_bytes(target, token + b"\n")
+            carried.append(name)
+        except OSError:
+            unavailable.append(name)
+    notes = []
+    if carried:
+        notes.append("Kept the scoped hook credentials for the new data_dir: " + ", ".join(carried) + ".")
+    if unavailable:
+        notes.append(
+            "warning: scoped hook credentials for " + ", ".join(unavailable) +
+            " could not be carried to the new data_dir; restart active agent sessions after the gateway restart."
+        )
+    return notes
+
+
 def _seed_moved_data_dir(changes: list, old_data_dir: str = "") -> list[str]:
     """Seed the rule packs, Rego policies and connector records under a new data_dir.
 
@@ -890,7 +978,13 @@ def _seed_moved_data_dir(changes: list, old_data_dir: str = "") -> list[str]:
         cfg = config_module.load()
     except Exception:  # noqa: BLE001 - the change is committed; seeding is best effort
         return []
-    notes = _carry_connector_records(old_data_dir, str(cfg.data_dir or ""))
+    new_data_dir = str(cfg.data_dir or "")
+    notes = _carry_connector_records(old_data_dir, new_data_dir)
+    if not cfg.guardrail.secure_client_hook_fail_modes():
+        notes.extend(_carry_hook_credentials(
+            old_data_dir, new_data_dir,
+            [name for name in cfg.active_connectors() if cfg.guardrail.effective_enabled(name)],
+        ))
     return notes + _seed_moved_policies(cfg)
 
 
