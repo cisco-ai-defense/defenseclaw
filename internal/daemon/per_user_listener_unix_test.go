@@ -8,6 +8,9 @@ package daemon
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -103,5 +106,38 @@ func TestPerUserListenerOwnAccountAndUnknown(t *testing.T) {
 	}
 	if got := ClassifyPerUserListener("127.0.0.1", 18970, home, PortHolder{UID: -1}, ErrNoListener, false); got != PerUserListenerUnknown {
 		t.Fatalf("no listener = %v, want unknown", got)
+	}
+	if got := ClassifyPerUserListener("127.0.0.1", 18970, home, PortHolder{UID: -1}, ErrNoListener, true); got != PerUserListenerUnlistedOwnProcess {
+		t.Fatalf("unlisted own process = %v, want connected-peer verification", got)
+	}
+	if err := os.Remove(d.pidFile); err != nil {
+		t.Fatal(err)
+	}
+	if got := ClassifyPerUserListener("127.0.0.1", 18970, home, PortHolder{UID: -1}, ErrNoListener, true); got != PerUserListenerForeign {
+		t.Fatalf("unlisted port without a strong record = %v, want foreign", got)
+	}
+	record.DataDir = ""
+	raw, err = json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.WritePrivate(d.pidFile, raw); err != nil {
+		t.Fatal(err)
+	}
+	if got := ClassifyPerUserListener("127.0.0.1", 18970, home, PortHolder{UID: -1}, ErrNoListener, true); got != PerUserListenerUnlistedOwnProcess {
+		t.Fatalf("unlisted account process with an older record = %v, want connected-peer verification", got)
+	}
+}
+
+func TestRootGatewayStopCommandTargetsQuotedDataHome(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "account's home; $marker")
+	command := rootGatewayStopCommand(home)
+	if !strings.HasPrefix(command, "sudo env DEFENSECLAW_HOME=") || !strings.HasSuffix(command, " defenseclaw-gateway stop") {
+		t.Fatalf("root stop command = %q", command)
+	}
+	value := strings.TrimSuffix(strings.TrimPrefix(command, "sudo env DEFENSECLAW_HOME="), " defenseclaw-gateway stop")
+	output, err := exec.Command("sh", "-c", "printf '%s' "+value).Output()
+	if err != nil || string(output) != home {
+		t.Fatalf("quoted data home = %q, err = %v, want %q", output, err, home)
 	}
 }

@@ -82,7 +82,7 @@ func TestPerUserHookNamesSameHomeRootListenerWithoutSending(t *testing.T) {
 	})
 	out := result.stdout + result.stderr
 	if !nativeOutageBlocked(result) || !strings.Contains(out, daemon.RootGatewayListenerReason) ||
-		!strings.Contains(out, "sudo defenseclaw-gateway stop") || strings.Contains(out, "--api-port") {
+		!strings.Contains(out, "sudo env DEFENSECLAW_HOME=") || strings.Contains(out, "--api-port") {
 		t.Fatalf("root listener result: code=%d output=%q", result.code, out)
 	}
 	if peer.received.Load() != 0 {

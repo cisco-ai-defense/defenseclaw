@@ -947,7 +947,7 @@ class TestStatusJson(unittest.TestCase):
         reason = json.loads(as_json.output)["sidecar"]["reason"]
         for shown in (reason, as_text.output):
             self.assertIn(ROOT_GATEWAY_REASON, shown)
-            self.assertIn("sudo defenseclaw-gateway stop", shown)
+            self.assertIn("sudo env DEFENSECLAW_HOME=", shown)
             self.assertNotIn("--api-port", shown)
 
     def test_json_roster_has_per_connector_mode(self):

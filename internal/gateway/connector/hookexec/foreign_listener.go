@@ -77,7 +77,7 @@ func perUserRootGatewayReason(opts Options) string {
 	if perUserListenerClass(host, port, opts.Home, holder, holderErr, true) != daemon.PerUserListenerOwnGatewayRunAsRoot {
 		return ""
 	}
-	return daemon.RootGatewayListenerReason + " " + daemon.RootGatewayListenerRemedy
+	return daemon.RootGatewayListenerReason + " " + daemon.RootGatewayListenerRemedy(opts.Home)
 }
 
 func perUserPeerRefusal(reason string) bool {

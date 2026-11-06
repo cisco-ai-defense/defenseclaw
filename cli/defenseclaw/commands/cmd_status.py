@@ -560,14 +560,14 @@ def status(app: AppContext, as_json: bool) -> None:
             listener_state, listener_reason = _sidecar_listener_state(cfg.gateway.api_port, bind)
         root_holder = False
         if holder:
-            from defenseclaw.commands.cmd_doctor import ROOT_GATEWAY_REASON, ROOT_GATEWAY_REMEDY
+            from defenseclaw.commands.cmd_doctor import ROOT_GATEWAY_REASON, _root_gateway_remedy
 
             root_holder = holder == ROOT_GATEWAY_REASON
 
             _status_row(
                 "Sidecar",
                 ux._style(
-                    ROOT_GATEWAY_REASON + " " + ROOT_GATEWAY_REMEDY if root_holder else
+                    ROOT_GATEWAY_REASON + " " + _root_gateway_remedy(cfg) if root_holder else
                     f"not running; port {cfg.gateway.api_port} is held by {holder}",
                     fg="yellow",
                 ),
@@ -610,10 +610,10 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_hook_guardian(cfg)
         _print_fleet_health(cfg, client)
         if holder:
-            from defenseclaw.commands.cmd_doctor import ROOT_GATEWAY_REASON, ROOT_GATEWAY_REMEDY
+            from defenseclaw.commands.cmd_doctor import ROOT_GATEWAY_REASON, _root_gateway_remedy
 
             first_hint = (
-                ROOT_GATEWAY_REMEDY if holder == ROOT_GATEWAY_REASON else
+                _root_gateway_remedy(cfg) if holder == ROOT_GATEWAY_REASON else
                 "Free the port:  stop that process, or run: defenseclaw setup gateway --api-port "
                 f"{_free_api_port_hint(cfg)} --non-interactive"
             )
@@ -998,9 +998,9 @@ def _print_agents(
             16,
         )
     if sidecar_root and enabled_count:
-        from defenseclaw.commands.cmd_doctor import ROOT_GATEWAY_REMEDY
+        from defenseclaw.commands.cmd_doctor import _root_gateway_remedy
 
-        _echo_wrapped(" " * 16 + ux.dim(ROOT_GATEWAY_REMEDY), 16)
+        _echo_wrapped(" " * 16 + ux.dim(_root_gateway_remedy(cfg)), 16)
     for conn in actives:
         source = roster.get(conn, {}).get("source", "manual")
         mode = _effective_status_mode(cfg, conn, source)
@@ -2395,10 +2395,10 @@ def _status_payload(app) -> dict:
         else:
             pid = live_pid = 0 if holder else _live_gateway_pid(cfg)
             if holder:
-                from defenseclaw.commands.cmd_doctor import ROOT_GATEWAY_REASON, ROOT_GATEWAY_REMEDY
+                from defenseclaw.commands.cmd_doctor import ROOT_GATEWAY_REASON, _root_gateway_remedy
 
                 reason = (
-                    ROOT_GATEWAY_REASON + " " + ROOT_GATEWAY_REMEDY if holder == ROOT_GATEWAY_REASON else
+                    ROOT_GATEWAY_REASON + " " + _root_gateway_remedy(cfg) if holder == ROOT_GATEWAY_REASON else
                     f"port {cfg.gateway.api_port} is held by {holder}; this gateway's state is unconfirmed"
                 )
                 payload["sidecar"] = {"running": None, "reason": reason}
