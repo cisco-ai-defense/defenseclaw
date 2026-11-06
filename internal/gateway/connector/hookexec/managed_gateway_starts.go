@@ -283,6 +283,8 @@ var managedGatewayServiceWatchInterval = 250 * time.Millisecond
 // ctx.
 func watchManagedGatewayService(ctx context.Context, running func() (bool, bool), deadline time.Time, interval time.Duration) (watched context.Context, stop, release func()) {
 	watched, cancel := context.WithCancelCause(ctx)
+	// Read once: the watch outlives the call by a moment after release.
+	wait := managedGatewayServiceStateWait
 	var mu sync.Mutex
 	stopped := false
 	done := make(chan struct{})
@@ -305,7 +307,7 @@ func watchManagedGatewayService(ctx context.Context, running func() (bool, bool)
 				return
 			case <-timer.C:
 			}
-			if up, known := serviceRunningWithin(running, managedGatewayServiceStateWait); known && !up {
+			if up, known := serviceRunningWithin(running, wait); known && !up {
 				mu.Lock()
 				if !stopped {
 					cancel(errGatewayRestarting)
