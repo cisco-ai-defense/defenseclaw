@@ -7804,7 +7804,7 @@ func trustedBashStaticWordValue(word *syntax.Word) (string, bool) {
 	if word == nil || trustedBashWordMayExpandHome(word) || shellparse.MinBraceFields(word) > 1 {
 		return "", false
 	}
-	fields, err := expand.Fields(&expand.Config{}, word)
+	fields, err := shellparse.Fields(&expand.Config{}, word)
 	if err != nil || len(fields) != 1 || strings.TrimSpace(fields[0]) != fields[0] {
 		return "", false
 	}
@@ -8058,7 +8058,7 @@ func trustedBashStaticFields(call *syntax.CallExpr) ([]string, bool) {
 		if uint64(len(fields))+shellparse.MinBraceFields(word) > 256 {
 			return nil, false
 		}
-		expanded, err := expand.Fields(&expand.Config{}, word)
+		expanded, err := shellparse.Fields(&expand.Config{}, word)
 		if err != nil {
 			if len(fields) == 0 {
 				return nil, false
