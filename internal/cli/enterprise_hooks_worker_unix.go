@@ -719,8 +719,9 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			result, err = enterpriseHookWorkerVerifier(ctx, opts)
 			recheck = err == nil && recheckWindow > 0
 			if err != nil {
+				policyOnly := request.Standalone && enterprisehooks.PreviousHookRuntimeIntactForPolicyChange(ctx, opts)
 				result, err = enterpriseHookWorkerInstaller(ctx, opts)
-				outcome.Repaired = err == nil
+				outcome.Repaired = err == nil && !policyOnly
 			}
 		case enterpriseHookWorkerModeRemove:
 			previousHome := strings.TrimSpace(target.Options.PreviousHome)
