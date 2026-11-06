@@ -154,25 +154,21 @@ func reportWindowsSecretFailure(cmd *cobra.Command, action string, opts *enterpr
 // windowsSecretRecordsChange says whether a credential run records its
 // change event. A run that changed a credential, or reserved room for its
 // event, passed the deployment check under the locks and always records. A
-// refusal before that records only from an elevated caller on a proven
-// installed standalone deployment, as an early refusal does
-// (recordWindowsChangeRefusal). Before, an elevated refusal on a computer
-// without a deployment created the protected change spool in ProgramData
-// and wrote its event there (g079 review F1).
-func windowsSecretRecordsChange(cmd *cobra.Command, change windowsSecretChange) bool {
-	if change.changed || change.reservation != nil {
+// refusal before that records unless the deployment record proves that no
+// standalone deployment is installed: as an early refusal
+// (recordWindowsChangeRefusal), a computer without a deployment gets no
+// managed event. Before, an elevated refusal there created the protected
+// change spool in ProgramData and wrote its event (g079 review F1). A
+// record that cannot be read records as before (the refusal is
+// state_invalid, and its document carries the error).
+func windowsSecretRecordsChange(change windowsSecretChange) bool {
+	if change.changed || change.reservation != nil || !windowsSecretIsElevated() {
+		// A caller that is not elevated records nothing either way
+		// (recordWindowsChange).
 		return true
 	}
-	if !windowsSecretIsElevated() {
-		// recordWindowsChange records nothing for this caller either.
-		return false
-	}
 	installed, err := windowsSecretDeploymentInstalled()
-	if err != nil {
-		warnChangeUnrecorded(cmd.ErrOrStderr(), err)
-		return false
-	}
-	return installed
+	return err != nil || installed
 }
 
 // runEnterpriseSecret implements `enterprise secret` on Windows.
@@ -188,7 +184,7 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	}
 	change, err := changeWindowsSecret(cmd, action, opts)
 	defer func() { _ = change.reservation.Release() }()
-	if ev, ok := secretChangeEvent(action, opts.name, change.changed, secretFailureCode(err, windowsSecretExitInvalid), err, false); ok && windowsSecretRecordsChange(cmd, change) {
+	if ev, ok := secretChangeEvent(action, opts.name, change.changed, secretFailureCode(err, windowsSecretExitInvalid), err, false); ok && windowsSecretRecordsChange(change) {
 		// The success document (secret-result.schema.json) has no warnings.
 		layout, layoutErr := windowsSecretLayout()
 		if layoutErr == nil {
