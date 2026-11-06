@@ -18344,31 +18344,49 @@ function Add-DefenseClawTransactionCreatedSharedDirectory {
 function Test-DefenseClawEmptyAdministratorVendorFolder {
     <#
         True for a folder an administrator, SYSTEM or TrustedInstaller owns,
-        with no file and no reparse point anywhere beneath it: a vendor folder
-        DefenseClaw did not create that holds no DefenseClaw file (case b of
-        the g582 vendor-folder ruling, GAP-0092).
+        with no file and no reparse point anywhere beneath it, and every
+        folder beneath it owned by SYSTEM, Administrators or TrustedInstaller
+        too: a vendor folder DefenseClaw did not create that holds no
+        DefenseClaw file (case b of the g582 vendor-folder ruling, GAP-0092;
+        g582 review 7 S2). A folder it cannot read is not empty.
     #>
     param([Parameter(Mandatory)][string]$Path)
-    $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-    if (-not $item.PSIsContainer -or
-        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        return $false
-    }
-    $owner = [string](Get-DefenseClawAclOwnerSID -Acl (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path))
-    if ($owner -notin @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)) {
-        return $false
-    }
-    foreach ($child in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $Path -Force -Recurse -ErrorAction Stop)) {
-        if (-not $child.PSIsContainer -or
-            ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    $trusted = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+    try {
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        if (-not $item.PSIsContainer -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             return $false
         }
+        $owner = [string](Get-DefenseClawAclOwnerSID -Acl (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path -ErrorAction Stop))
+        if ($owner -notin $trusted) {
+            return $false
+        }
+        foreach ($child in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $Path -Force -Recurse -ErrorAction Stop)) {
+            if (-not $child.PSIsContainer -or
+                ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                return $false
+            }
+            $childOwner = [string](Get-DefenseClawAclOwnerSID -Acl (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $child.FullName -ErrorAction Stop))
+            if ($childOwner -notin $trusted) {
+                return $false
+            }
+        }
+    }
+    catch {
+        return $false
     }
     return $true
 }
 
 function Assert-DefenseClawCodexMachinePolicyDirectory {
-    param([Parameter(Mandatory)][string]$Path)
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        # Install, ensure and repair (Initialize-DefenseClawCodexMachinePolicyParent)
+        # may adopt an empty vendor folder; Setup /verify, the guardian
+        # reconcile and the rollbacks only check it (g582 review 7 L1).
+        [switch]$Adopt
+    )
     try {
         Assert-DefenseClawCodexMachinePolicyDirectoryAcl -Path $Path
     }
@@ -18384,7 +18402,8 @@ function Assert-DefenseClawCodexMachinePolicyDirectory {
         # with any file in it, or one another account owns, keeps the refusal.
         # DefenseClaw did not create it, so it records no created folder and
         # a purge leaves it in place.
-        if (-not (Test-DefenseClawStandaloneProfile) -or
+        if (-not $Adopt -or
+            -not (Test-DefenseClawStandaloneProfile) -or
             -not (Test-DefenseClawEmptyAdministratorVendorFolder -Path $Path)) {
             throw
         }
@@ -18394,6 +18413,16 @@ function Assert-DefenseClawCodexMachinePolicyDirectory {
             reason = "took over an empty vendor folder DefenseClaw did not create: $refusal"
         }
         Set-DefenseClawPathAcl -Path $Path -Kind InstallDirectory -GatewayServiceSID $script:AdministratorsSID
+        # Until the stamp standard users could still add entries, so what
+        # they added between the check above and the stamp is caught here,
+        # once they no longer can (g582 review 7 S2). Setup keeps the folder
+        # it now holds, adopts nothing in it and names it.
+        if (-not (Test-DefenseClawEmptyAdministratorVendorFolder -Path $Path)) {
+            throw ("an entry appeared in $Path while Setup took the empty vendor folder over, or an entry beneath it " +
+                'is not owned by SYSTEM, Administrators or TrustedInstaller; Setup now holds the folder but did not ' +
+                "adopt what is in it: check what is in $Path, remove what you did not put there, then run Setup /ensure " +
+                "(before the takeover: $refusal)")
+        }
         Assert-DefenseClawCodexMachinePolicyDirectoryAcl -Path $Path
     }
 }
@@ -19135,7 +19164,7 @@ function Initialize-DefenseClawCodexMachinePolicyParent {
             # full-control rights (including rights removed by a deny ACE).
             # The assertion lists every condition that re-stamps the
             # canonical descriptor.
-            Assert-DefenseClawCodexMachinePolicyDirectory -Path $directory
+            Assert-DefenseClawCodexMachinePolicyDirectory -Path $directory -Adopt
             continue
         }
         $created = New-DefenseClawProtectedDirectory `

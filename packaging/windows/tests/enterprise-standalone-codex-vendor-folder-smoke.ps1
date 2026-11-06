@@ -11,7 +11,10 @@
 # so Setup /ensure failed 1603. It now reads the creator templates as the
 # GAP-0915 root check does, so the folder is adopted (case b of the g582 vendor
 # folder ruling: DefenseClaw did not create it and it holds no DefenseClaw
-# file). Any other inheritable write entry is still refused. Runs elevated in a
+# file). Any other inheritable write entry is still refused. Only install,
+# ensure and repair adopt (-Adopt); Setup /verify only checks (g582 review 7
+# L1). The folder is checked again after the stamp, and every folder beneath
+# it must be administrator-owned (review 7 S2). Runs elevated in a
 # disposable scratch folder that carries ProgramData's own access list, so the
 # stand-in folders inherit exactly what a folder made in ProgramData inherits.
 # No real machine root is touched.
@@ -57,7 +60,7 @@ try {
             else { function Test-DefenseClawStandaloneProfile { return $false } }
             $errors = @()
             foreach ($path in @($Vendor, $Codex)) {
-                try { Assert-DefenseClawCodexMachinePolicyDirectory -Path $path }
+                try { Assert-DefenseClawCodexMachinePolicyDirectory -Path $path -Adopt }
                 catch { $errors += "${path}: $($_.Exception.Message)" }
             }
             return , $errors
@@ -83,11 +86,62 @@ try {
     $kept = & $module {
         param($Path)
         function Test-DefenseClawStandaloneProfile { return $true }
-        try { Assert-DefenseClawCodexMachinePolicyDirectory -Path $Path; return $false }
+        try { Assert-DefenseClawCodexMachinePolicyDirectory -Path $Path -Adopt; return $false }
         catch { return $true }
     } $occupied
     if (-not $kept) {
         $failures.Add('a vendor folder holding a file was taken over on standalone')
+    }
+
+    # Setup /verify (no -Adopt) checks only: the empty folder keeps the refusal and its access list.
+    $verified = New-StandIn
+    $before = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $verified).Sddl
+    $verifyRefused = & $module {
+        param($Path)
+        function Test-DefenseClawStandaloneProfile { return $true }
+        try { Assert-DefenseClawCodexMachinePolicyDirectory -Path $Path; return $false }
+        catch { return $true }
+    } $verified
+    $after = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $verified).Sddl
+    if (-not $verifyRefused -or $after -ne $before) {
+        $failures.Add("the check without -Adopt adopted an empty vendor folder (refused=$verifyRefused): $before -> $after")
+    }
+
+    # An empty folder beneath it that another account owns is not empty: no adoption.
+    $foreignChild = New-StandIn
+    $child = [IO.Path]::Combine($foreignChild, 'Codex')
+    [void][IO.Directory]::CreateDirectory($child)
+    $setOwner = & icacls.exe $child /setowner '*S-1-5-32-545' 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $failures.Add("icacls /setowner Users on $child failed: $setOwner")
+    }
+    else {
+        $childKept = & $module {
+            param($Path)
+            function Test-DefenseClawStandaloneProfile { return $true }
+            try { Assert-DefenseClawCodexMachinePolicyDirectory -Path $Path -Adopt; return $false }
+            catch { return $true }
+        } $foreignChild
+        if (-not $childKept) {
+            $failures.Add('a vendor folder holding a folder BUILTIN\Users owns was taken over on standalone')
+        }
+    }
+
+    # An entry added between the emptiness check and the stamp is caught after the stamp.
+    $raced = New-StandIn
+    $racedMessage = & $module {
+        param($Path)
+        function Test-DefenseClawStandaloneProfile { return $true }
+        $real = ${function:Set-DefenseClawPathAcl}
+        function Set-DefenseClawPathAcl {
+            [IO.File]::WriteAllText([IO.Path]::Combine($Path, 'planted.json'), '{}')
+            & $real @args
+        }
+        try { Assert-DefenseClawCodexMachinePolicyDirectory -Path $Path -Adopt; return '' }
+        catch { return $_.Exception.Message }
+    } $raced
+    if ($racedMessage -notmatch 'an entry appeared in') {
+        $failures.Add("an entry added before the stamp was adopted with the folder: '$racedMessage'")
     }
 
     # The creator templates only: any other inheritable write entry stays a refusal.
