@@ -57,15 +57,16 @@ func MCPAccountJournalServes(key string, q MCPAdmissionQuery) bool {
 	return ok && identity.Connector != "" && identity.Home != "" && mcpServerServesQuery(identity.server(), q)
 }
 
-// MCPAccountJournalServesSnapshot decides an account row by the snapshot
-// stored under its key. Admission records its decision before the snapshot,
-// and that write can fail, so a key with no snapshot keeps its decision in
-// force (fail closed). Only a snapshot written by an earlier release, which
-// has no versioned identity, marks the row as an old one: a literal old
-// server name can spell a valid tuple key, and that row stays inert until
-// normal admission records a new outcome.
-func MCPAccountJournalServesSnapshot(key string, snapshot *audit.SnapshotRow, q MCPAdmissionQuery) bool {
-	return !mcpPreIdentitySnapshot(snapshot) && MCPAccountJournalServes(key, q)
+// MCPAccountRuntimeDisabled reports an account journal row whose runtime
+// disable is its own server's admission decision: the disable was written
+// with the row's key as its deciding path, in one statement
+// (audit.SetRuntimeDisableForConnector). No release before 1.0.9 wrote that
+// path, and every other runtime write drops it, so a row an earlier release
+// left under the same key (a server literally named like it, say) stays
+// inert until normal admission records a new outcome, while a fresh decision
+// needs no other table to be in force.
+func MCPAccountRuntimeDisabled(row audit.ActionEntry) bool {
+	return row.Actions.Runtime == "disable" && row.RuntimeSource != "" && row.RuntimeSource == row.TargetName
 }
 
 // MigrateAccountMCPJournal moves the MCP journal rows that earlier versions
