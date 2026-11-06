@@ -156,6 +156,7 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 	for _, path := range policyPaths {
 		add(path, nil)
 	}
+	snapshotStore := e.P(filepath.Join(e.Layout.LifecycleDir, snapshotsDirName))
 	for _, dir := range []string{e.Layout.DataDir, filepath.Dir(e.Layout.ManifestPath), e.Layout.GuardianAuthDir, e.Layout.SecretsDir, e.Layout.LifecycleDir} {
 		root := e.P(dir)
 		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -163,6 +164,13 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 				return nil
 			}
 			add(path, &yes)
+			// Preserved files are links to the live files. Checking both names
+			// schedules the same ACL entry for removal twice. The snapshot
+			// directories and index remain checked; the live files are checked
+			// through their deployment paths.
+			if d.IsDir() && filepath.Base(path) == "files" && filepath.Dir(filepath.Dir(path)) == snapshotStore {
+				return fs.SkipDir
+			}
 			if d.IsDir() && path != root && strings.Count(strings.TrimPrefix(path, root), string(filepath.Separator)) >= maxStateDepth {
 				return fs.SkipDir
 			}

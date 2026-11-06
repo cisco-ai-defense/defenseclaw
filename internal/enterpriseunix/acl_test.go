@@ -16,9 +16,97 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// linkedSnapshotACLRunner models macOS ACLs on two names of the same inode.
+// Removing an entry through either name removes it through the other.
+type linkedSnapshotACLRunner struct {
+	*fakeRunner
+	source string
+	blob   string
+}
+
+func (r linkedSnapshotACLRunner) Run(ctx context.Context, name string, args ...string) (CommandResult, error) {
+	result, err := r.fakeRunner.Run(ctx, name, args...)
+	if err == nil && name == "chmod" && len(args) == 4 && args[1] == "-a#" {
+		other := ""
+		switch args[3] {
+		case r.source:
+			other = r.blob
+		case r.blob:
+			other = r.source
+		}
+		if other != "" {
+			r.mu.Lock()
+			delete(r.acls, other)
+			r.mu.Unlock()
+		}
+	}
+	return result, err
+}
+
+// GAP-0664: a private deployment file and its preserved hard link share
+// one ACL. Repair must clear the live ACL once and leave a public read ACL.
+func TestGAP0664RepairWithLinkedSnapshotACL(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	canonical := filepath.Join(h.env.Layout.LifecycleDir, deploymentFileName)
+	source := h.env.P(canonical)
+	snap, err := h.env.takeSnapshot("linked-acl", []string{canonical}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.env.discardSnapshot(snap)
+	blob := h.env.blobPath(snap, snap.Entries[0])
+	sourceInfo, sourceErr := os.Lstat(source)
+	blobInfo, blobErr := os.Lstat(blob)
+	if sourceErr != nil || blobErr != nil || !os.SameFile(sourceInfo, blobInfo) {
+		t.Fatalf("snapshot did not preserve a hard link: source %v, blob %v", sourceErr, blobErr)
+	}
+	public := h.env.P(filepath.Join(h.env.Layout.BinDir, binHook))
+	entry := "group:staff allow read,readattr,readextattr,list,search"
+	h.runner.acls = map[string][]string{source: {entry}, blob: {entry}, public: {entry}}
+	h.env.Runner = linkedSnapshotACLRunner{fakeRunner: h.runner, source: source, blob: blob}
+	requireOK(t, h.run(Options{Action: ActionRepair}))
+	if len(h.runner.acls[source]) != 0 || len(h.runner.acls[blob]) != 0 {
+		t.Fatalf("repair kept the private file ACL: %v", h.runner.acls)
+	}
+	if got := h.runner.acls[public]; len(got) != 1 || got[0] != entry {
+		t.Fatalf("repair changed a public read ACL: %v", got)
+	}
+	for _, target := range h.env.aclTargets([]string{canonical}, nil) {
+		if target.path == blob {
+			t.Fatal("snapshot hard link was selected for ACL repair")
+		}
+	}
+	h.env.discardSnapshot(snap)
+	writeFreshLedger(t, h)
+	requireOK(t, h.run(Options{Action: ActionVerify}))
+}
+
+func TestGAP0664SnapshotDirectoriesClearInheritedACL(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	store := h.env.P(filepath.Join(h.env.Layout.LifecycleDir, snapshotsDirName))
+	h.runner.acls = map[string][]string{store: {"group:staff allow read,search"}}
+	snap, err := h.env.takeSnapshot("inherited-acl", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.env.discardSnapshot(snap)
+	if len(h.runner.acls[store]) != 0 {
+		t.Fatalf("snapshot store retained an inherited ACL: %v", h.runner.acls[store])
+	}
+	for _, path := range []string{store, snap.Dir, filepath.Join(snap.Dir, "files")} {
+		if !strings.Contains(strings.Join(h.runner.calls, "\n"), "chmod -N "+path) {
+			t.Errorf("snapshot directory %s was not cleared before storing files", path)
+		}
+	}
+}
 
 // failingLsRunner fails every ls that lists path.
 type failingLsRunner struct {
