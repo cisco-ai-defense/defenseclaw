@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/text/unicode/norm"
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
@@ -341,9 +342,11 @@ func pathTraversalView(_, line string) string {
 // childProcess) and module expressions (__import__('os').system(,
 // require('child_process').exec(); ShellJS (shell.exec, shelljs.exec); Ruby
 // Kernel, Process, binding and TOPLEVEL_BINDING, and instance_/class_/
-// module_eval; Python builtins; JavaScript window, globalThis and global
-// eval and jQuery globalEval; PHP shell_exec and pcntl_exec. A PHP "->" or
-// "::" call still counts, as before.
+// module_eval of a string or heredoc (not a block: class_eval do, (&blk)); Python
+// builtins; JavaScript window, globalThis and global eval and jQuery
+// globalEval; PHP shell_exec and pcntl_exec. A PHP "->" or "::" call still
+// counts, as before. A line with a non-ASCII byte is read in NFKC, as
+// Python reads its identifiers.
 const (
 	// cgExecCommandCalls run a command string. CG-EXEC-002 also reports a
 	// subprocess shell=True call; this rule keeps it at its own severity.
@@ -353,18 +356,24 @@ const (
 		// subprocess.call runs a command string, or a program chosen at run
 		// time, unless its first argument is a list that starts with a
 		// literal program name that is no shell, passes no inline code, and
-		// closes on this line without shell=True.
-		`subprocess\.call\((?:\s*[^\s\[]|\s*$|\s*\[\s*[^\s'"\]]|\s*\[[^\]]*$|\s*\[[^\]]*\]\s*,[^)]*$|` + cgExecShellListHead + `|` + cgExecInlineCodeList + `)|` +
+		// the call closes on this line without shell=True (a call left open
+		// can take shell=True on the next line).
+		`subprocess\.call\((?:\s*[^\s\[]|\s*$|\s*\[\s*[^\s'"\]]|\s*\[[^\]]*$|\s*\[[^\]]*\]\s*(?:,[^)]*)?$|` + cgExecShellListHead + `|` + cgExecInlineCodeList + `|` + cgExecInterpreterFlagList + `)|` +
 		`subprocess\.call\(.*shell\s*=\s*true|(?:^|[^.\w$]|\\[nrt])(?:exec|system)\(`
 	// cgExecShellListHead is an argument list whose first element is a
 	// shell or command interpreter (["sh", "-c", cmd], ["/bin/bash", ...]).
 	cgExecShellListHead = `\s*\[\s*['"](?:[^'"]*[/\\])?(?:sh|bash|zsh|dash|ksh|mksh|fish|csh|tcsh|ash|busybox|cmd|cmd\.exe|powershell|powershell\.exe|pwsh|pwsh\.exe)['"]`
 	// cgExecInlineCodeList is an argument list that passes inline code or a
 	// command string to an interpreter ([sys.executable, "-c", code],
-	// ["node", "-e", src], ["cmd", "/c", line], ["pwsh", "-Command", s]).
-	cgExecInlineCodeList = `\s*\[[^\]]*['"](?:-c|/c|-e|-command|-encodedcommand)['"]`
+	// ["node", "-e", src], ["node", "--eval", src], ["cmd", "/c", line],
+	// ["pwsh", "-Command", s]).
+	cgExecInlineCodeList = `\s*\[[^\]]*['"](?:-c|/c|-e|--eval|-command|-encodedcommand)['"]`
+	// cgExecInterpreterFlagList is a JavaScript or PHP interpreter given a
+	// code string through a flag that other programs use for something
+	// else (node -p/--print, php -r; rm -r and cp -r stay exempt).
+	cgExecInterpreterFlagList = `\s*\[\s*['"](?:[^'"]*[/\\])?(?:node|nodejs|deno|bun|php)['"][^\]]*['"](?:-p|--print|-r)['"]`
 	// cgExecEvalCalls evaluate source text.
-	cgExecEvalCalls = `(?:^|[^.\w$]|\\[nrt])eval\(|(?:instance|class|module)_eval\b|globaleval\(|` +
+	cgExecEvalCalls = `(?:^|[^.\w$]|\\[nrt])eval\(|(?:instance|class|module)_eval\s*(?:\(\s*[^&\s)]|<<|['"%])|globaleval\(|` +
 		`(?:__)?(?:builtins(?:__)?|kernel|binding|toplevel_binding|window|globalthis|global)\.eval\(`
 )
 
@@ -379,6 +388,12 @@ func cgExecView(ext, line string) string {
 	// it replaced.
 	if !cgExecHasNeedle(line) {
 		return ""
+	}
+	if !isASCII(line) {
+		// Python reads identifiers in NFKC (PEP 3131): a fullwidth,
+		// superscript or mathematical "os" names os. Go's (?i) folds only
+		// U+017F and U+212A, so the pattern reads the NFKC form.
+		line = norm.NFKC.String(line)
 	}
 	trimmed := strings.TrimLeft(line, " \t")
 	comment := strings.HasPrefix(trimmed, "//")
@@ -420,6 +435,16 @@ func cgExecHasNeedle(line string) bool {
 		}
 	}
 	return false
+}
+
+// isASCII reports whether line has only ASCII bytes.
+func isASCII(line string) bool {
+	for i := 0; i < len(line); i++ {
+		if line[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 // hasFoldASCII reports whether s starts with the lower-case letters word in

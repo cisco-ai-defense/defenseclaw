@@ -11,9 +11,10 @@ import (
 
 // GAP-0056 class guard: testdata/codeguard_exec_001.json holds every line
 // the substring rule (base d37eafc351) reported as CG-EXEC-001 that runs a
-// command or code string ("match": the fixer's positive corpus and the
-// independent review's near variants) and the method, name, list-form and
-// comment lines it reported wrongly ("no_match"). No true positive may be
+// command or code string, with the NFKC and heredoc forms the tightened rule
+// adds ("match": the fixer's positive corpus and the independent review's
+// near variants, rounds 1 and 2), and the method, name, list-form, Ruby
+// block and comment lines it reported wrongly ("no_match"). No true positive may be
 // lost and no false positive may come back.
 func TestCodeGuardExecClassCorpus(t *testing.T) {
 	raw, err := os.ReadFile("testdata/codeguard_exec_001.json")
@@ -27,7 +28,7 @@ func TestCodeGuardExecClassCorpus(t *testing.T) {
 	if err := json.Unmarshal(raw, &corpus); err != nil {
 		t.Fatal(err)
 	}
-	if len(corpus.Match) < 130 || len(corpus.NoMatch) < 75 {
+	if len(corpus.Match) < 210 || len(corpus.NoMatch) < 105 {
 		t.Fatalf("corpus has %d match and %d no_match rows, want the full guard", len(corpus.Match), len(corpus.NoMatch))
 	}
 	s := NewCodeGuardScanner("")

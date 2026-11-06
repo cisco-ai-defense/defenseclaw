@@ -27,6 +27,11 @@ func TestCodeGuardExecMatchesInterpreterCallsOnly(t *testing.T) {
 			"subprocess.call(['sh', '-c', cmd])", "subprocess.call(['/bin/bash', '-c', user_cmd])",
 			"subprocess.call([sys.executable, '-c', code])", "subprocess.call([cmd])",
 			"rc = subprocess.call([gateway, 'restart'])", "subprocess.call([\"ls\", d],",
+			// Review 2 MF1, MF2: NFKC receivers, node/php code flags, a list
+			// that closes the line before shell=True.
+			"\uff4fs.system(cmd)", "\U0001d428\U0001d42c.system(cmd)", "\uff42uiltins.exec(code)",
+			"subprocess.call(['node', '--eval', src])", "subprocess.call(['node', '-p', src])",
+			"subprocess.call(['php', '-r', code])", "subprocess.call([\"ls\", d]",
 		},
 		".js": {
 			"eval(userInput)", "const r = eval(req.body.code)", "  eval(atob(payload));", "if (x) eval(code)", "!eval(b)",
@@ -43,6 +48,7 @@ func TestCodeGuardExecMatchesInterpreterCallsOnly(t *testing.T) {
 			"x = `#{system(cmd)}`", "#{system(cmd)}",
 			// Review 1 MF4.
 			"Process.exec(cmd)", "binding.eval(code)", "TOPLEVEL_BINDING.eval(src)",
+			"class_eval <<~RUBY", "Foo.class_eval(src)", "obj.instance_eval 'code'",
 		},
 		".php": {"system($cmd);", "exec($cmd);", "shell_exec($cmd);", "pcntl_exec($path);", "eval($code);", "@eval($_POST['x']);", "{${eval($x)}}"},
 	}
@@ -50,6 +56,7 @@ func TestCodeGuardExecMatchesInterpreterCallsOnly(t *testing.T) {
 		".py": {
 			"subprocess.call(['make'])", `subprocess.call(["git", "status"])`, "subprocess.call( ['ls'] )",
 			"mock.patch('subprocess.call')",
+			"subprocess.call(['rm', '-r', d])", "subprocess.call(['cp', '-r', a, b])",
 			"model.eval()", "net.eval()", "self.system(name)", "pool.exec(job)", "platform.system()",
 			"ast.literal_eval(value)", "proc = await asyncio.create_subprocess_exec(", "with runner.isolated_filesystem():",
 			"# eval(x) is not used here",
@@ -68,7 +75,12 @@ func TestCodeGuardExecMatchesInterpreterCallsOnly(t *testing.T) {
 			"// eval('class VendorPlugin { ... }');", "# exec($cmd) runs in the worker",
 			"[$d, $w] = $this->createFlysystem($a, $c);", "$fileSystem(x)",
 		},
-		".rb": {"file_system(x)", "subsystem(x)", "# system(cmd) is called by the runner"},
+		".rb": {
+			"file_system(x)", "subsystem(x)", "# system(cmd) is called by the runner",
+			// Review 2 MF3: block forms evaluate no string.
+			"Foo.class_eval do", "  instance_eval { @x = 1 }", "Module.new.module_eval do", "klass.class_eval &block",
+			"obj.instance_eval(&blk)",
+		},
 	}
 	has := func(ext, line string) bool {
 		for _, f := range s.ScanContent("/src/app"+ext, line) {
