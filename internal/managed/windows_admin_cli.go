@@ -95,9 +95,16 @@ func powerShellArgument(arg string) string {
 		return "''"
 	}
 	for _, r := range arg {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-_.:/=+", r)) {
+		if !powerShellPlainRune(r) {
 			return PowerShellLiteral(arg)
 		}
 	}
 	return arg
+}
+
+// powerShellPlainRune reports a character a bare argument may hold: a
+// letter, a digit or one of - _ . : / = +, none of which PowerShell reads as
+// syntax.
+func powerShellPlainRune(r rune) bool {
+	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-_.:/=+", r)
 }
