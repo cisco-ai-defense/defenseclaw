@@ -596,12 +596,22 @@ else {
         [void](Test-Swap 'swap: a payload manifest pin is kept' $newInstaller $newModule $newInstallerHash $manifestModule `
             $metadata @{ 'defenseclawenterprise.psm1' = $manifestModule })
         $authenticodeMetadata = [pscustomobject]@{ trust_mode = 'authenticode'; hashes = $metadata.hashes }
-        [void](Test-Swap 'swap: an Authenticode deployment admits nothing by hash' $newInstaller $newModule '' '' $authenticodeMetadata)
+        Set-TestText $layout.CLIPath $newCli
+        $map = Test-Swap 'swap: an Authenticode deployment admits nothing by hash' $newInstaller $newModule '' '' $authenticodeMetadata
+        if ([string]$map['defenseclaw.exe'] -cne '') {
+            $failures.Add("swap: an Authenticode deployment pinned the CLI ('$([string]$map['defenseclaw.exe'])')")
+        }
         # The CLI follows the pair, only while the file on disk is its pin (g649 review F4).
         Set-TestText $layout.CLIPath $newCli
         $map = Test-Swap 'swap: the pair and the pinned CLI' $newInstaller $newModule $newInstallerHash $newModuleHash
         if ([string]$map['defenseclaw.exe'] -cne $newCliHash) {
             $failures.Add("swap: the pinned CLI on disk was not admitted ('$([string]$map['defenseclaw.exe'])')")
+        }
+        $manifestCli = 'b' * 64
+        $map = Test-Swap 'swap: a payload manifest CLI pin is kept' $newInstaller $newModule $newInstallerHash $newModuleHash `
+            $metadata @{ 'defenseclaw.exe' = $manifestCli }
+        if ([string]$map['defenseclaw.exe'] -cne $manifestCli) {
+            $failures.Add("swap: a payload manifest CLI pin was replaced ('$([string]$map['defenseclaw.exe'])')")
         }
         $map = Test-Swap 'swap: the pinned CLI without the pair' $newInstaller $oldModule $oldInstallerHash $oldModuleHash
         if ([string]$map['defenseclaw.exe'] -cne $oldCliHash) {
