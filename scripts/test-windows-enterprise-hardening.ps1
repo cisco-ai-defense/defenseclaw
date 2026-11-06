@@ -2831,7 +2831,10 @@ function Start-ActiveUserFileLockHolder(
     [string]$Path,
     [string]$Label,
     [ValidateRange(30, 600)]
-    [int]$TimeoutSeconds = 90
+    [int]$TimeoutSeconds = 90,
+    # The holder must be refused: it opens the file with no sharing and
+    # reports the denial instead of a lock (GAP-0650).
+    [switch]$ExpectDenied
 ) {
     $safeLabel = ($Label -replace '[^A-Za-z0-9_.-]', '_')
     $nonce = [Guid]::NewGuid().ToString('N')
@@ -2852,6 +2855,7 @@ function Start-ActiveUserFileLockHolder(
         evidence = $evidence
         type_name = "FileLockHolder_$($script:RunToken)_$($nonce.Substring(0, 8))"
         timeout_seconds = $TimeoutSeconds
+        expect_denied = [bool]$ExpectDenied
     }
     $inputBase64 = [Convert]::ToBase64String(
         [Text.Encoding]::UTF8.GetBytes(
@@ -2919,7 +2923,42 @@ $overlapped = [Activator]::CreateInstance($overlappedType)
 $stream = $null
 $locked = $false
 $unlocked = $false
+$denied = $false
 try {
+    if ([bool]$inputObject.expect_denied) {
+        try {
+            $stream = [IO.File]::Open(
+                $path,
+                [IO.FileMode]::Open,
+                [IO.FileAccess]::Read,
+                [IO.FileShare]::None
+            )
+        } catch [UnauthorizedAccessException] {
+            $denied = $true
+        }
+        [IO.File]::WriteAllText(
+            [string]$inputObject.ready,
+            ([pscustomobject]@{
+                sid = $sid
+                pid = [Diagnostics.Process]::GetCurrentProcess().Id
+                path = $path
+                locked = $false
+                denied = $denied
+                delete_sharing_enabled = $false
+            } | ConvertTo-Json -Compress),
+            [Text.UTF8Encoding]::new($false)
+        )
+        if (-not $denied) {
+            $deadline = [DateTimeOffset]::UtcNow.AddSeconds(
+                [int]$inputObject.timeout_seconds
+            )
+            while (-not (Test-Path -LiteralPath ([string]$inputObject.release)) -and
+                [DateTimeOffset]::UtcNow -lt $deadline) {
+                Start-Sleep -Milliseconds 50
+            }
+        }
+        return
+    }
     $stream = [IO.File]::Open(
         $path,
         [IO.FileMode]::Open,
@@ -2978,6 +3017,7 @@ try {
             path = $path
             locked = $locked
             unlocked = $unlocked
+            denied = $denied
             delete_sharing_enabled = $false
             final = $true
         } | ConvertTo-Json -Compress),
@@ -3032,11 +3072,17 @@ try {
             (ConvertTo-CanonicalPath $Path),
             [StringComparison]::OrdinalIgnoreCase
         ) -or
-        -not [bool]$readyJSON.locked -or
         $null -eq $readyJSON.PSObject.Properties[
             'delete_sharing_enabled'
         ] -or
         [bool]$readyJSON.delete_sharing_enabled) {
+        throw "$Label file-lock holder did not run against the exact path as target SID"
+    }
+    if ($ExpectDenied) {
+        if ([bool]$readyJSON.locked -or -not [bool]$readyJSON.denied) {
+            throw "$Label standard user opened the protected lock with no sharing; it must be refused"
+        }
+    } elseif (-not [bool]$readyJSON.locked) {
         throw "$Label file-lock holder did not lock the exact path as target SID"
     }
     return [pscustomobject]@{
@@ -3047,6 +3093,7 @@ try {
         Path = ConvertTo-CanonicalPath $Path
         PID = [uint32]$readyJSON.pid
         DeleteSharingEnabled = $false
+        Denied = [bool]$ExpectDenied
     }
 }
 
@@ -3080,8 +3127,11 @@ function Stop-ActiveUserFileLockHolder([object]$Holder) {
             [string]$Holder.Path,
             [StringComparison]::OrdinalIgnoreCase
         ) -or
-        -not [bool]$evidence.locked -or
-        -not [bool]$evidence.unlocked -or
+        ($(if ([bool]$Holder.Denied) {
+                [bool]$evidence.locked -or -not [bool]$evidence.denied
+            } else {
+                -not [bool]$evidence.locked -or -not [bool]$evidence.unlocked
+            })) -or
         $null -eq $evidence.PSObject.Properties[
             'delete_sharing_enabled'
         ] -or
@@ -9110,37 +9160,31 @@ function Test-CodexMachineLockSquattingBoundaries {
         }
     }
 
+    # GAP-0650: a standard user can no longer hold the Codex writer lock.
+    # Opening it for data with no sharing is refused, and verification runs
+    # to completion while that user is signed in, policy unchanged.
     $fileLockHolder = $null
     $contention = $null
     try {
         $fileLockHolder = Start-ActiveUserFileLockHolder `
             -Path $script:CodexMachineLockPath `
-            -Label 'codex-machine-protected-file-lock-contention'
+            -Label 'codex-machine-protected-file-lock-denied' `
+            -ExpectDenied
         $stopwatch = [Diagnostics.Stopwatch]::StartNew()
         $verify = Invoke-GatewayJSON `
             -Arguments @(
                 'enterprise', 'windows',
                 'codex-requirements', 'verify'
             ) `
-            -Label 'codex-machine-protected-file-lock-held-verify' `
-            -AllowedExitCodes @(1)
+            -Label 'codex-machine-protected-file-lock-denied-verify'
         $stopwatch.Stop()
-        if ([bool]$verify.JSON.ok -or
-            $verify.Process.ExitCode -eq 0) {
-            throw 'held protected Codex file lock did not fail closed'
-        }
-        $diagnostic = [string]$verify.JSON.error
-        if ($diagnostic -notmatch
-            '(?i)lock|timed out|sharing violation|used by another process') {
-            throw (
-                'held protected Codex file lock omitted a causal diagnostic: ' +
-                (Protect-SensitiveDisplayText $diagnostic)
-            )
+        if (-not [bool]$verify.JSON.ok -or
+            $verify.Process.ExitCode -ne 0) {
+            throw 'Codex verification failed while a standard user tried to hold the writer lock'
         }
         if ($stopwatch.Elapsed.TotalSeconds -gt 30) {
             throw (
-                'protected Codex file-lock contention exceeded the bounded ' +
-                "30-second fail-closed window: " +
+                'Codex verification waited on a standard user: ' +
                 "$($stopwatch.Elapsed.TotalSeconds)s"
             )
         }
@@ -9148,20 +9192,19 @@ function Test-CodexMachineLockSquattingBoundaries {
         Assert-SameDigests `
             $deploymentBefore `
             $deploymentAfter `
-            'held protected Codex file lock deployment'
+            'denied Codex file lock deployment'
         $machineAfter = Get-CodexMachinePolicySnapshot
         Assert-SameObjectJSON `
             $machineBefore `
             $machineAfter `
-            'held protected Codex file lock machine policy'
+            'denied Codex file lock machine policy'
         $contention = [pscustomobject]@{
             path = $script:CodexMachineLockPath
             holder_sid = $script:PrimarySID
             holder_pid = [uint32]$fileLockHolder.PID
             elapsed_ms = [int64]$stopwatch.ElapsedMilliseconds
             exit_code = [int]$verify.Process.ExitCode
-            diagnostic = Protect-SensitiveDisplayText $diagnostic
-            bounded_fail_closed = $true
+            standard_user_denied = $true
             policy_unchanged = $true
             deployment_unchanged = $true
         }
@@ -9186,7 +9229,7 @@ function Test-CodexMachineLockSquattingBoundaries {
         legacy_mutex_cases = @($legacyCases.ToArray())
         legacy_named_objects_ignored = $true
         protected_file_lock = $contention
-        protected_file_lock_bounded_fail_closed = $true
+        standard_user_cannot_hold_file_lock = $true
         unauthorized_machine_policy_read_or_mutation = $false
     }
 }
@@ -20858,10 +20901,12 @@ $script:StateRoot = Assert-PathBelow `
 $script:CodexRequirementsPath = ConvertTo-CanonicalPath (
     Join-Path $script:CodexMachinePolicyDirectory 'requirements.toml'
 )
+# The Codex writer lock (GAP-0650); standard users can read only its
+# attributes, so none of them can hold it against a transaction.
 $script:CodexMachineLockPath = ConvertTo-CanonicalPath (
     Join-Path `
         $script:CodexMachinePolicyDirectory `
-        '.defenseclaw-managed-hooks.lock'
+        '.defenseclaw-managed-hooks.writer.lock'
 )
 $script:CodexManagedStatePath = ConvertTo-CanonicalPath (
     Join-Path `
