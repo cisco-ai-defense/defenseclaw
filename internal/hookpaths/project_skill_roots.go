@@ -89,6 +89,38 @@ func projectSkillCallName(raw json.RawMessage) string {
 	return ""
 }
 
+// projectSkillCallPath reads the explicit source fields recognized by the
+// gateway's Skill probe. An empty result is a name-only selection.
+func projectSkillCallPath(raw json.RawMessage) string {
+	var values map[string]json.RawMessage
+	if json.Unmarshal(raw, &values) != nil {
+		return ""
+	}
+	for _, key := range []string{"skill_path", "skillPath", "source_path", "sourcePath"} {
+		var path string
+		if json.Unmarshal(values[key], &path) == nil && strings.TrimSpace(path) != "" {
+			return path
+		}
+	}
+	for _, key := range []string{"skill", "skill_info", "skillInfo", "source_skill", "sourceSkill"} {
+		var value string
+		if json.Unmarshal(values[key], &value) == nil && strings.ContainsAny(value, `/\\`) {
+			return value
+		}
+		var nested map[string]json.RawMessage
+		if json.Unmarshal(values[key], &nested) != nil {
+			continue
+		}
+		for _, field := range []string{"path", "source_path", "sourcePath", "skill_path", "skillPath"} {
+			var path string
+			if json.Unmarshal(nested[field], &path) == nil && strings.TrimSpace(path) != "" {
+				return path
+			}
+		}
+	}
+	return ""
+}
+
 func projectSkillName(raw string) string {
 	name := strings.TrimPrefix(strings.Trim(strings.TrimSpace(raw), `"'`), "@")
 	if name == "" || name == "." || name == ".." || len(name) > 255 || strings.ContainsAny(name, `/\:`) {
@@ -130,6 +162,41 @@ func projectSkillSelectedFolders(root, name string) []string {
 		}
 	}
 	return nil
+}
+
+// projectSkillSelectionMatchesPath binds a caller-inspected folder to an
+// explicit Skill source before the gateway receives the selected-folder fact.
+// The caller can resolve a profile link that a managed gateway cannot read.
+func projectSkillSelectionMatchesPath(root, selected, source, cwd string) bool {
+	if strings.TrimSpace(source) == "" {
+		return true
+	}
+	if !filepath.IsAbs(source) {
+		if !filepath.IsAbs(cwd) {
+			return false
+		}
+		source = filepath.Join(cwd, source)
+	}
+	if projectSkillRootKey(source) == projectSkillRootKey(root) ||
+		projectSkillRootKey(source) == projectSkillRootKey(selected) ||
+		projectSkillPathWithin(selected, source) {
+		return true
+	}
+	resolvedSource, sourceErr := filepath.EvalSymlinks(source)
+	if sourceErr != nil {
+		return false
+	}
+	resolvedRoot, rootErr := filepath.EvalSymlinks(root)
+	if rootErr == nil && (projectSkillRootKey(resolvedSource) == projectSkillRootKey(resolvedRoot) ||
+		projectSkillPathWithin(resolvedRoot, resolvedSource)) {
+		return true
+	}
+	resolvedSelected, selectedErr := filepath.EvalSymlinks(selected)
+	if selectedErr != nil {
+		return false
+	}
+	return projectSkillRootKey(resolvedSource) == projectSkillRootKey(resolvedSelected) ||
+		projectSkillPathWithin(resolvedSelected, resolvedSource)
 }
 
 // projectSkillRootFacts reports adverse and positively verified roots. The
