@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"maps"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -14,9 +15,9 @@ import (
 
 // A file-tool call (a read, write, edit, multiedit, notebook edit, create,
 // patch or search tool) whose arguments carry a key outside the tool's
-// reviewed schema parses partial, as every call with an unknown key does,
-// and a partial parse is never authoritative: no path rule judged the file
-// the call names, so one extra key such as "description" hid a write to
+// reviewed schema can lose authority or be parsed as a different kind of
+// call by the generic parser. Then no path rule judges the file the tool
+// handles, so one extra key hid a write to
 // DefenseClaw's own state, a credential file or an SSH key from every rule
 // in every profile (gas-ux-r1 GAP-0076; GAP-0655 had closed it for the
 // authorized_keys rule only). An unknown key must never hide a known path,
@@ -34,8 +35,8 @@ import (
 //
 // The twins prove only which file the call reads or writes: callers count
 // a rule match on them and never a non-match. Past maxUnknownKeyTargets
-// candidates the call cannot be read whole (UnknownKeyTwins reports
-// overflow) and callers fail closed for a write tool.
+// candidates or past the nesting bound, the remaining target is Possible
+// grade. Named readings still win.
 
 const (
 	// maxUnknownKeyTargets bounds the targets one call is judged as.
@@ -45,47 +46,41 @@ const (
 	maxUnknownKeyValueDepth = 4
 )
 
-// UnknownKeyTwin is one reading of a file-tool call with unknown keys: its
-// arguments and their complete analysis, which names at least one path.
+// UnknownKeyTwin is one additive reading of a file-tool call with extra keys.
 type UnknownKeyTwin struct {
 	Args  json.RawMessage
 	Facts Facts
 }
 
-// UnknownKeyTwins returns the readings of a file-tool call whose parse is
-// partial only because of argument keys outside its reviewed schema, and
-// whether the call holds more candidate targets than are judged
-// (maxUnknownKeyTargets). It reports nothing for any other call: a
-// complete, ambiguous, limit-exceeded or malformed parse, a call with
-// command text or argv, or a tool that names no file.
+// UnknownKeyTwins returns the reviewed and alternate readings of a file-tool
+// call with extra argument keys, plus whether the target count or depth
+// bound was exceeded. The full parse status does not gate these readings.
 func UnknownKeyTwins(input Input, facts Facts) ([]UnknownKeyTwin, bool) {
-	// A patch tool reads a path-named key as a second source of its
-	// targets (ambiguous); its harness reads only the patch.
-	patch := isApplyPatchTool(input.Tool)
-	if (facts.Parse.Status != StatusPartial && (!patch || facts.Parse.Status != StatusAmbiguous)) ||
-		len(facts.Parse.Issues) == 0 || input.Command != "" || len(input.Argv) != 0 ||
-		!unknownKeyFileTool(input.Tool) {
+	_ = facts
+	if input.Command != "" || len(input.Argv) != 0 || !unknownKeyFileTool(input.Tool) ||
+		len(input.Args) == 0 || !json.Valid(input.Args) {
 		return nil, false
 	}
-	for _, issue := range facts.Parse.Issues {
-		if issue != IssueUnknownOperandGrammar && (!patch || issue != IssueConflictingSources) {
-			return nil, false
-		}
-	}
-	object, problem := exactJSONObject(input.Args)
-	if problem.status != "" {
+	// An oversized extra value does not make the reviewed target disappear.
+	decoder := json.NewDecoder(bytes.NewReader(input.Args))
+	decoder.UseNumber()
+	var object map[string]any
+	if decoder.Decode(&object) != nil || object == nil {
 		return nil, false
 	}
 	reduced := make(map[string]any, len(object))
 	var unknown []string
 	for _, key := range slices.Sorted(maps.Keys(object)) {
-		if reviewedFileToolArgumentKey(input.Tool, key) {
+		if reviewedFileToolArgumentKey(input.Tool, key, object) {
 			reduced[key] = object[key]
 		} else {
 			unknown = append(unknown, key)
 		}
 	}
 
+	if len(unknown) == 0 {
+		return nil, false
+	}
 	var twins []UnknownKeyTwin
 	seen := map[string]bool{}
 	add := func(args map[string]any) bool {
@@ -97,17 +92,41 @@ func UnknownKeyTwins(input Input, facts Facts) ([]UnknownKeyTwin, bool) {
 		view := input
 		view.Args = raw
 		analyzed := Analyze(view)
-		if !analyzed.Authoritative() || len(analyzed.Paths) == 0 {
-			return false
-		}
 		twins = append(twins, UnknownKeyTwin{Args: raw, Facts: analyzed})
-		return true
+		return analyzed.Authoritative() && len(analyzed.Paths) > 0
 	}
-	reducedComplete := len(unknown) != 0 && len(reduced) != 0 && add(reduced)
+	reducedComplete := len(reduced) != 0 && add(reduced)
+	if reducedComplete && !isApplyPatchTool(input.Tool) {
+		for _, key := range unknownKeyTargetKeys {
+			if raw, ok := reduced[key].(string); ok {
+				if target := KnownExtraKeyPath(raw, input.ActiveHome); target != raw {
+					placed := maps.Clone(reduced)
+					placed[key] = target
+					add(placed)
+				}
+			}
+		}
+	}
 
 	var candidates []string
+	overflow := false
 	collect := func(value any) {
-		appendPathShapedStrings(&candidates, value, 0)
+		appendPathShapedStrings(&candidates, value, 0, &overflow)
+	}
+	// More than one target field can be two dialect readings. Keep every
+	// named value regardless of which field the reduction selected.
+	targetFields := 0
+	for _, key := range unknownKeyTargetKeys {
+		if _, ok := object[key]; ok {
+			targetFields++
+		}
+	}
+	if targetFields > 1 {
+		for _, key := range unknownKeyTargetKeys {
+			if value, ok := object[key]; ok {
+				collect(value)
+			}
+		}
 	}
 	if !reducedComplete {
 		// The call cannot be read in its reviewed shape: every target it
@@ -126,11 +145,11 @@ func UnknownKeyTwins(input Input, facts Facts) ([]UnknownKeyTwin, bool) {
 	for _, key := range unknown {
 		collect(object[key])
 	}
-	overflow := false
 	if len(candidates) > maxUnknownKeyTargets {
 		candidates, overflow = candidates[:maxUnknownKeyTargets], true
 	}
 	for _, target := range candidates {
+		target = KnownExtraKeyPath(target, input.ActiveHome)
 		if reducedComplete {
 			if retargeted, ok := retargetFileToolArgs(input.Tool, reduced, target); ok && add(retargeted) {
 				continue
@@ -139,6 +158,20 @@ func UnknownKeyTwins(input Input, facts Facts) ([]UnknownKeyTwin, bool) {
 		add(unknownKeyFileToolShape(input.Tool, target))
 	}
 	return twins, overflow
+}
+
+// Values in extra keys use the same known home as the reviewed call. In
+// particular, patch envelopes do not expand shell spelling by themselves.
+func KnownExtraKeyPath(target, home string) string {
+	if home == "" {
+		return target
+	}
+	for _, prefix := range []string{"~/", "$HOME/", "${HOME}/"} {
+		if strings.HasPrefix(target, prefix) {
+			return filepath.Join(home, strings.TrimPrefix(target, prefix))
+		}
+	}
+	return target
 }
 
 // UnknownKeyWriteTargetViews returns the complete analyses of the readings
@@ -158,9 +191,19 @@ func UnknownKeyWriteTargetViews(input Input, facts Facts) []Facts {
 
 // UnknownKeyWriteOverflow reports a write-class file-tool call with unknown
 // keys that holds more candidate targets than UnknownKeyTwins judges: the
-// files it may write cannot all be read, so callers fail closed.
+// files it may write cannot all be read. The gateway grades this Possible.
 func UnknownKeyWriteOverflow(input Input, facts Facts) bool {
 	if !StructuredWriteTool(input.Tool) && !isApplyPatchTool(input.Tool) {
+		return false
+	}
+	_, overflow := UnknownKeyTwins(input, facts)
+	return overflow
+}
+
+// UnknownKeyTargetOverflow also covers reads: a target past the count or
+// nesting bound has Possible grade even when the first readings are ordinary.
+func UnknownKeyTargetOverflow(input Input, facts Facts) bool {
+	if !unknownKeyFileTool(input.Tool) {
 		return false
 	}
 	_, overflow := UnknownKeyTwins(input, facts)
@@ -181,11 +224,12 @@ func PathShapedArgumentValues(raw json.RawMessage) ([]string, bool) {
 		return nil, false
 	}
 	var values []string
-	appendPathShapedStrings(&values, value, 0)
+	overflow := false
+	appendPathShapedStrings(&values, value, 0, &overflow)
 	if len(values) > maxUnknownKeyTargets {
 		return values[:maxUnknownKeyTargets], true
 	}
-	return values, false
+	return values, overflow
 }
 
 // unknownKeyFileTool reports a tool whose reviewed arguments name a file:
@@ -222,23 +266,54 @@ var fileToolTextKeys = map[string]bool{
 	"pattern": true, "glob": true, "patch": true, "patchText": true, "patch_text": true, "command": true,
 }
 
-// reviewedFileToolArgumentKey reports a key some reviewed schema of tool
-// reads: for a patch tool its patch fields and working directory, for any
-// other a closed schema's key or a generic field name
-// (canonicalInputFieldName). Every other key is unknown to every schema.
-func reviewedFileToolArgumentKey(tool, key string) bool {
-	field, known := canonicalInputFieldName(key)
+// reviewedFileToolArgumentKey follows the file tool's own argument contract.
+// A generic parser field such as cwd, command or input is not thereby a
+// reviewed field of Write, Edit or Read.
+func reviewedFileToolArgumentKey(tool, key string, object map[string]any) bool {
 	if isApplyPatchTool(tool) {
-		return isPatchInputField(key) || key == "input" || field == "cwd"
+		for _, candidate := range []string{"patchText", "patch_text", "patch", "command", "input"} {
+			if _, ok := object[candidate]; ok && (isPatchInputField(candidate) || isPatchEnvelopeField(candidate, object[candidate])) {
+				return key == candidate
+			}
+		}
+		return false
 	}
-	return closedFileToolArgumentKeys[key] || known
+	pathKey := ""
+	for _, candidate := range []string{"file_path", "filePath", "path"} {
+		if _, ok := object[candidate]; ok {
+			pathKey = candidate
+			break
+		}
+	}
+	switch strings.ToLower(tool) {
+	case "read", "readfile", "read_file", "read-file":
+		return key == pathKey || slices.Contains([]string{"limit", "offset", "pages"}, key)
+	case "write", "writefile", "write_file", "write-file", "fs_write", "fs.write_file", "fs.write":
+		return key == pathKey || key == "content" || key == "file_text"
+	case "edit", "editfile", "edit_file", "edit-file":
+		edit := codingAgentEditDialect(object)
+		if strings.EqualFold(tool, "edit") {
+			return key == edit.path || key == edit.old || key == edit.new || key == edit.all
+		}
+		return key == pathKey || slices.Contains([]string{"old_string", "new_string", "replace_all", "oldString", "newString", "replaceAll", "old_str", "new_str"}, key)
+	case "multiedit", "multi_edit", "multi-edit":
+		return key == pathKey || key == "edits"
+	case "notebookedit", "notebook_edit", "notebook-edit":
+		return slices.Contains([]string{"notebook_path", "new_source", "cell_id", "cell_type", "edit_mode"}, key)
+	case "create", "createfile", "create_file", "create-file":
+		return key == pathKey || key == "file_text" || key == "content"
+	case "grep", "glob", "search_code":
+		return closedFileToolArgumentKeys[key]
+	default:
+		return slices.Contains(unknownKeyTargetKeys, key) || fileToolTextKeys[key]
+	}
 }
 
 // appendPathShapedStrings appends every path-shaped string in value
 // (pathShapedArgumentValue), searching objects and arrays to
 // maxUnknownKeyValueDepth, once each, in a stable order. It stops one past
 // maxUnknownKeyTargets: the caller reports the overflow.
-func appendPathShapedStrings(out *[]string, value any, depth int) {
+func appendPathShapedStrings(out *[]string, value any, depth int, overflow *bool) {
 	if len(*out) > maxUnknownKeyTargets {
 		return
 	}
@@ -249,13 +324,19 @@ func appendPathShapedStrings(out *[]string, value any, depth int) {
 		}
 	case []any:
 		if depth >= maxUnknownKeyValueDepth {
+			if len(value) > 0 {
+				*overflow = true
+			}
 			return
 		}
 		for _, item := range value {
-			appendPathShapedStrings(out, item, depth+1)
+			appendPathShapedStrings(out, item, depth+1, overflow)
 		}
 	case map[string]any:
 		if depth >= maxUnknownKeyValueDepth {
+			if len(value) > 0 {
+				*overflow = true
+			}
 			return
 		}
 		keys := make([]string, 0, len(value))
@@ -264,7 +345,7 @@ func appendPathShapedStrings(out *[]string, value any, depth int) {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			appendPathShapedStrings(out, value[key], depth+1)
+			appendPathShapedStrings(out, value[key], depth+1, overflow)
 		}
 	}
 }

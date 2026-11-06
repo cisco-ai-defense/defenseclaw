@@ -1249,6 +1249,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				// gateway reads the same result and fails closed on it.
 				if strings.Contains(command, ">") {
 					assignedOperands = AdjacentAssignedWriteOperands(command, cwd, home)
+					assignedOperands = append(assignedOperands, DeclaredRedirectWriteOperands(command, cwd, home)...)
 					boundedOperands, _ := BoundedShellWriteOperands(command, cwd, home)
 					literalOperands = append(literalOperands, boundedOperands...)
 				}
