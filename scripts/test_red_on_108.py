@@ -1,11 +1,12 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.red_on_108 import mapped_python_files, run_mapped_candidate
+from scripts.red_on_108 import candidates, mapped_python_files, run_mapped_candidate
 from scripts.red_on_108 import tests_for_gap as select_tests_for_gap
 
 
@@ -42,6 +43,34 @@ class RedOn108Test(unittest.TestCase):
                 mapped_python_files(root, ["cli/tests/test_neighbor.py"], ["test_neighbor"]),
                 ["cli/tests/test_neighbor.py"],
             )
+
+    def test_candidates_ignore_deleted_tests_and_reverts(self):
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+
+            def git(*args: str) -> str:
+                return subprocess.check_output(
+                    ["git", "-C", str(repo), *args], text=True, stderr=subprocess.DEVNULL
+                ).strip()
+
+            git("init", "-q")
+            git("config", "user.name", "Test")
+            git("config", "user.email", "test@example.invalid")
+            git("commit", "-q", "--allow-empty", "-m", "base")
+            base = git("rev-parse", "HEAD")
+            test_file = repo / "candidate_test.go"
+            test_file.write_text("package example\n", encoding="utf-8")
+            git("add", "candidate_test.go")
+            git("commit", "-q", "-m", "fix(GAP-0607): add candidate test")
+            fix = git("rev-parse", "HEAD")
+            git("rm", "-q", "candidate_test.go")
+            git("commit", "-q", "-m", "fix(GAP-0607): remove obsolete candidate test")
+            (repo / "revert_test.go").write_text("package example\n", encoding="utf-8")
+            git("add", "revert_test.go")
+            git("commit", "-q", "-m", "revert(GAP-0607): restore prior state")
+            self.assertEqual(candidates(repo, "GAP-0607", base), [(fix, ["candidate_test.go"])])
 
 
 if __name__ == "__main__":
