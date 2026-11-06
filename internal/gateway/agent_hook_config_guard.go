@@ -997,26 +997,33 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 		return ""
 	}
 	if sub == "apply" {
+		readAny, unknown := false, false
 		for _, arg := range argv[index+1:] {
 			if strings.HasPrefix(arg, "-") {
 				continue
 			}
 			places := guard.places(arg)
 			if len(places) == 0 {
+				unknown = true
 				break
 			}
 			patch, err := os.ReadFile(places[0])
 			if err != nil || len(patch) > agentHookConfigMaxBytes {
+				unknown = true
 				break
 			}
-			for _, line := range strings.Split(string(patch), "\n") {
-				for _, prefix := range []string{"+++ b/", "--- a/", "rename to ", "rename from "} {
-					if path, ok := strings.CutPrefix(line, prefix); ok && guard.shellTarget(strings.TrimSpace(path)) {
-						return path
-					}
-				}
+			target, complete := agentHookConfigPatchTarget(patch, guard)
+			if target != "" {
+				return target
 			}
-			return "" // A readable patch with no registration target.
+			if !complete {
+				unknown = true
+				break
+			}
+			readAny = true
+		}
+		if readAny && !unknown {
+			return "" // Every readable patch names only other files.
 		}
 	}
 	// Explicit pathspecs are write operands for restore and checkout.
@@ -1039,6 +1046,43 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 		}
 	}
 	return ""
+}
+
+// agentHookConfigPatchTarget trusts a patch as unrelated only when every
+// section has a recognizable file target. Unknown syntax stays opaque.
+func agentHookConfigPatchTarget(patch []byte, guard *agentHookConfigGuard) (string, bool) {
+	section, seen, anyPath := false, false, false
+	for _, line := range strings.Split(string(patch), "\n") {
+		if strings.HasPrefix(line, "diff --git ") {
+			if section && !seen {
+				return "", false
+			}
+			section, seen = true, false
+			continue
+		}
+		if line == "+++ /dev/null" || line == "--- /dev/null" {
+			continue
+		}
+		for _, prefix := range []string{"+++ b/", "--- a/", "rename to ", "rename from "} {
+			if path, ok := strings.CutPrefix(line, prefix); ok {
+				path, _, _ = strings.Cut(path, "\t")
+				path = strings.TrimSpace(path)
+				if path == "" {
+					return "", false
+				}
+				seen, anyPath = true, true
+				if guard.shellTarget(path) {
+					return path, true
+				}
+				break
+			}
+		}
+		if (strings.HasPrefix(line, "+++ ") || strings.HasPrefix(line, "--- ")) &&
+			!strings.HasPrefix(line, "+++ b/") && !strings.HasPrefix(line, "--- a/") {
+			return "", false
+		}
+	}
+	return "", anyPath && (!section || seen)
 }
 
 func agentHookConfigRunOverride(argv []string, guard *agentHookConfigGuard) (reason, target string) {
