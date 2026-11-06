@@ -157,21 +157,25 @@ func lateKnownStatement(stmt *syntax.Stmt, cwd, home string, depth int, compound
 		if len(cmd.Assigns) != 0 || len(cmd.Args) == 0 {
 			return nil, false
 		}
-		program, fixed := StaticWord(cmd.Args[0], home)
+		args, ok := lateUnwrapCall(cmd.Args, home)
+		if !ok {
+			return nil, false
+		}
+		program, fixed := StaticWord(args[0], home)
 		if !fixed || compound && lateChangesShellContext(program) {
 			return nil, false
 		}
 		if program == "bash" || program == "sh" || program == "zsh" || program == "eval" {
-			if program == "eval" && len(cmd.Args) != 2 || program != "eval" && len(cmd.Args) != 3 {
+			if program == "eval" && len(args) != 2 || program != "eval" && len(args) != 3 {
 				return nil, false
 			}
 			bodyIndex := 2
 			if program == "eval" {
 				bodyIndex = 1
-			} else if option, known := StaticWord(cmd.Args[1], home); !known || option != "-c" && option != "-lc" {
+			} else if option, known := StaticWord(args[1], home); !known || option != "-c" && option != "-lc" {
 				return nil, false
 			}
-			body, bodyOK := lateKnownWord(cmd.Args[bodyIndex], cwd, home)
+			body, bodyOK := lateKnownWord(args[bodyIndex], cwd, home)
 			if !bodyOK {
 				return nil, false
 			}
@@ -182,8 +186,8 @@ func lateKnownStatement(stmt *syntax.Stmt, cwd, home string, depth int, compound
 			calls = append(calls, inner...)
 		} else {
 			display := program == "echo" || program == "printf"
-			words := make([]string, 0, len(cmd.Args)+len(stmt.Redirs))
-			for _, arg := range cmd.Args {
+			words := make([]string, 0, len(args)+len(stmt.Redirs))
+			for _, arg := range args {
 				if display && lateDisplayValueWord(arg) {
 					words = append(words, "")
 					continue
@@ -213,6 +217,110 @@ func lateKnownStatement(stmt *syntax.Stmt, cwd, home string, depth int, compound
 		calls = append(calls, []string{"", value})
 	}
 	return calls, true
+}
+
+// Prefix utilities execute their remaining words as a command. Keep that
+// command's operands together so a quoted shell body is read as a body.
+func lateUnwrapCall(args []*syntax.Word, home string) ([]*syntax.Word, bool) {
+	for wraps := 0; wraps < 8 && len(args) > 0; wraps++ {
+		program, known := StaticWord(args[0], home)
+		if !known {
+			return nil, false
+		}
+		prefix := args[:1]
+		switch program {
+		case "env", "/usr/bin/env", "/bin/env":
+			i, options := 1, true
+			for i < len(args) {
+				word, fixed := StaticWord(args[i], home)
+				if !fixed {
+					return nil, false
+				}
+				if options && word == "--" {
+					options = false
+					i++
+					continue
+				}
+				if options && (word == "-i" || word == "--ignore-environment") {
+					i++
+					continue
+				}
+				if options && (word == "-u" || word == "--unset") {
+					if i+1 >= len(args) {
+						return nil, false
+					}
+					name, fixed := StaticWord(args[i+1], home)
+					if !fixed || name == "HOME" || name == "PWD" {
+						return nil, false
+					}
+					i += 2
+					continue
+				}
+				if options && strings.HasPrefix(word, "--unset=") {
+					if name := strings.TrimPrefix(word, "--unset="); name == "HOME" || name == "PWD" || name == "" {
+						return nil, false
+					}
+					i++
+					continue
+				}
+				if name, _, assigned := strings.Cut(word, "="); assigned && lateEnvName(name) {
+					if name == "HOME" || name == "PWD" {
+						return nil, false
+					}
+					i++
+					continue
+				}
+				if options && strings.HasPrefix(word, "-") {
+					return nil, false
+				}
+				break
+			}
+			args = args[i:]
+			if len(args) == 0 {
+				return prefix, true
+			}
+		case "command", "exec":
+			i := 1
+			for i < len(args) {
+				word, fixed := StaticWord(args[i], home)
+				if !fixed {
+					return nil, false
+				}
+				if word == "--" {
+					i++
+					break
+				}
+				if program == "command" && word == "-p" {
+					i++
+					continue
+				}
+				if strings.HasPrefix(word, "-") {
+					return nil, false
+				}
+				break
+			}
+			args = args[i:]
+			if len(args) == 0 {
+				return prefix, true
+			}
+		default:
+			return args, true
+		}
+	}
+	return nil, false
+}
+
+func lateEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		if r == '_' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || i > 0 && r >= '0' && r <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func lateChangesShellContext(program string) bool {
