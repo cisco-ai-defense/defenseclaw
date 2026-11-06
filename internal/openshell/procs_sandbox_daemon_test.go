@@ -5,6 +5,7 @@ package openshell
 
 import (
 	"context"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -61,7 +62,7 @@ func TestMacSandboxDaemonPortNeedsExactAnsweringExecutable(t *testing.T) {
 		t.Skip("process image lookup requires Linux or macOS")
 	}
 	pid, uid := os.Getpid(), os.Geteuid()
-	r := &doctorRun{Doctor: &Doctor{GOOS: "darwin", DaemonPID: pid, Geteuid: os.Geteuid}}
+	r := &doctorRun{Doctor: &Doctor{GOOS: "darwin", DaemonPID: pid, ResponderPID: pid, Geteuid: os.Geteuid}}
 	holder := daemon.PortHolder{PID: pid, UID: uid}
 	if !r.ownSandboxDaemonProcess(context.Background(), holder) {
 		t.Fatal("answering daemon executable was not recognized")
@@ -77,9 +78,64 @@ func TestMacSandboxDaemonPortNeedsExactAnsweringExecutable(t *testing.T) {
 	}
 	foreignPID, _ := startSandboxImageProbe(t)
 	r.DaemonPID = foreignPID
+	r.ResponderPID = foreignPID
 	holder = daemon.PortHolder{PID: foreignPID, UID: uid}
 	if r.ownSandboxDaemonProcess(context.Background(), holder) {
 		t.Fatal("a different executable with the same account was accepted")
+	}
+}
+
+// GAP-0617: a status responder cannot name another same-account process as
+// the daemon merely because it runs the installed image and holds the port.
+func TestGAP0617PortNeedsVerifiedStatusResponder(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("process image lookup requires Linux or macOS")
+	}
+	pid, uid := os.Getpid(), os.Geteuid()
+	holder := daemon.PortHolder{PID: pid, UID: uid}
+	r := &doctorRun{Doctor: &Doctor{GOOS: runtime.GOOS, DaemonPID: pid, Geteuid: os.Geteuid}}
+	if r.ownSandboxDaemonProcess(context.Background(), holder) {
+		t.Fatal("a claimed PID proved a port without the status responder")
+	}
+	r.ResponderPID = pid + 1
+	if r.ownSandboxDaemonProcess(context.Background(), holder) {
+		t.Fatal("a different status responder proved the port holder")
+	}
+	r.ResponderPID = pid
+	if !r.ownSandboxDaemonProcess(context.Background(), holder) {
+		t.Fatal("the verified status responder was not recognized")
+	}
+}
+
+func TestGAP0617AdvertisedManagedPortStillNeedsItsResponder(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("process image lookup requires Linux or macOS")
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	pid, uid := os.Getpid(), os.Geteuid()
+	port := ln.Addr().(*net.TCPAddr).Port
+	d := &Doctor{
+		GOOS: runtime.GOOS, Managed: true, DaemonPID: pid, Geteuid: os.Geteuid,
+		Ports:  []PortRequirement{{Name: "ingress", Port: port, ServedByDaemon: true}},
+		Listen: net.Listen, PortHolder: func(string, int) (daemon.PortHolder, error) {
+			return daemon.PortHolder{PID: pid, UID: uid}, nil
+		},
+	}
+	run := func() CheckStatus {
+		r := &doctorRun{Doctor: d, report: &DoctorReport{}}
+		r.checkPorts(context.Background())
+		return r.report.Get(CheckIDPortPrefix + "ingress").Status
+	}
+	if got := run(); got != StatusFail {
+		t.Fatalf("unverified advertised port = %s, want fail", got)
+	}
+	d.ResponderPID = pid
+	if got := run(); got != StatusPass {
+		t.Fatalf("verified advertised port = %s, want pass", got)
 	}
 }
 

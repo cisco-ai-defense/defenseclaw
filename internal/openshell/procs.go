@@ -93,7 +93,7 @@ func (r *doctorRun) processes(ctx context.Context) []process {
 // executable identity must agree as well as the PID; a same-account
 // process with a similar name cannot make the port ready.
 func (r *doctorRun) ownSandboxDaemonProcess(ctx context.Context, holder daemon.PortHolder) bool {
-	if r.DaemonPID <= 0 || holder.PID != r.DaemonPID || holder.UID != r.Geteuid() ||
+	if r.DaemonPID <= 0 || r.ResponderPID != r.DaemonPID || holder.PID != r.ResponderPID || holder.UID != r.Geteuid() ||
 		r.DaemonUID != nil && *r.DaemonUID != holder.UID {
 		return false
 	}
