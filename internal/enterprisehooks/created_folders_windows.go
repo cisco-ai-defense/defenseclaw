@@ -54,6 +54,13 @@ const (
 type windowsCreatedFolderRecord struct {
 	SchemaVersion int    `json:"schema_version"`
 	Path          string `json:"path"`
+	// Origin is "upgrade" on a record the lifecycle back-filled on a
+	// computer installed before 1.0.9 (GAP-0704); the hooks never write
+	// one. Binding rule: such a record never gives ownership for a repair,
+	// a re-stamp or a takeover; it only lets a purge remove the folder once
+	// it is empty, which is all RemoveWindowsCreatedFolderIfEmpty does with
+	// any record.
+	Origin string `json:"origin,omitempty"`
 }
 
 // windowsCreatedFolderRoots returns the trusted Program Files and ProgramData

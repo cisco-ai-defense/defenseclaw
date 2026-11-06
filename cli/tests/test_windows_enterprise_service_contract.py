@@ -6156,6 +6156,20 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     assert "enterprisehooks.RemoveWindowsCreatedFolderIfEmpty(filepath.Dir(root))" in registration
     assert 'strings.EqualFold(filepath.Base(parent), "Cisco")' not in registration
 
+    # GAP-0704: the agent folders are back-filled with "origin":"upgrade"
+    # only with all three proofs; a purge names what it left unproven once,
+    # and a Cisco folder shaped like Secure Client is never back-filled.
+    assert "-Origin upgrade" in backfill and backfill.count("-Origin upgrade") == 2
+    agent = _psm1_function(module, "Get-DefenseClawAgentFolderBackfillRefusal")
+    assert "if ($created -lt $stateCreated) {" in agent
+    assert "[IO.Directory]::GetCreationTimeUtc($StateRoot)" in agent
+    assert "$dacl.Count -ne 3" in agent and "$ace.AceFlags -ne $inherit" in agent
+    assert "[bool]$ownership.preimage_existed" in agent and "[bool]$receipt.config_preexisting" in agent
+    assert "$document['origin'] = $Origin" in _psm1_function(module, "Add-DefenseClawStandaloneCreatedFolderRecord")
+    assert "'left in place: not provably created by DefenseClaw'" in lifecycle
+    assert "'(?i)secure ?client|anyconnect'" in refusal
+    assert 'Origin string `json:"origin,omitempty"`' in go
+
     # The by-name removals are gone (they deleted a folder that existed before).
     for retired in (
         "Remove-DefenseClawEmptyClaudeManagedSettingsFolders",

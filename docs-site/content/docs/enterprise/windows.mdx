@@ -970,8 +970,15 @@ stays keeps its record, so the next purge tries again. The JSON result names it 
 (a `created_folders_kept` warning), and so does the lifecycle log.
 Releases before 1.0.9 kept no record. On a computer installed with one of them, the first 1.0.9
 install, upgrade or repair records `C:\Program Files\Cisco` and `C:\ProgramData\Cisco` when they
-still have the permissions Setup gave them and hold only DefenseClaw folders. The other vendor
-folders, such as `C:\Program Files\ClaudeCode\managed-settings.d`, stay until you remove them. A standalone
+still have the permissions Setup gave them and hold only DefenseClaw folders. It records
+`C:\Program Files\ClaudeCode\managed-settings.d`, `C:\ProgramData\Cursor` and
+`C:\ProgramData\OpenAI\Codex` only when all three hold: the folder was created after
+`C:\ProgramData\Cisco\DefenseClaw`, it has exactly the permissions DefenseClaw creates it with, and
+it holds only DefenseClaw's own files. `ClaudeCode` and `OpenAI` follow when their only child is
+recorded. A folder that fails any of these stays after a purge, and the purge names it once as
+"left in place: not provably created by DefenseClaw". Such a record only lets a purge remove an
+empty folder; it never makes DefenseClaw treat the folder as its own. A folder that holds anything
+that looks like Secure Client is never recorded or removed. A standalone
 Setup uninstall removes the administrator-only
 `C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock` and its directory even
 without `PURGE=1`. A plain installed CLI uninstall leaves the lock file and its folder
