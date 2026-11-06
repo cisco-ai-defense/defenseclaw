@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scripts.red_on_108 import candidates, classify_test_result, mapped_python_files, run_mapped_candidate, run_one
+from scripts.red_on_108 import candidates, mapped_python_files, run_mapped_candidate, run_one
 from scripts.red_on_108 import tests_for_gap as select_tests_for_gap
 
 
@@ -100,6 +100,8 @@ class RedOn108Test(unittest.TestCase):
             self.assertEqual(status, "COMPILE_ONLY")
 
     def test_assertion_failure_remains_behavior_red(self):
+        from scripts.red_on_108 import classify_test_result
+
         command = [sys.executable, "-m", "pytest", "-q", "cli/tests/test_sample.py"]
         output = "FAILED cli/tests/test_sample.py::test_sample - AssertionError: expected sample result\n"
         self.assertEqual(classify_test_result(command, 1, output), "BEHAVIOR_RED")
