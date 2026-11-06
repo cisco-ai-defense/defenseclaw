@@ -196,7 +196,7 @@ func (m *TargetMemo) ProtectedReach(target, home string) Grade {
 				matches <- identityMatch{matched: err == nil && os.SameFile(directory.info, info), unknown: ShareUnanswered(err)}
 			}(path)
 		}
-		for _, path := range append(slices.Clone(names.directories), names.trees...) {
+		for _, path := range names.trees {
 			wg.Add(1)
 			go func(path string) {
 				defer wg.Done()
@@ -230,6 +230,11 @@ func (m *TargetMemo) ProtectedReach(target, home string) Grade {
 			return GradePossible
 		}
 		return GradeNone
+	}
+	if ShareUnanswered(entry.err) && directory.err == nil && !unknownParents {
+		// The final entry gave no answer. Its reached ordinary parent
+		// cannot make that unread identity a named protected file.
+		return GradePossible
 	}
 
 	reached := false
