@@ -946,6 +946,7 @@ func settleWindowsEnterpriseHotConfigClosure(ctx context.Context, result *enterp
 // admission issues. A refused config reports
 // them too, as the running deployment's (GAP-0103).
 func appendWindowsEnterpriseStatusAdvisories(ctx context.Context, result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+	appendWindowsOpenCodePortWarnings(result)
 	if layout, err := windowsEnterpriseHotConfigLayout(); err == nil {
 		if raw, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes); err == nil {
 			if installed, err := config.LoadRuntimeV8InspectionCandidateFromBytes(layout.ConfigPath, raw); err == nil {

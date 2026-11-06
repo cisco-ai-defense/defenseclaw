@@ -25,17 +25,21 @@ const (
 )
 
 type managedWindowsOpenCodePortFixture struct {
-	profiles     []enterprisehooks.TargetCredentials
-	homeSID      map[string]string
-	record       map[string]int
-	files        map[string]int
-	claims       map[int]string
-	readFailure  map[string]bool
-	writeFailure map[string]bool
-	claimFailure map[string]bool
-	activeSID    string
-	reads        int
-	writes       int
+	profiles       []enterprisehooks.TargetCredentials
+	homeSID        map[string]string
+	record         map[string]int
+	recordExists   bool
+	contested      []enterprisehooks.WindowsOpenCodeContestedPort
+	unknownEntries []enterprisehooks.WindowsOpenCodePortUnknown
+	cleared        []enterprisehooks.WindowsOpenCodeContestCleared
+	files          map[string]int
+	claims         map[int]string
+	readFailure    map[string]bool
+	writeFailure   map[string]bool
+	claimFailure   map[string]bool
+	activeSID      string
+	reads          int
+	writes         int
 }
 
 func newManagedWindowsOpenCodePortFixture(t *testing.T) *managedWindowsOpenCodePortFixture {
@@ -64,18 +68,20 @@ func newManagedWindowsOpenCodePortFixture(t *testing.T) *managedWindowsOpenCodeP
 		return enterprisepolicy.Options{}, []string{"opencode"}, true, nil
 	}
 	enterpriseHookWindowsEligibleProfiles = func(context.Context) ([]enterprisehooks.TargetCredentials, error) { return f.profiles, nil }
-	enterpriseHookWindowsOpenCodePortsLoad = func(string) (map[string]int, error) {
+	enterpriseHookWindowsOpenCodePortsLoad = func(string) (enterprisehooks.WindowsOpenCodeServicePortsState, error) {
 		copy := map[string]int{}
 		for key, port := range f.record {
 			copy[key] = port
 		}
-		return copy, nil
+		return enterprisehooks.WindowsOpenCodeServicePortsState{Exists: f.recordExists || len(copy) > 0, Ports: copy, Contested: append([]enterprisehooks.WindowsOpenCodeContestedPort(nil), f.contested...), Cleared: append([]enterprisehooks.WindowsOpenCodeContestCleared(nil), f.cleared...)}, nil
 	}
-	enterpriseHookWindowsOpenCodePortsWrite = func(_ string, ports map[string]int) error {
+	enterpriseHookWindowsOpenCodePortsWrite = func(_ string, state enterprisehooks.WindowsOpenCodeServicePortsState) error {
 		f.record = map[string]int{}
-		for key, port := range ports {
+		for key, port := range state.Ports {
 			f.record[key] = port
 		}
+		f.recordExists = true
+		f.contested, f.unknownEntries, f.cleared = state.Contested, state.Unknown, state.Cleared
 		f.writes++
 		return nil
 	}
@@ -315,6 +321,9 @@ func TestManagedWindowsGuardianTimedOutReadDoesNotExhaustHealthyProfiles(t *test
 		return enterprisepolicy.OpenCodeServicePortResult{Port: port}, nil
 	}
 	for pass := 0; pass < 5; pass++ {
+		// Model a documented administrator rebuild before each pass. The
+		// import window reopens, while the timed-out read remains pending.
+		f.recordExists, f.record = false, map[string]int{}
 		sid := fmt.Sprintf("S-1-5-21-700-800-900-%d", 1002+pass)
 		f.add(t, sid)
 		ports, err := f.run(t)
@@ -324,6 +333,24 @@ func TestManagedWindowsGuardianTimedOutReadDoesNotExhaustHealthyProfiles(t *test
 	}
 	close(release)
 	<-finished
+}
+
+func TestManagedWindowsGuardianContestMarkSurvivesAnUnwrittenClaimant(t *testing.T) {
+	f := newManagedWindowsOpenCodePortFixture(t)
+	firstHome, secondHome := f.add(t, openCodeSIDFirst), f.add(t, openCodeSIDSecond)
+	f.files[firstHome], f.files[secondHome] = 25002, 25002
+	f.writeFailure[firstHome] = true
+	ports, err := f.run(t)
+	if err == nil || ports[openCodeSIDFirst] != 0 || ports[openCodeSIDSecond] == 25002 || len(f.contested) != 1 || f.contested[0].Port != 25002 {
+		t.Fatalf("import pass: ports=%v marks=%v err=%v", ports, f.contested, err)
+	}
+	delete(f.writeFailure, firstHome)
+	for pass := 0; pass < 3; pass++ {
+		ports, err = f.run(t)
+		if err != nil || ports[openCodeSIDFirst] == 25002 || ports[openCodeSIDSecond] == 25002 || f.record[openCodeSIDFirst] == 25002 || len(f.contested) != 1 || f.reads != 2 {
+			t.Fatalf("pass %d: contested port reused: ports=%v record=%v marks=%v reads=%d err=%v", pass, ports, f.record, f.contested, f.reads, err)
+		}
+	}
 }
 
 func TestManagedWindowsGuardianResolvesOpenCodePortConflicts(t *testing.T) {
@@ -341,7 +368,9 @@ func TestManagedWindowsGuardianResolvesOpenCodePortConflicts(t *testing.T) {
 		t.Fatalf("manual file edit changed binding: ports=%v files=%v err=%v", ports, f.files, err)
 	}
 	beforeWrites := f.writes
-	enterpriseHookWindowsOpenCodePortsLoad = func(string) (map[string]int, error) { return nil, fmt.Errorf("record unreadable") }
+	enterpriseHookWindowsOpenCodePortsLoad = func(string) (enterprisehooks.WindowsOpenCodeServicePortsState, error) {
+		return enterprisehooks.WindowsOpenCodeServicePortsState{}, fmt.Errorf("record unreadable")
+	}
 	if got, err := f.run(t); err == nil || len(got) != 0 || f.writes != beforeWrites {
 		t.Fatalf("unreadable record made assignments: ports=%v writes=%d err=%v", got, f.writes, err)
 	}

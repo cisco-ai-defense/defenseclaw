@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -26,8 +27,38 @@ const (
 )
 
 type windowsOpenCodeServicePortsFile struct {
-	Version int                          `json:"version"`
-	Ports   []windowsOpenCodeServicePort `json:"ports"`
+	Version   int                             `json:"version"`
+	Ports     []windowsOpenCodeServicePort    `json:"ports"`
+	Unknown   []WindowsOpenCodePortUnknown    `json:"unknown,omitempty"`
+	Contested []WindowsOpenCodeContestedPort  `json:"contested,omitempty"`
+	Cleared   []WindowsOpenCodeContestCleared `json:"contested_cleared,omitempty"`
+}
+
+type WindowsOpenCodePortUnknown struct {
+	SID    string `json:"sid"`
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
+	Fix    string `json:"fix"`
+}
+
+type WindowsOpenCodeContestedPort struct {
+	Port int      `json:"port"`
+	SIDs []string `json:"sids"`
+}
+
+type WindowsOpenCodeContestCleared struct {
+	Port int      `json:"port"`
+	SIDs []string `json:"sids"`
+	At   string   `json:"at"`
+	By   string   `json:"by,omitempty"`
+}
+
+type WindowsOpenCodeServicePortsState struct {
+	Exists    bool
+	Ports     map[string]int
+	Unknown   []WindowsOpenCodePortUnknown
+	Contested []WindowsOpenCodeContestedPort
+	Cleared   []WindowsOpenCodeContestCleared
 }
 
 type windowsOpenCodeServicePort struct {
@@ -42,56 +73,72 @@ func WindowsOpenCodeServicePortsPath(manifestPath string) string {
 // LoadWindowsOpenCodeServicePorts reads the guardian's SYSTEM-only record.
 // A missing record is empty; an untrusted or malformed record is an error.
 func LoadWindowsOpenCodeServicePorts(path string) (map[string]int, error) {
-	ports := map[string]int{}
+	state, err := LoadWindowsOpenCodeServicePortsFull(path)
+	return state.Ports, err
+}
+
+// LoadWindowsOpenCodeServicePortsFull reads bindings and the last pass's
+// warnings. Exists selects the one import pass after install or admin rebuild.
+func LoadWindowsOpenCodeServicePortsFull(path string) (WindowsOpenCodeServicePortsState, error) {
+	state := WindowsOpenCodeServicePortsState{Ports: map[string]int{}}
 	if err := windowsOpenCodeServicePortsParent(path); err != nil {
-		return nil, err
+		return state, err
 	}
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
-		return ports, nil
+		return state, nil
 	} else if err != nil {
-		return nil, err
+		return state, err
 	}
+	state.Exists = true
 	if err := validateWindowsOpenCodeServicePortsFile(path); err != nil {
-		return nil, err
+		return state, err
 	}
 	data, err := readWindowsBoundedPlainFile(path, windowsOpenCodeServicePortsMaxBytes)
 	if err != nil {
-		return nil, err
+		return state, err
 	}
 	var record windowsOpenCodeServicePortsFile
 	if err := json.Unmarshal(data, &record); err != nil {
-		return nil, fmt.Errorf("enterprise hooks: parse OpenCode service ports: %w", err)
+		return state, fmt.Errorf("enterprise hooks: parse OpenCode service ports: %w", err)
 	}
 	if record.Version != 1 {
-		return nil, fmt.Errorf("enterprise hooks: OpenCode service ports version %d is not supported", record.Version)
+		return state, fmt.Errorf("enterprise hooks: OpenCode service ports version %d is not supported", record.Version)
 	}
 	holders := map[int]string{}
 	for _, entry := range record.Ports {
 		sid, err := windows.StringToSid(entry.SID)
 		if err != nil || !WindowsInteractiveUserSID(entry.SID) || sid.String() != entry.SID || entry.Port <= 0 || entry.Port > 65535 {
-			return nil, fmt.Errorf("enterprise hooks: OpenCode service ports record has an invalid account or port")
+			return state, fmt.Errorf("enterprise hooks: OpenCode service ports record has an invalid account or port")
 		}
-		if _, exists := ports[entry.SID]; exists {
-			return nil, fmt.Errorf("enterprise hooks: OpenCode service ports record repeats an account")
+		if _, exists := state.Ports[entry.SID]; exists {
+			return state, fmt.Errorf("enterprise hooks: OpenCode service ports record repeats an account")
 		}
 		if other := holders[entry.Port]; other != "" {
-			return nil, fmt.Errorf("enterprise hooks: OpenCode service ports record repeats a port for %s and %s", other, entry.SID)
+			return state, fmt.Errorf("enterprise hooks: OpenCode service ports record repeats a port for %s and %s", other, entry.SID)
 		}
 		holders[entry.Port] = entry.SID
-		ports[entry.SID] = entry.Port
+		state.Ports[entry.SID] = entry.Port
 	}
-	return ports, nil
+	state.Unknown, state.Contested, state.Cleared = record.Unknown, record.Contested, record.Cleared
+	if err := validateWindowsOpenCodeContests(state.Contested, holders); err != nil {
+		return state, err
+	}
+	return state, nil
 }
 
 // WriteWindowsOpenCodeServicePorts publishes only complete, validated
 // assignments. The staging file gets the SYSTEM-only ACL before replacement.
 func WriteWindowsOpenCodeServicePorts(path string, ports map[string]int) error {
+	return WriteWindowsOpenCodeServicePortsFull(path, WindowsOpenCodeServicePortsState{Ports: ports})
+}
+
+func WriteWindowsOpenCodeServicePortsFull(path string, state WindowsOpenCodeServicePortsState) error {
 	if err := windowsOpenCodeServicePortsParent(path); err != nil {
 		return err
 	}
-	record := windowsOpenCodeServicePortsFile{Version: 1, Ports: make([]windowsOpenCodeServicePort, 0, len(ports))}
+	record := windowsOpenCodeServicePortsFile{Version: 1, Ports: make([]windowsOpenCodeServicePort, 0, len(state.Ports))}
 	holders := map[int]string{}
-	for sid, port := range ports {
+	for sid, port := range state.Ports {
 		parsed, err := windows.StringToSid(sid)
 		if err != nil || !WindowsInteractiveUserSID(sid) || parsed.String() != sid || port <= 0 || port > 65535 {
 			return fmt.Errorf("enterprise hooks: OpenCode service ports assignment has an invalid account or port")
@@ -103,6 +150,14 @@ func WriteWindowsOpenCodeServicePorts(path string, ports map[string]int) error {
 		record.Ports = append(record.Ports, windowsOpenCodeServicePort{SID: sid, Port: port})
 	}
 	sort.Slice(record.Ports, func(i, j int) bool { return record.Ports[i].SID < record.Ports[j].SID })
+	if err := validateWindowsOpenCodeContests(state.Contested, holders); err != nil {
+		return err
+	}
+	record.Unknown = append(record.Unknown, state.Unknown...)
+	sort.Slice(record.Unknown, func(i, j int) bool { return record.Unknown[i].SID < record.Unknown[j].SID })
+	record.Contested = append(record.Contested, state.Contested...)
+	sort.Slice(record.Contested, func(i, j int) bool { return record.Contested[i].Port < record.Contested[j].Port })
+	record.Cleared = append(record.Cleared, state.Cleared...)
 	data, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
 		return err
@@ -166,6 +221,52 @@ func WriteWindowsOpenCodeServicePorts(path string, ports map[string]int) error {
 		return err
 	}
 	return validateWindowsOpenCodeServicePortsFile(path)
+}
+
+func validateWindowsOpenCodeContests(contested []WindowsOpenCodeContestedPort, holders map[int]string) error {
+	seen := map[int]bool{}
+	for _, mark := range contested {
+		if mark.Port <= 0 || mark.Port > 65535 || seen[mark.Port] || holders[mark.Port] != "" || len(mark.SIDs) < 2 {
+			return fmt.Errorf("enterprise hooks: OpenCode service ports record has an invalid contested port")
+		}
+		seen[mark.Port] = true
+		claimants := map[string]bool{}
+		for _, raw := range mark.SIDs {
+			sid, err := windows.StringToSid(raw)
+			if err != nil || !WindowsInteractiveUserSID(raw) || sid.String() != raw || claimants[raw] {
+				return fmt.Errorf("enterprise hooks: OpenCode service ports record has an invalid contested account")
+			}
+			claimants[raw] = true
+		}
+	}
+	return nil
+}
+
+// ClearWindowsOpenCodeContestedPort clears only the named mark and keeps all
+// bindings. The operation is recorded in the SYSTEM-only record.
+func ClearWindowsOpenCodeContestedPort(path string, port int, by string, now time.Time) ([]string, error) {
+	state, err := LoadWindowsOpenCodeServicePortsFull(path)
+	if err != nil {
+		return nil, err
+	}
+	if !state.Exists {
+		return nil, fmt.Errorf("no OpenCode service ports record at %s", path)
+	}
+	var claimants []string
+	kept := state.Contested[:0]
+	for _, mark := range state.Contested {
+		if mark.Port == port {
+			claimants = mark.SIDs
+		} else {
+			kept = append(kept, mark)
+		}
+	}
+	if claimants == nil {
+		return nil, fmt.Errorf("port %d is not marked contested in %s", port, path)
+	}
+	state.Contested = kept
+	state.Cleared = append(state.Cleared, WindowsOpenCodeContestCleared{Port: port, SIDs: claimants, At: now.UTC().Format(time.RFC3339), By: by})
+	return claimants, WriteWindowsOpenCodeServicePortsFull(path, state)
 }
 
 func windowsOpenCodeServicePortsParent(path string) error {
