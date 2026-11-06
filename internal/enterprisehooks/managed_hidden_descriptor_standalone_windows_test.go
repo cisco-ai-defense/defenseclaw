@@ -35,8 +35,14 @@ const (
 
 // hideF1Descriptor stamps sddl, checks this token can no longer open the
 // object with READ_CONTROL without privileges, and gives it back at cleanup.
+//
+// It also pins the managed profile to standalone: in production the policy
+// writer's standalone decision is managed.StandaloneRefusesContentDrift, and
+// only standalone (or strict) assessments re-read a hidden descriptor with
+// the repair privileges (g582 review 5 M1).
 func hideF1Descriptor(t *testing.T, path, sddl string) {
 	t.Helper()
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
 	disableBackupPrivilegesForTest(t)
 	stampGAP633SDDL(t, path, sddl)
 	t.Cleanup(func() { stampGAP633SDDL(t, path, f1RestoreSDDL) })
