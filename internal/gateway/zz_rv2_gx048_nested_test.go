@@ -4,6 +4,7 @@ package gateway
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -36,6 +37,9 @@ func TestRV2GX048Nested(t *testing.T) {
 				status = "MISS"
 			}
 			t.Logf("RV2N %s %s | %s | got=%s want=%s", status, profile, r.id, action, want)
+			if (strings.HasPrefix(r.id, "N03") || strings.HasPrefix(r.id, "N04")) && status != "ok" {
+				t.Errorf("%s %s: got %s, want %s", profile, r.id, action, want)
+			}
 		}
 	}
 	_ = filepath.Join

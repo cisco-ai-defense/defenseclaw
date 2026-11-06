@@ -257,6 +257,9 @@ func TestRV2GX048Variants(t *testing.T) {
 		if os.Getenv("GX048_ONLY_D") == "1" && !strings.HasPrefix(r.id, "D") {
 			continue
 		}
+		if os.Getenv("GX048_ONLY_F") == "1" && !strings.HasPrefix(r.id, "F") {
+			continue
+		}
 		for _, profile := range []string{"default", "strict"} {
 			got := func() (out string) {
 				defer func() {
@@ -301,7 +304,7 @@ func TestRV2GX048Variants(t *testing.T) {
 			if strings.HasPrefix(r.id, "E05") && strings.Contains(got, "PANIC") {
 				t.Errorf("%s %s: handler panicked", profile, r.id)
 			}
-			if (strings.HasPrefix(r.id, "D") || strings.HasPrefix(r.id, "X18")) && status != "ok" && status != "INFO" {
+			if (strings.HasPrefix(r.id, "D") || strings.HasPrefix(r.id, "F") || strings.HasPrefix(r.id, "X18")) && status != "ok" && status != "INFO" {
 				t.Errorf("%s %s: got %s, want %s", profile, r.id, action, want)
 			}
 		}
