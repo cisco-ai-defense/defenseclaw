@@ -78,6 +78,8 @@ readonly DC_SANDBOX_CONNECT_TIMEOUT={{.SandboxConnectTimeout}}
 readonly DC_SANDBOX_MAX_TIME={{.SandboxMaxTime}}
 readonly DC_SANDBOX_RETRY_MAX_TIME={{.SandboxRetryMaxTime}}
 readonly DC_SANDBOX_SESSION_END_MAX_TIME={{.SandboxSessionEndMaxTime}}
+readonly DC_SANDBOX_HOOK_STARTED=$SECONDS
+DC_SANDBOX_RECEIPT_STATUS=transport
 
 # DC_SANDBOX_UNREACHABLE is why a sandbox hook blocked when DefenseClaw did not
 # answer, worded for the agent and for the user who reads its screen: what is
@@ -297,6 +299,8 @@ defenseclaw_sandbox_post() {
 # the hook. The receipt ID is an opaque UUID, never shell syntax or a path.
 defenseclaw_sandbox_confirm_receipt() {
   local path="$1" result="$2" receipt="" body="" reply="" code="" received=""
+  local remaining first retry status=0
+  DC_SANDBOX_RECEIPT_STATUS=transport
   # Use the same baked sandbox binding token as the first request. The post
   # helper moves this header into curl's descriptor-backed config, keeping
   # the bearer off every external process command line.
@@ -306,14 +310,21 @@ defenseclaw_sandbox_confirm_receipt() {
   receipt="$(printf '%s' "$result" | _dc_jq -r '.delivery_receipt // empty' 2>/dev/null)" || return 1
   [ -n "$receipt" ] || return 0
   [[ "$receipt" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || return 1
+  # Use the time left in the agent's 30-second hook envelope, keeping one
+  # second for the answer. Both transport attempts share this allowance.
+  remaining=$((29 - (SECONDS - DC_SANDBOX_HOOK_STARTED)))
+  [ "$remaining" -ge 2 ] || return 1
+  first=$((remaining / 2))
+  retry=$((remaining - first))
   body="$(printf '{"delivery_receipt":"%s","result":"ack"}' "$receipt")"
-  reply="$(defenseclaw_sandbox_post "$path" "$body" 3 3 \
+  reply="$(defenseclaw_sandbox_post "$path" "$body" "$first" "$retry" \
     -H "Content-Type: application/json" \
     -H "X-DefenseClaw-Client: sandbox-hook/1.0" \
     -H "X-DefenseClaw-Hook-Receipt: 1" \
-    -H "Authorization: Bearer ${DEFENSECLAW_SANDBOX_TOKEN}")" || return 1
+    -H "Authorization: Bearer ${DEFENSECLAW_SANDBOX_TOKEN}")" || status=$?
   code="${reply##*$'\n'}"
-  [ "$code" = 200 ] || return 1
+  case "$code" in [0-9][0-9][0-9]) DC_SANDBOX_RECEIPT_STATUS="$code" ;; esac
+  [ "$status" -eq 0 ] && [ "$code" = 200 ] || return 1
   received="$(printf '%s' "${reply%$'\n'*}" | _dc_jq -r '.received // false' 2>/dev/null)" || return 1
   [ "$received" = true ]
 }

@@ -34,6 +34,28 @@ type windowsEnterpriseIgnoredDeploymentRecord struct {
 	reason  string
 }
 
+// windowsEnterpriseConfigRecoveryGuidance names the recovery supported by a
+// deployment with a confirmed policy bundle. Its config cannot be supplied
+// through CONFIG=, even when the installed bytes were restored exactly.
+func windowsEnterpriseConfigRecoveryGuidance(result *enterprisestatus.Result, bundleMode bool) {
+	if !bundleMode || result == nil || result.Profile != "standalone" || result.Platform != "windows" {
+		return
+	}
+	const ordinary = "; run ensure with the intended config to put the managed config back"
+	const bundle = "; run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1 from an elevated prompt to restore the confirmed policy bundle"
+	for i := range result.Warnings {
+		if result.Warnings[i].Code == "config_edited_outside_lifecycle" {
+			result.Warnings[i].Message = strings.Replace(result.Warnings[i].Message, ordinary, bundle, 1)
+		}
+	}
+	for i := range result.Errors {
+		if result.Errors[i].Code == "lifecycle_error" &&
+			strings.HasPrefix(result.Errors[i].Message, "config generation is unproven or records a hand edit;") {
+			result.Errors[i].Message = "config generation is unproven or records a hand edit" + bundle
+		}
+	}
+}
+
 // An owner mismatch on the standalone record left under StateRoot can make a
 // later ensure refuse its probe. A forced metadata-free purge may leave that
 // record behind, so the owner has to be restored before the last resort.

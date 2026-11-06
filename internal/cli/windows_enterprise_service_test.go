@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1261,6 +1262,7 @@ func TestPrepareWindowsEnterprisePowerShellTempUsesCurrentUserKnownFolderWithout
 	if windows.GetCurrentProcessToken().IsElevated() {
 		t.Skip("non-elevated branch requires a limited process token")
 	}
+	useTokenUserTempDirectory(t)
 	localAppData, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
 	if err != nil {
 		t.Fatalf("resolve token-bound LocalAppData: %v", err)
@@ -1717,6 +1719,7 @@ func TestPrepareWindowsEnterprisePowerShellTempElevatedDescriptorRepairAndCleanu
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		t.Skip("protected ProgramData temp creation requires an elevated process token")
 	}
+	useTestTokenForStaging(t)
 	path, cleanup, err := prepareWindowsEnterprisePowerShellTemp()
 	if err != nil {
 		t.Fatalf("prepareWindowsEnterprisePowerShellTemp: %v", err)
@@ -2016,6 +2019,24 @@ func TestWindowsEnterpriseLeaveInstallRootMovesTheWorkingDirectoryOut(t *testing
 	}
 }
 
+// windowsTestProcessState says whether a child process still runs, or the
+// status it exited with.
+func windowsTestProcessState(pid int) string {
+	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return fmt.Sprintf("process %d cannot be opened: %v", pid, err)
+	}
+	defer windows.CloseHandle(handle)
+	var code uint32
+	if err := windows.GetExitCodeProcess(handle, &code); err != nil {
+		return fmt.Sprintf("process %d exit code unreadable: %v", pid, err)
+	}
+	if code == 259 { // STILL_ACTIVE
+		return fmt.Sprintf("process %d still runs", pid)
+	}
+	return fmt.Sprintf("process %d exited with %#x", pid, code)
+}
+
 // GAP-1794: a self-uninstall typed into cmd.exe whose folder is inside
 // InstallRoot is refused before anything changes, and says how to proceed.
 func TestWindowsEnterpriseSelfUninstallRefusesAPromptInsideInstallRoot(t *testing.T) {
@@ -2027,8 +2048,20 @@ func TestWindowsEnterpriseSelfUninstallRefusesAPromptInsideInstallRoot(t *testin
 	if windowsDirectoryOpenWithoutDeleteSharing(bin) {
 		t.Fatal("a folder nobody uses was reported in use")
 	}
+	// g079 review F6: the prompt inherits what the test binary carries. A
+	// below-normal class passes to cmd.exe, and an above-normal one starves
+	// its start on a small host; the package's tests run at normal, so a
+	// class another test left is named here, not as a 10 s timeout. The
+	// prompt is the system cmd.exe, not whichever one PATH finds first.
+	if class, want := testProcessPriority(), fmt.Sprintf("%#x", windows.NORMAL_PRIORITY_CLASS); class != want {
+		t.Fatalf("the test binary runs at priority class %s, not normal (%s)", class, want)
+	}
+	system, err := windows.GetSystemDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
 	// An idle interactive prompt in bin, reading commands from a pipe.
-	prompt := exec.Command("cmd.exe", "/d", "/q", "/k")
+	prompt := exec.Command(filepath.Join(system, "cmd.exe"), "/d", "/q", "/k")
 	prompt.Dir = bin
 	input, err := prompt.StdinPipe()
 	if err != nil {
@@ -2045,7 +2078,7 @@ func TestWindowsEnterpriseSelfUninstallRefusesAPromptInsideInstallRoot(t *testin
 	deadline := time.Now().Add(10 * time.Second)
 	for !windowsDirectoryOpenWithoutDeleteSharing(bin) {
 		if time.Now().After(deadline) {
-			t.Fatal("a prompt's working folder was not reported in use")
+			t.Fatalf("a prompt's working folder was not reported in use (%s)", windowsTestProcessState(prompt.Process.Pid))
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

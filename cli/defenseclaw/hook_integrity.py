@@ -692,12 +692,28 @@ def _registers_defenseclaw_hooks(cfg: Any, connector: str, path: Path, *, strict
     raw = path.read_bytes()
     if path.suffix.lower() not in _STRUCTURED_SUFFIXES:
         return "defenseclaw" in raw.decode("utf-8", errors="replace").lower()
+    native = None
+    if connector == "claudecode" and strict:
+        from defenseclaw.fail_mode import _claude_per_user_native_registration
+
+        native = _claude_per_user_native_registration(cfg)
     try:
         document = _load_agent_document(path, raw)
     except ValueError:
         # A file the parser cannot read is reported by the agent itself;
         # never call it unregistered on that ground alone.
-        return "defenseclaw" in raw.decode("utf-8", errors="replace").lower()
+        return native is None and "defenseclaw" in raw.decode("utf-8", errors="replace").lower()
+    if native is not None:
+        # The native Linux registration has no hooks/ script path. Use the
+        # verifier shared with Doctor and fail-mode, which checks the exact
+        # executable, argv, required events and synchronous companions.
+        from defenseclaw.fail_mode import _claude_native_registration_problem, claude_missing_registration
+
+        return (
+            _claude_native_registration_problem(raw.decode("utf-8", errors="replace"), native, str(cfg.data_dir))
+            is None
+            and claude_missing_registration(cfg, document) is None
+        )
     section = _hook_section(document, path)
     if section is None:
         return False
@@ -865,14 +881,29 @@ def _unguarded_tool_events(cfg: Any, connector: str, document: Any, path: Path) 
     if section is None:
         return False, []
     strict = _tool_inspection_strict(cfg)
+    native = None
+    if connector == "claudecode" and strict:
+        # The native launcher sits outside hooks/. Share its exact invocation
+        # with the registration check before inspecting the tool event fields.
+        from defenseclaw.fail_mode import _claude_native_primary_handler, _claude_per_user_native_registration
+
+        native = _claude_per_user_native_registration(cfg)
 
     def owns(handler: Any) -> bool:
+        if native is not None:
+            return isinstance(handler, dict) and _claude_native_primary_handler(handler, native)
         return any(
             _defenseclaw_hook_command(cfg, connector, command, strict=strict)
             for command in hook_handler_command_lines(handler, connector)
         )
 
-    if not any(
+    if native is not None:
+        from defenseclaw.hook_guard_matrix import _entries
+
+        spec = TOOL_GUARD_HOOKS[connector]
+        if not any(owns(entry.handler) for event in spec.events for entry in _entries(spec, document, event)):
+            return False, []
+    elif not any(
         _defenseclaw_hook_command(cfg, connector, command, strict=strict)
         for command in _hook_command_lines(section, connector)
     ):

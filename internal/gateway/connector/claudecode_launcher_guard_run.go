@@ -32,6 +32,11 @@ func ClaudeCodeGatewayPreToolGuard(goos string, args []string, stdin *os.File, s
 	if launcher, hookArgs, ok := ClaudeCodeLauncherGuardArgv(args); ok {
 		return RunClaudeCodeLauncherGuard(launcher, hookArgs, stdin, stdout, stderr), true
 	}
+	if goos == "windows" {
+		if dataDir, launcher, event, ok := hookguard.CoworkArgv(args); ok {
+			return hookguard.RunCowork(dataDir, launcher, event, stdin, stdout, stderr), true
+		}
+	}
 	if goos == "windows" && len(args) == 0 && StdinIsPiped(stdin) && IsCursorHookEvent(stdin) {
 		return 0, true
 	}

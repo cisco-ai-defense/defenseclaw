@@ -46,7 +46,6 @@ from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.guardrail import (
     _backup,
     _derive_master_key,
-    _register_plugin_in_config,
     _remove_from_plugins_allow,
     _unregister_plugin_from_config,
     detect_api_key_env,
@@ -437,7 +436,8 @@ class TestRestoreOpenclawConfig(unittest.TestCase):
 
             # Plugin removed from all plugin sections
             self.assertNotIn("defenseclaw", cfg["plugins"]["allow"])
-            self.assertFalse(cfg["plugins"]["entries"]["defenseclaw"]["enabled"])
+            # GAP-0598: an entry that only held "enabled" is dropped, not left as enabled=false.
+            self.assertNotIn("defenseclaw", cfg["plugins"]["entries"])
             # Legacy provider entries removed
             self.assertNotIn("litellm", cfg["models"]["providers"])
             self.assertNotIn("defenseclaw", cfg["models"]["providers"])
@@ -547,54 +547,8 @@ class TestRemoveFromPluginsAllow(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# _register_plugin_in_config / _unregister_plugin_from_config
+# _unregister_plugin_from_config
 # ---------------------------------------------------------------------------
-
-
-class TestRegisterPluginInConfig(unittest.TestCase):
-    def test_registers_all_entries(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            oc_config = os.path.join(tmpdir, "openclaw.json")
-            with open(oc_config, "w") as f:
-                json.dump({"plugins": {}}, f)
-
-            source = os.path.join(tmpdir, "source")
-            os.makedirs(source)
-            with open(os.path.join(source, "package.json"), "w") as f:
-                json.dump({"version": "0.2.0"}, f)
-
-            _register_plugin_in_config(oc_config, source)
-
-            with open(oc_config) as f:
-                cfg = json.load(f)
-            plugins = cfg["plugins"]
-            self.assertTrue(plugins["entries"]["defenseclaw"]["enabled"])
-            install_path = os.path.join(tmpdir, "extensions", "defenseclaw")
-            self.assertIn(install_path, plugins["load"]["paths"])
-            self.assertEqual(plugins["installs"]["defenseclaw"]["version"], "0.2.0")
-            self.assertEqual(plugins["installs"]["defenseclaw"]["installPath"], install_path)
-
-    def test_idempotent(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            oc_config = os.path.join(tmpdir, "openclaw.json")
-            with open(oc_config, "w") as f:
-                json.dump({"plugins": {}}, f)
-
-            source = os.path.join(tmpdir, "source")
-            os.makedirs(source)
-            with open(os.path.join(source, "package.json"), "w") as f:
-                json.dump({"version": "1.0.0"}, f)
-
-            _register_plugin_in_config(oc_config, source)
-            _register_plugin_in_config(oc_config, source)
-
-            with open(oc_config) as f:
-                cfg = json.load(f)
-            install_path = os.path.join(tmpdir, "extensions", "defenseclaw")
-            self.assertEqual(cfg["plugins"]["load"]["paths"].count(install_path), 1)
-
-    def test_no_op_on_missing_file(self):
-        _register_plugin_in_config("/nonexistent/openclaw.json", "/tmp/source")
 
 
 class TestUnregisterPluginFromConfig(unittest.TestCase):

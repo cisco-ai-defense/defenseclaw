@@ -153,7 +153,6 @@ func TestWindowsPendingUnprotectedRecordIsAWarningNotAVerifyFailure(t *testing.T
 // (the lifecycle's hook, guardian target or ACL errors, a record agent that
 // fails verify) fails verify with the same errors and exit code beside it.
 func TestWindowsPendingRecordKeepsEveryOtherVerifyFailure(t *testing.T) {
-	isolateWindowsEnterpriseHostReaders(t)
 	records := []struct {
 		name   string
 		agents []enterprisehooks.UnprotectedAgent

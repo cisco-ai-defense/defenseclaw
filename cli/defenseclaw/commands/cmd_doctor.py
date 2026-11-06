@@ -55,6 +55,7 @@ import urllib.request
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from dataclasses import replace as _dc_replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -116,6 +117,7 @@ from defenseclaw.doctor_gateway import (
     pid_file_fingerprint_from_fd,
     read_pid_record,
     trusted_lsof_path,
+    windows_process_user_sid,
 )
 from defenseclaw.doctor_hooks import (
     CODEX_PROBE_TIMEOUT_STATE,
@@ -1824,11 +1826,79 @@ def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
     )
 
 
+def _process_uid(pid: int) -> int | None:
+    """Return the real-user owner of *pid* from the kernel, or None."""
+
+    if pid <= 0:
+        return None
+    if sys.platform.startswith("linux"):
+        try:
+            return os.stat(f"/proc/{pid}").st_uid
+        except OSError:
+            return None
+    if sys.platform != "darwin":
+        return None
+    try:
+        completed = subprocess.run(
+            ["/bin/ps", "-o", "uid=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = completed.stdout.strip()
+    return int(value) if completed.returncode == 0 and value.isdecimal() else None
+
+
+def _check_gateway_account(cfg, r: _DoctorResult) -> None:
+    """Warn when this per-user home's live gateway runs as root.
+
+    A per-user gateway runs as its account. DefenseClawMac up to 1.0.8 could
+    run it as root ("Run gateway as administrator"), and ``sudo
+    defenseclaw-gateway start`` does the same; both leave root-owned files in
+    the home. A managed install is skipped: its macOS gateway is root by design.
+    """
+
+    if os.name == "nt" or _doctor_managed(cfg) or os.geteuid() == 0:
+        return
+    data_dir = _configured_gateway_data_dir(cfg)
+    if not data_dir:
+        return
+    record = read_pid_record(os.path.join(data_dir, "gateway.pid"))
+    if record.status != "ok" or not pid_alive(record.pid):
+        return
+    if _process_uid(record.pid) != 0:
+        return
+    remediation = (
+        "on macOS open DefenseClawMac and choose Start Gateway: it stops the root gateway with "
+        "administrator approval, returns its files to you and starts the gateway as you. "
+        "Otherwise: sudo defenseclaw-gateway stop && sudo chown -R "
+        + shlex.quote(getpass.getuser())
+        + " "
+        + shlex.quote(data_dir)
+        + " && defenseclaw-gateway start"
+    )
+    _emit(
+        "warn",
+        "Gateway account",
+        f"the gateway for this per-user home (pid {record.pid}) runs as root; a per-user gateway "
+        "must run as its account (root-run gateways leave root-owned files in the home and the CLI "
+        "cannot verify them)",
+        r=r,
+        check_id="doctor.gateway.account",
+        reason_code="per-user-gateway-runs-as-root",
+        remediation=remediation,
+    )
+
+
 # Vendor machine-policy folders agents read administrator policy from. An
 # agent treats the folder's presence as policy: Codex pauses every launch with
 # "Organization settings could not be loaded" when /etc/codex exists but it
-# cannot read it. A gateway run as root (the Mac app's administrator mode, or
-# sudo) used to create /etc/codex with mode 0700 for its /etc/codex/skills
+# cannot read it. A gateway run as root (the Mac app's administrator mode up to
+# 1.0.8, or sudo) used to create /etc/codex with mode 0700 for its /etc/codex/skills
 # watch; the watcher no longer creates vendor folders and a root gateway
 # removes the empty ones it recorded, but a folder left by an older release
 # needs an administrator. Keyed by platform so tests can substitute paths.
@@ -2429,8 +2499,8 @@ def _check_hilt_support(
         _emit(
             "pass",
             "Human approval",
-            f"OpenClaw prompts supported at {min_sev}+ (Control UI and chat channels that "
-            "forward /approve; openclaw tui and local chat do not show them)",
+            f"OpenClaw prompts supported at {min_sev}+ (Control UI, chat channels that "
+            "forward /approve, and openclaw tui from OpenClaw 2026.10.9)",
             r=r,
         )
     elif connector == "claudecode":
@@ -4868,8 +4938,8 @@ def _free_api_port_hint(cfg) -> str:
     return str(port) if port else "<free port>"
 
 
-def _foreign_gateway_port_holder(cfg) -> str:
-    """Name the API port holder when it is not this account's verified gateway."""
+def _foreign_gateway_port_holder(cfg, *, status_only: bool = False) -> str:
+    """Name an unverified holder; status may use the public foreground proof."""
     holder = _gateway_port_holder(cfg)
     if not holder:
         # macOS lsof sees only this account's sockets. A peer listener can
@@ -4885,6 +4955,8 @@ def _foreign_gateway_port_holder(cfg) -> str:
             return ""
     except Exception:  # noqa: BLE001 - an unverifiable holder is still foreign
         pass
+    if status_only and _foreground_gateway_status_owner(cfg) is not None:
+        return ""
     return holder
 
 
@@ -5263,6 +5335,19 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                         )
                     else:
                         _emit("warn", f"  └─ {sub}", f"degraded — {reason}" if reason else "degraded", r=r)
+                elif sub == "gateway" and isinstance(details, dict) and isinstance(details.get("hint"), str):
+                    # The OpenClaw gateway refused this sidecar's device or
+                    # token, and only the operator can fix it: the gateway
+                    # keeps retrying and names the step (GAP-0592).
+                    last_error = info.get("last_error")
+                    reason = last_error.strip() if isinstance(last_error, str) else ""
+                    _emit(
+                        "fail",
+                        f"  └─ {sub}",
+                        f"{state} — {reason}" if reason else state,
+                        r=r,
+                        remediation=details["hint"].strip(),
+                    )
                 else:
                     audit_db = str(getattr(cfg, "audit_db", "") or "")
                     reason = _telemetry_error_reason(details, audit_db) if sub == "telemetry" else ""
@@ -5661,7 +5746,7 @@ def _read_pid_from_file(pid_file: str) -> int:
 
 @dataclass(frozen=True)
 class _GatewayTrust:
-    """Result of proving that the configured API target is the managed PID."""
+    """Result of proving that the configured API target is this home's gateway."""
 
     code: str
     detail: str
@@ -6177,6 +6262,19 @@ def _trusted_gateway_listener(
         platform_name=platform_name,
     )
     if not process_trust.trusted:
+        from defenseclaw.enforce import asset_lists
+
+        if (
+            process_trust.code == "missing"
+            and platform_name.startswith("linux")
+            and not asset_lists.is_secure_client(cfg)
+            and str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise"
+            and api_port == _gateway_api_port(cfg)
+            and _gateway_api_host_is_loopback(cfg)
+        ):
+            transient = _transient_same_home_gateway_listener(cfg, evidence, host, api_port)
+            if transient is not None:
+                return transient
         return process_trust
     listener = _managed_gateway_listener_evidence(
         api_port,
@@ -6226,6 +6324,52 @@ def _loopback_ip_literal(
     return address if address.is_loopback else None
 
 
+def _foreground_loopback_endpoints(
+    host: str, port: int
+) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]:
+    """Resolve a connect host once to concrete loopback endpoints."""
+    literal = _loopback_ip_literal(host, brackets=True)
+    if literal is not None:
+        return (literal,)
+    try:
+        rows = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
+    except (OSError, ValueError, UnicodeError):
+        return ()
+    endpoints: dict[ipaddress.IPv4Address | ipaddress.IPv6Address, None] = {}
+    for family, _, _, _, sockaddr in rows:
+        if family not in {socket.AF_INET, socket.AF_INET6}:
+            return ()
+        try:
+            address = ipaddress.ip_address(sockaddr[0])
+        except (IndexError, TypeError, ValueError):
+            return ()
+        if family == socket.AF_INET6 and (address.version != 6 or len(sockaddr) < 4 or sockaddr[3] != 0):
+            return ()
+        if family == socket.AF_INET and address.version != 4:
+            return ()
+        if not address.is_loopback:
+            return ()
+        endpoints[address] = None
+    return tuple(endpoints)
+
+
+def _foreground_endpoint_closed(address: ipaddress.IPv4Address | ipaddress.IPv6Address, port: int) -> bool:
+    """Confirm an alternate resolved endpoint cannot accept a TCP connection."""
+    try:
+        with socket.create_connection((str(address), port), timeout=0.3):
+            return False
+    except ConnectionRefusedError:
+        return True
+    except OSError as exc:
+        return exc.errno in {
+            errno.EAFNOSUPPORT,
+            errno.EPROTONOSUPPORT,
+            errno.ENETUNREACH,
+            errno.EHOSTUNREACH,
+            errno.EADDRNOTAVAIL,
+        }
+
+
 def _other_account_gateway_listener_evidence(cfg, pid: int, host: str, api_port: int) -> ListenerEvidence | None:
     """Bind another account's verified gateway to ``host:api_port``, or None.
 
@@ -6257,6 +6401,203 @@ def _other_account_gateway_listener_evidence(cfg, pid: int, host: str, api_port:
     except OSError:
         return None
     return ListenerEvidence("ok", pid=pid, reason="the gateway's own runtime record names this endpoint")
+
+
+def _transient_same_home_gateway_listener(
+    cfg, evidence: GatewayEvidence, host: str, api_port: int
+) -> _GatewayTrust | None:
+    """Read the gateway's own status proof for a Linux process without a PID file."""
+    from defenseclaw.gateway import resolve_trusted_gateway_binary
+
+    home = gateway_home_for_data_dir(cfg.data_dir)
+    if not os.path.isabs(home):
+        return None
+    listener = _managed_gateway_listener_evidence(
+        api_port, host=host, platform_name="linux", evidence=evidence
+    )
+    if listener.status != "ok" or listener.pid <= 0 or _linux_foreign_listener_accounts(api_port):
+        return None
+    try:
+        binary = resolve_trusted_gateway_binary()
+        if not binary:
+            return None
+        env = dict(os.environ)
+        env["DEFENSECLAW_HOME"] = home
+        report = subprocess.run(
+            [binary, "status", "--json"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=8,
+            env=env,
+            check=False,
+        )
+        if report.returncode != 0 or len(report.stdout) > 2 << 20:
+            return None
+        status = json.loads(report.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return None
+    # Go status checks the process at its reported endpoint. That endpoint
+    # must be the listener whose PID was inspected before and after the call.
+    if (
+        not isinstance(status, dict)
+        or status.get("running") is not True
+        or status.get("endpoint") != _gateway_api_url(cfg, "/health")
+        or not isinstance(status.get("health"), dict)
+    ):
+        return None
+    after = _managed_gateway_listener_evidence(
+        api_port, host=host, platform_name="linux", evidence=evidence
+    )
+    if after.status != "ok" or after.pid != listener.pid:
+        return None
+    return _GatewayTrust("trusted", "this account's gateway owns the API endpoint", listener.pid, home_bound=True)
+
+
+def _foreground_current_uid() -> int:
+    """Return the effective POSIX account for a status-only foreground proof."""
+    return os.geteuid() if hasattr(os, "geteuid") else -1
+
+
+@dataclass(frozen=True)
+class _ForegroundGatewayOwner:
+    pid: int
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address
+    process: ProcessEvidence
+
+
+def _foreground_gateway_status_owner(
+    cfg, *, platform_name: str | None = None, evidence: GatewayEvidence | None = None
+) -> _ForegroundGatewayOwner | None:
+    """Prove this account owns a foreground gateway listener for status display.
+
+    Public health may be unavailable while the listener is starting or hung.
+    Ownership alone never authorizes token-bearing requests.
+    """
+    from defenseclaw.enforce import asset_lists
+    from defenseclaw.gateway import resolve_trusted_gateway_binary
+    from defenseclaw.logger import _running_gateway_record
+
+    platform_name = platform_name or sys.platform
+    if platform_name not in {"win32", "darwin"} or asset_lists.is_secure_client(cfg):
+        return None
+    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
+        return None
+    port = _gateway_api_port(cfg)
+    host = _gateway_api_host(cfg)
+    endpoints = _foreground_loopback_endpoints(host, port) if port else ()
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not endpoints or not os.path.isabs(data_dir):
+        return None
+    evidence = evidence or GatewayEvidence(platform_name=platform_name)
+    if _managed_gateway_process_trust(cfg, evidence=evidence, platform_name=platform_name).code != "missing":
+        return None
+
+    def endpoint_listeners() -> dict[ipaddress.IPv4Address | ipaddress.IPv6Address, ListenerEvidence] | None:
+        found: dict[ipaddress.IPv4Address | ipaddress.IPv6Address, ListenerEvidence] = {}
+        for address in endpoints:
+            listener = _managed_gateway_listener_evidence(
+                port, host=str(address), platform_name=platform_name, evidence=evidence
+            )
+            if listener.status == "ok" and listener.pid > 0:
+                found[address] = listener
+                continue
+            if listener.status == "missing" and _foreground_endpoint_closed(address, port):
+                continue
+            return None
+        return found if len({listener.pid for listener in found.values()}) == 1 else None
+
+    before = endpoint_listeners()
+    if before is None:
+        return None
+    listener_pid = next(iter(before.values())).pid
+    # The private record selects one numeric endpoint. Listener inspection and
+    # the public request both use that endpoint, never a fresh name lookup.
+    record = _running_gateway_record(data_dir, "gateway-api.json", expected_pid=listener_pid)
+    if not isinstance(record, dict) or type(record.get("port")) is not int or record["port"] != port:
+        return None
+    target_ip = _loopback_ip_literal(record.get("host"))
+    if target_ip not in before:
+        return None
+    listener = before[target_ip]
+
+    def runtime_record_matches() -> bool:
+        record = _running_gateway_record(data_dir, "gateway-api.json", expected_pid=listener_pid)
+        return (
+            isinstance(record, dict)
+            and type(record.get("port")) is int
+            and record["port"] == port
+            and _loopback_ip_literal(record.get("host")) == target_ip
+        )
+    process = evidence.process(listener.pid)
+    if process.status != "ok" or not process.start_identity:
+        return None
+    if gateway_executable_name(process.executable, platform_name=platform_name) not in GATEWAY_PROCESS_NAMES:
+        return None
+    try:
+        binary = resolve_trusted_gateway_binary()
+        if not binary or not paths_same(binary, process.executable):
+            return None
+        if platform_name == "win32":
+            from defenseclaw.file_permissions import _windows_current_user_sid
+
+            own_sid = _windows_current_user_sid()
+            peer_sid = windows_process_user_sid(listener.pid)
+            if not own_sid or own_sid in {"S-1-5-18", "S-1-5-19", "S-1-5-20"} or peer_sid != own_sid:
+                return None
+        else:
+            own_uid = _foreground_current_uid()
+            if own_uid <= 0 or process.uid != own_uid:
+                return None
+    except (OSError, ValueError):
+        return None
+
+    if not runtime_record_matches():
+        return None
+    return _ForegroundGatewayOwner(listener.pid, target_ip, process)
+
+
+def _foreground_gateway_status_health(
+    cfg, *, platform_name: str | None = None, evidence: GatewayEvidence | None = None
+) -> tuple[int, dict] | None:
+    """Read public health from a current foreground owner, without a token."""
+    platform_name = platform_name or sys.platform
+    evidence = evidence or GatewayEvidence(platform_name=platform_name)
+    owner = _foreground_gateway_status_owner(cfg, platform_name=platform_name, evidence=evidence)
+    if owner is None:
+        return None
+    port = _gateway_api_port(cfg)
+    peer = _GatewayTrust(
+        "trusted", "foreground gateway status only", owner.pid, home_bound=True, process=owner.process
+    )
+    code, body = _http_probe(
+        f"http://[{owner.address}]:{port}/health"
+        if owner.address.version == 6
+        else f"http://{owner.address}:{port}/health",
+        timeout=3.0,
+        response_limit=2 << 20,
+        allow_truncation=False,
+        bound_peer=peer,
+    )
+    if code != 200:
+        return None
+    try:
+        health = json.loads(body)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(health, dict) or not isinstance(health.get("gateway"), dict):
+        return None
+    after = _foreground_gateway_status_owner(cfg, platform_name=platform_name, evidence=evidence)
+    if (
+        after is None
+        or after.pid != owner.pid
+        or after.address != owner.address
+        or after.process.executable != owner.process.executable
+        or after.process.start_identity != owner.process.start_identity
+        or after.process.uid != owner.process.uid
+    ):
+        return None
+    return owner.pid, health
 
 
 def _trusted_gateway_listener_for_lifecycle(
@@ -7351,6 +7692,11 @@ def _check_windows_native_hooks(
     if _hermes_passive_unverified(check, r):
         _emit("warn", label, f"{check.state}: {check.detail}", r=r, remediation=_HERMES_PASSIVE_STEP)
         return
+    if connector == "hermes" and check.state == "pending-reload" and check.execution_proven:
+        host_detail, step = _hermes_running_host_warning()
+        _emit("warn", label, f"{check.state}: {check.detail}; {host_detail}", r=r,
+              remediation=f"{step}; run 'defenseclaw doctor'")
+        return
     if not check.healthy and check.state == "missing" and _hook_runtime_file_problems(cfg, connector):
         # The registered adapter is gone with the hooks folder: the Hook
         # runtime files row names the one repair (p0-round GAP-0402).
@@ -7821,13 +8167,19 @@ def _collect_hermes_execution_probe(
 
 def _hermes_windows_execution_probe(check: WindowsHookCheck) -> WindowsHookCheck:
     """Execute the exact active Windows target after the registration validator read it."""
-    if not check.healthy:
+    if not check.healthy and check.state != "pending-reload":
         return check
+    if not check.target:
+        return WindowsHookCheck(
+            "unexecutable", "registered Hermes command has no active runtime target",
+            check.command, check.target, check.raw_target,
+            "run 'defenseclaw setup hermes --yes --restart', then rerun 'defenseclaw doctor'",
+        )
     returncode, stdout = _run_hermes_execution_probe(
         [check.target, "hook", "--connector", "hermes", "--defenseclaw-execution-probe"],
     )
     if returncode == 0 and stdout == _HERMES_EXECUTION_PROBE_RESPONSE:
-        return check
+        return _dc_replace(check, execution_proven=True)
     return WindowsHookCheck(
         "unexecutable", "registered Hermes command did not complete its active runtime execution probe",
         check.command, check.target, check.raw_target,
@@ -10340,7 +10692,7 @@ def _hermes_proc_argv(pid: str, proc_root: str = "/proc") -> tuple[str, ...] | N
     return tuple(arg.decode("utf-8", "replace") for arg in data.rstrip(b"\0").split(b"\0")) if data else None
 
 
-def _hermes_host_running() -> bool | None:
+def _hermes_host_running(found_pids: list[str] | None = None) -> bool | None:
     """Whether a Hermes host runs as this account; ``None`` when unknown.
 
     Hermes reads its hook registration only at startup, so doctor can not
@@ -10348,7 +10700,7 @@ def _hermes_host_running() -> bool | None:
     reload: the next host starts with the registration.
     """
     if os.name == "nt":
-        return _hermes_host_running_windows()
+        return _hermes_host_running_windows(found_pids=found_pids)
     if not hasattr(os, "getuid"):
         return None
     try:
@@ -10360,12 +10712,18 @@ def _hermes_host_running() -> bool | None:
             check=False,
         )
     except (FileNotFoundError, subprocess.SubprocessError, OSError):
-        return _hermes_host_running_from_proc()
+        return (
+            _hermes_host_running_from_proc()
+            if found_pids is None else _hermes_host_running_from_proc(found_pids=found_pids)
+        )
     if proc.returncode != 0:
         # ps fails where /proc hides its system files (hidepid=2,subset=pid
         # has no /proc/stat): this account's own processes are still there
         # (GAP-0015).
-        return _hermes_host_running_from_proc()
+        return (
+            _hermes_host_running_from_proc()
+            if found_pids is None else _hermes_host_running_from_proc(found_pids=found_pids)
+        )
     uid = str(os.getuid())
     own = {str(os.getpid()), str(os.getppid())}
     wrapped = False
@@ -10382,13 +10740,15 @@ def _hermes_host_running() -> bool | None:
             if complete:
                 verdict = _hermes_argv_verdict(complete)
         if verdict is True:
-            return True
+            if found_pids is None:
+                return True
+            found_pids.append(fields[0])
         if verdict is None:
             wrapped = True
-    return None if wrapped else False
+    return True if found_pids else None if wrapped else False
 
 
-def _hermes_host_running_from_proc(proc_root: str = "/proc") -> bool | None:
+def _hermes_host_running_from_proc(proc_root: str = "/proc", found_pids: list[str] | None = None) -> bool | None:
     """:func:`_hermes_host_running` from /proc when ps cannot list processes.
 
     Reads each process's real uid from ``status`` and its argv from
@@ -10424,10 +10784,12 @@ def _hermes_host_running_from_proc(proc_root: str = "/proc") -> bool | None:
             continue
         verdict = _hermes_argv_verdict(list(argv))
         if verdict is True:
-            return True
+            if found_pids is None:
+                return True
+            found_pids.append(pid)
         if verdict is None:
             wrapped = True
-    return None if wrapped else False
+    return True if found_pids else None if wrapped else False
 
 
 _WINDOWS_PROCESS_LISTING_PS = (
@@ -10591,7 +10953,9 @@ def _windows_process_listing_powershell() -> str | None:
     return proc.stdout
 
 
-def _hermes_host_running_windows(tasklist_output: str | None = None) -> bool | None:
+def _hermes_host_running_windows(
+    tasklist_output: str | None = None, found_pids: list[str] | None = None
+) -> bool | None:
     """Windows form of :func:`_hermes_host_running` (GAP-1298).
 
     ``tasklist`` lists this account's processes by image name only, so a
@@ -10643,7 +11007,10 @@ def _hermes_host_running_windows(tasklist_output: str | None = None) -> bool | N
         program = fields[0].strip().lower().removesuffix(".exe")
         if program in _HERMES_HOST_EXECUTABLES:
             if not all_accounts:
-                return True
+                if found_pids is None:
+                    return True
+                found_pids.append(pid)
+                continue
             hosts.add(pid)  # ours unless this account may not open it
             candidates.append(pid)
         elif program.startswith("python") or program in _HERMES_LAUNCHERS:
@@ -10651,7 +11018,7 @@ def _hermes_host_running_windows(tasklist_output: str | None = None) -> bool | N
     if not listed:
         return None  # tasklist printed only an "INFO: no tasks" line or nothing usable
     if not candidates:
-        return False
+        return bool(found_pids)
     command_lines = _windows_process_command_lines(candidates)
     if command_lines is None:
         return None
@@ -10666,14 +11033,37 @@ def _hermes_host_running_windows(tasklist_output: str | None = None) -> bool | N
                 wrapped = True
             continue
         if pid in hosts:
-            return True
+            if found_pids is None:
+                return True
+            found_pids.append(pid)
+            continue
         argv = _windows_command_line_argv(command_lines[pid])
         verdict = _hermes_argv_verdict(argv, ntpath.basename) if argv else None
         if verdict is True:
-            return True
+            if found_pids is None:
+                return True
+            found_pids.append(pid)
         if verdict is None:
             wrapped = True
-    return None if wrapped else False
+    return True if found_pids else None if wrapped else False
+
+
+def _hermes_running_host_warning() -> tuple[str, str]:
+    """Describe a current registration whose running host cannot be inspected."""
+    pids: list[str] = []
+    _hermes_host_running(pids)
+    if pids:
+        names = ", ".join(dict.fromkeys(pids))
+        stop = f"Stop-Process -Id {', '.join(pids)}" if os.name == "nt" else f"kill {' '.join(pids)}"
+        process = f"Hermes PID(s) {names}"
+        step = f"close the Hermes session or run `{stop}`, then start Hermes again"
+    else:
+        process = "Hermes PID unavailable"
+        step = "close every running Hermes CLI/TUI/gateway/desktop/service host, then start Hermes again"
+    return (
+        f"{process}; loaded hooks cannot be verified; a new Hermes session loads the current hooks; live=false",
+        step,
+    )
 
 
 def _hermes_idle_native_check(check: WindowsHookCheck, r: _DoctorResult) -> WindowsHookCheck:
@@ -10873,18 +11263,9 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                         remediation=_HERMES_PASSIVE_STEP,
                     )
                     return
-                _emit(
-                    "fail",
-                    label,
-                    f"on-disk registration is present at {path}, but running Hermes hosts "
-                    "are unverified: doctor cannot verify which hooks an already running host loaded, "
-                    "even after a restart or successful hook traffic; live=false",
-                    r=r,
-                remediation=(
-                    "close every Hermes CLI/TUI/gateway/desktop/service host, then run 'defenseclaw doctor'; "
-                    "start Hermes again after the on-disk checks pass. Running-host load verification is unavailable"
-                ),
-                )
+                host_detail, step = _hermes_running_host_warning()
+                _emit("warn", label, f"on-disk registration is present at {path}; {host_detail}",
+                      r=r, remediation=f"{step}; run 'defenseclaw doctor'")
             elif connector == "amp":
                 _emit(
                     "pass",
@@ -11641,6 +12022,36 @@ _INTERCEPTION_SELF_TEST_FRESHNESS = timedelta(minutes=3)
 # The plugin reports every 60 s and a restarted sidecar starts with no
 # report, so a fresh sidecar gets two cadences before a missing one fails.
 _INTERCEPTION_FIRST_REPORT_WINDOW = timedelta(minutes=2)
+
+
+def _openclaw_plugin_host_is_loopback(host: str) -> bool:
+    """Mirror the OpenClaw plugin's loopback rule (listener-proof.ts isLoopbackHost)."""
+    value = str(host or "").strip().lower().strip("[]")
+    if value in ("localhost", "::1"):
+        return True
+    parts = value.split(".")
+    return len(parts) == 4 and parts[0] == "127" and all(p.isdigit() and int(p) <= 255 for p in parts[1:])
+
+
+def _check_openclaw_gateway_host(cfg, r: _DoctorResult) -> None:
+    """GAP-0594: the OpenClaw plugin sends its token only to a loopback
+    gateway.host. With any other host every tool check follows the plugin's
+    outage mode and every model call fails, so say it here."""
+    if "openclaw" not in _doctor_active_connectors(cfg) or not _connector_enabled(cfg, "openclaw"):
+        return
+    host = str(getattr(getattr(cfg, "gateway", None), "host", "") or "127.0.0.1")
+    if _openclaw_plugin_host_is_loopback(host):
+        return
+    _emit(
+        "fail",
+        "OpenClaw gateway.host",
+        f"{host} is not a loopback address: the OpenClaw plugin sends nothing to it, so tool checks "
+        "follow the outage mode and model calls fail",
+        r=r,
+        remediation=(
+            "defenseclaw config set gateway.host 127.0.0.1, then defenseclaw-gateway restart and restart OpenClaw"
+        ),
+    )
 
 
 def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
@@ -14903,6 +15314,7 @@ def doctor(
         if not auth_attempted:
             _check_gateway_token_drift(cfg, r)
         _check_gateway_home_mismatch(cfg, r)
+        _check_gateway_account(cfg, r)
     _check_connector_hook_credentials(cfg, r)
     _check_windows_watchdog_diagnostics(cfg, r)
     # Run the per-connector hook/health check for EVERY active connector,
@@ -14954,6 +15366,7 @@ def doctor(
     _check_cowork(cfg, sidecar_health, r)
     _check_guardrail_proxy(cfg, r)
     _check_proxy_interception(cfg, r, live_health=sidecar_health)
+    _check_openclaw_gateway_host(cfg, r)
     _check_kernel_sensor(r)
     if not json_out:
         _doctor_subsection("Credentials")
@@ -17810,6 +18223,16 @@ def _check_hook_contract_lock(
         _emit("warn", "Hook contract", detail, r=r, remediation=_CODEX_PROBE_TIMEOUT_STEP)
     elif _hermes_passive_unverified(native_runtime, r) and status in {"known", "unversioned"}:
         _emit("warn", "Hook contract", detail, r=r, remediation=_HERMES_PASSIVE_STEP)
+    elif (
+        connector == "hermes"
+        and native_runtime is not None
+        and native_runtime.state == "pending-reload"
+        and native_runtime.execution_proven
+        and status in {"known", "unversioned"}
+    ):
+        host_detail, step = _hermes_running_host_warning()
+        _emit("warn", "Hook contract", f"{detail}; {host_detail}", r=r,
+              remediation=f"{step}; run 'defenseclaw doctor'")
     elif (
         native_runtime is not None
         and not native_runtime.healthy

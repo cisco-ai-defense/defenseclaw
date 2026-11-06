@@ -1401,57 +1401,93 @@ func claudeCodePerUserNativeGuard(native string) string {
 }
 
 func claudeCodePerUserGuardTarget(hook map[string]interface{}, hooksDir string) bool {
-	if runtime.GOOS == "windows" || filepath.Base(hooksDir) != "hooks" {
-		return false
-	}
-	home := filepath.Dir(hooksDir)
-	if filepath.Base(home) != ".defenseclaw" {
-		return false
-	}
-	account := filepath.Dir(home)
-	guard := filepath.Join(account, ".local", "bin", "defenseclaw-hook-post")
-	native := filepath.Join(account, ".local", "bin", "defenseclaw-hook-user")
-	command, _ := hook["command"].(string)
-	args, ok := claudeCodeNativeExecArguments(hook)
-	if !ok || command != guard || (len(args) != 7 && len(args) != 9) {
-		return false
-	}
-	want := []string{"guard-user-hook", native, "hook", "--connector", "claudecode", "--hook-home", home}
-	for i, value := range want {
-		if args[i] != value {
-			return false
-		}
-	}
-	return len(args) == 7 || (args[7] == "--api-addr" &&
-		claudeCodeLoopbackGatewayEndpoint("http://"+args[8]))
+	home, ok := claudeCodePerUserNativeOwnerHome(hook, false)
+	return ok && filepath.Base(hooksDir) == "hooks" && filepath.Dir(hooksDir) == home
 }
 
 // claudeCodePerUserFallbackTarget recognizes the companion native handler
 // that serves a call when the registered guard is unavailable.
 func claudeCodePerUserFallbackTarget(hook map[string]interface{}, hooksDir string) bool {
-	if runtime.GOOS == "windows" || filepath.Base(hooksDir) != "hooks" {
-		return false
+	home, ok := claudeCodePerUserNativeOwnerHome(hook, true)
+	return ok && filepath.Base(hooksDir) == "hooks" && filepath.Dir(hooksDir) == home
+}
+
+// claudeCodePerUserNativeOwnerHome identifies the pair Setup renders from the
+// registration itself. A moved account retains these exact paths and argv even
+// after its former home no longer exists. Current-runtime checks additionally
+// compare the returned home with the active hooks directory.
+func claudeCodePerUserNativeOwnerHome(hook map[string]interface{}, fallback bool) (string, bool) {
+	if runtime.GOOS == "windows" {
+		return "", false
 	}
-	home := filepath.Dir(hooksDir)
-	if filepath.Base(home) != ".defenseclaw" {
-		return false
+	if kind, present := hook["type"]; present && kind != "command" {
+		return "", false
 	}
-	account := filepath.Dir(home)
-	native := filepath.Join(account, ".local", "bin", "defenseclaw-hook-user")
-	guard := filepath.Join(account, ".local", "bin", "defenseclaw-hook-post")
 	command, _ := hook["command"].(string)
-	args, ok := claudeCodeNativeExecArguments(hook)
-	if !ok || command != native || (len(args) != 7 && len(args) != 9) {
-		return false
+	if !filepath.IsAbs(command) || filepath.Clean(command) != command ||
+		strings.ContainsAny(command, "\x00\r\n") {
+		return "", false
 	}
-	want := []string{"fallback-guard-user-hook", guard, "hook", "--connector", "claudecode", "--hook-home", home}
+	bin := filepath.Dir(command)
+	if filepath.Base(bin) != "bin" || filepath.Base(filepath.Dir(bin)) != ".local" {
+		return "", false
+	}
+	account := filepath.Dir(filepath.Dir(bin))
+	home := filepath.Join(account, ".defenseclaw")
+	guard := filepath.Join(bin, "defenseclaw-hook-post")
+	native := filepath.Join(bin, "defenseclaw-hook-user")
+	op := "guard-user-hook"
+	companion := native
+	wantCommand := guard
+	if fallback {
+		op = "fallback-guard-user-hook"
+		companion = guard
+		wantCommand = native
+	}
+	args, ok := claudeCodeNativeExecArguments(hook)
+	if !ok || command != wantCommand || (len(args) != 7 && len(args) != 9) {
+		return "", false
+	}
+	want := []string{op, companion, "hook", "--connector", "claudecode", "--hook-home", home}
 	for i, value := range want {
 		if args[i] != value {
-			return false
+			return "", false
 		}
 	}
-	return len(args) == 7 || (args[7] == "--api-addr" &&
-		claudeCodeLoopbackGatewayEndpoint("http://"+args[8]))
+	if len(args) == 9 && (args[7] != "--api-addr" ||
+		!claudeCodeLoopbackGatewayEndpoint("http://"+args[8])) {
+		return "", false
+	}
+	return home, true
+}
+
+// claudeCodePerUserNativeShellOwnerHome recognizes the shell form emitted when
+// the companion guard binary is unavailable. Both the launcher and hook home
+// must name the same account, and the command must have only Setup's flags.
+func claudeCodePerUserNativeShellOwnerHome(command string) (string, bool) {
+	if runtime.GOOS != "linux" {
+		return "", false
+	}
+	command = claudeCodeUnguardedHookCommand(command)
+	launcher, rest, ok := posixHookCommandSplit(command)
+	if !ok || !filepath.IsAbs(launcher) || filepath.Clean(launcher) != launcher ||
+		strings.ContainsAny(launcher, "\x00\r\n") || filepath.Base(launcher) != "defenseclaw-hook-user" {
+		return "", false
+	}
+	bin := filepath.Dir(launcher)
+	if filepath.Base(bin) != "bin" || filepath.Base(filepath.Dir(bin)) != ".local" {
+		return "", false
+	}
+	home := filepath.Join(filepath.Dir(filepath.Dir(bin)), ".defenseclaw")
+	want := " hook --connector claudecode --hook-home " + posixHookCommandWord(home)
+	if rest == want {
+		return home, true
+	}
+	if !strings.HasPrefix(rest, want+" --api-addr ") {
+		return "", false
+	}
+	address, tail, ok := posixHookCommandSplit(strings.TrimPrefix(rest, want+" --api-addr "))
+	return home, ok && tail == "" && claudeCodeLoopbackGatewayEndpoint("http://"+address)
 }
 
 // claudeCodePerUserNativeHook selects the installed native launcher only for
@@ -2962,11 +2998,17 @@ func isOwnedHookHandler(rawHook interface{}, hooksDir string) bool {
 	if command == "" {
 		return false
 	}
+	kind, hasKind := hook["type"]
+	if _, hasArgs := hook["args"]; !hasArgs && (!hasKind || kind == "command") {
+		if _, ok := claudeCodePerUserNativeShellOwnerHome(command); ok {
+			return true
+		}
+	}
 	command = posixHookCommandUnquoted(claudeCodeUnguardedHookCommand(command))
-	if claudeCodePerUserGuardTarget(hook, hooksDir) {
+	if _, ok := claudeCodePerUserNativeOwnerHome(hook, false); ok {
 		return true
 	}
-	if claudeCodePerUserFallbackTarget(hook, hooksDir) {
+	if _, ok := claudeCodePerUserNativeOwnerHome(hook, true); ok {
 		return true
 	}
 	if hooksDir != "" && strings.HasPrefix(command, hooksDir+"/") {

@@ -232,6 +232,7 @@ func TestForeignHookCleanupIsInertOutsideStandalone(t *testing.T) {
 }
 
 func TestEnterprisePolicyShowsTheClaudeVersionFloor(t *testing.T) {
+	requireAdministratorTestToken(t, "the product writer, not the fixture, needs it: enterprisepolicy creates the Claude Code policy folder (etc\\claude-code) with an Administrators owner (createProtectedDir, O:BA), which only an administrator token can set")
 	ctx := withEnterprisePolicyTree(t)
 	// The tree is a Linux host's, which has no Windows enumerator record of
 	// unprotected agent installs; on Windows its absence makes verify

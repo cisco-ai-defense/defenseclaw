@@ -283,10 +283,18 @@ func TestWindowsStandaloneUninstallReportsAnotherUsersUnremovableClaudeHooks(t *
 func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testing.T) {
 	original := windowsManagedHooksStandaloneUserRegistrationRemover
 	originalACPCopies := windowsManagedHooksStandaloneACPUserCopies
+	originalIdentity := enterpriseHookWindowsUserCleanupIdentity
 	t.Cleanup(func() {
 		windowsManagedHooksStandaloneUserRegistrationRemover = original
 		windowsManagedHooksStandaloneACPUserCopies = originalACPCopies
+		enterpriseHookWindowsUserCleanupIdentity = originalIdentity
 	})
+	// A finalize without purge, from an elevated prompt: the cleanup is not
+	// LocalSystem, so each enrolled account's folder stays and is named. The
+	// test sets the identity it describes; as LocalSystem the real check
+	// passed, the runtime remover took the folder, and the test failed
+	// (GAP-0079).
+	enterpriseHookWindowsUserCleanupIdentity = func() error { return enterprisehooks.ErrWindowsEnterpriseNotLocalSystem }
 	windowsManagedHooksStandaloneACPUserCopies = func() ([]enterprisehooks.WindowsACPUserCopy, error) { return nil, nil }
 	calls, pendingSID := 0, userCleanupSIDB
 	windowsManagedHooksStandaloneUserRegistrationRemover = func(
@@ -358,11 +366,9 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testi
 		t.Fatalf("repeated uninstall did not remove the Cursor tombstone: removals=%d", cursorPurges)
 	}
 	t.Setenv(windowsManagedHooksPurgeUserStateEnv, "1")
-	originalIdentity, originalPurger := enterpriseHookWindowsUserCleanupIdentity, windowsManagedHooksStandaloneUserStatePurger
-	originalBinaries := windowsManagedHooksStandaloneUserBinariesPurger
+	originalPurger, originalBinaries := windowsManagedHooksStandaloneUserStatePurger, windowsManagedHooksStandaloneUserBinariesPurger
 	t.Cleanup(func() {
-		enterpriseHookWindowsUserCleanupIdentity, windowsManagedHooksStandaloneUserStatePurger = originalIdentity, originalPurger
-		windowsManagedHooksStandaloneUserBinariesPurger = originalBinaries
+		windowsManagedHooksStandaloneUserStatePurger, windowsManagedHooksStandaloneUserBinariesPurger = originalPurger, originalBinaries
 	})
 	enterpriseHookWindowsUserCleanupIdentity = func() error { return nil }
 	purged, binaries := 0, 0

@@ -109,16 +109,15 @@ func TestCoworkReleasedPluginHandlersStillRun(t *testing.T) {
 		writeScript("exit 0\n")
 		released := coworkReleasedPlugin(t, "1.0.8", "cowork-plugin-hooks-unix.json", home)
 
-		// The current build writes the same handlers, so an account that holds
-		// the 1.0.8 plugin runs what setup cowork would build today: the script
-		// at the stable path that claudecode Setup and reconcile re-render.
+		// A released plugin still uses the stable script path that Setup and
+		// reconcile re-render. The current plugin adds a removal record check.
 		raw, err := CoworkPluginHooks(SetupOpts{DataDir: dataDir})
 		if err != nil {
 			t.Fatal(err)
 		}
 		current := coworkPluginHookEntries(t, raw)
-		if !reflect.DeepEqual(current, released) {
-			t.Fatalf("the current Cowork plugin differs from the 1.0.8 one:\ncurrent  %v\nreleased %v", current, released)
+		if reflect.DeepEqual(current, released) || !strings.Contains(current["PreToolUse"][0].Hooks[0]["command"].(string), dataDir+coworkRemovalMarkerSuffix) {
+			t.Fatalf("the current plugin needs the removal record and the released plugin must retain its original form")
 		}
 		for event, entries := range released {
 			if entries[0].Matcher != groups[event].matcher || entries[0].Hooks[0]["timeout"] != float64(groups[event].timeout) {
@@ -172,7 +171,7 @@ func TestCoworkReleasedPluginHandlersStillRun(t *testing.T) {
 		t.Cleanup(func() { claudeCodePreToolGuardExecutable = savedGuard })
 		released := coworkReleasedPlugin(t, "1.0.8", "cowork-plugin-hooks-windows.json", home)
 
-		// The argv per-user Windows Setup writes today for this launcher.
+		// The released argv is the per-user Windows Setup form from 1.0.8.
 		command, args := claudeCodeWindowsHookInvocation(SetupOpts{}, launcher)
 		for event, entries := range released {
 			handler := entries[0].Hooks[0]

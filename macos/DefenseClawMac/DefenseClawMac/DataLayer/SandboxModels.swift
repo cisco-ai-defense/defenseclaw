@@ -405,7 +405,7 @@ struct SandboxSnapshot: Sendable {
     static let noAsksText = "No asks are waiting. An ask appears when a program connects around DefenseClaw's proxy: "
         + "to a private-network address with any pack, to a host off the allowlist with balanced, "
         + "and to every new destination with strict. A port on this machine asks only if the run named it "
-        + "with --host-port PORT."
+        + "with --host-port PORT; approve that ask to open the port."
 
     var status = SandboxStatus()
     var sandboxes: [SandboxRow] = []

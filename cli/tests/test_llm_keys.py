@@ -189,7 +189,6 @@ class TestBackCompatShim(unittest.TestCase):
             "record_pristine_backup",
             "pristine_backup_path",
             "_backup",
-            "_register_plugin_in_config",
             "_unregister_plugin_from_config",
             "_remove_from_plugins_allow",
             "_preserve_ownership",

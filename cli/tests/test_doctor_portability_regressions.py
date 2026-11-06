@@ -20,16 +20,18 @@ from __future__ import annotations
 
 import ctypes
 import os
+import shlex
 import stat
 import subprocess
 import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import click
 import pytest
 from defenseclaw import doctor_gateway, file_permissions
 from defenseclaw import gateway as gateway_module
-from defenseclaw.commands import cmd_doctor, cmd_setup
+from defenseclaw.commands import cmd_doctor, cmd_setup, cmd_setup_cowork
 from defenseclaw.gateway import gateway_api_client_host
 
 from tests.os_view import os_view
@@ -357,6 +359,184 @@ def test_windows_gateway_custody_trusts_the_builtin_administrators_sid_only(monk
     assert file_permissions.windows_acl_write_error(os.fspath(gateway)) == f"ACL grants write access to untrusted SID {sid}"
 
 
+@pytest.mark.parametrize(
+    "owner_sid",
+    [
+        "S-1-5-32-544",  # Elevated Administrators owner.
+        "S-1-5-18",  # LocalSystem owner.
+        "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",  # TrustedInstaller owner.
+    ],
+)
+def test_windows_gateway_lifecycle_accepts_trusted_system_owners(monkeypatch, tmp_path, owner_sid):
+    current_sid = "S-1-5-21-current"
+    gateway = tmp_path / "bin" / "defenseclaw-gateway.exe"
+    gateway.parent.mkdir()
+    gateway.write_bytes(b"synthetic")
+    entries = [
+        (0x001F01FF, 1, 0, current_sid),
+        (0x001F01FF, 1, 0, "S-1-5-18"),
+        (0x001F01FF, 1, 0, "S-1-5-32-544"),
+        (0x001F01FF, 1, 0, owner_sid),
+    ]
+    monkeypatch.setattr(file_permissions, "os", SimpleNamespace(name="nt", fspath=os.fspath))
+    monkeypatch.setattr(file_permissions, "_windows_acl_snapshot", lambda _path: (owner_sid, False, entries))
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+    monkeypatch.setattr(cmd_setup, "os", os_view("nt"))
+    monkeypatch.setattr(cmd_setup.shutil, "which", lambda *_args, **_kwargs: os.fspath(gateway))
+    monkeypatch.setattr(gateway_module, "packaged_windows_install_root", lambda: "")
+    monkeypatch.setattr(gateway_module, "packaged_windows_gateway_path", lambda: "")
+
+    assert cmd_setup._trusted_gateway_lifecycle_executable(os.fspath(gateway)) == str(gateway.resolve())
+    assert cmd_setup._gateway_lifecycle_executable(native=True, search_path=os.fspath(gateway.parent)) == str(
+        gateway.resolve()
+    )
+    # Private-file validation retains its current-user ownership requirement.
+    assert file_permissions.windows_acl_write_error(gateway) == f"owner SID {owner_sid} is not the current user"
+
+
+@pytest.mark.parametrize("writer_sid", ["S-1-5-32-545", "S-1-1-0"])
+def test_windows_gateway_lifecycle_names_other_writers(monkeypatch, tmp_path, writer_sid):
+    current_sid = "S-1-5-21-current"
+    gateway = tmp_path / "bin" / "defenseclaw-gateway.exe"
+    gateway.parent.mkdir()
+    gateway.write_bytes(b"synthetic")
+    entries = [
+        (0x001F01FF, 1, 0, current_sid),
+        (0x001F01FF, 1, 0, "S-1-5-32-544"),
+        (0x001F01FF, 1, 0, writer_sid),
+    ]
+    monkeypatch.setattr(file_permissions, "os", SimpleNamespace(name="nt", fspath=os.fspath))
+    monkeypatch.setattr(file_permissions, "_windows_acl_snapshot", lambda _path: (current_sid, False, entries))
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+    monkeypatch.setattr(cmd_setup, "os", os_view("nt"))
+    monkeypatch.setattr(cmd_setup.shutil, "which", lambda *_args, **_kwargs: os.fspath(gateway))
+    monkeypatch.setattr(gateway_module, "packaged_windows_install_root", lambda: "")
+    monkeypatch.setattr(gateway_module, "packaged_windows_gateway_path", lambda: "")
+
+    assert cmd_setup._trusted_gateway_lifecycle_executable(os.fspath(gateway)) is None
+    reason = cmd_setup._refused_gateway_lifecycle_candidate(search_path=os.fspath(gateway.parent))
+    assert f"untrusted SID {writer_sid}" in reason
+    assert "Restore" in reason
+
+
+def test_windows_gateway_lifecycle_accepts_read_only_users_ace(monkeypatch, tmp_path):
+    current_sid = "S-1-5-21-current"
+    gateway = tmp_path / "bin" / "defenseclaw-gateway.exe"
+    gateway.parent.mkdir()
+    gateway.write_bytes(b"synthetic")
+    entries = [
+        (0x001F01FF, 1, 0, current_sid),
+        (0x001F01FF, 1, 0, "S-1-5-32-544"),
+        (0x80000000, 1, 0, "S-1-5-32-545"),
+    ]
+    monkeypatch.setattr(file_permissions, "os", SimpleNamespace(name="nt", fspath=os.fspath))
+    monkeypatch.setattr(file_permissions, "_windows_acl_snapshot", lambda _path: (current_sid, False, entries))
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+    monkeypatch.setattr(cmd_setup, "os", SimpleNamespace(name="nt", path=os.path))
+    monkeypatch.setattr(gateway_module, "packaged_windows_gateway_path", lambda: "")
+
+    assert cmd_setup._trusted_gateway_lifecycle_executable(os.fspath(gateway)) == str(gateway.resolve())
+
+
+@pytest.mark.parametrize("writer_sid", ["", "S-1-5-32-545", "S-1-1-0"])
+def test_windows_packaged_gateway_uses_the_same_custody_check(monkeypatch, tmp_path, writer_sid):
+    current_sid = "S-1-5-21-current"
+    gateway = tmp_path / "bin" / "defenseclaw-gateway.exe"
+    gateway.parent.mkdir()
+    gateway.write_bytes(b"synthetic")
+    entries = [
+        (0x001F01FF, 1, 0, current_sid),
+        (0x001F01FF, 1, 0, "S-1-5-32-544"),
+    ]
+    if writer_sid:
+        entries.append((0x001F01FF, 1, 0, writer_sid))
+    monkeypatch.setattr(file_permissions, "os", SimpleNamespace(name="nt", fspath=os.fspath))
+    monkeypatch.setattr(file_permissions, "_windows_acl_snapshot", lambda _path: ("S-1-5-32-544", False, entries))
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+    monkeypatch.setattr(cmd_setup, "os", SimpleNamespace(name="nt", path=os.path))
+    monkeypatch.setattr(gateway_module, "packaged_windows_install_root", lambda: os.fspath(tmp_path))
+    monkeypatch.setattr(gateway_module, "packaged_windows_gateway_path", lambda: os.fspath(gateway))
+
+    result = cmd_setup._gateway_lifecycle_executable()
+    selected, refusal = cmd_setup._gateway_lifecycle_resolution()
+    assert selected == result
+    if writer_sid:
+        assert result is None
+        assert f"untrusted SID {writer_sid}" in refusal
+        assert f"untrusted SID {writer_sid}" in cmd_setup._refused_gateway_lifecycle_candidate()
+    else:
+        assert result == str(gateway.resolve())
+        assert refusal == ""
+
+
+@pytest.mark.parametrize("path_form", ["quoted", "relative_shadow"])
+@pytest.mark.parametrize("writer_sid", ["S-1-5-32-544", "S-1-5-32-545"])
+def test_windows_gateway_refusal_uses_the_selected_path_candidate(monkeypatch, tmp_path, path_form, writer_sid):
+    current_sid = "S-1-5-21-current"
+    gateway = tmp_path / "bin" / "defenseclaw-gateway.exe"
+    gateway.parent.mkdir()
+    gateway.write_bytes(b"synthetic")
+    gateway.chmod(0o755)
+    entries = [(0x001F01FF, 1, 0x13, writer_sid)]
+    monkeypatch.setattr(file_permissions, "os", SimpleNamespace(name="nt", fspath=os.fspath))
+    monkeypatch.setattr(file_permissions, "_windows_acl_snapshot", lambda _path: (current_sid, False, entries))
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+    monkeypatch.setattr(cmd_setup, "os", os_view("nt"))
+    monkeypatch.setattr(gateway_module, "packaged_windows_install_root", lambda: None)
+    monkeypatch.setattr(gateway_module, "GATEWAY_BIN_NAME", gateway.name)
+    monkeypatch.setattr(gateway_module, "canonical_install_path", lambda: str(tmp_path / "absent.exe"))
+    if path_form == "quoted":
+        search_path = f'"{gateway.parent}"'
+    else:
+        shadow = tmp_path / "shadow"
+        shadow.mkdir()
+        (shadow / gateway.name).write_bytes(b"shadow")
+        (shadow / gateway.name).chmod(0o755)
+        monkeypatch.chdir(tmp_path)
+        search_path = f"shadow{os.pathsep}{gateway.parent}"
+
+    selected = cmd_setup._gateway_lifecycle_executable(native=True, search_path=search_path)
+    refusal = cmd_setup._refused_gateway_lifecycle_candidate(search_path=search_path)
+    if writer_sid == "S-1-5-32-544":
+        assert selected == str(gateway.resolve())
+        assert refusal == ""
+    else:
+        assert selected is None
+        assert str(gateway.resolve()) in refusal
+        assert writer_sid in refusal
+        monkeypatch.setenv("PATH", search_path)
+        with pytest.raises(click.ClickException, match=writer_sid) as exc:
+            cmd_setup_cowork._render_hooks(SimpleNamespace(data_dir=str(tmp_path)))
+        assert "was not found" not in str(exc.value)
+
+
+@pytest.mark.parametrize("writer_sid", ["S-1-5-32-544", "S-1-5-32-545"])
+def test_windows_gateway_refusal_uses_canonical_candidate(monkeypatch, tmp_path, writer_sid):
+    current_sid = "S-1-5-21-current"
+    gateway = tmp_path / "bin" / "defenseclaw-gateway.exe"
+    gateway.parent.mkdir()
+    gateway.write_bytes(b"synthetic")
+    gateway.chmod(0o755)
+    entries = [(0x001F01FF, 1, 0x13, writer_sid)]
+    monkeypatch.setattr(file_permissions, "os", SimpleNamespace(name="nt", fspath=os.fspath))
+    monkeypatch.setattr(file_permissions, "_windows_acl_snapshot", lambda _path: (current_sid, False, entries))
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+    monkeypatch.setattr(cmd_setup, "os", os_view("nt"))
+    monkeypatch.setattr(cmd_setup.shutil, "which", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(gateway_module, "packaged_windows_install_root", lambda: None)
+    monkeypatch.setattr(gateway_module, "canonical_install_path", lambda: str(gateway))
+
+    selected = cmd_setup._gateway_lifecycle_executable(search_path=str(tmp_path / "absent"))
+    refusal = cmd_setup._refused_gateway_lifecycle_candidate(search_path=str(tmp_path / "absent"))
+    if writer_sid == "S-1-5-32-544":
+        assert selected == str(gateway.resolve())
+        assert refusal == ""
+    else:
+        assert selected is None
+        assert str(gateway.resolve()) in refusal
+        assert writer_sid in refusal
+
+
 def test_windows_owner_assignment_leaves_a_path_the_user_already_owns(monkeypatch):
     """Setting an unchanged owner needs WRITE_OWNER, which a Modify-only TEMP folder does not grant.
 
@@ -671,6 +851,63 @@ def test_doctor_names_sudo_runtime_leftovers(monkeypatch, tmp_path) -> None:
     assert "guided ownership repair" in check["detail"]
     assert "descriptor-bound" in check["remediation"]
     assert check["reason_code"] == "sudo-runtime-leftovers"
+
+
+def _gateway_account_fixture(monkeypatch, tmp_path, *, process_uid, deployment_mode=""):
+    pid_path = os.path.join(os.fspath(tmp_path), "gateway.pid")
+    monkeypatch.setattr(
+        cmd_doctor,
+        "read_pid_record",
+        lambda path: (
+            doctor_gateway.PIDRecord("ok", pid=4242) if path == pid_path else doctor_gateway.PIDRecord("missing")
+        ),
+    )
+    monkeypatch.setattr(cmd_doctor, "pid_alive", lambda pid: pid == 4242)
+    monkeypatch.setattr(cmd_doctor, "_process_uid", lambda pid: process_uid if pid == 4242 else None)
+    result = cmd_doctor._DoctorResult(quiet=True)
+    cmd_doctor._check_gateway_account(
+        SimpleNamespace(data_dir=os.fspath(tmp_path), deployment_mode=deployment_mode),
+        result,
+    )
+    return result
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX per-user gateway account")
+def test_doctor_warns_when_per_user_gateway_runs_as_root(monkeypatch, tmp_path) -> None:
+    result = _gateway_account_fixture(monkeypatch, tmp_path, process_uid=0)
+
+    check = result.checks[-1]
+    assert check["status"] == "warn"
+    assert check["label"] == "Gateway account"
+    assert "runs as root" in check["detail"]
+    assert check["reason_code"] == "per-user-gateway-runs-as-root"
+    assert "DefenseClawMac" in check["remediation"]
+    assert "sudo defenseclaw-gateway stop" in check["remediation"]
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX per-user gateway account")
+def test_doctor_gateway_account_hint_quotes_the_home(monkeypatch, tmp_path) -> None:
+    home = tmp_path / "my home; touch pwned"
+    home.mkdir()
+    result = _gateway_account_fixture(monkeypatch, home, process_uid=0)
+
+    remediation = result.checks[-1]["remediation"]
+    assert shlex.quote(os.fspath(home)) in remediation
+    assert shlex.split(remediation.split("Otherwise: ", 1)[1])[8] == os.fspath(home)
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX per-user gateway account")
+def test_doctor_gateway_account_quiet_for_own_or_managed_gateway(monkeypatch, tmp_path) -> None:
+    assert _gateway_account_fixture(monkeypatch, tmp_path, process_uid=os.geteuid()).checks == []
+    assert _gateway_account_fixture(monkeypatch, tmp_path, process_uid=None).checks == []
+    managed = _gateway_account_fixture(monkeypatch, tmp_path, process_uid=0, deployment_mode="managed_enterprise")
+    assert managed.checks == []
+
+
+@pytest.mark.skipif(not sys.platform.startswith(("linux", "darwin")), reason="kernel process owner")
+def test_process_uid_reads_this_process_owner() -> None:
+    assert cmd_doctor._process_uid(os.getpid()) == os.getuid()
+    assert cmd_doctor._process_uid(0) is None
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX sudo leftover naming")

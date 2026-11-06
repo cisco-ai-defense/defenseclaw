@@ -584,7 +584,7 @@ describe('Hook connector setup and teardown', () => {
   it('says what teardown removes and what it preserves on every connector page', () => {
     const guardrailCode = source('cli/defenseclaw/commands/cmd_guardrail.py');
     const sharedTeardown = source('internal/gateway/connector/hook_only.go');
-    assert.match(guardrailCode, /def disable_cmd\([\s\S]*?if connector_flag:\s+_toggle_connector_guardrail\(/);
+    assert.match(guardrailCode, /def disable_cmd\([\s\S]*?if connector_flag(?: and not _single_connector_uses_global_scope\(app, connector_flag\))?:\s+_toggle_connector_guardrail\(/);
     assert.match(guardrailCode, /gc\.enabled = False[\s\S]*?if restart:[\s\S]*?_restart_services\(/);
     assert.match(sharedTeardown, /func \(c \*hookOnlyConnector\) Teardown\([\s\S]*?c\.teardown\(ctx, opts, ""\)/);
     assert.match(sharedTeardown, /case !restored:[\s\S]*?c\.removeConfigEntriesWithManagedBackup\(/);
@@ -622,7 +622,7 @@ describe('Hook connector setup and teardown', () => {
   it('distinguishes whole-guardrail --no-restart from connector hot reload', () => {
     const guardrailCode = source('cli/defenseclaw/commands/cmd_guardrail.py');
     const gatewayCode = source('internal/gateway/sidecar.go');
-    assert.match(guardrailCode, /def disable_cmd\([\s\S]*?if connector_flag:\s+_toggle_connector_guardrail\(/);
+    assert.match(guardrailCode, /def disable_cmd\([\s\S]*?if connector_flag(?: and not _single_connector_uses_global_scope\(app, connector_flag\))?:\s+_toggle_connector_guardrail\(/);
     assert.match(guardrailCode, /def _toggle_connector_guardrail\([\s\S]*?entry\.enabled = bool\(enable\)/);
     assert.match(guardrailCode, /gateway will continue running with the old policy[\s\S]*?until you restart it manually/);
     assert.match(gatewayCode, /guardrailRestart := connectorSetChanged\(oldCfg, newCfg\)/);

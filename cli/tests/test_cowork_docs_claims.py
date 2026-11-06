@@ -334,9 +334,29 @@ def test_the_engine_version_is_the_vocabulary_engine_version():
 _SENSOR_TERMS = re.compile(r"vm[ _-]?sensor|sensor package|cowork[_-]vm|defenseclaw-cowork-(?:amd64|arm64)", re.I)
 
 
-@pytest.mark.parametrize("path", [PAGE, *THREAT_MODELS], ids=lambda path: path.name)
-def test_the_page_does_not_name_the_vm_sensor(path):
+# Every public doc: the docs site, docs/, the CHANGELOG and the README
+# (audit review 2 N3, review 3).
+_PUBLIC_DOCS = (
+    *sorted((ROOT / "docs-site/content").rglob("*.mdx")),
+    *sorted((ROOT / "docs").rglob("*.md")),
+    ROOT / "CHANGELOG.md",
+    ROOT / "README.md",
+)
+
+
+@pytest.mark.parametrize("path", _PUBLIC_DOCS, ids=lambda path: path.relative_to(ROOT).as_posix())
+def test_public_docs_do_not_name_the_vm_sensor(path):
     # The Cowork VM sensor is undocumented by owner decision.
     text = path.read_text(encoding="utf-8")
     assert not _SENSOR_TERMS.findall(text), _SENSOR_TERMS.findall(text)
     assert _SENSOR_TERMS.search("the Cowork VM sensor") and not _SENSOR_TERMS.search("the Cowork VM")
+
+
+def test_the_printed_uninstall_step_is_the_documented_reminder():
+    """GAP-0084: the CLI line is the one guaranteed channel, and the page says so."""
+    from defenseclaw.commands import cmd_uninstall
+
+    text = _page()
+    assert cmd_uninstall._COWORK_PLUGIN_STAYS in text
+    assert "best effort" in text
+    assert "guaranteed reminder" in text

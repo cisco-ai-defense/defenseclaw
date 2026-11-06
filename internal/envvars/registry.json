@@ -3809,25 +3809,6 @@
       "security_note": "Inverted flag: setting it only hardens. The relaxation it disables is the AIFW-34262 default \u2014 an untrusted grant on a shared platform-owned parent no longer fails a managed install, which previously aborted after quiesce had disabled every service and left the endpoint unprotected. Set this on hosts where DefenseClaw owns the whole path chain and an untrusted ancestor must be treated as compromise."
     },
     {
-      "name": "DEFENSECLAW_MASTER_KEY",
-      "category": "credential",
-      "purpose": "Bearer derived from device.key (PBKDF2). Internal fallback; documented in GUARDRAIL_QUICKSTART for curl examples only. Operators should not rely on this credential.",
-      "default": "(derived at boot from device.key)",
-      "accepted_values": [
-        "sk-dc-<hex>"
-      ],
-      "security_impact": "high",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "internal/gateway/proxy.go",
-          "description": "deriveMasterKey"
-        }
-      ],
-      "since": "0.3.0"
-    },
-    {
       "name": "DEFENSECLAW_MCPHUNT_PUBLIC_DIR",
       "category": "test_fixture",
       "purpose": "Supplies an external public MCPHunt result directory to the optional SQL value-lineage format regression.",

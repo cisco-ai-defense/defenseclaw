@@ -167,9 +167,10 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 			"gateway/AI discovery read access on users' agent folders: "+boundedEnterpriseHookUserCleanupText(revokeErr.Error()))
 	}
 	purge := os.Getenv(windowsManagedHooksPurgeUserStateEnv) == "1"
-	report.UserStateRemaining, report.UserStatePurged = windowsManagedHooksStandaloneUserState(manifest, purge, windowsManagedHooksAccountsKeepingRegistrations(cleanup))
+	var accountLinks []windowsManagedHooksAccountLink
+	report.UserStateRemaining, report.UserStatePurged, accountLinks = windowsManagedHooksStandaloneUserState(manifest, purge, windowsManagedHooksAccountsKeepingRegistrations(cleanup))
 	if purge {
-		remaining, purged := windowsManagedHooksStandaloneACPUserState()
+		remaining, purged := windowsManagedHooksStandaloneACPUserState(accountLinks)
 		report.UserStateRemaining = append(report.UserStateRemaining, remaining...)
 		report.UserStatePurged = append(report.UserStatePurged, purged...)
 		if err := windowsManagedHooksStandaloneFloorPurger(); err != nil {
@@ -213,12 +214,18 @@ func finishWindowsCursorTombstoneCleanup(report *windowsManagedHooksTeardownRepo
 	}
 }
 
+type windowsManagedHooksAccountLink struct {
+	home string
+	sid  string
+}
+
 // windowsManagedHooksStandaloneACPUserState removes, with purge, the managed
 // ACP folder (token copies and editor contract locks) of every account that
 // still has one: signed out, revoked, ACP-only or kept for its
-// connector_backups (GAP-0773). It returns what stays ("SID: path: reason")
-// and what went ("SID: path").
-func windowsManagedHooksStandaloneACPUserState() ([]string, []string) {
+// connector_backups (GAP-0773). An account-owned link already reported at
+// the parent folder also covers its ACP path. It returns what stays
+// ("SID: path: reason") and what went ("SID: path").
+func windowsManagedHooksStandaloneACPUserState(accountLinks []windowsManagedHooksAccountLink) ([]string, []string) {
 	if err := enterpriseHookWindowsUserCleanupIdentity(); err != nil {
 		return nil, nil
 	}
@@ -228,6 +235,16 @@ func windowsManagedHooksStandaloneACPUserState() ([]string, []string) {
 	}
 	var remaining, purged []string
 	for _, copy := range copies {
+		covered := false
+		for _, link := range accountLinks {
+			if strings.EqualFold(copy.SID, link.sid) && sameWindowsEnterprisePathCLI(copy.Home, link.home) {
+				covered = true
+				break
+			}
+		}
+		if covered && windowsManagedHooksAccountOwnedRootLink(copy.Home, copy.SID) {
+			continue
+		}
 		label := copy.SID + ": " + filepath.Join(copy.Home, ".defenseclaw", "acp")
 		if err := windowsManagedHooksStandaloneACPUserPurger(copy.Home, copy.SID); err != nil {
 			remaining = append(remaining, label+": "+boundedEnterpriseHookUserCleanupText(err.Error()))
@@ -245,6 +262,7 @@ func windowsManagedHooksStandaloneACPUserState() ([]string, []string) {
 var (
 	windowsManagedHooksStandaloneACPUserCopies = enterprisehooks.WindowsManagedACPUserCopies
 	windowsManagedHooksStandaloneACPUserPurger = enterprisehooks.PurgeWindowsACPUserState
+	windowsManagedHooksAccountOwnedRootLink    = enterprisehooks.WindowsAccountOwnedRootDataDirLink
 )
 
 // windowsManagedHooksStandaloneCursorTombstonePurger is replaceable in tests.
@@ -338,10 +356,11 @@ func windowsManagedHooksStandaloneUserState(
 	manifest enterprisehooks.Manifest,
 	purge bool,
 	keepsRegistrations func(sid string) bool,
-) ([]string, []string) {
+) ([]string, []string, []windowsManagedHooksAccountLink) {
 	identityErr := enterpriseHookWindowsUserCleanupIdentity()
 	seen := map[string]bool{}
 	var remaining, purged []string
+	var accountLinks []windowsManagedHooksAccountLink
 	for _, target := range manifest.Targets {
 		home, sid := strings.TrimSpace(target.UserHome), strings.TrimSpace(target.SID)
 		dataDir := strings.TrimSpace(target.DataDir)
@@ -358,6 +377,16 @@ func windowsManagedHooksStandaloneUserState(
 		}
 		label += ": " + dataDir
 		_, statErr := os.Lstat(dataDir)
+		accountLink := purge && sameWindowsEnterprisePathCLI(dataDir, filepath.Join(home, ".defenseclaw")) &&
+			windowsManagedHooksAccountOwnedRootLink(home, sid)
+		accountLinkReported := false
+		addRemaining := func(entry string) {
+			remaining = append(remaining, entry)
+			if accountLink && !accountLinkReported {
+				accountLinks = append(accountLinks, windowsManagedHooksAccountLink{home: home, sid: sid})
+				accountLinkReported = true
+			}
+		}
 		var reason string
 		switch {
 		case !purge:
@@ -367,17 +396,17 @@ func windowsManagedHooksStandaloneUserState(
 			if identityErr != nil || keepsRegistrations(sid) {
 				// An account whose registrations stay keeps the folder: its
 				// connector_backups restore them.
-				remaining = append(remaining, label)
+				addRemaining(label)
 				continue
 			}
 			kept, err := windowsManagedHooksStandaloneUserRuntimeRemover(home, sid, target.DataDir)
 			if err != nil {
-				remaining = append(remaining, label+": "+boundedEnterpriseHookUserCleanupText(err.Error()))
+				addRemaining(label + ": " + boundedEnterpriseHookUserCleanupText(err.Error()))
 			} else if kept != "" {
-				remaining = append(remaining, label+": "+boundedEnterpriseHookUserCleanupText(kept))
+				addRemaining(label + ": " + boundedEnterpriseHookUserCleanupText(kept))
 			}
 			continue
-		case errors.Is(statErr, os.ErrNotExist):
+		case errors.Is(statErr, os.ErrNotExist) && !accountLink:
 			// Nothing to remove, unless the account has a roaming or container
 			// profile, which is off the computer while the account is signed
 			// out and brings the folder back at its next sign-in.
@@ -385,7 +414,7 @@ func windowsManagedHooksStandaloneUserState(
 				if home != "" && !errors.Is(err, os.ErrNotExist) && identityErr == nil && !keepsRegistrations(sid) {
 					// The folder is gone; the binaries may still be there.
 					if _, err := windowsManagedHooksStandaloneUserBinariesPurger(home, sid); err != nil {
-						remaining = append(remaining, label+": "+windowsManagedHooksUserBinariesReason(err))
+						addRemaining(label + ": " + windowsManagedHooksUserBinariesReason(err))
 					}
 				}
 				continue
@@ -400,10 +429,11 @@ func windowsManagedHooksStandaloneUserState(
 			if errors.Is(err, enterprisehooks.ErrWindowsUserStateOnlyLink) &&
 				sameWindowsEnterprisePathCLI(dataDir, filepath.Join(home, ".defenseclaw")) &&
 				windowsEnterpriseAccountOwnedDataDirLink(home, sid) {
+				accountLink = true
 				if _, binaryErr := windowsManagedHooksStandaloneUserBinariesPurger(home, sid); binaryErr != nil {
-					remaining = append(remaining, label+": "+windowsManagedHooksUserBinariesReason(binaryErr))
+					addRemaining(label + ": " + windowsManagedHooksUserBinariesReason(binaryErr))
 				}
-				remaining = append(remaining, label+": "+windowsManagedHooksAccountLinkKeptReason)
+				addRemaining(label + ": " + windowsManagedHooksAccountLinkKeptReason)
 				continue
 			}
 			var binaries []string
@@ -421,11 +451,11 @@ func windowsManagedHooksStandaloneUserState(
 			}
 			reason = windowsManagedHooksUserBinariesReason(err)
 		}
-		remaining = append(remaining, label+": "+reason)
+		addRemaining(label + ": " + reason)
 	}
 	sort.Strings(remaining)
 	sort.Strings(purged)
-	return remaining, purged
+	return remaining, purged, accountLinks
 }
 
 func newWindowsManagedHooksTeardownCommand() *cobra.Command {
@@ -580,7 +610,7 @@ func runWindowsManagedHooksUserStatePurge() (windowsManagedHooksTeardownReport, 
 	if os.Getenv(windowsManagedHooksPurgeUserStateEnv) != "1" {
 		return fail(errors.New("the per-user purge of a committed uninstall requires an uninstall with purge"))
 	}
-	if err := enterpriseHooksNativePlatformPreflight(); err != nil {
+	if err := enterpriseHooksPlatformPreflight(); err != nil {
 		return fail(err)
 	}
 	runtimeDir, err := exactWindowsCodexLayoutEnv("DEFENSECLAW_HOME")
@@ -708,7 +738,7 @@ func runWindowsManagedHooksOwnerRightsRestoreMode(probe, upgradeOnly bool) (wind
 	if !enterprisehooks.WindowsStandaloneProcess() {
 		return fail(errors.New("the OWNER RIGHTS restore requires the standalone profile"))
 	}
-	if err := enterpriseHooksNativePlatformPreflight(); err != nil {
+	if err := enterpriseHooksPlatformPreflight(); err != nil {
 		return fail(err)
 	}
 	runtimeDir, err := exactWindowsCodexLayoutEnv("DEFENSECLAW_HOME")
@@ -854,7 +884,7 @@ func runWindowsManagedHooksTeardown(
 		return fail(fmt.Errorf("unsupported managed-hook teardown action %q", action))
 	}
 	// Authorization intentionally precedes protected layout discovery.
-	if err := enterpriseHooksNativePlatformPreflight(); err != nil {
+	if err := enterpriseHooksPlatformPreflight(); err != nil {
 		return fail(err)
 	}
 	opts, err := resolveWindowsCodexRequirementsLayout("remove")

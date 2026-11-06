@@ -830,7 +830,7 @@ fi
   printf '%s\n' "$OUTPUT"
 fi
 {{end}}{{if .Sandbox}}if ! defenseclaw_sandbox_confirm_receipt "/api/v1/claude-code/hook" "$RESULT"; then
-  fail_unreachable "sandbox hook receipt was not acknowledged"
+  fail_unreachable "sandbox hook receipt was not acknowledged (status ${DC_SANDBOX_RECEIPT_STATUS})"
 fi
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   printf '%s\n' "$OUTPUT"

@@ -232,17 +232,25 @@ def _structured_surface(structured) -> str | None:
 def _event_surface(event, hook_details: dict[str, list[str]] | None = None) -> str:
     """The agent surface of an alert: ``cowork`` for a Claude Cowork call.
 
-    The row's structured surface decides when it records one; else the
-    ``surface=`` detail before ``details_json``. A finding takes it from the
-    hook rows of the same request, their structured surface included, so a
-    redaction profile that drops the details does not change it (cowork
-    audit S1). "" for every other call: only a known agent surface counts,
-    not the asset policy's ``surface=hook`` (cowork audit M2).
+    The row's structured surface decides when it records one. Only a
+    legacy row with no structured payload reads the ``surface=`` detail
+    before ``details_json``: the details of a row with one hold free text
+    (an unquoted ``reason=``, a ``raw_payload=``), so a terminal call that
+    only mentions ``surface=cowork`` is not Cowork (cowork audit review 2
+    N1). A finding takes it from the hook rows of the same request, their
+    structured surface included, so a redaction profile that drops the
+    details does not change it (cowork audit S1); hook_details_for_alerts
+    drops the detail of those rows that have a payload. "" for every other
+    call: only a known agent surface counts, not the asset policy's
+    ``surface=hook`` (cowork audit M2).
     internal/audit/cowork_alert_target.go selects the same rows."""
-    structured = _structured_surface(getattr(event, "structured", None))
+    payload = getattr(event, "structured", None)
+    structured = _structured_surface(payload)
     if structured is not None:
         return known_surface(structured)
-    if surface := known_surface(_kv(_strip_details_json(event.details or "")).get("surface", "")):
+    if not (isinstance(payload, dict) and payload) and (
+        surface := known_surface(_kv(_strip_details_json(event.details or "")).get("surface", ""))
+    ):
         return surface
     for raw in (hook_details or {}).get(getattr(event, "id", ""), []):
         if surface := known_surface(_kv(_strip_details_json(raw)).get("surface", "")):
