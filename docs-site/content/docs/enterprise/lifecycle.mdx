@@ -580,10 +580,10 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --js
 ```
 
 ```powershell title="Windows"
-& 'C:\ProgramData\DefenseClaw-Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /repair JSON=1
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows repair --profile standalone
 ```
 
-`repair` stops and restarts every DefenseClaw service for a few seconds and lists what it changed (`nothing to repair` on a healthy deployment); `ensure` leaves a healthy deployment running. It also removes the guardian targets of deleted accounts. For Linux package installs, reinstall the package to restore binaries. On Windows use the Setup of the installed release.
+`repair` stops and restarts every DefenseClaw service for a few seconds and lists what it changed (`nothing to repair` on a healthy deployment); `ensure` leaves a healthy deployment running. It also removes the guardian targets of deleted accounts. For Linux package installs, reinstall the package to restore binaries. On Windows the installed CLI repairs the deployment without a payload, so it cannot put back a file that went missing. For that, run the Setup of the installed release with `/repair JSON=1` from an elevated PowerShell prompt, as `& .\DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1` in the folder that holds it. Setup is not installed on the computer: use the copy in your MDM package or the release download.
 
 To re-run the guardian now, and repair DefenseClaw's machine-policy entries, without
 re-applying the deployment files, use `reconcile`:
@@ -629,7 +629,8 @@ On Windows, `reconcile` restarts the guardian and waits for a fresh reconcile:
   accounts that no longer exist. Otherwise they stay 10 to 15 minutes, with the warning
   `guardian_target_account_removed`. See
   [New, changed and removed users](/docs/enterprise/enrollment#new-changed-and-removed-users).
-- **Windows.** Use the Setup of the release that is installed. `/ensure` also repairs a
+- **Windows.** Use the installed CLI's `repair` (above), or the Setup of the release that is
+  installed when a file must be restored from the payload. `/ensure` also repairs a
   deployment whose `verify` fails.
 - **Claude Code attestation (Windows).** After you confirm that a real Claude Code session
   runs DefenseClaw's managed hooks, record it with `/repair ATTESTCLAUDEEFFECTIVEPOLICY=1 JSON=1`
@@ -646,7 +647,7 @@ commands below to restart the managed gateway.
 | --- | --- | --- |
 | Linux | `sudo systemctl restart defenseclaw-gateway.service` | `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux repair --json` |
 | macOS | `sudo launchctl kickstart -k system/com.cisco.defenseclaw.gateway` | `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --json` |
-| Windows | Run the installed release's Setup with `/repair JSON=1` | The same |
+| Windows | From an elevated PowerShell prompt: `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows repair --profile standalone` | The same |
 
 To stop the managed gateway, for example to see what your users get while it is down, and to start it again:
 

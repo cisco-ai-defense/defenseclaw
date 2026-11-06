@@ -909,7 +909,7 @@ On a computer with the standalone deployment the per-user product refuses to run
 | --- | --- |
 | `install.ps1` | Refuses when the marker key exists, or when `DisableSelfUpdate` under `HKLM\SOFTWARE\Policies\Cisco\DefenseClaw` is nonzero |
 | `defenseclaw upgrade`, `defenseclaw rollback` | Refuse when the marker key exists |
-| Per-user gateway | Refuses to start on a managed computer. `defenseclaw-gateway stop`, `start` and `restart` refuse there too; the message names `status` and the installed release's Setup `/repair` as the way to restart the managed gateway |
+| Per-user gateway | Refuses to start on a managed computer. `defenseclaw-gateway stop`, `start` and `restart` refuse there too; the message names `status` and the installed CLI's `enterprise windows repair --profile standalone`, each by its full path, as the way to restart the managed gateway |
 
 After the managed deployment is removed, a user can install the per-user product.
 Its first `defenseclaw init` moves the files a managed install left in

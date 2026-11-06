@@ -351,7 +351,8 @@ On Windows, a `Setup /repair CONFIG=` over a damaged `config.yaml` on 1.0.6 to 1
 `1603` with DefenseClawGateway stopped and `transaction_pending`. `/ensure CONFIG=` does not
 recover that computer. Run, as LocalSystem, `DefenseClawSetup-Enterprise-Standalone-x64.exe
 /uninstall FORCE=1 JSON=1`, then `DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure
-CONFIG=<approved config> JSON=1`.
+CONFIG=<approved config> JSON=1`. Setup is not installed on the computer: use the copy in
+your MDM package or the release download.
 
 ### Known limits for managed hooks
 
