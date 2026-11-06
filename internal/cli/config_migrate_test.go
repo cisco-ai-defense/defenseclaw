@@ -921,3 +921,36 @@ func TestMigrateManagedStandaloneConfigRecordsTheApprovedSourceOverAHandEditReco
 		})
 	}
 }
+
+// GAP-0646 review 4: the takeover records only the approved bytes it
+// compared. A config.yaml that changes after that check is a conflict: no
+// new generation, and the hand-edit record stays.
+func TestMigrateManagedStandaloneConfigTakeoverRefusesBytesChangedAfterTheCheck(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	raw := []byte("config_version: 9\nobservability: {}\n")
+	sum := configwrite.SHA256Hex(raw)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if recorded, err := configwrite.RecordUnrecorded(context.Background(), path, raw, configwrite.Options{
+		Actor: configwrite.ActorUnattributedHandEdit, Reason: "config.yaml edited outside the lifecycle",
+	}); err != nil || !recorded {
+		t.Fatalf("hand-edit record = %t, %v", recorded, err)
+	}
+	saved := managedStandaloneConfigBeforeRecord
+	t.Cleanup(func() { managedStandaloneConfigBeforeRecord = saved })
+	managedStandaloneConfigBeforeRecord = func(path string) {
+		if err := os.WriteFile(path, []byte("config_version: 9\nobservability: {}\n# changed after the check\n"), 0o600); err != nil {
+			t.Error(err)
+		}
+	}
+	if err := migrateManagedStandaloneConfig(context.Background(), path, sum); !errors.Is(err, configwrite.ErrConflict) {
+		t.Fatalf("migrate over bytes changed after the check = %v, want configwrite.ErrConflict", err)
+	}
+	state, err := configwrite.ReadGenerationState(path)
+	if err != nil || state.Generation != 1 || !configwrite.IsHandEditActor(state.Actor) || state.ConfigSHA256 != sum {
+		t.Fatalf("record = %+v, %v; want the hand-edit record of the checked bytes kept", state, err)
+	}
+}

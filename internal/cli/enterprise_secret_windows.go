@@ -96,7 +96,9 @@ var (
 		}
 		return filepath.Join(roots.LifecycleDir, "lifecycle.lock"), nil
 	}
-	windowsSecretLifecycleLock = acquireWindowsEnterpriseLifecycleLock
+	// windowsSecretLifecycleLock takes the lock once; acquireWindowsLockWithin
+	// waits windowsSecretInstallerLockWait around it.
+	windowsSecretLifecycleLock = tryWindowsEnterpriseLifecycleLock
 	// windowsSecretInstallerLockWait is the fixed wait for the installer's
 	// lifecycle.lock: the 30 s default of Enter-DefenseClawLifecycleLock
 	// (packaging/windows/DefenseClawEnterprise.psm1).

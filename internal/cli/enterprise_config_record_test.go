@@ -4,10 +4,12 @@
 package cli
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 )
@@ -100,5 +102,46 @@ func TestRecordUnrecordedManagedConfigLeavesALifecycleRunsWriteToIt(t *testing.T
 	recordUnrecordedManagedConfig(path, &log, busy)
 	if claims != 0 {
 		t.Fatalf("a recorded config claimed the lifecycle %d times", claims)
+	}
+}
+
+// GAP-0646 review 3: while the guardian holds lifecycle.lock it waits for a
+// busy config.yaml.lock about a second, not the writer's 10 s default, and
+// lets lifecycle.lock go before a Go lifecycle step's 5 s wait ends. The edit
+// is not recorded this cycle.
+func TestRecordUnrecordedManagedConfigBoundsItsLifecycleHoldOnABusyWriterLock(t *testing.T) {
+	t.Cleanup(func() { managedConfigRecordDeferredTo = "" })
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("config_version: 9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	held, done := make(chan struct{}), make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = configwrite.Locked(context.Background(), path, configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "test writer"},
+			func() (bool, error) { close(held); <-release; return false, nil })
+	}()
+	<-held
+	t.Cleanup(func() { close(release); <-done })
+	var hold time.Duration
+	var claimed time.Time
+	claim := func() (func(), string) {
+		claimed = time.Now()
+		return func() { hold = time.Since(claimed) }, ""
+	}
+	var log strings.Builder
+	recordUnrecordedManagedConfig(path, &log, claim)
+	if claimed.IsZero() || hold == 0 {
+		t.Fatalf("the guardian did not claim and release lifecycle.lock (claimed %v, hold %v)", claimed, hold)
+	}
+	if hold >= 5*time.Second {
+		t.Fatalf("the guardian held lifecycle.lock %v on a busy config.yaml.lock, want it below a lifecycle step's 5 s wait", hold)
+	}
+	if !strings.Contains(log.String(), "could not record the config generation") {
+		t.Fatalf("log = %q, want the deferred record logged", log.String())
+	}
+	if _, err := os.Stat(configwrite.GenerationPath(path)); !os.IsNotExist(err) {
+		t.Fatalf("a record was written while config.yaml.lock was busy: %v", err)
 	}
 }

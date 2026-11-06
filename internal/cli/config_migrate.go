@@ -363,11 +363,22 @@ func migrateManagedStandaloneConfig(ctx context.Context, path, approvedSHA256 st
 		// and the gateway service reads it for its generation (GAP-0293).
 		return restoreACL(written...)
 	}
+	// Bytes this run installed from its approved source are recorded only
+	// as those bytes: a config.yaml that changed after the check above is a
+	// conflict, never the lifecycle's generation (GAP-0646 review 4).
+	if approvedSHA256 != "" && strings.EqualFold(approvedSHA256, configwrite.SHA256Hex(raw)) {
+		opt.RecordSHA256 = approvedSHA256
+	}
+	managedStandaloneConfigBeforeRecord(path)
 	if _, err := configwrite.Locked(ctx, path, opt, func() (bool, error) { return true, nil }); err != nil {
 		return err
 	}
 	return restoreACL(written...)
 }
+
+// managedStandaloneConfigBeforeRecord runs just before the config step
+// records the installed config.yaml. A seam for tests.
+var managedStandaloneConfigBeforeRecord = func(string) {}
 
 // managedStandaloneLifecycleRecordOptions is what the Windows standalone
 // lifecycle records for raw at path: the lifecycle actor with reason, or the

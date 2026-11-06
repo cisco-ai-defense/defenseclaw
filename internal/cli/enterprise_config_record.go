@@ -30,6 +30,16 @@ import (
 // managedConfigRecordMaxBytes bounds the config read for the record.
 const managedConfigRecordMaxBytes = 8 << 20
 
+// managedConfigRecordLockWait bounds the guardian's wait for config.yaml.lock,
+// and managedConfigRecordHold the whole record, while the guardian holds
+// lifecycle.lock: it always lets lifecycle.lock go well before a Go lifecycle
+// step's 5 s wait for it ends (GAP-0646 review 3). A busy writer lock defers
+// the record to the next cycle, which is logged.
+const (
+	managedConfigRecordLockWait = time.Second
+	managedConfigRecordHold     = 2 * time.Second
+)
+
 // managedConfigRecordDeferredTo is the lifecycle owner the last cycle left an
 // unrecorded config.yaml to, so the guardian log names it once per run.
 var managedConfigRecordDeferredTo string
@@ -77,11 +87,12 @@ func recordUnrecordedManagedConfig(path string, w io.Writer, claim func() (relea
 		defer release()
 	}
 	managedConfigRecordDeferredTo = ""
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), managedConfigRecordHold)
 	defer cancel()
 	recorded, err := configwrite.RecordUnrecorded(ctx, path, raw, configwrite.Options{
-		Actor:  configwrite.ActorUnattributedHandEdit,
-		Reason: "config.yaml edited outside the lifecycle; recorded by the hook guardian",
+		Actor:   configwrite.ActorUnattributedHandEdit,
+		Reason:  "config.yaml edited outside the lifecycle; recorded by the hook guardian",
+		Timeout: managedConfigRecordLockWait,
 	})
 	switch {
 	case err != nil:

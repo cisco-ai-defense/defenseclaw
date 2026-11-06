@@ -1664,9 +1664,13 @@ func recordWindowsEnterpriseLifecycleConfigWrite(path string, approved []byte, r
 }
 
 // acquireWindowsEnterpriseLifecycleLock opens the lifecycle lock the way the
-// PowerShell lifecycle does for a mutation, exclusively, and does not wait:
-// a busy lock sends the change to the upgrade transaction, which waits for
-// it.
+// PowerShell lifecycle does for a mutation, exclusively. It waits up to
+// windowsEnterpriseLifecycleLockWait, and only on a sharing violation, so the
+// hook guardian's short hold never turns a step into "nothing to do"; a busy
+// lock after that sends the change to the upgrade transaction, which waits
+// for it. Only the windowsEnterpriseHotConfigLock seam uses it (Setup's
+// pre-step, hot apply, bundle restore, generation repair); passes that must
+// not wait take tryWindowsEnterpriseLifecycleLock (GAP-0646 review 2).
 func acquireWindowsEnterpriseLifecycleLock(path string) (func(), error) {
 	deadline := time.Now().Add(windowsEnterpriseLifecycleLockWait)
 	for {
@@ -1680,9 +1684,9 @@ func acquireWindowsEnterpriseLifecycleLock(path string) (func(), error) {
 
 // windowsEnterpriseLifecycleLockWait bounds how long a Go lifecycle step
 // waits for lifecycle.lock. The hook guardian holds it only while it records
-// an administrator's edit of config.yaml (GAP-0646), a few milliseconds; a
-// lifecycle run holds it for minutes, so a take during a run still fails as
-// busy. A seam for tests.
+// an administrator's edit of config.yaml (GAP-0646), at most
+// managedConfigRecordHold; a lifecycle run holds it for minutes, so a take
+// during a run still fails as busy. A seam for tests.
 var windowsEnterpriseLifecycleLockWait = 5 * time.Second
 
 // tryWindowsEnterpriseLifecycleLock opens lifecycle.lock with no sharing,
