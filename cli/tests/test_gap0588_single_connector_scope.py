@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -318,10 +319,6 @@ def test_config_set_refuses_zeptoclaw_in_final_multi_roster(tmp_path: Path) -> N
             "guardrail.connectors.kiro.hook_fail_mode", "open", False,
         ),
         (
-            "  connector: kiro\n  connectors:\n    kiro: {}\n    codex: {}\n",
-            "guardrail.connector", "codex", False,
-        ),
-        (
             "  connector: kiro\n  connectors:\n    kiro: {}\n    codex:\n      enabled: false\n",
             "guardrail.connectors.codex.enabled", "true", False,
         ),
@@ -333,8 +330,6 @@ def test_config_set_refuses_zeptoclaw_in_final_multi_roster(tmp_path: Path) -> N
             "  connector: kiro\n  connectors:\n    kiro: {}\n    codex: {}\n",
             "guardrail.connectors", '{"kiro": {}}', True,
         ),
-        # GAP-0588 review 1: a new entry that is guarded, or that drops the
-        # primary from the roster the runtime enumerates, needs setup.
         (
             "  connector: kiro\n  connectors:\n    kiro: {}\n",
             "guardrail.connectors.codex.enabled", "true", False,
@@ -342,6 +337,14 @@ def test_config_set_refuses_zeptoclaw_in_final_multi_roster(tmp_path: Path) -> N
         (
             "  connector: kiro\n  connectors:\n    kiro: {}\n",
             "guardrail.connectors.codex", '{"enabled": true}', True,
+        ),
+        (
+            "  connector: claudecode\n",
+            "guardrail.connectors", '{"codex": {"enabled": false}}', True,
+        ),
+        (
+            "  connector: claudecode\n",
+            "guardrail.connectors.claudecode.enabled", "false", False,
         ),
         (
             "  connector: kiro\n  connectors:\n    kiro: {}\n",
@@ -352,12 +355,8 @@ def test_config_set_refuses_zeptoclaw_in_final_multi_roster(tmp_path: Path) -> N
             "guardrail", '{"connector": "kiro", "connectors": {"kiro": {}, "codex": {}}}', True,
         ),
         (
-            "  connector: claudecode\n",
-            "guardrail.connectors", '{"codex": {"enabled": false}}', True,
-        ),
-        (
-            "  connector: claudecode\n",
-            "guardrail.connectors.claudecode.enabled", "false", False,
+            "  connector: kiro\n  connectors:\n    kiro: {}\n    codex: {}\n",
+            "guardrail.connector", "codex", False,
         ),
     ],
 )
@@ -371,143 +370,97 @@ def test_config_set_does_not_change_active_connector_selection(
     assert after == before
 
 
-def _go_hook_enabled(document: dict, name: str) -> bool:
-    # The configuration signals of agentHookEnabled (internal/gateway/agent_hook.go),
-    # written here apart from cmd_config: an enabled: false entry wins; then
-    # connector_hooks.<name>.enabled (else the legacy claude_code / codex
-    # section), a guardrail.connectors entry, or guardrail.connector. claw.mode
-    # is not a signal (GAP-1953).
-    from defenseclaw import connector_paths
-
-    guardrail = document.get("guardrail") or {}
-    entries = {connector_paths.normalize(key): entry for key, entry in (guardrail.get("connectors") or {}).items()}
-    if (entries.get(name) or {}).get("enabled") is False:
-        return False
-    hooks = document.get("connector_hooks") or {}
-    section = hooks[name] if name in hooks else document.get({"claudecode": "claude_code", "codex": "codex"}.get(name, ""))
-    if isinstance(section, dict) and section.get("enabled") is True:
-        return True
-    primary = guardrail.get("connector")
-    return name in entries or bool(primary) and connector_paths.normalize(primary) == name
-
-
-def _runtime(monkeypatch, path: Path, text: bytes) -> dcconfig.Config:
-    path.write_bytes(text)
-    monkeypatch.setenv("DEFENSECLAW_HOME", str(path.parent))
-    with patch.object(dcconfig, "config_path", return_value=path):
-        return dcconfig.load()
+def _with_setting(document: dict, key: str, value: object) -> dict:
+    node = document
+    *parents, last = key.split(".")
+    for part in parents:
+        node = node.setdefault(part, {})
+    node[last] = value
+    return document
 
 
 @pytest.mark.parametrize(
-    ("head", "roster", "key", "value", "as_json", "stored"),
+    ("head", "roster", "key", "value"),
     [
-        (
-            "", "  connector: claudecode\n",
-            "guardrail.connectors.codex.hook_fail_mode", "closed", False, "codex",
-        ),
-        (
-            "", "  connector: claudecode\n",
-            "guardrail.connectors.codex.enabled", "false", False, "codex",
-        ),
-        (
-            "", "  connector: kiro\n  connectors:\n    kiro: {}\n",
-            "guardrail.connectors.codex.hook_fail_mode", "closed", False, "codex",
-        ),
-        (
-            "", "  connector: kiro\n  connectors:\n    kiro: {}\n",
-            "guardrail.connectors.codex", '{"hook_fail_mode": "closed"}', True, "codex",
-        ),
-        (
-            "", "  connectors:\n    kiro: {}\n",
-            "guardrail.connectors.codex.hook_fail_mode", "closed", False, "codex",
-        ),
-        (
-            "", "  connectors:\n    kiro:\n      enabled: false\n",
-            "guardrail.connectors.codex.hook_fail_mode", "closed", False, "codex",
-        ),
-        # GAP-0588 review 2: a claw.mode-only primary whose hooks the Go gate
-        # already scans (connector_hooks, or the legacy codex section) keeps
-        # them scanned when it gets its own entry.
-        (
-            "claw:\n  mode: codex\nconnector_hooks:\n  codex:\n    enabled: true\n", "  enabled: true\n",
-            "guardrail.connectors.claudecode.hook_fail_mode", "closed", False, "claudecode",
-        ),
-        (
-            "claw:\n  mode: codex\ncodex:\n  enabled: true\n", "  enabled: true\n",
-            "guardrail.connectors.kiro.hook_fail_mode", "closed", False, "kiro",
-        ),
-        (
-            "", "  connector: openclaw\n  connectors:\n    openclaw:\n      enabled: false\n",
-            "guardrail.connectors.kiro.hook_fail_mode", "closed", False, "kiro",
-        ),
+        ("", "  connector: claudecode\n", "guardrail.connectors.codex.hook_fail_mode", "closed"),
+        ("", "  connector: kiro\n  connectors:\n    kiro: {}\n", "guardrail.connectors.codex.hook_fail_mode", "closed"),
+        ("", "  connector: kiro\n  connectors:\n    kiro: {}\n", "guardrail.connectors.codex", {"hook_fail_mode": "closed"}),
         (
             "", "  connector: claudecode\n  connectors:\n    claudecode: {}\n",
-            "guardrail.connectors.claude.hook_fail_mode", "closed", False, "claude",
+            "guardrail.connectors.claude.hook_fail_mode", "closed",
+        ),
+        # The primary that guardrail.connector names stays guarded off the roster.
+        (
+            "", "  connector: claudecode\n  connectors:\n    codex: {}\n",
+            "guardrail.connectors.claudecode.hook_fail_mode", "closed",
+        ),
+        # GAP-0588 review 3: an agent-gateway route or an automatic source
+        # keeps every enable signal the Go hook gate reads.
+        (
+            "connectors:\n  agent_gateway:\n    enabled: true\n", "  enabled: true\n  connector: kiro\n",
+            "guardrail.connectors.agent-gateway.hook_fail_mode", "closed",
+        ),
+        (
+            "application_protection:\n  enabled: true\n",
+            "  enabled: true\n  connector: kiro\n  connectors:\n    kiro: {}\n",
+            "guardrail.connectors.codex.hook_fail_mode", "closed",
+        ),
+        (
+            "application_protection:\n  enabled: true\n", "  enabled: true\n  connector: kiro\n",
+            "guardrail.connectors.claudecode.hook_fail_mode", "closed",
+        ),
+        (
+            "application_protection:\n  enabled: true\n",
+            "  enabled: true\n  connector: kiro\n  connectors:\n    kiro: {}\n",
+            "guardrail.connectors.cursor", {"hook_fail_mode": "closed"},
         ),
     ],
 )
-def test_config_set_stores_an_off_roster_entry_without_changing_selection(
-    tmp_path: Path, monkeypatch, head: str, roster: str, key: str, value: str, as_json: bool, stored: str
+def test_config_set_of_an_off_roster_setting_writes_only_that_key(
+    tmp_path: Path, head: str, roster: str, key: str, value: object
 ) -> None:
-    # GAP-0588 ruling (lead 11-06): the set succeeds and stores the entry. It
-    # neither selects nor enables a connector: the primary, every guarded
-    # connector and every name the runtime enumerates stay, and a new entry
-    # is stored disabled.
+    # GAP-0588 lead ruling r4: the set succeeds and writes that key alone. No
+    # enabled field and no other roster entry is written, the primary stays,
+    # and the Go hook gate reads the same enable signals as before.
     app = _app(tmp_path, ["kiro"])
-    result, before, after = _set_in_file(tmp_path, app, roster, key, value, as_json=as_json, head=head)
+    as_json = not isinstance(value, str)
+    result, before, after = _set_in_file(
+        tmp_path, app, roster, key, json.dumps(value) if as_json else value, as_json=as_json, head=head
+    )
     assert result.exit_code == 0, result.output
-    entry = yaml.safe_load(after)["guardrail"]["connectors"][stored]
-    guarded_before, primary_before, _, listed_before = cmd_config._configured_connector_selection(
-        yaml.safe_load(before)
-    )
-    guarded_after, primary_after, _, listed_after = cmd_config._configured_connector_selection(
-        yaml.safe_load(after)
-    )
-    assert primary_after == primary_before
-    assert guarded_after == guarded_before
-    assert listed_before <= listed_after
-    path = tmp_path / "config.yaml"
-    was = _runtime(monkeypatch, path, before)
-    now = _runtime(monkeypatch, path, after)
-    assert now.active_connector() == was.active_connector()
-    assert set(was.active_connectors()) <= set(now.active_connectors())
-    enabled = lambda cfg: {n for n in cfg.active_connectors() if cfg.guardrail.effective_enabled(n)}  # noqa: E731
-    assert enabled(now) == enabled(was)
-    for name in {"claudecode", "codex", "kiro", "openclaw", stored, primary_before}:
-        assert _go_hook_enabled(yaml.safe_load(after), name) == _go_hook_enabled(yaml.safe_load(before), name), name
-    if stored not in listed_before:
-        assert entry["enabled"] is False
-        assert "is stored but not guarded" in result.output
-        assert f"guardrail enable --connector {stored}" in result.output
+    assert yaml.safe_load(after) == _with_setting(yaml.safe_load(before), key, value)
 
 
 @pytest.mark.parametrize(
-    ("mode", "key", "value", "as_json"),
+    ("head", "roster", "key"),
     [
-        ("codex", "guardrail.connectors.kiro.hook_fail_mode", "closed", False),
-        ("kiro", "guardrail.connectors.codex.hook_fail_mode", "closed", False),
-        ("codex", "guardrail.connectors.claudecode.hook_fail_mode", "closed", False),
-        ("codex", "guardrail.connectors.kiro.enabled", "false", False),
-        ("codex", "guardrail.connectors.kiro", '{"hook_fail_mode": "closed"}', True),
-        ("codex", "guardrail.connectors.kiro", '{"enabled": false, "hook_fail_mode": "closed"}', True),
+        # The primary comes from roster order or claw.mode: the new entry would become it.
+        ("", "  connectors:\n    kiro: {}\n", "guardrail.connectors.codex.hook_fail_mode"),
+        ("claw:\n  mode: codex\n", "  enabled: true\n", "guardrail.connectors.kiro.hook_fail_mode"),
+        ("claw:\n  mode: kiro\n", "  enabled: true\n", "guardrail.connectors.codex.hook_fail_mode"),
+        # A proxy primary is guarded only from the roster; a disabled primary guards nothing.
+        ("", "  connector: openclaw\n", "guardrail.connectors.kiro.hook_fail_mode"),
+        (
+            "", "  connector: openclaw\n  connectors:\n    openclaw:\n      enabled: false\n",
+            "guardrail.connectors.kiro.hook_fail_mode",
+        ),
+        (
+            "", "  connector: kiro\n  connectors:\n    kiro:\n      enabled: false\n",
+            "guardrail.connectors.codex.hook_fail_mode",
+        ),
+        ("", "  connector: kiro\n", "guardrail.connectors.openclaw.hook_fail_mode"),
     ],
 )
-def test_config_set_off_roster_entry_does_not_start_scanning_a_claw_mode_primary(
-    tmp_path: Path, mode: str, key: str, value: str, as_json: bool
+def test_config_set_of_an_off_roster_setting_that_would_select_it_is_refused(
+    tmp_path: Path, head: str, roster: str, key: str
 ) -> None:
-    # GAP-0588 review 2: on a claw.mode-only file the Go gate does not scan
-    # the selected connector hook calls (GAP-1953). Storing another entry
-    # beside it would need an entry for the primary, which starts scanning
-    # it, so the set is refused and config.yaml keeps its bytes.
+    # GAP-0588: writing that key alone would select the connector or leave the
+    # primary unguarded, so the set is refused and config.yaml keeps its bytes.
     app = _app(tmp_path, ["kiro"])
-    result, before, after = _set_in_file(
-        tmp_path, app, "  enabled: true\n", key, value, as_json=as_json, head=f"claw:\n  mode: {mode}\n"
-    )
+    result, before, after = _set_in_file(tmp_path, app, roster, key, "closed", head=head)
     assert result.exit_code != 0
     assert "connector selection requires setup" in result.output
-    assert f"would change whether DefenseClaw scans {mode} hook calls" in result.output
     assert after == before
-    assert not _go_hook_enabled(yaml.safe_load(before), mode)
 
 
 @pytest.mark.parametrize(
@@ -522,72 +475,24 @@ def test_config_set_off_roster_entry_does_not_start_scanning_a_claw_mode_primary
 def test_config_set_of_the_claw_mode_primary_itself_stays_available(
     tmp_path: Path, key: str, value: str, as_json: bool
 ) -> None:
-    # Benign twin: an edit that names the selected connector itself may give
-    # it its entry (GAP-1953), as before.
+    # Benign twin (GAP-1953): an edit that names the selected connector itself may give it its entry.
     app = _app(tmp_path, ["codex"])
     result, before, after = _set_in_file(
         tmp_path, app, "  enabled: true\n", key, value, as_json=as_json, head="claw:\n  mode: codex\n"
     )
     assert result.exit_code == 0, result.output
     assert after != before
-    assert _go_hook_enabled(yaml.safe_load(after), "codex")
 
 
-def test_hook_scanned_connectors_mirrors_the_go_gate_signals() -> None:
-    documents = [
-        {"claw": {"mode": "codex"}, "guardrail": {"enabled": True}},
-        {"guardrail": {"connector": "Claude-Code"}},
-        {"guardrail": {"connector": "kiro", "connectors": {"kiro": {}, "codex": {"enabled": False}}}},
-        {"guardrail": {"connectors": {"kiro": {"enabled": False}}}, "connector_hooks": {"kiro": {"enabled": True}}},
-        {"connector_hooks": {"codex": {"enabled": False}}, "codex": {"enabled": True}},
-        {"codex": {"enabled": True}, "claude_code": {"enabled": True}},
-        {"connector_hooks": {"cursor": {"enabled": True}}},
-        {"guardrail": {"connector": "openclaw", "connectors": {"openclaw": {"enabled": False}}}},
-    ]
-    names = {"claudecode", "codex", "kiro", "cursor", "openclaw"}
-    for document in documents:
-        expected = {name for name in names if _go_hook_enabled(document, name)}
-        assert cmd_config._hook_scanned_connectors(document) == expected, document
-
-
-@pytest.mark.parametrize(
-    ("roster", "keys"),
-    [
-        (
-            "  connector: claudecode\n  connectors:\n    claudecode: {}\n    codex:\n      enabled: false\n",
-            ("guardrail.connectors.claudecode",),
-        ),
-    ],
-)
-def test_config_unset_keeps_the_primary_on_the_roster(tmp_path: Path, roster: str, keys: tuple[str, ...]) -> None:
-    # GAP-0588 review 1: removing the primary's entry while another stays
-    # would make the runtime enumerate only the other connector.
+def test_config_unset_of_a_stored_setting_keeps_the_roster_as_it_was(tmp_path: Path) -> None:
     app = _app(tmp_path, ["claudecode"])
-    result, before, after = _unset_in_file(tmp_path, app, roster, *keys)
-    assert result.exit_code != 0
-    assert "connector selection requires setup" in result.output
-    assert after == before
-
-
-def test_config_unset_of_a_stored_entry_restores_the_roster(tmp_path: Path) -> None:
-    app = _app(tmp_path, ["claudecode"])
-    roster = "  connector: claudecode\n  connectors:\n    claudecode: {}\n    codex:\n      enabled: false\n"
+    roster = (
+        "  connector: claudecode\n  connectors:\n    claudecode: {}\n"
+        "    codex:\n      hook_fail_mode: closed\n"
+    )
     result, _before, after = _unset_in_file(tmp_path, app, roster, "guardrail.connectors.codex")
     assert result.exit_code == 0, result.output
     assert yaml.safe_load(after)["guardrail"]["connectors"] == {"claudecode": {}}
-
-
-def test_config_set_of_the_roster_may_drop_a_disabled_entry(tmp_path: Path) -> None:
-    # Benign twin: dropping a disabled entry guards nothing new and keeps the
-    # primary, as config unset guardrail.connectors.codex does.
-    app = _app(tmp_path, ["kiro"])
-    result, _before, after = _set_in_file(
-        tmp_path, app,
-        "  connector: kiro\n  connectors:\n    kiro: {}\n    codex:\n      enabled: false\n",
-        "guardrail.connectors", '{"kiro": {}}', as_json=True,
-    )
-    assert result.exit_code == 0, result.output
-    assert yaml.safe_load(after)["guardrail"]["connectors"] == {"kiro": {}}
 
 
 def test_config_set_existing_connector_setting_stays_available(tmp_path: Path) -> None:
@@ -674,6 +579,14 @@ def test_config_unset_rejects_selection_or_enable_change_without_retained_enable
 @pytest.mark.parametrize(
     ("roster", "key", "value"),
     [
+        (
+            "  connectors:\n    kiro:\n      enabled: false\n",
+            "guardrail.connectors.codex.hook_fail_mode", "closed",
+        ),
+        (
+            "  connector: openclaw\n  connectors:\n    openclaw:\n      enabled: false\n",
+            "guardrail.connectors.kiro.hook_fail_mode", "closed",
+        ),
         (
             "  connector: claudecode\n  connectors:\n    claudecode: {}\n",
             "guardrail.connector", "claude",

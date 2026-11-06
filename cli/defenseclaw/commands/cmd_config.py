@@ -1102,7 +1102,7 @@ def _refresh_stopped_gateway_hooks(before: object) -> list[str]:
     refreshed: list[str] = []
     with fail_mode_transaction_lock(after):
         for name, mode in changed:
-            if normalize_connector(name) in _PROXY_CONNECTORS:
+            if normalize_connector(name) in {"openclaw", "zeptoclaw"}:
                 notes.append(
                     f"{name} PATH shims read the saved fail-{mode} mode when they run; "
                     "their installed fallback is refreshed at the next gateway start."
@@ -1234,182 +1234,91 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
         )
     roster_change = parts == ["guardrail"] or parts[:2] == ["guardrail", "connectors"]
     selection_change = parts and parts[0] in {"guardrail", "claw"}
-    inert, stored = _inert_entry_changes(parts, parsed, _written_config()) if roster_change else ([], "")
-    named = _edit_connector_names(parts, parsed)
+    stored = _stored_connector_entry(parts, parsed)
 
     def _check_candidate(path: str, candidate: bytes) -> None:
         if roster_change:
             _check_guardrail_connector_roster(path, candidate)
-        _check_config_connector_selection(path, candidate, named=named)
+        _check_config_connector_selection(path, candidate, stored=stored)
 
     check_candidate = _check_candidate if selection_change else None
-    changes = [Change(key, parsed), *inert]
-    if _write_config_change(app, changes, expect_sha256, "set", check_candidate=check_candidate) and stored:
-        from defenseclaw.commands.cmd_guardrail import _connector_label
-
-        label = _connector_label(stored)
-        click.echo(
-            f"{label} is stored but not guarded: guardrail.connectors.{parts[2]}.enabled is false, so "
-            f"DefenseClaw does not set {label} up or scan it. To guard it run: "
-            f"defenseclaw guardrail enable --connector {stored}"
-        )
+    _write_config_change(app, [Change(key, parsed)], expect_sha256, "set", check_candidate=check_candidate)
 
 
-_PROXY_CONNECTORS = frozenset({"openclaw", "zeptoclaw"})
+def _stored_connector_entry(parts: list, parsed: object) -> str:
+    """The hook connector whose settings a ``config set`` stores under its own entry (GAP-0588).
 
-
-def _configured_connector_selection(document: object) -> tuple[set[str], str, set[str], set[str]]:
-    """Resolve what the written config guards, its primary, its disabled entries and its roster.
-
-    Mirrors the loaders: the primary is ``guardrail.connector``, else the
-    roster entry ``claw.mode`` names, else the first roster name, else
-    ``claw.mode`` (a missing ``claw.mode`` loads as OpenClaw). The roster
-    is what ``ActiveConnectors`` enumerates: the ``guardrail.connectors``
-    names, or the primary alone when the map is empty. The Go hook gates
-    scan a hook connector that has a roster entry or that
-    ``guardrail.connector`` names, unless its entry says ``enabled: false``;
-    a proxy connector is guarded only through the roster.
+    ``guardrail.connectors.<C>.<key>``, or the whole entry as a mapping,
+    writes only that key. A write that names ``enabled`` is not a store, and
+    a proxy connector cannot share the roster with a hook connector.
     """
+    if len(parts) < 3 or parts[:2] != ["guardrail", "connectors"] or not isinstance(parts[2], str):
+        return ""
+    if parts[3:4] == ["enabled"] or (len(parts) == 3 and (not isinstance(parsed, dict) or "enabled" in parsed)):
+        return ""
+    name = connector_paths.normalize(parts[2])
+    return "" if name in {"openclaw", "zeptoclaw"} else name
+
+
+def _named_hook_primary(document: object) -> str:
+    """The hook connector ``guardrail.connector`` names, unless its entry says ``enabled: false``.
+
+    The Go hook gate scans that connector whether or not the roster lists it
+    (``NamesConnector``); a proxy connector is set up only from the roster.
+    """
+    guardrail = document.get("guardrail") if isinstance(document, dict) else None
+    guardrail = guardrail if isinstance(guardrail, dict) else {}
+    name = guardrail.get("connector")
+    name = connector_paths.normalize(name) if isinstance(name, str) else ""
+    if name in {"", "openclaw", "zeptoclaw"}:
+        return ""
+    roster = guardrail.get("connectors")
+    for key, entry in (roster.items() if isinstance(roster, dict) else ()):
+        if isinstance(key, str) and connector_paths.normalize(key) == name and isinstance(entry, dict):
+            if entry.get("enabled") is False:
+                return ""
+    return name
+
+
+def _configured_connector_selection(document: object) -> tuple[set[str], str, set[str]]:
+    """Resolve the enabled roster, the primary and the listed names from the written config shape."""
     if not isinstance(document, dict):
-        return set(), "", set(), set()
+        return set(), "", set()
     guardrail = document.get("guardrail")
     guardrail = guardrail if isinstance(guardrail, dict) else {}
     claw = document.get("claw")
     claw = claw if isinstance(claw, dict) else {}
     primary = guardrail.get("connector")
     primary = connector_paths.normalize(primary) if isinstance(primary, str) and primary.strip() else ""
+    # A missing claw.mode loads as OpenClaw in Config.load and the Go loader.
     mode = claw.get("mode", "openclaw")
     mode = connector_paths.normalize(mode) if isinstance(mode, str) and mode.strip() else ""
     roster = guardrail.get("connectors")
-    if not isinstance(roster, dict) or not roster:
-        selected = primary or mode
-        named = {selected} if selected else set()
-        return set(named), selected, set(), named
-    names = {connector_paths.normalize(name) for name in roster if isinstance(name, str)}
-    disabled = {
-        connector_paths.normalize(name)
-        for name, entry in roster.items()
-        if isinstance(name, str) and isinstance(entry, dict) and entry.get("enabled") is False
-    }
-    guarded = names - disabled
-    if primary and primary not in disabled and primary not in _PROXY_CONNECTORS:
-        guarded.add(primary)
-    selected = primary or (mode if mode in names else min(names) if names else "")
-    return guarded, selected, disabled, names
-
-
-def _hook_scanned_connectors(document: object) -> set[str]:
-    """The connectors whose hook calls the Go gate scans because of the written config (GAP-0588).
-
-    Mirrors the configuration signals of ``agentHookEnabled``
-    (internal/gateway/agent_hook.go): a ``guardrail.connectors`` entry with
-    ``enabled: false`` turns a connector off; otherwise
-    ``connector_hooks.<name>.enabled`` (else the legacy ``claude_code`` or
-    ``codex`` section), a ``guardrail.connectors`` entry or
-    ``guardrail.connector`` turns it on. ``claw.mode`` is not a signal
-    (GAP-1953): on a claw.mode-only file, an entry for the selected
-    connector starts scanning its hooks.
-    """
-    if not isinstance(document, dict):
-        return set()
-    guardrail = document.get("guardrail")
-    guardrail = guardrail if isinstance(guardrail, dict) else {}
-    roster = guardrail.get("connectors")
-    roster = roster if isinstance(roster, dict) else {}
-    hooks = document.get("connector_hooks")
-    hooks = {str(name).lower(): entry for name, entry in hooks.items()} if isinstance(hooks, dict) else {}
-    scanned = {connector_paths.normalize(name) for name in roster if isinstance(name, str) and name.strip()}
-    disabled = {
-        connector_paths.normalize(name)
-        for name, entry in roster.items()
-        if isinstance(name, str) and isinstance(entry, dict) and entry.get("enabled") is False
-    }
-    primary = guardrail.get("connector")
-    if isinstance(primary, str) and primary.strip():
-        scanned.add(connector_paths.normalize(primary))
-    for name in {*hooks, *_LEGACY_HOOK_SECTIONS}:
-        section = hooks[name] if name in hooks else document.get(_LEGACY_HOOK_SECTIONS.get(name, ""))
-        if isinstance(section, dict) and section.get("enabled") is True:
-            scanned.add(name)
-    return scanned - disabled
-
-
-_LEGACY_HOOK_SECTIONS = {"claudecode": "claude_code", "codex": "codex"}
-
-
-def _edit_connector_names(parts: list, parsed: object) -> set[str]:
-    """The connectors a ``config set`` names in its key or, for a whole section, in its value."""
-    if parts[:2] == ["guardrail", "connectors"] and len(parts) > 2:
-        names = [parts[2]]
-    elif parts == ["guardrail", "connectors"] and isinstance(parsed, dict):
-        names = list(parsed)
-    elif parts == ["guardrail", "connector"]:
-        names = [parsed]
-    elif parts == ["guardrail"] and isinstance(parsed, dict):
-        roster = parsed.get("connectors")
-        names = [*(roster if isinstance(roster, dict) else ()), parsed.get("connector")]
-    else:
-        names = []
-    return {connector_paths.normalize(name) for name in names if isinstance(name, str) and name.strip()}
-
-
-def _inert_entry_changes(parts: list, parsed: object, written: object) -> tuple[list, str]:
-    """The changes that store a new off-roster entry inert, and the connector it stores (GAP-0588).
-
-    ``config set guardrail.connectors.<C>[.<key>]`` for a hook connector the
-    roster does not list writes the entry with ``enabled: false``: the
-    gateway does not set ``<C>`` up and its hooks are not scanned until
-    ``guardrail enable --connector <C>``. A primary that was on the roster
-    only through ``guardrail.connector`` or ``claw.mode`` gets its own entry,
-    and one that came from roster order is pinned in ``guardrail.connector``,
-    so the roster keeps it and the new name cannot become the primary. A
-    proxy connector cannot share the roster, and an edit that enables
-    ``<C>`` is left for the selection check to refuse. So is the entry of a
-    claw.mode-only primary whose hooks were not scanned before: the entry
-    would start scanning them (``_hook_scanned_connectors``).
-    """
-    from defenseclaw.config_writer import Change
-
-    if len(parts) < 3 or parts[:2] != ["guardrail", "connectors"] or not isinstance(parts[2], str):
-        return [], ""
-    if not isinstance(written, dict) or (len(parts) == 3 and not isinstance(parsed, dict)):
-        return [], ""
-    _, primary, disabled, listed = _configured_connector_selection(written)
-    name = connector_paths.normalize(parts[2])
-    if not primary or name == primary or name in listed or name in _PROXY_CONNECTORS:
-        return [], ""
-    if primary in _PROXY_CONNECTORS and primary not in disabled:
-        return [], ""
-    sets_enabled = parts[3:4] == ["enabled"] or (len(parts) == 3 and "enabled" in parsed)
-    changes = [] if sets_enabled else [Change(f"guardrail.connectors.{parts[2]}.enabled", False)]
-    guardrail = written.get("guardrail")
-    guardrail = guardrail if isinstance(guardrail, dict) else {}
-    roster = guardrail.get("connectors")
-    if not isinstance(roster, dict) or not roster:
-        changes.append(Change(f"guardrail.connectors.{primary}", {}))
-    explicit = guardrail.get("connector")
-    claw = written.get("claw")
-    mode = claw.get("mode", "openclaw") if isinstance(claw, dict) else "openclaw"
-    mode = connector_paths.normalize(mode) if isinstance(mode, str) and mode.strip() else ""
-    if not (isinstance(explicit, str) and explicit.strip()) and primary != mode:
-        changes.append(Change("guardrail.connector", primary))
-    return changes, name
+    if isinstance(roster, dict) and roster:
+        enabled = {
+            connector_paths.normalize(name)
+            for name, entry in roster.items()
+            if isinstance(name, str) and isinstance(entry, dict) and entry.get("enabled") is not False
+        }
+        names = sorted(connector_paths.normalize(name) for name in roster if isinstance(name, str))
+        selected = primary or (mode if mode in names else names[0] if names else "")
+        return enabled, selected, set(names)
+    selected = primary or mode
+    return ({selected} if selected else set()), selected, ({selected} if selected else set())
 
 
 def _check_config_connector_selection(
-    path: str, candidate: bytes, *, allow_removal: bool = False, named: set[str] | frozenset[str] = frozenset()
+    path: str, candidate: bytes, *, allow_removal: bool = False, stored: str = ""
 ) -> None:
     """A settings edit cannot select, enable or unguard a connector as a side effect (GAP-0588).
 
-    It may add a disabled entry to the roster (``_inert_entry_changes``)
-    while the primary and every guarded connector stay as they were. The
-    primary changes, a connector starts being guarded, and a listed
-    connector that is not disabled leaves the roster or its guard only
-    through setup or a connector command; a whole-entry unset may remove its own entry (it says
-    so, GAP-1021), but not the primary's while other entries stay listed.
-    Whether the Go hook gate scans a connector (``_hook_scanned_connectors``)
-    changes only through a set that names the selected connector itself
-    (``named``, GAP-1953); an unset may only stop the scanning.
+    ``stored`` is the connector of a set that writes one setting under its
+    own entry (``_stored_connector_entry``). When the roster did not list it
+    and the primary was guarded, the new entry joins the roster beside the
+    primary, which stays the primary and stays guarded: a primary that
+    ``guardrail.connector`` names is still scanned off the roster. Nothing
+    else is written. Every other change of the enabled roster or the primary
+    needs setup or a connector command.
     """
     from defenseclaw import config_writer
 
@@ -1418,23 +1327,20 @@ def _check_config_connector_selection(
         return
     current, _, _ = config_writer._read_current(path)
     before = config_writer._parse_config_document(current) if current else {}
-    guarded_before, primary_before, disabled_before, listed_before = _configured_connector_selection(before)
-    guarded_after, primary_after, _, listed_after = _configured_connector_selection(after)
-    if allow_removal:
-        changed = guarded_after - guarded_before
-    else:
-        changed = (guarded_after ^ guarded_before) | (listed_before - listed_after - disabled_before)
-    primary_left = primary_before in listed_before and primary_after not in listed_after
-    scanned_before = _hook_scanned_connectors(before)
-    scanned_after = _hook_scanned_connectors(after)
-    rescanned = scanned_after - scanned_before if allow_removal else scanned_after ^ scanned_before
-    rescanned -= set(named) & {primary_before}
-    selection = primary_after != primary_before or changed or primary_left
-    if selection or rescanned:
-        names = ", ".join(sorted(rescanned))
-        reason = "" if selection else f": the edit would change whether DefenseClaw scans {names} hook calls"
+    active_before, primary_before, listed_before = _configured_connector_selection(before)
+    active_after, primary_after, _ = _configured_connector_selection(after)
+    # A whole-entry unset explicitly removes its guardrail scope and already
+    # reports that to the operator. It may drop an enabled name, but cannot
+    # select a new primary or enable another entry in the same batch.
+    gained = active_after - active_before
+    lost = set() if allow_removal else active_before - active_after
+    named = _named_hook_primary(before)
+    if stored and stored not in listed_before and primary_before in active_before | {named} - {""}:
+        gained.discard(stored)
+        lost.discard(named)
+    if gained or lost or primary_after != primary_before:
         raise config_writer.ConfigWriteError(
-            f"connector selection requires setup{reason}; use defenseclaw setup or a connector command "
+            "connector selection requires setup; use defenseclaw setup or a connector command "
             "to change the active connector"
         )
 
@@ -1458,11 +1364,11 @@ def _check_guardrail_connector_roster(_path: str, candidate: bytes) -> None:
         for name, entry in roster.items()
         if isinstance(name, str) and isinstance(entry, dict) and entry.get("enabled") is not False
     }
-    proxies = sorted(enabled & _PROXY_CONNECTORS)
+    proxies = sorted(enabled & {"openclaw", "zeptoclaw"})
     if proxies:
         proxy = proxies[0]
         others = sorted(configured - {proxy})
-        label = "hook connectors" if not set(others) & _PROXY_CONNECTORS else "other connectors"
+        label = "hook connectors" if not set(others) & {"openclaw", "zeptoclaw"} else "other connectors"
         raise config_writer.ConfigWriteError(
             f"{proxy} needs a proxy binding and cannot share a gateway process "
             f"with {label} ({', '.join(others)})."
