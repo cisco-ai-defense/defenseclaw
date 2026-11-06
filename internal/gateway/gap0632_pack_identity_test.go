@@ -1,0 +1,170 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"slices"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+)
+
+func TestGAP0632PinnedPackIdentityKeepsStateProtection(t *testing.T) {
+	root := guardrailPoliciesRoot(t)
+	home := t.TempDir()
+	state := filepath.Join(home, ".defenseclaw", "config.yaml")
+	project := filepath.Join(home, "project")
+	for _, dir := range []string{filepath.Dir(state), project} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(state, []byte("guardrail: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	chain, ok := guardrail.ToolChainDefinitionByID(guardrail.ToolChainPrivilegeDiscoveryThenElevation)
+	if !ok {
+		t.Fatal("missing built-in chain definition")
+	}
+	chainMask := chain.Step1Bit | chain.Step2Bit | chain.Step3Bit | chain.Step4Bit | chain.MutationBit
+
+	rows := []struct {
+		name, source, folder, selected string
+		copy, legacy, disabled         bool
+	}{
+		{name: "shipped strict", source: "strict"},
+		{name: "pinned strict copy", source: "strict", folder: "strict", copy: true},
+		{name: "renamed strict copy", source: "strict", folder: "operator-pack", copy: true},
+		{name: "pinned older strict copy", source: "strict", folder: "operator-pack", copy: true, legacy: true},
+		{name: "strict copy with rule disabled", source: "strict", folder: "operator-pack", copy: true, disabled: true},
+		{name: "shipped default", source: "default"},
+		{name: "pinned default copy", source: "default", folder: "strict", copy: true},
+		{name: "older default copy named strict", source: "default", folder: "operator-pack", selected: "strict", copy: true, legacy: true},
+		{name: "shipped permissive", source: "permissive"},
+		{name: "pinned permissive copy", source: "permissive", folder: "strict", copy: true},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			dir := filepath.Join(root, row.source)
+			cfg := &config.Config{PolicyDir: filepath.Dir(root)}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Enabled = true
+			cfg.Guardrail.RulePack = row.source
+			if row.disabled {
+				cfg.Guardrail.Rules.Disable = []string{"tamper.detector_state_write"}
+			}
+			if row.copy {
+				dir = filepath.Join(t.TempDir(), row.folder)
+				if err := os.CopyFS(dir, os.DirFS(filepath.Join(root, row.source))); err != nil {
+					t.Fatal(err)
+				}
+				if row.legacy {
+					if err := os.Remove(filepath.Join(dir, guardrail.PackManifestFile)); err != nil && !os.IsNotExist(err) {
+						t.Fatal(err)
+					}
+				}
+				pin, err := guardrail.RulePackDigest(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				selected := row.selected
+				if selected == "" {
+					selected = "operator"
+				}
+				cfg.Guardrail.RulePack = selected
+				cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{
+					selected: {Path: dir, Digest: "sha256:" + pin},
+				}
+			}
+			t.Cleanup(func() { pendingPackPostures.Delete(dir); packPostures.Delete(dir) })
+			pack, err := loadGlobalRulePack(guardrail.NewRulePackCache(), cfg, "global")
+			if err != nil {
+				t.Fatal(err)
+			}
+			generation, err := compileRulePackCategories(pack)
+			if err != nil {
+				t.Fatal(err)
+			}
+			buildThresholdTable(cfg, nil)
+			wantTier := row.source
+			if row.legacy {
+				wantTier = "default"
+			}
+			if got := cfg.HookPolicyTierForConnector("codex"); got != wantTier {
+				t.Errorf("hook policy tier = %q, want %q", got, wantTier)
+			}
+			chainProjection := toolChainProjectionForPolicyPosture(cfg, "codex", guardrail.ToolChainProjection{
+				DetectionStepMask: chainMask,
+			})
+			wantChain := uint64(0)
+			if row.source == "strict" && !row.legacy {
+				wantChain = chainMask
+			}
+			if chainProjection.DetectionStepMask != wantChain {
+				t.Errorf("chain posture mask = %d, want %d", chainProjection.DetectionStepMask, wantChain)
+			}
+			if row.copy && (!row.legacy || row.source == "default") {
+				shipped := ConfigThresholds(&config.Config{PolicyDir: filepath.Dir(root), Guardrail: config.GuardrailConfig{RulePack: row.source}}, "")
+				copied := resolveThresholds(cfg, "")
+				if copied.Block != shipped.Block || copied.Alert != shipped.Alert {
+					t.Errorf("copied pack levels = %+v, shipped = %+v", copied, shipped)
+				}
+			}
+			for _, command := range []struct {
+				name, text string
+				block      bool
+			}{
+				{"protected state", "echo marker > " + state, true},
+				{"home variable state", `printf marker > "$HOME/.defenseclaw/config.yaml"`, true},
+				{"value variable state", `printf "$X" > "$HOME"/.defenseclaw/config.yaml`, true},
+				{"tilde state", "printf marker >> ~/.defenseclaw/config.yaml", true},
+				{"literal home state", "printf marker > " + filepath.Join(home, ".defenseclaw", "config.yaml"), true},
+				{"state operand with expanded output", "truncate -s 0 " + state + " > out-*.txt", true},
+				{"ordinary project file", "echo marker > " + filepath.Join(project, "notes.txt"), false},
+				{"ordinary expanded output", "printf marker > out-*.txt", false},
+				{"state path mention", `printf '%s\n' "$HOME/.defenseclaw/config.yaml" > notes.txt`, false},
+			} {
+				t.Run(command.name, func(t *testing.T) {
+					findings := dispatchTrustedAction(context.Background(), trustedActionRequest{
+						Input:     actionfacts.Input{Tool: "Bash", Command: command.text, CWD: project, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX},
+						Connector: "codex", EnforcementCapable: true, generation: generation,
+					})
+					if got := singleProfileActionForFindings(cfg, "codex", findings, false, true) == guardrailActionBlock; got != command.block {
+						t.Fatalf("block=%t, want %t; findings=%v", got, command.block, FindingStrings(findings))
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestGAP0632StateProtectionSurvivesRulePackRemoval(t *testing.T) {
+	home := t.TempDir()
+	state := filepath.Join(home, ".defenseclaw", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(state), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(state, []byte("guardrail: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	categories := cloneRuleCategories(defaultRuleCategories())
+	for index := range categories {
+		categories[index].Rules = slices.DeleteFunc(categories[index].Rules, func(rule PatternRule) bool {
+			return rule.ID == "tamper.detector_state_write"
+		})
+	}
+	generation := mustCompileRulePackGeneration(categories)
+	findings := dispatchTrustedAction(context.Background(), trustedActionRequest{
+		Input:     actionfacts.Input{Tool: "Bash", Command: "echo marker > " + state, CWD: home, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX},
+		Connector: "codex", EnforcementCapable: true, generation: generation,
+	})
+	if finding := findingWithID(findings, "tamper.detector_state_write"); finding == nil || !finding.contributesToEnforcement() {
+		t.Fatalf("state protection missing after pack rule removal: %v", FindingStrings(findings))
+	}
+}

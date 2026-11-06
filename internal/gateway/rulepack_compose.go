@@ -217,15 +217,16 @@ func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s ru
 		// no migrated_literal marks: its migration record names the rules.
 		base = guardrail.MarkMigratedLiteralRules(base, config.ExpressedRulePackRules(migrationConfigPath(cfg)))
 	}
-	notePackPosture(s.dir, guardrail.ReadPackPosture(s.dir))
-	if len(s.layers) == 0 {
-		return base, nil
+	if len(s.layers) != 0 {
+		base, err = guardrail.Compose(base, protectionPackSource, guardrailCustomizations(s.layers)...)
+		if err != nil {
+			return nil, fmt.Errorf("%s rule pack %q: %w", scope, s.dir, err)
+		}
 	}
-	composed, err := guardrail.Compose(base, protectionPackSource, guardrailCustomizations(s.layers)...)
-	if err != nil {
-		return nil, fmt.Errorf("%s rule pack %q: %w", scope, s.dir, err)
-	}
-	return composed, nil
+	// Resolve levels from the same loaded bytes whose digest was checked above.
+	// Reading the path again could observe a later manifest edit.
+	notePackPosture(s.dir, base.Posture())
+	return base, nil
 }
 
 // reportUnrebasedRulePacks raises an alert for each 0.8.x custom pack the

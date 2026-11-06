@@ -307,7 +307,8 @@ func (rp *RulePack) mergeSensitiveTool(override SensitiveToolOverride) {
 func cloneRulePackForCompose(base *RulePack) *RulePack {
 	out := &RulePack{
 		JudgeConfigs: base.JudgeConfigs, LocalPatterns: base.LocalPatterns,
-		manifestDigest: base.manifestDigest, compilation: base.compilation,
+		manifestDigest: base.manifestDigest, manifestPosture: base.manifestPosture,
+		compilation: base.compilation,
 	}
 	if base.Suppressions != nil {
 		supps := *base.Suppressions
