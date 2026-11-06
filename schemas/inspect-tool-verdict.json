@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.io/schemas/inspect-tool-verdict.json",
+  "title": "DefenseClaw inspect tool verdict",
+  "description": "Response contract for /api/v1/inspect/tool. Action and mode determine enforcement; raw_action and severity describe the decision and do not override action.",
+  "type": "object",
+  "required": ["action", "severity", "reason", "mode"],
+  "properties": {
+    "action": { "type": "string", "enum": ["allow", "alert", "confirm", "block"] },
+    "raw_action": { "type": "string" },
+    "severity": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Informational label. Known labels are listed in knownSeverity; new labels do not change the effective action."
+    },
+    "reason": { "type": "string" },
+    "mode": { "type": "string", "enum": ["action", "observe"] },
+    "approval_timeout_ms": { "type": "integer", "minimum": 0 }
+  },
+  "$defs": {
+    "knownSeverity": {
+      "type": "string",
+      "enum": ["NONE", "INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL", "WARN"]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "mode": { "const": "observe" } }, "required": ["mode"] },
+      "then": { "properties": { "action": { "const": "allow" } } }
+    }
+  ],
+  "additionalProperties": true
+}

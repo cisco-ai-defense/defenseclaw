@@ -21,10 +21,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	jsonschema "github.com/santhosh-tekuri/jsonschema/v5"
 )
 
 // inspectTool posts one tool check to /api/v1/inspect/tool and returns the
@@ -50,6 +53,83 @@ func (fixture auditFailureHookFixture) inspectTool(t *testing.T, body map[string
 
 func benignInspectCall() map[string]any {
 	return map[string]any{"tool": "exec", "args": map[string]any{"command": "echo ok"}}
+}
+
+func TestInspectToolVerdictContractMatchesOpenClawConsumer(t *testing.T) {
+	raw, err := os.ReadFile("../../schemas/inspect-tool-verdict.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var contract struct {
+		Properties struct {
+			Action struct {
+				Enum []string `json:"enum"`
+			} `json:"action"`
+			Mode struct {
+				Enum []string `json:"enum"`
+			} `json:"mode"`
+		} `json:"properties"`
+		Defs struct {
+			KnownSeverity struct {
+				Enum []string `json:"enum"`
+			} `json:"knownSeverity"`
+		} `json:"$defs"`
+	}
+	if err := json.Unmarshal(raw, &contract); err != nil {
+		t.Fatal(err)
+	}
+	wantActions := []string{guardrailActionAllow, guardrailActionAlert, guardrailActionConfirm, guardrailActionBlock}
+	if !slices.Equal(contract.Properties.Action.Enum, wantActions) {
+		t.Fatalf("inspect actions %v, want %v", contract.Properties.Action.Enum, wantActions)
+	}
+	if !slices.Equal(contract.Properties.Mode.Enum, []string{"action", "observe"}) {
+		t.Fatalf("inspect modes %v", contract.Properties.Mode.Enum)
+	}
+	wantSeverities := []string{"INFO", "WARN"} // Also emitted outside the ranked rule findings.
+	for severity := range severityRank {
+		wantSeverities = append(wantSeverities, severity)
+	}
+	slices.Sort(wantSeverities)
+	knownSeverities := slices.Clone(contract.Defs.KnownSeverity.Enum)
+	slices.Sort(knownSeverities)
+	if !slices.Equal(knownSeverities, wantSeverities) {
+		t.Fatalf("inspect severities %v, want %v", knownSeverities, wantSeverities)
+	}
+
+	compiler := jsonschema.NewCompiler()
+	compiler.Draft = jsonschema.Draft2020
+	if err := compiler.AddResource("inspect-tool-verdict.json", bytes.NewReader(raw)); err != nil {
+		t.Fatal(err)
+	}
+	schema, err := compiler.Compile("inspect-tool-verdict.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, tier, mode string
+		fail             bool
+	}{
+		{name: "healthy default"},
+		{name: "degraded default", fail: true},
+		{name: "degraded permissive", tier: "permissive", fail: true},
+		{name: "degraded strict", tier: "strict", fail: true},
+		{name: "observe default", mode: "observe"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newAuditFailureHookFixture(t, "")
+			if tc.tier != "" {
+				fixture.api.scannerCfg.Guardrail.RulePack = tc.tier
+			}
+			if tc.mode != "" {
+				fixture.api.scannerCfg.Guardrail.Mode = tc.mode
+			}
+			fixture.emitter.fail = tc.fail
+			out := fixture.inspectTool(t, benignInspectCall())
+			if err := schema.Validate(out); err != nil {
+				t.Fatalf("inspect verdict %v does not match the shared contract: %v", out, err)
+			}
+		})
+	}
 }
 
 // GAP-0593: the inspect route (the OpenClaw plugin's tool and prompt checks)

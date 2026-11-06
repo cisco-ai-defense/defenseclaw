@@ -17,6 +17,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readFileSync } from "node:fs";
 import type { ScanResult } from "../types.js";
 
 // --- Hoisted mocks (available before module-level vi.mock factories) ---
@@ -155,6 +156,110 @@ describe("DefenseClaw OpenClaw Plugin", () => {
   });
 
   describe("before_tool_call approvals", () => {
+    it("uses the shared inspect contract for every known action and severity (GAP-0609)", async () => {
+      const contract = JSON.parse(readFileSync(
+        new URL("../../../../schemas/inspect-tool-verdict.json", import.meta.url), "utf8",
+      )) as {
+        properties: { action: { enum: string[] }; mode: { enum: string[] } };
+        $defs: { knownSeverity: { enum: string[] } };
+      };
+      expect(contract.properties.mode.enum).toEqual(["action", "observe"]);
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        for (const action of contract.properties.action.enum) {
+          for (const rawAction of contract.properties.action.enum) {
+            for (const severity of contract.$defs.knownSeverity.enum) {
+              mockDaemonClient.postRaw.mockResolvedValueOnce(rawAnswer(JSON.stringify({
+                action, raw_action: rawAction, severity, reason: "contract sample", mode: "action",
+              })));
+              const result = await listeners.before_tool_call(
+                { toolName: "exec", params: { command: "echo ok" } },
+                { sessionKey: "agent:main:main", runId: "run-1", toolName: "exec" },
+              );
+              if (action === "block") expect(result).toMatchObject({ block: true });
+              else if (action === "confirm") expect(result).toHaveProperty("requireApproval");
+              else expect(result).toBeUndefined();
+            }
+          }
+        }
+      } finally {
+        warn.mockRestore();
+        log.mockRestore();
+      }
+    });
+
+    it("keeps a future informational severity from changing an explicit allow", async () => {
+      mockDaemonClient.postRaw.mockResolvedValue(rawAnswer(JSON.stringify({
+        action: "allow", raw_action: "future-decision", severity: "FUTURE_LABEL",
+        reason: "new informational label", mode: "action",
+      })));
+      await expect(listeners.before_tool_call(
+        { toolName: "exec", params: { command: "echo ok" } },
+        { sessionKey: "agent:main:main", runId: "run-1", toolName: "exec" },
+      )).resolves.toBeUndefined();
+    });
+
+    it("honors the gateway's degraded-audit allow and shows its warning (GAP-0609)", async () => {
+      mockDaemonClient.postRaw.mockResolvedValue(
+        rawAnswer(JSON.stringify({
+          action: "allow",
+          raw_action: "alert",
+          severity: "WARN",
+          reason: "DefenseClaw audit is degraded: the record could not be written.",
+          mode: "action",
+        })),
+      );
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const result = await listeners.before_tool_call(
+          { toolName: "exec", params: { command: "echo ok" } },
+          { sessionKey: "agent:main:main", runId: "run-1", toolName: "exec" },
+        );
+        expect(result).toBeUndefined();
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining("audit is degraded"));
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it("keeps the healthy allow and the strict audit block", async () => {
+      const call = () => listeners.before_tool_call(
+        { toolName: "exec", params: { command: "echo ok" } },
+        { sessionKey: "agent:main:main", runId: "run-1", toolName: "exec" },
+      );
+      mockDaemonClient.postRaw.mockResolvedValueOnce(rawAnswer(JSON.stringify({
+        action: "allow", raw_action: "allow", severity: "NONE", reason: "", mode: "action",
+      })));
+      await expect(call()).resolves.toBeUndefined();
+
+      mockDaemonClient.postRaw.mockResolvedValueOnce(rawAnswer(JSON.stringify({
+        action: "block", raw_action: "block", severity: "HIGH",
+        reason: "DefenseClaw could not write the audit record.", mode: "action",
+      })));
+      await expect(call()).resolves.toMatchObject({
+        block: true,
+        blockReason: expect.stringContaining("could not write the audit record"),
+      });
+    });
+
+    it("shows the degraded-audit warning for an allowed message tool", async () => {
+      mockDaemonClient.postRaw.mockResolvedValue(rawAnswer(JSON.stringify({
+        action: "allow", raw_action: "alert", severity: "WARN",
+        reason: "DefenseClaw audit is degraded: the record could not be written.", mode: "action",
+      })));
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await expect(listeners.before_tool_call(
+          { toolName: "message", params: { to: "team@example.test", content: "status update" } },
+          { sessionKey: "agent:main:main", runId: "run-1", toolName: "message" },
+        )).resolves.toBeUndefined();
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining("audit is degraded"));
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
     it("an unanswered approval says where OpenClaw shows approvals (GAP-1958)", async () => {
       mockDaemonClient.postRaw.mockResolvedValue(
         rawAnswer(
@@ -340,6 +445,19 @@ describe("DefenseClaw OpenClaw Plugin", () => {
           { sessionKey: "agent:main:main", runId: "run-1", toolName: "exec" },
         ),
       ).resolves.toMatchObject({ block: true });
+    });
+
+    it("fails closed when the effective action is missing", async () => {
+      mockDaemonClient.postRaw.mockResolvedValue(rawAnswer(JSON.stringify({
+        raw_action: "allow", severity: "WARN", reason: "", mode: "action",
+      })));
+      await expect(listeners.before_tool_call(
+        { toolName: "exec", params: { command: "echo ok" } },
+        { sessionKey: "agent:main:main", runId: "run-1", toolName: "exec" },
+      )).resolves.toMatchObject({
+        block: true,
+        blockReason: expect.stringContaining("sidecar returned invalid verdict"),
+      });
     });
   });
 
