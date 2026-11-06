@@ -51,7 +51,14 @@ func TestGAP0617InheritedSocketResponder(t *testing.T) {
 		{name: "different claimed process", claimedPID: strconv.Itoa(os.Getpid())},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "sandbox.sock")
+			// Unix socket paths have a small kernel limit. Use a short private
+			// directory even when the test runner has a long TMPDIR.
+			dir, err := os.MkdirTemp("/tmp", "g617-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(dir) })
+			path := filepath.Join(dir, "s")
 			ln, err := net.Listen("unix", path)
 			if err != nil {
 				t.Fatal(err)

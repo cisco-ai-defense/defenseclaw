@@ -25,7 +25,7 @@ type verifiedDoctorStatusAPI struct {
 }
 
 func (a verifiedDoctorStatusAPI) StatusWithPeer(ctx context.Context) (*sandboxapi.Status, int, error) {
-	st, err := a.API.Status(ctx)
+	st, err := a.Status(ctx)
 	return st, a.pid, err
 }
 
