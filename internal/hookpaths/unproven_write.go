@@ -1825,15 +1825,16 @@ func protectedReachFromTextWithStatePrepared(command, cwd, home, stateRoot strin
 	seen := map[string]bool{}
 	text := strings.ReplaceAll(strings.ReplaceAll(command, "${HOME}/", home+"/"), "$HOME/", home+"/")
 	for _, quoted := range unprovenQuotedPath {
-		matches := quoted.FindAllStringSubmatch(text, 257)
-		if len(matches) > 256 {
-			return true
-		}
-		for _, match := range matches {
-			if len(match[1]) > MaxWriteTargetPathBytes || unprovenPathToken.FindString(match[1]) == match[1] {
+		for rest := text; rest != ""; {
+			match := quoted.FindStringSubmatchIndex(rest)
+			if match == nil {
+				break
+			}
+			candidate := rest[match[2]:match[3]]
+			rest = rest[match[1]:]
+			if len(candidate) > MaxWriteTargetPathBytes || unprovenPathToken.FindString(candidate) == candidate {
 				continue
 			}
-			candidate := match[1]
 			if candidate == "~" || strings.HasPrefix(candidate, "~/") {
 				candidate = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(candidate, "~"), "/"))
 			}
@@ -1842,16 +1843,38 @@ func protectedReachFromTextWithStatePrepared(command, cwd, home, stateRoot strin
 			}
 		}
 	}
-	tokens := unprovenPathToken.FindAllStringIndex(text, 513)
-	if len(tokens) > 512 {
-		return true // The path reach scan itself exceeded its proof bound.
-	}
-	for _, position := range tokens {
-		token := text[position[0]:position[1]]
+	segmentStart, scanned := 0, 0
+	segmentHasWord, segmentHasDoubleDash := false, false
+	for offset := 0; offset < len(text); {
+		position := unprovenPathToken.FindStringIndex(text[offset:])
+		if position == nil {
+			break
+		}
+		start, end := offset+position[0], offset+position[1]
+		offset = end
+		for i := scanned; i < start; i++ {
+			switch text[i] {
+			case ';', '|', '&', '\n':
+				segmentStart = i + 1
+				segmentHasWord, segmentHasDoubleDash = false, false
+			default:
+				if text[i] != ' ' && text[i] != '\t' && text[i] != '\r' {
+					segmentHasWord = true
+				}
+				if i >= segmentStart+3 && text[i-3:i+1] == " -- " {
+					segmentHasDoubleDash = true
+				}
+			}
+		}
+		scanned = start
+		token := text[start:end]
 		if seen[token] || len(token) > MaxWriteTargetPathBytes || token == "." || token == ".." {
 			continue
 		}
-		if stateRoot != "" && !recoveredTextOperandCandidate(text[:position[0]], token) {
+		if stateRoot != "" && (!segmentHasWord ||
+			strings.HasSuffix(text[:start], "$(") || strings.HasSuffix(text[:start], "${") ||
+			strings.HasPrefix(token, "-") && !strings.HasSuffix(text[:start], "'") &&
+				!strings.HasSuffix(text[:start], "\"") && !segmentHasDoubleDash) {
 			continue
 		}
 		seen[token] = true
@@ -1870,21 +1893,6 @@ func protectedReachFromTextWithStatePrepared(command, cwd, home, stateRoot strin
 		}
 	}
 	return false
-}
-
-// A recovered command word and its option names are not write targets.
-// Keep every other word as a possible operand, including bare relative
-// names, so a known link is still resolved through the file system.
-func recoveredTextOperandCandidate(before, token string) bool {
-	segment := before[strings.LastIndexAny(before, ";|&\n")+1:]
-	if strings.HasPrefix(token, "-") && !strings.HasSuffix(before, "'") &&
-		!strings.HasSuffix(before, "\"") && !strings.Contains(segment, " -- ") {
-		return false
-	}
-	if strings.HasSuffix(before, "$(") || strings.HasSuffix(before, "${") {
-		return false
-	}
-	return strings.TrimSpace(segment) != ""
 }
 
 func boundedProtectedGlobReach(pattern, cwd string, protected protectedFiles, ssh string) bool {

@@ -135,6 +135,9 @@ func (m *TargetMemo) protectedReachNames(home string, sshOnly bool) reachNames {
 		for _, name := range activeStateTrees {
 			addResolved(filepath.Join(state, name), names.addTree)
 		}
+		if !SharePath(state) {
+			m.addLinkedProtectedTreeNames(&names)
+		}
 	}
 	if !SharePath(ssh) {
 		if resolved, ok := m.resolveWriteTarget(ssh); ok {
@@ -154,6 +157,50 @@ func (m *TargetMemo) protectedReachNames(home string, sshOnly bool) reachNames {
 		m.mu.Unlock()
 	}
 	return names
+}
+
+// A linked child of an active state tree makes its resolved destination part
+// of that tree. Enumerate directories once per evaluation, following only
+// linked directories and recording linked files as exact protected names.
+func (m *TargetMemo) addLinkedProtectedTreeNames(names *reachNames) {
+	queue := append([]string(nil), names.trees...)
+	seen := make(map[string]bool)
+	for len(queue) != 0 {
+		dir := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			path := filepath.Join(dir, entry.Name())
+			if entry.IsDir() {
+				queue = append(queue, path)
+				continue
+			}
+			if entry.Type()&os.ModeSymlink == 0 {
+				continue
+			}
+			resolved, ok := m.resolveWriteTarget(path)
+			if !ok {
+				continue
+			}
+			info, err := PathStat(path)
+			if err != nil {
+				continue
+			}
+			if info.IsDir() {
+				names.addTree(resolved)
+				queue = append(queue, resolved)
+			} else if info.Mode().IsRegular() {
+				names.addFile(resolved)
+			}
+		}
+	}
 }
 
 // ProtectedReach grades a write target against both spellings and file
