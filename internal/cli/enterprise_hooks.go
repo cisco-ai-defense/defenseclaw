@@ -35,6 +35,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -778,8 +779,9 @@ type enterpriseHookReconcileRun struct {
 	Rows                []enterpriseHookReconcileRow
 	Failures            int
 	Pending             int
-	Repairs             int      `json:"-"`
-	RestoredPaths       []string `json:"-"` // owned files returned to the last verified fingerprint
+	Repairs             int             `json:"-"`
+	RestoredPaths       []string        `json:"-"` // owned files returned to the last verified fingerprint
+	RepairedTargets     map[string]bool `json:"-"` // target keys whose worker reported a repair
 	StateErr            error
 	WatchDirs           []string
 	WatchExclusiveFiles []string // DC-only writers: react to any event
@@ -3496,10 +3498,8 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		// filesystem event gets a pass. Retain the file state at the start of
 		// every standalone Unix pass so that restoration belongs to this pass.
 		var beforeOwned, lastVerifiedOwned map[string]string
-		var beforeOwnedInfo map[string]os.FileInfo
 		if !legacyWatch && runtime.GOOS != "windows" {
 			beforeOwned = make(map[string]string, len(exclusiveOwned))
-			beforeOwnedInfo = enterpriseHookWatchOwnedFileInfo(exclusiveOwned)
 			lastVerifiedOwned = maps.Clone(ownedSnapshot)
 			takeEnterpriseHookOwnedSnapshot(beforeOwned, exclusiveOwned, nil, enterpriseHookOwnedFileFingerprint)
 		}
@@ -3564,17 +3564,14 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		for k, v := range ownedSnapshot {
 			foundSnapshot[k] = v
 		}
-		// Read the final content after the change-time sample. A write that
-		// starts between these reads must not be reported as a completed
-		// restoration while its new bytes are still present.
-		afterOwnedInfo := map[string]os.FileInfo(nil)
-		if beforeOwned != nil {
-			afterOwnedInfo = enterpriseHookWatchOwnedFileInfo(exclusiveOwned)
-		}
 		takeEnterpriseHookOwnedSnapshot(ownedSnapshot, exclusiveOwned, sharedOwned, enterpriseHookOwnedFileFingerprint)
 		if beforeOwned != nil {
+			var observedDrift map[string]bool
+			if observed, ok := reconcileCtx.Value(enterpriseHookWatchPassWritesKey{}).(*enterpriseHookWatchPassWrites); ok {
+				observedDrift = observed.snapshot()
+			}
 			run.RestoredPaths = enterpriseHookWatchRestoredOwnedFiles(previousRun, lastVerifiedOwned, beforeOwned, ownedSnapshot,
-				beforeOwnedInfo, afterOwnedInfo, run.WatchExclusiveFiles)
+				observedDrift, run.RepairedTargets, run.WatchExclusiveFiles)
 			if len(run.RestoredPaths) > run.Repairs {
 				run.Repairs = len(run.RestoredPaths)
 			}
@@ -3884,6 +3881,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		priorFound, priorLeft := maps.Clone(foundSnapshot), maps.Clone(ownedSnapshot)
 		priorFailed := maps.Clone(failedOwnedPaths)
 		priorSettleUntil := settleUntil
+		passWrites := &enterpriseHookWatchPassWrites{}
 		go func() {
 			defer close(stopped)
 			for {
@@ -3899,6 +3897,9 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 					if _, ok := owned[path]; !ok || !enterpriseHookWatchEventRelevant(event) {
 						continue
 					}
+					if _, exclusive := priorExclusive[path]; exclusive {
+						passWrites.observe(event, priorLeft)
+					}
 					drop, _ := enterpriseHookWatchEventDropped(time.Now(), priorSettleUntil, event,
 						priorFailed[path], priorExclusive, priorShared, priorFound, priorLeft,
 						enterpriseHookOwnedFileFingerprint, true)
@@ -3910,7 +3911,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 				}
 			}
 		}()
-		_, err := reconcile(reason, passCtx)
+		_, err := reconcile(reason, context.WithValue(passCtx, enterpriseHookWatchPassWritesKey{}, passWrites))
 		close(stop)
 		<-stopped
 		cancel()
@@ -4127,35 +4128,47 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	}
 }
 
-// enterpriseHookWatchOwnedFileInfo records filesystem identity and change
-// times alongside the content fingerprint. A file can be overwritten and
-// restored during one pass, leaving the same bytes in both snapshots.
-func enterpriseHookWatchOwnedFileInfo(owned map[string]struct{}) map[string]os.FileInfo {
-	info := make(map[string]os.FileInfo, len(owned))
-	for path := range owned {
-		entry, err := os.Lstat(path)
-		if err == nil {
-			info[path] = entry
-		}
-	}
-	return info
+type enterpriseHookWatchPassWritesKey struct{}
+
+// enterpriseHookWatchPassWrites records owned files observed with bytes or
+// mode different from the last verified snapshot while a pass is running.
+// A timestamp-only event or a same-content write is not a repair.
+type enterpriseHookWatchPassWrites struct {
+	mu    sync.Mutex
+	paths map[string]bool
 }
 
-func enterpriseHookWatchFileWrittenDuringPass(before, after os.FileInfo) bool {
-	if before == nil || after == nil {
-		return false
+func (w *enterpriseHookWatchPassWrites) observe(event fsnotify.Event, verified map[string]string) {
+	if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) == 0 {
+		return
 	}
-	return !os.SameFile(before, after) || !before.ModTime().Equal(after.ModTime()) ||
-		enterpriseHookOwnedFileChangeTime(before) != enterpriseHookOwnedFileChangeTime(after)
+	path := filepath.Clean(event.Name)
+	want, known := verified[path]
+	if !known || enterpriseHookOwnedFileFingerprint(path) == want {
+		return
+	}
+	w.mu.Lock()
+	if w.paths == nil {
+		w.paths = make(map[string]bool)
+	}
+	w.paths[path] = true
+	w.mu.Unlock()
+	enterpriseHookWatchObservedDrift(path)
+}
+
+func (w *enterpriseHookWatchPassWrites) snapshot() map[string]bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return maps.Clone(w.paths)
 }
 
 // enterpriseHookWatchRestoredOwnedFiles reports files that return to the
-// last pass's verified bytes and mode. Change times and identity also cover
-// an overwrite after the first content snapshot that the pass restores before
-// its final snapshot. A first install, an untouched file and a failed repair
-// do not qualify.
+// last pass's verified bytes and mode. An in-pass change also needs a repair
+// reported by that file's owner; observing a brief changed fingerprint during
+// an unrelated write is not enough. A first install and a failed repair do
+// not qualify.
 func enterpriseHookWatchRestoredOwnedFiles(prior enterpriseHookReconcileRun, verified, before, after map[string]string,
-	beforeInfo, afterInfo map[string]os.FileInfo, owned []string) []string {
+	observedDrift, repairedTargets map[string]bool, owned []string) []string {
 	verifiedTargets := make(map[string]bool, len(prior.Rows))
 	for _, row := range prior.Rows {
 		if row.OK {
@@ -4165,11 +4178,11 @@ func enterpriseHookWatchRestoredOwnedFiles(prior enterpriseHookReconcileRun, ver
 	var restored []string
 	for _, name := range owned {
 		path := filepath.Clean(name)
-		verifiedOwner := false
+		verifiedOwner, reportedRepair := false, false
 		for _, owner := range prior.WatchPathOwners[path] {
 			if verifiedTargets[owner] {
 				verifiedOwner = true
-				break
+				reportedRepair = reportedRepair || repairedTargets[owner]
 			}
 		}
 		if !verifiedOwner {
@@ -4181,7 +4194,7 @@ func enterpriseHookWatchRestoredOwnedFiles(prior enterpriseHookReconcileRun, ver
 		}
 		found, checked := before[path]
 		if !checked || after[path] != want ||
-			(found == want && !enterpriseHookWatchFileWrittenDuringPass(beforeInfo[path], afterInfo[path])) {
+			(found == want && (!observedDrift[path] || !reportedRepair)) {
 			continue
 		}
 		restored = append(restored, path)
@@ -4695,6 +4708,10 @@ func enterpriseHookWatchNoteTrigger(path string, op fsnotify.Op, event fsnotify.
 // enterpriseHookOwnedFileFingerprint fingerprints an owned file for the
 // watch loop and the standalone Unix owned-files record; tests replace it.
 var enterpriseHookOwnedFileFingerprint = enterprisehooks.OwnedFileFingerprint
+
+// The watch-loop regression can wait until the pass has recorded a changed
+// owned file before its test worker restores that file.
+var enterpriseHookWatchObservedDrift = func(string) {}
 
 // takeEnterpriseHookOwnedSnapshot replaces snapshot with the fingerprint of
 // every owned file as the reconcile that just finished left it.
