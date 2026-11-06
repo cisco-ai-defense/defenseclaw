@@ -17,7 +17,8 @@ import (
 // g582 review 4 F1: when not even the repair privileges can read an object's
 // descriptor, standalone judges it a boundary (never Accepted), so no
 // standalone refusal lets it be re-stamped; Secure Client keeps the accepted
-// verdict.
+// verdict and, as on the base, never takes the privileges to assess (g582
+// review 5 M1).
 func TestStandaloneUnreadableDescriptorIsABoundary(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -48,8 +49,11 @@ func TestStandaloneUnreadableDescriptorIsABoundary(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if calls == 0 {
+			if tc.standalone && calls == 0 {
 				t.Fatal("the assessment never tried the privileged read")
+			}
+			if !tc.standalone && calls != 0 {
+				t.Fatalf("the Secure Client assessment took the repair privileges %d time(s); the base never did (g582 review 5 M1)", calls)
 			}
 			if assessed.Outcome != tc.want {
 				t.Fatalf("outcome = %s, want %s (%+v)", assessed.Outcome, tc.want, assessed)
