@@ -5,8 +5,8 @@
 
 package hookguard
 
-// coworkMarkerOwnerTrusted has no owner to read: the account plugin runs this
-// guard on Windows only. On Linux and macOS the plugin's hook is a shell
-// command with its own marker check, and the CLI refuses a group- or
+// coworkMarkerTrusted has no Windows security to read: the account plugin
+// runs this guard on Windows only. On Linux and macOS the plugin's hook is a
+// shell command with its own marker check, and the CLI refuses a group- or
 // world-writable folder for the marker.
-func coworkMarkerOwnerTrusted(string) bool { return true }
+func coworkMarkerTrusted(string) bool { return true }

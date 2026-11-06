@@ -28,6 +28,28 @@ var SystemOwnerSIDs = [...]string{
 	"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464", // NT SERVICE\TrustedInstaller
 }
 
+// OwnerRightsSID is OWNER RIGHTS. An ACE for it gives rights to the object's
+// owner, which the owner check limits to the trust set.
+const OwnerRightsSID = "S-1-3-4"
+
+// CreatorOwnerSID is CREATOR OWNER. An inherit-only ACE for it gives the
+// creator of a child object rights on that child only.
+const CreatorOwnerSID = "S-1-3-0"
+
+// CustodyWriteMask holds every right that lets a principal change a folder's
+// entries or a file's content, DACL or owner: GENERIC_ALL, GENERIC_WRITE,
+// DELETE, WRITE_DAC, WRITE_OWNER, FILE_ADD_FILE (FILE_WRITE_DATA),
+// FILE_ADD_SUBDIRECTORY (FILE_APPEND_DATA), FILE_WRITE_EA, FILE_DELETE_CHILD
+// and FILE_WRITE_ATTRIBUTES. cli/defenseclaw/file_permissions.py holds the
+// same value as _WINDOWS_CUSTODY_WRITE_MASK; a CLI test pins the two equal.
+const CustodyWriteMask uint32 = 0x500D0156
+
+// TrustedWriter reports whether sid may hold CustodyWriteMask rights on a
+// folder or file whose owner is Trusted: a Trusted owner or OWNER RIGHTS.
+func TrustedWriter(sid, current string) bool {
+	return sid == OwnerRightsSID || Trusted(sid, current)
+}
+
 // Trusted reports whether owner, a SID string, is current (the account's
 // own SID) or one of SystemOwnerSIDs. An empty owner is never trusted, and
 // an empty current trusts only SystemOwnerSIDs.

@@ -5,6 +5,28 @@ package winowner
 
 import "testing"
 
+func TestTrustedWriterAddsOnlyOwnerRights(t *testing.T) {
+	const current = "S-1-5-21-1-2-3-1001"
+	for _, tc := range []struct {
+		name, sid string
+		want      bool
+	}{
+		{"the account", current, true},
+		{"BUILTIN Administrators", "S-1-5-32-544", true},
+		{"OWNER RIGHTS", "S-1-3-4", true},
+		{"CREATOR OWNER", "S-1-3-0", false},
+		{"BUILTIN Users", "S-1-5-32-545", false},
+		{"Authenticated Users", "S-1-5-11", false},
+		{"another account", "S-1-5-21-1-2-3-1002", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := TrustedWriter(tc.sid, current); got != tc.want {
+				t.Fatalf("TrustedWriter(%q) = %v, want %v", tc.sid, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestTrustedAcceptsTheAccountAndWindowsSystemOwnersOnly(t *testing.T) {
 	const current = "S-1-5-21-1-2-3-1001"
 	for _, tc := range []struct {

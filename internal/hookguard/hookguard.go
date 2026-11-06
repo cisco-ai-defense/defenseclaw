@@ -8,7 +8,7 @@
 // a failed start of a hook command as a non-blocking error, so a launcher
 // that antivirus removed let tool calls run uninspected (GAP-1011). The
 // package uses only the standard library and, on Windows,
-// golang.org/x/sys/windows to read an owner: defenseclaw-hook-guard.exe, the
+// golang.org/x/sys/windows to read an owner and a DACL: defenseclaw-hook-guard.exe, the
 // one-line install's guard, is built from it alone and stays small, and the
 // native hook and the gateway answer the same argv through it.
 package hookguard
@@ -90,20 +90,26 @@ func Argv(args []string) (launcher string, hookArgs []string, ok bool) {
 // Code treats as a block, and prints MissingMessage when nothing is at the
 // launcher path and CannotStartMessage otherwise.
 func Run(launcher string, hookArgs []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	code, _ := run(launcher, hookArgs, stdin, stdout, stderr)
+	return code
+}
+
+// run is Run that also reports whether the launcher started.
+func run(launcher string, hookArgs []string, stdin io.Reader, stdout, stderr io.Writer) (int, bool) {
 	command := exec.Command(launcher, hookArgs...)
 	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, stderr
 	err := command.Run()
 	if err == nil {
-		return 0
+		return 0, true
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && exitErr.ExitCode() >= 0 {
-		return exitErr.ExitCode()
+		return exitErr.ExitCode(), true
 	}
 	if _, statErr := os.Lstat(launcher); errors.Is(statErr, fs.ErrNotExist) {
 		fmt.Fprintln(stderr, MissingMessage)
 	} else {
 		fmt.Fprintln(stderr, CannotStartMessage)
 	}
-	return 2
+	return 2, false
 }
