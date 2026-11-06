@@ -185,6 +185,10 @@ func writeWindowsMCPSpool(dir string, manifest Manifest, source windowsMCPSpoolS
 // windowsMCPSpoolWrite is writeSpoolBytes; tests replace it.
 var windowsMCPSpoolWrite = writeSpoolBytes
 
+// The status sidecar is separate from the version 1 inventory record so an
+// older gateway can keep reading the servers after an enumerator upgrade.
+const maxClaudeMCPProjectStatusNotes = 128
+
 func writeClaudeMCPProjectSkips(dir, name string, note ClaudeMCPProjectSkips, setOwnership func(string) error) error {
 	if len(note.Projects) > maxClaudeMCPProjectStatusNotes {
 		note.Omitted = len(note.Projects) - maxClaudeMCPProjectStatusNotes
@@ -203,7 +207,7 @@ func writeClaudeMCPProjectSkips(dir, name string, note ClaudeMCPProjectSkips, se
 		}
 	}
 	if len(data) > maxClaudeMCPSpoolRecordBytes {
-		return fmt.Errorf("Claude Code skipped project note exceeds %d bytes", maxClaudeMCPSpoolRecordBytes)
+		return fmt.Errorf("claude code skipped project note exceeds %d bytes", maxClaudeMCPSpoolRecordBytes)
 	}
 	if current, err := os.Open(filepath.Join(dir, name)); err == nil {
 		previous, readErr := io.ReadAll(io.LimitReader(current, maxClaudeMCPSpoolRecordBytes+1))

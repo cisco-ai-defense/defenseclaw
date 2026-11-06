@@ -38,10 +38,6 @@ const ClaudeMCPSpoolRecordVersion = 1
 
 const maxClaudeMCPSpoolRecordBytes = 4 << 20
 
-// The status sidecar is separate from the version 1 inventory record so an
-// older gateway can keep reading the servers after an enumerator upgrade.
-const maxClaudeMCPProjectStatusNotes = 128
-
 // ClaudeMCPProjectSkip records one project whose path the enumerator refused.
 type ClaudeMCPProjectSkip struct {
 	Project string `json:"project"`
