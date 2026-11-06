@@ -94,7 +94,7 @@ func TestGAP0621LinkedChildAfterManyEntriesBinds(t *testing.T) {
 			} {
 				args, _ := json.Marshal(map[string]any{"skill_path": tc.source})
 				facts := map[string]string{ProjectSkillRootUnverifiedPrefix + root: ProjectSkillRootOutsideProfile}
-				addProjectSkillSelectedFacts(facts, nil, args, project)
+				addProjectSkillSelectedFacts(facts, nil, args, home, project)
 				if got := round6Selected(facts); !slices.Equal(got, tc.want) {
 					t.Errorf("%s: selected %v, want %v", tc.label, got, tc.want)
 				}
@@ -119,7 +119,7 @@ func TestGAP0621LargeRootNameOnlySelectionIsExact(t *testing.T) {
 	}
 	selected := func() []string {
 		facts := map[string]string{ProjectSkillRootUnverifiedPrefix + root: ProjectSkillRootOutsideProfile}
-		addProjectSkillSelectedFacts(facts, nil, json.RawMessage(`{"skill":"sample"}`), project)
+		addProjectSkillSelectedFacts(facts, nil, json.RawMessage(`{"skill":"sample"}`), home, project)
 		return round6Selected(facts)
 	}
 	if got := selected(); got != nil {
@@ -142,7 +142,7 @@ func TestGAP0621UnlistableRootNameOnlySelection(t *testing.T) {
 	project, root, target := round6Root(t, home)
 	run := func() []string {
 		facts := map[string]string{ProjectSkillRootUnverifiedPrefix + root: ProjectSkillRootUnreadable}
-		addProjectSkillSelectedFacts(facts, nil, json.RawMessage(`{"skill":"sample"}`), project)
+		addProjectSkillSelectedFacts(facts, nil, json.RawMessage(`{"skill":"sample"}`), home, project)
 		return round6Selected(facts)
 	}
 	t.Cleanup(func() { _ = os.Chmod(target, 0o700) })
@@ -192,7 +192,7 @@ func TestGAP0621TopLevelNameUsesEveryExplicitSource(t *testing.T) {
 	} {
 		args, _ := json.Marshal(tc.input)
 		facts := map[string]string{ProjectSkillRootUnverifiedPrefix + root: ProjectSkillRootOutsideProfile}
-		addProjectSkillSelectedFacts(facts, tc.payload, args, project)
+		addProjectSkillSelectedFacts(facts, tc.payload, args, home, project)
 		if got := round6Selected(facts); !slices.Equal(got, tc.want) {
 			t.Errorf("%s: selected %v, want %v", tc.label, got, tc.want)
 		}
