@@ -92,6 +92,11 @@ func (a *APIServer) claudeCodeMCPAssetDecision(ctx context.Context, req claudeCo
 	probe.WorkspaceDir = req.CWD
 	rawServer := probe.ServerName
 	probe.ServerName = a.claudeCodePluginMCPServerName(ctx, probe)
+	if decision, refused := unresolvedPluginMCPDefinitionDecision(a.requestConfig(ctx), rawServer, probe); refused {
+		a.emitAssetPolicyDecisionFindings(ctx, decision, "mcp", "claudecode", req.HookEventName)
+		a.logAssetPolicyAudit(ctx, "claudecode", "mcp:"+rawServer, "action=block source=mcp-definition-unproven")
+		return decision, true
+	}
 	if decision, refused := a.mcpDefinitionRefreshDecision(ctx, "claudecode", req.HookEventName, probe); refused {
 		return decision, true
 	}
@@ -99,11 +104,6 @@ func (a *APIServer) claudeCodeMCPAssetDecision(ctx context.Context, req claudeCo
 		return decision, true
 	}
 	a.noteHookReportedMCPServer(ctx, "claudecode", req.HookEventName, probe)
-	if decision, refused := unresolvedPluginMCPDefinitionDecision(a.requestConfig(ctx), rawServer, probe); refused {
-		a.emitAssetPolicyDecisionFindings(ctx, decision, "mcp", "claudecode", req.HookEventName)
-		a.logAssetPolicyAudit(ctx, "claudecode", "mcp:"+rawServer, "action=block source=mcp-definition-unproven")
-		return decision, true
-	}
 	if decision, refused := a.mcpAdmissionPendingDecision(ctx, "claudecode", req.HookEventName, probe); refused {
 		return decision, true
 	}
@@ -162,9 +162,10 @@ func (a *APIServer) mcpStateUnreadableDecision(ctx context.Context, connectorNam
 // run, so the unreadable-state and pending checks that follow see the
 // definition the user has now: a server changed under the same name is then
 // refused until its own scan, never run on the old verdict (GAP-0216). A
-// refresh that fails follows the connector's outage tier and records a
-// warning or refusal; gateway.log says why. Every other gateway has nothing
-// to refresh. Secure Client keeps main (#1092).
+// refresh that fails preserves a known block or completed scan failure,
+// then follows the connector's outage tier and records a warning or refusal;
+// gateway.log says why. Every other gateway has nothing to refresh. Secure
+// Client keeps main (#1092).
 func (a *APIServer) mcpDefinitionRefreshDecision(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
 	cfg := a.requestConfig(ctx)
 	if a.mcpRefreshBeforeCall == nil || cfg == nil || cfg.SecureClientIntegration() || !probe.Matched ||
@@ -173,6 +174,19 @@ func (a *APIServer) mcpDefinitionRefreshDecision(ctx context.Context, connectorN
 	}
 	if err := a.mcpRefreshBeforeCall(ctx, connectorName); err == nil {
 		return config.AssetPolicyDecision{}, false
+	}
+	// A refresh outage cannot replace a decision already known to be
+	// protective. Use the pinned request configuration and the last known
+	// admission outcome before applying the connector's outage tier.
+	if decision, refused := a.mcpStateUnreadableDecision(ctx, connectorName, hookEvent, probe); refused {
+		return decision, true
+	}
+	if a.mcpAdmissionStatus != nil {
+		home, _ := callerHomeForAssets(ctx)
+		status := a.mcpAdmissionStatus(connectorName, probe.ServerName, home, probe.WorkspaceDir)
+		if status.Failed {
+			return a.mcpAdmissionStatusDecision(ctx, cfg, connectorName, hookEvent, probe, status)
+		}
 	}
 	return a.mcpAdmissionStatusDecision(ctx, cfg, connectorName, hookEvent, probe,
 		watcher.MCPAdmissionStatus{Name: probe.ServerName, Unavailable: true, RetryAfter: enrolledMCPRefreshBudget})

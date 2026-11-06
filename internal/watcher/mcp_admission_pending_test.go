@@ -6,6 +6,7 @@ package watcher
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -85,8 +86,93 @@ func TestGAP0034WatcherDistinguishesPendingFromCompletedFailure(t *testing.T) {
 	}
 	server.Args = []string{"-y", "changed"}
 	changed := w.MCPAdmissionStatus(query)
-	if !changed.Failed || changed.Pending {
-		t.Fatalf("a changed definition cleared the prior failed scan before readmission: %+v", changed)
+	if !changed.Pending || changed.Failed {
+		t.Fatalf("a changed definition kept the prior scan outcome: %+v", changed)
+	}
+}
+
+func TestGAP0034FailedScanSurvivesServerListOutage(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Gateway.Watcher.MCP.TakeAction = true
+	cfg.Scanners.MCPScanner.UnverifiedServer = "warn"
+	server := config.MCPServerEntry{Name: "notes", Command: "npx", Args: []string{"-y", "."},
+		Connector: "claudecode", Project: filepath.Join(t.TempDir(), "proj"), SourceScope: "project"}
+	unavailable := false
+	w := New(cfg, nil, nil, store, logger, nil, nil)
+	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) {
+		if unavailable {
+			return nil, errors.New("server list temporarily unavailable")
+		}
+		return []config.MCPServerEntry{server}, nil
+	})
+	w.firstCycleDone.Store(true)
+	w.scannerFactory = func(InstallEvent) scanner.Scanner {
+		return &failingScanner{countingScanner{name: "mcp-scanner"}}
+	}
+	w.AdmitAddedMCPServers([]string{server.Name})
+	w.admitAddedMCPServers(context.Background())
+	query := MCPAdmissionQuery{Connector: server.Connector, Server: server.Name, CWD: server.Project}
+	if status := w.MCPAdmissionStatus(query); !status.Failed {
+		t.Fatalf("completed scan failure: %+v", status)
+	}
+	unavailable = true
+	if status := w.MCPAdmissionStatus(query); !status.Failed || status.Unavailable {
+		t.Fatalf("completed failure lost during list outage: %+v", status)
+	}
+	cold := New(cfg, nil, nil, store, logger, nil, nil)
+	cold.SetMCPServerSource(func() ([]config.MCPServerEntry, error) {
+		return nil, errors.New("server list temporarily unavailable")
+	})
+	cold.firstCycleDone.Store(true)
+	if status := cold.MCPAdmissionStatus(query); !status.Failed || status.Unavailable {
+		t.Fatalf("stored failure lost before the first successful list: %+v", status)
+	}
+	ordinary := query
+	ordinary.Server = "ordinary"
+	if status := cold.MCPAdmissionStatus(ordinary); status.Failed || !status.Unavailable {
+		t.Fatalf("unrelated server inherited a stored failure: %+v", status)
+	}
+	otherProject := query
+	otherProject.CWD = t.TempDir()
+	if status := cold.MCPAdmissionStatus(otherProject); status.Failed || !status.Unavailable {
+		t.Fatalf("another project inherited a stored failure: %+v", status)
+	}
+	scopedName := query
+	scopedName.Server = config.MCPToolServerName(server.Connector, MCPEventPath(server))
+	if status := cold.MCPAdmissionStatus(scopedName); status.Failed || !status.Unavailable {
+		t.Fatalf("a scoped key was treated as another server's name: %+v", status)
+	}
+	unavailable = false
+	server.Args = []string{"-y", "changed"}
+	if status := w.MCPAdmissionStatus(query); !status.Pending || status.Failed {
+		t.Fatalf("new definition inherited old failure: %+v", status)
+	}
+	unavailable = true
+	if status := w.MCPAdmissionStatus(query); status.Failed || !status.Unavailable {
+		t.Fatalf("old failure returned after a successful new listing: %+v", status)
+	}
+}
+
+func TestGAP0034ColdOutageSnapshotScope(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "alice")
+	project := filepath.Join(home, "project")
+	server := config.MCPServerEntry{Name: "shared", Connector: "claudecode", Home: home, Project: project}
+	path := MCPEventPath(server)
+	for _, tc := range []struct {
+		name  string
+		query MCPAdmissionQuery
+		want  bool
+	}{
+		{"same account and project", MCPAdmissionQuery{Connector: "CLAUDECODE", Server: "shared", Home: home, CWD: filepath.Join(project, "src")}, true},
+		{"other account", MCPAdmissionQuery{Connector: "claudecode", Server: "shared", Home: home + "2", CWD: project}, false},
+		{"other project", MCPAdmissionQuery{Connector: "claudecode", Server: "shared", Home: home, CWD: filepath.Join(home, "other")}, false},
+		{"other connector", MCPAdmissionQuery{Connector: "codex", Server: "shared", Home: home, CWD: project}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mcpSnapshotPathServesQuery(path, tc.query); got != tc.want {
+				t.Fatalf("stored scope matched=%v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
