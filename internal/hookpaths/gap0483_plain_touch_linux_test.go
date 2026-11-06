@@ -155,3 +155,60 @@ func TestGAP0483LiteralLeafSpellingsStayBounded(t *testing.T) {
 		t.Fatal("linked protected leaf received an ordinary proof")
 	}
 }
+
+func TestGAP0483DateAndKnownDirectoryLeavesStayBounded(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	key := filepath.Join(home, ".ssh", "authorized_keys")
+	for _, dir := range []string{cwd, filepath.Dir(key)} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(key, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 2000)
+	known := make([]string, 2000)
+	for i := range names {
+		names[i] = fmt.Sprintf("leaf%d.txt", i)
+		known[i] = `"$PWD"/` + names[i]
+	}
+	for _, tc := range []struct{ name, command string }{
+		{"separate date", "touch -d 2026-11-06 " + strings.Join(names, " ")},
+		{"attached date", "touch --date=2026-11-06 " + strings.Join(names, " ")},
+		{"known directory", "touch " + strings.Join(known, " ")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			memo := NewTargetMemo()
+			if got := memo.ActionCommandDecisionWithDialectAndGlobFacts(tc.command, cwd, home, actionfacts.DialectPOSIX, nil); got != "" {
+				t.Fatalf("ordinary leaves = %q", got)
+			}
+			if walked, _ := memo.WorkParts(); walked > 64 {
+				t.Fatalf("ordinary leaves walked %d path parts", walked)
+			}
+			if !OrdinaryLongTouchMissingLeaves(tc.command, cwd, home) {
+				t.Fatal("ordinary leaves have no late proof")
+			}
+		})
+	}
+	alias := filepath.Join(cwd, "linked-leaf")
+	if err := os.Link(key, alias); err != nil {
+		t.Fatal(err)
+	}
+	withAlias := append([]string(nil), names...)
+	withAlias[len(withAlias)/2] = filepath.Base(alias)
+	command := "touch -d 2026-11-06 " + strings.Join(withAlias, " ")
+	if OrdinaryLongTouchMissingLeaves(command, cwd, home) || ActionCommandDecision(command, cwd, home) != "protected-target" {
+		t.Fatal("linked protected leaf received an ordinary proof")
+	}
+	projectAlias := filepath.Join(home, "project-link")
+	if err := os.Symlink(cwd, projectAlias); err != nil {
+		t.Fatal(err)
+	}
+	command = "touch -d 2026-11-06 " + strings.Join(known, " ")
+	if !OrdinaryLongTouchMissingLeaves(command, projectAlias, home) ||
+		ActionCommandDecision(command, projectAlias, home) != "" {
+		t.Fatal("ordinary leaves in a linked project directory lost the bounded proof")
+	}
+}

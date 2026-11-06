@@ -20,7 +20,7 @@ func plainTouchMissingLeaves(command, cwd, home string, memo *TargetMemo) ([]str
 		len(command) > MaxPayloadBytes || strings.ContainsAny(command, "\r\n") {
 		return nil, false
 	}
-	words, literal := plainTouchWords(command, home)
+	words, literal := plainTouchWords(command, cwd, home)
 	if !literal {
 		return nil, false
 	}
@@ -28,7 +28,7 @@ func plainTouchMissingLeaves(command, cwd, home string, memo *TargetMemo) ([]str
 		return nil, false
 	}
 	// This proof only handles options that never name another path. A
-	// reference, date, or unfamiliar option takes the full path reader.
+	// reference or unfamiliar option takes the full path reader.
 	names := make([]string, 0, len(words)-1)
 	endOptions := false
 	for i := 1; i < len(words); i++ {
@@ -40,6 +40,17 @@ func plainTouchMissingLeaves(command, cwd, home string, memo *TargetMemo) ([]str
 		if !endOptions && (word == "--no-create" || word == "--time=access" ||
 			word == "--time=modify" || word == "--time=atime" || word == "--time=mtime" ||
 			word == "--no-dereference") {
+			continue
+		}
+		if !endOptions && (word == "-d" || word == "--date") {
+			i++
+			if i == len(words) || words[i] == "" {
+				return nil, false
+			}
+			continue
+		}
+		if !endOptions && (strings.HasPrefix(word, "--date=") && len(word) > len("--date=") ||
+			strings.HasPrefix(word, "-d") && len(word) > 2) {
 			continue
 		}
 		if !endOptions && word == "-t" {
@@ -86,7 +97,7 @@ func plainTouchMissingLeaves(command, cwd, home string, memo *TargetMemo) ([]str
 		memo = NewTargetMemo()
 	}
 	parent, ok := memo.resolveWriteTarget(cwd)
-	if !ok || !samePathName(parent, filepath.Clean(cwd)) {
+	if !ok {
 		return nil, false
 	}
 	for _, root := range []string{filepath.Join(home, ".ssh"), filepath.Join(home, ".defenseclaw")} {
@@ -126,10 +137,10 @@ func plainTouchMissingLeaves(command, cwd, home string, memo *TargetMemo) ([]str
 	return names, true
 }
 
-// The fast spelling remains allocation-light. Other shell spellings use the
-// same literal-word parser as the ordinary path reader; expansions and extra
+// The fast spelling remains allocation-light. Other shell spellings resolve
+// bounded literal and known HOME/PWD words; unknown values and extra
 // statements cannot acquire a missing-leaf proof.
-func plainTouchWords(command, home string) ([]string, bool) {
+func plainTouchWords(command, cwd, home string) ([]string, bool) {
 	if !strings.ContainsAny(command, "'\"\\;|&<>(){}$`*?[]#") {
 		return strings.Fields(command), true
 	}
@@ -147,10 +158,10 @@ func plainTouchWords(command, home string) ([]string, bool) {
 	}
 	words := make([]string, 0, len(call.Args))
 	for _, arg := range call.Args {
-		if !noDereferenceTouchLiteralWord(arg) || actionWordHasUnquotedGlob(arg, command) {
+		if !lateKnownWordParts(arg) || actionWordHasUnquotedGlob(arg, command) {
 			return nil, false
 		}
-		value, ok := StaticWord(arg, home)
+		value, ok := lateKnownWord(arg, cwd, home)
 		if !ok {
 			return nil, false
 		}
