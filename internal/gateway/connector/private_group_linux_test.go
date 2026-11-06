@@ -7,6 +7,7 @@
 package connector
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
 	"os/user"
@@ -90,6 +91,44 @@ func TestPluginDestinationAcceptsOnlyTheOwnersPrivateGroup(t *testing.T) {
 			}
 			if tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
 				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+			if tc.name == "private group" {
+				plugin := filepath.Join(pluginDir, "defenseclaw.js")
+				if err := os.WriteFile(plugin, []byte("// managed plugin\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(plugin, 0o664); err != nil {
+					t.Fatal(err)
+				}
+				if err := validatePluginArtifactDestination(plugin); err != nil {
+					t.Fatalf("private-group file refused: %v", err)
+				}
+				// A named user with effective write access changes the file's
+				// group mode bits to the ACL mask. It must not inherit the
+				// parent directory's private-group exception.
+				acl := make([]byte, 4+5*8)
+				binary.LittleEndian.PutUint32(acl[:4], 2)
+				for i, entry := range []struct {
+					tag, perm uint16
+					id        uint32
+				}{
+					{1, 6, ^uint32(0)},
+					{2, 6, 65534},
+					{4, 0, ^uint32(0)},
+					{16, 6, ^uint32(0)},
+					{32, 0, ^uint32(0)},
+				} {
+					offset := 4 + i*8
+					binary.LittleEndian.PutUint16(acl[offset:offset+2], entry.tag)
+					binary.LittleEndian.PutUint16(acl[offset+2:offset+4], entry.perm)
+					binary.LittleEndian.PutUint32(acl[offset+4:offset+8], entry.id)
+				}
+				if err := unix.Setxattr(plugin, "system.posix_acl_access", acl, 0); err != nil {
+					t.Fatal(err)
+				}
+				if err := validatePluginArtifactDestination(plugin); err == nil {
+					t.Fatal("foreign-writable plugin file accepted")
+				}
 			}
 			// Agent executable folders (Codex policy, Hermes admission) ask the same rule.
 			if err := hookAPIValidateAgentDirectory(pluginDir); (err == nil) != (tc.want == "") {

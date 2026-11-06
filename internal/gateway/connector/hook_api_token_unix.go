@@ -247,6 +247,16 @@ func hookAPIValidateOwnerFor(path string, info os.FileInfo, _ string) error {
 	return hookAPIValidateOwner(path, info)
 }
 
+// Plugin files are loaded as policy code. Their own write authority must be
+// checked as well as the directory chain, including an existing file's ACL.
+func hookAPIValidatePluginFilePermissions(path string, info os.FileInfo) error {
+	mode := info.Mode().Perm()
+	if mode&0o002 != 0 || (mode&0o020 != 0 && !ownerPrivateGroup(path, info)) {
+		return fmt.Errorf("plugin target %s has group/other writable mode %04o", path, mode)
+	}
+	return hookAPIValidateDirectoryACL(path)
+}
+
 // hookAPIValidateDirectoryFor matches the Windows signature (see
 // hookAPIValidateOwnerFor).
 func hookAPIValidateDirectoryFor(path, _ string) error {

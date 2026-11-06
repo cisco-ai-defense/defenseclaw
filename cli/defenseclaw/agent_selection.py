@@ -43,7 +43,7 @@ from defenseclaw.connector_contracts import (
     normalize_agent_version,
     resolve_connector_contract,
 )
-from defenseclaw.file_permissions import atomic_write_private_bytes
+from defenseclaw.file_permissions import atomic_write_private_bytes, other_accounts_can_write
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
 
@@ -573,7 +573,7 @@ def is_setup_trusted_binary(candidate: str, data_dir: str, *, connector: str = "
         return False
     if binary_info.st_mode & 0o022:
         return False
-    if agent_discovery._trusted_prefix_dir_mode_error(parent_info) is not None:
+    if agent_discovery._trusted_prefix_dir_mode_error(os.path.dirname(resolved), parent_info) is not None:
         return False
     # Setup's built-in roots are explicit executable authority, but they still
     # receive the same per-file and parent permission checks as passive
@@ -598,7 +598,11 @@ def _posix_setup_chain_is_safe(executable: str, root: str) -> bool:
         reached_boundary = False
         while True:
             info = os.lstat(current)
-            writable = bool(info.st_mode & 0o022)
+            writable = (
+                bool(info.st_mode & 0o022)
+                if leaf
+                else other_accounts_can_write(current, info)
+            )
             trusted_sticky_ancestor = (
                 not leaf
                 and stat.S_ISDIR(info.st_mode)

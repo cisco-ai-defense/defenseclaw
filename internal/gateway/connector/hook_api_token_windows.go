@@ -210,6 +210,9 @@ func hookAPIValidateOwnerFor(path string, _ os.FileInfo, trustedOwnerSID string)
 	return hookAPIValidateWindowsPathElementTrusting(path, false, true, false, hookAPIParseTrustedOwnerSID(trustedOwnerSID))
 }
 
+// hookAPIValidateOwnerFor already checks the plugin file's DACL on Windows.
+func hookAPIValidatePluginFilePermissions(_ string, _ os.FileInfo) error { return nil }
+
 // hookAPIValidateDirectoryFor is hookAPIValidateDirectory that also trusts
 // trustedOwnerSID (see hookAPIValidateOwnerFor).
 func hookAPIValidateDirectoryFor(path, trustedOwnerSID string) error {
