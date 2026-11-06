@@ -1458,7 +1458,10 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 				if receiptWait < 0 {
 					receiptWait = 0
 				}
-				receiptTimer := time.AfterFunc(receiptWait, requestCancel)
+				// The receipt transport outlives the answer context for a
+				// watchdog token. Bound a normal confirmation with its own
+				// timer as well.
+				receiptTimer := time.AfterFunc(receiptWait, delivery.close)
 				defer receiptTimer.Stop()
 				if delivery.acknowledge(localBlock) == nil {
 					// Keep the request alive until HTTP has carried the receipt
