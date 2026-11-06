@@ -205,7 +205,7 @@ For hook-only connectors, add a case to `hookOnlyProfileRespond` (`hook_only_pro
 **PowerShell adapters.**
 - `hooks/cursor-hook.ps1` turns pipeline objects into UTF-8 JSON and uses the hidden `--input-file`.
 - `hooks/copilot-hook.ps1` uses a `ProcessStartInfo` byte stream and fails open.
-- Other code checks literal lines of these adapters: the Cursor runtime check in `hook_only.go`, `cli/defenseclaw/cursor_contract.py`, the Copilot adapter check in `cli/defenseclaw/doctor_hooks.py`, `scripts/windows-native-ci.ps1` and `scripts/live-connector-e2e/run-windows.ps1`. A new adapter needs the same kind of check, and an edit to an existing one must update all of them.
+- Other code checks literal lines of these adapters: the Cursor runtime check in `hook_only.go`, `cli/defenseclaw/cursor_contract.py`, the Copilot adapter check in `cli/defenseclaw/doctor_hooks.py`, and `scripts/live-connector-e2e/run-windows-install.ps1`. A new adapter needs the same kind of check, and an edit to an existing one must update all of them.
 
 ## 5. Native hook runner (`hookexec`)
 

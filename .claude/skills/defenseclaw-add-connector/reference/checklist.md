@@ -137,7 +137,7 @@ Before starting, pick the closest sibling and list its footprint: `git grep -l -
 - [ ] Hard-coded test lists updated, including the hand-kept tables that don't fail when a connector is missing (docs-tests-ci.md §4.1). Verify: the listed tests.
 - [ ] `test/e2e/connectormatrix.go` row and the `testdata/v7/golden/<id>/verdict-blocked.golden.json`. Verify: `TestConnectorLifecycle_Matrix`, `TestGoldenPerConnectorLayout`.
 - [ ] Live harness: `run.sh` `ALL_CONNECTORS` (shell hooks), `golden/<id>/*`, `lib/setup.sh`, and a driver if the agent is headless. Verify: `bash scripts/live-connector-e2e/run.sh --layer contract --connector <id>`.
-- [ ] `connector-live-e2e.yml` dispatch options, `full=` matrix, secret scoping; `windows-native.yml` matrix and `windows-native-ci.ps1` `ValidateSet`. Verify: `test_connector_live_e2e_path_policy.py`, `test_connector_live_secret_scoping.py`.
+- [ ] `connector-live-e2e.yml` dispatch options, `full=` matrix, secret scoping; `windows-native.yml` `connector-contract` matrix and `run-windows-install.ps1` `ValidateSet` plus a registration check. Verify: `test_connector_live_e2e_path_policy.py`, `test_connector_live_secret_scoping.py`, `test_windows_connector_contract.py`.
 - [ ] Windows `_test.go` files compile. Verify: `GOOS=windows go vet ./...` on the touched packages.
 - [ ] Narrow validation set passes. Verify: docs-tests-ci.md §7.
 - [ ] Interactive live certification on each claimed OS, then a `validated_versions.json` row. Verify: a person, after a green run.

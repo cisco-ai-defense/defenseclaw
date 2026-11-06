@@ -158,7 +158,7 @@ The per-layer references list these. Keep the PR lean: add a row to an existing 
 | File | What to add |
 |---|---|
 | `scripts/live-connector-e2e/run.sh` `ALL_CONNECTORS` | only for an executable shell-hook contract (plugins and policy bridges have their own gates) |
-| `scripts/live-connector-e2e/golden/<id>/pre_tool_allow.json`, `pre_tool_block.json` (+ `_windows` variants) | stdin payloads fed to the installed entrypoint by `contract-smoke.sh`. Allow means exit 0; block means exit 2 or a block/deny decision. The block payload uses a command the shipped rules deny with complete typed proof; the harness never executes it. |
+| `scripts/live-connector-e2e/golden/<id>/pre_tool_allow.json`, `pre_tool_block.json` (+ `pre_tool_block_windows.json` where the Windows block command differs; `contract-smoke.sh` uses it on Windows) | stdin payloads fed to the installed entrypoint by `contract-smoke.sh`. Allow means exit 0; block means exit 2 or a block/deny decision. The block payload uses a command the shipped rules deny with complete typed proof; the harness never executes it. |
 | `scripts/live-connector-e2e/lib/setup.sh` `dc_setup_subcommand`, `dc_connector_config_file` | the setup subcommand, and the vendor config file used by the teardown assertion |
 | `scripts/live-connector-e2e/drivers/<id>.sh` | a Layer B live driver, only if the agent has a headless mode that fires hooks; contract-only connectors skip it |
 | `.github/workflows/connector-live-e2e.yml` | the `workflow_dispatch` `connector` options, the `full=` matrix JSON, and live `include:` cells with connector-scoped secrets (`matrix.connector == '<id>' && secrets.X \|\| ''`) |
@@ -167,7 +167,7 @@ The per-layer references list these. Keep the PR lean: add a row to an existing 
 The workflows are pinned by these tests:
 - `cli/tests/test_connector_live_e2e_path_policy.py`: the full-matrix set must equal `ALL_CONNECTORS` and the dispatch options, and the path allowlist is fixed.
 - `test_connector_live_secret_scoping.py`: secrets are connector-scoped.
-- `test_connector_live_package_provenance.py`.
+- `test_windows_connector_contract.py`: the Windows `connector-contract` matrix must equal the Windows connector set, and the job must be in `windows-native-required.needs`.
 - `test_live_connector_upgrade_harness.py`.
 - `test_ci_workflow_efficiency.py`.
 - `test_windows_release_claims.py`.

@@ -206,10 +206,10 @@
     {
       "name": "DEFENSECLAW_ANTIGRAVITY_CONFIG_HOME",
       "category": "upgrade_internal",
-      "purpose": "Carries the exact Antigravity configuration home already captured and validated by the native Windows Setup transaction into its isolated connector maintenance child. The child converts it to the hidden --config-home binding; Antigravity itself never reads this variable.",
+      "purpose": "Internal. The Antigravity configuration home recorded in the install state of a DefenseClaw Setup 0.8.x program folder (internal/nativeinstallstate); that install's launcher passes it to its children. No 1.0 installer sets it.",
       "default": "unset",
       "accepted_values": [
-        "absolute normalized path selected by the Setup transaction",
+        "absolute normalized path from a 0.8.x Setup install state",
         "unset"
       ],
       "security_impact": "medium",
@@ -226,7 +226,7 @@
         }
       ],
       "since": "0.8.9",
-      "security_note": "Trusted Setup custody binding only. This is not an Antigravity vendor environment variable and must never be used for ordinary Antigravity discovery."
+      "security_note": "DefenseClaw-only binding. This is not a Antigravity vendor environment variable and must never be used for ordinary Antigravity discovery."
     },
     {
       "name": "DEFENSECLAW_API_ADDR",
@@ -952,10 +952,10 @@
     {
       "name": "DEFENSECLAW_CURSOR_CONFIG_HOME",
       "category": "upgrade_internal",
-      "purpose": "Carries the exact Cursor configuration home already captured and validated by the native Windows Setup transaction into its isolated connector maintenance child. The child converts it to the hidden --config-home binding; Cursor itself never reads this variable.",
+      "purpose": "Internal. The Cursor configuration home recorded in the install state of a DefenseClaw Setup 0.8.x program folder (internal/nativeinstallstate); that install's launcher passes it to its children. No 1.0 installer sets it.",
       "default": "unset",
       "accepted_values": [
-        "absolute normalized path selected by the Setup transaction",
+        "absolute normalized path from a 0.8.x Setup install state",
         "unset"
       ],
       "security_impact": "medium",
@@ -976,7 +976,7 @@
         }
       ],
       "since": "0.8.9",
-      "security_note": "Trusted Setup custody binding only. This is not a Cursor vendor environment variable and must never be used for ordinary Cursor discovery."
+      "security_note": "DefenseClaw-only binding. This is not a Cursor vendor environment variable and must never be used for ordinary Cursor discovery."
     },
     {
       "name": "DEFENSECLAW_CUSTOM_PROVIDERS_PATH",
@@ -1150,10 +1150,10 @@
     {
       "name": "DEFENSECLAW_DEVIN_CONFIG_HOME",
       "category": "upgrade_internal",
-      "purpose": "Carries the exact Devin configuration directory captured and validated by the native Windows Setup transaction into isolated connector maintenance children. Devin itself never reads this private DefenseClaw binding.",
+      "purpose": "Pins the Devin configuration directory that DefenseClaw discovery and the gateway's Devin connector setup use. When set it must be an absolute normalized path, and the gateway refuses Devin setup when its connector home differs. The install state of a DefenseClaw Setup 0.8.x program folder (internal/nativeinstallstate) sets it for that install's children; no 1.0 installer sets it. Devin itself never reads it.",
       "default": "unset",
       "accepted_values": [
-        "absolute normalized path selected by the Setup transaction",
+        "absolute normalized path",
         "unset"
       ],
       "security_impact": "medium",
@@ -1161,20 +1161,28 @@
       "managed": "allow",
       "consumers": [
         {
+          "location": "internal/config/claw.go",
+          "description": "devinConfigHome uses it as the Devin configuration root instead of the platform default"
+        },
+        {
+          "location": "internal/gateway/sidecar.go",
+          "description": "Refuses Devin connector setup when the connector home differs from the bound value"
+        },
+        {
           "location": "internal/nativeinstallstate/state.go",
-          "description": "Rehydrates the authenticated Devin configuration directory for direct gateway and launcher recovery"
+          "description": "Sets it from a 0.8.x Setup install state for that install's children"
         }
       ],
       "since": "0.8.10",
-      "security_note": "Private authenticated lifecycle binding only. This is not a Devin vendor environment variable and has no authority unless it came from protected native install state or the Setup transaction."
+      "security_note": "DefenseClaw-only binding. This is not a Devin vendor environment variable; a malformed value fails the lifecycle instead of falling back to a platform default."
     },
     {
       "name": "DEFENSECLAW_DEVIN_EXECUTABLE",
       "category": "upgrade_internal",
-      "purpose": "Carries the exact Devin executable selected and admitted by native Windows Setup through isolated maintenance and recovery child environments. Ambient copies are always scrubbed before the authenticated value is published.",
+      "purpose": "Internal. The Devin executable recorded in the install state of a DefenseClaw Setup 0.8.x program folder (internal/nativeinstallstate); that install's launcher passes it to its children. No 1.0 installer sets it, and no 1.0 code reads it.",
       "default": "unset",
       "accepted_values": [
-        "absolute normalized current-user Devin executable admitted by Setup",
+        "absolute normalized Devin executable path from a 0.8.x Setup install state",
         "unset"
       ],
       "security_impact": "high",
@@ -1187,7 +1195,7 @@
         }
       ],
       "since": "0.8.10",
-      "security_note": "Private authenticated executable binding only. It must remain tied to the exact signed Devin binary admitted by Setup and must never be treated as a general operator path override."
+      "security_note": "DefenseClaw-only binding, never a general operator path override."
     },
     {
       "name": "DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM",
@@ -2705,8 +2713,8 @@
     {
       "name": "DEFENSECLAW_INSTALL_ROOT",
       "category": "runtime_path",
-      "purpose": "Native Windows installer root injected by the stable defenseclaw.exe launcher so the managed Python CLI can locate the owning packaged install for installer-based upgrade handoff.",
-      "default": "unset (set by the native per-user launcher)",
+      "purpose": "Internal. Set only by the defenseclaw.exe launcher of a DefenseClaw Setup 0.8.x program folder (internal/nativeinstallstate); no 1.0 installer sets it. The CLI reads it to recognise the program folder of such an install.",
+      "default": "unset (no 1.0 installer sets it)",
       "accepted_values": [
         "any-absolute-path",
         "unset"
@@ -2721,7 +2729,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Installer root selection \u2014 upgrade code must treat this inherited value as untrusted and verify it is a canonical, product-owned Windows install before handing off to the setup executable."
+      "security_note": "Inherited value, so untrusted: the CLI acts on it only when its own interpreter is the embedded runtime under that root."
     },
     {
       "name": "DEFENSECLAW_INTEGRATION_ENABLED",
