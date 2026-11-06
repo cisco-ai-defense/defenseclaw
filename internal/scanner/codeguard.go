@@ -342,7 +342,8 @@ func pathTraversalView(_, line string) string {
 // childProcess) and module expressions (__import__('os').system(,
 // require('child_process').exec(); ShellJS (shell.exec, shelljs.exec); Ruby
 // Kernel, Process, binding and TOPLEVEL_BINDING, and instance_/class_/
-// module_eval of a string or heredoc (not a block: class_eval do, (&blk)); Python
+// module_eval of a string, heredoc or a call left open at the end of the line
+// (not a block: class_eval do, (&blk)); Python
 // builtins; JavaScript window, globalThis and global eval and jQuery
 // globalEval; PHP shell_exec and pcntl_exec. A PHP "->" or "::" call still
 // counts, as before. A line with a non-ASCII byte is read in NFKC, as
@@ -367,13 +368,17 @@ const (
 	// command string to an interpreter ([sys.executable, "-c", code],
 	// ["node", "-e", src], ["node", "--eval", src], ["cmd", "/c", line],
 	// ["pwsh", "-Command", s]).
-	cgExecInlineCodeList = `\s*\[[^\]]*['"](?:-c|/c|-e|--eval|-command|-encodedcommand)['"]`
-	// cgExecInterpreterFlagList is a JavaScript or PHP interpreter given a
-	// code string through a flag that other programs use for something
-	// else (node -p/--print, php -r; rm -r and cp -r stay exempt).
-	cgExecInterpreterFlagList = `\s*\[\s*['"](?:[^'"]*[/\\])?(?:node|nodejs|deno|bun|php)['"][^\]]*['"](?:-p|--print|-r)['"]`
+	cgExecInlineCodeList = `\s*\[[^\]]*['"](?:-[a-z]*[ce]|/c|--eval|--eval=[^'"]*|-command|-encodedcommand)['"]`
+	// The generic code flags include a short-flag cluster that ends in c or
+	// e (python3 -Ic, node -pe, perl -le) and --eval=<code>.
+	// cgExecInterpreterFlagList is a JavaScript or PHP interpreter, at any
+	// element (behind env, env FOO=1 or sudo; node.exe, php.exe), given a
+	// code string through a flag or subcommand that other programs use for
+	// something else (node -p/--print, php -r/--run, deno eval; rm -r,
+	// cp -r and pip -r stay exempt).
+	cgExecInterpreterFlagList = `\s*\[[^\]]*['"](?:[^'"]*[/\\])?(?:node|nodejs|deno|bun|php)(?:\.exe)?['"][^\]]*['"](?:-[a-z]*[epr][a-z]*|--print|--run|eval)['"]`
 	// cgExecEvalCalls evaluate source text.
-	cgExecEvalCalls = `(?:^|[^.\w$]|\\[nrt])eval\(|(?:instance|class|module)_eval\s*(?:\(\s*[^&\s)]|<<|['"%])|globaleval\(|` +
+	cgExecEvalCalls = `(?:^|[^.\w$]|\\[nrt])eval\(|(?:instance|class|module)_eval\s*(?:\(\s*(?:[^&\s)]|$)|<<|['"%])|globaleval\(|` +
 		`(?:__)?(?:builtins(?:__)?|kernel|binding|toplevel_binding|window|globalthis|global)\.eval\(`
 )
 
