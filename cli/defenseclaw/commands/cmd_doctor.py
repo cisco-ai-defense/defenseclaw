@@ -15311,9 +15311,12 @@ def doctor(
     failed/dependency-blocked repair.
     """
     global _json_mode
-    from defenseclaw.doctor_health import reset_installed_version_probes
+    from defenseclaw.doctor_health import begin_installed_version_run, end_installed_version_run
 
-    reset_installed_version_probes()  # one version probe per agent for this run (GAP-0723)
+    # One version probe per agent for the whole run, however long it takes (GAP-0723).
+    begin_installed_version_run()
+    if (click_ctx := click.get_current_context(silent=True)) is not None:
+        click_ctx.call_on_close(end_installed_version_run)
     if dry_run and not do_fix:
         raise click.UsageError("--dry-run requires --fix")
     if assume_yes and not do_fix:

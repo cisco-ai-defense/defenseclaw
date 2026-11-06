@@ -41,9 +41,12 @@ _BINARY = "/opt/codex/bin/codex"
 @pytest.fixture(autouse=True)
 def _fresh_probe_answers():
     # One probe answer is shared inside a Doctor run; each test is its own run.
-    doctor_health.reset_installed_version_probes()
-    yield
-    doctor_health.reset_installed_version_probes()
+    # The host this runs on may have a real agent on PATH: no launch candidates
+    # unless a test names them, so only the recorded path is probed.
+    doctor_health.end_installed_version_run()
+    with mock.patch.object(agent_discovery, "_binary_candidates_for_agent", return_value=()):
+        yield
+    doctor_health.end_installed_version_run()
 
 
 def _discovery(version: str = "codex-cli 0.160.0", binary: str = _BINARY) -> AgentDiscovery:
@@ -343,7 +346,160 @@ def test_a_new_run_probes_again() -> None:
     probe = mock.Mock(side_effect=[("codex-cli 0.167.0", ""), ("codex-cli 0.168.0", "")])
     with mock.patch.object(agent_discovery, "_version_for_agent_binary", probe):
         first = doctor_health.recheck_installed_versions(_discovery(), ["codex"], "")
-        doctor_health.reset_installed_version_probes()
+        doctor_health.begin_installed_version_run()
         second = doctor_health.recheck_installed_versions(_discovery(), ["codex"], "")
     assert first.discovery.agents["codex"].version == "codex-cli 0.167.0"
     assert second.discovery.agents["codex"].version == "codex-cli 0.168.0"
+
+
+# ---- M1: an update that moves the launched executable -------------------------
+
+_OLD = "/opt/old/bin/codex"
+_NEW = "/opt/new/bin/codex"
+
+
+def _by_path(answers: dict[str, tuple[str, str]]) -> mock.Mock:
+    return mock.Mock(side_effect=lambda _name, path, *_a, **_k: answers[path])
+
+
+def _row_with_candidates(candidates: tuple[str, ...], answers: dict[str, tuple[str, str]]) -> tuple[dict, mock.Mock]:
+    r = _DoctorResult()
+    probe = _by_path(answers)
+    with (
+        mock.patch("defenseclaw.doctor_health.read_cached_discovery", return_value=_discovery(binary=_OLD)),
+        mock.patch.object(agent_discovery, "_version_for_agent_binary", probe),
+        mock.patch.object(agent_discovery, "_binary_candidates_for_agent", return_value=candidates),
+        mock.patch.object(cmd_doctor, "_doctor_component_evidence", return_value=()),
+        mock.patch.object(cmd_doctor, "_connector_enabled", return_value=True),
+        mock.patch.object(cmd_doctor, "_unverified_executable_note", return_value=("", "")),
+    ):
+        cmd_doctor._check_component_connector_compatibility(SimpleNamespace(data_dir=""), ["codex"], r)
+    return next(c for c in r.checks if c["label"] == "Connector compatibility: codex"), probe
+
+
+def test_a_newly_preferred_executable_is_the_one_reported_installed() -> None:
+    # The old copy stays on disk at an unsupported version; the update put a new one first.
+    row, _ = _row_with_candidates(
+        (_NEW, _OLD), {_NEW: ("codex-cli 0.167.0", ""), _OLD: ("codex-cli 0.100.0", "")}
+    )
+    assert "installed=0.167.0" in row["detail"]
+    assert "0.100.0" not in row["detail"]
+    assert row["status"] == "pass"
+
+
+def test_a_downgrade_to_a_preferred_unsupported_executable_is_not_a_pass() -> None:
+    row, _ = _row_with_candidates(
+        (_NEW, _OLD), {_NEW: ("codex-cli 0.100.0", ""), _OLD: ("codex-cli 0.160.0", "")}
+    )
+    assert "installed=0.100.0" in row["detail"]
+    assert row["status"] == "fail"
+
+
+def test_a_preferred_executable_that_cannot_answer_falls_back_like_discovery() -> None:
+    row, probe = _row_with_candidates(
+        (_NEW, _OLD),
+        {_NEW: ("", agent_discovery.UNTRUSTED_PREFIX_ERROR), _OLD: ("codex-cli 0.160.0", "")},
+    )
+    assert "installed=0.160.0" in row["detail"]
+    assert row["status"] == "pass"
+    assert [c.args[1] for c in probe.call_args_list] == [_NEW, _OLD]
+
+
+def test_the_same_executable_in_the_candidates_keeps_the_plain_row() -> None:
+    row, probe = _row_with_candidates((_OLD,), {_OLD: ("codex-cli 0.160.0", "")})
+    assert "installed=0.160.0" in row["detail"]
+    assert "recorded" not in row["detail"]
+    assert probe.call_count == 1
+
+
+def test_a_moved_executable_with_the_same_version_is_probed_at_its_new_path_only() -> None:
+    check = None
+    probe = _by_path({_NEW: ("codex-cli 0.160.0", ""), _OLD: ("codex-cli 0.100.0", "")})
+    with (
+        mock.patch.object(agent_discovery, "_version_for_agent_binary", probe),
+        mock.patch.object(agent_discovery, "_binary_candidates_for_agent", return_value=(_NEW, _OLD)),
+    ):
+        check = doctor_health.recheck_installed_versions(_discovery(binary=_OLD), ["codex"], "")
+    signal = check.discovery.agents["codex"]
+    assert (signal.binary_path, signal.version) == (_NEW, "codex-cli 0.160.0")
+    assert check.changed == {}
+
+
+def test_kiro_install_at_a_new_path_is_judged_with_the_recorded_ones() -> None:
+    new = "/opt/new/bin/kiro-cli"
+    old = "/opt/kiro/bin/kiro-cli"
+    discovery = _kiro_discovery([_kiro_cli_form(_below(KIRO_CLI_HOOK_FLOOR), old)])
+    answers = {new: (f"kiro-cli {KIRO_CLI_HOOK_FLOOR}", ""), old: (f"kiro-cli {_below(KIRO_CLI_HOOK_FLOOR)}", "")}
+    with (
+        mock.patch.object(agent_discovery, "_version_for_agent_binary", _by_path(answers)),
+        mock.patch.object(agent_discovery, "_binary_candidates_for_agent", return_value=(new, old)),
+    ):
+        check = doctor_health.recheck_installed_versions(discovery, ["kiro"], "")
+    forms = check.discovery.agents["kiro"].kiro_forms
+    assert {f["path"] for f in forms} == {new, old}
+    assert check.discovery.agents["kiro"].kiro_cli_version == f"kiro-cli {KIRO_CLI_HOOK_FLOOR}"
+
+
+def test_kiro_new_install_that_cannot_be_read_is_not_invented() -> None:
+    new = "/opt/new/bin/kiro-cli"
+    old = "/opt/kiro/bin/kiro-cli"
+    discovery = _kiro_discovery([_kiro_cli_form(KIRO_CLI_HOOK_FLOOR, old)])
+    answers = {new: ("", agent_discovery.VERSION_PROBE_TIMED_OUT), old: (f"kiro-cli {KIRO_CLI_HOOK_FLOOR}", "")}
+    with (
+        mock.patch.object(agent_discovery, "_version_for_agent_binary", _by_path(answers)),
+        mock.patch.object(agent_discovery, "_binary_candidates_for_agent", return_value=(new, old)),
+    ):
+        check = doctor_health.recheck_installed_versions(discovery, ["kiro"], "")
+    assert check.discovery is discovery
+    assert dict(check.unchecked) == {"kiro": "the version probe timed out"}
+
+
+# ---- M2: one answer for a whole run, however long ----------------------------
+
+
+def _slow_clock() -> mock.Mock:
+    # Every reading is further than the share bound from the one before it.
+    ticks = iter(range(1000, 100000, int(doctor_health._PROBE_SHARE_SECONDS) + 1))
+    return mock.Mock(side_effect=lambda: float(next(ticks)))
+
+
+def test_a_run_longer_than_the_share_bound_still_probes_once() -> None:
+    probe = mock.Mock(side_effect=[("codex-cli 0.160.0", ""), ("codex-cli 0.100.0", "")])
+    clock = _slow_clock()
+    doctor_health.begin_installed_version_run()
+    with (
+        mock.patch.object(agent_discovery, "_version_for_agent_binary", probe),
+        mock.patch.object(doctor_health.time, "monotonic", clock),
+    ):
+        first = doctor_health.recheck_installed_versions(_discovery(), ["codex"], "")
+        second = doctor_health.recheck_installed_versions(_discovery(), ["codex"], "")
+    assert probe.call_count == 1
+    assert first.changed == second.changed == {}
+
+
+def test_outside_a_run_an_answer_expires() -> None:
+    probe = mock.Mock(side_effect=[("codex-cli 0.160.0", ""), ("codex-cli 0.167.0", "")])
+    clock = _slow_clock()
+    with (
+        mock.patch.object(agent_discovery, "_version_for_agent_binary", probe),
+        mock.patch.object(doctor_health.time, "monotonic", clock),
+    ):
+        doctor_health.recheck_installed_versions(_discovery(), ["codex"], "")
+        second = doctor_health.recheck_installed_versions(_discovery(), ["codex"], "")
+    assert probe.call_count == 2
+    assert second.discovery.agents["codex"].version == "codex-cli 0.167.0"
+
+
+def test_the_doctor_command_closes_its_run_scope_when_it_ends() -> None:
+    import click
+
+    @click.command()
+    def run() -> None:
+        doctor_health.begin_installed_version_run()
+        click.get_current_context().call_on_close(doctor_health.end_installed_version_run)
+        assert doctor_health._probe_run_scoped
+
+    from click.testing import CliRunner
+
+    assert CliRunner().invoke(run).exit_code == 0
+    assert not doctor_health._probe_run_scoped
