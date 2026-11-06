@@ -16,6 +16,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/ulikunitz/xz"
+	"github.com/ulikunitz/xz/lzma"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -46,6 +47,72 @@ func (b *boundedReader) Read(p []byte) (int, error) {
 		return read, errTarPlainBound
 	}
 	return read, err
+}
+
+// xzDictionaryCap checks the first block's LZMA2 property before
+// xz.NewReader allocates its dictionary. The xz library raises DictCap to the
+// declared block value, so ReaderConfig alone is not a memory bound.
+func xzDictionaryCap(reader *bufio.Reader) int {
+	header, err := reader.Peek(13)
+	if err != nil || string(header[:6]) != "\xfd7zXZ\x00" {
+		return 0
+	}
+	size := (int(header[12]) + 1) * 4
+	if header[12] == 0 || size < 8 {
+		return 0
+	}
+	header, err = reader.Peek(12 + size)
+	if err != nil {
+		return 0
+	}
+	block := header[12 : 12+size]
+	flags := block[1]
+	if flags&0x3c != 0 {
+		return 0
+	}
+	i, limit := 2, size-4
+	readVLI := func() (uint64, bool) {
+		var value uint64
+		for shift := uint(0); shift < 63 && i < limit; shift += 7 {
+			b := block[i]
+			i++
+			value |= uint64(b&0x7f) << shift
+			if b&0x80 == 0 {
+				return value, true
+			}
+		}
+		return 0, false
+	}
+	for _, present := range []bool{flags&0x40 != 0, flags&0x80 != 0} {
+		if present {
+			if _, ok := readVLI(); !ok {
+				return 0
+			}
+		}
+	}
+	dictCap := 0
+	for filter := 0; filter <= int(flags&0x03); filter++ {
+		id, ok := readVLI()
+		if !ok {
+			return 0
+		}
+		length, ok := readVLI()
+		if !ok || length > uint64(limit-i) {
+			return 0
+		}
+		if id == 0x21 {
+			if dictCap != 0 || length != 1 {
+				return 0
+			}
+			dict, err := lzma.DecodeDictCap(block[i])
+			if err != nil || dict > maxTarPlainBytes {
+				return 0
+			}
+			dictCap = int(dict)
+		}
+		i += int(length)
+	}
+	return dictCap
 }
 
 // tarArchiveHoldsNoLink reports a static tar extraction whose one archive
@@ -96,10 +163,40 @@ func tarArchiveLinkEvidence(program string, args []string, static []bool, cwd st
 	if !strings.HasSuffix(program, "tar") || !filepath.IsAbs(cwd) {
 		return false
 	}
+	resolved, cleanup := resolvedTarSources(file, extraction, cwd, home)
+	defer cleanup()
+	args, static = tarEvidenceArgs(args, static, resolved)
 	if _, _, extract, ok := tarScan(args, static, cwd); !ok || !extract {
+		// A dynamic placement does not hide a link whose absolute target is
+		// already a named protected path in readable archive bytes.
+		if archiveMayLink(program, args, static) {
+			if !record && facts != nil && facts[TarProtectedAbsoluteLinkKey] == "1" {
+				return true
+			}
+			for _, archive := range resolved {
+				if !record && facts != nil && facts[TarProtectedAbsoluteLinkFactPrefix+archive] == "1" {
+					return true
+				}
+				if !record && facts != nil && facts[TarLinkFactPrefix+archive] == "1" {
+					return true
+				}
+				if len(tarProtectedAbsoluteLinkMembers(archive, cwd, home)) != 0 {
+					if record && facts != nil {
+						facts[TarLinkFactPrefix+archive] = "1"
+						facts[TarProtectedAbsoluteLinkFactPrefix+archive] = "1"
+						facts[TarProtectedAbsoluteLinkKey] = "1"
+					}
+					return true
+				}
+			}
+		}
+		if len(resolved) == 0 && unfollowedTarProducer(file, extraction) {
+			return true
+		}
 		return false
 	}
-	for _, archive := range tarArchiveSources(args, static, file, extraction, home) {
+	readSource := false
+	for _, archive := range resolved {
 		if archive == "" || archive == "-" || strings.ContainsAny(archive, "*?[$`") {
 			continue
 		}
@@ -108,7 +205,9 @@ func tarArchiveLinkEvidence(program string, args []string, static []bool, cwd st
 			return true
 		}
 		readable := ""
-		if tarArchiveKind(path) == 2 {
+		kind := tarArchiveKind(path)
+		readSource = readSource || kind != 0
+		if kind == 2 {
 			readable = path
 		} else {
 			readable = tarArchivePriorLinkedRewriteNamed(file, extraction, archive, cwd, home)
@@ -125,15 +224,44 @@ func tarArchiveLinkEvidence(program string, args []string, static []bool, cwd st
 			return true
 		}
 	}
+	if !readSource && (len(resolved) == 0 && unfollowedTarProducer(file, extraction) ||
+		unknownPriorArchiveWrite(file, extraction, cwd, home, resolved)) {
+		return true
+	}
 	return false
+}
+
+// tarEvidenceArgs replaces only a dynamic archive operand after -f when its
+// producer resolved to readable bytes. Other dynamic options remain unknown.
+func tarEvidenceArgs(args []string, static []bool, sources []string) ([]string, []bool) {
+	if len(sources) == 0 {
+		return args, static
+	}
+	a := append([]string(nil), args...)
+	s := append([]bool(nil), static...)
+	for i := range a {
+		if !s[i] && archivePathValueOperand("tar", a, s, i) && i > 0 &&
+			(a[i-1] == "-f" || a[i-1] == "--file" || strings.HasSuffix(a[i-1], "f")) {
+			a[i], s[i] = sources[0], true
+		}
+	}
+	return a, s
 }
 
 // tarProtectedLinkMembers returns only members whose link text reaches the
 // active SSH tree. The archive is bounded by the same byte and member caps as
 // the plain reader. An incomplete read supplies no clearing evidence.
 func tarProtectedLinkMembers(path, destination, home string) map[string]string {
+	return tarProtectedLinkMembersMode(path, destination, home, false)
+}
+
+func tarProtectedAbsoluteLinkMembers(path, destination, home string) map[string]string {
+	return tarProtectedLinkMembersMode(path, destination, home, true)
+}
+
+func tarProtectedLinkMembersMode(path, destination, home string, absoluteOnly bool) map[string]string {
 	result := make(map[string]string)
-	if home == "" || destination == "" {
+	if home == "" || destination == "" && !absoluteOnly {
 		return result
 	}
 	info, err := os.Stat(path)
@@ -159,7 +287,11 @@ func tarProtectedLinkMembers(path, destination, home string) map[string]string {
 	case len(magic) >= 3 && string(magic[:3]) == "BZh":
 		stream = bzip2.NewReader(buffered)
 	case len(magic) >= 6 && string(magic[:6]) == "\xfd7zXZ\x00":
-		decoded, err := xz.NewReader(buffered)
+		dictCap := xzDictionaryCap(buffered)
+		if dictCap == 0 || !xzAllDictionariesWithinBound(f, info.Size()) {
+			return result
+		}
+		decoded, err := (xz.ReaderConfig{DictCap: dictCap}).NewReader(buffered)
 		if err != nil {
 			return result
 		}
@@ -181,7 +313,8 @@ func tarProtectedLinkMembers(path, destination, home string) map[string]string {
 		if err != nil {
 			return result
 		}
-		if header.Typeflag != tar.TypeSymlink && header.Typeflag != tar.TypeLink {
+		if header.Typeflag != tar.TypeSymlink && header.Typeflag != tar.TypeLink ||
+			absoluteOnly && !filepath.IsAbs(header.Linkname) {
 			continue
 		}
 		name := filepath.ToSlash(header.Name)
@@ -566,15 +699,15 @@ func tarArchivePlain(path string) bool {
 	return tarArchiveKind(path) == 1
 }
 
-// tarArchiveKind is unknown (0), plain (1), or positive reason to retain the
-// conservative scope (2): a non-plain member, unsafe name, or exceeded bound.
+// tarArchiveKind is unknown (0), plain (1), link or unsafe member (2), or
+// incomplete because a read bound was reached (3). Only 2 is positive evidence.
 func tarArchiveKind(path string) int {
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() {
 		return 0
 	}
 	if info.Size() > maxTarPlainBytes {
-		return 2
+		return 3
 	}
 	file, err := os.Open(path)
 	if err != nil {
@@ -595,7 +728,11 @@ func tarArchiveKind(path string) int {
 	case len(magic) >= 3 && string(magic[:3]) == "BZh":
 		stream = bzip2.NewReader(buffered)
 	case len(magic) >= 6 && string(magic[:6]) == "\xfd7zXZ\x00":
-		decoded, err := xz.NewReader(buffered)
+		dictCap := xzDictionaryCap(buffered)
+		if dictCap == 0 || !xzAllDictionariesWithinBound(file, info.Size()) {
+			return 0
+		}
+		decoded, err := (xz.ReaderConfig{DictCap: dictCap}).NewReader(buffered)
 		if err != nil {
 			return 0
 		}
@@ -624,7 +761,10 @@ func tarArchiveKind(path string) int {
 		}
 		if err != nil {
 			if errors.Is(err, errTarPlainBound) {
-				return 2
+				if nonPlain {
+					return 2
+				}
+				return 3
 			}
 			if nonPlain {
 				return 2
@@ -632,7 +772,10 @@ func tarArchiveKind(path string) int {
 			return 0
 		}
 		if members++; members > maxTarPlainMembers {
-			return 2
+			if nonPlain {
+				return 2
+			}
+			return 3
 		}
 		switch header.Typeflag {
 		case tar.TypeReg, tar.TypeDir:

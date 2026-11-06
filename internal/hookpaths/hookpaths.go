@@ -81,6 +81,14 @@ const TarPlainFactPrefix = "\x00tar-plain:"
 // that evidence behind ProtectHome.
 const TarLinkFactPrefix = "\x00tar-link:"
 
+// TarProtectedAbsoluteLinkFactPrefix records a read archive member whose
+// absolute link target is under the active user's protected SSH directory.
+const TarProtectedAbsoluteLinkFactPrefix = "\x00tar-protected-absolute:"
+
+// TarProtectedAbsoluteLinkKey retains the same client proof when a static
+// producer has no persistent archive pathname (for example, a joined stream).
+const TarProtectedAbsoluteLinkKey = "\x00tar-protected-absolute-source"
+
 // TarProtectedMemberFactPrefix identifies a link member whose extracted
 // target reaches this user's SSH directory. The value is the resolved target.
 const TarProtectedMemberFactPrefix = "\x00tar-protected-member:"
@@ -2121,6 +2129,13 @@ func Decode(value string) (map[string]string, bool) {
 		}
 		if strings.HasPrefix(key, TarLinkFactPrefix) &&
 			(value != "1" || !filepath.IsAbs(strings.TrimPrefix(key, TarLinkFactPrefix))) {
+			return nil, false
+		}
+		if strings.HasPrefix(key, TarProtectedAbsoluteLinkFactPrefix) &&
+			(value != "1" || !filepath.IsAbs(strings.TrimPrefix(key, TarProtectedAbsoluteLinkFactPrefix))) {
+			return nil, false
+		}
+		if key == TarProtectedAbsoluteLinkKey && value != "1" {
 			return nil, false
 		}
 		if strings.HasPrefix(key, TarProtectedMemberFactPrefix) &&
@@ -4407,15 +4422,48 @@ func HomeSpelledWriteOperands(command, cwd, home string) []string {
 	return destinations
 }
 
-// ProtectedArchiveMoveName reports a move into the user's SSH tree or through
-// a proved protected link member of an earlier extraction.
+// ProtectedArchiveMoveName reports a move or copier write into the user's SSH
+// tree or through a proved protected link member of an earlier extraction.
 func ProtectedArchiveMoveName(command, cwd, home string, facts map[string]string) bool {
-	if !strings.Contains(command, "mv") {
+	if !strings.Contains(command, "tar") && !strings.Contains(command, "zip") &&
+		!strings.Contains(command, "cpio") && !strings.Contains(command, "pax") &&
+		!strings.Contains(command, "7z") && !strings.Contains(command, "jar") &&
+		!strings.Contains(command, "ditto") {
 		return false
 	}
 	file, parsed := parseShell(command)
 	if !parsed {
 		return false
+	}
+	// A producer pipeline is not a linear shell statement, but a write in a
+	// later statement can still reach a link extracted from its bytes.
+	pipelineWriteAfter := func(extraction *syntax.CallExpr) bool {
+		inPipe := false
+		syntax.Walk(file, func(node syntax.Node) bool {
+			pipe, ok := node.(*syntax.BinaryCmd)
+			if ok && pipe.Op == syntax.Pipe && extraction.Pos().Offset() >= pipe.Y.Pos().Offset() && extraction.End().Offset() <= pipe.Y.End().Offset() {
+				inPipe = true
+			}
+			return true
+		})
+		if !inPipe {
+			return false
+		}
+		found := false
+		syntax.Walk(file, func(node syntax.Node) bool {
+			stmt, ok := node.(*syntax.Stmt)
+			if !ok || stmt.Pos().Offset() <= extraction.End().Offset() {
+				return true
+			}
+			for _, redirect := range stmt.Redirs {
+				switch redirect.Op {
+				case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+					found = true
+				}
+			}
+			return !found
+		})
+		return found
 	}
 	protectedName := func(path string, members map[string]string) bool {
 		if path == "" {
@@ -4474,13 +4522,76 @@ func ProtectedArchiveMoveName(command, cwd, home string, facts map[string]string
 				}
 				if archiveMayLink(program, args, static) && !archiveCopiesLinks(program, args, static) {
 					seenArchive = true
-					for _, archive := range tarArchiveSources(args, static, file, call, home) {
-						for member, target := range tarProtectedLinkMembers(OperandPath(archive, cwd), archiveDestination(program, args, static, cwd), home) {
+					resolved, cleanup := resolvedTarSources(file, call, cwd, home)
+					args, static = tarEvidenceArgs(args, static, resolved)
+					destination := archiveDestination(program, args, static, cwd)
+					if destination == "" && facts[TarProtectedAbsoluteLinkKey] == "1" && (ArchiveBeforeWrite(command, home) || pipelineWriteAfter(call)) {
+						named = true
+					}
+					for _, archive := range resolved {
+						if destination == "" &&
+							(facts[TarProtectedAbsoluteLinkFactPrefix+archive] == "1" ||
+								len(tarProtectedAbsoluteLinkMembers(archive, cwd, home)) != 0) &&
+							(ArchiveBeforeWrite(command, home) || pipelineWriteAfter(call)) {
+							named = true
+						}
+						for member, target := range tarProtectedLinkMembers(OperandPath(archive, cwd), destination, home) {
 							members[member] = target
 						}
 					}
+					cleanup()
+					return true
 				}
-				return true
+				if program != "ditto" {
+					return true
+				}
+			}
+			if seenArchive && slices.Contains([]string{"cp", "gcp", "install", "rsync", "ditto", "ln", "gln", "tee", "dd"}, program) {
+				args := make([]string, 0, len(call.Args)-1)
+				for _, word := range call.Args[1:] {
+					value, fixed := StaticWord(word, home)
+					if !fixed {
+						value, fixed = actionWordValue(word, values, cwd, home)
+					}
+					if !fixed {
+						return true
+					}
+					args = append(args, value)
+				}
+				if len(args) > 0 {
+					destination := args[len(args)-1]
+					switch program {
+					case "cp", "gcp":
+						if parsed := cpOperands(args, makeStatic(len(args))); parsed.ok {
+							destination = parsed.destination
+							if parsed.targetDir {
+								for _, source := range parsed.sources {
+									if protectedName(filepath.Join(destination, filepath.Base(source)), members) {
+										named = true
+									}
+								}
+							}
+						}
+					case "dd":
+						destination = ""
+						for _, arg := range args {
+							if strings.HasPrefix(arg, "of=") {
+								destination = strings.TrimPrefix(arg, "of=")
+							}
+						}
+					case "tee":
+						destination = ""
+						for _, arg := range args {
+							if arg != "-" && !strings.HasPrefix(arg, "-") && protectedName(arg, members) {
+								named = true
+							}
+						}
+					}
+					if protectedName(destination, members) {
+						named = true
+					}
+				}
+				return !named
 			}
 			if !seenArchive || !slices.Contains(renamePrograms, program) {
 				return true
@@ -4514,6 +4625,14 @@ func ProtectedArchiveMoveName(command, cwd, home string, facts map[string]string
 	}
 	for _, stmt := range file.Stmts {
 		visit(stmt)
+	}
+	if seenArchive && len(members) != 0 {
+		redirects, _, _ := ShellWriteOperands(command, cwd, home)
+		for _, path := range append(redirects, LiteralWriteOperands(command, cwd, home)...) {
+			if protectedName(path, members) {
+				return true
+			}
+		}
 	}
 	return named
 }
@@ -5742,7 +5861,7 @@ func archiveDestination(program string, args []string, static []bool, cwd string
 // --listed-incremental), renames members (--transform) or keeps existing
 // links (--keep-directory-symlink), is an unknown destination (GAP-2445).
 var tarLongOptions = append([]string{
-	"directory", "dir", "cd", "one-top-level", "file", "strip-components", "exclude",
+	"directory", "dir", "cd", "one-top-level", "file", "use-compress-program", "strip-components", "exclude",
 	"exclude-from", "files-from", "warning", "owner", "group", "mode", "mtime",
 	"blocking-factor", "record-size", "format", "label", "newer", "after-date",
 	"newer-mtime", "exclude-tag", "exclude-tag-all", "exclude-tag-under",
@@ -5829,7 +5948,7 @@ func tarScan(args []string, static []bool, cwd string) (string, []string, bool, 
 				if joined && !consume(value) {
 					return "", nil, false, false
 				}
-			case "file", "strip-components", "exclude", "exclude-from", "files-from", "warning",
+			case "file", "use-compress-program", "strip-components", "exclude", "exclude-from", "files-from", "warning",
 				"owner", "group", "mode", "mtime", "blocking-factor", "record-size", "format", "label",
 				"newer", "after-date", "newer-mtime", "exclude-tag", "exclude-tag-all", "exclude-tag-under":
 				if !joined {
@@ -5874,7 +5993,7 @@ func tarScan(args []string, static []bool, cwd string) (string, []string, bool, 
 				if !oldStyle {
 					j = len(cluster)
 				}
-			case 'f', 'T', 'X', 'b', 'N', 'V', 'H', 'K', 'L':
+			case 'f', 'I', 'T', 'X', 'b', 'N', 'V', 'H', 'K', 'L':
 				// The archive, a member list or exclude file, the blocking
 				// factor, a date, a label, a format, a starting member or a tape
 				// length: one value, never the destination.

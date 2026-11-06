@@ -63,8 +63,8 @@ func TestGX054CompressedTarStreamBoundRetainsScope(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := tarArchiveKind(path); got != 2 {
-		t.Fatalf("compressed stream over bound classified %d, want conservative evidence", got)
+	if got := tarArchiveKind(path); got != 3 {
+		t.Fatalf("compressed stream over bound classified %d, want incomplete reading", got)
 	}
 }
 

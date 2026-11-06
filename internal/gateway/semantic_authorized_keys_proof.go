@@ -1110,6 +1110,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				strings.HasPrefix(operand, hookpaths.CdEnterableFactPrefix) ||
 				strings.HasPrefix(operand, hookpaths.TarPlainFactPrefix) ||
 				strings.HasPrefix(operand, hookpaths.TarLinkFactPrefix) ||
+				strings.HasPrefix(operand, hookpaths.TarProtectedAbsoluteLinkFactPrefix) ||
+				operand == hookpaths.TarProtectedAbsoluteLinkKey ||
 				strings.HasPrefix(operand, hookpaths.TarProtectedMemberFactPrefix) ||
 				strings.HasPrefix(operand, hookpaths.UnreadArchiveTargetPrefix) ||
 				directoryFact && (changedDirectory ||

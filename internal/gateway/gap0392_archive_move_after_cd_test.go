@@ -96,11 +96,15 @@ func TestGAP0627VariablePackagingChainFourCell(t *testing.T) {
 		`cd ~/clean && tar -xzf out.tgz -C $HOME/tmp && mv $HOME/tmp/src $HOME/tmp/src-old && echo done`,
 		`cd ~/clean && tar -xzf out.tgz -C $TMPDIR && echo done > build-note.txt`,
 	} {
-		payload := mustJSON(t, map[string]any{"session_id": "gap0627", "hook_event_name": "PreToolUse", "cwd": clean,
-			"permission_mode": "default", "tool_name": "Bash", "tool_use_id": "gap0627",
-			"tool_input": map[string]any{"command": command, "description": "Package fixture"}})
-		header := f.clientHeaders(t, [][]byte{payload})[0]
 		for _, connector := range []string{"claudecode", "codex"} {
+			body := map[string]any{"session_id": "gap0627", "hook_event_name": "PreToolUse", "cwd": clean,
+				"permission_mode": "default", "tool_name": "Bash", "tool_use_id": "gap0627",
+				"tool_input": map[string]any{"command": command, "description": "Package fixture"}}
+			if connector == "codex" {
+				body["turn_id"] = "gap0627-turn"
+			}
+			payload := mustJSON(t, body)
+			header := rv4Header(t, f, connector, payload)
 			for _, managed := range []bool{false, true} {
 				if got := gx054Verdict(t, f, connector, "", payload, header, managed); got != "allow" {
 					t.Errorf("%s managed=%t command=%q balanced=%s", connector, managed, command, got)
