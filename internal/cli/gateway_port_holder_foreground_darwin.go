@@ -9,12 +9,9 @@ import (
 	"bytes"
 	"encoding/binary"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"golang.org/x/sys/unix"
 
-	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
 )
 
@@ -43,15 +40,6 @@ func sameHomeGatewayProcessPlatform(pid int, home, executable string) bool {
 		after.Proc.P_starttime == before.Proc.P_starttime && after.Eproc.Ucred.Uid == before.Eproc.Ucred.Uid
 }
 
-func sameForegroundFile(left, right string) bool {
-	if !filepath.IsAbs(left) || !filepath.IsAbs(right) {
-		return false
-	}
-	leftInfo, leftErr := os.Stat(left)
-	rightInfo, rightErr := os.Stat(right)
-	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
-}
-
 // darwinForegroundProcessHome reads only the launch home from kern.procargs2.
 func darwinForegroundProcessHome(raw []byte) (string, bool) {
 	if len(raw) < 5 || len(raw) > 256*1024+4 {
@@ -72,8 +60,7 @@ func darwinForegroundProcessHome(raw []byte) (string, bool) {
 		rest = rest[end+1:]
 	}
 	rest = bytes.TrimLeft(rest, "\x00")
-	var override, userHome string
-	seenOverride, seenHome := false, false
+	var environment []string
 	for len(rest) > 0 {
 		end = bytes.IndexByte(rest, 0)
 		if end < 0 {
@@ -82,30 +69,8 @@ func darwinForegroundProcessHome(raw []byte) (string, bool) {
 		if end == 0 {
 			break
 		}
-		entry := string(rest[:end])
+		environment = append(environment, string(rest[:end]))
 		rest = rest[end+1:]
-		if strings.HasPrefix(entry, "DEFENSECLAW_HOME=") {
-			if seenOverride {
-				return "", false
-			}
-			seenOverride = true
-			override = entry[len("DEFENSECLAW_HOME="):]
-		} else if strings.HasPrefix(entry, "HOME=") {
-			if seenHome {
-				return "", false
-			}
-			seenHome = true
-			userHome = entry[len("HOME="):]
-		}
 	}
-	if seenOverride && override != "" {
-		if !filepath.IsAbs(override) {
-			return "", false
-		}
-		return override, true
-	}
-	if seenHome && filepath.IsAbs(userHome) {
-		return filepath.Join(userHome, config.DefaultDataDirName), true
-	}
-	return "", false
+	return foregroundLaunchHome(environment)
 }
