@@ -4954,7 +4954,7 @@ def _foreign_gateway_port_holder(cfg, *, status_only: bool = False) -> str:
             return ""
     except Exception:  # noqa: BLE001 - an unverifiable holder is still foreign
         pass
-    if status_only and _foreground_gateway_status_health(cfg) is not None:
+    if status_only and _foreground_gateway_status_owner(cfg) is not None:
         return ""
     return holder
 
@@ -6458,13 +6458,20 @@ def _foreground_current_uid() -> int:
     return os.geteuid() if hasattr(os, "geteuid") else -1
 
 
-def _foreground_gateway_status_health(
-    cfg, *, platform_name: str | None = None, evidence: GatewayEvidence | None = None
-) -> tuple[int, dict] | None:
-    """Read public health from this account's foreground gateway, without a token.
+@dataclass(frozen=True)
+class _ForegroundGatewayOwner:
+    pid: int
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address
+    process: ProcessEvidence
 
-    This proof is for status display only. Token-bearing callers continue to
-    require ``_trusted_gateway_listener`` and its PID-file identity contract.
+
+def _foreground_gateway_status_owner(
+    cfg, *, platform_name: str | None = None, evidence: GatewayEvidence | None = None
+) -> _ForegroundGatewayOwner | None:
+    """Prove this account owns a foreground gateway listener for status display.
+
+    Public health may be unavailable while the listener is starting or hung.
+    Ownership alone never authorizes token-bearing requests.
     """
     from defenseclaw.enforce import asset_lists
     from defenseclaw.gateway import resolve_trusted_gateway_binary
@@ -6546,11 +6553,26 @@ def _foreground_gateway_status_health(
 
     if not runtime_record_matches():
         return None
+    return _ForegroundGatewayOwner(listener.pid, target_ip, process)
+
+
+def _foreground_gateway_status_health(
+    cfg, *, platform_name: str | None = None, evidence: GatewayEvidence | None = None
+) -> tuple[int, dict] | None:
+    """Read public health from a current foreground owner, without a token."""
+    platform_name = platform_name or sys.platform
+    evidence = evidence or GatewayEvidence(platform_name=platform_name)
+    owner = _foreground_gateway_status_owner(cfg, platform_name=platform_name, evidence=evidence)
+    if owner is None:
+        return None
+    port = _gateway_api_port(cfg)
     peer = _GatewayTrust(
-        "trusted", "foreground gateway status only", listener.pid, home_bound=True, process=process
+        "trusted", "foreground gateway status only", owner.pid, home_bound=True, process=owner.process
     )
     code, body = _http_probe(
-        f"http://[{target_ip}]:{port}/health" if target_ip.version == 6 else f"http://{target_ip}:{port}/health",
+        f"http://[{owner.address}]:{port}/health"
+        if owner.address.version == 6
+        else f"http://{owner.address}:{port}/health",
         timeout=3.0,
         response_limit=2 << 20,
         allow_truncation=False,
@@ -6564,20 +6586,17 @@ def _foreground_gateway_status_health(
         return None
     if not isinstance(health, dict) or not isinstance(health.get("gateway"), dict):
         return None
-    after = endpoint_listeners()
-    current = evidence.process(listener.pid)
+    after = _foreground_gateway_status_owner(cfg, platform_name=platform_name, evidence=evidence)
     if (
         after is None
-        or target_ip not in after
-        or after[target_ip].pid != listener.pid
-        or current.status != "ok"
-        or current.executable != process.executable
-        or current.start_identity != process.start_identity
-        or (platform_name == "darwin" and current.uid != own_uid)
-        or not runtime_record_matches()
+        or after.pid != owner.pid
+        or after.address != owner.address
+        or after.process.executable != owner.process.executable
+        or after.process.start_identity != owner.process.start_identity
+        or after.process.uid != owner.process.uid
     ):
         return None
-    return listener.pid, health
+    return owner.pid, health
 
 
 def _trusted_gateway_listener_for_lifecycle(

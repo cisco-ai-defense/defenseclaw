@@ -177,6 +177,25 @@ def test_loopback_hostname_holder_is_not_labeled_foreign(cfg, platform: str) -> 
 
 
 @pytest.mark.parametrize("platform", ["win32", "darwin"])
+@pytest.mark.parametrize("bind", ["localhost", "127.0.0.1"])
+def test_unavailable_public_health_keeps_verified_foreground_owner_unverified(cfg, platform: str, bind: str) -> None:
+    cfg.gateway.api_bind = bind
+    details = (
+        {"resolved_addresses": ("127.0.0.1", "::1"), "listener_pids": (4242, None, 4242, None)}
+        if bind == "localhost"
+        else {"listener_pids": (4242, 4242)}
+    )
+    stack, probe = _proof(platform, **details)
+    probe.return_value = (0, "public health unavailable")
+    with stack:
+        assert cmd_doctor._foreground_gateway_status_health(cfg) is None
+        assert cmd_doctor._foreign_gateway_port_holder(cfg, status_only=True) == ""
+        assert "PID 4242" in cmd_doctor._foreign_gateway_port_holder(cfg)
+    assert probe.call_count == 1
+    assert probe.call_args.kwargs.get("headers") is None
+
+
+@pytest.mark.parametrize("platform", ["win32", "darwin"])
 @pytest.mark.parametrize(
     ("listener_pids", "alternate_closed"),
     [((4242, 4343), True), ((4242, None), False)],
@@ -260,6 +279,39 @@ def test_status_renders_foreground_gateway_and_agents_from_public_health() -> No
         assert machine.exit_code == 0, machine.output
         assert json.loads(machine.output)["sidecar"]["running"] is True
         assert json.loads(machine.output)["fleet"]["available"] is False
+        client.status.assert_not_called()
+        client._session.get.assert_not_called()
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
+
+
+def test_status_renders_unverified_foreground_owner_without_credentials() -> None:
+    app, tmp_dir, db_path = make_app_context()
+    app.cfg.guardrail.connector = "claudecode"
+    app.cfg.guardrail.enabled = True
+    app.cfg.fleet.enabled = True
+    client = MagicMock()
+    try:
+        with (
+            patch.object(
+                cmd_doctor, "_trusted_gateway_listener", return_value=cmd_doctor._GatewayTrust("missing", "no PID file")
+            ),
+            patch.object(cmd_doctor, "_foreground_gateway_status_health", return_value=None),
+            patch.object(cmd_doctor, "_foreground_gateway_status_owner", return_value=SimpleNamespace(pid=4242)),
+            patch.object(cmd_doctor, "_gateway_port_holder", return_value="PID 4242 (defenseclaw-gateway)"),
+            patch.object(cmd_status, "_live_gateway_pid", return_value=0),
+            patch.object(gateway, "OrchestratorClient", return_value=client),
+        ):
+            human = CliRunner().invoke(cmd_status.status, [], obj=app)
+            machine = CliRunner().invoke(cmd_status.status, ["--json"], obj=app)
+        assert human.exit_code == 0, human.output
+        assert "foreground gateway (PID 4242) owns the listener" in human.output
+        assert "live state unverified" in human.output
+        assert "port 18789 is held by" not in human.output
+        assert machine.exit_code == 0, machine.output
+        sidecar = json.loads(machine.output)["sidecar"]
+        assert sidecar["running"] is None
+        assert "foreground gateway (PID 4242) owns the listener" in sidecar["reason"]
         client.status.assert_not_called()
         client._session.get.assert_not_called()
     finally:
