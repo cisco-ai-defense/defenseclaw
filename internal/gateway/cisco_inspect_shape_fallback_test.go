@@ -114,9 +114,10 @@ func TestCiscoInspectAPIKeyToolCallValidationFallback(t *testing.T) {
 				t.Fatalf("remembered format verdict = %+v, want block", verdict)
 			}
 			gotRequests = requestSnapshot()
-			if len(gotRequests) != 4 ||
-				!(reflect.DeepEqual(gotRequests[2], wantText) && hasShapeFallbackToolCalls(gotRequests[3]) ||
-					hasShapeFallbackToolCalls(gotRequests[2]) && reflect.DeepEqual(gotRequests[3], wantText)) {
+			bothShapes := len(gotRequests) == 4 &&
+				(reflect.DeepEqual(gotRequests[2], wantText) && hasShapeFallbackToolCalls(gotRequests[3]) ||
+					hasShapeFallbackToolCalls(gotRequests[2]) && reflect.DeepEqual(gotRequests[3], wantText))
+			if !bothShapes {
 				t.Fatalf("remembered format shapes = %v", gotRequests)
 			}
 			if verdict := client.Inspect(t.Context(), shapeFallbackMessages("ordinary edit")); verdict == nil || verdict.Action != "allow" {

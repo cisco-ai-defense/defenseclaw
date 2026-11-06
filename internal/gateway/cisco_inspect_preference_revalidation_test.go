@@ -245,11 +245,12 @@ func TestCiscoInspectAPIKeyPartialOutageReturnsNoVerdict(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		shape := ciscoPreferenceRequestShape(t, r)
 		mu.Lock()
-		if shape == "structured" {
+		switch shape {
+		case "structured":
 			structuredCalls++
-		} else if shape == "text" {
+		case "text":
 			textCalls++
-		} else {
+		default:
 			t.Errorf("request shape = %q", shape)
 		}
 		structuredNumber, textNumber := structuredCalls, textCalls
