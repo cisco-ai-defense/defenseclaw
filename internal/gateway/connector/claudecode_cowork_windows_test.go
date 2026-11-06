@@ -95,6 +95,19 @@ func TestCoworkWindowsPluginDistinguishesRemovalFromLauncherFailure(t *testing.T
 			t.Fatal(err)
 		}
 	}
+	// An account with no data folder has no Claude Code setup: Cowork setup
+	// refuses and creates nothing.
+	if _, err := CoworkPluginHooks(SetupOpts{DataDir: dataDir, HookExecutable: launcher}); !errors.Is(err, ErrCoworkClaudeCodeNotSetUp) {
+		t.Fatalf("account without a data folder: err = %v, want ErrCoworkClaudeCodeNotSetUp", err)
+	}
+	if _, err := os.Lstat(dataDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Cowork setup created the account data folder: %v", err)
+	}
+	// defenseclaw init creates the private data folder, and Claude Code setup
+	// writes its hooks there before it records the hook contract.
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := SaveHookContractLockEntry(dataDir, HookContractLockEntry{Connector: "claudecode", ContractID: "claudecode-test"}); err != nil {
 		t.Fatal(err)
 	}
@@ -162,8 +175,12 @@ func TestCoworkPluginHooksAcceptWindowsAccountPathVariants(t *testing.T) {
 			root := filepath.Join(t.TempDir(), name)
 			dataDir := filepath.Join(root, "account")
 			bin := filepath.Join(root, "bin")
-			if err := os.MkdirAll(bin, 0o700); err != nil {
-				t.Fatal(err)
+			// defenseclaw init creates the private data folder before Claude
+			// Code setup records the hook contract in it.
+			for _, dir := range []string{dataDir, bin} {
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
 			}
 			launcher := filepath.Join(bin, "defenseclaw-hook.exe")
 			guard := filepath.Join(bin, "defenseclaw-hook-guard.exe")
