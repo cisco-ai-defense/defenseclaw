@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"golang.org/x/sys/windows"
 )
 
 // GAP-0561: on the standalone profile the managed-hook lifecycle and teardown
@@ -70,26 +71,59 @@ func TestWindowsManagedHooksTrustStandaloneDrift(t *testing.T) {
 			t.Fatalf("repair calls = %d, want none for an untrusted state folder", calls-before)
 		}
 	})
-	t.Run("trusted-only folder drift is repaired and rechecked", func(t *testing.T) {
+	// trustedOnlyDriftedFolder is a folder whose DACL also grants OWNER
+	// RIGHTS full control while an administrator owns it: drift the strict
+	// walk refuses (it takes an OWNER RIGHTS entry for an untrusted writer),
+	// with no untrusted writer or owner on the object itself, so the
+	// standalone refusal leaves it to the repair (g582 review 4 S2).
+	trustedOnlyDriftedFolder := func(t *testing.T) string {
+		t.Helper()
 		dir := filepath.Join(t.TempDir(), "state")
 		if err := os.Mkdir(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
+		descriptor, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)")
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := descriptor.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+			t.Fatalf("set DACL on %s: %v", dir, err)
+		}
+		if err := windowsManagedHooksStrictDirCheck(dir, "state root"); err == nil {
+			t.Fatal("the fixture folder carries no drift the strict walk refuses")
+		}
+		if refused := managed.RefuseStandaloneInPlaceRepair(dir, managed.ObjectStateDirectory); refused != nil {
+			t.Fatalf("the fixture folder's drift is not trusted-only: %v", refused)
+		}
+		return dir
+	}
+	t.Run("trusted-only folder drift is repaired and rechecked", func(t *testing.T) {
+		dir := trustedOnlyDriftedFolder(t)
+		before := calls
 		if err := validateWindowsManagedHooksTrustedDir(dir, managed.ObjectStateDirectory, "state root"); err != nil {
 			t.Fatalf("standalone refused a state folder the repair made trusted: %v", err)
 		}
+		if calls != before+1 {
+			t.Fatalf("repair calls = %d, want the one repair of the trusted-only drift", calls-before)
+		}
 	})
 	t.Run("unrepaired folder drift is refused", func(t *testing.T) {
-		dir := filepath.Join(t.TempDir(), "state")
-		if err := os.Mkdir(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		grantUntrustedWriterForTest(t, dir)
+		dir := trustedOnlyDriftedFolder(t)
+		unrepaired := 0
 		windowsManagedHooksEnsureCanonical = func(path string, kind managed.ObjectKind, _ managed.CanonicalOptions) (managed.CanonicalResult, error) {
+			unrepaired++
 			return managed.CanonicalResult{Path: path, Kind: kind, Outcome: managed.CanonicalBoundary}, nil
 		}
 		if err := validateWindowsManagedHooksTrustedDir(dir, managed.ObjectStateDirectory, "state root"); err == nil {
-			t.Fatal("standalone accepted a state folder with an Everyone writer")
+			t.Fatal("standalone accepted a drifted state folder the repair did not make trusted")
+		}
+		if unrepaired != 1 {
+			t.Fatalf("repair calls = %d, want the repair to have been tried once", unrepaired)
 		}
 	})
 }
