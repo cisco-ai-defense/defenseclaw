@@ -1834,6 +1834,7 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	w.Header().Set(hookexec.HookDeliveryCapabilityHeader, "1")
 	snap := a.health.Snapshot()
 	cfg := a.runtimeConfigSnapshot()
 	// A standalone host's ordinary account reads liveness and the binary

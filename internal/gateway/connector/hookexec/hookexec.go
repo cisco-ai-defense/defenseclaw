@@ -1728,7 +1728,15 @@ func sendHookRequest(
 		transportCtx, cancelTransport := context.WithDeadline(
 			context.WithoutCancel(req.Context()), opts.answerWatch.ceiling.Add(answerWatchdogLogWait))
 		req = req.WithContext(transportCtx)
-		req, delivery = prepareHookDeliveryRequest(req, payload, hookDeliveryWait(opts), hookDeliveryGatewayStarting(opts))
+		var olderGateway func(context.Context) bool
+		if !opts.ManagedEnterprise {
+			target := req.URL.String()
+			client := opts.HTTPClient
+			olderGateway = func(ctx context.Context) bool {
+				return hookDeliveryOlderGateway(ctx, client, target)
+			}
+		}
+		req, delivery = prepareHookDeliveryRequest(req, payload, hookDeliveryWait(opts), hookDeliveryGatewayStarting(opts), olderGateway)
 		delivery.setCancel(cancelTransport)
 		opts.answerWatch.setDeadlineDelivery(delivery)
 	}
