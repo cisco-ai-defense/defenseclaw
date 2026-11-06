@@ -9,6 +9,7 @@ package enterprisehooks
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -176,5 +177,59 @@ func TestGAP0083InterruptedReadbackDoesNotPublishLock(t *testing.T) {
 	}
 	if entry := connector.LoadHookContractLockEntry(filepath.Join(home, ".defenseclaw"), "hermes"); entry.Connector != "" {
 		t.Fatalf("interrupted read-back published a %s lock", entry.Connector)
+	}
+}
+
+func TestGAP0083UncertainLockWriteKeepsVerifiedRegistration(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	setStandaloneProfileForTest(t, true)
+	home := newTestHome(t)
+	opts := hermesStandaloneOptions(t, home)
+	previous := installSaveHookContractLockEntry
+	t.Cleanup(func() { installSaveHookContractLockEntry = previous })
+	installSaveHookContractLockEntry = func(dataDir string, entry connector.HookContractLockEntry, managed bool) error {
+		if err := previous(dataDir, entry, managed); err != nil {
+			return err
+		}
+		return errors.New("injected lock durability error")
+	}
+	if _, err := Install(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "injected lock durability error") {
+		t.Fatalf("uncertain lock write = %v, want the reported error", err)
+	}
+	if entry := connector.LoadHookContractLockEntry(filepath.Join(home, ".defenseclaw"), "hermes"); entry.Connector != "hermes" {
+		t.Fatalf("post-publication error lost the Hermes lock: %+v", entry)
+	}
+	if _, err := Verify(context.Background(), opts); err != nil {
+		t.Fatalf("post-publication error left an unverified registration: %v", err)
+	}
+}
+
+func TestGAP0083FailedLockWriteBeforePublicationRollsBack(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	setStandaloneProfileForTest(t, true)
+	home := newTestHome(t)
+	opts := hermesStandaloneOptions(t, home)
+	previous := installSaveHookContractLockEntry
+	t.Cleanup(func() { installSaveHookContractLockEntry = previous })
+	installSaveHookContractLockEntry = func(string, connector.HookContractLockEntry, bool) error {
+		return errors.New("injected pre-publication error")
+	}
+	if _, err := Install(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "injected pre-publication error") {
+		t.Fatalf("failed lock write = %v, want the reported error", err)
+	}
+	if entry := connector.LoadHookContractLockEntry(filepath.Join(home, ".defenseclaw"), "hermes"); entry.Connector != "" {
+		t.Fatalf("failed lock write published a %s lock", entry.Connector)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".defenseclaw", "hooks", "hermes-hook.sh")); !os.IsNotExist(err) {
+		t.Fatalf("failed lock write retained the hook script: %v", err)
+	}
+	installSaveHookContractLockEntry = previous
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("recovery Install: %v", err)
+	}
+	if _, err := Verify(context.Background(), opts); err != nil {
+		t.Fatalf("recovery Verify: %v", err)
 	}
 }
