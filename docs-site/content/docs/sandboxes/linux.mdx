@@ -206,7 +206,9 @@ Continue with [run an agent](/docs/sandboxes/first-session).
 
 ## Run sandboxes in MicroVMs with KVM
 
-On a host with KVM, the `vm` driver runs each sandbox as a small virtual machine with its own kernel. It is the way on when the host kernel has no Landlock. Setup offers it when `/dev/kvm` exists and stops with the way on if something is missing: access to `/dev/kvm`, `e2fsprogs` 1.43 or newer, and the `openshell-driver-vm` download. Every MicroVM run works on a copy, so [`sandbox pull NAME --apply`](/docs/sandboxes/guide#pull-on-macos) brings the work into your project (`--branch` or `--patch-out FILE` saves it elsewhere).
+On a host with KVM, the `vm` driver is intended to run each sandbox as a small virtual machine with its own kernel, including when the host kernel has no Landlock. Setup offers it when `/dev/kvm` exists and stops with the way on if something is missing: access to `/dev/kvm`, `e2fsprogs` 1.43 or newer, and the `openshell-driver-vm` download. Every MicroVM run works on a copy, so [`sandbox pull NAME --apply`](/docs/sandboxes/guide#pull-on-macos) brings the work into your project (`--branch` or `--patch-out FILE` saves it elsewhere).
+
+With OpenShell 0.1.6, MicroVM sandboxes on Linux with KVM do not start on either per-user or managed computers. OpenShell gives the sandbox account ownership of the guest root folder, so DefenseClaw cannot trust its `localhost` resolver and refuses and deletes the sandbox. Until a fixed OpenShell release is supported, use Docker. On a per-user computer, run `defenseclaw sandbox setup` and answer no to MicroVMs. On a managed computer, ask your administrator to set `enterprise.openshell.driver: docker` and run `ensure`; `driver_fallback: docker` does not cover this refusal. See [the sandbox guide](/docs/sandboxes/guide#microvm-create-is-refused-on-linux-with-kvm).
 
 ## One OpenShell gateway per machine
 
