@@ -17,6 +17,14 @@ import (
 // any owner outside the installer set before it writes anything.
 var enterpriseHookGuardianLedgerRepairer = repairEnterpriseHookGuardianLedgerObjectPlatform
 
+// enterpriseHookGuardianLedgerStandaloneRefusal refuses, read-only, the
+// in-place repair of a ledger object that an untrusted account can write or
+// owns on a standalone install (g582 review 3, the class rule): that account
+// may have edited the roster or the activation record, and a re-stamp would
+// make every reader trust its bytes. It is nil off standalone and for
+// trusted-only drift, which keep the repair.
+var enterpriseHookGuardianLedgerStandaloneRefusal = enterpriseHookGuardianLedgerStandaloneRefusalPlatform
+
 type enterpriseHookGuardianLedgerObject struct {
 	path      string
 	directory bool
@@ -69,6 +77,14 @@ func repairEnterpriseHookGuardianLedger(dataDir string) error {
 		}
 		trustErr := object.check(object.path)
 		if trustErr == nil {
+			continue
+		}
+		if refused := enterpriseHookGuardianLedgerStandaloneRefusal(object.path, object.directory); refused != nil {
+			failures = append(failures, fmt.Errorf("hook guardian ledger %s was not repaired: %w", object.path, refused))
+			managed.EmitResilienceEvent(managed.MarkerBoundary, map[string]string{
+				"path":   object.path,
+				"reason": "hook guardian ledger was not repaired: " + refused.Error(),
+			})
 			continue
 		}
 		if err := enterpriseHookGuardianLedgerRepairer(object.path, object.directory); err != nil {
