@@ -929,6 +929,45 @@ func RestoreManagedFileBackups(dataDir, home string) (restored, kept []string, e
 	return restored, kept, err
 }
 
+// RestoreManagedFileBackupsForRollback uses the saved newer install's
+// connector backup list after the older data directory is back in place.
+// Every connector absent from the restored configuration is eligible,
+// including one the restored gateway does not know. Each backup still
+// requires its exact post-setup file hash, so later operator
+// edits remain in place for the normal surgical prune to handle.
+func RestoreManagedFileBackupsForRollback(
+	savedDataDir, currentDataDir, home string, configured map[string]bool, onlyConnector string,
+) (restored, kept []string, err error) {
+	err = forEachManagedFileBackup(savedDataDir, func(b managedFileBackup) error {
+		if configured[strings.ToLower(strings.TrimSpace(b.Connector))] ||
+			(onlyConnector != "" && !strings.EqualFold(b.Connector, onlyConnector)) {
+			return nil
+		}
+		if !managedBackupTargetInside(home, b.Path) || managedBackupTargetInside(currentDataDir, b.Path) {
+			kept = append(kept, b.Path)
+			return nil
+		}
+		if b.PostSHA256 == "" {
+			kept = append(kept, b.Path)
+			return nil
+		}
+		if managedFileSnapshotHash(b.PristineBytes, b.Existed) != b.PristineSHA256 {
+			return fmt.Errorf("restore %s: connector backup does not match its saved digest", b.Path)
+		}
+		ok, restoreErr := restoreManagedFileBackupIfUnchanged(savedDataDir, b.Connector, b.LogicalName, b.Path)
+		switch {
+		case restoreErr != nil:
+			return fmt.Errorf("restore %s: %w", b.Path, restoreErr)
+		case ok:
+			restored = append(restored, b.Path)
+		default:
+			kept = append(kept, b.Path)
+		}
+		return nil
+	})
+	return restored, kept, err
+}
+
 // ManagedFileBackupTargets lists the agent file each connector backup record
 // in dataDir names.
 func ManagedFileBackupTargets(dataDir string) ([]string, error) {

@@ -3932,13 +3932,57 @@ def test_rollback_and_upgrade_prune_hook_entries_of_connectors_no_longer_configu
     ]
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("with_backups", [False, True])
+def test_rollback_prunes_with_every_available_connector_reader(tmp_path: Path, with_backups: bool) -> None:
+    calls = tmp_path / "calls.txt"
+    gateways = []
+    for name in ("older", "newer"):
+        path = tmp_path / f"{name}.ps1"
+        flag = " --rollback-backups-dir" if with_backups and name == "newer" else ""
+        path.write_text(
+            f"param()\nAdd-Content -LiteralPath '{calls}' -Value ('{name} ' + ($args -join ' '))\n"
+            f"if ($args -contains '--help') {{ Write-Output 'Usage:'; Write-Output '  defenseclaw-gateway connector prune-orphans [flags]{flag}' }}\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        gateways.append(path)
+    data_dir = tmp_path / "dc"
+    backup_dir = tmp_path / "saved-data"
+    backup_arg = f" '{backup_dir}'" if with_backups else ""
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{data_dir}'\nfunction Write-Warn([string]$m) {{ 'warn: ' + $m }}\n"
+        f"{_ps1_function('Invoke-Native')}\n{_ps1_function('Get-NativeOutput')}\n"
+        f"{_ps1_function('Invoke-PruneOrphanedHooks')}\n"
+        f"Invoke-PruneOrphanedHooks @('{gateways[0]}', '{gateways[1]}'){backup_arg}\n"
+    )
+    completed = _run_powershell(script)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    expected = [
+        "older connector prune-orphans --help",
+        "newer connector prune-orphans --help",
+    ]
+    if with_backups:
+        expected += [
+            f"newer connector prune-orphans --data-dir {data_dir} --rollback-backups-dir {backup_dir}",
+            f"older connector prune-orphans --data-dir {data_dir}",
+        ]
+    else:
+        expected += [
+            f"older connector prune-orphans --data-dir {data_dir}",
+            f"newer connector prune-orphans --data-dir {data_dir}",
+        ]
+    assert calls.read_text(encoding="utf-8").splitlines() == expected
+
+
 def test_windows_rollback_and_upgrade_run_the_hook_entry_prune() -> None:
     # rel-1-0-1:GAP-0009: after the swap of a 1.x rollback (live gateway, then
     # the one just left in previous\bin), and in the upgrade after the migration.
     rollback = _ps1_function("Invoke-Rollback")
     prune = (
         'Invoke-PruneOrphanedHooks @((Join-Path $BinDir "defenseclaw-gateway.exe"), '
-        '(Join-Path $Previous "bin\\defenseclaw-gateway.exe"))'
+        '(Join-Path $Previous "bin\\defenseclaw-gateway.exe")) (Join-Path $Previous "data")'
     )
     assert rollback.index("Switch-WithPrevious $current") < rollback.index(prune)
     assert "if (-not $toLegacy) {\n        " + prune in rollback
