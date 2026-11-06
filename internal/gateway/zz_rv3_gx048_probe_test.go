@@ -371,7 +371,7 @@ func TestRV3GX048Probe(t *testing.T) {
 					default:
 						want = "-"
 					}
-					status := "ok"
+					var status string
 					switch {
 					case managed || want == "-":
 						status = "INFO"
