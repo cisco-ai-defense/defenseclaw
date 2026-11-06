@@ -223,7 +223,11 @@ type testSandboxSeam struct {
 var testSandboxSeams []testSandboxSeam
 
 // sandboxSeam sets *seam to value and registers it, so the TestMain guard
-// tells when a test left it reassigned (g079 review F2).
+// tells when a test left it reassigned (g079 review F2). It compares code
+// pointers, so it cannot tell two values of the same function literal apart:
+// a test that runs a sandbox setter such as isolateTestDeploymentReaders
+// again with another folder, and does not set it back, goes unnoticed. That
+// value is still a temp sandbox (g079 review 2 R2e).
 func sandboxSeam[T any](name string, seam *T, value T) {
 	*seam = value
 	testSandboxSeams = append(testSandboxSeams, testSandboxSeam{name: name,
