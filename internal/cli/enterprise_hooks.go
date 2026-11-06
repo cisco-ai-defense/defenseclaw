@@ -3873,9 +3873,15 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			return false, err
 		}
 		passCtx, cancel := context.WithCancel(cmd.Context())
+		activeWorkers := newEnterpriseHookWatchActiveWorkers(previousRun)
+		passCtx = context.WithValue(passCtx, enterpriseHookWatchActiveWorkersKey{}, activeWorkers)
 		interrupted := make(chan fsnotify.Event, 1)
 		stop := make(chan struct{})
 		stopped := make(chan struct{})
+		// The pump alone writes this map; the watch loop reads it after
+		// stopped closes. Recheck a worker's event once the pass ends so a
+		// concurrent account write cannot disappear into its final snapshot.
+		activeEvents := map[string]fsnotify.Op{}
 		owned := make(map[string]struct{}, len(exclusiveOwned)+len(sharedOwned))
 		for path := range exclusiveOwned {
 			owned[path] = struct{}{}
@@ -3907,6 +3913,16 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 					if _, exclusive := priorExclusive[path]; exclusive {
 						passWrites.observe(event, priorLeft)
 					}
+					// A late event for a completed repair is the worker's
+					// tail only while the verified bytes remain in place.
+					// A fresh change after the worker returns interrupts the
+					// pass so that account is inspected promptly.
+					workerActive, workerRepaired := activeWorkers.state(path)
+					if workerActive || ((workerRepaired || activeEvents[path] != 0) &&
+						enterpriseHookOwnedFileFingerprint(path) == priorLeft[path]) {
+						activeEvents[path] |= event.Op
+						continue
+					}
 					drop, _ := enterpriseHookWatchEventDropped(time.Now(), priorSettleUntil, event,
 						priorFailed[path], priorExclusive, priorShared, priorFound, priorLeft,
 						enterpriseHookOwnedFileFingerprint, true)
@@ -3922,6 +3938,18 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		close(stop)
 		<-stopped
 		cancel()
+		for path, op := range activeEvents {
+			if before, known := priorLeft[path]; known && before != "absent" &&
+				enterpriseHookOwnedFileFingerprint(path) != before {
+				// The completed run may have snapped the remaining drift as
+				// its new baseline. Keep the last verified fingerprint until
+				// the queued pass has inspected and repaired this file.
+				ownedSnapshot[path] = before
+				lastTriggerPath, lastTriggerOp = enterpriseHookWatchNoteTrigger(lastTriggerPath, lastTriggerOp,
+					fsnotify.Event{Name: path, Op: op})
+				queueWatchPath(path)
+			}
+		}
 		select {
 		case event := <-interrupted:
 			handleWatchEvent(event)
@@ -4136,6 +4164,94 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 }
 
 type enterpriseHookWatchPassWritesKey struct{}
+
+type enterpriseHookWatchActiveWorkersKey struct{}
+
+// The watch pump must not cancel a pass for a write made by one of that
+// pass's workers, even if its first event arrives after the worker returns.
+// It still preempts a slow pass for a changed file in another account.
+type enterpriseHookWatchActiveWorkers struct {
+	mu         sync.RWMutex
+	owners     map[string][]string
+	targetKeys map[string]string
+	active     map[string]int
+	repaired   map[string]bool
+}
+
+func newEnterpriseHookWatchActiveWorkers(prior enterpriseHookReconcileRun) *enterpriseHookWatchActiveWorkers {
+	w := &enterpriseHookWatchActiveWorkers{
+		owners: prior.WatchPathOwners, targetKeys: make(map[string]string, len(prior.Rows)),
+	}
+	for _, row := range prior.Rows {
+		home, connector := row.UserHome, row.Connector
+		if row.Result != nil {
+			if home == "" {
+				home = row.Result.UserHome
+			}
+			if connector == "" {
+				connector = row.Result.Connector
+			}
+		}
+		if id, key := enterpriseHookWatchTargetID(home, connector), enterpriseHookProtectedTargetKey(row); id != "" && key != "" {
+			w.targetKeys[id] = key
+		}
+	}
+	return w
+}
+
+func enterpriseHookWatchTargetID(home, connector string) string {
+	if strings.TrimSpace(home) == "" || strings.TrimSpace(connector) == "" {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(connector)) + "\x00" + filepath.Clean(home)
+}
+
+func (w *enterpriseHookWatchActiveWorkers) targetKey(home, user, connector string) string {
+	if key := w.targetKeys[enterpriseHookWatchTargetID(home, connector)]; key != "" {
+		return key
+	}
+	return enterpriseHookProtectedTargetKey(enterpriseHookReconcileRow{User: user, UserHome: home, Connector: connector})
+}
+
+func (w *enterpriseHookWatchActiveWorkers) start(keys []string) {
+	w.mu.Lock()
+	if w.active == nil {
+		w.active = make(map[string]int)
+	}
+	for _, key := range keys {
+		w.active[key]++
+	}
+	w.mu.Unlock()
+}
+
+func (w *enterpriseHookWatchActiveWorkers) finish(keys, repairedKeys []string) {
+	w.mu.Lock()
+	if len(repairedKeys) > 0 && w.repaired == nil {
+		w.repaired = make(map[string]bool)
+	}
+	for _, key := range repairedKeys {
+		w.repaired[key] = true
+	}
+	for _, key := range keys {
+		if w.active[key] <= 1 {
+			delete(w.active, key)
+		} else {
+			w.active[key]--
+		}
+	}
+	w.mu.Unlock()
+}
+
+func (w *enterpriseHookWatchActiveWorkers) state(path string) (active, repaired bool) {
+	path = filepath.Clean(path)
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	for _, key := range w.owners[path] {
+		active = active || w.active[key] > 0
+		repaired = repaired || w.repaired[key]
+	}
+	return active, repaired
+}
 
 // enterpriseHookWatchPassWrites records owned files observed with bytes or
 // mode different from the last verified snapshot while a pass is running.
