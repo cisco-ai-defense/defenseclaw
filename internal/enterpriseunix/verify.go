@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1581,6 +1582,16 @@ func auditWriteFailureRecovered(lastFailureAt string, now time.Time) bool {
 func (env *Env) warnOpenCodePortsRecord(r *enterprisestatus.Result) {
 	path := filepath.Join(env.Layout.GuardianAuthDir, enterprisehooks.UnixOpenCodeServicePortsFileName)
 	if _, err := os.Lstat(env.P(path)); err != nil {
+		// A non-root status cannot open the root-only guardian folder: say
+		// it could not check, where OpenCode is on the machine policy, so a
+		// silent status never reads as "no problem" (REVIEW-gx053-5 MF2).
+		if !errors.Is(err, fs.ErrNotExist) && openCodePortsRecordGeteuid() != 0 {
+			if _, pluginErr := os.Stat(env.P(filepath.Join(openCodePluginDir(env.Layout), "index.js"))); pluginErr == nil {
+				r.AddWarning("opencode_port_record_unchecked", fmt.Sprintf(
+					"this account cannot read the guardian's OpenCode service ports record %s; while it cannot be read no account gets a new OpenCode port. Check it as root: sudo %s",
+					path, env.lifecycleCommand(ActionStatus)))
+			}
+		}
 		return
 	}
 	if _, err := enterprisehooks.LoadUnixOpenCodeServicePorts(env.P(path)); err != nil {
@@ -1589,3 +1600,6 @@ func (env *Env) warnOpenCodePortsRecord(r *enterprisestatus.Result) {
 			path, err, path))
 	}
 }
+
+// openCodePortsRecordGeteuid is os.Geteuid (tests replace it).
+var openCodePortsRecordGeteuid = os.Geteuid

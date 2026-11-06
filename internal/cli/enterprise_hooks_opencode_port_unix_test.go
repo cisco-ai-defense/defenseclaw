@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,7 +40,10 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 	previousManifest, previousMachinePolicy := enterpriseHookManifest, enterpriseHookStandaloneMachinePolicySet
 	previousLoad, previousCheck, previousRunner := enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner
 	previousLoadPorts, previousWritePorts := enterpriseHookLoadOpenCodePorts, enterpriseHookWriteOpenCodePorts
+	previousRootRead := enterpriseHookReadOpenCodePort
+	openCodeRootCannotRead, openCodeUserCannotRead = map[int]bool{}, map[int]bool{}
 	t.Cleanup(func() {
+		enterpriseHookReadOpenCodePort = previousRootRead
 		enterpriseHookManifest, enterpriseHookStandaloneMachinePolicySet = previousManifest, previousMachinePolicy
 		enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner = previousLoad, previousCheck, previousRunner
 		enterpriseHookLoadOpenCodePorts, enterpriseHookWriteOpenCodePorts = previousLoadPorts, previousWritePorts
@@ -124,9 +128,43 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 		}
 		return nil
 	}
+	// Root's view: homes in openCodeRootCannotRead (root_squash NFS, a
+	// confined guardian) read as nothing, the way a refused read does.
+	uidOfHome := func(home string) int {
+		for uid, h := range homes {
+			if h == home {
+				return uid
+			}
+		}
+		return 0
+	}
+	enterpriseHookReadOpenCodePort = func(home string) int {
+		if openCodeRootCannotRead[uidOfHome(home)] {
+			return 0
+		}
+		return enterprisepolicy.ReadOpenCodeServicePort(home)
+	}
 	enterpriseHookWorkerRunner = func(_ context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
 		request.Home = account.Home
 		response := enterpriseHookWorkerResponse{}
+		if request.Operation == enterpriseHookWorkerOpOpenCodePortRead {
+			// The as-the-user read: links resolve; a file the user cannot
+			// read either is an error.
+			if openCodeUserCannotRead[account.UID] {
+				response.OpenCodeServicePort = &enterpriseHookWorkerOpenCodePortReport{Error: "permission denied"}
+				return response, nil
+			}
+			port, err := enterprisepolicy.ReadOpenCodeServicePortAsUser(account.Home)
+			response.OpenCodeServicePort = &enterpriseHookWorkerOpenCodePortReport{Port: port}
+			if err != nil {
+				response.OpenCodeServicePort.Error = err.Error()
+			}
+			return response, nil
+		}
+		if request.OpenCodeServicePort > 0 && openCodeUserCannotRead[account.UID] {
+			response.OpenCodeServicePort = &enterpriseHookWorkerOpenCodePortReport{Error: "permission denied"}
+			return response, nil
+		}
 		if request.OpenCodeServicePort > 0 {
 			response.OpenCodeServicePort = runEnterpriseHookWorkerOpenCodePort(request)
 		}
@@ -140,6 +178,9 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 var (
 	openCodeRecordUnreadable error
 	openCodeRecordWrites     int
+	// openCodeRootCannotRead and openCodeUserCannotRead are the uids whose
+	// service.json root, or the account itself, cannot read.
+	openCodeRootCannotRead, openCodeUserCannotRead map[int]bool
 )
 
 func openCodePortIn(t *testing.T, home string) int {
@@ -453,5 +494,100 @@ func TestManagedGuardianOpenCodeUnreadableRecordGivesNoNewPorts(t *testing.T) {
 				t.Fatalf("the reason is not logged:\n%s", log)
 			}
 		})
+	}
+}
+
+// REVIEW-gx053-5 MF1: alice keeps her OpenCode config in dotfiles
+// (~/.config/opencode -> ~/dotfiles/opencode, the stow layout), where root's
+// no-link read sees nothing, and set port 25002 by hand; bob's first port is
+// 25002. The as-the-user read sees her port: bob gets another, nobody shares,
+// over passes, and no line promises a move that does not happen.
+func TestManagedGuardianOpenCodeSymlinkedConfigFolder(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
+	alice := homes[1001]
+	if err := os.MkdirAll(filepath.Join(alice, "dotfiles", "opencode"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(alice, ".config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(alice, "dotfiles", "opencode"), filepath.Join(alice, ".config", "opencode")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(alice, "dotfiles", "opencode", "service.json"), []byte(`{"port":25002,"password":"p"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if port := enterprisepolicy.ReadOpenCodeServicePort(alice); port != 0 {
+		t.Fatalf("root's read should not follow the link (got %d)", port)
+	}
+	setEligible(nil, 1001, 1002)
+	for pass := 0; pass < 3; pass++ {
+		log := runOpenCodePortPass(t)
+		got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log)
+		if got[1001] != 25002 || got[1002] == 0 || (*record)[1001] != 25002 {
+			t.Fatalf("pass %d: ports %v record %v\n%s", pass, got, *record, log)
+		}
+		if strings.Contains(log, "next pass") {
+			t.Fatalf("pass %d promises a later move:\n%s", pass, log)
+		}
+	}
+}
+
+// REVIEW-gx053-5 MF1: a home root cannot read (root_squash NFS) is read by
+// the account's own worker; its port is held and nobody else is given it.
+func TestManagedGuardianOpenCodeRootUnreadableHome(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
+	writeOpenCodePortFile(t, homes[1001], 25002)
+	openCodeRootCannotRead[1001] = true
+	setEligible(nil, 1001, 1002)
+	for pass := 0; pass < 2; pass++ {
+		log := runOpenCodePortPass(t)
+		got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log)
+		if got[1001] != 25002 || got[1002] == 25002 || (*record)[1001] != 25002 {
+			t.Fatalf("pass %d: ports %v record %v\n%s", pass, got, *record, log)
+		}
+	}
+}
+
+// A file the account cannot read either keeps its recorded port held: no
+// other account is given it, and the warning names the account.
+func TestManagedGuardianOpenCodeFileUnreadableEvenAsTheUser(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
+	runOpenCodePortPass(t)
+	held := (*record)[1001]
+	openCodeUserCannotRead[1001] = true
+	setEligible(nil, 1001, 9001) // 9001 starts on 1001's port
+	log := runOpenCodePortPass(t)
+	if got := openCodePortIn(t, homes[9001]); got == held || got == 0 {
+		t.Fatalf("9001 got %d; 1001 holds %d\n%s", got, held, log)
+	}
+	if (*record)[1001] != held {
+		t.Fatalf("the unreadable account lost its port: %v", *record)
+	}
+	if !strings.Contains(log, "ent1001's OpenCode service.json cannot be read as ent1001") {
+		t.Fatalf("no warning names the account:\n%s", log)
+	}
+}
+
+// When the read phase could not run (the plan did not know alice's port),
+// alice's own write worker sees her file name a port another account holds
+// and moves her: still no share, and the move is logged as done.
+func TestManagedGuardianOpenCodeWriteWorkerMovesAPortTheReadMissed(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
+	writeOpenCodePortFile(t, homes[1001], 25002)
+	openCodeRootCannotRead[1001] = true
+	previousRead := enterpriseHookReadOpenCodePortsAsUsers
+	t.Cleanup(func() { enterpriseHookReadOpenCodePortsAsUsers = previousRead })
+	enterpriseHookReadOpenCodePortsAsUsers = func(context.Context, io.Writer, []enterprisehooks.UnixEligibleAccount) map[int]int {
+		return map[int]int{} // the read workers did not answer, root saw nothing
+	}
+	setEligible(nil, 1001, 1002)
+	log := runOpenCodePortPass(t)
+	got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log)
+	if got[1002] != 25002 || got[1001] == 25002 || (*record)[1001] != got[1001] {
+		t.Fatalf("ports %v record %v\n%s", got, *record, log)
+	}
+	if !strings.Contains(log, "moved ent1001's OpenCode background server from port 25002") {
+		t.Fatalf("the move is not logged:\n%s", log)
 	}
 }

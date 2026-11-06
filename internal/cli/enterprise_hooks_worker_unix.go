@@ -74,6 +74,9 @@ const (
 	// enterpriseHookWorkerOpAIDiscovery runs the static AI discovery scan
 	// of the user's own home (standalone profile).
 	enterpriseHookWorkerOpAIDiscovery = "ai_discovery"
+	// enterpriseHookWorkerOpOpenCodePortRead reads, as the user, the port the
+	// user's OpenCode service.json names, changing nothing (GAP-0053).
+	enterpriseHookWorkerOpOpenCodePortRead = "opencode_port_read"
 
 	enterpriseHookWorkerModeInstall        = "install"
 	enterpriseHookWorkerModeVerify         = "verify"
@@ -266,6 +269,10 @@ type enterpriseHookWorkerRequest struct {
 	// that another account holds: the worker replaces it with
 	// OpenCodeServicePort (enterprisepolicy.ReplaceOpenCodeServicePort).
 	OpenCodeServicePortReplace int `json:"opencode_service_port_replace,omitempty"`
+	// OpenCodeServicePortsHeld are the ports other accounts hold this pass:
+	// a port the account's file names from this set is replaced too (the
+	// guardian, as root, may not have been able to read the file).
+	OpenCodeServicePortsHeld []int `json:"opencode_service_ports_held,omitempty"`
 	// TimeoutSeconds replaces enterpriseHookWorkerTimeout for this worker
 	// (remove-all's retry of a worker that timed out).
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
@@ -410,10 +417,13 @@ type enterpriseHookWorkerResponse struct {
 // enterpriseHookWorkerOpenCodePortReport is the worker's account of the
 // OpenCode service port (user-influenced: the parent bounds the port).
 type enterpriseHookWorkerOpenCodePortReport struct {
-	Port    int      `json:"port,omitempty"`
-	Changed bool     `json:"changed,omitempty"`
-	Created []string `json:"created,omitempty"`
-	Error   string   `json:"error,omitempty"`
+	Port    int  `json:"port,omitempty"`
+	Changed bool `json:"changed,omitempty"`
+	// Replaced is the port another account held that the file named before
+	// this write moved it.
+	Replaced int      `json:"replaced,omitempty"`
+	Created  []string `json:"created,omitempty"`
+	Error    string   `json:"error,omitempty"`
 }
 
 // enterpriseHookWorkerAccount is the resolved target the parent spawns
@@ -583,6 +593,13 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		return respond(response, 0)
 	case enterpriseHookWorkerOpNativeOTLPCheck:
 		return respond(runEnterpriseHookWorkerNativeOTLPCheck(request), 0)
+	case enterpriseHookWorkerOpOpenCodePortRead:
+		port, err := enterprisepolicy.ReadOpenCodeServicePortAsUser(filepath.Clean(request.Home))
+		report := &enterpriseHookWorkerOpenCodePortReport{Port: port}
+		if err != nil {
+			report.Error = err.Error()
+		}
+		return respond(enterpriseHookWorkerResponse{OpenCodeServicePort: report}, 0)
 	case enterpriseHookWorkerOpAIDiscovery:
 		if request.AIDiscovery == nil {
 			return respond(enterpriseHookWorkerResponse{Error: "the ai_discovery operation needs its scan settings"}, 3)

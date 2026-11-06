@@ -77,6 +77,44 @@ func ReadOpenCodeServicePort(home string) int {
 	return port
 }
 
+// ReadOpenCodeServicePortAsUser is the port the service.json under home names
+// as the account sees it (its worker: links in the path resolve, a
+// root-squashed home reads): 0 with no file or no port; an error when the
+// file is there but cannot be read or is not a JSON object.
+func ReadOpenCodeServicePortAsUser(home string) (int, error) {
+	home = strings.TrimSpace(home)
+	if home == "" || !filepath.IsAbs(home) {
+		return 0, fmt.Errorf("opencode service port: home %q is not absolute", home)
+	}
+	path := OpenCodeServiceConfigPath(filepath.Clean(home))
+	data, exists, regular, err := readUserFile(path, openCodeServiceConfigLimit)
+	if err != nil {
+		return 0, fmt.Errorf("read %s: %w", path, err)
+	}
+	if !exists {
+		return 0, nil
+	}
+	if !regular {
+		return 0, fmt.Errorf("%s is not a regular file", path)
+	}
+	var doc map[string]json.RawMessage
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return 0, nil
+	}
+	if err := json.Unmarshal(data, &doc); err != nil || doc == nil {
+		return 0, fmt.Errorf("%s is not a JSON object", path)
+	}
+	raw, ok := doc["port"]
+	if !ok {
+		return 0, nil
+	}
+	var port int
+	if err := json.Unmarshal(raw, &port); err != nil || port <= 0 || port > 65535 {
+		return 0, fmt.Errorf("%s names a port that is not a number", path)
+	}
+	return port, nil
+}
+
 // OpenCodeServicePortResult is what EnsureOpenCodeServicePort found or did.
 type OpenCodeServicePortResult struct {
 	// Port is the port the account's service.json names after the call (0
