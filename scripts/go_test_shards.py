@@ -48,7 +48,14 @@ TEST_FUNCTION_RE = re.compile(r"^func\s+((?:Test|Fuzz|Example)[A-Za-z0-9_]*)\s*\
 def discover_test_files(package_dir: Path) -> list[tuple[Path, tuple[str, ...]]]:
     discovered: list[tuple[Path, tuple[str, ...]]] = []
     for path in sorted(package_dir.glob("*_test.go")):
-        names = tuple(sorted(set(TEST_FUNCTION_RE.findall(path.read_text(encoding="utf-8")))))
+        source = path.read_text(encoding="utf-8")
+        first_lines = source.splitlines()[:24]
+        if any(
+            line.startswith("//go:build ") and ("regressioncorpora" in line or "d1corpus" in line)
+            for line in first_lines
+        ):
+            continue
+        names = tuple(sorted(set(TEST_FUNCTION_RE.findall(source))))
         if names:
             discovered.append((path, names))
     return discovered

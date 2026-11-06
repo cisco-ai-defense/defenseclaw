@@ -5,5 +5,6 @@ self-hosted-runner:
     - antigravity-authenticated
     - connector-lab
     - copilot-authenticated
+    - dc-build-1
     - defenseclaw-macos
     - e2e

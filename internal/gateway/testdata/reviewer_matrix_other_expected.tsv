@@ -1,0 +1,2496 @@
+TestHP4ReviewProjectPatternTargetsFourCell	HP7ROW HP4/brace-member-link claudecode managed=false|block	1
+TestHP4ReviewProjectPatternTargetsFourCell	HP7ROW HP4/brace-member-link claudecode managed=true|block	1
+TestHP4ReviewProjectPatternTargetsFourCell	HP7ROW HP4/brace-member-link codex managed=false|block	1
+TestHP4ReviewProjectPatternTargetsFourCell	HP7ROW HP4/brace-member-link codex managed=true|block	1
+TestHP4ReviewProjectPatternTargetsFourCell	HP7ROW HP4/read-only-star claudecode managed=false|allow	1
+TestHP4ReviewProjectPatternTargetsFourCell	HP7ROW HP4/read-only-star claudecode managed=true|allow	1
+TestHP4ReviewProjectPatternTargetsFourCell	HP7ROW HP4/read-only-star codex managed=false|allow	1
+TestHP4ReviewProjectPatternTargetsFourCell	HP7ROW HP4/read-only-star codex managed=true|allow	1
+TestHP4ReviewProjectPatternTargetsFourCell	HP7ROW HP4/writing-star claudecode managed=false|block	1
+TestHP4ReviewProjectPatternTargetsFourCell	HP7ROW HP4/writing-star claudecode managed=true|block	1
+TestHP4ReviewProjectPatternTargetsFourCell	HP7ROW HP4/writing-star codex managed=false|block	1
+TestHP4ReviewProjectPatternTargetsFourCell	HP7ROW HP4/writing-star codex managed=true|block	1
+TestRVCdvarCorpus	RVROW|00|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|00|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|00|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|00|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|01|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|01|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|01|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|01|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|02|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|02|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|02|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|02|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|03|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|03|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|03|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|03|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|04|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|04|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|04|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|04|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|05|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|05|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|05|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|05|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|06|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|06|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|06|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|06|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|07|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|07|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|07|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|07|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|08|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|08|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|08|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|08|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|09|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|09|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|09|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|09|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|10|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|10|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|10|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|10|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|11|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|11|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|11|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|11|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|12|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|12|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|12|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|12|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|13|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|13|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|13|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|13|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|14|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|14|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|14|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|14|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|15|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|15|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|15|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|15|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|16|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|16|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|16|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|16|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|17|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|17|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|17|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|17|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|18|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|18|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|18|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|18|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|19|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|19|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|19|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|19|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|20|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|20|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|20|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|20|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|21|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|21|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|21|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|21|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|22|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|22|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|22|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|22|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|23|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|23|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|23|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|23|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|24|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|24|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|24|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|24|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|25|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|25|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|25|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|25|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|26|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|26|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|26|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|26|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|27|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|27|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|27|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|27|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|28|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|28|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|28|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|28|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|29|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|29|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|29|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|29|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|30|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|30|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|30|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|30|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|31|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|31|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|31|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|31|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|32|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|32|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|32|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|32|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|33|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|33|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|33|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|33|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|34|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|34|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|34|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|34|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|35|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|35|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|35|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|35|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|36|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|36|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|36|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|36|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|37|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|37|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|37|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|37|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|38|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|38|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|38|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|38|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|39|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|39|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|39|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|39|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|40|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|40|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|40|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|40|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|41|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|41|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|41|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|41|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|42|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|42|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|42|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|42|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|43|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|43|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|43|codex|false|P|block|keys	1
+TestRVCdvarCorpus	RVROW|43|codex|true|P|block|keys	1
+TestRVCdvarCorpus	RVROW|44|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|44|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|44|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|44|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|45|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|45|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|45|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|45|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|46|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|46|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|46|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|46|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|47|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|47|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|47|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|47|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|48|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|48|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|48|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|48|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|49|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|49|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|49|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|49|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|50|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|50|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|50|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|50|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|51|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|51|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|51|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|51|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|52|claudecode|false|B|block|keys	1
+TestRVCdvarCorpus	RVROW|52|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|52|codex|false|B|block|keys	1
+TestRVCdvarCorpus	RVROW|52|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|53|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|53|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|53|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|53|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|54|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|54|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|54|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|54|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|55|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|55|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|55|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|55|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|56|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|56|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|56|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|56|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|57|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|57|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|57|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|57|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|58|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|58|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|58|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|58|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|59|claudecode|false|B|block|keys	1
+TestRVCdvarCorpus	RVROW|59|claudecode|true|B|block|keys	1
+TestRVCdvarCorpus	RVROW|59|codex|false|B|block|keys	1
+TestRVCdvarCorpus	RVROW|59|codex|true|B|block|keys	1
+TestRVCdvarCorpus	RVROW|60|claudecode|false|B|block|keys	1
+TestRVCdvarCorpus	RVROW|60|claudecode|true|B|block|keys	1
+TestRVCdvarCorpus	RVROW|60|codex|false|B|block|keys	1
+TestRVCdvarCorpus	RVROW|60|codex|true|B|block|keys	1
+TestRVCdvarCorpus	RVROW|61|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|61|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|61|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|61|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|62|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|62|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|62|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|62|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|63|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|63|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|63|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|63|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|64|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|64|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|64|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|64|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|65|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|65|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|65|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|65|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|66|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|66|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|66|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|66|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|67|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|67|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|67|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|67|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|68|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|68|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|68|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|68|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|69|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|69|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|69|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|69|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|70|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|70|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|70|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|70|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|71|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|71|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|71|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|71|codex|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|72|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|72|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus	RVROW|72|codex|false|B|allow|-	1
+TestRVCdvarCorpus	RVROW|72|codex|true|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|00|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|00|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|00|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|00|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|01|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|01|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|01|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|01|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|02|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|02|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|02|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|02|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|03|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|03|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|03|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|03|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|04|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|04|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|04|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|04|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|05|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|05|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|05|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|05|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|06|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|06|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|06|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|06|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|07|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|07|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|07|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|07|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|08|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|08|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|08|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|08|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|09|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|09|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|09|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|09|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|10|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|10|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|10|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|10|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|11|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|11|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|11|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|11|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|12|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|12|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|12|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|12|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|13|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|13|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|13|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|13|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|14|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|14|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|14|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|14|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|15|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|15|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|15|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|15|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|16|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|16|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|16|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|16|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|17|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|17|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|17|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|17|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|18|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|18|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|18|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|18|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|19|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|19|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|19|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|19|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|20|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|20|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|20|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|20|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|21|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|21|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|21|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|21|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|22|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|22|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|22|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|22|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|23|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|23|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|23|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|23|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|24|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|24|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|24|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|24|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|25|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|25|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|25|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|25|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|26|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|26|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|26|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|26|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|27|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|27|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|27|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|27|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|28|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|28|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|28|codex|false|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|28|codex|true|P|block|keys	1
+TestRVCdvarCorpus2	RVROW2|29|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|29|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|29|codex|false|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|29|codex|true|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|30|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|30|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|30|codex|false|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|30|codex|true|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|31|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|31|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|31|codex|false|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|31|codex|true|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|32|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|32|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|32|codex|false|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|32|codex|true|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|33|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|33|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|33|codex|false|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|33|codex|true|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|34|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|34|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|34|codex|false|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|34|codex|true|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|35|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|35|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|35|codex|false|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|35|codex|true|B|allow|-	1
+TestRVCdvarCorpus2	RVROW2|36|claudecode|false|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|36|claudecode|true|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|36|codex|false|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|36|codex|true|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|37|claudecode|false|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|37|claudecode|true|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|37|codex|false|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|37|codex|true|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|38|claudecode|false|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|38|claudecode|true|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|38|codex|false|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|38|codex|true|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|39|claudecode|false|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|39|claudecode|true|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|39|codex|false|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|39|codex|true|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|40|claudecode|false|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|40|claudecode|true|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|40|codex|false|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|40|codex|true|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|41|claudecode|false|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|41|claudecode|true|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|41|codex|false|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|41|codex|true|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|42|claudecode|false|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|42|claudecode|true|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|42|codex|false|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|42|codex|true|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|43|claudecode|false|N|block|keys	1
+TestRVCdvarCorpus2	RVROW2|43|claudecode|true|N|block|keys	1
+TestRVCdvarCorpus2	RVROW2|43|codex|false|N|block|keys	1
+TestRVCdvarCorpus2	RVROW2|43|codex|true|N|block|keys	1
+TestRVCdvarCorpus2	RVROW2|44|claudecode|false|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|44|claudecode|true|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|44|codex|false|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|44|codex|true|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|45|claudecode|false|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|45|claudecode|true|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|45|codex|false|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|45|codex|true|N|allow|-	1
+TestRVCdvarCorpus2	RVROW2|46|claudecode|false|N|block|keys	1
+TestRVCdvarCorpus2	RVROW2|46|claudecode|true|N|block|keys	1
+TestRVCdvarCorpus2	RVROW2|46|codex|false|N|block|keys	1
+TestRVCdvarCorpus2	RVROW2|46|codex|true|N|block|keys	1
+TestRVCdvarCorpus3	RVROW3|00|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|00|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|00|codex|false|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|00|codex|true|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|01|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|01|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|01|codex|false|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|01|codex|true|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|02|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|02|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|02|codex|false|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|02|codex|true|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|03|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|03|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|03|codex|false|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|03|codex|true|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|04|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|04|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|04|codex|false|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|04|codex|true|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|05|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|05|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|05|codex|false|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|05|codex|true|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|06|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|06|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|06|codex|false|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|06|codex|true|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|07|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|07|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|07|codex|false|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|07|codex|true|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|08|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|08|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|08|codex|false|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|08|codex|true|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|09|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|09|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|09|codex|false|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|09|codex|true|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|10|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|10|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|10|codex|false|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|10|codex|true|P|block|keys	1
+TestRVCdvarCorpus3	RVROW3|11|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus3	RVROW3|11|claudecode|true|B|block|keys	1
+TestRVCdvarCorpus3	RVROW3|11|codex|false|B|allow|-	1
+TestRVCdvarCorpus3	RVROW3|11|codex|true|B|block|keys	1
+TestRVCdvarCorpus3	RVROW3|12|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus3	RVROW3|12|claudecode|true|B|block|keys	1
+TestRVCdvarCorpus3	RVROW3|12|codex|false|B|allow|-	1
+TestRVCdvarCorpus3	RVROW3|12|codex|true|B|block|keys	1
+TestRVCdvarCorpus3	RVROW3|13|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus3	RVROW3|13|claudecode|true|B|block|keys	1
+TestRVCdvarCorpus3	RVROW3|13|codex|false|B|allow|-	1
+TestRVCdvarCorpus3	RVROW3|13|codex|true|B|block|keys	1
+TestRVCdvarCorpus4	RVROW4|00|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|00|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|00|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|00|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|01|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|01|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|01|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|01|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|02|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|02|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|02|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|02|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|03|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|03|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|03|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|03|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|04|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|04|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|04|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|04|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|05|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|05|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|05|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|05|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|06|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|06|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|06|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|06|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|07|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|07|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|07|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|07|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|08|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|08|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|08|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|08|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|09|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|09|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|09|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|09|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|10|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|10|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|10|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|10|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|11|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|11|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|11|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|11|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|12|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|12|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|12|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|12|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|13|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|13|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|13|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|13|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|14|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|14|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|14|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|14|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|15|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|15|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|15|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|15|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|16|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|16|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|16|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|16|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|17|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|17|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|17|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|17|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|18|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|18|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|18|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|18|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|19|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|19|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|19|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|19|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|20|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|20|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|20|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|20|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|21|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|21|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|21|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|21|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|22|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|22|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|22|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|22|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|23|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|23|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|23|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|23|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|24|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|24|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|24|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|24|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|25|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|25|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|25|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|25|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|26|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|26|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|26|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|26|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|27|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|27|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|27|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|27|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|28|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|28|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|28|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|28|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|29|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|29|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|29|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|29|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|30|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|30|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|30|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|30|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|31|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|31|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|31|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|31|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|32|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|32|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|32|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|32|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|33|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|33|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|33|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|33|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|34|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|34|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|34|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|34|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|35|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|35|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|35|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|35|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|36|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|36|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|36|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|36|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|37|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|37|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|37|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|37|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|38|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|38|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|38|codex|false|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|38|codex|true|P|block|keys	1
+TestRVCdvarCorpus4	RVROW4|39|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|39|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|39|codex|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|39|codex|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|40|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|40|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|40|codex|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|40|codex|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|41|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|41|claudecode|true|B|block|keys	1
+TestRVCdvarCorpus4	RVROW4|41|codex|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|41|codex|true|B|block|keys	1
+TestRVCdvarCorpus4	RVROW4|42|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|42|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|42|codex|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|42|codex|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|43|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|43|claudecode|true|B|block|keys	1
+TestRVCdvarCorpus4	RVROW4|43|codex|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|43|codex|true|B|block|keys	1
+TestRVCdvarCorpus4	RVROW4|44|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|44|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|44|codex|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|44|codex|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|45|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|45|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|45|codex|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|45|codex|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|46|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|46|claudecode|true|B|block|keys	1
+TestRVCdvarCorpus4	RVROW4|46|codex|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|46|codex|true|B|block|keys	1
+TestRVCdvarCorpus4	RVROW4|47|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|47|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|47|codex|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|47|codex|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|48|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|48|claudecode|true|B|block|keys	1
+TestRVCdvarCorpus4	RVROW4|48|codex|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|48|codex|true|B|block|keys	1
+TestRVCdvarCorpus4	RVROW4|49|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|49|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|49|codex|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|49|codex|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|50|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|50|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|50|codex|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|50|codex|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|51|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|51|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|51|codex|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|51|codex|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|52|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|52|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|52|codex|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|52|codex|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|53|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|53|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|53|codex|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|53|codex|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|54|claudecode|false|B|block|keys	1
+TestRVCdvarCorpus4	RVROW4|54|claudecode|true|B|block|keys	1
+TestRVCdvarCorpus4	RVROW4|54|codex|false|B|block|keys	1
+TestRVCdvarCorpus4	RVROW4|54|codex|true|B|block|keys	1
+TestRVCdvarCorpus4	RVROW4|55|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|55|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|55|codex|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|55|codex|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|56|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|56|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|56|codex|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|56|codex|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|57|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|57|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|57|codex|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|57|codex|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|58|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|58|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|58|codex|false|B|allow|-	1
+TestRVCdvarCorpus4	RVROW4|58|codex|true|B|allow|-	1
+TestRVCdvarCorpus5	RVROW5|00|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|00|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|00|codex|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|00|codex|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|01|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|01|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|01|codex|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|01|codex|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|02|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|02|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|02|codex|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|02|codex|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|03|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|03|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|03|codex|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|03|codex|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|04|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|04|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|04|codex|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|04|codex|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|05|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|05|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|05|codex|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|05|codex|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|06|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|06|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|06|codex|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|06|codex|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|07|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|07|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|07|codex|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|07|codex|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|08|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|08|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|08|codex|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|08|codex|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|09|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|09|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|09|codex|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|09|codex|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|10|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|10|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|10|codex|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|10|codex|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|11|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|11|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|11|codex|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|11|codex|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|12|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|12|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|12|codex|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|12|codex|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|13|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|13|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|13|codex|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|13|codex|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|14|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|14|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|14|codex|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|14|codex|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|15|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|15|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|15|codex|false|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|15|codex|true|P|block|keys	1
+TestRVCdvarCorpus5	RVROW5|16|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus5	RVROW5|16|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus5	RVROW5|16|codex|false|B|allow|-	1
+TestRVCdvarCorpus5	RVROW5|16|codex|true|B|allow|-	1
+TestRVCdvarCorpus5	RVROW5|17|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus5	RVROW5|17|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus5	RVROW5|17|codex|false|B|allow|-	1
+TestRVCdvarCorpus5	RVROW5|17|codex|true|B|allow|-	1
+TestRVCdvarCorpus5	RVROW5|18|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus5	RVROW5|18|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus5	RVROW5|18|codex|false|B|allow|-	1
+TestRVCdvarCorpus5	RVROW5|18|codex|true|B|allow|-	1
+TestRVCdvarCorpus5	RVROW5|19|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus5	RVROW5|19|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus5	RVROW5|19|codex|false|B|allow|-	1
+TestRVCdvarCorpus5	RVROW5|19|codex|true|B|allow|-	1
+TestRVCdvarCorpus6	RVROW6|00|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|00|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|00|codex|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|00|codex|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|01|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|01|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|01|codex|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|01|codex|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|02|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|02|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|02|codex|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|02|codex|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|03|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|03|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|03|codex|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|03|codex|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|04|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|04|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|04|codex|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|04|codex|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|05|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|05|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|05|codex|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|05|codex|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|06|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|06|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|06|codex|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|06|codex|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|07|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|07|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|07|codex|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|07|codex|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|08|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|08|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|08|codex|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|08|codex|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|09|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|09|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|09|codex|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|09|codex|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|10|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|10|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|10|codex|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|10|codex|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|11|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|11|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|11|codex|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|11|codex|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|12|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|12|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|12|codex|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|12|codex|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|13|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|13|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|13|codex|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|13|codex|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|14|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|14|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|14|codex|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|14|codex|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|15|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|15|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|15|codex|false|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|15|codex|true|P|block|keys	1
+TestRVCdvarCorpus6	RVROW6|16|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus6	RVROW6|16|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus6	RVROW6|16|codex|false|B|allow|-	1
+TestRVCdvarCorpus6	RVROW6|16|codex|true|B|allow|-	1
+TestRVCdvarCorpus6	RVROW6|17|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus6	RVROW6|17|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus6	RVROW6|17|codex|false|B|allow|-	1
+TestRVCdvarCorpus6	RVROW6|17|codex|true|B|allow|-	1
+TestRVCdvarCorpus6	RVROW6|18|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus6	RVROW6|18|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus6	RVROW6|18|codex|false|B|allow|-	1
+TestRVCdvarCorpus6	RVROW6|18|codex|true|B|allow|-	1
+TestRVCdvarCorpus6	RVROW6|19|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus6	RVROW6|19|claudecode|true|B|block|keys	1
+TestRVCdvarCorpus6	RVROW6|19|codex|false|B|allow|-	1
+TestRVCdvarCorpus6	RVROW6|19|codex|true|B|block|keys	1
+TestRVCdvarCorpus7	RVROW7|00|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|00|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|00|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|00|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|01|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|01|claudecode|true|P|allow|-	1
+TestRVCdvarCorpus7	RVROW7|01|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|01|codex|true|P|allow|-	1
+TestRVCdvarCorpus7	RVROW7|02|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|02|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|02|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|02|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|03|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|03|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|03|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|03|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|04|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|04|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|04|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|04|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|05|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|05|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|05|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|05|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|06|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|06|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|06|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|06|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|07|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|07|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|07|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|07|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|08|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|08|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|08|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|08|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|09|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|09|claudecode|true|P|allow|-	1
+TestRVCdvarCorpus7	RVROW7|09|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|09|codex|true|P|allow|-	1
+TestRVCdvarCorpus7	RVROW7|10|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|10|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|10|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|10|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|11|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|11|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|11|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|11|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|12|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|12|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|12|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|12|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|13|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|13|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|13|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|13|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|14|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|14|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|14|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|14|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|15|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|15|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|15|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|15|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|16|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|16|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|16|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|16|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|17|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|17|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|17|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|17|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|18|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|18|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|18|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|18|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|19|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|19|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|19|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|19|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|20|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|20|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|20|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|20|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|21|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|21|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|21|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|21|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|22|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|22|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|22|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|22|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|23|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|23|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|23|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|23|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|24|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|24|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|24|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|24|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|25|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|25|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|25|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|25|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|26|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|26|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|26|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|26|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|27|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|27|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|27|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|27|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|28|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|28|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|28|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|28|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|29|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|29|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|29|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|29|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|30|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|30|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|30|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|30|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|31|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|31|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|31|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|31|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|32|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|32|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|32|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|32|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|33|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|33|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|33|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|33|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|34|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|34|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|34|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|34|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|35|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|35|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|35|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|35|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|36|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|36|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|36|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|36|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|37|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|37|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|37|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|37|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|38|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|38|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|38|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|38|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|39|claudecode|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|39|claudecode|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|39|codex|false|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|39|codex|true|P|block|keys	1
+TestRVCdvarCorpus7	RVROW7|40|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|40|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|40|codex|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|40|codex|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|41|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|41|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|41|codex|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|41|codex|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|42|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|42|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|42|codex|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|42|codex|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|43|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|43|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|43|codex|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|43|codex|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|44|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|44|claudecode|true|B|block|keys	1
+TestRVCdvarCorpus7	RVROW7|44|codex|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|44|codex|true|B|block|keys	1
+TestRVCdvarCorpus7	RVROW7|45|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|45|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|45|codex|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|45|codex|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|46|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|46|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|46|codex|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|46|codex|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|47|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|47|claudecode|true|B|block|keys	1
+TestRVCdvarCorpus7	RVROW7|47|codex|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|47|codex|true|B|block|keys	1
+TestRVCdvarCorpus7	RVROW7|48|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|48|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|48|codex|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|48|codex|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|49|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|49|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|49|codex|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|49|codex|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|50|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|50|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|50|codex|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|50|codex|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|51|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|51|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|51|codex|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|51|codex|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|52|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|52|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|52|codex|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|52|codex|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|53|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|53|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|53|codex|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|53|codex|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|54|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|54|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|54|codex|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|54|codex|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|55|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|55|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|55|codex|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|55|codex|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|56|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|56|claudecode|true|B|block|keys	1
+TestRVCdvarCorpus7	RVROW7|56|codex|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|56|codex|true|B|block|keys	1
+TestRVCdvarCorpus7	RVROW7|57|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|57|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|57|codex|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|57|codex|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|58|claudecode|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|58|claudecode|true|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|58|codex|false|B|allow|-	1
+TestRVCdvarCorpus7	RVROW7|58|codex|true|B|allow|-	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-cap-tee claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-cap-tee claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-cap-tee codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-cap-tee codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-cap-tee-home claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-cap-tee-home claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-cap-tee-home codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-cap-tee-home codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-cap-tee-link claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-cap-tee-link claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-cap-tee-link codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-cap-tee-link codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-cap-touch claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-cap-touch claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-cap-touch codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-cap-touch codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-cap-touch-home claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-cap-touch-home claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-cap-touch-home codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-cap-touch-home codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-redirect-one claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-redirect-one claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-redirect-one codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0233-brace-redirect-one codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-allow-setup claudecode managed=false|allow	1
+TestReviewHP3FourCell	HP3ROW 0298-allow-setup claudecode managed=true|allow	1
+TestReviewHP3FourCell	HP3ROW 0298-allow-setup codex managed=false|allow	1
+TestReviewHP3FourCell	HP3ROW 0298-allow-setup codex managed=true|allow	1
+TestReviewHP3FourCell	HP3ROW 0298-allow-var claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-allow-var claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-allow-var codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-allow-var codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-755 claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-755 claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-755 codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-755 codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-R-after claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-R-after claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-R-after codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-R-after codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-R-before claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-R-before claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-R-before codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-R-before codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-gow claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-gow claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-gow codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-gow codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-keylink claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-keylink claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-keylink codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-keylink codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-keys-600 claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-keys-600 claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-keys-600 codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-keys-600 codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-keys-after-setup claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-keys-after-setup claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-keys-after-setup codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-keys-after-setup codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-recursive claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-recursive claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-recursive codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-recursive codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-sshlink-keys claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-sshlink-keys claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-sshlink-keys codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-sshlink-keys codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-stderr-keys claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-stderr-keys claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-stderr-keys codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-stderr-keys codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-two-operands claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-two-operands claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-two-operands codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-two-operands codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-vR claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-vR claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-vR codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-chmod-vR codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-dot claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-dot claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-dot codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-dot codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-dotdot claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-dotdot claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-dotdot codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-dotdot codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-m777 claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-m777 claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-m777 codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-m777 codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-m777-attached claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-m777-attached claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-m777-attached codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-m777-attached codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-mode777 claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-mode777 claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-mode777 codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-mode777 codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-pm777 claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-pm777 claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-pm777 codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-pm777 codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-pm777-attached claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-pm777-attached claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-pm777-attached codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-pm777-attached codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-redirect-keys claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-redirect-keys claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-redirect-keys codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-redirect-keys codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-two-operands claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-two-operands claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-two-operands codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-mkdir-two-operands codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-setup-subshell-write claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-setup-subshell-write claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-setup-subshell-write codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-setup-subshell-write codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-setup-then-link-append claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-setup-then-link-append claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-setup-then-link-append codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-setup-then-link-append codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-setup-then-ln claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-setup-then-ln claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-setup-then-ln codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-setup-then-ln codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-setup-then-tee claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-setup-then-tee claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0298-setup-then-tee codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0298-setup-then-tee codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-allow-split claudecode managed=false|allow	1
+TestReviewHP3FourCell	HP3ROW 0310-allow-split claudecode managed=true|allow	1
+TestReviewHP3FourCell	HP3ROW 0310-allow-split codex managed=false|allow	1
+TestReviewHP3FourCell	HP3ROW 0310-allow-split codex managed=true|allow	1
+TestReviewHP3FourCell	HP3ROW 0310-backtick-word claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-backtick-word claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-backtick-word codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-backtick-word codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-brace-word claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-brace-word claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-brace-word codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-brace-word codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-escaped-semicolon claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-escaped-semicolon claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-escaped-semicolon codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-escaped-semicolon codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-glob-word claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-glob-word claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-glob-word codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-glob-word codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-quoted-glob claudecode managed=false|allow	1
+TestReviewHP3FourCell	HP3ROW 0310-quoted-glob claudecode managed=true|allow	1
+TestReviewHP3FourCell	HP3ROW 0310-quoted-glob codex managed=false|allow	1
+TestReviewHP3FourCell	HP3ROW 0310-quoted-glob codex managed=true|allow	1
+TestReviewHP3FourCell	HP3ROW 0310-quoted-pipe-clear claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-quoted-pipe-clear claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-quoted-pipe-clear codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-quoted-pipe-clear codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-quoted-pipe-remove claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-quoted-pipe-remove claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-quoted-pipe-remove codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-quoted-pipe-remove codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-quoted-semicolon-set claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-quoted-semicolon-set claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-quoted-semicolon-set codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-quoted-semicolon-set codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-andand claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-andand claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-andand codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-andand codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-iex claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-iex claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-iex codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-iex codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-link-writer claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-link-writer claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-link-writer codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-link-writer codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-out-file claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-out-file claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-out-file codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-out-file codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-paren claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-paren claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-paren codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-paren codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-subexpr claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-subexpr claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-subexpr codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-split-subexpr codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-subst-word claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-subst-word claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-subst-word codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-subst-word codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-unknown-var-last claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-unknown-var-last claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-unknown-var-last codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0310-unknown-var-last codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0310-var-word claudecode managed=false|allow	1
+TestReviewHP3FourCell	HP3ROW 0310-var-word claudecode managed=true|allow	1
+TestReviewHP3FourCell	HP3ROW 0310-var-word codex managed=false|allow	1
+TestReviewHP3FourCell	HP3ROW 0310-var-word codex managed=true|allow	1
+TestReviewHP3FourCell	HP3ROW 0409-and-false claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-and-false claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-and-false codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-and-false codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-assign-quoted-glob claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-assign-quoted-glob claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-assign-quoted-glob codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-assign-quoted-glob codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-case claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-case claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-case codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-case codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-brace claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-brace claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-brace codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-brace codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-brace-bare claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-brace-bare claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-brace-bare codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-brace-bare codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-e claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-e claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-e codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-e codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-n claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-n claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-n codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-n codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-quoted-glob claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-quoted-glob claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-quoted-glob codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-quoted-glob codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-two-words claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-two-words claudecode managed=true|allow	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-two-words codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-echo-two-words codex managed=true|allow	1
+TestReviewHP3FourCell	HP3ROW 0409-eval-concat claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-eval-concat claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-eval-concat codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-eval-concat codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-eval-tilde claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-eval-tilde claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-eval-tilde codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-eval-tilde codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-eval-tilde-link claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-eval-tilde-link claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-eval-tilde-link codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-eval-tilde-link codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-eval-true claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-eval-true claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-eval-true codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-eval-true codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-eval-two claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-eval-two claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-eval-two codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-eval-two codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-if-false claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-if-false claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-if-false codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-if-false codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-if-unset-plain claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-if-unset-plain claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-if-unset-plain codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-if-unset-plain codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-subshell claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-subshell claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-subshell codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-subshell codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-test-and claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-test-and claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-test-and codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-test-and codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-while-false claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-while-false claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 0409-while-false codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 0409-while-false codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 2590-allow-live-form claudecode managed=false|allow	1
+TestReviewHP3FourCell	HP3ROW 2590-allow-live-form claudecode managed=true|allow	1
+TestReviewHP3FourCell	HP3ROW 2590-allow-live-form codex managed=false|allow	1
+TestReviewHP3FourCell	HP3ROW 2590-allow-live-form codex managed=true|allow	1
+TestReviewHP3FourCell	HP3ROW 2590-cp-after claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 2590-cp-after claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 2590-cp-after codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 2590-cp-after codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 2590-find-delete claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 2590-find-delete claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 2590-find-delete codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 2590-find-delete codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 2590-group-append claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 2590-group-append claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 2590-group-append codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 2590-group-append codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 2590-mv-after claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 2590-mv-after claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 2590-mv-after codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 2590-mv-after codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 2590-recreate-append claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 2590-recreate-append claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 2590-recreate-append codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 2590-recreate-append codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 2590-recreate-home claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 2590-recreate-home claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 2590-recreate-home codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 2590-recreate-home codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 2590-rm-f-keys claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 2590-rm-f-keys claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 2590-rm-f-keys codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 2590-rm-f-keys codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 2590-rm-keys-through-dirlink claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 2590-rm-keys-through-dirlink claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 2590-rm-keys-through-dirlink codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 2590-rm-keys-through-dirlink codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 2590-sort-o-after claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 2590-sort-o-after claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 2590-sort-o-after codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 2590-sort-o-after codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 2590-tee-after claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 2590-tee-after claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 2590-tee-after codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 2590-tee-after codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 2590-uniq-before claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 2590-uniq-before claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW 2590-uniq-before codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW 2590-uniq-before codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW r2-0298-mkdir-dotdot-var claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW r2-0298-mkdir-dotdot-var claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW r2-0298-mkdir-dotdot-var codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW r2-0298-mkdir-dotdot-var codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-allow-eval-true-other claudecode managed=false|allow	1
+TestReviewHP3FourCell	HP3ROW r2-0409-allow-eval-true-other claudecode managed=true|allow	1
+TestReviewHP3FourCell	HP3ROW r2-0409-allow-eval-true-other codex managed=false|allow	1
+TestReviewHP3FourCell	HP3ROW r2-0409-allow-eval-true-other codex managed=true|allow	1
+TestReviewHP3FourCell	HP3ROW r2-0409-allow-if-false-other claudecode managed=false|allow	1
+TestReviewHP3FourCell	HP3ROW r2-0409-allow-if-false-other claudecode managed=true|allow	1
+TestReviewHP3FourCell	HP3ROW r2-0409-allow-if-false-other codex managed=false|allow	1
+TestReviewHP3FourCell	HP3ROW r2-0409-allow-if-false-other codex managed=true|allow	1
+TestReviewHP3FourCell	HP3ROW r2-0409-cp-operand-if-false claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-cp-operand-if-false claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-cp-operand-if-false codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-cp-operand-if-false codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-eval-prefix-static claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-eval-prefix-static claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-eval-prefix-static codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-eval-prefix-static codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-group-inner-value claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-group-inner-value claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-group-inner-value codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-group-inner-value codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-if-true-inner-value claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-if-true-inner-value claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-if-true-inner-value codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-if-true-inner-value codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-if-unknown-inner-value claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-if-unknown-inner-value claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-if-unknown-inner-value codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-if-unknown-inner-value codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-tee-operand-if-false claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-tee-operand-if-false claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-tee-operand-if-false codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-tee-operand-if-false codex managed=true|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-unset-default claudecode managed=false|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-unset-default claudecode managed=true|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-unset-default codex managed=false|block	1
+TestReviewHP3FourCell	HP3ROW r2-0409-unset-default codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0229-allow-eval-ordinary claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0229-allow-eval-ordinary claudecode managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0229-allow-eval-ordinary codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0229-allow-eval-ordinary codex managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0229-eval-keylink-bare claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0229-eval-keylink-bare claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0229-eval-keylink-bare codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0229-eval-keylink-bare codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0229-eval-reassign-keylink claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0229-eval-reassign-keylink claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0229-eval-reassign-keylink codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0229-eval-reassign-keylink codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0229-eval-reassign-keylink-dccert claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0229-eval-reassign-keylink-dccert claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0229-eval-reassign-keylink-dccert codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0229-eval-reassign-keylink-dccert codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-allow-case-other claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-allow-case-other claudecode managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-allow-case-other codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-allow-case-other codex managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-allow-for-other claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-allow-for-other claudecode managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-allow-for-other codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-allow-for-other codex managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-and-inner-value claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-and-inner-value claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-and-inner-value codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-and-inner-value codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-case-inner-value claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-case-inner-value claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-case-inner-value codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-case-inner-value codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-for-inner-value claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-for-inner-value claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-for-inner-value codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-for-inner-value codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-or-inner-value claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-or-inner-value claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-or-inner-value codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-or-inner-value codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-while-inner-value claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-while-inner-value claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-while-inner-value codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0312-while-inner-value codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0409-if-unknown-keeps-earlier claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0409-if-unknown-keeps-earlier claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0409-if-unknown-keeps-earlier codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0409-if-unknown-keeps-earlier codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0409-negated-true-keeps-earlier claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0409-negated-true-keeps-earlier claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0409-negated-true-keeps-earlier codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0409-negated-true-keeps-earlier codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0409-while-false-keeps-earlier claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0409-while-false-keeps-earlier claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0409-while-false-keeps-earlier codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-0409-while-false-keeps-earlier codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-andand-log claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-andand-log claudecode managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-andand-log codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-andand-log codex managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-build-case claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-build-case claudecode managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-build-case codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-build-case codex managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-build-outdir claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-build-outdir claudecode managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-build-outdir codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-build-outdir codex managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-cap-config claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-cap-config claudecode managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-cap-config codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-cap-config codex managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-cap-tee claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-cap-tee claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-cap-tee codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-cap-tee codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-for-bak claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-for-bak claudecode managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-for-bak codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-for-bak codex managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-for-bak-list claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-for-bak-list claudecode managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-for-bak-list codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-for-bak-list codex managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-for-bak-strip claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-for-bak-strip claudecode managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-for-bak-strip codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-for-bak-strip codex managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-for-case-mkdir claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-for-case-mkdir claudecode managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-for-case-mkdir codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-for-case-mkdir codex managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-for-index claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-for-index claudecode managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-for-index codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-for-index codex managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-group-dest claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-group-dest claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-group-dest codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-group-dest codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-if-else-src claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-if-else-src claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-if-else-src codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-if-else-src codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-logrotate claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-logrotate claudecode managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-logrotate codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-logrotate codex managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-logrotate-size claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-logrotate-size claudecode managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-logrotate-size codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-logrotate-size codex managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-loop-last claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-loop-last claudecode managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-loop-last codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-loop-last codex managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-multiline-build claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-multiline-build claudecode managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-multiline-build codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-multiline-build codex managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-reassign-off-link claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-reassign-off-link claudecode managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-reassign-off-link codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-reassign-off-link codex managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-tee-target claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-tee-target claudecode managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-tee-target codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-tee-target codex managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-while-counter claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-while-counter claudecode managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-while-counter codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-while-counter codex managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-while-read claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-while-read claudecode managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-while-read codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-allow-while-read codex managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-keylink-after claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-keylink-after claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-keylink-after codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-keylink-after codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-keylink-before claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-keylink-before claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-keylink-before codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-keylink-before codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-keylink-before-tee claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-keylink-before-tee claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-keylink-before-tee codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-keylink-before-tee codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-keylink-else claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-keylink-else claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-keylink-else codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-keylink-else codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-static-keylink-after claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-static-keylink-after claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-static-keylink-after codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-static-keylink-after codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-static-tee-after claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-static-tee-after claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-static-tee-after codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-cap-static-tee-after codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-pre-for-then-group-redirect claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-pre-for-then-group-redirect claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-pre-for-then-group-redirect codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-pre-for-then-group-redirect codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-pre-ifelse-then-group-redirect claudecode managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-pre-ifelse-then-group-redirect claudecode managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-pre-ifelse-then-group-redirect codex managed=false|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-pre-ifelse-then-group-redirect codex managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-probe-if-true-off-link claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-probe-if-true-off-link claudecode managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-probe-if-true-off-link codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-probe-if-true-off-link codex managed=true|allow	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-under-cap-keylink-before claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-under-cap-keylink-before claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-under-cap-keylink-before codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r3-under-cap-keylink-before codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r4-step-cap-keylink-after claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r4-step-cap-keylink-after claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r4-step-cap-keylink-after codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r4-step-cap-keylink-after codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-0349-if-defaults-keylink claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-0349-if-defaults-keylink claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-0349-if-defaults-keylink codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-0349-if-defaults-keylink codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-0349-options-cases-keylink claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-0349-options-cases-keylink claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-0349-options-cases-keylink codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-0349-options-cases-keylink codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-step-cap-andand-after claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-step-cap-andand-after claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-step-cap-andand-after codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-step-cap-andand-after codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-step-cap-eval-dynamic claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-step-cap-eval-dynamic claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-step-cap-eval-dynamic codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-step-cap-eval-dynamic codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-step-cap-group-redirect claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-step-cap-group-redirect claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-step-cap-group-redirect codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-step-cap-group-redirect codex managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-step-cap-while-read claudecode managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-step-cap-while-read claudecode managed=true|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-step-cap-while-read codex managed=false|block	1
+TestReviewHP3R3FourCell	HP3R3ROW r5-step-cap-while-read codex managed=true|block	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-andand-log claudecode managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-andand-log claudecode managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-andand-log codex managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-andand-log codex managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-backup-loops-10 claudecode managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-backup-loops-10 claudecode managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-backup-loops-10 codex managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-backup-loops-10 codex managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-build-outdir claudecode managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-build-outdir claudecode managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-build-outdir codex managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-build-outdir codex managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-defaults claudecode managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-defaults claudecode managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-defaults codex managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-defaults codex managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-defaults-cp claudecode managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-defaults-cp claudecode managed=true|block	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-defaults-cp codex managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-defaults-cp codex managed=true|block	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-defaults-fixed-out claudecode managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-defaults-fixed-out claudecode managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-defaults-fixed-out codex managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-defaults-fixed-out codex managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-defaults-mv claudecode managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-defaults-mv claudecode managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-defaults-mv codex managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-defaults-mv codex managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-defaults-tee claudecode managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-defaults-tee claudecode managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-defaults-tee codex managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-defaults-tee codex managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-if-defaults claudecode managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-if-defaults claudecode managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-if-defaults codex managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-if-defaults codex managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-if-defaults-cp claudecode managed=false|block	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-if-defaults-cp claudecode managed=true|block	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-if-defaults-cp codex managed=false|block	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-10-if-defaults-cp codex managed=true|block	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-5-defaults claudecode managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-5-defaults claudecode managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-5-defaults codex managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-5-defaults codex managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-5-defaults-cp claudecode managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-5-defaults-cp claudecode managed=true|block	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-5-defaults-cp codex managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-5-defaults-cp codex managed=true|block	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-6-defaults claudecode managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-6-defaults claudecode managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-6-defaults codex managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-6-defaults codex managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-6-defaults-cp claudecode managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-6-defaults-cp claudecode managed=true|block	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-6-defaults-cp codex managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-configure-6-defaults-cp codex managed=true|block	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-for-bak-list claudecode managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-for-bak-list claudecode managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-for-bak-list codex managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-for-bak-list codex managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-group-dest claudecode managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-group-dest claudecode managed=true|block	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-group-dest codex managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-group-dest codex managed=true|block	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-if-else-src claudecode managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-if-else-src claudecode managed=true|block	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-if-else-src codex managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-if-else-src codex managed=true|block	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-logrotate claudecode managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-logrotate claudecode managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-logrotate codex managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-logrotate codex managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-multiline-build claudecode managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-multiline-build claudecode managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-multiline-build codex managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-multiline-build codex managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-options-6-cases claudecode managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-options-6-cases claudecode managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-options-6-cases codex managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-options-6-cases codex managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-options-6-cases-cp claudecode managed=false|block	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-options-6-cases-cp claudecode managed=true|block	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-options-6-cases-cp codex managed=false|block	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-options-6-cases-cp codex managed=true|block	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-while-counter claudecode managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-while-counter claudecode managed=true|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-while-counter codex managed=false|allow	1
+TestReviewHP3R4CleanProjectFourCell	HP3R4ROW r4-clean-while-counter codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbA claudecode managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbA claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbA codex managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbA codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbB claudecode managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbB claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbB codex managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbB codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbC claudecode managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbC claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbC codex managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbC codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbD claudecode managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbD claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbD codex managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbD codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbE claudecode managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbE claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbE codex managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbE codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbF claudecode managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbF claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbF codex managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbF codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fba claudecode managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fba claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fba codex managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fba codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbb claudecode managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbb claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbb codex managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbb codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbc claudecode managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbc claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbc codex managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbc codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbd claudecode managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbd claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbd codex managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbd codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbe claudecode managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbe claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbe codex managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbe codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbf claudecode managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbf claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbf codex managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbf codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbg claudecode managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbg claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbg codex managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbg codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbh claudecode managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbh claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbh codex managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbh codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbi claudecode managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbi claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbi codex managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbi codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbj claudecode managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbj claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbj codex managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbj codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbk claudecode managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbk claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbk codex managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbk codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbl claudecode managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbl claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbl codex managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbl codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbm claudecode managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbm claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbm codex managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbm codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbn claudecode managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbn claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbn codex managed=false|block	1
+TestReviewHP5FBProbe	HP5FBROW fbn codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbo claudecode managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbo claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbo codex managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbo codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbp claudecode managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbp claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbp codex managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbp codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbq claudecode managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbq claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbq codex managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbq codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbr claudecode managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbr claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbr codex managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbr codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbs claudecode managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbs claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbs codex managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbs codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbt claudecode managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbt claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbt codex managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbt codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbu claudecode managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbu claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbu codex managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbu codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbv claudecode managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbv claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbv codex managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbv codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbw claudecode managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbw claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbw codex managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbw codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbx claudecode managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbx claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbx codex managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbx codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fby claudecode managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fby claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fby codex managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fby codex managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbz claudecode managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbz claudecode managed=true|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbz codex managed=false|allow	1
+TestReviewHP5FBProbe	HP5FBROW fbz codex managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-cp-var claudecode managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW cand-cp-var claudecode managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW cand-cp-var codex managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW cand-cp-var codex managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW cand-install-dir claudecode managed=false|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-install-dir claudecode managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-install-dir codex managed=false|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-install-dir codex managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-cmdsub claudecode managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-cmdsub claudecode managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-cmdsub codex managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-cmdsub codex managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-date claudecode managed=false|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-date claudecode managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-date codex managed=false|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-date codex managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-glob-loop claudecode managed=false|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-glob-loop claudecode managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-glob-loop codex managed=false|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-glob-loop codex managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-glob-loop-all claudecode managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-glob-loop-all claudecode managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-glob-loop-all codex managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-glob-loop-all codex managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-home-notes claudecode managed=false|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-home-notes claudecode managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-home-notes codex managed=false|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-home-notes codex managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-pos claudecode managed=false|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-pos claudecode managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-pos codex managed=false|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-pos codex managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-random claudecode managed=false|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-random claudecode managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-random codex managed=false|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-random codex managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-read claudecode managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-read claudecode managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-read codex managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-read codex managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-read-benign claudecode managed=false|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-read-benign claudecode managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-read-benign codex managed=false|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-read-benign codex managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-tmpdir claudecode managed=false|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-tmpdir claudecode managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-tmpdir codex managed=false|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-redir-tmpdir codex managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-rsync-dir claudecode managed=false|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-rsync-dir claudecode managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-rsync-dir codex managed=false|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-rsync-dir codex managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-rsync-src-var claudecode managed=false|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-rsync-src-var claudecode managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-rsync-src-var codex managed=false|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-rsync-src-var codex managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW cand-tee-var claudecode managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW cand-tee-var claudecode managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW cand-tee-var codex managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW cand-tee-var codex managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-append-assign claudecode managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-append-assign claudecode managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-append-assign codex managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-append-assign codex managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-bg-assign claudecode managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-bg-assign claudecode managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-bg-assign codex managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-bg-assign codex managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-echo-cmdsub claudecode managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-echo-cmdsub claudecode managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-echo-cmdsub codex managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-echo-cmdsub codex managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-echo-var claudecode managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-echo-var claudecode managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-echo-var codex managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-echo-var codex managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-if-colon-neg claudecode managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-if-colon-neg claudecode managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-if-colon-neg codex managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-if-colon-neg codex managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-if-false claudecode managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-if-false claudecode managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-if-false codex managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-if-false codex managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-if-true-benign claudecode managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-if-true-benign claudecode managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-if-true-benign codex managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-if-true-benign codex managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-other-name claudecode managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-other-name claudecode managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-other-name codex managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-other-name codex managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-plain-benign claudecode managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-plain-benign claudecode managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-plain-benign codex managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-plain-benign codex managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-printf claudecode managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-printf claudecode managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-printf codex managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-printf codex managed=true|allow	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-second-dirlink claudecode managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-second-dirlink claudecode managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-second-dirlink codex managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-second-dirlink codex managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-second-link claudecode managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-second-link claudecode managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-second-link codex managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-second-link codex managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-subshell-assign claudecode managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-subshell-assign claudecode managed=true|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-subshell-assign codex managed=false|block	1
+TestReviewHP5OvwProbe	HP5OVROW ovw-subshell-assign codex managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v1-one-name claudecode managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v1-one-name claudecode managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v1-one-name codex managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v1-one-name codex managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v2-harmless-first claudecode managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v2-harmless-first claudecode managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v2-harmless-first codex managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v2-harmless-first codex managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v4-link-first claudecode managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v4-link-first claudecode managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v4-link-first codex managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v4-link-first codex managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v5-then-echo claudecode managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v5-then-echo claudecode managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v5-then-echo codex managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v5-then-echo codex managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v6-quoted claudecode managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v6-quoted claudecode managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v6-quoted codex managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v6-quoted codex managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v7-twin claudecode managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v7-twin claudecode managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v7-twin codex managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v7-twin codex managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v7-twin-quoted claudecode managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v7-twin-quoted claudecode managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v7-twin-quoted codex managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0371/v7-twin-quoted codex managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0375/forvar-cd claudecode managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0375/forvar-cd claudecode managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0375/forvar-cd codex managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0375/forvar-cd codex managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0375/forvar-nocd claudecode managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0375/forvar-nocd claudecode managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0375/forvar-nocd codex managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0375/forvar-nocd codex managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0375/literal-cd-control claudecode managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0375/literal-cd-control claudecode managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0375/literal-cd-control codex managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0375/literal-cd-control codex managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0375/var-cp-control claudecode managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0375/var-cp-control claudecode managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0375/var-cp-control codex managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0375/var-cp-control codex managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/dd-cd claudecode managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/dd-cd claudecode managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/dd-cd codex managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/dd-cd codex managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/dd-cd-twin claudecode managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/dd-cd-twin claudecode managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/dd-cd-twin codex managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/dd-cd-twin codex managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/dd-nocd claudecode managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/dd-nocd claudecode managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/dd-nocd codex managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/dd-nocd codex managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/dd-nocd-twin claudecode managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/dd-nocd-twin claudecode managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/dd-nocd-twin codex managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/dd-nocd-twin codex managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/echo-cd-control claudecode managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/echo-cd-control claudecode managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/echo-cd-control codex managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/echo-cd-control codex managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/install-cd claudecode managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/install-cd claudecode managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/install-cd codex managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/install-cd codex managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/install-cd-twin claudecode managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/install-cd-twin claudecode managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/install-cd-twin codex managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/install-cd-twin codex managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/install-nocd claudecode managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/install-nocd claudecode managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/install-nocd codex managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/install-nocd codex managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/install-nocd-twin claudecode managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/install-nocd-twin claudecode managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/install-nocd-twin codex managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/install-nocd-twin codex managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/rsync-cd claudecode managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/rsync-cd claudecode managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/rsync-cd codex managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/rsync-cd codex managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/rsync-cd-twin claudecode managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/rsync-cd-twin claudecode managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/rsync-cd-twin codex managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/rsync-cd-twin codex managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/rsync-nocd claudecode managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/rsync-nocd claudecode managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/rsync-nocd codex managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/rsync-nocd codex managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/rsync-nocd-twin claudecode managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/rsync-nocd-twin claudecode managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/rsync-nocd-twin codex managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/rsync-nocd-twin codex managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/tee-cd claudecode managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/tee-cd claudecode managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/tee-cd codex managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/tee-cd codex managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/tee-cd-twin claudecode managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/tee-cd-twin claudecode managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/tee-cd-twin codex managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/tee-cd-twin codex managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/tee-nocd claudecode managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/tee-nocd claudecode managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/tee-nocd codex managed=false|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/tee-nocd codex managed=true|block	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/tee-nocd-twin claudecode managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/tee-nocd-twin claudecode managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/tee-nocd-twin codex managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0389/tee-nocd-twin codex managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P06-find-exec-mv claudecode managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P06-find-exec-mv claudecode managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P06-find-exec-mv codex managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P06-find-exec-mv codex managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P07-name-mkdir claudecode managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P07-name-mkdir claudecode managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P07-name-mkdir codex managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P07-name-mkdir codex managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P13-true-control claudecode managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P13-true-control claudecode managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P13-true-control codex managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P13-true-control codex managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P13-unzip-v-cd claudecode managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P13-unzip-v-cd claudecode managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P13-unzip-v-cd codex managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P13-unzip-v-cd codex managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P13-unzip-v-nocd claudecode managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P13-unzip-v-nocd claudecode managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P13-unzip-v-nocd codex managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P13-unzip-v-nocd codex managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P17-D-build-sub claudecode managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P17-D-build-sub claudecode managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P17-D-build-sub codex managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0395/P17-D-build-sub codex managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0396/posix-cp-star claudecode managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0396/posix-cp-star claudecode managed=true|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0396/posix-cp-star codex managed=false|allow	1
+TestReviewHP5SweepProbe	HP5SWROW gap0396/posix-cp-star codex managed=true|allow	1
+TestReviewHP6BProbe	HP6BROW hp6b/m14-eval claudecode managed=false|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m14-eval claudecode managed=true|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m14-eval codex managed=false|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m14-eval codex managed=true|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m14-read claudecode managed=false|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m14-read claudecode managed=true|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m14-read codex managed=false|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m14-read codex managed=true|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m14-set claudecode managed=false|allow	1
+TestReviewHP6BProbe	HP6BROW hp6b/m14-set claudecode managed=true|allow	1
+TestReviewHP6BProbe	HP6BROW hp6b/m14-set codex managed=false|allow	1
+TestReviewHP6BProbe	HP6BROW hp6b/m14-set codex managed=true|allow	1
+TestReviewHP6BProbe	HP6BROW hp6b/m14-source claudecode managed=false|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m14-source claudecode managed=true|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m14-source codex managed=false|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m14-source codex managed=true|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m14-unset claudecode managed=false|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m14-unset claudecode managed=true|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m14-unset codex managed=false|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m14-unset codex managed=true|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m7-cp claudecode managed=false|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m7-cp claudecode managed=true|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m7-cp codex managed=false|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m7-cp codex managed=true|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m7-dd claudecode managed=false|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m7-dd claudecode managed=true|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m7-dd codex managed=false|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m7-dd codex managed=true|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m7-mv claudecode managed=false|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m7-mv claudecode managed=true|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m7-mv codex managed=false|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m7-mv codex managed=true|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m7-tee claudecode managed=false|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m7-tee claudecode managed=true|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m7-tee codex managed=false|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m7-tee codex managed=true|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/m7-tee-benign claudecode managed=false|allow	1
+TestReviewHP6BProbe	HP6BROW hp6b/m7-tee-benign claudecode managed=true|allow	1
+TestReviewHP6BProbe	HP6BROW hp6b/m7-tee-benign codex managed=false|allow	1
+TestReviewHP6BProbe	HP6BROW hp6b/m7-tee-benign codex managed=true|allow	1
+TestReviewHP6BProbe	HP6BROW hp6b/pv-attached-benign claudecode managed=false|allow	1
+TestReviewHP6BProbe	HP6BROW hp6b/pv-attached-benign claudecode managed=true|allow	1
+TestReviewHP6BProbe	HP6BROW hp6b/pv-attached-benign codex managed=false|allow	1
+TestReviewHP6BProbe	HP6BROW hp6b/pv-attached-benign codex managed=true|allow	1
+TestReviewHP6BProbe	HP6BROW hp6b/pv-attached-quoted-name claudecode managed=false|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/pv-attached-quoted-name claudecode managed=true|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/pv-attached-quoted-name codex managed=false|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/pv-attached-quoted-name codex managed=true|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/pv-dashdash claudecode managed=false|allow	1
+TestReviewHP6BProbe	HP6BROW hp6b/pv-dashdash claudecode managed=true|allow	1
+TestReviewHP6BProbe	HP6BROW hp6b/pv-dashdash codex managed=false|allow	1
+TestReviewHP6BProbe	HP6BROW hp6b/pv-dashdash codex managed=true|allow	1
+TestReviewHP6BProbe	HP6BROW hp6b/pv-separate claudecode managed=false|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/pv-separate claudecode managed=true|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/pv-separate codex managed=false|block	1
+TestReviewHP6BProbe	HP6BROW hp6b/pv-separate codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g397-build claudecode managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/g397-build claudecode managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/g397-build codex managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/g397-build codex managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/g397-copy-dir claudecode managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/g397-copy-dir claudecode managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/g397-copy-dir codex managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/g397-copy-dir codex managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-cd claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-cd claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-cd codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-cd codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-compact claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-compact claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-compact codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-compact codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-compact-benign claudecode managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-compact-benign claudecode managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-compact-benign codex managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-compact-benign codex managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-plain claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-plain claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-plain codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-plain codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-plain-benign claudecode managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-plain-benign claudecode managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-plain-benign codex managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-plain-benign codex managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-printf claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-printf claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-printf codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-printf codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-pwd claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-pwd claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-pwd codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-pwd codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-pwd-benign claudecode managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-pwd-benign claudecode managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-pwd-benign codex managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-pwd-benign codex managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-var claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-var claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-var codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/g418-var codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-cd-prefix claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-cd-prefix claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-cd-prefix codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-cd-prefix codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-cp-opt claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-cp-opt claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-cp-opt codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-cp-opt codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-dest-dir claudecode managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-dest-dir claudecode managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-dest-dir codex managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-dest-dir codex managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-keyname-folder claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-keyname-folder claudecode managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-keyname-folder codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-keyname-folder codex managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-mv claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-mv claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-mv codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-mv codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-protected-subpath claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-protected-subpath claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-protected-subpath codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-protected-subpath codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-second-stmt claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-second-stmt claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-second-stmt codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-second-stmt codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-source-link claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-source-link claudecode managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-source-link codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-source-link codex managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-suffix claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-suffix claudecode managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-suffix codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-suffix codex managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-twins-glob claudecode managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-twins-glob claudecode managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-twins-glob codex managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-twins-glob codex managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-two-body claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-two-body claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-two-body codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/lc-two-body codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-all claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-all claudecode managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-all codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-all codex managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-and-benign claudecode managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-and-benign claudecode managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-and-benign codex managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-and-benign codex managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-bg-write claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-bg-write claudecode managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-bg-write codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-bg-write codex managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-case-benign claudecode managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-case-benign claudecode managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-case-benign codex managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-case-benign codex managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-clobber claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-clobber claudecode managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-clobber codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-clobber codex managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-heredoc claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-heredoc claudecode managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-heredoc codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-heredoc codex managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-printf-benign claudecode managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-printf-benign claudecode managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-printf-benign codex managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-printf-benign codex managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-time-benign claudecode managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-time-benign claudecode managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-time-benign codex managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sb-time-benign codex managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-and claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-and claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-and codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-and codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-brace claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-brace claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-brace codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-brace codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-case claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-case claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-case codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-case codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-case-mod claudecode managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-case-mod claudecode managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-case-mod codex managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-case-mod codex managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-cd-dot claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-cd-dot claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-cd-dot codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-cd-dot codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-dirlink claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-dirlink claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-dirlink codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-dirlink codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-dirlink-concat claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-dirlink-concat claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-dirlink-concat codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-dirlink-concat codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-dotslash claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-dotslash claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-dotslash codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-dotslash codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-dplout claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-dplout claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-dplout codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-dplout codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-dplout-only claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-dplout-only claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-dplout-only codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-dplout-only codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-if claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-if claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-if codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-if codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-indirect claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-indirect claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-indirect codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-indirect codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-inout claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-inout claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-inout codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-inout codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-install-final claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-install-final claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-install-final codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-install-final codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-last-arg claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-last-arg claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-last-arg codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-last-arg codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-negated claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-negated claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-negated codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-negated codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-or claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-or claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-or codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-or codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-printf-attached claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-printf-attached claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-printf-attached codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-printf-attached codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-printf-attached-before claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-printf-attached-before claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-printf-attached-before codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-printf-attached-before codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-printf-quoted claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-printf-quoted claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-printf-quoted codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-printf-quoted codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-second-write claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-second-write claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-second-write codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-second-write codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-subst claudecode managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-subst claudecode managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-subst codex managed=false|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-subst codex managed=true|allow	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-time claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-time claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-time codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-time codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-time-block claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-time-block claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-time-block codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-time-block codex managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-while claudecode managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-while claudecode managed=true|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-while codex managed=false|block	1
+TestReviewHP6Probe	HP6PRROW hp6/sp-while codex managed=true|block	1

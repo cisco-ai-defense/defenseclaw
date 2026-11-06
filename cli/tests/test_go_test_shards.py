@@ -45,6 +45,17 @@ def test_go_test_file_shards_are_deterministic_and_exhaustive(tmp_path: Path) ->
     assert {"TestLargeA", "TestLargeB"} in (set(first[0]), set(first[1]))
 
 
+def test_default_go_shards_leave_opt_in_corpora_for_their_own_jobs(tmp_path: Path) -> None:
+    (tmp_path / "normal_test.go").write_text("package sample\nfunc TestNormal(t *testing.T) {}\n")
+    (tmp_path / "review_test.go").write_text(
+        "//go:build regressioncorpora\n\npackage sample\nfunc TestReview(t *testing.T) {}\n"
+    )
+    (tmp_path / "private_test.go").write_text(
+        "//go:build d1corpus\n\npackage sample\nfunc TestPrivate(t *testing.T) {}\n"
+    )
+    assert [names for _, names in discover_test_files(tmp_path)] == [("TestNormal",)]
+
+
 def test_go_test_shards_reject_invalid_count() -> None:
     with pytest.raises(ValueError, match="positive"):
         partition_test_files([], 0)

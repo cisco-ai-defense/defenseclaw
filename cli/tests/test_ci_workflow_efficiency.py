@@ -172,7 +172,7 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:
     assert "--timings scripts/test-timings/go-darwin.json \\\n            --shard-count 4 \\" in workflow
     assert "name: go-test-timings-darwin-connector-${{ matrix.shard }}" in workflow
     assert "DC_TEST_NATIVE_GATEWAY" in workflow
-    assert "needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-pinned]" in workflow
+    assert "needs: [changes, go-test-gateway, go-reviewer-corpora, go-test-audit, go-test-other, go-pinned]" in workflow
     assert 'test "$AUDIT_RESULT" = success' in workflow
     assert "python3 scripts/merge_go_coverage.py" in workflow
     assert "go tool cover -func=coverage.out" in workflow
@@ -180,6 +180,18 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:
 
     sharder = (ROOT / "scripts/go_test_shards.py").read_text(encoding="utf-8")
     assert "Test|Fuzz|Example" in sharder
+
+
+def test_gap0607_reviewer_corpora_and_d1_public_shapes_are_required_in_ci() -> None:
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "name: Go Reviewer Corpora (${{ matrix.shard }})" in workflow
+    assert "shard: [matrix-heavy, matrix-other, winlexer]" in workflow
+    assert 'test "$REVIEWER_RESULT" = success' in workflow
+    assert "-tags regressioncorpora -count=3 -timeout 14m" in workflow
+    assert "TestD1PublicShapes" in (ROOT / "internal/gateway/d1_replay_test.go").read_text(encoding="utf-8")
+    assert (ROOT / "internal/gateway/testdata/d1-shapes.jsonl").is_file()
+    assert "python3 scripts/check_d1_shapes.py" in workflow
+    assert "name: D1 Benign Replay" in (ROOT / ".github/workflows/d1-benign-replay.yml").read_text(encoding="utf-8")
 
 
 def test_release_validates_reviewed_macos_pin_without_freshness_block() -> None:

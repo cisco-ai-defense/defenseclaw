@@ -1,0 +1,46 @@
+name: D1 Benign Replay
+
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: d1-benign-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  replay:
+    if: ${{ vars.D1_CORPUS_RUNNER_READY == 'true' && (github.event_name != 'pull_request' || (github.event.label.name == 'hookpaths' && github.event.pull_request.head.repo.full_name == github.repository)) }}
+    runs-on: [self-hosted, Linux, X64, dc-build-1]
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+      - name: Replay private D1 corpus and compare with 1.0.8
+        env:
+          DC_D1_CORPUS: ${{ vars.D1_CORPUS_PATH }}
+          DC_D1_BASELINE: ${{ vars.D1_BASELINE_PATH }}
+          DC_D1_OUTPUT: ${{ runner.temp }}/d1-head.tsv
+          DC_D1_SHARD_INDEX: ${{ matrix.shard }}
+          DC_D1_SHARD_COUNT: 16
+          GOMAXPROCS: 8
+        run: |
+          set -euo pipefail
+          test -d "$DC_D1_CORPUS"
+          test -f "$DC_D1_BASELINE"
+          GOTOOLCHAIN=go1.26.4 nice -n 15 go test -p 4 -tags d1corpus -count=1 -timeout 14m \
+            -run '^TestD1BenignReplay$' ./internal/gateway
+          python3 scripts/d1diff.py "$DC_D1_BASELINE" "$DC_D1_OUTPUT" \
+            --shard-index "$DC_D1_SHARD_INDEX" --shard-count "$DC_D1_SHARD_COUNT"

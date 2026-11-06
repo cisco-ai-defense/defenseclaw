@@ -128,6 +128,8 @@ jobs:
       - run: make plugin
       - name: Type-check Amp policy plugin against official API
         run: make amp-plugin-typecheck
+      - name: Check public D1 corpus scrub
+        run: python3 scripts/check_d1_shapes.py
       - name: Go lint (gofmt, go vet, golangci-lint on changed lines)
         env:
           GOLANGCI_LINT_BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || 'origin/main' }}
@@ -212,6 +214,46 @@ jobs:
         if: ${{ matrix.shard == 0 }}
         with:
           cache-hit: ${{ steps.go.outputs.cache-hit }}
+
+  go-reviewer-corpora:
+    name: Go Reviewer Corpora (${{ matrix.shard }})
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [matrix-heavy, matrix-other, winlexer]
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+      - name: Check corpus tooling
+        if: matrix.shard == 'matrix-heavy'
+        run: python3 -m unittest scripts.test_check_reviewer_corpus scripts.test_d1diff scripts.test_red_on_108 -q
+      - name: Check reviewer matrix and Windows lexer verdicts
+        env:
+          CORPUS_SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          case "$CORPUS_SHARD" in
+            matrix-heavy)
+              selector='^TestReviewHP3R5Probe$'
+              expected=internal/gateway/testdata/reviewer_matrix_heavy_expected.tsv
+              ;;
+            matrix-other)
+              selector='^(TestGAP0356VariableSourcesFourCell|TestGAP0403DeadValuesStayAllowedWithProtectHome|TestGAP0403WriteBeforeReassignmentStillBlocks|TestGAP0371LoopCopyDestinationsFourCell|TestGAP0404CompactionGuardsFourCell|TestHP4ReviewBenignNeighbours|TestHP4ReviewProjectPatternTargetsFourCell|TestHP4ReviewR2LinkedHome|TestHP4ReviewR2RmEntries|TestHP4ReviewR2RecursiveLinkEntry|TestReviewHP3R3FourCell|TestReviewHP3R4CleanProjectFourCell|TestReviewHP3FourCell|TestReviewHP5FBProbe|TestReviewHP5OvwProbe|TestReviewHP5SweepProbe|TestReviewHP6Probe|TestReviewHP6BProbe|TestWrappedLinkReadsLikeThePlainLink|TestRVCdvarCorpus2|TestRVCdvarCorpus3|TestRVCdvarCorpus4|TestRVCdvarCorpus5|TestRVCdvarCorpus6|TestRVCdvarCorpus7|TestRVCdvarCorpus)$'
+              expected=internal/gateway/testdata/reviewer_matrix_other_expected.tsv
+              ;;
+            winlexer)
+              selector='^(TestRVWLTails|TestRVWLBenignFourCells|TestRVWL2Comment|TestRVWL2Skip|TestRVWL2Benign|TestRVWL3Comment|TestRVWL4Neighbors|TestRVWL4TokenNeighbors)$'
+              expected=internal/gateway/testdata/winlexer_expected.tsv
+              ;;
+          esac
+          go test -p 4 -tags regressioncorpora -count=3 -timeout 14m -json \
+            -run "$selector" ./internal/gateway | \
+            python3 scripts/check_reviewer_corpus.py --expected "$expected" --repeat 3
 
   go-test-audit:
     name: Go Audit Test (shard ${{ matrix.shard }})
@@ -404,7 +446,7 @@ jobs:
     # packages. A pull request without Go changes skips the shards and runs
     # only Go Pinned Tests, if any.
     name: Go Test
-    needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-pinned]
+    needs: [changes, go-test-gateway, go-reviewer-corpora, go-test-audit, go-test-other, go-pinned]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -413,6 +455,7 @@ jobs:
         env:
           GO_SUITE: ${{ needs.changes.outputs.go }}
           GATEWAY_RESULT: ${{ needs.go-test-gateway.result }}
+          REVIEWER_RESULT: ${{ needs.go-reviewer-corpora.result }}
           AUDIT_RESULT: ${{ needs.go-test-audit.result }}
           OTHER_RESULT: ${{ needs.go-test-other.result }}
           PINNED_RESULT: ${{ needs.go-pinned.result }}
@@ -424,6 +467,7 @@ jobs:
             exit 0
           fi
           test "$GATEWAY_RESULT" = success
+          test "$REVIEWER_RESULT" = success
           test "$AUDIT_RESULT" = success
           test "$OTHER_RESULT" = success
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
