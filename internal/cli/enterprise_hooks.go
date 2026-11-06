@@ -3496,8 +3496,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		// filesystem event gets a pass. Retain the file state at the start of
 		// every standalone Unix pass so that restoration belongs to this pass.
 		var beforeOwned, lastVerifiedOwned map[string]string
+		var beforeOwnedInfo map[string]os.FileInfo
 		if !legacyWatch && runtime.GOOS != "windows" {
 			beforeOwned = make(map[string]string, len(exclusiveOwned))
+			beforeOwnedInfo = enterpriseHookWatchOwnedFileInfo(exclusiveOwned)
 			lastVerifiedOwned = maps.Clone(ownedSnapshot)
 			takeEnterpriseHookOwnedSnapshot(beforeOwned, exclusiveOwned, nil, enterpriseHookOwnedFileFingerprint)
 		}
@@ -3562,9 +3564,17 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		for k, v := range ownedSnapshot {
 			foundSnapshot[k] = v
 		}
+		// Read the final content after the change-time sample. A write that
+		// starts between these reads must not be reported as a completed
+		// restoration while its new bytes are still present.
+		afterOwnedInfo := map[string]os.FileInfo(nil)
+		if beforeOwned != nil {
+			afterOwnedInfo = enterpriseHookWatchOwnedFileInfo(exclusiveOwned)
+		}
 		takeEnterpriseHookOwnedSnapshot(ownedSnapshot, exclusiveOwned, sharedOwned, enterpriseHookOwnedFileFingerprint)
 		if beforeOwned != nil {
-			run.RestoredPaths = enterpriseHookWatchRestoredOwnedFiles(previousRun, lastVerifiedOwned, beforeOwned, ownedSnapshot, run.WatchExclusiveFiles)
+			run.RestoredPaths = enterpriseHookWatchRestoredOwnedFiles(previousRun, lastVerifiedOwned, beforeOwned, ownedSnapshot,
+				beforeOwnedInfo, afterOwnedInfo, run.WatchExclusiveFiles)
 			if len(run.RestoredPaths) > run.Repairs {
 				run.Repairs = len(run.RestoredPaths)
 			}
@@ -4117,11 +4127,35 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	}
 }
 
-// enterpriseHookWatchRestoredOwnedFiles reports files that were different
-// when this pass began and returned to the last pass's verified bytes and
-// mode. Only a file already verified and still owned by the current run can
-// qualify; a first install, an unchanged file and a failed repair do not.
-func enterpriseHookWatchRestoredOwnedFiles(prior enterpriseHookReconcileRun, verified, before, after map[string]string, owned []string) []string {
+// enterpriseHookWatchOwnedFileInfo records filesystem identity and change
+// times alongside the content fingerprint. A file can be overwritten and
+// restored during one pass, leaving the same bytes in both snapshots.
+func enterpriseHookWatchOwnedFileInfo(owned map[string]struct{}) map[string]os.FileInfo {
+	info := make(map[string]os.FileInfo, len(owned))
+	for path := range owned {
+		entry, err := os.Lstat(path)
+		if err == nil {
+			info[path] = entry
+		}
+	}
+	return info
+}
+
+func enterpriseHookWatchFileWrittenDuringPass(before, after os.FileInfo) bool {
+	if before == nil || after == nil {
+		return false
+	}
+	return !os.SameFile(before, after) || !before.ModTime().Equal(after.ModTime()) ||
+		enterpriseHookOwnedFileChangeTime(before) != enterpriseHookOwnedFileChangeTime(after)
+}
+
+// enterpriseHookWatchRestoredOwnedFiles reports files that return to the
+// last pass's verified bytes and mode. Change times and identity also cover
+// an overwrite after the first content snapshot that the pass restores before
+// its final snapshot. A first install, an untouched file and a failed repair
+// do not qualify.
+func enterpriseHookWatchRestoredOwnedFiles(prior enterpriseHookReconcileRun, verified, before, after map[string]string,
+	beforeInfo, afterInfo map[string]os.FileInfo, owned []string) []string {
 	verifiedTargets := make(map[string]bool, len(prior.Rows))
 	for _, row := range prior.Rows {
 		if row.OK {
@@ -4146,7 +4180,8 @@ func enterpriseHookWatchRestoredOwnedFiles(prior enterpriseHookReconcileRun, ver
 			continue
 		}
 		found, checked := before[path]
-		if !checked || found == want || after[path] != want {
+		if !checked || after[path] != want ||
+			(found == want && !enterpriseHookWatchFileWrittenDuringPass(beforeInfo[path], afterInfo[path])) {
 			continue
 		}
 		restored = append(restored, path)
