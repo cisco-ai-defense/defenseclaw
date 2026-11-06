@@ -48,6 +48,14 @@ from defenseclaw.hook_integrity import (
     hermes_approved_pairs,
 )
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
+from defenseclaw.winquote import (
+    powershell_literal,
+    powershell_literal_before_typographic_quotes,
+    powershell_literal_body,
+    powershell_literal_is_current,
+    powershell_literal_value,
+    split_windows_words,
+)
 
 _SAFE_PATHEXT = (".exe", ".cmd")
 _HOOK_RUNTIME_STATE_MAX_BYTES = 64 << 10
@@ -1876,9 +1884,9 @@ def _malformed_owned_hook_target(command: str, connector: str) -> str:
                                 script,
                             )
                         if awaited:
-                            owned_target = awaited.group("target").replace("''", "'")
+                            owned_target = powershell_literal_value(awaited.group("target"))
                         elif match:
-                            owned_target = match.group(1).replace("''", "'")
+                            owned_target = powershell_literal_value(match.group(1))
                 except (binascii.Error, UnicodeError, ValueError):
                     pass
         if owned_target:
@@ -3127,7 +3135,7 @@ def _validate_hermes_pending_runtime_state(data_dir: str, command: str) -> None:
 
 def _split_windows(command: str) -> list[str]:
     try:
-        parts = shlex.split(command, posix=False)
+        parts = split_windows_words(command)
     except ValueError as exc:
         raise _InspectionError("malformed", f"cannot parse registered hook command: {exc}") from exc
     normalized: list[str] = []
@@ -3136,7 +3144,7 @@ def _split_windows(command: str) -> list[str]:
             quote = part[0]
             part = part[1:-1]
             if parts and parts[0] == "&" and quote == "'":
-                part = part.replace("''", "'")
+                part = powershell_literal_value(part)
         normalized.append(part)
     return normalized
 
@@ -3244,7 +3252,7 @@ def _command_target(
                         "which loses the status of a hook that exits at once",
                     )
             if match:
-                target = match.group("target").replace("''", "'")
+                target = powershell_literal_value(match.group("target"))
                 args = ["hook", "--connector", connector]
                 event = match.groupdict().get("event")
                 contract_id = match.groupdict().get("contract")
@@ -3427,10 +3435,49 @@ def _locked_hook_script_digest(data_dir: str, connector: str, name: str) -> str:
     return str(digests.get(name) or "") if isinstance(digests, dict) else ""
 
 
+def copilot_setup_command(adapter: str, event: str) -> str:
+    """Setup's Copilot ``powershell`` handler for *event* (connector copilotHookInvocationCommandForEvent)."""
+    return f"& {powershell_literal(adapter)} -Event {powershell_literal(event)}"
+
+
+# g072 review 3 M3: a hook command whose PowerShell literal has a lone
+# typographic quote is the render of a release before 1.0.9, which doubled only
+# the apostrophe. It is DefenseClaw's own (setup rewrites it), but PowerShell
+# ends the quoted path at that quote, so the hook does not run.
+_PRE_TYPOGRAPHIC_QUOTE_RENDER = (
+    "was written before 1.0.9 and does not run: PowerShell ends its quoted path at the "
+    "typographic quote in it"
+)
+_POWERSHELL_SINGLE_QUOTED = re.compile(r"'((?:[^']|'')*)'")
+
+
+def _powershell_literals_current(command: str) -> bool:
+    """Whether every single-quoted literal of a PowerShell hook *command* is this release's render.
+
+    It reads a call-operator command itself and an -EncodedCommand bridge's
+    script. Other forms (cmd.exe, bash, shlex) do not read typographic quotes.
+    """
+    texts = [command] if command.lstrip().startswith("&") else []
+    parts = command.split()
+    lowered = [part.casefold() for part in parts]
+    if "-encodedcommand" in lowered:
+        index = lowered.index("-encodedcommand") + 1
+        if index < len(parts):
+            try:
+                texts.append(base64.b64decode(parts[index], validate=True).decode("utf-16-le"))
+            except (binascii.Error, UnicodeError, ValueError):
+                pass
+    return all(
+        powershell_literal_is_current(match.group(1))
+        for text in texts
+        for match in _POWERSHELL_SINGLE_QUOTED.finditer(text)
+    )
+
+
 def _copilot_powershell_binding(command: str) -> tuple[str, str] | None:
     match = _COPILOT_POWERSHELL_COMMAND.fullmatch(command.strip())
     if match:
-        return match.group(1).replace("''", "'"), match.group(2)
+        return powershell_literal_value(match.group(1)), match.group(2)
     lowered = command.casefold()
     if (
         "hook --connector copilot" in lowered
@@ -3547,12 +3594,20 @@ def _validate_copilot_hook_matrix(
             for item in value:
                 yield from unexpected_commands(item)
 
-    adapter_literal = expected_adapter.replace("'", "''").casefold()
+    # The adapter as this release quotes it, and as releases before 1.0.9 did.
+    adapter_body = powershell_literal_body(expected_adapter)
+    adapter_literals = {
+        adapter_body.casefold(),
+        powershell_literal_before_typographic_quotes(adapter_body).casefold(),
+    }
     for event, entries in hooks.items():
         if event in expected:
             continue
         for command in unexpected_commands(entries):
-            if adapter_literal in command.casefold() or _copilot_powershell_binding(command) is not None:
+            if (
+                any(literal in command.casefold() for literal in adapter_literals)
+                or _copilot_powershell_binding(command) is not None
+            ):
                 raise _InspectionError("stale", f"unexpected Copilot event {event} contains a DefenseClaw handler")
 
     if len(targets) != 1:
@@ -3606,10 +3661,13 @@ def validate_windows_copilot_hook_registration(
                 "foreign",
                 f"registered Copilot adapter is outside the DefenseClaw runtime: {resolved_adapter}",
             )
-        quoted_adapter = expected_adapter.replace("'", "''")
         for event, registered in commands.items():
-            if registered != f"& '{quoted_adapter}' -Event '{event}'":
-                raise _InspectionError("foreign", f"Copilot event {event} handler differs from Setup's command")
+            setup_command = copilot_setup_command(expected_adapter, event)
+            if registered == setup_command:
+                continue
+            if registered == powershell_literal_before_typographic_quotes(setup_command):
+                raise _InspectionError("stale", f"Copilot event {event} handler {_PRE_TYPOGRAPHIC_QUOTE_RENDER}")
+            raise _InspectionError("foreign", f"Copilot event {event} handler differs from Setup's command")
         adapter_bytes = _stable_regular_file(
             resolved_adapter,
             data_dir,
@@ -3676,7 +3734,7 @@ def validate_windows_copilot_hook_registration(
                 "malformed",
                 "registered Copilot adapter must contain exactly one bound hook executable",
             )
-        raw_target = hook_matches[0].group(1).replace("''", "'")
+        raw_target = powershell_literal_value(hook_matches[0].group(1))
         resolved = _resolve_target(raw_target, "direct", search_path=search_path, pathext=pathext)
         if not resolved:
             raise _InspectionError("missing", f"Copilot adapter hook executable cannot be resolved: {raw_target}")
@@ -3897,6 +3955,8 @@ def validate_windows_hook_registration(
             raise _InspectionError(
                 "foreign", f"registered hook target is not the DefenseClaw hook launcher: {resolved}"
             )
+        if not _powershell_literals_current(command):
+            raise _InspectionError("stale", f"registered hook command {_PRE_TYPOGRAPHIC_QUOTE_RENDER}")
         limitations = ""
         if connector == "devin":
             limitations = (

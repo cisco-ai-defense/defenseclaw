@@ -54,8 +54,13 @@ from defenseclaw.doctor_hooks import (
     resolve_windows_command,
     validate_windows_hook_registration,
 )
+from defenseclaw.winquote import powershell_literal_before_typographic_quotes, powershell_literal_body
 
 from tests.os_view import os_view
+
+
+def _decoded_bridge(command: str) -> str:
+    return base64.b64decode(command.rsplit(" ", 1)[1]).decode("utf-16-le")
 
 
 class WindowsHookDoctorTests(unittest.TestCase):
@@ -175,7 +180,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
         start_process: bool = False,
         constrained_fail_open: bool = False,
     ) -> str:
-        literal = str(runtime).replace("'", "''")
+        literal = powershell_literal_body(str(runtime))
         if legacy + unqualified + start_process + constrained_fail_open > 1:
             raise ValueError("launcher fixture flags are mutually exclusive")
         arguments = ["hook", "--connector", connector]
@@ -1945,6 +1950,36 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.state, "malformed")
         self.assertIn("explicitly disabled", raised.exception.detail)
+
+    def test_codex_bridge_under_a_typographic_quote_profile(self) -> None:
+        """g072 review 3 M3: the bridge for a profile like C:\\Users\\O\u2019Brien is current and owned.
+
+        Go doubles every PowerShell single quote of the launcher path (the
+        fixture renders the same text: tests/test_powershell_quote_golden.py).
+        The render of releases before 1.0.9, the typographic quote not
+        doubled, stays DefenseClaw's and is stale, so doctor says run setup
+        rather than calling it foreign.
+        """
+        for quote in "\u2018\u2019\u201a\u201b":
+            with self.subTest(quote=f"U+{ord(quote):04X}"):
+                self.profile = self.root / f"O{quote}Brien {ord(quote):04X}"
+                self.install = self.profile / "DefenseClaw Install"
+                self.data = self.profile / ".defenseclaw"
+                self.install.mkdir(parents=True)
+                self.data.mkdir()
+                runtime = self._runtime()
+                command = self._encoded_hook_command(runtime)
+                self.assertIn(quote * 2, _decoded_bridge(command))
+
+                check = self._validate("codex", self._config("codex", command, codex_features=False))
+                self.assertEqual(check.state, "healthy", check.detail)
+
+                script = powershell_literal_before_typographic_quotes(_decoded_bridge(command))
+                before = command.rsplit(" ", 1)[0] + " " + base64.b64encode(script.encode("utf-16-le")).decode()
+                check = self._validate("codex", self._config("codex", before, codex_features=False))
+                self.assertEqual(check.state, "stale", check.detail)
+                self.assertIn("written before 1.0.9", check.detail)
+                self.assertEqual(ntpath.normcase(check.target), ntpath.normcase(str(runtime)))
 
     def test_healthy_codex_synchronous_encoded_invocation(self) -> None:
         runtime = self._runtime()

@@ -76,6 +76,11 @@ from defenseclaw.commands import windows_native_uninstall, windows_uninstall_hel
 from defenseclaw.commands.cmd_doctor import _codex_otel_marked_kept
 from defenseclaw.connector_paths import claude_settings_paths, codex_home
 from defenseclaw.file_lock import tui_lock_held
+from defenseclaw.winquote import (
+    powershell_literal,
+    powershell_literal_before_typographic_quotes,
+    powershell_literal_value,
+)
 
 # Connectors whose teardown the Python CLI knows how to perform locally
 # without going through ``defenseclaw-gateway connector teardown``. This
@@ -3092,19 +3097,26 @@ def _orphan_copilot_handler_owned(handler: object) -> bool:
 
         if script == "; ".join([*statements, *run("")]):
             return True  # 1.0.0 render, before the removed-deployment guard
-        unquoted = binary[1:-1].replace("''", "'")
-        gateway = "'" + ntpath.join(ntpath.dirname(unquoted), "defenseclaw-gateway.exe").replace("'", "''") + "'"
-        guard = (
-            "if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { "
-            f"if (-not (Microsoft.PowerShell.Management\\Test-Path -LiteralPath {binary}) -and "
-            f"-not (Microsoft.PowerShell.Management\\Test-Path -LiteralPath {gateway})) {{ exit 0 }} }} "
-            f"elseif (-not [System.IO.File]::Exists({binary}) -and "
-            f"-not [System.IO.File]::Exists({gateway})) {{ exit 0 }}"
+        gateway = powershell_literal(
+            ntpath.join(ntpath.dirname(powershell_literal_value(binary[1:-1])), "defenseclaw-gateway.exe")
         )
+
+        def guard(gateway: str) -> str:
+            return (
+                "if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { "
+                f"if (-not (Microsoft.PowerShell.Management\\Test-Path -LiteralPath {binary}) -and "
+                f"-not (Microsoft.PowerShell.Management\\Test-Path -LiteralPath {gateway})) {{ exit 0 }} }} "
+                f"elseif (-not [System.IO.File]::Exists({binary}) -and "
+                f"-not [System.IO.File]::Exists({gateway})) {{ exit 0 }}"
+            )
+
         # The guarded render through 1.0.6, and the current one, whose
-        # Constrained Language branch exits 1 when the launcher never started.
+        # Constrained Language branch exits 1 when the launcher never started;
+        # builds before 1.0.9 doubled only the apostrophe of the gateway path
+        # (g072 review 3 M3), as they did the launcher's in binary.
         return script in {
-            "; ".join([*statements, guard, *run(fail_closed)])
+            "; ".join([*statements, guard(literal), *run(fail_closed)])
+            for literal in (gateway, powershell_literal_before_typographic_quotes(gateway))
             for fail_closed in ("", "if ($null -eq $LASTEXITCODE) { exit 1 }; ")
         }
 
