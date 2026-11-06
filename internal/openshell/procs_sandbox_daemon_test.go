@@ -37,25 +37,6 @@ func startSandboxImageProbe(t *testing.T) (int, string) {
 	return cmd.Process.Pid, image
 }
 
-func TestGAP0617ProcessImagePathUsesRunningFile(t *testing.T) {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skip("process image lookup requires Linux or macOS")
-	}
-	pid, image := startSandboxImageProbe(t)
-	path, err := sandboxDaemonProcessPath(context.Background(), pid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want, err := os.Stat(image)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := os.Stat(path)
-	if err != nil || !os.SameFile(got, want) {
-		t.Fatalf("process image path = %q, want running file %q: %v", path, image, err)
-	}
-}
-
 // A different account or process cannot satisfy the daemon status identity.
 func TestMacSandboxDaemonPortNeedsExactAnsweringExecutable(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {

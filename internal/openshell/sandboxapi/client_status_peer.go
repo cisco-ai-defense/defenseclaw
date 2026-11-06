@@ -24,14 +24,6 @@ type statusPeerEvidence struct {
 	invalid  bool
 }
 
-func (e *statusPeerEvidence) record(pid, uid int) {
-	if pid <= 0 || uid < 0 || e.seen && (e.pid != pid || e.uid != uid) {
-		e.invalid = true
-		return
-	}
-	e.pid, e.uid, e.seen = pid, uid, true
-}
-
 // StatusWithPeer returns a status and the kernel-verified PID of the process
 // that supplied it. A zero PID means the response cannot prove a busy port's
 // owner; the status itself remains available for the other doctor rows.
