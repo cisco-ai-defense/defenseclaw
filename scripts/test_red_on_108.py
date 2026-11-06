@@ -138,6 +138,22 @@ class RedOn108Test(unittest.TestCase):
         helper_only = "--- FAIL: TestGAP0607Sample (0.00s)\n    helper.go:9: got allow, want block\n"
         self.assertEqual(classify_test_result(command, 1, helper_only), "UNCLASSIFIED_FAIL")
 
+    def test_go_classifies_the_failing_assertion_without_unrelated_setup_text(self):
+        from scripts.red_on_108 import classify_test_result
+
+        command = ["nice", "-n", "15", "go", "test", "./internal/example"]
+        setup_assertion = (
+            "--- FAIL: TestGAP0607Sample (0.00s)\n"
+            "    sample_test.go:12: precondition got empty bytes, want sample bytes\n"
+        )
+        product_assertion = (
+            "--- FAIL: TestGAP0607Sample (0.00s)\n"
+            "    sample_test.go:12: got block, want allow\n"
+            "    sample_test.go:13: setup complete\n"
+        )
+        self.assertEqual(classify_test_result(command, 1, setup_assertion), "COMPILE_ONLY")
+        self.assertEqual(classify_test_result(command, 1, product_assertion), "BEHAVIOR_RED")
+
     def test_go_fixtures_match_the_test_commit_on_prior_release(self):
         from tempfile import TemporaryDirectory
 
@@ -160,6 +176,8 @@ class RedOn108Test(unittest.TestCase):
             existing_asset = repo / "internal/example/assets/existing.json"
             existing_asset.parent.mkdir(parents=True)
             existing_asset.write_text("base asset", encoding="utf-8")
+            deleted_asset = repo / "internal/example/assets/deleted.json"
+            deleted_asset.write_text("old asset", encoding="utf-8")
             source = repo / "internal/example/subpkg/lib.go"
             source.parent.mkdir(parents=True)
             source.write_text("package subpkg\n", encoding="utf-8")
@@ -178,6 +196,7 @@ class RedOn108Test(unittest.TestCase):
             nested_asset.parent.mkdir(parents=True)
             nested_asset.write_text("nested product asset", encoding="utf-8")
             git("rm", "-q", "internal/example/testdata/removed.json")
+            git("rm", "-q", "internal/example/assets/deleted.json")
             git("add", ".")
             git("commit", "-q", "-m", "fix(GAP-0607): add test fixture")
             commit = git("rev-parse", "HEAD")
@@ -190,6 +209,7 @@ class RedOn108Test(unittest.TestCase):
                 self.assertEqual((prior / "internal/example/fixtures/sample.json").read_text(), "sample")
                 self.assertEqual((prior / "internal/example/assets/sample.json").read_text(), "asset")
                 self.assertEqual((prior / "internal/example/assets/existing.json").read_text(), "updated asset")
+                self.assertFalse((prior / "internal/example/assets/deleted.json").exists())
                 self.assertEqual((prior / "internal/example/subpkg/lib.go").read_text(), "package subpkg\n")
                 self.assertFalse((prior / "internal/example/subpkg/assets/new.json").exists())
                 self.assertFalse((prior / "internal/example/testdata/removed.json").exists())

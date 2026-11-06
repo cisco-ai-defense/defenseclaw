@@ -32,6 +32,73 @@ type d1ReplayVerdict struct {
 	RuleID   string
 }
 
+type d1PendingProductDecision struct {
+	Gap     string
+	Want    string
+	Current d1ReplayVerdict
+}
+
+// The public corpus keeps the intended verdicts in its rows. These entries
+// pin peer-owned decisions until their product fixes reach this branch. A
+// changed result, including the intended result, requires removing the entry.
+func d1PendingProductDecisions() map[string]d1PendingProductDecision {
+	pending := make(map[string]d1PendingProductDecision)
+	for _, id := range []string{
+		"d1-0041", "d1-0063", "d1-0065", "d1-0070", "d1-0075",
+		"d1-0104", "d1-0105", "d1-0158", "d1-0263", "d1-0297",
+	} {
+		for _, connector := range []string{"claudecode", "codex"} {
+			pending[id+" "+connector+"/managed-balanced"] = d1PendingProductDecision{
+				Gap: "GAP-0054", Want: "alert",
+				Current: d1ReplayVerdict{Decision: "block", RuleID: "persistence.ssh_authorized_keys_command"},
+			}
+		}
+	}
+	for _, connector := range []string{"claudecode", "codex"} {
+		pending["d1-0043 "+connector+"/managed-balanced"] = d1PendingProductDecision{
+			Gap: "GAP-0054", Want: "allow",
+			Current: d1ReplayVerdict{Decision: "block", RuleID: "persistence.ssh_authorized_keys_command"},
+		}
+		for _, cell := range []string{connector + "/oss", connector + "/managed-balanced"} {
+			pending["d1-0081 "+cell] = d1PendingProductDecision{
+				Gap: "GAP-0054", Want: "allow",
+				Current: d1ReplayVerdict{Decision: "block", RuleID: "persistence.ssh_authorized_keys_command"},
+			}
+			for _, id := range []string{"d1-0084", "d1-0085", "d1-0299"} {
+				pending[id+" "+cell] = d1PendingProductDecision{
+					Gap: "GAP-0055", Want: "allow",
+					Current: d1ReplayVerdict{Decision: "error", RuleID: "-"},
+				}
+			}
+		}
+	}
+	return pending
+}
+
+func d1CheckPublicVerdict(row d1ReplayRow, cell string, got d1ReplayVerdict, pending map[string]d1PendingProductDecision) error {
+	want, ok := row.Expected[cell]
+	if !ok {
+		return fmt.Errorf("missing expected verdict")
+	}
+	if item, listed := pending[row.ID+" "+cell]; listed {
+		if want != item.Want {
+			return fmt.Errorf("%s intended verdict changed: got %s, want %s", item.Gap, want, item.Want)
+		}
+		if got.Decision == want {
+			return fmt.Errorf("%s pending decision resolved; remove its inventory entry", item.Gap)
+		}
+		if got != item.Current {
+			return fmt.Errorf("%s pending decision changed: got %s (%s), pinned %s (%s)",
+				item.Gap, got.Decision, got.RuleID, item.Current.Decision, item.Current.RuleID)
+		}
+		return nil
+	}
+	if got.Decision != want || got.Decision == "error" {
+		return fmt.Errorf("got %s (%s), want %s", got.Decision, got.RuleID, want)
+	}
+	return nil
+}
+
 func d1FirstRule(ids, findings []string) string {
 	if len(ids) > 0 {
 		return ids[0]
@@ -168,6 +235,8 @@ func d1Replay(t *testing.T, rows []d1ReplayRow, output *os.File, checkExpected b
 		"claudecode": d1TestAPI(t, "claudecode"),
 		"codex":      d1TestAPI(t, "codex"),
 	}
+	pending := d1PendingProductDecisions()
+	seenPending := make(map[string]bool)
 	for _, row := range rows {
 		for _, connector := range []string{"claudecode", "codex"} {
 			for _, managed := range []bool{false, true} {
@@ -182,14 +251,44 @@ func d1Replay(t *testing.T, rows []d1ReplayRow, output *os.File, checkExpected b
 					}
 				}
 				if checkExpected {
-					if want, ok := row.Expected[cell]; !ok || verdict.Decision != want || verdict.Decision == "error" {
-						t.Errorf("D1 %s %s: got %s (%s), want %s", row.ID, cell, verdict.Decision, verdict.RuleID, want)
+					key := row.ID + " " + cell
+					if _, listed := pending[key]; listed {
+						seenPending[key] = true
+					}
+					if err := d1CheckPublicVerdict(row, cell, verdict, pending); err != nil {
+						t.Errorf("D1 %s %s: %v", row.ID, cell, err)
 					}
 				} else if verdict.Decision == "error" {
 					t.Errorf("D1 %s %s: evaluation error", row.ID, cell)
 				}
 			}
 		}
+	}
+	if checkExpected {
+		for key := range pending {
+			if !seenPending[key] {
+				t.Errorf("D1 pending decision absent from public corpus: %s", key)
+			}
+		}
+	}
+}
+
+func TestD1PendingProductDecisionInventory(t *testing.T) {
+	row := d1ReplayRow{ID: "d1-0081", Expected: map[string]string{"codex/oss": "allow"}}
+	cell := "codex/oss"
+	pending := d1PendingProductDecisions()
+	if err := d1CheckPublicVerdict(row, cell, d1ReplayVerdict{Decision: "block", RuleID: "persistence.ssh_authorized_keys_command"}, pending); err != nil {
+		t.Fatal(err)
+	}
+	if err := d1CheckPublicVerdict(row, cell, d1ReplayVerdict{Decision: "allow"}, pending); err == nil {
+		t.Fatal("resolved product decision must require inventory review")
+	}
+	if err := d1CheckPublicVerdict(row, cell, d1ReplayVerdict{Decision: "alert"}, pending); err == nil {
+		t.Fatal("unreviewed product decision must fail")
+	}
+	row.ID = "d1-0030"
+	if err := d1CheckPublicVerdict(row, cell, d1ReplayVerdict{Decision: "allow"}, pending); err != nil {
+		t.Fatal(err)
 	}
 }
 

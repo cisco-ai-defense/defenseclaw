@@ -103,8 +103,6 @@ def classify_test_result(command: list[str], returncode: int, output: str) -> st
     )
     if any(marker in output.lower() for marker in infrastructure):
         return "COMPILE_ONLY"
-    if re.search(r"\b(?:setup|fixture|initialization|testmain)\b", output, re.IGNORECASE):
-        return "COMPILE_ONLY"
     if "go" in command and "--- FAIL:" in output:
         # A Go FAIL marker also follows setup errors inside a test. A verdict
         # assertion must be emitted from a test source line, not a log message
@@ -115,10 +113,24 @@ def classify_test_result(command: list[str], returncode: int, output: str) -> st
             r"\bexpected\b[^\n]{0,240}\b(?:got|observed|actual)\b",
             r"\b(?:got|observed|actual)\b[^\n]{0,240}\bexpected\b",
         )
+        source_lines = []
         for line in output.splitlines():
             match = re.match(r"^\s+[^\s:]+_test\.go:\d+:\s+(.+)$", line)
-            if match and any(re.search(pattern, match.group(1), re.IGNORECASE) for pattern in assertions):
-                return "BEHAVIOR_RED"
+            if match:
+                source_lines.append(match.group(1))
+        # A setup assertion can use the same got/want words as a product
+        # verdict. Only source assertions from a completed test count.
+        setup_failure = re.compile(
+            r"\b(?:precondition|fixture|setup|initialization|testmain)\b"
+            r"[^\n]*\b(?:fail(?:ed|ure)?|error|missing|unavailable|got|want)\b"
+            r"|\b(?:fail(?:ed|ure)?|error|missing|unavailable)\b"
+            r"[^\n]*\b(?:precondition|fixture|setup|initialization|testmain)\b",
+            re.IGNORECASE,
+        )
+        if any(setup_failure.search(line) for line in source_lines):
+            return "COMPILE_ONLY"
+        if any(any(re.search(pattern, line, re.IGNORECASE) for pattern in assertions) for line in source_lines):
+            return "BEHAVIOR_RED"
         return "UNCLASSIFIED_FAIL"
     if "pytest" in command and (
         "AssertionError" in output or "Failed: DID NOT RAISE" in output or re.search(r"(?m)^E\s+assert\b", output)
@@ -162,6 +174,14 @@ def overlay_go_fixtures(repo: Path, worktree: Path, commit: str, directory: str)
             path.unlink()
         elif path.is_dir():
             shutil.rmtree(path)
+    for name in sorted(prior - current):
+        if fixture_root(name) is None and Path(name).suffix in source_suffixes:
+            continue
+        target = worktree / name
+        if not target.resolve(strict=False).is_relative_to(worktree.resolve()):
+            raise ValueError(f"fixture path escapes audit worktree: {name}")
+        if target.is_file() or target.is_symlink():
+            target.unlink()
     for name in sorted(current):
         if fixture_root(name) is None and Path(name).suffix in source_suffixes:
             continue

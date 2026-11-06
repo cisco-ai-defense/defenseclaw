@@ -33,6 +33,18 @@ NEARBY_COMMANDS = (
     "wget testbed",
     "curl αβγ",
     "curl --user αβγ example.invalid",
+    "nc testbed 80",
+    "nc -z testbed 80",
+    "netcat testbed 80",
+    "telnet testbed 80",
+    "curl -H 'Host: testbed' https://example.invalid/resource",
+    "curl -H $'\\110\\157\\163\\164:testbed' https://example.invalid/resource",
+    "nc -l -c 'nc testbed 80'",
+    "curl -H '$(printf Host): testbed' https://example.invalid/resource",
+    "curl -HHost:testbed https://example.invalid/resource",
+    "curl --proxy-header='X-Forwarded-Host: testbed' https://example.invalid/resource",
+    "wget -H testbed",
+    "nc -stestbed example.invalid 80",
 )
 
 
@@ -63,6 +75,16 @@ class D1ShapeScrubTest(unittest.TestCase):
             "curl --url=example.invalid",
             "curl -xexample.invalid https://example.invalid/resource",
             "wget -O sample https://example.invalid/resource",
+            "nc example.invalid 80",
+            "nc -z example.invalid 80",
+            "netcat example.invalid 80",
+            "telnet example.invalid 80",
+            "curl -H 'Host: example.invalid' https://example.invalid/resource",
+            "nc -l -c 'nc example.invalid 80'",
+            "curl -HHost:example.invalid https://example.invalid/resource",
+            "curl --proxy-header='X-Forwarded-Host: example.invalid' https://example.invalid/resource",
+            "wget -H example.invalid",
+            "nc -sexample.invalid example.invalid 80",
         ):
             with self.subTest(command=command):
                 self.assertTrue(synthetic_operands({"command": command}))
