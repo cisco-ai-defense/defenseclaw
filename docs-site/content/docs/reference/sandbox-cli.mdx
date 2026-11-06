@@ -109,7 +109,8 @@ commands change in these ways. Everything else on this page works as written.
 
 - **The command is a launcher.** Enterprise packages install `defenseclaw`
   (`/usr/bin/defenseclaw` on Linux, `/usr/local/bin/defenseclaw` on macOS) as
-  a root-owned link that offers only the `sandbox` commands. Any other command
+  a root-owned link that offers only the `sandbox` commands, `status` (your own
+  protection state), `guardrail profile explain`, `help` and `--version`. Any other command
   prints "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy." followed, on Linux and macOS, by the administrator views of that computer (the installed gateway's `enterprise linux status` or `enterprise macos status`, `verify` and `audit export --since 2h`) and exits `2`. The launcher starts your own sandbox daemon
   when it is not running. Many sandbox commands in a few seconds (a script
   that runs `sandbox pack list` in a loop) can reach your account's request

@@ -1258,54 +1258,83 @@ describe('per-user install window refusal (GAP-2173)', () => {
   });
 });
 
-// launcherRefusalText mirrors launcherRefusalFor (internal/cli/launcher.go):
-// the shared sentence every platform prints, and the Linux and macOS texts
-// that add the administrator views for the installed gateway path.
-function launcherRefusalText(): { message: string; linux: string; macos: string } {
-  const launcher = source('internal/cli/launcher.go');
-  const message = /message := "([^"]+)"/.exec(launcher)?.[1];
-  const views = /fmt\.Sprintf\("( For administrator views[^"]+)",/.exec(launcher)?.[1];
-  assert.ok(message && views, 'launcher refusal text not found in launcherRefusalFor');
-  const layout = source('internal/managed/standalone_layout.go');
-  const linuxBin = /BinDir:\s+"(\/opt\/defenseclaw\/bin)"/.exec(layout)?.[1];
-  const darwinRoot = /const root = "([^"]+)"\s+return StandaloneLayout\{\s+GOOS:\s+goos,\s+InstallRoot:\s+root,/.exec(layout)?.[1];
-  assert.ok(linuxBin && darwinRoot, 'standalone Linux or macOS bin directory not found');
-  const build = (bin: string, platform: string): string => {
-    const gateway = `${bin}/defenseclaw-gateway`;
-    let at = 0;
-    const args = [gateway, platform, gateway, platform, gateway];
-    return message + views.replace(/%s/g, () => args[at++]);
-  };
-  return { message, linux: build(linuxBin, 'linux'), macos: build(`${darwinRoot}/bin`, 'macos') };
+// The launcher refusal as the code builds it for each OS. The Go test
+// TestLauncherRefusalFixture (internal/cli) evaluates launcherRefusalFor for
+// linux, darwin and windows and fails unless this fixture holds exactly that,
+// so the docs gate follows what the launcher prints, not how the Go source
+// spells it. Windows has no launcher; its text is the shared sentence.
+function launcherRefusalText(): { message: string; linux: string; macos: string; views: string[] } {
+  const fixture = JSON.parse(source('internal/cli/testdata/launcher_refusal.json')) as Record<string, string>;
+  const { linux, darwin: macos, windows: message } = fixture;
+  assert.ok(linux && macos && message, 'launcher_refusal.json must hold linux, darwin and windows texts');
+  assert.ok(linux.startsWith(message) && macos.startsWith(message), 'the Linux and macOS refusals must start with the shared sentence');
+  // The administrator views are the commands the Linux and macOS texts add
+  // after the shared sentence, without the installed gateway path.
+  const views = new Set<string>();
+  for (const text of [linux, macos]) {
+    const added = text.slice(message.length);
+    assert.ok(added.includes('administrator views'), 'the Linux and macOS refusals must point to the administrator views');
+    const commands = [...added.matchAll(/`sudo \S+ ([^`]+)`/g)].map((match) => match[1]);
+    assert.ok(commands.length >= 3, 'the Linux and macOS refusals must name the administrator commands');
+    // A short page names `enterprise <os> <first verb>` in full and the other
+    // verbs of that group alone; any other command is named in full.
+    let grouped = false;
+    for (const command of commands) {
+      const enterprise = /^enterprise \w+ (\w+)$/.exec(command);
+      views.add(enterprise && grouped ? `\`${enterprise[1]}\`` : command);
+      grouped = grouped || enterprise !== null;
+    }
+  }
+  return { message, linux, macos, views: [...views] };
+}
+
+// A page quotes the current guidance when it carries the full text of one OS,
+// or says "administrator views" and names every command both OS texts add.
+function givesAdministratorGuidance(text: string, refusal: ReturnType<typeof launcherRefusalText>): boolean {
+  if (text.includes(refusal.linux) || text.includes(refusal.macos)) return true;
+  return text.includes('administrator views') && refusal.views.every((view) => text.includes(view));
 }
 
 describe('managed launcher refusal on every page (GAP-1387, GAP-1569, GAP-0635)', () => {
   it('quotes the launcher refusal the code builds for each OS', () => {
-    const { message, linux, macos } = launcherRefusalText();
+    const refusal = launcherRefusalText();
     let quoted = 0;
     for (const file of enterprisePages(docs)) {
       const text = readFileSync(file, 'utf8').split(/\s+/).join(' ');
       const name = relative(docs, file);
       assert.ok(!text.includes('commands are available here'), `${name} quotes the retired launcher refusal`);
       assert.ok(!text.includes('Other commands require an administrator'), `${name} quotes the retired launcher refusal ending`);
-      if (text.includes(message)) quoted += 1;
+      // The launcher admits status, guardrail profile explain, help and
+      // --version beside the sandbox tree, so no page may list it shorter.
+      for (const match of text.matchAll(/offers only (?:the )?`?sandbox`? commands([^.;]{0,200})/g)) {
+        assert.ok(match[1].includes('status`'), `${name} says the launcher offers only sandbox commands, without status`);
+      }
+      if (!text.includes(refusal.message)) continue;
+      quoted += 1;
+      assert.ok(givesAdministratorGuidance(text, refusal), `${name} quotes the launcher refusal without the current administrator views`);
     }
     assert.ok(quoted >= 10, `expected the launcher refusal on at least 10 pages, found ${quoted}`);
-    const index = readFileSync(join(docs, 'enterprise/index.mdx'), 'utf8').split(/\s+/).join(' ');
-    assert.ok(index.includes(linux), 'enterprise/index.mdx does not quote the Linux launcher refusal');
-    assert.ok(index.includes(macos), 'enterprise/index.mdx does not quote the macOS launcher refusal');
-    const trouble = readFileSync(join(docs, 'enterprise/troubleshooting.mdx'), 'utf8').split(/\s+/).join(' ');
-    assert.ok(trouble.includes(linux), 'enterprise/troubleshooting.mdx does not quote the Linux launcher refusal');
+    const index = page('enterprise/index.mdx');
+    assert.ok(index.includes(refusal.linux), 'enterprise/index.mdx does not quote the Linux launcher refusal');
+    assert.ok(index.includes(refusal.macos), 'enterprise/index.mdx does not quote the macOS launcher refusal');
+    const trouble = page('enterprise/troubleshooting.mdx');
+    assert.ok(trouble.includes(refusal.linux), 'enterprise/troubleshooting.mdx does not quote the Linux launcher refusal');
     assert.ok(trouble.includes('/opt/cisco/defenseclaw/bin/defenseclaw-gateway') && trouble.includes('enterprise macos'), 'enterprise/troubleshooting.mdx does not name the macOS gateway');
+  });
+
+  it('does not tell a managed user that status or Check it is refused', () => {
+    assert.ok(!/readers included \([^)]*`status`/.test(page('reference/cli.mdx')), 'reference/cli.mdx lists status among the refused commands');
+    const copilot = page('connectors/copilot.mdx');
+    assert.ok(copilot.includes('`defenseclaw status` from Check it still runs there'), 'connectors/copilot.mdx says the Check it status step is refused');
   });
 });
 
 describe('the TUI page on a managed computer (rel-1-0-4 GAP-0597)', () => {
   it('quotes the launcher refusal and links the managed-device steps', () => {
-    const { message } = launcherRefusalText();
-    const tui = page('tui.mdx').split(/\s+/).join(' ');
-    assert.ok(tui.includes(message), 'features/tui.mdx does not quote the launcher refusal');
-    assert.ok(tui.includes('audit export --since 2h'), 'features/tui.mdx does not name the administrator views');
+    const refusal = launcherRefusalText();
+    const tui = page('tui.mdx');
+    assert.ok(tui.includes(refusal.message), 'features/tui.mdx does not quote the launcher refusal');
+    assert.ok(givesAdministratorGuidance(tui, refusal), 'features/tui.mdx does not name the administrator views');
     assert.ok(tui.includes('/docs/tui#on-a-managed-device'));
     assert.ok(page('tui.mdx').includes('#### On a managed device'));
   });
