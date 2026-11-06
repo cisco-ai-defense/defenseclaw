@@ -28,6 +28,7 @@ policy metadata for callers to reject unattended or experimental changes.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -304,10 +305,96 @@ def _discovery_from_hook_contract_lock(data_dir: str) -> _LockDiscovery | None:
             continue
         version = entry.get("raw_agent_version")
         if isinstance(version, str) and version.strip():
+            executable = entry.get("agent_executable")
             agents[name] = AgentSignal(
-                name=name, installed=True, config_path="", binary_path="", version=version, error=""
+                name=name,
+                installed=True,
+                config_path="",
+                binary_path=executable if isinstance(executable, str) else "",
+                version=version,
+                error="",
             )
     return _LockDiscovery(agents=agents) if agents else None
+
+
+@dataclass(frozen=True)
+class InstalledVersionCheck:
+    """Discovery evidence with each agent version re-read now.
+
+    ``changed`` maps a connector to the version the evidence recorded, when
+    the agent reports another one today. ``unchecked`` maps a connector to
+    why its recorded version could not be re-read; its row must call the
+    value recorded, not installed (GAP-0723).
+    """
+
+    discovery: Any | None
+    changed: Mapping[str, str]
+    unchecked: Mapping[str, str]
+
+
+def recheck_installed_versions(
+    discovery: Any | None,
+    connectors: Iterable[str],
+    data_dir: str,
+) -> InstalledVersionCheck:
+    """Re-read the version of each hook connector agent, once per run.
+
+    The discovery cache lives a day and the gateway hook contract lock
+    keeps the version setup selected the contract from, so after the agent
+    updated both still name the old version. Doctor judged compatibility on
+    it and printed it as ``installed``. This runs the same bounded,
+    trusted-path-only ``--version`` probe discovery uses (never a scan, a
+    write or a terminal) on the executable the evidence names, and returns
+    the evidence with the version found now. A probe that cannot run leaves
+    the recorded version in place and says why in ``unchecked``.
+    """
+
+    agents = getattr(discovery, "agents", None)
+    if not isinstance(agents, Mapping) or not dataclasses.is_dataclass(discovery):
+        return InstalledVersionCheck(discovery, {}, {})
+    from defenseclaw.inventory import agent_discovery
+
+    wanted = set(_normalized_active_connectors(connectors))
+    updated = dict(agents)
+    changed: dict[str, str] = {}
+    unchecked: dict[str, str] = {}
+    for raw_name, signal in agents.items():
+        name = normalize_connector(raw_name) if isinstance(raw_name, str) and len(raw_name) <= 128 else ""
+        spec = agent_discovery._SPECS.get(name)
+        recorded = getattr(signal, "version", "")
+        if (
+            name not in wanted
+            or name not in HOOK_CONTRACTS
+            or name == "kiro"
+            or spec is None
+            or not dataclasses.is_dataclass(signal)
+            or not getattr(signal, "installed", False)
+            or not isinstance(recorded, str)
+            or not recorded.strip()
+        ):
+            continue
+        path = getattr(signal, "binary_path", "")
+        if not isinstance(path, str) or not path.strip():
+            unchecked[name] = "no executable path is recorded"
+            continue
+        found, error = agent_discovery._version_for_agent_binary(
+            name, path, spec.version_args, data_dir=data_dir or None
+        )
+        if error or not found.strip():
+            unchecked[name] = (
+                "its executable is not in a trusted install location"
+                if error == agent_discovery.UNTRUSTED_PREFIX_ERROR
+                else "the version probe timed out"
+                if error == agent_discovery.VERSION_PROBE_TIMED_OUT
+                else "the version probe did not return a version"
+            )
+            continue
+        if found.strip() != recorded.strip():
+            changed[name] = recorded
+            updated[raw_name] = dataclasses.replace(signal, version=found, error="")
+    if not changed:
+        return InstalledVersionCheck(discovery, {}, unchecked)
+    return InstalledVersionCheck(dataclasses.replace(discovery, agents=updated), changed, unchecked)
 
 
 def assess_component_health(
