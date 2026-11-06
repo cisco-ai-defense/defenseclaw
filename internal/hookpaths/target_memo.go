@@ -42,6 +42,9 @@ type TargetMemo struct {
 	files map[string]protectedFiles
 	// reachNames stores both lexical and resolved protected names.
 	reachNames map[string]reachNames
+	// emptyReachRoots records a complete local empty-root check for this
+	// evaluation, so ordinary candidates share the same negative proof.
+	emptyReachRoots map[string]bool
 	// work counts the path components the memo walked on the file system
 	// and the candidate checks it computed (Work); candidates counts the
 	// Windows candidate checks among them (WorkParts).

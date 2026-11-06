@@ -306,16 +306,56 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 	if !filepath.IsAbs(target) || !filepath.IsAbs(home) {
 		return GradePossible
 	}
-	if protectedReachEmptyRootsMiss(target, home, sshOnly) {
+	if lexicalProtectedReach(target, home, sshOnly) {
+		return GradeNamed
+	}
+	if m.protectedReachEmptyRootsMiss(target, home, sshOnly) {
 		return GradeNone
 	}
 	return m.protectedReachUncached(target, home, sshOnly)
 }
 
+// A named protected spelling needs no file-system read. Physical aliases
+// and file identities still use the two-sided resolver below.
+func lexicalProtectedReach(target, home string, sshOnly bool) bool {
+	ssh := filepath.Join(home, ".ssh")
+	if samePathName(target, ssh) {
+		return true
+	}
+	for _, name := range AuthorizedKeysFiles {
+		if samePathName(target, filepath.Join(ssh, name)) {
+			return true
+		}
+	}
+	for _, name := range SSHControlFiles {
+		if samePathName(target, filepath.Join(ssh, name)) {
+			return true
+		}
+	}
+	if sshOnly {
+		return false
+	}
+	state := filepath.Join(home, ".defenseclaw")
+	if samePathName(target, state) {
+		return true
+	}
+	for _, name := range activeStateFiles {
+		if samePathName(target, filepath.Join(state, name)) {
+			return true
+		}
+	}
+	for _, name := range activeStateTrees {
+		if pathAtOrUnder(target, filepath.Join(state, name)) {
+			return true
+		}
+	}
+	return false
+}
+
 // An absent parent outside empty local protected roots has no current path
 // or file identity through which it could reach a protected entry. Keep the
 // full resolver whenever either root has contents, links, or an unknown read.
-func protectedReachEmptyRootsMiss(target, home string, sshOnly bool) bool {
+func (m *TargetMemo) protectedReachEmptyRootsMiss(target, home string, sshOnly bool) bool {
 	if SharePath(target) || SharePath(home) {
 		return false
 	}
@@ -327,6 +367,19 @@ func protectedReachEmptyRootsMiss(target, home string, sshOnly bool) bool {
 	if _, err := PathLstat(filepath.Dir(target)); !os.IsNotExist(err) {
 		return false
 	}
+	key := home
+	if sshOnly {
+		key = "ssh:" + home
+	}
+	if m != nil {
+		m.mu.Lock()
+		empty, ok := m.emptyReachRoots[key]
+		m.mu.Unlock()
+		if ok {
+			return empty
+		}
+	}
+	empty := true
 	for _, root := range []string{ssh, state} {
 		if sshOnly && root == state {
 			break
@@ -336,14 +389,24 @@ func protectedReachEmptyRootsMiss(target, home string, sshOnly bool) bool {
 			continue
 		}
 		if err != nil || !entry.IsDir() || entry.Mode()&os.ModeSymlink != 0 {
-			return false
+			empty = false
+			break
 		}
 		children, err := os.ReadDir(root)
 		if err != nil || len(children) != 0 {
-			return false
+			empty = false
+			break
 		}
 	}
-	return true
+	if m != nil {
+		m.mu.Lock()
+		if m.emptyReachRoots == nil {
+			m.emptyReachRoots = make(map[string]bool)
+		}
+		m.emptyReachRoots[key] = empty
+		m.mu.Unlock()
+	}
+	return empty
 }
 
 func (m *TargetMemo) protectedReachUncached(target, home string, sshOnly bool) Grade {
