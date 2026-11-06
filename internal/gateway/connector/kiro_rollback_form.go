@@ -5,12 +5,7 @@ package connector
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
-	"os"
-	"strings"
 )
 
 // Releases before 1.0.9 own the per-user Windows Kiro command only in the
@@ -68,57 +63,4 @@ func kiroJSONString(value string, escapeHTML bool) []byte {
 	encoder.SetEscapeHTML(escapeHTML)
 	_ = encoder.Encode(value)
 	return bytes.TrimSuffix(out.Bytes(), []byte("\n"))
-}
-
-// convertKiroConfigHookForms applies convertKiroHookFileForms to every Kiro
-// hook and agent file setup or teardown handles, each under its lock, and
-// keeps a copy of a file before a rollback conversion. Managed installs are
-// left alone: their guardian writes the managed form, which no release
-// changed.
-func (c *KiroConnector) convertKiroConfigHookForms(opts SetupOpts, toEarlier bool, keepCopy func(dataDir, name string, data []byte) error) (int, error) {
-	if kiroManaged(opts) {
-		return 0, nil
-	}
-	launchers := append([]string{strings.TrimSpace(opts.HookExecutable)}, nativeHookBinaryOwnershipCandidates()...)
-	pairs := kiroWindowsHookFormPairs(launchers)
-	paths := append(append(c.hookCleanupPaths(opts), c.agentConfigPaths(opts)...), c.agentCleanupPaths(opts)...)
-	total := 0
-	for _, path := range uniqueNonEmptyStrings(paths) {
-		data, err := os.ReadFile(path)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return total, fmt.Errorf("read Kiro hooks %s: %w", path, err)
-		}
-		if _, changed := convertKiroHookFileForms(data, pairs, toEarlier); changed == 0 {
-			continue
-		}
-		converted := 0
-		err = withFileLockMode(path, false, func() error {
-			return atomicTransformFileWithStateDir(path, opts.DataDir, 0o600,
-				func(current []byte, exists bool) (atomicTransformResult, error) {
-					if !exists {
-						return atomicTransformResult{Remove: true}, nil
-					}
-					out, changed := convertKiroHookFileForms(current, pairs, toEarlier)
-					if changed == 0 {
-						return atomicTransformResult{Data: current}, nil
-					}
-					if keepCopy != nil {
-						sum := sha256.Sum256([]byte(strings.ToLower(path)))
-						if err := keepCopy(opts.DataDir, "kiro-"+hex.EncodeToString(sum[:6])+".before-rollback.json", current); err != nil {
-							return atomicTransformResult{}, fmt.Errorf("keep a copy of the Kiro hooks: %w", err)
-						}
-					}
-					converted = changed
-					return atomicTransformResult{Data: out}, nil
-				})
-		})
-		if err != nil {
-			return total, fmt.Errorf("rewrite Kiro hooks in %s: %w", path, err)
-		}
-		total += converted
-	}
-	return total, nil
 }
