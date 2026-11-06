@@ -114,12 +114,8 @@ func TestGAP0482ReviewSlowHomeLocalPythonReassignment(t *testing.T) {
 	if got := r106PerUserVerdict(t, "claudecode", payload, ""); got != "allow" {
 		t.Fatalf("local Python reassignment = %s, want allow", got)
 	}
-	wantStrict := "allow"
-	if os.Getenv("R482_OVERLAY") == "1" {
-		wantStrict = "block"
-	}
-	if got := gap0482ProfileVerdict(t, payload, "strict"); got != wantStrict {
-		t.Fatalf("strict local Python reassignment = %s, want %s", got, wantStrict)
+	if got := gap0482ProfileVerdict(t, payload, "strict"); got != "allow" {
+		t.Fatalf("strict local Python reassignment = %s, want allow", got)
 	}
 }
 

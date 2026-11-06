@@ -97,6 +97,7 @@ func TestProtectedReachGradesNamedAndOrdinaryPaths(t *testing.T) {
 		{"ordinary-file", ordinary, GradeNone},
 		{"ordinary-missing", filepath.Join(project, "new.txt"), GradeNone},
 		{"ordinary-parent-link", filepath.Join(ordinaryParent, "new.txt"), GradeNone},
+		{"ordinary-ssh-sibling", filepath.Join(home, ".ssh", "notes.txt"), GradeNone},
 		{"ordinary-state-sibling", filepath.Join(home, ".defenseclaw", "notes.txt"), GradeNone},
 	} {
 		t.Run(row.name, func(t *testing.T) {

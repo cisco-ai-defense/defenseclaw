@@ -64,7 +64,7 @@ func (m *TargetMemo) parentProtectedReach(parent, home string, names reachNames)
 	}
 	reached, unread := false, false
 	lstat := func(path string) (os.FileInfo, error) {
-		if names.has(path) {
+		if names.hasCandidate(path) {
 			reached = true
 		}
 		info, err := PathLstat(path)
@@ -79,7 +79,7 @@ func (m *TargetMemo) parentProtectedReach(parent, home string, names reachNames)
 	resolved, _, _, ok := walkWritePathMemoWithReaders("", parent, 0, false, false, nil, lstat, readlink)
 	answer := reachParentAnswer{resolved: resolved}
 	switch {
-	case reached || ok && names.has(resolved):
+	case reached || ok && names.hasCandidate(resolved):
 		answer.grade = GradeNamed
 	case unread || !ok:
 		answer.grade = GradePossible
@@ -117,13 +117,20 @@ func (s *reachNames) addTree(path string) {
 }
 func (s *reachNames) has(path string) bool {
 	path = filepath.Clean(path)
-	for _, file := range s.files {
-		if samePathName(path, file) {
+	for _, dir := range s.directories {
+		if samePathName(path, dir) {
 			return true
 		}
 	}
-	for _, dir := range s.directories {
-		if pathAtOrUnder(path, dir) {
+	return s.hasCandidate(path)
+}
+
+// An exact protected directory is a protected destination, but passing
+// through it does not make every unlisted child a protected file.
+func (s *reachNames) hasCandidate(path string) bool {
+	path = filepath.Clean(path)
+	for _, file := range s.files {
+		if samePathName(path, file) {
 			return true
 		}
 	}
@@ -297,7 +304,7 @@ func (m *TargetMemo) ProtectedReach(target, home string) Grade {
 	reached := false
 	unread := false
 	lstat := func(path string) (os.FileInfo, error) {
-		if names.has(path) {
+		if names.hasCandidate(path) {
 			reached = true
 		}
 		info, err := PathLstat(path)
