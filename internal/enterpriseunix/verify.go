@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1581,11 +1582,35 @@ func auditWriteFailureRecovered(lastFailureAt string, now time.Time) bool {
 func (env *Env) warnOpenCodePortsRecord(r *enterprisestatus.Result) {
 	path := filepath.Join(env.Layout.GuardianAuthDir, enterprisehooks.UnixOpenCodeServicePortsFileName)
 	if _, err := os.Lstat(env.P(path)); err != nil {
+		// A non-root status cannot open the root-only guardian folder: say
+		// it could not check, where OpenCode is on the machine policy, so a
+		// silent status never reads as "no problem" (REVIEW-gx053-5 MF2).
+		if !errors.Is(err, fs.ErrNotExist) && openCodePortsRecordGeteuid() != 0 {
+			if _, pluginErr := os.Stat(env.P(filepath.Join(openCodePluginDir(env.Layout), "index.js"))); pluginErr == nil {
+				r.AddWarning("opencode_port_record_unchecked", fmt.Sprintf(
+					"this account cannot read the guardian's OpenCode service ports record %s; while it cannot be read no account gets a new OpenCode port. Check it as root: sudo %s",
+					path, env.lifecycleCommand(ActionStatus)))
+			}
+		}
 		return
 	}
-	if _, err := enterprisehooks.LoadUnixOpenCodeServicePorts(env.P(path)); err != nil {
+	_, unknown, err := enterprisehooks.LoadUnixOpenCodeServicePortsState(env.P(path))
+	if err != nil {
 		r.AddWarning("opencode_port_record_unreadable", fmt.Sprintf(
 			"the guardian's OpenCode service ports record %s cannot be read (%v), so no account gets a new OpenCode port; ports already in service.json files are kept. Remove it to rebuild it on the next pass: sudo rm %s",
 			path, err, path))
+		return
+	}
+	if len(unknown) > 0 {
+		names := make([]string, 0, len(unknown))
+		for _, entry := range unknown {
+			names = append(names, fmt.Sprintf("%s (uid %d: %s)", entry.User, entry.UID, entry.Reason))
+		}
+		r.AddWarning("opencode_port_account_unknown", fmt.Sprintf(
+			"the guardian could not read the OpenCode service port of %s as the account, so no account gets a new OpenCode port until it can; recorded ports stay held. Check that home is reachable; the next pass retries",
+			strings.Join(names, ", ")))
 	}
 }
+
+// openCodePortsRecordGeteuid is os.Geteuid (tests replace it).
+var openCodePortsRecordGeteuid = os.Geteuid

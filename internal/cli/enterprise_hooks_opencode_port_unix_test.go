@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,7 +40,13 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 	previousManifest, previousMachinePolicy := enterpriseHookManifest, enterpriseHookStandaloneMachinePolicySet
 	previousLoad, previousCheck, previousRunner := enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner
 	previousLoadPorts, previousWritePorts := enterpriseHookLoadOpenCodePorts, enterpriseHookWriteOpenCodePorts
+	previousReadTimeout := enterpriseHookOpenCodeReadTimeout
+	openCodeUserCannotRead, openCodeReadFails, openCodeReadHangs = map[int]bool{}, map[int]bool{}, map[int]chan struct{}{}
 	t.Cleanup(func() {
+		enterpriseHookOpenCodeReadTimeout = previousReadTimeout
+		for _, release := range openCodeReadHangs {
+			close(release)
+		}
 		enterpriseHookManifest, enterpriseHookStandaloneMachinePolicySet = previousManifest, previousMachinePolicy
 		enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner = previousLoad, previousCheck, previousRunner
 		enterpriseHookLoadOpenCodePorts, enterpriseHookWriteOpenCodePorts = previousLoadPorts, previousWritePorts
@@ -104,19 +111,20 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 		}
 	}
 	record := map[int]int{}
-	openCodeRecordUnreadable = nil
-	t.Cleanup(func() { openCodeRecordUnreadable = nil })
-	enterpriseHookLoadOpenCodePorts = func(string) (map[int]int, error) {
+	openCodeRecordUnreadable, openCodeRecordUnknown = nil, nil
+	t.Cleanup(func() { openCodeRecordUnreadable, openCodeRecordUnknown = nil, nil })
+	enterpriseHookLoadOpenCodePorts = func(string) (map[int]int, []enterprisehooks.UnixOpenCodeServicePortUnknown, error) {
 		if openCodeRecordUnreadable != nil {
-			return nil, openCodeRecordUnreadable
+			return nil, nil, openCodeRecordUnreadable
 		}
 		out := map[int]int{}
 		for uid, port := range record {
 			out[uid] = port
 		}
-		return out, nil
+		return out, openCodeRecordUnknown, nil
 	}
-	enterpriseHookWriteOpenCodePorts = func(_ string, ports map[int]int, _ map[int]string) error {
+	enterpriseHookWriteOpenCodePorts = func(_ string, ports map[int]int, _ map[int]string, unknown []enterprisehooks.UnixOpenCodeServicePortUnknown) error {
+		openCodeRecordUnknown = unknown
 		openCodeRecordWrites++
 		record = map[int]int{}
 		for uid, port := range ports {
@@ -127,6 +135,31 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 	enterpriseHookWorkerRunner = func(_ context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
 		request.Home = account.Home
 		response := enterpriseHookWorkerResponse{}
+		if request.Operation == enterpriseHookWorkerOpOpenCodePortRead {
+			if release, hangs := openCodeReadHangs[account.UID]; hangs {
+				<-release // a hung home: the read never answers
+				return response, context.DeadlineExceeded
+			}
+			if openCodeReadFails[account.UID] {
+				return response, errors.New("worker for uid " + fmt.Sprint(account.UID) + " exited 1")
+			}
+			// The as-the-user read: links resolve; a file the user cannot
+			// read either is an error.
+			if openCodeUserCannotRead[account.UID] {
+				response.OpenCodeServicePort = &enterpriseHookWorkerOpenCodePortReport{Error: "permission denied"}
+				return response, nil
+			}
+			port, err := enterprisepolicy.ReadOpenCodeServicePortAsUser(account.Home)
+			response.OpenCodeServicePort = &enterpriseHookWorkerOpenCodePortReport{Port: port}
+			if err != nil {
+				response.OpenCodeServicePort.Error = err.Error()
+			}
+			return response, nil
+		}
+		if request.OpenCodeServicePort > 0 && openCodeUserCannotRead[account.UID] {
+			response.OpenCodeServicePort = &enterpriseHookWorkerOpenCodePortReport{Error: "permission denied"}
+			return response, nil
+		}
 		if request.OpenCodeServicePort > 0 {
 			response.OpenCodeServicePort = runEnterpriseHookWorkerOpenCodePort(request)
 		}
@@ -140,6 +173,12 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 var (
 	openCodeRecordUnreadable error
 	openCodeRecordWrites     int
+	openCodeRecordUnknown    []enterprisehooks.UnixOpenCodeServicePortUnknown
+	// openCodeUserCannotRead are the uids whose service.json the account
+	// itself cannot read; openCodeReadFails the uids whose read worker fails;
+	// openCodeReadHangs the uids whose read never answers (until released).
+	openCodeUserCannotRead, openCodeReadFails map[int]bool
+	openCodeReadHangs                         map[int]chan struct{}
 )
 
 func openCodePortIn(t *testing.T, home string) int {
@@ -453,5 +492,179 @@ func TestManagedGuardianOpenCodeUnreadableRecordGivesNoNewPorts(t *testing.T) {
 				t.Fatalf("the reason is not logged:\n%s", log)
 			}
 		})
+	}
+}
+
+// REVIEW-gx053-5 MF1: alice keeps her OpenCode config in dotfiles
+// (~/.config/opencode -> ~/dotfiles/opencode, the stow layout), where root's
+// no-link read sees nothing, and set port 25002 by hand; bob's first port is
+// 25002. The as-the-user read sees her port: bob gets another, nobody shares,
+// over passes, and no line promises a move that does not happen.
+func TestManagedGuardianOpenCodeSymlinkedConfigFolder(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
+	alice := homes[1001]
+	if err := os.MkdirAll(filepath.Join(alice, "dotfiles", "opencode"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(alice, ".config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(alice, "dotfiles", "opencode"), filepath.Join(alice, ".config", "opencode")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(alice, "dotfiles", "opencode", "service.json"), []byte(`{"port":25002,"password":"p"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setEligible(nil, 1001, 1002)
+	for pass := 0; pass < 3; pass++ {
+		log := runOpenCodePortPass(t)
+		got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log)
+		if got[1001] != 25002 || got[1002] == 0 || (*record)[1001] != 25002 {
+			t.Fatalf("pass %d: ports %v record %v\n%s", pass, got, *record, log)
+		}
+		if strings.Contains(log, "next pass") {
+			t.Fatalf("pass %d promises a later move:\n%s", pass, log)
+		}
+	}
+}
+
+// REVIEW-gx053-5 MF1: a home root cannot read (root_squash NFS) is read by
+// the account's own worker; its port is held and nobody else is given it.
+func TestManagedGuardianOpenCodeRootUnreadableHome(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
+	writeOpenCodePortFile(t, homes[1001], 25002) // readable by the account only (root_squash)
+	setEligible(nil, 1001, 1002)
+	for pass := 0; pass < 2; pass++ {
+		log := runOpenCodePortPass(t)
+		got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log)
+		if got[1001] != 25002 || got[1002] == 25002 || (*record)[1001] != 25002 {
+			t.Fatalf("pass %d: ports %v record %v\n%s", pass, got, *record, log)
+		}
+	}
+}
+
+// A file the account cannot read either: its port is unknown, its recorded
+// port stays held, nobody gets a new port this pass (REVIEW-gx053-6: the
+// account may use any port), and the warning names the account.
+func TestManagedGuardianOpenCodeFileUnreadableEvenAsTheUser(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
+	runOpenCodePortPass(t)
+	held := (*record)[1001]
+	openCodeUserCannotRead[1001] = true
+	setEligible(nil, 1001, 9001) // 9001 starts on 1001's port
+	log := runOpenCodePortPass(t)
+	if got := openCodePortIn(t, homes[9001]); got != 0 {
+		t.Fatalf("9001 got %d while 1001's port (recorded %d) is unknown\n%s", got, held, log)
+	}
+	if (*record)[1001] != held {
+		t.Fatalf("the unreadable account lost its port: %v", *record)
+	}
+	if !strings.Contains(log, "ent1001's OpenCode service port is unknown this pass") {
+		t.Fatalf("no warning names the account:\n%s", log)
+	}
+}
+
+// When the read phase could not run (the plan did not know alice's port),
+// alice's own write worker sees her file name a port another account holds
+// and moves her: still no share, and the move is logged as done.
+func TestManagedGuardianOpenCodeWriteWorkerMovesAPortTheReadMissed(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
+	writeOpenCodePortFile(t, homes[1001], 25002)
+	previousRead := enterpriseHookReadOpenCodePortsAsUsers
+	t.Cleanup(func() { enterpriseHookReadOpenCodePortsAsUsers = previousRead })
+	enterpriseHookReadOpenCodePortsAsUsers = func(context.Context, io.Writer, []enterprisehooks.UnixEligibleAccount) (map[int]int, []enterprisehooks.UnixOpenCodeServicePortUnknown) {
+		return map[int]int{}, nil // the file changed after the read (it named no port then)
+	}
+	setEligible(nil, 1001, 1002)
+	log := runOpenCodePortPass(t)
+	got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log)
+	if got[1002] != 25002 || got[1001] == 25002 || (*record)[1001] != got[1001] {
+		t.Fatalf("ports %v record %v\n%s", got, *record, log)
+	}
+	if !strings.Contains(log, "moved ent1001's OpenCode background server from port 25002") {
+		t.Fatalf("the move is not logged:\n%s", log)
+	}
+}
+
+// REVIEW-gx053-6 MF1: alice's read worker fails. There is no root read: her
+// port is unknown this pass, so nobody gets a new port (bob, whose first
+// port is the 25002 alice's linked file names, waits), her recorded port
+// stays held, and the warning names her. Status names her too (the record).
+func TestManagedGuardianOpenCodeReadWorkerFails(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
+	alice := homes[1001]
+	_ = os.MkdirAll(filepath.Join(alice, "dotfiles", "opencode"), 0o700)
+	_ = os.MkdirAll(filepath.Join(alice, ".config"), 0o700)
+	if err := os.Symlink(filepath.Join(alice, "dotfiles", "opencode"), filepath.Join(alice, ".config", "opencode")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(alice, "dotfiles", "opencode", "service.json"), []byte(`{"port":25002}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	openCodeReadFails[1001] = true
+	setEligible(nil, 1001, 1002)
+	log := runOpenCodePortPass(t)
+	assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log)
+	if got := openCodePortIn(t, homes[1002]); got != 0 {
+		t.Fatalf("bob got port %d while alice's port is unknown\n%s", got, log)
+	}
+	if !strings.Contains(log, "ent1001's OpenCode service port is unknown this pass") {
+		t.Fatalf("the warning does not name alice:\n%s", log)
+	}
+	if len(openCodeRecordUnknown) != 1 || openCodeRecordUnknown[0].UID != 1001 {
+		t.Fatalf("the record does not name the unknown account for status: %+v (%v)", openCodeRecordUnknown, *record)
+	}
+	// The read works again: bob gets a port that is not alice's.
+	openCodeReadFails[1001] = false
+	log = runOpenCodePortPass(t)
+	got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log)
+	if got[1001] != 25002 || got[1002] == 0 || len(openCodeRecordUnknown) != 0 {
+		t.Fatalf("after recovery ports %v unknown %v\n%s", got, openCodeRecordUnknown, log)
+	}
+}
+
+// A read that hangs (a hard NFS mount) is cut at its deadline: the pass
+// finishes, the account's port is unknown and nobody gets a new port.
+func TestManagedGuardianOpenCodeReadWorkerTimesOut(t *testing.T) {
+	homes, _, setEligible := openCodePortGuardianWith(t, true, 1001)
+	writeOpenCodePortFile(t, homes[1001], 25002)
+	enterpriseHookOpenCodeReadTimeout = 200 * time.Millisecond
+	openCodeReadHangs[1001] = make(chan struct{})
+	setEligible(nil, 1001, 1002)
+	done := make(chan string, 1)
+	go func() { done <- runOpenCodePortPass(t) }()
+	var log string
+	select {
+	case log = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the pass hangs on a read that does not answer")
+	}
+	if got := openCodePortIn(t, homes[1002]); got != 0 {
+		t.Fatalf("bob got port %d while alice's read hung\n%s", got, log)
+	}
+	if !strings.Contains(log, "did not answer within") {
+		t.Fatalf("the timeout is not logged:\n%s", log)
+	}
+}
+
+// A hung account does not stop the next one: carol (healthy) is read and
+// recorded in the same pass; nobody shares a port.
+func TestManagedGuardianOpenCodeHungAccountThenHealthyOne(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
+	enterpriseHookOpenCodeReadTimeout = 200 * time.Millisecond
+	openCodeReadHangs[1001] = make(chan struct{})
+	setEligible(nil, 1001, 1003)
+	writeOpenCodePortFile(t, homes[1003], 25010)
+	done := make(chan string, 1)
+	go func() { done <- runOpenCodePortPass(t) }()
+	var log string
+	select {
+	case log = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a hung account blocked the pass")
+	}
+	assertNoSharedOpenCodePort(t, homes, []int{1001, 1003}, log)
+	if (*record)[1003] != 25010 {
+		t.Fatalf("the healthy account was not processed: record %v\n%s", *record, log)
 	}
 }

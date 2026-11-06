@@ -1657,6 +1657,46 @@ def _managed_install_scan_pending() -> tuple[str, str]:
     )
 
 
+_OPENCODE_PORT_RECORD_CODES = (
+    "opencode_port_record_unreadable",
+    "opencode_port_record_unchecked",
+    "opencode_port_account_unknown",
+)
+
+
+def _managed_opencode_port_record_problem() -> tuple[str, str]:
+    """The managed status warning about the guardian's OpenCode ports record
+    and its remedy, or ("", "") (gas-ux-r1 GAP-0053, REVIEW-gx053-5 MF2).
+
+    Doctor asks the managed lifecycle's own status, so a root and a non-root
+    run see what status says: the record cannot be read (no account gets a
+    new OpenCode port), or this account cannot check it.
+    """
+    from defenseclaw.upgrade_shim import managed_lifecycle_command
+
+    command = managed_lifecycle_command()
+    if not command:
+        return "", ""
+    try:
+        report = subprocess.run(
+            [*command.split(), "status", "--json"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        status = json.loads(report.stdout) if report.stdout and len(report.stdout) < 4 << 20 else {}
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return "", ""
+    for warning in (status.get("warnings") or []) if isinstance(status, dict) else []:
+        if isinstance(warning, dict) and warning.get("code") in _OPENCODE_PORT_RECORD_CODES:
+            message = str(warning.get("message") or "")
+            remedy = message.rsplit(": ", 1)[-1] if ": sudo " in message else f"sudo {command} status"
+            return f"{warning['code']}: {message}", remedy
+    return "", ""
+
+
 def _report_uninitialized_install(
     cfg, r: _DoctorResult, *, json_out: bool, write_cache: bool, leftover: str = ""
 ) -> int:
@@ -1707,6 +1747,17 @@ def _report_uninitialized_install(
                 check_id="doctor.managed.install-scan",
                 reason_code="scan-pending",
                 remediation=remedy,
+            )
+        record_problem, record_remedy = _managed_opencode_port_record_problem()
+        if record_problem:
+            _emit(
+                "warn",
+                "OpenCode ports record",
+                record_problem,
+                r=r,
+                check_id="doctor.managed.opencode-port-record",
+                reason_code="opencode-port-record",
+                remediation=record_remedy,
             )
     else:
         _emit(

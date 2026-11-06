@@ -553,3 +553,36 @@ def test_the_service_port_is_written_into_a_private_group_folder(monkeypatch, tm
         assert "uses port 25001" in line and _port(service) == 25001
     else:
         assert line.startswith("!") and not service.exists()
+
+
+# ---------------------------------------------------------------- managed doctor: the guardian's OpenCode ports record
+
+
+@posix_only
+@pytest.mark.parametrize(
+    ("code", "shown"),
+    [
+        ("opencode_port_record_unreadable", True),
+        ("opencode_port_record_unchecked", True),
+        ("opencode_port_account_unknown", True),
+        ("other_warning", False),
+        (None, False),
+    ],
+)
+def test_managed_doctor_shows_the_opencode_ports_record_warning(monkeypatch, code, shown):
+    """REVIEW-gx053-5 MF2: doctor on a managed host shows what status says, root or not."""
+    from defenseclaw.commands import cmd_doctor
+
+    warnings = [] if code is None else [{"code": code, "message": f"the record cannot be read; Remove it: sudo rm /x/{code}"}]
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"warnings": warnings}), stderr="")
+
+    monkeypatch.setattr(cmd_doctor.subprocess, "run", run)
+    problem, remedy = cmd_doctor._managed_opencode_port_record_problem()
+    assert bool(problem) is shown
+    assert calls and calls[0][-2:] == ["status", "--json"] and "enterprise" in calls[0]
+    if shown:
+        assert problem.startswith(code) and remedy == f"sudo rm /x/{code}"

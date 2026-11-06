@@ -7,7 +7,6 @@ package enterprisepolicy
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -43,38 +42,42 @@ func OpenCodeAccountPort(id uint64) int {
 	return OpenCodeAccountPortBase + int(id%OpenCodeAccountPortSpan)
 }
 
-// ReadOpenCodeServicePort is the port the service.json under home names, or 0
-// (no file, a link, not a regular file, no port, unreadable). The guardian
-// reads it as root before it assigns ports, so a new port never takes one
-// an account set itself; it never writes as root.
-func ReadOpenCodeServicePort(home string) int {
+// ReadOpenCodeServicePortAsUser is the port the service.json under home names
+// as the account sees it (its worker: links in the path resolve, a
+// root-squashed home reads): 0 with no file or no port; an error when the
+// file is there but cannot be read or is not a JSON object.
+func ReadOpenCodeServicePortAsUser(home string) (int, error) {
 	home = strings.TrimSpace(home)
 	if home == "" || !filepath.IsAbs(home) {
-		return 0
+		return 0, fmt.Errorf("opencode service port: home %q is not absolute", home)
 	}
-	home = filepath.Clean(home)
-	// Read through real folders only: a link the account put in place of
-	// ~/.config or ~/.config/opencode would point the root read elsewhere.
-	for _, dir := range []string{filepath.Join(home, ".config"), filepath.Join(home, ".config", "opencode")} {
-		if info, err := os.Lstat(dir); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !openCodeServiceDirIsReal(dir) {
-			return 0
-		}
+	path := OpenCodeServiceConfigPath(filepath.Clean(home))
+	data, exists, regular, err := readUserFile(path, openCodeServiceConfigLimit)
+	if err != nil {
+		return 0, fmt.Errorf("read %s: %w", path, err)
 	}
-	data, exists, regular, err := readUserFile(OpenCodeServiceConfigPath(home), openCodeServiceConfigLimit)
-	if err != nil || !exists || !regular {
-		return 0
+	if !exists {
+		return 0, nil
 	}
-	var doc struct {
-		Port json.RawMessage `json:"port"`
+	if !regular {
+		return 0, fmt.Errorf("%s is not a regular file", path)
 	}
-	if json.Unmarshal(data, &doc) != nil || len(doc.Port) == 0 {
-		return 0
+	var doc map[string]json.RawMessage
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return 0, nil
+	}
+	if err := json.Unmarshal(data, &doc); err != nil || doc == nil {
+		return 0, fmt.Errorf("%s is not a JSON object", path)
+	}
+	raw, ok := doc["port"]
+	if !ok {
+		return 0, nil
 	}
 	var port int
-	if json.Unmarshal(doc.Port, &port) != nil || port <= 0 || port > 65535 {
-		return 0
+	if err := json.Unmarshal(raw, &port); err != nil || port <= 0 || port > 65535 {
+		return 0, fmt.Errorf("%s names a port that is not a number", path)
 	}
-	return port
+	return port, nil
 }
 
 // OpenCodeServicePortResult is what EnsureOpenCodeServicePort found or did.
@@ -135,7 +138,7 @@ func EnsureOpenCodeServicePort(home string, port int) (OpenCodeServicePortResult
 		return result, err
 	}
 	missing := missingDirsBelow(home, path)
-	if err := writeOpenCodeServiceConfig(home, path, append(data, '\n')); err != nil {
+	if err := writePrivateUserFile(path, append(data, '\n')); err != nil {
 		return result, fmt.Errorf("opencode service port: write %s: %w", path, err)
 	}
 	result.Port, result.Changed, result.CreatedDirs = port, true, missing
@@ -324,7 +327,7 @@ func ReplaceOpenCodeServicePort(home string, port, stale int) (OpenCodeServicePo
 	if err != nil {
 		return result, err
 	}
-	if err := writeOpenCodeServiceConfig(home, path, append(data, '\n')); err != nil {
+	if err := writePrivateUserFile(path, append(data, '\n')); err != nil {
 		return result, fmt.Errorf("opencode service port: write %s: %w", path, err)
 	}
 	return OpenCodeServicePortResult{Port: port, Changed: true}, nil
