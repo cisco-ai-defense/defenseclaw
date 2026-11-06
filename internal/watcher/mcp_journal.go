@@ -36,11 +36,14 @@ func journalName(evt InstallEvent) string {
 }
 
 // IsAccountMCPJournalName reports whether key is the event path of the MCP
-// server name of an enrolled account (name@<connector>:<home>, then
-// @<connector>#<project> for a project server).
+// server name of an enrolled account. Versioned keys carry a full tuple;
+// older journal rows keep their original spelling.
 func IsAccountMCPJournalName(name, key string) bool {
 	if strings.TrimSpace(name) == "" {
 		return false
+	}
+	if identity, ok := decodeMCPEventPath(key); ok {
+		return identity.Name == name && identity.Connector != "" && identity.Home != ""
 	}
 	rest, ok := strings.CutPrefix(key, name+"@")
 	if !ok {
@@ -58,6 +61,9 @@ func IsAccountMCPJournalName(name, key string) bool {
 // working folder matches every project of the account: both refuse rather
 // than miss a block (fail closed).
 func MCPAccountJournalServes(key string, q MCPAdmissionQuery) bool {
+	if identity, ok := decodeMCPEventPath(key); ok {
+		return identity.Connector != "" && identity.Home != "" && mcpServerServesQuery(identity.server(), q)
+	}
 	connector := strings.ToLower(strings.TrimSpace(q.Connector))
 	if connector == "" {
 		return false
@@ -85,6 +91,49 @@ func MCPAccountJournalServes(key string, q MCPAdmissionQuery) bool {
 		return false
 	}
 	return true
+}
+
+// migrateLegacyMCPJournal moves an account action before a versioned
+// admission writes its verdict. The old snapshot must identify the same
+// scope; otherwise the action stays on its old key. A current action is
+// also left intact rather than merging two independent decisions.
+func (w *InstallWatcher) migrateLegacyMCPJournal(evt InstallEvent) error {
+	if w == nil || w.store == nil || evt.Type != InstallMCP || w.secureClientActive() {
+		return nil
+	}
+	identity, ok := decodeMCPEventPath(evt.Path)
+	if !ok || identity.Name != evt.Name || identity.Connector == "" || identity.Home == "" ||
+		!strings.EqualFold(identity.Connector, evt.Connector) {
+		return nil
+	}
+	server := identity.server()
+	oldPath := legacyMCPEventPath(server)
+	oldSnapshot, err := w.store.GetTargetSnapshot(string(InstallMCP), oldPath)
+	if err != nil || !mcpLegacySnapshotMatchesServer(oldPath, oldSnapshot, server) {
+		return nil
+	}
+	scope := w.journalScope(w.eventConnector(evt))
+	old, err := w.store.GetActionForConnector(string(InstallMCP), oldPath, scope)
+	if err != nil {
+		return err
+	}
+	if old == nil || old.SourcePath != oldPath || old.Actions.IsEmpty() {
+		return nil
+	}
+	current, err := w.store.GetActionForConnector(string(InstallMCP), evt.Path, scope)
+	if err != nil {
+		return err
+	}
+	if current != nil {
+		if current.SourcePath == evt.Path && current.Actions == old.Actions && current.Reason == old.Reason {
+			return w.store.RemoveActionForConnector(string(InstallMCP), oldPath, scope)
+		}
+		return nil
+	}
+	if err := w.store.SetActionForConnector(string(InstallMCP), evt.Path, scope, evt.Path, old.Actions, old.Reason); err != nil {
+		return err
+	}
+	return w.store.RemoveActionForConnector(string(InstallMCP), oldPath, scope)
 }
 
 // MigrateAccountMCPJournal moves the MCP journal rows that earlier versions
