@@ -162,3 +162,52 @@ func TestRefuseStandaloneContentRepairDecision(t *testing.T) {
 		t.Fatal("ACL-only drift (an extra reader) was refused; it must keep its repair")
 	}
 }
+
+// g582 review 2 S4: on standalone the guardian's layout self-heal does not
+// re-stamp a managed folder an untrusted principal can write; it reports the
+// folder with the way out. A folder with trusted-only drift, and every folder
+// on Secure Client, keep the repair.
+func TestStandaloneManagedInstallRepairRefusesAnUntrustedFolder(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		dacl       string
+		standalone bool
+		refused    bool
+	}{
+		{name: "standalone, Users write on etc", dacl: usersWriteDACL, standalone: true, refused: true},
+		{name: "twin: standalone, an extra Users read on etc", dacl: extraReaderDACL, standalone: true},
+		{name: "twin: Secure Client, Users write on etc", dacl: usersWriteDACL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state, files := standaloneInstallStateForTest(t, canonicalTestDACL)
+			etc := filepath.Dir(files["config"])
+			setTestFileDACL(t, etc, testDACL(t, tc.dacl), true)
+			pinTrustProfileForTest(t, tc.standalone)
+			results := RepairWindowsManagedInstall(ManagedInstallLayout{StateRoot: state}, CanonicalOptions{Quiet: true})
+			result, ok := installResultFor(results, etc)
+			if !ok {
+				t.Fatalf("no result for %s in %+v", etc, results)
+			}
+			assessed, err := AssessCanonical(etc, result.Kind, CanonicalOptions{Quiet: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.refused {
+				if result.Outcome != CanonicalBoundary || !strings.Contains(result.RepairError, "/remove:g") ||
+					!strings.Contains(result.RepairError, "Setup /ensure") {
+					t.Fatalf("result = %+v, want a boundary refusal naming the way out", result)
+				}
+				if assessed.Outcome != CanonicalBoundary {
+					t.Fatalf("the untrusted folder was re-stamped in place: %+v", assessed)
+				}
+				return
+			}
+			if result.Outcome != CanonicalRepaired {
+				t.Skipf("this process cannot re-stamp a managed folder here (result %+v)", result)
+			}
+			if assessed.Outcome == CanonicalBoundary {
+				t.Fatalf("the folder is still untrusted after the repair: %+v", assessed)
+			}
+		})
+	}
+}

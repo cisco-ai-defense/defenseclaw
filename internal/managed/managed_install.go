@@ -119,7 +119,11 @@ func (layout ManagedInstallLayout) targets() []managedDataTarget {
 // fresh file. A repair would restore the descriptor over bytes that account
 // may have changed (GAP-0561). ACL-only drift that gave no untrusted
 // principal write (an extra read entry, inheritance) is still repaired.
-// Secure Client keeps the repair.
+// A managed folder (the state root, etc, hook-guardian, install, the broker,
+// logs, the IPC folder) that an untrusted principal can write or owns is
+// refused the same way: an account that could change it may have put or
+// replaced objects in it, and a repair would erase the evidence before
+// Setup or /verify sees it (g582 review 2 S4). Secure Client keeps the repair.
 func RepairWindowsManagedInstall(layout ManagedInstallLayout, opts CanonicalOptions) []CanonicalResult {
 	targets := layout.targets()
 	if !windowsDescriptorPlatform() {
@@ -130,6 +134,12 @@ func RepairWindowsManagedInstall(layout ManagedInstallLayout, opts CanonicalOpti
 	for _, target := range targets {
 		if target.content && refuseContentDrift {
 			if refused, ok := refuseStandaloneContentRepair(target, opts); ok {
+				results = append(results, refused)
+				continue
+			}
+		}
+		if target.kind.Directory() && refuseContentDrift {
+			if refused, ok := refuseStandaloneFolderRepair(target, opts); ok {
 				results = append(results, refused)
 				continue
 			}
@@ -157,6 +167,31 @@ var standaloneContentRepairRefusal = "not repaired in place on a standalone inst
 	"that could write this file may have changed it: from an elevated PowerShell prompt run `" + WindowsSetupCommand("/ensure") +
 	"` so Setup writes a fresh file, then `" + WindowsAdminCommand("enterprise", "windows", "verify", "--profile", "standalone") +
 	"` (GAP-0561). " + WindowsSetupSource
+
+// standaloneFolderRepairRefusal is the recovery step logged with a refused
+// managed folder.
+const standaloneFolderRepairRefusal = "not repaired in place on a standalone install, because an account that " +
+	"could change this folder may have put or replaced files in it: from an elevated prompt remove that entry " +
+	"(icacls \"<folder>\" /remove:g *<SID>), or give the folder back to Administrators " +
+	"(icacls \"<folder>\" /setowner *S-1-5-32-544), check what is in it, then run Setup /ensure and Setup /verify (GAP-0561)"
+
+// refuseStandaloneFolderRepair reads a managed folder's descriptor without
+// writing. When an untrusted principal can write or owns it, it logs the
+// boundary finding with the way out and returns the result and true; the
+// caller must then not repair it, whatever AllowUntrustedOwnerTransfer says.
+// Trusted-only drift, a missing or a structurally bad folder returns false
+// and takes the normal path.
+func refuseStandaloneFolderRepair(target managedDataTarget, opts CanonicalOptions) (CanonicalResult, bool) {
+	quiet := opts
+	quiet.Quiet = true
+	result, err := AssessCanonical(target.path, target.kind, quiet)
+	if err != nil || result.Outcome != CanonicalBoundary {
+		return CanonicalResult{}, false
+	}
+	result.RepairError = standaloneFolderRepairRefusal
+	reportCanonicalResult(result, opts)
+	return result, true
+}
 
 // refuseStandaloneContentRepair reads target's descriptor without writing.
 // When an untrusted principal can write or owns the file, or the strict
