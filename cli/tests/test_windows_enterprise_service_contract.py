@@ -1968,6 +1968,18 @@ def test_bootstrap_rejects_raw_per_logon_dos_device_aliases() -> None:
     assert "raw_dos_device_cleanup_verified = $rawAliasCleanupVerified" in smoke
 
 
+def test_bootstrap_smoke_expects_the_installers_certification_action_message() -> None:
+    message = (
+        "CoreHardeningCertification is valid only with Install, Upgrade, "
+        "Repair, or Recover"
+    )
+    assert f"'-{message}'" in read(INSTALLER)
+    assert f"'-{message}'" in read(MODULE)
+    smoke = read(BOOTSTRAP_SMOKE)
+    assert f"-ExpectedError '{message}'" in smoke
+    assert "Upgrade, or Repair'" not in smoke
+
+
 def test_bootstrap_cleanup_drains_compiler_scratch_finalizers_first() -> None:
     """Windows PowerShell 5.1 Add-Type retires its CodeDom scratch folder only
     from a finalizer; a finalizer that ran in the middle of the exact cleanup

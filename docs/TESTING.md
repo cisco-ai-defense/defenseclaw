@@ -229,6 +229,13 @@ directories in `[managed]`, and shared files with managed branches in
 `Enterprise Required` in `ci.yml` (the install, upgrade, Setup-contract and
 lifecycle lanes) and the Windows Go, Windows Python and PowerShell suites in
 `windows-native.yml`. Those are where the PowerShell enterprise smokes run.
+To run `packaging/windows/tests/enterprise-bootstrap-smoke.ps1` by hand, use an
+elevated PowerShell 5.1 or 7 session (elevated SSH works) or a standard user: its
+worker needs a medium-integrity non-admin token, which it takes from the
+UAC-linked limited token when it can duplicate one and otherwise from a
+throwaway local standard user it creates and removes (it warns with the removal
+command if Windows still holds the user's profile), so the session must be
+allowed to create local users and scheduled tasks.
 Any Go change also runs the enterprise lanes. `make check-managed-paths`
 fails when a tracked file whose path looks managed is in no section. When
 you add a managed file, or add a managed branch to a shared file, add it to

@@ -3,6 +3,20 @@
 
 #Requires -Version 5.1
 
+# How to run: from an elevated PowerShell 5.1 or 7 session (including elevated
+# SSH or an interactive UAC-consent admin session), or as a standard user.
+# The raw DOS-device checks need an effective medium-integrity non-admin token.
+# A standard user already has one. An elevated caller starts its worker with the
+# UAC-linked limited token when the launcher can duplicate it (CI). When it
+# cannot (no UAC split, as in elevated SSH or with UAC off, or a UAC-consent
+# session whose linked token is identification-level only), it creates a
+# throwaway local standard user plus a one-shot scheduled task, runs the worker
+# there, and removes the user, the task and the staged files. It also removes
+# the user's profile, or warns with the exact command when the system still holds
+# the profile hive. The worker refuses to run under any other token. The script
+# writes the route it used to stderr and fails with a message naming how to run
+# it when neither is available.
+
 [CmdletBinding()]
 param(
     [string]$BasicUserResultPath = ''
@@ -52,6 +66,105 @@ trap {
     }
     [Console]::Error.WriteLine($detail)
     exit 1
+}
+
+function New-SmokeStandardUser {
+    $name = 'dcsmoke' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+    $bytes = New-Object byte[] 24
+    $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $generator.GetBytes($bytes) } finally { $generator.Dispose() }
+    $password = [Convert]::ToBase64String($bytes) + 'aA1!'
+    $computer = [ADSI]"WinNT://$env:COMPUTERNAME,computer"
+    $user = $computer.Create('user', $name)
+    $null = $user.SetPassword($password)
+    $null = $user.SetInfo()
+    $user.Description = 'DefenseClaw bootstrap smoke throwaway standard user'
+    $null = $user.SetInfo()
+    $created = [pscustomobject]@{ Name = $name; Password = $password; Sid = $null }
+    try {
+        $sid = (
+            [Security.Principal.NTAccount]"$env:COMPUTERNAME\$name"
+        ).Translate([Security.Principal.SecurityIdentifier])
+        $created.Sid = $sid.Value
+        # Users is the standard-user group. Performance Log Users carries the
+        # "log on as a batch job" right a password scheduled task needs and
+        # grants no administrative access.
+        foreach ($groupSid in 'S-1-5-32-545', 'S-1-5-32-559') {
+            $groupName = (
+                [Security.Principal.SecurityIdentifier]$groupSid
+            ).Translate([Security.Principal.NTAccount]).Value.Split('\')[-1]
+            $group = [ADSI]"WinNT://$env:COMPUTERNAME/$groupName,group"
+            $null = $group.Add("WinNT://$env:COMPUTERNAME/$name")
+        }
+    }
+    catch {
+        Remove-SmokeStandardUser -User $created
+        throw
+    }
+    return $created
+}
+
+function Remove-SmokeStandardUser {
+    param([Parameter(Mandatory = $true)]$User)
+    if (-not [string]::IsNullOrWhiteSpace([string]$User.Sid)) {
+        # Removing the Win32_UserProfile instance deletes the profile directory
+        # and registry hive the worker's logon created. The hive can stay loaded
+        # for a while after the last process of the user exits, so retry before
+        # giving up.
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            $userProfile = Get-CimInstance -ClassName Win32_UserProfile |
+                Where-Object { $_.SID -eq $User.Sid }
+            if ($null -eq $userProfile) { break }
+            try { $userProfile | Remove-CimInstance -ErrorAction Stop; break }
+            catch { Start-Sleep -Seconds 2 }
+        }
+        if ($null -ne $userProfile -and $attempt -ge 20) {
+            Write-Warning (
+                "throwaway user profile $($userProfile.LocalPath) (SID $($User.Sid)) " +
+                'is still loaded by the system and could not be removed; remove it ' +
+                "later with: Get-CimInstance Win32_UserProfile -Filter ""SID='$($User.Sid)'"" " +
+                '| Remove-CimInstance'
+            )
+        }
+    }
+    $computer = [ADSI]"WinNT://$env:COMPUTERNAME,computer"
+    try { $null = $computer.Delete('user', $User.Name) } catch { }
+}
+
+function Start-StandardUserTask {
+    param(
+        [Parameter(Mandatory = $true)][string]$TaskName,
+        [Parameter(Mandatory = $true)][string]$Engine,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)]$User
+    )
+    $argumentText = (
+        $Arguments | ForEach-Object {
+            [DefenseClaw.SetupStandardUserLauncher]::QuoteWindowsArgument([string]$_)
+        }
+    ) -join ' '
+    $action = New-ScheduledTaskAction -Execute $Engine `
+        -Argument $argumentText -WorkingDirectory $WorkingDirectory
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+    $principal = New-ScheduledTaskPrincipal `
+        -UserId "$env:COMPUTERNAME\$($User.Name)" -LogonType Password
+    $definition = New-ScheduledTask -Action $action -Principal $principal `
+        -Settings $settings
+    [void](Register-ScheduledTask -TaskName $TaskName -InputObject $definition `
+            -User "$env:COMPUTERNAME\$($User.Name)" -Password $User.Password -Force)
+    Start-ScheduledTask -TaskName $TaskName
+}
+
+function Remove-StandardUserTask {
+    param([Parameter(Mandatory = $true)][string]$TaskName)
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($null -eq $task) { return }
+    if ($task.State -eq 'Running') {
+        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    }
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
 }
 
 function Invoke-BasicUserBootstrapSmoke {
@@ -108,43 +221,149 @@ function Invoke-BasicUserBootstrapSmoke {
             '-NoLogo', '-NoProfile', '-NonInteractive',
             '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedCommand
         )
-        $process = [DefenseClaw.SetupStandardUserLauncher]::StartRestrictedWithCapture(
-            $engine,
-            $arguments,
-            [IO.Path]::GetFullPath($stagedTestsRoot),
-            [string[]]$environment,
-            $false
-        )
-        $deadline = [DateTime]::UtcNow.AddMinutes(5)
-        while (-not [IO.File]::Exists($resultPath) -and
-            -not $process.HasExited -and
-            [DateTime]::UtcNow -lt $deadline) {
-            Start-Sleep -Milliseconds 100
-        }
-        $timedOut = -not [IO.File]::Exists($resultPath) -and
-            -not $process.HasExited
-        if ($timedOut) {
-            $process.Kill($true)
-        }
-        if (-not $process.WaitForExit(30000)) {
-            throw 'Basic User bootstrap smoke child did not exit after completion'
-        }
-        $outputHealthy = $process.CompleteOutput(5000)
-        $launchOutput = @(
-            [string]$process.StdOut,
-            [string]$process.StdErr,
-            [string]$process.OutputCaptureError
-        ) -join [Environment]::NewLine
-        if (-not [IO.File]::Exists($resultPath)) {
-            throw (
-                $(if ($timedOut) {
-                    'Basic User bootstrap smoke timed out; '
-                } else {
-                    "Basic User bootstrap smoke exited $($process.ExitCode); "
-                }) +
-                "launch output=$($launchOutput.Trim())"
+        $workerDirectory = [IO.Path]::GetFullPath($stagedTestsRoot)
+        $launchContext = 'uac-linked-limited-token'
+        $standardUserRun = $false
+        $strictFailure = $null
+        try {
+            $process = [DefenseClaw.SetupStandardUserLauncher]::StartRestrictedWithCapture(
+                $engine, $arguments, $workerDirectory, [string[]]$environment, $false
             )
         }
+        catch {
+            $strictFailure = $_.Exception.Message
+            if ($null -ne $_.Exception.InnerException) {
+                $strictFailure += ' ' + $_.Exception.InnerException.Message
+            }
+            # Two elevated shapes cannot hand a primary limited token to the
+            # worker: no UAC split at all (elevated SSH as the built-in
+            # Administrator, UAC off), and a UAC-consent session whose linked
+            # token is identification-level only (DuplicateTokenEx 1346 without
+            # SeTcbPrivilege). A restricted LUA token is no substitute: it cannot
+            # initialise from SSH or a batch session, and a SYSTEM-derived one
+            # makes the untrusted fixtures look trusted. A real standard user is
+            # what the launcher asks for, so run the worker as a throwaway one.
+            if ($strictFailure -match 'restricted LUA default-token fallback is disabled' -or
+                $strictFailure -match 'DuplicateTokenEx failed for linked limited Setup') {
+                $standardUserRun = $true
+                $launchContext = 'throwaway-local-standard-user'
+            }
+            else {
+                throw
+            }
+        }
+        $deadline = [DateTime]::UtcNow.AddMinutes(5)
+        if ($standardUserRun) {
+            $sharedRelay = $null
+            $smokeUser = $null
+            $taskName = $null
+            try {
+                $smokeUser = New-SmokeStandardUser
+                $sharedRelay = Join-Path (
+                    [Environment]::GetFolderPath(
+                        [Environment+SpecialFolder]::CommonApplicationData
+                    )
+                ) "DefenseClaw-BootstrapRelay-$([Guid]::NewGuid().ToString('N'))"
+                [void][IO.Directory]::CreateDirectory($sharedRelay)
+                Copy-Item -Path (Join-Path $relayRoot '*') -Destination $sharedRelay -Recurse
+                $acl = Get-Acl -LiteralPath $sharedRelay
+                $acl.AddAccessRule(
+                    [Security.AccessControl.FileSystemAccessRule]::new(
+                        [Security.Principal.SecurityIdentifier]$smokeUser.Sid,
+                        'Modify',
+                        'ContainerInherit,ObjectInherit',
+                        'None',
+                        'Allow'
+                    )
+                )
+                Set-Acl -LiteralPath $sharedRelay -AclObject $acl
+                $sharedTests = Join-Path $sharedRelay 'packaging\windows\tests'
+                $sharedScript = Join-Path $sharedTests 'enterprise-bootstrap-smoke.ps1'
+                $sharedResult = Join-Path $sharedRelay 'result.json'
+                $sharedCommand = (
+                    "& '" + $sharedScript.Replace("'", "''") +
+                    "' -BasicUserResultPath '" + $sharedResult.Replace("'", "''") + "'"
+                )
+                $taskArguments = [string[]]@(
+                    '-NoLogo', '-NoProfile', '-NonInteractive',
+                    '-ExecutionPolicy', 'Bypass', '-EncodedCommand',
+                    [Convert]::ToBase64String(
+                        [Text.Encoding]::Unicode.GetBytes($sharedCommand)
+                    )
+                )
+                $taskName = "DefenseClawBootstrapSmoke-$([Guid]::NewGuid().ToString('N'))"
+                Start-StandardUserTask -TaskName $taskName -Engine $engine `
+                    -Arguments $taskArguments -WorkingDirectory $sharedTests `
+                    -User $smokeUser
+                while (-not [IO.File]::Exists($sharedResult) -and
+                    [DateTime]::UtcNow -lt $deadline) {
+                    Start-Sleep -Milliseconds 250
+                }
+                $taskDeadline = [DateTime]::UtcNow.AddSeconds(30)
+                while ((Get-ScheduledTask -TaskName $taskName).State -eq 'Running' -and
+                    [DateTime]::UtcNow -lt $taskDeadline) {
+                    Start-Sleep -Milliseconds 250
+                }
+                if (-not [IO.File]::Exists($sharedResult)) {
+                    $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName
+                    throw (
+                        'Basic User bootstrap smoke could not get a medium-integrity ' +
+                        'non-admin token (' + $strictFailure + ') and the throwaway ' +
+                        'standard-user scheduled task produced no result (last task ' +
+                        "result $($taskInfo.LastTaskResult)). Run the smoke as a " +
+                        'standard (non-admin) user, or from an elevated session that ' +
+                        'may create a local user and a scheduled task, or from a ' +
+                        'UAC-linked elevated session where the launcher can duplicate ' +
+                        'the linked limited token (CI).'
+                    )
+                }
+                $resultText = [IO.File]::ReadAllText($sharedResult)
+                [IO.File]::WriteAllText($resultPath, $resultText)
+            }
+            finally {
+                if ($null -ne $taskName) { Remove-StandardUserTask -TaskName $taskName }
+                if ($null -ne $smokeUser) { Remove-SmokeStandardUser -User $smokeUser }
+                if ($null -ne $sharedRelay -and [IO.Directory]::Exists($sharedRelay)) {
+                    [IO.Directory]::Delete($sharedRelay, $true)
+                }
+            }
+            $outputHealthy = $true
+            $launchOutput = ''
+        }
+        else {
+            while (-not [IO.File]::Exists($resultPath) -and
+                -not $process.HasExited -and
+                [DateTime]::UtcNow -lt $deadline) {
+                Start-Sleep -Milliseconds 100
+            }
+            $timedOut = -not [IO.File]::Exists($resultPath) -and
+                -not $process.HasExited
+            if ($timedOut) {
+                $process.Kill($true)
+            }
+            if (-not $process.WaitForExit(30000)) {
+                throw 'Basic User bootstrap smoke child did not exit after completion'
+            }
+            $outputHealthy = $process.CompleteOutput(5000)
+            $launchOutput = @(
+                [string]$process.StdOut,
+                [string]$process.StdErr,
+                [string]$process.OutputCaptureError
+            ) -join [Environment]::NewLine
+            if (-not [IO.File]::Exists($resultPath)) {
+                throw (
+                    $(if ($timedOut) {
+                        'Basic User bootstrap smoke timed out; '
+                    } else {
+                        "Basic User bootstrap smoke exited $($process.ExitCode); "
+                    }) +
+                    "launch output=$($launchOutput.Trim())"
+                )
+            }
+        }
+        [Console]::Error.WriteLine(
+            "enterprise-bootstrap-smoke: Basic User worker token = $launchContext"
+        )
         $reportJson = [IO.File]::ReadAllText($resultPath)
         $report = $reportJson | ConvertFrom-Json
         if (-not [bool]$report.ok) {
@@ -763,7 +982,7 @@ try {
         )
     Invoke-RejectedBootstrap `
         -InstallerPath (Join-Path $untrustedRoot 'install-enterprise.ps1') `
-        -ExpectedError 'CoreHardeningCertification is valid only with Install, Upgrade, or Repair' `
+        -ExpectedError 'CoreHardeningCertification is valid only with Install, Upgrade, Repair, or Recover' `
         -InstallerArguments @(
             '-Action', 'Status',
             '-CoreHardeningCertification',
