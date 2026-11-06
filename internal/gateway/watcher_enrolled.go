@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -68,6 +69,9 @@ type enrolledWatchSet struct {
 	// consumers lists every enrolled connector that loads each root, even
 	// when several connectors share one watched folder.
 	consumers []watcher.RootConsumer
+	// connectors names each enrolled connector, once, even when it has no
+	// folder to watch: it still depends on any explicit gateway.watcher dir.
+	connectors []string
 	// mcp is every enrolled user's MCP servers, tagged with the connector
 	// and the user home.
 	mcp []config.MCPServerEntry
@@ -279,6 +283,9 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 		conn, ok := reg.Get(target.connector)
 		if !ok {
 			continue
+		}
+		if !slices.Contains(set.connectors, target.connector) {
+			set.connectors = append(set.connectors, target.connector)
 		}
 		skillDirs, pluginDirs := connector.ComponentDirsForHome(conn, serviceHome, target.home)
 		add := func(dirs []string, seen map[string]bool, out *[]string, kind string) {
