@@ -107,7 +107,8 @@ func TestGAP0362CdVariableCopyDestination(t *testing.T) {
 					wantBlock := row.block || managed && strings.Contains(row.name, "/")
 					want := `{"action":"allow"`
 					if wantBlock {
-						want = `{"action":"block"`
+						// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+						want = `{"action":"alert"`
 					}
 					if !strings.HasPrefix(got, want) || wantBlock && !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
 						t.Errorf("%q = %.300s, want %s", row.command, got, want)
@@ -178,7 +179,8 @@ func TestGAP0415NestedCopyDestinationAfterPlainCd(t *testing.T) {
 					}
 					want := `{"action":"allow"`
 					if row.block {
-						want = `{"action":"block"`
+						// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+						want = `{"action":"alert"`
 					}
 					if !strings.HasPrefix(got, want) || row.block && !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
 						t.Errorf("%q = %.300s, want %s", row.command, got, want)
@@ -221,8 +223,9 @@ func TestGAP0416AfterDirectoryBoundaryWithNestedCopy(t *testing.T) {
 							t.Fatal(err)
 						}
 					}
-					if !strings.HasPrefix(got, `{"action":"block"`) || !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
-						t.Errorf("%q = %.300s, want keys block", row.command, got)
+					// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+					if !strings.HasPrefix(got, `{"action":"alert"`) || !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+						t.Errorf("%q = %.300s, want keys alert", row.command, got)
 					}
 				})
 			}
@@ -272,7 +275,8 @@ func TestGAP0362CdVariableCopyDestinationInAnotherDirectory(t *testing.T) {
 					}
 					want := `{"action":"allow"`
 					if row.block {
-						want = `{"action":"block"`
+						// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+						want = `{"action":"alert"`
 					}
 					if !strings.HasPrefix(got, want) || row.block && !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
 						t.Errorf("%q = %.300s, want %s", row.command, got, want)

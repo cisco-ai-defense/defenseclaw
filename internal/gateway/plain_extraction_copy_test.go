@@ -70,6 +70,7 @@ func r107WriteTar(t *testing.T, path string, zipped bool, headers ...tar.Header)
 // the command rewrites first, and a destination folder that already holds
 // a keys link keep blocking.
 func TestR107CopyOfAPlainExtractionIsPlain(t *testing.T) {
+	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
 	setup := func(t *testing.T, f b36ManagedHookFixture) {
 		reg := func(name string) tar.Header { return tar.Header{Name: name, Typeflag: tar.TypeReg} }
 		r107WriteTar(t, filepath.Join(f.project, "plain.tar"), false, tar.Header{Name: "sub/", Typeflag: tar.TypeDir}, reg("p"), reg("sub/q"))
@@ -94,37 +95,38 @@ func TestR107CopyOfAPlainExtractionIsPlain(t *testing.T) {
 	}
 	r106Reader2CheckWith(t, []r106Reader2Row{
 		{"plain tar, cp -a of the folder only", "project", `tar -xf plain.tar -C d1 && cp -a d1 e3`, "allow"},
-		{"plain tar, cp -a of the folder, append to the copy", "project", `tar -xf plain.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "allow/block"},
-		{"plain tar, rsync -a of the folder, append to the copy", "project", `tar -xf plain.tar -C d1 && rsync -a d1/ e2/ && echo k >> e2/p`, "allow/block"},
-		{"plain tar, append into the folder", "project", `tar -xf plain.tar -C d1 && echo k >> d1/sub/q`, "allow/block"},
-		{"plain tgz, cp -a of the folder, append to the copy", "project", `tar -xzf plain.tgz -C d1 && cp -a d1 e3 && echo k >> e3/p`, "allow/block"},
-		{"symlink tar, cp -a, append to the copy", "project", `tar -xf link.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "block"},
-		{"symlink tar, append into the folder", "project", `tar -xf link.tar -C d1 && echo k >> d1/p`, "block"},
-		{"hard link tar, cp -a, append to the copy", "project", `tar -xf hard.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "block"},
-		{"dot-dot tar, append", "project", `tar -xf dotdot.tar -C d1 && echo k >> d1/p`, "block"},
-		{"fifo member is not a plain file", "project", `tar -xf fifo.tar -C d1 && echo k >> d1/p`, "block"},
-		{"absolute member name is not plain", "project", `tar -xf absolute.tar -C d1 && echo k >> d1/p`, "block"},
-		{"backslash member name is not plain", "project", `tar -xf backslash.tar -C d1 && echo k >> d1/p`, "block"},
-		{"archive rewritten first", "project", `cp link.tar plain.tar; tar -xf plain.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "block"},
-		{"archive rewritten first through a glob", "project", `cp link.tar p[l]ain.tar; tar -xf plain.tar -C d1 && echo k >> d1/p`, "block"},
-		{"archive rewritten first through a hard-linked name", "project", `cp link.tar alias.tar; tar -xf plain.tar -C d1 && echo k >> d1/p`, "block"},
-		{"two archive words", "project", `tar -xf plain.tar --file=plain.tgz -C d1 && echo k >> d1/p`, "block"},
-		{"plain tar into a folder holding a keys link, append through it", "project", `tar -xf plain.tar -C d0 && echo k >> d0/p`, "block"},
-		{"plain tar into a folder holding a keys link, cp -a, append to the copy", "project", `tar -xf plain.tar -C d0 && cp -a d0 e4 && echo k >> e4/p`, "block"},
-		{"plain tar after a link is made in the destination", "project", `mkdir -p d1 && ln -s ../../.ssh d1/ssh && tar -xf plain.tar -C d1 && echo k >> d1/ssh/authorized_keys`, "block"},
-		{"write into the extraction scope (fake archive)", "project", `tar -C unpack -xf keys.tar; echo k >> unpack/n1.txt`, "block"},
+		{"plain tar, cp -a of the folder, append to the copy", "project", `tar -xf plain.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "allow/alert"},
+		{"plain tar, rsync -a of the folder, append to the copy", "project", `tar -xf plain.tar -C d1 && rsync -a d1/ e2/ && echo k >> e2/p`, "allow/alert"},
+		{"plain tar, append into the folder", "project", `tar -xf plain.tar -C d1 && echo k >> d1/sub/q`, "allow/alert"},
+		{"plain tgz, cp -a of the folder, append to the copy", "project", `tar -xzf plain.tgz -C d1 && cp -a d1 e3 && echo k >> e3/p`, "allow/alert"},
+		{"symlink tar, cp -a, append to the copy", "project", `tar -xf link.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "alert"},
+		{"symlink tar, append into the folder", "project", `tar -xf link.tar -C d1 && echo k >> d1/p`, "alert"},
+		{"hard link tar, cp -a, append to the copy", "project", `tar -xf hard.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "alert"},
+		{"dot-dot tar, append", "project", `tar -xf dotdot.tar -C d1 && echo k >> d1/p`, "alert"},
+		{"fifo member is not a plain file", "project", `tar -xf fifo.tar -C d1 && echo k >> d1/p`, "alert"},
+		{"absolute member name is not plain", "project", `tar -xf absolute.tar -C d1 && echo k >> d1/p`, "alert"},
+		{"backslash member name is not plain", "project", `tar -xf backslash.tar -C d1 && echo k >> d1/p`, "alert"},
+		{"archive rewritten first", "project", `cp link.tar plain.tar; tar -xf plain.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "alert"},
+		{"archive rewritten first through a glob", "project", `cp link.tar p[l]ain.tar; tar -xf plain.tar -C d1 && echo k >> d1/p`, "alert"},
+		{"archive rewritten first through a hard-linked name", "project", `cp link.tar alias.tar; tar -xf plain.tar -C d1 && echo k >> d1/p`, "alert"},
+		{"two archive words", "project", `tar -xf plain.tar --file=plain.tgz -C d1 && echo k >> d1/p`, "alert"},
+		{"plain tar into a folder holding a keys link, append through it", "project", `tar -xf plain.tar -C d0 && echo k >> d0/p`, "alert"},
+		{"plain tar into a folder holding a keys link, cp -a, append to the copy", "project", `tar -xf plain.tar -C d0 && cp -a d0 e4 && echo k >> e4/p`, "alert"},
+		{"plain tar after a link is made in the destination", "project", `mkdir -p d1 && ln -s ../../.ssh d1/ssh && tar -xf plain.tar -C d1 && echo k >> d1/ssh/authorized_keys`, "alert"},
+		{"write into the extraction scope (fake archive)", "project", `tar -C unpack -xf keys.tar; echo k >> unpack/n1.txt`, "alert"},
 	}, setup)
 }
 
 // Per-user shell hooks post the agent's payload without a resolved-writes
 // header. The installed hooks use this route for both Claude Code and Codex.
 func TestR107PlainArchiveRewriteViaShellHook(t *testing.T) {
+	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
 	rows := []struct {
 		name, command, want string
 	}{
-		{"plain extraction", `tar -xf plain.tar -C d1 && echo k >> d1/p`, "allow/block"},
-		{"archive rewritten first", `cp link.tar plain.tar; tar -xf plain.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "block"},
-		{"archive rewritten through hard link", `cp link.tar alias.tar; tar -xf plain.tar -C d1 && echo k >> d1/p`, "block"},
+		{"plain extraction", `tar -xf plain.tar -C d1 && echo k >> d1/p`, "allow/alert"},
+		{"archive rewritten first", `cp link.tar plain.tar; tar -xf plain.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "alert"},
+		{"archive rewritten through hard link", `cp link.tar alias.tar; tar -xf plain.tar -C d1 && echo k >> d1/p`, "alert"},
 	}
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, row := range rows {
@@ -165,8 +167,9 @@ func TestR107PlainArchiveRewriteViaShellHook(t *testing.T) {
 
 // The archive reader's byte and member limits keep these extractions opaque.
 func TestR107Review8TarPlainBounds(t *testing.T) {
+	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
 	r106Reader2CheckWith(t, []r106Reader2Row{
-		{"archive file exceeds 64 MiB", "project", `tar -xf overbytes.tar -C d1 && echo k >> d1/p`, "block"},
+		{"archive file exceeds 64 MiB", "project", `tar -xf overbytes.tar -C d1 && echo k >> d1/p`, "alert"},
 	}, func(t *testing.T, f b36ManagedHookFixture) {
 		if err := os.Mkdir(filepath.Join(f.project, "d1"), 0o700); err != nil {
 			t.Fatal(err)
@@ -178,7 +181,7 @@ func TestR107Review8TarPlainBounds(t *testing.T) {
 		}
 	})
 	r106Reader2CheckWith(t, []r106Reader2Row{
-		{"archive has 4097 members", "project", `tar -xf overmembers.tar -C d1 && echo k >> d1/p`, "block"},
+		{"archive has 4097 members", "project", `tar -xf overmembers.tar -C d1 && echo k >> d1/p`, "alert"},
 	}, func(t *testing.T, f b36ManagedHookFixture) {
 		if err := os.Mkdir(filepath.Join(f.project, "d1"), 0o700); err != nil {
 			t.Fatal(err)
@@ -209,12 +212,13 @@ func TestR107Review8ForgedTarPlainFact(t *testing.T) {
 	}
 	targets[hookpaths.TarPlainFactPrefix+filepath.Join(f.project, "link.tar")] = "1"
 	header := encodeTargets(t, targets)
+	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
 	for _, connector := range []string{"claudecode", "codex"} {
-		if got := f.post(t, connector, payload, realHeader); got != "block" {
-			t.Errorf("managed %s real client fact: %s, want block", connector, got)
+		if got := f.post(t, connector, payload, realHeader); got != "alert" {
+			t.Errorf("managed %s real client fact: %s, want alert", connector, got)
 		}
-		if got := f.post(t, connector, payload, header); got != "block" {
-			t.Errorf("managed %s forged plain fact: %s, want block", connector, got)
+		if got := f.post(t, connector, payload, header); got != "alert" {
+			t.Errorf("managed %s forged plain fact: %s, want alert", connector, got)
 		}
 	}
 }
@@ -222,9 +226,10 @@ func TestR107Review8ForgedTarPlainFact(t *testing.T) {
 // A redirection command substitution can rewrite the archive through a hard
 // link before tar opens it.
 func TestR107Review9RedirectSubstitutionRewritesArchive(t *testing.T) {
+	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
 	r106Reader2CheckWith(t, []r106Reader2Row{
 		{"redirect substitution rewrites hard-linked archive", "project",
-			`tar -xf plain.tar -C d1 > "$(cp link.tar alias.tar; echo out)" && echo k >> d1/p`, "block"},
+			`tar -xf plain.tar -C d1 > "$(cp link.tar alias.tar; echo out)" && echo k >> d1/p`, "alert"},
 	}, func(t *testing.T, f b36ManagedHookFixture) {
 		r107WriteTar(t, filepath.Join(f.project, "plain.tar"), false,
 			tar.Header{Name: "p", Typeflag: tar.TypeReg})

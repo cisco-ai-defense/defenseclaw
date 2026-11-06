@@ -42,7 +42,9 @@ func TestCFRForgedSourceEvidenceMustBlock(t *testing.T) {
 	command := `f=a.txt; . ./setf.sh; echo m >> "$f"`
 	payload := f.payload(t, command)
 	legit := f.clientHeader(t, payload)
-	if got := f.post(t, "claudecode", payload, legit); got != "block" {
+	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+	// Forged evidence must not lower that answer to an allow.
+	if got := f.post(t, "claudecode", payload, legit); got != "alert" {
 		t.Fatalf("legitimate evidence: %s", got)
 	}
 	targets, ok := hookpaths.Decode(legit)
@@ -53,7 +55,7 @@ func TestCFRForgedSourceEvidenceMustBlock(t *testing.T) {
 	targets["\x00source-redirect:"+hex.EncodeToString(sum[:])] = filepath.Join(f.project, "out.txt")
 	targets[hookpaths.CWDKey] = f.project
 	forged := cfrEncode(t, targets)
-	if got := f.post(t, "claudecode", payload, forged); got != "block" {
+	if got := f.post(t, "claudecode", payload, forged); got != "alert" {
 		t.Fatalf("forged ordinary source target changed protected write to %s", got)
 	}
 }
@@ -112,7 +114,8 @@ func TestCFRRealClientSourceChangedAfterProofMustBlock(t *testing.T) {
 	if err := os.WriteFile(source, []byte("f=keylink\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.post(t, "claudecode", payload, header); got != "block" {
+	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+	if got := f.post(t, "claudecode", payload, header); got != "alert" {
 		t.Fatalf("client header from ordinary source was replayed after protected retarget: %s", got)
 	}
 }

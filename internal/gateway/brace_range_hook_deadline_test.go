@@ -28,20 +28,26 @@ func TestBenignBraceRangeAnswersInsideHookDeadline(t *testing.T) {
 		"printf '%s\\n' {a..z}{1..2000} | wc -l",
 		"echo {a,b}{1..30000} > out.txt",
 	}
-	blocked := []struct{ command, rule string }{
-		{"echo {1..60000} > ../.ssh/authorized_keys", ""},
-		{"cp README.md {ordinary/a,keylink}", ""},
-		{"tee ../.ssh/authorized_keys < ../.ssh/id.pub", ""},
-		// Brace tee operands onto the keys file block managed like
+	// alert marks a protected write by a class rule: an alert in the default
+	// profile (strict blocks it). The other rows block.
+	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+	blocked := []struct {
+		command, rule string
+		alert         bool
+	}{
+		{"echo {1..60000} > ../.ssh/authorized_keys", "persistence.ssh_authorized_keys_command", true},
+		{"cp README.md {ordinary/a,keylink}", "persistence.ssh_authorized_keys_command", true},
+		{"tee ../.ssh/authorized_keys < ../.ssh/id.pub", "persistence.ssh_authorized_keys_command", true},
+		// Brace tee operands onto the keys file get the managed verdict of
 		// per-user since rel-1-0-6 GAP-0228.
-		{"tee ../.ssh/authorized_key{r..t} < ../.ssh/id.pub", ""},
-		{"tee ../.ssh/authorized_key{s,x} < ../.ssh/id.pub", ""},
+		{"tee ../.ssh/authorized_key{r..t} < ../.ssh/id.pub", "persistence.ssh_authorized_keys_command", true},
+		{"tee ../.ssh/authorized_key{s,x} < ../.ssh/id.pub", "persistence.ssh_authorized_keys_command", true},
 		// A range that alone takes the call past the copy-word cap is
 		// refused before it is expanded (GAP-0568); the keys operand of the
 		// same call, before or after it, still blocks.
-		{"tee ../.ssh/authorized_key{s,x} out{1..65536} < ../.ssh/id.pub", ""},
-		{"tee out{1..65536} ../.ssh/authorized_key{s,x} < ../.ssh/id.pub", ""},
-		{"echo {1..65537} | wc -c", "ACTION-COMPOUND-LIMIT"},
+		{"tee ../.ssh/authorized_key{s,x} out{1..65536} < ../.ssh/id.pub", "", false},
+		{"tee out{1..65536} ../.ssh/authorized_key{s,x} < ../.ssh/id.pub", "", false},
+		{"echo {1..65537} | wc -c", "ACTION-COMPOUND-LIMIT", false},
 	}
 	run := func(command string) (calls []*hookCall, slowest time.Duration) {
 		payload := f.payload(t, command)
@@ -81,6 +87,12 @@ func TestBenignBraceRangeAnswersInsideHookDeadline(t *testing.T) {
 	for _, tc := range blocked {
 		calls, slowest := run(tc.command)
 		for _, call := range calls {
+			if tc.alert {
+				if !strings.HasPrefix(call.body, `{"action":"alert"`) || !strings.Contains(call.body, tc.rule) {
+					t.Errorf("%s: verdict %s, want alert %s; body %.200s", call.name, call.verdict, tc.rule, call.body)
+				}
+				continue
+			}
 			if call.verdict != "block" || !strings.Contains(call.body, tc.rule) {
 				t.Errorf("%s: verdict %s, want block %s; body %.200s", call.name, call.verdict, tc.rule, call.body)
 			}

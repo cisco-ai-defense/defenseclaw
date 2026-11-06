@@ -43,7 +43,11 @@ func selfProtVerdict(t *testing.T, r selfProtRow, managed bool, connector string
 	payload := f.payload(t, r.cmd)
 	header := f.clientHeader(t, payload)
 	if managed {
-		return f.post(t, connector, payload, header)
+		got := f.post(t, connector, payload, header)
+		if strings.HasPrefix(got, `status 200 body {"action":"alert"`) {
+			return "alert"
+		}
+		return got
 	}
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
@@ -60,6 +64,8 @@ func selfProtVerdict(t *testing.T, r selfProtRow, managed bool, connector string
 		return "block"
 	case strings.HasPrefix(body, `{"action":"allow"`):
 		return "allow"
+	case strings.HasPrefix(body, `{"action":"alert"`):
+		return "alert"
 	default:
 		return "status " + recorder.Result().Status
 	}
@@ -85,9 +91,10 @@ func TestSelfProtCopyOwnDestinationIsOrdinary(t *testing.T) {
 		{"B01", `ln -s build/out bin && cp -a build/x.o dist.o`, "allow"},
 		{"B07", `ln -s build/out bin && cp -a src dist && cp -a dist dist2`, "allow"},
 		{"N03", `sh -c "ln -s build/out bin && cp -a build dist"`, "allow"},
-		{"T10", `ln -s ../.ssh/authorized_keys k; cp -a k dist; echo key >> dist`, "block"},
-		{"T13", `ln -s ../.ssh k; cp -a build dist; cp -a src/a.txt k/authorized_keys`, "block"},
-		{"T02", `sh -c "ln -s ../.ssh k && cp -a src/a.txt k/authorized_keys"`, "block"},
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		{"T10", `ln -s ../.ssh/authorized_keys k; cp -a k dist; echo key >> dist`, "alert"},
+		{"T13", `ln -s ../.ssh k; cp -a build dist; cp -a src/a.txt k/authorized_keys`, "alert"},
+		{"T02", `sh -c "ln -s ../.ssh k && cp -a src/a.txt k/authorized_keys"`, "alert"},
 	}, "claudecode", "codex")
 }
 
@@ -98,8 +105,8 @@ func TestSelfProtManagedAliasOutsideCopyScope(t *testing.T) {
 		{"N03p", `ln -s build/out bin && cp -a build dist`, "allow"},
 		{"B03", `ln -sf ../src/a.txt link.txt && cp -a src out`, "allow"},
 		{"B34", `nohup cp -r src src-bak && ln -s src-bak/main.go x.go`, "allow"},
-		{"T18", `ln -s build/out bin && cp -a build dist && echo key >> keylink`, "block"},
-		{"T21", `ln -s ~/.ssh build/k && cp -a build dist && echo key >> dist/k/authorized_keys`, "block"},
+		{"T18", `ln -s build/out bin && cp -a build dist && echo key >> keylink`, "alert"},
+		{"T21", `ln -s ~/.ssh build/k && cp -a build dist && echo key >> dist/k/authorized_keys`, "alert"},
 	}, "claudecode", "codex")
 }
 
@@ -108,9 +115,9 @@ func TestSelfProtEnvChdirLinkIsPlaced(t *testing.T) {
 	checkSelfProtRows(t, []selfProtRow{
 		{"B21", `env -C ~/project ln -s build/out bin`, "allow"},
 		{"L08", `env -C ~/project ln -sf ordinary/o.txt ln2.go; cp a.txt ln2.go`, "allow"},
-		{"E02", `env -C ~/project ln -sf ../.ssh/authorized_keys ln3; cp a.txt ln3`, "block"},
-		{"E03", `env -C ~/project ln -s ../.ssh ks; cp a.txt ks/authorized_keys`, "block"},
-		{"A09", `env -C ~ ln -s .ssh/authorized_keys project/k7`, "block"},
+		{"E02", `env -C ~/project ln -sf ../.ssh/authorized_keys ln3; cp a.txt ln3`, "alert"},
+		{"E03", `env -C ~/project ln -s ../.ssh ks; cp a.txt ks/authorized_keys`, "alert"},
+		{"A09", `env -C ~ ln -s .ssh/authorized_keys project/k7`, "alert"},
 	}, "claudecode", "codex")
 }
 
@@ -121,9 +128,9 @@ func TestSelfProtMoveAfterStaticCdIsFollowed(t *testing.T) {
 	checkSelfProtRows(t, []selfProtRow{
 		{"C01", `cd ~/project && ln -s README.md docs.md; mv a.txt e.txt; ls`, "allow"},
 		{"V2", `cd ~/project && ln -s src/main.go alias6.go; find . -type f -name "*.tmp" -exec mv {} build/ \;`, "allow"},
-		{"C04", `cd ~/project && ln -s ../.ssh ks; mv a.txt e.txt; cp b.txt ks/authorized_keys`, "block"},
-		{"C05", `cd ~/project && ln -s ../.ssh/authorized_keys k; mv k k2; echo x >> k2`, "block"},
-		{"C06", `cd ~/project && ln -s README.md docs.md; mv keylink k2; echo x >> k2`, "block"},
+		{"C04", `cd ~/project && ln -s ../.ssh ks; mv a.txt e.txt; cp b.txt ks/authorized_keys`, "alert"},
+		{"C05", `cd ~/project && ln -s ../.ssh/authorized_keys k; mv k k2; echo x >> k2`, "alert"},
+		{"C06", `cd ~/project && ln -s README.md docs.md; mv keylink k2; echo x >> k2`, "alert"},
 	}, "claudecode", "codex")
 }
 
@@ -132,8 +139,8 @@ func TestSelfProtMoveAfterStaticCdIsFollowed(t *testing.T) {
 func TestSelfProtCopyAfterDirectoryChange(t *testing.T) {
 	checkSelfProtRows(t, []selfProtRow{
 		{"B11", `env -C ~ cp -r project project-bak`, "allow"},
-		{"E01", `env -C ~ cp -r project project-bak; echo key >> ~/project-bak/keylink`, "block"},
-		{"E05", `env -C ~ cp -a project/keylink kl2; echo key >> ~/kl2`, "block"},
+		{"E01", `env -C ~ cp -r project project-bak; echo key >> ~/project-bak/keylink`, "alert"},
+		{"E05", `env -C ~ cp -a project/keylink kl2; echo key >> ~/kl2`, "alert"},
 	}, "claudecode", "codex")
 }
 
@@ -144,7 +151,8 @@ func TestSelfProtGitInertConfigIsText(t *testing.T) {
 	for _, r := range []selfProtRow{
 		{"P03", "pwsh -NoProfile -Command \"git -c user.name=vd commit --allow-empty -m \x27Document ~/.ssh/authorized_keys\x27\"", "allow"},
 		{"P04", "pwsh -NoProfile -Command \"git -c user.name=vd -c user.email=vd@example.test commit --allow-empty -m \x27Document ~/.ssh/authorized_keys\x27\"", "allow"},
-		{"PT2", "pwsh -NoProfile -Command \"git -c core.pager=x commit --allow-empty -m \x27Document ~/.ssh/authorized_keys\x27\"", "block"},
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		{"PT2", "pwsh -NoProfile -Command \"git -c core.pager=x commit --allow-empty -m \x27Document ~/.ssh/authorized_keys\x27\"", "alert"},
 	} {
 		if got := selfProtVerdict(t, r, false, "claudecode"); got != r.want {
 			t.Errorf("%s per-user: %q = %s, want %s", r.id, r.cmd, got, r.want)
@@ -154,20 +162,22 @@ func TestSelfProtGitInertConfigIsText(t *testing.T) {
 
 // cmd /c "mklink ..." makes the link ln makes, so a hard link of an
 // ordinary file and a write through it are ordinary (GAP-2229, GAP-1266)
-// and a link to the keys stays a key write.
+// and a link to the keys stays a key write (an alert in the default
+// profile, GAP-0675).
 func TestSelfProtCmdMklinkIsALink(t *testing.T) {
 	checkSelfProtRows(t, []selfProtRow{
 		{"H03", `cmd //c "mklink /H alias.md SOUL.md" ; printf y >> alias.md`, "allow"},
-		{"HT3", `cmd //c "mklink /H hk ../.ssh/authorized_keys" ; printf y >> hk`, "block"},
-		{"HT4", `cmd //c "mklink /D d ..\.ssh" ; printf y >> d/authorized_keys`, "block"},
-		{"HT5", `cmd //c "mklink /H hk ../.ssh/authorized_keys & echo" ; printf y >> hk`, "block"},
+		{"HT3", `cmd //c "mklink /H hk ../.ssh/authorized_keys" ; printf y >> hk`, "alert"},
+		{"HT4", `cmd //c "mklink /D d ..\.ssh" ; printf y >> d/authorized_keys`, "alert"},
+		{"HT5", `cmd //c "mklink /H hk ../.ssh/authorized_keys & echo" ; printf y >> hk`, "alert"},
 	}, "claudecode", "codex")
 }
 
 // A directory change that only a literal shell body makes is read by the
 // body own statement walk: a link made after it is placed in the directory
 // it names, as the plain list is (GAP-2602). A link made outside the body, a
-// dynamic directory and every write through a link to state keep blocking.
+// dynamic directory and every write through a link to state keep blocking;
+// a write through a link to the keys alerts in the default profile (GAP-0675).
 func TestSelfProtShellBodyDirectoryChange(t *testing.T) {
 	checkSelfProtRows(t, []selfProtRow{
 		{"W01", `bash -lc 'cd ~/project && ln -s README.md docs.md; mv a.txt e.txt; ls'`, "allow"},
@@ -177,16 +187,16 @@ func TestSelfProtShellBodyDirectoryChange(t *testing.T) {
 		{"Y02", `bash -c 'cd src && ln -s ../a.txt b'`, "allow"},
 		{"Y03", `bash -c 'cd ~/project/src && ln -s ../a.txt b'`, "allow"},
 		{"Y06", `bash -c 'cd build && ln -s out bin'`, "allow"},
-		{"W07", `bash -lc 'cd ~/project && ln -s ../.ssh ks; mv a.txt e.txt; cp b.txt ks/authorized_keys'`, "block"},
-		{"W08", `bash -lc 'ln -s ../.ssh/authorized_keys k; echo x >> k'`, "block"},
-		{"W09", `bash -c 'cd ~/project && ln -s README.md docs.md; mv keylink k2; echo x >> k2'`, "block"},
-		{"X01", `bash -c 'cd src && ln -s ../../.ssh k && cp ../a.txt k/authorized_keys'`, "block"},
-		{"X02", `ln -s ../.ssh k; bash -lc 'cd src && echo x >> ../k/authorized_keys'`, "block"},
-		{"X03", `bash -c 'cd src && ln -s ../../.ssh/authorized_keys k; echo x >> k'`, "block"},
-		{"X05", `bash -c 'cd ~ && ln -s .ssh/authorized_keys project/k7'`, "block"},
-		{"X07", `bash -c 'cd ~/project && ln -s ../.ssh ks'; echo x >> ks/authorized_keys`, "block"},
-		{"X08", `cd src && bash -c 'cd .. && ln -s ../.ssh k'; echo x >> ../k/authorized_keys`, "block"},
-		{"X09", `bash -c "cd $X && ln -s ../.ssh k; echo x >> k/authorized_keys"`, "block"},
+		{"W07", `bash -lc 'cd ~/project && ln -s ../.ssh ks; mv a.txt e.txt; cp b.txt ks/authorized_keys'`, "alert"},
+		{"W08", `bash -lc 'ln -s ../.ssh/authorized_keys k; echo x >> k'`, "alert"},
+		{"W09", `bash -c 'cd ~/project && ln -s README.md docs.md; mv keylink k2; echo x >> k2'`, "alert"},
+		{"X01", `bash -c 'cd src && ln -s ../../.ssh k && cp ../a.txt k/authorized_keys'`, "alert"},
+		{"X02", `ln -s ../.ssh k; bash -lc 'cd src && echo x >> ../k/authorized_keys'`, "alert"},
+		{"X03", `bash -c 'cd src && ln -s ../../.ssh/authorized_keys k; echo x >> k'`, "alert"},
+		{"X05", `bash -c 'cd ~ && ln -s .ssh/authorized_keys project/k7'`, "alert"},
+		{"X07", `bash -c 'cd ~/project && ln -s ../.ssh ks'; echo x >> ks/authorized_keys`, "alert"},
+		{"X08", `cd src && bash -c 'cd .. && ln -s ../.ssh k'; echo x >> ../k/authorized_keys`, "alert"},
+		{"X09", `bash -c "cd $X && ln -s ../.ssh k; echo x >> k/authorized_keys"`, "alert"},
 	}, "claudecode", "codex")
 }
 
@@ -194,7 +204,8 @@ func TestSelfProtShellBodyDirectoryChange(t *testing.T) {
 // written where it stands; a size or path reader that names the SSH folder
 // reads nothing it could change; a link moved into a real directory goes
 // inside it (GAP-0091). A writer after the entering cd, a link to state and
-// a copy of the SSH folder keep blocking.
+// a copy of the SSH folder are protected writes (an alert in the default
+// profile, GAP-0675).
 func TestSelfProtLinkNameBesideReaders(t *testing.T) {
 	checkSelfProtRows(t, []selfProtRow{
 		{"R01", `ln -s / r; bash -c "cd r && ls"`, "allow"},
@@ -204,15 +215,15 @@ func TestSelfProtLinkNameBesideReaders(t *testing.T) {
 		{"R06", `readlink -f ~/.ssh`, "allow"},
 		{"R17", `ln -s /usr/lib lib; bash -c "cd ~nosuchuser9 && ls"`, "allow"},
 		{"R18", `du -sh ~/.*/`, "allow"},
-		{"R19", `ln -s /usr/lib lib; ls ~nosuchuser9; bash -c "cd lib && ls"`, "block"},
-		{"R07", `ln -s / r; bash -c "cd r && touch x"`, "block"},
-		{"R08", `ln -s / r; bash -c "cd r && sed -i s/a/b/ x"`, "block"},
-		{"R09", `ln -s / r; bash -c "cd r && ./run.sh"`, "block"},
-		{"R10", `ln -s / r; bash -c "cd r && ls"; echo k >> r/home/alice/.ssh/authorized_keys`, "block"},
-		{"R11", `ln -s / r; bash -c "cd r && ls"; mv a.txt r`, "block"},
-		{"R12", `ln -s ../.ssh ks; bash -c "cd ks && cat authorized_keys"`, "block"},
-		{"R13", `ln -s ~/.ssh/authorized_keys k; mv k build/; echo x >> build/k`, "block"},
-		{"R14", `du -sh ~/.ssh/ > ~/.ssh/authorized_keys`, "block"},
+		{"R19", `ln -s /usr/lib lib; ls ~nosuchuser9; bash -c "cd lib && ls"`, "alert"},
+		{"R07", `ln -s / r; bash -c "cd r && touch x"`, "alert"},
+		{"R08", `ln -s / r; bash -c "cd r && sed -i s/a/b/ x"`, "alert"},
+		{"R09", `ln -s / r; bash -c "cd r && ./run.sh"`, "alert"},
+		{"R10", `ln -s / r; bash -c "cd r && ls"; echo k >> r/home/alice/.ssh/authorized_keys`, "alert"},
+		{"R11", `ln -s / r; bash -c "cd r && ls"; mv a.txt r`, "alert"},
+		{"R12", `ln -s ../.ssh ks; bash -c "cd ks && cat authorized_keys"`, "alert"},
+		{"R13", `ln -s ~/.ssh/authorized_keys k; mv k build/; echo x >> build/k`, "alert"},
+		{"R14", `du -sh ~/.ssh/ > ~/.ssh/authorized_keys`, "alert"},
 	}, "claudecode", "codex")
 }
 
@@ -223,8 +234,9 @@ func TestSelfProtMoveIntoRealDirectory(t *testing.T) {
 	for _, r := range []selfProtRow{
 		{"M01", `ln -s build/out bin; mv bin build/`, "allow"},
 		{"M02", `ln -s build/out bin; mv bin build`, "allow"},
-		{"M03", `ln -s ~/.ssh/authorized_keys k; mv k build/; echo x >> build/k`, "block"},
-		{"M05", `ln -s build/out bin; mv bin ../.ssh/`, "block"},
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		{"M03", `ln -s ~/.ssh/authorized_keys k; mv k build/; echo x >> build/k`, "alert"},
+		{"M05", `ln -s build/out bin; mv bin ../.ssh/`, "alert"},
 	} {
 		for _, connector := range []string{"claudecode", "codex"} {
 			if got := selfProtVerdict(t, r, false, connector); got != r.want {
@@ -235,17 +247,17 @@ func TestSelfProtMoveIntoRealDirectory(t *testing.T) {
 }
 
 // find that only lists the SSH folder reads, as ls does; a find that
-// deletes, runs a program or writes a file there still blocks
-// (rel-1-0-6:GAP-0119).
+// deletes, runs a program or writes a file there is a protected write
+// (rel-1-0-6:GAP-0119; an alert in the default profile, GAP-0675).
 func TestSelfProtFindListingOfTheSSHFolderReads(t *testing.T) {
 	checkSelfProtRows(t, []selfProtRow{
 		{"F1", `find ~/.ssh -maxdepth 1 -type f`, "allow"},
 		{"F2", `find ~/.ssh -name "*.pub"`, "allow"},
 		{"F3", `find ~/.ssh/ -maxdepth 1 -type f -newer ~/.ssh/authorized_keys -print`, "allow"},
-		{"F4", `find ~/.ssh -name authorized_keys -delete`, "block"},
-		{"F5", `find ~/.ssh -type f -fprint ~/.ssh/authorized_keys`, "block"},
-		{"F6", `find ~/.ssh -maxdepth 1 -type f > ~/.ssh/authorized_keys`, "block"},
-		{"F7", `find ~/.ssh -name authorized_keys -exec rm {} \;`, "block"},
-		{"F8", `find ~/.ssh -maxdepth 1 -type f -fls ~/.ssh/authorized_keys`, "block"},
+		{"F4", `find ~/.ssh -name authorized_keys -delete`, "alert"},
+		{"F5", `find ~/.ssh -type f -fprint ~/.ssh/authorized_keys`, "alert"},
+		{"F6", `find ~/.ssh -maxdepth 1 -type f > ~/.ssh/authorized_keys`, "alert"},
+		{"F7", `find ~/.ssh -name authorized_keys -exec rm {} \;`, "alert"},
+		{"F8", `find ~/.ssh -maxdepth 1 -type f -fls ~/.ssh/authorized_keys`, "alert"},
 	}, "claudecode", "codex")
 }

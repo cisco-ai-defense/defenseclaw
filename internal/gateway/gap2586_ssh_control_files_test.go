@@ -6,6 +6,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -17,7 +18,7 @@ import (
 // project copy onto ~/.ssh/config was allowed. Reads of ~/.ssh/config, an
 // unrelated new file under ~/.ssh and ordinary project copies stay allowed.
 func TestR106WriteIntoSSHControlFilesIsAKeysWrite(t *testing.T) {
-	judgeR106HookRows(t, []r106HookRow{
+	judgeR106AlertRows(t, []r106HookRow{
 		{command: `cp a.txt ~/.ssh/config`, block: true},
 		{command: `cp a.txt HOMEDIR/.ssh/config`, block: true},
 		{command: `cd ~/.ssh && cp ~/project/a.txt config`, block: true},
@@ -60,4 +61,39 @@ func TestR106WriteIntoSSHControlFilesIsAKeysWrite(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+// judgeR106AlertRows is judgeR106HookRows for rows of the shell-command
+// protected-file class: a row with block set gets the default profile's
+// alert with the keys rule; every other row is allowed.
+func judgeR106AlertRows(t *testing.T, rows []r106HookRow, prepare func(t *testing.T, f b36ManagedHookFixture)) {
+	t.Helper()
+	for _, mode := range []struct {
+		managed, header bool
+	}{{true, true}, {false, true}, {false, false}} {
+		for _, connector := range []string{"claudecode", "codex"} {
+			for _, row := range rows {
+				if mode.managed && row.perUserOnly {
+					continue
+				}
+				f := newB36ManagedHookFixture(t)
+				prepare(t, f)
+				command := strings.NewReplacer("HOMEDIR", f.home, "EXTDIR", filepath.Join(filepath.Dir(f.homes), "ext")).Replace(row.command)
+				payload := f.payload(t, command)
+				header := ""
+				if mode.header {
+					header = f.clientHeader(t, payload)
+				}
+				want := "allow"
+				if row.block {
+					// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+					want = "alert"
+				}
+				if got := r106HookVerdict(t, f, mode.managed, connector, payload, header); got != want {
+					t.Errorf("managed=%v header=%v %s %q: %s, want %s", mode.managed, mode.header, connector, row.command, got, want)
+				}
+				_ = os.Chmod(f.homes, 0o700)
+			}
+		}
+	}
 }

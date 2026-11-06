@@ -89,7 +89,8 @@ func postDynamicWordParity(t *testing.T, home, project, connector string, manage
 func checkDynamicWordParity(t *testing.T, allowed, blocked []string) {
 	t.Helper()
 	home, project := dynamicWordParityProject(t)
-	const block, allow = `{"action":"block"`, `{"action":"allow"`
+	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+	const alert, allow = `{"action":"alert"`, `{"action":"allow"`
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, managed := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s managed=%v", connector, managed), func(t *testing.T) {
@@ -100,8 +101,8 @@ func checkDynamicWordParity(t *testing.T, allowed, blocked []string) {
 				}
 				for _, command := range blocked {
 					got := postDynamicWordParity(t, home, project, connector, managed, command, nil)
-					if !strings.HasPrefix(got, block) || !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
-						t.Errorf("%s = %.300s, want block", command, got)
+					if !strings.HasPrefix(got, alert) || !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+						t.Errorf("%s = %.300s, want alert", command, got)
 					}
 				}
 			})
@@ -146,13 +147,14 @@ func TestManagedClaudeCodeKeepsTheEvalRedirectBlockWithoutACompleteClientReading
 		},
 	} {
 		got := postDynamicWordParity(t, home, project, "claudecode", true, command, edit)
-		if !strings.HasPrefix(got, `{"action":"block"`) {
-			t.Errorf("%s: %s = %.300s, want block", name, command, got)
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		if !strings.HasPrefix(got, `{"action":"alert"`) || !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+			t.Errorf("%s: %s = %.300s, want alert", name, command, got)
 		}
 	}
 	got := postDynamicWordParity(t, home, project, "claudecode", true, `eval "$CMD"; echo marker >> "$f"`, nil)
-	if !strings.HasPrefix(got, `{"action":"block"`) {
-		t.Errorf("eval of a dynamic script = %.300s, want block", got)
+	if !strings.HasPrefix(got, `{"action":"alert"`) || !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+		t.Errorf("eval of a dynamic script = %.300s, want alert", got)
 	}
 }
 

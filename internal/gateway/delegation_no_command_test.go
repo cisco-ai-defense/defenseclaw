@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -95,7 +96,9 @@ func TestGAP0958DelegationCallsAreNotProtectedWrites(t *testing.T) {
 	} {
 		t.Run(tc.connector+" protected write control", func(t *testing.T) {
 			resp := evaluate(t, tc.connector, tc.event, tc.tool, delegation(map[string]any{tc.key: write}))
-			if resp.Action != "block" || resp.RawAction != "block" {
+			// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+			if resp.Action != "alert" || resp.RawAction != "alert" ||
+				!strings.Contains(resp.Reason, "persistence.ssh_authorized_keys_command") {
 				t.Fatalf("protected write action=%q raw=%q reason=%q", resp.Action, resp.RawAction, resp.Reason)
 			}
 		})

@@ -39,6 +39,8 @@ func r106PerUserVerdict(t *testing.T, connector string, payload []byte, header s
 		return "block"
 	case strings.HasPrefix(body, `{"action":"allow"`):
 		return "allow"
+	case strings.HasPrefix(body, `{"action":"alert"`):
+		return "alert"
 	}
 	return fmt.Sprintf("status %d body %.200s", recorder.Code, body)
 }
@@ -59,7 +61,7 @@ func r106Verdicts(t *testing.T, connector, command string) (perUser, managed str
 	payload := f.payload(t, command)
 	header := f.clientHeader(t, payload)
 	perUser = r106PerUserVerdict(t, connector, payload, header)
-	managed = f.post(t, connector, payload, header)
+	managed = r106AlertVerdict(f.post(t, connector, payload, header))
 	if err := os.Chmod(f.homes, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -78,12 +80,13 @@ func TestR106CommentNamingKeysIsNotAKeysWrite(t *testing.T) {
 		{"echo done # see ~/.ssh/authorized_keys later", "allow"},
 		{"echo done >> notes.txt # see ~/.ssh/authorized_keys later", "allow"},
 		{"echo a > notes.txt\n# then ~/.ssh/authorized_keys\necho b >> notes.txt", "allow"},
-		{"echo x >> ~/.ssh/authorized_keys # note", "block"},
-		{"echo x >> \"$HOME/.ssh/authorized_keys\" # note", "block"},
-		{"bash -c \"echo x >> ~/.ssh/authorized_keys\" # note", "block"},
-		{"echo x >> keylink # note", "block"},
-		{"echo \"# note\" >> ~/.ssh/authorized_keys", "block"},
-		{"echo ok # c\necho x >> ~/.ssh/authorized_keys", "block"},
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		{"echo x >> ~/.ssh/authorized_keys # note", "alert"},
+		{"echo x >> \"$HOME/.ssh/authorized_keys\" # note", "alert"},
+		{"bash -c \"echo x >> ~/.ssh/authorized_keys\" # note", "alert"},
+		{"echo x >> keylink # note", "alert"},
+		{"echo \"# note\" >> ~/.ssh/authorized_keys", "alert"},
+		{"echo ok # c\necho x >> ~/.ssh/authorized_keys", "alert"},
 	} {
 		for _, connector := range []string{"claudecode", "codex"} {
 			perUser, managed := r106Verdicts(t, connector, tc.command)

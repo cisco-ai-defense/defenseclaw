@@ -11,6 +11,7 @@ import "testing"
 // user and managed (rel-1-0-6:GAP-0259). The same copy of a link to the keys
 // file still writes the keys file.
 func TestR107ArchiveCopyOfACommandLinkIsTheSameLink(t *testing.T) {
+	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
 	r106Reader2Check(t, []r106Reader2Row{
 		{"plain archive copy then append", "project", `cp --archive README.md notes9.txt && echo k >> notes9.txt`, "allow"},
 		{"archive copy of a made link then append", "project", `ln -s README.md rl1 && cp --archive rl1 notes9.txt && echo k >> notes9.txt`, "allow"},
@@ -18,7 +19,7 @@ func TestR107ArchiveCopyOfACommandLinkIsTheSameLink(t *testing.T) {
 		{"cp -a -t of a made link then append", "project", `ln -s README.md rl5 && mkdir -p out5 && cp -a -t out5 rl5 && echo k >> out5/rl5`, "allow"},
 		{"cp -P of a made ln -sr link then append", "project", `ln -sr README.md rr6 && cp -P rr6 nr6 && echo k >> nr6`, "allow"},
 		{"cp -d of a made link then append", "project", `ln -s a.txt rl7 && cp -d rl7 n7 && echo k >> n7`, "allow"},
-		{"link to the keys file then write", "project", `ln -sfn ../.ssh/authorized_keys plink && echo k >> plink`, "block"},
-		{"link to the keys file, cp -a it, write the copy", "project", `ln -sfn ../.ssh/authorized_keys plink && cp -a plink pcopy && echo k >> pcopy`, "block"},
+		{"link to the keys file then write", "project", `ln -sfn ../.ssh/authorized_keys plink && echo k >> plink`, "alert"},
+		{"link to the keys file, cp -a it, write the copy", "project", `ln -sfn ../.ssh/authorized_keys plink && cp -a plink pcopy && echo k >> pcopy`, "alert"},
 	})
 }

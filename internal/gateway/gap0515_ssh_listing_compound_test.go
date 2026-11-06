@@ -6,6 +6,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -32,15 +33,16 @@ func TestGAP0515SSHListingCompoundFourCell(t *testing.T) {
 		{"home-variable-semicolon-pwd", `ls "$HOME/.ssh"; pwd`, "allow"},
 		{"absolute-home-semicolon-pwd", `ls ` + ssh + `; pwd`, "allow"},
 		{"absolute-home-and-echo", `ls ` + ssh + ` && echo done`, "allow"},
-		{"semicolon-keys-write", `ls ~/.ssh; echo marker >> ~/.ssh/authorized_keys`, "block"},
-		{"and-keys-write", `ls ~/.ssh && echo marker >> ~/.ssh/authorized_keys`, "block"},
-		{"semicolon-pwd-keys-write", `ls ~/.ssh; pwd > ~/.ssh/authorized_keys`, "block"},
-		{"and-pwd-keys-write", `ls ~/.ssh && pwd > ~/.ssh/authorized_keys`, "block"},
-		{"three-statement-keys-write", `ls ~/.ssh; pwd; echo marker >> ~/.ssh/authorized_keys`, "block"},
-		{"read-then-keys-write", `ls ~/.ssh; stat .; pwd > ~/.ssh/authorized_keys`, "block"},
-		{"semicolon-keys-copy", `ls ~/.ssh; cp keylink ~/.ssh/authorized_keys`, "block"},
-		{"and-keys-copy", `ls ~/.ssh && cp keylink ~/.ssh/authorized_keys`, "block"},
-		{"absolute-home-keys-write", `ls ` + ssh + `; echo marker >> ` + ssh + `/authorized_keys`, "block"},
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		{"semicolon-keys-write", `ls ~/.ssh; echo marker >> ~/.ssh/authorized_keys`, "alert"},
+		{"and-keys-write", `ls ~/.ssh && echo marker >> ~/.ssh/authorized_keys`, "alert"},
+		{"semicolon-pwd-keys-write", `ls ~/.ssh; pwd > ~/.ssh/authorized_keys`, "alert"},
+		{"and-pwd-keys-write", `ls ~/.ssh && pwd > ~/.ssh/authorized_keys`, "alert"},
+		{"three-statement-keys-write", `ls ~/.ssh; pwd; echo marker >> ~/.ssh/authorized_keys`, "alert"},
+		{"read-then-keys-write", `ls ~/.ssh; stat .; pwd > ~/.ssh/authorized_keys`, "alert"},
+		{"semicolon-keys-copy", `ls ~/.ssh; cp keylink ~/.ssh/authorized_keys`, "alert"},
+		{"and-keys-copy", `ls ~/.ssh && cp keylink ~/.ssh/authorized_keys`, "alert"},
+		{"absolute-home-keys-write", `ls ` + ssh + `; echo marker >> ` + ssh + `/authorized_keys`, "alert"},
 	}
 	var payloads [][]byte
 	for _, row := range rows {
@@ -54,6 +56,9 @@ func TestGAP0515SSHListingCompoundFourCell(t *testing.T) {
 	f.answerAll(t, calls)
 	for i, call := range calls {
 		want := rows[i/4].want
+		if strings.HasPrefix(call.body, `{"action":"alert"`) {
+			call.verdict = "alert" // rel-1-0-6:GAP-0675
+		}
 		t.Logf("CF515ROW %s | %s | want %s", call.name, call.verdict, want)
 		if call.verdict != want {
 			t.Errorf("%s: verdict %s, want %s; body %.200s", call.name, call.verdict, want, call.body)

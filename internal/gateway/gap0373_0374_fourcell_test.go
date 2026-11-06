@@ -42,9 +42,10 @@ func TestGAP0373And0374FourCell(t *testing.T) {
 	multiline := "set -e\nBUILD=build\nif [ \"$1\" = clean ]; then\n  rm -rf \"$BUILD\"\nfi\nmkdir -p \"$BUILD\"\nfor src in *.txt; do\n  obj=\"$BUILD/${src%.txt}.o\"\n  cp \"$src\" \"$obj\"\n  echo \"$obj\" >> \"$BUILD/manifest\"\ndone\nLOG=\"$BUILD/build.log\"\ncase \"$MODE\" in\n  ci) LOG=\"$BUILD/ci.log\" ;;\nesac\ndate > \"$LOG\""
 	rows := []struct{ name, project, command, want string }{
 		{"GAP0373/glob-backup", "ordinary", `for f in *.txt; do out=$f.bak; cp "$f" "$out"; echo "$out" >> backups.list; done`, "allow"},
-		{"GAP0373/glob-backup-link", "protected", `for f in *.txt; do out=$f.bak; cp "$f" "$out"; echo "$out" >> backups.list; done`, "block"},
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		{"GAP0373/glob-backup-link", "protected", `for f in *.txt; do out=$f.bak; cp "$f" "$out"; echo "$out" >> backups.list; done`, "alert"},
 		{"GAP0374/multiline-build", "ordinary", multiline, "allow"},
-		{"GAP0374/multiline-build-link", "protected", multiline, "block"},
+		{"GAP0374/multiline-build-link", "protected", multiline, "alert"},
 	}
 	var payloads [][]byte
 	for _, row := range rows {
@@ -59,6 +60,7 @@ func TestGAP0373And0374FourCell(t *testing.T) {
 	}
 	f.answerAll(t, calls)
 	for i, call := range calls {
+		call.verdict = r106AlertVerdict(call.verdict)
 		want := rows[i/4].want
 		t.Logf("FBROW %s | %s | want %s", call.name, call.verdict, want)
 		if call.verdict != want {
@@ -90,8 +92,9 @@ func TestGAP0373GlobOptionChangeKeepsProtectedTwin(t *testing.T) {
 	}
 	f.answerAll(t, calls)
 	for _, call := range calls {
-		if call.verdict != "block" {
-			t.Errorf("%s: verdict %s, want block; body %.200s", call.name, call.verdict, call.body)
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		if call.verdict = r106AlertVerdict(call.verdict); call.verdict != "alert" {
+			t.Errorf("%s: verdict %s, want alert; body %.200s", call.name, call.verdict, call.body)
 		}
 	}
 }

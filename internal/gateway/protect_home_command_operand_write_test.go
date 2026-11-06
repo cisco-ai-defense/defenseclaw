@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -100,8 +101,13 @@ func TestProtectHomeCommandOperandWriteThroughLinkUsesClientWalk(t *testing.T) {
 					t.Fatal(err)
 				}
 				got := overLimitHostHookWithEvidence(t, connector, home, string(body), evidence)
-				if blocked := nativeWriteBlocked(t, got); blocked != tc.block {
-					t.Fatalf("blocked = %t, want %t: %.600s", blocked, tc.block, got)
+				if tc.block {
+					// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+					if !strings.HasPrefix(strings.TrimSpace(got), `{"action":"alert"`) || !strings.Contains(got, nativeWriteAuthorizedKeysRule) {
+						t.Fatalf("protected write = %.600s, want alert with %s", got, nativeWriteAuthorizedKeysRule)
+					}
+				} else if blocked := nativeWriteBlocked(t, got); blocked {
+					t.Fatalf("blocked = true, want false: %.600s", got)
 				}
 			})
 		}

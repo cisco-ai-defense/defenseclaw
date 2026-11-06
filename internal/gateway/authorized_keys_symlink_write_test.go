@@ -592,7 +592,8 @@ func TestClaudeResolvedWriteHeaderMarkerRule(t *testing.T) {
 			api.handleAgentHook("claudecode").ServeHTTP(recorder, req)
 			want := `"raw_action":"allow"`
 			if row.block {
-				want = `"raw_action":"block"`
+				// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+				want = `"raw_action":"alert"`
 			}
 			if !strings.Contains(recorder.Body.String(), want) {
 				t.Fatalf("response = %d %s, want %s", recorder.Code, recorder.Body.String(), want)
@@ -670,7 +671,9 @@ func TestResolvedWriteHeaderNeverDropsTarget(t *testing.T) {
 		return strings.Join(writes, " && ")
 	}
 	// "action" (not "raw_action") is the enforced decision.
-	const block, allow = `{"action":"block"`, `{"action":"allow"`
+	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+	// The statement budget (ACTION-COMPOUND-LIMIT) keeps its block.
+	const block, allow, alert = `{"action":"block"`, `{"action":"allow"`, `{"action":"alert"`
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, count := range []int{29, 30, 31, 33, 64, 200} {
 			t.Run(fmt.Sprintf("%s %d", connector, count), func(t *testing.T) {
@@ -682,11 +685,11 @@ func TestResolvedWriteHeaderNeverDropsTarget(t *testing.T) {
 					"tool_input": map[string]string{"command": command}}))
 				// Past 128 statements the call is refused by the statement
 				// budget before its writes are read (rel-1-0-2:GAP-0568).
-				rule := "persistence.ssh_authorized_keys_command"
+				rule, want := "persistence.ssh_authorized_keys_command", alert
 				if count+1 > 128 {
-					rule = "ACTION-COMPOUND-LIMIT"
+					rule, want = "ACTION-COMPOUND-LIMIT", block
 				}
-				if got := post(t, connector, "action", command, header); !strings.HasPrefix(got, block) ||
+				if got := post(t, connector, "action", command, header); !strings.HasPrefix(got, want) ||
 					!strings.Contains(got, rule) {
 					t.Fatalf("linked append after %d targets = %.400s", count, got)
 				}
@@ -699,22 +702,18 @@ func TestResolvedWriteHeaderNeverDropsTarget(t *testing.T) {
 			prefix := ": " + strings.Repeat("x", 65<<10) + " && "
 			for _, row := range []struct {
 				command string
-				block   bool
+				want    string
 			}{
-				{prefix + "echo marker >> " + link, true},
-				{chain(200, "") + " && L=" + link + " && echo marker >> \"$L\"", true},
-				{prefix + "echo marker > " + filepath.Join(external, "notes.txt"), false},
+				{prefix + "echo marker >> " + link, alert},
+				{chain(200, "") + " && L=" + link + " && echo marker >> \"$L\"", block},
+				{prefix + "echo marker > " + filepath.Join(external, "notes.txt"), allow},
 			} {
 				if err := os.Symlink(keys, link); err != nil && !os.IsExist(err) {
 					t.Fatal(err)
 				}
 				header := hookpaths.Resolve(mustJSON(t, map[string]any{"tool_name": "Bash",
 					"tool_input": map[string]string{"command": row.command}}))
-				want := allow
-				if row.block {
-					want = block
-				}
-				if got := post(t, connector, "action", row.command, header); !strings.HasPrefix(got, want) {
+				if got := post(t, connector, "action", row.command, header); !strings.HasPrefix(got, row.want) {
 					t.Fatalf("%.60s...%s = %.400s", row.command, row.command[len(row.command)-60:], got)
 				}
 			}
@@ -744,22 +743,24 @@ func TestResolvedWriteHeaderNeverDropsTarget(t *testing.T) {
 		})
 		t.Run(connector+" unresolved target", func(t *testing.T) {
 			header := encodeTargets(t, map[string]string{hookpaths.CWDKey: project, link: ""})
-			if got := post(t, connector, "action", "echo marker >> "+link, header); !strings.HasPrefix(got, block) {
+			if got := post(t, connector, "action", "echo marker >> "+link, header); !strings.HasPrefix(got, alert) {
 				t.Fatalf("unresolved target = %.400s", got)
 			}
 		})
 		t.Run(connector+" undecodable header", func(t *testing.T) {
-			if got := post(t, connector, "action", "echo marker >> "+link, "!"); !strings.HasPrefix(got, block) {
+			if got := post(t, connector, "action", "echo marker >> "+link, "!"); !strings.HasPrefix(got, alert) {
 				t.Fatalf("undecodable header = %.400s", got)
 			}
 		})
 		t.Run(connector+" truncated observe", func(t *testing.T) {
 			header := encodeTargets(t, map[string]string{hookpaths.CWDKey: project, hookpaths.TruncatedKey: "1"})
-			if got := post(t, connector, "action", "echo marker >> "+link, header); !strings.HasPrefix(got, block) {
+			if got := post(t, connector, "action", "echo marker >> "+link, header); !strings.HasPrefix(got, alert) {
 				t.Fatalf("truncated action = %.400s", got)
 			}
+			// The default profile's alert is no would-block: observe allows
+			// the call and names the rule (rel-1-0-6:GAP-0675).
 			if got := post(t, connector, "observe", "echo marker >> "+link, header); !strings.HasPrefix(got, allow) ||
-				!strings.Contains(got, `"would_block":true`) {
+				!strings.Contains(got, "persistence.ssh_authorized_keys_command") {
 				t.Fatalf("truncated observe = %.400s", got)
 			}
 		})
@@ -787,7 +788,8 @@ func TestAuthorizedKeys2LinkWriteMatchesDirectWrite(t *testing.T) {
 		return func(link string) error { return os.Symlink(target, link) }
 	}
 	// "action" (not "raw_action") is the enforced decision.
-	const block, allow = `{"action":"block"`, `{"action":"allow"`
+	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+	const alert, allow = `{"action":"alert"`, `{"action":"allow"`
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, row := range []struct {
 			name, link, operand string
@@ -795,13 +797,13 @@ func TestAuthorizedKeys2LinkWriteMatchesDirectWrite(t *testing.T) {
 			create              func(string) error
 			want                string
 		}{
-			{"link to missing file", filepath.Join(external, "kmiss"), "", false, symlink(keys2), block},
-			{"link to existing file", filepath.Join(external, "kfile"), "", true, symlink(keys2), block},
+			{"link to missing file", filepath.Join(external, "kmiss"), "", false, symlink(keys2), alert},
+			{"link to existing file", filepath.Join(external, "kfile"), "", true, symlink(keys2), alert},
 			{"relative link", filepath.Join(project, "krel"), "./krel", true,
-				symlink(filepath.Join("..", ".ssh", "authorized_keys2")), block},
+				symlink(filepath.Join("..", ".ssh", "authorized_keys2")), alert},
 			{"hard link", filepath.Join(external, "hard.cfg"), "", true,
-				func(link string) error { return os.Link(keys2, link) }, block},
-			{"direct write", "", keys2, true, nil, block},
+				func(link string) error { return os.Link(keys2, link) }, alert},
+			{"direct write", "", keys2, true, nil, alert},
 			{"benign file", "", filepath.Join(external, "notes.txt"), false, nil, allow},
 		} {
 			for _, count := range []int{1, 31} {
@@ -850,7 +852,7 @@ func TestAuthorizedKeys2LinkWriteMatchesDirectWrite(t *testing.T) {
 					api.handleAgentHook(connector).ServeHTTP(recorder, req)
 					got := recorder.Body.String()
 					if !strings.HasPrefix(got, row.want) ||
-						row.want == block && !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+						row.want == alert && !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
 						t.Fatalf("append after %d targets = %.400s, want %s", count, got, row.want)
 					}
 				})
@@ -1303,7 +1305,8 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 	// assert a protected write through this ordinary relative redirect.
 	const uncertainLoginShell = `bash -lc "cp a b" > out.txt`
 	// "action" (not "raw_action") is the enforced decision.
-	const block, allow = `{"action":"block"`, `{"action":"allow"`
+	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+	const alert, allow = `{"action":"alert"`, `{"action":"allow"`
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, managed := range []bool{true, false} {
 			post := func(t *testing.T, command string, cwdOverride ...string) string {
@@ -1335,14 +1338,14 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 			}
 			name := fmt.Sprintf("%s managed=%v", connector, managed)
 			t.Run(name, func(t *testing.T) {
-				if got := post(t, "echo k >> authorized_keys", filepath.Join(project, "dirlink")); !strings.HasPrefix(got, block) {
-					t.Errorf("linked event cwd = %.300s, want block", got)
+				if got := post(t, "echo k >> authorized_keys", filepath.Join(project, "dirlink")); !strings.HasPrefix(got, alert) {
+					t.Errorf("linked event cwd = %.300s, want alert", got)
 				}
 				for _, command := range blocked {
 					got := post(t, command)
-					if !strings.HasPrefix(got, block) ||
+					if !strings.HasPrefix(got, alert) ||
 						!strings.Contains(got, "persistence.ssh_authorized_keys_command") {
-						t.Errorf("%s = %.300s, want block", command, got)
+						t.Errorf("%s = %.300s, want alert", command, got)
 					}
 					if command == `tar xzf node.tgz && ./configure > build.log` &&
 						!strings.Contains(got, "Run the extraction and the write as separate commands") {

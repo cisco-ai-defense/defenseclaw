@@ -17,7 +17,8 @@ import (
 // an SSH authorized_keys command (GAP-2586, cells L-mac-J3-011 and
 // L-erhel-J3-013). A copy into or out of ~/.ssh, a stack word that names a
 // directory carrying a link to the keys file then a write through it, and a
-// stack word after a cd that may have failed still block.
+// stack word after a cd that may have failed are protected writes: an
+// alert in the default profile (rel-1-0-6:GAP-0675).
 func TestR106DirectoryStackCopyAfterPushdStaysAllowed(t *testing.T) {
 	judgeR106HookRows(t, []r106HookRow{
 		{command: `pushd src && cp -r ../ordinary ord4`},
@@ -31,22 +32,24 @@ func TestR106DirectoryStackCopyAfterPushdStaysAllowed(t *testing.T) {
 		{command: `cd src && rsync -a ~-/ordinary/ out/`},
 		{command: `cd src && cp -r ../ordinary ord5`},
 		{command: `pushd src && cp -r ~+1/ordinary ord7`},
-		{command: `pushd src && cp -r ~1/ordinary ~/.ssh/`, block: true},
-		{command: `pushd src && cp a.txt ~/.ssh/authorized_keys`, block: true},
-		{command: `pushd ~/.ssh && pushd /tmp && cp a.txt ~1/authorized_keys`, block: true},
-		{command: `pushd ~/linked && pushd ~/project && cp -a ~1 lb && echo k >> lb/lnk`, block: true},
-		{command: `pushd ~/linked; cp -a ~1 lb && echo k >> lb/lnk`, block: true},
-		{command: `cd ~/linked && cd ~/project && cp -a ~- lb && echo k >> lb/lnk`, block: true},
-		{command: `cd ~/linked && cd ~/project && cd /nonexistent-zz || cp -a ~- lb && echo k >> lb/lnk`, block: true},
-		{command: `cd ~/linked && cd ~/project && cd /nonexistent-zz && true; cp -a ~- lb && echo k >> lb/lnk`, block: true},
-		{command: `pushd /nonexistent-zz; pushd ~/linked && pushd ~/project && cp -a ~1 lb; echo k >> lb/lnk`, block: true},
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		{command: `pushd src && cp -r ~1/ordinary ~/.ssh/`, alert: true},
+		{command: `pushd src && cp a.txt ~/.ssh/authorized_keys`, alert: true},
+		{command: `pushd ~/.ssh && pushd /tmp && cp a.txt ~1/authorized_keys`, alert: true},
+		{command: `pushd ~/linked && pushd ~/project && cp -a ~1 lb && echo k >> lb/lnk`, alert: true},
+		{command: `pushd ~/linked; cp -a ~1 lb && echo k >> lb/lnk`, alert: true},
+		{command: `cd ~/linked && cd ~/project && cp -a ~- lb && echo k >> lb/lnk`, alert: true},
+		{command: `cd ~/linked && cd ~/project && cd /nonexistent-zz || cp -a ~- lb && echo k >> lb/lnk`, alert: true},
+		{command: `cd ~/linked && cd ~/project && cd /nonexistent-zz && true; cp -a ~- lb && echo k >> lb/lnk`, alert: true},
+		{command: `pushd /nonexistent-zz; pushd ~/linked && pushd ~/project && cp -a ~1 lb; echo k >> lb/lnk`, alert: true},
 		// Copies out of ~/.ssh: a managed gateway reads a word that names
 		// the .ssh directory as a per-user gateway does (rel-1-0-6:GAP-0130).
-		{command: `pushd src && cp -r ~/.ssh ~1/sshcopy`, block: true},
-		{command: `pushd ~/.ssh && pushd ~/project && cp -r ~1 k`, block: true},
-		{command: `pushd ~/.ssh && pushd /tmp && cp -r ~2/ordinary ~1/`, block: true},
-		{command: `cp -r ~/.ssh sshcopy`, block: true},
-		{command: `cp -r ~/.ssh/. sshcopy2`, block: true},
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		{command: `pushd src && cp -r ~/.ssh ~1/sshcopy`, alert: true},
+		{command: `pushd ~/.ssh && pushd ~/project && cp -r ~1 k`, alert: true},
+		{command: `pushd ~/.ssh && pushd /tmp && cp -r ~2/ordinary ~1/`, alert: true},
+		{command: `cp -r ~/.ssh sshcopy`, alert: true},
+		{command: `cp -r ~/.ssh/. sshcopy2`, alert: true},
 		{command: `ls -la ~/.ssh`},
 		{command: `cp ~/.ssh/config ssh-config.bak`},
 		{command: `git commit --allow-empty -m "doc: mention ~/.ssh"`},

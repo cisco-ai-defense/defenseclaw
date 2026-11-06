@@ -87,8 +87,9 @@ func TestInterpreterWriteThroughProjectLinkIsOneVerdictPerConnector(t *testing.T
 		return answer.Action
 	}
 	for _, connectorName := range []string{"copilot", "claudecode", "codex"} {
-		if got := verdict(t, connectorName, quoted); got != "block" {
-			t.Errorf("%s: quoted interpreter write through keylink = %s, want block", connectorName, got)
+		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+		if got := verdict(t, connectorName, quoted); got != "alert" {
+			t.Errorf("%s: quoted interpreter write through keylink = %s, want alert", connectorName, got)
 		}
 	}
 	want := verdict(t, "claudecode", literal)

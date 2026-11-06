@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -50,8 +51,11 @@ func TestR105CodexWindowsShellPrintedTildeIsText(t *testing.T) {
 				resp := api.evaluateCodexHook(t.Context(), codexHookRequest{
 					HookEventName: "PreToolUse", ToolName: tool, CWD: t.TempDir(), ToolInput: input,
 				})
-				if got := resp.Action == "block"; got != tc.block {
-					t.Errorf("block=%t want %t: action=%s raw=%s rules=%v reason=%s", got, tc.block, resp.Action, resp.RawAction, resp.RuleIDs, resp.Reason)
+				// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+				// A row that writes the keys file (block) gets the keys alert.
+				keysAlert := resp.Action == "alert" && strings.Contains(resp.Reason, "persistence.ssh_authorized_keys_command")
+				if resp.Action == "block" || keysAlert != tc.block {
+					t.Errorf("keys alert=%t want %t: action=%s raw=%s rules=%v reason=%s", keysAlert, tc.block, resp.Action, resp.RawAction, resp.RuleIDs, resp.Reason)
 				}
 			})
 		}
