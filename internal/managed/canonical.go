@@ -800,13 +800,27 @@ func (paths ManagedDataPaths) targets() []managedDataTarget {
 // (the hook guardian, the CMID broker, the installer) may call it; inside the
 // gateway service it degrades to AssessWindowsManagedDataPaths. On other
 // platforms every result is CanonicalUnsupported.
+//
+// On standalone an object an untrusted principal can write or owns (data_dir,
+// its hooks folder and tokens, the audit and judge databases, the redaction
+// key, the log) is not repaired: it is reported as a boundary finding with
+// the way out and left as it is, whatever AllowUntrustedOwnerTransfer says,
+// as RepairWindowsManagedInstall does (g582 round 4). The redaction key is
+// rotated by the gateway instead. Trusted-only drift keeps the repair.
 func RepairWindowsManagedDataPaths(paths ManagedDataPaths, opts CanonicalOptions) []CanonicalResult {
 	targets := paths.targets()
 	if !windowsDescriptorPlatform() {
 		return unsupportedCanonicalResults(targets)
 	}
+	refuseDrift := managedInstallRefusesContentDrift()
 	results := make([]CanonicalResult, 0, len(targets))
 	for _, target := range targets {
+		if refuseDrift {
+			if refused, ok := refuseStandaloneDataPathRepair(target, opts); ok {
+				results = append(results, refused)
+				continue
+			}
+		}
 		result, _ := EnsureCanonical(target.path, target.kind, opts)
 		results = append(results, result)
 	}
