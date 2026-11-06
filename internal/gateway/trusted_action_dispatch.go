@@ -156,6 +156,9 @@ type trustedActionRequest struct {
 	LegacyText         string
 	Connector          string
 	EnforcementCapable bool
+	// StrictPolicy grades an unverifiable extra argument as a block.
+	StrictPolicy               bool
+	UnknownKeyPossibleOverflow bool
 	// ArtifactBody is set when LegacyText and Input.Command are the whole
 	// body of a script the call runs (the artifact lane): its comments and
 	// data are not tool-call text, so a migrated literal rule must match a

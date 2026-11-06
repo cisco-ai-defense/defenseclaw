@@ -3598,6 +3598,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			conflictSource:          conflictSource,
 			Connector:               req.ConnectorName,
 			EnforcementCapable:      enforcementCapable,
+			StrictPolicy:            a.strictPolicyTierForHook(ctx, req.ConnectorName),
 			ManagedHookOverflowHold: managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
 			ResolvedWriteTargets:    resolvedWritesFromContext(ctx),
 			patchTarget:             hermesV4APatch,

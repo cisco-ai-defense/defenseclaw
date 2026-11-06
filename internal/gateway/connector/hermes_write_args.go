@@ -46,6 +46,8 @@ const HermesMaxPatchTargets = 256
 type HermesWriteView struct {
 	Tool string
 	Args json.RawMessage
+	// PossibleOverflow marks extra-key values past the count or depth bound.
+	PossibleOverflow bool
 	// Path is the target as the call names it ("" for the unverified view).
 	Path string
 
@@ -143,7 +145,7 @@ var hermesReviewedKeys = map[string][]string{
 // not read: Hermes ignores such a key, but a key outside the reviewed
 // schema must not become a place to name a target the rules never see
 // (gas-ux-r1 GAP-0076, actionfacts.UnknownKeyTwins). Past the bound the
-// call is the unverified view as well.
+// gateway receives a Possible overflow marker.
 func withHermesHiddenTargets(tool string, views []HermesWriteView, args json.RawMessage) []HermesWriteView {
 	if len(views) == 0 || views[0].pathKey == "" {
 		return views
@@ -153,20 +155,27 @@ func withHermesHiddenTargets(tool string, views []HermesWriteView, args json.Raw
 		return views
 	}
 	reviewed := hermesReviewedKeys[tool]
+	count, possible := 0, false
 	for _, key := range slices.Sorted(maps.Keys(fields)) {
 		if slices.Contains(reviewed, key) {
 			continue
 		}
 		targets, overflow := actionfacts.PathShapedArgumentValues(fields[key])
+		possible = possible || overflow
 		for _, target := range targets {
+			count++
+			if count > 16 {
+				possible = true
+				continue
+			}
 			if retargeted, ok := views[0].Retarget(target); ok {
 				views = append(views, HermesWriteView{Tool: views[0].Tool, Args: retargeted, Path: target,
 					fields: views[0].fields, pathKey: views[0].pathKey})
 			}
 		}
-		if overflow {
-			return append(views, hermesUnverifiedView())
-		}
+	}
+	if possible {
+		views = append(views, HermesWriteView{PossibleOverflow: true})
 	}
 	return views
 }

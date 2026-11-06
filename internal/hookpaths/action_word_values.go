@@ -21,6 +21,36 @@ import (
 // an unset, append, read or command substitution changed it.
 type actionValues map[string]string
 
+// DeclaredRedirectWriteOperands lists a variable redirect whose pathname was
+// established by a preceding declaration. The client resolves these paths
+// through links before a managed gateway loses access to the caller's home.
+func DeclaredRedirectWriteOperands(command, cwd, home string) []string {
+	file, ok := parseShell(command)
+	if !ok || !filepath.IsAbs(cwd) {
+		return nil
+	}
+	values := actionValues{"HOME": home, "PWD": cwd}
+	declared := false
+	var paths []string
+	for _, stmt := range file.Stmts {
+		if _, ok := stmt.Cmd.(*syntax.DeclClause); ok {
+			declared = true
+		}
+		if declared {
+			for _, redirect := range stmt.Redirs {
+				if redirect.Word == nil || !actionOutputRedirect(redirect.Op) || !wordExpandsParameter(redirect.Word) {
+					continue
+				}
+				if value, known := actionWordValue(redirect.Word, values, cwd, home); known && value != "" {
+					paths = append(paths, OperandPath(value, cwd))
+				}
+			}
+		}
+		actionUpdateValues(stmt, values, cwd, home)
+	}
+	return paths
+}
+
 const actionReadonlyValuePrefix = "\x00readonly:"
 
 // AdjacentAssignedWriteOperands proves a redirect whose immediately preceding

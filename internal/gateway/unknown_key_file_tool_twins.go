@@ -5,14 +5,9 @@ package gateway
 
 import "github.com/defenseclaw/defenseclaw/internal/actionfacts"
 
-// unknownKeyFileToolOverflowTitle is the reason of the conservative block of
-// a file-write tool call whose unknown argument keys hold more possible
-// targets than are judged.
-const unknownKeyFileToolOverflowTitle = "File-write tool call names too many possible files in arguments outside its reviewed schema to verify; remove the extra arguments"
-
 // unknownKeyTwinRequests are the requests for the readings of a file-tool
-// call whose parse is partial only because of argument keys outside its
-// reviewed schema (actionfacts.UnknownKeyTwins): the call without those
+// call with argument keys outside its reviewed schema
+// (actionfacts.UnknownKeyTwins): the call without those
 // keys, and the same tool aimed at each path-shaped value they hold. Each
 // reading is judged by every lane, so an extra key never hides the file a
 // call names from a path rule, the state-write block or the credential and
