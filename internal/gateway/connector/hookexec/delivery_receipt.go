@@ -116,9 +116,10 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 		}
 		timer := time.NewTimer(wait)
 		defer timer.Stop()
-		// Verify the accepted peer during the compatibility window. The
-		// probe never adds time to an older gateway's body release, while a
-		// matching current gateway can keep this body for its later 103.
+		// Start peer verification during the compatibility window. A
+		// completed older-gateway check releases on that window; an
+		// unfinished check follows the request deadline so a matching
+		// current gateway can still advertise its later 103.
 		var verified <-chan bool
 		var cancelProbe context.CancelFunc = func() {}
 		startProbe := func() {
@@ -138,7 +139,15 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 			}
 			// The health request must not inherit the POST's HTTP trace: a
 			// health response cannot advertise receipt support for the POST.
+			// A request with an answer deadline can still receive its 103
+			// after the compatibility wait. Keep the peer check within that
+			// existing deadline; a prompt older-gateway response still releases
+			// the body at the compatibility wait.
 			probeCtx, cancel := context.WithTimeout(context.Background(), wait)
+			if deadline, ok := req.Context().Deadline(); ok {
+				cancel()
+				probeCtx, cancel = context.WithDeadline(context.Background(), deadline)
+			}
 			stopCancel := context.AfterFunc(req.Context(), cancel)
 			cancelProbe = func() {
 				stopCancel()
@@ -185,6 +194,23 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 					}
 					verified = nil
 				default:
+				}
+			}
+			if verified != nil {
+				// The accepted process may still be answering the peer
+				// check. Releasing now would consume its receipt channel
+				// before a delayed 103 can arrive.
+				select {
+				case same := <-verified:
+					if same {
+						awaitReceipt()
+						return
+					}
+					verified = nil
+				case <-delivery.ready:
+					return
+				case <-req.Context().Done():
+					return
 				}
 			}
 			if starting != nil && starting(req.Context()) {
@@ -253,10 +279,10 @@ func gatewayServiceNotServing(state gatewayServiceState) bool {
 func hookDeliveryWait(opts Options) time.Duration {
 	wait := hookDeliveryCapabilityWait
 	if !opts.ManagedEnterprise && !opts.answerBy.IsZero() {
-		// Preserve the short-window retry reserve. Peer verification runs
-		// within this wait and never extends an older gateway's answer.
+		// Preserve the short-window retry reserve. A peer that answers
+		// without receipt support gets its original body-release budget.
 		remaining := max(time.Until(opts.answerBy), 0)
-		wait = min(330*time.Millisecond, remaining/2)
+		wait = min(hookDeliveryCapabilityWait, remaining/2)
 		if remaining <= 2*hookDeliveryCapabilityWait {
 			wait = remaining / 4
 		}
@@ -299,10 +325,10 @@ func hookDeliveryCurrentGateway(ctx context.Context, client *http.Client, target
 	conn := healthConn
 	connMu.Unlock()
 	return resp.StatusCode == http.StatusOK && resp.Header.Get(HookDeliveryCapabilityHeader) == "1" &&
-		hookDeliverySameGateway(postConn, conn)
+		hookDeliverySameGateway(ctx, postConn, conn)
 }
 
-func hookDeliverySameGateway(postConn, healthConn net.Conn) bool {
+func hookDeliverySameGateway(ctx context.Context, postConn, healthConn net.Conn) bool {
 	if postConn == nil || healthConn == nil {
 		return false
 	}
@@ -318,8 +344,8 @@ func hookDeliverySameGateway(postConn, healthConn net.Conn) bool {
 	if postRemote.String() != healthRemote.String() {
 		return false
 	}
-	postPID, postOK := perUserConnectedPeerPID(postClient, postServer)
-	healthPID, healthOK := perUserConnectedPeerPID(healthClient, healthServer)
+	postPID, postOK := perUserConnectedPeerPIDWithin(ctx, postClient, postServer)
+	healthPID, healthOK := perUserConnectedPeerPIDWithin(ctx, healthClient, healthServer)
 	return postOK && healthOK && postPID == healthPID
 }
 

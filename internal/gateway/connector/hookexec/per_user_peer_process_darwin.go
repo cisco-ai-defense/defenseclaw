@@ -19,7 +19,11 @@ import (
 // system clock, and not one of the post-deadline proof budgets that the proof
 // clock decides (internal/proofclock).
 func perUserConnectedPeerPID(client, server *net.TCPAddr) (int, bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	return perUserConnectedPeerPIDWithin(context.Background(), client, server)
+}
+
+func perUserConnectedPeerPIDWithin(parent context.Context, client, server *net.TCPAddr) (int, bool) {
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
 	owners, err := darwinSocketOwnerPIDs(ctx, server, client, darwinTCPEstablished)
 	if err != nil || len(owners) != 1 {
