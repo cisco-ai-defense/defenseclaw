@@ -303,13 +303,16 @@ func (e *ErrUnsupportedVersion) Error() string {
 	return fmt.Sprintf("OpenShell %s is not supported; DefenseClaw drives >=%s <%s", e.Found, SupportedMin, SupportedBelow)
 }
 
-// ErrSandboxRelease reports a supported OpenShell release older than
-// SupportedMin, which DefenseClaw creates and starts no sandbox on.
+// ErrSandboxRelease reports a release older than SupportedMin, which
+// DefenseClaw creates and starts no sandbox on.
 type ErrSandboxRelease struct {
 	Found Version
 }
 
 func (e *ErrSandboxRelease) Error() string {
+	if err := CheckConnects(e.Found); err != nil {
+		return err.Error()
+	}
 	return fmt.Sprintf("OpenShell %s runs no DefenseClaw sandbox: OpenShell %s or later is required; upgrade OpenShell to %s in place",
 		e.Found, SupportedMin, InstallerVersion)
 }
