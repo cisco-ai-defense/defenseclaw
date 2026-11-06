@@ -150,6 +150,7 @@ func (a *APIServer) skillSourcePaths(ctx context.Context, connector, cwd string,
 	for _, root := range assetfacts.SkillRoots(connector, hookActiveHome(ctx), cwd) {
 		dir := filepath.Join(root, name)
 		if reason, _ := a.projectSkills.refusal(root, time.Now()); reason != "" {
+			selected := false
 			for key, selectedName := range facts {
 				if !strings.HasPrefix(key, hookpaths.ProjectSkillSelectedPrefix) || !config.SameAssetName(selectedName, name) {
 					continue
@@ -157,6 +158,16 @@ func (a *APIServer) skillSourcePaths(ctx context.Context, connector, cwd string,
 				selectedDir := strings.TrimPrefix(key, hookpaths.ProjectSkillSelectedPrefix)
 				if projectRootKey(filepath.Dir(selectedDir)) == projectRootKey(root) {
 					paths = append(paths, selectedDir)
+					selected = true
+				}
+			}
+			// A named folder visible to this gateway is positive evidence too.
+			// An absent folder cannot make an unrelated selection inherit the
+			// refused root's decision.
+			if !selected {
+				if info, err := os.Lstat(dir); err == nil && (info.IsDir() || info.Mode()&os.ModeSymlink != 0) ||
+					err != nil && !errors.Is(err, fs.ErrNotExist) {
+					paths = append(paths, dir)
 				}
 			}
 			continue
@@ -587,6 +598,15 @@ func (a *APIServer) noteExcludedProjectSkillFolders(ctx context.Context, connect
 		case hookpaths.ProjectSkillRootUnreadable:
 			reason = "the calling user could not verify the project skill folder"
 		default:
+			// A missing adverse fact cannot clear a refusal. The caller's
+			// positive inspection, or a gateway inspection where permitted,
+			// can retire a repaired root's caller finding.
+			if prior, _, callerFinding := a.projectSkills.refusalWithPolicyMode(folder, time.Now()); prior != "" && callerFinding {
+				if (callerVerifiedProjectSkillRoot(facts, folder) ||
+					gatewayVerifiedProjectSkillRoot(home, folder)) && a.projectSkills.clearCallerRefusal(folder) && a.health != nil {
+					a.health.SetWatcherDetail(projectSkillRootsUnverifiedDetail, len(a.projectSkills.unverifiedFolders()))
+				}
+			}
 			continue
 		}
 		if previous, _ := a.projectSkills.refusal(folder, time.Now()); previous == reason {
@@ -598,6 +618,32 @@ func (a *APIServer) noteExcludedProjectSkillFolders(ctx context.Context, connect
 			a.health.SetWatcherDetail(projectSkillRootsUnverifiedDetail, len(a.projectSkills.unverifiedFolders()))
 		}
 	}
+}
+
+func callerVerifiedProjectSkillRoot(facts map[string]string, folder string) bool {
+	for key, value := range facts {
+		if value == "1" && strings.HasPrefix(key, hookpaths.ProjectSkillRootVerifiedPrefix) &&
+			projectRootKey(strings.TrimPrefix(key, hookpaths.ProjectSkillRootVerifiedPrefix)) == projectRootKey(folder) {
+			return true
+		}
+	}
+	return false
+}
+
+func gatewayVerifiedProjectSkillRoot(home, folder string) bool {
+	if gatewaySkillPathCheck(folder) != nil {
+		return false
+	}
+	realHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		return false
+	}
+	realFolder, err := filepath.EvalSymlinks(folder)
+	if err != nil || !insideHome(realHome, realFolder) {
+		return false
+	}
+	info, err := os.Stat(realFolder)
+	return err == nil && info.IsDir()
 }
 
 // projectSkillLstat is os.Lstat; tests stand in for a service account that
@@ -684,21 +730,21 @@ func (a *APIServer) projectSkillScanPending(targetType, connector, surface strin
 		return config.AssetPolicyDecision{}, false
 	}
 	for _, path := range paths {
-		// A hidden folder is not enumerated by the rescan, so it never gets
-		// a baseline to wait for.
-		if strings.TrimSpace(path) == "" || strings.HasPrefix(filepath.Base(path), ".") {
+		if strings.TrimSpace(path) == "" {
 			continue
 		}
 		dir := filepath.Dir(path)
-		if reason, _, policyModeAware := a.projectSkills.refusalWithPolicyMode(dir, time.Now()); reason != "" {
+		if reason, _ := a.projectSkills.refusal(dir, time.Now()); reason != "" {
 			name := filepath.Base(path)
 			decision := runtimeAssetDisableBlockDecision("skill", name, connector, surface,
 				fmt.Sprintf("skill %q in %s is refused: DefenseClaw could not verify this project skill folder (%s)", name, dir, reason),
 				"project-skill-unverified")
-			if cfg := a.liveConfig(); policyModeAware && cfg != nil && cfg.EffectiveAssetPolicyModeForConnector(connector) == config.AssetPolicyModeObserve {
-				decision.Mode, decision.Action, decision.WouldBlock = config.AssetPolicyModeObserve, "allow", true
-			}
 			return decision, true
+		}
+		// A hidden folder is not enumerated by the rescan, so it never gets
+		// a baseline to wait for. A recorded root refusal still applies.
+		if strings.HasPrefix(filepath.Base(path), ".") {
+			continue
 		}
 		if a.store == nil {
 			continue

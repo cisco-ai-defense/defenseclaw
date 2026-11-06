@@ -43,6 +43,19 @@ func TestGAP0621SelectedSkillEvidenceIsNarrow(t *testing.T) {
 	}
 }
 
+func TestGAP0621CodexPromptSelectionUsesFirstToken(t *testing.T) {
+	for prompt, want := range map[string]string{
+		"$sample Continue.": "sample",
+		"Use $sample":       "",
+		"$sample, Continue": "",
+		"$../sample":        "",
+	} {
+		if got := CodexSelectedSkillName(prompt); got != want {
+			t.Errorf("prompt %q selected %q, want %q", prompt, got, want)
+		}
+	}
+}
+
 func TestGAP0621ProjectSkillRootClassification(t *testing.T) {
 	base := t.TempDir()
 	home := filepath.Join(base, "home")

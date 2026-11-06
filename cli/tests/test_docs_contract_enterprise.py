@@ -244,7 +244,7 @@ FACTS = [
         (('enterprise/windows.mdx',),
          '`project_skill_roots_unverified`, and enterprise status shows a'),
         (('enterprise/windows.mdx',),
-         '`asset_policy.mode: action` refuses its skills; observe mode allows them with a warning'),
+         'root is refused in every asset policy mode until a fresh caller inspection'),
     ]),
     ('gap_0289_invalid_machine_policy_is_config_invalid', [
         (('enterprise/troubleshooting.mdx',),
