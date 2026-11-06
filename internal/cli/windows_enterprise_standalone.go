@@ -829,11 +829,13 @@ func runWindowsEnterpriseStandaloneAction(
 		replaced, err := installWindowsEnterpriseSuppliedConfigOverRefused(opts.configPath)
 		if err == nil && replaced.kept != "" {
 			configReplaced = append(configReplaced, windowsEnterpriseReplacedFileChange("config.yaml", replaced, action))
+			opts.rewrittenBeforeLifecycle = append(opts.rewrittenBeforeLifecycle, "config.yaml")
 		}
 		if err == nil {
 			replaced, err = installWindowsEnterpriseApprovedManifestOverDrift(ctx, windowsEnterpriseEnsureEnumerationLogger(cmd, opts), opts.configPath, opts.manifestPath)
 			if err == nil && replaced.kept != "" {
 				configReplaced = append(configReplaced, windowsEnterpriseReplacedFileChange("targets.yaml", replaced, action))
+				opts.rewrittenBeforeLifecycle = append(opts.rewrittenBeforeLifecycle, "targets.yaml")
 			}
 		}
 		if err != nil {
@@ -3243,6 +3245,7 @@ func finishWindowsEnterpriseStandalone(
 		}
 	}
 	addWindowsEnterprisePipeWaitWarning(result, opts)
+	noteWindowsEnterpriseRewriteBeforeRefusal(result, opts.rewrittenBeforeLifecycle)
 	deliveredBundle := opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil
 	finishWindowsEnterpriseBundle(cmd, opts, result)
 	if result.Bundle != nil && result.Bundle.State == enterprisebundle.StateApplied &&
@@ -4381,11 +4384,13 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 				keptConfig = replaced.kept
 			}
 			result.Changes = append(result.Changes, windowsEnterpriseReplacedFileChange("config.yaml", replaced, plan.Action))
+			opts.rewrittenBeforeLifecycle = append(opts.rewrittenBeforeLifecycle, "config.yaml")
 		}
 		if err == nil {
 			replaced, err = installWindowsEnterpriseApprovedManifestOverDrift(ctx, windowsEnterpriseEnsureEnumerationLogger(cmd, opts), opts.configPath, opts.manifestPath)
 			if err == nil && replaced.kept != "" {
 				result.Changes = append(result.Changes, windowsEnterpriseReplacedFileChange("targets.yaml", replaced, plan.Action))
+				opts.rewrittenBeforeLifecycle = append(opts.rewrittenBeforeLifecycle, "targets.yaml")
 			}
 		}
 		if err != nil {

@@ -216,6 +216,10 @@ type windowsEnterpriseLifecycleOptions struct {
 	// the check of a supplied config changed
 	// (noteWindowsEnterpriseRefusalRecovery).
 	recoveryChanges []string
+	// rewrittenBeforeLifecycle names the managed files (config.yaml,
+	// targets.yaml) Setup wrote new from the approved source before the
+	// lifecycle ran (noteWindowsEnterpriseRewriteBeforeRefusal).
+	rewrittenBeforeLifecycle []string
 	// activationStartedAt is when a standalone change action started, and
 	// installedBeforeRun whether a deployment was installed then: a run
 	// that installs one records its activation (GAP-0967), dated when the
