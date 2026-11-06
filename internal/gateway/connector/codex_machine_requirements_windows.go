@@ -127,12 +127,7 @@ func ReconcileWindowsCodexMachineRequirements(
 		if err != nil {
 			return err
 		}
-		managedState, err := readWindowsCodexMachineFile(
-			opts.ManagedStatePath,
-			windowsCodexManagedStateLimit,
-			true,
-			"Codex managed runtime state",
-		)
+		managedState, err := readWindowsCodexManagedState(opts.ManagedStatePath, true)
 		if err != nil {
 			return err
 		}
@@ -336,12 +331,7 @@ func ReconcileWindowsCodexMachineRequirements(
 			}
 		}
 		if runtimeChanged {
-			if err := writeWindowsCodexMachineFile(
-				opts.ManagedStatePath,
-				runtimeBytes,
-				windowsCodexManagedStateLimit,
-				"Codex managed runtime state",
-			); err != nil {
+			if err := writeWindowsCodexManagedState(opts.ManagedStatePath, runtimeBytes); err != nil {
 				return err
 			}
 		}
@@ -377,16 +367,19 @@ func ReconcileWindowsCodexMachineRequirements(
 		}
 		return verifyWindowsCodexMachineRequirementsLocked(opts, nil)
 	}
-	err := withWindowsCodexMachineMutation(opts, func() error {
-		for attempt := 1; ; attempt++ {
-			err := reconcile()
-			if !errors.Is(err, errWindowsCodexMachineFileChanged) || attempt == windowsCodexMachineReconcileAttempts {
-				return err
+	err := withWindowsCodexRequirementsReleaseRetry(opts.RequirementsPath, func() error {
+		return withWindowsCodexMachineMutation(opts, func() error {
+			for attempt := 1; ; attempt++ {
+				err := reconcile()
+				if !errors.Is(err, errWindowsCodexMachineFileChanged) || attempt == windowsCodexMachineReconcileAttempts {
+					return err
+				}
 			}
-		}
+		})
 	})
 	if err != nil {
 		report.Error = err.Error()
+		report.RequirementsHeldBy = windowsCodexRequirementsHeldBy(err)
 		return report, err
 	}
 	report.OK = true
@@ -438,12 +431,7 @@ func VerifyWindowsCodexMachineRequirements(
 			if readErr != nil {
 				return readErr
 			}
-			managedState, readErr := readWindowsCodexMachineFile(
-				opts.ManagedStatePath,
-				windowsCodexManagedStateLimit,
-				true,
-				"Codex managed runtime state",
-			)
+			managedState, readErr := readWindowsCodexManagedState(opts.ManagedStatePath, true)
 			if readErr != nil {
 				return readErr
 			}
@@ -494,12 +482,7 @@ func VerifyWindowsCodexMachineRequirements(
 		if err != nil {
 			return err
 		}
-		managedState, err := readWindowsCodexMachineFile(
-			opts.ManagedStatePath,
-			windowsCodexManagedStateLimit,
-			false,
-			"Codex managed runtime state",
-		)
+		managedState, err := readWindowsCodexManagedState(opts.ManagedStatePath, false)
 		if err != nil {
 			return err
 		}
@@ -650,12 +633,7 @@ func removeWindowsCodexMachineRequirements(
 		if err != nil {
 			return err
 		}
-		managedState, err := readWindowsCodexMachineFile(
-			opts.ManagedStatePath,
-			windowsCodexManagedStateLimit,
-			true,
-			"Codex managed runtime state",
-		)
+		managedState, err := readWindowsCodexManagedState(opts.ManagedStatePath, true)
 		if err != nil {
 			return err
 		}
@@ -762,7 +740,7 @@ func removeWindowsCodexMachineRequirements(
 			return fmt.Errorf("%s %w before removal could commit", "Codex machine requirements", errWindowsCodexMachineFileChanged)
 		}
 		if managedState.existed {
-			if err := deleteWindowsCodexMachineFile(opts.ManagedStatePath, "Codex managed runtime state"); err != nil {
+			if err := deleteWindowsCodexManagedState(opts.ManagedStatePath); err != nil {
 				return err
 			}
 			report.ManagedStateRemoved = true
@@ -776,16 +754,19 @@ func removeWindowsCodexMachineRequirements(
 		report.ManagedStateRemovedOrAbsent = true
 		return nil
 	}
-	err = withWindowsCodexMachineMutation(opts, func() error {
-		for attempt := 1; ; attempt++ {
-			err := remove()
-			if !errors.Is(err, errWindowsCodexMachineFileChanged) || attempt == windowsCodexMachineReconcileAttempts {
-				return err
+	err = withWindowsCodexRequirementsReleaseRetry(opts.RequirementsPath, func() error {
+		return withWindowsCodexMachineMutation(opts, func() error {
+			for attempt := 1; ; attempt++ {
+				err := remove()
+				if !errors.Is(err, errWindowsCodexMachineFileChanged) || attempt == windowsCodexMachineReconcileAttempts {
+					return err
+				}
 			}
-		}
+		})
 	})
 	if err != nil {
 		report.Error = err.Error()
+		report.RequirementsHeldBy = windowsCodexRequirementsHeldBy(err)
 		return report, err
 	}
 	report.OK = true
@@ -829,12 +810,7 @@ func PublishWindowsCodexManagedRuntimeTargets(
 		if err != nil {
 			return err
 		}
-		return writeWindowsCodexMachineFile(
-			opts.ManagedStatePath,
-			data,
-			windowsCodexManagedStateLimit,
-			"Codex managed runtime state",
-		)
+		return writeWindowsCodexManagedState(opts.ManagedStatePath, data)
 	})
 }
 
@@ -862,12 +838,7 @@ func RemoveWindowsCodexManagedRuntimeTarget(
 		if err != nil {
 			return err
 		}
-		stateFile, err := readWindowsCodexMachineFile(
-			opts.ManagedStatePath,
-			windowsCodexManagedStateLimit,
-			false,
-			"Codex managed runtime state",
-		)
+		stateFile, err := readWindowsCodexManagedState(opts.ManagedStatePath, false)
 		if err != nil {
 			return err
 		}
@@ -891,12 +862,7 @@ func RemoveWindowsCodexManagedRuntimeTarget(
 		if err != nil {
 			return err
 		}
-		return writeWindowsCodexMachineFile(
-			opts.ManagedStatePath,
-			body,
-			windowsCodexManagedStateLimit,
-			"Codex managed runtime state",
-		)
+		return writeWindowsCodexManagedState(opts.ManagedStatePath, body)
 	})
 }
 
@@ -916,8 +882,10 @@ func ResolveWindowsCodexManagedRuntimeRegistry(
 	statePath := filepath.Join(filepath.Dir(requirementsPath), windowsCodexManagedStateFile)
 	writerLockPath := filepath.Join(filepath.Dir(requirementsPath), WindowsCodexManagedWriterLockFile)
 	legacyLockPath := filepath.Join(filepath.Dir(requirementsPath), windowsCodexManagedLegacyLockFile)
-	resolve := func() (WindowsCodexManagedRuntimeRegistry, error) {
-		return resolveWindowsCodexManagedRuntimeRegistryLocked(requirementsPath, statePath, hookExecutable)
+	// resolve reads the state from stateFile: the hook copy the even counter
+	// names once a writer of this release has run, the fixed name before.
+	resolve := func(stateFile string) (WindowsCodexManagedRuntimeRegistry, error) {
+		return resolveWindowsCodexManagedRuntimeRegistryLocked(requirementsPath, statePath, stateFile, hookExecutable)
 	}
 	writerLock, err := windowsCodexMachinePathExists(writerLockPath)
 	if err != nil {
@@ -935,7 +903,9 @@ func ResolveWindowsCodexManagedRuntimeRegistry(
 		// yet. Every writer creates its lock before it changes a file, so a
 		// writer lock that exists after this read means one may have run
 		// during it, and the read is taken again against the counter.
-		result, err = resolveWindowsCodexManagedRuntimeRegistryLegacy(legacyLockPath, resolve)
+		result, err = resolveWindowsCodexManagedRuntimeRegistryLegacy(legacyLockPath, func() (WindowsCodexManagedRuntimeRegistry, error) {
+			return resolve(statePath)
+		})
 		started, existsErr := windowsCodexMachinePathExists(writerLockPath)
 		if existsErr != nil {
 			return WindowsCodexManagedRuntimeRegistry{}, existsErr
@@ -981,12 +951,13 @@ var windowsCodexReaderWait = windowsCodexMachineLockTimeout
 // lock, so no reader can make a writer wait (GAP-0650), and keeps its result
 // only when the writer lock's transaction counter was even (no transaction
 // running) and unchanged across the whole read: requirements.toml and the
-// state file were then read as one committed pair. Otherwise it reads again.
+// hook copy of the state that counter names were then read as one committed
+// pair. Otherwise it reads again.
 // When no stable read is possible within windowsCodexReaderWait it fails
 // closed, as a timed-out wait for the old lock did.
 func resolveWindowsCodexManagedRuntimeRegistryStable(
 	lockPath string,
-	resolve func() (WindowsCodexManagedRuntimeRegistry, error),
+	resolve func(stateFile string) (WindowsCodexManagedRuntimeRegistry, error),
 ) (WindowsCodexManagedRuntimeRegistry, error) {
 	if err := windowsCodexMachineTrustedDirCheck(filepath.Dir(lockPath), "Codex machine policy lock parent"); err != nil {
 		return WindowsCodexManagedRuntimeRegistry{}, err
@@ -1001,7 +972,7 @@ func resolveWindowsCodexManagedRuntimeRegistryStable(
 			return WindowsCodexManagedRuntimeRegistry{}, err
 		}
 		if before%2 == 0 {
-			result, resolveErr := resolve()
+			result, resolveErr := resolve(windowsCodexStableStateFile(filepath.Dir(lockPath), before))
 			after, err := windowsCodexTransactionCounterRead(lockPath)
 			if err != nil {
 				return WindowsCodexManagedRuntimeRegistry{}, err
@@ -1023,6 +994,17 @@ func resolveWindowsCodexManagedRuntimeRegistryStable(
 		}
 		time.Sleep(delay)
 	}
+}
+
+// windowsCodexStableStateFile is the state file a stable read at counter
+// uses: the hook copy the counter names. A counter of 0 is a writer lock no
+// transaction has used yet (a writer of this release creating it on a host
+// that 1.0.8 set up), whose state is still the fixed name.
+func windowsCodexStableStateFile(dir string, counter uint64) string {
+	if counter == 0 {
+		return filepath.Join(dir, windowsCodexManagedStateFile)
+	}
+	return windowsCodexManagedStateGenerationPath(dir, counter)
 }
 
 // resolveWindowsCodexManagedRuntimeRegistryLegacy reads under the shared lock
@@ -1085,9 +1067,13 @@ func windowsCodexWriterLockCounter(handle windows.Handle) (uint64, error) {
 	return uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow), nil
 }
 
+// resolveWindowsCodexManagedRuntimeRegistryLocked reads requirementsPath and
+// the state in stateFile; statePath is the logical state path the identity
+// checks name.
 func resolveWindowsCodexManagedRuntimeRegistryLocked(
 	requirementsPath string,
 	statePath string,
+	stateFile string,
 	hookExecutable string,
 ) (WindowsCodexManagedRuntimeRegistry, error) {
 	var result WindowsCodexManagedRuntimeRegistry
@@ -1095,7 +1081,7 @@ func resolveWindowsCodexManagedRuntimeRegistryLocked(
 	if err != nil {
 		return result, err
 	}
-	stateExists, err := windowsCodexMachinePathExists(statePath)
+	stateExists, err := windowsCodexMachinePathExists(stateFile)
 	if err != nil {
 		return result, err
 	}
@@ -1138,8 +1124,8 @@ func resolveWindowsCodexManagedRuntimeRegistryLocked(
 	if err := verifyWindowsCodexRequirementsBytes(requirements.data, identityOpts); err != nil {
 		return result, fmt.Errorf("verify active Codex machine requirements: %w", err)
 	}
-	stateFile, err := readWindowsCodexMachineFile(
-		statePath,
+	stateCopy, err := readWindowsCodexMachineFile(
+		stateFile,
 		windowsCodexManagedStateLimit,
 		false,
 		"Codex managed runtime state",
@@ -1147,7 +1133,7 @@ func resolveWindowsCodexManagedRuntimeRegistryLocked(
 	if err != nil {
 		return result, err
 	}
-	state, err := parseWindowsCodexManagedRuntimeState(stateFile.data)
+	state, err := parseWindowsCodexManagedRuntimeState(stateCopy.data)
 	if err != nil {
 		return result, fmt.Errorf("parse Codex managed runtime state: %w", err)
 	}
@@ -1290,12 +1276,7 @@ func verifyWindowsCodexMachineRequirementsLocked(
 	if state.PostimageSHA256 != hash {
 		managedPinMismatch(opts.RequirementsPath, "ownership postimage", state.PostimageSHA256, hash)
 	}
-	managedState, err := readWindowsCodexMachineFile(
-		opts.ManagedStatePath,
-		windowsCodexManagedStateLimit,
-		false,
-		"Codex managed runtime state",
-	)
+	managedState, err := readWindowsCodexManagedState(opts.ManagedStatePath, false)
 	if err != nil {
 		return err
 	}
@@ -1560,23 +1541,40 @@ func withWindowsCodexMachinePolicyLock(
 	}
 	defer windows.CloseHandle(lock)
 	defer windows.UnlockFileEx(lock, 0, 1, 0, overlapped)
-	end, err := beginWindowsCodexTransaction(lock)
+	end, err := beginWindowsCodexTransaction(lock, func(counter uint64) bool {
+		return windowsCodexStateGenerationTaken(dir, counter)
+	})
 	if err != nil {
 		return err
 	}
+	// The state is committed while the counter is still odd, and the hook
+	// copy is closed before the counter becomes even.
+	state, stateErr := beginWindowsCodexManagedState(dir, end)
 	defer func() {
+		if state != nil {
+			windowsCodexActiveManagedState = nil
+			if commitErr := state.commit(); commitErr != nil {
+				err = errors.Join(err, fmt.Errorf("commit the Codex managed runtime state: %w", commitErr))
+			}
+		}
 		if endErr := setWindowsCodexTransactionCounter(lock, end); endErr != nil {
 			err = errors.Join(err, fmt.Errorf("end the Codex machine policy transaction: %w", endErr))
 		}
 	}()
+	if stateErr != nil {
+		return stateErr
+	}
+	windowsCodexActiveManagedState = state
 	removeWindowsCodexLegacyLock(filepath.Join(dir, windowsCodexManagedLegacyLockFile))
 	return fn()
 }
 
 // beginWindowsCodexTransaction makes the counter odd and returns the even
 // value that ends the transaction. An odd counter on entry is a writer that
-// stopped mid-transaction; the new odd value still differs from it.
-func beginWindowsCodexTransaction(lock windows.Handle) (uint64, error) {
+// stopped mid-transaction; the new odd value still differs from it. An end
+// value taken reports is skipped: a hook copy of the state named for it is
+// still held open from before the counter wrapped.
+func beginWindowsCodexTransaction(lock windows.Handle, taken func(uint64) bool) (uint64, error) {
 	counter, err := windowsCodexWriterLockCounter(lock)
 	if err != nil {
 		return 0, err
@@ -1585,8 +1583,14 @@ func beginWindowsCodexTransaction(lock windows.Handle) (uint64, error) {
 	if counter%2 == 1 {
 		start = counter + 2
 	}
-	if start >= windowsCodexTransactionCounterWrap {
-		start = 1
+	for skipped := 0; ; skipped++ {
+		if start >= windowsCodexTransactionCounterWrap {
+			start = 1
+		}
+		if !taken(start+1) || skipped == windowsCodexTransactionCounterWrap/2 {
+			break
+		}
+		start += 2
 	}
 	if err := setWindowsCodexTransactionCounter(lock, start); err != nil {
 		return 0, fmt.Errorf("begin the Codex machine policy transaction: %w", err)
@@ -1900,6 +1904,16 @@ func windowsCodexMachineAnyArtifactPathExists(
 			return false, fmt.Errorf("inspect Codex artifact path %s: %w", path, err)
 		}
 	}
+	// The writer copy and the hook copies of the state.
+	entries, err := os.ReadDir(filepath.Dir(opts.ManagedStatePath))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("inspect Codex artifact folder %s: %w", filepath.Dir(opts.ManagedStatePath), err)
+	}
+	for _, entry := range entries {
+		if windowsCodexManagedStateCopyName(entry.Name()) {
+			return true, nil
+		}
+	}
 	return false, nil
 }
 
@@ -2119,7 +2133,7 @@ func publishWindowsCodexRequirements(base safefile.SharedFile, candidate []byte,
 			Rewrite: !remove && windowsCodexRequirementsUnreadable(current),
 		}, nil
 	})
-	return err
+	return windowsCodexRequirementsHeldFailure(base.Path, err)
 }
 
 // windowsCodexRequirementsUnreadable reports a requirements.toml that is
@@ -2303,8 +2317,12 @@ func windowsCodexMachineSingleLinkCheck(file *os.File) error {
 }
 
 func windowsCodexMachineFileUserReadable(path string) bool {
-	return strings.EqualFold(filepath.Base(path), "requirements.toml") ||
-		strings.EqualFold(filepath.Base(path), windowsCodexManagedStateFile)
+	base := filepath.Base(path)
+	if _, generation := windowsCodexManagedStateGenerationOf(base); generation {
+		return true
+	}
+	return strings.EqualFold(base, "requirements.toml") ||
+		strings.EqualFold(base, windowsCodexManagedStateFile)
 }
 
 func setWindowsCodexMachineFileProtection(path string, userReadable bool) error {

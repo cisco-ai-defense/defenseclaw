@@ -152,6 +152,11 @@ type WindowsCodexMachineRequirementsReport struct {
 	ManagedEvents                 []string `json:"managed_events"`
 	Details                       []string `json:"details,omitempty"`
 	Error                         string   `json:"error,omitempty"`
+	// RequirementsHeldBy names the processes (Restart Manager, "<app> (PID
+	// <n>)") that held requirements.toml open so that it could not be
+	// written (Windows); the enforced policy stayed in place. Empty when
+	// Windows could not tell or the file was not held.
+	RequirementsHeldBy string `json:"requirements_held_by,omitempty"`
 	// PinMismatch reports that a content-hash pin no longer matches the live
 	// requirements bytes. It is advisory: verification still succeeds and the
 	// next privileged reconcile refreshes the pin.
