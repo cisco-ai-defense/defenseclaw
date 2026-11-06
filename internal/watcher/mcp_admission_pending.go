@@ -37,6 +37,12 @@ type MCPAdmissionStatus struct {
 	RetryAfter  time.Duration
 }
 
+type mcpKnownDefinition struct {
+	server config.MCPServerEntry
+	path   string
+	hash   string
+}
+
 // MCPAdmissionPending reports an MCP server with no admission outcome yet
 // and queues admission now (GAP-0112). A server whose definition changed
 // since its outcome is pending the same way (GAP-0216). The hook applies the
@@ -64,6 +70,9 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 	firstCycle := !w.firstCycleDone.Load()
 	servers, err := w.readMCPServers()
 	if err != nil {
+		if failed := w.mcpFailedFromLastRead(q); failed.Failed {
+			return failed
+		}
 		return MCPAdmissionStatus{Name: q.Server, Unavailable: true, RetryAfter: defaultScanTimeout}
 	}
 	var pending []string
@@ -78,16 +87,8 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 			return MCPAdmissionStatus{Name: server.Name, Unavailable: true, RetryAfter: defaultScanTimeout}
 		}
 		matched := err == nil && mcpBaselineMatches(row, server)
-		if err == nil && row != nil {
-			fingerprint := row.ScannerFingerprint
-			if strings.HasSuffix(fingerprint, mcpScanFailedMark) ||
-				strings.HasSuffix(fingerprint, mcpLauncherRefusedMark) ||
-				strings.HasSuffix(fingerprint, unverifiedMCPMark) {
-				if !matched {
-					w.AdmitAddedMCPServers([]string{server.Name})
-				}
-				return MCPAdmissionStatus{Name: server.Name, Failed: true}
-			}
+		if matched && mcpSnapshotFailed(row) {
+			return MCPAdmissionStatus{Name: server.Name, Failed: true}
 		}
 		if matched {
 			continue
@@ -110,6 +111,104 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 	}
 	w.AdmitAddedMCPServers(pending)
 	return MCPAdmissionStatus{Name: pending[0], Pending: true, RetryAfter: w.mcpRetryAfter(pendingPath)}
+}
+
+// mcpFailedFromLastRead uses a prior successful listing only to keep a
+// completed failed scan effective during a source-list outage. The cache
+// holds identity and definition hash, not an old allow or pending verdict.
+func (w *InstallWatcher) mcpFailedFromLastRead(q MCPAdmissionQuery) MCPAdmissionStatus {
+	w.mcpAdmissionMu.RLock()
+	known := append([]mcpKnownDefinition(nil), w.mcpAdmissionKnown...)
+	listed := w.mcpAdmissionListed
+	w.mcpAdmissionMu.RUnlock()
+	for _, definition := range known {
+		if definition.server.Bundled || !mcpServerServesQuery(definition.server, q) {
+			continue
+		}
+		row, err := w.store.GetTargetSnapshot(string(InstallMCP), definition.path)
+		if err == nil && row != nil && row.ContentHash == definition.hash && mcpSnapshotFailed(row) {
+			return MCPAdmissionStatus{Name: definition.server.Name, Failed: true}
+		}
+	}
+	// After a restart the watcher can have durable failed snapshots but no
+	// successful source listing yet. Match their scoped paths until a fresh
+	// listing establishes the definition identities above.
+	if !listed {
+		paths, err := w.store.ListTargetSnapshotPaths(string(InstallMCP))
+		if err == nil {
+			for _, path := range paths {
+				if !mcpSnapshotPathServesQuery(path, q) {
+					continue
+				}
+				row, err := w.store.GetTargetSnapshot(string(InstallMCP), path)
+				if err == nil && mcpSnapshotFailed(row) {
+					return MCPAdmissionStatus{Name: q.Server, Failed: true}
+				}
+			}
+		}
+	}
+	return MCPAdmissionStatus{}
+}
+
+// mcpSnapshotPathServesQuery checks the stored scope when no live server
+// definition has been listed yet. The path is built by MCPEventPath.
+func mcpSnapshotPathServesQuery(path string, q MCPAdmissionQuery) bool {
+	// A scoped path must not be normalized as though its entire key were a
+	// server name; the scope may contain the same punctuation as a tool name.
+	if path == q.Server || (!strings.Contains(path, "@") && config.SameMCPToolServer(q.Connector, path, q.Server)) {
+		return true
+	}
+	if q.Connector == "" {
+		return false
+	}
+	marker := "@" + q.Connector
+	for start := 0; start < len(path); {
+		index := strings.IndexByte(path[start:], '@')
+		if index < 0 {
+			break
+		}
+		index += start
+		start = index + 1
+		if len(path)-index < len(marker) || !strings.EqualFold(path[index:index+len(marker)], marker) {
+			continue
+		}
+		if !config.SameMCPToolServer(q.Connector, path[:index], q.Server) {
+			continue
+		}
+		rest := path[index+len(marker):]
+		switch {
+		case rest == "":
+			return true
+		case strings.HasPrefix(rest, "#"):
+			if q.CWD == "" || mcpFolderWithin(q.CWD, rest[1:]) {
+				return true
+			}
+		case strings.HasPrefix(rest, ":") && q.Home != "":
+			if len(rest) < 1+len(q.Home) || !sameMCPFolder(rest[1:1+len(q.Home)], q.Home) {
+				continue
+			}
+			remaining := rest[1+len(q.Home):]
+			if remaining == "" {
+				return true
+			}
+			if len(remaining) > len(marker) && strings.EqualFold(remaining[:len(marker)], marker) &&
+				remaining[len(marker)] == '#' &&
+				(q.CWD == "" || mcpFolderWithin(q.CWD, remaining[len(marker)+1:])) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func mcpSnapshotFailed(row *audit.SnapshotRow) bool {
+	if row == nil {
+		return false
+	}
+	fingerprint := row.ScannerFingerprint
+	return strings.HasSuffix(fingerprint, mcpScanFailedMark) ||
+		strings.HasSuffix(fingerprint, mcpLauncherRefusedMark) ||
+		strings.HasSuffix(fingerprint, unverifiedMCPMark)
 }
 
 // mcpBaselineMatches reports whether the baseline admission recorded for an
