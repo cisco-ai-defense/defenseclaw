@@ -603,25 +603,38 @@ func sedLongOption(word string) string {
 
 // InPlaceEditOperands lists the files a sed -i or perl -i call of the
 // command edits in place, as absolute paths read in cwd, whatever their
-// parent directory, with every known value expanded (knownValueWord). The editor replaces the directory entry; a caller that
-// follows the name through a link the same command makes to a directory
-// reads the file the edit replaces (GAP-2522).
-func InPlaceEditOperands(command, cwd, home string) []string {
-	return inPlaceEditOperands(command, cwd, home, false)
+// parent directory, with the known values expanded (knownValueWord; user
+// is ActionKnownUser of the whole action). The editor replaces the
+// directory entry; a caller that follows the name through a link the same
+// command makes to a directory reads the file the edit replaces (GAP-2522).
+func InPlaceEditOperands(command, cwd, home, user string) []string {
+	return inPlaceEditOperands(command, cwd, home, user, false)
 }
 
 // FollowedInPlaceEditOperands lists the files a sed -i --follow-symlinks
 // (or gsed) call of the command edits, as absolute paths read in cwd. GNU
 // sed then rewrites the file a link names instead of replacing the link,
 // so a caller follows the operand name itself (GAP-2529).
-func FollowedInPlaceEditOperands(command, cwd, home string) []string {
-	return inPlaceEditOperands(command, cwd, home, true)
+func FollowedInPlaceEditOperands(command, cwd, home, user string) []string {
+	return inPlaceEditOperands(command, cwd, home, user, true)
 }
 
-func inPlaceEditOperands(command, cwd, home string, followedOnly bool) (operands []string) {
+func inPlaceEditOperands(command, cwd, home, user string, followedOnly bool) (operands []string) {
+	readInPlaceEdits(command, cwd, home, user, func(name string, followed bool) {
+		if followed || !followedOnly {
+			operands = append(operands, name)
+		}
+	})
+	return operands
+}
+
+// readInPlaceEdits calls edit with each in-place editor operand of command
+// (InPlaceEditOperands), and whether sed follows its links
+// (FollowedInPlaceEditOperands).
+func readInPlaceEdits(command, cwd, home, user string, edit func(name string, followed bool)) {
 	file, ok := parseShell(command)
 	if !ok || !filepath.IsAbs(cwd) {
-		return nil
+		return
 	}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
@@ -631,7 +644,7 @@ func inPlaceEditOperands(command, cwd, home string, followedOnly bool) (operands
 		words := make([]string, len(call.Args))
 		static := make([]bool, len(call.Args))
 		for i, arg := range call.Args {
-			words[i], static[i] = knownValueWord(arg, home)
+			words[i], static[i] = knownValueWord(arg, home, user)
 		}
 		if index, wrapped := plainWrappedChild(words, static); wrapped {
 			words, static = words[index:], static[index:]
@@ -640,24 +653,20 @@ func inPlaceEditOperands(command, cwd, home string, followedOnly bool) (operands
 			return true
 		}
 		var files []string
+		followed := false
 		switch programBase(words[0]) {
 		case "sed", "gsed":
-			if !followedOnly || sedFollowsInPlaceLinks(words) {
-				files = sedInPlaceFiles(words)
-			}
+			files, followed = sedInPlaceFiles(words), sedFollowsInPlaceLinks(words)
 		case "perl":
-			if !followedOnly {
-				files = perlInPlaceFiles(words)
-			}
+			files = perlInPlaceFiles(words)
 		}
 		for _, name := range files {
 			if name != "" && !strings.ContainsAny(name, "\x00\r\n") {
-				operands = append(operands, OperandPath(name, cwd))
+				edit(OperandPath(name, cwd), followed)
 			}
 		}
 		return true
 	})
-	return operands
 }
 
 // perlInPlaceFiles lists the file operands of perl -i (-pi -e CODE FILE,
