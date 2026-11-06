@@ -5700,14 +5700,25 @@ func makeStatic(n int) []bool {
 	return static
 }
 
+// argumentSuppliers run a program with arguments their own text does not
+// show: xargs and parallel read them from stdin or a file, find -exec adds
+// the found names. The argv of a program after one is never complete
+// (gas-ux-r1 GAP-0055 review M1).
+var argumentSuppliers = []string{"xargs", "parallel", "find"}
+
 // wrappedMayLink reads the words of a wrapper's text from the first ln, cp,
 // or archive program on as that program's arguments and reports one that can
 // link files; for cp a word with a parameter or a substitution counts as a
-// link option. copyWord reports that a cp program word was found.
+// link option. copyWord reports that a cp program word was found. After an
+// argument supplier the archive program also gets the words the text does
+// not show, read as one word that is not static: unzip with no visible
+// arguments may then extract, as on 1.0.6, while a visible list or test
+// mode (xargs unzip -l) still reads as one that does not.
 func wrappedMayLink(text string) (mayLink, copyWord bool) {
 	words := strings.FieldsFunc(text, func(r rune) bool {
 		return unicode.IsSpace(r) || strings.ContainsRune("\"'`;&|(){}<>=", r)
 	})
+	supplied := false
 	for i, word := range words {
 		program, rest := programBase(word), words[i+1:]
 		switch {
@@ -5720,9 +5731,16 @@ func wrappedMayLink(text string) (mayLink, copyWord bool) {
 				}
 			}
 			copyWord = true
-		case slices.Contains(archivePrograms, program) && archiveMayLink(program, rest, makeStatic(len(rest))):
-			return true, copyWord
+		case slices.Contains(archivePrograms, program):
+			static := makeStatic(len(rest))
+			if supplied {
+				rest, static = append(slices.Clip(rest), ""), append(static, false)
+			}
+			if archiveMayLink(program, rest, static) {
+				return true, copyWord
+			}
 		}
+		supplied = supplied || slices.Contains(argumentSuppliers, program)
 	}
 	return false, copyWord
 }
