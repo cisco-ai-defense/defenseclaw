@@ -255,6 +255,7 @@ func TestGX054PinnedArchiveMovesRemainStrict(t *testing.T) {
 		{"rename into nested scope", `tar -C {P}/x -xzf {P}/journey1.tgz && mv {P}/x/journey1 {P}/x/sub/journey1-x`, true},
 		{"move from scope", `tar -C {P}/x -xzf keys.tar && mv {P}/x/d/notes {P}/x/notes-x`, true},
 		{"move onto scope root", `tar -C {P}/x -xzf keys.tar && mv notes {P}/x`, true},
+		{"ordinary rc move into unread scope", `tar -C {P}/x -xzf keys.tar && mv rc {P}/x/d`, true},
 		{"failed move then write", `tar -C {P}/x -xzf keys.tar; mv nosuch {P}/x/k; echo k >> {P}/x/k`, true},
 		{"no clobber then write", `tar -C {P}/x -xzf keys.tar && mv -n notes {P}/x/k && echo k >> {P}/x/k`, true},
 		{"write then move", `tar -C {P}/x -xzf keys.tar; echo k >> {P}/x/k; mv notes {P}/x/k`, true},
