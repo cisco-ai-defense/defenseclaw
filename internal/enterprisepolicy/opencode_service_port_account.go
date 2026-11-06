@@ -28,6 +28,12 @@ type OpenCodeAccountPortPlan struct {
 // Per-user claims can keep a port out of the fresh pool but never displace a
 // binding already in the protected record.
 func PlanOpenCodeServicePortsByAccountWithClaims(ids map[string]uint64, eligible []string, imports, recorded map[string]int, claims map[int]string, allowNew bool, unknown map[string]bool) OpenCodeAccountPortPlan {
+	return PlanOpenCodeServicePortsByAccountWithClaimsWindow(ids, eligible, imports, recorded, claims, allowNew, unknown, true, nil)
+}
+
+// PlanOpenCodeServicePortsByAccountWithClaimsWindow applies the record's one
+// import window and permanent contested marks to full-SID accounts.
+func PlanOpenCodeServicePortsByAccountWithClaimsWindow(ids map[string]uint64, eligible []string, imports, recorded map[string]int, claims map[int]string, allowNew bool, unknown map[string]bool, importWindow bool, contestedMarks map[int]bool) OpenCodeAccountPortPlan {
 	plan := OpenCodeAccountPortPlan{
 		Ports: map[string]int{}, Record: map[string]int{}, Contested: map[int][]string{},
 	}
@@ -85,7 +91,7 @@ func PlanOpenCodeServicePortsByAccountWithClaims(ids map[string]uint64, eligible
 			reserved[port] = -1
 		}
 	}
-	shared := planOpenCodeServicePorts(eligibleUIDs, importUIDs, recordUIDs, allowNew, unknownUIDs, reserved)
+	shared := planOpenCodeServicePorts(eligibleUIDs, importUIDs, recordUIDs, allowNew, unknownUIDs, importWindow, contestedMarks, reserved)
 	for uid, port := range shared.Ports {
 		if sid := sidFor[uid]; sid != "" {
 			plan.Ports[sid] = port

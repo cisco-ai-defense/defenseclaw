@@ -112,23 +112,29 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 		}
 	}
 	record := map[int]int{}
-	openCodeRecordUnreadable, openCodeRecordUnknown = nil, nil
-	t.Cleanup(func() { openCodeRecordUnreadable, openCodeRecordUnknown = nil, nil })
-	enterpriseHookLoadOpenCodePorts = func(string) (map[int]int, []enterprisehooks.UnixOpenCodeServicePortUnknown, error) {
+	openCodeRecordUnreadable, openCodeRecordUnknown, openCodeRecordContested, openCodeRecordExists = nil, nil, nil, false
+	t.Cleanup(func() {
+		openCodeRecordUnreadable, openCodeRecordUnknown, openCodeRecordContested, openCodeRecordExists = nil, nil, nil, false
+	})
+	enterpriseHookLoadOpenCodePorts = func(string) (enterprisehooks.UnixOpenCodeServicePortsState, error) {
+		state := enterprisehooks.UnixOpenCodeServicePortsState{Ports: map[int]int{}, Users: map[int]string{}}
 		if openCodeRecordUnreadable != nil {
-			return nil, nil, openCodeRecordUnreadable
+			state.Exists = true
+			return state, openCodeRecordUnreadable
 		}
-		out := map[int]int{}
 		for uid, port := range record {
-			out[uid] = port
+			state.Ports[uid] = port
 		}
-		return out, openCodeRecordUnknown, nil
+		state.Exists = openCodeRecordExists || len(record) > 0
+		state.Unknown, state.Contested = openCodeRecordUnknown, openCodeRecordContested
+		return state, nil
 	}
-	enterpriseHookWriteOpenCodePorts = func(_ string, ports map[int]int, _ map[int]string, unknown []enterprisehooks.UnixOpenCodeServicePortUnknown) error {
-		openCodeRecordUnknown = unknown
+	enterpriseHookWriteOpenCodePorts = func(_ string, state enterprisehooks.UnixOpenCodeServicePortsState) error {
+		openCodeRecordUnknown, openCodeRecordContested = state.Unknown, state.Contested
 		openCodeRecordWrites++
+		openCodeRecordExists = true
 		record = map[int]int{}
-		for uid, port := range ports {
+		for uid, port := range state.Ports {
 			record[uid] = port
 		}
 		return nil
@@ -175,6 +181,8 @@ var (
 	openCodeRecordUnreadable error
 	openCodeRecordWrites     int
 	openCodeRecordUnknown    []enterprisehooks.UnixOpenCodeServicePortUnknown
+	openCodeRecordContested  []enterprisehooks.UnixOpenCodeContestedPort
+	openCodeRecordExists     bool
 	// openCodeUserCannotRead are the uids whose service.json the account
 	// itself cannot read; openCodeReadFails the uids whose read worker fails;
 	// openCodeReadHangs the uids whose read never answers (until released).
@@ -435,8 +443,10 @@ func TestManagedGuardianOpenCodeHomeReusedByAReturningAccount(t *testing.T) {
 	if got[1001] != 25001 || got[1002] == 0 {
 		t.Fatalf("ports %v record %v\n%s", got, *record, log)
 	}
-	if !strings.Contains(log, "port 25001 of ") || !strings.Contains(log, "(uid 1002) is recorded for") || !strings.Contains(log, "(uid 1001)") {
-		t.Fatalf("the conflict is not logged with both uids:\n%s", log)
+	// The record exists, so the import window is closed: alice's old file is
+	// not input; she gets a fresh port and her file is rewritten.
+	if got[1002] == 25001 || (*record)[1002] != got[1002] {
+		t.Fatalf("alice was given bob's port: %v record %v\n%s", got, *record, log)
 	}
 	// Stable: the next pass moves nothing and logs no conflict.
 	log = runOpenCodePortPass(t)
@@ -846,6 +856,7 @@ func TestManagedGuardianOpenCodeRebuildContestGivesThePortToNobody(t *testing.T)
 			for uid := range *record {
 				delete(*record, uid) // sudo rm opencode-service-ports.json
 			}
+			openCodeRecordExists, openCodeRecordContested = false, nil
 			if listening != "nobody" {
 				listenOn(t, bob) // bob's OpenCode, or an attacker's listener on the copied port
 			}
@@ -895,17 +906,18 @@ func TestManagedGuardianOpenCodeTwoNewAccountsContest(t *testing.T) {
 
 // An existing DefenseClaw record, also one an earlier round wrote (no
 // "unknown" list), decides over every user file: bob keeps 25002 whatever
-// any file names, and an uncontested import of a free port is granted.
+// any file names, and with the record there no file is imported at all
+// (REVIEW-gx053-11: the import window is the pass that builds the record).
 func TestManagedGuardianOpenCodeEarlierRecordDecides(t *testing.T) {
 	homes, record, setEligible := openCodePortGuardianWith(t, true, 1002)
 	(*record)[1002] = 25002
 	setEligible(nil, 1001, 1002, 1003)
 	writeOpenCodePortFile(t, homes[1001], 25002) // a copy of bob's
 	writeOpenCodePortFile(t, homes[1002], 26111) // bob's own file disagrees
-	writeOpenCodePortFile(t, homes[1003], 26500) // free: imported
+	writeOpenCodePortFile(t, homes[1003], 26500) // free, but the window is closed: not imported
 	log := runOpenCodePortPass(t)
 	got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002, 1003}, log)
-	if got[1002] != 25002 || (*record)[1002] != 25002 || got[1001] == 25002 || got[1003] != 26500 {
+	if got[1002] != 25002 || (*record)[1002] != 25002 || got[1001] == 25002 || got[1003] == 26500 || got[1003] == 0 {
 		t.Fatalf("ports %v record %v\n%s", got, *record, log)
 	}
 }
@@ -920,6 +932,83 @@ func TestManagedGuardianOpenCodeDefaultPortIsNotImported(t *testing.T) {
 	}
 }
 
+// REVIEW-gx053-11 MF1 repros: with no record, the victim's port is named by
+// two accounts' files (a contest), and mallory, who copied it too, makes her
+// own file unreadable for that pass, so she is not a claimant. On the next
+// pass her file is readable and she would be the only claimant. She never
+// gets the port: no file is input after the pass that built the record, and
+// the contested port stays marked.
+func TestManagedGuardianOpenCodeAttackerSkipsTheImportPass(t *testing.T) {
+	for _, victim := range []struct {
+		name string
+		port int
+	}{{"bob", 25002}, {"carol", 25003}} {
+		t.Run(victim.name, func(t *testing.T) {
+			homes, record, _ := openCodePortGuardianWith(t, true, 1001, 1002, 1003)
+			writeOpenCodePortFile(t, homes[1002], victim.port) // the victim's file
+			writeOpenCodePortFile(t, homes[1003], victim.port) // another account names it too: a contest
+			writeOpenCodePortFile(t, homes[1001], victim.port) // mallory's copy
+			openCodeReadFails[1001] = true                     // linked, chmod 000, or a hung read
+			runOpenCodePortPass(t)
+			openCodeReadFails[1001] = false
+			for pass := 2; pass <= 4; pass++ {
+				log := runOpenCodePortPass(t)
+				for uid, port := range *record {
+					if port == victim.port {
+						t.Fatalf("pass %d: uid %d was given the contested port %d\n%s", pass, uid, port, log)
+					}
+				}
+				if (*record)[1001] == 0 {
+					t.Fatalf("pass %d: mallory got no port at all: %v", pass, *record)
+				}
+			}
+		})
+	}
+}
+
+// A uid unreadable in the import pass and readable later gets a fresh port,
+// not the one its file names.
+func TestManagedGuardianOpenCodeUnreadableInTheImportPassGetsAFreshPort(t *testing.T) {
+	homes, record, _ := openCodePortGuardianWith(t, true, 1001)
+	writeOpenCodePortFile(t, homes[1001], 26600)
+	openCodeReadFails[1001] = true
+	runOpenCodePortPass(t)
+	openCodeReadFails[1001] = false
+	runOpenCodePortPass(t)
+	if got := (*record)[1001]; got == 26600 || got == 0 || openCodePortIn(t, homes[1001]) != got {
+		t.Fatalf("record %v, file %d", *record, openCodePortIn(t, homes[1001]))
+	}
+}
+
+// A contested port stays contested over later passes and new accounts:
+// nobody is given it until an administrator clears the mark.
+func TestManagedGuardianOpenCodeContestedPortStaysContested(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001, 1002)
+	writeOpenCodePortFile(t, homes[1001], 25003)
+	writeOpenCodePortFile(t, homes[1002], 25003)
+	log := runOpenCodePortPass(t)
+	if len(openCodeRecordContested) != 1 || openCodeRecordContested[0].Port != 25003 || len(openCodeRecordContested[0].UIDs) != 2 {
+		t.Fatalf("the contest is not marked: %+v\n%s", openCodeRecordContested, log)
+	}
+	if !strings.Contains(log, "opencode-port-clear 25003 --yes") {
+		t.Fatalf("the clear command is not named:\n%s", log)
+	}
+	setEligible(nil, 1001, 1002, 1003) // uid 1003's first port is 25003
+	for pass := 2; pass <= 3; pass++ {
+		runOpenCodePortPass(t)
+		for uid, port := range *record {
+			if port == 25003 {
+				t.Fatalf("pass %d: uid %d was given the contested port: %v", pass, uid, *record)
+			}
+		}
+		if len(openCodeRecordContested) != 1 {
+			t.Fatalf("pass %d: the mark was lost: %+v", pass, openCodeRecordContested)
+		}
+	}
+}
+
+// A linked final service file is read in the only import pass. Its port is
+// held from a newcomer even though the account-side writer cannot replace it.
 func TestReviewLinkedServiceFileNeverGivesItsPortToNewcomer(t *testing.T) {
 	homes, record := openCodePortGuardian(t, true, 1001, 1002)
 	target := filepath.Join(homes[1001], "actual-service.json")
@@ -946,7 +1035,7 @@ func TestReviewLinkedServiceFileNeverGivesItsPortToNewcomer(t *testing.T) {
 		t.Fatal(err)
 	}
 	runOpenCodePortPass(t)
-	if (*record)[1001] != 25002 || openCodePortIn(t, homes[1001]) != 25002 || (*record)[1002] == 25002 {
-		t.Fatalf("ordinary file recovery changed another binding: %v", *record)
+	if got := (*record)[1001]; got == 0 || got == 25002 || openCodePortIn(t, homes[1001]) != got || (*record)[1002] == 25002 {
+		t.Fatalf("ordinary file recovery did not take a fresh port: %v", *record)
 	}
 }

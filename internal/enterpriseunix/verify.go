@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1594,12 +1595,22 @@ func (env *Env) warnOpenCodePortsRecord(r *enterprisestatus.Result) {
 		}
 		return
 	}
-	_, unknown, err := enterprisehooks.LoadUnixOpenCodeServicePortsState(env.P(path))
+	state, err := loadOpenCodePortsRecord(env.P(path))
+	unknown := state.Unknown
 	if err != nil {
 		r.AddWarning("opencode_port_record_unreadable", fmt.Sprintf(
 			"the guardian's OpenCode service ports record %s cannot be read (%v), so no account gets a new OpenCode port; ports already in service.json files are kept. Remove it to rebuild it on the next pass: sudo rm %s",
 			path, err, path))
 		return
+	}
+	for _, entry := range state.Contested {
+		uids := make([]string, 0, len(entry.UIDs))
+		for _, uid := range entry.UIDs {
+			uids = append(uids, strconv.Itoa(uid))
+		}
+		r.AddWarning("opencode_port_contested", fmt.Sprintf(
+			"OpenCode service port %d was named by the files of uids %s when the guardian's record was built, so no account is given it; to release it: sudo %s %d --yes",
+			entry.Port, strings.Join(uids, ", "), env.lifecycleCommand("opencode-port-clear"), entry.Port))
 	}
 	if len(unknown) > 0 {
 		names := make([]string, 0, len(unknown))
@@ -1614,3 +1625,7 @@ func (env *Env) warnOpenCodePortsRecord(r *enterprisestatus.Result) {
 
 // openCodePortsRecordGeteuid is os.Geteuid (tests replace it).
 var openCodePortsRecordGeteuid = os.Geteuid
+
+// loadOpenCodePortsRecord is enterprisehooks.LoadUnixOpenCodeServicePortsFull
+// (tests replace it).
+var loadOpenCodePortsRecord = enterprisehooks.LoadUnixOpenCodeServicePortsFull

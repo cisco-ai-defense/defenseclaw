@@ -9,6 +9,7 @@ package enterpriseunix
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -73,5 +74,31 @@ func TestStatusWarnsOnAnUnreadableOpenCodePortsRecord(t *testing.T) {
 	codes := openCodeRecordWarnings(t, env)
 	if msg := codes["opencode_port_record_unchecked"]; msg == "" || !filepath.IsAbs(env.Layout.GuardianAuthDir) {
 		t.Fatalf("a non-root status says nothing: %v", codes)
+	}
+}
+
+// Status, verify (and doctor, from status) name each contested port, its
+// claimants and the exact clear command.
+func TestStatusNamesContestedOpenCodePorts(t *testing.T) {
+	root := t.TempDir()
+	env := &Env{GOOS: "linux", Root: root, Layout: mustLayout(t, "linux")}
+	record := env.P(filepath.Join(env.Layout.GuardianAuthDir, enterprisehooks.UnixOpenCodeServicePortsFileName))
+	if err := os.MkdirAll(filepath.Dir(record), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(record, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := loadOpenCodePortsRecord
+	t.Cleanup(func() { loadOpenCodePortsRecord = previous })
+	loadOpenCodePortsRecord = func(string) (enterprisehooks.UnixOpenCodeServicePortsState, error) {
+		return enterprisehooks.UnixOpenCodeServicePortsState{Exists: true,
+			Contested: []enterprisehooks.UnixOpenCodeContestedPort{{Port: 25003, UIDs: []int{1001, 1002}}}}, nil
+	}
+	msg := openCodeRecordWarnings(t, env)["opencode_port_contested"]
+	for _, want := range []string{"port 25003", "uids 1001, 1002", "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux opencode-port-clear 25003 --yes"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("the contested line %q lacks %q", msg, want)
+		}
 	}
 }

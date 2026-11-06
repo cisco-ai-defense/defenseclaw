@@ -208,14 +208,14 @@ type OpenCodePortPlan struct {
 //
 // A record that pairs two uids with one port (written by an earlier build)
 // keeps the lower uid on it and rebinds the other, reported as a conflict.
-func PlanOpenCodeServicePorts(eligible []int, imports, recorded map[int]int, allowNew bool, unknown map[int]bool) OpenCodePortPlan {
-	return planOpenCodeServicePorts(eligible, imports, recorded, allowNew, unknown, nil)
+// importWindow is true only in the pass that creates or rebuilds the record.
+// Contested ports stay marked until an administrator clears them. A per-user
+// claim reserves a free port from other accounts while its owner may retry it.
+func PlanOpenCodeServicePorts(eligible []int, imports, recorded map[int]int, allowNew bool, unknown map[int]bool, importWindow bool, contestedMarks map[int]bool) OpenCodePortPlan {
+	return planOpenCodeServicePorts(eligible, imports, recorded, allowNew, unknown, importWindow, contestedMarks, nil)
 }
 
-// reserved keeps a per-user claim out of another account's allocation. A
-// matching claim may be retried by its owner after an account-file refusal;
-// neither kind of claim can move a binding in the protected record.
-func planOpenCodeServicePorts(eligible []int, imports, recorded map[int]int, allowNew bool, unknown map[int]bool, reserved map[int]int) OpenCodePortPlan {
+func planOpenCodeServicePorts(eligible []int, imports, recorded map[int]int, allowNew bool, unknown map[int]bool, importWindow bool, contestedMarks map[int]bool, reserved map[int]int) OpenCodePortPlan {
 	plan := OpenCodePortPlan{Ports: map[int]int{}, Record: map[int]int{}}
 	holder := map[int]int{}
 	recordedUIDs := make([]int, 0, len(recorded))
@@ -247,6 +247,9 @@ func planOpenCodeServicePorts(eligible []int, imports, recorded map[int]int, all
 		}
 	}
 	contested := map[int]bool{}
+	for port := range contestedMarks {
+		contested[port] = true
+	}
 	fresh := func(uid int) int {
 		start := OpenCodeAccountPort(uint64(uid))
 		for step := 0; step < OpenCodeAccountPortSpan; step++ {
@@ -276,11 +279,17 @@ func planOpenCodeServicePorts(eligible []int, imports, recorded map[int]int, all
 	claims := map[int][]int{}
 	var needFresh []int
 	for _, uid := range sortedEligible {
-		if _, bound := plan.Ports[uid]; bound || unknown[uid] {
+		if _, bound := plan.Ports[uid]; bound {
+			continue
+		}
+		if unknown[uid] && importWindow {
+			// Not importable in the window: no import later either; a fresh
+			// port once its file can be written.
+			needFresh = append(needFresh, uid)
 			continue
 		}
 		port := imports[uid]
-		if port <= 0 || port > 65535 || port == OpenCodeDefaultServicePort || port == openCodeLocalChannelPort {
+		if !importWindow || contested[port] || port <= 0 || port > 65535 || port == OpenCodeDefaultServicePort || port == openCodeLocalChannelPort {
 			needFresh = append(needFresh, uid)
 			continue
 		}
