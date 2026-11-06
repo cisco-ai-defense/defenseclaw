@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 )
 
@@ -246,6 +247,11 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 	if names.has(target) {
 		return GradeNamed
 	}
+	if processRelativeLink(target) {
+		// The kernel resolves this hop for the process that opens it; the
+		// hook's own reading proves a different path.
+		return GradePossible
+	}
 	parent := filepath.Dir(target)
 	share := SharePath(target) || SharePath(home)
 	// A missing leaf cannot be a hard link. Resolve its parent through the
@@ -407,7 +413,8 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 				return grade
 			}
 		}
-		if unknownFiles {
+		if unknownFiles || !ok {
+			// An unresolved walk leaves the opened identity unproved.
 			return GradePossible
 		}
 		return GradeNone
@@ -438,4 +445,48 @@ func stateTreeHardlinkReach(target, home string) Grade {
 		return GradePossible
 	}
 	return GradeNone
+}
+
+// processRelativeLink reports a path whose link the kernel reads for the
+// process that opens it: a /proc process entry (self, thread-self or a pid,
+// also under task/<tid>) for its cwd, root, exe, descriptors or mapped
+// files, and the /dev descriptor aliases.
+func processRelativeLink(path string) bool {
+	path = filepath.ToSlash(path)
+	for _, alias := range []string{"/dev/fd", "/dev/stdin", "/dev/stdout", "/dev/stderr"} {
+		if path == alias || strings.HasPrefix(path, alias+"/") {
+			return true
+		}
+	}
+	rest, found := strings.CutPrefix(path, "/proc/")
+	if !found {
+		return false
+	}
+	parts := strings.Split(rest, "/")
+	digits := func(s string) bool {
+		if s == "" {
+			return false
+		}
+		for _, r := range s {
+			if r < 0 || r > 9 {
+				return false
+			}
+		}
+		return true
+	}
+	if len(parts) < 2 || parts[0] != "self" && parts[0] != "thread-self" && !digits(parts[0]) {
+		return false
+	}
+	entry := 1
+	if parts[1] == "task" {
+		if len(parts) < 4 || !digits(parts[2]) {
+			return false
+		}
+		entry = 3
+	}
+	switch parts[entry] {
+	case "cwd", "root", "exe", "fd", "map_files":
+		return true
+	}
+	return false
 }

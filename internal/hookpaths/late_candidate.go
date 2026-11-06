@@ -154,8 +154,18 @@ func lateKnownStatement(stmt *syntax.Stmt, cwd, home string, depth int, compound
 		}
 		calls = append(left, right...)
 	case *syntax.CallExpr:
-		if len(cmd.Assigns) != 0 || len(cmd.Args) == 0 {
+		values, ok := lateAssignValues(cmd.Assigns, cwd, home)
+		if !ok {
 			return nil, false
+		}
+		calls = append(calls, values...)
+		if len(cmd.Args) == 0 {
+			if len(cmd.Assigns) == 0 {
+				return nil, false
+			}
+			// An assignment-only statement runs nothing. A later word that
+			// expands its variable is not a known word (lateKnownParam).
+			break
 		}
 		args, wrappers, ok := lateUnwrapCall(cmd.Args, home)
 		if !ok {
@@ -238,6 +248,42 @@ func lateKnownStatement(stmt *syntax.Stmt, cwd, home string, depth int, compound
 			return nil, false
 		}
 		calls = append(calls, []string{"", value})
+	}
+	return calls, true
+}
+
+// lateAssignValues reads the assignments of a simple command, before its
+// words or alone, as candidate operands: each known value and each element
+// of a colon list, as the shell expands an assignment. An assignment that
+// changes how the reader expands later words (HOME, PWD, IFS), an array, an
+// index or an unknown value keeps the statement unknown.
+func lateAssignValues(assigns []*syntax.Assign, cwd, home string) ([][]string, bool) {
+	var calls [][]string
+	for _, assign := range assigns {
+		if assign == nil || assign.Name == nil || assign.Naked || assign.Index != nil || assign.Array != nil {
+			return nil, false
+		}
+		switch name := assign.Name.Value; {
+		case !lateEnvName(name), name == "HOME", name == "PWD", name == "IFS":
+			return nil, false
+		}
+		if assign.Value == nil {
+			continue
+		}
+		value, known := lateKnownWord(assign.Value, cwd, home)
+		if !known {
+			return nil, false
+		}
+		calls = append(calls, []string{"", value})
+		if !strings.Contains(value, ":") {
+			continue
+		}
+		for _, element := range strings.Split(value, ":") {
+			if element == "~" || strings.HasPrefix(element, "~/") {
+				element = home + element[1:]
+			}
+			calls = append(calls, []string{"", element})
+		}
 	}
 	return calls, true
 }
