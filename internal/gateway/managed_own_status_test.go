@@ -288,3 +288,57 @@ func TestOwnStatusForWindowsAccountAnswersOnlyThatAccount(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0635: the Windows own-status pipe carries the same configured roster
+// as the Unix answer while retaining its existing Claude Code and Cowork
+// status. A connector without per-user proof stays unconfirmed.
+func TestOwnStatusForWindowsAccountListsConfiguredConnectors(t *testing.T) {
+	previousName := ownStatusWindowsAccountName
+	ownStatusWindowsAccountName = func(string) string { return `WIN11\alice` }
+	t.Cleanup(func() { ownStatusWindowsAccountName = previousName })
+	enabled, disabled := true, false
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex": {Enabled: &enabled}, "opencode": {Enabled: &enabled},
+		"copilot": {Enabled: &disabled},
+	}
+	cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{
+		"hermes": {},
+	}
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	const alice = "S-1-5-21-1004336348-1177238915-682003330-1001"
+	var out struct {
+		ClaudeCode struct {
+			Protected bool `json:"protected"`
+		} `json:"claude_code"`
+		Cowork struct {
+			Protected bool `json:"protected"`
+		} `json:"cowork"`
+		Connectors map[string]struct {
+			Protected bool   `json:"protected"`
+			State     string `json:"state"`
+		} `json:"connectors"`
+	}
+	if err := json.Unmarshal(api.ownStatusForWindowsAccount(context.Background(), alice), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.ClaudeCode.Protected || !out.Cowork.Protected {
+		t.Fatalf("existing Claude Code and Cowork state changed: %+v", out)
+	}
+	if len(out.Connectors) != 4 {
+		t.Fatalf("Windows connector roster = %+v; want four configured entries", out.Connectors)
+	}
+	if row := out.Connectors["claudecode"]; !row.Protected || row.State != "protected" {
+		t.Fatalf("Claude Code row = %+v; want existing protected state", row)
+	}
+	for _, name := range []string{"codex", "opencode", "hermes"} {
+		if row := out.Connectors[name]; row.Protected || row.State != "not confirmed" {
+			t.Fatalf("%s row = %+v; want unconfirmed", name, row)
+		}
+	}
+	if _, listed := out.Connectors["copilot"]; listed {
+		t.Fatal("disabled connector was listed")
+	}
+}
