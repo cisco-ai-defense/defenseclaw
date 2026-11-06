@@ -240,9 +240,11 @@ FACTS = [
     ]),
     ('gap_1356_windows_project_skill_roots_skipped', [
         (('enterprise/windows.mdx',),
-         'project skill folders inside profiles are skipped before verification or registration'),
+         'Ordinary project skill folders inside profiles are not watched or admission-scanned'),
         (('enterprise/windows.mdx',),
-         'no install scan, no "is not scanned yet" refusal and no `project_skill_root_unverified` warning'),
+         '`project_skill_roots_unverified`, and enterprise status shows a'),
+        (('enterprise/windows.mdx',),
+         '`asset_policy.mode: action` refuses its skills; observe mode allows them with a warning'),
     ]),
     ('gap_0289_invalid_machine_policy_is_config_invalid', [
         (('enterprise/troubleshooting.mdx',),
