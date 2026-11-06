@@ -73,7 +73,14 @@ var (
 	// is a character set ("!$&'()"), &%s; an XML entity, and a lone "&" (a
 	// token a reader compares with) is not a command; joined into one it is
 	// (managedWindowsAmpersandWord).
-	managedWindowsCall = regexp.MustCompile(`(^|[\s|;{(])&['"\x{2018}-\x{201B}]|(^|[^&>])&[ \t]+(?:['"\x{2018}-\x{201B}]|%[-+# 0-9.]*[sqvc]|$)`)
+	// A word starts after a blank, | ; { ( and, since g072 review 4 M3, a
+	// backtick (the repo's markdown for a command), a double quote, = : and
+	// a comma. A no-break space is a blank to PowerShell, and an indexed or
+	// starred verb (%[1]s, %*s) is a verb. Documented limits, which no source
+	// uses: &%s with no space (an XML entity's twin), a strings.Builder
+	// WriteString("&") then WriteByte(' '), string('&'), and
+	// strings.ReplaceAll(p, "'", strings.Repeat("'", 2)).
+	managedWindowsCall = regexp.MustCompile(`(^|[\s|;{(\x60"=:,])&['"\x{2018}-\x{201B}]|(^|[^&>])&[ \t\x{00A0}]+(?:['"\x{2018}-\x{201B}]|%(?:\[\d+\])?[-+# 0-9.*]*[sqvc]|$)`)
 	// managedWindowsVerbOnly is an instruction to run a DefenseClaw
 	// subcommand that names no executable ("run `enterprise windows ensure
 	// ...`", "with enterprise secret set"): a managed Windows computer has no
@@ -738,6 +745,14 @@ func TestManagedWindowsProbeVariantsAreCaught(t *testing.T) {
 		"Sprintf verb-only":                  "fmt.Sprintf(\"run `enterprise windows %s --profile standalone`\", v)",
 		"Sprintf name as an argument":        "fmt.Sprintf(\"run `%s enterprise windows ensure`\", \"defenseclaw\")",
 		"backtick between name and argument": "\"run \" + \"`defenseclaw.exe` \" + \"enterprise windows status\"",
+		// g072 review 4 M3.
+		"backtick before a no-space call": "\"run `&'\" + p + \"' status`\"",
+		"double quote before &'":          `"\"&'" + p`,
+		"equals before &'":                `"-Command=&'" + p`,
+		"colon before &'":                 `"Run:&'" + p`,
+		"Sprintf indexed verb":            `fmt.Sprintf("& %[1]s status", p)`,
+		"Sprintf starred verb":            `fmt.Sprintf("& %*s", 2, p)`,
+		"no-break space":                  `"&\u00a0'" + p`,
 	} {
 		src := "package cli\n\nfunc probe(p, v string) any { return " + expr + " }\n"
 		file, err := parser.ParseFile(token.NewFileSet(), "zz_probe_windows.go", src, 0)
