@@ -116,6 +116,7 @@ from defenseclaw.doctor_gateway import (
     pid_file_fingerprint_from_fd,
     read_pid_record,
     trusted_lsof_path,
+    windows_process_user_sid,
 )
 from defenseclaw.doctor_hooks import (
     CODEX_PROBE_TIMEOUT_STATE,
@@ -4936,8 +4937,8 @@ def _free_api_port_hint(cfg) -> str:
     return str(port) if port else "<free port>"
 
 
-def _foreign_gateway_port_holder(cfg) -> str:
-    """Name the API port holder when it is not this account's verified gateway."""
+def _foreign_gateway_port_holder(cfg, *, status_only: bool = False) -> str:
+    """Name an unverified holder; status may use the public foreground proof."""
     holder = _gateway_port_holder(cfg)
     if not holder:
         # macOS lsof sees only this account's sockets. A peer listener can
@@ -4953,6 +4954,8 @@ def _foreign_gateway_port_holder(cfg) -> str:
             return ""
     except Exception:  # noqa: BLE001 - an unverifiable holder is still foreign
         pass
+    if status_only and _foreground_gateway_status_health(cfg) is not None:
+        return ""
     return holder
 
 
@@ -6402,6 +6405,105 @@ def _transient_same_home_gateway_listener(
     if after.status != "ok" or after.pid != listener.pid:
         return None
     return _GatewayTrust("trusted", "this account's gateway owns the API endpoint", listener.pid, home_bound=True)
+
+
+def _foreground_current_uid() -> int:
+    """Return the effective POSIX account for a status-only foreground proof."""
+    return os.geteuid() if hasattr(os, "geteuid") else -1
+
+
+def _foreground_gateway_status_health(
+    cfg, *, platform_name: str | None = None, evidence: GatewayEvidence | None = None
+) -> tuple[int, dict] | None:
+    """Read public health from this account's foreground gateway, without a token.
+
+    This proof is for status display only. Token-bearing callers continue to
+    require ``_trusted_gateway_listener`` and its PID-file identity contract.
+    """
+    from defenseclaw.enforce import asset_lists
+    from defenseclaw.gateway import resolve_trusted_gateway_binary
+    from defenseclaw.logger import _running_gateway_record
+
+    platform_name = platform_name or sys.platform
+    if platform_name not in {"win32", "darwin"} or asset_lists.is_secure_client(cfg):
+        return None
+    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
+        return None
+    port = _gateway_api_port(cfg)
+    host = _gateway_api_host(cfg)
+    target_ip = _loopback_ip_literal(host, brackets=True)
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not port or target_ip is None or not os.path.isabs(data_dir):
+        return None
+    evidence = evidence or GatewayEvidence(platform_name=platform_name)
+    if _managed_gateway_process_trust(cfg, evidence=evidence, platform_name=platform_name).code != "missing":
+        return None
+
+    listener = _managed_gateway_listener_evidence(port, host=host, platform_name=platform_name, evidence=evidence)
+    if listener.status != "ok" or listener.pid <= 0:
+        return None
+    process = evidence.process(listener.pid)
+    if process.status != "ok" or not process.start_identity:
+        return None
+    if gateway_executable_name(process.executable, platform_name=platform_name) not in GATEWAY_PROCESS_NAMES:
+        return None
+    try:
+        binary = resolve_trusted_gateway_binary()
+        if not binary or not paths_same(binary, process.executable):
+            return None
+        if platform_name == "win32":
+            from defenseclaw.file_permissions import _windows_current_user_sid
+
+            own_sid = _windows_current_user_sid()
+            peer_sid = windows_process_user_sid(listener.pid)
+            if not own_sid or own_sid in {"S-1-5-18", "S-1-5-19", "S-1-5-20"} or peer_sid != own_sid:
+                return None
+        else:
+            own_uid = _foreground_current_uid()
+            if own_uid <= 0 or process.uid != own_uid:
+                return None
+    except (OSError, ValueError):
+        return None
+
+    def runtime_record_matches() -> bool:
+        record = _running_gateway_record(data_dir, "gateway-api.json", expected_pid=listener.pid)
+        if not isinstance(record, dict) or type(record.get("port")) is not int or record["port"] != port:
+            return False
+        return _loopback_ip_literal(record.get("host")) == target_ip
+
+    if not runtime_record_matches():
+        return None
+    peer = _GatewayTrust(
+        "trusted", "foreground gateway status only", listener.pid, home_bound=True, process=process
+    )
+    code, body = _http_probe(
+        _gateway_api_url(cfg, "/health"),
+        timeout=3.0,
+        response_limit=2 << 20,
+        allow_truncation=False,
+        bound_peer=peer,
+    )
+    if code != 200:
+        return None
+    try:
+        health = json.loads(body)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(health, dict) or not isinstance(health.get("gateway"), dict):
+        return None
+    after = _managed_gateway_listener_evidence(port, host=host, platform_name=platform_name, evidence=evidence)
+    current = evidence.process(listener.pid)
+    if (
+        after.status != "ok"
+        or after.pid != listener.pid
+        or current.status != "ok"
+        or current.executable != process.executable
+        or current.start_identity != process.start_identity
+        or (platform_name == "darwin" and current.uid != own_uid)
+        or not runtime_record_matches()
+    ):
+        return None
+    return listener.pid, health
 
 
 def _trusted_gateway_listener_for_lifecycle(

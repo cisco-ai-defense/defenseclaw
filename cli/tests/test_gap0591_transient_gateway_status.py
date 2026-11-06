@@ -31,11 +31,21 @@ def _config(tmp_path: Path):
 def _proof_patches(cfg, *, report: dict, foreign_accounts: str = "") -> ExitStack:
     report = {"endpoint": cmd_doctor._gateway_api_url(cfg, "/health"), **report}
     stack = ExitStack()
-    stack.enter_context(patch.object(cmd_doctor, "_managed_gateway_process_trust", return_value=cmd_doctor._GatewayTrust("missing", "no PID file")))
-    stack.enter_context(patch.object(cmd_doctor, "_managed_gateway_listener_evidence", return_value=ListenerEvidence("ok", pid=4242)))
+    stack.enter_context(
+        patch.object(
+            cmd_doctor,
+            "_managed_gateway_process_trust",
+            return_value=cmd_doctor._GatewayTrust("missing", "no PID file"),
+        )
+    )
+    stack.enter_context(
+        patch.object(cmd_doctor, "_managed_gateway_listener_evidence", return_value=ListenerEvidence("ok", pid=4242))
+    )
     stack.enter_context(patch.object(cmd_doctor, "_linux_foreign_listener_accounts", return_value=foreign_accounts))
     stack.enter_context(patch.object(cmd_doctor, "_gateway_port_holder", return_value="PID 4242 (defenseclaw-gateway)"))
-    stack.enter_context(patch.object(gateway, "resolve_trusted_gateway_binary", return_value="/opt/defenseclaw-gateway"))
+    stack.enter_context(
+        patch.object(gateway, "resolve_trusted_gateway_binary", return_value="/opt/defenseclaw-gateway")
+    )
     stack.enter_context(
         patch.object(
             cmd_doctor.subprocess,
@@ -48,6 +58,19 @@ def _proof_patches(cfg, *, report: dict, foreign_accounts: str = "") -> ExitStac
     return stack
 
 
+def _as_on_linux() -> ExitStack:
+    """Exercise the existing Linux listener proof on every test platform."""
+    original = cmd_doctor._trusted_gateway_listener
+
+    def linux_proof(cfg, **kwargs):
+        kwargs["platform_name"] = kwargs.get("platform_name") or "linux"
+        return original(cfg, **kwargs)
+
+    stack = ExitStack()
+    stack.enter_context(patch.object(cmd_doctor, "_trusted_gateway_listener", side_effect=linux_proof))
+    return stack
+
+
 def test_same_home_transient_gateway_status_has_live_health_and_agents(tmp_path: Path) -> None:
     cfg = _config(tmp_path)
     client = MagicMock()
@@ -56,7 +79,7 @@ def test_same_home_transient_gateway_status_has_live_health_and_agents(tmp_path:
         "health": {"connectors": [{"name": "claudecode", "state": "running"}]},
     }
     report = {"running": True, "health": {"connectors": [{"name": "claudecode"}]}}
-    with _proof_patches(cfg, report=report):
+    with _proof_patches(cfg, report=report), _as_on_linux():
         assert cmd_doctor._foreign_gateway_port_holder(cfg) == ""
         health = cmd_status._fetch_runtime_bound_health(client, cfg)
     assert health is not None
@@ -78,6 +101,7 @@ def test_status_cli_shows_same_home_transient_gateway_and_agent_running() -> Non
         with (
             _proof_patches(app.cfg, report={"running": True, "health": {}}),
             patch.object(gateway, "OrchestratorClient", return_value=client),
+            _as_on_linux(),
         ):
             human = CliRunner().invoke(cmd_status.status, [], obj=app)
             machine = CliRunner().invoke(cmd_status.status, ["--json"], obj=app)
@@ -106,7 +130,7 @@ def test_foreign_or_unhealthy_port_holder_is_not_reported_running(
 ) -> None:
     cfg = _config(tmp_path)
     client = MagicMock()
-    with _proof_patches(cfg, report=report, foreign_accounts=foreign_accounts):
+    with _proof_patches(cfg, report=report, foreign_accounts=foreign_accounts), _as_on_linux():
         assert "PID 4242" in cmd_doctor._foreign_gateway_port_holder(cfg)
         assert cmd_status._fetch_runtime_bound_health(client, cfg) is None
     client.status.assert_not_called()
@@ -119,14 +143,14 @@ def test_transient_gateway_authenticated_runtime_must_match_listener(tmp_path: P
         "runtime": {"pid": 4343, "data_dir": cfg.data_dir},
         "health": {"connectors": [{"name": "claudecode", "state": "running"}]},
     }
-    with _proof_patches(cfg, report={"running": True, "health": {}}):
+    with _proof_patches(cfg, report={"running": True, "health": {}}), _as_on_linux():
         assert cmd_status._fetch_runtime_bound_health(client, cfg) is None
 
 
 @pytest.mark.parametrize("endpoint", [None, "http://127.0.0.1:18790/health"])
 def test_transient_gateway_report_must_name_inspected_endpoint(tmp_path: Path, endpoint: str | None) -> None:
     cfg = _config(tmp_path)
-    with _proof_patches(cfg, report={"running": True, "endpoint": endpoint, "health": {}}):
+    with _proof_patches(cfg, report={"running": True, "endpoint": endpoint, "health": {}}), _as_on_linux():
         assert "PID 4242" in cmd_doctor._foreign_gateway_port_holder(cfg)
 
 
@@ -135,8 +159,9 @@ def test_transient_gateway_listener_pid_must_remain_stable(tmp_path: Path) -> No
     with (
         _proof_patches(cfg, report={"running": True, "health": {}}),
         patch.object(
-            cmd_doctor, "_managed_gateway_listener_evidence",
+            cmd_doctor,
+            "_managed_gateway_listener_evidence",
             side_effect=[ListenerEvidence("ok", pid=4242), ListenerEvidence("ok", pid=4343)],
         ),
     ):
-        assert not cmd_doctor._trusted_gateway_listener(cfg).trusted
+        assert not cmd_doctor._trusted_gateway_listener(cfg, platform_name="linux").trusted
