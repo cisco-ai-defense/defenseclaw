@@ -165,7 +165,7 @@ func tarProtectedLinkMembers(path, destination, home string) map[string]string {
 		}
 		stream = decoded
 	case len(magic) >= 4 && string(magic[:4]) == "\x28\xb5\x2f\xfd":
-		decoded, err := zstd.NewReader(buffered, zstd.WithDecoderConcurrency(1))
+		decoded, err := zstd.NewReader(buffered, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(maxTarPlainBytes))
 		if err != nil {
 			return result
 		}
@@ -601,7 +601,7 @@ func tarArchiveKind(path string) int {
 		}
 		stream = decoded
 	case len(magic) >= 4 && string(magic[:4]) == "\x28\xb5\x2f\xfd":
-		decoded, err := zstd.NewReader(buffered, zstd.WithDecoderConcurrency(1))
+		decoded, err := zstd.NewReader(buffered, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(maxTarPlainBytes))
 		if err != nil {
 			return 0
 		}
