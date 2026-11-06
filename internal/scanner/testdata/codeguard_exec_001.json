@@ -265,7 +265,19 @@
   {"ext": ".py", "line": "subprocess.call(['deno', 'eval', '-p', s])"},
   {"ext": ".py", "line": "subprocess.call(['/usr/bin/env', 'node', '--eval=' + s])"},
   {"ext": ".rb", "line": "obj.instance_eval("},
-  {"ext": ".rb", "line": "Foo.module_eval(  "}
+  {"ext": ".rb", "line": "Foo.module_eval(  "},
+  {"ext": ".py", "line": "subprocess.call(['env', '-S', 'node -p', src])"},
+  {"ext": ".py", "line": "subprocess.call(['env', '-S', 'python3 -c', code])"},
+  {"ext": ".py", "line": "subprocess.call(['/usr/bin/env', '--split-string=node -e', src])"},
+  {"ext": ".py", "line": "subprocess.call(['env', '-S', 'php -B', code])"},
+  {"ext": ".py", "line": "subprocess.call(['env', '-S', 'perl -le', code])"},
+  {"ext": ".py", "line": "subprocess.call(['php', '-B', code])"},
+  {"ext": ".py", "line": "subprocess.call(['php', '--process-code', code])"},
+  {"ext": ".py", "line": "subprocess.call(['php', '--process-begin', code])"},
+  {"ext": ".py", "line": "subprocess.call(['php', '-nB', code])"},
+  {"ext": ".py", "line": "subprocess.call(['php', '-E', code])"},
+  {"ext": ".py", "line": "subprocess.call(['php', '--process-end', code])"},
+  {"ext": ".py", "line": "subprocess.call(['env', '-S', 'php --process-end', code])"}
  ],
  "no_match": [
   {"ext": ".js", "line": "while ((m = re.exec(s)) !== null) {"},
@@ -397,6 +409,11 @@
   {"ext": ".rb", "line": "klass.class_eval( &blk )"},
   {"ext": ".rb", "line": "binding.instance_eval { }"},
   {"ext": ".py", "line": "subprocess.call(['perl', 'script.pl'])"},
-  {"ext": ".rb", "line": "obj.instance_eval( &blk )"}
+  {"ext": ".rb", "line": "obj.instance_eval( &blk )"},
+  {"ext": ".py", "line": "subprocess.call(['env', '-S', 'ls -la', d])"},
+  {"ext": ".py", "line": "subprocess.call(['env', '-S', 'rm -rf', d])"},
+  {"ext": ".py", "line": "subprocess.call(['ls', '-s', d])"},
+  {"ext": ".py", "line": "subprocess.call(['du', '-s', 'node_modules'])"},
+  {"ext": ".py", "line": "subprocess.call(['git', 'commit', '-m', 'fix -c'])"}
  ]
 }

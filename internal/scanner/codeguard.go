@@ -359,7 +359,7 @@ const (
 		// literal program name that is no shell, passes no inline code, and
 		// the call closes on this line without shell=True (a call left open
 		// can take shell=True on the next line).
-		`subprocess\.call\((?:\s*[^\s\[]|\s*$|\s*\[\s*[^\s'"\]]|\s*\[[^\]]*$|\s*\[[^\]]*\]\s*(?:,[^)]*)?$|` + cgExecShellListHead + `|` + cgExecInlineCodeList + `|` + cgExecInterpreterFlagList + `)|` +
+		`subprocess\.call\((?:\s*[^\s\[]|\s*$|\s*\[\s*[^\s'"\]]|\s*\[[^\]]*$|\s*\[[^\]]*\]\s*(?:,[^)]*)?$|` + cgExecShellListHead + `|` + cgExecInlineCodeList + `|` + cgExecInterpreterFlagList + `|` + cgExecSplitStringList + `)|` +
 		`subprocess\.call\(.*shell\s*=\s*true|(?:^|[^.\w$]|\\[nrt])(?:exec|system)\(`
 	// cgExecShellListHead is an argument list whose first element is a
 	// shell or command interpreter (["sh", "-c", cmd], ["/bin/bash", ...]).
@@ -374,9 +374,13 @@ const (
 	// cgExecInterpreterFlagList is a JavaScript or PHP interpreter, at any
 	// element (behind env, env FOO=1 or sudo; node.exe, php.exe), given a
 	// code string through a flag or subcommand that other programs use for
-	// something else (node -p/--print, php -r/--run, deno eval; rm -r,
-	// cp -r and pip -r stay exempt).
-	cgExecInterpreterFlagList = `\s*\[[^\]]*['"](?:[^'"]*[/\\])?(?:node|nodejs|deno|bun|php)(?:\.exe)?['"][^\]]*['"](?:-[a-z]*[epr][a-z]*|--print|--run|eval)['"]`
+	// something else (node -p/--print, php -r/--run, php -B/-R/-E and
+	// --process-begin/-code/-end, deno eval; rm -r, cp -r and pip -r stay
+	// exempt).
+	cgExecInterpreterFlagList = `\s*\[[^\]]*['"](?:[^'"]*[/\\])?(?:node|nodejs|deno|bun|php)(?:\.exe)?['"][^\]]*['"](?:-[a-z]*[eprb][a-z]*|--print|--run|--process-(?:begin|code|end)|eval)['"]`
+	// cgExecSplitStringList is env -S/--split-string given one element that
+	// holds a whole command line with an inline-code flag (env -S 'node -p').
+	cgExecSplitStringList = `\s*\[[^\]]*['"](?:-s|--split-string)(?:['"]\s*,\s*['"]|=)(?:[^'"]*\s)?(?:-[a-z]*[ce]|--eval\S*|(?:[^'"\s]*[/\\])?(?:node|nodejs|deno|bun|php)(?:\.exe)?\s+(?:[^'"]*\s)?(?:-[a-z]*[eprb][a-z]*|--print|--run|--process-(?:begin|code|end)|eval))['"\s]`
 	// cgExecEvalCalls evaluate source text.
 	cgExecEvalCalls = `(?:^|[^.\w$]|\\[nrt])eval\(|(?:instance|class|module)_eval\s*(?:\(\s*(?:[^&\s)]|$)|<<|['"%])|globaleval\(|` +
 		`(?:__)?(?:builtins(?:__)?|kernel|binding|toplevel_binding|window|globalthis|global)\.eval\(`
