@@ -223,7 +223,8 @@ and the code `downgrade_refused`, and the macOS package records `downgrade_refus
 and exit with `1`; `rpm`, `dnf` and `apt` show that text only, and `last-package-result.json`
 keeps the result of the package that is applied. `rpm` and `dnf` run the older package's own
 preinstall, so a package before 1.0.9 prints the same refusal without the code; the apt hook of
-the installed package names it for any older package. For an
+the installed package names it for any older package. `dpkg -i` skips the apt hook, so `dpkg -i` of a
+package before 1.0.9 prints the refusal without the code. For an
 Intune Win32 deployment, remove the superseding **Required** assignment before assigning
 the older app; otherwise Intune can reapply the newer release.
 
