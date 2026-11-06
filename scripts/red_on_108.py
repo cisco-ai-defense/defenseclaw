@@ -158,6 +158,16 @@ def run_one(repo: Path, worktree: Path, commit: str, files: list[str], tests: li
     return "PASS_ON_108"
 
 
+def run_mapped_candidate(
+    repo: Path, worktree: Path, found: list[tuple[str, list[str]]], tests: list[str], base: str
+) -> tuple[str, str]:
+    for commit, files in found:
+        status = run_one(repo, worktree, commit, files, tests, base)
+        if status != "NO_MAPPED_TEST":
+            return commit, status
+    return "-", "NO_MAPPED_TEST"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--map", type=Path, required=True)
@@ -195,9 +205,8 @@ def main() -> int:
                     elif not found:
                         rows.append((pod, gap, "-", "COMMIT_UNRESOLVED", ",".join(gap_tests)))
                     else:
-                        commit, files = found[0]
-                        status = run_one(repo, worktree, commit, files, gap_tests, base)
-                        rows.append((pod, gap, commit[:12], status, ",".join(gap_tests)))
+                        commit, status = run_mapped_candidate(repo, worktree, found, gap_tests, base)
+                        rows.append((pod, gap, commit[:12] if commit != "-" else "-", status, ",".join(gap_tests)))
                     print(f"{pod} {gap} {rows[-1][3]}", flush=True)
         finally:
             subprocess.run(
