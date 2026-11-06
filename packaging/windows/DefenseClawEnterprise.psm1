@@ -18341,7 +18341,64 @@ function Add-DefenseClawTransactionCreatedSharedDirectory {
     Write-DefenseClawJsonAtomic -Value $snapshot -Path $SnapshotPath
 }
 
+function Test-DefenseClawEmptyAdministratorVendorFolder {
+    <#
+        True for a folder an administrator, SYSTEM or TrustedInstaller owns,
+        with no file and no reparse point anywhere beneath it: a vendor folder
+        DefenseClaw did not create that holds no DefenseClaw file (case b of
+        the g582 vendor-folder ruling, GAP-0092).
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        return $false
+    }
+    $owner = [string](Get-DefenseClawAclOwnerSID -Acl (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path))
+    if ($owner -notin @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)) {
+        return $false
+    }
+    foreach ($child in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $Path -Force -Recurse -ErrorAction Stop)) {
+        if (-not $child.PSIsContainer -or
+            ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            return $false
+        }
+    }
+    return $true
+}
+
 function Assert-DefenseClawCodexMachinePolicyDirectory {
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        Assert-DefenseClawCodexMachinePolicyDirectoryAcl -Path $Path
+    }
+    catch {
+        $refusal = $_.Exception.Message
+        # Standalone: an empty vendor folder an administrator or the vendor
+        # created (C:\ProgramData\OpenAI, OpenAI\Codex) inherits ProgramData's
+        # "Users may add files and folders" entry, which the standalone check
+        # refuses and does not re-stamp in place. Such a folder holds no
+        # DefenseClaw file, so it gets the documented vendor-folder takeover:
+        # Administrators' owner and the protected access list, then the check
+        # again (GAP-0092; case b of the g582 vendor-folder ruling). A folder
+        # with any file in it, or one another account owns, keeps the refusal.
+        # DefenseClaw did not create it, so it records no created folder and
+        # a purge leaves it in place.
+        if (-not (Test-DefenseClawStandaloneProfile) -or
+            -not (Test-DefenseClawEmptyAdministratorVendorFolder -Path $Path)) {
+            throw
+        }
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_repair -Fields @{
+            path   = $Path
+            kind   = 'InstallDirectory'
+            reason = "took over an empty vendor folder DefenseClaw did not create: $refusal"
+        }
+        Set-DefenseClawPathAcl -Path $Path -Kind InstallDirectory -GatewayServiceSID $script:AdministratorsSID
+        Assert-DefenseClawCodexMachinePolicyDirectoryAcl -Path $Path
+    }
+}
+
+function Assert-DefenseClawCodexMachinePolicyDirectoryAcl {
     param([Parameter(Mandatory)][string]$Path)
     if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Container)) {
         throw "Codex machine-policy directory is missing or is not a directory: $Path"
@@ -18350,8 +18407,14 @@ function Assert-DefenseClawCodexMachinePolicyDirectory {
     $required[$script:SystemSID] = [Security.AccessControl.FileSystemRights]::FullControl
     $required[$script:AdministratorsSID] = [Security.AccessControl.FileSystemRights]::FullControl
     $required[$script:UsersSID] = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+    # An empty OpenAI or Codex folder an administrator or the vendor created
+    # carries ProgramData's inherit-only CREATOR OWNER entry, which grants
+    # nothing; on standalone it is read as the GAP-0915 root check reads it,
+    # so the folder is adopted instead of refusing Setup /ensure (GAP-0092).
+    # Secure Client already skips the creator templates.
     Assert-DefenseClawPathAcl `
         -Path $Path `
+        -IgnoreCreatorTemplates:(Test-DefenseClawStandaloneProfile) `
         -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
         -AllowedReaderSIDs @(
             $script:SystemSID,
