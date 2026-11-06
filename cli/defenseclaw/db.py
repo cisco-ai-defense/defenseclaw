@@ -1545,11 +1545,11 @@ class Store:
             cols = [f"{alias}.{name}" if name in columns else "NULL" for name in ("session_id", "agent_instance_id")]
             for key in self._ALERT_AGENT_KEYS:
                 value = self._safe_json_extract(self._structured_sql(alias), f'$."{key}"')
-                if key == "defenseclaw.agent.identity.id" and "agent_id" in columns:
-                    # A finding's own verified install identity takes precedence
-                    # over any same-request decision row.
-                    value = (f"COALESCE(NULLIF(CASE WHEN substr({alias}.agent_id, 1, 4) = 'agt-' "
-                             f"THEN {alias}.agent_id END, ''), {value})")
+                if alias == "f" and key == "defenseclaw.agent.identity.id" and "agent_id" in columns:
+                    # Keep a finding's structured identity first. Its own
+                    # install identity still wins over same-request rows.
+                    value = (f"COALESCE(NULLIF({value}, ''), CASE WHEN substr(f.agent_id, 1, 4) = 'agt-' "
+                             "THEN f.agent_id END)")
                 cols.append(value)
             return ", ".join(cols)
 
