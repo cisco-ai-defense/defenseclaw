@@ -4505,6 +4505,14 @@ func gitMaterializationScope(args []string, static []bool, cwd string) (string, 
 				return "", true
 			}
 			return gitWorktreeRoot(working), true
+		case "submodule":
+			if i+1 < len(args) && static[i+1] && args[i+1] == "update" {
+				if scopeUnknown {
+					return "", true
+				}
+				return gitWorktreeRoot(working), true
+			}
+			return "", false
 		default:
 			// A read or inspection subcommand (show, diff, log, config, ...)
 			// installs no link, whatever the global options were.

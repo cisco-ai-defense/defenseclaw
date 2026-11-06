@@ -17,7 +17,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/protectedfiles"
 )
 
@@ -73,6 +75,56 @@ func TestProtectedFileWatchAttributesTheHookCall(t *testing.T) {
 	}
 	if read, _ := os.ReadFile(filepath.Join(home, ".ssh", "authorized_keys")); string(read) != secret {
 		t.Fatal("alert mode changed the file")
+	}
+}
+
+func TestGAP0626ProtectedFileChangeIsCriticalAlert(t *testing.T) {
+	home := protectedFilesHome(t)
+	store, logger := testStoreAndLogger(t)
+	sidecar := &Sidecar{cfg: &config.Config{}, logger: logger}
+	change := protectedfiles.Change{
+		Path: filepath.Join(home, ".ssh", "authorized_keys"), Home: home,
+		Class: protectedfiles.ClassAuthorizedKeys, Before: "sha256:before", After: "sha256:after",
+		Attributed: true, Session: protectedfiles.Session{Connector: "claudecode", SessionID: "sess-1"},
+	}
+	sidecar.emitProtectedFileChange(change)
+	alerts, err := store.ListAlerts(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 || alerts[0].Severity != "CRITICAL" ||
+		alerts[0].Action != string(audit.ActionProtectedFileChanged) {
+		t.Fatalf("alerts = %+v", alerts)
+	}
+	counts, err := store.GetCounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Alerts != 1 {
+		t.Fatalf("status active alerts = %d, want 1", counts.Alerts)
+	}
+}
+
+func TestGAP0626ProtectedFileChangeSecureClientSeverity(t *testing.T) {
+	home := protectedFilesHome(t)
+	store, logger := testStoreAndLogger(t)
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		Enterprise: config.EnterpriseConfig{Profile: managed.ProfileSecureClient}}
+	if !cfg.SecureClientIntegration() {
+		t.Fatal("Secure Client fixture is inactive")
+	}
+	sidecar := &Sidecar{cfg: cfg, logger: logger}
+	sidecar.emitProtectedFileChange(protectedfiles.Change{
+		Path: filepath.Join(home, ".ssh", "authorized_keys"), Home: home,
+		Class: protectedfiles.ClassAuthorizedKeys, Before: "sha256:before", After: "sha256:after",
+		Attributed: true,
+	})
+	alerts, err := store.ListAlerts(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 || alerts[0].Severity != "HIGH" {
+		t.Fatalf("Secure Client alerts = %+v", alerts)
 	}
 }
 

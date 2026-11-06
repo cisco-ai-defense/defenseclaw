@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
 func TestR104Refix4AWKVisibleOutput(t *testing.T) {
@@ -52,21 +54,27 @@ func TestR104Refix4GitWorktreeRoot(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name, command, target string
-		opaque                bool
+		opaque, possible      bool
 	}{
-		{"GAP-0493 pull can update root", `git -C sub pull && echo marker >> future`, "future", false},
-		{"GAP-0493 checkout can update root", `git -C sub checkout -- future && echo marker >> future`, "future", false},
-		{"outside repository", `git -C sub pull && echo marker >> ../notes.txt`, "../notes.txt", false},
-		{"explicit worktree environment", `GIT_WORK_TREE=.. git -C sub pull && echo marker >> ../notes.txt`, "../notes.txt", false},
-		{"explicit worktree config", `git -C sub -c core.worktree=.. pull && echo marker >> ../notes.txt`, "../notes.txt", false},
-		{"case-folded worktree config", `git -C sub -c CoRe.WorkTree=.. pull && echo marker >> ../notes.txt`, "../notes.txt", false},
-		{"materialization beside protected link", `git -C sub pull && echo marker >> alias`, "alias", false},
+		{"GAP-0493 pull can update root", `git -C sub pull && echo marker >> future`, "future", false, true},
+		{"GAP-0493 checkout can update root", `git -C sub checkout -- future && echo marker >> future`, "future", false, true},
+		{"outside repository", `git -C sub pull && echo marker >> ../notes.txt`, "../notes.txt", false, false},
+		{"explicit worktree environment", `GIT_WORK_TREE=.. git -C sub pull && echo marker >> ../notes.txt`, "../notes.txt", false, true},
+		{"explicit worktree config", `git -C sub -c core.worktree=.. pull && echo marker >> ../notes.txt`, "../notes.txt", false, true},
+		{"case-folded worktree config", `git -C sub -c CoRe.WorkTree=.. pull && echo marker >> ../notes.txt`, "../notes.txt", false, true},
+		{"materialization beside protected link", `git -C sub pull && echo marker >> alias`, "alias", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			links := commandLinksWithFacts(tc.command, cwd, home, nil, false)
 			target := filepath.Join(cwd, tc.target)
 			if got := links.opaqueTarget(target); got != tc.opaque {
 				t.Fatalf("opaque target = %v, want %v", got, tc.opaque)
+			}
+			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: cwd,
+				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+			if got := GitMaterializedWrite(input, actionfacts.Analyze(input)); (got == GradePossible) != tc.possible {
+				t.Fatalf("possible materialized write = %v, want %v, simples=%+v", got, tc.possible,
+					actionfacts.SimpleCommands(input, actionfacts.Analyze(input)))
 			}
 		})
 	}

@@ -93,8 +93,9 @@ func (s *Sidecar) startProtectedFileWatch(ctx context.Context) {
 }
 
 // emitProtectedFileChange writes the audit row of an agent's change to a
-// protected file: HIGH, naming the file, the digests (never the content)
-// and the agent session. A change no agent tool call explains is the
+// protected file: CRITICAL for the per-user gateway, naming the file, its
+// digests (never the content), and the agent session. Secure Client keeps
+// its existing severity. A change no agent tool call explains is the
 // user's own and is accepted without a row.
 func (s *Sidecar) emitProtectedFileChange(change protectedfiles.Change) {
 	if !change.Attributed {
@@ -107,8 +108,12 @@ func (s *Sidecar) emitProtectedFileChange(change protectedfiles.Change) {
 	ctx := audit.ContextWithEnvelope(context.Background(), audit.CorrelationEnvelope{
 		Connector: change.Session.Connector, SessionID: change.Session.SessionID, ToolID: change.Session.ToolInvocationID,
 	})
+	severity := "CRITICAL"
+	if cfg := s.currentConfig(); cfg != nil && cfg.SecureClientIntegration() {
+		severity = "HIGH"
+	}
 	_ = logger.LogActionCtxSeverity(ctx, string(audit.ActionProtectedFileChanged), change.Path,
-		protectedFileChangeDetails(change), "HIGH")
+		protectedFileChangeDetails(change), severity)
 }
 
 func protectedFileChangeDetails(change protectedfiles.Change) string {

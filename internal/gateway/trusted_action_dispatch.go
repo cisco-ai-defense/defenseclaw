@@ -439,12 +439,23 @@ func dispatchTrustedAction(
 	if generation == nil {
 		generation = snapshotRulePackGenerationFor(parent, request.Connector)
 	}
+	gitInput := request.Input
+	if gitInput.Command == "" {
+		if command, ok := trustedBashCommandInput(gitInput); ok {
+			gitInput.Command = command
+		}
+	}
+	gitMaterializedWrite := hookpaths.GradeNone
+	if !request.simpleCommandPass {
+		gitMaterializedWrite = hookpaths.GitMaterializedWrite(gitInput, facts)
+	}
 	budget := request.budget
 	if generation == nil || len(generation.members) == 0 {
 		if budget == nil {
 			budget = newTrustedActionBudget(false)
 		}
-		return dispatchTrustedActionWith(parent, request, facts, gitHookFacts, generation, budget, &telemetry)
+		found := dispatchTrustedActionWith(parent, request, facts, gitHookFacts, generation, budget, &telemetry)
+		return withGitMaterializedWriteFinding(found, request, gitMaterializedWrite == hookpaths.GradePossible)
 	}
 	// A strictest combination of profiles judges the call with each
 	// member's own rules within one budget. Each finding keeps its member for
@@ -455,6 +466,7 @@ func dispatchTrustedAction(
 	for i, member := range generation.members {
 		var memberTelemetry trustedActionTelemetry
 		found := dispatchTrustedActionWith(parent, request, facts, gitHookFacts, member, budget, &memberTelemetry)
+		found = withGitMaterializedWriteFinding(found, request, gitMaterializedWrite == hookpaths.GradePossible)
 		if i < len(generation.memberNames) {
 			for j := range found {
 				found[j].profile = generation.memberNames[i]
