@@ -92,8 +92,8 @@ func UnselectedCustomPackProblems(cfg *config.Config) []string {
 		pack := cfg.Guardrail.CustomPacks[name]
 		head := fmt.Sprintf("guardrail.custom_packs.%s is registered but will not load", name)
 		dir := strings.TrimSpace(pack.Path)
-		if info, err := os.Stat(dir); dir == "" || err != nil || !info.IsDir() {
-			problems = append(problems, fmt.Sprintf("%s: %q is not a folder", head, dir))
+		if err := cfg.CustomRulePackError(name); err != nil {
+			problems = append(problems, fmt.Sprintf("%s: %v", head, err))
 			continue
 		}
 		loaded, err := loadValidatedRulePack(cache, dir, "guardrail.custom_packs."+name)
@@ -147,6 +147,11 @@ func CheckRulePacks(cfg *config.Config) error {
 			if scope.ref.Name == "" && scope.dir != "" && !filepath.IsAbs(scope.dir) {
 				return fmt.Errorf("%s rule pack directory %q is not an absolute path; the gateway does not expand ~ "+
 					"or a relative path, so write the full path", c.label, scope.dir)
+			}
+			if err := c.cfg.CustomRulePackError(scope.ref.Name); err != nil {
+				// The gateway runs a broken entry's built-in fallback; a
+				// writer or an install check refuses the entry itself.
+				return fmt.Errorf("%s rule pack %q: %w", c.label, scope.ref.Name, err)
 			}
 			if builtinPackNotSeeded(scope) {
 				continue

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
@@ -118,5 +119,53 @@ func TestGAP0632PinnedStandaloneHookOutageRejectsInvalidPack(t *testing.T) {
 				t.Errorf("invalid selected pack outage = %q, want closed", got)
 			}
 		})
+	}
+}
+
+// A broken custom_packs entry is a config error, never outage evidence: the
+// standalone hook stays closed whatever the entry's name, and the loaded
+// config names the error. A usable default copy still opens.
+func TestGAP0632BrokenCustomPackIsConfigErrorNotOutage(t *testing.T) {
+	for _, variant := range []string{"whitespace path", "empty file set", "missing folder"} {
+		for _, name := range []string{"operator", "default", "strict"} {
+			t.Run(variant+"/"+name, func(t *testing.T) {
+				home := t.TempDir()
+				t.Setenv("DEFENSECLAW_HOME", home)
+				t.Setenv("HOME", home)
+				dir := filepath.Join(t.TempDir(), "operator-pack")
+				if err := os.CopyFS(dir, os.DirFS(filepath.Join("..", "..", "policies", "guardrail", "default"))); err != nil {
+					t.Fatal(err)
+				}
+				pin, err := guardrail.RulePackDigest(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				pin = "sha256:" + pin
+				path := dir
+				switch variant {
+				case "whitespace path":
+					path = "   "
+				case "empty file set":
+					pin = config.EmptyRulePackFilesDigest
+				case "missing folder":
+					path = filepath.Join(dir, "missing")
+				}
+				body := fmt.Sprintf("config_version: 9\nobservability: {}\nguardrail:\n  mode: action\n  rule_pack: %s\n  custom_packs:\n    %s:\n      path: %q\n      digest: %s\n", name, name, path, pin)
+				writeOutageNowConfig(t, home, body)
+				loaded, _, err := loadHookRuntimeConfig(filepath.Join(home, "config.yaml"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if errs := loaded.CustomRulePackErrors(); len(errs) != 1 {
+					t.Fatalf("config errors = %v, want one", errs)
+				}
+				if got := loaded.HookPolicyTierForConnector("codex"); got != config.HookPolicyTierStrict {
+					t.Errorf("tier = %q, want strict", got)
+				}
+				if got := hookOutageFailModeNow("codex", filepath.Join(home, "hooks")); got != "closed" {
+					t.Errorf("outage = %q, want closed", got)
+				}
+			})
+		}
 	}
 }

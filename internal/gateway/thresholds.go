@@ -115,10 +115,10 @@ func packPosture(ref config.RulePackRef, dir string) string {
 }
 
 // guardrailRulePackDir is the directory of ref for a caller that holds only
-// the guardrail block: a custom_packs entry's path, else ref.Dir.
+// the guardrail block: a usable custom_packs entry's path, else ref.Dir.
 func guardrailRulePackDir(gc *config.GuardrailConfig, ref config.RulePackRef) string {
 	if gc != nil && ref.Name != "" {
-		if custom, ok := gc.CustomPacks[ref.Name]; ok {
+		if custom, ok := gc.CustomPacks[ref.Name]; ok && gc.CustomRulePackError(ref.Name) == nil {
 			return strings.TrimSpace(custom.Path)
 		}
 	}

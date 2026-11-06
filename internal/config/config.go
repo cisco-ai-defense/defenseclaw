@@ -300,6 +300,9 @@ type Config struct {
 	// guardrail.rule_pack_dir, so the standalone implicit rule pack default
 	// never rewrites an explicit value. Set only by the loader.
 	rulePackDirDeclared bool
+	// customRulePackChecks is each guardrail.custom_packs entry with its
+	// CustomRulePackError, recorded once by the loader.
+	customRulePackChecks map[string]customRulePackCheck
 	// openShellPackDirDeclared records that the config source sets
 	// openshell.pack_dir, which the standalone sandbox packs default never
 	// rewrites; legacyOpenShellPackDir is the pre-1.0.2 default folder a
@@ -3176,6 +3179,7 @@ func loadConfigSourceCheckedWithLayout(
 	cfg.ConfigFilePath = configFile
 	cfg.offlineInspection = inspection
 	cfg.rulePackDirDeclared = viper.InConfig("guardrail.rule_pack_dir")
+	cfg.checkCustomRulePacks()
 	cfg.openShellPackDirDeclared = viper.InConfig("openshell.pack_dir")
 	cfg.legacyConnectorRouteSelectors = legacyConnectorRouteSelectorPaths(viper.Get("observability.destinations"))
 	// Move retired connector IDs to their replacement before any connector
