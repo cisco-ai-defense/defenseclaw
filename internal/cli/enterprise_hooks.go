@@ -3867,6 +3867,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	}
 	// Reconcile on the watch loop, but consume owned-file events while it
 	// runs. Only the watch loop updates retry and snapshot state.
+	replayPending := false
 	reconcileWatchPass := func(reason string) (bool, error) {
 		if legacyWatch {
 			_, err := reconcile(reason)
@@ -3948,18 +3949,57 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 				lastTriggerPath, lastTriggerOp = enterpriseHookWatchNoteTrigger(lastTriggerPath, lastTriggerOp,
 					fsnotify.Event{Name: path, Op: op})
 				queueWatchPath(path)
+				replayPending = true
 			}
 		}
 		select {
 		case event := <-interrupted:
 			handleWatchEvent(event)
+			if debouncePending {
+				replayPending = true
+			}
 			return true, err
 		default:
 			return false, err
 		}
 	}
 
+	// Events queued during a pass keep their filesystem attribution even
+	// when another interval tick arrives before their debounce expires.
+	intervalDeferred := false
+	runIntervalPass := func() bool {
+		if enterpriseHookStandaloneConfigChanged(standaloneConfigFingerprint, cmd.ErrOrStderr()) {
+			return true
+		}
+		interrupted, err := reconcileWatchPass("interval")
+		if err != nil && !errors.Is(err, context.Canceled) {
+			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] interval reconcile failed: %s\n", err)
+		}
+		if interrupted {
+			return false
+		}
+		hostChecks.Run()
+		if repairRetryNeeded() {
+			scheduleRepairRetry()
+		} else {
+			cancelRepairRetry()
+			if legacyWatch || !replayPending {
+				cancelPendingDebounce()
+			}
+		}
+		return false
+	}
+
 	for {
+		if intervalDeferred && !debouncePending {
+			if err := cmd.Context().Err(); err != nil {
+				return err
+			}
+			intervalDeferred = false
+			if runIntervalPass() {
+				return nil
+			}
+		}
 		select {
 		case <-cmd.Context().Done():
 			return cmd.Context().Err()
@@ -3994,6 +4034,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		case <-debounce.C:
 			if debouncePending {
 				debouncePending = false
+				replayPending = false
 				// If only a healthy path's event reached this loop, retain any
 				// failed owned path whose current state differs from the last
 				// reconcile. Save the old fingerprints now; check the files
@@ -4142,22 +4183,12 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 				debounceReason = "account database change"
 			}
 		case <-intervalTicks:
-			if enterpriseHookStandaloneConfigChanged(standaloneConfigFingerprint, cmd.ErrOrStderr()) {
-				return nil
-			}
-			interrupted, err := reconcileWatchPass("interval")
-			if err != nil && !errors.Is(err, context.Canceled) {
-				fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] interval reconcile failed: %s\n", err)
-			}
-			if interrupted {
+			if !legacyWatch && replayPending && debouncePending {
+				intervalDeferred = true
 				continue
 			}
-			hostChecks.Run()
-			if repairRetryNeeded() {
-				scheduleRepairRetry()
-			} else {
-				cancelRepairRetry()
-				cancelPendingDebounce()
+			if runIntervalPass() {
+				return nil
 			}
 		}
 	}
