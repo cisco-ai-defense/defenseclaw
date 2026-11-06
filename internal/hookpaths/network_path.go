@@ -4,11 +4,13 @@
 package hookpaths
 
 import (
+	"bytes"
 	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,14 +38,19 @@ import (
 // still had no answer after networkShareDeadAfter stays unknown for
 // networkShareQuietFor without being asked again.
 //
-// The answer wait is shared, not given to each share: one hook call may
-// name many shares, one after another, and each fresh share given its own
-// wait would add up past the hook answer budget. Within any
-// networkShareWaitWindow, longer than a hook call may take, the calls of
-// this process wait networkShareAnswerWait for share answers in all
-// (overlapping waits of concurrent calls count once). A fresh share asked
-// once that wait is spent reads as unknown at once, as a share that did
-// not answer within its wait reads, and is read once it has answered.
+// The answer wait is given to the hook call, not to each share: one hook
+// call may name many shares, one after another, and each fresh share given
+// its own wait would add up past the hook answer budget. A hook call (the
+// hook client resolving its targets, the gateway answering one hook
+// request: HookCall) waits networkShareAnswerWait for share answers in
+// all. A fresh share asked once its call has spent that wait reads as
+// unknown at once, as a share that did not answer within its wait reads,
+// and is read once it has answered. The wait is the call's own: no other
+// call, before it or alongside it in the same process, spends it
+// (rel-1-0-6:GAP-0482 review 2), so every call can read a share that
+// answers within the wait. The readers take no context, so a call is the
+// goroutine that runs it, from HookCall to its end; a read outside a hook
+// call waits for each share at most networkShareAnswerWait.
 
 // errNetworkShareUnanswered is the error of a read below a network share
 // that has not answered. It is not fs.ErrNotExist: the path may exist.
@@ -61,9 +68,6 @@ var (
 	// how long an answer is reused before the share is asked again.
 	networkShareQuietFor    = 2 * time.Minute
 	networkShareAnsweredFor = time.Minute
-	// networkShareWaitWindow is longer than a hook call may take (hookexec
-	// answers within its 3.5 s budget and 4 s progress ceiling).
-	networkShareWaitWindow = 6 * time.Second
 	// networkShareRootOf names the network share a path is on ("" for a
 	// local path); probeNetworkShare asks the share once. Tests replace both.
 	networkShareRootOf = networkShareRoot
@@ -85,64 +89,69 @@ var networkShares struct {
 	probes map[string]*networkShareProbe
 }
 
-// networkShareWaits are the waits for share answers that ended within
-// networkShareWaitWindow, merged so that none overlaps, oldest first.
-var networkShareWaits struct {
+// hookCalls are the hook calls in progress, by the goroutine that runs
+// each; a call's wait is read and spent only by that goroutine.
+var hookCalls struct {
 	mu    sync.Mutex
-	spans []networkShareWait
+	calls map[uint64]*hookCall
 }
 
-type networkShareWait struct{ from, to time.Time }
-
-// networkShareWaitLeft is how long a call may still wait for a share
-// answer at now: networkShareAnswerWait less the time spent waiting for
-// share answers in the networkShareWaitWindow before now.
-func networkShareWaitLeft(now time.Time) time.Duration {
-	since := now.Add(-networkShareWaitWindow)
-	networkShareWaits.mu.Lock()
-	defer networkShareWaits.mu.Unlock()
-	spent := time.Duration(0)
-	for _, span := range networkShareWaits.spans {
-		if span.to.After(since) {
-			spent += span.to.Sub(later(span.from, since))
-		}
-	}
-	return networkShareAnswerWait - spent
+type hookCall struct {
+	// waitLeft is how long the call may still wait for share answers.
+	waitLeft time.Duration
 }
 
-// recordNetworkShareWait records a wait for a share answer from from to to.
-func recordNetworkShareWait(from, to time.Time) {
-	if !to.After(from) {
-		return
+// HookCall begins a hook call on the calling goroutine and returns its end.
+// The reads of the goroutine until then wait for share answers
+// networkShareAnswerWait in all. Within a call it begins nothing more, so
+// the gateway's request and the target resolution it runs are one call.
+func HookCall() (end func()) {
+	id := goroutineID()
+	if id == 0 {
+		return func() {}
 	}
-	networkShareWaits.mu.Lock()
-	defer networkShareWaits.mu.Unlock()
-	spans := append(networkShareWaits.spans, networkShareWait{from: from, to: to})
-	slices.SortFunc(spans, func(a, b networkShareWait) int { return a.from.Compare(b.from) })
-	since := to.Add(-networkShareWaitWindow)
-	merged := spans[:0]
-	for _, span := range spans {
-		switch last := len(merged) - 1; {
-		case !span.to.After(since):
-		case last >= 0 && !span.from.After(merged[last].to):
-			merged[last].to = later(merged[last].to, span.to)
-		default:
-			merged = append(merged, span)
-		}
+	hookCalls.mu.Lock()
+	defer hookCalls.mu.Unlock()
+	if _, open := hookCalls.calls[id]; open {
+		return func() {}
 	}
-	// Joining the oldest two spans only shortens later waits.
-	for len(merged) > networkShareProbeLimit {
-		merged[1].from = merged[0].from
-		merged = merged[1:]
+	if hookCalls.calls == nil {
+		hookCalls.calls = make(map[uint64]*hookCall)
 	}
-	networkShareWaits.spans = merged
+	hookCalls.calls[id] = &hookCall{waitLeft: networkShareAnswerWait}
+	return func() {
+		hookCalls.mu.Lock()
+		delete(hookCalls.calls, id)
+		hookCalls.mu.Unlock()
+	}
 }
 
-func later(a, b time.Time) time.Time {
-	if a.After(b) {
-		return a
+// currentHookCall is the hook call the calling goroutine runs (nil: none).
+func currentHookCall() *hookCall {
+	id := goroutineID()
+	if id == 0 {
+		return nil
 	}
-	return b
+	hookCalls.mu.Lock()
+	defer hookCalls.mu.Unlock()
+	return hookCalls.calls[id]
+}
+
+// goroutineID is the runtime's number of the calling goroutine (0: not
+// read), from the first line of its stack: "goroutine N [...". Numbers are
+// not reused while the process runs.
+func goroutineID() uint64 {
+	var buf [64]byte
+	line, ok := bytes.CutPrefix(buf[:runtime.Stack(buf[:], false)], []byte("goroutine "))
+	if !ok {
+		return 0
+	}
+	digits, _, _ := bytes.Cut(line, []byte(" "))
+	id, err := strconv.ParseUint(string(digits), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return id
 }
 
 // networkPathUnanswered reports a path below a network share that has not
@@ -186,15 +195,22 @@ func networkPathUnanswered(path string) bool {
 		}
 		probe = &networkShareProbe{started: now, done: make(chan struct{})}
 		networkShares.probes[key] = probe
+		// The probe function is read here, not by the probe goroutine,
+		// which may start after a test has put the function back.
+		ask := probeNetworkShare
 		go func(probe *networkShareProbe) {
-			probeNetworkShare(root + string(filepath.Separator))
+			ask(root + string(filepath.Separator))
 			probe.took = time.Since(probe.started)
 			close(probe.done)
 		}(probe)
 	}
 	networkShares.mu.Unlock()
 	now = time.Now()
-	wait := min(networkShareAnswerWait-now.Sub(probe.started), networkShareWaitLeft(now))
+	wait := networkShareAnswerWait - now.Sub(probe.started)
+	call := currentHookCall()
+	if call != nil {
+		wait = min(wait, call.waitLeft)
+	}
 	if wait <= 0 {
 		select {
 		case <-probe.done:
@@ -205,7 +221,9 @@ func networkPathUnanswered(path string) bool {
 	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
-	defer func() { recordNetworkShareWait(now, time.Now()) }()
+	if call != nil {
+		defer func() { call.waitLeft -= time.Since(now) }()
+	}
 	select {
 	case <-probe.done:
 		return probe.took > networkShareDeadAfter

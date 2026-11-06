@@ -310,6 +310,9 @@ func contextWithCancelGrace(parent context.Context, grace time.Duration) (contex
 
 func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// The request is one hook call: its reads wait for network shares
+		// one answer wait in all, its own (rel-1-0-6:GAP-0482).
+		defer hookpaths.HookCall()()
 		chargeBudget := func(receipt bool) bool {
 			if err := chargeSandboxHookBudget(r.Context(), receipt); err != nil {
 				w.Header().Set("Retry-After", "1")
@@ -2366,6 +2369,7 @@ func (a *APIServer) safeEvaluateHook(
 	payload map[string]interface{},
 	runtime hookProfileRuntime,
 ) (resp agentHookResponse, panicked bool) {
+	defer hookpaths.HookCall()()
 	defer func() {
 		if r := recover(); r != nil {
 			panicked = true
@@ -2392,6 +2396,7 @@ func (a *APIServer) safeEvaluateSyntheticHook(
 	connectorName string,
 	req agentHookRequest,
 ) (resp agentHookResponse, panicked bool) {
+	defer hookpaths.HookCall()()
 	defer func() {
 		if r := recover(); r != nil {
 			panicked = true

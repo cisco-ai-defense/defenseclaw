@@ -921,6 +921,7 @@ func hookShellDialect(connector, tool string) actionfacts.Dialect {
 // so the map lists that call's targets and the limit alone does not make it
 // incomplete. Any other reason still does.
 func ResolveConnector(connector, surface, event string, payload []byte) string {
+	defer HookCall()()
 	if len(payload) > MaxPayloadBytes {
 		return incompleteEvidence("")
 	}
