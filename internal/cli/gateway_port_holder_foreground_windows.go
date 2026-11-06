@@ -6,20 +6,20 @@
 package cli
 
 import (
-	"os"
-	"path/filepath"
-
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
 )
 
 // sameHomeGatewayProcessPlatform diagnoses this account's foreground gateway
 // that has no PID record (GAP-0694). Windows names no listener UID, so the
 // owner is the process token's user, compared with this process's. The image
-// must be this gateway's executable file, and the home is proved by the
-// private runtime record (gateway-api.json) a gateway writes in its own data
-// directory after it starts: it must name this PID and be newer than the
-// process. The handle stays open across the reads, so the PID cannot be
-// reused meanwhile. The result never authorizes a token or process control.
+// must be this gateway's executable file. The home is read from the launch
+// environment of that very process (DEFENSECLAW_HOME, else USERPROFILE's
+// .defenseclaw), the Windows twin of /proc/<pid>/environ and KERN_PROCARGS2:
+// a record file in some home cannot stand in for it, however it was written.
+// The handle stays open across the reads, so the PID cannot be reused
+// meanwhile. The result never authorizes a token or process control.
 func sameHomeGatewayProcessPlatform(pid int, home, executable string) bool {
 	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, uint32(pid))
 	if err != nil {
@@ -35,15 +35,24 @@ func sameHomeGatewayProcessPlatform(pid int, home, executable string) bool {
 		!sameForegroundFile(windows.UTF16ToString(buffer[:size]), executable) {
 		return false
 	}
-	var created, exited, kernel, user windows.Filetime
-	if windows.GetProcessTimes(process, &created, &exited, &kernel, &user) != nil {
+	environment, err := agentprocess.LaunchEnvironmentForPID(pid)
+	if err != nil {
 		return false
 	}
-	record, err := os.Lstat(filepath.Join(filepath.Clean(home), "gateway-api.json"))
-	if err != nil || record.ModTime().UnixNano() < created.Nanoseconds() {
-		return false
+	processHome, ok := foregroundLaunchHomeFrom(foregroundLaunchEntries(environment), "USERPROFILE")
+	return ok && sameForegroundFile(processHome, home) && windowsProcessRunning(process)
+}
+
+// foregroundLaunchEntries renders the selected launch variables as
+// NAME=value entries for foregroundLaunchHomeFrom.
+func foregroundLaunchEntries(environment map[string]string) []string {
+	entries := make([]string, 0, 2)
+	for _, name := range []string{"DEFENSECLAW_HOME", "USERPROFILE"} {
+		if value, ok := environment[name]; ok {
+			entries = append(entries, name+"="+value)
+		}
 	}
-	return gatewayRuntimeRecordNamesPID(home, pid) && windowsProcessRunning(process)
+	return entries
 }
 
 // windowsProcessRunning waits on the handle instead of reading the exit

@@ -131,6 +131,13 @@ func gatewayExecutableName(executable, goos string) bool {
 // so a foreground gateway on the default home is recognised on both
 // (GAP-0705). A relative or repeated value proves nothing.
 func foregroundLaunchHome(environment []string) (string, bool) {
+	return foregroundLaunchHomeFrom(environment, "HOME")
+}
+
+// foregroundLaunchHomeFrom is foregroundLaunchHome for a platform whose
+// account home variable is userHomeKey (USERPROFILE on Windows, the one
+// os.UserHomeDir reads).
+func foregroundLaunchHomeFrom(environment []string, userHomeKey string) (string, bool) {
 	var override, userHome string
 	seenOverride, seenHome := false, false
 	for _, entry := range environment {
@@ -140,11 +147,11 @@ func foregroundLaunchHome(environment []string) (string, bool) {
 				return "", false
 			}
 			seenOverride, override = true, strings.TrimPrefix(entry, "DEFENSECLAW_HOME=")
-		case strings.HasPrefix(entry, "HOME="):
+		case strings.HasPrefix(entry, userHomeKey+"="):
 			if seenHome {
 				return "", false
 			}
-			seenHome, userHome = true, strings.TrimPrefix(entry, "HOME=")
+			seenHome, userHome = true, strings.TrimPrefix(entry, userHomeKey+"=")
 		}
 	}
 	if override != "" {
@@ -193,6 +200,13 @@ func otherAccountListenerAt(host string, port int) string {
 	return fmt.Sprintf("%s is held by %s, not by this account's gateway", addr, who)
 }
 
+// problemClause is a foreignGatewayListener problem inside a longer sentence:
+// the root-gateway reason is a full sentence with its own final period, which
+// the surrounding text must not double (GAP-0706).
+func problemClause(problem string) string {
+	return strings.TrimSuffix(problem, ".")
+}
+
 // explainForeignListenerAtReadiness names the holder when another listener
 // answered readiness on the API port. The start check passed, but another
 // account's gateway took the port before this one bound it, and start
@@ -205,7 +219,7 @@ func explainForeignListenerAtReadiness(cfg *config.Config, err error) error {
 		return err
 	}
 	if problem := foreignGatewayListener(cfg); problem != "" {
-		return fmt.Errorf("%w: %s. %s", err, problem, foreignGatewayListenerFix(cfg))
+		return fmt.Errorf("%w: %s. %s", err, problemClause(problem), foreignGatewayListenerFix(cfg))
 	}
 	return err
 }

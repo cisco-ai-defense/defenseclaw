@@ -52,3 +52,25 @@ func TestGAP0705ForegroundLaunchHomeFollowsDefaultDataPath(t *testing.T) {
 		})
 	}
 }
+
+func TestGAP0694ForegroundLaunchHomeUsesTheWindowsProfile(t *testing.T) {
+	profile := filepath.Join(t.TempDir(), "profile")
+	for _, tc := range []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{"default", []string{"USERPROFILE=" + profile, "HOME=/ignored"}, filepath.Join(profile, config.DefaultDataDirName)},
+		{"explicit", []string{"USERPROFILE=" + profile, "DEFENSECLAW_HOME=" + profile}, profile},
+		{"duplicate profile", []string{"USERPROFILE=" + profile, "USERPROFILE=" + profile}, ""},
+		{"relative profile", []string{"USERPROFILE=relative"}, ""},
+		{"only HOME", []string{"HOME=" + profile}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := foregroundLaunchHomeFrom(tc.env, "USERPROFILE")
+			if got != tc.want || ok != (tc.want != "") {
+				t.Fatalf("launch home = %q, %v; want %q", got, ok, tc.want)
+			}
+		})
+	}
+}
