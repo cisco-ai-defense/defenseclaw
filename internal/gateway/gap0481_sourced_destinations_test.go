@@ -12,7 +12,7 @@ import (
 )
 
 // The balanced tiers leave a sourced project-file destination alone when the
-// existing path reading has no protected candidate. Managed hidden homes and
+// current source and known candidates are ordinary. Managed hidden homes and
 // strict tiers retain the conservative answer. A known link stays protected
 // in every tier.
 func TestGAP0481SourcedDestinationFollowsTier(t *testing.T) {
@@ -20,6 +20,12 @@ func TestGAP0481SourcedDestinationFollowsTier(t *testing.T) {
 	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
 	source := filepath.Join(f.project, "setf.sh")
 	if err := os.Mkdir(filepath.Join(f.project, "reports"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(f.keys, filepath.Join(f.project, "key link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.project, "writer.sh"), []byte("printf x >> ~/.ssh/authorized_keys\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	rows := []struct {
@@ -31,11 +37,20 @@ func TestGAP0481SourcedDestinationFollowsTier(t *testing.T) {
 		{"no-op between", "f=out.txt\n", "f=a.txt; . ./setf.sh; :; echo m >> \"$f\"", false},
 		{"project subdirectory", "f=reports/b.txt\n", "f=reports/a.txt; . ./setf.sh; echo m >> \"$f\"", false},
 		{"unquoted destination", "f=out.txt\n", "f=a.txt; . ./setf.sh; echo m >> $f", false},
+		{"dot-relative destination", "f=./out.txt\n", "f=./a.txt; . ./setf.sh; echo m >> \"$f\"", false},
+		{"spaced destination", "f='out file.txt'\n", "f='a file.txt'; . ./setf.sh; echo m >> \"$f\"", false},
+		{"cat redirect", "f=out.txt\n", "f=a.txt; . ./setf.sh; cat input.txt >> \"$f\"", false},
+		{"colon redirect", "f=out.txt\n", "f=a.txt; . ./setf.sh; : >> \"$f\"", false},
+		{"overwrite redirect", "f=out.txt\n", "f=a.txt; . ./setf.sh; echo m > \"$f\"", false},
 		{"source link", "f=keylink\n", "f=a.txt; . ./setf.sh; echo m >> \"$f\"", true},
 		{"source direct", "f=~/.ssh/authorized_keys\n", "f=a.txt; . ./setf.sh; echo m >> \"$f\"", true},
 		{"source side effect", "f=out.txt\necho x >> ~/.ssh/authorized_keys\n", "f=a.txt; . ./setf.sh; echo m >> \"$f\"", true},
 		{"source function", "f=out.txt\necho() { printf x >> ~/.ssh/authorized_keys; }\n", "f=a.txt; . ./setf.sh; echo m >> \"$f\"", true},
 		{"initial link", "f=out.txt\n", "f=keylink; . ./setf.sh; echo m >> \"$f\"", true},
+		{"spaced protected link", "f='key link'\n", "f='a file.txt'; . ./setf.sh; echo m >> \"$f\"", true},
+		{"spaced initial link", "f='out file.txt'\n", "f='key link'; . ./setf.sh; echo m >> \"$f\"", true},
+		{"writer named target", "f=out.txt\n", "f=a.txt; . ./setf.sh; cp a.txt ~/.ssh/authorized_keys >> \"$f\"", true},
+		{"writer script target", "f=out.txt\n", "f=a.txt; . ./setf.sh; sh ./writer.sh >> \"$f\"", true},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -79,5 +94,27 @@ func TestGAP0481SourcedDestinationFollowsTier(t *testing.T) {
 	}
 	if err := os.Chmod(f.homes, 0o700); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestGAP0481CurrentSourceAfterClientReading(t *testing.T) {
+	f := newB36ManagedHookFixture(t)
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	source := filepath.Join(f.project, "setf.sh")
+	if err := os.WriteFile(source, []byte("f=out.txt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	payload := f.payload(t, `f=a.txt; . ./setf.sh; echo m >> "$f"`)
+	header := f.clientHeader(t, payload)
+	if err := os.WriteFile(source, []byte("f=keylink\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, connector := range []string{"claudecode", "codex"} {
+		call := &keyReadCall{api: keyReadGateway(t, connector, "default", "action"),
+			connector: connector, payload: payload, header: header}
+		call.answer(f.home)
+		if call.verdict != "block" {
+			t.Errorf("%s current source changed after client reading: %s", connector, call.verdict)
+		}
 	}
 }
