@@ -57,14 +57,15 @@ func MCPAccountJournalServes(key string, q MCPAdmissionQuery) bool {
 	return ok && identity.Connector != "" && identity.Home != "" && mcpServerServesQuery(identity.server(), q)
 }
 
-// MCPAccountJournalServesSnapshot requires the account key to have a matching
-// versioned snapshot identity. A literal old server name can spell a valid
-// tuple key, so the journal key alone is not provenance for an account row.
+// MCPAccountJournalServesSnapshot decides an account row by the snapshot
+// stored under its key. Admission records its decision before the snapshot,
+// and that write can fail, so a key with no snapshot keeps its decision in
+// force (fail closed). Only a snapshot written by an earlier release, which
+// has no versioned identity, marks the row as an old one: a literal old
+// server name can spell a valid tuple key, and that row stays inert until
+// normal admission records a new outcome.
 func MCPAccountJournalServesSnapshot(key string, snapshot *audit.SnapshotRow, q MCPAdmissionQuery) bool {
-	if _, ok := mcpStoredSnapshotIdentity(key, snapshot); !ok {
-		return false
-	}
-	return MCPAccountJournalServes(key, q)
+	return !mcpPreIdentitySnapshot(snapshot) && MCPAccountJournalServes(key, q)
 }
 
 // MigrateAccountMCPJournal moves the MCP journal rows that earlier versions
