@@ -5,15 +5,17 @@
 from __future__ import annotations
 
 import os
+import stat
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import click
 import pytest
-from defenseclaw import bootstrap, connector_paths, file_permissions
+from defenseclaw import agent_selection, bootstrap, connector_paths, file_permissions
 from defenseclaw.commands import cmd_setup
 from defenseclaw.config import default_config
+from defenseclaw.inventory import agent_discovery
 
 pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux private groups")
 
@@ -72,6 +74,72 @@ def test_gap0657_owner_private_755_stays_allowed(monkeypatch: pytest.MonkeyPatch
 
     assert connector_paths.opencode_writable_plugin_folder([str(plugin)]) == ""
     cmd_setup._preflight_opencode_plugin_folder()
+
+
+def test_gap0657_sticky_ancestor_stays_allowed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    sticky = Path("/tmp")
+    info = sticky.stat()
+    if info.st_uid != 0 or not info.st_mode & stat.S_ISVTX:
+        pytest.skip("root-owned sticky /tmp is unavailable")
+    plugin = tmp_path / "plugins" / "defenseclaw.js"
+    plugin.parent.mkdir(mode=0o700)
+    monkeypatch.setenv("HOME", str(sticky))
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path))
+    assert connector_paths.opencode_writable_plugin_folder([str(plugin)]) == ""
+    cmd_setup._preflight_opencode_plugin_folder()
+
+
+def test_gap0657_custom_config_root_names_unsafe_ancestor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    external = tmp_path / "external"
+    (external / "plugins").mkdir(parents=True)
+    external.chmod(0o777)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(external))
+    plugin = connector_paths.connector_config_files("opencode")[0]
+    assert connector_paths.opencode_writable_plugin_folder([plugin]) == str(external)
+    with pytest.raises(click.ClickException) as caught:
+        cmd_setup._preflight_opencode_plugin_folder()
+    assert f"chmod go-w {external}" in str(caught.value)
+
+
+@pytest.mark.parametrize("mode,shared,allowed", [(0o775, False, True), (0o775, True, False), (0o755, True, True)])
+def test_gap0657_executable_prefix_uses_private_group_rule(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: int, shared: bool, allowed: bool
+) -> None:
+    prefix = tmp_path / "bin"
+    prefix.mkdir()
+    prefix.chmod(mode)
+    executable = prefix / "opencode"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    _account_records(monkeypatch, tmp_path, prefix.stat().st_gid, shared=shared)
+    monkeypatch.setattr(agent_selection, "_builtin_setup_trusted_prefixes", lambda: (str(prefix),))
+    monkeypatch.setattr(agent_discovery, "_ai_discovery_trust_config", lambda _path: (False, ()))
+    monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", str(prefix))
+
+    assert (agent_discovery.validate_trusted_prefix(str(prefix))[1] is None) is allowed
+    assert agent_discovery._is_trusted_binary_path(str(executable)) is allowed
+    assert agent_selection.is_setup_trusted_binary(str(executable), str(tmp_path)) is allowed
+    assert agent_selection._posix_setup_chain_is_safe(str(executable), str(prefix)) is allowed
+
+
+def test_gap0657_executable_prefix_with_acl_stays_untrusted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    prefix = tmp_path / "bin"
+    prefix.mkdir()
+    prefix.chmod(0o775)
+    _account_records(monkeypatch, tmp_path, prefix.stat().st_gid)
+    native_getxattr = os.getxattr
+
+    def getxattr(path: str, name: str, *, follow_symlinks: bool = True) -> bytes:
+        if os.fspath(path) == str(prefix) and name == "system.nfs4_acl":
+            return b"present"
+        return native_getxattr(path, name, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(file_permissions.os, "getxattr", getxattr)
+    assert file_permissions.owner_private_group(str(prefix), prefix.stat()) is False
+    assert agent_discovery.validate_trusted_prefix(str(prefix))[1] == "directory is group-writable"
 
 
 @pytest.mark.parametrize("shared,mode", [(True, 0o775), (False, 0o777)])

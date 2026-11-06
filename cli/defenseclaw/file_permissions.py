@@ -82,11 +82,15 @@ def _has_access_acl(path: str) -> bool:
     getxattr = getattr(os, "getxattr", None)
     if getxattr is None:
         return True
-    try:
-        getxattr(path, "system.posix_acl_access", follow_symlinks=False)
-    except OSError as exc:
-        return exc.errno not in (errno.ENODATA, errno.ENOTSUP, getattr(errno, "ENOATTR", errno.ENODATA))
-    return True
+    for attribute in ("system.posix_acl_access", "system.nfs4_acl", "system.nfs4acl"):
+        try:
+            getxattr(path, attribute, follow_symlinks=False)
+        except OSError as exc:
+            if exc.errno in (errno.ENODATA, errno.ENOTSUP, getattr(errno, "ENOATTR", errno.ENODATA)):
+                continue
+            return True
+        return True
+    return False
 
 
 def owner_private_group(path: str, info: os.stat_result) -> bool:
