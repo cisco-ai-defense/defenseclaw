@@ -18,18 +18,33 @@ import (
 // caller without the privileges logged a once-per-process "grant the
 // privilege" prerequisite. Secure Client's assessment of a hidden descriptor
 // is Accepted, as on the base, and it does not take the privileges.
+//
+// g582 review 6 M1: the same holds with the strict pin set, which any
+// managed host may set to tighten trust. The base returns Boundary there
+// ("security descriptor is not readable") without the privileges; round 6
+// re-read the descriptor with them and could return Accepted instead.
 func TestSecureClientHiddenDescriptorAssessmentIsUnchanged(t *testing.T) {
 	requireHiddenDescriptorElevated(t)
 	for _, tc := range []struct {
 		name      string
 		directory bool
 		sddl      string
+		strict    bool
+		want      CanonicalOutcome
 	}{
-		{name: "token-style file, Guests write, descriptor hidden", sddl: hiddenWriterFileSDDL},
-		{name: "folder, Guests write, descriptor and listing hidden", directory: true, sddl: hiddenWriterFolderSDDL},
+		{name: "token-style file, Guests write, descriptor hidden", sddl: hiddenWriterFileSDDL, want: CanonicalAccepted},
+		{name: "folder, Guests write, descriptor and listing hidden", directory: true, sddl: hiddenWriterFolderSDDL, want: CanonicalAccepted},
+		{name: "strict pin, token-style file, descriptor hidden", sddl: hiddenWriterFileSDDL, strict: true, want: CanonicalBoundary},
+		{name: "strict pin, folder, descriptor and listing hidden", directory: true, sddl: hiddenWriterFolderSDDL, strict: true, want: CanonicalBoundary},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(TrustStrictAncestorsEnv, "")
+			if tc.strict {
+				t.Setenv(TrustStrictAncestorsEnv, "1")
+				if !TrustStrictAncestors() {
+					t.Fatal("the strict pin did not take")
+				}
+			}
 			path := filepath.Join(t.TempDir(), "object")
 			kind := ObjectAdminFile
 			if tc.directory {
@@ -57,8 +72,11 @@ func TestSecureClientHiddenDescriptorAssessmentIsUnchanged(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if assessed.Outcome != CanonicalAccepted {
-				t.Fatalf("Secure Client assessment = %+v, want Accepted as on the base", assessed)
+			if assessed.Outcome != tc.want {
+				t.Fatalf("Secure Client assessment = %+v, want %s as on the base", assessed, tc.want)
+			}
+			if tc.strict && assessed.RepairError != "security descriptor is not readable" {
+				t.Fatalf("Secure Client strict assessment = %+v, want the base reason", assessed)
 			}
 			if privileged != 0 {
 				t.Fatalf("the Secure Client assessment took the repair privileges %d time(s)", privileged)
