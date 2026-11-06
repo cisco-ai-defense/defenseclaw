@@ -50,7 +50,7 @@ func TestGAP0288ManagedWindowsCodexProjectCopy(t *testing.T) {
 	}
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	strictCopyRows := map[string]bool{"B11": true, "V1": true, "V2": true, "V5": true, "V7": true, "V10": true, "V11": true, "V12": true, "V13": true}
+	strictCopyRows := map[string]bool{"B11": true, "V1": true, "V2": true, "V5": true, "V7": true, "V10": true, "V11": true, "V12": true, "V13": true, "V14": true, "V15": true}
 	for _, row := range []struct {
 		name, cwd, command string
 		want               string
@@ -68,6 +68,8 @@ func TestGAP0288ManagedWindowsCodexProjectCopy(t *testing.T) {
 		{"V11", home, `env -C ~ cp -a project project-a-bak`, "allow", nil},
 		{"V12", home, `env -C ~ cp -R project project-R2-bak`, "allow", nil},
 		{"V13", home, `Copy-Item -Recurse project project-ps-bak`, "allow", nil},
+		{"V14", home, `env -C ~ cp -r project "project backup"`, "allow", nil},
+		{"V15", home, `Copy-Item -Recurse project "project backup"`, "allow", nil},
 		{"B11-cd", home, `cd ~ && cp -r project project-bak`, "allow", []string{"claudecode"}},
 		{"B11-write", project, `env -C ~ cp -r project project-bak; echo key >> ~/project-bak/keylink`, "block", nil},
 		{"K00", project, `echo key >> ` + filepath.ToSlash(filepath.Join(home, ".ssh", "authorized_keys")), "block", nil},
