@@ -17035,9 +17035,12 @@ function Repair-DefenseClawDeploymentAclDrift {
         # return whether it would repair (GAP-0590).
         [switch]$CheckOnly,
         # The caller's content gate scope: an uninstall passes Retain or
-        # Purge, so a purge is never refused for a credential it deletes
-        # unread (g582 review 2 S1).
-        [ValidateSet('Lifecycle', 'Retain', 'Purge')][string]$ContentGateScope = 'Lifecycle'
+        # Purge, so a purge is never refused before the stop for a
+        # credential it deletes unread (g582 review 2 S1). It judges only
+        # the read-only check; the re-stamps are judged with Lifecycle.
+        [ValidateSet('Lifecycle', 'Retain', 'Purge')][string]$ContentGateScope = 'Lifecycle',
+        # Set to the gate's refusal when an uninstall's re-stamp is skipped.
+        [ref]$GateRefusal
     )
     $drifted = [string]$RedactionKeyClass -ceq 'trusted_drift'
     if (-not $drifted) {
@@ -17059,8 +17062,33 @@ function Repair-DefenseClawDeploymentAclDrift {
     # config check above keeps its CONFIG= wording; the gate judges the rest of
     # what the re-stamps below would re-trust (GAP-0590 review M3).
     if (Test-DefenseClawStandaloneProfile) {
-        Assert-DefenseClawStandaloneContentTrusted -Layout $Layout -GatewayServiceName $GatewayServiceName `
-            -Scope $ContentGateScope
+        # The re-stamps below give the gateway back every runtime child and
+        # re-stamp the core folders, which a Purge gate (runtime, .env, IPC
+        # and the credential store skipped) does not judge. Only the
+        # read-only check keeps the caller's scope; the re-stamps are judged
+        # with Lifecycle, the scope of what they re-trust (g582 review 3 M4).
+        $gateScope = if ($CheckOnly) { $ContentGateScope } else { 'Lifecycle' }
+        try {
+            Assert-DefenseClawStandaloneContentTrusted -Layout $Layout -GatewayServiceName $GatewayServiceName `
+                -Scope $gateScope
+        }
+        catch {
+            if ($CheckOnly -or $ContentGateScope -ceq 'Lifecycle') {
+                throw
+            }
+            # An uninstall goes on without the re-stamp: a purge deletes the
+            # paths, and the gateway's access stays stripped, so a restart
+            # after a failure fails closed instead of reading bytes nobody
+            # judged. The caller names the paths.
+            if ($null -ne $GateRefusal) {
+                $GateRefusal.Value = $_.Exception.Message
+            }
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_boundary -Fields @{
+                path   = [string]$Layout.StateRoot
+                reason = 'the uninstall did not give the deployment its access lists back: ' + $_.Exception.Message
+            }
+            return $false
+        }
     }
     if ($CheckOnly) {
         return $true
@@ -17980,17 +18008,27 @@ function New-DefenseClawTransaction {
                 $restoreServices = @(foreach ($entry in $services) { [pscustomobject]$entry })
                 if ($PriorDeploymentActive -and
                     (Test-DefenseClawServiceExists -Name $GatewayServiceName)) {
+                    $gateRefusal = ''
                     try {
                         [void](Repair-DefenseClawDeploymentAclDrift `
                             -Layout $Layout `
                             -GatewayServiceName $GatewayServiceName `
                             -RedactionKeyClass $precheckRedactionKeyClass `
-                            -ContentGateScope $ContentGateScope)
+                            -ContentGateScope $ContentGateScope `
+                            -GateRefusal ([ref]$gateRefusal))
                     }
                     catch {
                         # The restart below still runs; this is reported
                         # only if it fails too.
                         $aclRestoreFailure = $_.Exception.Message
+                    }
+                    if ($gateRefusal) {
+                        # The gate refused what the re-stamp would have
+                        # re-trusted: the services stay stopped and the
+                        # quiescing intent stays pending, naming the paths,
+                        # instead of a restart on bytes nobody judged
+                        # (g582 review 3 M4).
+                        throw "not restarting the services on paths the content gate refused: $gateRefusal"
                     }
                 }
             }
