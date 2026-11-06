@@ -50,7 +50,7 @@ def candidates(repo: Path, gap: str, base: str) -> list[tuple[str, list[str]]]:
     result = []
     for line in text.splitlines():
         commit, _, subject = line.partition("\t")
-        if gap not in subject.upper():
+        if gap not in subject.upper() or subject.lower().startswith(("revert(", "revert ")):
             continue
         if (
             subprocess.run(
@@ -61,7 +61,7 @@ def candidates(repo: Path, gap: str, base: str) -> list[tuple[str, list[str]]]:
             == 0
         ):
             continue
-        files = git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", commit).splitlines()
+        files = git(repo, "diff-tree", "--no-commit-id", "--name-only", "--diff-filter=AM", "-r", commit).splitlines()
         test_files = [name for name in files if name.endswith("_test.go") or re.search(r"(?:^|/)test_[^/]+\.py$", name)]
         if test_files:
             result.append((commit, test_files))
