@@ -1551,9 +1551,28 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		symlinkWrite = false
 		findings = withTrustedActionLimitFinding(findings, request.EnforcementCapable)
 	}
-	if possible && !symlinkWrite && !request.StrictPolicy {
-		// The ordinary spelling names no protected target. Keep a visible
-		// notice while the default policy allows the command.
+	// Keep an uncertain mention attached to this reader. Independent named
+	// proofs retain their own enforcement finding.
+	mentionGrade := sshKeyMentionGrade(request)
+	if mentionGrade == hookpaths.GradePossible &&
+		!slices.ContainsFunc(findings, func(f RuleFinding) bool {
+			return f.RuleID == "persistence.ssh_authorized_keys_command" && f.contributesToEnforcement()
+		}) {
+		if _, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command"); ok {
+			enforcement := findingEnforcementDetectionOnly
+			if request.strictHookProfile && request.EnforcementCapable {
+				enforcement = findingEnforcementAllowed
+			}
+			findings = append(findings, adjustConfidence(input.Tool, RuleFinding{
+				RuleID: rule.ID, Title: "Possible SSH path mention", Severity: rule.Severity,
+				Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
+				Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
+				enforcement: enforcement,
+			}))
+		}
+	}
+	if possible && !symlinkWrite && !request.StrictPolicy && mentionGrade == hookpaths.GradeNone {
+		// The unresolved write retains the filesystem reader's notice.
 		if _, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command"); ok {
 			findings = append(findings, adjustConfidence(input.Tool, RuleFinding{
 				RuleID: rule.ID, Title: unresolvedWriteTargetTitle, Severity: rule.Severity,
@@ -1565,7 +1584,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	}
 	if commandText != "" && !strings.Contains(commandText, "authorized_k") &&
 		!strings.Contains(commandText, "administrators_authorized") &&
-		!strings.Contains(commandText, "base64") && !symlinkWrite &&
+		!strings.Contains(commandText, "base64") && !symlinkWrite && mentionGrade != hookpaths.GradeNamed &&
 		!trustedWindowsLocationAuthorizedKeysWriteWith(input, request.targetMemo) {
 		return appendTrustedCMDPrivateKeyReadFinding(
 			appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts),
@@ -1579,7 +1598,8 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		}
 	}
 	if request.EnforcementCapable &&
-		(trustedAuthorizedKeysWriteProofWith(input, facts, symlinkWrite, clientGlobFacts(request), request.targetMemo, request.StrictPolicy) ||
+		(mentionGrade == hookpaths.GradeNamed ||
+			trustedAuthorizedKeysWriteProofWith(input, facts, symlinkWrite, clientGlobFacts(request), request.targetMemo, request.StrictPolicy) ||
 			trustedSandboxGuestAuthorizedKeysWrite(request)) {
 		_, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command")
 		if ok {
@@ -1748,7 +1768,7 @@ func trustedAuthorizedKeysWriteProofWith(input actionfacts.Input, facts actionfa
 		return false
 	}
 	if input.Command != "" &&
-		memo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts) == "protected-target" {
+		memo.ActionCommandGradeWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts) == hookpaths.GradeNamed {
 		return true
 	}
 	enforcementFacts := facts.EnforcementProjection()

@@ -56,7 +56,20 @@ func ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home string, dia
 // ActionCommandDecisionWithDialectAndGlobFacts is the package function of
 // that name, with the file system answers of the evaluation m (nil: none).
 func (m *TargetMemo) ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home string, dialect actionfacts.Dialect, facts map[string]string) string {
-	return actionTargetDecision(command, cwd, home, dialect, dialect == actionfacts.DialectPOSIX, facts, m)
+	return actionDecisionFromGrade(actionTargetDecision(command, cwd, home, dialect, dialect == actionfacts.DialectPOSIX, facts, m))
+}
+
+// ActionCommandGradeWithDialectAndGlobFacts returns the maximum certainty
+// produced by the target readers, retaining possible hits for policy tiers.
+func (m *TargetMemo) ActionCommandGradeWithDialectAndGlobFacts(command, cwd, home string, dialect actionfacts.Dialect, facts map[string]string) Grade {
+	grade := actionTargetDecision(command, cwd, home, dialect, dialect == actionfacts.DialectPOSIX, facts, m)
+	if grade == ProtectedTargetDecision {
+		return GradeNamed
+	}
+	if actionPossibleGrade(grade) {
+		return GradePossible
+	}
+	return GradeNone
 }
 
 // ActionCommandDecisionInShell is ActionCommandDecisionWithGlobFacts for a
@@ -69,14 +82,38 @@ func ActionCommandDecisionInShell(command, cwd, home string, facts map[string]st
 // ActionCommandDecisionInShell is the package function of that name, with
 // the file system answers of the evaluation m (nil: none).
 func (m *TargetMemo) ActionCommandDecisionInShell(command, cwd, home string, facts map[string]string, posixShell bool) string {
-	return actionTargetDecision(command, cwd, home, "", posixShell, facts, m)
+	return actionDecisionFromGrade(actionTargetDecision(command, cwd, home, "", posixShell, facts, m))
 }
 
-// ProvedReadOnlyPOSIXCommand uses the existing bounded shell reader to
-// establish that every reached statement only reads or displays data.
-func ProvedReadOnlyPOSIXCommand(command, home string) bool {
-	file, parsed := parseShell(command)
-	return parsed && actionKnownReadOnlyShell(file, home)
+// The historical decision API remains conservative for its client callers.
+// A Possible hit that only supplies tier policy has no client block.
+func actionDecisionFromGrade(grade string) string {
+	if grade == ProtectedTargetDecision || grade == PossibleTargetDecision {
+		return ProtectedTargetDecision
+	}
+	return ""
+}
+
+const possibleOnlyTargetDecision = "possible-tier-only"
+
+// PossibleTargetDecision marks a target whose reach remains uncertain.
+const PossibleTargetDecision = "possible-target"
+
+func actionPossibleGrade(grade string) bool {
+	return grade == PossibleTargetDecision || grade == possibleOnlyTargetDecision
+}
+
+func actionMaxTargetGrade(left, right string) string {
+	if left == ProtectedTargetDecision || right == ProtectedTargetDecision {
+		return ProtectedTargetDecision
+	}
+	if left == PossibleTargetDecision || right == PossibleTargetDecision {
+		return PossibleTargetDecision
+	}
+	if left == possibleOnlyTargetDecision || right == possibleOnlyTargetDecision {
+		return possibleOnlyTargetDecision
+	}
+	return ""
 }
 
 func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect, posixShell bool, facts map[string]string, memo *TargetMemo) string {
@@ -95,28 +132,6 @@ func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect
 	if actionWindowsHome(home) && actionSimpleEnvTextDisplay(command) {
 		return ""
 	}
-	// A Git Bash home glob in an entirely read-only compound names no
-	// protected write in either Windows or POSIX syntax. Keep the proof
-	// syntactic so a later redirect or copy still reaches all target scans.
-	if dialect == actionfacts.DialectPOSIX && actionWindowsHome(home) && strings.Contains(command, "*/*") {
-		if file, parsed := parseShell(command); parsed &&
-			(actionKnownReadOnlyShell(file, home) ||
-				strings.Contains(command, "pwd") && actionReadOnlyListingCompound(file, cwd, home)) {
-			return ""
-		}
-	}
-	if strings.HasPrefix(strings.TrimSpace(command), "bash -c ") {
-		if file, parsed := parseShell(command); parsed && len(file.Stmts) == 1 &&
-			len(file.Stmts[0].Redirs) == 0 && !file.Stmts[0].Background && !file.Stmts[0].Coprocess &&
-			!file.Stmts[0].Negated {
-			if call, ok := file.Stmts[0].Cmd.(*syntax.CallExpr); ok && len(call.Args) > 0 {
-				if program, known := StaticWord(call.Args[0], home); known && programBase(program) == "bash" &&
-					actionReadOnlyBashCLaunch(call, home, 0) {
-					return ""
-				}
-			}
-		}
-	}
 	if memo == nil {
 		// Every reading of this decision shares one memo.
 		memo = NewTargetMemo()
@@ -125,30 +140,37 @@ func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect
 	if facts != nil {
 		globs = &actionGlobs{facts: facts}
 	}
-	if !actionGitBashReadsAlone(command, home, dialect) &&
-		actionProtectedTargetMentionIn(command, cwd, home, 0, false, globs, dialect, memo) {
-		return "protected-target"
+	grade := ""
+	if !actionGitBashReadsAlone(command, home, dialect) {
+		grade = actionProtectedTargetMentionGradeIn(command, cwd, home, 0, false, globs, dialect, memo)
+		if grade == ProtectedTargetDecision {
+			return grade
+		}
 	}
 	if posixShell && actionWindowsHome(home) && command != "" && len(command) <= MaxPayloadBytes {
 		if actionWindowsLiteralHereDocumentTarget(command, home, memo) ||
-			actionPosixTargetMention(command, cwd, home, 0, false, globs.forCommandWith(command, memo)) ||
 			runtime.GOOS == "windows" && actionConcreteProtectedWriteOnWith(command, cwd, home, true, memo) {
-			return "protected-target"
+			return ProtectedTargetDecision
+		}
+		if hit := actionPosixTargetMentionGrade(command, cwd, home, 0, false, globs.forCommandWith(command, memo)); hit == ProtectedTargetDecision {
+			return hit
+		} else if actionPossibleGrade(hit) {
+			grade = actionMaxTargetGrade(grade, hit)
 		}
 	}
 	if actionPureMake(command, home) {
 		if actionMakeProtectedRecipe(command, cwd, home) {
-			return "protected-target"
+			return ProtectedTargetDecision
 		}
-		return ""
+		return grade
 	}
 	if actionMakeProtectedRecipe(command, cwd, home) {
-		return "protected-target"
+		return ProtectedTargetDecision
 	}
 	if actionConcreteProtectedWriteOnWith(command, cwd, home, false, memo) {
-		return "protected-target"
+		return ProtectedTargetDecision
 	}
-	return ""
+	return grade
 }
 
 func actionSimpleEnvTextDisplay(command string) bool {

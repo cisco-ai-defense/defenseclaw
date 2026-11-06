@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 func TestGAP236CompoundGradeNearVariants(t *testing.T) {
@@ -38,6 +39,7 @@ func TestGAP236CompoundGradeNearVariants(t *testing.T) {
 		{"quoted_option_after_pwd", `pwd; t="-t $HOME/.ssh"; cp "$t" a.txt`, home + `\project`, "allow", actionfacts.DialectPOSIX},
 		{"here_string_after_getlocation", "Get-Location; $t = @'\n.ssh/authorized_k*\n'@; Write-Output $t", home, "allow", actionfacts.DialectPowerShell},
 		{"here_string_after_echo", "$t = @'\n.ssh/authorized_k*\n'@; Write-Output $t; echo ready", home, "allow", actionfacts.DialectPowerShell},
+		{"here_string_ordinary_write", "$t = @'\nproject/report*\n'@; Add-Content -Path $t -Value k", home, "allow", actionfacts.DialectPowerShell},
 		{"listing_then_sh_known_write", `ls */*; d=.ssh; cd "$d"; sh -c 'printf k >> authorized_keys'`, home, "block", actionfacts.DialectPOSIX},
 		{"project_copy_then_sh_known_write", `cp *.txt build/; d=../.ssh; cd "$d"; sh -c 'printf k >> authorized_keys'`, home + `\project`, "block", actionfacts.DialectPOSIX},
 		{"config_copy_then_bash_known_write", `cp ~/.defenseclaw/conf*.yaml project/copy.yaml; d=.ssh; cd "$d"; bash -c 'printf k >> authorized_keys'`, home, "block", actionfacts.DialectPOSIX},
@@ -77,6 +79,15 @@ func TestGAP236CompoundGradeNearVariants(t *testing.T) {
 	for _, row := range rows {
 		for _, connector := range []string{"codex", "claudecode"} {
 			t.Run(row.name+"/"+connector, func(t *testing.T) {
+				grade := sshKeyMentionGrade(trustedActionRequest{Input: actionfacts.Input{
+					Command: row.command, CWD: row.cwd, ActiveHome: home, DialectHint: row.dialect,
+				}})
+				if row.want == "block" && grade != hookpaths.GradeNamed {
+					t.Errorf("protected target grade = %s, want named", grade)
+				}
+				if row.want == "allow" && grade == hookpaths.GradeNamed {
+					t.Errorf("ordinary target grade = named, want possible or none")
+				}
 				got := gap236Round5Action(t, row.command, row.cwd, home, connector, row.dialect)
 				t.Logf("CASE %s %s got=%s want=%s", row.name, connector, got, row.want)
 				if got != row.want {

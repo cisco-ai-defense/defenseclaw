@@ -156,8 +156,8 @@ type trustedActionRequest struct {
 	LegacyText         string
 	Connector          string
 	EnforcementCapable bool
-	// StrictPolicy keeps the conservative SSH path-mention disposition.
-	// The balanced profile admits only the ordinary forms proved below.
+	// StrictPolicy keeps uncertain path proofs closed in strict policy and
+	// preserves Secure Client's conservative path behavior.
 	StrictPolicy      bool
 	strictHookProfile bool
 	// ArtifactBody is set when LegacyText and Input.Command are the whole
@@ -179,9 +179,6 @@ type trustedActionRequest struct {
 	// ProtectedHomeHook is set only from a kernel-verified managed hook peer.
 	// Its gateway cannot inspect the caller's home when ProtectHome is active.
 	ProtectedHomeHook bool
-	// StrictPolicy keeps uncertain path proofs closed for the strict rule pack.
-	// Secure Client uses the same conservative path behavior as before.
-	StrictPolicy bool
 	// possibleTarget records a write whose spelling is ordinary but identity is unknown.
 	possibleTarget *bool
 	// ManagedHookOverflowHold retains a bounded state reading on an
@@ -297,53 +294,6 @@ func dispatchTrustedAction(
 ) (findings []RuleFinding) {
 	if ManagedEnterpriseActive() {
 		return nil
-	}
-	// Grade after the child readings join. A confirmed protected target from
-	// any reading still enforces; a possible mention uses the policy tier.
-	if !request.StrictPolicy && len(request.Input.ActiveHome) >= 3 && request.Input.ActiveHome[1] == ':' {
-		defer func() {
-			grade := sshKeyMentionGrade(request)
-			if grade != hookpaths.PossibleTargetDecision {
-				return
-			}
-			emitted := false
-			for i := range findings {
-				if findings[i].RuleID == "persistence.ssh_authorized_keys_command" {
-					findings[i].enforcement = findingEnforcementDetectionOnly
-					findings[i].Title = "Possible SSH path mention"
-					emitted = true
-				}
-			}
-			if !emitted {
-				findings = append(findings, RuleFinding{
-					RuleID: "persistence.ssh_authorized_keys_command", Title: "Possible SSH path mention",
-					Severity: "HIGH", Confidence: 0.5, Evidence: request.Input.Command,
-					Tags: []string{"persistence", "ssh"}, LineNumber: 1,
-					enforcement: findingEnforcementDetectionOnly,
-				})
-			}
-		}()
-	}
-	if request.strictHookProfile && len(request.Input.ActiveHome) >= 3 && request.Input.ActiveHome[1] == ':' {
-		if sshKeyMentionGrade(request) == hookpaths.PossibleTargetDecision {
-			defer func() {
-				for _, finding := range findings {
-					if finding.RuleID == "persistence.ssh_authorized_keys_command" {
-						return
-					}
-				}
-				enforcement := findingEnforcementDetectionOnly
-				if request.EnforcementCapable {
-					enforcement = findingEnforcementAllowed
-				}
-				findings = append(findings, RuleFinding{
-					RuleID: "persistence.ssh_authorized_keys_command", Title: "SSH authorized keys mutation",
-					Severity: "CRITICAL", Confidence: 0.98, Evidence: request.Input.Command,
-					Tags: []string{"persistence", "credential", "ssh"}, LineNumber: 1,
-					enforcement: enforcement,
-				})
-			}()
-		}
 	}
 	if _, ok := managedHookPeerFromContext(parent); ok {
 		request.ProtectedHomeHook = true

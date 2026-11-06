@@ -99,7 +99,7 @@ func TestGAP0496KnownBashStartupRetainsBlock(t *testing.T) {
 	const home = `C:\Users\review`
 	if sshKeyMentionGrade(trustedActionRequest{Input: actionfacts.Input{
 		Command: `bash -c 'ls -d */* | head -3'`, CWD: home, ActiveHome: home,
-	}}) == hookpaths.PossibleTargetDecision {
+	}}) == hookpaths.GradePossible {
 		t.Fatal("a known Bash startup file received an ordinary disposition")
 	}
 }
@@ -111,11 +111,11 @@ func TestGAP236ClientProtectedTargetRetainsBlock(t *testing.T) {
 		Input:                actionfacts.Input{Tool: "Bash", Command: command, CWD: home, ActiveHome: home},
 		ResolvedWriteTargets: map[string]string{"project/link": home + `\.ssh\authorized_keys`},
 	}
-	if sshKeyMentionGrade(request) != hookpaths.ProtectedTargetDecision {
+	if sshKeyMentionGrade(request) != hookpaths.GradeNamed {
 		t.Fatal("client-proved protected target received an ordinary disposition")
 	}
 	request.ResolvedWriteTargets = map[string]string{hookpaths.ActionDecisionKey: hookpaths.ProtectedTargetDecision}
-	if sshKeyMentionGrade(request) != hookpaths.ProtectedTargetDecision {
+	if sshKeyMentionGrade(request) != hookpaths.GradeNamed {
 		t.Fatal("client decision received an ordinary disposition")
 	}
 }

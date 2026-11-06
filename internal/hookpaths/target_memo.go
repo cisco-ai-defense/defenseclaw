@@ -32,7 +32,7 @@ type TargetMemo struct {
 	prefixes map[string]walkState
 	// words are the answers of actionWindowsWordNamesTarget's candidate
 	// check, which depend only on the key and the file system.
-	words map[memoWordKey]bool
+	words map[memoWordKey]string
 	// homes resolves each home once (actionProtectedStatePath).
 	homes map[string]*actionStateHome
 	// keys lists each home's protected key files once
@@ -57,7 +57,7 @@ const maxTargetMemoEntries = 1 << 16
 func NewTargetMemo() *TargetMemo {
 	return &TargetMemo{
 		prefixes: make(map[string]walkState),
-		words:    make(map[memoWordKey]bool),
+		words:    make(map[memoWordKey]string),
 		homes:    make(map[string]*actionStateHome),
 		keys:     make(map[string][]string),
 		files:    make(map[string]protectedFiles),
@@ -169,9 +169,9 @@ func (m *TargetMemo) storePrefix(key string, state walkState) {
 	}
 }
 
-func (m *TargetMemo) word(key memoWordKey) (answer, ok bool) {
+func (m *TargetMemo) word(key memoWordKey) (answer string, ok bool) {
 	if m == nil {
-		return false, false
+		return "", false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -179,7 +179,7 @@ func (m *TargetMemo) word(key memoWordKey) (answer, ok bool) {
 	return answer, ok
 }
 
-func (m *TargetMemo) storeWord(key memoWordKey, answer bool) {
+func (m *TargetMemo) storeWord(key memoWordKey, answer string) {
 	if m == nil {
 		return
 	}

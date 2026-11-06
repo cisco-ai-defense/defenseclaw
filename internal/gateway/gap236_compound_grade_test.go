@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
-	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"testing"
 )
 
@@ -48,7 +47,9 @@ func TestGAP236CompoundGradePreservesNamedTargets(t *testing.T) {
 	for _, row := range rows {
 		for _, connector := range []string{"codex", "claudecode"} {
 			t.Run(row.name+"/"+connector, func(t *testing.T) {
-				grade := hookpaths.SSHKeyMentionGrade(row.command, row.cwd, home)
+				grade := sshKeyMentionGrade(trustedActionRequest{Input: actionfacts.Input{
+					Command: row.command, CWD: row.cwd, ActiveHome: home,
+				}})
 				got := gap236BalancedAction(t, row.command, row.cwd, home, connector, row.dialect, false)
 				t.Logf("grade=%s verdict=%s want=%s", grade, got, row.want)
 				if got != row.want {

@@ -3,7 +3,20 @@
 
 package hookpaths
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+)
+
+func testActionCommandMaxGrade(command, cwd, home string) Grade {
+	memo := NewTargetMemo()
+	grade := GradeNone
+	for _, dialect := range []actionfacts.Dialect{"", actionfacts.DialectPOSIX, actionfacts.DialectPowerShell} {
+		grade = grade.Max(memo.ActionCommandGradeWithDialectAndGlobFacts(command, cwd, home, dialect, nil))
+	}
+	return grade
+}
 
 func TestSSHKeyMentionGradeRoles(t *testing.T) {
 	const home = `C:\Users\review`
@@ -11,6 +24,7 @@ func TestSSHKeyMentionGradeRoles(t *testing.T) {
 		{"display pipeline", "$t = @'\n.ssh/authorized_k*\n'@; Write-Output $t | Out-String", PossibleTargetDecision},
 		{"display direct", "Write-Output @'\n.ssh/authorized_k*\n'@", PossibleTargetDecision},
 		{"writer consumes text", "$t = @'\n.ssh/authorized_k*\n'@; Add-Content -Path $t -Value k", ProtectedTargetDecision},
+		{"writer consumes ordinary pattern", "$t = @'\nproject/report*\n'@; Add-Content -Path $t -Value k", ""},
 		{"read-only Bash", `bash  -c 'ls -d */* | head -3'`, PossibleTargetDecision},
 		{"read-only Bash quoted option", `bash -c 'ls -d */* | head "-3"'`, PossibleTargetDecision},
 		{"read-only Bash quoted number", `bash -c 'ls -d */* | head -n "3"'`, PossibleTargetDecision},
@@ -28,7 +42,7 @@ func TestSSHKeyMentionGradeRoles(t *testing.T) {
 		{"known POSIX value after directory change", `t=authorized_keys; cd .ssh; cp a "$t"`, ProtectedTargetDecision},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			if got := SSHKeyMentionGrade(row.command, home, home); got != row.want {
+			if got := testActionCommandMaxGrade(row.command, home, home); got.String() != row.want {
 				t.Errorf("grade = %q, want %q", got, row.want)
 			}
 		})

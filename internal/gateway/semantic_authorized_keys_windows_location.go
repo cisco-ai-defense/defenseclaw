@@ -30,7 +30,7 @@ func trustedWindowsLocationAuthorizedKeysWriteWith(input actionfacts.Input, memo
 		!windowsLocationAbsolute(input.ActiveHome) || !windowsLocationAbsolute(input.CWD) {
 		return false
 	}
-	if memo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, input.ActiveHome, input.DialectHint, nil) != "" {
+	if memo.ActionCommandGradeWithDialectAndGlobFacts(input.Command, input.CWD, input.ActiveHome, input.DialectHint, nil) == hookpaths.GradeNamed {
 		return true
 	}
 	return trustedWindowsPOSIXLocationWrite(input) ||

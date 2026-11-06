@@ -8,24 +8,25 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // A confirmed target from the client is stronger than an uncertain shell
 // reading. The gateway also checks concrete paths resolved on the user's host.
-func sshKeyMentionGrade(request trustedActionRequest) string {
+func sshKeyMentionGrade(request trustedActionRequest) hookpaths.Grade {
 	input := request.Input
 	if len(input.ActiveHome) < 3 || input.ActiveHome[1] != ':' || input.CWD == "" {
-		return ""
+		return hookpaths.GradeNone
 	}
 	if input.Command == "" {
 		input.Command, _ = trustedBashCommandInput(input)
 	}
 	if input.Command == "" {
-		return ""
+		return hookpaths.GradeNone
 	}
 	if request.ResolvedWriteTargets[hookpaths.ActionDecisionKey] == hookpaths.ProtectedTargetDecision {
-		return hookpaths.ProtectedTargetDecision
+		return hookpaths.GradeNamed
 	}
 	ssh := canonicalSemanticPath(filepath.Join(input.ActiveHome, ".ssh"))
 	protectedPaths := hookpaths.ProtectedAuthorizedKeysPaths(input.ActiveHome)
@@ -46,7 +47,7 @@ func sshKeyMentionGrade(request trustedActionRequest) string {
 			continue
 		}
 		if isNamed(resolved) {
-			return hookpaths.ProtectedTargetDecision
+			return hookpaths.GradeNamed
 		}
 	}
 	// A complete source-glob reading includes each destination child. A
@@ -54,15 +55,24 @@ func sshKeyMentionGrade(request trustedActionRequest) string {
 	// only an ordinary destination directory.
 	for _, destination := range hookpaths.CopySourceGlobDestinations(input.Command, input.CWD, input.ActiveHome, request.ResolvedWriteTargets) {
 		if isNamed(destination) {
-			return hookpaths.ProtectedTargetDecision
+			return hookpaths.GradeNamed
 		}
 		if resolved, ok := hookpaths.ResolveWriteTarget(destination); ok && isNamed(resolved) {
-			return hookpaths.ProtectedTargetDecision
+			return hookpaths.GradeNamed
 		}
 	}
 	// A known startup file can run additional statements.
 	if os.Getenv("BASH_ENV") != "" && strings.Contains(strings.ToLower(input.Command), "bash") {
-		return hookpaths.ProtectedTargetDecision
+		return hookpaths.GradeNamed
 	}
-	return hookpaths.SSHKeyMentionGrade(input.Command, input.CWD, input.ActiveHome)
+	grade := hookpaths.GradeNone
+	for _, dialect := range []actionfacts.Dialect{"", actionfacts.DialectPOSIX, actionfacts.DialectPowerShell} {
+		hit := request.targetMemo.ActionCommandGradeWithDialectAndGlobFacts(
+			input.Command, input.CWD, input.ActiveHome, dialect, clientGlobFacts(request))
+		grade = grade.Max(hit)
+		if grade == hookpaths.GradeNamed {
+			return grade
+		}
+	}
+	return grade
 }
