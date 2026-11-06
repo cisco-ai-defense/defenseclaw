@@ -236,13 +236,13 @@ def refuse_first_run_when_managed() -> None:
 @click.option("--verbose", is_flag=True, help="Show full subprocess/setup output.")
 @click.option(
     "--api-port",
-    type=click.IntRange(1, 65535),
+    type=click.IntRange(1024, 65533),
     default=None,
     help="Gateway API port for a new config (default 18970, or the next free one when another account holds it).",
 )
 @click.option(
     "--proxy-port",
-    type=click.IntRange(1, 65535),
+    type=click.IntRange(1024, 65535),
     default=None,
     help="Guardrail proxy port for a new config (default 4000, or the next free one when another account holds it).",
 )
@@ -302,6 +302,12 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     from defenseclaw.commands.cmd_setup import _validated_api_key_env_name
 
     refuse_first_run_when_managed()
+
+    from defenseclaw.bootstrap import first_run_port_flags_conflict
+
+    if conflict := first_run_port_flags_conflict(api_port or 0, proxy_port or 0):
+        # Before anything is written (GAP-0053).
+        raise click.UsageError(conflict)
 
     from defenseclaw import config as config_module
 
@@ -476,18 +482,20 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
             cfg.claw.mode = ""
         click.echo("  Config:        " + ux._style("created new defaults", fg="green"))
         from defenseclaw.bootstrap import (
+            api_port_avoid,
             apply_first_run_ports,
             choose_first_run_api_port,
             choose_first_run_guardrail_port,
+            proxy_port_avoid,
         )
 
         for step in apply_first_run_ports(cfg, api_port or 0, proxy_port or 0, new_config=True):
             label = "  API port:      " if step.name == "Gateway API port" else "  Proxy port:    "
             click.echo(label + ux._style(step.detail, fg="green" if step.status == "pass" else "yellow"))
-        port_note = "" if api_port else choose_first_run_api_port(cfg)
+        port_note = "" if api_port else choose_first_run_api_port(cfg, api_port_avoid(cfg, proxy_port or 0))
         if port_note:
             click.echo("  API port:      " + ux._style(port_note, fg="yellow"))
-        proxy_note = "" if proxy_port else choose_first_run_guardrail_port(cfg)
+        proxy_note = "" if proxy_port else choose_first_run_guardrail_port(cfg, proxy_port_avoid(cfg))
         if proxy_note:
             click.echo("  Proxy port:    " + ux._style(proxy_note, fg="yellow"))
     else:

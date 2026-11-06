@@ -58,10 +58,13 @@ func OpenCodeManagedPlugin() []byte {
 // openCodeManagedPluginVendorLimit says what an OpenCode launch can do to the
 // managed plugin. OpenCode V1 (1.18.32) skipped it in pure mode and when
 // OPENCODE_TEST_MANAGED_CONFIG_DIR moved the managed folder. OpenCode 2.2.5,
-// the supported release, has neither: no --pure flag, neither variable, and
-// a managed folder fixed per OS (checked live and in its binary, GAP-0053).
-// The launch scan still reports those variables on a running OpenCode.
-const openCodeManagedPluginVendorLimit = "OpenCode 2.2.5 always loads the managed plugin from its fixed machine config folder: it has no pure mode (no --pure flag) and does not read OPENCODE_PURE or OPENCODE_TEST_MANAGED_CONFIG_DIR, which made OpenCode V1 skip it; status and verify still report a running OpenCode started with those variables"
+// the supported release, has no --pure flag and reads neither variable
+// (checked in its Linux and Windows binaries, GAP-0053). Its managed folder
+// is /etc/opencode on Linux and /Library/Application Support/opencode on
+// macOS; on Windows it is ProgramData\opencode taken from the process
+// environment, so a launch with another ProgramData skips it. The launch
+// scan reports that (enterprisestatus opencode_managed_config_relocated).
+const openCodeManagedPluginVendorLimit = "OpenCode 2.2.5 has no pure mode (no --pure flag) and does not read OPENCODE_PURE or OPENCODE_TEST_MANAGED_CONFIG_DIR, which made OpenCode V1 skip the managed plugin. It loads the plugin from /etc/opencode on Linux and /Library/Application Support/opencode on macOS; on Windows from %ProgramData%\\opencode as the process environment names it, so a session started with another ProgramData runs without DefenseClaw's hooks. Status and verify report a running OpenCode whose ProgramData was moved or that was started with those variables"
 
 // OpenCodeManagedPluginPath is where a standalone install places the
 // administrator-owned managed OpenCode plugin. StandaloneOptions always

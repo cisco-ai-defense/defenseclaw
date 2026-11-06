@@ -111,7 +111,17 @@ def owner_private_group(path: str, info: os.stat_result) -> bool:
     if not sys.platform.startswith("linux") or os.name == "nt":
         return False
     uid, gid = os.geteuid(), info.st_gid
-    if info.st_uid != uid or _has_access_acl(path):
+    # Judge the object *info* describes: callers pass os.stat (through a
+    # link) or os.lstat. The ACL is read from the resolved path, and only
+    # when that is the same object.
+    try:
+        target = os.path.realpath(path)
+        resolved = os.stat(target)
+    except OSError:
+        return False
+    if (resolved.st_dev, resolved.st_ino) != (info.st_dev, info.st_ino):
+        return False
+    if info.st_uid != uid or _has_access_acl(target):
         return False
     passwd = _colon_records(_PASSWD_FILE)
     groups = _colon_records(_GROUP_FILE)

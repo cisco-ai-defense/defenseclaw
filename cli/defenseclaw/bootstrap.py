@@ -402,7 +402,7 @@ def suggest_free_api_port(host: str, port: int) -> int:
     return 0
 
 
-def choose_first_run_api_port(cfg: Config) -> str:
+def choose_first_run_api_port(cfg: Config, avoid: frozenset[int] = frozenset()) -> str:
     """Move a new config off the default API port when something holds it.
 
     Per-user installs of several accounts on one host all default to 18970.
@@ -419,11 +419,17 @@ def choose_first_run_api_port(cfg: Config) -> str:
     if host in {"", "localhost"}:
         host = "127.0.0.1"
     host = host.strip("[]")
-    if _api_port_available(host, _DEFAULT_API_PORT) and _reserve_api_port(_DEFAULT_API_PORT):
+    # avoid: ports init was given for something else (--proxy-port, GAP-0053);
+    # the API port and the two sandbox ports after it stay clear of them.
+    def clear(port: int) -> bool:
+        return not ({port, port + 1, port + 2} & avoid)
+
+    default = _DEFAULT_API_PORT
+    if clear(default) and _api_port_available(host, default) and _reserve_api_port(default):
         return ""
     for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
         port = _DEFAULT_API_PORT + step * _FIRST_RUN_API_PORT_STEP
-        if _api_port_available(host, port) and _reserve_api_port(port):
+        if clear(port) and _api_port_available(host, port) and _reserve_api_port(port):
             cfg.gateway.api_port = port
             return (
                 f"{host}:{_DEFAULT_API_PORT} is in use or configured by another account's DefenseClaw gateway, "
@@ -448,7 +454,7 @@ def _guardrail_port_available(host: str, port: int) -> bool:
     )
 
 
-def choose_first_run_guardrail_port(cfg: Config) -> str:
+def choose_first_run_guardrail_port(cfg: Config, avoid: frozenset[int] = frozenset()) -> str:
     """Move a new config's guardrail proxy port off 4000 when something holds it.
 
     Like the API port: a second account's proxy (OpenClaw) on the same host
@@ -463,11 +469,11 @@ def choose_first_run_guardrail_port(cfg: Config) -> str:
     host = str(getattr(gc, "host", "") or "").strip().strip("[]")
     if host.lower() in {"", "localhost", "::1"}:
         host = "127.0.0.1"
-    if _guardrail_port_available(host, _DEFAULT_GUARDRAIL_PORT):
+    if _DEFAULT_GUARDRAIL_PORT not in avoid and _guardrail_port_available(host, _DEFAULT_GUARDRAIL_PORT):
         return ""
     for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
         port = _DEFAULT_GUARDRAIL_PORT + step * _FIRST_RUN_API_PORT_STEP
-        if _guardrail_port_available(host, port):
+        if port not in avoid and _guardrail_port_available(host, port):
             gc.port = port
             return (
                 # A claim by another account's init has no listener yet, so
@@ -480,6 +486,66 @@ def choose_first_run_guardrail_port(cfg: Config) -> str:
         "claimed by other accounts; choose a free guardrail proxy port with "
         "`defenseclaw setup guardrail --port <free port> --non-interactive`"
     )
+
+
+# OpenClaw's own gateway port (gateway.port); DefenseClaw's ports stay off it.
+_DEFAULT_OPENCLAW_GATEWAY_PORT = 18789
+
+
+def port_layout_conflict(api_port: int, proxy_port: int, openclaw_port: int = 0) -> str:
+    """Why these ports cannot all listen on one account, or "" (GAP-0053).
+
+    The gateway API listens on api_port and its two sandbox ports after it;
+    the guardrail proxy on proxy_port; OpenClaw's gateway on openclaw_port.
+    """
+    api_ports = {api_port, api_port + 1, api_port + 2} if api_port else set()
+    sandbox = f"({api_port + 1}, {api_port + 2})"
+    if api_port and api_port + 2 > 65535:
+        return f"API port {api_port} leaves no room for its two sandbox ports {sandbox}; use 65533 or lower"
+    if proxy_port and proxy_port in api_ports:
+        return (
+            f"guardrail proxy port {proxy_port} is the gateway API port {api_port} or one of its "
+            f"sandbox ports {sandbox}; choose another"
+        )
+    if openclaw_port and openclaw_port in api_ports:
+        return (
+            f"API port {api_port} or a sandbox port after it is OpenClaw's gateway port {openclaw_port}; "
+            "choose another"
+        )
+    if openclaw_port and proxy_port == openclaw_port:
+        return f"guardrail proxy port {proxy_port} is OpenClaw's gateway port; choose another"
+    return ""
+
+
+def first_run_port_flags_conflict(api_port: int, proxy_port: int) -> str:
+    """Why init --api-port / --proxy-port cannot be used, or "".
+
+    A flag is checked against the other flag, or against the default the
+    other port takes when it was not given, and against OpenClaw's gateway
+    port. The automatic pick avoids a given flag too (api_port_avoid).
+    """
+    if not api_port and not proxy_port:
+        return ""
+    conflict = port_layout_conflict(
+        api_port or _DEFAULT_API_PORT, proxy_port or _DEFAULT_GUARDRAIL_PORT, _DEFAULT_OPENCLAW_GATEWAY_PORT
+    )
+    if not conflict:
+        return ""
+    flags = " and ".join(name for name, value in (("--api-port", api_port), ("--proxy-port", proxy_port)) if value)
+    return f"{flags}: {conflict}"
+
+
+def api_port_avoid(cfg: Config, proxy_port: int = 0) -> frozenset[int]:
+    """Ports the automatic API pick keeps its three ports off."""
+    proxy = proxy_port or int(getattr(cfg.guardrail, "port", 0) or 0)
+    return frozenset(p for p in (proxy, _DEFAULT_OPENCLAW_GATEWAY_PORT) if p)
+
+
+def proxy_port_avoid(cfg: Config) -> frozenset[int]:
+    """Ports the automatic proxy pick stays off: the API port and its sandbox ports."""
+    api = int(getattr(cfg.gateway, "api_port", 0) or 0)
+    ports = {api, api + 1, api + 2} if api else set()
+    return frozenset(ports | {_DEFAULT_OPENCLAW_GATEWAY_PORT})
 
 
 def apply_first_run_ports(cfg: Config, api_port: int, proxy_port: int, *, new_config: bool) -> list[StepResult]:
@@ -797,11 +863,12 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
 
     setup.extend(apply_first_run_ports(cfg, options.api_port, options.proxy_port, new_config=new_config))
     if new_config:
-        port_note = "" if options.api_port else choose_first_run_api_port(cfg)
+        avoid = api_port_avoid(cfg, options.proxy_port)
+        port_note = "" if options.api_port else choose_first_run_api_port(cfg, avoid)
         if port_note:
             status = "pass" if cfg.gateway.api_port != _DEFAULT_API_PORT else "warn"
             setup.append(StepResult("Gateway API port", status, port_note))
-        proxy_note = "" if options.proxy_port else choose_first_run_guardrail_port(cfg)
+        proxy_note = "" if options.proxy_port else choose_first_run_guardrail_port(cfg, proxy_port_avoid(cfg))
         if proxy_note:
             status = "pass" if cfg.guardrail.port != _DEFAULT_GUARDRAIL_PORT else "warn"
             setup.append(StepResult("Guardrail proxy port", status, proxy_note))
