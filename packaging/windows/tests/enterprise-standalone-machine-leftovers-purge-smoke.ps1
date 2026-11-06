@@ -215,6 +215,10 @@ $failures = & $module {
                 # rows below rely on stays as it is.
                 $modulePathAcl = ${function:script:Assert-DefenseClawPathAcl}
                 function Assert-DefenseClawPathAcl { & $modulePathAcl @args }
+                # The lifecycle log lines a purge writes for folders that stay
+                # are collected here, not written to this computer's log.
+                $logged = [Collections.Generic.List[string]]::new()
+                function Write-DefenseClawLifecycleLogDiagnostic { param([string]$Message) $logged.Add($Message) }
                 $adminOnly = 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
                 $native = Initialize-DefenseClawNativeSecurity
                 [void][IO.Directory]::CreateDirectory($Scratch)
@@ -379,6 +383,11 @@ $failures = & $module {
                 }
                 if (-not [IO.File]::Exists($planted)) {
                     $failures.Add('GAP-0091: the planted record was deleted')
+                }
+                foreach ($stayed in @($dropIns, $claude, $leafLink, $throughParent, $recreated, $userParentChild, $vendor)) {
+                    if (@($logged | Microsoft.PowerShell.Core\Where-Object { $_.StartsWith("defenseclaw_skip path=${stayed}: a folder DefenseClaw created stays") }).Count -ne 1) {
+                        $failures.Add("GAP-0091: the lifecycle log does not name the folder that stayed once: $stayed")
+                    }
                 }
 
                 # The folders that stayed are cleared; the next purge takes

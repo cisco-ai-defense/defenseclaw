@@ -18531,6 +18531,41 @@ function Assert-DefenseClawCreatedFolderRemovable {
     }
 }
 
+# Appends one line to the lifecycle log (%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log)
+# for a fact a purge reports after its result was written: the
+# self-uninstall finalizer, which removes the recorded folders, runs after
+# the CLI that writes the log has exited. The line carries only time, source
+# and diagnostics, so the event check (windows_enterprise_event_check.go),
+# which reads only lines with an event record, skips it. The Go lifecycle
+# creates and protects the folder; this never creates it. Best effort.
+function Write-DefenseClawLifecycleLogDiagnostic {
+    param([Parameter(Mandatory)][string]$Message)
+    try {
+        $directory = [IO.Path]::Combine([string]$script:WindowsDirectory, 'Logs', 'DefenseClaw')
+        if (-not [IO.Directory]::Exists($directory)) {
+            return
+        }
+        $path = [IO.Path]::Combine($directory, 'enterprise-lifecycle.log')
+        Assert-DefenseClawNoReparsePath -Path $path -AllowMissingLeaf
+        $line = [ordered]@{
+            time        = [DateTime]::UtcNow.ToString('o')
+            source      = 'DefenseClawEnterprise.psm1'
+            diagnostics = @($Message)
+        } | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress
+        $bytes = [Text.Encoding]::UTF8.GetBytes($line + "`n")
+        $stream = [IO.FileStream]::new($path, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+        try {
+            $stream.Write($bytes, 0, $bytes.Length)
+        }
+        finally {
+            $stream.Dispose()
+        }
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Verbose "lifecycle log not written: $($_.Exception.Message)"
+    }
+}
+
 # Removes one recorded folder when it is empty and may go
 # (Assert-DefenseClawCreatedFolderRemovable). Returns '' when the folder is
 # gone (removed now, or already absent with no reparse point on the way),
@@ -18571,11 +18606,13 @@ function Remove-DefenseClawStandaloneCreatedFolder {
     catch {
         $reason = [string]$_.Exception.Message
     }
+    $stays = 'a folder DefenseClaw created stays, and so does its record: ' +
+        (ConvertTo-DefenseClawBoundedDiagnostic -Value $reason -MaxLength 512)
     Write-DefenseClawResilienceEvent -Marker defenseclaw_skip -Fields @{
         path   = $folder
-        reason = 'a folder DefenseClaw created stays, and so does its record: ' +
-            (ConvertTo-DefenseClawBoundedDiagnostic -Value $reason -MaxLength 512)
+        reason = $stays
     }
+    Write-DefenseClawLifecycleLogDiagnostic -Message "defenseclaw_skip path=${folder}: $stays"
     return $reason
 }
 
@@ -18674,10 +18711,12 @@ function Invoke-DefenseClawStandaloneCreatedFolderRemoval {
     }
     if ($stayed) {
         foreach ($record in $deferred) {
+            $stays = 'a folder DefenseClaw created stays, and so does its record: the lifecycle folder in it keeps the records of the folders that stayed'
             Write-DefenseClawResilienceEvent -Marker defenseclaw_skip -Fields @{
                 path   = $record.Folder
-                reason = 'a folder DefenseClaw created stays, and so does its record: the lifecycle folder in it keeps the records of the folders that stayed'
+                reason = $stays
             }
+            Write-DefenseClawLifecycleLogDiagnostic -Message "defenseclaw_skip path=$($record.Folder): $stays"
         }
         return
     }

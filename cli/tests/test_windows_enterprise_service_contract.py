@@ -6071,6 +6071,13 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     one = _psm1_function(module, "Remove-DefenseClawStandaloneCreatedFolder")
     assert one.index("Assert-DefenseClawCreatedFolderRemovable -Path $folder -Roots $Roots") < one.index("[IO.Directory]::Delete($folder, $false)")
     assert "Write-DefenseClawResilienceEvent -Marker defenseclaw_skip" in one
+    # The finalizer runs after the CLI wrote the lifecycle log, so the folder
+    # that stays is named there by the module itself, in a line without an
+    # event record (the event check skips it).
+    assert 'Write-DefenseClawLifecycleLogDiagnostic -Message "defenseclaw_skip path=${folder}: $stays"' in one
+    note = _psm1_function(module, "Write-DefenseClawLifecycleLogDiagnostic")
+    assert "'enterprise-lifecycle.log'" in note and "[IO.Directory]::Exists($directory)" in note
+    assert "event" not in note.split("$line = [ordered]@{", 1)[1].split("}", 1)[0]
     assert "Remove-Item" not in one
     removable = _psm1_function(module, "Assert-DefenseClawCreatedFolderRemovable")
     assert "$null = Assert-DefenseClawNoReparsePath -Path $Path\n" in removable
