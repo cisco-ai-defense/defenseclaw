@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -273,7 +274,18 @@ func verifyStandaloneHookRuntime(conn connector.Connector, setupOpts connector.S
 	} else if path != "" {
 		return fmt.Errorf("enterprise hooks: connector %s managed plugin differs from the rendered template: %s", name, path)
 	}
-	if path, err := connector.HookScriptRenderDrift(conn, opts); err != nil {
+	for _, path := range connector.ManagedPluginArtifacts(conn, opts) {
+		matches, err := standaloneRuntimeFileMetadataMatches(path, 0o600, uid)
+		if err != nil {
+			return fmt.Errorf("enterprise hooks: inspect connector %s managed plugin %s: %w", name, path, err)
+		}
+		if !matches {
+			return fmt.Errorf("enterprise hooks: connector %s managed plugin protection differs from the installed mode or owner: %s", name, path)
+		}
+	}
+	if path, err := connector.HookScriptRenderDriftWithMetadata(conn, opts, func(path string, mode os.FileMode) (bool, error) {
+		return standaloneRuntimeFileMetadataMatches(path, mode, uid)
+	}); err != nil {
 		return fmt.Errorf("enterprise hooks: inspect connector %s hook runtime file %s: %w", name, path, err)
 	} else if path != "" {
 		return fmt.Errorf("enterprise hooks: connector %s hook runtime file differs from the rendered template: %s", name, path)
@@ -287,11 +299,20 @@ func verifyStandaloneHookRuntime(conn connector.Connector, setupOpts connector.S
 	return verifyHookRuntimeRecords(hookDir, name, connector.CapableHookFailMode(opts, conn, expected.HookFailMode))
 }
 
-// PreviousHookRuntimeIntactForPolicyChange distinguishes a configuration
+func standaloneRuntimeFileMetadataMatches(path string, mode os.FileMode, uid int) (bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false, err
+	}
+	owned, _ := fileOwnerMatches(path, uid)
+	return info.Mode().IsRegular() && info.Mode().Perm() == mode && owned, nil
+}
+
+// PreviousHookRuntimeIntactForConfigurationChange distinguishes a configuration
 // rerender from repair of a changed target. It verifies the installed runtime
-// against the modes recorded at its last successful install; any independent
-// drift keeps the ordinary repair classification.
-func PreviousHookRuntimeIntactForPolicyChange(ctx context.Context, opts InstallOptions) bool {
+// against the prior recorded configuration; independent drift keeps the
+// ordinary repair classification.
+func PreviousHookRuntimeIntactForConfigurationChange(ctx context.Context, opts InstallOptions) bool {
 	if runtime.GOOS == "windows" || !standaloneProfileProcess() || os.Geteuid() == 0 {
 		return false
 	}
@@ -305,14 +326,116 @@ func PreviousHookRuntimeIntactForPolicyChange(ctx context.Context, opts InstallO
 		return false
 	}
 	previous := opts
+	previous.AgentVersion = lock.RawAgentVersion
+	previous.HookContractID = lock.ContractID
 	previous.HookFailMode = lock.HookFailMode
 	previous.GuardrailMode = lock.RegistrationPosture.GuardrailMode
+	previous.HILTEnabled = lock.RegistrationPosture.HILTEnabled
+	previous.WorkspaceDir = lock.RegistrationPosture.WorkspaceDir
+	previous.ManagedHookSocket = lock.RegistrationPosture.HookSocket
+	previous.ManagedServiceUID = lock.RegistrationPosture.HookSocketServiceUID
+	previous.ForeignHookGuardBinary = lock.RegistrationPosture.ForeignHookGuard
+	// The lock deliberately omits endpoints. The installed runtime record
+	// retains the prior one, so use it to reproduce the previous rendering
+	// when an administrator changes the endpoint and policy together.
+	if endpoint, ok := previousHookRuntimeEndpoint(opts, dataDir); ok {
+		previous.APIAddr = endpoint
+	}
+	// The scoped credential is installed alongside the runtime. Its custody
+	// check and the lock's credential binding distinguish a legitimate token
+	// rotation from a changed or unreadable installed token.
+	if token, tokenErr := connector.LoadHookAPIToken(dataDir, name); tokenErr != nil {
+		return false
+	} else if token != "" {
+		if token != opts.APIToken && lock.RegistrationPosture.HookCredentialBinding == "" {
+			return false
+		}
+		previous.APIToken = token
+	}
 	if strings.TrimSpace(previous.HookFailMode) == strings.TrimSpace(opts.HookFailMode) &&
-		strings.TrimSpace(previous.GuardrailMode) == strings.TrimSpace(opts.GuardrailMode) {
+		strings.TrimSpace(previous.GuardrailMode) == strings.TrimSpace(opts.GuardrailMode) &&
+		previous.APIAddr == opts.APIAddr && previous.APIToken == opts.APIToken &&
+		previous.AgentVersion == opts.AgentVersion && previous.HookContractID == opts.HookContractID &&
+		previous.HILTEnabled == opts.HILTEnabled &&
+		previous.WorkspaceDir == opts.WorkspaceDir && previous.ManagedHookSocket == opts.ManagedHookSocket &&
+		previous.ManagedServiceUID == opts.ManagedServiceUID && previous.ForeignHookGuardBinary == opts.ForeignHookGuardBinary {
 		return false
 	}
 	_, err = Verify(ctx, previous)
 	return err == nil
+}
+
+func previousHookRuntimeEndpoint(opts InstallOptions, dataDir string) (string, bool) {
+	path := filepath.Join(dataDir, "hooks", ".hookcfg")
+	body, exists, err := readUserRuntimeRecord(path, "hook runtime record")
+	if err != nil {
+		return "", false
+	}
+	if exists {
+		var record struct {
+			Version     int    `json:"version"`
+			GatewayAddr string `json:"gateway_addr"`
+			Managed     bool   `json:"managed_enterprise"`
+		}
+		if err := json.Unmarshal(body, &record); err != nil || record.Version != 2 ||
+			strings.TrimSpace(record.GatewayAddr) == "" || !record.Managed ||
+			connector.HookSidecarJSONAmbiguous(body) {
+			return "", false
+		}
+		return record.GatewayAddr, true
+	}
+	reg := opts.Registry
+	if reg == nil {
+		reg = connector.NewDefaultRegistry()
+	}
+	conn, ok := reg.Get(strings.ToLower(strings.TrimSpace(opts.ConnectorName)))
+	if !ok {
+		return "", false
+	}
+	var paths []string
+	if err := connector.WithUserHomeDir(opts.UserHome, func() error {
+		paths = connector.ManagedPluginArtifacts(conn, connector.SetupOpts{DataDir: dataDir, WorkspaceDir: opts.WorkspaceDir})
+		return nil
+	}); err != nil || len(paths) == 0 {
+		return "", false
+	}
+	endpoint := ""
+	for _, path := range paths {
+		body, exists, err := readUserRuntimeRecord(path, "managed plugin")
+		if err != nil || !exists {
+			return "", false
+		}
+		value, ok := renderedPluginEndpoint(body)
+		if !ok || (endpoint != "" && endpoint != value) {
+			return "", false
+		}
+		endpoint = value
+	}
+	return endpoint, endpoint != ""
+}
+
+func renderedPluginEndpoint(body []byte) (string, bool) {
+	endpoint := ""
+	for _, line := range strings.Split(string(body), "\n") {
+		left, right, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok {
+			continue
+		}
+		left = strings.TrimSpace(left)
+		if left != "const DC_API_ADDR" && left != "const DC_API_ADDR: string" {
+			continue
+		}
+		if endpoint != "" {
+			return "", false
+		}
+		raw := strings.TrimSuffix(strings.TrimSpace(right), ";")
+		value, err := strconv.Unquote(raw)
+		if err != nil || value == "" || len(value) > 256 {
+			return "", false
+		}
+		endpoint = value
+	}
+	return endpoint, endpoint != ""
 }
 
 // verifyHookRuntimeToken requires the connector-scoped token file the hook
