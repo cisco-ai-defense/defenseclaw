@@ -1896,13 +1896,15 @@ func (a *APIServer) serveGuardrailProfileResolve(w http.ResponseWriter, r *http.
 			found, err = profileSubject{UserName: user}, refusal
 		} else {
 			found, err = profileExplainSubjectLookup(user)
-			if caller, ok := profileExplainCallerSubject(query.Get("caller_facts"), user); ok && !own {
-				// The administrator's own NSS lookup as root resolved the
-				// account (GAP-0500); the gateway's lookup above still
-				// refreshed what the hooks read, and the cache block says
-				// what they use.
-				found, err = caller, nil
-				out["facts_source"] = "caller"
+			if !own && (err != nil || found.LookupFailed || found.LookupError != "" || found.UserID == "" || found.accountUnresolved) {
+				if caller, ok := profileExplainCallerSubject(query.Get("caller_facts"), user); ok &&
+					(found.UserID == "" || found.UserID == caller.UserID) {
+					// A completed gateway lookup uses the same facts as the
+					// hook. Root's NSS facts are a fallback for a lookup the
+					// gateway service cannot complete (GAP-0500).
+					found, err = caller, nil
+					out["facts_source"] = "caller"
+				}
 			}
 			if refusal := perUserExplainOfAnotherAccount(found); refusal != nil && !own {
 				found, err = profileSubject{UserName: user}, refusal
