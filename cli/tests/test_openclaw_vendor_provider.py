@@ -9,7 +9,7 @@ import json
 import shutil
 from types import SimpleNamespace
 
-from defenseclaw.commands.cmd_plugin import _build_scan_options, _scan_options_for_connector
+from defenseclaw.commands.cmd_plugin import _build_scan_options
 from defenseclaw.enforce import asset_lists
 from defenseclaw.scanner.plugin_scanner import vendor_identity
 from defenseclaw.scanner.plugin_scanner.scanner import scan_plugin
@@ -219,7 +219,46 @@ def test_r109_g501_peer_link_revalidated_after_hash(tmp_path, monkeypatch) -> No
     assert "SRC-EXEC" in _high_rules(installed)
 
 
+@requires_symlink_privilege
+def test_r109_g501_peer_ancestor_revalidated_after_hash(tmp_path, monkeypatch) -> None:
+    published = tmp_path / "published"
+    (published / "node_modules").mkdir(parents=True)
+    (published / "package.json").write_text(json.dumps({
+        "name": "@openclaw/amazon-bedrock-provider",
+        "version": "2026.10.9",
+        "peerDependencies": {"openclaw": ">=2026.10.9"},
+    }), encoding="utf-8")
+    (published / "index.js").write_text("const match = /region/.exec(value);\n", encoding="utf-8")
+    digest = vendor_identity._tree_sha256(str(published))
+    assert digest
+    monkeypatch.setitem(
+        vendor_identity.VENDOR_DIGESTS,
+        ("@openclaw/amazon-bedrock-provider", "2026.10.9"), digest,
+    )
+    installed = tmp_path / "installed"
+    shutil.copytree(published, installed)
+    peer_target = tmp_path / "peer-target"
+    peer_target.mkdir()
+    (peer_target / "package.json").write_text('{"name":"openclaw"}', encoding="utf-8")
+    (installed / "node_modules" / "openclaw").symlink_to(peer_target, target_is_directory=True)
+    assert not _high_rules(installed)  # Ordinary installed provider remains allowed.
+
+    original = vendor_identity._tree_sha256
+
+    def swap_ancestor_after_hash(path, **kwargs):
+        result = original(path, **kwargs)
+        if path == str(installed):
+            (installed / "node_modules").rename(tmp_path / "saved-node_modules")
+            (installed / "node_modules").symlink_to(tmp_path / "saved-node_modules", target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(vendor_identity, "_tree_sha256", swap_ancestor_after_hash)
+    assert "SRC-EXEC" in _high_rules(installed)
+
+
 def test_r109_g501_secure_client_scan_options(monkeypatch) -> None:
+    from defenseclaw.commands.cmd_plugin import _scan_options_for_connector
+
     monkeypatch.setattr(asset_lists, "is_secure_client", lambda cfg: True)
     app = SimpleNamespace(cfg=SimpleNamespace(
         claw=SimpleNamespace(home_dir=""),

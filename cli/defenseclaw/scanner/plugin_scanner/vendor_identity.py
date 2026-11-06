@@ -10,7 +10,12 @@ import os
 import re
 import stat
 
-from defenseclaw.hermes_skills import _read_regular_file, _tree_sha256
+from defenseclaw.hermes_skills import (
+    _filesystem_identity,
+    _is_real_directory,
+    _read_regular_file,
+    _tree_sha256,
+)
 
 # SHA-256 of sorted relative paths and file bytes, using the same bounded,
 # non-link tree reader as the Hermes vendor library. These are the published
@@ -47,9 +52,9 @@ def inspect_official_provider_tree(plugin_dir: str) -> str | None:
     peers = package.get("peerDependencies", {})
     if not isinstance(peers, dict):
         return None
-    root = os.path.realpath(plugin_dir)
+    root = os.path.abspath(plugin_dir)
     tolerated: set[str] = set()
-    links: dict[str, tuple[str, tuple[os.stat_result, str, bytes] | None]] = {}
+    links: dict[str, tuple[str, tuple]] = {}
     for peer in peers:
         if not isinstance(peer, str) or not re.fullmatch(
             r"(?:@[a-z0-9._-]+/)?[a-z0-9._-]+", peer,
@@ -67,29 +72,40 @@ def inspect_official_provider_tree(plugin_dir: str) -> str | None:
         return None
     for peer, (link, before) in links.items():
         try:
-            after = _validated_peer_link(link, root, peer)
-            if (before is None) != (after is None):
-                return None
-            if before is not None and after is not None and (
-                not os.path.samestat(before[0], after[0]) or before[1:] != after[1:]
-            ):
+            if before != _validated_peer_link(link, root, peer):
                 return None
         except (OSError, ValueError, TypeError, AttributeError):
             return None
     return name
 
 
-def _validated_peer_link(link: str, root: str, peer: str) -> tuple[os.stat_result, str, bytes] | None:
-    """Return a peer link's identity, or None when the optional link is absent."""
+def _validated_peer_link(link: str, root: str, peer: str) -> tuple:
+    """Record the complete in-root path to an optional installer peer link."""
+
+    relative = os.path.relpath(link, root)
+    parts = relative.split(os.sep)
+    ancestors = []
+    current = root
+    for part in ("", *parts[:-1]):
+        if part:
+            current = os.path.join(current, part)
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            ancestors.append(None)
+            return tuple(ancestors), None
+        if not _is_real_directory(info):
+            raise ValueError("peer path contains a non-directory entry")
+        ancestors.append(_filesystem_identity(info))
 
     try:
         info = os.lstat(link)
     except FileNotFoundError:
-        return None
+        return tuple(ancestors), None
     if not stat.S_ISLNK(info.st_mode):
         raise ValueError("peer entry is not a link")
     destination = os.path.realpath(link)
-    if os.path.commonpath((root, destination)) == root:
+    if os.path.commonpath((os.path.realpath(root), destination)) == os.path.realpath(root):
         raise ValueError("peer link points inside the package")
     if not stat.S_ISDIR(os.stat(destination, follow_symlinks=False).st_mode):
         raise ValueError("peer link target is not a directory")
@@ -98,4 +114,4 @@ def _validated_peer_link(link: str, root: str, peer: str) -> tuple[os.stat_resul
     )
     if manifest is None or json.loads(manifest).get("name") != peer:
         raise ValueError("peer link target has another package identity")
-    return info, os.readlink(link), manifest
+    return tuple(ancestors), (_filesystem_identity(info), os.readlink(link), manifest)

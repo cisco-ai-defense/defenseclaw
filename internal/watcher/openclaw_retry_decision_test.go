@@ -148,6 +148,39 @@ func TestR109G501BPluginSnapshotCoversBundledTree(t *testing.T) {
 	}
 }
 
+func TestR109G501BSecureClientKeepsPluginSnapshotScope(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.DeploymentMode = "managed_enterprise"
+	cfg.Enterprise.Profile = "secure_client"
+	cfg.Watch.RescanContentGated = true
+	root := t.TempDir()
+	plugin := filepath.Join(root, "provider")
+	dependency := filepath.Join(plugin, "node_modules", "dependency")
+	if err := os.MkdirAll(dependency, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entry := filepath.Join(dependency, "index.js")
+	if err := os.WriteFile(entry, []byte("const value = 1;\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, nil, []string{root}, store, logger, nil, nil)
+	evt := InstallEvent{Type: InstallPlugin, Name: "provider", Path: plugin, Connector: "openclaw"}
+	before, err := w.snapshotForEvent(evt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(entry, []byte("const value = 2;\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	after, err := w.snapshotForEvent(evt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.ContentHash != after.ContentHash {
+		t.Fatal("Secure Client changed its dependency-only rescan decision")
+	}
+}
+
 func TestR109G501BPluginSnapshotRetainsUnreadableEntry(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("requires local file permissions")
