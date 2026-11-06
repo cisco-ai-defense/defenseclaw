@@ -279,7 +279,7 @@ func TestKeepWindowsManagedFileCopyReplacesAHookHeldOpenForWriting(t *testing.T)
 		t.Fatal("a start succeeded while a writer held the hook; the fixture does not reproduce the failure")
 	}
 	damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false)
-	if err != nil || !strings.Contains(damage, "held open for writing") {
+	if err != nil || !strings.Contains(damage, "held open by another program") {
 		t.Fatalf("restored %q, %v", damage, err)
 	}
 	if out, err := exec.Command(target).Output(); err != nil || len(strings.TrimSpace(string(out))) == 0 {
@@ -449,4 +449,232 @@ func runWindowsImageSwapLaunches(t *testing.T, target string, builds []string, s
 	close(stop)
 	wg.Wait()
 	return failures, starts.Load(), restoreErrs
+}
+
+// GAP-0656 review S5: a sharing violation on the start-style open also comes
+// from a handle that shares no reading, which any user may hold on the
+// hook, and a swap cannot end that hold. The swaps back off for the same
+// path, stop at a cap of pending backups, and are logged once.
+func resetWindowsHeldSwapsForTest(t *testing.T) {
+	t.Helper()
+	windowsHeldSwaps = windowsHeldSwapState{}
+	t.Cleanup(func() { windowsHeldSwaps = windowsHeldSwapState{} })
+}
+
+func fakeWindowsHeldSwapClock(t *testing.T) (advance func(time.Duration)) {
+	t.Helper()
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	previous := windowsHeldSwapNow
+	windowsHeldSwapNow = func() time.Time { return now }
+	t.Cleanup(func() { windowsHeldSwapNow = previous })
+	return func(d time.Duration) { now = now.Add(d) }
+}
+
+func TestWindowsHeldSwapBacksOffExponentiallyUpToTheMaximum(t *testing.T) {
+	resetWindowsHeldSwapsForTest(t)
+	advance := fakeWindowsHeldSwapClock(t)
+	// Held at every 5 s check: the swaps fall 10, 20, 40, 80, 160, 300, 300 s apart.
+	var swaps []time.Duration
+	var last time.Duration
+	var elapsed time.Duration
+	for elapsed = 0; elapsed <= 30*time.Minute; elapsed += 5 * time.Second {
+		if allowed, why := windowsHeldSwapAllowed(); allowed {
+			if len(swaps) > 0 {
+				swaps = append(swaps, elapsed-last)
+			} else {
+				swaps = append(swaps, 0)
+			}
+			last = elapsed
+		} else if why == "" {
+			t.Fatal("a refused swap gave no reason")
+		}
+		advance(5 * time.Second)
+	}
+	want := []time.Duration{0, 10 * time.Second, 20 * time.Second, 40 * time.Second, 80 * time.Second, 160 * time.Second, 300 * time.Second, 300 * time.Second}
+	if len(swaps) < len(want) {
+		t.Fatalf("swaps %v, want at least %v", swaps, want)
+	}
+	for i, d := range want {
+		if swaps[i] != d {
+			t.Fatalf("swap gaps %v, want %v", swaps, want)
+		}
+	}
+	// Without a held verdict for the streak's end, the next hold starts again.
+	advance(windowsHeldSwapStreakEnd + time.Second)
+	if allowed, _ := windowsHeldSwapAllowed(); !allowed {
+		t.Fatal("the backoff outlived the streak")
+	}
+	if allowed, _ := windowsHeldSwapAllowed(); allowed {
+		t.Fatal("a second swap in the same instant")
+	}
+}
+
+func TestWindowsHeldSwapStopsAtTheBackupCapAndLogsOnce(t *testing.T) {
+	resetWindowsHeldSwapsForTest(t)
+	advance := fakeWindowsHeldSwapClock(t)
+	windowsImageBackups.Lock()
+	previous := windowsImageBackups.pending
+	windowsImageBackups.pending = map[string]windowsImageBackup{}
+	windowsImageBackups.Unlock()
+	t.Cleanup(func() {
+		windowsImageBackups.Lock()
+		windowsImageBackups.pending = previous
+		windowsImageBackups.Unlock()
+	})
+	for i := 0; i < windowsHeldSwapBackupCap; i++ {
+		deferWindowsImageBackupRemoval(filepath.Join(`C:\bin`, "defenseclaw-hook.exe.backup."+strings.Repeat("a", 31)+string(rune('a'+i))))
+	}
+	var log strings.Builder
+	for i := 0; i < 5; i++ {
+		advance(time.Hour)
+		allowed, why := windowsHeldSwapAllowed()
+		if allowed {
+			t.Fatalf("check %d swapped with %d backups pending", i, windowsHeldSwapBackupCap)
+		}
+		if !strings.Contains(why, "backups of earlier swaps are still held open") {
+			t.Fatalf("reason %q", why)
+		}
+		windowsHeldSwaps.notice = why
+		reportWindowsHeldSwapNotice(&log, `C:\bin\defenseclaw-hook.exe`)
+	}
+	if strings.Count(log.String(), "notice: the hook binary") != 1 || strings.Contains(log.String(), "for writing") {
+		t.Fatalf("log %q", log.String())
+	}
+	// A holder lets go: the pending backup goes and swapping resumes.
+	for key := range windowsImageBackups.pending {
+		forgetWindowsImageBackup(key)
+		break
+	}
+	if allowed, _ := windowsHeldSwapAllowed(); !allowed {
+		t.Fatal("no swap once the backups were below the cap")
+	}
+}
+
+// The guardian swaps a held hook at the first check, then leaves it for the
+// backoff: the file ID stays and nothing piles up.
+func TestKeepWindowsManagedFileCopyBacksOffFromAHoldItCannotEnd(t *testing.T) {
+	requireAdministratorTestToken(t, "the product restore writes the hook binary with the install file descriptor (an Administrators owner)")
+	resetWindowsHeldSwapsForTest(t)
+	advance := fakeWindowsHeldSwapClock(t)
+	root := t.TempDir()
+	target := filepath.Join(root, "bin", "defenseclaw-hook.exe")
+	copyPath := filepath.Join(root, "hook-guardian", "payload", "defenseclaw-hook.exe")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeWindowsSystemProgram(t, "HOSTNAME.EXE", target, nil)
+	want, err := windowsFileSHA256Hex(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, true); err != nil || damage != "" {
+		t.Fatalf("keep copy: restored %q, %v", damage, err)
+	}
+	// The injected open check stands for a reader with share mode 0 that
+	// reopens whatever object holds the name.
+	previous := windowsHookBinaryOpenRefused
+	windowsHookBinaryOpenRefused = func(string) bool { return true }
+	t.Cleanup(func() { windowsHookBinaryOpenRefused = previous })
+	t.Cleanup(func() { removeWindowsReplacementCopies(filepath.Dir(target)) })
+	damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false)
+	if err != nil || !strings.Contains(damage, "held open by another program") || strings.Contains(damage, "for writing") {
+		t.Fatalf("first check: restored %q, %v", damage, err)
+	}
+	afterFirst, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		advance(time.Second)
+		damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false)
+		if err != nil || damage != "" {
+			t.Fatalf("check %d inside the backoff: restored %q, %v", i, damage, err)
+		}
+	}
+	if now, err := os.Stat(target); err != nil || !os.SameFile(now, afterFirst) {
+		t.Fatalf("the hook was swapped again inside the backoff (%v)", err)
+	}
+	var log strings.Builder
+	reportWindowsHeldSwapNotice(&log, target)
+	reportWindowsHeldSwapNotice(&log, target)
+	if strings.Count(log.String(), "held open by another program") != 1 {
+		t.Fatalf("log %q", log.String())
+	}
+	if left, _ := filepath.Glob(target + ".backup.*"); len(left) != 1 {
+		t.Fatalf("backups after one swap: %q", left)
+	}
+	advance(windowsHeldSwapBackoffBase)
+	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false); err != nil || damage == "" {
+		t.Fatalf("after the backoff: restored %q, %v", damage, err)
+	}
+	if left, _ := filepath.Glob(target + ".backup.*"); len(left) != 2 {
+		t.Fatalf("backups after two swaps: %q", left)
+	}
+}
+
+// GAP-0656 review S6: the older replacement runs after a refused hard link,
+// and the "restored without the one-step swap" notice is set only if it
+// succeeded. A running hook refuses it; the notice stays empty.
+func TestCopyWindowsManagedFileClaimsNoRestoreWhenTheOlderReplacementIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "defenseclaw-hook.exe")
+	source := filepath.Join(dir, "source.exe")
+	writeWindowsSystemProgram(t, "PING.EXE", target, nil)
+	writeWindowsSystemProgram(t, "HOSTNAME.EXE", source, nil)
+	running := exec.Command(target, "-n", "30", "127.0.0.1")
+	if err := running.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = running.Process.Kill(); _, _ = running.Process.Wait() }()
+	time.Sleep(200 * time.Millisecond)
+	previous := windowsImageSwapLink
+	windowsImageSwapLink = func(string, string) error { return windows.ERROR_NOT_SUPPORTED }
+	t.Cleanup(func() { windowsImageSwapLink = previous })
+	windowsImageSwapLinkRefusal, windowsImageSwapLinkRefusalLogged = "", ""
+	t.Cleanup(func() { windowsImageSwapLinkRefusal, windowsImageSwapLinkRefusalLogged = "", "" })
+	if err := copyWindowsManagedFile(source, target, "", true, true); err == nil {
+		t.Fatal("the MoveFileEx replacement of a running program succeeded")
+	}
+	var log strings.Builder
+	reportWindowsImageSwapLinkRefusal(&log, target)
+	if log.Len() != 0 || windowsImageSwapLinkRefusal != "" {
+		t.Fatalf("a restore was claimed although the replacement failed: %q", log.String())
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, "*.restore-*")); len(left) != 0 {
+		t.Fatalf("temporaries left: %q", left)
+	}
+}
+
+// GAP-0656 review L5: the old program under its backup name takes an
+// administrators-only access list, so a user cannot start it from there.
+func TestSwapWindowsProgramImageClosesTheBackupToUsers(t *testing.T) {
+	requireAdministratorTestToken(t, "the backup keeps the old object's owner")
+	dir := t.TempDir()
+	target := filepath.Join(dir, "defenseclaw-hook.exe")
+	source := filepath.Join(dir, "source.exe")
+	_ = os.WriteFile(target, []byte("old"), 0o600)
+	_ = os.WriteFile(source, []byte("new"), 0o600)
+	backup, err := swapWindowsProgramImage(source, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := windows.GetNamedSecurityInfo(backup, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sddl := descriptor.String()
+	if strings.Contains(sddl, ";;;BU") || strings.Contains(sddl, ";;;WD") || !strings.Contains(sddl, ";;;BA") {
+		t.Fatalf("backup access list %s", sddl)
+	}
+	if body, _ := os.ReadFile(target); string(body) != "new" {
+		t.Fatalf("target %q", body)
+	}
+	// A failing access-list step does not fail the swap.
+	_ = os.WriteFile(source, []byte("newer"), 0o600)
+	previous := windowsImageBackupRestrict
+	windowsImageBackupRestrict = func(string) error { return windows.ERROR_ACCESS_DENIED }
+	t.Cleanup(func() { windowsImageBackupRestrict = previous })
+	if _, err := swapWindowsProgramImage(source, target); err != nil {
+		t.Fatalf("swap with a failing access-list step: %v", err)
+	}
 }

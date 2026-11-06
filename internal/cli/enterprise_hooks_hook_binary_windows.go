@@ -170,6 +170,7 @@ func keepWindowsStandaloneHookBinary(stderr io.Writer, onlyWhenDamaged bool) {
 	damage, err := keepWindowsManagedFileCopy(target, copyPath, want, !onlyWhenDamaged)
 	reportWindowsHookBinaryDigestRefusal(stderr, target)
 	reportWindowsImageSwapLinkRefusal(stderr, target)
+	reportWindowsHeldSwapNotice(stderr, target)
 	if err != nil {
 		if message := err.Error(); message != windowsHookBinaryLastErr {
 			windowsHookBinaryLastErr = message
@@ -300,8 +301,20 @@ func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (st
 		// writing (sharing read and delete) leaves the bytes and the single
 		// name intact, but Windows refuses every start of the image, so each
 		// tool call runs unchecked. The swap moves the name to a fresh
-		// object; the handle keeps the old one.
-		if held := windowsHookBinaryHeldForWriting(target); held != "" {
+		// object; the handle keeps the old one. A sharing violation on the
+		// start-style open does not say which kind of handle it is (a writer,
+		// or a reader that shares no reading), so the verdict is "held
+		// open".
+		if held := windowsHookBinaryHeldOpen(target); held != "" {
+			// The same verdict comes from a handle that shares no reading
+			// (any user may open the hook that way), and the swap cannot
+			// end that hold. So the swaps of one path are bounded: a
+			// backoff between them and a cap on the backups still pending
+			// (S5).
+			if allowed, why := windowsHeldSwapAllowed(); !allowed {
+				windowsHeldSwaps.notice = why
+				return "", nil
+			}
 			damage = held
 			break
 		}
@@ -408,24 +421,108 @@ func restoreWindowsNonRegularHookBinary(copyPath, target string) error {
 	return copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, false, true)
 }
 
-// windowsHookBinaryHeldForWriting opens path for reading as a program start
-// does (sharing only read and delete) and reports a handle that has it open
-// for writing, or "".
-func windowsHookBinaryHeldForWriting(path string) string {
+// windowsHookBinaryHeldOpen opens path for reading as a program start does
+// (sharing only read and delete) and reports a handle that has it open in a
+// way that refuses the start, or "". A sharing violation is a writer, or a
+// handle that opened the file with no read sharing: the probe cannot tell
+// them apart, so the text does not claim a writer.
+func windowsHookBinaryHeldOpen(path string) string {
+	if windowsHookBinaryOpenRefused(path) {
+		return "held open by another program (a write handle, or one that shares no reading), so no agent can start it"
+	}
+	return ""
+}
+
+// windowsHookBinaryOpenRefused is the start-style open; tests replace it.
+var windowsHookBinaryOpenRefused = func(path string) bool {
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return ""
+		return false
 	}
 	handle, err := windows.CreateFile(name, windows.GENERIC_READ,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_DELETE,
 		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
-		return "held open for writing by another program, so no agent can start it"
+		return true
 	}
 	if err == nil {
 		_ = windows.CloseHandle(handle)
 	}
-	return ""
+	return false
+}
+
+// The swaps a held-open verdict causes (GAP-0656 review S5). Any user may
+// open the hook with no sharing, because agents must run it, and that holds
+// every start off until the guardian swaps. The swap cannot end such a hold:
+// the holder reopens the new object, and its handle on the old object
+// blocks the backup's deletion. Unbounded, that is a full-size backup every
+// check. So these swaps back off exponentially for the same path, stop when
+// windowsHeldSwapBackupCap backups are still pending, and say so once. The
+// hold itself is a known limit of a hook image a user may start; the cap
+// bounds the cost, not the hold.
+var (
+	windowsHeldSwapBackoffBase = 10 * time.Second
+	windowsHeldSwapBackoffMax  = 5 * time.Minute
+	// windowsHeldSwapStreakEnd is how long without a held verdict ends the
+	// backoff, so a hold much later starts again at the first delay.
+	windowsHeldSwapStreakEnd = 10 * time.Minute
+	windowsHeldSwapBackupCap = 8
+	windowsHeldSwapNow       = time.Now
+)
+
+// windowsHeldSwaps is the backoff state, guarded by windowsHookBinaryMu.
+var windowsHeldSwaps windowsHeldSwapState
+
+type windowsHeldSwapState struct {
+	streak int       // swaps made in this streak
+	last   time.Time // the last held verdict
+	next   time.Time // no swap before this
+	notice string    // why the last held verdict did not swap, until logged
+	logged bool      // the notice of this streak was logged
+}
+
+// windowsHeldSwapAllowed decides, for a held-open verdict, whether the
+// guardian swaps now, and records the swap. When it does not, why says so.
+func windowsHeldSwapAllowed() (bool, string) {
+	state := &windowsHeldSwaps
+	now := windowsHeldSwapNow()
+	if state.streak > 0 && now.Sub(state.last) > windowsHeldSwapStreakEnd {
+		*state = windowsHeldSwapState{}
+	}
+	state.last = now
+	if pending := pendingWindowsImageBackups(); pending >= windowsHeldSwapBackupCap {
+		return false, fmt.Sprintf("%d backups of earlier swaps are still held open, so the guardian makes no new one until a holder lets go", pending)
+	}
+	if state.streak > 0 && now.Before(state.next) {
+		return false, fmt.Sprintf("swaps of this path back off (%d so far); the next one is not before %s", state.streak, state.next.Format("15:04:05"))
+	}
+	state.streak++
+	state.next = now.Add(windowsHeldSwapDelay(state.streak))
+	return true, ""
+}
+
+// windowsHeldSwapDelay is the wait after the nth swap of a streak: the base,
+// doubled each time, up to the maximum.
+func windowsHeldSwapDelay(swaps int) time.Duration {
+	delay := windowsHeldSwapBackoffBase
+	for i := 1; i < swaps && delay < windowsHeldSwapBackoffMax; i++ {
+		delay *= 2
+	}
+	return min(delay, windowsHeldSwapBackoffMax)
+}
+
+// reportWindowsHeldSwapNotice logs, once per streak, that a held-open hook
+// was not swapped at this check. The guardian calls it holding
+// windowsHookBinaryMu after each check.
+func reportWindowsHeldSwapNotice(stderr io.Writer, target string) {
+	state := &windowsHeldSwaps
+	notice := state.notice
+	state.notice = ""
+	if notice == "" || state.logged {
+		return
+	}
+	state.logged = true
+	fmt.Fprintf(stderr, "[hook-guardian] notice: the hook binary %s is held open by another program, and the guardian swaps it less often while that lasts: %s; this is logged once until the hold ends\n", target, notice)
 }
 
 // windowsHookBinaryStructuralDamage inspects the named file without opening
@@ -503,6 +600,7 @@ func copyWindowsManagedFile(source, destination, sddl string, replace, launchabl
 		_ = os.Remove(temporary)
 		return err
 	}
+	linkRefusal := ""
 	if replace && launchable {
 		if info, err := os.Lstat(destination); err == nil && info.Mode().IsRegular() {
 			backup, err := swapWindowsProgramImage(temporary, destination)
@@ -511,7 +609,7 @@ func copyWindowsManagedFile(source, destination, sddl string, replace, launchabl
 				deferWindowsImageBackupRemoval(backup)
 				return nil
 			case errors.Is(err, errWindowsImageSwapLinkRefused):
-				windowsImageSwapLinkRefusal = err.Error()
+				linkRefusal = err.Error()
 			default:
 				_ = os.Remove(temporary)
 				return err
@@ -525,6 +623,13 @@ func copyWindowsManagedFile(source, destination, sddl string, replace, launchabl
 	if err := windows.MoveFileEx(from, to, flags); err != nil {
 		_ = os.Remove(temporary)
 		return err
+	}
+	// The notice claims a restore without the one-step swap, so it is set
+	// only now that the older replacement has succeeded (review S6): a
+	// MoveFileEx the running hook refuses leaves the hook as it was and the
+	// guardian retries at the next check.
+	if linkRefusal != "" {
+		windowsImageSwapLinkRefusal = linkRefusal
 	}
 	return nil
 }

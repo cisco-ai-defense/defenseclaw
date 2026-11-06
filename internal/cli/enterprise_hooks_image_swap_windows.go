@@ -108,7 +108,33 @@ func swapWindowsProgramImage(temporary, destination string) (string, error) {
 		_ = os.Remove(backup)
 		return "", err
 	}
+	// The backup name is the old program under a second name for as long as
+	// a process runs it. Nothing refers to the name, and a user must not be
+	// able to start the old image from it (review L5), so it takes an
+	// administrators-only access list. A process already running the image,
+	// and one that opened it a moment before the rename, are unaffected.
+	_ = windowsImageBackupRestrict(backup)
 	return backup, nil
+}
+
+// windowsImageBackupSDDL is SYSTEM and Administrators only, protected.
+const windowsImageBackupSDDL = "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
+
+// windowsImageBackupRestrict is the access-list step on a backup; tests
+// replace it.
+var windowsImageBackupRestrict = restrictWindowsImageBackup
+
+func restrictWindowsImageBackup(path string) error {
+	descriptor, err := windows.SecurityDescriptorFromString(windowsImageBackupSDDL)
+	if err != nil {
+		return err
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return err
+	}
+	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
 }
 
 // renameWindowsProgramImage renames source over destination with POSIX
@@ -212,6 +238,14 @@ func deferWindowsImageBackupRemoval(backup string) {
 	windowsImageBackups.Lock()
 	defer windowsImageBackups.Unlock()
 	windowsImageBackups.pending[strings.ToLower(backup)] = windowsImageBackup{path: backup, made: windowsImageBackupNow()}
+}
+
+// pendingWindowsImageBackups is how many backups the guardian's swaps made
+// and has not been able to delete yet.
+func pendingWindowsImageBackups() int {
+	windowsImageBackups.Lock()
+	defer windowsImageBackups.Unlock()
+	return len(windowsImageBackups.pending)
 }
 
 // windowsImageBackupTooFresh reports a backup the guardian's own swap made
