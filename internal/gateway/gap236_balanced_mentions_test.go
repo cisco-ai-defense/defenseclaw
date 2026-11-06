@@ -31,6 +31,7 @@ func TestGAP0236BalancedAssignedHereStringPrint(t *testing.T) {
 	for _, row := range []struct{ name, command, want string }{
 		{"assigned print", "$t = @'\n.ssh/authorized_k*\n'@; Write-Output $t", "allow"},
 		{"multiple displays", "$t = @'\n.ssh/authorized_k*\n'@; Write-Output $t; Write-Host $t", "allow"},
+		{"display pipeline", "$t = @'\n.ssh/authorized_k*\n'@; Write-Output $t | Out-String", "allow"},
 		{"direct print twin", "Write-Output @'\n.ssh/authorized_k*\n'@", "allow"},
 		{"writer twin", "$t = @'\n.ssh/authorized_k*\n'@; Add-Content -Path $t -Value k", "block"},
 		{"named file twin", "$t = @'\n.ssh/authorized_keys\n'@; Write-Output $t", "block"},
@@ -54,6 +55,9 @@ func TestGAP0496BalancedBashHomeListing(t *testing.T) {
 	const home = `C:\Users\review`
 	for _, row := range []struct{ name, command, want string }{
 		{"single quoted listing", `bash -c 'ls -d */* | head -3'`, "allow"},
+		{"extra spacing", `bash  -c 'ls -d */* | head -3'`, "allow"},
+		{"tab separator", "bash\t-c 'ls -d */* | head -3'", "allow"},
+		{"env launch", `env bash -c 'ls -d */* | head -3'`, "allow"},
 		{"single quoted discard", `bash -c 'ls -d */* 2>/dev/null | head -3'`, "allow"},
 		{"reader variant", `bash -c 'ls */* | head -4'`, "allow"},
 		{"program case variant", `BASH -c 'ls -d */* | head -3'`, "allow"},
@@ -70,6 +74,28 @@ func TestGAP0496BalancedBashHomeListing(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+func TestGAP0548BalancedQuotedOptionAndSwitches(t *testing.T) {
+	const home = `C:\Users\review`
+	const cwd = home + `\project`
+	for _, row := range []struct{ name, command, want string }{
+		{"quoted option source", `t="-t $HOME/.ssh"; cp "$t" a.txt`, "allow"},
+		{"ordinary option", `t="-t $HOME/build"; cp $t a.txt`, "allow"},
+		{"unquoted protected option", `t="-t $HOME/.ssh"; cp $t a.txt`, "block"},
+		{"direct protected destination", `cp -t "$HOME/.ssh" a.txt`, "block"},
+		{"Copy-Item Recurse", `Copy-Item -Recurse -Path .\src -Destination .\build`, "allow"},
+		{"Copy-Item Container", `Copy-Item -Container -Path .\src -Destination .\build`, "allow"},
+		{"Copy-Item protected destination", `Copy-Item -Recurse -Path .\src -Destination $HOME\.ssh\authorized_keys`, "block"},
+	} {
+		for _, connector := range []string{"codex", "claudecode"} {
+			t.Run(row.name+"/"+connector, func(t *testing.T) {
+				if got := gap236BalancedAction(t, row.command, cwd, home, connector, "", false); got != row.want {
+					t.Errorf("verdict %s, want %s", got, row.want)
+				}
+			})
 		}
 	}
 }

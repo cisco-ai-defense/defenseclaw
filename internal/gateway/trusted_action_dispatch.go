@@ -290,20 +290,33 @@ func dispatchTrustedAction(
 	if ManagedEnterpriseActive() {
 		return nil
 	}
-	// Run after the call's child readings have joined their findings. Those
-	// readings can retain a path mention from an ordinary command even when
-	// the full command has no matching write.
-	if !request.StrictPolicy && balancedOrdinarySSHKeysRequest(request) {
+	// Grade after the child readings join. A confirmed protected target from
+	// any reading still enforces; a possible mention uses the policy tier.
+	if !request.StrictPolicy && len(request.Input.ActiveHome) >= 3 && request.Input.ActiveHome[1] == ':' {
 		defer func() {
-			possible := false
-			for i := range findings {
-				if findings[i].RuleID == "persistence.ssh_authorized_keys_command" || findings[i].RuleID == "PATH-SSH-DIR" {
-					findings[i].enforcement = findingEnforcementDetectionOnly
-					findings[i].Title = "Possible SSH path mention"
-					possible = true
+			hasSSHFinding := false
+			for _, finding := range findings {
+				if finding.RuleID == "persistence.ssh_authorized_keys_command" {
+					hasSSHFinding = true
+					break
 				}
 			}
-			if !possible {
+			if !hasSSHFinding && !strings.ContainsAny(request.Input.Command+request.LegacyText, "*?[") {
+				return
+			}
+			grade := sshKeyMentionGrade(request)
+			if grade != hookpaths.PossibleTargetDecision {
+				return
+			}
+			emitted := false
+			for i := range findings {
+				if findings[i].RuleID == "persistence.ssh_authorized_keys_command" {
+					findings[i].enforcement = findingEnforcementDetectionOnly
+					findings[i].Title = "Possible SSH path mention"
+					emitted = true
+				}
+			}
+			if !emitted {
 				findings = append(findings, RuleFinding{
 					RuleID: "persistence.ssh_authorized_keys_command", Title: "Possible SSH path mention",
 					Severity: "HIGH", Confidence: 0.5, Evidence: request.Input.Command,
@@ -313,8 +326,8 @@ func dispatchTrustedAction(
 			}
 		}()
 	}
-	if request.strictHookProfile {
-		if command := strictBashListingCommand(request); command != "" {
+	if request.strictHookProfile && len(request.Input.ActiveHome) >= 3 && request.Input.ActiveHome[1] == ':' {
+		if sshKeyMentionGrade(request) == hookpaths.PossibleTargetDecision {
 			defer func() {
 				for _, finding := range findings {
 					if finding.RuleID == "persistence.ssh_authorized_keys_command" {
@@ -327,7 +340,7 @@ func dispatchTrustedAction(
 				}
 				findings = append(findings, RuleFinding{
 					RuleID: "persistence.ssh_authorized_keys_command", Title: "SSH authorized keys mutation",
-					Severity: "CRITICAL", Confidence: 0.98, Evidence: command,
+					Severity: "CRITICAL", Confidence: 0.98, Evidence: request.Input.Command,
 					Tags: []string{"persistence", "credential", "ssh"}, LineNumber: 1,
 					enforcement: enforcement,
 				})

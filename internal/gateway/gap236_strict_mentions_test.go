@@ -19,8 +19,12 @@ func TestGAP236OrdinaryMentionsMoveToStrictProfile(t *testing.T) {
 		dialect            actionfacts.Dialect
 	}{
 		{"GAP-0236", "$t = @'\n.ssh/authorized_k*\n'@; Write-Output $t", home, actionfacts.DialectPowerShell},
+		{"GAP-0236 display pipeline", "$t = @'\n.ssh/authorized_k*\n'@; Write-Output $t | Out-String", home, actionfacts.DialectPowerShell},
 		{"GAP-0496", `bash -c 'ls -d */* | head -3'`, home, actionfacts.DialectPOSIX},
+		{"GAP-0496 spaced", `bash  -c 'ls -d */* | head -3'`, home, actionfacts.DialectPOSIX},
+		{"GAP-0496 env", `env bash -c 'ls -d */* | head -3'`, home, actionfacts.DialectPOSIX},
 		{"GAP-0496 native form", `bash -c "ls -d */* 2>/dev/null | head -3"`, home, actionfacts.DialectPOSIX},
+		{"GAP-0548 quoted option", `t="-t $HOME/.ssh"; cp "$t" a.txt`, home + `\project`, actionfacts.DialectPOSIX},
 	} {
 		for _, tier := range []string{"default", "permissive", "strict"} {
 			for _, managed := range []bool{false, true} {
@@ -71,7 +75,10 @@ func TestGAP236OrdinaryMentionsMoveToStrictProfile(t *testing.T) {
 
 func TestGAP0496KnownBashStartupRetainsBlock(t *testing.T) {
 	t.Setenv("BASH_ENV", "/tmp/review-startup")
-	if balancedOrdinarySSHKeysCommand(`bash -c 'ls -d */* | head -3'`, `C:\Users\review`, `C:\Users\review`) {
+	const home = `C:\Users\review`
+	if sshKeyMentionGrade(trustedActionRequest{Input: actionfacts.Input{
+		Command: `bash -c 'ls -d */* | head -3'`, CWD: home, ActiveHome: home,
+	}}) == hookpaths.PossibleTargetDecision {
 		t.Fatal("a known Bash startup file received an ordinary disposition")
 	}
 }
@@ -83,11 +90,11 @@ func TestGAP236ClientProtectedTargetRetainsBlock(t *testing.T) {
 		Input:                actionfacts.Input{Tool: "Bash", Command: command, CWD: home, ActiveHome: home},
 		ResolvedWriteTargets: map[string]string{"project/link": home + `\.ssh\authorized_keys`},
 	}
-	if balancedOrdinarySSHKeysRequest(request) {
+	if sshKeyMentionGrade(request) != hookpaths.ProtectedTargetDecision {
 		t.Fatal("client-proved protected target received an ordinary disposition")
 	}
 	request.ResolvedWriteTargets = map[string]string{hookpaths.ActionDecisionKey: hookpaths.ProtectedTargetDecision}
-	if balancedOrdinarySSHKeysRequest(request) {
+	if sshKeyMentionGrade(request) != hookpaths.ProtectedTargetDecision {
 		t.Fatal("client decision received an ordinary disposition")
 	}
 }

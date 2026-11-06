@@ -3575,13 +3575,19 @@ func ProvedDisplayOnlyHereString(command string) bool {
 		if i < len(scan.words) && scan.words[i] != ";" && scan.words[i] != "|" && scan.words[i] != "&" && scan.words[i] != "&&" && scan.words[i] != "||" {
 			continue
 		}
-		if i < len(scan.words) && scan.words[i] != ";" {
+		if i < len(scan.words) && scan.words[i] != ";" && scan.words[i] != "|" {
 			return false
 		}
 		if i > start {
 			statement := scan.words[start:i]
 			assignment := len(statement) == 3 && statement[1] == "=" && actionWindowsHereStringBody(statement[2]) != statement[2]
-			if !assignment && !actionWindowsTextStatement(statement) {
+			isDisplay := actionWindowsTextStatement(statement) ||
+				actionWindowsDisplaySinks[programBase(statement[0])]
+			if !assignment && !isDisplay {
+				return false
+			}
+			if i < len(scan.words) && scan.words[i] == "|" &&
+				(!actionWindowsTextStatement(statement) || !actionWindowsPrintOnlyDisplays(scan, start, i)) {
 				return false
 			}
 		}
