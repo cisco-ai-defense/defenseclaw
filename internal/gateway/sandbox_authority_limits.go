@@ -18,6 +18,7 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
@@ -39,20 +40,32 @@ import (
 // rate. There is no four-binding limit: one account can use its budget
 // across more bindings, each with its own 32-request in-flight limit. The
 // shared hook and receipt admission therefore holds the most calls the
-// account bucket can admit within a 3.5 s hook answer window, including its
-// initial burst (GAP-0490). The 60 s policy/current poll is one call a
-// minute per live registration.
+// account bucket can admit during each managed request's actual lifetime,
+// including its initial burst (GAP-0490). The 60 s policy/current poll is
+// one call a minute per live registration.
 const (
-	sandboxBudgetHook       = "sandbox-hook"
-	sandboxBudgetReceipt    = "sandbox-receipt"
-	sandboxBudgetPending    = "sandbox-pending"
-	sandboxBudgetPolicy     = "sandbox-policy"
-	sandboxBudgetEvents     = "sandbox-events"
-	sandboxUserHookRate     = 100
-	sandboxUserHookBurst    = 200
-	sandboxHookAnswerWindow = 3500 * time.Millisecond
-	sandboxUserHookInFlight = sandboxUserHookBurst + int(sandboxUserHookRate*sandboxHookAnswerWindow/time.Second)
+	sandboxBudgetHook    = "sandbox-hook"
+	sandboxBudgetReceipt = "sandbox-receipt"
+	sandboxBudgetPending = "sandbox-pending"
+	sandboxBudgetPolicy  = "sandbox-policy"
+	sandboxBudgetEvents  = "sandbox-events"
+	sandboxUserHookRate  = 100
+	sandboxUserHookBurst = 200
 )
+
+var sandboxUserHookInFlight, sandboxUserReceiptInFlight = managedSandboxInFlightLimits()
+
+// managedSandboxInFlightLimits uses one rendered ingress attempt's maximum
+// lifetime for hooks and the gateway's receipt window for acknowledgements.
+// These are separate HTTP requests with separate account rate buckets.
+func managedSandboxInFlightLimits() (hook, receipt int) {
+	first, retry := connector.SandboxHookAttemptBudgets()
+	return sandboxWindowCapacity(max(first, retry)), sandboxWindowCapacity(sandboxHookReceiptWindow)
+}
+
+func sandboxWindowCapacity(window time.Duration) int {
+	return sandboxUserHookBurst + int((time.Duration(sandboxUserHookRate)*window+time.Second-1)/time.Second)
+}
 
 // sandboxBudgetLimit is one class's rate, burst and in-flight bound per
 // uid.
@@ -63,7 +76,7 @@ type sandboxBudgetLimit struct {
 // sandboxBudgetLimits is the per-class table; tests replace entries.
 var sandboxBudgetLimits = map[string]sandboxBudgetLimit{
 	sandboxBudgetHook:    {Rate: sandboxUserHookRate, Burst: sandboxUserHookBurst, InFlight: sandboxUserHookInFlight},
-	sandboxBudgetReceipt: {Rate: sandboxUserHookRate, Burst: sandboxUserHookBurst, InFlight: sandboxUserHookInFlight},
+	sandboxBudgetReceipt: {Rate: sandboxUserHookRate, Burst: sandboxUserHookBurst, InFlight: sandboxUserReceiptInFlight},
 	sandboxBudgetPolicy:  {Rate: 10, Burst: 20, InFlight: 8},
 	// The daemon posts its lifecycle and egress records every 2 s, one batch
 	// per sandbox (daemonRelayTelemetry), and stops a pass at its first
