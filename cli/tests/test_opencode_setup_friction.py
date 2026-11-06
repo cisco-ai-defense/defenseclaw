@@ -111,121 +111,131 @@ def test_folders_another_account_can_write_stay_refused(monkeypatch, tmp_path, c
 # ---------------------------------------------------------------- per-account service port
 
 
-def _fake_opencode(tmp_path: Path, config_home: Path, channel_port: int | str = "") -> str:
-    """`opencode service get|set port` and `status`, with service.json as OpenCode keeps it.
-
-    Like OpenCode 2.2.5, `get port` prints nothing while no port is set.
-    """
-    service = config_home / "opencode" / "service.json"
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    binary = tmp_path / "opencode"
-    binary.write_text(
-        f"#!{sys.executable}\n"
-        "import json, os, sys\n"
-        f"path = {str(service)!r}\n"
-        "data = json.load(open(path)) if os.path.exists(path) else {}\n"
-        "args = sys.argv[1:]\n"
-        "if args[:3] == ['service', 'get', 'port']:\n"
-        f"    print(data.get('port', {channel_port!r}))\n"
-        "elif args[:3] == ['service', 'set', 'port']:\n"
-        "    data['port'] = int(args[3]); data.setdefault('password', 'x')\n"
-        "    os.makedirs(os.path.dirname(path), exist_ok=True); json.dump(data, open(path, 'w'))\n"
-        "elif args[:2] == ['service', 'status']:\n"
-        "    print('stopped')\n",
-        encoding="utf-8",
-    )
-    binary.chmod(0o755)
-    return str(binary)
-
-
 class _Host:
-    """One computer: listening ports and the per-account port claims in /var/tmp."""
+    """One computer: listening ports and the per-account port claims.
 
-    def __init__(self):
+    POSIX claims are owned by a uid; Windows claims hold the account SID
+    (the real Windows claim path is used, with %ProgramData% in tmp).
+    """
+
+    def __init__(self, monkeypatch, tmp_path: Path, windows: bool = False):
         self.listening: set[int] = set()
         self.claims: dict[int, int] = {}
-        self.uid = 0
-
-    def install(self, monkeypatch):
-        monkeypatch.setattr(opencode_service.os, "getuid", lambda: self.uid)
+        self.account = 0
+        self.windows = windows
+        self.claim_dir = tmp_path / "ProgramData"
+        self.claim_dir.mkdir()
+        self.tmp_path = tmp_path
+        monkeypatch.setattr(bootstrap, "_windows_port_claims", lambda: self.windows)
+        monkeypatch.setattr(bootstrap, "_api_port_claim_dir", lambda: str(self.claim_dir))
+        monkeypatch.setattr(bootstrap, "_windows_own_sid", lambda: f"S-1-5-21-1-2-3-{self.account}")
+        monkeypatch.setattr(opencode_service.os, "getuid", lambda: self.account)
         monkeypatch.setattr(bootstrap, "_api_port_free", lambda _host, port: port not in self.listening)
-        monkeypatch.setattr(
-            bootstrap,
-            "_api_port_claimed_by_other_account",
-            lambda port, prefix=bootstrap._API_PORT_CLAIM_PREFIX: self.claims.get(port, self.uid) != self.uid,
-        )
+        if not windows:
+            monkeypatch.setattr(
+                bootstrap,
+                "_api_port_claimed_by_other_account",
+                lambda port, prefix=bootstrap._API_PORT_CLAIM_PREFIX: self.claims.get(port, self.account) != self.account,
+            )
 
-        def reserve(port, prefix=bootstrap._API_PORT_CLAIM_PREFIX):
-            if self.claims.get(port, self.uid) != self.uid:
-                return False
-            self.claims[port] = self.uid
-            return True
+            def reserve(port, prefix=bootstrap._API_PORT_CLAIM_PREFIX):
+                if self.claims.get(port, self.account) != self.account:
+                    return False
+                self.claims[port] = self.account
+                return True
 
-        monkeypatch.setattr(bootstrap, "_reserve_api_port", reserve)
+            monkeypatch.setattr(bootstrap, "_reserve_api_port", reserve)
+
+    def login(self, monkeypatch, account: int) -> Path:
+        """Become *account*; returns its service.json path."""
+        self.account = account
+        config_home = self.tmp_path / f"u{account}" / ".config"
+        config_home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+        return config_home / "opencode" / "service.json"
 
 
-def _account(monkeypatch, tmp_path: Path, host: _Host, uid: int, **fake) -> tuple[str, Path]:
-    config_home = tmp_path / f"u{uid}" / ".config"
-    config_home.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
-    host.uid = uid
-    return _fake_opencode(tmp_path / f"u{uid}", config_home, **fake), config_home / "opencode" / "service.json"
+def _port(service: Path) -> int:
+    return json.loads(service.read_text())["port"]
 
 
-@posix_only
-@pytest.mark.parametrize("unset_prints", ["", 49374])
-def test_two_accounts_get_their_own_stable_service_ports(monkeypatch, tmp_path, unset_prints):
-    host = _Host()
-    host.install(monkeypatch)
+@pytest.mark.parametrize("windows", [False, True])
+def test_two_accounts_get_their_own_stable_service_ports(monkeypatch, tmp_path, windows):
+    host = _Host(monkeypatch, tmp_path, windows)
     ports = {}
-    for uid in (1001, 1002):
-        binary, service = _account(monkeypatch, tmp_path, host, uid, channel_port=unset_prints)
-        line = opencode_service.ensure_account_port(binary)
-        ports[uid] = json.loads(service.read_text())["port"]
-        assert f"uses port {ports[uid]} for this account" in line and "49374" in line
-        host.listening.add(ports[uid])  # its server now runs there
-
+    for account in (1001, 1002):
+        service = host.login(monkeypatch, account)
+        line = opencode_service.ensure_account_port()
+        ports[account] = _port(service)
+        assert f"uses port {ports[account]} for this account" in line and "49374" in line
+        host.listening.add(ports[account])  # its server now runs there
     assert ports == {1001: 24000 + 1001 % 8000, 1002: 24000 + 1002 % 8000}
-    assert ports[1001] != ports[1002]
-    assert host.claims == {ports[1001]: 1001, ports[1002]: 1002}
-    # Stable: a later setup run keeps the recorded port and says nothing.
-    for uid in (1001, 1002):
-        binary, service = _account(monkeypatch, tmp_path, host, uid)
-        assert opencode_service.ensure_account_port(binary) == ""
-        assert json.loads(service.read_text())["port"] == ports[uid]
+    if windows:
+        claims = {p.name: p.read_text() for p in host.claim_dir.iterdir()}
+        assert claims == {
+            f"defenseclaw-opencode-port-{ports[1001]}": "S-1-5-21-1-2-3-1001",
+            f"defenseclaw-opencode-port-{ports[1002]}": "S-1-5-21-1-2-3-1002",
+        }
+    else:
+        assert host.claims == {ports[1001]: 1001, ports[1002]: 1002}
+    # Stable: a later setup run, and one after an upgrade (the files and the
+    # claims stay), keeps the recorded port and says nothing.
+    for account in (1001, 1002, 1001):
+        service = host.login(monkeypatch, account)
+        assert opencode_service.ensure_account_port() == ""
+        assert _port(service) == ports[account]
 
 
-@posix_only
-def test_an_account_whose_port_another_account_holds_takes_the_next(monkeypatch, tmp_path):
-    host = _Host()
-    host.install(monkeypatch)
-    first, _ = _account(monkeypatch, tmp_path, host, 1001)
-    opencode_service.ensure_account_port(first)
-    # uid 9001 derives the same port as uid 1001 (mod 8000): claimed, so the next one.
-    second, service = _account(monkeypatch, tmp_path, host, 9001)
-    opencode_service.ensure_account_port(second)
-    assert json.loads(service.read_text())["port"] == 24000 + 1001 % 8000 + 1
+@pytest.mark.parametrize("windows", [False, True])
+def test_an_account_whose_port_another_account_holds_takes_the_next(monkeypatch, tmp_path, windows):
+    host = _Host(monkeypatch, tmp_path, windows)
+    host.login(monkeypatch, 1001)
+    opencode_service.ensure_account_port()
+    # 9001 derives the same port as 1001 (mod 8000): claimed, so the next one.
+    service = host.login(monkeypatch, 9001)
+    opencode_service.ensure_account_port()
+    assert _port(service) == 24000 + 1001 % 8000 + 1
     # A port something else listens on is skipped too.
     host.listening.add(24000 + 1003 % 8000)
-    third, service = _account(monkeypatch, tmp_path, host, 1003)
-    opencode_service.ensure_account_port(third)
-    assert json.loads(service.read_text())["port"] == 24000 + 1003 % 8000 + 1
+    service = host.login(monkeypatch, 1003)
+    opencode_service.ensure_account_port()
+    assert _port(service) == 24000 + 1003 % 8000 + 1
 
 
-@posix_only
-@pytest.mark.parametrize("case", ["set-by-user", "own-channel-port", "no-opencode-v2"])
+@pytest.mark.parametrize("case", ["set-by-user", "set-to-the-default", "not-an-object", "link"])
 def test_a_port_the_account_chose_is_kept(monkeypatch, tmp_path, case):
-    host = _Host()
-    host.install(monkeypatch)
-    extra = {"channel_port": 51234} if case == "own-channel-port" else {}
-    binary, service = _account(monkeypatch, tmp_path, host, 1001, **extra)
-    if case == "set-by-user":
-        service.parent.mkdir(parents=True, exist_ok=True)
-        service.write_text(json.dumps({"port": 49374, "password": "x"}))
-    assert opencode_service.ensure_account_port("" if case == "no-opencode-v2" else binary) == ""
+    host = _Host(monkeypatch, tmp_path)
+    service = host.login(monkeypatch, 1001)
+    service.parent.mkdir(parents=True, exist_ok=True)
+    body = {
+        "set-by-user": '{"port": 49375, "password": "x"}',
+        "set-to-the-default": '{"port": 49374, "password": "x"}',
+        "not-an-object": "[1]",
+    }.get(case)
+    if case == "link":
+        target = tmp_path / "elsewhere.json"
+        target.write_text("{}")
+        service.symlink_to(target)
+    else:
+        service.write_text(body)
+    line = opencode_service.ensure_account_port()
     assert host.claims == {}
-    if case == "set-by-user":
-        assert json.loads(service.read_text())["port"] == 49374
+    if case in ("set-by-user", "set-to-the-default"):
+        assert line == "" and service.read_text() == body
+    else:
+        assert line.startswith("!") and "opencode service set port" in line
+        assert case != "link" or (tmp_path / "elsewhere.json").read_text() == "{}"
+
+
+def test_the_password_opencode_wrote_is_kept(monkeypatch, tmp_path):
+    host = _Host(monkeypatch, tmp_path)
+    service = host.login(monkeypatch, 1001)
+    service.parent.mkdir(parents=True, exist_ok=True)
+    service.write_text('{"password": "kept"}')
+    opencode_service.ensure_account_port()
+    assert json.loads(service.read_text()) == {"password": "kept", "port": 25001}
+    if os.name != "nt":
+        assert service.stat().st_mode & 0o777 == 0o600
 
 
 @posix_only
@@ -236,10 +246,19 @@ def test_setup_sets_the_port_before_it_restarts_the_server(monkeypatch, tmp_path
     order = []
     monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", lambda *_a, **_k: True)
     monkeypatch.setattr(opencode_service, "account_binary", lambda data_dir=None: "/u/bin/opencode")
-    monkeypatch.setattr(opencode_service, "ensure_account_port", lambda binary: order.append(f"port {binary}") or "")
+    monkeypatch.setattr(opencode_service, "ensure_account_port", lambda: order.append("port") or "")
     monkeypatch.setattr(opencode_service, "restart_if_running", lambda binary: order.append(f"restart {binary}") or "")
     cmd_setup._restart_services(str(tmp_path), connector="opencode", teardown=teardown)
-    assert order == (["restart /u/bin/opencode"] if teardown else ["port /u/bin/opencode", "restart /u/bin/opencode"])
+    assert order == (["restart /u/bin/opencode"] if teardown else ["port", "restart /u/bin/opencode"])
+
+
+def test_the_cli_and_the_guardian_use_the_same_scheme():
+    """cli/defenseclaw/opencode_service.py and internal/enterprisepolicy/opencode_service_port.go."""
+    go = (Path(__file__).resolve().parents[2] / "internal/enterprisepolicy/opencode_service_port.go").read_text()
+    assert f"OpenCodeDefaultServicePort = {opencode_service.DEFAULT_SERVICE_PORT}" in go
+    assert f"OpenCodeAccountPortBase = {opencode_service.ACCOUNT_PORT_BASE}" in go
+    assert f"OpenCodeAccountPortSpan = {opencode_service.ACCOUNT_PORT_SPAN}" in go
+    assert 'filepath.Join(home, ".config", "opencode", "service.json")' in go
 
 
 # ---------------------------------------------------------------- OpenCode V1 -> V2 hint
@@ -301,11 +320,11 @@ def test_init_passes_the_given_ports_to_first_run(monkeypatch):
     monkeypatch.setattr(cmd_init, "refuse_first_run_when_managed", lambda: None)
     result = CliRunner().invoke(
         cmd_init.init_cmd,
-        ["--non-interactive", "--connector", "none", "--api-port", "16700", "--proxy-port", "16701"],
+        ["--non-interactive", "--connector", "none", "--api-port", "16700", "--proxy-port", "16710"],
         obj=SimpleNamespace(cfg=None),
     )
     assert result.exit_code == 0, result.output
-    assert (captured["api_port"], captured["proxy_port"]) == (16700, 16701)
+    assert (captured["api_port"], captured["proxy_port"]) == (16700, 16710)
     bad = CliRunner().invoke(cmd_init.init_cmd, ["--api-port", "70000"], obj=SimpleNamespace(cfg=None))
     assert bad.exit_code == 2 and "70000" in bad.output
 
@@ -401,3 +420,112 @@ def test_the_folder_holding_the_npm_link_counts_too(monkeypatch, tmp_path, share
     _accounts(monkeypatch, tmp_path, gid, group_line=f"devs:x:{gid}:me,bob\n" if shared else "")
     monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", str(prefix))
     assert agent_discovery._is_trusted_binary_path(str(target)) is not shared
+
+
+# ---------------------------------------------------------------- every port-flag collision form
+
+
+@pytest.mark.parametrize(
+    ("api", "proxy", "refused"),
+    [
+        (28111, 28111, True),  # the same port twice
+        (28111, 28112, True),  # the proxy on the first sandbox port
+        (28111, 28113, True),  # the proxy on the second sandbox port
+        (0, 18970, True),  # the proxy on the default API port (API chosen automatically)
+        (0, 18972, True),  # ... or one of its sandbox ports
+        (4000, 0, True),  # the API on the default proxy port (proxy chosen automatically)
+        (3998, 0, True),  # ... its sandbox ports reach 4000
+        (18789, 0, True),  # OpenClaw's gateway port
+        (0, 18789, True),
+        (65534, 0, True),  # no room for the sandbox ports
+        (28111, 28114, False),
+        (16700, 16710, False),
+        (0, 4010, False),
+        (19000, 0, False),
+    ],
+)
+def test_init_refuses_every_port_flag_collision(api, proxy, refused):
+    conflict = bootstrap.first_run_port_flags_conflict(api, proxy)
+    assert bool(conflict) is refused, conflict
+
+
+@pytest.mark.parametrize("args", [["--api-port", "28111", "--proxy-port", "28111"], ["--proxy-port", "18970"], ["--api-port", "4000"]])
+def test_init_command_refuses_before_writing(monkeypatch, tmp_path, args):
+    from click.testing import CliRunner
+    from defenseclaw.commands import cmd_init
+
+    ran = []
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "dc"))
+    monkeypatch.setattr(cmd_init, "_use_guided_first_run", lambda **_k: ran.append("run") or True)
+    monkeypatch.setattr(cmd_init, "_run_first_run_cmd", lambda **kwargs: ran.append("run"))
+    monkeypatch.setattr(cmd_init, "refuse_first_run_when_managed", lambda: None)
+    result = CliRunner().invoke(cmd_init.init_cmd, ["--non-interactive", "--connector", "none", *args], obj=SimpleNamespace(cfg=None))
+    assert result.exit_code == 2 and "choose another" in result.output, result.output
+    assert ran == [] and not (tmp_path / "dc").exists()
+
+
+def test_the_automatic_picks_avoid_the_given_flags(monkeypatch):
+    cfg = default_config()
+    # Another account holds 18970: the next API candidate is 18980, which
+    # --proxy-port took; the pick goes on to 18990.
+    monkeypatch.setattr(bootstrap, "_api_port_available", lambda _h, port: port != 18970)
+    monkeypatch.setattr(bootstrap, "_reserve_api_port", lambda _p, prefix=None: True)
+    bootstrap.choose_first_run_api_port(cfg, bootstrap.api_port_avoid(cfg, 18981))
+    assert cfg.gateway.api_port == 18990
+    # --api-port 4005: the automatic proxy pick leaves 4005..4007 alone.
+    cfg = default_config()
+    cfg.gateway.api_port = 3999
+    monkeypatch.setattr(bootstrap, "_guardrail_port_available", lambda _h, _p: True)
+    bootstrap.choose_first_run_guardrail_port(cfg, bootstrap.proxy_port_avoid(cfg))
+    assert cfg.guardrail.port not in {3999, 4000, 4001}
+
+
+@pytest.mark.parametrize(
+    ("api", "proxy", "openclaw", "refused"),
+    [(18970, 18970, 0, True), (18970, 18971, 0, True), (18789, 4000, 18789, True), (18970, 18789, 18789, True),
+     (18970, 4000, 0, False), (18970, 4000, 18789, False)],
+)
+def test_one_layout_rule_for_every_port_writer(api, proxy, openclaw, refused):
+    """init, setup gateway --api-port, setup guardrail --port and config validate share it."""
+    assert bool(bootstrap.port_layout_conflict(api, proxy, openclaw)) is refused
+
+
+def test_config_validate_warns_on_colliding_ports(monkeypatch):
+    from defenseclaw.commands import cmd_config
+
+    cfg = default_config()
+    cfg.gateway.api_port, cfg.guardrail.port = 4000, 4000
+    monkeypatch.setattr(cmd_config.config_module, "load", lambda: cfg)
+    assert cmd_config._port_layout_warnings() and "guardrail.port" in cmd_config._port_layout_warnings()[0]
+    cfg.guardrail.port = 4010
+    assert cmd_config._port_layout_warnings() == []
+
+
+@linux_only
+@pytest.mark.parametrize("acl", [False, True])
+def test_a_symlinked_folder_is_judged_by_its_target(monkeypatch, tmp_path, acl):
+    """Review M5: the ACL of the object os.stat describes, not of the link."""
+    real = tmp_path / "real-bin"
+    real.mkdir()
+    real.chmod(0o775)
+    for name in ("system.posix_acl_access", "system.posix_acl_default"):
+        try:
+            os.removexattr(real, name)
+        except (AttributeError, OSError):
+            pass
+    link = tmp_path / "bin"
+    link.symlink_to(real)
+    _accounts(monkeypatch, tmp_path, os.stat(real).st_gid)
+    if acl:
+        # A POSIX access ACL granting another uid write (setfacl -m u:65534:rwx).
+        import struct
+
+        entries = [(0x01, 7, 0xFFFFFFFF), (0x02, 7, 65534), (0x04, 7, 0xFFFFFFFF), (0x10, 7, 0xFFFFFFFF), (0x20, 5, 0xFFFFFFFF)]
+        data = struct.pack("<I", 2) + b"".join(struct.pack("<HHI", tag, perm, uid) for tag, perm, uid in entries)
+        try:
+            os.setxattr(real, "system.posix_acl_access", data)
+        except OSError as exc:
+            pytest.skip(f"POSIX ACLs are not available here: {exc}")
+    assert file_permissions.other_accounts_can_write(str(link), os.stat(link)) is acl
+    # An lstat of the link describes the link, not the folder: not judged private.
+    assert file_permissions.owner_private_group(str(link), os.lstat(link)) is False

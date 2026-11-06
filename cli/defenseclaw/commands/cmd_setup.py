@@ -5316,6 +5316,13 @@ def setup_gateway(
             gw.port = port
         if api_port is not None:
             gw.api_port = api_port
+        if api_port is not None or port is not None:
+            from defenseclaw.bootstrap import port_layout_conflict
+
+            if conflict := port_layout_conflict(
+                gw.api_port, int(app.cfg.guardrail.port or 0), gw.port if uses_openclaw else 0
+            ):
+                raise click.UsageError(conflict)
         if token is not None:
             _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", token, data_dir)
             gw.token = ""
@@ -7805,6 +7812,15 @@ def setup_guardrail(
         if cisco_timeout_ms is not None:
             aid.timeout_ms = cisco_timeout_ms
         gc.port = guard_port or gc.port or 4000
+        if guard_port:
+            from defenseclaw.bootstrap import port_layout_conflict
+
+            if conflict := port_layout_conflict(
+                int(app.cfg.gateway.api_port or 0),
+                gc.port,
+                app.cfg.gateway.port if "openclaw" in app.cfg.active_connectors() else 0,
+            ):
+                raise click.UsageError(conflict)
         if block_message is not None and per_connector_target:
             gc.connectors[target_connector].block_message = block_message
         elif block_message is not None:
@@ -16502,7 +16518,7 @@ def _restart_services(
         if not teardown:
             # Its default port is shared by every account on a computer
             # (GAP-0053); set before the restart so the server moves now.
-            opencode_service.report_port(opencode_service.ensure_account_port(opencode_binary))
+            opencode_service.report_port(opencode_service.ensure_account_port())
         opencode_service.report(
             opencode_service.restart_if_running(opencode_binary),
             what="runs the plugin as it is now",

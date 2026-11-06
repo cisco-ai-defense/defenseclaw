@@ -63,6 +63,15 @@ var (
 	enterpriseHookWriteCopilotVSCodeAccounts = enterprisehooks.WriteUnixEligibleAccounts
 )
 
+// enterpriseHookLoadOpenCodePorts and enterpriseHookWriteOpenCodePorts read
+// and publish the record of the OpenCode service ports the eligible accounts
+// have (gas-ux-r1 GAP-0053); tests replace them.
+var (
+	enterpriseHookLoadOpenCodePorts  = enterprisehooks.LoadUnixOpenCodeServicePorts
+	enterpriseHookWriteOpenCodePorts = enterprisehooks.WriteUnixOpenCodeServicePorts
+	enterpriseHookReadOpenCodePort   = enterprisepolicy.ReadOpenCodeServicePort
+)
+
 var enterpriseHookForeignCleanupState struct {
 	sync.Mutex
 	last        time.Time
@@ -237,6 +246,38 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	published := enterpriseHookStandaloneMachinePolicySet()
 	_, claudeManaged := published[enterprisepolicy.ConnectorClaudeCode]
 	claudeKnown := published != nil
+	// OpenCode V2's background server listens on one port per account,
+	// 49374 for all of them unless service.json names another, so only the
+	// first account's server starts (gas-ux-r1 GAP-0053). While DefenseClaw
+	// covers OpenCode, every eligible account gets a port of its own.
+	_, openCodeGoverned := published[enterprisepolicy.ConnectorOpenCode]
+	for _, account := range accounts {
+		openCodeGoverned = openCodeGoverned || perUser[account.User]["opencode"]
+	}
+	openCodePortsPath := enterpriseHookOpenCodePortsPath(enterpriseHookManifest)
+	var openCodeRecorded, openCodePorts map[int]int
+	openCodePortsErr := error(nil)
+	if openCodeGoverned {
+		openCodeRecorded, openCodePortsErr = enterpriseHookLoadOpenCodePorts(openCodePortsPath)
+		if openCodePortsErr != nil {
+			fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: OpenCode service ports record: %v\n", openCodePortsErr)
+			openCodeRecorded = map[int]int{}
+		}
+		// A port an account's service.json already names is kept, and no
+		// other account is given it; the record keeps the rest stable.
+		kept := map[int]int{}
+		uids := make([]int, 0, len(accounts))
+		for _, account := range accounts {
+			uids = append(uids, account.UID)
+			if port, ok := openCodeRecorded[account.UID]; ok {
+				kept[account.UID] = port
+			}
+			if port := enterpriseHookReadOpenCodePort(account.Home); port > 0 {
+				kept[account.UID] = port
+			}
+		}
+		openCodePorts = enterprisepolicy.AssignOpenCodeServicePorts(uids, kept)
+	}
 	leftovers := func(user string) []string {
 		out := []string{}
 		for _, name := range vendor {
@@ -254,6 +295,11 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	}
 	if vscode != nil {
 		fingerprint += fmt.Sprintf("copilot-vscode|%s|%t|%t;", vscode.HookBinary, vscode.HookFile, vscode.Plugin)
+	}
+	for _, account := range accounts {
+		if port := openCodePorts[account.UID]; port > 0 {
+			fingerprint += fmt.Sprintf("opencode-port:%d=%d;", account.UID, port)
+		}
 	}
 	// A governed Local harness is re-checked every interval; a removal runs
 	// once per change. The Local hook file is the guardian's own, so one a
@@ -327,7 +373,8 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			clean = false
 			continue
 		}
-		request := enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpForeignCleanup, Standalone: true, CopilotVSCode: vscodeFor(vscode, account.UID)}
+		request := enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpForeignCleanup, Standalone: true, CopilotVSCode: vscodeFor(vscode, account.UID),
+			OpenCodeServicePort: openCodePorts[account.UID]}
 		for _, cleanup := range cleanups {
 			cleanup.OwnedCommands = perUserOwnedHookCommands(cleanup.Connector, account.Home, filepath.Join(account.Home, ".defenseclaw"))
 			request.ForeignCleanup = append(request.ForeignCleanup, cleanup)
@@ -359,7 +406,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		// blocks every Claude Code tool call with no managed hook deciding:
 		// it goes (GAP-1829).
 		if len(cleanups) == 0 && len(names) == 0 && vscode == nil && (claudeManaged || !claudeKnown) &&
-			len(nativeOTLP) == 0 && !accountHasRemovedConnectorFiles(account.Home) {
+			len(nativeOTLP) == 0 && request.OpenCodeServicePort == 0 && !accountHasRemovedConnectorFiles(account.Home) {
 			continue
 		}
 		for index, name := range names {
@@ -462,6 +509,8 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		}
 	}
 	removed := 0
+	openCodeSeen := map[int]int{}
+	openCodeUsers := map[int]string{}
 	createdDirs := map[int][]string{}
 	var auditRepairs []enterpriseHookGuardianAuditReport
 	reportedUIDs := map[int]bool{}
@@ -520,6 +569,24 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			}
 		}
 		logEnterpriseForeignHookBlocks(stderr, user, outcome.Response.Blocks, outcome.Response.BlocksDropped, outcome.Response.BlocksError)
+		if want := outcome.Job.Request.OpenCodeServicePort; want > 0 {
+			report := outcome.Response.OpenCodeServicePort
+			switch {
+			case report == nil:
+				clean = false
+				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: could not give %s's OpenCode background server its own port: %s\n", user, errEnterpriseHookWorkerNoResult.Error())
+			case report.Error != "":
+				clean = false
+				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: could not give %s's OpenCode background server its own port: %s\n", user, boundedString(report.Error, 512))
+			case report.Port > 0 && report.Port <= 65535:
+				openCodeSeen[outcome.Job.Account.UID] = report.Port
+				openCodeUsers[outcome.Job.Account.UID] = user
+				if report.Changed {
+					fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: gave %s's OpenCode background server port %d (OpenCode's default, %d, is shared by every account); it moves there at its next start\n",
+						user, report.Port, enterprisepolicy.OpenCodeDefaultServicePort)
+				}
+			}
+		}
 		if report := outcome.Response.CopilotVSCode; report != nil {
 			// A changed file is a repair only if this account already had a
 			// guardian-written file, it drifted before the pass, and the
@@ -595,6 +662,19 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		}
 	}
 	reportEnterpriseHookGuardianRepairs(ctx, hookSocket, auditRepairs)
+	if openCodeGoverned && openCodePortsErr == nil {
+		if next, changed := nextOpenCodeServicePorts(openCodeRecorded, openCodeSeen, accounts); changed {
+			for _, account := range accounts {
+				if _, ok := openCodeUsers[account.UID]; !ok {
+					openCodeUsers[account.UID] = account.User
+				}
+			}
+			if err := enterpriseHookWriteOpenCodePorts(openCodePortsPath, next, openCodeUsers); err != nil {
+				clean = false
+				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: OpenCode service ports record: %v\n", err)
+			}
+		}
+	}
 	if recordErr == nil {
 		next := nextCopilotVSCodeAccounts(recorded, vscodeAccounts, governed, dropped, createdDirs)
 		if !sameCopilotVSCodeAccounts(recorded, next) {
@@ -838,6 +918,43 @@ func enterpriseHookCopilotVSCodeHookFileDrift(accounts []enterprisehooks.UnixEli
 		}
 	}
 	return drifted
+}
+
+// enterpriseHookOpenCodePortsPath is the OpenCode service ports record,
+// beside the VS Code Local accounts record.
+func enterpriseHookOpenCodePortsPath(manifestPath string) string {
+	return filepath.Join(filepath.Dir(enterpriseHookCopilotVSCodeAccountsPath(manifestPath)), enterprisehooks.UnixOpenCodeServicePortsFileName)
+}
+
+// nextOpenCodeServicePorts is the record after a pass: the ports the workers
+// reported for the eligible accounts, and the recorded ports of eligible
+// accounts no worker answered for. Accounts no longer eligible drop out.
+func nextOpenCodeServicePorts(recorded, seen map[int]int, accounts []enterprisehooks.UnixEligibleAccount) (map[int]int, bool) {
+	next := map[int]int{}
+	for _, account := range accounts {
+		if port, ok := seen[account.UID]; ok {
+			next[account.UID] = port
+		} else if port, ok := recorded[account.UID]; ok {
+			next[account.UID] = port
+		}
+	}
+	changed := len(next) != len(recorded)
+	for uid, port := range next {
+		if recorded[uid] != port {
+			changed = true
+		}
+	}
+	return next, changed
+}
+
+// runEnterpriseHookWorkerOpenCodePort runs inside the worker as the user.
+func runEnterpriseHookWorkerOpenCodePort(request enterpriseHookWorkerRequest) *enterpriseHookWorkerOpenCodePortReport {
+	result, err := enterprisepolicy.EnsureOpenCodeServicePort(filepath.Clean(request.Home), request.OpenCodeServicePort)
+	report := &enterpriseHookWorkerOpenCodePortReport{Port: result.Port, Changed: result.Changed, Created: result.CreatedDirs}
+	if err != nil {
+		report.Error = err.Error()
+	}
+	return report
 }
 
 // runEnterpriseHookWorkerCopilotVSCode runs inside the worker as the user.

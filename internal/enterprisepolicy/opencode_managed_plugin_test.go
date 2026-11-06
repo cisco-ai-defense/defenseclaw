@@ -168,9 +168,13 @@ func TestOpenCodeMachinePolicyStateNamesTheVendorLimit(t *testing.T) {
 			t.Fatal(err)
 		}
 		details := strings.Join(state.Details, " ")
-		if !state.Covered || !strings.Contains(details, "OpenCode 2.2.5 always loads the managed plugin") ||
-			!strings.Contains(details, "no --pure flag") || !strings.Contains(details, "does not read OPENCODE_PURE or OPENCODE_TEST_MANAGED_CONFIG_DIR") {
-			t.Fatalf("%s must say OpenCode 2.2.5 has no pure-mode or managed-folder bypass: %+v", step.name, state)
+		if !state.Covered || !strings.Contains(details, "no --pure flag") ||
+			!strings.Contains(details, "does not read OPENCODE_PURE or OPENCODE_TEST_MANAGED_CONFIG_DIR") ||
+			!strings.Contains(details, "another ProgramData") || !strings.Contains(details, "Status and verify report") {
+			t.Fatalf("%s must say OpenCode 2.2.5 has no pure mode and that Windows follows ProgramData: %+v", step.name, state)
+		}
+		if strings.Contains(details, "always loads") {
+			t.Fatalf("%s overclaims: on Windows the managed folder follows ProgramData: %+v", step.name, state)
 		}
 		if strings.Contains(details, "skips the managed plugin in pure mode") {
 			t.Fatalf("%s still describes the OpenCode V1 bypass as current: %+v", step.name, state)
