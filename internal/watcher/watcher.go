@@ -2578,11 +2578,12 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, out *poli
 			runtimeAction := coalesce(out.RuntimeAction, "allow")
 			fileAction := coalesce(out.FileAction, "none")
 			scope := w.journalScope(w.eventConnector(evt))
+			rowType, rowName := journalTarget(evt, targetType)
 
 			if installAction == "block" {
-				_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "install", "block", blockReason)
+				_ = w.store.SetActionFieldForConnector(rowType, rowName, scope, "install", "block", blockReason)
 			}
-			_ = w.store.SetSourcePathForConnector(targetType, journalName(evt), scope, evt.Path)
+			_ = w.store.SetSourcePathForConnector(rowType, rowName, scope, evt.Path)
 
 			enforcement := map[string]string{
 				"source_path": evt.Path,
@@ -2593,10 +2594,10 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, out *poli
 
 			secureClient := w.secureClientActive()
 			if fileAction == "quarantine" && !retainRestored && secureClient {
-				_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "file", "quarantine", blockReason)
+				_ = w.store.SetActionFieldForConnector(rowType, rowName, scope, "file", "quarantine", blockReason)
 			}
 			if runtimeAction == "block" {
-				_ = w.store.SetRuntimeDisableForConnector(targetType, journalName(evt), scope, evt.Path, blockReason)
+				_ = w.store.SetRuntimeDisableForConnector(rowType, rowName, scope, evt.Path, blockReason)
 			}
 
 			_ = w.logger.LogActionWithEnforcement(string(audit.ActionWatcherBlock), evt.Name,
@@ -2612,7 +2613,7 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, out *poli
 					// in quarantine storage; a failed move says so, plainly,
 					// and the block and runtime disable stay (GAP-0394).
 					if err == nil {
-						_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "file", "quarantine", blockReason)
+						_ = w.store.SetActionFieldForConnector(rowType, rowName, scope, "file", "quarantine", blockReason)
 					} else {
 						w.journalFailedQuarantine(evt, targetType, err)
 					}
@@ -2907,7 +2908,8 @@ func (w *InstallWatcher) hasRecoverableMCPBlock(evt InstallEvent) bool {
 	if evt.Type != InstallMCP || w.store == nil {
 		return false
 	}
-	entry, err := w.store.GetActionForConnector(string(InstallMCP), journalName(evt), w.journalScope(w.eventConnector(evt)))
+	rowType, rowName := journalTarget(evt, string(InstallMCP))
+	entry, err := w.store.GetActionForConnector(rowType, rowName, w.journalScope(w.eventConnector(evt)))
 	return err == nil && entry != nil && (entry.Actions.Runtime == "disable" || entry.Actions.Install == "block") &&
 		(strings.HasPrefix(entry.Reason, autoBlockReasonPrefix) || strings.HasPrefix(entry.Reason, scanFailureReason)) &&
 		(entry.SourcePath == "" || sameWatcherPath(entry.SourcePath, evt.Path))
@@ -2941,9 +2943,9 @@ func (w *InstallWatcher) releaseSupersededRejection(evt InstallEvent, targetType
 	if w.store == nil || w.secureClientActive() {
 		return
 	}
-	name := journalName(evt)
+	rowType, name := journalTarget(evt, targetType)
 	scope := w.journalScope(w.eventConnector(evt))
-	entry, err := w.store.GetActionForConnector(targetType, name, scope)
+	entry, err := w.store.GetActionForConnector(rowType, name, scope)
 	if err != nil || entry == nil || entry.Actions.IsEmpty() || !strings.HasPrefix(entry.Reason, autoBlockReasonPrefix) ||
 		(entry.SourcePath != "" && !sameWatcherPath(entry.SourcePath, evt.Path)) {
 		return
@@ -2960,7 +2962,7 @@ func (w *InstallWatcher) releaseSupersededRejection(evt InstallEvent, targetType
 		if field.value == "" {
 			continue
 		}
-		if err := w.store.ClearActionFieldForConnector(targetType, name, scope, field.name); err == nil {
+		if err := w.store.ClearActionFieldForConnector(rowType, name, scope, field.name); err == nil {
 			cleared = append(cleared, field.name+"="+field.value)
 		}
 	}
@@ -3081,10 +3083,11 @@ func (w *InstallWatcher) recordScanFailureBlock(evt InstallEvent, targetType, re
 		return
 	}
 	scope := w.journalScope(w.eventConnector(evt))
-	_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "install", "block", reason)
+	rowType, rowName := journalTarget(evt, targetType)
+	_ = w.store.SetActionFieldForConnector(rowType, rowName, scope, "install", "block", reason)
 	// One statement records the runtime disable, the source path and the
 	// path that decided it (the provenance an account row is read by).
-	_ = w.store.SetRuntimeDisableForConnector(targetType, journalName(evt), scope, evt.Path, reason)
+	_ = w.store.SetRuntimeDisableForConnector(rowType, rowName, scope, evt.Path, reason)
 }
 
 // releaseScanFailureBlock clears the block and runtime disable a failed scan
@@ -3097,7 +3100,8 @@ func (w *InstallWatcher) releaseScanFailureBlock(evt InstallEvent, targetType, c
 		return
 	}
 	scope := w.journalScope(w.eventConnector(evt))
-	entry, err := w.store.GetActionForConnector(targetType, journalName(evt), scope)
+	rowType, rowName := journalTarget(evt, targetType)
+	entry, err := w.store.GetActionForConnector(rowType, rowName, scope)
 	if err != nil || entry == nil || !strings.HasPrefix(entry.Reason, scanFailureReason) ||
 		(entry.SourcePath != "" && !sameWatcherPath(entry.SourcePath, evt.Path) && !blockedPathGone(entry.SourcePath)) {
 		return
@@ -3109,7 +3113,7 @@ func (w *InstallWatcher) releaseScanFailureBlock(evt InstallEvent, targetType, c
 		if field.value == "" {
 			continue
 		}
-		if err := w.store.ClearActionFieldForConnector(targetType, journalName(evt), scope, field.name); err == nil {
+		if err := w.store.ClearActionFieldForConnector(rowType, rowName, scope, field.name); err == nil {
 			cleared = append(cleared, field.name+"="+field.value)
 		}
 	}
@@ -3142,7 +3146,8 @@ func (w *InstallWatcher) journalFailedQuarantine(evt InstallEvent, targetType st
 		reason = err.Error()
 	}
 	scope := w.journalScope(w.eventConnector(evt))
-	_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "install", "block", reason)
+	rowType, rowName := journalTarget(evt, targetType)
+	_ = w.store.SetActionFieldForConnector(rowType, rowName, scope, "install", "block", reason)
 }
 
 // quarantineFailedReason and errLinkRemoved lead the journal reason of a
