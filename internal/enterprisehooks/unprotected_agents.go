@@ -187,9 +187,10 @@ type UnprotectedAgent struct {
 }
 
 type unprotectedAgentsFile struct {
-	Version    int                `json:"version"`
-	Generation string             `json:"generation,omitempty"`
-	Agents     []UnprotectedAgent `json:"agents"`
+	Version          int                `json:"version"`
+	Generation       string             `json:"generation,omitempty"`
+	ConfigGeneration uint64             `json:"config_generation,omitempty"`
+	Agents           []UnprotectedAgent `json:"agents"`
 }
 
 // UnprotectedAgentsPath is the unprotected-agents record for manifestPath.
@@ -250,12 +251,32 @@ func (a UnprotectedAgent) Message() string {
 // entry per user and connector, except separate Kiro CLI and IDE surfaces)
 // so an unchanged set rewrites nothing.
 func MarshalUnprotectedAgents(agents []UnprotectedAgent) ([]byte, error) {
+	return MarshalUnprotectedAgentsForConfig(agents, 0)
+}
+
+// MarshalUnprotectedAgentsForConfig binds a completed Unix scan to the
+// config generation the enumerator observed before loading its inputs.
+// Zero keeps older records and platforms without a lifecycle generation
+// readable; status cannot infer their config freshness from this field.
+func MarshalUnprotectedAgentsForConfig(agents []UnprotectedAgent, configGeneration uint64) ([]byte, error) {
 	normalized := normalizeUnprotectedAgents(agents)
-	data, err := json.MarshalIndent(unprotectedAgentsFile{Version: 1, Generation: UnprotectedAgentsGeneration(), Agents: normalized}, "", "  ")
+	data, err := json.MarshalIndent(unprotectedAgentsFile{Version: 1, Generation: UnprotectedAgentsGeneration(), ConfigGeneration: configGeneration, Agents: normalized}, "", "  ")
 	if err != nil {
 		return nil, err
 	}
 	return append(data, '\n'), nil
+}
+
+// UnprotectedAgentsRecordConfigGeneration is the config generation a
+// completed scan covered, or zero for a legacy record.
+func UnprotectedAgentsRecordConfigGeneration(data []byte) uint64 {
+	var record struct {
+		ConfigGeneration uint64 `json:"config_generation"`
+	}
+	if json.Unmarshal(data, &record) != nil {
+		return 0
+	}
+	return record.ConfigGeneration
 }
 
 // ParseUnprotectedAgents decodes a record written by MarshalUnprotectedAgents.

@@ -142,7 +142,7 @@ func TestManifestModePublishesPrivateInstallScanWithoutRewritingTargets(t *testi
 		return false, nil
 	}
 	var published []enterprisehooks.UnprotectedAgent
-	enterpriseHooksEnumerateUnprotectedWriter = func(_ string, agents []enterprisehooks.UnprotectedAgent) error {
+	enterpriseHooksEnumerateUnprotectedWriter = func(_ string, agents []enterprisehooks.UnprotectedAgent, _ uint64) error {
 		published = append([]enterprisehooks.UnprotectedAgent(nil), agents...)
 		return nil
 	}
@@ -252,7 +252,7 @@ func TestEnumerateCyclePublishesTheUnprotectedAgentsRecord(t *testing.T) {
 	}
 	var recordPath string
 	var recorded []enterprisehooks.UnprotectedAgent
-	enterpriseHooksEnumerateUnprotectedWriter = func(path string, agents []enterprisehooks.UnprotectedAgent) error {
+	enterpriseHooksEnumerateUnprotectedWriter = func(path string, agents []enterprisehooks.UnprotectedAgent, _ uint64) error {
 		recordPath, recorded = path, append([]enterprisehooks.UnprotectedAgent(nil), agents...)
 		return nil
 	}

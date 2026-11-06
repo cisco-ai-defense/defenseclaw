@@ -27,6 +27,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -463,6 +464,14 @@ func (l *lifecycle) describeUnprotectedAgents() {
 		// A recent record of the previous install is not this install's
 		// scan (GAP-1454): pending until the current enumerator publishes.
 		l.reportInstallScanPending(enterprisehooks.UnprotectedAgentsRecordFromEarlierInstall(written))
+	} else if scanned := enterprisehooks.UnprotectedAgentsRecordConfigGeneration(data); scanned != 0 {
+		// The build and age can match after a connector or policy change.
+		// Only a scan stamped with the lifecycle's current config generation
+		// establishes coverage for those inputs (GAP-0640).
+		if current, err := configwrite.ReadGenerationState(env.P(env.Layout.ConfigPath)); err == nil &&
+			current.Generation != 0 && scanned != current.Generation {
+			l.reportInstallScanPending("from a different config generation")
+		}
 	}
 	// One machine-wide OpenCode V1 copy is one warning with the user count,
 	// not one per account (GAP-0071); every account still counts below.
