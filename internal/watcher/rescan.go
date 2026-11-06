@@ -1562,7 +1562,7 @@ func (w *InstallWatcher) persistSnapshot(evt InstallEvent, snap *TargetSnapshot,
 		return
 	}
 	old, err := w.store.GetTargetSnapshot(string(InstallMCP), oldPath)
-	if err == nil && mcpLegacySnapshotMatchesServer(oldPath, old, server) {
+	if err == nil && mcpLegacySnapshotCanMove(oldPath, old, server, snap.ContentHash) {
 		if err := w.store.DeleteTargetSnapshot(string(InstallMCP), oldPath); err != nil {
 			fmt.Fprintf(os.Stderr, "[rescan] retire old mcp snapshot %s: %v\n", evt.Name, err)
 		}
