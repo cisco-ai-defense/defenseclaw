@@ -1304,6 +1304,15 @@ Limits:
 See [Machine policy](/docs/enterprise/machine-policy) and
 [Foreign-hook guard](/docs/enterprise/foreign-hook-guard).
 
+### Windows platform limit: a held Codex requirements file
+
+Codex reads `C:\ProgramData\OpenAI\Codex\requirements.toml` as each user, so
+every user must be able to read it. A user who can read it can also hold it
+open, and while it is held Windows does not let DefenseClaw replace it, so
+Codex policy updates wait. The enforced policy already in place stays in
+effect. Status names the process that holds the file, and DefenseClaw applies
+the update as soon as the file is released.
+
 ## Claude Cowork
 
 Claude Cowork runs its agent loop on the computer, with the Claude Code engine that Claude Desktop bundles. The Claude Code drop-in (`C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json`) is meant to cover it. There is nothing to configure for Cowork itself.

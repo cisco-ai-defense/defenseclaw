@@ -607,6 +607,19 @@ FACTS = [
         (('get-started/windows/install-lifecycle.mdx',),
          "Windows Home, per-user Docker Desktop, WSL2 engines and Windows containers are not supported"),
     ]),
+    # GAP-0650, owner decision for 1.0.9: a held requirements.toml is a
+    # documented Windows platform limit.
+    ("gap_0650_held_codex_requirements_is_a_platform_limit", [
+        (('enterprise/windows.mdx',),
+         "A user who can read it can also hold it open, and while it is held Windows does not let DefenseClaw replace it, so Codex policy updates wait."),
+        (('enterprise/windows.mdx',),
+         "The enforced policy already in place stays in effect. Status names the process that holds the file, and DefenseClaw applies the update as soon as the file is released."),
+    ]),
+    # g582 review 7 M1: the vendor-folder fix also removes inherited entries.
+    ("g582_vendor_folder_fix_removes_inherited_entries", [
+        (('enterprise/machine-policy.mdx',),
+         '`icacls "<folder>" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-32-545:(OI)(CI)RX"`'),
+    ]),
 ]
 
 
