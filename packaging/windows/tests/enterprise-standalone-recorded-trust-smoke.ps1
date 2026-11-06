@@ -179,6 +179,89 @@ finally {
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# While a transaction is pending, the bootstrap also admits the installer and
+# module pair the transaction pinned in its protected directory, and only for
+# the running installer it names (rel-1-0-6 GAP-0649: an upgrade cut off after
+# it copied its own installer and module). The module stages that pair first.
+$transactionPins = @(
+    $ast.FindAll(
+        {
+            param($node)
+            return (
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                [string]$node.Name -ceq 'Get-DefenseClawBootstrapTransactionModulePin'
+            )
+        },
+        $true
+    )
+)
+if ($transactionPins.Count -ne 1) {
+    $failures.Add("expected one Get-DefenseClawBootstrapTransactionModulePin, found $($transactionPins.Count)")
+}
+else {
+    . ([scriptblock]::Create([string]$transactionPins[0].Extent.Text))
+    $stateRoot = [IO.Path]::Combine(
+        [IO.Path]::GetFullPath($ScratchRoot),
+        ('dc-standalone-transaction-pins-' + [Guid]::NewGuid().ToString('N'))
+    )
+    try {
+        $utf8 = [Text.UTF8Encoding]::new($false)
+        $transaction = [IO.Path]::Combine($stateRoot, 'install', 'transactions', ('a' * 32))
+        [void][IO.Directory]::CreateDirectory($transaction)
+        $installer = [IO.Path]::Combine($stateRoot, 'install-enterprise.ps1')
+        $otherInstaller = [IO.Path]::Combine($stateRoot, 'other-install-enterprise.ps1')
+        [IO.File]::WriteAllText($installer, '# the installer the transaction installed', $utf8)
+        [IO.File]::WriteAllText($otherInstaller, '# the replaced installer', $utf8)
+        $installerHash = Get-TestSHA256 $installer
+        $moduleHash = 'b' * 64
+        $pending = [IO.Path]::Combine($stateRoot, 'install', 'pending.json')
+        $pins = [IO.Path]::Combine($transaction, 'lifecycle-pins.json')
+        function Write-TestJson([string]$Path, $Document) {
+            [IO.File]::WriteAllText($Path, ($Document | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 4), $utf8)
+        }
+        function Test-TransactionPin([string]$Label, [string]$Want, [string]$Installer = $installer) {
+            $got = Get-DefenseClawBootstrapTransactionModulePin -StateRoot $stateRoot -InstallerPath $Installer
+            if ($got -cne $Want) {
+                $failures.Add("${Label}: transaction pin '$got', want '$Want'")
+            }
+        }
+        $pinned = [ordered]@{ schema_version = 1; installer = $installerHash; module = $moduleHash }
+
+        Test-TransactionPin 'no pending transaction' ''
+
+        Write-TestJson $pending @{ snapshot = [IO.Path]::Combine($transaction, 'snapshot.json') }
+        Test-TransactionPin 'pending transaction without pins' ''
+
+        Write-TestJson $pins $pinned
+        Test-TransactionPin 'pending transaction pins the running installer' $moduleHash
+        Test-TransactionPin 'pins name another installer' '' $otherInstaller
+
+        $script:UntrustedMetadata = $pins
+        Test-TransactionPin 'pins a standard user could write' ''
+        $script:UntrustedMetadata = $pending
+        Test-TransactionPin 'pending record a standard user could write' ''
+        $script:UntrustedMetadata = ''
+
+        Write-TestJson $pending @{ snapshot = [IO.Path]::Combine($stateRoot, 'elsewhere', 'snapshot.json') }
+        Test-TransactionPin 'snapshot outside the transactions directory' ''
+        Write-TestJson $pending @{ phase = 'quiescing' }
+        Test-TransactionPin 'quiescing record without a snapshot' ''
+        Write-TestJson $pending @{ snapshot = [IO.Path]::Combine($transaction, 'snapshot.json') }
+
+        $badPins = [ordered]@{ schema_version = 1; installer = $installerHash; module = $moduleHash.ToUpperInvariant() }
+        Write-TestJson $pins $badPins
+        Test-TransactionPin 'non-canonical module digest' ''
+        $badPins = [ordered]@{ schema_version = 2; installer = $installerHash; module = $moduleHash }
+        Write-TestJson $pins $badPins
+        Test-TransactionPin 'unknown pin schema' ''
+        [IO.File]::WriteAllText($pins, 'not json', $utf8)
+        Test-TransactionPin 'unparseable pins' ''
+    }
+    finally {
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $stateRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # The module's own deployment.json reader refuses every record that is not a
 # JSON object with the marker the CLI maps to ensure_refused, an empty one
 # too ($null -isnot [pscustomobject] is false; GAP-0164).
@@ -211,6 +294,30 @@ else {
     }
     if ($null -eq (ConvertFrom-DefenseClawDeploymentMetadataText -Path 'C:\x\deployment.json' -Text '{"installed":true}')) {
         $failures.Add('module reader refused a JSON object')
+    }
+}
+
+$stagingOrders = @($moduleAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            [string]$node.Name -ceq 'Get-DefenseClawStagingOrder'
+        }, $true))
+if ($stagingOrders.Count -ne 1) {
+    $failures.Add("expected one Get-DefenseClawStagingOrder, found $($stagingOrders.Count)")
+}
+else {
+    . ([scriptblock]::Create([string]$stagingOrders[0].Extent.Text))
+    $script:StandaloneProfile = $true
+    function Test-DefenseClawStandaloneProfile { return $script:StandaloneProfile }
+    $names = @('gateway', 'module', 'hook', 'cli', 'config', 'installer', 'acp')
+    $order = (@(Get-DefenseClawStagingOrder -Names $names) -join ',')
+    if ($order -cne 'installer,module,cli,acp,config,gateway,hook') {
+        $failures.Add("standalone staging order '$order'")
+    }
+    $script:StandaloneProfile = $false
+    $order = (@(Get-DefenseClawStagingOrder -Names $names) -join ',')
+    if ($order -cne ($names -join ',')) {
+        $failures.Add("Secure Client staging order '$order', want the caller's")
     }
 }
 
