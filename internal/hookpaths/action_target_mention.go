@@ -80,6 +80,15 @@ func actionProtectedTargetMentionIn(command, cwd, home string, depth int, stateO
 // Windows host it also reads a POSIX shell's command (Git Bash, MSYS) under
 // a Windows home, on the Windows file system (ActionCommandDecisionWithDialectAndGlobFacts).
 func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bool, globs *actionGlobs) bool {
+	for _, shell := range actionShellValueReadings(command) {
+		if actionPosixTargetMentionAs(command, cwd, home, depth, stateOnly, globs, shell) {
+			return true
+		}
+	}
+	return false
+}
+
+func actionPosixTargetMentionAs(command, cwd, home string, depth int, stateOnly bool, globs *actionGlobs, shell string) bool {
 	// spelledWindows: a Windows home this host cannot open (the gateway is
 	// not on Windows). Its paths are judged by their spelling
 	// (actionWindowsPath), as the Windows reading judges them (GAP-1504).
@@ -267,13 +276,16 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				return true
 			}
 			values["PWD"] = effectiveCWD
-			actionUpdateValues(stmt, values, effectiveCWD, home)
+			values[actionShellValueKey] = shell
+			// The shell expands a statement's redirect before its command
+			// updates variables. Keep the preceding values for that target.
 			for _, redir := range stmt.Redirs {
 				if redir.Word != nil && (actionExpandedWordGlob(redir.Word, values, effectiveCWD, home, check) || checkBraceFields(redir.Word, true) || checkWord(redir.Word)) {
 					found = true
 					return false
 				}
 			}
+			actionUpdateValues(stmt, values, effectiveCWD, home)
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok {
 				if copyOptionCandidate {
 					if destination, ok := actionPosixCopyVariableTarget(call, values, effectiveCWD, home); ok &&
@@ -282,10 +294,20 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 						return false
 					}
 				}
-				for _, assign := range call.Assigns {
-					if assign.Value != nil && checkWord(assign.Value) {
-						found = true
-						return false
+				if len(call.Args) > 0 {
+					// A standalone assignment changes a shell value, not a
+					// file. Its later uses are checked with the updated value.
+					for _, assign := range call.Assigns {
+						if assign.Value != nil && checkWord(assign.Value) {
+							found = true
+							return false
+						}
+					}
+				} else {
+					for _, assign := range call.Assigns {
+						if assign.Value != nil {
+							judgedWords = append(judgedWords, assign.Value)
+						}
 					}
 				}
 				var moved *syntax.Word
@@ -1865,6 +1887,11 @@ func (h *actionStateHome) active() (string, bool) {
 }
 
 func actionProtectedStatePath(value string, home *actionStateHome) bool {
+	// A named active-state path remains named when the gateway cannot
+	// inspect the user's home. The physical walk below adds aliases.
+	if NamedActiveStatePath(value, home.home) {
+		return true
+	}
 	resolved, ok := home.memo.resolveWriteTarget(value)
 	if !ok {
 		return false
@@ -1900,6 +1927,14 @@ func actionProtectedStatePath(value string, home *actionStateHome) bool {
 	}
 	_, same := ResolveActiveStateHardlinkTarget(resolved, home.home)
 	return same
+}
+
+// NamedActiveStatePath reports an exact active-state name below the active
+// home. A shell redirect to that name opens it even when the gateway cannot
+// inspect the user's home; physical resolution adds aliases elsewhere.
+func NamedActiveStatePath(value, home string) bool {
+	relative, err := filepath.Rel(filepath.Clean(home), filepath.Clean(value))
+	return err == nil && actionProtectedStateRelative(filepath.ToSlash(relative))
 }
 
 // ResolveActiveStateHardlinkTarget maps an existing write target back to an

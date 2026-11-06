@@ -22,6 +22,23 @@ import (
 type actionValues map[string]string
 
 const actionReadonlyValuePrefix = "\x00readonly:"
+const actionShellValueKey = "\x00shell-value-dialect"
+
+// The user's shell determines whether printf -v changes a shell variable.
+// An unrecognized shell keeps both readings for the target scanners.
+func actionShellValueReadings(command string) []string {
+	switch filepath.Base(os.Getenv("SHELL")) {
+	case "bash":
+		return []string{"bash"}
+	case "zsh", "sh", "dash":
+		return []string{"zsh"}
+	default:
+		if strings.Contains(command, "printf") {
+			return []string{"bash", "zsh"}
+		}
+		return []string{"bash"}
+	}
+}
 
 // AdjacentAssignedWriteOperands proves a redirect whose immediately preceding
 // AND-list statement assigns its path. Earlier commands may create files, but
@@ -119,6 +136,9 @@ func actionPrintfBoundName(call *syntax.CallExpr, values actionValues, cwd, home
 	if !fixed {
 		return "", 0, false
 	}
+	if values[actionShellValueKey] == "zsh" && strings.HasPrefix(option, "-v") {
+		return "", 0, false
+	}
 	if option == "-v" {
 		if len(call.Args) <= optionIndex+1 {
 			return "", 0, false
@@ -212,7 +232,16 @@ func actionPrintfFormatBindings(call *syntax.CallExpr, values actionValues, cwd,
 	}
 	option, known := actionWordValue(call.Args[index], values, cwd, home)
 	if !known {
+		// With no following format or data word, an unknown first word
+		// cannot provide both a -v destination and its format. A %n
+		// conversion has no variable name operand either.
+		if index+1 == len(call.Args) {
+			return nil, "", false
+		}
 		return nil, "", true
+	}
+	if values[actionShellValueKey] == "zsh" && strings.HasPrefix(option, "-v") {
+		return nil, "", false
 	}
 	if option == "-v" {
 		index += 2
@@ -1557,23 +1586,16 @@ func actionUpdateValuesAs(stmt *syntax.Stmt, values actionValues, cwd, home stri
 		}
 		values[name] = result.String()
 	case "read", "mapfile", "readarray":
-		index := 1
-		for index < len(call.Args) {
-			word, ok := StaticWord(call.Args[index], home)
-			if !ok {
-				return
-			}
-			if !strings.HasPrefix(word, "-") {
-				break
-			}
-			index++
-		}
-		if index >= len(call.Args) {
+		names, known := shellBinderDestinations(call, home)
+		if !known {
 			return
 		}
-		name, ok := StaticWord(call.Args[index], home)
-		if !ok || name == "" {
-			return
+		if program == "read" && len(names) == 0 {
+			names = []string{"REPLY"}
+		}
+		for _, name := range names {
+			delete(values, name)
+			delete(values, name+"[0]")
 		}
 		var input string
 		found := false
@@ -1592,20 +1614,20 @@ func actionUpdateValuesAs(stmt *syntax.Stmt, values actionValues, cwd, home stri
 			}
 		}
 		if !found {
-			delete(values, name)
-			delete(values, name+"[0]")
 			return
 		}
 		input = strings.TrimRight(input, "\r\n")
 		if program == "read" {
 			fields := strings.Fields(input)
-			if len(fields) == 0 {
-				delete(values, name)
-			} else {
-				values[name] = fields[0]
+			for index, name := range names {
+				if index < len(fields) {
+					values[name] = fields[index]
+				}
 			}
-		} else {
-			values[name+"[0]"] = strings.Split(input, "\n")[0]
+		} else if len(names) == 1 {
+			first := strings.Split(input, "\n")[0]
+			values[names[0]] = first
+			values[names[0]+"[0]"] = first
 		}
 	}
 }

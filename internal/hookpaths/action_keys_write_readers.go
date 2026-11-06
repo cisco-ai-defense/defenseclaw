@@ -100,6 +100,15 @@ func actionOversizedTouchOperands(call *syntax.CallExpr, home, cwd string, check
 // user's file-system view. The managed client sends a positive decision for
 // these; a read through a link is not a write decision.
 func actionClientResolvedProtectedWrite(file *syntax.File, command, cwd, home string, protected protectedFiles, ssh string) bool {
+	for _, shell := range actionShellValueReadings(command) {
+		if actionClientResolvedProtectedWriteAs(file, command, cwd, home, protected, ssh, shell) {
+			return true
+		}
+	}
+	return false
+}
+
+func actionClientResolvedProtectedWriteAs(file *syntax.File, command, cwd, home string, protected protectedFiles, ssh, shell string) bool {
 	uncalled := actionUncalledFunctions(file, command)
 	values := actionValues{"HOME": home, "PWD": cwd, "USER": filepath.Base(home), "LOGNAME": filepath.Base(home)}
 	currentCWD := cwd
@@ -117,8 +126,7 @@ func actionClientResolvedProtectedWrite(file *syntax.File, command, cwd, home st
 			return true
 		}
 		values["PWD"] = currentCWD
-		actionUpdateValues(stmt, values, currentCWD, home)
-		actionClientSpecialAssignments(stmt, values, home)
+		values[actionShellValueKey] = shell
 		for _, redirect := range stmt.Redirs {
 			if redirect.Word == nil || !actionOutputRedirect(redirect.Op) {
 				continue
@@ -129,6 +137,8 @@ func actionClientResolvedProtectedWrite(file *syntax.File, command, cwd, home st
 				return false
 			}
 		}
+		actionUpdateValues(stmt, values, currentCWD, home)
+		actionClientSpecialAssignments(stmt, values, home)
 		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok {
 			if actionClientMutationCall(call, values, currentCWD, home, protected, ssh) ||
 				actionClientPowerShellWrite(call, currentCWD, home, protected, ssh) {

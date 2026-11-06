@@ -277,6 +277,9 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 			for _, name := range names {
 				unsafeNames[name] = true
 			}
+			if declarationPrintOnly(node) {
+				return false
+			}
 		case *syntax.ArithmCmd, *syntax.ArithmExp, *syntax.LetClause, *syntax.TestClause,
 			*syntax.CoprocClause, *syntax.ProcSubst:
 			rejected = true
@@ -586,23 +589,21 @@ func balancedFunctionBody(fn *syntax.FuncDecl, home string) bool {
 	return safe
 }
 
-// printfFormatDoesNotBind checks a fixed format for %n, which can assign a
-// variable named by any later argument. The caller has parsed -v separately.
-func printfFormatDoesNotBind(args []*syntax.Word, formatIndex int, home string) bool {
-	if formatIndex >= len(args) {
-		return false
+// printfFormatDestinations returns names a %n conversion may bind through
+// the data operands. The caller handles -v separately.
+func printfFormatDestinations(args []*syntax.Word, formatIndex int, home string) ([]string, bool) {
+	if formatIndex < 0 || formatIndex >= len(args) {
+		return nil, false
 	}
 	format, fixed := StaticWord(args[formatIndex], home)
-	if !fixed {
-		return false
-	}
-	for i := 0; i < len(format); i++ {
+	mayBind := !fixed
+	for i := 0; fixed && i < len(format); i++ {
 		if format[i] != '%' {
 			continue
 		}
 		i++
 		if i >= len(format) {
-			return false
+			return nil, false
 		}
 		if format[i] == '%' {
 			continue
@@ -610,22 +611,42 @@ func printfFormatDoesNotBind(args []*syntax.Word, formatIndex int, home string) 
 		if format[i] == '(' {
 			end := strings.IndexByte(format[i+1:], ')')
 			if end < 0 || i+end+2 >= len(format) || format[i+end+2] != 'T' {
-				return false
+				return nil, false
 			}
 			i += end + 2
 			continue
 		}
 		for i < len(format) && (format[i] < 'A' || format[i] > 'Z') && (format[i] < 'a' || format[i] > 'z') {
 			if format[i] == '%' {
-				return false
+				return nil, false
 			}
 			i++
 		}
-		if i >= len(format) || format[i] == 'n' {
-			return false
+		if i >= len(format) {
+			return nil, false
+		}
+		if format[i] == 'n' {
+			mayBind = true
 		}
 	}
-	return true
+	if !mayBind {
+		return nil, true
+	}
+	// An unknown format can only write a name supplied by a data operand.
+	// Keep unrelated bindings; a dynamic data word can name any binding.
+	var names []string
+	for _, arg := range args[formatIndex+1:] {
+		name, known := StaticWord(arg, home)
+		if !known {
+			return nil, false
+		}
+		if plainShellVariableName(name) {
+			names = append(names, name)
+		} else if strings.ContainsAny(name, "[]$`\\") {
+			return nil, false
+		}
+	}
+	return names, true
 }
 
 type binderOperandRole uint8
@@ -702,6 +723,13 @@ func shellBinderDestinations(call *syntax.CallExpr, home string) ([]string, bool
 		}
 		word, fixed := StaticWord(args[index], home)
 		if !fixed {
+			if program == "printf" && formatIndex < 0 {
+				if _, scalar := actionSimpleProgramParameter(args[index]); scalar {
+					formatIndex = index
+					options = false
+					continue
+				}
+			}
 			return nil, false
 		}
 		if options && word == "--" {
@@ -756,6 +784,8 @@ func shellBinderDestinations(call *syntax.CallExpr, home string) ([]string, bool
 	case binderFirstPosition:
 		if len(positional) > 0 {
 			names = append(names, positional[0])
+		} else {
+			names = append(names, "MAPFILE")
 		}
 	}
 	for _, name := range names {
@@ -764,9 +794,11 @@ func shellBinderDestinations(call *syntax.CallExpr, home string) ([]string, bool
 		}
 	}
 	if program == "printf" {
-		if formatIndex < 0 || !printfFormatDoesNotBind(args, formatIndex, home) {
+		formatNames, safe := printfFormatDestinations(args, formatIndex, home)
+		if !safe {
 			return nil, false
 		}
+		names = append(names, formatNames...)
 	}
 	return names, true
 }
@@ -774,6 +806,7 @@ func shellBinderDestinations(call *syntax.CallExpr, home string) ([]string, bool
 func declarationWordDestinations(args []*syntax.Word, home string) ([]string, bool) {
 	names := make([]string, 0, len(args))
 	options := true
+	printing := false
 	for _, arg := range args {
 		word, fixed := StaticWord(arg, home)
 		if !fixed {
@@ -787,14 +820,25 @@ func declarationWordDestinations(args []*syntax.Word, home string) ([]string, bo
 			if strings.ContainsRune(word[1:], 'n') {
 				return nil, false // nameref can write through another name
 			}
+			if word == "-p" {
+				printing = true
+			} else if printing {
+				return nil, false
+			}
 			continue
 		}
 		options = false
 		name, _, _ := strings.Cut(word, "=")
+		if printing && name != word {
+			return nil, false
+		}
 		if !plainShellVariableName(name) {
 			return nil, false
 		}
 		names = append(names, name)
+	}
+	if printing {
+		return nil, true
 	}
 	return names, true
 }
@@ -804,23 +848,66 @@ func declarationDestinations(decl *syntax.DeclClause) ([]string, bool) {
 		return nil, false
 	}
 	names := make([]string, 0, len(decl.Args))
+	printing := false
 	for _, arg := range decl.Args {
 		if arg.Name == nil {
-			return nil, false
+			option, fixed := StaticWord(arg.Value, "")
+			if !fixed || option != "-p" {
+				return nil, false
+			}
+			printing = true
+			continue
 		}
 		name := arg.Name.Value
 		if strings.HasPrefix(name, "-") || strings.HasPrefix(name, "+") {
 			if strings.ContainsRune(name[1:], 'n') {
 				return nil, false
 			}
+			if name == "-p" {
+				printing = true
+			} else if printing {
+				return nil, false
+			}
 			continue
+		}
+		if printing && arg.Value != nil {
+			return nil, false
 		}
 		if !plainShellVariableName(name) {
 			return nil, false
 		}
 		names = append(names, name)
 	}
+	if printing {
+		return nil, true
+	}
 	return names, true
+}
+
+func declarationPrintOnly(decl *syntax.DeclClause) bool {
+	if decl == nil {
+		return false
+	}
+	printing := false
+	for _, arg := range decl.Args {
+		if arg.Name == nil {
+			option, fixed := StaticWord(arg.Value, "")
+			if !fixed || option != "-p" {
+				return false
+			}
+			printing = true
+			continue
+		}
+		if arg.Name.Value == "-p" {
+			printing = true
+			continue
+		}
+		if strings.HasPrefix(arg.Name.Value, "-") || strings.HasPrefix(arg.Name.Value, "+") ||
+			arg.Value != nil || !plainShellVariableName(arg.Name.Value) {
+			return false
+		}
+	}
+	return printing
 }
 
 // shellSpecialParameters are names bash sets itself (on every command, at

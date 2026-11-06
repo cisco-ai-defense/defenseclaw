@@ -3107,6 +3107,12 @@ func provenShellRedirectStateWrite(request trustedActionRequest) bool {
 		if strings.ContainsAny(target, "'\n") {
 			continue
 		}
+		// ShellRedirectTargets has proved the output-redirection role and
+		// substituted only a known active-home spelling. That exact state
+		// name remains protected when a managed gateway cannot walk home.
+		if hookpaths.NamedActiveStatePath(target, request.Input.ActiveHome) {
+			return true
+		}
 		input := request.Input
 		input.Command, input.Args, input.Argv = ": > '"+target+"'", nil, nil
 		input.DialectHint = actionfacts.DialectPOSIX

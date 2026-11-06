@@ -19,6 +19,15 @@ func actionClientProvedSafeVariableTargets(command, cwd, home string) bool {
 }
 
 func actionClientProvedSafeVariableTargetsWithBindings(command, cwd, home string, trackBindings bool) bool {
+	for _, shell := range actionShellValueReadings(command) {
+		if !actionClientProvedSafeVariableTargetsWithBindingsAs(command, cwd, home, trackBindings, shell) {
+			return false
+		}
+	}
+	return true
+}
+
+func actionClientProvedSafeVariableTargetsWithBindingsAs(command, cwd, home string, trackBindings bool, shell string) bool {
 	if actionClientLoopCopySourceStartupUnknown() {
 		return false
 	}
@@ -172,7 +181,7 @@ func actionClientProvedSafeVariableTargetsWithBindings(command, cwd, home string
 	}
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
-	kept := []actionValues{{"HOME": home, "PWD": cwd}}
+	kept := []actionValues{{"HOME": home, "PWD": cwd, actionShellValueKey: shell}}
 	steps := 0
 	seen := false
 	possibleLaterBinding := false

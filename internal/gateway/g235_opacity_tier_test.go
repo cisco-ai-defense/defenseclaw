@@ -94,8 +94,14 @@ func TestG235OpacityTierCells(t *testing.T) {
 		{"GAP-0507/builtin-read-link", project, `f=disklink; builtin read -r <<< data; cp a.txt $f`, true, true, true},
 		{"GAP-0507/command-read", project, `f=ordinary/n2; command read -r <<< data; cp a.txt $f`, false, false, true},
 		{"GAP-0507/command-read-link", project, `f=disklink; command read -r <<< data; cp a.txt $f`, true, true, true},
+		{"GAP-0507/printf-unknown-format-other", project, `f=ordinary/n2; printf "$X" hello; cp a.txt $f`, false, false, true},
+		{"GAP-0507/printf-unknown-format-other-link", project, `f=disklink; printf "$X" hello; cp a.txt $f`, true, true, true},
 		{"GAP-0507/printf-v-other", project, `f=ordinary/n2; printf -v other %s data; cp a.txt $f`, false, false, true},
 		{"GAP-0507/printf-v-other-link", project, `f=disklink; printf -v other %s data; cp a.txt $f`, true, true, true},
+		{"GAP-0507/mapfile-default-protected", project, `MAPFILE=out2.txt; mapfile -t <<< disklink; cp a.txt $MAPFILE`, true, true, true},
+		{"GAP-0507/readarray-default-protected", project, `MAPFILE=out2.txt; readarray -t <<< disklink; cp a.txt $MAPFILE`, true, true, true},
+		{"GAP-0507/declare-p-ordinary", project, `f=ordinary/n2; declare -p f; cp a.txt $f`, false, false, true},
+		{"GAP-0507/declare-p-link", project, `f=disklink; declare -p f; cp a.txt $f`, true, true, true},
 		{"GAP-0507/mapfile-other", project, `f=ordinary/n2; mapfile -t other <<< data; cp a.txt $f`, false, false, true},
 		{"GAP-0507/mapfile-other-link", project, `f=disklink; mapfile -t other <<< data; cp a.txt $f`, true, true, true},
 		{"GAP-0507/function-local-other", project, `g() { local other; cp a.txt $f; }; f=ordinary/n2; g`, false, false, true},
@@ -124,6 +130,87 @@ func TestG235OpacityTierCells(t *testing.T) {
 						want = `{"action":"block"`
 					}
 					got := postDynamicWordParityCell(t, home, row.cwd, connector, mode.managed, mode.blind, mode.strict, row.command, nil)
+					if !strings.HasPrefix(got, want) {
+						t.Errorf("verdict %.300s, want %s", got, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+// A runtime print format cannot erase a known protected redirect target.
+func TestG235KnownUserRedirectRows(t *testing.T) {
+	home, project := dynamicWordParityProject(t)
+	t.Setenv("USER", filepath.Base(home))
+	t.Setenv("LOGNAME", filepath.Base(home))
+	state := filepath.Join(home, ".defenseclaw", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(state), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(state, []byte("marker\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Dir(home) + "/"
+	rows := []struct {
+		name, command string
+		protected     bool
+	}{
+		{"GAP-0630/$USER", `printf "$X" > ` + parent + `$USER/.defenseclaw/config.yaml`, true},
+		{"GAP-0630/${USER}", `printf "$X" > ` + parent + `${USER}/.defenseclaw/config.yaml`, true},
+		{"GAP-0601/$LOGNAME", `printf "$X" > ` + parent + `$LOGNAME/.defenseclaw/config.yaml`, true},
+		{"control/fixed-format", `printf %s hello > ` + parent + `$USER/.defenseclaw/config.yaml`, true},
+		{"control/literal-path", `printf "$X" > ` + state, true},
+		{"ordinary/user-project", `printf "$X" > ` + parent + `$USER/proj/build.log`, false},
+	}
+	for _, connector := range []string{"claudecode", "codex"} {
+		for _, mode := range []struct{ managed, blind, strict bool }{
+			{false, false, false}, {false, false, true},
+			{true, false, false}, {true, false, true},
+			{true, true, false}, {true, true, true},
+		} {
+			for _, row := range rows {
+				t.Run(fmt.Sprintf("%s/%s/managed=%t/blind=%t/strict=%t", row.name, connector, mode.managed, mode.blind, mode.strict), func(t *testing.T) {
+					if !row.protected && mode.strict {
+						return
+					}
+					want := `{"action":"allow"`
+					if row.protected {
+						want = `{"action":"block"`
+					}
+					got := postDynamicWordParityCell(t, home, project, connector, mode.managed, mode.blind, mode.strict, row.command, nil)
+					if !strings.HasPrefix(got, want) {
+						t.Errorf("verdict %.300s, want %s", got, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestGAP0628PrintfAssignmentShellReadings(t *testing.T) {
+	home, project := dynamicWordParityProject(t)
+	rows := []struct {
+		name, shell, command string
+		block                bool
+	}{
+		{"zsh/retained-link", "/bin/zsh", `f=disklink; printf -vf %s out2.txt; echo marker >> "$f"`, true},
+		{"bash/replaced-link", "/bin/bash", `f=disklink; printf -vf %s out2.txt; echo marker >> "$f"`, false},
+		{"unknown/retained-link", "", `f=disklink; printf -vf %s out2.txt; echo marker >> "$f"`, true},
+		{"zsh/ordinary", "/bin/zsh", `f=out2.txt; printf -vf %s a.txt; echo marker >> "$f"`, false},
+		{"bash/assigned-link", "/bin/bash", `f=out2.txt; printf -vf %s disklink; echo marker >> "$f"`, true},
+		{"unknown/assigned-link", "", `f=out2.txt; printf -vf %s disklink; echo marker >> "$f"`, true},
+	}
+	for _, connector := range []string{"claudecode", "codex"} {
+		for _, managed := range []bool{false, true} {
+			for _, row := range rows {
+				t.Run(fmt.Sprintf("%s/%s/managed=%t", row.name, connector, managed), func(t *testing.T) {
+					t.Setenv("SHELL", row.shell)
+					want := `{"action":"allow"`
+					if row.block {
+						want = `{"action":"block"`
+					}
+					got := postDynamicWordParityCell(t, home, project, connector, managed, managed, false, row.command, nil)
 					if !strings.HasPrefix(got, want) {
 						t.Errorf("verdict %.300s, want %s", got, want)
 					}
