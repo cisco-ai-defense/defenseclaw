@@ -965,6 +965,13 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 				}
 			}
 		}
+		if probe.SourcePath != "" {
+			if decision, refused := a.projectSkillSelectedRefusalDecision(
+				ctx, probe.SkillName, connector, runtimeSurface,
+			); refused {
+				return decision, true
+			}
+		}
 	}
 	admissionPaths := make([]string, len(paths))
 	for i, path := range paths {
@@ -985,6 +992,26 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 		last = decision
 	}
 	return last, false
+}
+
+// projectSkillSelectedRefusalDecision uses the caller's selected-folder fact
+// when an explicit source uses a spelling the gateway cannot associate with
+// an excluded profile root. The hook binds the fact to the explicit path in
+// the caller's filesystem view before it sends the fact.
+func (a *APIServer) projectSkillSelectedRefusalDecision(
+	ctx context.Context, name, connector, surface string,
+) (config.AssetPolicyDecision, bool) {
+	for key, selectedName := range resolvedWritesFromContext(ctx) {
+		if !strings.HasPrefix(key, hookpaths.ProjectSkillSelectedPrefix) ||
+			!config.SameAssetName(selectedName, name) {
+			continue
+		}
+		selected := strings.TrimPrefix(key, hookpaths.ProjectSkillSelectedPrefix)
+		if decision, refused := a.projectSkillRefusalDecision(selected, name, connector, surface); refused {
+			return decision, true
+		}
+	}
+	return config.AssetPolicyDecision{}, false
 }
 
 // projectSkillAbsolutePath resolves a source spelling for project admission.
