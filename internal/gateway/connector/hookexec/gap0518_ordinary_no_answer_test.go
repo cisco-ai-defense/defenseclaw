@@ -167,6 +167,57 @@ func TestGAP0518LateProofDistinguishesProtectedAliasesAndOrdinaryNames(t *testin
 	}
 }
 
+func TestGAP0518KnownValueWordsKeepLinkedTargetsClosed(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	for _, dir := range []string{cwd, filepath.Join(home, ".ssh"), filepath.Join(home, ".defenseclaw")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	call := func(command string) []byte {
+		return []byte(`{"hook_event_name":"PreToolUse","tool_name":"Bash","cwd":` +
+			mustJSONString(cwd) + `,"tool_input":{"command":` + mustJSONString(command) + `}}`)
+	}
+	for _, command := range []string{"echo $HOME", "echo ${HOME}", `printf '%s' "$LOGNAME"`, "echo $PWD"} {
+		if !ordinaryNoAnswerPayloadInHome(call(command), home) {
+			t.Errorf("ordinary value command %q has no late proof", command)
+		}
+	}
+	for _, source := range []string{
+		filepath.Join(home, ".ssh", "config"),
+		filepath.Join(home, ".defenseclaw", "config.yaml"),
+	} {
+		if err := os.WriteFile(source, []byte("protected"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		alias := filepath.Join(cwd, filepath.Base(filepath.Dir(source))+"-alias.txt")
+		if err := os.Link(source, alias); err != nil {
+			t.Fatal(err)
+		}
+		for _, command := range []string{
+			"cat " + alias,
+			`cat "$PWD"/` + filepath.Base(alias),
+			`cat "${PWD}"/` + filepath.Base(alias),
+			`echo "$PWD"/` + filepath.Base(alias),
+			`printf '%s' "${PWD}"/` + filepath.Base(alias),
+		} {
+			if ordinaryNoAnswerPayloadInHome(call(command), home) {
+				t.Errorf("protected alias %q received an ordinary proof", command)
+			}
+		}
+	}
+	ordinary := filepath.Join(cwd, "notes.txt")
+	if err := os.WriteFile(ordinary, []byte("ordinary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{"cat " + ordinary, `cat "$PWD"/notes.txt`, `echo "$PWD"/notes.txt`} {
+		if !ordinaryNoAnswerPayloadInHome(call(command), home) {
+			t.Errorf("ordinary file %q has no late proof", command)
+		}
+	}
+}
+
 func TestGAP0518LongOrdinaryTouchNoAnswer(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
@@ -248,5 +299,92 @@ func TestGAP0518CodexOrdinaryDeadlineFollowsTier(t *testing.T) {
 				t.Fatalf("allowed deadline had no visible warning: %q %q", result.stdout, result.stderr)
 			}
 		})
+	}
+}
+
+func TestGAP0518CompoundKnownValueLateProof(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	if err := os.MkdirAll(cwd, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(home, ".ssh", "config")
+	if err := os.WriteFile(key, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(cwd, "alias.txt")
+	if err := os.Link(key, alias); err != nil {
+		t.Fatal(err)
+	}
+	note := filepath.Join(cwd, "notes.txt")
+	if err := os.WriteFile(note, []byte("ordinary"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	call := func(command string) []byte {
+		return []byte(`{"hook_event_name":"PreToolUse","tool_name":"Bash","cwd":` + mustJSONString(cwd) + `,"tool_input":{"command":` + mustJSONString(command) + `}}`)
+	}
+	for _, tc := range []struct {
+		name, command string
+		ordinary      bool
+	}{
+		{"simple semicolon", "echo hello; true", true},
+		{"simple pipe", `cat "$PWD"/notes.txt | head -c 1`, true},
+		{"simple redirect", "echo hello > /dev/null", true},
+		{"protected pipe", `cat "$PWD"/alias.txt | head -c 1`, false},
+		{"ordinary wrapper", `bash -c 'cat "$PWD"/notes.txt'`, true},
+		{"protected wrapper", `bash -c 'cat "$PWD"/alias.txt'`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ordinaryNoAnswerPayloadInHome(call(tc.command), home)
+			t.Logf("ordinary_proof=%t", got)
+			if got != tc.ordinary {
+				t.Errorf("proof %t want %t", got, tc.ordinary)
+			}
+		})
+	}
+}
+
+func TestGAP0518DisplayValuesCheckKnownAliases(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	ssh := filepath.Join(home, ".ssh")
+	for _, dir := range []string{cwd, ssh} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key := filepath.Join(ssh, "config")
+	if err := os.WriteFile(key, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(cwd, "alias.txt")
+	if err := os.Link(key, alias); err != nil {
+		t.Fatal(err)
+	}
+	linkdir := filepath.Join(cwd, "linked-dir")
+	if err := os.Symlink(ssh, linkdir); err != nil {
+		t.Fatal(err)
+	}
+	call := func(command string) []byte {
+		return []byte(`{"hook_event_name":"PreToolUse","tool_name":"Bash","cwd":` + mustJSONString(cwd) + `,"tool_input":{"command":` + mustJSONString(command) + `}}`)
+	}
+	for _, tc := range []struct {
+		command  string
+		ordinary bool
+	}{
+		{`printf '%s/%s' foo bar`, true},
+		{`echo ordinary/subpath`, true},
+		{`echo "$PWD"/alias.txt`, false},
+		{`echo linked-dir/config`, false},
+		{`echo linked-dir/new-file`, false},
+	} {
+		got := ordinaryNoAnswerPayloadInHome(call(tc.command), home)
+		t.Logf("%q ordinary=%t", tc.command, got)
+		if got != tc.ordinary {
+			t.Errorf("%q proof %t want %t", tc.command, got, tc.ordinary)
+		}
 	}
 }

@@ -130,21 +130,57 @@ func ordinaryNoAnswerCommand(raw json.RawMessage, cwd, home string, bodySize int
 }
 
 // commandMayNameLink closes an unresolved operand at a no-answer deadline.
-// It scans at most the small-call budget; large ordinary touch calls use the
-// missing-leaf proof above.
+// The shell's words must be resolved before checking file identity; a known
+// PWD or HOME value can otherwise hide a protected link behind an alias.
 func commandMayNameLink(command, cwd, home string) bool {
-	words := strings.Fields(command)
-	if len(words) > 128 {
+	calls, known := hookpaths.LateKnownCalls(command, cwd, home)
+	if !known {
 		return true
 	}
-	for _, word := range words[1:] {
-		word = strings.Trim(word, "'\";,()")
-		if word == "" || strings.HasPrefix(word, "-") || strings.ContainsAny(word, "|&<>=") {
+	wordCount := 0
+	for _, words := range calls {
+		wordCount += len(words)
+		if wordCount > 128 {
+			return true
+		}
+		if commandWordsMayNameLink(words, cwd, home) {
+			return true
+		}
+	}
+	return false
+}
+
+func commandWordsMayNameLink(words []string, cwd, home string) bool {
+	display := len(words) != 0 && (words[0] == "echo" || words[0] == "printf")
+	endOptions := false
+	for i, word := range words {
+		if i == 0 && !strings.ContainsAny(word, "/\\") {
+			continue
+		}
+		if !endOptions && word == "--" {
+			endOptions = true
+			continue
+		}
+		if !endOptions && strings.HasPrefix(word, "-") {
+			_, value, assigned := strings.Cut(word, "=")
+			if !assigned {
+				continue
+			}
+			word = value
+		}
+		if word == "" {
 			continue
 		}
 		path := word
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(cwd, path)
+		}
+		parent := filepath.Dir(path)
+		resolvedParent, parentErr := filepath.EvalSymlinks(parent)
+		if parentErr != nil && (!display || !os.IsNotExist(parentErr)) ||
+			parentErr == nil && (resolvedParent != filepath.Clean(parent) ||
+				hookpaths.CallMayReachProtected(resolvedParent, home)) {
+			return true
 		}
 		info, err := os.Lstat(path)
 		if err == nil && info.Mode()&os.ModeSymlink != 0 {
