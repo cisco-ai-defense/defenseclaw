@@ -1218,6 +1218,9 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					if !protectedDecision {
 						protectedDecision = actionClientLoopCopyDestinationProtected(command, cwd, home)
 					}
+					if !protectedDecision {
+						protectedDecision = actionClientWrappedCopyDestinationProtected(command, cwd, home)
+					}
 				}
 				if !isApplyPatchToolName(tool) && unprovenReason == "" && !concreteOperands.plainTouchSafe {
 					unprovenReason = ActionCommandAuditReasonWithDialect(command, cwd, home, hookShellDialect(connector, tool))
