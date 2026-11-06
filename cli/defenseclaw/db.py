@@ -1543,24 +1543,30 @@ class Store:
 
         def row_facts(alias: str) -> str:
             cols = [f"{alias}.{name}" if name in columns else "NULL" for name in ("session_id", "agent_instance_id")]
-            cols += [
-                self._safe_json_extract(self._structured_sql(alias), f'$."{key}"') for key in self._ALERT_AGENT_KEYS
-            ]
+            for key in self._ALERT_AGENT_KEYS:
+                value = self._safe_json_extract(self._structured_sql(alias), f'$."{key}"')
+                if key == "defenseclaw.agent.identity.id" and "agent_id" in columns:
+                    # A finding's own verified install identity takes precedence
+                    # over any same-request decision row.
+                    value = (f"COALESCE(NULLIF(CASE WHEN substr({alias}.agent_id, 1, 4) = 'agt-' "
+                             f"THEN {alias}.agent_id END, ''), {value})")
+                cols.append(value)
             return ", ".join(cols)
 
         width = 2 + len(self._ALERT_AGENT_KEYS)
         join, hook_cols = "", ", ".join(["NULL"] * width)
         if "request_id" in columns:
             # Request IDs are client supplied. Borrow hook or direct inspect
-            # facts only when both records identify the same user independently
-            # of that ID. OpenClaw tool checks have no hook_decision row.
+            # facts only when both records identify the same user and connector
+            # independently of that ID. OpenClaw tool checks have no hook_decision row.
             f_user = self._safe_json_extract(self._structured_sql("f"), '$."user.id"')
             h_user = self._safe_json_extract(self._structured_sql("h"), '$."user.id"')
             join = (
                 "LEFT JOIN audit_events AS h ON COALESCE(f.request_id, '') <> '' AND h.request_id = f.request_id "
+                "AND h.connector = f.connector "
                 "AND (h.action IN ('hook_decision', 'action') OR "
                 "(h.action IN ('inspect-tool-block', 'inspect-tool-confirm', "
-                "'inspect-tool-alert', 'inspect-tool-allow') AND h.connector = f.connector)) "
+                "'inspect-tool-alert', 'inspect-tool-allow'))) "
                 "AND h.id <> f.id "
                 f"AND COALESCE({f_user}, '') <> '' AND {f_user} = {h_user}"
             )
