@@ -106,6 +106,9 @@ var (
 	windowsBundleEnsurePrivateDirectory = ensureWindowsBundlePrivateDirectory
 	windowsBundlePublishPrivateFile     = publishWindowsBundlePrivateFile
 	windowsBundleSyncMarker             = syncWindowsBundleMarker
+	// windowsBundleEnsurePublicReceiptEventsDirectory creates or repairs
+	// the public receipt events folder (an Administrators owner).
+	windowsBundleEnsurePublicReceiptEventsDirectory = ensureWindowsBundlePublicReceiptEventsDirectory
 	// windowsBundleReadAnchors reads and checks an anchor file once.
 	windowsBundleReadAnchors = enterprisebundle.ReadAnchorsFile
 	// windowsBundleDeploymentInstalled reads the deployment record again
@@ -415,7 +418,7 @@ func newWindowsBundleDriver(layout managed.StandaloneLayout) *enterprisebundle.D
 	store.SealVersion = windowsBundleSealVersion
 	store.PublishVersion = windowsBundlePublishVersion
 	store.PublishReceipt = windowsBundlePublishReceipt
-	store.EnsurePublicReceiptEventsDirectory = ensureWindowsBundlePublicReceiptEventsDirectory
+	store.EnsurePublicReceiptEventsDirectory = windowsBundleEnsurePublicReceiptEventsDirectory
 	store.EnsurePrivateDirectory = windowsBundleEnsurePrivateDirectory
 	store.PublishPrivateFile = windowsBundlePublishPrivateFile
 	store.ReceiptEventReported = func(id string) bool { return enterprisestatus.ReceiptEventReported(layout.DataDir, id) }

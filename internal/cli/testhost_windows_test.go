@@ -664,17 +664,52 @@ var errTestSandboxNoServiceControl = errors.New("test sandbox: no service contro
 // pinned (pinTestProcessIdentity).
 func testTokenIsElevated() bool { return windows.GetCurrentProcessToken().IsElevated() }
 
-// requireAdministratorTestToken skips a test whose fixture only an
-// administrator token can build (an Administrators-owned or protected
-// object, a folder under C:\ProgramData), saying why. A standard user cannot
-// create them, so the test cannot give the same answer as a standard user
-// (GAP-0079); the elevated CI runner, an elevated administrator and
-// LocalSystem run it.
+// requireAdministratorTestToken skips a test whose fixture, or whose product
+// writer, only an administrator token can build (a BUILTIN\Administrators
+// owner, or a protected admin-only object), saying why. A standard user
+// cannot create them, so the test cannot give the same answer as a standard
+// user (GAP-0079); the elevated CI runner, an elevated administrator and
+// LocalSystem run it. A folder under C:\ProgramData alone does not need it:
+// BUILTIN\Users can create one.
 func requireAdministratorTestToken(t *testing.T, why string) {
 	t.Helper()
 	if !testTokenIsElevated() && !testRunsAsLocalSystem() {
 		t.Skip("needs an administrator token: " + why)
 	}
+}
+
+// grantTestTreeToCurrentUser gives the test account full control of root
+// and everything under it, top down, so a fixture whose folders only
+// Administrators can enter can be removed by the account that owns them.
+// It never fails.
+func grantTestTreeToCurrentUser(root string) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return
+	}
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;" + user.User.Sid.String() + ")(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+	if err != nil {
+		return
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return
+	}
+	var grant func(string)
+	grant = func(path string) {
+		_ = windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return
+		}
+		for _, entry := range entries {
+			if entry.Type()&os.ModeSymlink == 0 {
+				grant(filepath.Join(path, entry.Name()))
+			}
+		}
+	}
+	grant(root)
 }
 
 // skipIfLocalSystem skips a test whose fixture cannot hold when it runs as

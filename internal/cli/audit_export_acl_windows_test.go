@@ -15,12 +15,18 @@ import (
 )
 
 func TestAuditExportWindowsCreatesProtectedFileInSharedDirectory(t *testing.T) {
-	requireAdministratorTestToken(t, "the fixture needs an Administrators-owned or protected object, which only an elevated token can create")
 	shared := filepath.Join(t.TempDir(), "shared")
 	if err := os.Mkdir(shared, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FR;;;BU)")
+	// The test account keeps full control, so a standard user builds the
+	// fixture too (g079 review F4); the Users read entry is the one the
+	// export must not inherit.
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + user.User.Sid.String() + ")(A;OICI;FR;;;BU)")
 	if err != nil {
 		t.Fatal(err)
 	}

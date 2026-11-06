@@ -676,8 +676,10 @@ func stubWindowsBundleHost(t *testing.T) managed.StandaloneLayout {
 	savedPrivate, savedSeal, savedPublish, savedReceipt, savedEnsure := windowsBundlePrivateStage, windowsBundleSealVersion, windowsBundlePublishVersion, windowsBundlePublishReceipt, windowsBundleEnsureDirectory
 	savedEnsurePrivate, savedPublishPrivate := windowsBundleEnsurePrivateDirectory, windowsBundlePublishPrivateFile
 	savedEnsureStage, savedPublishStage := windowsBundleEnsureStageDirectory, windowsBundlePublishStageFile
-	savedSpool := windowsChangeSpool
-	t.Cleanup(func() { windowsChangeSpool = savedSpool })
+	savedSpool, savedReceiptEvents := windowsChangeSpool, windowsBundleEnsurePublicReceiptEventsDirectory
+	t.Cleanup(func() {
+		windowsChangeSpool, windowsBundleEnsurePublicReceiptEventsDirectory = savedSpool, savedReceiptEvents
+	})
 	t.Cleanup(func() {
 		windowsBundleLayout, windowsBundlePolicy, windowsBundleSleep, windowsBundleTrust, bundleAnchorTrust = savedLayout, savedPolicy, savedSleep, savedTrust, savedAnchorTrust
 		windowsBundlePrivateStage, windowsBundleSealVersion, windowsBundlePublishVersion = savedPrivate, savedSeal, savedPublish
@@ -726,6 +728,10 @@ func stubWindowsBundleHost(t *testing.T) managed.StandaloneLayout {
 		return enterprisestatus.ChangeSpool{Dir: enterprisestatus.ChangeEventsDir(layout.ConfigDir), StateDir: layout.LifecycleDir,
 			Reported: func(id string) bool { return enterprisestatus.ChangeReported(layout.DataDir, id) }}, nil
 	}
+	// The public receipt events folder too: its descriptor has an
+	// Administrators owner, and TestWindowsBundlePublicReceiptEventsCreatedProtected
+	// checks it (g079 review F4).
+	windowsBundleEnsurePublicReceiptEventsDirectory = func(path string) error { return os.MkdirAll(path, 0o700) }
 	bundleAnchorTrust = nil
 	return layout
 }
@@ -1231,7 +1237,6 @@ func TestWindowsEnsureBundleConfirmsThenRequiresBundles(t *testing.T) {
 }
 
 func TestWindowsBundleGatewayRestartReachesEveryReceiptSurface(t *testing.T) {
-	requireAdministratorTestToken(t, "the fixture needs an Administrators-owned or protected object, which only an elevated token can create")
 	e := newBundleCLIEnv(t)
 	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
 	signed := filepath.Join(e.dir, "restart.dcbundle")
@@ -1296,7 +1301,6 @@ func TestWindowsBundleGatewayRestartReachesEveryReceiptSurface(t *testing.T) {
 }
 
 func TestWindowsCommittedBundleGatewayOutageReportsPendingReceipt(t *testing.T) {
-	requireAdministratorTestToken(t, "the fixture needs an Administrators-owned or protected object, which only an elevated token can create")
 	e := newBundleCLIEnv(t)
 	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
 	signed := filepath.Join(e.dir, "outage.dcbundle")

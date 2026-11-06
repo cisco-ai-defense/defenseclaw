@@ -74,7 +74,6 @@ func TestValidateWindowsStagedRetireGatewayLayout(t *testing.T) {
 // descriptor admits is admitted here too; a folder or file another user can
 // change is refused before the gateway runs any retire.
 func TestValidateWindowsStagedRetireGatewayImage(t *testing.T) {
-	requireAdministratorTestToken(t, "the fixture is a folder under C:\\ProgramData, which only an administrator can create")
 	for _, tc := range []struct{ name, executable string }{
 		{name: "wrong executable", executable: `C:\ProgramData\DefenseClaw-Staging\defenseclaw-hook.exe`},
 		{name: "relative source", executable: `payload\defenseclaw-gateway.exe`},
@@ -106,7 +105,15 @@ func TestValidateWindowsStagedRetireGatewayImage(t *testing.T) {
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	// The cases leave folders only Administrators can enter; an unelevated
+	// run owns them and gives itself access back to remove them (g079
+	// review F4: the folder was left in the real ProgramData).
+	t.Cleanup(func() {
+		grantTestTreeToCurrentUser(root)
+		if err := os.RemoveAll(root); err != nil {
+			t.Errorf("remove the ProgramData fixture %s: %v", root, err)
+		}
+	})
 	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 	if err != nil {
 		t.Fatal(err)
@@ -162,15 +169,18 @@ func TestValidateWindowsStagedRetireGatewayImage(t *testing.T) {
 			if err := os.MkdirAll(tc.folder, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if tc.folderACL != "" {
-				setDACL(t, tc.folder, tc.folderACL)
-			}
+			// The file first: an admin-only folder ACL leaves an unelevated
+			// test account no right to create it (g079 review F4). The
+			// folder ACL then reaches the file as it would have at creation.
 			executable := filepath.Join(tc.folder, "defenseclaw-gateway.exe")
 			if err := os.WriteFile(executable, []byte("gateway"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if tc.fileACL != "" {
 				setDACL(t, executable, tc.fileACL)
+			}
+			if tc.folderACL != "" {
+				setDACL(t, tc.folder, tc.folderACL)
 			}
 			if elevated {
 				for path := executable; ; path = filepath.Dir(path) {
