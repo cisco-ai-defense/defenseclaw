@@ -46213,6 +46213,108 @@ function Initialize-DefenseClawRecordedPayloadTrust {
             $script:DefenseClawPinnedPayloadSHA256[$leaf] = ([string]$property.Value).ToLowerInvariant()
         }
     }
+    # An interrupted transaction may already have installed its own installer
+    # and module (rel-1-0-6 GAP-0649): the pair the bootstrap admitted by the
+    # transaction's pins. Admit exactly that pair, and only while both files
+    # on disk are it, in place of the recorded pair.
+    $transactionPins = Get-DefenseClawPendingTransactionLifecyclePins -Layout $Layout
+    if ($null -eq $transactionPins) {
+        return
+    }
+    $pair = @(
+        @([string]$Layout.InstallerPath, [string]$transactionPins.installer, 'installer'),
+        @([string]$Layout.ModulePath, [string]$transactionPins.module, 'module')
+    )
+    foreach ($entry in $pair) {
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $entry[0] -PathType Leaf)) {
+            return
+        }
+        $onDisk = (
+            Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $entry[0] -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        if ($onDisk -cne $entry[1]) {
+            return
+        }
+    }
+    foreach ($entry in $pair) {
+        $leaf = [IO.Path]::GetFileName($entry[0]).ToLowerInvariant()
+        $recorded = $Metadata.hashes.PSObject.Properties[$entry[2]]
+        # A payload manifest's pin (Setup) is never replaced.
+        if (-not $script:DefenseClawPinnedPayloadSHA256.ContainsKey($leaf) -or
+            ($null -ne $recorded -and
+                $script:DefenseClawPinnedPayloadSHA256[$leaf] -ceq ([string]$recorded.Value).ToLowerInvariant())) {
+            $script:DefenseClawPinnedPayloadSHA256[$leaf] = $entry[1]
+        }
+    }
+}
+
+function Get-DefenseClawPendingTransactionLifecyclePins {
+    <#
+        The installer and module SHA-256 a pending transaction recorded before
+        it copied them (Write-DefenseClawTransactionLifecyclePins), or $null
+        without a pending transaction, without pins, or when the record is not
+        an administrator-only file in this deployment's transactions folder
+        (rel-1-0-6 GAP-0649).
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    try {
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath -PathType Leaf)) {
+            return $null
+        }
+        Assert-DefenseClawNoReparsePath -Path $Layout.PendingPath
+        $pending = Microsoft.PowerShell.Management\Get-Content -LiteralPath $Layout.PendingPath -Raw |
+            Microsoft.PowerShell.Utility\ConvertFrom-Json
+        $snapshot = $pending.PSObject.Properties['snapshot']
+        if ($null -eq $snapshot -or [string]::IsNullOrWhiteSpace([string]$snapshot.Value)) {
+            return $null
+        }
+        $transactions = [IO.Path]::GetFullPath([string]$Layout.TransactionsDirectory).TrimEnd('\') + '\'
+        $directory = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath([string]$snapshot.Value))
+        if (-not $directory.StartsWith($transactions, [StringComparison]::OrdinalIgnoreCase) -or
+            $directory.Length -le $transactions.Length -or
+            $directory.Substring($transactions.Length).Contains('\')) {
+            return $null
+        }
+        $path = Microsoft.PowerShell.Management\Join-Path $directory 'lifecycle-pins.json'
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
+            return $null
+        }
+        Assert-DefenseClawNoReparsePath -Path $path
+        Assert-DefenseClawPathAcl `
+            -Path $path `
+            -AllowedWriterSIDs @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID
+            ) `
+            -AllowedReaderSIDs @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID
+            ) `
+            -RequiredRights (New-DefenseClawRequiredRights -Kind Admin) `
+            -RejectUntrustedRead
+        if ([int64](Microsoft.PowerShell.Management\Get-Item -LiteralPath $path -Force).Length -gt 65536) {
+            return $null
+        }
+        $pins = Microsoft.PowerShell.Management\Get-Content -LiteralPath $path -Raw |
+            Microsoft.PowerShell.Utility\ConvertFrom-Json
+        $schema = $pins.PSObject.Properties['schema_version']
+        $installer = $pins.PSObject.Properties['installer']
+        $module = $pins.PSObject.Properties['module']
+        if ($null -eq $schema -or [string]$schema.Value -cne '1' -or
+            $null -eq $installer -or [string]$installer.Value -cnotmatch '^[0-9a-f]{64}$' -or
+            $null -eq $module -or [string]$module.Value -cnotmatch '^[0-9a-f]{64}$') {
+            return $null
+        }
+        return [pscustomobject]@{
+            installer = [string]$installer.Value
+            module = [string]$module.Value
+        }
+    }
+    catch {
+        return $null
+    }
 }
 
 function Add-DefenseClawProductionUninstallNativeCleanupSource {
