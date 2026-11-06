@@ -637,6 +637,17 @@ func openClawInspectIdentity(ctx context.Context, connectorName string) context.
 	}
 	identity := AgentIdentityFromContext(ctx)
 	identity.IdentityID, identity.IdentityVerified = facts.ID, true
+	// The session's agent instance (ais-) is assigned here from the verified
+	// identity and the session, as on the hook path, so the inspect audit row
+	// and the findings it raises carry one key that a later request cannot
+	// reuse for another identity. The plugin's agent ID stays a claim.
+	if session := SessionIDFromContext(ctx); session != "" {
+		if reg := SharedAgentRegistry(); reg != nil {
+			if resolved, _ := reg.ResolveForAgentIdentity(ctx, facts.ID, session, identity.AgentID); resolved.AgentInstanceID != "" {
+				identity.AgentInstanceID = resolved.AgentInstanceID
+			}
+		}
+	}
 	if identity.AgentID == "" {
 		identity.AgentID = facts.ID
 	}

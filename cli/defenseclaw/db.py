@@ -1536,11 +1536,14 @@ class Store:
         row's structured facts and from a hook-decision or direct-inspect row
         of the same occurrence; the alert row's own structured value wins.
 
-        Request IDs are client supplied and can repeat, so a request ID alone
-        never names the occurrence: the other row must also agree with the
-        alert row's own recorded sidecar run, session and agent instance
-        (GAP-0647). A fact the matching rows disagree on is not shown, so a
-        later request cannot change an earlier alert's Agent.
+        Request, run and session IDs are client supplied or shared by many
+        calls, so none of them names one occurrence. The gateway assigns the
+        agent instance (``ais-``) from the verified agent identity and the
+        session, so a hook or inspect row is borrowed from only when it carries
+        the same non-empty instance as the alert row (GAP-0647). A row without
+        that instance is never borrowed from, and a fact the matching rows
+        disagree on is not shown, so a later request cannot change or replace
+        an earlier alert's Agent.
         """
         ids = [alert_id for alert_id in alert_ids if alert_id]
         columns, _tables = self._audit_projection_schema()
@@ -1556,17 +1559,20 @@ class Store:
 
         width = 2 + len(self._ALERT_AGENT_KEYS)
         join, hook_cols = "", ", ".join(["NULL"] * width)
-        if "request_id" in columns:
+        if "request_id" in columns and "agent_instance_id" in columns:
             # Borrow hook or direct inspect facts only from a row of the same
-            # occurrence: the same user and connector, and no conflicting run,
-            # session or agent instance. OpenClaw tool checks have no
-            # hook_decision row.
+            # occurrence: the same user and connector, the gateway-assigned
+            # agent instance of the alert row, and no conflicting run or
+            # session. OpenClaw tool checks have no hook_decision row.
             f_user = self._safe_json_extract(self._structured_sql("f"), '$."user.id"')
             h_user = self._safe_json_extract(self._structured_sql("h"), '$."user.id"')
-            occurrence = "".join(
-                f"AND (COALESCE(f.{name}, '') = '' OR COALESCE(h.{name}, '') = '' OR h.{name} = f.{name}) "
-                for name in ("run_id", "session_id", "agent_instance_id")
-                if name in columns
+            occurrence = (
+                "AND COALESCE(f.agent_instance_id, '') <> '' AND h.agent_instance_id = f.agent_instance_id "
+                + "".join(
+                    f"AND (COALESCE(f.{name}, '') = '' OR COALESCE(h.{name}, '') = '' OR h.{name} = f.{name}) "
+                    for name in ("run_id", "session_id")
+                    if name in columns
+                )
             )
             join = (
                 "LEFT JOIN audit_events AS h ON COALESCE(f.request_id, '') <> '' AND h.request_id = f.request_id "
