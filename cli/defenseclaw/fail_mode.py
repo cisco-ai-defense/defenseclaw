@@ -1626,6 +1626,11 @@ class _ClaudeNativeRegistration:
 
 # claudeCodeMissingHookGuardSeparator (internal/gateway/connector/claudecode.go).
 _CLAUDE_MISSING_HOOK_GUARD_SEPARATOR = " || { rc=$?; "
+_CLAUDE_MISSING_HOOK_GUARD_MESSAGE = (
+    "DefenseClaw blocked this: its Claude Code hook script is missing "
+    "or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, "
+    "or remove the DefenseClaw hooks from ~/.claude/settings.json."
+)
 
 
 def _claude_posix_word(value: str) -> str:
@@ -1634,6 +1639,20 @@ def _claude_posix_word(value: str) -> str:
     if value and all((ch.isascii() and ch.isalnum()) or ch in "/._-+=:,@%" for ch in value):
         return value
     return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _claude_native_shell_command(expected: _ClaudeNativeRegistration) -> str:
+    """The exact native launcher command Setup writes without a guard binary."""
+
+    command = " ".join(_claude_posix_word(word) for word in (expected.native, *expected.hook_args))
+    return (
+        command
+        + _CLAUDE_MISSING_HOOK_GUARD_SEPARATOR
+        + '[ "$rc" -eq 126 ] || [ "$rc" -eq 127 ] || exit "$rc"; '
+        + "echo '"
+        + _CLAUDE_MISSING_HOOK_GUARD_MESSAGE
+        + "' >&2; exit 2; }"
+    )
 
 
 def _claude_loopback_api_addr(addr: str) -> bool:
@@ -1775,10 +1794,7 @@ def _claude_native_registration_problem(
         return stale
     primary_args = ["guard-user-hook", expected.native, *expected.hook_args]
     companion_args = ["fallback-guard-user-hook", expected.guard, *expected.hook_args]
-    shell_prefix = (
-        " ".join(_claude_posix_word(word) for word in (expected.native, *expected.hook_args))
-        + _CLAUDE_MISSING_HOOK_GUARD_SEPARATOR
-    )
+    shell_command = _claude_native_shell_command(expected)
     primaries = 0
     for groups in hooks.values():
         if not isinstance(groups, list):
@@ -1795,7 +1811,7 @@ def _claude_native_registration_problem(
                 if handler.get("type") != "command":
                     return stale
                 if not expected.guard:
-                    if args is not None or not isinstance(command, str) or not command.startswith(shell_prefix):
+                    if args is not None or command != shell_command:
                         return stale
                     primaries += 1
                 elif command == expected.guard and args == primary_args:
@@ -1860,10 +1876,7 @@ def claude_missing_registration(cfg: Any, settings: Any) -> tuple[str, str] | No
     if native is not None:
         primary_args = ["guard-user-hook", native.native, *native.hook_args]
         companion_args = ["fallback-guard-user-hook", native.guard, *native.hook_args]
-        shell_prefix = (
-            " ".join(_claude_posix_word(word) for word in (native.native, *native.hook_args))
-            + _CLAUDE_MISSING_HOOK_GUARD_SEPARATOR
-        )
+        shell_command = _claude_native_shell_command(native)
 
     def guard(handler: dict[str, Any], synchronous: bool) -> bool:
         if handler.get("type") != "command" or (synchronous and handler.get("async") is True):
@@ -1874,7 +1887,7 @@ def claude_missing_registration(cfg: Any, settings: Any) -> tuple[str, str] | No
             # checks' question; this one asks whether the event runs it at all.
             return isinstance(command, str) and "claude-code-hook.sh" in command
         if not native.guard:
-            return args is None and isinstance(command, str) and command.startswith(shell_prefix)
+            return args is None and command == shell_command
         return command == native.guard and args == primary_args
 
     def companion(handler: dict[str, Any]) -> bool:

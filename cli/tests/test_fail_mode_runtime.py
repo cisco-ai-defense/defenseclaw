@@ -2891,6 +2891,41 @@ def test_claude_linux_per_user_native_registration_is_current(monkeypatch: pytes
     assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the Linux per-user native registration")
+def test_gap0612_status_and_quickstart_share_native_registration_verdict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from defenseclaw import bootstrap, hook_integrity
+    from defenseclaw.commands import cmd_status
+
+    cfg, home, _app = _claude_native_runtime(monkeypatch, tmp_path, "open")
+    healthy = _claude_contract_hooks(_claude_golden_hooks(home))
+    assert _doctor_claude_hooks_row(cfg, home)["status"] == "pass"
+    assert hook_integrity.hook_registration_problems(cfg, "claudecode") == []
+    assert "DEGRADED" not in cmd_status._hook_runtime_degraded_suffix(cfg, "claudecode")
+    assert bootstrap._connector_runtime_readiness(cfg, "claudecode") is None
+
+    # A foreign command cannot stand in for the native registration, and a
+    # missing event must not be called healthy just because other events remain.
+    wrong_home = json.loads(json.dumps(healthy))
+    wrong_home["PreToolUse"][0]["hooks"][0]["args"][6] = str(tmp_path / "other")
+    missing_companion = json.loads(json.dumps(healthy))
+    missing_companion["PreToolUse"][0]["hooks"].pop()
+    for hooks in (
+        {"PreToolUse": [{"hooks": [{"type": "command", "command": "/usr/local/bin/audit-tool"}]}]},
+        {event: groups for event, groups in healthy.items() if event != "PreToolUse"},
+        wrong_home,
+        missing_companion,
+    ):
+        _write_claude_hooks(home, hooks)
+        assert hook_integrity.hook_registration_problems(cfg, "claudecode")
+        assert "DEGRADED" in cmd_status._hook_runtime_degraded_suffix(cfg, "claudecode")
+        assert bootstrap._connector_runtime_readiness(cfg, "claudecode") is not None
+
+    _write_claude_hooks(home, healthy)
+    assert hook_integrity.hook_registration_problems(cfg, "claudecode") == []
+
+
 def _doctor_claude_hooks_row(cfg: SimpleNamespace, home: Path) -> dict:
     result = cmd_doctor._DoctorResult()
     cmd_doctor._check_claudecode_hooks(
@@ -3081,14 +3116,38 @@ def test_claude_tampered_native_registration_is_drift(monkeypatch: pytest.Monkey
 def test_claude_native_registration_without_guard_uses_the_launcher_shell_form(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    from defenseclaw import hook_integrity
+
     cfg, home = _claude_native_layout(monkeypatch, tmp_path, hook_post=False)
     native = str(home / ".local" / "bin" / "defenseclaw-hook-user")
     command = (
         f"{native} hook --connector claudecode --hook-home {cfg.data_dir} --api-addr 127.0.0.1:18970"
-        " || { rc=$?; echo 'DefenseClaw blocked this' >&2; exit 2; }"
+        ' || { rc=$?; [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ] || exit "$rc"; '
+        "echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. "
+        "Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, "
+        "or remove the DefenseClaw hooks from ~/.claude/settings.json.' >&2; exit 2; }"
+    )
+    settings = home / ".claude" / "settings.json"
+    (Path(cfg.data_dir) / "hook_contract_lock.json").write_text(
+        json.dumps({"connectors": {"claudecode": {"locations": {"hook_config_paths": [str(settings)]}}}}),
+        encoding="utf-8",
+    )
+    assert command == fail_mode_runtime._claude_native_shell_command(
+        fail_mode_runtime._claude_per_user_native_registration(cfg)
     )
     _write_claude_hooks(home, {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": command}]}]})
     assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
+    assert hook_integrity.hook_registration_problems(cfg, "claudecode") == []
+    _write_claude_hooks(
+        home,
+        {
+            "PreToolUse": [
+                {"matcher": "*", "hooks": [{"type": "command", "command": command.replace("exit 2; }", "exit 0; }")}]}
+            ]
+        },
+    )
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") == "registration-command-stale"
+    assert hook_integrity.hook_registration_problems(cfg, "claudecode")
     _write_claude_hooks(home, _claude_golden_hooks(home))
     assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") == "registration-command-stale"
 
