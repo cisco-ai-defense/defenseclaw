@@ -24,6 +24,10 @@ func fakeNetworkShare(t *testing.T, prefix string, wait, deadAfter time.Duration
 	oldProbes := networkShares.probes
 	networkShares.probes = nil
 	networkShares.mu.Unlock()
+	networkShareWaits.mu.Lock()
+	oldWaits := networkShareWaits.spans
+	networkShareWaits.spans = nil
+	networkShareWaits.mu.Unlock()
 	var probes atomic.Int64
 	// A test names its share with "/". On Windows a path below it may carry
 	// either separator, and a scan spells the host of a URL as \\host\...
@@ -46,6 +50,9 @@ func fakeNetworkShare(t *testing.T, prefix string, wait, deadAfter time.Duration
 		networkShares.mu.Lock()
 		networkShares.probes = oldProbes
 		networkShares.mu.Unlock()
+		networkShareWaits.mu.Lock()
+		networkShareWaits.spans = oldWaits
+		networkShareWaits.mu.Unlock()
 	})
 	return &probes
 }

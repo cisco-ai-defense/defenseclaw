@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,15 @@ import (
 // loopback share that names a local file among them). A share whose probe
 // still had no answer after networkShareDeadAfter stays unknown for
 // networkShareQuietFor without being asked again.
+//
+// The answer wait is shared, not given to each share: one hook call may
+// name many shares, one after another, and each fresh share given its own
+// wait would add up past the hook answer budget. Within any
+// networkShareWaitWindow, longer than a hook call may take, the calls of
+// this process wait networkShareAnswerWait for share answers in all
+// (overlapping waits of concurrent calls count once). A fresh share asked
+// once that wait is spent reads as unknown at once, as a share that did
+// not answer within its wait reads, and is read once it has answered.
 
 // errNetworkShareUnanswered is the error of a read below a network share
 // that has not answered. It is not fs.ErrNotExist: the path may exist.
@@ -51,6 +61,9 @@ var (
 	// how long an answer is reused before the share is asked again.
 	networkShareQuietFor    = 2 * time.Minute
 	networkShareAnsweredFor = time.Minute
+	// networkShareWaitWindow is longer than a hook call may take (hookexec
+	// answers within its 3.5 s budget and 4 s progress ceiling).
+	networkShareWaitWindow = 6 * time.Second
 	// networkShareRootOf names the network share a path is on ("" for a
 	// local path); probeNetworkShare asks the share once. Tests replace both.
 	networkShareRootOf = networkShareRoot
@@ -70,6 +83,66 @@ type networkShareProbe struct {
 var networkShares struct {
 	mu     sync.Mutex
 	probes map[string]*networkShareProbe
+}
+
+// networkShareWaits are the waits for share answers that ended within
+// networkShareWaitWindow, merged so that none overlaps, oldest first.
+var networkShareWaits struct {
+	mu    sync.Mutex
+	spans []networkShareWait
+}
+
+type networkShareWait struct{ from, to time.Time }
+
+// networkShareWaitLeft is how long a call may still wait for a share
+// answer at now: networkShareAnswerWait less the time spent waiting for
+// share answers in the networkShareWaitWindow before now.
+func networkShareWaitLeft(now time.Time) time.Duration {
+	since := now.Add(-networkShareWaitWindow)
+	networkShareWaits.mu.Lock()
+	defer networkShareWaits.mu.Unlock()
+	spent := time.Duration(0)
+	for _, span := range networkShareWaits.spans {
+		if span.to.After(since) {
+			spent += span.to.Sub(later(span.from, since))
+		}
+	}
+	return networkShareAnswerWait - spent
+}
+
+// recordNetworkShareWait records a wait for a share answer from from to to.
+func recordNetworkShareWait(from, to time.Time) {
+	if !to.After(from) {
+		return
+	}
+	networkShareWaits.mu.Lock()
+	defer networkShareWaits.mu.Unlock()
+	spans := append(networkShareWaits.spans, networkShareWait{from: from, to: to})
+	slices.SortFunc(spans, func(a, b networkShareWait) int { return a.from.Compare(b.from) })
+	since := to.Add(-networkShareWaitWindow)
+	merged := spans[:0]
+	for _, span := range spans {
+		switch last := len(merged) - 1; {
+		case !span.to.After(since):
+		case last >= 0 && !span.from.After(merged[last].to):
+			merged[last].to = later(merged[last].to, span.to)
+		default:
+			merged = append(merged, span)
+		}
+	}
+	// Joining the oldest two spans only shortens later waits.
+	for len(merged) > networkShareProbeLimit {
+		merged[1].from = merged[0].from
+		merged = merged[1:]
+	}
+	networkShareWaits.spans = merged
+}
+
+func later(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
 }
 
 // networkPathUnanswered reports a path below a network share that has not
@@ -120,7 +193,8 @@ func networkPathUnanswered(path string) bool {
 		}(probe)
 	}
 	networkShares.mu.Unlock()
-	wait := networkShareAnswerWait - time.Since(probe.started)
+	now = time.Now()
+	wait := min(networkShareAnswerWait-now.Sub(probe.started), networkShareWaitLeft(now))
 	if wait <= 0 {
 		select {
 		case <-probe.done:
@@ -131,6 +205,7 @@ func networkPathUnanswered(path string) bool {
 	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
+	defer func() { recordNetworkShareWait(now, time.Now()) }()
 	select {
 	case <-probe.done:
 		return probe.took > networkShareDeadAfter
@@ -188,6 +263,15 @@ func pathOpen(name string) (*os.File, error) {
 		return nil, networkShareError("open", name)
 	}
 	return os.Open(name)
+}
+
+// pathOpenRoot is os.OpenRoot with the root read as pathOpen reads it.
+// A read through the root stays below the root, so on the same share.
+func pathOpenRoot(name string) (*os.Root, error) {
+	if networkPathUnanswered(name) {
+		return nil, networkShareError("openroot", name)
+	}
+	return os.OpenRoot(name)
 }
 
 func pathReadDir(name string) ([]os.DirEntry, error) {
