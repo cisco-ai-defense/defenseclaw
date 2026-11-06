@@ -5747,7 +5747,9 @@ func copilotLiveOperatorLookalike(raw interface{}, hookScript string) bool {
 		}
 		if binding := copilotPowerShellAdapterBinding.FindStringSubmatch(strings.TrimSpace(command)); len(binding) == 3 {
 			adapter := powershellLiteralValue(binding[1])
-			current := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(hookScript), "& '"), "'")
+			// Both sides decoded: the registered body doubles every PowerShell
+			// single quote (g072 review 3 N5).
+			current := powershellLiteralValue(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(hookScript), "& '"), "'"))
 			if !strings.EqualFold(adapter, current) && !copilotMarkedAdapterCommand(command) {
 				if info, err := os.Lstat(adapter); err == nil && info.Mode().IsRegular() {
 					return true

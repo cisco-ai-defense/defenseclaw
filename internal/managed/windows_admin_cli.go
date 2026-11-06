@@ -96,6 +96,14 @@ func PowerShellLiteralBody(value string) string {
 // PowerShell literal (PowerShellLiteralBody): each doubled quote is one. A
 // quote that is not doubled is kept, as the hook-command parsers kept a lone
 // apostrophe.
+//
+// PowerShell's tokenizer reads any two single quotes in a row as one, the
+// second ('’ is ’); this reads only identical pairs (g072 review 3 N1). That
+// is enough, because every reader then requires the value to be DefenseClaw's
+// own path (pathidentity.Same with a launcher candidate) or one of its exact
+// commands: no other pairing decodes to those, and the only lone-quote form
+// that does is this package's own pre-1.0.9 render, which stays owned so
+// setup rewrites it. The Python copy, defenseclaw/winquote.py, reads the same.
 func PowerShellLiteralValue(body string) string {
 	runes := []rune(body)
 	var value strings.Builder
