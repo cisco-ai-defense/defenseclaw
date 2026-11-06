@@ -516,6 +516,9 @@ func reclaimPolicyDirs(opts Options, dir string) (policyTakeBack, error) {
 			}
 			continue
 		}
+		if refused := refuseStandaloneReclaim(cur, trustErr); refused != nil {
+			return result, refused
+		}
 		if err := reclaimDir(cur); err != nil {
 			return result, fmt.Errorf("%w; taking it back failed: %v", trustErr, err)
 		}
@@ -1083,7 +1086,55 @@ func InspectWindowsPublicDir(dir string) (WindowsPublicDirDrift, error) {
 
 // RepairWindowsPublicDir writes DefenseClaw's owner and protected access
 // list back on dir, by handle and without following a reparse point.
-func RepairWindowsPublicDir(dir string) error { return reclaimDir(dir) }
+func RepairWindowsPublicDir(dir string) error {
+	if trustErr := validateTrustedLeafDir(dir); trustErr != nil {
+		if refused := refuseStandaloneReclaim(dir, trustErr); refused != nil {
+			return refused
+		}
+	}
+	return reclaimDir(dir)
+}
+
+// reclaimRefusesContentDrift is managed.StandaloneRefusesContentDrift; tests
+// replace it.
+var reclaimRefusesContentDrift = managed.StandaloneRefusesContentDrift
+
+// refuseStandaloneReclaim is the standalone refusal of a folder takeover (the
+// g582 class rule): a vendor or hook-runtime folder that already holds a
+// DefenseClaw file and that another account can write or owns is refused
+// and named, not taken over in place, because that account may have put or
+// replaced files in it, or may hold a handle to one. A folder with no
+// DefenseClaw file (a vendor folder a user or MDM created before the first
+// install) keeps the takeover, its entries each still judged. It is nil off
+// standalone.
+func refuseStandaloneReclaim(dir string, trustErr error) error {
+	if !reclaimRefusesContentDrift() {
+		return nil
+	}
+	marker := defenseClawEntryIn(dir)
+	if marker == "" {
+		return nil
+	}
+	return managed.RefuseStandaloneMachinePolicyDrift(
+		fmt.Errorf("%w (the folder already holds DefenseClaw's %s)", trustErr, marker))
+}
+
+// defenseClawEntryIn returns the first entry directly in dir that DefenseClaw
+// writes (a name with "defenseclaw" in it, or the machine policy summary), or
+// "".
+func defenseClawEntryIn(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		name := strings.ToLower(entry.Name())
+		if strings.Contains(name, "defenseclaw") || name == "machine-policy.json" {
+			return entry.Name()
+		}
+	}
+	return ""
+}
 
 const (
 	trustedInstallerSIDStr = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
