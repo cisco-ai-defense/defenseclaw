@@ -42809,6 +42809,79 @@ function Get-DefenseClawNuclearConnectorOwner {
     return [pscustomobject]@{ Owner = 'foreign'; State = $record.Value; Detail = $hook }
 }
 
+function Remove-DefenseClawNuclearCopilotPolicy {
+    <#
+        GitHub Copilot's machine policy on the Secure Client purge:
+        DefenseClaw's policy.d drop-in, which every user's Copilot CLI and
+        the GitHub Copilot app load, and the ownership record the guardian
+        keeps for it in the lifecycle folder's machine-policy store
+        (<LifecycleDirectory>\machine-policy\copilot.json). The drop-in goes
+        first; a drop-in that stays makes the purge incomplete. The record
+        describes that file, so it goes only once the drop-in is gone or
+        scheduled for deletion at restart: while the drop-in is there, the
+        record is what a later uninstall strips DefenseClaw's handlers by.
+        The store goes when nothing else is left in it. A record or store
+        that stays is a warning, not a failed purge: nothing reads it once
+        the drop-in is gone, and the next publish rewrites it.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$CopilotPolicyDirectory,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$LifecycleDirectory,
+        [Parameter(Mandatory)][ref]$RebootRequired,
+        [Parameter(Mandatory)][AllowEmptyCollection()]
+        [Collections.Generic.List[string]]$Incomplete,
+        [Parameter(Mandatory)][AllowEmptyCollection()]
+        [Collections.Generic.List[string]]$Warnings
+    )
+    $leftover = Remove-DefenseClawNuclearPath `
+        -Path ([IO.Path]::Combine($CopilotPolicyDirectory, '90-defenseclaw.json')) `
+        -Role 'agent sidecar' `
+        -RebootRequired $RebootRequired `
+        -AcceptScheduledDelete
+    if (-not [string]::IsNullOrEmpty($leftover)) {
+        $Incomplete.Add($leftover)
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($LifecycleDirectory)) {
+        return
+    }
+    $store = [IO.Path]::Combine($LifecycleDirectory, 'machine-policy')
+    $leftover = Remove-DefenseClawNuclearPath `
+        -Path ([IO.Path]::Combine($store, 'copilot.json')) `
+        -Role 'GitHub Copilot machine policy record' `
+        -RebootRequired $RebootRequired `
+        -AcceptScheduledDelete
+    if (-not [string]::IsNullOrEmpty($leftover)) {
+        $Warnings.Add($leftover)
+        return
+    }
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $store -PathType Container)) {
+        return
+    }
+    $other = $null
+    try {
+        $other = @(Microsoft.PowerShell.Management\Get-ChildItem `
+                -LiteralPath $store `
+                -Force `
+                -ErrorAction Stop |
+            Microsoft.PowerShell.Utility\Select-Object -First 1)
+    }
+    catch {
+        $Warnings.Add("machine-policy store $store could not be listed: $($_.Exception.Message)")
+        return
+    }
+    if ($other.Count -eq 0) {
+        $leftover = Remove-DefenseClawNuclearPath `
+            -Path $store `
+            -Role 'machine-policy store' `
+            -RebootRequired $RebootRequired `
+            -AcceptScheduledDelete
+        if (-not [string]::IsNullOrEmpty($leftover)) {
+            $Warnings.Add($leftover)
+        }
+    }
+}
+
 function Invoke-DefenseClawNuclearCodexRequirements {
     <#
         Codex requirements.toml on a standalone forced uninstall
@@ -43226,6 +43299,21 @@ function Invoke-DefenseClawNuclearUninstall {
             $incomplete.Add($leftover)
         }
     }
+    # GitHub Copilot's drop-in is machine-wide, and so is the ownership
+    # record the guardian keeps for it in the lifecycle folder: it is none
+    # of this scope's receipts. Both go here, before the lifecycle folder is
+    # judged empty below; a record left behind described a drop-in that was
+    # gone and kept that folder in place.
+    $copilotLifecycleDir = ''
+    if ($nuclearLifecycleDir -match $safeRootPattern) {
+        $copilotLifecycleDir = $nuclearLifecycleDir
+    }
+    Remove-DefenseClawNuclearCopilotPolicy `
+        -CopilotPolicyDirectory ([IO.Path]::Combine($script:ProgramData, 'GitHub', 'Copilot', 'policy.d')) `
+        -LifecycleDirectory $copilotLifecycleDir `
+        -RebootRequired ([ref]$rebootRequired) `
+        -Incomplete $incomplete `
+        -Warnings $warnings
     # The shared lifecycle folder goes too once nothing of another scope is
     # left in it: only this scope's receipts were removed above, and an
     # empty folder (or one holding just the shared lock file) belongs to
@@ -43331,9 +43419,8 @@ function Invoke-DefenseClawNuclearUninstall {
         [IO.Path]::Combine($cursorManaged, '.defenseclaw-managed-runtime-selector.state'),
         [IO.Path]::Combine($cursorManaged, '.defenseclaw-managed-runtime-selector.lock'),
         # GitHub Copilot (the CLI and the GitHub Copilot app): DefenseClaw's
-        # policy.d drop-in and DefenseClaw's own enrollment and runtime
-        # selector folder beside it.
-        [IO.Path]::Combine($copilotManaged, 'policy.d', '90-defenseclaw.json'),
+        # own enrollment and runtime selector folder. Its policy.d drop-in
+        # went in step 2 with its ownership record.
         [IO.Path]::Combine($copilotManaged, 'DefenseClaw')
     )
     foreach ($fixedPath in $sidecars) {
