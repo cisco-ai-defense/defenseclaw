@@ -235,6 +235,15 @@ type InstallWatcher struct {
 	// mcpServers lists the MCP servers admission and the rescan see. Nil
 	// reads the connector config in the gateway's own home.
 	mcpServers func() ([]config.MCPServerEntry, error)
+	// mcpAdmissionKnown is the last successfully listed definition identity
+	// for each server. A later list error can still preserve a completed
+	// failed-scan decision for that definition.
+	mcpAdmissionMu     sync.RWMutex
+	mcpAdmissionKnown  []mcpKnownDefinition
+	mcpAdmissionListed bool
+	// A slower older list read must not replace a newer completed listing.
+	mcpAdmissionReadSeq  atomic.Uint64
+	mcpAdmissionKnownSeq uint64 // guarded by mcpAdmissionMu
 	// admitNewMCP runs install admission for an MCP server that appears
 	// after the first rescan cycle (set with SetMCPServerSource): a managed
 	// computer has no `mcp set`, so a user adding a server to their agent is
@@ -439,6 +448,11 @@ func (w *InstallWatcher) SetRootConnectors(roots map[string]string) {
 func (w *InstallWatcher) SetMCPServerSource(source func() ([]config.MCPServerEntry, error)) {
 	w.mcpServers = source
 	w.admitNewMCP = source != nil
+	w.mcpAdmissionMu.Lock()
+	w.mcpAdmissionKnown = nil
+	w.mcpAdmissionListed = false
+	w.mcpAdmissionKnownSeq = w.mcpAdmissionReadSeq.Add(1)
+	w.mcpAdmissionMu.Unlock()
 }
 
 // RequestRescan runs a rescan cycle soon, without waiting for the interval.
@@ -727,10 +741,42 @@ func (w *InstallWatcher) discoverAddedMCPServers() {
 
 // readMCPServers is the MCP server list admission and the rescan use.
 func (w *InstallWatcher) readMCPServers() ([]config.MCPServerEntry, error) {
-	if w.mcpServers != nil {
-		return w.mcpServers()
+	if !w.admitNewMCP {
+		if w.mcpServers != nil {
+			return w.mcpServers()
+		}
+		return w.cfg.ReadMCPServers()
 	}
-	return w.cfg.ReadMCPServers()
+	readSeq := w.mcpAdmissionReadSeq.Add(1)
+	var servers []config.MCPServerEntry
+	var err error
+	if w.mcpServers != nil {
+		servers, err = w.mcpServers()
+	} else {
+		servers, err = w.cfg.ReadMCPServers()
+	}
+	if err == nil {
+		known := make([]mcpKnownDefinition, 0, len(servers))
+		for _, server := range servers {
+			hash, hashErr := mcpDefinitionHash(server)
+			if hashErr != nil {
+				continue
+			}
+			known = append(known, mcpKnownDefinition{
+				server: config.MCPServerEntry{Name: server.Name, Connector: server.Connector,
+					Home: server.Home, Project: server.Project, Bundled: server.Bundled},
+				path: MCPEventPath(server), hash: hash,
+			})
+		}
+		w.mcpAdmissionMu.Lock()
+		if readSeq > w.mcpAdmissionKnownSeq {
+			w.mcpAdmissionKnown = known
+			w.mcpAdmissionListed = true
+			w.mcpAdmissionKnownSeq = readSeq
+		}
+		w.mcpAdmissionMu.Unlock()
+	}
+	return servers, err
 }
 
 // connectorForPath is the connector that owns path: the tagged watched root
