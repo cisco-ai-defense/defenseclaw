@@ -58,7 +58,7 @@ type UnknownKeyTwin struct {
 func UnknownKeyTwins(input Input, facts Facts) ([]UnknownKeyTwin, bool) {
 	_ = facts
 	if input.Command != "" || len(input.Argv) != 0 || !unknownKeyFileTool(input.Tool) ||
-		len(input.Args) == 0 || !json.Valid(input.Args) {
+		len(input.Args) == 0 || validateJSONWithStringLimit(input.Args, len(input.Args)) != "" {
 		return nil, false
 	}
 	// An oversized extra value does not make the reviewed target disappear.
@@ -81,19 +81,29 @@ func UnknownKeyTwins(input Input, facts Facts) ([]UnknownKeyTwin, bool) {
 	if len(unknown) == 0 {
 		return nil, false
 	}
+	// A large reviewed payload remains the existing over-limit case. The
+	// extra field may be large; only the reduced call must fit the parser.
+	reducedRaw, err := json.Marshal(reduced)
+	if err != nil || len(reducedRaw) > maxArgsJSONBytes || validateJSONWithStringLimit(reducedRaw, maxCommandBytes) != "" {
+		return nil, false
+	}
 	var twins []UnknownKeyTwin
 	seen := map[string]bool{}
 	add := func(args map[string]any) bool {
 		raw, err := json.Marshal(args)
-		if err != nil || seen[string(raw)] {
+		if err != nil {
 			return false
 		}
-		seen[string(raw)] = true
+		if complete, exists := seen[string(raw)]; exists {
+			return complete
+		}
 		view := input
 		view.Args = raw
 		analyzed := Analyze(view)
+		complete := analyzed.Authoritative() && len(analyzed.Paths) > 0
+		seen[string(raw)] = complete
 		twins = append(twins, UnknownKeyTwin{Args: raw, Facts: analyzed})
-		return analyzed.Authoritative() && len(analyzed.Paths) > 0
+		return complete
 	}
 	reducedComplete := len(reduced) != 0 && add(reduced)
 	if reducedComplete && !isApplyPatchTool(input.Tool) {
@@ -123,7 +133,7 @@ func UnknownKeyTwins(input Input, facts Facts) ([]UnknownKeyTwin, bool) {
 	}
 	if targetFields > 1 {
 		for _, key := range unknownKeyTargetKeys {
-			if value, ok := object[key]; ok {
+			if value, ok := object[key].(string); ok {
 				collect(value)
 			}
 		}
@@ -132,7 +142,7 @@ func UnknownKeyTwins(input Input, facts Facts) ([]UnknownKeyTwin, bool) {
 		// The call cannot be read in its reviewed shape: every target it
 		// may name is judged, the reviewed target keys first.
 		for _, key := range unknownKeyTargetKeys {
-			if value, ok := object[key]; ok {
+			if value, ok := object[key].(string); ok {
 				collect(value)
 			}
 		}
