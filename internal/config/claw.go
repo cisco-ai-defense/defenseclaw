@@ -152,18 +152,27 @@ func (c *Config) activeConnector() string {
 		return normalizeConnectorKey(name)
 	}
 	if roster := c.rosterConnectorNames(); len(roster) > 0 {
-		mode := normalizeConnectorKey(string(c.Claw.Mode))
-		for _, name := range roster {
-			if name == mode {
-				return mode
-			}
-		}
-		return roster[0]
+		return rosterPrimary(roster, c.Claw.Mode)
 	}
 	if mode := strings.TrimSpace(string(c.Claw.Mode)); mode != "" {
 		return normalizeConnectorKey(mode)
 	}
 	return ""
+}
+
+// rosterPrimary is the connector a roster resolves to when no
+// guardrail.connector names one: claw.mode when the roster lists it, else the
+// first name in sorted order. roster is normalized and sorted
+// (rosterConnectorNames). The Python Config.active_connector follows the same
+// rule; test/testdata/active-connectors.json pins both (GAP-0707).
+func rosterPrimary(roster []string, mode ClawMode) string {
+	want := normalizeConnectorKey(string(mode))
+	for _, name := range roster {
+		if name == want {
+			return want
+		}
+	}
+	return roster[0]
 }
 
 // activeConnectors returns the configured connector roster for this config, in

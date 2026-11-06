@@ -16,8 +16,6 @@
 
 package config
 
-import "sort"
-
 // IsRetiredConnector reports whether name (any spelling the loader accepts)
 // is a connector 1.0.4 removed. until 1.1: the loader drops its settings, and
 // the staged upgrade check must expect that (GAP-0290).
@@ -139,13 +137,10 @@ func dropRetiredConnectorSettings(cfg *Config) {
 		cfg.Claw.Mode = ""
 		changed = true
 	}
-	if cfg.Guardrail.Connector == "" && len(cfg.Guardrail.Connectors) > 0 {
-		remaining := make([]string, 0, len(cfg.Guardrail.Connectors))
-		for name := range cfg.Guardrail.Connectors {
-			remaining = append(remaining, name)
+	if cfg.Guardrail.Connector == "" {
+		if roster := cfg.rosterConnectorNames(); len(roster) > 0 {
+			cfg.Guardrail.Connector = rosterPrimary(roster, cfg.Claw.Mode)
 		}
-		sort.Strings(remaining)
-		cfg.Guardrail.Connector = remaining[0]
 	}
 	if changed {
 		cfg.LegacyConnectorNotices = append(cfg.LegacyConnectorNotices,
