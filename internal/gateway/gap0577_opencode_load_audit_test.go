@@ -81,3 +81,17 @@ func TestSecureClientOpenCodeLoadKeepsHookDecision(t *testing.T) {
 		t.Fatal("Secure Client load decision was suppressed")
 	}
 }
+
+func TestManagedStandaloneOpenCodeLoadKeepsHookDecision(t *testing.T) {
+	agentIdentityTestSetup(t)
+	cfg := &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
+	if cfg.SecureClientIntegration() {
+		t.Fatal("standalone fixture selected Secure Client")
+	}
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+	req := agentHookRequest{ConnectorName: "opencode", HookEventName: "defenseclaw.plugin.loaded", Payload: map[string]interface{}{"load_heartbeat": true}}
+	if _, _, ok := api.hookDecisionMeta(context.Background(), req); !ok {
+		t.Fatal("managed standalone load decision was suppressed")
+	}
+}
