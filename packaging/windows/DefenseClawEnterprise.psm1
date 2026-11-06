@@ -16930,7 +16930,11 @@ function Repair-DefenseClawDeploymentAclDrift {
         [string]$RedactionKeyClass,
         # Read-only: refuse what the repair would refuse, change nothing, and
         # return whether it would repair (GAP-0590).
-        [switch]$CheckOnly
+        [switch]$CheckOnly,
+        # The caller's content gate scope: an uninstall passes Retain or
+        # Purge, so a purge is never refused for a credential it deletes
+        # unread (g582 review 2 S1).
+        [ValidateSet('Lifecycle', 'Retain', 'Purge')][string]$ContentGateScope = 'Lifecycle'
     )
     $drifted = [string]$RedactionKeyClass -ceq 'trusted_drift'
     if (-not $drifted) {
@@ -16952,7 +16956,8 @@ function Repair-DefenseClawDeploymentAclDrift {
     # config check above keeps its CONFIG= wording; the gate judges the rest of
     # what the re-stamps below would re-trust (GAP-0590 review M3).
     if (Test-DefenseClawStandaloneProfile) {
-        Assert-DefenseClawStandaloneContentTrusted -Layout $Layout -GatewayServiceName $GatewayServiceName
+        Assert-DefenseClawStandaloneContentTrusted -Layout $Layout -GatewayServiceName $GatewayServiceName `
+            -Scope $ContentGateScope
     }
     if ($CheckOnly) {
         return $true
@@ -17023,7 +17028,10 @@ function New-DefenseClawTransaction {
         [switch]$SkipRedactionKeySnapshot,
         # Upgrade and Repair of an active deployment: the authenticated
         # replacement hook, published before the services stop (GAP-0993).
-        [hashtable]$EarlyHookSource
+        [hashtable]$EarlyHookSource,
+        # The content gate scope of the ACL drift repair: the uninstall
+        # passes Retain or Purge, the scope its own gate ran (g582 review 2 S1).
+        [ValidateSet('Lifecycle', 'Retain', 'Purge')][string]$ContentGateScope = 'Lifecycle'
     )
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath) {
         throw 'refusing to open a lifecycle transaction while protected recovery state already exists'
@@ -17156,6 +17164,7 @@ function New-DefenseClawTransaction {
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
                 -RedactionKeyClass $precheckRedactionKeyClass `
+                -ContentGateScope $ContentGateScope `
                 -CheckOnly)
         }
         # Publish prior service state before the first explicit stop. If this
@@ -17350,7 +17359,8 @@ function New-DefenseClawTransaction {
             [void](Repair-DefenseClawDeploymentAclDrift `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
-                -RedactionKeyClass $precheckRedactionKeyClass)
+                -RedactionKeyClass $precheckRedactionKeyClass `
+                -ContentGateScope $ContentGateScope)
         }
         $redactionKeySecurity = if ($SkipRedactionKeySnapshot) {
             # Purge-mode placeholder. The teardown branch of the
@@ -17871,7 +17881,8 @@ function New-DefenseClawTransaction {
                         [void](Repair-DefenseClawDeploymentAclDrift `
                             -Layout $Layout `
                             -GatewayServiceName $GatewayServiceName `
-                            -RedactionKeyClass $precheckRedactionKeyClass)
+                            -RedactionKeyClass $precheckRedactionKeyClass `
+                            -ContentGateScope $ContentGateScope)
                     }
                     catch {
                         # The restart below still runs; this is reported
@@ -48367,7 +48378,8 @@ function Invoke-DefenseClawUninstallLifecycle {
             -IncludeCodexMachineState:$Layout.CodexTargetEnabled `
             -SkipLinkedCodexMachineState `
             -PreserveManagedHooksTeardownJournal `
-            -SkipRedactionKeySnapshot
+            -SkipRedactionKeySnapshot `
+            -ContentGateScope $(if ($Purge) { 'Purge' } else { 'Retain' })
         [void](Suspend-DefenseClawSensorHelperForServicing -Layout $Layout)
         if (Test-DefenseClawStandaloneProfile) {
             Invoke-DefenseClawCoworkDelivery -Layout $Layout `
