@@ -269,6 +269,18 @@ $script:DefenseClawQuarantinedRoots = @()
 # ran with that gateway, and why it declined one. Reset per lifecycle run.
 $script:DefenseClawRecoveryGatewayCandidate = $null
 $script:DefenseClawRecoveryGatewayRuns = @()
+# The SHA-256 of this module's bytes as imported (rel-1-0-6 GAP-0649). A
+# Repair that recovered a pending transaction compares it with the module the
+# recovery put back: this module never drives another release's payload.
+$script:DefenseClawRunningModuleSHA256 = ''
+try {
+    $script:DefenseClawRunningModuleSHA256 = (
+        Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+}
+catch {
+    $script:DefenseClawRunningModuleSHA256 = ''
+}
 # Standalone: the gateway of the running Setup payload, which puts back the
 # OWNER RIGHTS entry an owner write took out of the managed state of the
 # enrolled accounts before the installed helper prepares, collects or purges
@@ -23624,6 +23636,144 @@ function Recover-DefenseClawPendingTransaction {
     }
 }
 
+function Test-DefenseClawRecoveryRestoredOtherRelease {
+    <#
+        Standalone Repair right after a pending-transaction recovery
+        (rel-1-0-6 GAP-0649). The recovery puts back the payload the
+        transaction replaced. When the module it put back is not the module
+        running this lifecycle, the restored binaries are another release's:
+        their helper commands and flags are not this module's (a 1.0.9 Repair
+        called the restored 1.0.8 gateway with --skip-account-failures and
+        failed 1603). Repair then ends with the recovery: Setup re-plans an
+        upgrade with its own payload, and the installed CLI reports the
+        rollback. A Repair that brings its own gateway restages the payload
+        and continues, as before.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Recovery,
+        [Parameter(Mandatory)][string]$Action,
+        [hashtable]$Sources = @{}
+    )
+    if ($Action -ne 'Repair' -or
+        -not (Test-DefenseClawStandaloneProfile) -or
+        -not [bool]$Recovery.recovered -or
+        [bool]$Recovery.fresh_install_rollback -or
+        $Sources.ContainsKey('gateway') -or
+        [string]::IsNullOrEmpty([string]$script:DefenseClawRunningModuleSHA256) -or
+        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.ModulePath -PathType Leaf)) {
+        return $false
+    }
+    Assert-DefenseClawNoReparsePath -Path $Layout.ModulePath
+    $restored = (
+        Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Layout.ModulePath -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    return $restored -cne [string]$script:DefenseClawRunningModuleSHA256
+}
+
+function Get-DefenseClawRecoveryRestoredOtherReleaseResult {
+    <#
+        The result of a Repair that stopped after its recovery restored another
+        release (Test-DefenseClawRecoveryRestoredOtherRelease): the restored
+        deployment's status, with a warning that names what happened.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    $result = Get-DefenseClawLifecycleStatus `
+        -Action 'Repair' `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName
+    $warnings = [Collections.Generic.List[string]]::new()
+    $existing = $result.PSObject.Properties['warnings']
+    if ($null -ne $existing) {
+        foreach ($item in @($existing.Value)) {
+            $warnings.Add([string]$item)
+        }
+    }
+    $warnings.Add(
+        'Repair rolled back an interrupted lifecycle change and restored the release it replaced; ' +
+        'it did not reapply that release with this release''s installer'
+    )
+    $result |
+        Microsoft.PowerShell.Utility\Add-Member `
+            -MemberType NoteProperty `
+            -Name warnings `
+            -Value ([string[]]@($warnings.ToArray())) `
+            -Force
+    return $result
+}
+
+function Write-DefenseClawTransactionLifecyclePins {
+    <#
+        Standalone (rel-1-0-6 GAP-0649). Before a transaction copies its first
+        payload file, record the SHA-256 of the installer and module it
+        installs in the protected transaction directory. Until the transaction
+        commits or rolls back, the installed installer then admits exactly
+        that pair (the release that wrote the transaction and can recover it)
+        besides the pair the deployment record pins. The pinned check itself
+        is unchanged.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SnapshotPath,
+        [hashtable]$Sources = @{}
+    )
+    if (-not (Test-DefenseClawStandaloneProfile) -or
+        -not $Sources.ContainsKey('installer') -or
+        -not $Sources.ContainsKey('module')) {
+        return
+    }
+    $installer = ([string]$Sources['installer'].sha256).ToLowerInvariant()
+    $module = ([string]$Sources['module'].sha256).ToLowerInvariant()
+    foreach ($digest in @($installer, $module)) {
+        if ($digest -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'transaction lifecycle pins need the SHA-256 of the installer and module sources'
+        }
+    }
+    $path = Microsoft.PowerShell.Management\Join-Path `
+        ([IO.Path]::GetDirectoryName($SnapshotPath)) `
+        'lifecycle-pins.json'
+    Write-DefenseClawJsonAtomic -Value ([ordered]@{
+        schema_version = 1
+        installer = $installer
+        module = $module
+    }) -Path $path
+    Set-DefenseClawPathAcl `
+        -Path $path `
+        -Kind AdminFile `
+        -GatewayServiceSID $script:AdministratorsSID
+}
+
+function Get-DefenseClawStagingOrder {
+    <#
+        Standalone (rel-1-0-6 GAP-0649): the installer, then the module, then
+        the CLI, then the other payload files. An interrupted transaction then
+        leaves the lifecycle toolchain of one release: an older installer never
+        meets a newer module, and once the pair is new its transaction pins
+        admit it. Secure Client keeps its order.
+    #>
+    param([string[]]$Names = @())
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return @($Names)
+    }
+    $first = @('installer', 'module', 'cli')
+    $ordered = [Collections.Generic.List[string]]::new()
+    foreach ($name in $first) {
+        if ($Names -ccontains $name) {
+            $ordered.Add($name)
+        }
+    }
+    foreach ($name in @($Names | Microsoft.PowerShell.Utility\Sort-Object)) {
+        if ($first -cnotcontains $name) {
+            $ordered.Add([string]$name)
+        }
+    }
+    return @($ordered.ToArray())
+}
+
 function Assert-DefenseClawRecoveryActivatedForAction {
     <#
         Repair reapplies the installed payload, which is the release recovery
@@ -40670,6 +40820,19 @@ function Invoke-DefenseClawPreLayoutRecovery {
                 Assert-DefenseClawRecoveryActivatedForAction `
                     -Recovery $pendingRecovery `
                     -Action $Action
+                if (Test-DefenseClawRecoveryRestoredOtherRelease `
+                        -Layout $Layout `
+                        -Recovery $pendingRecovery `
+                        -Action $Action `
+                        -Sources $Sources) {
+                    return [pscustomobject]@{
+                        handled = $true
+                        result = (Get-DefenseClawRecoveryRestoredOtherReleaseResult `
+                            -Layout $Layout `
+                            -GatewayServiceName $GatewayServiceName `
+                            -GuardianServiceName $GuardianServiceName)
+                    }
+                }
                 if ([bool]$pendingRecovery.fresh_install_rollback) {
                     if ($Action -eq 'Uninstall' -and $Purge) {
                         $result = Get-DefenseClawLifecycleStatus `
@@ -41302,6 +41465,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
         -SnapshotPath $snapshot)
+    Write-DefenseClawTransactionLifecyclePins `
+        -SnapshotPath $snapshot `
+        -Sources $Sources
     $committedLifecycleRecovery = $null
     try {
         if ($Action -eq 'Install' -and $null -ne $metadata -and
@@ -41368,9 +41534,10 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         else {
             @('config', 'manifest')
         }
-        foreach ($name in @($Sources.Keys | Microsoft.PowerShell.Core\Where-Object {
-            $_ -notin $deferredPolicySources -and $_ -ne 'provider_library'
-        })) {
+        foreach ($name in @(Get-DefenseClawStagingOrder -Names @($Sources.Keys) |
+                Microsoft.PowerShell.Core\Where-Object {
+                    $_ -notin $deferredPolicySources -and $_ -ne 'provider_library'
+                })) {
             $destination = Get-DefenseClawArtifactPath -Layout $Layout -Name $name
             # A release binary whose installed bytes are the source's is
             # kept: a config-only ensure on the installed release copied
@@ -47108,6 +47275,16 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 Assert-DefenseClawRecoveryActivatedForAction `
                     -Recovery $pendingRecovery `
                     -Action $Action
+                if (Test-DefenseClawRecoveryRestoredOtherRelease `
+                        -Layout $layout `
+                        -Recovery $pendingRecovery `
+                        -Action $Action `
+                        -Sources $sources) {
+                    return Get-DefenseClawRecoveryRestoredOtherReleaseResult `
+                        -Layout $layout `
+                        -GatewayServiceName $GatewayServiceName `
+                        -GuardianServiceName $GuardianServiceName
+                }
                 if ([bool]$pendingRecovery.fresh_install_rollback) {
                     if ($Action -eq 'Uninstall' -and $Purge) {
                         $result = Get-DefenseClawLifecycleStatus `
