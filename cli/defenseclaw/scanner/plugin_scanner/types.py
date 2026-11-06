@@ -213,6 +213,8 @@ class PluginManifest:
 class PluginScanOptions:
     profile: str | None = None  # ScanProfile
     policy: str | None = None
+    # Operator data directory containing the agent discovery pointer.
+    data_dir: str = ""
     # Optional LLM override that wins over ``PluginScanPolicy.llm``
     # after the YAML policy is loaded. This is how the unified
     # top-level ``llm:`` config (resolved for ``scanners.plugin``)
