@@ -108,6 +108,14 @@ func TestGX054ArchiveScopeFourCell(t *testing.T) {
 		{"plain tar copied append", "tar -xf plain.tar -C d1 && cp -a d1 e3 && echo k >> e3/p", "allow", "allow", "allow", "archive"},
 		{"plain tar synchronized append", "tar -xf plain.tar -C d1 && rsync -a d1/ e2/ && echo k >> e2/p", "allow", "allow", "allow", "archive"},
 		{"link tar copied append", "tar -xf link.tar -C d1 && cp -a d1 e3 && echo k >> e3/p", "archive", "archive", "archive", "archive"},
+		{"known archive rewrite", "cp link.tar plain.tar; tar -xf plain.tar -C d1 && echo k >> d1/p", "archive", "archive", "archive", "archive"},
+		{"known archive rewrite with copy option", "cp -T link.tar plain.tar; tar -xf plain.tar -C d1 && echo k >> d1/p", "archive", "archive", "archive", "archive"},
+		{"known archive move", "mv link.tar plain.tar; tar -xf plain.tar -C d1 && echo k >> d1/p", "archive", "archive", "archive", "archive"},
+		{"known archive install", "install link.tar plain.tar; tar -xf plain.tar -C d1 && echo k >> d1/p", "archive", "archive", "archive", "archive"},
+		{"known archive rewrite through hard link", "cp link.tar alias.tar; tar -xf plain.tar -C d1 && echo k >> d1/p", "archive", "archive", "archive", "archive"},
+		{"known archive rewrite in redirection", "tar -xf plain.tar -C d1 > \"$(cp link.tar alias.tar; echo out)\" && echo k >> d1/p", "archive", "archive", "archive", "archive"},
+		{"unrelated earlier archive copy", "cp link.tar other.tar; tar -xf plain.tar -C d1 && echo k >> d1/p", "allow", "archive", "allow", "archive"},
+		{"later archive copy", "tar -xf plain.tar -C d1 && cp link.tar alias.tar && echo k >> d1/p", "allow", "allow", "allow", "archive"},
 		{"named protected destination", "tar -xzf missing.tgz -C app && mv app/pkg-1.0 ~/.ssh/authorized_keys", "protected", "protected", "protected", "protected"},
 		{"named protected source", "unzip -q pkg.zip -d app && mv app/authorized_keys app/out", "protected", "protected", "protected", "protected"},
 		{"known protected source value", "F=app/authorized_keys; unzip -q pkg.zip -d app && mv \"$F\" app/out", "protected", "protected", "protected", "protected"},
@@ -128,6 +136,9 @@ func TestGX054ArchiveScopeFourCell(t *testing.T) {
 			r107WriteTar(t, filepath.Join(f.project, "pkg.tgz"), true, tar.Header{Name: "pkg-1.0/", Typeflag: tar.TypeDir}, reg("pkg-1.0/a.c"))
 			r107WriteTar(t, filepath.Join(f.project, "plain.tar"), false, reg("p"))
 			r107WriteTar(t, filepath.Join(f.project, "link.tar"), false, tar.Header{Name: "p", Typeflag: tar.TypeSymlink, Linkname: "../../.ssh/authorized_keys"})
+			if err := os.Link(filepath.Join(f.project, "plain.tar"), filepath.Join(f.project, "alias.tar")); err != nil {
+				t.Fatal(err)
+			}
 			if err := os.WriteFile(filepath.Join(f.project, "pkg.zip"), append([]byte("PK\x05\x06"), make([]byte, 18)...), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -224,8 +235,6 @@ func TestGX054PinnedArchiveMovesRemainStrict(t *testing.T) {
 		{"managed plain sync append", `tar -xf plain.tar -C d1 && rsync -a d1/ e2/ && echo k >> e2/p`, false},
 		{"managed plain append", `tar -xf plain.tar -C d1 && echo k >> d1/p`, false},
 		{"managed plain tgz append", `tar -xzf plain.tgz -C d1 && cp -a d1 e3 && echo k >> e3/p`, false},
-		{"archive rewritten", `cp link.tar plain.tar; tar -xf plain.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, true},
-		{"archive rewritten via alias", `cp link.tar alias.tar; tar -xf plain.tar -C d1 && echo k >> d1/p`, true},
 		{"two archive words", `tar -xf plain.tar --file=plain.tgz -C d1 && echo k >> d1/p`, true},
 	}
 	for _, row := range rows {

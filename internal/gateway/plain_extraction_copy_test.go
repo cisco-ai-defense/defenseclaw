@@ -67,8 +67,8 @@ func r107WriteTar(t *testing.T, path string, zipped bool, headers ...tar.Header)
 // gateway that cannot read the archive behind ProtectHome keeps the opaque
 // reading in strict; balanced judges ordinary destinations. An archive with
 // a symbolic link, a hard link or an unsafe name, and a destination folder
-// that already holds a keys link keep blocking in both tiers. The rewritten
-// archive cases retain their strict expectations in TestGX054PinnedArchiveMovesRemainStrict.
+// that already holds a keys link keep blocking in both tiers. A known
+// link-bearing archive copied onto the extraction source also keeps blocking.
 func TestR107CopyOfAPlainExtractionIsPlain(t *testing.T) {
 	setup := func(t *testing.T, f b36ManagedHookFixture) {
 		reg := func(name string) tar.Header { return tar.Header{Name: name, Typeflag: tar.TypeReg} }
@@ -105,9 +105,9 @@ func TestR107CopyOfAPlainExtractionIsPlain(t *testing.T) {
 		{"fifo member is not a plain file", "project", `tar -xf fifo.tar -C d1 && echo k >> d1/p`, "block"},
 		{"absolute member name is not plain", "project", `tar -xf absolute.tar -C d1 && echo k >> d1/p`, "block"},
 		{"backslash member name is not plain", "project", `tar -xf backslash.tar -C d1 && echo k >> d1/p`, "block"},
-		{"archive rewritten first", "project", `cp link.tar plain.tar; tar -xf plain.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "allow"},
+		{"archive rewritten first", "project", `cp link.tar plain.tar; tar -xf plain.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "block"},
 		{"archive rewritten first through a glob", "project", `cp link.tar p[l]ain.tar; tar -xf plain.tar -C d1 && echo k >> d1/p`, "block"},
-		{"archive rewritten first through a hard-linked name", "project", `cp link.tar alias.tar; tar -xf plain.tar -C d1 && echo k >> d1/p`, "allow"},
+		{"archive rewritten first through a hard-linked name", "project", `cp link.tar alias.tar; tar -xf plain.tar -C d1 && echo k >> d1/p`, "block"},
 		{"two archive words", "project", `tar -xf plain.tar --file=plain.tgz -C d1 && echo k >> d1/p`, "allow"},
 		{"plain tar into a folder holding a keys link, append through it", "project", `tar -xf plain.tar -C d0 && echo k >> d0/p`, "block"},
 		{"plain tar into a folder holding a keys link, cp -a, append to the copy", "project", `tar -xf plain.tar -C d0 && cp -a d0 e4 && echo k >> e4/p`, "block"},
@@ -123,8 +123,8 @@ func TestR107PlainArchiveRewriteViaShellHook(t *testing.T) {
 		name, command, want string
 	}{
 		{"plain extraction", `tar -xf plain.tar -C d1 && echo k >> d1/p`, "allow"},
-		{"archive rewritten first", `cp link.tar plain.tar; tar -xf plain.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "allow"},
-		{"archive rewritten through hard link", `cp link.tar alias.tar; tar -xf plain.tar -C d1 && echo k >> d1/p`, "allow"},
+		{"archive rewritten first", `cp link.tar plain.tar; tar -xf plain.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "block"},
+		{"archive rewritten through hard link", `cp link.tar alias.tar; tar -xf plain.tar -C d1 && echo k >> d1/p`, "block"},
 	}
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, row := range rows {
