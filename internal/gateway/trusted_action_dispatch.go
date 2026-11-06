@@ -156,6 +156,9 @@ type trustedActionRequest struct {
 	LegacyText         string
 	Connector          string
 	EnforcementCapable bool
+	// StrictPolicy grades an unverifiable extra argument as a block.
+	StrictPolicy               bool
+	UnknownKeyPossibleOverflow bool
 	// ArtifactBody is set when LegacyText and Input.Command are the whole
 	// body of a script the call runs (the artifact lane): its comments and
 	// data are not tool-call text, so a migrated literal rule must match a
@@ -213,6 +216,10 @@ type trustedActionRequest struct {
 	// resolve (an empty map value: an unreadable folder, a link loop) and
 	// this gateway cannot resolve either (rel-1-0-2:GAP-0690).
 	unresolvedTarget *bool
+	// resolvedTarget, when set, is told that the code-owned target walk
+	// confirmed a protected file rather than conservatively holding an
+	// unresolved write.
+	resolvedTarget *bool
 	// evidenceCWD places a simple command whose cwd the gateway cannot see
 	// (ProtectHome) where the managed hook client keyed its evidence: the
 	// client's cwd followed through the command's static cd.
@@ -419,6 +426,15 @@ func dispatchTrustedAction(
 		}
 	}
 	if twin, ok := overLimitWriteBoundedTwinRequest(request, facts); ok {
+		defer func() {
+			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
+	// A file-tool call with an argument key outside its reviewed schema is
+	// judged as each reading the harness may run (gas-ux-r1 GAP-0076).
+	twins, overflow := unknownKeyTwinRequests(request, facts)
+	request.UnknownKeyPossibleOverflow = request.UnknownKeyPossibleOverflow || overflow
+	for _, twin := range twins {
 		defer func() {
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
 		}()

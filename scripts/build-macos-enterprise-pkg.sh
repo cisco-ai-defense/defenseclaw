@@ -475,6 +475,24 @@ if [ -n "$installed" ] && awk -v v="$installed" 'BEGIN {
         ) </dev/null >/dev/null 2>&1 &
     fi
 fi
+# GAP-0091: the shared parents the payload is about to create are DefenseClaw's
+# to remove once empty after an uninstall; one that already exists is not.
+# Listed last, after every refusal, so a refused install changes nothing.
+# The postinstall's ensure moves the list into the deployment record.
+d_created=""
+for d_parent in /opt /opt/cisco /usr/local /usr/local/bin; do
+    if [ ! -e "$d_parent" ] && [ ! -L "$d_parent" ]; then
+        d_created="$d_created$d_parent
+"
+    fi
+done
+if [ -n "$d_created" ]; then
+    # The parents get the payload's 0755 and only the lifecycle folder 0700:
+    # mkdir -p under umask 077 made /opt and /opt/cisco 0700 on a fresh Mac,
+    # and standard users could not reach /opt/cisco/defenseclaw.
+    ( (umask 022 && mkdir -p "${state%/*}") &&
+        (umask 077 && mkdir -p "$state" && printf '%s' "$d_created" >>"$state/created-parent-dirs") ) 2>/dev/null || true
+fi
 exit 0
 EOF
 "$REPO_ROOT/scripts/stamp-package-script.sh" "$VERSION" "$SCRIPTS/preinstall" "$SCRIPTS/preinstall"

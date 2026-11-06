@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import shlex
 import socket
@@ -53,6 +54,104 @@ UNSAFE_PATH_INSPECTION_FAILED = "unsafe-path-inspection-failed"
 UNSAFE_PATH_NAMESPACE_VIEW = "unsafe-path-namespace-view"
 
 _tracked_host_stat_lock = threading.Lock()
+
+# The local account records are checked alongside NSS before a group is
+# considered private. Tests replace these paths with isolated account data.
+_PASSWD_FILE = "/etc/passwd"
+_GROUP_FILE = "/etc/group"
+
+
+def _account_records(path: str) -> list[list[str]] | None:
+    try:
+        with open(path, encoding="utf-8", errors="strict") as handle:
+            lines = handle.read().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    records = []
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line.startswith(("+", "-")):
+            return None
+        records.append(line.split(":"))
+    return records
+
+
+def _has_access_acl(path: str) -> bool:
+    """Treat an unreadable ACL as present; group mode bits can be its mask."""
+    getxattr = getattr(os, "getxattr", None)
+    if getxattr is None:
+        return True
+    for attribute in ("system.posix_acl_access", "system.nfs4_acl", "system.nfs4acl"):
+        try:
+            getxattr(path, attribute, follow_symlinks=False)
+        except OSError as exc:
+            if exc.errno in (errno.ENODATA, errno.ENOTSUP, getattr(errno, "ENOATTR", errno.ENODATA)):
+                continue
+            return True
+        return True
+    return False
+
+
+def owner_private_group(path: str, info: os.stat_result) -> bool:
+    """Whether a Linux path is owned by this account and its private group."""
+    if not sys.platform.startswith("linux") or os.name == "nt":
+        return False
+    uid, gid = os.geteuid(), info.st_gid
+    try:
+        target = os.path.realpath(path)
+        resolved = os.stat(target)
+    except OSError:
+        return False
+    if (resolved.st_dev, resolved.st_ino) != (info.st_dev, info.st_ino):
+        return False
+    if info.st_uid != uid or _has_access_acl(target):
+        return False
+    passwd = _account_records(_PASSWD_FILE)
+    groups = _account_records(_GROUP_FILE)
+    if passwd is None or groups is None:
+        return False
+    try:
+        owners = [rec for rec in passwd if len(rec) >= 4 and int(rec[2]) == uid]
+        if len(owners) != 1:
+            return False
+        name = owners[0][0]
+        if not name:
+            return False
+        for rec in passwd:
+            if len(rec) < 4:
+                return False
+            record_uid, record_gid = int(rec[2]), int(rec[3])
+            if record_gid == gid and record_uid != uid:
+                return False
+            if rec[0] == name and (record_uid != uid or record_gid != gid):
+                return False
+        matches = [rec for rec in groups if len(rec) >= 4 and int(rec[2]) == gid]
+    except ValueError:
+        return False
+    if not matches:
+        return False
+    for rec in matches:
+        members = {member.strip() for member in rec[3].split(",") if member.strip()}
+        if rec[0] != name or not members <= {name}:
+            return False
+    try:
+        import grp
+        import pwd
+
+        account = pwd.getpwuid(uid)
+        group = grp.getgrgid(gid)
+    except (ImportError, KeyError, OSError):
+        return False
+    return account.pw_name == name and account.pw_gid == gid and group.gr_name == name and set(group.gr_mem) <= {name}
+
+
+def other_accounts_can_write(path: str, info: os.stat_result) -> bool:
+    """Check other-write and group-write after proving a private group."""
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & 0o002:
+        return True
+    return bool(mode & 0o020) and not owner_private_group(path, info)
 
 
 def tracked_host_owner_uid(path: str | os.PathLike[str], info: os.stat_result) -> int:

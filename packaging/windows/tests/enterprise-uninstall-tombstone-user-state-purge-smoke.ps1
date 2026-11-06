@@ -108,7 +108,6 @@ function Remove-DefenseClawCommittedManagedHooksTeardownJournal {
 }
 function Remove-DefenseClawCommittedManagedHooksSerializationLocks { param([hashtable]$Layout) }
 function Remove-DefenseClawRuntimeSelectorState { param([string]$HookPath, [string[]]$Directories) return @() }
-function Remove-DefenseClawEmptyClaudeManagedSettingsFolders { param([string]$ProgramFiles) return @() }
 function Revoke-DefenseClawStateAncestorTraverse { param([string]$Path, [string]$GatewayServiceSID) }
 function Test-DefenseClawStandaloneVendorDirectory { param([string]$Path) return $false }
 function Revoke-DefenseClawStandaloneVendorUsersRead { param([string]$Path, [string]$Scope) }

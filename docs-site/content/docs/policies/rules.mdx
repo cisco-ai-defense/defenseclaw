@@ -59,7 +59,7 @@ guardrail:
 
 `use-pack` takes a pack name under `~/.defenseclaw/policies/guardrail/` or a directory path (`./NAME` for a folder in the current directory). Add `--connector X` to select the pack for one connector only. A pattern-only rule can block matching prompts and content, but a tool-call pattern match is detection-only and never blocks, whatever `block_at` is. For a tool-call block, use an `expression` over complete action facts. `tool_call_only` limits where the pattern runs; it does not make it enforceable. See [CEL authoring](/docs/policies/cel/authoring).
 
-On a managed host the Python CLI is not installed. Validate with `defenseclaw-gateway rulepack validate --dir PACK` and set `rule_pack` and `custom_packs` in the admin config ([custom rule packs](/docs/enterprise/configuration)).
+On a managed host the Python CLI is not installed. Validate with `/opt/defenseclaw/bin/defenseclaw-gateway rulepack validate --dir PACK` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS) and set `rule_pack` and `custom_packs` in the admin config ([custom rule packs](/docs/enterprise/configuration)).
 
 ### What the digest covers
 

@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -391,6 +392,24 @@ func TestPluginScanCommand(t *testing.T) {
 			if args[i] != want[i] {
 				t.Fatalf("args[%d] = %q, want %q", i, args[i], want[i])
 			}
+		}
+	})
+
+	t.Run("vendor identity can be disabled for the existing scan path", func(t *testing.T) {
+		s := &PluginScanner{BinaryPath: "defenseclaw", DisableVendorIdentity: true}
+		_, args := s.pluginScanCommand("/tmp/plugin")
+		want := []string{"plugin", "scan", "--json", "/tmp/plugin", "--disable-vendor-identity"}
+		if !reflect.DeepEqual(args, want) {
+			t.Fatalf("args = %v, want %v", args, want)
+		}
+	})
+
+	t.Run("custom scanner arguments stay unchanged", func(t *testing.T) {
+		s := &PluginScanner{BinaryPath: "/tmp/custom-scanner", DisableVendorIdentity: true}
+		_, args := s.pluginScanCommand("/tmp/plugin")
+		want := []string{"plugin", "scan", "--json", "/tmp/plugin"}
+		if !reflect.DeepEqual(args, want) {
+			t.Fatalf("args = %v, want %v", args, want)
 		}
 	})
 }

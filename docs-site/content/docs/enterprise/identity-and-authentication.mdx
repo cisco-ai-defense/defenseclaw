@@ -246,6 +246,15 @@ guardrail:
   default_profile: ""        # "" keeps the global guardrail.* behaviour
 ```
 
+This example uses Linux SSSD's `name@domain` group spelling. On a managed
+AD-bound Mac, use the exact `DOMAIN\group` name shown by
+`enterprise macos profile-explain --user bob --connector codex`. Replace the
+example's group selector with:
+
+```yaml title="macOS AD group selector"
+match: {groups: ['CORP\contractors']}
+```
+
 ```bash
 defenseclaw config validate
 defenseclaw guardrail profile list
@@ -260,7 +269,7 @@ defenseclaw guardrail profile explain --user bob@corp.example.com --connector co
   applies (codex): mode=action block_at=MEDIUM alert_at=pack hilt=off rule_pack=...
 ```
 
-Use the group name exactly as `id -Gn` prints it. A Windows group is `CORP\Contractors`, the bare name or its SID. Users of a child domain of the joined domain match `users` assignments only when you list their domain in `ai_discovery.trusted_ad_child_domains`; see [Child domains of the joined realm](/docs/enterprise/identity-sources#child-domains-of-the-joined-realm). Precedence, worked scenarios, the audit record and delivery to managed hosts are in [User- and group-based policies](/docs/guardrail/user-and-group-policies).
+On Linux, use the group name exactly as `id -Gn` prints it. On macOS, a Linux `name@domain` selector does not select the `DOMAIN\group` AD membership. A Windows group is `CORP\Contractors`, the bare name or its SID. Users of a child domain of the joined domain match `users` assignments only when you list their domain in `ai_discovery.trusted_ad_child_domains`; see [Child domains of the joined realm](/docs/enterprise/identity-sources#child-domains-of-the-joined-realm). Precedence, worked scenarios, the audit record and delivery to managed hosts are in [User- and group-based policies](/docs/guardrail/user-and-group-policies).
 
 ### Check what DefenseClaw knows about a user
 

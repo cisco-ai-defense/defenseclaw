@@ -1081,7 +1081,7 @@ func TestWindowsEnsureBundleConfirmsThenRequiresBundles(t *testing.T) {
 	if err := os.WriteFile(layout.ConfigPath, rendered, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := migrateManagedStandaloneConfig(ctx, layout.ConfigPath); err != nil {
+	if err := migrateManagedStandaloneConfig(ctx, layout.ConfigPath, ""); err != nil {
 		t.Fatalf("record installed bundle config: %v", err)
 	}
 	attribution, ok := observabilityruntime.ReadBundleAttribution(layout.ConfigPath)

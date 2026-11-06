@@ -1103,6 +1103,10 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// A managed Windows hook starts the installer-owned gateway after the
 	// restart budget; a per-user hook started its own gateway above.
 	if err != nil && opts.ManagedEnterprise && opts.GatewayRecovery != nil && connectionRefused(err) {
+		// The service watch is for a call a stopping gateway took: this one
+		// reached none, and the start reads the service as stopped until it
+		// runs (GAP-0648 review F3). The answer deadline still bounds it.
+		stopWatch()
 		if recoveryErr := opts.GatewayRecovery(ctx, err); recoveryErr == nil && ctx.Err() == nil {
 			// The initial request proved no listener was present. Recovery verifies
 			// and starts the exact installer-owned gateway, including authenticated
@@ -1398,7 +1402,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		opts.answerWatch.setDeliveryReceipt(func(answered, localBlock bool) {
 			// finish calls this only after it writes the answer to the agent.
 			// The receipt shares the managed process deadline with the answer.
-			// A late healthy verdict still reaches the agent before this wait.
+			// On a managed call outside Secure Client a verdict read after
+			// that deadline never reaches the agent: the watchdog's closed
+			// answer does (lateAnswerDue).
 			stopAnswer()
 			if answered {
 				receiptWait := hookDeliveryReceiptTimeout
@@ -1532,8 +1538,11 @@ func retryAfterDelay(value string) time.Duration {
 	if err != nil || seconds < 1 {
 		seconds = 1
 	}
-	return time.Duration(min(seconds, 3)) * time.Second
+	return time.Duration(min(seconds, 3)) * retryAfterSecond
 }
+
+// retryAfterSecond is one second of a Retry-After. A variable for tests.
+var retryAfterSecond = time.Second
 
 // managedAuditUnavailableReason is the hook-failure reason of a managed call
 // the gateway refused because it could not write the call's audit record
@@ -1659,10 +1668,7 @@ func sendHookRequest(
 	opts.requestFacts.set(req.Header, opts, payload)
 	var delivery *hookDeliveryRequest
 	if wantsHookDeliveryReceipt(opts) {
-		gatewayStarting := hookDeliveryGatewayStarting
-		req, delivery = prepareHookDeliveryRequest(req, payload, hookDeliveryWait(opts), func(ctx context.Context) bool {
-			return gatewayStarting(ctx, opts)
-		})
+		req, delivery = prepareHookDeliveryRequest(req, payload, hookDeliveryWait(opts), hookDeliveryGatewayStarting(opts))
 	}
 
 	var connected atomic.Bool
@@ -2896,7 +2902,7 @@ const perUserGatewayStatusHint = " `defenseclaw-gateway status` shows its state.
 // line names the blocked or allowed event instead, a prompt rather than a
 // tool for UserPromptSubmit (GAP-1706).
 func unreachableLead(opts Options, sp spec, reason, verdict string) string {
-	if strings.HasPrefix(reason, foreignListenerReasonPrefix) {
+	if perUserPeerRefusal(reason) {
 		return verdict + " this " + hookEventSubject(opts.Event)
 	}
 	return "gateway unreachable, " + verdict + " " + sp.subject
@@ -2910,7 +2916,7 @@ const perUserNotOutageNote = "not a gateway outage, so it is blocked in every fa
 // outage mode, so a block says "fail mode closed". A listener DefenseClaw
 // cannot verify is not an outage and says so (GAP-1735).
 func unreachableModeNote(opts Options, reason string) string {
-	notOutage := strings.HasPrefix(reason, foreignListenerReasonPrefix)
+	notOutage := perUserPeerRefusal(reason)
 	if notOutage && !opts.perUserOutage && !opts.ManagedEnterprise && opts.ManagedUnixSocket == "" &&
 		!opts.SecureClient && !opts.StrictAvailability && !perUserInstallWindow(opts) {
 		return perUserNotOutageNote
@@ -2955,7 +2961,7 @@ const perUserInstallWindowDetail = "DefenseClaw is being installed or upgraded f
 // gateway's own error answer nor a listener DefenseClaw cannot verify,
 // which keep their cause.
 func perUserInstallWindowNamesTheInstall(opts Options, reason string) bool {
-	return opts.gatewayRefusal == "" && !strings.HasPrefix(reason, foreignListenerReasonPrefix) && perUserInstallWindow(opts)
+	return opts.gatewayRefusal == "" && !perUserPeerRefusal(reason) && perUserInstallWindow(opts)
 }
 
 // perUserGatewayDownText is what a per-user hook that fails closed because
@@ -2969,7 +2975,7 @@ func perUserGatewayDownText(opts Options, reason string) string {
 		// The gateway answered with an error of its own (perUserRefusalText).
 		return opts.gatewayRefusal
 	}
-	if strings.HasPrefix(reason, foreignListenerReasonPrefix) && !opts.ManagedEnterprise {
+	if perUserPeerRefusal(reason) && !opts.ManagedEnterprise {
 		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": " + reason + "."
 	}
 	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {

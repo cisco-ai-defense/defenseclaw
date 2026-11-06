@@ -48,8 +48,8 @@ $DefenseClaw = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'
 
 Run these as root on Linux and macOS, and from an elevated prompt on Windows, so
 every check can read the protected files. On Windows the lifecycle runs on
-PowerShell 7, which must be installed; you can start `defenseclaw.exe` from any
-shell.
+PowerShell 7, which must be installed; you can start the CLI from any shell by its
+full path.
 
 | Result of `verify` | Linux and macOS | Windows |
 | --- | --- | --- |
@@ -557,7 +557,7 @@ A file event starts a guardian pass at once, and the pass watches every protecte
 
 To find the account, read `warnings[]` in `status --json` or `verify --json`: each
 `guardian_target_user_path` and `guardian_target_failed` entry names the user, the
-connector and the reason. As root, `defenseclaw-gateway enterprise hooks status --json`
+connector and the reason. As root, `/opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks status --json` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS)
 lists every user and connector with its state.
 
 ### When a user breaks their own setup (Linux and macOS)
@@ -784,7 +784,7 @@ To forward records to a SIEM, add `observability.destinations` to the managed co
 you deploy. Destination kinds include OTLP, Splunk HEC, HTTP JSONL and JSONL files;
 see [Observability](/docs/observability). `enterprise <os> status` and `verify` warn
 when an optional destination is failing. For the destination name, circuit state, last
-failure code and rejected count, run `defenseclaw-gateway status` on the managed host
+failure code and rejected count, run `/opt/defenseclaw/bin/defenseclaw-gateway status` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway status` on macOS, `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' status` on Windows) on the managed host
 or read its loopback `/health` `telemetry.details.destinations` object. A failed
 optional destination does not stop the local audit store or sibling destinations.
 `no_space` means a JSONL file destination's volume is full; free space there and let
@@ -857,10 +857,10 @@ You are an AI agent working for an administrator, on an admin workstation or a t
 2. Check the candidate file before anything is installed.
 
    ```bash
-   defenseclaw-gateway config validate ./config.yaml
+   /opt/defenseclaw/bin/defenseclaw-gateway config validate ./config.yaml
    ```
 
-   Expected: no error, and the previous config stays in force either way. The CLI is not installed on a managed host; run this where the gateway binary is, or from the unpacked release archive.
+   Expected: no error, and the previous config stays in force either way. The CLI is not installed on a managed host, and the gateway is on no `PATH`: run the gateway by its full path (`/opt/defenseclaw/bin/defenseclaw-gateway` on Linux, `/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS), or the `defenseclaw-gateway` of the unpacked release archive.
    If it prints an error: report the setting it names and the profile; do not guess a value (`config_invalid` in [Enterprise troubleshooting](/docs/enterprise/troubleshooting)).
 
 3. Show the administrator the config and the artifact name and SHA-256 you will use. Ask: "Run ensure on this host?" Continue only on yes.

@@ -93,10 +93,15 @@ func hermesSealedRegistrationWithoutProof(opts SetupOpts, target, reason string)
 	return true
 }
 
-// hermesHookScriptSealed reports whether the hook script at target has the
-// digest the hook contract lock sealed for it.
+// hermesHookScriptSealed reports whether the hook script at target matches the
+// pending install digest, or the published lock for ordinary readers.
 func hermesHookScriptSealed(opts SetupOpts, target string) bool {
-	sealed := LoadHookContractLockEntry(opts.DataDir, "hermes").HookScriptDigests[filepath.Base(target)]
+	sealed := ""
+	if opts.pendingHookScriptDigests != nil {
+		sealed = opts.pendingHookScriptDigests[filepath.Base(target)]
+	} else {
+		sealed = LoadHookContractLockEntry(opts.DataDir, "hermes").HookScriptDigests[filepath.Base(target)]
+	}
 	if sealed == "" {
 		return false
 	}

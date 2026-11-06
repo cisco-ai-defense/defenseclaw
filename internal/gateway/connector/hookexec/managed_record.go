@@ -59,7 +59,7 @@ func recordManagedHookDecision(opts Options, sp spec, reason, category, failMode
 	// Written straight to the durable recorder, never through the standard
 	// logger: agents surface hook stderr, and Claude Code turns it into the
 	// block message shown to the user and the model.
-	managedHookDecisionRecorder(
+	opts.failureLog.recorder()(
 		managedHookDecisionRecordSource(opts.ManagedGatewayServiceName),
 		marker,
 		managed.FormatResilienceEvent(marker, fields),

@@ -80,16 +80,10 @@ const (
 	maxPersistedLocalModelAPISignals = 2 * maxLocalModelAPIItems
 )
 
-// managedEnterpriseScanInterval is the minimum full-scan cadence in
-// managed_enterprise mode. Every full-scan tick still fans out through
-// managedInventoryEmit, so this is the MAXIMUM AI Defense publish rate — not
-// the publish cadence itself. The gateway emitter change-gates the actual
-// publish on a content fingerprint (see managedInventoryPublishState in
-// internal/gateway), so a steady-state endpoint ships nothing on most ticks and
-// a complete bundle at least once every managedInventoryFullBundleInterval.
-// The value is also the floor applied to ProcessIntervalSec in the same
-// mode so the two tickers never diverge onto a faster wall-clock.
-const managedEnterpriseScanInterval = 30 * time.Minute
+// secureClientScanInterval retains the existing Secure Client fleet cadence.
+// Standalone managed discovery uses its configured interval so local inventory
+// consumers see each full scan, including IDE extensions, on that cadence.
+const secureClientScanInterval = 30 * time.Minute
 
 // aiDiscoveryStateVersion is the schema version of the on-disk state file
 // (`ai_discovery_state.json`). v2 introduced per-signal `evidence_hash`,
@@ -905,26 +899,19 @@ func normalizeAIDiscoveryOptions(opts AIDiscoveryOptions) AIDiscoveryOptions {
 	if opts.ProcessInterval <= 0 {
 		opts.ProcessInterval = 60 * time.Second
 	}
-	// In managed_enterprise every scan tick (full or process-only) fans
-	// out through managedInventoryEmit, so a 60s process interval becomes
-	// a 60s connector/MCP snapshot push to AI Defense. Push volume, not
-	// process-detection cost, dominates the operational spend on managed
-	// installs — align the process cadence with the full-scan cadence so
-	// the two tickers produce one push per full-scan cycle instead of
-	// several. The full-scan cadence is itself lifted to 30 min in
-	// managed_enterprise; the process-interval floor tracks it so both
-	// tickers fire on the same 30-min beat. Operators can still configure
-	// a longer interval; the floor only lifts values below the managed
-	// default.
-	if opts.ManagedEnterprise && opts.ScanInterval < managedEnterpriseScanInterval {
-		opts.ScanInterval = managedEnterpriseScanInterval
+	// Secure Client keeps its fleet scan cadence. The standalone managed
+	// profile serves its IDE inventory locally, so raising its full-scan
+	// interval here would make scan_interval_min ineffective for every
+	// inventory consumer. Process-only scans do not refresh that inventory.
+	if opts.ManagedEnterprise && opts.SecureClient && opts.ScanInterval < secureClientScanInterval {
+		opts.ScanInterval = secureClientScanInterval
 	}
-	if opts.ManagedEnterprise && opts.ProcessInterval < managedEnterpriseScanInterval {
-		opts.ProcessInterval = managedEnterpriseScanInterval
+	if opts.ManagedEnterprise && opts.SecureClient && opts.ProcessInterval < secureClientScanInterval {
+		opts.ProcessInterval = secureClientScanInterval
 	}
 	// Default the fleet-wide publish jitter to 10 % of the full-scan
-	// cadence in managed_enterprise. At the 30-min managed default this
-	// is a 3-min window; each endpoint's startup scan and each scheduled
+	// cadence in managed_enterprise. At the 30-min Secure Client default
+	// this is a 3-min window; each endpoint's startup scan and each scheduled
 	// tick land at a uniformly random offset inside that window, so a
 	// synchronized fleet event (reboot, config reload, AI Defense outage
 	// recovery) does not translate into a synchronized ingest spike.

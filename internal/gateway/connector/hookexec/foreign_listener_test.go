@@ -4,8 +4,14 @@
 package hookexec
 
 import (
+	"errors"
+	"net"
+	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 )
 
 // GAP-1343: when another account's process holds this account's gateway
@@ -46,5 +52,43 @@ func TestForeignListenerGetsNoTokenAndIsNamed(t *testing.T) {
 	foreignListenerPID = func(string, int, string) int { t.Fatal("managed hook ran the per-user check"); return 0 }
 	if pid := perUserForeignListener(Options{ManagedEnterprise: true, APIAddr: "127.0.0.1:8787"}); pid != 0 {
 		t.Fatalf("managed pid = %d", pid)
+	}
+}
+
+func TestPerUserHookNamesSameHomeRootListenerWithoutSending(t *testing.T) {
+	oldPID, oldHolder, oldClass := foreignListenerPID, perUserPortHolder, perUserListenerClass
+	t.Cleanup(func() {
+		foreignListenerPID, perUserPortHolder, perUserListenerClass = oldPID, oldHolder, oldClass
+	})
+	foreignListenerPID = func(string, int, string) int { return 0 }
+	perUserPortHolder = func(string, int) (daemon.PortHolder, error) {
+		return daemon.PortHolder{PID: 1, UID: 0}, nil
+	}
+	perUserListenerClass = func(string, int, string, daemon.PortHolder, error, bool) daemon.PerUserListenerClass {
+		return daemon.PerUserListenerOwnGatewayRunAsRoot
+	}
+	peer := newPeerListener(t, "127.0.0.1:0", false)
+	addr := peer.addr()
+	result := run(t, "claudecode", nil, func(opts *Options) {
+		opts.APIAddr = addr
+		opts.Home = t.TempDir()
+		opts.HTTPClient = verifiedTestClient(addr, func(net.Conn) error {
+			return errors.New("connected gateway socket belongs to another account")
+		})
+		opts.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo hi"}}`)
+		opts.FailMode = "closed"
+		opts.OutageFailModeNow = func() string { return "open" }
+		opts.StartedAt = time.Now()
+	})
+	out := result.stdout + result.stderr
+	if !nativeOutageBlocked(result) || !strings.Contains(out, daemon.RootGatewayListenerReason) ||
+		!strings.Contains(out, "sudo env DEFENSECLAW_HOME=") || strings.Contains(out, "--api-port") {
+		t.Fatalf("root listener result: code=%d output=%q", result.code, out)
+	}
+	if peer.received.Load() != 0 {
+		t.Fatalf("root listener received %d request bytes", peer.received.Load())
+	}
+	if got := perUserRootGatewayReason(Options{ManagedEnterprise: true, APIAddr: addr, Home: os.TempDir()}); got != "" {
+		t.Fatalf("managed hook used per-user root diagnosis: %q", got)
 	}
 }

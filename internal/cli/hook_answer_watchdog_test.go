@@ -38,7 +38,7 @@ func TestHookArmsTheAnswerWatchdogBeforeTheRuntimeResolution(t *testing.T) {
 		_ = writer.Close()
 		savedStdin := os.Stdin
 		os.Stdin = reader
-		stdin, watchdog := armHookAnswerWatchdog("claudecode", "", "", "", true, time.Now(), func(int) {})
+		stdin, watchdog := armHookAnswerWatchdog("claudecode", "", "", "", true, secureClientHost(), time.Now(), func(int) {})
 		os.Stdin = savedStdin
 		if (watchdog != nil) != test.armed {
 			t.Fatalf("%s: watchdog armed=%v, want %v", test.payload, watchdog != nil, test.armed)
@@ -87,7 +87,7 @@ func TestManagedHookArmsTheWatchdogThenPrefetchesTheProfileLookup(t *testing.T) 
 	t.Cleanup(func() { os.Stdin = savedStdin; _ = reader.Close() })
 	armed := make(chan *hookexec.AnswerWatchdog, 1)
 	go func() {
-		_, watchdog := armHookAnswerWatchdog("claudecode", "", "", "", true, time.Now(), func(int) {})
+		_, watchdog := armHookAnswerWatchdog("claudecode", "", "", "", true, secureClientHost(), time.Now(), func(int) {})
 		armed <- watchdog
 	}()
 	var watchdog *hookexec.AnswerWatchdog
@@ -144,7 +144,7 @@ func TestPerUserHookEarlyAnswerIsClosedWhileTheInstallerHoldsTheDataDirectory(t 
 		// The 3.5 s answer budget is nearly spent: the deadline passes
 		// while the work before Run is held.
 		started := time.Now().Add(-3400 * time.Millisecond)
-		_, watchdog := armHookAnswerWatchdog("claudecode", "PreToolUse", "open", "", false, started, func(code int) { exited <- code })
+		_, watchdog := armHookAnswerWatchdog("claudecode", "PreToolUse", "open", "", false, false, started, func(code int) { exited <- code })
 		os.Stdin, os.Stdout, os.Stderr = savedStdin, savedStdout, savedStderr
 		_ = reader.Close()
 		if watchdog == nil {
@@ -163,5 +163,33 @@ func TestPerUserHookEarlyAnswerIsClosedWhileTheInstallerHoldsTheDataDirectory(t 
 		if !blocked {
 			t.Fatalf("installing=%v: exit %d output %q, want blocked", installing, code, out)
 		}
+	}
+}
+
+// GAP-0648 review 3 L1: a hook call reads its machine's Secure Client state
+// once (the hook command, before it arms the watchdog) and its options use
+// that reading: building them reads it no second time, so the start rule and
+// opts.SecureClient cannot disagree during a Secure Client install, also on
+// the Cursor --input-file path, which arms no watchdog.
+func TestHookOptionsUseTheCallsSecureClientReading(t *testing.T) {
+	saved := secureClientHost
+	t.Cleanup(func() { secureClientHost = saved })
+	reads := 0
+	secureClientHost = func() bool { reads++; return false }
+	for _, test := range []struct {
+		managed, secureClient, want bool
+	}{
+		{true, true, true},
+		{true, false, false},
+		{false, true, false},
+	} {
+		opts := buildHookOptionsForCall("cursor", "preToolUse", "", "", test.managed, test.secureClient)
+		if opts.SecureClient != test.want {
+			t.Errorf("managed %v, Secure Client reading %v: opts.SecureClient = %v, want %v",
+				test.managed, test.secureClient, opts.SecureClient, test.want)
+		}
+	}
+	if reads != 0 {
+		t.Fatalf("building the options read the Secure Client state %d more times", reads)
 	}
 }

@@ -1032,8 +1032,8 @@ func (d *Daemon) stop(timeout time.Duration, request GracefulStopRequest) error 
 		if errors.Is(err, syscall.EPERM) {
 			return fmt.Errorf(
 				"%w: PID %d was started with administrator rights for %s; stop it the same way "+
-					"(the app that started it, or sudo defenseclaw-gateway stop)",
-				ErrOtherAccountProcess, pid, d.dataDir,
+					"(the app that started it, or %s)",
+				ErrOtherAccountProcess, pid, d.dataDir, rootGatewayStopCommand(d.dataDir),
 			)
 		}
 		return fmt.Errorf("daemon: send term signal: %w", err)

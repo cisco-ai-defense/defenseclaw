@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -2102,6 +2103,7 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 		serviceAccount string
 		jsonOutput     bool
 		record         bool
+		approvedSHA256 string
 		recordRestored bool
 		repairRollback bool
 	)
@@ -2114,6 +2116,9 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 			if repairRollback && (record || recordRestored) {
 				return errors.New("repair-rollback is read-only and cannot record a config generation")
 			}
+			if approvedSHA256 != "" && (!record || !windowsServiceConfigSHA256Pattern.MatchString(approvedSHA256)) {
+				return errors.New("approved-config-sha256 takes the 64 lowercase hex digits of the installed approved source and needs record-lifecycle")
+			}
 			if recordRestored {
 				return recordRestoredWindowsServiceConfig(cmd, configPath, dataDir, serviceAccount, jsonOutput)
 			}
@@ -2122,7 +2127,7 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 			if repairRollback {
 				report, err = validateWindowsRepairRollbackConfig(configPath, dataDir, serviceAccount)
 			} else {
-				report, err = validateWindowsServiceConfig(configPath, dataDir, serviceAccount, record)
+				report, err = validateWindowsServiceConfigApproved(configPath, dataDir, serviceAccount, record, approvedSHA256)
 			}
 			if jsonOutput {
 				if err != nil {
@@ -2148,6 +2153,8 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit machine-readable JSON")
 	cmd.Flags().BoolVar(&record, "record-lifecycle", false,
 		"migrate a config_version 8 config and record the installed config generation (install-like lifecycle only)")
+	cmd.Flags().StringVar(&approvedSHA256, "approved-config-sha256", "",
+		"sha256 of the approved source this run installed as config.yaml; with record-lifecycle it records those bytes as the lifecycle generation over a hand-edit record of them")
 	cmd.Flags().BoolVar(&recordRestored, "record-restored", false,
 		"record the config a lifecycle rollback restored as a new generation, without validating or migrating it")
 	cmd.Flags().BoolVar(&repairRollback, "repair-rollback", false,
@@ -2265,6 +2272,10 @@ func recordRestoredWindowsServiceConfig(cmd *cobra.Command, configPath, dataDir,
 	return err
 }
 
+// windowsServiceConfigSHA256Pattern is a sha256 as config.generation.json
+// records it.
+var windowsServiceConfigSHA256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
 // validateWindowsServiceConfig checks the installed config. Only the
 // install-like lifecycle passes record, inside its transaction: verify and
 // status run the same check read-only, so a hand edit is never recorded as
@@ -2274,6 +2285,20 @@ func validateWindowsServiceConfig(
 	expectedDataDir string,
 	serviceAccount string,
 	record bool,
+) (windowsServiceConfigValidation, error) {
+	return validateWindowsServiceConfigApproved(configPath, expectedDataDir, serviceAccount, record, "")
+}
+
+// validateWindowsServiceConfigApproved is validateWindowsServiceConfig for
+// the transaction's config step, which also passes the sha256 of the approved
+// source it installed as config.yaml ("" for none; see
+// migrateManagedStandaloneConfig).
+func validateWindowsServiceConfigApproved(
+	configPath string,
+	expectedDataDir string,
+	serviceAccount string,
+	record bool,
+	approvedSHA256 string,
 ) (windowsServiceConfigValidation, error) {
 	var report windowsServiceConfigValidation
 	configPath, err := filepath.Abs(strings.TrimSpace(configPath))
@@ -2345,7 +2370,7 @@ func validateWindowsServiceConfig(
 		// config becomes 9 here, and the installed config is recorded in
 		// config.generation.json.
 		if record {
-			if err := migrateManagedStandaloneConfig(context.Background(), configPath); err != nil {
+			if err := migrateManagedStandaloneConfig(context.Background(), configPath, approvedSHA256); err != nil {
 				return windowsServiceConfigValidation{}, err
 			}
 		}

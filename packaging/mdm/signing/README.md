@@ -11,7 +11,7 @@ The artifact and the options you install it with choose the channel:
   deployment was installed with. A later `ensure` by the installed CLI (for
   example the Intune Remediations script) keeps it, so a hash-pinned
   deployment stays `hash_pinned`.
-- **Windows CLI** (`defenseclaw.exe enterprise windows ...` from an extracted
+- **Windows CLI** (`.\defenseclaw.exe enterprise windows ...` from an extracted
   payload): `--trust-mode authenticode` is the default; `--trust-mode
   hash_pinned` needs `--payload-manifest`, and `--allowed-signer` pins
   signers.

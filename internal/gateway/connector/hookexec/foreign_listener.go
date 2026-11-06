@@ -7,12 +7,16 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 )
 
 // foreignListenerPID is the listener-ownership check (a seam for tests).
 var foreignListenerPID = daemon.ForeignListenerPID
+
+var perUserPortHolder = daemon.FindPortHolder
+var perUserListenerClass = daemon.ClassifyPerUserListener
 
 // foreignListenerReasonPrefix starts the reason of a call blocked because
 // another account's process holds this account's gateway port.
@@ -46,9 +50,39 @@ func perUserPeerUnverifiedReason(opts Options) string {
 	if pid := perUserForeignListener(opts); pid > 0 {
 		return foreignListenerReason(opts.APIAddr, pid)
 	}
+	if reason := perUserRootGatewayReason(opts); reason != "" {
+		return reason
+	}
 	return foreignListenerReasonPrefix + ", or a listener whose owner DefenseClaw could not prove, took this " +
 		"account's gateway connection on " + opts.APIAddr + ", so DefenseClaw sent it nothing. " +
 		"Check this account's gateway with `defenseclaw-gateway status`"
+}
+
+func perUserRootGatewayReason(opts Options) string {
+	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" || opts.SecureClient || opts.Home == "" {
+		return ""
+	}
+	host, rawPort, err := net.SplitHostPort(opts.APIAddr)
+	if err != nil {
+		return ""
+	}
+	port, err := strconv.Atoi(rawPort)
+	if err != nil || port < 1 || port > 65535 {
+		return ""
+	}
+	holder, holderErr := perUserPortHolder(host, port)
+	if holderErr != nil {
+		holder = daemon.PortHolder{UID: -1}
+	}
+	if perUserListenerClass(host, port, opts.Home, holder, holderErr, true) != daemon.PerUserListenerOwnGatewayRunAsRoot {
+		return ""
+	}
+	return daemon.RootGatewayListenerReason + " " + daemon.RootGatewayListenerRemedy(opts.Home)
+}
+
+func perUserPeerRefusal(reason string) bool {
+	return strings.HasPrefix(reason, foreignListenerReasonPrefix) ||
+		strings.HasPrefix(reason, daemon.RootGatewayListenerReason)
 }
 
 func foreignListenerReason(addr string, pid int) string {

@@ -229,6 +229,8 @@ class PluginScanOptions:
     # scanner does not match its own bundled signatures/runtime. Developers
     # can opt back in explicitly when auditing DefenseClaw itself.
     include_self: bool = False
+    # Secure Client keeps the ordinary plugin scan decision for every vendor.
+    disable_vendor_identity: bool = False
     # Concrete additional first-party paths resolved from active config (for
     # example a custom OpenClaw home). These are exact paths, never patterns.
     trusted_self_paths: tuple[str, ...] = ()
