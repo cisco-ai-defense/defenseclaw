@@ -163,6 +163,7 @@ arguments, 75 another lifecycle run holds the lock.`,
 	}
 	group.AddCommand(newUnixDiscoveryCommand(name))
 	group.AddCommand(newUnixTransactionWatchCommand(name))
+	group.AddCommand(newUnixOpenCodePortClearCommand(name))
 	group.AddCommand(newEnterpriseIdentityViewCommands(name)...)
 	if name == "linux" {
 		group.AddCommand(newUnixTetragonCommand())

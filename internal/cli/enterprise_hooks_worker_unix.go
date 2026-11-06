@@ -74,6 +74,9 @@ const (
 	// enterpriseHookWorkerOpAIDiscovery runs the static AI discovery scan
 	// of the user's own home (standalone profile).
 	enterpriseHookWorkerOpAIDiscovery = "ai_discovery"
+	// enterpriseHookWorkerOpOpenCodePortRead reads, as the user, the port the
+	// user's OpenCode service.json names, changing nothing (GAP-0053).
+	enterpriseHookWorkerOpOpenCodePortRead = "opencode_port_read"
 
 	enterpriseHookWorkerModeInstall        = "install"
 	enterpriseHookWorkerModeVerify         = "verify"
@@ -263,6 +266,11 @@ type enterpriseHookWorkerRequest struct {
 	// foreign_cleanup worker does either; remove-all's apply worker only
 	// removes).
 	CopilotVSCode *enterpriseHookWorkerCopilotVSCode `json:"copilot_vscode,omitempty"`
+	// OpenCodeServicePort is the account's recorded OpenCode service port:
+	// the foreign_cleanup worker writes it into the account's service.json,
+	// whatever the file named (gas-ux-r1 GAP-0053, the record is the only
+	// authority; enterprisepolicy.SetOpenCodeServicePort).
+	OpenCodeServicePort int `json:"opencode_service_port,omitempty"`
 	// TimeoutSeconds replaces enterpriseHookWorkerTimeout for this worker
 	// (remove-all's retry of a worker that timed out).
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
@@ -399,7 +407,20 @@ type enterpriseHookWorkerResponse struct {
 	AIDiscovery *inventory.AIDiscoveryReport `json:"ai_discovery,omitempty"`
 	// CopilotVSCode reports the VS Code Local hook file and plugin.
 	CopilotVSCode *enterpriseHookWorkerCopilotVSCodeReport `json:"copilot_vscode,omitempty"`
-	Error         string                                   `json:"error,omitempty"`
+	// OpenCodeServicePort reports the account's OpenCode service port.
+	OpenCodeServicePort *enterpriseHookWorkerOpenCodePortReport `json:"opencode_service_port,omitempty"`
+	Error               string                                  `json:"error,omitempty"`
+}
+
+// enterpriseHookWorkerOpenCodePortReport is the worker's account of the
+// OpenCode service port (user-influenced: the parent bounds the port).
+type enterpriseHookWorkerOpenCodePortReport struct {
+	Port    int  `json:"port,omitempty"`
+	Changed bool `json:"changed,omitempty"`
+	// Previous is the port the file named before this write (0: none).
+	Previous int      `json:"previous,omitempty"`
+	Created  []string `json:"created,omitempty"`
+	Error    string   `json:"error,omitempty"`
 }
 
 // enterpriseHookWorkerAccount is the resolved target the parent spawns
@@ -553,6 +574,9 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		if request.CopilotVSCode != nil {
 			response.CopilotVSCode = runEnterpriseHookWorkerCopilotVSCode(request)
 		}
+		if request.OpenCodeServicePort > 0 {
+			response.OpenCodeServicePort = runEnterpriseHookWorkerOpenCodePort(request)
+		}
 		if len(request.Targets) > 0 {
 			response.Targets = runEnterpriseHookWorkerApply(ctx, request).Targets
 		} else {
@@ -566,6 +590,13 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		return respond(response, 0)
 	case enterpriseHookWorkerOpNativeOTLPCheck:
 		return respond(runEnterpriseHookWorkerNativeOTLPCheck(request), 0)
+	case enterpriseHookWorkerOpOpenCodePortRead:
+		port, err := enterprisepolicy.ReadOpenCodeServicePortAsUser(filepath.Clean(request.Home))
+		report := &enterpriseHookWorkerOpenCodePortReport{Port: port}
+		if err != nil {
+			report.Error = err.Error()
+		}
+		return respond(enterpriseHookWorkerResponse{OpenCodeServicePort: report}, 0)
 	case enterpriseHookWorkerOpAIDiscovery:
 		if request.AIDiscovery == nil {
 			return respond(enterpriseHookWorkerResponse{Error: "the ai_discovery operation needs its scan settings"}, 3)

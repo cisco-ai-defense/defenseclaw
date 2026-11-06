@@ -59,7 +59,7 @@ DefenseClaw ships three binaries. Each row below is on the Python CLI unless it 
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw init` | Interactive first-run wizard. On a TTY it pre-selects installed hook connectors and lets you choose observe or action for each. Scripted multi-connector flags are `--observe-all` and `--action-connectors`; an explicit `--connector` keeps the single-connector path. |
+| `defenseclaw init` | Interactive first-run wizard. On a TTY it pre-selects installed hook connectors and lets you choose observe or action for each. Scripted multi-connector flags are `--observe-all` and `--action-connectors`; an explicit `--connector` keeps the single-connector path. `--api-port` and `--proxy-port` set the gateway API and guardrail proxy ports of a new configuration. |
 | `defenseclaw quickstart` | Zero-prompt first run for one connector with safe defaults. Pass `--connector <name>` when more than one is configured or detected. See [init and quickstart](/docs/get-started/first-run). |
 | `defenseclaw doctor` | Health and repair check. See [Doctor](#doctor). |
 | `defenseclaw status` | Gateway state, the Policy line, and one block per active connector. The Policy line names the generation and the first 12 hex characters of the effective policy digest ([below](#policy-generation-and-digest)). `--json` adds a `policy` object. Secure Client has neither the Policy line nor the `policy` object. A connector whose hook files or registration drifted, or whose agent's own settings turn its hooks off (for example `disableAllHooks`), shows `DEGRADED` with the first problem and the step that fixes it. |

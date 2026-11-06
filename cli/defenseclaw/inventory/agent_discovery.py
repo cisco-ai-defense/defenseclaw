@@ -2364,13 +2364,17 @@ def _is_trusted_binary_path(
     else:
         if not os.access(resolved, os.X_OK):
             return False
-        parent = os.path.dirname(resolved)
-        try:
-            parent_st = os.stat(parent)
-        except OSError:
-            return False
-        if _trusted_prefix_dir_mode_error(parent, parent_st) is not None:
-            return False
+        # A parent another account can write lets it swap the binary at any
+        # time. That holds for the folder of the command as named too: npm
+        # puts a link in ~/.npm-global/bin, and whoever can write that folder
+        # can point the link elsewhere (GAP-0053).
+        for parent in dict.fromkeys((os.path.dirname(resolved), os.path.dirname(os.path.abspath(binary_path)))):
+            try:
+                parent_st = os.stat(parent)
+            except OSError:
+                return False
+            if _trusted_prefix_dir_mode_error(parent, parent_st) is not None:
+                return False
         # refuse a binary whose own file is writable by
         # anyone other than the trusted system owner. The user-writable
         # ~/.local/bin/* case is the canonical exploit path; even if an
@@ -2381,7 +2385,7 @@ def _is_trusted_binary_path(
             bin_st = os.stat(resolved)
         except OSError:
             return False
-        if bin_st.st_mode & 0o022:
+        if other_accounts_can_write(resolved, bin_st):
             return False
     prefixes = _trusted_bin_prefixes(data_dir)
     default_prefixes = _default_trusted_bin_prefixes()

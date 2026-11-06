@@ -228,6 +228,18 @@ def refuse_first_run_when_managed() -> None:
 @click.option("--verify/--no-verify", default=None, help="Run targeted readiness checks before exiting.")
 @click.option("--json-summary", is_flag=True, help="Emit the final first-run report as JSON.")
 @click.option("--verbose", is_flag=True, help="Show full subprocess/setup output.")
+@click.option(
+    "--api-port",
+    type=click.IntRange(1024, 65533),
+    default=None,
+    help="Gateway API port for a new config (default 18970, or the next free one when another account holds it).",
+)
+@click.option(
+    "--proxy-port",
+    type=click.IntRange(1024, 65535),
+    default=None,
+    help="Guardrail proxy port for a new config (default 4000, or the next free one when another account holds it).",
+)
 @pass_ctx
 def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     app: AppContext,
@@ -262,6 +274,8 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     verify: bool | None,
     json_summary: bool,
     verbose: bool,
+    api_port: int | None,
+    proxy_port: int | None,
 ) -> None:
     """Initialize DefenseClaw environment.
 
@@ -281,6 +295,12 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     from defenseclaw.commands.cmd_setup import _validated_api_key_env_name
 
     refuse_first_run_when_managed()
+
+    from defenseclaw.bootstrap import first_run_port_flags_conflict
+
+    if conflict := first_run_port_flags_conflict(api_port or 0, proxy_port or 0):
+        # Before anything is written (GAP-0053).
+        raise click.UsageError(conflict)
 
     from defenseclaw import config as config_module
 
@@ -379,6 +399,8 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
                 verify=verify,
                 json_summary=json_summary,
                 verbose=verbose,
+                api_port=api_port or 0,
+                proxy_port=proxy_port or 0,
             )
         return
 
@@ -419,12 +441,21 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
             # OpenClaw that is not there (GAP-0568, as GAP-1056 for none).
             cfg.claw.mode = ""
         click.echo("  Config:        " + ux._style("created new defaults", fg="green"))
-        from defenseclaw.bootstrap import choose_first_run_api_port, choose_first_run_guardrail_port
+        from defenseclaw.bootstrap import (
+            api_port_avoid,
+            apply_first_run_ports,
+            choose_first_run_api_port,
+            choose_first_run_guardrail_port,
+            proxy_port_avoid,
+        )
 
-        port_note = choose_first_run_api_port(cfg)
+        for step in apply_first_run_ports(cfg, api_port or 0, proxy_port or 0, new_config=True):
+            label = "  API port:      " if step.name == "Gateway API port" else "  Proxy port:    "
+            click.echo(label + ux._style(step.detail, fg="green" if step.status == "pass" else "yellow"))
+        port_note = "" if api_port else choose_first_run_api_port(cfg, api_port_avoid(cfg, proxy_port or 0))
         if port_note:
             click.echo("  API port:      " + ux._style(port_note, fg="yellow"))
-        proxy_note = choose_first_run_guardrail_port(cfg)
+        proxy_note = "" if proxy_port else choose_first_run_guardrail_port(cfg, proxy_port_avoid(cfg))
         if proxy_note:
             click.echo("  Proxy port:    " + ux._style(proxy_note, fg="yellow"))
     else:
@@ -435,6 +466,10 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
                 "; run 'defenseclaw migrate' first"
             )
         click.echo("  Config:        " + ux.dim("preserved existing"))
+        from defenseclaw.bootstrap import apply_first_run_ports
+
+        for step in apply_first_run_ports(cfg, api_port or 0, proxy_port or 0, new_config=False):
+            click.echo(f"  {step.name}: " + ux._style(f"{step.detail}; run {step.next_command}", fg="yellow"))
 
     cfg.environment = env
     if cfg.claw.mode.strip():
@@ -634,6 +669,8 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     verify: bool | None,
     json_summary: bool,
     verbose: bool,
+    api_port: int = 0,
+    proxy_port: int = 0,
 ) -> None:
     from defenseclaw.bootstrap import (
         FirstRunOptions,
@@ -805,6 +842,8 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         human_approval=primary["human_approval"],
         hilt_min_severity=primary["hilt_min_severity"] or "",
         trusted_binary_prefixes=trusted_binary_prefixes,
+        api_port=api_port,
+        proxy_port=proxy_port,
     )
     # GAP-1713: first run rebuilds guardrail.connectors; keep what init does
     # not ask about (a use-pack override, levels) for re-selected connectors.
