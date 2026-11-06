@@ -34,6 +34,7 @@ func TestPluginDestinationAcceptsOnlyTheOwnersPrivateGroup(t *testing.T) {
 		{name: "shared group", group: "devs:x:%[2]s:%[1]s,bob\n", mode: 0o775, want: "group/other writable"},
 		{name: "member in private group", group: "%[1]s:x:%[2]s:%[1]s,bob\n", mode: 0o775, want: "group/other writable"},
 		{name: "other account with that primary group", passwdExtra: "bob:x:%[3]d:%[2]s::/home/bob:/bin/sh\n", mode: 0o775, want: "group/other writable"},
+		{name: "same login name with another uid", passwdExtra: "%[1]s:x:%[3]d:%[2]s::/home/other:/bin/sh\n", mode: 0o775, want: "group/other writable"},
 		{name: "everyone writable", mode: 0o777, want: "group/other writable"},
 		{name: "group file unreadable", group: "-", mode: 0o775, want: "group/other writable"},
 	} {

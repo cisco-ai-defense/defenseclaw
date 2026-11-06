@@ -55,6 +55,7 @@ func ownerPrivateGroup(path string, info os.FileInfo) bool {
 	}
 	uid, gid := strconv.FormatUint(uint64(stat.Uid), 10), strconv.FormatUint(uint64(stat.Gid), 10)
 	name := ""
+	ownerRecords := 0
 	for _, rec := range passwd {
 		if len(rec) < 4 {
 			return false
@@ -64,7 +65,8 @@ func ownerPrivateGroup(path string, info os.FileInfo) bool {
 			return false
 		}
 		if recordUID == uint64(stat.Uid) {
-			if name != "" && name != rec[0] {
+			ownerRecords++
+			if ownerRecords > 1 {
 				return false
 			}
 			name = rec[0]
@@ -74,8 +76,12 @@ func ownerPrivateGroup(path string, info os.FileInfo) bool {
 		return false
 	}
 	for _, rec := range passwd {
+		recordUID, _ := strconv.ParseUint(rec[2], 10, 32)
 		recordGID, _ := strconv.ParseUint(rec[3], 10, 32)
-		if (recordGID == uint64(stat.Gid)) != (rec[0] == name) {
+		if recordGID == uint64(stat.Gid) && recordUID != uint64(stat.Uid) {
+			return false
+		}
+		if rec[0] == name && (recordUID != uint64(stat.Uid) || recordGID != uint64(stat.Gid)) {
 			return false
 		}
 	}
