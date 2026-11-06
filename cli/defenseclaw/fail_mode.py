@@ -147,12 +147,21 @@ def managed_windows_verify_command() -> str:
     """The managed Windows deployment's verify as an administrator types it.
 
     Setup puts no DefenseClaw command on PATH, so the installed CLI is named
-    by its path under %ProgramFiles%, as a PowerShell literal: the form of
+    by its path under Program Files, as a PowerShell literal: the form of
     managed.WindowsAdminCommand in the Go CLI (cowork-1-0-8 GAP-0076).
+    Program Files comes from the machine registration, never the
+    ProgramFiles variable a standard user can set (g072 review 2 S2).
     """
-    root = os.environ.get("ProgramFiles", "").strip().rstrip("\\") or r"C:\Program Files"
-    cli = root + r"\Cisco\DefenseClaw\bin\defenseclaw.exe"
-    return "& '" + cli.replace("'", "''") + "' enterprise windows verify --profile standalone"
+    root = ""
+    if sys.platform == "win32":
+        from defenseclaw import windows_owner
+
+        root = windows_owner._program_files_dir()
+    cli = (root.strip().rstrip("\\") or r"C:\Program Files") + r"\Cisco\DefenseClaw\bin\defenseclaw.exe"
+    # PowerShell reads U+2018 to U+201B as single quotes too, so each is
+    # doubled like an apostrophe (managed.PowerShellLiteral).
+    quoted = "".join(ch * 2 if ch in "'\u2018\u2019\u201a\u201b" else ch for ch in cli)
+    return "& '" + quoted + "' enterprise windows verify --profile standalone"
 
 
 @dataclass(frozen=True)

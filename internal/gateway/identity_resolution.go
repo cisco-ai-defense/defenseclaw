@@ -627,8 +627,8 @@ func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, c
 		case "darwin":
 			command = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain --user " + user
 		case "windows":
-			// The installed CLI under %ProgramFiles%, with the user quoted
-			// for PowerShell (cowork-1-0-8 GAP-0076).
+			// The installed CLI under the registered Program Files, with
+			// the user quoted for PowerShell (cowork-1-0-8 GAP-0076).
 			command = managed.WindowsAdminCommand("enterprise", "windows", "profile-explain", "--user", user)
 		}
 	}

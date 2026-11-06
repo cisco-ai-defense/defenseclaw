@@ -9,6 +9,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -70,8 +71,10 @@ func TestWindowsPolicyReasonsDoNotConditionPublicationOnEnrollment(t *testing.T)
 // prompt; Setup puts no DefenseClaw command on PATH. Linux and macOS keep
 // the gateway command.
 func TestWindowsPolicyDetailsNameTheInstalledCLI(t *testing.T) {
-	t.Setenv("ProgramFiles", `C:\Program Files`)
-	cli := "`& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw.exe' "
+	cli := "`" + managed.WindowsAdminCommand() + " "
+	if runtime.GOOS != "windows" && cli != "`& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw.exe' " {
+		t.Fatalf("installed CLI = %s", cli)
+	}
 	if got, want := policyExportCommand("windows", "--connector", "claudecode", "--format", "claude-hklm-json"),
 		cli+"enterprise policy export --connector claudecode --format claude-hklm-json` (from an elevated PowerShell prompt)"; got != want {
 		t.Errorf("windows export = %s, want %s", got, want)
@@ -94,10 +97,12 @@ func TestWindowsPolicyDetailsNameTheInstalledCLI(t *testing.T) {
 		strings.Contains(state.Conflicts[0], "`defenseclaw-gateway ") {
 		t.Errorf("windows flap conflict = %q", state.Conflicts)
 	}
-	// The renderer follows %ProgramFiles%.
+	// A ProgramFiles a standard user set does not move the command
+	// (g072 review 2 S2).
+	want := policyExportCommand("windows", "--connector", "wsl")
 	t.Setenv("ProgramFiles", `D:\Apps`)
-	if got := policyExportCommand("windows", "--connector", "wsl"); !strings.HasPrefix(got, "`"+managed.WindowsAdminCommand()) ||
-		!strings.Contains(got, `D:\Apps\Cisco`) {
-		t.Errorf("export with another ProgramFiles = %s", got)
+	if got := policyExportCommand("windows", "--connector", "wsl"); got != want || !strings.HasPrefix(got, "`"+managed.WindowsAdminCommand()) ||
+		strings.Contains(got, `D:\Apps`) {
+		t.Errorf("export with a poisoned ProgramFiles = %s, want %s", got, want)
 	}
 }

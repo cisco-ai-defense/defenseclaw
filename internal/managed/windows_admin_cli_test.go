@@ -3,15 +3,23 @@
 
 package managed
 
-import "testing"
+import (
+	"runtime"
+	"strings"
+	"testing"
+)
 
 // cowork-1-0-8 GAP-0076: a managed Windows command runs as typed in
 // PowerShell. The path is a literal, and so is every argument that is not a
 // plain word or a <placeholder>: an account named "John Smith" was two
 // arguments, "O'Brien" broke the quoting and "svc$" expanded as a variable.
 func TestWindowsAdminCommandQuotesEveryArgument(t *testing.T) {
-	t.Setenv("ProgramFiles", `C:\Program Files`)
-	cli := `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'`
+	cli := "& " + PowerShellLiteral(WindowsStandaloneAdminCLI())
+	if runtime.GOOS != "windows" {
+		if want := `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'`; cli != want {
+			t.Fatalf("installed CLI = %s, want %s", cli, want)
+		}
+	}
 	for _, row := range []struct {
 		args []string
 		want string
@@ -40,16 +48,36 @@ func TestWindowsAdminCommandQuotesEveryArgument(t *testing.T) {
 			t.Errorf("WindowsAdminCommand(%q) = %s, want %s", row.args, got, row.want)
 		}
 	}
-	gateway := `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' enterprise windows sandbox list --user 'r103 probe'`
-	if got := WindowsGatewayCommand("enterprise", "windows", "sandbox", "list", "--user", "r103 probe"); got != gateway {
+	gateway := "& " + PowerShellLiteral(WindowsStandaloneGatewayCLI()) + " enterprise windows sandbox list --user 'r103 probe'"
+	if got := WindowsGatewayCommand("enterprise", "windows", "sandbox", "list", "--user", "r103 probe"); got != gateway ||
+		!strings.HasSuffix(WindowsStandaloneGatewayCLI(), `\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe`) {
 		t.Errorf("WindowsGatewayCommand = %s, want %s", got, gateway)
 	}
-	// The path is quoted the same way, and follows %ProgramFiles%.
-	t.Setenv("ProgramFiles", `D:\Apps' x\`)
-	if got, want := WindowsAdminCommand("status"), `& 'D:\Apps'' x\Cisco\DefenseClaw\bin\defenseclaw.exe' status`; got != want {
+	// The path is quoted the same way.
+	if got, want := WindowsCommandLine(`D:\Apps' x\Cisco\DefenseClaw\bin\defenseclaw.exe`, "status"), `& 'D:\Apps'' x\Cisco\DefenseClaw\bin\defenseclaw.exe' status`; got != want {
 		t.Errorf("quoted path = %s, want %s", got, want)
 	}
 	if got, want := WindowsCommandLine(`C:\T\defenseclaw.exe`), `& 'C:\T\defenseclaw.exe'`; got != want {
 		t.Errorf("no arguments = %s, want %s", got, want)
+	}
+}
+
+// g072 review 2 S2: the hint names the Program Files of the machine
+// registration. A standard user who sets ProgramFiles in a shell does not
+// get a hint, for an administrator to paste elevated, that names a folder of
+// theirs.
+func TestWindowsAdminCommandIgnoresAPoisonedProgramFiles(t *testing.T) {
+	want := WindowsAdminCommand("enterprise", "windows", "status", "--profile", "standalone")
+	wantGateway := WindowsGatewayCommand("provenance", "show")
+	for _, poison := range []string{`C:\Users\dcw-std1\Controlled`, `D:\Apps' x\`, ""} {
+		t.Setenv("ProgramFiles", poison)
+		got := WindowsAdminCommand("enterprise", "windows", "status", "--profile", "standalone")
+		gotGateway := WindowsGatewayCommand("provenance", "show")
+		if got != want || gotGateway != wantGateway || poison != "" && (strings.Contains(got, poison) || strings.Contains(gotGateway, poison)) {
+			t.Errorf("ProgramFiles=%q changed the hint: %s / %s, want %s / %s", poison, got, gotGateway, want, wantGateway)
+		}
+	}
+	if runtime.GOOS != "windows" && want != `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --profile standalone` {
+		t.Errorf("hint off Windows = %s", want)
 	}
 }

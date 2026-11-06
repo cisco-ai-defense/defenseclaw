@@ -3373,3 +3373,23 @@ def test_fail_mode_change_rolls_back_over_a_stale_claude_shell_entry(
     assert "registration-command-stale" in result.output
     assert (settings.read_bytes(), script.read_bytes()) == before
     assert cfg.guardrail.connectors["claudecode"].hook_fail_mode == "open"
+
+
+def test_managed_windows_verify_command_ignores_a_poisoned_program_files(monkeypatch):
+    """g072 review 2 S2: the verify command an administrator pastes elevated
+    names the registered Program Files, not a ProgramFiles a standard user set."""
+    from defenseclaw import fail_mode
+
+    want = r"& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows verify --profile standalone"
+    for poison in (r"C:\Users\dcw-std1\Controlled", r"D:\Apps' x"):
+        monkeypatch.setenv("ProgramFiles", poison)
+        if sys.platform == "win32":
+            from defenseclaw import windows_owner
+
+            monkeypatch.setattr(windows_owner, "_program_files_dir", lambda: "C:\\Program Files")
+        assert fail_mode.managed_windows_verify_command() == want
+    if sys.platform == "win32":
+        from defenseclaw import windows_owner
+
+        monkeypatch.setattr(windows_owner, "_program_files_dir", lambda: "D:\\O\u2019Brien Apps\\")
+        assert fail_mode.managed_windows_verify_command().startswith("& 'D:\\O\u2019\u2019Brien Apps\\Cisco\\")

@@ -3,21 +3,24 @@
 
 package managed
 
-import (
-	"os"
-	"strings"
-)
+import "strings"
 
 // WindowsStandaloneAdminCLI is the managed CLI an administrator runs on a
 // Windows standalone computer, as the docs name it. Setup puts no
 // DefenseClaw command on PATH, so a hint must name this path (GAP-1183).
+// Program Files is the machine's protected registration
+// (windowsAdminProgramFiles), as for the managed layout, never the process's
+// ProgramFiles variable: a standard user who set it in a shell was handed a
+// hint naming a folder of theirs, which the hint tells an administrator to
+// run elevated (g072 review 2 S2).
 func WindowsStandaloneAdminCLI() string {
-	root := strings.TrimRight(strings.TrimSpace(os.Getenv("ProgramFiles")), `\`)
-	if root == "" {
-		root = `C:\Program Files`
-	}
-	return root + `\Cisco\DefenseClaw\bin\defenseclaw.exe`
+	return windowsAdminProgramFiles() + `\Cisco\DefenseClaw\bin\defenseclaw.exe`
 }
+
+// windowsDefaultProgramFiles is the Program Files of a hint when the machine
+// registration cannot be read, and on a computer that is not Windows, where
+// the hint is only rendered (tests, docs).
+const windowsDefaultProgramFiles = `C:\Program Files`
 
 // WindowsStandaloneGatewayCLI is the managed gateway executable an
 // administrator runs on a Windows standalone computer: standalone Setup
