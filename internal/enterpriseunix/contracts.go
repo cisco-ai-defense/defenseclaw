@@ -464,12 +464,12 @@ func (l *lifecycle) describeUnprotectedAgents() {
 		// A recent record of the previous install is not this install's
 		// scan (GAP-1454): pending until the current enumerator publishes.
 		l.reportInstallScanPending(enterprisehooks.UnprotectedAgentsRecordFromEarlierInstall(written))
-	} else if scanned := enterprisehooks.UnprotectedAgentsRecordConfigGeneration(data); scanned != 0 {
+	} else {
 		// The build and age can match after a connector or policy change.
 		// Only a scan stamped with the lifecycle's current config generation
 		// establishes coverage for those inputs (GAP-0640).
 		if current, err := configwrite.ReadGenerationState(env.P(env.Layout.ConfigPath)); err == nil &&
-			current.Generation != 0 && scanned != current.Generation {
+			current.Generation != 0 && enterprisehooks.UnprotectedAgentsRecordConfigGeneration(data) != current.Generation {
 			l.reportInstallScanPending("from a different config generation")
 		}
 	}
