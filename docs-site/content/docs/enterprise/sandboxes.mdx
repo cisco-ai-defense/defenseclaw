@@ -275,6 +275,8 @@ On Linux, `driver: vm` or `driver: auto` wants OpenShell's MicroVM driver. When 
 
 The MicroVM driver checks are in [The MicroVM driver](#the-microvm-driver).
 
+With OpenShell 0.1.6, MicroVM sandboxes on Linux with KVM do not start on either per-user or managed computers. On a managed computer, the OpenShell gateway also runs as the enrolled account; OpenShell gives that account ownership of the guest root folder, so DefenseClaw cannot trust its `localhost` resolver and refuses and deletes the sandbox. `driver_fallback: docker` does not cover this refusal because KVM is available and the MicroVM was selected. Until a fixed OpenShell release is supported, the administrator sets `enterprise.openshell.driver: docker` (the Linux default) and runs `ensure`. On a per-user computer, run `defenseclaw sandbox setup` and answer no to MicroVMs. Before a driver switch, have users save work from existing sandboxes as described above.
+
 ### The MicroVM driver
 
 The MicroVM driver runs each sandbox in a small virtual machine instead of a container. It is the only driver on macOS (Apple silicon) and an option on Linux.
