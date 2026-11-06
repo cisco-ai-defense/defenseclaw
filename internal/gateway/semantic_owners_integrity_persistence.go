@@ -2837,13 +2837,57 @@ func findingWithRuleID(findings []RuleFinding, ruleID string) bool {
 	return false
 }
 
-// credentialFileWriteLegOwnsReadRule reports a read rule whose writes its
-// leg in credentialFileWriteLegs judges, at the severity of the leg.
+// credentialFileWriteLegJudgesWrite reports a write candidate of a
+// credential read rule that the rule leaves to its write leg: the rule has a
+// leg in credentialFileWriteLegs, the leg itself covers the path (the
+// active home), and the command reads no credential file. Every other write
+// keeps the read rule's own mutation proof, so the leg never narrows what
+// the read rule judged before it existed.
+func credentialFileWriteLegJudgesWrite(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+	ruleID string,
+) bool {
+	return credentialFileWriteLegOwnsReadRule(ruleID) &&
+		matchesActiveCredentialFileWrite(facts, candidate) &&
+		!commandReadsCredentialFile(facts, candidate.CommandID)
+}
+
+// credentialFileWriteLegOwnsReadRule reports a read rule with a leg in
+// credentialFileWriteLegs.
 func credentialFileWriteLegOwnsReadRule(ruleID string) bool {
 	ruleID = canonicalTrustedRuleID(ruleID)
 	for _, leg := range credentialFileWriteLegs {
 		for _, readRule := range leg.readRules {
 			if canonicalTrustedRuleID(readRule) == ruleID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// credentialReadRuleIDs are the read rules whose path a read by the same
+// command makes a write of a credential file a copy of credential material:
+// every rule with a write leg, and the SSH private key.
+func credentialReadRuleIDs() []string {
+	ids := []string{"PATH-SSH-KEY", "PATH-WIN-SSH-KEY"}
+	for _, leg := range credentialFileWriteLegs {
+		ids = append(ids, leg.readRules...)
+	}
+	return ids
+}
+
+// commandReadsCredentialFile reports a read, by the command commandID, of a
+// path any credential read rule matches, with the same matchers the trusted
+// disposition uses for those rules (any home, not only the active one).
+func commandReadsCredentialFile(facts actionfacts.Facts, commandID int64) bool {
+	for _, candidate := range facts.Paths {
+		if candidate.CommandID != commandID || candidate.Access != actionfacts.PathAccessRead {
+			continue
+		}
+		for _, ruleID := range credentialReadRuleIDs() {
+			if trustedActionPathMatchesRule(facts, candidate, ruleID) {
 				return true
 			}
 		}
