@@ -61,10 +61,12 @@ func isolateTestHost() func() {
 		sandboxSeam("managedHostDescriptorPath", &managedHostDescriptorPath, func() string { return "" })
 		isolateTestDeploymentReaders(os.TempDir())
 		isolateTestRunFolders("")
+		isolateTestGatewayPortClaims(filepath.Join(os.TempDir(), "defenseclaw-cli-test-no-port-claims"))
 		return isolateTestMachineWriters("")
 	}
 	isolateTestDeploymentReaders(dir)
 	isolateTestRunFolders(dir)
+	isolateTestGatewayPortClaims(filepath.Join(dir, "port-claims"))
 	missingDescriptor := filepath.Join(dir, "no-runtime-descriptor")
 	sandboxSeam("managedHostDescriptorPath", &managedHostDescriptorPath, func() string { return missingDescriptor })
 	// Absent like on a computer without a deployment.
@@ -76,6 +78,22 @@ func isolateTestHost() func() {
 		_ = os.RemoveAll(dir)
 	}
 }
+
+// isolateTestGatewayPortClaims points the per-user gateway's API port claims
+// at dir in the run's temp folder (PR #1427 stress, GAP-0079 follow-up). A
+// start or restart test that reached claimGatewayAPIPort left a
+// defenseclaw-api-port-<port> claim in the computer's own %ProgramData%,
+// which init on every other account then skipped. When dir cannot be made,
+// the claim fails rather than reach %ProgramData%. The built gateway the
+// executable tests start gets the same folder through its ProgramData
+// variable (executableTestEnv).
+func isolateTestGatewayPortClaims(dir string) {
+	_ = os.MkdirAll(dir, 0o700)
+	gatewayPortClaimDir, testGatewayPortClaimDir = dir, dir
+}
+
+// testGatewayPortClaimDir is the port claim folder isolateTestHost set.
+var testGatewayPortClaimDir string
 
 // testProcessIdentityNote says which identity the package's tests run as.
 const testProcessIdentityNote = "an elevated administrator that is not LocalSystem (the CI runner's identity)"
@@ -266,6 +284,11 @@ func testSandboxProblems() []string {
 		!errors.Is(enterpriseHookWindowsUserCleanupIdentity(), enterprisehooks.ErrWindowsEnterpriseNotLocalSystem) ||
 		enterpriseHooksPlatformPreflight() != nil || windowsEnterpriseStagingElevated() {
 		problems = append(problems, "the identity seams do not answer as "+testProcessIdentityNote)
+	}
+	if testGatewayPortClaimDir == "" || gatewayPortClaimDir != testGatewayPortClaimDir {
+		problems = append(problems, fmt.Sprintf("the gateway port claims folder is %q, not the sandbox's %q", gatewayPortClaimDir, testGatewayPortClaimDir))
+	} else if rel, err := filepath.Rel(os.TempDir(), gatewayPortClaimDir); err != nil || strings.HasPrefix(rel, "..") {
+		problems = append(problems, "the gateway port claims folder "+gatewayPortClaimDir+" is outside the temp folder")
 	}
 	if logDir, err := windowsEnterpriseLogDirectory(); err != nil {
 		problems = append(problems, "the lifecycle log: "+err.Error())
@@ -946,6 +969,24 @@ func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 		t.Fatal(err)
 	}
 	inTemp("the caller's staging temp folder", userTemp)
+	// PR #1427 stress, GAP-0079 follow-up: the per-user gateway's port
+	// claims are the run's, in the temp folder, in this process and in the
+	// built gateway the executable tests start.
+	inTemp("the gateway port claims folder", gatewayPortClaimDir)
+	if strings.EqualFold(filepath.Clean(gatewayPortClaimDir), filepath.Clean(os.Getenv("ProgramData"))) {
+		t.Fatalf("the gateway port claims go to the computer's ProgramData %s", gatewayPortClaimDir)
+	}
+	childHome := t.TempDir()
+	var childProgramData []string
+	for _, entry := range executableTestEnv(childHome, "gateway.exe", "start") {
+		if key, value, ok := strings.Cut(entry, "="); ok && strings.EqualFold(key, "ProgramData") {
+			childProgramData = append(childProgramData, value)
+		}
+	}
+	if len(childProgramData) != 1 {
+		t.Fatalf("the built gateway's ProgramData = %q, want one value in its test home", childProgramData)
+	}
+	inTemp("the built gateway's ProgramData", childProgramData[0])
 	// Service control: first that no seam is its production function (one
 	// would stop or start the computer's own gateway), then that each fails.
 	for name, seam := range map[string][2]any{
