@@ -115,6 +115,11 @@ const HookDeliveryReceiptAck = "ack\n"
 
 const HookDeliveryReceiptBlock = "block\n"
 
+// HookDeliveryReceiptLate and HookDeliveryReceiptOpen report the answer the
+// watchdog delivered when the gateway had not supplied a usable answer.
+const HookDeliveryReceiptLate = "late\n"
+const HookDeliveryReceiptOpen = "open\n"
+
 // HookDeliveryReleased ends the request body of a hook whose capability wait
 // passed without a 103: the hook takes the ordinary answer and sends no
 // receipt. It is JSON whitespace, so an older gateway's decoder ignores it.
