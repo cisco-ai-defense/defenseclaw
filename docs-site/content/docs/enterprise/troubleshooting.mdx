@@ -575,6 +575,26 @@ The guardian is always running.
 
 **Check.** `verify` passes.
 
+#### Windows Setup refuses "to change the deployment, and nothing was changed"
+
+On a standalone Windows host, Setup `/ensure`, `/repair`, `/upgrade` or `/uninstall` stops with exit `1603` and the message "refusing to change the deployment, and nothing was changed" (or `/verify` with "refusing to re-stamp a managed path in place"). Another account owns a managed file or folder, or can change it, for example after `icacls <path> /grant Users:(M)` or `icacls <StateRoot> /reset /T`. Setup does not give such a path a trusted access list back, because that account may have changed it. No service was stopped. The message names every refused path (up to 20), the account, and what to do for each.
+
+The hook guardian does not repair these paths either. Its log names each one as `machine policy object drift was not repaired`, with the same fix. This covers the Claude Code, Codex and Cursor policy folders and DefenseClaw's files in them.
+
+**Fix.** For each path the message names, from an elevated prompt:
+
+- Remove the account's entry: `icacls "<path>" /remove:g *<SID>`.
+- Give an owned path back to Administrators: `icacls "<path>" /setowner *S-1-5-32-544`.
+- If the path lost its protection and only inherits: `icacls "<path>" /inheritance:r` (then run Setup, which puts the access list back).
+- Check what the file holds, since that account could have changed it.
+
+Then:
+
+- For `config.yaml` and `targets.yaml`, you do not need to fix them by hand: run Setup `/ensure CONFIG=<approved config>` (add `MANIFEST=<approved targets.yaml>` in manifest enrollment mode). Setup writes both files new, keeps the old ones as `rejected-*.yaml`, and publishes fresh approved copies.
+- For a credential or other state you do not keep, Setup `/uninstall PURGE=1` deletes it unread. A plain `/uninstall` keeps the state, so it refuses the same paths.
+
+**Check.** Run the action again. It names the next paths if more than 20 were refused. `/verify JSON=1` passes.
+
 ### Hooks and policy
 
 Hook refusals show a stable code in the agent's output. Look it up in the [hook refusal codes](/docs/enterprise/troubleshooting#hook-refusal-codes). The entries below are what administrators see on the host.
