@@ -5718,16 +5718,27 @@ func makeStatic(n int) []bool {
 var argumentSuppliers = []string{"xargs", "parallel", "find"}
 
 // suppliedArgvCommand reports a command with a word that names an argument
-// supplier (argumentSuppliers) as a program, at any wrapper depth (sudo
-// xargs, env xargs, /usr/bin/xargs): one scan for the common command
-// without one. tactics.RunsProgram reads xargs as a wrapper of the program
-// it runs, so it is not used here.
+// supplier as a program, at any wrapper depth (sudo xargs, env xargs,
+// /usr/bin/xargs, busybox xargs): xargs or parallel, or find with an -exec,
+// -execdir, -ok or -okdir action (a find without one runs no program). One
+// scan for the common command without one. tactics.RunsProgram reads xargs
+// as a wrapper of the program it runs, so it is not used here.
 func suppliedArgvCommand(command string) bool {
 	if !slices.ContainsFunc(argumentSuppliers, func(supplier string) bool { return strings.Contains(command, supplier) }) {
 		return false
 	}
 	words, _ := wrapperWords(command)
-	return slices.ContainsFunc(words, func(word string) bool { return slices.Contains(argumentSuppliers, programBase(word)) })
+	find, action := false, false
+	for _, word := range words {
+		switch programBase(word) {
+		case "xargs", "parallel":
+			return true
+		case "find":
+			find = true
+		}
+		action = action || word == "-exec" || word == "-execdir" || word == "-ok" || word == "-okdir"
+	}
+	return find && action
 }
 
 // wrappedMayLink reads the words of a wrapper's text from the first ln, cp,
@@ -5823,7 +5834,8 @@ func wrapperWords(text string) (words []string, segments []int) {
 // through an argument supplier (xargs unzip -l, xargs -I{} unzip -vq {},
 // sudo xargs tar -tf) with a visible list or test mode (archiveListMode)
 // and no link or copy program before it. Words that are not static are
-// unseen operands, as the supplied ones are.
+// unseen words, as the supplied ones are; the archive program word itself
+// is static.
 func suppliedListCall(call *syntax.CallExpr) bool {
 	words := make([]string, len(call.Args))
 	static := make([]bool, len(call.Args))
@@ -5833,7 +5845,7 @@ func suppliedListCall(call *syntax.CallExpr) bool {
 	supplied := false
 	for i, word := range words {
 		if !static[i] {
-			return false
+			continue // an unseen word (xargs -a <(ls)) is not the archive program
 		}
 		program := programBase(word)
 		switch {
@@ -5996,9 +6008,12 @@ func suppliedArchiveModeTwin(command string, depth int) (string, bool) {
 		if from < 0 || to > len(command) || from >= to {
 			return true
 		}
-		if body := literalShellCallBody(call, ""); body != "" {
-			last := call.Args[len(call.Args)-1]
-			bodyFrom, bodyTo := int(last.Pos().Offset()), int(last.End().Offset())
+		body, first := literalShellCallBody(call, ""), len(call.Args)-1
+		if body == "" {
+			body, first = staticEvalBody(call)
+		}
+		if body != "" {
+			bodyFrom, bodyTo := int(call.Args[first].Pos().Offset()), int(call.Args[len(call.Args)-1].End().Offset())
 			if bodyTwin, twinned := suppliedArchiveModeTwin(body, depth+1); twinned &&
 				bodyFrom >= from && bodyTo <= to && bodyFrom < bodyTo {
 				edits = append(edits, edit{bodyFrom, bodyTo, singleQuotedShellWord(bodyTwin)})
@@ -6006,7 +6021,8 @@ func suppliedArchiveModeTwin(command string, depth int) (string, bool) {
 			return false
 		}
 		text := command[from:to]
-		if !tactics.RunsProgram(text, archivePrograms...) {
+		// The calls commandLinks reads with wrappedMayLink.
+		if !tactics.RunsProgram(text, multicallPrograms...) && !tactics.RunsProgram(text, archivePrograms...) {
 			return true
 		}
 		unseen, _ := wrappedMayLinkRead(text, false)
@@ -6056,6 +6072,30 @@ func SuppliedArchiveMayLink(command string) bool {
 		return !found
 	})
 	return found
+}
+
+// staticEvalBody is the body eval runs, its static argument words joined by
+// blanks, and the index of the first of them; "" for any other call.
+func staticEvalBody(call *syntax.CallExpr) (string, int) {
+	if len(call.Args) < 2 {
+		return "", 0
+	}
+	words := make([]string, len(call.Args))
+	for i, arg := range call.Args {
+		word, static := StaticWord(arg, "")
+		if !static {
+			return "", 0
+		}
+		words[i] = word
+	}
+	if words[0] != "eval" {
+		return "", 0
+	}
+	body := strings.Join(words[1:], " ")
+	if _, parsed := parseShell(body); !parsed {
+		return "", 0
+	}
+	return body, 1
 }
 
 // singleQuotedShellWord is text as one single-quoted POSIX shell word.

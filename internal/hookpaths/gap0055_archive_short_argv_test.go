@@ -372,6 +372,9 @@ func TestGAP0055SuppliedArchiveModeTwin(t *testing.T) {
 		"ls | xargs sudo unzip -v; ls | xargs -n1 unzip -v": "ls | true; ls | true",
 		// Round 5: the list and test mode family (M1, M3) and nested bodies (M2).
 		"ls | xargs unzip -l":                            "ls | true",
+		"ls | busybox xargs unzip -l; cp a b":            "ls | true; cp a b",
+		"ls | xargs -a <(ls) unzip -t; cp a b":           "ls | true; cp a b",
+		"eval 'ls | xargs unzip -v'; cp a b":             "eval 'ls | true'; cp a b",
 		"ls | xargs unzip -vq; cp a b":                   "ls | true; cp a b",
 		"ls | xargs unzip -lv; cp a b":                   "ls | true; cp a b",
 		"ls | xargs unzip -tq; cp a b":                   "ls | true; cp a b",
