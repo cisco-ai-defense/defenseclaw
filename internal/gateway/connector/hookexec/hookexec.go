@@ -1734,7 +1734,7 @@ func sendHookRequest(
 		// The answer timer ends the hook's wait, but the request body must
 		// remain writable long enough to carry the watchdog's outcome once
 		// this request's gateway has advertised receipt support. Until then,
-		// the original context still bounds connection and peer verification.
+		// the original context still bounds connection and body release.
 		deadlineCtx, cancelDeadline := context.WithDeadline(
 			context.WithoutCancel(req.Context()), opts.answerWatch.ceiling.Add(answerWatchdogLogWait))
 		transportCtx, cancelWithCause := context.WithCancelCause(deadlineCtx)
@@ -1774,8 +1774,8 @@ func sendHookRequest(
 	}
 	// Headers are a gateway response even if its body has not arrived yet.
 	if delivery != nil {
-		// A 103 after the capability wait still asks for a receipt; the
-		// gateway reads the released marker instead and takes none.
+		// A transport without the legacy read signal may release at the
+		// compatibility wait. A later 103 on that request has no receipt.
 		if resp.Header.Get(HookDeliveryRequiredHeader) == "1" && !delivery.wasReleased() {
 			resp.Body = &hookDeliveryResponseBody{ReadCloser: resp.Body, delivery: delivery}
 		} else {

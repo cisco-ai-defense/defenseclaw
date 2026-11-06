@@ -166,7 +166,7 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 
 // hookDeliveryContinueClient sends the request body immediately while still
 // asking an earlier Go gateway to signal when it begins reading it. A custom
-// transport with unknown Expect handling keeps the existing peer-check path.
+// transport with unknown Expect handling keeps the bounded release window.
 func hookDeliveryContinueClient(client *http.Client) (*http.Client, bool) {
 	if client == nil {
 		return nil, false
