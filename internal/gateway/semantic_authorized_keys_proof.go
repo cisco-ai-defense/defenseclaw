@@ -1324,23 +1324,53 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		info, err := hookpaths.PathLstat(target)
 		if err != nil && !os.IsNotExist(err) {
-			return hookpaths.ShareUnanswered(err) && possible(target)
-		}
-		if err == nil && info.Mode()&os.ModeSymlink == 0 {
-			// A hard link names a protected file under another path.
-			if !info.Mode().IsRegular() {
+			if !hookpaths.ShareUnanswered(err) {
 				return false
 			}
-			for _, path := range protectedPaths {
-				if file, err := hookpaths.PathStat(path); request.StrictPolicy && hookpaths.ShareUnanswered(err) || err == nil && os.SameFile(info, file) {
-					return true
+			// A linked parent can name a protected final file even if that
+			// file does not exist yet. Its reachable parent is positive proof.
+			parent, ok := hookpaths.ResolveWriteTargetIdentity(filepath.Dir(target))
+			return ok && isProtected(filepath.Join(parent, filepath.Base(target))) || possible(target)
+		}
+		if err == nil {
+			// A reachable link and a hard link both name the protected file
+			// by identity, even while the share root probe is pending.
+			identity, identityErr := info, error(nil)
+			if info.Mode()&os.ModeSymlink != 0 {
+				identity, identityErr = hookpaths.PathStat(target)
+			}
+			if identityErr == nil && identity.Mode().IsRegular() {
+				for _, path := range protectedPaths {
+					if file, err := hookpaths.PathStat(path); request.StrictPolicy && hookpaths.ShareUnanswered(err) || err == nil && os.SameFile(identity, file) {
+						return true
+					}
 				}
 			}
-			return false
+			if info.Mode()&os.ModeSymlink == 0 {
+				return false
+			}
+		}
+		// A known link entry is positive proof even when the share root
+		// has not answered and its final protected file does not exist yet.
+		if err == nil && info.Mode()&os.ModeSymlink != 0 {
+			if link, readErr := hookpaths.PathReadlink(target); readErr == nil {
+				if filepath.IsAbs(link) && isProtected(link) {
+					return true
+				}
+				if !filepath.IsAbs(link) {
+					parent, ok := hookpaths.ResolveWriteTargetIdentity(filepath.Dir(target))
+					if ok && isProtected(filepath.Join(parent, link)) {
+						return true
+					}
+				}
+			}
 		}
 		// Resolve as the hook client does, so a link to a missing final
 		// file that the redirect would create is covered as well.
 		resolved, ok := hookpaths.ResolveWriteTarget(target)
+		if !ok && hookpaths.SharePath(target) {
+			resolved, ok = hookpaths.ResolveWriteTargetIdentity(target)
+		}
 		// An existing link whose target cannot be resolved is still a
 		// possible write into the protected home. The client and gateway
 		// must both fail closed on a linked component before "..".

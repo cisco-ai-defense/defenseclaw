@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -490,11 +491,11 @@ func resolveWritePath(path string, linkDepth int) (string, bool) {
 // link (GAP-1515: with sshlink -> ~\.ssh, sshlink\authorized_keys looked
 // like a project file). An irregular entry that names no target stays a
 // plain component.
-func windowsMountPointLink(candidate string, info os.FileInfo) bool {
+func windowsMountPointLink(candidate string, info os.FileInfo, readlink func(string) (string, error)) bool {
 	if runtime.GOOS != "windows" || info.Mode()&os.ModeIrregular == 0 {
 		return false
 	}
-	_, err := pathReadlink(candidate)
+	_, err := readlink(candidate)
 	return err == nil
 }
 
@@ -514,6 +515,12 @@ func walkWritePath(base, path string, linkDepth int, collect, patchTarget bool) 
 // prefix depends only on that prefix and the file system, so a memo walk
 // answers exactly what a fresh walk answers while the files stay as they are.
 func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bool, memo *TargetMemo) (string, []string, int, bool) {
+	return walkWritePathMemoWithReaders(base, path, linkDepth, collect, patchTarget, memo, pathLstat, pathReadlink)
+}
+
+func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, patchTarget bool, memo *TargetMemo,
+	lstat func(string) (os.FileInfo, error), readlink func(string) (string, error),
+) (string, []string, int, bool) {
 	if linkDepth > maxWriteTargetLinkDepth {
 		return "", nil, linkDepth, false
 	}
@@ -593,18 +600,18 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 				return fail()
 			}
 			memo.noteWork()
-			info, err := pathLstat(candidate)
+			info, err := lstat(candidate)
 			if err != nil && !os.IsNotExist(err) {
 				return fail()
 			}
 			unknown := os.IsNotExist(err)
-			if err == nil && (info.Mode()&os.ModeSymlink != 0 || windowsMountPointLink(candidate, info)) {
+			if err == nil && (info.Mode()&os.ModeSymlink != 0 || windowsMountPointLink(candidate, info, readlink)) {
 				// The cwd proc link is interpreted by the process opening the
 				// operand. Resolving it in the hook would prove a different path.
 				if ProcCWDWriteOperand(candidate) {
 					return fail()
 				}
-				link, err := pathReadlink(candidate)
+				link, err := readlink(candidate)
 				if err != nil {
 					return fail()
 				}
@@ -617,13 +624,13 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 				var extra []string
 				var nextDepth int
 				var ok bool
-				current, extra, nextDepth, ok = walkWritePath(current, link, linkDepth+1, collect, patchTarget)
+				current, extra, nextDepth, ok = walkWritePathMemoWithReaders(current, link, linkDepth+1, collect, patchTarget, nil, lstat, readlink)
 				if !ok || collect && len(forms)+len(extra) > maxOpaquePathForms {
 					return fail()
 				}
 				linkDepth = nextDepth
 				forms = append(forms, extra...)
-				_, err = pathLstat(current)
+				_, err = lstat(current)
 				if err != nil && !os.IsNotExist(err) {
 					return fail()
 				}
@@ -705,6 +712,28 @@ func protectedAuthorizedKeysPaths(home string, memo *TargetMemo) []string {
 // exist yet. ok is false when the target cannot be resolved.
 func ResolveWriteTarget(path string) (string, bool) {
 	return resolveWritePath(path, 0)
+}
+
+// ResolveWriteTargetIdentity gives a reachable link on a pending share one
+// bounded identity walk. It uses the same readers as ResolveWriteTarget and
+// shares one short deadline across every component and link hop.
+func ResolveWriteTargetIdentity(path string) (string, bool) {
+	deadline := time.Now().Add(100 * time.Millisecond)
+	lstat := func(name string) (os.FileInfo, error) {
+		if time.Now().After(deadline) {
+			return nil, networkShareError("read", name)
+		}
+		return PathLstat(name)
+	}
+	readlink := func(name string) (string, error) {
+		if time.Now().After(deadline) {
+			return "", networkShareError("read", name)
+		}
+		return PathReadlink(name)
+	}
+	writeTargetWalks.Add(1)
+	resolved, _, _, ok := walkWritePathMemoWithReaders("", path, 0, false, false, nil, lstat, readlink)
+	return resolved, ok
 }
 
 // ResolvePatchWriteTarget rejects a link whose target contains a line break:

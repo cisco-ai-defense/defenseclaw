@@ -121,3 +121,74 @@ func TestGAP0482ReviewSlowHomeLocalPythonReassignment(t *testing.T) {
 		t.Fatalf("strict local Python reassignment = %s, want %s", got, wantStrict)
 	}
 }
+
+func TestGAP0482ReviewSlowShareSymlink(t *testing.T) {
+	for _, row := range []struct {
+		name                              string
+		keysPresent, relative, parentLink bool
+	}{{"existing", true, false, false}, {"missing-final-file", false, false, false},
+		{"missing-relative-link", false, true, false}, {"missing-parent-link", false, false, true}} {
+		t.Run(row.name, func(t *testing.T) {
+			for _, placement := range []string{"both", "target", "home"} {
+				t.Run(placement, func(t *testing.T) {
+					root := t.TempDir()
+					home := filepath.Join(root, "home")
+					project := filepath.Join(root, "project")
+					for _, dir := range []string{filepath.Join(home, ".ssh"), project} {
+						if err := os.MkdirAll(dir, 0o700); err != nil {
+							t.Fatal(err)
+						}
+					}
+					keys := filepath.Join(home, ".ssh", "authorized_keys")
+					if row.keysPresent {
+						if err := os.WriteFile(keys, []byte("placeholder\n"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					alias := filepath.Join(project, "ordinary.txt")
+					link := keys
+					if row.relative {
+						var err error
+						link, err = filepath.Rel(project, keys)
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					if row.parentLink {
+						alias = filepath.Join(project, "linked")
+						link = filepath.Dir(keys)
+					}
+					if err := os.Symlink(link, alias); err != nil {
+						t.Skipf("symlinks unavailable: %v", err)
+					}
+					switch placement {
+					case "both":
+						t.Setenv("R482_FAKE_SHARE", root)
+					case "target":
+						t.Setenv("R482_FAKE_SHARE", project)
+					case "home":
+						t.Setenv("R482_FAKE_SHARE", home)
+					}
+					t.Setenv("HOME", home)
+					t.Setenv("USERPROFILE", home)
+					command := "echo marker >> ordinary.txt"
+					if row.parentLink {
+						command = "echo marker >> linked/authorized_keys"
+					}
+					payload := mustJSON(t, map[string]any{
+						"session_id": "gap0482-slow-symlink", "hook_event_name": "PreToolUse",
+						"tool_name": "Bash", "tool_use_id": "toolu_gap0482_slow_symlink",
+						"cwd": project, "permission_mode": "default",
+						"tool_input": map[string]any{"command": command},
+					})
+					if got := gap0482ProfileVerdict(t, payload, "strict"); got != "block" {
+						t.Fatalf("strict symlink alias = %s, want block", got)
+					}
+					if got := gap0482ProfileVerdict(t, payload, "default"); got != "block" {
+						t.Fatalf("default symlink alias = %s, want block", got)
+					}
+				})
+			}
+		})
+	}
+}

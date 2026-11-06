@@ -435,3 +435,9 @@ func PathLstat(name string) (os.FileInfo, error) {
 	result := boundedPathRead(name, readLstat, true)
 	return result.info, result.err
 }
+
+// PathReadlink reads a known link entry within the shared share budget.
+func PathReadlink(name string) (string, error) {
+	result := boundedPathRead(name, readLink, true)
+	return result.link, result.err
+}
