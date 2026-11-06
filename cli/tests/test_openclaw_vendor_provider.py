@@ -538,8 +538,7 @@ def test_r109_g610_off_path_manager_peer_is_bound(tmp_path, monkeypatch, manager
 
     installed = _linked_provider(tmp_path, monkeypatch, root)
     assert "SRC-EXEC" in _high_rules(installed)
-    shim.unlink()
-    shim.symlink_to(entry)
+    shim.write_text(f'#!/bin/sh\nexec "{entry}" "$@"\n', encoding="utf-8")
     for profile in ("default", "permissive"):
         assert not {f.rule_id for f in scan_plugin(
             str(installed), PluginScanOptions(policy=profile),
@@ -593,13 +592,14 @@ def test_r109_g610_recorded_wrapper_and_old_record_follow_selected_executable(
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     monkeypatch.setattr(Path, "home", lambda: home)
-    monkeypatch.setattr(shutil, "which", lambda name: str(active_shim))
+    monkeypatch.setattr(shutil, "which", lambda name: str(wrapper))
 
     installed = {
         label: _linked_provider(tmp_path / label, monkeypatch, target)
         for label, target in (("active", active), ("foreign", foreign), ("old", old))
     }
-    for recorded in (wrapper, old_shim):
+    for selected, recorded in ((wrapper, old_shim), (active_shim, wrapper)):
+        monkeypatch.setattr(shutil, "which", lambda name, path=selected: str(path))
         (data_dir / "agent_discovery.json").write_text(json.dumps({
             "version": 7, "ttl_seconds": 86_400,
             "scanned_at": datetime.now(timezone.utc).isoformat(),
@@ -610,6 +610,24 @@ def test_r109_g610_recorded_wrapper_and_old_record_follow_selected_executable(
             for profile in ("default", "permissive", "strict"):
                 high = _high_rules_with_options(tree, profile, str(data_dir))
                 assert ("SRC-EXEC" in high) is (label != "active" or profile == "strict")
+
+    relay = home / "bin/openclaw-relay"
+    relay.parent.mkdir(parents=True)
+    relay.write_text(f'#!/bin/sh\nexec "{active_shim}" "$@"\n', encoding="utf-8")
+    relay.chmod(0o755)
+    wrapper.write_text(f'#!/bin/sh\nexec "{relay}" "$@"\n', encoding="utf-8")
+    monkeypatch.setattr(shutil, "which", lambda name: str(wrapper))
+    assert not _high_rules_with_options(installed["active"], "default", str(data_dir))
+    assert "SRC-EXEC" in _high_rules_with_options(installed["old"], "default", str(data_dir))
+
+    wrapper.write_text(f'#!/bin/sh\nexec "{old_shim}" "$@"\n', encoding="utf-8")
+    assert "SRC-EXEC" in _high_rules_with_options(installed["active"], "default", str(data_dir))
+    assert not _high_rules_with_options(installed["old"], "default", str(data_dir))
+
+    wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    for tree in installed.values():
+        for profile in ("default", "permissive", "strict"):
+            assert "SRC-EXEC" in _high_rules_with_options(tree, profile, str(data_dir))
 
 
 def _high_rules_with_options(root, profile: str, data_dir: str) -> set[str]:
