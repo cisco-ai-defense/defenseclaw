@@ -60,65 +60,50 @@ func CodexSelectedSkillName(prompt string) string {
 	return name
 }
 
-func projectSkillCallName(raw json.RawMessage) string {
-	var values map[string]json.RawMessage
-	if json.Unmarshal(raw, &values) != nil {
-		return ""
-	}
-	for _, key := range []string{"skill_name", "skillName", "skill_key", "skillKey", "skill_id", "skillId"} {
-		var name string
-		if json.Unmarshal(values[key], &name) == nil && projectSkillName(name) != "" {
-			return projectSkillName(name)
-		}
-	}
-	for _, key := range []string{"skill", "skill_info", "skillInfo", "source_skill", "sourceSkill"} {
-		var name string
-		if json.Unmarshal(values[key], &name) == nil && projectSkillName(name) != "" {
-			return projectSkillName(name)
-		}
-		var nested map[string]json.RawMessage
-		if json.Unmarshal(values[key], &nested) != nil {
+// projectSkillCallSelection reads a Skill call with the gateway's parser:
+// the top-level event fields first, then the tool input. The name is empty
+// when the gateway could not use it as a selected-folder fact value.
+func projectSkillCallSelection(payload, args json.RawMessage) (name, source string) {
+	for _, raw := range []json.RawMessage{payload, args} {
+		var values map[string]any
+		if json.Unmarshal(raw, &values) != nil {
 			continue
 		}
-		for _, field := range []string{"name", "key", "id", "skill_name", "skillName", "skill_key", "skillKey", "skill_id", "skillId"} {
-			if json.Unmarshal(nested[field], &name) == nil && projectSkillName(name) != "" {
-				return projectSkillName(name)
-			}
+		selected, path, _ := assetfacts.SkillSelection(values)
+		if selected == "" {
+			continue
 		}
+		if projectSkillName(selected) != selected {
+			return "", ""
+		}
+		return selected, path
 	}
-	return ""
+	return "", ""
 }
 
-// projectSkillCallPath reads the explicit source fields recognized by the
-// gateway's Skill probe. An empty result is a name-only selection.
-func projectSkillCallPath(raw json.RawMessage) string {
-	var values map[string]json.RawMessage
-	if json.Unmarshal(raw, &values) != nil {
-		return ""
+// addProjectSkillSelectedFacts names the folder a Skill call selects under
+// each unverified root in facts. An explicit source binds the folder by path;
+// a name-only call binds the folder of that name or declared name.
+func addProjectSkillSelectedFacts(facts map[string]string, payload, args json.RawMessage, cwd string) {
+	name, source := projectSkillCallSelection(payload, args)
+	if name == "" {
+		return
 	}
-	for _, key := range []string{"skill_path", "skillPath", "source_path", "sourcePath"} {
-		var path string
-		if json.Unmarshal(values[key], &path) == nil && strings.TrimSpace(path) != "" {
-			return path
-		}
-	}
-	for _, key := range []string{"skill", "skill_info", "skillInfo", "source_skill", "sourceSkill"} {
-		var value string
-		if json.Unmarshal(values[key], &value) == nil && strings.ContainsAny(value, `/\\`) {
-			return value
-		}
-		var nested map[string]json.RawMessage
-		if json.Unmarshal(values[key], &nested) != nil {
-			continue
-		}
-		for _, field := range []string{"path", "source_path", "sourcePath", "skill_path", "skillPath"} {
-			var path string
-			if json.Unmarshal(nested[field], &path) == nil && strings.TrimSpace(path) != "" {
-				return path
-			}
+	roots := make([]string, 0, len(facts))
+	for key := range facts {
+		if strings.HasPrefix(key, ProjectSkillRootUnverifiedPrefix) {
+			roots = append(roots, strings.TrimPrefix(key, ProjectSkillRootUnverifiedPrefix))
 		}
 	}
-	return ""
+	for _, root := range roots {
+		dirs := projectSkillSelectedFolders(root, name)
+		if source != "" {
+			dirs = projectSkillSourceFolders(root, name, source, cwd)
+		}
+		for _, dir := range dirs {
+			facts[ProjectSkillSelectedPrefix+dir] = name
+		}
+	}
 }
 
 func projectSkillName(raw string) string {
@@ -164,39 +149,65 @@ func projectSkillSelectedFolders(root, name string) []string {
 	return nil
 }
 
-// projectSkillSelectionMatchesPath binds a caller-inspected folder to an
-// explicit Skill source before the gateway receives the selected-folder fact.
-// The caller can resolve a profile link that a managed gateway cannot read.
-func projectSkillSelectionMatchesPath(root, selected, source, cwd string) bool {
-	if strings.TrimSpace(source) == "" {
-		return true
-	}
+// projectSkillSourceFolders returns the folders under an unverified root
+// that an explicit Skill source names. The source is compared with the root
+// lexically and through the caller's resolved view, which a managed gateway
+// cannot inspect, so the result does not depend on the selected name. A
+// source naming the root itself selects the root and its named folder.
+func projectSkillSourceFolders(root, name, source, cwd string) []string {
 	if !filepath.IsAbs(source) {
 		if !filepath.IsAbs(cwd) {
-			return false
+			return nil
 		}
 		source = filepath.Join(cwd, source)
 	}
-	if projectSkillRootKey(source) == projectSkillRootKey(root) ||
-		projectSkillRootKey(source) == projectSkillRootKey(selected) ||
-		projectSkillPathWithin(selected, source) {
-		return true
-	}
+	source = filepath.Clean(source)
 	resolvedSource, sourceErr := filepath.EvalSymlinks(source)
-	if sourceErr != nil {
-		return false
-	}
 	resolvedRoot, rootErr := filepath.EvalSymlinks(root)
-	if rootErr == nil && (projectSkillRootKey(resolvedSource) == projectSkillRootKey(resolvedRoot) ||
-		projectSkillPathWithin(resolvedRoot, resolvedSource)) {
-		return true
+	if projectSkillRootKey(source) == projectSkillRootKey(root) ||
+		sourceErr == nil && rootErr == nil && projectSkillRootKey(resolvedSource) == projectSkillRootKey(resolvedRoot) {
+		return append(projectSkillSelectedFolders(root, name), root)
 	}
-	resolvedSelected, selectedErr := filepath.EvalSymlinks(selected)
-	if selectedErr != nil {
-		return false
+	if child := projectSkillChild(root, source); child != "" {
+		return []string{filepath.Join(root, child)}
 	}
-	return projectSkillRootKey(resolvedSource) == projectSkillRootKey(resolvedSelected) ||
-		projectSkillPathWithin(resolvedSelected, resolvedSource)
+	if sourceErr != nil {
+		return nil
+	}
+	if rootErr == nil {
+		if child := projectSkillChild(resolvedRoot, resolvedSource); child != "" {
+			return []string{filepath.Join(root, child)}
+		}
+	}
+	// A folder under the root may itself be a link to the source.
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	for i, entry := range entries {
+		if i >= maxProjectSelectedScan {
+			break
+		}
+		dir := filepath.Join(root, entry.Name())
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err == nil && (projectSkillRootKey(resolved) == projectSkillRootKey(resolvedSource) ||
+			projectSkillPathWithin(resolved, resolvedSource)) {
+			return []string{dir}
+		}
+	}
+	return nil
+}
+
+// projectSkillChild names the first folder under root on the way to path.
+func projectSkillChild(root, path string) string {
+	if !projectSkillPathWithin(root, path) {
+		return ""
+	}
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	if err != nil {
+		return ""
+	}
+	return strings.SplitN(rel, string(filepath.Separator), 2)[0]
 }
 
 // projectSkillRootFacts reports adverse and positively verified roots. The
