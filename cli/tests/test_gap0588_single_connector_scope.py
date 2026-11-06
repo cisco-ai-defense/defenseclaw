@@ -370,6 +370,10 @@ def test_config_set_does_not_change_active_connector_selection(
     assert after == before
 
 
+_CLAUDE = "  enabled: true\n  connector: claudecode\n"
+_CLAUDE_OFF_ROSTER = _CLAUDE + "  connectors:\n    codex: {}\n"
+
+
 def _with_setting(document: dict, key: str, value: object) -> dict:
     node = document
     *parents, last = key.split(".")
@@ -382,18 +386,10 @@ def _with_setting(document: dict, key: str, value: object) -> dict:
 @pytest.mark.parametrize(
     ("head", "roster", "key", "value"),
     [
+        # The gateway still boots the primary that guardrail.connector names, alone.
         ("", "  connector: claudecode\n", "guardrail.connectors.codex.hook_fail_mode", "closed"),
-        ("", "  connector: kiro\n  connectors:\n    kiro: {}\n", "guardrail.connectors.codex.hook_fail_mode", "closed"),
-        ("", "  connector: kiro\n  connectors:\n    kiro: {}\n", "guardrail.connectors.codex", {"hook_fail_mode": "closed"}),
-        (
-            "", "  connector: claudecode\n  connectors:\n    claudecode: {}\n",
-            "guardrail.connectors.claude.hook_fail_mode", "closed",
-        ),
-        # The primary that guardrail.connector names stays guarded off the roster.
-        (
-            "", "  connector: claudecode\n  connectors:\n    codex: {}\n",
-            "guardrail.connectors.claudecode.hook_fail_mode", "closed",
-        ),
+        ("", "  connector: claudecode\n", "guardrail.connectors.codex", {"hook_fail_mode": "closed"}),
+        ("", "  enabled: true\n  connector: kiro\n", "guardrail.connectors.cursor.rules.enable", ["ALLOW"]),
         # GAP-0588 review 3: an agent-gateway route or an automatic source
         # keeps every enable signal the Go hook gate reads.
         (
@@ -401,18 +397,8 @@ def _with_setting(document: dict, key: str, value: object) -> dict:
             "guardrail.connectors.agent-gateway.hook_fail_mode", "closed",
         ),
         (
-            "application_protection:\n  enabled: true\n",
-            "  enabled: true\n  connector: kiro\n  connectors:\n    kiro: {}\n",
-            "guardrail.connectors.codex.hook_fail_mode", "closed",
-        ),
-        (
             "application_protection:\n  enabled: true\n", "  enabled: true\n  connector: kiro\n",
             "guardrail.connectors.claudecode.hook_fail_mode", "closed",
-        ),
-        (
-            "application_protection:\n  enabled: true\n",
-            "  enabled: true\n  connector: kiro\n  connectors:\n    kiro: {}\n",
-            "guardrail.connectors.cursor", {"hook_fail_mode": "closed"},
         ),
     ],
 )
@@ -461,6 +447,93 @@ def test_config_set_of_an_off_roster_setting_that_would_select_it_is_refused(
     assert result.exit_code != 0
     assert "connector selection requires setup" in result.output
     assert after == before
+
+
+@pytest.mark.parametrize(
+    ("head", "roster", "key", "value"),
+    [
+        # GAP-0588 review 4: a second roster key selects the multi-connector
+        # boot, which sets up only the roster and drops the named primary.
+        ("", _CLAUDE_OFF_ROSTER, "guardrail.connectors.kiro.hook_fail_mode", "closed"),
+        ("", _CLAUDE_OFF_ROSTER, "guardrail.connectors.kiro", {"hook_fail_mode": "closed"}),
+        ("", _CLAUDE_OFF_ROSTER, "guardrail.connectors.cursor.rules.enable", ["ALLOW"]),
+        ("", _CLAUDE_OFF_ROSTER, "guardrail.connectors.kiro.enabled", False),
+        ("", _CLAUDE_OFF_ROSTER, "guardrail.connectors.claudecode.hook_fail_mode", "closed"),
+        (
+            "", "  enabled: true\n  connector: kiro\n  connectors:\n    codex: {}\n",
+            "guardrail.connectors.claude_code.hook_fail_mode", "closed",
+        ),
+        # ... or sets up the new connector beside the primary.
+        ("", "  connector: kiro\n  connectors:\n    kiro: {}\n", "guardrail.connectors.codex.hook_fail_mode", "closed"),
+        ("", "  connector: kiro\n  connectors:\n    kiro: {}\n", "guardrail.connectors.codex", {"hook_fail_mode": "closed"}),
+        (
+            "", "  connector: claudecode\n  connectors:\n    claudecode: {}\n",
+            "guardrail.connectors.codex.rules.enable", ["ALLOW"],
+        ),
+        (
+            "application_protection:\n  enabled: true\n",
+            "  enabled: true\n  connector: kiro\n  connectors:\n    kiro: {}\n",
+            "guardrail.connectors.cursor", {"hook_fail_mode": "closed"},
+        ),
+    ],
+)
+def test_config_set_that_would_change_what_the_gateway_boots_is_refused(
+    tmp_path: Path, head: str, roster: str, key: str, value: object
+) -> None:
+    # The gateway boots the same connectors after any config edit, so the
+    # primary keeps its hooks and no other connector is set up.
+    app = _app(tmp_path, ["kiro"])
+    as_json = not isinstance(value, str)
+    result, before, after = _set_in_file(
+        tmp_path, app, roster, key, json.dumps(value) if as_json else value, as_json=as_json, head=head
+    )
+    assert result.exit_code != 0
+    assert "connector selection requires setup" in result.output
+    assert after == before
+
+
+def _cli_in_file(path: Path, monkeypatch, verb: str, *args: str) -> object:
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(path))
+    with (
+        patch.object(cmd_config.config_module, "config_path", return_value=path),
+        patch.object(config_writer, "_use_go_validator", return_value=False),
+        patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+        patch.object(cmd_config, "_refresh_stopped_gateway_hooks", return_value=[]),
+    ):
+        command = cmd_config.config_set if verb == "set" else cmd_config.config_unset
+        return CliRunner().invoke(command, list(args))
+
+
+def test_config_unset_removes_the_off_roster_entry_a_set_stored(tmp_path: Path, monkeypatch) -> None:
+    # GAP-0588 review 4: set stores the entry and a whole-entry unset removes it.
+    path = tmp_path / "config.yaml"
+    path.write_text(f"config_version: 9\ndata_dir: {tmp_path}\nguardrail:\n{_CLAUDE}", encoding="utf-8")
+    before = path.read_bytes()
+    stored = _cli_in_file(path, monkeypatch, "set", "guardrail.connectors.codex.hook_fail_mode", "closed")
+    assert stored.exit_code == 0, stored.output
+    removed = _cli_in_file(path, monkeypatch, "unset", "guardrail.connectors.codex")
+    assert removed.exit_code == 0, removed.output
+    assert yaml.safe_load(path.read_bytes()) == yaml.safe_load(before)
+
+
+def test_config_edits_keep_the_gateway_on_the_named_primary(tmp_path: Path, monkeypatch) -> None:
+    # GAP-0588 review 4: CLI edits alone cannot reach a roster that boots
+    # without the primary guardrail.connector names.
+    path = tmp_path / "config.yaml"
+    path.write_text(f"config_version: 9\ndata_dir: {tmp_path}\nguardrail:\n{_CLAUDE}", encoding="utf-8")
+    before = yaml.safe_load(path.read_bytes())
+    rule = "guardrail.connectors.codex.rules.enable"
+    assert _cli_in_file(path, monkeypatch, "set", rule, '["ALLOW"]', "--json").exit_code == 0
+    assert _cli_in_file(path, monkeypatch, "unset", rule).exit_code == 0
+    staged = path.read_bytes()
+    assert yaml.safe_load(staged)["guardrail"]["connectors"] == {"codex": {}}
+    refused = _cli_in_file(path, monkeypatch, "set", "guardrail.connectors.kiro.hook_fail_mode", "closed")
+    assert refused.exit_code != 0
+    assert "connector selection requires setup" in refused.output
+    assert path.read_bytes() == staged
+    removed = _cli_in_file(path, monkeypatch, "unset", "guardrail.connectors.codex")
+    assert removed.exit_code == 0, removed.output
+    assert yaml.safe_load(path.read_bytes()) == before
 
 
 @pytest.mark.parametrize(
@@ -590,6 +663,10 @@ def test_config_unset_rejects_selection_or_enable_change_without_retained_enable
         (
             "  connector: claudecode\n  connectors:\n    claudecode: {}\n",
             "guardrail.connector", "claude",
+        ),
+        (
+            "  connector: claudecode\n  connectors:\n    claudecode: {}\n",
+            "guardrail.connectors.claude.hook_fail_mode", "closed",
         ),
     ],
 )
