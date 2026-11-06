@@ -34,12 +34,20 @@ func TestGAP0034EventPathDistinguishesScopeTuples(t *testing.T) {
 				for _, project := range values {
 					server := config.MCPServerEntry{Name: name, Connector: connector, Home: home, Project: project}
 					key := MCPEventPath(server)
+					if decoded, ok := decodeMCPEventPath(key); !ok || decoded != mcpIdentityForServer(server) {
+						t.Fatalf("scope key %q did not round trip: %+v", key, decoded)
+					}
 					if previous, ok := seen[key]; ok {
 						t.Fatalf("scope tuples %+v and %+v share key %q", previous, server, key)
 					}
 					seen[key] = server
 				}
 			}
+		}
+	}
+	for _, key := range []string{"notes@claudecode", "mcp:v2:5:6e6f746573", "mcp:v2:05:6e6f7465730:0:0:", MCPEventPath(first) + "suffix"} {
+		if _, ok := decodeMCPEventPath(key); ok {
+			t.Fatalf("invalid scope key %q was accepted", key)
 		}
 	}
 }
@@ -81,67 +89,117 @@ func TestGAP0034DistinctSnapshotKeysPreserveCompletedFailure(t *testing.T) {
 	}
 }
 
-func TestGAP0034LegacyUnscopedHomeIsNeverSplit(t *testing.T) {
+func TestGAP0034UpgradePreIdentityRowsRescanOnce(t *testing.T) {
 	cfg, store, logger, _ := setupTestEnv(t)
 	cfg.Gateway.Watcher.MCP.TakeAction = true
-	baseHome := filepath.Join(t.TempDir(), "account")
+	cfg.Scanners.MCPScanner.UnverifiedServer = "warn"
+	home := filepath.Join(t.TempDir(), "account")
 	project := t.TempDir()
-	failedHome := baseHome + "@claudecode#" + project
-	legacyPath := "notes@claudecode:" + failedHome
-	if err := store.SetTargetSnapshot(string(InstallMCP), legacyPath, "hash", "{}",
-		`{"mcp.servers.notes":"hash"}`, "[]", "", "fingerprint"+mcpScanFailedMark); err != nil {
+	failed := config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: home + "@claudecode#" + project, Command: "npx"}
+	ordinary := config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: home, Project: project, Command: "npx"}
+	oldPath := "notes@claudecode:" + failed.Home
+	if oldPath != "notes@claudecode:"+ordinary.Home+"@claudecode#"+ordinary.Project {
+		t.Fatal("old scope keys did not collide")
+	}
+	hash, err := mcpDefinitionHash(failed)
+	if err != nil {
 		t.Fatal(err)
+	}
+	otherHash, err := mcpDefinitionHash(ordinary)
+	if err != nil || hash != otherHash {
+		t.Fatalf("old definition hashes differ: %s %s %v", hash, otherHash, err)
+	}
+	hashes, err := json.Marshal(map[string]string{"mcp.servers.notes": hash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetTargetSnapshot(string(InstallMCP), oldPath, hash, "{}", string(hashes), "[]", "", "fingerprint"+mcpScanFailedMark); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetActionFieldForConnector(string(InstallMCP), oldPath, "claudecode", "runtime", "disable", "previous scan"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = audit.NewStore(cfg.AuditDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	logger = audit.NewLogger(store)
+	logger.SetRuntimeV8Emitter(&watcherTestRuntime{})
+	if MCPAccountJournalServes(oldPath, MCPAdmissionQuery{Connector: "claudecode", Server: "notes", Home: failed.Home}) ||
+		MCPAccountJournalServes(oldPath, MCPAdmissionQuery{Connector: "claudecode", Server: "notes", Home: ordinary.Home, CWD: project}) {
+		t.Fatal("pre-identity action was served to an account")
+	}
+	servers := []config.MCPServerEntry{failed, ordinary}
+	w := New(cfg, nil, nil, store, logger, nil, nil)
+	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return servers, nil })
+	w.firstCycleDone.Store(true)
+	failedCall := MCPAdmissionQuery{Connector: "claudecode", Server: "notes", Home: failed.Home, CWD: t.TempDir()}
+	ordinaryCall := MCPAdmissionQuery{Connector: "claudecode", Server: "notes", Home: ordinary.Home, CWD: project}
+	for _, query := range []MCPAdmissionQuery{failedCall, ordinaryCall} {
+		if got := w.MCPAdmissionStatus(query); !got.Pending || got.Failed {
+			t.Fatalf("old row was served instead of fresh admission: %+v", got)
+		}
+	}
+	failedScanner := &failingScanner{countingScanner{name: "mcp-scanner"}}
+	ordinaryScanner := &countingScanner{name: "mcp-scanner"}
+	w.scannerFactory = func(evt InstallEvent) scanner.Scanner {
+		if evt.Path == MCPEventPath(failed) {
+			return failedScanner
+		}
+		return ordinaryScanner
+	}
+	w.admitAddedMCPServers(context.Background())
+	if failedScanner.calls != 1 || ordinaryScanner.calls != 1 {
+		t.Fatalf("upgrade scans: failed=%d ordinary=%d, want one each", failedScanner.calls, ordinaryScanner.calls)
+	}
+	if got := w.MCPAdmissionStatus(failedCall); !got.Failed || got.Pending {
+		t.Fatalf("new failed admission was not retained: %+v", got)
+	}
+	if got := w.MCPAdmissionStatus(ordinaryCall); got.Failed || got.Pending || got.Unavailable {
+		t.Fatalf("clean account inherited a failed admission: %+v", got)
+	}
+	for _, server := range servers {
+		if row, err := mcpSnapshotForServer(store, server); err != nil || row == nil {
+			t.Fatalf("versioned snapshot for %+v: %+v, %v", server, row, err)
+		}
+	}
+	w.AdmitAddedMCPServers([]string{"notes"})
+	w.admitAddedMCPServers(context.Background())
+	if failedScanner.calls != 1 || ordinaryScanner.calls != 1 {
+		t.Fatalf("unchanged server scanned twice: failed=%d ordinary=%d", failedScanner.calls, ordinaryScanner.calls)
 	}
 	cold := New(cfg, nil, nil, store, logger, nil, nil)
 	cold.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return nil, errors.New("source list unavailable") })
 	cold.firstCycleDone.Store(true)
-	for _, tc := range []struct {
-		name   string
-		query  MCPAdmissionQuery
-		failed bool
-	}{
-		{"failed account", MCPAdmissionQuery{Connector: "claudecode", Server: "notes", Home: failedHome, CWD: t.TempDir()}, true},
-		{"unresolved home", MCPAdmissionQuery{Connector: "claudecode", Server: "notes", CWD: t.TempDir()}, true},
-		{"ordinary other account", MCPAdmissionQuery{Connector: "claudecode", Server: "notes", Home: baseHome, CWD: project}, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := cold.MCPAdmissionStatus(tc.query)
-			if got.Failed != tc.failed || got.Unavailable == tc.failed {
-				t.Fatalf("legacy state = %+v, want failed=%v", got, tc.failed)
-			}
-		})
+	if got := cold.MCPAdmissionStatus(failedCall); !got.Failed || got.Unavailable {
+		t.Fatalf("new failed admission lost after restart: %+v", got)
+	}
+	if got := cold.MCPAdmissionStatus(ordinaryCall); got.Failed || !got.Unavailable {
+		t.Fatalf("ordinary account inherited failure after restart: %+v", got)
 	}
 }
 
-func TestGAP0034LegacyPathOnlyNameDoesNotAcquireProjectScope(t *testing.T) {
-	cfg, store, logger, _ := setupTestEnv(t)
-	cfg.Gateway.Watcher.MCP.TakeAction = true
-	project := t.TempDir()
-	legacyName := "notes@claudecode#" + project
-	if err := store.SetTargetSnapshot(string(InstallMCP), legacyName, "hash", "{}", "{}", "[]", "", "fingerprint"+mcpScanFailedMark); err != nil {
-		t.Fatal(err)
-	}
-	cold := New(cfg, nil, nil, store, logger, nil, nil)
-	cold.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return nil, errors.New("source list unavailable") })
-	cold.firstCycleDone.Store(true)
-	if got := cold.MCPAdmissionStatus(MCPAdmissionQuery{Connector: "claudecode", Server: "notes", CWD: project}); got.Failed || !got.Unavailable {
-		t.Fatalf("ordinary server inherited legacy name failure: %+v", got)
-	}
-	if got := cold.MCPAdmissionStatus(MCPAdmissionQuery{Connector: "claudecode", Server: legacyName}); !got.Failed {
-		t.Fatalf("named server lost its completed failure: %+v", got)
-	}
-}
-
-func TestGAP0034LegacySnapshotMigratesOnFirstWrite(t *testing.T) {
-	cfg, store, logger, _ := setupTestEnv(t)
-	cfg.Gateway.Watcher.MCP.TakeAction = true
-	server := config.MCPServerEntry{Name: "notes", Connector: "claudecode",
-		Home: filepath.Join(t.TempDir(), "account@claudecode#literal"), Command: "npx", Args: []string{"-y", "."}}
+func TestGAP0034VersionedSnapshotRequiresStoredIdentity(t *testing.T) {
+	_, store, _, _ := setupTestEnv(t)
+	server := config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: t.TempDir(), Command: "npx"}
 	hash, err := mcpDefinitionHash(server)
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldPath := legacyMCPEventPath(server)
+	path := MCPEventPath(server)
+	if err := store.SetTargetSnapshot(string(InstallMCP), path, hash, "{}", `{"mcp.servers.notes":"`+hash+`"}`, "[]", "", "fingerprint"+mcpScanFailedMark); err != nil {
+		t.Fatal(err)
+	}
+	if row, err := mcpSnapshotForServer(store, server); row != nil || !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("unstructured snapshot was accepted: %+v, %v", row, err)
+	}
 	identity, err := json.Marshal(mcpIdentityForServer(server))
 	if err != nil {
 		t.Fatal(err)
@@ -150,28 +208,11 @@ func TestGAP0034LegacySnapshotMigratesOnFirstWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetTargetSnapshot(string(InstallMCP), oldPath, hash, "{}",
-		string(hashes), "[]", "", "fingerprint"+mcpScanFailedMark); err != nil {
+	if err := store.SetTargetSnapshot(string(InstallMCP), path, hash, "{}", string(hashes), "[]", "", "fingerprint"+mcpScanFailedMark); err != nil {
 		t.Fatal(err)
 	}
-	w := New(cfg, nil, nil, store, logger, nil, nil)
-	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return []config.MCPServerEntry{server}, nil })
-	w.firstCycleDone.Store(true)
-	query := MCPAdmissionQuery{Connector: server.Connector, Server: server.Name, Home: server.Home}
-	if got := w.MCPAdmissionStatus(query); !got.Failed {
-		t.Fatalf("legacy failed scan was not read: %+v", got)
-	}
-	evt := InstallEvent{Type: InstallMCP, Name: server.Name, Path: MCPEventPath(server), Connector: server.Connector}
-	snap, err := w.snapshotMCPServer(evt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	w.persistSnapshot(evt, snap, "scan-clean", "fingerprint")
-	if _, err := store.GetTargetSnapshot(string(InstallMCP), oldPath); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("old snapshot remains after versioned write: %v", err)
-	}
-	if got := w.MCPAdmissionStatus(query); got.Failed || got.Pending || got.Unavailable {
-		t.Fatalf("clean versioned snapshot did not replace old failure: %+v", got)
+	if row, err := mcpSnapshotForServer(store, server); err != nil || row == nil {
+		t.Fatalf("structured versioned snapshot was lost: %+v, %v", row, err)
 	}
 }
 
@@ -193,110 +234,63 @@ func TestGAP0034AccountJournalKeepsLiteralHomeAndProjectSeparate(t *testing.T) {
 	if !MCPAccountJournalServes(literalKey, literalCall) || MCPAccountJournalServes(literalKey, projectCall) {
 		t.Fatal("literal-home row matched the project account")
 	}
-}
-
-func TestGAP0034StructuredLegacyProjectSnapshotMigrates(t *testing.T) {
-	cfg, store, logger, _ := setupTestEnv(t)
-	cfg.Gateway.Watcher.MCP.TakeAction = true
-	server := config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: t.TempDir(),
-		Project: t.TempDir(), Command: "npx", Args: []string{"-y", "."}}
-	hash, err := mcpDefinitionHash(server)
-	if err != nil {
-		t.Fatal(err)
-	}
-	identity, err := json.Marshal(mcpIdentityForServer(server))
-	if err != nil {
-		t.Fatal(err)
-	}
-	hashes, err := json.Marshal(map[string]string{"mcp.servers.notes": hash, mcpSnapshotIdentityKey: string(identity)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	oldPath := legacyMCPEventPath(server)
-	if err := store.SetTargetSnapshot(string(InstallMCP), oldPath, hash, "{}", string(hashes), "[]", "", "fingerprint"+mcpScanFailedMark); err != nil {
-		t.Fatal(err)
-	}
-	w := New(cfg, nil, nil, store, logger, nil, nil)
-	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return []config.MCPServerEntry{server}, nil })
-	w.firstCycleDone.Store(true)
-	query := MCPAdmissionQuery{Connector: server.Connector, Server: server.Name, Home: server.Home, CWD: server.Project}
-	if got := w.MCPAdmissionStatus(query); !got.Failed {
-		t.Fatalf("structured legacy failure was not read: %+v", got)
-	}
-	evt := InstallEvent{Type: InstallMCP, Name: server.Name, Path: MCPEventPath(server), Connector: server.Connector}
-	snap, err := w.snapshotMCPServer(evt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	w.persistSnapshot(evt, snap, "scan-clean", "fingerprint")
-	if _, err := store.GetTargetSnapshot(string(InstallMCP), oldPath); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("old project snapshot remains after versioned write: %v", err)
-	}
-	if got := w.MCPAdmissionStatus(query); got.Failed || got.Pending || got.Unavailable {
-		t.Fatalf("clean versioned snapshot did not replace old project failure: %+v", got)
+	oldPath := "notes@claudecode:" + literalHomeServer.Home
+	if MCPAccountJournalServes(oldPath, projectCall) || MCPAccountJournalServes(oldPath, literalCall) {
+		t.Fatal("old account journal row was assigned to an account")
 	}
 }
 
-func TestGAP0034LegacyAccountJournalClearsAfterCleanReadmission(t *testing.T) {
-	cfg, store, logger, _ := setupTestEnv(t)
-	cfg.Gateway.Watcher.MCP.TakeAction = true
-	server := config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: t.TempDir(),
-		Project: t.TempDir(), Command: "npx", Args: []string{"-y", "."}}
-	hash, err := mcpDefinitionHash(server)
-	if err != nil {
-		t.Fatal(err)
-	}
-	identity, err := json.Marshal(mcpIdentityForServer(server))
-	if err != nil {
-		t.Fatal(err)
-	}
-	hashes, err := json.Marshal(map[string]string{"mcp.servers.notes": hash, mcpSnapshotIdentityKey: string(identity)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	oldPath := legacyMCPEventPath(server)
-	if err := store.SetTargetSnapshot(string(InstallMCP), oldPath, hash, "{}", string(hashes), "[]", "", "fingerprint"+mcpScanFailedMark); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SetActionForConnector(string(InstallMCP), oldPath, server.Connector, oldPath,
-		audit.ActionState{Install: "block", Runtime: "disable"}, scanFailureReason+"previous scan"); err != nil {
-		t.Fatal(err)
-	}
-	w := New(cfg, nil, nil, store, logger, nil, nil)
-	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return []config.MCPServerEntry{server}, nil })
-	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "mcp-scanner"} }
-	w.firstCycleDone.Store(true)
-	evt := InstallEvent{Type: InstallMCP, Name: server.Name, Path: MCPEventPath(server), Connector: server.Connector}
-	if result := w.runAdmission(context.Background(), evt); result.Verdict != VerdictClean {
-		t.Fatalf("clean readmission: %+v", result)
-	}
-	old, err := store.GetActionForConnector(string(InstallMCP), oldPath, server.Connector)
-	if err != nil || old != nil {
-		t.Fatalf("legacy action remains after clean readmission: %+v, %v", old, err)
-	}
-	current, err := store.GetActionForConnector(string(InstallMCP), MCPJournalName(server), server.Connector)
-	if err != nil || current != nil && (current.Actions.Install == "block" || current.Actions.Runtime == "disable") {
-		t.Fatalf("clean account still refused: %+v, %v", current, err)
-	}
-}
-
-func TestGAP0034LegacyJournalMigrationKeepsOtherScope(t *testing.T) {
-	cfg, store, logger, _ := setupTestEnv(t)
+func TestGAP0034PreIdentityCollisionBothDirectionsNeedAdmission(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "account")
 	project := t.TempDir()
-	failed := config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: home,
-		Project: project, Command: "npx"}
-	ordinary := config.MCPServerEntry{Name: "notes", Connector: "claudecode",
-		Home: home + "@claudecode#" + project, Command: "npx"}
-	oldPath := legacyMCPEventPath(failed)
-	if oldPath != legacyMCPEventPath(ordinary) {
-		t.Fatal("fixture must share the old key")
+	projectServer := config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: home, Project: project, Command: "npx"}
+	literalServer := config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: home + "@claudecode#" + project, Command: "npx"}
+	oldPath := "notes@claudecode:" + literalServer.Home
+	for _, tc := range []struct {
+		name                         string
+		failedServer, ordinaryServer config.MCPServerEntry
+	}{
+		{"literal home failed", literalServer, projectServer},
+		{"project failed", projectServer, literalServer},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, store, logger, _ := setupTestEnv(t)
+			cfg.Gateway.Watcher.MCP.TakeAction = true
+			hash, err := mcpDefinitionHash(tc.failedServer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hashes, err := json.Marshal(map[string]string{"mcp.servers.notes": hash})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.SetTargetSnapshot(string(InstallMCP), oldPath, hash, "{}", string(hashes), "[]", "", "fingerprint"+mcpScanFailedMark); err != nil {
+				t.Fatal(err)
+			}
+			w := New(cfg, nil, nil, store, logger, nil, nil)
+			w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) {
+				return []config.MCPServerEntry{tc.failedServer, tc.ordinaryServer}, nil
+			})
+			w.firstCycleDone.Store(true)
+			for _, server := range []config.MCPServerEntry{tc.failedServer, tc.ordinaryServer} {
+				query := MCPAdmissionQuery{Connector: server.Connector, Server: server.Name, Home: server.Home, CWD: server.Project}
+				if got := w.MCPAdmissionStatus(query); !got.Pending || got.Failed {
+					t.Fatalf("old row selected scope %+v: %+v", server, got)
+				}
+			}
+		})
 	}
-	hash, err := mcpDefinitionHash(failed)
+}
+
+func TestGAP0034StructuredOldKeyNeedsFreshAdmission(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Gateway.Watcher.MCP.TakeAction = true
+	server := config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: t.TempDir(), Command: "npx"}
+	hash, err := mcpDefinitionHash(server)
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := json.Marshal(mcpIdentityForServer(failed))
+	identity, err := json.Marshal(mcpIdentityForServer(server))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,162 +298,21 @@ func TestGAP0034LegacyJournalMigrationKeepsOtherScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	oldPath := "notes@claudecode:" + server.Home
 	if err := store.SetTargetSnapshot(string(InstallMCP), oldPath, hash, "{}", string(hashes), "[]", "", "fingerprint"+mcpScanFailedMark); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetActionForConnector(string(InstallMCP), oldPath, failed.Connector, oldPath,
-		audit.ActionState{Runtime: "disable"}, scanFailureReason+"previous scan"); err != nil {
-		t.Fatal(err)
-	}
 	w := New(cfg, nil, nil, store, logger, nil, nil)
-	ordinaryEvent := InstallEvent{Type: InstallMCP, Name: ordinary.Name, Path: MCPEventPath(ordinary), Connector: ordinary.Connector}
-	if err := w.migrateLegacyMCPJournal(ordinaryEvent); err != nil {
-		t.Fatal(err)
+	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return []config.MCPServerEntry{server}, nil })
+	w.firstCycleDone.Store(true)
+	query := MCPAdmissionQuery{Connector: server.Connector, Server: server.Name, Home: server.Home}
+	if got := w.MCPAdmissionStatus(query); !got.Pending || got.Failed {
+		t.Fatalf("old key was accepted despite its stored identity: %+v", got)
 	}
-	if row, err := store.GetActionForConnector(string(InstallMCP), oldPath, failed.Connector); err != nil || row == nil || row.Actions.Runtime != "disable" {
-		t.Fatalf("another scope moved the old block: %+v, %v", row, err)
-	}
-	if row, err := store.GetActionForConnector(string(InstallMCP), ordinaryEvent.Path, ordinary.Connector); err != nil || row != nil {
-		t.Fatalf("ordinary scope inherited the old block: %+v, %v", row, err)
-	}
-	failedEvent := InstallEvent{Type: InstallMCP, Name: failed.Name, Path: MCPEventPath(failed), Connector: failed.Connector}
-	if err := w.migrateLegacyMCPJournal(failedEvent); err != nil {
-		t.Fatal(err)
-	}
-	if row, err := store.GetActionForConnector(string(InstallMCP), failedEvent.Path, failed.Connector); err != nil || row == nil || row.Actions.Runtime != "disable" {
-		t.Fatalf("failed scope lost its block: %+v, %v", row, err)
-	}
-	if row, err := store.GetActionForConnector(string(InstallMCP), oldPath, failed.Connector); err != nil || row != nil {
-		t.Fatalf("old key remained after scoped move: %+v, %v", row, err)
-	}
-}
-
-func TestGAP0034PreIdentityProjectRowDoesNotMoveToLiteralHome(t *testing.T) {
-	cfg, store, logger, _ := setupTestEnv(t)
-	home := filepath.Join(t.TempDir(), "alice")
-	project := t.TempDir()
-	failed := config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: home,
-		Project: project, SourceScope: "project", Command: "npx", Args: []string{"-y", "."}}
-	ordinary := config.MCPServerEntry{Name: "notes", Connector: "claudecode",
-		Home: home + "@claudecode#" + project, Command: "npx", Args: []string{"-y", "."}}
-	oldPath := legacyMCPEventPath(failed)
-	if oldPath != legacyMCPEventPath(ordinary) {
-		t.Fatal("fixture does not share the legacy path")
-	}
-	hash, err := mcpDefinitionHash(failed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	hashes, err := json.Marshal(map[string]string{"mcp.servers.notes": hash})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SetTargetSnapshot(string(InstallMCP), oldPath, hash, "{}", string(hashes), "[]", "", "fingerprint"+mcpScanFailedMark); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SetActionForConnector(string(InstallMCP), oldPath, failed.Connector, oldPath,
-		audit.ActionState{Runtime: "disable"}, scanFailureReason+"previous scan"); err != nil {
-		t.Fatal(err)
-	}
-	w := New(cfg, nil, nil, store, logger, nil, nil)
-	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return []config.MCPServerEntry{ordinary}, nil })
-	evt := InstallEvent{Type: InstallMCP, Name: ordinary.Name, Path: MCPEventPath(ordinary), Connector: ordinary.Connector}
-	if err := w.migrateLegacyMCPJournal(evt); err != nil {
-		t.Fatal(err)
-	}
-	if row, err := store.GetActionForConnector(string(InstallMCP), evt.Path, evt.Connector); err != nil || row != nil {
-		t.Fatalf("other account inherited the legacy action: row=%+v err=%v", row, err)
-	}
-	snap, err := w.snapshotMCPServer(evt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	w.persistSnapshot(evt, snap, "scan-clean", "fingerprint")
-	if row, err := store.GetTargetSnapshot(string(InstallMCP), oldPath); err != nil || row == nil || !mcpSnapshotFailed(row) {
-		t.Fatalf("other account retired the failed snapshot: row=%+v err=%v", row, err)
-	}
-	if row, err := store.GetActionForConnector(string(InstallMCP), oldPath, failed.Connector); err != nil || row == nil || row.Actions.Runtime != "disable" {
-		t.Fatalf("other account retired the failed action: row=%+v err=%v", row, err)
-	}
-	old, err := store.GetTargetSnapshot(string(InstallMCP), oldPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	protectedCall := MCPAdmissionQuery{Connector: failed.Connector, Server: failed.Name, Home: home, CWD: project}
-	ordinaryCall := MCPAdmissionQuery{Connector: ordinary.Connector, Server: ordinary.Name, Home: ordinary.Home, CWD: t.TempDir()}
-	if !MCPAccountJournalServesSnapshot(oldPath, old, protectedCall) || MCPAccountJournalServesSnapshot(oldPath, old, ordinaryCall) {
-		t.Fatal("remaining legacy action crossed account scopes")
-	}
-}
-
-func TestGAP0034AmbiguousPreIdentityScopesStayUnmovedEvenWithEqualHash(t *testing.T) {
-	home := filepath.Join(t.TempDir(), "alice")
-	project := t.TempDir()
-	projectServer := config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: home,
-		Project: project, Command: "npx"}
-	literalServer := config.MCPServerEntry{Name: "notes", Connector: "claudecode",
-		Home: home + "@claudecode#" + project, Command: "npx"}
-	path := legacyMCPEventPath(projectServer)
-	if path != legacyMCPEventPath(literalServer) {
-		t.Fatal("fixture does not share the legacy path")
-	}
-	hash, err := mcpDefinitionHash(projectServer)
-	if err != nil {
-		t.Fatal(err)
-	}
-	otherHash, err := mcpDefinitionHash(literalServer)
-	if err != nil || otherHash != hash {
-		t.Fatalf("fixture does not share the old definition hash: %s %s %v", hash, otherHash, err)
-	}
-	hashes, err := json.Marshal(map[string]string{"mcp.servers.notes": hash})
-	if err != nil {
-		t.Fatal(err)
-	}
-	row := &audit.SnapshotRow{ContentHash: hash, ConfigHashes: string(hashes)}
-	for _, server := range []config.MCPServerEntry{projectServer, literalServer} {
-		if mcpLegacySnapshotCanMove(path, row, server, hash) {
-			t.Fatalf("ambiguous pre-identity scope moved: %+v", server)
-		}
-	}
-}
-
-func TestGAP0034LiteralLegacyHomeJournalUsesStoredIdentity(t *testing.T) {
-	home := filepath.Join(t.TempDir(), "alice")
-	project := t.TempDir()
-	server := config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: home + "@claudecode#" + project}
-	path := legacyMCPEventPath(server)
-	identity, err := json.Marshal(mcpIdentityForServer(server))
-	if err != nil {
-		t.Fatal(err)
-	}
-	hashes, err := json.Marshal(map[string]string{"mcp.servers.notes": "hash", mcpSnapshotIdentityKey: string(identity)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshot := &audit.SnapshotRow{ContentHash: "hash", ConfigHashes: string(hashes)}
-	protected := MCPAdmissionQuery{Connector: "claudecode", Server: "notes", Home: server.Home, CWD: t.TempDir()}
-	ordinary := MCPAdmissionQuery{Connector: "claudecode", Server: "notes", Home: home, CWD: project}
-	if !MCPAccountJournalServesSnapshot(path, snapshot, protected) || MCPAccountJournalServesSnapshot(path, snapshot, ordinary) {
-		t.Fatal("stored identity did not keep the legacy action with its account")
-	}
-}
-
-func TestGAP0034PathOnlyVersionedSpellingRemainsLiteral(t *testing.T) {
-	cfg, store, logger, _ := setupTestEnv(t)
-	const literalName = "mcp:v2:5:6e6f74657310:636c61756465636f64650:0:"
 	cold := New(cfg, nil, nil, store, logger, nil, nil)
 	cold.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return nil, errors.New("source list unavailable") })
 	cold.firstCycleDone.Store(true)
-	for _, hashes := range []string{"{}", `{"mcp.servers.` + literalName + `":"hash"}`} {
-		if err := store.SetTargetSnapshot(string(InstallMCP), literalName, "hash", "{}", hashes, "[]", "",
-			"fingerprint"+mcpScanFailedMark); err != nil {
-			t.Fatal(err)
-		}
-		if got := cold.MCPAdmissionStatus(MCPAdmissionQuery{Connector: "claudecode", Server: "notes"}); got.Failed || !got.Unavailable {
-			t.Fatalf("literal name became another server's failure with %s: %+v", hashes, got)
-		}
-		if got := cold.MCPAdmissionStatus(MCPAdmissionQuery{Connector: "claudecode", Server: literalName}); !got.Failed {
-			t.Fatalf("literal server lost its failure with %s: %+v", hashes, got)
-		}
+	if got := cold.MCPAdmissionStatus(query); got.Failed || !got.Unavailable {
+		t.Fatalf("old key was served during source outage: %+v", got)
 	}
 }

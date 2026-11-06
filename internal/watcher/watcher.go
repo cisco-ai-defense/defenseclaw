@@ -2106,9 +2106,6 @@ func (w *InstallWatcher) eventConnector(evt InstallEvent) string {
 // Rego policy; otherwise it falls back to the built-in Go logic.
 func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (res AdmissionResult) {
 	w.admissionNotes.Delete(evt.Path)
-	if err := w.migrateLegacyMCPJournal(evt); err != nil {
-		fmt.Fprintf(os.Stderr, "[watch] mcp %s: retain old journal row: %v\n", evt.Name, err)
-	}
 	defer func() { w.settleAdmissionIssue(evt, res) }()
 	if evt.Type == InstallPlugin && w.isManagedArtifact(evt.Path) {
 		return AdmissionResult{
@@ -3085,8 +3082,8 @@ func (w *InstallWatcher) recordScanFailureBlock(evt InstallEvent, targetType, re
 	}
 	scope := w.journalScope(w.eventConnector(evt))
 	_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "install", "block", reason)
-	_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "runtime", "disable", reason)
 	_ = w.store.SetSourcePathForConnector(targetType, journalName(evt), scope, evt.Path)
+	_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "runtime", "disable", reason)
 }
 
 // releaseScanFailureBlock clears the block and runtime disable a failed scan

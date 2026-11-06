@@ -1552,9 +1552,6 @@ func (w *InstallWatcher) recordAdmissionBaseline(evt InstallEvent, snap *TargetS
 // persistSnapshot upserts the baseline snapshot (content/dep/config/endpoint
 // hashes plus the scan ID and scanner fingerprint) without running a scan.
 func (w *InstallWatcher) persistSnapshot(evt InstallEvent, snap *TargetSnapshot, scanID, fingerprint string) {
-	if err := w.migrateLegacyMCPJournal(evt); err != nil {
-		fmt.Fprintf(os.Stderr, "[rescan] mcp %s: retain old journal row: %v\n", evt.Name, err)
-	}
 	depJSON, _ := json.Marshal(snap.DependencyHashes)
 	cfgJSON, _ := json.Marshal(snap.ConfigHashes)
 	epJSON, _ := json.Marshal(snap.NetworkEndpoints)
@@ -1564,24 +1561,6 @@ func (w *InstallWatcher) persistSnapshot(evt InstallEvent, snap *TargetSnapshot,
 		string(depJSON), string(cfgJSON), string(epJSON), scanID, fingerprint,
 	); err != nil {
 		return
-	}
-	if evt.Type != InstallMCP {
-		return
-	}
-	var identity mcpSnapshotIdentity
-	if json.Unmarshal([]byte(snap.ConfigHashes[mcpSnapshotIdentityKey]), &identity) != nil || identity.Name == "" {
-		return
-	}
-	server := identity.server()
-	oldPath := legacyMCPEventPath(server)
-	if oldPath == evt.Path {
-		return
-	}
-	old, err := w.store.GetTargetSnapshot(string(InstallMCP), oldPath)
-	if err == nil && mcpLegacySnapshotCanMove(oldPath, old, server, snap.ContentHash) {
-		if err := w.store.DeleteTargetSnapshot(string(InstallMCP), oldPath); err != nil {
-			fmt.Fprintf(os.Stderr, "[rescan] retire old mcp snapshot %s: %v\n", evt.Name, err)
-		}
 	}
 }
 
