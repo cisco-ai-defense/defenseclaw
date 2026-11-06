@@ -1376,6 +1376,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		return true
 	}
 	links = hookpaths.CommandLinksWithFactsForTier(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets, request.balancedArchiveScope)
+	if !request.balancedArchiveScope && request.ProtectedHomeHook &&
+		hookpaths.HomeSpelledRename(input.Command) &&
+		len(links.UnreadArchiveRenameOperands(opaqueFacts)) != 0 {
+		return true
+	}
 	if hookpaths.ProtectedArchiveMoveName(input.Command, input.CWD, facts.ActiveHome) {
 		return true
 	}

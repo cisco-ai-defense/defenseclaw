@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"archive/tar"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -79,6 +80,9 @@ func gx054Fixture(t *testing.T) b36ManagedHookFixture {
 	if err := os.Symlink("../.ssh/authorized_keys", filepath.Join(f.project, "keylink")); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Symlink("../.ssh", filepath.Join(f.project, "dirlink")); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", f.home)
 	t.Cleanup(func() { _ = os.Chmod(f.homes, 0o700) })
 	return f
@@ -103,7 +107,13 @@ func TestGX054ArchiveScopeFourCell(t *testing.T) {
 		{"install from extraction", "tar -xzf missing.tgz -C app && install app/pkg-1.0/a.c app/out.c", "allow", "archive", "allow", "allow"},
 		{"redirect into extraction", "tar -xzf missing.tgz -C app && echo k >> app/pkg-1.0/a.c", "allow", "archive", "allow", "archive"},
 		{"in place edit", "tar -xzf missing.tgz -C app && sed -i s/x/y/ app/pkg-1.0/a.c", "allow", "allow", "allow", "archive"},
-		{"home spelling ordinary move", "tar -xzf ~/project/missing.tgz -C ~/project/app && mv ~/project/app/pkg-1.0 ~/project/app/pkg", "allow", "allow", "protected", "protected"},
+		{"strict symbolic link label", "tar -xzf missing.tgz -C app && ln -s pkg-1.0 app/current", "allow", "archive", "allow", "archive"},
+		{"strict forced symbolic link label", "tar -xzf missing.tgz -C app && ln -sf pkg-1.0 app/current", "allow", "archive", "allow", "archive"},
+		{"managed named ssh copy label", "unzip -q missing.zip -d app && cp -r app/pkg-1.0/. ~/.ssh/", "protected", "protected", "protected", "protected"},
+		{"managed named ssh sync label", "unzip -q missing.zip -d app && rsync -a app/pkg-1.0/ ~/.ssh/", "protected", "protected", "protected", "protected"},
+		{"managed named ssh extraction label", "unzip -q missing.zip -d ~/.ssh && echo ok > notes.txt", "protected", "protected", "protected", "protected"},
+		{"home spelling ordinary move", "tar -xzf ~/project/missing.tgz -C ~/project/app && mv ~/project/app/pkg-1.0 ~/project/app/pkg", "allow", "allow", "allow", "archive"},
+		{"home variable ordinary move", "tar -xzf $HOME/project/missing.tgz -C $HOME/project/app && mv $HOME/project/app/pkg-1.0 $HOME/project/app/pkg", "allow", "allow", "allow", "archive"},
 		{"plain tar managed copy", "tar -xzf pkg.tgz -C app && cp -r app/pkg-1.0 app/pkg", "allow", "allow", "allow", "archive"},
 		{"plain tar copied append", "tar -xf plain.tar -C d1 && cp -a d1 e3 && echo k >> e3/p", "allow", "allow", "allow", "archive"},
 		{"plain tar synchronized append", "tar -xf plain.tar -C d1 && rsync -a d1/ e2/ && echo k >> e2/p", "allow", "allow", "allow", "archive"},
@@ -174,6 +184,14 @@ func TestGX054ArchiveScopeFourCell(t *testing.T) {
 }
 
 func TestGX054OpenCodePatchNamesFourCell(t *testing.T) {
+	// OpenCode 2.2.5 emitted the patch tool and patchText argument in a
+	// managed live run. The fixture preserves its installed plugin envelope
+	// with identifiers and paths anonymized; both accepted tool spellings
+	// must reach the same target reader.
+	captured, err := os.ReadFile("testdata/gx054_opencode_225_hook.json")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tool := range []string{"patch", "apply_patch"} {
 		t.Run(tool, func(t *testing.T) {
 			f := gx054Fixture(t)
@@ -185,22 +203,32 @@ func TestGX054OpenCodePatchNamesFourCell(t *testing.T) {
 				{"add new file", "*** Begin Patch\n*** Add File: notes.txt\n+note\n*** End Patch", "allow"},
 				{"add new subdirectory", "*** Begin Patch\n*** Add File: sub/notes.txt\n+note\n*** End Patch", "allow"},
 				{"update existing file", "*** Begin Patch\n*** Update File: existing.txt\n@@\n-old\n+new\n*** End Patch", "allow"},
+				{"move existing file", "*** Begin Patch\n*** Update File: existing.txt\n*** Move to: moved.txt\n@@\n-old\n+new\n*** End Patch", "allow"},
 				{"add protected file", "*** Begin Patch\n*** Add File: " + f.keys + "\n+note\n*** End Patch", "protected"},
 				{"add linked file", "*** Begin Patch\n*** Add File: keylink\n+note\n*** End Patch", "protected"},
 			} {
 				t.Run(row.name, func(t *testing.T) {
-					for _, pack := range []string{"", "strict"} {
-						id := fmt.Sprintf("gx054-patch-%s-%s-%s", tool, row.name, pack)
-						payload := mustJSON(t, map[string]any{"hook_event_name": "tool.execute.before", "tool_name": tool, "tool_input": map[string]any{"patchText": row.patch}, "session_id": id, "turn_id": "m1", "tool_call_id": id, "agent_name": "build", "cwd": f.project, "arguments_authoritative": true, "mcp_identity_status": "not_mcp"})
+					for _, cell := range []struct {
+						pack    string
+						managed bool
+					}{{"", false}, {"strict", false}, {"", true}, {"strict", true}} {
+						id := fmt.Sprintf("gx054-patch-%s-%s-%s-%t", tool, row.name, cell.pack, cell.managed)
+						var body map[string]any
+						if err := json.Unmarshal(captured, &body); err != nil {
+							t.Fatal(err)
+						}
+						body["tool_name"], body["cwd"], body["session_id"], body["tool_call_id"] = tool, f.project, id, id
+						body["tool_input"] = map[string]any{"patchText": row.patch}
+						payload := mustJSON(t, body)
 						os.Chmod(f.homes, 0o700)
 						header := hookpaths.ResolveConnector("opencode", "", "tool.execute.before", payload)
 						facts, ok := hookpaths.Decode(header)
 						if !ok || facts[hookpaths.PatchCompleteKey] != "1" {
 							t.Errorf("client did not describe complete patch: %v", facts)
 						}
-						got := gx054Verdict(t, f, "opencode", pack, payload, header, true)
+						got := gx054Verdict(t, f, "opencode", cell.pack, payload, header, cell.managed)
 						if got != row.want {
-							t.Errorf("pack=%q: got %s, want %s", pack, got, row.want)
+							t.Errorf("pack=%q managed=%t: got %s, want %s", cell.pack, cell.managed, got, row.want)
 						}
 					}
 				})
