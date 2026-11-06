@@ -452,7 +452,7 @@ func staticShellWord(word *syntax.Word, env expand.Environ, haveHome bool) (stri
 	if shellparse.MinBraceFields(word) > 1 {
 		return "", false
 	}
-	fields, err := expand.Fields(&expand.Config{Env: env}, word)
+	fields, err := shellparse.Fields(&expand.Config{Env: env}, word)
 	if err != nil || len(fields) != 1 {
 		return "", false
 	}
