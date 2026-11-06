@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 from datetime import datetime, timedelta, timezone
@@ -230,26 +231,70 @@ def _named_openclaw_package(path: str) -> bool:
 def _openclaw_root_for_executable(executable: str) -> str | None:
     """Bind a runnable launcher to its package, without running the launcher."""
 
-    try:
-        info = os.stat(executable)
-        if not stat.S_ISREG(info.st_mode) or (
-            os.name != "nt" and not os.access(executable, os.X_OK)
-        ):
+    seen: set[str] = set()
+    for _ in range(8):
+        try:
+            info = os.stat(executable)
+            if not stat.S_ISREG(info.st_mode) or (
+                os.name != "nt" and not os.access(executable, os.X_OK)
+            ):
+                return None
+            resolved = os.path.realpath(executable)
+        except OSError:
             return None
-    except OSError:
-        return None
+        if resolved in seen:
+            return None
+        seen.add(resolved)
 
-    resolved_executable = os.path.realpath(executable)
-    directory = os.path.dirname(resolved_executable)
-    for _ in range(16):
-        if _named_openclaw_package(directory):
-            return directory
-        parent = os.path.dirname(directory)
-        if parent == directory:
-            break
-        directory = parent
+        directory = os.path.dirname(resolved)
+        for _ in range(16):
+            if _named_openclaw_package(directory):
+                return directory
+            parent = os.path.dirname(directory)
+            if parent == directory:
+                break
+            directory = parent
+        executable = _literal_shell_exec_target(resolved)
+        if executable is None:
+            return None
 
     return None
+
+
+def _literal_shell_exec_target(path: str) -> str | None:
+    """Read a single-command shell wrapper as a path, without executing it."""
+
+    payload = _read_regular_file(path, max_bytes=16 * 1024)
+    if payload is None:
+        return None
+    try:
+        source = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if "\x00" in source:
+        return None
+    lines = source.splitlines()
+    if not lines or lines[0] not in (
+        "#!/bin/sh", "#!/bin/bash", "#!/usr/bin/env sh", "#!/usr/bin/env bash",
+    ):
+        return None
+    commands = [line.strip() for line in lines[1:]
+                if line.strip() and not line.lstrip().startswith("#")]
+    if len(commands) != 1:
+        return None
+    try:
+        words = shlex.split(commands[0], posix=True)
+    except ValueError:
+        return None
+    if (len(words) not in (2, 3) or words[0] != "exec"
+            or (len(words) == 3 and words[2] != "$@")):
+        return None
+    target = words[1]
+    if (not os.path.isabs(target) or any(
+        char in target for char in "$`*?[]{};&|<>\r\n"
+    )):
+        return None
+    return target
 
 
 def _recorded_openclaw_executable(data_dir: str) -> str | None:
@@ -327,14 +372,11 @@ def _active_openclaw_root(*, data_dir: str = "") -> str | None:
     """Find one active package from recorded, PATH, or discovered launchers."""
 
     on_path = shutil.which("openclaw")
-    path_root = _openclaw_root_for_executable(on_path) if on_path else None
-    if path_root:
-        return path_root
+    if on_path:
+        return _openclaw_root_for_executable(on_path)
     recorded = _recorded_openclaw_executable(data_dir)
     if recorded:
-        root = _openclaw_root_for_executable(recorded)
-        if root:
-            return root
+        return _openclaw_root_for_executable(recorded)
     roots = {
         root for candidate in _discovered_openclaw_executables()
         if (root := _openclaw_root_for_executable(candidate))
