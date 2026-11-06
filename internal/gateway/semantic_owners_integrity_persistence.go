@@ -1526,10 +1526,11 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		return kept
 	}
 	commandText := strings.ToLower(input.Command)
-	overBudget, unresolved := false, false
+	overBudget, unresolved, resolvedTarget := false, false, false
 	evidence := request
 	evidence.overBudgetOmission = &overBudget
 	evidence.unresolvedTarget = &unresolved
+	evidence.resolvedTarget = &resolvedTarget
 	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(evidence, facts)
 	if !symlinkWrite && !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
 		(request.Connector == "claudecode" || request.Connector == "codex") &&
@@ -1599,12 +1600,17 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				// what it is, not as a key write (rel-1-0-2:GAP-0690).
 				title = unresolvedWriteTargetTitle
 			}
-			return append(kept, adjustConfidence(input.Tool, RuleFinding{
+			finding := adjustConfidence(input.Tool, RuleFinding{
 				RuleID: named.ID, Title: title, Severity: rule.Severity,
 				Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
 				Tags: append([]string(nil), named.Tags...), LineNumber: 1,
 				enforcement: findingEnforcementAllowed,
-			}))
+			})
+			if named.ID == rule.ID &&
+				(trustedAuthorizedKeysSymlinkWrite(input) || resolvedTarget && !overBudget && !unresolved) {
+				finding = finding.withTrustedActionProof(newResolvedTargetFindingProof(named.ID, true))
+			}
+			return append(kept, finding)
 		}
 	}
 	return appendTrustedCMDPrivateKeyReadFinding(

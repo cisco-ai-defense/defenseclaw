@@ -445,14 +445,16 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	// confirm that SSSD has no second holder of its uid. When this is the
 	// sole missing fact and the unproven profile differs only in its hook
 	// threshold, the OSS default and permissive tiers use the profile selected
-	// by proven assignments on hook decisions and pathless explanations for a
-	// known connector. Inspection, a different sandbox, or a different rule
-	// pack still needs account proof.
+	// by proven assignments on hook decisions and pathless explanations when
+	// every represented connector has an eligible tier. Inspection, a
+	// different sandbox, or a different rule pack still needs account proof.
 	// Strict and managed installs keep their proof requirement.
-	if verified && subject.holderUnproven && !subject.LookupFailed && connectorName != "" &&
+	if verified && subject.holderUnproven && !subject.LookupFailed &&
 		path != profilePathInspect && slices.Equal(needed, []string{"account:unknown"}) &&
 		set.base != nil && !managed.IsManagedEnterprise(set.base.DeploymentMode) &&
-		set.base.HookPolicyTierForConnector(connectorName) != config.HookPolicyTierStrict &&
+		!slices.ContainsFunc(scans, func(name string) bool {
+			return set.base.HookPolicyTierForConnector(name) == config.HookPolicyTierStrict
+		}) &&
 		set.unconfirmedHolderOnlyTightensHook(uncoveredMaybe, proven, scans) {
 		decision := set.decision(proven, profileMatchDefaultLookupFailed, "", source)
 		if len(yes) > 0 {

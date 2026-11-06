@@ -1041,6 +1041,12 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		_, ok := protected[canonicalSemanticPath(path)]
 		return ok
 	}
+	confirmed := func() bool {
+		if request.resolvedTarget != nil {
+			*request.resolvedTarget = true
+		}
+		return true
+	}
 	// The client's opaque-scope facts stand in only for the link-scope walk;
 	// every other check sees the map as before.
 	globFacts := clientGlobFacts(request)
@@ -1208,7 +1214,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			target = mapped
 		}
 		if isProtected(target) {
-			return true
+			return confirmed()
 		}
 		if moved := hookpaths.PlainMovePath(target); movedOntoLinks[moved] || windowsMovedOntoLink(moved) {
 			parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(moved))
@@ -1218,7 +1224,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			strings.HasPrefix(target, clientCWD+string(filepath.Separator)) {
 			relative := strings.TrimPrefix(target, clientCWD+string(filepath.Separator))
 			if isProtected(hookpaths.OperandPath(relative, physicalCWD)) {
-				return true
+				return confirmed()
 			}
 		}
 		// An unreadable link operation makes later writes at its destination
@@ -1237,13 +1243,19 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// word, the client answer of that reading decides an operand the
 		// call as written left unknown (GAP-2477).
 		if reading := clientTargets[hookpaths.ReadingTargetPrefix+target]; request.staticOperandReading && reading != "" {
-			return isProtected(reading)
+			if isProtected(reading) {
+				return confirmed()
+			}
+			return false
 		}
 		if request.ResolvedWriteTargets != nil {
 			resolved, present := request.ResolvedWriteTargets[target]
 			switch {
 			case present && resolved != "":
-				return isProtected(resolved)
+				if isProtected(resolved) {
+					return confirmed()
+				}
+				return false
 			case present:
 				// The user's hook could not resolve the operand (a link
 				// loop, a chain past the kernel limit or an unreadable
@@ -1284,11 +1296,20 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			// by the client as known ones (GAP-2582).
 			if !ok && request.ProtectedHomeHook && links.KnownOutsideScopes(target, ownCopy, opaqueFacts) {
 				if resolved := clientTargets[target]; resolved != "" {
-					return isProtected(resolved)
+					if isProtected(resolved) {
+						return confirmed()
+					}
+					return false
 				}
 				if resolved := clientTargets[hookpaths.ReadingTargetPrefix+target]; request.staticOperandReading && resolved != "" {
-					return isProtected(resolved)
+					if isProtected(resolved) {
+						return confirmed()
+					}
+					return false
 				}
+			}
+			if ok {
+				return confirmed()
 			}
 			return true
 		}
@@ -1303,7 +1324,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			}
 			for _, path := range protectedPaths {
 				if file, err := os.Stat(path); err == nil && os.SameFile(info, file) {
-					return true
+					return confirmed()
 				}
 			}
 			return false
@@ -1314,7 +1335,10 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// An existing link whose target cannot be resolved is still a
 		// possible write into the protected home. The client and gateway
 		// must both fail closed on a linked component before "..".
-		return isProtected(resolved) || !ok && !windowsLocationOrdinaryWriteTarget(target)
+		if isProtected(resolved) {
+			return confirmed()
+		}
+		return !ok && !windowsLocationOrdinaryWriteTarget(target)
 	}
 	// Partial command projections can omit a redirect PathFact. The shell AST
 	// still gives an exact write operand, which the user's hook resolved.
@@ -1341,7 +1365,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		decision = request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
 	}
 	if decision != "" {
-		return true
+		return confirmed()
 	}
 	if !cannotResolveLocally && trustedPOSIXShellCall(input, facts) &&
 		strings.Contains(input.Command, "for") && strings.Contains(input.Command, "cp") &&
@@ -1355,7 +1379,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// the user's hook ran the same decision on the same command and
 		// found a protected target, as a per-user gateway does (GAP-2514,
 		// GAP-2515).
-		return true
+		return confirmed()
 	}
 	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {
 		return true
