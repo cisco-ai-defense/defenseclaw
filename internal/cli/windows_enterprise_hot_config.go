@@ -1666,8 +1666,8 @@ func keepInstalledWindowsEnterpriseEditedConfig() string {
 // outside the lifecycle (its sha256 is not the one config.generation.json
 // records) as rejected-config.yaml beside it, before ensure replaces it with
 // the managed config. It returns the kept path, or "" when the file was not
-// edited or could not be kept. The copy has deployment.json's access
-// control, administrators only.
+// edited or could not be kept. Only administrators can read or change the
+// copy.
 func keepWindowsEnterpriseEditedConfig(layout managed.StandaloneLayout, current []byte) string {
 	state, err := configwrite.ReadGenerationState(layout.ConfigPath)
 	if err != nil || state.ConfigSHA256 == "" {
@@ -1685,20 +1685,17 @@ func keepWindowsEnterpriseEditedConfig(layout managed.StandaloneLayout, current 
 // beside config.yaml. It returns the kept path, or "" when it could not be
 // kept.
 func keepWindowsEnterpriseRejectedConfig(layout managed.StandaloneLayout, current []byte) string {
-	return keepWindowsEnterpriseRejectedFile(layout, filepath.Join(layout.ConfigDir, "rejected-config.yaml"), current)
+	return keepWindowsEnterpriseRejectedFile(filepath.Join(layout.ConfigDir, "rejected-config.yaml"), current)
 }
 
-// keepWindowsEnterpriseRejectedFile writes current to kept with
-// deployment.json's access control (administrators only). It returns kept,
-// or "" when it could not be kept.
-func keepWindowsEnterpriseRejectedFile(layout managed.StandaloneLayout, kept string, current []byte) string {
-	sibling := layout.ConfigPath
-	if deployment, err := windowsEnterpriseDeploymentInspector(managed.ProfileStandalone); err == nil && deployment.MetadataPath != "" {
-		if _, err := os.Stat(deployment.MetadataPath); err == nil {
-			sibling = deployment.MetadataPath
-		}
-	}
-	if err := writeFileKeepingDACL(kept, current, sibling); err != nil {
+// keepWindowsEnterpriseRejectedFile writes current to kept as a new file
+// that only administrators can read or change, under Setup's own AdminFile
+// descriptor. It used to copy deployment.json's access list, or the
+// rejected file's own when deployment.json was missing or unreadable, so a
+// kept copy could carry the very entry it was rejected for (GAP-0590 review
+// S3). It returns kept, or "" when it could not be kept.
+func keepWindowsEnterpriseRejectedFile(kept string, current []byte) string {
+	if err := writeFreshFileWithDACL(kept, current, windowsBundleAdminFileSDDL()); err != nil {
 		return ""
 	}
 	return kept
@@ -1765,7 +1762,7 @@ func rewriteWindowsEnterpriseDriftedFile(layout managed.StandaloneLayout, rewrit
 	if err != nil {
 		return "", nil, fmt.Errorf("read the installed %s to keep it: %w", rewrite.path, err)
 	}
-	kept := keepWindowsEnterpriseRejectedFile(layout, rewrite.kept, current)
+	kept := keepWindowsEnterpriseRejectedFile(rewrite.kept, current)
 	if kept == "" {
 		return "", nil, fmt.Errorf("the installed %s %s and could not be kept as %s", rewrite.path, windowsEnterpriseUntrustedProblem(untrusted), rewrite.kept)
 	}
