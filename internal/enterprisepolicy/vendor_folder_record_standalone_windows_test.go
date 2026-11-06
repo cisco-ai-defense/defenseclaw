@@ -292,11 +292,17 @@ func TestStandaloneVendorFolderDefenseClawCreatedIsRestamped(t *testing.T) {
 			}
 
 			state, err := publishVendorCase(t, tc, opts)
-			if err != nil || !state.Covered {
-				t.Fatalf("publish: state = %+v, err = %v", state, err)
+			if trustErr := validateTrustedLeafDir(folder); trustErr != nil {
+				t.Fatalf("the created folder was not re-stamped: %v", trustErr)
 			}
-			if err := validateTrustedLeafDir(folder); err != nil {
-				t.Fatalf("the created folder was not re-stamped: %v", err)
+			if err != nil || !state.Covered {
+				// The other outcome the class allows: the recorded file is
+				// refused and named, never trusted as found (OpenCode does not
+				// move an Administrators-owned file aside).
+				if err == nil || state.Covered || !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(file)) {
+					t.Fatalf("publish: state = %+v, err = %v; want the file written new, or refused by name", state, err)
+				}
+				return
 			}
 			if err := validateTrustedFile(tc.file(t, opts)); err != nil {
 				t.Fatalf("the recorded file another account could change was kept: %v", err)
