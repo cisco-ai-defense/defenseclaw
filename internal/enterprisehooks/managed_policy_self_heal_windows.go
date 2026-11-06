@@ -210,7 +210,11 @@ func repairWindowsManagedPolicySelfHealFile(path string, file windowsManagedPoli
 			return
 		}
 	}
-	if _, err := repairWindowsManagedMachineFile(path, file.userReadable, check); err != nil {
+	repair := repairWindowsManagedMachineFile
+	if file.lock {
+		repair = repairWindowsManagedLockFile
+	}
+	if _, err := repair(path, file.userReadable, check); err != nil {
 		reportWindowsManagedPolicySelfHeal(managed.MarkerAccept, path, err)
 		return
 	}
