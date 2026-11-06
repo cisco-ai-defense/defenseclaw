@@ -12,10 +12,10 @@ import (
 )
 
 // knownWordPrograms cannot set a variable of the calling shell: external
-// programs and builtins without a binding form. A command that runs any
-// other program (read, wait -p, printf -v, eval, source, trap, command,
-// builtin, exec, env, a function or a dynamic program word) has no known
-// parameter words: a wrapper or a deferred string can rebind the name
+// programs and builtins without a binding form. In strict, a command that
+// runs any other program (read, wait -p, printf -v, eval, source, trap,
+// command, builtin, exec, env, a function or a dynamic program word) has no
+// known parameter words: a wrapper or a deferred string can rebind the name
 // (rel-1-0-2:GAP-0004 review). The list is an allowlist on purpose. test and
 // [ are left out: test -v "a[f=-3]" evaluates the subscript, which assigns
 // (rel-1-0-6:GAP-0235 review). Static cd and pushd have a separate check.
@@ -333,11 +333,14 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 				// parameter word (rel-1-0-6:GAP-0320, GAP-0362).
 				break
 			}
-			if balanced && static && program == "printf" && len(node.Args) >= 2 {
-				// printf without its binding option cannot change the
-				// caller's variable. A dynamic first argument may be -v.
-				option, fixed := StaticWord(node.Args[1], home)
-				if fixed && option != "" && !strings.HasPrefix(option, "-") {
+			if balanced && static && program == "printf" && nonbindingPrintfCall(node, home) {
+				break
+			}
+			if balanced && static && program == "read" {
+				if names, ok := namedReadDestinations(node, home); ok {
+					for _, name := range names {
+						unsafeNames[name] = true
+					}
 					break
 				}
 			}
@@ -527,11 +530,101 @@ func balancedFunctionBody(fn *syntax.FuncDecl, home string) bool {
 				return true
 			}
 			program, fixed := literalProgramWord(node.Args[0], home)
-			safe = fixed && slices.Contains(knownWordPrograms, programBase(program))
+			safe = fixed && (slices.Contains(knownWordPrograms, programBase(program)) ||
+				program == "printf" && nonbindingPrintfCall(node, home))
 		}
 		return safe
 	})
 	return safe
+}
+
+// nonbindingPrintfCall accepts only print forms of the shell builtin. The
+// end-of-options marker makes a later -v a format word. The format itself
+// must be fixed and cannot use %n, which assigns a named shell variable.
+func nonbindingPrintfCall(call *syntax.CallExpr, home string) bool {
+	if call == nil || len(call.Args) < 2 {
+		return false
+	}
+	program, fixed := literalProgramWord(call.Args[0], home)
+	if !fixed || program != "printf" {
+		return false
+	}
+	formatIndex := 1
+	first, fixed := StaticWord(call.Args[formatIndex], home)
+	if !fixed || first == "" {
+		return false
+	}
+	if first == "--" {
+		formatIndex++
+	} else if strings.HasPrefix(first, "-") {
+		return false
+	}
+	if formatIndex >= len(call.Args) {
+		return false
+	}
+	format, fixed := StaticWord(call.Args[formatIndex], home)
+	if !fixed {
+		return false
+	}
+	for i := 0; i < len(format); i++ {
+		if format[i] != '%' {
+			continue
+		}
+		i++
+		if i >= len(format) {
+			return false
+		}
+		if format[i] == '%' {
+			continue
+		}
+		if format[i] == '(' {
+			end := strings.IndexByte(format[i+1:], ')')
+			if end < 0 || i+end+2 >= len(format) || format[i+end+2] != 'T' {
+				return false
+			}
+			i += end + 2
+			continue
+		}
+		for i < len(format) && (format[i] < 'A' || format[i] > 'Z') && (format[i] < 'a' || format[i] > 'z') {
+			if format[i] == '%' {
+				return false
+			}
+			i++
+		}
+		if i >= len(format) || format[i] == 'n' {
+			return false
+		}
+	}
+	return true
+}
+
+// namedReadDestinations recognizes explicit plain read destinations. The
+// scan marks those names unknown and can retain other copy-word names.
+// Other read forms may bind a name the scan cannot identify.
+func namedReadDestinations(call *syntax.CallExpr, home string) ([]string, bool) {
+	if call == nil || len(call.Assigns) != 0 || len(call.Args) < 2 {
+		return nil, false
+	}
+	program, fixed := literalProgramWord(call.Args[0], home)
+	if !fixed || program != "read" {
+		return nil, false
+	}
+	index := 1
+	if option, fixed := StaticWord(call.Args[index], home); fixed && option == "-r" {
+		index++
+	}
+	if index == len(call.Args) {
+		return nil, false
+	}
+	names := make([]string, 0, len(call.Args)-index)
+	for _, word := range call.Args[index:] {
+		name, fixed := StaticWord(word, home)
+		if !fixed || !plainShellVariableName(name) {
+			return nil, false
+		}
+		names = append(names, name)
+	}
+	return names, true
 }
 
 // shellSpecialParameters are names bash sets itself (on every command, at
@@ -555,6 +648,10 @@ func simpleScalarParameter(param *syntax.ParamExp) bool {
 		return false
 	}
 	name := param.Param.Value
+	return plainShellVariableName(name)
+}
+
+func plainShellVariableName(name string) bool {
 	if name == "" || slices.Contains(shellSpecialParameters, name) || strings.HasPrefix(name, "BASH_") {
 		return false
 	}

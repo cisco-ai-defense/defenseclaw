@@ -30,13 +30,13 @@ func TestGAP0395And0397FourCell(t *testing.T) {
 	linked := projects["protected"]
 	for name, target := range map[string]string{
 		"build/README.md": "../../.ssh/authorized_keys",
-		"build/opt1.cfg": "../../.ssh/authorized_keys",
-		"out.debug":      "../.ssh/authorized_keys",
-		"a.txt.bak":      "../.ssh/authorized_keys",
-		"build/a.o":      "../../.ssh/authorized_keys",
-		"build/a.txt":    "../../.ssh/authorized_keys",
-		"out/a.txt":      "../../.ssh/authorized_keys",
-		"copy/a.txt":     "../../.ssh/authorized_keys",
+		"build/opt1.cfg":  "../../.ssh/authorized_keys",
+		"out.debug":       "../.ssh/authorized_keys",
+		"a.txt.bak":       "../.ssh/authorized_keys",
+		"build/a.o":       "../../.ssh/authorized_keys",
+		"build/a.txt":     "../../.ssh/authorized_keys",
+		"out/a.txt":       "../../.ssh/authorized_keys",
+		"copy/a.txt":      "../../.ssh/authorized_keys",
 	} {
 		if err := os.Symlink(target, filepath.Join(linked, name)); err != nil {
 			t.Fatal(err)
