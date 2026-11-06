@@ -385,7 +385,7 @@ func (t opencodeTarget) Reconcile(opts Options) (State, error) {
 	}
 	var created []string
 	if policy.Ownership == config.MachinePolicyOwnershipMerge {
-		if created, err = takeBackPolicyPath(opts, path, &state); err != nil {
+		if created, _, err = takeBackPolicyPathFor(opts, path, opencodeFolderUse, &state); err != nil {
 			return state, err
 		}
 		// A config an unprivileged user planted in the folder before
@@ -444,6 +444,9 @@ func (t opencodeTarget) Verify(opts Options) (State, error) {
 	state := newOpenCodeState(opts, policy, path)
 	if openCodePerUserFallback(opts, policy, &state) {
 		return state, nil
+	}
+	if err := validatePolicyLeafDir(opts, platformPath(opts, dirFor(opts, path))); err != nil {
+		state.conflict("%v; unprivileged users can add an opencode.json or opencode.jsonc there, which OpenCode loads for every user", err)
 	}
 	current, exists, err := readPolicyFile(opts, path)
 	if err != nil {

@@ -425,7 +425,15 @@ func removeWindowsManagedHooksStandalonePerUserWiring(identity windowsManagedHoo
 		return err
 	}
 	opts := enterprisepolicy.LayoutOptions(layout, programFiles, programData)
-	if _, err := enterprisepolicy.RemoveWindowsGoOwned(opts); err != nil {
+	removed, err := enterprisepolicy.RemoveWindowsGoOwned(opts)
+	// A vendor folder that does not protect DefenseClaw's file is named, and
+	// the uninstall goes on (g582 review 7 S1).
+	for _, state := range removed.States {
+		for _, warning := range state.Warnings {
+			fmt.Fprintf(os.Stderr, "warning: %s: %s\n", state.Connector, warning)
+		}
+	}
+	if err != nil {
 		return err
 	}
 	// The Claude Code version floor drop-in goes with the rest of the

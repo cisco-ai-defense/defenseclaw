@@ -487,6 +487,13 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 	if err != nil {
 		return err
 	}
+	recordedPath := path
+	if record != nil && record.Path != "" {
+		recordedPath = record.Path
+	}
+	if folder, ok := opts.unprotectedFolderOf(recordedPath); ok {
+		return restoreOrStripUnprotected(opts, connector, record, strip, folder, state)
+	}
 	current, exists, err := readPolicyFile(opts, path)
 	if err != nil {
 		return err
@@ -565,6 +572,59 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 			}
 		}
 	}
+	return deleteRecord(opts, connector)
+}
+
+// restoreOrStripUnprotected is restoreOrStrip for a recorded file in a
+// vendor folder DefenseClaw did not create and that does not protect it
+// (Windows, case c; g582 review 7 S1). The removal neither takes the folder
+// over nor fails closed on it. It restores the administrator's original, or
+// removes DefenseClaw's file, only while the recorded file is still the one
+// DefenseClaw wrote: a regular single-link file only SYSTEM, Administrators
+// and TrustedInstaller own and can change, byte for byte the recorded
+// postimage. Any other file is left as it is, since its content may no
+// longer be DefenseClaw's or the administrator's. Either way DefenseClaw's
+// record goes, and one warning names the folder and the fix.
+func restoreOrStripUnprotected(opts Options, connector string, record *ownershipRecord, strip stripFunc, folder unprotectedVendorFolder, state *State) error {
+	if record == nil {
+		return nil
+	}
+	path := record.Path
+	current, exists, why := readUnprotectedRecordedFile(opts, path)
+	outcome := ""
+	switch {
+	case why != "":
+		outcome = fmt.Sprintf("left %s as it is (%s)", path, why)
+	case !exists:
+		outcome = fmt.Sprintf("%s is already gone", path)
+	case sha256Hex(current) != record.PostimageSHA256:
+		outcome = fmt.Sprintf("left %s as it is (it changed after DefenseClaw wrote it)", path)
+	default:
+		var admin []byte
+		if record.PreimageExisted {
+			stripped, _, err := strip(record.Preimage)
+			if err != nil {
+				return err
+			}
+			admin = stripped
+		}
+		base := policyFileBase{exists: true, data: current}
+		if blank(admin) {
+			if err := removePolicyFileOver(opts, path, base); err != nil {
+				return err
+			}
+			outcome = fmt.Sprintf("removed %s, DefenseClaw's file", path)
+		} else {
+			if err := atomicWriteOver(opts, platformPath(opts, path), base, admin); err != nil {
+				return err
+			}
+			outcome = fmt.Sprintf("restored the administrator content of %s", path)
+		}
+		state.Changed = true
+	}
+	state.detail("%s", outcome)
+	state.warn("%s; the uninstall %s and dropped DefenseClaw's record without taking the folder over. "+
+		"To protect the folder, from an elevated prompt run %s", folder.reason, outcome, folder.fix)
 	return deleteRecord(opts, connector)
 }
 

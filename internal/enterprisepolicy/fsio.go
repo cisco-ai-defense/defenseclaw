@@ -76,6 +76,42 @@ type policyTakeBack struct {
 	// recorded, and no standard user can delete or replace that file there
 	// (Windows, g582 review 6 M2, case c).
 	left []string
+	// unprotected is a case c folder that does not protect the recorded file,
+	// found by a removal walk (policyFolderUse.removal), which does not fail
+	// closed on it: the walk stops there and takes nothing over.
+	unprotected []unprotectedVendorFolder
+}
+
+// policyFolderUse is how the vendor uses the folder that holds a policy
+// file, and what the walk is for.
+type policyFolderUse struct {
+	// siblings says what else the vendor loads from that folder besides the
+	// policy file itself, for example "GitHub Copilot loads every *.json file
+	// in it", or "" when the vendor reads only that one file name. In case c
+	// such a folder fails closed when standard users may add files to it: a
+	// file they add would apply beside or instead of DefenseClaw's (g582
+	// review 7 M1).
+	siblings string
+	// removal is an uninstall walk: a case c folder that does not protect the
+	// recorded file is reported in policyTakeBack.unprotected instead of
+	// failing, so the removal goes on without taking the folder over (g582
+	// review 7 S1).
+	removal bool
+}
+
+// Folder uses of the Go-owned Windows targets whose vendor loads more than
+// DefenseClaw's file from its folder.
+var (
+	copilotFolderUse  = policyFolderUse{siblings: "GitHub Copilot loads every *.json file in it for every user"}
+	opencodeFolderUse = policyFolderUse{siblings: "OpenCode loads opencode.json and opencode.jsonc from it for every user, and prefers opencode.jsonc"}
+)
+
+// unprotectedVendorFolder is a vendor folder DefenseClaw did not create that
+// holds a file DefenseClaw recorded and does not protect that file (case c).
+type unprotectedVendorFolder struct {
+	// dir is the folder, reason why it does not protect the file, and fix
+	// the administrator's commands, in order.
+	dir, reason, fix string
 }
 
 // takeBackPolicyPath reclaims the vendor directories of path that an
@@ -84,10 +120,18 @@ type policyTakeBack struct {
 // before a target reads or writes its policy. It records what it did and
 // returns the directories it created.
 func takeBackPolicyPath(opts Options, path string, state *State) ([]string, error) {
+	created, _, err := takeBackPolicyPathFor(opts, path, policyFolderUse{}, state)
+	return created, err
+}
+
+// takeBackPolicyPathFor is takeBackPolicyPath for a folder the vendor uses
+// as use says. It also returns the case c folders a removal walk found
+// unprotected; the path itself is then left alone.
+func takeBackPolicyPathFor(opts Options, path string, use policyFolderUse, state *State) ([]string, []unprotectedVendorFolder, error) {
 	if opts.SkipTrustChecks {
-		return nil, nil
+		return nil, nil, nil
 	}
-	result, err := reclaimPolicyDirs(opts, platformPath(opts, dirFor(opts, path)))
+	result, err := reclaimPolicyDirsFor(opts, platformPath(opts, dirFor(opts, path)), use)
 	for _, dir := range result.reclaimed {
 		state.detail("took back %s: an unprivileged user created it before DefenseClaw; it now has DefenseClaw's owner and protected DACL", dir)
 	}
@@ -97,14 +141,14 @@ func takeBackPolicyPath(opts Options, path string, state *State) ([]string, erro
 	for _, note := range result.left {
 		state.detail("%s", note)
 	}
-	if err != nil {
-		return result.created, err
+	if err != nil || len(result.unprotected) != 0 {
+		return result.created, result.unprotected, err
 	}
 	note, err := clearPolicyFileName(opts, platformPath(opts, path))
 	if note != "" {
 		state.detail("%s", note)
 	}
-	return result.created, err
+	return result.created, nil, err
 }
 
 // TakeBackVendorPolicyFolder takes back dir, a vendor folder under
