@@ -354,6 +354,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if delivery == nil {
 			delivery = a.beginHookDeliveryReceipt(w, r)
 		}
+		if delivery != nil {
+			delivery.bindBody(r.Body)
+		}
 		// Resolve the identity-based guardrail profile once, after
 		// authentication, from the route's connector, the verified subject
 		// and the agent identity derived from both (never the payload).
