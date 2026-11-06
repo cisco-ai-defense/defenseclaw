@@ -7038,9 +7038,9 @@ def test_untrusted_config_acl_is_refused_before_the_transaction_stops_a_service(
     # GAP-0603: the standalone self-heal never re-stamps an untrusted owner
     # or a null DACL; Setup's own account as owner is still repaired.
     heal = _function_text(module, "Assert-DefenseClawPathAcl")
-    assert "$untrustedContract = @('Dacl')" in heal
+    assert "$untrustedContract = @('Dacl', '')" in heal
     assert "if ([string]$currentOwner -cne [string](Get-DefenseClawCurrentProcessUserSID)) {" in heal
-    assert "-not ($_.Kind -eq 'Contract' -and $_.Severity -in $untrustedContract)" in heal
+    assert "-not ($_.Kind -eq 'Contract' -and (Get-DefenseClawPathAclVerdictSeverity -Verdict $_) -in $untrustedContract)" in heal
 
     # The install-like lifecycle refuses every content path another account
     # can change before the transaction stops anything, and before Repair
@@ -7305,7 +7305,7 @@ def test_standalone_self_heal_restamps_only_when_every_verdict_is_repairable() -
     restamp = heal.index("if ($repairable.Count -gt 0) {", guard + 1)
     refusal = heal[guard:restamp]
     assert "$_.Kind -notin $repairableKinds -or" in refusal
-    assert "($_.Kind -eq 'Contract' -and $_.Severity -in $untrustedContract)" in refusal
+    assert "($_.Kind -eq 'Contract' -and (Get-DefenseClawPathAclVerdictSeverity -Verdict $_) -in $untrustedContract)" in refusal
     assert "throw ('refusing to re-stamp a managed path in place" in refusal
     assert refusal.rstrip().endswith('"/ensure again): $([string]$unrepairable[0].Reason)")\n            }\n        }')
     assert restamp < heal.index("Set-DefenseClawPathAcl `")
