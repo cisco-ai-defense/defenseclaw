@@ -99,11 +99,8 @@ func enterpriseHookGuardianTargetRemoved(
 	if _, present := local[user]; present {
 		return false
 	}
-	if !enterpriseHooksEnumerateDirectoryConfigured() {
-		return true
-	}
 	state := enterprisehooks.LoadUnixEnumeratorState(enterpriseHookEnumeratorStatePath(enterpriseHookManifest))
-	return state.Sources[user] == "files"
+	return enterprisehooks.UnixMissConfirmed(state, user, target.Connector)
 }
 
 // enterpriseHookRemovedAccountNote follows a failed row whose local account
