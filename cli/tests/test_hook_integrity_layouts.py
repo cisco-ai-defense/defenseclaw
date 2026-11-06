@@ -30,6 +30,7 @@ TestClaudeCodeWindowsHandlersMatchTheSharedGolden checks it against Setup
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -320,6 +321,42 @@ def test_status_and_doctor_read_the_claude_launcher_guard_the_same_way(monkeypat
     ):
         other = {**pretool, "command": command}
         assert hook_integrity.claude_launcher_guard_view(other) is other, command
+
+
+def test_claude_chain_view_and_guard_drift(tmp_path, monkeypatch):
+    monkeypatch.setenv("SystemRoot", "C:\\Windows")
+    monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
+    chain = tmp_path / "chain"
+    chain.mkdir()
+    guard = chain / "defenseclaw-hook-guard.exe"
+    approved = chain / "defenseclaw-hook-guard.approved"
+    body = b"approved guard image"
+    guard.write_bytes(body)
+    approved.write_bytes(body)
+    (chain / "chain.json").write_text(json.dumps({"guard_sha256": hashlib.sha256(body).hexdigest()}))
+    launcher = str(tmp_path / "defenseclaw-hook.exe")
+    command = "C:\\Windows\\System32\\cmd.exe"
+    compare = "C:\\Windows\\System32\\fc.exe"
+    words = hook_integrity._claude_chain_wrapper_words(
+        compare, str(guard), str(approved), launcher, "UserPromptSubmit"
+    )
+    handler = {"type": "command", "command": command, "args": words}
+    assert hook_integrity.claude_launcher_guard_view(handler) == {
+        **handler, "command": launcher, "args": ["hook", "--connector", "claudecode"]
+    }
+    cfg, _ = _install(tmp_path, "claudecode", json.dumps({"hooks": {"UserPromptSubmit": [{"hooks": [handler]}]}}))
+    assert hook_integrity.hook_launcher_problems(cfg, "claudecode") == []
+    guard.write_bytes(b"changed guard")
+    problems = hook_integrity.hook_launcher_problems(cfg, "claudecode")
+    assert len(problems) == 1 and "missing or changed" in problems[0]
+    assert "defenseclaw setup claude-code" in problems[0].repair
+    edited = {**handler, "args": [*words[:-1], "0"]}
+    assert hook_integrity.claude_launcher_guard_view(edited) is edited
+    neutral = hook_integrity._claude_chain_wrapper_words(compare, str(guard), str(approved), launcher, "Stop")
+    assert neutral[-1] == "1"
+    direct = {"command": str(guard),
+              "args": ["launcher-guard", launcher, "hook", "--connector", "claudecode", "--event", "PreToolUse"]}
+    assert hook_integrity.claude_launcher_guard_view(direct)["command"] == launcher
 
 
 def test_windows_copilot_adapter_in_a_data_dir_not_named_defenseclaw_is_registered(tmp_path, monkeypatch):
