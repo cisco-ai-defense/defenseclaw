@@ -21,13 +21,41 @@ const PossibleTargetDecision = "possible-target"
 // as the target reader. A named path wins even if an earlier word was only
 // possible. The caller applies the policy tier to a possible answer.
 func SSHKeyMentionGrade(command, cwd, home string) string {
-	if command == "" || !actionWindowsHome(home) || len(command) > MaxPayloadBytes {
+	context := actionSSHGradeContext{memo: NewTargetMemo(), grades: make(map[actionSSHGradeKey]string)}
+	return sshKeyMentionGrade(command, cwd, home, 0, &context)
+}
+
+type actionSSHGradeKey struct {
+	command, cwd string
+	depth        int
+}
+
+type actionSSHGradeContext struct {
+	memo   *TargetMemo
+	grades map[actionSSHGradeKey]string
+}
+
+func sshKeyMentionGrade(command, cwd, home string, depth int, context *actionSSHGradeContext) string {
+	if command == "" || !actionWindowsHome(home) || len(command) > MaxPayloadBytes || depth >= 8 {
 		return ""
 	}
+	key := actionSSHGradeKey{command: command, cwd: cwd, depth: depth}
+	if grade, ok := context.grades[key]; ok {
+		return grade
+	}
+	grade := sshKeyMentionGradeUncached(command, cwd, home, depth, context)
+	context.grades[key] = grade
+	return grade
+}
+
+func sshKeyMentionGradeUncached(command, cwd, home string, depth int, context *actionSSHGradeContext) string {
 	possible := actionPOSIXCopyMayVary(command, home)
 	displayOnly := ProvedDisplayOnlyHereString(command) || actionReadOnlyNestedShellPattern(command, home) ||
 		ProvedReadOnlyPOSIXCommand(command, home)
-	memo := NewTargetMemo()
+	memo := context.memo
+	if actionNamedPOSIXWrite(command, cwd, home, depth, context) {
+		return ProtectedTargetDecision
+	}
 	for _, target := range actionKnownPOSIXCopyTargets(command, cwd, home) {
 		resolved, ok := actionWindowsPath(target, cwd, home)
 		root, rootOK := actionWindowsPath(home, cwd, home)
@@ -47,7 +75,20 @@ func SSHKeyMentionGrade(command, cwd, home string) string {
 			continue
 		}
 		readOnly := displayOnly || actionKnownReadOnlyWindows(scan.words)
-		for _, span := range actionWindowsResolvedSpans(scan.words, cwd, home) {
+		spans := actionWindowsResolvedSpans(scan.words, cwd, home)
+		spanReadOnly := make([]bool, len(spans))
+		var rawReadOnly []bool
+		if runtime.GOOS == "windows" {
+			rawReadOnly = make([]bool, len(scan.words))
+		}
+		for i, span := range spans {
+			spanReadOnly[i] = readOnly || actionKnownReadOnlyWindowsStatement(span.words) ||
+				actionReadOnlyFixedPOSIXShellBody(span.words, home)
+			if spanReadOnly[i] {
+				for j := span.start; j < span.end && j < len(rawReadOnly); j++ {
+					rawReadOnly[j] = true
+				}
+			}
 			if len(span.words) > 1 && (programBase(span.words[0]) == "copy-item" || programBase(span.words[0]) == "cpi") {
 				for _, word := range span.words[1:] {
 					if strings.HasPrefix(word, "-") {
@@ -59,7 +100,7 @@ func SSHKeyMentionGrade(command, cwd, home string) string {
 		if actionWindowsInvokedTextMention(scan.words, cwd, home, 0, false, memo) {
 			return ProtectedTargetDecision
 		}
-		check := func(word, dir string, consumed bool) bool {
+		check := func(word, dir string, consumed, readOnly bool) bool {
 			for _, candidate := range strings.FieldsFunc(word, func(r rune) bool {
 				return strings.ContainsRune(" \t\r\n'\"(),;|&<>{}=", r)
 			}) {
@@ -92,22 +133,30 @@ func SSHKeyMentionGrade(command, cwd, home string) string {
 			}
 			return false
 		}
-		for _, word := range scan.words {
-			if check(word, cwd, false) {
+		for i, word := range scan.words {
+			wordReadOnly := readOnly
+			if len(rawReadOnly) != 0 {
+				wordReadOnly = wordReadOnly || rawReadOnly[i]
+			}
+			if check(word, cwd, false, wordReadOnly) {
 				return ProtectedTargetDecision
 			}
 		}
 		effectiveCWD := cwd
 		var directoryStack []string
-		for _, span := range actionWindowsResolvedSpans(scan.words, cwd, home) {
+		for i, span := range spans {
+			if body, ok := actionFixedPOSIXShellBody(span.words); ok &&
+				sshKeyMentionGrade(body, effectiveCWD, home, depth+1, context) == ProtectedTargetDecision {
+				return ProtectedTargetDecision
+			}
 			consumed := len(span.words) > 0 && !actionWindowsTextStatement(span.words) &&
-				!actionKnownReadOnlyWindowsStatement(span.words)
+				!spanReadOnly[i]
 			if len(span.words) > 0 && actionWindowsTextStatement(span.words) &&
 				!actionWindowsPrintOnlyDisplays(scan, span.start, span.end) {
 				consumed = true
 			}
 			for _, word := range span.words {
-				if check(word, effectiveCWD, consumed) {
+				if check(word, effectiveCWD, consumed, spanReadOnly[i]) {
 					return ProtectedTargetDecision
 				}
 			}
@@ -118,6 +167,199 @@ func SSHKeyMentionGrade(command, cwd, home string) string {
 		return PossibleTargetDecision
 	}
 	return ""
+}
+
+// Follow a fixed shell body with the same bounded grade reader. The Windows
+// word scanner keeps the body as one word, including its own separators.
+func actionFixedPOSIXShellBody(words []string) (string, bool) {
+	if len(words) == 4 && programBase(words[0]) == "env" {
+		words = words[1:]
+	}
+	if len(words) != 3 || !posixShellProgram(programBase(words[0])) || words[1] != "-c" ||
+		strings.ContainsAny(words[2], "\x00\r\n") {
+		return "", false
+	}
+	return words[2], true
+}
+
+// A child shell whose fixed body is entirely read-only contributes only a
+// possible path mention. Each surrounding statement is graded separately.
+func actionReadOnlyFixedPOSIXShellBody(words []string, home string) bool {
+	if os.Getenv("BASH_ENV") != "" {
+		return false
+	}
+	body, ok := actionFixedPOSIXShellBody(words)
+	if len(words) == 4 && programBase(words[0]) == "env" {
+		words = words[1:]
+	}
+	if !ok || programBase(words[0]) != "bash" || body == "" ||
+		strings.ContainsAny(body, "$`\\%!^'\r\n") {
+		return false
+	}
+	child, parsed := parseShell(body)
+	return parsed && actionKnownReadOnlyShell(child, home)
+}
+
+// Resolve fixed write targets across POSIX statement bodies while retaining
+// scalar and directory state. Uncertain operands keep the possible grade.
+func actionNamedPOSIXWrite(command, cwd, home string, depth int, context *actionSSHGradeContext) bool {
+	if !strings.Contains(command, ">") && !strings.Contains(command, "-c") {
+		return false
+	}
+	file, parsed := parseShell(command)
+	if !parsed {
+		return false
+	}
+	state := actionGradePOSIXState{values: actionValues{"HOME": home, "PWD": cwd}, cwd: cwd}
+	seen := 0
+	var walk func(*syntax.Stmt, *actionGradePOSIXState, int) bool
+	var walkList func([]*syntax.Stmt, *actionGradePOSIXState, int) bool
+	walkList = func(stmts []*syntax.Stmt, current *actionGradePOSIXState, level int) bool {
+		for _, stmt := range stmts {
+			if walk(stmt, current, level) {
+				return true
+			}
+		}
+		return false
+	}
+	walk = func(stmt *syntax.Stmt, current *actionGradePOSIXState, level int) bool {
+		if stmt == nil || level >= 8 || seen >= 128 {
+			return false
+		}
+		seen++
+		if stmt.Background || stmt.Coprocess {
+			child := current.clone()
+			copyStmt := *stmt
+			copyStmt.Background, copyStmt.Coprocess = false, false
+			return walk(&copyStmt, &child, level+1)
+		}
+		for _, redirect := range stmt.Redirs {
+			if redirect.Word == nil || !actionOutputRedirect(redirect.Op) {
+				continue
+			}
+			target, known := actionWordValue(redirect.Word, current.values, current.cwd, home)
+			if known && actionNamedSSHKeyPath(target, current.cwd, home, context.memo) {
+				return true
+			}
+		}
+		switch cmd := stmt.Cmd.(type) {
+		case *syntax.CallExpr:
+			current.values["PWD"] = current.cwd
+			actionUpdateValues(stmt, current.values, current.cwd, home)
+			if body, ok := actionPOSIXShellCallBody(cmd, current.values, current.cwd, home); ok &&
+				sshKeyMentionGrade(body, current.cwd, home, depth+1, context) == ProtectedTargetDecision {
+				return true
+			}
+			actionGradePOSIXAdvanceDirectory(cmd, current.values, home, &current.cwd, &current.stack)
+		case *syntax.BinaryCmd:
+			if cmd.Op == syntax.Pipe || cmd.Op == syntax.PipeAll {
+				left, right := current.clone(), current.clone()
+				return walk(cmd.X, &left, level+1) || walk(cmd.Y, &right, level+1)
+			}
+			return walk(cmd.X, current, level+1) || walk(cmd.Y, current, level+1)
+		case *syntax.Subshell:
+			child := current.clone()
+			return walkList(cmd.Stmts, &child, level+1)
+		case *syntax.Block:
+			return walkList(cmd.Stmts, current, level+1)
+		}
+		return false
+	}
+	return walkList(file.Stmts, &state, 0)
+}
+
+type actionGradePOSIXState struct {
+	values actionValues
+	cwd    string
+	stack  []string
+}
+
+func (s actionGradePOSIXState) clone() actionGradePOSIXState {
+	values := make(actionValues, len(s.values))
+	for name, value := range s.values {
+		values[name] = value
+	}
+	s.values = values
+	s.stack = append([]string(nil), s.stack...)
+	return s
+}
+
+func actionNamedSSHKeyPath(target, cwd, home string, memo *TargetMemo) bool {
+	if protected, _ := actionWindowsProtected(target, cwd, home, false); protected {
+		return true
+	}
+	resolved, known := actionWindowsPath(target, cwd, home)
+	return known && actionWindowsLinkReachesKeyFile(resolved, home, memo)
+}
+
+func actionPOSIXShellCallBody(call *syntax.CallExpr, values actionValues, cwd, home string) (string, bool) {
+	args := call.Args
+	if len(args) == 4 {
+		program, known := actionWordValue(args[0], values, cwd, home)
+		if !known || programBase(program) != "env" {
+			return "", false
+		}
+		args = args[1:]
+	}
+	if len(args) != 3 {
+		return "", false
+	}
+	program, known := actionWordValue(args[0], values, cwd, home)
+	if !known || !posixShellProgram(programBase(program)) {
+		return "", false
+	}
+	option, known := StaticWord(args[1], home)
+	if !known || option != "-c" {
+		return "", false
+	}
+	return actionWordValue(args[2], values, cwd, home)
+}
+
+// The grade reader uses Windows lexical paths even when its POSIX reading
+// runs on a Linux gateway. The ordinary directory reader uses host paths.
+func actionGradePOSIXAdvanceDirectory(call *syntax.CallExpr, values actionValues, home string, cwd *string, stack *[]string) {
+	if len(call.Args) == 0 {
+		return
+	}
+	program, known := actionWordValue(call.Args[0], values, *cwd, home)
+	if !known {
+		return
+	}
+	switch programBase(program) {
+	case "popd":
+		if len(*stack) != 0 {
+			*cwd = (*stack)[len(*stack)-1]
+			*stack = (*stack)[:len(*stack)-1]
+		}
+		return
+	case "cd", "pushd":
+	default:
+		return
+	}
+	index := 1
+	if index < len(call.Args) {
+		if option, fixed := StaticWord(call.Args[index], home); fixed && option == "--" {
+			index++
+		}
+	}
+	if len(call.Args)-index > 1 {
+		return
+	}
+	destination := home
+	if index < len(call.Args) {
+		destination, known = actionWordValue(call.Args[index], values, *cwd, home)
+		if !known {
+			return
+		}
+	}
+	resolved, known := actionWindowsPath(destination, *cwd, home)
+	if !known {
+		return
+	}
+	if programBase(program) == "pushd" {
+		*stack = append(*stack, *cwd)
+	}
+	*cwd = resolved
 }
 
 // A runtime-expanded copy operand or source pattern leaves the target set
@@ -204,7 +446,7 @@ func actionKnownPOSIXCopyTargets(command, cwd, home string) []string {
 				}
 			}
 		}
-		actionPosixAdvanceDirectory(call, values, home, &effectiveCWD, &directoryStack)
+		actionGradePOSIXAdvanceDirectory(call, values, home, &effectiveCWD, &directoryStack)
 	}
 	return targets
 }
@@ -216,46 +458,57 @@ func actionReadOnlyNestedShellPattern(command, home string) bool {
 		return false
 	}
 	file, parsed := parseShell(command)
-	if !parsed || len(file.Stmts) != 1 || len(file.Stmts[0].Redirs) != 0 {
+	if !parsed || len(file.Stmts) == 0 || len(file.Stmts) > 128 {
 		return false
 	}
-	call, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
-	if !ok || len(call.Assigns) != 0 || len(call.Args) < 3 {
+	seenChild := false
+	for _, stmt := range file.Stmts {
+		if len(stmt.Redirs) != 0 || stmt.Background || stmt.Negated || stmt.Coprocess {
+			return false
+		}
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Assigns) != 0 || len(call.Args) == 0 {
+			return false
+		}
+		args := call.Args
+		program, fixed := StaticWord(args[0], home)
+		if !fixed {
+			return false
+		}
+		if programBase(program) == "env" {
+			args = args[1:]
+		}
+		if len(args) == 3 {
+			program, fixed = StaticWord(args[0], home)
+			option, known := StaticWord(args[1], home)
+			if fixed && known && programBase(program) == "bash" && option == "-c" {
+				// StaticWord returns the body after the outer shell has
+				// processed its quotes, including escaped inner quotes.
+				body, known := StaticWord(args[2], home)
+				if !known || body == "" || strings.ContainsAny(body, "$`\\%!^'\r\n") {
+					return false
+				}
+				child, parsed := parseShell(body)
+				if !parsed || !actionKnownReadOnlyShell(child, home) {
+					return false
+				}
+				seenChild = true
+				continue
+			}
+		}
+		if actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home) ||
+			actionFixedTextEcho(call) {
+			continue
+		}
+		switch programBase(program) {
+		case "pwd", "true", ":":
+			if len(call.Args) == 1 {
+				continue
+			}
+		}
 		return false
 	}
-	args := call.Args
-	program, fixed := StaticWord(args[0], home)
-	if !fixed {
-		return false
-	}
-	if programBase(program) == "env" {
-		args = args[1:]
-	}
-	if len(args) != 3 {
-		return false
-	}
-	program, fixed = StaticWord(args[0], home)
-	option, known := StaticWord(args[1], home)
-	if !fixed || !known || programBase(program) != "bash" || option != "-c" {
-		return false
-	}
-	body := actionWordLiteralText(args[2])
-	if body == "" || strings.ContainsAny(body, "$`\\%!^'\r\n") {
-		return false
-	}
-	// A single-quoted outer word passes inner double quotes to bash
-	// literally. Other outer forms can reinterpret them before the child
-	// parser sees the body.
-	if strings.Contains(body, `"`) && (len(args[2].Parts) != 1 || !actionSingleQuotedWord(args[2])) {
-		return false
-	}
-	child, parsed := parseShell(body)
-	return parsed && actionKnownReadOnlyShell(child, home)
-}
-
-func actionSingleQuotedWord(word *syntax.Word) bool {
-	_, ok := word.Parts[0].(*syntax.SglQuoted)
-	return ok
+	return seenChild
 }
 
 // A complete native expansion can turn a pattern into a named disk target.

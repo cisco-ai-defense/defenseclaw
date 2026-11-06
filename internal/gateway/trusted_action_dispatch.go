@@ -294,16 +294,6 @@ func dispatchTrustedAction(
 	// any reading still enforces; a possible mention uses the policy tier.
 	if !request.StrictPolicy && len(request.Input.ActiveHome) >= 3 && request.Input.ActiveHome[1] == ':' {
 		defer func() {
-			hasSSHFinding := false
-			for _, finding := range findings {
-				if finding.RuleID == "persistence.ssh_authorized_keys_command" {
-					hasSSHFinding = true
-					break
-				}
-			}
-			if !hasSSHFinding && !strings.ContainsAny(request.Input.Command+request.LegacyText, "*?[") {
-				return
-			}
 			grade := sshKeyMentionGrade(request)
 			if grade != hookpaths.PossibleTargetDecision {
 				return
