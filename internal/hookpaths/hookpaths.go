@@ -3246,7 +3246,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				if archiveMayLink(program, words[1:], static[1:]) &&
 					(!onlyDirectoryStatementsBefore(file, call, home) ||
 						!tarArchiveHoldsNoLink(program, words[1:], static[1:], dir, command, facts, record)) {
-					if tarArchivePriorLinkedRewrite(file, call, words[1:], static[1:], dir, home) ||
+					if tarArchivePriorLinkedRewrite(file, call, words[1:], static[1:], dir, home, facts, record) ||
 						(program != "cpio" && program != "bsdcpio" && program != "pax" &&
 							archiveNamesEscape(program, words[1:], static[1:])) ||
 						tarArchiveLinkEvidence(program, words[1:], static[1:], dir, facts, record) {
@@ -4287,6 +4287,17 @@ func (l Links) UnreadArchiveTargetOnly(path string, facts map[string]string) boo
 // ProtectedArchiveMoveName reports a protected entry name in a move after
 // extraction. Archive creation and listing do not materialize links.
 func ProtectedArchiveMoveName(command, cwd, home string) bool {
+	return protectedArchiveMoveName(command, cwd, home, nil, false)
+}
+
+// ProtectedArchiveMoveNameBalanced keeps the name check for unresolved
+// extractions. A proven plain archive has no new link scope, so project file
+// names retain their ordinary path meaning in the balanced tier.
+func ProtectedArchiveMoveNameBalanced(command, cwd, home string, facts map[string]string) bool {
+	return protectedArchiveMoveName(command, cwd, home, facts, true)
+}
+
+func protectedArchiveMoveName(command, cwd, home string, facts map[string]string, balanced bool) bool {
 	if !strings.Contains(command, "mv") {
 		return false
 	}
@@ -4333,8 +4344,19 @@ func ProtectedArchiveMoveName(command, cwd, home string) bool {
 				for i, word := range call.Args {
 					words[i], static[i] = StaticWord(word, home)
 				}
-				seenArchive = seenArchive || slices.Contains(static[1:], false) ||
-					archiveMayLink(program, words[1:], static[1:])
+				mayLink := slices.Contains(static[1:], false) || archiveMayLink(program, words[1:], static[1:])
+				if balanced && mayLink && onlyDirectoryStatementsBefore(file, call, home) {
+					plain := tarArchiveHoldsNoLink(program, words[1:], static[1:], cwd, command, nil, false)
+					if !plain && facts != nil && strings.HasSuffix(program, "tar") {
+						if archive, ok := tarArchiveWord(words[1:], static[1:]); ok &&
+							strings.Count(command, filepath.Base(archive)) == 1 {
+							path := OperandPath(archive, cwd)
+							plain = facts[TarPlainFactPrefix+path] == "1" && facts[TarLinkFactPrefix+path] != "1"
+						}
+					}
+					mayLink = !plain
+				}
+				seenArchive = seenArchive || mayLink
 				return true
 			}
 			if !seenArchive || !slices.Contains(renamePrograms, program) {

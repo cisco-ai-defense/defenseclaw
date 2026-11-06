@@ -126,44 +126,127 @@ func tarArchiveLinkEvidence(program string, args []string, static []bool, cwd st
 // moved onto the archive this extraction will read. The destination may be a
 // hard-linked name of that archive. Redirection substitutions on the tar
 // statement run before tar opens its archive, so their calls count too.
-func tarArchivePriorLinkedRewrite(file *syntax.File, extraction *syntax.CallExpr, args []string, static []bool, cwd, home string) bool {
+func tarArchivePriorLinkedRewrite(file *syntax.File, extraction *syntax.CallExpr, args []string, static []bool, cwd, home string, facts map[string]string, record bool) bool {
 	archive, ok := tarArchiveWord(args, static)
 	if !ok || archive == "" || archive == "-" || file == nil || extraction == nil {
 		return false
 	}
 	archivePath := OperandPath(archive, cwd)
+	if !record && facts != nil && facts[TarLinkFactPrefix+archivePath] == "1" {
+		return true
+	}
 	archiveInfo, _ := os.Stat(archivePath)
+	matchesArchive := func(destination string) bool {
+		path := OperandPath(destination, cwd)
+		if path == archivePath {
+			return true
+		}
+		info, err := os.Stat(path)
+		return err == nil && archiveInfo != nil && os.SameFile(info, archiveInfo)
+	}
 	var redirectRanges [][2]syntax.Pos
+	statements := make(map[*syntax.CallExpr]*syntax.Stmt)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		stmt, ok := node.(*syntax.Stmt)
-		if !ok || stmt.Cmd != syntax.Command(extraction) {
+		if !ok {
+			return true
+		}
+		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok {
+			statements[call] = stmt
+		}
+		if stmt.Cmd != syntax.Command(extraction) {
 			return true
 		}
 		for _, redirect := range stmt.Redirs {
 			redirectRanges = append(redirectRanges, [2]syntax.Pos{redirect.Pos(), redirect.End()})
 		}
-		return false
+		return true
 	})
-	prior := func(candidate *syntax.CallExpr) bool {
-		if candidate.Pos().Offset() < extraction.Pos().Offset() {
+	priorRange := func(start, end syntax.Pos) bool {
+		if start.Offset() < extraction.Pos().Offset() {
 			return true
 		}
 		for _, span := range redirectRanges {
-			if span[0].Offset() <= candidate.Pos().Offset() && candidate.End().Offset() <= span[1].Offset() {
+			if span[0].Offset() <= start.Offset() && end.Offset() <= span[1].Offset() {
 				return true
 			}
 		}
 		return false
 	}
+	prior := func(candidate *syntax.CallExpr) bool {
+		return priorRange(candidate.Pos(), candidate.End())
+	}
 	linkedRewrite := false
+	linkedPipeline := func(pipe *syntax.BinaryCmd) bool {
+		var calls []*syntax.CallExpr
+		var collect func(*syntax.Stmt) bool
+		collect = func(stmt *syntax.Stmt) bool {
+			if nested, ok := stmt.Cmd.(*syntax.BinaryCmd); ok &&
+				(nested.Op == syntax.Pipe || nested.Op == syntax.PipeAll) {
+				return collect(nested.X) && collect(nested.Y)
+			}
+			call, ok := stmt.Cmd.(*syntax.CallExpr)
+			if ok {
+				calls = append(calls, call)
+			}
+			return ok
+		}
+		if !collect(pipe.X) || !collect(pipe.Y) {
+			return false
+		}
+		linkedOutput := false
+		for _, call := range calls {
+			stream := tarArchiveStreamOperands(statements[call], call, home)
+			if !stream.ok {
+				return false
+			}
+			linked := stream.readsPipe && linkedOutput
+			for _, source := range stream.sources {
+				linked = linked || tarArchiveKind(OperandPath(source, cwd)) == 2
+			}
+			if linked {
+				for _, destination := range stream.destinations {
+					if matchesArchive(destination) {
+						return true
+					}
+				}
+			}
+			linkedOutput = linked && stream.passesPipe
+		}
+		return false
+	}
 	syntax.Walk(file, func(node syntax.Node) bool {
+		if pipe, ok := node.(*syntax.BinaryCmd); ok &&
+			(pipe.Op == syntax.Pipe || pipe.Op == syntax.PipeAll) &&
+			priorRange(pipe.Pos(), pipe.End()) && linkedPipeline(pipe) {
+			linkedRewrite = true
+			return false
+		}
 		candidate, ok := node.(*syntax.CallExpr)
-		if !ok || candidate == extraction || !prior(candidate) || len(candidate.Args) < 3 {
+		if !ok || candidate == extraction || !prior(candidate) || len(candidate.Args) == 0 {
 			return true
 		}
 		program, fixed := StaticWord(candidate.Args[0], home)
-		if !fixed || programBase(program) != "cp" && programBase(program) != "gcp" &&
-			programBase(program) != "mv" && programBase(program) != "gmv" && programBase(program) != "install" {
+		program = programBase(program)
+		if stream := tarArchiveStreamOperands(statements[candidate], candidate, home); fixed && stream.ok {
+			for _, source := range stream.sources {
+				if tarArchiveKind(OperandPath(source, cwd)) != 2 {
+					continue
+				}
+				for _, destination := range stream.destinations {
+					if matchesArchive(destination) {
+						linkedRewrite = true
+						return false
+					}
+				}
+			}
+			return true
+		}
+		if len(candidate.Args) < 3 {
+			return true
+		}
+		if !fixed || program != "cp" && program != "gcp" &&
+			program != "mv" && program != "gmv" && program != "install" {
 			return true
 		}
 		words := make([]string, 0, len(candidate.Args)-1)
@@ -210,7 +293,95 @@ func tarArchivePriorLinkedRewrite(file *syntax.File, extraction *syntax.CallExpr
 		}
 		return true
 	})
+	if linkedRewrite && record && facts != nil {
+		facts[TarLinkFactPrefix+archivePath] = "1"
+	}
 	return linkedRewrite
+}
+
+// archiveStream describes the bytes a static stream writer reads and writes.
+// A stage that reads its own file does not inherit the preceding pipe's bytes.
+type archiveStream struct {
+	sources, destinations []string
+	readsPipe, passesPipe bool
+	ok                    bool
+}
+
+func tarArchiveStreamOperands(stmt *syntax.Stmt, call *syntax.CallExpr, home string) archiveStream {
+	var stream archiveStream
+	if call == nil || len(call.Args) == 0 {
+		return stream
+	}
+	program, fixed := StaticWord(call.Args[0], home)
+	program = programBase(program)
+	if !fixed || program != "cat" && program != "tee" && program != "dd" {
+		return stream
+	}
+	stream.ok, stream.passesPipe = true, true
+	stream.readsPipe = program == "tee" || program == "dd" || program == "cat" && len(call.Args) == 1
+	for _, word := range call.Args[1:] {
+		value, static := StaticWord(word, home)
+		if !static {
+			return archiveStream{}
+		}
+		switch program {
+		case "cat":
+			if value == "-" {
+				stream.readsPipe = true
+			} else if !strings.HasPrefix(value, "-") {
+				stream.sources = append(stream.sources, value)
+			}
+		case "tee":
+			if !strings.HasPrefix(value, "-") {
+				stream.destinations = append(stream.destinations, value)
+			}
+		case "dd":
+			if strings.HasPrefix(value, "if=") {
+				stream.sources = []string{strings.TrimPrefix(value, "if=")}
+				stream.readsPipe = false
+			} else if strings.HasPrefix(value, "of=") {
+				stream.destinations = []string{strings.TrimPrefix(value, "of=")}
+				stream.passesPipe = false
+			}
+		}
+	}
+	if program == "cat" && len(stream.sources) == 0 {
+		stream.readsPipe = true
+	}
+	if stmt != nil {
+		input, output := "", ""
+		readsInput, writesOutput := stream.readsPipe, stream.passesPipe
+		redirectedInput := false
+		for _, redirect := range stmt.Redirs {
+			if redirect.Word == nil {
+				continue
+			}
+			value, static := StaticWord(redirect.Word, home)
+			if readsInput && (redirect.Op == syntax.RdrIn || redirect.Op == syntax.RdrInOut) {
+				redirectedInput = true
+				input = ""
+				if static {
+					input = value
+				}
+			}
+			switch redirect.Op {
+			case syntax.RdrOut, syntax.RdrClob, syntax.AppOut, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+				stream.passesPipe = false
+				output = ""
+				if static && writesOutput {
+					output = value
+				}
+			}
+		}
+		stream.readsPipe = readsInput && !redirectedInput
+		if input != "" {
+			stream.sources = append(stream.sources, input)
+		}
+		if output != "" {
+			stream.destinations = append(stream.destinations, output)
+		}
+	}
+	return stream
 }
 
 // tarArchiveWords returns the static archive operands of a tar call.

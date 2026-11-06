@@ -1394,7 +1394,13 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	if cannotResolveLocally && hookpaths.UnverifiedClientResolution(clientTargets) {
 		return true
 	}
-	if hookpaths.ProtectedArchiveMoveName(input.Command, input.CWD, facts.ActiveHome) {
+	var archiveMoveNamed bool
+	if request.balancedArchiveScope {
+		archiveMoveNamed = hookpaths.ProtectedArchiveMoveNameBalanced(input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
+	} else {
+		archiveMoveNamed = hookpaths.ProtectedArchiveMoveName(input.Command, input.CWD, facts.ActiveHome)
+	}
+	if archiveMoveNamed {
 		return true
 	}
 	safeRedirects = hookpaths.SafeShellRedirectOccurrencesWithFacts(input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)

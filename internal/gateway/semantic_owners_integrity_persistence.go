@@ -1603,8 +1603,14 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 					}
 				}
 			}
+			var archiveMoveNamed bool
+			if request.balancedArchiveScope {
+				archiveMoveNamed = hookpaths.ProtectedArchiveMoveNameBalanced(input.Command, input.CWD, input.ActiveHome, request.ResolvedWriteTargets)
+			} else {
+				archiveMoveNamed = hookpaths.ProtectedArchiveMoveName(input.Command, input.CWD, input.ActiveHome)
+			}
 			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) &&
-				!hookpaths.ProtectedArchiveMoveName(input.Command, input.CWD, input.ActiveHome) &&
+				!archiveMoveNamed &&
 				!clientNamedProtected &&
 				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) {
 				title = archiveBeforeWriteTitle
