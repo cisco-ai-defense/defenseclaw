@@ -204,3 +204,34 @@ func TestD1PublicShapes(t *testing.T) {
 	}
 	d1Replay(t, rows, nil, true)
 }
+
+func TestD1StrictArchiveShape(t *testing.T) {
+	var row d1ReplayRow
+	for _, candidate := range d1ReadRows(t, "testdata/d1-shapes.jsonl") {
+		if candidate.ID == "d1-0081" {
+			row = candidate
+			break
+		}
+	}
+	if row.ID == "" {
+		t.Fatal("missing strict archive shape")
+	}
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	if err := os.Mkdir(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	for _, connector := range []string{"claudecode", "codex"} {
+		cfg := &config.Config{}
+		cfg.Guardrail.Mode = "action"
+		cfg.Guardrail.Connector = connector
+		cfg.Guardrail.RulePack = "strict"
+		api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+		for _, managed := range []bool{false, true} {
+			if got := d1Evaluate(t, api, row, connector, managed, home, cwd); got.Decision != "block" {
+				t.Errorf("D1 strict %s managed=%t: got %s, want block", connector, managed, got.Decision)
+			}
+		}
+	}
+}

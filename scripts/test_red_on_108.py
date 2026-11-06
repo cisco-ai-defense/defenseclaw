@@ -115,8 +115,10 @@ class RedOn108Test(unittest.TestCase):
             "    sample_test.go:12: open testdata/sample.json: no such file or directory\n"
         )
         assertion = "--- FAIL: TestGAP0607Sample (0.00s)\n    sample_test.go:12: got allow, want block\n"
+        unclassified = "--- FAIL: TestGAP0607Sample (0.00s)\n    sample_test.go:12: fixture bytes unavailable\n"
         self.assertEqual(classify_test_result(command, 1, missing), "COMPILE_ONLY")
         self.assertEqual(classify_test_result(command, 1, assertion), "BEHAVIOR_RED")
+        self.assertEqual(classify_test_result(command, 1, unclassified), "UNCLASSIFIED_FAIL")
 
     def test_new_go_fixture_is_copied_to_prior_release_tree(self):
         from tempfile import TemporaryDirectory
