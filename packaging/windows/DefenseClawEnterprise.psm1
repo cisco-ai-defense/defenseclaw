@@ -13506,6 +13506,25 @@ function Invoke-DefenseClawBundleAclContract {
         [Parameter(Mandatory)][string]$GatewayServiceSID,
         [switch]$Repair
     )
+    foreach ($item in @(Get-DefenseClawBundleAclItems -Layout $Layout)) {
+        if ($Repair) {
+            Set-DefenseClawPathAcl -Path $item.Path -Kind $item.Kind -GatewayServiceSID $GatewayServiceSID
+        }
+        else {
+            $expected = New-DefenseClawCanonicalPathAcl `
+                -IsDirectory ($item.Kind -in @('BundleDirectory', 'BundleVersionDirectory', 'AdminDirectory')) `
+                -Kind $item.Kind `
+                -GatewayServiceSID $GatewayServiceSID
+            Assert-DefenseClawCanonicalPathAcl -Path $item.Path -Expected $expected
+        }
+    }
+}
+
+# Every path of the bundle store and its private state, with the ACL kind
+# Setup stamps on it: what Invoke-DefenseClawBundleAclContract checks or
+# re-stamps, and what Assert-DefenseClawStandaloneContentTrusted judges first.
+function Get-DefenseClawBundleAclItems {
+    param([Parameter(Mandatory)][hashtable]$Layout)
     $bundleDirectory = Microsoft.PowerShell.Management\Join-Path $Layout.ConfigDirectory 'bundles'
     $trustDirectory = Microsoft.PowerShell.Management\Join-Path $Layout.ConfigDirectory 'trust'
     $trustAnchors = Microsoft.PowerShell.Management\Join-Path $trustDirectory 'bundle-anchors.json'
@@ -13553,18 +13572,7 @@ function Invoke-DefenseClawBundleAclContract {
             $items.Add([pscustomobject]@{ Path = $entry.FullName; Kind = 'AdminFile' })
         }
     }
-    foreach ($item in $items) {
-        if ($Repair) {
-            Set-DefenseClawPathAcl -Path $item.Path -Kind $item.Kind -GatewayServiceSID $GatewayServiceSID
-        }
-        else {
-            $expected = New-DefenseClawCanonicalPathAcl `
-                -IsDirectory ($item.Kind -in @('BundleDirectory', 'BundleVersionDirectory', 'AdminDirectory')) `
-                -Kind $item.Kind `
-                -GatewayServiceSID $GatewayServiceSID
-            Assert-DefenseClawCanonicalPathAcl -Path $item.Path -Expected $expected
-        }
-    }
+    return $items.ToArray()
 }
 
 function Set-DefenseClawSecureClientInstallMarker {
@@ -16719,15 +16727,42 @@ function Assert-DefenseClawRepairableConfigAcl {
     }
 }
 
+# Paths Set-DefenseClawManagedAcls and Set-DefenseClawStandaloneSecretsAcls
+# re-stamp in place that Assert-DefenseClawStandaloneContentTrusted does not
+# judge, each with the reason it is outside the rule "a managed file whose
+# owner or ACL is untrusted is never re-stamped in place". Every other path
+# those two functions re-stamp is judged by the gate (GAP-0590 review M2);
+# test_every_restamped_path_is_gated_or_named_out_of_class keeps the two
+# lists whole in both directions.
+$script:StandaloneContentGateOutOfClass = @(
+    [pscustomobject]@{
+        Reason = 'an installed binary: verify and the lifecycle actions check its bytes against the digest recorded from the signed payload'
+        Paths  = @('GatewayPath', 'ACPPath', 'HookPath', 'SensorHelperPath', 'InstallerPath', 'ModulePath', 'BrokerPath', 'CLIPath', 'CompilerPath')
+    },
+    [pscustomobject]@{
+        Reason = 'a log: DefenseClaw appends to it and never reads it as policy or as a record'
+        Paths  = @('LogDirectory', 'GatewayLogDirectory', 'GuardianLogDirectory', 'BrokerLogDirectory', 'GatewayLogPath', 'GuardianLogPath', 'BrokerLogPath')
+    },
+    [pscustomobject]@{
+        Reason = 'a folder above the state root: Setup adds one traverse entry and never replaces its access list, and the trusted-ancestor walk judges it'
+        Paths  = @('StateRootAncestors')
+    },
+    [pscustomobject]@{
+        Reason = 'Secure Client only: the standalone profile has no install marker'
+        Paths  = @('SecureClientInstallMarker')
+    }
+)
+
 function Assert-DefenseClawStandaloneContentTrusted {
     <#
-        Standalone, read-only, before an install-like lifecycle stops any
-        service. A managed content file or folder that an account other than
-        SYSTEM, Administrators and TrustedInstaller owns or can change is never given
-        a trusted descriptor back in place: its bytes may be that account's,
-        and a handle it opened keeps working after a re-stamp (GAP-0561).
-        Repair used to re-stamp each of these after the stop
-        (Set-DefenseClawManagedAcls), and the config ACL repair refused
+        Standalone, read-only, before a lifecycle action re-stamps any
+        managed path or stops any service. A managed file or folder that an
+        account other than SYSTEM, Administrators and TrustedInstaller (and,
+        for the runtime and IPC folders, the gateway service) owns or can
+        change is never given a trusted descriptor back in place: its bytes
+        may be that account's, and a handle it opened keeps working after a
+        re-stamp (GAP-0561). Repair used to re-stamp each of these after the
+        stop (Set-DefenseClawManagedAcls), and the config ACL repair refused
         config.yaml only after the stop, leaving the transaction pending
         (GAP-0590). Setup writes config.yaml and targets.yaml new from the
         approved CONFIG= and MANIFEST= before the lifecycle runs; whatever
@@ -16736,43 +16771,144 @@ function Assert-DefenseClawStandaloneContentTrusted {
         (missing service rights, an inherited trusted entry) passes for the
         repair to put back (GAP-0920); an owner that is Setup's own account
         passes, as the self-heal repairs it (GAP-0603).
+
+        Every path Set-DefenseClawManagedAcls and
+        Set-DefenseClawStandaloneSecretsAcls re-stamp is judged here, or
+        named with its reason in $script:StandaloneContentGateOutOfClass:
+        the credential store, the guardian authorization records, the broker
+        state, the runtime folder and its .env, the IPC folder, the bundle
+        tree and the install folders too (GAP-0590 review M2). -Scope picks
+        what the caller re-stamps or reads: Lifecycle (install, upgrade,
+        repair, reconcile, the ACL drift repair) judges every path; Retain
+        (an uninstall that keeps the state, which
+        Set-DefenseClawPreservedStateAcls re-stamps administrator-only for
+        the next install to adopt) skips the install tree it removes; Purge
+        judges what the purge reads or restores before it deletes the state:
+        the folders, config.yaml, targets.yaml and the records (GAP-0590
+        review M3).
     #>
-    param([Parameter(Mandatory)][hashtable]$Layout)
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [ValidateSet('Lifecycle', 'Retain', 'Purge')][string]$Scope = 'Lifecycle'
+    )
     $adminWriters = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
-    $folder = 'remove that entry, or give the folder back to Administrators, then run Setup /ensure again'
-    $record = 'Setup does not write this file from an administrator source: remove that entry, or give the file back to Administrators, and check the file, then run Setup /ensure again'
-    $entries = [Collections.Generic.List[object]]::new()
-    foreach ($name in @('StateRoot', 'ConfigDirectory', 'GuardianDirectory', 'InstallStateDirectory')) {
-        $entries.Add(@($name, $folder))
+    $again = 'run Setup /ensure again'
+    $then = ''
+    if ($Scope -ne 'Lifecycle') {
+        $again = 'run the uninstall again'
+        $then = ', then run the uninstall again'
     }
-    $entries.Add(@('ConfigPath', 'run Setup /ensure CONFIG=<the approved administrator-only config>: Setup writes a new config.yaml from it'))
-    $entries.Add(@('ManifestPath', 'run Setup /ensure CONFIG=<the approved config>: Setup writes a new targets.yaml enumerated from it, or from MANIFEST=<the approved administrator-only targets.yaml> in manifest enrollment mode'))
-    $records = @(
-        'MetadataPath',
-        'AgentApplicationControlAttestationPath',
-        'CodexRequirementsOwnershipPath',
-        'CodexRequirementsAclBackupPath',
-        'ManagedHooksLifecycleJournalPath',
-        'ManagedHooksTeardownJournalPath'
+    # A non-purge uninstall keeps these; a purge deletes them unread.
+    $purgeDeletes = if ($Scope -eq 'Retain') { ', or run Setup /uninstall PURGE=1, which deletes it' } else { '' }
+    $folder = "remove that entry, or give the folder back to Administrators, then $again"
+    $record = "Setup does not write this file from an administrator source: remove that entry, or give the file back to Administrators, and check the file, then $again"
+    $state = "Setup does not write this from an administrator source: remove that entry, or give it back to Administrators, and check it, then $again$purgeDeletes"
+    $secret = "Setup does not write a credential: remove that entry, then set the credential again (defenseclaw-gateway enterprise secret set) and $again$purgeDeletes"
+    $config = "run Setup /ensure CONFIG=<the approved administrator-only config>: Setup writes a new config.yaml from it$then"
+    $manifest = "run Setup /ensure CONFIG=<the approved config>: Setup writes a new targets.yaml enumerated from it, or from MANIFEST=<the approved administrator-only targets.yaml> in manifest enrollment mode$then"
+    $every = @('Lifecycle', 'Retain', 'Purge')
+    $kept = @('Lifecycle', 'Retain')
+    $rows = @(
+        @('StateRoot', $folder, $every),
+        @('ConfigDirectory', $folder, $every),
+        @('GuardianDirectory', $folder, $every),
+        @('InstallStateDirectory', $folder, $every),
+        @('AuthorizationDirectory', $folder, $every),
+        @('ConfigPath', $config, $every),
+        @('ManifestPath', $manifest, $every),
+        @('MetadataPath', $record, $every),
+        @('AgentApplicationControlAttestationPath', $record, $every),
+        @('CodexRequirementsOwnershipPath', $record, $every),
+        @('CodexRequirementsAclBackupPath', $record, $every),
+        @('ManagedHooksLifecycleJournalPath', $record, $every),
+        @('ManagedHooksTeardownJournalPath', $record, $every),
+        @('AuthorizationLedgerPath', $record, $every),
+        @('BrokerStateDirectory', $state, $kept),
+        @('InstallRoot', $folder, @('Lifecycle')),
+        @('BinDirectory', $folder, @('Lifecycle')),
+        @('LibexecDirectory', $folder, @('Lifecycle')),
+        @('CompilerLibDirectory', $folder, @('Lifecycle')),
+        @('CompilerDirectory', $folder, @('Lifecycle'))
     )
     if ((Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CodexTargetEnabled) -eq 'True') {
-        $records += @('CodexMachinePolicyPath', 'CodexManagedHooksStatePath')
+        $rows += , @('CodexMachinePolicyPath', $record, $every)
+        $rows += , @('CodexManagedHooksStatePath', $record, $every)
     }
-    foreach ($name in $records) {
-        $entries.Add(@($name, $record))
+    # Writer 'Gateway': the gateway service writes in the runtime and IPC
+    # folders, and owns what it creates there.
+    $entries = [Collections.Generic.List[object]]::new()
+    foreach ($row in $rows) {
+        if ($Scope -in $row[2]) {
+            $entries.Add([pscustomobject]@{
+                Path     = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name ([string]$row[0]))
+                Writer   = 'Admin'
+                Recovery = [string]$row[1]
+            })
+        }
     }
+    $authorizationDirectory = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name AuthorizationDirectory)
+    if (-not [string]::IsNullOrWhiteSpace($authorizationDirectory)) {
+        $entries.Add([pscustomobject]@{
+            Path     = [IO.Path]::Combine($authorizationDirectory, 'activation.json')
+            Writer   = 'Admin'
+            Recovery = $record
+        })
+    }
+    if ($Scope -ne 'Purge') {
+        $runtimeDirectory = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name RuntimeDirectory)
+        if (-not [string]::IsNullOrWhiteSpace($runtimeDirectory)) {
+            foreach ($path in @($runtimeDirectory, [IO.Path]::Combine($runtimeDirectory, '.env'))) {
+                $entries.Add([pscustomobject]@{ Path = $path; Writer = 'Gateway'; Recovery = $state })
+            }
+        }
+        $entries.Add([pscustomobject]@{
+            Path     = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name ManagedIPCDirectory)
+            Writer   = 'Gateway'
+            Recovery = $state
+        })
+        # The credential store and every credential-named file in it, as
+        # Set-DefenseClawStandaloneSecretsAcls re-stamps them.
+        $stateRoot = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name StateRoot)
+        $secrets = if ([string]::IsNullOrWhiteSpace($stateRoot)) { '' } else { [IO.Path]::Combine($stateRoot, 'secrets') }
+        if (-not [string]::IsNullOrWhiteSpace($secrets) -and
+            (Microsoft.PowerShell.Management\Test-Path -LiteralPath $secrets -PathType Container)) {
+            $entries.Add([pscustomobject]@{ Path = $secrets; Writer = 'Admin'; Recovery = $secret })
+            foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $secrets -Force)) {
+                if (-not $item.PSIsContainer -and $item.Name -cmatch '^[a-z0-9][a-z0-9-]{0,62}\z') {
+                    $entries.Add([pscustomobject]@{ Path = $item.FullName; Writer = 'Admin'; Recovery = $secret })
+                }
+            }
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name ConfigDirectory)) -and
+            -not [string]::IsNullOrWhiteSpace([string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name InstallStateDirectory))) {
+            foreach ($item in @(Get-DefenseClawBundleAclItems -Layout $Layout)) {
+                $entries.Add([pscustomobject]@{ Path = [string]$item.Path; Writer = 'Admin'; Recovery = $state })
+            }
+        }
+    }
+    $ownerSIDs = @($adminWriters + @(Get-DefenseClawCurrentProcessUserSID))
+    $gatewaySID = ''
     foreach ($entry in $entries) {
-        # Partial layouts (older records, test fixtures) may not carry a key.
-        $path = Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name ([string]$entry[0])
+        $path = [string]$entry.Path
         if ([string]::IsNullOrWhiteSpace($path) -or
             -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path)) {
             continue
         }
+        $writers = $adminWriters
+        $owners = $ownerSIDs
+        if ($entry.Writer -ceq 'Gateway') {
+            if ([string]::IsNullOrWhiteSpace($gatewaySID)) {
+                $gatewaySID = [string](Get-DefenseClawServiceSIDForRecovery -ServiceName $GatewayServiceName)
+            }
+            $writers = @($adminWriters + @($gatewaySID))
+            $owners = @($ownerSIDs + @($gatewaySID))
+        }
         try {
             Assert-DefenseClawPathAcl `
                 -Path $path `
-                -AllowedWriterSIDs $adminWriters `
-                -AllowedOwnerSIDs @($adminWriters + @(Get-DefenseClawCurrentProcessUserSID)) `
+                -AllowedWriterSIDs $writers `
+                -AllowedOwnerSIDs $owners `
                 -AllowInheritance `
                 -IgnoreCreatorTemplates
         }
@@ -16780,7 +16916,7 @@ function Assert-DefenseClawStandaloneContentTrusted {
             # The verdict comes last: the result names its account and the
             # icacls fix from it.
             throw ('refusing to change the deployment, and nothing was changed (DefenseClaw does not give a file ' +
-                'another account owns or could change a trusted access list back in place; ' + [string]$entry[1] +
+                'another account owns or could change a trusted access list back in place; ' + [string]$entry.Recovery +
                 "): $($_.Exception.Message)")
         }
     }
@@ -44569,7 +44705,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
     if ((Test-DefenseClawStandaloneProfile) -and $priorDeploymentActive) {
         # Before any service stops: Repair below re-stamps these paths, which
         # must never re-trust content another account could change (GAP-0590).
-        Assert-DefenseClawStandaloneContentTrusted -Layout $Layout
+        Assert-DefenseClawStandaloneContentTrusted -Layout $Layout -GatewayServiceName $GatewayServiceName
     }
     $snapshot = New-DefenseClawTransaction `
         -Layout $Layout `

@@ -7061,7 +7061,114 @@ def test_untrusted_config_acl_is_refused_before_the_transaction_stops_a_service(
         assert f"'{path}'" in content and f"$Layout.{path}" in restamped, path
     assert "'ManagedHooksLifecycleJournalPath'" in content
     assert "-SelfHealKind" not in content and "Set-DefenseClawPathAcl" not in content
-    assert "-AllowedOwnerSIDs @($adminWriters + @(Get-DefenseClawCurrentProcessUserSID))" in content
+    assert "$ownerSIDs = @($adminWriters + @(Get-DefenseClawCurrentProcessUserSID))" in content
+    assert "-AllowedOwnerSIDs $owners `" in content
+
+_LAYOUT_PATH_KEY = r"(\w+(?:Path|Directory|Root|Ancestors))"
+
+
+def _restamped_managed_paths(managed_acls: str, secrets_acls: str) -> set[str]:
+    """The paths Set-DefenseClawManagedAcls and Set-DefenseClawStandaloneSecretsAcls
+    re-stamp in place: layout keys, leaf names, the bundle tree and the
+    credential store."""
+
+    names = set(re.findall(r"\$Layout\." + _LAYOUT_PATH_KEY + r"\b", managed_acls))
+    names |= set(re.findall(r"-Name " + _LAYOUT_PATH_KEY + r"\b", managed_acls))
+    names |= set(re.findall(r"'([.\w-]*\.\w+)'\)", managed_acls))
+    if "Invoke-DefenseClawBundleAclContract -Layout $Layout" in managed_acls:
+        names.add("BundleTree")
+    if "Set-DefenseClawSecureClientInstallMarker -Layout $Layout" in managed_acls:
+        names.add("SecureClientInstallMarker")
+    for directory in re.findall(r"Set-DefenseClawStandaloneSecretSddl `\s+-Path \S+ `\s+-IsDirectory \$(true|false)", secrets_acls):
+        names.add("CredentialStore" if directory == "true" else "CredentialFiles")
+    return names
+
+
+def _gated_managed_paths(gate: str) -> set[str]:
+    names = set(re.findall(r"@\('(\w+)', \$\w+, ", gate))
+    names |= set(re.findall(r"-Name " + _LAYOUT_PATH_KEY + r"\b", gate))
+    names |= set(re.findall(r"Combine\(\$\w+, '([.\w-]*\.\w+)'\)", gate))
+    if "Combine($stateRoot, 'secrets')" in gate:
+        names.add("CredentialStore")
+    if "$item.Name -cmatch '^[a-z0-9][a-z0-9-]{0,62}\\z'" in gate:
+        names.add("CredentialFiles")
+    if "Get-DefenseClawBundleAclItems -Layout $Layout" in gate:
+        names.add("BundleTree")
+    return names
+
+
+def _ungated_restamps(module: str) -> tuple[set[str], set[str], set[str]]:
+    restamped = _restamped_managed_paths(
+        _function_text(module, "Set-DefenseClawManagedAcls"),
+        _function_text(module, "Set-DefenseClawStandaloneSecretsAcls"),
+    )
+    gated = _gated_managed_paths(_function_text(module, "Assert-DefenseClawStandaloneContentTrusted"))
+    start = module.index("$script:StandaloneContentGateOutOfClass = @(")
+    table = module[start : module.index("\n)\n", start)]
+    out_of_class = set(re.findall(r"'(\w+)'", "\n".join(re.findall(r"Paths\s+= @\(([^)]*)\)", table))))
+    assert table.count("Reason = '") == table.count("Paths  = @(") > 0
+    return restamped - gated - out_of_class, out_of_class - restamped, gated & out_of_class
+
+
+def test_every_restamped_path_is_gated_or_named_out_of_class() -> None:
+    """GAP-0590 review M2: the content gate judged only part of what Repair
+    and every install-like action re-stamp in place, so a standard user's
+    entry on a credential, protected_targets.json, the runtime .env or the
+    bundle tree was re-stamped administrator-only with that user's bytes.
+    Every path Set-DefenseClawManagedAcls and
+    Set-DefenseClawStandaloneSecretsAcls re-stamp is now judged by the gate or
+    named, with its reason, in $script:StandaloneContentGateOutOfClass; that
+    list names nothing that is not re-stamped, and nothing on it is gated."""
+
+    module = read(MODULE).replace("\r\n", "\n")
+    ungated, stale, both = _ungated_restamps(module)
+    assert not ungated, f"re-stamped in place but neither gated nor named out of class: {sorted(ungated)}"
+    assert not stale, f"named out of class but not re-stamped: {sorted(stale)}"
+    assert not both, f"gated and named out of class: {sorted(both)}"
+    restamped = _restamped_managed_paths(
+        _function_text(module, "Set-DefenseClawManagedAcls"),
+        _function_text(module, "Set-DefenseClawStandaloneSecretsAcls"),
+    )
+    for name in (
+        "CredentialStore", "CredentialFiles", "AuthorizationDirectory", "AuthorizationLedgerPath", "activation.json",
+        "BrokerStateDirectory", "RuntimeDirectory", ".env", "ManagedIPCDirectory", "BundleTree", "ConfigPath",
+        "ManifestPath", "MetadataPath", "GatewayPath", "LogDirectory",
+    ):
+        assert name in restamped, name
+
+    # A path added to the re-stamp without the gate fails this check.
+    managed = _function_text(module, "Set-DefenseClawManagedAcls")
+    planted = module.replace(
+        managed,
+        managed.replace(
+            "    Set-DefenseClawPathAcl -Path $Layout.ConfigPath -Kind ConfigFile",
+            "    Set-DefenseClawPathAcl -Path $Layout.PolicyCachePath -Kind AdminFile -GatewayServiceSID $gatewaySID\n"
+            "    Set-DefenseClawPathAcl -Path $Layout.ConfigPath -Kind ConfigFile",
+            1,
+        ),
+        1,
+    )
+    assert planted != module
+    assert _ungated_restamps(planted)[0] == {"PolicyCachePath"}
+
+    # The gateway service writes the runtime and IPC folders and owns what it
+    # creates there; every other path allows only SYSTEM, Administrators and
+    # TrustedInstaller (and Setup's own account as owner).
+    gate = _function_text(module, "Assert-DefenseClawStandaloneContentTrusted")
+    assert len(re.findall(r"Writer\s+= 'Gateway'", gate)) == 2
+    assert "foreach ($path in @($runtimeDirectory, [IO.Path]::Combine($runtimeDirectory, '.env'))) {" in gate
+    assert "-Name ManagedIPCDirectory)\n            Writer   = 'Gateway'" in gate
+    assert "$writers = @($adminWriters + @($gatewaySID))" in gate
+    assert "$ownerSIDs = @($adminWriters + @(Get-DefenseClawCurrentProcessUserSID))" in gate
+    assert "-SelfHealKind" not in gate and "Set-DefenseClawPathAcl" not in gate
+    bundle = _function_text(module, "Invoke-DefenseClawBundleAclContract")
+    assert "foreach ($item in @(Get-DefenseClawBundleAclItems -Layout $Layout)) {" in bundle
+
+    # Repair re-stamps the credential store after the stop: the gate comes first.
+    lifecycle = _function_text(module, "Invoke-DefenseClawInstallLikeLifecycle")
+    gated = lifecycle.index("Assert-DefenseClawStandaloneContentTrusted -Layout $Layout")
+    assert gated < lifecycle.index("Set-DefenseClawStandaloneSecretsAcls `")
+
 
 def test_standalone_self_heal_restamps_only_when_every_verdict_is_repairable() -> None:
     """GAP-0603 review M1: the standalone self-heal dropped only the untrusted
