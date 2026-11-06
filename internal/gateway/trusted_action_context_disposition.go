@@ -466,6 +466,12 @@ func trustedActionClassifySensitivePathRisk(
 		case actionfacts.PathAccessWrite,
 			actionfacts.PathAccessAppend,
 			actionfacts.PathAccessDelete:
+			// A credential read rule judges reads; its write leg,
+			// secrets.credential_file_write, judges the writes (GAP-0052).
+			// A fallback match of the read rule on a write is a reference.
+			if credentialFileWriteLegOwnsReadRule(ruleID) {
+				continue
+			}
 			if trustedActionExecutingCommand(facts, candidate.CommandID) {
 				return trustedActionSensitivePathMutation
 			}
