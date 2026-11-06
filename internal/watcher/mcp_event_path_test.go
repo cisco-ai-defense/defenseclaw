@@ -316,3 +316,48 @@ func TestGAP0034StructuredOldKeyNeedsFreshAdmission(t *testing.T) {
 		t.Fatalf("old key was served during source outage: %+v", got)
 	}
 }
+
+// The decision of a completed failed scan holds from the moment admission
+// records it: before its snapshot is stored, and if storing it fails.
+// Only a snapshot an earlier release left under the key makes a row old.
+func TestGAP0034FreshAccountDecisionHoldsWithoutSnapshot(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Gateway.Watcher.MCP.TakeAction = true
+	cfg.Scanners.MCPScanner.UnverifiedServer = "block"
+	server := config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: filepath.Join(t.TempDir(), "account"),
+		Command: "npx", Args: []string{"-y", "."}}
+	w := New(cfg, nil, nil, store, logger, nil, nil)
+	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return []config.MCPServerEntry{server}, nil })
+	w.firstCycleDone.Store(true)
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &failingScanner{countingScanner{name: "mcp-scanner"}} }
+	key := MCPEventPath(server)
+	evt := InstallEvent{Type: InstallMCP, Name: server.Name, Path: key, Connector: server.Connector}
+	w.runAdmission(context.Background(), evt)
+	row, err := store.GetActionForConnector(string(InstallMCP), MCPJournalName(server), "claudecode")
+	if err != nil || row == nil || row.Actions.Runtime != "disable" || row.SourcePath != key {
+		t.Fatalf("failed admission was not recorded: row=%+v err=%v", row, err)
+	}
+	snapshot, err := store.GetTargetSnapshot(string(InstallMCP), key)
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("snapshot already stored: %+v %v", snapshot, err)
+	}
+	owner := MCPAdmissionQuery{Connector: server.Connector, Server: server.Name, Home: server.Home}
+	ordinary := MCPAdmissionQuery{Connector: server.Connector, Server: server.Name, Home: filepath.Join(t.TempDir(), "ordinary")}
+	if !MCPAccountJournalServesSnapshot(row.TargetName, snapshot, owner) ||
+		MCPAccountJournalServesSnapshot(row.TargetName, snapshot, ordinary) {
+		t.Fatal("decision without a stored snapshot did not stay with its account")
+	}
+	current, err := w.snapshotForEvent(evt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.persistSnapshot(evt, current, "", "fingerprint"+mcpScanFailedMark)
+	if snapshot, err = store.GetTargetSnapshot(string(InstallMCP), key); err != nil ||
+		!MCPAccountJournalServesSnapshot(row.TargetName, snapshot, owner) {
+		t.Fatalf("stored snapshot released the decision: %+v %v", snapshot, err)
+	}
+	old := &audit.SnapshotRow{ContentHash: "hash", ConfigHashes: `{"mcp.servers.` + key + `":"hash"}`}
+	if MCPAccountJournalServesSnapshot(row.TargetName, old, owner) {
+		t.Fatal("snapshot of an earlier release was taken as current provenance")
+	}
+}
