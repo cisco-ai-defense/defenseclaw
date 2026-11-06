@@ -166,20 +166,14 @@ func (c *Config) activeConnector() string {
 	return ""
 }
 
-// activeConnectors returns the connectors the gateway sets up for this config,
-// in deterministic (sorted) order. Unlike activeConnector(), this plural list
-// is a roster surface: an unconfigured install returns an empty slice.
-//
-// Two or more guardrail.connectors keys select the multi-connector boot of
-// that roster. Fewer than two keys boot exactly the connector activeConnector
-// resolves, so a single entry for another connector (a stored setting for an
-// off-roster connector, GAP-0588) neither replaces the named primary nor moves
-// the active rule pack and the per-user watcher set away from it (GAP-0707).
+// activeConnectors returns the configured connector roster for this config, in
+// deterministic (sorted) order. Unlike activeConnector(), this plural list is
+// a roster surface: an unconfigured install returns an empty slice.
 func (c *Config) activeConnectors() []string {
 	if c == nil || !c.HasConnectorConfigured() {
 		return nil
 	}
-	if names := c.rosterConnectorNames(); len(names) > 1 {
+	if names := c.rosterConnectorNames(); len(names) > 0 {
 		return names
 	}
 	return []string{c.activeConnector()}
