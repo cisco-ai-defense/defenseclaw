@@ -103,4 +103,31 @@ func TestGAP0621WindowsSkillHookReportsLinkedAndSharedProjectRoots(t *testing.T)
 	if got := check(plain)[ProjectSkillRootUnverifiedPrefix+plainRoot]; got != "" {
 		t.Fatalf("ordinary project finding = %q", got)
 	}
+	if got := check(plain)[ProjectSkillRootVerifiedPrefix+plainRoot]; got != "1" {
+		t.Fatalf("ordinary project inspection = %q", got)
+	}
+
+	codex := makeProject("codex")
+	codexTarget := filepath.Join(outside, ".agents")
+	if err := os.MkdirAll(filepath.Join(codexTarget, "skills", "sample"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexTarget, "skills", "sample", "SKILL.md"), []byte("---\nname: sample\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", filepath.Join(codex, ".agents"), codexTarget).CombinedOutput(); err != nil {
+		t.Fatalf("create Codex junction: %v: %s", err, out)
+	}
+	prompt, err := json.Marshal(map[string]string{"hook_event_name": "UserPromptSubmit", "cwd": codex, "prompt": "$sample Continue."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ProjectSkillHookCall("codex", prompt) {
+		t.Fatal("Codex skill selection did not request caller inspection")
+	}
+	codexFacts, ok := Decode(ResolveConnector("codex", "", "UserPromptSubmit", prompt))
+	if !ok || codexFacts[ProjectSkillRootUnverifiedPrefix+filepath.Join(codex, ".agents", "skills")] != ProjectSkillRootOutsideProfile ||
+		codexFacts[ProjectSkillSelectedPrefix+filepath.Join(codex, ".agents", "skills", "sample")] != "sample" {
+		t.Fatalf("Codex selected project skill facts = %v, decoded=%v", codexFacts, ok)
+	}
 }

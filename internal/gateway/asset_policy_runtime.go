@@ -25,6 +25,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
@@ -57,6 +58,9 @@ type skillRuntimeProbe struct {
 	// on SkillName by default; operators wanting to constrain by path
 	// must use AssetPolicyRule.SourcePathContains.
 	SourcePath string
+	// ProjectDir resolves relative source paths for project skill admission.
+	// SourcePath itself remains unchanged for policy and audit records.
+	ProjectDir string
 	// RawName preserves the unnormalized input the SkillName was
 	// derived from when path-stripping occurred (e.g. SkillName came
 	// from filepath.Base on a "/path/to/<name>/SKILL.md") or when a
@@ -369,6 +373,7 @@ func (a *APIServer) codexMCPServerName(ctx context.Context, req codexHookRequest
 func (a *APIServer) claudeCodeSkillAssetDecision(ctx context.Context, req claudeCodeHookRequest) (config.AssetPolicyDecision, bool) {
 	a.noteProjectSkillFolders(ctx, "claudecode", req.CWD)
 	probe := skillProbeFromFields(req.ToolName, req.ToolInput, req.Payload)
+	probe.ProjectDir = req.CWD
 	if !probe.Matched {
 		if saved := claudeCodeCoworkSkillProbe(req); saved.Matched && coworkInspected(a.requestConfig(ctx)) {
 			return a.evaluateRuntimeSkillAssetPolicy(ctx, "claudecode", req.HookEventName, saved)
@@ -520,6 +525,7 @@ func (a *APIServer) claudeCodeMCPPromptAssetDecisions(ctx context.Context, req c
 func (a *APIServer) codexSkillAssetDecision(ctx context.Context, req codexHookRequest) (config.AssetPolicyDecision, bool) {
 	a.noteProjectSkillFolders(ctx, "codex", req.CWD)
 	probe := skillProbeFromFields(req.ToolName, req.ToolInput, req.Payload)
+	probe.ProjectDir = req.CWD
 	if !probe.Matched {
 		return a.skillFolderAccessDecision(ctx, "codex", req.HookEventName, req.CWD, req.ToolName, req.ToolInput)
 	}
@@ -785,7 +791,11 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 			}
 		}
 	}
-	if decision, pending := a.projectSkillScanPending(targetType, connector, runtimeSurface, paths); pending {
+	admissionPaths := make([]string, len(paths))
+	for i, path := range paths {
+		admissionPaths[i] = projectSkillAdmissionFolder(path, probe.ProjectDir)
+	}
+	if decision, pending := a.projectSkillScanPending(targetType, connector, runtimeSurface, admissionPaths); pending {
 		return decision, true
 	}
 	var last config.AssetPolicyDecision
@@ -800,6 +810,26 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 		last = decision
 	}
 	return last, false
+}
+
+// projectSkillAdmissionFolder maps the path spellings a skill call accepts to
+// the folder that owns its manifest. It only affects project admission; the
+// raw source path remains available to asset rules and audit records.
+func projectSkillAdmissionFolder(path, cwd string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	if !filepath.IsAbs(path) {
+		if !filepath.IsAbs(cwd) {
+			return ""
+		}
+		path = filepath.Join(cwd, path)
+	}
+	path = filepath.Clean(path)
+	if strings.EqualFold(filepath.Base(path), "SKILL.md") {
+		path = filepath.Dir(path)
+	}
+	return path
 }
 
 // runtimeSkillPathDecision is the asset_policy decision for one folder a
@@ -1713,15 +1743,11 @@ func nativeSkillToolProbe(connector, toolName string, toolInput map[string]inter
 // skill is the first token, written as "$<skill-name>". Codex does not emit a
 // Skill tool call or a synthetic skill_name field for this path.
 func codexSkillProbeFromPrompt(prompt string) skillRuntimeProbe {
-	fields := strings.Fields(strings.TrimSpace(prompt))
-	if len(fields) == 0 || !strings.HasPrefix(fields[0], "$") {
+	name := hookpaths.CodexSelectedSkillName(prompt)
+	if name == "" {
 		return skillRuntimeProbe{}
 	}
-	raw := fields[0]
-	name := strings.TrimPrefix(raw, "$")
-	if !validNativeSkillSelectionName(name) {
-		return skillRuntimeProbe{}
-	}
+	raw := "$" + name
 	return skillRuntimeProbe{
 		TargetType: "skill",
 		SkillName:  name,

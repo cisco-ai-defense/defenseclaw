@@ -19,13 +19,45 @@ import (
 // calling user's project-root inspection beyond session start. The common
 // command path keeps its existing Windows cost.
 func ProjectSkillHookCall(connector string, payload []byte) bool {
-	if !strings.EqualFold(strings.TrimSpace(connector), "claudecode") {
+	connector = strings.ToLower(strings.TrimSpace(connector))
+	if connector != "claudecode" && connector != "codex" {
 		return false
 	}
 	var event struct {
 		ToolName string `json:"tool_name"`
+		Prompt   string `json:"prompt"`
 	}
-	return json.Unmarshal(payload, &event) == nil && strings.EqualFold(strings.TrimSpace(event.ToolName), "Skill")
+	if json.Unmarshal(payload, &event) != nil {
+		return false
+	}
+	switch connector {
+	case "claudecode":
+		return strings.EqualFold(strings.TrimSpace(event.ToolName), "Skill")
+	case "codex":
+		return CodexSelectedSkillName(event.Prompt) != ""
+	default:
+		return false
+	}
+}
+
+// CodexSelectedSkillName returns the exact first-token skill selection used
+// by the Codex prompt hook.
+func CodexSelectedSkillName(prompt string) string {
+	fields := strings.Fields(strings.TrimSpace(prompt))
+	if len(fields) == 0 || !strings.HasPrefix(fields[0], "$") {
+		return ""
+	}
+	name := strings.TrimPrefix(fields[0], "$")
+	if name == "" || len(name) > 255 {
+		return ""
+	}
+	for i, r := range name {
+		alphaNumeric := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
+		if !alphaNumeric && (i == 0 || r != '-' && r != '_' && r != '.') {
+			return ""
+		}
+	}
+	return name
 }
 
 func projectSkillCallName(raw json.RawMessage) string {
@@ -100,10 +132,9 @@ func projectSkillSelectedFolders(root, name string) []string {
 	return nil
 }
 
-// projectSkillRootFacts reports only adverse facts. The Windows hook runs
-// with the caller's profile access, while the managed gateway cannot inspect
-// those paths. Every candidate is independently checked; a safe root adds
-// nothing to the header and cannot clear an earlier refusal.
+// projectSkillRootFacts reports adverse and positively verified roots. The
+// Windows hook runs with the caller's profile access, while the managed
+// gateway cannot inspect those paths. Every candidate is checked separately.
 func projectSkillRootFacts(connector, home, cwd string) map[string]string {
 	if runtime.GOOS != "windows" || !projectSkillPathWithin(home, cwd) {
 		return nil
@@ -119,6 +150,12 @@ func projectSkillRootFacts(connector, home, cwd string) map[string]string {
 		}
 		finding := inspectProjectSkillRoot(home, root)
 		if finding == "" {
+			if info, err := os.Stat(root); err == nil && info.IsDir() {
+				if facts == nil {
+					facts = map[string]string{}
+				}
+				facts[ProjectSkillRootVerifiedPrefix+root] = "1"
+			}
 			continue
 		}
 		if facts == nil {

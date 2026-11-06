@@ -106,7 +106,19 @@ func TestGAP0621ManagedWindowsProfileExcludedSkillHook(t *testing.T) {
 		t.Fatalf("unrelated selected skill was blocked: %+v", decision)
 	}
 	cfg.AssetPolicy.Mode = config.AssetPolicyModeObserve
-	if decision, matched := call(linked, "sample"); !matched || decision.Action != "allow" || !decision.WouldBlock {
+	if decision, matched := call(linked, "sample"); !matched || decision.Action != "block" {
 		t.Fatalf("observe decision = %+v, matched=%v", decision, matched)
+	}
+	if err := os.Remove(filepath.Join(linked, ".claude")); err != nil {
+		t.Fatalf("remove repaired junction: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(linked, ".claude", "skills", "sample"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if decision, matched := call(linked, "sample"); matched && decision.Action == "block" {
+		t.Fatalf("repaired project decision = %+v", decision)
+	}
+	if count := api.health.Snapshot().Watcher.Details[projectSkillRootsUnverifiedDetail]; count != 0 {
+		t.Fatalf("repaired project health count = %v", count)
 	}
 }
