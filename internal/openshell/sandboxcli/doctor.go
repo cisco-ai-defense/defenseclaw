@@ -151,6 +151,9 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		// The uid the daemon reports (an older one reports none, and the
 		// check then has nothing to compare).
 		d.DaemonUID = st.daemonUID
+		if st.status != nil {
+			d.DaemonPID = st.status.DaemonPID
+		}
 		managed = managed || st.managed != nil
 	}
 	// On a managed computer the host checks are of this account's own

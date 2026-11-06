@@ -88,6 +88,88 @@ func (r *doctorRun) processes(ctx context.Context) []process {
 	return r.procs
 }
 
+// ownSandboxDaemonProcess proves that the occupied port belongs to the
+// process that answered the managed daemon's status request. The uid and
+// executable identity must agree as well as the PID; a same-account
+// process with a similar name cannot make the port ready.
+func (r *doctorRun) ownSandboxDaemonProcess(ctx context.Context, holder daemon.PortHolder) bool {
+	if r.DaemonPID <= 0 || holder.PID != r.DaemonPID || holder.UID != r.Geteuid() ||
+		r.DaemonUID != nil && *r.DaemonUID != holder.UID {
+		return false
+	}
+	selfPath, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	self, err := os.Stat(selfPath)
+	if err != nil {
+		return false
+	}
+	var other os.FileInfo
+	var path string
+	switch r.GOOS {
+	case "linux":
+		// /proc/<pid>/exe follows the running file even after an upgrade.
+		other, err = os.Stat("/proc/" + strconv.Itoa(holder.PID) + "/exe")
+	case "darwin":
+		// lsof identifies the socket PID, and a fixed ps reads its path.
+		var pathErr error
+		path, pathErr = r.DaemonProcessPath(ctx, holder.PID)
+		if pathErr != nil || !filepath.IsAbs(path) {
+			return false
+		}
+		other, err = os.Stat(path)
+	default:
+		return false
+	}
+	if err != nil || other == nil {
+		return false
+	}
+	if os.SameFile(self, other) {
+		return true
+	}
+	// The managed macOS LaunchAgent executes the package's content-addressed
+	// gateway copy. It is a different inode from the CLI binary.
+	return r.GOOS == "darwin" && installedSandboxDaemonCopy(selfPath, path)
+}
+
+func installedSandboxDaemonCopy(canonical, candidate string) bool {
+	if filepath.Base(canonical) != "defenseclaw-gateway" || filepath.Base(candidate) != filepath.Base(canonical) {
+		return false
+	}
+	canonicalInfo, err := os.Lstat(canonical)
+	if err != nil || !canonicalInfo.Mode().IsRegular() {
+		return false
+	}
+	digest, err := fileSHA256(canonical)
+	if err != nil || candidate != filepath.Join(filepath.Dir(canonical), "launch-agents", digest, filepath.Base(canonical)) {
+		return false
+	}
+	copyInfo, err := os.Lstat(candidate)
+	if err != nil || !copyInfo.Mode().IsRegular() || copyInfo.Size() != canonicalInfo.Size() {
+		return false
+	}
+	copyDigest, err := fileSHA256(candidate)
+	return err == nil && copyDigest == digest
+}
+
+func sandboxDaemonPSCommand(pid int) Command {
+	return Command{Name: "/bin/ps", Args: []string{"-p", strconv.Itoa(pid), "-o", "comm="}, Timeout: 3 * time.Second,
+		Unset: []string{"DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH"}, Env: []string{"LANG=C", "LC_ALL=C"}}
+}
+
+func sandboxDaemonProcessPath(ctx context.Context, pid int) (string, error) {
+	out, err := (ExecRunner{}).Output(ctx, sandboxDaemonPSCommand(pid))
+	if err != nil {
+		return "", err
+	}
+	path := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(path) || strings.ContainsAny(path, "\r\n") {
+		return "", fmt.Errorf("ps did not return an absolute executable path for pid %d", pid)
+	}
+	return path, nil
+}
+
 // findProcess is the first of procs running the executable named name
 // whose parent is parent (any parent when parent is 0), or nil.
 func findProcess(procs []process, name string, parent int) *process {
