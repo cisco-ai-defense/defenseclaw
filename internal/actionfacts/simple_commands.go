@@ -165,6 +165,13 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 	}
 	home, _ := normalizeActiveHome(input.ActiveHome)
 	initialVars := map[string]string{"HOME": home}
+	// USER and LOGNAME name the last element of a POSIX home, as the trusted
+	// home rewrite reads <parent>/$USER (userHomeRewriteWord) and the hook
+	// target scans read both names, so a child command spelled with them is
+	// judged as its literal spelling (rel-1-0-6:GAP-0601, GAP-0681).
+	if user := path.Base(home); strings.HasPrefix(home, "/") && user != "/" && user != "." {
+		initialVars["USER"], initialVars["LOGNAME"] = user, user
+	}
 	if simplePathAbs(input.CWD) {
 		initialVars["PWD"] = simplePathClean(input.CWD)
 	}

@@ -12,6 +12,7 @@ import (
 	"maps"
 	"os"
 	osuser "os/user"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -190,6 +191,7 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 	// when the command may call it (GAP-1430). Expanding each call instead
 	// costs time exponential in the call nesting.
 	called := calledFunctions(file, home)
+	var known []string
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if declaration, isFunction := node.(*syntax.FuncDecl); isFunction {
 			return declaration.Name != nil && called[declaration.Name.Value]
@@ -209,6 +211,10 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 			name, static := staticShellWord(redirect.Word, env, home != "")
 			if !static {
 				dynamic = dynamic || shellWordHasSlash(redirect.Word)
+				if name, static = knownValueWord(redirect.Word, home); static && name != "" && name != "-" &&
+					strings.Trim(name, "0123456789") != "" {
+					known = append(known, OperandPath(name, cwd))
+				}
 				return true
 			}
 			if name == "" || name == "-" || strings.Trim(name, "0123456789") == "" {
@@ -222,6 +228,9 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 		name, static := staticShellWord(redirect.Word, env, home != "")
 		if !static {
 			dynamic = true
+			if name, static = knownValueWord(redirect.Word, home); static && name != "" {
+				known = append(known, OperandPath(name, cwd))
+			}
 			return true
 		}
 		if name == "" {
@@ -230,24 +239,44 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 		operands = append(operands, OperandPath(name, cwd))
 		return true
 	})
-	// The gateway proves a redirect onto the DefenseClaw state from the
-	// targets its own reader names (actionfacts.ShellRedirectTargets, read
-	// by provenShellRedirectStateWrite), which also spells the home as
-	// <parent>/$USER and <parent>/$LOGNAME. Behind ProtectHome it finds the
-	// file each of them opens only in the hook client map, which lists
-	// these operands: list the targets of that reader too, so a statement
-	// that leaves the other readers here without those values cannot leave
-	// a target out (rel-1-0-6:GAP-0630, GAP-0601).
-	if strings.HasPrefix(home, "/") && strings.Contains(command, ">") && MayNameState(command) {
-		if targets, found := actionfacts.ShellRedirectTargets(command, home); found {
-			for _, target := range targets {
-				if !slices.Contains(operands, target) {
-					operands = append(operands, target)
-				}
-			}
+	// A target spelled with USER or LOGNAME (<parent>/$USER/f) stays dynamic
+	// for this reading, and is listed after the static ones as the file the
+	// gateway judges it to be (knownValueWord, as
+	// actionfacts.ShellRedirectTargets reads it): behind ProtectHome the
+	// gateway finds the file it opens only in the hook client map, which
+	// lists these operands, and a link with an ordinary name can lead to
+	// the state (rel-1-0-6:GAP-0630, GAP-0601). They come last so the
+	// static operands keep their order (SafeShellRedirectOccurrences).
+	for _, name := range known {
+		if !slices.Contains(operands, name) {
+			operands = append(operands, name)
 		}
 	}
 	return operands, true, dynamic
+}
+
+// shellBodyRedirectOperands lists the redirect targets of the static body
+// of each shell -c call of command (literalShellCallBody), read in cwd.
+func shellBodyRedirectOperands(command, cwd, home string) []string {
+	if !strings.Contains(command, ">") {
+		return nil
+	}
+	file, parsed := parseShell(command)
+	if !parsed {
+		return nil
+	}
+	var operands []string
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if call, isCall := node.(*syntax.CallExpr); isCall {
+			if body := literalShellCallBody(call, home); body != "" {
+				if redirects, ok, _ := ShellWriteOperands(body, cwd, home); ok {
+					operands = append(operands, redirects...)
+				}
+			}
+		}
+		return true
+	})
+	return operands
 }
 
 // shellWordHasSlash reports a literal "/" anywhere in word, quoted or not: a
@@ -447,7 +476,7 @@ func staticShellWord(word *syntax.Word, env expand.Environ, haveHome bool) (stri
 				switch inner := inner.(type) {
 				case *syntax.Lit:
 				case *syntax.ParamExp:
-					if !homeParam(inner, haveHome) {
+					if !knownParam(inner, env, haveHome) {
 						return "", false
 					}
 				default:
@@ -455,7 +484,7 @@ func staticShellWord(word *syntax.Word, env expand.Environ, haveHome bool) (stri
 				}
 			}
 		case *syntax.ParamExp:
-			if !homeParam(part, haveHome) {
+			if !knownParam(part, env, haveHome) {
 				return "", false
 			}
 		default:
@@ -484,8 +513,43 @@ func StaticWord(word *syntax.Word, home string) (string, bool) {
 	return staticShellWord(word, expand.ListEnviron("HOME="+strings.TrimRight(home, "/")), home != "")
 }
 
+// knownValueWord expands one shell word with every value the gateway knows
+// for the active home: HOME, and USER and LOGNAME as the last element of
+// the home, as actionfacts reads <parent>/$USER (userHomeRewriteWord) and
+// the target mention scan reads both names. A reader of the targets of a
+// write to DefenseClaw state uses it, so a known value names the file its
+// literal spelling names (rel-1-0-6:GAP-0681).
+func knownValueWord(word *syntax.Word, home string) (string, bool) {
+	if word == nil {
+		return "", false
+	}
+	home = strings.TrimRight(home, "/")
+	names := []string{"HOME=" + home}
+	if user := path.Base(home); strings.HasPrefix(home, "/") && user != "/" && user != "." {
+		names = append(names, "USER="+user, "LOGNAME="+user)
+	}
+	return staticShellWord(word, expand.ListEnviron(names...), home != "")
+}
+
 func homeParam(param *syntax.ParamExp, haveHome bool) bool {
-	return haveHome && param.Param != nil && param.Param.Value == "HOME" && !param.Excl && !param.Length &&
+	return haveHome && plainParam(param, "HOME")
+}
+
+// knownParam reports a plain expansion of HOME (when the home is known) or
+// of another name env sets.
+func knownParam(param *syntax.ParamExp, env expand.Environ, haveHome bool) bool {
+	if param.Param == nil {
+		return false
+	}
+	if name := param.Param.Value; name != "HOME" {
+		return env.Get(name).IsSet() && plainParam(param, name)
+	}
+	return homeParam(param, haveHome)
+}
+
+// plainParam reports $name or ${name} with no operator.
+func plainParam(param *syntax.ParamExp, name string) bool {
+	return param.Param != nil && param.Param.Value == name && !param.Excl && !param.Length &&
 		!param.Width && !param.IsSet && param.Index == nil && param.Slice == nil && param.Repl == nil &&
 		param.Names == 0 && param.Exp == nil && param.Flags == nil && param.NestedParam == nil &&
 		len(param.Modifiers) == 0
@@ -1341,10 +1405,20 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					// pushd of a bare name as it follows cd. The copy source
 					// facts of those readings are recorded too, so a gateway
 					// behind ProtectHome reads the same answer (GAP-2586).
+					// A child reading spells USER and LOGNAME as the home they
+					// name, also inside a shell body the outer shell expands
+					// (bash -c "echo x > /home/$USER/f"); the gateway reads the
+					// redirect targets of that body behind ProtectHome only
+					// from this map, so they are listed (rel-1-0-6:GAP-0601).
+					knownValues := strings.HasPrefix(home, "/") && strings.Contains(command, ">") &&
+						(strings.Contains(command, "USER") || strings.Contains(command, "LOGNAME"))
 					for _, simple := range actionfacts.SimpleCommands(fallback, fallbackFacts) {
 						if simple.EvaluationFailure == "" && simple.Text != command && filepath.IsAbs(simple.CWD) &&
 							filepath.Clean(simple.CWD) != filepath.Clean(cwd) {
 							commandLinksWithFacts(simple.Text, simple.CWD, home, sourceFacts, true)
+						}
+						if knownValues && simple.EvaluationFailure == "" && simple.Text != command && filepath.IsAbs(simple.CWD) {
+							literalOperands = append(literalOperands, shellBodyRedirectOperands(simple.Text, simple.CWD, home)...)
 						}
 					}
 					safeRedirects = SafeShellRedirectOccurrencesWithFacts(command, cwd, home, sourceFacts)
