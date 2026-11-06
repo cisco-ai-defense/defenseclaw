@@ -327,16 +327,25 @@ func gatewayNoAnswer(ctx context.Context) bool {
 	return errors.Is(context.Cause(ctx), errGatewayNoAnswer)
 }
 
-// noAnswerFailMode keeps a call with no gateway decision closed. A proven
-// outage has its own answer path; socket contact alone does not prove one.
-// Secure Client retains its established fail-mode behavior unless the local
-// answer budget was spent or the gateway already returned an error status.
+// noAnswerFailMode uses the current account outage tier for an ordinary
+// per-user call whose gateway did not answer. The shared protected-reach
+// reader must prove that the call names no protected target before the open
+// tier applies. Managed and strict calls, unusable answers, and unclassified
+// payloads stay closed. Secure Client retains its established behavior.
 func noAnswerFailMode(opts Options, failMode string) string {
-	if opts.answerSpentLocally || opts.answeredErrorStatus != 0 || opts.ManagedEnterprise {
+	if opts.SecureClient {
+		if opts.answerSpentLocally || opts.answeredErrorStatus != 0 || opts.ManagedEnterprise {
+			return "closed"
+		}
+		return failMode
+	}
+	if opts.answeredErrorStatus != 0 || opts.ManagedEnterprise || opts.ManagedUnixSocket != "" ||
+		opts.StrictAvailability || perUserInstallWindow(opts) || opts.OutageFailModeNow == nil {
 		return "closed"
 	}
-	if opts.SecureClient {
-		return failMode
+	if normalizeFailMode(opts.OutageFailModeNow()) == "open" &&
+		OrdinaryNoAnswerPayload(opts.failurePayload) {
+		return "open"
 	}
 	return "closed"
 }
