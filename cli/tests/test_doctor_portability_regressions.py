@@ -706,13 +706,117 @@ def test_doctor_warns_when_per_user_gateway_runs_as_root(monkeypatch, tmp_path) 
 def test_doctor_gateway_account_hint_quotes_the_home(monkeypatch, tmp_path) -> None:
     home = tmp_path / "my home; touch pwned"
     home.mkdir()
+    binary = tmp_path / "bin with spaces" / "defenseclaw-gateway"
+    binary.parent.mkdir()
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o700)
+    monkeypatch.setattr(gateway_module, "resolve_gateway_binary", lambda: os.fspath(binary))
     result = _gateway_account_fixture(monkeypatch, home, process_uid=0)
 
     remediation = result.checks[-1]["remediation"]
     assert shlex.quote(os.fspath(home)) in remediation
     tokens = shlex.split(remediation.split("Otherwise: ", 1)[1])
-    assert tokens[:5] == ["sudo", "env", f"DEFENSECLAW_HOME={home}", "defenseclaw-gateway", "stop"]
+    assert tokens[:5] == ["sudo", "env", f"DEFENSECLAW_HOME={home}", os.fspath(binary), "stop"]
     assert tokens[10] == os.fspath(home)
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX per-user gateway account")
+@pytest.mark.parametrize("platform_name", ["linux", "darwin"])
+def test_doctor_custom_store_root_gateway_uses_pid_record_home(
+    monkeypatch, tmp_path, platform_name
+) -> None:
+    """A moved store leaves config and gateway.pid in the install home."""
+    from defenseclaw.doctor_gateway import PIDRecord, ProcessEvidence
+
+    home = tmp_path / "install home"
+    store = tmp_path / "store"
+    home.mkdir()
+    store.mkdir()
+    (home / "config.yaml").write_text(f"data_dir: {store}\n")
+    monkeypatch.setenv("DEFENSECLAW_HOME", os.fspath(home))
+    monkeypatch.setattr(cmd_doctor, "sys", SimpleNamespace(platform=platform_name))
+    binary = tmp_path / "local bin" / "defenseclaw-gateway"
+    binary.parent.mkdir()
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o700)
+    monkeypatch.setattr(gateway_module, "resolve_gateway_binary", lambda: os.fspath(binary))
+    record = PIDRecord(
+        "ok", pid=4242, executable=os.fspath(binary),
+        data_dir=os.fspath(home), start_identity="kernel-generation",
+    )
+    process = ProcessEvidence(
+        "ok", pid=4242, executable=os.fspath(binary),
+        start_identity=record.start_identity, uid=0,
+    )
+    cfg = SimpleNamespace(data_dir=os.fspath(store), deployment_mode="")
+    monkeypatch.setattr(cmd_doctor, "pid_alive", lambda _pid: True)
+    for listener_code in ("missing_listener", "unavailable", "ambiguous_listener", "root_gateway"):
+        trust = cmd_doctor._GatewayTrust(
+            listener_code, "fixture", pid=4242, home_bound=True,
+            record=record, process=process,
+        )
+        monkeypatch.setattr(cmd_doctor, "_trusted_gateway_listener", lambda _cfg: trust)
+        result = cmd_doctor._DoctorResult(quiet=True)
+        cmd_doctor._check_gateway_account(cfg, result)
+        assert [(check["label"], check["status"]) for check in result.checks] == [
+            ("Gateway account", "warn")
+        ]
+        remediation = result.checks[0]["remediation"]
+        assert ["sudo", "env", f"DEFENSECLAW_HOME={home}", os.fspath(binary), "stop"] == (
+            shlex.split(remediation.split("Otherwise: ", 1)[1])[:5]
+        )
+        assert f"DEFENSECLAW_HOME={store}" not in remediation
+
+    foreign = PIDRecord(
+        "ok", pid=4242, executable=os.fspath(binary),
+        data_dir=os.fspath(tmp_path / "other"), start_identity="kernel-generation",
+    )
+    trust = cmd_doctor._GatewayTrust(
+        "missing_listener", "fixture", pid=4242, home_bound=True,
+        record=foreign, process=process,
+    )
+    monkeypatch.setattr(cmd_doctor, "_trusted_gateway_listener", lambda _cfg: trust)
+    result = cmd_doctor._DoctorResult(quiet=True)
+    cmd_doctor._check_gateway_account(cfg, result)
+    assert result.checks == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process evidence")
+def test_linux_root_listener_diagnosis_accepts_custom_store_install_home(monkeypatch, tmp_path) -> None:
+    from defenseclaw.doctor_gateway import PIDRecord
+    from defenseclaw.enforce import asset_lists
+
+    home = tmp_path / "install"
+    store = tmp_path / "store"
+    home.mkdir()
+    store.mkdir()
+    (home / "config.yaml").write_text(f"data_dir: {store}\n")
+    monkeypatch.setenv("DEFENSECLAW_HOME", os.fspath(home))
+    monkeypatch.setattr(cmd_doctor, "_process_uid", lambda _pid: 0)
+    monkeypatch.setattr(cmd_doctor, "pid_alive", lambda _pid: True)
+    monkeypatch.setattr(cmd_doctor, "_linux_root_process_identity_matches", lambda _record: True)
+    monkeypatch.setattr(cmd_doctor, "_linux_root_listener_at", lambda _host, _port: True)
+    monkeypatch.setattr(asset_lists, "is_secure_client", lambda _cfg: False)
+    cfg = SimpleNamespace(data_dir=os.fspath(store), deployment_mode="")
+    record = PIDRecord(
+        "ok", pid=4242, executable="/usr/local/bin/defenseclaw-gateway",
+        data_dir=os.fspath(home), start_identity="kernel-generation",
+    )
+    process_trust = cmd_doctor._GatewayTrust("unavailable", "fixture", pid=4242, record=record)
+    result = cmd_doctor._linux_root_gateway_diagnosis(
+        cfg, process_trust, "127.0.0.1", 18970, "linux"
+    )
+    assert result is not None and result.code == "root_gateway"
+    assert result.home_bound
+
+    foreign = PIDRecord(
+        "ok", pid=4242, executable=record.executable,
+        data_dir=os.fspath(tmp_path / "other"), start_identity=record.start_identity,
+    )
+    process_trust = cmd_doctor._GatewayTrust("unavailable", "fixture", pid=4242, record=foreign)
+    assert cmd_doctor._linux_root_gateway_diagnosis(
+        cfg, process_trust, "127.0.0.1", 18970, "linux"
+    ) is None
 
 
 @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX per-user gateway account")

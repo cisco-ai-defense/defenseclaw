@@ -131,12 +131,21 @@ func TestPerUserListenerOwnAccountAndUnknown(t *testing.T) {
 
 func TestRootGatewayStopCommandTargetsQuotedDataHome(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "account's home; $marker")
+	binDir := filepath.Join(t.TempDir(), "local bin")
+	if err := os.MkdirAll(binDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(binDir, "defenseclaw-gateway")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
 	command := rootGatewayStopCommand(home)
-	if !strings.HasPrefix(command, "sudo env DEFENSECLAW_HOME=") || !strings.HasSuffix(command, " defenseclaw-gateway stop") {
+	if !strings.HasPrefix(command, "sudo env DEFENSECLAW_HOME=") || !strings.HasSuffix(command, " '"+binary+"' stop") {
 		t.Fatalf("root stop command = %q", command)
 	}
-	value := strings.TrimSuffix(strings.TrimPrefix(command, "sudo env DEFENSECLAW_HOME="), " defenseclaw-gateway stop")
-	output, err := exec.Command("sh", "-c", "printf '%s' "+value).Output()
+	value := strings.TrimSuffix(strings.TrimPrefix(command, "sudo env DEFENSECLAW_HOME="), " '"+binary+"' stop")
+	output, err := exec.Command("/bin/sh", "-c", "printf '%s' "+value).Output()
 	if err != nil || string(output) != home {
 		t.Fatalf("quoted data home = %q, err = %v, want %q", output, err, home)
 	}

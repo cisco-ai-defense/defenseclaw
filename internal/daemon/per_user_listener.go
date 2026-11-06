@@ -6,6 +6,7 @@ package daemon
 import (
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -27,8 +28,8 @@ const (
 
 const RootGatewayListenerReason = "Your DefenseClaw gateway is running as root."
 
-// RootGatewayListenerRemedy names the data home explicitly because sudo can
-// reset HOME and discard DEFENSECLAW_HOME before the stop command starts.
+// RootGatewayListenerRemedy names the PID-record home and executable before
+// sudo resets the caller's environment.
 func RootGatewayListenerRemedy(dataDir string) string {
 	return "Stop it with " + rootGatewayStopCommand(dataDir) + ", then start it as yourself (defenseclaw-gateway start). On macOS, use DefenseClawMac to repair root-owned gateway files."
 }
@@ -38,7 +39,37 @@ func rootGatewayStopCommand(dataDir string) string {
 		dataDir = absolute
 	}
 	quotedHome := "'" + strings.ReplaceAll(dataDir, "'", "'\\''") + "'"
-	return "sudo env DEFENSECLAW_HOME=" + quotedHome + " defenseclaw-gateway stop"
+	executable := "\"$(command -v defenseclaw-gateway)\""
+	if path := rootGatewayExecutablePath(); path != "" {
+		executable = "'" + strings.ReplaceAll(path, "'", "'\\''") + "'"
+	}
+	return "sudo env DEFENSECLAW_HOME=" + quotedHome + " " + executable + " stop"
+}
+
+func rootGatewayExecutablePath() string {
+	// A gateway handling its own stop error can use the binary it is running.
+	// Other callers resolve the account's executable before sudo changes PATH.
+	if self, err := os.Executable(); err == nil && filepath.Base(self) == "defenseclaw-gateway" && runnableGatewayFile(self) {
+		return self
+	}
+	if found, err := exec.LookPath("defenseclaw-gateway"); err == nil && runnableGatewayFile(found) {
+		return found
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidate := filepath.Join(home, ".local", "bin", "defenseclaw-gateway")
+		if runnableGatewayFile(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func runnableGatewayFile(path string) bool {
+	if !filepath.IsAbs(path) {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular() && info.Mode()&0111 != 0
 }
 
 // ClassifyPerUserListener combines the observed endpoint owner with the PID
