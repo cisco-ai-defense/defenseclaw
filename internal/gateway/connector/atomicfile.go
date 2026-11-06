@@ -24,6 +24,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // atomicWriteFile writes data to a temp file in the same directory and then
@@ -188,7 +190,7 @@ func publishCause(err error) error {
 }
 
 func atomicFileAlreadyMatches(path string, data []byte, perm os.FileMode) bool {
-	file, err := os.Open(path)
+	file, err := winpath.OpenReadShared(path)
 	if err != nil {
 		return false
 	}

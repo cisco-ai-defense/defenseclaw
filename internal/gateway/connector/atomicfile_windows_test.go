@@ -160,6 +160,66 @@ func TestAtomicWriteIdenticalWindowsConfigPreservesIdentityAndMetadata(t *testin
 	}
 }
 
+// An unchanged agent config keeps its file identity while another process
+// holds a delete-capable handle. A changed body still publishes new content.
+func TestAtomicWriteFileKeepsMatchingContentWithSharedDeleteHandle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	initial := []byte("managed\n")
+	if err := atomicWriteFile(path, initial, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(name, windows.DELETE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(handle)
+	if err := atomicWriteFile(path, initial, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("matching agent config was replaced")
+	}
+}
+
+func TestAtomicWriteFilePublishesChangedContent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := atomicWriteFile(path, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(path, []byte("new\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(before, after) {
+		t.Fatal("changed agent config kept the old file identity")
+	}
+	body, err := os.ReadFile(path)
+	if err != nil || string(body) != "new\n" {
+		t.Fatalf("published body = %q, err %v", body, err)
+	}
+}
+
 func TestAtomicWritePrivatePublicationDoesNotPreserveRacedDestinationDACL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	if err := atomicWriteFile(path, []byte("old\n"), 0o600); err != nil {

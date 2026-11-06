@@ -26,6 +26,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // Protected descriptors: SYSTEM and Administrators own and write; standard
@@ -292,7 +294,20 @@ func openNoFollow(path string) (*os.File, error) {
 	if info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeIrregular != 0 {
 		return nil, fmt.Errorf("%s is a reparse point", path)
 	}
-	return os.Open(path)
+	return openReadSharedSettled(path)
+}
+
+// openReadSharedSettled opens path for reading sharing deletion, so a
+// replacement can proceed while it is open, and retries for a moment
+// while another process holds or swaps it (GAP-0655).
+func openReadSharedSettled(path string) (*os.File, error) {
+	var file *os.File
+	err := safefile.RetryTransientRead(func() error {
+		var err error
+		file, err = winpath.OpenReadShared(path)
+		return err
+	})
+	return file, err
 }
 
 func applySDDL(path, sddl string) error {

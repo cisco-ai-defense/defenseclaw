@@ -135,13 +135,13 @@ func retryBusyRename(
 	return err
 }
 
-// ReplaceFileAtomically renames source over destination in one step, so a
-// reader that opens destination meanwhile finds the old file or the new one,
-// never no file. ReplaceFile (ReplaceFileW) moves an existing destination
-// aside while it merges metadata, and for that moment the name is missing: a
-// policy file another file names (Cursor's hooks.json names the machine
-// adapter) must not go missing (GAP-2572). The rename uses POSIX semantics,
-// so readers that share deletion (Cursor, Codex) keep reading; the new file
+// ReplaceFileAtomically renames source over destination in one step. Windows
+// can briefly report a missing name to a concurrent opener during a rename,
+// so callers should avoid replacing identical content and retry owned reads
+// when the file is expected. ReplaceFile (ReplaceFileW) moves an existing
+// destination aside while it merges metadata; this one-step rename reduces
+// that window for a policy file another file names (GAP-2572). POSIX semantics
+// let readers that share deletion keep an already-open handle. The new file
 // keeps its own access list, so a caller sets the protection of source first.
 //
 // Where the POSIX-semantics rename is refused (a volume without it, or a
