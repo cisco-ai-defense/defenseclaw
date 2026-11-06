@@ -772,7 +772,7 @@ func (w *InstallWatcher) hermesBundledPlugin(evt InstallEvent) bool {
 // A path's final spelling alone cannot establish which tree the scanner read.
 type bundledPluginScanState struct {
 	directories []os.FileInfo
-	contentHash string
+	treeHash    string
 }
 
 func pluginDirectoryChain(path string) []os.FileInfo {
@@ -815,13 +815,13 @@ func (w *InstallWatcher) bundledPluginScanState(evt InstallEvent) *bundledPlugin
 	if len(before) == 0 {
 		return nil
 	}
-	snap, err := w.snapshotForEvent(evt)
-	if err != nil || snap == nil || snap.ContentHash == "" ||
+	treeHash, err := fingerprintBundledTree(evt.Path, before[0])
+	if err != nil || treeHash == "" ||
 		!w.hermesBundledPlugin(evt) ||
 		!samePluginDirectoryChain(before, pluginDirectoryChain(evt.Path)) {
 		return nil
 	}
-	return &bundledPluginScanState{directories: before, contentHash: snap.ContentHash}
+	return &bundledPluginScanState{directories: before, treeHash: treeHash}
 }
 
 func skipPluginChildDir(name string) bool {
@@ -1585,7 +1585,15 @@ func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent, init
 	target, err := w.scanTargetFor(evt)
 	var result *scanner.ScanResult
 	if err == nil {
-		result, err = s.Scan(scanCtx, target)
+		if scannedTree != nil {
+			var pinned bool
+			result, pinned, err = scanBundledPluginBaseline(scanCtx, s, target, scannedTree)
+			if !pinned {
+				scannedTree = nil
+			}
+		} else {
+			result, err = s.Scan(scanCtx, target)
+		}
 	}
 	if err == nil && !w.secureClientActive() {
 		// A scan without its judge is incomplete: it never becomes the
@@ -1605,7 +1613,7 @@ func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent, init
 	}
 	if scannedTree != nil {
 		after := w.bundledPluginScanState(evt)
-		if after != nil && after.contentHash == scannedTree.contentHash &&
+		if after != nil && after.treeHash == scannedTree.treeHash &&
 			samePluginDirectoryChain(scannedTree.directories, after.directories) {
 			for i := range result.Findings {
 				if !slices.Contains(result.Findings[i].Tags, scanner.FindingTagDetectionOnly) {

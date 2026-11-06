@@ -29,6 +29,15 @@ func (s *pluginBaselineScanner) Scan(_ context.Context, target string) (*scanner
 	}, nil
 }
 
+// The fixture's findings are keyed by the installed path; the pinned copy is
+// checked for the same manifest before returning that path's scan result.
+func (s *pluginBaselineScanner) ScanBaseline(ctx context.Context, target, copyPath string) (*scanner.ScanResult, error) {
+	if _, err := os.ReadFile(filepath.Join(copyPath, "plugin.yaml")); err != nil {
+		return nil, err
+	}
+	return s.Scan(ctx, target)
+}
+
 func TestRescanAttributesBundledPluginFindingsAndKeepsFirstSightOutOfAlerts(t *testing.T) {
 	t.Setenv("PATH", "")
 	t.Setenv("HERMES_BUNDLED_PLUGINS", "")
@@ -271,6 +280,10 @@ func (s *pluginTreeSwitchScanner) Scan(_ context.Context, target string) (*scann
 	}, nil
 }
 
+func (s *pluginTreeSwitchScanner) ScanBaseline(ctx context.Context, target, _ string) (*scanner.ScanResult, error) {
+	return s.Scan(ctx, target)
+}
+
 func TestRescanBundledPluginBaselineTracksScannedTree(t *testing.T) {
 	for _, tc := range []struct {
 		name, layout string
@@ -338,5 +351,155 @@ func TestRescanBundledPluginBaselineTracksScannedTree(t *testing.T) {
 				t.Errorf("baseline tag = %t, want %t", tagged, tc.baseline)
 			}
 		})
+	}
+}
+
+// transientPluginScanner observes the live pathname while it refers to a
+// second tree, then restores the original name before returning.
+type transientPluginScanner struct {
+	root, parked, other string
+}
+
+func (s *transientPluginScanner) Name() string               { return "plugin-scanner" }
+func (s *transientPluginScanner) Version() string            { return "test-1" }
+func (s *transientPluginScanner) SupportedTargets() []string { return []string{"plugin"} }
+func (s *transientPluginScanner) Scan(_ context.Context, target string) (*scanner.ScanResult, error) {
+	if err := os.Rename(s.root, s.parked); err != nil {
+		return nil, err
+	}
+	if err := os.Symlink(s.other, s.root); err != nil {
+		_ = os.Rename(s.parked, s.root)
+		return nil, err
+	}
+	manifest, readErr := os.ReadFile(filepath.Join(target, "plugin.yaml"))
+	removeErr := os.Remove(s.root)
+	restoreErr := os.Rename(s.parked, s.root)
+	if readErr != nil {
+		return nil, readErr
+	}
+	if removeErr != nil {
+		return nil, removeErr
+	}
+	if restoreErr != nil {
+		return nil, restoreErr
+	}
+	id := "shipped"
+	if strings.Contains(string(manifest), "other") {
+		id = "other"
+	}
+	return &scanner.ScanResult{
+		Scanner: "plugin-scanner", Target: target, TargetType: "plugin", Timestamp: time.Now().UTC(),
+		Findings: []scanner.Finding{{ID: id, RuleID: "PLUGIN-REVIEW", Severity: scanner.SeverityHigh, Title: "Review source"}},
+	}, nil
+}
+
+// pinnedPluginScanner uses the copied tree for the baseline scan. Its live
+// scan is retained to show the result if the scanner cannot pin its input.
+type pinnedPluginScanner struct{ transientPluginScanner }
+
+func (s *pinnedPluginScanner) ScanBaseline(ctx context.Context, target, copyPath string) (*scanner.ScanResult, error) {
+	return s.transientPluginScanner.Scan(ctx, copyPath)
+}
+
+func TestRescanBundledPluginBaselineUsesPinnedInput(t *testing.T) {
+	for _, tc := range []struct {
+		name, wantID string
+		pinned       bool
+		baseline     bool
+	}{
+		{"unverified scan remains active", "other", false, false},
+		{"pinned shipped scan remains baseline", "shipped", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("PATH", "")
+			t.Setenv("HERMES_BUNDLED_PLUGINS", "")
+			cfg, store, logger, _ := setupTestEnv(t)
+			cfg.Guardrail.Connector = "claudecode"
+			logger.SetRuntimeV8Emitter(&watcherTestRuntime{})
+			home := t.TempDir()
+			root := filepath.Join(home, ".hermes", "hermes-agent", "plugins")
+			other := filepath.Join(home, "other")
+			for _, item := range []struct{ dir, manifest string }{
+				{filepath.Join(root, "photon"), "name: shipped\n"},
+				{filepath.Join(other, "photon"), "name: other\n"},
+			} {
+				if err := os.MkdirAll(item.dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(item.dir, "plugin.yaml"), []byte(item.manifest), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				src := filepath.Join(item.dir, "src")
+				if err := os.Mkdir(src, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(src, "index.py"), []byte("pass\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			w := New(cfg, nil, []string{root}, store, logger, nil, nil)
+			w.SetRootConnectors(map[string]string{root: "hermes"})
+			swap := transientPluginScanner{root: root, parked: filepath.Join(home, "parked"), other: other}
+			w.scannerFactory = func(InstallEvent) scanner.Scanner {
+				if tc.pinned {
+					return &pinnedPluginScanner{transientPluginScanner: swap}
+				}
+				return &swap
+			}
+			w.runRescanCycle(context.Background())
+			row, err := store.GetTargetSnapshot("plugin", filepath.Join(root, "photon"))
+			if err != nil || row.ScanID == "" {
+				t.Fatalf("plugin snapshot = %#v, %v", row, err)
+			}
+			raw, err := store.GetScanRawJSON(row.ScanID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(raw, `"id": "`+tc.wantID+`"`) ||
+				strings.Contains(raw, scanner.FindingTagDetectionOnly) != tc.baseline {
+				t.Errorf("scan result does not match pinned input: %s", raw)
+			}
+		})
+	}
+}
+
+func TestRescanBundledPluginBaselineKeepsLinkedFileFindingActive(t *testing.T) {
+	t.Setenv("PATH", "")
+	t.Setenv("HERMES_BUNDLED_PLUGINS", "")
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Guardrail.Connector = "claudecode"
+	logger.SetRuntimeV8Emitter(&watcherTestRuntime{})
+	home := t.TempDir()
+	root := filepath.Join(home, ".hermes", "hermes-agent", "plugins")
+	plugin := filepath.Join(root, "photon")
+	if err := os.MkdirAll(plugin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(plugin, "plugin.yaml"), []byte("name: photon\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(home, "outside.py")
+	if err := os.WriteFile(outside, []byte("pass\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(plugin, "linked.py")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	w := New(cfg, nil, []string{root}, store, logger, nil, nil)
+	w.SetRootConnectors(map[string]string{root: "hermes"})
+	w.scannerFactory = func(InstallEvent) scanner.Scanner {
+		return &pluginBaselineScanner{findings: map[string][]scanner.Finding{plugin: {{ID: "linked", RuleID: "STRUCT-SYMLINK-ESCAPE", Severity: scanner.SeverityHigh, Title: "Linked file"}}}}
+	}
+	w.runRescanCycle(context.Background())
+	row, err := store.GetTargetSnapshot("plugin", plugin)
+	if err != nil || row.ScanID == "" {
+		t.Fatalf("plugin snapshot = %#v, %v", row, err)
+	}
+	raw, err := store.GetScanRawJSON(row.ScanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(raw, scanner.FindingTagDetectionOnly) {
+		t.Errorf("linked file finding entered shipped baseline: %s", raw)
 	}
 }

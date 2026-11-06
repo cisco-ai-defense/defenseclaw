@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -44,6 +45,9 @@ type PluginScanner struct {
 	Policy      string
 	Profile     string
 	IncludeSelf bool
+	// baselineConnector keeps an installed plugin's connector selection when
+	// its first-sight scan reads a private copy outside registered roots.
+	baselineConnector bool
 	// LLM is the resolved scanners.plugin judge (config ResolveLLM). Only
 	// the embedded Windows runtime needs it: the defenseclaw CLI resolves
 	// it from config itself.
@@ -70,6 +74,27 @@ func (s *PluginScanner) Name() string               { return "plugin-scanner" }
 func (s *PluginScanner) Version() string            { return "1.0.0" }
 func (s *PluginScanner) SupportedTargets() []string { return []string{"plugin"} }
 
+// ScanBaseline reads a private, pinned copy of an installed plugin. The
+// watcher verifies that copy before using the result as a shipped baseline.
+func (s *PluginScanner) ScanBaseline(ctx context.Context, target, copyPath string) (*ScanResult, error) {
+	copyScanner := *s
+	copyScanner.baselineConnector = true
+	result, err := copyScanner.Scan(ctx, copyPath)
+	if result == nil || err != nil {
+		return result, err
+	}
+	result.Target = target
+	for i := range result.Findings {
+		finding := &result.Findings[i]
+		finding.Location = strings.ReplaceAll(finding.Location, copyPath, target)
+		finding.File = strings.ReplaceAll(finding.File, copyPath, target)
+		finding.Description = strings.ReplaceAll(finding.Description, copyPath, target)
+		finding.EvidenceSummary = strings.ReplaceAll(finding.EvidenceSummary, copyPath, target)
+		finding.Remediation = strings.ReplaceAll(finding.Remediation, copyPath, target)
+	}
+	return result, nil
+}
+
 func (s *PluginScanner) pluginScanCommand(target string) (string, []string) {
 	binaryPath := s.BinaryPath
 	if binaryPath == "" {
@@ -86,6 +111,9 @@ func (s *PluginScanner) pluginScanCommand(target string) (string, []string) {
 		}
 	default:
 		args = []string{"plugin", "scan", "--json", target}
+		if s.baselineConnector && s.Connector != "" {
+			args = append(args, "--connector", s.Connector)
+		}
 	}
 	if s.Policy != "" {
 		args = append(args, "--policy", s.Policy)
