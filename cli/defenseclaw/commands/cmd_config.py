@@ -1235,11 +1235,12 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
     roster_change = parts == ["guardrail"] or parts[:2] == ["guardrail", "connectors"]
     selection_change = parts and parts[0] in {"guardrail", "claw"}
     inert, stored = _inert_entry_changes(parts, parsed, _written_config()) if roster_change else ([], "")
+    named = _edit_connector_names(parts, parsed)
 
     def _check_candidate(path: str, candidate: bytes) -> None:
         if roster_change:
             _check_guardrail_connector_roster(path, candidate)
-        _check_config_connector_selection(path, candidate)
+        _check_config_connector_selection(path, candidate, named=named)
 
     check_candidate = _check_candidate if selection_change else None
     changes = [Change(key, parsed), *inert]
@@ -1297,6 +1298,61 @@ def _configured_connector_selection(document: object) -> tuple[set[str], str, se
     return guarded, selected, disabled, names
 
 
+def _hook_scanned_connectors(document: object) -> set[str]:
+    """The connectors whose hook calls the Go gate scans because of the written config (GAP-0588).
+
+    Mirrors the configuration signals of ``agentHookEnabled``
+    (internal/gateway/agent_hook.go): a ``guardrail.connectors`` entry with
+    ``enabled: false`` turns a connector off; otherwise
+    ``connector_hooks.<name>.enabled`` (else the legacy ``claude_code`` or
+    ``codex`` section), a ``guardrail.connectors`` entry or
+    ``guardrail.connector`` turns it on. ``claw.mode`` is not a signal
+    (GAP-1953): on a claw.mode-only file, an entry for the selected
+    connector starts scanning its hooks.
+    """
+    if not isinstance(document, dict):
+        return set()
+    guardrail = document.get("guardrail")
+    guardrail = guardrail if isinstance(guardrail, dict) else {}
+    roster = guardrail.get("connectors")
+    roster = roster if isinstance(roster, dict) else {}
+    hooks = document.get("connector_hooks")
+    hooks = {str(name).lower(): entry for name, entry in hooks.items()} if isinstance(hooks, dict) else {}
+    scanned = {connector_paths.normalize(name) for name in roster if isinstance(name, str) and name.strip()}
+    disabled = {
+        connector_paths.normalize(name)
+        for name, entry in roster.items()
+        if isinstance(name, str) and isinstance(entry, dict) and entry.get("enabled") is False
+    }
+    primary = guardrail.get("connector")
+    if isinstance(primary, str) and primary.strip():
+        scanned.add(connector_paths.normalize(primary))
+    for name in {*hooks, *_LEGACY_HOOK_SECTIONS}:
+        section = hooks[name] if name in hooks else document.get(_LEGACY_HOOK_SECTIONS.get(name, ""))
+        if isinstance(section, dict) and section.get("enabled") is True:
+            scanned.add(name)
+    return scanned - disabled
+
+
+_LEGACY_HOOK_SECTIONS = {"claudecode": "claude_code", "codex": "codex"}
+
+
+def _edit_connector_names(parts: list, parsed: object) -> set[str]:
+    """The connectors a ``config set`` names in its key or, for a whole section, in its value."""
+    if parts[:2] == ["guardrail", "connectors"] and len(parts) > 2:
+        names = [parts[2]]
+    elif parts == ["guardrail", "connectors"] and isinstance(parsed, dict):
+        names = list(parsed)
+    elif parts == ["guardrail", "connector"]:
+        names = [parsed]
+    elif parts == ["guardrail"] and isinstance(parsed, dict):
+        roster = parsed.get("connectors")
+        names = [*(roster if isinstance(roster, dict) else ()), parsed.get("connector")]
+    else:
+        names = []
+    return {connector_paths.normalize(name) for name in names if isinstance(name, str) and name.strip()}
+
+
 def _inert_entry_changes(parts: list, parsed: object, written: object) -> tuple[list, str]:
     """The changes that store a new off-roster entry inert, and the connector it stores (GAP-0588).
 
@@ -1308,7 +1364,9 @@ def _inert_entry_changes(parts: list, parsed: object, written: object) -> tuple[
     and one that came from roster order is pinned in ``guardrail.connector``,
     so the roster keeps it and the new name cannot become the primary. A
     proxy connector cannot share the roster, and an edit that enables
-    ``<C>`` is left for the selection check to refuse.
+    ``<C>`` is left for the selection check to refuse. So is the entry of a
+    claw.mode-only primary whose hooks were not scanned before: the entry
+    would start scanning them (``_hook_scanned_connectors``).
     """
     from defenseclaw.config_writer import Change
 
@@ -1338,15 +1396,20 @@ def _inert_entry_changes(parts: list, parsed: object, written: object) -> tuple[
     return changes, name
 
 
-def _check_config_connector_selection(path: str, candidate: bytes, *, allow_removal: bool = False) -> None:
+def _check_config_connector_selection(
+    path: str, candidate: bytes, *, allow_removal: bool = False, named: set[str] | frozenset[str] = frozenset()
+) -> None:
     """A settings edit cannot select, enable or unguard a connector as a side effect (GAP-0588).
 
     It may add a disabled entry to the roster (``_inert_entry_changes``)
     while the primary and every guarded connector stay as they were. The
     primary changes, a connector starts being guarded, and a listed
-    connector leaves the roster or its guard only through setup or a
-    connector command; a whole-entry unset may remove its own entry (it says
+    connector that is not disabled leaves the roster or its guard only
+    through setup or a connector command; a whole-entry unset may remove its own entry (it says
     so, GAP-1021), but not the primary's while other entries stay listed.
+    Whether the Go hook gate scans a connector (``_hook_scanned_connectors``)
+    changes only through a set that names the selected connector itself
+    (``named``, GAP-1953); an unset may only stop the scanning.
     """
     from defenseclaw import config_writer
 
@@ -1355,16 +1418,23 @@ def _check_config_connector_selection(path: str, candidate: bytes, *, allow_remo
         return
     current, _, _ = config_writer._read_current(path)
     before = config_writer._parse_config_document(current) if current else {}
-    guarded_before, primary_before, _, listed_before = _configured_connector_selection(before)
+    guarded_before, primary_before, disabled_before, listed_before = _configured_connector_selection(before)
     guarded_after, primary_after, _, listed_after = _configured_connector_selection(after)
     if allow_removal:
         changed = guarded_after - guarded_before
     else:
-        changed = (guarded_after ^ guarded_before) | (listed_before - listed_after)
+        changed = (guarded_after ^ guarded_before) | (listed_before - listed_after - disabled_before)
     primary_left = primary_before in listed_before and primary_after not in listed_after
-    if primary_after != primary_before or changed or primary_left:
+    scanned_before = _hook_scanned_connectors(before)
+    scanned_after = _hook_scanned_connectors(after)
+    rescanned = scanned_after - scanned_before if allow_removal else scanned_after ^ scanned_before
+    rescanned -= set(named) & {primary_before}
+    selection = primary_after != primary_before or changed or primary_left
+    if selection or rescanned:
+        names = ", ".join(sorted(rescanned))
+        reason = "" if selection else f": the edit would change whether DefenseClaw scans {names} hook calls"
         raise config_writer.ConfigWriteError(
-            "connector selection requires setup; use defenseclaw setup or a connector command "
+            f"connector selection requires setup{reason}; use defenseclaw setup or a connector command "
             "to change the active connector"
         )
 
