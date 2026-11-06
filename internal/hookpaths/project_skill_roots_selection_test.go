@@ -48,7 +48,7 @@ func projectSkillLinkedRoot(t *testing.T) (home, project, root, target, alias, o
 }
 
 func TestGAP0621CallerBindsSelectedProjectSkillToExplicitPath(t *testing.T) {
-	_, project, root, target, alias, other := projectSkillLinkedRoot(t)
+	home, project, root, target, alias, other := projectSkillLinkedRoot(t)
 	selected := filepath.Join(root, "sample")
 	realSelected := filepath.Join(target, "sample")
 	manifest := filepath.Join(realSelected, "SKILL.md")
@@ -65,7 +65,7 @@ func TestGAP0621CallerBindsSelectedProjectSkillToExplicitPath(t *testing.T) {
 		{other, false},
 		{filepath.Join(other, "SKILL.md"), false},
 	} {
-		got := slices.Contains(projectSkillSourceFolders(root, "sample", tc.path, project), selected)
+		got := slices.Contains(projectSkillSourceFolders(root, "sample", tc.path, home, project), selected)
 		if got != tc.want {
 			t.Errorf("path %q selected=%v, want %v", tc.path, got, tc.want)
 		}
@@ -76,7 +76,7 @@ func TestGAP0621CallerBindsSelectedProjectSkillToExplicitPath(t *testing.T) {
 // under the refused root, whatever name the path spells; an ordinary skill
 // of the same name elsewhere stays unselected.
 func TestGAP0621CallerSelectionFormsBindRefusedRoot(t *testing.T) {
-	_, project, root, target, alias, other := projectSkillLinkedRoot(t)
+	home, project, root, target, alias, other := projectSkillLinkedRoot(t)
 	selected := filepath.Join(root, "sample")
 	realSelected := filepath.Join(target, "sample")
 	forms := map[string]func(path string) map[string]any{
@@ -108,7 +108,7 @@ func TestGAP0621CallerSelectionFormsBindRefusedRoot(t *testing.T) {
 				t.Fatal(err)
 			}
 			facts := map[string]string{ProjectSkillRootUnverifiedPrefix + root: ProjectSkillRootOutsideProfile}
-			addProjectSkillSelectedFacts(facts, nil, args, project)
+			addProjectSkillSelectedFacts(facts, nil, args, home, project)
 			_, got := facts[ProjectSkillSelectedPrefix+selected]
 			if got != tc.want {
 				t.Errorf("%s %s: selected fact=%v, want %v (facts %v)", form, tc.label, got, tc.want, facts)
@@ -117,14 +117,14 @@ func TestGAP0621CallerSelectionFormsBindRefusedRoot(t *testing.T) {
 	}
 	// A name-only call keeps the named folder.
 	facts := map[string]string{ProjectSkillRootUnverifiedPrefix + root: ProjectSkillRootOutsideProfile}
-	addProjectSkillSelectedFacts(facts, nil, json.RawMessage(`{"skill":"sample"}`), project)
+	addProjectSkillSelectedFacts(facts, nil, json.RawMessage(`{"skill":"sample"}`), home, project)
 	if facts[ProjectSkillSelectedPrefix+selected] != "sample" {
 		t.Errorf("name-only selection facts = %v", facts)
 	}
 	// A top-level event source wins over the tool input, as at the gateway.
 	facts = map[string]string{ProjectSkillRootUnverifiedPrefix + root: ProjectSkillRootOutsideProfile}
 	payload, _ := json.Marshal(map[string]any{"skill_path": other})
-	addProjectSkillSelectedFacts(facts, payload, json.RawMessage(`{"skill":"sample"}`), project)
+	addProjectSkillSelectedFacts(facts, payload, json.RawMessage(`{"skill":"sample"}`), home, project)
 	if _, ok := facts[ProjectSkillSelectedPrefix+selected]; ok {
 		t.Errorf("top-level ordinary source selected the refused folder: %v", facts)
 	}
