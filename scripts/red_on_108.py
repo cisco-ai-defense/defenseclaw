@@ -68,6 +68,18 @@ def candidates(repo: Path, gap: str, base: str) -> list[tuple[str, list[str]]]:
     return result
 
 
+def mapped_python_files(worktree: Path, files: list[str], tests: list[str]) -> list[str]:
+    matched = []
+    for name in files:
+        if not name.startswith("cli/tests/") or not name.endswith(".py"):
+            continue
+        source = (worktree / name).read_text(encoding="utf-8", errors="replace")
+        if any(re.search(r"^\s*(?:async\s+)?def\s+" + re.escape(test) + r"\s*\(", source, re.MULTILINE)
+               for test in tests):
+            matched.append(name)
+    return matched
+
+
 def run_one(repo: Path, worktree: Path, commit: str, files: list[str], tests: list[str], base: str) -> str:
     subprocess.run(["git", "-C", str(worktree), "reset", "--hard", base], check=True, stdout=subprocess.DEVNULL)
     subprocess.run(["git", "-C", str(worktree), "clean", "-fd"], check=True, stdout=subprocess.DEVNULL)
@@ -110,7 +122,7 @@ def run_one(repo: Path, worktree: Path, commit: str, files: list[str], tests: li
                     "./" + directory,
                 ]
             )
-    py_files = [name for name in files if name.endswith(".py") and name.startswith("cli/tests/")]
+    py_files = mapped_python_files(worktree, files, py_tests)
     if py_files and py_tests:
         commands.append([sys.executable, "-m", "pytest", "-q", "-k", " or ".join(py_tests), *py_files])
     if not commands:

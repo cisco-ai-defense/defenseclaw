@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.red_on_108 import run_mapped_candidate
+from scripts.red_on_108 import mapped_python_files, run_mapped_candidate
 from scripts.red_on_108 import tests_for_gap as select_tests_for_gap
 
 
@@ -28,6 +28,20 @@ class RedOn108Test(unittest.TestCase):
             self.assertEqual(run_mapped_candidate(Path("."), Path("."), found, ["TestMapped"], "base"),
                              ("earlier", "BEHAVIOR_RED"))
         self.assertEqual(run.call_count, 2)
+
+    def test_python_candidate_requires_the_named_test(self):
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "cli/tests/test_neighbor.py"
+            path.parent.mkdir(parents=True)
+            path.write_text("def test_neighbor():\n    pass\n", encoding="utf-8")
+            self.assertEqual(mapped_python_files(root, ["cli/tests/test_neighbor.py"], ["test_mapped"]), [])
+            self.assertEqual(
+                mapped_python_files(root, ["cli/tests/test_neighbor.py"], ["test_neighbor"]),
+                ["cli/tests/test_neighbor.py"],
+            )
 
 
 if __name__ == "__main__":
