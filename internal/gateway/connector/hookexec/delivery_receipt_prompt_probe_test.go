@@ -6,84 +6,77 @@ package hookexec
 import (
 	"context"
 	"io"
-	"net"
 	"net/http"
-	"net/http/httptrace"
 	"testing"
 	"time"
 )
 
-// A prompt capability signal already identifies the accepted request. It
-// must not add a separate health request to every ordinary tool call.
-func TestGAP0370PromptCapabilitySkipsPeerProbe(t *testing.T) {
+// The accepted POST's own 103 keeps its body available for the committed
+// watchdog decision, even after the compatibility window.
+func TestGAP0370Post103CarriesReceiptAfterCompatibilityWindow(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, "http://localhost/hook", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	probed := make(chan struct{}, 1)
-	payload := []byte("tool call")
-	req, delivery := prepareHookDeliveryRequest(req, payload, time.Second, nil,
-		func(context.Context, net.Conn) bool {
-			probed <- struct{}{}
-			return true
-		})
-	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
-	delivery.setConnection(client)
-	defer delivery.close()
-	close(delivery.ready)
-	got := make([]byte, len(payload))
-	if _, err := io.ReadFull(req.Body, got); err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(payload) {
-		t.Fatalf("request body = %q, want %q", got, payload)
-	}
-	<-delivery.payloadDone
-	select {
-	case <-probed:
-		t.Fatal("promptly advertised receipt started an unnecessary peer check")
-	case <-time.After(hookDeliveryCapabilityWait):
-	}
-}
-
-// Peer verification has its own HTTP trace, but remains bounded by the
-// accepted request's lifetime.
-func TestGAP0370PeerProbeSeparatesTraceAndFollowsRequestCancel(t *testing.T) {
-	requestCtx, cancelRequest := context.WithCancel(context.Background())
-	defer cancelRequest()
-	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, "http://localhost/hook", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	probeContext := make(chan context.Context, 1)
-	req, delivery := prepareHookDeliveryRequest(req, []byte("call"), time.Second, nil,
-		func(ctx context.Context, _ net.Conn) bool {
-			probeContext <- ctx
-			<-ctx.Done()
-			return false
-		})
-	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
-	delivery.setConnection(client)
+	req, delivery := prepareHookDeliveryRequest(req, []byte("call"), 10*time.Millisecond, nil, true)
 	defer delivery.close()
 	if _, err := io.ReadFull(req.Body, make([]byte, len("call"))); err != nil {
 		t.Fatal(err)
 	}
+	time.Sleep(25 * time.Millisecond)
+	close(delivery.ready)
+	wrote := make(chan bool, 1)
+	go func() { wrote <- delivery.deadline(true) }()
+	line := make([]byte, len(HookDeliveryReceiptLate))
+	if _, err := io.ReadFull(req.Body, line); err != nil || string(line) != HookDeliveryReceiptLate {
+		t.Fatalf("accepted POST receipt = %q, %v", line, err)
+	}
+	if !<-wrote {
+		t.Fatal("the accepted POST lost its deadline receipt")
+	}
+}
+
+// The accepted legacy POST's 100 ends the body promptly so its ordinary
+// response can arrive before the answer deadline.
+func TestGAP0370LegacyReadSignalReleasesBody(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "http://localhost/hook", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, delivery := prepareHookDeliveryRequest(req, []byte("call"), time.Second, nil, true)
+	defer delivery.close()
+	if _, err := io.ReadFull(req.Body, make([]byte, len("call"))); err != nil {
+		t.Fatal(err)
+	}
+	close(delivery.reading)
+	line := make([]byte, len(HookDeliveryReleased))
+	if _, err := io.ReadFull(req.Body, line); err != nil || string(line) != HookDeliveryReleased {
+		t.Fatalf("legacy POST body end = %q, %v", line, err)
+	}
+}
+
+// A request that ends before either POST signal cannot hold its body open.
+func TestGAP0370CanceledPostEndsUnadvertisedBody(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://localhost/hook", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, delivery := prepareHookDeliveryRequest(req, []byte("call"), time.Second, nil, true)
+	defer delivery.close()
+	if _, err := io.ReadFull(req.Body, make([]byte, len("call"))); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, req.Body)
+		done <- err
+	}()
 	select {
-	case ctx := <-probeContext:
-		if httptrace.ContextClientTrace(ctx) != nil {
-			t.Fatal("peer probe inherited the POST's capability trace")
-		}
-		cancelRequest()
-		select {
-		case <-ctx.Done():
-		case <-time.After(time.Second):
-			t.Fatal("peer probe remained active after the request ended")
-		}
+	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("peer probe did not start during the compatibility window")
+		t.Fatal("canceled POST body stayed open")
 	}
 }
