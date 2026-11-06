@@ -18,9 +18,12 @@ package gateway
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
@@ -139,7 +142,14 @@ func (a *APIServer) mcpAccountRuntimeBlock(ctx context.Context, pe *enforce.Poli
 			continue
 		}
 		query := watcher.MCPAdmissionQuery{Connector: connector, Server: server, Home: home, CWD: req.callerCWD}
-		if !watcher.MCPAccountJournalServes(row.TargetName, query) {
+		var snapshot *audit.SnapshotRow
+		if strings.Contains(row.TargetName, "@") || strings.HasPrefix(row.TargetName, "mcp:v2:") {
+			snapshot, err = a.store.GetTargetSnapshot("mcp", row.TargetName)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return true, fmt.Sprintf("mcp server %q block check failed — failing closed: %v", server, err)
+			}
+		}
+		if !watcher.MCPAccountJournalServesSnapshot(row.TargetName, snapshot, query) {
 			continue
 		}
 		note := fmt.Sprintf("mcp server %q is disabled because its install admission rejected it", server)
