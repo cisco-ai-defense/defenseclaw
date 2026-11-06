@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 )
 
@@ -43,6 +44,7 @@ type reachNames struct {
 	files       []string
 	directories []string
 	trees       []string
+	hasAlias    bool
 }
 
 func (s *reachNames) addFile(path string) {
@@ -108,40 +110,111 @@ func (m *TargetMemo) protectedReachNames(home string, sshOnly bool) reachNames {
 	names := reachNames{}
 	ssh := filepath.Join(home, ".ssh")
 	names.addDirectory(ssh)
-	addResolved := func(path string, add func(string)) {
+	physicalHome, homeKnown := "", false
+	if !SharePath(home) {
+		physicalHome, homeKnown = m.resolveWriteTarget(home)
+	}
+	// Resolve each root once. Its children share that physical parent; only
+	// an entry that is itself a link needs another path walk.
+	resolvedRoot := func(root string) string {
+		if SharePath(root) {
+			return ""
+		}
+		if homeKnown {
+			if entry, err := PathLstat(root); err == nil && entry.Mode()&os.ModeSymlink == 0 || os.IsNotExist(err) {
+				resolved := filepath.Join(physicalHome, filepath.Base(root))
+				if !samePathName(root, resolved) {
+					names.hasAlias = true
+				}
+				return resolved
+			}
+		}
+		resolved, ok := m.resolveWriteTarget(root)
+		if !ok {
+			names.hasAlias = true
+			return ""
+		}
+		if !samePathName(root, resolved) {
+			names.hasAlias = true
+		}
+		return resolved
+	}
+	readEntries := func(root string) map[string]bool {
+		if SharePath(root) {
+			return nil
+		}
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				names.hasAlias = true
+			}
+			return nil
+		}
+		present := make(map[string]bool, len(entries))
+		for _, entry := range entries {
+			present[entry.Name()] = true
+		}
+		return present
+	}
+	addChild := func(root, physicalRoot, name string, present map[string]bool, add func(string)) {
+		path := filepath.Join(root, name)
 		add(path)
-		// A share's lexical protected names remain valid while its root is
-		// pending. Resolve its physical side through the identity reads below,
-		// in parallel with the target, so one slow root does not consume the
-		// target's entire answer window.
-		if SharePath(path) {
+		if physicalRoot != "" {
+			add(filepath.Join(physicalRoot, name))
+		}
+		first := name
+		if cut := strings.IndexByte(name, '/'); cut >= 0 {
+			first = name[:cut]
+		}
+		if SharePath(path) || !present[first] {
+			return
+		}
+		entry, err := PathLstat(path)
+		if err != nil && !os.IsNotExist(err) {
+			names.hasAlias = true
+		}
+		// A nested protected entry can have a linked parent even when its
+		// own final name has not been created yet.
+		if err == nil && entry.Mode()&os.ModeSymlink == 0 && name != "previous/installer" {
+			return
+		}
+		if err != nil && name != "previous/installer" {
 			return
 		}
 		if resolved, ok := m.resolveWriteTarget(path); ok {
 			add(resolved)
+			if !samePathName(path, resolved) {
+				names.hasAlias = true
+			}
 		}
 	}
+	sshRoot := resolvedRoot(ssh)
+	sshEntries := readEntries(ssh)
+	if sshRoot != "" {
+		names.addDirectory(sshRoot)
+	}
 	for _, name := range AuthorizedKeysFiles {
-		addResolved(filepath.Join(ssh, name), names.addFile)
+		addChild(ssh, sshRoot, name, sshEntries, names.addFile)
 	}
 	for _, name := range SSHControlFiles {
-		addResolved(filepath.Join(ssh, name), names.addFile)
+		addChild(ssh, sshRoot, name, sshEntries, names.addFile)
 	}
 	if !sshOnly {
 		state := filepath.Join(home, ".defenseclaw")
+		stateRoot := resolvedRoot(state)
+		names.addDirectory(state)
+		if stateRoot != "" {
+			names.addDirectory(stateRoot)
+		}
+		stateEntries := readEntries(state)
 		for _, name := range activeStateFiles {
-			addResolved(filepath.Join(state, name), names.addFile)
+			addChild(state, stateRoot, name, stateEntries, names.addFile)
 		}
 		for _, name := range activeStateTrees {
-			addResolved(filepath.Join(state, name), names.addTree)
+			addChild(state, stateRoot, name, stateEntries, names.addTree)
 		}
 		if !SharePath(state) {
 			m.addLinkedProtectedTreeNames(&names)
-		}
-	}
-	if !SharePath(ssh) {
-		if resolved, ok := m.resolveWriteTarget(ssh); ok {
-			names.addDirectory(resolved)
 		}
 	}
 	if m != nil {
@@ -174,6 +247,9 @@ func (m *TargetMemo) addLinkedProtectedTreeNames(names *reachNames) {
 		seen[dir] = true
 		entries, err := os.ReadDir(dir)
 		if err != nil {
+			if !os.IsNotExist(err) {
+				names.hasAlias = true
+			}
 			continue
 		}
 		for _, entry := range entries {
@@ -185,12 +261,18 @@ func (m *TargetMemo) addLinkedProtectedTreeNames(names *reachNames) {
 			if entry.Type()&os.ModeSymlink == 0 {
 				continue
 			}
+			names.hasAlias = true
 			resolved, ok := m.resolveWriteTarget(path)
 			if !ok {
 				continue
 			}
 			info, err := PathStat(path)
 			if err != nil {
+				if os.IsNotExist(err) {
+					// A linked tree entry can name a parent that will be
+					// created by the command being evaluated.
+					names.addTree(resolved)
+				}
 				continue
 			}
 			if info.IsDir() {
@@ -224,10 +306,60 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 	if !filepath.IsAbs(target) || !filepath.IsAbs(home) {
 		return GradePossible
 	}
+	if protectedReachEmptyRootsMiss(target, home, sshOnly) {
+		return GradeNone
+	}
+	return m.protectedReachUncached(target, home, sshOnly)
+}
+
+// An absent parent outside empty local protected roots has no current path
+// or file identity through which it could reach a protected entry. Keep the
+// full resolver whenever either root has contents, links, or an unknown read.
+func protectedReachEmptyRootsMiss(target, home string, sshOnly bool) bool {
+	if SharePath(target) || SharePath(home) {
+		return false
+	}
+	ssh := filepath.Join(home, ".ssh")
+	state := filepath.Join(home, ".defenseclaw")
+	if pathAtOrUnder(target, ssh) || !sshOnly && pathAtOrUnder(target, state) {
+		return false
+	}
+	if _, err := PathLstat(filepath.Dir(target)); !os.IsNotExist(err) {
+		return false
+	}
+	for _, root := range []string{ssh, state} {
+		if sshOnly && root == state {
+			break
+		}
+		entry, err := PathLstat(root)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil || !entry.IsDir() || entry.Mode()&os.ModeSymlink != 0 {
+			return false
+		}
+		children, err := os.ReadDir(root)
+		if err != nil || len(children) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *TargetMemo) protectedReachUncached(target, home string, sshOnly bool) Grade {
 	names := m.protectedReachNames(home, sshOnly)
 	target = filepath.Clean(target)
 	if names.has(target) {
 		return GradeNamed
+	}
+	// When the protected side has no links and this target's parent does not
+	// exist, it cannot currently name a protected file by identity or path.
+	// A linked protected entry keeps the full two-sided check, including a
+	// link whose physical destination has not been created yet.
+	if !names.hasAlias && !SharePath(target) {
+		if _, err := PathLstat(filepath.Dir(target)); os.IsNotExist(err) {
+			return GradeNone
+		}
 	}
 	type answer struct {
 		info os.FileInfo

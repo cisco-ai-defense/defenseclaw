@@ -31,6 +31,10 @@ func TestGAP0534NestedProtectedTreeReach(t *testing.T) {
 	if err := os.Symlink(outside, nested); err != nil {
 		t.Fatal(err)
 	}
+	pending := filepath.Join(home, "pending-tree")
+	if err := os.Symlink(pending, filepath.Join(state, "policies", "pending")); err != nil {
+		t.Fatal(err)
+	}
 	hard := filepath.Join(home, "rule-hardlink")
 	if err := os.Link(protected, hard); err != nil {
 		t.Fatal(err)
@@ -42,6 +46,7 @@ func TestGAP0534NestedProtectedTreeReach(t *testing.T) {
 		{"lexical", filepath.Join(nested, "rule.yaml"), GradeNamed},
 		{"physical", protected, GradeNamed},
 		{"physical-new", filepath.Join(outside, "new-rule.yaml"), GradeNamed},
+		{"pending-tree-new", filepath.Join(pending, "new-rule.yaml"), GradeNamed},
 		{"hardlink", hard, GradeNamed},
 		{"ordinary", ordinary, GradeNone},
 	} {

@@ -1952,8 +1952,8 @@ func protectedReachPathWith(path string, protected protectedFiles, ssh string, m
 // Exact write destinations still use protectedReachPath, so a literal
 // ordinary child of home is not mistaken for the protected file.
 func protectedReachTextPathWithState(path string, protected protectedFiles, ssh, stateRoot string, memo *TargetMemo) bool {
-	if stateRoot != "" && ProtectedReach(path, filepath.Dir(stateRoot), memo) == GradeNamed {
-		return true
+	if stateRoot != "" {
+		return ProtectedReach(path, filepath.Dir(stateRoot), memo) == GradeNamed
 	}
 	resolved, ok := memo.resolveWriteTarget(path)
 	if !ok {
@@ -1964,14 +1964,6 @@ func protectedReachTextPathWithState(path string, protected protectedFiles, ssh,
 	}
 	if mapped, ok := protected.target(resolved); ok && protected.has(mapped) {
 		return true
-	}
-	if stateRoot != "" {
-		physicalRoot, rootOK := memo.resolveWriteTarget(stateRoot)
-		if samePathName(path, stateRoot) || rootOK && samePathName(resolved, physicalRoot) ||
-			samePathName(resolved, filepath.Dir(ssh)) {
-			return true
-		}
-		return false
 	}
 	return samePathName(resolved, filepath.Dir(ssh))
 }
