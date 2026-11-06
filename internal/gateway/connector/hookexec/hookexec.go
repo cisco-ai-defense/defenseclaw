@@ -1724,27 +1724,45 @@ func sendHookRequest(
 	var delivery *hookDeliveryRequest
 	if wantsHookDeliveryReceipt(opts) {
 		// The answer timer ends the hook's wait, but the request body must
-		// remain writable long enough to carry the watchdog's outcome.
-		transportCtx, cancelTransport := context.WithDeadline(
+		// remain writable long enough to carry the watchdog's outcome once
+		// this request's gateway has advertised receipt support. Until then,
+		// the original context still bounds connection and peer verification.
+		deadlineCtx, cancelDeadline := context.WithDeadline(
 			context.WithoutCancel(req.Context()), opts.answerWatch.ceiling.Add(answerWatchdogLogWait))
+		transportCtx, cancelWithCause := context.WithCancelCause(deadlineCtx)
+		cancelTransport := func() {
+			cancelWithCause(nil)
+			cancelDeadline()
+		}
 		req = req.WithContext(transportCtx)
-		var olderGateway func(context.Context) bool
+		var currentGateway func(context.Context, net.Conn) bool
 		if !opts.ManagedEnterprise {
 			target := req.URL.String()
 			client := opts.HTTPClient
-			olderGateway = func(ctx context.Context) bool {
-				return hookDeliveryOlderGateway(ctx, client, target)
+			currentGateway = func(ctx context.Context, postConn net.Conn) bool {
+				return hookDeliveryCurrentGateway(ctx, client, target, postConn)
 			}
 		}
-		req, delivery = prepareHookDeliveryRequest(req, payload, hookDeliveryWait(opts), hookDeliveryGatewayStarting(opts), olderGateway)
+		req, delivery = prepareHookDeliveryRequest(req, payload, hookDeliveryWait(opts), hookDeliveryGatewayStarting(opts), currentGateway)
 		delivery.setCancel(cancelTransport)
+		context.AfterFunc(ctx, func() {
+			select {
+			case <-delivery.ready:
+				// The accepted request can carry the committed answer.
+			default:
+				cancelWithCause(context.Cause(ctx))
+			}
+		})
 		opts.answerWatch.setDeadlineDelivery(delivery)
 	}
 
 	var connected atomic.Bool
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
-		GotConn: func(httptrace.GotConnInfo) {
+		GotConn: func(info httptrace.GotConnInfo) {
 			connected.Store(true)
+			if delivery != nil {
+				delivery.setConnection(info.Conn)
+			}
 		},
 	}))
 	resp, err := opts.HTTPClient.Do(req)
