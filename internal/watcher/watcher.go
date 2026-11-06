@@ -233,6 +233,10 @@ type InstallWatcher struct {
 	// that holds it (GAP-0132). Empty means every root belongs to
 	// watcherConnectorName.
 	rootConnectors []rootConnector
+	// rootConsumers retains every connector that loads a watched root. The
+	// event owner above stays singular, while root coverage applies to all
+	// consumers of a shared skill or plugin folder.
+	rootConsumers map[string][]string
 	// assetOwners names the account of each enrolled home, longest home
 	// first (SetAssetOwners).
 	assetOwners []AssetOwner
@@ -320,6 +324,12 @@ type InstallWatcher struct {
 // Health exposes only counts and connector names; the gateway log names paths.
 type RootCoverageIssue struct {
 	Kind, Path, Connector, Reason string
+	Connectors                    []string
+}
+
+// RootConsumer names a connector that loads a watched skill or plugin root.
+type RootConsumer struct {
+	Kind, Path, Connector string
 }
 
 // SetRootCoverageHandler publishes changes to the gateway's watcher health.
@@ -334,6 +344,7 @@ func (w *InstallWatcher) RootCoverageIssues() []RootCoverageIssue {
 	defer w.rootCoverageMu.RUnlock()
 	issues := make([]RootCoverageIssue, 0, len(w.rootCoverage))
 	for _, issue := range w.rootCoverage {
+		issue.Connectors = append([]string(nil), issue.Connectors...)
 		issues = append(issues, issue)
 	}
 	sort.Slice(issues, func(i, j int) bool { return issues[i].Path < issues[j].Path })
@@ -357,20 +368,32 @@ func (w *InstallWatcher) setRootCoverage(kind, path string, cause error) {
 		if w.rootCoverage == nil {
 			w.rootCoverage = make(map[string]RootCoverageIssue)
 		}
-		connector := w.connectorForPath(path)
-		if connector == "" && w.cfg != nil {
-			connector = w.cfg.Guardrail.Connector
+		connectors := w.rootConsumers[kind+"\x00"+w.rootCoveragePath(path)]
+		if len(connectors) == 0 {
+			connector := w.connectorForPath(path)
+			if connector == "" && w.cfg != nil {
+				connector = w.cfg.Guardrail.Connector
+			}
+			if connector != "" {
+				connectors = []string{connector}
+			}
 		}
-		w.rootCoverage[key] = RootCoverageIssue{Kind: kind, Path: path, Connector: connector, Reason: cause.Error()}
+		connector := ""
+		if len(connectors) > 0 {
+			connector = connectors[0]
+		}
+		w.rootCoverage[key] = RootCoverageIssue{Kind: kind, Path: path, Connector: connector, Connectors: append([]string(nil), connectors...), Reason: cause.Error()}
 	}
 	current := w.rootCoverage[key]
-	changed := hadPrevious != (cause != nil) || (cause != nil && previous != current)
+	changed := hadPrevious != (cause != nil) || (cause != nil &&
+		(previous.Kind != current.Kind || previous.Path != current.Path || previous.Connector != current.Connector ||
+			previous.Reason != current.Reason || !slices.Equal(previous.Connectors, current.Connectors)))
 	w.rootCoverageMu.Unlock()
 	if !changed {
 		return
 	}
 	if cause != nil {
-		fmt.Fprintf(os.Stderr, "[watch] warning: %s admission scanning is off for connector %s root %s: %v\n", kind, current.Connector, path, cause)
+		fmt.Fprintf(os.Stderr, "[watch] warning: %s admission scanning is off for connectors %s root %s: %v\n", kind, strings.Join(current.Connectors, ", "), path, cause)
 	} else {
 		fmt.Fprintf(os.Stderr, "[watch] %s admission scanning resumed for root %s\n", kind, path)
 	}
@@ -509,6 +532,33 @@ func (w *InstallWatcher) SetRootConnectors(roots map[string]string) {
 	sort.Slice(w.rootConnectors, func(i, j int) bool {
 		return len(w.rootConnectors[i].root) > len(w.rootConnectors[j].root)
 	})
+}
+
+// SetRootConsumers records all connectors that load each watched root. Call
+// before Run, alongside SetRootConnectors for the event owner.
+func (w *InstallWatcher) SetRootConsumers(consumers []RootConsumer) {
+	w.rootConsumers = make(map[string][]string)
+	for _, consumer := range consumers {
+		connector := strings.ToLower(strings.TrimSpace(consumer.Connector))
+		if connector == "" || strings.TrimSpace(consumer.Path) == "" {
+			continue
+		}
+		key := consumer.Kind + "\x00" + w.rootCoveragePath(consumer.Path)
+		if !slices.Contains(w.rootConsumers[key], connector) {
+			w.rootConsumers[key] = append(w.rootConsumers[key], connector)
+		}
+	}
+}
+
+func (w *InstallWatcher) rootCoveragePath(path string) string {
+	cleaned, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		cleaned = filepath.Clean(path)
+	}
+	if runtime.GOOS == "windows" {
+		cleaned = strings.ToLower(cleaned)
+	}
+	return cleaned
 }
 
 // SetMCPServerSource replaces where admission and the rescan read the MCP
