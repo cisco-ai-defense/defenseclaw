@@ -68,13 +68,12 @@ var (
 	// windowsSecretDeploymentInstalled reports whether an administrator
 	// recorded a standalone deployment on this host; a record a standard
 	// user planted does not count.
-	windowsSecretDeploymentInstalled = func() (bool, error) {
-		deployment, err := inspectTrustedWindowsEnterpriseDeployment(managed.ProfileStandalone)
-		if err != nil {
-			return false, err
-		}
-		return deployment.State == winpath.EnterpriseDeploymentInstalled, nil
-	}
+	windowsSecretDeploymentInstalled = trustedWindowsSecretDeploymentInstalled
+	// windowsSecretDeploymentAbsent reports whether the trusted read finds
+	// no standalone deployment at all: no record, or the tombstone an
+	// uninstall leaves (g079 review 2 R1).
+	windowsSecretDeploymentAbsent = trustedWindowsSecretDeploymentAbsent
+
 	windowsSecretIsElevated      = func() bool { return windows.GetCurrentProcessToken().IsElevated() }
 	windowsSecretRestartGateway  = restartWindowsStandaloneGatewayBeforeStop
 	windowsSecretSpawnRecovery   = spawnWindowsSecretGatewayRecovery
@@ -154,21 +153,50 @@ func reportWindowsSecretFailure(cmd *cobra.Command, action string, opts *enterpr
 // windowsSecretRecordsChange says whether a credential run records its
 // change event. A run that changed a credential, or reserved room for its
 // event, passed the deployment check under the locks and always records. A
-// refusal before that records unless the deployment record proves that no
-// standalone deployment is installed: as an early refusal
-// (recordWindowsChangeRefusal), a computer without a deployment gets no
-// managed event. Before, an elevated refusal there created the protected
-// change spool in ProgramData and wrote its event (g079 review F1). A
-// record that cannot be read records as before (the refusal is
-// state_invalid, and its document carries the error).
+// refusal before that records unless the trusted deployment read finds no
+// standalone deployment at all, cleanly: no record, or the tombstone of an
+// uninstall. As for an early refusal (recordWindowsChangeRefusal), a
+// computer without a deployment gets no managed event. Before, an elevated
+// refusal there created the protected change spool in ProgramData and wrote
+// its event (g079 review F1). Every other read records, as before g079 (g079
+// review 2 R1): a record that is there but cannot be classified (it does not
+// parse, is too large or cannot be opened), a record that fails the owner or
+// DACL check, and a read that fails (the refusal is state_invalid, and its
+// document carries the error).
 func windowsSecretRecordsChange(change windowsSecretChange) bool {
 	if change.changed || change.reservation != nil || !windowsSecretIsElevated() {
 		// A caller that is not elevated records nothing either way
 		// (recordWindowsChange).
 		return true
 	}
-	installed, err := windowsSecretDeploymentInstalled()
-	return err != nil || installed
+	absent, err := windowsSecretDeploymentAbsent()
+	return err != nil || !absent
+}
+
+// trustedWindowsSecretDeploymentInstalled reports whether the trusted read
+// finds an installed standalone deployment record.
+func trustedWindowsSecretDeploymentInstalled() (bool, error) {
+	deployment, err := inspectTrustedWindowsEnterpriseDeployment(managed.ProfileStandalone)
+	if err != nil {
+		return false, err
+	}
+	return deployment.State == winpath.EnterpriseDeploymentInstalled, nil
+}
+
+// trustedWindowsSecretDeploymentAbsent reports whether the trusted read finds
+// no standalone deployment record, or only the tombstone of an uninstall. A
+// record the read cannot classify (EnterpriseDeploymentUnknown), and one it
+// refuses as untrusted (reported as absent, with the reason), are not
+// absent.
+func trustedWindowsSecretDeploymentAbsent() (bool, error) {
+	deployment, err := inspectTrustedWindowsEnterpriseDeployment(managed.ProfileStandalone)
+	if err != nil {
+		return false, err
+	}
+	if deployment.State == winpath.EnterpriseDeploymentTombstone {
+		return true, nil
+	}
+	return deployment.State == winpath.EnterpriseDeploymentAbsent && deployment.Untrusted == "", nil
 }
 
 // runEnterpriseSecret implements `enterprise secret` on Windows.

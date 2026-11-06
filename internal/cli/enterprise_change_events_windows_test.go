@@ -272,8 +272,8 @@ func TestWindowsChangeSyntaxRefusalsAreAudited(t *testing.T) {
 
 // g079 review F1: an elevated credential refusal on a computer without an
 // installed standalone deployment records no change event, as an early
-// refusal does (recordWindowsChangeRefusal); on an installed deployment it
-// records one. Before, every refusal wrote the computer's change spool, so
+// refusal does (recordWindowsChangeRefusal); on an installed deployment, and
+// on any record the trusted read cannot call cleanly absent, it records one. Before, every refusal wrote the computer's change spool, so
 // a test that missed the spool stub wrote the real one.
 func TestWindowsSecretRefusalIsAuditedOnlyOnAnInstalledDeployment(t *testing.T) {
 	root := t.TempDir()
@@ -298,6 +298,54 @@ func TestWindowsSecretRefusalIsAuditedOnlyOnAnInstalledDeployment(t *testing.T) 
 		if installed {
 			if ev := events[len(events)-1]; ev.Outcome != enterprisestatus.ChangeRefused || ev.ReasonCode != "invalid_arguments" {
 				t.Fatalf("refusal event = %+v", ev)
+			}
+		}
+	}
+
+	// g079 review 2 R1: through the trusted reader, only a clean absence and
+	// a tombstone leave the refusal unrecorded. A record that is there but
+	// cannot be classified (State Unknown: it does not parse, is too large or
+	// cannot be opened), one that fails the owner or DACL check, and a read
+	// that fails record it, as before g079.
+	savedAbsent, savedInspector, savedValidator := windowsSecretDeploymentAbsent, windowsEnterpriseRecordInspector, windowsEnterpriseRecordValidator
+	t.Cleanup(func() {
+		windowsSecretDeploymentAbsent, windowsEnterpriseRecordInspector, windowsEnterpriseRecordValidator = savedAbsent, savedInspector, savedValidator
+	})
+	windowsSecretDeploymentInstalled, windowsSecretDeploymentAbsent = trustedWindowsSecretDeploymentInstalled, trustedWindowsSecretDeploymentAbsent
+	for _, tc := range []struct {
+		name       string
+		state      winpath.EnterpriseDeploymentState
+		inspectErr error
+		untrusted  error
+		records    bool
+	}{
+		{name: "no record", state: winpath.EnterpriseDeploymentAbsent},
+		{name: "tombstone", state: winpath.EnterpriseDeploymentTombstone},
+		{name: "unclassified record", state: winpath.EnterpriseDeploymentUnknown, records: true},
+		{name: "untrusted record", state: winpath.EnterpriseDeploymentInstalled, untrusted: errors.New("owner is not trusted"), records: true},
+		{name: "failed read", inspectErr: errors.New("the deployment record cannot be inspected"), records: true},
+		{name: "installed", state: winpath.EnterpriseDeploymentInstalled, records: true},
+	} {
+		windowsEnterpriseRecordInspector = func(profile string) (winpath.EnterpriseDeployment, error) {
+			return winpath.EnterpriseDeployment{Profile: profile, State: tc.state}, tc.inspectErr
+		}
+		windowsEnterpriseRecordValidator = func(string) error { return tc.untrusted }
+		before := len(windowsChangeEvents(t, spool))
+		_, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "../escape", fromStdin: true}, "x")
+		if commandExitCode(err) != windowsSecretExitInvalid {
+			t.Fatalf("%s: an unsafe name = %v (exit %d), want 1639", tc.name, err, commandExitCode(err))
+		}
+		events := windowsChangeEvents(t, spool)
+		want := 0
+		if tc.records {
+			want = 1
+		}
+		if len(events)-before != want {
+			t.Fatalf("%s: %d change events, want %d", tc.name, len(events)-before, want)
+		}
+		if tc.records {
+			if ev := events[len(events)-1]; ev.Outcome != enterprisestatus.ChangeRefused || ev.ReasonCode != "invalid_arguments" {
+				t.Fatalf("%s: refusal event = %+v", tc.name, ev)
 			}
 		}
 	}

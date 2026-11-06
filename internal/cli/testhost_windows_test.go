@@ -640,6 +640,20 @@ func isolateTestDeploymentReaders(dir string) {
 	sandboxSeam("windowsBundleRestoreGatewayRunning", &windowsBundleRestoreGatewayRunning, func() bool { return false })
 	sandboxSeam("windowsStandaloneGatewayPID", &windowsStandaloneGatewayPID, func() uint32 { return 0 })
 	sandboxSeam("windowsSecretGatewayLive", &windowsSecretGatewayLive, func() (bool, error) { return false, nil })
+	// g079 review 2 R1: the credential refusal audit reads a deployment no
+	// test installed as cleanly absent. testSandboxSecretDeploymentAbsent
+	// follows windowsSecretDeploymentInstalled, so a test that stubs that
+	// one gets the same answer here; a test of another record state sets
+	// windowsSecretDeploymentAbsent itself.
+	sandboxSeam("windowsSecretDeploymentAbsent", &windowsSecretDeploymentAbsent, testSandboxSecretDeploymentAbsent)
+}
+
+// testSandboxSecretDeploymentAbsent is the sandbox's credential audit read:
+// a deployment that is not installed is a clean absence, and a failed read
+// is a failed read.
+func testSandboxSecretDeploymentAbsent() (bool, error) {
+	installed, err := windowsSecretDeploymentInstalled()
+	return err == nil && !installed, err
 }
 
 // errTestSandboxNoServiceControl is what the gateway and guardian service
@@ -803,6 +817,9 @@ func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 	if live, err := windowsSecretGatewayLive(); live || err != nil {
 		t.Fatalf("the gateway service's state of the computer is read: %v %v", live, err)
 	}
+	if absent, err := windowsSecretDeploymentAbsent(); !absent || err != nil {
+		t.Fatalf("the credential refusal audit does not read the deployment as cleanly absent: %v %v", absent, err)
+	}
 	// Service control: first that no seam is its production function (one
 	// would stop or start the computer's own gateway), then that each fails.
 	for name, seam := range map[string][2]any{
@@ -859,7 +876,7 @@ func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 	for _, seam := range testSandboxSeams {
 		registered[seam.name] = true
 	}
-	for _, name := range []string{"windowsBundleLayout", "windowsSecretLayout", "windowsChangeSpool",
+	for _, name := range []string{"windowsBundleLayout", "windowsSecretLayout", "windowsChangeSpool", "windowsSecretDeploymentAbsent",
 		"windowsEnterpriseStandaloneFootprint", "windowsEnterpriseClaudeRegistryPolicyValue",
 		"windowsBundleRestoreGatewayRunning", "windowsStandaloneGatewayPID", "windowsSecretGatewayLive",
 		"windowsEnterpriseHotConfigRestart", "windowsEnterpriseHotConfigRecover", "windowsEnterpriseHotConfigFailClosed",
