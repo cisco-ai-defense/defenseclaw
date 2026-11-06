@@ -3,6 +3,11 @@
 
 package managed
 
+import (
+	"fmt"
+	"strings"
+)
+
 // StandaloneContentDriftError is the refusal of a drifted standalone policy
 // or data file (StandaloneRefusesContentDrift). It wraps the strict verdict,
 // so errors.As still finds the UntrustedPrincipalError that names the path
@@ -86,4 +91,41 @@ func RefuseStandaloneMachinePolicyDrift(err error) error {
 		return nil
 	}
 	return &StandaloneContentDriftError{Err: err, Recovery: standaloneMachinePolicyDriftRecovery()}
+}
+
+// Recovery texts of RefuseStandaloneInPlaceRepair.
+const (
+	standaloneInPlaceFolderRecovery = "from an elevated prompt remove that entry (icacls \"<path>\" /remove:g *<SID>), or give " +
+		"the folder back to Administrators (icacls \"<path>\" /setowner *S-1-5-32-544), check what is in it, then run " +
+		"Setup /ensure and Setup /verify"
+	standaloneInPlaceFileRecovery = "from an elevated prompt remove that entry (icacls \"<path>\" /remove:g *<SID>), or give " +
+		"the file back to Administrators (icacls \"<path>\" /setowner *S-1-5-32-544), check it, then run Setup /ensure " +
+		"and Setup /verify"
+)
+
+// RefuseStandaloneInPlaceRepair is the standalone refusal of an in-place
+// owner or DACL repair of a managed object (the g582 class rule: on a
+// standalone install a managed file or folder another account can write or
+// owns is never given a trusted descriptor back in place). It reads the
+// object's own descriptor (AssessCanonical as kind) without writing and
+// returns a StandaloneContentDriftError that names the object and the way
+// out when an untrusted principal can write or owns it. It is nil off
+// standalone, for trusted-only drift, and for a missing or structurally bad
+// object, which the caller's own checks report.
+func RefuseStandaloneInPlaceRepair(path string, kind ObjectKind) error {
+	if !StandaloneRefusesContentDrift() {
+		return nil
+	}
+	result, err := AssessCanonical(path, kind, CanonicalOptions{Quiet: true})
+	if err != nil || result.Outcome != CanonicalBoundary {
+		return nil
+	}
+	recovery := standaloneInPlaceFileRecovery
+	if kind.Directory() {
+		recovery = standaloneInPlaceFolderRecovery
+	}
+	return &StandaloneContentDriftError{
+		Err:      fmt.Errorf("an untrusted principal can write or owns %s: %s", path, strings.Join(result.Drift, "; ")),
+		Recovery: recovery,
+	}
 }

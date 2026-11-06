@@ -193,6 +193,31 @@ func refuseStandaloneFolderRepair(target managedDataTarget, opts CanonicalOption
 	return result, true
 }
 
+// standaloneDataPathRepairRefusal is the recovery step logged with a refused
+// gateway data file (a token, a database, the log).
+const standaloneDataPathRepairRefusal = "not repaired in place on a standalone install, because an account that " +
+	"could write this file may have changed it: from an elevated prompt remove that entry " +
+	"(icacls \"<path>\" /remove:g *<SID>), or give it back to Administrators (icacls \"<path>\" /setowner *S-1-5-32-544), " +
+	"check it, then run Setup /ensure and Setup /verify (GAP-0561)"
+
+// refuseStandaloneDataPathRepair is refuseStandaloneFolderRepair for every
+// managed data object: a folder or file an untrusted principal can write or
+// owns is a boundary finding, logged with the way out, and not repaired.
+func refuseStandaloneDataPathRepair(target managedDataTarget, opts CanonicalOptions) (CanonicalResult, bool) {
+	if target.kind.Directory() {
+		return refuseStandaloneFolderRepair(target, opts)
+	}
+	quiet := opts
+	quiet.Quiet = true
+	result, err := AssessCanonical(target.path, target.kind, quiet)
+	if err != nil || result.Outcome != CanonicalBoundary {
+		return CanonicalResult{}, false
+	}
+	result.RepairError = standaloneDataPathRepairRefusal
+	reportCanonicalResult(result, opts)
+	return result, true
+}
+
 // refuseStandaloneContentRepair reads target's descriptor without writing.
 // When an untrusted principal can write or owns the file, or the strict
 // trust walk refuses it, it logs the boundary finding with the Setup step

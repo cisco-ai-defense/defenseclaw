@@ -293,6 +293,26 @@ func loadExistingWindowsCorrelationKey(dataDir string, hooks keyStoreHooks) (Cor
 		if err != nil {
 			return CorrelationKey{}, false, err
 		}
+		if windowsCorrelationStandaloneRotates() {
+			// On standalone a key another account owns or can write is never
+			// adopted or re-stamped in place: that account knows, or may
+			// have chosen, the key material. It is rotated (g582 round 4).
+			principal := untrustedOwner
+			if principal == "" {
+				writers, writersErr := windowsCorrelationHandleUntrustedWriters(handle)
+				if writersErr != nil {
+					return CorrelationKey{}, false, writersErr
+				}
+				principal = strings.Join(writers, ",")
+			}
+			if principal != "" {
+				identity, infoErr := windowsCorrelationHandleInformation(handle)
+				if infoErr != nil {
+					return CorrelationKey{}, false, infoErr
+				}
+				return CorrelationKey{}, false, &windowsCorrelationRotation{owner: principal, identity: identity}
+			}
+		}
 		if untrustedOwner != "" {
 			// Re-stamping the DACL alone leaves an untrusted owner able to
 			// read the key and rewrite its DACL, so the owner is restored too
@@ -354,6 +374,28 @@ type windowsCorrelationRotation struct {
 
 func (r *windowsCorrelationRotation) Error() string {
 	return "redaction correlation key is owned by untrusted principal " + r.owner
+}
+
+// windowsCorrelationStandaloneRotates is managed.StandaloneRefusesContentDrift;
+// tests replace it.
+var windowsCorrelationStandaloneRotates = managed.StandaloneRefusesContentDrift
+
+// windowsCorrelationHandleUntrustedWriters lists the principals outside the
+// trusted set that the key's DACL lets write it.
+func windowsCorrelationHandleUntrustedWriters(handle windows.Handle) ([]string, error) {
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil || descriptor == nil {
+		return nil, keyStoreError(KeyStoreErrorUnavailable)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		return nil, keyStoreError(KeyStoreErrorUnsafePermissions)
+	}
+	expectedOwner, err := windowsCorrelationExpectedOwnerSID()
+	if err != nil {
+		return nil, err
+	}
+	return windowsCorrelationUntrustedWriters(dacl, expectedOwner), nil
 }
 
 // windowsCorrelationUntrustedOwner returns the key's owner when it is neither
