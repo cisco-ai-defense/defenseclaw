@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -758,23 +759,35 @@ func (a *APIServer) unavailableRootDecision(
 		if issue.Kind != targetType || (issue.Connector != "" && issue.Connector != connector) {
 			continue
 		}
-		matched := false
-		hasPath := false
+		root, rootErr := filepath.Abs(issue.Path)
+		resolvedRoot, resolvedErr := filepath.EvalSymlinks(issue.Path)
+		provenOutside := rootErr == nil
 		for _, path := range paths {
+			path = strings.TrimSpace(path)
 			if path == "" {
+				provenOutside = false
 				continue
 			}
-			hasPath = true
-			if insideHome(issue.Path, path) {
-				matched = true
+			if !filepath.IsAbs(path) {
+				provenOutside = false
 				break
 			}
-			if resolved, err := filepath.EvalSymlinks(issue.Path); err == nil && insideHome(resolved, path) {
-				matched = true
+			clean := filepath.Clean(path)
+			if rootErr == nil && unavailableRootContainsPath(root, clean) ||
+				resolvedErr == nil && unavailableRootContainsPath(resolvedRoot, clean) {
+				provenOutside = false
+				break
+			}
+			// Parent elements and Windows device or stream forms do not prove
+			// that a source is outside an unavailable root.
+			if hasParentElement(path) || runtime.GOOS == "windows" &&
+				(strings.HasPrefix(path, `\\?\`) || strings.HasPrefix(path, `\\.\`) ||
+					strings.Contains(path[len(filepath.VolumeName(path)):], ":")) {
+				provenOutside = false
 				break
 			}
 		}
-		if !matched && hasPath {
+		if provenOutside {
 			continue
 		}
 		return runtimeAssetDisableBlockDecision(targetType, name, connector, surface,
@@ -782,6 +795,16 @@ func (a *APIServer) unavailableRootDecision(
 			"watch-root-unavailable"), true
 	}
 	return config.AssetPolicyDecision{}, false
+}
+
+func unavailableRootContainsPath(root, path string) bool {
+	if insideHome(root, path) {
+		return true
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(filepath.Clean(root), filepath.Clean(path))
+	}
+	return filepath.Clean(root) == filepath.Clean(path)
 }
 
 // runtimeSkillPathDecision is the asset_policy decision for one folder a

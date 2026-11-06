@@ -1024,7 +1024,19 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	watchWake := make(chan struct{}, 1)
 	var nestedMu sync.Mutex
 	watchAsync := false
-	w.addWatch = func(dir string) { addDirWatches(fsw, dir, 0, watchedDirs) }
+	w.addWatch = func(dir string) {
+		if w.secureClientActive() {
+			addDirWatchesLegacy(fsw, dir, 0, watchedDirs)
+		} else {
+			for _, root := range w.pluginDirs {
+				if watcherPathAtOrBelow(dir, root) && !sameWatcherPath(dir, root) &&
+					unlinkedSkillTreePath(root, dir) != nil {
+					return
+				}
+			}
+			addDirWatches(fsw, dir, 0, watchedDirs)
+		}
+	}
 	w.addContentWatch = func(dir string) {
 		if !w.secureClientActive() {
 			for _, root := range w.skillDirs {
@@ -1083,9 +1095,12 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	rewatchRoot := func(key string, root watchedRoot) {
 		info, statErr := os.Stat(root.dir)
 		if statErr != nil || !info.IsDir() {
-			if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
-				w.setRootCoverage(root.kind, root.dir, statErr)
+			if statErr == nil {
+				statErr = fmt.Errorf("watched root is not a directory: %s", root.dir)
 			}
+			root.failed, root.checked = true, time.Now()
+			roots[key] = root
+			w.setRootCoverage(root.kind, root.dir, statErr)
 			return
 		}
 		_, watching := watchedDirs[key]
@@ -1185,8 +1200,13 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			// (skills/synced/<account>/<skill>); watch those folders too so
 			// a newly synced skill is scanned on arrival (GAP-1409).
 			synced := filepath.Join(dir, "synced")
-			if depth, ok := w.claudeSyncedDepth(synced); ok && depth == 0 {
-				addDirWatches(fsw, synced, 1, watchedDirs)
+			if depth, ok := w.claudeSyncedDepth(synced); ok && depth == 0 &&
+				(w.secureClientActive() || unlinkedSkillTreePath(dir, synced) == nil) {
+				if w.secureClientActive() {
+					addDirWatchesLegacy(fsw, synced, 1, watchedDirs)
+				} else {
+					addDirWatches(fsw, synced, 1, watchedDirs)
+				}
 			}
 		}
 	}
@@ -1197,7 +1217,11 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		w.watchExistingPluginFolders(dir)
 		if w.cacheLayoutPlugins(dir) &&
 			strings.EqualFold(filepath.Base(filepath.Clean(dir)), "cache") {
-			addClaudeCacheWatches(fsw, dir, watchedDirs)
+			if w.secureClientActive() {
+				addDirWatchesLegacy(fsw, dir, 2, watchedDirs)
+			} else {
+				addClaudeCacheWatches(fsw, dir, watchedDirs)
+			}
 		}
 	}
 
@@ -1336,9 +1360,13 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 						continue
 					}
 					copyRoot, copied := w.cachePluginCopyRoot(event.Name)
-					if info, statErr := os.Stat(event.Name); statErr == nil &&
+					if info, statErr := os.Lstat(event.Name); statErr == nil &&
 						info.IsDir() && depth < 3 {
-						addClaudeCacheWatches(fsw, event.Name, watchedDirs)
+						if w.secureClientActive() {
+							addDirWatchesLegacy(fsw, event.Name, 2, watchedDirs)
+						} else {
+							addClaudeCacheWatches(fsw, event.Name, watchedDirs)
+						}
 						if !copied {
 							w.queueExistingClaudePlugins(ctx, event.Name, depth)
 						}
@@ -1381,11 +1409,19 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 				case 0:
 					// The synced folder itself: watch it and its account
 					// folders; the event below expands it into its skills.
-					addDirWatches(fsw, event.Name, 1, watchedDirs)
+					if w.secureClientActive() {
+						addDirWatchesLegacy(fsw, event.Name, 1, watchedDirs)
+					} else {
+						addDirWatches(fsw, event.Name, 1, watchedDirs)
+					}
 				case 1:
 					// A new account folder: watch it and queue the skills
 					// already inside (they can land before the watch).
-					addDirWatches(fsw, event.Name, 0, watchedDirs)
+					if w.secureClientActive() {
+						addDirWatchesLegacy(fsw, event.Name, 0, watchedDirs)
+					} else {
+						addDirWatches(fsw, event.Name, 0, watchedDirs)
+					}
 					children, _ := os.ReadDir(event.Name)
 					for _, child := range children {
 						if child.IsDir() && !strings.HasPrefix(child.Name(), ".") {
@@ -1512,7 +1548,8 @@ func (w *InstallWatcher) admitReplacedRoot(ctx context.Context, fsw *fsnotify.Wa
 		w.watchIncompleteSkillFolders(root)
 		w.watchSkillContents(root)
 		synced := filepath.Join(root, "synced")
-		if depth, ok := w.claudeSyncedDepth(synced); ok && depth == 0 {
+		if depth, ok := w.claudeSyncedDepth(synced); ok && depth == 0 &&
+			unlinkedSkillTreePath(root, synced) == nil {
 			addDirWatches(fsw, synced, 1, watched)
 		}
 	} else {
@@ -4480,10 +4517,38 @@ func addDirWatches(
 	maxDepth int,
 	watched map[string]struct{},
 ) {
+	addDirWatchesWithRootLink(fsw, root, maxDepth, watched, true)
+}
+
+// Secure Client retains the plain WalkDir behavior for a linked final root.
+func addDirWatchesLegacy(
+	fsw *fsnotify.Watcher,
+	root string,
+	maxDepth int,
+	watched map[string]struct{},
+) {
+	addDirWatchesWithRootLink(fsw, root, maxDepth, watched, false)
+}
+
+func addDirWatchesWithRootLink(
+	fsw *fsnotify.Watcher,
+	root string,
+	maxDepth int,
+	watched map[string]struct{},
+	allowRootLink bool,
+) {
 	root = filepath.Clean(root)
-	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+	walkRoot := root
+	if allowRootLink {
+		var err error
+		walkRoot, err = trustedWalkRoot(root)
 		if err != nil {
-			if path == root {
+			return
+		}
+	}
+	_ = filepath.WalkDir(walkRoot, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			if path == walkRoot {
 				return fs.SkipAll
 			}
 			return fs.SkipDir
@@ -4494,7 +4559,7 @@ func addDirWatches(
 		if entry.Type()&os.ModeSymlink != 0 {
 			return fs.SkipDir
 		}
-		relative, relErr := filepath.Rel(root, path)
+		relative, relErr := filepath.Rel(walkRoot, path)
 		if relErr != nil || relative == ".." ||
 			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 			return fs.SkipDir
@@ -4508,9 +4573,13 @@ func addDirWatches(
 		if depth > maxDepth {
 			return fs.SkipDir
 		}
-		key := strings.ToLower(filepath.Clean(path))
+		logical, mapErr := logicalWalkPath(root, walkRoot, path)
+		if mapErr != nil {
+			return fs.SkipDir
+		}
+		key := strings.ToLower(filepath.Clean(logical))
 		if _, exists := watched[key]; !exists {
-			if addErr := fsw.Add(path); addErr == nil {
+			if addErr := fsw.Add(logical); addErr == nil {
 				watched[key] = struct{}{}
 			}
 		}
