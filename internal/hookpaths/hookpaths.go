@@ -40,9 +40,10 @@ const CWDKey = "\x00cwd"
 // bounded evidence. The gateway must not treat the remaining map as complete.
 const TruncatedKey = "\x00truncated"
 
-// PatchCompleteKey is positive hook-side proof that every apply_patch
-// directive was parsed and each target was resolved in the user's filesystem
-// view. The gateway may be unable to repeat that walk under ProtectHome.
+// PatchCompleteKey is positive hook-side proof that every apply_patch (or
+// Hermes V4A patch) directive was parsed and each target was resolved in the
+// user's filesystem view. The gateway may be unable to repeat that walk
+// under ProtectHome.
 const PatchCompleteKey = "\x00patch-complete"
 
 // ActionDecisionKey carries the user's hook reading of a shell command:
@@ -1070,11 +1071,31 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			args = clean
 		}
 	}
+	// A Hermes V4A patch is a native file tool, not shell: the gateway judges
+	// each file its headers name as a write_file or delete of that file
+	// (connector.HermesTrustedWriteViews). List and resolve those files as
+	// the apply_patch targets are (GAP-0488).
+	var hermesV4A, hermesV4AKnown bool
+	var hermesV4ATargets []string
 	if tool == "patch" && strings.EqualFold(strings.TrimSpace(connector), "hermes") {
 		// The gateway judges a Hermes replace patch as the edit it makes:
 		// describe that call, as write_file is described (GAP-0680).
 		if edit, ok := hermesReplaceEditArgs(args); ok {
 			tool, args = "edit", edit
+		} else {
+			hermesV4ATargets, hermesV4A, hermesV4AKnown = hermesV4APatchTargets(args, cwd, home)
+		}
+	}
+	// A V4A target that reaches a protected key file is the client's positive
+	// protected-target decision, which a gateway behind ProtectHome keeps.
+	hermesV4AProtected := false
+	if hermesV4AKnown {
+		protected := newProtectedFiles(home).keysOnlyWith(home, nil)
+		for _, target := range hermesV4ATargets {
+			if protectedReachPath(target, protected, filepath.Join(home, ".ssh")) {
+				hermesV4AProtected = true
+				break
+			}
 		}
 	}
 	input := actionfacts.Input{Tool: tool, Args: args, CWD: cwd, ActiveHome: home}
@@ -1112,7 +1133,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	opaqueFacts := map[string]string{}
 	var globFacts, walkFacts map[string]string
 	var unprovenReason string
-	var protectedDecision bool
+	protectedDecision := hermesV4AProtected
 	var noDereferenceTouchSafe bool
 	// identities is the file-identity evidence for InstructionIdentityKey:
 	// every existing instruction file a write target names.
@@ -1554,6 +1575,11 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	// An apply_patch edit names its files in the patch envelope, not in a
 	// redirect. Unknown targets make the map incomplete.
 	patchTargets, patchKnown := ApplyPatchWriteTargets(tool, args, "", cwd, home)
+	if hermesV4A {
+		// The V4A headers, read as Hermes reads them, are the whole target
+		// list; the apply_patch envelope reading does not apply.
+		patchTargets, patchKnown = hermesV4ATargets, hermesV4AKnown
+	}
 	truncated = truncated || !patchKnown
 	patchListed := patchKnown && len(patchTargets) > 0
 	for _, target := range patchTargets {
@@ -1574,7 +1600,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			}
 		}
 	}
-	if isApplyPatchToolName(tool) && patchListed {
+	if (isApplyPatchToolName(tool) || hermesV4A) && patchListed {
 		entry := len(jsonString(PatchCompleteKey)) + 1 + len(jsonString("1")) + 1
 		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
 			return incompleteEvidence(cwd)
