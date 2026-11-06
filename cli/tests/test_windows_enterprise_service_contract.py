@@ -653,6 +653,13 @@ def test_codex_machine_policy_uses_protected_bounded_file_lock() -> None:
     shared_source = read(CODEX_MACHINE_POLICY)
 
     assert '".defenseclaw-managed-hooks.lock"' in shared_source
+    # GAP-0650: writers take an Administrators/SYSTEM-only lock that standard
+    # users may read only the attributes of, and the hook reads lock-free
+    # against its transaction counter.
+    assert '".defenseclaw-managed-hooks.writer.lock"' in shared_source
+    assert '"O:BAD:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;0x120080;;;BU)"' in windows_source
+    assert "resolveWindowsCodexManagedRuntimeRegistryStable" in windows_source
+    assert "timed out waiting %s for a Codex machine policy transaction to finish" in windows_source
     assert "windowsCodexMachineTrustedDirCheck" in windows_source
     assert "windowsCodexMachineTrustedFileCheck" in windows_source
     assert "windows.FILE_FLAG_OPEN_REPARSE_POINT" in windows_source
@@ -5993,9 +6000,13 @@ def test_certification_covers_effective_policy_revocation_and_lock_squatting() -
     assert "Global\\DefenseClaw-CodexRequirements-" in harness
     assert "Test-CodexMachineLockSquattingBoundaries" in harness
     assert "Start-ActiveUserFileLockHolder" in harness
-    assert ".defenseclaw-managed-hooks.lock" in harness
+    assert ".defenseclaw-managed-hooks.writer.lock" in harness
     assert "legacy_named_objects_ignored = $true" in harness
-    assert "protected_file_lock_bounded_fail_closed = $true" in harness
+    # GAP-0650: a standard user is refused the writer lock, so verification
+    # completes instead of failing closed behind that user.
+    assert "-ExpectDenied" in harness
+    assert "standard_user_cannot_hold_file_lock = $true" in harness
+    assert "protected_file_lock_bounded_fail_closed" not in harness
 
 
 def test_uninstall_returns_shared_vendor_directories_to_their_prior_state() -> None:

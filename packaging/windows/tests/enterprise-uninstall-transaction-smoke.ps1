@@ -655,7 +655,7 @@ targets:
                 CodexManagedHooksLockPath = (
                     Microsoft.PowerShell.Management\Join-Path `
                         $codexMachinePolicyDirectory `
-                        '.defenseclaw-managed-hooks.lock'
+                        '.defenseclaw-managed-hooks.writer.lock'
                 )
                 CodexTargetEnabled = $false
                 ClaudeTargetEnabled = $true
@@ -7662,6 +7662,15 @@ targets:
             if ($WithLock) {
                 [IO.File]::WriteAllBytes(
                     $layout.CodexManagedHooksLockPath,
+                    [byte[]]@()
+                )
+                # The lock of 1.0.8 and earlier goes with it (GAP-0650).
+                [IO.File]::WriteAllBytes(
+                    (
+                        Microsoft.PowerShell.Management\Join-Path `
+                            $layout.CodexMachinePolicyDirectory `
+                            '.defenseclaw-managed-hooks.lock'
+                    ),
                     [byte[]]@()
                 )
             }

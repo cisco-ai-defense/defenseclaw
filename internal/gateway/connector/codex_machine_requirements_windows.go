@@ -914,47 +914,175 @@ func ResolveWindowsCodexManagedRuntimeRegistry(
 	}
 	requirementsPath := filepath.Join(programData, "OpenAI", "Codex", "requirements.toml")
 	statePath := filepath.Join(filepath.Dir(requirementsPath), windowsCodexManagedStateFile)
-	lockPath := filepath.Join(filepath.Dir(requirementsPath), windowsCodexManagedLockFile)
-	lockExists, err := windowsCodexMachinePathExists(lockPath)
+	writerLockPath := filepath.Join(filepath.Dir(requirementsPath), WindowsCodexManagedWriterLockFile)
+	legacyLockPath := filepath.Join(filepath.Dir(requirementsPath), windowsCodexManagedLegacyLockFile)
+	resolve := func() (WindowsCodexManagedRuntimeRegistry, error) {
+		return resolveWindowsCodexManagedRuntimeRegistryLocked(requirementsPath, statePath, hookExecutable)
+	}
+	writerLock, err := windowsCodexMachinePathExists(writerLockPath)
 	if err != nil {
 		return result, err
 	}
-	if !lockExists {
-		requirementsExists, requirementsErr := windowsCodexMachinePathExists(requirementsPath)
-		if requirementsErr != nil {
-			return result, requirementsErr
-		}
-		stateExists, stateErr := windowsCodexMachinePathExists(statePath)
-		if stateErr != nil {
-			return result, stateErr
-		}
-		// Close the first-install race before using either unlocked observation.
-		// The writer always creates the protected lock before publishing policy.
-		lockExists, err = windowsCodexMachinePathExists(lockPath)
-		if err != nil {
-			return result, err
-		}
-		if lockExists {
-			// The policy pair will be inspected again after the writer releases
-			// this lock, so no unlocked observation above influences the result.
-		} else if requirementsExists || stateExists {
-			return result, errors.New("Codex managed artifacts exist without the machine policy lock")
-		} else {
-			return result, nil
-		}
+	if writerLock {
+		return resolveWindowsCodexManagedRuntimeRegistryStable(writerLockPath, resolve)
 	}
-	// Hook reads take the lock shared so concurrent hooks never queue behind
-	// one another; only writers take it exclusively.
-	err = withWindowsCodexMachinePolicyLockMode(requirementsPath, true, func() error {
-		var resolveErr error
-		result, resolveErr = resolveWindowsCodexManagedRuntimeRegistryLocked(
-			requirementsPath,
-			statePath,
-			hookExecutable,
+	legacyLock, err := windowsCodexMachinePathExists(legacyLockPath)
+	if err != nil {
+		return result, err
+	}
+	if legacyLock {
+		// Upgrade from 1.0.8 or earlier: no writer of this release has run
+		// yet. Every writer creates its lock before it changes a file, so a
+		// writer lock that exists after this read means one may have run
+		// during it, and the read is taken again against the counter.
+		result, err = resolveWindowsCodexManagedRuntimeRegistryLegacy(legacyLockPath, resolve)
+		started, existsErr := windowsCodexMachinePathExists(writerLockPath)
+		if existsErr != nil {
+			return WindowsCodexManagedRuntimeRegistry{}, existsErr
+		}
+		if started {
+			return resolveWindowsCodexManagedRuntimeRegistryStable(writerLockPath, resolve)
+		}
+		return result, err
+	}
+	requirementsExists, err := windowsCodexMachinePathExists(requirementsPath)
+	if err != nil {
+		return result, err
+	}
+	stateExists, err := windowsCodexMachinePathExists(statePath)
+	if err != nil {
+		return result, err
+	}
+	// Close the first-install race before using either unlocked observation.
+	// The writer always creates its lock before publishing policy.
+	writerLock, err = windowsCodexMachinePathExists(writerLockPath)
+	if err != nil {
+		return result, err
+	}
+	if writerLock {
+		return resolveWindowsCodexManagedRuntimeRegistryStable(writerLockPath, resolve)
+	}
+	if requirementsExists || stateExists {
+		return result, errors.New("the Codex managed artifacts exist without the machine policy lock")
+	}
+	return result, nil
+}
+
+// windowsCodexTransactionCounterRead reads the writer lock's transaction
+// counter; tests replace it.
+var windowsCodexTransactionCounterRead = readWindowsCodexTransactionCounter
+
+// windowsCodexReaderWait bounds how long the hook-side reader waits for a
+// writer's transaction to finish, as long as the old shared lock waited;
+// tests shorten it.
+var windowsCodexReaderWait = windowsCodexMachineLockTimeout
+
+// resolveWindowsCodexManagedRuntimeRegistryStable runs resolve without any
+// lock, so no reader can make a writer wait (GAP-0650), and keeps its result
+// only when the writer lock's transaction counter was even (no transaction
+// running) and unchanged across the whole read: requirements.toml and the
+// state file were then read as one committed pair. Otherwise it reads again.
+// When no stable read is possible within windowsCodexReaderWait it fails
+// closed, as a timed-out wait for the old lock did.
+func resolveWindowsCodexManagedRuntimeRegistryStable(
+	lockPath string,
+	resolve func() (WindowsCodexManagedRuntimeRegistry, error),
+) (WindowsCodexManagedRuntimeRegistry, error) {
+	if err := windowsCodexMachineTrustedDirCheck(filepath.Dir(lockPath), "Codex machine policy lock parent"); err != nil {
+		return WindowsCodexManagedRuntimeRegistry{}, err
+	}
+	if err := ensureWindowsCodexMachineFileTrust(lockPath, "Codex machine policy writer lock", false); err != nil {
+		return WindowsCodexManagedRuntimeRegistry{}, err
+	}
+	deadline := time.Now().Add(windowsCodexReaderWait)
+	for {
+		before, err := windowsCodexTransactionCounterRead(lockPath)
+		if err != nil {
+			return WindowsCodexManagedRuntimeRegistry{}, err
+		}
+		if before%2 == 0 {
+			result, resolveErr := resolve()
+			after, err := windowsCodexTransactionCounterRead(lockPath)
+			if err != nil {
+				return WindowsCodexManagedRuntimeRegistry{}, err
+			}
+			if after == before {
+				return result, resolveErr
+			}
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return WindowsCodexManagedRuntimeRegistry{}, fmt.Errorf(
+				"timed out waiting %s for a Codex machine policy transaction to finish",
+				windowsCodexReaderWait,
+			)
+		}
+		delay := 25 * time.Millisecond
+		if remaining < delay {
+			delay = remaining
+		}
+		time.Sleep(delay)
+	}
+}
+
+// resolveWindowsCodexManagedRuntimeRegistryLegacy reads under the shared lock
+// of 1.0.8 and earlier, for a host no writer of this release has reached yet.
+func resolveWindowsCodexManagedRuntimeRegistryLegacy(
+	lockPath string,
+	resolve func() (WindowsCodexManagedRuntimeRegistry, error),
+) (WindowsCodexManagedRuntimeRegistry, error) {
+	windowsCodexMachineProcessMu.Lock()
+	defer windowsCodexMachineProcessMu.Unlock()
+	lock, overlapped, err := acquireWindowsCodexLegacyReaderLock(lockPath)
+	if err != nil {
+		return WindowsCodexManagedRuntimeRegistry{}, err
+	}
+	defer windows.CloseHandle(lock)
+	defer windows.UnlockFileEx(lock, 0, 1, 0, overlapped)
+	return resolve()
+}
+
+// readWindowsCodexTransactionCounter returns the size of the writer lock,
+// through a handle that asks for the attributes only: such a handle takes no
+// part in sharing, so the hook's read never stops a writer from opening it.
+func readWindowsCodexTransactionCounter(path string) (uint64, error) {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return 0, err
+	}
+	ptr, err := windows.UTF16PtrFromString(extended)
+	if err != nil {
+		return 0, err
+	}
+	handle, err := windows.CreateFile(
+		ptr,
+		windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("read the Codex machine policy transaction counter: %w", err)
+	}
+	defer windows.CloseHandle(handle)
+	return windowsCodexWriterLockCounter(handle)
+}
+
+func windowsCodexWriterLockCounter(handle windows.Handle) (uint64, error) {
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return 0, fmt.Errorf("inspect Codex machine policy lock handle: %w", err)
+	}
+	if info.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+		info.NumberOfLinks != 1 {
+		return 0, fmt.Errorf(
+			"the Codex machine policy lock must be a no-reparse single-link regular file (links=%d)",
+			info.NumberOfLinks,
 		)
-		return resolveErr
-	})
-	return result, err
+	}
+	return uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow), nil
 }
 
 func resolveWindowsCodexManagedRuntimeRegistryLocked(
@@ -1078,7 +1206,7 @@ func windowsCodexMachinePathExists(path string) (bool, error) {
 }
 
 // windowsCodexMachineArtifactsAbsentUnlocked reports whether every managed
-// Codex artifact — and the machine policy lock file — is absent. It uses the
+// Codex artifact — and both machine policy lock files — is absent. It uses the
 // same lock-observation-lock pattern ResolveWindowsCodexManagedRuntimeRegistry
 // applies: two lock-existence probes bracket the artifact check so a
 // concurrent writer that publishes between the artifact scan and the caller's
@@ -1086,13 +1214,18 @@ func windowsCodexMachinePathExists(path string) (bool, error) {
 func windowsCodexMachineArtifactsAbsentUnlocked(
 	opts WindowsCodexMachineRequirementsOptions,
 ) (bool, error) {
-	lockPath := filepath.Join(filepath.Dir(opts.RequirementsPath), windowsCodexManagedLockFile)
-	lockExists, err := windowsCodexMachinePathExists(lockPath)
-	if err != nil {
-		return false, err
-	}
-	if lockExists {
+	lockExists := func() (bool, error) {
+		for _, name := range []string{WindowsCodexManagedWriterLockFile, windowsCodexManagedLegacyLockFile} {
+			exists, err := windowsCodexMachinePathExists(filepath.Join(filepath.Dir(opts.RequirementsPath), name))
+			if err != nil || exists {
+				return exists, err
+			}
+		}
 		return false, nil
+	}
+	locked, err := lockExists()
+	if err != nil || locked {
+		return false, err
 	}
 	present, err := windowsCodexMachineAnyArtifactPathExists(opts)
 	if err != nil {
@@ -1102,12 +1235,9 @@ func windowsCodexMachineArtifactsAbsentUnlocked(
 	// The Reconcile path always creates the protected lock before publishing
 	// policy, so a lock that materialized during the scan means a writer is
 	// mid-flight and the caller must defer to the locked path.
-	lockExists, err = windowsCodexMachinePathExists(lockPath)
-	if err != nil {
+	locked, err = lockExists()
+	if err != nil || locked {
 		return false, err
-	}
-	if lockExists {
-		return false, nil
 	}
 	return !present, nil
 }
@@ -1393,62 +1523,295 @@ func withWindowsCodexMachineRead(
 	})
 }
 
+// windowsCodexWriterLockSDDL is the writer lock's descriptor: Administrators
+// and SYSTEM have full control, and BUILTIN\Users may only read the
+// attributes (the transaction counter) and the descriptor. No standard user
+// can open it for data, so none can share-lock it, byte-range-lock it or
+// hold it against a writer (GAP-0650).
+const windowsCodexWriterLockSDDL = "O:BAD:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;0x120080;;;BU)"
+
+// windowsCodexWriterLockUsersAccess is all BUILTIN\Users holds on the writer
+// lock: read attributes, read control and synchronize.
+const windowsCodexWriterLockUsersAccess = windows.FILE_READ_ATTRIBUTES | windows.READ_CONTROL | windows.SYNCHRONIZE
+
+// windowsCodexWriterLockRangeHigh places the writers' one-byte range lock at
+// 4 GiB, far past the counter, so moving the end of file never touches it.
+const windowsCodexWriterLockRangeHigh = 1
+
+// windowsCodexTransactionCounterWrap keeps the counter (the lock's size)
+// small; a reader only compares two values a moment apart.
+const windowsCodexTransactionCounterWrap = 1 << 20
+
+// withWindowsCodexMachinePolicyLock runs fn as one Codex machine-policy
+// transaction: it holds the writer lock exclusively and keeps the
+// transaction counter odd while fn runs, so the hook-side reader never keeps
+// what it read during a transaction and never needs a lock of its own.
 func withWindowsCodexMachinePolicyLock(
 	requirementsPath string,
 	fn func() error,
-) error {
-	return withWindowsCodexMachinePolicyLockMode(requirementsPath, false, fn)
-}
-
-func withWindowsCodexMachinePolicyLockMode(
-	requirementsPath string,
-	shared bool,
-	fn func() error,
-) error {
+) (err error) {
 	windowsCodexMachineProcessMu.Lock()
 	defer windowsCodexMachineProcessMu.Unlock()
 
-	lockPath := filepath.Join(
-		filepath.Dir(requirementsPath),
-		windowsCodexManagedLockFile,
-	)
-	lock, overlapped, err := acquireWindowsCodexMachineFileLockMode(lockPath, shared)
+	dir := filepath.Dir(requirementsPath)
+	lock, overlapped, err := acquireWindowsCodexWriterLock(filepath.Join(dir, WindowsCodexManagedWriterLockFile))
 	if err != nil {
 		return err
 	}
 	defer windows.CloseHandle(lock)
 	defer windows.UnlockFileEx(lock, 0, 1, 0, overlapped)
+	end, err := beginWindowsCodexTransaction(lock)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if endErr := setWindowsCodexTransactionCounter(lock, end); endErr != nil {
+			err = errors.Join(err, fmt.Errorf("end the Codex machine policy transaction: %w", endErr))
+		}
+	}()
+	removeWindowsCodexLegacyLock(filepath.Join(dir, windowsCodexManagedLegacyLockFile))
 	return fn()
 }
 
-func acquireWindowsCodexMachineFileLock(
-	path string,
-) (windows.Handle, *windows.Overlapped, error) {
-	return acquireWindowsCodexMachineFileLockMode(path, false)
+// beginWindowsCodexTransaction makes the counter odd and returns the even
+// value that ends the transaction. An odd counter on entry is a writer that
+// stopped mid-transaction; the new odd value still differs from it.
+func beginWindowsCodexTransaction(lock windows.Handle) (uint64, error) {
+	counter, err := windowsCodexWriterLockCounter(lock)
+	if err != nil {
+		return 0, err
+	}
+	start := counter + 1
+	if counter%2 == 1 {
+		start = counter + 2
+	}
+	if start >= windowsCodexTransactionCounterWrap {
+		start = 1
+	}
+	if err := setWindowsCodexTransactionCounter(lock, start); err != nil {
+		return 0, fmt.Errorf("begin the Codex machine policy transaction: %w", err)
+	}
+	return start + 1, nil
 }
 
-func acquireWindowsCodexMachineFileLockMode(
-	path string,
-	shared bool,
-) (windows.Handle, *windows.Overlapped, error) {
-	parent := filepath.Dir(path)
-	if err := windowsCodexMachineTrustedDirCheck(parent, "Codex machine policy lock parent"); err != nil {
+func setWindowsCodexTransactionCounter(lock windows.Handle, value uint64) error {
+	if value >= windowsCodexTransactionCounterWrap+2 {
+		return fmt.Errorf("the Codex machine policy transaction counter %d is out of range", value)
+	}
+	if _, err := windows.SetFilePointer(lock, int32(value), nil, windows.FILE_BEGIN); err != nil {
+		return err
+	}
+	return windows.SetEndOfFile(lock)
+}
+
+// removeWindowsCodexLegacyLock deletes the lock of 1.0.8 and earlier once a
+// writer of this release holds its own, so hooks stop falling back to it. A
+// copy another process still holds open stays until a later transaction.
+func removeWindowsCodexLegacyLock(path string) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return
+	}
+	_ = deleteWindowsCodexMachineFile(path, "Codex machine policy lock of an earlier release")
+}
+
+// acquireWindowsCodexWriterLock opens, creates with its descriptor, or puts
+// back to its descriptor the writer lock, and takes it exclusively, waiting
+// at most windowsCodexMachineLockTimeout for another writer.
+func acquireWindowsCodexWriterLock(path string) (windows.Handle, *windows.Overlapped, error) {
+	if err := windowsCodexMachineTrustedDirCheck(filepath.Dir(path), "Codex machine policy lock parent"); err != nil {
 		return 0, nil, err
 	}
-	existed := false
 	if info, err := os.Lstat(path); err == nil {
-		existed = true
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return 0, nil, fmt.Errorf(
-				"Codex machine policy lock is not a regular non-link file: %s",
-				path,
-			)
-		}
-		if err := ensureWindowsCodexMachineFileTrust(path, "Codex machine policy lock", true); err != nil {
-			return 0, nil, err
+			return 0, nil, fmt.Errorf("the Codex machine policy lock is not a regular non-link file: %s", path)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return 0, nil, fmt.Errorf("inspect Codex machine policy lock: %w", err)
+	}
+	descriptor, err := windows.SecurityDescriptorFromString(windowsCodexWriterLockSDDL)
+	if err != nil {
+		return 0, nil, fmt.Errorf("build Codex machine policy lock descriptor: %w", err)
+	}
+	attributes := windows.SecurityAttributes{SecurityDescriptor: descriptor}
+	attributes.Length = uint32(unsafe.Sizeof(attributes))
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return 0, nil, err
+	}
+	ptr, err := windows.UTF16PtrFromString(extended)
+	if err != nil {
+		return 0, nil, err
+	}
+	handle, err := windows.CreateFile(
+		ptr,
+		windows.GENERIC_READ|windows.GENERIC_WRITE|windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+		&attributes,
+		windows.OPEN_ALWAYS,
+		windows.FILE_ATTRIBUTE_HIDDEN|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		return 0, nil, fmt.Errorf("open Codex machine policy lock: %w", err)
+	}
+	closeOnError := func(cause error) (windows.Handle, *windows.Overlapped, error) {
+		_ = windows.CloseHandle(handle)
+		return 0, nil, cause
+	}
+	if _, err := windowsCodexWriterLockCounter(handle); err != nil {
+		return closeOnError(err)
+	}
+	if err := ensureWindowsCodexWriterLockDescriptor(handle, path); err != nil {
+		return closeOnError(err)
+	}
+	overlapped := &windows.Overlapped{OffsetHigh: windowsCodexWriterLockRangeHigh}
+	deadline := time.Now().Add(windowsCodexMachineLockTimeout)
+	for {
+		err = windows.LockFileEx(
+			handle,
+			windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
+			0,
+			1,
+			0,
+			overlapped,
+		)
+		if err == nil {
+			return handle, overlapped, nil
+		}
+		if !errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+			return closeOnError(fmt.Errorf("acquire Codex machine policy lock: %w", err))
+		}
+		if !time.Now().Before(deadline) {
+			return closeOnError(fmt.Errorf(
+				"timed out waiting %s for Codex machine policy lock",
+				windowsCodexMachineLockTimeout,
+			))
+		}
+		delay := 50 * time.Millisecond
+		if remaining := time.Until(deadline); remaining < delay {
+			delay = remaining
+		}
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+	}
+}
+
+// ensureWindowsCodexWriterLockDescriptor keeps the writer lock at exactly
+// windowsCodexWriterLockSDDL, through the open handle. The lock carries no
+// content, so drift is put back in place in every profile, as for the other
+// transaction locks; an owner outside the administrator set is refused.
+func ensureWindowsCodexWriterLockDescriptor(handle windows.Handle, path string) error {
+	current, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return fmt.Errorf("inspect Codex machine policy lock descriptor: %w", err)
+	}
+	drift := windowsCodexWriterLockDescriptorDrift(current)
+	if drift == "" {
+		return nil
+	}
+	owner, _, err := current.Owner()
+	trustedOwner := err == nil && owner != nil &&
+		(managed.IsWindowsTrustedAdminOwner(owner) || managed.WindowsAdminEquivalentPrincipal(owner))
+	if !trustedOwner {
+		ownerText := "an unreadable owner"
+		if owner != nil {
+			ownerText = owner.String()
+		}
+		return fmt.Errorf(
+			"the Codex machine policy lock %s is owned by %s, not an administrator: from an elevated prompt delete it (del /a:h %q), then run Setup /ensure",
+			path, ownerText, path,
+		)
+	}
+	canonical, err := windows.SecurityDescriptorFromString(windowsCodexWriterLockSDDL)
+	if err != nil {
+		return err
+	}
+	canonicalOwner, _, err := canonical.Owner()
+	if err != nil {
+		return err
+	}
+	canonicalDACL, _, err := canonical.DACL()
+	if err != nil {
+		return err
+	}
+	if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		canonicalOwner, nil, canonicalDACL, nil); err != nil {
+		return fmt.Errorf("protect Codex machine policy lock: %w", err)
+	}
+	repaired, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return fmt.Errorf("inspect Codex machine policy lock descriptor: %w", err)
+	}
+	if after := windowsCodexWriterLockDescriptorDrift(repaired); after != "" {
+		return fmt.Errorf("the Codex machine policy lock %s is still not protected: %s", path, after)
+	}
+	managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
+		"path":   path,
+		"reason": "re-stamped the Codex machine policy writer lock descriptor after: " + drift,
+	})
+	return nil
+}
+
+// windowsCodexWriterLockDescriptorDrift says how descriptor differs from
+// windowsCodexWriterLockSDDL, or "" when it matches.
+func windowsCodexWriterLockDescriptorDrift(descriptor *windows.SECURITY_DESCRIPTOR) string {
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner == nil || !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+		return "the owner is not Administrators"
+	}
+	control, _, err := descriptor.Control()
+	if err != nil || control&windows.SE_DACL_PROTECTED == 0 {
+		return "the access list is not protected"
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		return "the access list is missing"
+	}
+	const fileAllAccess = 0x1f01ff
+	want := map[string]uint32{
+		"S-1-5-32-544": fileAllAccess,
+		"S-1-5-18":     fileAllAccess,
+		"S-1-5-32-545": windowsCodexWriterLockUsersAccess,
+	}
+	if int(dacl.AceCount) != len(want) {
+		return fmt.Sprintf("the access list has %d entries, want %d", dacl.AceCount, len(want))
+	}
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil || ace == nil {
+			return fmt.Sprintf("entry %d cannot be read", index)
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags != 0 {
+			return fmt.Sprintf("entry %d is not a plain allow entry", index)
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart)).String()
+		mask, ok := want[sid]
+		if !ok || uint32(ace.Mask) != mask {
+			return fmt.Sprintf("entry %d gives %s access 0x%x", index, sid, uint32(ace.Mask))
+		}
+		delete(want, sid)
+	}
+	return ""
+}
+
+// acquireWindowsCodexLegacyReaderLock takes the 1.0.8-and-earlier lock shared
+// for the upgrade fallback read. It never creates or re-protects that file.
+func acquireWindowsCodexLegacyReaderLock(path string) (windows.Handle, *windows.Overlapped, error) {
+	if err := windowsCodexMachineTrustedDirCheck(filepath.Dir(path), "Codex machine policy lock parent"); err != nil {
+		return 0, nil, err
+	}
+	if info, err := os.Lstat(path); err != nil {
+		return 0, nil, fmt.Errorf("inspect Codex machine policy lock: %w", err)
+	} else if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return 0, nil, fmt.Errorf("the Codex machine policy lock is not a regular non-link file: %s", path)
+	}
+	if err := ensureWindowsCodexMachineFileTrust(path, "Codex machine policy lock", false); err != nil {
+		return 0, nil, err
 	}
 	extended, err := winpath.Extended(path)
 	if err != nil {
@@ -1463,8 +1826,8 @@ func acquireWindowsCodexMachineFileLockMode(
 		windows.GENERIC_READ|windows.READ_CONTROL,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
 		nil,
-		windows.OPEN_ALWAYS,
-		windows.FILE_ATTRIBUTE_HIDDEN|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_OPEN_REPARSE_POINT,
 		0,
 	)
 	if err != nil {
@@ -1474,37 +1837,13 @@ func acquireWindowsCodexMachineFileLockMode(
 		_ = windows.CloseHandle(handle)
 		return 0, nil, cause
 	}
-	var info windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
-		return closeOnError(fmt.Errorf("inspect Codex machine policy lock handle: %w", err))
-	}
-	if info.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
-		info.NumberOfLinks != 1 {
-		return closeOnError(fmt.Errorf(
-			"Codex machine policy lock must be a no-reparse single-link regular file (links=%d)",
-			info.NumberOfLinks,
-		))
-	}
-	if !existed {
-		if err := setWindowsCodexMachineFileProtection(path, true); err != nil {
-			return closeOnError(fmt.Errorf("protect Codex machine policy lock: %w", err))
-		}
+	if _, err := windowsCodexWriterLockCounter(handle); err != nil {
+		return closeOnError(err)
 	}
 	overlapped := new(windows.Overlapped)
 	deadline := time.Now().Add(windowsCodexMachineLockTimeout)
-	lockFlags := uint32(windows.LOCKFILE_EXCLUSIVE_LOCK | windows.LOCKFILE_FAIL_IMMEDIATELY)
-	if shared {
-		lockFlags = windows.LOCKFILE_FAIL_IMMEDIATELY
-	}
 	for {
-		err = windows.LockFileEx(
-			handle,
-			lockFlags,
-			0,
-			1,
-			0,
-			overlapped,
-		)
+		err = windows.LockFileEx(handle, windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, overlapped)
 		if err == nil {
 			return handle, overlapped, nil
 		}
@@ -1965,8 +2304,7 @@ func windowsCodexMachineSingleLinkCheck(file *os.File) error {
 
 func windowsCodexMachineFileUserReadable(path string) bool {
 	return strings.EqualFold(filepath.Base(path), "requirements.toml") ||
-		strings.EqualFold(filepath.Base(path), windowsCodexManagedStateFile) ||
-		strings.EqualFold(filepath.Base(path), windowsCodexManagedLockFile)
+		strings.EqualFold(filepath.Base(path), windowsCodexManagedStateFile)
 }
 
 func setWindowsCodexMachineFileProtection(path string, userReadable bool) error {
