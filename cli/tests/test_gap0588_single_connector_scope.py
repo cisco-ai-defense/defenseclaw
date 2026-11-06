@@ -135,11 +135,11 @@ def test_multi_connector_claudecode_scope_stays_available(tmp_path: Path) -> Non
 
 
 def _set_in_file(
-    tmp_path: Path, app: AppContext, roster: str, key: str, value: str, *, as_json: bool = False
+    tmp_path: Path, app: AppContext, roster: str, key: str, value: str, *, as_json: bool = False, head: str = ""
 ) -> tuple[object, bytes, bytes]:
     path = tmp_path / "config.yaml"
     path.write_text(
-        f"config_version: 9\ndata_dir: {tmp_path}\nguardrail:\n{roster}", encoding="utf-8"
+        f"config_version: 9\ndata_dir: {tmp_path}\n{head}guardrail:\n{roster}", encoding="utf-8"
     )
     before = path.read_bytes()
 
@@ -333,6 +333,32 @@ def test_config_set_refuses_zeptoclaw_in_final_multi_roster(tmp_path: Path) -> N
             "  connector: kiro\n  connectors:\n    kiro: {}\n    codex: {}\n",
             "guardrail.connectors", '{"kiro": {}}', True,
         ),
+        # GAP-0588 review 1: a new entry that is guarded, or that drops the
+        # primary from the roster the runtime enumerates, needs setup.
+        (
+            "  connector: kiro\n  connectors:\n    kiro: {}\n",
+            "guardrail.connectors.codex.enabled", "true", False,
+        ),
+        (
+            "  connector: kiro\n  connectors:\n    kiro: {}\n",
+            "guardrail.connectors.codex", '{"enabled": true}', True,
+        ),
+        (
+            "  connector: kiro\n  connectors:\n    kiro: {}\n",
+            "guardrail.connectors", '{"kiro": {}, "codex": {}}', True,
+        ),
+        (
+            "  connector: kiro\n  connectors:\n    kiro: {}\n",
+            "guardrail", '{"connector": "kiro", "connectors": {"kiro": {}, "codex": {}}}', True,
+        ),
+        (
+            "  connector: claudecode\n",
+            "guardrail.connectors", '{"codex": {"enabled": false}}', True,
+        ),
+        (
+            "  connector: claudecode\n",
+            "guardrail.connectors.claudecode.enabled", "false", False,
+        ),
     ],
 )
 def test_config_set_does_not_change_active_connector_selection(
@@ -345,52 +371,112 @@ def test_config_set_does_not_change_active_connector_selection(
     assert after == before
 
 
+def _runtime(monkeypatch, path: Path, text: bytes) -> dcconfig.Config:
+    path.write_bytes(text)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(path.parent))
+    with patch.object(dcconfig, "config_path", return_value=path):
+        return dcconfig.load()
+
+
 @pytest.mark.parametrize(
-    ("roster", "key", "value", "as_json", "stored"),
+    ("head", "roster", "key", "value", "as_json", "stored"),
     [
         (
-            "  connector: claudecode\n",
+            "", "  connector: claudecode\n",
             "guardrail.connectors.codex.hook_fail_mode", "closed", False, "codex",
         ),
         (
-            "  connector: kiro\n  connectors:\n    kiro: {}\n",
+            "", "  connector: claudecode\n",
+            "guardrail.connectors.codex.enabled", "false", False, "codex",
+        ),
+        (
+            "", "  connector: kiro\n  connectors:\n    kiro: {}\n",
             "guardrail.connectors.codex.hook_fail_mode", "closed", False, "codex",
         ),
         (
-            "  connector: kiro\n  connectors:\n    kiro: {}\n",
-            "guardrail.connectors", '{"kiro": {}, "codex": {}}', True, "codex",
+            "", "  connector: kiro\n  connectors:\n    kiro: {}\n",
+            "guardrail.connectors.codex", '{"hook_fail_mode": "closed"}', True, "codex",
         ),
         (
-            "  connector: kiro\n  connectors:\n    kiro: {}\n",
-            "guardrail", '{"connector": "kiro", "connectors": {"kiro": {}, "codex": {}}}', True, "codex",
+            "", "  connectors:\n    kiro: {}\n",
+            "guardrail.connectors.codex.hook_fail_mode", "closed", False, "codex",
         ),
         (
-            "  connector: openclaw\n  connectors:\n    openclaw:\n      enabled: false\n",
+            "", "  connectors:\n    kiro:\n      enabled: false\n",
+            "guardrail.connectors.codex.hook_fail_mode", "closed", False, "codex",
+        ),
+        (
+            "claw:\n  mode: codex\n", "  enabled: true\n",
+            "guardrail.connectors.claudecode.hook_fail_mode", "closed", False, "claudecode",
+        ),
+        (
+            "", "  connector: openclaw\n  connectors:\n    openclaw:\n      enabled: false\n",
             "guardrail.connectors.kiro.hook_fail_mode", "closed", False, "kiro",
         ),
         (
-            "  connector: claudecode\n  connectors:\n    claudecode: {}\n",
+            "", "  connector: claudecode\n  connectors:\n    claudecode: {}\n",
             "guardrail.connectors.claude.hook_fail_mode", "closed", False, "claude",
         ),
     ],
 )
 def test_config_set_stores_an_off_roster_entry_without_changing_selection(
-    tmp_path: Path, roster: str, key: str, value: str, as_json: bool, stored: str
+    tmp_path: Path, monkeypatch, head: str, roster: str, key: str, value: str, as_json: bool, stored: str
 ) -> None:
-    # GAP-0588 ruling (lead 11-06): the set succeeds and stores the entry; the
-    # primary stays, every guarded connector stays guarded, nothing disabled
-    # turns on.
+    # GAP-0588 ruling (lead 11-06): the set succeeds and stores the entry. It
+    # neither selects nor enables a connector: the primary, every guarded
+    # connector and every name the runtime enumerates stay, and a new entry
+    # is stored disabled.
     app = _app(tmp_path, ["kiro"])
-    result, before, after = _set_in_file(tmp_path, app, roster, key, value, as_json=as_json)
+    result, before, after = _set_in_file(tmp_path, app, roster, key, value, as_json=as_json, head=head)
     assert result.exit_code == 0, result.output
-    assert stored in yaml.safe_load(after)["guardrail"]["connectors"]
-    guarded_before, primary_before, disabled_before = cmd_config._configured_connector_selection(
+    entry = yaml.safe_load(after)["guardrail"]["connectors"][stored]
+    guarded_before, primary_before, _, listed_before = cmd_config._configured_connector_selection(
         yaml.safe_load(before)
     )
-    guarded_after, primary_after, _ = cmd_config._configured_connector_selection(yaml.safe_load(after))
+    guarded_after, primary_after, _, listed_after = cmd_config._configured_connector_selection(
+        yaml.safe_load(after)
+    )
     assert primary_after == primary_before
-    assert guarded_before <= guarded_after
-    assert not disabled_before & guarded_after
+    assert guarded_after == guarded_before
+    assert listed_before <= listed_after
+    path = tmp_path / "config.yaml"
+    was = _runtime(monkeypatch, path, before)
+    now = _runtime(monkeypatch, path, after)
+    assert now.active_connector() == was.active_connector()
+    assert set(was.active_connectors()) <= set(now.active_connectors())
+    enabled = lambda cfg: {n for n in cfg.active_connectors() if cfg.guardrail.effective_enabled(n)}  # noqa: E731
+    assert enabled(now) == enabled(was)
+    if stored not in listed_before:
+        assert entry["enabled"] is False
+        assert "is stored but not guarded" in result.output
+        assert f"guardrail enable --connector {stored}" in result.output
+
+
+@pytest.mark.parametrize(
+    ("roster", "keys"),
+    [
+        (
+            "  connector: claudecode\n  connectors:\n    claudecode: {}\n    codex:\n      enabled: false\n",
+            ("guardrail.connectors.claudecode",),
+        ),
+    ],
+)
+def test_config_unset_keeps_the_primary_on_the_roster(tmp_path: Path, roster: str, keys: tuple[str, ...]) -> None:
+    # GAP-0588 review 1: removing the primary's entry while another stays
+    # would make the runtime enumerate only the other connector.
+    app = _app(tmp_path, ["claudecode"])
+    result, before, after = _unset_in_file(tmp_path, app, roster, *keys)
+    assert result.exit_code != 0
+    assert "connector selection requires setup" in result.output
+    assert after == before
+
+
+def test_config_unset_of_a_stored_entry_restores_the_roster(tmp_path: Path) -> None:
+    app = _app(tmp_path, ["claudecode"])
+    roster = "  connector: claudecode\n  connectors:\n    claudecode: {}\n    codex:\n      enabled: false\n"
+    result, _before, after = _unset_in_file(tmp_path, app, roster, "guardrail.connectors.codex")
+    assert result.exit_code == 0, result.output
+    assert yaml.safe_load(after)["guardrail"]["connectors"] == {"claudecode": {}}
 
 
 def test_config_set_existing_connector_setting_stays_available(tmp_path: Path) -> None:
@@ -477,10 +563,6 @@ def test_config_unset_rejects_selection_or_enable_change_without_retained_enable
 @pytest.mark.parametrize(
     ("roster", "key", "value"),
     [
-        (
-            "  connectors:\n    kiro:\n      enabled: false\n",
-            "guardrail.connectors.codex.hook_fail_mode", "closed",
-        ),
         (
             "  connector: claudecode\n  connectors:\n    claudecode: {}\n",
             "guardrail.connector", "claude",
