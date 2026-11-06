@@ -17,8 +17,6 @@
 package connector
 
 import (
-	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,7 +24,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"unicode/utf16"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookguard"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // Claude Cowork (the agent mode of Claude Desktop) does not read
@@ -65,9 +65,7 @@ const coworkMissingHookGuardMessage = "DefenseClaw blocked this: its Claude Code
 	"or cannot be run. Run the DefenseClaw installer, then defenseclaw setup cowork, to repair it, " +
 	"or remove the DefenseClaw plugin in Claude (Customize, Plugins)."
 
-const coworkUninstalledMessage = "DefenseClaw was uninstalled for this user. Remove the DefenseClaw plugin in Claude Desktop under Customize > Plugins."
-
-const coworkRemovalMarkerSuffix = ".cowork-uninstalled"
+const coworkRemovalMarkerSuffix = hookguard.CoworkRemovalMarkerSuffix
 
 // ErrCoworkClaudeCodeNotSetUp means the Claude Code connector, whose hook and
 // credential the Cowork plugin runs, has not been set up in the data
@@ -96,9 +94,11 @@ func CoworkPluginHooks(opts SetupOpts) ([]byte, error) {
 		if executable == "" {
 			executable = defenseclawHookBinary()
 		}
-		if !filepath.IsAbs(executable) || !coworkRegularFile(executable) || !claudeCodeLauncherGuardable(executable) ||
-			!claudeCodeLauncherGuardable(opts.DataDir) {
+		if !filepath.IsAbs(executable) || !coworkRegularFile(executable) {
 			return nil, fmt.Errorf("%w: the hook launcher %s is missing", ErrCoworkClaudeCodeNotSetUp, executable)
+		}
+		if coworkWindowsGuardExecutable(executable) == "" {
+			return nil, fmt.Errorf("%w: the hook guard for %s is missing", ErrCoworkClaudeCodeNotSetUp, executable)
 		}
 		launcher = executable
 	} else {
@@ -135,27 +135,11 @@ func CoworkPluginHooks(opts SetupOpts) ([]byte, error) {
 // installation records must also be absent, so a retained marker cannot turn
 // a later installation or an incomplete removal into an unguarded hook.
 func coworkRemovalPaths(dataDir string) (marker string, installed []string) {
-	return filepath.Clean(dataDir) + coworkRemovalMarkerSuffix, []string{
-		filepath.Join(dataDir, "config.yaml"),
-		filepath.Join(dataDir, hookContractLockFile),
-		filepath.Join(dataDir, "cowork", "plugin-state.json"),
-		filepath.Join(dataDir, "gateway.pid"),
-		filepath.Join(dataDir, "gateway-api.json"),
-	}
+	return hookguard.CoworkRemovalPaths(dataDir)
 }
 
 func coworkUninstalledJSON(event string, notice bool) string {
-	message := map[string]interface{}{}
-	if notice {
-		message["systemMessage"] = coworkUninstalledMessage
-	}
-	if event == "UserPromptSubmit" {
-		message["hookSpecificOutput"] = map[string]string{
-			"hookEventName": "UserPromptSubmit", "additionalContext": coworkUninstalledMessage,
-		}
-	}
-	data, _ := json.Marshal(message) // The values are static strings.
-	return string(data)
+	return hookguard.CoworkUninstalledJSON(event, notice)
 }
 
 func coworkUnixHookCommand(dataDir, script, event string) string {
@@ -185,48 +169,27 @@ func coworkUnixHookCommand(dataDir, script, event string) string {
 }
 
 func coworkWindowsHookInvocation(dataDir, launcher, event string) (string, []string) {
-	marker, installed := coworkRemovalPaths(dataDir)
-	runner := claudeCodePreToolGuardExecutable(launcher)
-	runArgs := []string{"hook", "--connector", "claudecode"}
-	if runner != "" {
-		runArgs = claudeCodePreToolGuardArgs(launcher, runArgs)
-	} else {
-		runner = launcher
-	}
-	args := []string{"/d", "/c", "if", "exist", marker, "if", "not", "exist", marker + `\NUL`}
-	for _, path := range installed {
-		args = append(args, "if", "not", "exist", path)
-	}
-	args = append(args, "(")
-	if event == "UserPromptSubmit" {
-		args = append(args, "md", marker+".context", "2>nul", "&&", "(", "md", marker+".notice", "2>nul", "&&")
-		args = append(args, coworkWindowsJSONCommand(event, true)...)
-		args = append(args, "||")
-		args = append(args, coworkWindowsJSONCommand(event, false)...)
-		args = append(args, ")", "&")
-	} else {
-		args = append(args, "md", marker+".notice", "2>nul", "&&")
-		args = append(args, coworkWindowsJSONCommand(event, true)...)
-		args = append(args, "&")
-	}
-	args = append(args, "exit", "/b", "0", ")", "&", "if", "exist", runner, "(", runner)
-	args = append(args, runArgs...)
-	args = append(args, "&", "if", "errorlevel", "1", "exit", "/b", "2", ")", "else", "(",
-		"echo", "DefenseClaw hook launcher is missing or cannot run.", "1>&2", "&", "exit", "/b", "2", ")")
-	return claudeCodeWindowsCommandProcessor(), args
+	return coworkWindowsGuardExecutable(launcher), []string{hookguard.CoworkSubcommand, dataDir, launcher, event}
 }
 
-func coworkWindowsJSONCommand(event string, notice bool) []string {
-	// The encoded PowerShell program contains only the static JSON notice. The
-	// cmd.exe branch that invokes it is reached only after removal.
-	program := "Write-Output '" + coworkUninstalledJSON(event, notice) + "'"
-	characters := utf16.Encode([]rune(program))
-	encoded := make([]byte, len(characters)*2)
-	for i, value := range characters {
-		binary.LittleEndian.PutUint16(encoded[i*2:], value)
+// The guard is an installed executable separate from the stable launcher.
+// Its path is passed to CreateProcess directly, so supported account paths
+// need no command-processor quoting or character restrictions.
+func coworkWindowsGuardExecutable(launcher string) string {
+	if stable, installed := canonicalNativeWindowsHookBinary(), canonicalNativeWindowsInstalledHookBinary(); stable != "" && installed != "" && pathidentity.Same(launcher, stable) &&
+		!pathidentity.Same(installed, stable) && hookguard.AbsoluteHookExecutable(installed) {
+		if info, err := os.Lstat(installed); err == nil && info.Mode().IsRegular() {
+			return installed
+		}
 	}
-	return []string{filepath.Join(windowsSystemDirectory(), "WindowsPowerShell", "v1.0", "powershell.exe"),
-		"-NoProfile", "-NonInteractive", "-EncodedCommand", base64.StdEncoding.EncodeToString(encoded)}
+	for _, name := range []string{windowsHookGuardBinaryName, windowsGatewayBinaryName} {
+		guard := filepath.Join(filepath.Dir(launcher), name)
+		if info, err := os.Lstat(guard); err == nil && info.Mode().IsRegular() &&
+			filepath.IsAbs(guard) && !pathidentity.Same(guard, launcher) {
+			return guard
+		}
+	}
+	return ""
 }
 
 func coworkRegularFile(path string) bool {

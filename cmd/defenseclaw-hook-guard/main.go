@@ -31,6 +31,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if launcher, hookArgs, ok := hookguard.Argv(args); ok {
 		return hookguard.Run(launcher, hookArgs, stdin, stdout, stderr)
 	}
+	if dataDir, launcher, event, ok := hookguard.CoworkArgv(args); ok {
+		return hookguard.RunCowork(dataDir, launcher, event, stdin, stdout, stderr)
+	}
 	switch {
 	case len(args) == 0:
 		// Cursor imports the hooks in ~/.claude/settings.json and runs an
@@ -41,6 +44,6 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "defenseclaw-hook-guard version %s (commit=%s, built=%s)\n", version, commit, date)
 		return 0
 	}
-	fmt.Fprintf(stderr, "defenseclaw-hook-guard: only %q <defenseclaw-hook.exe> hook --connector claudecode is accepted\n", hookguard.Subcommand)
+	fmt.Fprintf(stderr, "defenseclaw-hook-guard: only %q <defenseclaw-hook.exe> hook --connector claudecode or %q with DefenseClaw hook paths is accepted\n", hookguard.Subcommand, hookguard.CoworkSubcommand)
 	return 2
 }

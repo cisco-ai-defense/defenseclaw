@@ -19,18 +19,21 @@
 package connector
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookguard"
 )
 
 // TestCoworkPluginHooksUseClaudeCodeExecFormOnWindows pins the Windows plugin
-// handler in the one-line install layout. The cmd.exe entry checks completed
-// removal and runs the launcher guard while the account is installed.
+// handler in the one-line install layout. The native guard checks completed
+// removal and runs the launcher while the account is installed.
 func TestCoworkPluginHooksUseClaudeCodeExecFormOnWindows(t *testing.T) {
 	dataDir := t.TempDir()
 	bin := t.TempDir()
@@ -68,18 +71,12 @@ func TestCoworkPluginHooksUseClaudeCodeExecFormOnWindows(t *testing.T) {
 	}
 	for event, entries := range doc.Hooks {
 		handler := entries[0].Hooks[0]
-		got := strings.Join(handler.Args, "\x00")
-		if !strings.EqualFold(filepath.Base(handler.Command), "cmd.exe") || !filepath.IsAbs(handler.Command) ||
-			!strings.Contains(got, dataDir+coworkRemovalMarkerSuffix) ||
-			!strings.Contains(got, filepath.Join(dataDir, "config.yaml")) ||
-			!strings.Contains(got, filepath.Join(dataDir, hookContractLockFile)) ||
-			!strings.Contains(got, filepath.Join(dataDir, "gateway.pid")) ||
-			!strings.Contains(got, guard+"\x00launcher-guard\x00"+launcher) ||
-			!strings.Contains(got, "if\x00errorlevel\x001\x00exit\x00/b\x002") {
+		if handler.Command != guard || !reflect.DeepEqual(handler.Args, []string{hookguard.CoworkSubcommand, dataDir, launcher, event}) {
 			t.Fatalf("%s: %q %q does not guard the installed launcher and distinguish removal", event, handler.Command, handler.Args)
 		}
-		if strings.Contains(got, "--enterprise-managed") {
-			t.Fatalf("%s: per-user plugin handler carries --enterprise-managed", event)
+		if gotDir, gotLauncher, gotEvent, ok := hookguard.CoworkArgv(handler.Args); !ok ||
+			gotDir != dataDir || gotLauncher != launcher || gotEvent != event {
+			t.Fatalf("%s: generated arguments are not accepted by the native guard", event)
 		}
 	}
 }
@@ -119,15 +116,13 @@ func TestCoworkWindowsPluginDistinguishesRemovalFromLauncherFailure(t *testing.T
 	run := func() (int, string) {
 		t.Helper()
 		handler := doc.Hooks["PreToolUse"][0].Hooks[0]
-		out, err := exec.Command(handler.Command, handler.Args...).CombinedOutput()
-		if err == nil {
-			return 0, string(out)
+		gotDir, gotLauncher, event, ok := hookguard.CoworkArgv(handler.Args)
+		if !ok || handler.Command != guard {
+			t.Fatal("invalid native Cowork guard entry")
 		}
-		if exit, ok := err.(*exec.ExitError); ok {
-			return exit.ExitCode(), string(out)
-		}
-		t.Fatal(err)
-		return -1, ""
+		var out bytes.Buffer
+		code := hookguard.RunCowork(gotDir, gotLauncher, event, bytes.NewReader(nil), &out, &out)
+		return code, out.String()
 	}
 	if code, out := run(); code != 2 {
 		t.Fatalf("launcher cannot start: exit %d output %q, want 2", code, out)
@@ -144,6 +139,9 @@ func TestCoworkWindowsPluginDistinguishesRemovalFromLauncherFailure(t *testing.T
 	if err := os.Remove(guard); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := CoworkPluginHooks(SetupOpts{DataDir: dataDir, HookExecutable: launcher}); !errors.Is(err, ErrCoworkClaudeCodeNotSetUp) {
+		t.Fatalf("removed guard was accepted at setup: %v", err)
+	}
 	if code, out := run(); code != 2 {
 		t.Fatalf("launcher guard missing: exit %d output %q, want 2", code, out)
 	}
@@ -155,5 +153,49 @@ func TestCoworkWindowsPluginDistinguishesRemovalFromLauncherFailure(t *testing.T
 	}
 	if code, out := run(); code != 0 || !strings.Contains(out, "Customize") {
 		t.Fatalf("completed removal: exit %d output %q, want notice", code, out)
+	}
+}
+
+func TestCoworkPluginHooksAcceptWindowsAccountPathVariants(t *testing.T) {
+	for _, name := range []string{"ordinary", "DC!Ops", "DC%Ops", "DC&Ops", "DC^Ops", "DC(Ops)"} {
+		t.Run(name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), name)
+			dataDir := filepath.Join(root, "account")
+			bin := filepath.Join(root, "bin")
+			if err := os.MkdirAll(bin, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			launcher := filepath.Join(bin, "defenseclaw-hook.exe")
+			guard := filepath.Join(bin, "defenseclaw-hook-guard.exe")
+			for _, path := range []string{launcher, guard} {
+				if err := os.WriteFile(path, []byte("MZ"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := SaveHookContractLockEntry(dataDir, HookContractLockEntry{Connector: "claudecode", ContractID: "claudecode-test"}); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := CoworkPluginHooks(SetupOpts{DataDir: dataDir, HookExecutable: launcher})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var doc struct {
+				Hooks map[string][]struct {
+					Hooks []struct {
+						Command string   `json:"command"`
+						Args    []string `json:"args"`
+					} `json:"hooks"`
+				} `json:"hooks"`
+			}
+			if err := json.Unmarshal(raw, &doc); err != nil {
+				t.Fatal(err)
+			}
+			for _, event := range []string{"PreToolUse", "UserPromptSubmit"} {
+				handler := doc.Hooks[event][0].Hooks[0]
+				if handler.Command != guard || !reflect.DeepEqual(handler.Args, []string{hookguard.CoworkSubcommand, dataDir, launcher, event}) {
+					t.Fatalf("%s: command %q args %q, want literal native guard arguments", event, handler.Command, handler.Args)
+				}
+			}
+		})
 	}
 }
