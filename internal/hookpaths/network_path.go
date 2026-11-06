@@ -47,6 +47,10 @@ var (
 	// Keep it relative to that wait so a shorter share budget also bounds
 	// the identity read.
 	networkShareIdentityExtension = 220 * time.Millisecond
+	// A pending identity may have a different reached file immediately
+	// behind it. This is one shared allowance for the share, not one
+	// allowance per later operand.
+	networkShareIdentityGrace = 30 * time.Millisecond
 	// networkShareDeadAfter is how long a probe may take and still count as
 	// the answer of a live (slow) share.
 	networkShareDeadAfter = 5 * time.Second
@@ -309,9 +313,9 @@ func boundedPathRead(name string, kind pathReadKind, identityRead bool) pathRead
 		wait = networkShareIdentityWait() - time.Since(started)
 		if pending {
 			// Reached identity reads may still answer after a different file
-			// stalls. Give each a brief chance, without charging a fresh full
-			// share window to the same hook decision.
-			wait = min(wait, max(15*time.Millisecond, networkShareIdentityWait()-time.Since(pendingStarted)))
+			// stalls. All later reads share one grace window after first
+			// contact, so many stalled operands cannot extend the decision.
+			wait = min(wait, networkShareIdentityWait()+networkShareIdentityGrace-time.Since(pendingStarted))
 		}
 		networkShares.mu.Lock()
 		probe := networkShares.probes[root]
