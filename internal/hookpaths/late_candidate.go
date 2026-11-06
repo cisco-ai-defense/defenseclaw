@@ -47,8 +47,8 @@ func CallMayReachProtected(text, home string) bool {
 				break
 			}
 		}
-		if length == 0 || i+length < len(text) && !lateValueEnd(text[i+length]) &&
-			text[i+length] != '/' && text[i+length] != '\\' ||
+		if length == 0 || i+length < len(text) && text[i+1] != '{' &&
+			lateShellNameByte(text[i+length]) ||
 			i > 0 && (text[i-1] == '/' || text[i-1] == '\\') {
 			return true
 		}
@@ -128,7 +128,7 @@ func lateKnownStatement(stmt *syntax.Stmt, cwd, home string, depth int, compound
 			display := program == "echo" || program == "printf"
 			words := make([]string, 0, len(cmd.Args)+len(stmt.Redirs))
 			for _, arg := range cmd.Args {
-				if display && lateValueOnlyWord(arg) {
+				if display && lateDisplayValueWord(arg) {
 					words = append(words, "")
 					continue
 				}
@@ -198,6 +198,45 @@ func lateValueOnlyWord(word *syntax.Word) bool {
 		return part.Value == "~"
 	}
 	return false
+}
+
+// A displayed user or login name with surrounding text is still only a
+// displayed value. A path separator or an unknown expansion keeps the word
+// in the ordinary resolved-word path instead.
+func lateDisplayValueWord(word *syntax.Word) bool {
+	if lateValueOnlyWord(word) {
+		return true
+	}
+	seen := false
+	var visit func([]syntax.WordPart) bool
+	visit = func(parts []syntax.WordPart) bool {
+		for _, item := range parts {
+			switch part := item.(type) {
+			case *syntax.Lit:
+				if strings.ContainsAny(part.Value, "/\\") {
+					return false
+				}
+			case *syntax.SglQuoted:
+				if strings.ContainsAny(part.Value, "/\\") {
+					return false
+				}
+			case *syntax.DblQuoted:
+				if !visit(part.Parts) {
+					return false
+				}
+			case *syntax.ParamExp:
+				if !latePlainParam(part) ||
+					part.Param.Value != "USER" && part.Param.Value != "LOGNAME" {
+					return false
+				}
+				seen = true
+			default:
+				return false
+			}
+		}
+		return true
+	}
+	return visit(word.Parts) && seen
 }
 
 func lateValueParam(name string) bool {
@@ -276,6 +315,7 @@ func lateNameBoundary(c byte) bool {
 	return strings.ContainsRune("/\\ \t\r\n'\"=;|&<>(){}:,", rune(c))
 }
 
-func lateValueEnd(c byte) bool {
-	return strings.ContainsRune(" \t\r\n'\";|&<>(){}:,", rune(c))
+func lateShellNameByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' ||
+		c >= '0' && c <= '9' || c == '_'
 }

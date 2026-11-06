@@ -428,3 +428,63 @@ func TestGAP0518DoubleQuotedKnownValueShellBody(t *testing.T) {
 		}
 	}
 }
+
+func TestGAP0518LateProofChecksAttachedFilesAndResolvedProject(t *testing.T) {
+	home := t.TempDir()
+	real := filepath.Join(home, "real-project")
+	cwd := filepath.Join(home, "project-link")
+	ssh := filepath.Join(home, ".ssh")
+	for _, dir := range []string{real, ssh} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(real, cwd); err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(ssh, "authorized_keys")
+	if err := os.WriteFile(key, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(key, filepath.Join(real, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "notes.txt"), []byte("ordinary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	call := func(command string) []byte {
+		return []byte(`{"hook_event_name":"PreToolUse","tool_name":"Bash","cwd":` +
+			mustJSONString(cwd) + `,"tool_input":{"command":` + mustJSONString(command) + `}}`)
+	}
+	read := func(path string) []byte {
+		return []byte(`{"hook_event_name":"PreToolUse","tool_name":"Read","cwd":` +
+			mustJSONString(cwd) + `,"tool_input":{"file_path":` + mustJSONString(path) + `}}`)
+	}
+	if !ordinaryNoAnswerPayloadInHome(read(filepath.Join(cwd, "notes.txt")), home) {
+		t.Error("ordinary Read through a linked project directory has no late proof")
+	}
+	if ordinaryNoAnswerPayloadInHome(read(filepath.Join(cwd, "alias")), home) {
+		t.Error("linked protected Read received a late proof")
+	}
+	for _, command := range []string{
+		"echo hello", `printf '%s' hello`, "cat notes.txt", "grep -fnotes.txt /dev/null",
+		`grep -ealias /dev/null`, `echo "user=$USER"`, `echo "logname:$LOGNAME"`,
+		`echo "$HOME-suffix"`,
+	} {
+		if !ordinaryNoAnswerPayloadInHome(call(command), home) {
+			t.Errorf("ordinary command has no late proof: %q", command)
+		}
+	}
+	for _, command := range []string{
+		"cat alias", "grep -falias /dev/null", `grep -f"$PWD"/alias /dev/null`,
+		`grep -f"$PWD/alias" /dev/null`, "grep --file=alias /dev/null",
+		"grep -Ffalias /dev/null", "sed -falias /dev/null", "sed -nfalias /dev/null",
+		`sed -f"$PWD"/alias /dev/null`, "awk -falias /dev/null",
+		`awk -f"$PWD"/alias /dev/null`, "sort -oalias notes.txt", `echo "$PWD"/alias`,
+		`bash -c 'grep -falias /dev/null'`,
+	} {
+		if ordinaryNoAnswerPayloadInHome(call(command), home) {
+			t.Errorf("protected file received a late proof: %q", command)
+		}
+	}
+}

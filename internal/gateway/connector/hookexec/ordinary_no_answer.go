@@ -163,44 +163,116 @@ func commandWordsMayNameLink(words []string, cwd, home string) bool {
 		}
 		if !endOptions && strings.HasPrefix(word, "-") {
 			_, value, assigned := strings.Cut(word, "=")
-			if !assigned {
-				continue
+			if assigned {
+				word = value
+			} else {
+				var known bool
+				word, known = attachedFileOptionValue(words[0], word)
+				if !known {
+					if display {
+						continue
+					}
+					// An unfamiliar attached option may carry a file name.
+					// Inspect its bounded suffixes before granting a late proof.
+					if len(words[i]) > 18 {
+						return true
+					}
+					for start := 2; start < len(words[i]); start++ {
+						if pathWordMayNameLink(words[i][start:], cwd, home, false) {
+							return true
+						}
+					}
+					continue
+				}
 			}
-			word = value
 		}
 		if word == "" {
 			continue
 		}
-		path := word
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(cwd, path)
-		}
-		parent := filepath.Dir(path)
-		resolvedParent, parentErr := filepath.EvalSymlinks(parent)
-		if parentErr != nil && (!display || !os.IsNotExist(parentErr)) ||
-			parentErr == nil && (resolvedParent != filepath.Clean(parent) ||
-				hookpaths.CallMayReachProtected(resolvedParent, home)) {
+		if pathWordMayNameLink(word, cwd, home, display) {
 			return true
-		}
-		info, err := os.Lstat(path)
-		if err == nil && info.Mode()&os.ModeSymlink != 0 {
-			return true
-		}
-		if err != nil && !os.IsNotExist(err) {
-			return true
-		}
-		if err == nil {
-			resolved, resolveErr := filepath.EvalSymlinks(path)
-			if resolveErr != nil || pathMayNameProtectedLink(path, resolved, home, info) {
-				return true
-			}
 		}
 	}
 	return false
 }
 
+func pathWordMayNameLink(word, cwd, home string, display bool) bool {
+	path := word
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(cwd, path)
+	}
+	parent := filepath.Dir(path)
+	resolvedParent, parentErr := filepath.EvalSymlinks(parent)
+	if parentErr != nil && (!display || !os.IsNotExist(parentErr)) ||
+		parentErr == nil && hookpaths.CallMayReachProtected(resolvedParent, home) {
+		return true
+	}
+	info, err := os.Lstat(path)
+	if err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return true
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return true
+	}
+	if err == nil {
+		resolved, resolveErr := filepath.EvalSymlinks(path)
+		if resolveErr != nil || pathMayNameProtectedIdentity(resolved, home, info) {
+			return true
+		}
+	}
+	return false
+}
+
+// attachedFileOptionValue reads the file operand of a short option, including
+// a cluster of no-value switches before it. Options that consume non-file
+// text stop the scan, so a search pattern is not mistaken for a file name.
+func attachedFileOptionValue(program, option string) (string, bool) {
+	if len(option) < 3 || option[0] != '-' || option[1] == '-' {
+		return "", false
+	}
+	var fileOptions, textOptions, switches string
+	switch filepath.Base(program) {
+	case "grep", "egrep", "fgrep":
+		fileOptions, textOptions = "f", "eABCm"
+		switches = "EFGivnHhroqwslLaxZzUuPp"
+	case "sed":
+		fileOptions, textOptions = "f", "ei"
+		switches = "nErsuz"
+	case "awk", "gawk", "mawk", "nawk":
+		fileOptions, textOptions = "f", "FvW"
+		switches = ""
+	default:
+		// A direct -fFILE is a conventional file operand for other tools.
+		fileOptions = "f"
+	}
+	for i := 1; i < len(option); i++ {
+		if strings.IndexByte(fileOptions, option[i]) >= 0 {
+			return option[i+1:], true
+		}
+		if strings.IndexByte(textOptions, option[i]) >= 0 ||
+			strings.IndexByte(switches, option[i]) < 0 {
+			return "", strings.IndexByte(textOptions, option[i]) >= 0
+		}
+	}
+	return "", true
+}
+
 func pathMayNameProtectedLink(path, resolved, home string, info os.FileInfo) bool {
-	if resolved != filepath.Clean(path) || hookpaths.CallMayReachProtected(resolved, home) {
+	if resolved != filepath.Clean(path) {
+		entry, err := os.Lstat(path)
+		if err != nil || entry.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+		parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+		if err != nil || hookpaths.CallMayReachProtected(parent, home) {
+			return true
+		}
+	}
+	return pathMayNameProtectedIdentity(resolved, home, info)
+}
+
+func pathMayNameProtectedIdentity(resolved, home string, info os.FileInfo) bool {
+	if hookpaths.CallMayReachProtected(resolved, home) {
 		return true
 	}
 	for _, protected := range hookpaths.ProtectedAuthorizedKeysPaths(home) {
