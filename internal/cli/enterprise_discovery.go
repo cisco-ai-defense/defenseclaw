@@ -494,7 +494,8 @@ func writeManagedViewRefusalJSON(w io.Writer, err error) {
 func enterpriseDiscoveryStatusHint() string {
 	switch runtime.GOOS {
 	case "windows":
-		return "defenseclaw enterprise windows status"
+		// Setup puts no DefenseClaw command on PATH (cowork-1-0-8 GAP-0076).
+		return managedWindowsCommand("enterprise", "windows", "status", "--profile", "standalone") + " from an elevated PowerShell prompt"
 	case "darwin":
 		return "defenseclaw-gateway enterprise macos status"
 	default:

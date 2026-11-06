@@ -9,6 +9,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -110,15 +111,48 @@ type answerWatchdog struct {
 	// restart is the outage answer of a per-user call that met its own
 	// gateway's restart (perUserOutageSeen) or reached a gateway that only
 	// just started (restartWindowContact). restartProof says, at the
-	// deadline, whether the call's connection is held by a gateway that
-	// started moments ago and has answered no call yet (GAP-0295).
+	// deadline, whether the call's connection was held by a gateway that
+	// started moments ago and had answered no call before it (GAP-0295).
 	restart      *perUserRestartAnswer
-	restartProof func() bool
+	restartProof func() restartProofResult
 	// failureLog is the call's hook-failure log, opened
 	// answerWatchdogLogPrepareLead before the deadline (watch).
 	failureLog     *preparedFailureLog
 	failureLogHome func() string
 	prepareLead    time.Duration
+
+	// closeLateAnswer is set for a managed call outside Secure Client: once
+	// its deadline has passed, the agent gets the watchdog's answer, never a
+	// verdict that came late (lateAnswerDue). watchDone is closed when watch
+	// returns.
+	closeLateAnswer bool
+	watchDone       chan struct{}
+	watchDoneOnce   sync.Once
+	// answeredInTime is set when answered stood a managed call's watchdog
+	// down before its deadline: the call's own answer is then the one
+	// written, also when the call finishes after the deadline (GAP-0648
+	// review 3 S1). Atomic, not under mu: answered runs from the delivery
+	// receipt that finish and answerLate send while they hold mu.
+	answeredInTime atomic.Bool
+}
+
+// lateAnswerWait bounds how long a managed call's own answer, ready after
+// its deadline, waits for the watchdog's answer (watch is bounded by its own
+// waits: the restart proof, the install look and the log line). A watchdog
+// that has not answered by then is answered for (answerLate).
+var lateAnswerWait = time.Second
+
+// lateAnswerDue reports a managed call whose deadline has passed while the
+// watchdog still owns its answer: the gateway's verdict, or the call's own
+// result, came too late, and the watchdog answers it. One deadline holds for
+// the whole call: before, a verdict read in the moment the watchdog's
+// thread woke at the deadline (the host had held the process) could stand
+// the watchdog down and reach the agent past it (rel-1-0-6 GAP-0648). The
+// deadline counts the time the computer slept (countSleep), so a verdict
+// read after a sleep that outlasted the budget is late too.
+// Per-user and Secure Client calls keep their answer.
+func (w *answerWatchdog) lateAnswerDue() bool {
+	return w.closeLateAnswer && w.waiter.passed()
 }
 
 // AnswerWatchdog is the answer watchdog of one tool call that the hook
@@ -183,6 +217,8 @@ func ArmAnswerWatchdog(opts Options, payload []byte) *AnswerWatchdog {
 // output; Run returns through finish.
 func startAnswerWatchdog(opts *Options, sp spec, failMode string, deadline, ceiling time.Time) *answerWatchdog {
 	w := prepareAnswerWatchdog(opts, sp, failMode, ceiling)
+	// The deadline holds from now, also before the watch goroutine runs.
+	w.waiter.extendTo(deadline)
 	go w.watch(deadline)
 	return w
 }
@@ -192,7 +228,13 @@ func startAnswerWatchdog(opts *Options, sp spec, failMode string, deadline, ceil
 // output.
 func prepareAnswerWatchdog(opts *Options, sp spec, failMode string, ceiling time.Time) *answerWatchdog {
 	w := &answerWatchdog{stdout: opts.Stdout, stderr: opts.Stderr, exit: opts.Exit, ceiling: ceiling, waiter: newAnswerDeadlineWaiter(), secureClient: opts.SecureClient,
-		failureLog: newPreparedFailureLog(), prepareLead: answerWatchdogLogPrepareLead}
+		failureLog: newPreparedFailureLog(), prepareLead: answerWatchdogLogPrepareLead,
+		closeLateAnswer: managedNativeDecision(*opts), watchDone: make(chan struct{})}
+	if w.closeLateAnswer {
+		// One deadline for the whole call, also across a sleep of the
+		// computer (GAP-0648 review F4).
+		w.waiter.countSleep(platformSuspendClock)
+	}
 	w.cacheFailureLogHome(opts)
 	opts.failureLog = w.failureLog
 	w.failureLogHome = failureLogHomeOf(*opts)
@@ -527,11 +569,18 @@ func (w *answerWatchdog) restartWindowContact(opts Options, sp spec, failMode st
 		return
 	}
 	home := opts.Home
+	// Read now: the proof runs on a goroutine that a proof past
+	// restartProofWait leaves running (provenWithin, GAP-0680).
+	proof := perUserRestartWindowProof
 	w.mu.Lock()
-	w.restartProof = func() bool { return perUserRestartWindowProof(home, check) }
+	w.restartProof = func() restartProofResult { return proof(home, check) }
 	prepared := w.restart != nil
 	w.mu.Unlock()
-	if prepared || !perUserGatewayRecentlyStarted(home) {
+	if !perUserGatewayRecentlyStarted(home) {
+		return
+	}
+	perUserCaptureFreshGatewayOwner(check)
+	if prepared {
 		return
 	}
 	go func() {
@@ -545,9 +594,14 @@ func (w *answerWatchdog) restartWindowContact(opts Options, sp spec, failMode st
 }
 
 // perUserRestartWindowProof reports whether the connection of check is held
-// by this account's gateway that started moments ago and has answered no
-// hook call yet; tests replace it.
-var perUserRestartWindowProof = perUserFreshGatewayHoldsCall
+// by this account's gateway that started moments ago and had answered no
+// hook call before the connection; tests replace it.
+var perUserRestartWindowProof = perUserFreshGatewayProof
+
+type restartProofResult struct {
+	ok     bool
+	reason string
+}
 
 // restartProofWait bounds the restart-window proof at the deadline: a proof
 // not done by then is no proof, and the call stays closed.
@@ -556,12 +610,25 @@ var restartProofWait = 250 * time.Millisecond
 // restartWindowCandidate is the proof to run when the call's answer could
 // still be the restart outage: an outage answer is ready, and the gateway
 // sent no status or progress and the call logged no failure. w.mu is held.
-func (w *answerWatchdog) restartWindowCandidateLocked() func() bool {
+func (w *answerWatchdog) restartWindowCandidateLocked() func() restartProofResult {
 	if w.secureClient || w.restart == nil || w.restartProof == nil || w.answeredStatus || w.progressSeen ||
 		w.failureClosed || w.claimedAnswer || w.failureLogged || w.fired {
 		return nil
 	}
 	return w.restartProof
+}
+
+func (w *answerWatchdog) restartWindowSkipReasonLocked() string {
+	switch {
+	case w.restartProof == nil:
+		return "no_verified_connection"
+	case w.restart == nil:
+		return "outage_mode_not_ready"
+	case w.answeredStatus || w.progressSeen:
+		return "answer_started"
+	default:
+		return "proof_not_applicable"
+	}
 }
 
 // restartWindowProven runs the restart-window proof for the call's own
@@ -573,29 +640,40 @@ func (w *answerWatchdog) restartWindowProven() (string, bool) {
 	}
 	w.mu.Lock()
 	proof := w.restartWindowCandidateLocked()
+	skipReason := w.restartWindowSkipReasonLocked()
 	w.mu.Unlock()
-	if proof == nil || !provenWithin(proof, restartProofWait) {
+	if proof == nil {
+		w.failureLog.setRestartReason(skipReason)
+		return "", false
+	}
+	result := provenWithin(proof, restartProofWait)
+	if !result.ok {
+		w.failureLog.setRestartReason(result.reason)
 		return "", false
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.restartWindowCandidateLocked() == nil {
+		w.failureLog.setRestartReason(w.restartWindowSkipReasonLocked())
 		return "", false
 	}
 	return w.restart.mode, true
 }
 
 // provenWithin runs proof bounded by wait: a proof that takes longer is none.
-func provenWithin(proof func() bool, wait time.Duration) bool {
-	proven := make(chan bool, 1)
+func provenWithin(proof func() restartProofResult, wait time.Duration) restartProofResult {
+	proven := make(chan restartProofResult, 1)
 	go func() { proven <- proof() }()
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {
 	case ok := <-proven:
+		if !ok.ok && ok.reason == "" {
+			ok.reason = "proof_rejected"
+		}
 		return ok
 	case <-timer.C:
-		return false
+		return restartProofResult{reason: "proof_timeout"}
 	}
 }
 
@@ -678,6 +756,9 @@ func (w *answerWatchdog) hold(opts *Options) {
 }
 
 func (w *answerWatchdog) watch(deadline time.Time) {
+	if w.watchDone != nil {
+		defer w.watchDoneOnce.Do(func() { close(w.watchDone) })
+	}
 	// A call still waiting answerWatchdogLogPrepareLead before its deadline
 	// opens its log now, so the line of the answer below is one append.
 	prepare := time.AfterFunc(time.Until(deadline.Add(-w.prepareLead)), func() {
@@ -690,18 +771,25 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	}
 	w.mu.Lock()
 	proof := w.restartWindowCandidateLocked()
+	skipReason := w.restartWindowSkipReasonLocked()
 	w.mu.Unlock()
 	// Outside the lock: Run must still be able to finish meanwhile. A call
 	// whose connection a gateway that only just started holds, with no
 	// answer from it yet, is in that gateway's restart window: it gets the
 	// outage answer, not the closed no-decision one (GAP-0295).
-	if proof != nil && provenWithin(proof, restartProofWait) {
+	if proof == nil {
+		w.failureLog.setRestartReason(skipReason)
+	} else if result := provenWithin(proof, restartProofWait); result.ok {
 		w.mu.Lock()
 		if w.restartWindowCandidateLocked() != nil {
 			w.closedKnown = false
 			w.useRestartAnswerLocked(w.restart)
+		} else {
+			w.failureLog.setRestartReason(w.restartWindowSkipReasonLocked())
 		}
 		w.mu.Unlock()
+	} else {
+		w.failureLog.setRestartReason(result.reason)
 	}
 	w.mu.Lock()
 	installCheck := w.installCheck
@@ -709,7 +797,7 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	installing := installCheck != nil && installCheck()
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.finished {
+	if w.finished || w.answeredInTime.Load() {
 		return
 	}
 	if installing && !w.closedKnown && !w.claimedAnswer && w.installCheck != nil {
@@ -817,11 +905,19 @@ func heldWithin(check func() bool, wait time.Duration) bool {
 }
 
 // answered stands the watchdog down: the gateway's decision is in. Safe on
-// a nil watchdog.
+// a nil watchdog. A managed call's decision read before its deadline is the
+// answer the agent gets, also when rendering it takes the call past the
+// deadline (answeredInTime); one read after it is late (lateAnswerDue) and
+// leaves the watchdog's answer.
 func (w *answerWatchdog) answered() {
-	if w != nil {
-		w.waiter.cancel()
+	if w == nil || w.lateAnswerDue() {
+		return
 	}
+	if w.closeLateAnswer {
+		// Before the cancel: watch, answerLate and finish read it.
+		w.answeredInTime.Store(true)
+	}
+	w.waiter.cancel()
 }
 
 // noDecisionPending restores the closed answer when a retry has connected
@@ -881,6 +977,24 @@ func (w *AnswerWatchdog) Finish(code int) int {
 // finish writes the call's own result unless the watchdog already answered,
 // and returns the exit status of the answer the agent got.
 func (w *answerWatchdog) finish(code int) int {
+	if w.lateAnswerDue() && w.watchDone != nil && !w.answeredInTime.Load() {
+		timer := time.NewTimer(lateAnswerWait)
+		held := false
+		select {
+		case <-w.watchDone:
+			// The watch answered (it fired), or it stood down for a
+			// decision read in time: nothing to answer for.
+		case <-timer.C:
+			held = true
+		}
+		timer.Stop()
+		if held {
+			if late, ok := w.answerLate(); ok {
+				w.waiter.cancel()
+				return late
+			}
+		}
+	}
 	w.waiter.cancel()
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -900,6 +1014,67 @@ func (w *answerWatchdog) finish(code int) int {
 		w.deliveryReceipt(true, w.failureClosed)
 	}
 	return code
+}
+
+// answerLate gives the watchdog's answer for it when a managed call's
+// deadline has passed and its watchdog did not answer within lateAnswerWait
+// (its thread was held, or still waits on a timer the computer's sleep
+// stopped): the late verdict or result is never written (GAP-0648 review
+// F4). It is the answer watch would give: while the computer's lifecycle
+// holds a call whose fallback is not closed, the install answer (GAP-1074,
+// review 3 L2). ok is false when the watchdog answered, the call's decision
+// came in time (answeredInTime) or the call is not late.
+func (w *answerWatchdog) answerLate() (code int, ok bool) {
+	w.mu.Lock()
+	if !w.lateAnswerOwedLocked() {
+		w.mu.Unlock()
+		return 0, false
+	}
+	installCheck := w.installCheck
+	w.mu.Unlock()
+	// Outside the lock, as in watch; the look is bounded (heldWithin).
+	installing := installCheck != nil && installCheck()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.lateAnswerOwedLocked() {
+		return 0, false
+	}
+	if installing && !w.closedKnown && !w.claimedAnswer && w.installCheck != nil {
+		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure =
+			w.installOut, w.installErr, w.installCode, w.installLogFailure
+	}
+	// The watchdog's answer: watch finds the call finished and stays quiet.
+	w.fired, w.finished = true, true
+	_, _ = w.stderr.Write(w.fallbackErr)
+	_, _ = w.stdout.Write(w.fallbackOut)
+	logged := w.failureLogDone
+	if !w.failureLogged {
+		done := make(chan struct{})
+		logFailure := w.logFailure
+		go func() {
+			defer close(done)
+			logFailure()
+		}()
+		logged = done
+	}
+	if logged != nil {
+		timer := time.NewTimer(answerWatchdogLogWait)
+		select {
+		case <-logged:
+		case <-timer.C:
+		}
+		timer.Stop()
+	}
+	if w.deliveryReceipt != nil {
+		w.deliveryReceipt(false, true)
+	}
+	return w.fallbackCode, true
+}
+
+// lateAnswerOwedLocked reports a late managed call nobody answered yet.
+// w.mu is held.
+func (w *answerWatchdog) lateAnswerOwedLocked() bool {
+	return !w.fired && !w.finished && !w.answeredInTime.Load() && w.lateAnswerDue()
 }
 
 func (w *answerWatchdog) setDeliveryReceipt(receipt func(bool, bool)) {

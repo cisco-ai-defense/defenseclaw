@@ -821,7 +821,7 @@ case "$ACTION" in
 esac
 
 {{if .Sandbox}}if ! defenseclaw_sandbox_confirm_receipt "/api/v1/codex/hook" "$RESULT"; then
-  fail_unreachable "sandbox hook receipt was not acknowledged"
+  fail_unreachable "sandbox hook receipt was not acknowledged (status ${DC_SANDBOX_RECEIPT_STATUS})"
 fi
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"

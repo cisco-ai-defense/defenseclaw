@@ -40,6 +40,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/hookguard"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -81,6 +82,11 @@ func main() {
 	// a missing launcher must block whatever that state says.
 	if launcher, hookArgs, ok := connector.ClaudeCodeLauncherGuardArgv(os.Args[1:]); ok {
 		os.Exit(connector.RunClaudeCodeLauncherGuard(launcher, hookArgs, os.Stdin, os.Stdout, os.Stderr))
+	}
+	if runtime.GOOS == "windows" {
+		if dataDir, launcher, event, ok := hookguard.CoworkArgv(os.Args[1:]); ok {
+			os.Exit(hookguard.RunCowork(dataDir, launcher, event, os.Stdin, os.Stdout, os.Stderr))
+		}
 	}
 	// The stable Windows launcher survives uninstall because agent clients may
 	// cache its absolute command for the lifetime of their process. Disabled,

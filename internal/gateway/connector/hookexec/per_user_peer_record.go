@@ -34,6 +34,7 @@ type PerUserPeerRecord struct {
 	connected chan struct{}
 	done      chan struct{}
 	server    *net.TCPAddr
+	at        time.Time
 	peer      perUserPeerProcess
 	ok        bool
 }
@@ -72,6 +73,9 @@ func (r *PerUserPeerRecord) capture(local, remote net.Addr) {
 	r.once.Do(func() {
 		client, okc := local.(*net.TCPAddr)
 		server, oks := remote.(*net.TCPAddr)
+		// capture runs after the transport verifies the accepted socket.
+		// This is an upper bound on when the call reached the gateway.
+		r.at = time.Now()
 		if oks {
 			r.server = server
 		}

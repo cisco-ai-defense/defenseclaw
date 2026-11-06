@@ -2976,6 +2976,15 @@ the lifecycle's prerequisite record carries the fallback's readiness under
 `status`, `policy explain`, `doctor` (`managed-driver`) and the telemetry
 (`defenseclaw.sandbox.driver_reason`).
 
+With OpenShell 0.1.6, a selected MicroVM on Linux with KVM is refused after
+create because the account owns the guest root folder and DefenseClaw cannot
+trust the guest's `localhost` resolver. This affects per-user and managed
+gateways. `driver_fallback: docker` does not cover this refusal: it is chosen
+before create when KVM or the driver is unavailable. Until a fixed OpenShell
+release is supported, a managed administrator sets
+`enterprise.openshell.driver: docker` and runs `ensure`. On a per-user install,
+run `defenseclaw sandbox setup` and answer no to MicroVMs.
+
 The enterprise packages install
 `defenseclaw` as a root-owned link to `defenseclaw-gateway`, which under that
 name exposes only the `sandbox` tree (`internal/cli/launcher.go`).

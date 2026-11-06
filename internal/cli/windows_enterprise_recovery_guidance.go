@@ -34,6 +34,28 @@ type windowsEnterpriseIgnoredDeploymentRecord struct {
 	reason  string
 }
 
+// windowsEnterpriseConfigRecoveryGuidance names the recovery supported by a
+// deployment with a confirmed policy bundle. Its config cannot be supplied
+// through CONFIG=, even when the installed bytes were restored exactly.
+func windowsEnterpriseConfigRecoveryGuidance(result *enterprisestatus.Result, bundleMode bool) {
+	if !bundleMode || result == nil || result.Profile != "standalone" || result.Platform != "windows" {
+		return
+	}
+	const ordinary = "; run ensure with the intended config to put the managed config back"
+	const bundle = "; run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1 from an elevated prompt to restore the confirmed policy bundle"
+	for i := range result.Warnings {
+		if result.Warnings[i].Code == "config_edited_outside_lifecycle" {
+			result.Warnings[i].Message = strings.Replace(result.Warnings[i].Message, ordinary, bundle, 1)
+		}
+	}
+	for i := range result.Errors {
+		if result.Errors[i].Code == "lifecycle_error" &&
+			strings.HasPrefix(result.Errors[i].Message, "config generation is unproven or records a hand edit;") {
+			result.Errors[i].Message = "config generation is unproven or records a hand edit" + bundle
+		}
+	}
+}
+
 // An owner mismatch on the standalone record left under StateRoot can make a
 // later ensure refuse its probe. A forced metadata-free purge may leave that
 // record behind, so the owner has to be restored before the last resort.
@@ -415,13 +437,13 @@ func windowsEnterpriseInstallerBuildMismatchText(message, action string, purge b
 	if !strings.Contains(message, "installer module SHA-256 does not match the pinned payload manifest") {
 		return "", false
 	}
-	command := action
+	var flags []string
 	if action == "uninstall" && purge {
-		command += " --purge"
+		flags = append(flags, "--purge")
 	}
 	return "this CLI does not match the installed DefenseClaw: the enterprise installer module it carries is not the one the installed deployment recorded" +
 		" (a CLI from another DefenseClaw build, or a changed module file), so the " + action + " stopped before it changed anything." +
-		" Next step: run the installed CLI, " + windowsEnterpriseAdminCommand(command) +
+		" Next step: from an elevated PowerShell prompt run the installed CLI, " + windowsEnterpriseAdminCommand(action, flags...) +
 		", or the DefenseClaw Setup of the installed release; to move to another release, run that release's Setup", true
 }
 
@@ -651,8 +673,10 @@ func windowsEnterpriseStoppedServiceNextStep(services []enterprisestatus.Service
 // for the standalone profile as an administrator types it. Setup puts no
 // DefenseClaw command on PATH, so a bare `defenseclaw ...` hint was "not
 // recognized"; the installed CLI is named by its path (GAP-1183, GAP-1338).
-func windowsEnterpriseAdminCommand(action string) string {
-	return "`& '" + managedWindowsAdminCLI() + "' enterprise windows " + action + " --profile standalone`"
+// flags come before --profile.
+func windowsEnterpriseAdminCommand(action string, flags ...string) string {
+	args := append([]string{"enterprise", "windows", action}, flags...)
+	return managedWindowsCommand(append(args, "--profile", "standalone")...)
 }
 
 // windowsEnterpriseStandaloneLifecycleAction reports whether a standalone

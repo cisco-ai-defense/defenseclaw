@@ -1009,6 +1009,7 @@ func TestWindowsEnterpriseConfigRefusalRecoversAPendingTransaction(t *testing.T)
 // On a host without the log folder the first run created it but still
 // reported it missing, so a first install carried lifecycle_log_failed.
 func TestWindowsEnterpriseLogDirectoryIsUsableOnFirstCreate(t *testing.T) {
+	requireAdministratorTestToken(t, "the product writer, not the fixture, needs it: ensureWindowsEnterpriseLogDirectory creates the lifecycle log folder with its windowsEnterpriseLogSDDL descriptor (O:BA, an Administrators owner), which only an administrator token can set")
 	directory := filepath.Join(t.TempDir(), "DefenseClaw")
 	if err := ensureWindowsEnterpriseLogDirectory(directory); errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the log folder this call created is reported missing: %v", err)
@@ -2878,7 +2879,6 @@ func TestWindowsEnterpriseResultNamesRemovedStaleLifecycleJournal(t *testing.T) 
 // error (1639) that names the profile to use, not a fatal install (1603).
 // GAP-2113: its --json result reports the installed deployment.
 func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
-	isolateWindowsEnterpriseHostReaders(t)
 	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentInstalled})
 	originalObserver := windowsEnterpriseStandaloneObserver
 	originalElevated := windowsEnterpriseIsElevated
@@ -3092,7 +3092,6 @@ func TestWindowsEnterpriseRefusedPowerShellReportsRecordedDeployment(t *testing.
 // service states) instead of installed=false with no services, and text
 // mode is the one refusal line. Exit 5 stays.
 func TestWindowsEnterpriseStandardUserStatusReportsRecordedDeployment(t *testing.T) {
-	isolateWindowsEnterpriseHostReaders(t)
 	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentUnknown})
 	originalRunner := windowsEnterpriseStandaloneRunner
 	originalObserver := windowsEnterpriseStandaloneObserver

@@ -9,6 +9,7 @@ import io
 import json
 import ntpath
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -54,8 +55,13 @@ from defenseclaw.doctor_hooks import (
     resolve_windows_command,
     validate_windows_hook_registration,
 )
+from defenseclaw.winquote import powershell_literal_before_typographic_quotes, powershell_literal_body
 
 from tests.os_view import os_view
+
+
+def _decoded_bridge(command: str) -> str:
+    return base64.b64decode(command.rsplit(" ", 1)[1]).decode("utf-16-le")
 
 
 class WindowsHookDoctorTests(unittest.TestCase):
@@ -175,7 +181,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
         start_process: bool = False,
         constrained_fail_open: bool = False,
     ) -> str:
-        literal = str(runtime).replace("'", "''")
+        literal = powershell_literal_body(str(runtime))
         if legacy + unqualified + start_process + constrained_fail_open > 1:
             raise ValueError("launcher fixture flags are mutually exclusive")
         arguments = ["hook", "--connector", connector]
@@ -1946,6 +1952,78 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertEqual(raised.exception.state, "malformed")
         self.assertIn("explicitly disabled", raised.exception.detail)
 
+    def test_codex_bridge_under_a_typographic_quote_profile(self) -> None:
+        """g072 review 3 M3: the bridge for a profile like C:\\Users\\O\u2019Brien is current and owned.
+
+        Go doubles every PowerShell single quote of the launcher path (the
+        fixture renders the same text: tests/test_powershell_quote_golden.py).
+        The render of releases before 1.0.9, the typographic quote not
+        doubled, stays DefenseClaw's and is stale, so doctor says run setup
+        rather than calling it foreign.
+        """
+        for quote in "\u2018\u2019\u201a\u201b":
+            with self.subTest(quote=f"U+{ord(quote):04X}"):
+                self.profile = self.root / f"O{quote}Brien {ord(quote):04X}"
+                self.install = self.profile / "DefenseClaw Install"
+                self.data = self.profile / ".defenseclaw"
+                self.install.mkdir(parents=True)
+                self.data.mkdir()
+                runtime = self._runtime()
+                command = self._encoded_hook_command(runtime)
+                self.assertIn(quote * 2, _decoded_bridge(command))
+
+                check = self._validate("codex", self._config("codex", command, codex_features=False))
+                self.assertEqual(check.state, "healthy", check.detail)
+
+                script = powershell_literal_before_typographic_quotes(_decoded_bridge(command))
+                before = command.rsplit(" ", 1)[0] + " " + base64.b64encode(script.encode("utf-16-le")).decode()
+                check = self._validate("codex", self._config("codex", before, codex_features=False))
+                self.assertEqual(check.state, "stale", check.detail)
+                self.assertIn("written before 1.0.9", check.detail)
+                self.assertEqual(ntpath.normcase(check.target), ntpath.normcase(str(runtime)))
+
+    def test_codex_file_with_one_pre_typographic_quote_entry_is_stale(self) -> None:
+        """g072 review 4 S1: every hook command is checked, not only the first.
+
+        A hand-merged or partly rewritten file whose first entry is current and
+        whose last entry is the pre-1.0.9 render does not read healthy.
+        """
+        quote = "\u2019"
+        self.profile = self.root / f"O{quote}Brien mixed"
+        self.install = self.profile / "DefenseClaw Install"
+        self.data = self.profile / ".defenseclaw"
+        self.install.mkdir(parents=True)
+        self.data.mkdir()
+        runtime = self._runtime()
+        last_event = list(doctor_hooks._codex_hook_specs("codex-hooks-v1"))[-1]
+        bind_current = self._bind_codex_fixture_command
+        rewritten: list[str] = []
+
+        def bind(command: str, event: str, contract: str) -> str:
+            bound = bind_current(command, event, contract)
+            if event != last_event:
+                return bound
+
+            def before(match: re.Match[str]) -> str:
+                script = base64.b64decode(match.group(1)).decode("utf-16-le")
+                self.assertIn(quote * 2, script)
+                old = powershell_literal_before_typographic_quotes(script)
+                rewritten.append(event)
+                return "-EncodedCommand " + base64.b64encode(old.encode("utf-16-le")).decode()
+
+            return re.sub(r"-EncodedCommand ([A-Za-z0-9+/=]+)", before, bound)
+
+        self._bind_codex_fixture_command = bind  # type: ignore[method-assign]
+        try:
+            config = self._config("codex", self._encoded_hook_command(runtime), codex_features=False)
+        finally:
+            del self._bind_codex_fixture_command
+        self.assertTrue(rewritten, "the last event holds the pre-1.0.9 render")
+
+        check = self._validate("codex", config)
+        self.assertEqual(check.state, "stale", check.detail)
+        self.assertIn("written before 1.0.9", check.detail)
+
     def test_healthy_codex_synchronous_encoded_invocation(self) -> None:
         runtime = self._runtime()
         command = self._encoded_hook_command(runtime)
@@ -3085,19 +3163,22 @@ class WindowsHookDoctorTests(unittest.TestCase):
         )
         result = _DoctorResult()
 
+        paths = {
+            "platform_name": "nt",
+            "config_path": str(config),
+            "install_root": str(self.install),
+            "search_path": str(self.install),
+            "pathext": ".EXE;.CMD",
+        }
+
         # A Hermes host that may be running keeps the pending-reload state;
-        # an idle Hermes is healthy (GAP-1298).
-        with patch.object(cmd_doctor, "_hermes_host_running", return_value=None):
-            _check_hook_contract_lock(
-                self.cfg,
-                "hermes",
-                result,
-                platform_name="nt",
-                config_path=str(config),
-                install_root=str(self.install),
-                search_path=str(self.install),
-                pathext=".EXE;.CMD",
-            )
+        # an idle Hermes is healthy (GAP-1298). Without an execution probe
+        # that proves the registered hook runs, that state stays a failure.
+        with (
+            patch.object(cmd_doctor, "_hermes_host_running", return_value=None),
+            patch.object(cmd_doctor, "_hermes_windows_execution_probe", side_effect=lambda check: check),
+        ):
+            _check_hook_contract_lock(self.cfg, "hermes", result, **paths)
 
         self.assertEqual(result.checks[-1]["status"], "fail", result.checks[-1])
         self.assertIn("pending-reload", result.checks[-1]["detail"])
@@ -3105,6 +3186,35 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertIn("close every Hermes", result.checks[-1]["remediation"])
         self.assertIn(f"agent_executable={executable}", result.checks[-1]["detail"])
         self.assertNotIn("99.0.0", result.checks[-1]["detail"])
+
+        # Once the probe proves the registered hook runs, the running host is
+        # a warning that names it (GAP-0586); a failed probe stays a failure.
+        class WindowsOS:
+            name = "nt"
+
+            def __getattr__(self, key):
+                return getattr(os, key)
+
+        host = ("Hermes PID(s) 4300; loaded hooks cannot be verified; live=false", "close Hermes PID 4300")
+        outcomes = {}
+        for label, answer in (("proven", (0, cmd_doctor._HERMES_EXECUTION_PROBE_RESPONSE)), ("failed", (1, b""))):
+            outcomes[label] = _DoctorResult()
+            with (
+                patch.object(cmd_doctor, "os", WindowsOS()),
+                patch.object(cmd_doctor, "_hermes_host_running", return_value=None),
+                patch.object(cmd_doctor, "_run_hermes_execution_probe", return_value=answer),
+                patch.object(cmd_doctor, "_hermes_running_host_warning", return_value=host),
+            ):
+                _check_hook_contract_lock(self.cfg, "hermes", outcomes[label], **paths)
+
+        proven = outcomes["proven"].checks[-1]
+        self.assertEqual(proven["status"], "warn", proven)
+        self.assertIn("pending-reload", proven["detail"])
+        self.assertIn("Hermes PID(s) 4300", proven["detail"])
+        self.assertIn(f"agent_executable={executable}", proven["detail"])
+        self.assertNotIn("99.0.0", proven["detail"])
+        self.assertIn("close Hermes PID 4300", proven["remediation"])
+        self.assertEqual(outcomes["failed"].checks[-1]["status"], "fail", outcomes["failed"].checks[-1])
 
     def test_windows_hermes_pending_reload_is_a_passive_warning(self) -> None:
         # --passive does not list processes, so a Hermes that may be idle is
@@ -3119,7 +3229,14 @@ class WindowsHookDoctorTests(unittest.TestCase):
             "pathext": ".EXE;.CMD",
         }
 
-        with patch.object(cmd_doctor, "_hermes_host_running", side_effect=AssertionError("listed processes")):
+        # On Windows the execution probe runs first; this registration passes it.
+        with (
+            patch.object(cmd_doctor, "_hermes_host_running", side_effect=AssertionError("listed processes")),
+            patch.object(
+                cmd_doctor, "_run_hermes_execution_probe",
+                return_value=(0, cmd_doctor._HERMES_EXECUTION_PROBE_RESPONSE),
+            ),
+        ):
             _check_hook_contract_lock(self.cfg, "hermes", result, platform_name="nt", **paths)
             cmd_doctor._check_windows_native_hooks(self.cfg, "hermes", "Hermes hooks", result, **paths)
 

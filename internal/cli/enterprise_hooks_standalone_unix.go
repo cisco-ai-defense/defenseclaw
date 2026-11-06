@@ -1073,6 +1073,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 		rows[index] = row
 	}
 	repairs := 0
+	repairedTargets := make(map[string]bool)
 	var repaired []enterpriseHookGuardianRepair
 	var auditRepairs []enterpriseHookGuardianAuditReport
 	var notices []enterpriseHookGuardianNotice
@@ -1092,6 +1093,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			row.UserHome = outcome.result.UserHome
 			row.Connector = outcome.result.Connector
 			if outcome.repaired {
+				repairedTargets[slot.key] = true
 				repaired = append(repaired, enterpriseHookGuardianRepair{User: row.User, Connector: row.Connector})
 				auditRepairs = append(auditRepairs, enterpriseHookGuardianAuditReport{User: row.User, UID: slot.account.UID, Connector: row.Connector})
 				repairs++
@@ -1154,6 +1156,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	run.Failures = failures
 	run.Pending = pending
 	run.Repairs = repairs
+	run.RepairedTargets = repairedTargets
 	run.StateErr = stateErr
 	dropEnterpriseHookAccountHomeWatchDirs(watchDirs, manifest.Targets, jobs)
 	run.WatchDirs = sortedEnterpriseHookWatchDirs(watchDirs)

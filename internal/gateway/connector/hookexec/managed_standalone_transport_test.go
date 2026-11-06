@@ -260,6 +260,7 @@ func TestStandaloneHookSocketImpostorGetsZeroBytes(t *testing.T) {
 // a structured deny, one plain sentence that ends with the documented
 // refusal code (GAP-0554, GAP-1179).
 func TestStandaloneHookSocketMissingSaysGatewayStopped(t *testing.T) {
+	shortRestartBudget(t)
 	result := standaloneRun(t, filepath.Join(shortSocketDir(t), "hook.sock"), os.Getuid())
 	out := result.stdout + result.stderr
 	if result.code != 0 || !strings.Contains(result.stdout, `"permissionDecision":"deny"`) ||
@@ -353,6 +354,7 @@ func TestValidateStandaloneHookSocketPath(t *testing.T) {
 // fall back to loopback TCP, where another user can hold the port during a
 // gateway restart, and it must not read or send a bearer token.
 func TestStandaloneWithoutHookSocketNeverUsesTCP(t *testing.T) {
+	shortRestartBudget(t)
 	listener, sentBytes := rawRecordingListener(t, "tcp4", "127.0.0.1:0")
 	home := t.TempDir()
 	hookDir := filepath.Join(home, "hooks")

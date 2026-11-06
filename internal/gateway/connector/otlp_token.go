@@ -482,7 +482,7 @@ func readSecureOTLPPathTokenFile(dataDir, path string) (string, error) {
 	if err := otlpValidateOwner(path, openedInfo); err != nil {
 		return "", err
 	}
-	if err := otlpValidatePerm(path, openedInfo); err != nil {
+	if err := otlpValidateCredentialPerm(path, openedInfo); err != nil {
 		return "", err
 	}
 	limited := io.LimitReader(f, otlpPathTokenMaxReadBytes+1)
@@ -504,7 +504,7 @@ func readSecureOTLPPathTokenFile(dataDir, path string) (string, error) {
 	if err := otlpValidateOwner(path, currentInfo); err != nil {
 		return "", err
 	}
-	if err := otlpValidatePerm(path, currentInfo); err != nil {
+	if err := otlpValidateCredentialPerm(path, currentInfo); err != nil {
 		return "", err
 	}
 	return tok, nil
@@ -527,7 +527,7 @@ func validateSecureOTLPPathTokenFile(dataDir, path string) (os.FileInfo, error) 
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("OTLP path-token %s is not a regular file", path)
 	}
-	if err := otlpValidatePerm(path, info); err != nil {
+	if err := otlpValidateCredentialPerm(path, info); err != nil {
 		return nil, err
 	}
 	if err := otlpValidateOwner(path, info); err != nil {

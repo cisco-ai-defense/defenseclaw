@@ -112,7 +112,7 @@ func runWindowsManagedHookContractCleanup(opts *windowsManagedHookContractCleanu
 	if opts == nil {
 		return errors.New("managed hook contract cleanup options are required")
 	}
-	if err := enterpriseHooksNativePlatformPreflight(); err != nil {
+	if err := enterpriseHooksPlatformPreflight(); err != nil {
 		return err
 	}
 	receiptPath, err := requireWindowsTargetRuntimeProtectedPath(

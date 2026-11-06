@@ -40,6 +40,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 //go:embed all:payload
@@ -554,9 +556,13 @@ func clearRuntimeDir(dir string) error {
 
 // notPreparedError tells a standard account that cannot create the runtime
 // that an administrator prepares it, instead of a bare "Access is denied".
+// The repair is named as typed: Setup puts no DefenseClaw command on PATH,
+// and the standalone profile is the one that ships this runtime
+// (cowork-1-0-8 GAP-0076).
 func notPreparedError(err error) error {
 	if errors.Is(err, fs.ErrPermission) {
-		return fmt.Errorf("the scanner runtime is not prepared and this account cannot prepare it; an administrator prepares it with `defenseclaw enterprise windows repair`: %w", err)
+		return fmt.Errorf("the scanner runtime is not prepared and this account cannot prepare it; an administrator prepares it from an elevated PowerShell prompt with `%s`: %w",
+			managed.WindowsAdminCommand("enterprise", "windows", "repair", "--profile", "standalone"), err)
 	}
 	return err
 }

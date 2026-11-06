@@ -574,8 +574,8 @@ def config_path_for_data_dir(data_dir: str | os.PathLike[str] | None = None) -> 
 
 GATEWAY_PID_FILE_NAME = "gateway.pid"
 
-# (path, st_dev, st_ino, st_size, st_mtime_ns) -> the data_dir that config names.
-_home_data_dir_cache: dict[tuple[str, int, int, int, int], str | None] = {}
+# (path, st_dev, st_ino, st_size, st_mtime_ns) -> (configured data_dir, managed mode).
+_home_config_cache: dict[tuple[str, int, int, int, int], tuple[str | None, bool]] = {}
 
 
 def gateway_home_for_data_dir(data_dir: str | os.PathLike[str]) -> str:
@@ -589,25 +589,22 @@ def gateway_home_for_data_dir(data_dir: str | os.PathLike[str]) -> str:
     config write create a second config.yaml there, without the account ports
     (rel-1-0-6 GAP-0232), and setup read the default API port and found no
     gateway.pid, so it rolled the connector back while the gateway served
-    (GAP-0230). The Go hook runtime had the same gap (GAP-0224). A data_dir
-    holding any config.yaml entry stays its own home, so the default layout
-    and a managed install are unchanged.
+    (GAP-0230). The Go hook runtime had the same gap (GAP-0224). The active
+    config's data_dir binding selects the PID-record home even if a moved
+    store still has an older config.yaml. An explicit per-user config path can
+    be outside the install home; its PID record remains under
+    ``DEFENSECLAW_HOME`` (or the default home). Unrelated stores and managed
+    runtimes keep their own PID home.
     """
     own = os.fspath(data_dir)
-    try:
-        os.lstat(os.path.join(own, CONFIG_FILE_NAME))
-        return own
-    except FileNotFoundError:
-        pass
-    except OSError:
-        return own
-    if os.environ.get(CONFIG_PATH_ENV):
-        return own
     try:
         home = os.fspath(default_data_path())
     except (OSError, KeyError, NotImplementedError):
         return own
-    configured = _home_config_data_dir(os.path.join(home, CONFIG_FILE_NAME))
+    active_config = os.environ.get(CONFIG_PATH_ENV) or os.path.join(home, CONFIG_FILE_NAME)
+    configured, managed = _home_config_binding(active_config)
+    if managed or _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV)):
+        return own
     if configured and _same_folder(configured, own):
         return home
     return own
@@ -618,28 +615,30 @@ def gateway_pid_path(data_dir: str | os.PathLike[str]) -> str:
     return os.path.join(gateway_home_for_data_dir(data_dir), GATEWAY_PID_FILE_NAME)
 
 
-def _home_config_data_dir(path: str) -> str | None:
-    """The data_dir the account config.yaml names, resolved; None when it names none."""
+def _home_config_binding(path: str) -> tuple[str | None, bool]:
+    """Return the config's resolved store and whether it declares managed mode."""
     try:
         st = os.stat(path)
     except OSError:
-        return None
+        return None, False
     key = (path, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
-    if key in _home_data_dir_cache:
-        return _home_data_dir_cache[key]
+    if key in _home_config_cache:
+        return _home_config_cache[key]
     resolved: str | None = None
+    managed = False
     try:
         raw = parse_config_yaml(read_config_text(path))
     except (OSError, UnicodeError, yaml.YAMLError):
         raw = None
     if isinstance(raw, dict):
+        managed = _is_managed_enterprise_mode(str(raw.get("deployment_mode") or ""))
         configured = raw.get("data_dir")
         if isinstance(configured, str) and configured.strip():
             resolved = _configured_data_dir(raw, os.path.dirname(path))
-    if len(_home_data_dir_cache) > 32:
-        _home_data_dir_cache.clear()
-    _home_data_dir_cache[key] = resolved
-    return resolved
+    if len(_home_config_cache) > 32:
+        _home_config_cache.clear()
+    _home_config_cache[key] = (resolved, managed)
+    return resolved, managed
 
 
 def _same_folder(a: str, b: str) -> bool:

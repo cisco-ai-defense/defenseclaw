@@ -118,8 +118,8 @@ func codexWindowsHookFormReplacement(command, eventType, launcher string, toBrid
 		return "", false
 	}
 	for _, match := range windowsCodexBoundArgumentsPattern.FindAllStringSubmatch(script, -1) {
-		event := strings.ReplaceAll(match[1], "''", "'")
-		contract := strings.ReplaceAll(match[2], "''", "'")
+		event := powershellLiteralValue(match[1])
+		contract := powershellLiteralValue(match[2])
 		if event != eventType || command != windowsNativePowerShellHookCommandForCodexEvent(event, contract, launcher) {
 			continue
 		}

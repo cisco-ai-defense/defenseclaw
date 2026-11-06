@@ -454,7 +454,7 @@ func (t copilotTarget) Reconcile(opts Options) (State, error) {
 		return state, err
 	}
 	if policy.Ownership == config.MachinePolicyOwnershipVerifyOnly && state.OwnedEntries == 0 {
-		state.detail("missing_defenseclaw_hooks: deploy the output of `defenseclaw-gateway enterprise policy export --connector copilot` through your policy tool")
+		state.detail("missing_defenseclaw_hooks: deploy the output of %s through your policy tool", policyExportCommand(opts.goos(), "--connector", "copilot"))
 	}
 	state.finish()
 	return state, nil

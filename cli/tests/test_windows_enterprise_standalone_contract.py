@@ -1936,11 +1936,24 @@ def _repair_rollback_config_cases(tmp_path: Path) -> dict[str, dict]:
         "return Invoke-DefenseClawInstallLikeLifecycle `"
     )
     install = _function_body(module, "Invoke-DefenseClawInstallLikeLifecycle")
-    repair_stamp = install.index("if ($Action -eq 'Repair' -and (Test-DefenseClawStandaloneProfile)) {")
+    # Standalone Repair has two blocks (GAP-0568). The first, after the
+    # recorded artifact hashes are checked, rewrites drifted policy from the
+    # recorded approved sources. The second, inside the transaction with the
+    # services stopped, re-stamps the managed and secrets ACLs.
+    repair_anchor = "if ($Action -eq 'Repair' -and (Test-DefenseClawStandaloneProfile)) {"
+    assert install.count(repair_anchor) == 2
+    snapshot = install.index("$snapshot = New-DefenseClawTransaction `")
+    recovery = install.index(repair_anchor)
+    recovery_end = install.index("\n    }\n", recovery)
+    assert "Invoke-DefenseClawRepairApprovedPolicyRecovery" in install[recovery:recovery_end]
+    assert "Set-DefenseClawManagedAcls" not in install[recovery:recovery_end]
+    assert install.index("Assert-DefenseClawRecordedArtifactHashes `") < recovery < snapshot
+    repair_stamp = install.index(repair_anchor, recovery_end)
     stamp_end = install.index("\n        }\n", repair_stamp)
-    assert "Set-DefenseClawManagedAcls" in install[repair_stamp:stamp_end]
-    assert "Set-DefenseClawStandaloneSecretsAcls" in install[repair_stamp:stamp_end]
-    assert install.index("$snapshot = New-DefenseClawTransaction `") < repair_stamp
+    stamp = install[repair_stamp:stamp_end]
+    assert "Set-DefenseClawManagedAcls" in stamp and "-SkipCodexMachineState" in stamp
+    assert "Set-DefenseClawStandaloneSecretsAcls" in stamp
+    assert snapshot < repair_stamp
     assert install.index("Stop-DefenseClawService -Name $GatewayServiceName") < repair_stamp
     assert repair_stamp < install.index("Assert-DefenseClawInstalledConfig -Layout $Layout")
     assert "[string]$GatewayPath" in _function_body(module, "Invoke-DefenseClawGatewayCommand")
@@ -1950,6 +1963,12 @@ def _repair_rollback_config_cases(tmp_path: Path) -> dict[str, dict]:
             "Assert-DefenseClawInstalledConfig",
             "Assert-DefenseClawRepairRollbackConfig",
             "Repair-DefenseClawUnreadableDeploymentMetadata",
+            "Get-DefenseClawRepairRollbackApprovedConfigSource",
+            "Get-DefenseClawRecordedConfigGenerationHash",
+            "Get-DefenseClawApprovedPolicySource",
+            "Get-DefenseClawApprovedPolicyHash",
+            "Get-DefenseClawApprovedPolicyPath",
+            "Get-DefenseClawStandaloneBundleRepairCommand",
         )
     )
     harness = tmp_path / "repair-rollback-config.ps1"
@@ -1959,6 +1978,8 @@ def _repair_rollback_config_cases(tmp_path: Path) -> dict[str, dict]:
         + r"""
 $script:SchemaVersion = 1
 $script:AdministratorsSID = 'S-1-5-32-544'
+$script:SystemSID = 'S-1-5-18'
+$script:TrustedInstallerSID = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
 $script:UnreadableMetadataMessage = 'could not read the installed deployment metadata'
 $root = '__ROOT__'
 $Layout = @{
@@ -1966,6 +1987,7 @@ $Layout = @{
     PendingPath = Join-Path $root 'pending.json'; GatewayPath = Join-Path $root 'installed-gateway.exe'
     RuntimeDirectory = Join-Path $root 'runtime'; CLIPath = Join-Path $root 'defenseclaw.exe'
     InstallRoot = Join-Path $root 'install'; StateRoot = Join-Path $root 'state'
+    ConfigDirectory = $root; InstallStateDirectory = Join-Path $root 'install-state'
 }
 $Sources = @{ gateway = @{ path = 'authenticated-replacement-gateway.exe' } }
 foreach ($name in @('acp', 'hook', 'sensor_helper', 'installer', 'module')) { $Sources[$name] = @{} }
@@ -2000,6 +2022,22 @@ function Write-DefenseClawJsonAtomic {
     [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 10))
 }
 function Set-DefenseClawPathAcl { param($Path, $Kind, $GatewayServiceSID) $global:Stamps++ }
+function Assert-DefenseClawPathAcl {
+    param($Path, $AllowedWriterSIDs, $AllowedReaderSIDs, [switch]$RejectUntrustedRead,
+        [switch]$AllowInheritance, [switch]$IgnoreCreatorTemplates)
+}
+function Assert-DefenseClawNoReparsePath { param($Path, [switch]$AllowMissingLeaf) }
+function Get-DefenseClawServiceSID { param($ServiceName) return 'S-1-5-80-0' }
+function Get-DefenseClawSourceDescriptor {
+    param($Path, $Label)
+    # Get-FileHash returns upper-case hex, as the production descriptor does.
+    return @{ path = $Path; sha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash }
+}
+function Install-DefenseClawFileAtomic {
+    param($Source, $Destination, $ExpectedSHA256)
+    if ((Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash -ne $ExpectedSHA256) { throw 'copy digest changed' }
+    [IO.File]::Copy($Source, $Destination, $true)
+}
 function Invoke-Case([string]$Name, [string]$Metadata, [string]$Bind, [string]$Status,
         [bool]$Pending, [string]$TrustProblem = '') {
     [IO.File]::WriteAllText($Layout.MetadataPath, $Metadata)
@@ -2023,6 +2061,8 @@ function Invoke-Case([string]$Name, [string]$Metadata, [string]$Bind, [string]$S
         name = $Name; error = $errorText; metadata = [IO.File]::ReadAllText($Layout.MetadataPath)
         pending = (Test-Path -LiteralPath $Layout.PendingPath); gateway_calls = $global:GatewayCalls
         source_checks = $global:SourceChecks; stamps = $global:Stamps
+        config = [IO.File]::ReadAllText($Layout.ConfigPath)
+        candidates = @(Get-ChildItem -LiteralPath $root -Filter 'config.repair-rollback.*').Count
     } | ConvertTo-Json -Compress
 }
 Invoke-Case 'invalid malformed' 'broken metadata' '0.0.0.0' 'Running' $false
@@ -2034,6 +2074,20 @@ Invoke-Case 'external policy ACL drift' 'broken metadata' '127.0.0.1' 'Running' 
 Invoke-Case 'transitional service' 'broken metadata' '127.0.0.1' 'StartPending' $false
 Invoke-Case 'pending recovery' 'broken metadata' '0.0.0.0' 'Running' $true
 Invoke-Case 'stopped deferred' 'broken metadata' '0.0.0.0' 'Stopped' $false
+# GAP-0568: a config edited after the recorded generation is checked through a
+# temporary copy of the recorded approved bytes; the installed file is not
+# changed and the copy is removed. A stale approved copy is refused and the
+# refusal still names the installed config's failing setting.
+[void][IO.Directory]::CreateDirectory($Layout.InstallStateDirectory)
+$approvedPath = Join-Path $Layout.InstallStateDirectory 'approved-config.yaml'
+[IO.File]::WriteAllText($approvedPath, "gateway:`n  api_bind: 127.0.0.1`n")
+$approvedHash = (Get-FileHash -LiteralPath $approvedPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$generationPath = Join-Path $Layout.ConfigDirectory 'config.generation.json'
+$approvedMetadata = '{"installed":true,"approved_policy_sources":{"config":"' + $approvedHash + '"}}'
+[IO.File]::WriteAllText($generationPath, '{"config_sha256":"' + $approvedHash + '"}')
+Invoke-Case 'approved current' $approvedMetadata '0.0.0.0' 'Running' $false
+[IO.File]::WriteAllText($generationPath, '{"config_sha256":"' + ('a' * 64) + '"}')
+Invoke-Case 'approved stale' $approvedMetadata '0.0.0.0' 'Running' $false
 """.replace("__ROOT__", str(tmp_path)),
         encoding="utf-8",
     )
@@ -2074,13 +2128,22 @@ def test_repair_checks_the_running_gateway_rollback_config_before_rebuilding_met
     assert cases["pending recovery"]["metadata"] == "broken metadata"
     assert cases["pending recovery"]["gateway_calls"] == 0
     assert cases["stopped deferred"]["gateway_calls"] == 0
+    approved = cases["approved current"]
+    assert approved["error"] == "", approved
+    assert approved["gateway_calls"] == 2, approved
+    assert "0.0.0.0" in approved["config"] and approved["candidates"] == 0, approved
+    stale = cases["approved stale"]
+    assert "gateway.api_bind" in stale["error"] and "cannot prove" in stale["error"], stale
+    assert stale["gateway_calls"] == 1 and stale["candidates"] == 0, stale
+    assert "0.0.0.0" in stale["config"], stale
 
 
 def test_repair_rollback_refusal_names_the_supported_next_step(tmp_path: Path) -> None:
     cases = _repair_rollback_config_cases(tmp_path)
-    for name in ("invalid malformed", "invalid valid"):
+    for name in ("invalid malformed", "invalid valid", "approved stale"):
         assert "Next step:" in cases[name]["error"], cases[name]
         assert "/ensure CONFIG=" in cases[name]["error"], cases[name]
+    assert "enterprise windows repair --profile standalone --json" in cases["approved stale"]["error"]
     assert "administrator-selected path permissions" in cases["external policy ACL drift"]["error"]
     assert "Next step:" in cases["transitional service"]["error"]
     assert "retry Setup /repair" in cases["transitional service"]["error"]
@@ -2510,3 +2573,41 @@ def test_gap_0583_standalone_teardown_refuses_activation_drift_before_the_commit
     rebind = recovery.index("Sync-DefenseClawStandaloneUninstallTombstoneBinding")
     assert rebind < recovery.index("$retiredContractReceipt =")
     assert "$committedMetadata = Get-DefenseClawDeploymentMetadata" in recovery[rebind : rebind + 400]
+
+
+def test_the_config_step_records_over_a_hand_edit_only_for_this_runs_config_source() -> None:
+    # GAP-0646: the transaction's config step records a hand-edit record of
+    # the installed bytes as the lifecycle's generation only for the approved
+    # source this run installed (CONFIG=). The sha256 comes from that source
+    # descriptor alone, never from config.yaml or config.generation.json, and
+    # rides only on the recording call: verify, status, the Repair rollback
+    # preflight and Secure Client (validate-only) never pass it.
+    module = _text(MODULE)
+    check = _function_body(module, "Assert-DefenseClawInstalledConfig")
+    record = check.index("if ($RecordLifecycle) {")
+    record_end = check.index("\n    }\n", record)
+    assert check.count("--approved-config-sha256") == 1
+    assert "'--approved-config-sha256'" in check[record:record_end]
+    assert module.count("-ApprovedConfigSHA256") == 1
+    install = _function_body(module, "Invoke-DefenseClawInstallLikeLifecycle")
+    call = install.index("-ApprovedConfigSHA256 $approvedConfigSHA256")
+    source = install.rindex("# The approved source this run installed as config.yaml (CONFIG=):", 0, call)
+    block = install[source:call]
+    assert "if ($Sources.ContainsKey('config') -and $Sources['config'] -is [System.Collections.IDictionary]) {" in block
+    assert "$approvedConfigSHA256 = ([string]$Sources['config']['sha256']).ToLowerInvariant()" in block
+    assert "if ($approvedConfigSHA256 -cnotmatch '^[0-9a-f]{64}$') {" in block
+    assert "-RecordLifecycle:(-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout))" in block
+    assert "config.generation.json" not in block and "Get-FileHash" not in block
+
+
+def test_bundle_repair_hint_names_the_installed_cli_without_a_bare_fallback() -> None:
+    # GAP-0081: Setup puts no DefenseClaw command on PATH, so the hint must never
+    # fall back to a bare defenseclaw.exe. Get-DefenseClawLayout is the only
+    # producer of a layout and always sets CLIPath, so the fallback was dead.
+    module = _text(MODULE)
+    hint = _function_body(module, "Get-DefenseClawStandaloneBundleRepairCommand")
+    assert "$cli = [string]$Layout['CLIPath']" in hint
+    assert "'defenseclaw.exe'" not in hint
+    assert "IsNullOrWhiteSpace" not in hint
+    layout = _function_body(module, "Get-DefenseClawLayout")
+    assert "CLIPath = (Microsoft.PowerShell.Management\\Join-Path $bin 'defenseclaw.exe')" in layout

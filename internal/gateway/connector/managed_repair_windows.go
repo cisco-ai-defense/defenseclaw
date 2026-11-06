@@ -520,12 +520,30 @@ func ensureWindowsManagedLockProtection(lock windowsManagedLockRepair) error {
 	} else if !errors.Is(repairErr, errWindowsManagedRepairUnprivileged) {
 		reason += "; repair failed: " + repairErr.Error()
 	}
-	if managed.TrustStrictAncestors() {
+	if managed.TrustStrictAncestors() || windowsManagedLockStandaloneBoundary(lock.Handle, lock.Policy) {
 		return err
 	}
 	emitManagedResilience(managedDriftMarker(drift, false, drift.Boundary()), lock.Path,
 		"accepted lock permission drift: "+reason, map[string]string{"label": lock.Label})
 	return nil
+}
+
+// windowsManagedLockStandaloneBoundary reports whether a standalone process
+// must refuse a drifted lock it would otherwise accept: after any repair, the
+// held descriptor still gives an untrusted principal write or ownership, or
+// cannot be classified. Benign drift (an inherited profile entry, extra
+// trusted or read-only entries) stays accepted, so a clean install never
+// refuses its own locks. Secure Client keeps accepting every drift
+// (GAP-0566).
+func windowsManagedLockStandaloneBoundary(handle windows.Handle, policy managedDriftPolicy) bool {
+	if !managed.WindowsStandaloneTrustScope() {
+		return false
+	}
+	model, err := windowsManagedHandleDescriptorModel(handle)
+	if err != nil {
+		return true
+	}
+	return classifyManagedDrift(model, policy).Boundary()
 }
 
 func repairWindowsManagedHeldLock(lock windowsManagedLockRepair) error {

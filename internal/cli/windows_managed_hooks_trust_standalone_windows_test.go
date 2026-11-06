@@ -20,6 +20,7 @@ import (
 // is judged on its own). The Secure Client twin is
 // TestWindowsManagedHooksTrustRepairsThenAcceptsDrift.
 func TestWindowsManagedHooksTrustStandaloneDrift(t *testing.T) {
+	requireAdministratorTestToken(t, "the product trusts only administrator-owned state folders; a standard user's test folder is untrusted by design")
 	skipIfLocalSystem(t, "LocalSystem owns its t.TempDir() tree, so the fixture cannot stand in for a file a standard account owns")
 	t.Setenv(managed.TrustStrictAncestorsEnv, "")
 	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)

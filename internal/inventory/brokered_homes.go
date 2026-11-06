@@ -329,7 +329,7 @@ func validateBrokeredHomeReport(report *BrokeredHomeReport, allow BrokeredHomeAl
 	dropped := 0
 	for i := range report.Homes {
 		home := &report.Homes[i]
-		if !filepath.IsAbs(home.Home) || filepath.Clean(home.Home) != home.Home || home.Home == "/" ||
+		if !path.IsAbs(home.Home) || path.Clean(home.Home) != home.Home || home.Home == "/" ||
 			!userScanText(home.Home, 4096) {
 			return 0, errors.New("a home is not a clean absolute path")
 		}

@@ -1736,7 +1736,7 @@ func validatePluginArtifactDestinationFor(path, trustedOwnerSID string) error {
 	if err := hookAPIValidateOwnerFor(path, info, trustedOwnerSID); err != nil {
 		return err
 	}
-	return nil
+	return hookAPIValidatePluginFilePermissions(path, info)
 }
 
 // hookCommand returns the command an agent runs for this connector's hook. On
@@ -5413,15 +5413,17 @@ func (c *hookOnlyConnector) cursorRuntimePath(opts SetupOpts) string {
 	return filepath.Join(opts.DataDir, "hooks", name)
 }
 
+// cursorManagedHookCommands are the commands setup replaces. The Windows
+// adapter command's pre-1.0.9 render (a profile like C:\Users\O’Brien, whose
+// typographic quote those releases did not double) is DefenseClaw's too, so
+// setup rewrites it instead of adding a second entry (g072 review 4 M1).
 func cursorManagedHookCommands(hookScript, legacyShellScript string) []string {
-	return uniqueNonEmptyStrings(append(
-		[]string{
-			hookScript,
-			legacyShellScript,
-			hookInvocationCommandFor("windows", "cursor", legacyShellScript),
-		},
-		legacyCursorNativeHookCommands()...,
-	))
+	commands := []string{hookScript, legacyShellScript}
+	if runtime.GOOS == "windows" {
+		commands = appendWithPreTypographicQuoteForm(commands, hookScript)
+	}
+	commands = appendWithPreTypographicQuoteForm(commands, hookInvocationCommandFor("windows", "cursor", legacyShellScript))
+	return uniqueNonEmptyStrings(append(commands, legacyCursorNativeHookCommands()...))
 }
 
 // replaceManagedCursorHooks drops DefenseClaw's entries, including one whose
@@ -5440,15 +5442,12 @@ func replaceManagedCursorHooks(
 	return append(out, entry)
 }
 
+// cursorOwnedHookCommands are the commands teardown removes, the Windows
+// adapter command's pre-1.0.9 render included (g072 review 4 M1).
 func cursorOwnedHookCommands(opts SetupOpts) []string {
 	portableScript := filepath.Join(opts.DataDir, "hooks", "cursor-hook.sh")
-	return uniqueNonEmptyStrings(append(
-		[]string{
-			portableScript,
-			hookInvocationCommandFor("windows", "cursor", portableScript),
-		},
-		legacyCursorNativeHookCommands()...,
-	))
+	commands := appendWithPreTypographicQuoteForm([]string{portableScript}, hookInvocationCommandFor("windows", "cursor", portableScript))
+	return uniqueNonEmptyStrings(append(commands, legacyCursorNativeHookCommands()...))
 }
 
 // legacyCursorNativeHookCommands returns only direct-native command strings
@@ -5646,7 +5645,7 @@ func copilotBoundEventOwnsCommand(key, command, hookScript string) bool {
 		// A previous DefenseClaw adapter may have been deleted along with
 		// its data directory. Its event-bound command still identifies it.
 		if binding := copilotPowerShellAdapterBinding.FindStringSubmatch(strings.TrimSpace(command)); len(binding) == 3 {
-			adapter := strings.ReplaceAll(binding[1], "''", "'")
+			adapter := powershellLiteralValue(binding[1])
 			if _, err := os.Lstat(adapter); errors.Is(err, os.ErrNotExist) {
 				return true
 			}
@@ -5697,7 +5696,7 @@ func copilotMarkedAdapterCommand(command string) bool {
 	if len(binding) != 3 || !ValidCopilotHookEvent(binding[2]) {
 		return false
 	}
-	adapter := strings.ReplaceAll(binding[1], "''", "'")
+	adapter := powershellLiteralValue(binding[1])
 	body, err := safefile.ReadRegularFileBounded(adapter, 1<<20)
 	if err != nil {
 		return false
@@ -5746,8 +5745,10 @@ func copilotLiveOperatorLookalike(raw interface{}, hookScript string) bool {
 			continue
 		}
 		if binding := copilotPowerShellAdapterBinding.FindStringSubmatch(strings.TrimSpace(command)); len(binding) == 3 {
-			adapter := strings.ReplaceAll(binding[1], "''", "'")
-			current := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(hookScript), "& '"), "'")
+			adapter := powershellLiteralValue(binding[1])
+			// Both sides decoded: the registered body doubles every PowerShell
+			// single quote (g072 review 3 N5).
+			current := powershellLiteralValue(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(hookScript), "& '"), "'"))
 			if !strings.EqualFold(adapter, current) && !copilotMarkedAdapterCommand(command) {
 				if info, err := os.Lstat(adapter); err == nil && info.Mode().IsRegular() {
 					return true
@@ -5915,7 +5916,7 @@ func copilotPowerShellCommandClaimsHandler(raw interface{}, adapter string) bool
 					lowered := strings.ToLower(command)
 					missingAdapter := false
 					if binding := copilotPowerShellAdapterBinding.FindStringSubmatch(strings.TrimSpace(command)); len(binding) == 3 {
-						path := strings.ReplaceAll(binding[1], "''", "'")
+						path := powershellLiteralValue(binding[1])
 						_, err := os.Lstat(path)
 						missingAdapter = errors.Is(err, os.ErrNotExist)
 					}

@@ -80,7 +80,7 @@ func newWindowsCodexRequirementsCommand() *cobra.Command {
 func runWindowsCodexRequirementsAction(cmd *cobra.Command, action string, jsonOutput bool) error {
 	// Identity authorization intentionally precedes layout/config reads. A
 	// standard user cannot use this hidden parser as a protected-file oracle.
-	if err := enterpriseHooksNativePlatformPreflight(); err != nil {
+	if err := enterpriseHooksPlatformPreflight(); err != nil {
 		return writeWindowsCodexRequirementsFailure(cmd, action, jsonOutput, err)
 	}
 	opts, err := windowsCodexRequirementsLayoutResolver(action)

@@ -934,3 +934,11 @@ func Names() []string {
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
+
+// pinVersionCheck compares a tool's extracted version with its pinned release.
+// CLIs may print the semver tag marker; the remaining version must match the
+// pin exactly, including any prerelease or build suffix.
+func pinVersionCheck(displayName, version string) string {
+	return `case "$got" in v*) got="${got#v}" ;; esac; ` +
+		`[ "$got" = ` + shellQuote(version) + ` ] || { echo "` + displayName + ` '$got' is not the pinned ` + version + `" >&2; exit 1; }`
+}

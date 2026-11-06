@@ -19,6 +19,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
@@ -796,8 +797,49 @@ func TestSandboxHookReceiptAdmissionKeys(t *testing.T) {
 		}
 	}
 	var l hookCallerLimiter
-	if rps, burst, inFlight, _ := l.limits("1001|" + sandboxBudgetReceipt); rps != 100 || burst != 200 || inFlight != 32 {
+	if rps, burst, inFlight, _ := l.limits("1001|" + sandboxBudgetReceipt); rps != 100 || burst != 200 || inFlight != sandboxUserReceiptInFlight {
 		t.Fatalf("receipt limits %d/%d/%d", rps, burst, inFlight)
+	}
+}
+
+// Delivery receipts are posts in their own rate class. Several bindings of
+// one account must not fill a second, 32-request user cap while each binding
+// and the shared 100/s receipt bucket remain within their limits.
+func TestGAP0490ConcurrentReceiptsAcrossBindings(t *testing.T) {
+	now := time.Unix(4_000_000, 0)
+	limiter := &hookCallerLimiter{now: func() time.Time { return now }}
+	var releases []func()
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+	for binding := 0; binding < 4; binding++ {
+		for call := 0; call < 24; call++ {
+			release, _, reason, _ := limiter.acquire("1001|" + sandboxBudgetReceipt)
+			if reason != "" {
+				t.Fatalf("binding %d receipt %d refused within the 96-call aggregate: %s", binding, call, reason)
+			}
+			releases = append(releases, release)
+		}
+	}
+	if host, _, reason, _ := limiter.acquire("1001"); reason != "" {
+		t.Fatalf("host hook refused while sandbox receipts were held: %s", reason)
+	} else {
+		host()
+	}
+	for len(releases) < sandboxUserReceiptInFlight {
+		// Advance the bucket as receipts arrive; keeping their slots held
+		// exercises the concurrency boundary.
+		now = now.Add(11 * time.Millisecond)
+		release, _, reason, _ := limiter.acquire("1001|" + sandboxBudgetReceipt)
+		if reason != "" {
+			t.Fatalf("receipt %d below the aggregate bound refused: %s", len(releases), reason)
+		}
+		releases = append(releases, release)
+	}
+	if release, _, reason, _ := limiter.acquire("1001|" + sandboxBudgetReceipt); release != nil || reason != managedHookReasonRateLimited {
+		t.Fatalf("receipt above the aggregate bound: release=%t reason=%s", release != nil, reason)
 	}
 }
 
@@ -873,4 +915,161 @@ func TestSandboxHookFloodAtTheDocumentedUserRate(t *testing.T) {
 	if refusedHooks != 0 || refusedReceipts != 0 {
 		t.Fatalf("%d calls at %d a second: %d hooks and %d receipts refused", calls, budget.Rate, refusedHooks, refusedReceipts)
 	}
+}
+
+// One account may spread its documented hook budget across several sandbox
+// bindings. Each binding stays below its own 25/s and 32-in-flight limits;
+// the account must not hit a second, smaller concurrency limit at the gateway.
+func TestGAP0490MultipleSandboxBindingsShareTheUserBudget(t *testing.T) {
+	type heldCall struct {
+		binding int
+		until   time.Time
+		release func()
+	}
+	run := func(bindings, perBinding, seconds int, service time.Duration) (allowed, refused int) {
+		t.Helper()
+		start := time.Unix(4_000_000, 0)
+		now := start
+		limiter := &hookCallerLimiter{now: func() time.Time { return now }}
+		active := make([]int, bindings)
+		var held []heldCall
+		perSecond := bindings * perBinding
+		for i := 0; i < seconds*perSecond; i++ {
+			now = start.Add(time.Duration(i) * time.Second / time.Duration(perSecond))
+			kept := held[:0]
+			for _, call := range held {
+				if call.until.After(now) {
+					kept = append(kept, call)
+					continue
+				}
+				call.release()
+				active[call.binding]--
+				if receipt, _, reason, _ := limiter.acquire("1001|" + sandboxBudgetReceipt); reason != "" {
+					t.Fatalf("receipt of an admitted call refused: %s", reason)
+				} else {
+					receipt()
+				}
+			}
+			held = kept
+			binding := i % bindings
+			if active[binding] >= 32 {
+				t.Fatalf("binding %d exceeded its own in-flight limit", binding)
+			}
+			release, _, reason, _ := limiter.acquire("1001|" + sandboxBudgetPending)
+			if reason != "" {
+				refused++
+				continue
+			}
+			if reason = limiter.chargeClass("1001|" + sandboxBudgetHook); reason != "" {
+				release()
+				refused++
+				continue
+			}
+			allowed++
+			active[binding]++
+			held = append(held, heldCall{binding, now.Add(service), release})
+			if i == perSecond {
+				// The relayed class does not consume the host hook's budget.
+				host, _, reason, _ := limiter.acquire("1001")
+				if reason != "" {
+					t.Fatalf("host hook refused during the sandbox stream: %s", reason)
+				}
+				host()
+			}
+		}
+		for _, call := range held {
+			call.release()
+		}
+		return allowed, refused
+	}
+
+	if allowed, refused := run(1, 24, 10, time.Second); allowed != 240 || refused != 0 {
+		t.Fatalf("one ordinary binding: %d allowed, %d refused", allowed, refused)
+	}
+	if allowed, refused := run(4, 24, 10, time.Second); allowed != 960 || refused != 0 {
+		t.Fatalf("four ordinary bindings at 96/s: %d allowed, %d refused", allowed, refused)
+	}
+	if allowed, refused := run(5, 20, 10, 1300*time.Millisecond); allowed != 1000 || refused != 0 {
+		t.Fatalf("five ordinary bindings at 100/s: %d allowed, %d refused", allowed, refused)
+	}
+	if allowed, refused := run(6, 16, 10, 1500*time.Millisecond); allowed != 960 || refused != 0 {
+		t.Fatalf("six ordinary bindings at 96/s: %d allowed, %d refused", allowed, refused)
+	}
+	if allowed, refused := run(20, 5, 10, 3400*time.Millisecond); allowed != 1000 || refused != 0 {
+		t.Fatalf("twenty ordinary bindings at 100/s: %d allowed, %d refused", allowed, refused)
+	}
+	if allowed, refused := run(10, 13, 15, 100*time.Millisecond); refused == 0 || allowed > 200+100*15 {
+		t.Fatalf("over-budget account at 130/s: %d allowed, %d refused", allowed, refused)
+	}
+}
+
+// Managed sandbox requests can remain active for the rendered ingress
+// attempt or receipt window. Calls spread across bindings must still use the
+// account's rate bucket rather than a shorter shared concurrency allowance.
+func TestGAP0490ManagedHookAndReceiptWindows(t *testing.T) {
+	first, retry := connector.SandboxHookAttemptBudgets()
+	for _, tc := range []struct {
+		name     string
+		class    string
+		span     time.Duration
+		bindings int
+	}{
+		{"hook-review-window", sandboxBudgetPending, 3510 * time.Millisecond, 20},
+		{"receipt-review-window", sandboxBudgetReceipt, 3510 * time.Millisecond, 20},
+		{"hook-full-window", sandboxBudgetPending, max(first, retry) - 10*time.Millisecond, 60},
+		{"receipt-full-window", sandboxBudgetReceipt, sandboxHookReceiptWindow - 10*time.Millisecond, 60},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Unix(4_000_000, 0)
+			now := start
+			limiter := &hookCallerLimiter{now: func() time.Time { return now }}
+			active := make([]int, tc.bindings)
+			var releases []func()
+			defer func() {
+				for _, release := range releases {
+					release()
+				}
+			}()
+			calls := sandboxUserHookBurst + int(sandboxUserHookRate*tc.span/time.Second)
+			for i := 0; i < calls; i++ {
+				if i >= sandboxUserHookBurst {
+					now = start.Add(time.Duration(i-sandboxUserHookBurst+1) * time.Second / sandboxUserHookRate)
+				}
+				binding := i % tc.bindings
+				if active[binding] >= 32 {
+					t.Fatalf("binding %d reached its own in-flight limit", binding)
+				}
+				release, _, reason, _ := limiter.acquire("1001|" + tc.class)
+				if reason != "" {
+					t.Fatalf("call %d of %d at %s refused: %s", i+1, calls, now.Sub(start), reason)
+				}
+				if tc.class == sandboxBudgetPending {
+					if reason := limiter.chargeClass("1001|" + sandboxBudgetHook); reason != "" {
+						release()
+						t.Fatalf("hook call %d refused: %s", i+1, reason)
+					}
+				}
+				releases = append(releases, release)
+				active[binding]++
+			}
+			for _, key := range []string{"1001", "1002|" + sandboxBudgetReceipt} {
+				release, _, reason, _ := limiter.acquire(key)
+				if reason != "" {
+					t.Fatalf("independent caller %s refused: %s", key, reason)
+				}
+				release()
+			}
+		})
+	}
+
+	t.Run("single-binding-ordinary", func(t *testing.T) {
+		limiter := &hookCallerLimiter{}
+		for i := 0; i < 24; i++ {
+			release, _, reason, _ := limiter.acquire("1001|" + sandboxBudgetPending)
+			if reason != "" {
+				t.Fatalf("ordinary call %d refused: %s", i+1, reason)
+			}
+			release()
+		}
+	})
 }

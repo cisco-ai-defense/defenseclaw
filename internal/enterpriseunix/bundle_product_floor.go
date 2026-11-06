@@ -60,11 +60,11 @@ func (e *Env) BundleProductFloorRefusal(version string) error {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
-		return &codedError{code: codeProductFloor, err: fmt.Errorf("cannot check the bundle trust anchors, so the release floor of the confirmed policy bundle is unknown: %w; run `defenseclaw-gateway enterprise bundle anchors install --file <approved-bundle-anchors.json> --json` before retrying", err)}
+		return &codedError{code: codeProductFloor, err: fmt.Errorf("cannot check the bundle trust anchors, so the release floor of the confirmed policy bundle is unknown: %w; run `%s` before retrying", err, e.gatewayCommand("enterprise bundle anchors install --file <approved-bundle-anchors.json> --json"))}
 	}
 	floor, err := confirmedBundleProductFloor(e.bundleStore())
 	if err != nil {
-		return &codedError{code: codeProductFloor, err: fmt.Errorf("cannot read the release floor of the confirmed policy bundle: %w; run `%s --json` with a new signed bundle to replace it before retrying", err, bundleApplyCommand)}
+		return &codedError{code: codeProductFloor, err: fmt.Errorf("cannot read the release floor of the confirmed policy bundle: %w; run `%s --json` with a new signed bundle to replace it before retrying", err, e.bundleApplyCommand())}
 	}
 	return bundleProductFloorRefusal(version, floor)
 }

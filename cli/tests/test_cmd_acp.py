@@ -9,15 +9,21 @@ import json
 import os
 import shlex
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import defenseclaw.commands.cmd_acp as cmd_acp_module
+import pytest
 from click.testing import CliRunner
 from defenseclaw.acp_catalog import ACP_AGENT_ENTRY_POINTS
 from defenseclaw.commands.cmd_acp import _write_token, acp_cmd
 from defenseclaw.config import ACPBinding, ACPProfile
+from defenseclaw.winquote import powershell_literal, powershell_literal_value
 
 from tests.helpers import cleanup_app, make_app_context
+
+# How verify asks for its repair: a PowerShell line on Windows (g072 review 3 M2).
+_RUN = "; in PowerShell, run " if os.name == "nt" else "; run "
 
 
 def _repair_command(*args: str) -> str:
@@ -27,7 +33,7 @@ def _repair_command(*args: str) -> str:
     pasted path with spaces or quotes stays one argument.
     """
     if os.name == "nt":
-        return "defenseclaw " + " ".join("'" + value.replace("'", "''") + "'" for value in args)
+        return "defenseclaw " + " ".join(powershell_literal(value) for value in args)
     return shlex.join(["defenseclaw", *args])
 
 
@@ -306,9 +312,8 @@ def test_doctor_reports_acp_bindings_and_fails_on_drift(tmp_path, monkeypatch):
         [row] = drifted.checks
         assert row["status"] == "fail"
         assert "agent executable digest has drifted" in row["detail"]
-        assert row["remediation"].startswith(
-            _repair_command("acp", "setup", "--client", "zed", "--agent", "kiro", "--profile", "default")
-        )
+        repair = _repair_command("acp", "setup", "--client", "zed", "--agent", "kiro", "--profile", "default")
+        assert row["remediation"].startswith(f"in PowerShell, run {repair}" if os.name == "nt" else repair)
         assert "--activate" not in row["remediation"]
     finally:
         cleanup_app(app, db_path, data_dir)
@@ -1148,9 +1153,11 @@ def _repair_args(output: str) -> list[str]:
     import re
     import shlex
 
-    command = output.split("; run ", 1)[1].strip().splitlines()[0]
+    # On Windows the command is a PowerShell line and verify says so (g072 review 3 M2).
+    assert _RUN in output, output
+    command = output.split(_RUN, 1)[1].strip().splitlines()[0]
     if os.name == "nt":
-        words = [value.replace("''", "'") for value in re.findall(r"'((?:[^']|'')*)'", command)]
+        words = [powershell_literal_value(value) for value in re.findall(r"'((?:[^']|'')*)'", command)]
     else:
         words = shlex.split(command)[1:]
     assert words[:2] == ["acp", "setup"], command
@@ -1424,7 +1431,7 @@ def test_missing_editor_settings_is_a_binding_problem(tmp_path, monkeypatch):
         failed = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
         assert failed.exit_code != 0
         assert "editor settings file cannot be used" in failed.output, failed.output
-        assert "; run " in failed.output, failed.output
+        assert _RUN in failed.output, failed.output
     finally:
         cleanup_app(app, db_path, data_dir)
 
@@ -1827,7 +1834,7 @@ def test_changed_alias_is_not_this_runtimes_to_remove(tmp_path, monkeypatch):
             verified = CliRunner().invoke(acp_cmd, ["verify"], obj=app)
             assert verified.exit_code != 0, (label, verified.output)
             assert "'My Kiro' no longer launches the DefenseClaw guard" in verified.output, (label, verified.output)
-            assert "; run defenseclaw " in verified.output, (label, verified.output)
+            assert f"{_RUN}defenseclaw " in verified.output, (label, verified.output)
 
             removed = CliRunner().invoke(acp_cmd, remove_args, obj=app)
             assert removed.exit_code == 0, (label, removed.output)
@@ -2474,3 +2481,43 @@ def test_an_interpreter_entry_that_runs_the_pinned_agent_script_keeps_verify_red
             assert CliRunner().invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "copilot"], obj=app).exit_code == 0
     finally:
         cleanup_app(app, db_path, data_dir)
+
+
+@pytest.mark.parametrize(
+    ("deployment_mode", "data_dir", "expected"),
+    [
+        (
+            "",
+            "/nonexistent/defenseclaw",
+            "defenseclaw 'acp' 'setup' '--client' 'zed' '--agent' 'kiro' '--profile' 'default'",
+        ),
+        (
+            "managed_enterprise",
+            "C:\\ProgramData\\DefenseClaw\\users\\dc-user",
+            "& 'defenseclaw-gateway' enterprise acp setup --client zed --agent kiro --profile default"
+            " --data-dir 'C:\\ProgramData\\DefenseClaw\\users\\dc-user' --api-port 18970"
+            " --guard-binary defenseclaw-acp",
+        ),
+        (
+            "managed_enterprise",
+            "C:\\ProgramData\\DefenseClaw\\users\\O\u2019Brien",
+            "& 'defenseclaw-gateway' enterprise acp setup --client zed --agent kiro --profile default"
+            " --data-dir 'C:\\ProgramData\\DefenseClaw\\users\\O\u2019\u2019Brien' --api-port 18970"
+            " --guard-binary defenseclaw-acp",
+        ),
+    ],
+)
+def test_windows_repair_command_is_pinned_by_a_literal(monkeypatch, deployment_mode, data_dir, expected):
+    """g072 review 4 S2: the Windows repair lines verify prints, pinned without winquote."""
+    profile = SimpleNamespace(mode="observe")
+    cfg = SimpleNamespace(
+        acp=SimpleNamespace(
+            profile_for_pair=lambda _client, _agent: "default", profiles={"default": profile}, mode="observe"
+        ),
+        deployment_mode=deployment_mode,
+        gateway=SimpleNamespace(api_port=18970),
+    )
+    monkeypatch.setattr(cmd_acp_module, "os", SimpleNamespace(name="nt", path=os.path))
+    # A standalone host: on a Windows test host the probe can find a Secure Client install.
+    monkeypatch.setattr(cmd_acp_module, "is_secure_client", lambda _cfg: False)
+    assert cmd_acp_module.setup_repair_command(cfg, "zed", "kiro", data_dir) == expected

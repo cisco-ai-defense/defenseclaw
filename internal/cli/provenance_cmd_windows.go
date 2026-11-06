@@ -33,10 +33,10 @@ func managedWindowsGatewayProvenance(ctx context.Context) (version.Provenance, b
 	if !present {
 		return version.Provenance{}, false, nil
 	}
-	const next = "defenseclaw-gateway enterprise windows status"
+	next := managedWindowsCommand("enterprise", "windows", "status", "--profile", "standalone") + " from an elevated PowerShell prompt"
 	if err != nil {
 		if err.Error() == managedScanAdministratorOnly {
-			return version.Provenance{}, true, errors.New("the managed gateway's provenance needs administrator access; run defenseclaw-gateway provenance show from an elevated Administrator prompt, or ask your administrator to run it")
+			return version.Provenance{}, true, errors.New("the managed gateway's provenance needs administrator access; run " + managedWindowsGatewayCommand("provenance", "show") + " from an elevated PowerShell prompt, or ask your administrator to run it")
 		}
 		return version.Provenance{}, true, fmt.Errorf("cannot read the managed gateway's provenance: %w; check it with: %s", err, next)
 	}

@@ -369,11 +369,13 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 				if windowsStandaloneSkillJudgeDisabled() {
 					result.AddWarning("scanner_judge_missing",
 						"the skill scanner runs without its LLM judge because scanners.skill_scanner.use_llm is false in the admin config "+
-							"(recommended: the quiet policy with the LLM judge); set it to true, with llm.model and its key stored by `enterprise secret set`")
+							"(recommended: the quiet policy with the LLM judge); set it to true, with llm.model and its key stored by "+
+							windowsScannerJudgeSecretCommand())
 				} else {
 					result.AddWarning("scanner_judge_missing",
 						"the scanners run without an LLM judge (recommended: the quiet policy with the LLM judge); "+
-							"set llm.model in the admin config and store its key with `enterprise secret set`, named by enterprise.inspection.llm.credential")
+							"set llm.model in the admin config and store its key with "+windowsScannerJudgeSecretCommand()+
+							", named by enterprise.inspection.llm.credential")
 				}
 			}
 		}
@@ -1423,6 +1425,12 @@ func windowsScannerRuntimeServiceProblem() string {
 		"restore the access it names, then run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair"
 }
 
+// windowsScannerJudgeSecretCommand is the command that stores the LLM
+// judge's key, as an administrator types it (g072 review 2 M3).
+func windowsScannerJudgeSecretCommand() string {
+	return managedWindowsCommand("enterprise", "secret", "set", "--name", "<name>", "--from-file", "<key file>") + " from an elevated PowerShell prompt"
+}
+
 // windowsScannerRuntimeUnavailable says what a scanner runtime that is not
 // ready blocks and what restores it.
 func windowsScannerRuntimeUnavailable(scanners *enterprisestatus.ScannerRuntime) string {
@@ -1430,7 +1438,7 @@ func windowsScannerRuntimeUnavailable(scanners *enterprisestatus.ScannerRuntime)
 	state := scanners.State
 	if state == "not_prepared" && scanners.Problem != "" {
 		return "the skill, MCP and plugin scanner runtime is prepared but damaged (" + scanners.Problem + "), " + blocked +
-			"; run enterprise windows repair, or DefenseClawSetup-Enterprise-Standalone-x64.exe /repair, to unpack it again"
+			"; run " + windowsEnterpriseAdminCommand("repair") + " from an elevated PowerShell prompt, or DefenseClawSetup-Enterprise-Standalone-x64.exe /repair, to unpack it again"
 	}
 	if state == "untrusted" && scanners.Problem != "" {
 		return "the skill, MCP and plugin scanner runtime can be changed by an account other than SYSTEM and Administrators (" +
@@ -1446,7 +1454,7 @@ func windowsScannerRuntimeUnavailable(scanners *enterprisestatus.ScannerRuntime)
 	}
 	if state == "not_prepared" {
 		return "the skill, MCP and plugin scanner runtime is installed but not prepared, " + blocked +
-			"; run enterprise windows repair, or DefenseClawSetup-Enterprise-Standalone-x64.exe /repair, to prepare it"
+			"; run " + windowsEnterpriseAdminCommand("repair") + " from an elevated PowerShell prompt, or DefenseClawSetup-Enterprise-Standalone-x64.exe /repair, to prepare it"
 	}
 	return "the skill, MCP and plugin scanner runtime is missing, " + blocked +
 		"; run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair (or /ensure) to install it"

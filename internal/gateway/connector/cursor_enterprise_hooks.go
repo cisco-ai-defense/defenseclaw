@@ -204,7 +204,7 @@ func renderWindowsCursorAdapterWithTargets(hookBinary, failMode string, managed 
 	rendered, err := renderTemplate(string(tmpl), templateData{
 		FailMode:                normalizeHookFailMode(failMode),
 		Managed:                 managed,
-		HookBinaryPS:            strings.ReplaceAll(hookBinary, "'", "''"),
+		HookBinaryPS:            powershellLiteralBody(hookBinary),
 		HookTimeoutMS:           timeoutMS,
 		CursorTargetModesJSON64: targetModesJSON64,
 	})

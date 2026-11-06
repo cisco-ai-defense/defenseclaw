@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
@@ -125,6 +126,7 @@ def test_mac_status_and_doctor_name_a_peer_listener_hidden_from_lsof() -> None:
     cfg = SimpleNamespace(gateway=SimpleNamespace(api_port=19081))
     with (
         mock.patch.object(cmd_doctor.sys, "platform", "darwin"),
+        mock.patch.object(cmd_doctor, "_trusted_gateway_listener", return_value=cmd_doctor._GatewayTrust("missing", "")),
         mock.patch.object(cmd_doctor, "_gateway_port_holder", return_value=""),
         mock.patch.object(cmd_doctor, "_gateway_api_host", return_value="127.0.0.1"),
         mock.patch.object(
@@ -133,6 +135,62 @@ def test_mac_status_and_doctor_name_a_peer_listener_hidden_from_lsof() -> None:
     ):
         holder = cmd_doctor._foreign_gateway_port_holder(cfg)
     assert "another account" in holder
+
+
+def test_doctor_sidecar_root_listener_uses_root_remedy(monkeypatch) -> None:
+    from defenseclaw.commands import cmd_doctor
+
+    cfg = SimpleNamespace(gateway=SimpleNamespace(api_port=18970))
+    monkeypatch.setattr(
+        cmd_doctor, "_trusted_gateway_listener",
+        lambda _cfg: cmd_doctor._GatewayTrust("root_gateway", "root listener", pid=4242),
+    )
+    monkeypatch.setattr(cmd_doctor, "_gateway_port_holder", lambda _cfg: "another account (uid 0)")
+    holder = cmd_doctor._foreign_gateway_port_holder(cfg)
+    assert holder == cmd_doctor.ROOT_GATEWAY_REASON
+    detail = cmd_doctor._foreign_gateway_port_detail(cfg, holder)
+    remedy = cmd_doctor._foreign_gateway_port_remediation(cfg, holder=holder)
+    assert "sudo env DEFENSECLAW_HOME=" in detail and remedy in detail
+    assert "--api-port" not in detail
+
+
+def test_doctor_names_visible_root_listener_from_trust_evidence(monkeypatch) -> None:
+    from defenseclaw.commands import cmd_doctor
+
+    cfg = SimpleNamespace(gateway=SimpleNamespace(api_port=18970), data_dir="/tmp/defenseclaw-account-home")
+    monkeypatch.setattr(cmd_doctor.sys, "platform", "darwin")
+    monkeypatch.setattr(cmd_doctor, "_gateway_port_holder", lambda _cfg: "PID 4242 (defenseclaw-gateway)")
+    monkeypatch.setattr(
+        cmd_doctor, "_trusted_gateway_listener",
+        lambda _cfg: cmd_doctor._GatewayTrust("root_gateway", "root listener", pid=4242),
+    )
+    assert cmd_doctor._foreign_gateway_port_holder(cfg) == cmd_doctor.ROOT_GATEWAY_REASON
+
+    monkeypatch.setattr(
+        cmd_doctor, "_trusted_gateway_listener",
+        lambda _cfg: cmd_doctor._GatewayTrust("trusted", "own listener", pid=4242),
+    )
+    assert cmd_doctor._foreign_gateway_port_holder(cfg) == ""
+
+
+def test_doctor_names_unlisted_linux_root_listener_without_an_extra_probe(monkeypatch) -> None:
+    from defenseclaw.commands import cmd_doctor
+
+    cfg = SimpleNamespace(gateway=SimpleNamespace(api_port=18970), data_dir="/tmp/defenseclaw-account-home")
+    monkeypatch.setattr(cmd_doctor.sys, "platform", "linux")
+    monkeypatch.setattr(cmd_doctor, "_gateway_port_holder", lambda _cfg: "")
+    monkeypatch.setattr(cmd_doctor, "_gateway_api_host", lambda _cfg: "127.0.0.1")
+    monkeypatch.setattr(
+        cmd_doctor, "_trusted_gateway_listener",
+        lambda _cfg: pytest.fail("an unlisted listener must use the existing connected-peer diagnosis"),
+    )
+    monkeypatch.setattr(
+        gateway, "foreign_loopback_listener",
+        lambda *_args: cmd_doctor.ROOT_GATEWAY_REASON + " " + cmd_doctor._root_gateway_remedy(cfg),
+    )
+    assert cmd_doctor._foreign_gateway_port_holder(cfg) == cmd_doctor.ROOT_GATEWAY_REASON
+    monkeypatch.setattr(gateway, "foreign_loopback_listener", lambda *_args: "")
+    assert cmd_doctor._foreign_gateway_port_holder(cfg) == ""
 
 
 _HEADER = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
@@ -388,7 +446,7 @@ def test_listener_proof_checks_the_named_running_port(monkeypatch) -> None:
     monkeypatch.setattr(
         cmd_doctor, "_managed_gateway_listener_evidence", lambda port, **_k: seen.append(port) or "listener"
     )
-    monkeypatch.setattr(cmd_doctor, "_gateway_listener_trust", lambda proc, listener: (proc, listener))
+    monkeypatch.setattr(cmd_doctor, "_gateway_listener_trust", lambda proc, listener: cmd_doctor._GatewayTrust("unavailable", "stub"))
     cfg = SimpleNamespace(gateway=SimpleNamespace(api_port=19082))
     cmd_doctor._trusted_gateway_listener(cfg, evidence=object(), platform_name="linux", api_port=19080)
     cmd_doctor._trusted_gateway_listener(cfg, evidence=object(), platform_name="linux")
@@ -396,63 +454,160 @@ def test_listener_proof_checks_the_named_running_port(monkeypatch) -> None:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX account semantics")
-def test_this_homes_gateway_run_by_another_account_gets_the_token(monkeypatch) -> None:
-    """The macOS app's privileged helper runs this account's gateway as root.
-
-    lsof lists only this account's sockets, so the listener looked like another
-    account's and the CLI withheld the token from its own gateway (status:
-    "port 18970 is held by a process of another account"). Doctor's complete
-    proof for the port makes it this account's; any other port stays foreign.
-    """
+def test_root_listener_names_the_remedy_and_keeps_the_token_withheld(monkeypatch) -> None:
     from defenseclaw import upgrade_shim
+    from defenseclaw.commands import cmd_doctor
+
+    cfg = SimpleNamespace(data_dir="/tmp/defenseclaw-account-home")
 
     monkeypatch.setattr(upgrade_shim, "managed_descriptor", lambda: None)
     monkeypatch.setattr(
         gateway, "_foreign_loopback_listener_uncached", lambda port, *_a, **_k: "a process of another account"
     )
-    monkeypatch.setattr(gateway, "_this_accounts_gateway_as_another_account", lambda port: port == 18970)
-
-    assert gateway.foreign_loopback_listener("127.0.0.1", 18970) == ""
-    assert "a process of another account" in gateway.foreign_loopback_listener("127.0.0.1", 18980)
+    monkeypatch.setattr(
+        gateway, "_root_gateway_listener_reason",
+        lambda port: cmd_doctor.ROOT_GATEWAY_REASON + " " + cmd_doctor._root_gateway_remedy(cfg) if port == 18970 else "",
+    )
+    problem = gateway.foreign_loopback_listener("127.0.0.1", 18970)
+    assert cmd_doctor.ROOT_GATEWAY_REASON in problem
+    assert "sudo env DEFENSECLAW_HOME=" in problem
+    assert "--api-port" not in problem
+    assert "another account" in gateway.foreign_loopback_listener("127.0.0.1", 18980)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX account semantics")
-def test_only_a_complete_proof_for_the_port_makes_an_unlisted_listener_this_accounts(monkeypatch) -> None:
-    from types import SimpleNamespace
-
+def test_root_listener_classification_requires_complete_home_and_endpoint_proof(monkeypatch) -> None:
     from defenseclaw import config
     from defenseclaw.commands import cmd_doctor
+    from defenseclaw.enforce import asset_lists
 
     monkeypatch.setattr(config, "load", lambda **_kwargs: SimpleNamespace())
-    proven: list[int] = []
+    monkeypatch.setattr(asset_lists, "is_secure_client", lambda _cfg: False)
+    seen: list[int] = []
 
-    def trust(code: str, uid: int):
-        def prove(_cfg, *, api_port=None, **_kwargs):
-            proven.append(api_port)
-            trusted = code == "trusted"
-            return SimpleNamespace(
-                trusted=trusted, code=code, pid=36347 if trusted else 0, process=SimpleNamespace(uid=uid)
-            )
+    def prove(code: str):
+        def trust(_cfg, *, api_port=None, **_kwargs):
+            seen.append(api_port)
+            return SimpleNamespace(code=code, detail="root reason" if code == "root_gateway" else "")
+        return trust
 
-        return prove
-
-    for code, uid, expected in [
-        ("trusted", 0, True),
-        ("trusted", os.getuid(), False),  # this account's own gateway is listed by lsof; nothing to excuse
-        ("missing_listener", 0, False),
-        ("missing", -1, False),
-    ]:
-        monkeypatch.setattr(cmd_doctor, "_trusted_gateway_listener", trust(code, uid))
-        assert gateway._this_accounts_gateway_as_another_account(18970) is expected, (code, uid)
-    assert proven == [18970] * 4
+    for code, expected in (("root_gateway", "root reason"), ("trusted", ""), ("missing_listener", "")):
+        monkeypatch.setattr(cmd_doctor, "_trusted_gateway_listener", prove(code))
+        assert gateway._root_gateway_listener_reason(18970) == expected
+    assert seen == [18970] * 3
 
     def unavailable(*_args, **_kwargs):
         raise RuntimeError("config does not load")
 
     monkeypatch.setattr(cmd_doctor, "_trusted_gateway_listener", unavailable)
-    assert gateway._this_accounts_gateway_as_another_account(18970) is False
+    assert gateway._root_gateway_listener_reason(18970) == ""
 
 
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX per-user root listener")
+def test_trusted_listener_reclassifies_root_without_trusting_its_token(monkeypatch) -> None:
+    from defenseclaw.commands import cmd_doctor
+    from defenseclaw.enforce import asset_lists
+
+    monkeypatch.setattr(asset_lists, "is_secure_client", lambda _cfg: False)
+    monkeypatch.setattr(cmd_doctor, "_gateway_api_host", lambda _cfg: "127.0.0.1")
+    monkeypatch.setattr(cmd_doctor, "_managed_gateway_listener_evidence", lambda *_a, **_k: object())
+    record = SimpleNamespace(start_identity="kernel start", data_dir="/home/account/.defenseclaw")
+    process = SimpleNamespace(uid=0)
+    process_trust = cmd_doctor._GatewayTrust(
+        "trusted", "same home", pid=4242, home_bound=True, record=record, process=process
+    )
+    monkeypatch.setattr(cmd_doctor, "_managed_gateway_process_trust", lambda *_a, **_k: process_trust)
+    monkeypatch.setattr(cmd_doctor, "_gateway_listener_trust", lambda *_a, **_k: process_trust)
+    cfg = SimpleNamespace(gateway=SimpleNamespace(api_port=18970), deployment_mode="")
+    root = cmd_doctor._trusted_gateway_listener(cfg, evidence=object(), platform_name="linux")
+    assert root.code == "root_gateway"
+    assert not root.trusted
+    assert "sudo env DEFENSECLAW_HOME=" in root.detail
+
+    for name, changed in (
+        ("own UID", dict(process=SimpleNamespace(uid=os.getuid()))),
+        ("missing start identity", dict(record=SimpleNamespace(start_identity="", data_dir=record.data_dir))),
+        ("different home", dict(home_bound=False)),
+    ):
+        process_trust = cmd_doctor._GatewayTrust(
+            "trusted", name, pid=4242, home_bound=changed.get("home_bound", True),
+            record=changed.get("record", record), process=changed.get("process", process),
+        )
+        got = cmd_doctor._trusted_gateway_listener(cfg, evidence=object(), platform_name="linux")
+        assert got.code == "trusted" and got.trusted, name
+    cfg.deployment_mode = "managed_enterprise"
+    process_trust = cmd_doctor._GatewayTrust(
+        "trusted", "managed", pid=4242, home_bound=True, record=record, process=process
+    )
+    got = cmd_doctor._trusted_gateway_listener(cfg, evidence=object(), platform_name="linux")
+    assert got.trusted
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux") or os.geteuid() == 0, reason="Linux per-user root diagnosis")
+def test_linux_root_diagnosis_uses_bound_start_identity_when_executable_is_hidden(monkeypatch, tmp_path) -> None:
+    from defenseclaw import doctor_gateway
+    from defenseclaw.commands import cmd_doctor
+    from defenseclaw.enforce import asset_lists
+
+    monkeypatch.setattr(asset_lists, "is_secure_client", lambda _cfg: False)
+    monkeypatch.setattr(cmd_doctor, "_process_uid", lambda _pid: 0)
+    monkeypatch.setattr(cmd_doctor, "pid_alive", lambda _pid: True)
+    monkeypatch.setattr(cmd_doctor, "_linux_root_process_identity_matches", lambda _record: True)
+    monkeypatch.setattr(cmd_doctor, "_linux_root_listener_at", lambda _host, _port: True)
+    home = str(tmp_path)
+    cfg = SimpleNamespace(data_dir=home, deployment_mode="")
+    record = doctor_gateway.PIDRecord(
+        "ok", pid=4242, executable="/home/account/.local/bin/defenseclaw-gateway",
+        data_dir=home, start_identity="kernel start",
+    )
+    def diagnose(row):
+        unavailable = cmd_doctor._GatewayTrust("unavailable", "executable hidden", record=row)
+        return cmd_doctor._linux_root_gateway_diagnosis(cfg, unavailable, "127.0.0.1", 18970, "linux")
+
+    root = diagnose(record)
+    assert root is not None and root.code == "root_gateway" and not root.trusted
+    assert root.pid == 4242 and root.home_bound
+    for changed in (
+        dict(start_identity=""), dict(data_dir=str(tmp_path / "other")),
+        dict(executable="/usr/bin/other"),
+    ):
+        row = doctor_gateway.PIDRecord(
+            "ok", pid=4242, executable=changed.get("executable", record.executable),
+            data_dir=changed.get("data_dir", home),
+            start_identity=changed.get("start_identity", record.start_identity),
+        )
+        assert diagnose(row) is None
+    monkeypatch.setattr(cmd_doctor, "_linux_root_listener_at", lambda _host, _port: False)
+    assert diagnose(record) is None
+    monkeypatch.setattr(cmd_doctor, "_linux_root_listener_at", lambda _host, _port: True)
+    monkeypatch.setattr(cmd_doctor, "_process_uid", lambda _pid: os.getuid())
+    assert diagnose(record) is None
+    monkeypatch.setattr(cmd_doctor, "_process_uid", lambda _pid: 0)
+    cfg.deployment_mode = "managed_enterprise"
+    assert diagnose(record) is None
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux procfs identity")
+def test_linux_hidden_executable_identity_uses_kernel_start_generation() -> None:
+    from defenseclaw import doctor_gateway
+    from defenseclaw.commands import cmd_doctor
+
+    pid = os.getpid()
+    with open(f"/proc/{pid}/stat", encoding="ascii") as stream:
+        raw = stream.read()
+    fields = raw[raw.rfind(")") + 1 :].split()
+    with open(f"/proc/{pid}/comm", encoding="ascii") as stream:
+        command = stream.read().strip()
+    record = doctor_gateway.PIDRecord(
+        "ok", pid=pid, executable=f"/opt/defenseclaw/{command}",
+        start_identity=fields[19], data_dir="/home/account/.defenseclaw",
+    )
+    assert cmd_doctor._linux_root_process_identity_matches(record)
+    stale = doctor_gateway.PIDRecord(
+        "ok", pid=pid, executable=record.executable,
+        start_identity="different", data_dir=record.data_dir,
+    )
+    assert not cmd_doctor._linux_root_process_identity_matches(stale)
 @pytest.mark.skipif(os.name == "nt", reason="POSIX account semantics")
 def test_doctor_binds_another_accounts_gateway_to_its_own_runtime_record(tmp_path, monkeypatch) -> None:
     """Without a socket table it may read, doctor binds the verified gateway of
@@ -516,7 +671,7 @@ def test_doctor_binds_another_accounts_gateway_to_its_own_runtime_record(tmp_pat
     try:
         publish(pid, port)
         trust = prove()
-        assert (trust.code, trust.pid, trust.trusted) == ("trusted", pid, True)
+        assert (trust.code, trust.pid, trust.trusted) == ("root_gateway", pid, False)
         # This account's own gateway is listed by lsof: no listener means none.
         assert prove(os.getuid()).code == "missing_listener"
         # The record must name this port, and this process.
@@ -617,7 +772,7 @@ def test_doctor_probes_only_the_exact_ip_the_runtime_record_names(
         listener.close()
     other_account_probes = [address for address in probed if address[1] == port]
     if trusted:
-        assert (trust.code, trust.pid, trust.trusted) == ("trusted", pid, True)
+        assert (trust.code, trust.pid, trust.trusted) == ("root_gateway", pid, False)
         assert other_account_probes == [("127.0.0.1", port)]
     else:
         assert trust.trusted is False

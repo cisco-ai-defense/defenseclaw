@@ -136,6 +136,32 @@ func TestStandaloneForeignOwnedDataDirLinkStaysRefused(t *testing.T) {
 	requireOutsideDataDirTreeUnchanged(t, outside, canary)
 }
 
+func TestStandaloneLifecycleValidationSkipsAdministratorOwnedDataDirLink(t *testing.T) {
+	target := deferredPendingProofFixture(t, true)
+	dataDir := filepath.Join(target.UserHome, ".defenseclaw")
+	outside, canary := outsideDataDirTree(t, target.UserHome)
+	admin, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plantWindowsAccountJunction(t, dataDir, outside, admin)
+	manifest := Manifest{Version: 1, Targets: []ManifestTarget{target}}
+	plan, err := PlanWindowsManagedRuntimeRootsForValidationSkippingAccountFailures(
+		manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, strings.Repeat("a", 64))
+	if err != nil || len(plan.Roots) != 0 || len(plan.SkippedProfiles) != 1 ||
+		plan.SkippedProfiles[0].SID != target.SID ||
+		!strings.Contains(plan.SkippedProfiles[0].Reason, "reject noncanonical managed runtime baseline") {
+		t.Fatalf("lifecycle validation plan = %+v, %v; want one account left pending", plan, err)
+	}
+	if pendingErr := RequireWindowsEnterpriseDeferredTargetPending(target); pendingErr == nil {
+		t.Fatal("the account's foreign-owned folder became trusted")
+	}
+	requireOutsideDataDirTreeUnchanged(t, outside, canary)
+	if owner, err := windowsPathOwnerNoFollow(dataDir); err != nil || owner == nil || !owner.Equals(admin) {
+		t.Fatalf("junction owner changed: %v, %v", owner, err)
+	}
+}
+
 func TestSecureClientDeferredOwnDataDirLinkStaysRefused(t *testing.T) {
 	target := deferredPendingProofFixture(t, false)
 	sid := currentWindowsTestSID(t)

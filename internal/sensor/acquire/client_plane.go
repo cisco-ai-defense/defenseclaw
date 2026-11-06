@@ -159,13 +159,9 @@ func (s *helperPlaneSource) Coverage() plane.Coverage {
 	if coverage.Mechanism != "" {
 		coverage.Mechanism += " (via the sensor helper)"
 	}
-	if dropped := s.buffer.Dropped(); dropped > 0 {
-		// The gateway's own buffer for the helper's stream: a host plane
-		// that falls behind drops here, not in the helper (GAP-0071).
-		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), fmt.Sprintf(
-			"%d events from the sensor helper were dropped from the gateway's event buffer under back-pressure", dropped))
-	}
-	return coverage
+	// The gateway's own buffer for the helper's stream, in the words every
+	// source uses (GAP-0071, cowork-1-0-8 GAP-0072).
+	return plane.WithBufferDrops(coverage, s.buffer.Dropped(), plane.HelperStreamBuffer)
 }
 
 // Close ends the subscription.

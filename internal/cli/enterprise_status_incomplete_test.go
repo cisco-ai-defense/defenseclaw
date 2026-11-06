@@ -129,6 +129,13 @@ func TestEnterpriseSecurityIncompleteIgnoresInformationalWarnings(t *testing.T) 
 	}
 
 	result.Warnings = nil
+	result.AddWarning("claude_project_skipped", "one project was skipped")
+	addEnterpriseSecurityIncompleteReasons(result, false)
+	if len(result.Warnings) != 2 || result.Warnings[1].Code != "security_incomplete" {
+		t.Fatalf("a project note suppressed the reason: %+v", result.Warnings)
+	}
+
+	result.Warnings = nil
 	result.AddWarning("cursor_adapter_restored", "restored")
 	result.AddWarning("user_registrations_pending", "pending")
 	addEnterpriseSecurityIncompleteReasons(result, false)

@@ -186,8 +186,10 @@ var windowsManagedClaudeGuardianLeftoverRemover = func() error {
 	return removeWindowsManagedClaudeTransactionFolderOutsideLifecycle(dir, filepath.Join(roots.LifecycleDir, "lifecycle.lock"))
 }
 
-// windowsManagedClaudeLifecycleLock is replaceable in tests.
-var windowsManagedClaudeLifecycleLock = acquireWindowsEnterpriseLifecycleLock
+// windowsManagedClaudeLifecycleLock is replaceable in tests. It never waits:
+// the guardian's pass gives the folder up while a lifecycle run holds the lock
+// (GAP-0646 review 2).
+var windowsManagedClaudeLifecycleLock = tryWindowsEnterpriseLifecycleLock
 
 // removeWindowsManagedClaudeTransactionFolderOutsideLifecycle removes the
 // transaction folder holding the lifecycle lock, and does nothing while a

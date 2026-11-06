@@ -44,6 +44,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from functools import cmp_to_key
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -126,6 +127,7 @@ from defenseclaw.connector_contracts import (
     stable_agent_version,
 )
 from defenseclaw.context import SETUP_RESTART_HANDLED_META_KEY, SETUP_SECRET_CHANGED_META_KEY, AppContext, pass_ctx
+from defenseclaw.doctor_health import VersionRange, supported_range_text, version_range_label
 from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
     UnsafePathError,
@@ -6159,53 +6161,21 @@ def _connector_contract_upgrade_guidance(
         return f"Use a {label} version covered by a DefenseClaw hook contract, then run: {rerun}."
 
     contract = contracts[0]
-    if len(contracts) > 1 and normalized_version:
+    ranged = _ranged_contracts(contracts)
+    if len(contracts) > 1 and normalized_version and ranged:
         # A connector may carry consecutive reviewed contracts. For a version
         # below or above the entire covered span, point at the nearest exact
         # contract so remediation names a useful boundary instead of falling
-        # back to a generic "covered version" message.
-        ranged = [
-            candidate
-            for candidate in contracts
-            if candidate.min_agent_version or candidate.max_agent_version
-        ]
-        if ranged:
-            first = ranged[0]
-            last = ranged[0]
-            for candidate in ranged[1:]:
-                if candidate.min_agent_version and (
-                    not first.min_agent_version
-                    or compare_agent_versions(
-                        candidate.min_agent_version,
-                        first.min_agent_version,
-                    )
-                    < 0
-                ):
-                    first = candidate
-                if candidate.max_agent_version and (
-                    not last.max_agent_version
-                    or compare_agent_versions(
-                        candidate.max_agent_version,
-                        last.max_agent_version,
-                    )
-                    > 0
-                ):
-                    last = candidate
-            if first.min_agent_version and compare_agent_versions(
-                normalized_version,
-                first.min_agent_version,
-            ) < 0:
-                contract = first
-            elif last.max_agent_version and compare_agent_versions(
-                normalized_version,
-                last.max_agent_version,
-            ) >= 0:
-                contract = last
-            else:
-                return (
-                    f"Use a {label} version covered by a DefenseClaw hook contract, "
-                    f"then run: {rerun}."
-                )
+        # back to a generic "covered version" message. The latest contract is
+        # the one that starts last: without an upper bound, nothing is above
+        # the span (a capped older contract was taken for the last one).
+        first, last = ranged[0], ranged[-1]
+        if first.min_agent_version and compare_agent_versions(normalized_version, first.min_agent_version) < 0:
+            contract = first
+        elif last.max_agent_version and compare_agent_versions(normalized_version, last.max_agent_version) >= 0:
+            contract = last
+        else:
+            return f"Use a {label} version covered by a DefenseClaw hook contract, then run: {rerun}."
     requirement_parts: list[str] = []
     pins = contract.exact_agent_versions
     if normalized_version:
@@ -6221,21 +6191,37 @@ def _connector_contract_upgrade_guidance(
         )
     if pins:
         requirement_parts.append("one of " + ", ".join(pins))
-    range_requirement = ""
-    if contract.min_agent_version and contract.max_agent_version:
-        range_requirement = f">={contract.min_agent_version} and <{contract.max_agent_version}"
-    elif contract.min_agent_version:
-        range_requirement = f">={contract.min_agent_version}"
-    elif contract.max_agent_version:
-        range_requirement = f"<{contract.max_agent_version}"
+    range_requirement = version_range_label(contract.min_agent_version, contract.max_agent_version)
     if range_requirement:
         requirement_parts.append(range_requirement)
     requirement = " or ".join(requirement_parts) if requirement_parts else "an explicitly supported version"
+    # With consecutive contracts, the nearest one alone reads as if newer
+    # releases were unsupported (GAP-0049: "claudecode-hooks-v1 requires
+    # >=2.1.154 and <2.1.219" for Claude Code 2.1.121, though
+    # claudecode-hooks-v2 covers >=2.1.219). Name the whole supported range.
+    supported = (
+        supported_range_text(
+            VersionRange(
+                contract_id=c.contract_id,
+                min_inclusive=c.min_agent_version,
+                max_exclusive=c.max_agent_version,
+            )
+            for c in ranged
+        )
+        if len(contracts) > 1
+        else ""
+    )
     if normalized_version and range_requirement:
         if contract.min_agent_version and compare_agent_versions(
             normalized_version,
             contract.min_agent_version,
         ) < 0:
+            if supported:
+                return (
+                    f"Upgrade {label}; installed version {normalized_version} is older than the validated "
+                    f"minimum. DefenseClaw supports {label} {supported}; {contract.contract_id} covers "
+                    f"{requirement}. Then run: {rerun}."
+                )
             return (
                 f"Upgrade {label}; installed version {normalized_version} is older than the validated "
                 f"minimum. {contract.contract_id} requires {requirement}. Then run: {rerun}."
@@ -6246,12 +6232,20 @@ def _connector_contract_upgrade_guidance(
         ) >= 0:
             return (
                 f"{label} {normalized_version} is newer than DefenseClaw's validated range "
-                f"({requirement}). Use a validated version, or update DefenseClaw when a matching "
-                f"hook contract is available; then run: {rerun}."
+                f"({supported or requirement}). Use a validated version, or update DefenseClaw when a "
+                f"matching hook contract is available; then run: {rerun}."
             )
     return (
         f"{label} {normalized_version or 'version'} is outside the validated hook contract; "
         f"{contract.contract_id} requires {requirement}. Use a covered version, then run: {rerun}."
+    )
+
+
+def _ranged_contracts(contracts: tuple[Any, ...]) -> list[Any]:
+    """The contracts that bound a version range, oldest first."""
+    return sorted(
+        (c for c in contracts if c.min_agent_version or c.max_agent_version),
+        key=cmp_to_key(lambda a, b: compare_agent_versions(a.min_agent_version or "0", b.min_agent_version or "0")),
     )
 
 
@@ -17762,6 +17756,16 @@ def _gateway_lifecycle_executable(
     native: bool = False,
     search_path: str | None = None,
 ) -> str | None:
+    """Return the selected gateway only when its executable custody is trusted."""
+    candidate = _gateway_lifecycle_candidate(native=native, search_path=search_path)
+    return _trusted_gateway_lifecycle_executable(candidate) if candidate else None
+
+
+def _gateway_lifecycle_candidate(
+    *,
+    native: bool = False,
+    search_path: str | None = None,
+) -> str | None:
     """Resolve one stable executable for a complete gateway lifecycle call.
 
     A packaged Windows CLI must use the gateway beside its verified embedded
@@ -17782,7 +17786,8 @@ def _gateway_lifecycle_executable(
     if packaged_windows_install_root():
         # A corroborated package with a missing sibling is broken; fail closed
         # instead of allowing PATH/current-directory executable shadowing.
-        return packaged_windows_gateway_path()
+        packaged = packaged_windows_gateway_path()
+        return str(Path(packaged).resolve()) if packaged else None
     raw_search_path = os.environ.get("PATH", os.defpath) if search_path is None else search_path
     current_directory = os.path.normcase(os.path.realpath(os.curdir))
     search_directories: list[str] = []
@@ -17822,79 +17827,63 @@ def _gateway_lifecycle_executable(
     resolved = Path(executable).expanduser().resolve()
     if native and os.name == "nt" and resolved.suffix.lower() != ".exe":
         return None
-    return _trusted_gateway_lifecycle_executable(str(resolved))
+    return str(resolved)
+
+
+def _gateway_lifecycle_resolution(
+    *,
+    native: bool = False,
+    search_path: str | None = None,
+) -> tuple[str | None, str]:
+    """Select once and retain the custody result for a lifecycle message."""
+    candidate = _gateway_lifecycle_candidate(native=native, search_path=search_path)
+    return _trusted_gateway_lifecycle_resolution(candidate) if candidate else (None, "")
 
 
 def _trusted_gateway_lifecycle_executable(executable: str) -> str | None:
     """Return a custody-checked concrete executable for lifecycle mutation."""
+    return _trusted_gateway_lifecycle_resolution(executable)[0]
+
+
+def _trusted_gateway_lifecycle_resolution(executable: str) -> tuple[str | None, str]:
+    """Return the trusted path or the reason the selected path was refused."""
     if not executable or not os.path.isabs(executable):
-        return None
+        return None, ""
     resolved = str(Path(executable).resolve())
-    if os.name != "nt":
-        from defenseclaw.file_permissions import trusted_posix_executable_path
-
-        try:
-            return trusted_posix_executable_path(resolved)
-        except OSError:
-            return None
-
-    from defenseclaw.file_permissions import windows_acl_write_error
-    from defenseclaw.gateway import packaged_windows_gateway_path
-
-    packaged = packaged_windows_gateway_path()
-    if packaged:
-        try:
-            if os.path.samefile(resolved, packaged):
-                return resolved
-        except OSError:
-            pass
-    for candidate in (resolved, os.path.dirname(resolved)):
-        if windows_acl_write_error(candidate, trust_administrators=True) is not None:
-            return None
-    return resolved
-
-
-def _refused_gateway_lifecycle_candidate(search_path: str | None = None) -> str:
-    """Name an installed gateway the lifecycle custody check refused, or "".
-
-    The lifecycle reported such a binary as "binary not found" with a build
-    hint, although the gateway was installed and only its ACL or mode was
-    refused.
-    """
-    from defenseclaw.gateway import GATEWAY_BIN_NAME, canonical_install_path, packaged_windows_install_root
-
-    if os.name == "nt" and packaged_windows_install_root():
-        return ""
-    raw_search_path = os.environ.get("PATH", os.defpath) if search_path is None else search_path
-    found = shutil.which(GATEWAY_BIN_NAME, path=raw_search_path)
-    if (not found or not os.path.isabs(found)) and os.name == "nt":
-        # The per-user installer's folder, which the lifecycle also falls
-        # back to.
-        canonical = canonical_install_path()
-        found = canonical if os.path.isfile(canonical) else ""
-    if not found or not os.path.isabs(found):
-        return ""
-    found = str(Path(found).resolve())
     if os.name != "nt":
         from defenseclaw.file_permissions import UnsafePathError, trusted_posix_executable_path, unsafe_gateway_remedy
 
         try:
-            trusted_posix_executable_path(found)
+            return trusted_posix_executable_path(resolved), ""
         except UnsafePathError as exc:
-            return f"refusing to run {found}: {unsafe_gateway_remedy(exc)}"
-        return ""
-    from defenseclaw.file_permissions import windows_acl_write_error
+            return None, f"refusing to run {resolved}: {unsafe_gateway_remedy(exc)}"
+        except OSError:
+            return None, ""
 
-    for candidate in (found, os.path.dirname(found)):
-        problem = windows_acl_write_error(candidate, trust_administrators=True)
+    custody_problem = _windows_gateway_lifecycle_custody_problem(resolved)
+    if custody_problem is not None:
+        candidate, problem = custody_problem
+        return None, (
+            f"refusing to run {resolved}: {candidate}: {problem}. Restore ownership and write access "
+            "to this account or a trusted Windows system controller (SYSTEM, BUILTIN Administrators, "
+            "TrustedInstaller), then retry. For an installed gateway, rerun the DefenseClaw installer "
+            "to restore its permissions"
+        )
+    return resolved, ""
+
+
+def _windows_gateway_lifecycle_custody_problem(executable: str) -> tuple[str, str] | None:
+    """Check the executable and its folder against the shared Windows custody set."""
+    for candidate in (executable, os.path.dirname(executable)):
+        problem = windows_acl_custody_write_error(candidate, allow_current_user=True)
         if problem is not None:
-            return (
-                f"refusing to run {found}: {candidate}: {problem}; only this account, SYSTEM and "
-                "Administrators may write the gateway and its folder. Run the DefenseClaw installer "
-                "again, which restricts "
-                "the folder, or remove the other accounts' write access"
-            )
-    return ""
+            return candidate, problem
+    return None
+
+
+def _refused_gateway_lifecycle_candidate(search_path: str | None = None) -> str:
+    """Name the custody reason for the gateway selected by the lifecycle."""
+    return _gateway_lifecycle_resolution(search_path=search_path)[1]
 
 
 # A lifecycle command's own 30 s progress lines go to its captured output, so

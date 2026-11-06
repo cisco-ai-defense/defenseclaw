@@ -233,7 +233,7 @@ func runWindowsManagedHooksLifecycleWithStagedRetire(
 		action != "prune-orphaned-selectors" {
 		return fail(fmt.Errorf("unsupported managed-hook lifecycle snapshot action %q", action))
 	}
-	if err := enterpriseHooksNativePlatformPreflight(); err != nil {
+	if err := enterpriseHooksPlatformPreflight(); err != nil {
 		return fail(err)
 	}
 	ctx, err := resolveWindowsManagedHooksLifecycleContext(stagedRetire)

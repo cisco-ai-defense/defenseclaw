@@ -11,6 +11,9 @@ import (
 )
 
 func TestMacOSPrivacySkipCarriesPreviousManifest(t *testing.T) {
+	// The scan must not read this host's process table: a live process
+	// matching a signature adds a gone signal and the count flakes.
+	stubProcessSnapshotSource(t, func() ([]processInfo, error) { return nil, nil })
 	oldOS, oldFDA := discoveryGOOS, macOSFullDiskAccess
 	t.Cleanup(func() { discoveryGOOS, macOSFullDiskAccess = oldOS, oldFDA })
 	discoveryGOOS = "darwin"
