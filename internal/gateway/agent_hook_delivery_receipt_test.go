@@ -44,6 +44,11 @@ func newManagedHookAuditFixture(t *testing.T, wrap func(http.ResponseWriter) htt
 	return newManagedHookAuditFixtureFor(t, "claudecode", wrap)
 }
 
+func newManagedHookAuditFixtureInDir(t *testing.T, directory string) managedHookAuditFixture {
+	t.Helper()
+	return newManagedHookAuditFixtureForExportingToInDir(t, directory, "claudecode", nil, nil)
+}
+
 func newManagedHookAuditFixtureFor(t *testing.T, connectorName string, wrap func(http.ResponseWriter) http.ResponseWriter) managedHookAuditFixture {
 	t.Helper()
 	return newManagedHookAuditFixtureForCollectingNo(t, connectorName, wrap)
@@ -79,9 +84,17 @@ func newManagedHookAuditFixtureForExportingTo(
 	remote delivery.Adapter, off ...observability.Bucket,
 ) managedHookAuditFixture {
 	t.Helper()
+	return newManagedHookAuditFixtureForExportingToInDir(t, t.TempDir(), connectorName, wrap, remote, off...)
+}
+
+func newManagedHookAuditFixtureForExportingToInDir(
+	t *testing.T, directory, connectorName string, wrap func(http.ResponseWriter) http.ResponseWriter,
+	remote delivery.Adapter, off ...observability.Bucket,
+) managedHookAuditFixture {
+	t.Helper()
 	installCorrelationHMACForTest()
 	installDefaultProfileConnector(t, connectorName)
-	fixture := newSidecarRuntimeFixtureExportingTo(t, nil, remote, off...)
+	fixture := newSidecarRuntimeFixtureExportingToInDir(t, directory, nil, remote, off...)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
 	if err != nil {
 		t.Fatal(err)
