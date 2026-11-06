@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -436,9 +437,9 @@ type outageToolPayload struct {
 	CWD  string                 `json:"cwd"`
 }
 
-// outageToolDecision reuses the hook target reader on the rare path where the
-// gateway is unavailable. The installed account and its file system, rather
-// than the agent's environment, supply the protected-state paths.
+// outageToolDecision checks named protected targets on the rare path where
+// the gateway is unavailable. The saved tier chooses whether ordinary calls
+// may proceed; this check does not interpret the agent's environment.
 func outageToolDecision(input io.Reader, dataDir string) string {
 	const maxPayload = 256 << 10
 	raw, err := io.ReadAll(io.LimitReader(input, maxPayload+1))
@@ -483,70 +484,80 @@ func outageToolDecision(input io.Reader, dataDir string) string {
 			}
 		}
 	}
-	if outagePayloadNamesProtected(payload.Args, "", cwd, home, dataDir, nil, 0) {
+	if outagePayloadNamesProtected(payload.Args, cwd, home, dataDir) {
 		return "protected"
 	}
 	return "open"
 }
 
-func outagePayloadNamesProtected(value interface{}, key, cwd, home, dataDir string, env map[string]interface{}, depth int) bool {
-	if depth > 16 {
-		return true
+func outagePayloadNamesProtected(args map[string]interface{}, cwd, home, dataDir string) bool {
+	type field struct {
+		key   string
+		value interface{}
 	}
-	switch item := value.(type) {
-	case map[string]interface{}:
-		if ownEnv, ok := item["env"].(map[string]interface{}); ok {
-			env = ownEnv
-		}
-		for childKey, child := range item {
-			if strings.EqualFold(childKey, "env") {
-				// Environment values are data until the command expands them.
-				continue
-			}
-			if outagePayloadNamesProtected(child, childKey, cwd, home, dataDir, env, depth+1) {
-				return true
-			}
-		}
-	case []interface{}:
-		for _, child := range item {
-			if outagePayloadNamesProtected(child, key, cwd, home, dataDir, env, depth+1) {
-				return true
-			}
-		}
-	case string:
-		if item == "" {
-			return false
-		}
-		switch strings.ToLower(key) {
-		case "command", "cmd", "script", "command_line", "commandline":
-			known := map[string]string{"DEFENSECLAW_HOME": dataDir}
-			for name, value := range env {
-				if path, ok := value.(string); ok {
-					known[name] = path
+	stack := []field{{value: args}}
+	for len(stack) != 0 {
+		current := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		switch item := current.value.(type) {
+		case map[string]interface{}:
+			for key, value := range item {
+				if !strings.EqualFold(key, "env") {
+					stack = append(stack, field{key: key, value: value})
 				}
 			}
-			targets, parsed := hookpaths.KnownEnvironmentWriteTargets(item, cwd, home, known)
-			if !parsed {
-				return hookpaths.ActionStateTargetMention(item, cwd, home) ||
-					hookpaths.ActionCommandDecision(item, cwd, home) == "protected-target"
+		case []interface{}:
+			for _, value := range item {
+				stack = append(stack, field{key: current.key, value: value})
 			}
-			for _, target := range targets {
-				if outagePathProtected(target, cwd, home, dataDir) {
+		case string:
+			if item == "" {
+				continue
+			}
+			switch strings.ToLower(current.key) {
+			case "command", "cmd", "script", "command_line", "commandline":
+				if outageCommandNamesProtected(item, cwd, home, dataDir) {
+					return true
+				}
+			case "path", "file", "filepath", "file_path", "target", "destination", "dest", "output", "output_path", "filename":
+				path := strings.ReplaceAll(strings.ReplaceAll(item, "${HOME}", home), "$HOME", home)
+				if path == "~" {
+					path = home
+				} else if strings.HasPrefix(path, "~/") {
+					path = filepath.Join(home, path[2:])
+				}
+				if !filepath.IsAbs(path) {
+					path = filepath.Join(cwd, path)
+				}
+				if outagePathProtected(path, cwd, home, dataDir) {
 					return true
 				}
 			}
-			return hookpaths.ActionCommandDecision(item, cwd, home) == "protected-target"
-		case "path", "file", "filepath", "file_path", "target", "destination", "dest", "output", "output_path", "filename":
-			path := strings.ReplaceAll(strings.ReplaceAll(item, "${HOME}", home), "$HOME", home)
-			if path == "~" {
-				path = home
-			} else if strings.HasPrefix(path, "~/") {
-				path = filepath.Join(home, path[2:])
+		}
+	}
+	return false
+}
+
+// The hook's ActionFacts reader supplies literal path operands. Each name
+// then goes through the same hookpaths protected-target check as a direct
+// file tool. Unknown shell state does not become a protected finding.
+func outageCommandNamesProtected(command, cwd, home, dataDir string) bool {
+	facts := actionfacts.Analyze(actionfacts.Input{Tool: "exec", Command: command, CWD: cwd, ActiveHome: home})
+	for _, path := range facts.Paths {
+		target := path.Resolved
+		if target == "" {
+			target = path.Normalized
+		}
+		if target == "" {
+			target = path.Value
+		}
+		if target != "" {
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(cwd, target)
 			}
-			if !filepath.IsAbs(path) {
-				path = filepath.Join(cwd, path)
+			if outagePathProtected(target, cwd, home, dataDir) {
+				return true
 			}
-			return outagePathProtected(path, cwd, home, dataDir)
 		}
 	}
 	return false
