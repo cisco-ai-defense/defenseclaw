@@ -192,8 +192,15 @@ func snapshotTarget(root string, fullTree bool) (*TargetSnapshot, error) {
 		if !info.Mode().IsRegular() {
 			if fullTree {
 				// A special entry can wait for a peer when opened. Keep its mode
-				// in the plugin snapshot without changing the legacy scope.
-				allHashes = append(allHashes, rel+":special:"+info.Mode().String())
+				// in the plugin snapshot without changing the legacy scope. A
+				// reparse entry that is not reported as a symlink, such as a
+				// Windows junction (ModeIrregular), still names a target:
+				// record it, so a retarget changes the snapshot.
+				entry := rel + ":special:" + info.Mode().String()
+				if target, readErr := os.Readlink(path); readErr == nil {
+					entry += ":link:" + target
+				}
+				allHashes = append(allHashes, entry)
 			}
 			return nil
 		}
