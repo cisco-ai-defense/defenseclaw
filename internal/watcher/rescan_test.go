@@ -51,6 +51,25 @@ func TestCompareSnapshots_NoDrift(t *testing.T) {
 	}
 }
 
+func TestGAP0034SnapshotIdentityDoesNotCreateConfigDrift(t *testing.T) {
+	baseline := &audit.SnapshotRow{
+		TargetType:       string(InstallMCP),
+		DependencyHashes: `{}`,
+		ConfigHashes:     `{"mcp.servers.notes":"hash"}`,
+		NetworkEndpoints: `[]`,
+	}
+	current := &TargetSnapshot{
+		DependencyHashes: map[string]string{},
+		ConfigHashes: map[string]string{
+			"mcp.servers.notes":    "hash",
+			mcpSnapshotIdentityKey: `{"name":"notes","connector":"claudecode"}`,
+		},
+	}
+	if deltas := compareSnapshots(baseline, current); len(deltas) != 0 {
+		t.Fatalf("identity metadata produced a drift alert: %+v", deltas)
+	}
+}
+
 func TestCompareSnapshots_DependencyChanged(t *testing.T) {
 	baseline := &audit.SnapshotRow{
 		DependencyHashes: `{"requirements.txt":"abc123"}`,
