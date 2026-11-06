@@ -328,12 +328,15 @@ def test_claude_chain_view_and_guard_drift(tmp_path, monkeypatch):
     monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
     chain = tmp_path / "chain"
     chain.mkdir()
-    guard = chain / "defenseclaw-hook-guard.exe"
-    approved = chain / "defenseclaw-hook-guard.approved"
+    generation = "chain-abc123"
+    pair = chain / generation
+    pair.mkdir()
+    guard = pair / "defenseclaw-hook-guard.exe"
+    approved = pair / "defenseclaw-hook-guard.approved"
     body = b"approved guard image"
     guard.write_bytes(body)
     approved.write_bytes(body)
-    (chain / "chain.json").write_text(json.dumps({"guard_sha256": hashlib.sha256(body).hexdigest()}))
+    (chain / "chain.json").write_text(json.dumps({"guard_sha256": hashlib.sha256(body).hexdigest(), "generation": generation}))
     launcher = str(tmp_path / "defenseclaw-hook.exe")
     command = "C:\\Windows\\System32\\cmd.exe"
     compare = "C:\\Windows\\System32\\fc.exe"
