@@ -1898,7 +1898,7 @@ func actionProtectedStatePath(value string, home *actionStateHome) bool {
 	if err != nil || !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
 		return false
 	}
-	_, same := ResolveActiveStateHardlinkTarget(resolved, home.home)
+	_, same := resolveActiveStateHardlinkTargetResolved(resolved, home.home)
 	return same
 }
 
@@ -1911,6 +1911,11 @@ func ResolveActiveStateHardlinkTarget(value, home string) (string, bool) {
 	if !ok {
 		return "", false
 	}
+	return resolveActiveStateHardlinkTargetResolved(resolved, home)
+}
+
+// The caller may already have resolved the target during the same evaluation.
+func resolveActiveStateHardlinkTargetResolved(resolved, home string) (string, bool) {
 	info, err := pathStat(resolved)
 	if err != nil || !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
 		return "", false

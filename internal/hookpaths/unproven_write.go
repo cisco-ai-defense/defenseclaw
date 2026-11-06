@@ -1944,7 +1944,7 @@ func protectedReachTextPathWithState(path string, protected protectedFiles, ssh,
 		if physicalRoot, ok := memo.resolveWriteTarget(stateRoot); ok && pathAtOrUnder(resolved, physicalRoot) {
 			return true
 		}
-		if _, same := ResolveActiveStateHardlinkTarget(resolved, filepath.Dir(stateRoot)); same {
+		if _, same := resolveActiveStateHardlinkTargetResolved(resolved, filepath.Dir(stateRoot)); same {
 			return true
 		}
 	}
