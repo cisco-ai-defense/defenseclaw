@@ -37,7 +37,8 @@ type projectSkillRoots struct {
 	changed chan struct{}
 	// unverified holds, by root key, the project skill folders a managed
 	// Windows gateway could not verify (GAP-1356): they are not watched,
-	// their skills are refused, and the watcher health names them.
+	// and the watcher health names them. Guardian admission failures refuse
+	// the skill; caller-inspected profile roots follow the policy mode.
 	unverified map[string]projectSkillRootRefusal
 	// grant asks the hook guardian to let the gateway read a project skill
 	// folder; nil where no guardian grants reads.
@@ -48,8 +49,9 @@ type projectSkillRoots struct {
 }
 
 type projectSkillRootRefusal struct {
-	path, reason string
-	at           time.Time
+	path, reason    string
+	at              time.Time
+	policyModeAware bool
 }
 
 // projectSkillRootRetry is how long a project skill folder that could not
@@ -164,27 +166,42 @@ func (p *projectSkillRoots) readGranter() func(targetType, path string) error {
 
 // refuse records root as a project skill folder that could not be verified.
 func (p *projectSkillRoots) refuse(root, reason string, now time.Time) {
+	p.refuseWithPolicyMode(root, reason, now, false)
+}
+
+// refuseWithPolicyMode records a caller-inspected profile root. These roots
+// have no install admission path, so observe mode reports their finding while
+// action mode refuses the selected skill. Guardian refusals remain closed in
+// every mode because the required admission check could not complete.
+func (p *projectSkillRoots) refuseWithPolicyMode(root, reason string, now time.Time, policyModeAware bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.unverified == nil {
 		p.unverified = map[string]projectSkillRootRefusal{}
 	}
-	p.unverified[projectRootKey(root)] = projectSkillRootRefusal{path: filepath.Clean(root), reason: reason, at: now}
+	p.unverified[projectRootKey(root)] = projectSkillRootRefusal{
+		path: filepath.Clean(root), reason: reason, at: now, policyModeAware: policyModeAware,
+	}
 }
 
 // refusal returns why root could not be verified, and whether that was less
 // than projectSkillRootRetry before now.
 func (p *projectSkillRoots) refusal(root string, now time.Time) (reason string, recent bool) {
+	reason, recent, _ = p.refusalWithPolicyMode(root, now)
+	return reason, recent
+}
+
+func (p *projectSkillRoots) refusalWithPolicyMode(root string, now time.Time) (reason string, recent bool, policyModeAware bool) {
 	if p == nil {
-		return "", false
+		return "", false, false
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	refusal, ok := p.unverified[projectRootKey(root)]
 	if !ok {
-		return "", false
+		return "", false, false
 	}
-	return refusal.reason, now.Sub(refusal.at) < projectSkillRootRetry
+	return refusal.reason, now.Sub(refusal.at) < projectSkillRootRetry, refusal.policyModeAware
 }
 
 // unverifiedFolders lists, sorted, the project skill folders that could
