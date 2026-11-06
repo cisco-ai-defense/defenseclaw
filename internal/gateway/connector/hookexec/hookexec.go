@@ -1036,7 +1036,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		retry := retryingAfterOutage
 		var check *perUserPeerCheck
 		onConnect := func() {
-			if retry {
+			if retry || opts.ManagedEnterprise {
 				opts.answerWatch.noDecisionPending()
 			}
 			// A gateway that only just started and has not answered any
@@ -1063,6 +1063,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		return failUnreachable(withPerUserOutage(opts), sp, failMode, perUserGatewayRestartingReason)
 	}
 	resp, err := send()
+	if opts.ManagedEnterprise {
+		opts.answerWatch.managedOutageSeen(opts, sp, failMode, err)
+	}
 	if !opts.ManagedEnterprise {
 		retryingAfterOutage = perUserOutageError(opts, err)
 		// A first try the gateway refused or dropped met an outage: from now
@@ -1102,6 +1105,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			resp, err = nil, cause
 			break
 		}
+		opts.answerWatch.managedOutageSeen(opts, sp, failMode, err)
 	}
 	if errors.Is(err, errInvalidHookRequest) {
 		return failResponse(opts, sp, nonOutageFailMode(opts, failMode), err.Error())
