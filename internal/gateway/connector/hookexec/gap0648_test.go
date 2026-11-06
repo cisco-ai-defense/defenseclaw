@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptrace"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -292,6 +293,124 @@ func TestAManagedVerdictReadAfterTheDeadlineGetsTheWatchdogsAnswer(t *testing.T)
 				t.Fatalf("exit %d answer %q, want the per-user call's own answer", code, shown)
 			}
 		})
+	}
+}
+
+// sleepClock is the sleep-counting clock of a computer that slept for slept
+// after the test began: the awake clock and the timers did not see it.
+type sleepClock struct{ slept atomic.Int64 }
+
+func (c *sleepClock) now() (time.Duration, bool) {
+	now, ok := platformSuspendClock()
+	return now + time.Duration(c.slept.Load()), ok
+}
+
+// useSleepClock makes w's deadline read clock, when it counts sleep at all.
+func useSleepClock(w *answerWatchdog, clock *sleepClock) {
+	w.waiter.mu.Lock()
+	defer w.waiter.mu.Unlock()
+	if w.waiter.sleepClock != nil {
+		w.waiter.sleepClock = clock.now
+	}
+}
+
+// GAP-0648 review F4: a managed call's deadline counts the time the computer
+// slept. A verdict read after a sleep that outlasted the budget gets the
+// watchdog's closed answer, from a watchdog woken by the sleep-counting
+// clock, not by its timer (2 s more of awake time). A per-user call keeps
+// the verdict. EC2 test hosts cannot sleep: the sleep is the clock's.
+func TestAManagedVerdictReadAfterASleepPastTheDeadlineGetsTheWatchdogsAnswer(t *testing.T) {
+	if !hookClockAnchor.ok {
+		t.Skip("no sleep-counting clock on this system")
+	}
+	const verdict = `{"systemMessage":"verdict after the sleep"}`
+	for _, managed := range []bool{true, false} {
+		name := "per-user"
+		if managed {
+			name = "managed"
+		}
+		t.Run(name, func(t *testing.T) {
+			sp, _ := specFor("claudecode")
+			var stdout, stderr bytes.Buffer
+			opts := Options{Connector: "claudecode", Event: "PreToolUse", ManagedEnterprise: managed, FailMode: "closed",
+				Stdout: &stdout, Stderr: &stderr}
+			w := prepareAnswerWatchdog(&opts, sp, "closed", time.Time{})
+			clock := &sleepClock{}
+			useSleepClock(w, clock)
+			deadline := time.Now().Add(2 * time.Second)
+			w.waiter.extendTo(deadline)
+			go w.watch(deadline)
+			// The watchdog waits on its timer.
+			time.Sleep(20 * time.Millisecond)
+			// A sleep shorter than the clock's steps moves nothing.
+			clock.slept.Store(int64(suspendClockSlack / 2))
+			if w.waiter.passed() {
+				t.Fatal("the deadline passed with 2 s left")
+			}
+			// The computer sleeps 3 s; the verdict is read first after it.
+			clock.slept.Store(int64(3 * time.Second))
+			_, _ = w.out.WriteString(verdict)
+			w.answered()
+			began := time.Now()
+			code := w.finish(0)
+			took := time.Since(began)
+			shown := stdout.String() + stderr.String()
+			if !managed {
+				if code != 0 || shown != verdict {
+					t.Fatalf("exit %d answer %q, want the per-user call's own answer", code, shown)
+				}
+				return
+			}
+			if code == 0 || strings.Contains(shown, "verdict after the sleep") || !strings.Contains(shown, managedGatewayNoAnswerReason) {
+				t.Fatalf("exit %d answer %q, want the watchdog's closed %s answer", code, shown, managedGatewayNoAnswerReason)
+			}
+			if took >= lateAnswerWait {
+				t.Fatalf("answered after %s, want the watchdog woken by the sleep-counting clock", took)
+			}
+		})
+	}
+}
+
+// GAP-0648 review F4: a late managed call whose watchdog does not answer
+// within lateAnswerWait (its thread held) is answered for: the late verdict
+// is never written.
+func TestALateManagedVerdictIsNotWrittenWhileTheWatchdogIsHeld(t *testing.T) {
+	previous := lateAnswerWait
+	lateAnswerWait = 50 * time.Millisecond
+	t.Cleanup(func() { lateAnswerWait = previous })
+	sp, _ := specFor("claudecode")
+	var stdout, stderr bytes.Buffer
+	opts := Options{Connector: "claudecode", Event: "PreToolUse", ManagedEnterprise: true, FailMode: "closed",
+		Stdout: &stdout, Stderr: &stderr}
+	w := prepareAnswerWatchdog(&opts, sp, "closed", time.Time{})
+	w.waiter.extendTo(time.Now().Add(-time.Millisecond))
+	// The watchdog's thread never runs.
+	_, _ = w.out.WriteString(`{"systemMessage":"late gateway verdict"}`)
+	w.answered()
+	code := w.finish(0)
+	shown := stdout.String() + stderr.String()
+	if code == 0 || strings.Contains(shown, "late gateway verdict") || !strings.Contains(shown, managedGatewayNoAnswerReason) {
+		t.Fatalf("exit %d answer %q, want the watchdog's closed %s answer", code, shown, managedGatewayNoAnswerReason)
+	}
+}
+
+// The sleep-counting clock runs with the awake clock while the computer is
+// awake (CLOCK_BOOTTIME, CLOCK_MONOTONIC_RAW, GetTickCount64 in 10-16 ms
+// steps).
+func TestTheSleepCountingClockRunsWithTheAwakeClock(t *testing.T) {
+	first, ok := platformSuspendClock()
+	if !ok {
+		if runtime.GOOS == "linux" || runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+			t.Fatal("no sleep-counting clock")
+		}
+		t.Skip("no sleep-counting clock on this system")
+	}
+	began := time.Now()
+	time.Sleep(100 * time.Millisecond)
+	last, _ := platformSuspendClock()
+	awake := time.Since(began)
+	if drift := (last - first) - awake; drift < -40*time.Millisecond || drift > 40*time.Millisecond {
+		t.Fatalf("the sleep-counting clock moved %s while the awake clock moved %s", last-first, awake)
 	}
 }
 

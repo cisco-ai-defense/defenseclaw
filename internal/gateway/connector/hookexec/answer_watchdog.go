@@ -131,7 +131,8 @@ type answerWatchdog struct {
 
 // lateAnswerWait bounds how long a managed call's own answer, ready after
 // its deadline, waits for the watchdog's answer (watch is bounded by its own
-// waits: the restart proof, the install look and the log line).
+// waits: the restart proof, the install look and the log line). A watchdog
+// that has not answered by then is answered for (answerLate).
 var lateAnswerWait = time.Second
 
 // lateAnswerDue reports a managed call whose deadline has passed while the
@@ -139,7 +140,9 @@ var lateAnswerWait = time.Second
 // result, came too late, and the watchdog answers it. One deadline holds for
 // the whole call: before, a verdict read in the moment the watchdog's
 // thread woke at the deadline (the host had held the process) could stand
-// the watchdog down and reach the agent past it (rel-1-0-6 GAP-0648).
+// the watchdog down and reach the agent past it (rel-1-0-6 GAP-0648). The
+// deadline counts the time the computer slept (countSleep), so a verdict
+// read after a sleep that outlasted the budget is late too.
 // Per-user and Secure Client calls keep their answer.
 func (w *answerWatchdog) lateAnswerDue() bool {
 	return w.closeLateAnswer && w.waiter.passed()
@@ -220,6 +223,11 @@ func prepareAnswerWatchdog(opts *Options, sp spec, failMode string, ceiling time
 	w := &answerWatchdog{stdout: opts.Stdout, stderr: opts.Stderr, exit: opts.Exit, ceiling: ceiling, waiter: newAnswerDeadlineWaiter(), secureClient: opts.SecureClient,
 		failureLog: newPreparedFailureLog(), prepareLead: answerWatchdogLogPrepareLead,
 		closeLateAnswer: managedNativeDecision(*opts), watchDone: make(chan struct{})}
+	if w.closeLateAnswer {
+		// One deadline for the whole call, also across a sleep of the
+		// computer (GAP-0648 review F4).
+		w.waiter.countSleep(platformSuspendClock)
+	}
 	w.cacheFailureLogHome(opts)
 	opts.failureLog = w.failureLog
 	w.failureLogHome = failureLogHomeOf(*opts)
@@ -958,6 +966,10 @@ func (w *answerWatchdog) finish(code int) int {
 		case <-timer.C:
 		}
 		timer.Stop()
+		if late, ok := w.answerLate(); ok {
+			w.waiter.cancel()
+			return late
+		}
 	}
 	w.waiter.cancel()
 	w.mu.Lock()
@@ -978,6 +990,45 @@ func (w *answerWatchdog) finish(code int) int {
 		w.deliveryReceipt(true, w.failureClosed)
 	}
 	return code
+}
+
+// answerLate gives the watchdog's answer for it when a managed call's
+// deadline has passed and its watchdog did not answer within lateAnswerWait
+// (its thread was held, or still waits on a timer the computer's sleep
+// stopped): the late verdict or result is never written (GAP-0648 review
+// F4). ok is false when the watchdog answered or the call is not late.
+func (w *answerWatchdog) answerLate() (code int, ok bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.fired || w.finished || !w.lateAnswerDue() {
+		return 0, false
+	}
+	// The watchdog's answer: watch finds the call finished and stays quiet.
+	w.fired, w.finished = true, true
+	_, _ = w.stderr.Write(w.fallbackErr)
+	_, _ = w.stdout.Write(w.fallbackOut)
+	logged := w.failureLogDone
+	if !w.failureLogged {
+		done := make(chan struct{})
+		logFailure := w.logFailure
+		go func() {
+			defer close(done)
+			logFailure()
+		}()
+		logged = done
+	}
+	if logged != nil {
+		timer := time.NewTimer(answerWatchdogLogWait)
+		select {
+		case <-logged:
+		case <-timer.C:
+		}
+		timer.Stop()
+	}
+	if w.deliveryReceipt != nil {
+		w.deliveryReceipt(false, true)
+	}
+	return w.fallbackCode, true
 }
 
 func (w *answerWatchdog) setDeliveryReceipt(receipt func(bool, bool)) {
