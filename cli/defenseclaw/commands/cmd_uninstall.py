@@ -963,6 +963,9 @@ def _dispatch_native_windows_uninstall(
     if outcome.restart_required:
         ux.ok("Native Windows uninstall is armed; restart required (Windows exit code 3010).")
         _relay_native_setup_removed_connector_leftovers(outcome.stdout, left_before, data_dir, wipe_data=wipe_data)
+        if cowork_plugin:
+            # The uninstall succeeded and waits for a restart; the plugin step is the same (review N2).
+            ux.warn(f"DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
         raise SystemExit(outcome.returncode)
     if outcome.refused:
         ux.err("Authenticated native Setup refused the uninstall (Windows exit code 1603).")

@@ -310,12 +310,10 @@ class CoworkPluginLineTests(unittest.TestCase):
         self.assertLess(flat.index(self.LINE), flat.index("cannot remove its Cowork plugin"))
         self.assertLess(flat.index("older plugins may block"), flat.index("dry-run"))
 
-    def test_native_windows_dry_run_prints_both_lines(self):
-        # The native Windows path has its own dry-run block (review F2).
+    def _native_request(self):
         from defenseclaw.commands.windows_native_uninstall import NativeWindowsUninstallRequest
 
-        self._cowork_state()
-        request = NativeWindowsUninstallRequest(
+        return NativeWindowsUninstallRequest(
             platform_name="win32",
             wipe_data=False,
             install_root="C:\\Program Files\\DefenseClaw",
@@ -328,24 +326,65 @@ class CoworkPluginLineTests(unittest.TestCase):
             payload_manifest_sha256="0" * 64,
             argv=("Setup.exe", "/uninstall"),
         )
+
+    def _native_uninstall(self, *args: str, returncode: int | None = None):
+        """Run the native Windows uninstall with Setup stubbed to `returncode`."""
+        from defenseclaw.commands.windows_native_uninstall import NativeWindowsUninstallOutcome
+
         with (
             patch(
                 "defenseclaw.commands.windows_native_uninstall.prepare_native_windows_uninstall",
-                return_value=request,
+                return_value=self._native_request(),
             ),
-            patch("defenseclaw.commands.windows_native_uninstall.execute_native_windows_uninstall") as execute,
+            patch(
+                "defenseclaw.commands.windows_native_uninstall.execute_native_windows_uninstall",
+                return_value=NativeWindowsUninstallOutcome(returncode=returncode or 0),
+            ) as execute,
             patch.object(cmd_uninstall, "_build_plan") as build_plan,
+            patch.object(cmd_uninstall, "_configured_gateway_ports", return_value=frozenset()),
+            patch.object(cmd_uninstall, "_remove_marked_native_otel_left"),
+            patch.object(cmd_uninstall, "_relay_native_setup_removed_connector_leftovers"),
         ):
-            result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--dry-run"])
+            result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, list(args))
+        build_plan.assert_not_called()
+        return result, " ".join(result.output.split()), execute
+
+    def test_native_windows_dry_run_prints_both_lines(self):
+        # The native Windows path has its own dry-run block (review F2, N1).
+        self._cowork_state()
+        result, flat, execute = self._native_uninstall("--dry-run")
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        flat = " ".join(result.output.split())
         self.assertIn("authenticated native Windows installation", flat)
         self.assertIn(self.LINE, flat)
         self.assertIn("Customize > Plugins, then the ... menu > Remove", flat)
         self.assertIn("older plugins may block", flat)
         self.assertIn("dry-run", flat)
+        self.assertLess(flat.index(self.LINE), flat.index("cannot remove its Cowork plugin"))
+        self.assertLess(flat.index("older plugins may block"), flat.index("dry-run"))
         execute.assert_not_called()
-        build_plan.assert_not_called()
+
+    def test_native_windows_real_run_prints_the_full_step_once(self):
+        self._cowork_state()
+        result, flat, _ = self._native_uninstall("--yes", returncode=0)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(flat.count("older plugins may block"), 1)
+
+    def test_native_windows_restart_required_prints_the_full_step_once(self):
+        # Setup exit 3010 is a successful uninstall that waits for a restart (review N2).
+        self._cowork_state()
+        result, flat, _ = self._native_uninstall("--yes", returncode=3010)
+        self.assertEqual(result.exit_code, 3010, msg=result.output)
+        self.assertIn("restart required", flat)
+        self.assertIn(self.LINE, flat)
+        self.assertEqual(flat.count("older plugins may block"), 1)
+        self.assertLess(flat.index(self.LINE), flat.index("cannot remove its Cowork plugin"))
+
+    def test_native_windows_failed_setup_prints_no_removal_step(self):
+        self._cowork_state()
+        for code in (1603, 5):
+            result, flat, _ = self._native_uninstall("--yes", returncode=code)
+            self.assertEqual(result.exit_code, code, msg=result.output)
+            self.assertNotIn("cannot remove its Cowork plugin", flat)
 
     def test_reset_prints_the_line(self):
         self._cowork_state()
