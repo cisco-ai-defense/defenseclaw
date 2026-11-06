@@ -63,6 +63,17 @@ def test_gap0657_private_group_775_ancestors_allow_opencode_setup(monkeypatch: p
     assert ready.status == "pass"
 
 
+def test_gap0657_owner_private_755_stays_allowed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config, plugins, plugin = _folder_tree(monkeypatch, tmp_path)
+    _account_records(monkeypatch, tmp_path, config.stat().st_gid)
+    config.chmod(0o755)
+    plugins.parent.chmod(0o755)
+    plugins.chmod(0o755)
+
+    assert connector_paths.opencode_writable_plugin_folder([str(plugin)]) == ""
+    cmd_setup._preflight_opencode_plugin_folder()
+
+
 @pytest.mark.parametrize("shared,mode", [(True, 0o775), (False, 0o777)])
 def test_gap0657_first_unsafe_ancestor_is_named(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, shared: bool, mode: int
