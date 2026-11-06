@@ -37,13 +37,20 @@ func processExecPath(pid int) (string, error) {
 	return string(path), nil
 }
 
+// ProcessImagePath is the one macOS resolver for the image a process runs.
+// The gateway status same-home proof uses it, so every proc_info caller
+// shares the call contract below.
+func ProcessImagePath(pid int) (string, error) { return processImagePath(pid) }
+
 // processImagePath asks the kernel for the absolute path of the image
 // process pid runs, as proc_pidpath(3) does (proc_info PROC_PIDPATHINFO).
 // Unlike the exec path it does not depend on the working directory the
 // process had at exec time. It fails when that path no longer names a file.
 func processImagePath(pid int) (string, error) {
 	// libproc's proc_pidpath is this one call; the binaries build without
-	// cgo, so it is made directly.
+	// cgo, so it is made directly. The kernel returns 0 for this flavor, not
+	// the path length (proc_pidpath measures the copied path itself), so the
+	// path ends at the first NUL of the zeroed buffer.
 	const (
 		sysProcInfo           = 336  // SYS_PROC_INFO
 		procInfoCallPIDInfo   = 2    // PROC_INFO_CALL_PIDINFO
