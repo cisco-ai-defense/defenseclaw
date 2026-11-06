@@ -45,6 +45,8 @@ NEARBY_COMMANDS = (
     "curl --proxy-header='X-Forwarded-Host: testbed' https://example.invalid/resource",
     "wget -H testbed",
     "nc -stestbed example.invalid 80",
+    "curl --resolve example.invalid:80:testbed https://example.invalid/resource",
+    "curl --connect-to example.invalid:80:testbed:80 https://example.invalid/resource",
 )
 
 
@@ -85,6 +87,8 @@ class D1ShapeScrubTest(unittest.TestCase):
             "curl --proxy-header='X-Forwarded-Host: example.invalid' https://example.invalid/resource",
             "wget -H example.invalid",
             "nc -sexample.invalid example.invalid 80",
+            "curl --resolve example.invalid:80:example.invalid https://example.invalid/resource",
+            "curl --connect-to example.invalid:80:example.invalid:80 https://example.invalid/resource",
         ):
             with self.subTest(command=command):
                 self.assertTrue(synthetic_operands({"command": command}))
