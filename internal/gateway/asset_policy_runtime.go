@@ -22,6 +22,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
@@ -1985,6 +1986,18 @@ func mergeAssetDecision(
 	// blocked under enforcement. Operators rely on this to size the
 	// false-positive rate before flipping a connector to action mode.
 	return action, rawAction, severity, reason, findings, true
+}
+
+// mapAssetBlockForProfile checks whether the connector can veto an asset
+// decision that mergeAssetDecision has already made blocking. The guardrail
+// mode governs guardrail findings, not an action-mode asset-policy decision.
+// Secure Client retains its existing guardrail-mode mapping.
+func mapAssetBlockForProfile(guardrailMode, event string, caps connector.HookCapability, profile connector.HookProfile, payload map[string]interface{}, secureClient bool) (string, bool) {
+	mode := config.AssetPolicyModeAction
+	if secureClient {
+		mode = guardrailMode
+	}
+	return mapHookActionForProfile("block", mode, event, caps, profile, payload)
 }
 
 // assetPolicyResponseReason renders a structured, machine-parseable
