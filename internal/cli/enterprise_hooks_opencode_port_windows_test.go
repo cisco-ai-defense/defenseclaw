@@ -32,6 +32,7 @@ type managedWindowsOpenCodePortFixture struct {
 	contested      []enterprisehooks.WindowsOpenCodeContestedPort
 	unknownEntries []enterprisehooks.WindowsOpenCodePortUnknown
 	cleared        []enterprisehooks.WindowsOpenCodeContestCleared
+	warningState   enterprisehooks.WindowsOpenCodeServicePortsState
 	files          map[string]int
 	claims         map[int]string
 	readFailure    map[string]bool
@@ -48,6 +49,7 @@ func newManagedWindowsOpenCodePortFixture(t *testing.T) *managedWindowsOpenCodeP
 	oldLoad, oldWrite := enterpriseHookWindowsOpenCodePortsLoad, enterpriseHookWindowsOpenCodePortsWrite
 	oldRead, oldSet, oldRunAs := enterpriseHookWindowsOpenCodeRead, enterpriseHookWindowsOpenCodeSet, enterpriseHookWindowsOpenCodeRunAs
 	oldClaims, oldClaim := enterpriseHookWindowsOpenCodeClaims, enterpriseHookWindowsOpenCodeClaim
+	oldWarningWrite, oldWarningItemsWrite := enterpriseHookWindowsOpenCodeWarningWrite, enterpriseHookWindowsOpenCodeWarningItemsWrite
 	oldManifest, oldConfig := enterpriseHookManifest, cfg
 	oldTimeout := enterpriseHookWindowsOpenCodeReadTimeout
 	t.Cleanup(func() {
@@ -55,6 +57,7 @@ func newManagedWindowsOpenCodePortFixture(t *testing.T) *managedWindowsOpenCodeP
 		enterpriseHookWindowsOpenCodePortsLoad, enterpriseHookWindowsOpenCodePortsWrite = oldLoad, oldWrite
 		enterpriseHookWindowsOpenCodeRead, enterpriseHookWindowsOpenCodeSet, enterpriseHookWindowsOpenCodeRunAs = oldRead, oldSet, oldRunAs
 		enterpriseHookWindowsOpenCodeClaims, enterpriseHookWindowsOpenCodeClaim = oldClaims, oldClaim
+		enterpriseHookWindowsOpenCodeWarningWrite, enterpriseHookWindowsOpenCodeWarningItemsWrite = oldWarningWrite, oldWarningItemsWrite
 		enterpriseHookManifest, cfg = oldManifest, oldConfig
 		enterpriseHookWindowsOpenCodeReadTimeout = oldTimeout
 	})
@@ -128,6 +131,11 @@ func newManagedWindowsOpenCodePortFixture(t *testing.T) *managedWindowsOpenCodeP
 		f.claims[port] = sid
 		return nil
 	}
+	enterpriseHookWindowsOpenCodeWarningWrite = func(state enterprisehooks.WindowsOpenCodeServicePortsState) error {
+		f.warningState = state
+		return nil
+	}
+	enterpriseHookWindowsOpenCodeWarningItemsWrite = func([]windowsOpenCodePortWarning) error { return nil }
 	return f
 }
 

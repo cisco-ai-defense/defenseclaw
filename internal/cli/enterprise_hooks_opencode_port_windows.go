@@ -26,14 +26,16 @@ import (
 )
 
 var (
-	enterpriseHookWindowsOpenCodePortsLoad   = enterprisehooks.LoadWindowsOpenCodeServicePortsFull
-	enterpriseHookWindowsOpenCodePortsWrite  = enterprisehooks.WriteWindowsOpenCodeServicePortsFull
-	enterpriseHookWindowsOpenCodeRead        = enterprisepolicy.ReadOpenCodeServicePortAsUser
-	enterpriseHookWindowsOpenCodeSet         = enterprisepolicy.SetOpenCodeServicePort
-	enterpriseHookWindowsOpenCodeRunAs       = enterprisehooks.RunAsTargetWithS4U
-	enterpriseHookWindowsOpenCodeClaims      = windowsOpenCodeClaims
-	enterpriseHookWindowsOpenCodeClaim       = windowsClaimOpenCodePort
-	enterpriseHookWindowsOpenCodeReadTimeout = 20 * time.Second
+	enterpriseHookWindowsOpenCodePortsLoad         = enterprisehooks.LoadWindowsOpenCodeServicePortsFull
+	enterpriseHookWindowsOpenCodePortsWrite        = enterprisehooks.WriteWindowsOpenCodeServicePortsFull
+	enterpriseHookWindowsOpenCodeRead              = enterprisepolicy.ReadOpenCodeServicePortAsUser
+	enterpriseHookWindowsOpenCodeSet               = enterprisepolicy.SetOpenCodeServicePort
+	enterpriseHookWindowsOpenCodeRunAs             = enterprisehooks.RunAsTargetWithS4U
+	enterpriseHookWindowsOpenCodeClaims            = windowsOpenCodeClaims
+	enterpriseHookWindowsOpenCodeClaim             = windowsClaimOpenCodePort
+	enterpriseHookWindowsOpenCodeWarningWrite      = writeWindowsOpenCodePortWarnings
+	enterpriseHookWindowsOpenCodeWarningItemsWrite = writeWindowsOpenCodePortWarningItems
+	enterpriseHookWindowsOpenCodeReadTimeout       = 20 * time.Second
 )
 
 // Windows can leave a profile read pending after its timeout. Keep at most
@@ -121,6 +123,7 @@ func enterpriseHookStandaloneOpenCodePorts(ctx context.Context, manifest enterpr
 	path := enterprisehooks.WindowsOpenCodeServicePortsPath(enterpriseHookManifest)
 	state, err := enterpriseHookWindowsOpenCodePortsLoad(path)
 	if err != nil {
+		_ = enterpriseHookWindowsOpenCodeWarningItemsWrite([]windowsOpenCodePortWarning{{Code: "opencode_port_record_unreadable", Message: fmt.Sprintf("OpenCode service ports record %s cannot be read (%v); repair the SYSTEM-only record before assigning new ports", path, err)}})
 		return nil, fmt.Errorf("OpenCode service ports record: %w; repair the SYSTEM-only record before assigning new ports", err)
 	}
 	recorded := state.Ports
@@ -271,7 +274,11 @@ func enterpriseHookStandaloneOpenCodePorts(ctx context.Context, manifest enterpr
 	}
 	state.Ports, state.Unknown = resultRecord, unknownEntries
 	if err := enterpriseHookWindowsOpenCodePortsWrite(path, state); err != nil {
+		_ = enterpriseHookWindowsOpenCodeWarningItemsWrite([]windowsOpenCodePortWarning{{Code: "opencode_port_record_unreadable", Message: fmt.Sprintf("OpenCode service ports record %s could not be written (%v); repair the SYSTEM-only record", path, err)}})
 		return nil, errors.Join(problems, fmt.Errorf("OpenCode service ports record: %w", err))
+	}
+	if err := enterpriseHookWindowsOpenCodeWarningWrite(state); err != nil {
+		return available, errors.Join(problems, fmt.Errorf("OpenCode port warning summary: %w", err))
 	}
 	return available, problems
 }

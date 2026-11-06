@@ -6,8 +6,10 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -21,6 +23,92 @@ import (
 )
 
 var windowsOpenCodePortClear = enterprisehooks.ClearWindowsOpenCodeContestedPort
+
+const windowsOpenCodePortWarningsFile = "opencode_port_warnings.json"
+
+type windowsOpenCodePortWarning struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type windowsOpenCodePortWarningRecord struct {
+	Version  int                          `json:"version"`
+	Warnings []windowsOpenCodePortWarning `json:"warnings"`
+}
+
+func windowsOpenCodePortWarningsPath() (string, error) {
+	layout, err := managed.StandaloneWindowsLayout()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(layout.DataDir, windowsOpenCodePortWarningsFile), nil
+}
+
+// The port record remains SYSTEM-only. The guardian publishes just warning
+// text under the existing admin-readable guardian-state ACL for lifecycle
+// status and doctor; it contains no bindings or account file contents.
+func writeWindowsOpenCodePortWarnings(state enterprisehooks.WindowsOpenCodeServicePortsState) error {
+	var warnings []windowsOpenCodePortWarning
+	for _, item := range state.Unknown {
+		warnings = append(warnings, windowsOpenCodePortWarning{Code: "opencode_port_account_unknown", Message: fmt.Sprintf("OpenCode service port for %s at %s could not be read or written as that account (%s); %s", item.SID, item.Path, item.Reason, item.Fix)})
+	}
+	for _, mark := range state.Contested {
+		message := fmt.Sprintf("OpenCode service port %d is marked contested by %s; clear it with %s", mark.Port, strings.Join(mark.SIDs, ", "), windowsOpenCodePortClearCommand(mark.Port))
+		if len(mark.SIDs) == 1 {
+			message = fmt.Sprintf("OpenCode service port %d remains held because %s's file could not be replaced in the import pass; repair the account file, then clear the held mark with %s", mark.Port, mark.SIDs[0], windowsOpenCodePortClearCommand(mark.Port))
+		}
+		warnings = append(warnings, windowsOpenCodePortWarning{Code: "opencode_port_contested", Message: message})
+	}
+	return writeWindowsOpenCodePortWarningItems(warnings)
+}
+
+func writeWindowsOpenCodePortWarningItems(warnings []windowsOpenCodePortWarning) error {
+	path, err := windowsOpenCodePortWarningsPath()
+	if err != nil {
+		return err
+	}
+	record := windowsOpenCodePortWarningRecord{Version: 1, Warnings: warnings}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	if len(data) > 64<<10 {
+		return errors.New("OpenCode port warning summary is too large")
+	}
+	return writeEnterpriseHookProtectedFile(path, append(data, '\n'))
+}
+
+func readWindowsOpenCodePortWarnings() ([]windowsOpenCodePortWarning, error) {
+	path, err := windowsOpenCodePortWarningsPath()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Lstat(path); err != nil {
+		return nil, err
+	}
+	if err := enterpriseHookGuardianStateFileTrustCheck(path); err != nil {
+		return nil, err
+	}
+	data, err := readWindowsEnterpriseBoundedFile(path, 64<<10)
+	if err != nil {
+		return nil, err
+	}
+	var record windowsOpenCodePortWarningRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return nil, err
+	}
+	if record.Version != 1 || len(record.Warnings) > 256 {
+		return nil, errors.New("OpenCode port warning summary has invalid schema")
+	}
+	for _, warning := range record.Warnings {
+		switch warning.Code {
+		case "opencode_port_account_unknown", "opencode_port_contested", "opencode_port_record_unreadable":
+		default:
+			return nil, errors.New("OpenCode port warning summary has an invalid code")
+		}
+	}
+	return record.Warnings, nil
+}
 
 func windowsOpenCodePortRecordPath() (string, error) {
 	layout, err := managed.StandaloneWindowsLayout()
@@ -93,28 +181,12 @@ func appendWindowsOpenCodePortWarnings(result *enterprisestatus.Result) {
 	if !governed {
 		return
 	}
-	path, err := windowsOpenCodePortRecordPath()
+	warnings, err := readWindowsOpenCodePortWarnings()
 	if err != nil {
-		result.AddWarning("opencode_port_record_unchecked", "cannot locate the SYSTEM-only OpenCode service ports record: "+err.Error())
+		result.AddWarning("opencode_port_record_unchecked", fmt.Sprintf("OpenCode port warnings could not be checked (%v); inspect the guardian state in an elevated console", err))
 		return
 	}
-	state, err := enterprisehooks.LoadWindowsOpenCodeServicePortsFull(path)
-	if err != nil {
-		code := "opencode_port_record_unreadable"
-		if !windowsEnterpriseIsElevated() {
-			code = "opencode_port_record_unchecked"
-		}
-		result.AddWarning(code, fmt.Sprintf("OpenCode service ports record %s cannot be read (%v); inspect it in an elevated console and repair the SYSTEM-only record", path, err))
-		return
-	}
-	for _, item := range state.Unknown {
-		result.AddWarning("opencode_port_account_unknown", fmt.Sprintf("OpenCode service port for %s at %s could not be read or written as that account (%s); %s", item.SID, item.Path, item.Reason, item.Fix))
-	}
-	for _, mark := range state.Contested {
-		if len(mark.SIDs) == 1 {
-			result.AddWarning("opencode_port_contested", fmt.Sprintf("OpenCode service port %d remains held because %s's file could not be replaced in the import pass; repair the account file, then clear the held mark with %s", mark.Port, mark.SIDs[0], windowsOpenCodePortClearCommand(mark.Port)))
-			continue
-		}
-		result.AddWarning("opencode_port_contested", fmt.Sprintf("OpenCode service port %d is marked contested by %s; clear it with %s", mark.Port, strings.Join(mark.SIDs, ", "), windowsOpenCodePortClearCommand(mark.Port)))
+	for _, warning := range warnings {
+		result.AddWarning(warning.Code, warning.Message)
 	}
 }
