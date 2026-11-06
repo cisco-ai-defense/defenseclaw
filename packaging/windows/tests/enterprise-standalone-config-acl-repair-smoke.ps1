@@ -328,22 +328,27 @@ try {
             function Assert-DefenseClawStandaloneStateFilesNotInUse { }
             function Remove-DefenseClawCommittedManagedHooksTeardownJournal { throw 'past the gate' }
             function Remove-DefenseClawStandaloneInstallTreeReplacementBackups { throw 'past the gate' }
-            # Repair reaches the service checks right after the gate; the
-            # uninstall runs them before it.
-            function Assert-DefenseClawOwnedServiceOrAbsent { if ($script:serviceCheckIsPastTheGate) { throw 'past the gate' } }
+            function Assert-DefenseClawOwnedServiceOrAbsent { }
+            function Assert-DefenseClawRecordedArtifactHashes { }
+            # Repair restores config.yaml from Setup's approved copy (GAP-0568)
+            # between its two gates; the Codex preflight comes after both.
+            $script:recoveryRestores = $false
+            function Invoke-DefenseClawRepairApprovedPolicyRecovery {
+                if ($script:recoveryRestores) { Set-DefenseClawPathAcl -Path $Config -Kind ConfigFile -GatewayServiceSID $sid }
+            }
+            function Assert-DefenseClawCodexMachinePolicyFilePreflight { throw 'past the gate' }
             $lifecycleLayout = $gateLayout.Clone()
             $lifecycleLayout.GatewayPath = [IO.Path]::Combine($State, 'program', 'bin', 'defenseclaw-gateway.exe')
             $lifecycleLayout.ProviderLibraryPath = ''
-            function Invoke-TestLifecycle([string]$Action, [bool]$Installed, [switch]$Purge) {
+            function Invoke-TestLifecycle([string]$Action, [bool]$Installed, [switch]$Purge, [hashtable]$Sources = @{}) {
                 $script:metadataInstalled = $Installed
-                $script:serviceCheckIsPastTheGate = $Action -eq 'Repair'
                 try {
                     if ($Action -eq 'Uninstall') {
                         Invoke-DefenseClawUninstallLifecycle -Layout $lifecycleLayout `
                             -GatewayServiceName DefenseClawGateway -GuardianServiceName DefenseClawHookGuardian -Purge:$Purge
                     }
                     else {
-                        [void](Invoke-DefenseClawInstallLikeLifecycle -Action $Action -Layout $lifecycleLayout -Sources @{} `
+                        [void](Invoke-DefenseClawInstallLikeLifecycle -Action $Action -Layout $lifecycleLayout -Sources $Sources `
                             -GatewayServiceName DefenseClawGateway -GuardianServiceName DefenseClawHookGuardian)
                     }
                 }
@@ -392,6 +397,32 @@ try {
                 throw "a purge refused a credential it deletes: '$message'"
             }
             & $canonical[$credential]
+            # config.yaml written new from an approved source is judged after
+            # that write: Repair's restore from Setup's approved copy, and an
+            # Install that supplies CONFIG=. A Repair whose restore leaves the
+            # drift is refused by the gate after it.
+            foreach ($restores in @($true, $false)) {
+                Add-UsersWrite -Path $Config -Rights Modify
+                $script:recoveryRestores = $restores
+                $message = Invoke-TestLifecycle -Action Repair -Installed $true
+                $want = if ($restores) { 'past the gate' } else { 'refusing to change the deployment, and nothing was changed' }
+                if (-not $message.StartsWith($want) -or
+                    (-not $restores -and -not $message.Contains('Setup /ensure CONFIG=<the approved administrator-only config>'))) {
+                    throw "Repair with a drifted config.yaml (restored $restores): '$message'"
+                }
+                Set-DefenseClawPathAcl -Path $Config -Kind ConfigFile -GatewayServiceSID $sid
+            }
+            $script:recoveryRestores = $false
+            Add-UsersWrite -Path $Config -Rights Modify
+            $message = Invoke-TestLifecycle -Action Install -Installed $false -Sources @{ config = @{} }
+            if ($message -cne 'past the gate') {
+                throw "an Install that writes config.yaml from CONFIG= refused the drifted one it replaces: '$message'"
+            }
+            $message = Invoke-TestLifecycle -Action Install -Installed $false
+            if (-not $message.StartsWith('refusing to change the deployment') -or -not $message.Contains($Config)) {
+                throw "an Install without CONFIG= took a drifted retained config.yaml: '$message'"
+            }
+            Set-DefenseClawPathAcl -Path $Config -Kind ConfigFile -GatewayServiceSID $sid
             # Benign twins: a canonical layout reaches the next step.
             foreach ($cell in @(@('Repair', $true, $false), @('Install', $false, $false), @('Uninstall', $true, $false), @('Uninstall', $true, $true))) {
                 $message = Invoke-TestLifecycle -Action $cell[0] -Installed $cell[1] -Purge:$cell[2]
