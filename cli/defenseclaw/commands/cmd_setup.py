@@ -40,7 +40,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -8623,13 +8623,14 @@ def _windows_runtime_rollback(restart: bool) -> bool:
     return restart and platform_support.host_os() == "windows"
 
 
-def _windows_hook_launcher_setup_refusal(cfg, *, restart: bool) -> str:
-    """Refuse a per-user restart when its installed hook launcher is absent."""
+def _windows_hook_launcher_setup_refusal(cfg, *, restart: bool, connectors: Iterable[str]) -> str:
+    """Refuse a per-user restart that must publish a native hook launcher."""
 
     if (
         not restart
         or platform_support.host_os() != "windows"
         or str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+        or not any(normalize_connector(name) not in {"amp", "opencode"} for name in connectors)
     ):
         return ""
     # The per-user gateway registers the installer's stable ~/.local/bin
@@ -11762,7 +11763,12 @@ def _apply_hook_connector_setup(
     if connector == "opencode":
         _preflight_opencode_plugin_folder()
 
-    if refusal := _windows_hook_launcher_setup_refusal(app.cfg, restart=restart):
+    desired = (
+        (*app.cfg.active_connectors(), connector)
+        if write_mode == "add" and hasattr(app.cfg, "active_connectors")
+        else (connector,)
+    )
+    if refusal := _windows_hook_launcher_setup_refusal(app.cfg, restart=restart, connectors=desired):
         ux.echo(f"  ✗ {refusal}", err=True)
         return False
 
@@ -13380,7 +13386,8 @@ def _apply_setup_batch(
     rather than per connector.
     """
     default_mode = "action" if (mode or "").strip().lower() == "action" else "observe"
-    if refusal := _windows_hook_launcher_setup_refusal(app.cfg, restart=restart):
+    desired = (*app.cfg.active_connectors(), *connectors) if preserve_global_settings else connectors
+    if refusal := _windows_hook_launcher_setup_refusal(app.cfg, restart=restart, connectors=desired):
         raise click.ClickException(refusal)
 
     setup_snapshot = _prior_snapshot or _capture_setup_config_snapshot(
@@ -13704,7 +13711,8 @@ def _dispatch_bare_setup(
             ux.echo("  Aborted — no connectors selected.")
             return
 
-    if refusal := _windows_hook_launcher_setup_refusal(app.cfg, restart=restart):
+    desired = (*app.cfg.active_connectors(), *targets) if add_detected else targets
+    if refusal := _windows_hook_launcher_setup_refusal(app.cfg, restart=restart, connectors=desired):
         raise click.ClickException(refusal)
 
     setup_snapshot = _capture_setup_config_snapshot(
