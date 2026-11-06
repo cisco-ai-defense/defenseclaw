@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/skillrootsafe"
 )
 
 const (
@@ -155,6 +156,53 @@ func DiscoverUnder(root, subtree string, directoryLimit int) ([]Entry, error) {
 // its budget. Callers run it off the event reader.
 func DiscoverUnderFull(root, subtree string) ([]Entry, error) {
 	return DiscoverUnder(root, subtree, FullScanDirectoryLimit)
+}
+
+// DiscoverTrusted lists a root whose account-owned link path has already
+// passed the shared ownership check. The ordinary Discover entry points keep
+// their existing no-link behavior for callers outside the install watcher.
+func DiscoverTrusted(root string, directoryLimit int) ([]Entry, error) {
+	if !IsRoot(root) && !IsProfileRoot(root) {
+		return nil, fmt.Errorf("not a Hermes skills root: %s", root)
+	}
+	resolved, err := skillrootsafe.Resolve(root, evalSymlinks)
+	if err != nil {
+		return nil, err
+	}
+	walkRoot := root
+	if info, err := os.Lstat(root); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		walkRoot = resolved
+	}
+	entries, err := discover(walkRoot, walkRoot, directoryLimit)
+	if err != nil || samePath(walkRoot, root) {
+		return entries, err
+	}
+	for i := range entries {
+		relative, relErr := filepath.Rel(walkRoot, entries[i].Path)
+		if relErr != nil {
+			return nil, relErr
+		}
+		entries[i].Path = filepath.Join(root, relative)
+	}
+	return entries, nil
+}
+
+// DiscoverUnderTrusted applies the same root proof to an event subtree. A
+// link below the root remains unavailable, as in DiscoverUnder.
+func DiscoverUnderTrusted(root, subtree string, directoryLimit int) ([]Entry, error) {
+	if !IsRoot(root) && !IsProfileRoot(root) {
+		return nil, fmt.Errorf("not a Hermes skills root: %s", root)
+	}
+	if _, err := skillrootsafe.Resolve(root, evalSymlinks); err != nil ||
+		!pathAtOrBelow(subtree, root) || samePath(subtree, root) {
+		return nil, fmt.Errorf("invalid Hermes skill subtree: %s", subtree)
+	}
+	for dir := filepath.Clean(subtree); !samePath(dir, root); dir = filepath.Dir(dir) {
+		if !plainDirectory(dir) {
+			return nil, fmt.Errorf("linked or unavailable Hermes skill subtree: %s", subtree)
+		}
+	}
+	return discover(root, subtree, directoryLimit)
 }
 
 // profileRootUnlinked is canonicalPath for a profile's skills root. The
