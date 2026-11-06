@@ -27,12 +27,13 @@ const hookDeliveryCapabilityWait = 250 * time.Millisecond
 const hookDeliveryReceiptTimeout = hookResponseGrace
 
 type hookDeliveryRequest struct {
-	writer *io.PipeWriter
-	cancel context.CancelFunc
-	ready  chan struct{}
-	once   sync.Once
-	mu     sync.Mutex
-	closed bool
+	writer      *io.PipeWriter
+	cancel      context.CancelFunc
+	ready       chan struct{}
+	payloadDone chan struct{}
+	once        sync.Once
+	mu          sync.Mutex
+	closed      bool
 	// released: the capability wait passed first and the body ended with
 	// HookDeliveryReleased. The answer is ordinary, with no receipt.
 	released bool
@@ -79,7 +80,7 @@ func wantsHookDeliveryReceipt(opts Options) bool {
 
 func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Duration, starting func(context.Context) bool) (*http.Request, *hookDeliveryRequest) {
 	reader, writer := io.Pipe()
-	delivery := &hookDeliveryRequest{writer: writer, ready: make(chan struct{})}
+	delivery := &hookDeliveryRequest{writer: writer, ready: make(chan struct{}), payloadDone: make(chan struct{})}
 	req.Body = reader
 	req.ContentLength = -1
 	req.GetBody = nil
@@ -99,10 +100,13 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 	// Read now: the goroutine below outlives the call by a moment (GAP-0680).
 	poll := hookDeliveryStartPoll
 	go func() {
-		if _, err := writer.Write(payload); err != nil {
+		_, err := writer.Write(payload)
+		if err != nil {
 			delivery.close()
+			close(delivery.payloadDone)
 			return
 		}
+		close(delivery.payloadDone)
 		timer := time.NewTimer(wait)
 		defer timer.Stop()
 		// seenStarting: the gateway was still starting when the wait
@@ -267,9 +271,16 @@ func (d *hookDeliveryRequest) deadline(blocked bool) bool {
 		return false
 	}
 	d.mu.Unlock()
+	readyWait := time.NewTimer(answerWatchdogLogWait)
+	defer readyWait.Stop()
+	select {
+	case <-d.payloadDone:
+	case <-readyWait.C:
+		return false
+	}
 	select {
 	case <-d.ready:
-	case <-time.After(answerWatchdogLogWait):
+	case <-readyWait.C:
 		return false
 	}
 	d.mu.Lock()
