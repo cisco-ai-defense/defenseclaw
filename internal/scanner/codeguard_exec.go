@@ -143,7 +143,7 @@ func cgExecBenignNameCall(line string, start, end int, name string, childProcess
 				return cgExecRubyBlockArgs(line[end:])
 			}
 		}
-		for _, risky := range []string{"globaleval", "shell_exec", "pcntl_exec"} {
+		for _, risky := range []string{"globaleval", "shell_exec", "pcntl_exec", "winexec", "ssh2_exec"} {
 			if strings.HasSuffix(full, risky) {
 				return false
 			}
@@ -195,13 +195,16 @@ var cgExecInterpreters = cgExecWordSet(`sh bash zsh dash ksh mksh pdksh fish csh
 	osascript rscript julia awk gawk mawk nawk jshell jjs groovy scala kotlin elixir iex erl escript racket guile
 	sbcl clisp ghci runghc runhaskell swift wscript cscript mshta rundll regsvr expect qjs d8 rhino
 	ssh su sudo doas runas runuser xargs watch tmux screen script parallel gnome-terminal xterm konsole wt start
-	docker podman kubectl nsenter chroot unshare firejail setsid systemd-run flatpak-spawn sandbox-exec wsl`)
+	docker podman kubectl nsenter chroot unshare firejail setsid systemd-run flatpak-spawn sandbox-exec wsl
+	plink rsh adb oc nerdctl lxc lxc-attach incus crictl psexec paexec sshpass pkexec gosu su-exec`)
 
 // cgExecWrappers run the program named in a later element.
 var cgExecWrappers = cgExecWordSet(`env sudo doas nice ionice timeout command nohup stdbuf taskset chrt setsid runuser su sg
 	firejail unshare chroot nsenter xvfb-run time exec builtin strace ltrace valgrind systemd-run flatpak-spawn
 	sandbox-exec faketime proxychains proxychains4 torsocks caffeinate wsl wt start runas xargs watch tmux screen
-	ssh script parallel docker podman kubectl busybox catchsegv`)
+	ssh script parallel docker podman kubectl busybox catchsegv flock pkexec gosu su-exec setpriv chpst setuidgid
+	s6-setuidgid numactl prlimit cgexec bwrap unbuffer rlwrap arch fakeroot dbus-run-session dbus-launch daemonize
+	trickle cpulimit`)
 
 // cgExecProgramWord is a program word: a name, an optional version, an
 // optional "-suffix" and ".exe" (python3.12, pwsh-preview, php8.3.exe).
@@ -210,7 +213,7 @@ var cgExecProgramWord = regexp.MustCompile(`^([a-z]+(?:-[a-z]+)?)(?:\d[\d.]*)?(?
 // cgExecGenericCodeFlag is an element that passes inline code or a command
 // string to whatever program reads it (-c, -Ic, -e, -le, /c, --eval,
 // -Command, -EncodedCommand).
-var cgExecGenericCodeFlag = regexp.MustCompile(`(?i)^(?:-[a-z]*[ce]|/c|--eval(?:=.*)?|-command|-encodedcommand|-commandwithargs|-cwa)$`)
+var cgExecGenericCodeFlag = regexp.MustCompile(`(?i)^(?:-[a-z]*[ce]|/c|--eval(?:=.*)?|-command|-encodedcommand|-commandwithargs|-cwa|-execdir|-ok|-okdir)$`)
 
 // cgExecProgram returns the program a word names, lowercased, without its
 // path, version and .exe.
@@ -267,10 +270,14 @@ func cgExecStringLiteral(e string) (string, bool) {
 	if i >= len(e) || (e[i] != '\'' && e[i] != '"') {
 		return "", false
 	}
+	raw := strings.ContainsAny(e[:i], "rR")
 	q := e[i]
 	for k := i + 1; k < len(e); k++ {
 		switch e[k] {
 		case '\\':
+			if !raw && (k+1 >= len(e) || e[k+1] != '\\') {
+				return "", false // an escape: 'p\x68p' is php
+			}
 			k++
 		case q:
 			if k != len(e)-1 {
@@ -325,8 +332,30 @@ func cgExecSplitTopLevel(s string, closer byte) ([]string, int, bool) {
 	return nil, 0, false
 }
 
-// cgExecShellKeyword finds shell= (other than shell=False) or executable=.
-var cgExecShellKeyword = regexp.MustCompile(`(?i)\bexecutable\s*=|\bshell\s*=\s*(?:[^f\s]|f(?:[^a]|a(?:[^l]|l(?:[^s]|s(?:[^e]|e\w))))|$)`)
+// cgExecKeyword is a keyword argument: name=value.
+var cgExecKeyword = regexp.MustCompile(`^([A-Za-z_]\w*)\s*=(.*)$`)
+
+// cgExecBenignKeyword reports whether an argument after the argv is a
+// keyword other than executable= and a shell= other than False, 0 or None. A
+// positional argument (bufsize, executable, ..., shell), *args and **kwargs
+// are not proven benign.
+func cgExecBenignKeyword(k string) bool {
+	m := cgExecKeyword.FindStringSubmatch(k)
+	if m == nil {
+		return k == ""
+	}
+	switch m[1] {
+	case "executable":
+		return false
+	case "shell":
+		switch strings.TrimSpace(m[2]) {
+		case "False", "0", "None":
+			return true
+		}
+		return false
+	}
+	return true
+}
 
 // cgExecBenignSubprocessCall reports whether the subprocess.call name at
 // line[start:end] is proven benign: subprocess.call_count, a quoted
@@ -371,7 +400,7 @@ func cgExecBenignSubprocessCall(line string, start, end int) bool {
 			return false // left open: shell=True can follow on the next line
 		}
 		for _, k := range kw {
-			if cgExecShellKeyword.MatchString(k) {
+			if !cgExecBenignKeyword(k) {
 				return false
 			}
 		}
@@ -381,9 +410,18 @@ func cgExecBenignSubprocessCall(line string, start, end int) bool {
 	argv := make([]cgExecArg, len(elems))
 	for i, e := range elems {
 		argv[i].s, argv[i].lit = cgExecStringLiteral(e)
+		if !argv[i].lit && cgExecStringShaped.MatchString(e) {
+			return false // a string this reader cannot decode: an escape, adjacent literals
+		}
 	}
 	return argv[0].lit && cgExecBenignArgv(argv)
 }
+
+// cgExecStringShaped is an element that starts as a plain, raw, bytes or
+// unicode string literal (not an f-string). When cgExecStringLiteral cannot
+// read it whole (an escape, adjacent literals joined), its value is not
+// known, so no element of the call is proven benign.
+var cgExecStringShaped = regexp.MustCompile(`^[rRbBuU]{0,2}['"]`)
 
 // cgExecArg is one argv element: a string literal, or an expression (lit
 // false) whose value is not known.
@@ -506,6 +544,14 @@ var cgExecScriptOptions = map[string]*regexp.Regexp{
 	"deno":   regexp.MustCompile(`^(?:-v|-V|--version|-A|--allow-[a-z-]+(?:=\S*)?|-q|--quiet|--unstable(?:-[a-z-]+)?|--watch|--check)$`),
 }
 
+// cgExecStdinScript is a script path that reads the code from stdin or a
+// file descriptor, like "-".
+var cgExecStdinScript = regexp.MustCompile(`(?i)^(?:/dev/(?:stdin|fd/\d+)|/proc/self/fd/\d+|php://)`)
+
+// cgExecCodeModules are the python -m modules that run a code string
+// argument.
+var cgExecCodeModules = cgExecWordSet(`timeit`)
+
 // cgExecDenoFileCommands are the deno subcommands that run or read files.
 var cgExecDenoFileCommands = cgExecWordSet(`run task fmt test lint check compile install info doc bench cache upgrade`)
 
@@ -538,6 +584,9 @@ func cgExecBenignScriptRun(prog string, argv []cgExecArg) bool {
 			if i >= len(argv) || !argv[i].lit || strings.HasPrefix(argv[i].s, "-") {
 				return false
 			}
+			if cgExecCodeModules[argv[i].s] {
+				return false // python -m timeit 'code'
+			}
 			return cgExecBenignScriptArgs(argv[i+1:])
 		}
 		if strings.HasPrefix(a.s, "-") {
@@ -550,7 +599,7 @@ func cgExecBenignScriptRun(prog string, argv []cgExecArg) bool {
 			}
 			continue
 		}
-		if strings.Contains(strings.ToLower(a.s), "data:") || a.s == "" {
+		if strings.Contains(strings.ToLower(a.s), "data:") || a.s == "" || cgExecStdinScript.MatchString(a.s) {
 			return false
 		}
 		return cgExecBenignScriptArgs(argv[i+1:])
