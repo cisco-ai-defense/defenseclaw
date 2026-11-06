@@ -376,18 +376,11 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	var yes []hit
 	var maybe []string
 	var maybeNeeds [][]string
-	// A connector-only match is independent of the account holder. Matches
-	// involving a user, group, or agent keep their normal proof requirement.
-	provenRouteOnly := true
 	for i, assignment := range set.assignments {
 		state, reason, group, needs := set.assignmentState(assignment.Match, subject, res, verified, connectorName, agent)
 		switch state {
 		case matchYes:
 			yes = append(yes, hit{index: i + 1, profile: strings.TrimSpace(assignment.Profile), reason: reason, group: group})
-			if len(assignment.Match.Connectors) == 0 || len(assignment.Match.Users) > 0 ||
-				len(assignment.Match.Groups) > 0 || len(assignment.Match.Agents) > 0 {
-				provenRouteOnly = false
-			}
 		case matchMaybe:
 			maybe = append(maybe, strings.TrimSpace(assignment.Profile))
 			maybeNeeds = append(maybeNeeds, needs)
@@ -452,20 +445,21 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	// confirm that SSSD has no second holder of its uid. When this is the
 	// sole missing fact and the unproven profile differs only in its hook
 	// threshold, the OSS default and permissive tiers use the profile selected
-	// by a proven connector-only assignment on hook decisions and pathless
-	// explanations. Inspection, a
-	// different sandbox, or a different rule pack still needs account proof.
+	// by proven assignments on hook decisions and pathless explanations for a
+	// known connector. Inspection, a different sandbox, or a different rule
+	// pack still needs account proof.
 	// Strict and managed installs keep their proof requirement.
-	if verified && subject.holderUnproven && !subject.LookupFailed && provenRouteOnly &&
+	if verified && subject.holderUnproven && !subject.LookupFailed && connectorName != "" &&
 		path != profilePathInspect && slices.Equal(needed, []string{"account:unknown"}) &&
 		set.base != nil && !managed.IsManagedEnterprise(set.base.DeploymentMode) &&
 		set.base.HookPolicyTierForConnector(connectorName) != config.HookPolicyTierStrict &&
-		set.unconfirmedHolderOnlyTightensHook(uncoveredMaybe, proven, connectorName) {
+		set.unconfirmedHolderOnlyTightensHook(uncoveredMaybe, proven, scans) {
 		decision := set.decision(proven, profileMatchDefaultLookupFailed, "", source)
 		if len(yes) > 0 {
 			decision = provenDecision()
 		}
 		decision.Unproven = []string{"account:unknown"}
+		decision.holderFallback = true
 		return decision
 	}
 	if !verified || len(needed) == 0 {
@@ -521,23 +515,26 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 // unconfirmedHolderOnlyTightensHook allows the OSS proven selection when an
 // unconfirmed named account could select a stricter hook threshold but no
 // different rule pack, sandbox floor, or approval control.
-func (set *guardrailProfileSet) unconfirmedHolderOnlyTightensHook(names []string, proven, connectorName string) bool {
-	if len(names) == 0 {
+func (set *guardrailProfileSet) unconfirmedHolderOnlyTightensHook(names []string, proven string, scans []string) bool {
+	if len(names) == 0 || len(scans) == 0 {
 		return false
 	}
 	selected := set.profileConfig(proven)
 	for _, name := range names {
 		possible := set.profileConfig(name)
-		if selected == nil || possible == nil ||
-			!set.profileStricter(name, proven, connectorName) ||
-			!reflect.DeepEqual(set.profileSandbox(name), set.profileSandbox(proven)) ||
-			!set.scansRulePacksOf(proven, name, connectorName, profilePathAny) ||
-			!set.scansRulePacksOf(name, proven, connectorName, profilePathAny) ||
-			!hiltCovers(hiltEnabledForConfig(selected, connectorName), hiltMinRankForConfig(selected, connectorName),
-				hiltEnabledForConfig(possible, connectorName), hiltMinRankForConfig(possible, connectorName)) ||
-			!hiltCovers(hiltEnabled(&selected.Guardrail, connectorName), hiltMinRank(&selected.Guardrail, connectorName),
-				hiltEnabled(&possible.Guardrail, connectorName), hiltMinRank(&possible.Guardrail, connectorName)) {
+		if selected == nil || possible == nil || !reflect.DeepEqual(set.profileSandbox(name), set.profileSandbox(proven)) {
 			return false
+		}
+		for _, connectorName := range scans {
+			if !set.profileStricter(name, proven, connectorName) ||
+				!set.scansRulePacksOf(proven, name, connectorName, profilePathAny) ||
+				!set.scansRulePacksOf(name, proven, connectorName, profilePathAny) ||
+				!hiltCovers(hiltEnabledForConfig(selected, connectorName), hiltMinRankForConfig(selected, connectorName),
+					hiltEnabledForConfig(possible, connectorName), hiltMinRankForConfig(possible, connectorName)) ||
+				!hiltCovers(hiltEnabled(&selected.Guardrail, connectorName), hiltMinRank(&selected.Guardrail, connectorName),
+					hiltEnabled(&possible.Guardrail, connectorName), hiltMinRank(&possible.Guardrail, connectorName)) {
+				return false
+			}
 		}
 	}
 	return true
@@ -592,20 +589,15 @@ func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubjec
 }
 
 // explainOnRequestPaths is explain's decision for connectorName's requests:
-// decide on any path, and, when that refuses, on the hook and inspect paths
-// a connector's requests are decided on. A request decides on its own path,
-// where an unproven assignment whose profile enforces there as the proven
-// one does changes nothing (selectProfile), so the pathless answer refused
-// accounts whose hook calls were allowed (GAP-1685). No path refusing gives
-// the hook path's decision; one path refusing keeps the refusal and names
-// that path. Without a connector explain keeps the pathless answer.
-// sandboxRefused is the pathless refusal when no request path refuses: a
-// sandbox run decides on any path (sandboxMatchPeer), so it is still
-// refused, and explain names that refusal beside the hook decision
-// (GAP-1789).
+// decide on any path and on each concrete hook and inspect path. A request
+// decides on its own path, where a possible assignment with equivalent
+// enforcement changes nothing (GAP-1685). One concrete path refusing names
+// that path; a pathless refusal with neither concrete path refusing names
+// the sandbox refusal beside the allowed hook decision (GAP-1789). Without
+// a connector explain keeps the pathless answer.
 func (set *guardrailProfileSet) explainOnRequestPaths(connectorName string, decide func(profilePath) profileDecision) (decision profileDecision, refusedOn []string, sandboxRefused string) {
 	decision = decide(profilePathAny)
-	if decision.Refused == "" || connectorName == "" {
+	if connectorName == "" {
 		return decision, nil, ""
 	}
 	hook, inspect := decide(profilePathHook), decide(profilePathInspect)
@@ -617,9 +609,21 @@ func (set *guardrailProfileSet) explainOnRequestPaths(connectorName string, deci
 	}
 	switch len(refusedOn) {
 	case 0:
-		return hook, nil, decision.Refused
+		if decision.Refused != "" {
+			return hook, nil, decision.Refused
+		}
+		return decision, nil, ""
 	case 1:
+		if decision.Refused == "" {
+			if hook.Refused != "" {
+				return hook, refusedOn, ""
+			}
+			return inspect, refusedOn, ""
+		}
 		return decision, refusedOn, ""
+	}
+	if decision.Refused == "" {
+		return hook, nil, ""
 	}
 	return decision, nil, ""
 }
