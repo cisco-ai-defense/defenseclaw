@@ -36,13 +36,16 @@ type gap0523LogBuffer struct {
 // back, even while another target remains in attention.
 func TestGAP0523AttentionIntervalNamesRestoredOwnedFile(t *testing.T) {
 	for _, tc := range []struct {
-		name, reason       string
-		damaged, attention bool
+		name, reason                             string
+		damaged, attention, inflight, resetMtime bool
 	}{
-		{"attention_interval", "interval", true, true},
-		{"attention_retry", "retry", true, true},
-		{"healthy_fsnotify", "fsnotify", true, false},
-		{"healthy_unchanged", "interval", false, false},
+		{"attention_interval", "interval", true, true, false, false},
+		{"attention_retry", "retry", true, true, false, false},
+		{"healthy_fsnotify", "fsnotify", true, false, false, false},
+		{"attention_inflight", "interval", true, true, true, false},
+		{"attention_inflight_reset_mtime", "interval", true, true, true, true},
+		{"healthy_inflight", "interval", true, false, true, false},
+		{"healthy_unchanged", "interval", false, false, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			restoreEnterpriseHooksLifecycleTestState(t)
@@ -60,6 +63,10 @@ func TestGAP0523AttentionIntervalNamesRestoredOwnedFile(t *testing.T) {
 			token := filepath.Join(dir, ".hook-hermes.token")
 			const issued = "issued\n"
 			if err := os.WriteFile(token, []byte(issued), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			issuedInfo, err := os.Lstat(token)
+			if err != nil {
 				t.Fatal(err)
 			}
 			cfg = &config.Config{DataDir: dir}
@@ -83,6 +90,14 @@ func TestGAP0523AttentionIntervalNamesRestoredOwnedFile(t *testing.T) {
 			enterpriseHookWatchReconcileOnce = func(context.Context) (enterpriseHookReconcileRun, error) {
 				calls++
 				if calls > 1 {
+					if calls == 2 && tc.inflight {
+						// The write lands after the watch pass sampled the file.
+						written := make(chan error, 1)
+						go func() { written <- os.WriteFile(token, []byte("changed\n"), 0o600) }()
+						if err := <-written; err != nil {
+							return enterpriseHookReconcileRun{}, err
+						}
+					}
 					data, err := os.ReadFile(token)
 					if err != nil {
 						return enterpriseHookReconcileRun{}, err
@@ -90,6 +105,18 @@ func TestGAP0523AttentionIntervalNamesRestoredOwnedFile(t *testing.T) {
 					if string(data) != issued {
 						if err := os.WriteFile(token, []byte(issued), 0o600); err != nil {
 							return enterpriseHookReconcileRun{}, err
+						}
+						if tc.resetMtime {
+							if err := os.Chtimes(token, issuedInfo.ModTime(), issuedInfo.ModTime()); err != nil {
+								return enterpriseHookReconcileRun{}, err
+							}
+							resetInfo, err := os.Lstat(token)
+							if err != nil {
+								return enterpriseHookReconcileRun{}, err
+							}
+							if !resetInfo.ModTime().Equal(issuedInfo.ModTime()) {
+								return enterpriseHookReconcileRun{}, fmt.Errorf("modification time was not restored")
+							}
 						}
 					}
 				}
@@ -137,7 +164,7 @@ func TestGAP0523AttentionIntervalNamesRestoredOwnedFile(t *testing.T) {
 			case <-time.After(3 * time.Second):
 				t.Fatal("watch did not reach startup")
 			}
-			if tc.damaged {
+			if tc.damaged && !tc.inflight {
 				if err := os.WriteFile(token, []byte("changed\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
