@@ -82,11 +82,11 @@ const (
 	// hookGlobalInFlightPerProc and hookGlobalInFlightMin bound the requests
 	// the gateway holds at once for all callers together: 16 per processor,
 	// at least four accounts' sandbox hook caps. A caller's share of it is a
-	// quarter, so on a small host the minimum lets one account hold its
-	// aggregate sandbox hook cap while leaving room for other accounts. It
-	// also lets one host account hold its full hookCallerInFlight: 10 calls a
-	// second for the 3.5 s answer
-	// budget. With a minimum of 32 a host of two processors let one account
+	// quarter, so on a small host the minimum lets one account hold the
+	// requests its sandbox rate bucket admits within an answer window while
+	// leaving room for other accounts. It also lets one host account hold its
+	// full hookCallerInFlight: 10 calls a second for the 3.5 s answer budget.
+	// With a minimum of 32 a host of two processors let one account
 	// hold 8, so an ordinary 10 calls a second whose answers took over 0.8 s
 	// under CPU load (five agent TUIs starting beside two busy agents) were
 	// refused 429 and blocked as a gateway no-answer (GAP-1790). A request
