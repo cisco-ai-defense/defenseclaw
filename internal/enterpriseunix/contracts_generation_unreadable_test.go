@@ -39,6 +39,7 @@ func TestUnprotectedScanRequiresReadableConfigGeneration(t *testing.T) {
 					t.Fatal(err)
 				}
 				record["config_generation"] = current.Generation
+				record["config_sha256"] = current.ConfigSHA256
 				scan, err = json.Marshal(record)
 				if err != nil {
 					t.Fatal(err)
