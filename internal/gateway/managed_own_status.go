@@ -90,8 +90,7 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 	desktopRefused := false
 	auditDB := ""
 	if cfg != nil {
-		claudeConfigured = slices.Contains(cfg.ActiveConnectors(), enterprisepolicy.ConnectorClaudeCode) &&
-			!cfg.ConnectorDisabled(enterprisepolicy.ConnectorClaudeCode)
+		claudeConfigured = slices.Contains(enterprisepolicy.StandaloneConnectors(cfg), enterprisepolicy.ConnectorClaudeCode)
 		claudeCode = claudeConfigured
 		desktopRefused = gatewayconnector.SurfaceRefused(enterprisepolicy.ConnectorClaudeCode, gatewayconnector.HostSurfaceDesktop,
 			cfg.Enterprise.Enrollment.UnverifiedVersionsFor(enterprisepolicy.ConnectorClaudeCode))
@@ -177,10 +176,7 @@ func (a *APIServer) ownConnectorStates(cfg *config.Config, uid, name string) map
 		}
 		return false
 	}
-	for _, connector := range cfg.ActiveConnectors() {
-		if cfg.ConnectorDisabled(connector) {
-			continue
-		}
+	for _, connector := range enterprisepolicy.StandaloneConnectors(cfg) {
 		state := map[string]any{"protected": false, "state": "not confirmed"}
 		if view != nil && (view.admitted == nil || view.admitted[connector]) {
 			if proof, ok := view.connectors[connector]; ok {
