@@ -15,10 +15,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
@@ -614,6 +616,66 @@ func TestWindowsEnterpriseEnsureInstallsTheSuppliedConfigOverAnUnparseableOne(t 
 	if len(stub.calls) != 2 || stub.calls[1][1] != "Upgrade" || string(got) != next || string(kept) != broken ||
 		!strings.Contains(strings.Join(result.Changes, "\n"), "did not parse") {
 		t.Fatalf("installer runs %q, config.yaml %q, rejected-config.yaml %q, changes %q", stub.calls, got, kept, result.Changes)
+	}
+}
+
+// GAP-0590 review S2: a file Setup writes new from the approved source is
+// owned by Administrators, whatever owner the token gives new files. Under the
+// "Object creator" default-owner policy the token's own account owned it, and
+// the gateway's standalone walk and Setup's gate refused that owner. The
+// policy is reproduced on this thread only: an impersonation token whose
+// default owner is the token's own account.
+func TestWriteFreshFileWithDACLOwnerIsAdministratorsUnderObjectCreatorPolicy(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("setting Administrators as owner needs an elevated administrator or SYSTEM")
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("drifted\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var process windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_DUPLICATE|windows.TOKEN_QUERY, &process); err != nil {
+		t.Fatal(err)
+	}
+	defer process.Close()
+	var thread windows.Token
+	if err := windows.DuplicateTokenEx(process, windows.TOKEN_ALL_ACCESS, nil, windows.SecurityImpersonation, windows.TokenImpersonation, &thread); err != nil {
+		t.Fatal(err)
+	}
+	defer thread.Close()
+	user, err := thread.GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.User.Sid.String() == "S-1-5-32-544" {
+		t.Skip("the token's own account is Administrators")
+	}
+	tokenOwner := struct{ Owner *windows.SID }{user.User.Sid}
+	if err := windows.SetTokenInformation(thread, windows.TokenOwner, (*byte)(unsafe.Pointer(&tokenOwner)), uint32(unsafe.Sizeof(tokenOwner))); err != nil {
+		t.Fatalf("set the default owner to the token's account: %v", err)
+	}
+	if err := windows.SetThreadToken(nil, thread); err != nil {
+		t.Fatal(err)
+	}
+	writeErr := writeFreshFileWithDACL(path, []byte("approved\n"), windowsConfigFileSDDL(managed.WindowsServiceSIDString(managed.StandaloneWindowsGatewaySvc)))
+	if err := windows.RevertToSelf(); err != nil {
+		t.Fatal(err)
+	}
+	if writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner.String() != "S-1-5-32-544" {
+		t.Fatalf("the new config.yaml is owned by %v (%v), want Administrators, not the token's account %s", owner, err, user.User.Sid)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "approved\n" {
+		t.Fatalf("config.yaml = %q", got)
 	}
 }
 
