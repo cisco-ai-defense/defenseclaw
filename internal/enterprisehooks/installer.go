@@ -37,6 +37,10 @@ import (
 // host's user namespace setting.
 var installOwnedHooksPresent = connector.OwnedHooksPresentForPendingInstall
 
+// A lock writer may report an error after its atomic publication. Tests
+// exercise that outcome without changing the on-disk writer.
+var installSaveHookContractLockEntry = connector.SaveHookContractLockEntryForMode
+
 // InstallOptions describes one explicit enterprise hook install/repair target.
 //
 // The gateway service itself is deliberately sandboxed away from user homes in
@@ -758,8 +762,21 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			}
 			// Publish the lock after every fallible registration and hardening
 			// check. A rejected install leaves peer lock metadata unchanged.
-			if err := connector.SaveHookContractLockEntryForMode(dataDir, lockEntry, strictManagedRuntime); err != nil {
-				return rollback(fmt.Errorf("enterprise hooks: save hook contract lock: %w", err))
+			lockPath := filepath.Join(dataDir, "hook_contract_lock.json")
+			beforeLock, beforeLockErr := os.Stat(lockPath)
+			if err := installSaveHookContractLockEntry(dataDir, lockEntry, strictManagedRuntime); err != nil {
+				cause := fmt.Errorf("enterprise hooks: save hook contract lock: %w", err)
+				afterLock, afterLockErr := os.Stat(lockPath)
+				// Both writers replace the lock atomically. If the file identity
+				// did not change, the failed save never published, so ordinary
+				// rollback can restore the previous registration. Otherwise a
+				// writer may have published before reporting a durability error:
+				// retain the verified registration for that visible lock.
+				if (errors.Is(beforeLockErr, os.ErrNotExist) && errors.Is(afterLockErr, os.ErrNotExist)) ||
+					(beforeLockErr == nil && afterLockErr == nil && os.SameFile(beforeLock, afterLock)) {
+					return rollback(cause)
+				}
+				return cause
 			}
 			clearProtectedHookRepairFailure(dataDir, conn.Name())
 			result = InstallResult{
