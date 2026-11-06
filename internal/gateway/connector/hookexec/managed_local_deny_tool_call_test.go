@@ -22,6 +22,7 @@ import (
 // names. A managed refusal's row carries both, and the answer still names
 // the id of that row.
 func TestManagedLocalDenyRowNamesItsEventIDAndToolCall(t *testing.T) {
+	shortRestartBudget(t)
 	userHome := t.TempDir()
 	r := run(t, "claudecode", &stubRT{err: errManagedGatewayNotRunning}, func(opts *Options) {
 		opts.ManagedEnterprise = true
