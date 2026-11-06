@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -149,26 +150,17 @@ var testGatewayPortClaimDir string
 const testProcessIdentityNote = "an elevated administrator that is not LocalSystem (the CI runner's identity)"
 
 // normalizeTestTokenDefaultOwner makes the test binary's own account the
-// owner of everything it creates, as the CI harness does for its elevated
-// runner (scripts/windows-native-ci.ps1 Set-CurrentUserAsDefaultOwner). An
-// elevated administrator's token defaults to BUILTIN\Administrators as the
-// owner, so outside that harness every t.TempDir() looked foreign to the
-// product's ownership checks ("safefile: refusing foreign-owned directory")
-// and the watchdog, daemon and audit tests failed when an administrator ran
-// the package from an elevated prompt (GAP-0079). A standard user's and
-// LocalSystem's tokens already default to their own account.
+// owner of everything it creates (testenv.OwnNewObjectsAsTokenUser), as the
+// CI harness does for its elevated runner (scripts/windows-native-ci.ps1
+// Set-CurrentUserAsDefaultOwner). An elevated administrator's token defaults
+// to BUILTIN\Administrators as the owner, so outside that harness every
+// t.TempDir() looked foreign to the product's ownership checks ("safefile:
+// refusing foreign-owned directory") and the watchdog, daemon and audit tests
+// failed when an administrator ran the package from an elevated prompt
+// (GAP-0079). A standard user's and LocalSystem's tokens already default to
+// their own account.
 func normalizeTestTokenDefaultOwner() {
-	var token windows.Token
-	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY|windows.TOKEN_ADJUST_DEFAULT, &token); err != nil {
-		return
-	}
-	defer token.Close()
-	user, err := token.GetTokenUser()
-	if err != nil || user == nil || user.User.Sid == nil {
-		return
-	}
-	owner := struct{ Owner *windows.SID }{Owner: user.User.Sid}
-	_ = windows.SetTokenInformation(token, windows.TokenOwner, (*byte)(unsafe.Pointer(&owner)), uint32(unsafe.Sizeof(owner)))
+	_, _ = testenv.OwnNewObjectsAsTokenUser()
 }
 
 // pinTestProcessIdentity makes every identity seam answer as the CI runner
