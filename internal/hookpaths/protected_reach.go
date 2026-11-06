@@ -89,7 +89,7 @@ func (m *TargetMemo) parentProtectedReach(parent, home string, names reachNames)
 	switch {
 	case reached || ok && names.hasCandidate(resolved):
 		answer.grade = GradeNamed
-	case linkedInProtectedDir || ok && !samePathName(parent, resolved) && names.has(resolved):
+	case linkedInProtectedDir:
 		answer.grade = GradePossible
 	case unread || !ok:
 		answer.grade = GradePossible
