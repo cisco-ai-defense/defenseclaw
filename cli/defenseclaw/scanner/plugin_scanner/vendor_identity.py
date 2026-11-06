@@ -158,14 +158,21 @@ def _validated_peer_link(link: str, root: str, peer: str, data_dir: str) -> tupl
         raise ValueError("peer link points inside the package")
     if peer != "openclaw":
         raise ValueError("peer link is not the OpenClaw package")
-    if not stat.S_ISDIR(os.stat(destination, follow_symlinks=False).st_mode):
+    target = os.stat(destination, follow_symlinks=False)
+    if not stat.S_ISDIR(target.st_mode):
         raise ValueError("peer link target is not a directory")
     manifest = _read_regular_file(
         os.path.join(destination, "package.json"), max_bytes=1024 * 1024,
     )
     if manifest is None or json.loads(manifest).get("name") != peer:
         raise ValueError("peer link target has another package identity")
-    return tuple(ancestors), (_filesystem_identity(info), os.readlink(link), manifest)
+    # The validated target is bound by its volume and file ID, not only by
+    # its path and manifest, so a different directory at the same path is
+    # judged again.
+    return tuple(ancestors), (
+        _filesystem_identity(info), os.readlink(link), destination,
+        (target.st_dev, target.st_ino), manifest,
+    )
 
 
 def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
@@ -199,9 +206,11 @@ def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
         path = os.path.join(os.getcwd(), path)
     parts = Path(path).parts
     current = _path_anchor(path)
-    if private(current):
+    if private(_exact_location(current, last=False)):
         return True
     pending = list(parts[1:])
+    # Whether a separator follows the last name of the complete path.
+    trailing = _ends_with_separator(path)
     links = 0
     steps = 0
     while pending:
@@ -213,17 +222,22 @@ def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
             current = os.path.dirname(current)
             continue
         current = os.path.join(current, part)
-        if private(current):
+        # A location is the one this name selects within the complete path,
+        # not the one a shorter path ending at the same name would select.
+        location = _exact_location(current, last=not pending and not trailing)
+        if private(location):
             return True
         try:
-            alias = _is_link_or_junction(os.lstat(current))
+            alias = _is_link_or_junction(os.lstat(location))
         except FileNotFoundError:
             alias = False
         if alias:
             links += 1
             if links > 40:
                 raise ValueError("peer path has too many links")
-            next_target = os.readlink(current)
+            next_target = os.readlink(location)
+            if not pending:
+                trailing = _ends_with_separator(next_target)
             target_parts = Path(next_target).parts
             if os.path.isabs(next_target):
                 current = _path_anchor(next_target)
@@ -292,8 +306,9 @@ def _location_names(path: str) -> tuple[str, ...]:
 
     A UNC server and share are names too. A device or extended-length prefix
     only selects the namespace, so it is not a name. Windows normalizes an
-    ordinary path, which drops the trailing dots and spaces of a name, but uses
-    the names of an extended-length path as written.
+    ordinary path as a whole: every name drops its trailing dots, and the last
+    name, unless a separator follows it, also drops its trailing spaces. The
+    names of an extended-length path are used as written.
     """
 
     text = str(path)
@@ -309,5 +324,41 @@ def _location_names(path: str) -> tuple[str, ...]:
     names += [pure.root] if pure.root else []
     names += pure.parts[1:] if pure.anchor else pure.parts
     if not verbatim:
-        names = [name.rstrip(". ") or name for name in names]
+        last = len(names) - 1 if not _ends_with_separator(text) else -1
+        names = [
+            name.rstrip(". " if index == last else ".") or name
+            for index, name in enumerate(names)
+        ]
     return tuple(names)
+
+
+def _ends_with_separator(path: str) -> bool:
+    return isinstance(Path(path), PureWindowsPath) and path[-1:] in ("\\", "/")
+
+
+def _exact_location(path: str, *, last: bool) -> str:
+    """Spell a location so that Windows selects exactly the entry it names.
+
+    Windows normalizes an ordinary path as a whole, so a name selects another
+    entry at the end of the path than before a separator. The extended-length
+    spelling of the names the complete path selects is used as written, so
+    every check reads the entry the complete path reaches. Other paths are
+    returned unchanged.
+    """
+
+    text = str(path)
+    if not isinstance(Path(text), PureWindowsPath) or text.startswith(
+        _WINDOWS_VERBATIM_PREFIXES,
+    ):
+        return text
+    prefix = _WINDOWS_DEVICE_PREFIX.match(text)
+    unc = bool(prefix) and prefix.group(0)[4:].casefold().startswith("unc")
+    pure = PureWindowsPath(("\\\\" if unc else "") + text[prefix.end():] if prefix else text)
+    unc = unc or pure.drive.startswith(("\\\\", "//"))
+    if not pure.drive or not pure.root:
+        return text
+    names = _location_names(text if last else text + "\\")
+    drive = [name for name in re.split(r"[\\/]+", pure.drive) if name]
+    tail = names[len(drive) + 1:]
+    head = "\\\\?\\UNC\\" if unc else "\\\\?\\"
+    return head + "\\".join(names[:len(drive)]) + "\\" + "\\".join(tail)

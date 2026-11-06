@@ -242,6 +242,60 @@ def test_r109_g501_peer_link_revalidated_after_hash(tmp_path, monkeypatch) -> No
     assert "SRC-EXEC" in _high_rules(installed)
 
 
+
+@requires_symlink_privilege
+def test_r109_g610_peer_destination_bound_by_file_identity(tmp_path, monkeypatch) -> None:
+    """A different directory at the validated peer path is judged again.
+
+    The peer target is replaced while the published bytes are hashed, keeping
+    its path and its manifest; the provider is then not official. An
+    unchanged peer stays official.
+    """
+
+    published = tmp_path / "published"
+    (published / "node_modules").mkdir(parents=True)
+    (published / "package.json").write_text(json.dumps({
+        "name": "@openclaw/amazon-bedrock-provider",
+        "version": "2026.10.9",
+        "peerDependencies": {"openclaw": "*"},
+    }), encoding="utf-8")
+    (published / "index.js").write_text(
+        "const match = /region/.exec(value);\n", encoding="utf-8",
+    )
+    monkeypatch.setitem(
+        vendor_identity.VENDOR_DIGESTS,
+        ("@openclaw/amazon-bedrock-provider", "2026.10.9"),
+        vendor_identity._tree_sha256(str(published)),
+    )
+    installed = tmp_path / "installed"
+    shutil.copytree(published, installed)
+    target = tmp_path / "peer"
+    manifest = json.dumps({"name": "openclaw"})
+    target.mkdir()
+    (target / "package.json").write_text(manifest, encoding="utf-8")
+    (installed / "node_modules" / "openclaw").symlink_to(target, target_is_directory=True)
+
+    identity = vendor_identity.inspect_official_provider_tree(str(installed))
+    assert identity is not None and identity.possible_peer
+
+    original = vendor_identity._tree_sha256
+    replaced = []
+
+    def replace_target_during_hash(path, **kwargs):
+        result = original(path, **kwargs)
+        if path == str(installed) and not replaced:
+            before = target.stat()
+            target.rename(tmp_path / "retired-peer")
+            target.mkdir()
+            (target / "package.json").write_text(manifest, encoding="utf-8")
+            replaced.append(not os.path.samestat(before, target.stat()))
+        return result
+
+    monkeypatch.setattr(vendor_identity, "_tree_sha256", replace_target_during_hash)
+    assert vendor_identity.inspect_official_provider_tree(str(installed)) is None
+    assert replaced == [True]
+
+
 @requires_symlink_privilege
 def test_r109_g501_peer_ancestor_revalidated_after_hash(tmp_path, monkeypatch) -> None:
     published = tmp_path / "published"
@@ -728,32 +782,44 @@ class _WindowsShareModel:
 
     Every location is a directory except the given junctions and symlinks;
     ``realpath`` follows them as Windows does, including into a UNC share.
+    An extended-length spelling selects the entry with the same names, and
+    ``realpath`` keeps that spelling, as Windows does.
     """
 
     def __init__(self, links) -> None:
         import ntpath
 
         self.ntpath = ntpath
-        self.links = {ntpath.normcase(path): link for path, link in links.items()}
+        self.links = {self.key(path): link for path, link in links.items()}
+
+    def key(self, value):
+        value = self.ntpath.normcase(os.fspath(value))
+        if value.startswith("\\\\?\\unc\\"):
+            return "\\\\" + value[8:]
+        return value[4:] if value.startswith("\\\\?\\") else value
 
     def realpath(self, value, **_kwargs):
         ntpath = self.ntpath
         value = ntpath.normpath(os.fspath(value))
+        verbatim = value.startswith("\\\\?\\")
         for _ in range(40):
             parts = PureWindowsPath(value).parts
             current = parts[0]
             for index, part in enumerate(parts[1:], 1):
                 current = ntpath.join(current, part)
-                link = self.links.get(ntpath.normcase(current))
+                link = self.links.get(self.key(current))
                 if link:
                     value = ntpath.normpath(ntpath.join(link[1], *parts[index + 1:]))
                     break
             else:
+                if verbatim and not value.startswith("\\\\?\\"):
+                    unc = value.startswith("\\\\")
+                    value = ("\\\\?\\UNC\\" + value[2:]) if unc else "\\\\?\\" + value
                 return value
         raise OSError("too many links")
 
     def lstat(self, value, *_args, **_kwargs):
-        kind = self.links.get(self.ntpath.normcase(os.fspath(value)), ("directory",))[0]
+        kind = self.links.get(self.key(value), ("directory",))[0]
         return SimpleNamespace(
             st_mode=(stat.S_IFLNK | 0o777) if kind == "symlink" else (stat.S_IFDIR | 0o755),
             st_file_attributes=0 if kind == "directory" else (
@@ -761,12 +827,12 @@ class _WindowsShareModel:
             ),
             st_reparse_tag=getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003)
             if kind == "junction" else 0,
-            st_dev=1, st_ino=hash(self.ntpath.normcase(os.fspath(value))) & 0xFFFF,
+            st_dev=1, st_ino=hash(self.key(value)) & 0xFFFF,
             st_size=0, st_mtime_ns=0, st_ctime_ns=0,
         )
 
     def readlink(self, value):
-        link = self.links.get(self.ntpath.normcase(os.fspath(value)))
+        link = self.links.get(self.key(value))
         if link is None:
             raise OSError("not a link")
         return link[1]
@@ -875,11 +941,14 @@ def test_r109_g610_unc_share_peers_judged_as_whole_paths(monkeypatch) -> None:
 def test_r109_g610_verbatim_peer_paths_judged_by_actual_names(monkeypatch) -> None:
     """An extended-length path names the entries it spells, as Windows does.
 
-    Windows drops trailing dots and spaces from the names of an ordinary path,
-    so an ordinary ``.ssh.`` names ``.ssh`` and is refused. An extended-length
-    path is not normalized: ``.ssh.`` there is a distinct ordinary directory
-    and is admitted, while ``.ssh`` is refused. A device or extended-length
-    spelling of the configured state names the state and is refused.
+    Windows normalizes an ordinary path as a whole: every name drops its
+    trailing dots, so an ordinary ``.ssh.`` names ``.ssh`` and is refused, but
+    only the last name drops its trailing spaces, so ``.ssh `` before another
+    name is a distinct ordinary directory and is admitted, while the state
+    named with a trailing space at the end is refused. An extended-length path
+    is not normalized: ``.ssh.`` there is a distinct ordinary directory and is
+    admitted, while ``.ssh`` is refused. A device or extended-length spelling
+    of the configured state names the state and is refused.
     """
     import ntpath
 
@@ -910,7 +979,23 @@ def test_r109_g610_verbatim_peer_paths_judged_by_actual_names(monkeypatch) -> No
         ("verbatim-alias-protected", alias + sep + sep.join(package),
          verbatim + sep.join(("C:", "ordinary", ".aws")), local_state, False),
         ("ordinary-period", spelled("", "C:", "ordinary", ".ssh."), None, local_state, False),
-        ("ordinary-space", spelled("", "C:", "ordinary", ".ssh "), None, local_state, False),
+        ("ordinary-intermediate-space", spelled("", "C:", "ordinary", ".ssh "), None, local_state, True),
+        ("ordinary-intermediate-space-share", spelled(sep * 2, "server", ".ssh "), None, local_state, True),
+        ("ordinary-intermediate-space-state", spelled("", "C:", "state "), None, local_state, True),
+        ("ordinary-alias-intermediate-space", alias + sep + sep.join(package),
+         sep.join(("C:", "ordinary", ".aws ")), local_state, True),
+        ("ordinary-alias-period", alias + sep + sep.join(package),
+         sep.join(("C:", "ordinary", ".aws.")), local_state, False),
+        ("ordinary-intermediate-space-period", spelled("", "C:", "ordinary", ".ssh ."),
+         None, local_state, True),
+        ("ordinary-intermediate-period-space", spelled("", "C:", "ordinary", ".ssh. "),
+         None, local_state, True),
+        ("ordinary-final-space-state", sep.join(("C:", "state ")), None, local_state, False),
+        ("ordinary-final-period-space-state", sep.join(("C:", "state. ")), None, local_state, False),
+        ("device-intermediate-space", spelled(sep * 2 + "." + sep, "C:", "ordinary", ".ssh "),
+         None, local_state, True),
+        ("device-intermediate-period", spelled(sep * 2 + "." + sep, "C:", "ordinary", ".ssh."),
+         None, local_state, False),
         ("forward-slash-device-period", spelled("//?/", "C:", "ordinary", ".ssh."),
          None, local_state, False),
         ("verbatim-local-state", spelled(verbatim, "C:", "state"), None, local_state, False),

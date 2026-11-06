@@ -263,10 +263,11 @@ const (
 
 // linkResolution describes everything plugin admission reads to validate a
 // link in the plugin tree: the text of every link on the way to its target,
-// including links outside the plugin root, the final location, and the
-// package manifest there. A change to any of them changes the plugin
-// snapshot, so an allowed baseline is not reused for a link whose validated
-// resolution changed.
+// including links outside the plugin root, the final location with its volume
+// and file ID, and the package manifest there. A change to any of them
+// changes the plugin snapshot, so an allowed baseline is not reused for a
+// link whose validated resolution changed, even when a different directory
+// takes the place of the validated one.
 func linkResolution(link, target string) string {
 	var out strings.Builder
 	current := filepath.Dir(link)
@@ -311,6 +312,11 @@ func linkResolution(link, target string) string {
 		return out.String()
 	}
 	out.WriteString("|resolved:" + resolved)
+	if id, idErr := snapshotFileIdentity(resolved); idErr == nil {
+		out.WriteString("|id:" + id)
+	} else {
+		out.WriteString("|id-error:" + idErr.Error())
+	}
 	if info, statErr := os.Stat(resolved); statErr == nil && info.IsDir() {
 		if h, hashErr := hashFile(filepath.Join(resolved, "package.json")); hashErr == nil {
 			out.WriteString("|manifest:" + h)
