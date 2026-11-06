@@ -4,6 +4,10 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -48,5 +52,38 @@ func TestGAP0706RootGatewayMessagesHaveSinglePunctuation(t *testing.T) {
 	}
 	if problemClause("held by another process") != "held by another process" {
 		t.Fatal("a problem without a final period changed")
+	}
+}
+
+// GAP-0711, GAP-0713: gateway status, start and the other messages that carry
+// the root-gateway remedy return the moved store as well as the install home.
+func TestGAP0711RootGatewayStatusRemedyCoversMovedStore(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Windows remedy has no ownership step")
+	}
+	home := t.TempDir()
+	store := filepath.Join(t.TempDir(), "moved store")
+	t.Setenv("DEFENSECLAW_HOME", home)
+	t.Setenv("DEFENSECLAW_CONFIG", "")
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("data_dir: "+strconv.Quote(store)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldHolder, oldClass := gatewayPortHolder, gatewayListenerClass
+	t.Cleanup(func() { gatewayPortHolder, gatewayListenerClass = oldHolder, oldClass })
+	gatewayPortHolder = func(string, int) (daemon.PortHolder, error) { return daemon.PortHolder{PID: 1, UID: 0}, nil }
+	gatewayListenerClass = func(string, int, string, daemon.PortHolder, error, bool) daemon.PerUserListenerClass {
+		return daemon.PerUserListenerOwnGatewayRunAsRoot
+	}
+	c := config.DefaultConfig()
+	c.Gateway.APIBind = "127.0.0.1"
+	c.Gateway.APIPort = 18970
+	fix := foreignGatewayListenerFix(c)
+	for _, dir := range []string{home, store} {
+		if !strings.Contains(fix, "'"+dir+"'") {
+			t.Errorf("status remedy leaves %s root-owned: %q", dir, fix)
+		}
+	}
+	if !strings.Contains(fix, `sudo chown -R "$(id -un)" `) || !strings.HasSuffix(fix, "defenseclaw-gateway start") {
+		t.Errorf("status remedy does not end with a start the account can run: %q", fix)
 	}
 }

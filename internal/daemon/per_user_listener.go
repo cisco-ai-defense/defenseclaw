@@ -10,6 +10,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // PerUserListenerClass describes a listener for display. It never authorizes
@@ -52,12 +57,67 @@ func rootGatewayRemedyFor(goos, dataDir string) string {
 	return "Stop it, return its files to your account and start it as yourself with: " + rootGatewayRecoveryCommand(dataDir)
 }
 
-// rootGatewayRecoveryCommand stops the root gateway, returns the home to the
-// calling account and starts the gateway as that account.
+// rootGatewayRecoveryCommand stops the root gateway, returns the install home
+// and the moved store to the calling account and starts the gateway as that
+// account. The root run leaves root-owned files in both (GAP-0711, GAP-0713).
 func rootGatewayRecoveryCommand(dataDir string) string {
-	return rootGatewayStopCommand(dataDir) + " && sudo chown -R \"$(id -un)\" " + shellQuote(absoluteDataDir(dataDir)) +
+	dirs := rootGatewayRecoveryDirs(dataDir)
+	for i, dir := range dirs {
+		dirs[i] = shellQuote(dir)
+	}
+	return rootGatewayStopCommand(dataDir) + " && sudo chown -R \"$(id -un)\" " + strings.Join(dirs, " ") +
 		" && defenseclaw-gateway start"
 }
+
+// rootGatewayRecoveryDirs are the directories a root-run gateway for the
+// install home writes to: the home that holds the PID record, and the store
+// that home's config moved the data to (defenseclaw config set data_dir). A
+// chown of the home alone leaves the store's connector state root-owned, so
+// the account start fails on it.
+func rootGatewayRecoveryDirs(installHome string) []string {
+	home := absoluteDataDir(installHome)
+	dirs := []string{home}
+	if store := movedStoreOfHome(home); store != "" && store != home {
+		dirs = append(dirs, store)
+	}
+	return dirs
+}
+
+// movedStoreOfHome reads data_dir from the config the gateway reads for the
+// install home: DEFENSECLAW_CONFIG when set, else home/config.yaml. It
+// returns "" when there is none, it cannot be read or it names no directory.
+// A relative data_dir is taken relative to the config file, as the gateway does.
+func movedStoreOfHome(home string) string {
+	configFile := os.Getenv(managed.ConfigPathEnv)
+	if configFile == "" {
+		configFile = filepath.Join(home, "config.yaml")
+	}
+	if !filepath.IsAbs(configFile) {
+		return ""
+	}
+	raw, err := safefile.ReadRegularFileBounded(configFile, maxRemedyConfigBytes)
+	if err != nil {
+		return ""
+	}
+	var source struct {
+		DataDir string `yaml:"data_dir"`
+	}
+	if yaml.Unmarshal(raw, &source) != nil {
+		return ""
+	}
+	store := strings.TrimSpace(source.DataDir)
+	if store == "" {
+		return ""
+	}
+	if !filepath.IsAbs(store) {
+		store = filepath.Join(filepath.Dir(configFile), store)
+	}
+	return filepath.Clean(store)
+}
+
+// maxRemedyConfigBytes bounds the config read for a remedy. A larger file
+// names no store here; the remedy then covers the install home only.
+const maxRemedyConfigBytes = 4 << 20
 
 func rootGatewayStopCommand(dataDir string) string {
 	executable := "\"$(command -v defenseclaw-gateway)\""

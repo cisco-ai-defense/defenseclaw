@@ -1169,3 +1169,42 @@ func TestChildEnvAppliesTheParentEnvFilter(t *testing.T) {
 		t.Fatalf("the filter was not applied: %v", got)
 	}
 }
+
+// GAP-0714: a start whose PID record is written but whose ownership step then
+// refuses leaves nothing behind, so the account's own start is not blocked by
+// a record the refused start made. A record that a different process owns
+// stays.
+func TestGAP0714FailedPIDWriteTakesBackOnlyItsOwnRecord(t *testing.T) {
+	old := writeGatewayPIDFile
+	t.Cleanup(func() { writeGatewayPIDFile = old })
+	writeGatewayPIDFile = func(mode, path, label string, data []byte) error {
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			return err
+		}
+		return errors.New("safefile: private directory has an untrusted owner")
+	}
+	d := New(t.TempDir())
+	if err := d.writePIDInfoAt(4242, "/usr/local/bin/defenseclaw-gateway", "start-4242", time.Now()); err == nil {
+		t.Fatal("the failed ownership step was not reported")
+	}
+	if _, err := os.Lstat(d.pidFile); !os.IsNotExist(err) {
+		t.Fatalf("the refused start left its PID record behind: %v", err)
+	}
+
+	other, err := json.Marshal(pidInfo{PID: 7, Executable: "/usr/local/bin/defenseclaw-gateway", StartIdentity: "start-7"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeGatewayPIDFile = func(mode, path, label string, data []byte) error {
+		if err := os.WriteFile(path, other, 0o600); err != nil {
+			return err
+		}
+		return errors.New("write refused")
+	}
+	if err := d.writePIDInfoAt(4242, "/usr/local/bin/defenseclaw-gateway", "start-4242", time.Now()); err == nil {
+		t.Fatal("the refused write was not reported")
+	}
+	if got, err := d.readPIDInfo(); err != nil || got.PID != 7 {
+		t.Fatalf("another process's PID record = %+v, %v", got, err)
+	}
+}

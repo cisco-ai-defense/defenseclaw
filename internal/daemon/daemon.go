@@ -1261,10 +1261,22 @@ func (d *Daemon) writePIDInfoAt(pid int, executable string, startIdentity string
 	if err != nil {
 		return err
 	}
-	return managed.WriteServiceRuntimeFile(
+	if err := writeGatewayPIDFile(
 		managed.PinnedDeploymentMode(), d.pidFile, "gateway pid file", data,
-	)
+	); err != nil {
+		// The write can land and the ownership step after it fail: a root
+		// start for an account whose owner it cannot prove leaves a root-owned
+		// record that stops the account's own start (GAP-0714). Take back the
+		// record this call wrote, and only it.
+		d.removePIDFileIfStarted(info)
+		return err
+	}
+	return nil
 }
+
+// writeGatewayPIDFile writes gateway.pid. A variable so a test can fail the
+// step after the write.
+var writeGatewayPIDFile = managed.WriteServiceRuntimeFile
 
 func IsDaemonChild() bool {
 	return os.Getenv(EnvDaemon) == "1"

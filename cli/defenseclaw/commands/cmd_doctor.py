@@ -1810,16 +1810,21 @@ def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
             check_id="doctor.state.sudo-leftovers",
         )
         return
-    remediation = (
-        "stop the gateway, preserve a backup, then rerun the gateway once with sudo "
-        "from the owning account so verified descriptor-bound ownership repair can run"
-    )
+    if _root_leftovers_account_can_repair(cfg):
+        remediation = _root_leftovers_remedy(cfg)
+        guidance = "; give them back to this account"
+    else:
+        remediation = (
+            "stop the gateway, preserve a backup, then rerun the gateway once with sudo "
+            "from the owning account so verified descriptor-bound ownership repair can run"
+        )
+        guidance = "; use the guided ownership repair"
     _emit(
         "fail",
         "Sudo leftovers",
         "root-owned from a sudo-started gateway: "
         + ", ".join(leftovers)
-        + "; use the guided ownership repair",
+        + guidance,
         r=r,
         check_id="doctor.state.sudo-leftovers",
         reason_code="sudo-runtime-leftovers",
@@ -1889,15 +1894,48 @@ def _root_gateway_remedy_for(platform_name: str, cfg) -> str:
 
 def _root_gateway_recovery_command(cfg) -> str:
     """Stop the root gateway, return the home and the store, start as this account."""
+    return _root_gateway_stop_command(cfg) + " && " + _root_gateway_return_and_start_command(cfg)
+
+
+def _root_gateway_return_and_start_command(cfg) -> str:
+    """Give the install home and the moved store back to this account, then start."""
     data_dir = _configured_gateway_data_dir(cfg)
     homes = [_root_gateway_install_home(cfg)]
     if data_dir and data_dir not in homes:
         homes.append(data_dir)
     return (
-        _root_gateway_stop_command(cfg)
-        + ' && sudo chown -R "$(id -un)" '
+        'sudo chown -R "$(id -un)" '
         + " ".join(shlex.quote(home) for home in homes)
         + " && defenseclaw-gateway start"
+    )
+
+
+def _root_leftovers_account_can_repair(cfg) -> bool:
+    """Whether root-owned runtime files are this account's to take back.
+
+    A managed install keeps its runtime root-owned by design, and a Secure
+    Client host is unchanged, so both keep their own guidance.
+    """
+    if os.name == "nt" or _doctor_managed(cfg):
+        return False
+    from defenseclaw.enforce import asset_lists
+
+    return not asset_lists.is_secure_client(cfg)
+
+
+def _root_leftovers_remedy(cfg) -> str:
+    """The one repair for root-owned files a sudo-started gateway left behind.
+
+    The gateway refuses to run as root over an account's files, so asking for
+    another sudo run cannot repair them (GAP-0711, GAP-0713). The same
+    sequence as ``_root_gateway_remedy``: return the install home and the
+    moved store, then start as this account.
+    """
+    return (
+        "give the files back to this account and start the gateway: "
+        + _root_gateway_return_and_start_command(cfg)
+        + "; a gateway still running as root must be stopped first with: "
+        + _root_gateway_stop_command(cfg)
     )
 
 
@@ -18249,6 +18287,15 @@ def _check_hook_contract_lock(
         return
     except PermissionError:
         if root_owned_private_regular_file(lock_path):
+            if _root_leftovers_account_can_repair(cfg):
+                _emit(
+                    "fail",
+                    "Hook contract",
+                    "hook_contract_lock.json is root-owned from a sudo-started gateway",
+                    r=r,
+                    remediation=_root_leftovers_remedy(cfg),
+                )
+                return
             _emit(
                 "fail",
                 "Hook contract",

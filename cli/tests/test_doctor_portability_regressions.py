@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import shlex
 import stat
@@ -848,9 +849,66 @@ def test_doctor_names_sudo_runtime_leftovers(monkeypatch, tmp_path) -> None:
     assert check["status"] == "fail"
     assert check["label"] == "Sudo leftovers"
     assert "hook_contract_lock.json" in check["detail"]
-    assert "guided ownership repair" in check["detail"]
-    assert "descriptor-bound" in check["remediation"]
+    assert "give them back to this account" in check["detail"]
+    assert "descriptor-bound" not in check["remediation"]
+    assert "rerun the gateway once with sudo" not in check["remediation"]
+    assert 'sudo chown -R "$(id -un)" ' in check["remediation"]
     assert check["reason_code"] == "sudo-runtime-leftovers"
+
+
+def _moved_store_config(monkeypatch, tmp_path, **extra):
+    home = tmp_path / "install home"
+    store = tmp_path / "moved store's data"
+    home.mkdir()
+    store.mkdir()
+    (home / "config.yaml").write_text(f"data_dir: {json.dumps(os.fspath(store))}\n")
+    monkeypatch.setenv("DEFENSECLAW_HOME", os.fspath(home))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    monkeypatch.setattr(gateway_module, "resolve_gateway_binary", lambda: "")
+    return home, store, SimpleNamespace(data_dir=os.fspath(store), deployment_mode="", **extra)
+
+
+def _chowned_dirs(remediation: str) -> list[str]:
+    """The directories the printed chown returns, as the shell would read them."""
+    tail = remediation.split('sudo chown -R "$(id -un)" ', 1)[1]
+    return shlex.split(tail.split(" && defenseclaw-gateway start", 1)[0])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX sudo leftover naming")
+def test_doctor_leftovers_remedy_returns_install_home_and_moved_store(monkeypatch, tmp_path) -> None:
+    """GAP-0711, GAP-0713: one remedy for the leftovers covers both directories."""
+    home, store, cfg = _moved_store_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(cmd_doctor, "sudo_runtime_leftover_relpaths", lambda _d: ["active_connector.json"])
+    result = cmd_doctor._DoctorResult(quiet=True)
+
+    cmd_doctor._check_sudo_runtime_leftovers(cfg, result)
+
+    remediation = result.checks[-1]["remediation"]
+    assert _chowned_dirs(remediation) == [os.fspath(home), os.fspath(store)]
+    assert remediation.index("chown") < remediation.index("defenseclaw-gateway start")
+    assert "stopped first" in remediation and "stop" in remediation.rsplit("stopped first", 1)[1]
+    assert "rerun the gateway once with sudo" not in remediation
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX sudo leftover naming")
+@pytest.mark.parametrize("kind", ["managed", "secure_client"])
+def test_doctor_leftovers_guidance_unchanged_for_managed_and_secure_client(monkeypatch, tmp_path, kind) -> None:
+    """Managed installs and Secure Client hosts keep their own guidance."""
+    _home, _store, cfg = _moved_store_config(monkeypatch, tmp_path)
+    if kind == "managed":
+        cfg.deployment_mode = "managed_enterprise"
+    else:
+        from defenseclaw.enforce import asset_lists
+
+        monkeypatch.setattr(asset_lists, "is_secure_client", lambda _cfg: True)
+    monkeypatch.setattr(cmd_doctor, "sudo_runtime_leftover_relpaths", lambda _d: ["active_connector.json"])
+    result = cmd_doctor._DoctorResult(quiet=True)
+
+    cmd_doctor._check_sudo_runtime_leftovers(cfg, result)
+
+    check = result.checks[-1]
+    assert "descriptor-bound" in check["remediation"]
+    assert "chown" not in check["remediation"]
 
 
 def _recovery_chain(remediation: str) -> str:

@@ -4,8 +4,10 @@
 package daemon
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -56,5 +58,68 @@ func TestGAP0706RootGatewayRemedyIsWrittenPerOS(t *testing.T) {
 	}
 	if got, want := RootGatewayListenerRemedy(home), rootGatewayRemedyFor(runtime.GOOS, home); got != want {
 		t.Fatalf("RootGatewayListenerRemedy on %s = %q, want %q", runtime.GOOS, got, want)
+	}
+}
+
+// GAP-0711, GAP-0713: a root run leaves root-owned files in the install home
+// and in the store that home's config moved the data to, so the sequence
+// returns both before the account start. It is the same sequence whichever
+// surface prints it (status, the hook, doctor), because they share this call.
+func TestGAP0711RootGatewayRemedyReturnsInstallHomeAndMovedStore(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "install home")
+	store := filepath.Join(root, "moved store's data")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEFENSECLAW_CONFIG", "")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	chowned := func(remedy string) string {
+		t.Helper()
+		_, rest, ok := strings.Cut(remedy, `sudo chown -R "$(id -un)" `)
+		if !ok {
+			t.Fatalf("remedy returns no files: %q", remedy)
+		}
+		dirs, _, _ := strings.Cut(rest, " && defenseclaw-gateway start")
+		return dirs
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		write("data_dir: " + strconv.Quote(store) + "\n")
+		got := chowned(rootGatewayRemedyFor(goos, home))
+		if want := shellQuote(home) + " " + shellQuote(store); got != want {
+			t.Fatalf("%s moved store: chown targets %q, want %q", goos, got, want)
+		}
+		// A relative data_dir is relative to the config file, as the gateway reads it.
+		write("data_dir: ../relative-store\n")
+		if got, want := chowned(rootGatewayRemedyFor(goos, home)), shellQuote(home)+" "+shellQuote(filepath.Join(root, "relative-store")); got != want {
+			t.Fatalf("%s relative store: chown targets %q, want %q", goos, got, want)
+		}
+	}
+	// Benign twins: the store is the home, or no config names one.
+	for _, body := range []string{"data_dir: " + strconv.Quote(home) + "\n", "gateway:\n  api_port: 18970\n", "data_dir: [unterminated\n"} {
+		write(body)
+		if got, want := chowned(rootGatewayRemedyFor("linux", home)), shellQuote(home); got != want {
+			t.Fatalf("config %q: chown targets %q, want only the install home %q", body, got, want)
+		}
+	}
+	if err := os.Remove(filepath.Join(home, "config.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := chowned(rootGatewayRemedyFor("linux", home)), shellQuote(home); got != want {
+		t.Fatalf("no config: chown targets %q, want %q", got, want)
+	}
+	// An explicit DEFENSECLAW_CONFIG outside the home is the config the gateway reads.
+	other := filepath.Join(root, "elsewhere.yaml")
+	if err := os.WriteFile(other, []byte("data_dir: "+strconv.Quote(store)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEFENSECLAW_CONFIG", other)
+	if got, want := chowned(rootGatewayRemedyFor("linux", home)), shellQuote(home)+" "+shellQuote(store); got != want {
+		t.Fatalf("explicit config: chown targets %q, want %q", got, want)
 	}
 }

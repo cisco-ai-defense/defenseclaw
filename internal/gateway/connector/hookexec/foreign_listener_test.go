@@ -7,6 +7,9 @@ import (
 	"errors"
 	"net"
 	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -90,5 +93,31 @@ func TestPerUserHookNamesSameHomeRootListenerWithoutSending(t *testing.T) {
 	}
 	if got := perUserRootGatewayReason(Options{ManagedEnterprise: true, APIAddr: addr, Home: os.TempDir()}); got != "" {
 		t.Fatalf("managed hook used per-user root diagnosis: %q", got)
+	}
+}
+
+// GAP-0711, GAP-0713: the hook's block text for a root-run gateway returns the
+// moved store as well as the install home.
+func TestPerUserHookRootGatewayRemedyCoversMovedStore(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Windows remedy has no ownership step")
+	}
+	home := t.TempDir()
+	store := filepath.Join(t.TempDir(), "moved store")
+	t.Setenv("DEFENSECLAW_CONFIG", "")
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("data_dir: "+strconv.Quote(store)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldHolder, oldClass := perUserPortHolder, perUserListenerClass
+	t.Cleanup(func() { perUserPortHolder, perUserListenerClass = oldHolder, oldClass })
+	perUserPortHolder = func(string, int) (daemon.PortHolder, error) { return daemon.PortHolder{PID: 1, UID: 0}, nil }
+	perUserListenerClass = func(string, int, string, daemon.PortHolder, error, bool) daemon.PerUserListenerClass {
+		return daemon.PerUserListenerOwnGatewayRunAsRoot
+	}
+	reason := perUserRootGatewayReason(Options{APIAddr: "127.0.0.1:8787", Home: home})
+	for _, dir := range []string{home, store} {
+		if !strings.Contains(reason, "'"+dir+"'") {
+			t.Errorf("hook remedy leaves %s root-owned: %q", dir, reason)
+		}
 	}
 }
