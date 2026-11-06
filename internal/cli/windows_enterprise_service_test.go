@@ -2047,8 +2047,20 @@ func TestWindowsEnterpriseSelfUninstallRefusesAPromptInsideInstallRoot(t *testin
 	if windowsDirectoryOpenWithoutDeleteSharing(bin) {
 		t.Fatal("a folder nobody uses was reported in use")
 	}
+	// g079 review F6: the prompt inherits what the test binary carries. A
+	// below-normal class passes to cmd.exe, and an above-normal one starves
+	// its start on a small host; the package's tests run at normal, so a
+	// class another test left is named here, not as a 10 s timeout. The
+	// prompt is the system cmd.exe, not whichever one PATH finds first.
+	if class, want := testProcessPriority(), fmt.Sprintf("%#x", windows.NORMAL_PRIORITY_CLASS); class != want {
+		t.Fatalf("the test binary runs at priority class %s, not normal (%s)", class, want)
+	}
+	system, err := windows.GetSystemDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
 	// An idle interactive prompt in bin, reading commands from a pipe.
-	prompt := exec.Command("cmd.exe", "/d", "/q", "/k")
+	prompt := exec.Command(filepath.Join(system, "cmd.exe"), "/d", "/q", "/k")
 	prompt.Dir = bin
 	input, err := prompt.StdinPipe()
 	if err != nil {
