@@ -29,6 +29,7 @@ import (
 )
 
 const testEgressProxy = "http://dcx-0123456789abcdef:0123abcd@host.openshell.internal:18972"
+const testDefaultNoProxy = connector.SandboxIngressHost + ",localhost,127.0.0.1,127.0.0.0/8,::1"
 
 // shellEnvRecord is a shell fragment that prints the proxy variables and
 // PATH, one NAME=value per line ("<unset>" when absent).
@@ -173,7 +174,7 @@ func TestSandboxProfileExportsTheProxy(t *testing.T) {
 			}
 		}
 	}
-	if got := run(openshell.EnvEgressURL + "=" + testEgressProxy); got["NO_PROXY"] != connector.SandboxIngressHost {
+	if got := run(openshell.EnvEgressURL + "=" + testEgressProxy); got["NO_PROXY"] != testDefaultNoProxy {
 		t.Errorf("NO_PROXY without a bypass list = %q", got["NO_PROXY"])
 	}
 	for _, env := range [][]string{

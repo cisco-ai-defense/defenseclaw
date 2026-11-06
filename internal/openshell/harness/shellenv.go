@@ -69,7 +69,7 @@ const (
 // carries, so every process started through it goes through the DefenseClaw
 // proxy; without one (the strict profile), or with a URL carrying anything
 // but URL characters, the caller's environment is left alone. NO_PROXY
-// defaults to the ingress host, which hooks reach directly.
+// defaults to the ingress host and local service addresses.
 //
 // With NODE_USE_ENV_PROXY=1, Node 22 (the base image's node, which runs
 // Codex's wrapper, Copilot's npm launcher and every node or npm command the
@@ -91,7 +91,7 @@ case "${` + openshell.EnvEgressURL + `:-}" in
     HTTPS_PROXY="$` + openshell.EnvEgressURL + `"; HTTP_PROXY="$` + openshell.EnvEgressURL + `"
     https_proxy="$` + openshell.EnvEgressURL + `"; http_proxy="$` + openshell.EnvEgressURL + `"
     NODE_USE_ENV_PROXY=1; NODE_NO_WARNINGS="${NODE_NO_WARNINGS:-1}"
-    NO_PROXY="${` + openshell.EnvEgressBypass + `:-` + connector.SandboxIngressHost + `}"; no_proxy="$NO_PROXY"
+    NO_PROXY="${` + openshell.EnvEgressBypass + `:-` + connector.SandboxIngressHost + `,` + sandboxLoopbackNoProxy + `}"; no_proxy="$NO_PROXY"
     export HTTPS_PROXY HTTP_PROXY https_proxy http_proxy NODE_USE_ENV_PROXY NODE_NO_WARNINGS NO_PROXY no_proxy
     ;;
 esac
