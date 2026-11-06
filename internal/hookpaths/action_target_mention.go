@@ -3700,6 +3700,7 @@ func actionWindowsNamedCopyDestinationPatternCall(words []string, cwd, home stri
 	var positional []string
 	destination := ""
 	sourceOption := false
+	unknownOption := false
 	for i := 1; i < len(words); i++ {
 		word := words[i]
 		if word == "" {
@@ -3726,12 +3727,13 @@ func actionWindowsNamedCopyDestinationPatternCall(words []string, cwd, home stri
 		case "-recurse", "-container", "-force", "-passthru", "-whatif", "-confirm":
 		default:
 			if strings.HasPrefix(word, "-") {
-				return false
+				unknownOption = true
+				continue
 			}
 			positional = append(positional, word)
 		}
 	}
-	if destination == "" {
+	if destination == "" && !unknownOption {
 		switch {
 		case sourceOption && len(positional) == 1:
 			destination = positional[0]
