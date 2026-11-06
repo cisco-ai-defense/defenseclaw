@@ -2436,34 +2436,21 @@ func repairWindowsManagedPolicyFolder(path string, validate func(string) error) 
 	return nil
 }
 
-// windowsManagedPolicyFolderMarkers are the DefenseClaw files that exist in a
-// machine policy or managed runtime folder only once DefenseClaw manages it:
-// the Claude Code, Codex and Cursor state record, the Cursor rollback
-// receipt, the runtime selector and the per-user enrollment registry.
-var windowsManagedPolicyFolderMarkers = []string{
-	windowsClaudeManagedStateFile,
-	windowsCursorManagedStateFile,
-	windowsCursorManagedReceiptFile,
-	windowsManagedRuntimeSelectorFile,
-	windowsPerUserManagedEnrollmentFile,
-}
-
-// windowsManagedPolicyFolderMarker returns the first DefenseClaw marker file
-// directly in folder, or "". A marker that cannot be inspected for any reason
-// but its absence counts as present: an account that can hide a folder's
-// entries from SYSTEM and Administrators must not turn the refusal into a
-// takeover (g582 review 4 F1).
+// windowsManagedPolicyFolderMarker returns why folder is one DefenseClaw
+// already manages, or "". It is the shared standalone decision
+// (managed.WindowsDefenseClawFolderMarker, g582 review 4 F2): an
+// administrator-only record outside the folder names it, or it holds a
+// DefenseClaw-named entry, a hook runtime file or the per-user enrollment
+// registry owned by SYSTEM, Administrators, TrustedInstaller or the owner
+// the policy writer stamps (windowsManagedPolicyOwnerSID, Administrators);
+// a folder it cannot list counts too. A marker a user planted does not
+// count, and deleting one does not turn a recorded folder into a takeover.
 func windowsManagedPolicyFolderMarker(folder string) string {
-	for _, name := range windowsManagedPolicyFolderMarkers {
-		_, err := os.Lstat(filepath.Join(folder, name))
-		if err == nil {
-			return name
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return name + " (it cannot be inspected: " + err.Error() + ")"
-		}
+	owner, err := windowsManagedPolicyOwnerSID()
+	if err != nil {
+		owner = nil
 	}
-	return ""
+	return managed.WindowsDefenseClawFolderMarker(folder, owner, windowsPerUserManagedEnrollmentFile)
 }
 
 // refuseWindowsManagedPolicyFolderTakeover is the standalone refusal of a

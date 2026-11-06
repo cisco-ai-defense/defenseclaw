@@ -1119,27 +1119,12 @@ func refuseStandaloneReclaim(dir string, trustErr error) error {
 		fmt.Errorf("%w (the folder already holds DefenseClaw's %s)", trustErr, marker))
 }
 
-// defenseClawEntryIn returns the first entry directly in dir that DefenseClaw
-// writes (a name with "defenseclaw" in it, or the machine policy summary), or
-// "". A folder that cannot be listed for any reason but its absence counts as
-// holding one: an account that denies SYSTEM and Administrators
-// FILE_LIST_DIRECTORY must not turn the refusal into a takeover (g582 review
-// 4 F1).
+// defenseClawEntryIn returns why dir is a folder DefenseClaw already
+// manages, or "": the shared standalone decision
+// (managed.WindowsDefenseClawFolderMarker, g582 review 4 F2), the same one
+// the hook-side policy folder transactions use.
 func defenseClawEntryIn(dir string) string {
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		return ""
-	}
-	if err != nil {
-		return "entries (the folder cannot be listed: " + err.Error() + ")"
-	}
-	for _, entry := range entries {
-		name := strings.ToLower(entry.Name())
-		if strings.Contains(name, "defenseclaw") || name == "machine-policy.json" {
-			return entry.Name()
-		}
-	}
-	return ""
+	return managed.WindowsDefenseClawFolderMarker(dir, nil)
 }
 
 const (
