@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // gas-ux-r1 GAP-0053: the guardian's OpenCode service ports record is
@@ -42,5 +43,37 @@ func TestUnixOpenCodeServicePortsRoundTripAndTrust(t *testing.T) {
 	}
 	if _, err := LoadUnixOpenCodeServicePorts(path); err == nil {
 		t.Fatal("a record others can read must be refused")
+	}
+}
+
+// The clear removes only the named mark, keeps every binding and logs it.
+func TestClearUnixOpenCodeContestedPort(t *testing.T) {
+	root := trustedTestDir(t)
+	current := uint32(os.Getuid())
+	previous := unixManifestTestOwnerAllowed
+	unixManifestTestOwnerAllowed = func(uid uint32) bool { return uid == current }
+	t.Cleanup(func() { unixManifestTestOwnerAllowed = previous })
+	if err := validateRootOwnedDirChain(root); err != nil {
+		t.Skipf("test directory chain cannot hold the record: %v", err)
+	}
+	path := filepath.Join(root, UnixOpenCodeServicePortsFileName)
+	state := UnixOpenCodeServicePortsState{Ports: map[int]int{1001: 25001, 1002: 25002}, Users: map[int]string{1001: "a"},
+		Contested: []UnixOpenCodeContestedPort{{Port: 25003, UIDs: []int{1001, 1002}}, {Port: 26000, UIDs: []int{1003, 1004}}}}
+	if err := WriteUnixOpenCodeServicePortsFull(path, state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ClearUnixOpenCodeContestedPort(path, 27000, "admin", time.Now()); err == nil {
+		t.Fatal("a port that is not marked was cleared")
+	}
+	uids, err := ClearUnixOpenCodeContestedPort(path, 25003, "admin", time.Unix(1, 0))
+	if err != nil || len(uids) != 2 {
+		t.Fatalf("clear: %v %v", uids, err)
+	}
+	got, err := LoadUnixOpenCodeServicePortsFull(path)
+	if err != nil || len(got.Contested) != 1 || got.Contested[0].Port != 26000 || got.Ports[1001] != 25001 || got.Ports[1002] != 25002 {
+		t.Fatalf("after clear: %+v %v", got, err)
+	}
+	if len(got.Cleared) != 1 || got.Cleared[0].Port != 25003 || got.Cleared[0].By != "admin" || got.Users[1001] != "a" {
+		t.Fatalf("the clear is not logged: %+v", got.Cleared)
 	}
 }

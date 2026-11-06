@@ -14,7 +14,7 @@ import (
 // gas-ux-r1 GAP-0053: ports derive from the account id (the class invariant
 // over every sequence is TestOpenCodePortInvariantOverRandomSequences).
 func TestPlanOpenCodeServicePortsDerivesFromTheUID(t *testing.T) {
-	plan := PlanOpenCodeServicePorts([]int{1001, 1002, 9001}, nil, nil, true, nil)
+	plan := PlanOpenCodeServicePorts([]int{1001, 1002, 9001}, nil, nil, true, nil, true, nil)
 	if plan.Ports[1001] != 25001 || plan.Ports[1002] != 25002 || plan.Ports[9001] != 25003 {
 		t.Fatalf("ports %v", plan.Ports)
 	}

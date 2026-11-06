@@ -194,7 +194,13 @@ type OpenCodePortPlan struct {
 //
 // A record that pairs two uids with one port (written by an earlier build)
 // keeps the lower uid on it and rebinds the other, reported as a conflict.
-func PlanOpenCodeServicePorts(eligible []int, imports, recorded map[int]int, allowNew bool, unknown map[int]bool) OpenCodePortPlan {
+//
+// importWindow is true only in the pass that creates or rebuilds the record
+// (REVIEW-gx053-11): only then are imports used; every other pass gives an
+// unrecorded uid a fresh port, whatever its file names. contestedMarks are
+// the ports the record marks contested: never imported, never handed out,
+// until an administrator clears the mark.
+func PlanOpenCodeServicePorts(eligible []int, imports, recorded map[int]int, allowNew bool, unknown map[int]bool, importWindow bool, contestedMarks map[int]bool) OpenCodePortPlan {
 	plan := OpenCodePortPlan{Ports: map[int]int{}, Record: map[int]int{}}
 	holder := map[int]int{}
 	recordedUIDs := make([]int, 0, len(recorded))
@@ -226,6 +232,9 @@ func PlanOpenCodeServicePorts(eligible []int, imports, recorded map[int]int, all
 		}
 	}
 	contested := map[int]bool{}
+	for port := range contestedMarks {
+		contested[port] = true
+	}
 	fresh := func(uid int) int {
 		start := OpenCodeAccountPort(uint64(uid))
 		for step := 0; step < OpenCodeAccountPortSpan; step++ {
@@ -253,11 +262,17 @@ func PlanOpenCodeServicePorts(eligible []int, imports, recorded map[int]int, all
 	claims := map[int][]int{}
 	var needFresh []int
 	for _, uid := range sortedEligible {
-		if _, bound := plan.Ports[uid]; bound || unknown[uid] {
+		if _, bound := plan.Ports[uid]; bound {
+			continue
+		}
+		if unknown[uid] && importWindow {
+			// Not importable in the window: no import later either; a fresh
+			// port once its file can be written.
+			needFresh = append(needFresh, uid)
 			continue
 		}
 		port := imports[uid]
-		if port <= 0 || port > 65535 || port == OpenCodeDefaultServicePort || port == openCodeLocalChannelPort {
+		if !importWindow || contested[port] || port <= 0 || port > 65535 || port == OpenCodeDefaultServicePort || port == openCodeLocalChannelPort {
 			needFresh = append(needFresh, uid)
 			continue
 		}
