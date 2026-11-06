@@ -176,6 +176,73 @@ describe("saved model outage tier", () => {
     expect(direct.write).toHaveBeenCalledWith(Buffer.from("request-body"));
   });
 
+  it("continues every Node HTTP overload with its original authorization and body", async () => {
+    const seen: Array<{ authorization: string; body: string }> = [];
+    const provider = http.createServer((req, res) => {
+      const parts: Buffer[] = [];
+      req.on("data", (part: Buffer) => parts.push(part));
+      req.on("end", () => {
+        seen.push({ authorization: String(req.headers.authorization ?? ""), body: Buffer.concat(parts).toString() });
+        res.writeHead(200);
+        res.end("ok");
+      });
+    });
+    const proxy = http.createServer((_req, res) => res.destroy());
+    const listen = (server: import("node:http").Server) => new Promise<number>((resolve) => {
+      server.listen(0, "127.0.0.1", () => resolve((server.address() as import("node:net").AddressInfo).port));
+    });
+    const close = (server: import("node:http").Server) => new Promise<void>((resolve) => server.close(() => resolve()));
+    const providerPort = await listen(provider);
+    const proxyPort = await listen(proxy);
+    const plainURL = `http://127.0.0.1:${providerPort}/v1/chat/completions`;
+    const credentialURL = `http://fixture:password@127.0.0.1:${providerPort}/v1/chat/completions`;
+    const options = () => ({
+      host: "127.0.0.1", port: providerPort, path: "/v1/chat/completions",
+      method: "POST", headers: { Authorization: "Bearer fixture" },
+    });
+    const withURL = () => ({ method: "POST", headers: { Authorization: "Bearer fixture" } });
+    type ResponseCallback = (res: import("node:http").IncomingMessage) => void;
+    const cases: Array<{ name: string; expected: string; send: (callback: ResponseCallback) => import("node:http").ClientRequest }> = [
+      { name: "options", expected: "Bearer fixture", send: () => http.request(options()) },
+      { name: "options, callback", expected: "Bearer fixture", send: (cb) => http.request(options(), cb) },
+      { name: "URL string", expected: "Basic Zml4dHVyZTpwYXNzd29yZA==", send: () => http.request(credentialURL) },
+      { name: "URL string, callback", expected: "Basic Zml4dHVyZTpwYXNzd29yZA==", send: (cb) => http.request(credentialURL, cb) },
+      { name: "URL string, options", expected: "Bearer fixture", send: () => http.request(plainURL, withURL()) },
+      { name: "URL string, options, callback", expected: "Bearer fixture", send: (cb) => http.request(plainURL, withURL(), cb) },
+      { name: "URL object", expected: "Basic Zml4dHVyZTpwYXNzd29yZA==", send: () => http.request(new URL(credentialURL)) },
+      { name: "URL object, callback", expected: "Basic Zml4dHVyZTpwYXNzd29yZA==", send: (cb) => http.request(new URL(credentialURL), cb) },
+      { name: "URL object, options", expected: "Bearer fixture", send: () => http.request(new URL(plainURL), withURL()) },
+      { name: "URL object, options, callback", expected: "Bearer fixture", send: (cb) => http.request(new URL(plainURL), withURL(), cb) },
+    ];
+    interceptor = createFetchInterceptor({ guardrailPort: proxyPort, getOutageMode: () => "open" });
+    interceptor.start();
+    try {
+      for (const tc of cases) {
+        for (const body of ["", "request-body"]) {
+          const received = await new Promise<{ status: number; record: typeof seen[number] }>((resolve, reject) => {
+            const onResponse: ResponseCallback = (res) => {
+              res.resume();
+              res.on("end", () => resolve({ status: res.statusCode ?? 0, record: seen.at(-1)! }));
+            };
+            const req = tc.send(onResponse);
+            req.on("response", onResponse);
+            req.on("error", reject);
+            if (body) req.setHeader("Content-Length", Buffer.byteLength(body));
+            req.end(body || undefined);
+          });
+          expect(received.status, tc.name).toBe(200);
+          expect(received.record.authorization, tc.name).toBe(tc.expected);
+          expect(received.record.body, tc.name).toBe(body);
+        }
+      }
+    } finally {
+      interceptor.stop();
+      interceptor = undefined;
+      await close(proxy);
+      await close(provider);
+    }
+  });
+
   it("retries an undici model dispatch with its original destination and headers", async () => {
     const origins: string[] = [];
     const directHeaders: unknown[] = [];
