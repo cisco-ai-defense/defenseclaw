@@ -42,6 +42,7 @@ func TestGAP0621WindowsExplicitSkillSelectionBinding(t *testing.T) {
 		path     string
 		want     bool
 		inTopMap bool
+		input    map[string]any
 	}{
 		{name: "resolved-folder", path: resolved, want: true},
 		{name: "resolved-root", path: filepath.Dir(resolved), want: true},
@@ -49,11 +50,20 @@ func TestGAP0621WindowsExplicitSkillSelectionBinding(t *testing.T) {
 		{name: "project-root", path: filepath.Dir(selected), want: true},
 		{name: "ordinary-user-skill", path: ordinary, want: false},
 		{name: "ordinary-top-level-source", path: ordinary, want: false, inTopMap: true},
+		{name: "path-only-resolved-folder", want: true, input: map[string]any{"skill_path": resolved}},
+		{name: "path-in-skill-resolved-folder", want: true, input: map[string]any{"skill": resolved}},
+		{name: "nested-path-only-resolved-folder", want: true, input: map[string]any{"skill": map[string]any{"path": resolved}}},
+		{name: "path-only-resolved-manifest", want: true, input: map[string]any{"skill_path": filepath.Join(resolved, "SKILL.md")}},
+		{name: "path-only-ordinary-user-skill", want: false, input: map[string]any{"skill_path": ordinary}},
+		{name: "path-in-skill-ordinary-user-skill", want: false, input: map[string]any{"skill": ordinary}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			event := map[string]any{
 				"hook_event_name": "PreToolUse", "cwd": project,
 				"tool_name": "Skill", "tool_input": map[string]string{"skill": "sample", "skill_path": tc.path},
+			}
+			if tc.input != nil {
+				event["tool_input"] = tc.input
 			}
 			if tc.inTopMap {
 				event["tool_input"] = map[string]string{"skill": "sample"}
