@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
@@ -525,8 +526,31 @@ func (l *lifecycle) removeACLTargets(ctx context.Context, targets []aclTarget) e
 	if len(ancestors) > 0 {
 		return errors.New(ancestorACLProblem(ancestors, env.lifecycleCommand(l.opts.Action)))
 	}
-	var removed []string
+	// Several selected paths can name one inode. Their path policies still
+	// decide which entries must go, but each ACL index is removed only once.
+	type inode struct{ device, number uint64 }
+	byInode := make(map[inode]int, len(findings))
+	removals := make([]aclFinding, 0, len(findings))
 	for _, finding := range findings {
+		info, err := os.Lstat(finding.rooted)
+		if err != nil {
+			return fmt.Errorf("inspect the macOS ACL target %s: %w", finding.path, err)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("inspect the macOS ACL target %s: inode unavailable or path is a link", finding.path)
+		}
+		key := inode{uint64(stat.Dev), uint64(stat.Ino)}
+		if index, ok := byInode[key]; ok {
+			removals[index].indexes = append(removals[index].indexes, finding.indexes...)
+			removals[index].entries = append(removals[index].entries, finding.entries...)
+		} else {
+			byInode[key] = len(removals)
+			removals = append(removals, finding)
+		}
+	}
+	var removed []string
+	for _, finding := range removals {
 		// Highest index first: removing an entry renumbers the ones after it.
 		indexes := slices.Clone(finding.indexes)
 		slices.Sort(indexes)

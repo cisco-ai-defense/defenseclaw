@@ -42,7 +42,11 @@ func (r linkedSnapshotACLRunner) Run(ctx context.Context, name string, args ...s
 		}
 		if other != "" {
 			r.mu.Lock()
-			delete(r.acls, other)
+			if entries := r.acls[args[3]]; len(entries) > 0 {
+				r.acls[other] = append([]string(nil), entries...)
+			} else {
+				delete(r.acls, other)
+			}
 			r.mu.Unlock()
 		}
 	}
@@ -86,6 +90,96 @@ func TestGAP0664RepairWithLinkedSnapshotACL(t *testing.T) {
 	h.env.discardSnapshot(snap)
 	writeFreshLedger(t, h)
 	requireOK(t, h.run(Options{Action: ActionVerify}))
+}
+
+// GAP-0664: other private names of an inode must be checked, while repair
+// removes each shared ACL entry only once.
+func TestGAP0664RepairCoalescesHardlinkACLs(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		entry string
+	}{
+		{"read", "group:staff allow read,readattr,readextattr,list,search"},
+		{"write", "user:developer allow write,append"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHost(t, "darwin")
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			canonical := filepath.Join(h.env.Layout.LifecycleDir, deploymentFileName)
+			source := h.env.P(canonical)
+			alias := h.env.P(filepath.Join(h.env.Layout.LifecycleDir, "linked-record"))
+			if err := os.Link(source, alias); err != nil {
+				t.Fatal(err)
+			}
+			sourceInfo, sourceErr := os.Lstat(source)
+			aliasInfo, aliasErr := os.Lstat(alias)
+			if sourceErr != nil || aliasErr != nil || !os.SameFile(sourceInfo, aliasInfo) {
+				t.Fatalf("expected the same inode: source %v, alias %v", sourceErr, aliasErr)
+			}
+			selected := map[string]bool{source: false, alias: false}
+			for _, target := range h.env.aclTargets([]string{canonical}, nil) {
+				if _, ok := selected[target.path]; ok {
+					selected[target.path] = true
+				}
+			}
+			for path, ok := range selected {
+				if !ok {
+					t.Fatalf("private ACL target omitted: %s", path)
+				}
+			}
+			public := h.env.P(filepath.Join(h.env.Layout.BinDir, binHook))
+			publicRead := "group:staff allow read,readattr"
+			h.runner.acls = map[string][]string{
+				source: {tc.entry}, alias: {tc.entry}, public: {publicRead},
+			}
+			h.env.Runner = linkedSnapshotACLRunner{fakeRunner: h.runner, source: source, blob: alias}
+			requireOK(t, h.run(Options{Action: ActionRepair}))
+			if len(h.runner.acls[source]) != 0 || len(h.runner.acls[alias]) != 0 {
+				t.Fatalf("repair kept the private file ACL: %v", h.runner.acls)
+			}
+			if got := h.runner.acls[public]; len(got) != 1 || got[0] != publicRead {
+				t.Fatalf("repair changed the public read ACL: %v", got)
+			}
+			removals := 0
+			for _, call := range h.runner.calls {
+				if strings.Contains(call, "chmod -h -a#") &&
+					(strings.HasSuffix(call, " "+source) || strings.HasSuffix(call, " "+alias)) {
+					removals++
+				}
+			}
+			if removals != 1 {
+				t.Fatalf("shared ACL entry removed %d times, want 1", removals)
+			}
+			writeFreshLedger(t, h)
+			requireOK(t, h.run(Options{Action: ActionVerify}))
+		})
+	}
+}
+
+func TestGAP0664HardlinkKeepsStricterPathPolicy(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	source := h.env.P(filepath.Join(h.env.Layout.LifecycleDir, deploymentFileName))
+	alias := h.env.P(filepath.Join(h.env.Layout.LifecycleDir, "linked-record"))
+	if err := os.Link(source, alias); err != nil {
+		t.Fatal(err)
+	}
+	read := "group:staff allow read,readattr"
+	write := "user:developer allow write,append"
+	h.runner.acls = map[string][]string{source: {read, write}, alias: {read, write}}
+	h.env.Runner = linkedSnapshotACLRunner{fakeRunner: h.runner, source: source, blob: alias}
+	l := &lifecycle{env: h.env, opts: Options{Action: ActionRepair}}
+	// The first path allows read. The second requires its removal, so the
+	// shared inode must lose both indexed entries.
+	if err := l.removeACLTargets(context.Background(), []aclTarget{
+		{path: alias, private: false},
+		{path: source, private: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.runner.acls[source]) != 0 || len(h.runner.acls[alias]) != 0 {
+		t.Fatalf("the private path retained an ACL entry: %v", h.runner.acls)
+	}
 }
 
 func TestGAP0664SnapshotDirectoriesClearInheritedACL(t *testing.T) {
