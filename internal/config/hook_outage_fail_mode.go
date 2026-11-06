@@ -65,6 +65,16 @@ func (c *Config) EffectiveHookOutageFailModeForConnector(connector string) strin
 	return HookOutageFailMode(false, c.configuredHookFailModeForConnector(connector), c.HookPolicyTierForConnector(connector))
 }
 
+// pinnedRulePackPostureCheck is installed by the rule loader when linked.
+var pinnedRulePackPostureCheck func(dir, pin string) (string, bool)
+
+// RegisterPinnedRulePackPostureCheck supplies the rule loader's validity and
+// posture for a selected digest-pinned custom pack. A binary without the
+// loader keeps such a standalone selection closed.
+func RegisterPinnedRulePackPostureCheck(check func(dir, pin string) (string, bool)) {
+	pinnedRulePackPostureCheck = check
+}
+
 // HookPolicyTierForConnector is the policy tier of connector's guardrail rule
 // pack, as the gateway reads its posture (internal/gateway packPosture): the
 // generation's pinned manifest posture, else the legacy folder-name table.
@@ -87,10 +97,13 @@ func (c *Config) HookPolicyTierForConnector(connector string) string {
 		return packFolderPosture(dir)
 	}
 	if custom, selected := c.Guardrail.CustomPacks[ref.Name]; selected && strings.TrimSpace(custom.Digest) != "" {
-		// A standalone hook has no rule generation. Before its current
-		// manifest can set an outage tier, require the same content pin the
-		// gateway requires when it loads a selected custom pack.
-		posture, valid := rulePackPinnedPosture(dir, custom.Digest)
+		// A standalone hook has no rule generation. Require both a valid
+		// loaded pack and its selected content pin before its posture can
+		// set an outage tier.
+		if pinnedRulePackPostureCheck == nil {
+			return HookPolicyTierStrict
+		}
+		posture, valid := pinnedRulePackPostureCheck(dir, custom.Digest)
 		if !valid {
 			return HookPolicyTierStrict
 		}

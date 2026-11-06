@@ -39,6 +39,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"gopkg.in/yaml.v3"
@@ -1619,6 +1620,19 @@ func safeJudgeName(name string) string {
 		}
 	}
 	return "component"
+}
+
+func init() { config.RegisterPinnedRulePackPostureCheck(pinnedRulePackPosture) }
+
+// pinnedRulePackPosture uses the same loader, validation, and digest that the
+// gateway uses for a selected pack. Standalone hooks can then trust the
+// posture of a pinned pack without maintaining another parser.
+func pinnedRulePackPosture(dir, pin string) (string, bool) {
+	pack, err := LoadRulePack(dir)
+	if err != nil || !strings.EqualFold(strings.TrimSpace(pin), "sha256:"+pack.FilesDigest()) {
+		return "", false
+	}
+	return pack.Posture(), true
 }
 
 // RulePackDigest is the FilesDigest of the valid pack in dir, the value

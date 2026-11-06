@@ -4,6 +4,8 @@
 package cli
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -57,6 +59,63 @@ func TestGAP0632PinnedStandaloneHookOutageUsesValidatedPosture(t *testing.T) {
 			}
 			if got := hookOutageFailModeNow("codex", hooks); got != "closed" {
 				t.Errorf("invalid pack pin outage = %q, want closed", got)
+			}
+		})
+	}
+}
+
+// A matching content pin is only sufficient when the selected pack loads.
+func TestGAP0632PinnedStandaloneHookOutageRejectsInvalidPack(t *testing.T) {
+	for _, variant := range []string{"component directory", "invalid YAML with matching pin"} {
+		t.Run(variant, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("DEFENSECLAW_HOME", home)
+			t.Setenv("HOME", home)
+			dir := filepath.Join(t.TempDir(), "operator-pack")
+			var pin string
+			if variant == "component directory" {
+				if err := os.CopyFS(dir, os.DirFS(filepath.Join("..", "..", "policies", "guardrail", "default"))); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				pin, err = guardrail.RulePackDigest(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.MkdirAll(filepath.Join(dir, "rules"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				manifest := []byte(`{"posture":"default"}`)
+				rule := []byte("version: 1\ncategory: command\nrules: [\n")
+				if err := os.WriteFile(filepath.Join(dir, guardrail.PackManifestFile), manifest, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "rules", "invalid.yaml"), rule, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				manifestSum, ruleSum := sha256.Sum256(manifest), sha256.Sum256(rule)
+				hash := sha256.New()
+				_, _ = fmt.Fprintf(hash, "%s\n%s\nrules/invalid.yaml\n%s\n", guardrail.PackManifestFile,
+					hex.EncodeToString(manifestSum[:]), hex.EncodeToString(ruleSum[:]))
+				pin = hex.EncodeToString(hash.Sum(nil))
+			}
+			body := fmt.Sprintf("config_version: 9\nobservability: {}\nguardrail:\n  mode: action\n  rule_pack: operator\n  custom_packs:\n    operator:\n      path: %q\n      digest: sha256:%s\n", dir, pin)
+			writeOutageNowConfig(t, home, body)
+			hooks := filepath.Join(home, "hooks")
+			if variant == "component directory" {
+				if got := hookOutageFailModeNow("codex", hooks); got != "open" {
+					t.Fatalf("valid default copy outage = %q, want open", got)
+				}
+				if err := os.Mkdir(filepath.Join(dir, "rules", "extra.yaml"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := guardrail.RulePackDigest(dir); err == nil {
+				t.Fatal("invalid pack unexpectedly loadable")
+			}
+			if got := hookOutageFailModeNow("codex", hooks); got != "closed" {
+				t.Errorf("invalid selected pack outage = %q, want closed", got)
 			}
 		})
 	}
