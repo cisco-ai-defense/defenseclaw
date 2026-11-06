@@ -219,10 +219,14 @@ func TestWindowsClaudeManagedPolicyReaderStandaloneNeverTakesOverAnUntrustedMana
 			if _, err := os.Lstat(state); err != nil {
 				t.Fatalf("fixture has no state record: %v", err)
 			}
-			// The fixture's policy writer stamps the test account as owner;
-			// in production it is Administrators, and only an Administrators,
-			// SYSTEM or TrustedInstaller owned marker counts (g582 review 5 S2).
-			stampGAP633SDDL(t, state, gap633CanonicalFile)
+			if standalone {
+				// The fixture's policy writer stamps the test account as
+				// owner; in production it is Administrators, and only an
+				// Administrators, SYSTEM or TrustedInstaller owned marker
+				// counts (g582 review 5 S2). Secure Client never asks for a
+				// marker, and its reader checks the fixture owner.
+				stampGAP633SDDL(t, state, gap633CanonicalFile)
+			}
 			current := gap633Descriptor(t, folder)
 			stampGAP633SDDL(t, folder, current[:strings.Index(current, "D:")]+"G:SY"+
 				strings.Replace(current[strings.Index(current, "D:"):], ")", ")(A;OICI;0x1301bf;;;BU)", 1))
