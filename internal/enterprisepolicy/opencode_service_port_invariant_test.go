@@ -193,7 +193,7 @@ func TestOpenCodePortInvariantWithUnreadableAccounts(t *testing.T) {
 					seen[uid] = port
 				}
 			}
-			plan := PlanOpenCodeServicePortsHolding(eligible, seen, record, true, unknown)
+			plan := PlanOpenCodeServicePortsHolding(eligible, seen, record, true, unknown, nil)
 			for _, uid := range eligible {
 				if unknown[uid] {
 					if plan.Replace[uid] != 0 || (record[uid] == 0 && plan.Ports[uid] != 0) {
@@ -226,6 +226,61 @@ func TestOpenCodePortInvariantWithUnreadableAccounts(t *testing.T) {
 					t.Fatalf("seed %d step %d: uids %d and %d share %d", seed, step, other, uid, port)
 				}
 				holders[port] = uid
+			}
+		}
+	}
+}
+
+// REVIEW-gx053-8: some accounts' files cannot be rewritten (a linked
+// ~/.config/opencode). After a pass with every file known, no two accounts
+// share a port unless both files are unwritable and name the same one; an
+// unwritable file is never asked to change.
+func TestOpenCodePortInvariantWithUnwritableFiles(t *testing.T) {
+	for seed := int64(1); seed <= 300; seed++ {
+		rng := rand.New(rand.NewSource(seed))
+		files, record := map[int]int{}, map[int]int{}
+		unwritable := map[int]bool{}
+		var eligible []int
+		for step := 0; step < 25; step++ {
+			uid := 1000 + rng.Intn(20000)
+			eligible = append(eligible, uid)
+			if rng.Intn(3) == 0 {
+				unwritable[uid] = true
+				files[uid] = OpenCodeAccountPortBase + rng.Intn(40)
+			}
+			if rng.Intn(4) == 0 && len(eligible) > 1 { // a copied file
+				src := eligible[rng.Intn(len(eligible))]
+				if files[src] > 0 && !unwritable[uid] {
+					files[uid] = files[src]
+				}
+			}
+			seen := map[int]int{}
+			for _, u := range eligible {
+				if files[u] > 0 {
+					seen[u] = files[u]
+				}
+			}
+			plan := PlanOpenCodeServicePortsHolding(eligible, seen, record, true, nil, unwritable)
+			for _, u := range eligible {
+				want := plan.Ports[u]
+				if unwritable[u] {
+					continue // a move is refused: the file stays
+				}
+				if want > 0 && (files[u] == 0 || plan.Replace[u] == files[u]) {
+					files[u] = want
+				}
+			}
+			record = plan.Record
+			holders := map[int]int{}
+			for _, u := range eligible {
+				port := files[u]
+				if port == 0 {
+					continue
+				}
+				if other, dup := holders[port]; dup && other != u && !(unwritable[u] && unwritable[other]) {
+					t.Fatalf("seed %d step %d: uids %d and %d share %d (unwritable %v/%v)", seed, step, other, u, port, unwritable[other], unwritable[u])
+				}
+				holders[port] = u
 			}
 		}
 	}

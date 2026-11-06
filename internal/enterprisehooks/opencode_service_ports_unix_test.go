@@ -27,7 +27,7 @@ func TestUnixOpenCodeServicePortsRoundTripAndTrust(t *testing.T) {
 	if ports, err := LoadUnixOpenCodeServicePorts(path); err != nil || len(ports) != 0 {
 		t.Fatalf("a missing record is empty: %v %v", ports, err)
 	}
-	if err := WriteUnixOpenCodeServicePorts(path, map[int]int{1002: 25002, 1001: 25001, 0: 1, 1003: 70000}, map[int]string{1001: "ent1"}, nil); err != nil {
+	if err := WriteUnixOpenCodeServicePorts(path, map[int]int{1002: 25002, 1001: 25001, 0: 1, 1003: 70000}, map[int]string{1001: "ent1"}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if info, _ := os.Stat(path); info.Mode().Perm() != 0o600 {

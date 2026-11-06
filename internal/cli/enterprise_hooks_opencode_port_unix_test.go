@@ -111,20 +111,20 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 		}
 	}
 	record := map[int]int{}
-	openCodeRecordUnreadable, openCodeRecordUnknown = nil, nil
-	t.Cleanup(func() { openCodeRecordUnreadable, openCodeRecordUnknown = nil, nil })
-	enterpriseHookLoadOpenCodePorts = func(string) (map[int]int, []enterprisehooks.UnixOpenCodeServicePortUnknown, error) {
+	openCodeRecordUnreadable, openCodeRecordUnknown, openCodeRecordShared = nil, nil, nil
+	t.Cleanup(func() { openCodeRecordUnreadable, openCodeRecordUnknown, openCodeRecordShared = nil, nil, nil })
+	enterpriseHookLoadOpenCodePorts = func(string) (map[int]int, []enterprisehooks.UnixOpenCodeServicePortUnknown, []enterprisehooks.UnixOpenCodeServicePortShare, error) {
 		if openCodeRecordUnreadable != nil {
-			return nil, nil, openCodeRecordUnreadable
+			return nil, nil, nil, openCodeRecordUnreadable
 		}
 		out := map[int]int{}
 		for uid, port := range record {
 			out[uid] = port
 		}
-		return out, openCodeRecordUnknown, nil
+		return out, openCodeRecordUnknown, openCodeRecordShared, nil
 	}
-	enterpriseHookWriteOpenCodePorts = func(_ string, ports map[int]int, _ map[int]string, unknown []enterprisehooks.UnixOpenCodeServicePortUnknown) error {
-		openCodeRecordUnknown = unknown
+	enterpriseHookWriteOpenCodePorts = func(_ string, ports map[int]int, _ map[int]string, unknown []enterprisehooks.UnixOpenCodeServicePortUnknown, shared []enterprisehooks.UnixOpenCodeServicePortShare) error {
+		openCodeRecordUnknown, openCodeRecordShared = unknown, shared
 		openCodeRecordWrites++
 		record = map[int]int{}
 		for uid, port := range ports {
@@ -150,7 +150,8 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 				return response, nil
 			}
 			port, err := enterprisepolicy.ReadOpenCodeServicePortAsUser(account.Home)
-			response.OpenCodeServicePort = &enterpriseHookWorkerOpenCodePortReport{Port: port}
+			response.OpenCodeServicePort = &enterpriseHookWorkerOpenCodePortReport{Port: port,
+				NotWritable: !enterprisepolicy.OpenCodeServicePortWritable(account.Home)}
 			if err != nil {
 				response.OpenCodeServicePort.Error = err.Error()
 			}
@@ -174,6 +175,7 @@ var (
 	openCodeRecordUnreadable error
 	openCodeRecordWrites     int
 	openCodeRecordUnknown    []enterprisehooks.UnixOpenCodeServicePortUnknown
+	openCodeRecordShared     []enterprisehooks.UnixOpenCodeServicePortShare
 	// openCodeUserCannotRead are the uids whose service.json the account
 	// itself cannot read; openCodeReadFails the uids whose read worker fails;
 	// openCodeReadHangs the uids whose read never answers (until released).
@@ -572,8 +574,8 @@ func TestManagedGuardianOpenCodeWriteWorkerMovesAPortTheReadMissed(t *testing.T)
 	writeOpenCodePortFile(t, homes[1001], 25002)
 	previousRead := enterpriseHookReadOpenCodePortsAsUsers
 	t.Cleanup(func() { enterpriseHookReadOpenCodePortsAsUsers = previousRead })
-	enterpriseHookReadOpenCodePortsAsUsers = func(context.Context, io.Writer, []enterprisehooks.UnixEligibleAccount) (map[int]int, []enterprisehooks.UnixOpenCodeServicePortUnknown) {
-		return map[int]int{}, nil // the file changed after the read (it named no port then)
+	enterpriseHookReadOpenCodePortsAsUsers = func(context.Context, io.Writer, []enterprisehooks.UnixEligibleAccount) (map[int]int, map[int]bool, []enterprisehooks.UnixOpenCodeServicePortUnknown) {
+		return map[int]int{}, nil, nil // the file changed after the read (it named no port then)
 	}
 	setEligible(nil, 1001, 1002)
 	log := runOpenCodePortPass(t)
@@ -586,14 +588,35 @@ func TestManagedGuardianOpenCodeWriteWorkerMovesAPortTheReadMissed(t *testing.T)
 	}
 }
 
-// REVIEW-gx053-6/7: alice's read worker fails. There is no root read: her
-// port is unknown this pass and nothing changes for her; bob is still given a
-// port (alice had no record, so her hand-set 25002 may be given away). On the
-// next readable pass the clash rule settles it: bob, the recorded holder,
-// keeps it, alice is moved, and the log names both.
+// linkOpenCodeConfig gives home the stow layout: ~/.config/opencode is a
+// link to ~/dotfiles/opencode, whose service.json names port.
+func linkOpenCodeConfig(t *testing.T, home string, port int) {
+	t.Helper()
+	real := filepath.Join(home, "dotfiles", "opencode")
+	if err := os.MkdirAll(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(home, ".config", "opencode")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "service.json"), []byte(fmt.Sprintf(`{"port":%d}`, port)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// REVIEW-gx053-6/7/8: alice keeps OpenCode's config in dotfiles (a linked
+// ~/.config/opencode, which the guardian cannot rewrite) naming 25002, and her
+// read worker fails once. There is no root read: her port is unknown that pass
+// and nothing changes for her; bob is still given a port, possibly 25002
+// (alice had no record). From the next readable pass on no two accounts share:
+// alice cannot be moved, so bob, whose file can be rewritten, is moved, and the
+// log names both.
 func TestManagedGuardianOpenCodeReadWorkerFails(t *testing.T) {
 	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
-	writeOpenCodePortFile(t, homes[1001], 25002)
+	linkOpenCodeConfig(t, homes[1001], 25002)
 	openCodeReadFails[1001] = true
 	setEligible(nil, 1001, 1002)
 	log := runOpenCodePortPass(t)
@@ -607,13 +630,59 @@ func TestManagedGuardianOpenCodeReadWorkerFails(t *testing.T) {
 		t.Fatalf("the record does not name the unknown account and its fix for status: %+v (%v)", openCodeRecordUnknown, *record)
 	}
 	openCodeReadFails[1001] = false
-	log = runOpenCodePortPass(t)
-	got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log)
-	if got[1001] == 0 || len(openCodeRecordUnknown) != 0 {
-		t.Fatalf("after recovery ports %v unknown %v\n%s", got, openCodeRecordUnknown, log)
+	for pass := 2; pass <= 4; pass++ {
+		log = runOpenCodePortPass(t)
+		got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log)
+		if got[1001] != 25002 || got[1002] == 0 || (*record)[1001] != 25002 || len(openCodeRecordUnknown) != 0 || len(openCodeRecordShared) != 0 {
+			t.Fatalf("pass %d: ports %v record %v unknown %v shared %v\n%s", pass, got, *record, openCodeRecordUnknown, openCodeRecordShared, log)
+		}
 	}
-	if got[1002] == 25002 && !strings.Contains(log, "port 25002 of ent1001 (uid 1001) is held by ent1002 (uid 1002)") {
-		t.Fatalf("the clash is not logged with both accounts:\n%s", log)
+}
+
+// REVIEW-gx053-8 repro (TestZZRV8LinkedBlindThenRecover): a linked alice
+// whose first read fails, bob enrolled in the same pass and given 25002; on
+// every later pass the guardian moves bob (writable), never rewrites alice's
+// linked file, and nobody shares.
+func TestManagedGuardianOpenCodeLinkedBlindThenRecover(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
+	linkOpenCodeConfig(t, homes[1001], 25002)
+	openCodeReadFails[1001] = true
+	setEligible(nil, 1001, 1002)
+	runOpenCodePortPass(t) // pass 1: alice unknown
+	openCodeReadFails[1001] = false
+	for pass := 2; pass <= 4; pass++ {
+		log := runOpenCodePortPass(t)
+		got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log)
+		if got[1001] != 25002 {
+			t.Fatalf("pass %d: alice's linked file was changed: %v\n%s", pass, got, log)
+		}
+		if strings.Contains(log, "could not give ent1001") {
+			t.Fatalf("pass %d: the guardian tried to rewrite alice's linked file:\n%s", pass, log)
+		}
+		if pass == 2 && !strings.Contains(log, "of ent1002 (uid 1002) is held by ent1001 (uid 1001)") {
+			t.Fatalf("the clash is not logged naming both:\n%s", log)
+		}
+		if (*record)[1001] != 25002 || (*record)[1002] == 25002 {
+			t.Fatalf("pass %d: record %v", pass, *record)
+		}
+	}
+}
+
+// Two linked accounts name the same port: neither file can be rewritten, so
+// the share stays, and status, verify and doctor are told (the record names
+// both and the step that clears it).
+func TestManagedGuardianOpenCodeShareNeitherCanMove(t *testing.T) {
+	homes, _, setEligible := openCodePortGuardianWith(t, true, 1001)
+	linkOpenCodeConfig(t, homes[1001], 26000)
+	setEligible(nil, 1001, 1002)
+	linkOpenCodeConfig(t, homes[1002], 26000)
+	log := runOpenCodePortPass(t)
+	if len(openCodeRecordShared) != 1 || openCodeRecordShared[0].UID != 1002 || openCodeRecordShared[0].Other != 1001 ||
+		openCodeRecordShared[0].Port != 26000 || !strings.Contains(openCodeRecordShared[0].Fix, "opencode service set port") {
+		t.Fatalf("the unresolved share is not recorded for status: %+v\n%s", openCodeRecordShared, log)
+	}
+	if !strings.Contains(log, "shares port 26000 with uid 1001 and could not be moved") {
+		t.Fatalf("the share is not logged:\n%s", log)
 	}
 }
 
