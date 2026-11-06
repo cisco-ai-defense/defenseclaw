@@ -40,6 +40,9 @@ type windowsManagedPolicySelfHealFile struct {
 	exact bool
 	// marker: the file only exists while DefenseClaw manages the connector.
 	marker bool
+	// lock: a transaction lock file, which carries no content anything
+	// reads, so its descriptor is repaired in place in every profile.
+	lock bool
 }
 
 // windowsManagedPolicySelfHealFolder is one machine policy folder and the
@@ -60,7 +63,7 @@ type windowsManagedPolicySelfHealFolder struct {
 func windowsManagedPolicySelfHealFolders() []windowsManagedPolicySelfHealFolder {
 	selector := []windowsManagedPolicySelfHealFile{
 		{name: windowsManagedRuntimeSelectorFile, userReadable: true, clear: windowsManagedPolicyStateAttributes, exact: true, marker: true},
-		{name: windowsManagedRuntimeSelectorLockFile, clear: windowsManagedPolicyLockAttributes, exact: true},
+		{name: windowsManagedRuntimeSelectorLockFile, clear: windowsManagedPolicyLockAttributes, exact: true, lock: true},
 	}
 	var folders []windowsManagedPolicySelfHealFolder
 	if policyPath, err := windowsClaudeManagedPolicyPath(); err == nil {
@@ -69,7 +72,7 @@ func windowsManagedPolicySelfHealFolders() []windowsManagedPolicySelfHealFolder 
 			files: append([]windowsManagedPolicySelfHealFile{
 				{name: windowsClaudeManagedPolicyFile, userReadable: true, clear: windowsManagedPolicyStateAttributes, exact: true},
 				{name: windowsClaudeManagedStateFile, userReadable: true, clear: windowsManagedPolicyStateAttributes, exact: true, marker: true},
-				{name: windowsClaudeManagedLockFile, clear: windowsManagedPolicyLockAttributes, exact: true},
+				{name: windowsClaudeManagedLockFile, clear: windowsManagedPolicyLockAttributes, exact: true, lock: true},
 			}, selector...),
 		})
 	}
@@ -81,7 +84,7 @@ func windowsManagedPolicySelfHealFolders() []windowsManagedPolicySelfHealFolder 
 			files: append([]windowsManagedPolicySelfHealFile{
 				{name: filepath.Base(requirementsPath), userReadable: true, clear: windowsManagedPolicyStateAttributes, exact: true},
 				{name: windowsClaudeManagedStateFile, userReadable: true, clear: windowsManagedPolicyStateAttributes, exact: true, marker: true},
-				{name: windowsClaudeManagedLockFile, userReadable: true, clear: windowsManagedPolicyLockAttributes, exact: true},
+				{name: windowsClaudeManagedLockFile, userReadable: true, clear: windowsManagedPolicyLockAttributes, exact: true, lock: true},
 			}, selector...),
 		})
 	}
@@ -94,7 +97,7 @@ func windowsManagedPolicySelfHealFolders() []windowsManagedPolicySelfHealFolder 
 				{name: filepath.Base(paths.Adapter), userReadable: true, clear: windowsManagedPolicyStateAttributes, exact: true},
 				{name: filepath.Base(paths.State), userReadable: true, clear: windowsManagedPolicyStateAttributes, exact: true, marker: true},
 				{name: filepath.Base(paths.Receipt), clear: windowsManagedPolicyStateAttributes, exact: true, marker: true},
-				{name: filepath.Base(paths.Lock), clear: windowsManagedPolicyLockAttributes, exact: true},
+				{name: filepath.Base(paths.Lock), clear: windowsManagedPolicyLockAttributes, exact: true, lock: true},
 			}, selector...),
 		})
 	}
@@ -113,6 +116,17 @@ func windowsManagedPolicySelfHealFolders() []windowsManagedPolicySelfHealFolder 
 // Every repair is logged once with MarkerRepair; anything that cannot be
 // repaired is logged once and left for the transactions to judge. Nothing
 // here returns an error, and one object never stops the others.
+//
+// On standalone (managed.StandaloneRefusesContentDrift) a folder or a content
+// file that an untrusted account can write or owns is not re-stamped, and its
+// attributes are not cleared: an account that could write it may have
+// changed it, or may still hold a handle to it, so a repair would make every
+// reader trust bytes that account chose (GAP-0561, GAP-0633). It is logged
+// once as a MarkerBoundary finding that names the file and the way out, and
+// every reader keeps refusing it until an administrator removes the entry
+// and checks the file. Trusted-only drift (an extra trusted reader, lost
+// protection, a missing Users read, a ReadOnly attribute) and the lock files,
+// which carry no content, keep the repair. Secure Client keeps the repair.
 func RepairWindowsManagedPolicyArtifacts() {
 	if managed.WindowsCurrentProcessIsGatewayService() {
 		return
@@ -149,7 +163,9 @@ func repairWindowsManagedPolicySelfHealFolder(folder windowsManagedPolicySelfHea
 		check = validateWindowsManagedPolicyDirectoryDescriptor
 	}
 	if check(folder.path) != nil {
-		if err := repairWindowsManagedPolicyFolder(folder.path, check); err != nil {
+		if refused := windowsManagedPolicySelfHealRefusal(folder.path, managed.ObjectInstallDirectory, nil); refused != nil {
+			reportWindowsManagedPolicySelfHeal(managed.MarkerBoundary, folder.path, refused)
+		} else if err := repairWindowsManagedPolicyFolder(folder.path, check); err != nil {
 			reportWindowsManagedPolicySelfHeal(managed.MarkerAccept, folder.path, err)
 		} else {
 			reportWindowsManagedPolicySelfHeal("", folder.path, nil)
@@ -186,12 +202,44 @@ func repairWindowsManagedPolicySelfHealFile(path string, file windowsManagedPoli
 		clearWindowsManagedPolicyFileAttributes(path, file.clear)
 		return
 	}
+	if !file.lock {
+		if refused := windowsManagedPolicySelfHealRefusal(
+			path, managed.ObjectInstallFile, windowsManagedPolicyFileTrustCheck,
+		); refused != nil {
+			reportWindowsManagedPolicySelfHeal(managed.MarkerBoundary, path, refused)
+			return
+		}
+	}
 	if _, err := repairWindowsManagedMachineFile(path, file.userReadable, check); err != nil {
 		reportWindowsManagedPolicySelfHeal(managed.MarkerAccept, path, err)
 		return
 	}
 	reportWindowsManagedPolicySelfHeal("", path, nil)
 	clearWindowsManagedPolicyFileAttributes(path, file.clear)
+}
+
+// windowsManagedPolicySelfHealRefusesContentDrift is
+// managed.StandaloneRefusesContentDrift; tests replace it.
+var windowsManagedPolicySelfHealRefusesContentDrift = managed.StandaloneRefusesContentDrift
+
+// windowsManagedPolicySelfHealRefusal is the standalone refusal of an
+// in-place repair of a drifted policy folder or DefenseClaw policy file, read
+// without writing anything: the object's own descriptor lets an untrusted
+// account write it or makes one its owner (windowsManagedPolicyLeafTrust), or
+// strict, the trust walk every reader of the file runs, refuses it. It is nil
+// off standalone and for trusted-only drift, which keep the repair.
+func windowsManagedPolicySelfHealRefusal(path string, kind managed.ObjectKind, strict func(string) error) error {
+	if !windowsManagedPolicySelfHealRefusesContentDrift() {
+		return nil
+	}
+	err := windowsManagedPolicyLeafTrust(kind)(path)
+	if err == nil && strict != nil {
+		err = strict(path)
+	}
+	if err == nil {
+		return nil
+	}
+	return managed.RefuseStandaloneMachinePolicyDrift(err)
 }
 
 // windowsManagedPolicyLeafTrust judges only the object's own descriptor: it

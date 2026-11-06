@@ -14,6 +14,8 @@ package managed
 // the administrator removes the entry and checks the file (GAP-0590).
 type StandaloneContentDriftError struct {
 	Err error
+	// Recovery replaces the recovery chosen from the refused path when set.
+	Recovery string
 }
 
 // Recovery texts of a StandaloneContentDriftError, by file. Setup is not
@@ -37,9 +39,26 @@ func standaloneRecordDriftRecovery() string {
 		WindowsAdminCommand("enterprise", "windows", "verify", "--profile", "standalone") + "`. " + WindowsSetupSource
 }
 
+// standaloneMachinePolicyDriftRecovery is the way out of a drifted Claude
+// Code, Codex or Cursor machine policy folder or DefenseClaw file in it,
+// which the hook guardian does not re-stamp (GAP-0633).
+func standaloneMachinePolicyDriftRecovery() string {
+	return "the hook guardian leaves it as it is and every DefenseClaw reader keeps refusing it: " +
+		"from an elevated PowerShell prompt remove that entry (icacls \"<path>\" /remove:g *<SID>), or give it back to Administrators " +
+		"(icacls \"<path>\" /setowner *S-1-5-32-544), check the file, then run `" + WindowsSetupCommand("/ensure") + "` and `" +
+		WindowsAdminCommand("enterprise", "windows", "verify", "--profile", "standalone") + "`. " + WindowsSetupSource
+}
+
 func (e *StandaloneContentDriftError) Error() string {
 	return e.Err.Error() + "; a standalone install does not repair this file in place, because an account that could " +
-		"write it may have changed it: " + standaloneContentDriftRecovery(e.Err)
+		"write it may have changed it: " + e.recovery()
+}
+
+func (e *StandaloneContentDriftError) recovery() string {
+	if e.Recovery != "" {
+		return e.Recovery
+	}
+	return standaloneContentDriftRecovery(e.Err)
 }
 
 func (e *StandaloneContentDriftError) Unwrap() error { return e.Err }
@@ -51,4 +70,14 @@ func RefuseStandaloneContentDrift(err error) error {
 		return nil
 	}
 	return &StandaloneContentDriftError{Err: err}
+}
+
+// RefuseStandaloneMachinePolicyDrift is RefuseStandaloneContentDrift for a
+// vendor machine policy folder or a DefenseClaw file in it, which the hook
+// guardian refuses to re-stamp on standalone (GAP-0633).
+func RefuseStandaloneMachinePolicyDrift(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &StandaloneContentDriftError{Err: err, Recovery: standaloneMachinePolicyDriftRecovery()}
 }

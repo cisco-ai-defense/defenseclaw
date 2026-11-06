@@ -66,6 +66,12 @@ func RestoreWindowsClaudeManagedPolicyDrift() (bool, error) {
 		if err := windowsManagedPolicyFileTrustCheck(statePath); err != nil {
 			return err
 		}
+		// On standalone the record's own descriptor is judged too, so a
+		// record an untrusted account can write or owns is never rendered
+		// from, whatever the guardian did before (GAP-0633).
+		if err := windowsManagedPolicySelfHealRefusal(statePath, managed.ObjectInstallFile, nil); err != nil {
+			return err
+		}
 		var record windowsClaudeManagedPolicyState
 		if err := decodeWindowsClaudeManagedPolicyState(state.data, &record); err != nil {
 			return fmt.Errorf("enterprise hooks: read the Claude Code managed policy ownership record: %w", err)
@@ -81,6 +87,9 @@ func RestoreWindowsClaudeManagedPolicyDrift() (bool, error) {
 				step = "`" + managed.WindowsSetupCommand("/ensure") + "` (" + managed.WindowsSetupSource + ")"
 			}
 			return errors.New("enterprise hooks: the Claude Code managed policy ownership record is from an earlier release; run " + step)
+		}
+		if err := requireWindowsClaudeRecordedHookExecutable(record); err != nil {
+			return err
 		}
 		body, err := renderRecordedWindowsClaudeManagedPolicy(record)
 		setAside := false
@@ -117,6 +126,27 @@ func RestoreWindowsClaudeManagedPolicyDrift() (bool, error) {
 		return nil
 	})
 	return restored, err
+}
+
+// requireWindowsClaudeRecordedHookExecutable refuses, on standalone, an
+// ownership record whose hook executable is not this install's own native
+// hook, so the restore never renders a drop-in that runs another binary for
+// every Claude Code user. The record is trusted only through its descriptor;
+// the target install and verify already require the same executable
+// (GAP-0633). Secure Client keeps the record as it is.
+func requireWindowsClaudeRecordedHookExecutable(record windowsClaudeManagedPolicyState) error {
+	if !windowsManagedPolicySelfHealRefusesContentDrift() {
+		return nil
+	}
+	hookExecutable, err := windowsEnterpriseHookExecutable()
+	if err != nil {
+		return err
+	}
+	if !sameWindowsEnterprisePath(record.HookExecutable, hookExecutable) {
+		return fmt.Errorf("enterprise hooks: the Claude Code managed policy ownership record names hook executable %s, "+
+			"not this install's %s, so the changed drop-in is left as it is; run Setup /ensure", record.HookExecutable, hookExecutable)
+	}
+	return nil
 }
 
 // renderRecordedWindowsClaudeManagedPolicy is the Claude Code policy whose
