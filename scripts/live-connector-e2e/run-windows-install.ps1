@@ -964,7 +964,8 @@ async def main() -> str:
 
 text = asyncio.run(main())
 print(text)
-sys.exit(0 if "DefenseClaw" in text and "Traceback" not in text else 1)
+# The Overview tab with the product banner, as at a real 80x24 terminal.
+sys.exit(0 if "DEFENSECLAW" in text.upper() and "Overview" in text and "Traceback" not in text else 1)
 '@
     $tui = Invoke-Tool $script:VenvPython @('-I', '-X', 'utf8', '-c', $render) -Allowed @(0, 1) -Timeout 180
     Write-Host $tui.StdOut
