@@ -9575,10 +9575,12 @@ func trustedActionLimitFindings(enforcementCapable bool) []RuleFinding {
 
 // trustedActionCommandTooDeep reports whether the call's command (the
 // command input, or the top-level command argument of any tool but
-// apply_patch) nests past
-// shellparse.MaxNestingDepth. Every shell reader of the gateway, the hook
-// proofs and actionfacts recurse per nesting level; such a command
-// overflowed the Windows gateway's stack (GAP-2537).
+// apply_patch) is past shellparse.PastReadingBounds: it nests past
+// shellparse.MaxNestingDepth, or its nested shell bodies weigh more than
+// shellparse.MaxNestedBodyBytes. Every shell reader of the gateway, the
+// hook proofs and actionfacts recurse per nesting level; such a command
+// overflowed the Windows gateway's stack (GAP-2537), and deeply nested
+// bodies took seconds to read (GAP-0677).
 func trustedActionCommandTooDeep(input actionfacts.Input) bool {
 	// The command of an apply_patch call is a patch envelope: file text,
 	// not shell. Its targets are read from the envelope, and every shell
@@ -9588,14 +9590,14 @@ func trustedActionCommandTooDeep(input actionfacts.Input) bool {
 	if actionfacts.ApplyPatchTool(input.Tool) {
 		return false
 	}
-	if shellparse.TooDeep(input.Command) {
+	if shellparse.PastReadingBounds(input.Command) {
 		return true
 	}
 	if input.Command != "" || len(bytes.TrimSpace(input.Args)) == 0 {
 		return false
 	}
 	command, present, valid := trustedTopLevelCommandField(input.Args)
-	return valid && present && shellparse.TooDeep(command)
+	return valid && present && shellparse.PastReadingBounds(command)
 }
 
 func trustedBashCommandInput(input actionfacts.Input) (string, bool) {

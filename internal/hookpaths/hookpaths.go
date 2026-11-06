@@ -1903,11 +1903,14 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					truncated = true
 					break
 				}
-				// A shell command nested past the reading bound is past the
-				// analysis limits: no reader below parses it (GAP-2556). Only
-				// the command is measured: a Write or Edit body of ordinary
-				// text (colour escapes, brackets) is not shell (RV-p4-1).
-				if shellparse.TooDeep(command) {
+				// A shell command nested past the reading bound, or whose
+				// nested shell bodies the readers would re-read past
+				// shellparse.MaxNestedBodyBytes, is past the analysis
+				// limits: no reader below parses it (GAP-2556, GAP-0677).
+				// Only the command is measured: a Write or Edit body of
+				// ordinary text (colour escapes, brackets) is not shell
+				// (RV-p4-1).
+				if shellparse.PastReadingBounds(command) {
 					if !isApplyPatchToolName(tool) {
 						return incompleteEvidence(cwd)
 					}
