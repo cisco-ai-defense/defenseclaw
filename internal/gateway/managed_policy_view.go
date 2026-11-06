@@ -11,6 +11,10 @@ package gateway
 // pointer load and two map lookups to a call (review loop round 1, P1).
 type managedPolicyView struct {
 	connectors map[string]managedPolicyViewConnector
+	// admitted is the descriptor connector set the hook authorizer actually
+	// accepted for this config generation. Nil is reserved for standalone
+	// proof fixtures that do not run an authorizer.
+	admitted map[string]bool
 }
 
 type managedPolicyViewConnector struct {
