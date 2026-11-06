@@ -29054,6 +29054,11 @@ function Assert-DefenseClawInstalledConfig {
         # Only the install-like lifecycle records (and migrates) the config,
         # inside its transaction; verify validates read-only.
         [switch]$RecordLifecycle,
+        # The sha256 of the approved source this run installed as config.yaml
+        # (CONFIG=), '' for none. A hand-edit record of exactly those bytes is
+        # the hook guardian's claim on the lifecycle's own write, and the
+        # config step records them as the lifecycle generation (GAP-0646).
+        [string]$ApprovedConfigSHA256 = '',
         [switch]$RepairRollback
     )
     $arguments = @(
@@ -29065,6 +29070,9 @@ function Assert-DefenseClawInstalledConfig {
     )
     if ($RecordLifecycle) {
         $arguments += '--record-lifecycle'
+        if (-not [string]::IsNullOrEmpty($ApprovedConfigSHA256)) {
+            $arguments += @('--approved-config-sha256', $ApprovedConfigSHA256)
+        }
     }
     if ($RepairRollback) {
         $arguments += '--repair-rollback'
@@ -41932,8 +41940,13 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -Report $codexRemoval
         }
         # Secure Client keeps its validate-only config check (issue #1092).
+        $approvedConfigSHA256 = ''
+        if ($Sources.ContainsKey('config')) {
+            $approvedConfigSHA256 = ([string]$Sources['config'].sha256).ToLowerInvariant()
+        }
         Assert-DefenseClawInstalledConfig -Layout $Layout -GatewayServiceName $GatewayServiceName `
-            -RecordLifecycle:(-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout))
+            -RecordLifecycle:(-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) `
+            -ApprovedConfigSHA256 $approvedConfigSHA256
         if (Test-DefenseClawStandaloneProfile) {
             Invoke-DefenseClawCoworkDelivery -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName -SnapshotPath $snapshot `

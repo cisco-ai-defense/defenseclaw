@@ -2573,3 +2573,27 @@ def test_gap_0583_standalone_teardown_refuses_activation_drift_before_the_commit
     rebind = recovery.index("Sync-DefenseClawStandaloneUninstallTombstoneBinding")
     assert rebind < recovery.index("$retiredContractReceipt =")
     assert "$committedMetadata = Get-DefenseClawDeploymentMetadata" in recovery[rebind : rebind + 400]
+
+
+def test_the_config_step_records_over_a_hand_edit_only_for_this_runs_config_source() -> None:
+    # GAP-0646: the transaction's config step records a hand-edit record of
+    # the installed bytes as the lifecycle's generation only for the approved
+    # source this run installed (CONFIG=). The sha256 comes from that source
+    # descriptor alone, never from config.yaml or config.generation.json, and
+    # rides only on the recording call: verify, status, the Repair rollback
+    # preflight and Secure Client (validate-only) never pass it.
+    module = _text(MODULE)
+    check = _function_body(module, "Assert-DefenseClawInstalledConfig")
+    record = check.index("if ($RecordLifecycle) {")
+    record_end = check.index("\n    }\n", record)
+    assert check.count("--approved-config-sha256") == 1
+    assert "'--approved-config-sha256'" in check[record:record_end]
+    assert module.count("-ApprovedConfigSHA256") == 1
+    install = _function_body(module, "Invoke-DefenseClawInstallLikeLifecycle")
+    call = install.index("-ApprovedConfigSHA256 $approvedConfigSHA256")
+    source = install.rindex("$approvedConfigSHA256 = ''", 0, call)
+    block = install[source:call]
+    assert "if ($Sources.ContainsKey('config')) {" in block
+    assert "$approvedConfigSHA256 = ([string]$Sources['config'].sha256).ToLowerInvariant()" in block
+    assert "-RecordLifecycle:(-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout))" in block
+    assert "config.generation.json" not in block and "Get-FileHash" not in block
