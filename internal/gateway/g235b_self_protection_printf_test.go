@@ -22,12 +22,21 @@ import (
 // the default or the strict rule pack.
 func postSelfProtectionCell(t *testing.T, home, project, connector string, managed, blind, strict bool, command string) string {
 	t.Helper()
+	pack := ""
+	if strict {
+		pack = "strict"
+	}
+	return postSelfProtectionPackCell(t, home, project, connector, pack, managed, blind, command)
+}
+
+// postSelfProtectionPackCell is postSelfProtectionCell with the rule pack
+// named ("" is the default pack).
+func postSelfProtectionPackCell(t *testing.T, home, project, connector, pack string, managed, blind bool, command string) string {
+	t.Helper()
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = connector
-	if strict {
-		cfg.Guardrail.RulePack = "strict"
-	}
+	cfg.Guardrail.RulePack = pack
 	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 	body := mustJSON(t, map[string]any{"session_id": "self-protection-session", "hook_event_name": "PreToolUse",
 		"tool_name": "Bash", "cwd": project, "tool_input": map[string]any{"command": command, "description": "d"}})
@@ -54,11 +63,13 @@ func postSelfProtectionCell(t *testing.T, home, project, connector string, manag
 	return recorder.Body.String()
 }
 
-// rel-1-0-6:GAP-0630, GAP-0601: printf assigns only through -v and through
-// a %n conversion argument. An unknown format with no name argument assigns
-// nothing, so HOME, USER and LOGNAME keep their values and every spelling
-// of the DefenseClaw config path stays a protected write target in every
-// cell and profile. The same forms into a project file stay allowed.
+// rel-1-0-6:GAP-0630, GAP-0601: a managed gateway proves a redirect onto
+// the DefenseClaw state from the targets its own reader names and finds the
+// file each one opens in the hook client map. The client lists the targets
+// of the same reader, so every HOME, USER and LOGNAME spelling of the config
+// path stays a protected write target in every cell and profile, whatever
+// an unknown printf format, printf -v, %n or read does to the values the
+// other readers track. The same forms into a project file stay allowed.
 func TestG235bPrintfKeepsKnownHomeSpellingsForSelfProtection(t *testing.T) {
 	home, project := dynamicWordParityProject(t)
 	t.Setenv("USER", filepath.Base(home))
@@ -135,6 +146,96 @@ func TestG235bPrintfKeepsKnownHomeSpellingsForSelfProtection(t *testing.T) {
 					}
 				}
 			})
+		}
+	}
+}
+
+// rel-1-0-6:GAP-0681, GAP-0630 review 1: a write to DefenseClaw state named
+// through a known value ($HOME, and $USER or $LOGNAME as the last element
+// of the home) is the write its literal spelling is, for an in-place editor
+// operand and for a redirect through a link with an ordinary name, in
+// per-user, managed and blind managed cells and in the default, strict and
+// permissive packs. The same forms onto a project file, and through a link
+// to a project file, stay allowed.
+func TestG235bKnownValueStateTargetsInPlaceAndThroughLink(t *testing.T) {
+	home, project := dynamicWordParityProject(t)
+	t.Setenv("USER", filepath.Base(home))
+	t.Setenv("LOGNAME", filepath.Base(home))
+	state := filepath.Join(home, ".defenseclaw", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(state), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(state, []byte("marker\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(state, filepath.Join(home, "statealias")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(project, "build.log"), filepath.Join(home, "projectalias")); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Dir(home) + "/"
+	spellings := []string{
+		`"$HOME"`, `${HOME}`,
+		parent + `$USER`, parent + `${USER}`, parent + `"$USER"`,
+		parent + `$LOGNAME`, parent + `${LOGNAME}`, parent + `"$LOGNAME"`,
+	}
+	edits := []string{
+		`sed -i d {T}`,
+		`sed -i s/a/b/ {T}`,
+		`sed -i.bak d {T}`,
+		`sed --in-place d {T}`,
+		`sed -i -e d {T}`,
+		`sed -n -i p {T}`,
+		`perl -pi -e 1 {T}`,
+		`bash -c "echo x > {T}"`,
+		`bash -c "sed -i d {T}"`,
+		`sh -c "printf x > {T}"`,
+	}
+	redirects := []string{
+		`printf "$X" > {L}`,
+		`echo x >> {L}`,
+		`: > {L}`,
+		`printf "$X" a; echo x > {L}`,
+		`bash -c "echo x > {L}"`,
+	}
+	type row struct {
+		command   string
+		protected bool
+	}
+	var rows []row
+	for _, spelling := range spellings {
+		for _, form := range edits {
+			rows = append(rows,
+				row{strings.ReplaceAll(form, "{T}", spelling+"/.defenseclaw/config.yaml"), true},
+				row{strings.ReplaceAll(form, "{T}", spelling+"/proj/build.log"), false})
+		}
+		for _, form := range redirects {
+			rows = append(rows,
+				row{strings.ReplaceAll(form, "{L}", spelling+"/statealias"), true},
+				row{strings.ReplaceAll(form, "{L}", spelling+"/projectalias"), false})
+		}
+	}
+	for _, connector := range []string{"claudecode", "codex"} {
+		for _, pack := range []string{"", "strict", "permissive"} {
+			for _, cell := range []struct{ managed, blind bool }{{false, false}, {true, false}, {true, true}} {
+				t.Run(fmt.Sprintf("%s/pack=%s/managed=%t/blind=%t", connector, pack, cell.managed, cell.blind), func(t *testing.T) {
+					for _, row := range rows {
+						if !row.protected && pack == "strict" {
+							continue
+						}
+						got := postSelfProtectionPackCell(t, home, project, connector, pack, cell.managed, cell.blind, row.command)
+						if row.protected {
+							if !strings.HasPrefix(got, `{"action":"block"`) ||
+								!cell.blind && !strings.Contains(got, "tamper.detector_state_write") {
+								t.Errorf("%s = %.200s, want block tamper.detector_state_write", row.command, got)
+							}
+						} else if !strings.HasPrefix(got, `{"action":"allow"`) {
+							t.Errorf("%s = %.200s, want allow", row.command, got)
+						}
+					}
+				})
+			}
 		}
 	}
 }

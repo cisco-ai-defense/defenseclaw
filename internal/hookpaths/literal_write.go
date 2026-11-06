@@ -603,7 +603,7 @@ func sedLongOption(word string) string {
 
 // InPlaceEditOperands lists the files a sed -i or perl -i call of the
 // command edits in place, as absolute paths read in cwd, whatever their
-// parent directory. The editor replaces the directory entry; a caller that
+// parent directory, with every known value expanded (knownValueWord). The editor replaces the directory entry; a caller that
 // follows the name through a link the same command makes to a directory
 // reads the file the edit replaces (GAP-2522).
 func InPlaceEditOperands(command, cwd, home string) []string {
@@ -631,7 +631,7 @@ func inPlaceEditOperands(command, cwd, home string, followedOnly bool) (operands
 		words := make([]string, len(call.Args))
 		static := make([]bool, len(call.Args))
 		for i, arg := range call.Args {
-			words[i], static[i] = StaticWord(arg, home)
+			words[i], static[i] = knownValueWord(arg, home)
 		}
 		if index, wrapped := plainWrappedChild(words, static); wrapped {
 			words, static = words[index:], static[index:]
