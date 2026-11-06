@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -132,15 +133,14 @@ func TestCopilotCLIHookFileRunByVSCodeLocalHarness(t *testing.T) {
 	}
 }
 
-// The VS Code Local harness can run a per-user Copilot CLI hook file, but
-// that file remains bound to the CLI route. Its Local-shaped body is denied
-// even when the command text itself would be benign.
+// Strict policy retains the CLI registration's exact-schema refusal.
 func TestCopilotCLIHookFileLocalPayloadFromVSCode(t *testing.T) {
 	installSandboxMarkerRules(t)
 	store, logger := testStoreAndLogger(t)
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "copilot"
+	cfg.Guardrail.RulePack = "strict"
 	api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
 	handler := http.HandlerFunc(api.handleAgentHook("copilot"))
 
@@ -177,6 +177,51 @@ func TestCopilotCLIHookFileLocalPayloadFromVSCode(t *testing.T) {
 	}
 }
 
+func TestGAP0691PerUserCopilotCLIRegistrationJudgesLocalToolCalls(t *testing.T) {
+	installSandboxMarkerRules(t)
+	store, logger := testStoreAndLogger(t)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "copilot"
+	api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+	seq := 0
+	post := func(name string, input map[string]any) string {
+		t.Helper()
+		seq++
+		id := "g691-" + name + "-" + strconv.Itoa(seq)
+		body, err := json.Marshal(map[string]any{
+			"hook_event_name": "PreToolUse", "session_id": id, "tool_use_id": id,
+			"cwd": t.TempDir(), "tool_name": name, "tool_input": input,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/copilot/hook", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-DefenseClaw-Copilot-Event", "preToolUse")
+		w := httptest.NewRecorder()
+		api.handleAgentHook("copilot").ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+		}
+		return w.Body.String()
+	}
+	if body := post("run_in_terminal", map[string]any{"command": "echo hello"}); !strings.Contains(body, `"action":"allow"`) || strings.Contains(body, hookToolCallUnparsedRuleID) {
+		t.Fatalf("ordinary terminal call: %s", body)
+	}
+	if body := post("create_file", map[string]any{"filePath": t.TempDir() + "/notes.txt", "content": "hello"}); !strings.Contains(body, `"action":"allow"`) || strings.Contains(body, hookToolCallUnparsedRuleID) {
+		t.Fatalf("ordinary project file: %s", body)
+	}
+	if body := post("run_in_terminal", map[string]any{"command": "echo DCE2E-BLOCK-MARKER"}); !strings.Contains(body, `"action":"block"`) || strings.Contains(body, hookToolCallUnparsedRuleID) ||
+		!strings.Contains(body, `"E2E-SANDBOX-MARKER"`) || strings.Count(body, `"permissionDecision":"deny"`) < 2 {
+		t.Fatalf("protected terminal call: %s", body)
+	}
+	if body := post("create_file", map[string]any{"filePath": "/etc/shadow", "content": "example"}); !strings.Contains(body, `"action":"block"`) || strings.Contains(body, hookToolCallUnparsedRuleID) ||
+		!strings.Contains(body, `"PATH-ETC-SHADOW"`) {
+		t.Fatalf("protected file call: %s", body)
+	}
+}
+
 func TestGAP0481MappedLocalEventRejectsCLIFields(t *testing.T) {
 	installSandboxMarkerRules(t)
 	store, logger := testStoreAndLogger(t)
@@ -191,7 +236,8 @@ func TestGAP0481MappedLocalEventRejectsCLIFields(t *testing.T) {
 	req.Header.Set("X-DefenseClaw-Copilot-Event", "preToolUse")
 	w := httptest.NewRecorder()
 	api.handleAgentHook("copilot")(w, req)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"permissionDecision":"deny"`) {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"permissionDecision":"deny"`) ||
+		!strings.Contains(w.Body.String(), hookToolCallUnparsedRuleID) {
 		t.Fatalf("mapped Local call changed route: status=%d body=%s", w.Code, w.Body.String())
 	}
 }
