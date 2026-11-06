@@ -359,7 +359,7 @@ const (
 		// literal program name that is no shell, passes no inline code, and
 		// the call closes on this line without shell=True (a call left open
 		// can take shell=True on the next line).
-		`subprocess\.call\((?:\s*[^\s\[]|\s*$|\s*\[\s*[^\s'"\]]|\s*\[[^\]]*$|\s*\[[^\]]*\]\s*(?:,[^)]*)?$|` + cgExecShellListHead + `|` + cgExecInlineCodeList + `|` + cgExecInterpreterFlagList + `|` + cgExecSplitStringList + `)|` +
+		`subprocess\.call\((?:\s*[^\s\[]|\s*$|\s*\[\s*[^\s'"\]]|\s*\[[^\]]*$|\s*\[[^\]]*\]\s*(?:,[^)]*)?$|` + cgExecShellListHead + `|` + cgExecInlineCodeList + `|` + cgExecInterpreterFlagList + `|` + cgExecSplitStringList + `|` + cgExecAttachedCodeList + `)|` +
 		`subprocess\.call\(.*shell\s*=\s*true|(?:^|[^.\w$]|\\[nrt])(?:exec|system)\(`
 	// cgExecShellListHead is an argument list whose first element is a
 	// shell or command interpreter (["sh", "-c", cmd], ["/bin/bash", ...]).
@@ -367,8 +367,11 @@ const (
 	// cgExecInlineCodeList is an argument list that passes inline code or a
 	// command string to an interpreter ([sys.executable, "-c", code],
 	// ["node", "-e", src], ["node", "--eval", src], ["cmd", "/c", line],
-	// ["pwsh", "-Command", s]).
-	cgExecInlineCodeList = `\s*\[[^\]]*['"](?:-[a-z]*[ce]|/c|--eval|--eval=[^'"]*|-command|-encodedcommand)['"]`
+	// ["pwsh", "-Command", s], ["pwsh", "-CommandWithArgs", s]).
+	cgExecInlineCodeList = `\s*\[[^\]]*['"](?:-[a-z]*[ce]|/c|--eval|--eval=[^'"]*|` + cgExecPwshCode + `)['"]`
+	// cgExecPwshCode is a PowerShell command-string option, other than a
+	// short cluster ending in c or e (-c, -enc, -ec).
+	cgExecPwshCode = `-command(?:withargs)?|-encodedcommand|-cwa`
 	// The generic code flags include a short-flag cluster that ends in c or
 	// e (python3 -Ic, node -pe, perl -le) and --eval=<code>.
 	// cgExecInterpreterFlagList is a JavaScript or PHP interpreter, at any
@@ -377,10 +380,27 @@ const (
 	// something else (node -p/--print, php -r/--run, php -B/-R/-E and
 	// --process-begin/-code/-end, deno eval; rm -r, cp -r and pip -r stay
 	// exempt).
-	cgExecInterpreterFlagList = `\s*\[[^\]]*['"](?:[^'"]*[/\\])?(?:node|nodejs|deno|bun|php)(?:\.exe)?['"][^\]]*['"](?:-[a-z]*[eprb][a-z]*|--print|--run|--process-(?:begin|code|end)|eval)['"]`
-	// cgExecSplitStringList is env -S/--split-string given one element that
-	// holds a whole command line with an inline-code flag (env -S 'node -p').
-	cgExecSplitStringList = `\s*\[[^\]]*['"](?:-s|--split-string)(?:['"]\s*,\s*['"]|=)(?:[^'"]*\s)?(?:-[a-z]*[ce]|--eval\S*|(?:[^'"\s]*[/\\])?(?:node|nodejs|deno|bun|php)(?:\.exe)?\s+(?:[^'"]*\s)?(?:-[a-z]*[eprb][a-z]*|--print|--run|--process-(?:begin|code|end)|eval))['"\s]`
+	cgExecInterpreterFlagList = `\s*\[[^\]]*['"](?:[^'"]*[/\\])?(?:node|nodejs|deno|bun|php)(?:\d+(?:\.\d+)*)?(?:\.exe)?['"][^\]]*['"](?:-[a-z]*[eprb][a-z]*|(?:--print|--run|--process-(?:begin|code|end))(?:=[^'"]*)?|eval)['"]`
+	// cgExecSplitStringList is env -S/--split-string (also in a cluster,
+	// -iS, or joined, '-S node -p', '-Snode -p') given one element that
+	// holds a whole command line with an inline-code flag (env -S 'node -p',
+	// env -S 'pwsh -Command', env -S 'python3 -cCODE').
+	cgExecSplitStringList = `\s*\[[^\]]*['"](?:-[a-z]*s|--split-string)(?:['"]\s*,\s*['"]|=|\s*)(?:[^'"]*\s)?(?:(?:-[a-z]*[ce]|/c|` + cgExecPwshCode + `|--eval\S*|(?:[^'"\s]*[/\\])?(?:node|nodejs|deno|bun|php)(?:\d+(?:\.\d+)*)?(?:\.exe)?\s+(?:[^'"]*\s)?(?:-[a-z]*[eprb][a-z]*|(?:--print|--run|--process-(?:begin|code|end))(?:=\S*)?|eval))['"\s]|(?:[^'"\s]*[/\\])?` + cgExecAttachedCode + `)`
+	// cgExecAttachedCodeList is python, perl, ruby or php given its code in
+	// the same element as the flag (python3 -cCODE, perl -eCODE).
+	cgExecAttachedCodeList = `\s*\[[^\]]*['"](?:[^'"]*[/\\])?` + cgExecAttachedCode
+	// cgExecAttachedCode is python, perl, ruby or php (versioned, .exe), at
+	// any later element or word, whose code-string flag carries the code in
+	// the same word (python3 -cCODE, python -IcCODE, perl -leCODE,
+	// ruby -eCODE, php -rCODE/-BCODE). The cluster before the flag holds
+	// only that interpreter's no-argument switches, read case-sensitively,
+	// so python -Werror/-Xcpu_count, perl -Ilib/-version, ruby -Eutf-8 and
+	// php -version stay exempt.
+	cgExecAttachedCode = `(?:(?:python|py|pypy)` + cgExecAttachedNext + `(?-i:-[bBdEiIOPqRsSuvx]*c)|perl` + cgExecAttachedNext + `(?-i:-[acnpstTuUwWXl0-9]*[eE])|` +
+		`ruby` + cgExecAttachedNext + `(?-i:-[acdlnpsSwW0-9]*e)|php` + cgExecAttachedNext + `(?-i:-[aenqHw]*[rBRE]))[^'"]`
+	// cgExecAttachedNext ends the interpreter name (a version, .exe) and
+	// moves to a later list element or split-string word.
+	cgExecAttachedNext = `(?:\d+(?:\.\d+)*)?(?:\.exe)?(?:['"][^\]]*['"]|\s+(?:[^'"]*\s)?)`
 	// cgExecEvalCalls evaluate source text.
 	cgExecEvalCalls = `(?:^|[^.\w$]|\\[nrt])eval\(|(?:instance|class|module)_eval\s*(?:\(\s*(?:[^&\s)]|$)|<<|['"%])|globaleval\(|` +
 		`(?:__)?(?:builtins(?:__)?|kernel|binding|toplevel_binding|window|globalthis|global)\.eval\(`

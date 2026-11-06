@@ -13,7 +13,7 @@ import (
 // the substring rule (base d37eafc351) reported as CG-EXEC-001 that runs a
 // command or code string, with the NFKC and heredoc forms the tightened rule
 // adds ("match": the fixer's positive corpus and the independent review's
-// near variants, rounds 1 to 4), and the method, name, list-form, Ruby
+// near variants, rounds 1 to 5), and the method, name, list-form, Ruby
 // block and comment lines it reported wrongly ("no_match"). No true positive may be
 // lost and no false positive may come back.
 func TestCodeGuardExecClassCorpus(t *testing.T) {
@@ -28,7 +28,7 @@ func TestCodeGuardExecClassCorpus(t *testing.T) {
 	if err := json.Unmarshal(raw, &corpus); err != nil {
 		t.Fatal(err)
 	}
-	if len(corpus.Match) < 275 || len(corpus.NoMatch) < 135 {
+	if len(corpus.Match) < 315 || len(corpus.NoMatch) < 160 {
 		t.Fatalf("corpus has %d match and %d no_match rows, want the full guard", len(corpus.Match), len(corpus.NoMatch))
 	}
 	s := NewCodeGuardScanner("")
