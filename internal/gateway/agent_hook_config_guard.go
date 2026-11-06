@@ -105,7 +105,7 @@ var agentHookConfigHomeFiles = []struct {
 var agentHookConfigNames = []string{
 	"settings.json", "settings.local.json", "config.toml", "hooks.json", "defenseclaw.js",
 	"config.json", "opencode.json", "opencode.jsonc", "defenseclaw.json", "hooks.v1.json",
-	"defenseclaw.ts", "config.yaml", "cli.json", ".claude", ".codex", ".opencode", ".kiro", ".gemini", ".hermes", "plugins", "hooks", "agents",
+	"defenseclaw.ts", "defenseclaw-hook-user", "defenseclaw-hook-post", "config.yaml", "cli.json", ".claude", ".codex", ".opencode", ".kiro", ".gemini", ".hermes", "plugins", "hooks", "agents",
 }
 
 func agentHookConfigFoldCase() bool {
@@ -175,6 +175,30 @@ func (g *agentHookConfigGuard) shellTarget(raw string) bool {
 					return true
 				}
 			}
+		}
+	}
+	return false
+}
+
+// ownedFile identifies installed DefenseClaw artifacts whose entire content
+// is part of a registered hook. A mutation of one is a Named disable.
+func (g *agentHookConfigGuard) ownedFile(raw string) bool {
+	for _, place := range g.places(raw) {
+		if g.format(place) == gatewayconnector.AgentHookConfigBridge ||
+			(filepath.Base(place) == "defenseclaw.json" && g.format(place) != "") {
+			return true
+		}
+		if g.home == "" {
+			continue
+		}
+		bin := filepath.Join(g.home, ".local", "bin")
+		if place == filepath.Join(bin, "defenseclaw-hook-user") ||
+			place == filepath.Join(bin, "defenseclaw-hook-post") {
+			return true
+		}
+		hooks := filepath.Join(g.home, ".defenseclaw", "hooks")
+		if strings.HasPrefix(place, hooks+string(filepath.Separator)) {
+			return true
 		}
 	}
 	return false
@@ -871,6 +895,10 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 	guard := newAgentHookConfigGuard(request.Input.CWD, request.Input.ActiveHome)
 	if changes, native := agentHookConfigFileChanges(request.Input.Tool, request.Input.Args); native {
 		for _, change := range changes {
+			if guard.ownedFile(change.path) {
+				add(agentHookConfigDisableRuleID, "changes a registered DefenseClaw hook file", change.path)
+				continue
+			}
 			format := guard.format(change.path)
 			if format == "" {
 				continue
@@ -893,8 +921,12 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 	// the write rule. The hook client's resolved targets carry links the
 	// command text does not name.
 	for operand, resolved := range request.ResolvedWriteTargets {
-		if !strings.HasPrefix(operand, "\x00") && filepath.IsAbs(resolved) && guard.shellTarget(resolved) {
-			add(agentHookConfigWriteRuleID, "", resolved)
+		if !strings.HasPrefix(operand, "\x00") && filepath.IsAbs(resolved) && (guard.shellTarget(resolved) || guard.ownedFile(resolved)) {
+			if guard.ownedFile(resolved) {
+				add(agentHookConfigDisableRuleID, "changes a registered DefenseClaw hook file", resolved)
+			} else {
+				add(agentHookConfigWriteRuleID, "", resolved)
+			}
 			return out
 		}
 	}
@@ -915,14 +947,39 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 			add(agentHookConfigWriteRuleID, "", target)
 		}
 		if target := agentHookConfigDirectoryCopyTarget(command.Argv, guard); target != "" {
-			add(agentHookConfigWriteRuleID, "", target)
+			if guard.ownedFile(target) {
+				add(agentHookConfigDisableRuleID, "changes a registered DefenseClaw hook file", target)
+			} else {
+				add(agentHookConfigWriteRuleID, "", target)
+			}
+		}
+		if target := agentHookConfigMovedOwnedSource(command.Argv, guard); target != "" {
+			add(agentHookConfigDisableRuleID, "moves a registered DefenseClaw hook file", target)
+		}
+		if target := agentHookConfigModeTarget(command, guard); target != "" {
+			if guard.ownedFile(target) {
+				add(agentHookConfigDisableRuleID, "changes a registered DefenseClaw hook file", target)
+			} else {
+				add(agentHookConfigWriteRuleID, "", target)
+			}
 		}
 	}
 	for _, target := range facts.Paths {
+		modeTarget := false
+		if target.Access == actionfacts.PathAccessMetadata {
+			for _, command := range facts.Commands {
+				if command.ID == target.CommandID && agentHookConfigModeCommand(command.Argv) {
+					modeTarget = true
+					break
+				}
+			}
+		}
 		switch target.Access {
 		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
 		default:
-			continue
+			if !modeTarget {
+				continue
+			}
 		}
 		candidate := firstNonEmpty(target.Resolved, target.Normalized, target.Value)
 		if runtime.GOOS == "windows" && target.Flavor == actionfacts.PathFlavorPOSIX {
@@ -930,12 +987,62 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 				candidate = filepath.FromSlash(host)
 			}
 		}
-		if guard.shellTarget(filepath.FromSlash(candidate)) {
-			add(agentHookConfigWriteRuleID, "", candidate)
+		if guard.shellTarget(filepath.FromSlash(candidate)) || guard.ownedFile(filepath.FromSlash(candidate)) {
+			if guard.ownedFile(filepath.FromSlash(candidate)) {
+				add(agentHookConfigDisableRuleID, "changes a registered DefenseClaw hook file", candidate)
+			} else {
+				add(agentHookConfigWriteRuleID, "", candidate)
+			}
 			return out
 		}
 	}
 	return out
+}
+
+func agentHookConfigMovedOwnedSource(argv []string, guard *agentHookConfigGuard) string {
+	if len(argv) < 3 || filepath.Base(argv[0]) != "mv" {
+		return ""
+	}
+	var operands []string
+	for _, arg := range argv[1:] {
+		if arg == "--" || strings.HasPrefix(arg, "-") {
+			continue
+		}
+		operands = append(operands, arg)
+	}
+	for _, source := range operands[:max(0, len(operands)-1)] {
+		if guard.ownedFile(source) {
+			return source
+		}
+	}
+	return ""
+}
+
+func agentHookConfigModeCommand(argv []string) bool {
+	if len(argv) == 0 {
+		return false
+	}
+	switch filepath.Base(argv[0]) {
+	case "chmod", "chown", "chgrp", "setfacl", "chattr":
+		return true
+	}
+	return false
+}
+
+func agentHookConfigModeTarget(command actionfacts.CommandFact, guard *agentHookConfigGuard) string {
+	if !agentHookConfigModeCommand(command.Argv) {
+		return ""
+	}
+	for _, arg := range command.Arguments[1:] {
+		candidate := arg.Value
+		if candidate == "" && !strings.ContainsAny(arg.StaticGlob, "*?[]{}$`\\") {
+			candidate = arg.StaticGlob
+		}
+		if candidate != "" && (guard.shellTarget(candidate) || guard.ownedFile(candidate)) {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func agentHookConfigDirectoryCopyTarget(argv []string, guard *agentHookConfigGuard) string {
