@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"golang.org/x/sys/windows"
+
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/safefile/sharedfiletest"
 )
@@ -88,5 +90,67 @@ func requireManagedPolicyWriterKeepsTheFile(t *testing.T, refused bool) {
 	}
 	if want := fmt.Sprintf("version %d\r\n", writes); string(data) != want {
 		t.Fatalf("file = %q, want %q", data, want)
+	}
+}
+
+// A content-stable managed file keeps its file identity while another process
+// has a delete-capable handle open. A changed body still publishes a new file.
+func TestWindowsManagedPolicyWriterKeepsMatchingContentWithSharedDeleteHandle(t *testing.T) {
+	paths := withWindowsCursorStandaloneSeamsForTest(t)
+	path := paths.Adapter
+	initial := []byte("same body\r\n")
+	if err := writeWindowsManagedFile(path, initial, true); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(name, windows.DELETE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(handle)
+	if err := writeWindowsManagedFile(path, initial, true); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("matching managed content was replaced")
+	}
+}
+
+func TestWindowsManagedPolicyWriterPublishesChangedContent(t *testing.T) {
+	paths := withWindowsCursorStandaloneSeamsForTest(t)
+	path := paths.Adapter
+	if err := writeWindowsManagedFile(path, []byte("old\r\n"), true); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeWindowsManagedFile(path, []byte("new\r\n"), true); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(before, after) {
+		t.Fatal("changed managed content kept the old file identity")
+	}
+	body, err := os.ReadFile(path)
+	if err != nil || string(body) != "new\r\n" {
+		t.Fatalf("published body = %q, err %v", body, err)
 	}
 }

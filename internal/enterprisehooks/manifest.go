@@ -17,6 +17,8 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 type Manifest struct {
@@ -88,7 +90,14 @@ func loadManifestWithSHA256(path string, validateTarget func(int, ManifestTarget
 			enterpriseHookManifestMaxBytes,
 		)
 	}
-	file, err := os.Open(path)
+	// Share deletion and retry a transient open error without holding a
+	// replacement in place (GAP-0655).
+	var file *os.File
+	err = safefile.RetryTransientRead(func() error {
+		var err error
+		file, err = winpath.OpenReadShared(path)
+		return err
+	})
 	if err != nil {
 		return Manifest{}, "", fmt.Errorf("enterprise hooks: read manifest %s: %w", path, err)
 	}

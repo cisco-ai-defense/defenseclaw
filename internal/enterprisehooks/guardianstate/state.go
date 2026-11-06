@@ -34,6 +34,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // State names — the exact bytes the guardian writes and the sidecar
@@ -105,7 +108,14 @@ func ReadState(path string) string {
 	if !readStatePathTrusted(path) {
 		return StateUnknown
 	}
-	f, err := os.Open(path) // #nosec G304 — path derives from install-time layout, not user input.
+	// Shared with deletion and retried for a moment, so the guardian's
+	// replacement can be read without holding it in place (GAP-0655).
+	var f *os.File
+	err := safefile.RetryTransientRead(func() error {
+		var err error
+		f, err = winpath.OpenReadShared(path) // #nosec G304 — path derives from install-time layout, not user input.
+		return err
+	})
 	if err != nil {
 		return StateUnknown
 	}
