@@ -81,6 +81,7 @@ try {
         # change, names it and its recovery, and changes nothing. It runs only
         # on the standalone profile, whose verdicts it uses.
         function Test-DefenseClawStandaloneProfile { return $true }
+        function Get-DefenseClawServiceSIDForRecovery { return $sid }
         $manifest = [IO.Path]::Combine($State, 'targets.yaml')
         $metadata = [IO.Path]::Combine($State, 'deployment.json')
         foreach ($file in @($manifest, $metadata)) {
@@ -98,7 +99,7 @@ try {
         function Assert-GateRefuses([string]$Path, [string]$Recovery) {
             $message = ''
             try {
-                Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout
+                Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway
             }
             catch {
                 $message = $_.Exception.Message
@@ -123,7 +124,7 @@ try {
             throw 'the content gate changed the config ACL'
         }
         Set-DefenseClawPathAcl -Path $Config -Kind ConfigFile -GatewayServiceSID $sid
-        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway
         Add-UsersWrite -Path $manifest
         Assert-GateRefuses -Path $manifest -Recovery 'Setup writes a new targets.yaml enumerated from it'
         Set-DefenseClawPathAcl -Path $manifest -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
@@ -137,7 +138,7 @@ try {
             Assert-GateRefuses -Path $ConfigDirectory -Recovery 'remove that entry, or give the folder back to Administrators'
             Set-DefenseClawPathAcl -Path $ConfigDirectory -Kind ConfigDirectory -GatewayServiceSID $sid
         }
-        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway
         if ($script:repairCalls -ne 0) {
             throw 'the content gate repaired ACLs'
         }
@@ -201,7 +202,92 @@ try {
                 Set-DefenseClawPathAcl -Path $path -Kind $kind -GatewayServiceSID $gatewaySID
             }
         }
-        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway
+
+        # GAP-0590 review M2: every other path Set-DefenseClawManagedAcls and
+        # Set-DefenseClawStandaloneSecretsAcls re-stamp is judged as well,
+        # each with its own writers: the credential store and a credential,
+        # the guardian authorization folder, protected_targets.json and
+        # activation.json, the broker state, the runtime folder and its .env,
+        # the IPC folder, the bundle tree and an install folder. A standard
+        # user's write entry on any of them is refused before anything
+        # changes; the gateway's own Modify on the runtime and IPC folders is
+        # not drift.
+        $secrets = [IO.Path]::Combine($State, 'secrets')
+        $credential = [IO.Path]::Combine($secrets, 'ai-defense-api-key')
+        $authorization = [IO.Path]::Combine($State, 'hook-guardian-state')
+        $protectedTargets = [IO.Path]::Combine($authorization, 'protected_targets.json')
+        $activation = [IO.Path]::Combine($authorization, 'activation.json')
+        $broker = [IO.Path]::Combine($State, 'broker')
+        $runtime = [IO.Path]::Combine($State, 'runtime')
+        $runtimeEnv = [IO.Path]::Combine($runtime, '.env')
+        $ipc = [IO.Path]::Combine($State, 'ipc')
+        $installState = [IO.Path]::Combine($State, 'install')
+        $trust = [IO.Path]::Combine($ConfigDirectory, 'trust')
+        $anchors = [IO.Path]::Combine($trust, 'bundle-anchors.json')
+        $bin = [IO.Path]::Combine($State, 'program', 'bin')
+        foreach ($directory in @($secrets, $authorization, $broker, $runtime, $ipc, $installState, $trust, $bin)) {
+            [void][IO.Directory]::CreateDirectory($directory)
+        }
+        foreach ($file in @($credential, $protectedTargets, $activation, $runtimeEnv, $anchors)) {
+            [IO.File]::WriteAllText($file, 'x')
+        }
+        $canonical = [ordered]@{
+            $secrets = { Set-DefenseClawStandaloneSecretSddl -Path $secrets -IsDirectory $true -Sddl (Get-DefenseClawStandaloneSecretsDirectorySddl -GatewayServiceSID $sid) }
+            $credential = { Set-DefenseClawStandaloneSecretSddl -Path $credential -IsDirectory $false -Sddl (Get-DefenseClawStandaloneSecretFileSddl -GatewayServiceSID $sid -Name 'ai-defense-api-key') }
+            $authorization = { Set-DefenseClawPathAcl -Path $authorization -Kind AuthorizationDirectory -GatewayServiceSID $sid }
+            $protectedTargets = { Set-DefenseClawPathAcl -Path $protectedTargets -Kind AuthorizationFile -GatewayServiceSID $sid }
+            $activation = { Set-DefenseClawPathAcl -Path $activation -Kind AuthorizationFile -GatewayServiceSID $sid }
+            $broker = { Set-DefenseClawPathAcl -Path $broker -Kind AuthorizationDirectory -GatewayServiceSID $sid }
+            $runtime = { Set-DefenseClawPathAcl -Path $runtime -Kind RuntimeDirectory -GatewayServiceSID $sid }
+            $runtimeEnv = { Set-DefenseClawPathAcl -Path $runtimeEnv -Kind RuntimeFile -GatewayServiceSID $sid }
+            $ipc = { Set-DefenseClawPathAcl -Path $ipc -Kind ManagedIPCDirectory -GatewayServiceSID $sid }
+            $installState = { Set-DefenseClawPathAcl -Path $installState -Kind AdminDirectory -GatewayServiceSID $sid }
+            $trust = { Set-DefenseClawPathAcl -Path $trust -Kind AdminDirectory -GatewayServiceSID $sid }
+            $anchors = { Set-DefenseClawPathAcl -Path $anchors -Kind AdminFile -GatewayServiceSID $sid }
+            $bin = { Set-DefenseClawPathAcl -Path $bin -Kind ServiceInstallDirectory -GatewayServiceSID $sid }
+        }
+        foreach ($path in @($canonical.Keys)) { & $canonical[$path] }
+        $gateLayout.AuthorizationDirectory = $authorization
+        $gateLayout.AuthorizationLedgerPath = $protectedTargets
+        $gateLayout.BrokerStateDirectory = $broker
+        $gateLayout.RuntimeDirectory = $runtime
+        $gateLayout.ManagedIPCDirectory = $ipc
+        $gateLayout.InstallStateDirectory = $installState
+        $gateLayout.BinDirectory = $bin
+        # The canonical layout passes, the gateway's own entries included.
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway
+        $recoveries = @{
+            $secrets = 'set the credential again (defenseclaw-gateway enterprise secret set)'
+            $credential = 'set the credential again (defenseclaw-gateway enterprise secret set)'
+            $authorization = 'remove that entry, or give the folder back to Administrators'
+            $protectedTargets = 'remove that entry, or give the file back to Administrators'
+            $activation = 'remove that entry, or give the file back to Administrators'
+            $broker = 'remove that entry, or give it back to Administrators'
+            $runtime = 'remove that entry, or give it back to Administrators'
+            $runtimeEnv = 'remove that entry, or give it back to Administrators'
+            $ipc = 'remove that entry, or give it back to Administrators'
+            $installState = 'remove that entry, or give the folder back to Administrators'
+            $trust = 'remove that entry, or give it back to Administrators'
+            $anchors = 'remove that entry, or give it back to Administrators'
+            $bin = 'remove that entry, or give the folder back to Administrators'
+        }
+        foreach ($path in @($canonical.Keys)) {
+            Add-UsersWrite -Path $path -Rights Modify
+            $before = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path).Sddl
+            Assert-GateRefuses -Path $path -Recovery $recoveries[$path]
+            if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path).Sddl -cne $before) {
+                throw "the content gate changed $path"
+            }
+            & $canonical[$path]
+        }
+        # A file in the credential store that is not named like a credential
+        # (a temporary file) is not re-stamped, so it is not judged either.
+        $temporary = [IO.Path]::Combine($secrets, '.ai-defense-api-key.tmp')
+        [IO.File]::WriteAllText($temporary, 'x')
+        Add-UsersWrite -Path $temporary -Rights Modify
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway
+        [IO.File]::Delete($temporary)
 
         # The self-heal path itself (Verify, the attestation, the journals and
         # the Codex records read through it).
@@ -391,7 +477,7 @@ try {
         $trusted.SetAccessRuleProtection($false, $false)
         Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Config -AclObject $trusted
         # Trusted-only drift passes the content gate for the repair to put back.
-        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway
         if (-not (Repair-DefenseClawDeploymentAclDrift `
             -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
             -RedactionKeyClass trusted_drift -CheckOnly) -or $script:repairCalls -ne 0) {
