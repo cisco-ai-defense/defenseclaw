@@ -190,6 +190,19 @@ func canonicalize(path string, kind ObjectKind, opts CanonicalOptions, repair bo
 		reportCanonicalResult(result, opts)
 		return result, nil
 	}
+	// On standalone the repair itself refuses an object an untrusted
+	// principal can write or owns, whatever AllowUntrustedOwnerTransfer
+	// says, and judges it again on the handle it stamps (see
+	// stampCanonicalDescriptor). A caller's earlier read-only check can be
+	// raced: a hard link removed or an object deleted and recreated between
+	// that check and this repair (g582 review 6 S1, review 5 L1).
+	refuseUntrusted := StandaloneRefusesContentDrift() && !opts.inPlaceOutOfClass
+	if refuseUntrusted && assessment.boundary() {
+		result.Outcome = CanonicalBoundary
+		result.RepairError = standaloneInPlaceRepairRefused
+		reportCanonicalResult(result, opts)
+		return result, nil
+	}
 	if assessment.Owner == ownerUntrusted && !descriptorUnreadable && !opts.AllowUntrustedOwnerTransfer {
 		result.Outcome = CanonicalBoundary
 		result.RepairError = "owner is not trusted; not adopted"
@@ -210,7 +223,16 @@ func canonicalize(path string, kind ObjectKind, opts CanonicalOptions, repair bo
 		reportCanonicalResult(result, opts)
 		return result, nil
 	}
-	if repairErr := stampCanonicalDescriptor(handle, clean, kind, spec.canonicalSDDL()); repairErr != nil {
+	if repairErr := stampCanonicalDescriptor(handle, clean, kind, spec.canonicalSDDL(), refuseUntrusted, gatewaySID); repairErr != nil {
+		var refused *standaloneStampRefusal
+		if errors.As(repairErr, &refused) {
+			result.Outcome = CanonicalBoundary
+			result.Drift = refused.drift
+			result.UntrustedWriters = refused.writers
+			result.RepairError = standaloneInPlaceRepairRefused
+			reportCanonicalResult(result, opts)
+			return result, nil
+		}
 		result.RepairError = repairErr.Error()
 		reportCanonicalResult(result, opts)
 		return result, nil
@@ -416,6 +438,14 @@ var (
 // restore privileges apply. Sharing and lock violations are retried with a
 // bounded backoff.
 func openCanonicalObject(path string, access uint32) (windows.Handle, error) {
+	return openCanonicalObjectShared(path, access, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
+}
+
+// openCanonicalObjectShared is openCanonicalObject with the share mode given.
+// The standalone repair handle leaves out FILE_SHARE_DELETE, so while it is
+// open no name of the object can be removed or renamed: the object judged
+// on it is the object stamped through it.
+func openCanonicalObjectShared(path string, access, share uint32) (windows.Handle, error) {
 	pointer, err := winpath.UTF16Ptr(path)
 	if err != nil {
 		return windows.InvalidHandle, err
@@ -424,7 +454,7 @@ func openCanonicalObject(path string, access uint32) (windows.Handle, error) {
 		return windows.CreateFile(
 			pointer,
 			access,
-			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+			share,
 			nil,
 			windows.OPEN_EXISTING,
 			windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
@@ -579,13 +609,39 @@ func objectDescriptorFromSD(sd *windows.SECURITY_DESCRIPTOR) (objectDescriptor, 
 	return desc, nil
 }
 
+// standaloneInPlaceRepairRefused is the RepairError of an object the
+// standalone repair refused to re-stamp in place.
+const standaloneInPlaceRepairRefused = "not repaired in place on a standalone install, because an untrusted " +
+	"principal can write or owns it: from an elevated prompt remove that entry (icacls \"<path>\" /remove:g *<SID>), " +
+	"or give it back to Administrators (icacls \"<path>\" /setowner *S-1-5-32-544), check it, then run Setup " +
+	"/ensure and Setup /verify (GAP-0561)"
+
+// standaloneStampRefusal is the refusal stampCanonicalDescriptor returns when
+// the descriptor read on its own repair handle lets an untrusted principal
+// write or own the object.
+type standaloneStampRefusal struct {
+	drift   []string
+	writers []string
+}
+
+func (r *standaloneStampRefusal) Error() string {
+	return "an untrusted principal can write or owns the object: " + strings.Join(r.drift, "; ")
+}
+
+// canonicalBeforeStamp runs after the assessment and before the repair handle
+// is opened; tests replace it to change the object in between.
+var canonicalBeforeStamp = func(string) {}
+
 // stampCanonicalDescriptor writes sddl's owner, group and protected DACL to
 // the object open as readHandle, through a second handle proven to be the same
-// file. With the restore privilege enabled the second open is granted
+// file. With refuseUntrusted (standalone) that handle is opened without
+// delete sharing, and the structure (no reparse point, one link) and the
+// descriptor are judged again on it: an untrusted owner or writer is refused
+// with a standaloneStampRefusal and nothing is written. With the restore privilege enabled the second open is granted
 // WRITE_DAC and WRITE_OWNER whatever the current DACL says; without it, an
 // owner change is dropped and only the DACL is written, which the owner's
 // implicit rights allow for an administrator-owned object.
-func stampCanonicalDescriptor(readHandle windows.Handle, path string, kind ObjectKind, sddl string) error {
+func stampCanonicalDescriptor(readHandle windows.Handle, path string, kind ObjectKind, sddl string, refuseUntrusted bool, gatewaySID string) error {
 	descriptor, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil {
 		return fmt.Errorf("build canonical descriptor: %w", err)
@@ -602,12 +658,17 @@ func stampCanonicalDescriptor(readHandle windows.Handle, path string, kind Objec
 	if err != nil {
 		return fmt.Errorf("read canonical DACL: %w", err)
 	}
+	canonicalBeforeStamp(path)
+	share := uint32(windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE)
+	if refuseUntrusted {
+		share = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE
+	}
 	return RunWithWindowsRepairPrivileges(func() error {
 		full := uint32(windows.READ_CONTROL | windows.WRITE_DAC | windows.WRITE_OWNER | windows.FILE_READ_ATTRIBUTES)
-		handle, openErr := openCanonicalObject(path, full)
+		handle, openErr := openCanonicalObjectShared(path, full, share)
 		ownerToo := openErr == nil
 		if openErr != nil {
-			handle, openErr = openCanonicalObject(path, uint32(windows.READ_CONTROL|windows.WRITE_DAC|windows.FILE_READ_ATTRIBUTES))
+			handle, openErr = openCanonicalObjectShared(path, uint32(windows.READ_CONTROL|windows.WRITE_DAC|windows.FILE_READ_ATTRIBUTES), share)
 		}
 		if openErr != nil {
 			return fmt.Errorf("open for repair: %w", openErr)
@@ -622,6 +683,18 @@ func stampCanonicalDescriptor(readHandle windows.Handle, path string, kind Objec
 		}
 		if !same {
 			return errors.New("object changed between inspection and repair")
+		}
+		if refuseUntrusted {
+			// The decision is made on this handle: no name of the object can
+			// go away while it is open, and the descriptor stamped below
+			// replaces the one judged here.
+			current, err := readObjectDescriptor(handle)
+			if err != nil {
+				return fmt.Errorf("read descriptor on the repair handle: %w", err)
+			}
+			if judged := assessCanonicalDescriptor(current, kind, gatewaySID, windowsLocalAdministratorsMember); judged.boundary() {
+				return &standaloneStampRefusal{drift: judged.Drift, writers: judged.UntrustedWriters}
+			}
 		}
 		dataInfo := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
 		if kind.Directory() && !kind.propagatesRepair() {
@@ -653,6 +726,74 @@ func stampCanonicalDescriptor(readHandle windows.Handle, path string, kind Objec
 			return fmt.Errorf("apply canonical DACL: %w", err)
 		}
 		return nil
+	})
+}
+
+// StampStandaloneTrustedObject is the standalone in-place stamp of a managed
+// folder or file whose writer stamps its own descriptor (the hook guardian
+// manifest folder, the secrets folder). It writes sddl's owner and protected
+// DACL through one handle opened without delete sharing, after it has judged,
+// on that same handle, the object's type and shape (no reparse point, one
+// link) and its descriptor as kind. An untrusted owner or writer is refused
+// with a StandaloneContentDriftError that names the path and the way out, and
+// nothing is written, so a read-only check made earlier cannot be raced
+// (g582 review 6 S1). Inheritable entries reach existing children as with
+// SetNamedSecurityInfo.
+func StampStandaloneTrustedObject(path string, kind ObjectKind, sddl string) error {
+	if !kind.valid() {
+		return fmt.Errorf("unknown managed object kind %q", kind)
+	}
+	recovery := standaloneInPlaceFileRecovery
+	if kind.Directory() {
+		recovery = standaloneInPlaceFolderRecovery
+	}
+	clean, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve %s: %w", path, err)
+	}
+	if err := winpath.RejectReparseChain(filepath.Dir(clean)); err != nil {
+		return fmt.Errorf("%s: %w", clean, err)
+	}
+	descriptor, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		return fmt.Errorf("build descriptor: %w", err)
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		return fmt.Errorf("read descriptor owner: %w", err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		return fmt.Errorf("read descriptor DACL: %v", err)
+	}
+	canonicalBeforeStamp(clean)
+	return RunWithWindowsRepairPrivileges(func() error {
+		handle, err := openCanonicalObjectShared(clean,
+			uint32(windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER|windows.FILE_READ_ATTRIBUTES),
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
+		if err != nil {
+			return fmt.Errorf("open %s for repair: %w", clean, err)
+		}
+		defer func() { _ = windows.CloseHandle(handle) }()
+		if err := checkCanonicalStructure(handle, clean, kind); err != nil {
+			return &StandaloneContentDriftError{Err: err, Recovery: recovery}
+		}
+		current, err := readObjectDescriptor(handle)
+		if err != nil {
+			return &StandaloneContentDriftError{
+				Err:      fmt.Errorf("cannot judge who can write or owns %s: %w", clean, err),
+				Recovery: recovery,
+			}
+		}
+		if judged := assessCanonicalDescriptor(current, kind, "", windowsLocalAdministratorsMember); judged.boundary() {
+			return &StandaloneContentDriftError{
+				Err:      fmt.Errorf("an untrusted principal can write or owns %s: %s", clean, strings.Join(judged.Drift, "; ")),
+				Recovery: recovery,
+			}
+		}
+		info := windows.SECURITY_INFORMATION(windows.OWNER_SECURITY_INFORMATION | windows.DACL_SECURITY_INFORMATION |
+			windows.PROTECTED_DACL_SECURITY_INFORMATION)
+		return windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, info, owner, nil, dacl, nil)
 	})
 }
 
