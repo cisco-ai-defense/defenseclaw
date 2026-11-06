@@ -189,6 +189,13 @@ func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, f
 				}
 			}
 		}
+		if include != nil && depth < 4 {
+			if clause, ok := root.Cmd.(*syntax.ForClause); ok {
+				for _, name := range knownFixedLoopWrites(clause, candidates, cwd, home, depth, include) {
+					add(name)
+				}
+			}
+		}
 		saturated := actionKeptSaturated(kept)
 		if saturated {
 			candidates = candidates[:1]
@@ -457,6 +464,67 @@ func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, f
 	operands = append(operands, literalPipelineOperands(file, called, cwd, home, depth)...)
 	operands = append(operands, literalGeneratedScriptOperands(file, cwd, home, depth)...)
 	return operands, copies
+}
+
+// knownFixedLoopWrites reads the body of a fixed for list once for each
+// item it reaches, with the item bound, so a write or entry change through
+// the loop variable names its value. Only targets include accepts are kept.
+func knownFixedLoopWrites(clause *syntax.ForClause, candidates []actionValues, cwd, home string, depth int, include func(string) bool) []string {
+	var source strings.Builder
+	if len(clause.Do) == 0 || syntax.NewPrinter().Print(&source, &syntax.File{Stmts: clause.Do}) != nil {
+		return nil
+	}
+	var writes []string
+	read := func(bound actionValues) {
+		found, _ := literalWriteOperandsWithParsedKnown(source.String(), cwd, home, depth+1, nil, bound, include)
+		for _, target := range found {
+			if include(target) {
+				writes = append(writes, target)
+			}
+		}
+	}
+	steps := 0
+	for _, candidate := range candidates {
+		if actionKeptSaturated([]actionValues{candidate}) {
+			continue
+		}
+		name, items, fixed := actionFixedForItems(clause, candidate, cwd, home)
+		if !fixed {
+			continue
+		}
+		states := []actionValues{candidate}
+		for index, item := range items {
+			var next []actionValues
+			capped := false
+			for _, state := range states {
+				bound := maps.Clone(state)
+				bound[name] = item
+				read(bound)
+				flow := actionKeptLoopBody(clause.Do, []actionValues{bound}, cwd, home, &steps)
+				if _, saturated := flow.saturatedStates(); saturated {
+					capped = true
+					continue
+				}
+				next = actionAppendValueCandidates(next, flow.ended)
+				next = actionAppendValueCandidates(next, flow.continued)
+			}
+			if capped || len(next) > 8 || actionKeptSaturated(next) {
+				// Past the state cap, each later item is read from the loop
+				// entry, as if every item ran.
+				for _, rest := range items[index+1:] {
+					bound := maps.Clone(candidate)
+					bound[name] = rest
+					read(bound)
+				}
+				break
+			}
+			if len(next) == 0 {
+				break
+			}
+			states = next
+		}
+	}
+	return writes
 }
 
 // SedReplacedOperands names sed -i operands whose directory entry is
