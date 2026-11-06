@@ -56,8 +56,13 @@ func perUserRecordHomes(opts Options) []string {
 	if accountHome := perUserAccountHome(); accountHome != "" {
 		add(filepath.Join(accountHome, ".defenseclaw"))
 	}
+	// The folder the gateway recorded as holding gateway.pid, independent of
+	// where its config file sits, then the config folder for hooks rendered
+	// before that record existed, then the environment status itself reads.
+	add(hooklayout.RecordedInstallHome(opts.Home))
 	if recorded := hooklayout.RecordedConfig(opts.Home); recorded != "" {
 		add(filepath.Dir(recorded))
 	}
+	add(os.Getenv("DEFENSECLAW_HOME"))
 	return homes
 }

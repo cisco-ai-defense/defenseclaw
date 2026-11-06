@@ -591,6 +591,11 @@ func writePerUserGatewayHelperRecord(hookDir string) error {
 // under, beside the per-user hooks it renders (cli hookConfigRecordName).
 const perUserConfigRecordName = ".config-record"
 
+// perUserInstallHomeRecordName is the record of the folder that holds the
+// gateway.pid of this account, beside the hooks. It is separate from the config
+// record because DEFENSECLAW_CONFIG can name a file outside the install home.
+const perUserInstallHomeRecordName = ".install-home-record"
+
 // writePerUserConfigRecord records, beside the hooks, the absolute config
 // file this gateway runs under, as config.ConfigPath names it
 // (DEFENSECLAW_CONFIG, else DEFENSECLAW_HOME/config.yaml, else
@@ -621,6 +626,19 @@ func writePerUserConfigRecord(hookDir string) error {
 	}
 	if err := hookRuntimeFileWriter(false)(filepath.Join(hookDir, perUserConfigRecordName), []byte(path+"\n"), 0o600); err != nil {
 		return fmt.Errorf("write hook config record: %w", err)
+	}
+	// Written under the same cold-start guard as the config record.
+	home := os.Getenv("DEFENSECLAW_HOME")
+	if home == "" {
+		if account := userHomeDir(); account != "" {
+			home = filepath.Join(account, ".defenseclaw")
+		}
+	}
+	if !filepath.IsAbs(home) {
+		return nil
+	}
+	if err := hookRuntimeFileWriter(false)(filepath.Join(hookDir, perUserInstallHomeRecordName), []byte(filepath.Clean(home)+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write hook install home record: %w", err)
 	}
 	return nil
 }
