@@ -317,8 +317,8 @@ func TestEveryCoverageNamesItsBufferDrops(t *testing.T) {
 					continue // a wrapper that passes another source's coverage on
 				}
 				checked[dir+":"+receiver] = true
-				if !callsWithBufferDrops(fn.Body) {
-					t.Errorf("%s: (%s).Coverage does not name its buffer drops with WithBufferDrops",
+				if !coverageNamesItsBufferDrops(fn) {
+					t.Errorf("%s: (%s).Coverage does not name its buffer drops with WithBufferDrops on every return",
 						fset.Position(fn.Pos()), receiver)
 				}
 			}
@@ -365,18 +365,141 @@ func receiverName(expr ast.Expr) string {
 	return ""
 }
 
-func callsWithBufferDrops(body *ast.BlockStmt) bool {
-	found := false
-	ast.Inspect(body, func(node ast.Node) bool {
-		call, ok := node.(*ast.CallExpr)
-		if !ok {
-			return !found
+// coverageNamesItsBufferDrops reports whether every way out of fn, a
+// Coverage method, gives a WithBufferDrops result: each return gives a
+// WithBufferDrops call or a variable last assigned from one, or the method
+// first defers a closure that sets its named result from one (Tetragon's
+// form), before any return. One call on one path was not enough: the
+// pre-fix Windows source returned its start coverage early when it had no
+// reader (g072 review 2 S4).
+func coverageNamesItsBufferDrops(fn *ast.FuncDecl) bool {
+	named := ""
+	if results := fn.Type.Results.List; len(results) == 1 && len(results[0].Names) == 1 {
+		named = results[0].Names[0].Name
+	}
+	if named != "" {
+		for _, stmt := range fn.Body.List {
+			if containsReturn(stmt) {
+				break // a return before the defer escapes it
+			}
+			if deferred, ok := stmt.(*ast.DeferStmt); ok && deferSetsWithBufferDrops(deferred, named) {
+				return true
+			}
 		}
-		switch fun := call.Fun.(type) {
-		case *ast.Ident:
-			found = found || fun.Name == "WithBufferDrops"
-		case *ast.SelectorExpr:
-			found = found || fun.Sel.Name == "WithBufferDrops"
+	}
+	returns, every := 0, true
+	ast.Inspect(fn.Body, func(node ast.Node) bool {
+		if _, closure := node.(*ast.FuncLit); closure {
+			return false
+		}
+		ret, ok := node.(*ast.ReturnStmt)
+		if !ok {
+			return true
+		}
+		returns++
+		var result ast.Expr
+		switch {
+		case len(ret.Results) == 1:
+			result = ret.Results[0]
+		case len(ret.Results) == 0 && named != "":
+			result = ast.NewIdent(named)
+		default:
+			every = false
+			return false
+		}
+		if !isWithBufferDropsCall(result) && !lastAssignedFromWithBufferDrops(fn.Body, result, ret.Pos()) {
+			every = false
+		}
+		return false
+	})
+	return every && returns > 0
+}
+
+// isWithBufferDropsCall reports a call of WithBufferDrops or
+// plane.WithBufferDrops.
+func isWithBufferDropsCall(expr ast.Expr) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		return fun.Name == "WithBufferDrops"
+	case *ast.SelectorExpr:
+		return fun.Sel.Name == "WithBufferDrops"
+	}
+	return false
+}
+
+// lastAssignedFromWithBufferDrops reports whether result is a variable whose
+// last assignment in body before pos, in source order, is from a
+// WithBufferDrops call.
+func lastAssignedFromWithBufferDrops(body *ast.BlockStmt, result ast.Expr, pos token.Pos) bool {
+	ident, ok := result.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	var last ast.Expr
+	ast.Inspect(body, func(node ast.Node) bool {
+		if node == nil || node.Pos() >= pos {
+			return false
+		}
+		if _, closure := node.(*ast.FuncLit); closure {
+			return false
+		}
+		switch stmt := node.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range stmt.Lhs {
+				if name, ok := lhs.(*ast.Ident); ok && name.Name == ident.Name {
+					last = nil
+					if len(stmt.Rhs) == len(stmt.Lhs) {
+						last = stmt.Rhs[i]
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			for i, name := range stmt.Names {
+				if name.Name == ident.Name {
+					last = nil
+					if len(stmt.Values) == len(stmt.Names) {
+						last = stmt.Values[i]
+					}
+				}
+			}
+		}
+		return true
+	})
+	return last != nil && isWithBufferDropsCall(last)
+}
+
+// deferSetsWithBufferDrops reports a deferred closure that sets named from a
+// WithBufferDrops call.
+func deferSetsWithBufferDrops(deferred *ast.DeferStmt, named string) bool {
+	closure, ok := deferred.Call.Fun.(*ast.FuncLit)
+	if !ok {
+		return false
+	}
+	for _, stmt := range closure.Body.List {
+		assign, ok := stmt.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+			continue
+		}
+		if name, ok := assign.Lhs[0].(*ast.Ident); ok && name.Name == named && isWithBufferDropsCall(assign.Rhs[0]) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsReturn reports a return statement in stmt outside a closure.
+func containsReturn(stmt ast.Stmt) bool {
+	found := false
+	ast.Inspect(stmt, func(node ast.Node) bool {
+		switch node.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.ReturnStmt:
+			found = true
 		}
 		return !found
 	})
@@ -401,21 +524,34 @@ func TestWithRetiredBufferDrops(t *testing.T) {
 	}
 }
 
-// The check itself: a Coverage without the call is caught, one with it (also
-// inside a deferred closure, as Tetragon's) is not.
+// The check itself: a Coverage without the call is caught, and so is one
+// that calls it on one path and returns early on another (the pre-fix
+// Windows shape); every return through it, a variable last assigned from it,
+// and a deferred closure set before any return (Tetragon's) are not.
 func TestCallsWithBufferDrops(t *testing.T) {
 	for source, want := range map[string]bool{
 		`package p; func (s *x) Coverage() Coverage { return s.coverage }`:                                                    false,
 		`package p; func (s *x) Coverage() Coverage { return WithBufferDrops(s.coverage, 1, SensorEventBuffer) }`:             true,
 		`package p; func (s *x) Coverage() (c Coverage) { defer func() { c = WithBufferDrops(c, 1, "b") }(); return }`:        true,
 		`package p; func (s *x) Coverage() plane.Coverage { return plane.WithBufferDrops(s.c, 1, plane.HelperStreamBuffer) }`: true,
+		// g072 review 2 S4: a planted early return.
+		`package p; func (s *x) Coverage() Coverage { c := s.coverage; if s.reader == nil { return c }; return WithBufferDrops(c, 1, SensorEventBuffer) }`: false,
+		`package p; func (s *x) Coverage() Coverage { if s.reader == nil { return s.coverage }; return WithBufferDrops(s.coverage, 1, "b") }`:              false,
+		`package p; func (s *x) Coverage() Coverage { c := WithBufferDrops(s.c, 1, "b"); return c }`:                                                       true,
+		`package p; func (s *x) Coverage() Coverage { var c = WithBufferDrops(s.c, 1, "b"); return c }`:                                                    true,
+		`package p; func (s *x) Coverage() Coverage { c := WithBufferDrops(s.c, 1, "b"); c = s.c; return c }`:                                              false,
+		`package p; func (s *x) Coverage() (c Coverage) { if s.r == nil { return s.c }; defer func() { c = WithBufferDrops(c, 1, "b") }(); return }`:       false,
+		`package p; func (s *x) Coverage() (c Coverage) { c = s.c; return }`:                                                                               false,
+		`package p; func (s *x) Coverage() (c Coverage) { c = WithBufferDrops(s.c, 1, "b"); return }`:                                                      true,
+		`package p; func (s *x) Coverage() Coverage { f := func() Coverage { return s.c }; _ = f; return WithBufferDrops(s.c, 1, "b") }`:                   true,
+		`package p; func (s *x) Coverage() Coverage { for { } }`:                                                                                           false,
 	} {
 		file, err := parser.ParseFile(token.NewFileSet(), "x.go", source, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := callsWithBufferDrops(file.Decls[0].(*ast.FuncDecl).Body); got != want {
-			t.Errorf("callsWithBufferDrops(%s) = %t, want %t", source, got, want)
+		if got := coverageNamesItsBufferDrops(file.Decls[0].(*ast.FuncDecl)); got != want {
+			t.Errorf("coverageNamesItsBufferDrops(%s) = %t, want %t", source, got, want)
 		}
 	}
 	if !isBufferPointer(&ast.StarExpr{X: &ast.SelectorExpr{X: ast.NewIdent("plane"), Sel: ast.NewIdent("Buffer")}}) {
