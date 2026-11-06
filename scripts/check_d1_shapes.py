@@ -15,6 +15,24 @@ from urllib.parse import urlsplit
 
 ALLOWED_KEYS = {"id", "kind", "tool_name", "cc_tool", "command", "args", "expected"}
 PAYLOAD_KEYS = ("kind", "tool_name", "cc_tool", "command", "args")
+ALLOWED_KINDS = {"edit", "grep", "read", "shell", "write"}
+ALLOWED_TOOLS = {
+    "Bash",
+    "Edit",
+    "Grep",
+    "PowerShell",
+    "Read",
+    "Write",
+    "bash",
+    "bash_command",
+    "execute",
+    "execute_bash",
+    "read_file",
+    "run_shell_command",
+    "shell",
+    "str_replace_editor",
+}
+ALLOWED_CC_TOOLS = {"Edit", "Grep", "Read", "Write"}
 APPROVED = Path(__file__).resolve().parents[1] / "internal/gateway/testdata/d1-shapes-approved.tsv"
 EXPECTED_CELLS = {"claudecode/oss", "claudecode/managed-balanced", "codex/oss", "codex/managed-balanced"}
 ALLOWED_DECISIONS = {"allow", "alert", "block"}
@@ -70,6 +88,28 @@ GIT_TRANSPORT = re.compile(
 )
 GIT_SCP_ENDPOINT = re.compile(r"(?<![\w./])(?:([A-Za-z][A-Za-z0-9_.+-]*)@)?([A-Za-z][A-Za-z0-9_.-]*):(?!//)[^\s;&|]+")
 HOST_ASSIGNMENT = re.compile(r"\b(?:host|hostname|server|remote|user|username|account)=([^\s;&|\"']+)", re.I)
+NETWORK_CLIENT = re.compile(r"\b(?:curl|wget|fetch|ftp)\b([^\n;&|<>]*)", re.I)
+NETWORK_WORD = re.compile(r"[^\s;&|]+")
+NETWORK_ACCOUNT_OPTIONS = {"-u", "--user", "--proxy-user", "--http-user", "--ftp-user"}
+NETWORK_ENDPOINT_OPTIONS = {"-x", "--url", "--proxy", "--preproxy", "--doh-url", "--resolve", "--connect-to"}
+NETWORK_VALUE_OPTIONS = {
+    "-o",
+    "-O",
+    "-H",
+    "-d",
+    "-X",
+    "-A",
+    "-e",
+    "--output",
+    "--header",
+    "--data",
+    "--request",
+    "--user-agent",
+    "--referer",
+    "--post-data",
+    "--post-file",
+    "--output-document",
+}
 # The reviewed payload vocabulary is independent of the per-row digest
 # manifest. Adding a new literal identifier requires an explicit scrub review.
 TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_.@+-]*")
@@ -116,8 +156,70 @@ def strings(value: object):
             yield from strings(item)
 
 
+def synthetic_network_operands(value: str) -> bool:
+    """Check identity and endpoint operands for network clients as one class."""
+
+    def approved_endpoint(word: str) -> bool:
+        if "://" not in word and word.count(":") > 1:
+            return False
+        try:
+            parsed = urlsplit(word if "://" in word else "//" + word)
+            return parsed.hostname in ALLOWED_HOSTS and (not parsed.username or parsed.username in ALLOWED_USERS)
+        except ValueError:
+            return False
+
+    for match in NETWORK_CLIENT.finditer(value):
+        fragment = match.group(1)
+        if match.end() < len(value) and value[match.end()] in "<>":
+            fragment = re.sub(r"\s+\d+$", "", fragment)
+        words = [word.strip("\"'()") for word in NETWORK_WORD.findall(fragment)]
+        index = 0
+        while index < len(words):
+            word = words[index]
+            option, separator, inline = word.partition("=")
+            if option in NETWORK_ACCOUNT_OPTIONS:
+                account = inline if separator else (words[index + 1] if index + 1 < len(words) else "")
+                if account not in ALLOWED_ACCOUNTS | ALLOWED_USERS:
+                    return False
+                index += 1 if separator else 2
+                continue
+            if word.startswith("-u") and not word.startswith("--"):
+                if word[2:] not in ALLOWED_ACCOUNTS | ALLOWED_USERS:
+                    return False
+                index += 1
+                continue
+            if word.startswith("-x") and not word.startswith("--"):
+                endpoint = word[2:] or (words[index + 1] if index + 1 < len(words) else "")
+                if not approved_endpoint(endpoint):
+                    return False
+                index += 1 if word[2:] else 2
+                continue
+            if option in NETWORK_ENDPOINT_OPTIONS:
+                endpoint = inline if separator else (words[index + 1] if index + 1 < len(words) else "")
+                if not approved_endpoint(endpoint):
+                    return False
+                index += 1 if separator else 2
+                continue
+            if option in NETWORK_VALUE_OPTIONS:
+                index += 1 if separator else 2
+                continue
+            if word.startswith("-") or word in {"", "//"}:
+                index += 1
+                continue
+            # Every remaining operand is an endpoint. A scheme-free spelling
+            # must be parsed as an authority, not as a URL scheme.
+            if not approved_endpoint(word):
+                return False
+            index += 1
+    return True
+
+
 def synthetic_operands(row: dict) -> bool:
     for value in strings({key: row.get(key) for key in ("command", "args")}):
+        # The public fixture is an ASCII synthetic language. Non-ASCII words
+        # cannot be silently omitted by the reviewed literal vocabulary.
+        if not value.isascii() or not synthetic_network_operands(value):
+            return False
         without_urls = re.sub(r"https?://example\.invalid(?:/[A-Za-z0-9._/-]*)?", "example.invalid", value)
         for match in ABSOLUTE_PATH.finditer(without_urls):
             path = match.group()
@@ -183,6 +285,15 @@ def check(path: Path, approved_path: Path = APPROVED) -> list[str]:
         seen.add(row_id)
         if set(row) - ALLOWED_KEYS:
             errors.append(f"line {number}: private metadata fields")
+        kind, tool, cc_tool = row.get("kind"), row.get("tool_name"), row.get("cc_tool")
+        if (
+            not isinstance(kind, str)
+            or kind not in ALLOWED_KINDS
+            or not isinstance(tool, str)
+            or tool not in ALLOWED_TOOLS
+            or ("cc_tool" in row and (not isinstance(cc_tool, str) or cc_tool not in ALLOWED_CC_TOOLS))
+        ):
+            errors.append(f"line {number}: unapproved public tool")
         if (
             not isinstance(row.get("expected"), dict)
             or set(row["expected"]) != EXPECTED_CELLS
