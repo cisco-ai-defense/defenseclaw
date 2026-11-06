@@ -118,7 +118,25 @@ class RedOn108Test(unittest.TestCase):
         unclassified = "--- FAIL: TestGAP0607Sample (0.00s)\n    sample_test.go:12: fixture bytes unavailable\n"
         self.assertEqual(classify_test_result(command, 1, missing), "COMPILE_ONLY")
         self.assertEqual(classify_test_result(command, 1, assertion), "BEHAVIOR_RED")
-        self.assertEqual(classify_test_result(command, 1, unclassified), "UNCLASSIFIED_FAIL")
+        self.assertEqual(classify_test_result(command, 1, unclassified), "COMPILE_ONLY")
+
+    def test_go_setup_message_is_not_behavior_evidence(self):
+        from scripts.red_on_108 import classify_test_result
+
+        command = ["nice", "-n", "15", "go", "test", "./internal/example"]
+        setup = (
+            "--- FAIL: TestGAP0607Sample (0.00s)\n"
+            "    sample_test.go:12: fixture setup got empty bytes, want sample bytes\n"
+        )
+        unrelated = (
+            "--- FAIL: TestGAP0607Sample (0.00s)\n"
+            "    sample_test.go:12: dependency setup failed\n"
+            "    helper.go:9: got allow, want block\n"
+        )
+        self.assertEqual(classify_test_result(command, 1, setup), "COMPILE_ONLY")
+        self.assertEqual(classify_test_result(command, 1, unrelated), "COMPILE_ONLY")
+        helper_only = "--- FAIL: TestGAP0607Sample (0.00s)\n    helper.go:9: got allow, want block\n"
+        self.assertEqual(classify_test_result(command, 1, helper_only), "UNCLASSIFIED_FAIL")
 
     def test_go_fixtures_match_the_test_commit_on_prior_release(self):
         from tempfile import TemporaryDirectory
@@ -137,11 +155,28 @@ class RedOn108Test(unittest.TestCase):
             fixture.mkdir(parents=True)
             (fixture / "existing.json").write_text("base", encoding="utf-8")
             (fixture / "removed.json").write_text("removed", encoding="utf-8")
+            alternate = repo / "internal/example/fixtures/sample.json"
+            alternate.parent.mkdir(parents=True)
+            existing_asset = repo / "internal/example/assets/existing.json"
+            existing_asset.parent.mkdir(parents=True)
+            existing_asset.write_text("base asset", encoding="utf-8")
+            source = repo / "internal/example/subpkg/lib.go"
+            source.parent.mkdir(parents=True)
+            source.write_text("package subpkg\n", encoding="utf-8")
             git("add", ".")
             git("commit", "-q", "-m", "base")
             base = git("rev-parse", "HEAD")
             (fixture / "existing.json").write_text("updated", encoding="utf-8")
             (fixture / "new.json").write_text("new", encoding="utf-8")
+            alternate.write_text("sample", encoding="utf-8")
+            extra = repo / "internal/example/assets/sample.json"
+            extra.parent.mkdir(parents=True, exist_ok=True)
+            extra.write_text("asset", encoding="utf-8")
+            existing_asset.write_text("updated asset", encoding="utf-8")
+            source.write_text("package subpkg\n// later product source\n", encoding="utf-8")
+            nested_asset = repo / "internal/example/subpkg/assets/new.json"
+            nested_asset.parent.mkdir(parents=True)
+            nested_asset.write_text("nested product asset", encoding="utf-8")
             git("rm", "-q", "internal/example/testdata/removed.json")
             git("add", ".")
             git("commit", "-q", "-m", "fix(GAP-0607): add test fixture")
@@ -152,6 +187,11 @@ class RedOn108Test(unittest.TestCase):
                 overlay_go_fixtures(repo, prior, commit, "internal/example")
                 self.assertEqual((prior / "internal/example/testdata/new.json").read_text(), "new")
                 self.assertEqual((prior / "internal/example/testdata/existing.json").read_text(), "updated")
+                self.assertEqual((prior / "internal/example/fixtures/sample.json").read_text(), "sample")
+                self.assertEqual((prior / "internal/example/assets/sample.json").read_text(), "asset")
+                self.assertEqual((prior / "internal/example/assets/existing.json").read_text(), "updated asset")
+                self.assertEqual((prior / "internal/example/subpkg/lib.go").read_text(), "package subpkg\n")
+                self.assertFalse((prior / "internal/example/subpkg/assets/new.json").exists())
                 self.assertFalse((prior / "internal/example/testdata/removed.json").exists())
                 git("rm", "-qr", "internal/example/testdata")
                 git("commit", "-q", "-m", "fix(GAP-0607): remove old fixtures")

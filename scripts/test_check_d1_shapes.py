@@ -25,6 +25,14 @@ NEARBY_COMMANDS = (
     "git config user.name sampleacct7",
     "git -c user.email=sampleacct7@example.invalid status",
     "GIT_AUTHOR_NAME=sampleacct7 git status",
+    "curl testbed:80",
+    "curl --user testbed testbed:80",
+    "curl --proxy=testbed https://example.invalid/resource",
+    "curl --url=testbed",
+    "curl -xtestbed https://example.invalid/resource",
+    "wget testbed",
+    "curl αβγ",
+    "curl --user αβγ example.invalid",
 )
 
 
@@ -43,6 +51,18 @@ class D1ShapeScrubTest(unittest.TestCase):
             "git config user.name testuser",
             "git -c user.email=testuser@example.invalid status",
             "GIT_AUTHOR_NAME=testuser git status",
+        ):
+            with self.subTest(command=command):
+                self.assertTrue(synthetic_operands({"command": command}))
+
+    def test_synthetic_network_twins_are_allowed(self):
+        for command in (
+            "curl -fsSL https://example.invalid/resource",
+            "curl --user testuser example.invalid:80",
+            "curl --proxy=example.invalid https://example.invalid/resource",
+            "curl --url=example.invalid",
+            "curl -xexample.invalid https://example.invalid/resource",
+            "wget -O sample https://example.invalid/resource",
         ):
             with self.subTest(command=command):
                 self.assertTrue(synthetic_operands({"command": command}))
@@ -115,6 +135,18 @@ class D1ShapeScrubTest(unittest.TestCase):
             write_rows(corpus, rows)
             manifest.write_text("".join(f"{row['id']}\t{payload_digest(row)}\n" for row in rows), encoding="utf-8")
             self.assertIn("unreviewed public vocabulary", check(corpus, manifest))
+
+    def test_tool_metadata_requires_review_with_updated_manifest(self):
+        from scripts.check_d1_shapes import payload_digest
+
+        rows = [json.loads(line) for line in CORPUS.read_text(encoding="utf-8").splitlines()]
+        rows[29]["tool_name"] = "curl testbed"
+        with TemporaryDirectory() as temporary:
+            corpus = Path(temporary) / "d1.jsonl"
+            manifest = Path(temporary) / "approved.tsv"
+            write_rows(corpus, rows)
+            manifest.write_text("".join(f"{row['id']}\t{payload_digest(row)}\n" for row in rows), encoding="utf-8")
+            self.assertIn("line 30: unapproved public tool", check(corpus, manifest))
 
 
 if __name__ == "__main__":

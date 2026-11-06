@@ -103,17 +103,22 @@ def classify_test_result(command: list[str], returncode: int, output: str) -> st
     )
     if any(marker in output.lower() for marker in infrastructure):
         return "COMPILE_ONLY"
+    if re.search(r"\b(?:setup|fixture|initialization|testmain)\b", output, re.IGNORECASE):
+        return "COMPILE_ONLY"
     if "go" in command and "--- FAIL:" in output:
-        # A Go FAIL marker also follows setup errors inside a test. Only a
-        # concrete before/after assertion is evidence of changed behaviour.
+        # A Go FAIL marker also follows setup errors inside a test. A verdict
+        # assertion must be emitted from a test source line, not a log message
+        # from a helper or another package.
         assertions = (
             r"\bgot\b[^\n]{0,240}\bwant\b",
             r"\bwant\b[^\n]{0,240}\bgot\b",
             r"\bexpected\b[^\n]{0,240}\b(?:got|observed|actual)\b",
             r"\b(?:got|observed|actual)\b[^\n]{0,240}\bexpected\b",
         )
-        if any(re.search(pattern, output, re.IGNORECASE) for pattern in assertions):
-            return "BEHAVIOR_RED"
+        for line in output.splitlines():
+            match = re.match(r"^\s+[^\s:]+_test\.go:\d+:\s+(.+)$", line)
+            if match and any(re.search(pattern, match.group(1), re.IGNORECASE) for pattern in assertions):
+                return "BEHAVIOR_RED"
         return "UNCLASSIFIED_FAIL"
     if "pytest" in command and (
         "AssertionError" in output or "Failed: DID NOT RAISE" in output or re.search(r"(?m)^E\s+assert\b", output)
@@ -123,29 +128,48 @@ def classify_test_result(command: list[str], returncode: int, output: str) -> st
 
 
 def overlay_go_fixtures(repo: Path, worktree: Path, commit: str, directory: str) -> None:
-    """Run an old product with the test commit's complete package fixtures."""
-    names = git(repo, "ls-tree", "-r", "--name-only", commit, "--", f"{directory}/testdata")
-    if names:
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                str(worktree),
-                "restore",
-                "--source",
-                commit,
-                "--staged",
-                "--worktree",
-                "--",
-                f"{directory}/testdata",
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-        )
-    else:
-        path = worktree / directory / "testdata"
-        if path.is_dir():
+    """Use the test commit's package fixtures with the old product sources."""
+    current = set(git(repo, "ls-tree", "-r", "--name-only", commit, "--", directory).splitlines())
+    prior = set(git(worktree, "ls-tree", "-r", "--name-only", "HEAD", "--", directory).splitlines())
+    fixture_dirs = {"testdata", "fixtures", "testfixtures", "test_fixtures", "golden", "goldens"}
+    source_suffixes = {".go", ".py", ".sh", ".js", ".ts", ".ps1", ".c", ".h", ".s"}
+
+    def fixture_root(name: str) -> Path | None:
+        relative = Path(name).relative_to(directory)
+        for index, part in enumerate(relative.parts[:-1]):
+            if part in fixture_dirs:
+                return Path(directory, *relative.parts[: index + 1])
+        return None
+
+    subpackages = {
+        Path(name).parent
+        for name in current | prior
+        if name.endswith(".go") and Path(name).parent != Path(directory) and fixture_root(name) is None
+    }
+
+    def in_package(name: str) -> bool:
+        path = Path(name)
+        return not any(path.is_relative_to(package) for package in subpackages)
+
+    current = {name for name in current if in_package(name)}
+    prior = {name for name in prior if in_package(name)}
+
+    # Rebuild every test-owned fixture tree, including deletions. New non-code
+    # assets outside those conventional trees may also be test dependencies.
+    for root in {root for name in current | prior if (root := fixture_root(name)) is not None}:
+        path = worktree / root
+        if path.is_symlink():
+            path.unlink()
+        elif path.is_dir():
             shutil.rmtree(path)
+    for name in sorted(current):
+        if fixture_root(name) is None and Path(name).suffix in source_suffixes:
+            continue
+        target = worktree / name
+        if not target.resolve(strict=False).is_relative_to(worktree.resolve()) or target.is_symlink():
+            raise ValueError(f"fixture path escapes audit worktree: {name}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(subprocess.check_output(["git", "-C", str(repo), "show", f"{commit}:{name}"]))
 
 
 def run_one(repo: Path, worktree: Path, commit: str, files: list[str], tests: list[str], base: str) -> str:
