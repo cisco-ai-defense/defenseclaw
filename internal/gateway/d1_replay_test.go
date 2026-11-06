@@ -237,6 +237,18 @@ func d1CellLimit(t *testing.T) time.Duration {
 	return limit
 }
 
+// d1TimedOutRows reads DC_D1_TIMEOUT_ROWS, comma-separated row IDs whose
+// evaluation outlived the cell limit in an earlier run.
+func d1TimedOutRows() map[string]bool {
+	rows := make(map[string]bool)
+	for _, id := range strings.Split(os.Getenv("DC_D1_TIMEOUT_ROWS"), ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			rows[id] = true
+		}
+	}
+	return rows
+}
+
 // d1EvaluateBounded returns a timeout verdict when the evaluation outlives
 // limit. The evaluation keeps running in its goroutine until the test binary
 // exits; the replay fails on the timeout cell either way.
@@ -269,7 +281,9 @@ func d1Replay(t *testing.T, rows []d1ReplayRow, output *os.File, checkExpected b
 	pending := d1PendingProductDecisions()
 	seenPending := make(map[string]bool)
 	cellLimit := d1CellLimit(t)
+	timedOutRows := d1TimedOutRows()
 	for _, row := range rows {
+		rowTimedOut := timedOutRows[row.ID]
 		for _, connector := range []string{"claudecode", "codex"} {
 			for _, managed := range []bool{false, true} {
 				cell := connector + "/oss"
@@ -277,10 +291,16 @@ func d1Replay(t *testing.T, rows []d1ReplayRow, output *os.File, checkExpected b
 					cell = connector + "/managed-balanced"
 				}
 				var verdict d1ReplayVerdict
-				if checkExpected {
+				switch {
+				case checkExpected:
 					verdict = d1Evaluate(t, apis[connector], row, connector, managed, home, cwd)
-				} else {
+				case rowTimedOut:
+					// Not evaluated again: each run would leave one more
+					// evaluator running.
+					verdict = d1ReplayVerdict{Decision: "timeout", RuleID: "-"}
+				default:
 					verdict = d1EvaluateBounded(t, apis[connector], row, connector, managed, home, cwd, cellLimit)
+					rowTimedOut = verdict.Decision == "timeout"
 				}
 				if output != nil {
 					if _, err := fmt.Fprintf(output, "%s\t%s\t%s\t%s\n", row.ID, cell, verdict.Decision, verdict.RuleID); err != nil {
@@ -299,6 +319,14 @@ func d1Replay(t *testing.T, rows []d1ReplayRow, output *os.File, checkExpected b
 					t.Errorf("D1 %s %s: evaluation %s", row.ID, cell, verdict.Decision)
 				}
 			}
+		}
+		// An evaluator that outlived its limit keeps running and allocating
+		// (GAP-0700 reached the host memory limit), so the replay stops
+		// after its row. A rerun lists the row in DC_D1_TIMEOUT_ROWS, which
+		// records it as timeout without evaluating it; d1diff fails that
+		// cell unless the owner ratified it.
+		if rowTimedOut && !timedOutRows[row.ID] {
+			t.Fatalf("D1 %s: evaluation did not return within %s; rerun with the row in DC_D1_TIMEOUT_ROWS", row.ID, cellLimit)
 		}
 	}
 	if checkExpected {
