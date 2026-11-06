@@ -172,17 +172,13 @@ func (w *InstallWatcher) mcpFailedFromLastRead(q MCPAdmissionQuery) MCPAdmission
 // a structured identity. A versioned path can be decoded directly. An older
 // path is never split to infer project scope from raw home or name text.
 func mcpFailedSnapshotServesQuery(path string, row *audit.SnapshotRow, q MCPAdmissionQuery) bool {
+	if identity, ok := mcpStoredSnapshotIdentity(path, row); ok {
+		return mcpServerServesQuery(identity.server(), q)
+	}
 	var hashes map[string]string
 	if row != nil && json.Unmarshal([]byte(row.ConfigHashes), &hashes) == nil {
-		if encoded, ok := hashes[mcpSnapshotIdentityKey]; ok {
-			var identity mcpSnapshotIdentity
-			if json.Unmarshal([]byte(encoded), &identity) != nil || identity.Name == "" ||
-				row.ContentHash == "" || hashes["mcp.servers."+identity.Name] != row.ContentHash {
-				return false
-			}
-			server := identity.server()
-			return (path == MCPEventPath(server) || path == legacyMCPEventPath(server)) &&
-				mcpServerServesQuery(server, q)
+		if _, ok := hashes[mcpSnapshotIdentityKey]; ok {
+			return false
 		}
 		name := ""
 		hasStoredName := false
@@ -199,8 +195,11 @@ func mcpFailedSnapshotServesQuery(path string, row *audit.SnapshotRow, q MCPAdmi
 			}
 		}
 		if name != "" {
+			if path == name {
+				return config.SameMCPToolServer(q.Connector, name, q.Server)
+			}
 			if identity, ok := decodeMCPEventPath(path); ok {
-				return identity.Name == name && mcpServerServesQuery(identity.server(), q)
+				return identity.Name == name && mcpSnapshotPathServesQuery(path, q)
 			}
 			return mcpLegacyNamedPathServesQuery(path, name, q)
 		}
@@ -208,11 +207,13 @@ func mcpFailedSnapshotServesQuery(path string, row *audit.SnapshotRow, q MCPAdmi
 			return false
 		}
 	}
-	return mcpSnapshotPathServesQuery(path, q)
+	// A path-only row has no provenance. The entire key is its old literal
+	// name, even if the bytes also decode as a versioned tuple.
+	return config.SameMCPToolServer(q.Connector, path, q.Server)
 }
 
-// mcpSnapshotPathServesQuery also handles old path-only rows. Their entire
-// key is a server name; punctuation is never interpreted as a scope marker.
+// mcpSnapshotPathServesQuery matches a versioned path whose stored server
+// name has already been checked against the decoded name.
 func mcpSnapshotPathServesQuery(path string, q MCPAdmissionQuery) bool {
 	if identity, ok := decodeMCPEventPath(path); ok {
 		return mcpServerServesQuery(identity.server(), q)

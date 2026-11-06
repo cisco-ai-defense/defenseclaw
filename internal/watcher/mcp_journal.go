@@ -93,6 +93,22 @@ func MCPAccountJournalServes(key string, q MCPAdmissionQuery) bool {
 	return true
 }
 
+// MCPAccountJournalServesSnapshot uses the identity bound to a stored
+// snapshot when an older journal key has more than one possible scope. The
+// path-only matcher cannot distinguish a project marker from literal home
+// text without that evidence.
+func MCPAccountJournalServesSnapshot(key string, snapshot *audit.SnapshotRow, q MCPAdmissionQuery) bool {
+	if identity, ok := mcpStoredSnapshotIdentity(key, snapshot); ok {
+		return identity.Connector != "" && identity.Home != "" && mcpServerServesQuery(identity.server(), q)
+	}
+	if snapshot != nil {
+		if _, ok := decodeMCPEventPath(key); ok {
+			return config.SameMCPToolServer(q.Connector, key, q.Server)
+		}
+	}
+	return MCPAccountJournalServes(key, q)
+}
+
 // migrateLegacyMCPJournal moves an account action before a versioned
 // admission writes its verdict. The old snapshot must identify the same
 // scope; otherwise the action stays on its old key. A current action is
@@ -109,8 +125,18 @@ func (w *InstallWatcher) migrateLegacyMCPJournal(evt InstallEvent) error {
 	server := identity.server()
 	oldPath := legacyMCPEventPath(server)
 	oldSnapshot, err := w.store.GetTargetSnapshot(string(InstallMCP), oldPath)
-	if err != nil || !mcpLegacySnapshotMatchesServer(oldPath, oldSnapshot, server) {
+	if err != nil {
 		return nil
+	}
+	if !mcpLegacySnapshotCanMove(oldPath, oldSnapshot, server, "") {
+		full, err := w.lookupMCPServer(evt)
+		if err != nil {
+			return nil
+		}
+		hash, err := mcpDefinitionHash(*full)
+		if err != nil || !mcpLegacySnapshotCanMove(oldPath, oldSnapshot, *full, hash) {
+			return nil
+		}
 	}
 	scope := w.journalScope(w.eventConnector(evt))
 	old, err := w.store.GetActionForConnector(string(InstallMCP), oldPath, scope)
