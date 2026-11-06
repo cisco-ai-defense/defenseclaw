@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGAP0534NestedProtectedTreeReach(t *testing.T) {
@@ -95,4 +96,61 @@ func TestGAP0534RecoveredTextScanBeyondEarlierLimit(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGAP0534LargeRecoveredTextBounded(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	state := filepath.Join(home, ".defenseclaw")
+	for _, dir := range []string{cwd, state} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var text strings.Builder
+	text.WriteString("Write-Output $(.\\a[1]<#x#>); Set-Content -Path ~/project/output -Value x #")
+	for i := 0; i < 50000; i++ {
+		fmt.Fprintf(&text, " ordinary%d", i)
+	}
+	started := time.Now()
+	if protectedReachFromTextWithStatePrepared(text.String(), cwd, home, state, nil, filepath.Join(home, ".ssh"), NewTargetMemo()) {
+		t.Fatal("ordinary text graded as protected")
+	}
+	if elapsed := time.Since(started); elapsed > 3500*time.Millisecond {
+		t.Errorf("ordinary recovery scan took %v, exceeding the hook answer window", elapsed)
+	}
+	text.WriteString("; Set-Content -Path ~/.defenseclaw/config.yaml -Value x")
+	if !protectedReachFromTextWithStatePrepared(text.String(), cwd, home, state, nil, filepath.Join(home, ".ssh"), NewTargetMemo()) {
+		t.Fatal("protected name after ordinary text was not reached")
+	}
+}
+
+func TestGAP0534BatchedMissingLeavesKeepNamedAlias(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	state := filepath.Join(home, ".defenseclaw")
+	for _, dir := range []string{cwd, state} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(cwd, "linked-config"), filepath.Join(state, "config.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	var text strings.Builder
+	text.WriteString("Set-Content -Path ~/project/output -Value x #")
+	for i := 0; i < 1000; i++ {
+		fmt.Fprintf(&text, " ordinary%d", i)
+	}
+	check := func(command string, want bool) {
+		t.Helper()
+		got := protectedReachFromTextWithStatePrepared(command, cwd, home, state, nil, filepath.Join(home, ".ssh"), NewTargetMemo())
+		if got != want {
+			t.Errorf("protected reach = %t, want %t", got, want)
+		}
+	}
+	ordinary := text.String()
+	check(ordinary, false)
+	check(ordinary+"; Set-Content -Path linked-config -Value x", true)
+	check(ordinary+"; Set-Content -Path "+filepath.Join(state, "policies")+" -Value x", true)
 }

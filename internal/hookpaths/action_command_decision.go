@@ -73,6 +73,19 @@ func (m *TargetMemo) ActionCommandDecisionInShell(command, cwd, home string, fac
 }
 
 func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect, posixShell bool, facts map[string]string, memo *TargetMemo) string {
+	if memo != nil && facts == nil {
+		key := actionDecisionMemoKey{command: command, cwd: cwd, home: home, dialect: string(dialect), posixShell: posixShell}
+		if answer, ok := memo.actionDecision(key); ok {
+			return answer
+		}
+		answer := actionTargetDecisionUncached(command, cwd, home, dialect, posixShell, facts, memo)
+		memo.storeActionDecision(key, answer)
+		return answer
+	}
+	return actionTargetDecisionUncached(command, cwd, home, dialect, posixShell, facts, memo)
+}
+
+func actionTargetDecisionUncached(command, cwd, home string, dialect actionfacts.Dialect, posixShell bool, facts map[string]string, memo *TargetMemo) string {
 	if safe, protected := noDereferenceTouchStatus(command, cwd, home); protected {
 		return "protected-target"
 	} else if safe {

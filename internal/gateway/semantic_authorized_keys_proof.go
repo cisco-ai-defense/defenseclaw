@@ -1400,9 +1400,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// earlier mention of a replaced value is not a write target.
 		return false
 	}
-	decision := request.targetMemo.ActionCommandDecisionInShell(input.Command, input.CWD, facts.ActiveHome, globFacts, trustedPOSIXShellCall(input, facts))
+	decision := ""
 	if input.DialectHint != "" {
 		decision = request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
+	} else {
+		decision = request.targetMemo.ActionCommandDecisionInShell(input.Command, input.CWD, facts.ActiveHome, globFacts, trustedPOSIXShellCall(input, facts))
 	}
 	if decision == hookpaths.ProtectedTargetDecision {
 		return named()

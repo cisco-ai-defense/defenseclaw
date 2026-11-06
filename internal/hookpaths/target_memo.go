@@ -45,6 +45,19 @@ type TargetMemo struct {
 	// emptyReachRoots records a complete local empty-root check for this
 	// evaluation, so ordinary candidates share the same negative proof.
 	emptyReachRoots map[string]bool
+	// reachParentMissing reuses the local parent answer across recovered
+	// words in one evaluation.
+	reachParentMissing map[string]bool
+	// reachDirHits and reachDirs reuse a complete local directory listing
+	// when many recovered words share a parent.
+	reachDirHits map[string]uint8
+	reachDirs    map[string]reachDirNames
+	// reachParentIdentity records protected directory identities for
+	// missing-leaf checks, including bind-mounted parents.
+	reachParentIdentity map[reachParentKey]reachParentProof
+	// actionDecisions reuses the whole-command grade when several rules
+	// judge the same call with the same dialect and no client glob facts.
+	actionDecisions map[actionDecisionMemoKey]string
 	// work counts the path components the memo walked on the file system
 	// and the candidate checks it computed (Work); candidates counts the
 	// Windows candidate checks among them (WorkParts).
@@ -154,6 +167,29 @@ type walkState struct {
 type memoWordKey struct {
 	candidate, cwd, home    string
 	stateOnly, sshDirectory bool
+}
+
+type actionDecisionMemoKey struct {
+	command, cwd, home, dialect string
+	posixShell                  bool
+}
+
+func (m *TargetMemo) actionDecision(key actionDecisionMemoKey) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	answer, ok := m.actionDecisions[key]
+	return answer, ok
+}
+
+func (m *TargetMemo) storeActionDecision(key actionDecisionMemoKey, answer string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.actionDecisions == nil {
+		m.actionDecisions = make(map[actionDecisionMemoKey]string)
+	}
+	if len(m.actionDecisions) < maxTargetMemoEntries {
+		m.actionDecisions[key] = answer
+	}
 }
 
 func (m *TargetMemo) prefix(key string) (walkState, bool) {

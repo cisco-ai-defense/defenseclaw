@@ -4,9 +4,11 @@
 package hookpaths
 
 import (
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -45,6 +47,199 @@ type reachNames struct {
 	directories []string
 	trees       []string
 	hasAlias    bool
+}
+
+type reachDirNames struct {
+	names    map[string]struct{}
+	complete bool
+}
+
+type reachParentKey struct {
+	parent, home string
+	sshOnly      bool
+}
+
+type reachParentProof struct {
+	tree  bool
+	files map[string]struct{}
+	dirs  map[string]struct{}
+	trees map[string]struct{}
+}
+
+// A missing leaf can still be placed through a bind-mounted protected
+// directory. Compare the parent identity with protected tree roots and file
+// parents once per evaluation before treating that leaf as ordinary.
+func (m *TargetMemo) protectedReachMissingParent(parent, home string, sshOnly bool, names reachNames) (reachParentProof, bool) {
+	key := reachParentKey{parent, home, sshOnly}
+	if m != nil {
+		m.mu.Lock()
+		proof, ok := m.reachParentIdentity[key]
+		m.mu.Unlock()
+		if ok {
+			return proof, true
+		}
+	}
+	parentInfo, err := PathStat(parent)
+	if err != nil {
+		return reachParentProof{}, false
+	}
+	proof := reachParentProof{files: make(map[string]struct{}), dirs: make(map[string]struct{}), trees: make(map[string]struct{})}
+	resolvedParent, resolved := m.resolveWriteTarget(parent)
+	if !resolved {
+		return reachParentProof{}, false
+	}
+	type statAnswer struct {
+		info os.FileInfo
+		err  error
+	}
+	answers := make(map[string]statAnswer)
+	read := func(path string) (os.FileInfo, error) {
+		if answer, ok := answers[path]; ok {
+			return answer.info, answer.err
+		}
+		info, err := PathStat(path)
+		answers[path] = statAnswer{info, err}
+		return info, err
+	}
+	for _, tree := range names.trees {
+		info, err := read(tree)
+		if err != nil && !os.IsNotExist(err) {
+			return reachParentProof{}, false
+		}
+		proof.tree = proof.tree || pathAtOrUnder(parent, tree) || pathAtOrUnder(resolvedParent, tree) ||
+			err == nil && os.SameFile(parentInfo, info)
+		if info, err := read(filepath.Dir(tree)); err == nil && os.SameFile(parentInfo, info) {
+			proof.trees[filepath.Base(tree)] = struct{}{}
+		} else if err != nil && !os.IsNotExist(err) {
+			return reachParentProof{}, false
+		}
+	}
+	for _, dir := range names.directories {
+		info, err := read(filepath.Dir(dir))
+		if err != nil && !os.IsNotExist(err) {
+			return reachParentProof{}, false
+		}
+		if err == nil && os.SameFile(parentInfo, info) {
+			proof.dirs[filepath.Base(dir)] = struct{}{}
+		}
+	}
+	for _, file := range names.files {
+		info, err := read(filepath.Dir(file))
+		if err != nil && !os.IsNotExist(err) {
+			return reachParentProof{}, false
+		}
+		if err == nil && os.SameFile(parentInfo, info) {
+			proof.files[filepath.Base(file)] = struct{}{}
+		}
+	}
+	if m != nil {
+		m.mu.Lock()
+		if m.reachParentIdentity == nil {
+			m.reachParentIdentity = make(map[reachParentKey]reachParentProof)
+		}
+		if len(m.reachParentIdentity) < 512 {
+			m.reachParentIdentity[key] = proof
+		}
+		m.mu.Unlock()
+	}
+	return proof, true
+}
+
+// A complete parent listing and its protected identity proof can dismiss a
+// missing candidate before the general two-sided path comparison. A present
+// entry, named leaf, or unanswered parent always takes that comparison.
+func (m *TargetMemo) protectedReachOrdinaryMissing(target, home string) bool {
+	if m == nil || !filepath.IsAbs(target) || !filepath.IsAbs(home) || SharePath(target) || SharePath(home) {
+		return false
+	}
+	parent, leaf := filepath.Dir(target), filepath.Base(target)
+	if !m.protectedReachDirMiss(parent, leaf) {
+		return false
+	}
+	proof, complete := m.protectedReachMissingParent(parent, home, false, m.protectedReachNames(home, false))
+	if !complete || proof.tree {
+		return false
+	}
+	if _, named := proof.files[leaf]; named {
+		return false
+	}
+	if _, named := proof.dirs[leaf]; named {
+		return false
+	}
+	_, named := proof.trees[leaf]
+	return !named
+}
+
+// A complete local directory listing proves that an unlisted leaf has no
+// file identity. Read it only when several candidates share the parent;
+// large or unanswered directories continue through the usual path reader.
+func (m *TargetMemo) protectedReachDirMiss(parent, leaf string) bool {
+	if m == nil || runtime.GOOS != "linux" || SharePath(parent) {
+		return false
+	}
+	m.mu.Lock()
+	listing, cached := m.reachDirs[parent]
+	if !cached {
+		if len(m.reachDirs) >= 512 {
+			m.mu.Unlock()
+			return false
+		}
+		if m.reachDirHits == nil {
+			m.reachDirHits = make(map[string]uint8)
+		}
+		if len(m.reachDirHits) >= 512 && m.reachDirHits[parent] == 0 {
+			m.mu.Unlock()
+			return false
+		}
+		if m.reachDirHits[parent] < 64 {
+			m.reachDirHits[parent]++
+		}
+		if m.reachDirHits[parent] < 64 {
+			m.mu.Unlock()
+			return false
+		}
+	}
+	m.mu.Unlock()
+	if !cached {
+		listing = reachDirNames{}
+		if physical, ok := m.resolveWriteTarget(parent); ok && !SharePath(physical) {
+			if entry, err := PathLstat(physical); err == nil && entry.IsDir() {
+				if directory, err := os.Open(physical); err == nil {
+					var names []string
+					complete := false
+					for len(names) <= 4096 {
+						part, readErr := directory.Readdirnames(4097 - len(names))
+						names = append(names, part...)
+						if readErr == io.EOF {
+							complete = true
+							break
+						}
+						if readErr != nil || len(part) == 0 {
+							break
+						}
+					}
+					_ = directory.Close()
+					if complete && len(names) <= 4096 {
+						listing.names = make(map[string]struct{}, len(names))
+						for _, name := range names {
+							listing.names[name] = struct{}{}
+						}
+						listing.complete = true
+					}
+				}
+			}
+		}
+		m.mu.Lock()
+		if m.reachDirs == nil {
+			m.reachDirs = make(map[string]reachDirNames)
+		}
+		if len(m.reachDirs) < 512 {
+			m.reachDirs[parent] = listing
+		}
+		m.mu.Unlock()
+	}
+	_, exists := listing.names[leaf]
+	return listing.complete && !exists
 }
 
 func (s *reachNames) addFile(path string) {
@@ -352,6 +547,30 @@ func lexicalProtectedReach(target, home string, sshOnly bool) bool {
 	return false
 }
 
+func (m *TargetMemo) protectedReachParentMissing(parent string) bool {
+	if m != nil {
+		m.mu.Lock()
+		missing, ok := m.reachParentMissing[parent]
+		m.mu.Unlock()
+		if ok {
+			return missing
+		}
+	}
+	_, err := PathLstat(parent)
+	missing := os.IsNotExist(err)
+	if m != nil {
+		m.mu.Lock()
+		if m.reachParentMissing == nil {
+			m.reachParentMissing = make(map[string]bool)
+		}
+		if len(m.reachParentMissing) < maxTargetMemoEntries {
+			m.reachParentMissing[parent] = missing
+		}
+		m.mu.Unlock()
+	}
+	return missing
+}
+
 // An absent parent outside empty local protected roots has no current path
 // or file identity through which it could reach a protected entry. Keep the
 // full resolver whenever either root has contents, links, or an unknown read.
@@ -364,7 +583,7 @@ func (m *TargetMemo) protectedReachEmptyRootsMiss(target, home string, sshOnly b
 	if pathAtOrUnder(target, ssh) || !sshOnly && pathAtOrUnder(target, state) {
 		return false
 	}
-	if _, err := PathLstat(filepath.Dir(target)); !os.IsNotExist(err) {
+	if !m.protectedReachParentMissing(filepath.Dir(target)) {
 		return false
 	}
 	key := home
@@ -420,7 +639,7 @@ func (m *TargetMemo) protectedReachUncached(target, home string, sshOnly bool) G
 	// A linked protected entry keeps the full two-sided check, including a
 	// link whose physical destination has not been created yet.
 	if !names.hasAlias && !SharePath(target) {
-		if _, err := PathLstat(filepath.Dir(target)); os.IsNotExist(err) {
+		if m.protectedReachParentMissing(filepath.Dir(target)) {
 			return GradeNone
 		}
 	}

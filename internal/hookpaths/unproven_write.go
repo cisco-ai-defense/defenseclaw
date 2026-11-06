@@ -53,7 +53,6 @@ func IsUnprovenWriteTitle(title string) bool {
 }
 
 var (
-	unprovenPathToken  = lazyregexp.New(`[A-Za-z0-9_./~*?\[\]-]+`)
 	unprovenQuotedPath = []*regexp.Regexp{
 		regexp.MustCompile(`'([^']+)'`),
 		regexp.MustCompile(`"([^"]+)"`),
@@ -93,6 +92,22 @@ type unprovenParseBudget struct {
 	nodes   int
 	bounded bool
 	memo    *TargetMemo
+	reach   map[unprovenReachKey]bool
+}
+
+type unprovenReachKey struct{ command, cwd, home string }
+
+func (b *unprovenParseBudget) recoveredReach(command, cwd, home string) bool {
+	key := unprovenReachKey{command, cwd, home}
+	if reached, ok := b.reach[key]; ok {
+		return reached
+	}
+	reached := unprovenRecoveredProtectedReach(command, cwd, home, b.memo)
+	if b.reach == nil {
+		b.reach = make(map[unprovenReachKey]bool)
+	}
+	b.reach[key] = reached
+	return reached
 }
 
 func (b *unprovenParseBudget) visit() bool {
@@ -112,14 +127,14 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 		return ""
 	}
 	if len(command) > MaxPayloadBytes || len(command) > budget.bytes {
-		if unprovenRecoveredProtectedReach(command, cwd, home, budget.memo) {
+		if budget.recoveredReach(command, cwd, home) {
 			return "shell-parse-bound"
 		}
 		return "shell-parse-unreached"
 	}
 	budget.bytes -= len(command)
 	if depth >= 4 {
-		if unprovenRecoveredProtectedReach(command, cwd, home, budget.memo) {
+		if budget.recoveredReach(command, cwd, home) {
 			return "shell-parse-bound"
 		}
 		return "shell-parse-unreached"
@@ -154,7 +169,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 	}
 	reachable := false
 	called := calledFunctionsWithBudget(file, home, budget)
-	if budget.bounded && unprovenRecoveredProtectedReach(command, cwd, home, budget.memo) {
+	if budget.bounded && budget.recoveredReach(command, cwd, home) {
 		return "shell-parse-bound"
 	}
 	if budget.bounded {
@@ -163,7 +178,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 	reachText := command
 	if strings.Contains(command, "()") || strings.Contains(command, "function ") {
 		reachText = reachableShellWords(file, called, home, budget)
-		if budget.bounded && unprovenRecoveredProtectedReach(command, cwd, home, budget.memo) {
+		if budget.bounded && budget.recoveredReach(command, cwd, home) {
 			return "shell-parse-bound"
 		}
 		if budget.bounded {
@@ -442,7 +457,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 		}
 		return true
 	})
-	if reason == "" && budget.bounded && unprovenRecoveredProtectedReach(command, cwd, home, budget.memo) {
+	if reason == "" && budget.bounded && budget.recoveredReach(command, cwd, home) {
 		return "shell-parse-bound"
 	}
 	if reason == "" && budget.bounded {
@@ -456,21 +471,21 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unprovenParseBudget) (unknown, reached bool) {
 	if len(command) > MaxPayloadBytes || shellparse.TooDeep(command) || len(command) > budget.bytes {
 		budget.bounded = true
-		reached = unprovenRecoveredProtectedReach(command, cwd, home, budget.memo)
+		reached = budget.recoveredReach(command, cwd, home)
 		return reached, reached
 	}
 	budget.bytes -= len(command)
 	file, _ := syntax.NewParser(syntax.Variant(syntax.LangBash), syntax.RecoverErrors(8)).Parse(shellparse.Reader(command), "")
 	if file == nil {
-		reached = unprovenRecoveredProtectedReach(command, cwd, home, budget.memo)
+		reached = budget.recoveredReach(command, cwd, home)
 		return strings.Contains(command, ">") || unprovenWriter.MatchString(command) && reached, reached
 	}
 	protected := budget.memo.protectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
-	reach := protectedReachFromTextWithStatePrepared(command, cwd, home, filepath.Join(home, ".defenseclaw"), protected, ssh, budget.memo)
+	reach := budget.recoveredReach(command, cwd, home)
 	called := calledFunctionsWithBudget(file, home, budget)
 	if budget.bounded {
-		reach = reach || unprovenRecoveredProtectedReach(command, cwd, home, budget.memo)
+		reach = reach || budget.recoveredReach(command, cwd, home)
 		return reach, reach
 	}
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -506,7 +521,7 @@ func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unpro
 				// A resolved protected reach keeps the incomplete verdict;
 				// an ordinary target remains audit-only in balanced mode.
 				budget.bounded = true
-				if reach || unprovenRecoveredProtectedReach(command, cwd, home, budget.memo) ||
+				if reach || budget.recoveredReach(command, cwd, home) ||
 					prefix != command && protectedReachFromTextWithStatePrepared(prefix, cwd, home, filepath.Join(home, ".defenseclaw"), protected, ssh, budget.memo) {
 					unknown = true
 					return false
@@ -567,7 +582,7 @@ func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unpro
 		return !unknown
 	})
 	if budget.bounded && !reach {
-		reach = unprovenRecoveredProtectedReach(command, cwd, home, budget.memo)
+		reach = budget.recoveredReach(command, cwd, home)
 	}
 	return unknown || budget.bounded && reach, reach
 }
@@ -1829,7 +1844,11 @@ func protectedReachFromTextWithState(command, cwd, home, stateRoot string) bool 
 func protectedReachFromTextWithStatePrepared(command, cwd, home, stateRoot string, protected protectedFiles, ssh string, memo *TargetMemo) bool {
 	seen := map[string]bool{}
 	text := strings.ReplaceAll(strings.ReplaceAll(command, "${HOME}/", home+"/"), "$HOME/", home+"/")
-	for _, quoted := range unprovenQuotedPath {
+	batchMissing := stateRoot != "" && len(text) > 8192
+	for index, quoted := range unprovenQuotedPath {
+		if strings.IndexByte(text, []byte{'\'', '"'}[index]) < 0 {
+			continue
+		}
 		for rest := text; rest != ""; {
 			match := quoted.FindStringSubmatchIndex(rest)
 			if match == nil {
@@ -1837,13 +1856,17 @@ func protectedReachFromTextWithStatePrepared(command, cwd, home, stateRoot strin
 			}
 			candidate := rest[match[2]:match[3]]
 			rest = rest[match[1]:]
-			if len(candidate) > MaxWriteTargetPathBytes || unprovenPathToken.FindString(candidate) == candidate {
+			if len(candidate) > MaxWriteTargetPathBytes || unprovenWholePathToken(candidate) {
 				continue
 			}
 			if candidate == "~" || strings.HasPrefix(candidate, "~/") {
 				candidate = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(candidate, "~"), "/"))
 			}
-			if protectedReachTextPathWithState(OperandPath(candidate, cwd), protected, ssh, stateRoot, memo) {
+			path := OperandPath(candidate, cwd)
+			if batchMissing && memo.protectedReachOrdinaryMissing(path, home) {
+				continue
+			}
+			if protectedReachTextPathWithState(path, protected, ssh, stateRoot, memo) {
 				return true
 			}
 		}
@@ -1851,11 +1874,10 @@ func protectedReachFromTextWithStatePrepared(command, cwd, home, stateRoot strin
 	segmentStart, scanned := 0, 0
 	segmentHasWord, segmentHasDoubleDash := false, false
 	for offset := 0; offset < len(text); {
-		position := unprovenPathToken.FindStringIndex(text[offset:])
-		if position == nil {
+		start, end := nextUnprovenPathToken(text, offset)
+		if start < 0 {
 			break
 		}
-		start, end := offset+position[0], offset+position[1]
 		offset = end
 		for i := scanned; i < start; i++ {
 			switch text[i] {
@@ -1893,11 +1915,52 @@ func protectedReachFromTextWithStatePrepared(command, cwd, home, stateRoot strin
 			// A bare ~ is the home itself (GAP-1093).
 			token = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(token, "~"), "/"))
 		}
-		if protectedReachTextPathWithState(OperandPath(token, cwd), protected, ssh, stateRoot, memo) {
+		path := OperandPath(token, cwd)
+		if batchMissing && memo.protectedReachOrdinaryMissing(path, home) {
+			continue
+		}
+		if protectedReachTextPathWithState(path, protected, ssh, stateRoot, memo) {
 			return true
 		}
 	}
 	return false
+}
+
+func unprovenPathTokenByte(c byte) bool {
+	if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' {
+		return true
+	}
+	switch c {
+	case '_', '.', '/', '~', '*', '?', '[', ']', '-':
+		return true
+	}
+	return false
+}
+
+func unprovenWholePathToken(word string) bool {
+	if word == "" {
+		return false
+	}
+	for i := 0; i < len(word); i++ {
+		if !unprovenPathTokenByte(word[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func nextUnprovenPathToken(text string, offset int) (int, int) {
+	for offset < len(text) && !unprovenPathTokenByte(text[offset]) {
+		offset++
+	}
+	if offset == len(text) {
+		return -1, -1
+	}
+	end := offset + 1
+	for end < len(text) && unprovenPathTokenByte(text[end]) {
+		end++
+	}
+	return offset, end
 }
 
 func boundedProtectedGlobReach(pattern, cwd string, protected protectedFiles, ssh string) bool {
