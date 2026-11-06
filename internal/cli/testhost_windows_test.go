@@ -336,7 +336,8 @@ func snapshotTestMachineRegistry() map[string]string {
 // snapshotTestMachineState adds what a test could change outside the
 // registry to snapshot (g079 review F2): the run state and process of each
 // DefenseClaw service, and a fingerprint (kind, size, modification time) of
-// %ProgramData%\Cisco\DefenseClaw, the DefenseClaw-* staging and dc-*-test-*
+// every DefenseClaw* folder under %ProgramData%\Cisco and
+// %ProgramData%\Cisco\Cisco Secure Client, the DefenseClaw-* staging and dc-*-test-*
 // fixture folders at the top of %ProgramData% and of the system drive,
 // %WINDIR%\Logs\DefenseClaw* and %ProgramFiles%\Cisco\DefenseClaw*. While a
 // DefenseClaw service runs, its data folder and the lifecycle log folder are
@@ -357,7 +358,12 @@ func snapshotTestMachineState(snapshot map[string]string) {
 	if programData, err := winpath.TrustedProgramData(); err != nil {
 		snapshot["file %ProgramData%"] = "unresolved: " + err.Error()
 	} else {
-		fingerprintTestTree(snapshot, filepath.Join(programData, "Cisco", "DefenseClaw"), skip)
+		// Both profiles' DefenseClaw* folders: the state root, and its
+		// siblings DefenseClaw-Lifecycle (lifecycle.lock, the spool and
+		// bundle-store lock state, the lifecycle logs) and DefenseClaw-Cert
+		// (g079 review 2 R2a).
+		fingerprintTestEntries(snapshot, filepath.Join(programData, "Cisco"), defenseClaw, skip)
+		fingerprintTestEntries(snapshot, filepath.Join(programData, "Cisco", "Cisco Secure Client"), defenseClaw, skip)
 		fingerprintTestEntries(snapshot, programData, stagingOrFixture, skip)
 	}
 	if drive := os.Getenv("SystemDrive"); drive != "" {
