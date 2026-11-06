@@ -20,6 +20,9 @@ type declaredRedirectWalker struct {
 	paths     []string
 	steps     int
 	functions map[string]*syntax.Stmt
+	// exhausted is set when the step budget or the candidate bound ran out,
+	// so some redirect may not have been read with its known values.
+	exhausted bool
 }
 
 func newDeclaredRedirectWalker(file *syntax.File, cwd, home string) *declaredRedirectWalker {
@@ -49,6 +52,9 @@ func (w *declaredRedirectWalker) walkList(stmts []*syntax.Stmt, states []actionV
 			next = actionAppendValueCandidates(next, w.walkStmt(stmt, values, depth))
 		}
 		states = next
+		if actionKeptSaturated(states) {
+			w.exhausted = true
+		}
 		if len(states) == 0 {
 			break
 		}
@@ -57,7 +63,11 @@ func (w *declaredRedirectWalker) walkList(stmts []*syntax.Stmt, states []actionV
 }
 
 func (w *declaredRedirectWalker) walkStmt(stmt *syntax.Stmt, values actionValues, depth int) []actionValues {
-	if stmt == nil || depth > 32 || w.steps >= actionMaxValueSteps {
+	if stmt == nil {
+		return []actionValues{values}
+	}
+	if depth > 32 || w.steps >= actionMaxValueSteps {
+		w.exhausted = true
 		return []actionValues{values}
 	}
 	w.steps++
@@ -241,14 +251,15 @@ func declaredRedirectTruth(stmt *syntax.Stmt, home string) int {
 		}
 	case *syntax.BinaryCmd:
 		left := declaredRedirectTruth(command.X, home)
-		if command.Op == syntax.AndStmt {
+		switch command.Op {
+		case syntax.AndStmt:
 			if left < 0 {
 				return -1
 			}
 			if left > 0 {
 				return declaredRedirectTruth(command.Y, home)
 			}
-		} else if command.Op == syntax.OrStmt {
+		case syntax.OrStmt:
 			if left > 0 {
 				return 1
 			}
@@ -286,4 +297,48 @@ func (w *declaredRedirectWalker) walkFunction(body *syntax.Stmt, values actionVa
 		}
 	}
 	return result
+}
+
+// When the ordered walk ran out of budget, list every value that any
+// assignment in the command gives a redirect's variable. The client's link
+// proof then decides; an ordinary path stays ordinary.
+func (w *declaredRedirectWalker) anyAssignedValue(file *syntax.File) {
+	base := actionValues{"HOME": w.home, "PWD": w.cwd}
+	assigned := map[string][]string{}
+	total := 0
+	syntax.Walk(file, func(node syntax.Node) bool {
+		assign, ok := node.(*syntax.Assign)
+		if !ok || assign.Name == nil || assign.Value == nil || assign.Array != nil || assign.Index != nil || total >= 256 {
+			return true
+		}
+		if value, known := actionWordValue(assign.Value, base, w.cwd, w.home); known && value != "" {
+			name := assign.Name.Value
+			if !slices.Contains(assigned[name], value) {
+				assigned[name] = append(assigned[name], value)
+				total++
+			}
+		}
+		return true
+	})
+	if total == 0 {
+		return
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		redirect, ok := node.(*syntax.Redirect)
+		if !ok || redirect.Word == nil || !actionOutputRedirect(redirect.Op) || !wordExpandsParameter(redirect.Word) || len(w.paths) >= 512 {
+			return true
+		}
+		for name, list := range assigned {
+			for _, candidate := range list {
+				values := maps.Clone(base)
+				values[name] = candidate
+				if value, known := actionWordValue(redirect.Word, values, w.cwd, w.home); known && value != "" {
+					if path := OperandPath(value, w.cwd); !slices.Contains(w.paths, path) {
+						w.paths = append(w.paths, path)
+					}
+				}
+			}
+		}
+		return true
+	})
 }

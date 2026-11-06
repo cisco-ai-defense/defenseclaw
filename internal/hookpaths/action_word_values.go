@@ -35,6 +35,9 @@ func DeclaredRedirectWriteOperands(command, cwd, home string) []string {
 	}
 	walker := newDeclaredRedirectWalker(file, cwd, home)
 	walker.walkList(file.Stmts, []actionValues{{"HOME": home, "PWD": cwd}}, 0)
+	if walker.exhausted {
+		walker.anyAssignedValue(file)
+	}
 	return walker.paths
 }
 
@@ -1358,6 +1361,9 @@ func actionUpdateValuesAs(stmt *syntax.Stmt, values actionValues, cwd, home stri
 					update(assign)
 				}
 				values[actionReadonlyValuePrefix+assign.Name.Value] = "1"
+			} else if declaration.Variant != nil && declaration.Variant.Value == "export" && assign.Naked && assign.Value == nil {
+				// export NAME keeps the value NAME already has.
+				continue
 			} else {
 				update(assign)
 			}

@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
@@ -44,6 +46,22 @@ func TestRVGXARGNestedDeclaredLink(t *testing.T) {
 		{"reassigned-function", `f(){ local F=%s; F=%s; printf x > "$F"; }; f`, false},
 		{"reassigned-case", `case x in x) export F=%s; F=%s; printf x > "$F";; esac`, false},
 	}
+	unknownConditions := func(n int) string {
+		var b strings.Builder
+		for i := 0; i < n; i++ {
+			fmt.Fprintf(&b, "[ -e /n%d ] && V%d=1; ", i, i)
+		}
+		return b.String()
+	}
+	forms = append(forms,
+		form{"budget-seven-branches", `export F=%s; ` + unknownConditions(7) + `printf x > "$F"`, true},
+		form{"budget-four-branches-steps", `export F=%s; ` + unknownConditions(4) + strings.Repeat(`: ; `, 40) + `printf x > "$F"`, true},
+		form{"budget-three-branches-echo", `export F=%s; ` + unknownConditions(3) + strings.Repeat(`echo ok; `, 70) + `printf x > "$F"`, true},
+		form{"export-existing-value", `F=%s; export F; printf x > "$F"`, true},
+		form{"export-existing-value-and", `F=%s && export F && printf x > "$F"`, true},
+		form{"export-n-existing-value", `F=%s; export -n F; printf x > "$F"`, true},
+		form{"budget-then-benign-reassignment", `export F=%s; ` + unknownConditions(6) + `F=%s; printf x > "$F"`, false},
+	)
 	for _, cell := range rvgxCells {
 		t.Run(cell.profile+fmt.Sprint(cell.managed), func(t *testing.T) {
 			rvgxInstall(t, cell.profile)
