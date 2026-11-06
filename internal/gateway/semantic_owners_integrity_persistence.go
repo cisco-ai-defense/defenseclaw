@@ -1624,16 +1624,20 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 const possibleSupplierArchiveTitle = "Archive call with supplied arguments may create a link before a later write"
 
 // possibleSuppliedArchiveModeFindings grades a command with a supplied
-// archive call that shows a list or test mode (ls *.zip | xargs unzip -v;
-// cp a.txt build/) by ROOTCAUSE-CROSS-1 Rule G. The command is read as
-// written and as its twin without those calls. A block the twin keeps names
-// its target (Named) and stays; a block only the supplied call makes is
-// Possible, so outside strict and Secure Client it is lowered to a visible
-// alert-only finding of the same rule (gas-ux-r1 GAP-0055 round 4). The
-// twin keeps the hook client's evidence of the command as written, which
-// leaves the write targets after the supplied call unlisted; a twin block
-// that is only that unresolved target (unresolvedWriteTargetTitle) is the
-// same Possible scope, not a Named one.
+// archive call that shows a list or test mode (ls *.zip | xargs unzip -l;
+// cp a.txt build/) by ROOTCAUSE-CROSS-1 Rule G. A command whose
+// whole-command target reading names a protected target is Named and keeps
+// every block (suppliedArchiveCommandNamesTarget). Otherwise a block only
+// the supplied call makes is Possible: outside strict and Secure Client it
+// is lowered to a visible alert-only finding of the same rule (gas-ux-r1
+// GAP-0055 rounds 4 and 5). The twin without those calls is read too, and a
+// block the twin keeps stays. Behind ProtectHome the twin is read with the
+// hook client's evidence of the command as written, whose targets after
+// the supplied call are unlisted or opaque, so there a twin block counts
+// only while the twin still runs a supplied archive call that may link
+// (hookpaths.SuppliedArchiveMayLink: xargs unzip -l; xargs unzip; cp ...);
+// a Named target is the client's whole-command decision (ActionDecisionKey),
+// read above.
 func possibleSuppliedArchiveModeFindings(
 	findings []RuleFinding,
 	generation *compiledRulePackCategories,
@@ -1644,11 +1648,17 @@ func possibleSuppliedArchiveModeFindings(
 ) []RuleFinding {
 	request.archiveModeGraded = true
 	written := appendTrustedHomeResolvedSSHKeyWriteFinding(slices.Clone(findings), generation, request, facts)
-	twinRequest := request
-	twinRequest.Input = input
-	twinRequest.Input.Command = twin
-	twinFindings := appendTrustedHomeResolvedSSHKeyWriteFinding(slices.Clone(findings), generation, twinRequest,
-		actionfacts.Analyze(twinRequest.Input))
+	if suppliedArchiveCommandNamesTarget(request, input, facts) {
+		return written
+	}
+	var twinFindings []RuleFinding
+	if !request.ProtectedHomeHook || hookpaths.SuppliedArchiveMayLink(twin) {
+		twinRequest := request
+		twinRequest.Input = input
+		twinRequest.Input.Command = twin
+		twinFindings = appendTrustedHomeResolvedSSHKeyWriteFinding(slices.Clone(findings), generation, twinRequest,
+			actionfacts.Analyze(twinRequest.Input))
+	}
 	for i := range written {
 		if !written[i].contributesToEnforcement() ||
 			slices.ContainsFunc(twinFindings, func(f RuleFinding) bool {
@@ -1663,6 +1673,21 @@ func possibleSuppliedArchiveModeFindings(
 		written[i].Title = possibleSupplierArchiveTitle
 	}
 	return written
+}
+
+// suppliedArchiveCommandNamesTarget reports a Named protected target in the
+// whole command, the supplied archive call included (xargs unzip -l
+// keylink; ... ; cp a.txt keylink): the gateway's own whole-command target
+// reading (hookpaths.ActionCommandDecision, as a per-user gateway reads it)
+// or, behind ProtectHome, the hook client's reading of the same command
+// (ActionDecisionKey), which the client sends for every supplied command.
+func suppliedArchiveCommandNamesTarget(request trustedActionRequest, input actionfacts.Input, facts actionfacts.Facts) bool {
+	if request.ProtectedHomeHook &&
+		request.ResolvedWriteTargets[hookpaths.ActionDecisionKey] == hookpaths.ProtectedTargetDecision {
+		return true
+	}
+	return request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome,
+		input.DialectHint, clientGlobFacts(request)) != ""
 }
 
 // sshControlFileTitlePrefix opens the title of a block whose only SSH target

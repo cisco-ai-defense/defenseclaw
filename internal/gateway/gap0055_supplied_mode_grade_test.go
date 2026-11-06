@@ -46,9 +46,10 @@ func (f b36ManagedHookFixture) gap0055ServePack(call *hookCall, rulePack string)
 	return fmt.Sprintf("status %d body %.200s", recorder.Code, body), body
 }
 
-// TestGAP0055SuppliedArchiveModeIsPossibleGrade is gas-ux-r1 GAP-0055 round
-// 4 (ROOTCAUSE-CROSS-1 Rule G): an archive call whose arguments come from an
-// argument supplier and that shows a list or test mode (xargs unzip -v) may
+// TestGAP0055SuppliedArchiveModeIsPossibleGrade is gas-ux-r1 GAP-0055 rounds
+// 4 and 5 (ROOTCAUSE-CROSS-1 Rule G): an archive call whose arguments come
+// from an argument supplier and that shows a list or test mode (xargs unzip
+// -v, -lv, -Z1, tar -tf, 7z l, jar tf, also in a sh -c body) may
 // still extract through the supplied words, so a later write it could
 // redirect is a Possible hit. The default pack allows it with a visible
 // alert-only finding; the strict pack blocks it. A later write whose target
@@ -78,6 +79,42 @@ func TestGAP0055SuppliedArchiveModeIsPossibleGrade(t *testing.T) {
 		{"unseen", `ls *.zip | xargs unzip; cp a.txt build/`, "block", "block", false},
 		{"unseen-overwrite", `ls *.zip | xargs unzip -o; cp a.txt build/`, "block", "block", false},
 		{"direct-version", `unzip -v; cp a.txt build/`, "allow", "", false},
+		// Round 5 M1: the unzip list and test mode family is one class.
+		{"possible-cluster-vq", `ls *.zip | xargs unzip -vq; cp a.txt build/`, "allow", "block", true},
+		{"possible-cluster-lv", `ls *.zip | xargs unzip -lv; cp a.txt build/`, "allow", "block", true},
+		{"possible-cluster-tq", `ls *.zip | xargs unzip -tq; cp a.txt build/`, "allow", "block", true},
+		{"possible-cluster-Z1", `ls *.zip | xargs unzip -Z1; cp a.txt build/`, "allow", "block", true},
+		{"possible-cluster-n1-and", `ls *.zip | xargs -n1 unzip -lv && cp a.txt build/`, "allow", "block", true},
+		{"possible-cluster-env-redirect", `ls *.zip | env xargs unzip -Z1; echo hi > build/x`, "allow", "block", true},
+		// Round 5 M2: a literal sh -c / bash -c body is graded as at top level.
+		{"possible-bash-c", `bash -c 'ls *.zip | xargs unzip -v; cp a.txt build/'`, "allow", "block", true},
+		{"possible-sh-c-cluster", `sh -c 'ls *.zip | xargs unzip -lv; cp a.txt build/'`, "allow", "block", true},
+		{"possible-sh-c-double", `sh -c "ls *.zip | xargs unzip -t; cp a.txt build/"`, "allow", "block", true},
+		{"named-bash-c", `bash -c 'ls *.zip | xargs unzip -v; cp a.txt keylink'`, "block", "block", false},
+		{"named-sh-c-redirect", `sh -c 'ls *.zip | xargs unzip -lv; echo hi > keylink'`, "block", "block", false},
+		// Round 5 M3: -l, -t, -Z, tar -t, 7z l and jar t are the same Possible scope.
+		{"possible-l", `ls *.zip | xargs unzip -l; cp a.txt build/`, "allow", "block", true},
+		{"possible-t", `ls *.zip | xargs unzip -t; cp a.txt build/`, "allow", "block", true},
+		{"possible-Z", `ls *.zip | xargs unzip -Z; cp a.txt build/`, "allow", "block", true},
+		{"possible-tar-tf", `ls *.tar | xargs tar -tf; cp a.txt build/`, "allow", "block", true},
+		{"possible-tar-tvf", `ls *.tar | xargs tar -tvf; cp a.txt build/`, "allow", "block", true},
+		{"possible-bsdtar-tf", `ls *.tar | xargs bsdtar -tf; cp a.txt build/`, "allow", "block", true},
+		{"possible-7z-l", `ls *.7z | xargs 7z l; cp a.txt build/`, "allow", "block", true},
+		{"possible-jar-tf", `ls *.jar | xargs jar tf; cp a.txt build/`, "allow", "block", true},
+		{"possible-l-link", `ls *.zip | xargs unzip -l; ln -s ../a.txt build/l`, "allow", "block", true},
+		{"named-cluster", `ls *.zip | xargs unzip -vq; cp a.txt keylink`, "block", "block", false},
+		{"named-tar", `ls *.tar | xargs tar -tf; cp a.txt keylink`, "block", "block", false},
+		{"named-in-supplied-call", `ls *.zip | xargs unzip -l keylink; cp a.txt build/`, "block", "block", false},
+		{"unseen-cluster-overwrite", `ls *.zip | xargs unzip -lo; cp a.txt build/`, "block", "block", false},
+		{"unseen-exdir", `ls *.zip | xargs unzip -v -d build; cp a.txt build/`, "block", "block", false},
+		{"unseen-tar-x", `ls *.tar | xargs tar -xf; cp a.txt build/`, "block", "block", false},
+		{"unseen-7z-x", `ls *.7z | xargs 7z x; cp a.txt build/`, "block", "block", false},
+		// Round 5 S3: a Named write inside a supplied shell body or argv
+		// blocks in every cell, managed included.
+		{"named-supplied-sh-c", `ls *.zip | xargs -I{} sh -c 'unzip -v {} && cp a.txt keylink'`, "block", "block", false},
+		{"named-supplied-bash-c", `ls *.zip | xargs bash -c 'unzip -v "$@"; cat a.txt > keylink' _`, "block", "block", false},
+		{"named-supplied-replace", `ls *.zip | xargs -I{} cp {} keylink`, "block", "block", false},
+		{"ordinary-supplied-replace", `ls *.zip | xargs -I{} cp {} build/`, "allow", "", false},
 	}
 	if err := os.Chmod(f.homes, 0o700); err != nil {
 		t.Fatal(err)

@@ -357,13 +357,36 @@ func TestGAP0055SuppliedArchiveModeTwin(t *testing.T) {
 		"ls *.zip | xargs unzip -v; cp a.txt build/":        "ls *.zip | true; cp a.txt build/",
 		"xargs -I{} unzip -v {} && cp a b":                  "true && cp a b",
 		"ls | xargs sudo unzip -v; ls | xargs -n1 unzip -v": "ls | true; ls | true",
+		// Round 5: the list and test mode family (M1, M3) and nested bodies (M2).
+		"ls | xargs unzip -l":                            "ls | true",
+		"ls | xargs unzip -vq; cp a b":                   "ls | true; cp a b",
+		"ls | xargs unzip -lv; cp a b":                   "ls | true; cp a b",
+		"ls | xargs unzip -tq; cp a b":                   "ls | true; cp a b",
+		"ls | xargs unzip -Z1; cp a b":                   "ls | true; cp a b",
+		"ls | xargs unzip -t -q; cp a b":                 "ls | true; cp a b",
+		"ls | xargs tar -tf; cp a b":                     "ls | true; cp a b",
+		"ls | xargs tar tvf; cp a b":                     "ls | true; cp a b",
+		"ls | xargs gtar --list -f; cp a b":              "ls | true; cp a b",
+		"ls | xargs bsdtar -tf; cp a b":                  "ls | true; cp a b",
+		"ls | xargs 7z l; cp a b":                        "ls | true; cp a b",
+		"ls | xargs 7za t; cp a b":                       "ls | true; cp a b",
+		"ls | xargs jar tf; cp a b":                      "ls | true; cp a b",
+		"ls | xargs unzip -v \"$f\"; cp a b":             "ls | true; cp a b",
+		"bash -c 'ls | xargs unzip -v; cp a b'":          "bash -c 'ls | true; cp a b'",
+		"sh -c \"ls | xargs unzip -l; cp a keylink\"":    "sh -c 'ls | true; cp a keylink'",
+		"bash -lc 'ls | xargs unzip -t'; cp a b":         "bash -lc 'ls | true'; cp a b",
+		"sh -c 'sh -c \"ls | xargs unzip -Z1; cp a b\"'": "sh -c 'sh -c '\\''ls | true; cp a b'\\'''",
 	} {
 		if twin, ok := SuppliedArchiveModeTwin(command); !ok || twin != want {
 			t.Errorf("%s: twin %q %t, want %q", command, twin, ok, want)
 		}
 	}
-	for _, command := range []string{"ls | xargs unzip; cp a b", "ls | xargs unzip -o", "ls | xargs unzip -l", "unzip -v; cp a b",
-		"command -v unzip"} {
+	for _, command := range []string{"ls | xargs unzip; cp a b", "ls | xargs unzip -o", "unzip -v; cp a b",
+		"command -v unzip", "unzip -lv x.zip; cp a b", "ls | xargs unzip -lo", "ls | xargs unzip -v -d build",
+		"ls | xargs unzip -1Z", "ls | xargs unzip -l x.zip -d build", "ls | xargs tar -xf", "ls | xargs tar -tf -x",
+		"ls | xargs tar -cf out.tar", "ls | xargs 7z x", "ls | xargs 7z a t", "ls | xargs jar xf",
+		"ls | xargs -I{} sh -c 'unzip -v {} && cp a keylink'", "ls | xargs bash -c 'unzip -l \"$@\"; cp a b' _",
+		"bash -c 'ls | xargs unzip; cp a b'", "echo xargs unzip -v", "ls | xargs cp a b"} {
 		if twin, ok := SuppliedArchiveModeTwin(command); ok {
 			t.Errorf("%s: twin %q, want none", command, twin)
 		}

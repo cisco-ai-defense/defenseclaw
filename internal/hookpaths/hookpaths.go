@@ -1215,6 +1215,17 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					if !protectedDecision {
 						protectedDecision = actionClientLoopCopyDestinationProtected(command, cwd, home)
 					}
+					if !protectedDecision && suppliedArgvCommand(command) {
+						// A program an argument supplier runs (xargs -I{} cp {}
+						// keylink, xargs sh -c BODY _) has argv words the text
+						// does not show, so no operand list names its targets.
+						// A per-user gateway reads the whole command and finds a
+						// Named target through the links of the user; carry that
+						// decision to a managed gateway, which cannot follow
+						// them, so every cell grades the call the same
+						// (ROOTCAUSE-CROSS-1 Rule G; gas-ux-r1 GAP-0055 round 5).
+						protectedDecision = ActionCommandDecision(command, cwd, home) != ""
+					}
 				}
 				if !protectedDecision && NoDereferenceTouchShape(command, cwd, home) {
 					noDereferenceTouchSafe, protectedDecision = noDereferenceTouchStatus(command, cwd, home)
@@ -5706,6 +5717,19 @@ func makeStatic(n int) []bool {
 // (gas-ux-r1 GAP-0055 review M1).
 var argumentSuppliers = []string{"xargs", "parallel", "find"}
 
+// suppliedArgvCommand reports a command with a word that names an argument
+// supplier (argumentSuppliers) as a program, at any wrapper depth (sudo
+// xargs, env xargs, /usr/bin/xargs): one scan for the common command
+// without one. tactics.RunsProgram reads xargs as a wrapper of the program
+// it runs, so it is not used here.
+func suppliedArgvCommand(command string) bool {
+	if !slices.ContainsFunc(argumentSuppliers, func(supplier string) bool { return strings.Contains(command, supplier) }) {
+		return false
+	}
+	words, _ := wrapperWords(command)
+	return slices.ContainsFunc(words, func(word string) bool { return slices.Contains(argumentSuppliers, programBase(word)) })
+}
+
 // wrappedMayLink reads the words of a wrapper's text from the first ln, cp,
 // or archive program on as that program's arguments and reports one that can
 // link files; for cp a word with a parameter or a substitution counts as a
@@ -5723,9 +5747,7 @@ func wrappedMayLink(text string) (mayLink, copyWord bool) {
 // that a visible list or test mode (xargs unzip -v) reads as the mode it
 // names. An archive program that shows no word keeps the unseen reading.
 func wrappedMayLinkRead(text string, visibleMode bool) (mayLink, copyWord bool) {
-	words := strings.FieldsFunc(text, func(r rune) bool {
-		return unicode.IsSpace(r) || strings.ContainsRune("\"'`;&|(){}<>=", r)
-	})
+	words, segments := wrapperWords(text)
 	supplied := false
 	for i, word := range words {
 		program, rest := programBase(word), words[i+1:]
@@ -5741,6 +5763,22 @@ func wrappedMayLinkRead(text string, visibleMode bool) (mayLink, copyWord bool) 
 			copyWord = true
 		case slices.Contains(archivePrograms, program):
 			static := makeStatic(len(rest))
+			own := 0
+			for own < len(rest) && segments[i+1+own] == segments[i] {
+				own++
+			}
+			if supplied && archiveListMode(program, rest[:own], static[:own]) {
+				// A list or test mode the text shows (unzip -l, -tq, -Z1,
+				// tar -tf, 7z l, jar tf) is not proved by the text alone
+				// after a supplier: the supplied words may cancel or replace
+				// it (unzip --l, a supplied x). The unseen reading may link;
+				// the visible reading is the mode it names (gas-ux-r1
+				// GAP-0055 round 5).
+				if !visibleMode {
+					return true, copyWord
+				}
+				break
+			}
 			if supplied && (!visibleMode || len(rest) == 0) {
 				rest, static = append(slices.Clip(rest), ""), append(static, false)
 			}
@@ -5753,6 +5791,168 @@ func wrappedMayLinkRead(text string, visibleMode bool) (mayLink, copyWord bool) 
 	return false, copyWord
 }
 
+// wrapperWords splits a wrapper's text into the words wrappedMayLinkRead
+// reads (split at blanks, quotes, =, and the shell operator characters) and
+// numbers the command segment each word is in: the segment changes at an
+// operator character (;&|()<> backquote, newline), so the words of one
+// program's own call share its segment number.
+func wrapperWords(text string) (words []string, segments []int) {
+	segment, start := 0, -1
+	flush := func(end int) {
+		if start >= 0 {
+			words, segments = append(words, text[start:end]), append(segments, segment)
+			start = -1
+		}
+	}
+	for i, r := range text {
+		switch {
+		case strings.ContainsRune(";&|()<>`\n", r):
+			flush(i)
+			segment++
+		case unicode.IsSpace(r) || strings.ContainsRune("\"'{}=", r):
+			flush(i)
+		case start < 0:
+			start = i
+		}
+	}
+	flush(len(text))
+	return words, segments
+}
+
+// suppliedListCall reports a call whose own words run an archive program
+// through an argument supplier (xargs unzip -l, xargs -I{} unzip -vq {},
+// sudo xargs tar -tf) with a visible list or test mode (archiveListMode)
+// and no link or copy program before it. Words that are not static are
+// unseen operands, as the supplied ones are.
+func suppliedListCall(call *syntax.CallExpr) bool {
+	words := make([]string, len(call.Args))
+	static := make([]bool, len(call.Args))
+	for i, arg := range call.Args {
+		words[i], static[i] = StaticWord(arg, "")
+	}
+	supplied := false
+	for i, word := range words {
+		if !static[i] {
+			return false
+		}
+		program := programBase(word)
+		switch {
+		case supplied && slices.Contains(archivePrograms, program):
+			return archiveListMode(program, words[i+1:], static[i+1:])
+		case slices.Contains(linkPrograms, program) || slices.Contains(copyPrograms, program):
+			return false
+		}
+		supplied = supplied || slices.Contains(argumentSuppliers, program)
+	}
+	return false
+}
+
+// archiveListMode reports an archive call whose visible words name only a
+// list or test mode, which never extracts: unzip with only -l, -t, -v or -Z
+// option clusters and their display modifiers (-lv, -tq, -vq, -Z1), tar,
+// gtar or bsdtar with a t mode and no other mode, 7z with the l or t command,
+// and jar with the t mode. Any other unzip option (an extraction directory,
+// overwrite) is not a list mode; a word that is not static is an operand,
+// and the 7z or jar mode word must be static.
+func archiveListMode(program string, args []string, static []bool) bool {
+	switch {
+	case program == "unzip":
+		mode := false
+		for i, arg := range args {
+			if !staticAt(static, i) || arg == "--" || !strings.HasPrefix(arg, "-") {
+				continue
+			}
+			lists, ok := unzipListCluster(arg)
+			if !ok {
+				return false
+			}
+			mode = mode || lists
+		}
+		return mode
+	case strings.HasSuffix(program, "tar"):
+		mode := false
+		for i, arg := range args {
+			if !staticAt(static, i) {
+				continue
+			}
+			if long, isLong := strings.CutPrefix(arg, "--"); isLong {
+				name, _, _ := strings.Cut(long, "=")
+				switch {
+				case name == "list":
+					mode = true
+				case name == "get" || name == "delete" || len(name) >= 3 &&
+					(strings.HasPrefix("extract", name) || strings.HasPrefix("create", name) ||
+						strings.HasPrefix("append", name) || strings.HasPrefix("update", name) ||
+						strings.HasPrefix("concatenate", name) || strings.HasPrefix("catenate", name)):
+					return false
+				}
+				continue
+			}
+			cluster, option := strings.CutPrefix(arg, "-")
+			if !option && i != 0 {
+				continue
+			}
+			switch tarClusterMode(cluster) {
+			case 't':
+				mode = true
+			case 0:
+			default:
+				return false
+			}
+		}
+		return mode
+	case strings.HasPrefix(program, "7z"):
+		for i, arg := range args {
+			if !staticAt(static, i) {
+				return false
+			}
+			if !strings.HasPrefix(arg, "-") {
+				return arg == "l" || arg == "t"
+			}
+		}
+		return false
+	case program == "jar":
+		return len(args) > 0 && staticAt(static, 0) && (args[0] == "--list" ||
+			strings.HasPrefix(strings.TrimLeft(args[0], "-"), "t"))
+	}
+	return false
+}
+
+// unzipListCluster reads one unzip option word: ok when every letter is a
+// list or test mode (l, t, v; Z as the first letter, zipinfo) or a display
+// modifier (q, 1, 2, h, m, M, s, T, z), lists when it names a mode.
+func unzipListCluster(arg string) (lists, ok bool) {
+	letters := arg[1:]
+	if letters == "" || strings.HasPrefix(letters, "-") {
+		return false, false
+	}
+	for i, c := range letters {
+		switch {
+		case c == 'l' || c == 't' || c == 'v' || c == 'Z' && i == 0:
+			lists = true
+		case strings.ContainsRune("q12hmMsTz", c):
+		default:
+			return false, false
+		}
+	}
+	return lists, true
+}
+
+// tarClusterMode is the mode letter of a tar option cluster (A, c, d, r, t,
+// u or x), read before an option that takes the rest of the word as its
+// value, or 0 when it names none.
+func tarClusterMode(cluster string) rune {
+	for _, c := range cluster {
+		switch {
+		case strings.ContainsRune("Acdrtux", c):
+			return c
+		case strings.ContainsRune("fCTXbIKNgVHFL", c):
+			return 0
+		}
+	}
+	return 0
+}
+
 // SuppliedArchiveModeTwin is command with each call whose only link reading
 // is an archive program after an argument supplier that shows a list or
 // test mode (ls *.zip | xargs unzip -v) replaced by true, and whether there
@@ -5761,16 +5961,32 @@ func wrappedMayLinkRead(text string, visibleMode bool) (mayLink, copyWord bool) 
 // gateway compares the command with its twin, blocks a later write the twin
 // still blocks (a Named target) everywhere, and the rest in strict only
 // (gas-ux-r1 GAP-0055 round 4).
+//
+// A literal sh -c or bash -c body is graded as the same command at top
+// level (Rule G, the call grade is the maximum over every nested body): its
+// twin replaces the body word, so a Named write in the body stays in the
+// twin (round 5).
 func SuppliedArchiveModeTwin(command string) (string, bool) {
-	if !slices.ContainsFunc(argumentSuppliers, func(supplier string) bool { return strings.Contains(command, supplier) }) {
+	return suppliedArchiveModeTwin(command, 0)
+}
+
+// suppliedArchiveTwinDepth bounds the nested shell bodies the twin reads.
+const suppliedArchiveTwinDepth = 8
+
+func suppliedArchiveModeTwin(command string, depth int) (string, bool) {
+	if depth > suppliedArchiveTwinDepth ||
+		!slices.ContainsFunc(argumentSuppliers, func(supplier string) bool { return strings.Contains(command, supplier) }) {
 		return "", false // the common case costs one scan, no parse
 	}
 	file, parsed := parseShell(command)
 	if !parsed {
 		return "", false
 	}
-	type span struct{ from, to int }
-	var spans []span
+	type edit struct {
+		from, to int
+		text     string
+	}
+	var edits []edit
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
@@ -5780,26 +5996,71 @@ func SuppliedArchiveModeTwin(command string) (string, bool) {
 		if from < 0 || to > len(command) || from >= to {
 			return true
 		}
+		if body := literalShellCallBody(call, ""); body != "" {
+			last := call.Args[len(call.Args)-1]
+			bodyFrom, bodyTo := int(last.Pos().Offset()), int(last.End().Offset())
+			if bodyTwin, twinned := suppliedArchiveModeTwin(body, depth+1); twinned &&
+				bodyFrom >= from && bodyTo <= to && bodyFrom < bodyTo {
+				edits = append(edits, edit{bodyFrom, bodyTo, singleQuotedShellWord(bodyTwin)})
+			}
+			return false
+		}
 		text := command[from:to]
 		if !tactics.RunsProgram(text, archivePrograms...) {
 			return true
 		}
 		unseen, _ := wrappedMayLinkRead(text, false)
 		visible, _ := wrappedMayLinkRead(text, true)
-		if unseen && !visible {
-			spans = append(spans, span{from, to})
+		if unseen && !visible && suppliedListCall(call) {
+			edits = append(edits, edit{from, to, "true"})
 			return false
 		}
 		return true
 	})
-	if len(spans) == 0 {
+	if len(edits) == 0 {
 		return "", false
 	}
 	twin := command
-	for i := len(spans) - 1; i >= 0; i-- {
-		twin = twin[:spans[i].from] + "true" + twin[spans[i].to:]
+	for i := len(edits) - 1; i >= 0; i-- {
+		twin = twin[:edits[i].from] + edits[i].text + twin[edits[i].to:]
 	}
 	return twin, true
+}
+
+// SuppliedArchiveMayLink reports a call of command that runs an archive
+// program through an argument supplier and may link by the unseen reading
+// (xargs unzip, xargs unzip -o): the twin of a Possible call still holds an
+// unseen extraction (gas-ux-r1 GAP-0055 round 5).
+func SuppliedArchiveMayLink(command string) bool {
+	if !suppliedArgvCommand(command) {
+		return false
+	}
+	file, parsed := parseShell(command)
+	if !parsed {
+		return true
+	}
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if found || !ok || len(call.Args) == 0 {
+			return !found
+		}
+		from, to := int(call.Pos().Offset()), int(call.End().Offset())
+		if from < 0 || to > len(command) || from >= to {
+			return true
+		}
+		text := command[from:to]
+		if suppliedArgvCommand(text) && tactics.RunsProgram(text, archivePrograms...) {
+			found, _ = wrappedMayLinkRead(text, false)
+		}
+		return !found
+	})
+	return found
+}
+
+// singleQuotedShellWord is text as one single-quoted POSIX shell word.
+func singleQuotedShellWord(text string) string {
+	return "'" + strings.ReplaceAll(text, "'", "'\\''") + "'"
 }
 
 // programBase is a program's lowercased basename without ".exe".

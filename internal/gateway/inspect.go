@@ -1010,10 +1010,6 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		policyConfig.HookPolicyTierForConnector(firstNonEmpty(req.Connector, action.Connector)) == config.HookPolicyTierStrict {
 		action.StrictPolicy = true
 	}
-	if policyConfig != nil && !policyConfig.SecureClientIntegration() &&
-		policyConfig.HookPolicyTierForConnector(firstNonEmpty(req.Connector, action.Connector)) == config.HookPolicyTierStrict {
-		action.strictHookProfile = true
-	}
 	policySource := func() *config.Config { return policyConfig }
 	if a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration() {
 		policySource = a.liveConfig

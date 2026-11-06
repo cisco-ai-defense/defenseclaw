@@ -158,8 +158,7 @@ type trustedActionRequest struct {
 	EnforcementCapable bool
 	// StrictPolicy keeps uncertain path proofs closed in strict policy and
 	// preserves Secure Client's conservative path behavior.
-	StrictPolicy      bool
-	strictHookProfile bool
+	StrictPolicy bool
 	// archiveModeGraded marks the readings of a Possible supplied archive
 	// mode (hookpaths.SuppliedArchiveModeTwin), so they are graded once.
 	archiveModeGraded bool
