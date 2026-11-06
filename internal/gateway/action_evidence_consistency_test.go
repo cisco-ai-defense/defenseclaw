@@ -105,6 +105,9 @@ func TestR103B36ReviewRealClientOperandForms(t *testing.T) {
 			if row.block {
 				want = `{"action":"block"`
 			}
+			if !row.block && gx054BalancedAllow(got) {
+				return
+			}
 			if !strings.HasPrefix(got, want) {
 				t.Fatalf("verdict = %.300s, want %s", got, want)
 			}
@@ -120,7 +123,7 @@ func TestR103B36ReviewRealClientOperandForms(t *testing.T) {
 		got := post(t, "tar -C scope -xf pkg.tar; echo hi > ordinary/n", func(m map[string]string) {
 			delete(m, hookpaths.OpaqueScopeFactPrefix+filepath.Join(project, "ordinary", "n"))
 		})
-		if !strings.HasPrefix(got, `{"action":"allow"`) {
+		if !gx054BalancedAllow(got) {
 			t.Fatalf("verdict = %.300s, want allow", got)
 		}
 		strict := strictPost(t, "tar -C scope -xf pkg.tar; echo hi > ordinary/n", func(m map[string]string) {
@@ -136,7 +139,7 @@ func TestR103B36ReviewRealClientOperandForms(t *testing.T) {
 			delete(m, key)
 			m[key+"/"] = "0"
 		})
-		if !strings.HasPrefix(got, `{"action":"allow"`) {
+		if !gx054BalancedAllow(got) {
 			t.Fatalf("verdict = %.300s, want allow", got)
 		}
 		strict := strictPost(t, "tar -C scope -xf pkg.tar; echo hi > ordinary/n", func(m map[string]string) {
@@ -162,7 +165,7 @@ func TestR103B36ReviewRealClientOperandForms(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Setenv("HOME", alternate)
-		if got := post(t, `tar -C "$HOME/scope" -xf pkg.tar; echo hi > ordinary/n`, nil); !strings.HasPrefix(got, `{"action":"allow"`) {
+		if got := post(t, `tar -C "$HOME/scope" -xf pkg.tar; echo hi > ordinary/n`, nil); !gx054BalancedAllow(got) {
 			t.Fatalf("ordinary write = %.300s, want allow", got)
 		}
 		if got := post(t, "tar -C scope -xf pkg.tar; echo hi > "+filepath.Join(home, ".ssh", "authorized_keys"), nil); !strings.HasPrefix(got, `{"action":"block"`) {
@@ -173,12 +176,12 @@ func TestR103B36ReviewRealClientOperandForms(t *testing.T) {
 		command := "tar -C scope -xf pkg.tar; echo hi > ordinary/n"
 		if got := post(t, command, func(m map[string]string) {
 			m[hookpaths.OpaqueScopeFactPrefix+filepath.Join(project, "ordinary", "n")] = "0"
-		}); !strings.HasPrefix(got, `{"action":"allow"`) {
+		}); !gx054BalancedAllow(got) {
 			t.Fatalf("forged call = %.300s, want allow", got)
 		}
 		if got := post(t, command, func(m map[string]string) {
 			delete(m, hookpaths.OpaqueScopeFactPrefix+filepath.Join(project, "ordinary", "n"))
-		}); !strings.HasPrefix(got, `{"action":"allow"`) {
+		}); !gx054BalancedAllow(got) {
 			t.Fatalf("later call = %.300s, want allow", got)
 		}
 		if strict := strictPost(t, command, func(m map[string]string) {

@@ -1114,6 +1114,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				operand == hookpaths.TarProtectedAbsoluteLinkKey ||
 				strings.HasPrefix(operand, hookpaths.TarProtectedMemberFactPrefix) ||
 				strings.HasPrefix(operand, hookpaths.UnreadArchiveTargetPrefix) ||
+				resolved == filepath.Join(home, ".ssh") ||
+				strings.HasPrefix(resolved, filepath.Join(home, ".ssh")+string(filepath.Separator)) ||
 				directoryFact && (changedDirectory ||
 					canonicalSemanticPath(resolved) == canonicalSemanticPath(filepath.Join(facts.ActiveHome, ".ssh"))) ||
 				operand == hookpaths.CWDKey && (changedDirectory || truncated) ||

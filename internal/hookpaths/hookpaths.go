@@ -2911,7 +2911,11 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 // commandLinksRead is commandLinks; readDisk reads the link-keeping copies
 // of links on disk as those links (copyDiskLinks). fallback reports such a
 // copy that could not be read so.
-func commandLinksRead(command, cwd, home string, facts map[string]string, record, nested, readDisk bool, memo *TargetMemo) (shellLinks, bool) {
+func commandLinksRead(command, cwd, home string, facts map[string]string, record, nested, readDisk bool, memo ...*TargetMemo) (shellLinks, bool) {
+	var evaluation *TargetMemo
+	if len(memo) != 0 {
+		evaluation = memo[0]
+	}
 	links := shellLinks{known: true, callAt: -1}
 	// One shell evaluation reads each archive's on-disk bytes once. The map
 	// belongs to this invocation, so a later hook call always reads afresh.
@@ -2920,7 +2924,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 		if kind, found := archiveKinds[path]; found {
 			return kind
 		}
-		kind := memo.tarKind(path)
+		kind := evaluation.tarKind(path)
 		archiveKinds[path] = kind
 		return kind
 	}
@@ -3276,7 +3280,8 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 					// A plain reading may clear uncertainty only for a simple
 					// command. Positive evidence is independent of that proof.
 					plain := onlyDirectoryStatementsBefore(file, call, home) &&
-						tarArchiveHoldsNoLink(program, words[1:], static[1:], dir, command, facts, record, archiveKind)
+						tarArchiveHoldsNoLink(program, words[1:], static[1:], dir, command, home, facts, record, archiveKind)
+					plain = plain || tarArchiveHoldsNoProtectedPipe(file, call, program, words[1:], static[1:], dir, home, facts, record, archiveKind)
 					linked := !plain && tarArchiveLinkEvidence(program, words[1:], static[1:], dir, file, call, home, facts, record, archiveKind)
 					if tarArchivePriorLinkedRewrite(file, call, words[1:], static[1:], dir, home) ||
 						(program != "cpio" && program != "bsdcpio" && program != "pax" &&
@@ -3346,7 +3351,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				// placed its call (rel-1-0-6:GAP-0260).
 				bodyDir, placedBody = callDirs[0], true
 			}
-			inner := commandLinks(body, bodyDir, home, facts, record, true, memo)
+			inner := commandLinks(body, bodyDir, home, facts, record, true, evaluation)
 			links.merge(inner)
 			renames = renames || inner.renames
 			cds = cds || inner.cds
@@ -4175,7 +4180,46 @@ func ArchiveBeforeWrite(command, home string) bool {
 	}
 	statements, linear := linearShellStatements(file)
 	if !linear {
-		return false
+		var extractionEnd uint
+		syntax.Walk(file, func(node syntax.Node) bool {
+			call, ok := node.(*syntax.CallExpr)
+			if !ok || len(call.Args) == 0 {
+				return true
+			}
+			program, fixed := StaticWord(call.Args[0], home)
+			if !fixed || !slices.Contains(archivePrograms, programBase(program)) {
+				return true
+			}
+			args := make([]string, 0, len(call.Args)-1)
+			static := make([]bool, 0, len(call.Args)-1)
+			for _, word := range call.Args[1:] {
+				value, known := StaticWord(word, home)
+				args, static = append(args, value), append(static, known)
+			}
+			if archiveMayLink(programBase(program), args, static) && !archiveCopiesLinks(programBase(program), args, static) &&
+				(extractionEnd == 0 || uint(call.End().Offset()) < extractionEnd) {
+				extractionEnd = uint(call.End().Offset())
+			}
+			return true
+		})
+		if extractionEnd == 0 {
+			return false
+		}
+		found := false
+		syntax.Walk(file, func(node syntax.Node) bool {
+			stmt, ok := node.(*syntax.Stmt)
+			if !ok || uint(stmt.Pos().Offset()) < extractionEnd {
+				return true
+			}
+			for _, redirect := range stmt.Redirs {
+				switch redirect.Op {
+				case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+					found = true
+				}
+			}
+			return !found
+		})
+		return found
 	}
 	extracted := false
 	for _, stmt := range statements {
@@ -4498,6 +4542,15 @@ func ProtectedArchiveMoveName(command, cwd, home string, facts map[string]string
 		}
 		operand := OperandPath(path, cwd)
 		ssh := filepath.Join(home, ".ssh")
+		if resolved := facts[operand]; resolved == ssh || strings.HasPrefix(resolved, ssh+string(filepath.Separator)) {
+			return true
+		}
+		for observed, resolved := range facts {
+			if filepath.IsAbs(observed) && strings.HasPrefix(operand, observed+string(filepath.Separator)) &&
+				(resolved == ssh || strings.HasPrefix(resolved, ssh+string(filepath.Separator))) {
+				return true
+			}
+		}
 		if resolved, ok := ResolveWriteTarget(operand); ok &&
 			(resolved == ssh || strings.HasPrefix(resolved, ssh+string(filepath.Separator))) {
 			return true
@@ -4611,6 +4664,16 @@ func ProtectedArchiveMoveName(command, cwd, home string, facts map[string]string
 						for _, arg := range args {
 							if arg != "-" && !strings.HasPrefix(arg, "-") && protectedName(arg, members) {
 								named = true
+							}
+						}
+					}
+					if program == "install" {
+						for i, arg := range args {
+							if (arg == "-t" || arg == "--target-directory") && i+1 < len(args) {
+								destination = args[i+1]
+							}
+							if strings.HasPrefix(arg, "--target-directory=") {
+								destination = strings.TrimPrefix(arg, "--target-directory=")
 							}
 						}
 					}

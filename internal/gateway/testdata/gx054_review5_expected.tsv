@@ -1,0 +1,467 @@
+# Independent reviewer round-4 probe, pinned on round-5 Rule G verdicts.
+extra/E01	S+ S+ S+ S+ S+ S+ S+ S+
+extra/E02	S+ S+ S+ S+ S+ S+ S+ S+
+extra/E03	S+ S+ S+ S+ S+ S+ S+ S+
+extra/E04	W R+ W R+ W R+ W R+
+extra/E05	W R+ W R+ W R+ W R+
+extra/E06	S+ S+ S+ S+ S+ S+ S+ S+
+extra/E07	S+ S+ S+ S+ S+ S+ S+ S+
+extra/E08	S+ S+ S+ S+ S+ S+ S+ S+
+extra/E09	W R+ W R+ W R+ W R+
+extra/E10	S+ S+ S+ S+ S+ S+ S+ S+
+extra/E11	S+ S+ S+ S+ S+ S+ S+ S+
+extra/E12	W R+ W R+ W R+ W R+
+extra/E13	W R+ W R+ W R+ W R+
+extra/E14	W R+ W R+ W R+ W R+
+extra/E15	W R+ W R+ W R+ W R+
+extra/E16	W R+ W R+ W R+ W R+
+extra/E17	S+ S+ S+ S+ S+ S+ S+ S+
+extra/E18	W R+ W R+ W R+ W R+
+extra/E19	W R+ W R+ W R+ W R+
+extra/E20	W R+ W R+ W R+ W R+
+extra/E21	S+ S+ S+ S+ S+ S+ S+ S+
+extra/E22	S+ S+ S+ S+ S+ S+ S+ S+
+extra/E23	S+ S+ S+ S+ S+ S+ S+ S+
+extra/E24	S+ S+ S+ S+ S+ S+ S+ S+
+extra/E25	S+ S+ S+ S+ S+ S+ S+ S+
+extra/E26	W R+ W R+ W R+ W R+
+extra/E27	S+ S+ S+ S+ S+ S+ S+ S+
+extra/Q01	A A A A A A A A
+extra/Q02	A A A A A A A A
+extra/Q03	A A A A A A A A
+extra/Q04	A A A A A A A A
+extra/Q05	A A A A A A A A
+extra/Q06	W R+ W R+ W R+ W R+
+extra/Q07	A A A A A A A A
+extra/Q08	A A A A A A A A
+extra/Q09	A A A A A A A A
+extra/Q10	A A A A A A A A
+extra/Q11	A A A A A A A A
+extra/Q12	A A A A A A A A
+extra/Q13	A A A A A A A A
+extra/Q14	A A A A A A A A
+extra/Q15	A A A A A A A A
+extra/Q16	A A A A A A A A
+extra/Q17	A A A A A A A A
+extra/Q18	A A A A A A A A
+extra/U01	W R+ W R+ W R+ W R+
+extra/U02	W R+ W R+ W R+ W R+
+extra/U03	W R+ W R+ W R+ W R+
+extra/U04	W R+ W R+ W R+ W R+
+extra/U05	W R+ W R+ W R+ W R+
+extra/U06	W R+ W R+ W R+ W R+
+extra/U07	W R+ W R+ W R+ W R+
+extra/U08	W R+ W R+ W R+ W R+
+extra/U09	W R+ W R+ W R+ W R+
+extra/U10	W R+ W R+ W R+ W R+
+extra/U11	W R+ W R+ W R+ W R+
+extra/U12	W R+ W R+ W R+ W R+
+extra/V01	A A A A A A A A
+extra/V02	A A A A A A A A
+extra/V03	A A A A A A A A
+extra/W01	S+ S+ R+ R+ S+ S+ R+ R+
+extra/W02	S+ S+ R+ R+ S+ S+ R+ R+
+extra/W03	S+ S+ R+ R+ S+ S+ R+ R+
+extra/W04	S+ S+ R+ R+ S+ S+ R+ R+
+extra/W05	S+ S+ S+ S+ S+ S+ S+ S+
+extra/W06	S+ S+ R+ R+ S+ S+ R+ R+
+extra/W07	S+ S+ R+ R+ S+ S+ R+ R+
+extra/W08	S+ S+ R+ R+ S+ S+ R+ R+
+extra/W09	S+ S+ S+ S+ S+ S+ S+ S+
+extra/W10	S+ S+ S+ S+ S+ S+ S+ S+
+extra/W11	S+ S+ R+ R+ S+ S+ R+ R+
+extra/W12	S+ S+ R+ R+ S+ S+ R+ R+
+extra/W13	S+ S+ S+ S+ S+ S+ S+ S+
+extra/W14	S+ S+ R+ R+ S+ S+ R+ R+
+extra/W15	S+ S+ R+ R+ S+ S+ R+ R+
+extra/W16	S+ S+ S+ S+ S+ S+ S+ S+
+extra/W17	S+ S+ S+ S+ S+ S+ S+ S+
+extra/W18	S+ S+ S+ S+ S+ S+ S+ S+
+extra/W19	S+ S+ S+ S+ S+ S+ S+ S+
+extra/W20	S+ S+ S+ S+ S+ S+ S+ S+
+extra/W21	S+ S+ S+ S+ S+ S+ S+ S+
+extra/W22	S+ S+ S+ S+ S+ S+ S+ S+
+extra/W23	S+ S+ S+ S+ S+ S+ S+ S+
+extra/W24	S+ S+ S+ S+ S+ S+ S+ S+
+extra/W25	S+ S+ R+ R+ S+ S+ R+ R+
+extra/W26	S+ S+ R+ R+ S+ S+ R+ R+
+extra/W27	S+ S+ R+ R+ S+ S+ R+ R+
+extra/W28	S+ S+ R+ R+ S+ S+ R+ R+
+extra/W29	S+ S+ R+ R+ S+ S+ R+ R+
+extra/W30	A A A A A A A A
+new/C01	S+ S+ S+ S+ S+ S+ S+ S+
+new/C02	S+ S+ S+ S+ S+ S+ S+ S+
+new/C03	S+ S+ S+ S+ S+ S+ S+ S+
+new/C04	S+ S+ R+ R+ S+ S+ R+ R+
+new/G01	A A A A A A A A
+new/G02	W R+ W R+ W R+ W R+
+new/G03	W R+ W R+ W R+ W R+
+new/G04	W R+ W R+ W R+ W R+
+new/G05	W R+ W R+ W R+ W R+
+new/G06	W R+ W R+ W R+ W R+
+new/G07	W R+ W R+ W R+ W R+
+new/G08	A A A A A A A A
+new/G09	A A A A A A A A
+new/G10	A A A A A A A A
+new/H31	A A W R+ A A W R+
+new/H32	W R+ W R+ W R+ W R+
+new/H33	W R+ W R+ W R+ W R+
+new/H34	S+ S+ S+ S+ S+ S+ S+ S+
+new/H35	S+ S+ S+ S+ S+ S+ S+ S+
+new/H36	S+ S+ S+ S+ S+ S+ S+ S+
+new/H37	S+ S+ S+ S+ S+ S+ S+ S+
+new/H38	S+ S+ S+ S+ S+ S+ S+ S+
+new/H39	S+ S+ S+ S+ S+ S+ S+ S+
+new/H40	S+ S+ S+ S+ S+ S+ S+ S+
+new/L01	S+ S+ S+ S+ S+ S+ S+ S+
+new/L02	S+ S+ S+ S+ S+ S+ S+ S+
+new/L03	S+ S+ S+ S+ S+ S+ S+ S+
+new/L04	S+ S+ S+ S+ S+ S+ S+ S+
+new/L05	S+ S+ S+ S+ S+ S+ S+ S+
+new/L06	S+ S+ S+ S+ S+ S+ S+ S+
+new/L07	S+ S+ S+ S+ S+ S+ S+ S+
+new/L08	S+ S+ S+ S+ S+ S+ S+ S+
+new/L09	S+ S+ S+ S+ S+ S+ S+ S+
+new/L10	S+ S+ R+ R+ S+ S+ R+ R+
+new/L11	S+ S+ R+ R+ S+ S+ R+ R+
+new/L12	S+ S+ S+ S+ S+ S+ S+ S+
+new/L13	S+ S+ S+ S+ S+ S+ S+ S+
+new/N01	S+ S+ S+ S+ S+ S+ S+ S+
+new/N02	S+ S+ S+ S+ S+ S+ S+ S+
+new/N03	S+ S+ S+ S+ S+ S+ S+ S+
+new/N04	S+ S+ S+ S+ S+ S+ S+ S+
+new/N05	S+ S+ S+ S+ S+ S+ S+ S+
+new/N06	S+ S+ S+ S+ S+ S+ S+ S+
+new/N07	S+ S+ S+ S+ S+ S+ S+ S+
+new/N08	S+ S+ S+ S+ S+ S+ S+ S+
+new/N09	S+ S+ S+ S+ S+ S+ S+ S+
+new/N10	R+ R+ R+ R+ R+ R+ R+ R+
+new/N11	S+ S+ S+ S+ S+ S+ S+ S+
+new/N12	S+ S+ S+ S+ S+ S+ S+ S+
+new/N13	S+ S+ S+ S+ S+ S+ S+ S+
+new/N14	S+ S+ S+ S+ S+ S+ S+ S+
+new/O01	A S+ A A A S+ A A
+new/O02	A S+ A A A S+ A A
+new/O03	A A A A A A A A
+new/O04	W R+ R+ R+ W R+ R+ R+
+new/O05	A S+ A S+ A S+ A S+
+new/O06	A A A A A A A A
+new/O07	A A A A A A A A
+new/P01	S+ S+ S+ S+ S+ S+ S+ S+
+new/P02	S+ S+ S+ S+ S+ S+ S+ S+
+new/P03	S+ S+ S+ S+ S+ S+ S+ S+
+new/P04	S+ S+ S+ S+ S+ S+ S+ S+
+new/T01	S+ S+ S+ S+ S+ S+ S+ S+
+new/T02	W R+ W R+ W R+ W R+
+new/T03	W R+ W R+ W R+ W R+
+new/T04	W R+ W R+ W R+ W R+
+olda/C01	A A A A A A A A
+olda/C02	A A A A A A A A
+olda/C03	A A A A A A A A
+olda/C04	A A A A A A A A
+olda/C05	A A A A A A A A
+olda/C06	W R+ A A W R+ A A
+olda/C07	A A A A A A A A
+olda/H03	A A W R+ A A W R+
+olda/H04	A A W R+ A A W R+
+olda/H05	A A W R+ A A W R+
+olda/H06	A A W R+ A A W R+
+olda/H07	W R+ W R+ W R+ W R+
+olda/H08	A A W R+ A A W R+
+olda/H10	W R+ W R+ W R+ W R+
+olda/H11	S+ S+ S+ S+ S+ S+ S+ S+
+olda/H12	S+ S+ S+ S+ S+ S+ S+ S+
+olda/H14	S+ S+ S+ S+ S+ S+ S+ S+
+olda/H15	S+ S+ S+ S+ S+ S+ S+ S+
+olda/H16	W R+ W R+ W R+ W R+
+olda/H17	A A W R+ A A W R+
+olda/H18	A A W R+ A A W R+
+olda/H19	S+ S+ S+ S+ S+ S+ S+ S+
+olda/H20	S+ S+ S+ S+ S+ S+ S+ S+
+olda/H21	S+ S+ S+ S+ S+ S+ S+ S+
+olda/H22	S+ S+ S+ S+ S+ S+ S+ S+
+olda/H23	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K01	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K02	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K03	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K04	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K05	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K06	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K07	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K08	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K09	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K10	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K11	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K12	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K13	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K14	A A A A A A A A
+olda/K15	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K16	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K17	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K18	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K19	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K20	S+ S+ R+ R+ S+ S+ R+ R+
+olda/K21	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K22	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K23	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K24	A A A A A A A A
+olda/K25	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K26	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K27	A A A A A A A A
+olda/K28	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K29	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K30	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K31	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K32	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K33	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K34	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K35	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K36	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K37	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K38	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K39	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K40	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K41	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K42	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K43	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K44	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K45	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K46	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K47	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K48	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K49	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K50	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K51	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K52	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K53	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K54	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K55	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K56	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K57	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K58	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K59	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K60	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K61	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K62	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K63	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K64	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K65	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K66	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K67	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K68	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K69	S+ S+ R+ R+ S+ S+ R+ R+
+olda/K70	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K71	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K72	A A S+ S+ A A S+ S+
+olda/K73	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K74	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K75	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K76	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K77	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K78	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K79	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K80	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K81	S+ S+ S+ S+ S+ S+ S+ S+
+olda/K82	S+ S+ S+ S+ S+ S+ S+ S+
+olda/L01	S+ S+ S+ S+ S+ S+ S+ S+
+olda/L02	S+ S+ S+ S+ S+ S+ S+ S+
+olda/M01	A A A A A A A A
+olda/M02	A A A A A A A A
+olda/M03	A A A A A A A A
+olda/M04	A A A A A A A A
+olda/M05	A A A A A A A A
+olda/M06	A A A A A A A A
+olda/M07	A A A A A A A A
+olda/M08	A A A A A A A A
+olda/M09	A A A A A A A A
+olda/M10	S+ S+ S+ S+ S+ S+ S+ S+
+olda/M11	S+ S+ S+ S+ S+ S+ S+ S+
+olda/M12	S+ S+ S+ S+ S+ S+ S+ S+
+olda/M13	S+ S+ S+ S+ S+ S+ S+ S+
+olda/M14	S+ S+ S+ S+ S+ S+ S+ S+
+olda/M15	S+ S+ S+ S+ S+ S+ S+ S+
+olda/M16	S+ S+ S+ S+ S+ S+ S+ S+
+olda/M17	S+ S+ S+ S+ S+ S+ S+ S+
+olda/M18	B+ B+ B+ B+ B+ B+ B+ B+
+olda/M19	S+ S+ R+ R+ S+ S+ R+ R+
+olda/M20	S+ S+ R+ R+ S+ S+ R+ R+
+olda/M21	S+ S+ R+ R+ S+ S+ R+ R+
+olda/M22	S+ S+ S+ S+ S+ S+ S+ S+
+olda/M24	S+ S+ S+ S+ S+ S+ S+ S+
+olda/M25	A A A A A A A A
+olda/M26	A A A A A A A A
+olda/M27	S+ S+ S+ S+ S+ S+ S+ S+
+olda/M28	W R+ A A W R+ A A
+olda/M29	A A A A A A A A
+olda/M30	S+ S+ S+ S+ S+ S+ S+ S+
+olda/M31	S+ S+ S+ S+ S+ S+ S+ S+
+olda/M32	A A A A A A A A
+olda/M33	S+ S+ R+ R+ S+ S+ R+ R+
+olda/M34	S+ S+ R+ R+ S+ S+ R+ R+
+olda/M35	W R+ A A W R+ A A
+olda/M36	S+ S+ S+ S+ S+ S+ S+ S+
+olda/N01	S+ S+ S+ S+ S+ S+ S+ S+
+olda/N02	S+ S+ S+ S+ S+ S+ S+ S+
+olda/N03	S+ S+ S+ S+ S+ S+ S+ S+
+olda/N04	S+ S+ S+ S+ S+ S+ S+ S+
+olda/N05	S+ S+ S+ S+ S+ S+ S+ S+
+olda/N06	S+ S+ S+ S+ S+ S+ S+ S+
+olda/N07	S+ S+ S+ S+ S+ S+ S+ S+
+olda/N08	S+ S+ S+ S+ S+ S+ S+ S+
+olda/N09	S+ S+ S+ S+ S+ S+ S+ S+
+olda/N10	W R+ W R+ W R+ W R+
+olda/N11	S+ S+ S+ S+ S+ S+ S+ S+
+olda/N12	S+ S+ S+ S+ S+ S+ S+ S+
+olda/N13	W R+ W R+ W R+ W R+
+olda/N14	S+ S+ S+ S+ S+ S+ S+ S+
+olda/N15	S+ S+ S+ S+ S+ S+ S+ S+
+olda/N16	S+ S+ S+ S+ S+ S+ S+ S+
+olda/N17	S+ S+ S+ S+ S+ S+ S+ S+
+olda/N18	S+ S+ S+ S+ S+ S+ S+ S+
+olda/N19	S+ S+ S+ S+ S+ S+ S+ S+
+olda/N20	S+ S+ R+ R+ S+ S+ R+ R+
+olda/N21	S+ S+ S+ S+ S+ S+ S+ S+
+olda/N22	S+ S+ S+ S+ S+ S+ S+ S+
+olda/N23	S+ S+ S+ S+ S+ S+ S+ S+
+olda/O01	A A A A A A A A
+olda/O02	A A A A A A A A
+olda/O03	A A A A A A A A
+olda/O04	A A A A A A A A
+olda/O05	W R+ W R+ W R+ W R+
+olda/O06	W R+ A A W R+ A A
+olda/O07	W R+ A A W R+ A A
+olda/O08	W R+ W R+ W R+ W R+
+olda/O09	A A A A A A A A
+olda/O10	W R+ A A W R+ A A
+olda/O11	W R+ W R+ W R+ W R+
+olda/O12	W R+ W R+ W R+ W R+
+olda/O13	W R+ A A W R+ A A
+olda/O14	W R+ W R+ W R+ W R+
+olda/O15	A A W R+ A A W R+
+olda/O16	A A W R+ A A W R+
+olda/O17	W R+ W R+ W R+ W R+
+olda/O18	W R+ W R+ W R+ W R+
+olda/O19	W R+ W R+ W R+ W R+
+olda/O20	A A A A A A A A
+olda/O21	W R+ W R+ W R+ W R+
+olda/O22	A A A A A A A A
+olda/O23	A A A A A A A A
+olda/O24	W R+ W R+ W R+ W R+
+oldb/S01	S+ S+ S+ S+ S+ S+ S+ S+
+oldb/S02	S+ S+ S+ S+ S+ S+ S+ S+
+oldb/S03	S+ S+ S+ S+ S+ S+ S+ S+
+oldb/S04	S+ S+ S+ S+ S+ S+ S+ S+
+oldb/S05	S+ S+ S+ S+ S+ S+ S+ S+
+oldb/S06	W R+ A A W R+ A A
+oldb/S07	A S+ A A A S+ A A
+oldb/S08	S+ S+ S+ S+ S+ S+ S+ S+
+oldb/S09	W R+ W R+ W R+ W R+
+oldb/S10	W R+ W R+ W R+ W R+
+oldb/S11	S+ S+ S+ S+ S+ S+ S+ S+
+oldb/S12	W R+ W R+ W R+ W R+
+oldb/S13	S+ S+ S+ S+ S+ S+ S+ S+
+oldb/S14	S+ S+ S+ S+ S+ S+ S+ S+
+oldb/S15	S+ S+ S+ S+ S+ S+ S+ S+
+oldb/S16	S+ S+ S+ S+ S+ S+ S+ S+
+oldb/S17	S+ S+ S+ S+ S+ S+ S+ S+
+oldb/S18	S+ S+ S+ S+ S+ S+ S+ S+
+oldb/S19	S+ S+ S+ S+ S+ S+ S+ S+
+oldb/S20	S+ S+ S+ S+ S+ S+ S+ S+
+oldb/S21	S+ S+ S+ S+ S+ S+ S+ S+
+oldb/S22	A A A A A A A A
+oldb/S23	W R+ W R+ W R+ W R+
+oldb/S24	A S+ A A A S+ A A
+parity/set-0	W R+ W R+ W R+ W R+
+parity/set-1	W R+ W R+ W R+ W R+
+parity/set-2	W R+ W R+ W R+ W R+
+parity/set-3	W R+ W R+ W R+ W R+
+parity/set-4	A A A A A A A A
+parity/set-5	W R+ W R+ W R+ W R+
+parity/set-6	W R+ W R+ W R+ W R+
+parity/set-7	W R+ W R+ W R+ W R+
+parity/set-8	S+ S+ S+ S+ S+ S+ S+ S+
+parity/set-9	S+ S+ S+ S+ S+ S+ S+ S+
+parity/slash-0	W R+ W R+ W R+ W R+
+parity/slash-1	W R+ W R+ W R+ W R+
+parity/slash-2	W R+ W R+ W R+ W R+
+parity/slash-3	W R+ W R+ W R+ W R+
+parity/slash-4	A A A A A A A A
+parity/slash-5	W R+ W R+ W R+ W R+
+parity/slash-6	W R+ W R+ W R+ W R+
+parity/slash-7	W R+ W R+ W R+ W R+
+parity/slash-8	S+ S+ S+ S+ S+ S+ S+ S+
+parity/slash-9	S+ S+ S+ S+ S+ S+ S+ S+
+parity/unset-0	W R+ W R+ W R+ W R+
+parity/unset-1	W R+ W R+ W R+ W R+
+parity/unset-2	W R+ W R+ W R+ W R+
+parity/unset-3	W R+ W R+ W R+ W R+
+parity/unset-4	A A A A A A A A
+parity/unset-5	W R+ W R+ W R+ W R+
+parity/unset-6	W R+ W R+ W R+ W R+
+parity/unset-7	W R+ W R+ W R+ W R+
+parity/unset-8	S+ S+ S+ S+ S+ S+ S+ S+
+parity/unset-9	S+ S+ S+ S+ S+ S+ S+ S+
+patch/apply_patch/home/P01 add new	A A A A
+patch/apply_patch/home/P02 add new subdir	A A A A
+patch/apply_patch/home/P03 add absolute ordinary	A A A A
+patch/apply_patch/home/P04 update existing	A A A A
+patch/apply_patch/home/P05 add config name	A A A A
+patch/apply_patch/home/P10 add keys tilde	S+ S+ S+ S+
+patch/apply_patch/home/P11 add keys absolute	S+ S+ S+ S+
+patch/apply_patch/home/P12 add keys relative	S+ S+ S+ S+
+patch/apply_patch/home/P13 move to keys	S+ S+ S+ S+
+patch/apply_patch/home/P14 move to keys tilde	S+ S+ S+ S+
+patch/apply_patch/home/P15 update keylink	S+ S+ S+ S+
+patch/apply_patch/home/P16 add keylink	S+ S+ S+ S+
+patch/apply_patch/home/P17 add via dirlink	S+ S+ S+ S+
+patch/apply_patch/home/P18 delete keys	S+ S+ S+ S+
+patch/apply_patch/home/P19 add ssh config	B+ B+ B+ B+
+patch/apply_patch/home/P20 move to dirlink	S+ S+ S+ S+
+patch/apply_patch/project/P01 add new	A A A A
+patch/apply_patch/project/P02 add new subdir	A A A A
+patch/apply_patch/project/P03 add absolute ordinary	A A A A
+patch/apply_patch/project/P04 update existing	A A A A
+patch/apply_patch/project/P05 add config name	A A A A
+patch/apply_patch/project/P10 add keys tilde	S+ S+ S+ S+
+patch/apply_patch/project/P11 add keys absolute	S+ S+ S+ S+
+patch/apply_patch/project/P12 add keys relative	S+ S+ S+ S+
+patch/apply_patch/project/P13 move to keys	S+ S+ S+ S+
+patch/apply_patch/project/P14 move to keys tilde	S+ S+ S+ S+
+patch/apply_patch/project/P15 update keylink	S+ S+ S+ S+
+patch/apply_patch/project/P16 add keylink	S+ S+ S+ S+
+patch/apply_patch/project/P17 add via dirlink	S+ S+ S+ S+
+patch/apply_patch/project/P18 delete keys	S+ S+ S+ S+
+patch/apply_patch/project/P19 add ssh config	B+ B+ B+ B+
+patch/apply_patch/project/P20 move to dirlink	S+ S+ S+ S+
+patch/patch/home/P01 add new	A A A A
+patch/patch/home/P02 add new subdir	A A A A
+patch/patch/home/P03 add absolute ordinary	A A A A
+patch/patch/home/P04 update existing	A A A A
+patch/patch/home/P05 add config name	A A A A
+patch/patch/home/P10 add keys tilde	S+ S+ S+ S+
+patch/patch/home/P11 add keys absolute	S+ S+ S+ S+
+patch/patch/home/P12 add keys relative	S+ S+ S+ S+
+patch/patch/home/P13 move to keys	S+ S+ S+ S+
+patch/patch/home/P14 move to keys tilde	S+ S+ S+ S+
+patch/patch/home/P15 update keylink	S+ S+ S+ S+
+patch/patch/home/P16 add keylink	S+ S+ S+ S+
+patch/patch/home/P17 add via dirlink	S+ S+ S+ S+
+patch/patch/home/P18 delete keys	S+ S+ S+ S+
+patch/patch/home/P19 add ssh config	B+ B+ B+ B+
+patch/patch/home/P20 move to dirlink	S+ S+ S+ S+
+patch/patch/project/P01 add new	A A A A
+patch/patch/project/P02 add new subdir	A A A A
+patch/patch/project/P03 add absolute ordinary	A A A A
+patch/patch/project/P04 update existing	A A A A
+patch/patch/project/P05 add config name	A A A A
+patch/patch/project/P10 add keys tilde	S+ S+ S+ S+
+patch/patch/project/P11 add keys absolute	S+ S+ S+ S+
+patch/patch/project/P12 add keys relative	S+ S+ S+ S+
+patch/patch/project/P13 move to keys	S+ S+ S+ S+
+patch/patch/project/P14 move to keys tilde	S+ S+ S+ S+
+patch/patch/project/P15 update keylink	S+ S+ S+ S+
+patch/patch/project/P16 add keylink	S+ S+ S+ S+
+patch/patch/project/P17 add via dirlink	S+ S+ S+ S+
+patch/patch/project/P18 delete keys	S+ S+ S+ S+
+patch/patch/project/P19 add ssh config	B+ B+ B+ B+
+patch/patch/project/P20 move to dirlink	S+ S+ S+ S+

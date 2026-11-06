@@ -20,7 +20,11 @@ import (
 )
 
 func rv4oClass(body string) string {
-	if !(strings.Contains(body, `"deny"`) || strings.Contains(body, `"block"`)) {
+	if !strings.Contains(body, `"deny"`) && !strings.Contains(body, `"block"`) {
+		if strings.HasPrefix(body, `{"action":"alert"`) && strings.Contains(body, possibleArchiveWriteTitle) &&
+			strings.Contains(body, "persistence.ssh_authorized_keys_command") {
+			return "W"
+		}
 		return "A"
 	}
 	c := "B"

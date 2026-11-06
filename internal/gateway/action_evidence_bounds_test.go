@@ -95,6 +95,9 @@ func (f b36ManagedHookFixture) post(t *testing.T, connector string, payload []by
 		return "block"
 	case strings.HasPrefix(body, `{"action":"allow"`):
 		return "allow"
+	case strings.HasPrefix(body, `{"action":"alert"`) && strings.Contains(body, possibleArchiveWriteTitle) &&
+		strings.Contains(body, "persistence.ssh_authorized_keys_command"):
+		return "allow"
 	}
 	return fmt.Sprintf("status %d body %.200s", recorder.Code, body)
 }

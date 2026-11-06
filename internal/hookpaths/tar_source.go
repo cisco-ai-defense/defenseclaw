@@ -45,6 +45,17 @@ func tarKnownValues(file *syntax.File, extraction *syntax.CallExpr, cwd, home st
 		}
 		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) == 0 {
 			actionUpdateValues(stmt, values, cwd, home)
+			for _, assign := range call.Assigns {
+				if assign.Name == nil || assign.Append || assign.Index != nil || assign.Array == nil || len(assign.Array.Elems) == 0 {
+					continue
+				}
+				first := assign.Array.Elems[0]
+				if first.Index == nil && first.Value != nil {
+					if value, fixed := StaticWord(first.Value, home); fixed {
+						values[assign.Name.Value+"[0]"] = value
+					}
+				}
+			}
 		}
 	}
 	for _, stmt := range file.Stmts {
@@ -67,6 +78,24 @@ func resolvedTarSources(file *syntax.File, extraction *syntax.CallExpr, cwd, hom
 		}
 		if v, ok := StaticWord(w, home); ok {
 			return v, true
+		}
+		parts := w.Parts
+		if len(parts) == 1 {
+			if quoted, ok := parts[0].(*syntax.DblQuoted); ok {
+				parts = quoted.Parts
+			}
+		}
+		if len(parts) == 1 {
+			if param, ok := parts[0].(*syntax.ParamExp); ok && param.Param != nil && param.Slice != nil && param.Index != nil {
+				var index, offset, length strings.Builder
+				printer := syntax.NewPrinter()
+				if printer.Print(&index, param.Index) == nil && index.String() == "@" &&
+					printer.Print(&offset, param.Slice.Offset) == nil && offset.String() == "0" &&
+					printer.Print(&length, param.Slice.Length) == nil && length.String() == "1" {
+					value, fixed := values[param.Param.Value+"[0]"]
+					return value, fixed
+				}
+			}
 		}
 		return actionWordValue(w, values, cwd, home)
 	}
@@ -143,8 +172,7 @@ func resolvedTarSources(file *syntax.File, extraction *syntax.CallExpr, cwd, hom
 		})
 		return out
 	}
-	var producer func(*syntax.CallExpr) []string
-	producer = func(c *syntax.CallExpr) []string {
+	producer := func(c *syntax.CallExpr) []string {
 		p, a, s := args(c)
 		var out []string
 		switch p {
@@ -298,7 +326,14 @@ func resolvedTarSources(file *syntax.File, extraction *syntax.CallExpr, cwd, hom
 			for _, st := range sub.Stmts {
 				syntax.Walk(st, func(n syntax.Node) bool {
 					if c, ok := n.(*syntax.CallExpr); ok {
-						sources = append(sources, producer(c)...)
+						input := producer(c)
+						if len(input) > 1 {
+							virtual := filepath.Join(cwd, ".dc-subst-archive-"+strconv.Itoa(int(c.Pos().Offset())))
+							writes[virtual] = input
+							sources = append(sources, virtual)
+						} else {
+							sources = append(sources, input...)
+						}
 					}
 					return true
 				})
@@ -320,7 +355,14 @@ func resolvedTarSources(file *syntax.File, extraction *syntax.CallExpr, cwd, hom
 					for _, s := range sub.Stmts {
 						syntax.Walk(s, func(n syntax.Node) bool {
 							if c, ok := n.(*syntax.CallExpr); ok {
-								sources = append(sources, producer(c)...)
+								input := producer(c)
+								if len(input) > 1 {
+									virtual := filepath.Join(cwd, ".dc-subst-archive-"+strconv.Itoa(int(c.Pos().Offset())))
+									writes[virtual] = input
+									sources = append(sources, virtual)
+								} else {
+									sources = append(sources, input...)
+								}
 							}
 							return true
 						})
@@ -377,105 +419,4 @@ func resolvedTarSources(file *syntax.File, extraction *syntax.CallExpr, cwd, hom
 			os.Remove(p)
 		}
 	}
-}
-
-// unfollowedTarProducer keeps the conservative archive reading when shell
-// syntax supplies tar's stdin but no source bytes could be resolved. A plain
-// missing file operand without a producer remains Possible.
-func unfollowedTarProducer(file *syntax.File, extraction *syntax.CallExpr) bool {
-	if file == nil || extraction == nil {
-		return false
-	}
-	// A static remote URL has no local bytes for the gateway to name or
-	// read. Keep that genuinely unverifiable input Possible in balanced.
-	remoteOnly := false
-	syntax.Walk(file, func(n syntax.Node) bool {
-		pipe, ok := n.(*syntax.BinaryCmd)
-		if !ok || pipe.Op != syntax.Pipe || extraction.Pos().Offset() < pipe.Y.Pos().Offset() || extraction.End().Offset() > pipe.Y.End().Offset() {
-			return true
-		}
-		syntax.Walk(pipe.X, func(n syntax.Node) bool {
-			call, ok := n.(*syntax.CallExpr)
-			if !ok {
-				return true
-			}
-			for _, arg := range call.Args[1:] {
-				value, fixed := StaticWord(arg, "")
-				if fixed && (strings.HasPrefix(value, "https://") || strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "ftp://")) {
-					remoteOnly = true
-				}
-			}
-			return true
-		})
-		return false
-	})
-	if remoteOnly {
-		return false
-	}
-	found := false
-	syntax.Walk(file, func(n syntax.Node) bool {
-		if found {
-			return false
-		}
-		if pipe, ok := n.(*syntax.BinaryCmd); ok && pipe.Op == syntax.Pipe &&
-			extraction.Pos().Offset() >= pipe.Y.Pos().Offset() && extraction.End().Offset() <= pipe.Y.End().Offset() {
-			found = true
-			return false
-		}
-		if st, ok := n.(*syntax.Stmt); ok && st.Cmd == syntax.Command(extraction) {
-			for _, r := range st.Redirs {
-				if r.Op == syntax.RdrIn {
-					found = true
-					return false
-				}
-			}
-		}
-		return true
-	})
-	syntax.Walk(extraction, func(n syntax.Node) bool {
-		if _, ok := n.(*syntax.ProcSubst); ok {
-			found = true
-		}
-		return !found
-	})
-	return found
-}
-
-// unknownPriorArchiveWrite identifies an earlier output redirect to a missing
-// archive operand. Its source is not proved, so the earlier base reading is
-// retained rather than treating the missing on-disk file as ordinary.
-func unknownPriorArchiveWrite(file *syntax.File, extraction *syntax.CallExpr, cwd, home string, sources []string) bool {
-	if file == nil || extraction == nil {
-		return false
-	}
-	targets := map[string]bool{}
-	for _, source := range sources {
-		if source != "" {
-			targets[OperandPath(source, cwd)] = true
-		}
-	}
-	if len(targets) == 0 {
-		return false
-	}
-	found := false
-	syntax.Walk(file, func(n syntax.Node) bool {
-		if found {
-			return false
-		}
-		st, ok := n.(*syntax.Stmt)
-		if !ok || st.Pos().Offset() >= extraction.Pos().Offset() {
-			return true
-		}
-		for _, r := range st.Redirs {
-			if r.Word == nil || r.Op != syntax.RdrOut && r.Op != syntax.AppOut && r.Op != syntax.RdrClob {
-				continue
-			}
-			if value, ok := StaticWord(r.Word, home); ok && targets[OperandPath(value, cwd)] {
-				found = true
-				return false
-			}
-		}
-		return true
-	})
-	return found
 }

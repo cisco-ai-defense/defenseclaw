@@ -13,6 +13,12 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
+func gx054BalancedAllow(body string) bool {
+	return strings.HasPrefix(body, `{"action":"allow"`) ||
+		strings.HasPrefix(body, `{"action":"alert"`) && strings.Contains(body, possibleArchiveWriteTitle) &&
+			strings.Contains(body, "persistence.ssh_authorized_keys_command")
+}
+
 // TestR103B36ManagedArchiveScopeUsesClientWalk replays the GAP-0278 FP-0001
 // PreToolUse payload from the managed RHEL lane. The hook client runs as the
 // user and walks the operands; the managed gateway runs with ProtectHome and
@@ -51,7 +57,7 @@ func TestR103B36ManagedArchiveScopeUsesClientWalk(t *testing.T) {
 	}
 	t.Setenv("HOME", home)
 	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
-	const block, allow = `{"action":"block"`, `{"action":"allow"`
+	const block = `{"action":"block"`
 	body := func(t *testing.T, command string) []byte {
 		t.Helper()
 		return mustJSON(t, map[string]any{"session_id": "s", "hook_event_name": "PreToolUse", "cwd": project,
@@ -132,7 +138,7 @@ func TestR103B36ManagedArchiveScopeUsesClientWalk(t *testing.T) {
 	for _, connector := range []string{"claudecode", "codex"} {
 		t.Run(connector, func(t *testing.T) {
 			for _, command := range allowed {
-				if got := post(t, connector, command, nil); !strings.HasPrefix(got, allow) {
+				if got := post(t, connector, command, nil); !gx054BalancedAllow(got) {
 					t.Errorf("%s = %.300s, want allow", command, got)
 				}
 			}
@@ -152,7 +158,7 @@ func TestR103B36ManagedArchiveScopeUsesClientWalk(t *testing.T) {
 			// in balanced; strict retains the earlier conservative reading.
 			if got := post(t, connector, allowed[3], func(targets map[string]string) {
 				delete(targets, hookpaths.OpaqueScopeFactPrefix+report)
-			}); !strings.HasPrefix(got, allow) {
+			}); !gx054BalancedAllow(got) {
 				t.Errorf("missing opaque-scope fact = %.300s, want allow", got)
 			}
 			pack = "strict"

@@ -21,7 +21,7 @@ import (
 )
 
 func rv054Class(body string) string {
-	if !(strings.Contains(body, `"deny"`) || strings.Contains(body, `"block"`)) {
+	if !strings.Contains(body, `"deny"`) && !strings.Contains(body, `"block"`) {
 		return "A"
 	}
 	c := "B"

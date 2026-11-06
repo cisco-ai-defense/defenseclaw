@@ -1389,7 +1389,7 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 				for _, command := range blocked {
 					got := post(t, command)
 					if balancedArchive[command] {
-						if !strings.HasPrefix(got, allow) {
+						if !gx054BalancedAllow(got) {
 							t.Errorf("%s = %.300s, want balanced allow", command, got)
 						}
 						strict := postWithPack(t, command, "strict")

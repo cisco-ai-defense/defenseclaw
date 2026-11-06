@@ -29,8 +29,11 @@ func TestGX054UnfollowedArchiveProducerKeepsBaseDecision(t *testing.T) {
 					payload := mustJSON(t, body)
 					header := rv4Header(t, f, connector, payload)
 					got := rv4oPost(t, f.homes, f.home, connector, cell.pack, payload, header, cell.managed)
-					if got == "A" || len(got) == 0 || got[len(got)-1] != '+' {
-						t.Errorf("%s managed=%t pack=%q got %s, want protected block", connector, cell.managed, cell.pack, got)
+					if cell.pack == "" && got != "W" {
+						t.Errorf("%s managed=%t pack=%q got %s, want visible Possible warning", connector, cell.managed, cell.pack, got)
+					}
+					if cell.pack == "strict" && (got == "A" || got == "W" || len(got) == 0 || got[len(got)-1] != '+') {
+						t.Errorf("%s managed=%t pack=%q got %s, want strict block", connector, cell.managed, cell.pack, got)
 					}
 					os.Chmod(f.homes, 0o700)
 				}

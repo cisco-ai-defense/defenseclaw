@@ -116,21 +116,20 @@ func xzDictionaryCap(reader *bufio.Reader) int {
 }
 
 // tarArchiveHoldsNoLink reports a static tar extraction whose one archive
-// file holds only regular files and directories with relative names and no
-// .. component, so it makes no link in its destination
+// file is fully read and holds no link to the protected SSH tree
 // (rel-1-0-6:GAP-0339): tar -xf plain.tar -C d1 && cp -a d1 e3 && echo k
 // >> e3/p writes a plain file. The destination must be known (tarScan),
 // the archive word must appear once in the command, and the archive must
-// be plain, gzip or bzip2. The caller also requires that no statement
+// be a supported tar encoding. The caller also requires that no statement
 // before the extraction can write a file and that the extraction statement
 // has no redirection (onlyDirectoryStatementsBefore): another name for the
 // archive (a hard link, a symbolic link) could rewrite it before tar opens
 // it (reviews 8 and 9). The hook client reads the archive and
 // records TarPlainFactPrefix; a gateway with client evidence needs the
-// fact and its own read of the archive. Anything else keeps the opaque
-// reading. A process outside the command can still replace the archive
+// fact and either its own read or a genuinely inaccessible home. Anything
+// else keeps the opaque reading. A process outside the command can still replace the archive
 // between the check and the run, as it can any file a disk walk reads.
-func tarArchiveHoldsNoLink(program string, args []string, static []bool, cwd, command string, facts map[string]string, record bool, kind func(string) int) bool {
+func tarArchiveHoldsNoLink(program string, args []string, static []bool, cwd, command, home string, facts map[string]string, record bool, kind func(string) int) bool {
 	if !strings.HasSuffix(program, "tar") || !filepath.IsAbs(cwd) {
 		return false
 	}
@@ -144,13 +143,70 @@ func tarArchiveHoldsNoLink(program string, args []string, static []bool, cwd, co
 	}
 	path := OperandPath(archive, cwd)
 	key := TarPlainFactPrefix + path
+	archiveKind := kind(path)
+	plain := archiveKind == 1 || archiveKind == 4 &&
+		len(tarProtectedLinkMembers(path, archiveDestination(program, args, static, cwd), home)) == 0
 	if !record && facts != nil {
-		// A client claim alone does not clear the scope: the gateway reads
-		// the archive itself and needs the fact as well. One that cannot
-		// read it (ProtectHome) keeps the opaque reading (review 8).
-		return facts[key] == "1" && kind(path) == 1
+		// The signed client fact supplies the reading when ProtectHome hides
+		// the archive. An available gateway reading must agree with it.
+		return facts[key] == "1" && (plain || archiveKind == 0)
 	}
-	plain := kind(path) == 1
+	if record && facts != nil && plain {
+		facts[key] = "1"
+	}
+	return plain
+}
+
+// tarArchiveHoldsNoProtectedPipe proves a read-only pipeline's archive bytes.
+// Earlier statements are excluded because they could rewrite a producer file.
+func tarArchiveHoldsNoProtectedPipe(file *syntax.File, extraction *syntax.CallExpr, program string, args []string, static []bool, cwd, home string, facts map[string]string, record bool, kindOf func(string) int) bool {
+	if file == nil || extraction == nil || !strings.HasSuffix(program, "tar") || !filepath.IsAbs(cwd) {
+		return false
+	}
+	var pipe *syntax.BinaryCmd
+	syntax.Walk(file, func(node syntax.Node) bool {
+		candidate, ok := node.(*syntax.BinaryCmd)
+		if ok && candidate.Op == syntax.Pipe && extraction.Pos().Offset() >= candidate.Y.Pos().Offset() &&
+			extraction.End().Offset() <= candidate.Y.End().Offset() {
+			pipe = candidate
+		}
+		return true
+	})
+	if pipe == nil {
+		return false
+	}
+	earlierCall := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if call, ok := node.(*syntax.CallExpr); ok && call.End().Offset() <= pipe.Pos().Offset() {
+			earlierCall = true
+		}
+		if redirect, ok := node.(*syntax.Redirect); ok && redirect.End().Offset() <= pipe.Pos().Offset() &&
+			(redirect.Op == syntax.RdrOut || redirect.Op == syntax.AppOut || redirect.Op == syntax.RdrClob) {
+			earlierCall = true
+		}
+		return !earlierCall
+	})
+	if earlierCall {
+		return false
+	}
+	for _, statement := range file.Stmts {
+		if statement.End().Offset() <= pipe.Pos().Offset() {
+			return false
+		}
+	}
+	sources, cleanup := resolvedTarSources(file, extraction, cwd, home)
+	defer cleanup()
+	if len(sources) != 1 {
+		return false
+	}
+	path := OperandPath(sources[0], cwd)
+	key := TarPlainFactPrefix + path
+	kind := kindOf(path)
+	plain := kind == 1 || kind == 4 &&
+		len(tarProtectedLinkMembers(path, archiveDestination(program, args, static, cwd), home)) == 0
+	if !record && facts != nil {
+		return facts[key] == "1" && (plain || kind == 0)
+	}
 	if record && facts != nil && plain {
 		facts[key] = "1"
 	}
@@ -187,12 +243,8 @@ func tarArchiveLinkEvidence(program string, args []string, static []bool, cwd st
 				}
 			}
 		}
-		if len(resolved) == 0 && unfollowedTarProducer(file, extraction) {
-			return true
-		}
 		return false
 	}
-	readSource := false
 	for _, archive := range resolved {
 		if archive == "" || archive == "-" || strings.ContainsAny(archive, "*?[$`") {
 			continue
@@ -203,8 +255,8 @@ func tarArchiveLinkEvidence(program string, args []string, static []bool, cwd st
 		}
 		readable := ""
 		kind := kindOf(path)
-		readSource = readSource || kind != 0
-		if kind == 2 {
+		if (kind == 2 || kind == 3 || kind == 4) &&
+			len(tarProtectedLinkMembers(path, archiveDestination(program, args, static, cwd), home)) != 0 {
 			readable = path
 		} else {
 			readable = tarArchivePriorLinkedRewriteNamed(file, extraction, archive, cwd, home)
@@ -220,10 +272,6 @@ func tarArchiveLinkEvidence(program string, args []string, static []bool, cwd st
 			}
 			return true
 		}
-	}
-	if !readSource && (len(resolved) == 0 && unfollowedTarProducer(file, extraction) ||
-		unknownPriorArchiveWrite(file, extraction, cwd, home, resolved)) {
-		return true
 	}
 	return false
 }
@@ -492,6 +540,17 @@ func tarArchivePriorLinkedRewriteNamed(file *syntax.File, extraction *syntax.Cal
 	}
 	archivePath := OperandPath(archive, cwd)
 	archiveInfo, _ := os.Stat(archivePath)
+	extractArgs, extractStatic := make([]string, 0, len(extraction.Args)-1), make([]bool, 0, len(extraction.Args)-1)
+	for _, word := range extraction.Args[1:] {
+		value, fixed := StaticWord(word, home)
+		extractArgs, extractStatic = append(extractArgs, value), append(extractStatic, fixed)
+	}
+	destination := archiveDestination("tar", extractArgs, extractStatic, cwd)
+	protectedSource := func(source string) bool {
+		path := OperandPath(source, cwd)
+		return len(tarProtectedLinkMembers(path, destination, home)) != 0 ||
+			len(tarProtectedAbsoluteLinkMembers(path, cwd, home)) != 0
+	}
 	var redirectRanges [][2]syntax.Pos
 	syntax.Walk(file, func(node syntax.Node) bool {
 		stmt, ok := node.(*syntax.Stmt)
@@ -535,7 +594,7 @@ func tarArchivePriorLinkedRewriteNamed(file *syntax.File, extraction *syntax.Cal
 					destination = strings.TrimPrefix(value, "of=")
 				}
 			}
-			if source != "" && destination != "" && tarArchiveKind(OperandPath(source, cwd)) == 2 &&
+			if source != "" && destination != "" && protectedSource(source) &&
 				OperandPath(destination, cwd) == archivePath {
 				linkedRewrite = OperandPath(source, cwd)
 				return false
@@ -544,7 +603,7 @@ func tarArchivePriorLinkedRewriteNamed(file *syntax.File, extraction *syntax.Cal
 		}
 		if fixed && programBase(program) == "tee" {
 			for _, source := range tarArchiveSources(nil, nil, file, candidate, home) {
-				if tarArchiveKind(OperandPath(source, cwd)) != 2 {
+				if !protectedSource(source) {
 					continue
 				}
 				for _, word := range candidate.Args[1:] {
@@ -588,7 +647,7 @@ func tarArchivePriorLinkedRewriteNamed(file *syntax.File, extraction *syntax.Cal
 				continue
 			}
 			sourcePath := OperandPath(source, cwd)
-			if tarArchiveKind(sourcePath) != 2 {
+			if !protectedSource(source) {
 				continue
 			}
 			destinationPath := OperandPath(destination, cwd)
@@ -625,7 +684,7 @@ func tarArchivePriorLinkedRewriteNamed(file *syntax.File, extraction *syntax.Cal
 		}
 		for _, word := range call.Args[1:] {
 			source, fixed := StaticWord(word, home)
-			if !fixed || tarArchiveKind(OperandPath(source, cwd)) != 2 {
+			if !fixed || !protectedSource(source) {
 				continue
 			}
 			for _, redir := range stmt.Redirs {
@@ -700,8 +759,8 @@ func tarArchiveWord(args []string, static []bool) (string, bool) {
 	return archive, found == 1
 }
 
-// tarArchiveKind is unknown (0), plain (1), link or unsafe member (2), or
-// incomplete because a read bound was reached (3). Only 2 is positive evidence.
+// tarArchiveKind is unknown (0), plain (1), unsafe member (2), incomplete (3),
+// or completely read with links whose targets need destination-aware grading (4).
 func tarArchiveKind(path string) int {
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() {
@@ -757,15 +816,12 @@ func tarArchiveKind(path string) int {
 				return 0
 			}
 			if nonPlain {
-				return 2
+				return 4
 			}
 			return 1
 		}
 		if err != nil {
 			if errors.Is(err, errTarPlainBound) {
-				if nonPlain {
-					return 2
-				}
 				return 3
 			}
 			if nonPlain {
@@ -774,9 +830,6 @@ func tarArchiveKind(path string) int {
 			return 0
 		}
 		if members++; members > maxTarPlainMembers {
-			if nonPlain {
-				return 2
-			}
 			return 3
 		}
 		switch header.Typeflag {
@@ -796,9 +849,6 @@ func tarArchiveKind(path string) int {
 		// The next payload cannot fit inside this read. A link already
 		// named by a header stays positive; the rest is only Possible.
 		if header.Size >= bound.n {
-			if nonPlain {
-				return 2
-			}
 			return 3
 		}
 	}

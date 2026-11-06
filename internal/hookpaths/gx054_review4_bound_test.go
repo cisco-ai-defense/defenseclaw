@@ -45,8 +45,8 @@ func rv4Measure(t *testing.T, label, path string) {
 	members := tarProtectedLinkMembers(path, filepath.Join(filepath.Dir(path), "d1"), home)
 	t.Logf("BOUND|%s|kind=%d|%dms|totalalloc=%dMB|sysdelta=%dMB|members=%d|%dms", label, kind, elapsed.Milliseconds(),
 		(after.TotalAlloc-before.TotalAlloc)>>20, (after.Sys-before.Sys)>>20, len(members), time.Since(start2).Milliseconds())
-	if label == "xz-dict-00" && kind != 2 {
-		t.Errorf("ordinary xz archive kind=%d, want link evidence", kind)
+	if label == "xz-dict-00" && kind != 4 {
+		t.Errorf("ordinary xz archive kind=%d, want completely read links", kind)
 	}
 	if (strings.HasPrefix(label, "xz-dict-") && label != "xz-dict-00" || label == "zstd-bomb-200M") &&
 		after.TotalAlloc-before.TotalAlloc > 80<<20 {
