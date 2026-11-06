@@ -579,10 +579,13 @@ The guardian is always running.
 
 On a standalone Windows host, Setup `/ensure`, `/repair`, `/upgrade` or `/uninstall` stops with exit `1603` and the message "refusing to change the deployment, and nothing was changed" (or `/verify` with "refusing to re-stamp a managed path in place"). Another account owns a managed file or folder, or can change it, for example after `icacls <path> /grant Users:(M)` or `icacls <StateRoot> /reset /T`. Setup does not give such a path a trusted access list back, because that account may have changed it. No service was stopped. The message names every refused path (up to 20), the account, and what to do for each.
 
-The hook guardian, and every DefenseClaw step that reads or updates the Claude Code, Codex and Cursor policy folders, do not repair these paths either. That covers those policy folders, DefenseClaw's files in them (the ownership record, the runtime selector, the Cursor rollback receipt) and the folders and files under the DefenseClaw state root. Every reader keeps refusing such a path. The guardian log names each one once, with its fix, in one of two lines:
+The hook guardian, and every DefenseClaw step that reads or updates the Claude Code, Codex and Cursor policy folders, do not repair these paths either. That covers those policy folders, DefenseClaw's files in them (the ownership record, the runtime selector, the Cursor rollback receipt), a vendor policy folder that holds a DefenseClaw file, and the folders and files under the DefenseClaw state root (the runtime folder and its tokens, the databases, the secrets folder, the hook guardian's records). Every reader keeps refusing such a path. The guardian log names each one once, with its fix, in one of three lines:
 
 - `machine policy object drift was not repaired`: a policy folder or a DefenseClaw file in it.
 - `not repaired in place on a standalone install`: a folder or file under the state root.
+- `hook guardian ledger was not repaired`: the hook guardian's authorization folder, `protected_targets.json`, `activation.json` or `hook_guardian_state.json`.
+
+A redaction correlation key another account owns or can change is replaced with a new key instead, so pseudonymised values start over.
 
 If an earlier Setup run stopped with the services stopped, the next run can stop with "refusing to recover the pending lifecycle transaction" instead. The services stay stopped and the transaction stays pending until you fix the paths it names, as below, and run Setup again.
 
