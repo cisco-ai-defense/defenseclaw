@@ -414,9 +414,21 @@ def real_local(tmp_path: Path):
         yield local
 
 
+def _set_owner(path: Path, sid: str) -> None:
+    result = subprocess.run(["icacls", str(path), "/setowner", "*" + sid], capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        pytest.skip(f"setting the owner of {path} to {sid} failed: {result.stdout.strip()}")
+
+
 @windows_only
 def test_real_own_program_folder_passes_the_owner_check(real_local: Path) -> None:
+    from defenseclaw.file_permissions import _windows_current_user_sid
+
     root = _install(real_local)
+    # The 0.8.x Setup ran as the user, so its folder is the user's. Under an
+    # elevated token new folders belong to Administrators instead; give this
+    # one the owner a Setup install has.
+    _set_owner(root, _windows_current_user_sid())
     assert legacy_setup_install._ownership_problem(str(root)) == ""
     found = legacy_setup_install.find("win32")
     assert found is not None and found.problem == ""
@@ -444,9 +456,13 @@ def test_real_program_folder_below_a_junction_is_refused(real_local: Path, tmp_p
     state = json.loads(state_path.read_text(encoding="utf-8"))
     state["install_root"] = str(real_local / "Programs" / "DefenseClaw")
     state_path.write_text(json.dumps(state), encoding="utf-8")
+    linked = real_local / "Programs" / "DefenseClaw"
+    problem = legacy_setup_install._ownership_problem(str(linked))
+    assert "reparse-point ancestor" in problem and str(real_local / "Programs").lower() in problem.lower()
+    # find() stops even earlier: the install state is never read through a link.
     found = legacy_setup_install.find("win32")
     assert found is not None
-    assert "reparse-point ancestor" in found.problem and str(real_local / "Programs") in found.problem
+    assert found.problem and str(real_local / "Programs") in found.problem
     done, problems = legacy_setup_install.remove(found, edit_user_path=lambda _path: True)
     assert done == [] and problems
     assert (elsewhere / "Programs" / "DefenseClaw" / "bin" / "defenseclaw-gateway.exe").is_file()
@@ -454,14 +470,12 @@ def test_real_program_folder_below_a_junction_is_refused(real_local: Path, tmp_p
 
 @windows_only
 def test_real_program_folder_owned_by_another_account_is_refused(real_local: Path) -> None:
+    from defenseclaw.file_permissions import _windows_current_user_sid
+
     root = _install(real_local)
     administrators = "S-1-5-32-544"
-    result = subprocess.run(
-        ["icacls", str(root), "/setowner", "*" + administrators], capture_output=True, text=True, check=False
-    )
-    if result.returncode != 0:
-        pytest.skip(f"giving the folder another owner needs an elevated token: {result.stdout.strip()}")
-    from defenseclaw.file_permissions import _windows_current_user_sid
+    # Another owner than this account; an elevated token can give it to Administrators.
+    _set_owner(root, administrators)
 
     assert _windows_current_user_sid() != administrators
     found = legacy_setup_install.find("win32")
