@@ -12,9 +12,14 @@ of its programs, and keeps its data folder.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import shutil
+import subprocess
 import sys
+import time
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -291,3 +296,211 @@ def test_execute_plan_removes_the_old_install_after_teardown_and_before_leftover
     phase = next(p for p in result.phases if p.name == "DefenseClaw Setup 0.8.x removal")
     assert phase.status == "succeeded"
     assert root.exists()  # remove() was stubbed
+
+
+# The scoping rules, checked against real Windows state: a real registry key,
+# a real junction, a real owner and real processes. Only the hive path is the
+# test's own, so no test touches the account's real Run or Uninstall entries.
+
+windows_only = pytest.mark.skipif(sys.platform != "win32", reason="real Windows registry, ACL and process checks")
+
+_LOCAL = "c:\\users\\u\\appdata\\local\\"
+_PREFIXES = (_LOCAL + "programs\\defenseclaw\\", _LOCAL + "defenseclaw\\installercache\\")
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('"' + _PREFIXES[0] + 'bin\\defenseclaw-startup.exe" --sign-in', True),
+        (_PREFIXES[0] + "bin\\defenseclaw-startup.exe", True),
+        ('  "' + _PREFIXES[1] + 'defenseclawsetup-x64.exe" /resume', True),
+        # Another program that only passes the folder as an argument is not this install's.
+        ('"c:\\windows\\system32\\cmd.exe" /c dir "' + _PREFIXES[0] + 'bin"', False),
+        ("c:\\tools\\sync.exe " + _PREFIXES[0], False),
+        # A sibling folder whose name only starts the same way.
+        ('"' + _LOCAL + 'programs\\defenseclawother\\bin\\x.exe"', False),
+        ("", False),
+    ],
+)
+def test_a_run_value_is_the_installs_only_when_its_program_starts_in_the_folder(command: str, expected: bool) -> None:
+    assert legacy_setup_install._starts_in(command, _PREFIXES) is expected
+
+
+@pytest.fixture
+def hkcu_key(monkeypatch):
+    """A fresh HKCU key for one test; the module's Run and Uninstall paths point under it."""
+    import winreg
+
+    base = rf"Software\DefenseClawTest\{uuid.uuid4().hex}"
+    monkeypatch.setattr(legacy_setup_install, "_RUN_KEY", base + r"\Run")
+    monkeypatch.setattr(legacy_setup_install, "_UNINSTALL_KEY", base + r"\Uninstall\DefenseClaw")
+    yield base
+    with contextlib.suppress(FileNotFoundError):
+        legacy_setup_install._delete_key_tree(winreg.HKEY_CURRENT_USER, base)
+    with contextlib.suppress(OSError):
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, r"Software\DefenseClawTest")
+
+
+def _values(path: str) -> dict[str, str]:
+    import winreg
+
+    found: dict[str, str] = {}
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as key:
+        index = 0
+        while True:
+            try:
+                name, value, _kind = winreg.EnumValue(key, index)
+            except OSError:
+                return found
+            found[name] = value
+            index += 1
+
+
+@windows_only
+def test_real_run_key_loses_only_the_values_that_start_in_the_install(hkcu_key: str, tmp_path: Path) -> None:
+    import winreg
+
+    root = tmp_path / "Programs" / "DefenseClaw"
+    cache = tmp_path / "DefenseClaw" / "InstallerCache"
+    values = {
+        "DefenseClaw": f'"{root}\\bin\\defenseclaw-startup.exe" --sign-in',
+        "DefenseClawSetupResume": f"{cache}\\DefenseClawSetup-x64.exe /resume",
+        "Unrelated": r'"C:\Windows\System32\notepad.exe"',
+        "PassesTheFolder": f'"C:\\Windows\\System32\\cmd.exe" /c dir "{root}\\bin"',
+        "Sibling": f'"{root}Other\\bin\\x.exe"',
+        "NotAString": b"\x00",
+    }
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, legacy_setup_install._RUN_KEY) as key:
+        for name, value in values.items():
+            kind = winreg.REG_BINARY if isinstance(value, bytes) else winreg.REG_SZ
+            winreg.SetValueEx(key, name, 0, kind, value)
+    removed = legacy_setup_install._remove_run_values(str(root), str(cache))
+    assert sorted(removed) == ["DefenseClaw", "DefenseClawSetupResume"]
+    assert sorted(_values(legacy_setup_install._RUN_KEY)) == ["NotAString", "PassesTheFolder", "Sibling", "Unrelated"]
+
+
+@windows_only
+def test_real_uninstall_entry_of_another_location_stays(hkcu_key: str, tmp_path: Path) -> None:
+    import winreg
+
+    root = tmp_path / "Programs" / "DefenseClaw"
+    path = legacy_setup_install._UNINSTALL_KEY
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, path) as key:
+        winreg.SetValueEx(key, "InstallLocation", 0, winreg.REG_SZ, str(tmp_path / "Programs" / "DefenseClawOther"))
+    winreg.CreateKey(winreg.HKEY_CURRENT_USER, path + r"\Child").Close()
+    assert legacy_setup_install._remove_uninstall_entry(str(root)) is False
+    assert _values(path)["InstallLocation"].endswith("DefenseClawOther")
+    # The same folder, spelled with another case and a trailing separator, is this install.
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE) as key:
+        winreg.SetValueEx(key, "InstallLocation", 0, winreg.REG_SZ, str(root).upper() + "\\")
+    assert legacy_setup_install._remove_uninstall_entry(str(root)) is True
+    with pytest.raises(FileNotFoundError):
+        winreg.OpenKey(winreg.HKEY_CURRENT_USER, path).Close()
+
+
+def _junction(link: Path, target: Path) -> None:
+    result = subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(target)], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.fixture
+def real_local(tmp_path: Path):
+    """A LocalAppData whose ownership checks run for real."""
+    local = tmp_path.resolve() / "LocalAppData"
+    local.mkdir()
+    with patch.object(legacy_setup_install, "local_app_data", return_value=str(local)):
+        yield local
+
+
+@windows_only
+def test_real_own_program_folder_passes_the_owner_check(real_local: Path) -> None:
+    root = _install(real_local)
+    assert legacy_setup_install._ownership_problem(str(root)) == ""
+    found = legacy_setup_install.find("win32")
+    assert found is not None and found.problem == ""
+
+
+@windows_only
+def test_real_program_folder_that_is_a_junction_is_refused(real_local: Path, tmp_path: Path) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    root = _install(elsewhere)
+    (real_local / "Programs").mkdir()
+    _junction(real_local / "Programs" / "DefenseClaw", root)
+    assert legacy_setup_install._ownership_problem(str(real_local / "Programs" / "DefenseClaw")) == (
+        "its program folder is a link"
+    )
+
+
+@windows_only
+def test_real_program_folder_below_a_junction_is_refused(real_local: Path, tmp_path: Path) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    _install(elsewhere)
+    _junction(real_local / "Programs", elsewhere / "Programs")
+    # install-state.json names the real folder, so point it at the linked path the
+    # Known Folder gives; only the link above the folder is left to refuse it.
+    state_path = real_local / "Programs" / "DefenseClaw" / "installer" / "install-state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["install_root"] = str(real_local / "Programs" / "DefenseClaw")
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    found = legacy_setup_install.find("win32")
+    assert found is not None
+    assert "reparse-point ancestor" in found.problem and str(real_local / "Programs") in found.problem
+    done, problems = legacy_setup_install.remove(found, edit_user_path=lambda _path: True)
+    assert done == [] and problems
+    assert (elsewhere / "Programs" / "DefenseClaw" / "bin" / "defenseclaw-gateway.exe").is_file()
+
+
+@windows_only
+def test_real_program_folder_owned_by_another_account_is_refused(real_local: Path) -> None:
+    root = _install(real_local)
+    administrators = "S-1-5-32-544"
+    result = subprocess.run(
+        ["icacls", str(root), "/setowner", "*" + administrators], capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0:
+        pytest.skip(f"giving the folder another owner needs an elevated token: {result.stdout.strip()}")
+    from defenseclaw.file_permissions import _windows_current_user_sid
+
+    assert _windows_current_user_sid() != administrators
+    found = legacy_setup_install.find("win32")
+    assert found is not None
+    assert found.problem == f"its program folder belongs to another account ({administrators})"
+    done, problems = legacy_setup_install.remove(found, edit_user_path=lambda _path: True)
+    assert done == [] and problems
+    assert (root / "bin" / "defenseclaw-gateway.exe").is_file()
+
+
+@windows_only
+def test_real_processes_stop_only_when_their_program_is_inside_the_folder(tmp_path: Path) -> None:
+    ping = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "PING.EXE"
+    root = tmp_path / "Programs" / "DefenseClaw"
+    sibling = tmp_path / "Programs" / "DefenseClawOther"
+    images = []
+    for folder in (root / "bin", sibling / "bin"):
+        folder.mkdir(parents=True)
+        images.append(folder / "ping.exe")
+        shutil.copyfile(ping, images[-1])
+    images.append(ping)
+    started = [
+        subprocess.Popen(
+            [str(image), "-n", "120", "127.0.0.1"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        for image in images
+    ]
+    try:
+        time.sleep(0.5)
+        assert all(process.poll() is None for process in started)
+        assert legacy_setup_install._stop_processes_under(str(root)) == 1
+        assert started[0].wait(timeout=15) == 1
+        # The sibling folder and the system copy keep running.
+        assert started[1].poll() is None and started[2].poll() is None
+    finally:
+        for process in started:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=15)

@@ -118,7 +118,10 @@ def plan_lines(install: LegacySetupInstall, data_dir: str) -> list[str]:
         "Apps & Features entry, sign-in start and user Path entry go; its hook launcher is turned off"
     ]
     if install.data_root and not _same_path(install.data_root, data_dir) and os.path.isdir(install.data_root):
-        lines.append(f"kept: its data folder {install.data_root} (delete it yourself if you no longer need it)")
+        lines.append(
+            f"kept: its data folder {install.data_root} (delete it yourself if you no longer need it; "
+            "the Enterprise Setup does not install on this computer while it is there)"
+        )
     return lines
 
 
@@ -188,10 +191,16 @@ def _read_state(path: str) -> object:
 
 def _ownership_problem(root: str) -> str:
     """Why *root* is not this account's own folder ("" when it is)."""
+    from defenseclaw.commands.windows_uninstall_helper import _validate_root
     from defenseclaw.file_permissions import _windows_acl_snapshot, _windows_current_user_sid
 
     if _is_reparse(root):
         return "its program folder is a link"
+    try:
+        # A link above the folder redirects it as well as one at the folder.
+        _validate_root(root, "its program folder")
+    except ValueError as exc:
+        return str(exc)
     try:
         owner, _null_dacl, _entries = _windows_acl_snapshot(root)
         current = _windows_current_user_sid()
@@ -245,12 +254,25 @@ def _remove_run_values(root: str, cache: str) -> list[str]:
                 break
             index += 1
             command = os.path.normcase(winreg.ExpandEnvironmentStrings(value)) if isinstance(value, str) else ""
-            if any(prefix in command for prefix in prefixes):
+            if _starts_in(command, prefixes):
                 names.append(name)
         for name in names:
             winreg.DeleteValue(key, name)
             removed.append(name)
     return removed
+
+
+def _starts_in(command: str, prefixes: tuple[str, ...]) -> bool:
+    """Whether the program *command* runs is inside one of the folders *prefixes*.
+
+    Both are normcased; each prefix ends with a path separator, so a sibling
+    folder whose name only starts the same way does not match, and neither
+    does another program that merely passes such a path as an argument.
+    """
+    program = command.lstrip()
+    if program.startswith('"'):
+        program = program[1:]
+    return program.startswith(prefixes)
 
 
 def _remove_uninstall_entry(root: str) -> bool:
@@ -326,6 +348,7 @@ def _stop_processes_under(root: str) -> int:
     finally:
         kernel32.CloseHandle(snapshot)
     stopped = 0
+    failures: list[str] = []
     own = os.getpid()
     # PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE
     access = 0x0001 | 0x1000 | 0x00100000
@@ -343,11 +366,14 @@ def _stop_processes_under(root: str) -> int:
             if not os.path.normcase(os.path.abspath(image.value)).startswith(prefix):
                 continue
             if not kernel32.TerminateProcess(handle, 1):
-                raise ctypes.WinError(ctypes.get_last_error())
+                failures.append(f"PID {pid} ({ctypes.WinError(ctypes.get_last_error()).strerror})")
+                continue
             kernel32.WaitForSingleObject(handle, _STOP_WAIT_MS)
             stopped += 1
         finally:
             kernel32.CloseHandle(handle)
+    if failures:
+        raise OSError(f"stopped {stopped}, could not stop {', '.join(failures)}")
     return stopped
 
 
