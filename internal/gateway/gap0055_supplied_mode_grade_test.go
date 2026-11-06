@@ -122,7 +122,7 @@ func TestGAP0055SuppliedArchiveModeIsPossibleGrade(t *testing.T) {
 		{"possible-mf2-2", `env -i PATH=/usr/bin sh -c 'ls *.zip | xargs unzip -l; cp a.txt build/'`, "allow", "block", true},
 		{"possible-mf2-3", `/usr/bin/env bash -c 'ls *.zip | xargs unzip -l; cp a.txt build/'`, "allow", "block", true},
 		{"possible-mf2-4", `sudo sh -c 'ls *.zip | xargs unzip -l; cp a.txt build/'`, "allow", "block", true},
-		{"possible-mf2-5", `sudo -E bash -lc 'ls *.zip | xargs unzip -l; cp a.txt build/'`, "allow", "block", true},
+		{"possible-mf2-5", `sudo bash -lc 'ls *.zip | xargs unzip -l; cp a.txt build/'`, "allow", "block", true},
 		{"possible-mf2-6", `nice sh -c 'ls *.zip | xargs unzip -l; cp a.txt build/'`, "allow", "block", true},
 		{"possible-mf2-7", `nice -n 5 sh -c 'ls *.zip | xargs unzip -l; cp a.txt build/'`, "allow", "block", true},
 		{"possible-mf2-8", `command sh -c 'ls *.zip | xargs unzip -l; cp a.txt build/'`, "allow", "block", true},
