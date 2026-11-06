@@ -23,14 +23,14 @@ func TestManagedWindowsGuardianKeepsOpenCodePortsBySIDAcrossEligibilityChanges(t
 	const absent = "S-1-5-21-11-22-33-9003"
 	previousOptions, previousProfiles := enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles
 	previousLoad, previousWrite := enterpriseHookWindowsOpenCodePortsLoad, enterpriseHookWindowsOpenCodePortsWrite
-	previousRead, previousEnsure := enterpriseHookWindowsOpenCodeRead, enterpriseHookWindowsOpenCodeEnsure
+	previousRead, previousEnsure, previousReplace := enterpriseHookWindowsOpenCodeRead, enterpriseHookWindowsOpenCodeEnsure, enterpriseHookWindowsOpenCodeReplace
 	previousRunAs := enterpriseHookWindowsOpenCodeRunAs
 	previousClaims, previousClaim := enterpriseHookWindowsOpenCodeClaims, enterpriseHookWindowsOpenCodeClaim
 	previousManifest, previousConfig := enterpriseHookManifest, cfg
 	t.Cleanup(func() {
 		enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles = previousOptions, previousProfiles
 		enterpriseHookWindowsOpenCodePortsLoad, enterpriseHookWindowsOpenCodePortsWrite = previousLoad, previousWrite
-		enterpriseHookWindowsOpenCodeRead, enterpriseHookWindowsOpenCodeEnsure = previousRead, previousEnsure
+		enterpriseHookWindowsOpenCodeRead, enterpriseHookWindowsOpenCodeEnsure, enterpriseHookWindowsOpenCodeReplace = previousRead, previousEnsure, previousReplace
 		enterpriseHookWindowsOpenCodeRunAs = previousRunAs
 		enterpriseHookWindowsOpenCodeClaims, enterpriseHookWindowsOpenCodeClaim = previousClaims, previousClaim
 		enterpriseHookManifest, cfg = previousManifest, previousConfig
@@ -127,5 +127,83 @@ func TestManagedWindowsGuardianKeepsOpenCodePortsBySIDAcrossEligibilityChanges(t
 	}
 	if ports := run(); len(ports) != 0 {
 		t.Fatalf("OpenCode off still assigns ports: %v", ports)
+	}
+}
+
+func TestManagedWindowsGuardianResolvesOpenCodePortConflicts(t *testing.T) {
+	const (
+		first  = "S-1-5-21-100-200-300-1001"
+		second = "S-1-5-21-400-500-600-1002"
+	)
+	previousOptions, previousProfiles := enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles
+	previousLoad, previousWrite := enterpriseHookWindowsOpenCodePortsLoad, enterpriseHookWindowsOpenCodePortsWrite
+	previousRead, previousEnsure, previousReplace := enterpriseHookWindowsOpenCodeRead, enterpriseHookWindowsOpenCodeEnsure, enterpriseHookWindowsOpenCodeReplace
+	previousRunAs := enterpriseHookWindowsOpenCodeRunAs
+	previousClaims, previousClaim := enterpriseHookWindowsOpenCodeClaims, enterpriseHookWindowsOpenCodeClaim
+	previousManifest, previousConfig := enterpriseHookManifest, cfg
+	t.Cleanup(func() {
+		enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles = previousOptions, previousProfiles
+		enterpriseHookWindowsOpenCodePortsLoad, enterpriseHookWindowsOpenCodePortsWrite = previousLoad, previousWrite
+		enterpriseHookWindowsOpenCodeRead, enterpriseHookWindowsOpenCodeEnsure, enterpriseHookWindowsOpenCodeReplace = previousRead, previousEnsure, previousReplace
+		enterpriseHookWindowsOpenCodeRunAs = previousRunAs
+		enterpriseHookWindowsOpenCodeClaims, enterpriseHookWindowsOpenCodeClaim = previousClaims, previousClaim
+		enterpriseHookManifest, cfg = previousManifest, previousConfig
+	})
+	cfg = nil
+	enterpriseHookManifest = filepath.Join(t.TempDir(), "targets.yaml")
+	enterpriseHookWindowsGuardianOptions = func() (enterprisepolicy.Options, []string, bool, error) {
+		return enterprisepolicy.Options{}, []string{"opencode"}, true, nil
+	}
+	profiles := []enterprisehooks.TargetCredentials{{SID: first, UserHome: `C:\Users\first`}, {SID: second, UserHome: `C:\Users\second`}}
+	enterpriseHookWindowsEligibleProfiles = func(context.Context) ([]enterprisehooks.TargetCredentials, error) { return profiles, nil }
+	record := map[string]int{first: 25001}
+	var readErr error
+	writes := 0
+	enterpriseHookWindowsOpenCodePortsLoad = func(string) (map[string]int, error) {
+		if readErr != nil {
+			return nil, readErr
+		}
+		copy := map[string]int{}
+		for key, port := range record {
+			copy[key] = port
+		}
+		return copy, nil
+	}
+	enterpriseHookWindowsOpenCodePortsWrite = func(_ string, ports map[string]int) error {
+		writes++
+		record = ports
+		return nil
+	}
+	files := map[string]int{`C:\Users\second`: 25001}
+	enterpriseHookWindowsOpenCodeRead = func(home string) int { return files[home] }
+	enterpriseHookWindowsOpenCodeEnsure = func(home string, port int) (enterprisepolicy.OpenCodeServicePortResult, error) {
+		files[home] = port
+		return enterprisepolicy.OpenCodeServicePortResult{Port: port, Changed: true}, nil
+	}
+	replacements := 0
+	enterpriseHookWindowsOpenCodeReplace = func(home string, port, stale int) (enterprisepolicy.OpenCodeServicePortResult, error) {
+		if files[home] != stale {
+			t.Fatalf("replacement expected port %d, got %d", stale, files[home])
+		}
+		replacements++
+		files[home] = port
+		return enterprisepolicy.OpenCodeServicePortResult{Port: port, Changed: true}, nil
+	}
+	enterpriseHookWindowsOpenCodeRunAs = func(_ enterprisehooks.TargetCredentials, fn func() error) error { return fn() }
+	claims := 0
+	enterpriseHookWindowsOpenCodeClaims = func() (map[int]string, error) { return nil, nil }
+	enterpriseHookWindowsOpenCodeClaim = func(string, int) error { claims++; return nil }
+	ports, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
+	if err != nil || ports[first] != 25001 || ports[second] != 25002 || files[`C:\Users\second`] != 25002 || replacements != 1 {
+		t.Fatalf("record/file conflict was not resolved: ports=%v files=%v replacements=%d err=%v", ports, files, replacements, err)
+	}
+	ports, err = enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
+	if err != nil || ports[first] != 25001 || ports[second] != 25002 || replacements != 1 {
+		t.Fatalf("second pass was not stable: ports=%v replacements=%d err=%v", ports, replacements, err)
+	}
+	readErr = fmt.Errorf("record unreadable")
+	beforeWrites, beforeClaims := writes, claims
+	if existing, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{}); err == nil || existing[second] != 25002 || writes != beforeWrites || claims != beforeClaims || replacements != 1 {
+		t.Fatalf("unreadable record made an assignment: existing=%v writes=%d claims=%d replacements=%d err=%v", existing, writes, claims, replacements, err)
 	}
 }

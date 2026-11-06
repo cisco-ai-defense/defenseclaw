@@ -45,6 +45,9 @@ func TestManagedWindowsOpenCodePortRecordIsSystemOnly(t *testing.T) {
 	if !before.ModTime().Equal(after.ModTime()) {
 		t.Fatal("unchanged record was rewritten")
 	}
+	if err := WriteWindowsOpenCodeServicePorts(path, map[string]int{testLocalUserSID: 25001, testEntraUserSID: 25001}); err == nil {
+		t.Fatal("record writer accepted one port for two accounts")
+	}
 	stampWindowsTargetsManifestTestSDDL(t, path, windowsTargetsManifestAdminFileSDDL)
 	if _, err := LoadWindowsOpenCodeServicePorts(path); err == nil {
 		t.Fatal("administrators-readable record was accepted")

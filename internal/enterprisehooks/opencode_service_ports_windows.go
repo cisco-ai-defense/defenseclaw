@@ -65,6 +65,7 @@ func LoadWindowsOpenCodeServicePorts(path string) (map[string]int, error) {
 	if record.Version != 1 {
 		return nil, fmt.Errorf("enterprise hooks: OpenCode service ports version %d is not supported", record.Version)
 	}
+	holders := map[int]string{}
 	for _, entry := range record.Ports {
 		sid, err := windows.StringToSid(entry.SID)
 		if err != nil || !WindowsInteractiveUserSID(entry.SID) || sid.String() != entry.SID || entry.Port <= 0 || entry.Port > 65535 {
@@ -73,6 +74,10 @@ func LoadWindowsOpenCodeServicePorts(path string) (map[string]int, error) {
 		if _, exists := ports[entry.SID]; exists {
 			return nil, fmt.Errorf("enterprise hooks: OpenCode service ports record repeats an account")
 		}
+		if other := holders[entry.Port]; other != "" {
+			return nil, fmt.Errorf("enterprise hooks: OpenCode service ports record repeats a port for %s and %s", other, entry.SID)
+		}
+		holders[entry.Port] = entry.SID
 		ports[entry.SID] = entry.Port
 	}
 	return ports, nil
@@ -85,11 +90,16 @@ func WriteWindowsOpenCodeServicePorts(path string, ports map[string]int) error {
 		return err
 	}
 	record := windowsOpenCodeServicePortsFile{Version: 1, Ports: make([]windowsOpenCodeServicePort, 0, len(ports))}
+	holders := map[int]string{}
 	for sid, port := range ports {
 		parsed, err := windows.StringToSid(sid)
 		if err != nil || !WindowsInteractiveUserSID(sid) || parsed.String() != sid || port <= 0 || port > 65535 {
 			return fmt.Errorf("enterprise hooks: OpenCode service ports assignment has an invalid account or port")
 		}
+		if other := holders[port]; other != "" {
+			return fmt.Errorf("enterprise hooks: OpenCode service ports assignment repeats a port for %s and %s", other, sid)
+		}
+		holders[port] = sid
 		record.Ports = append(record.Ports, windowsOpenCodeServicePort{SID: sid, Port: port})
 	}
 	sort.Slice(record.Ports, func(i, j int) bool { return record.Ports[i].SID < record.Ports[j].SID })

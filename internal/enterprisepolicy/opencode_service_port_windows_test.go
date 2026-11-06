@@ -38,6 +38,16 @@ func TestManagedWindowsOpenCodePortWriteIsAccountPrivate(t *testing.T) {
 	if err := json.Unmarshal(data, &doc); err != nil || doc["password"] != "kept" || doc["port"] != float64(25001) {
 		t.Fatalf("service.json content: %s, %v", data, err)
 	}
+	result, err = ReplaceOpenCodeServicePort(home, 25002, 25001)
+	if err != nil || !result.Changed || result.Port != 25002 {
+		t.Fatalf("replace conflicting port: %+v %v", result, err)
+	}
+	if err := safefile.ValidatePrivateFile(path); err != nil {
+		t.Fatalf("replaced service.json is not account-private: %v", err)
+	}
+	if got := ReadOpenCodeServicePort(home); got != 25002 {
+		t.Fatalf("replaced service.json port = %d", got)
+	}
 }
 
 func TestManagedWindowsOpenCodePortReadRefusesReparseFolder(t *testing.T) {
