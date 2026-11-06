@@ -192,8 +192,17 @@ func OverrideWindowsManagedFolderLayoutForTest(layout StandaloneLayout) (restore
 	return func() { windowsManagedFolderLayout = previous }
 }
 
-// windowsAdminOnlyRecord reports whether path is a regular file whose own
-// descriptor no untrusted principal can write or owns. It only ever adds a
+// WindowsAdminOnlyRecord reports whether path is a regular file whose own
+// descriptor no untrusted principal can write or owns (AssessCanonical as an
+// AdminFile: canonical or trusted-only drift), the trust a standalone
+// decision needs before it lets an administrator record outside a folder
+// speak for that folder. A record it cannot judge (missing, a link, a
+// reparse point, a descriptor nobody can read) is not trusted.
+func WindowsAdminOnlyRecord(path string) bool {
+	return windowsAdminOnlyRecord(path)
+}
+
+// windowsAdminOnlyRecord is WindowsAdminOnlyRecord. It only ever adds a
 // refusal, so a record it cannot judge is not used.
 func windowsAdminOnlyRecord(path string) bool {
 	info, err := os.Lstat(path)
