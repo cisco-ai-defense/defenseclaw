@@ -16735,6 +16735,10 @@ $script:StandaloneContentGateOutOfClass = @(
         Paths  = @('StateRootAncestors')
     },
     [pscustomobject]@{
+        Reason = "Setup's copy of an approved source: Repair restores from it only when its access list is administrator-only and its bytes match the digest deployment.json records (GAP-0568)"
+        Paths  = @('ApprovedPolicyFiles')
+    },
+    [pscustomobject]@{
         Reason = 'Secure Client only: the standalone profile has no install marker'
         Paths  = @('SecureClientInstallMarker')
     }
@@ -16777,7 +16781,10 @@ function Assert-DefenseClawStandaloneContentTrusted {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
-        [ValidateSet('Lifecycle', 'Retain', 'Purge')][string]$Scope = 'Lifecycle'
+        [ValidateSet('Lifecycle', 'Retain', 'Purge')][string]$Scope = 'Lifecycle',
+        # Layout keys this run writes new from an approved source before it
+        # reads them, judged later or not at all (ConfigPath, ManifestPath).
+        [string[]]$Except = @()
     )
     $adminWriters = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
     $again = 'run Setup /ensure again'
@@ -16826,7 +16833,7 @@ function Assert-DefenseClawStandaloneContentTrusted {
     # folders, and owns what it creates there.
     $entries = [Collections.Generic.List[object]]::new()
     foreach ($row in $rows) {
-        if ($Scope -in $row[2]) {
+        if ($Scope -in $row[2] -and $row[0] -notin $Except) {
             $entries.Add([pscustomobject]@{
                 Path     = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name ([string]$row[0]))
                 Writer   = 'Admin'
@@ -44484,7 +44491,21 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         # A fresh install or a reinstall over an uninstall's tombstone is
         # judged too: missing paths are skipped, and the state a non-purge
         # uninstall kept is adopted by this install (GAP-0590 review M3).
-        Assert-DefenseClawStandaloneContentTrusted -Layout $Layout -GatewayServiceName $GatewayServiceName
+        # Install writes config.yaml and targets.yaml new from the supplied
+        # approved sources; Repair restores them from Setup's approved copies
+        # below (GAP-0568) and judges them after that.
+        $writtenFresh = @()
+        if ($Action -eq 'Repair') {
+            $writtenFresh = @('ConfigPath', 'ManifestPath')
+        }
+        elseif ($Action -eq 'Install') {
+            if ($Sources.ContainsKey('config')) { $writtenFresh += 'ConfigPath' }
+            if ($Sources.ContainsKey('manifest')) { $writtenFresh += 'ManifestPath' }
+        }
+        Assert-DefenseClawStandaloneContentTrusted `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Except $writtenFresh
     }
     # Idempotent-Install contract: AVC's Windows installer runs -Action Install
     # unconditionally after its own preinstall has removed the machine-wide
@@ -44582,6 +44603,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -Metadata $metadata `
             -GatewayServiceName $GatewayServiceName `
             -ApprovedConfig $repairApprovedConfig
+        # config.yaml and targets.yaml now hold the approved bytes, or are
+        # judged as they are (GAP-0590 review M3).
+        Assert-DefenseClawStandaloneContentTrusted -Layout $Layout -GatewayServiceName $GatewayServiceName
     }
 
     $priorCodexTargetEnabled = $false
