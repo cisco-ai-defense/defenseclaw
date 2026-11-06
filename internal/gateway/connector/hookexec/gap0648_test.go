@@ -294,3 +294,59 @@ func TestAManagedVerdictReadAfterTheDeadlineGetsTheWatchdogsAnswer(t *testing.T)
 		})
 	}
 }
+
+// GAP-0648 re-check: Secure Client hooks are unchanged in 1.0.9. A Secure
+// Client hook the computer held more than 30 s still gets a fresh budget and
+// asks its gateway, as in 1.0.8. With the stale start it spent its request
+// budget and got its Secure Client fail mode's answer without asking: an
+// allow in fail mode open. Other managed hooks keep the stale start and are
+// blocked without asking.
+func TestASecureClientHookHeldPastItsBudgetStillAsksItsGateway(t *testing.T) {
+	now := time.Now()
+	for _, test := range []struct {
+		name    string
+		started time.Time
+		ok      bool
+		want    time.Time
+	}{
+		{"fresh", now.Add(-200 * time.Millisecond), true, now.Add(-200 * time.Millisecond)},
+		{"held 30 s", now.Add(-30 * time.Second), true, now.Add(-30 * time.Second)},
+		{"held 39 s", now.Add(-39 * time.Second), true, now},
+		{"held 73 s", now.Add(-73 * time.Second), true, now},
+		{"in the future (clock stepped back)", now.Add(time.Minute), true, now},
+		{"not known", time.Time{}, false, now},
+	} {
+		if got := secureClientCallStart(test.started, test.ok, now, now); !got.Equal(test.want) {
+			t.Errorf("%s: call start %s, want %s", test.name, got, test.want)
+		}
+	}
+	stale := now.Add(-73 * time.Second)
+	for _, secureClient := range []bool{true, false} {
+		name := "managed"
+		if secureClient {
+			name = "Secure Client"
+		}
+		t.Run(name, func(t *testing.T) {
+			rt := ok(`{"action":"block"}`)
+			r := run(t, "claudecode", rt, func(opts *Options) {
+				opts.Event = "PreToolUse"
+				if secureClient {
+					opts.ManagedEnterprise, opts.SecureClient = true, true
+					opts.StartedAt = secureClientCallStart(stale, true, now, time.Now())
+				} else {
+					managedWindowsStandalone(opts)
+					opts.StartedAt = hookCallStart(stale, true, now)
+				}
+				opts.FailMode = "open"
+			})
+			wantRequests := 0
+			if secureClient {
+				wantRequests = 1
+			}
+			if rt.requests != wantRequests || !blocked(r) {
+				t.Fatalf("%d gateway requests, code=%d stdout=%q stderr=%q; want %d and a block",
+					rt.requests, r.code, r.stdout, r.stderr, wantRequests)
+			}
+		})
+	}
+}
