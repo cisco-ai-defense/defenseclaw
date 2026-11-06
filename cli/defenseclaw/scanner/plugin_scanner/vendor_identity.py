@@ -8,7 +8,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import stat
+from pathlib import Path
 
 from defenseclaw.hermes_skills import (
     _filesystem_identity,
@@ -71,16 +73,19 @@ def inspect_official_provider_tree(plugin_dir: str) -> str | None:
     before_tree = _tree_entry_state(root)
     if before_tree is None:
         return None
-    if _tree_sha256(plugin_dir, tolerated_links=frozenset(tolerated)) != want:
-        return None
-    for peer, (link, before) in links.items():
-        try:
-            if before != _validated_peer_link(link, root, peer):
-                return None
-        except (OSError, ValueError, TypeError, AttributeError):
+    # A same-size edit can retain its mtime, and Windows ctime is creation
+    # time. Recheck the published bytes and links before admitting.
+    for _ in range(2):
+        if _tree_sha256(plugin_dir, tolerated_links=frozenset(tolerated)) != want:
             return None
-    if before_tree != _tree_entry_state(root):
-        return None
+        for peer, (link, before) in links.items():
+            try:
+                if before != _validated_peer_link(link, root, peer):
+                    return None
+            except (OSError, ValueError, TypeError, AttributeError):
+                return None
+        if before_tree != _tree_entry_state(root):
+            return None
     return name
 
 
@@ -136,6 +141,9 @@ def _validated_peer_link(link: str, root: str, peer: str) -> tuple:
     destination = os.path.realpath(link)
     if os.path.commonpath((os.path.realpath(root), destination)) == os.path.realpath(root):
         raise ValueError("peer link points inside the package")
+    active_root = _active_openclaw_root() if peer == "openclaw" else None
+    if active_root is None or os.path.normcase(destination) != os.path.normcase(active_root):
+        raise ValueError("peer link points outside the active installation")
     if not stat.S_ISDIR(os.stat(destination, follow_symlinks=False).st_mode):
         raise ValueError("peer link target is not a directory")
     manifest = _read_regular_file(
@@ -144,3 +152,60 @@ def _validated_peer_link(link: str, root: str, peer: str) -> tuple:
     if manifest is None or json.loads(manifest).get("name") != peer:
         raise ValueError("peer link target has another package identity")
     return tuple(ancestors), (_filesystem_identity(info), os.readlink(link), manifest)
+
+
+def _active_openclaw_root() -> str | None:
+    """Locate the OpenClaw package used by the operator's executable."""
+
+    executable = shutil.which("openclaw")
+    if executable is None:
+        home = Path.home()
+        for candidate in (
+            home / ".npm-global" / "bin" / "openclaw",
+            home / ".local" / "bin" / "openclaw",
+            Path("/usr/local/bin/openclaw"),
+            Path("/opt/homebrew/bin/openclaw"),
+        ):
+            if candidate.is_file():
+                executable = str(candidate)
+                break
+    if executable is None:
+        return None
+
+    def named_package(path: str) -> bool:
+        if (
+            os.path.basename(path) != "openclaw"
+            or os.path.basename(os.path.dirname(path)) != "node_modules"
+        ):
+            return False
+        manifest = _read_regular_file(
+            os.path.join(path, "package.json"), max_bytes=1024 * 1024,
+        )
+        if manifest is None:
+            return False
+        try:
+            return json.loads(manifest).get("name") == "openclaw"
+        except (UnicodeDecodeError, ValueError, AttributeError):
+            return False
+
+    resolved_executable = os.path.realpath(executable)
+    directory = os.path.dirname(resolved_executable)
+    for _ in range(16):
+        if named_package(directory):
+            return directory
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            break
+        directory = parent
+
+    # npm's Windows .cmd shim sits beside node_modules; Unix wrappers can
+    # live in the bin directory of the same npm prefix.
+    bin_dir = os.path.dirname(os.path.abspath(executable))
+    for candidate in (
+        os.path.join(bin_dir, "node_modules", "openclaw"),
+        os.path.join(os.path.dirname(bin_dir), "lib", "node_modules", "openclaw"),
+    ):
+        resolved = os.path.realpath(candidate)
+        if named_package(resolved):
+            return resolved
+    return None

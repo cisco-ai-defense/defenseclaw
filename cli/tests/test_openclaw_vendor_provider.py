@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from types import SimpleNamespace
 
@@ -28,6 +29,21 @@ def _package(root, name: str, source: str) -> None:
 
 def _high_rules(root) -> set[str]:
     return {f.rule_id for f in scan_plugin(str(root)).findings if f.severity == "HIGH"}
+
+
+def _active_peer(tmp_path, monkeypatch, label="host-peer"):
+    peer = tmp_path / label / "node_modules" / "openclaw"
+    (peer / "bin").mkdir(parents=True)
+    (peer / "package.json").write_text('{"name":"openclaw"}', encoding="utf-8")
+    executable = peer / "bin" / "openclaw"
+    executable.write_text("openclaw entry\n", encoding="utf-8")
+    original_which = shutil.which
+    monkeypatch.setattr(
+        vendor_identity.shutil, "which",
+        lambda name: str(executable) if name == "openclaw" else original_which(name),
+    )
+    assert vendor_identity._active_openclaw_root() == os.path.realpath(peer)
+    return peer
 
 
 def test_r108_g501_exact_provider_tree_and_scanned_twins(tmp_path, monkeypatch) -> None:
@@ -80,9 +96,7 @@ def test_r109_g501_identity_matrix(tmp_path, monkeypatch) -> None:
         vendor_identity.VENDOR_DIGESTS,
         ("@openclaw/amazon-bedrock-provider", "2026.10.9"), digest,
     )
-    peer = tmp_path / "host-peer"
-    peer.mkdir()
-    (peer / "package.json").write_text('{"name":"openclaw"}', encoding="utf-8")
+    peer = _active_peer(tmp_path, monkeypatch)
 
     installed = tmp_path / "installed"
     shutil.copytree(source, installed)
@@ -237,9 +251,7 @@ def test_r109_g501_peer_ancestor_revalidated_after_hash(tmp_path, monkeypatch) -
     )
     installed = tmp_path / "installed"
     shutil.copytree(published, installed)
-    peer_target = tmp_path / "peer-target"
-    peer_target.mkdir()
-    (peer_target / "package.json").write_text('{"name":"openclaw"}', encoding="utf-8")
+    peer_target = _active_peer(tmp_path, monkeypatch, "peer-target")
     (installed / "node_modules" / "openclaw").symlink_to(peer_target, target_is_directory=True)
     assert not _high_rules(installed)  # Ordinary installed provider remains allowed.
 
@@ -276,9 +288,7 @@ def test_r109_g501_whole_tree_revalidated_after_hash(tmp_path, monkeypatch) -> N
         vendor_identity.VENDOR_DIGESTS,
         ("@openclaw/amazon-bedrock-provider", "2026.10.9"), digest,
     )
-    peer = tmp_path / "peer"
-    peer.mkdir()
-    (peer / "package.json").write_text('{"name":"openclaw"}', encoding="utf-8")
+    peer = _active_peer(tmp_path, monkeypatch, "peer")
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "entry.js").write_text("exec('changed command');\n", encoding="utf-8")
@@ -313,6 +323,98 @@ def test_r109_g501_whole_tree_revalidated_after_hash(tmp_path, monkeypatch) -> N
                 str(installed), PluginScanOptions(policy=profile),
             ).findings if f.severity == "HIGH"}
         assert changed
+
+
+@requires_symlink_privilege
+def test_r109_g610_peer_matches_active_openclaw_install(tmp_path, monkeypatch) -> None:
+    published = tmp_path / "published"
+    (published / "node_modules").mkdir(parents=True)
+    (published / "package.json").write_text(json.dumps({
+        "name": "@openclaw/amazon-bedrock-provider", "version": "2026.10.9",
+        "peerDependencies": {"openclaw": ">=2026.10.9"},
+    }), encoding="utf-8")
+    (published / "index.js").write_text("const match = /region/.exec(value);\n", encoding="utf-8")
+    digest = vendor_identity._tree_sha256(str(published))
+    assert digest
+    monkeypatch.setitem(
+        vendor_identity.VENDOR_DIGESTS,
+        ("@openclaw/amazon-bedrock-provider", "2026.10.9"), digest,
+    )
+    active = _active_peer(tmp_path, monkeypatch)
+
+    for label, target, expected_high in (
+        ("active", active, False),
+        ("foreign", tmp_path / "foreign" / "openclaw", True),
+        ("protected", tmp_path / ".ssh", True),
+    ):
+        if target != active:
+            target.mkdir(parents=True)
+            (target / "package.json").write_text('{"name":"openclaw"}', encoding="utf-8")
+        installed = tmp_path / f"installed-{label}"
+        shutil.copytree(published, installed)
+        (installed / "node_modules" / "openclaw").symlink_to(target, target_is_directory=True)
+        assert (vendor_identity.inspect_official_provider_tree(str(installed)) is None) is expected_high
+        for profile in ("default", "permissive"):
+            findings = scan_plugin(str(installed), PluginScanOptions(policy=profile)).findings
+            assert ("SRC-EXEC" in {f.rule_id for f in findings if f.severity == "HIGH"}) is expected_high
+
+
+def test_r109_g610_active_openclaw_npm_prefix(tmp_path, monkeypatch) -> None:
+    prefix = tmp_path / "npm"
+    executable = prefix / "bin" / "openclaw"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("npm shim\n", encoding="utf-8")
+    root = prefix / "lib" / "node_modules" / "openclaw"
+    root.mkdir(parents=True)
+    (root / "package.json").write_text(
+        json.dumps({"name": "openclaw", "description": "x" * (70 * 1024)}), encoding="utf-8",
+    )
+    monkeypatch.setattr(vendor_identity.shutil, "which", lambda name: str(executable))
+    assert vendor_identity._active_openclaw_root() == os.path.realpath(root)
+
+
+def test_r109_g501_contents_rehashed_after_metadata_stable_edit(tmp_path, monkeypatch) -> None:
+    published = tmp_path / "published"
+    published.mkdir()
+    (published / "package.json").write_text(json.dumps({
+        "name": "@openclaw/amazon-bedrock-provider", "version": "2026.10.9",
+    }), encoding="utf-8")
+    changed_source = 'require("child_process").exec("true");\n'
+    safe_source = "export const value = 1;".ljust(len(changed_source) - 1) + "\n"
+    assert len(safe_source) == len(changed_source)
+    (published / "index.js").write_text(safe_source, encoding="utf-8")
+    digest = vendor_identity._tree_sha256(str(published))
+    assert digest
+    monkeypatch.setitem(
+        vendor_identity.VENDOR_DIGESTS,
+        ("@openclaw/amazon-bedrock-provider", "2026.10.9"), digest,
+    )
+    installed = tmp_path / "installed"
+    shutil.copytree(published, installed)
+    assert not _high_rules(installed)
+
+    original_digest = vendor_identity._tree_sha256
+    original_identity = vendor_identity._filesystem_identity
+    monkeypatch.setattr(
+        vendor_identity, "_filesystem_identity",
+        lambda info: (*original_identity(info)[:-1], 0),
+    )
+    changed = False
+
+    def edit_after_first_digest(path, **kwargs):
+        nonlocal changed
+        result = original_digest(path, **kwargs)
+        if path == str(installed) and not changed:
+            entry = installed / "index.js"
+            before = entry.stat()
+            entry.write_text(changed_source, encoding="utf-8")
+            os.utime(entry, ns=(before.st_atime_ns, before.st_mtime_ns))
+            changed = True
+        return result
+
+    monkeypatch.setattr(vendor_identity, "_tree_sha256", edit_after_first_digest)
+    assert "SRC-EXEC" in _high_rules(installed)
+    assert changed
 
 
 def test_r109_g501_secure_client_scan_options(monkeypatch) -> None:
