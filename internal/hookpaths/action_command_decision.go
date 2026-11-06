@@ -852,8 +852,9 @@ func actionPosixCommandDecision(command, cwd, home string, depth int) string {
 	if depth >= 8 || len(command) > MaxPayloadBytes {
 		return "dynamic-command"
 	}
-	if reason := UnprovenProtectedWrite(command, cwd, home); reason != "" {
-		return reason
+	unproven := UnprovenProtectedWrite(command, cwd, home)
+	if unproven != "" && unproven != "shell-parse-unreached" {
+		return unproven
 	}
 	// apply_patch receives its writes from an envelope, often through a
 	// heredoc. Check every envelope in the same action decision as shell
@@ -871,6 +872,9 @@ func actionPosixCommandDecision(command, cwd, home string, depth int) string {
 	}
 	file, ok := parseShell(command)
 	if !ok {
+		if unproven == "shell-parse-unreached" {
+			return unproven
+		}
 		if actionTextMayWrite(command) {
 			return "shell-parse"
 		}
@@ -997,6 +1001,9 @@ func actionPosixCommandDecision(command, cwd, home string, depth int) string {
 		}
 		return reason == ""
 	})
+	if reason == "" {
+		return unproven
+	}
 	return reason
 }
 

@@ -156,6 +156,9 @@ type trustedActionRequest struct {
 	LegacyText         string
 	Connector          string
 	EnforcementCapable bool
+	// StrictProofBound keeps an unresolved, unreached parser budget closed in
+	// strict and managed policy tiers. The ordinary tier records a warning.
+	StrictProofBound bool
 	// ArtifactBody is set when LegacyText and Input.Command are the whole
 	// body of a script the call runs (the artifact lane): its comments and
 	// data are not tool-call text, so a migrated literal rule must match a
@@ -295,6 +298,18 @@ func dispatchTrustedAction(
 	request.Input.ActiveStateTreeNames = clientStateTreeNames(request.ResolvedWriteTargets)
 	if request.EnforcementCapable && request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey] == "shell-parse-bound" {
 		return trustedActionLimitFindings(true)
+	}
+	if request.EnforcementCapable && request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey] == "shell-parse-unreached" && !request.simpleCommandPass {
+		if request.StrictProofBound {
+			return trustedActionLimitFindings(true)
+		}
+		defer func() {
+			findings = append(findings, RuleFinding{
+				RuleID: "ACTION-COMPOUND-UNRESOLVED", Title: "Shell command proof limit reached",
+				Severity: "LOW", Confidence: 1,
+				enforcement: findingEnforcementAlertOnly,
+			})
+		}()
 	}
 	if trustedActionCommandTooDeep(request.Input) {
 		// Past the reading bounds: no reader below parses it, and the call

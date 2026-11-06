@@ -1095,7 +1095,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// dedupe get the decision the agent was given (GAP-0286).
 		wireResp = resp
 		auditExtra := mergeHookEnvelopeExtra(hookRequestAuditExtra(ctx, profile), sandboxGate.auditExtra())
-		auditExtra = mergeHookEnvelopeExtra(auditExtra, hookActionCommandAuditExtra(req, hookActiveHome(ctx)))
+		if auditExtra["unresolved_command"] == "" {
+			auditExtra = mergeHookEnvelopeExtra(auditExtra, hookActionCommandAuditExtra(req, hookActiveHome(ctx)))
+		}
 		auditExtra = mergeHookEnvelopeExtra(auditExtra, coworkCallAuditExtra(ctx, req.Payload, req.ToolName))
 		if payload["bounded_prefix_review"] == true {
 			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{"bounded_prefix_review": "true"})

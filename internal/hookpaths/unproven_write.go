@@ -21,18 +21,19 @@ import (
 const UnprovenReasonKey = "\x00unproven-write"
 
 var unprovenReasonTitles = map[string]string{
-	"trap":                 "A trap handler can write a protected file",
-	"function":             "A called function can write a protected file",
-	"dynamic-command":      "A dynamic command can write a protected file",
-	"dynamic-argument":     "A dynamic argument can select a protected file",
-	"eval-source":          "Evaluated or sourced code can write a protected file",
-	"interpreter-path":     "Interpreter file effects cannot be proved safe for the protected path",
-	"interpreter-argument": "An interpreter has a dynamic argument after writable code",
-	"shell-parse":          "A shell parse error leaves a protected write unproved",
-	"shell-parse-bound":    "A shell parse exceeded the protected write proof bound",
-	"copy-directory":       "A copy into a directory can select a protected file",
-	"cdpath":               "CDPATH can select a directory containing a protected file link",
-	"nested-shell":         "A nested shell or shell script can write a protected file",
+	"trap":                  "A trap handler can write a protected file",
+	"function":              "A called function can write a protected file",
+	"dynamic-command":       "A dynamic command can write a protected file",
+	"dynamic-argument":      "A dynamic argument can select a protected file",
+	"eval-source":           "Evaluated or sourced code can write a protected file",
+	"interpreter-path":      "Interpreter file effects cannot be proved safe for the protected path",
+	"interpreter-argument":  "An interpreter has a dynamic argument after writable code",
+	"shell-parse":           "A shell parse error leaves a protected write unproved",
+	"shell-parse-bound":     "A shell parse exceeded the protected write proof bound",
+	"shell-parse-unreached": "A shell parse exceeded its proof bound without a protected target",
+	"copy-directory":        "A copy into a directory can select a protected file",
+	"cdpath":                "CDPATH can select a directory containing a protected file link",
+	"nested-shell":          "A nested shell or shell script can write a protected file",
 }
 
 // UnprovenWriteTitle gives the operator the class that prevented a proof.
@@ -79,7 +80,7 @@ var (
 // such a form and a path in its bounded text can reach a protected file. A
 // dynamic interpreter write operand can name the protected file directly.
 func UnprovenProtectedWrite(command, cwd, home string) string {
-	budget := unprovenParseBudget{bytes: 8 * MaxPayloadBytes, calls: 512, nodes: 8 * MaxPayloadBytes}
+	budget := unprovenParseBudget{bytes: 8 * MaxPayloadBytes, calls: 512, nodes: 8 * MaxPayloadBytes, memo: NewTargetMemo()}
 	return unprovenProtectedWriteDepth(command, cwd, home, 0, &budget)
 }
 
@@ -91,9 +92,13 @@ type unprovenParseBudget struct {
 	calls   int
 	nodes   int
 	bounded bool
+	memo    *TargetMemo
 }
 
 func (b *unprovenParseBudget) visit() bool {
+	if b.bounded {
+		return false
+	}
 	b.nodes--
 	if b.nodes < 0 {
 		b.bounded = true
@@ -107,14 +112,17 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 		return ""
 	}
 	if len(command) > MaxPayloadBytes || len(command) > budget.bytes {
-		return "shell-parse-bound" // The proof budget cannot certify the write.
+		if unprovenRecoveredProtectedReach(command, cwd, home, budget.memo) {
+			return "shell-parse-bound"
+		}
+		return "shell-parse-unreached"
 	}
 	budget.bytes -= len(command)
 	if depth >= 4 {
-		if unprovenRecoveredProtectedReach(command, cwd, home) {
-			return "dynamic-command"
+		if unprovenRecoveredProtectedReach(command, cwd, home, budget.memo) {
+			return "shell-parse-bound"
 		}
-		return ""
+		return "shell-parse-unreached"
 	}
 	if !strings.ContainsAny(command, "$#*?[\\>;|&\n") &&
 		!strings.Contains(command, "trap") && !strings.Contains(command, "eval") &&
@@ -130,24 +138,36 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 	}
 	file, ok := parseShell(command)
 	if !ok {
-		if unprovenShellParseWrite(command, cwd, home, depth, budget) {
+		if unknown, reached := unprovenShellParseWrite(command, cwd, home, depth, budget); unknown {
 			if budget.bounded {
-				return "shell-parse-bound"
+				if reached {
+					return "shell-parse-bound"
+				}
+				return "shell-parse-unreached"
 			}
 			return "shell-parse"
+		}
+		if budget.bounded {
+			return "shell-parse-unreached"
 		}
 		return ""
 	}
 	reachable := false
 	called := calledFunctionsWithBudget(file, home, budget)
-	if budget.bounded && unprovenRecoveredProtectedReach(command, cwd, home) {
+	if budget.bounded && unprovenRecoveredProtectedReach(command, cwd, home, budget.memo) {
 		return "shell-parse-bound"
+	}
+	if budget.bounded {
+		return "shell-parse-unreached"
 	}
 	reachText := command
 	if strings.Contains(command, "()") || strings.Contains(command, "function ") {
 		reachText = reachableShellWords(file, called, home, budget)
-		if budget.bounded && unprovenRecoveredProtectedReach(command, cwd, home) {
+		if budget.bounded && unprovenRecoveredProtectedReach(command, cwd, home, budget.memo) {
 			return "shell-parse-bound"
+		}
+		if budget.bounded {
+			return "shell-parse-unreached"
 		}
 	}
 	checkReach := func() bool {
@@ -309,7 +329,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 				words = append(words, word)
 			}
 			if body, ok := shellCommandBodyIndex(words); ok {
-				if nested := unprovenProtectedWriteDepth(words[body], cwd, home, depth+1, budget); nested != "" {
+				if nested := unprovenProtectedWriteDepth(words[body], cwd, home, depth+1, budget); nested != "" && nested != "shell-parse-unreached" {
 					set(nested, true)
 				} else if shellArgvIncomplete(program) && shellBodyProtectedWrite(words[body], cwd, home) {
 					// Zsh runs its startup files before the -c body, so argv
@@ -326,7 +346,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 			// path, because the contents it will run are not bounded here.
 			if script, ok := shellScriptOperand(words); ok {
 				if content, read := readIndirectSource(script, cwd); read {
-					if nested := unprovenProtectedWriteDepth(content, cwd, home, depth+1, budget); nested != "" {
+					if nested := unprovenProtectedWriteDepth(content, cwd, home, depth+1, budget); nested != "" && nested != "shell-parse-unreached" {
 						set(nested, true)
 					} else if shellBodyProtectedWrite(content, cwd, home) {
 						set("nested-shell", true)
@@ -422,38 +442,42 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 		}
 		return true
 	})
-	if reason == "" && budget.bounded && unprovenRecoveredProtectedReach(command, cwd, home) {
+	if reason == "" && budget.bounded && unprovenRecoveredProtectedReach(command, cwd, home, budget.memo) {
 		return "shell-parse-bound"
+	}
+	if reason == "" && budget.bounded {
+		return "shell-parse-unreached"
 	}
 	return reason
 }
 
 // Recoverable syntax errors may leave executable calls and redirects in the
 // syntax tree. Check those effects before discarding the failed parse.
-func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unprovenParseBudget) bool {
+func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unprovenParseBudget) (unknown, reached bool) {
 	if len(command) > MaxPayloadBytes || shellparse.TooDeep(command) || len(command) > budget.bytes {
 		budget.bounded = true
-		return true // Beyond the command proof bound, effects are unknown.
+		reached = unprovenRecoveredProtectedReach(command, cwd, home, budget.memo)
+		return reached, reached
 	}
 	budget.bytes -= len(command)
 	file, _ := syntax.NewParser(syntax.Variant(syntax.LangBash), syntax.RecoverErrors(8)).Parse(shellparse.Reader(command), "")
 	if file == nil {
-		return strings.Contains(command, ">") ||
-			unprovenWriter.MatchString(command) && protectedReachFromText(command, cwd, home)
+		reached = unprovenRecoveredProtectedReach(command, cwd, home, budget.memo)
+		return strings.Contains(command, ">") || unprovenWriter.MatchString(command) && reached, reached
 	}
-	protected := newProtectedFiles(home)
+	protected := budget.memo.protectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
-	unknown := false
+	reach := protectedReachFromTextWithStatePrepared(command, cwd, home, filepath.Join(home, ".defenseclaw"), protected, ssh, budget.memo)
 	called := calledFunctionsWithBudget(file, home, budget)
-	if budget.bounded && unprovenRecoveredProtectedReach(command, cwd, home) {
-		return true
+	if budget.bounded {
+		return reach, reach
 	}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if unknown {
 			return false
 		}
 		if !budget.visit() {
-			unknown = unprovenRecoveredProtectedReach(command, cwd, home)
+			unknown = reach
 			return false
 		}
 		if declaration, ok := node.(*syntax.FuncDecl); ok {
@@ -463,7 +487,7 @@ func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unpro
 			budget.calls--
 			if budget.calls < 0 {
 				budget.bounded = true
-				unknown = true
+				unknown = reach
 				return false
 			}
 			// The printer can expand text while rendering recovered syntax.
@@ -471,36 +495,37 @@ func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unpro
 			rendered := unprovenBoundedWriter{limit: min(MaxPayloadBytes, budget.bytes)}
 			if syntax.NewPrinter().Print(&rendered, call) != nil {
 				budget.bounded = true
-				unknown = true
+				unknown = reach
 				return false
 			}
 			prefix := rendered.String()
-			budget.bytes -= len(prefix)
-			if len(prefix) > len(command) || prefix == command || depth+1 >= 4 {
+			if len(prefix) >= len(command) || depth+1 >= 4 {
 				// A recovered call can print back to the same input, or to
 				// longer text. Neither is progress toward a bounded proof.
-				// A protected reach or unresolved redirect keeps the
-				// incomplete verdict; an ordinary target stays allowed.
+				// A resolved protected reach keeps the incomplete verdict;
+				// an ordinary target remains audit-only in balanced mode.
 				budget.bounded = true
-				if (prefix == command || len(prefix) > len(command)) && strings.Contains(powerShellExecutableText(prefix), ">") {
-					unknown = true // The recovered call retains an unresolved redirect.
-					return false
-				}
-				if unprovenRecoveredProtectedReach(command, cwd, home) || unprovenRecoveredProtectedReach(prefix, cwd, home) {
+				if reach || prefix != command && protectedReachFromTextWithStatePrepared(prefix, cwd, home, filepath.Join(home, ".defenseclaw"), protected, ssh, budget.memo) {
 					unknown = true
 					return false
 				}
-			} else if unprovenProtectedWriteDepth(prefix, cwd, home, depth+1, budget) != "" {
+				return true
+			}
+			if nested := unprovenProtectedWriteDepth(prefix, cwd, home, depth+1, budget); nested != "" && nested != "shell-parse-unreached" {
 				unknown = true
 				return false
 			}
 			if len(prefix) > budget.bytes {
 				budget.bounded = true
-				unknown = true
+				unknown = reach
 				return false
 			}
-			budget.bytes -= len(prefix)
-			for _, operand := range literalWriteOperandsDepth(prefix, cwd, home, 0) {
+			// The recovered call was already charged above. Do not start a
+			// fresh reader after the proof budget has been exhausted.
+			if budget.bounded {
+				return true
+			}
+			for _, operand := range literalWriteOperandsDepth(prefix, cwd, home, depth+1) {
 				if protectedReachPath(operand, protected, ssh) {
 					unknown = true
 					return false
@@ -539,35 +564,14 @@ func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unpro
 		}
 		return !unknown
 	})
-	return unknown || budget.bounded && unprovenRecoveredProtectedReach(command, cwd, home)
+	return unknown || budget.bounded && reach, reach
 }
 
-// A recovered shell call may keep a PowerShell target as text. The exact
-// active-state root is included because a recursive operation on the root
-// affects its protected children; the ordinary sibling is distinct.
-func unprovenRecoveredProtectedReach(command, cwd, home string) bool {
-	if protectedReachFromText(command, cwd, home) {
-		return true
-	}
-	if !powerShellMayWriteStatePath(command) {
-		return false
-	}
-	if ActionStateTargetMention(command, cwd, home) {
-		return true
-	}
-	root := filepath.Join(home, ".defenseclaw")
-	for _, token := range unprovenPathToken.FindAllString(command, 513) {
-		if token == "~" || strings.HasPrefix(token, "~/") {
-			token = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(token, "~"), "/"))
-		}
-		if strings.ContainsAny(token, "*?[]") {
-			continue
-		}
-		if target, ok := ResolveWriteTarget(OperandPath(token, cwd)); ok && samePathName(target, root) {
-			return true
-		}
-	}
-	return false
+// A recovered shell call may keep a target as text. The same bounded scan
+// checks resolved links into the active state tree without starting another
+// parser after the proof budget is exhausted.
+func unprovenRecoveredProtectedReach(command, cwd, home string, memo *TargetMemo) bool {
+	return protectedReachFromTextWithStatePrepared(command, cwd, home, filepath.Join(home, ".defenseclaw"), memo.protectedFiles(home), filepath.Join(home, ".ssh"), memo)
 }
 
 type unprovenBoundedWriter struct {
@@ -1803,8 +1807,16 @@ func shellBodyProtectedWrite(code, cwd, home string) bool {
 }
 
 func protectedReachFromText(command, cwd, home string) bool {
+	return protectedReachFromTextWithState(command, cwd, home, "")
+}
+
+func protectedReachFromTextWithState(command, cwd, home, stateRoot string) bool {
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
+	return protectedReachFromTextWithStatePrepared(command, cwd, home, stateRoot, protected, ssh, nil)
+}
+
+func protectedReachFromTextWithStatePrepared(command, cwd, home, stateRoot string, protected protectedFiles, ssh string, memo *TargetMemo) bool {
 	seen := map[string]bool{}
 	text := strings.ReplaceAll(strings.ReplaceAll(command, "${HOME}/", home+"/"), "$HOME/", home+"/")
 	for _, quoted := range unprovenQuotedPath {
@@ -1820,17 +1832,21 @@ func protectedReachFromText(command, cwd, home string) bool {
 			if candidate == "~" || strings.HasPrefix(candidate, "~/") {
 				candidate = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(candidate, "~"), "/"))
 			}
-			if protectedReachTextPath(OperandPath(candidate, cwd), protected, ssh) {
+			if protectedReachTextPathWithState(OperandPath(candidate, cwd), protected, ssh, stateRoot, memo) {
 				return true
 			}
 		}
 	}
-	tokens := unprovenPathToken.FindAllString(text, 513)
+	tokens := unprovenPathToken.FindAllStringIndex(text, 513)
 	if len(tokens) > 512 {
 		return true // The path reach scan itself exceeded its proof bound.
 	}
-	for _, token := range tokens {
+	for _, position := range tokens {
+		token := text[position[0]:position[1]]
 		if seen[token] || len(token) > MaxWriteTargetPathBytes || token == "." || token == ".." {
+			continue
+		}
+		if stateRoot != "" && !recoveredTextOperandCandidate(text[:position[0]], token) {
 			continue
 		}
 		seen[token] = true
@@ -1844,11 +1860,26 @@ func protectedReachFromText(command, cwd, home string) bool {
 			// A bare ~ is the home itself (GAP-1093).
 			token = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(token, "~"), "/"))
 		}
-		if protectedReachTextPath(OperandPath(token, cwd), protected, ssh) {
+		if protectedReachTextPathWithState(OperandPath(token, cwd), protected, ssh, stateRoot, memo) {
 			return true
 		}
 	}
 	return false
+}
+
+// A recovered command word and its option names are not write targets.
+// Keep every other word as a possible operand, including bare relative
+// names, so a known link is still resolved through the file system.
+func recoveredTextOperandCandidate(before, token string) bool {
+	segment := before[strings.LastIndexAny(before, ";|&\n")+1:]
+	if strings.HasPrefix(token, "-") && !strings.HasSuffix(before, "'") &&
+		!strings.HasSuffix(before, "\"") && !strings.Contains(segment, " -- ") {
+		return false
+	}
+	if strings.HasSuffix(before, "$(") || strings.HasSuffix(before, "${") {
+		return false
+	}
+	return strings.TrimSpace(segment) != ""
 }
 
 func boundedProtectedGlobReach(pattern, cwd string, protected protectedFiles, ssh string) bool {
@@ -1901,9 +1932,20 @@ func protectedReachPathWith(path string, protected protectedFiles, ssh string, m
 // interpreter paths and shell state can enter its protected subdirectories.
 // Exact write destinations still use protectedReachPath, so a literal
 // ordinary child of home is not mistaken for the protected file.
-func protectedReachTextPath(path string, protected protectedFiles, ssh string) bool {
-	resolved, ok := ResolveWriteTarget(path)
-	return ok && samePathName(resolved, filepath.Dir(ssh)) || protectedReachPath(path, protected, ssh)
+func protectedReachTextPathWithState(path string, protected protectedFiles, ssh, stateRoot string, memo *TargetMemo) bool {
+	resolved, ok := memo.resolveWriteTarget(path)
+	if !ok {
+		return false
+	}
+	if samePathName(resolved, filepath.Dir(ssh)) ||
+		stateRoot != "" && pathAtOrUnder(resolved, stateRoot) ||
+		protected.has(resolved) || samePathName(resolved, ssh) {
+		return true
+	}
+	if mapped, ok := protected.target(resolved); ok && protected.has(mapped) {
+		return true
+	}
+	return false
 }
 
 func cdPathProtectedReach(call *syntax.CallExpr, file *syntax.File, cwd, home string) bool {

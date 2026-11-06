@@ -39,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -1006,6 +1007,10 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// Keep all static checks in this decision on the request snapshot. The
 	// Secure Client path keeps its pre-1.0 live policy source (issue #1092).
 	policyConfig := a.decisionConfig(ctx)
+	if policyConfig != nil {
+		action.StrictProofBound = policyConfig.HookPolicyTierForConnector(req.Connector) == config.HookPolicyTierStrict ||
+			managed.IsManagedEnterprise(policyConfig.DeploymentMode) || policyConfig.SecureClientIntegration()
+	}
 	policySource := func() *config.Config { return policyConfig }
 	if a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration() {
 		policySource = a.liveConfig

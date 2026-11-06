@@ -34,8 +34,11 @@ func TestGAP0534RecoveredParseFixedPoint(t *testing.T) {
 		if reason := UnprovenProtectedWrite(gap0534Command, cwd, home); reason != "shell-parse-bound" {
 			t.Fatalf("recovered parse reason = %q, want proof bound", reason)
 		}
-		if reason := UnprovenProtectedWrite(gap0534OrdinaryCommand, cwd, home); reason != "" {
-			t.Fatalf("ordinary recovered parse reason = %q, want none", reason)
+		if reason := UnprovenProtectedWrite(gap0534OrdinaryCommand, cwd, home); reason != "shell-parse-unreached" {
+			t.Fatalf("ordinary recovered parse reason = %q, want an unreached proof bound", reason)
+		}
+		if reason := ActionCommandDecision(gap0534OrdinaryCommand, cwd, home); reason != "" {
+			t.Fatalf("ordinary command decision = %q, want none", reason)
 		}
 		payload, err := json.Marshal(map[string]any{
 			"hook_event_name": "PreToolUse", "tool_name": "PowerShell", "cwd": cwd,
