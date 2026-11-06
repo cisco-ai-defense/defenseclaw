@@ -42,7 +42,12 @@ var errNetworkShareUnanswered = errors.New("the network share did not answer in 
 var (
 	// networkShareAnswerWait bounds how long a call waits for the first
 	// answer of a share.
-	networkShareAnswerWait = 750 * time.Millisecond
+	networkShareAnswerWait = 680 * time.Millisecond
+	// Identity reads get the remainder of this first-contact budget while
+	// the root is pending. The ordinary root probe still has the shorter
+	// answer wait above, so dead shares return within the hook's one-second
+	// requirement while a reached file can answer after that probe.
+	networkShareIdentityAnswerWait = 900 * time.Millisecond
 	// networkShareDeadAfter is how long a probe may take and still count as
 	// the answer of a live (slow) share.
 	networkShareDeadAfter = 5 * time.Second
@@ -191,16 +196,17 @@ var pendingNetworkReads struct {
 
 type pendingNetworkRead struct {
 	done       chan struct{}
+	started    time.Time
 	lastAccess time.Time
 	quietFor   time.Duration
 }
 
-func networkReadPending(root string) bool {
+func networkReadPending(root string) (bool, time.Time) {
 	pendingNetworkReads.mu.Lock()
 	defer pendingNetworkReads.mu.Unlock()
 	state := pendingNetworkReads.roots[root]
 	if state == nil {
-		return false
+		return false, time.Time{}
 	}
 	select {
 	case <-state.done:
@@ -208,21 +214,24 @@ func networkReadPending(root string) bool {
 		// later read after a quiet interval retries the current identity.
 		if time.Since(state.lastAccess) >= state.quietFor {
 			delete(pendingNetworkReads.roots, root)
-			return false
+			return false, time.Time{}
 		}
 	default:
 	}
 	state.lastAccess = time.Now()
-	return true
+	return true, state.started
 }
 
-func rememberPendingNetworkRead(root string, done chan struct{}) {
+func rememberPendingNetworkRead(root string, done chan struct{}, started time.Time) {
 	pendingNetworkReads.mu.Lock()
 	if pendingNetworkReads.roots == nil {
 		pendingNetworkReads.roots = make(map[string]*pendingNetworkRead)
 	}
+	if prior := pendingNetworkReads.roots[root]; prior != nil && prior.started.Before(started) {
+		started = prior.started
+	}
 	state := &pendingNetworkRead{
-		done: done, lastAccess: time.Now(), quietFor: max(networkShareAnswerWait/3, time.Millisecond),
+		done: done, started: started, lastAccess: time.Now(), quietFor: max(networkShareAnswerWait/3, time.Millisecond),
 	}
 	pendingNetworkReads.roots[root] = state
 	pendingNetworkReads.mu.Unlock()
@@ -279,7 +288,7 @@ func boundedPathRead(name string, kind pathReadKind, identityRead bool) pathRead
 		return readPath(name, kind)
 	}
 	root = strings.ToLower(filepath.ToSlash(root))
-	pending := networkReadPending(root)
+	pending, pendingStarted := networkReadPending(root)
 	if pending && !identityRead {
 		return pathReadResult{err: networkShareError("read", name)}
 	}
@@ -294,30 +303,23 @@ func boundedPathRead(name string, kind pathReadKind, identityRead bool) pathRead
 	}
 	wait := networkShareAnswerWait - time.Since(started)
 	if identityRead {
-		// A hook path scan may already have spent the root probe's
-		// answer budget. Give a reachable identity a brief chance to
-		// answer without charging another full budget to this call.
+		wait = networkShareIdentityAnswerWait - time.Since(started)
+		if pending {
+			wait = min(wait, networkShareIdentityAnswerWait-time.Since(pendingStarted))
+		}
 		networkShares.mu.Lock()
 		probe := networkShares.probes[root]
 		if probe != nil {
 			select {
 			case <-probe.done:
 			default:
-				remaining := networkShareAnswerWait - time.Since(probe.started)
+				remaining := networkShareIdentityAnswerWait - time.Since(probe.started)
 				if remaining < wait {
 					wait = remaining
 				}
 			}
 		}
 		networkShares.mu.Unlock()
-		// Give a reachable identity room to answer under load while keeping
-		// the caller's first-contact share verdict within one second.
-		if wait < 150*time.Millisecond {
-			wait = 150 * time.Millisecond
-		}
-		if pending && wait > 150*time.Millisecond {
-			wait = 150 * time.Millisecond
-		}
 	}
 	if wait <= 0 {
 		return pathReadResult{err: networkShareError("read", name)}
@@ -374,7 +376,7 @@ func boundedPathRead(name string, kind pathReadKind, identityRead bool) pathRead
 				}()
 			}
 			if !readDone {
-				rememberPendingNetworkRead(root, readFinished)
+				rememberPendingNetworkRead(root, readFinished, started)
 			}
 			return pathReadResult{err: networkShareError("read", name)}
 		}

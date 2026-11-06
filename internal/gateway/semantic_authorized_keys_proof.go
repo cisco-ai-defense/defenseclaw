@@ -355,38 +355,19 @@ func trustedOrdinaryPathReassignment(name, home, cwd string, strict bool) bool {
 	if name == "" || strings.ContainsAny(name, "\x00\r\n$`*?[") {
 		return false
 	}
+	if strict && hookpaths.SharePath(home) {
+		// A local replacement cannot establish the protected side of a
+		// pending home share for strict policy.
+		return false
+	}
 	if !filepath.IsAbs(name) {
 		if !filepath.IsAbs(cwd) {
 			return false
 		}
 		name = filepath.Join(cwd, name)
 	}
-	resolved, ok := hookpaths.ResolveWriteTarget(name)
-	if !ok {
-		return false
-	}
-	for _, protected := range hookpaths.ProtectedAuthorizedKeysPaths(home) {
-		if canonicalSemanticPath(resolved) == canonicalSemanticPath(protected) {
-			return false
-		}
-	}
-	entry, entryErr := hookpaths.PathStat(resolved)
-	if entryErr != nil && !os.IsNotExist(entryErr) {
-		return !strict && hookpaths.ShareUnanswered(entryErr)
-	}
-	for _, protected := range hookpaths.ProtectedAuthorizedKeysPaths(home) {
-		guarded, err := hookpaths.PathStat(protected)
-		if err != nil && !os.IsNotExist(err) {
-			if strict || !hookpaths.ShareUnanswered(err) {
-				return false
-			}
-			continue
-		}
-		if entryErr == nil && err == nil && os.SameFile(entry, guarded) {
-			return false
-		}
-	}
-	return true
+	grade := hookpaths.ProtectedSSHReach(name, home, hookpaths.NewTargetMemo())
+	return grade == hookpaths.GradeNone || grade == hookpaths.GradePossible && !strict
 }
 
 // A static shell redirect writes its target independently of the program's
@@ -1027,6 +1008,18 @@ func trustedSymlinkName(input actionfacts.Input, name string) string {
 }
 
 func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, facts actionfacts.Facts) bool {
+	// A partial ActionFacts projection can omit ActiveHome while the trusted
+	// hook request still carries the verified user's home. Keep the path
+	// proof available for that projection.
+	if facts.ActiveHome == "" && filepath.IsAbs(request.Input.ActiveHome) {
+		facts.ActiveHome = request.Input.ActiveHome
+	}
+	named := func() bool {
+		if request.namedTarget != nil {
+			*request.namedTarget = true
+		}
+		return true
+	}
 	if command, ok := trustedBashCommandInput(request.Input); ok &&
 		trustedNoDereferenceTouchSafe(command, request.Input.CWD, facts.ActiveHome,
 			request.ResolvedWriteTargets, request.ProtectedHomeHook) {
@@ -1118,6 +1111,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 					canonicalSemanticPath(resolved) == canonicalSemanticPath(filepath.Join(facts.ActiveHome, ".ssh"))) ||
 				operand == hookpaths.CWDKey && (changedDirectory || truncated) ||
 				operand == hookpaths.LinksStableKey ||
+				operand == hookpaths.ActionDecisionKey && resolved == hookpaths.ProtectedTargetDecision ||
 				operand == hookpaths.TruncatedKey ||
 				resolved == "" && external(operand) && !truncated ||
 				isProtected(resolved) {
@@ -1148,6 +1142,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// the command is known, before the first writeTarget call.
 	var links hookpaths.Links
 	var safeRedirects []hookpaths.RedirectOccurrence
+	// Read a static write on a share before the broad command-word scan
+	// spends the share's first-contact window on a non-write word.
+	var preReach map[string]hookpaths.Grade
 	// A plain mv onto an existing link to a file replaces the link entry
 	// and writes neither file (GAP-2559); a gateway that reads the file
 	// system judges that destination by its entry. Behind ProtectHome the
@@ -1179,25 +1176,16 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	ordinarySpelling := func(target string) bool {
 		return runtime.GOOS != "windows" || windowsLocationOrdinaryWriteTarget(target)
 	}
-	staticWordsRead, staticWordsKnown := false, false
 	possible := func(target string) bool {
+		if cannotResolveLocally && (truncated || len(clientTargets) == 0) {
+			// Missing, rejected, or bounded user-side evidence cannot
+			// establish an ordinary write behind ProtectHome.
+			return true
+		}
 		if !ordinarySpelling(target) {
 			return true
 		}
 		if request.ProtectedHomeHook && links.DereferencedSourceLink(target) {
-			return true
-		}
-		if request.staticOperandReading || request.unresolvedSourceWords {
-			// A static projection is one reading of a runtime operand. It
-			// cannot clear the unresolved name in the original command.
-			return true
-		}
-		if !staticWordsRead {
-			staticWordsRead = true
-			staticWordsKnown = trustedCommandWordsStatic(request.Input, facts.ActiveHome)
-		}
-		if !staticWordsKnown {
-			// A runtime value can still name a reached disk link.
 			return true
 		}
 		if request.possibleTarget != nil {
@@ -1242,15 +1230,34 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			target = mapped
 		}
 		if isProtected(target) {
-			return true
+			return named()
 		}
 		// Positive client and command-link answers take precedence over an
 		// opaque copy scope. The scope alone is only a possible write.
 		if isProtected(clientTargets[target]) {
-			return true
+			return named()
+		}
+		localReach := hookpaths.GradeNone
+		if !cannotResolveLocally {
+			var warmed bool
+			localReach, warmed = preReach[target]
+			if !warmed {
+				localReach = hookpaths.ProtectedSSHReach(target, facts.ActiveHome, request.targetMemo)
+			}
+		}
+		if localReach == hookpaths.GradeNamed {
+			return named()
 		}
 		if linked, ok := links.Target(target); ok && isProtected(linked) {
-			return true
+			return named()
+		}
+		for _, linked := range links.AliasTargets(target, false) {
+			if isProtected(linked) {
+				return named()
+			}
+		}
+		if links.CopiedSourceReachesProtected(target, facts.ActiveHome, request.targetMemo) {
+			return named()
 		}
 		if moved := hookpaths.PlainMovePath(target); movedOntoLinks[moved] || windowsMovedOntoLink(moved) {
 			parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(moved))
@@ -1260,7 +1267,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			strings.HasPrefix(target, clientCWD+string(filepath.Separator)) {
 			relative := strings.TrimPrefix(target, clientCWD+string(filepath.Separator))
 			if isProtected(hookpaths.OperandPath(relative, physicalCWD)) {
-				return true
+				return named()
 			}
 		}
 		// An unreadable link operation makes later writes at its destination
@@ -1270,11 +1277,19 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// so the device is read without following links. A managed gateway
 		// cannot walk the user's home (ProtectHome); the hook client's walk of
 		// the same operand replaces only that missing view (GAP-0278).
+		if reading := clientTargets[hookpaths.ReadingTargetPrefix+target]; request.staticOperandReading && isProtected(reading) {
+			return named()
+		}
+		if resolved, present := request.ResolvedWriteTargets[target]; present && isProtected(resolved) {
+			return named()
+		}
 		if !safeRedirect && links.OpaqueTargetWithFacts(target, ownCopy, opaqueFacts) {
-			// The scope is possible until a named client or local target
-			// below proves that it reaches the protected file.
+			// A target inside an archive or copy scope, or one for which
+			// bounded client evidence is missing, has no complete ordinary
+			// answer. Keep the scope's existing block after the positive
+			// link and client checks above.
 			info, err := hookpaths.PathLstat(target)
-			if (err != nil || info.Mode()&os.ModeCharDevice == 0) && possible(target) {
+			if err != nil || info.Mode()&os.ModeCharDevice == 0 {
 				return true
 			}
 		}
@@ -1318,7 +1333,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				}
 			}
 		}
-		if request.SkipLocalFilesystemResolution {
+		if cannotResolveLocally {
 			return false
 		}
 		// A name that a link earlier in the command makes an alias of a
@@ -1340,53 +1355,14 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				return true
 			}
 		}
-		if hookpaths.SharePath(target) {
-			if trustedShareKnownProtectedTarget(target, protectedPaths, isProtected) {
-				return true
-			}
+		switch localReach {
+		case hookpaths.GradeNamed:
+			return true
+		case hookpaths.GradePossible:
 			return possible(target)
-		}
-		info, err := hookpaths.PathLstat(target)
-		if err != nil && !os.IsNotExist(err) {
+		default:
 			return false
 		}
-		if err == nil {
-			// A reachable link and a hard link both name the protected file
-			// by identity.
-			identity, identityErr := info, error(nil)
-			if info.Mode()&os.ModeSymlink != 0 {
-				identity, identityErr = hookpaths.PathStat(target)
-			}
-			if identityErr == nil && identity.Mode().IsRegular() {
-				for _, path := range protectedPaths {
-					if file, err := hookpaths.PathStat(path); err == nil && os.SameFile(identity, file) {
-						return true
-					}
-				}
-			}
-			if info.Mode()&os.ModeSymlink == 0 {
-				return false
-			}
-		}
-		// A known link entry names a protected file even if the final file
-		// does not exist yet.
-		if err == nil && info.Mode()&os.ModeSymlink != 0 {
-			if link, readErr := hookpaths.PathReadlink(target); readErr == nil {
-				if filepath.IsAbs(link) && isProtected(link) {
-					return true
-				}
-				if !filepath.IsAbs(link) {
-					parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(target))
-					if ok && isProtected(filepath.Join(parent, link)) {
-						return true
-					}
-				}
-			}
-		}
-		// Resolve as the hook client does, so a link to a missing final
-		// file that the redirect would create is covered as well.
-		resolved, ok := hookpaths.ResolveWriteTarget(target)
-		return isProtected(resolved) || !ok && (err == nil && info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 || possible(target))
 	}
 	// Partial command projections can omit a redirect PathFact. The shell AST
 	// still gives an exact write operand, which the user's hook resolved.
@@ -1403,17 +1379,39 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			input.Command = args.Cmd
 		}
 	}
+	if !cannotResolveLocally && input.Command != "" {
+		if writes, parsed, _ := hookpaths.ShellWriteOperands(input.Command, input.CWD, facts.ActiveHome); parsed {
+			for _, target := range writes {
+				if hookpaths.SharePath(target) {
+					if preReach == nil {
+						preReach = make(map[string]hookpaths.Grade)
+					}
+					if _, read := preReach[target]; !read {
+						preReach[target] = hookpaths.ProtectedSSHReach(target, facts.ActiveHome, request.targetMemo)
+					}
+				}
+			}
+		}
+	}
 	if !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
 		(request.Connector == "claudecode" || request.Connector == "codex") &&
 		hookpaths.ProvedOrdinaryVariableTargets(input.Command, input.CWD, facts.ActiveHome) {
+		// The binding tracker has followed every later write value. An
+		// earlier mention of a replaced value is not a write target.
 		return false
 	}
 	decision := request.targetMemo.ActionCommandDecisionInShell(input.Command, input.CWD, facts.ActiveHome, globFacts, trustedPOSIXShellCall(input, facts))
 	if input.DialectHint != "" {
 		decision = request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
 	}
-	if decision != "" {
-		return true
+	if decision == hookpaths.ProtectedTargetDecision {
+		return named()
+	}
+	// A possible hit cannot end this proof: a later write operand or
+	// command-created link in the same call may still give a named answer.
+	decisionPossible := decision != ""
+	if decisionPossible && request.possibleTarget != nil {
+		*request.possibleTarget = true
 	}
 	if !cannotResolveLocally && trustedPOSIXShellCall(input, facts) &&
 		strings.Contains(input.Command, "for") && strings.Contains(input.Command, "cp") &&
@@ -1427,12 +1425,15 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// the user's hook ran the same decision on the same command and
 		// found a protected target, as a per-user gateway does (GAP-2514,
 		// GAP-2515).
-		return true
+		return named()
 	}
 	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {
 		return true
 	}
 	links = hookpaths.CommandLinksWithFacts(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
+	if links.LinkNamesProtectedSource(facts.ActiveHome, request.targetMemo) {
+		return named()
+	}
 	safeRedirects = hookpaths.SafeShellRedirectOccurrencesWithFacts(input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
 	replacedBySed := hookpaths.SedReplacedOperands(input.Command, input.CWD, facts.ActiveHome)
 	// The claudecode scoping above drops the client's reading of the
@@ -1710,54 +1711,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return true
 		}
 	}
-	return false
-}
-
-// trustedShareKnownProtectedTarget checks reachable file and parent identity
-// while the share probe is pending. Each independent read can use the same
-// bounded answer window; a stalled file read does not hide a reachable parent.
-func trustedShareKnownProtectedTarget(target string, protectedPaths []string, isProtected func(string) bool) bool {
-	type answer struct {
-		info os.FileInfo
-		err  error
-	}
-	fileAnswer := make(chan answer, 1)
-	parentAnswer := make(chan answer, 1)
-	entryAnswer := make(chan answer, 1)
-	parent := filepath.Dir(target)
-	go func() {
-		info, err := hookpaths.PathStat(target)
-		fileAnswer <- answer{info, err}
-	}()
-	go func() {
-		info, err := hookpaths.PathStat(parent)
-		parentAnswer <- answer{info, err}
-	}()
-	go func() {
-		info, err := hookpaths.PathLstat(target)
-		entryAnswer <- answer{info, err}
-	}()
-	file, directory, entry := <-fileAnswer, <-parentAnswer, <-entryAnswer
-	for _, path := range protectedPaths {
-		if file.err == nil {
-			if protectedFile, err := hookpaths.PathStat(path); err == nil && os.SameFile(file.info, protectedFile) {
-				return true
-			}
-		}
-		if directory.err == nil && filepath.Base(target) == filepath.Base(path) {
-			if protectedDir, err := hookpaths.PathStat(filepath.Dir(path)); err == nil && os.SameFile(directory.info, protectedDir) {
-				return true
-			}
-		}
-	}
-	if entry.err == nil && entry.info.Mode()&os.ModeSymlink != 0 {
-		if link, err := hookpaths.PathReadlink(target); err == nil {
-			if filepath.IsAbs(link) && isProtected(link) || !filepath.IsAbs(link) && isProtected(filepath.Join(parent, link)) {
-				return true
-			}
-		}
-	}
-	return false
+	return decisionPossible && request.StrictPolicy
 }
 
 // trustedCommandWordsStatic reports whether every word is fixed by the
