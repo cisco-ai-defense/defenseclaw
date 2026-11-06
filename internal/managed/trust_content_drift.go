@@ -56,7 +56,8 @@ func standaloneMachinePolicyDriftRecovery() string {
 		"DefenseClaw policy file beside it too, 90-defenseclaw.json or requirements.toml; for Cursor delete the record, " +
 		".defenseclaw-managed-hooks.receipt and defenseclaw-hook.ps1 together), then run `" + WindowsSetupCommand("/ensure") +
 		"`, which writes them new from Setup's own state, and `" + WindowsAdminCommand("enterprise", "windows", "verify", "--profile", "standalone") +
-		"`; for a folder remove that entry (icacls \"<path>\" /remove:g *<SID>), or give it back to Administrators " +
+		"`; for a folder remove that entry (icacls \"<path>\" /remove:g *<SID>; for an inherited entry first run icacls \"<path>\" /inheritance:d, " +
+		"which keeps copies of the inherited entries), or give it back to Administrators " +
 		"(icacls \"<path>\" /setowner *S-1-5-32-544). " + WindowsSetupSource
 }
 
@@ -95,10 +96,10 @@ func RefuseStandaloneMachinePolicyDrift(err error) error {
 
 // Recovery texts of RefuseStandaloneInPlaceRepair.
 const (
-	standaloneInPlaceFolderRecovery = "from an elevated prompt remove that entry (icacls \"<path>\" /remove:g *<SID>), or give " +
+	standaloneInPlaceFolderRecovery = "from an elevated prompt remove that entry (icacls \"<path>\" /remove:g *<SID>; for an inherited entry first run icacls \"<path>\" /inheritance:d, which keeps copies of the inherited entries), or give " +
 		"the folder back to Administrators (icacls \"<path>\" /setowner *S-1-5-32-544), check what is in it, then run " +
 		"Setup /ensure and Setup /verify"
-	standaloneInPlaceFileRecovery = "from an elevated prompt remove that entry (icacls \"<path>\" /remove:g *<SID>), or give " +
+	standaloneInPlaceFileRecovery = "from an elevated prompt remove that entry (icacls \"<path>\" /remove:g *<SID>; for an inherited entry first run icacls \"<path>\" /inheritance:d, which keeps copies of the inherited entries), or give " +
 		"the file back to Administrators (icacls \"<path>\" /setowner *S-1-5-32-544), check it, then run Setup /ensure " +
 		"and Setup /verify"
 )
