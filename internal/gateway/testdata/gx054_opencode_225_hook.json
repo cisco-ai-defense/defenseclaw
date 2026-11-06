@@ -1,0 +1,14 @@
+{
+  "hook_event_name": "tool.execute.before",
+  "tool_name": "patch",
+  "tool_input": {
+    "patchText": "*** Begin Patch\n*** Add File: note.txt\n+note\n*** End Patch"
+  },
+  "session_id": "session-captured",
+  "turn_id": "message-captured",
+  "tool_call_id": "call-captured",
+  "agent_name": "build",
+  "cwd": "/home/operator/project",
+  "arguments_authoritative": true,
+  "mcp_identity_status": "not_mcp"
+}
