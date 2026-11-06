@@ -1937,6 +1937,27 @@ func installWindowsEnterpriseApprovedManifestOverDrift(
 	})
 }
 
+// windowsEnterpriseGateRefusal starts every refusal of the lifecycle's
+// content gate (Assert-DefenseClawStandaloneContentTrusted), which runs
+// before the lifecycle changes anything.
+const windowsEnterpriseGateRefusal = "refusing to change the deployment, and nothing was changed"
+
+// noteWindowsEnterpriseRewriteBeforeRefusal makes a content-gate refusal say
+// what this run had already done: Setup wrote config.yaml or targets.yaml
+// new from the approved source before the lifecycle ran, and the gate then
+// refused another file, so "nothing was changed" was not true (GAP-0590
+// review S4). The changes list the rewrite and the kept file.
+func noteWindowsEnterpriseRewriteBeforeRefusal(result *enterprisestatus.Result, rewritten []string) {
+	if len(rewritten) == 0 {
+		return
+	}
+	said := "refusing to change the rest of the deployment: Setup first wrote a new " + strings.Join(rewritten, " and ") +
+		" from the approved source (see changes), and then stopped no service and changed nothing else"
+	for i := range result.Errors {
+		result.Errors[i].Message = strings.Replace(result.Errors[i].Message, windowsEnterpriseGateRefusal, said, 1)
+	}
+}
+
 // windowsEnterpriseSamePath reports whether two paths name one file.
 func windowsEnterpriseSamePath(left, right string) bool {
 	a, errA := filepath.Abs(left)

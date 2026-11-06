@@ -619,6 +619,36 @@ func TestWindowsEnterpriseEnsureInstallsTheSuppliedConfigOverAnUnparseableOne(t 
 	}
 }
 
+// GAP-0590 review S4: Setup wrote config.yaml new from the approved source,
+// then the lifecycle's content gate refused another file. The refusal said
+// "nothing was changed"; it now says what was rewritten and what was refused.
+// Without a rewrite, and for other errors, the message stays as it is.
+func TestWindowsEnterpriseGateRefusalNamesTheRewriteBeforeIt(t *testing.T) {
+	refusal := windowsEnterpriseGateRefusal + ` (DefenseClaw does not give a file another account owns or could change a trusted access list back in place; remove that entry): untrusted principal S-1-5-32-545 has write-like access to managed path: C:\ProgramData\Cisco\DefenseClaw\secrets\ai-defense-api-key`
+	other := "the gateway did not start"
+	result := &enterprisestatus.Result{}
+	result.AddError("lifecycle_failed", refusal)
+	result.AddError("lifecycle_failed", other)
+	noteWindowsEnterpriseRewriteBeforeRefusal(result, nil)
+	if result.Errors[0].Message != refusal {
+		t.Fatalf("no rewrite changed the refusal: %q", result.Errors[0].Message)
+	}
+	noteWindowsEnterpriseRewriteBeforeRefusal(result, []string{"config.yaml", "targets.yaml"})
+	got := result.Errors[0].Message
+	for _, want := range []string{
+		"Setup first wrote a new config.yaml and targets.yaml from the approved source (see changes)",
+		"stopped no service and changed nothing else",
+		`managed path: C:\ProgramData\Cisco\DefenseClaw\secrets\ai-defense-api-key`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("refusal %q does not say %q", got, want)
+		}
+	}
+	if strings.Contains(got, "nothing was changed") || result.Errors[1].Message != other {
+		t.Fatalf("refusal %q / other %q", got, result.Errors[1].Message)
+	}
+}
+
 // GAP-0590 review S6: a program that holds the old file open without delete
 // sharing makes the rename fail; the error names the file, the holder and the
 // way out (stop it, or restart Windows), and nothing changes. A replaced
