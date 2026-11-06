@@ -3660,7 +3660,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// by returning advisory-only changes (action stays allow,
 	// rawAction promoted to block, wouldBlock=true). For events
 	// the connector itself does not declare blockable, we further
-	// downgrade through mapHookAction so we never tell the agent
+	// downgrade through its capability map so we never tell the agent
 	// to block on a surface it cannot honor.
 	for _, asset := range assetDecisions {
 		mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
@@ -3668,7 +3668,10 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			action, rawAction, severity, reason, findings,
 		)
 		if mergedAction == "block" {
-			capable, capableWouldBlock := mapHookActionForProfile("block", effectiveMode, req.HookEventName, caps, profile, req.Payload)
+			capable, capableWouldBlock := mapAssetBlockForProfile(
+				effectiveMode, req.HookEventName, caps, profile, req.Payload,
+				a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration(),
+			)
 			if capable != "block" {
 				mergedAction = capable
 				if capableWouldBlock {

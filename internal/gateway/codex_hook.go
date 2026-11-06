@@ -393,13 +393,13 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			asset.decision, true, asset.targetType, req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings,
 		)
 		if mergedAction == "block" {
-			capable, capableWouldBlock := mapHookActionForProfile(
-				"block",
+			capable, capableWouldBlock := mapAssetBlockForProfile(
 				effectiveMode,
 				req.HookEventName,
 				caps,
 				profile,
 				req.Payload,
+				cfg != nil && cfg.SecureClientIntegration(),
 			)
 			if capable != "block" {
 				mergedAction = capable
