@@ -2566,7 +2566,7 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, out *poli
 				_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "file", "quarantine", blockReason)
 			}
 			if runtimeAction == "block" {
-				_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "runtime", "disable", blockReason)
+				_ = w.store.SetRuntimeDisableForConnector(targetType, journalName(evt), scope, evt.Path, blockReason)
 			}
 
 			_ = w.logger.LogActionWithEnforcement(string(audit.ActionWatcherBlock), evt.Name,
@@ -3039,8 +3039,9 @@ func (w *InstallWatcher) recordScanFailureBlock(evt InstallEvent, targetType, re
 	}
 	scope := w.journalScope(w.eventConnector(evt))
 	_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "install", "block", reason)
-	_ = w.store.SetSourcePathForConnector(targetType, journalName(evt), scope, evt.Path)
-	_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "runtime", "disable", reason)
+	// One statement records the runtime disable, the source path and the
+	// path that decided it (the provenance an account row is read by).
+	_ = w.store.SetRuntimeDisableForConnector(targetType, journalName(evt), scope, evt.Path, reason)
 }
 
 // releaseScanFailureBlock clears the block and runtime disable a failed scan

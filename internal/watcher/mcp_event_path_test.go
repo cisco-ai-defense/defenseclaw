@@ -318,46 +318,93 @@ func TestGAP0034StructuredOldKeyNeedsFreshAdmission(t *testing.T) {
 }
 
 // The decision of a completed failed scan holds from the moment admission
-// records it: before its snapshot is stored, and if storing it fails.
-// Only a snapshot an earlier release left under the key makes a row old.
-func TestGAP0034FreshAccountDecisionHoldsWithoutSnapshot(t *testing.T) {
-	cfg, store, logger, _ := setupTestEnv(t)
-	cfg.Gateway.Watcher.MCP.TakeAction = true
-	cfg.Scanners.MCPScanner.UnverifiedServer = "block"
-	server := config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: filepath.Join(t.TempDir(), "account"),
-		Command: "npx", Args: []string{"-y", "."}}
-	w := New(cfg, nil, nil, store, logger, nil, nil)
-	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return []config.MCPServerEntry{server}, nil })
-	w.firstCycleDone.Store(true)
-	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &failingScanner{countingScanner{name: "mcp-scanner"}} }
-	key := MCPEventPath(server)
-	evt := InstallEvent{Type: InstallMCP, Name: server.Name, Path: key, Connector: server.Connector}
-	w.runAdmission(context.Background(), evt)
-	row, err := store.GetActionForConnector(string(InstallMCP), MCPJournalName(server), "claudecode")
-	if err != nil || row == nil || row.Actions.Runtime != "disable" || row.SourcePath != key {
-		t.Fatalf("failed admission was not recorded: row=%+v err=%v", row, err)
+// records it, whatever the snapshot table holds under the key: nothing, a
+// snapshot an earlier release left there (a server literally named like the
+// key), or the new snapshot. The provenance is on the decision row itself.
+func TestGAP0034FreshAccountDecisionCarriesItsProvenance(t *testing.T) {
+	for _, preIdentitySnapshot := range []bool{false, true} {
+		cfg, store, logger, _ := setupTestEnv(t)
+		cfg.Gateway.Watcher.MCP.TakeAction = true
+		cfg.Scanners.MCPScanner.UnverifiedServer = "block"
+		server := config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: filepath.Join(t.TempDir(), "account"),
+			Command: "npx", Args: []string{"-y", "."}}
+		key := MCPEventPath(server)
+		if preIdentitySnapshot {
+			hashes, err := json.Marshal(map[string]string{"mcp.servers." + key: "oldhash"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.SetTargetSnapshot(string(InstallMCP), key, "oldhash", "{}", string(hashes), "[]", "", "fingerprint"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		w := New(cfg, nil, nil, store, logger, nil, nil)
+		w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return []config.MCPServerEntry{server}, nil })
+		w.firstCycleDone.Store(true)
+		w.scannerFactory = func(InstallEvent) scanner.Scanner { return &failingScanner{countingScanner{name: "mcp-scanner"}} }
+		evt := InstallEvent{Type: InstallMCP, Name: server.Name, Path: key, Connector: server.Connector}
+		w.runAdmission(context.Background(), evt)
+		owner := MCPAdmissionQuery{Connector: server.Connector, Server: server.Name, Home: server.Home}
+		ordinary := MCPAdmissionQuery{Connector: server.Connector, Server: server.Name, Home: filepath.Join(t.TempDir(), "ordinary")}
+		served := func(stage string) {
+			t.Helper()
+			row, err := store.GetActionForConnector(string(InstallMCP), MCPJournalName(server), "claudecode")
+			if err != nil || row == nil || row.SourcePath != key || !MCPAccountRuntimeDisabled(*row) ||
+				!MCPAccountJournalServes(row.TargetName, owner) || MCPAccountJournalServes(row.TargetName, ordinary) {
+				t.Fatalf("pre-identity snapshot %v, %s: decision not in force for its account only: row=%+v err=%v",
+					preIdentitySnapshot, stage, row, err)
+			}
+		}
+		served("before its snapshot")
+		current, err := w.snapshotForEvent(evt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.persistSnapshot(evt, current, "", "fingerprint"+mcpScanFailedMark)
+		served("after its snapshot")
 	}
-	snapshot, err := store.GetTargetSnapshot(string(InstallMCP), key)
-	if !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("snapshot already stored: %+v %v", snapshot, err)
+}
+
+// A runtime disable an earlier release wrote under a key (here an old server
+// literally named like the versioned key) has no provenance, with or without
+// its old snapshot; a later plain runtime write drops the provenance too.
+func TestGAP0034RuntimeDisableWithoutProvenanceIsNotAnAccountDecision(t *testing.T) {
+	_, store, _, _ := setupTestEnv(t)
+	key := MCPEventPath(config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: filepath.Join(t.TempDir(), "account")})
+	row := func() audit.ActionEntry {
+		t.Helper()
+		entry, err := store.GetActionForConnector(string(InstallMCP), key, "claudecode")
+		if err != nil || entry == nil {
+			t.Fatalf("row: %+v %v", entry, err)
+		}
+		return *entry
 	}
-	owner := MCPAdmissionQuery{Connector: server.Connector, Server: server.Name, Home: server.Home}
-	ordinary := MCPAdmissionQuery{Connector: server.Connector, Server: server.Name, Home: filepath.Join(t.TempDir(), "ordinary")}
-	if !MCPAccountJournalServesSnapshot(row.TargetName, snapshot, owner) ||
-		MCPAccountJournalServesSnapshot(row.TargetName, snapshot, ordinary) {
-		t.Fatal("decision without a stored snapshot did not stay with its account")
-	}
-	current, err := w.snapshotForEvent(evt)
-	if err != nil {
+	if err := store.SetActionFieldForConnector(string(InstallMCP), key, "claudecode", "runtime", "disable", "old literal server"); err != nil {
 		t.Fatal(err)
 	}
-	w.persistSnapshot(evt, current, "", "fingerprint"+mcpScanFailedMark)
-	if snapshot, err = store.GetTargetSnapshot(string(InstallMCP), key); err != nil ||
-		!MCPAccountJournalServesSnapshot(row.TargetName, snapshot, owner) {
-		t.Fatalf("stored snapshot released the decision: %+v %v", snapshot, err)
+	if err := store.SetSourcePathForConnector(string(InstallMCP), key, "claudecode", key); err != nil {
+		t.Fatal(err)
 	}
-	old := &audit.SnapshotRow{ContentHash: "hash", ConfigHashes: `{"mcp.servers.` + key + `":"hash"}`}
-	if MCPAccountJournalServesSnapshot(row.TargetName, old, owner) {
-		t.Fatal("snapshot of an earlier release was taken as current provenance")
+	if MCPAccountRuntimeDisabled(row()) {
+		t.Fatal("a runtime disable without provenance was taken as the account decision")
+	}
+	if err := store.SetRuntimeDisableForConnector(string(InstallMCP), key, "claudecode", key, "fresh admission failed"); err != nil {
+		t.Fatal(err)
+	}
+	if !MCPAccountRuntimeDisabled(row()) {
+		t.Fatal("the account decision lost its provenance")
+	}
+	if err := store.SetActionFieldForConnector(string(InstallMCP), key, "claudecode", "runtime", "disable", "plain write"); err != nil {
+		t.Fatal(err)
+	}
+	if MCPAccountRuntimeDisabled(row()) {
+		t.Fatal("a later runtime write kept the provenance of an earlier one")
+	}
+	literal := MCPEventPath(config.MCPServerEntry{Name: key, Connector: "claudecode"})
+	if err := store.SetRuntimeDisableForConnector(string(InstallMCP), key, "claudecode", literal, "literal server failed"); err != nil {
+		t.Fatal(err)
+	}
+	if MCPAccountRuntimeDisabled(row()) {
+		t.Fatal("the decision of a server literally named like the key became the account decision")
 	}
 }

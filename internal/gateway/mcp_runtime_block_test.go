@@ -286,11 +286,8 @@ func TestInspectToolEnrolledAccountMCPVerdictIsThatAccountsOnly(t *testing.T) {
 	u1 := config.MCPServerEntry{Name: "gb05-benign", Connector: "claudecode",
 		Home: filepath.Join(base, "dcw-std1"), Project: filepath.Join(base, "dcw-std1", "proj")}
 	u2Home := filepath.Join(base, "dcw-std2")
-	if err := store.SetActionFieldForConnector("mcp", watcher.MCPJournalName(u1), "claudecode", "runtime", "disable",
+	if err := store.SetRuntimeDisableForConnector("mcp", watcher.MCPJournalName(u1), "claudecode", watcher.MCPEventPath(u1),
 		"scanner failure (fail-closed): dcw-std1 is not signed in"); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SetSourcePathForConnector("mcp", watcher.MCPJournalName(u1), "claudecode", watcher.MCPEventPath(u1)); err != nil {
 		t.Fatal(err)
 	}
 	identity, err := json.Marshal(map[string]string{"name": u1.Name, "connector": u1.Connector,
