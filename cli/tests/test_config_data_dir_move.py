@@ -103,6 +103,104 @@ def test_config_set_data_dir_carries_the_records_the_gateway_needs_to_start(tmp_
     assert "Copied the connector records to the new data_dir: agent_discovery.json." in result.output
 
 
+def test_config_set_data_dir_keeps_live_hook_credentials(tmp_path, monkeypatch):
+    home, path = _install_home(tmp_path, monkeypatch)
+    path.write_text(
+        f"config_version: 9\ndata_dir: {home.as_posix()}\n"
+        "guardrail:\n  connectors:\n    claudecode: {mode: action, enabled: true}\n"
+        "    codex: {mode: action, enabled: true}\n"
+        "    cursor: {mode: action, enabled: false}\nobservability: {}\n",
+        encoding="utf-8",
+    )
+    old_hooks = home / "hooks"
+    old_hooks.mkdir(mode=0o700)
+    tokens = {name: os.urandom(32).hex() for name in ("claudecode", "codex")}
+    for name, token in tokens.items():
+        source = old_hooks / f".hook-{name}.token"
+        source.write_text(token + "\n", encoding="ascii")
+        source.chmod(0o600)
+    disabled = old_hooks / ".hook-cursor.token"
+    disabled.write_text(os.urandom(32).hex() + "\n", encoding="ascii")
+    disabled.chmod(0o600)
+    moved = tmp_path / "dcdata"
+    monkeypatch.setattr(cmd_config.config_module, "_is_admin_process", lambda: False)
+
+    result = CliRunner().invoke(cmd_config.config_cmd, ["set", "data_dir", str(moved)], obj=AppContext())
+
+    assert result.exit_code == 0, result.output
+    for name, token in tokens.items():
+        source = old_hooks / f".hook-{name}.token"
+        target = moved / "hooks" / f".hook-{name}.token"
+        assert source.read_text(encoding="ascii").strip() == token
+        assert target.read_text(encoding="ascii").strip() == token
+        assert target.stat().st_mode & 0o077 == 0
+    assert not (moved / "hooks" / ".hook-cursor.token").exists()
+
+
+def test_config_set_data_dir_without_hook_credentials_keeps_the_new_hooks_empty(tmp_path, monkeypatch):
+    home, _ = _install_home(tmp_path, monkeypatch)
+    moved = tmp_path / "dcdata"
+    monkeypatch.setattr(cmd_config.config_module, "_is_admin_process", lambda: False)
+
+    result = CliRunner().invoke(cmd_config.config_cmd, ["set", "data_dir", str(moved)], obj=AppContext())
+
+    assert result.exit_code == 0, result.output
+    assert not (moved / "hooks").exists()
+
+
+def test_config_set_data_dir_uses_the_current_hook_credential_in_a_populated_store(tmp_path, monkeypatch):
+    home, path = _install_home(tmp_path, monkeypatch)
+    path.write_text(
+        f"config_version: 9\ndata_dir: {home.as_posix()}\n"
+        "guardrail:\n  connector: claudecode\nobservability: {}\n",
+        encoding="utf-8",
+    )
+    old_hooks = home / "hooks"
+    old_hooks.mkdir(mode=0o700)
+    source = old_hooks / ".hook-claudecode.token"
+    live_token = os.urandom(32).hex()
+    source.write_text(live_token + "\n", encoding="ascii")
+    source.chmod(0o600)
+    moved = tmp_path / "dcdata"
+    new_hooks = moved / "hooks"
+    new_hooks.mkdir(parents=True, mode=0o700)
+    target = new_hooks / ".hook-claudecode.token"
+    prior_token = os.urandom(32).hex()
+    assert prior_token != live_token
+    target.write_text(prior_token + "\n", encoding="ascii")
+    target.chmod(0o600)
+    monkeypatch.setattr(cmd_config.config_module, "_is_admin_process", lambda: False)
+
+    result = CliRunner().invoke(cmd_config.config_cmd, ["set", "data_dir", str(moved)], obj=AppContext())
+
+    assert result.exit_code == 0, result.output
+    assert source.read_text(encoding="ascii") == live_token + "\n"
+    assert target.read_text(encoding="ascii") == source.read_text(encoding="ascii")
+    assert target.stat().st_mode & 0o077 == 0
+
+
+def test_config_set_data_dir_does_not_carry_an_untrusted_hook_credential(tmp_path, monkeypatch):
+    home, path = _install_home(tmp_path, monkeypatch)
+    path.write_text(
+        f"config_version: 9\ndata_dir: {home.as_posix()}\n"
+        "guardrail:\n  connector: claudecode\nobservability: {}\n",
+        encoding="utf-8",
+    )
+    hooks = home / "hooks"
+    hooks.mkdir(mode=0o700)
+    source = hooks / ".hook-claudecode.token"
+    source.write_text(os.urandom(32).hex() + "\n", encoding="ascii")
+    source.chmod(0o644)
+    moved = tmp_path / "dcdata"
+    monkeypatch.setattr(cmd_config.config_module, "_is_admin_process", lambda: False)
+
+    result = CliRunner().invoke(cmd_config.config_cmd, ["set", "data_dir", str(moved)], obj=AppContext())
+
+    assert result.exit_code == 0, result.output
+    assert not (moved / "hooks" / ".hook-claudecode.token").exists()
+    assert "warning: scoped hook credentials for claudecode could not be carried" in result.output
+
+
 def test_config_set_data_dir_copies_no_records_as_an_administrator(tmp_path, monkeypatch):
     # Review of 4c1ab8bf99: under sudo the account config is resolved and
     # data_dir is not limited, so a root copy would drop user-chosen files
