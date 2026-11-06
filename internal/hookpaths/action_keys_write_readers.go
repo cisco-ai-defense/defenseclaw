@@ -139,7 +139,8 @@ func actionClientResolvedProtectedWrite(file *syntax.File, command, cwd, home st
 		}
 		return true
 	})
-	return found
+	return found || actionClientPipelineRemoval(file, cwd, home, protected, ssh) ||
+		actionClientLoopRemoval(file, cwd, home, protected, ssh)
 }
 
 // actionClientWriteCandidate only admits a possible output redirect or a
@@ -451,6 +452,8 @@ func actionClientMutationCall(call *syntax.CallExpr, values actionValues, cwd, h
 		}
 	case "find":
 		return actionClientFindDelete(call, cwd, home, protected, ssh)
+	case "perl":
+		return actionClientPerlInPlace(call, cwd, home, protected, ssh)
 	}
 	return false
 }
@@ -489,10 +492,101 @@ func actionClientFindDelete(call *syntax.CallExpr, cwd, home string, protected p
 		roots = []string{"."}
 	}
 	for _, root := range roots {
-		for _, key := range AuthorizedKeysFiles {
-			if matches, _ := filepath.Match(name, key); matches &&
-				actionClientProtectedPath(filepath.Join(root, key), cwd, protected, ssh) {
+		absoluteRoot := OperandPath(root, cwd)
+		for _, target := range protected {
+			if target.path != absoluteRoot && !strings.HasPrefix(target.path, absoluteRoot+string(filepath.Separator)) {
+				continue
+			}
+			if matches, _ := filepath.Match(name, filepath.Base(target.path)); matches &&
+				actionClientProtectedPath(target.path, cwd, protected, ssh) {
 				return true
+			}
+		}
+	}
+	return false
+}
+
+func actionClientPerlInPlace(call *syntax.CallExpr, cwd, home string, protected protectedFiles, ssh string) bool {
+	inPlace, code := false, false
+	for _, arg := range call.Args[1:] {
+		value, known := StaticWord(arg, home)
+		if !known {
+			return false
+		}
+		if code {
+			code = false
+			continue
+		}
+		if value == "-e" {
+			code = true
+			continue
+		}
+		if strings.HasPrefix(value, "-") {
+			inPlace = inPlace || strings.Contains(value, "i")
+			continue
+		}
+		if inPlace && protectedReachPath(OperandPath(value, cwd), protected, ssh) {
+			return true
+		}
+	}
+	return false
+}
+
+func actionClientPipelineRemoval(file *syntax.File, cwd, home string, protected protectedFiles, ssh string) bool {
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		pipe, ok := node.(*syntax.BinaryCmd)
+		if !ok || pipe.Op != syntax.Pipe {
+			return true
+		}
+		producer, left := pipe.X.Cmd.(*syntax.CallExpr)
+		consumer, right := pipe.Y.Cmd.(*syntax.CallExpr)
+		if !left || !right || len(producer.Args) != 2 || len(consumer.Args) < 2 {
+			return true
+		}
+		from, f := StaticWord(producer.Args[0], home)
+		to, t := StaticWord(consumer.Args[0], home)
+		remove, r := StaticWord(consumer.Args[1], home)
+		if !f || !t || !r || programBase(from) != "echo" || programBase(to) != "xargs" ||
+			programBase(remove) != "rm" {
+			return true
+		}
+		path, known := StaticWord(producer.Args[1], home)
+		found = known && protectedReachPath(OperandPath(path, cwd), protected, ssh)
+		return !found
+	})
+	return found
+}
+
+func actionClientLoopRemoval(file *syntax.File, cwd, home string, protected protectedFiles, ssh string) bool {
+	for _, statement := range file.Stmts {
+		loop, ok := statement.Cmd.(*syntax.ForClause)
+		if !ok || loop.Select || len(loop.Do) != 1 {
+			continue
+		}
+		iteration, ok := loop.Loop.(*syntax.WordIter)
+		if !ok || iteration.Name == nil || len(iteration.Items) == 0 || len(iteration.Items) > 8 {
+			continue
+		}
+		call, ok := loop.Do[0].Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) < 2 {
+			continue
+		}
+		program, fixed := StaticWord(call.Args[0], home)
+		if !fixed || programBase(program) != "rm" {
+			continue
+		}
+		for _, item := range iteration.Items {
+			value, fixed := StaticWord(item, home)
+			if !fixed {
+				continue
+			}
+			values := actionValues{"HOME": home, "PWD": cwd, iteration.Name.Value: value}
+			for _, word := range call.Args[1:] {
+				if path, fixed := actionWordValue(word, values, cwd, home); fixed &&
+					!strings.HasPrefix(path, "-") && protectedReachPath(OperandPath(path, cwd), protected, ssh) {
+					return true
+				}
 			}
 		}
 	}
