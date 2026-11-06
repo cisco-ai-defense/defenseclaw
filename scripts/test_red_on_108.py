@@ -146,13 +146,40 @@ class RedOn108Test(unittest.TestCase):
             "--- FAIL: TestGAP0607Sample (0.00s)\n"
             "    sample_test.go:12: precondition got empty bytes, want sample bytes\n"
         )
-        product_assertion = (
-            "--- FAIL: TestGAP0607Sample (0.00s)\n"
-            "    sample_test.go:12: got block, want allow\n"
-            "    sample_test.go:13: setup complete\n"
-        )
+        product_assertion = "--- FAIL: TestGAP0607Sample (0.00s)\n    sample_test.go:12: got block, want allow\n"
+        with_setup_log = product_assertion + "    sample_test.go:13: setup complete\n"
+        with_other_log = product_assertion + "    sample_test.go:13: decision recorded\n"
         self.assertEqual(classify_test_result(command, 1, setup_assertion), "COMPILE_ONLY")
         self.assertEqual(classify_test_result(command, 1, product_assertion), "BEHAVIOR_RED")
+        # Text cannot tell a setup log from the failing line, so setup words
+        # anywhere in the failing output withhold certification.
+        self.assertEqual(classify_test_result(command, 1, with_setup_log), "COMPILE_ONLY")
+        self.assertEqual(classify_test_result(command, 1, with_other_log), "UNCLASSIFIED_FAIL")
+
+    def test_setup_context_is_independent_of_the_comparison_words(self):
+        from scripts.red_on_108 import classify_test_result
+
+        go = ["nice", "-n", "15", "go", "test", "./internal/example"]
+        pytest = [sys.executable, "-m", "pytest", "-q", "cli/tests/test_sample.py"]
+        for message in (
+            "fixture observed old bytes, expected new bytes",
+            "testdata observed old bytes, expected new bytes",
+            "golden actual old, expected new",
+            "seeded file: expected new, got old",
+            "prepared workspace want new got old",
+            "harness observed old bytes, expected new bytes",
+        ):
+            with self.subTest(message=message):
+                output = f"--- FAIL: TestGAP0607Sample (0.00s)\n    sample_test.go:12: {message}\n"
+                self.assertEqual(classify_test_result(go, 1, output), "COMPILE_ONLY")
+                failed = f"E   AssertionError: {message}\nFAILED cli/tests/test_sample.py::test_sample - {message}\n"
+                self.assertEqual(classify_test_result(pytest, 1, failed), "COMPILE_ONLY")
+        product = (
+            "--- FAIL: TestGAP0607Sample (0.00s)\n    sample_test.go:12: decision observed allow, expected block\n"
+        )
+        self.assertEqual(classify_test_result(go, 1, product), "BEHAVIOR_RED")
+        failed = "E   AssertionError: decision allow, expected block\nFAILED cli/tests/test_sample.py::test_sample\n"
+        self.assertEqual(classify_test_result(pytest, 1, failed), "BEHAVIOR_RED")
 
     def test_go_fixtures_match_the_test_commit_on_prior_release(self):
         from tempfile import TemporaryDirectory
@@ -178,6 +205,9 @@ class RedOn108Test(unittest.TestCase):
             existing_asset.write_text("base asset", encoding="utf-8")
             deleted_asset = repo / "internal/example/assets/deleted.json"
             deleted_asset.write_text("old asset", encoding="utf-8")
+            only_asset = repo / "internal/example/assets/deleted/only.json"
+            only_asset.parent.mkdir(parents=True)
+            only_asset.write_text("old only asset", encoding="utf-8")
             source = repo / "internal/example/subpkg/lib.go"
             source.parent.mkdir(parents=True)
             source.write_text("package subpkg\n", encoding="utf-8")
@@ -197,6 +227,7 @@ class RedOn108Test(unittest.TestCase):
             nested_asset.write_text("nested product asset", encoding="utf-8")
             git("rm", "-q", "internal/example/testdata/removed.json")
             git("rm", "-q", "internal/example/assets/deleted.json")
+            git("rm", "-q", "internal/example/assets/deleted/only.json")
             git("add", ".")
             git("commit", "-q", "-m", "fix(GAP-0607): add test fixture")
             commit = git("rev-parse", "HEAD")
@@ -210,6 +241,7 @@ class RedOn108Test(unittest.TestCase):
                 self.assertEqual((prior / "internal/example/assets/sample.json").read_text(), "asset")
                 self.assertEqual((prior / "internal/example/assets/existing.json").read_text(), "updated asset")
                 self.assertFalse((prior / "internal/example/assets/deleted.json").exists())
+                self.assertFalse((prior / "internal/example/assets/deleted").exists())
                 self.assertEqual((prior / "internal/example/subpkg/lib.go").read_text(), "package subpkg\n")
                 self.assertFalse((prior / "internal/example/subpkg/assets/new.json").exists())
                 self.assertFalse((prior / "internal/example/testdata/removed.json").exists())
@@ -220,6 +252,36 @@ class RedOn108Test(unittest.TestCase):
                 )
                 overlay_go_fixtures(repo, prior, git("rev-parse", "HEAD"), "internal/example")
                 self.assertFalse((prior / "internal/example/testdata").exists())
+                # A directory that replaces a prior-release file is rebuilt.
+                git("rm", "-q", "internal/example/assets/existing.json")
+                (repo / "internal/example/assets/existing.json").mkdir()
+                (repo / "internal/example/assets/existing.json/inner.json").write_text("inner", encoding="utf-8")
+                git("add", ".")
+                git("commit", "-q", "-m", "fix(GAP-0607): nest asset")
+                subprocess.run(
+                    ["git", "-C", str(prior), "reset", "--hard", base], check=True, stdout=subprocess.DEVNULL
+                )
+                overlay_go_fixtures(repo, prior, git("rev-parse", "HEAD"), "internal/example")
+                self.assertEqual((prior / "internal/example/assets/existing.json/inner.json").read_text(), "inner")
+                # A file that replaces an emptied prior-release directory is
+                # written; one that would hide kept prior files is a mismatch.
+                (repo / "internal/example/assets/deleted").write_text("file now", encoding="utf-8")
+                git("add", ".")
+                git("commit", "-q", "-m", "fix(GAP-0607): flatten asset")
+                subprocess.run(
+                    ["git", "-C", str(prior), "reset", "--hard", base], check=True, stdout=subprocess.DEVNULL
+                )
+                overlay_go_fixtures(repo, prior, git("rev-parse", "HEAD"), "internal/example")
+                self.assertEqual((prior / "internal/example/assets/deleted").read_text(), "file now")
+                (repo / "internal/example/subpkg").rename(repo / "internal/example/moved")
+                (repo / "internal/example/subpkg").write_text("file over package", encoding="utf-8")
+                git("add", "-A", ".")
+                git("commit", "-q", "-m", "fix(GAP-0607): replace package path")
+                subprocess.run(
+                    ["git", "-C", str(prior), "reset", "--hard", base], check=True, stdout=subprocess.DEVNULL
+                )
+                with self.assertRaises(ValueError):
+                    overlay_go_fixtures(repo, prior, git("rev-parse", "HEAD"), "internal/example")
             finally:
                 git("worktree", "remove", "--force", str(prior))
 

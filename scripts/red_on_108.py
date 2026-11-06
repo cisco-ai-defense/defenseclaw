@@ -21,6 +21,27 @@ TEST_NAME = re.compile(r"\b(Test[A-Z][A-Za-z0-9_]*|test_[a-z0-9_]+)\b")
 GAP = re.compile(r"\bGAP-\d{4}\b")
 
 
+# Test-preparation words. They are matched without regard to the comparison
+# vocabulary, so a setup line cannot become behaviour evidence by using a
+# different comparison phrase.
+SETUP_CONTEXT = re.compile(
+    r"\b(?:pre-?conditions?|fixtures?|set[ -]?up|setups?|initiali[sz](?:e|ed|es|ing|ation)|testmain|testdata"
+    r"|goldens?|seed(?:s|ed|ing)?|prepar(?:e|ed|es|ing|ation)|harness(?:es)?|helpers?|scaffold(?:s|ed|ing)?"
+    r"|bootstrap(?:s|ped|ping)?|temp ?dirs?|mkdir(?:all)?|chdir)\b",
+    re.IGNORECASE,
+)
+ASSERTIONS = (
+    r"\bgot\b[^\n]{0,240}\bwant\b",
+    r"\bwant\b[^\n]{0,240}\bgot\b",
+    r"\bexpected\b[^\n]{0,240}\b(?:got|observed|actual)\b",
+    r"\b(?:got|observed|actual)\b[^\n]{0,240}\bexpected\b",
+)
+
+
+def is_assertion(line: str) -> bool:
+    return any(re.search(pattern, line, re.IGNORECASE) for pattern in ASSERTIONS)
+
+
 def git(repo: Path, *args: str) -> str:
     return subprocess.check_output(["git", "-C", str(repo), *args], text=True, stderr=subprocess.DEVNULL).strip()
 
@@ -104,38 +125,26 @@ def classify_test_result(command: list[str], returncode: int, output: str) -> st
     if any(marker in output.lower() for marker in infrastructure):
         return "COMPILE_ONLY"
     if "go" in command and "--- FAIL:" in output:
-        # A Go FAIL marker also follows setup errors inside a test. A verdict
-        # assertion must be emitted from a test source line, not a log message
-        # from a helper or another package.
-        assertions = (
-            r"\bgot\b[^\n]{0,240}\bwant\b",
-            r"\bwant\b[^\n]{0,240}\bgot\b",
-            r"\bexpected\b[^\n]{0,240}\b(?:got|observed|actual)\b",
-            r"\b(?:got|observed|actual)\b[^\n]{0,240}\bexpected\b",
-        )
-        source_lines = []
-        for line in output.splitlines():
-            match = re.match(r"^\s+[^\s:]+_test\.go:\d+:\s+(.+)$", line)
-            if match:
-                source_lines.append(match.group(1))
-        # A setup assertion can use the same got/want words as a product
-        # verdict. Only source assertions from a completed test count.
-        setup_failure = re.compile(
-            r"\b(?:precondition|fixture|setup|initialization|testmain)\b"
-            r"[^\n]*\b(?:fail(?:ed|ure)?|error|missing|unavailable|got|want)\b"
-            r"|\b(?:fail(?:ed|ure)?|error|missing|unavailable)\b"
-            r"[^\n]*\b(?:precondition|fixture|setup|initialization|testmain)\b",
-            re.IGNORECASE,
-        )
-        if any(setup_failure.search(line) for line in source_lines):
+        # A Go FAIL marker also follows setup errors inside a test. Setup
+        # context is matched on its own, independent of the comparison words,
+        # anywhere in the failing test output: a line about test preparation
+        # is never behaviour evidence, whatever else it says.
+        messages = re.findall(r"(?m)^\s+([^\s:]+\.go):\d+:\s+(.+)$", output)
+        if any(SETUP_CONTEXT.search(text) for _, text in messages):
             return "COMPILE_ONLY"
-        if any(any(re.search(pattern, line, re.IGNORECASE) for pattern in assertions) for line in source_lines):
+        # A verdict assertion must be emitted from a test source line, and
+        # every failing test source line must be a comparison.
+        source_lines = [text for name, text in messages if name.endswith("_test.go")]
+        if source_lines and all(is_assertion(line) for line in source_lines):
             return "BEHAVIOR_RED"
         return "UNCLASSIFIED_FAIL"
-    if "pytest" in command and (
-        "AssertionError" in output or "Failed: DID NOT RAISE" in output or re.search(r"(?m)^E\s+assert\b", output)
-    ):
-        return "BEHAVIOR_RED"
+    if "pytest" in command:
+        messages = re.findall(r"(?m)^E\s+(.+)$", output)
+        messages += re.findall(r"(?m)^FAILED \S+ - (.+)$", output)
+        if any(SETUP_CONTEXT.search(text) for text in messages):
+            return "COMPILE_ONLY"
+        if "AssertionError" in output or "Failed: DID NOT RAISE" in output or re.search(r"(?m)^E\s+assert\b", output):
+            return "BEHAVIOR_RED"
     return "UNCLASSIFIED_FAIL"
 
 
@@ -161,7 +170,7 @@ def overlay_go_fixtures(repo: Path, worktree: Path, commit: str, directory: str)
 
     def in_package(name: str) -> bool:
         path = Path(name)
-        return not any(path.is_relative_to(package) for package in subpackages)
+        return not any(path != package and path.is_relative_to(package) for package in subpackages)
 
     current = {name for name in current if in_package(name)}
     prior = {name for name in prior if in_package(name)}
@@ -188,8 +197,34 @@ def overlay_go_fixtures(repo: Path, worktree: Path, commit: str, directory: str)
         target = worktree / name
         if not target.resolve(strict=False).is_relative_to(worktree.resolve()) or target.is_symlink():
             raise ValueError(f"fixture path escapes audit worktree: {name}")
+        if target.is_dir():
+            if any(path.is_file() or path.is_symlink() for path in target.rglob("*")):
+                raise ValueError(f"fixture path is a directory on the prior release: {name}")
+            shutil.rmtree(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(subprocess.check_output(["git", "-C", str(repo), "show", f"{commit}:{name}"]))
+
+    # Git records no empty directory, so a directory a deletion left empty is
+    # absent from the tree of the test commit. Then require the overlaid
+    # package to hold exactly the test-owned files of that commit.
+    package = worktree / directory
+    for path in sorted(package.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        if path.is_dir() and not path.is_symlink() and not any(path.iterdir()):
+            path.rmdir()
+
+    def managed(name: str) -> bool:
+        return in_package(name) and not (fixture_root(name) is None and Path(name).suffix in source_suffixes)
+
+    present = set()
+    for path in package.rglob("*"):
+        if path.is_file() or path.is_symlink():
+            name = path.relative_to(worktree).as_posix()
+            if managed(name):
+                present.add(name)
+    expected = {name for name in current if managed(name)}
+    if present != expected:
+        difference = sorted(present ^ expected)[:5]
+        raise ValueError(f"fixture overlay differs from the test commit: {difference}")
 
 
 def run_one(repo: Path, worktree: Path, commit: str, files: list[str], tests: list[str], base: str) -> str:
@@ -217,7 +252,10 @@ def run_one(repo: Path, worktree: Path, commit: str, files: list[str], tests: li
             )
         ]
         if names:
-            overlay_go_fixtures(repo, worktree, commit, directory)
+            try:
+                overlay_go_fixtures(repo, worktree, commit, directory)
+            except ValueError:
+                return "OVERLAY_MISMATCH"
             commands.append(
                 [
                     "nice",
