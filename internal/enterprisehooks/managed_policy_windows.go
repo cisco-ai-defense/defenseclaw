@@ -2388,6 +2388,12 @@ func isWindowsManagedPolicyAncestorOf(folder, path string) bool {
 // reparse point anywhere on its path. Ownership is taken whatever the current
 // owner, because a folder squatted by a standard user would otherwise block
 // every user's enforcement. Files inside are still validated individually.
+//
+// On standalone the takeover is only for a folder created before DefenseClaw
+// managed it (by MDM, the vendor installer or a user): a folder that already
+// holds a DefenseClaw marker and that an untrusted account can write or owns
+// is refused and named, never re-stamped in place, by every transaction and
+// reader that prepares it (GAP-0633, g582 review 3 M3).
 func repairWindowsManagedPolicyFolder(path string, validate func(string) error) error {
 	drift := validate(path)
 	if drift == nil {
@@ -2405,6 +2411,9 @@ func repairWindowsManagedPolicyFolder(path string, validate func(string) error) 
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("managed policy folder is not a plain directory: %s", path)
+	}
+	if refused := refuseWindowsManagedPolicyFolderTakeover(path); refused != nil {
+		return errors.Join(drift, refused)
 	}
 	previousOwner, _ := windowsPathOwnerNoFollow(path)
 	// The re-stamp goes through one no-follow handle whose type and reparse
@@ -2425,6 +2434,52 @@ func repairWindowsManagedPolicyFolder(path string, validate func(string) error) 
 		"reason":         "machine policy folder protection drifted or folder was pre-created: " + drift.Error(),
 	})
 	return nil
+}
+
+// windowsManagedPolicyFolderMarkers are the DefenseClaw files that exist in a
+// machine policy or managed runtime folder only once DefenseClaw manages it:
+// the Claude Code, Codex and Cursor state record, the Cursor rollback
+// receipt, the runtime selector and the per-user enrollment registry.
+var windowsManagedPolicyFolderMarkers = []string{
+	windowsClaudeManagedStateFile,
+	windowsCursorManagedStateFile,
+	windowsCursorManagedReceiptFile,
+	windowsManagedRuntimeSelectorFile,
+	windowsPerUserManagedEnrollmentFile,
+}
+
+// windowsManagedPolicyFolderMarker returns the first DefenseClaw marker file
+// directly in folder, or "".
+func windowsManagedPolicyFolderMarker(folder string) string {
+	for _, name := range windowsManagedPolicyFolderMarkers {
+		if _, err := os.Lstat(filepath.Join(folder, name)); err == nil {
+			return name
+		}
+	}
+	return ""
+}
+
+// refuseWindowsManagedPolicyFolderTakeover is the standalone refusal of a
+// folder takeover (GAP-0633, g582 review 3 M3), read without writing
+// anything: the folder holds a DefenseClaw marker and its own descriptor lets
+// an untrusted account write it or makes one its owner. It is nil off
+// standalone, for trusted-only drift, and for a folder with no DefenseClaw
+// file, which keeps the takeover.
+func refuseWindowsManagedPolicyFolderTakeover(path string) error {
+	if !windowsManagedPolicySelfHealRefusesContentDrift() {
+		return nil
+	}
+	marker := windowsManagedPolicyFolderMarker(path)
+	if marker == "" {
+		return nil
+	}
+	leaf := windowsManagedPolicyLeafTrust(managed.ObjectInstallDirectory)(path)
+	if leaf == nil {
+		return nil
+	}
+	return managed.RefuseStandaloneMachinePolicyDrift(
+		fmt.Errorf("%w (the folder already holds DefenseClaw's %s)", leaf, marker),
+	)
 }
 
 func windowsManagedPolicyDirectorySecurityAttributes() (*windows.SecurityAttributes, error) {
