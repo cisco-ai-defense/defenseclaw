@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -27,8 +28,8 @@ import (
 // folder holding a DefenseClaw marker are now refused and left as they are.
 
 const (
-	f1HiddenWriterFile   = "O:BAG:SYD:P(A;;0x40080;;;OW)(A;;FA;;;BG)"
-	f1HiddenWriterFolder = "O:BAG:SYD:P(A;OICI;0x40080;;;OW)(A;OICI;FA;;;BG)"
+	f1HiddenWriterFile   = "O:BAG:SYD:P(A;;0x140080;;;OW)(A;;FA;;;BG)"
+	f1HiddenWriterFolder = "O:BAG:SYD:P(A;OICI;0x140080;;;OW)(A;OICI;FA;;;BG)"
 	f1RestoreSDDL        = "O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)"
 )
 
@@ -36,6 +37,7 @@ const (
 // object with READ_CONTROL without privileges, and gives it back at cleanup.
 func hideF1Descriptor(t *testing.T, path, sddl string) {
 	t.Helper()
+	disableBackupPrivilegesForTest(t)
 	stampGAP633SDDL(t, path, sddl)
 	t.Cleanup(func() { stampGAP633SDDL(t, path, f1RestoreSDDL) })
 	if f1DescriptorReadable(t, path) {
@@ -186,5 +188,36 @@ func TestStandalonePolicyFolderWithAHiddenDescriptorIsNotTakenOver(t *testing.T)
 	var refused *managed.StandaloneContentDriftError
 	if !errors.As(err, &refused) || !strings.Contains(err.Error(), folder) {
 		t.Fatalf("err = %v, want a standalone refusal naming %s", err, folder)
+	}
+}
+
+// disableBackupPrivilegesForTest disables SeBackupPrivilege and
+// SeRestorePrivilege on the process token for the test, as on an elevated
+// prompt (an elevated SSH or SYSTEM token has them enabled, and backup
+// semantics then read any descriptor). The repair privileges helpers still
+// enable them on their own impersonation thread.
+func disableBackupPrivilegesForTest(t *testing.T) {
+	t.Helper()
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &token); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = token.Close() })
+	for _, name := range []string{"SeBackupPrivilege", "SeRestorePrivilege"} {
+		var luid windows.LUID
+		if err := windows.LookupPrivilegeValue(nil, windows.StringToUTF16Ptr(name), &luid); err != nil {
+			t.Fatal(err)
+		}
+		state := windows.Tokenprivileges{PrivilegeCount: 1, Privileges: [1]windows.LUIDAndAttributes{{Luid: luid}}}
+		var previous windows.Tokenprivileges
+		var size uint32
+		if err := windows.AdjustTokenPrivileges(token, false, &state, uint32(unsafe.Sizeof(previous)), &previous, &size); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if previous.PrivilegeCount > 0 {
+				_ = windows.AdjustTokenPrivileges(token, false, &previous, 0, nil, nil)
+			}
+		})
 	}
 }

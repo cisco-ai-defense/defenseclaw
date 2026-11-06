@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -18,7 +19,7 @@ import (
 
 // g582 review 4 F1: a vendor folder holding a DefenseClaw file whose
 // descriptor and listing are hidden from SYSTEM and Administrators (an OWNER
-// RIGHTS entry with only FILE_READ_ATTRIBUTES and WRITE_DAC) made the
+// RIGHTS entry with only FILE_READ_ATTRIBUTES, SYNCHRONIZE and WRITE_DAC) made the
 // standalone refusal see no DefenseClaw file, so the folder was taken over in
 // place. An unlistable folder now counts as holding one.
 func TestWindowsReclaimRefusesAnUnlistableFolderOnStandalone(t *testing.T) {
@@ -42,7 +43,8 @@ func TestWindowsReclaimRefusesAnUnlistableFolderOnStandalone(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "50-defenseclaw.json"), []byte("{}"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			stampF1(t, dir, "O:BAG:SYD:P(A;OICI;0x40080;;;OW)(A;OICI;FA;;;BG)")
+			disableBackupPrivilegesForTest(t)
+			stampF1(t, dir, "O:BAG:SYD:P(A;OICI;0x140080;;;OW)(A;OICI;FA;;;BG)")
 			t.Cleanup(func() { stampF1(t, dir, "O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)") })
 			if _, err := os.ReadDir(dir); err == nil {
 				t.Skip("this token still lists the folder")
@@ -91,5 +93,36 @@ func stampF1(t *testing.T, path, sddl string) {
 		return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, info, owner, group, dacl, nil)
 	}); err != nil {
 		t.Fatalf("stamp %s on %s: %v", sddl, path, err)
+	}
+}
+
+// disableBackupPrivilegesForTest disables SeBackupPrivilege and
+// SeRestorePrivilege on the process token for the test, as on an elevated
+// prompt (an elevated SSH or SYSTEM token has them enabled, and backup
+// semantics then read any descriptor). The repair privileges helpers still
+// enable them on their own impersonation thread.
+func disableBackupPrivilegesForTest(t *testing.T) {
+	t.Helper()
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &token); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = token.Close() })
+	for _, name := range []string{"SeBackupPrivilege", "SeRestorePrivilege"} {
+		var luid windows.LUID
+		if err := windows.LookupPrivilegeValue(nil, windows.StringToUTF16Ptr(name), &luid); err != nil {
+			t.Fatal(err)
+		}
+		state := windows.Tokenprivileges{PrivilegeCount: 1, Privileges: [1]windows.LUIDAndAttributes{{Luid: luid}}}
+		var previous windows.Tokenprivileges
+		var size uint32
+		if err := windows.AdjustTokenPrivileges(token, false, &state, uint32(unsafe.Sizeof(previous)), &previous, &size); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if previous.PrivilegeCount > 0 {
+				_ = windows.AdjustTokenPrivileges(token, false, &previous, 0, nil, nil)
+			}
+		})
 	}
 }
