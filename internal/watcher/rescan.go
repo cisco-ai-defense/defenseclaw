@@ -482,11 +482,17 @@ func (w *InstallWatcher) admitsAtStartup(evt InstallEvent) bool {
 // false for a profile root: its manifest and Hermes checkout belong to that
 // account, which could mark its own skill bundled, so every skill there is
 // rescanned.
-func hermesSkillsDiscover(dir string) (discover func(string, int) ([]hermesskills.Entry, error), trustBundled bool) {
+func hermesSkillsDiscover(dir string, trusted bool) (discover func(string, int) ([]hermesskills.Entry, error), trustBundled bool) {
 	switch {
 	case hermesskills.IsRoot(dir):
+		if trusted {
+			return hermesskills.DiscoverTrusted, true
+		}
 		return hermesskills.Discover, true
 	case hermesskills.IsProfileRoot(dir):
+		if trusted {
+			return hermesskills.DiscoverTrusted, false
+		}
 		return hermesskills.DiscoverProfileRoot, false
 	}
 	return nil, false
@@ -505,11 +511,11 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 		}
 		if !w.secureClientActive() {
 			if err := unlinkedSkillTreePath(dir, dir); err != nil {
-				fmt.Fprintf(os.Stderr, "[rescan] enumerate skills dir %s: %v\n", dir, err)
+				w.setRootCoverage("skill", dir, err)
 				continue
 			}
 		}
-		if discover, trustBundled := hermesSkillsDiscover(dir); discover != nil {
+		if discover, trustBundled := hermesSkillsDiscover(dir, !w.secureClientActive()); discover != nil {
 			entries, err := discover(dir, hermesskills.DefaultDirectoryLimit)
 			if !w.secureClientActive() && errors.Is(err, hermesskills.ErrDirectoryLimit) {
 				entries, err = discover(dir, hermesskills.FullScanDirectoryLimit)
@@ -600,6 +606,15 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	}
 
 	for _, dir := range w.pluginDirs {
+		if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if !w.secureClientActive() {
+			if err := unlinkedSkillTreePath(dir, dir); err != nil {
+				w.setRootCoverage("plugin", dir, err)
+				continue
+			}
+		}
 		// Claude Code's plugin roots, and a Codex plugin cache, whose
 		// marketplace folders hold <plugin>/<version> and are not plugins
 		// themselves (GAP-1573).
