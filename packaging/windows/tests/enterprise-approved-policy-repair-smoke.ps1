@@ -19,6 +19,9 @@ foreach ($name in @(
     'Get-DefenseClawApprovedPolicyPath',
     'Get-DefenseClawApprovedPolicyHash',
     'Get-DefenseClawStandaloneBundleRepairCommand',
+    'Test-DefenseClawStandaloneProfile',
+    'Format-DefenseClawSetupAction',
+    'Format-DefenseClawRepairAction',
     'Get-DefenseClawApprovedPolicySource',
     'Get-DefenseClawRecordedConfigGenerationHash',
     'Get-DefenseClawRepairRollbackApprovedConfigSource',
@@ -59,6 +62,7 @@ if ($preflightCall -lt 0 -or $installCall -le $preflightCall) {
     throw 'Repair does not validate rollback before the install-like lifecycle'
 }
 
+$script:DefenseClawEnterpriseProfile = 'Standalone'
 $script:SystemSID = 'S-1-5-18'
 $script:AdministratorsSID = 'S-1-5-32-544'
 $script:TrustedInstallerSID = 'S-1-5-80-1'
@@ -194,7 +198,8 @@ try {
             -Sources @{} -Metadata $noRecord -GatewayServiceName 'gateway'
     }
     catch { $refusal = $_.Exception.Message }
-    if ($refusal -notmatch 'Setup /ensure' -or $script:Copies -ne $priorCopies) {
+    if ($refusal -notmatch [regex]::Escape("DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure") -or
+        $refusal -notmatch 'Setup is not installed on this computer' -or $script:Copies -ne $priorCopies) {
         throw 'source-less Repair did not refuse with a working command'
     }
     [IO.File]::WriteAllBytes($script:Layout.ConfigPath, $approvedConfig)
@@ -207,7 +212,8 @@ try {
             -Sources @{} -Metadata $noRecord -GatewayServiceName 'gateway'
     }
     catch { $refusal = $_.Exception.Message }
-    if ($refusal -notmatch 'Setup /ensure' -or $script:Copies -ne $priorCopies) {
+    if ($refusal -notmatch [regex]::Escape("DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure") -or
+        $refusal -notmatch 'Setup is not installed on this computer' -or $script:Copies -ne $priorCopies) {
         throw 'source-less Repair accepted a changed manifest without an approved source'
     }
     $script:DriftManifest = $false

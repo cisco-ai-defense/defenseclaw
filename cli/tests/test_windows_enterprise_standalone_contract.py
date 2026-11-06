@@ -1815,6 +1815,7 @@ def test_repair_rebuilds_deployment_metadata_that_is_not_json(tmp_path: Path) ->
             "ConvertFrom-DefenseClawDeploymentMetadataText",
             "Get-DefenseClawDeploymentMetadata",
             "Repair-DefenseClawUnreadableDeploymentMetadata",
+            "Format-DefenseClawSetupAction",
             "Write-DefenseClawJsonAtomic",
             "Clear-DefenseClawRestrictiveFileAttributes",
         )
@@ -1910,7 +1911,12 @@ Invoke-Case 'valid drifted' $valid $true $full
         assert cases[name]["read"].startswith("could not read the installed deployment metadata"), cases[name]
         assert cases[name]["resets"] == 0, cases[name]
         assert cases[name]["repair"] == "rebuilt=True installed=True stamps=1 drifted=False", cases[name]
-    assert "only Setup /repair" in cases["garbage without payload"]["repair"]
+    # GAP-0095: Setup is not installed on the computer; the hint runs it from its folder and says where it comes from.
+    assert (
+        "only the installed release's Setup carries every artifact it must re-record (acp, hook, sensor_helper, installer, module); "
+        "run & '.\\DefenseClawSetup-Enterprise-Standalone-x64.exe' /repair (Setup is not installed on this computer: "
+        "use the copy in your MDM package or the release download)"
+    ) in cases["garbage without payload"]["repair"], cases["garbage without payload"]
     assert cases["valid drifted"]["read"].startswith("managed DACL is not protected")
     assert cases["valid drifted"]["repair"].startswith("managed DACL is not protected")
 
@@ -1972,6 +1978,8 @@ def _repair_rollback_config_cases(tmp_path: Path) -> dict[str, dict]:
             "Get-DefenseClawApprovedPolicyHash",
             "Get-DefenseClawApprovedPolicyPath",
             "Get-DefenseClawStandaloneBundleRepairCommand",
+            "Format-DefenseClawSetupAction",
+            "Format-DefenseClawRepairAction",
         )
     )
     harness = tmp_path / "repair-rollback-config.ps1"
@@ -1979,6 +1987,7 @@ def _repair_rollback_config_cases(tmp_path: Path) -> dict[str, dict]:
         "$ErrorActionPreference = 'Stop'\nSet-StrictMode -Version Latest\n"
         + functions
         + r"""
+function Test-DefenseClawStandaloneProfile { return $true }
 $script:SchemaVersion = 1
 $script:AdministratorsSID = 'S-1-5-32-544'
 $script:SystemSID = 'S-1-5-18'
@@ -2141,6 +2150,77 @@ def test_repair_checks_the_running_gateway_rollback_config_before_rebuilding_met
     assert "0.0.0.0" in stale["config"], stale
 
 
+_SETUP_HINT_FUNCTIONS = (
+    "Test-DefenseClawStandaloneProfile",
+    "Format-DefenseClawSetupAction",
+    "Format-DefenseClawRepairAction",
+    "Get-DefenseClawStandaloneBundleRepairCommand",
+)
+
+
+def test_module_hints_do_not_name_setup_as_a_bare_command() -> None:
+    # cowork-1-0-8 GAP-0095: Setup is not installed on a managed computer, so a
+    # hint reaches it only through Format-DefenseClawSetupAction (the command
+    # run from its folder, with where it comes from) or, for a repair, the
+    # installed CLI. The two literals left name it for a profile that is not
+    # standalone (Secure Client), which keeps the text it always had.
+    module = re.sub(r"<#.*?#>", "", _text(MODULE), flags=re.DOTALL)
+    named = [
+        line.strip()
+        for line in module.splitlines()
+        if not line.lstrip().startswith("#")
+        and re.search(r"\bSetup\s+/(?:repair|ensure|uninstall|install|upgrade|verify)\b", line)
+    ]
+    assert len(named) == 2, named
+    assert "return 'Setup /repair'" in named[0], named
+    assert "only Setup /repair carries every artifact" in named[1], named
+    assert "DefenseClawSetup-Enterprise-Standalone-x64.exe" not in re.sub(r"<#.*?#>", "", module.replace(
+        "& '.\\DefenseClawSetup-Enterprise-Standalone-x64.exe' $Action", ""))
+
+
+@pytest.mark.skipif(not _portable_pwsh(), reason="PowerShell 7 (pwsh) is not installed")
+def test_setup_hints_run_the_setup_from_its_folder_and_repair_through_the_cli(tmp_path: Path) -> None:
+    import json
+
+    module = _text(MODULE)
+    functions = "\n".join(_function_body(module, name) for name in _SETUP_HINT_FUNCTIONS)
+    harness = tmp_path / "hints.ps1"
+    harness.write_text(
+        functions
+        + r"""
+$Layout = @{ CLIPath = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' }
+$script:DefenseClawEnterpriseProfile = 'Standalone'
+$standalone = [ordered]@{
+    ensure = Format-DefenseClawSetupAction -Action '/ensure'
+    config = Format-DefenseClawSetupAction -Action '/ensure CONFIG=<approved absolute config path>'
+    repair = Format-DefenseClawRepairAction -Layout $Layout
+}
+$script:DefenseClawEnterpriseProfile = 'SecureClient'
+$other = [ordered]@{
+    ensure = Format-DefenseClawSetupAction -Action '/ensure'
+    repair = Format-DefenseClawRepairAction -Layout $Layout
+}
+[ordered]@{ standalone = $standalone; other = $other } | ConvertTo-Json -Compress
+""",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [_portable_pwsh(), "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(harness)],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    source = "Setup is not installed on this computer: use the copy in your MDM package or the release download"
+    setup = "& '.\\DefenseClawSetup-Enterprise-Standalone-x64.exe'"
+    assert result["standalone"]["ensure"] == f"{setup} /ensure ({source})"
+    assert result["standalone"]["config"] == f"{setup} /ensure CONFIG=<approved absolute config path> ({source})"
+    assert result["standalone"]["repair"] == (
+        "& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw.exe' enterprise windows repair --profile standalone --json"
+    )
+    # Another profile keeps "Setup /..." as it was, byte for byte.
+    assert result["other"] == {"ensure": "Setup /ensure", "repair": "Setup /repair"}
+
+
 def test_repair_rollback_refusal_names_the_supported_next_step(tmp_path: Path) -> None:
     cases = _repair_rollback_config_cases(tmp_path)
     for name in ("invalid malformed", "invalid valid", "approved stale"):
@@ -2149,7 +2229,10 @@ def test_repair_rollback_refusal_names_the_supported_next_step(tmp_path: Path) -
     assert "enterprise windows repair --profile standalone --json" in cases["approved stale"]["error"]
     assert "administrator-selected path permissions" in cases["external policy ACL drift"]["error"]
     assert "Next step:" in cases["transitional service"]["error"]
-    assert "retry Setup /repair" in cases["transitional service"]["error"]
+    # GAP-0095: the installed CLI repairs, by its full path; Setup is not on the computer.
+    assert "then retry & '" in cases["transitional service"]["error"], cases["transitional service"]
+    assert "enterprise windows repair --profile standalone --json" in cases["transitional service"]["error"]
+    assert "Setup /repair" not in cases["transitional service"]["error"]
 
 
 def _csharp_method_body(text: str, name: str) -> str:

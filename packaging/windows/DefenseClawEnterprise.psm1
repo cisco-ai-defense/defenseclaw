@@ -376,6 +376,30 @@ function Test-DefenseClawStandaloneProfile {
     return [string]$script:DefenseClawEnterpriseProfile -ceq 'Standalone'
 }
 
+function Format-DefenseClawSetupAction {
+    <#
+        A hint that sends an administrator to Setup. Setup is not installed on
+        a standalone computer (the MDM kit removes its staged copy), so a bare
+        "Setup /ensure" is not a command there: the hint runs Setup from the
+        folder that holds it and says where it comes from (cowork-1-0-8
+        GAP-0095). Other profiles keep "Setup <action>" as it was.
+    #>
+    param([Parameter(Mandatory)][string]$Action)
+    if (-not (Test-DefenseClawStandaloneProfile)) { return "Setup $Action" }
+    return "& '.\DefenseClawSetup-Enterprise-Standalone-x64.exe' $Action (Setup is not installed on this computer: use the copy in your MDM package or the release download)"
+}
+
+function Format-DefenseClawRepairAction {
+    <#
+        The repair an administrator runs: the installed CLI by its full path on
+        a standalone computer (it is there; Setup is not), "Setup /repair"
+        elsewhere.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if (-not (Test-DefenseClawStandaloneProfile)) { return 'Setup /repair' }
+    return Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout
+}
+
 function Get-DefenseClawClaudeMinimumClientVersion {
     <#
         The Claude client floor recorded in application-control evidence,
@@ -10050,12 +10074,12 @@ function Stop-DefenseClawService {
                 $_.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped
             })
         if ($running.Count -gt 0) {
-            throw "service $Name failed during stop: $($running[0].ServiceName) still depends on it after $($script:ServiceStopTimeoutSeconds) seconds; stop the dependent service, then run Setup /ensure again"
+            throw "service $Name failed during stop: $($running[0].ServiceName) still depends on it after $($script:ServiceStopTimeoutSeconds) seconds; stop the dependent service, then run $(Format-DefenseClawSetupAction -Action '/ensure') again"
         }
         Write-DefenseClawLifecyclePhase -Stage "stop $Name ending unresponsive process"
         Stop-DefenseClawUnresponsiveServiceProcess -Name $Name
         if (-not (Wait-DefenseClawServiceStopped -Service $service -Timeout $budget)) {
-            throw "service $Name failed during stop: it stayed running for $($script:ServiceStopTimeoutSeconds) seconds after its process was ended; inspect the Windows service events, then run Setup /ensure again"
+            throw "service $Name failed during stop: it stayed running for $($script:ServiceStopTimeoutSeconds) seconds after its process was ended; inspect the Windows service events, then run $(Format-DefenseClawSetupAction -Action '/ensure') again"
         }
         Write-DefenseClawLifecyclePhase -Stage "stop $Name complete after termination"
     }
@@ -10087,7 +10111,7 @@ function Start-DefenseClawServiceStopRequest {
         return [Diagnostics.Process]::Start($info)
     }
     catch {
-        throw "service $Name failed during stop request: $($_.Exception.Message). Inspect the Windows service events, then run Setup /ensure again"
+        throw "service $Name failed during stop request: $($_.Exception.Message). Inspect the Windows service events, then run $(Format-DefenseClawSetupAction -Action '/ensure') again"
     }
 }
 
@@ -10200,7 +10224,7 @@ function Wait-DefenseClawServiceProcessExit {
             $ended = [DateTime]::UtcNow.AddSeconds(10)
             while (Test-DefenseClawProcessIdentityRunning -Identity $Identity) {
                 if ([DateTime]::UtcNow -ge $ended) {
-                    throw "service $Name failed during stop: its process $($Identity.Id) still runs after the service stopped and could not be ended; end process $($Identity.Id), then run Setup /ensure again"
+                    throw "service $Name failed during stop: its process $($Identity.Id) still runs after the service stopped and could not be ended; end process $($Identity.Id), then run $(Format-DefenseClawSetupAction -Action '/ensure') again"
                 }
                 Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 250
             }
@@ -10235,7 +10259,7 @@ function Get-DefenseClawServiceProcessId {
         $lines = @(Invoke-DefenseClawNative -File $script:ScExe -Arguments @('queryex', $Name) -TimeoutSeconds 10 -Capture)
     }
     catch {
-        throw "service $Name failed during SCM process lookup: $($_.Exception.Message). Inspect the Windows service events, then run Setup /ensure again"
+        throw "service $Name failed during SCM process lookup: $($_.Exception.Message). Inspect the Windows service events, then run $(Format-DefenseClawSetupAction -Action '/ensure') again"
     }
     $match = [regex]::Match(($lines -join "`n"), '(?m)^\s*PID\s*:\s*([0-9]+)\s*$')
     if (-not $match.Success) {
@@ -10258,7 +10282,7 @@ function Stop-DefenseClawUnresponsiveServiceProcess {
         return
     }
     if ($processId -eq [uint32]$PID) {
-        throw "service $Name failed during stop: its process is this lifecycle's own process $processId; inspect the service configuration, then run Setup /ensure again"
+        throw "service $Name failed during stop: its process is this lifecycle's own process $processId; inspect the service configuration, then run $(Format-DefenseClawSetupAction -Action '/ensure') again"
     }
     $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name"
     $imagePath = [string](Microsoft.PowerShell.Management\Get-ItemPropertyValue -LiteralPath $key -Name ImagePath -ErrorAction Stop)
@@ -10322,7 +10346,7 @@ function Start-DefenseClawService {
                 if (-not [string]::IsNullOrEmpty($logged)) {
                     $detail += " The service logged: $logged"
                 }
-                throw "service $Name failed during start or readiness check (SCM request: $($script:ServiceStartRequestTimeoutSeconds)s; running state: $($script:ServiceStartReadyTimeoutSeconds)s). Inspect the service events and log, then run Setup /ensure again. Details: $detail"
+                throw "service $Name failed during start or readiness check (SCM request: $($script:ServiceStartRequestTimeoutSeconds)s; running state: $($script:ServiceStartReadyTimeoutSeconds)s). Inspect the service events and log, then run $(Format-DefenseClawSetupAction -Action '/ensure') again. Details: $detail"
             }
             # Start-Service only says "Cannot start service X". Name SCM's exit
             # codes, and each dependency's, so a failed rollback or install says
@@ -14575,7 +14599,7 @@ function ConvertFrom-DefenseClawDeploymentMetadataText {
     # record) and a wrapped number or array: test the parsed object's own
     # type, so every record that is not a JSON object is unreadable (GAP-0164).
     if ($metadata -isnot [Management.Automation.PSCustomObject]) {
-        throw "$($script:UnreadableMetadataMessage) $Path ($reason); run Setup /repair to rebuild it"
+        throw "$($script:UnreadableMetadataMessage) $Path ($reason); run $(Format-DefenseClawSetupAction -Action '/repair') to rebuild it"
     }
     return $metadata
 }
@@ -14618,10 +14642,11 @@ function Repair-DefenseClawUnreadableDeploymentMetadata {
     }
     $missing = @($required | Microsoft.PowerShell.Core\Where-Object { -not $Sources.ContainsKey($_) })
     if ($missing.Count -ne 0) {
-        throw "$unreadable; only Setup /repair carries every artifact it must re-record ($($missing -join ', '))"
+        $carrier = if (Test-DefenseClawStandaloneProfile) { "only the installed release's Setup carries every artifact it must re-record ($($missing -join ', ')); run $(Format-DefenseClawSetupAction -Action '/repair')" } else { "only Setup /repair carries every artifact it must re-record ($($missing -join ', '))" }
+        throw "$unreadable; $carrier"
     }
     if (-not (Test-DefenseClawServiceExists -Name $GatewayServiceName)) {
-        throw "$unreadable; no $GatewayServiceName service is registered, so run Setup /install or /uninstall PURGE=1"
+        throw "$unreadable; no $GatewayServiceName service is registered, so run $(Format-DefenseClawSetupAction -Action '/install or /uninstall PURGE=1')"
     }
     Assert-DefenseClawOwnedServiceOrAbsent `
         -Name $GatewayServiceName `
@@ -24165,7 +24190,7 @@ function Assert-DefenseClawEarlyHookPublished {
         Write-DefenseClawLifecyclePhase -Stage ("transaction quiesce: the replacement hook was replaced while the prior hook calls drained (sha256 {0}); publishing it again" -f $(if ($have) { $have } else { 'missing' }))
         Install-DefenseClawSourceDescriptor -Source $Source -Destination $Layout.HookPath
     }
-    throw 'the replacement hook was replaced again before the prior gateway stopped; a process of the prior release still writes the hook. End it, then run Setup /ensure again'
+    throw ('the replacement hook was replaced again before the prior gateway stopped; a process of the prior release still writes the hook. End it, then run ' + (Format-DefenseClawSetupAction -Action '/ensure') + ' again')
 }
 
 function Get-DefenseClawPriorHookProcessIds {
@@ -25581,7 +25606,7 @@ function Write-DefenseClawTargetRuntimeSkippedProfiles {
     foreach ($profile in @(Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan)) {
         $description = if ($ValidationOnly) {
             'was left pending in this lifecycle run; its folder was not changed. ' +
-            'Correct the named account profile and run Setup /ensure to retry enrollment: {0}'
+            'Correct the named account profile and run ' + (Format-DefenseClawSetupAction -Action '/ensure') + ' to retry enrollment: {0}'
         }
         else {
             'was left out of this install and is not protected until the Guardian ' +
@@ -28016,7 +28041,7 @@ function Invoke-DefenseClawStandaloneRuntimeGenerationCollect {
         $lock = Enter-DefenseClawLifecycleLock -Layout $Layout
         try {
             if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath -PathType Leaf) {
-                throw 'a lifecycle transaction is pending; Setup /ensure finishes it and collects the old runtime copies'
+                throw ('a lifecycle transaction is pending; ' + (Format-DefenseClawSetupAction -Action '/ensure') + ' finishes it and collects the old runtime copies')
             }
             [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
                 -Layout $Layout `
@@ -28669,7 +28694,7 @@ function Assert-DefenseClawStagedRuntimeBundleClassification {
             "$Action stopped before it changed anything: the new release refuses a per-user managed " +
             'runtime bundle that its upgrade would retire. The error names the connector and the account; ' +
             'have an administrator remove that account''s damaged bundle from its .defenseclaw\hooks folder, ' +
-            "then run Setup /ensure again. $($failure.Exception.Message)"
+            "then run $(Format-DefenseClawSetupAction -Action '/ensure') again. $($failure.Exception.Message)"
         )
     }
     Microsoft.PowerShell.Utility\Write-Warning -Message (
@@ -28719,7 +28744,7 @@ function Invoke-DefenseClawCommittedManagedHooksLifecycleRetire {
             throw (
                 "gateway service $GatewayServiceName failed while retiring the managed-hook lifecycle snapshot " +
                 'because a per-user hooks folder has untrusted permissions. Have an administrator inspect the ' +
-                'folder named in the error, reset its permissions or remove it, then run Setup /ensure again. ' +
+                'folder named in the error, reset its permissions or remove it, then run ' + (Format-DefenseClawSetupAction -Action '/ensure') + ' again. ' +
                 $message
             )
         }
@@ -30359,7 +30384,7 @@ function Assert-DefenseClawRepairRollbackConfig {
         return
     }
     if ([string]$service.Status -cne 'Running') {
-        throw "Repair refused while $GatewayServiceName is $($service.Status); Next step: wait for a stable service state, then retry Setup /repair"
+        throw "Repair refused while $GatewayServiceName is $($service.Status); Next step: wait for a stable service state, then retry $(Format-DefenseClawRepairAction -Layout $Layout)"
     }
     $gatewaySource = if ($Sources.ContainsKey('gateway')) {
         [hashtable]$Sources['gateway']
@@ -30433,8 +30458,8 @@ function Assert-DefenseClawRepairRollbackConfig {
             'were not changed): ' + $validationError +
             ' Next step: fix the named config setting or administrator-selected ' +
             'path permissions, restore an approved gateway-valid config.yaml ' +
-            'if needed, and retry Setup /repair; or run Setup /ensure ' +
-            'CONFIG=<approved config> when deployment metadata is readable. ' +
+            'if needed, and retry ' + (Format-DefenseClawRepairAction -Layout $Layout) + '; or run ' + (Format-DefenseClawSetupAction -Action '/ensure CONFIG=<approved config>') + ' ' +
+            'when deployment metadata is readable. ' +
             'For a signed-bundle deployment, run ' +
             (Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout) +
             ' from an elevated PowerShell prompt.'
@@ -32703,7 +32728,7 @@ function Assert-DefenseClawEnterpriseDeployment {
             -not (Test-DefenseClawStandaloneVendorUsersRead -Path $ancestor)) {
             throw (
                 "standard users cannot read the permissions of $ancestor, so every enrolled user's hook fails closed " +
-                '(enterprise_machine_policy_summary_untrusted). Run Setup /repair, which grants BUILTIN\Users ' +
+                '(enterprise_machine_policy_summary_untrusted). Run ' + (Format-DefenseClawRepairAction -Layout $Layout) + ', which grants BUILTIN\Users ' +
                 "read-permissions and traverse on that folder alone, or run icacls `"$ancestor`" /grant *S-1-5-32-545:(S,RC,RA,X). " +
                 'A deny entry on that folder for a group, a domain account or an enrolled user takes that access away too, ' +
                 'and repair keeps it: remove that entry'
@@ -33481,7 +33506,7 @@ function Get-DefenseClawApprovedPolicySource {
     )
     $bundleRepair = Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout
     $inputName = if ($Name -ceq 'config') { 'CONFIG' } else { 'MANIFEST' }
-    $nextStep = "run Setup /ensure $inputName=<approved absolute path>, or $bundleRepair on a signed-bundle deployment"
+    $nextStep = "run $(Format-DefenseClawSetupAction -Action ('/ensure ' + $inputName + '=<approved absolute path>')), or $bundleRepair on a signed-bundle deployment"
     $expected = Get-DefenseClawApprovedPolicyHash -Metadata $Metadata -Name $Name
     if ([string]::IsNullOrEmpty($expected)) {
         throw "Repair has no recorded approved $Name source; $nextStep"
@@ -33525,7 +33550,7 @@ function Get-DefenseClawRecordedConfigGeneration {
         Microsoft.PowerShell.Utility\ConvertFrom-Json
     $activeHash = [string]$generation.config_sha256
     if ($activeHash -cnotmatch '^[0-9a-f]{64}$') {
-        throw 'Repair cannot read the recorded config generation; run Setup /ensure CONFIG=<approved absolute config path>'
+        throw ('Repair cannot read the recorded config generation; run ' + (Format-DefenseClawSetupAction -Action '/ensure CONFIG=<approved absolute config path>'))
     }
     $actorProperty = $generation.PSObject.Properties['actor']
     $actor = if ($null -eq $actorProperty) { '' } else { [string]$actorProperty.Value }
@@ -33646,7 +33671,7 @@ function Get-DefenseClawRepairRollbackApprovedConfigSource {
     if (([string]$approved.sha256).ToLowerInvariant() -cne $activeHash) {
         throw ('Repair cannot prove that the recorded approved config source is current; ' +
             'run ' + (Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout) + ' ' +
-            'on a signed-bundle deployment, or Setup /ensure CONFIG=<approved absolute config path> otherwise')
+            'on a signed-bundle deployment, or ' + (Format-DefenseClawSetupAction -Action '/ensure CONFIG=<approved absolute config path>') + ' otherwise')
     }
     return $approved
 }
@@ -33745,7 +33770,7 @@ function Invoke-DefenseClawRepairApprovedPolicyRecovery {
             [string]$approved.sha256 -ne $activeHash) {
             $inputName = if ($name -ceq 'config') { 'CONFIG' } else { 'MANIFEST' }
             throw ("Repair cannot prove that the recorded approved $name source is current; " +
-                "run Setup /ensure $inputName=<approved absolute path>, or " +
+                "run $(Format-DefenseClawSetupAction -Action ('/ensure ' + $inputName + '=<approved absolute path>')), or " +
                 (Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout) +
                 ' on a signed-bundle deployment')
         }
@@ -43824,7 +43849,7 @@ function Invoke-DefenseClawForcedUninstallPreparation {
                 ' aside because a file or folder inside it is in use by another program (' +
                 (ConvertTo-DefenseClawBoundedDiagnostic -Value $cause.Message -MaxLength 256) +
                 '); nothing was removed. Close the program that holds it open (an editor or a console whose ' +
-                'current folder is inside it, a log reader, a backup or anti-virus scan) and run Setup /uninstall FORCE=1 again.')
+                'current folder is inside it, a log reader, a backup or anti-virus scan) and run ' + (Format-DefenseClawSetupAction -Action '/uninstall FORCE=1') + ' again.')
         }
         $preparation.moved_state_root = $moved
         if ($null -ne $coworkForcedOwnership) {
@@ -46399,7 +46424,7 @@ function Invoke-DefenseClawUninstallLifecycle {
             }
             throw ("The uninstall stopped before it removed anything; DefenseClaw is still installed. " +
                 "The hook removal it runs after the commit would refuse this deployment: " +
-                "$reason. Repair that (run Setup /repair, or undo the change to the file it names), " +
+                "$reason. Repair that (run $(Format-DefenseClawRepairAction -Layout $Layout), or undo the change to the file it names), " +
                 "then run the uninstall again.")
         }
     }
