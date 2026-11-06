@@ -130,9 +130,9 @@ func TestDeadlineThatWakesAsTheAnswerIsCommittedChangesNothing(t *testing.T) {
 	exited := make(chan int, 1)
 	w := &answerWatchdog{
 		stdout: answer, stderr: answer, exit: func(code int) { exited <- code },
-		waiter:      newAnswerDeadlineWaiter(),
-		fallbackOut: []byte(managedGatewayNoAnswerReason + "\n"), fallbackCode: 1,
-		logFailure: func() { t.Error("the watchdog logged a failure for an answered call") },
+		waiter: newAnswerDeadlineWaiter(),
+		fallback: watchdogAnswer{out: []byte(managedGatewayNoAnswerReason + "\n"), code: 1,
+			logFailure: func() { t.Error("the watchdog logged a failure for an answered call") }},
 	}
 	_, _ = w.out.WriteString(decision)
 	if code := w.finish(blockExit); code != blockExit {

@@ -159,8 +159,8 @@ func TestGAP0295ManagedAndSecureClientNeverTakeTheRestartWindow(t *testing.T) {
 			if _, ok := failPerUserRestartWindow(answerDeadlineEnded(), opts, sp, "open"); ok {
 				t.Fatal("Run's branch took the restart-window answer for a managed or Secure Client call")
 			}
-			if strings.Contains(string(w.fallbackOut)+string(w.fallbackErr), "restarting or not running") {
-				t.Fatalf("watchdog answer %q names the per-user restart", string(w.fallbackOut)+string(w.fallbackErr))
+			if strings.Contains(string(w.fallback.out)+string(w.fallback.err), "restarting or not running") {
+				t.Fatalf("watchdog answer %q names the per-user restart", string(w.fallback.out)+string(w.fallback.err))
 			}
 		})
 	}

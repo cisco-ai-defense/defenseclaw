@@ -42,7 +42,6 @@ type preparedFailureLog struct {
 	marker        *os.File
 	markerEnabled bool
 	markerTaken   bool
-	forceMarker   bool
 	fallbackFrame []byte
 	fallbackSaved bool
 	taken         bool
@@ -140,24 +139,6 @@ func (p *preparedFailureLog) fallbackRecorded() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.fallbackSaved
-}
-
-func (p *preparedFailureLog) forceFallback() {
-	if p == nil {
-		return
-	}
-	p.mu.Lock()
-	p.forceMarker = true
-	p.mu.Unlock()
-}
-
-func (p *preparedFailureLog) wantsFallback() bool {
-	if p == nil {
-		return false
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.forceMarker
 }
 
 func (p *preparedFailureLog) takeMarker(home string) *os.File {
@@ -279,21 +260,6 @@ func (p *preparedFailureLog) appendFallback() bool {
 	p.fallbackSaved = saved
 	p.mu.Unlock()
 	return saved
-}
-
-// appendFallbackWithin leaves the hook free to answer when the local write
-// does not finish in time. A completed write reports whether it was saved.
-func (p *preparedFailureLog) appendFallbackWithin(wait time.Duration) (saved, finished bool) {
-	result := make(chan bool, 1)
-	go func() { result <- p.appendFallback() }()
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
-	select {
-	case saved := <-result:
-		return saved, true
-	case <-timer.C:
-		return false, false
-	}
 }
 
 // close closes the log unless a failure line took it.

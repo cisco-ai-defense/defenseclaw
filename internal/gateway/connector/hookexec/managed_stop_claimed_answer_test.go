@@ -252,7 +252,7 @@ func TestClaimedFailureAnswerIsNotReplaced(t *testing.T) {
 		t.Fatal("first claim not taken")
 	}
 	close(done)
-	want := string(w.fallbackErr) + string(w.fallbackOut)
+	want := string(w.fallback.err) + string(w.fallback.out)
 	if !strings.Contains(want, managedGatewayNotRunningReason) {
 		t.Fatalf("claimed answer %q, want the %s text", want, managedGatewayNotRunningReason)
 	}
@@ -262,7 +262,7 @@ func TestClaimedFailureAnswerIsNotReplaced(t *testing.T) {
 	if _, again := w.claimFailureLog(opts, sp, true, "gateway unreachable", "closed", false); again {
 		t.Fatal("second claim taken")
 	}
-	if got := string(w.fallbackErr) + string(w.fallbackOut); got != want || !w.closedKnown {
+	if got := string(w.fallback.err) + string(w.fallback.out); got != want || !w.closedKnown {
 		t.Fatalf("answer after later renders %q (closed %v), want %q", got, w.closedKnown, want)
 	}
 	if !errors.Is(fakeStoppedSCM(), errManagedGatewayNotRunning) {

@@ -31,6 +31,9 @@ func TestGAP0370DeadlineReceiptSurvivesDelayedLocalRecord(t *testing.T) {
 	}
 	defer func() {
 		close(stall)
+		// Let the open and append goroutines finish before runAgainstGateway's
+		// temporary home is removed by testing cleanup.
+		time.Sleep(500 * time.Millisecond)
 		openHookFailureLog = previous
 	}()
 
