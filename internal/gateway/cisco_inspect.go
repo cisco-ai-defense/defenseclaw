@@ -119,6 +119,9 @@ type inspectCall struct {
 	// form, or returns an already inspected text verdict. Managed callers
 	// leave it nil.
 	onValidationError func() *ScanVerdict
+	// acceptShapeValidation records a cached structured shape's 400/422 as
+	// a rejected format, leaving the concurrently inspected text verdict.
+	acceptShapeValidation bool
 	// onOutcome receives the call's final outcome: nil for a verdict, the
 	// failure otherwise. nil: nothing is reported (every client but the
 	// standalone AI Defense client, whose outcomes feed /health).
@@ -273,6 +276,12 @@ func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, ca
 			retriedAsText = true
 			continue
 		}
+		if (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnprocessableEntity) &&
+			call.acceptShapeValidation {
+			recordCiscoInspectV8(ctx, runtime, elapsed, observability.OutcomeRejected, "")
+			report(ciscoInspectStatusError(resp.StatusCode))
+			return nil
+		}
 
 		if resp.StatusCode == http.StatusUnauthorized && call.onUnauthorized != nil && !retriedAfter401 {
 			if call.onUnauthorized(ctx) {
@@ -317,17 +326,25 @@ func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, ca
 	return nil
 }
 
+// ciscoInspectHTTPStatusError retains the status so a cached format check can
+// distinguish shape validation from an unavailable inspection endpoint.
+type ciscoInspectHTTPStatusError struct{ status int }
+
+func (e *ciscoInspectHTTPStatusError) Error() string {
+	switch e.status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return fmt.Sprintf("the API key was rejected (HTTP %d)", e.status)
+	case http.StatusProxyAuthRequired:
+		return fmt.Sprintf("the egress proxy requires authentication (HTTP %d)", e.status)
+	}
+	return fmt.Sprintf("inspection failed (HTTP %d)", e.status)
+}
+
 // ciscoInspectStatusError describes a final non-200 inspection reply for
 // /health. A rejected key and a proxy that wants credentials name the
 // setting to fix; any other status is reported as is.
 func ciscoInspectStatusError(status int) error {
-	switch status {
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return fmt.Errorf("the API key was rejected (HTTP %d)", status)
-	case http.StatusProxyAuthRequired:
-		return fmt.Errorf("the egress proxy requires authentication (HTTP %d)", status)
-	}
-	return fmt.Errorf("inspection failed (HTTP %d)", status)
+	return &ciscoInspectHTTPStatusError{status: status}
 }
 
 // CiscoInspectClient calls the Cisco AI Defense Chat Inspection API using
@@ -634,16 +651,98 @@ func (c *CiscoInspectClient) Inspect(ctx context.Context, messages []ChatMessage
 		onOutcome: c.availabilityCallback(),
 	}
 	if preferredText {
-		textVerdict := doInspectHTTP(ctx, runtime, call)
-		if textVerdict != nil && textVerdict.Action == "block" {
-			return textVerdict
+		// The preference is only a shape hint. Check both forms within the
+		// same deadline: waiting for a slow text allow before starting the
+		// structured request could discard a timely structured block.
+		type shapeResult struct {
+			verdict    *ScanVerdict
+			outcome    error
+			structured bool
 		}
-		payload["messages"] = chatMsgs
-		if textVerdict != nil {
-			call.onValidationError = func() *ScanVerdict { return textVerdict }
-		} else {
-			canUseText = true
+		results := make(chan shapeResult, 2)
+		checkCtx, stop := context.WithCancel(ctx)
+		defer stop()
+		check := func(messages []map[string]interface{}, structured bool) {
+			shapeCall := call
+			shapeCall.acceptShapeValidation = structured
+			shapeCall.payload = make(map[string]interface{}, len(payload))
+			for name, value := range payload {
+				shapeCall.payload[name] = value
+			}
+			shapeCall.payload["messages"] = messages
+			var outcome error
+			shapeCall.onOutcome = func(err error) { outcome = err }
+			verdict := doInspectHTTP(checkCtx, runtime, shapeCall)
+			results <- shapeResult{verdict: verdict, outcome: outcome, structured: structured}
 		}
+		go check(textMsgs, false)
+		go check(chatMsgs, true)
+
+		var textResult, structuredResult shapeResult
+		for range 2 {
+			result := <-results
+			if result.verdict != nil && result.verdict.Action == "block" {
+				stop()
+				if call.onOutcome != nil {
+					call.onOutcome(nil)
+				}
+				return result.verdict
+			}
+			if result.structured {
+				structuredResult = result
+			} else {
+				textResult = result
+			}
+		}
+		// A 400/422 from one shape is a compatibility signal when the
+		// other shape returned a verdict. Any other failed shape leaves an
+		// inspection incomplete, so the caller applies its outage mode.
+		var incomplete error
+		for _, result := range []shapeResult{textResult, structuredResult} {
+			if result.verdict != nil {
+				continue
+			}
+			if result.outcome == nil {
+				if ctx.Err() != nil {
+					incomplete = ctx.Err()
+					break
+				}
+				continue
+			}
+			var status *ciscoInspectHTTPStatusError
+			if errors.As(result.outcome, &status) &&
+				(status.status == http.StatusBadRequest || status.status == http.StatusUnprocessableEntity) {
+				continue
+			}
+			incomplete = result.outcome
+			break
+		}
+		if incomplete != nil {
+			if call.onOutcome != nil && !errors.Is(ctx.Err(), context.Canceled) {
+				call.onOutcome(incomplete)
+			}
+			return nil
+		}
+		if structuredResult.verdict != nil {
+			if call.onOutcome != nil {
+				call.onOutcome(nil)
+			}
+			return structuredResult.verdict
+		}
+		if textResult.verdict != nil {
+			if call.onOutcome != nil {
+				call.onOutcome(nil)
+			}
+			return textResult.verdict
+		}
+		if call.onOutcome != nil && !errors.Is(ctx.Err(), context.Canceled) {
+			if structuredResult.outcome != nil {
+				call.onOutcome(structuredResult.outcome)
+			} else {
+				call.onOutcome(textResult.outcome)
+			}
+		}
+		return nil
 	}
 	if canUseText {
 		call.onValidationError = func() *ScanVerdict {

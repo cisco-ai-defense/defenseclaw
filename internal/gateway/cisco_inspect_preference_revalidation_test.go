@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -111,22 +112,44 @@ func TestCiscoInspectAPIKeyCachedBlockRechecksTextAllow(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
 			var formats []string
+			var structuredCalls, textCalls, secondCalls int
+			bothSecondStarted := make(chan struct{})
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				shape := ciscoPreferenceRequestShape(t, r)
 				mu.Lock()
-				index := len(formats)
 				formats = append(formats, shape)
+				var number int
+				if shape == "structured" {
+					structuredCalls++
+					number = structuredCalls
+				} else {
+					textCalls++
+					number = textCalls
+				}
+				if number == 2 {
+					secondCalls++
+					if secondCalls == 2 {
+						close(bothSecondStarted)
+					}
+				}
 				mu.Unlock()
 				if shape == "invalid" {
 					t.Error("invalid request shape")
 					w.WriteHeader(http.StatusBadRequest)
 					return
 				}
-				if index == 0 || index == 3 && tc.action == "allow" {
+				if number == 2 {
+					select {
+					case <-bothSecondStarted:
+					case <-r.Context().Done():
+						return
+					}
+				}
+				if shape == "structured" && (number == 1 || tc.action == "allow") {
 					w.WriteHeader(http.StatusUnprocessableEntity)
 					return
 				}
-				if index == 1 || index == 3 {
+				if shape == "structured" || number == 1 {
 					_, _ = io.WriteString(w, `{"is_safe":false,"action":"Block","rules":[]}`)
 					return
 				}
@@ -143,10 +166,124 @@ func TestCiscoInspectAPIKeyCachedBlockRechecksTextAllow(t *testing.T) {
 			}
 			mu.Lock()
 			defer mu.Unlock()
-			if want := []string{"structured", "text", "text", "structured"}; !reflect.DeepEqual(formats, want) {
-				t.Fatalf("request formats = %v, want %v", formats, want)
+			if len(formats) != 4 || !reflect.DeepEqual(formats[:2], []string{"structured", "text"}) {
+				t.Fatalf("request formats = %v, want first structured/text and four total", formats)
+			}
+			last := append([]string(nil), formats[2:]...)
+			sort.Strings(last)
+			if !reflect.DeepEqual(last, []string{"structured", "text"}) {
+				t.Fatalf("second request formats = %v, want both forms", last)
 			}
 		})
+	}
+}
+
+func TestCiscoInspectAPIKeySlowTextAllowKeepsStructuredVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		name, action string
+	}{
+		{name: "structured_block", action: "block"},
+		{name: "benign_twin", action: "allow"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var structuredCalls, textCalls int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				shape := ciscoPreferenceRequestShape(t, r)
+				mu.Lock()
+				var number int
+				switch shape {
+				case "structured":
+					structuredCalls++
+					number = structuredCalls
+				case "text":
+					textCalls++
+					number = textCalls
+				default:
+					t.Errorf("request shape = %q", shape)
+				}
+				mu.Unlock()
+				if shape == "structured" && number == 1 {
+					w.WriteHeader(http.StatusUnprocessableEntity)
+					return
+				}
+				if shape == "text" && number == 1 {
+					_, _ = io.WriteString(w, `{"is_safe":false,"action":"Block","rules":[]}`)
+					return
+				}
+				if shape == "text" {
+					time.Sleep(400 * time.Millisecond)
+					_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+					return
+				}
+				time.Sleep(175 * time.Millisecond)
+				if tc.action == "block" {
+					_, _ = io.WriteString(w, `{"is_safe":false,"action":"Block","rules":[]}`)
+				} else {
+					_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			client := &CiscoInspectClient{
+				apiKey: "provided by test fixture", endpoint: srv.URL,
+				timeout: 500 * time.Millisecond, client: srv.Client(),
+			}
+			if first := client.Inspect(t.Context(), ciscoPreferenceMessages(t, "first")); first == nil || first.Action != "block" {
+				t.Fatalf("first verdict = %+v, want block", first)
+			}
+			if second := client.Inspect(t.Context(), ciscoPreferenceMessages(t, "second")); second == nil || second.Action != tc.action {
+				t.Fatalf("second verdict = %+v, want %s", second, tc.action)
+			}
+		})
+	}
+}
+
+func TestCiscoInspectAPIKeyPartialOutageReturnsNoVerdict(t *testing.T) {
+	var mu sync.Mutex
+	var structuredCalls, textCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		shape := ciscoPreferenceRequestShape(t, r)
+		mu.Lock()
+		if shape == "structured" {
+			structuredCalls++
+		} else if shape == "text" {
+			textCalls++
+		} else {
+			t.Errorf("request shape = %q", shape)
+		}
+		structuredNumber, textNumber := structuredCalls, textCalls
+		mu.Unlock()
+		if shape == "structured" && structuredNumber == 1 {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			return
+		}
+		if shape == "structured" {
+			<-r.Context().Done()
+			return
+		}
+		if textNumber == 1 {
+			_, _ = io.WriteString(w, `{"is_safe":false,"action":"Block","rules":[]}`)
+		} else {
+			_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &CiscoInspectClient{
+		apiKey: "provided by test fixture", endpoint: srv.URL,
+		timeout: 100 * time.Millisecond, client: srv.Client(),
+	}
+	if first := client.Inspect(t.Context(), ciscoPreferenceMessages(t, "first")); first == nil || first.Action != "block" {
+		t.Fatalf("first verdict = %+v, want block", first)
+	}
+	var observed error
+	client.bindAvailabilityObserver(func(err error) { observed = err })
+	if second := client.Inspect(t.Context(), ciscoPreferenceMessages(t, "second")); second != nil {
+		t.Fatalf("incomplete second inspection = %+v, want no verdict", second)
+	}
+	if observed == nil {
+		t.Fatal("incomplete inspection did not report the outage")
 	}
 }
 

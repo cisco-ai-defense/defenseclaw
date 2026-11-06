@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +28,8 @@ func TestCiscoInspectAPIKeyRetryIgnoresToolUseID(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
 			var formats []string
+			var secondCalls, textCalls int
+			bothSecondStarted := make(chan struct{})
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var body struct {
 					Messages []struct {
@@ -43,8 +46,23 @@ func TestCiscoInspectAPIKeyRetryIgnoresToolUseID(t *testing.T) {
 				}
 				if len(body.Messages) == 2 && len(body.Messages[0].ToolCalls) == 1 {
 					mu.Lock()
-					formats = append(formats, "structured:"+body.Messages[0].ToolCalls[0].ID)
+					id := body.Messages[0].ToolCalls[0].ID
+					formats = append(formats, "structured:"+id)
+					second := tc.action == "block" && id == "event-two"
+					if second {
+						secondCalls++
+						if secondCalls == 2 {
+							close(bothSecondStarted)
+						}
+					}
 					mu.Unlock()
+					if second {
+						select {
+						case <-bothSecondStarted:
+						case <-r.Context().Done():
+							return
+						}
+					}
 					w.WriteHeader(http.StatusUnprocessableEntity)
 					return
 				}
@@ -55,7 +73,22 @@ func TestCiscoInspectAPIKeyRetryIgnoresToolUseID(t *testing.T) {
 				}
 				mu.Lock()
 				formats = append(formats, "text")
+				textCalls++
+				second := tc.action == "block" && textCalls == 2
+				if second {
+					secondCalls++
+					if secondCalls == 2 {
+						close(bothSecondStarted)
+					}
+				}
 				mu.Unlock()
+				if second {
+					select {
+					case <-bothSecondStarted:
+					case <-r.Context().Done():
+						return
+					}
+				}
 				if tc.action == "block" {
 					_, _ = io.WriteString(w, `{"is_safe":false,"action":"Block","rules":[]}`)
 					return
@@ -76,10 +109,13 @@ func TestCiscoInspectAPIKeyRetryIgnoresToolUseID(t *testing.T) {
 			}
 			mu.Lock()
 			defer mu.Unlock()
-			want := []string{"structured:event-one", "text", "text"}
-			if tc.action != "block" {
-				// An allow needs a fresh structured verdict on the next invocation.
-				want = []string{"structured:event-one", "text", "structured:event-two", "text"}
+			// A non-blocking text result is not cached. A cached block
+			// launches both forms, with no ordering between their arrivals.
+			want := []string{"structured:event-one", "text", "structured:event-two", "text"}
+			if tc.action == "block" && len(formats) == 4 {
+				last := append([]string(nil), formats[2:]...)
+				sort.Strings(last)
+				formats = append(append([]string(nil), formats[:2]...), last...)
 			}
 			if !reflect.DeepEqual(formats, want) {
 				t.Fatalf("request formats = %v, want %v", formats, want)

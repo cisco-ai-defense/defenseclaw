@@ -55,6 +55,7 @@ func TestCiscoInspectAPIKeyToolCallValidationFallback(t *testing.T) {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			var mu sync.Mutex
 			var requests [][]map[string]json.RawMessage
+			cachedBothStarted := make(chan struct{})
 			requestSnapshot := func() [][]map[string]json.RawMessage {
 				mu.Lock()
 				defer mu.Unlock()
@@ -67,7 +68,18 @@ func TestCiscoInspectAPIKeyToolCallValidationFallback(t *testing.T) {
 				messages := shapeFallbackWire(t, r)
 				mu.Lock()
 				requests = append(requests, messages)
+				requestNumber := len(requests)
+				if requestNumber == 4 {
+					close(cachedBothStarted)
+				}
 				mu.Unlock()
+				if requestNumber == 3 || requestNumber == 4 {
+					select {
+					case <-cachedBothStarted:
+					case <-r.Context().Done():
+						return
+					}
+				}
 				if hasShapeFallbackToolCalls(messages) {
 					w.WriteHeader(status)
 					_, _ = io.WriteString(w, `{"detail":"tool_calls validation"}`)
@@ -96,20 +108,22 @@ func TestCiscoInspectAPIKeyToolCallValidationFallback(t *testing.T) {
 			}
 
 			// A reconstructed client in the same process uses the learned
-			// endpoint format without sending another tool-call request.
+			// text form and checks the structured form within the same budget.
 			client = &CiscoInspectClient{apiKey: "test-key", endpoint: srv.URL, timeout: time.Second, client: srv.Client()}
 			if verdict := client.Inspect(t.Context(), messages); verdict == nil || verdict.Action != "block" {
 				t.Fatalf("remembered format verdict = %+v, want block", verdict)
 			}
 			gotRequests = requestSnapshot()
-			if len(gotRequests) != 3 || !reflect.DeepEqual(gotRequests[2], wantText) {
-				t.Fatalf("remembered format messages = %v", gotRequests)
+			if len(gotRequests) != 4 ||
+				!(reflect.DeepEqual(gotRequests[2], wantText) && hasShapeFallbackToolCalls(gotRequests[3]) ||
+					hasShapeFallbackToolCalls(gotRequests[2]) && reflect.DeepEqual(gotRequests[3], wantText)) {
+				t.Fatalf("remembered format shapes = %v", gotRequests)
 			}
 			if verdict := client.Inspect(t.Context(), shapeFallbackMessages("ordinary edit")); verdict == nil || verdict.Action != "allow" {
 				t.Fatalf("benign fallback verdict = %+v, want allow", verdict)
 			}
 			gotRequests = requestSnapshot()
-			if len(gotRequests) != 5 || !hasShapeFallbackToolCalls(gotRequests[3]) || hasShapeFallbackToolCalls(gotRequests[4]) {
+			if len(gotRequests) != 6 || !hasShapeFallbackToolCalls(gotRequests[4]) || hasShapeFallbackToolCalls(gotRequests[5]) {
 				t.Fatalf("different request formats = %v", gotRequests)
 			}
 		})
