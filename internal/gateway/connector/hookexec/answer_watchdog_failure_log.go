@@ -310,6 +310,13 @@ func (p *preparedFailureLog) close() {
 	if p == nil {
 		return
 	}
+	// If preparation never started, close its completion channels now. A
+	// queued timer may call prepare after the hook has already finished; it
+	// must not start a file opener against a retired call.
+	p.once.Do(func() {
+		close(p.markerReady)
+		close(p.done)
+	})
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {

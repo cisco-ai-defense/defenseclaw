@@ -181,6 +181,7 @@ func TestPerUserNativeHookOutageOpenOnlyForAnOutage(t *testing.T) {
 		for _, tier := range []struct{ name, mode string }{{"default or permissive", "open"}, {"strict", "closed"}} {
 			for _, sc := range scenarios {
 				t.Run(connector+"/"+tier.name+"/"+sc.name, func(t *testing.T) {
+					var armed *AnswerWatchdog
 					result := run(t, connector, sc.rt(), func(opts *Options) {
 						opts.Event = call.event
 						opts.Stdin = strings.NewReader(call.stdin)
@@ -190,7 +191,19 @@ func TestPerUserNativeHookOutageOpenOnlyForAnOutage(t *testing.T) {
 						if sc.mutate != nil {
 							sc.mutate(opts)
 						}
+						if opts.StartedAt.IsZero() {
+							opts.StartedAt = time.Now()
+						}
+						armed = ArmAnswerWatchdog(*opts, []byte(call.stdin))
+						opts.AnswerWatchdog = armed
 					})
+					if armed != nil {
+						select {
+						case <-armed.failureLog.done:
+						case <-time.After(time.Second):
+							t.Fatal("hook failure-log opener did not finish before temporary home cleanup")
+						}
+					}
 					wantRun := sc.name == "gateway up" || (sc.opens && tier.mode == "open")
 					if blocked := nativeOutageBlocked(result); blocked == wantRun {
 						t.Fatalf("blocked=%v, want %v: code=%d stdout=%q stderr=%q", blocked, !wantRun, result.code, result.stdout, result.stderr)

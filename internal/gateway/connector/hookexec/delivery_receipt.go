@@ -7,21 +7,18 @@ import (
 	"context"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/textproto"
-	"net/url"
 	"strconv"
 	"sync"
 	"time"
 )
 
-// The managed hook and gateway use the same HTTP request for the verdict and
-// its delivery receipt. An old gateway does not send 103 Early Hints, so the
-// body ends with HookDeliveryReleased when an earlier gateway begins reading
-// it, or after this compatibility wait. A 1.0.4 gateway whose 103 comes later
-// reads the same marker in place of a receipt.
+// The hook and gateway use the same HTTP request for the verdict and its
+// delivery receipt. A legacy reader signals 100 before it needs the body end;
+// a current gateway signals 103 before it reads the receipt. The compatibility
+// wait applies to transports that cannot report the legacy read signal.
 const hookDeliveryCapabilityWait = 250 * time.Millisecond
 
 // The agent has its answer before this wait starts. Limit a missing HTTP
@@ -39,7 +36,6 @@ type hookDeliveryRequest struct {
 	readOnce    sync.Once
 	mu          sync.Mutex
 	closed      bool
-	conn        net.Conn
 	// released: the capability wait passed first and the body ended with
 	// HookDeliveryReleased. The answer is ordinary, with no receipt.
 	released bool
@@ -84,7 +80,7 @@ func wantsHookDeliveryReceipt(opts Options) bool {
 	return !opts.SecureClient && opts.answerWatch != nil && !opts.answerBy.IsZero()
 }
 
-func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Duration, starting func(context.Context) bool, currentGateway func(context.Context, net.Conn) bool) (*http.Request, *hookDeliveryRequest) {
+func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Duration, starting func(context.Context) bool, legacyReadSignal bool) (*http.Request, *hookDeliveryRequest) {
 	reader, writer := io.Pipe()
 	delivery := &hookDeliveryRequest{writer: writer, ready: make(chan struct{}), reading: make(chan struct{}), payloadDone: make(chan struct{})}
 	req.Body = reader
@@ -118,65 +114,15 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 			return
 		}
 		close(delivery.payloadDone)
-		if wait <= 0 {
+		if wait <= 0 && !legacyReadSignal {
 			delivery.release()
 			return
 		}
-		timer := time.NewTimer(wait)
+		timer := time.NewTimer(max(wait, 0))
 		defer timer.Stop()
-		// Start peer verification during the compatibility window. A
-		// completed older-gateway check releases on that window; an
-		// unfinished check follows the request deadline so a matching
-		// current gateway can still advertise its later 103.
-		var verified <-chan bool
-		var cancelProbe context.CancelFunc = func() {}
-		startProbe := func() {
-			cancelProbe()
-			verified = nil
-			select {
-			case <-delivery.ready:
-				return
-			case <-delivery.reading:
-				return
-			default:
-			}
-			if currentGateway == nil {
-				return
-			}
-			postConn := delivery.connection()
-			if postConn == nil {
-				return
-			}
-			// The health request must not inherit the POST's HTTP trace: a
-			// health response cannot advertise receipt support for the POST.
-			// A request with an answer deadline can still receive its 103
-			// after the compatibility wait. Keep the peer check within that
-			// existing deadline; a prompt older-gateway response still releases
-			// the body at the compatibility wait.
-			probeCtx, cancel := context.WithTimeout(context.Background(), wait)
-			if deadline, ok := req.Context().Deadline(); ok {
-				cancel()
-				probeCtx, cancel = context.WithDeadline(context.Background(), deadline)
-			}
-			stopCancel := context.AfterFunc(req.Context(), cancel)
-			cancelProbe = func() {
-				stopCancel()
-				cancel()
-			}
-			result := make(chan bool, 1)
-			verified = result
-			go func() { result <- currentGateway(probeCtx, postConn) }()
-		}
-		defer func() { cancelProbe() }()
-		awaitReceipt := func() {
-			select {
-			case <-delivery.ready:
-			case <-req.Context().Done():
-			}
-		}
-		startProbe()
-		// seenStarting: the gateway was still starting when the wait
-		// passed; once it runs it gets the capability wait again.
+		// A 100 is evidence that the accepted legacy POST has begun reading.
+		// A 103 is evidence that this POST can carry the delivered receipt.
+		// The health of a separate request proves neither fact.
 		seenStarting := false
 		for {
 			select {
@@ -187,47 +133,7 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 				return
 			case <-req.Context().Done():
 				return
-			case same := <-verified:
-				if same {
-					awaitReceipt()
-					return
-				}
-				verified = nil
-				continue
 			case <-timer.C:
-			}
-			// Prefer a completed peer check if the timer and probe become
-			// ready together.
-			if verified != nil {
-				select {
-				case same := <-verified:
-					if same {
-						awaitReceipt()
-						return
-					}
-					verified = nil
-				default:
-				}
-			}
-			if verified != nil {
-				// The accepted process may still be answering the peer
-				// check. Releasing now would consume its receipt channel
-				// before a delayed 103 can arrive.
-				select {
-				case same := <-verified:
-					if same {
-						awaitReceipt()
-						return
-					}
-					verified = nil
-				case <-delivery.ready:
-					return
-				case <-delivery.reading:
-					delivery.release()
-					return
-				case <-req.Context().Done():
-					return
-				}
 			}
 			if starting != nil && starting(req.Context()) {
 				seenStarting = true
@@ -238,8 +144,18 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 			if seenStarting {
 				seenStarting, starting = false, nil
 				timer.Reset(wait)
-				startProbe()
 				continue
+			}
+			if legacyReadSignal {
+				// With a read signal, keep the accepted POST writable until it
+				// advertises 103 or the request's own deadline ends it.
+				select {
+				case <-delivery.ready:
+				case <-delivery.reading:
+					delivery.release()
+				case <-req.Context().Done():
+				}
+				return
 			}
 			delivery.release()
 			return
@@ -335,71 +251,6 @@ func hookDeliveryWait(opts Options) time.Duration {
 		}
 	}
 	return wait
-}
-
-// hookDeliveryCurrentGateway checks whether the process that accepted the
-// POST supports receipts. A separate health response only applies when its
-// connected endpoint and process match the still-open POST connection.
-func hookDeliveryCurrentGateway(ctx context.Context, client *http.Client, target string, postConn net.Conn) bool {
-	endpoint, err := url.Parse(target)
-	if err != nil {
-		return false
-	}
-	endpoint.Path, endpoint.RawPath, endpoint.RawQuery, endpoint.Fragment = "/health", "", "", ""
-	var healthConn net.Conn
-	var connMu sync.Mutex
-	trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
-		connMu.Lock()
-		healthConn = info.Conn
-		connMu.Unlock()
-	}}
-	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, trace), http.MethodGet, endpoint.String(), nil)
-	if err != nil {
-		return false
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	connMu.Lock()
-	conn := healthConn
-	connMu.Unlock()
-	return resp.StatusCode == http.StatusOK && resp.Header.Get(HookDeliveryCapabilityHeader) == "1" &&
-		hookDeliverySameGateway(ctx, postConn, conn)
-}
-
-func hookDeliverySameGateway(ctx context.Context, postConn, healthConn net.Conn) bool {
-	if postConn == nil || healthConn == nil {
-		return false
-	}
-	postLocal, postRemote := postConn.LocalAddr(), postConn.RemoteAddr()
-	healthLocal, healthRemote := healthConn.LocalAddr(), healthConn.RemoteAddr()
-	postClient, postClientOK := postLocal.(*net.TCPAddr)
-	postServer, postServerOK := postRemote.(*net.TCPAddr)
-	healthClient, healthClientOK := healthLocal.(*net.TCPAddr)
-	healthServer, healthServerOK := healthRemote.(*net.TCPAddr)
-	if !postClientOK || !postServerOK || !healthClientOK || !healthServerOK {
-		return false
-	}
-	if postRemote.String() != healthRemote.String() {
-		return false
-	}
-	postPID, postOK := perUserConnectedPeerPIDWithin(ctx, postClient, postServer)
-	healthPID, healthOK := perUserConnectedPeerPIDWithin(ctx, healthClient, healthServer)
-	return postOK && healthOK && postPID == healthPID
-}
-
-func (d *hookDeliveryRequest) setConnection(conn net.Conn) {
-	d.mu.Lock()
-	d.conn = conn
-	d.mu.Unlock()
-}
-
-func (d *hookDeliveryRequest) connection() net.Conn {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.conn
 }
 
 func (d *hookDeliveryRequest) close() {

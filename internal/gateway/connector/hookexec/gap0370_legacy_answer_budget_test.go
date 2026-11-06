@@ -41,8 +41,9 @@ func TestGAP0370LegacyAnswerNearBudget(t *testing.T) {
 				opts.FailMode = "open"
 				opts.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"shell","tool_input":{"command":"echo ok"}}`)
 			})
-			if blocked(result) {
-				t.Fatalf("ordinary gateway allow became block after %s: code=%d stdout=%q stderr=%q", elapsed, result.code, result.stdout, result.stderr)
+			if blocked(result) || !strings.Contains(result.stdout, `"permissionDecision":"allow"`) ||
+				strings.Contains(result.stdout+result.stderr, perUserGatewayNoAnswerReason) {
+				t.Fatalf("ordinary gateway allow was not delivered after %s: code=%d stdout=%q stderr=%q", elapsed, result.code, result.stdout, result.stderr)
 			}
 		})
 	}
