@@ -58,6 +58,7 @@ $StateRoot = (Get-Item -LiteralPath $StateRoot).FullName
 $script:Results = Join-Path $StateRoot 'results.jsonl'
 $script:Failures = [Collections.Generic.List[string]]::new()
 $script:HarnessBash = $null
+$script:Bin = ''
 $script:AgentFixtures = @()
 $script:FixtureDirectories = [Collections.Generic.List[string]]::new()
 $WindowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -1071,7 +1072,8 @@ if ($Operation -eq 'self-test') {
     } catch {
         Write-Result $(if ($Operation -eq 'lifecycle') { 'lifecycle' } else { "$Connector`:contract" }) fail "$($_.Exception.Message) at $($_.InvocationInfo.PositionMessage)"
     } finally {
-        if ($Operation -ne 'lifecycle') { try { Stop-Gateway } catch { Write-Host "gateway stop: $($_.Exception.Message)" } }
+        # A lifecycle that stopped before its uninstall leaves the gateway running.
+        if ($script:Bin) { try { Stop-Gateway } catch { Write-Host "gateway stop: $($_.Exception.Message)" } }
         try { Remove-AgentFixtures } catch { Write-Result agent-fixtures fail "cleanup: $($_.Exception.Message)" }
     }
 }

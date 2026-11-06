@@ -886,7 +886,9 @@ jobs:
       - name: Lifecycle lane ${{ matrix.cell }}
         if: ${{ matrix.cell != 'uninstall' }}
         run: |
-          ./scripts/test-install-lifecycle.ps1 -Assets (Join-Path $env:RUNNER_TEMP 'contract-assets') -Lanes $env:CELL -Root (Join-Path $env:DC_STATE_ROOT 'lanes')
+          # The lanes make their own profiles below the user temp folder, as
+          # in release.yaml's install gate.
+          ./scripts/test-install-lifecycle.ps1 -Assets (Join-Path $env:RUNNER_TEMP 'contract-assets') -Lanes $env:CELL
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Capture bounded diagnostics
         if: ${{ failure() || cancelled() }}
