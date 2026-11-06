@@ -94,17 +94,26 @@ class RedOn108Test(unittest.TestCase):
 
             with (
                 patch("scripts.red_on_108.subprocess.run", side_effect=run),
+                patch("scripts.red_on_108.tree_entries", return_value={test_file: ("100644", "0" * 40)}),
                 patch("scripts.red_on_108.subprocess.check_output", return_value=source),
             ):
-                status = run_one(Path("."), worktree, "commit", [test_file], ["test_gap0607_dependency"], "base")
+                status = run_one(
+                    Path("."), worktree, "commit", [test_file], ["test_gap0607_dependency"], "base", ["unused"]
+                )
             self.assertEqual(status, "COMPILE_ONLY")
 
-    def test_assertion_failure_remains_behavior_red(self):
+    def test_assertion_failure_is_certified_only_by_its_reviewed_lines(self):
         from scripts.red_on_108 import classify_test_result
 
         command = [sys.executable, "-m", "pytest", "-q", "cli/tests/test_sample.py"]
-        output = "FAILED cli/tests/test_sample.py::test_sample - AssertionError: expected sample result\n"
-        self.assertEqual(classify_test_result(command, 1, output), "BEHAVIOR_RED")
+        output = (
+            "E   AssertionError: expected sample result\n"
+            "FAILED cli/tests/test_sample.py::test_sample - AssertionError: expected sample result\n"
+        )
+        self.assertEqual(classify_test_result(command, 1, output), "UNCLASSIFIED_FAIL")
+        reviewed = ["AssertionError: expected sample result"]
+        self.assertEqual(classify_test_result(command, 1, output, reviewed), "BEHAVIOR_RED")
+        self.assertEqual(classify_test_result(command, 1, output, ["AssertionError: other"]), "UNCLASSIFIED_FAIL")
 
     def test_go_missing_fixture_is_not_behavior_red(self):
         from scripts.red_on_108 import classify_test_result
@@ -115,48 +124,31 @@ class RedOn108Test(unittest.TestCase):
             "    sample_test.go:12: open testdata/sample.json: no such file or directory\n"
         )
         assertion = "--- FAIL: TestGAP0607Sample (0.00s)\n    sample_test.go:12: got allow, want block\n"
-        unclassified = "--- FAIL: TestGAP0607Sample (0.00s)\n    sample_test.go:12: fixture bytes unavailable\n"
-        self.assertEqual(classify_test_result(command, 1, missing), "COMPILE_ONLY")
-        self.assertEqual(classify_test_result(command, 1, assertion), "BEHAVIOR_RED")
-        self.assertEqual(classify_test_result(command, 1, unclassified), "COMPILE_ONLY")
+        unavailable = "--- FAIL: TestGAP0607Sample (0.00s)\n    sample_test.go:12: fixture bytes unavailable\n"
+        reviewed = ["sample_test.go:12: got allow, want block"]
+        self.assertEqual(classify_test_result(command, 1, missing, reviewed), "COMPILE_ONLY")
+        self.assertEqual(classify_test_result(command, 1, assertion), "UNCLASSIFIED_FAIL")
+        self.assertEqual(classify_test_result(command, 1, assertion, reviewed), "BEHAVIOR_RED")
+        self.assertEqual(classify_test_result(command, 1, unavailable, reviewed), "UNCLASSIFIED_FAIL")
 
-    def test_go_setup_message_is_not_behavior_evidence(self):
+    def test_reviewed_lines_must_be_exactly_the_failing_lines(self):
         from scripts.red_on_108 import classify_test_result
 
         command = ["nice", "-n", "15", "go", "test", "./internal/example"]
-        setup = (
-            "--- FAIL: TestGAP0607Sample (0.00s)\n"
-            "    sample_test.go:12: fixture setup got empty bytes, want sample bytes\n"
-        )
-        unrelated = (
-            "--- FAIL: TestGAP0607Sample (0.00s)\n"
-            "    sample_test.go:12: dependency setup failed\n"
-            "    helper.go:9: got allow, want block\n"
-        )
-        self.assertEqual(classify_test_result(command, 1, setup), "COMPILE_ONLY")
-        self.assertEqual(classify_test_result(command, 1, unrelated), "COMPILE_ONLY")
-        helper_only = "--- FAIL: TestGAP0607Sample (0.00s)\n    helper.go:9: got allow, want block\n"
-        self.assertEqual(classify_test_result(command, 1, helper_only), "UNCLASSIFIED_FAIL")
+        product = "--- FAIL: TestGAP0607Sample (0.00s)\n    sample_test.go:12: got block, want allow\n"
+        reviewed = ["sample_test.go:12: got block, want allow"]
+        for extra in (
+            "    sample_test.go:13: setup complete\n",
+            "    sample_test.go:13: decision recorded\n",
+            "    helper.go:9: got allow, want block\n",
+        ):
+            with self.subTest(extra=extra):
+                self.assertEqual(classify_test_result(command, 1, product + extra, reviewed), "UNCLASSIFIED_FAIL")
+        moved = "--- FAIL: TestGAP0607Sample (0.00s)\n    sample_test.go:14: got block, want allow\n"
+        self.assertEqual(classify_test_result(command, 1, moved, reviewed), "UNCLASSIFIED_FAIL")
+        self.assertEqual(classify_test_result(command, 1, product, reviewed), "BEHAVIOR_RED")
 
-    def test_go_classifies_the_failing_assertion_without_unrelated_setup_text(self):
-        from scripts.red_on_108 import classify_test_result
-
-        command = ["nice", "-n", "15", "go", "test", "./internal/example"]
-        setup_assertion = (
-            "--- FAIL: TestGAP0607Sample (0.00s)\n"
-            "    sample_test.go:12: precondition got empty bytes, want sample bytes\n"
-        )
-        product_assertion = "--- FAIL: TestGAP0607Sample (0.00s)\n    sample_test.go:12: got block, want allow\n"
-        with_setup_log = product_assertion + "    sample_test.go:13: setup complete\n"
-        with_other_log = product_assertion + "    sample_test.go:13: decision recorded\n"
-        self.assertEqual(classify_test_result(command, 1, setup_assertion), "COMPILE_ONLY")
-        self.assertEqual(classify_test_result(command, 1, product_assertion), "BEHAVIOR_RED")
-        # Text cannot tell a setup log from the failing line, so setup words
-        # anywhere in the failing output withhold certification.
-        self.assertEqual(classify_test_result(command, 1, with_setup_log), "COMPILE_ONLY")
-        self.assertEqual(classify_test_result(command, 1, with_other_log), "UNCLASSIFIED_FAIL")
-
-    def test_setup_context_is_independent_of_the_comparison_words(self):
+    def test_unreviewed_comparisons_are_never_certified(self):
         from scripts.red_on_108 import classify_test_result
 
         go = ["nice", "-n", "15", "go", "test", "./internal/example"]
@@ -168,18 +160,23 @@ class RedOn108Test(unittest.TestCase):
             "seeded file: expected new, got old",
             "prepared workspace want new got old",
             "harness observed old bytes, expected new bytes",
+            "asset observed old bytes, expected new bytes",
+            "resource got old, want new",
+            "mock server observed 0 calls, expected 1",
+            "decision observed allow, expected block",
+            "got allow, want block",
         ):
             with self.subTest(message=message):
                 output = f"--- FAIL: TestGAP0607Sample (0.00s)\n    sample_test.go:12: {message}\n"
-                self.assertEqual(classify_test_result(go, 1, output), "COMPILE_ONLY")
+                self.assertEqual(classify_test_result(go, 1, output), "UNCLASSIFIED_FAIL")
                 failed = f"E   AssertionError: {message}\nFAILED cli/tests/test_sample.py::test_sample - {message}\n"
-                self.assertEqual(classify_test_result(pytest, 1, failed), "COMPILE_ONLY")
-        product = (
-            "--- FAIL: TestGAP0607Sample (0.00s)\n    sample_test.go:12: decision observed allow, expected block\n"
-        )
-        self.assertEqual(classify_test_result(go, 1, product), "BEHAVIOR_RED")
-        failed = "E   AssertionError: decision allow, expected block\nFAILED cli/tests/test_sample.py::test_sample\n"
-        self.assertEqual(classify_test_result(pytest, 1, failed), "BEHAVIOR_RED")
+                self.assertEqual(classify_test_result(pytest, 1, failed), "UNCLASSIFIED_FAIL")
+
+    def test_run_one_passes_the_reviewed_lines(self):
+        found = [("commit", ["sample_test.go"])]
+        with patch("scripts.red_on_108.run_one", return_value="BEHAVIOR_RED") as run:
+            run_mapped_candidate(Path("."), Path("."), found, ["TestMapped"], "base", ["sample_test.go:1: x"])
+        self.assertEqual(run.call_args.args[-1], ["sample_test.go:1: x"])
 
     def test_go_fixtures_match_the_test_commit_on_prior_release(self):
         from tempfile import TemporaryDirectory
@@ -282,6 +279,72 @@ class RedOn108Test(unittest.TestCase):
                 )
                 with self.assertRaises(ValueError):
                     overlay_go_fixtures(repo, prior, git("rev-parse", "HEAD"), "internal/example")
+            finally:
+                git("worktree", "remove", "--force", str(prior))
+
+    def test_overlay_reproduces_git_type_content_and_executable_bit(self):
+        import os
+        import stat
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "repo"
+            repo.mkdir()
+
+            def git(*args: str) -> str:
+                return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
+
+            git("init", "-q")
+            git("config", "user.name", "Test")
+            git("config", "user.email", "test@example.invalid")
+            git("config", "core.fileMode", "true")
+            fixture = repo / "internal/example/testdata"
+            fixture.mkdir(parents=True)
+            (fixture / "runner.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (fixture / "data.json").write_text("{}", encoding="utf-8")
+            git("add", ".")
+            git("commit", "-q", "-m", "base")
+            base = git("rev-parse", "HEAD")
+            (fixture / "runner.sh").chmod(0o755)
+            (fixture / "data.json").chmod(0o755)
+            (fixture / "link.json").symlink_to("data.json")
+            (fixture / "data.json").chmod(0o644)
+            git("add", ".")
+            git("commit", "-q", "-m", "fix(GAP-0607): executable runner and linked fixture")
+            commit = git("rev-parse", "HEAD")
+            self.assertIn("100755", git("ls-tree", commit, "internal/example/testdata/runner.sh"))
+            prior = Path(temporary) / "prior"
+            git("worktree", "add", "--quiet", "--detach", str(prior), base)
+            try:
+                mask = os.umask(0o022)
+                try:
+                    overlay_go_fixtures(repo, prior, commit, "internal/example")
+                finally:
+                    os.umask(mask)
+                runner = prior / "internal/example/testdata/runner.sh"
+                self.assertTrue(stat.S_IMODE(runner.stat().st_mode) & 0o100)
+                self.assertFalse(stat.S_IMODE((prior / "internal/example/testdata/data.json").stat().st_mode) & 0o111)
+                link = prior / "internal/example/testdata/link.json"
+                self.assertTrue(link.is_symlink())
+                self.assertEqual(os.readlink(link), "data.json")
+
+                # An overlay that loses the executable bit or writes a link as a
+                # file is a mismatch, never a test run.
+                def plain(repo_path, worktree, name, entry):
+                    target = worktree / name
+                    if target.is_symlink() or target.is_file():
+                        target.unlink()
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    data = subprocess.check_output(["git", "-C", str(repo_path), "cat-file", "blob", entry[1]])
+                    target.write_bytes(data)
+                    target.chmod(0o644)
+
+                subprocess.run(
+                    ["git", "-C", str(prior), "reset", "--hard", base], check=True, stdout=subprocess.DEVNULL
+                )
+                with patch("scripts.red_on_108.write_entry", side_effect=plain):
+                    with self.assertRaises(ValueError):
+                        overlay_go_fixtures(repo, prior, commit, "internal/example")
             finally:
                 git("worktree", "remove", "--force", str(prior))
 
