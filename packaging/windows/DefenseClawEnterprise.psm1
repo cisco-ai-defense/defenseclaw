@@ -28990,7 +28990,13 @@ function Assert-DefenseClawRepairRollbackConfig {
                 }
             }
             catch {
-                $validationError = $_.Exception.Message
+                # Keep the installed config's reason: it names the setting
+                # the next step asks the administrator to fix. Unreadable
+                # metadata or an unusable approved copy only says why Repair
+                # could not check the recorded approved bytes instead.
+                $validationError = $validationError +
+                    ' The recorded approved config could not be used: ' +
+                    $_.Exception.Message
             }
         }
         throw (
