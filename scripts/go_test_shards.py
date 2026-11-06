@@ -43,17 +43,77 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST_FUNCTION_RE = re.compile(r"^func\s+((?:Test|Fuzz|Example)[A-Za-z0-9_]*)\s*\(", re.MULTILINE)
+BUILD_TAG_TOKEN_RE = re.compile(r"\s*(&&|\|\||!|\(|\)|[A-Za-z0-9_.]+)")
+OPT_IN_TEST_TAGS = frozenset({"regressioncorpora", "d1corpus"})
+
+
+def requires_opt_in_test_tag(expression: str) -> bool:
+    """Exclude a file only if its constraint is false without opt-in tags.
+
+    Other build tags are unknown here because this sharder also runs on
+    Windows and macOS. Unknown expressions stay in the ordinary test set.
+    """
+    expression = expression.strip()
+    tokens: list[str] = []
+    cursor = 0
+    while cursor < len(expression):
+        match = BUILD_TAG_TOKEN_RE.match(expression, cursor)
+        if match is None:
+            return False
+        tokens.append(match.group(1))
+        cursor = match.end()
+    position = 0
+
+    def unary() -> int:
+        nonlocal position
+        if position >= len(tokens):
+            raise ValueError("missing build tag operand")
+        token = tokens[position]
+        position += 1
+        if token == "!":
+            return -unary()
+        if token == "(":
+            value = disjunction()
+            if position >= len(tokens) or tokens[position] != ")":
+                raise ValueError("unclosed build tag group")
+            position += 1
+            return value
+        if token in {"&&", "||", ")"}:
+            raise ValueError("unexpected build tag operator")
+        return -1 if token in OPT_IN_TEST_TAGS else 0
+
+    def conjunction() -> int:
+        nonlocal position
+        value = unary()
+        while position < len(tokens) and tokens[position] == "&&":
+            position += 1
+            value = min(value, unary())
+        return value
+
+    def disjunction() -> int:
+        nonlocal position
+        value = conjunction()
+        while position < len(tokens) and tokens[position] == "||":
+            position += 1
+            value = max(value, conjunction())
+        return value
+
+    try:
+        value = disjunction()
+    except ValueError:
+        return False
+    return position == len(tokens) and value == -1
 
 
 def discover_test_files(package_dir: Path) -> list[tuple[Path, tuple[str, ...]]]:
     discovered: list[tuple[Path, tuple[str, ...]]] = []
     for path in sorted(package_dir.glob("*_test.go")):
         source = path.read_text(encoding="utf-8")
-        first_lines = source.splitlines()[:24]
-        if any(
-            line.startswith("//go:build ") and ("regressioncorpora" in line or "d1corpus" in line)
-            for line in first_lines
-        ):
+        constraint = next(
+            (line.removeprefix("//go:build ") for line in source.splitlines() if line.startswith("//go:build ")),
+            None,
+        )
+        if constraint is not None and requires_opt_in_test_tag(constraint):
             continue
         names = tuple(sorted(set(TEST_FUNCTION_RE.findall(source))))
         if names:

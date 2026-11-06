@@ -53,7 +53,18 @@ def test_default_go_shards_leave_opt_in_corpora_for_their_own_jobs(tmp_path: Pat
     (tmp_path / "private_test.go").write_text(
         "//go:build d1corpus\n\npackage sample\nfunc TestPrivate(t *testing.T) {}\n"
     )
-    assert [names for _, names in discover_test_files(tmp_path)] == [("TestNormal",)]
+    (tmp_path / "conditional_private_test.go").write_text(
+        "//go:build linux && d1corpus\n\npackage sample\nfunc TestConditionalPrivate(t *testing.T) {}\n"
+    )
+    (tmp_path / "alternate_test.go").write_text(
+        "//go:build d1corpus || linux\n\npackage sample\nfunc TestAlternate(t *testing.T) {}\n"
+    )
+    (tmp_path / "negated_test.go").write_text(
+        "//go:build !d1corpus\n\npackage sample\nfunc TestNegated(t *testing.T) {}\n"
+    )
+    assert [names for _, names in discover_test_files(tmp_path)] == [
+        ("TestAlternate",), ("TestNegated",), ("TestNormal",)
+    ]
 
 
 def test_go_test_shards_reject_invalid_count() -> None:
