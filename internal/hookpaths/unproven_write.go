@@ -576,7 +576,7 @@ func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unpro
 // checks resolved links into the active state tree without starting another
 // parser after the proof budget is exhausted.
 func unprovenRecoveredProtectedReach(command, cwd, home string, memo *TargetMemo) bool {
-	return protectedReachFromTextWithStatePrepared(command, cwd, home, filepath.Join(home, ".defenseclaw"), memo.protectedFiles(home), filepath.Join(home, ".ssh"), memo)
+	return protectedReachFromTextWithStatePrepared(command, cwd, home, filepath.Join(home, ".defenseclaw"), nil, filepath.Join(home, ".ssh"), memo)
 }
 
 type unprovenBoundedWriter struct {
@@ -1816,7 +1816,12 @@ func protectedReachFromText(command, cwd, home string) bool {
 }
 
 func protectedReachFromTextWithState(command, cwd, home, stateRoot string) bool {
-	protected := newProtectedFiles(home)
+	// State-root candidates use ProtectedReach; only the older no-state
+	// reader needs the separate protected-file index.
+	var protected protectedFiles
+	if stateRoot == "" {
+		protected = newProtectedFiles(home)
+	}
 	ssh := filepath.Join(home, ".ssh")
 	return protectedReachFromTextWithStatePrepared(command, cwd, home, stateRoot, protected, ssh, nil)
 }
