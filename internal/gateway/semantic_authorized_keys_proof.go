@@ -361,32 +361,8 @@ func trustedOrdinaryPathReassignment(name, home, cwd string, strict bool) bool {
 		}
 		name = filepath.Join(cwd, name)
 	}
-	resolved, ok := hookpaths.ResolveWriteTarget(name)
-	if !ok {
-		return false
-	}
-	for _, protected := range hookpaths.ProtectedAuthorizedKeysPaths(home) {
-		if canonicalSemanticPath(resolved) == canonicalSemanticPath(protected) {
-			return false
-		}
-	}
-	entry, entryErr := hookpaths.PathStat(resolved)
-	if entryErr != nil && !os.IsNotExist(entryErr) {
-		return !strict && hookpaths.ShareUnanswered(entryErr)
-	}
-	for _, protected := range hookpaths.ProtectedAuthorizedKeysPaths(home) {
-		guarded, err := hookpaths.PathStat(protected)
-		if err != nil && !os.IsNotExist(err) {
-			if strict || !hookpaths.ShareUnanswered(err) {
-				return false
-			}
-			continue
-		}
-		if entryErr == nil && err == nil && os.SameFile(entry, guarded) {
-			return false
-		}
-	}
-	return true
+	grade := hookpaths.ProtectedReach(name, home, hookpaths.NewTargetMemo())
+	return grade == hookpaths.GradeNone || grade == hookpaths.GradePossible && !strict
 }
 
 // A static shell redirect writes its target independently of the program's
@@ -1148,6 +1124,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// the command is known, before the first writeTarget call.
 	var links hookpaths.Links
 	var safeRedirects []hookpaths.RedirectOccurrence
+	// Read a static write on a share before the broad command-word scan
+	// spends the share's first-contact window on a non-write word.
+	var preReach map[string]hookpaths.Grade
 	// A plain mv onto an existing link to a file replaces the link entry
 	// and writes neither file (GAP-2559); a gateway that reads the file
 	// system judges that destination by its entry. Behind ProtectHome the
@@ -1249,6 +1228,14 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if isProtected(clientTargets[target]) {
 			return true
 		}
+		localReach := hookpaths.GradeNone
+		if !cannotResolveLocally {
+			var warmed bool
+			localReach, warmed = preReach[target]
+			if !warmed {
+				localReach = hookpaths.ProtectedReach(target, facts.ActiveHome, request.targetMemo)
+			}
+		}
 		if linked, ok := links.Target(target); ok && isProtected(linked) {
 			return true
 		}
@@ -1318,7 +1305,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				}
 			}
 		}
-		if request.SkipLocalFilesystemResolution {
+		if cannotResolveLocally {
 			return false
 		}
 		// A name that a link earlier in the command makes an alias of a
@@ -1340,53 +1327,14 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				return true
 			}
 		}
-		if hookpaths.SharePath(target) {
-			if trustedShareKnownProtectedTarget(target, protectedPaths, isProtected) {
-				return true
-			}
+		switch localReach {
+		case hookpaths.GradeNamed:
+			return true
+		case hookpaths.GradePossible:
 			return possible(target)
-		}
-		info, err := hookpaths.PathLstat(target)
-		if err != nil && !os.IsNotExist(err) {
+		default:
 			return false
 		}
-		if err == nil {
-			// A reachable link and a hard link both name the protected file
-			// by identity.
-			identity, identityErr := info, error(nil)
-			if info.Mode()&os.ModeSymlink != 0 {
-				identity, identityErr = hookpaths.PathStat(target)
-			}
-			if identityErr == nil && identity.Mode().IsRegular() {
-				for _, path := range protectedPaths {
-					if file, err := hookpaths.PathStat(path); err == nil && os.SameFile(identity, file) {
-						return true
-					}
-				}
-			}
-			if info.Mode()&os.ModeSymlink == 0 {
-				return false
-			}
-		}
-		// A known link entry names a protected file even if the final file
-		// does not exist yet.
-		if err == nil && info.Mode()&os.ModeSymlink != 0 {
-			if link, readErr := hookpaths.PathReadlink(target); readErr == nil {
-				if filepath.IsAbs(link) && isProtected(link) {
-					return true
-				}
-				if !filepath.IsAbs(link) {
-					parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(target))
-					if ok && isProtected(filepath.Join(parent, link)) {
-						return true
-					}
-				}
-			}
-		}
-		// Resolve as the hook client does, so a link to a missing final
-		// file that the redirect would create is covered as well.
-		resolved, ok := hookpaths.ResolveWriteTarget(target)
-		return isProtected(resolved) || !ok && (err == nil && info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 || possible(target))
 	}
 	// Partial command projections can omit a redirect PathFact. The shell AST
 	// still gives an exact write operand, which the user's hook resolved.
@@ -1401,6 +1349,20 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		if json.Unmarshal(input.Args, &args) == nil {
 			input.Command = args.Cmd
+		}
+	}
+	if !cannotResolveLocally && input.Command != "" {
+		if writes, parsed, _ := hookpaths.ShellWriteOperands(input.Command, input.CWD, facts.ActiveHome); parsed {
+			for _, target := range writes {
+				if hookpaths.SharePath(target) {
+					if preReach == nil {
+						preReach = make(map[string]hookpaths.Grade)
+					}
+					if _, read := preReach[target]; !read {
+						preReach[target] = hookpaths.ProtectedReach(target, facts.ActiveHome, request.targetMemo)
+					}
+				}
+			}
 		}
 	}
 	if !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
@@ -1708,53 +1670,6 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	for _, target := range patchTargets {
 		if writeTarget(target, false, false) {
 			return true
-		}
-	}
-	return false
-}
-
-// trustedShareKnownProtectedTarget checks reachable file and parent identity
-// while the share probe is pending. Each independent read can use the same
-// bounded answer window; a stalled file read does not hide a reachable parent.
-func trustedShareKnownProtectedTarget(target string, protectedPaths []string, isProtected func(string) bool) bool {
-	type answer struct {
-		info os.FileInfo
-		err  error
-	}
-	fileAnswer := make(chan answer, 1)
-	parentAnswer := make(chan answer, 1)
-	entryAnswer := make(chan answer, 1)
-	parent := filepath.Dir(target)
-	go func() {
-		info, err := hookpaths.PathStat(target)
-		fileAnswer <- answer{info, err}
-	}()
-	go func() {
-		info, err := hookpaths.PathStat(parent)
-		parentAnswer <- answer{info, err}
-	}()
-	go func() {
-		info, err := hookpaths.PathLstat(target)
-		entryAnswer <- answer{info, err}
-	}()
-	file, directory, entry := <-fileAnswer, <-parentAnswer, <-entryAnswer
-	for _, path := range protectedPaths {
-		if file.err == nil {
-			if protectedFile, err := hookpaths.PathStat(path); err == nil && os.SameFile(file.info, protectedFile) {
-				return true
-			}
-		}
-		if directory.err == nil && filepath.Base(target) == filepath.Base(path) {
-			if protectedDir, err := hookpaths.PathStat(filepath.Dir(path)); err == nil && os.SameFile(directory.info, protectedDir) {
-				return true
-			}
-		}
-	}
-	if entry.err == nil && entry.info.Mode()&os.ModeSymlink != 0 {
-		if link, err := hookpaths.PathReadlink(target); err == nil {
-			if filepath.IsAbs(link) && isProtected(link) || !filepath.IsAbs(link) && isProtected(filepath.Join(parent, link)) {
-				return true
-			}
 		}
 	}
 	return false

@@ -114,12 +114,8 @@ func TestGAP0482ReviewSlowHomeLocalPythonReassignment(t *testing.T) {
 	if got := r106PerUserVerdict(t, "claudecode", payload, ""); got != "allow" {
 		t.Fatalf("local Python reassignment = %s, want allow", got)
 	}
-	wantStrict := "allow"
-	if os.Getenv("R482_OVERLAY") == "1" {
-		wantStrict = "block"
-	}
-	if got := gap0482ProfileVerdict(t, payload, "strict"); got != wantStrict {
-		t.Fatalf("strict local Python reassignment = %s, want %s", got, wantStrict)
+	if got := gap0482ProfileVerdict(t, payload, "strict"); got != "allow" {
+		t.Fatalf("strict local Python reassignment = %s, want allow", got)
 	}
 }
 
@@ -441,5 +437,54 @@ func TestGAP0482NestedSlowShareBudget(t *testing.T) {
 	}
 	if elapsed >= time.Second {
 		t.Errorf("ordinary nested share answer exceeded one second: %v", elapsed)
+	}
+}
+
+// Every reachable identity gives the same verdict while the root probe is
+// pending. The delay is on the identity read, not on the command parser.
+func TestGAP0482PendingShareIdentityDelayInvariant(t *testing.T) {
+	if os.Getenv("R482_OVERLAY") != "1" {
+		t.Skip("requires the slow-share overlay")
+	}
+	for _, delay := range []int{0, 40, 80, 120, 300, 700} {
+		for _, kind := range []string{"symlink", "hardlink"} {
+			t.Run(kind+"-"+strconv.Itoa(delay)+"ms", func(t *testing.T) {
+				root := t.TempDir()
+				home, project := filepath.Join(root, "home"), filepath.Join(root, "project")
+				for _, dir := range []string{filepath.Join(home, ".ssh"), project} {
+					if err := os.MkdirAll(dir, 0700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				keys := filepath.Join(home, ".ssh", "authorized_keys")
+				if err := os.WriteFile(keys, []byte("fixture\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				alias := filepath.Join(project, "ordinary.txt")
+				var err error
+				if kind == "symlink" {
+					err = os.Symlink(keys, alias)
+				} else {
+					err = os.Link(keys, alias)
+				}
+				if err != nil {
+					t.Skipf("link unavailable: %v", err)
+				}
+				t.Setenv("R482_FAKE_SHARE", project)
+				t.Setenv("R482_FAKE_SHARE_DELAY_MS", strconv.Itoa(delay))
+				t.Setenv("HOME", home)
+				t.Setenv("USERPROFILE", home)
+				payload := mustJSON(t, map[string]any{
+					"session_id": "gap0482-delay", "hook_event_name": "PreToolUse",
+					"tool_name": "Bash", "tool_use_id": "toolu_gap0482_delay", "cwd": project,
+					"permission_mode": "default", "tool_input": map[string]any{"command": "echo marker >> ordinary.txt"},
+				})
+				for _, profile := range []string{"default", "strict"} {
+					if got := gap0482ProfileVerdict(t, payload, profile); got != "block" {
+						t.Errorf("%s %s at %d ms = %s, want block", profile, kind, delay, got)
+					}
+				}
+			})
+		}
 	}
 }
