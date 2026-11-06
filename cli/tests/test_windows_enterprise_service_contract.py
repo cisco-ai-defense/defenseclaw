@@ -1980,6 +1980,24 @@ def test_bootstrap_smoke_expects_the_installers_certification_action_message() -
     assert "Upgrade, or Repair'" not in smoke
 
 
+def test_bootstrap_smoke_throwaway_route_trusts_only_its_own_result() -> None:
+    smoke = read(BOOTSTRAP_SMOKE)
+    # The staging folder breaks ProgramData inheritance, and the parent takes
+    # only a result the throwaway user owns that carries this run's nonce.
+    assert "$security.SetAccessRuleProtection($true, $false)" in smoke
+    assert "$resultOwner -cne $smokeUser.Sid" in smoke
+    assert "-BasicUserResultNonce '$resultNonce'" in smoke
+    assert "-BasicUserResultNonce '$Nonce'" in smoke
+    assert "$parts[0] -cne $Nonce" in smoke
+    # Only the two launcher shapes GAP-0661 names fall back.
+    assert "$ErrorCode -eq 1346" in smoke
+    # Windows PowerShell 5.1 sends Write-Warning to redirected stdout, which
+    # would break the JSON report; the password must not be a cmdlet parameter.
+    assert "Write-Warning (" not in smoke
+    assert "Register-ScheduledTask -TaskName" not in smoke
+    assert "'^dcsmoke[0-9a-f]{8}$'" in smoke
+
+
 def test_bootstrap_cleanup_drains_compiler_scratch_finalizers_first() -> None:
     """Windows PowerShell 5.1 Add-Type retires its CodeDom scratch folder only
     from a finalizer; a finalizer that ran in the middle of the exact cleanup
