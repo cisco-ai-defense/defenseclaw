@@ -279,8 +279,14 @@ class TestSetupCodexAlias(unittest.TestCase):
             )
             return {}, {"codex": "selection receipt is invalid or expired"}
 
+        # Reach the selection failure with the shared Windows launcher present.
+        atomic_write_private_bytes(os.path.join(self.tmp_dir, "defenseclaw-hook.exe"), b"installed fixture")
         with (
             patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+            patch(
+                "defenseclaw.gateway.canonical_install_path",
+                return_value=os.path.join(self.tmp_dir, "defenseclaw-gateway.exe"),
+            ),
             patch(
                 "defenseclaw.commands.cmd_setup._capture_setup_applied_runtime",
                 return_value=cmd_setup._SetupAppliedRuntimeEvidence("stopped", "", ()),
