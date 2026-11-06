@@ -325,6 +325,10 @@ func TestStandaloneFileLeafDriftOwnerEntryAndBoth(t *testing.T) {
 	}
 }
 
+// unsupportedObjectEntryDACL grants BUILTIN\Users full control through a
+// well-formed allow object entry, which the trust walk cannot read.
+const unsupportedObjectEntryDACL = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(OA;;FA;00000000-0000-0000-0000-000000000001;;BU)"
+
 // GAP-0590 review S1: a null DACL, or an allow entry of a type the walk
 // cannot read, on the file itself is leaf drift too, so Setup rewrites
 // config.yaml and targets.yaml from the approved source. Before, only an
@@ -364,15 +368,15 @@ func TestStandaloneFileLeafDriftNullDACLAndUnsupportedEntry(t *testing.T) {
 				windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, nil, nil)
 		},
 		"unsupported entry": func(path string) error {
-			// (A;;FA;;;BU) with its type byte rewritten to an allow object entry.
-			dacl := testDACL(t, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;BU)")
-			var ace *windows.ACCESS_ALLOWED_ACE
-			if err := windows.GetAce(dacl, 2, &ace); err != nil {
-				return err
-			}
-			ace.Header.AceType = 0x5
+			// A well-formed allow object entry (type 0x5) for BUILTIN\Users,
+			// built from SDDL. Never patch the type byte of a plain entry in a
+			// descriptor Windows is given: the object layout then runs past
+			// the entry and the ACL, and SetNamedSecurityInfo corrupted the
+			// test process heap (0xC0000374, g582 review 6 M3). The Go-only
+			// classifier rows above keep the patched form.
 			return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
-				windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+				windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil,
+				testDACL(t, unsupportedObjectEntryDACL), nil)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
