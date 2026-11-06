@@ -198,7 +198,7 @@ def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
     if not os.path.isabs(path):
         path = os.path.join(os.getcwd(), path)
     parts = Path(path).parts
-    current = parts[0]
+    current = _path_anchor(path)
     if private(current):
         return True
     pending = list(parts[1:])
@@ -226,7 +226,7 @@ def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
             next_target = os.readlink(current)
             target_parts = Path(next_target).parts
             if os.path.isabs(next_target):
-                current = target_parts[0]
+                current = _path_anchor(next_target)
                 if private(current):
                     return True
                 pending = list(target_parts[1:]) + pending
@@ -240,30 +240,74 @@ def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
 
 
 def _names_private_state(path: str) -> bool:
-    """Check every name in a path, including the server and share of a UNC anchor.
+    """Check every name that selects a location, UNC server and share included."""
 
-    Windows ignores trailing dots and spaces in a name, so they do not change
-    which location a Windows name refers to.
-    """
-
-    pure = Path(path)
-    windows = isinstance(pure, PureWindowsPath)
-    names = [name for name in re.split(r"[\\/]+", pure.drive) if name]
-    names += pure.parts[1:] if pure.anchor else pure.parts
-    for name in names:
-        key = name.casefold()
-        if (key.rstrip(". ") if windows else key) in _PRIVATE_INSTALL_COMPONENTS:
-            return True
-    return False
+    return any(
+        name.casefold() in _PRIVATE_INSTALL_COMPONENTS for name in _location_names(path)
+    )
 
 
 def _path_within(root: str, path: str) -> bool:
     """Containment for resolved absolute paths; another drive or share is outside.
 
-    Whole components are compared, so a share root names the same location
-    with or without its trailing separator.
+    Whole names are compared as the filesystem sees them, so a share root names
+    the same location with or without its trailing separator, and a device or
+    extended-length spelling names the same location as the ordinary one.
     """
 
-    root_parts = Path(os.path.normcase(root)).parts
-    path_parts = Path(os.path.normcase(path)).parts
-    return bool(root_parts) and path_parts[:len(root_parts)] == root_parts
+    windows = isinstance(Path(root), PureWindowsPath)
+
+    def key(value: str) -> tuple[str, ...]:
+        names = _location_names(value)
+        return tuple(name.casefold() for name in names) if windows else names
+
+    root_names, path_names = key(root), key(path)
+    return bool(root_names) and path_names[:len(root_names)] == root_names
+
+
+# Windows passes a path that starts exactly with one of these to the filesystem
+# without normalizing its names.
+_WINDOWS_VERBATIM_PREFIXES = ("\\\\?\\", "\\??\\")
+_WINDOWS_DEVICE_PREFIX = re.compile(r"^(?:[\\/]{2}[.?][\\/]|\\\?\?\\)(?:UNC[\\/])?", re.I)
+
+
+def _path_anchor(path: str) -> str:
+    """The first part of a path, in the namespace the path spells.
+
+    The parsed anchor of a device path written with forward slashes is spelled
+    with backslashes, which would read as extended-length; Windows normalizes
+    such a path, so its anchor stays a device path.
+    """
+
+    anchor = Path(path).parts[0]
+    if anchor.startswith(_WINDOWS_VERBATIM_PREFIXES) and not path.startswith(
+        _WINDOWS_VERBATIM_PREFIXES,
+    ):
+        return "\\\\.\\" + anchor[4:]
+    return anchor
+
+
+def _location_names(path: str) -> tuple[str, ...]:
+    """The names that select a location: anchor names first, then each name.
+
+    A UNC server and share are names too. A device or extended-length prefix
+    only selects the namespace, so it is not a name. Windows normalizes an
+    ordinary path, which drops the trailing dots and spaces of a name, but uses
+    the names of an extended-length path as written.
+    """
+
+    text = str(path)
+    pure = Path(text)
+    if not isinstance(pure, PureWindowsPath):
+        return pure.parts
+    verbatim = text.startswith(_WINDOWS_VERBATIM_PREFIXES)
+    prefix = _WINDOWS_DEVICE_PREFIX.match(text)
+    if prefix:
+        unc = prefix.group(0)[4:].casefold().startswith("unc")
+        pure = PureWindowsPath(("\\\\" if unc else "") + text[prefix.end():])
+    names = [name for name in re.split(r"[\\/]+", pure.drive) if name]
+    names += [pure.root] if pure.root else []
+    names += pure.parts[1:] if pure.anchor else pure.parts
+    if not verbatim:
+        names = [name.rstrip(". ") or name for name in names]
+    return tuple(names)
