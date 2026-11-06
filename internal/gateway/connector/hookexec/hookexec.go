@@ -341,6 +341,9 @@ type Options struct {
 	// for this call found it held. The answer rendered from it with no home
 	// (the watchdog's prepared answer) still names the install (GAP-2440).
 	installWindowSeen bool
+	// lateOrdinaryOpen is set once lateOrdinaryLook proved this per-user
+	// call ordinary under an open outage tier (noAnswerFailMode).
+	lateOrdinaryOpen bool
 	// managedOutageOpen is set on a standalone hook outside Secure Client
 	// for a failure that ManagedOutageFailsOpen lets through (the gateway is
 	// not running, was still restarting, or gave no answer). Only such a
