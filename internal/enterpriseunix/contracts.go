@@ -466,10 +466,23 @@ func (l *lifecycle) describeUnprotectedAgents() {
 		l.reportInstallScanPending(enterprisehooks.UnprotectedAgentsRecordFromEarlierInstall(written))
 	} else {
 		// The build and age can match after a connector or policy change.
-		// Only a scan stamped with the lifecycle's current config generation
-		// establishes coverage for those inputs (GAP-0640).
-		if current, err := configwrite.ReadGenerationState(env.P(env.Layout.ConfigPath)); err == nil &&
-			current.Generation != 0 && enterprisehooks.UnprotectedAgentsRecordConfigGeneration(data) != current.Generation {
+		// A readable lifecycle generation and a matching scan stamp are both
+		// required to establish coverage for those inputs (GAP-0640).
+		current, err := configwrite.ReadGenerationState(env.P(env.Layout.ConfigPath))
+		if err != nil || current.Generation == 0 {
+			message := "NOT COVERED (scan pending): the enumerator's scan cannot be matched to the installed config generation"
+			if err != nil {
+				message += ": " + err.Error()
+			} else {
+				message += ": generation is zero"
+			}
+			if l.opts.Action == ActionVerify {
+				r.AddError(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
+			} else {
+				r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
+			}
+			r.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+		} else if enterprisehooks.UnprotectedAgentsRecordConfigGeneration(data) != current.Generation {
 			l.reportInstallScanPending("from a different config generation")
 		}
 	}
