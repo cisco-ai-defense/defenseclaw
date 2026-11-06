@@ -1414,7 +1414,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		_ = json.Unmarshal(envelope["cwd"], &cwd)
 		if home, err := os.UserHomeDir(); err == nil {
 			if facts := projectSkillRootFacts(connector, home, cwd); len(facts) > 0 {
-				addProjectSkillSelectedFacts(facts, payload, args, cwd)
+				addProjectSkillSelectedFacts(facts, payload, args, home, cwd)
 				facts[CWDKey] = cwd
 				encoded, err := json.Marshal(facts)
 				if err == nil && len(encoded) <= maxEncodedTargets {
@@ -2620,7 +2620,7 @@ func Decode(value string) (map[string]string, bool) {
 		}
 		if strings.HasPrefix(key, ProjectSkillSelectedPrefix) {
 			dir := strings.TrimPrefix(key, ProjectSkillSelectedPrefix)
-			if !filepath.IsAbs(dir) || len(dir) > MaxWriteTargetPathBytes || projectSkillName(finding) == "" || finding != projectSkillName(finding) {
+			if !filepath.IsAbs(dir) || len(dir) > MaxWriteTargetPathBytes || !projectSkillFactName(finding) {
 				return nil, false
 			}
 			continue
