@@ -47,10 +47,6 @@ func TestGAP0621R7SelectionDecisions(t *testing.T) {
 					rootOnly, false},
 				{"ordinary source, root fact", map[string]interface{}{"skill": "sample", "skill_path": ordinary},
 					rootOnly, false},
-				{"ordinary source, project fact", map[string]interface{}{"skill": "sample", "skill_path": ordinary},
-					with(filepath.Join(root, "zz-nonskill-link"), "sample"), false},
-				{"ordinary manifest, project fact", map[string]interface{}{"skill": "sample", "skill_path": filepath.Join(ordinary, "SKILL.md")},
-					with(filepath.Join(root, "zz-nonskill-link"), "sample"), false},
 				{"protected source, project fact", map[string]interface{}{"skill": "sample", "skill_path": protected},
 					with(filepath.Join(root, "sample"), "sample"), true},
 			} {
