@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -108,7 +109,7 @@ func noDereferenceTouchOperands(command, cwd, home string, expandPatterns bool) 
 			if actionWordHasBraceText(assign.Value) {
 				return nil, false
 			}
-			fields, err := expand.Fields(&expand.Config{Env: expand.ListEnviron("HOME=" + home)}, assign.Value)
+			fields, err := shellparse.Fields(&expand.Config{Env: expand.ListEnviron("HOME=" + home)}, assign.Value)
 			if err != nil || len(fields) != 1 {
 				return nil, false
 			}
@@ -158,7 +159,7 @@ func noDereferenceTouchOperands(command, cwd, home string, expandPatterns bool) 
 			}
 			value, known := actionWordValueWithGlob(word, values, cwd, home, true)
 			if noDereferenceTouchLiteralWord(word) && !actionWordHasUnquotedGlob(word, command) && strings.Contains(value, "\\") {
-				expanded, err := expand.Fields(&expand.Config{Env: expand.ListEnviron("HOME=" + home)}, word)
+				expanded, err := shellparse.Fields(&expand.Config{Env: expand.ListEnviron("HOME=" + home)}, word)
 				if err != nil || len(expanded) != 1 {
 					return nil, false
 				}
@@ -251,7 +252,7 @@ func noDereferenceTouchPattern(word *syntax.Word, home string) (string, bool) {
 				return "", false
 			}
 		case *syntax.DblQuoted:
-			fields, err := expand.Fields(&expand.Config{Env: expand.ListEnviron("HOME=" + home)},
+			fields, err := shellparse.Fields(&expand.Config{Env: expand.ListEnviron("HOME=" + home)},
 				&syntax.Word{Parts: []syntax.WordPart{part}})
 			if err != nil || len(fields) != 1 || !quoted(fields[0]) {
 				return "", false
