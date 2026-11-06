@@ -725,19 +725,43 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 // exception. Malformed JSON is never retried as KEY=value lines.
 func readHookSidecar(path string) map[string]string {
 	out := map[string]string{}
-	// A link, another file type or a file past the writers' bound
-	// (gwconnector.HookSidecarMaxBytes) supplies no address.
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > gwconnector.HookSidecarMaxBytes {
-		return out
-	}
-	// Share deletion and retry a transient open error without holding a
-	// replacement in place (GAP-0655).
 	var data []byte
-	err = safefile.RetryTransientRead(func() error {
-		var err error
-		data, err = winpath.ReadFileShared(path)
-		return err
+	err := safefile.RetryTransientRead(func() error {
+		// A link, another file type or a file past the writers' bound
+		// (gwconnector.HookSidecarMaxBytes) supplies no address.
+		info, err := pathidentity.LstatPinned(path)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || info.Size() > gwconnector.HookSidecarMaxBytes {
+			data = nil
+			return nil
+		}
+		file, err := winpath.OpenReadShared(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		opened, err := file.Stat()
+		if err != nil {
+			return err
+		}
+		if !os.SameFile(info, opened) {
+			data = nil
+			return nil
+		}
+		data, err = io.ReadAll(io.LimitReader(file, gwconnector.HookSidecarMaxBytes+1))
+		if err != nil {
+			return err
+		}
+		current, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if !current.Mode().IsRegular() || !os.SameFile(opened, current) {
+			data = nil
+		}
+		return nil
 	})
 	if err != nil || len(data) > gwconnector.HookSidecarMaxBytes {
 		return out

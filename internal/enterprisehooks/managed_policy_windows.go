@@ -23,6 +23,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -2078,52 +2079,68 @@ func validateExistingWindowsManagedPolicyDirectory(path string) (bool, error) {
 }
 
 func readTrustedWindowsManagedPolicyFile(path string) ([]byte, bool, error) {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
+	var data []byte
+	var seen bool
+	err := safefile.RetryTransientRead(func() error {
+		var readErr error
+		data, readErr = readTrustedWindowsManagedPolicyFileOnce(path, &seen)
+		return readErr
+	})
+	if errors.Is(err, os.ErrNotExist) && !seen {
 		return nil, false, nil
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("enterprise hooks: inspect Claude Code managed policy %s: %w", path, err)
-	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return nil, false, fmt.Errorf("enterprise hooks: refusing non-regular Claude Code managed policy: %s", path)
-	}
-	if info.Size() > windowsClaudeManagedPolicyLimit {
-		return nil, false, fmt.Errorf("enterprise hooks: Claude Code managed policy is too large: %s", path)
-	}
-	if err := rejectWindowsReparseChain(path); err != nil {
 		return nil, false, err
 	}
-	if err := windowsManagedPolicyFileTrustCheck(path); err != nil {
-		return nil, false, fmt.Errorf("enterprise hooks: untrusted Claude Code managed policy source %s: %w", path, err)
-	}
-	// Share deletion and retry a transient open error without holding a
-	// replacement in place (GAP-0655).
-	var file *os.File
-	err = safefile.RetryTransientRead(func() error {
-		var err error
-		file, err = winpath.OpenReadShared(path)
-		return err
-	})
+	return data, true, nil
+}
+
+// Each retry rechecks the pathname, protection, and opened file together.
+func readTrustedWindowsManagedPolicyFileOnce(path string, seen *bool) ([]byte, error) {
+	info, err := pathidentity.LstatPinned(path)
 	if err != nil {
-		return nil, false, fmt.Errorf("enterprise hooks: open Claude Code managed policy %s: %w", path, err)
+		return nil, fmt.Errorf("enterprise hooks: inspect Claude Code managed policy %s: %w", path, err)
+	}
+	*seen = true
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("enterprise hooks: refusing non-regular Claude Code managed policy: %s", path)
+	}
+	if info.Size() > windowsClaudeManagedPolicyLimit {
+		return nil, fmt.Errorf("enterprise hooks: Claude Code managed policy is too large: %s", path)
+	}
+	if err := rejectWindowsReparseChain(path); err != nil {
+		return nil, err
+	}
+	if err := windowsManagedPolicyFileTrustCheck(path); err != nil {
+		return nil, fmt.Errorf("enterprise hooks: untrusted Claude Code managed policy source %s: %w", path, err)
+	}
+	file, err := winpath.OpenReadShared(path)
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: open Claude Code managed policy %s: %w", path, err)
 	}
 	defer file.Close()
 	openedInfo, err := file.Stat()
 	if err != nil {
-		return nil, false, fmt.Errorf("enterprise hooks: inspect opened Claude Code managed policy %s: %w", path, err)
+		return nil, fmt.Errorf("enterprise hooks: inspect opened Claude Code managed policy %s: %w", path, err)
 	}
-	if !openedInfo.Mode().IsRegular() || openedInfo.Size() > windowsClaudeManagedPolicyLimit {
-		return nil, false, fmt.Errorf("enterprise hooks: Claude Code managed policy changed type or exceeds the size limit: %s", path)
+	if !openedInfo.Mode().IsRegular() || openedInfo.Size() > windowsClaudeManagedPolicyLimit || !os.SameFile(info, openedInfo) {
+		return nil, fmt.Errorf("enterprise hooks: Claude Code managed policy changed identity, type, or size: %s", path)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, windowsClaudeManagedPolicyLimit+1))
 	if err != nil {
-		return nil, false, fmt.Errorf("enterprise hooks: read Claude Code managed policy %s: %w", path, err)
+		return nil, fmt.Errorf("enterprise hooks: read Claude Code managed policy %s: %w", path, err)
 	}
 	if len(data) > windowsClaudeManagedPolicyLimit {
-		return nil, false, fmt.Errorf("enterprise hooks: Claude Code managed policy is too large: %s", path)
+		return nil, fmt.Errorf("enterprise hooks: Claude Code managed policy is too large: %s", path)
 	}
-	return data, true, nil
+	current, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: re-inspect Claude Code managed policy %s: %w", path, err)
+	}
+	if !current.Mode().IsRegular() || !os.SameFile(openedInfo, current) {
+		return nil, fmt.Errorf("enterprise hooks: Claude Code managed policy changed identity during read: %s", path)
+	}
+	return data, nil
 }
 
 func ensureWindowsManagedPolicyDirectory(path string) error {
@@ -2467,27 +2484,12 @@ func writeWindowsManagedFile(path string, data []byte, userReadable bool) error 
 	if err := rejectWindowsReparseChain(path); err != nil {
 		return err
 	}
-	if info, err := os.Lstat(path); err == nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("enterprise hooks: refusing non-regular managed policy file: %s", path)
-		}
-		if err := windowsManagedPolicyFileTrustCheck(path); err != nil {
-			return err
-		}
-		var current []byte
-		readErr := safefile.RetryTransientRead(func() error {
-			var err error
-			current, err = winpath.ReadFileShared(path)
-			return err
-		})
-		if readErr != nil {
-			return fmt.Errorf("enterprise hooks: read existing managed policy %s: %w", path, readErr)
-		}
-		if bytes.Equal(current, data) {
-			return windowsManagedPolicyFileTrustCheck(path)
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	matched, err := windowsManagedFileMatchesExisting(path, data)
+	if err != nil {
 		return err
+	}
+	if matched {
+		return nil
 	}
 	temp, err := os.CreateTemp(filepath.Dir(path), ".defenseclaw-policy-*.tmp")
 	if err != nil {
@@ -2519,6 +2521,39 @@ func writeWindowsManagedFile(path string, data []byte, userReadable bool) error 
 		return err
 	}
 	return windowsManagedPolicyFileTrustCheck(path)
+}
+
+func windowsManagedFileMatchesExisting(path string, data []byte) (bool, error) {
+	var seen, matched bool
+	err := safefile.RetryTransientRead(func() error {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		seen = true
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("enterprise hooks: refusing non-regular managed policy file: %s", path)
+		}
+		if err := windowsManagedPolicyFileTrustCheck(path); err != nil {
+			return err
+		}
+		current, err := winpath.ReadFileShared(path)
+		if err != nil {
+			return fmt.Errorf("enterprise hooks: read existing managed policy %s: %w", path, err)
+		}
+		if !bytes.Equal(current, data) {
+			return nil
+		}
+		if err := windowsManagedPolicyFileTrustCheck(path); err != nil {
+			return err
+		}
+		matched = true
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) && !seen {
+		return false, nil
+	}
+	return matched, err
 }
 
 func setWindowsManagedPolicyProtection(path string, directory, userReadable bool) error {

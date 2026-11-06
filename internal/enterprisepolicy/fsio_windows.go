@@ -26,6 +26,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -287,25 +288,29 @@ func openCodePluginLoadable(_ Options, path string) (bool, error) {
 }
 
 func openNoFollow(path string) (*os.File, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeIrregular != 0 {
-		return nil, fmt.Errorf("%s is a reparse point", path)
-	}
-	return openReadSharedSettled(path)
-}
-
-// openReadSharedSettled opens path for reading sharing deletion, so a
-// replacement can proceed while it is open, and retries for a moment
-// while another process holds or swaps it (GAP-0655).
-func openReadSharedSettled(path string) (*os.File, error) {
 	var file *os.File
 	err := safefile.RetryTransientRead(func() error {
-		var err error
+		info, err := pathidentity.LstatPinned(path)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeIrregular != 0 {
+			return fmt.Errorf("%s is a reparse point", path)
+		}
 		file, err = winpath.OpenReadShared(path)
-		return err
+		if err != nil {
+			return err
+		}
+		opened, err := file.Stat()
+		if err != nil || !os.SameFile(info, opened) {
+			_ = file.Close()
+			file = nil
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("%s changed identity before open", path)
+		}
+		return nil
 	})
 	return file, err
 }
