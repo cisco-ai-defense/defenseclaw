@@ -399,11 +399,13 @@ func testGAP0523ThirteenAccountWatchRepairsDuringSlowPass(t *testing.T, interval
 	previousReconcile, previousPlatformWatch := enterpriseHookWatchReconcileOnce, enterpriseHookWatchPlatformWatch
 	previousBefore, previousAfter := enterpriseHookBeforeWatchReconcile, enterpriseHookAfterWatchReconcile
 	previousInterval, previousDebounce := enterpriseHookWatchInterval, enterpriseHookWatchDebounce
+	previousTicker := enterpriseHookWatchIntervalTicker
 	previousRetryMin, previousRetryMax := enterpriseHookWatchRepairRetryMin, enterpriseHookWatchRepairRetryMax
 	t.Cleanup(func() {
 		enterpriseHookWatchReconcileOnce, enterpriseHookWatchPlatformWatch = previousReconcile, previousPlatformWatch
 		enterpriseHookBeforeWatchReconcile, enterpriseHookAfterWatchReconcile = previousBefore, previousAfter
 		enterpriseHookWatchInterval, enterpriseHookWatchDebounce = previousInterval, previousDebounce
+		enterpriseHookWatchIntervalTicker = previousTicker
 		enterpriseHookWatchRepairRetryMin, enterpriseHookWatchRepairRetryMax = previousRetryMin, previousRetryMax
 	})
 	enterpriseHookWatchPlatformWatch = func(context.Context, io.Writer) {}
@@ -412,8 +414,11 @@ func testGAP0523ThirteenAccountWatchRepairsDuringSlowPass(t *testing.T, interval
 	enterpriseHookWatchDebounce = 50 * time.Millisecond
 	enterpriseHookWatchRepairRetryMin = 100 * time.Millisecond
 	enterpriseHookWatchRepairRetryMax = time.Second
+	intervalTicks := make(chan time.Time, 1)
 	if interval {
-		enterpriseHookWatchInterval = 100 * time.Millisecond
+		enterpriseHookWatchIntervalTicker = func(time.Duration) (<-chan time.Time, func()) {
+			return intervalTicks, func() {}
+		}
 		enterpriseHookWatchRepairRetryMin = time.Minute
 		enterpriseHookWatchRepairRetryMax = time.Minute
 	}
@@ -428,6 +433,9 @@ func testGAP0523ThirteenAccountWatchRepairsDuringSlowPass(t *testing.T, interval
 	}
 	enterpriseHookAfterWatchReconcile = func(ctx context.Context, w io.Writer, run enterpriseHookReconcileRun) {
 		previousAfter(ctx, w, run)
+		if interval && phase.Load() == 1 {
+			intervalTicks <- time.Now()
+		}
 		if phase.Load() == 2 {
 			canceledRetryPublished.Store(true)
 		}

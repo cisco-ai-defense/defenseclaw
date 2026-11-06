@@ -3381,6 +3381,13 @@ var enterpriseHookWatchPlatformWatch = enterpriseHookStandalonePlatformWatch
 // Tests can select the standalone scheduling path without privileged setup.
 var enterpriseHookWatchTargetScoped = func() bool { return cfg != nil && cfg.StandaloneEnterprise() }
 
+// Replaceable by watch-loop tests that advance the interval only after the
+// preceding pass is ready, without depending on a short wall-clock tick.
+var enterpriseHookWatchIntervalTicker = func(interval time.Duration) (<-chan time.Time, func()) {
+	ticker := time.NewTicker(interval)
+	return ticker.C, ticker.Stop
+}
+
 func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	if cfg == nil {
 		return fmt.Errorf("enterprise hooks watch: config is not loaded")
@@ -3702,8 +3709,8 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	hostChecks := newEnterpriseHookHostChecks(cfg)
 	hostChecks.Run()
 
-	ticker := time.NewTicker(enterpriseHookWatchInterval)
-	defer ticker.Stop()
+	intervalTicks, stopIntervalTicker := enterpriseHookWatchIntervalTicker(enterpriseHookWatchInterval)
+	defer stopIntervalTicker()
 	debounce := time.NewTimer(time.Hour)
 	if !debounce.Stop() {
 		<-debounce.C
@@ -4106,7 +4113,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			if debounceReason == "" {
 				debounceReason = "account database change"
 			}
-		case <-ticker.C:
+		case <-intervalTicks:
 			if enterpriseHookStandaloneConfigChanged(standaloneConfigFingerprint, cmd.ErrOrStderr()) {
 				return nil
 			}
