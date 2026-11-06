@@ -39,8 +39,8 @@ func TestGAP0407StalledMarkerOpenKeepsWatchdogBound(t *testing.T) {
 	w := startAnswerWatchdog(&opts, specs["claudecode"], "closed", deadline, deadline)
 	logged := make(chan struct{})
 	w.mu.Lock()
-	logFailure := w.logFailure
-	w.logFailure = func() {
+	logFailure := w.fallback.logFailure
+	w.fallback.logFailure = func() {
 		defer close(logged)
 		logFailure()
 	}
