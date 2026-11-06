@@ -1176,6 +1176,10 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	ordinarySpelling := func(target string) bool {
 		return runtime.GOOS != "windows" || windowsLocationOrdinaryWriteTarget(target)
 	}
+	scopeCommand := request.Input.Command
+	if scopeCommand == "" {
+		scopeCommand, _ = trustedBashCommandInput(request.Input)
+	}
 	possible := func(target string) bool {
 		if cannotResolveLocally && (truncated || len(clientTargets) == 0) {
 			// Missing, rejected, or bounded user-side evidence cannot
@@ -1292,11 +1296,15 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return named()
 		}
 		if !safeRedirect && links.OpaqueTargetWithFacts(target, ownCopy, opaqueFacts) {
-			// An archive or copy scope without named reach leaves a possible
-			// write. Named link and client evidence was checked above.
+			// A copy's own destination and a plain entry rename may be
+			// possible after an opaque scope. Other writes into that scope
+			// retain the protective block until their reach is known.
 			info, err := hookpaths.PathLstat(target)
 			if err != nil || info.Mode()&os.ModeCharDevice == 0 {
-				return possible(target)
+				if ownCopy || links.PossibleSameDirectoryMove(target, scopeCommand, clientCWD, facts.ActiveHome) {
+					return possible(target)
+				}
+				return true
 			}
 		}
 		// On a static reading of a call with a runtime-expanded operand

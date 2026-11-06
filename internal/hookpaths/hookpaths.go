@@ -4114,6 +4114,67 @@ func (l Links) OpaqueTargetWithFacts(path string, ownCopy bool, facts map[string
 	return l.links.opaqueTargetWithFacts(path, "", facts)
 }
 
+// PossibleSameDirectoryMove reports a plain entry rename whose source and
+// destination have the same existing directory parent. An opaque archive or
+// copy may change that entry before the move, so its reach remains possible;
+// the move alone does not name a protected destination through that scope.
+func (l Links) PossibleSameDirectoryMove(path, command, cwd, home string) bool {
+	path = filepath.Clean(path)
+	placements := []string{path}
+	if l.links.cdScopes {
+		if relative, err := filepath.Rel(l.links.cdFrom, path); err == nil &&
+			relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			for _, dir := range l.links.cdDirs {
+				placed := filepath.Join(dir, relative)
+				if !slices.Contains(placements, placed) {
+					placements = append(placements, placed)
+				}
+			}
+		}
+	}
+	writes, _, _ := ShellWriteOperands(command, cwd, home)
+	writes = append(writes, LiteralWriteOperands(command, cwd, home)...)
+	for _, placed := range placements {
+		parent := filepath.Dir(placed)
+		info, err := PathLstat(parent)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		for _, op := range l.links.renameOps {
+			if len(op.sources) != 1 || op.backup || op.optioned || op.targetDir != "" || op.dest == "" ||
+				dotDotComponent(op.dest) || dotDotComponent(op.sources[0]) {
+				continue
+			}
+			if absolutePath(op.dest, op.wd) != placed ||
+				filepath.Dir(absolutePath(op.sources[0], op.wd)) != parent ||
+				!scopedMoveName(filepath.Base(op.sources[0])) || !scopedMoveName(filepath.Base(placed)) ||
+				strings.Count(command, op.dest) != 1 {
+				continue
+			}
+			matches := 0
+			for _, other := range l.links.renameOps {
+				if other.dest != "" && absolutePath(other.dest, other.wd) == placed {
+					matches++
+				}
+			}
+			if matches != 1 {
+				continue
+			}
+			wrote := false
+			for _, write := range writes {
+				if OperandPath(write, cwd) == placed || OperandPath(write, op.wd) == placed {
+					wrote = true
+					break
+				}
+			}
+			if !wrote {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // SplitOpaqueScopeFacts separates the OpaqueScopeFactPrefix entries from the
 // rest of a decoded map. The identity facts (InstructionIdentityKey,
 // FileIdentitiesKey, LoadedIdentityPrefix) are for the cognitive-file proof
