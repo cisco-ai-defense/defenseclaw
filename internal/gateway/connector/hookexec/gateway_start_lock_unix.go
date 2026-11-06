@@ -36,10 +36,16 @@ var perUserStartLockOpen = func(path string) (*os.File, error) {
 // its start lock now. Only a regular file this account owns counts; any
 // other state, or a lock nobody holds, is no start.
 func PerUserGatewayStartInProgress(dataDir string) bool {
+	return perUserGatewayStartInProgressWith(perUserStartLockOpen, dataDir)
+}
+
+// perUserGatewayStartInProgressWith is PerUserGatewayStartInProgress with
+// the lock opened by open.
+func perUserGatewayStartInProgressWith(open func(string) (*os.File, error), dataDir string) bool {
 	if dataDir == "" || !filepath.IsAbs(dataDir) {
 		return false
 	}
-	f, err := perUserStartLockOpen(filepath.Join(dataDir, perUserGatewayStartLockName))
+	f, err := open(filepath.Join(dataDir, perUserGatewayStartLockName))
 	if err != nil {
 		return false
 	}
@@ -86,7 +92,10 @@ func PerUserGatewayRestartProvenDuringCall(dataDir string, peer *PerUserPeerReco
 	ctx, cancel := context.WithTimeout(context.Background(), perUserRestartProofBudget)
 	defer cancel()
 	proven := make(chan bool, 1)
-	go func() { proven <- perUserGatewayRestartProof(ctx, dataDir, peer, startObserved) }()
+	// Read now: a proof past its budget leaves the goroutine running
+	// (GAP-0680).
+	open := perUserStartLockOpen
+	go func() { proven <- perUserGatewayRestartProof(ctx, open, dataDir, peer, startObserved) }()
 	select {
 	case ok := <-proven:
 		return ok && ctx.Err() == nil
@@ -98,8 +107,8 @@ func PerUserGatewayRestartProvenDuringCall(dataDir string, peer *PerUserPeerReco
 // perUserRestartProofBudget bounds PerUserGatewayRestartProven.
 var perUserRestartProofBudget = 300 * time.Millisecond
 
-func perUserGatewayRestartProof(ctx context.Context, dataDir string, peer *PerUserPeerRecord, startObserved bool) bool {
-	if !startObserved && !PerUserGatewayStartInProgress(dataDir) {
+func perUserGatewayRestartProof(ctx context.Context, open func(string) (*os.File, error), dataDir string, peer *PerUserPeerRecord, startObserved bool) bool {
+	if !startObserved && !perUserGatewayStartInProgressWith(open, dataDir) {
 		return false
 	}
 	wait := perUserPeerReadWait

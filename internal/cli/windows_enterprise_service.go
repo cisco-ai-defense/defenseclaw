@@ -540,7 +540,7 @@ func runWindowsEnterpriseLifecycle(
 	if windowsEnterpriseMutationAction(action) {
 		// The run and the installer it starts leave the CPU to the hooks
 		// that must answer each tool call in time (GAP-0155).
-		windowsLifecycleYieldToHooks()
+		windowsEnterpriseLifecycleYield()
 	}
 	if err := resolveWindowsEnterpriseLifecycleProfile(action, opts); err != nil {
 		recordWindowsAnchorsProfileRefusal(cmd, opts, err)
@@ -1635,9 +1635,9 @@ func prepareWindowsEnterprisePowerShellTemp() (string, func() error, error) {
 	return prepareWindowsEnterprisePowerShellTempWithOps(
 		windowsEnterprisePowerShellTempOps{
 			isElevated: func() bool {
-				return windows.GetCurrentProcessToken().IsElevated()
+				return windowsEnterpriseStagingElevated()
 			},
-			userTemp: trustedWindowsEnterpriseUserTempDirectory,
+			userTemp: windowsEnterpriseUserTempDirectory,
 			elevatedTempRoot: func() (string, error) {
 				// ProgramData permits create-only access at its root without
 				// granting unprivileged callers replacement access to this child.
@@ -1847,6 +1847,11 @@ func createProtectedWindowsEnterpriseDirectory(
 	}
 	return "", fmt.Errorf("create protected %s: random path collisions exhausted", label)
 }
+
+// windowsEnterpriseUserTempDirectory is the caller's own temp folder, where
+// an unelevated lifecycle stages its scripts and its PowerShell temp. The
+// package's tests point it into their own temp folder (GAP-0079).
+var windowsEnterpriseUserTempDirectory = trustedWindowsEnterpriseUserTempDirectory
 
 func trustedWindowsEnterpriseUserTempDirectory() (string, error) {
 	// A read-only Status command is intentionally available without elevation.

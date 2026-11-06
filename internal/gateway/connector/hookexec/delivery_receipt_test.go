@@ -419,7 +419,9 @@ func TestManagedHookTakesTheAnswerAfterALateEarlyHint(t *testing.T) {
 func gatewayStartingFor(t *testing.T, starting func() bool) {
 	t.Helper()
 	previous := hookDeliveryGatewayStarting
-	hookDeliveryGatewayStarting = func(context.Context, Options) bool { return starting() }
+	hookDeliveryGatewayStarting = func(Options) func(context.Context) bool {
+		return func(context.Context) bool { return starting() }
+	}
 	t.Cleanup(func() { hookDeliveryGatewayStarting = previous })
 }
 

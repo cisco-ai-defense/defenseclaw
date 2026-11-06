@@ -133,7 +133,7 @@ Options:
 | `--wait` / `--no-wait` | Waits for the first Cowork event. The default is to wait |
 | `--timeout SECONDS` | How long to wait. Default 900, from 10 to 3600 |
 
-What the plugin contains: `.claude-plugin/plugin.json` and `hooks/hooks.json`, nothing else. It has no `bin/` folder, because Cowork refuses a plugin that has one. The hooks call the DefenseClaw hook that the Claude Code connector already installed, with the same matchers and timeouts, for the ten events above. Its version is `1.0.` followed by the build time, and it rises on every run.
+What the plugin contains: `.claude-plugin/plugin.json` and `hooks/hooks.json`; on Windows it also contains a small guard at `hooks/defenseclaw-hook-guard.exe`. It has no `bin/` folder, because Cowork refuses a plugin that has one. The guard stays with the plugin after DefenseClaw is removed. While DefenseClaw is installed, it runs the Claude Code hook that the connector installed. The hooks use the same matchers and timeouts for the ten events above. Its version is `1.0.` followed by the build time, and it rises on every run.
 
 ### Check it
 
@@ -164,14 +164,16 @@ Do not publish this zip to your whole organization from Claude's organization se
 
 In Claude Desktop, open **Customize > Plugins**, then the **...** menu on DefenseClaw, and choose **Remove**. DefenseClaw cannot remove an account plugin.
 
-Remove the plugin before you uninstall DefenseClaw. If the hook script is gone and the plugin is still installed, the plugin's hook blocks Cowork tool calls with "DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run". The message tells you to reinstall DefenseClaw and run `defenseclaw setup cowork`, or to remove the plugin in Claude.
+Remove the plugin before you uninstall DefenseClaw. A plugin built with DefenseClaw 1.0.9 lets Cowork calls continue after a completed per-user `uninstall --all` or `reset`. The printed step is the reminder you can count on: `defenseclaw uninstall` (also with `--dry-run`) and `defenseclaw reset` print "The DefenseClaw Cowork plugin stays in your Claude account. Remove it in Claude: Customize > Plugins." whenever `setup cowork` built a plugin.
+
+The plugin also sends a one-time notice into the chat after an uninstall, but that is best effort. Claude Desktop shows no banner, and the notice goes to the model, which may not repeat it to you. In testing the model relayed it once, and once flagged it as not coming from you. A plugin built with 1.0.8 still blocks calls after the data folder is removed; remove it in Claude or rebuild and upload the 1.0.9 plugin before uninstalling. While DefenseClaw is installed, a missing hook still blocks the call.
 
 How each command treats the plugin:
 
 | Command | What it does about the plugin |
 | --- | --- |
-| `defenseclaw uninstall`, `defenseclaw uninstall --dry-run` | Prints the removal step when `setup cowork` built a plugin from this data folder. The dry run lists it with the plan |
-| `defenseclaw reset` | Deletes the data folder, the hook script and the Cowork state with it. It reads the state first and prints the same removal step when a plugin was built, because the plugin now blocks Cowork tool calls |
+| `defenseclaw uninstall`, `defenseclaw uninstall --dry-run` | Prints the removal step in the plan, in the dry run and in the real run, when `setup cowork` built a plugin from this data folder |
+| `defenseclaw reset` | Deletes the data folder, the hook script and the Cowork state with it. It reads the state first and prints the same removal step when a plugin was built |
 | `defenseclaw setup remove claudecode` | Turns off the Claude Code hooks. It does not touch the plugin in your Claude account. When `setup cowork` built a plugin, it prints that Cowork is no longer protected. Remove the plugin in Claude too |
 
 All three leave the plugin in your Claude account. Only you can remove it.
@@ -285,7 +287,7 @@ The user's identity comes from the operating system, never from Cowork's environ
 | Detection gaps | No built-in rule flags JavaScript that exfiltrates data, such as `fetch(url + document.cookie)` in `javascript_tool`, or a download-and-execute instruction in a scheduled task prompt |
 | Secrets in tool results | A secret in a file Cowork reads, such as a key in a `.env` file, is detected and recorded after the read, not prevented, in action mode too. The model is told the rule, never the value. To prevent the read, block it at `PreToolUse` with a path rule: see [Secrets in tool results](/docs/connectors/claudecode#secrets-in-tool-results) |
 | Gateway outage | The hook follows the Claude Code connector's fail mode. On a managed computer that is closed by default: on managed macOS, with the gateway service stopped, Cowork blocked the prompt with `enterprise_managed_gateway_not_running`. See [Fail modes](/docs/reference/fail-modes) |
-| Notices | Cowork does not show DefenseClaw's hook warnings and notices anywhere in its window: not in the reply, the tool details or a banner (measured with Claude Desktop 4.16336.0 on macOS and Windows). When the gateway is down, Cowork keeps working without a visible warning; a plugin left after an uninstall blocks Cowork tool calls until you remove it. See DefenseClaw's state with `defenseclaw status` or `defenseclaw doctor` (the gateway and the Cowork row), in the TUI, and in the audit log: `~/.defenseclaw/logs/hook-failures.jsonl` lists each call the hook let run unchecked. What an outage does is in the [capability matrix](/docs/connectors/capability-matrix#gateway-outage) |
+| Notices | Claude Desktop 4.16336.0 did not show DefenseClaw's hook warnings or notices in its window, reply, tool details or a banner on macOS or Windows. After an uninstall the 1.0.9 per-user plugin sends a one-time removal notice to the model only, which may not repeat it. The printed uninstall step is the guaranteed reminder: remove the plugin using it. See DefenseClaw's state with `defenseclaw status` or `defenseclaw doctor` (the gateway and the Cowork row), in the TUI, and in the audit log: `~/.defenseclaw/logs/hook-failures.jsonl`. Outage behavior is in the [capability matrix](/docs/connectors/capability-matrix#gateway-outage) |
 
 ## See also
 

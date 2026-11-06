@@ -363,7 +363,7 @@ func logHookFailureOf(opts Options, sp spec, reason, category, failMode string, 
 				return false
 			}
 			var openErr error
-			marker, openErr = openHookFailureLog(filepath.Join(logDir, "hook-failures.dropped"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+			marker, openErr = opts.failureLog.opener()(filepath.Join(logDir, "hook-failures.dropped"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 			if openErr != nil {
 				return false
 			}
@@ -378,7 +378,7 @@ func logHookFailureOf(opts Options, sp spec, reason, category, failMode string, 
 		if !hookFailureLogFolderReady(opts, home, logDir, eventID) {
 			return
 		}
-		f, err = openHookFailureLog(filepath.Join(logDir, "hook-failures.jsonl"),
+		f, err = opts.failureLog.opener()(filepath.Join(logDir, "hook-failures.jsonl"),
 			os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 		if err != nil {
 			if blocked && !opts.ManagedEnterprise && !opts.SecureClient && appendMarker() {

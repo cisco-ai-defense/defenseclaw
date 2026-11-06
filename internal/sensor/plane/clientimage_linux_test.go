@@ -10,7 +10,9 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -106,14 +108,14 @@ func TestForkThatExecsMidReadIsNotPairedWithItsParentImage(t *testing.T) {
 			if err := os.WriteFile(image, shell, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			process := exec.Command(image, "-c", "read line; exec /bin/sleep 30", "@modelcontextprotocol/server-filesystem")
-			stdin, err := process.StdinPipe()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := process.Start(); err != nil {
-				t.Fatal(err)
-			}
+			var stdin io.WriteCloser
+			process := startWrittenImage(t, func() *exec.Cmd {
+				process := exec.Command(image, "-c", "read line; exec /bin/sleep 30", "@modelcontextprotocol/server-filesystem")
+				if stdin, err = process.StdinPipe(); err != nil {
+					t.Fatal(err)
+				}
+				return process
+			})
 			t.Cleanup(func() {
 				_ = process.Process.Kill()
 				_ = process.Wait()
@@ -175,12 +177,12 @@ func TestClientForkThatExitsMidReadKeepsNoCommandLine(t *testing.T) {
 	}
 	run := func(path string, fromFork bool) Event {
 		t.Helper()
-		process := exec.Command(path, "-c", "sleep 30; :", "@modelcontextprotocol/server-filesystem")
-		// Its own process group, so the shell's sleep child is killed with it.
-		process.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		if err := process.Start(); err != nil {
-			t.Fatal(err)
-		}
+		process := startWrittenImage(t, func() *exec.Cmd {
+			process := exec.Command(path, "-c", "sleep 30; :", "@modelcontextprotocol/server-filesystem")
+			// Its own process group, so the shell's sleep child is killed with it.
+			process.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			return process
+		})
 		killGroup := func() {
 			_ = syscall.Kill(-process.Process.Pid, syscall.SIGKILL)
 			_ = process.Wait()
@@ -241,10 +243,7 @@ func TestInstalledClientImagesArePrewarmed(t *testing.T) {
 	clientImages.idle()
 	want := sha256.Sum256(sleep)
 	source := &linuxSource{buffer: NewBuffer()}
-	process := exec.Command(image, "30")
-	if err := process.Start(); err != nil {
-		t.Fatal(err)
-	}
+	process := startWrittenImage(t, func() *exec.Cmd { return exec.Command(image, "30") })
 	t.Cleanup(func() {
 		_ = process.Process.Kill()
 		_ = process.Wait()
@@ -681,13 +680,30 @@ func startImage(t *testing.T, path string, data []byte) int {
 	if err := os.WriteFile(path, data, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	process := exec.Command(path, "30")
-	if err := process.Start(); err != nil {
-		t.Fatal(err)
-	}
+	process := startWrittenImage(t, func() *exec.Cmd { return exec.Command(path, "30") })
 	t.Cleanup(func() {
 		_ = process.Process.Kill()
 		_ = process.Wait()
 	})
 	return process.Process.Pid
+}
+
+// startWrittenImage starts the command newCmd builds for an image the test
+// has just written. A fork in a parallel test that lands while the write
+// descriptor of the image is open keeps a copy of it until that child execs,
+// and an exec of the image fails with ETXTBSY meanwhile (golang/go#22315).
+// The image bytes are final once written, so a fresh command for the same
+// image starts the same program; any other error still fails the test.
+func startWrittenImage(t *testing.T, newCmd func() *exec.Cmd) *exec.Cmd {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		process := newCmd()
+		err := process.Start()
+		if err == nil {
+			return process
+		}
+		if !errors.Is(err, syscall.ETXTBSY) || time.Now().After(deadline) {
+			t.Fatal(err)
+		}
+	}
 }

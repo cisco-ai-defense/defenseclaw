@@ -1,9 +1,10 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
-// Package hookguard is the per-user Windows Claude Code PreToolUse launcher
-// guard: it runs DefenseClaw's hook launcher with the Claude Code hook argv
-// and blocks when the launcher is missing or cannot start. Claude Code treats
+// Package hookguard supplies the per-user Windows Claude Code launcher guard
+// and the Cowork account plugin guard. It runs DefenseClaw's hook launcher
+// with the Claude Code hook argv and blocks when the launcher is missing or
+// cannot start. Claude Code treats
 // a failed start of a hook command as a non-blocking error, so a launcher
 // that antivirus removed let tool calls run uninspected (GAP-1011). The
 // package uses only the standard library: defenseclaw-hook-guard.exe, the

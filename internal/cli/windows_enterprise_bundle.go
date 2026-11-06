@@ -106,6 +106,9 @@ var (
 	windowsBundleEnsurePrivateDirectory = ensureWindowsBundlePrivateDirectory
 	windowsBundlePublishPrivateFile     = publishWindowsBundlePrivateFile
 	windowsBundleSyncMarker             = syncWindowsBundleMarker
+	// windowsBundleEnsurePublicReceiptEventsDirectory creates or repairs
+	// the public receipt events folder (an Administrators owner).
+	windowsBundleEnsurePublicReceiptEventsDirectory = ensureWindowsBundlePublicReceiptEventsDirectory
 	// windowsBundleReadAnchors reads and checks an anchor file once.
 	windowsBundleReadAnchors = enterprisebundle.ReadAnchorsFile
 	// windowsBundleDeploymentInstalled reads the deployment record again
@@ -206,7 +209,7 @@ func syncWindowsBundleMarker(store *enterprisebundle.Store) error {
 	if err != nil || st.Current == nil {
 		return err
 	}
-	marker, err := registry.OpenKey(registry.LOCAL_MACHINE, WindowsEnterpriseMarkerKey,
+	marker, err := registry.OpenKey(windowsEnterpriseMachineRegistry, WindowsEnterpriseMarkerKey,
 		registry.SET_VALUE|registry.QUERY_VALUE|registry.WOW64_64KEY)
 	if err != nil {
 		return fmt.Errorf("open the enterprise marker to publish the confirmed bundle: %w", err)
@@ -415,7 +418,7 @@ func newWindowsBundleDriver(layout managed.StandaloneLayout) *enterprisebundle.D
 	store.SealVersion = windowsBundleSealVersion
 	store.PublishVersion = windowsBundlePublishVersion
 	store.PublishReceipt = windowsBundlePublishReceipt
-	store.EnsurePublicReceiptEventsDirectory = ensureWindowsBundlePublicReceiptEventsDirectory
+	store.EnsurePublicReceiptEventsDirectory = windowsBundleEnsurePublicReceiptEventsDirectory
 	store.EnsurePrivateDirectory = windowsBundleEnsurePrivateDirectory
 	store.PublishPrivateFile = windowsBundlePublishPrivateFile
 	store.ReceiptEventReported = func(id string) bool { return enterprisestatus.ReceiptEventReported(layout.DataDir, id) }
@@ -530,11 +533,11 @@ func createWindowsBundleDirectory(path, sddl string) error {
 		if !windowsEnterpriseIsElevated() {
 			return fmt.Errorf("bundle directory has an unexpected owner: %s", path)
 		}
-		user, err := windows.GetCurrentProcessToken().GetTokenUser()
+		user, err := windowsEnterpriseProcessUserSID()
 		if err != nil {
 			return err
 		}
-		if user == nil || !windowsEnterpriseSIDEqual(actualOwner, user.User.Sid) {
+		if user == nil || !windowsEnterpriseSIDEqual(actualOwner, user) {
 			return fmt.Errorf("bundle directory has an unexpected owner: %s", path)
 		}
 	}

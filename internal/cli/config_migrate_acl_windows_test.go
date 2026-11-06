@@ -78,6 +78,9 @@ func TestMigrateManagedStandaloneConfigKeepsDotEnvDACL(t *testing.T) {
 	if err := os.WriteFile(path, []byte(v8), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The migration loads the .env into the process environment; every test
+	// after this one inherited GATEWAY_TOKEN (GAP-0079).
+	unsetEnvironmentForDotenvTest(t, "GATEWAY_TOKEN")
 	if err := os.WriteFile(envPath, []byte("GATEWAY_TOKEN=existing\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -1107,6 +1107,10 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// A managed Windows hook starts the installer-owned gateway after the
 	// restart budget; a per-user hook started its own gateway above.
 	if err != nil && opts.ManagedEnterprise && opts.GatewayRecovery != nil && connectionRefused(err) {
+		// The service watch is for a call a stopping gateway took: this one
+		// reached none, and the start reads the service as stopped until it
+		// runs (GAP-0648 review F3). The answer deadline still bounds it.
+		stopWatch()
 		if recoveryErr := opts.GatewayRecovery(ctx, err); recoveryErr == nil && ctx.Err() == nil {
 			// The initial request proved no listener was present. Recovery verifies
 			// and starts the exact installer-owned gateway, including authenticated
@@ -1402,7 +1406,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		opts.answerWatch.setDeliveryReceipt(func(answered, localBlock bool) {
 			// finish calls this only after it writes the answer to the agent.
 			// The receipt shares the managed process deadline with the answer.
-			// A late healthy verdict still reaches the agent before this wait.
+			// On a managed call outside Secure Client a verdict read after
+			// that deadline never reaches the agent: the watchdog's closed
+			// answer does (lateAnswerDue).
 			stopAnswer()
 			if answered {
 				receiptWait := hookDeliveryReceiptTimeout
@@ -1686,10 +1692,7 @@ func sendHookRequest(
 			cancelDeadline()
 		}
 		req = req.WithContext(transportCtx)
-		gatewayStarting := hookDeliveryGatewayStarting
-		req, delivery = prepareHookDeliveryRequest(req, payload, hookDeliveryWait(opts), func(ctx context.Context) bool {
-			return gatewayStarting(ctx, opts)
-		}, !opts.ManagedEnterprise && req.Header.Get("Expect") == "100-continue")
+		req, delivery = prepareHookDeliveryRequest(req, payload, hookDeliveryWait(opts), hookDeliveryGatewayStarting(opts), !opts.ManagedEnterprise && req.Header.Get("Expect") == "100-continue")
 		delivery.setCancel(cancelTransport)
 		context.AfterFunc(ctx, func() {
 			select {

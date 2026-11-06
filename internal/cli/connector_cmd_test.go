@@ -55,9 +55,22 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	restore := isolateTestHost()
+	// guardTestMachine first: guardTestProcessState marks the helper
+	// children it starts.
+	checkMachine := guardTestMachine()
+	checkProcess, checkSandbox := guardTestProcessState(), guardTestSandbox()
 	code := m.Run()
+	processErr, sandboxErr := checkProcess(), checkSandbox()
 	restore()
 	cleanupHermes()
+	for _, err := range []error{processErr, sandboxErr, checkMachine()} {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			if code == 0 {
+				code = 1
+			}
+		}
+	}
 	os.Exit(code)
 }
 

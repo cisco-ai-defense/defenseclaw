@@ -24,16 +24,15 @@ var procSetThreadPriority = windows.NewLazySystemDLL("kernel32.dll").NewProc("Se
 // Windows scheduler wakes it on time on a host whose CPU ordinary-priority
 // work fills (an attestation repair, GAP-0155). The thread only writes the
 // prepared answer and ends the process, so it cannot take the CPU from
-// anything else. The deadline only moves later (extendTo, after the gateway
-// reported that it waits on a remote scanner).
+// anything else.
 type answerDeadlineWaiter struct {
 	once sync.Once
 	done chan struct{}
+	deadlineState
 
-	mu       sync.Mutex
-	deadline time.Time
-	event    windows.Handle // zero: the Go timer alone
-	closed   bool
+	eventMu sync.Mutex
+	event   windows.Handle // zero: the Go timer alone
+	closed  bool
 }
 
 func newAnswerDeadlineWaiter() *answerDeadlineWaiter {
@@ -47,27 +46,12 @@ func newAnswerDeadlineWaiter() *answerDeadlineWaiter {
 func (w *answerDeadlineWaiter) cancel() {
 	w.once.Do(func() {
 		close(w.done)
-		w.mu.Lock()
+		w.eventMu.Lock()
 		if w.event != 0 && !w.closed {
 			_ = windows.SetEvent(w.event)
 		}
-		w.mu.Unlock()
+		w.eventMu.Unlock()
 	})
-}
-
-// extendTo moves the deadline to t when t is later.
-func (w *answerDeadlineWaiter) extendTo(t time.Time) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if t.After(w.deadline) {
-		w.deadline = t
-	}
-}
-
-func (w *answerDeadlineWaiter) current() time.Time {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.deadline
 }
 
 // wait reports whether the deadline came before a cancel.
@@ -81,7 +65,7 @@ func (w *answerDeadlineWaiter) wait(deadline time.Time) bool {
 		w.waitEvent()
 	}
 	for {
-		timer := time.NewTimer(time.Until(w.current()))
+		timer := time.NewTimer(w.next())
 		select {
 		case <-w.done:
 			timer.Stop()
@@ -93,23 +77,24 @@ func (w *answerDeadlineWaiter) wait(deadline time.Time) bool {
 			return false
 		default:
 		}
-		if !time.Now().Before(w.current()) {
+		if w.passed() {
 			return true
 		}
 	}
 }
 
 // waitEvent blocks in the kernel until the (current) deadline or a cancel,
-// then releases the event.
+// then releases the event. A deadline that counts sleep is looked at again
+// at least every suspendCheckInterval (next): the timeout does not count it.
 func (w *answerDeadlineWaiter) waitEvent() {
 	defer func() {
-		w.mu.Lock()
+		w.eventMu.Lock()
 		w.closed = true
 		_ = windows.CloseHandle(w.event)
-		w.mu.Unlock()
+		w.eventMu.Unlock()
 	}()
 	for {
-		left := time.Until(w.current())
+		left := w.next()
 		if left <= 0 {
 			return
 		}

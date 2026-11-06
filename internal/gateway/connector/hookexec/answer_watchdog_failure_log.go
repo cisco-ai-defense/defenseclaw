@@ -35,6 +35,13 @@ type preparedFailureLog struct {
 	once        sync.Once
 	done        chan struct{}
 	markerReady chan struct{}
+	// open and record are openHookFailureLog and managedHookDecisionRecorder
+	// as the call found them: its lines can be written by a goroutine that
+	// outlives it (the watchdog's log line past answerWatchdogLogWait, the
+	// open ahead of the deadline), and a test that replaced either after the
+	// call raced that read (rel-1-0-6 GAP-0680).
+	open   func(string, int, os.FileMode) (*os.File, error)
+	record func(source, marker, line string)
 
 	mu            sync.Mutex
 	home          string
@@ -69,7 +76,23 @@ func (p *preparedFailureLog) getRestartReason() string {
 }
 
 func newPreparedFailureLog() *preparedFailureLog {
-	return &preparedFailureLog{done: make(chan struct{}), markerReady: make(chan struct{})}
+	return &preparedFailureLog{done: make(chan struct{}), markerReady: make(chan struct{}), open: openHookFailureLog, record: managedHookDecisionRecorder}
+}
+
+// opener is the call's openHookFailureLog.
+func (p *preparedFailureLog) opener() func(string, int, os.FileMode) (*os.File, error) {
+	if p == nil || p.open == nil {
+		return openHookFailureLog
+	}
+	return p.open
+}
+
+// recorder is the call's managedHookDecisionRecorder.
+func (p *preparedFailureLog) recorder() func(source, marker, line string) {
+	if p == nil || p.record == nil {
+		return managedHookDecisionRecorder
+	}
+	return p.record
 }
 
 // prepare opens the per-user marker before the ordinary failure log. The
@@ -91,7 +114,7 @@ func (p *preparedFailureLog) prepare(home func() string) {
 				if info, err := os.Stat(h); err == nil && info.IsDir() {
 					_ = os.Mkdir(filepath.Join(h, "logs"), 0o700)
 				}
-				marker, err := openHookFailureLog(filepath.Join(h, "logs", "hook-failures.dropped"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+				marker, err := p.opener()(filepath.Join(h, "logs", "hook-failures.dropped"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 				if err == nil {
 					p.mu.Lock()
 					if p.closed {
@@ -103,7 +126,7 @@ func (p *preparedFailureLog) prepare(home func() string) {
 				}
 			}
 			close(p.markerReady)
-			f, err := openHookFailureLog(filepath.Join(h, "logs", "hook-failures.jsonl"), os.O_APPEND|os.O_WRONLY, 0)
+			f, err := p.opener()(filepath.Join(h, "logs", "hook-failures.jsonl"), os.O_APPEND|os.O_WRONLY, 0)
 			if err != nil {
 				return
 			}
