@@ -16,7 +16,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -193,10 +192,11 @@ func WriteWindowsOpenCodeServicePortsFull(path string, state WindowsOpenCodeServ
 	if err := protectWindowsOpenCodeServicePortsFile(stagedPath); err != nil {
 		return err
 	}
-	staged, err = os.OpenFile(stagedPath, os.O_WRONLY|os.O_TRUNC, 0)
+	handle, err := openWindowsTargetsManifestObjectWithBackup(stagedPath, false, windows.GENERIC_WRITE, true)
 	if err != nil {
 		return err
 	}
+	staged = os.NewFile(uintptr(handle), stagedPath)
 	if _, err := staged.Write(data); err != nil {
 		_ = staged.Close()
 		return err
@@ -218,10 +218,55 @@ func WriteWindowsOpenCodeServicePortsFull(path string, state WindowsOpenCodeServ
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := safefile.ReplaceFile(stagedPath, path); err != nil {
+	if err := replaceWindowsOpenCodePortRecord(stagedPath, path); err != nil {
 		return err
 	}
 	return validateWindowsOpenCodeServicePortsFile(path)
+}
+
+// A SYSTEM-only record cannot be opened by an administrator through
+// ReplaceFileW, even with SeRestorePrivilege: that API does not request backup
+// semantics. Rename the already protected staging file through a handle opened
+// with backup intent. The destination name changes in one operation and the
+// staging file's exact SYSTEM-only descriptor is retained.
+func replaceWindowsOpenCodePortRecord(stagedPath, path string) error {
+	handle, err := openWindowsTargetsManifestObjectWithBackup(stagedPath, false, windows.DELETE|windows.SYNCHRONIZE, true)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(handle)
+	utf16Name, err := windows.UTF16FromString(path)
+	if err != nil {
+		return err
+	}
+	type fileRenameInfo struct {
+		Flags          uint32
+		RootDirectory  windows.Handle
+		FileNameLength uint32
+		FileName       [1]uint16
+	}
+	size := unsafe.Offsetof(fileRenameInfo{}.FileName) + uintptr(len(utf16Name))*2
+	buffer := make([]uint64, (size+7)/8)
+	info := (*fileRenameInfo)(unsafe.Pointer(&buffer[0]))
+	info.FileNameLength = uint32((len(utf16Name) - 1) * 2)
+	copy(unsafe.Slice(&info.FileName[0], len(utf16Name)), utf16Name)
+	const replaceIfExists, posixSemantics = 0x1, 0x2
+	for attempt := 0; attempt < 3000; attempt++ {
+		info.Flags = replaceIfExists | posixSemantics
+		err = windows.SetFileInformationByHandle(handle, windows.FileRenameInfoEx, (*byte)(unsafe.Pointer(&buffer[0])), uint32(size))
+		if errors.Is(err, windows.ERROR_INVALID_PARAMETER) || errors.Is(err, windows.ERROR_NOT_SUPPORTED) || errors.Is(err, windows.ERROR_INVALID_FUNCTION) {
+			info.Flags = replaceIfExists
+			err = windows.SetFileInformationByHandle(handle, windows.FileRenameInfo, (*byte)(unsafe.Pointer(&buffer[0])), uint32(size))
+		}
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, windows.ERROR_ACCESS_DENIED) && !errors.Is(err, windows.ERROR_SHARING_VIOLATION) && !errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+			return err
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return fmt.Errorf("enterprise hooks: replace OpenCode service ports record: %w", err)
 }
 
 func validateWindowsOpenCodeContests(contested []WindowsOpenCodeContestedPort, holders map[int]string) error {

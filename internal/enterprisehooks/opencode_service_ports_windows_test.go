@@ -6,10 +6,13 @@
 package enterprisehooks
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestManagedWindowsOpenCodePortRecordIsSystemOnly(t *testing.T) {
@@ -88,5 +91,46 @@ func TestManagedWindowsOpenCodeContestedMarkIsSystemOnly(t *testing.T) {
 	}
 	if _, err := ClearWindowsOpenCodeContestedPort(path, 25002, "administrator", time.Now()); err == nil {
 		t.Fatal("unmarked port was cleared twice")
+	}
+}
+
+func TestManagedWindowsOpenCodeContestedMarkCanBeClearedByElevatedAdministrator(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() || !errors.Is(windowsEnterpriseMutationIdentityCheck(), errWindowsEnterpriseNotLocalSystem) {
+		t.Skip("requires an elevated administrator token")
+	}
+	dir := prepareWindowsTargetsManifestTestDirectory(t)
+	path := WindowsOpenCodeServicePortsPath(filepath.Join(dir, "targets.yaml"))
+	state := WindowsOpenCodeServicePortsState{
+		Ports:     map[string]int{testLocalUserSID: 25001},
+		Contested: []WindowsOpenCodeContestedPort{{Port: 25002, SIDs: []string{testEntraUserSID}}},
+	}
+	if err := RunWithWindowsOwnerRestorePrivilege(func() error {
+		return WriteWindowsOpenCodeServicePortsFull(path, state)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.ReadFile(path); !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		t.Fatalf("administrator read of SYSTEM-only record = %v", err)
+	}
+	claimants, err := ClearWindowsOpenCodeContestedPort(path, 25002, "administrator", time.Now())
+	if err != nil || len(claimants) != 1 || claimants[0] != testEntraUserSID {
+		t.Fatalf("clear = %v, %v", claimants, err)
+	}
+	if err := RunWithWindowsOwnerRestorePrivilege(func() error {
+		got, loadErr := LoadWindowsOpenCodeServicePortsFull(path)
+		if loadErr != nil {
+			return loadErr
+		}
+		if len(got.Contested) != 0 || len(got.Cleared) != 1 || got.Ports[testLocalUserSID] != 25001 {
+			t.Errorf("clear changed a binding or lost its audit: %+v", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunWithWindowsOwnerRestorePrivilege(func() error {
+		return validateWindowsOpenCodeServicePortsFile(path)
+	}); err != nil {
+		t.Fatalf("clear changed the SYSTEM-only ACL: %v", err)
 	}
 }
