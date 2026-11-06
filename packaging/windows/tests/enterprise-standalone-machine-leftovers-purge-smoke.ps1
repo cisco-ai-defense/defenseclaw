@@ -221,6 +221,25 @@ $failures = & $module {
                 function Write-DefenseClawLifecycleLogDiagnostic { param([string]$Message) $logged.Add($Message) }
                 $adminOnly = 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
                 $native = Initialize-DefenseClawNativeSecurity
+                # A fixture folder a purge may remove is owned by
+                # BUILTIN\Administrators, as the folders Setup and the hooks
+                # create are. A folder an elevated administrator creates is
+                # owned by that account itself where "Default owner for objects
+                # created by members of the Administrators group" is "Object
+                # creator" (the GitHub runner's runneradmin), and the purge's
+                # owner check rightly refuses it; SYSTEM and hosts set to
+                # "Administrators group" get BUILTIN\Administrators anyway.
+                # The negative rows keep what makes them negative (a junction,
+                # a Users write entry).
+                function Set-G091AdministratorsOwner {
+                    param([string[]]$Path)
+                    foreach ($folder in $Path) {
+                        $out = & "$env:SystemRoot\System32\icacls.exe" $folder /setowner '*S-1-5-32-544' /Q 2>&1
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "set the owner of $folder to BUILTIN\Administrators: $out"
+                        }
+                    }
+                }
                 [void][IO.Directory]::CreateDirectory($Scratch)
                 $root = Microsoft.PowerShell.Management\Join-Path $Scratch 'gap0091'
                 [void]$native::CreateDirectorySecure($root, $adminOnly)
@@ -264,6 +283,9 @@ $failures = & $module {
                         ([IO.Path]::Combine($parentTarget, 'Codex')), $recreated, $userParentChild, $openRecordFolder)) {
                     [void][IO.Directory]::CreateDirectory($folder)
                 }
+                Set-G091AdministratorsOwner -Path @($pd, $pf, $outsideRoot, $vendor, $cursor, $openai, $codex, $before,
+                    $claude, $dropIns, $shared, $sharedSub, $leafTarget, $parentTarget, ([IO.Path]::Combine($parentTarget, 'Codex')),
+                    $recreated, $userParent, $userParentChild, $openRecordFolder)
                 [IO.File]::WriteAllText($foreignFile, '{}')
                 [IO.File]::WriteAllText([IO.Path]::Combine($life, 'lifecycle.lock'), '')
                 foreach ($link in @(@($leafLink, $leafTarget), @($parentLink, $parentTarget))) {
@@ -433,6 +455,7 @@ $failures = & $module {
                 $rollbackVendor = [IO.Path]::Combine($pd, 'OpenAI')
                 $rollbackCodex = [IO.Path]::Combine($rollbackVendor, 'Codex')
                 [void][IO.Directory]::CreateDirectory($rollbackCodex)
+                Set-G091AdministratorsOwner -Path @($vendor, $rollbackVendor, $rollbackCodex)
                 Add-DefenseClawStandaloneCreatedFolderRecord -Path @($rollbackVendor, $rollbackCodex) -RecordDirectory $records -Roots $roots
                 & {
                     function Get-DefenseClawStandaloneCreatedFolderRecordDirectory { return $records }
