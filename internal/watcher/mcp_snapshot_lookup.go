@@ -38,6 +38,22 @@ func (w *InstallWatcher) mcpSnapshotForEvent(evt InstallEvent) (*audit.SnapshotR
 	return mcpSnapshotForServer(w.store, identity.server())
 }
 
+// mcpPreIdentitySnapshot reports a snapshot an earlier release stored: its
+// config hashes parse and carry no versioned identity. Every current MCP
+// snapshot carries one (snapshotMCPServer); a missing or unreadable snapshot
+// is not evidence of an old row.
+func mcpPreIdentitySnapshot(row *audit.SnapshotRow) bool {
+	if row == nil {
+		return false
+	}
+	var hashes map[string]string
+	if json.Unmarshal([]byte(row.ConfigHashes), &hashes) != nil {
+		return false
+	}
+	_, ok := hashes[mcpSnapshotIdentityKey]
+	return !ok
+}
+
 // mcpStoredSnapshotIdentity requires the versioned key and an identity bound
 // to the snapshot's baseline hash. Neither an old key nor a hash alone can
 // establish account scope.
