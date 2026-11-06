@@ -18,6 +18,7 @@ import (
 // and puts a missing (quarantined), empty or different binary back from it;
 // a copy of another release is never restored.
 func TestKeepWindowsManagedFileCopyRestoresADamagedHookBinary(t *testing.T) {
+	requireAdministratorTestToken(t, "the fixture needs an Administrators-owned or protected object, which only an elevated token can create")
 	root := t.TempDir()
 	target := filepath.Join(root, "bin", "defenseclaw-hook.exe")
 	copyPath := filepath.Join(root, "hook-guardian", "payload", "defenseclaw-hook.exe")

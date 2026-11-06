@@ -232,6 +232,7 @@ func TestForeignHookCleanupIsInertOutsideStandalone(t *testing.T) {
 }
 
 func TestEnterprisePolicyShowsTheClaudeVersionFloor(t *testing.T) {
+	requireAdministratorTestToken(t, "the fixture needs an Administrators-owned or protected object, which only an elevated token can create")
 	ctx := withEnterprisePolicyTree(t)
 	// The tree is a Linux host's, which has no Windows enumerator record of
 	// unprotected agent installs; on Windows its absence makes verify

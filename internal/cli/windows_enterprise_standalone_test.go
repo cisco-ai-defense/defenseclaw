@@ -1009,6 +1009,7 @@ func TestWindowsEnterpriseConfigRefusalRecoversAPendingTransaction(t *testing.T)
 // On a host without the log folder the first run created it but still
 // reported it missing, so a first install carried lifecycle_log_failed.
 func TestWindowsEnterpriseLogDirectoryIsUsableOnFirstCreate(t *testing.T) {
+	requireAdministratorTestToken(t, "the fixture needs an Administrators-owned or protected object, which only an elevated token can create")
 	directory := filepath.Join(t.TempDir(), "DefenseClaw")
 	if err := ensureWindowsEnterpriseLogDirectory(directory); errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the log folder this call created is reported missing: %v", err)

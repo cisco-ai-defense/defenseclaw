@@ -94,6 +94,7 @@ func TestWindowsStandaloneConfigPreflightRefusesForeignRuntimePaths(t *testing.T
 // inherited Users write ACE there is repairable drift, so it must not stop
 // a valid supplied config before Setup can do that repair.
 func TestWindowsStandaloneConfigPreflightAllowsRepairableRuntimeACLDrift(t *testing.T) {
+	requireAdministratorTestToken(t, "the fixture is a folder under C:\\ProgramData, which only an administrator can create")
 	previousLayout, previousSource := windowsEnterpriseStandaloneLayoutForPreflight, windowsEnterpriseStandaloneConfigSource
 	t.Cleanup(func() {
 		windowsEnterpriseStandaloneLayoutForPreflight, windowsEnterpriseStandaloneConfigSource = previousLayout, previousSource

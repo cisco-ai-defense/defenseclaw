@@ -16,5 +16,8 @@ func guardTestMachine() func() error { return func() error { return nil } }
 // testProcessPriority is not tracked off Windows.
 func testProcessPriority() string { return "" }
 
+// requireAdministratorTestToken is a no-op off Windows.
+func requireAdministratorTestToken(*testing.T, string) {}
+
 // skipIfLocalSystem is a no-op off Windows.
 func skipIfLocalSystem(*testing.T, string) {}

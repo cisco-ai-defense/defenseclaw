@@ -28,6 +28,7 @@ import (
 // `bundle status --json` and the public receipt files that follow
 // (GAP-0001: current carries the delivery id).
 func TestManagementContractWindowsBundleStatusDeliveryID(t *testing.T) {
+	requireAdministratorTestToken(t, "the fixture needs an Administrators-owned or protected object, which only an elevated token can create")
 	schemas := contracttest.Compile(t)
 	e := newBundleCLIEnv(t)
 	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})

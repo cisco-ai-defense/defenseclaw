@@ -74,6 +74,7 @@ func TestValidateWindowsStagedRetireGatewayLayout(t *testing.T) {
 // descriptor admits is admitted here too; a folder or file another user can
 // change is refused before the gateway runs any retire.
 func TestValidateWindowsStagedRetireGatewayImage(t *testing.T) {
+	requireAdministratorTestToken(t, "the fixture is a folder under C:\\ProgramData, which only an administrator can create")
 	for _, tc := range []struct{ name, executable string }{
 		{name: "wrong executable", executable: `C:\ProgramData\DefenseClaw-Staging\defenseclaw-hook.exe`},
 		{name: "relative source", executable: `payload\defenseclaw-gateway.exe`},

@@ -1231,6 +1231,7 @@ func TestWindowsEnsureBundleConfirmsThenRequiresBundles(t *testing.T) {
 }
 
 func TestWindowsBundleGatewayRestartReachesEveryReceiptSurface(t *testing.T) {
+	requireAdministratorTestToken(t, "the fixture needs an Administrators-owned or protected object, which only an elevated token can create")
 	e := newBundleCLIEnv(t)
 	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
 	signed := filepath.Join(e.dir, "restart.dcbundle")
@@ -1295,6 +1296,7 @@ func TestWindowsBundleGatewayRestartReachesEveryReceiptSurface(t *testing.T) {
 }
 
 func TestWindowsCommittedBundleGatewayOutageReportsPendingReceipt(t *testing.T) {
+	requireAdministratorTestToken(t, "the fixture needs an Administrators-owned or protected object, which only an elevated token can create")
 	e := newBundleCLIEnv(t)
 	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
 	signed := filepath.Join(e.dir, "outage.dcbundle")

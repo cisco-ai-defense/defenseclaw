@@ -358,6 +358,19 @@ func isolateTestDeploymentReaders(dir string) {
 // pinned (pinTestProcessIdentity).
 func testTokenIsElevated() bool { return windows.GetCurrentProcessToken().IsElevated() }
 
+// requireAdministratorTestToken skips a test whose fixture only an
+// administrator token can build (an Administrators-owned or protected
+// object, a folder under C:\ProgramData), saying why. A standard user cannot
+// create them, so the test cannot give the same answer as a standard user
+// (GAP-0079); the elevated CI runner, an elevated administrator and
+// LocalSystem run it.
+func requireAdministratorTestToken(t *testing.T, why string) {
+	t.Helper()
+	if !testTokenIsElevated() && !testRunsAsLocalSystem() {
+		t.Skip("needs an administrator token: " + why)
+	}
+}
+
 // skipIfLocalSystem skips a test whose fixture cannot hold when it runs as
 // LocalSystem, saying why.
 func skipIfLocalSystem(t *testing.T, why string) {

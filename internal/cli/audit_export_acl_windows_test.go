@@ -15,6 +15,7 @@ import (
 )
 
 func TestAuditExportWindowsCreatesProtectedFileInSharedDirectory(t *testing.T) {
+	requireAdministratorTestToken(t, "the fixture needs an Administrators-owned or protected object, which only an elevated token can create")
 	shared := filepath.Join(t.TempDir(), "shared")
 	if err := os.Mkdir(shared, 0o700); err != nil {
 		t.Fatal(err)
