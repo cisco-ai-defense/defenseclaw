@@ -34,7 +34,7 @@ import (
 func init() {
 	enterprisehooks.SetWindowsOpenCodeMachinePolicy(windowsOpenCodeMachinePolicy)
 	enterprisehooks.SetWindowsOpenCodeServicePortWriter(func(home string, port int) (int, error) {
-		result, err := enterprisepolicy.EnsureOpenCodeServicePort(home, port)
+		result, err := enterprisepolicy.SetOpenCodeServicePort(home, port)
 		return result.Port, err
 	})
 	enterprisehooks.SetWindowsClaudeManagedHooksOnlyPolicy(windowsClaudeManagedHooksOnlyEnforced)

@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,20 +112,20 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 		}
 	}
 	record := map[int]int{}
-	openCodeRecordUnreadable, openCodeRecordUnknown, openCodeRecordShared = nil, nil, nil
-	t.Cleanup(func() { openCodeRecordUnreadable, openCodeRecordUnknown, openCodeRecordShared = nil, nil, nil })
-	enterpriseHookLoadOpenCodePorts = func(string) (map[int]int, []enterprisehooks.UnixOpenCodeServicePortUnknown, []enterprisehooks.UnixOpenCodeServicePortShare, error) {
+	openCodeRecordUnreadable, openCodeRecordUnknown = nil, nil
+	t.Cleanup(func() { openCodeRecordUnreadable, openCodeRecordUnknown = nil, nil })
+	enterpriseHookLoadOpenCodePorts = func(string) (map[int]int, []enterprisehooks.UnixOpenCodeServicePortUnknown, error) {
 		if openCodeRecordUnreadable != nil {
-			return nil, nil, nil, openCodeRecordUnreadable
+			return nil, nil, openCodeRecordUnreadable
 		}
 		out := map[int]int{}
 		for uid, port := range record {
 			out[uid] = port
 		}
-		return out, openCodeRecordUnknown, openCodeRecordShared, nil
+		return out, openCodeRecordUnknown, nil
 	}
-	enterpriseHookWriteOpenCodePorts = func(_ string, ports map[int]int, _ map[int]string, unknown []enterprisehooks.UnixOpenCodeServicePortUnknown, shared []enterprisehooks.UnixOpenCodeServicePortShare) error {
-		openCodeRecordUnknown, openCodeRecordShared = unknown, shared
+	enterpriseHookWriteOpenCodePorts = func(_ string, ports map[int]int, _ map[int]string, unknown []enterprisehooks.UnixOpenCodeServicePortUnknown) error {
+		openCodeRecordUnknown = unknown
 		openCodeRecordWrites++
 		record = map[int]int{}
 		for uid, port := range ports {
@@ -150,8 +151,7 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 				return response, nil
 			}
 			port, err := enterprisepolicy.ReadOpenCodeServicePortAsUser(account.Home)
-			response.OpenCodeServicePort = &enterpriseHookWorkerOpenCodePortReport{Port: port,
-				NotWritable: !enterprisepolicy.OpenCodeServicePortWritable(account.Home)}
+			response.OpenCodeServicePort = &enterpriseHookWorkerOpenCodePortReport{Port: port}
 			if err != nil {
 				response.OpenCodeServicePort.Error = err.Error()
 			}
@@ -175,7 +175,6 @@ var (
 	openCodeRecordUnreadable error
 	openCodeRecordWrites     int
 	openCodeRecordUnknown    []enterprisehooks.UnixOpenCodeServicePortUnknown
-	openCodeRecordShared     []enterprisehooks.UnixOpenCodeServicePortShare
 	// openCodeUserCannotRead are the uids whose service.json the account
 	// itself cannot read; openCodeReadFails the uids whose read worker fails;
 	// openCodeReadHangs the uids whose read never answers (until released).
@@ -436,30 +435,30 @@ func TestManagedGuardianOpenCodeHomeReusedByAReturningAccount(t *testing.T) {
 	if got[1001] != 25001 || got[1002] == 0 {
 		t.Fatalf("ports %v record %v\n%s", got, *record, log)
 	}
-	if !strings.Contains(log, "port 25001 of ") || !strings.Contains(log, "(uid 1002) is held by") || !strings.Contains(log, "(uid 1001)") {
+	if !strings.Contains(log, "port 25001 of ") || !strings.Contains(log, "(uid 1002) is recorded for") || !strings.Contains(log, "(uid 1001)") {
 		t.Fatalf("the conflict is not logged with both uids:\n%s", log)
 	}
 	// Stable: the next pass moves nothing and logs no conflict.
 	log = runOpenCodePortPass(t)
-	if again := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log); again[1001] != got[1001] || again[1002] != got[1002] || strings.Contains(log, "is held by") {
+	if again := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log); again[1001] != got[1001] || again[1002] != got[1002] || strings.Contains(log, "is recorded for") {
 		t.Fatalf("second pass moved %v -> %v\n%s", got, again, log)
 	}
 }
 
-// REVIEW-gx053-4 MF1 repro 2: two files name the same port (an admin's
-// /etc/skel service.json, a copied dotfiles repo). The lower uid keeps it;
-// the other is moved and the conflict is logged.
+// Two files name the same port (an admin's /etc/skel service.json, a copied
+// dotfiles repo) and neither account is recorded: the port is contested, so
+// it is given to nobody (REVIEW-gx053-10); both get fresh ports.
 func TestManagedGuardianOpenCodeTwoFilesNameOnePort(t *testing.T) {
 	homes, record, _ := openCodePortGuardianWith(t, true, 1001, 1002)
 	writeOpenCodePortFile(t, homes[1001], 26000)
 	writeOpenCodePortFile(t, homes[1002], 26000)
 	log := runOpenCodePortPass(t)
 	got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log)
-	if got[1001] != 26000 || got[1002] == 26000 || (*record)[1002] != got[1002] {
+	if got[1001] == 26000 || got[1002] == 26000 || got[1001] == 0 || got[1002] == 0 || (*record)[1002] != got[1002] {
 		t.Fatalf("ports %v record %v\n%s", got, *record, log)
 	}
-	if !strings.Contains(log, "port 26000 of ent1002 (uid 1002) is held by ent1001 (uid 1001)") {
-		t.Fatalf("the conflict is not logged:\n%s", log)
+	if !strings.Contains(log, "port 26000 is named by the files of several accounts") {
+		t.Fatalf("the contest is not logged:\n%s", log)
 	}
 }
 
@@ -561,7 +560,7 @@ func TestManagedGuardianOpenCodeFileUnreadableEvenAsTheUser(t *testing.T) {
 	if (*record)[1001] != held {
 		t.Fatalf("the unreadable account lost its port: %v", *record)
 	}
-	if !strings.Contains(log, "ent1001's OpenCode service port is unknown this pass") {
+	if !strings.Contains(log, "ent1001's OpenCode service port file") || !strings.Contains(log, "the record keeps port") {
 		t.Fatalf("no warning names the account:\n%s", log)
 	}
 }
@@ -574,8 +573,8 @@ func TestManagedGuardianOpenCodeWriteWorkerMovesAPortTheReadMissed(t *testing.T)
 	writeOpenCodePortFile(t, homes[1001], 25002)
 	previousRead := enterpriseHookReadOpenCodePortsAsUsers
 	t.Cleanup(func() { enterpriseHookReadOpenCodePortsAsUsers = previousRead })
-	enterpriseHookReadOpenCodePortsAsUsers = func(context.Context, io.Writer, []enterprisehooks.UnixEligibleAccount) (map[int]int, map[int]bool, []enterprisehooks.UnixOpenCodeServicePortUnknown) {
-		return map[int]int{}, nil, nil // the file changed after the read (it named no port then)
+	enterpriseHookReadOpenCodePortsAsUsers = func(context.Context, io.Writer, []enterprisehooks.UnixEligibleAccount) (map[int]int, []enterprisehooks.UnixOpenCodeServicePortUnknown) {
+		return map[int]int{}, nil // the file changed after the read (it named no port then)
 	}
 	setEligible(nil, 1001, 1002)
 	log := runOpenCodePortPass(t)
@@ -583,7 +582,7 @@ func TestManagedGuardianOpenCodeWriteWorkerMovesAPortTheReadMissed(t *testing.T)
 	if got[1002] != 25002 || got[1001] == 25002 || (*record)[1001] != got[1001] {
 		t.Fatalf("ports %v record %v\n%s", got, *record, log)
 	}
-	if !strings.Contains(log, "moved ent1001's OpenCode background server from port 25002") {
+	if !strings.Contains(log, "ent1001's OpenCode service.json named port 25002; wrote its recorded port") {
 		t.Fatalf("the move is not logged:\n%s", log)
 	}
 }
@@ -607,82 +606,74 @@ func linkOpenCodeConfig(t *testing.T, home string, port int) {
 	}
 }
 
-// REVIEW-gx053-6/7/8: alice keeps OpenCode's config in dotfiles (a linked
-// ~/.config/opencode, which the guardian cannot rewrite) naming 25002, and her
-// read worker fails once. There is no root read: her port is unknown that pass
-// and nothing changes for her; bob is still given a port, possibly 25002
-// (alice had no record). From the next readable pass on no two accounts share:
-// alice cannot be moved, so bob, whose file can be rewritten, is moved, and the
-// log names both.
+// REVIEW-gx053-6..9: alice keeps OpenCode's config in dotfiles (a linked
+// ~/.config/opencode the guardian cannot write) naming 25002, and her read
+// worker fails once, at enrolment. Bob is bound 25002 that pass. From then on
+// the record is the only authority: bob keeps 25002 on every pass, alice's
+// import of 25002 is refused (recorded for bob), her fresh binding cannot be
+// written through the link, so none is recorded, and she is warned with the
+// admin step. Nobody's binding changes; the record never pairs two uids.
 func TestManagedGuardianOpenCodeReadWorkerFails(t *testing.T) {
 	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
 	linkOpenCodeConfig(t, homes[1001], 25002)
 	openCodeReadFails[1001] = true
 	setEligible(nil, 1001, 1002)
 	log := runOpenCodePortPass(t)
-	if got := openCodePortIn(t, homes[1002]); got == 0 {
-		t.Fatalf("bob got no port while alice's port is unknown\n%s", log)
-	}
-	if !strings.Contains(log, "ent1001's OpenCode service port is unknown this pass") || !strings.Contains(log, "To clear it:") {
-		t.Fatalf("the warning does not name alice and the fix:\n%s", log)
-	}
-	if len(openCodeRecordUnknown) != 1 || openCodeRecordUnknown[0].UID != 1001 || openCodeRecordUnknown[0].Fix == "" {
-		t.Fatalf("the record does not name the unknown account and its fix for status: %+v (%v)", openCodeRecordUnknown, *record)
+	bob := openCodePortIn(t, homes[1002])
+	if bob == 0 || !strings.Contains(log, "ent1001's OpenCode service port is unknown this pass") || !strings.Contains(log, "To clear it:") {
+		t.Fatalf("pass 1: bob %d\n%s", bob, log)
 	}
 	openCodeReadFails[1001] = false
 	for pass := 2; pass <= 4; pass++ {
 		log = runOpenCodePortPass(t)
-		got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log)
-		if got[1001] != 25002 || got[1002] == 0 || (*record)[1001] != 25002 || len(openCodeRecordUnknown) != 0 || len(openCodeRecordShared) != 0 {
-			t.Fatalf("pass %d: ports %v record %v unknown %v shared %v\n%s", pass, got, *record, openCodeRecordUnknown, openCodeRecordShared, log)
+		if got := openCodePortIn(t, homes[1002]); got != bob || (*record)[1002] != bob {
+			t.Fatalf("pass %d: bob's binding changed %d -> %d (record %v)\n%s", pass, bob, got, *record, log)
+		}
+		if _, ok := (*record)[1001]; ok && (*record)[1001] == bob {
+			t.Fatalf("pass %d: the record pairs alice with bob's port: %v", pass, *record)
+		}
+		if len(openCodeRecordUnknown) != 1 || openCodeRecordUnknown[0].UID != 1001 || !strings.Contains(openCodeRecordUnknown[0].Fix, "opencode service set port") {
+			t.Fatalf("pass %d: alice is not warned with the admin step: %+v\n%s", pass, openCodeRecordUnknown, log)
 		}
 	}
 }
 
-// REVIEW-gx053-8 repro (TestZZRV8LinkedBlindThenRecover): a linked alice
-// whose first read fails, bob enrolled in the same pass and given 25002; on
-// every later pass the guardian moves bob (writable), never rewrites alice's
-// linked file, and nobody shares.
+// REVIEW-gx053-8 repro (TestZZRV8LinkedBlindThenRecover) under the record
+// model: bob, bound first, keeps 25002 for good; alice's linked file is never
+// rewritten (the guardian cannot) and she is warned.
 func TestManagedGuardianOpenCodeLinkedBlindThenRecover(t *testing.T) {
 	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
 	linkOpenCodeConfig(t, homes[1001], 25002)
 	openCodeReadFails[1001] = true
 	setEligible(nil, 1001, 1002)
-	runOpenCodePortPass(t) // pass 1: alice unknown
+	runOpenCodePortPass(t)
 	openCodeReadFails[1001] = false
+	bob := (*record)[1002]
 	for pass := 2; pass <= 4; pass++ {
 		log := runOpenCodePortPass(t)
-		got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log)
-		if got[1001] != 25002 {
-			t.Fatalf("pass %d: alice's linked file was changed: %v\n%s", pass, got, log)
+		if (*record)[1002] != bob || openCodePortIn(t, homes[1002]) != bob {
+			t.Fatalf("pass %d: bob moved from %d (record %v)\n%s", pass, bob, *record, log)
 		}
-		if strings.Contains(log, "could not give ent1001") {
-			t.Fatalf("pass %d: the guardian tried to rewrite alice's linked file:\n%s", pass, log)
-		}
-		if pass == 2 && !strings.Contains(log, "of ent1002 (uid 1002) is held by ent1001 (uid 1001)") {
-			t.Fatalf("the clash is not logged naming both:\n%s", log)
-		}
-		if (*record)[1001] != 25002 || (*record)[1002] == 25002 {
-			t.Fatalf("pass %d: record %v", pass, *record)
+		if openCodePortIn(t, homes[1001]) != 25002 {
+			t.Fatalf("pass %d: alice's linked file changed", pass)
 		}
 	}
 }
 
-// Two linked accounts name the same port: neither file can be rewritten, so
-// the share stays, and status, verify and doctor are told (the record names
-// both and the step that clears it).
-func TestManagedGuardianOpenCodeShareNeitherCanMove(t *testing.T) {
-	homes, _, setEligible := openCodePortGuardianWith(t, true, 1001)
+// Two linked files name the same port: contested, so neither import is
+// granted; the fresh bindings cannot be written through the links, so none is
+// recorded, and both accounts are warned with the admin step.
+func TestManagedGuardianOpenCodeImportCollisionCannotBeWritten(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
 	linkOpenCodeConfig(t, homes[1001], 26000)
 	setEligible(nil, 1001, 1002)
 	linkOpenCodeConfig(t, homes[1002], 26000)
 	log := runOpenCodePortPass(t)
-	if len(openCodeRecordShared) != 1 || openCodeRecordShared[0].UID != 1002 || openCodeRecordShared[0].Other != 1001 ||
-		openCodeRecordShared[0].Port != 26000 || !strings.Contains(openCodeRecordShared[0].Fix, "opencode service set port") {
-		t.Fatalf("the unresolved share is not recorded for status: %+v\n%s", openCodeRecordShared, log)
+	if len(*record) != 0 {
+		t.Fatalf("a contested port, or a binding that could not be written, was recorded: %v\n%s", *record, log)
 	}
-	if !strings.Contains(log, "shares port 26000 with uid 1001 and could not be moved") {
-		t.Fatalf("the share is not logged:\n%s", log)
+	if len(openCodeRecordUnknown) != 2 || !strings.Contains(openCodeRecordUnknown[0].Fix, "opencode service set port") {
+		t.Fatalf("not warned with the admin step: %+v\n%s", openCodeRecordUnknown, log)
 	}
 }
 
@@ -751,13 +742,180 @@ func TestManagedGuardianOpenCodeOneBadFileAffectsNobodyElse(t *testing.T) {
 		t.Fatalf("the new account got %d (mallory holds %d)\n%s", got, malloryPort, log)
 	}
 	got := assertNoSharedOpenCodePort(t, homes, []int{9001, 1003, 1004}, log)
-	if got[1003] != 26000 || got[1004] == 26000 || got[1004] == 0 {
+	if got[1003] == 26000 || got[1004] == 26000 || got[1003] == 0 || got[1004] == 0 {
 		t.Fatalf("the readable clash was not resolved: %v\n%s", got, log)
 	}
 	if (*record)[1001] != malloryPort {
 		t.Fatalf("mallory's reserved port changed: %v", *record)
 	}
-	if !strings.Contains(log, path) || !strings.Contains(log, "is not a JSON object") || !strings.Contains(log, "sudo -u ent1001 rm "+path) {
+	if !strings.Contains(log, path) || !strings.Contains(log, "is not a JSON object") || !strings.Contains(log, "sudo -u ent1001 rm "+path) || !strings.Contains(log, "the record keeps port") {
 		t.Fatalf("the warning does not name the path, the reason and the fix:\n%s", log)
+	}
+}
+
+// REVIEW-gx053-9 MF1 repro (TestZZRV9LinkedTakesExcludedPort): 1001 and 1002
+// are bound 25001 and 25002; 1001 is excluded; 1002 links its folder and
+// names 25001. The record does not change: 1001 keeps 25001, 1002 keeps
+// 25002 (the guardian cannot write through the link, so it warns).
+func TestManagedGuardianOpenCodeLinkCannotTakeAnExcludedPort(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001, 1002)
+	runOpenCodePortPass(t)
+	before := map[int]int{1001: (*record)[1001], 1002: (*record)[1002]}
+	setEligible(nil, 1002)
+	if err := os.Remove(enterprisepolicy.OpenCodeServiceConfigPath(homes[1002])); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Dir(enterprisepolicy.OpenCodeServiceConfigPath(homes[1002]))); err != nil {
+		t.Fatal(err)
+	}
+	linkOpenCodeConfig(t, homes[1002], before[1001])
+	for pass := 1; pass <= 2; pass++ {
+		log := runOpenCodePortPass(t)
+		if (*record)[1001] != before[1001] || (*record)[1002] != before[1002] {
+			t.Fatalf("pass %d: the record changed %v -> %v\n%s", pass, before, *record, log)
+		}
+		if len(openCodeRecordUnknown) != 1 || openCodeRecordUnknown[0].UID != 1002 {
+			t.Fatalf("pass %d: 1002 is not warned: %+v\n%s", pass, openCodeRecordUnknown, log)
+		}
+	}
+}
+
+// REVIEW-gx053-9 MF2 repros (TestZZRV9LinkedEvictsRecordedHolder,
+// TestZZRV9ReadOnlyFolderEvicts): mallory links, or chmods 500, her own
+// folder and names bob's port, then the next one. Bob's binding and file
+// never change; mallory keeps her own recorded port and is warned.
+func TestManagedGuardianOpenCodeUserCannotEvictAnother(t *testing.T) {
+	for _, how := range []string{"link", "chmod 500"} {
+		t.Run(how, func(t *testing.T) {
+			homes, record, setEligible := openCodePortGuardianWith(t, true, 1002)
+			runOpenCodePortPass(t)
+			bob := (*record)[1002]
+			setEligible(nil, 1002, 1009)
+			runOpenCodePortPass(t)
+			mallory := (*record)[1009]
+			folder := filepath.Dir(enterprisepolicy.OpenCodeServiceConfigPath(homes[1009]))
+			name := func(port int) {
+				switch how {
+				case "link":
+					_ = os.RemoveAll(folder)
+					_ = os.RemoveAll(filepath.Join(homes[1009], "dotfiles"))
+					linkOpenCodeConfig(t, homes[1009], port)
+				default:
+					_ = os.Chmod(folder, 0o700)
+					writeOpenCodePortFile(t, homes[1009], port)
+					_ = os.Chmod(folder, 0o500)
+					t.Cleanup(func() { _ = os.Chmod(folder, 0o700) })
+				}
+			}
+			for _, target := range []int{bob, bob + 1, bob} {
+				name(target)
+				log := runOpenCodePortPass(t)
+				if (*record)[1002] != bob || openCodePortIn(t, homes[1002]) != bob {
+					t.Fatalf("mallory naming %d moved bob from %d (record %v)\n%s", target, bob, *record, log)
+				}
+				if (*record)[1009] != mallory {
+					t.Fatalf("mallory's own binding changed %d -> %d", mallory, (*record)[1009])
+				}
+			}
+		})
+	}
+}
+
+// listenOn opens a listener on 127.0.0.1:port for the test (an OpenCode
+// server, or an attacker's): the guardian must not care.
+func listenOn(t *testing.T, port int) {
+	t.Helper()
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Skipf("cannot listen on %d here: %v", port, err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+}
+
+// REVIEW-gx053-10 MF1 repro (TestZZRV10RebuildAfterRemoval): 1001 copies
+// bob's 25002 into her own file and the administrator removes the record (the
+// documented rebuild). Both files name 25002 and neither account is recorded:
+// nobody gets 25002, both get fresh ports, one warning names both.
+func TestManagedGuardianOpenCodeRebuildContestGivesThePortToNobody(t *testing.T) {
+	for _, listening := range []string{"nobody", "bob", "attacker"} {
+		t.Run("listener "+listening, func(t *testing.T) {
+			homes, record, _ := openCodePortGuardianWith(t, true, 1001, 1002)
+			runOpenCodePortPass(t)
+			bob := (*record)[1002]
+			writeOpenCodePortFile(t, homes[1001], bob) // the copy
+			for uid := range *record {
+				delete(*record, uid) // sudo rm opencode-service-ports.json
+			}
+			if listening != "nobody" {
+				listenOn(t, bob) // bob's OpenCode, or an attacker's listener on the copied port
+			}
+			log := runOpenCodePortPass(t)
+			got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log)
+			if got[1001] == bob || got[1002] == bob || got[1001] == 0 || got[1002] == 0 {
+				t.Fatalf("a contested port was granted: %v (contested %d)\n%s", got, bob, log)
+			}
+			if (*record)[1001] == bob || (*record)[1002] == bob {
+				t.Fatalf("the record binds the contested port: %v", *record)
+			}
+			if !strings.Contains(log, fmt.Sprintf("port %d is named by the files of several accounts", bob)) ||
+				!strings.Contains(log, "ent1001 (uid 1001)") || !strings.Contains(log, "ent1002 (uid 1002)") {
+				t.Fatalf("the warning does not name both claimants:\n%s", log)
+			}
+		})
+	}
+}
+
+// The first pass after an upgrade from 1.0.8 (no record yet): bob's own
+// file names 25002 and a lower uid copied it. Neither gets it.
+func TestManagedGuardianOpenCodeUpgradeContestGivesThePortToNobody(t *testing.T) {
+	homes, record, _ := openCodePortGuardianWith(t, true, 1001, 1002)
+	writeOpenCodePortFile(t, homes[1002], 25002)
+	writeOpenCodePortFile(t, homes[1001], 25002)
+	log := runOpenCodePortPass(t)
+	got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log)
+	if got[1001] == 25002 || got[1002] == 25002 || (*record)[1001] == 25002 || (*record)[1002] == 25002 {
+		t.Fatalf("a contested port was granted: %v record %v\n%s", got, *record, log)
+	}
+}
+
+// REVIEW-gx053-10 TestZZRV10PreImportRace: two new accounts enrol in one
+// pass; mallory's file names carol's 25003. Neither gets 25003.
+func TestManagedGuardianOpenCodeTwoNewAccountsContest(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1002)
+	setEligible(nil, 1002, 1003)
+	writeOpenCodePortFile(t, homes[1002], 25003)
+	writeOpenCodePortFile(t, homes[1003], 25003)
+	listenOn(t, 25003) // carol's OpenCode: it still decides nothing
+	log := runOpenCodePortPass(t)
+	got := assertNoSharedOpenCodePort(t, homes, []int{1002, 1003}, log)
+	if got[1002] == 25003 || got[1003] == 25003 || len(*record) != 2 {
+		t.Fatalf("ports %v record %v\n%s", got, *record, log)
+	}
+}
+
+// An existing DefenseClaw record, also one an earlier round wrote (no
+// "unknown" list), decides over every user file: bob keeps 25002 whatever
+// any file names, and an uncontested import of a free port is granted.
+func TestManagedGuardianOpenCodeEarlierRecordDecides(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1002)
+	(*record)[1002] = 25002
+	setEligible(nil, 1001, 1002, 1003)
+	writeOpenCodePortFile(t, homes[1001], 25002) // a copy of bob's
+	writeOpenCodePortFile(t, homes[1002], 26111) // bob's own file disagrees
+	writeOpenCodePortFile(t, homes[1003], 26500) // free: imported
+	log := runOpenCodePortPass(t)
+	got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002, 1003}, log)
+	if got[1002] != 25002 || (*record)[1002] != 25002 || got[1001] == 25002 || got[1003] != 26500 {
+		t.Fatalf("ports %v record %v\n%s", got, *record, log)
+	}
+}
+
+// OpenCode's own defaults are never imported (REVIEW-gx053-10 S1).
+func TestManagedGuardianOpenCodeDefaultPortIsNotImported(t *testing.T) {
+	homes, record, _ := openCodePortGuardianWith(t, true, 1001)
+	writeOpenCodePortFile(t, homes[1001], enterprisepolicy.OpenCodeDefaultServicePort)
+	runOpenCodePortPass(t)
+	if got := (*record)[1001]; got == enterprisepolicy.OpenCodeDefaultServicePort || got == 0 {
+		t.Fatalf("the shared default was imported: %v", *record)
 	}
 }

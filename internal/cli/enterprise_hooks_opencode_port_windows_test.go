@@ -18,155 +18,45 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 )
 
-func TestManagedWindowsGuardianKeepsOpenCodePortsBySIDAcrossEligibilityChanges(t *testing.T) {
-	const first = "S-1-5-21-100-200-300-1001"
-	const second = "S-1-5-21-400-500-600-1001"
-	const newcomer = "S-1-5-21-700-800-900-9003"
-	const absent = "S-1-5-21-11-22-33-9003"
-	previousOptions, previousProfiles := enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles
-	previousLoad, previousWrite := enterpriseHookWindowsOpenCodePortsLoad, enterpriseHookWindowsOpenCodePortsWrite
-	previousRead, previousEnsure, previousReplace := enterpriseHookWindowsOpenCodeRead, enterpriseHookWindowsOpenCodeEnsure, enterpriseHookWindowsOpenCodeReplace
-	previousRunAs := enterpriseHookWindowsOpenCodeRunAs
-	previousClaims, previousClaim := enterpriseHookWindowsOpenCodeClaims, enterpriseHookWindowsOpenCodeClaim
-	previousManifest, previousConfig := enterpriseHookManifest, cfg
-	t.Cleanup(func() {
-		enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles = previousOptions, previousProfiles
-		enterpriseHookWindowsOpenCodePortsLoad, enterpriseHookWindowsOpenCodePortsWrite = previousLoad, previousWrite
-		enterpriseHookWindowsOpenCodeRead, enterpriseHookWindowsOpenCodeEnsure, enterpriseHookWindowsOpenCodeReplace = previousRead, previousEnsure, previousReplace
-		enterpriseHookWindowsOpenCodeRunAs = previousRunAs
-		enterpriseHookWindowsOpenCodeClaims, enterpriseHookWindowsOpenCodeClaim = previousClaims, previousClaim
-		enterpriseHookManifest, cfg = previousManifest, previousConfig
-	})
-	cfg = nil
-	enterpriseHookManifest = filepath.Join(t.TempDir(), "targets.yaml")
-	enterpriseHookWindowsGuardianOptions = func() (enterprisepolicy.Options, []string, bool, error) {
-		return enterprisepolicy.Options{}, []string{"opencode"}, true, nil
-	}
-	homes := map[string]string{first: t.TempDir(), second: t.TempDir(), newcomer: t.TempDir()}
-	profiles := []enterprisehooks.TargetCredentials{{SID: first, UserHome: homes[first]}, {SID: second, UserHome: homes[second]}}
-	enterpriseHookWindowsEligibleProfiles = func(context.Context) ([]enterprisehooks.TargetCredentials, error) { return profiles, nil }
-	record := map[string]int{}
-	enterpriseHookWindowsOpenCodePortsLoad = func(string) (map[string]int, error) {
-		copy := map[string]int{}
-		for key, port := range record {
-			copy[key] = port
-		}
-		return copy, nil
-	}
-	enterpriseHookWindowsOpenCodePortsWrite = func(_ string, ports map[string]int) error {
-		record = map[string]int{}
-		for key, port := range ports {
-			record[key] = port
-		}
-		return nil
-	}
-	claims := map[int]string{}
-	enterpriseHookWindowsOpenCodeClaims = func() (map[int]string, error) {
-		copy := map[int]string{}
-		for port, sid := range claims {
-			copy[port] = sid
-		}
-		return copy, nil
-	}
-	enterpriseHookWindowsOpenCodeClaim = func(sid string, port int) error {
-		if other := claims[port]; other != "" && other != sid {
-			return fmt.Errorf("port claimed")
-		}
-		claims[port] = sid
-		return nil
-	}
-	runAsCalls := 0
-	enterpriseHookWindowsOpenCodeRunAs = func(_ enterprisehooks.TargetCredentials, fn func() error) error {
-		runAsCalls++
-		return fn()
-	}
-	run := func() map[string]int {
-		t.Helper()
-		ports, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return ports
-	}
-	firstPass := run()
-	if firstPass[first] != 25001 || firstPass[second] != 25002 {
-		t.Fatalf("two accounts with the same RID: %v", firstPass)
-	}
-	if runAsCalls != 4 {
-		t.Fatalf("first pass ran as %d account reads and writes, want 4", runAsCalls)
-	}
-	if stable := run(); stable[first] != firstPass[first] || stable[second] != firstPass[second] || runAsCalls != 6 {
-		t.Fatalf("stable pass did not read both accounts as user: ports=%v calls=%d", stable, runAsCalls)
-	}
-	for sid, home := range homes {
-		if port, err := enterprisepolicy.ReadOpenCodeServicePortAsUser(home); err != nil || port != firstPass[sid] {
-			t.Fatalf("service.json for %s = %d, want %d, err=%v", sid, port, firstPass[sid], err)
-		}
-	}
-	// The account behind this recorded SID may be temporarily unavailable
-	// to Windows. Its reservation remains unavailable to a new account.
-	record[absent] = 25003
-	profiles = []enterprisehooks.TargetCredentials{{SID: second, UserHome: homes[second]}, {SID: newcomer, UserHome: homes[newcomer]}}
-	withoutFirst := run()
-	if withoutFirst[first] != firstPass[first] || withoutFirst[second] != firstPass[second] ||
-		withoutFirst[absent] != 25003 || withoutFirst[newcomer] != 25004 || record[first] != firstPass[first] {
-		t.Fatalf("recorded account lost its port: %v", withoutFirst)
-	}
-	profiles = []enterprisehooks.TargetCredentials{{SID: first, UserHome: homes[first]}, {SID: second, UserHome: homes[second]}, {SID: newcomer, UserHome: homes[newcomer]}}
-	returned := run()
-	if returned[first] != firstPass[first] || returned[second] != firstPass[second] || returned[newcomer] != withoutFirst[newcomer] {
-		t.Fatalf("returning account moved ports: %v -> %v", firstPass, returned)
-	}
-	service := enterprisepolicy.OpenCodeServiceConfigPath(homes[second])
-	if err := os.WriteFile(service, []byte(`{"port":49375}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if chosen := run(); chosen[second] != 49375 || chosen[first] != firstPass[first] || chosen[newcomer] != withoutFirst[newcomer] {
-		t.Fatalf("user-chosen port was not kept: %v", chosen)
-	}
-	enterpriseHookWindowsGuardianOptions = func() (enterprisepolicy.Options, []string, bool, error) {
-		return enterprisepolicy.Options{}, []string{"codex"}, true, nil
-	}
-	if ports := run(); len(ports) != 0 {
-		t.Fatalf("OpenCode off still assigns ports: %v", ports)
-	}
-}
+const (
+	openCodeSIDFirst  = "S-1-5-21-100-200-300-1001"
+	openCodeSIDSecond = "S-1-5-21-400-500-600-1002"
+	openCodeSIDThird  = "S-1-5-21-700-800-900-1003"
+)
 
 type managedWindowsOpenCodePortFixture struct {
-	profiles       []enterprisehooks.TargetCredentials
-	homeSID        map[string]string
-	record         map[string]int
-	files          map[string]int
-	claims         map[int]string
-	claimFailure   map[string]bool
-	replaceFailure map[string]bool
-	unwritable     map[string]bool
-	activeSID      string
-	reads          int
-	writes         int
+	profiles     []enterprisehooks.TargetCredentials
+	homeSID      map[string]string
+	record       map[string]int
+	files        map[string]int
+	claims       map[int]string
+	readFailure  map[string]bool
+	writeFailure map[string]bool
+	claimFailure map[string]bool
+	activeSID    string
+	reads        int
+	writes       int
 }
 
 func newManagedWindowsOpenCodePortFixture(t *testing.T) *managedWindowsOpenCodePortFixture {
 	t.Helper()
-	previousOptions, previousProfiles := enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles
-	previousLoad, previousWrite := enterpriseHookWindowsOpenCodePortsLoad, enterpriseHookWindowsOpenCodePortsWrite
-	previousRead, previousWritable, previousEnsure, previousReplace := enterpriseHookWindowsOpenCodeRead, enterpriseHookWindowsOpenCodeWritable, enterpriseHookWindowsOpenCodeEnsure, enterpriseHookWindowsOpenCodeReplace
-	previousRunAs := enterpriseHookWindowsOpenCodeRunAs
-	previousClaims, previousClaim := enterpriseHookWindowsOpenCodeClaims, enterpriseHookWindowsOpenCodeClaim
-	previousManifest, previousConfig := enterpriseHookManifest, cfg
-	previousTimeout := enterpriseHookWindowsOpenCodeReadTimeout
+	oldOptions, oldProfiles := enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles
+	oldLoad, oldWrite := enterpriseHookWindowsOpenCodePortsLoad, enterpriseHookWindowsOpenCodePortsWrite
+	oldRead, oldSet, oldRunAs := enterpriseHookWindowsOpenCodeRead, enterpriseHookWindowsOpenCodeSet, enterpriseHookWindowsOpenCodeRunAs
+	oldClaims, oldClaim := enterpriseHookWindowsOpenCodeClaims, enterpriseHookWindowsOpenCodeClaim
+	oldManifest, oldConfig := enterpriseHookManifest, cfg
+	oldTimeout := enterpriseHookWindowsOpenCodeReadTimeout
 	t.Cleanup(func() {
-		enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles = previousOptions, previousProfiles
-		enterpriseHookWindowsOpenCodePortsLoad, enterpriseHookWindowsOpenCodePortsWrite = previousLoad, previousWrite
-		enterpriseHookWindowsOpenCodeRead, enterpriseHookWindowsOpenCodeWritable, enterpriseHookWindowsOpenCodeEnsure, enterpriseHookWindowsOpenCodeReplace = previousRead, previousWritable, previousEnsure, previousReplace
-		enterpriseHookWindowsOpenCodeRunAs = previousRunAs
-		enterpriseHookWindowsOpenCodeClaims, enterpriseHookWindowsOpenCodeClaim = previousClaims, previousClaim
-		enterpriseHookManifest, cfg = previousManifest, previousConfig
-		enterpriseHookWindowsOpenCodeReadTimeout = previousTimeout
+		enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles = oldOptions, oldProfiles
+		enterpriseHookWindowsOpenCodePortsLoad, enterpriseHookWindowsOpenCodePortsWrite = oldLoad, oldWrite
+		enterpriseHookWindowsOpenCodeRead, enterpriseHookWindowsOpenCodeSet, enterpriseHookWindowsOpenCodeRunAs = oldRead, oldSet, oldRunAs
+		enterpriseHookWindowsOpenCodeClaims, enterpriseHookWindowsOpenCodeClaim = oldClaims, oldClaim
+		enterpriseHookManifest, cfg = oldManifest, oldConfig
+		enterpriseHookWindowsOpenCodeReadTimeout = oldTimeout
 	})
 	f := &managedWindowsOpenCodePortFixture{
-		homeSID: map[string]string{}, record: map[string]int{}, files: map[string]int{},
-		claims: map[int]string{}, claimFailure: map[string]bool{}, replaceFailure: map[string]bool{}, unwritable: map[string]bool{},
+		homeSID: map[string]string{}, record: map[string]int{}, files: map[string]int{}, claims: map[int]string{},
+		readFailure: map[string]bool{}, writeFailure: map[string]bool{}, claimFailure: map[string]bool{},
 	}
 	cfg = nil
 	enterpriseHookManifest = filepath.Join(t.TempDir(), "targets.yaml")
@@ -199,30 +89,24 @@ func newManagedWindowsOpenCodePortFixture(t *testing.T) *managedWindowsOpenCodeP
 	}
 	enterpriseHookWindowsOpenCodeRead = func(home string) (int, error) {
 		if f.activeSID != f.homeSID[home] {
-			return 0, fmt.Errorf("account read outside its token")
+			return 0, fmt.Errorf("read outside account token")
 		}
 		f.reads++
+		if f.readFailure[home] {
+			return 0, fmt.Errorf("account file unavailable")
+		}
 		return f.files[home], nil
 	}
-	enterpriseHookWindowsOpenCodeWritable = func(home string) bool {
-		return f.activeSID == f.homeSID[home] && !f.unwritable[home]
-	}
-	enterpriseHookWindowsOpenCodeEnsure = func(home string, port int) (enterprisepolicy.OpenCodeServicePortResult, error) {
-		if f.activeSID != f.homeSID[home] || f.unwritable[home] {
-			return enterprisepolicy.OpenCodeServicePortResult{}, fmt.Errorf("account write outside its token")
+	enterpriseHookWindowsOpenCodeSet = func(home string, port int) (enterprisepolicy.OpenCodeServicePortResult, error) {
+		if f.activeSID != f.homeSID[home] {
+			return enterprisepolicy.OpenCodeServicePortResult{}, fmt.Errorf("write outside account token")
 		}
-		if existing := f.files[home]; existing > 0 {
-			return enterprisepolicy.OpenCodeServicePortResult{Port: existing}, nil
+		if f.writeFailure[home] {
+			return enterprisepolicy.OpenCodeServicePortResult{}, fmt.Errorf("account file cannot be replaced")
 		}
+		previous := f.files[home]
 		f.files[home] = port
-		return enterprisepolicy.OpenCodeServicePortResult{Port: port, Changed: true}, nil
-	}
-	enterpriseHookWindowsOpenCodeReplace = func(home string, port, stale int) (enterprisepolicy.OpenCodeServicePortResult, error) {
-		if f.activeSID != f.homeSID[home] || f.files[home] != stale || f.unwritable[home] || f.replaceFailure[f.homeSID[home]] {
-			return enterprisepolicy.OpenCodeServicePortResult{}, fmt.Errorf("account replacement did not match its token and file")
-		}
-		f.files[home] = port
-		return enterprisepolicy.OpenCodeServicePortResult{Port: port, Changed: true}, nil
+		return enterprisepolicy.OpenCodeServicePortResult{Port: port, Previous: previous, Changed: previous != port}, nil
 	}
 	enterpriseHookWindowsOpenCodeClaims = func() (map[int]string, error) {
 		copy := map[int]string{}
@@ -232,11 +116,8 @@ func newManagedWindowsOpenCodePortFixture(t *testing.T) *managedWindowsOpenCodeP
 		return copy, nil
 	}
 	enterpriseHookWindowsOpenCodeClaim = func(sid string, port int) error {
-		if f.claimFailure[sid] {
+		if f.claimFailure[sid] || f.claims[port] != "" && f.claims[port] != sid {
 			return fmt.Errorf("claim unavailable")
-		}
-		if owner := f.claims[port]; owner != "" && owner != sid {
-			return fmt.Errorf("claimed by another account")
 		}
 		f.claims[port] = sid
 		return nil
@@ -252,260 +133,248 @@ func (f *managedWindowsOpenCodePortFixture) add(t *testing.T, sid string) string
 	return home
 }
 
-func TestManagedWindowsGuardianPlansFromEachAccountView(t *testing.T) {
-	const first, second = "S-1-5-21-100-200-300-1001", "S-1-5-21-400-500-600-1002"
+func (f *managedWindowsOpenCodePortFixture) run(t *testing.T) (map[string]int, error) {
+	t.Helper()
+	return enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
+}
+
+func TestManagedWindowsGuardianKeepsOpenCodePortsBySIDAcrossEligibilityChanges(t *testing.T) {
 	f := newManagedWindowsOpenCodePortFixture(t)
-	firstHome, secondHome := f.add(t, first), f.add(t, second)
-	f.files[firstHome] = 25002
-	ports, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
-	if err != nil || ports[first] != 25002 || ports[second] != 25003 || f.files[secondHome] != 25003 || f.reads != 2 {
-		t.Fatalf("account view did not reserve its existing port: ports=%v files=%v reads=%d err=%v", ports, f.files, f.reads, err)
+	firstHome, secondHome := f.add(t, openCodeSIDFirst), f.add(t, openCodeSIDSecond)
+	first, err := f.run(t)
+	if err != nil || first[openCodeSIDFirst] != 25001 || first[openCodeSIDSecond] != 25002 || f.reads != 2 {
+		t.Fatalf("first pass: ports=%v reads=%d err=%v", first, f.reads, err)
 	}
-	stable, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
-	if err != nil || stable[first] != 25002 || stable[second] != 25003 || f.reads != 4 {
-		t.Fatalf("ordinary second pass was not stable: ports=%v reads=%d err=%v", stable, f.reads, err)
+	second, err := f.run(t)
+	if err != nil || second[openCodeSIDFirst] != 25001 || second[openCodeSIDSecond] != 25002 || f.reads != 2 {
+		t.Fatalf("stable pass reread account files: ports=%v reads=%d err=%v", second, f.reads, err)
+	}
+	f.profiles = f.profiles[1:]
+	f.record["S-1-5-21-11-22-33-9003"] = 25003
+	thirdHome := f.add(t, openCodeSIDThird)
+	third, err := f.run(t)
+	if err != nil || third[openCodeSIDThird] != 25004 || f.record[openCodeSIDFirst] != 25001 || f.record["S-1-5-21-11-22-33-9003"] != 25003 {
+		t.Fatalf("absent SID lost a reservation: ports=%v record=%v err=%v", third, f.record, err)
+	}
+	f.profiles = append(f.profiles, enterprisehooks.TargetCredentials{SID: openCodeSIDFirst, UserHome: firstHome})
+	f.files[firstHome] = 49375
+	returned, err := f.run(t)
+	if err != nil || returned[openCodeSIDFirst] != 25001 || f.files[firstHome] != 25001 || f.files[secondHome] != 25002 || f.files[thirdHome] != 25004 {
+		t.Fatalf("returning account or record authority: ports=%v files=%v err=%v", returned, f.files, err)
+	}
+	enterpriseHookWindowsGuardianOptions = func() (enterprisepolicy.Options, []string, bool, error) {
+		return enterprisepolicy.Options{}, []string{"codex"}, true, nil
+	}
+	if off, err := f.run(t); err != nil || len(off) != 0 {
+		t.Fatalf("OpenCode-off twin: %v %v", off, err)
+	}
+}
+
+func TestManagedWindowsGuardianPlansFromEachAccountView(t *testing.T) {
+	f := newManagedWindowsOpenCodePortFixture(t)
+	firstHome, secondHome := f.add(t, openCodeSIDFirst), f.add(t, openCodeSIDSecond)
+	f.files[firstHome] = 25002
+	ports, err := f.run(t)
+	if err != nil || ports[openCodeSIDFirst] != 25002 || ports[openCodeSIDSecond] != 25003 || f.files[secondHome] != 25003 || f.reads != 2 {
+		t.Fatalf("account view did not reserve the import: ports=%v files=%v reads=%d err=%v", ports, f.files, f.reads, err)
+	}
+	stable, err := f.run(t)
+	if err != nil || stable[openCodeSIDFirst] != 25002 || stable[openCodeSIDSecond] != 25003 || f.reads != 2 {
+		t.Fatalf("stable pass reread account files: ports=%v reads=%d err=%v", stable, f.reads, err)
 	}
 }
 
 func TestManagedWindowsGuardianContinuesAfterOneClaimFailure(t *testing.T) {
-	const first, second, third = "S-1-5-21-100-200-300-1001", "S-1-5-21-400-500-600-1001", "S-1-5-21-700-800-900-1003"
 	f := newManagedWindowsOpenCodePortFixture(t)
-	firstHome, secondHome, thirdHome := f.add(t, first), f.add(t, second), f.add(t, third)
-	f.record[first], f.files[firstHome], f.files[secondHome], f.claims[25001] = 25001, 25001, 25001, second
-	f.claimFailure[first] = true
-	ports, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
-	if err == nil || ports[first] != 0 || ports[second] != 0 || ports[third] != 25003 ||
-		f.files[thirdHome] != 25003 || f.record[third] != 25003 || f.record[second] != 0 {
-		t.Fatalf("one failed claim stopped unrelated account: ports=%v record=%v files=%v err=%v", ports, f.record, f.files, err)
+	firstHome, secondHome, thirdHome := f.add(t, openCodeSIDFirst), f.add(t, openCodeSIDSecond), f.add(t, openCodeSIDThird)
+	f.record[openCodeSIDFirst], f.files[firstHome], f.files[secondHome] = 25001, 25001, 25001
+	f.claimFailure[openCodeSIDSecond] = true
+	ports, err := f.run(t)
+	if err == nil || ports[openCodeSIDFirst] != 25001 || ports[openCodeSIDSecond] != 0 || ports[openCodeSIDThird] != 25003 || f.record[openCodeSIDSecond] != 0 || f.files[thirdHome] != 25003 {
+		t.Fatalf("claim failure changed another binding: ports=%v record=%v files=%v err=%v", ports, f.record, f.files, err)
 	}
-	delete(f.claimFailure, first)
-	ports, err = enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
-	if err != nil || ports[first] != 25002 || ports[second] != 25001 || ports[third] != 25003 ||
-		f.files[firstHome] != 25002 || f.record[second] != 25001 {
-		t.Fatalf("re-enrollment did not reconcile claim and record: ports=%v record=%v err=%v", ports, f.record, err)
+	delete(f.claimFailure, openCodeSIDSecond)
+	ports, err = f.run(t)
+	if err != nil || ports[openCodeSIDSecond] != 25002 || f.record[openCodeSIDSecond] != 25002 || f.files[secondHome] != 25002 {
+		t.Fatalf("claim recovery: ports=%v record=%v err=%v", ports, f.record, err)
 	}
 }
 
 func TestManagedWindowsGuardianUnknownAccountKeepsKnownAssignments(t *testing.T) {
-	const first, second = "S-1-5-21-100-200-300-1001", "S-1-5-21-400-500-600-1002"
 	f := newManagedWindowsOpenCodePortFixture(t)
-	firstHome, secondHome := f.add(t, first), f.add(t, second)
-	f.record[first] = 25001
-	previousRead := enterpriseHookWindowsOpenCodeRead
-	enterpriseHookWindowsOpenCodeRead = func(home string) (int, error) {
-		if home == firstHome {
-			return 0, fmt.Errorf("account file unavailable")
-		}
-		return previousRead(home)
+	firstHome, secondHome := f.add(t, openCodeSIDFirst), f.add(t, openCodeSIDSecond)
+	f.readFailure[firstHome] = true
+	ports, err := f.run(t)
+	if err == nil || !strings.Contains(err.Error(), firstHome) || ports[openCodeSIDFirst] != 0 || ports[openCodeSIDSecond] != 25002 || f.record[openCodeSIDFirst] != 0 || f.files[secondHome] != 25002 {
+		t.Fatalf("unknown account changed another binding: ports=%v record=%v err=%v", ports, f.record, err)
 	}
-	ports, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
-	if err == nil || !strings.Contains(err.Error(), "exclude it from managed targets") || ports[first] != 0 || ports[second] != 25002 || f.record[first] != 25001 || f.files[secondHome] != 25002 || f.reads != 1 {
-		t.Fatalf("unknown account view changed assignments: ports=%v files=%v claims=%v writes=%d reads=%d err=%v", ports, f.files, f.claims, f.writes, f.reads, err)
+	delete(f.readFailure, firstHome)
+	ports, err = f.run(t)
+	if err != nil || ports[openCodeSIDFirst] != 25001 || ports[openCodeSIDSecond] != 25002 {
+		t.Fatalf("healthy recovery: ports=%v err=%v", ports, err)
 	}
-	ports, err = enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
-	if err == nil || ports[first] != 0 || ports[second] != 25002 || f.files[secondHome] != 25002 || f.record[first] != 25001 {
-		t.Fatalf("persistent unknown account changed a known account: ports=%v record=%v err=%v", ports, f.record, err)
-	}
-	// A healthy read restores the account's eligibility and keeps both assignments.
-	enterpriseHookWindowsOpenCodeRead = previousRead
-	ports, err = enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
-	if err != nil || ports[first] != 25001 || ports[second] != 25002 {
-		t.Fatalf("healthy account read did not resume assignments: ports=%v err=%v", ports, err)
-	}
-	enterpriseHookWindowsOpenCodeRead = func(home string) (int, error) {
-		if home == firstHome {
-			return 0, fmt.Errorf("%w: account file", enterprisepolicy.ErrOpenCodeServicePortContent)
-		}
-		return previousRead(home)
-	}
-	ports, err = enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
-	if err == nil || !strings.Contains(err.Error(), "fix or remove .config/opencode/service.json") || ports[first] != 0 || ports[second] != 25002 || f.record[first] != 25001 {
-		t.Fatalf("readable account file problem held another account: ports=%v record=%v err=%v", ports, f.record, err)
+	f.writeFailure[firstHome] = true
+	ports, err = f.run(t)
+	if err == nil || ports[openCodeSIDFirst] != 0 || ports[openCodeSIDSecond] != 25002 || f.record[openCodeSIDFirst] != 25001 || !strings.Contains(err.Error(), firstHome) {
+		t.Fatalf("recorded file refusal moved another account: ports=%v record=%v err=%v", ports, f.record, err)
 	}
 }
 
 func TestManagedWindowsGuardianUnreadableClaimsDeferThePass(t *testing.T) {
-	const first = "S-1-5-21-100-200-300-1001"
 	f := newManagedWindowsOpenCodePortFixture(t)
-	f.add(t, first)
-	enterpriseHookWindowsOpenCodeClaims = func() (map[int]string, error) {
-		return nil, fmt.Errorf("claim directory unavailable")
-	}
-	ports, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
+	f.add(t, openCodeSIDFirst)
+	enterpriseHookWindowsOpenCodeClaims = func() (map[int]string, error) { return nil, fmt.Errorf("claim directory unavailable") }
+	ports, err := f.run(t)
 	if err == nil || len(ports) != 0 || f.writes != 0 || len(f.record) != 0 {
 		t.Fatalf("unreadable claims changed assignments: ports=%v record=%v writes=%d err=%v", ports, f.record, f.writes, err)
 	}
 }
 
 func TestManagedWindowsGuardianMovesKnownConflictWithUnknownAccount(t *testing.T) {
-	const first, second, third = "S-1-5-21-100-200-300-1001", "S-1-5-21-400-500-600-1002", "S-1-5-21-700-800-900-1003"
 	f := newManagedWindowsOpenCodePortFixture(t)
-	firstHome, secondHome, thirdHome := f.add(t, first), f.add(t, second), f.add(t, third)
-	f.record[first], f.record[second] = 25001, 25002
+	firstHome, secondHome, thirdHome := f.add(t, openCodeSIDFirst), f.add(t, openCodeSIDSecond), f.add(t, openCodeSIDThird)
+	f.record[openCodeSIDFirst], f.record[openCodeSIDSecond] = 25001, 25002
 	f.files[firstHome], f.files[secondHome], f.files[thirdHome] = 25001, 25002, 25002
-	previousRead := enterpriseHookWindowsOpenCodeRead
-	enterpriseHookWindowsOpenCodeRead = func(home string) (int, error) {
-		if home == firstHome {
-			return 0, fmt.Errorf("account file unavailable")
-		}
-		return previousRead(home)
-	}
-	ports, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
-	if err == nil || ports[first] != 0 || ports[second] != 25002 || ports[third] != 25003 ||
-		f.files[thirdHome] != 25003 || f.record[first] != 25001 {
-		t.Fatalf("unknown account held a known conflict: ports=%v files=%v record=%v err=%v", ports, f.files, f.record, err)
-	}
-	stable, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
-	if err == nil || stable[second] != 25002 || stable[third] != 25003 || f.files[thirdHome] != 25003 {
-		t.Fatalf("known conflict moved again: ports=%v files=%v err=%v", stable, f.files, err)
+	f.readFailure[firstHome] = true // recorded account is written without a read
+	ports, err := f.run(t)
+	if err != nil || ports[openCodeSIDFirst] != 25001 || ports[openCodeSIDSecond] != 25002 || ports[openCodeSIDThird] != 25003 || f.files[thirdHome] != 25003 || f.record[openCodeSIDFirst] != 25001 {
+		t.Fatalf("recorded port failed to decide an import: ports=%v files=%v record=%v err=%v", ports, f.files, f.record, err)
 	}
 }
 
 func TestManagedWindowsGuardianMovesWritablePeerAfterLinkedAccountRecovers(t *testing.T) {
-	const first, second = "S-1-5-21-100-200-300-1001", "S-1-5-21-400-500-600-1002"
 	f := newManagedWindowsOpenCodePortFixture(t)
-	firstHome, secondHome := f.add(t, first), f.add(t, second)
+	firstHome, secondHome := f.add(t, openCodeSIDFirst), f.add(t, openCodeSIDSecond)
 	f.files[firstHome] = 25002
-	f.unwritable[firstHome] = true
-	previousRead := enterpriseHookWindowsOpenCodeRead
-	failOnce := true
-	enterpriseHookWindowsOpenCodeRead = func(home string) (int, error) {
-		if home == firstHome && failOnce {
-			failOnce = false
-			return 0, fmt.Errorf("account file unavailable")
-		}
-		return previousRead(home)
+	f.readFailure[firstHome] = true
+	first, err := f.run(t)
+	if err == nil || first[openCodeSIDSecond] != 25002 || f.files[secondHome] != 25002 {
+		t.Fatalf("first pass: ports=%v files=%v err=%v", first, f.files, err)
 	}
-	firstPass, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
-	if err == nil || firstPass[first] != 0 || firstPass[second] != 25002 || f.files[secondHome] != 25002 {
-		t.Fatalf("unreadable first pass: ports=%v files=%v err=%v", firstPass, f.files, err)
+	delete(f.readFailure, firstHome)
+	f.writeFailure[firstHome] = true
+	second, err := f.run(t)
+	if err == nil || second[openCodeSIDFirst] != 0 || second[openCodeSIDSecond] != 25002 || f.record[openCodeSIDFirst] != 0 || f.record[openCodeSIDSecond] != 25002 {
+		t.Fatalf("linked file displaced a record: ports=%v record=%v err=%v", second, f.record, err)
 	}
-	secondPass, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
-	if err == nil || secondPass[first] != 0 || secondPass[second] != 25003 ||
-		f.files[firstHome] != 25002 || f.files[secondHome] != 25003 || f.record[second] != 25003 {
-		t.Fatalf("writable account did not move after the linked account recovered: ports=%v files=%v record=%v err=%v", secondPass, f.files, f.record, err)
-	}
-	stable, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
-	if err == nil || stable[second] != 25003 || f.files[firstHome] == f.files[secondHome] {
-		t.Fatalf("separate ports did not remain stable: ports=%v files=%v err=%v", stable, f.files, err)
-	}
-	f.unwritable[firstHome] = false
-	recovered, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
-	if err != nil || recovered[first] != 25001 || recovered[second] != 25003 ||
-		f.files[firstHome] != 25001 || f.files[secondHome] != 25003 {
-		t.Fatalf("ordinary writable account did not recover: ports=%v files=%v err=%v", recovered, f.files, err)
+	delete(f.writeFailure, firstHome)
+	third, err := f.run(t)
+	if err != nil || third[openCodeSIDFirst] != 25001 || third[openCodeSIDSecond] != 25002 || f.files[firstHome] != 25001 {
+		t.Fatalf("ordinary writable recovery: ports=%v files=%v err=%v", third, f.files, err)
 	}
 }
 
 func TestManagedWindowsGuardianMovesPeerAfterAccountWriteRefusal(t *testing.T) {
-	const first, second = "S-1-5-21-100-200-300-1001", "S-1-5-21-400-500-600-1002"
 	f := newManagedWindowsOpenCodePortFixture(t)
-	firstHome, secondHome := f.add(t, first), f.add(t, second)
+	firstHome, secondHome := f.add(t, openCodeSIDFirst), f.add(t, openCodeSIDSecond)
+	f.record[openCodeSIDSecond] = 25002
 	f.files[firstHome], f.files[secondHome] = 25002, 25002
-	f.record[second], f.claims[25002] = 25002, second
-	f.replaceFailure[first] = true
-	ports, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
-	if err == nil || ports[first] != 0 || ports[second] != 25003 ||
-		f.files[firstHome] != 25002 || f.files[secondHome] != 25003 || f.record[second] != 25003 {
-		t.Fatalf("writable peer did not move after a write refusal: ports=%v files=%v record=%v err=%v", ports, f.files, f.record, err)
+	f.writeFailure[firstHome] = true
+	for pass := 0; pass < 3; pass++ {
+		ports, err := f.run(t)
+		if err == nil || ports[openCodeSIDFirst] != 0 || ports[openCodeSIDSecond] != 25002 || f.record[openCodeSIDSecond] != 25002 || f.record[openCodeSIDFirst] != 0 {
+			t.Fatalf("pass %d moved the recorded peer after refusal: ports=%v record=%v err=%v", pass, ports, f.record, err)
+		}
 	}
-	delete(f.replaceFailure, first)
-	recovered, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
-	if err != nil || recovered[first] != 25001 || recovered[second] != 25003 ||
-		f.files[firstHome] != 25001 || f.files[secondHome] != 25003 {
-		t.Fatalf("ordinary write did not recover: ports=%v files=%v err=%v", recovered, f.files, err)
+	delete(f.writeFailure, firstHome)
+	ports, err := f.run(t)
+	if err != nil || ports[openCodeSIDFirst] != 25001 || ports[openCodeSIDSecond] != 25002 || f.files[firstHome] != 25001 {
+		t.Fatalf("ordinary recovery: ports=%v files=%v err=%v", ports, f.files, err)
 	}
 }
 
 func TestManagedWindowsGuardianAccountReadHasDeadline(t *testing.T) {
-	const first = "S-1-5-21-100-200-300-1001"
 	f := newManagedWindowsOpenCodePortFixture(t)
-	f.add(t, first)
-	release := make(chan struct{})
-	defer close(release)
+	f.add(t, openCodeSIDFirst)
+	release, finished := make(chan struct{}), make(chan struct{})
 	enterpriseHookWindowsOpenCodeReadTimeout = 10 * time.Millisecond
-	enterpriseHookWindowsOpenCodeRead = func(string) (int, error) { <-release; return 0, nil }
+	enterpriseHookWindowsOpenCodeRead = func(string) (int, error) { <-release; close(finished); return 0, nil }
 	start := time.Now()
-	ports, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
-	if err == nil || len(ports) != 0 || time.Since(start) > 5*time.Second || f.writes != 0 {
+	ports, err := f.run(t)
+	close(release)
+	<-finished
+	if err == nil || len(ports) != 0 || time.Since(start) > 5*time.Second || f.writes != 1 {
 		t.Fatalf("account read did not stop at its deadline: ports=%v writes=%d err=%v", ports, f.writes, err)
 	}
 }
 
-func TestManagedWindowsGuardianResolvesOpenCodePortConflicts(t *testing.T) {
-	const (
-		first  = "S-1-5-21-100-200-300-1001"
-		second = "S-1-5-21-400-500-600-1002"
-	)
-	previousOptions, previousProfiles := enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles
-	previousLoad, previousWrite := enterpriseHookWindowsOpenCodePortsLoad, enterpriseHookWindowsOpenCodePortsWrite
-	previousRead, previousEnsure, previousReplace := enterpriseHookWindowsOpenCodeRead, enterpriseHookWindowsOpenCodeEnsure, enterpriseHookWindowsOpenCodeReplace
-	previousRunAs := enterpriseHookWindowsOpenCodeRunAs
-	previousClaims, previousClaim := enterpriseHookWindowsOpenCodeClaims, enterpriseHookWindowsOpenCodeClaim
-	previousManifest, previousConfig := enterpriseHookManifest, cfg
-	t.Cleanup(func() {
-		enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles = previousOptions, previousProfiles
-		enterpriseHookWindowsOpenCodePortsLoad, enterpriseHookWindowsOpenCodePortsWrite = previousLoad, previousWrite
-		enterpriseHookWindowsOpenCodeRead, enterpriseHookWindowsOpenCodeEnsure, enterpriseHookWindowsOpenCodeReplace = previousRead, previousEnsure, previousReplace
-		enterpriseHookWindowsOpenCodeRunAs = previousRunAs
-		enterpriseHookWindowsOpenCodeClaims, enterpriseHookWindowsOpenCodeClaim = previousClaims, previousClaim
-		enterpriseHookManifest, cfg = previousManifest, previousConfig
-	})
-	cfg = nil
-	enterpriseHookManifest = filepath.Join(t.TempDir(), "targets.yaml")
-	enterpriseHookWindowsGuardianOptions = func() (enterprisepolicy.Options, []string, bool, error) {
-		return enterprisepolicy.Options{}, []string{"opencode"}, true, nil
-	}
-	profiles := []enterprisehooks.TargetCredentials{{SID: first, UserHome: `C:\Users\first`}, {SID: second, UserHome: `C:\Users\second`}}
-	enterpriseHookWindowsEligibleProfiles = func(context.Context) ([]enterprisehooks.TargetCredentials, error) { return profiles, nil }
-	record := map[string]int{first: 25001}
-	var readErr error
-	writes := 0
-	enterpriseHookWindowsOpenCodePortsLoad = func(string) (map[string]int, error) {
-		if readErr != nil {
-			return nil, readErr
-		}
-		copy := map[string]int{}
-		for key, port := range record {
-			copy[key] = port
-		}
-		return copy, nil
-	}
-	enterpriseHookWindowsOpenCodePortsWrite = func(_ string, ports map[string]int) error {
-		writes++
-		record = ports
-		return nil
-	}
-	files := map[string]int{`C:\Users\second`: 25001}
-	enterpriseHookWindowsOpenCodeRead = func(home string) (int, error) { return files[home], nil }
-	enterpriseHookWindowsOpenCodeEnsure = func(home string, port int) (enterprisepolicy.OpenCodeServicePortResult, error) {
-		files[home] = port
-		return enterprisepolicy.OpenCodeServicePortResult{Port: port, Changed: true}, nil
-	}
-	replacements := 0
-	enterpriseHookWindowsOpenCodeReplace = func(home string, port, stale int) (enterprisepolicy.OpenCodeServicePortResult, error) {
-		if files[home] != stale {
-			t.Fatalf("replacement expected port %d, got %d", stale, files[home])
-		}
-		replacements++
-		files[home] = port
-		return enterprisepolicy.OpenCodeServicePortResult{Port: port, Changed: true}, nil
-	}
+func TestManagedWindowsGuardianTimedOutReadDoesNotExhaustHealthyProfiles(t *testing.T) {
+	f := newManagedWindowsOpenCodePortFixture(t)
+	firstHome := f.add(t, openCodeSIDFirst)
+	release, finished := make(chan struct{}), make(chan struct{})
+	enterpriseHookWindowsOpenCodeReadTimeout = 10 * time.Millisecond
 	enterpriseHookWindowsOpenCodeRunAs = func(_ enterprisehooks.TargetCredentials, fn func() error) error { return fn() }
-	claims := 0
-	enterpriseHookWindowsOpenCodeClaims = func() (map[int]string, error) { return nil, nil }
-	enterpriseHookWindowsOpenCodeClaim = func(string, int) error { claims++; return nil }
-	ports, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
-	if err != nil || ports[first] != 25001 || ports[second] != 25002 || files[`C:\Users\second`] != 25002 || replacements != 1 {
-		t.Fatalf("record/file conflict was not resolved: ports=%v files=%v replacements=%d err=%v", ports, files, replacements, err)
+	enterpriseHookWindowsOpenCodeRead = func(home string) (int, error) {
+		if home == firstHome {
+			<-release
+			close(finished)
+		}
+		return 0, nil
 	}
-	ports, err = enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{})
-	if err != nil || ports[first] != 25001 || ports[second] != 25002 || replacements != 1 {
-		t.Fatalf("second pass was not stable: ports=%v replacements=%d err=%v", ports, replacements, err)
+	enterpriseHookWindowsOpenCodeSet = func(_ string, port int) (enterprisepolicy.OpenCodeServicePortResult, error) {
+		return enterprisepolicy.OpenCodeServicePortResult{Port: port}, nil
 	}
-	readErr = fmt.Errorf("record unreadable")
-	beforeWrites, beforeClaims := writes, claims
-	if existing, err := enterpriseHookStandaloneOpenCodePorts(context.Background(), enterprisehooks.Manifest{}); err == nil || len(existing) != 0 || writes != beforeWrites || claims != beforeClaims || replacements != 1 {
-		t.Fatalf("unreadable record made an assignment: existing=%v writes=%d claims=%d replacements=%d err=%v", existing, writes, claims, replacements, err)
+	for pass := 0; pass < 5; pass++ {
+		sid := fmt.Sprintf("S-1-5-21-700-800-900-%d", 1002+pass)
+		f.add(t, sid)
+		ports, err := f.run(t)
+		if err == nil || ports[sid] == 0 || f.record[sid] == 0 || ports[openCodeSIDFirst] != 0 {
+			t.Fatalf("pass %d lost a healthy account: ports=%v record=%v err=%v", pass, ports, f.record, err)
+		}
+	}
+	close(release)
+	<-finished
+}
+
+func TestManagedWindowsGuardianResolvesOpenCodePortConflicts(t *testing.T) {
+	f := newManagedWindowsOpenCodePortFixture(t)
+	firstHome, secondHome := f.add(t, openCodeSIDFirst), f.add(t, openCodeSIDSecond)
+	f.record[openCodeSIDFirst] = 25001
+	f.files[firstHome], f.files[secondHome] = 25001, 25001
+	ports, err := f.run(t)
+	if err != nil || ports[openCodeSIDFirst] != 25001 || ports[openCodeSIDSecond] != 25002 || f.files[secondHome] != 25002 || f.record[openCodeSIDFirst] != 25001 {
+		t.Fatalf("record/file conflict: ports=%v files=%v record=%v err=%v", ports, f.files, f.record, err)
+	}
+	f.files[firstHome] = 26000
+	ports, err = f.run(t)
+	if err != nil || ports[openCodeSIDFirst] != 25001 || f.files[firstHome] != 25001 || ports[openCodeSIDSecond] != 25002 {
+		t.Fatalf("manual file edit changed binding: ports=%v files=%v err=%v", ports, f.files, err)
+	}
+	beforeWrites := f.writes
+	enterpriseHookWindowsOpenCodePortsLoad = func(string) (map[string]int, error) { return nil, fmt.Errorf("record unreadable") }
+	if got, err := f.run(t); err == nil || len(got) != 0 || f.writes != beforeWrites {
+		t.Fatalf("unreadable record made assignments: ports=%v writes=%d err=%v", got, f.writes, err)
+	}
+}
+
+func TestManagedWindowsGuardianFinalServiceLinkDoesNotPublishClash(t *testing.T) {
+	f := newManagedWindowsOpenCodePortFixture(t)
+	firstHome, secondHome := f.add(t, openCodeSIDFirst), f.add(t, openCodeSIDSecond)
+	f.files[firstHome] = 25002       // the account-side read follows the final link
+	f.writeFailure[firstHome] = true // the protected writer refuses it
+	ports, err := f.run(t)
+	if err == nil || ports[openCodeSIDFirst] != 0 || ports[openCodeSIDSecond] == 25002 || f.record[openCodeSIDFirst] != 0 || f.record[openCodeSIDSecond] == 25002 || f.files[secondHome] == 25002 {
+		t.Fatalf("linked file port was published to another account: ports=%v files=%v record=%v err=%v", ports, f.files, f.record, err)
+	}
+}
+
+func TestManagedWindowsOpenCodePortReadSeesFinalServiceLink(t *testing.T) {
+	home := t.TempDir()
+	path := enterprisepolicy.OpenCodeServiceConfigPath(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(home, "linked-service.json")
+	if err := os.WriteFile(target, []byte(`{"port":25002}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("service link unavailable: %v", err)
+	}
+	if port, err := enterprisepolicy.ReadOpenCodeServicePortAsUser(home); err != nil || port != 25002 {
+		t.Fatalf("account read: %d %v", port, err)
+	}
+	if _, err := enterprisepolicy.SetOpenCodeServicePort(home, 25001); err == nil {
+		t.Fatal("protected writer changed a final link")
 	}
 }

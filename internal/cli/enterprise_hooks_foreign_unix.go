@@ -20,7 +20,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -68,7 +67,7 @@ var (
 // and publish the record of the OpenCode service ports the eligible accounts
 // have (gas-ux-r1 GAP-0053); tests replace them.
 var (
-	enterpriseHookLoadOpenCodePorts  = enterprisehooks.LoadUnixOpenCodeServicePortsProblems
+	enterpriseHookLoadOpenCodePorts  = enterprisehooks.LoadUnixOpenCodeServicePortsState
 	enterpriseHookWriteOpenCodePorts = enterprisehooks.WriteUnixOpenCodeServicePorts
 )
 
@@ -257,10 +256,9 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	openCodePortsPath := enterpriseHookOpenCodePortsPath(enterpriseHookManifest)
 	var openCodeRecorded map[int]int
 	var openCodeRecordedUnknown []enterprisehooks.UnixOpenCodeServicePortUnknown
-	var openCodeRecordedShared []enterprisehooks.UnixOpenCodeServicePortShare
 	openCodePortsErr := error(nil)
 	if openCodeGoverned {
-		openCodeRecorded, openCodeRecordedUnknown, openCodeRecordedShared, openCodePortsErr = enterpriseHookLoadOpenCodePorts(openCodePortsPath)
+		openCodeRecorded, openCodeRecordedUnknown, openCodePortsErr = enterpriseHookLoadOpenCodePorts(openCodePortsPath)
 		if openCodePortsErr != nil {
 			// The record is what keeps the ports of departed, excluded and
 			// directory accounts taken. Without it no port is given or moved
@@ -348,31 +346,29 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		return 0
 	}
 
-	// OpenCode ports (gas-ux-r1 GAP-0053, REVIEW-gx053-5 MF1). Each eligible
-	// account's service.json is read by its as-the-user worker, which sees
-	// links and root-squashed homes as the user does; root reads only as a
-	// fallback. An account whose file cannot be read even as the user keeps
-	// its recorded port held. Then the plan; its moves go through the same
-	// worker below.
+	// OpenCode ports (gas-ux-r1 GAP-0053). The guardian's root-owned record is
+	// the only authority (REVIEW-gx053-9): a recorded uid keeps its port
+	// whatever any user's file says, and its worker writes that port into
+	// the file. A user's file is read (as that user) only to import a port for
+	// a uid with no record entry, when no other uid holds it.
 	var openCodePlan enterprisepolicy.OpenCodePortPlan
 	var openCodeUnknown []enterprisehooks.UnixOpenCodeServicePortUnknown
-	var openCodeUnwritable map[int]bool
-	var openCodeShared []enterprisehooks.UnixOpenCodeServicePortShare
 	if openCodeGoverned {
-		var filePorts map[int]int
-		filePorts, openCodeUnwritable, openCodeUnknown = enterpriseHookReadOpenCodePortsAsUsers(ctx, stderr, accounts)
+		var unrecorded []enterprisehooks.UnixEligibleAccount
 		uids := make([]int, 0, len(accounts))
 		for _, account := range accounts {
 			uids = append(uids, account.UID)
+			if _, ok := openCodeRecorded[account.UID]; !ok && openCodePortsErr == nil {
+				unrecorded = append(unrecorded, account)
+			}
 		}
-		// An account whose port is unknown this pass keeps its recorded port
-		// reserved and nothing changes for it; every other account is planned
-		// as usual (REVIEW-gx053-7: one account's file must not stop the rest).
+		var imports map[int]int
+		imports, openCodeUnknown = enterpriseHookReadOpenCodePortsAsUsers(ctx, stderr, unrecorded)
 		unknownUIDs := map[int]bool{}
 		for _, entry := range openCodeUnknown {
 			unknownUIDs[entry.UID] = true
 		}
-		openCodePlan = enterprisepolicy.PlanOpenCodeServicePortsHolding(uids, filePorts, openCodeRecorded, openCodePortsErr == nil, unknownUIDs, openCodeUnwritable)
+		openCodePlan = enterprisepolicy.PlanOpenCodeServicePorts(uids, imports, openCodeRecorded, openCodePortsErr == nil, unknownUIDs)
 		userOf := map[int]string{}
 		for _, account := range accounts {
 			userOf[account.UID] = account.User
@@ -383,19 +379,34 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			}
 			return fmt.Sprintf("uid %d", uid)
 		}
-		for _, conflict := range openCodePlan.Conflicts {
-			moved := fmt.Sprintf("it keeps the shared port: every port from %d to %d is held; give it its own with 'opencode service set port <free port>'",
-				enterprisepolicy.OpenCodeAccountPortBase, enterprisepolicy.OpenCodeAccountPortBase+enterprisepolicy.OpenCodeAccountPortSpan-1)
-			if openCodePortsErr != nil {
-				moved = "it is not moved while the record cannot be read; give it its own with 'opencode service set port <free port>'"
-			} else if port := openCodePlan.Ports[conflict.UID]; port > 0 {
-				moved = fmt.Sprintf("this pass moves it to port %d (a failed move is logged below)", port)
+		gets := func(uid int) string {
+			if port := openCodePlan.Record[uid]; port > 0 {
+				return fmt.Sprintf("port %d", port)
 			}
-			fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: OpenCode background server port %d of %s is held by %s; %s\n",
-				conflict.Port, name(conflict.UID), name(conflict.Holder), moved)
+			return "no port (every port of the range is held)"
+		}
+		for _, conflict := range openCodePlan.Conflicts {
+			fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: OpenCode background server port %d of %s is recorded for %s; %s gets %s instead\n",
+				conflict.Port, name(conflict.UID), name(conflict.Holder), name(conflict.UID), gets(conflict.UID))
+		}
+		contestedPorts := make([]int, 0, len(openCodePlan.Contested))
+		for port := range openCodePlan.Contested {
+			contestedPorts = append(contestedPorts, port)
+		}
+		sort.Ints(contestedPorts)
+		for _, port := range contestedPorts {
+			claimants := make([]string, 0, len(openCodePlan.Contested[port]))
+			for _, uid := range openCodePlan.Contested[port] {
+				claimants = append(claimants, fmt.Sprintf("%s -> %s", name(uid), gets(uid)))
+			}
+			fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: OpenCode background server port %d is named by the files of several accounts with no record entry, so it is given to none of them: %s. To give one of them that port, an administrator edits the record, then that account's service.json is rewritten on the next pass\n",
+				port, strings.Join(claimants, ", "))
 		}
 		if openCodePortsErr == nil {
 			for _, uid := range openCodePlan.NoPort {
+				if unknownUIDs[uid] {
+					continue
+				}
 				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: no free OpenCode background server port for %s: every port from %d to %d is held\n",
 					name(uid), enterprisepolicy.OpenCodeAccountPortBase,
 					enterprisepolicy.OpenCodeAccountPortBase+enterprisepolicy.OpenCodeAccountPortSpan-1)
@@ -420,8 +431,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			continue
 		}
 		request := enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpForeignCleanup, Standalone: true, CopilotVSCode: vscodeFor(vscode, account.UID),
-			OpenCodeServicePort: openCodePortForWorker(openCodePorts, openCodeUnknown, account.UID), OpenCodeServicePortReplace: openCodePlan.Replace[account.UID],
-			OpenCodeServicePortsHeld: openCodePortsHeldByOthers(openCodePlan.Record, account.UID)}
+			OpenCodeServicePort: openCodePortForWorker(openCodePorts, openCodeUnknown, account.UID)}
 		for _, cleanup := range cleanups {
 			cleanup.OwnedCommands = perUserOwnedHookCommands(cleanup.Connector, account.Home, filepath.Join(account.Home, ".defenseclaw"))
 			request.ForeignCleanup = append(request.ForeignCleanup, cleanup)
@@ -556,7 +566,6 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		}
 	}
 	removed := 0
-	openCodeSeen := map[int]int{}
 	openCodeUsers := map[int]string{}
 	createdDirs := map[int][]string{}
 	var auditRepairs []enterpriseHookGuardianAuditReport
@@ -618,51 +627,36 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		logEnterpriseForeignHookBlocks(stderr, user, outcome.Response.Blocks, outcome.Response.BlocksDropped, outcome.Response.BlocksError)
 		if want := outcome.Job.Request.OpenCodeServicePort; want > 0 {
 			report := outcome.Response.OpenCodeServicePort
+			account := enterprisehooks.UnixEligibleAccount{UID: outcome.Job.Account.UID, User: user, Home: outcome.Job.Account.Home}
+			path := enterprisepolicy.OpenCodeServiceConfigPath(outcome.Job.Account.Home)
 			switch {
-			case report == nil:
+			case report == nil || report.Error != "":
+				// The recorded port could not be written: the record does not
+				// change; the account is warned about (status, verify, doctor).
 				clean = false
-				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: could not give %s's OpenCode background server its own port: %s\n", user, errEnterpriseHookWorkerNoResult.Error())
-			case report.Error != "":
-				clean = false
-				if stale := openCodePlan.Replace[outcome.Job.Account.UID]; stale > 0 {
-					// A planned move was refused: the share stays this pass.
-					// The next read reports the file as not writable, and the
-					// plan then moves the other account (REVIEW-gx053-8).
-					other, _ := openCodePortHolder(openCodePlan.Record, stale, outcome.Job.Account.UID)
-					path := enterprisepolicy.OpenCodeServiceConfigPath(outcome.Job.Account.Home)
-					share := enterprisehooks.UnixOpenCodeServicePortShare{UID: outcome.Job.Account.UID, User: user, Other: other, Port: stale, Path: path,
-						Fix: fmt.Sprintf("let the guardian rewrite %s (replace a linked ~/.config/opencode with a folder), or as %s run 'opencode service set port <free port>'", path, user)}
-					openCodeShared = append(openCodeShared, share)
-					fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: %s's OpenCode background server shares port %d with uid %d and could not be moved (%s); the next pass moves uid %d instead if its file can be rewritten. To clear it: %s\n",
-						user, stale, other, boundedString(report.Error, 256), other, share.Fix)
+				raw := errEnterpriseHookWorkerNoResult.Error()
+				if report != nil {
+					raw = report.Error
+				}
+				fix := openCodeUnknownFix(account, path, raw, want)
+				reason := fmt.Sprintf("could not write its recorded port %d: %s", want, boundedString(raw, 256))
+				openCodeUnknown = append(openCodeUnknown, enterprisehooks.UnixOpenCodeServicePortUnknown{UID: account.UID, User: user, Reason: reason, Path: path, Fix: fix})
+				if _, recorded := openCodeRecorded[account.UID]; recorded {
+					fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: %s's OpenCode service port file %s %s; the record keeps port %d. To clear it: %s\n",
+						user, path, reason, want, fix)
 				} else {
-					fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: could not give %s's OpenCode background server its own port: %s\n", user, boundedString(report.Error, 512))
+					// A binding this pass made but could not write is not
+					// recorded: nothing in the record changes.
+					delete(openCodePlan.Record, account.UID)
+					fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: %s's OpenCode service port file %s %s; no binding is recorded for it. To clear it: %s\n",
+						user, path, reason, fix)
 				}
-			case report.Port > 0 && report.Port <= 65535 && report.Port != want:
-				// The file names another port than the one planned (the user
-				// changed it since the pass read it). Recorded only when no
-				// other account holds it, so the record never pairs two
-				// accounts with one port.
-				if other, held := openCodePortHolder(openCodePlan.Record, report.Port, outcome.Job.Account.UID); held {
-					// The worker could not move it (the file changed or could
-					// not be written): say so, promise nothing.
-					clean = false
-					fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: %s's OpenCode background server shares port %d with uid %d and could not be moved%s; as %s, run 'opencode service set port <free port>'\n",
-						user, report.Port, other, openCodeReportReason(report), user)
-				} else {
-					openCodeSeen[outcome.Job.Account.UID] = report.Port
-				}
-				openCodeUsers[outcome.Job.Account.UID] = user
-			case report.Port > 0 && report.Port <= 65535:
-				openCodeSeen[outcome.Job.Account.UID] = report.Port
-				openCodeUsers[outcome.Job.Account.UID] = user
-				if report.Changed && report.Replaced > 0 {
-					fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: moved %s's OpenCode background server from port %d, which another account holds, to %d; it moves there at its next start (opencode service restart)\n",
-						user, report.Replaced, report.Port)
-				} else if report.Changed {
-					fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: gave %s's OpenCode background server port %d (OpenCode's default, %d, is shared by every account); it moves there at its next start\n",
-						user, report.Port, enterprisepolicy.OpenCodeDefaultServicePort)
-				}
+			case report.Changed && report.Previous > 0:
+				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: %s's OpenCode service.json named port %d; wrote its recorded port %d (the record is the only authority); it moves there at its next start (opencode service restart)\n",
+					user, report.Previous, want)
+			case report.Changed:
+				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: gave %s's OpenCode background server port %d (OpenCode's default, %d, is shared by every account); it moves there at its next start\n",
+					user, want, enterprisepolicy.OpenCodeDefaultServicePort)
 			}
 		}
 		if report := outcome.Response.CopilotVSCode; report != nil {
@@ -741,8 +735,9 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	}
 	reportEnterpriseHookGuardianRepairs(ctx, hookSocket, auditRepairs)
 	if openCodeGoverned && openCodePortsErr == nil {
-		next, changed := nextOpenCodeServicePorts(openCodeRecorded, openCodePlan.Record, openCodeSeen)
-		if !sameOpenCodeUnknown(openCodeRecordedUnknown, openCodeUnknown) || len(openCodeRecordedShared) != len(openCodeShared) {
+		sort.Slice(openCodeUnknown, func(i, j int) bool { return openCodeUnknown[i].UID < openCodeUnknown[j].UID })
+		next, changed := nextOpenCodeServicePorts(openCodeRecorded, openCodePlan.Record)
+		if !sameOpenCodeUnknown(openCodeRecordedUnknown, openCodeUnknown) {
 			changed = true
 		}
 		if changed {
@@ -751,7 +746,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 					openCodeUsers[account.UID] = account.User
 				}
 			}
-			if err := enterpriseHookWriteOpenCodePorts(openCodePortsPath, next, openCodeUsers, openCodeUnknown, openCodeShared); err != nil {
+			if err := enterpriseHookWriteOpenCodePorts(openCodePortsPath, next, openCodeUsers, openCodeUnknown); err != nil {
 				clean = false
 				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: OpenCode service ports record: %v\n", err)
 			}
@@ -1009,19 +1004,14 @@ func enterpriseHookOpenCodePortsPath(manifestPath string) string {
 }
 
 // nextOpenCodeServicePorts is the record after a pass: the plan's record
-// (PlanOpenCodeServicePorts: every recorded entry, never dropped, and every
-// eligible account's port) with the ports the workers reported. Departed,
-// excluded and directory accounts, and homes not available this pass, keep
-// their entries (REVIEW-gx053-3, the GAP-1704 rule for API-port claims).
-func nextOpenCodeServicePorts(recorded, planned, seen map[int]int) (map[int]int, bool) {
+// (every binding unchanged, never dropped, and the new ones). Nothing a
+// worker reports changes a binding (REVIEW-gx053-9).
+func nextOpenCodeServicePorts(recorded, planned map[int]int) (map[int]int, bool) {
 	next := map[int]int{}
 	for uid, port := range recorded {
 		next[uid] = port
 	}
 	for uid, port := range planned {
-		next[uid] = port
-	}
-	for uid, port := range seen {
 		next[uid] = port
 	}
 	changed := len(next) != len(recorded)
@@ -1033,32 +1023,13 @@ func nextOpenCodeServicePorts(recorded, planned, seen map[int]int) (map[int]int,
 	return next, changed
 }
 
-// openCodePortsHeldByOthers are the ports record gives accounts other than uid:
-// the worker moves its account off any of them its file names.
-func openCodePortsHeldByOthers(record map[int]int, uid int) []int {
-	var held []int
-	for other, port := range record {
-		if other != uid && port > 0 {
-			held = append(held, port)
-		}
-	}
-	sort.Ints(held)
-	return held
-}
-
-func openCodeReportReason(report *enterpriseHookWorkerOpenCodePortReport) string {
-	if report.Error != "" {
-		return " (" + boundedString(report.Error, 256) + ")"
-	}
-	return ""
-}
-
 // enterpriseHookOpenCodeReadTimeout bounds one account's as-the-user read of
 // its OpenCode port (tests shorten it).
 var enterpriseHookOpenCodeReadTimeout = 20 * time.Second
 
-// enterpriseHookReadOpenCodePortsAsUsers reads every eligible account's
-// OpenCode service port as that account (worker operation
+// enterpriseHookReadOpenCodePortsAsUsers reads, as each account, the OpenCode
+// service port of the accounts given (the eligible ones with no record entry:
+// the only use of a user's file is that import) (worker operation
 // opencode_port_read), at most enterpriseHookWorkerParallelism at a time,
 // each bounded by enterpriseHookOpenCodeReadTimeout: the worker is given that
 // deadline and kills its own process group when it passes, and the pass does
@@ -1067,9 +1038,8 @@ var enterpriseHookOpenCodeReadTimeout = 20 * time.Second
 // available, is returned in unknown (REVIEW-gx053-6 MF1); the plan then keeps
 // recorded ports held and gives no new port, and one bad home never blocks
 // the others.
-var enterpriseHookReadOpenCodePortsAsUsers = func(ctx context.Context, stderr io.Writer, accounts []enterprisehooks.UnixEligibleAccount) (map[int]int, map[int]bool, []enterprisehooks.UnixOpenCodeServicePortUnknown) {
+var enterpriseHookReadOpenCodePortsAsUsers = func(ctx context.Context, stderr io.Writer, accounts []enterprisehooks.UnixEligibleAccount) (map[int]int, []enterprisehooks.UnixOpenCodeServicePortUnknown) {
 	ports := map[int]int{}
-	unwritable := map[int]bool{}
 	var unknown []enterprisehooks.UnixOpenCodeServicePortUnknown
 	var mu sync.Mutex
 	note := func(account enterprisehooks.UnixEligibleAccount, reason string) {
@@ -1077,7 +1047,7 @@ var enterpriseHookReadOpenCodePortsAsUsers = func(ctx context.Context, stderr io
 		mu.Lock()
 		defer mu.Unlock()
 		unknown = append(unknown, enterprisehooks.UnixOpenCodeServicePortUnknown{UID: account.UID, User: account.User,
-			Reason: boundedString(reason, 256), Path: path, Fix: openCodeUnknownFix(account, path, reason)})
+			Reason: boundedString(reason, 256), Path: path, Fix: openCodeUnknownFix(account, path, reason, 0)})
 	}
 	slots := make(chan struct{}, enterpriseHookWorkerParallelism)
 	var wg sync.WaitGroup
@@ -1123,9 +1093,6 @@ var enterpriseHookReadOpenCodePortsAsUsers = func(ctx context.Context, stderr io
 			case report.Port > 0 && report.Port <= 65535:
 				mu.Lock()
 				ports[account.UID] = report.Port
-				if report.NotWritable {
-					unwritable[account.UID] = true
-				}
 				mu.Unlock()
 			}
 		}(account)
@@ -1133,18 +1100,20 @@ var enterpriseHookReadOpenCodePortsAsUsers = func(ctx context.Context, stderr io
 	wg.Wait()
 	sort.Slice(unknown, func(i, j int) bool { return unknown[i].UID < unknown[j].UID })
 	for _, entry := range unknown {
-		fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: %s's OpenCode service port is unknown this pass: %s (%s); its recorded port stays reserved and nothing changes for it, other accounts are not affected. To clear it: %s\n",
+		fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: %s's OpenCode service port is unknown this pass: %s (%s); it gets no port until it can be read, other accounts are not affected. To clear it: %s\n",
 			entry.User, entry.Path, entry.Reason, entry.Fix)
 	}
-	return ports, unwritable, unknown
+	return ports, unknown
 }
 
 // openCodeUnknownFix is the administrator's step that lets the guardian read
 // the account's OpenCode service.json again, by the reason it could not.
-func openCodeUnknownFix(account enterprisehooks.UnixEligibleAccount, path, reason string) string {
+func openCodeUnknownFix(account enterprisehooks.UnixEligibleAccount, path, reason string, port int) string {
 	lower := strings.ToLower(reason)
 	user := account.User
 	switch {
+	case port > 0 && (strings.Contains(lower, "not a directory") || strings.Contains(lower, "read-only") || strings.Contains(lower, "permission") || strings.Contains(lower, "denied")):
+		return fmt.Sprintf("as %s, run 'opencode service set port %d' (it writes through a link), or make %s a folder (not a link) that %s can write; the next pass retries", user, port, filepath.Dir(path), user)
 	case strings.Contains(lower, "not available") || strings.Contains(lower, "did not answer") || strings.Contains(lower, "timed out") || strings.Contains(lower, "deadline"):
 		return fmt.Sprintf("make %s's home %s reachable (check its mount: findmnt -T %s); the next pass retries", user, account.Home, account.Home)
 	case strings.Contains(lower, "permission") || strings.Contains(lower, "denied"):
@@ -1181,37 +1150,10 @@ func sameOpenCodeUnknown(a, b []enterprisehooks.UnixOpenCodeServicePortUnknown) 
 	return true
 }
 
-// openCodePortHolder is the uid other than uid that record gives port, if any.
-func openCodePortHolder(record map[int]int, port, uid int) (int, bool) {
-	for other, held := range record {
-		if held == port && other != uid {
-			return other, true
-		}
-	}
-	return 0, false
-}
-
 // runEnterpriseHookWorkerOpenCodePort runs inside the worker as the user.
 func runEnterpriseHookWorkerOpenCodePort(request enterpriseHookWorkerRequest) *enterpriseHookWorkerOpenCodePortReport {
-	home := filepath.Clean(request.Home)
-	// The worker reads the file as the user: a port it names that another
-	// account holds (Replace, or any port in the held set) is replaced.
-	stale := request.OpenCodeServicePortReplace
-	if current, err := enterprisepolicy.ReadOpenCodeServicePortAsUser(home); err == nil && current > 0 && current != request.OpenCodeServicePort &&
-		slices.Contains(request.OpenCodeServicePortsHeld, current) {
-		stale = current
-	}
-	var result enterprisepolicy.OpenCodeServicePortResult
-	var err error
-	if stale > 0 {
-		result, err = enterprisepolicy.ReplaceOpenCodeServicePort(home, request.OpenCodeServicePort, stale)
-	} else {
-		result, err = enterprisepolicy.EnsureOpenCodeServicePort(home, request.OpenCodeServicePort)
-	}
-	report := &enterpriseHookWorkerOpenCodePortReport{Port: result.Port, Changed: result.Changed, Created: result.CreatedDirs}
-	if result.Changed && stale > 0 && result.Port == request.OpenCodeServicePort {
-		report.Replaced = stale
-	}
+	result, err := enterprisepolicy.SetOpenCodeServicePort(filepath.Clean(request.Home), request.OpenCodeServicePort)
+	report := &enterpriseHookWorkerOpenCodePortReport{Port: result.Port, Previous: result.Previous, Changed: result.Changed, Created: result.CreatedDirs}
 	if err != nil {
 		report.Error = err.Error()
 	}

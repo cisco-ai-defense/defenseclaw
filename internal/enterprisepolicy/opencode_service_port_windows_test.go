@@ -23,7 +23,7 @@ func TestManagedWindowsOpenCodePortWriteIsAccountPrivate(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"password":"kept"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	result, err := EnsureOpenCodeServicePort(home, 25001)
+	result, err := SetOpenCodeServicePort(home, 25001)
 	if err != nil || !result.Changed || result.Port != 25001 {
 		t.Fatalf("write port: %+v %v", result, err)
 	}
@@ -38,7 +38,7 @@ func TestManagedWindowsOpenCodePortWriteIsAccountPrivate(t *testing.T) {
 	if err := json.Unmarshal(data, &doc); err != nil || doc["password"] != "kept" || doc["port"] != float64(25001) {
 		t.Fatalf("service.json content: %s, %v", data, err)
 	}
-	result, err = ReplaceOpenCodeServicePort(home, 25002, 25001)
+	result, err = SetOpenCodeServicePort(home, 25002)
 	if err != nil || !result.Changed || result.Port != 25002 {
 		t.Fatalf("replace conflicting port: %+v %v", result, err)
 	}
@@ -62,9 +62,6 @@ func TestManagedWindowsOpenCodePortReadSeesAccountLinkedFolder(t *testing.T) {
 	if got, err := ReadOpenCodeServicePortAsUser(home); err != nil || got != 25001 {
 		t.Fatalf("regular folder port = %d, err=%v", got, err)
 	}
-	if !OpenCodeServicePortWritableAsUser(home) {
-		t.Fatal("regular account folder was not writable in place")
-	}
 	target := filepath.Join(home, "held-config")
 	if err := os.Rename(config, target); err != nil {
 		t.Fatal(err)
@@ -75,10 +72,7 @@ func TestManagedWindowsOpenCodePortReadSeesAccountLinkedFolder(t *testing.T) {
 	if got, err := ReadOpenCodeServicePortAsUser(home); err != nil || got != 25001 {
 		t.Fatalf("account-linked folder port = %d, err=%v", got, err)
 	}
-	if OpenCodeServicePortWritableAsUser(home) {
-		t.Fatal("linked account folder was treated as writable in place")
-	}
-	if _, err := ReplaceOpenCodeServicePort(home, 25002, 25001); err == nil {
+	if _, err := SetOpenCodeServicePort(home, 25002); err == nil {
 		t.Fatal("linked account folder was changed through the protected writer")
 	}
 }

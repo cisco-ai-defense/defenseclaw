@@ -261,18 +261,11 @@ type enterpriseHookWorkerRequest struct {
 	// foreign_cleanup worker does either; remove-all's apply worker only
 	// removes).
 	CopilotVSCode *enterpriseHookWorkerCopilotVSCode `json:"copilot_vscode,omitempty"`
-	// OpenCodeServicePort asks the foreign_cleanup worker to give the
-	// account's OpenCode background server this port when its service.json
-	// names none (gas-ux-r1 GAP-0053; enterprisepolicy.EnsureOpenCodeServicePort).
+	// OpenCodeServicePort is the account's recorded OpenCode service port:
+	// the foreign_cleanup worker writes it into the account's service.json,
+	// whatever the file named (gas-ux-r1 GAP-0053, the record is the only
+	// authority; enterprisepolicy.SetOpenCodeServicePort).
 	OpenCodeServicePort int `json:"opencode_service_port,omitempty"`
-	// OpenCodeServicePortReplace is a port the account's service.json names
-	// that another account holds: the worker replaces it with
-	// OpenCodeServicePort (enterprisepolicy.ReplaceOpenCodeServicePort).
-	OpenCodeServicePortReplace int `json:"opencode_service_port_replace,omitempty"`
-	// OpenCodeServicePortsHeld are the ports other accounts hold this pass:
-	// a port the account's file names from this set is replaced too (the
-	// guardian, as root, may not have been able to read the file).
-	OpenCodeServicePortsHeld []int `json:"opencode_service_ports_held,omitempty"`
 	// TimeoutSeconds replaces enterpriseHookWorkerTimeout for this worker
 	// (remove-all's retry of a worker that timed out).
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
@@ -419,14 +412,10 @@ type enterpriseHookWorkerResponse struct {
 type enterpriseHookWorkerOpenCodePortReport struct {
 	Port    int  `json:"port,omitempty"`
 	Changed bool `json:"changed,omitempty"`
-	// Replaced is the port another account held that the file named before
-	// this write moved it.
-	Replaced int      `json:"replaced,omitempty"`
+	// Previous is the port the file named before this write (0: none).
+	Previous int      `json:"previous,omitempty"`
 	Created  []string `json:"created,omitempty"`
 	Error    string   `json:"error,omitempty"`
-	// NotWritable (opencode_port_read): the file cannot be rewritten in place
-	// (a linked folder), so the account cannot be moved.
-	NotWritable bool `json:"not_writable,omitempty"`
 }
 
 // enterpriseHookWorkerAccount is the resolved target the parent spawns
@@ -598,7 +587,7 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		return respond(runEnterpriseHookWorkerNativeOTLPCheck(request), 0)
 	case enterpriseHookWorkerOpOpenCodePortRead:
 		port, err := enterprisepolicy.ReadOpenCodeServicePortAsUser(filepath.Clean(request.Home))
-		report := &enterpriseHookWorkerOpenCodePortReport{Port: port, NotWritable: !enterprisepolicy.OpenCodeServicePortWritable(filepath.Clean(request.Home))}
+		report := &enterpriseHookWorkerOpenCodePortReport{Port: port}
 		if err != nil {
 			report.Error = err.Error()
 		}

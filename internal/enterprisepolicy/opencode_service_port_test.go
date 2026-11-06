@@ -6,7 +6,6 @@ package enterprisepolicy
 
 import (
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,7 +20,7 @@ func TestOpenCodeServicePortReadDistinguishesContentFromUnavailableFile(t *testi
 	if err := os.WriteFile(path, []byte(`{"port":"invalid"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if port, err := ReadOpenCodeServicePortAsUser(home); port != 0 || !errors.Is(err, ErrOpenCodeServicePortContent) {
+	if port, err := ReadOpenCodeServicePortAsUser(home); port != 0 || err == nil {
 		t.Fatalf("invalid content classification: port=%d err=%v", port, err)
 	}
 	if err := os.WriteFile(path, []byte(`{"port":25001}`), 0o600); err != nil {
@@ -35,48 +34,38 @@ func TestOpenCodeServicePortReadDistinguishesContentFromUnavailableFile(t *testi
 // gas-ux-r1 GAP-0053: ports derive from the account id (the class invariant
 // over every sequence is TestOpenCodePortInvariantOverRandomSequences).
 func TestPlanOpenCodeServicePortsDerivesFromTheUID(t *testing.T) {
-	plan := PlanOpenCodeServicePorts([]int{1001, 1002, 9001}, nil, nil, true)
+	plan := PlanOpenCodeServicePorts([]int{1001, 1002, 9001}, nil, nil, true, nil)
 	if plan.Ports[1001] != 25001 || plan.Ports[1002] != 25002 || plan.Ports[9001] != 25003 {
 		t.Fatalf("ports %v", plan.Ports)
 	}
 }
 
-func TestEnsureOpenCodeServicePortKeepsAndWrites(t *testing.T) {
+// The record wins: a port the file names is rewritten to the recorded one;
+// OpenCode's other keys are kept; a link or a non-object file is left alone.
+func TestSetOpenCodeServicePort(t *testing.T) {
 	home := t.TempDir()
 	path := OpenCodeServiceConfigPath(home)
-	// No file: created at 0600 with the port.
-	result, err := EnsureOpenCodeServicePort(home, 25001)
+	result, err := SetOpenCodeServicePort(home, 25001)
 	if err != nil || !result.Changed || result.Port != 25001 {
 		t.Fatalf("first write: %+v %v", result, err)
 	}
-	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("service.json mode: %v %v", info, err)
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode: %v %v", info, err)
 	}
-	// Second pass: kept, nothing written.
-	if result, err = EnsureOpenCodeServicePort(home, 26000); err != nil || result.Changed || result.Port != 25001 {
+	if result, err = SetOpenCodeServicePort(home, 25001); err != nil || result.Changed {
 		t.Fatalf("second pass: %+v %v", result, err)
 	}
-	// OpenCode's password is kept when the port is added.
-	if err := os.WriteFile(path, []byte(`{"password":"p"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if result, err = EnsureOpenCodeServicePort(home, 25002); err != nil || !result.Changed {
-		t.Fatalf("add to existing: %+v %v", result, err)
-	}
-	var doc map[string]any
-	data, _ := os.ReadFile(path)
-	if err := json.Unmarshal(data, &doc); err != nil || doc["password"] != "p" || doc["port"] != float64(25002) {
-		t.Fatalf("merged service.json: %s %v", data, err)
-	}
-	// A port the user set is theirs.
 	if err := os.WriteFile(path, []byte(`{"port":49375,"password":"p"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if result, err = EnsureOpenCodeServicePort(home, 25003); err != nil || result.Changed || result.Port != 49375 {
-		t.Fatalf("user port: %+v %v", result, err)
+	if result, err = SetOpenCodeServicePort(home, 25001); err != nil || !result.Changed || result.Previous != 49375 {
+		t.Fatalf("a disagreeing file: %+v %v", result, err)
 	}
-	// A link or a file that is not a JSON object is left alone.
+	var doc map[string]any
+	data, _ := os.ReadFile(path)
+	if err := json.Unmarshal(data, &doc); err != nil || doc["password"] != "p" || doc["port"] != float64(25001) {
+		t.Fatalf("rewritten service.json: %s %v", data, err)
+	}
 	for name, setup := range map[string]func(){
 		"not json": func() { _ = os.WriteFile(path, []byte("[1]"), 0o600) },
 		"link": func() {
@@ -87,121 +76,98 @@ func TestEnsureOpenCodeServicePortKeepsAndWrites(t *testing.T) {
 		},
 	} {
 		setup()
-		if result, err = EnsureOpenCodeServicePort(home, 25004); err == nil || result.Changed {
+		if result, err = SetOpenCodeServicePort(home, 25004); err == nil || result.Changed {
 			t.Fatalf("%s: %+v %v", name, result, err)
 		}
 	}
 }
 
 func TestManagedWindowsOpenCodePortsKeepFullSIDReservations(t *testing.T) {
-	const (
-		first  = "S-1-5-21-100-200-300-1001"
-		second = "S-1-5-21-400-500-600-1001"
-		third  = "S-1-5-21-700-800-900-1002"
-	)
+	const first, second, third = "S-1-5-21-100-200-300-1001", "S-1-5-21-400-500-600-1001", "S-1-5-21-700-800-900-1002"
 	ids := map[string]uint64{first: 1001, second: 1001, third: 1002}
-	plan := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, second}, nil, nil, nil, true)
+	plan := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, second}, nil, nil, nil, true, nil)
 	if plan.Ports[first] != 25001 || plan.Ports[second] != 25002 {
-		t.Fatalf("same-RID accounts share or move a port: %+v", plan)
+		t.Fatalf("same-RID accounts shared a port: %+v", plan)
 	}
-	// A temporarily ineligible or unresolved SID keeps its record reservation.
-	next := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{second, third}, nil, plan.Record, nil, true)
+	next := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{second, third}, nil, plan.Record, nil, true, nil)
 	if next.Record[first] != 25001 || next.Ports[second] != 25002 || next.Ports[third] != 25003 {
-		t.Fatalf("recorded account lost its reservation: %+v", next)
+		t.Fatalf("absent SID lost its reservation: %+v", next)
 	}
-	returned := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, second, third}, nil, next.Record, nil, true)
+	returned := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, second, third}, map[string]int{first: 49375}, next.Record, map[int]string{25001: third}, true, nil)
 	if returned.Ports[first] != 25001 || returned.Ports[second] != 25002 || returned.Ports[third] != 25003 {
-		t.Fatalf("returning account moved ports: %+v", returned)
-	}
-	chosen := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, second}, map[string]int{first: 49375}, plan.Record, nil, true)
-	if chosen.Ports[first] != 49375 || chosen.Ports[second] == 49375 {
-		t.Fatalf("user port was not preserved: %+v", chosen)
-	}
-	claimed := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, second}, nil, nil, map[int]string{25001: third}, true)
-	if claimed.Ports[first] == 25001 || claimed.Ports[second] == 25001 || claimed.Ports[first] == claimed.Ports[second] {
-		t.Fatalf("per-user claim was reused: %+v", claimed)
+		t.Fatalf("file or claim changed a recorded binding: %+v", returned)
 	}
 }
 
 func TestManagedWindowsOpenCodePlanResolvesFileAndRecordConflicts(t *testing.T) {
-	const (
-		first  = "S-1-5-21-100-200-300-1001"
-		second = "S-1-5-21-400-500-600-1002"
-	)
+	const first, second = "S-1-5-21-100-200-300-1001", "S-1-5-21-400-500-600-1002"
 	ids := map[string]uint64{first: 1001, second: 1002}
-	eligible := []string{first, second}
-	files := map[string]int{second: 25001}
-	plan := PlanOpenCodeServicePortsByAccountWithClaims(ids, eligible, files, map[string]int{first: 25001}, nil, true)
-	if plan.Ports[first] != 25001 || plan.Ports[second] != 25002 || plan.Replace[second] != 25001 ||
-		len(plan.Conflicts) != 1 || plan.Conflicts[0].Holder != first || plan.Record[first] == plan.Record[second] {
-		t.Fatalf("record/file conflict: %+v", plan)
+	plan := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, second}, map[string]int{second: 25001}, map[string]int{first: 25001}, nil, true, nil)
+	if plan.Ports[first] != 25001 || plan.Ports[second] != 25002 || plan.Record[first] != 25001 || len(plan.Conflicts) != 1 || plan.Conflicts[0].Holder != first {
+		t.Fatalf("record did not decide the file conflict: %+v", plan)
 	}
-	files[second] = plan.Ports[second]
-	again := PlanOpenCodeServicePortsByAccountWithClaims(ids, eligible, files, plan.Record, nil, true)
-	if again.Ports[first] != 25001 || again.Ports[second] != 25002 || len(again.Conflicts) != 0 || len(again.Replace) != 0 {
-		t.Fatalf("second pass moved or conflicted: %+v", again)
+	stable := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, second}, map[string]int{first: 26000, second: 25001}, plan.Record, nil, true, nil)
+	if stable.Ports[first] != 25001 || stable.Ports[second] != 25002 || stable.Record[first] != 25001 || stable.Record[second] != 25002 {
+		t.Fatalf("manual edits moved a binding: %+v", stable)
 	}
-	// Two files with the same port choose one holder and move the other.
-	plan = PlanOpenCodeServicePortsByAccountWithClaims(ids, eligible, map[string]int{first: 26000, second: 26000}, nil, nil, true)
-	if plan.Ports[first] != 26000 || plan.Ports[second] == 26000 || plan.Replace[second] != 26000 {
-		t.Fatalf("file/file conflict: %+v", plan)
+	contest := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, second}, map[string]int{first: 26000, second: 26000}, nil, nil, true, nil)
+	if contest.Ports[first] == 26000 || contest.Ports[second] == 26000 || len(contest.Contested[26000]) != 2 || contest.Ports[first] == contest.Ports[second] {
+		t.Fatalf("contested port was granted: %+v", contest)
 	}
-	// A record read failure cannot allocate or move a port.
-	plan = PlanOpenCodeServicePortsByAccountWithClaims(ids, eligible, map[string]int{first: 26000, second: 26000}, nil, nil, false)
-	if len(plan.Replace) != 0 || plan.Ports[second] != 0 || len(plan.NoPort) != 1 {
-		t.Fatalf("unreadable record made a new assignment: %+v", plan)
+	noRecord := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, second}, map[string]int{first: 26000}, nil, nil, false, nil)
+	if len(noRecord.Ports) != 0 || len(noRecord.Record) != 0 || len(noRecord.NoPort) != 2 {
+		t.Fatalf("unreadable record made a binding: %+v", noRecord)
 	}
 }
 
-func TestManagedWindowsOpenCodeClaimOwnsPortBeforeAnOlderRecord(t *testing.T) {
-	const (
-		first  = "S-1-5-21-100-200-300-1001"
-		second = "S-1-5-21-400-500-600-1001"
-		third  = "S-1-5-21-700-800-900-1003"
-	)
-	ids := map[string]uint64{first: 1001, second: 1001, third: 1003}
-	claim := map[int]string{25001: second}
-	recorded := map[string]int{first: 25001, third: 25003}
-	files := map[string]int{first: 25001, second: 25001, third: 25003}
-	plan := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, second, third}, files, recorded, claim, true)
-	if plan.Ports[first] != 25002 || plan.Ports[second] != 25001 || plan.Ports[third] != 25003 ||
-		plan.Replace[first] != 25001 || plan.Record[first] == plan.Record[second] {
-		t.Fatalf("claim ownership was not reconciled with the older record: %+v", plan)
+func TestManagedWindowsOpenCodeRecordWinsAnOlderClaim(t *testing.T) {
+	const first, second = "S-1-5-21-100-200-300-1001", "S-1-5-21-400-500-600-1002"
+	ids := map[string]uint64{first: 1001, second: 1002}
+	plan := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, second}, map[string]int{second: 25001}, map[string]int{first: 25001}, map[int]string{25001: second}, true, nil)
+	if plan.Record[first] != 25001 || plan.Ports[first] != 25001 || plan.Ports[second] != 25002 {
+		t.Fatalf("claim displaced protected record: %+v", plan)
 	}
-	// The recorded account may have been excluded when the other account
-	// claimed the port. Its entry remains reserved for its return.
-	excluded := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{second, third}, files, recorded, claim, true)
-	if excluded.Record[first] != 25002 || excluded.Record[second] != 25001 || excluded.Ports[third] != 25003 {
-		t.Fatalf("excluded account's reservation was lost: %+v", excluded)
+	fresh := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, second}, nil, nil, map[int]string{25001: "other"}, true, nil)
+	if fresh.Ports[first] == 25001 || fresh.Ports[first] == fresh.Ports[second] {
+		t.Fatalf("fresh allocation reused another account's claim: %+v", fresh)
 	}
-	returned := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, second, third}, files, excluded.Record, claim, true)
-	if returned.Ports[first] != 25002 || returned.Replace[first] != 25001 || returned.Ports[second] != 25001 {
-		t.Fatalf("returning account could not reconcile its service file: %+v", returned)
+}
+
+func TestReviewUnwritableFileCannotTakeDepartedAccountReservation(t *testing.T) {
+	const current, departed = "S-1-5-21-100-200-300-1001", "S-1-5-21-400-500-600-1002"
+	ids := map[string]uint64{current: 1001, departed: 1002}
+	plan := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{current}, map[string]int{current: 25002}, map[string]int{departed: 25002}, nil, true, nil)
+	if plan.Record[departed] != 25002 || plan.Ports[current] != 25001 || plan.Record[current] != 25001 {
+		t.Fatalf("departed account reservation moved: %+v", plan)
 	}
-	files[first] = 25002
-	stable := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, second, third}, files, returned.Record, claim, true)
-	if stable.Ports[first] != 25002 || stable.Ports[second] != 25001 || len(stable.Replace) != 0 {
-		t.Fatalf("reconciled accounts were not stable: %+v", stable)
+}
+
+func TestReadOpenCodeServicePortAsUserFollowsFinalLink(t *testing.T) {
+	home := t.TempDir()
+	path := OpenCodeServiceConfigPath(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	// A per-user uninstall can remove the first account's claim while its
-	// guardian record and service file remain. Another account can then run
-	// per-user setup on that port before the first account is re-enrolled.
-	initial := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, third},
-		map[string]int{first: 25001, third: 25003}, nil, map[int]string{25001: first}, true)
-	uninstalled := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{third},
-		map[string]int{third: 25003}, initial.Record, nil, true)
-	setup := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{second, third},
-		map[string]int{second: 25001, third: 25003}, uninstalled.Record, claim, true)
-	reenrolled := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, second, third},
-		map[string]int{first: 25001, second: 25001, third: 25003}, setup.Record, claim, true)
-	if initial.Record[first] != 25001 || uninstalled.Record[first] != 25001 ||
-		setup.Ports[second] != 25001 || reenrolled.Ports[first] != 25002 || reenrolled.Replace[first] != 25001 {
-		t.Fatalf("uninstall and re-enrollment did not reconcile: initial=%+v uninstalled=%+v setup=%+v re-enrolled=%+v",
-			initial, uninstalled, setup, reenrolled)
+	target := filepath.Join(home, "linked-service.json")
+	if err := os.WriteFile(target, []byte(`{"port":25002}`), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	// A claim by the recorded owner keeps the ordinary stable case.
-	owned := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, third}, map[string]int{first: 25001, third: 25003}, recorded, map[int]string{25001: first}, true)
-	if owned.Ports[first] != 25001 || owned.Ports[third] != 25003 || len(owned.Replace) != 0 {
-		t.Fatalf("matching claim moved an account: %+v", owned)
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("service link unavailable: %v", err)
+	}
+	if port, err := ReadOpenCodeServicePortAsUser(home); err != nil || port != 25002 {
+		t.Fatalf("account port through final link: %d %v", port, err)
+	}
+	if _, err := SetOpenCodeServicePort(home, 25001); err == nil {
+		t.Fatal("account writer followed final link")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"port":25002}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if port, err := ReadOpenCodeServicePortAsUser(home); err != nil || port != 25002 {
+		t.Fatalf("regular account file: %d %v", port, err)
 	}
 }

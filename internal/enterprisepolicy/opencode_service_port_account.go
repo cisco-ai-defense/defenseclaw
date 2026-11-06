@@ -5,152 +5,120 @@ package enterprisepolicy
 
 import "sort"
 
-// OpenCodeAccountPortConflict names a live account whose service file names
-// a port held by a different account.
+// OpenCodeAccountPortConflict names an import that could not take a port.
 type OpenCodeAccountPortConflict struct {
 	Account string
 	Holder  string
 	Port    int
 }
 
-// OpenCodeAccountPortPlan is the Windows guardian's SID keyed port plan.
+// OpenCodeAccountPortPlan is the Windows guardian's full-SID view of the
+// shared record-authoritative OpenCode port plan.
 type OpenCodeAccountPortPlan struct {
 	Ports     map[string]int
-	Replace   map[string]int
 	Record    map[string]int
 	Conflicts []OpenCodeAccountPortConflict
+	Contested map[int][]string
 	NoPort    []string
 }
 
-// PlanOpenCodeServicePortsByAccountWithClaims keeps the full SID as the key.
-// Existing claim files reserve ports for their owner, including accounts that
-// are not currently eligible. A recorded reservation or file port can keep a
-// claimed port only when the claim belongs to that same account. Other recorded
-// reservations win before new file ports; a live file naming its own recorded
-// port wins first. A conflict asks the caller to replace the
-// losing file's port under its account token. When allowNew is false, the
-// caller must not write the returned record or replace any file.
-func PlanOpenCodeServicePortsByAccountWithClaims(ids map[string]uint64, eligible []string, filePorts, recorded map[string]int, claims map[int]string, allowNew bool) OpenCodeAccountPortPlan {
-	plan := OpenCodeAccountPortPlan{Ports: map[string]int{}, Replace: map[string]int{}, Record: map[string]int{}}
-	eligible = append([]string(nil), eligible...)
-	sort.Strings(eligible)
-	isEligible := make(map[string]bool, len(eligible))
-	for _, sid := range eligible {
-		isEligible[sid] = true
+// PlanOpenCodeServicePortsByAccountWithClaims maps full SIDs to distinct
+// planner IDs with the same initial port as their RID. The shared planner
+// then applies the same record and import rules on every operating system.
+// Per-user claims can keep a port out of the fresh pool but never displace a
+// binding already in the protected record.
+func PlanOpenCodeServicePortsByAccountWithClaims(ids map[string]uint64, eligible []string, imports, recorded map[string]int, claims map[int]string, allowNew bool, unknown map[string]bool) OpenCodeAccountPortPlan {
+	plan := OpenCodeAccountPortPlan{
+		Ports: map[string]int{}, Record: map[string]int{}, Contested: map[int][]string{},
 	}
-	recordKeys := make([]string, 0, len(recorded))
+	all := map[string]bool{}
 	for sid := range recorded {
-		recordKeys = append(recordKeys, sid)
+		all[sid] = true
 	}
-	sort.Strings(recordKeys)
-	holder := map[int]string{}
-	hold := func(sid string, port int) bool {
-		if port <= 0 || port > 65535 {
-			return false
-		}
-		if other := holder[port]; other != "" && other != sid {
-			return false
-		}
-		holder[port] = sid
-		return true
+	for _, sid := range eligible {
+		all[sid] = true
 	}
+	keys := make([]string, 0, len(all))
+	for sid := range all {
+		keys = append(keys, sid)
+	}
+	sort.Strings(keys)
+	uidFor := make(map[string]int, len(keys))
+	sidFor := make(map[int]string, len(keys))
+	for i, sid := range keys {
+		uid := (i+1)*OpenCodeAccountPortSpan + int(ids[sid]%OpenCodeAccountPortSpan)
+		uidFor[sid], sidFor[uid] = uid, sid
+	}
+	eligibleUIDs := make([]int, 0, len(eligible))
+	for _, sid := range eligible {
+		eligibleUIDs = append(eligibleUIDs, uidFor[sid])
+	}
+	importUIDs := map[int]int{}
+	for sid, port := range imports {
+		if uid, ok := uidFor[sid]; ok {
+			importUIDs[uid] = port
+		}
+	}
+	recordUIDs := map[int]int{}
+	recordedPorts := map[int]bool{}
+	for sid, port := range recorded {
+		recordUIDs[uidFor[sid]] = port
+		recordedPorts[port] = true
+	}
+	unknownUIDs := map[int]bool{}
+	for sid := range unknown {
+		if uid, ok := uidFor[sid]; ok {
+			unknownUIDs[uid] = true
+		}
+	}
+	// A claim is a reservation for allocation, never a competing owner of
+	// an existing record entry. A matching one-time import can use its own
+	// claim; an import with someone else's claim remains unavailable.
 	claimPorts := make([]int, 0, len(claims))
 	for port := range claims {
 		claimPorts = append(claimPorts, port)
 	}
 	sort.Ints(claimPorts)
+	claimUIDs := map[int]string{}
 	for _, port := range claimPorts {
-		if port <= 0 || port > 65535 {
+		if port <= 0 || port > 65535 || recordedPorts[port] {
 			continue
 		}
 		owner := claims[port]
-		if owner == "" {
-			owner = "!"
+		if imports[owner] == port && !unknown[owner] {
+			continue
 		}
-		holder[port] = owner
+		uid := (len(keys)+len(claimUIDs)+1)*OpenCodeAccountPortSpan + port%OpenCodeAccountPortSpan
+		recordUIDs[uid] = port
+		claimUIDs[uid] = owner
 	}
-	for _, sid := range eligible {
-		if port := filePorts[sid]; port > 0 && port == recorded[sid] && hold(sid, port) {
+	shared := PlanOpenCodeServicePorts(eligibleUIDs, importUIDs, recordUIDs, allowNew, unknownUIDs)
+	for uid, port := range shared.Ports {
+		if sid := sidFor[uid]; sid != "" {
 			plan.Ports[sid] = port
 		}
 	}
-	var superseded []string
-	for _, sid := range recordKeys {
-		if plan.Ports[sid] != 0 || (isEligible[sid] && filePorts[sid] > 0) {
-			continue
-		}
-		port := recorded[sid]
-		if hold(sid, port) {
-			if isEligible[sid] {
-				plan.Ports[sid] = port
-			} else {
-				plan.Record[sid] = port
-			}
-			continue
-		}
-		if isEligible[sid] {
-			plan.Conflicts = append(plan.Conflicts, OpenCodeAccountPortConflict{sid, holder[port], port})
-		} else {
-			superseded = append(superseded, sid)
+	for uid, port := range shared.Record {
+		if sid := sidFor[uid]; sid != "" {
+			plan.Record[sid] = port
 		}
 	}
-	var fresh []string
-	for _, sid := range eligible {
-		if plan.Ports[sid] != 0 {
-			continue
+	for _, conflict := range shared.Conflicts {
+		holder := sidFor[conflict.Holder]
+		if holder == "" {
+			holder = claimUIDs[conflict.Holder]
 		}
-		port := filePorts[sid]
-		if port <= 0 {
-			fresh = append(fresh, sid)
-			continue
-		}
-		if hold(sid, port) {
-			plan.Ports[sid] = port
-			continue
-		}
-		plan.Conflicts = append(plan.Conflicts, OpenCodeAccountPortConflict{sid, holder[port], port})
-		if allowNew {
-			plan.Replace[sid] = port
-		}
-		fresh = append(fresh, sid)
+		plan.Conflicts = append(plan.Conflicts, OpenCodeAccountPortConflict{sidFor[conflict.UID], holder, conflict.Port})
 	}
-	next := func(sid string) int {
-		if port := recorded[sid]; port > 0 && hold(sid, port) {
-			return port
+	for port, uids := range shared.Contested {
+		for _, uid := range uids {
+			plan.Contested[port] = append(plan.Contested[port], sidFor[uid])
 		}
-		start := OpenCodeAccountPort(ids[sid]) - OpenCodeAccountPortBase
-		for step := 0; step < OpenCodeAccountPortSpan; step++ {
-			port := OpenCodeAccountPortBase + (start+step)%OpenCodeAccountPortSpan
-			if hold(sid, port) {
-				return port
-			}
-		}
-		return 0
 	}
-	for _, sid := range fresh {
-		port := 0
-		if allowNew {
-			port = next(sid)
-		}
-		if port == 0 {
+	for _, uid := range shared.NoPort {
+		if sid := sidFor[uid]; sid != "" {
 			plan.NoPort = append(plan.NoPort, sid)
-			delete(plan.Replace, sid)
-			continue
 		}
-		plan.Ports[sid] = port
-	}
-	for _, sid := range superseded {
-		port := 0
-		if allowNew {
-			port = next(sid)
-		}
-		if port == 0 {
-			port = recorded[sid]
-		}
-		plan.Record[sid] = port
-	}
-	for sid, port := range plan.Ports {
-		plan.Record[sid] = port
 	}
 	sort.Strings(plan.NoPort)
 	return plan
