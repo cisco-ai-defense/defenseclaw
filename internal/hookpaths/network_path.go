@@ -303,9 +303,13 @@ func boundedPathRead(name string, kind pathReadKind, identityRead bool) pathRead
 	}
 	wait := networkShareAnswerWait - time.Since(started)
 	if identityRead {
-		wait = networkShareIdentityAnswerWait - time.Since(started)
+		// The identity window extends the root probe by at most one third.
+		// Keep that relationship when a caller supplies a shorter probe
+		// bound, so one slow file read does not consume a separate budget.
+		identityWait := min(networkShareIdentityAnswerWait, networkShareAnswerWait*4/3)
+		wait = identityWait - time.Since(started)
 		if pending {
-			wait = min(wait, networkShareIdentityAnswerWait-time.Since(pendingStarted))
+			wait = min(wait, identityWait-time.Since(pendingStarted))
 		}
 		networkShares.mu.Lock()
 		probe := networkShares.probes[root]
@@ -313,7 +317,7 @@ func boundedPathRead(name string, kind pathReadKind, identityRead bool) pathRead
 			select {
 			case <-probe.done:
 			default:
-				remaining := networkShareIdentityAnswerWait - time.Since(probe.started)
+				remaining := identityWait - time.Since(probe.started)
 				if remaining < wait {
 					wait = remaining
 				}
