@@ -26,6 +26,13 @@ dc_setup_subcommand() {
 # `defenseclaw setup` patches, used by the teardown assertion. Paths mirror
 # the *PathOverride defaults in internal/gateway/connector and cmd_setup.py.
 dc_connector_config_file() {
+  if dc_is_windows; then
+    # Devin and Hermes keep their config in the Windows AppData folders.
+    case "$1" in
+      devin)  printf '%s/devin/config.json' "$(cygpath -u "${APPDATA}")"; return 0 ;;
+      hermes) printf '%s/hermes/config.yaml' "$(cygpath -u "${LOCALAPPDATA}")"; return 0 ;;
+    esac
+  fi
   case "$1" in
     codex)       printf '%s/.codex/config.toml' "${HOME}" ;;
     claudecode)  printf '%s/.claude/settings.json' "${HOME}" ;;

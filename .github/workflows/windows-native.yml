@@ -1,7 +1,9 @@
 # Deterministic, fork-safe native Windows x64 regression suite: the Go and
-# Python suites, the telemetry registry suites and the PowerShell harness
-# validation. It builds and installs no Windows package; the released
-# scripts/install.ps1 path is exercised by release.yaml.
+# Python suites, the telemetry registry suites, the PowerShell harness
+# validation, and the connector contract and install lifecycle on an
+# install.ps1 -Local install of this tree's release-shaped assets (the way
+# users install DefenseClaw on Windows). A green contract cell is not
+# connector certification.
 #
 # Branch protection must require the exact aggregate check name:
 #   Windows Native Required
@@ -39,6 +41,7 @@ jobs:
     outputs:
       windows_go: ${{ steps.classify.outputs.windows_go }}
       windows_python: ${{ steps.classify.outputs.windows_python }}
+      windows_contract: ${{ steps.classify.outputs.windows_contract }}
       pwsh: ${{ steps.classify.outputs.pwsh }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -731,6 +734,169 @@ jobs:
         if: ${{ always() }}
         run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
 
+  contract-assets:
+    # This tree's release-shaped Windows assets: the release zip's binaries,
+    # the wheel, the requirements, install.ps1 and checksums.txt, built the
+    # way ci.yml's install smoke builds them. The connector contract and the
+    # install lifecycle install them with install.ps1 -Local.
+    name: Windows install assets of this tree
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.windows_contract != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # "|" falls back to direct on any proxy error.
+      GOPROXY: https://proxy.golang.org|direct
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+        with:
+          # ci.yml's install smoke saves this entry on main; this job only restores it.
+          cache-name: release-assets
+          cache-files: scripts/build-release-assets.sh
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          # Only main writes the uv cache; other refs restore it.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build the Windows assets
+        shell: bash
+        run: scripts/build-release-assets.sh 9.9.9 "$RUNNER_TEMP/assets" windows/amd64
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-contract-assets
+          path: ${{ runner.temp }}/assets/
+          if-no-files-found: error
+          retention-days: 3
+
+  connector-contract:
+    # scripts/live-connector-e2e/run-windows-install.ps1: observe setup and
+    # the Windows checks of what it wrote (hook commands, adapters, plugins,
+    # Doctor), then contract-smoke.sh's golden allow and block payloads
+    # through the installed hook, the gateway evidence, the observability v8
+    # records, and teardown restoring the vendor config. No vendor agent runs.
+    # cli/tests/test_windows_connector_contract.py pins the matrix.
+    name: Windows x64 connector contract / ${{ matrix.connector }}
+    needs: [changes, contract-assets]
+    if: ${{ !cancelled() && needs.contract-assets.result == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        connector: [codex, claudecode, amp, copilot, cursor, devin, hermes, antigravity, opencode]
+    env:
+      CONNECTOR: ${{ matrix.connector }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Initialize isolated paths
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ('ct-' + $env:CONNECTOR) -DiagnosticsLeaf ('windows-native-diagnostics-contract-' + $env:CONNECTOR)
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          # Only main writes the uv cache; other refs restore it.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
+          version: "0.11.28"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        if: ${{ matrix.connector == 'opencode' }}
+        with:
+          node-version: "24"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-contract-assets
+          path: ${{ runner.temp }}\contract-assets
+      - name: Connector contract on an install.ps1 install
+        run: ./scripts/live-connector-e2e/run-windows-install.ps1 -Operation contract -Connector $env:CONNECTOR -Assets (Join-Path $env:RUNNER_TEMP 'contract-assets') -StateRoot (Join-Path $env:DC_STATE_ROOT 'contract')
+      - name: Upload contract results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-native-contract-results-${{ matrix.connector }}
+          path: ${{ env.DC_STATE_ROOT }}\contract\results.jsonl
+          if-no-files-found: warn
+          retention-days: 5
+      - name: Capture bounded diagnostics
+        if: ${{ failure() || cancelled() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
+      - name: Upload diagnostics on failure
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-native-contract-diagnostics-${{ matrix.connector }}
+          path: ${{ env.DC_DIAGNOSTICS }}\**
+          if-no-files-found: ignore
+          retention-days: 5
+      - name: Always clean isolated processes, listeners, and temp state
+        if: ${{ always() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
+
+  install-lifecycle:
+    # The per-user install lifecycle on this tree's assets, one cell each:
+    # uninstall = install, version, status, doctor, the TUI at 80x24, a
+    # repair re-run and a full uninstall that leaves nothing behind
+    # (run-windows-install.ps1); fresh and files-in-use =
+    # test-install-lifecycle.ps1's lanes of those names.
+    name: Windows x64 install lifecycle / ${{ matrix.cell }}
+    needs: [changes, contract-assets]
+    if: ${{ !cancelled() && needs.contract-assets.result == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        cell: [uninstall, fresh, files-in-use]
+    env:
+      CELL: ${{ matrix.cell }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Initialize isolated paths
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ('lc-' + $env:CELL) -DiagnosticsLeaf ('windows-native-diagnostics-lifecycle-' + $env:CELL)
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          # Only main writes the uv cache; other refs restore it.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
+          version: "0.11.28"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-contract-assets
+          path: ${{ runner.temp }}\contract-assets
+      - name: Install, check, repair and uninstall
+        if: ${{ matrix.cell == 'uninstall' }}
+        run: ./scripts/live-connector-e2e/run-windows-install.ps1 -Operation lifecycle -Assets (Join-Path $env:RUNNER_TEMP 'contract-assets') -StateRoot (Join-Path $env:DC_STATE_ROOT 'lifecycle')
+      - name: Lifecycle lane ${{ matrix.cell }}
+        if: ${{ matrix.cell != 'uninstall' }}
+        run: |
+          ./scripts/test-install-lifecycle.ps1 -Assets (Join-Path $env:RUNNER_TEMP 'contract-assets') -Lanes $env:CELL -Root (Join-Path $env:DC_STATE_ROOT 'lanes')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Capture bounded diagnostics
+        if: ${{ failure() || cancelled() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
+      - name: Upload diagnostics on failure
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-native-lifecycle-diagnostics-${{ matrix.cell }}
+          path: ${{ env.DC_DIAGNOSTICS }}\**
+          if-no-files-found: ignore
+          retention-days: 5
+      - name: Always clean isolated processes, listeners, and temp state
+        if: ${{ always() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
+
   windows-native-required:
     name: Windows Native Required
     if: ${{ always() }}
@@ -740,6 +906,9 @@ jobs:
       - windows-python
       - windows-telemetry-registry
       - powershell-static
+      - contract-assets
+      - connector-contract
+      - install-lifecycle
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
@@ -758,4 +927,4 @@ jobs:
             $summary = $failed | ForEach-Object { "$($_.Name)=$($_.Value.result)" }
             throw "Required Windows validation did not succeed: $($summary -join ', ')"
           }
-          Write-Host 'Every required deterministic native Windows x64 validation job succeeded; this does not certify preview connectors.'
+          Write-Host 'Every required deterministic native Windows x64 validation job succeeded; a green connector contract does not certify a connector.'

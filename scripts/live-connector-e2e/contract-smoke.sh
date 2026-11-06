@@ -162,7 +162,12 @@ drive_event() {
 [ -f "${golden_dir}/pre_tool_allow.json" ] && drive_event "PreTool-allow" "${golden_dir}/pre_tool_allow.json" allow
 [ -f "${golden_dir}/tool_result.json" ] && drive_event "ToolResult" "${golden_dir}/tool_result.json" allow
 [ -f "${golden_dir}/subagent_tool_call.json" ] && drive_event "SubagentToolCall" "${golden_dir}/subagent_tool_call.json" allow
-[ -f "${golden_dir}/pre_tool_block.json" ] && drive_event "PreTool-block" "${golden_dir}/pre_tool_block.json" block
+# The Windows block command, where it differs from the POSIX one.
+block_payload="${golden_dir}/pre_tool_block.json"
+if dc_is_windows && [ -f "${golden_dir}/pre_tool_block_windows.json" ]; then
+  block_payload="${golden_dir}/pre_tool_block_windows.json"
+fi
+[ -f "${block_payload}" ] && drive_event "PreTool-block" "${block_payload}" block
 [ -f "${golden_dir}/agent_end.json" ] && drive_event "AgentEnd" "${golden_dir}/agent_end.json" allow
 
 # Schema invariant over everything emitted so far.

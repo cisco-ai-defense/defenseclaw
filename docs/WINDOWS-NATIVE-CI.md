@@ -1,8 +1,9 @@
 # Native Windows CI
 
 `Windows Native CI` is DefenseClaw's deterministic Windows x64 merge gate. It
-runs on pull requests and pushes to `main` without WSL, MSYS, Git Bash, or
-provider credentials.
+runs on pull requests and pushes to `main` without WSL or provider
+credentials. Only the connector contract uses Git Bash, to run the shared
+`contract-smoke.sh`.
 
 Repository merge rules should require the aggregate check name
 `Windows Native Required`. The aggregate fails when a required Windows job
@@ -22,11 +23,27 @@ The merge gate covers:
   managed-enterprise lifecycle smokes (`packaging/windows/tests`), the
   `install.ps1` bootstrap and offline contract tests
   (`cli/tests/test_install_ps1.py`), and the harness self-test (timeout,
-  redaction and process-tree cleanup contracts).
+  redaction and process-tree cleanup contracts);
+- the connector contract on a per-user install: `contract-assets` builds this
+  tree's release-shaped Windows assets (`scripts/build-release-assets.sh ...
+  windows/amd64`), and each `connector-contract` cell (codex, claudecode, amp,
+  copilot, cursor, devin, hermes, antigravity, opencode) installs them with
+  `install.ps1 -Local` into a throwaway profile and runs
+  `scripts/live-connector-e2e/run-windows-install.ps1`: observe setup and the
+  Windows checks of what it wrote (exact hook commands, the Cursor and
+  Copilot PowerShell adapters, the Amp and OpenCode plugins, the Doctor row),
+  `contract-smoke.sh`'s golden allow and block payloads through the installed
+  hook with the gateway evidence, the observability v8 records, and teardown
+  restoring the vendor config byte for byte. No vendor agent is installed, so
+  a green cell is not connector certification.
+  `cli/tests/test_windows_connector_contract.py` pins the matrix to the
+  Windows connectors;
+- the install lifecycle on the same assets (`install-lifecycle`): install,
+  version, status, doctor, the TUI at 80x24, a repair re-run, and a full
+  uninstall that leaves no files, processes, Run value or Path entry; then the
+  `fresh` and `files-in-use` lanes of `scripts/test-install-lifecycle.ps1`.
 
-Windows Native CI builds and installs no DefenseClaw package on the runner;
-the released `install.ps1` path is tested by the Release workflow (see
-below). Failure diagnostics are bounded, secret-redacted, retained for five
+Failure diagnostics are bounded, secret-redacted, retained for five
 days, and followed by unconditional process, listener, and temporary-state
 cleanup.
 
