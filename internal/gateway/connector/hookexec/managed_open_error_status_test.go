@@ -22,6 +22,8 @@ import (
 // the fail-modes table says for 5xx and 4xx. Only an eligible service outage
 // opens, and closed blocks everything.
 func TestStandaloneManagedOpenBlocksErrorStatusesThatAreNotAnOutage(t *testing.T) {
+	shortRestartBudget(t)
+	shortAuthRetryDelay(t)
 	standalone := func(mode string) func(*Options) {
 		return func(o *Options) {
 			managedCodex(o)

@@ -28,6 +28,7 @@ import (
 // only DefenseClaw's text and not the hook's command line, whose Windows
 // launcher guard holds a "launcher is missing" sentence.
 func TestPerUserClaudeCodeGatewayDownShowsOnlyTheText(t *testing.T) {
+	shortRestartBudget(t)
 	refused := &stubRT{err: fmt.Errorf("dial: %w", syscall.ECONNREFUSED)}
 	for _, tc := range []struct {
 		name, event, want string
@@ -97,6 +98,7 @@ func TestPerUserClaudeCodeGatewayDownShowsOnlyTheText(t *testing.T) {
 // (the Windows launcher guard) after the prompt's block. The failure is
 // still logged.
 func TestPerUserClaudeCodeGatewayDownQuietForUnblockableEvents(t *testing.T) {
+	shortRestartBudget(t)
 	refused := &stubRT{err: fmt.Errorf("dial: %w", syscall.ECONNREFUSED)}
 	for _, event := range []string{"SessionEnd", "SubagentStart"} {
 		for _, recovery := range []bool{false, true} {
