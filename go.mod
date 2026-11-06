@@ -11,8 +11,8 @@ require (
 	github.com/godbus/dbus/v5 v5.2.2
 	github.com/google/cel-go v0.30.0
 	github.com/google/uuid v1.6.0
-	github.com/klauspost/compress v1.18.6
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
+	github.com/klauspost/compress v1.18.6
 	github.com/maximhq/bifrost/core v1.7.3
 	github.com/open-policy-agent/opa v1.15.2
 	github.com/pelletier/go-toml/v2 v2.2.4
