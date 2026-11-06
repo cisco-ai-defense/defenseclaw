@@ -92,6 +92,12 @@ func TestGAP0664SnapshotDirectoriesClearInheritedACL(t *testing.T) {
 	h := newTestHost(t, "darwin")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	store := h.env.P(filepath.Join(h.env.Layout.LifecycleDir, snapshotsDirName))
+	if err := os.MkdirAll(store, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(store, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	h.runner.acls = map[string][]string{store: {"group:staff allow read,search"}}
 	snap, err := h.env.takeSnapshot("inherited-acl", nil, nil)
 	if err != nil {
@@ -101,8 +107,11 @@ func TestGAP0664SnapshotDirectoriesClearInheritedACL(t *testing.T) {
 	if len(h.runner.acls[store]) != 0 {
 		t.Fatalf("snapshot store retained an inherited ACL: %v", h.runner.acls[store])
 	}
+	if info, err := os.Lstat(store); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("snapshot store mode = %v, %v; want 0700", info, err)
+	}
 	for _, path := range []string{store, snap.Dir, filepath.Join(snap.Dir, "files")} {
-		if !strings.Contains(strings.Join(h.runner.calls, "\n"), "chmod -N "+path) {
+		if !strings.Contains(strings.Join(h.runner.calls, "\n"), "chmod -h -N "+path) {
 			t.Errorf("snapshot directory %s was not cleared before storing files", path)
 		}
 	}

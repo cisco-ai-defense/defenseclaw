@@ -175,8 +175,11 @@ func (e *Env) secureSnapshotDir(path string) error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("%s is not a snapshot directory", path)
 	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		return fmt.Errorf("set snapshot directory mode of %s: %w", path, err)
+	}
 	if e.GOOS == "darwin" {
-		if _, err := e.Runner.Run(context.Background(), "chmod", "-N", path); err != nil {
+		if _, err := e.Runner.Run(context.Background(), "chmod", "-h", "-N", path); err != nil {
 			return fmt.Errorf("clear snapshot directory ACL of %s: %w", path, err)
 		}
 	}
