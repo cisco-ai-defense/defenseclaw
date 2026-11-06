@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import stat
+from pathlib import PureWindowsPath
 from types import SimpleNamespace
 
 import pytest
@@ -720,3 +721,143 @@ def test_r109_g501_secure_client_scan_options(monkeypatch) -> None:
     assert _scan_options_for_connector(app, "openclaw", {}) == {
         "policy": "strict", "profile": "strict",
     }
+
+
+class _WindowsShareModel:
+    """A Windows path namespace with local and UNC locations.
+
+    Every location is a directory except the given junctions and symlinks;
+    ``realpath`` follows them as Windows does, including into a UNC share.
+    """
+
+    def __init__(self, links) -> None:
+        import ntpath
+
+        self.ntpath = ntpath
+        self.links = {ntpath.normcase(path): link for path, link in links.items()}
+
+    def realpath(self, value, **_kwargs):
+        ntpath = self.ntpath
+        value = ntpath.normpath(os.fspath(value))
+        for _ in range(40):
+            parts = PureWindowsPath(value).parts
+            current = parts[0]
+            for index, part in enumerate(parts[1:], 1):
+                current = ntpath.join(current, part)
+                link = self.links.get(ntpath.normcase(current))
+                if link:
+                    value = ntpath.normpath(ntpath.join(link[1], *parts[index + 1:]))
+                    break
+            else:
+                return value
+        raise OSError("too many links")
+
+    def lstat(self, value, *_args, **_kwargs):
+        kind = self.links.get(self.ntpath.normcase(os.fspath(value)), ("directory",))[0]
+        return SimpleNamespace(
+            st_mode=(stat.S_IFLNK | 0o777) if kind == "symlink" else (stat.S_IFDIR | 0o755),
+            st_file_attributes=0 if kind == "directory" else (
+                stat.FILE_ATTRIBUTE_DIRECTORY | stat.FILE_ATTRIBUTE_REPARSE_POINT
+            ),
+            st_reparse_tag=getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003)
+            if kind == "junction" else 0,
+            st_dev=1, st_ino=hash(self.ntpath.normcase(os.fspath(value))) & 0xFFFF,
+            st_size=0, st_mtime_ns=0, st_ctime_ns=0,
+        )
+
+    def readlink(self, value):
+        link = self.links.get(self.ntpath.normcase(os.fspath(value)))
+        if link is None:
+            raise OSError("not a link")
+        return link[1]
+
+    def install(self, monkeypatch) -> None:
+        ntpath = self.ntpath
+        path_module = SimpleNamespace(**{
+            name: getattr(ntpath, name) for name in dir(ntpath) if not name.startswith("__")
+        })
+        path_module.realpath = self.realpath
+        windows_os = SimpleNamespace(
+            path=path_module, sep=ntpath.sep, readlink=self.readlink, lstat=self.lstat,
+            stat=lambda value, follow_symlinks=True: self.lstat(
+                value if not follow_symlinks else self.realpath(value),
+            ),
+            getcwd=lambda: "C:" + ntpath.sep,
+        )
+        monkeypatch.setattr(vendor_identity, "os", windows_os)
+        monkeypatch.setattr(vendor_identity, "Path", PureWindowsPath)
+
+
+def test_r109_g610_unc_share_peers_judged_as_whole_paths(monkeypatch) -> None:
+    """A UNC server and share are part of the path the peer validation judges.
+
+    A protected share name, or the configured state share root itself, is
+    refused like the same local location, directly or behind an alias; an
+    ordinary share is admitted.
+    """
+    import ntpath
+
+    sep = ntpath.sep
+    unc = sep * 2
+    provider = sep.join(("C:", "provider"))
+    peer = sep.join((provider, "node_modules", "openclaw"))
+    alias = sep.join(("C:", "alias"))
+    data_dir = unc + sep.join(("server", "state"))
+
+    def share(*names):
+        return unc + sep.join(names)
+
+    # (label, peer entry kind, peer target, alias target, admitted with a possible peer)
+    cases = (
+        ("ordinary-share", "junction", share("server", "packages", "node_modules", "openclaw"), None, True),
+        ("ordinary-share-alias", "junction", alias + sep + sep.join(("node_modules", "openclaw")),
+         share("server", "packages"), True),
+        ("state-like-share", "symlink", share("server", "state-other", "node_modules", "openclaw"), None, True),
+        ("private-share", "junction", share("server", ".ssh", "node_modules", "openclaw"), None, False),
+        ("private-share-upper", "symlink", share("server", ".SSH", "node_modules", "openclaw"), None, False),
+        ("private-share-trailing-dot", "junction", share("server", ".ssh.", "node_modules", "openclaw"),
+         None, False),
+        ("private-extended-share", "junction",
+         sep.join((unc + "?", "UNC", "server", ".aws", "node_modules", "openclaw")), None, False),
+        ("private-share-alias", "junction", alias + sep + sep.join(("node_modules", "openclaw")),
+         share("server", ".ssh"), False),
+        ("private-local-trailing-dot", "junction",
+         sep.join(("C:", "Users", "user", ".ssh.", "node_modules", "openclaw")), None, False),
+        ("state-share-root", "junction", data_dir, None, False),
+        ("state-share-root-alias", "symlink", alias, data_dir + sep, False),
+        ("state-share-child", "junction", data_dir + sep + sep.join(("node_modules", "openclaw")), None, False),
+    )
+    pinned = vendor_identity.VENDOR_DIGESTS[("@openclaw/amazon-bedrock-provider", "2026.10.9")]
+    provider_manifest = json.dumps({
+        "name": "@openclaw/amazon-bedrock-provider", "version": "2026.10.9",
+        "peerDependencies": {"openclaw": "*"},
+    }).encode()
+
+    def manifest(path, **_kwargs):
+        if ntpath.normcase(path) == ntpath.normcase(provider + sep + "package.json"):
+            return provider_manifest
+        return json.dumps({"name": "openclaw"}).encode()
+
+    # The published bytes and a stable tree are preconditions here; the other
+    # tests cover them. This isolates the peer decision on Windows paths.
+    monkeypatch.setattr(vendor_identity, "_read_regular_file", manifest)
+    monkeypatch.setattr(vendor_identity, "_tree_sha256", lambda *_args, **_kwargs: pinned)
+    monkeypatch.setattr(vendor_identity, "_tree_entry_state", lambda _root: ("stable",))
+    for label, kind, target, alias_target, possible in cases:
+        links = {peer: (kind, target)}
+        if alias_target is not None:
+            links[alias] = ("junction", alias_target)
+        with monkeypatch.context() as patch:
+            _WindowsShareModel(links).install(patch)
+            identity = vendor_identity.inspect_official_provider_tree(provider, data_dir=data_dir)
+        assert (identity is not None) is possible, label
+        if possible:
+            assert identity.possible_peer, label
+
+    with monkeypatch.context() as patch:
+        _WindowsShareModel({}).install(patch)
+        within = vendor_identity._path_within
+        assert within(data_dir, data_dir + sep)
+        assert within(data_dir + sep, data_dir + sep + "openclaw")
+        assert not within(data_dir, data_dir + "-other" + sep + "openclaw")
+        assert not within(sep.join(("C:", "provider")), sep.join(("D:", "provider")))

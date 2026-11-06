@@ -9,7 +9,7 @@ import json
 import os
 import re
 import stat
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import NamedTuple
 
 from defenseclaw.hermes_skills import (
@@ -174,7 +174,9 @@ def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
     A protected name can appear in a link or junction target, where a later
     alias could hide it, or only after resolution, behind an alias with an
     ordinary name. Both are checked at every hop, so an alias kind this walk
-    does not expand is still judged by where it resolves.
+    does not expand is still judged by where it resolves. Every location is
+    judged as a whole path, from its anchor (a UNC server and share are names
+    too) to its last name, and the final destination is judged again.
     """
 
     from defenseclaw.config import default_data_path
@@ -182,12 +184,23 @@ def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
     roots = {os.path.realpath(str(default_data_path()))}
     if data_dir:
         roots.add(os.path.realpath(data_dir))
+
+    def private(location: str) -> bool:
+        resolved = os.path.realpath(location)
+        return (
+            _names_private_state(location)
+            or _names_private_state(resolved)
+            or any(_path_within(root, resolved) for root in roots)
+        )
+
     target = os.readlink(link)
     path = target if os.path.isabs(target) else os.path.join(os.path.dirname(link), target)
     if not os.path.isabs(path):
         path = os.path.join(os.getcwd(), path)
     parts = Path(path).parts
     current = parts[0]
+    if private(current):
+        return True
     pending = list(parts[1:])
     links = 0
     steps = 0
@@ -199,13 +212,8 @@ def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
         if part == "..":
             current = os.path.dirname(current)
             continue
-        if part.casefold() in _PRIVATE_INSTALL_COMPONENTS:
-            return True
         current = os.path.join(current, part)
-        resolved = os.path.realpath(current)
-        if _names_private_state(resolved) or any(
-            _path_within(root, resolved) for root in roots
-        ):
+        if private(current):
             return True
         try:
             alias = _is_link_or_junction(os.lstat(current))
@@ -219,22 +227,43 @@ def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
             target_parts = Path(next_target).parts
             if os.path.isabs(next_target):
                 current = target_parts[0]
+                if private(current):
+                    return True
                 pending = list(target_parts[1:]) + pending
             else:
                 current = os.path.dirname(current)
                 pending = list(target_parts) + pending
-    return False
+    destination = os.path.realpath(link)
+    return _names_private_state(destination) or any(
+        _path_within(root, destination) for root in roots
+    )
 
 
 def _names_private_state(path: str) -> bool:
-    return any(part.casefold() in _PRIVATE_INSTALL_COMPONENTS for part in Path(path).parts)
+    """Check every name in a path, including the server and share of a UNC anchor.
+
+    Windows ignores trailing dots and spaces in a name, so they do not change
+    which location a Windows name refers to.
+    """
+
+    pure = Path(path)
+    windows = isinstance(pure, PureWindowsPath)
+    names = [name for name in re.split(r"[\\/]+", pure.drive) if name]
+    names += pure.parts[1:] if pure.anchor else pure.parts
+    for name in names:
+        key = name.casefold()
+        if (key.rstrip(". ") if windows else key) in _PRIVATE_INSTALL_COMPONENTS:
+            return True
+    return False
 
 
 def _path_within(root: str, path: str) -> bool:
-    """Containment for resolved absolute paths; another drive or share is outside."""
+    """Containment for resolved absolute paths; another drive or share is outside.
 
-    root = os.path.normcase(root)
-    try:
-        return os.path.commonpath((root, os.path.normcase(path))) == root
-    except ValueError:
-        return False
+    Whole components are compared, so a share root names the same location
+    with or without its trailing separator.
+    """
+
+    root_parts = Path(os.path.normcase(root)).parts
+    path_parts = Path(os.path.normcase(path)).parts
+    return bool(root_parts) and path_parts[:len(root_parts)] == root_parts
