@@ -230,7 +230,7 @@ Not covered yet:
 
 ## On a managed computer
 
-Set up, Check it and Turn it off on this page are per-user commands. On a computer with a standalone enterprise install they are refused: on Linux and macOS `defenseclaw` prints "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." and exits 2; on native Windows the administrator's command is `defenseclaw.exe`, run by its full path because Setup puts nothing on `PATH`, and it refuses `setup copilot`. The administrator manages Copilot CLI in the managed `config.yaml` (`guardrail.connectors.copilot`) and applies it as in [Change the config](/docs/enterprise/lifecycle#change-the-config).
+Set up, Check it and Turn it off on this page are per-user commands. On a computer with a standalone enterprise install they are refused: on Linux and macOS `defenseclaw` prints "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy." followed, on Linux and macOS, by the administrator views of that computer (the installed gateway's `enterprise linux status` or `enterprise macos status`, `verify` and `audit export --since 2h`) and exits 2; on native Windows the administrator's command is `defenseclaw.exe`, run by its full path because Setup puts nothing on `PATH`, and it refuses `setup copilot`. The administrator manages Copilot CLI in the managed `config.yaml` (`guardrail.connectors.copilot`) and applies it as in [Change the config](/docs/enterprise/lifecycle#change-the-config).
 
 ## Disable
 
