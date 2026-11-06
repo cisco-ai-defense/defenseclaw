@@ -38,6 +38,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 func cleanupPreparedDiscoveryService(t *testing.T, svc *ContinuousDiscoveryService) {
@@ -1346,8 +1347,8 @@ func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 		t.Fatalf("worker IDE inventory = %+v, want one plugin with no account", report.IDEInventory)
 	}
 	spool := filepath.Join(tmp, "spool")
-	// The guardian names an SSSD account as NSS does; its records carry the
-	// bare name, as its hook records do (GAP-0447).
+	// The guardian names an SSSD account as NSS does. Inventory retains the
+	// qualified name for the gateway's current-holder check.
 	for uid, user := range map[int]string{1001: "alice@corp.example.com", 1002: "bob"} {
 		userReport := report
 		if uid == 1002 {
@@ -1380,13 +1381,13 @@ func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 		if sig.Source != AISourceUserScan {
 			t.Fatalf("the gateway's own scan reported %+v", sig)
 		}
-		want := map[string]string{"1001": "alice", "1002": "bob"}[sig.UserID]
+		want := map[string]string{"1001": "alice@corp.example.com", "1002": "bob"}[sig.UserID]
 		if want == "" || sig.UserName != want {
 			t.Fatalf("signal attributed to %q/%q, want the record's account: %+v", sig.UserID, sig.UserName, sig)
 		}
 		if sig.Runtime != nil {
 			processes++
-			if sig.Runtime.PID != 10 || sig.Runtime.User != want {
+			if sig.Runtime.PID != 10 || sig.Runtime.User != useridentity.BareAccountName(want) {
 				t.Fatalf("process signal %+v, want alice's own process attributed to %s", sig.Runtime, want)
 			}
 		}
@@ -1399,7 +1400,7 @@ func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 		t.Fatalf("signals = %+v, want a config, a process, an editor extension and a model file signal per user", got.Signals)
 	}
 	ide := svc.IDEInventory()
-	if ide == nil || len(ide.Plugins) != 1 || ide.Plugins[0].UserID != "1001" || ide.Plugins[0].UserName != "alice" ||
+	if ide == nil || len(ide.Plugins) != 1 || ide.Plugins[0].UserID != "1001" || ide.Plugins[0].UserName != "alice@corp.example.com" ||
 		ide.Plugins[0].Enabled != "client_side_unknown" || !ide.Plugins[0].IsAI {
 		t.Fatalf("IDE inventory = %+v, want alice's remote-server plugin", ide)
 	}

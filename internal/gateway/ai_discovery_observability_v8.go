@@ -407,7 +407,7 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 			// lifecycle records can be split by user like the observations.
 			UserID:                aiDiscoveryV8OptionalText(signal.UserID),
 			DefenseClawUserIDKind: v8UserIDKind(discoveryUserIDKind(signal.UserID)),
-			DefenseClawUserName:   v8UserName(signal.UserName, aiDiscoveryV8OptionalText),
+			DefenseClawUserName:   v8UserName(inventoryTelemetryUserName(signal.UserID, signal.UserName), aiDiscoveryV8OptionalText),
 			// The agent identity of the connector install the signal belongs
 			// to, so discovery joins that agent's decisions.
 			DefenseClawAgentIdentityID: agentIdentityV8(inventoryAgentIdentityID(signal.SupportedConnector, signal.UserID, signal.UserName)),
@@ -608,7 +608,7 @@ func (adapter *aiDiscoveryV8Adapter) emitIDEPluginLog(
 			DefenseClawAIDiscoveryScanID: aiDiscoveryV8Optional(summary.ScanID),
 			UserID:                       ideV8Optional(plugin.UserID, ideV8UserPattern, 256),
 			DefenseClawUserIDKind:        v8UserIDKind(discoveryUserIDKind(plugin.UserID)),
-			DefenseClawUserName:          v8UserName(plugin.UserName, ideV8UserName),
+			DefenseClawUserName:          v8UserName(inventoryTelemetryUserName(plugin.UserID, plugin.UserName), ideV8UserName),
 		}
 		inventoryIdentityFor(plugin.UserID, plugin.UserName).applyTo(&base)
 		switch plugin.State {
