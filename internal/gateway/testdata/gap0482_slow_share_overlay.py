@@ -33,9 +33,9 @@ replacement = original.replace(root_old, root_new).replace(probe_old, probe_new)
 target = output / "network_path.go"
 target.write_text(replacement)
 overlays = {str(source): str(target)}
-read_old = 'var readShareInfo = func(name string, follow bool) (os.FileInfo, error) {'
+read_old = 'var readPath = func(name string, kind pathReadKind) (result pathReadResult) {'
 if read_old in original:
-    read_new = '''var readShareInfo = func(name string, follow bool) (os.FileInfo, error) {
+    read_new = '''var readPath = func(name string, kind pathReadKind) (result pathReadResult) {
         root := os.Getenv("R482_FAKE_SHARE")
         if os.Getenv("R482_FAKE_SHARE_UNANSWERED") == "1" && root != "" &&
             (name == root || strings.HasPrefix(name, root+string(filepath.Separator))) {

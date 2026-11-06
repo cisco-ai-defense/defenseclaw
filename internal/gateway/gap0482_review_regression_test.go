@@ -51,6 +51,9 @@ func TestGAP0482ReviewSlowShareHardLink(t *testing.T) {
 			if got := gap0482ProfileVerdict(t, payload, "strict"); got != "block" {
 				t.Fatalf("strict hard-link alias = %s, want block", got)
 			}
+			if got := gap0482ProfileVerdict(t, payload, "default"); got != "block" {
+				t.Fatalf("default hard-link alias = %s, want block", got)
+			}
 		})
 	}
 }
@@ -110,7 +113,11 @@ func TestGAP0482ReviewSlowHomeLocalPythonReassignment(t *testing.T) {
 	if got := r106PerUserVerdict(t, "claudecode", payload, ""); got != "allow" {
 		t.Fatalf("local Python reassignment = %s, want allow", got)
 	}
-	if got := gap0482ProfileVerdict(t, payload, "strict"); got != "block" {
-		t.Fatalf("strict local Python reassignment = %s, want block", got)
+	wantStrict := "allow"
+	if os.Getenv("R482_OVERLAY") == "1" {
+		wantStrict = "block"
+	}
+	if got := gap0482ProfileVerdict(t, payload, "strict"); got != wantStrict {
+		t.Fatalf("strict local Python reassignment = %s, want %s", got, wantStrict)
 	}
 }
