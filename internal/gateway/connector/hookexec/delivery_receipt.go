@@ -23,10 +23,6 @@ import (
 // gateway whose 103 comes later reads the same marker in place of a receipt.
 const hookDeliveryCapabilityWait = 250 * time.Millisecond
 
-// A separate capability request must not consume the time an earlier
-// gateway needs to answer after the hook finishes its request body.
-const hookDeliveryCapabilityProbeWait = 100 * time.Millisecond
-
 // The agent has its answer before this wait starts. Limit a missing HTTP
 // confirmation independently of the answer deadline so the hook process
 // returns within the tool call's registered timeout.
@@ -120,6 +116,46 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 		}
 		timer := time.NewTimer(wait)
 		defer timer.Stop()
+		// Verify the accepted peer during the compatibility window. The
+		// probe never adds time to an older gateway's body release, while a
+		// matching current gateway can keep this body for its later 103.
+		var verified <-chan bool
+		var cancelProbe context.CancelFunc = func() {}
+		startProbe := func() {
+			cancelProbe()
+			verified = nil
+			select {
+			case <-delivery.ready:
+				return
+			default:
+			}
+			if currentGateway == nil {
+				return
+			}
+			postConn := delivery.connection()
+			if postConn == nil {
+				return
+			}
+			// The health request must not inherit the POST's HTTP trace: a
+			// health response cannot advertise receipt support for the POST.
+			probeCtx, cancel := context.WithTimeout(context.Background(), wait)
+			stopCancel := context.AfterFunc(req.Context(), cancel)
+			cancelProbe = func() {
+				stopCancel()
+				cancel()
+			}
+			result := make(chan bool, 1)
+			verified = result
+			go func() { result <- currentGateway(probeCtx, postConn) }()
+		}
+		defer func() { cancelProbe() }()
+		awaitReceipt := func() {
+			select {
+			case <-delivery.ready:
+			case <-req.Context().Done():
+			}
+		}
+		startProbe()
 		// seenStarting: the gateway was still starting when the wait
 		// passed; once it runs it gets the capability wait again.
 		seenStarting := false
@@ -129,7 +165,27 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 				return
 			case <-req.Context().Done():
 				return
+			case same := <-verified:
+				if same {
+					awaitReceipt()
+					return
+				}
+				verified = nil
+				continue
 			case <-timer.C:
+			}
+			// Prefer a completed peer check if the timer and probe become
+			// ready together.
+			if verified != nil {
+				select {
+				case same := <-verified:
+					if same {
+						awaitReceipt()
+						return
+					}
+					verified = nil
+				default:
+				}
 			}
 			if starting != nil && starting(req.Context()) {
 				seenStarting = true
@@ -140,34 +196,8 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 			if seenStarting {
 				seenStarting, starting = false, nil
 				timer.Reset(wait)
+				startProbe()
 				continue
-			}
-			if currentGateway != nil && delivery.connection() != nil {
-				// Only the process holding the accepted POST may vouch for a
-				// later receipt. A replacement listener's capability is not
-				// evidence about the request already in flight.
-				probeCtx, cancel := context.WithTimeout(context.Background(), hookDeliveryCapabilityProbeWait)
-				current := make(chan bool, 1)
-				go func() { current <- currentGateway(probeCtx, delivery.connection()) }()
-				select {
-				case <-delivery.ready:
-					cancel()
-					return
-				case <-req.Context().Done():
-					cancel()
-					return
-				case same := <-current:
-					cancel()
-					if same {
-						select {
-						case <-delivery.ready:
-						case <-req.Context().Done():
-						}
-						return
-					}
-				case <-probeCtx.Done():
-					cancel()
-				}
 			}
 			delivery.release()
 			return
@@ -223,8 +253,8 @@ func gatewayServiceNotServing(state gatewayServiceState) bool {
 func hookDeliveryWait(opts Options) time.Duration {
 	wait := hookDeliveryCapabilityWait
 	if !opts.ManagedEnterprise && !opts.answerBy.IsZero() {
-		// Preserve the short-window retry reserve. A capability probe runs
-		// only after this wait and has its own small bound.
+		// Preserve the short-window retry reserve. Peer verification runs
+		// within this wait and never extends an older gateway's answer.
 		remaining := max(time.Until(opts.answerBy), 0)
 		wait = min(330*time.Millisecond, remaining/2)
 		if remaining <= 2*hookDeliveryCapabilityWait {
