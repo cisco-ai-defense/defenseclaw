@@ -63,10 +63,10 @@ func CodexSelectedSkillName(prompt string) string {
 
 // projectSkillCallSelection reads a Skill call with the gateway parser. The
 // name is the one the gateway decides on: the top-level event fields first,
-// then the tool input. It is empty when the gateway could not use it as a
-// selected-folder fact value. sources lists every explicit source path in
-// either field set, so a path the gateway does not read next to that name
-// still decides which folder the call selects.
+// then the tool input. It is empty when no selected-folder fact can carry
+// it. sources lists every explicit source path in either field set, so a
+// path the gateway does not read next to that name still decides which
+// folder the call selects.
 func projectSkillCallSelection(payload, args json.RawMessage) (name string, sources []string) {
 	for _, raw := range []json.RawMessage{payload, args} {
 		var values map[string]any
@@ -78,7 +78,7 @@ func projectSkillCallSelection(payload, args json.RawMessage) (name string, sour
 			continue
 		}
 		if name == "" {
-			if projectSkillName(selected) != selected {
+			if !projectSkillFactName(selected) {
 				return "", nil
 			}
 			name = selected
@@ -90,10 +90,17 @@ func projectSkillCallSelection(payload, args json.RawMessage) (name string, sour
 	return name, sources
 }
 
+// projectSkillFactName reports whether name can be a selected-folder fact
+// value: a name the shared selection parser returns, within the path bound.
+// It need not be a folder name; an explicit source binds the folder.
+func projectSkillFactName(name string) bool {
+	return name != "" && len(name) <= MaxWriteTargetPathBytes && assetfacts.SkillRuntimeName(name) == name
+}
+
 // addProjectSkillSelectedFacts names the folder a Skill call selects under
 // each unverified root in facts. Explicit sources bind folders by path; a
 // name-only call binds the folder of that name or declared name.
-func addProjectSkillSelectedFacts(facts map[string]string, payload, args json.RawMessage, cwd string) {
+func addProjectSkillSelectedFacts(facts map[string]string, payload, args json.RawMessage, home, cwd string) {
 	name, sources := projectSkillCallSelection(payload, args)
 	if name == "" {
 		return
@@ -110,7 +117,7 @@ func addProjectSkillSelectedFacts(facts map[string]string, payload, args json.Ra
 			dirs = projectSkillSelectedFolders(root, name)
 		}
 		for _, source := range sources {
-			dirs = append(dirs, projectSkillSourceFolders(root, name, source, cwd)...)
+			dirs = append(dirs, projectSkillSourceFolders(root, name, source, home, cwd)...)
 		}
 		for _, dir := range dirs {
 			facts[ProjectSkillSelectedPrefix+dir] = name
@@ -137,8 +144,12 @@ func projectSkillName(raw string) string {
 // user, so it neither invents a project copy nor misses a late folder. When
 // the caller cannot list the root, root/name counts only if its manifest
 // could not be ruled out; the agent, running as the same user, cannot find
-// a declared-name folder there either.
+// a declared-name folder there either. A name that is not a folder name
+// selects no folder by name, as in the gateway.
 func projectSkillSelectedFolders(root, name string) []string {
+	if projectSkillName(name) != name {
+		return nil
+	}
 	direct := filepath.Join(root, name)
 	info, directErr := os.Stat(filepath.Join(direct, "SKILL.md"))
 	if directErr == nil && info.Mode().IsRegular() {
@@ -172,7 +183,7 @@ func projectSkillSelectedFolders(root, name string) []string {
 // lexically and through the caller's resolved view, which a managed gateway
 // cannot inspect, so the result does not depend on the selected name. A
 // source naming the root itself selects the root and its named folder.
-func projectSkillSourceFolders(root, name, source, cwd string) []string {
+func projectSkillSourceFolders(root, name, source, home, cwd string) []string {
 	if !filepath.IsAbs(source) {
 		if !filepath.IsAbs(cwd) {
 			return nil
@@ -193,7 +204,8 @@ func projectSkillSourceFolders(root, name, source, cwd string) []string {
 		return nil
 	}
 	if rootErr == nil {
-		if child := projectSkillChild(resolvedRoot, resolvedSource); child != "" {
+		if child := projectSkillChild(resolvedRoot, resolvedSource); child != "" &&
+			projectSkillSourceSelects(home, filepath.Join(resolvedRoot, child), resolvedSource) {
 			return []string{filepath.Join(root, child)}
 		}
 	}
@@ -211,12 +223,43 @@ func projectSkillSourceFolders(root, name, source, cwd string) []string {
 		}
 		dir := filepath.Join(root, entry.Name())
 		resolved, err := filepath.EvalSymlinks(dir)
-		if err == nil && (projectSkillRootKey(resolved) == projectSkillRootKey(resolvedSource) ||
-			projectSkillPathWithin(resolved, resolvedSource)) {
+		if err == nil && projectSkillSourceSelects(home, resolved, resolvedSource) {
 			return []string{dir}
 		}
 	}
 	return nil
+}
+
+// projectSkillSourceSelects reports whether a resolved source selects the
+// resolved project folder: the source is the folder, its manifest or a path
+// in it that no other skill folder owns. A skill folder below the project
+// folder that the caller's profile holds privately is that skill's own
+// selection, so a project link or root reaching an ancestor of it does not
+// claim it. One that another user can change still counts.
+func projectSkillSourceSelects(home, folder, source string) bool {
+	if projectSkillRootKey(folder) == projectSkillRootKey(source) {
+		return true
+	}
+	if !projectSkillPathWithin(folder, source) {
+		return false
+	}
+	for dir := source; projectSkillPathWithin(folder, dir); dir = filepath.Dir(dir) {
+		if info, err := os.Stat(filepath.Join(dir, "SKILL.md")); err == nil && info.Mode().IsRegular() {
+			return !projectSkillPrivateFolder(home, dir)
+		}
+	}
+	return true
+}
+
+// projectSkillPrivateFolder reports whether a resolved folder lies in the
+// caller's profile with no folder on the way to it writable by another user.
+func projectSkillPrivateFolder(home, dir string) bool {
+	realHome, err := filepath.EvalSymlinks(home)
+	if err != nil || !projectSkillPathWithin(realHome, dir) {
+		return false
+	}
+	shared, err := projectSkillRootSharedWritable(realHome, dir)
+	return err == nil && !shared
 }
 
 // projectSkillChild names the first folder under root on the way to path.
