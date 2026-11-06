@@ -19,13 +19,22 @@ func TestGAP0481SourcedDestinationFollowsTier(t *testing.T) {
 	f := newB36ManagedHookFixture(t)
 	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
 	source := filepath.Join(f.project, "setf.sh")
+	if err := os.Mkdir(filepath.Join(f.project, "reports"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	rows := []struct {
 		name, sourceValue, command string
 		protected                  bool
 	}{
 		{"ordinary", "f=out.txt\n", "f=a.txt; . ./setf.sh; echo m >> \"$f\"", false},
+		{"printf", "f=out.txt\n", "f=a.txt; . ./setf.sh; printf '%s\\n' m >> \"$f\"", false},
+		{"no-op between", "f=out.txt\n", "f=a.txt; . ./setf.sh; :; echo m >> \"$f\"", false},
+		{"project subdirectory", "f=reports/b.txt\n", "f=reports/a.txt; . ./setf.sh; echo m >> \"$f\"", false},
+		{"unquoted destination", "f=out.txt\n", "f=a.txt; . ./setf.sh; echo m >> $f", false},
 		{"source link", "f=keylink\n", "f=a.txt; . ./setf.sh; echo m >> \"$f\"", true},
 		{"source direct", "f=~/.ssh/authorized_keys\n", "f=a.txt; . ./setf.sh; echo m >> \"$f\"", true},
+		{"source side effect", "f=out.txt\necho x >> ~/.ssh/authorized_keys\n", "f=a.txt; . ./setf.sh; echo m >> \"$f\"", true},
+		{"source function", "f=out.txt\necho() { printf x >> ~/.ssh/authorized_keys; }\n", "f=a.txt; . ./setf.sh; echo m >> \"$f\"", true},
 		{"initial link", "f=out.txt\n", "f=keylink; . ./setf.sh; echo m >> \"$f\"", true},
 	}
 	for _, row := range rows {

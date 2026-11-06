@@ -30,7 +30,7 @@ func balancedSourcedDestination(request trustedActionRequest, facts actionfacts.
 		return false
 	}
 	command, known := trustedBashCommandInput(request.Input)
-	if !known || !sourcedVariableRedirectForm(command, facts.ActiveHome) {
+	if !known || !unresolvedVariableRedirectForm(command, facts.ActiveHome) {
 		return false
 	}
 	if request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(
@@ -44,68 +44,126 @@ func balancedSourcedDestination(request trustedActionRequest, facts actionfacts.
 	return true
 }
 
-// sourcedVariableRedirectForm is the existing three-statement sourced-file
-// class: a plain project-file binding, one local source, then a fixed-text
-// print redirected through that binding. It does not expand the sourced file
-// or add a new target reading; the hook's existing evidence decides known
-// protected names.
-func sourcedVariableRedirectForm(command, home string) bool {
-	if !strings.Contains(command, "source") && !strings.Contains(command, ". ") {
-		return false
-	}
+// unresolvedVariableRedirectForm identifies a variable destination whose
+// command text supplies only ordinary project-file candidates. The unresolved
+// part is a local source. The path reader above still judges
+// the current source file and every named link before the tier can apply.
+func unresolvedVariableRedirectForm(command, home string) bool {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(command), "")
-	if err != nil || len(file.Stmts) != 3 {
+	if err != nil || len(file.Stmts) < 3 {
 		return false
 	}
-	assignment, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
-	if !ok || len(assignment.Args) != 0 || len(assignment.Assigns) != 1 ||
-		len(file.Stmts[0].Redirs) != 0 || file.Stmts[0].Background || file.Stmts[0].Negated {
+	name, ok := variableRedirectWriter(file.Stmts[len(file.Stmts)-1], home)
+	if !ok {
 		return false
 	}
-	binding := assignment.Assigns[0]
-	if binding.Name == nil || binding.Value == nil || binding.Append || binding.Array != nil {
-		return false
-	}
-	value, fixed := hookpaths.StaticWord(binding.Value, home)
-	if !fixed || !plainProjectFileName(value) {
-		return false
-	}
-	source, ok := file.Stmts[1].Cmd.(*syntax.CallExpr)
-	if !ok || len(source.Args) != 2 || len(source.Assigns) != 0 ||
-		len(file.Stmts[1].Redirs) != 0 || file.Stmts[1].Background || file.Stmts[1].Negated ||
-		(source.Args[0].Lit() != "." && source.Args[0].Lit() != "source") {
-		return false
-	}
-	sourceName, fixed := hookpaths.StaticWord(source.Args[1], home)
-	if !fixed || !plainProjectFileName(strings.TrimPrefix(sourceName, "./")) {
-		return false
-	}
-	writer, ok := file.Stmts[2].Cmd.(*syntax.CallExpr)
-	if !ok || len(writer.Args) < 2 || writer.Args[0].Lit() != "echo" ||
-		len(writer.Assigns) != 0 || len(file.Stmts[2].Redirs) != 1 ||
-		file.Stmts[2].Background || file.Stmts[2].Negated {
-		return false
-	}
-	for _, arg := range writer.Args[1:] {
-		if _, fixed := hookpaths.StaticWord(arg, home); !fixed {
+	binding, uncertainty := false, false
+	for _, stmt := range file.Stmts[:len(file.Stmts)-1] {
+		if !plainVariableStatement(stmt) || len(stmt.Redirs) != 0 {
+			return false
+		}
+		switch call := stmt.Cmd.(type) {
+		case *syntax.CallExpr:
+			if len(call.Args) == 0 {
+				if !plainVariableBinding(call, name, home) {
+					return false
+				}
+				binding = true
+				continue
+			}
+			if len(call.Assigns) != 0 {
+				return false
+			}
+			switch call.Args[0].Lit() {
+			case ".", "source":
+				if !binding || len(call.Args) != 2 {
+					return false
+				}
+				path, fixed := hookpaths.StaticWord(call.Args[1], home)
+				if !fixed || !plainProjectPath(strings.TrimPrefix(path, "./")) {
+					return false
+				}
+				uncertainty = true
+			case ":":
+				if len(call.Args) != 1 {
+					return false
+				}
+			default:
+				return false
+			}
+		default:
 			return false
 		}
 	}
-	redirect := file.Stmts[2].Redirs[0]
-	if redirect.Op != syntax.AppOut || redirect.N != nil || redirect.Word == nil || len(redirect.Word.Parts) != 1 {
-		return false
-	}
-	quoted, ok := redirect.Word.Parts[0].(*syntax.DblQuoted)
-	if !ok || quoted.Dollar || len(quoted.Parts) != 1 {
-		return false
-	}
-	parameter, ok := quoted.Parts[0].(*syntax.ParamExp)
-	return ok && parameter.Param != nil && parameter.Param.Value == binding.Name.Value &&
-		!parameter.Excl && !parameter.Length && !parameter.Width && !parameter.IsSet &&
-		parameter.Index == nil && parameter.Slice == nil && parameter.Exp == nil && parameter.Repl == nil
+	return binding && uncertainty
 }
 
-func plainProjectFileName(value string) bool {
-	return value != "" && value != "." && value != ".." &&
-		!filepath.IsAbs(value) && !strings.ContainsAny(value, "/\\*?[]$~\x00\r\n")
+func plainVariableStatement(stmt *syntax.Stmt) bool {
+	return stmt != nil && stmt.Cmd != nil && !stmt.Background &&
+		!stmt.Coprocess && !stmt.Disown && !stmt.Negated
+}
+
+func plainVariableBinding(call *syntax.CallExpr, name, home string) bool {
+	if len(call.Assigns) != 1 {
+		return false
+	}
+	a := call.Assigns[0]
+	if a.Name == nil || a.Name.Value != name || a.Value == nil ||
+		a.Append || a.Array != nil || a.Index != nil {
+		return false
+	}
+	value, fixed := hookpaths.StaticWord(a.Value, home)
+	return fixed && plainProjectPath(value)
+}
+
+func variableRedirectWriter(stmt *syntax.Stmt, home string) (string, bool) {
+	if !plainVariableStatement(stmt) || len(stmt.Redirs) != 1 {
+		return "", false
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) != 0 || len(call.Args) < 2 {
+		return "", false
+	}
+	switch call.Args[0].Lit() {
+	case "echo", "printf":
+	default:
+		return "", false
+	}
+	for _, arg := range call.Args[1:] {
+		if _, fixed := hookpaths.StaticWord(arg, home); !fixed {
+			return "", false
+		}
+	}
+	redirect := stmt.Redirs[0]
+	if redirect.Op != syntax.AppOut || redirect.N != nil ||
+		redirect.Word == nil || len(redirect.Word.Parts) != 1 {
+		return "", false
+	}
+	part := redirect.Word.Parts[0]
+	if quoted, ok := part.(*syntax.DblQuoted); ok {
+		if quoted.Dollar || len(quoted.Parts) != 1 {
+			return "", false
+		}
+		part = quoted.Parts[0]
+	}
+	parameter, ok := part.(*syntax.ParamExp)
+	if !ok || parameter.Param == nil || parameter.Excl || parameter.Length ||
+		parameter.Width || parameter.IsSet || parameter.Index != nil ||
+		parameter.Slice != nil || parameter.Exp != nil || parameter.Repl != nil {
+		return "", false
+	}
+	return parameter.Param.Value, true
+}
+
+func plainProjectPath(value string) bool {
+	if value == "" || filepath.IsAbs(value) ||
+		strings.ContainsAny(value, "\\*?[]$~\x00\r\n \t;&|><'\"") {
+		return false
+	}
+	for _, part := range strings.Split(value, "/") {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
 }
