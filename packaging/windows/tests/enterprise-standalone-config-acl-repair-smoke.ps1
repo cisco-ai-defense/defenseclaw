@@ -289,6 +289,118 @@ try {
         Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway
         [IO.File]::Delete($temporary)
 
+        # GAP-0590 review M3: the ACL drift repair, which every transaction
+        # runs (uninstall included), judges what it would re-stamp before it
+        # answers the read-only check and before any re-stamp.
+        Add-UsersWrite -Path $credential -Rights Modify
+        foreach ($checkOnly in @($true, $false)) {
+            $driftError = ''
+            try {
+                [void](Repair-DefenseClawDeploymentAclDrift `
+                    -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                    -RedactionKeyClass trusted_drift -CheckOnly:$checkOnly)
+            }
+            catch {
+                $driftError = $_.Exception.Message
+            }
+            if (-not $driftError.StartsWith('refusing to change the deployment') -or
+                -not $driftError.Contains($credential) -or $script:repairCalls -ne 0) {
+                throw "the ACL drift repair (CheckOnly $checkOnly) re-stamped a user-writable credential: '$driftError'"
+            }
+        }
+        & $canonical[$credential]
+
+        # GAP-0590 review M3: Repair, a reinstall over an uninstall's
+        # tombstone and the uninstall itself reach the gate before they
+        # consume a record or change anything. The lifecycle steps after the
+        # gate are replaced by a marker, so reaching one means the gate passed.
+        & {
+            $script:metadataInstalled = $true
+            function Get-DefenseClawDeploymentMetadata { param($Layout, [switch]$Required)
+                return [pscustomobject]@{ installed = $script:metadataInstalled; managed_hooks_activation = [pscustomobject]@{} } }
+            function Test-DefenseClawMetadataInstalled { param($Metadata) return [bool]$Metadata.installed }
+            function Assert-DefenseClawMetadataIdentity { }
+            function Test-DefenseClawLayoutBrokerEnabled { return $false }
+            function Assert-DefenseClawManagedHooksActivationRecord { return [pscustomobject]@{} }
+            function Assert-DefenseClawManagedServiceConfigurations { }
+            function Assert-DefenseClawStandaloneInstallTreeNotInUse { }
+            function Assert-DefenseClawStandaloneInstallRootNotHeld { }
+            function Assert-DefenseClawStandaloneStateFilesNotInUse { }
+            function Remove-DefenseClawCommittedManagedHooksTeardownJournal { throw 'past the gate' }
+            function Remove-DefenseClawStandaloneInstallTreeReplacementBackups { throw 'past the gate' }
+            # Repair reaches the service checks right after the gate; the
+            # uninstall runs them before it.
+            function Assert-DefenseClawOwnedServiceOrAbsent { if ($script:serviceCheckIsPastTheGate) { throw 'past the gate' } }
+            $lifecycleLayout = $gateLayout.Clone()
+            $lifecycleLayout.GatewayPath = [IO.Path]::Combine($State, 'program', 'bin', 'defenseclaw-gateway.exe')
+            $lifecycleLayout.ProviderLibraryPath = ''
+            function Invoke-TestLifecycle([string]$Action, [bool]$Installed, [switch]$Purge) {
+                $script:metadataInstalled = $Installed
+                $script:serviceCheckIsPastTheGate = $Action -eq 'Repair'
+                try {
+                    if ($Action -eq 'Uninstall') {
+                        Invoke-DefenseClawUninstallLifecycle -Layout $lifecycleLayout `
+                            -GatewayServiceName DefenseClawGateway -GuardianServiceName DefenseClawHookGuardian -Purge:$Purge
+                    }
+                    else {
+                        [void](Invoke-DefenseClawInstallLikeLifecycle -Action $Action -Layout $lifecycleLayout -Sources @{} `
+                            -GatewayServiceName DefenseClawGateway -GuardianServiceName DefenseClawHookGuardian)
+                    }
+                }
+                catch {
+                    return $_.Exception.Message
+                }
+                return 'returned'
+            }
+            $teardownJournal = [string]$lifecycleLayout.ManagedHooksTeardownJournalPath
+            $cells = @(
+                # The credential-file scenario: a standard user's write entry,
+                # then /repair.
+                @('Repair', $true, $false, $credential, 'set the credential again', 'run Setup /ensure again'),
+                # A reinstall over a tombstone with a retained drifted credential
+                # or a leftover teardown journal.
+                @('Install', $false, $false, $credential, 'set the credential again', 'run Setup /ensure again'),
+                @('Install', $false, $false, $teardownJournal, 'remove that entry, or give the file back to Administrators', 'run Setup /ensure again'),
+                # A non-purge uninstall keeps the credential; PURGE=1 deletes it.
+                @('Uninstall', $true, $false, $credential, 'run Setup /uninstall PURGE=1, which deletes it', 'run the uninstall again'),
+                # A purge still refuses a drifted Codex record before it restores it.
+                @('Uninstall', $true, $true, [string]$lifecycleLayout.CodexRequirementsOwnershipPath, 'remove that entry, or give the file back to Administrators', 'run the uninstall again')
+            )
+            foreach ($cell in $cells) {
+                $path = [string]$cell[3]
+                Add-UsersWrite -Path $path -Rights Modify
+                $before = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path).Sddl
+                $message = Invoke-TestLifecycle -Action $cell[0] -Installed $cell[1] -Purge:$cell[2]
+                if (-not $message.StartsWith('refusing to change the deployment, and nothing was changed') -or
+                    -not $message.Contains($path) -or -not $message.Contains([string]$cell[4]) -or
+                    -not $message.Contains([string]$cell[5]) -or
+                    (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path).Sddl -cne $before) {
+                    throw "$($cell[0]) (installed $($cell[1]), purge $($cell[2])) did not refuse $path at the gate: '$message'"
+                }
+                if ($path -ceq $credential) {
+                    & $canonical[$credential]
+                }
+                else {
+                    Set-DefenseClawPathAcl -Path $path -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+                }
+            }
+            # A purge deletes the credential store unread, so a drifted
+            # credential does not stop it.
+            Add-UsersWrite -Path $credential -Rights Modify
+            $message = Invoke-TestLifecycle -Action Uninstall -Installed $true -Purge
+            if ($message -cne 'past the gate') {
+                throw "a purge refused a credential it deletes: '$message'"
+            }
+            & $canonical[$credential]
+            # Benign twins: a canonical layout reaches the next step.
+            foreach ($cell in @(@('Repair', $true, $false), @('Install', $false, $false), @('Uninstall', $true, $false), @('Uninstall', $true, $true))) {
+                $message = Invoke-TestLifecycle -Action $cell[0] -Installed $cell[1] -Purge:$cell[2]
+                if ($message -cne 'past the gate') {
+                    throw "$($cell[0]) (purge $($cell[2])) on a canonical layout stopped at the gate: '$message'"
+                }
+            }
+        }
+
         # The self-heal path itself (Verify, the attestation, the journals and
         # the Codex records read through it).
         $healed = [IO.Path]::Combine($State, 'self-heal.json')
