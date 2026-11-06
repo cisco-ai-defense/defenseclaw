@@ -231,8 +231,138 @@ def test_windows_hook_launcher_preflight_skips_offline_and_managed_setups(restar
         patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
         patch("defenseclaw.gateway.canonical_install_path") as canonical,
     ):
-        assert cmd_setup._windows_hook_launcher_setup_refusal(cfg, restart=restart) == ""
+        assert cmd_setup._windows_hook_launcher_setup_refusal(
+            cfg, restart=restart, connectors=("claudecode",)
+        ) == ""
     canonical.assert_not_called()
+
+
+@pytest.mark.parametrize("connector", ["amp", "opencode"])
+def test_windows_plugin_setup_does_not_require_native_hook_launcher(connector):
+    cfg = SimpleNamespace(deployment_mode="")
+    with (
+        patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+        patch("defenseclaw.gateway.canonical_install_path") as canonical,
+    ):
+        assert cmd_setup._windows_hook_launcher_setup_refusal(
+            cfg, restart=True, connectors=(connector,)
+        ) == ""
+    canonical.assert_not_called()
+
+
+def test_windows_plugin_setup_with_native_hook_peer_requires_launcher(tmp_path):
+    cfg = SimpleNamespace(deployment_mode="")
+    gateway = tmp_path / "defenseclaw-gateway.exe"
+    with (
+        patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+        patch("defenseclaw.gateway.canonical_install_path", return_value=str(gateway)),
+    ):
+        assert "missing or unusable" in cmd_setup._windows_hook_launcher_setup_refusal(
+            cfg, restart=True, connectors=("amp", "codex")
+        )
+
+
+@pytest.mark.parametrize("selector", ["detected", "all"])
+def test_windows_bare_setup_checks_derived_native_hook_roster_before_snapshot(tmp_path, selector):
+    app, root, db_path = make_app_context()
+    try:
+        gateway = tmp_path / "defenseclaw-gateway.exe"
+        ctx = click.Context(setup_group, obj=app)
+        with (
+            ctx,
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+            patch("defenseclaw.gateway.canonical_install_path", return_value=str(gateway)),
+            patch("defenseclaw.commands.cmd_setup._detect_installed_connectors", return_value=["codex"]),
+            patch("defenseclaw.commands.cmd_setup.platform_support.supported_connectors", return_value=["codex"]),
+            patch("defenseclaw.commands.cmd_setup.platform_support.connector_supported_on_os", return_value=True),
+            patch("defenseclaw.commands.cmd_setup.platform_support.connector_platform_support",
+                  return_value=SimpleNamespace(available=True)),
+            patch("defenseclaw.commands.cmd_setup._capture_setup_config_snapshot") as snapshot,
+            pytest.raises(click.ClickException, match="defenseclaw-hook.exe.*missing or unusable"),
+        ):
+            cmd_setup._dispatch_bare_setup(
+                ctx, app, connectors=[], detected=selector == "detected", add_detected=False,
+                all_connectors=selector == "all", mode="observe", restart=True, yes=True,
+            )
+        snapshot.assert_not_called()
+    finally:
+        cleanup_app(app, db_path, root)
+
+
+def test_windows_add_detected_checks_preserved_native_hook_peer_before_snapshot(tmp_path):
+    app, root, db_path = make_app_context()
+    try:
+        app.cfg.guardrail.connector = "codex"
+        app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(mode="action")}
+        app.cfg.claw.mode = "codex"
+        gateway = tmp_path / "defenseclaw-gateway.exe"
+        ctx = click.Context(setup_group, obj=app)
+        with (
+            ctx,
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+            patch("defenseclaw.gateway.canonical_install_path", return_value=str(gateway)),
+            patch("defenseclaw.commands.cmd_setup._detect_installed_connectors", return_value=["amp"]),
+            patch("defenseclaw.commands.cmd_setup.platform_support.connector_supported_on_os", return_value=True),
+            patch("defenseclaw.commands.cmd_setup.platform_support.connector_platform_support",
+                  return_value=SimpleNamespace(available=True)),
+            patch("defenseclaw.commands.cmd_setup._capture_setup_config_snapshot") as snapshot,
+            pytest.raises(click.ClickException, match="defenseclaw-hook.exe.*missing or unusable"),
+        ):
+            cmd_setup._dispatch_bare_setup(
+                ctx, app, connectors=[], detected=False, add_detected=True,
+                all_connectors=False, mode="observe", restart=True, yes=True,
+            )
+        snapshot.assert_not_called()
+    finally:
+        cleanup_app(app, db_path, root)
+
+
+def test_windows_additive_batch_checks_preserved_native_hook_peer_before_snapshot(tmp_path):
+    app, root, db_path = make_app_context()
+    try:
+        app.cfg.guardrail.connector = "codex"
+        app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(mode="action")}
+        app.cfg.claw.mode = "codex"
+        gateway = tmp_path / "defenseclaw-gateway.exe"
+        ctx = click.Context(setup_group, obj=app)
+        with (
+            ctx,
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+            patch("defenseclaw.gateway.canonical_install_path", return_value=str(gateway)),
+            patch("defenseclaw.commands.cmd_setup._capture_setup_config_snapshot") as snapshot,
+            pytest.raises(click.ClickException, match="defenseclaw-hook.exe.*missing or unusable"),
+        ):
+            cmd_setup._apply_setup_batch(
+                ctx, app, ["amp"], mode="observe", restart=True,
+                prompt_per_connector=False, preserve_global_settings=True,
+            )
+        snapshot.assert_not_called()
+    finally:
+        cleanup_app(app, db_path, root)
+
+
+def test_windows_amp_setup_without_native_hook_launcher_reaches_normal_preflight(tmp_path, capsys):
+    app, root, db_path = make_app_context()
+    try:
+        app.cfg.guardrail.connector = ""
+        app.cfg.guardrail.connectors = {}
+        app.cfg.claw.mode = ""
+        gateway = tmp_path / "defenseclaw-gateway.exe"
+        with (
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+            patch("defenseclaw.gateway.canonical_install_path", return_value=str(gateway)),
+            patch("defenseclaw.commands.cmd_setup._agent_settings_refusal", return_value=""),
+            patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=False)
+            as version_check,
+        ):
+            applied = cmd_setup._apply_hook_connector_setup(
+                app, connector="amp", mode="observe", restart=True, write_mode="replace"
+            )
+        assert applied is False
+        version_check.assert_called_once()
+        assert "defenseclaw-hook.exe) is missing or unusable" not in capsys.readouterr().err
+    finally:
+        cleanup_app(app, db_path, root)
 
 
 def test_batch_probes_all_selected_versions_in_one_cache_publication():
