@@ -3560,7 +3560,7 @@
         },
         {
           "location": "packaging/windows/DefenseClawEnterprise.psm1",
-          "description": "Assert-DefenseClawTrustedAncestor and the state-root ACL assertion throw instead of emitting Write-DefenseClawTrustAdvisory when set; Assert-DefenseClawTrustedAncestor also throws regardless of this variable for an ancestor outside Get-DefenseClawPlatformInstallerOwnedRoots (C:\\, C:\\ProgramData and C:\\Program Files themselves); Set-DefenseClawSharedPathAcl also stops retrying a lost canonical-stamp race and rethrows on the first failure. The state-root ACL self-heal itself still runs when set, because re-stamping only hardens"
+          "description": "Assert-DefenseClawTrustedAncestor and the state-root ACL assertion throw instead of emitting Write-DefenseClawTrustAdvisory when set; Assert-DefenseClawTrustedAncestor also throws regardless of this variable when its caller passes -Strict, where the verdict decides whether content counts as administrator-written evidence; Set-DefenseClawSharedPathAcl also stops retrying a lost canonical-stamp race and rethrows on the first failure. The state-root ACL self-heal itself still runs when set, because re-stamping only hardens"
         },
         {
           "location": "packaging/macos/install.sh",
