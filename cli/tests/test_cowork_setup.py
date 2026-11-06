@@ -104,7 +104,7 @@ def app():
         patch.object(cowork, "managed_host", return_value=""),
         patch.object(cowork, "claude_desktop_installed", return_value=True),
         patch.object(cowork, "open_claude", return_value=True),
-        patch.object(cmd_setup, "_gateway_lifecycle_executable", return_value=GATEWAY),
+        patch.object(cmd_setup, "_gateway_lifecycle_resolution", return_value=(GATEWAY, "")),
     ):
         yield ctx
     cleanup_app(ctx, db_path, tmp_dir)
@@ -124,8 +124,7 @@ def _data_dir(app) -> str:
 def test_cowork_names_found_gateway_with_unsafe_acl(app) -> None:
     reason = "refusing to run the gateway: ACL grants write access to untrusted SID S-1-5-32-545; Restore its ACL"
     with (
-        patch.object(cmd_setup, "_gateway_lifecycle_executable", return_value=None),
-        patch.object(cmd_setup, "_refused_gateway_lifecycle_candidate", return_value=reason),
+        patch.object(cmd_setup, "_gateway_lifecycle_resolution", return_value=(None, reason)),
     ):
         with pytest.raises(click.ClickException) as exc:
             cmd_setup_cowork._render_hooks(app.cfg)
@@ -137,8 +136,7 @@ def test_cowork_names_found_gateway_with_unsafe_acl(app) -> None:
 
 def test_cowork_missing_gateway_keeps_install_guidance(app) -> None:
     with (
-        patch.object(cmd_setup, "_gateway_lifecycle_executable", return_value=None),
-        patch.object(cmd_setup, "_refused_gateway_lifecycle_candidate", return_value=""),
+        patch.object(cmd_setup, "_gateway_lifecycle_resolution", return_value=(None, "")),
     ):
         with pytest.raises(click.ClickException) as exc:
             cmd_setup_cowork._render_hooks(app.cfg)

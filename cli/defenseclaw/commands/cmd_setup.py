@@ -17762,6 +17762,16 @@ def _gateway_lifecycle_executable(
     native: bool = False,
     search_path: str | None = None,
 ) -> str | None:
+    """Return the selected gateway only when its executable custody is trusted."""
+    candidate = _gateway_lifecycle_candidate(native=native, search_path=search_path)
+    return _trusted_gateway_lifecycle_executable(candidate) if candidate else None
+
+
+def _gateway_lifecycle_candidate(
+    *,
+    native: bool = False,
+    search_path: str | None = None,
+) -> str | None:
     """Resolve one stable executable for a complete gateway lifecycle call.
 
     A packaged Windows CLI must use the gateway beside its verified embedded
@@ -17783,7 +17793,7 @@ def _gateway_lifecycle_executable(
         # A corroborated package with a missing sibling is broken; fail closed
         # instead of allowing PATH/current-directory executable shadowing.
         packaged = packaged_windows_gateway_path()
-        return _trusted_gateway_lifecycle_executable(packaged) if packaged else None
+        return str(Path(packaged).resolve()) if packaged else None
     raw_search_path = os.environ.get("PATH", os.defpath) if search_path is None else search_path
     current_directory = os.path.normcase(os.path.realpath(os.curdir))
     search_directories: list[str] = []
@@ -17823,25 +17833,49 @@ def _gateway_lifecycle_executable(
     resolved = Path(executable).expanduser().resolve()
     if native and os.name == "nt" and resolved.suffix.lower() != ".exe":
         return None
-    return _trusted_gateway_lifecycle_executable(str(resolved))
+    return str(resolved)
+
+
+def _gateway_lifecycle_resolution(
+    *,
+    native: bool = False,
+    search_path: str | None = None,
+) -> tuple[str | None, str]:
+    """Select once and retain the custody result for a lifecycle message."""
+    candidate = _gateway_lifecycle_candidate(native=native, search_path=search_path)
+    return _trusted_gateway_lifecycle_resolution(candidate) if candidate else (None, "")
 
 
 def _trusted_gateway_lifecycle_executable(executable: str) -> str | None:
     """Return a custody-checked concrete executable for lifecycle mutation."""
+    return _trusted_gateway_lifecycle_resolution(executable)[0]
+
+
+def _trusted_gateway_lifecycle_resolution(executable: str) -> tuple[str | None, str]:
+    """Return the trusted path or the reason the selected path was refused."""
     if not executable or not os.path.isabs(executable):
-        return None
+        return None, ""
     resolved = str(Path(executable).resolve())
     if os.name != "nt":
-        from defenseclaw.file_permissions import trusted_posix_executable_path
+        from defenseclaw.file_permissions import UnsafePathError, trusted_posix_executable_path, unsafe_gateway_remedy
 
         try:
-            return trusted_posix_executable_path(resolved)
+            return trusted_posix_executable_path(resolved), ""
+        except UnsafePathError as exc:
+            return None, f"refusing to run {resolved}: {unsafe_gateway_remedy(exc)}"
         except OSError:
-            return None
+            return None, ""
 
-    if _windows_gateway_lifecycle_custody_problem(resolved) is not None:
-        return None
-    return resolved
+    custody_problem = _windows_gateway_lifecycle_custody_problem(resolved)
+    if custody_problem is not None:
+        candidate, problem = custody_problem
+        return None, (
+            f"refusing to run {resolved}: {candidate}: {problem}. Restore ownership and write access "
+            "to this account or a trusted Windows system controller (SYSTEM, BUILTIN Administrators, "
+            "TrustedInstaller), then retry. For an installed gateway, rerun the DefenseClaw installer "
+            "to restore its permissions"
+        )
+    return resolved, ""
 
 
 def _windows_gateway_lifecycle_custody_problem(executable: str) -> tuple[str, str] | None:
@@ -17854,47 +17888,8 @@ def _windows_gateway_lifecycle_custody_problem(executable: str) -> tuple[str, st
 
 
 def _refused_gateway_lifecycle_candidate(search_path: str | None = None) -> str:
-    """Name an installed gateway the lifecycle custody check refused, or "".
-
-    The lifecycle reported such a binary as "binary not found" with a build
-    hint, although the gateway was installed and only its ACL or mode was
-    refused.
-    """
-    from defenseclaw.gateway import GATEWAY_BIN_NAME, canonical_install_path, packaged_windows_install_root
-
-    if os.name == "nt" and packaged_windows_install_root():
-        from defenseclaw.gateway import packaged_windows_gateway_path
-
-        found = packaged_windows_gateway_path()
-    else:
-        raw_search_path = os.environ.get("PATH", os.defpath) if search_path is None else search_path
-        found = shutil.which(GATEWAY_BIN_NAME, path=raw_search_path)
-        if (not found or not os.path.isabs(found)) and os.name == "nt":
-            # The per-user installer's folder, which the lifecycle also falls
-            # back to.
-            canonical = canonical_install_path()
-            found = canonical if os.path.isfile(canonical) else ""
-    if not found or not os.path.isabs(found):
-        return ""
-    found = str(Path(found).resolve())
-    if os.name != "nt":
-        from defenseclaw.file_permissions import UnsafePathError, trusted_posix_executable_path, unsafe_gateway_remedy
-
-        try:
-            trusted_posix_executable_path(found)
-        except UnsafePathError as exc:
-            return f"refusing to run {found}: {unsafe_gateway_remedy(exc)}"
-        return ""
-    custody_problem = _windows_gateway_lifecycle_custody_problem(found)
-    if custody_problem is not None:
-        candidate, problem = custody_problem
-        return (
-            f"refusing to run {found}: {candidate}: {problem}. Restore ownership and write access "
-            "to this account or a trusted Windows system controller (SYSTEM, BUILTIN Administrators, "
-            "TrustedInstaller), then retry. For an installed gateway, rerun the DefenseClaw installer "
-            "to restore its permissions"
-        )
-    return ""
+    """Name the custody reason for the gateway selected by the lifecycle."""
+    return _gateway_lifecycle_resolution(search_path=search_path)[1]
 
 
 # A lifecycle command's own 30 s progress lines go to its captured output, so
