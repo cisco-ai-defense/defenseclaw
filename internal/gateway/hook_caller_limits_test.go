@@ -805,7 +805,8 @@ func TestSandboxHookReceiptAdmissionKeys(t *testing.T) {
 // one account must not fill a second, 32-request user cap while each binding
 // and the shared 100/s receipt bucket remain within their limits.
 func TestGAP0490ConcurrentReceiptsAcrossBindings(t *testing.T) {
-	limiter := &hookCallerLimiter{now: func() time.Time { return time.Unix(4_000_000, 0) }}
+	now := time.Unix(4_000_000, 0)
+	limiter := &hookCallerLimiter{now: func() time.Time { return now }}
 	var releases []func()
 	defer func() {
 		for _, release := range releases {
@@ -827,6 +828,9 @@ func TestGAP0490ConcurrentReceiptsAcrossBindings(t *testing.T) {
 		host()
 	}
 	for len(releases) < sandboxUserHookInFlight {
+		// Advance the bucket as receipts arrive; keeping their slots held
+		// exercises the concurrency boundary.
+		now = now.Add(11 * time.Millisecond)
 		release, _, reason, _ := limiter.acquire("1001|" + sandboxBudgetReceipt)
 		if reason != "" {
 			t.Fatalf("receipt %d below the aggregate bound refused: %s", len(releases), reason)
@@ -983,6 +987,15 @@ func TestGAP0490MultipleSandboxBindingsShareTheUserBudget(t *testing.T) {
 	}
 	if allowed, refused := run(4, 24, 10, time.Second); allowed != 960 || refused != 0 {
 		t.Fatalf("four ordinary bindings at 96/s: %d allowed, %d refused", allowed, refused)
+	}
+	if allowed, refused := run(5, 20, 10, 1300*time.Millisecond); allowed != 1000 || refused != 0 {
+		t.Fatalf("five ordinary bindings at 100/s: %d allowed, %d refused", allowed, refused)
+	}
+	if allowed, refused := run(6, 16, 10, 1500*time.Millisecond); allowed != 960 || refused != 0 {
+		t.Fatalf("six ordinary bindings at 96/s: %d allowed, %d refused", allowed, refused)
+	}
+	if allowed, refused := run(20, 5, 10, 3400*time.Millisecond); allowed != 1000 || refused != 0 {
+		t.Fatalf("twenty ordinary bindings at 100/s: %d allowed, %d refused", allowed, refused)
 	}
 	if allowed, refused := run(10, 13, 15, 100*time.Millisecond); refused == 0 || allowed > 200+100*15 {
 		t.Fatalf("over-budget account at 130/s: %d allowed, %d refused", allowed, refused)
