@@ -54,7 +54,7 @@ func TestGAP0483PlainTouchMissingLeavesSkipPathWalk(t *testing.T) {
 			if walked, _ := memo.WorkParts(); walked > 64 {
 				t.Fatalf("ordinary variant %q walked %d path parts, want at most 64", prefix, walked)
 			}
-			if !OrdinaryLongTouchMissingLeaves(command, cwd, home) {
+			if !ordinaryLongTouchMissingLeavesForTest(command, cwd, home) {
 				t.Fatalf("ordinary variant %q has no late proof", prefix)
 			}
 		}
@@ -75,7 +75,7 @@ func TestGAP0483PlainTouchMissingLeavesSkipPathWalk(t *testing.T) {
 		if walked, _ := memo.WorkParts(); walked > 64 {
 			t.Fatalf("ordinary literal touch walked %d path parts", walked)
 		}
-		if !OrdinaryLongTouchMissingLeaves(command, cwd, home) {
+		if !ordinaryLongTouchMissingLeavesForTest(command, cwd, home) {
 			t.Fatal("ordinary literal touch has no late proof")
 		}
 	}
@@ -83,11 +83,11 @@ func TestGAP0483PlainTouchMissingLeavesSkipPathWalk(t *testing.T) {
 		withKey := append([]string(nil), quoted...)
 		withKey[index] = `"../.ssh/authorized_keys"`
 		command := "touch -t 202611060101 -- " + strings.Join(withKey, " ")
-		if OrdinaryLongTouchMissingLeaves(command, cwd, home) || ActionCommandDecision(command, cwd, home) != "protected-target" {
+		if ordinaryLongTouchMissingLeavesForTest(command, cwd, home) || ActionCommandDecision(command, cwd, home) != "protected-target" {
 			t.Fatalf("protected literal touch at %d did not close", index)
 		}
 	}
-	if OrdinaryLongTouchMissingLeaves("touch "+strings.Join(names[:128], " ")+"\necho hello", cwd, home) {
+	if ordinaryLongTouchMissingLeavesForTest("touch "+strings.Join(names[:128], " ")+"\necho hello", cwd, home) {
 		t.Fatal("a second shell statement received a touch-only proof")
 	}
 	for _, index := range []int{0, len(names) / 2, len(names) - 1} {
@@ -139,7 +139,7 @@ func TestGAP0483LiteralLeafSpellingsStayBounded(t *testing.T) {
 			if walked, _ := memo.WorkParts(); walked > 64 {
 				t.Fatalf("ordinary touch walked %d path parts", walked)
 			}
-			if !OrdinaryLongTouchMissingLeaves(tc.command, cwd, home) {
+			if !ordinaryLongTouchMissingLeavesForTest(tc.command, cwd, home) {
 				t.Fatal("ordinary touch has no late proof")
 			}
 		})
@@ -151,7 +151,7 @@ func TestGAP0483LiteralLeafSpellingsStayBounded(t *testing.T) {
 	withAlias := append([]string(nil), spaced...)
 	withAlias[len(withAlias)/2] = fmt.Sprintf("%q", filepath.Base(alias))
 	command := "touch -t202611060101 " + strings.Join(withAlias, " ")
-	if OrdinaryLongTouchMissingLeaves(command, cwd, home) || ActionCommandDecision(command, cwd, home) != "protected-target" {
+	if ordinaryLongTouchMissingLeavesForTest(command, cwd, home) || ActionCommandDecision(command, cwd, home) != "protected-target" {
 		t.Fatal("linked protected leaf received an ordinary proof")
 	}
 }
@@ -187,7 +187,7 @@ func TestGAP0483DateAndKnownDirectoryLeavesStayBounded(t *testing.T) {
 			if walked, _ := memo.WorkParts(); walked > 64 {
 				t.Fatalf("ordinary leaves walked %d path parts", walked)
 			}
-			if !OrdinaryLongTouchMissingLeaves(tc.command, cwd, home) {
+			if !ordinaryLongTouchMissingLeavesForTest(tc.command, cwd, home) {
 				t.Fatal("ordinary leaves have no late proof")
 			}
 		})
@@ -199,7 +199,7 @@ func TestGAP0483DateAndKnownDirectoryLeavesStayBounded(t *testing.T) {
 	withAlias := append([]string(nil), names...)
 	withAlias[len(withAlias)/2] = filepath.Base(alias)
 	command := "touch -d 2026-11-06 " + strings.Join(withAlias, " ")
-	if OrdinaryLongTouchMissingLeaves(command, cwd, home) || ActionCommandDecision(command, cwd, home) != "protected-target" {
+	if ordinaryLongTouchMissingLeavesForTest(command, cwd, home) || ActionCommandDecision(command, cwd, home) != "protected-target" {
 		t.Fatal("linked protected leaf received an ordinary proof")
 	}
 	projectAlias := filepath.Join(home, "project-link")
@@ -207,8 +207,13 @@ func TestGAP0483DateAndKnownDirectoryLeavesStayBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	command = "touch -d 2026-11-06 " + strings.Join(known, " ")
-	if !OrdinaryLongTouchMissingLeaves(command, projectAlias, home) ||
+	if !ordinaryLongTouchMissingLeavesForTest(command, projectAlias, home) ||
 		ActionCommandDecision(command, projectAlias, home) != "" {
 		t.Fatal("ordinary leaves in a linked project directory lost the bounded proof")
 	}
+}
+
+func ordinaryLongTouchMissingLeavesForTest(command, cwd, home string) bool {
+	_, ok := plainTouchMissingLeaves(command, cwd, home, NewTargetMemo())
+	return ok
 }
