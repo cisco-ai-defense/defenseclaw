@@ -938,6 +938,53 @@ def test_r109_g610_unc_share_peers_judged_as_whole_paths(monkeypatch) -> None:
         assert not within(sep.join(("C:", "provider")), sep.join(("D:", "provider")))
 
 
+def test_r109_g610_root_relative_symlink_target_judged_on_the_link_drive(monkeypatch) -> None:
+    """A symbolic-link target that starts with one separator is on the link drive.
+
+    Its names are judged as the drive-qualified path is: an ordinary
+    intermediate name with a trailing space or a longer run of periods is
+    admitted, the protected name and the configured state are refused.
+    """
+    import ntpath
+
+    sep = ntpath.sep
+    provider = sep.join(("C:", "provider"))
+    peer = sep.join((provider, "node_modules", "openclaw"))
+    alias = sep.join(("C:", "alias"))
+    local_state = sep.join(("C:", "state"))
+    package = ("node_modules", "openclaw")
+
+    def rooted(*names):
+        return sep + sep.join((*names, *package))
+
+    # (label, peer target, alias target, admitted with a possible peer)
+    cases = (
+        ("ordinary", rooted("ordinary", "packages"), None, True),
+        ("intermediate-space", rooted("ordinary", ".ssh "), None, True),
+        ("intermediate-multi-period", rooted("ordinary", ".ssh.."), None, True),
+        ("state-multi-period", rooted("state.."), None, True),
+        ("state-intermediate-space", rooted("state "), None, True),
+        ("alias-intermediate-space", alias + sep + sep.join(package),
+         sep + sep.join(("ordinary", ".aws ")), True),
+        ("protected", rooted("ordinary", ".ssh"), None, False),
+        ("protected-single-period", rooted("ordinary", ".ssh."), None, False),
+        ("protected-upper", rooted("ordinary", ".SSH"), None, False),
+        ("state", rooted("state"), None, False),
+        ("state-single-period", rooted("state."), None, False),
+        ("alias-protected", alias + sep + sep.join(package),
+         sep + sep.join(("ordinary", ".aws")), False),
+        ("alias-state", alias + sep + sep.join(package), sep + "state", False),
+    )
+    for label, target, alias_target, possible in cases:
+        links = {peer: ("symlink", target)}
+        if alias_target is not None:
+            links[alias] = ("symlink", alias_target)
+        identity = _windows_peer_identity(monkeypatch, provider, links, local_state)
+        assert (identity is not None) is possible, label
+        if possible:
+            assert identity.possible_peer, label
+
+
 def test_r109_g610_verbatim_peer_paths_judged_by_actual_names(monkeypatch) -> None:
     """An extended-length path names the entries it spells, as Windows does.
 
@@ -1002,6 +1049,21 @@ def test_r109_g610_verbatim_peer_paths_judged_by_actual_names(monkeypatch) -> No
         ("device-local-state", spelled(sep * 2 + "." + sep, "C:", "state"), None, local_state, False),
         ("verbatim-share-state", spelled(verbatim, "UNC", "server", "state"), None, share_state, False),
         ("ordinary-state-period", spelled("", "C:", "state."), None, local_state, False),
+        # A name before a separator drops one trailing period only; a longer
+        # run is a distinct ordinary name, and a single period is the protected one.
+        ("ordinary-multi-period", spelled("", "C:", "ordinary", ".ssh.."), None, local_state, True),
+        ("ordinary-triple-period", spelled("", "C:", "ordinary", ".ssh..."), None, local_state, True),
+        ("ordinary-state-multi-period", spelled("", "C:", "state.."), None, local_state, True),
+        ("device-multi-period", spelled(sep * 2 + "." + sep, "C:", "ordinary", ".ssh.."),
+         None, local_state, True),
+        ("share-multi-period", spelled(sep * 2, "server", "packages", ".ssh.."),
+         None, local_state, True),
+        ("alias-multi-period", alias + sep + sep.join(package),
+         sep.join(("C:", "ordinary", ".aws..")), local_state, True),
+        ("ordinary-multi-period-space", spelled("", "C:", "ordinary", ".ssh.. "),
+         None, local_state, True),
+        ("ordinary-final-multi-period-state", sep.join(("C:", "state..")), None, local_state, False),
+        ("ordinary-protected-twin", spelled("", "C:", "ordinary", ".ssh"), None, local_state, False),
     )
     for label, target, alias_target, data_dir, possible in cases:
         links = {peer: ("junction", target)}

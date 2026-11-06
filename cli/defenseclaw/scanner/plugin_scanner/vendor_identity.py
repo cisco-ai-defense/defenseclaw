@@ -200,7 +200,7 @@ def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
             or any(_path_within(root, resolved) for root in roots)
         )
 
-    target = os.readlink(link)
+    target = _on_link_drive(os.readlink(link), link)
     path = target if os.path.isabs(target) else os.path.join(os.path.dirname(link), target)
     if not os.path.isabs(path):
         path = os.path.join(os.getcwd(), path)
@@ -235,7 +235,7 @@ def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
             links += 1
             if links > 40:
                 raise ValueError("peer path has too many links")
-            next_target = os.readlink(location)
+            next_target = _on_link_drive(os.readlink(location), location)
             if not pending:
                 trailing = _ends_with_separator(next_target)
             target_parts = Path(next_target).parts
@@ -306,9 +306,10 @@ def _location_names(path: str) -> tuple[str, ...]:
 
     A UNC server and share are names too. A device or extended-length prefix
     only selects the namespace, so it is not a name. Windows normalizes an
-    ordinary path as a whole: every name drops its trailing dots, and the last
-    name, unless a separator follows it, also drops its trailing spaces. The
-    names of an extended-length path are used as written.
+    ordinary path as a whole: a name before a separator drops one trailing dot
+    (a name that ends in two or more dots is kept as written), and the last
+    name, unless a separator follows it, drops all its trailing dots and
+    spaces. The names of an extended-length path are used as written.
     """
 
     text = str(path)
@@ -326,10 +327,42 @@ def _location_names(path: str) -> tuple[str, ...]:
     if not verbatim:
         last = len(names) - 1 if not _ends_with_separator(text) else -1
         names = [
-            name.rstrip(". " if index == last else ".") or name
-            for index, name in enumerate(names)
+            _normalized_name(name, final=index == last) for index, name in enumerate(names)
         ]
     return tuple(names)
+
+
+def _normalized_name(name: str, *, final: bool) -> str:
+    """One name of an ordinary Windows path after the filesystem trimming.
+
+    The last name of a path drops every trailing dot and space. A name before
+    a separator drops a single trailing dot only; a longer run of dots is a
+    distinct name and trailing spaces stay.
+    """
+
+    if final:
+        return name.rstrip(". ") or name
+    if name.endswith(".") and not name.endswith(".."):
+        return name[:-1] or name
+    return name
+
+
+def _on_link_drive(target: str, link: str) -> str:
+    """Give a link target that starts with one separator the drive of its link.
+
+    Windows resolves such a target on the volume that holds the link, so every
+    name of it is judged on that drive, as a drive-qualified path would be.
+    """
+
+    if not isinstance(Path(target), PureWindowsPath):
+        return target
+    pure = PureWindowsPath(target)
+    if pure.drive or not pure.root:
+        return target
+    prefix = _WINDOWS_DEVICE_PREFIX.match(link)
+    unc = bool(prefix) and prefix.group(0)[4:].casefold().startswith("unc")
+    rest = link[prefix.end():] if prefix else link
+    return PureWindowsPath(("\\\\" if unc else "") + rest).drive + target
 
 
 def _ends_with_separator(path: str) -> bool:
