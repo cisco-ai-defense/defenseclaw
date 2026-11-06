@@ -4,12 +4,16 @@
 package connector
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookguard"
 )
@@ -94,6 +98,26 @@ func TestClaudeCodeChainRendersEveryEventAndKeepsForeignCommands(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeChainKeepsPackagedPreToolStartPath(t *testing.T) {
+	launcher := `C:\Users\Owner\AppData\Local\DefenseClaw\HookRuntime\defenseclaw-hook.exe`
+	installed := `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`
+	guard := `C:\Users\Owner\AppData\Local\DefenseClaw\claude-code-chain\chain-abc123\defenseclaw-hook-guard.exe`
+	approved := `C:\Users\Owner\AppData\Local\DefenseClaw\claude-code-chain\chain-abc123\defenseclaw-hook-guard.approved`
+	oldChain, oldDirect := claudeChainFor, claudeCodePreToolGuardExecutable
+	claudeChainFor = func(string) (string, string) { return guard, approved }
+	claudeCodePreToolGuardExecutable = func(string) string { return installed }
+	t.Cleanup(func() { claudeChainFor, claudeCodePreToolGuardExecutable = oldChain, oldDirect })
+	baseCommand, baseArgs := claudeCodeWindowsHookInvocation(SetupOpts{HookExecutable: launcher}, launcher)
+	command, args := claudeCodeHandlerInvocation("PreToolUse", baseCommand, baseArgs)
+	if command != installed || !slices.Equal(args, claudeGuardEventArgs(launcher, []string{"hook", "--connector", "claudecode"}, "PreToolUse", false)) {
+		t.Fatalf("packaged PreToolUse = %q %q", command, args)
+	}
+	command, args = claudeCodeHandlerInvocation("UserPromptSubmit", baseCommand, baseArgs)
+	if command != baseCommand || !slices.Equal(args, claudeGuardWrapperArgs(guard, approved, launcher, "UserPromptSubmit", []string{"hook", "--connector", "claudecode"})) {
+		t.Fatalf("ordinary event = %q %q", command, args)
+	}
+}
+
 func TestClaudeCodeChainKeepsAnApprovedGuardAndRepairsItsWorkingCopy(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "chain")
 	source := filepath.Join(t.TempDir(), windowsHookGuardBinaryName)
@@ -115,7 +139,8 @@ func TestClaudeCodeChainKeepsAnApprovedGuardAndRepairsItsWorkingCopy(t *testing.
 	if err := ensureClaudeChain(launcher); err != nil {
 		t.Fatal(err)
 	}
-	files := claudeChainFilesIn(dir)
+	guard, _ := claudeChainFor(launcher)
+	files := claudeChainFilesIn(filepath.Dir(guard))
 	if guard, approved := claudeChainFor(launcher); guard != files.guard || approved != files.approved {
 		t.Fatalf("chain = %q, %q", guard, approved)
 	}
@@ -136,5 +161,156 @@ func TestClaudeCodeChainKeepsAnApprovedGuardAndRepairsItsWorkingCopy(t *testing.
 	}
 	if body, _ := os.ReadFile(files.approved); string(body) != "MZ guard one" {
 		t.Fatalf("approved guard changed: %q", body)
+	}
+}
+
+func TestClaudeCodeChainUpdateKeepsActivePairCoherent(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "chain")
+	source := filepath.Join(t.TempDir(), windowsHookGuardBinaryName)
+	launcher := filepath.Join(t.TempDir(), windowsHookBinaryName)
+	first, second := []byte("MZ guard one"), []byte("MZ guard two")
+	if err := os.WriteFile(source, first, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldDir, oldSource, oldProbe := claudeChainDir, claudeChainSource, claudeChainProbe
+	claudeChainDir = func() string { return dir }
+	claudeChainSource = func(string) string { return source }
+	claudeChainProbe = func(string, string) error { return nil }
+	t.Cleanup(func() { claudeChainDir, claudeChainSource, claudeChainProbe = oldDir, oldSource, oldProbe })
+	if err := ensureClaudeChain(launcher); err != nil {
+		t.Fatal(err)
+	}
+	oldGuard, oldApproved := claudeChainFor(launcher)
+	stop, done := make(chan struct{}), make(chan error, 1)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				done <- nil
+				return
+			default:
+			}
+			for _, path := range []string{oldGuard, oldApproved} {
+				body, err := os.ReadFile(path)
+				if err != nil || string(body) != string(first) {
+					done <- fmt.Errorf("active pair changed at %s: %q: %v", path, body, err)
+					return
+				}
+			}
+		}
+	}()
+	if err := os.WriteFile(source, second, 0o600); err != nil {
+		close(stop)
+		<-done
+		t.Fatal(err)
+	}
+	updateErr := ensureClaudeChain(launcher)
+	close(stop)
+	if monitorErr := <-done; monitorErr != nil {
+		t.Fatal(monitorErr)
+	}
+	if updateErr != nil {
+		t.Fatal(updateErr)
+	}
+	newGuard, newApproved := claudeChainFor(launcher)
+	if newGuard == oldGuard || newApproved == oldApproved {
+		t.Fatal("the update replaced an active pair")
+	}
+	for _, path := range []string{oldGuard, oldApproved} {
+		body, err := os.ReadFile(path)
+		if err != nil || string(body) != string(first) {
+			t.Fatalf("active pair %s changed: %q: %v", path, body, err)
+		}
+	}
+	for _, path := range []string{newGuard, newApproved} {
+		body, err := os.ReadFile(path)
+		if err != nil || string(body) != string(second) {
+			t.Fatalf("new pair %s = %q: %v", path, body, err)
+		}
+	}
+}
+
+func TestClaudeCodeChainUpdateKeepsActiveLaunchesWorking(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "chain")
+	source := filepath.Join(t.TempDir(), windowsHookGuardBinaryName)
+	launcher := filepath.Join(t.TempDir(), windowsHookBinaryName)
+	first := []byte("#!/bin/sh\nexit 0\n")
+	if runtime.GOOS == "windows" {
+		self, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		first, err = os.ReadFile(self)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(source, first, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	probeReached, releaseProbe := make(chan struct{}), make(chan struct{})
+	probes := 0
+	oldDir, oldSource, oldProbe := claudeChainDir, claudeChainSource, claudeChainProbe
+	claudeChainDir = func() string { return dir }
+	claudeChainSource = func(string) string { return source }
+	claudeChainProbe = func(string, string) error {
+		probes++
+		if probes == 2 {
+			close(probeReached)
+			<-releaseProbe
+		}
+		return nil
+	}
+	t.Cleanup(func() { claudeChainDir, claudeChainSource, claudeChainProbe = oldDir, oldSource, oldProbe })
+	if err := ensureClaudeChain(launcher); err != nil {
+		t.Fatal(err)
+	}
+	activeGuard, _ := claudeChainFor(launcher)
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(activeGuard, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(source, append(append([]byte(nil), first...), []byte("\nupdated\n")...), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	updated := make(chan error, 1)
+	go func() { updated <- ensureClaudeChain(launcher) }()
+	select {
+	case <-probeReached:
+	case err := <-updated:
+		t.Fatalf("update ended before its probe: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("update did not reach its probe")
+	}
+	launched := make(chan error, 1)
+	firstLaunch := make(chan struct{})
+	go func() {
+		for i := 0; i < 21; i++ {
+			cmd := exec.Command(activeGuard, "-test.run=^$")
+			if output, err := cmd.CombinedOutput(); err != nil {
+				launched <- fmt.Errorf("active launch %d: %v: %s", i, err, output)
+				if i == 0 {
+					close(firstLaunch)
+				}
+				return
+			}
+			if i == 0 {
+				close(firstLaunch)
+			}
+		}
+		launched <- nil
+	}()
+	select {
+	case <-firstLaunch:
+	case <-time.After(10 * time.Second):
+		t.Fatal("active launch did not finish")
+	}
+	close(releaseProbe)
+	if err := <-updated; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-launched; err != nil {
+		t.Fatal(err)
 	}
 }
