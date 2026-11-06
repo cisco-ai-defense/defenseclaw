@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 	"time"
 
@@ -16,8 +17,113 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/skillrootsafe"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
+
+func TestGAP0613SharedUnavailableSkillRootCoversEveryConnector(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix ownership checks")
+	}
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	shared := filepath.Join(home, "shared")
+	root := filepath.Join(home, ".claude", "skills")
+	if err := os.MkdirAll(filepath.Join(shared, "skills"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(shared, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(shared, filepath.Dir(root)); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	cfg := config.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"claudecode": {}, "amp": {},
+	}
+	cfg.Gateway.Watcher.Enabled = true
+	cfg.Gateway.Watcher.Skill.Enabled = true
+	cfg.Gateway.Watcher.Plugin.Enabled = false
+	cfg.Watch.RescanEnabled = false
+	s := &Sidecar{cfg: cfg, store: store, logger: logger, health: NewSidecarHealth()}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.runWatcher(ctx) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("runWatcher: %v", err)
+		}
+	}()
+	var rootIssue watcher.RootCoverageIssue
+	deadline := time.After(5 * time.Second)
+	for {
+		if current := s.installWatcher.Load(); current != nil {
+			for _, issue := range current.RootCoverageIssues() {
+				if issue.Kind == "skill" && issue.Path == root {
+					rootIssue = issue
+					break
+				}
+			}
+		}
+		if rootIssue.Path != "" {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("shared unavailable skill root was not reported")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	coverage := func() []watcher.RootCoverageIssue { return []watcher.RootCoverageIssue{rootIssue} }
+	for _, tc := range []struct {
+		name, tier string
+		managed    bool
+		block      bool
+	}{
+		{"strict", "strict", false, true},
+		{"managed", "default", true, true},
+		{"default", "default", false, false},
+		{"permissive", "permissive", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			policy := config.DefaultConfig()
+			policy.AssetPolicy = config.DefaultAssetPolicy()
+			policy.Guardrail.RulePack = tc.tier
+			if tc.managed {
+				policy.DeploymentMode = managed.DeploymentModeManagedEnterprise
+				policy.Enterprise.Profile = managed.ProfileStandalone
+			}
+			api := &APIServer{store: store, logger: logger, scannerCfg: policy, rootCoverage: coverage}
+			for _, source := range []struct {
+				name, path string
+				blocked    bool
+			}{
+				{"name-only", "", tc.block},
+				{"known-path", filepath.Join(root, "ordinary"), tc.block},
+				{"outside-path", filepath.Join(home, "outside", "ordinary"), false},
+			} {
+				probe := nativeSkillToolProbe("amp", "skill", map[string]interface{}{"name": "ordinary"})
+				if !probe.Matched {
+					t.Fatal("Amp skill selection was not recognized")
+				}
+				probe.SourcePath = source.path
+				decision, blocked := api.runtimeSkillAssetPolicyDecision(context.Background(), "amp", probe)
+				if blocked != source.blocked || blocked && (decision.Action != "block" || decision.Source != "watch-root-unavailable") {
+					t.Errorf("%s: blocked=%v decision=%+v, want blocked=%v", source.name, blocked, decision, source.blocked)
+				}
+			}
+		})
+	}
+	if names, ok := s.health.Snapshot().Watcher.Details["admission_scanning_off"].([]string); !ok || !slices.Contains(names, "claudecode") || !slices.Contains(names, "amp") {
+		t.Errorf("watcher health affected connectors = %v", names)
+	}
+}
 
 func TestGAP0613UnavailableRootDegradesWatcherHealthUntilRecovery(t *testing.T) {
 	if runtime.GOOS == "windows" {
