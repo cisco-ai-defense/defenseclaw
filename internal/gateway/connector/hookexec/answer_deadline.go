@@ -330,8 +330,9 @@ func gatewayNoAnswer(ctx context.Context) bool {
 // noAnswerFailMode uses the current account outage tier for an ordinary
 // per-user call whose gateway did not answer. The shared protected-reach
 // reader must prove that the call names no protected target before the open
-// tier applies. Managed and strict calls, unusable answers, and unclassified
-// payloads stay closed. Secure Client retains its established behavior.
+// tier applies. A managed call follows an administrator's open only after a
+// stopped-service proof; strict, unusable and unclassified calls stay closed.
+// Secure Client retains its established behavior.
 func noAnswerFailMode(opts Options, failMode string) string {
 	if opts.SecureClient {
 		if opts.answerSpentLocally || opts.answeredErrorStatus != 0 || opts.ManagedEnterprise {
@@ -339,7 +340,14 @@ func noAnswerFailMode(opts Options, failMode string) string {
 		}
 		return failMode
 	}
-	if opts.answeredErrorStatus != 0 || opts.ManagedEnterprise || opts.ManagedUnixSocket != "" ||
+	if opts.ManagedEnterprise {
+		if opts.managedOutageOpen && OrdinaryNoAnswerPayload(opts.failurePayload) && opts.answeredErrorStatus == 0 && !opts.StrictAvailability &&
+			normalizeFailMode(failMode) == "open" && !managedLifecycleHeldWithin(opts, installLockCheckWait) {
+			return "open"
+		}
+		return "closed"
+	}
+	if opts.answeredErrorStatus != 0 || opts.ManagedUnixSocket != "" ||
 		opts.StrictAvailability || perUserInstallWindow(opts) || opts.OutageFailModeNow == nil {
 		return "closed"
 	}
@@ -367,6 +375,10 @@ func lateOrdinaryCheck(opts Options, payload []byte) func() bool {
 }
 
 func failNoAnswer(opts Options, sp spec, failMode string) int {
+	if managedNativeDecision(opts) && opts.answerWatch.managedOutagePending() {
+		opts.managedOutageOpen = true
+		opts.managedNoAnswerCode = managedGatewayNotRunningReason
+	}
 	mode, _, _ := lateAnswerOutcome(opts, sp, failMode)
 	return failNoAnswerInMode(opts, sp, mode)
 }
