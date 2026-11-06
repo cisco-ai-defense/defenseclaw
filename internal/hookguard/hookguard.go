@@ -173,10 +173,6 @@ func run(launcher string, hookArgs []string, event string, stdin io.Reader, stdo
 	if errors.As(err, &exitErr) {
 		code := exitErr.ExitCode()
 		if !ExceptionStatus(code) {
-			if NeutralEvent(event) && code == 2 {
-				fmt.Fprintln(stderr, NonBlockingExitMessage)
-				return 1, true
-			}
 			return code, true
 		}
 	}
