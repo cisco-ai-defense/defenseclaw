@@ -3955,7 +3955,9 @@ def validate_windows_hook_registration(
             raise _InspectionError(
                 "foreign", f"registered hook target is not the DefenseClaw hook launcher: {resolved}"
             )
-        if not _powershell_literals_current(command):
+        # Every command, not only the first: Codex has one per event, and a
+        # hand-merged file can mix forms (g072 review 4 S1).
+        if not all(_powershell_literals_current(item) for item in commands):
             raise _InspectionError("stale", f"registered hook command {_PRE_TYPOGRAPHIC_QUOTE_RENDER}")
         limitations = ""
         if connector == "devin":

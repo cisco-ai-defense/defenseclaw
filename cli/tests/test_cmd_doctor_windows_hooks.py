@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import re
 import contextlib
 import hashlib
 import io
@@ -1980,6 +1981,48 @@ class WindowsHookDoctorTests(unittest.TestCase):
                 self.assertEqual(check.state, "stale", check.detail)
                 self.assertIn("written before 1.0.9", check.detail)
                 self.assertEqual(ntpath.normcase(check.target), ntpath.normcase(str(runtime)))
+
+    def test_codex_file_with_one_pre_typographic_quote_entry_is_stale(self) -> None:
+        """g072 review 4 S1: every hook command is checked, not only the first.
+
+        A hand-merged or partly rewritten file whose first entry is current and
+        whose last entry is the pre-1.0.9 render does not read healthy.
+        """
+        quote = "\u2019"
+        self.profile = self.root / f"O{quote}Brien mixed"
+        self.install = self.profile / "DefenseClaw Install"
+        self.data = self.profile / ".defenseclaw"
+        self.install.mkdir(parents=True)
+        self.data.mkdir()
+        runtime = self._runtime()
+        last_event = list(doctor_hooks._codex_hook_specs("codex-hooks-v1"))[-1]
+        bind_current = self._bind_codex_fixture_command
+        rewritten: list[str] = []
+
+        def bind(command: str, event: str, contract: str) -> str:
+            bound = bind_current(command, event, contract)
+            if event != last_event:
+                return bound
+
+            def before(match: re.Match[str]) -> str:
+                script = base64.b64decode(match.group(1)).decode("utf-16-le")
+                self.assertIn(quote * 2, script)
+                old = powershell_literal_before_typographic_quotes(script)
+                rewritten.append(event)
+                return "-EncodedCommand " + base64.b64encode(old.encode("utf-16-le")).decode()
+
+            return re.sub(r"-EncodedCommand ([A-Za-z0-9+/=]+)", before, bound)
+
+        self._bind_codex_fixture_command = bind  # type: ignore[method-assign]
+        try:
+            config = self._config("codex", self._encoded_hook_command(runtime), codex_features=False)
+        finally:
+            del self._bind_codex_fixture_command
+        self.assertTrue(rewritten, "the last event holds the pre-1.0.9 render")
+
+        check = self._validate("codex", config)
+        self.assertEqual(check.state, "stale", check.detail)
+        self.assertIn("written before 1.0.9", check.detail)
 
     def test_healthy_codex_synchronous_encoded_invocation(self) -> None:
         runtime = self._runtime()
