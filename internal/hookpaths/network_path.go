@@ -210,3 +210,39 @@ func pathEvalSymlinks(name string) (string, error) {
 	}
 	return filepath.EvalSymlinks(name)
 }
+
+// pathWalkDir is filepath.WalkDir with its root read as pathLstat reads
+// it: a root below a share that has not answered is passed to fn with the
+// share's error, as WalkDir passes a root it cannot read.
+func pathWalkDir(root string, fn fs.WalkDirFunc) error {
+	if networkPathUnanswered(root) {
+		err := fn(root, nil, networkShareError("lstat", root))
+		if err == filepath.SkipDir || err == filepath.SkipAll {
+			return nil
+		}
+		return err
+	}
+	return filepath.WalkDir(root, fn)
+}
+
+// Every read of a path that a hook call names, in this package and in the
+// gateway's command-target proofs, goes through these readers, so a share
+// that does not answer costs at most networkShareAnswerWait and never the
+// connect timeout (rel-1-0-6:GAP-0482). TestHookPathReadsAreShareBounded
+// keeps it so.
+
+// Lstat is os.Lstat for a path a hook call names, read as pathLstat reads it.
+func Lstat(name string) (os.FileInfo, error) { return pathLstat(name) }
+
+// Stat is os.Stat for a path a hook call names, read as pathStat reads it.
+func Stat(name string) (os.FileInfo, error) { return pathStat(name) }
+
+// NotExist reports a read error that a proof which tells a missing path
+// from an unreadable one takes as missing: an os not-exist error, or a
+// share that did not answer in time. A read that waits for such a share
+// fails at the end of the connect timeout with ERROR_BAD_NETPATH, which
+// os.IsNotExist reports, so the proof reaches the verdict it reached
+// before, without the wait its hook cannot afford.
+func NotExist(err error) bool {
+	return os.IsNotExist(err) || errors.Is(err, errNetworkShareUnanswered)
+}

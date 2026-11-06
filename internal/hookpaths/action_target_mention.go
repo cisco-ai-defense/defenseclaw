@@ -2026,7 +2026,7 @@ func walkActiveStateIdentities(activeRoot string, deadline time.Time) []activeSt
 	}
 	for _, tree := range activeStateTrees {
 		stopped := false
-		_ = filepath.WalkDir(filepath.Join(activeRoot, tree), func(path string, entry fs.DirEntry, walkErr error) error {
+		_ = pathWalkDir(filepath.Join(activeRoot, tree), func(path string, entry fs.DirEntry, walkErr error) error {
 			if exhausted() {
 				stopped = true
 				return fs.SkipAll
