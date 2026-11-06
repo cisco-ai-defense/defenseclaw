@@ -21,8 +21,9 @@ import (
 // uncompressed tar stream, and 4096 members. A larger archive keeps the
 // opaque extraction scope (review 8 item 3).
 const (
-	maxTarPlainBytes   = 64 << 20
-	maxTarPlainMembers = 4096
+	maxTarPlainBytes    = 64 << 20
+	maxTarPlainMembers  = 4096
+	maxTarEvidenceWords = 2
 )
 
 // errTarPlainBound ends a tar read past maxTarPlainBytes of stream.
@@ -89,28 +90,36 @@ func tarArchiveHoldsNoLink(program string, args []string, static []bool, cwd, co
 }
 
 // tarArchiveLinkEvidence records or reads positive scope-retaining tar evidence.
-// The caller uses it only when earlier statements cannot rewrite the archive.
-func tarArchiveLinkEvidence(program string, args []string, static []bool, cwd, command string, facts map[string]string, record bool) bool {
+// A readable non-plain archive retains its scope even in a compound command.
+func tarArchiveLinkEvidence(program string, args []string, static []bool, cwd string, facts map[string]string, record bool) bool {
 	if !strings.HasSuffix(program, "tar") || !filepath.IsAbs(cwd) {
 		return false
 	}
 	if _, _, extract, ok := tarScan(args, static, cwd); !ok || !extract {
 		return false
 	}
-	archive, ok := tarArchiveWord(args, static)
-	if !ok || archive == "" || archive == "-" || strings.ContainsAny(archive, "*?[$`") ||
-		strings.Count(command, filepath.Base(archive)) != 1 {
-		return false
-	}
-	path := OperandPath(archive, cwd)
-	if !record && facts != nil && facts[TarLinkFactPrefix+path] == "1" {
+	archives := tarArchiveWords(args, static)
+	if len(archives) > maxTarEvidenceWords {
+		// The operand list exceeded the bounded archive read. Keep its
+		// scope rather than treating a skipped archive as plain.
 		return true
 	}
-	linked := tarArchiveKind(path) == 2
-	if linked && record && facts != nil {
-		facts[TarLinkFactPrefix+path] = "1"
+	for _, archive := range archives {
+		if archive == "" || archive == "-" || strings.ContainsAny(archive, "*?[$`") {
+			continue
+		}
+		path := OperandPath(archive, cwd)
+		if !record && facts != nil && facts[TarLinkFactPrefix+path] == "1" {
+			return true
+		}
+		if tarArchiveKind(path) == 2 {
+			if record && facts != nil {
+				facts[TarLinkFactPrefix+path] = "1"
+			}
+			return true
+		}
 	}
-	return linked
+	return false
 }
 
 // tarArchivePriorLinkedRewrite finds a known link-bearing archive copied or
@@ -204,18 +213,18 @@ func tarArchivePriorLinkedRewrite(file *syntax.File, extraction *syntax.CallExpr
 	return linkedRewrite
 }
 
-// tarArchiveWord returns the one archive operand of a tar call: -f FILE,
-// -fFILE, a cluster ending in f followed by FILE, --file FILE, --file=FILE,
-// or an old-style cluster (xf FILE). ok is false for none or more than one.
-func tarArchiveWord(args []string, static []bool) (string, bool) {
-	archive, found := "", 0
+// tarArchiveWords returns the static archive operands of a tar call.
+// Positive scope evidence considers every -f word; plain proof needs one.
+func tarArchiveWords(args []string, static []bool) []string {
+	var archives []string
 	take := func(value string) {
-		archive = value
-		found++
+		if len(archives) <= maxTarEvidenceWords {
+			archives = append(archives, value)
+		}
 	}
 	for i := 0; i < len(args); i++ {
 		if !static[i] {
-			return "", false
+			return nil
 		}
 		arg := args[i]
 		if arg == "--" {
@@ -226,7 +235,7 @@ func tarArchiveWord(args []string, static []bool) (string, bool) {
 			if option, unique := longOption(name, tarLongOptions); unique && option == "file" {
 				if !joined {
 					if i++; i >= len(args) {
-						return "", false
+						return nil
 					}
 					value = args[i]
 				}
@@ -245,7 +254,7 @@ func tarArchiveWord(args []string, static []bool) (string, bool) {
 				value := cluster[j+1:]
 				if oldStyle || value == "" {
 					if i++; i >= len(args) {
-						return "", false
+						return nil
 					}
 					value = args[i]
 				}
@@ -259,7 +268,16 @@ func tarArchiveWord(args []string, static []bool) (string, bool) {
 			}
 		}
 	}
-	return archive, found == 1
+	return archives
+}
+
+// tarArchiveWord returns the unique archive operand required by plain proof.
+func tarArchiveWord(args []string, static []bool) (string, bool) {
+	archives := tarArchiveWords(args, static)
+	if len(archives) != 1 {
+		return "", false
+	}
+	return archives[0], true
 }
 
 // tarArchivePlain reads the archive at path and reports that every member

@@ -3249,8 +3249,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 					if tarArchivePriorLinkedRewrite(file, call, words[1:], static[1:], dir, home) ||
 						(program != "cpio" && program != "bsdcpio" && program != "pax" &&
 							archiveNamesEscape(program, words[1:], static[1:])) ||
-						onlyDirectoryStatementsBefore(file, call, home) &&
-							tarArchiveLinkEvidence(program, words[1:], static[1:], dir, command, facts, record) {
+						tarArchiveLinkEvidence(program, words[1:], static[1:], dir, facts, record) {
 						links.unknownIn(archiveDestination(program, words[1:], static[1:], dir))
 					} else {
 						links.unreadArchiveIn(archiveDestination(program, words[1:], static[1:], dir))
