@@ -38,6 +38,33 @@ const ClaudeMCPSpoolRecordVersion = 1
 
 const maxClaudeMCPSpoolRecordBytes = 4 << 20
 
+// The status sidecar is separate from the version 1 inventory record so an
+// older gateway can keep reading the servers after an enumerator upgrade.
+const maxClaudeMCPProjectStatusNotes = 128
+
+// ClaudeMCPProjectSkip records one project whose path the enumerator refused.
+type ClaudeMCPProjectSkip struct {
+	Project string `json:"project"`
+	Reason  string `json:"reason"`
+}
+
+// ClaudeMCPProjectSkips is a status-only sidecar beside an account's inventory.
+type ClaudeMCPProjectSkips struct {
+	Key      string                 `json:"key"`
+	User     string                 `json:"user,omitempty"`
+	Home     string                 `json:"home"`
+	Projects []ClaudeMCPProjectSkip `json:"projects"`
+	Omitted  int                    `json:"omitted,omitempty"`
+}
+
+// Account names the enrolled account in a status warning.
+func (s ClaudeMCPProjectSkips) Account() string {
+	if strings.TrimSpace(s.User) != "" {
+		return s.User
+	}
+	return s.Home
+}
+
 // ClaudeMCPSpoolServer is one server of a record and the project folder
 // whose local scope or .mcp.json lists it (empty for the user scope).
 type ClaudeMCPSpoolServer struct {
@@ -255,6 +282,44 @@ func ReadClaudeStateUnreadable(dir string) []ClaudeStateUnreadable {
 		if _, unreadable, err := ReadClaudeMCPSpool(dir, sid, nil); err == nil && unreadable != nil {
 			out = append(out, *unreadable)
 		}
+	}
+	return out
+}
+
+// ReadClaudeMCPProjectSkips lists per-project path refusals for status. It
+// reports only notes beside a readable inventory record for the same SID.
+func ReadClaudeMCPProjectSkips(dir string) []ClaudeMCPProjectSkips {
+	entries, err := os.ReadDir(dir)
+	if dir == "" || err != nil {
+		return nil
+	}
+	var out []ClaudeMCPProjectSkips
+	for _, entry := range entries {
+		sid, ok := strings.CutSuffix(entry.Name(), ".skipped")
+		if !ok || !validIdentitySpoolKey(sid) {
+			continue
+		}
+		if _, unreadable, err := ReadClaudeMCPSpool(dir, sid, nil); err != nil || unreadable != nil {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || !info.Mode().IsRegular() || info.Size() > maxClaudeMCPSpoolRecordBytes {
+			continue
+		}
+		file, err := os.Open(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		data, readErr := io.ReadAll(io.LimitReader(file, maxClaudeMCPSpoolRecordBytes+1))
+		_ = file.Close()
+		if readErr != nil || len(data) > maxClaudeMCPSpoolRecordBytes {
+			continue
+		}
+		var note ClaudeMCPProjectSkips
+		if json.Unmarshal(data, &note) != nil || !strings.EqualFold(note.Key, sid) || len(note.Projects) == 0 {
+			continue
+		}
+		out = append(out, note)
 	}
 	return out
 }
