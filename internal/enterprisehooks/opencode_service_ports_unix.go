@@ -41,6 +41,10 @@ type UnixOpenCodeServicePortUnknown struct {
 	UID    int    `json:"uid"`
 	User   string `json:"user"`
 	Reason string `json:"reason"`
+	// Path is the account's service.json; Fix is the administrator's step
+	// that clears the warning.
+	Path string `json:"path,omitempty"`
+	Fix  string `json:"fix,omitempty"`
 }
 
 // UnixOpenCodeServicePort is one account's entry.

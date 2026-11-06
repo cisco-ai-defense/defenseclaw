@@ -1604,11 +1604,11 @@ func (env *Env) warnOpenCodePortsRecord(r *enterprisestatus.Result) {
 	if len(unknown) > 0 {
 		names := make([]string, 0, len(unknown))
 		for _, entry := range unknown {
-			names = append(names, fmt.Sprintf("%s (uid %d: %s)", entry.User, entry.UID, entry.Reason))
+			names = append(names, fmt.Sprintf("%s (uid %d): %s (%s); to clear it: %s", entry.User, entry.UID, entry.Path, entry.Reason, entry.Fix))
 		}
 		r.AddWarning("opencode_port_account_unknown", fmt.Sprintf(
-			"the guardian could not read the OpenCode service port of %s as the account, so no account gets a new OpenCode port until it can; recorded ports stay held. Check that home is reachable; the next pass retries",
-			strings.Join(names, ", ")))
+			"the guardian could not read the OpenCode service port of these accounts as the account; each keeps its recorded port reserved and nothing changes for it, other accounts are not affected: %s",
+			strings.Join(names, "; ")))
 	}
 }
 
