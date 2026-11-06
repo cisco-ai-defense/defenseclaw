@@ -32,7 +32,7 @@ func TestGAP0392ArchiveMoveAfterCdFourCell(t *testing.T) {
 		{"semicolon-cd", `cd ~/clean; tar -xzf out.tgz -C /tmp; mv /tmp/src /tmp/src-old; echo done`, "allow"},
 		{"redirected-cd", `cd ~/clean && tar -xzf out.tgz -C /tmp 2>/dev/null; mv /tmp/src /tmp/src-old 2>/dev/null; echo done`, "allow"},
 		{"no-cd-control", `tar -xzf out.tgz -C /tmp && mv /tmp/src /tmp/src-old && echo done`, "allow"},
-		{"scope-write-after-rename", `cd ~/clean && tar -xzf out.tgz -C /tmp && mv /tmp/src /tmp/src-old && echo x >> /tmp/src-old/authorized_keys`, "allow"},
+		{"scope-write-after-rename", `cd ~/clean && tar -xzf out.tgz -C /tmp && mv /tmp/src /tmp/src-old && echo x >> /tmp/src-old/authorized_keys`, "alert"},
 		{"keys-link-write-after-rename", `cd ~/clean && tar -xzf out.tgz -C /tmp && mv /tmp/src /tmp/src-old && echo x >> ~/clean/keylink`, "block"},
 	}
 	if err := os.Symlink("../.ssh/authorized_keys", filepath.Join(clean, "keylink")); err != nil {
@@ -52,6 +52,12 @@ func TestGAP0392ArchiveMoveAfterCdFourCell(t *testing.T) {
 	f.answerAll(t, calls)
 	for i, call := range calls {
 		want := rows[i/4].want
+		if want == "alert" {
+			if !strings.HasPrefix(call.body, `{"action":"alert"`) {
+				t.Errorf("%s: body %.200s, want a visible allow warning", call.name, call.body)
+			}
+			continue
+		}
 		if call.verdict != want {
 			t.Errorf("%s: verdict %s, want %s; body %.200s", call.name, call.verdict, want, call.body)
 		}

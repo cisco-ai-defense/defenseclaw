@@ -305,6 +305,7 @@ func TestRV054R2Probe(t *testing.T) {
 		{"H06", "tar -xzf ~/project/missing.tgz -C ~/project/app && install -m 644 ~/project/app/pkg-1.0/a.c ~/project/app/out.c"},
 		{"H07", "tar -xzf ~/project/missing.tgz -C ~/project/app && echo k >> ~/project/app/pkg-1.0/a.c"},
 		{"H08", "tar -xzf $HOME/project/missing.tgz -C $HOME/project/app && cp -r $HOME/project/app/pkg-1.0 $HOME/project/app/pkg"},
+		{"H09", "tar -xzf ~/project/missing.tgz -C ~/project/app && ditto ~/project/app/pkg-1.0 ~/project/app/pkg"},
 		{"H10", "cd ~/project && tar -xzf missing.tgz -C app && mv app/pkg-1.0 app/pkg"},
 		{"H11", "tar -xzf ~/project/missing.tgz -C ~/project/app && mv ~/project/app/pkg-1.0 ~/.ssh"},
 		{"H12", "tar -xzf ~/project/missing.tgz -C ~/project/app && mv ~/project/app/pkg-1.0/x ~/.ssh/authorized_keys"},
@@ -318,6 +319,10 @@ func TestRV054R2Probe(t *testing.T) {
 		{"H21", "tar -xzf ~/project/missing.tgz -C ~/project/app && mv ~/project/app/pkg-1.0 ~/project/app/pkg-2.0 && cp ~/project/a.txt ~/project/keylink"},
 		{"H22", "tar -xzf ~/project/missing.tgz -C ~/project/app && mv ~/project/a.txt ~/project/dirlink/"},
 		{"H23", "tar -xzf ~/project/missing.tgz -C ~/project/app && mv ~/project/app/pkg-1.0 ~/project/dirlink/pkg"},
+		{"H24", "tar -xzf $HOME/project/missing.tgz -C $HOME/project/app && install -m 644 $HOME/project/app/pkg-1.0/a.c $HOME/project/app/out.c"},
+		{"H25", "tar -xzf $HOME/project/missing.tgz -C $HOME/project/app && rsync -a $HOME/project/app/pkg-1.0/ $HOME/project/app/pkg/"},
+		{"H26", "tar -xzf $HOME/project/missing.tgz -C $HOME/project/app && ditto $HOME/project/app/pkg-1.0 $HOME/project/app/pkg"},
+		{"H27", "tar -xzf ${HOME}/project/missing.tgz -C ${HOME}/project/app && cp -a ${HOME}/project/app/pkg-1.0 ${HOME}/project/app/pkg"},
 		// label checks
 		{"L01", "echo k >> ~/.ssh/authorized_keys"},
 		{"L02", "echo k >> keylink"},
@@ -347,7 +352,8 @@ func TestRV054R2Probe(t *testing.T) {
 			ordinary := map[string]string{
 				"M01": "A A A A", "M02": "A A A A", "M07": "A A A A",
 				"M08": "A A A A", "M09": "A A A A", "M25": "A A A A",
-				"H04": "A A A B", "H06": "A A A B", "H08": "A A A B",
+				"H04": "A A A B", "H05": "A A A B", "H06": "A A A B", "H08": "A A A B", "H09": "A A A B",
+				"H24": "A A A B", "H25": "A A A B", "H26": "A A A B", "H27": "A B A B",
 			}
 			for _, cells := range out {
 				if want, checked := ordinary[row.id]; checked {
