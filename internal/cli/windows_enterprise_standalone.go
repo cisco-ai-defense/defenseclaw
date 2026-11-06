@@ -237,6 +237,11 @@ var windowsEnterpriseRepairDataDirBeforePlan = func() string {
 	if err != nil || strings.TrimSpace(layout.DataDir) == "" {
 		return ""
 	}
+	// On standalone a runtime folder another account can write or owns is
+	// left for the strict trust walk to refuse and name (g582 round 4).
+	if managed.RefuseStandaloneInPlaceRepair(layout.DataDir, managed.ObjectRuntimeDirectory) != nil {
+		return ""
+	}
 	// The gateway service account is named: this process carries no
 	// service pins, from which the guardian's repair resolves it.
 	repaired, err := managed.EnsureCanonical(layout.DataDir, managed.ObjectRuntimeDirectory, managed.CanonicalOptions{GatewayServiceAccount: layout.ServiceUser})

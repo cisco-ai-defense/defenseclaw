@@ -45,6 +45,11 @@ func repairEnterpriseHookManagedRuntimePlatform(path, serviceAccount string) err
 	if strings.TrimSpace(serviceAccount) == "" {
 		return nil
 	}
+	// On standalone a data_dir another account can write or owns is refused
+	// and named, never re-stamped or adopted in place (g582 round 4).
+	if refused := managed.RefuseStandaloneInPlaceRepair(path, managed.ObjectRuntimeDirectory); refused != nil {
+		return fmt.Errorf("managed data_dir was not repaired: %w", refused)
+	}
 
 	// The shared canonical repair checks the gateway's write entry as well as
 	// trust, so an ACL reset that only removed the gateway's access is
