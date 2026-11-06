@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -791,9 +792,18 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 			}
 		}
 	}
+	if targetType == "skill" && !cfg.SecureClientIntegration() {
+		for _, path := range paths {
+			if absolute := projectSkillAbsolutePath(path, probe.ProjectDir); absolute != "" {
+				if decision, refused := a.projectSkillRefusalDecision(absolute, probe.SkillName, connector, runtimeSurface); refused {
+					return decision, true
+				}
+			}
+		}
+	}
 	admissionPaths := make([]string, len(paths))
 	for i, path := range paths {
-		admissionPaths[i] = projectSkillAdmissionFolder(path, probe.ProjectDir)
+		admissionPaths[i] = projectSkillAdmissionFolder(path, probe.ProjectDir, resolvedWritesFromContext(ctx), cfg.SecureClientIntegration())
 	}
 	if decision, pending := a.projectSkillScanPending(targetType, connector, runtimeSurface, admissionPaths); pending {
 		return decision, true
@@ -812,10 +822,8 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 	return last, false
 }
 
-// projectSkillAdmissionFolder maps the path spellings a skill call accepts to
-// the folder that owns its manifest. It only affects project admission; the
-// raw source path remains available to asset rules and audit records.
-func projectSkillAdmissionFolder(path, cwd string) string {
+// projectSkillAbsolutePath resolves a source spelling for project admission.
+func projectSkillAbsolutePath(path, cwd string) string {
 	if strings.TrimSpace(path) == "" {
 		return ""
 	}
@@ -825,9 +833,39 @@ func projectSkillAdmissionFolder(path, cwd string) string {
 		}
 		path = filepath.Join(cwd, path)
 	}
-	path = filepath.Clean(path)
+	return filepath.Clean(path)
+}
+
+// projectSkillAdmissionFolder maps the path spellings a skill call accepts to
+// the folder that owns its manifest. It only affects project admission; the
+// raw source path remains available to asset rules and audit records.
+func projectSkillAdmissionFolder(path, cwd string, facts map[string]string, secureClient bool) string {
+	path = projectSkillAbsolutePath(path, cwd)
+	if path == "" {
+		return ""
+	}
+	if secureClient {
+		if strings.EqualFold(filepath.Base(path), "SKILL.md") {
+			return filepath.Dir(path)
+		}
+		return path
+	}
 	if strings.EqualFold(filepath.Base(path), "SKILL.md") {
-		path = filepath.Dir(path)
+		selected := false
+		for key := range facts {
+			if strings.HasPrefix(key, hookpaths.ProjectSkillSelectedPrefix) &&
+				sameCleanPath(strings.TrimPrefix(key, hookpaths.ProjectSkillSelectedPrefix), path) {
+				selected = true
+				break
+			}
+		}
+		if !selected {
+			if gatewaySkillPathCheck(path) != nil {
+				path = filepath.Dir(path)
+			} else if info, err := os.Stat(path); err != nil || !info.IsDir() {
+				path = filepath.Dir(path)
+			}
+		}
 	}
 	return path
 }

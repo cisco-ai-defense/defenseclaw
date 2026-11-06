@@ -165,8 +165,7 @@ func (a *APIServer) skillSourcePaths(ctx context.Context, connector, cwd string,
 			// An absent folder cannot make an unrelated selection inherit the
 			// refused root's decision.
 			if !selected {
-				if info, err := os.Lstat(dir); err == nil && (info.IsDir() || info.Mode()&os.ModeSymlink != 0) ||
-					err != nil && !errors.Is(err, fs.ErrNotExist) {
+				if info, err := os.Lstat(dir); err == nil && (info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
 					paths = append(paths, dir)
 				}
 			}
@@ -514,7 +513,7 @@ func (a *APIServer) noteProjectSkillFolders(ctx context.Context, connector, cwd 
 	if home == "" || home == unresolvedCallerHome {
 		return
 	}
-	if watcherUsesEnrolledUserDirs(cfg) {
+	if watcherUsesEnrolledUserDirs(cfg) || gatewaySkillPathCheck(cwd) != nil {
 		a.noteExcludedProjectSkillFolders(ctx, connector, home, cwd)
 	}
 	if gatewaySkillPathCheck(cwd) != nil {
@@ -715,11 +714,7 @@ func (a *APIServer) projectSkillScanPending(targetType, connector, surface strin
 			continue
 		}
 		dir := filepath.Dir(path)
-		if reason, _ := a.projectSkills.refusal(dir, time.Now()); reason != "" {
-			name := filepath.Base(path)
-			decision := runtimeAssetDisableBlockDecision("skill", name, connector, surface,
-				fmt.Sprintf("skill %q in %s is refused: DefenseClaw could not verify this project skill folder (%s)", name, dir, reason),
-				"project-skill-unverified")
+		if decision, refused := a.projectSkillRefusalDecision(path, filepath.Base(path), connector, surface); refused {
 			return decision, true
 		}
 		// A hidden folder is not enumerated by the rescan, so it never gets
@@ -766,4 +761,17 @@ func (a *APIServer) projectSkillScanPending(targetType, connector, surface strin
 		return runtimeAssetDisableBlockDecision("skill", name, connector, surface, reason, "project-skill-pending"), true
 	}
 	return config.AssetPolicyDecision{}, false
+}
+
+func (a *APIServer) projectSkillRefusalDecision(path, name, connector, surface string) (config.AssetPolicyDecision, bool) {
+	if a == nil || !a.projectSkills.isActive() {
+		return config.AssetPolicyDecision{}, false
+	}
+	root, reason := a.projectSkills.refusalForPath(path)
+	if reason == "" {
+		return config.AssetPolicyDecision{}, false
+	}
+	return runtimeAssetDisableBlockDecision("skill", name, connector, surface,
+		fmt.Sprintf("skill %q in %s is refused: DefenseClaw could not verify this project skill folder (%s)", name, root, reason),
+		"project-skill-unverified"), true
 }
