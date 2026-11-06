@@ -37,37 +37,48 @@ func balancedSourcedDestination(request trustedActionRequest, facts actionfacts.
 	}
 	defer root.Close()
 	command, known := trustedBashCommandInput(request.Input)
-	if !known || !unresolvedVariableRedirectForm(command, cwd, facts.ActiveHome,
-		request.targetMemo.ProtectedAuthorizedKeysPaths(facts.ActiveHome), root) {
+	if !known {
 		return false
 	}
-	if request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(
+	grade := unresolvedVariableRedirectGrade(command, cwd, facts.ActiveHome,
+		request.targetMemo, root)
+	grade = grade.Max(sourcedHitGrade(request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(
 		command, cwd, facts.ActiveHome, request.Input.DialectHint,
-		clientGlobFacts(request)) != "" {
-		return false
-	}
-	if hookpaths.UnprovenProtectedWrite(command, cwd, facts.ActiveHome) != "" {
-		return false
-	}
-	return true
+		clientGlobFacts(request))))
+	grade = grade.Max(sourcedHitGrade(hookpaths.UnprovenProtectedWrite(command, cwd, facts.ActiveHome)))
+	return grade == hookpaths.GradePossible
 }
 
-// unresolvedVariableRedirectForm identifies a variable destination whose
+func sourcedHitGrade(reason string) hookpaths.Grade {
+	switch reason {
+	case "":
+		return hookpaths.GradeNone
+	case "possible-target":
+		return hookpaths.GradePossible
+	default:
+		return hookpaths.GradeNamed
+	}
+}
+
+// unresolvedVariableRedirectGrade identifies a variable destination whose
 // command text supplies only ordinary project-file candidates. The unresolved
 // part is a local source. The path reader above still judges
 // the current source file and every named link before the tier can apply.
-func unresolvedVariableRedirectForm(command, cwd, home string, protectedPaths []string, root *os.Root) bool {
+func unresolvedVariableRedirectGrade(command, cwd, home string, memo *hookpaths.TargetMemo, root *os.Root) hookpaths.Grade {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(command), "")
 	if err != nil || len(file.Stmts) < 2 {
-		return false
+		return hookpaths.GradeNone
 	}
 	name, quoted, ok := variableRedirectWriter(file.Stmts[len(file.Stmts)-1], home)
 	if !ok {
-		return false
+		return hookpaths.GradeNone
 	}
 	proof := sourcedDestinationProof{name: name, cwd: cwd, home: home,
-		quoted: quoted, protectedPaths: protectedPaths, root: root}
-	return proof.statements(file.Stmts[:len(file.Stmts)-1], false, 0) && proof.bound && proof.sourced
+		quoted: quoted, memo: memo, root: root}
+	if !proof.statements(file.Stmts[:len(file.Stmts)-1], false, 0) || !proof.bound || !proof.sourced {
+		return hookpaths.GradeNone
+	}
+	return hookpaths.GradePossible
 }
 
 // sourcedDestinationProof visits each possible assignment before the final
@@ -75,7 +86,7 @@ func unresolvedVariableRedirectForm(command, cwd, home string, protectedPaths []
 type sourcedDestinationProof struct {
 	name, cwd, home string
 	quoted          bool
-	protectedPaths  []string
+	memo            *hookpaths.TargetMemo
 	root            *os.Root
 	bound, sourced  bool
 }
@@ -117,27 +128,26 @@ func (p *sourcedDestinationProof) statement(stmt *syntax.Stmt, inSource bool, de
 			// A bare source name can be found through the shell's PATH rather
 			// than at the event cwd, which is the only source view available here.
 			if !fixed || !strings.Contains(path, "/") ||
-				!knownProjectDestination(path, p.cwd, true, p.protectedPaths, p.root) ||
+				!knownProjectDestination(path, p.cwd, p.home, true, false, p.memo, p.root) ||
 				!p.currentProjectSourceOrdinary(path, depth+1) {
 				return false
 			}
 			p.sourced = true
 			return true
 		default:
-			// Status-only commands may read values but do not change the
-			// redirect destination or write a file. The condition reader
-			// keeps expansions with effects unresolved.
-			return ordinaryStatusStatement(stmt)
+			return p.sourceStatusStatement(stmt)
 		}
 	case *syntax.IfClause:
 		return p.ifClause(call, inSource, depth+1)
+	case *syntax.BinaryCmd:
+		return p.sourceStatusStatement(stmt)
 	default:
 		return false
 	}
 }
 
 func (p *sourcedDestinationProof) ifClause(clause *syntax.IfClause, inSource bool, depth int) bool {
-	if depth > 8 || !ordinarySourceCondition(clause.Cond) {
+	if depth > 8 || !p.ordinarySourceCondition(clause.Cond) {
 		return false
 	}
 	thenProof, elseProof := *p, *p
@@ -158,29 +168,118 @@ func (p *sourcedDestinationProof) ifClause(clause *syntax.IfClause, inSource boo
 	return true
 }
 
-func ordinarySourceCondition(stmts []*syntax.Stmt) bool {
-	return len(stmts) == 1 && ordinaryStatusStatement(stmts[0])
+func (p *sourcedDestinationProof) ordinarySourceCondition(stmts []*syntax.Stmt) bool {
+	return len(stmts) == 1 && p.sourceStatusStatement(stmts[0])
+}
+
+// A source assignment is graded as a destination value, never as a write.
+// For an executing status statement, the write readers grade only that hit.
+func (p *sourcedDestinationProof) sourceStatusStatement(stmt *syntax.Stmt) bool {
+	if !ordinaryStatusStatement(stmt) {
+		return false
+	}
+	var printed strings.Builder
+	if err := syntax.NewPrinter().Print(&printed, stmt); err != nil {
+		return false
+	}
+	command := printed.String()
+	return sourcedHitGrade(p.memo.ActionCommandDecisionWithDialectAndGlobFacts(
+		command, p.cwd, p.home, actionfacts.DialectPOSIX, nil)) != hookpaths.GradeNamed &&
+		sourcedHitGrade(hookpaths.UnprovenProtectedWrite(command, p.cwd, p.home)) != hookpaths.GradeNamed
 }
 
 func ordinaryStatusStatement(stmt *syntax.Stmt) bool {
 	if !plainVariableStatement(stmt) || len(stmt.Redirs) != 0 {
 		return false
 	}
-	call, ok := stmt.Cmd.(*syntax.CallExpr)
-	if !ok || len(call.Assigns) != 0 || len(call.Args) == 0 {
-		return false
-	}
-	switch call.Args[0].Lit() {
-	case "test", "[", "true", "false", ":":
+	switch command := stmt.Cmd.(type) {
+	case *syntax.BinaryCmd:
+		return (command.Op == syntax.AndStmt || command.Op == syntax.OrStmt) &&
+			ordinaryStatusStatement(command.X) && ordinaryStatusStatement(command.Y)
+	case *syntax.CallExpr:
+		return ordinaryStatusCall(command)
 	default:
 		return false
 	}
-	for _, arg := range call.Args[1:] {
-		if !ordinaryConditionWord(arg) {
+}
+
+// An ordinary command in a source can affect its exit status and output, but
+// an external process cannot rebind the shell's destination variable. The
+// shell's binding and nested-evaluation commands need their own proof. Named
+// file effects are checked on each executing statement before this result is used.
+func ordinaryStatusCall(call *syntax.CallExpr) bool {
+	if len(call.Assigns) != 0 || len(call.Args) == 0 {
+		return false
+	}
+	args := call.Args
+	for depth := 0; depth < 8 && len(args) != 0; depth++ {
+		program, fixed := hookpaths.StaticWord(args[0], "")
+		if !fixed || strings.ContainsAny(program, "/\\") {
 			return false
 		}
+		switch program {
+		case "command", "builtin":
+			args = args[1:]
+			if program == "command" && len(args) != 0 && args[0].Lit() == "-p" {
+				args = args[1:]
+			}
+			if len(args) != 0 && args[0].Lit() == "--" {
+				args = args[1:]
+			}
+		case "env":
+			args = args[1:]
+		envOptions:
+			for len(args) != 0 {
+				option, known := hookpaths.StaticWord(args[0], "")
+				if !known {
+					return false
+				}
+				switch option {
+				case "-i", "--ignore-environment", "--":
+					args = args[1:]
+				case "-u", "--unset":
+					if len(args) < 2 {
+						return false
+					}
+					args = args[2:]
+				default:
+					if strings.Contains(option, "=") && !strings.HasPrefix(option, "-") {
+						args = args[1:]
+						continue
+					}
+					if strings.HasPrefix(option, "-") {
+						return false
+					}
+					break envOptions
+				}
+			}
+		default:
+			if sourceMayChangeShellState(program, args[1:]) {
+				return false
+			}
+			for _, arg := range call.Args {
+				if !ordinaryConditionWord(arg) {
+					return false
+				}
+			}
+			return true
+		}
 	}
-	return true
+	return false
+}
+
+func sourceMayChangeShellState(program string, args []*syntax.Word) bool {
+	switch program {
+	case ".", "source", "eval", "read", "mapfile", "readarray", "unset",
+		"declare", "typeset", "local", "export", "readonly", "getopts",
+		"let", "set", "shift", "trap", "exec", "alias", "unalias",
+		"sh", "bash", "dash", "zsh", "ksh", "csh", "tcsh", "fish":
+		return true
+	case "printf":
+		return len(args) != 0 && strings.HasPrefix(args[0].Lit(), "-v")
+	default:
+		return false
+	}
 }
 
 func ordinaryConditionWord(word *syntax.Word) bool {
@@ -226,7 +325,8 @@ func (p *sourcedDestinationProof) variableBinding(call *syntax.CallExpr) bool {
 			// Bash performs tilde expansion in an export assignment, including
 			// after a colon. A plain static word alone does not establish its path.
 			return !strings.HasPrefix(assigned, "~") && !strings.Contains(assigned, ":~") &&
-				knownProjectDestination(assigned, p.cwd, p.quoted, p.protectedPaths, p.root)
+				knownProjectDestination(assigned, p.cwd, p.home, p.quoted,
+					len(call.Args[1].Parts) > 1, p.memo, p.root)
 		}
 		if len(call.Args) != 1 {
 			return false
@@ -241,7 +341,8 @@ func (p *sourcedDestinationProof) variableBinding(call *syntax.CallExpr) bool {
 		return false
 	}
 	value, fixed := hookpaths.StaticWord(a.Value, p.home)
-	return fixed && knownProjectDestination(value, p.cwd, p.quoted, p.protectedPaths, p.root)
+	return fixed && knownProjectDestination(value, p.cwd, p.home, p.quoted,
+		len(a.Value.Parts) > 1, p.memo, p.root)
 }
 
 func variableRedirectWriter(stmt *syntax.Stmt, home string) (string, bool, bool) {
@@ -302,7 +403,7 @@ func fixedOutputCommand(call *syntax.CallExpr, home string) bool {
 // knownProjectDestination judges the resolved file, not the spelling of its
 // name. A variable expanded without quotes cannot carry a space or glob as
 // one destination, so that case is still unresolved.
-func knownProjectDestination(value, cwd string, quoted bool, protectedPaths []string, root *os.Root) bool {
+func knownProjectDestination(value, cwd, home string, quoted, assembled bool, memo *hookpaths.TargetMemo, root *os.Root) bool {
 	if value == "" || strings.ContainsAny(value, "\x00\r\n") ||
 		(!quoted && strings.ContainsAny(value, " \t*?[]")) {
 		return false
@@ -316,21 +417,31 @@ func knownProjectDestination(value, cwd string, quoted bool, protectedPaths []st
 	}
 	info, err := root.Lstat(relative)
 	if err == nil {
-		if !info.Mode().IsRegular() {
-			return false
-		}
-		for _, path := range protectedPaths {
-			if protected, err := os.Stat(path); err == nil && os.SameFile(info, protected) {
-				return false
-			}
-		}
-		return true
+		return info.Mode().IsRegular() &&
+			memo.ProtectedReach(filepath.Join(cwd, relative), home) != hookpaths.GradeNamed
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return false
 	}
+	// An assembled name with no reached file has only a Possible destination.
+	// A direct spelling or a reached parent link still names the protected
+	// target through the shared resolver.
+	if (!assembled || projectPathHasLink(root, relative)) &&
+		memo.ProtectedReach(filepath.Join(cwd, relative), home) == hookpaths.GradeNamed {
+		return false
+	}
 	parent, err := root.Stat(filepath.Dir(relative))
 	return err == nil && parent.IsDir()
+}
+
+func projectPathHasLink(root *os.Root, relative string) bool {
+	for parent := filepath.Dir(relative); parent != "." && parent != ""; parent = filepath.Dir(parent) {
+		info, err := root.Lstat(parent)
+		if err == nil && info.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func projectRelative(path, cwd string) (string, error) {

@@ -1506,7 +1506,20 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	generation *compiledRulePackCategories,
 	request trustedActionRequest,
 	facts actionfacts.Facts,
-) []RuleFinding {
+) (out []RuleFinding) {
+	// Grade the sourced destination while producing this rule's finding.
+	// A named hit in either the current source or the command keeps the
+	// enforcing finding; a Possible-only hit is visible in balanced tiers.
+	if !request.simpleCommandPass && balancedSourcedDestination(request, facts) {
+		defer func() {
+			for i := range out {
+				if out[i].RuleID == "persistence.ssh_authorized_keys_command" {
+					out[i].enforcement = findingEnforcementAlertOnly
+					out[i].disposition = findingDispositionAdvisory
+				}
+			}
+		}()
+	}
 	input := request.Input
 	if input.Command == "" {
 		if command, ok := trustedBashCommandInput(input); ok {

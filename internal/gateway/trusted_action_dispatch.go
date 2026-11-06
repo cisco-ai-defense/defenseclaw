@@ -333,21 +333,6 @@ func dispatchTrustedAction(
 			request.record(toolChainPlacedFacts(facts, request), findings)
 		}()
 	}
-	// The sourced-file view can leave a later variable destination unknown.
-	// Keep its finding visible when the balanced profile allows the call.
-	if !request.simpleCommandPass {
-		defer func() {
-			if balancedSourcedDestination(request, facts) {
-				for i := range findings {
-					if findings[i].RuleID != "persistence.ssh_authorized_keys_command" {
-						continue
-					}
-					findings[i].enforcement = findingEnforcementAlertOnly
-					findings[i].disposition = findingDispositionAdvisory
-				}
-			}
-		}()
-	}
 	if parent == nil {
 		parent = context.Background()
 	}
