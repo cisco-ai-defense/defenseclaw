@@ -13,6 +13,10 @@ import (
 // perUserConnectedPeerPID is unknown here: no restart is proven.
 func perUserConnectedPeerPID(*net.TCPAddr, *net.TCPAddr) (int, bool) { return 0, false }
 
+func perUserConnectedPeerPIDWithin(context.Context, *net.TCPAddr, *net.TCPAddr) (int, bool) {
+	return 0, false
+}
+
 // perUserListenerOwners is unknown here.
 func perUserListenerOwners(context.Context, *net.TCPAddr) ([]perUserPeerProcess, bool) {
 	return nil, false
