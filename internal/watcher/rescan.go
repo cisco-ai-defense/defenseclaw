@@ -1908,6 +1908,9 @@ func compareSnapshots(baseline *audit.SnapshotRow, current *TargetSnapshot) []Dr
 		fmt.Fprintf(os.Stderr, "[rescan] corrupt baseline config_hashes for %s: %v\n", baseline.TargetPath, err)
 	}
 	for file, hash := range current.ConfigHashes {
+		if baseline.TargetType == string(InstallMCP) && file == mcpSnapshotIdentityKey {
+			continue
+		}
 		prev, exists := prevCfg[file]
 		if !exists {
 			deltas = append(deltas, DriftDelta{
@@ -1927,6 +1930,9 @@ func compareSnapshots(baseline *audit.SnapshotRow, current *TargetSnapshot) []Dr
 		}
 	}
 	for file, hash := range prevCfg {
+		if baseline.TargetType == string(InstallMCP) && file == mcpSnapshotIdentityKey {
+			continue
+		}
 		if _, exists := current.ConfigHashes[file]; !exists {
 			deltas = append(deltas, DriftDelta{
 				Type:        DriftConfigMutation,
@@ -2184,12 +2190,17 @@ func (w *InstallWatcher) snapshotMCPServer(evt InstallEvent) (*TargetSnapshot, e
 	if err != nil {
 		return nil, fmt.Errorf("marshal mcp server %s: %w", name, err)
 	}
+	identity, err := json.Marshal(mcpIdentityForServer(*entry))
+	if err != nil {
+		return nil, fmt.Errorf("marshal mcp identity %s: %w", name, err)
+	}
 
 	snap := &TargetSnapshot{
 		ContentHash:      hash,
 		DependencyHashes: map[string]string{},
 		ConfigHashes: map[string]string{
 			fmt.Sprintf("mcp.servers.%s", name): hash,
+			mcpSnapshotIdentityKey:              string(identity),
 		},
 		Timestamp: time.Now().UTC(),
 	}

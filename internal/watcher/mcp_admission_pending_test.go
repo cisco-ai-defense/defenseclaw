@@ -226,6 +226,115 @@ func TestGAP0034ColdFailedSnapshotUsesStoredIdentityAndNormalizedHome(t *testing
 	}
 }
 
+func TestGAP0034ColdFailedScanUsesStructuredScope(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Gateway.Watcher.MCP.TakeAction = true
+	cfg.Scanners.MCPScanner.UnverifiedServer = "warn"
+	home := filepath.Join(t.TempDir(), "alice")
+	project := t.TempDir()
+	failed := config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: home,
+		Project: project, SourceScope: "project", Command: "npx", Args: []string{"-y", "."}}
+	admitted := New(cfg, nil, nil, store, logger, nil, nil)
+	admitted.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return []config.MCPServerEntry{failed}, nil })
+	admitted.firstCycleDone.Store(true)
+	admitted.scannerFactory = func(InstallEvent) scanner.Scanner {
+		return &failingScanner{countingScanner{name: "mcp-scanner"}}
+	}
+	admitted.AdmitAddedMCPServers([]string{failed.Name})
+	admitted.admitAddedMCPServers(context.Background())
+
+	cold := New(cfg, nil, nil, store, logger, nil, nil)
+	cold.SetMCPServerSource(func() ([]config.MCPServerEntry, error) {
+		return nil, errors.New("source list unavailable")
+	})
+	cold.firstCycleDone.Store(true)
+	for _, tc := range []struct {
+		name   string
+		query  MCPAdmissionQuery
+		failed bool
+	}{
+		{"failed account", MCPAdmissionQuery{Connector: "claudecode", Server: "notes", Home: home, CWD: project}, true},
+		{"equivalent account", MCPAdmissionQuery{Connector: "claudecode", Server: "notes", Home: home + string(filepath.Separator) + ".", CWD: project}, true},
+		{"different account with scope marker", MCPAdmissionQuery{Connector: "claudecode", Server: "notes", Home: home + "@claudecode#" + project + string(filepath.Separator) + ".", CWD: t.TempDir()}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := cold.MCPAdmissionStatus(tc.query)
+			if got.Failed != tc.failed || got.Unavailable == tc.failed {
+				t.Fatalf("cold failed scan: %+v, want failed=%v", got, tc.failed)
+			}
+		})
+	}
+}
+
+func TestGAP0034ColdFailedHomeDelimiterWithUnresolvedCaller(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Gateway.Watcher.MCP.TakeAction = true
+	cfg.Scanners.MCPScanner.UnverifiedServer = "warn"
+	failed := config.MCPServerEntry{Name: "notes", Connector: "claudecode",
+		Home: filepath.Join(t.TempDir(), "alice@claudecode#fake"), Command: "npx", Args: []string{"-y", "."}}
+	admitted := New(cfg, nil, nil, store, logger, nil, nil)
+	admitted.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return []config.MCPServerEntry{failed}, nil })
+	admitted.firstCycleDone.Store(true)
+	admitted.scannerFactory = func(InstallEvent) scanner.Scanner {
+		return &failingScanner{countingScanner{name: "mcp-scanner"}}
+	}
+	admitted.AdmitAddedMCPServers([]string{failed.Name})
+	admitted.admitAddedMCPServers(context.Background())
+	cold := New(cfg, nil, nil, store, logger, nil, nil)
+	cold.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return nil, errors.New("source list unavailable") })
+	cold.firstCycleDone.Store(true)
+	for _, q := range []MCPAdmissionQuery{
+		{Connector: "claudecode", Server: "notes", Home: failed.Home},
+		{Connector: "claudecode", Server: "notes", CWD: t.TempDir()},
+	} {
+		if got := cold.MCPAdmissionStatus(q); !got.Failed || got.Unavailable {
+			t.Errorf("stored failed scan for %+v: %+v", q, got)
+		}
+	}
+}
+
+func TestGAP0034LegacyScopeRequiresCallerEvidence(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Gateway.Watcher.MCP.TakeAction = true
+	other := config.MCPServerEntry{Name: "notes@claudecode#" + t.TempDir()}
+	if err := store.SetTargetSnapshot(string(InstallMCP), MCPEventPath(other), "hash", "{}", "{}", "[]", "", "fingerprint"+mcpScanFailedMark); err != nil {
+		t.Fatal(err)
+	}
+	cold := New(cfg, nil, nil, store, logger, nil, nil)
+	cold.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return nil, errors.New("source list unavailable") })
+	cold.firstCycleDone.Store(true)
+	if got := cold.MCPAdmissionStatus(MCPAdmissionQuery{Connector: "claudecode", Server: "notes"}); got.Failed || !got.Unavailable {
+		t.Fatalf("ambiguous legacy scope selected another name: %+v", got)
+	}
+	if got := cold.MCPAdmissionStatus(MCPAdmissionQuery{Connector: "claudecode", Server: other.Name}); !got.Failed {
+		t.Fatalf("exact legacy name lost its failed scan: %+v", got)
+	}
+}
+
+func TestGAP0034NamedLegacyProjectDoesNotCrossUnknownHome(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Gateway.Watcher.MCP.TakeAction = true
+	server := config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: t.TempDir(), Project: t.TempDir()}
+	if err := store.SetTargetSnapshot(string(InstallMCP), MCPEventPath(server), "hash", "{}", `{"mcp.servers.notes":"hash"}`, "[]", "", "fingerprint"+mcpScanFailedMark); err != nil {
+		t.Fatal(err)
+	}
+	cold := New(cfg, nil, nil, store, logger, nil, nil)
+	cold.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return nil, errors.New("source list unavailable") })
+	cold.firstCycleDone.Store(true)
+	for _, tc := range []struct {
+		cwd    string
+		failed bool
+	}{
+		{server.Project, true},
+		{t.TempDir(), false},
+	} {
+		got := cold.MCPAdmissionStatus(MCPAdmissionQuery{Connector: "claudecode", Server: "notes", CWD: tc.cwd})
+		if got.Failed != tc.failed || got.Unavailable == tc.failed {
+			t.Errorf("legacy project at %q: %+v, want failed=%v", tc.cwd, got, tc.failed)
+		}
+	}
+}
+
 func TestMCPAdmissionPendingKeepsOtherCallsAsBefore(t *testing.T) {
 	cfg, store, logger, _ := setupTestEnv(t)
 	cfg.Gateway.Watcher.MCP.TakeAction = true

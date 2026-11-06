@@ -44,6 +44,27 @@ type mcpKnownDefinition struct {
 	hash   string
 }
 
+const mcpSnapshotIdentityKey = "mcp.snapshot.identity.v1"
+
+// mcpSnapshotIdentity keeps the fields needed to match a call when the source
+// list is unavailable. MCPEventPath is not an unambiguous encoding of them.
+type mcpSnapshotIdentity struct {
+	Name      string `json:"name"`
+	Connector string `json:"connector"`
+	Home      string `json:"home"`
+	Project   string `json:"project"`
+}
+
+func mcpIdentityForServer(server config.MCPServerEntry) mcpSnapshotIdentity {
+	return mcpSnapshotIdentity{server.Name, server.Connector, server.Home, server.Project}
+}
+
+func (identity mcpSnapshotIdentity) server() config.MCPServerEntry {
+	return config.MCPServerEntry{
+		Name: identity.Name, Connector: identity.Connector, Home: identity.Home, Project: identity.Project,
+	}
+}
+
 // MCPAdmissionPending reports an MCP server with no admission outcome yet
 // and queues admission now (GAP-0112). A server whose definition changed
 // since its outcome is pending the same way (GAP-0216). The hook applies the
@@ -154,9 +175,23 @@ func (w *InstallWatcher) mcpFailedFromLastRead(q MCPAdmissionQuery) MCPAdmission
 func mcpFailedSnapshotServesQuery(path string, row *audit.SnapshotRow, q MCPAdmissionQuery) bool {
 	var hashes map[string]string
 	if row != nil && json.Unmarshal([]byte(row.ConfigHashes), &hashes) == nil {
+		if encoded, ok := hashes[mcpSnapshotIdentityKey]; ok {
+			var identity mcpSnapshotIdentity
+			if json.Unmarshal([]byte(encoded), &identity) != nil || identity.Name == "" ||
+				row.ContentHash == "" || hashes["mcp.servers."+identity.Name] != row.ContentHash {
+				return false
+			}
+			server := identity.server()
+			return path == MCPEventPath(server) && mcpServerServesQuery(server, q)
+		}
 		name := ""
+		hasStoredName := false
 		for key, hash := range hashes {
-			if strings.HasPrefix(key, "mcp.servers.") && hash == row.ContentHash && hash != "" {
+			if !strings.HasPrefix(key, "mcp.servers.") {
+				continue
+			}
+			hasStoredName = true
+			if hash == row.ContentHash && hash != "" {
 				if name != "" {
 					return false
 				}
@@ -165,6 +200,9 @@ func mcpFailedSnapshotServesQuery(path string, row *audit.SnapshotRow, q MCPAdmi
 		}
 		if name != "" {
 			return mcpSnapshotNamedPathServesQuery(path, name, q)
+		}
+		if hasStoredName {
+			return false
 		}
 	}
 	return mcpSnapshotPathServesQuery(path, q)
@@ -191,9 +229,12 @@ func mcpSnapshotPathServesQuery(path string, q MCPAdmissionQuery) bool {
 			continue
 		}
 		rest := path[index+len(marker):]
-		if strings.HasPrefix(rest, "#") && (!filepath.IsAbs(rest[1:]) ||
-			strings.Contains(strings.ToLower(rest[1:]), strings.ToLower(marker))) {
-			continue
+		if strings.HasPrefix(rest, "#") {
+			// Without a stored identity the same bytes can also be a
+			// server name. Require the caller's project to prove scope.
+			if q.CWD == "" || !filepath.IsAbs(rest[1:]) || !mcpFolderWithin(q.CWD, rest[1:]) {
+				continue
+			}
 		}
 		if mcpSnapshotNamedPathServesQuery(path, path[:index], q) {
 			return true
@@ -231,10 +272,39 @@ func mcpSnapshotNamedPathServesQuery(path, name string, q MCPAdmissionQuery) boo
 }
 
 func mcpSnapshotHomeServesQuery(scope, marker string, q MCPAdmissionQuery) bool {
-	if q.Home != "" && sameMCPFolder(scope, q.Home) {
+	projectMarker := marker + "#"
+	if q.Home == "" {
+		// A verified caller with no resolvable home cannot be compared
+		// against an account. A known CWD still excludes another project.
+		if q.CWD != "" {
+			absoluteProject := false
+			for start := 0; start < len(scope); {
+				index := strings.IndexByte(scope[start:], '@')
+				if index < 0 {
+					break
+				}
+				index += start
+				start = index + 1
+				if len(scope)-index < len(projectMarker) || !strings.EqualFold(scope[index:index+len(projectMarker)], projectMarker) {
+					continue
+				}
+				project := scope[index+len(projectMarker):]
+				if filepath.IsAbs(project) {
+					absoluteProject = true
+					if mcpFolderWithin(q.CWD, project) {
+						return true
+					}
+				}
+			}
+			if absoluteProject {
+				return false
+			}
+		}
 		return true
 	}
-	projectMarker := marker + "#"
+	if !strings.Contains(strings.ToLower(scope), strings.ToLower(projectMarker)) && sameMCPFolder(scope, q.Home) {
+		return true
+	}
 	for start := 0; start < len(scope); {
 		index := strings.IndexByte(scope[start:], '@')
 		if index < 0 {
@@ -245,7 +315,7 @@ func mcpSnapshotHomeServesQuery(scope, marker string, q MCPAdmissionQuery) bool 
 		if len(scope)-index < len(projectMarker) || !strings.EqualFold(scope[index:index+len(projectMarker)], projectMarker) {
 			continue
 		}
-		if q.Home != "" && !sameMCPFolder(scope[:index], q.Home) {
+		if !sameMCPFolder(scope[:index], q.Home) {
 			continue
 		}
 		project := scope[index+len(projectMarker):]
@@ -253,7 +323,7 @@ func mcpSnapshotHomeServesQuery(scope, marker string, q MCPAdmissionQuery) bool 
 			return true
 		}
 	}
-	return q.Home == "" && !strings.Contains(strings.ToLower(scope), strings.ToLower(projectMarker))
+	return false
 }
 
 func mcpSnapshotFailed(row *audit.SnapshotRow) bool {
