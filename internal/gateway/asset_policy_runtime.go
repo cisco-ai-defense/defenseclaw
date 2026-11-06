@@ -967,7 +967,7 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 		}
 		if probe.SourcePath != "" {
 			if decision, refused := a.projectSkillSelectedRefusalDecision(
-				ctx, probe.SkillName, probe.SourcePath, connector, runtimeSurface,
+				ctx, probe.SkillName, connector, runtimeSurface,
 			); refused {
 				return decision, true
 			}
@@ -997,18 +997,14 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 // projectSkillSelectedRefusalDecision uses the caller's selected-folder fact
 // when an explicit source uses a spelling the gateway cannot associate with
 // an excluded profile root. The hook binds the fact to the explicit path in
-// the caller's filesystem view before it sends the fact. An absolute source
-// spelled inside one of the caller's own user skill folders loads that user
-// skill, as it does with no project root at all: only the caller can link
-// such a folder into a project, so a project fact does not move it there.
+// the caller's filesystem view before it sends the fact, and sends one only
+// for a folder that the caller's own profile does not hold privately. The
+// gateway applies the fact for every spelling of the source: a path under a
+// user skill folder can be a link to a refused target, which only the caller
+// can tell.
 func (a *APIServer) projectSkillSelectedRefusalDecision(
-	ctx context.Context, name, source, connector, surface string,
+	ctx context.Context, name, connector, surface string,
 ) (config.AssetPolicyDecision, bool) {
-	for _, root := range assetfacts.SkillRoots(connector, hookActiveHome(ctx), "") {
-		if sameProjectRootOrDescendant(root, source) {
-			return config.AssetPolicyDecision{}, false
-		}
-	}
 	for key, selectedName := range resolvedWritesFromContext(ctx) {
 		if !strings.HasPrefix(key, hookpaths.ProjectSkillSelectedPrefix) ||
 			!config.SameAssetName(selectedName, name) {

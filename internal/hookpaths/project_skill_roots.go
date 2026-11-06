@@ -232,23 +232,24 @@ func projectSkillSourceFolders(root, name, source, home, cwd string) []string {
 
 // projectSkillSourceSelects reports whether a resolved source selects the
 // resolved project folder: the source is the folder, its manifest or a path
-// in it that no other skill folder owns. A skill folder below the project
-// folder that the caller's profile holds privately is that skill's own
-// selection, so a project link or root reaching an ancestor of it does not
-// claim it. One that another user can change still counts.
+// in it that no other skill folder owns. The nearest skill folder holding the
+// source, the project folder itself included, is its owner. When the caller
+// profile holds that owner privately, the source is that user skill's own
+// selection, whichever way a project link reaches it, so the project folder
+// does not claim it. An owner another user can change, or one outside the
+// profile, still counts.
 func projectSkillSourceSelects(home, folder, source string) bool {
-	if projectSkillRootKey(folder) == projectSkillRootKey(source) {
-		return true
-	}
-	if !projectSkillPathWithin(folder, source) {
+	if projectSkillRootKey(folder) != projectSkillRootKey(source) && !projectSkillPathWithin(folder, source) {
 		return false
 	}
-	for dir := source; projectSkillPathWithin(folder, dir); dir = filepath.Dir(dir) {
+	for dir := source; ; dir = filepath.Dir(dir) {
 		if info, err := os.Stat(filepath.Join(dir, "SKILL.md")); err == nil && info.Mode().IsRegular() {
 			return !projectSkillPrivateFolder(home, dir)
 		}
+		if parent := filepath.Dir(dir); projectSkillRootKey(dir) == projectSkillRootKey(folder) || parent == dir {
+			return true
+		}
 	}
-	return true
 }
 
 // projectSkillPrivateFolder reports whether a resolved folder lies in the
