@@ -42,7 +42,7 @@ const { mockDaemonClient, mockEnforcer, mockRunSkillScan, mockRunPluginScan, moc
     mockRunPluginScan: vi.fn(),
     mockRunCodeScan: vi.fn(),
     mockScanMCPServer: vi.fn(),
-    mockOutageMode: vi.fn(() => "closed"),
+    mockOutageMode: vi.fn((_tool?: { args?: Record<string, unknown> }) => "closed"),
   }));
 
 vi.mock("../sidecar-config.js", async (importOriginal) => ({
@@ -452,6 +452,21 @@ describe("DefenseClaw OpenClaw Plugin", () => {
       expect(result.message.content[0].text).toBe("today");
       expect(result.message.content[1].text).toContain("DefenseClaw warning:");
       expect(result.message.content[1].text).toContain("without inspection");
+    });
+
+    it.each([
+      "printf x >> ~/.defenseclaw/config.yaml",
+      `printf x >> "$HOME/.defenseclaw/config.yaml"`,
+    ])("keeps a protected target closed during an open outage: %s", async (command) => {
+      mockOutageMode.mockImplementation((tool) =>
+        tool?.args?.command === command ? "protected" : "open");
+      mockDaemonClient.postRaw.mockResolvedValue({
+        status: 0, body: "", error: "connect ECONNREFUSED 127.0.0.1:18970", outage: true,
+      });
+      await expect(listeners.before_tool_call(
+        { toolName: "exec", params: { command } },
+        { sessionKey: "agent:main:main", toolName: "exec" },
+      )).resolves.toMatchObject({ block: true, blockReason: expect.stringContaining("protected state") });
     });
 
     it("uses the saved open mode when the sidecar connection resets", async () => {

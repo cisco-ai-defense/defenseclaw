@@ -4,18 +4,23 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
@@ -400,7 +405,7 @@ func outageInstallLockHeld(root string) bool {
 
 func init() {
 	var connectorName, hookDir string
-	var installWindow bool
+	var installWindow, toolPayloadStdin bool
 	cmd := &cobra.Command{
 		Use:    "hook-outage-mode",
 		Short:  "Print the gateway-outage mode the config gives a per-user connector's hooks now",
@@ -410,13 +415,152 @@ func init() {
 		Annotations: map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
 		Args:        cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			_, err := fmt.Fprintln(cmd.OutOrStdout(), hookOutageFailModeFor(connectorName, hookDir, installWindow))
+			mode := hookOutageFailModeFor(connectorName, hookDir, installWindow)
+			if mode == "open" && toolPayloadStdin {
+				mode = outageToolDecision(cmd.InOrStdin(), filepath.Dir(hookDir))
+			}
+			_, err := fmt.Fprintln(cmd.OutOrStdout(), mode)
 			return err
 		},
 	}
 	cmd.Flags().StringVar(&connectorName, "connector", "", "connector name")
 	cmd.Flags().StringVar(&hookDir, "hook-dir", "", "absolute hooks folder of the hook runtime asking")
 	cmd.Flags().BoolVar(&installWindow, "install-window", false, "print the mode for a call the gateway answered while an installer holds the data directory")
+	cmd.Flags().BoolVar(&toolPayloadStdin, "tool-payload-stdin", false, "check the tool payload before an open outage answer")
 	_ = cmd.MarkFlagRequired("connector")
 	rootCmd.AddCommand(cmd)
+}
+
+type outageToolPayload struct {
+	Name string                 `json:"name"`
+	Args map[string]interface{} `json:"args"`
+	CWD  string                 `json:"cwd"`
+}
+
+// outageToolDecision reuses the hook target reader on the rare path where the
+// gateway is unavailable. The installed account and its file system, rather
+// than the agent's environment, supply the protected-state paths.
+func outageToolDecision(input io.Reader, dataDir string) string {
+	const maxPayload = 256 << 10
+	raw, err := io.ReadAll(io.LimitReader(input, maxPayload+1))
+	if err != nil || len(raw) > maxPayload {
+		return "closed"
+	}
+	var payload outageToolPayload
+	if err := json.Unmarshal(raw, &payload); err != nil || payload.Name == "" || payload.Args == nil {
+		return "closed"
+	}
+	home := outageAccountHome()
+	if home == "" || !filepath.IsAbs(home) {
+		return "closed"
+	}
+	cwd := payload.CWD
+	if !filepath.IsAbs(cwd) {
+		return "closed"
+	}
+	if outagePayloadNamesProtected(payload.Args, "", cwd, home, dataDir, 0) {
+		return "protected"
+	}
+	return "open"
+}
+
+func outagePayloadNamesProtected(value interface{}, key, cwd, home, dataDir string, depth int) bool {
+	if depth > 16 {
+		return true
+	}
+	switch item := value.(type) {
+	case map[string]interface{}:
+		for childKey, child := range item {
+			if outagePayloadNamesProtected(child, childKey, cwd, home, dataDir, depth+1) {
+				return true
+			}
+		}
+	case []interface{}:
+		for _, child := range item {
+			if outagePayloadNamesProtected(child, key, cwd, home, dataDir, depth+1) {
+				return true
+			}
+		}
+	case string:
+		if item == "" {
+			return false
+		}
+		switch strings.ToLower(key) {
+		case "command", "cmd", "script", "command_line", "commandline":
+			return hookpaths.ActionStateTargetMention(item, cwd, home) ||
+				hookpaths.ActionCommandDecision(item, cwd, home) == "protected-target" ||
+				outageCommandTargetsDataRoot(item, cwd, home, dataDir)
+		case "path", "file", "filepath", "file_path", "target", "destination", "dest", "output", "output_path", "filename":
+			path := strings.ReplaceAll(strings.ReplaceAll(item, "${HOME}", home), "$HOME", home)
+			if path == "~" {
+				path = home
+			} else if strings.HasPrefix(path, "~/") {
+				path = filepath.Join(home, path[2:])
+			}
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(cwd, path)
+			}
+			quoted := "'" + strings.ReplaceAll(path, "'", "'\\''") + "'"
+			if runtime.GOOS == "windows" {
+				quoted = `"` + path + `"`
+			}
+			command := "printf x > " + quoted
+			return hookpaths.ActionStateTargetMention(command, cwd, home) ||
+				hookpaths.ActionCommandDecision(command, cwd, home) == "protected-target" ||
+				outageTargetInDataRoot(path, home, dataDir)
+		}
+	}
+	return false
+}
+
+func outageCommandTargetsDataRoot(command, cwd, home, dataDir string) bool {
+	if dataDir == "" || filepath.Clean(dataDir) == filepath.Join(home, ".defenseclaw") {
+		return false
+	}
+	command = strings.ReplaceAll(command, "${DEFENSECLAW_HOME}", dataDir)
+	command = strings.ReplaceAll(command, "$DEFENSECLAW_HOME", dataDir)
+	facts := actionfacts.Analyze(actionfacts.Input{Tool: "exec", Command: command, CWD: cwd, ActiveHome: home})
+	for _, candidate := range facts.Paths {
+		switch candidate.Access {
+		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
+		default:
+			continue
+		}
+		path := candidate.Resolved
+		if path == "" {
+			path = candidate.Value
+		}
+		if path == "" {
+			continue
+		}
+		path = strings.ReplaceAll(path, "${DEFENSECLAW_HOME}", dataDir)
+		path = strings.ReplaceAll(path, "$DEFENSECLAW_HOME", dataDir)
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(cwd, path)
+		}
+		if outageTargetInDataRoot(path, home, dataDir) {
+			return true
+		}
+	}
+	return false
+}
+
+func outageTargetInDataRoot(target, home, dataDir string) bool {
+	if dataDir == "" || filepath.Clean(dataDir) == filepath.Join(home, ".defenseclaw") {
+		return false
+	}
+	root, rootOK := hookpaths.ResolveWriteTarget(dataDir)
+	resolved, targetOK := hookpaths.ResolveWriteTarget(target)
+	if !rootOK {
+		return true
+	}
+	if !targetOK {
+		resolved = filepath.Clean(target)
+	}
+	relative, err := filepath.Rel(root, resolved)
+	if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) &&
+		!strings.HasPrefix(relative, "logs"+string(filepath.Separator)) {
+		return true
+	}
+	return false
 }
