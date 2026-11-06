@@ -298,6 +298,9 @@ type rule struct {
 	// rule drops text that only mentions what it looks for (GAP-1226,
 	// GAP-1227).
 	view func(ext, line string) string
+	// reports, when set, keeps only the pattern matches it returns true for:
+	// CG-EXEC-001 drops the proven-benign ones (GAP-0056).
+	reports func(line string, loc []int) bool
 }
 
 // matches reports whether the rule fires on line of a file with extension
@@ -306,7 +309,15 @@ func (r rule) matches(ext, line string) bool {
 	if r.view != nil {
 		line = r.view(ext, line)
 	}
-	return r.pattern.MatchString(line)
+	if r.reports == nil {
+		return r.pattern.MatchString(line)
+	}
+	for _, loc := range r.pattern.FindAllStringIndex(line, -1) {
+		if r.reports(line, loc) {
+			return true
+		}
+	}
+	return false
 }
 
 // pathTraversalModuleSpecifier is the quoted module path of an import,
@@ -328,83 +339,6 @@ func pathTraversalView(_, line string) string {
 	line = pathTraversalModuleSpecifier.ReplaceAllString(line, " ")
 	return pathTraversalProse.ReplaceAllString(line, " ")
 }
-
-// CG-EXEC-001 reads a call of a command or code interpreter, not a name that
-// ends in exec, eval or system (GAP-0056): a method of another object
-// (re.exec(s), model.eval()), a longer name (parseEval(, createFlysystem()
-// and an argument-list subprocess.call([...]) that names no shell run no
-// command string. A call right after an escaped line break or tab of a string
-// literal (\n, \r, \t) is code in that string and still counts.
-//
-// The method and name forms that do run a command or code string are named,
-// one for each kind of true positive the substring rule found: the os,
-// posix and nt modules; child_process and its usual handles (cp,
-// childProcess) and module expressions (__import__('os').system(,
-// require('child_process').exec(); ShellJS (shell.exec, shelljs.exec); Ruby
-// Kernel, Process, binding and TOPLEVEL_BINDING, and instance_/class_/
-// module_eval of a string, heredoc or a call left open at the end of the line
-// (not a block: class_eval do, (&blk)); Python
-// builtins; JavaScript window, globalThis and global eval and jQuery
-// globalEval; PHP shell_exec and pcntl_exec. A PHP "->" or "::" call still
-// counts, as before. A line with a non-ASCII byte is read in NFKC, as
-// Python reads its identifiers.
-const (
-	// cgExecCommandCalls run a command string. CG-EXEC-002 also reports a
-	// subprocess shell=True call; this rule keeps it at its own severity.
-	cgExecCommandCalls = `os\.system|\b(?:posix|nt)\.system\(|child_process\.exec|\b(?:cp|childprocess)\.exec\(|` +
-		`(?:__import__|import_module|require)\(\s*['"](?:os|(?:node:)?child_process|shelljs)['"]\s*\)\.(?:system|exec)\(|` +
-		`\bshell(?:js)?\.exec\(|(?:shell|pcntl)_exec\(|(?:kernel|\bprocess|(?:__)?builtins(?:__)?)\.(?:exec|system)\(|` +
-		// subprocess.call runs a command string, or a program chosen at run
-		// time, unless its first argument is a list that starts with a
-		// literal program name that is no shell, passes no inline code, and
-		// the call closes on this line without shell=True (a call left open
-		// can take shell=True on the next line).
-		`subprocess\.call\((?:\s*[^\s\[]|\s*$|\s*\[\s*[^\s'"\]]|\s*\[[^\]]*$|\s*\[[^\]]*\]\s*(?:,[^)]*)?$|` + cgExecShellListHead + `|` + cgExecInlineCodeList + `|` + cgExecInterpreterFlagList + `|` + cgExecSplitStringList + `|` + cgExecAttachedCodeList + `)|` +
-		`subprocess\.call\(.*shell\s*=\s*true|(?:^|[^.\w$]|\\[nrt])(?:exec|system)\(`
-	// cgExecShellListHead is an argument list whose first element is a
-	// shell or command interpreter (["sh", "-c", cmd], ["/bin/bash", ...]).
-	cgExecShellListHead = `\s*\[\s*['"](?:[^'"]*[/\\])?(?:sh|bash|zsh|dash|ksh|mksh|fish|csh|tcsh|ash|busybox|cmd|cmd\.exe|powershell|powershell\.exe|pwsh|pwsh\.exe)['"]`
-	// cgExecInlineCodeList is an argument list that passes inline code or a
-	// command string to an interpreter ([sys.executable, "-c", code],
-	// ["node", "-e", src], ["node", "--eval", src], ["cmd", "/c", line],
-	// ["pwsh", "-Command", s], ["pwsh", "-CommandWithArgs", s]).
-	cgExecInlineCodeList = `\s*\[[^\]]*['"](?:-[a-z]*[ce]|/c|--eval|--eval=[^'"]*|` + cgExecPwshCode + `)['"]`
-	// cgExecPwshCode is a PowerShell command-string option, other than a
-	// short cluster ending in c or e (-c, -enc, -ec).
-	cgExecPwshCode = `-command(?:withargs)?|-encodedcommand|-cwa`
-	// The generic code flags include a short-flag cluster that ends in c or
-	// e (python3 -Ic, node -pe, perl -le) and --eval=<code>.
-	// cgExecInterpreterFlagList is a JavaScript or PHP interpreter, at any
-	// element (behind env, env FOO=1 or sudo; node.exe, php.exe), given a
-	// code string through a flag or subcommand that other programs use for
-	// something else (node -p/--print, php -r/--run, php -B/-R/-E and
-	// --process-begin/-code/-end, deno eval; rm -r, cp -r and pip -r stay
-	// exempt).
-	cgExecInterpreterFlagList = `\s*\[[^\]]*['"](?:[^'"]*[/\\])?(?:node|nodejs|deno|bun|php)(?:\d+(?:\.\d+)*)?(?:\.exe)?['"][^\]]*['"](?:-[a-z]*[eprb][a-z]*|(?:--print|--run|--process-(?:begin|code|end))(?:=[^'"]*)?|eval)['"]`
-	// cgExecSplitStringList is env -S/--split-string (also in a cluster,
-	// -iS, or joined, '-S node -p', '-Snode -p') given one element that
-	// holds a whole command line with an inline-code flag (env -S 'node -p',
-	// env -S 'pwsh -Command', env -S 'python3 -cCODE').
-	cgExecSplitStringList = `\s*\[[^\]]*['"](?:-[a-z]*s|--split-string)(?:['"]\s*,\s*['"]|=|\s*)(?:[^'"]*\s)?(?:(?:-[a-z]*[ce]|/c|` + cgExecPwshCode + `|--eval\S*|(?:[^'"\s]*[/\\])?(?:node|nodejs|deno|bun|php)(?:\d+(?:\.\d+)*)?(?:\.exe)?\s+(?:[^'"]*\s)?(?:-[a-z]*[eprb][a-z]*|(?:--print|--run|--process-(?:begin|code|end))(?:=\S*)?|eval))['"\s]|(?:[^'"\s]*[/\\])?` + cgExecAttachedCode + `)`
-	// cgExecAttachedCodeList is python, perl, ruby or php given its code in
-	// the same element as the flag (python3 -cCODE, perl -eCODE).
-	cgExecAttachedCodeList = `\s*\[[^\]]*['"](?:[^'"]*[/\\])?` + cgExecAttachedCode
-	// cgExecAttachedCode is python, perl, ruby or php (versioned, .exe), at
-	// any later element or word, whose code-string flag carries the code in
-	// the same word (python3 -cCODE, python -IcCODE, perl -leCODE,
-	// ruby -eCODE, php -rCODE/-BCODE). The cluster before the flag holds
-	// only that interpreter's no-argument switches, read case-sensitively,
-	// so python -Werror/-Xcpu_count, perl -Ilib/-version, ruby -Eutf-8 and
-	// php -version stay exempt.
-	cgExecAttachedCode = `(?:(?:python|py|pypy)` + cgExecAttachedNext + `(?-i:-[bBdEiIOPqRsSuvx]*c)|perl` + cgExecAttachedNext + `(?-i:-[acnpstTuUwWXl0-9]*[eE])|` +
-		`ruby` + cgExecAttachedNext + `(?-i:-[acdlnpsSwW0-9]*e)|php` + cgExecAttachedNext + `(?-i:-[aenqHw]*[rBRE]))[^'"]`
-	// cgExecAttachedNext ends the interpreter name (a version, .exe) and
-	// moves to a later list element or split-string word.
-	cgExecAttachedNext = `(?:\d+(?:\.\d+)*)?(?:\.exe)?(?:['"][^\]]*['"]|\s+(?:[^'"]*\s)?)`
-	// cgExecEvalCalls evaluate source text.
-	cgExecEvalCalls = `(?:^|[^.\w$]|\\[nrt])eval\(|(?:instance|class|module)_eval\s*(?:\(\s*(?:[^&\s)]|$)|<<|['"%])|globaleval\(|` +
-		`(?:__)?(?:builtins(?:__)?|kernel|binding|toplevel_binding|window|globalthis|global)\.eval\(`
-)
 
 // cgExecView is the part of a line of a file with extension ext that
 // CG-EXEC-001 reads. A line that starts with "//", or in Python, Ruby and
@@ -516,10 +450,11 @@ var builtinRules = codeOwnedBuiltinRules([]rule{
 		id:          "CG-EXEC-001",
 		severity:    SeverityHigh,
 		title:       "Unsafe command execution",
-		pattern:     regexp.MustCompile(`(?i)` + cgExecCommandCalls + `|` + cgExecEvalCalls),
+		pattern:     cgExecPattern,
 		remediation: "Use parameterized execution or an allowlist of commands",
 		extensions:  []string{".py", ".js", ".ts", ".rb", ".php"},
 		view:        cgExecView,
+		reports:     cgExecReports,
 	},
 	{
 		id:          "CG-EXEC-002",
