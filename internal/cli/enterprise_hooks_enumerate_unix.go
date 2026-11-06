@@ -295,9 +295,12 @@ func runEnterpriseHooksEnumerateCycle(
 	// Capture before loading the config. A lifecycle update during this
 	// cycle leaves its record on the older generation, so status waits for
 	// a later scan of the new inputs (GAP-0640).
+	// The digest travels with the number: a rebuilt generation record can
+	// reuse a number, never a digest of different bytes.
 	var configGeneration uint64
+	var configSHA256 string
 	if state, err := configwrite.ReadGenerationState(config.ConfigPath()); err == nil {
-		configGeneration = state.Generation
+		configGeneration, configSHA256 = state.Generation, state.ConfigSHA256
 	}
 	// Reload each cycle so an administrator's enrollment change applies
 	// without restarting the service.
@@ -381,7 +384,7 @@ func runEnterpriseHooksEnumerateCycle(
 	}
 	// Status and verify report agents found installed but not enrollable,
 	// so an unprotected agent is never a silent gap.
-	if err := enterpriseHooksEnumerateUnprotectedWriter(enterprisehooks.UnprotectedAgentsPath(manifestPath), cycle.Unprotected, configGeneration); err != nil {
+	if err := enterpriseHooksEnumerateUnprotectedWriter(enterprisehooks.UnprotectedAgentsPath(manifestPath), cycle.Unprotected, configGeneration, configSHA256); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the unprotected agents: %v\n", err)
 	}
 	if !manifestMode {

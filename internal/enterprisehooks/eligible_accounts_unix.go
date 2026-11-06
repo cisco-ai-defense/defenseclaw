@@ -94,17 +94,17 @@ func WriteUnixEnumeratorAccounts(path string, accounts, identityOnly []UnixEligi
 // WriteUnixUnprotectedAgents publishes the enumerator's unprotected-agents
 // record at path with the same root-only contract as the eligible accounts.
 func WriteUnixUnprotectedAgents(path string, agents []UnprotectedAgent) error {
-	return WriteUnixUnprotectedAgentsForConfig(path, agents, 0)
+	return WriteUnixUnprotectedAgentsForConfig(path, agents, 0, "")
 }
 
 // WriteUnixUnprotectedAgentsForConfig publishes a completed scan with the
-// lifecycle config generation it covered.
-func WriteUnixUnprotectedAgentsForConfig(path string, agents []UnprotectedAgent, configGeneration uint64) error {
+// lifecycle config generation and config digest it covered.
+func WriteUnixUnprotectedAgentsForConfig(path string, agents []UnprotectedAgent, configGeneration uint64, configSHA256 string) error {
 	path = filepath.Clean(strings.TrimSpace(path))
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("enterprise hooks: unprotected agents path must be absolute: %s", path)
 	}
-	data, err := MarshalUnprotectedAgentsForConfig(agents, configGeneration)
+	data, err := MarshalUnprotectedAgentsForConfig(agents, configGeneration, configSHA256)
 	if err != nil {
 		return err
 	}

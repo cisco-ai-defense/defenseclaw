@@ -44,7 +44,7 @@ func TestUnprotectedRecordFromAnEarlierInstallIsPending(t *testing.T) {
 					if generationErr != nil || current.Generation == 0 {
 						t.Fatalf("read current config generation: %+v, %v", current, generationErr)
 					}
-					if data, err = enterprisehooks.MarshalUnprotectedAgentsForConfig(nil, current.Generation); err != nil {
+					if data, err = enterprisehooks.MarshalUnprotectedAgentsForConfig(nil, current.Generation, current.ConfigSHA256); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -106,6 +106,7 @@ func TestUnprotectedRecordPredatingConfigGenerationIsPending(t *testing.T) {
 					t.Fatal(err)
 				}
 				record["config_generation"] = generation
+				record["config_sha256"] = current.ConfigSHA256
 				data, err = json.Marshal(record)
 				if err != nil {
 					t.Fatal(err)

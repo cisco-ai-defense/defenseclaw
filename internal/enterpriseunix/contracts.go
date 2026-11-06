@@ -555,7 +555,10 @@ func (l *lifecycle) describeUnprotectedAgents() {
 				r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
 			}
 			r.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
-		} else if enterprisehooks.UnprotectedAgentsRecordConfigGeneration(data) != current.Generation {
+		} else if enterprisehooks.UnprotectedAgentsRecordConfigGeneration(data) != current.Generation ||
+			enterprisehooks.UnprotectedAgentsRecordConfigSHA256(data) != current.ConfigSHA256 {
+			// The digest names the bytes the scan read. A number alone can
+			// repeat after the generation record is rebuilt.
 			l.reportInstallScanPending("from a different config generation")
 		}
 	}
