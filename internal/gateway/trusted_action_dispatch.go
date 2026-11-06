@@ -1003,6 +1003,12 @@ func withActiveStateTargetMention(
 	facts actionfacts.Facts,
 	findings []RuleFinding,
 ) []RuleFinding {
+	// The bounded view of a large structured write keeps its complete target
+	// facts. Use that same view for the gateway-owned state proof as the pack
+	// rules use for their path decisions.
+	if view, _, ok := actionfacts.OverLimitWriteTargetReduction(request.Input, facts); ok {
+		facts = view
+	}
 	// A pattern, brace list, rsync or git clean that expands onto the
 	// state names no path fact, so it is proved from the shell words
 	// (GAP-2047); so is an archive extraction into it (GAP-2415).
