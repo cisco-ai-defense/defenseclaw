@@ -182,6 +182,54 @@ func TestManagedOwnStatusReportsConfiguredConnectorProof(t *testing.T) {
 	}
 }
 
+func TestManagedOwnStatusIncludesStandaloneConnectorSources(t *testing.T) {
+	previousGuardian := ownStatusGuardianAuthorization
+	ownStatusGuardianAuthorization = func(string) (*managedGuardianAuthorization, string) { return nil, "unavailable" }
+	t.Cleanup(func() { ownStatusGuardianAuthorization = previousGuardian })
+
+	for _, tc := range []struct {
+		name string
+		cfg  *config.Config
+		want []string
+	}{
+		{
+			name: "singular beside plural",
+			cfg: &config.Config{Guardrail: config.GuardrailConfig{
+				Mode: "action", Connector: "claudecode",
+				Connectors: map[string]config.PerConnectorGuardrailConfig{"codex": {}},
+			}},
+			want: []string{"claudecode", "codex"},
+		},
+		{
+			name: "machine policy only",
+			cfg: &config.Config{Enterprise: config.EnterpriseConfig{
+				MachinePolicy: config.EnterpriseMachinePolicyConfig{
+					Connectors: map[string]config.EnterpriseConnectorPolicy{"codex": {}},
+				},
+			}},
+			want: []string{"codex"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, tc.cfg)
+			api.managedPolicyView.Store(&managedPolicyView{connectors: map[string]managedPolicyViewConnector{
+				"claudecode": {}, "codex": {},
+			}})
+			answer := api.ownStatusAnswer(context.Background(), "uid", "5001", "alice")
+			roster, ok := answer["connectors"].(map[string]any)
+			if !ok || len(roster) != len(tc.want) {
+				t.Fatalf("roster = %#v, want %v", answer["connectors"], tc.want)
+			}
+			for _, name := range tc.want {
+				row, ok := roster[name].(map[string]any)
+				if !ok || row["protected"] != true {
+					t.Fatalf("%s = %#v, want confirmed protection", name, roster[name])
+				}
+			}
+		})
+	}
+}
+
 // cowork-1-0-8 GAP-0060: on a managed Windows computer the gateway answers a
 // standard account's own status for the SID its own-status pipe read from
 // the client token, with the same rule as the hook socket: that account's
