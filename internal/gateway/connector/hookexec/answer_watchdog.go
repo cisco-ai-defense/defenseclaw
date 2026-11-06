@@ -9,6 +9,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -127,6 +128,12 @@ type answerWatchdog struct {
 	closeLateAnswer bool
 	watchDone       chan struct{}
 	watchDoneOnce   sync.Once
+	// answeredInTime is set when answered stood a managed call's watchdog
+	// down before its deadline: the call's own answer is then the one
+	// written, also when the call finishes after the deadline (GAP-0648
+	// review 3 S1). Atomic, not under mu: answered runs from the delivery
+	// receipt that finish and answerLate send while they hold mu.
+	answeredInTime atomic.Bool
 }
 
 // lateAnswerWait bounds how long a managed call's own answer, ready after
@@ -787,7 +794,7 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	installing := installCheck != nil && installCheck()
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.finished {
+	if w.finished || w.answeredInTime.Load() {
 		return
 	}
 	if installing && !w.closedKnown && !w.claimedAnswer && w.installCheck != nil {
@@ -895,11 +902,19 @@ func heldWithin(check func() bool, wait time.Duration) bool {
 }
 
 // answered stands the watchdog down: the gateway's decision is in. Safe on
-// a nil watchdog.
+// a nil watchdog. A managed call's decision read before its deadline is the
+// answer the agent gets, also when rendering it takes the call past the
+// deadline (answeredInTime); one read after it is late (lateAnswerDue) and
+// leaves the watchdog's answer.
 func (w *answerWatchdog) answered() {
-	if w != nil && !w.lateAnswerDue() {
-		w.waiter.cancel()
+	if w == nil || w.lateAnswerDue() {
+		return
 	}
+	if w.closeLateAnswer {
+		// Before the cancel: watch, answerLate and finish read it.
+		w.answeredInTime.Store(true)
+	}
+	w.waiter.cancel()
 }
 
 // noDecisionPending restores the closed answer when a retry has connected
@@ -959,16 +974,22 @@ func (w *AnswerWatchdog) Finish(code int) int {
 // finish writes the call's own result unless the watchdog already answered,
 // and returns the exit status of the answer the agent got.
 func (w *answerWatchdog) finish(code int) int {
-	if w.lateAnswerDue() && w.watchDone != nil {
+	if w.lateAnswerDue() && w.watchDone != nil && !w.answeredInTime.Load() {
 		timer := time.NewTimer(lateAnswerWait)
+		held := false
 		select {
 		case <-w.watchDone:
+			// The watch answered (it fired), or it stood down for a
+			// decision read in time: nothing to answer for.
 		case <-timer.C:
+			held = true
 		}
 		timer.Stop()
-		if late, ok := w.answerLate(); ok {
-			w.waiter.cancel()
-			return late
+		if held {
+			if late, ok := w.answerLate(); ok {
+				w.waiter.cancel()
+				return late
+			}
 		}
 	}
 	w.waiter.cancel()
@@ -996,12 +1017,28 @@ func (w *answerWatchdog) finish(code int) int {
 // deadline has passed and its watchdog did not answer within lateAnswerWait
 // (its thread was held, or still waits on a timer the computer's sleep
 // stopped): the late verdict or result is never written (GAP-0648 review
-// F4). ok is false when the watchdog answered or the call is not late.
+// F4). It is the answer watch would give: while the computer's lifecycle
+// holds a call whose fallback is not closed, the install answer (GAP-1074,
+// review 3 L2). ok is false when the watchdog answered, the call's decision
+// came in time (answeredInTime) or the call is not late.
 func (w *answerWatchdog) answerLate() (code int, ok bool) {
 	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.fired || w.finished || !w.lateAnswerDue() {
+	if !w.lateAnswerOwedLocked() {
+		w.mu.Unlock()
 		return 0, false
+	}
+	installCheck := w.installCheck
+	w.mu.Unlock()
+	// Outside the lock, as in watch; the look is bounded (heldWithin).
+	installing := installCheck != nil && installCheck()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.lateAnswerOwedLocked() {
+		return 0, false
+	}
+	if installing && !w.closedKnown && !w.claimedAnswer && w.installCheck != nil {
+		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure =
+			w.installOut, w.installErr, w.installCode, w.installLogFailure
 	}
 	// The watchdog's answer: watch finds the call finished and stays quiet.
 	w.fired, w.finished = true, true
@@ -1029,6 +1066,12 @@ func (w *answerWatchdog) answerLate() (code int, ok bool) {
 		w.deliveryReceipt(false, true)
 	}
 	return w.fallbackCode, true
+}
+
+// lateAnswerOwedLocked reports a late managed call nobody answered yet.
+// w.mu is held.
+func (w *answerWatchdog) lateAnswerOwedLocked() bool {
+	return !w.fired && !w.finished && !w.answeredInTime.Load() && w.lateAnswerDue()
 }
 
 func (w *answerWatchdog) setDeliveryReceipt(receipt func(bool, bool)) {

@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptrace"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -442,23 +444,124 @@ func TestALateManagedVerdictIsNotWrittenWhileTheWatchdogIsHeld(t *testing.T) {
 	}
 }
 
+// GAP-0648 review 3 S1: a managed verdict read before the deadline is the
+// answer the agent gets, also when rendering it takes the call past the
+// deadline: finish answers for the watchdog only when the watchdog is held
+// (lateAnswerWait passed), never for one that stood down in time. The
+// deadline passes on the injected sleep-counting clock, so the test does
+// not sleep. Before, the agent got the closed no-answer reply.
+func TestAManagedVerdictReadInTimeIsWrittenWhenItsCallFinishesPastTheDeadline(t *testing.T) {
+	if !hookClockAnchor.ok {
+		t.Skip("no sleep-counting clock on this system")
+	}
+	previous := lateAnswerWait
+	lateAnswerWait = 5 * time.Second
+	t.Cleanup(func() { lateAnswerWait = previous })
+	const verdict = `{"systemMessage":"verdict read in time"}`
+	for _, held := range []bool{false, true} {
+		name := "the watchdog stands down"
+		if held {
+			name = "the watchdog's thread is held"
+		}
+		t.Run(name, func(t *testing.T) {
+			sp, _ := specFor("claudecode")
+			var stdout, stderr bytes.Buffer
+			opts := Options{Connector: "claudecode", Event: "PreToolUse", ManagedEnterprise: true, FailMode: "closed",
+				Stdout: &stdout, Stderr: &stderr}
+			w := prepareAnswerWatchdog(&opts, sp, "closed", time.Time{})
+			clock := &sleepClock{}
+			useSleepClock(w, clock)
+			deadline := time.Now().Add(time.Hour)
+			w.waiter.extendTo(deadline)
+			if !held {
+				go w.watch(deadline)
+			}
+			// The verdict is read with an hour left.
+			_, _ = w.out.WriteString(verdict)
+			w.answered()
+			// Rendering it takes the call past the deadline.
+			clock.slept.Store(int64(2 * time.Hour))
+			if !w.lateAnswerDue() {
+				t.Fatal("the deadline has not passed")
+			}
+			began := time.Now()
+			code := w.finish(0)
+			took := time.Since(began)
+			shown := stdout.String() + stderr.String()
+			if code != 0 || shown != verdict {
+				t.Fatalf("exit %d answer %q, want the verdict read in time", code, shown)
+			}
+			if took >= lateAnswerWait {
+				t.Fatalf("finish waited %s for a watchdog that had stood down", took)
+			}
+		})
+	}
+}
+
+// GAP-0648 review 3 L2: the answer finish gives for a held managed watchdog
+// is the one watch would give: while the computer's lifecycle holds a call
+// whose administrator chose open (an install or upgrade began during the
+// call), the install answer and its closed hook-failures row (GAP-1074).
+// Hermes shows the difference: its no-answer row is fail_open.
+func TestALateManagedAnswerForAHeldWatchdogIsTheInstallAnswerDuringALifecycle(t *testing.T) {
+	previousLate, previousLog := lateAnswerWait, answerWatchdogLogWait
+	lateAnswerWait, answerWatchdogLogWait = 50*time.Millisecond, time.Minute
+	t.Cleanup(func() { lateAnswerWait, answerWatchdogLogWait = previousLate, previousLog })
+	var running atomic.Bool
+	stubManagedLifecycle(t, running.Load)
+	home := t.TempDir()
+	sp, _ := specFor("hermes")
+	var stdout, stderr bytes.Buffer
+	opts := withDefaults(Options{Connector: "hermes", Event: "pre_tool_call", ManagedEnterprise: true, FailMode: "open",
+		Stdout: &stdout, Stderr: &stderr, FailureLogHome: func() string { return home }})
+	w := prepareAnswerWatchdog(&opts, sp, "open", time.Time{})
+	if w.installCheck == nil {
+		t.Fatal("no lifecycle look for the administrator's open")
+	}
+	install := string(w.installOut) + string(w.installErr)
+	w.waiter.extendTo(time.Now().Add(-time.Millisecond))
+	// The lifecycle starts; the watchdog's thread never runs.
+	running.Store(true)
+	_, _ = w.out.WriteString(`{"action":"allow"}`)
+	w.answered()
+	code := w.finish(0)
+	shown := stdout.String() + stderr.String()
+	if shown != install || code != w.installCode || strings.Contains(shown, `"allow"`) {
+		t.Fatalf("exit %d answer %q, want the closed install answer %q", code, shown, install)
+	}
+	row, err := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
+	if err != nil || !strings.Contains(string(row), `"outcome":"fail_closed"`) || strings.Contains(string(row), "fail_open") {
+		t.Fatalf("hook-failures row %q (%v), want the install answer's fail_closed row", row, err)
+	}
+}
+
 // The sleep-counting clock runs with the awake clock while the computer is
 // awake (CLOCK_BOOTTIME, CLOCK_MONOTONIC_RAW, GetTickCount64 in 10-16 ms
-// steps).
+// steps). Each reading of it is bracketed by two of the awake clock, so a
+// test goroutine the host holds between two readings widens the bracket, not
+// the error (GAP-0648 review 3 L3): the interval it measured lies within
+// the bracket, to two steps of the coarsest clock (GetTickCount64, up to
+// 15.6 ms each). Before, a fixed 40 ms around one reading failed on a
+// loaded runner.
 func TestTheSleepCountingClockRunsWithTheAwakeClock(t *testing.T) {
+	const step = 32 * time.Millisecond
+	before := time.Now()
 	first, ok := platformSuspendClock()
+	after := time.Now()
 	if !ok {
 		if runtime.GOOS == "linux" || runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
 			t.Fatal("no sleep-counting clock")
 		}
 		t.Skip("no sleep-counting clock on this system")
 	}
-	began := time.Now()
 	time.Sleep(100 * time.Millisecond)
+	beforeLast := time.Now()
 	last, _ := platformSuspendClock()
-	awake := time.Since(began)
-	if drift := (last - first) - awake; drift < -40*time.Millisecond || drift > 40*time.Millisecond {
-		t.Fatalf("the sleep-counting clock moved %s while the awake clock moved %s", last-first, awake)
+	afterLast := time.Now()
+	moved := last - first
+	least, most := beforeLast.Sub(after), afterLast.Sub(before)
+	if moved < least-step || moved > most+step {
+		t.Fatalf("the sleep-counting clock moved %s while the awake clock moved between %s and %s", moved, least, most)
 	}
 }
 
