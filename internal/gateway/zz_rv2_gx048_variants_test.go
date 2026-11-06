@@ -175,6 +175,15 @@ func TestRV2GX048Variants(t *testing.T) {
 		{"G11 git switch", "claudecode", "Bash", "shell", b("git switch other")},
 		{"G12 git checkout new project settings from branch", "claudecode", "Bash", "shell", b("git checkout other -- sub2/.claude/settings.json")},
 		{"G13 git checkout new project settings, no --", "claudecode", "Bash", "shell", b("git checkout other sub2/.claude/settings.json")},
+		{"G14 git -C am", "claudecode", "Bash", "shell", b("git -C . am fix.mbox")},
+		{"G15 git --git-dir cherry-pick", "claudecode", "Bash", "shell", b("git --git-dir=.git cherry-pick abc1234")},
+		{"G16 git -c merge", "claudecode", "Bash", "shell", b("git -c core.autocrlf=false merge feature")},
+		{"G17 git --no-pager pull", "claudecode", "Bash", "shell", b("git --no-pager pull")},
+		{"G18 git --work-tree rebase", "claudecode", "Bash", "shell", b("git --work-tree=. rebase main")},
+		{"G19 git -C revert", "claudecode", "Bash", "shell", b("git -C . revert HEAD")},
+		{"G20 git -C switch", "claudecode", "Bash", "shell", b("git -C . switch other")},
+		{"G21 git reset hard", "claudecode", "Bash", "shell", b("git reset --hard HEAD~1")},
+		{"G22 git stash branch", "claudecode", "Bash", "shell", b("git stash branch from-stash")},
 		// registry: Amp, Antigravity, Kiro, Hermes
 		{"R01 Antigravity Edit drops hook", "claudecode", "Edit", "native", e(antigravity, `"/home/u/.defenseclaw/hooks/x-hook.sh"`, `"true"`)},
 		{"R02 Hermes Edit drops hook", "claudecode", "Edit", "native", e(hermes, "/home/u/.defenseclaw/hooks/hermes-hook.sh", "true")},
@@ -251,6 +260,9 @@ func TestRV2GX048Variants(t *testing.T) {
 		{"X20 rm -rf .github/workflows/old", "claudecode", "Bash", "benign", b("rm -rf .github/workflows/old")},
 		{"X21 Kiro settings other key", "claudecode", "Edit", "benign", e(kiroSettings, `"chat.defaultAgent":"defenseclaw"`, `"chat.defaultAgent":"defenseclaw","chat.enableThinking":true`)},
 		{"X22 Hermes model change", "claudecode", "Edit", "benign", e(hermes, "hooks:", "model: x\nhooks:")},
+		{"X23 git switch -c", "claudecode", "Bash", "benign", b("git switch -c feature-x")},
+		{"X24 git checkout -B", "claudecode", "Bash", "benign", b("git checkout -B feature-x")},
+		{"X25 git stash show", "claudecode", "Bash", "benign", b("git stash show")},
 	}
 	counts := map[string]int{}
 	for _, r := range rows {
@@ -258,6 +270,11 @@ func TestRV2GX048Variants(t *testing.T) {
 			continue
 		}
 		if os.Getenv("GX048_ONLY_F") == "1" && !strings.HasPrefix(r.id, "F") {
+			continue
+		}
+		if os.Getenv("GX048_ONLY_G") == "1" && !strings.HasPrefix(r.id, "G") &&
+			!strings.HasPrefix(r.id, "X12") && !strings.HasPrefix(r.id, "X15") &&
+			!strings.HasPrefix(r.id, "X23") && !strings.HasPrefix(r.id, "X24") && !strings.HasPrefix(r.id, "X25") {
 			continue
 		}
 		for _, profile := range []string{"default", "strict"} {
@@ -304,7 +321,9 @@ func TestRV2GX048Variants(t *testing.T) {
 			if strings.HasPrefix(r.id, "E05") && strings.Contains(got, "PANIC") {
 				t.Errorf("%s %s: handler panicked", profile, r.id)
 			}
-			if (strings.HasPrefix(r.id, "D") || strings.HasPrefix(r.id, "F") || strings.HasPrefix(r.id, "X18")) && status != "ok" && status != "INFO" {
+			if (strings.HasPrefix(r.id, "D") || strings.HasPrefix(r.id, "F") || strings.HasPrefix(r.id, "G") ||
+				strings.HasPrefix(r.id, "X12") || strings.HasPrefix(r.id, "X15") || strings.HasPrefix(r.id, "X18") ||
+				strings.HasPrefix(r.id, "X23") || strings.HasPrefix(r.id, "X24") || strings.HasPrefix(r.id, "X25")) && status != "ok" && status != "INFO" {
 				t.Errorf("%s %s: got %s, want %s", profile, r.id, action, want)
 			}
 		}
