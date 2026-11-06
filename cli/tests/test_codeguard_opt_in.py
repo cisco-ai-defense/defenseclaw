@@ -682,4 +682,3 @@ def test_windows_scan_hint_is_pinned_by_a_literal(monkeypatch, executable, expec
     monkeypatch.setattr(cmd_codeguard_module, "_path_gateway_is", lambda _executable: False)
     monkeypatch.setattr(cmd_codeguard_module, "os", SimpleNamespace(name="nt"))
     assert cmd_codeguard_module._format_code_scan_command(executable) == expected
-

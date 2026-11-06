@@ -2519,4 +2519,3 @@ def test_windows_repair_command_is_pinned_by_a_literal(monkeypatch, deployment_m
     )
     monkeypatch.setattr(cmd_acp_module, "os", SimpleNamespace(name="nt", path=os.path))
     assert cmd_acp_module.setup_repair_command(cfg, "zed", "kiro", data_dir) == expected
-
