@@ -16,6 +16,13 @@ func TestGAP0518LateCandidateText(t *testing.T) {
 		{"cat ~/.ss*/auth*", true},
 		{"p=$HOME/.ssh/authorized_keys; cat $p", true},
 		{"cat /home/test/.defenseclaw/config.yaml", true},
+		{"cat project/authorized_keys_notes.txt", false},
+		{"cat project/notes.ssh.txt", false},
+		{"echo $PWD", false},
+		{"printf '%s' \"$USER\"", false},
+		{"cat $unknown", true},
+		{"cat $PWD/.ssh/config", true},
+		{"cat project/authorized_keys", true},
 	} {
 		if got := CallMayReachProtected(row.text, "/home/test"); got != row.want {
 			t.Errorf("candidate %q = %t, want %t", row.text, got, row.want)

@@ -167,11 +167,12 @@ func pathMayNameProtectedLink(path, resolved, home string, info os.FileInfo) boo
 	if resolved != filepath.Clean(path) || hookpaths.CallMayReachProtected(resolved, home) {
 		return true
 	}
-	for _, protected := range hookpaths.AuthorizedKeysPaths(home) {
+	for _, protected := range hookpaths.ProtectedAuthorizedKeysPaths(home) {
 		other, err := os.Stat(protected)
 		if err == nil && os.SameFile(info, other) {
 			return true
 		}
 	}
-	return false
+	_, protected := hookpaths.ResolveActiveStateHardlinkTarget(resolved, home)
+	return protected
 }

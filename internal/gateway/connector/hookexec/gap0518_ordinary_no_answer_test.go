@@ -119,6 +119,54 @@ func TestGAP0518OrdinaryProofRejectsProtectedLinkAndKnownValue(t *testing.T) {
 	}
 }
 
+func TestGAP0518LateProofDistinguishesProtectedAliasesAndOrdinaryNames(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	for _, dir := range []string{cwd, filepath.Join(home, ".ssh"), filepath.Join(home, ".defenseclaw")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	call := func(tool, input string) []byte {
+		return []byte(`{"hook_event_name":"PreToolUse","tool_name":` + mustJSONString(tool) +
+			`,"cwd":` + mustJSONString(cwd) + `,"tool_input":` + input + `}`)
+	}
+	for _, source := range []string{
+		filepath.Join(home, ".ssh", "config"),
+		filepath.Join(home, ".defenseclaw", "config.yaml"),
+	} {
+		if err := os.WriteFile(source, []byte("fixture"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		alias := filepath.Join(cwd, filepath.Base(filepath.Dir(source))+"-alias.txt")
+		if err := os.Link(source, alias); err != nil {
+			t.Fatal(err)
+		}
+		for _, body := range [][]byte{
+			call("Read", `{"file_path":`+mustJSONString(alias)+`}`),
+			call("Bash", `{"command":`+mustJSONString("cat "+alias)+`}`),
+		} {
+			if ordinaryNoAnswerPayloadInHome(body, home) {
+				t.Fatalf("protected alias got a late proof: %s", body)
+			}
+		}
+	}
+	for _, name := range []string{"authorized_keys_notes.txt", "notes.ssh.txt"} {
+		path := filepath.Join(cwd, name)
+		if err := os.WriteFile(path, []byte("ordinary"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !ordinaryNoAnswerPayloadInHome(call("Read", `{"file_path":`+mustJSONString(path)+`}`), home) {
+			t.Fatalf("ordinary file %q has no late proof", name)
+		}
+	}
+	for _, command := range []string{"echo $PWD", `printf '%s' "$USER"`} {
+		if !ordinaryNoAnswerPayloadInHome(call("Bash", `{"command":`+mustJSONString(command)+`}`), home) {
+			t.Fatalf("ordinary variable command %q has no late proof", command)
+		}
+	}
+}
+
 func TestGAP0518LongOrdinaryTouchNoAnswer(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
