@@ -40,6 +40,10 @@ type TargetMemo struct {
 	// (newProtectedFiles).
 	keys  map[string][]string
 	files map[string]protectedFiles
+	// The shared reach reader keeps complete names and per-parent answers.
+	reachNames   map[string]reachNames
+	reachParents map[reachParentKey]reachParentAnswer
+	stateIndices map[string]activeStateIdentityIndex
 	// work counts the path components the memo walked on the file system
 	// and the candidate checks it computed (Work); candidates counts the
 	// Windows candidate checks among them (WorkParts).
@@ -54,11 +58,12 @@ const maxTargetMemoEntries = 1 << 16
 // NewTargetMemo returns an empty memo for one evaluation.
 func NewTargetMemo() *TargetMemo {
 	return &TargetMemo{
-		prefixes: make(map[string]walkState),
-		words:    make(map[memoWordKey]bool),
-		homes:    make(map[string]*actionStateHome),
-		keys:     make(map[string][]string),
-		files:    make(map[string]protectedFiles),
+		prefixes:     make(map[string]walkState),
+		words:        make(map[memoWordKey]bool),
+		homes:        make(map[string]*actionStateHome),
+		keys:         make(map[string][]string),
+		files:        make(map[string]protectedFiles),
+		stateIndices: make(map[string]activeStateIdentityIndex),
 	}
 }
 
