@@ -113,6 +113,97 @@ func tarArchiveLinkEvidence(program string, args []string, static []bool, cwd, c
 	return linked
 }
 
+// tarArchivePriorLinkedRewrite finds a known link-bearing archive copied or
+// moved onto the archive this extraction will read. The destination may be a
+// hard-linked name of that archive. Redirection substitutions on the tar
+// statement run before tar opens its archive, so their calls count too.
+func tarArchivePriorLinkedRewrite(file *syntax.File, extraction *syntax.CallExpr, args []string, static []bool, cwd, home string) bool {
+	archive, ok := tarArchiveWord(args, static)
+	if !ok || archive == "" || archive == "-" || file == nil || extraction == nil {
+		return false
+	}
+	archivePath := OperandPath(archive, cwd)
+	archiveInfo, _ := os.Stat(archivePath)
+	var redirectRanges [][2]syntax.Pos
+	syntax.Walk(file, func(node syntax.Node) bool {
+		stmt, ok := node.(*syntax.Stmt)
+		if !ok || stmt.Cmd != syntax.Command(extraction) {
+			return true
+		}
+		for _, redirect := range stmt.Redirs {
+			redirectRanges = append(redirectRanges, [2]syntax.Pos{redirect.Pos(), redirect.End()})
+		}
+		return false
+	})
+	prior := func(candidate *syntax.CallExpr) bool {
+		if candidate.Pos().Offset() < extraction.Pos().Offset() {
+			return true
+		}
+		for _, span := range redirectRanges {
+			if span[0].Offset() <= candidate.Pos().Offset() && candidate.End().Offset() <= span[1].Offset() {
+				return true
+			}
+		}
+		return false
+	}
+	linkedRewrite := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		candidate, ok := node.(*syntax.CallExpr)
+		if !ok || candidate == extraction || !prior(candidate) || len(candidate.Args) < 3 {
+			return true
+		}
+		program, fixed := StaticWord(candidate.Args[0], home)
+		if !fixed || programBase(program) != "cp" && programBase(program) != "gcp" &&
+			programBase(program) != "mv" && programBase(program) != "gmv" && programBase(program) != "install" {
+			return true
+		}
+		words := make([]string, 0, len(candidate.Args)-1)
+		for _, word := range candidate.Args[1:] {
+			value, static := StaticWord(word, home)
+			if !static {
+				return true
+			}
+			words = append(words, value)
+		}
+		sources, destination, directoryTarget := []string(nil), "", false
+		if programBase(program) == "cp" || programBase(program) == "gcp" {
+			parsed := cpOperands(words, makeStatic(len(words)))
+			if !parsed.ok {
+				return true
+			}
+			sources, destination, directoryTarget = parsed.sources, parsed.destination, parsed.targetDir || len(parsed.sources) > 1
+		} else {
+			sources, destination = []string{words[len(words)-2]}, words[len(words)-1]
+		}
+		for _, source := range sources {
+			if strings.HasPrefix(source, "-") || strings.HasPrefix(destination, "-") {
+				continue
+			}
+			sourcePath := OperandPath(source, cwd)
+			if tarArchiveKind(sourcePath) != 2 {
+				continue
+			}
+			destinationPath := OperandPath(destination, cwd)
+			if info, err := os.Stat(destinationPath); err == nil && info.IsDir() {
+				directoryTarget = true
+			}
+			if directoryTarget {
+				destinationPath = filepath.Join(destinationPath, filepath.Base(sourcePath))
+			}
+			if destinationPath == archivePath {
+				linkedRewrite = true
+				return false
+			}
+			if info, err := os.Stat(destinationPath); err == nil && archiveInfo != nil && os.SameFile(info, archiveInfo) {
+				linkedRewrite = true
+				return false
+			}
+		}
+		return true
+	})
+	return linkedRewrite
+}
+
 // tarArchiveWord returns the one archive operand of a tar call: -f FILE,
 // -fFILE, a cluster ending in f followed by FILE, --file FILE, --file=FILE,
 // or an old-style cluster (xf FILE). ok is false for none or more than one.
