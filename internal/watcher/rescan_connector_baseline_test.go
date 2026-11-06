@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -422,6 +423,13 @@ func TestHermesPluginTreeDigestCoversEveryReadByte(t *testing.T) {
 	if got, _, err := hermesPluginTreeDigest(dir); err != nil || got != seen[len(seen)-1] {
 		t.Fatalf("bytecode cache changed the digest: %s, %v", got, err)
 	}
+	writePluginFile(t, filepath.Join(dir, "lib", "__pycache__", "x.node"), "native")
+	if _, _, err := hermesPluginTreeDigest(dir); err == nil {
+		t.Fatal("a native payload in a bytecode cache produced a vendor digest")
+	}
+	if err := os.Remove(filepath.Join(dir, "lib", "__pycache__", "x.node")); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Symlink(filepath.Join(dir, "plugin.yaml"), filepath.Join(dir, "link.yaml")); err != nil {
 		t.Skipf("symlink: %v", err)
 	}
@@ -599,4 +607,105 @@ func TestHermesVendorPluginAddedWhileStoppedIsNotScanned(t *testing.T) {
 	}
 	f.refused(edited)
 	onlyHermes(t, f.findingConnectors())
+}
+
+// GAP-0645 review 6: the plugin scanner reports a native payload in a folder
+// it otherwise skips, so a digest match must not vouch for one, and a
+// pristine shipped plugin that gains one is admitted, whichever folder it
+// hides in. Bytecode caches without a native payload stay out of the way.
+func TestHermesVendorPluginNativePayloadInScannerSkippedDir(t *testing.T) {
+	cases := []struct{ dir, file string }{
+		{"__pycache__", "payload.node"},
+		{"lib/__pycache__", "payload.SO"},
+		{"node_modules", "payload.node"},
+		{".git", "payload.dll"},
+		{".venv", "payload.wasm"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.dir, func(t *testing.T) {
+			t.Run("rescan", func(t *testing.T) {
+				f := newHermesPluginFixture(t)
+				path := f.plugin(f.bundledRoot, "web/ddgs")
+				f.pinVendor("web/ddgs", path)
+				f.w.runRescanCycle(context.Background())
+				f.w.runRescanCycle(context.Background())
+				f.unscannedVendor(path)
+				writePluginFile(t, filepath.Join(path, filepath.FromSlash(tc.dir), tc.file), "payload")
+				f.w.runRescanCycle(context.Background())
+				if f.scan.scans(path) != 1 {
+					t.Fatalf("plugin scans = %d, want 1", f.scan.scans(path))
+				}
+				f.refused(path)
+				onlyHermes(t, f.findingConnectors())
+			})
+			t.Run("live", func(t *testing.T) {
+				f := newHermesPluginFixture(t)
+				f.cfg.Watch.RescanEnabled = true
+				path := f.plugin(f.bundledRoot, "web/ddgs")
+				f.pinVendor("web/ddgs", path)
+				writePluginFile(t, filepath.Join(path, filepath.FromSlash(tc.dir), tc.file), "payload")
+				events := f.w.pendingInstallEvents(path)
+				if len(events) != 1 {
+					t.Fatalf("live events = %#v", events)
+				}
+				res := f.w.runAdmission(context.Background(), events[0])
+				if res.Verdict != VerdictRejected && res.Verdict != VerdictBlocked {
+					t.Fatalf("live admission = %s (%s), want rejected or blocked", res.Verdict, res.Reason)
+				}
+				if f.scan.scans(path) != 1 {
+					t.Fatalf("plugin scans = %d, want 1", f.scan.scans(path))
+				}
+			})
+		})
+	}
+}
+
+func TestHermesVendorPluginBytecodeCacheIsNotAChange(t *testing.T) {
+	f := newHermesPluginFixture(t)
+	f.cfg.Watch.RescanEnabled = true
+	path := f.plugin(f.bundledRoot, "web/ddgs")
+	f.pinVendor("web/ddgs", path)
+	f.w.runRescanCycle(context.Background())
+	f.unscannedVendor(path)
+	writePluginFile(t, filepath.Join(path, "__pycache__", "provider.cpython-312.pyc"), "cache")
+	writePluginFile(t, filepath.Join(path, "lib", "__pycache__", "a.cpython-312.opt-1.pyc"), "cache")
+	f.w.runRescanCycle(context.Background())
+	f.unscannedVendor(path)
+	events := f.w.pendingInstallEvents(path)
+	if len(events) != 1 {
+		t.Fatalf("live events = %#v", events)
+	}
+	if res := f.w.runAdmission(context.Background(), events[0]); res.Verdict != VerdictAllowed || res.Reason != hermesVendorPluginReason {
+		t.Fatalf("live admission = %#v", res)
+	}
+	f.unscannedVendor(path)
+	if logs := f.findingConnectors(); len(logs) != 0 {
+		t.Fatalf("bytecode cache raised findings: %q", logs)
+	}
+}
+
+// The native extensions the digest walk refuses are the ones the plugin
+// scanner reports.
+func TestHermesNativeExtensionsMatchScanner(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "cli", "defenseclaw", "scanner", "plugin_scanner", "rules.py"))
+	if err != nil {
+		t.Skipf("plugin scanner rules: %v", err)
+	}
+	match := regexp.MustCompile(`(?m)^BINARY_EXTENSIONS:[^=]*=\s*\{([^}]*)\}`).FindSubmatch(src)
+	if match == nil {
+		t.Fatal("BINARY_EXTENSIONS not found in the plugin scanner rules")
+	}
+	var scanned []string
+	for _, ext := range regexp.MustCompile(`"(\.[a-z0-9]+)"`).FindAllSubmatch(match[1], -1) {
+		scanned = append(scanned, string(ext[1]))
+	}
+	var ours []string
+	for ext := range hermesNativeExtensions {
+		ours = append(ours, ext)
+	}
+	slices.Sort(scanned)
+	slices.Sort(ours)
+	if !slices.Equal(scanned, ours) {
+		t.Fatalf("native extensions = %q, scanner reports %q", ours, scanned)
+	}
 }

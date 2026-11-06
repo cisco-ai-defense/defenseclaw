@@ -25,6 +25,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -126,8 +127,10 @@ func (w *InstallWatcher) rescanHermesVendorPlugin(evt InstallEvent, snap *Target
 // unmarkHermesVendorBaseline returns the baseline without its shipped-plugin
 // mark, and whether the plugin owes an admission: a marked baseline never
 // had a scan, so content other than the bytes that matched the digest is
-// admitted, whatever the scan gating says.
-func unmarkHermesVendorBaseline(baseline *audit.SnapshotRow, snap *TargetSnapshot) (*audit.SnapshotRow, bool) {
+// admitted, whatever the scan gating says. The snapshot leaves out folders
+// the plugin scanner audits for native payloads, so the plugin must also
+// still match its digest, read again, with the same content.
+func (w *InstallWatcher) unmarkHermesVendorBaseline(evt InstallEvent, baseline *audit.SnapshotRow, snap *TargetSnapshot) (*audit.SnapshotRow, bool) {
 	at := strings.LastIndex(baseline.ScannerFingerprint, hermesVendorMark)
 	if at < 0 {
 		return baseline, false
@@ -135,7 +138,11 @@ func unmarkHermesVendorBaseline(baseline *audit.SnapshotRow, snap *TargetSnapsho
 	verified := baseline.ScannerFingerprint[at+len(hermesVendorMark):]
 	unmarked := *baseline
 	unmarked.ScannerFingerprint = baseline.ScannerFingerprint[:at]
-	return &unmarked, verified != baseline.ContentHash || snap == nil || snap.ContentHash != verified
+	if verified != baseline.ContentHash || snap == nil || snap.ContentHash != verified {
+		return &unmarked, true
+	}
+	content, ok := w.hermesVendorPluginContent(evt)
+	return &unmarked, !ok || content != verified
 }
 
 // hermesPluginTreeDigest reads every regular file under path once, through
@@ -143,8 +150,10 @@ func unmarkHermesVendorBaseline(baseline *audit.SnapshotRow, snap *TargetSnapsho
 // name, size and bytes of each file, in lexical walk order) and the content
 // hash SnapshotTarget computes for the same tree. Links, devices, special
 // mode bits and oversize trees make the tree unverifiable. Python bytecode
-// caches, which Hermes writes beside its plugins at run time, are left out,
-// as the plugin scanner and the snapshot leave them out.
+// caches, which Hermes writes beside its plugins at run time, are left out
+// of both hashes, as the plugin scanner and the snapshot leave them out; a
+// native payload inside one makes the tree unverifiable, as the scanner
+// reports it.
 func hermesPluginTreeDigest(path string) (string, string, error) {
 	root, err := os.OpenRoot(path)
 	if err != nil {
@@ -168,12 +177,18 @@ func hermesPluginTreeDigest(path string) (string, string, error) {
 		case entry.Type()&fs.ModeSymlink != 0:
 			return errHermesPluginUnverified
 		case entry.IsDir():
-			if entry.Name() == "__pycache__" {
-				return fs.SkipDir
-			}
 			return nil
 		case !entry.Type().IsRegular():
 			return errHermesPluginUnverified
+		}
+		if inBytecodeCache(name) {
+			// Hermes writes these at run time, so they are not hashed; but
+			// the plugin scanner audits them for native payloads, which a
+			// digest match must not vouch for.
+			if hermesNativePayload(name) {
+				return errHermesPluginUnverified
+			}
+			return nil
 		}
 		file, err := root.Open(name)
 		if err != nil {
@@ -207,6 +222,28 @@ func hermesPluginTreeDigest(path string) (string, string, error) {
 		return "", "", err
 	}
 	return hex.EncodeToString(digest.Sum(nil)), snapshotContentHash(contentEntries), nil
+}
+
+// hermesNativeExtensions are the extensions the plugin scanner reports as a
+// native payload hidden in a folder it skips (BINARY_EXTENSIONS in
+// plugin_scanner/rules.py; TestHermesNativeExtensionsMatchScanner keeps them
+// equal).
+var hermesNativeExtensions = map[string]bool{
+	".exe": true, ".so": true, ".dylib": true, ".wasm": true, ".dll": true, ".node": true,
+}
+
+// hermesNativePayload reports a file the plugin scanner treats as a native
+// payload by its name.
+func hermesNativePayload(name string) bool {
+	base := name[strings.LastIndex(name, "/")+1:]
+	dot := strings.LastIndex(base, ".")
+	return dot >= 0 && hermesNativeExtensions[strings.ToLower(base[dot:])]
+}
+
+// inBytecodeCache reports a file inside a __pycache__ folder.
+func inBytecodeCache(name string) bool {
+	parts := strings.Split(name, "/")
+	return slices.Contains(parts[:len(parts)-1], "__pycache__")
 }
 
 // snapshotSkipsPath reports a file inside a folder SnapshotTarget does not

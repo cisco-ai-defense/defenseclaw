@@ -1055,7 +1055,7 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	// A Hermes shipped plugin recorded without a scan is admitted once its
 	// content is not the bytes that matched its digest (GAP-0645).
 	recorded := baseline
-	baseline, vendorChanged := unmarkHermesVendorBaseline(baseline, currentSnap)
+	baseline, vendorChanged := w.unmarkHermesVendorBaseline(evt, baseline, currentSnap)
 	if vendorChanged && !w.secureClientActive() {
 		return w.readmitChanged(ctx, evt, baseline, currentSnap, compareSnapshots(baseline, currentSnap), fingerprint, "rescan")
 	}
