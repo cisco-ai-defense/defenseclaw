@@ -85,3 +85,64 @@ func TestWindowsCorrelationKeyUntrustedReaderIsRotatedOnStandalone(t *testing.T)
 		})
 	}
 }
+
+// g582 review 5 L2: a key with a null DACL, which every account can read,
+// failed closed on standalone before the rotation was judged. It is rotated
+// like any other key another account could read. Secure Client keeps its
+// base path and never rotates.
+func TestWindowsCorrelationKeyWithANullDACLIsRotatedOnStandalone(t *testing.T) {
+	skipCorrelationKeyAsLocalSystem(t)
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("needs an elevated token (the Windows CI runners and the native test hosts run elevated)")
+	}
+	for _, standalone := range []bool{true, false} {
+		name := "standalone"
+		if !standalone {
+			name = "twin: Secure Client"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(managed.TrustStrictAncestorsEnv, "")
+			current, err := windows.GetCurrentProcessToken().GetTokenUser()
+			if err != nil || current == nil || current.User.Sid == nil {
+				t.Fatalf("resolve current Windows user: %v", err)
+			}
+			expected := current.User.Sid
+			pinWindowsCorrelationExpectedOwner(t, &expected)
+			previous := windowsCorrelationStandaloneRotates
+			windowsCorrelationStandaloneRotates = func() bool { return standalone }
+			t.Cleanup(func() { windowsCorrelationStandaloneRotates = previous })
+
+			dir := t.TempDir()
+			original, err := LoadOrCreateCorrelationKey(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, correlationKeyFilename)
+			if err := managed.RunWithWindowsRepairPrivileges(func() error {
+				return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+					windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, nil, nil)
+			}); err != nil {
+				t.Fatalf("set a null DACL: %v", err)
+			}
+			var rotated string
+			realRotate := windowsCorrelationKeyRotate
+			stubWindowsCorrelationOwnerRecovery(t,
+				func(string, windows.Handle) error { return nil },
+				func(target string, identity windows.ByHandleFileInformation) error {
+					rotated = target
+					return realRotate(target, identity)
+				},
+			)
+			loaded, err := LoadOrCreateCorrelationKey(dir)
+			if standalone {
+				if err != nil || rotated != path || loaded.ID() == original.ID() {
+					t.Fatalf("load = %v, rotated %q (want %q): a key with a null DACL was not rotated", err, rotated, path)
+				}
+				return
+			}
+			if rotated != "" {
+				t.Fatalf("Secure Client rotated %q (load err %v), want its base path", rotated, err)
+			}
+		})
+	}
+}
