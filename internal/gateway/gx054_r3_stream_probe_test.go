@@ -45,6 +45,8 @@ func TestRV054R3Probe(t *testing.T) {
 		{"S30", "dd if=link.tar of=x.tar && tar -xf x.tar -C d1 && echo k >> d1/p"},
 		{"S31", "cat link.tar > x.tar && tar -x -C d1 < x.tar && echo k >> d1/p"},
 		{"S32", "cat link.tar > x.tar && cat x.tar | tar -x -C d1 && echo k >> d1/p"},
+		{"S33", "bsdtar -xf - -C d1 < link.tar && echo k >> d1/p"},
+		{"S34", "gzip -dc link.tgz | bsdtar -xf - -C d1 && echo k >> d1/p"},
 	}
 	for _, row := range rows {
 		t.Run(row.id, func(t *testing.T) {
@@ -68,7 +70,7 @@ func TestRV054R3Probe(t *testing.T) {
 			}
 			for _, cells := range out {
 				if strings.HasPrefix(row.id, "S0") && row.id != "S06" && row.id != "S07" ||
-					row.id == "S14" || row.id == "S21" || row.id == "S25" || row.id == "S26" || row.id == "S27" || row.id == "S28" || row.id == "S29" || row.id == "S30" || row.id == "S31" || row.id == "S32" {
+					row.id == "S14" || row.id == "S21" || row.id == "S25" || row.id == "S26" || row.id == "S27" || row.id == "S28" || row.id == "S29" || row.id == "S30" || row.id == "S31" || row.id == "S32" || row.id == "S33" || row.id == "S34" {
 					for _, cell := range strings.Fields(cells) {
 						if cell == "A" {
 							t.Errorf("%s: known archive link allowed: %s", row.id, cells)
