@@ -17,13 +17,11 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
-	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
-	"mvdan.cc/sh/v3/syntax"
 )
 
 // hookOutageFailModeNow is the gateway-outage mode the config of the per-user
@@ -521,12 +519,23 @@ func outagePayloadNamesProtected(value interface{}, key, cwd, home, dataDir stri
 		}
 		switch strings.ToLower(key) {
 		case "command", "cmd", "script", "command_line", "commandline":
-			command := outageCommandWithEnv(item, env)
-			return hookpaths.ActionStateTargetMention(item, cwd, home) ||
-				hookpaths.ActionCommandDecision(command, cwd, home) == "protected-target" ||
-				outageExpandedCommandTargetsProtected(command, cwd, home, dataDir) ||
-				outageCommandTargetsDataRoot(command, cwd, home, dataDir) ||
-				outageNestedShellTargetsProtected(command, env, cwd, home, dataDir, 0)
+			known := map[string]string{"DEFENSECLAW_HOME": dataDir}
+			for name, value := range env {
+				if path, ok := value.(string); ok {
+					known[name] = path
+				}
+			}
+			targets, parsed := hookpaths.KnownEnvironmentWriteTargets(item, cwd, home, known)
+			if !parsed {
+				return hookpaths.ActionStateTargetMention(item, cwd, home) ||
+					hookpaths.ActionCommandDecision(item, cwd, home) == "protected-target"
+			}
+			for _, target := range targets {
+				if outagePathProtected(target, cwd, home, dataDir) {
+					return true
+				}
+			}
+			return hookpaths.ActionCommandDecision(item, cwd, home) == "protected-target"
 		case "path", "file", "filepath", "file_path", "target", "destination", "dest", "output", "output_path", "filename":
 			path := strings.ReplaceAll(strings.ReplaceAll(item, "${HOME}", home), "$HOME", home)
 			if path == "~" {
@@ -552,203 +561,6 @@ func outagePathProtected(path, cwd, home, dataDir string) bool {
 	return hookpaths.ActionStateTargetMention(command, cwd, home) ||
 		hookpaths.ActionCommandDecision(command, cwd, home) == "protected-target" ||
 		outageTargetInDataRoot(path, home, dataDir)
-}
-
-func outageCommandWithEnv(command string, env map[string]interface{}) string {
-	if len(env) == 0 || runtime.GOOS == "windows" {
-		return command
-	}
-	var expanded strings.Builder
-	expanded.Grow(len(command))
-	quote := byte(0)
-	for i := 0; i < len(command); {
-		c := command[i]
-		if c == '\\' && quote != '\'' && i+1 < len(command) {
-			expanded.WriteString(command[i : i+2])
-			i += 2
-			continue
-		}
-		if c == '\'' && quote != '"' || c == '"' && quote != '\'' {
-			if quote == c {
-				quote = 0
-			} else if quote == 0 {
-				quote = c
-			}
-			expanded.WriteByte(c)
-			i++
-			continue
-		}
-		if c != '$' || quote == '\'' {
-			expanded.WriteByte(c)
-			i++
-			continue
-		}
-		start := i + 1
-		end := start
-		braced := start < len(command) && command[start] == '{'
-		if braced {
-			start++
-			end = start
-		}
-		if start < len(command) && outageEnvNameStart(command[start]) {
-			end = start + 1
-			for end < len(command) && outageEnvNamePart(command[end]) {
-				end++
-			}
-			value, known := env[command[start:end]].(string)
-			close := end
-			if braced && close < len(command) && command[close] != '}' {
-				// POSIX default and assignment forms use the known value when
-				// set; a default is used only for an absent or empty value.
-				colon := command[close] == ':'
-				if colon {
-					close++
-				}
-				if close < len(command) && (command[close] == '-' || command[close] == '=') {
-					fallbackStart := close + 1
-					close = strings.IndexByte(command[fallbackStart:], '}')
-					if close >= 0 {
-						close += fallbackStart
-						if !known || colon && value == "" {
-							value = command[fallbackStart:close]
-							known = true
-						}
-					}
-				} else {
-					close = -1
-				}
-			}
-			if (!braced || close >= 0 && close < len(command) && command[close] == '}') && known {
-				if quote == '"' {
-					replacer := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`, "`", "\\`")
-					expanded.WriteString(replacer.Replace(value))
-				} else {
-					expanded.WriteByte('\'')
-					expanded.WriteString(strings.ReplaceAll(value, "'", "'\\''"))
-					expanded.WriteByte('\'')
-				}
-				i = close
-				if braced {
-					i++
-				}
-				continue
-			}
-		}
-		expanded.WriteByte(c)
-		i++
-	}
-	return expanded.String()
-}
-
-func outageEnvNameStart(c byte) bool {
-	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c == '_'
-}
-
-func outageEnvNamePart(c byte) bool {
-	return outageEnvNameStart(c) || c >= '0' && c <= '9'
-}
-
-// A shell passed through -c expands its quoted program in a new shell.
-// Inspect that program with the same known environment as the outer call.
-func outageNestedShellTargetsProtected(command string, env map[string]interface{}, cwd, home, dataDir string, depth int) bool {
-	if depth >= 16 || runtime.GOOS == "windows" || len(env) == 0 {
-		return false
-	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
-	if err != nil {
-		return false
-	}
-	protected := false
-	syntax.Walk(file, func(node syntax.Node) bool {
-		if protected {
-			return false
-		}
-		call, ok := node.(*syntax.CallExpr)
-		if !ok || len(call.Args) < 3 {
-			return true
-		}
-		words := make([]string, len(call.Args))
-		for i, arg := range call.Args {
-			value, known := hookpaths.StaticWord(arg, home)
-			if !known {
-				return true
-			}
-			words[i] = value
-		}
-		switch filepath.Base(words[0]) {
-		case "sh", "bash", "dash", "zsh", "ksh":
-		default:
-			return true
-		}
-		for i := 1; i < len(words)-1; i++ {
-			option := words[i]
-			if option != "-c" && (len(option) < 3 || option[0] != '-' ||
-				strings.Trim(option[1:], "abcefilmnpsuvxBCEHPT") != "" || !strings.ContainsRune(option[1:], 'c')) {
-				continue
-			}
-			body := outageCommandWithEnv(words[i+1], env)
-			if hookpaths.ActionCommandDecision(body, cwd, home) == "protected-target" ||
-				outageExpandedCommandTargetsProtected(body, cwd, home, dataDir) ||
-				outageCommandTargetsDataRoot(body, cwd, home, dataDir) ||
-				outageNestedShellTargetsProtected(body, env, cwd, home, dataDir, depth+1) {
-				protected = true
-			}
-			break
-		}
-		return true
-	})
-	return protected
-}
-
-func outageExpandedCommandTargetsProtected(command, cwd, home, dataDir string) bool {
-	facts := actionfacts.Analyze(actionfacts.Input{Tool: "exec", Command: command, CWD: cwd, ActiveHome: home})
-	for _, candidate := range facts.Paths {
-		switch candidate.Access {
-		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
-		default:
-			continue
-		}
-		path := candidate.Resolved
-		if path == "" {
-			path = candidate.Value
-		}
-		if path != "" && outagePathProtected(path, cwd, home, dataDir) {
-			return true
-		}
-	}
-	return false
-}
-
-func outageCommandTargetsDataRoot(command, cwd, home, dataDir string) bool {
-	if dataDir == "" || filepath.Clean(dataDir) == filepath.Join(home, ".defenseclaw") {
-		return false
-	}
-	command = strings.ReplaceAll(command, "${DEFENSECLAW_HOME}", dataDir)
-	command = strings.ReplaceAll(command, "$DEFENSECLAW_HOME", dataDir)
-	facts := actionfacts.Analyze(actionfacts.Input{Tool: "exec", Command: command, CWD: cwd, ActiveHome: home})
-	for _, candidate := range facts.Paths {
-		switch candidate.Access {
-		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
-		default:
-			continue
-		}
-		path := candidate.Resolved
-		if path == "" {
-			path = candidate.Value
-		}
-		if path == "" {
-			continue
-		}
-		path = strings.ReplaceAll(path, "${DEFENSECLAW_HOME}", dataDir)
-		path = strings.ReplaceAll(path, "$DEFENSECLAW_HOME", dataDir)
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(cwd, path)
-		}
-		if outageTargetInDataRoot(path, home, dataDir) {
-			return true
-		}
-	}
-	return false
 }
 
 func outageTargetInDataRoot(target, home, dataDir string) bool {
