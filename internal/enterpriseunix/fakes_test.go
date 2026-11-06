@@ -620,7 +620,7 @@ func (h *testHost) marshalCompletedScan(agents []enterprisehooks.UnprotectedAgen
 	if err != nil || state.Generation == 0 {
 		return nil, fmt.Errorf("read installed config generation: %+v, %v", state, err)
 	}
-	return enterprisehooks.MarshalUnprotectedAgentsForConfig(agents, state.Generation)
+	return enterprisehooks.MarshalUnprotectedAgentsForConfig(agents, state.Generation, state.ConfigSHA256)
 }
 
 func (h *testHost) read(canonical string) string {
