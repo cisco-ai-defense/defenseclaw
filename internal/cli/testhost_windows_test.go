@@ -60,9 +60,11 @@ func isolateTestHost() func() {
 		sandboxSeam("windowsScannerRuntimeDir", &windowsScannerRuntimeDir, func() (string, error) { return "", err })
 		sandboxSeam("managedHostDescriptorPath", &managedHostDescriptorPath, func() string { return "" })
 		isolateTestDeploymentReaders(os.TempDir())
+		isolateTestRunFolders("")
 		return isolateTestMachineWriters("")
 	}
 	isolateTestDeploymentReaders(dir)
+	isolateTestRunFolders(dir)
 	missingDescriptor := filepath.Join(dir, "no-runtime-descriptor")
 	sandboxSeam("managedHostDescriptorPath", &managedHostDescriptorPath, func() string { return missingDescriptor })
 	// Absent like on a computer without a deployment.
@@ -662,6 +664,38 @@ func testSandboxSecretDeploymentAbsent() (bool, error) {
 	return err == nil && !installed, err
 }
 
+// isolateTestRunFolders points the lifecycle lock at the run's temp folder
+// dir (g079 review 2 R2b); with no dir, taking it fails.
+//
+// The lifecycle lock (DefenseClaw-Lifecycle\lifecycle.lock) is what the hot
+// config, the bundle restore, the generation repair and the credential
+// changes open with no sharing. A test that missed its stub held the
+// computer's own lock, and kept the guardian and Setup out, for as long as
+// it ran: interference without a write, which no fingerprint sees. In the
+// sandbox it is a missing file in dir, so taking it fails as on a computer
+// without a deployment.
+func isolateTestRunFolders(dir string) {
+	noDir := errors.New("the tests have no temp folder for the lifecycle lock and the staging")
+	lock := ""
+	if dir != "" {
+		lock = filepath.Join(dir, "no-lifecycle", "lifecycle.lock")
+	}
+	takeLock := func(string) (func(), error) {
+		if lock == "" {
+			return nil, noDir
+		}
+		return acquireWindowsEnterpriseLifecycleLock(lock)
+	}
+	sandboxSeam("windowsEnterpriseHotConfigLock", &windowsEnterpriseHotConfigLock, takeLock)
+	sandboxSeam("windowsSecretLifecycleLock", &windowsSecretLifecycleLock, takeLock)
+	sandboxSeam("windowsSecretLifecycleLockPath", &windowsSecretLifecycleLockPath, func() (string, error) {
+		if lock == "" {
+			return "", noDir
+		}
+		return lock, nil
+	})
+}
+
 // errTestSandboxNoServiceControl is what the gateway and guardian service
 // control answers in the package's tests: a test that reaches a real stop,
 // start or restart without its own stub fails, loudly, rather than acting on
@@ -826,6 +860,33 @@ func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 	if absent, err := windowsSecretDeploymentAbsent(); !absent || err != nil {
 		t.Fatalf("the credential refusal audit does not read the deployment as cleanly absent: %v %v", absent, err)
 	}
+	// g079 review 2 R2b: the lifecycle lock is the run's, in the temp
+	// folder; neither lock seam takes the computer's own.
+	lockPath, err := windowsSecretLifecycleLockPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inTemp("the lifecycle lock", lockPath)
+	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machineLock := filepath.Join(roots.LifecycleDir, "lifecycle.lock")
+	for name, take := range map[string]func(string) (func(), error){
+		"windowsEnterpriseHotConfigLock": windowsEnterpriseHotConfigLock, "windowsSecretLifecycleLock": windowsSecretLifecycleLock,
+	} {
+		if sameTestFunc(take, acquireWindowsEnterpriseLifecycleLock) {
+			t.Fatalf("%s takes the computer's own lifecycle lock", name)
+		}
+		release, err := take(machineLock)
+		if err == nil {
+			release()
+			t.Fatalf("%s took a lifecycle lock outside the sandbox", name)
+		}
+		if !strings.Contains(err.Error(), lockPath) {
+			t.Fatalf("%s does not take the run's lifecycle lock %s: %v", name, lockPath, err)
+		}
+	}
 	// Service control: first that no seam is its production function (one
 	// would stop or start the computer's own gateway), then that each fails.
 	for name, seam := range map[string][2]any{
@@ -883,6 +944,7 @@ func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 		registered[seam.name] = true
 	}
 	for _, name := range []string{"windowsBundleLayout", "windowsSecretLayout", "windowsChangeSpool", "windowsSecretDeploymentAbsent",
+		"windowsEnterpriseHotConfigLock", "windowsSecretLifecycleLock", "windowsSecretLifecycleLockPath",
 		"windowsEnterpriseStandaloneFootprint", "windowsEnterpriseClaudeRegistryPolicyValue",
 		"windowsBundleRestoreGatewayRunning", "windowsStandaloneGatewayPID", "windowsSecretGatewayLive",
 		"windowsEnterpriseHotConfigRestart", "windowsEnterpriseHotConfigRecover", "windowsEnterpriseHotConfigFailClosed",
