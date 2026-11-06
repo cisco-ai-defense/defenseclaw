@@ -173,9 +173,10 @@ var (
 // once the standalone gateway service is seen failing a start that began
 // while this hook waited, or with errGatewayRestarting when the service is
 // still not running at deadline (the call sits in the socket systemd holds
-// across the restart). stop ends the watch (call it once the response
-// arrives); release frees ctx. Off Linux, or outside the standalone
-// profile, ctx is returned unchanged.
+// across the restart). A managed Windows call outside Secure Client that
+// names its gateway service gets the service watch instead
+// (watchManagedGatewayService). stop ends the watch (call it once the
+// response arrives); release frees ctx. Any other call gets ctx unchanged.
 func watchManagedGatewayStarts(ctx context.Context, opts Options, deadline time.Time) (watched context.Context, stop, release func()) {
 	if running := managedGatewayServiceRunningNow; running != nil && opts.ManagedEnterprise && !opts.ManagedStandalone &&
 		!opts.SecureClient && !deadline.IsZero() && strings.TrimSpace(opts.ManagedGatewayServiceName) != "" {

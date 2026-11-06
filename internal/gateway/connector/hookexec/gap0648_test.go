@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -120,12 +121,12 @@ func TestManagedGatewayServiceWatchNeedsAProvenStop(t *testing.T) {
 		{name: "answered before the budget", states: []bool{false}, known: true, stopAt: 20 * time.Millisecond},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			reads := 0
+			// A read past the bound keeps running while the next one starts.
+			var reads atomic.Int32
 			read := test.read
 			if read == nil {
 				read = func() (bool, bool) {
-					state := test.states[min(reads, len(test.states)-1)]
-					reads++
+					state := test.states[min(int(reads.Add(1))-1, len(test.states)-1)]
 					return state, test.known
 				}
 			}
