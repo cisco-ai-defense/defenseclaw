@@ -239,3 +239,104 @@ func TestG235bKnownValueStateTargetsInPlaceAndThroughLink(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-6:GAP-0681, GAP-0630, GAP-0601 review 2: an in-place editor entry
+// whose directory is a link to the DefenseClaw state folder, and a sed
+// --follow-symlinks operand that is a link to a state file, edit state in
+// every cell, managed and blind managed included, however the home is
+// spelled. A value the command binds first names the file of that value:
+// USER=other; sed -i d <parent>/$USER/aliasdir/config.yaml edits the
+// sibling file of other and stays allowed, as does a shell body that
+// inherits such a binding, and sed -i on a final link (the editor replaces
+// the link).
+func TestG235bKnownValueBindingsAndLinkedEditorEntries(t *testing.T) {
+	home, project := dynamicWordParityProject(t)
+	t.Setenv("USER", filepath.Base(home))
+	t.Setenv("LOGNAME", filepath.Base(home))
+	state := filepath.Join(home, ".defenseclaw", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(state), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(state, []byte("marker\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(state, filepath.Join(home, "statealias")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Dir(state), filepath.Join(home, "aliasdir")); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(filepath.Dir(home), "other")
+	for _, dir := range []string{filepath.Join(other, "aliasdir"), filepath.Join(other, ".defenseclaw")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{filepath.Join(other, "statealias"), filepath.Join(other, "aliasdir", "config.yaml"),
+		filepath.Join(other, ".defenseclaw", "config.yaml")} {
+		if err := os.WriteFile(name, []byte("other\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	parent := filepath.Dir(home) + "/"
+	type row struct {
+		command               string
+		protected, perUserOff bool
+	}
+	var rows []row
+	for _, spelling := range []string{home, `"$HOME"`, `${HOME}`, parent + `$USER`, parent + `${LOGNAME}`} {
+		for _, form := range []string{
+			`sed -i d {S}/aliasdir/config.yaml`,
+			`sed --in-place d {S}/aliasdir/config.yaml`,
+			`perl -pi -e 1 {S}/aliasdir/config.yaml`,
+			`sed -i -e "s/USER=a/USER=b/" {S}/aliasdir/config.yaml`,
+			`echo USER=a; sed -i d {S}/aliasdir/config.yaml`,
+			`sed -i --follow-symlinks d {S}/statealias`,
+			`bash -c "sed -i d {S}/aliasdir/config.yaml"`,
+		} {
+			rows = append(rows, row{command: strings.ReplaceAll(form, "{S}", spelling), protected: true})
+		}
+	}
+	rows = append(rows,
+		row{command: `cd "$HOME" && sed -i d aliasdir/config.yaml`, protected: true},
+		row{command: `USER=other; USER=` + filepath.Base(home) + `; sed -i d ` + parent + `$USER/aliasdir/config.yaml`, protected: true},
+		row{command: `USER=other; sed -i d ` + parent + `$USER/aliasdir/config.yaml`},
+		row{command: `LOGNAME=other; sed -i d ` + parent + `$LOGNAME/aliasdir/config.yaml`},
+		row{command: `USER=other; sed -i.bak d ` + parent + `$USER/aliasdir/config.yaml`},
+		row{command: `USER=other; sed -i d ` + parent + `$USER/.defenseclaw/config.yaml`},
+		row{command: `export LOGNAME=other; sed -i d ` + parent + `$LOGNAME/.defenseclaw/config.yaml`},
+		row{command: `USER=other bash -c 'sed -i d ` + parent + `$USER/.defenseclaw/config.yaml'`},
+		row{command: `sed -i d ` + parent + `$USER/statealias`},
+		row{command: `sed -i d "$HOME"/statealias`},
+		// Per-user, the gateway reads the body in the child pass as the
+		// home spelling on the base as well; only the hook client map
+		// reading changed here.
+		row{command: `USER=other bash -c 'printf x > ` + parent + `$USER/statealias'`, perUserOff: true},
+		row{command: `USER=other bash -lc 'printf x > ` + parent + `$USER/statealias'`, perUserOff: true},
+		row{command: `env USER=other bash -c 'printf x > ` + parent + `$USER/statealias'`, perUserOff: true},
+	)
+	for _, connector := range []string{"claudecode", "codex"} {
+		for _, pack := range []string{"", "strict", "permissive"} {
+			for _, cell := range []struct{ managed, blind bool }{{false, false}, {true, false}, {true, true}} {
+				t.Run(fmt.Sprintf("%s/pack=%s/managed=%t/blind=%t", connector, pack, cell.managed, cell.blind), func(t *testing.T) {
+					for _, row := range rows {
+						// A strict pack fails closed once the home cannot be
+						// read (blind); ordinary rows are judged elsewhere.
+						if row.perUserOff && !cell.managed || !row.protected && pack == "strict" && cell.blind {
+							continue
+						}
+						got := postSelfProtectionPackCell(t, home, project, connector, pack, cell.managed, cell.blind, row.command)
+						if row.protected {
+							if !strings.HasPrefix(got, `{"action":"block"`) ||
+								!cell.blind && !strings.Contains(got, "tamper.detector_state_write") {
+								t.Errorf("%s = %.200s, want block tamper.detector_state_write", row.command, got)
+							}
+						} else if !strings.HasPrefix(got, `{"action":"allow"`) {
+							t.Errorf("%s = %.200s, want allow", row.command, got)
+						}
+					}
+				})
+			}
+		}
+	}
+}
