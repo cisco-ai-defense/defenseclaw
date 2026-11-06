@@ -4306,7 +4306,13 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		followStatus, _, statusErr := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs("status", windowsEnterpriseEnsureProbeOptions(opts)))
 		// A follow-up probe that cannot read the host leaves the completed
 		// repair as the result, exactly like a probe that failed to launch.
-		if statusErr == nil && !followStatus.probeFailed {
+		if statusErr == nil && !followStatus.probeFailed && !deferredActivation &&
+			windowsEnterpriseRecoveryRestoredOtherRelease(opts, followStatus) {
+			// The installed CLI recovered a transaction of another release
+			// and carries no payload to finish it: the rollback is the
+			// result, with the next step (rel-1-0-6 GAP-0649).
+			result.AddWarning("recovered_pending_transaction", windowsEnterpriseRolledBackMessage(followStatus.InstalledVersion))
+		} else if statusErr == nil && !followStatus.probeFailed {
 			followPlan, planErr := planWindowsEnterpriseEnsure(followStatus, opts, script)
 			if planErr != nil {
 				applyWindowsEnterpriseInstallerReport(result, opts, report, run)
@@ -4497,6 +4503,22 @@ func planWindowsEnterpriseEnsure(
 		return windowsEnterpriseEnsurePlan{Action: "upgrade", Reason: "drift:" + drift}, nil
 	}
 	return windowsEnterpriseEnsurePlan{Reason: "compliant"}, nil
+}
+
+// windowsEnterpriseRecoveryRestoredOtherRelease reports a pending-transaction
+// recovery by a run without a payload (the installed CLI: Remediate-Fix, an
+// MDM ensure) that restored a release other than this CLI's. The transaction
+// was that other release's change, cut off part way (rel-1-0-6 GAP-0649);
+// only its Setup can finish it, so planning the upgrade here can only fail.
+func windowsEnterpriseRecoveryRestoredOtherRelease(opts *windowsEnterpriseLifecycleOptions, status *windowsEnterpriseInstallerReport) bool {
+	if opts == nil || status == nil || !status.Installed || status.TransactionPending {
+		return false
+	}
+	if len(missingWindowsEnterpriseSources(opts)) == 0 {
+		return false
+	}
+	installed := strings.TrimSpace(status.InstalledVersion)
+	return installed != "" && compareWindowsEnterpriseVersions(opts.productVersion, installed) != 0
 }
 
 // windowsEnterpriseEnsureProbeFailure carries the failed status probe's own
