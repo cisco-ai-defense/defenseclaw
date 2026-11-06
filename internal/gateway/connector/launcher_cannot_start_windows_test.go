@@ -29,7 +29,7 @@ import (
 
 const (
 	// launcherStartChildEnv makes this test binary the launcher
-	// (defenseclaw-hook.exe) and the Codex guard (defenseclaw-hook-guard.exe)
+	// (defenseclaw-hook.exe) and the Codex and Devin guard (defenseclaw-hook-guard.exe)
 	// of TestWindowsHookCommandsAnswerALauncherThatCannotStart.
 	launcherStartChildEnv = "DEFENSECLAW_TEST_LAUNCHER_START_CHILD"
 	// launcherStartExitEnv is the exit status the stand-in launcher returns.
@@ -52,6 +52,9 @@ func init() {
 	case windowsHookGuardBinaryName:
 		if hookArgs, event, contract, ok := hookguard.SiblingArgv(os.Args[1:]); ok {
 			os.Exit(hookguard.RunCodex(hookguard.SiblingLauncher(self), hookArgs, event, contract, os.Stdin, os.Stdout, os.Stderr))
+		}
+		if hookArgs, event, ok := hookguard.DevinArgv(os.Args[1:]); ok {
+			os.Exit(hookguard.RunDevin(hookguard.SiblingLauncher(self), hookArgs, event, os.Stdin, os.Stdout, os.Stderr))
 		}
 		os.Exit(97)
 	case windowsHookBinaryName:

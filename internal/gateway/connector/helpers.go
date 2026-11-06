@@ -39,6 +39,7 @@ import (
 	"unicode"
 	"unicode/utf16"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookguard"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -500,12 +501,53 @@ func windowsHermesDirectHookCommand(binary string) string {
 }
 
 func windowsDevinBashHookCommand(binary string) string {
+	word := windowsDevinProgramWord(binary)
+	if word == "" {
+		return ""
+	}
+	return word + " " + nativeHookFlag + "devin"
+}
+
+// windowsDevinProgramWord is the first word of a Windows Devin command: the
+// absolute program path with forward slashes in single quotes, a quote in it
+// written as '\”; "" for a path Devin's words cannot carry.
+func windowsDevinProgramWord(binary string) string {
 	binary = strings.TrimSpace(binary)
 	if binary == "" || strings.ContainsAny(binary, "\"\x00\r\n") || !isWindowsAbsolutePath(binary) {
 		return ""
 	}
 	binary = strings.ReplaceAll(binary, `\`, "/")
-	return "'" + strings.ReplaceAll(binary, "'", `'\''`) + "' " + nativeHookFlag + "devin"
+	return "'" + strings.ReplaceAll(binary, "'", `'\''`) + "'"
+}
+
+// windowsDevinGuardedHookCommand is the per-user Windows Devin command of a
+// block event (hookguard.DevinBlockEvent) that starts the one-line install's
+// guard program, which starts the defenseclaw-hook.exe beside it and blocks
+// when that launcher cannot start (rel-1-0-6 GAP-0676):
+//
+//	'C:/Users/<u>/.local/bin/defenseclaw-hook-guard.exe' launcher-guard-devin <Event> hook --connector devin
+//
+// The same words as windowsDevinBashHookCommand, with the guard first.
+func windowsDevinGuardedHookCommand(guard, event string) string {
+	word := windowsDevinProgramWord(guard)
+	if word == "" || !hookguard.DevinBlockEvent(event) || !strings.EqualFold(filepath.Base(strings.ReplaceAll(guard, `\`, "/")), windowsHookGuardBinaryName) {
+		return ""
+	}
+	return word + " " + hookguard.DevinSubcommand + " " + event + " " + nativeHookFlag + "devin"
+}
+
+// windowsDevinOwnedHookCommands are the per-user Windows Devin commands of
+// launcher this release and its upgrade sources write: the direct start
+// every release writes, and the guarded start of each block event, whether
+// or not the guard program is still there.
+func windowsDevinOwnedHookCommands(launcher string) []string {
+	commands := []string{windowsDevinBashHookCommand(launcher)}
+	if guard := windowsSiblingGuardPath(launcher); guard != "" {
+		for _, event := range devinHookEvents {
+			commands = append(commands, windowsDevinGuardedHookCommand(guard, event))
+		}
+	}
+	return uniqueNonEmptyStrings(commands)
 }
 
 // defenseclawHookBinary returns the stable native HookRuntime launcher on
@@ -913,13 +955,26 @@ func windowsAntigravityHookCommand() string {
 // event to the trusted registration and passes it as a DefenseClaw launcher
 // argument. Unix retains agy's direct command-tokenization contract; Windows
 // uses the system PowerShell EncodedCommand bridge so GUI-subsystem launchers
-// are awaited and stdin/stdout remain attached. The PreToolUse bridge denies
-// the call when the launcher cannot start (antigravityLauncherStartAnswer,
-// rel-1-0-6 GAP-0676); releases before 1.0.9 rendered it without that answer
-// (windowsNativePowerShellHookCommandForEvent), which stays owned.
+// are awaited and stdin/stdout remain attached. It is the per-user render;
+// antigravityHookCommandForEvent renders a managed one.
 func antigravityHookInvocationCommandForEvent(goos, event, unixCommand string) string {
+	return antigravityHookCommandForEvent(goos, event, unixCommand, false)
+}
+
+// antigravityHookCommandForEvent is antigravityHookInvocationCommandForEvent
+// for a per-user or a managed install. On per-user Windows the PreToolUse
+// bridge denies the call when the launcher cannot start
+// (antigravityLauncherStartAnswer, rel-1-0-6 GAP-0676). A managed install
+// keeps the bridge without that answer, the form releases before 1.0.9
+// rendered everywhere (windowsNativePowerShellHookCommandForEvent), as Kiro
+// does: its guardian restores the launcher. Both forms stay owned.
+func antigravityHookCommandForEvent(goos, event, unixCommand string, managed bool) string {
 	if goos == "windows" {
-		return windowsAnsweringPowerShellHookCommand("antigravity", event, "", defenseclawHookBinary(), antigravityLauncherStartAnswer(event))
+		var answer *launcherStartAnswer
+		if !managed {
+			answer = antigravityLauncherStartAnswer(event)
+		}
+		return windowsAnsweringPowerShellHookCommand("antigravity", event, "", defenseclawHookBinary(), answer)
 	}
 	return strings.TrimSpace(unixCommand) + " " + event
 }
@@ -969,7 +1024,7 @@ func windowsNativePowerShellHookCommandForBoundEvent(connector, event, contractI
 // (windowsCodexPerUserHookCommands) while those releases are upgrade sources.
 func windowsCodexHookCommandForBinaryEvent(event, contractID, hookBinary string) string {
 	if codexLauncherStartAnswer(event, contractID) != nil {
-		if guard := windowsCodexLauncherGuard(hookBinary); guard != "" {
+		if guard := windowsSiblingLauncherGuard(hookBinary); guard != "" {
 			if command, ok := windowsCodexGuardedHookCommand(guard, event, contractID); ok {
 				return command
 			}
@@ -1468,10 +1523,8 @@ func isHermesDirectNativeHookCommand(command string) bool {
 
 func isDevinBashNativeHookCommand(command string) bool {
 	for _, hookBinary := range nativeHookBinaryOwnershipCandidates() {
-		for _, expected := range []string{
-			windowsDevinBashHookCommand(hookBinary),
-		} {
-			if expected != "" && command == expected {
+		for _, expected := range windowsDevinOwnedHookCommands(hookBinary) {
+			if command == expected {
 				return true
 			}
 		}

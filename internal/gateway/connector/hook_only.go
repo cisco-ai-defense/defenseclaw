@@ -2857,11 +2857,13 @@ func (c *hookOnlyConnector) patchConfig(opts SetupOpts, hookScript string) error
 			c.effectiveFailClosed(opts),
 		)
 	case "devin":
-		err = patchDevinHooks(path, hookScript, devinOwnedHookCommands(opts, hookScript)...)
+		err = patchDevinHooksForEvents(path, func(event string) string {
+			return devinHookCommandForEvent(runtime.GOOS, opts, hookScript, event)
+		}, devinOwnedHookCommands(opts, hookScript)...)
 	case "copilot":
 		err = patchCopilotHooksForOS(path, hookScript, c.copilotHookEvents(opts), runtime.GOOS)
 	case "antigravity":
-		err = patchAntigravityHooks(path, hookScript)
+		err = patchAntigravityHooksFor(path, hookScript, runtime.GOOS, opts.ManagedEnterprise)
 	default:
 		err = fmt.Errorf("unknown hook connector %q", c.name)
 	}
@@ -6063,6 +6065,12 @@ func patchAntigravityHooks(path, hookScript string) error {
 }
 
 func patchAntigravityHooksForOS(path, hookScript, goos string) error {
+	return patchAntigravityHooksFor(path, hookScript, goos, false)
+}
+
+// patchAntigravityHooksFor is patchAntigravityHooksForOS for a per-user or a
+// managed install (antigravityHookCommandForEvent).
+func patchAntigravityHooksFor(path, hookScript, goos string, managed bool) error {
 	if goos != "windows" && strings.IndexFunc(hookScript, unicode.IsSpace) >= 0 {
 		// Antigravity splits the command on whitespace and runs it directly.
 		// Shell metacharacters and Unicode letters do not need shell quoting.
@@ -6072,20 +6080,21 @@ func patchAntigravityHooksForOS(path, hookScript, goos string) error {
 	if err != nil {
 		return err
 	}
-	for key, value := range antigravityOwnedHookKeys(goos, hookScript) {
+	for key, value := range antigravityOwnedHookKeys(goos, hookScript, managed) {
 		cfg[key] = value
 	}
 	return writeJSONObject(path, cfg)
 }
 
 // antigravityOwnedHookKeys renders the outer keys DefenseClaw owns in
-// Antigravity's hooks.json, one per lifecycle event.
-func antigravityOwnedHookKeys(goos, hookScript string) map[string]interface{} {
+// Antigravity's hooks.json, one per lifecycle event, for a per-user or a
+// managed install.
+func antigravityOwnedHookKeys(goos, hookScript string, managed bool) map[string]interface{} {
 	keys := make(map[string]interface{}, len(antigravityLifecycleEvents))
 	for _, event := range antigravityLifecycleEvents {
 		handler := map[string]interface{}{
 			"type":    "command",
-			"command": antigravityHookInvocationCommandForEvent(goos, event, hookScript),
+			"command": antigravityHookCommandForEvent(goos, event, hookScript, managed),
 			"timeout": 30,
 		}
 		var handlers []interface{}

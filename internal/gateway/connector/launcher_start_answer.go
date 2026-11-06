@@ -29,7 +29,7 @@ import (
 //     direct form cannot carry) wraps its Process.Start (CreateProcess) and
 //     answers a start that throws, a Constrained Language start that never
 //     ran, and a launcher that ended with a Windows exception status (a
-//     corrupt image; hookguard.ExceptionStatus).
+//     corrupt image; the guard's siblingExceptionStatus).
 //   - The direct Codex line starts the one-line install's guard program,
 //     which does the same for Codex (hookguard.RunCodex); cmd.exe cannot see a
 //     start failure and hangs on an empty or truncated image.
@@ -112,15 +112,14 @@ func windowsAnsweringPowerShellHookCommand(connector, event, contractID, hookBin
 	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
 }
 
-// windowsCodexLauncherGuard returns the guard program the per-user Codex
-// command starts for launcher: defenseclaw-hook-guard.exe beside it (the
-// one-line install) when that is a regular file, else "". The installed full
-// hook and the gateway are not used. On a packaged install the stable
-// launcher already verifies the full hook and answers closed when it is
-// missing or damaged; as the first program Codex starts, its damage would let
-// the call run instead (REVIEW-g089 M1). Tests replace it.
-var windowsCodexLauncherGuard = func(launcher string) string {
-	guard := windowsCodexSiblingGuardPath(launcher)
+// windowsSiblingLauncherGuard returns the guard program the per-user Codex
+// and Devin commands start for launcher: defenseclaw-hook-guard.exe beside it
+// (the one-line install) when that is a regular file, else "". The installed
+// full hook and the gateway are never used as the guard: as the first program
+// the agent starts, their damage would let the call run (REVIEW-g089 M1).
+// Tests replace it.
+var windowsSiblingLauncherGuard = func(launcher string) string {
+	guard := windowsSiblingGuardPath(launcher)
 	if guard == "" {
 		return ""
 	}
@@ -130,10 +129,10 @@ var windowsCodexLauncherGuard = func(launcher string) string {
 	return ""
 }
 
-// windowsCodexSiblingGuardPath is defenseclaw-hook-guard.exe in the folder of
+// windowsSiblingGuardPath is defenseclaw-hook-guard.exe in the folder of
 // an absolute defenseclaw-hook.exe launcher, the program the guard argv
 // (hookguard.SiblingArgv) starts its launcher beside; otherwise "".
-func windowsCodexSiblingGuardPath(launcher string) string {
+func windowsSiblingGuardPath(launcher string) string {
 	if !hookguard.AbsoluteHookExecutable(launcher) {
 		return ""
 	}
@@ -174,10 +173,55 @@ func windowsCodexPerUserHookCommands(event, contractID, launcher string) []strin
 	if direct, ok := windowsCmdDirectHookCommand(launcher, nativeHookBridgeArguments("codex", event, contractID, nil)); ok {
 		commands = append(commands, direct)
 	}
-	if guard := windowsCodexSiblingGuardPath(launcher); guard != "" {
+	if guard := windowsSiblingGuardPath(launcher); guard != "" {
 		if guarded, ok := windowsCodexGuardedHookCommand(guard, event, contractID); ok {
 			commands = append(commands, guarded)
 		}
 	}
 	return uniqueNonEmptyStrings(commands)
+}
+
+// launcherStartAnswerHookForms are the per-user Windows hook commands of
+// launcher, by connector, that this release writes to answer a launcher that
+// cannot start (rel-1-0-6 GAP-0676) and that no release before 1.0.9 owns:
+// the Antigravity PreToolUse answering bridge, the Kiro answering bridge of
+// each surface, the Codex guarded start and answering bridge of each event
+// Codex can block, and the Devin guarded start of each block event. It is the
+// one place a connector-wide rollback stash or restore (GAP-0697, lane g697)
+// takes them from. Each connector's ownership list holds them too, the Codex,
+// Kiro and Devin rollback converters turn them into the earlier forms, and
+// Antigravity's entries are owned by their defenseclaw-antigravity-* key
+// (TestLauncherStartAnswerHookFormsAreOwnedAndConverted).
+func launcherStartAnswerHookForms(launcher string) map[string][]string {
+	forms := map[string][]string{
+		"antigravity": {windowsAnsweringPowerShellHookCommand("antigravity", "PreToolUse", "", launcher, antigravityLauncherStartAnswer("PreToolUse"))},
+		"kiro": {
+			windowsKiroHookCommandForBinary(launcher, "", false),
+			windowsKiroHookCommandForBinary(launcher, KiroHookSurfaceV3, false),
+		},
+	}
+	guard := windowsSiblingGuardPath(launcher)
+	for _, contract := range builtinHookContracts["codex"] {
+		for _, event := range contract.Events {
+			if codexLauncherStartAnswer(event, contract.ContractID) == nil {
+				continue
+			}
+			forms["codex"] = append(forms["codex"], windowsCodexAnsweringBridgeHookCommand(event, contract.ContractID, launcher))
+			if guard == "" {
+				continue
+			}
+			if guarded, ok := windowsCodexGuardedHookCommand(guard, event, contract.ContractID); ok {
+				forms["codex"] = append(forms["codex"], guarded)
+			}
+		}
+	}
+	for _, event := range devinHookEvents {
+		if guard != "" {
+			forms["devin"] = append(forms["devin"], windowsDevinGuardedHookCommand(guard, event))
+		}
+	}
+	for name, commands := range forms {
+		forms[name] = uniqueNonEmptyStrings(commands)
+	}
+	return forms
 }

@@ -142,6 +142,13 @@ func ownedHookCommandNeedlesFor(goos string, opts SetupOpts, conn Connector) []s
 			return uniqueNonEmptyStrings(needles)
 		case "antigravity":
 			return antigravityOwnedHookCommandsForOS(goos, hookScript)
+		case "devin":
+			if goos == "windows" {
+				// Every Windows Devin form DefenseClaw writes, the guarded
+				// start of the block events included (rel-1-0-6 GAP-0676),
+				// matched exactly.
+				return devinOwnedHookCommandsForOS(goos, opts, hookInvocationCommandFor(goos, "devin", hookScript))
+			}
 		}
 	}
 	if goos == "windows" {
@@ -567,7 +574,7 @@ func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document 
 		})
 	case "antigravity":
 		// Setup rewrites each DefenseClaw-owned outer key whole.
-		for key, rendered := range antigravityOwnedHookKeys(runtime.GOOS, hookCommand) {
+		for key, rendered := range antigravityOwnedHookKeys(runtime.GOOS, hookCommand, opts.ManagedEnterprise) {
 			if !sameHookJSON(document[key], rendered) {
 				return false
 			}

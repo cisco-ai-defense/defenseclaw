@@ -15,18 +15,18 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookguard"
 )
 
-// stubCodexLauncherGuard makes every launcher have the one-line guard
+// stubSiblingLauncherGuard makes every launcher have the one-line guard
 // program beside it (present) or none.
-func stubCodexLauncherGuard(t *testing.T, present bool) {
+func stubSiblingLauncherGuard(t *testing.T, present bool) {
 	t.Helper()
-	saved := windowsCodexLauncherGuard
-	windowsCodexLauncherGuard = func(launcher string) string {
+	saved := windowsSiblingLauncherGuard
+	windowsSiblingLauncherGuard = func(launcher string) string {
 		if !present {
 			return ""
 		}
-		return windowsCodexSiblingGuardPath(launcher)
+		return windowsSiblingGuardPath(launcher)
 	}
-	t.Cleanup(func() { windowsCodexLauncherGuard = saved })
+	t.Cleanup(func() { windowsSiblingLauncherGuard = saved })
 }
 
 func pinWindowsSystemDirectoryForTest(t *testing.T) {
@@ -91,7 +91,7 @@ func TestCodexPerUserCommandStartsTheGuardOnTheEventsCodexCanBlock(t *testing.T)
 			direct, _ := windowsCmdDirectHookCommand(launcher, args)
 			guarded := windowsSystemCmdExe() + ` /d /v:off /c "` + guard + `" ` + hookguard.SiblingSubcommand + " " + strings.Join(args, " ")
 			blocks := hookguard.CodexBlock(event, contract.ContractID, "m") != nil
-			stubCodexLauncherGuard(t, true)
+			stubSiblingLauncherGuard(t, true)
 			got := windowsCodexHookCommandForBinaryEvent(event, contract.ContractID, launcher)
 			if blocks && got != guarded || !blocks && got != direct {
 				t.Fatalf("%s %s with the guard: %q; want guarded=%v", contract.ContractID, event, got, blocks)
@@ -99,7 +99,7 @@ func TestCodexPerUserCommandStartsTheGuardOnTheEventsCodexCanBlock(t *testing.T)
 			if _, owned := nativeHookExactCommands([]string{launcher})[got]; !owned {
 				t.Fatalf("%s %s: %q is not owned", contract.ContractID, event, got)
 			}
-			stubCodexLauncherGuard(t, false)
+			stubSiblingLauncherGuard(t, false)
 			if got := windowsCodexHookCommandForBinaryEvent(event, contract.ContractID, launcher); got != direct {
 				t.Fatalf("%s %s without the guard: %q; want the direct start", contract.ContractID, event, got)
 			}
@@ -122,7 +122,7 @@ func TestCodexPerUserCommandStartsTheGuardOnTheEventsCodexCanBlock(t *testing.T)
 	// A launcher path cmd.exe cannot carry keeps the bridge, which answers a
 	// launcher that cannot start on an event Codex can block.
 	const odd = `C:\Users\a(1)\.local\bin\defenseclaw-hook.exe`
-	stubCodexLauncherGuard(t, true)
+	stubSiblingLauncherGuard(t, true)
 	bridge := windowsCodexHookCommandForBinaryEvent("UserPromptSubmit", "codex-hooks-v4", odd)
 	script := decodePowerShellEncodedCommandForTest(t, bridge)
 	if !strings.Contains(script, `'{"decision":"block","reason":"DefenseClaw blocked this: its Codex hook launcher cannot start.`) {
@@ -138,7 +138,7 @@ func TestCodexPerUserCommandStartsTheGuardOnTheEventsCodexCanBlock(t *testing.T)
 // back (rel-1-0-6 GAP-0676, the GAP-1284 rule).
 func TestCodexRollbackConvertsTheGuardedStartToTheEarlierBridgeAndBack(t *testing.T) {
 	pinWindowsSystemDirectoryForTest(t)
-	stubCodexLauncherGuard(t, true)
+	stubSiblingLauncherGuard(t, true)
 	const launcher = `C:\Users\dcw std1\.local\bin\defenseclaw-hook.exe`
 	const contract = "codex-hooks-v4"
 	dir := t.TempDir()
@@ -213,4 +213,155 @@ func TestCodexRollbackConvertsTheGuardedStartToTheEarlierBridgeAndBack(t *testin
 	if !bytes.Contains(restored, []byte(hookguard.SiblingSubcommand)) {
 		t.Fatalf("restore did not put the guarded start back:\n%s", restored)
 	}
+}
+
+// Every hook form this release added for a launcher that cannot start
+// (launcherStartAnswerHookForms) is owned by its connector, so setup
+// rewrites it and teardown removes it, and the Codex, Kiro and Devin forms
+// are the ones their rollback converters turn into the earlier form. The
+// Antigravity form is owned by its key, which the connector-wide rollback
+// cleanup (GAP-0697) reads (rel-1-0-6 GAP-0676).
+func TestLauncherStartAnswerHookFormsAreOwnedAndConverted(t *testing.T) {
+	pinWindowsSystemDirectoryForTest(t)
+	const launcher = `C:\Users\dcw std1\.local\bin\defenseclaw-hook.exe`
+	setHookBinaryOverride(t, launcher)
+	forms := launcherStartAnswerHookForms(launcher)
+	if len(forms) != 4 || len(forms["antigravity"]) != 1 || len(forms["kiro"]) != 2 || len(forms["devin"]) != 3 || len(forms["codex"]) == 0 {
+		t.Fatalf("forms = %d connectors (antigravity %d, kiro %d, codex %d, devin %d)", len(forms),
+			len(forms["antigravity"]), len(forms["kiro"]), len(forms["codex"]), len(forms["devin"]))
+	}
+	contains := func(list []string, command string) bool {
+		for _, item := range list {
+			if item == command {
+				return true
+			}
+		}
+		return false
+	}
+	for _, command := range forms["antigravity"] {
+		if command != antigravityHookInvocationCommandForEvent("windows", "PreToolUse", "") ||
+			!contains(antigravityOwnedHookCommandsForOS("windows", ""), command) {
+			t.Fatal("the Antigravity form is not the per-user PreToolUse render, or is not owned")
+		}
+	}
+	kiroPairs := kiroWindowsHookFormPairs([]string{launcher})
+	for _, command := range forms["kiro"] {
+		converted := false
+		for _, pair := range kiroPairs {
+			converted = converted || pair[0] == command
+		}
+		if !converted || !contains(kiroWindowsOwnedHookCommands(), command) {
+			t.Fatalf("a Kiro form is not owned (%v) or not converted (%v)", contains(kiroWindowsOwnedHookCommands(), command), converted)
+		}
+	}
+	for _, command := range forms["codex"] {
+		found := false
+		for _, contract := range builtinHookContracts["codex"] {
+			for _, event := range contract.Events {
+				if !contains(windowsCodexPerUserHookCommands(event, contract.ContractID, launcher), command) {
+					continue
+				}
+				bridge, ok := codexWindowsHookFormReplacement(command, event, launcher, true)
+				if ok && bridge == windowsNativePowerShellHookCommandForCodexEvent(event, contract.ContractID, launcher) {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("a Codex form is not owned and converted: %.120q", command)
+		}
+	}
+	devinOwned := devinOwnedHookCommandsForOS("windows", SetupOpts{}, "")
+	devinPairs := devinWindowsHookFormPairs([]string{launcher}, false)
+	for _, command := range forms["devin"] {
+		converted := false
+		for _, pairs := range devinPairs {
+			for _, pair := range pairs {
+				converted = converted || pair[0] == command
+			}
+		}
+		if !converted || !contains(devinOwned, command) || !isDevinBashNativeHookCommand(command) {
+			t.Fatalf("the Devin form %q is not owned or not converted", command)
+		}
+	}
+}
+
+// A managed (standalone) Windows Antigravity install keeps the PreToolUse
+// bridge without the launcher-start answer, the form every release before
+// 1.0.9 rendered, as managed Kiro does; per-user PreToolUse answers. Setup
+// writes the managed form, and both stay owned (REVIEW-g676 S2).
+func TestAntigravityManagedKeepsTheEarlierBridge(t *testing.T) {
+	pinWindowsSystemDirectoryForTest(t)
+	setHookBinaryOverride(t, `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`)
+	owned := antigravityOwnedHookCommandsForOS("windows", "")
+	isOwned := func(command string) bool {
+		for _, item := range owned {
+			if item == command {
+				return true
+			}
+		}
+		return false
+	}
+	for _, event := range antigravityLifecycleEvents {
+		earlier := windowsNativePowerShellHookCommandForEvent("antigravity", event, defenseclawHookBinary())
+		managed := antigravityHookCommandForEvent("windows", event, "", true)
+		perUser := antigravityHookCommandForEvent("windows", event, "", false)
+		if managed != earlier {
+			t.Fatalf("%s: the managed command is not the earlier bridge", event)
+		}
+		if (event == "PreToolUse") == (perUser == earlier) {
+			t.Fatalf("%s: per-user answers = %v, want it only on PreToolUse", event, perUser != earlier)
+		}
+		if perUser != antigravityHookInvocationCommandForEvent("windows", event, "") || !isOwned(managed) || !isOwned(perUser) {
+			t.Fatalf("%s: the per-user or managed form is not owned", event)
+		}
+	}
+	for _, managed := range []bool{false, true} {
+		path := filepath.Join(t.TempDir(), "hooks.json")
+		if err := patchAntigravityHooksFor(path, "", "windows", managed); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := readJSONObject(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		key, _ := cfg[antigravityOwnedHookKeyPrefix+"pretooluse"].(map[string]interface{})
+		groups, _ := key["PreToolUse"].([]interface{})
+		group, _ := groups[0].(map[string]interface{})
+		handlers, _ := group["hooks"].([]interface{})
+		handler, _ := handlers[0].(map[string]interface{})
+		if got, want := handler["command"], antigravityHookCommandForEvent("windows", "PreToolUse", "", managed); got != want {
+			t.Fatalf("managed=%v: Setup wrote %.80q, want %.80q", managed, got, want)
+		}
+	}
+}
+
+// Kiro starts its command through cmd.exe (cmd.exe /d /c, and Node adds
+// cmd.exe /d /s /c "..."), whose command line holds at most 8191
+// characters. The encoded bridge grows by about 5.3 characters per launcher
+// path character, so it must fit with room to spare on a long profile path
+// (REVIEW-g676 L2).
+func TestKiroWindowsCommandFitsTheCmdExeLimitOnALongProfilePath(t *testing.T) {
+	pinWindowsSystemDirectoryForTest(t)
+	const cmdExeLimit, wrapper = 8191, 256
+	profile := `C:\Users\` + strings.Repeat("d", 48) + ".CONTOSO-ENTERPRISE-0001"
+	launcher := profile + `\.local\bin\defenseclaw-hook.exe`
+	if len(launcher) < 100 {
+		t.Fatalf("launcher path is only %d characters", len(launcher))
+	}
+	short := windowsKiroHookCommandForBinary(`C:\Users\a\.local\bin\defenseclaw-hook.exe`, KiroHookSurfaceV3, false)
+	for _, surface := range []string{"", KiroHookSurfaceV3} {
+		for _, managed := range []bool{false, true} {
+			command := windowsKiroHookCommandForBinary(launcher, surface, managed)
+			if len(command)+wrapper > cmdExeLimit {
+				t.Fatalf("surface %q managed=%v: %d characters with a %d-character launcher path; cmd.exe takes %d with the wrapper",
+					surface, managed, len(command), len(launcher), cmdExeLimit-wrapper)
+			}
+		}
+	}
+	perCharacter := float64(len(windowsKiroHookCommandForBinary(launcher, KiroHookSurfaceV3, false))-len(short)) /
+		float64(len(launcher)-len(`C:\Users\a\.local\bin\defenseclaw-hook.exe`))
+	t.Logf("Kiro v3 per-user command: %d characters on a %d-character path, %.1f per path character; headroom %d path characters",
+		len(windowsKiroHookCommandForBinary(launcher, KiroHookSurfaceV3, false)), len(launcher), perCharacter,
+		int(float64(cmdExeLimit-wrapper-len(windowsKiroHookCommandForBinary(launcher, KiroHookSurfaceV3, false)))/perCharacter))
 }
