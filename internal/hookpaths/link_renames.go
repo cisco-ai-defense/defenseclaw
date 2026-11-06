@@ -261,7 +261,7 @@ func (l *shellLinks) followRenames(ops []renameOp, userView bool) bool {
 					if alias.text != "" {
 						target = filepath.Dir(name) + string(filepath.Separator) + alias.text
 					}
-					l.aliases = append(l.aliases, linkAlias{name: name, target: target, text: alias.text})
+					l.aliases = append(l.aliases, linkAlias{name: name, target: target, text: alias.text, sourcePath: alias.sourcePath, copiedSource: alias.copiedSource})
 				}
 			}
 		}

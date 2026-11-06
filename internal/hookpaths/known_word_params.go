@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -128,9 +129,12 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 	if file == nil || !mayHaveKnownCopyWord(command) {
 		return nil, nil
 	}
-	safe := func(value string) bool {
+	safeValue := func(value string) bool {
 		return value != "" && !strings.HasPrefix(value, "-") &&
-			!strings.ContainsAny(value, " \t\r\n*?[]{}$`\\\"'()|&;<>!~#=,\x00")
+			!strings.ContainsAny(value, "\r\n*?[]{}$`\\\"'()|&;<>!~#=,\x00")
+	}
+	safePlain := func(value string) bool {
+		return safeValue(value) && !strings.ContainsAny(value, " \t")
 	}
 	type loop struct {
 		from, to uint
@@ -247,7 +251,7 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 				return "", false
 			}
 			value, fixed := StaticWord(assign.Value, home)
-			return value, fixed && safe(value)
+			return value, fixed && safeValue(value)
 		}
 		return "", false
 	}
@@ -296,7 +300,7 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 			if node.Value != nil {
 				value, fixed = StaticWord(node.Value, home)
 			}
-			if node.Append || node.Naked || node.Array != nil || node.Index != nil || !fixed || !safe(value) {
+			if node.Append || node.Naked || node.Array != nil || node.Index != nil || !fixed || !safeValue(value) {
 				unsafeNames[name] = true
 			}
 			bind(name, value)
@@ -320,7 +324,7 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 				if !fixed {
 					value, fixed = priorLoopWord(node, item)
 				}
-				if !fixed || !safe(value) {
+				if !fixed || !safeValue(value) {
 					unsafeNames[name] = true
 				}
 				bind(name, value)
@@ -341,6 +345,19 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 				break
 			}
 			program, static := literalProgramWord(node.Args[0], home)
+			if static && programBase(program) == "env" {
+				words, fixed := make([]string, len(node.Args)), make([]bool, len(node.Args))
+				for i, arg := range node.Args {
+					words[i], fixed[i] = StaticWord(arg, home)
+				}
+				if run, ok := actionfacts.StaticPrefixWrapperChild(words, fixed); ok &&
+					run.Index < len(words) && fixed[run.Index] && !run.DirUnknown && !run.ChangesResolution &&
+					slices.Contains(knownWordPrograms, programBase(words[run.Index])) {
+					// The shell expands the parameter before this fixed wrapper
+					// runs its child; the child cannot rebind the shell value.
+					break
+				}
+			}
 			if static && program == "cd" && staticDirectoryCall(node, home) || node == leadingPushd {
 				// A fixed directory change does not rebind an accepted
 				// parameter word (rel-1-0-6:GAP-0320, GAP-0362).
@@ -469,7 +486,7 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 			if len(word.Parts) == 2 {
 				lit, isLit := word.Parts[1].(*syntax.Lit)
 				if !isLit || (!strings.HasPrefix(lit.Value, "/") && !strings.HasPrefix(lit.Value, ".")) ||
-					!safe(strings.ReplaceAll(lit.Value, "/", "x")) {
+					!safePlain(strings.ReplaceAll(lit.Value, "/", "x")) {
 					continue
 				}
 				suffix = lit.Value
@@ -505,12 +522,20 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 			for _, body := range loops[name] {
 				known = known || at > body.from && at < body.to
 			}
-			if known {
-				if !quoted && suffix == "" {
+			if known && !quoted && suffix == "" {
+				plain := true
+				for value := range bound[name] {
+					plain = plain && safePlain(value)
+				}
+				if plain {
 					uses[word] = true
 				}
-				if len(bound[name]) == 1 {
-					for value := range bound[name] {
+			}
+			if known && len(bound[name]) == 1 {
+				for value := range bound[name] {
+					// A quoted parameter stays one argv word with blanks.
+					// An unquoted value may split into several words.
+					if quoted || safePlain(value) {
 						values[word] = value + suffix
 					}
 				}

@@ -2270,7 +2270,7 @@ var (
 // text is the target a relative symbolic link stores, read from the link
 // directory, so a move of the link names another target; it is empty when
 // the target does not depend on where the link sits.
-type linkAlias struct{ name, target, text string }
+type linkAlias struct{ name, target, text, sourcePath, copiedSource string }
 
 // shellLinks are the links one shell command creates. known is false when
 // link names or operands are dynamic or an archive can extract links. opaque
@@ -3122,7 +3122,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 					treeCopies = append(treeCopies, cpTreeCopy(words[1:], static[1:], dir, destination))
 					diskLink := cpDiskSymlink(words[1:], static[1:], dir, home, facts, record)
 					copied, readable := linkOnlyCopyOperands(words[1:], static[1:], dir)
-					readable = readable && !option && !dynamic && !nested && movedDir == "" && len(callDirs) == 1
+					readable = readable && !option && !dynamic && !nested && len(callDirs) == 1
 					diskRead := false
 					if diskLink {
 						if cpOperands(words[1:], static[1:]).dereference && destination != "" {
@@ -4333,6 +4333,35 @@ func (l Links) HasAliases() bool {
 	return len(l.links.aliases) > 0
 }
 
+// LinkNamesProtectedSource reports a link operation whose source operand
+// names a protected SSH path in the directory where the operation runs.
+// Copied disk links do not add source operands of their own.
+func (l Links) LinkNamesProtectedSource(home string, memo *TargetMemo) bool {
+	for _, alias := range l.links.aliases {
+		if alias.sourcePath != "" && ProtectedSSHReach(alias.sourcePath, home, memo) == GradeNamed {
+			return true
+		}
+	}
+	return false
+}
+
+// CopiedSourceReachesProtected reports a write through a copied link whose
+// inspected source reached an SSH path. Copying the link alone is ordinary;
+// the source identity matters when a later write uses its copied name.
+func (l Links) CopiedSourceReachesProtected(path, home string, memo *TargetMemo) bool {
+	path = linksDrivePath(path)
+	for _, alias := range l.links.aliases {
+		if alias.copiedSource == "" {
+			continue
+		}
+		if _, under := cutPathPrefix(path, alias.name); under &&
+			ProtectedSSHReach(alias.copiedSource, home, memo) == GradeNamed {
+			return true
+		}
+	}
+	return false
+}
+
 // AliasTargets returns the names path reaches through the links the
 // command creates, read lexically (the links do not exist yet when the
 // hook runs): ln -s ~/.defenseclaw hc makes <cwd>/hc/config.yaml name
@@ -5040,6 +5069,14 @@ func (l *shellLinks) copyDiskLinks(copied linkCopy) bool {
 			names = append(names, filepath.Join(copied.destination, filepath.Base(source)))
 		}
 		for _, link := range copied.diskLinks[i] {
+			sourceName := source
+			if link.rest != "" {
+				sourceName = filepath.Join(source, link.rest)
+			}
+			copiedSource := link.text
+			if !filepath.IsAbs(copiedSource) {
+				copiedSource = filepath.Join(filepath.Dir(sourceName), copiedSource)
+			}
 			for _, base := range names {
 				name := base
 				if link.rest != "" {
@@ -5049,10 +5086,10 @@ func (l *shellLinks) copyDiskLinks(copied linkCopy) bool {
 				if !filepath.IsAbs(target) {
 					target, text = filepath.Dir(name)+string(filepath.Separator)+link.text, link.text
 				}
-				made = append(made, linkAlias{name: name, target: target, text: text})
+				made = append(made, linkAlias{name: name, target: target, text: text, copiedSource: copiedSource})
 				if dir, ok := resolveWritePath(filepath.Dir(name), 0); ok {
 					if resolved := filepath.Join(dir, filepath.Base(name)); resolved != name {
-						made = append(made, linkAlias{name: resolved, target: target, text: text})
+						made = append(made, linkAlias{name: resolved, target: target, text: text, copiedSource: copiedSource})
 					}
 				}
 			}
@@ -5146,10 +5183,10 @@ func (l *shellLinks) copyLinks(copied linkCopy, facts map[string]string) bool {
 				if from.text != "" {
 					target = filepath.Dir(name) + string(filepath.Separator) + from.text
 				}
-				made = append(made, linkAlias{name: name, target: target, text: from.text})
+				made = append(made, linkAlias{name: name, target: target, text: from.text, copiedSource: from.target})
 				if dir, ok := resolveWritePath(filepath.Dir(name), 0); ok {
 					if resolved := filepath.Join(dir, filepath.Base(name)); resolved != name {
-						made = append(made, linkAlias{name: resolved, target: target, text: from.text})
+						made = append(made, linkAlias{name: resolved, target: target, text: from.text, copiedSource: from.target})
 					}
 				}
 			}
@@ -6053,10 +6090,11 @@ func (l *shellLinks) record(source, name string, literal, symbolic bool, cwd str
 			text = relative
 		}
 	}
-	l.aliases = append(l.aliases, linkAlias{name: name, target: target, text: text})
+	sourcePath := absolutePath(source, cwd)
+	l.aliases = append(l.aliases, linkAlias{name: name, target: target, text: text, sourcePath: sourcePath})
 	if dir, ok := resolveWritePath(filepath.Dir(name), 0); ok {
 		if resolved := filepath.Join(dir, filepath.Base(name)); resolved != name {
-			l.aliases = append(l.aliases, linkAlias{name: resolved, target: target, text: text})
+			l.aliases = append(l.aliases, linkAlias{name: resolved, target: target, text: text, sourcePath: sourcePath})
 		}
 	}
 }
