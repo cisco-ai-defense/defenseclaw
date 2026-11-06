@@ -41940,9 +41940,14 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -Report $codexRemoval
         }
         # Secure Client keeps its validate-only config check (issue #1092).
+        # The approved source this run installed as config.yaml (CONFIG=):
+        # the sha256 its source descriptor recorded, '' without one (GAP-0646).
         $approvedConfigSHA256 = ''
-        if ($Sources.ContainsKey('config')) {
-            $approvedConfigSHA256 = ([string]$Sources['config'].sha256).ToLowerInvariant()
+        if ($Sources.ContainsKey('config') -and $Sources['config'] -is [System.Collections.IDictionary]) {
+            $approvedConfigSHA256 = ([string]$Sources['config']['sha256']).ToLowerInvariant()
+        }
+        if ($approvedConfigSHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            $approvedConfigSHA256 = ''
         }
         Assert-DefenseClawInstalledConfig -Layout $Layout -GatewayServiceName $GatewayServiceName `
             -RecordLifecycle:(-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) `

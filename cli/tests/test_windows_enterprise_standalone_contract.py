@@ -2591,9 +2591,10 @@ def test_the_config_step_records_over_a_hand_edit_only_for_this_runs_config_sour
     assert module.count("-ApprovedConfigSHA256") == 1
     install = _function_body(module, "Invoke-DefenseClawInstallLikeLifecycle")
     call = install.index("-ApprovedConfigSHA256 $approvedConfigSHA256")
-    source = install.rindex("$approvedConfigSHA256 = ''", 0, call)
+    source = install.rindex("# The approved source this run installed as config.yaml (CONFIG=):", 0, call)
     block = install[source:call]
-    assert "if ($Sources.ContainsKey('config')) {" in block
-    assert "$approvedConfigSHA256 = ([string]$Sources['config'].sha256).ToLowerInvariant()" in block
+    assert "if ($Sources.ContainsKey('config') -and $Sources['config'] -is [System.Collections.IDictionary]) {" in block
+    assert "$approvedConfigSHA256 = ([string]$Sources['config']['sha256']).ToLowerInvariant()" in block
+    assert "if ($approvedConfigSHA256 -cnotmatch '^[0-9a-f]{64}$') {" in block
     assert "-RecordLifecycle:(-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout))" in block
     assert "config.generation.json" not in block and "Get-FileHash" not in block
