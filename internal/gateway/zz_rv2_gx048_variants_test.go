@@ -113,6 +113,7 @@ func TestRV2GX048Variants(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+
 	S := filepath.ToSlash
 	w := func(p, c string) map[string]any { return map[string]any{"file_path": p, "content": c} }
 	e := func(p, o, n string) map[string]any {
@@ -253,6 +254,9 @@ func TestRV2GX048Variants(t *testing.T) {
 	}
 	counts := map[string]int{}
 	for _, r := range rows {
+		if os.Getenv("GX048_ONLY_D") == "1" && !strings.HasPrefix(r.id, "D") {
+			continue
+		}
 		for _, profile := range []string{"default", "strict"} {
 			got := func() (out string) {
 				defer func() {
@@ -294,6 +298,12 @@ func TestRV2GX048Variants(t *testing.T) {
 				}
 			}
 			t.Logf("RV2 %s %s | %s | got=%s want=%s | %s", status, profile, r.id, action, want, rule)
+			if strings.HasPrefix(r.id, "E05") && strings.Contains(got, "PANIC") {
+				t.Errorf("%s %s: handler panicked", profile, r.id)
+			}
+			if (strings.HasPrefix(r.id, "D") || strings.HasPrefix(r.id, "X18")) && status != "ok" && status != "INFO" {
+				t.Errorf("%s %s: got %s, want %s", profile, r.id, action, want)
+			}
 		}
 	}
 	t.Logf("RV2 COUNTS %v", counts)
