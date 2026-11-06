@@ -464,9 +464,15 @@ func TestUncertainObserveProfileUsesDefaultWithoutProvenAssignment(t *testing.T)
 		t.Fatal("fixture: uncertain profile does not act on the hook")
 	}
 	got := acting.selectProfile(&subject, resolveIdentity(&subject, nil), profileSubjectVerified, "codex", nil, profilePathHook, "")
-	if !slices.Equal(got.Unproven, []string{"account:unknown"}) || !strings.Contains(got.Refused, "account holder is unconfirmed") {
-		t.Fatalf("uncertain enforcing assignment = %+v; want account-only refusal", got)
+	if got.Name != "watch" || got.Refused != "" || !slices.Equal(got.Unproven, []string{"account:unknown"}) {
+		t.Fatalf("default-tier uncertain enforcing assignment = %+v; want warned default", got)
 	}
+	cfg.Guardrail.RulePack = "strict"
+	got = acting.selectProfile(&subject, resolveIdentity(&subject, nil), profileSubjectVerified, "codex", nil, profilePathHook, "")
+	if !slices.Equal(got.Unproven, []string{"account:unknown"}) || !strings.Contains(got.Refused, "account holder is unconfirmed") {
+		t.Fatalf("strict-tier uncertain enforcing assignment = %+v; want account-only refusal", got)
+	}
+	cfg.Guardrail.RulePack = ""
 	// The fallback itself may act. An uncertain observe profile could weaken
 	// it, so their different enforcement still needs the account fact.
 	cfg.Guardrail.Profiles["watch"] = config.GuardrailProfile{Mode: "action"}

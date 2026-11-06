@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -410,17 +411,35 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 		proven, _ = set.meetOf(compactProfiles(matched), scans)
 	}
 	var needed []string
+	var uncoveredMaybe []string
 	for i, name := range maybe {
 		if set.provenProfileCovers(proven, name, scans, path) &&
 			(len(yes) > 0 || name == proven ||
 				(path != profilePathAny && set.provenProfileCovers(name, proven, scans, path))) {
 			continue
 		}
+		uncoveredMaybe = append(uncoveredMaybe, name)
 		for _, fact := range maybeNeeds[i] {
 			if !slices.Contains(needed, fact) {
 				needed = append(needed, fact)
 			}
 		}
+	}
+	// A per-user gateway can prove its process groups while only root can
+	// confirm that SSSD has no second holder of its uid. When this is the
+	// sole missing fact and the unproven profile differs only in its hook
+	// threshold, the OSS default and permissive tiers use their configured
+	// default on hook decisions and pathless explanations. Inspection, a
+	// different sandbox, or a different rule pack still needs account proof.
+	// Strict and managed installs keep their proof requirement.
+	if verified && subject.holderUnproven && !subject.LookupFailed &&
+		path != profilePathInspect && len(yes) == 0 && slices.Equal(needed, []string{"account:unknown"}) &&
+		set.base != nil && !managed.IsManagedEnterprise(set.base.DeploymentMode) &&
+		set.base.HookPolicyTierForConnector(connectorName) != config.HookPolicyTierStrict &&
+		set.unconfirmedHolderOnlyTightensHook(uncoveredMaybe, connectorName) {
+		decision := set.decision(set.defaultProfile, profileMatchDefaultLookupFailed, "", source)
+		decision.Unproven = []string{"account:unknown"}
+		return decision
 	}
 	if !verified || len(needed) == 0 {
 		// No assignment depends on a fact that is not proven: the profiles
@@ -486,6 +505,24 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	decision.Candidates = candidates
 	decision.Refused = set.identityUncertaintyReason(subject, decision.Unproven, connectorName, agent)
 	return decision
+}
+
+// unconfirmedHolderOnlyTightensHook allows the OSS default when an
+// unconfirmed named account could select a stricter hook threshold but no
+// different rule pack or sandbox floor. Those latter controls need proof.
+func (set *guardrailProfileSet) unconfirmedHolderOnlyTightensHook(names []string, connectorName string) bool {
+	if len(names) == 0 {
+		return false
+	}
+	for _, name := range names {
+		if !set.profileStricter(name, set.defaultProfile, connectorName) ||
+			!reflect.DeepEqual(set.profileSandbox(name), set.profileSandbox(set.defaultProfile)) ||
+			!set.scansRulePacksOf(set.defaultProfile, name, connectorName, profilePathAny) ||
+			!set.scansRulePacksOf(name, set.defaultProfile, connectorName, profilePathAny) {
+			return false
+		}
+	}
+	return true
 }
 
 // orderedFacts is facts in a fixed order: account, upn, groups, the
