@@ -71,6 +71,10 @@ func TestGAP0574HermesBlockTextVariants(t *testing.T) {
 		if !strings.HasPrefix(message, "DefenseClaw blocked this call: "+hookOversizeUninspectedRuleID+": ") {
 			t.Fatalf("bounded-review block text=%q", message)
 		}
+		secure := oversizeUninspectedHookResponse(profile, req, "action", agentHookResponse{Action: "allow", RawAction: "allow"}, true)
+		if secure.Reason != oversizeUninspectedReason || secure.HookOutput["reason"] != oversizeUninspectedReason {
+			t.Fatalf("Secure Client bounded-review text changed: %q / %v", secure.Reason, secure.HookOutput["reason"])
+		}
 	})
 	t.Run("conflicting-event", func(t *testing.T) {
 		api := &APIServer{}

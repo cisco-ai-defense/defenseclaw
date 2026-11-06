@@ -1051,7 +1051,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// already warns and audits its own finding).
 			// The field only tightens a verdict, so any sender may set it.
 			if mode := a.agentHookMode(ctx, connectorName); resp.Action == "allow" || mode == "action" {
-				resp = oversizeUninspectedHookResponse(profile, req, mode, resp)
+				secureClient := false
+				if cfg := a.decisionConfig(ctx); cfg != nil {
+					secureClient = cfg.SecureClientIntegration()
+				}
+				resp = oversizeUninspectedHookResponse(profile, req, mode, resp, secureClient)
 			}
 		}
 		if payload["bounded_prefix_review"] == true && (resp.Action == "allow" || resp.Action == "alert") {
@@ -3725,7 +3729,8 @@ func oversizeUninspectedPayload(payload map[string]any) bool {
 // in the connector's mode: observe warns and audits, action blocks. A
 // would-block finding the gateway made on the bounded review (observe mode)
 // stays in the answer and the audit row next to it.
-func oversizeUninspectedHookResponse(profile connector.HookProfile, req agentHookRequest, mode string, prior agentHookResponse) agentHookResponse {
+// The caller supplies the verified Secure Client setting when available.
+func oversizeUninspectedHookResponse(profile connector.HookProfile, req agentHookRequest, mode string, prior agentHookResponse, secureClient ...bool) agentHookResponse {
 	action, wouldBlock := mapHookActionForProfile("block", mode, req.HookEventName, profile.Capabilities, profile, req.Payload)
 	findings, ruleIDs := []string{hookOversizeUninspectedRuleID}, []string{hookOversizeUninspectedRuleID}
 	if prior.WouldBlock || prior.RawAction == "block" {
@@ -3735,6 +3740,9 @@ func oversizeUninspectedHookResponse(profile connector.HookProfile, req agentHoo
 	resp := agentHookResponseForProfile(profile, req, action, "block", "HIGH", oversizeUninspectedReason,
 		findings, mode, wouldBlock, profile.Capabilities)
 	resp.RuleIDs = ruleIDs
+	if len(secureClient) > 0 && secureClient[0] {
+		return resp
+	}
 	return hermesBlockText(req, resp)
 }
 
