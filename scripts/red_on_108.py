@@ -103,7 +103,17 @@ def classify_test_result(command: list[str], returncode: int, output: str) -> st
     if any(marker in output.lower() for marker in infrastructure):
         return "COMPILE_ONLY"
     if "go" in command and "--- FAIL:" in output:
-        return "BEHAVIOR_RED"
+        # A Go FAIL marker also follows setup errors inside a test. Only a
+        # concrete before/after assertion is evidence of changed behaviour.
+        assertions = (
+            r"\bgot\b[^\n]{0,240}\bwant\b",
+            r"\bwant\b[^\n]{0,240}\bgot\b",
+            r"\bexpected\b[^\n]{0,240}\b(?:got|observed|actual)\b",
+            r"\b(?:got|observed|actual)\b[^\n]{0,240}\bexpected\b",
+        )
+        if any(re.search(pattern, output, re.IGNORECASE) for pattern in assertions):
+            return "BEHAVIOR_RED"
+        return "UNCLASSIFIED_FAIL"
     if "pytest" in command and (
         "AssertionError" in output or "Failed: DID NOT RAISE" in output or re.search(r"(?m)^E\s+assert\b", output)
     ):
