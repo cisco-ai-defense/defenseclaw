@@ -21,9 +21,8 @@ import (
 // drive (/c/...). windowsOnly rows spell what only Windows reads.
 type claudeBashParityRow struct {
 	name, command string
-	// block: the row writes the keys file (the default profile alerts).
-	block       bool
-	windowsOnly bool
+	block         bool
+	windowsOnly   bool
 }
 
 // judgeClaudeBashParityRows runs rows through the Claude Code hook of a
@@ -75,12 +74,12 @@ func judgeClaudeBashParityRows(t *testing.T, rows []claudeBashParityRow) {
 			recorder := httptest.NewRecorder()
 			api.handleAgentHook("claudecode").ServeHTTP(recorder, req)
 			got := recorder.Body.String()
-			// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-			// A row whose keys write is proved (block) gets the keys alert;
-			// no row blocks.
-			keysAlert := strings.HasPrefix(got, `{"action":"alert"`) && strings.Contains(got, "persistence.ssh_authorized_keys_command")
-			if strings.Contains(got, `"action":"block"`) || keysAlert != row.block {
-				t.Fatalf("%q: keys alert=%v, want %v: %.400s", command, keysAlert, row.block, got)
+			blocked := strings.Contains(got, `"action":"block"`)
+			if blocked != row.block {
+				t.Fatalf("%q: block=%v, want %v: %.400s", command, blocked, row.block, got)
+			}
+			if row.block && !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+				t.Fatalf("%q: blocked by another rule: %.400s", command, got)
 			}
 		})
 	}

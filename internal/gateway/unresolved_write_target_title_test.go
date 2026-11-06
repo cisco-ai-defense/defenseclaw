@@ -35,8 +35,7 @@ func TestManagedWriteTargetTheHookCannotResolveIsNamedAsUnresolved(t *testing.T)
 		_ = os.Chmod(outside, 0o700)
 	})
 	const keysTitle = "SSH authorized keys mutation"
-	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-	alerted := 0
+	blocked := 0
 	for _, cwd := range []string{inHome, outside} {
 		for _, row := range []struct {
 			name, command string
@@ -65,19 +64,19 @@ func TestManagedWriteTargetTheHookCannotResolveIsNamedAsUnresolved(t *testing.T)
 				named := strings.Contains(body, unresolvedWriteTargetTitle)
 				keys := strings.Contains(body, keysTitle)
 				switch {
-				case !row.unresolved && (verdict != "alert" || named || !keys):
-					t.Errorf("%s %s %s: %s, unresolved title %v, keys title %v, want an alert named %q: %.300s", connector, where, row.name, verdict, named, keys, keysTitle, body)
-				case row.unresolved && verdict == "alert" && (!named || keys):
-					t.Errorf("%s %s %s: alert with unresolved title %v, keys title %v, want it named as unresolved: %.300s", connector, where, row.name, named, keys, body)
-				case row.unresolved && verdict == "alert":
-					alerted++
+				case !row.unresolved && (verdict != "block" || named || !keys):
+					t.Errorf("%s %s %s: %s, unresolved title %v, keys title %v, want a block named %q: %.300s", connector, where, row.name, verdict, named, keys, keysTitle, body)
+				case row.unresolved && verdict == "block" && (!named || keys):
+					t.Errorf("%s %s %s: block with unresolved title %v, keys title %v, want it named as unresolved: %.300s", connector, where, row.name, named, keys, body)
+				case row.unresolved && verdict == "block":
+					blocked++
 				case row.unresolved && verdict != "allow":
 					t.Errorf("%s %s %s: %s", connector, where, row.name, verdict)
 				}
 			}
 		}
 	}
-	if alerted == 0 {
-		t.Fatal("no unresolved write was answered as unresolved: the fixture does not reach the empty client answer")
+	if blocked == 0 {
+		t.Fatal("no unresolved write failed closed: the fixture does not reach the empty client answer")
 	}
 }

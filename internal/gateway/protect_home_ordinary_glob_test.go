@@ -102,14 +102,8 @@ func TestR104ProtectHomeOrdinaryGlobUsesClientExpansion(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := overLimitHostHookWithEvidence(t, "claudecode", home, string(body), evidence)
-			// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-			want := "allow"
-			if tc.block {
-				want = "alert"
-			}
-			if !strings.HasPrefix(got, `{"action":"`+want+`"`) ||
-				tc.block && !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
-				t.Fatalf("verdict = %.600s, want %s", got, want)
+			if blocked := nativeWriteBlocked(t, got); blocked != tc.block {
+				t.Fatalf("blocked = %t, want %t: %.600s", blocked, tc.block, got)
 			}
 		})
 	}

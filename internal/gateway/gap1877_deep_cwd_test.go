@@ -72,13 +72,8 @@ func TestR105DeepWorkingDirectoryRedirectIsDescribed(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := overLimitHostHookWithEvidence(t, "codex", home, string(body), evidence)
-			if want {
-				// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-				if !strings.HasPrefix(strings.TrimSpace(got), `{"action":"alert"`) || !strings.Contains(got, nativeWriteAuthorizedKeysRule) {
-					t.Fatalf("protected write = %.400s, want alert with %s", strings.TrimSpace(got), nativeWriteAuthorizedKeysRule)
-				}
-			} else if blocked := nativeWriteBlocked(t, got); blocked {
-				t.Fatalf("blocked = true, want false: %.400s", strings.TrimSpace(got))
+			if blocked := nativeWriteBlocked(t, got); blocked != want {
+				t.Fatalf("blocked = %t, want %t: %.400s", blocked, want, strings.TrimSpace(got))
 			}
 		})
 	}

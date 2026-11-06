@@ -47,8 +47,7 @@ func TestR103B36ManagedArchiveScopeUsesClientWalk(t *testing.T) {
 	}
 	t.Setenv("HOME", home)
 	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
-	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-	const alert, allow = `{"action":"alert"`, `{"action":"allow"`
+	const block, allow = `{"action":"block"`, `{"action":"allow"`
 	body := func(t *testing.T, command string) []byte {
 		t.Helper()
 		return mustJSON(t, map[string]any{"session_id": "s", "hook_event_name": "PreToolUse", "cwd": project,
@@ -132,20 +131,20 @@ func TestR103B36ManagedArchiveScopeUsesClientWalk(t *testing.T) {
 				}
 			}
 			for _, command := range blocked {
-				if got := post(t, connector, command, nil); !strings.HasPrefix(got, alert) {
-					t.Errorf("%s = %.300s, want alert", command, got)
+				if got := post(t, connector, command, nil); !strings.HasPrefix(got, block) {
+					t.Errorf("%s = %.300s, want block", command, got)
 				}
 			}
 			// An older client sends no fact: the operand stays unknown.
 			if got := post(t, connector, allowed[0], func(targets map[string]string) {
 				delete(targets, hookpaths.OpaqueScopeFactPrefix+report)
-			}); !strings.HasPrefix(got, alert) {
-				t.Errorf("missing opaque-scope fact = %.300s, want alert", got)
+			}); !strings.HasPrefix(got, block) {
+				t.Errorf("missing opaque-scope fact = %.300s, want block", got)
 			}
 			if got := post(t, connector, allowed[0], func(targets map[string]string) {
 				targets[hookpaths.OpaqueScopeFactPrefix+report] = "invalid"
-			}); !strings.HasPrefix(got, alert) {
-				t.Errorf("malformed opaque-scope fact = %.300s, want alert", got)
+			}); !strings.HasPrefix(got, block) {
+				t.Errorf("malformed opaque-scope fact = %.300s, want block", got)
 			}
 			// Incomplete client evidence carries the cwd but no operand: the
 			// gateway cannot place or resolve the write, so it fails closed.
@@ -155,21 +154,21 @@ func TestR103B36ManagedArchiveScopeUsesClientWalk(t *testing.T) {
 				}
 				targets[hookpaths.CWDKey] = project
 				targets[hookpaths.TruncatedKey] = "1"
-			}); !strings.HasPrefix(got, alert) {
-				t.Errorf("incomplete evidence = %.300s, want alert", got)
+			}); !strings.HasPrefix(got, block) {
+				t.Errorf("incomplete evidence = %.300s, want block", got)
 			}
 			// A header that does not decode at all is no better than one
 			// without the fact, also for a write after no extraction.
 			for _, command := range []string{allowed[0], "echo hi > report.txt"} {
-				if got := postHeader(t, connector, command, "not-base64!"); !strings.HasPrefix(got, alert) {
-					t.Errorf("undecodable header %s = %.300s, want alert", command, got)
+				if got := postHeader(t, connector, command, "not-base64!"); !strings.HasPrefix(got, block) {
+					t.Errorf("undecodable header %s = %.300s, want block", command, got)
 				}
 			}
 			// A fact cannot clear a name inside the extraction scope.
 			if got := post(t, connector, "tar -C unpack -xf keys.tar && echo k >> unpack/n1.txt", func(targets map[string]string) {
 				targets[hookpaths.OpaqueScopeFactPrefix+inScope] = "0"
-			}); !strings.HasPrefix(got, alert) {
-				t.Errorf("in-scope fact = %.300s, want alert", got)
+			}); !strings.HasPrefix(got, block) {
+				t.Errorf("in-scope fact = %.300s, want block", got)
 			}
 		})
 	}

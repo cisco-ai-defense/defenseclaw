@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -45,14 +44,13 @@ func TestR104ProtectHomeGlobThroughDirectoryAlias(t *testing.T) {
 	}
 	t.Setenv("HOME", home)
 	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
-	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-	cases := map[string]string{
-		"cp payload keyd*/authorized_keys":       "alert",
-		"cat payload >> keyd*/authorized_keys":   "alert",
-		"cp payload k*/authorized_key?":          "alert",
-		"cp payload ./keyd[i]r/authorized_keys2": "alert",
-		"cp src/*.txt docs/":                     "allow",
-		"cp payload d*/notes.txt":                "allow",
+	cases := map[string]bool{
+		"cp payload keyd*/authorized_keys":       true,
+		"cat payload >> keyd*/authorized_keys":   true,
+		"cp payload k*/authorized_key?":          true,
+		"cp payload ./keyd[i]r/authorized_keys2": true,
+		"cp src/*.txt docs/":                     false,
+		"cp payload d*/notes.txt":                false,
 	}
 	for command, want := range cases {
 		t.Run(command, func(t *testing.T) {
@@ -70,9 +68,8 @@ func TestR104ProtectHomeGlobThroughDirectoryAlias(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := overLimitHostHookWithEvidence(t, "claudecode", home, string(body), evidence)
-			if !strings.HasPrefix(got, `{"action":"`+want+`"`) ||
-				want == "alert" && !strings.Contains(got, nativeWriteAuthorizedKeysRule) {
-				t.Fatalf("want %s: %.600s", want, got)
+			if blocked := nativeWriteBlocked(t, got); blocked != want {
+				t.Fatalf("blocked = %t, want %t: %.600s", blocked, want, got)
 			}
 		})
 	}

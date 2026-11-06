@@ -22,11 +22,10 @@ func TestReadOfLinkReplacedByMoveIsAllowed(t *testing.T) {
 		{"tilde mv then ls", "project", `mv a.txt ~/project/keylink && ls -l ~/project/keylink`, "allow"},
 		{"from home, mv then ls", "home", `mv project/a.txt project/keylink && ls -l project/keylink`, "allow"},
 		{"mv alone", "project", `mv a.txt keylink`, "allow"},
-		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-		{"keys write after the move", "project", `mv a.txt keylink && echo k >> ../.ssh/authorized_keys`, "alert"},
-		{"read then write through an unmoved link", "project", `mv a.txt b.txt && ls -l keylink && echo k >> keylink`, "alert"},
-		{"read redirected into the keys file", "project", `mv a.txt keylink && cat keylink > ../.ssh/authorized_keys`, "alert"},
-		{"move into the keys path then ls", "project", `mv a.txt ../.ssh/authorized_keys && ls -l ../.ssh/authorized_keys`, "alert"},
-		{"link made again then written", "project", `mv a.txt keylink && ln -sfn ../.ssh/authorized_keys keylink && echo k >> keylink`, "alert"},
+		{"keys write after the move", "project", `mv a.txt keylink && echo k >> ../.ssh/authorized_keys`, "block"},
+		{"read then write through an unmoved link", "project", `mv a.txt b.txt && ls -l keylink && echo k >> keylink`, "block"},
+		{"read redirected into the keys file", "project", `mv a.txt keylink && cat keylink > ../.ssh/authorized_keys`, "block"},
+		{"move into the keys path then ls", "project", `mv a.txt ../.ssh/authorized_keys && ls -l ../.ssh/authorized_keys`, "block"},
+		{"link made again then written", "project", `mv a.txt keylink && ln -sfn ../.ssh/authorized_keys keylink && echo k >> keylink`, "block"},
 	})
 }

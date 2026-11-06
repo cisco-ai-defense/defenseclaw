@@ -104,8 +104,7 @@ func TestManagedHookCopySourceFactsWithInvisibleGatewayPath(t *testing.T) {
 				api.handleAgentHook(connector).ServeHTTP(recorder, req)
 				want := `{"action":"allow"`
 				if row.block {
-					// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-					want = `{"action":"alert"`
+					want = `{"action":"block"`
 				}
 				if !strings.HasPrefix(recorder.Body.String(), want) {
 					t.Fatalf("response = %s, want %s", recorder.Body.String(), want)

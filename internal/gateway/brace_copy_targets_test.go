@@ -20,9 +20,8 @@ func TestBraceBackupCopyInProjectIsAllowed(t *testing.T) {
 		{"two sources into a project dir", "project", `cp {a.txt,README.md} ordinary/`, "allow"},
 		{"absolute backup", "project", `cp {P}/a.txt {P}/a.txt{,.orig}`, "allow"},
 		{"many sources into a project dir", "project", `cp a.txt{1..300} ordinary/`, "allow"},
-		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-		{"keys file by brace", "project", `cp {README.md,{K}}`, "alert"},
-		{"keys file by relative brace", "project", `cp {README.md,../.ssh/authorized_keys}`, "alert"},
+		{"keys file by brace", "project", `cp {README.md,{K}}`, "block"},
+		{"keys file by relative brace", "project", `cp {README.md,../.ssh/authorized_keys}`, "block"},
 	})
 }
 
@@ -34,10 +33,9 @@ func TestBraceBackupCopyInProjectIsAllowed(t *testing.T) {
 // (GAP-0187).
 func TestBraceCopyOntoKeysLinkBlocks(t *testing.T) {
 	r106Reader2Check(t, []r106Reader2Row{
-		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-		{"link by brace", "project", `cp {README.md,keylink}`, "alert"},
-		{"link by backup idiom", "project", `echo x > key && cp key{,link}`, "alert"},
-		{"link by absolute brace", "project", `cp {P}/{README.md,keylink}`, "alert"},
+		{"link by brace", "project", `cp {README.md,keylink}`, "block"},
+		{"link by backup idiom", "project", `echo x > key && cp key{,link}`, "block"},
+		{"link by absolute brace", "project", `cp {P}/{README.md,keylink}`, "block"},
 		{"past the brace budget", "project", `cp a.txt{1..70000} ordinary/`, "block"},
 	})
 }

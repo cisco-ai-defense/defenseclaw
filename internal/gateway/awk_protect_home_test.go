@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -94,16 +93,9 @@ func TestR105ProtectHomeAWKOutputUsesClientTargets(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := overLimitHostHookWithEvidence(t, "claudecode", home, string(body), evidence)
-			// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-			// A protected row alerts; an ordinary row does not block.
-			if alerted := strings.HasPrefix(got, `{"action":"alert"`) &&
-				strings.Contains(got, nativeWriteAuthorizedKeysRule); tc.want && !alerted {
+			if blocked := nativeWriteBlocked(t, got); blocked != tc.want {
 				decoded, _ := hookpaths.Decode(evidence)
-				t.Fatalf("alerted = %t, want %t: %.600s evidence=%q", alerted, tc.want, got, decoded)
-			}
-			if !tc.want && nativeWriteBlocked(t, got) {
-				decoded, _ := hookpaths.Decode(evidence)
-				t.Fatalf("blocked, want allowed: %.600s evidence=%q", got, decoded)
+				t.Fatalf("blocked = %t, want %t: %.600s evidence=%q", blocked, tc.want, got, decoded)
 			}
 		})
 	}

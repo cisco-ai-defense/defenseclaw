@@ -98,8 +98,7 @@ func TestBraceWriterOperandsOntoKeysBlockManagedLikePerUser(t *testing.T) {
 		}
 	}
 	for _, command := range blocked {
-		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-		check(command, "alert")
+		check(command, "block")
 	}
 	for _, command := range allowed {
 		check(command, "allow")

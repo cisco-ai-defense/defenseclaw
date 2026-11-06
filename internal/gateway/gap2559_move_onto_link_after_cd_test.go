@@ -20,11 +20,8 @@ import (
 // rows are judged only on a per-user gateway (a managed gateway reads them
 // from the client map, outside the row under test).
 type r106HookRow struct {
-	command string
-	block   bool
-	// alert: the row expects the default profile's alert.
-	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-	alert       bool
+	command     string
+	block       bool
 	perUserOnly bool
 }
 
@@ -55,8 +52,6 @@ func r106HookVerdict(t *testing.T, f b36ManagedHookFixture, managed bool, connec
 		return "block"
 	case strings.HasPrefix(body, `{"action":"allow"`):
 		return "allow"
-	case strings.HasPrefix(body, `{"action":"alert"`):
-		return "alert"
 	}
 	return fmt.Sprintf("status %d body %.200s", recorder.Code, body)
 }
@@ -87,9 +82,6 @@ func judgeR106HookRows(t *testing.T, rows []r106HookRow, prepare func(t *testing
 				if row.block {
 					want = "block"
 				}
-				if row.alert {
-					want = "alert"
-				}
 				if got := r106HookVerdict(t, f, mode.managed, connector, payload, header); got != want {
 					t.Errorf("managed=%v header=%v %s %q: %s, want %s", mode.managed, mode.header, connector, row.command, got, want)
 				}
@@ -118,27 +110,26 @@ func TestR106MoveOntoKeysLinkAfterCDReplacesTheLink(t *testing.T) {
 		{command: `cd .. && mv project/n1.txt project/lnk`},
 		{command: `cd ~/project; mv n1.txt lnk`},
 		{command: `cd HOMEDIR/project && mv n1.txt plain.txt`},
-		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-		{command: `cat n1.txt > lnk`, alert: true},
-		{command: `mv n1.txt ~/.ssh/authorized_keys`, alert: true},
-		{command: `cd HOMEDIR/project && cat n1.txt > lnk`, alert: true},
-		{command: `cd HOMEDIR/project && cp n1.txt lnk`, alert: true},
-		{command: `cd HOMEDIR/project && tee lnk < n1.txt`, alert: true},
-		{command: `cd HOMEDIR/project && mv n1.txt s/authorized_keys`, alert: true},
-		{command: `cd ~/project && mv n1.txt ./s/authorized_keys`, alert: true},
-		{command: `cd ~/ext && mv ~/project/n1.txt HOMEDIR/project/s/authorized_keys`, alert: true},
-		{command: `cd ~/.ssh && mv HOMEDIR/project/n1.txt authorized_keys`, alert: true},
-		{command: `cd HOMEDIR/project && mv n1.txt lnk; echo x >> lnk`, alert: true},
-		{command: `cd ~/ext && cat ~/x >> ~/project/lnk && mv ~/project/n1.txt HOMEDIR/project/lnk`, alert: true},
+		{command: `cat n1.txt > lnk`, block: true},
+		{command: `mv n1.txt ~/.ssh/authorized_keys`, block: true},
+		{command: `cd HOMEDIR/project && cat n1.txt > lnk`, block: true},
+		{command: `cd HOMEDIR/project && cp n1.txt lnk`, block: true},
+		{command: `cd HOMEDIR/project && tee lnk < n1.txt`, block: true},
+		{command: `cd HOMEDIR/project && mv n1.txt s/authorized_keys`, block: true},
+		{command: `cd ~/project && mv n1.txt ./s/authorized_keys`, block: true},
+		{command: `cd ~/ext && mv ~/project/n1.txt HOMEDIR/project/s/authorized_keys`, block: true},
+		{command: `cd ~/.ssh && mv HOMEDIR/project/n1.txt authorized_keys`, block: true},
+		{command: `cd HOMEDIR/project && mv n1.txt lnk; echo x >> lnk`, block: true},
+		{command: `cd ~/ext && cat ~/x >> ~/project/lnk && mv ~/project/n1.txt HOMEDIR/project/lnk`, block: true},
 		// A link outside the home that the gateway can see, to the keys
 		// file a managed gateway cannot read.
 		{command: `cd EXTDIR && mv ~/project/n1.txt c`},
 		{command: `cd EXTDIR && mv -f ~/project/n1.txt ./c`},
-		{command: `cd EXTDIR && cat ~/project/n1.txt > c`, alert: true},
-		{command: `cd EXTDIR && cp ~/project/n1.txt c`, alert: true},
+		{command: `cd EXTDIR && cat ~/project/n1.txt > c`, block: true},
+		{command: `cd EXTDIR && cp ~/project/n1.txt c`, block: true},
 		// Pre-existing managed limit (moving an existing disk link, then a
 		// write through the new name), judged per-user only here.
-		{command: `cd HOMEDIR/project && mv lnk lnk2; echo x >> lnk2`, alert: true, perUserOnly: true},
+		{command: `cd HOMEDIR/project && mv lnk lnk2; echo x >> lnk2`, block: true, perUserOnly: true},
 	}, func(t *testing.T, f b36ManagedHookFixture) {
 		for _, dir := range []string{filepath.Join(f.home, "ext"), filepath.Join(f.home, ".defenseclaw")} {
 			if err := os.MkdirAll(dir, 0o700); err != nil {

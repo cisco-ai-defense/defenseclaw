@@ -88,11 +88,12 @@ type RuleFinding struct {
 	// only the in-process trusted-action boundary may use the proof to decide
 	// whether the finding can participate in a synchronous deny decision.
 	proof findingProof
-	// shellProtectedFile marks a finding of the shell-command protected-file
-	// class on a shell command (markShellProtectedFileFindings). It is
-	// private and value-free; the rule-pack posture decides what it does
-	// (profileClassFindings).
-	shellProtectedFile bool
+	// shellFile marks a finding of the shell-command protected-file class
+	// on a shell command (markShellProtectedFileFindings): proven when the
+	// call writes a protected file by a target it names, unproven when only
+	// the reader suspects it. It is private and value-free; the rule-pack
+	// posture decides what it does (profileClassFindings).
+	shellFile shellFileMark
 }
 
 type findingEnforcement uint8

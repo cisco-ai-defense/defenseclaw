@@ -33,9 +33,8 @@ func TestGAP0416NestedTargetWithPlacedSiblingFourCell(t *testing.T) {
 				name, command, want string
 				changedEvidence     bool
 			}{
-				// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-				{"after-directory", `cd ~/proj/work && f=disklink; cp ../a.txt $f`, "alert", false},
-				{"nested-target", `pushd ~/proj/work && f=disklink; echo hi; for x in 1; do cp ../a.txt $f; done`, "alert", true},
+				{"after-directory", `cd ~/proj/work && f=disklink; cp ../a.txt $f`, "block", false},
+				{"nested-target", `pushd ~/proj/work && f=disklink; echo hi; for x in 1; do cp ../a.txt $f; done`, "block", true},
 				{"ordinary-nested-target", `pushd ~/proj/work && f=/dev/null; echo hi; for x in 1; do cp ../a.txt $f; done`, "allow", false},
 			} {
 				t.Run(fmt.Sprintf("%s/managed=%t/%s", connector, managed, row.name), func(t *testing.T) {
@@ -63,7 +62,7 @@ func TestGAP0416NestedTargetWithPlacedSiblingFourCell(t *testing.T) {
 						}
 					}
 					if !strings.HasPrefix(got, `{"action":"`+row.want+`"`) ||
-						row.want != "allow" && !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+						row.want == "block" && !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
 						t.Errorf("%s = %.300s, want %s", row.name, got, row.want)
 					}
 				})

@@ -38,18 +38,17 @@ func TestGAP0431TouchNoDereferenceFourCell(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute). Its rows here alert.
 	rows := []struct{ name, command, want string }{
 		{"glob-h", `pat='1*'; touch -h $pat`, "allow"},
 		{"glob-long-no-deref", `pat='1*'; touch --no-dereference $pat`, "allow"},
 		{"range-h", `touch -h {1..300}`, "allow"},
 		{"range-long-no-deref", `touch --no-dereference {1..300}`, "allow"},
-		{"padded-range-link", `touch {0001..0300}`, "alert"},
+		{"padded-range-link", `touch {0001..0300}`, "block"},
 		{"padded-range-no-deref", `touch -h {0001..0300}`, "allow"},
 		{"single-link-no-deref", `touch -h 150`, "allow"},
-		{"hardlink-no-deref", `touch -h hardlink`, "alert"},
-		{"direct-keys-no-deref", `touch -h "$HOME/.ssh/authorized_keys"`, "alert"},
-		{"ssh-child-no-deref", `touch -h "$HOME/.ssh/alias"`, "alert"},
+		{"hardlink-no-deref", `touch -h hardlink`, "block"},
+		{"direct-keys-no-deref", `touch -h "$HOME/.ssh/authorized_keys"`, "block"},
+		{"ssh-child-no-deref", `touch -h "$HOME/.ssh/alias"`, "block"},
 		{"ordinary-range-control", `touch {301..600}`, "allow"},
 	}
 	var calls []*hookCall

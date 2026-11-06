@@ -13,7 +13,6 @@ import (
 // retain the protected verdict, including a shell child and later actions.
 func TestGAP0522FindExecSSHReadersFourCell(t *testing.T) {
 	f := newB36ManagedHookFixture(t)
-	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute). Its rows here alert.
 	rows := []struct{ name, command, want string }{
 		{"plain-find", `find ~/.ssh -maxdepth 1 -type f`, "allow"},
 		{"reported-exec-ls-plus", `find ~/.ssh -maxdepth 1 -type f -exec ls -l {} +`, "allow"},
@@ -23,16 +22,16 @@ func TestGAP0522FindExecSSHReadersFourCell(t *testing.T) {
 		{"okdir-wc-semicolon", `find ~/.ssh -maxdepth 1 -type f -okdir wc -l {} \;`, "allow"},
 		{"exec-head-plus", `find ~/.ssh -maxdepth 1 -type f -exec head -n 1 {} +`, "allow"},
 		{"exec-ls-and-print", `find ~/.ssh -maxdepth 1 -type f -exec ls -l {} + -print`, "allow"},
-		{"exec-copy-keys", `find ~/.ssh -maxdepth 1 -type f -exec cp {} ~/.ssh/authorized_keys \;`, "alert"},
-		{"exec-shell-append-keys", `find ~/.ssh -maxdepth 1 -type f -exec sh -c 'printf key >> "$HOME/.ssh/authorized_keys"' _ {} \;`, "alert"},
-		{"execdir-copy-keys", `find ~/.ssh -maxdepth 1 -type f -execdir cp /dev/null ~/.ssh/authorized_keys \;`, "alert"},
-		{"ok-shell-append-keys", `find ~/.ssh -maxdepth 1 -type f -ok sh -c 'printf key >> "$HOME/.ssh/authorized_keys"' _ {} \;`, "alert"},
-		{"exec-copy-found-keys", `find ~/.ssh/authorized_keys -exec cp /dev/null {} \;`, "alert"},
-		{"exec-shell-append-found-keys", `find ~/.ssh/authorized_keys -exec sh -c 'printf key >> "$1"' _ {} \;`, "alert"},
-		{"exec-reader-then-copy", `find ~/.ssh -maxdepth 1 -type f -exec ls -l {} \; -exec cp {} ~/.ssh/authorized_keys \;`, "alert"},
-		{"exec-reader-then-delete", `find ~/.ssh -maxdepth 1 -type f -exec ls -l {} \; -delete`, "alert"},
-		{"exec-reader-then-fprint", `find ~/.ssh -maxdepth 1 -type f -exec ls -l {} \; -fprint ~/.ssh/authorized_keys`, "alert"},
-		{"exec-reader-redirect-keys", `find ~/.ssh -maxdepth 1 -type f -exec ls -l {} + > ~/.ssh/authorized_keys`, "alert"},
+		{"exec-copy-keys", `find ~/.ssh -maxdepth 1 -type f -exec cp {} ~/.ssh/authorized_keys \;`, "block"},
+		{"exec-shell-append-keys", `find ~/.ssh -maxdepth 1 -type f -exec sh -c 'printf key >> "$HOME/.ssh/authorized_keys"' _ {} \;`, "block"},
+		{"execdir-copy-keys", `find ~/.ssh -maxdepth 1 -type f -execdir cp /dev/null ~/.ssh/authorized_keys \;`, "block"},
+		{"ok-shell-append-keys", `find ~/.ssh -maxdepth 1 -type f -ok sh -c 'printf key >> "$HOME/.ssh/authorized_keys"' _ {} \;`, "block"},
+		{"exec-copy-found-keys", `find ~/.ssh/authorized_keys -exec cp /dev/null {} \;`, "block"},
+		{"exec-shell-append-found-keys", `find ~/.ssh/authorized_keys -exec sh -c 'printf key >> "$1"' _ {} \;`, "block"},
+		{"exec-reader-then-copy", `find ~/.ssh -maxdepth 1 -type f -exec ls -l {} \; -exec cp {} ~/.ssh/authorized_keys \;`, "block"},
+		{"exec-reader-then-delete", `find ~/.ssh -maxdepth 1 -type f -exec ls -l {} \; -delete`, "block"},
+		{"exec-reader-then-fprint", `find ~/.ssh -maxdepth 1 -type f -exec ls -l {} \; -fprint ~/.ssh/authorized_keys`, "block"},
+		{"exec-reader-redirect-keys", `find ~/.ssh -maxdepth 1 -type f -exec ls -l {} + > ~/.ssh/authorized_keys`, "block"},
 	}
 	var payloads [][]byte
 	for _, row := range rows {

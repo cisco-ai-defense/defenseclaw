@@ -42,7 +42,6 @@ func TestGAP0516HomeListingCompoundFourCell(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 	t.Cleanup(func() { _ = os.Chmod(home, 0o700) })
 
-	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
 	rows := []struct{ name, command, want string }{
 		{"lone-read", `head -n 1 */*`, "allow"},
 		{"semicolon-marker", `head -n 1 */*; echo done`, "allow"},
@@ -59,16 +58,16 @@ func TestGAP0516HomeListingCompoundFourCell(t *testing.T) {
 		{"echo-glob-then-marker", `echo */*; echo done`, "allow"},
 		{"bash-c-list-then-marker", `bash -c "head -n 1 */*; echo done"`, "allow"},
 		{"bash-c-echo-glob-then-marker", `bash -c "echo */*; echo done"`, "allow"},
-		{"relative-write", `head -n 1 */*; echo marker >> .ssh/authorized_keys`, "alert"},
-		{"tilde-write", `head -n 1 */* && echo marker >> ~/.ssh/authorized_keys`, "alert"},
-		{"pwd-then-write", `head -n 1 */*; pwd; echo marker >> .ssh/authorized_keys`, "alert"},
-		{"read-then-write", `head -n 1 */*; stat .; pwd > .ssh/authorized_keys`, "alert"},
-		{"glob-print-then-write", `echo */*; pwd; echo marker >> .ssh/authorized_keys`, "alert"},
-		{"native-absolute-write", `echo */*; echo marker >> "` + keys + `"`, "alert"},
-		{"slash-absolute-write", `echo */* && cp project/note.txt "` + filepath.ToSlash(keys) + `"`, "alert"},
-		{"bash-c-list-then-write", `bash -c "head -n 1 */*; echo marker >> .ssh/authorized_keys"`, "alert"},
-		{"bash-c-echo-glob-then-copy", `bash -c "echo */*; cp project/note.txt .ssh/authorized_keys"`, "alert"},
-		{"echo-substitution-write", `echo $(echo marker >> .ssh/authorized_keys) */*; echo done`, "alert"},
+		{"relative-write", `head -n 1 */*; echo marker >> .ssh/authorized_keys`, "block"},
+		{"tilde-write", `head -n 1 */* && echo marker >> ~/.ssh/authorized_keys`, "block"},
+		{"pwd-then-write", `head -n 1 */*; pwd; echo marker >> .ssh/authorized_keys`, "block"},
+		{"read-then-write", `head -n 1 */*; stat .; pwd > .ssh/authorized_keys`, "block"},
+		{"glob-print-then-write", `echo */*; pwd; echo marker >> .ssh/authorized_keys`, "block"},
+		{"native-absolute-write", `echo */*; echo marker >> "` + keys + `"`, "block"},
+		{"slash-absolute-write", `echo */* && cp project/note.txt "` + filepath.ToSlash(keys) + `"`, "block"},
+		{"bash-c-list-then-write", `bash -c "head -n 1 */*; echo marker >> .ssh/authorized_keys"`, "block"},
+		{"bash-c-echo-glob-then-copy", `bash -c "echo */*; cp project/note.txt .ssh/authorized_keys"`, "block"},
+		{"echo-substitution-write", `echo $(echo marker >> .ssh/authorized_keys) */*; echo done`, "block"},
 	}
 	for _, row := range rows {
 		payload := mustJSON(t, map[string]any{
@@ -112,8 +111,8 @@ func TestGAP0516HomeListingCompoundFourCell(t *testing.T) {
 					if !strings.HasPrefix(body, `{"action":"`+row.want+`"`) {
 						t.Errorf("%q: status %d body %.400s, want %s", row.command, recorder.Code, body, row.want)
 					}
-					if row.want == "alert" && !strings.Contains(body, "persistence.ssh_authorized_keys_command") {
-						t.Errorf("%q: wrong alert rule: %.400s", row.command, body)
+					if row.want == "block" && !strings.Contains(body, "persistence.ssh_authorized_keys_command") {
+						t.Errorf("%q: wrong block rule: %.400s", row.command, body)
 					}
 				})
 			}

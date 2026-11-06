@@ -96,9 +96,8 @@ func TestR103B36ReviewRealClientOperandForms(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			got := post(t, "tar -C scope -xf pkg.tar; echo hi > "+row.operand, nil)
 			want := `{"action":"allow"`
-			// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
 			if row.block {
-				want = `{"action":"alert"`
+				want = `{"action":"block"`
 			}
 			if !strings.HasPrefix(got, want) {
 				t.Fatalf("verdict = %.300s, want %s", got, want)
@@ -109,9 +108,8 @@ func TestR103B36ReviewRealClientOperandForms(t *testing.T) {
 		got := post(t, "tar -C scope -xf pkg.tar; echo hi > ordinary/n", func(m map[string]string) {
 			delete(m, hookpaths.OpaqueScopeFactPrefix+filepath.Join(project, "ordinary", "n"))
 		})
-		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-		if !strings.HasPrefix(got, `{"action":"alert"`) {
-			t.Fatalf("verdict = %.300s, want alert", got)
+		if !strings.HasPrefix(got, `{"action":"block"`) {
+			t.Fatalf("verdict = %.300s, want block", got)
 		}
 	})
 	t.Run("wrong operand key", func(t *testing.T) {
@@ -120,18 +118,16 @@ func TestR103B36ReviewRealClientOperandForms(t *testing.T) {
 			delete(m, key)
 			m[key+"/"] = "0"
 		})
-		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-		if !strings.HasPrefix(got, `{"action":"alert"`) {
-			t.Fatalf("verdict = %.300s, want alert", got)
+		if !strings.HasPrefix(got, `{"action":"block"`) {
+			t.Fatalf("verdict = %.300s, want block", got)
 		}
 	})
 	t.Run("malformed fact truncates header", func(t *testing.T) {
 		got := post(t, "tar -C scope -xf pkg.tar; echo hi > ordinary/n", func(m map[string]string) {
 			m[hookpaths.OpaqueScopeFactPrefix+filepath.Join(project, "ordinary", "n")] = "bad"
 		})
-		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-		if !strings.HasPrefix(got, `{"action":"alert"`) {
-			t.Fatalf("verdict = %.300s, want alert", got)
+		if !strings.HasPrefix(got, `{"action":"block"`) {
+			t.Fatalf("verdict = %.300s, want block", got)
 		}
 	})
 	t.Run("HOME differs from account home", func(t *testing.T) {
@@ -143,9 +139,8 @@ func TestR103B36ReviewRealClientOperandForms(t *testing.T) {
 		if got := post(t, `tar -C "$HOME/scope" -xf pkg.tar; echo hi > ordinary/n`, nil); !strings.HasPrefix(got, `{"action":"allow"`) {
 			t.Fatalf("ordinary write = %.300s, want allow", got)
 		}
-		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-		if got := post(t, "tar -C scope -xf pkg.tar; echo hi > "+filepath.Join(home, ".ssh", "authorized_keys"), nil); !strings.HasPrefix(got, `{"action":"alert"`) {
-			t.Fatalf("account-home key write = %.300s, want alert", got)
+		if got := post(t, "tar -C scope -xf pkg.tar; echo hi > "+filepath.Join(home, ".ssh", "authorized_keys"), nil); !strings.HasPrefix(got, `{"action":"block"`) {
+			t.Fatalf("account-home key write = %.300s, want block", got)
 		}
 	})
 	t.Run("forged call does not seed later verdict", func(t *testing.T) {
@@ -155,11 +150,10 @@ func TestR103B36ReviewRealClientOperandForms(t *testing.T) {
 		}); !strings.HasPrefix(got, `{"action":"allow"`) {
 			t.Fatalf("forged call = %.300s, want allow", got)
 		}
-		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
 		if got := post(t, command, func(m map[string]string) {
 			delete(m, hookpaths.OpaqueScopeFactPrefix+filepath.Join(project, "ordinary", "n"))
-		}); !strings.HasPrefix(got, `{"action":"alert"`) {
-			t.Fatalf("later call = %.300s, want alert", got)
+		}); !strings.HasPrefix(got, `{"action":"block"`) {
+			t.Fatalf("later call = %.300s, want block", got)
 		}
 	})
 }

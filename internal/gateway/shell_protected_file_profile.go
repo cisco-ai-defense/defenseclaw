@@ -11,6 +11,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // shellProtectedFileRules is the class of rules that decide whether a shell
@@ -36,6 +37,20 @@ var shellProtectedFileRules = map[string]bool{
 	"PERSISTENCE.GIT_HOOK_WRITE":      true,
 }
 
+// shellFileMark says how sure the readers are of a finding of the class.
+type shellFileMark uint8
+
+const (
+	// shellFileNone: not a finding of the class, or not on a shell command.
+	shellFileNone shellFileMark = iota
+	// shellFileUnproven: a reader suspects a protected target; nothing the
+	// command names proves it. The balanced and permissive profiles warn.
+	shellFileUnproven
+	// shellFileProven: the call writes a protected file at a target it
+	// names (shellWritesProvenProtectedFile). It keeps the block.
+	shellFileProven
+)
+
 // shellProtectedFileRule reports a rule of the shell-command protected-file
 // class.
 func shellProtectedFileRule(ruleID string) bool {
@@ -44,27 +59,16 @@ func shellProtectedFileRule(ruleID string) bool {
 
 // trustedShellCommandInput reports an action that runs a shell command now:
 // the command text or argv of a shell or execution tool. A native write or
-// edit tool, an apply_patch envelope (also one a shell call runs or feeds:
-// mayRunApplyPatch) and a stored command payload are not shell commands
-// here; they keep their enforcement in every profile.
+// edit tool, an apply_patch envelope and a stored command payload are not
+// shell commands here; they keep their enforcement in every profile. An
+// envelope a shell call runs or feeds is judged by its directive targets
+// (shellWritesProvenProtectedFile), not by the words of the call.
 func trustedShellCommandInput(input actionfacts.Input) bool {
-	if actionfacts.ApplyPatchTool(input.Tool) || mayRunApplyPatch(input) {
+	if actionfacts.ApplyPatchTool(input.Tool) {
 		return false
 	}
 	return input.Command != "" || len(input.Argv) > 0 ||
 		actionfacts.IsImmediateShellExecutionTool(input.Tool)
-}
-
-// mayRunApplyPatch reports a call whose text, argv or arguments name
-// apply_patch or carry a patch envelope. It over-matches on purpose: a false
-// answer only keeps the enforcement the call had before GAP-0675.
-func mayRunApplyPatch(input actionfacts.Input) bool {
-	names := func(text string) bool {
-		lower := strings.ToLower(text)
-		return strings.Contains(lower, "apply_patch") || strings.Contains(lower, "applypatch") ||
-			strings.Contains(lower, "apply-patch") || strings.Contains(lower, "*** begin patch")
-	}
-	return names(input.Command) || names(string(input.Args)) || slices.ContainsFunc(input.Argv, names)
 }
 
 // markShellProtectedFileFindings records, on the findings of one trusted
@@ -74,39 +78,171 @@ func mayRunApplyPatch(input actionfacts.Input) bool {
 // a child or a twin of the call): the outermost call, which runs last, has
 // the whole command and decides.
 //
-// A call that may reach the DefenseClaw state is self-protection, not the
-// class: the protected-write owners also report a write that reaches the
-// state through a link, and such a finding keeps its block in every profile
-// (rel-1-0-6:GAP-0675 review 1 M3a). The check over-matches on purpose and
-// runs only when a finding of the class is present. A native write or edit
-// tool is not in the class either.
+// The class is the findings the readers could not prove. A call that
+// writes a protected file the structure of the command names, or one it
+// reaches through a link on disk, a value the command assigns, or an
+// apply_patch envelope directive, is not in the class: it keeps its block in
+// every profile (owner steer, Wave-3 rule: a protected file or link named
+// directly or through a known value stays blocked). A call that may reach the
+// DefenseClaw state is self-protection, not the class either: the
+// protected-write owners also report a write that reaches the state through
+// a link, and such a finding keeps its block in every profile
+// (rel-1-0-6:GAP-0675 review 1 M3a). Both checks run only when a finding of
+// the class is present, and each answer over-matches: a false answer only
+// keeps the block the call had before GAP-0675. A native write or edit tool is
+// not in the class either.
 func markShellProtectedFileFindings(request trustedActionRequest, findings []RuleFinding) []RuleFinding {
 	if !slices.ContainsFunc(findings, func(f RuleFinding) bool { return shellProtectedFileRule(f.RuleID) }) {
 		for index := range findings {
-			findings[index].shellProtectedFile = false
+			findings[index].shellFile = shellFileNone
 		}
 		return findings
 	}
-	class := trustedShellCommandInput(request.Input) && !shellCommandMayReachState(request)
+	// A level below (a twin, a child, a statement) may have proven the write
+	// where the whole call is written in a way its own facts cannot read (a
+	// value assigned earlier, a shell -c body): the proof stays.
+	mark := shellFileNone
+	if trustedShellCommandInput(request.Input) {
+		switch {
+		case slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.shellFile == shellFileProven }) ||
+			shellWritesProvenProtectedFile(request):
+			mark = shellFileProven
+		case !shellCommandMayReachState(request):
+			mark = shellFileUnproven
+		}
+	}
 	for index := range findings {
-		findings[index].shellProtectedFile = class && shellProtectedFileRule(findings[index].RuleID)
+		findings[index].shellFile = shellFileNone
+		if shellProtectedFileRule(findings[index].RuleID) {
+			findings[index].shellFile = mark
+		}
 	}
 	return findings
 }
 
-// shellCommandMayReachState reports a shell call that may write the
-// DefenseClaw state: its text, argv or arguments may name the state folder
-// however the shell spells it (mayNameStateFolder), the state target
-// scan places a target in the active state (it follows the links on disk),
-// or the hook client resolved a write target below the state folder of the
-// active home. Each answer over-matches: a false answer only keeps the
-// block the call had before GAP-0675.
-func shellCommandMayReachState(request trustedActionRequest) bool {
+// shellWritesProvenProtectedFile reports a shell call that mutates a
+// protected file of the user (an authorized-keys or SSH control file, an SSH
+// private key, a shell startup profile or an active Git hook) at a target the
+// call proves, whatever the profile: a path the command structure names (a
+// literal or a value the command assigns), that path after the links on disk
+// are followed, a target the hook client resolved, or a directive target of
+// an apply_patch envelope the call runs or feeds. A word the readers cannot
+// place, a pattern, text in a comment or data, and a variable the command
+// does not set prove nothing here; such a finding stays in the class.
+func shellWritesProvenProtectedFile(request trustedActionRequest) bool {
 	input := request.Input
-	if mayNameStateFolder(input.Command) || mayNameStateFolder(string(input.Args)) ||
-		slices.ContainsFunc(input.Argv, mayNameStateFolder) {
+	facts := actionfacts.Analyze(input)
+	for _, path := range facts.Paths {
+		command, ok := integrityCommandByID(facts, path.CommandID)
+		if !ok || !integrityCommandMutatesPath(command, path) {
+			continue
+		}
+		if protectedFilePath(facts, path) {
+			return true
+		}
+		if resolved, ok := request.targetMemo.ResolveWriteTarget(placedPath(path, facts.CWD)); ok {
+			path.Resolved = resolved
+			if protectedFilePath(facts, path) {
+				return true
+			}
+		}
+	}
+	// The path readers of hookpaths place every target of the command in the
+	// user home (links, cd, brace lists, archives and copies included); the
+	// decision is theirs, not a side reader of the gateway.
+	if command, ok := trustedBashCommandInput(input); ok &&
+		request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(command, input.CWD, input.ActiveHome, input.DialectHint, clientGlobFacts(request)) == hookpaths.ProtectedTargetDecision {
 		return true
 	}
+	// The call names a protected file in its words (a path, a variable value,
+	// a patch directive): the finding keeps the block it had before GAP-0675.
+	// This over-matches (a comment that names the file counts); it keeps no
+	// block for a call that names none.
+	if namesProtectedFile(input.Command) || namesProtectedFile(string(input.Args)) ||
+		slices.ContainsFunc(input.Argv, namesProtectedFile) {
+		return true
+	}
+	for _, target := range request.ResolvedWriteTargets {
+		if protectedFilePath(facts, actionfacts.PathFact{Resolved: target, Absolute: true}) {
+			return true
+		}
+	}
+	targets, _ := hookpaths.ApplyPatchLexicalCommandTargets(input.Tool, input.Args, input.Command, facts.CWD, facts.ActiveHome)
+	for _, target := range targets {
+		for _, form := range []string{target, request.ResolvedWriteTargets[hookpaths.OperandPath(target, facts.CWD)]} {
+			if form != "" && protectedFilePath(facts, actionfacts.PathFact{Resolved: form, Absolute: true}) {
+				return true
+			}
+		}
+		if resolved, ok := request.targetMemo.ResolveWriteTarget(hookpaths.OperandPath(target, facts.CWD)); ok &&
+			protectedFilePath(facts, actionfacts.PathFact{Resolved: resolved, Absolute: true}) {
+			return true
+		}
+	}
+	return false
+}
+
+// protectedFileNames are the names that make a command word a protected file
+// of the shell-command protected-file class: the SSH folder and its files,
+// the shell startup profiles and the Git hooks folder.
+var protectedFileNames = []string{
+	"authorized_keys", ".ssh", "/etc/profile", ".bashrc", ".bash_profile", ".zshrc", ".zprofile",
+	".profile", "config.fish", "profile.ps1", "powershell_profile", ".git/hooks", ".git\\hooks",
+	"hookspath",
+}
+
+// namesProtectedFile reports a text that holds one of protectedFileNames
+// (quotes, escapes and backticks removed, any case).
+func namesProtectedFile(text string) bool {
+	if text == "" {
+		return false
+	}
+	text = strings.ToLower(strings.NewReplacer("\x27", "", "\"", "", "`", "").Replace(text))
+	return slices.ContainsFunc(protectedFileNames, func(name string) bool { return strings.Contains(text, name) })
+}
+
+// placedPath is the absolute spelling of a path fact in cwd.
+func placedPath(path actionfacts.PathFact, cwd string) string {
+	value := path.Resolved
+	if value == "" {
+		value = path.Normalized
+	}
+	if value == "" {
+		value = path.Value
+	}
+	return hookpaths.OperandPath(value, cwd)
+}
+
+// protectedFilePath reports a path of the files of the shell-command
+// protected-file class under the active home: the authorized-keys files, the
+// SSH control files, an SSH private key, a shell startup profile and an
+// active Git hook.
+func protectedFilePath(facts actionfacts.Facts, path actionfacts.PathFact) bool {
+	if matchesAuthorizedKeys(facts, path) || matchesActiveSSHPrivateKey(facts, path) ||
+		matchesActiveShellProfile(facts, path) || matchesActiveGitHook(facts, path) {
+		return true
+	}
+	relative, ok := activeHomeRelative(facts, path)
+	if !ok {
+		return false
+	}
+	for _, name := range hookpaths.SSHControlFiles {
+		if relative == ".ssh/"+name {
+			return true
+		}
+	}
+	return false
+}
+
+// shellCommandMayReachState reports a shell call that may write the
+// DefenseClaw state: the state target scan places a target in the active
+// state (it follows the links on disk), a word of the command is an existing
+// link into it, or the hook client resolved a write target below the state
+// folder of the active home. Each answer over-matches: a false answer only
+// keeps the block the call had before GAP-0675. The words and comments of the
+// command do not count unless they place a target (rel-1-0-6:GAP-0675 review 2).
+func shellCommandMayReachState(request trustedActionRequest) bool {
+	input := request.Input
 	if home := strings.TrimSpace(input.ActiveHome); home != "" {
 		state := strings.ToLower(filepath.ToSlash(filepath.Join(home, ".defenseclaw")))
 		for _, target := range request.ResolvedWriteTargets {
@@ -121,16 +257,6 @@ func shellCommandMayReachState(request trustedActionRequest) bool {
 	}
 	return request.targetMemo.ActionStateTargetMention(command, input.CWD, input.ActiveHome) ||
 		commandWordLinksIntoState(command, input.CWD, input.ActiveHome)
-}
-
-// mayNameStateFolder reports a text that may name the .defenseclaw state
-// folder with quotes, escapes or backticks in the name, in any case or split
-// across variables (d=.Defense; e=Claw): it holds "defense" once those are
-// removed. hookpaths.MayNameState also matches "claw", which every OpenClaw
-// path holds; that would keep the class enforcing for an ordinary OpenClaw
-// user in the default profile.
-func mayNameStateFolder(text string) bool {
-	return strings.Contains(strings.ToLower(strings.NewReplacer("'", "", "\"", "", "\\", "", "`", "").Replace(text)), "defense")
 }
 
 // commandWordLinksIntoState reports a word of command that names an existing
@@ -219,8 +345,8 @@ func profileClassFindings(findings []RuleFinding, secureClient bool, posture fun
 		}
 		if selfProtectionRules[canonicalTrustedRuleID(finding.RuleID)] {
 			floor = guardrailActionBlock
-		} else if finding.shellProtectedFile {
-			class = true
+		} else if finding.shellFile != shellFileNone {
+			class = class || finding.shellFile == shellFileUnproven
 			floor = strongerGuardrailAction(floor, guardrailActionAlert)
 		}
 	}
@@ -229,7 +355,7 @@ func profileClassFindings(findings []RuleFinding, secureClient bool, posture fun
 	}
 	capped := slices.Clone(findings)
 	for index := range capped {
-		if capped[index].shellProtectedFile && capped[index].contributesToEnforcement() {
+		if capped[index].shellFile == shellFileUnproven && capped[index].contributesToEnforcement() {
 			capped[index].enforcement = findingEnforcementAlertOnly
 		}
 	}

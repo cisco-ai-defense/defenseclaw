@@ -52,8 +52,7 @@ func TestBraceTouchAndPrintedRedirectTargetBlockEveryMode(t *testing.T) {
 			if err := os.Chmod(f.homes, mode); err != nil {
 				t.Fatal(err)
 			}
-			call.verdict, call.body = f.serve(call)
-			if call.verdict = r106AlertVerdict(call.verdict); call.verdict != want {
+			if call.verdict, call.body = f.serve(call); call.verdict != want {
 				t.Errorf("%s: verdict %s, want %s; body %.200s", call.name, call.verdict, want, call.body)
 			}
 		}
@@ -62,8 +61,7 @@ func TestBraceTouchAndPrintedRedirectTargetBlockEveryMode(t *testing.T) {
 		}
 	}
 	for _, command := range blocked {
-		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-		check(command, "alert")
+		check(command, "block")
 	}
 	for _, command := range allowed {
 		check(command, "allow")

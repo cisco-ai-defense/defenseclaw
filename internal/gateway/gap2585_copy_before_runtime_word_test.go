@@ -17,7 +17,22 @@ import (
 // is judged as written; a write after the runtime-word copy, a copy into
 // the keys file or state, and a link the command makes still block.
 func TestR106CopyBeforeARuntimeWordCopyStaysAllowed(t *testing.T) {
-	prepare := func(t *testing.T, f b36ManagedHookFixture) {
+	judgeR106HookRows(t, []r106HookRow{
+		{command: `cp a.txt c.txt; cp c.txt d.txt $(true)`},
+		{command: `cp a.txt c.txt && cp c.txt d.txt $(true)`},
+		{command: `cp a.txt ordinary/ && cp b.txt ordinary/ $(true) && git status`},
+		{command: "cp a.txt c.txt; cp c.txt d.txt `true`"},
+		{command: `cp a.txt c.txt; cp c.txt d.txt $(date +%s)`},
+		{command: `cp b.txt e.txt $(true)`},
+		{command: `cp a.txt c.txt; cp c.txt d.txt`},
+		{command: `cp a.txt c.txt; cp c.txt ~/.ssh/authorized_keys $(true)`, block: true},
+		{command: `cp a.txt c.txt; cp c.txt HOMEDIR/.defenseclaw/config.yaml $(true)`, block: true},
+		{command: `ln -s ../.ssh/authorized_keys c.txt; cp a.txt c.txt $(true)`, block: true},
+		{command: `ln -s ../.ssh c; cp a.txt c/authorized_keys $(true)`, block: true},
+		{command: `cp -P keylink c.txt; cp a.txt c.txt $(true)`, block: true},
+		{command: `cp a.txt c.txt; cp c.txt d.txt $(true); echo x >> keylink`, block: true},
+		{command: `cp c.txt d.txt $(true); cp a.txt d.txt`, block: true},
+	}, func(t *testing.T, f b36ManagedHookFixture) {
 		for _, dir := range []string{filepath.Join(f.project, "ordinary"), filepath.Join(f.home, ".defenseclaw")} {
 			if err := os.MkdirAll(dir, 0o700); err != nil {
 				t.Fatal(err)
@@ -29,42 +44,5 @@ func TestR106CopyBeforeARuntimeWordCopyStaysAllowed(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-	}
-	judgeR106HookRows(t, []r106HookRow{
-		{command: `cp a.txt c.txt; cp c.txt d.txt $(true)`},
-		{command: `cp a.txt c.txt && cp c.txt d.txt $(true)`},
-		{command: `cp a.txt ordinary/ && cp b.txt ordinary/ $(true) && git status`},
-		{command: "cp a.txt c.txt; cp c.txt d.txt `true`"},
-		{command: `cp a.txt c.txt; cp c.txt d.txt $(date +%s)`},
-		{command: `cp b.txt e.txt $(true)`},
-		{command: `cp a.txt c.txt; cp c.txt d.txt`},
-		{command: `cp a.txt c.txt; cp c.txt HOMEDIR/.defenseclaw/config.yaml $(true)`, block: true},
-	}, prepare)
-	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-	for _, mode := range []struct {
-		managed, header bool
-	}{{true, true}, {false, true}, {false, false}} {
-		for _, connector := range []string{"claudecode", "codex"} {
-			for _, command := range []string{
-				`cp a.txt c.txt; cp c.txt ~/.ssh/authorized_keys $(true)`,
-				`ln -s ../.ssh/authorized_keys c.txt; cp a.txt c.txt $(true)`,
-				`ln -s ../.ssh c; cp a.txt c/authorized_keys $(true)`,
-				`cp -P keylink c.txt; cp a.txt c.txt $(true)`,
-				`cp a.txt c.txt; cp c.txt d.txt $(true); echo x >> keylink`,
-				`cp c.txt d.txt $(true); cp a.txt d.txt`,
-			} {
-				f := newB36ManagedHookFixture(t)
-				prepare(t, f)
-				payload := f.payload(t, command)
-				header := ""
-				if mode.header {
-					header = f.clientHeader(t, payload)
-				}
-				if got := r106AlertVerdict(r106HookVerdict(t, f, mode.managed, connector, payload, header)); got != "alert" {
-					t.Errorf("managed=%v header=%v %s %q: %s, want alert", mode.managed, mode.header, connector, command, got)
-				}
-				_ = os.Chmod(f.homes, 0o700)
-			}
-		}
-	}
+	})
 }

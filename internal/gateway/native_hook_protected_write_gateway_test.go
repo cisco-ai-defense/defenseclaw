@@ -58,8 +58,7 @@ func TestR104CodexNativeExecWorkdirRefix3(t *testing.T) {
 			api.handleAgentHook("codex").ServeHTTP(response, req)
 			want := `"action":"allow"`
 			if tc.block {
-				// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-				want = `"action":"alert"`
+				want = `"action":"block"`
 			}
 			if !strings.HasPrefix(response.Body.String(), "{"+want) {
 				t.Fatalf("native exec_command: status=%d body=%s, want %s", response.Code, response.Body.String(), want)

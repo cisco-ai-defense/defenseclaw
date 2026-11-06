@@ -38,30 +38,22 @@ func TestR104GAP0696BoundProgramOrdinaryAndProtectedLinks(t *testing.T) {
 					t.Errorf("proof route %d blocked=%t, want %t", i, blocked, tc.block)
 				}
 			}
-			// rel-1-0-6:GAP-0675: the default pack alerts on the protected
-			// write and strict blocks it; the ordinary rows are allowed in both.
-			for _, posture := range []string{"default", "strict"} {
-				installToolCallCorpusProfileConnector(t, "codex", posture)
-				cfg := &config.Config{}
-				cfg.Guardrail.Mode = "action"
-				cfg.Guardrail.Connector = "codex"
-				cfg.Guardrail.BlockAt = "CRITICAL"
-				cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), posture)
-				args, err := json.Marshal(map[string]string{"command": tc.command})
-				if err != nil {
-					t.Fatal(err)
-				}
-				input := actionfacts.Input{Tool: "Bash", Args: args, CWD: cwd, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
-				verdict := (&APIServer{scannerCfg: cfg}).inspectTrustedToolPolicyCtx(t.Context(),
-					&ToolInspectRequest{Tool: "Bash", Args: args, Direction: "tool_call", Connector: "codex"},
-					trustedActionRequest{Input: input, LegacyText: string(args), Connector: "codex", EnforcementCapable: true})
-				want := guardrailActionAllow
-				if tc.block {
-					want = map[string]string{"default": guardrailActionAlert, "strict": guardrailActionBlock}[posture]
-				}
-				if verdict.Action != want {
-					t.Errorf("%s native Codex action=%q findings=%v, want %q", posture, verdict.Action, verdict.Findings, want)
-				}
+			installToolCallCorpusProfileConnector(t, "codex", "default")
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = "codex"
+			cfg.Guardrail.BlockAt = "CRITICAL"
+			cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "default")
+			args, err := json.Marshal(map[string]string{"command": tc.command})
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := actionfacts.Input{Tool: "Bash", Args: args, CWD: cwd, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+			verdict := (&APIServer{scannerCfg: cfg}).inspectTrustedToolPolicyCtx(t.Context(),
+				&ToolInspectRequest{Tool: "Bash", Args: args, Direction: "tool_call", Connector: "codex"},
+				trustedActionRequest{Input: input, LegacyText: string(args), Connector: "codex", EnforcementCapable: true})
+			if got := verdict.Action == guardrailActionBlock; got != tc.block {
+				t.Errorf("native Codex action=%q findings=%v, want block=%t", verdict.Action, verdict.Findings, tc.block)
 			}
 		})
 	}

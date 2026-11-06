@@ -105,9 +105,8 @@ func TestSSHControlFileBlockTextNamesTheFileInEveryMode(t *testing.T) {
 				t.Fatal(err)
 			}
 			call.verdict, call.body = f.serve(call)
-			// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-			if call.verdict != "alert" || !strings.Contains(call.body, want) {
-				t.Errorf("%s %q: verdict %s, body %.300s, want an alert naming %q", call.name, command, call.verdict, call.body, want)
+			if call.verdict != "block" || !strings.Contains(call.body, want) {
+				t.Errorf("%s %q: verdict %s, body %.300s, want a block naming %q", call.name, command, call.verdict, call.body, want)
 			}
 			if want != "SSH authorized keys mutation" && strings.Contains(call.body, "authorized keys") {
 				t.Errorf("%s %q: the block text still says authorized keys: %.300s", call.name, command, call.body)

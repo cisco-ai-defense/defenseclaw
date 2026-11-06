@@ -50,15 +50,9 @@ func TestDirectoryStackTildeCopyIsNotAKeysWrite(t *testing.T) {
 		{"pushd ~/.ssh; dirs -c; ls ~1", false},
 		{"pushd ~/.ssh; dirs -v", false},
 		{"pushd ~/.ssh; dirs -c; cat id_ed25519", true},
-		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-		// These two rows alert (alerts below).
-		{"pushd ~/.ssh && pushd /tmp && cp a.txt ~1/authorized_keys", false},
-		{"pushd src && cp a.txt ~/.ssh/authorized_keys", false},
+		{"pushd ~/.ssh && pushd /tmp && cp a.txt ~1/authorized_keys", true},
+		{"pushd src && cp a.txt ~/.ssh/authorized_keys", true},
 		{"pushd ~/.defenseclaw && pushd /tmp && cp a.txt ~1/config.yaml", true},
-	}
-	alerts := map[string]bool{
-		"pushd ~/.ssh && pushd /tmp && cp a.txt ~1/authorized_keys": true,
-		"pushd src && cp a.txt ~/.ssh/authorized_keys":              true,
 	}
 	for _, mode := range []string{"action"} {
 		for _, row := range rows {
@@ -71,9 +65,6 @@ func TestDirectoryStackTildeCopyIsNotAKeysWrite(t *testing.T) {
 			})
 			if blocked := resp.Action == "block"; blocked != row.block {
 				t.Errorf("%s %q: block=%t, want %t: %v", mode, row.command, blocked, row.block, resp.Findings)
-			}
-			if alerts[row.command] && resp.Action != "alert" {
-				t.Errorf("%s %q: action=%s, want alert: %v", mode, row.command, resp.Action, resp.Findings)
 			}
 		}
 	}

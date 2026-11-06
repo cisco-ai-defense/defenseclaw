@@ -39,8 +39,7 @@ func TestCopilotPermissionRequestShellJudgesToolInputCommand(t *testing.T) {
 		{name: "bash pwd", tool: "bash", input: map[string]any{"command": "pwd"}, want: "allow"},
 		{name: "powershell echo ok", tool: "powershell", input: map[string]any{"command": "echo ok"}, want: "allow"},
 		{name: "bash append to authorized_keys", tool: "bash",
-			// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-			input: map[string]any{"command": "printf 'ssh-ed25519 AAAA marker\\n' >> ~/.ssh/authorized_keys"}, want: "alert"},
+			input: map[string]any{"command": "printf 'ssh-ed25519 AAAA marker\\n' >> ~/.ssh/authorized_keys"}, want: "block"},
 		{name: "bash with no command", tool: "bash", input: map[string]any{"description": "Run echo"},
 			want: "block", wantReason: unverifiedShellCommandRuleID},
 		{name: "bash command not a string", tool: "bash", input: map[string]any{"command": 42},

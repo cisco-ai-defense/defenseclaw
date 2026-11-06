@@ -6,7 +6,6 @@ package gateway
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -27,11 +26,10 @@ var hp4ReviewLinkedHomeRows = []struct{ name, command, want string }{
 	{"lh-chmod-script", "chmod +x scripts/run.sh", "allow"},
 	{"lh-redir-build", "go test ./... > build/test.log 2>&1", "allow"},
 	{"lh-pwsh-set-content", "pwsh -c \"Set-Content -Path package.json -Value x\"", "allow"},
-	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-	{"lh-block-chmod-keylink", "chmod 666 keylink", "alert"},
-	{"lh-block-rm-dirlink", "rm sshlink/authorized_keys", "alert"},
-	{"lh-block-pwsh-named", "pwsh -c \"Set-Content -Value k -Path keylink\"", "alert"},
-	{"lh-block-redirect-echo", "echo m >> $(echo -e keylink)", "alert"},
+	{"lh-block-chmod-keylink", "chmod 666 keylink", "block"},
+	{"lh-block-rm-dirlink", "rm sshlink/authorized_keys", "block"},
+	{"lh-block-pwsh-named", "pwsh -c \"Set-Content -Value k -Path keylink\"", "block"},
+	{"lh-block-redirect-echo", "echo m >> $(echo -e keylink)", "block"},
 }
 
 // TestHP4ReviewR2LinkedHome is the review round 2 check of the link-only
@@ -60,9 +58,6 @@ func TestHP4ReviewR2LinkedHome(t *testing.T) {
 				t.Fatal(err)
 			}
 			call.verdict, call.body = f.serve(call)
-			if strings.HasPrefix(call.body, `{"action":"alert"`) {
-				call.verdict = "alert" // rel-1-0-6:GAP-0675
-			}
 			t.Logf("HP4REV %s | %s | want %s", call.name, call.verdict, row.want)
 			if row.want != "" && call.verdict != row.want {
 				t.Errorf("%s: verdict %s, want %s; body %.160s", call.name, call.verdict, row.want, call.body)
@@ -104,9 +99,8 @@ func TestHP4ReviewR2RmEntries(t *testing.T) {
 				t.Fatal(err)
 			}
 			call.verdict, call.body = f.serve(call)
-			// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-			if !strings.HasPrefix(call.body, `{"action":"alert"`) || !strings.Contains(call.body, "persistence.ssh_authorized_keys_command") {
-				t.Errorf("%s: verdict %s, want alert; body %.160s", call.name, call.verdict, call.body)
+			if call.verdict != "block" {
+				t.Errorf("%s: verdict %s, want block; body %.160s", call.name, call.verdict, call.body)
 			}
 		}
 		if err := os.Chmod(f.homes, 0o700); err != nil {
@@ -126,8 +120,7 @@ func TestHP4ReviewR2RecursiveLinkEntry(t *testing.T) {
 	header := f.clientHeader(t, payload)
 	for _, call := range everyMode("rm-rf-keylink", payload, header) {
 		mode := os.FileMode(0o700)
-		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-		want := "alert"
+		want := "block"
 		if call.managed {
 			mode = 0
 			want = "allow"
@@ -136,9 +129,6 @@ func TestHP4ReviewR2RecursiveLinkEntry(t *testing.T) {
 			t.Fatal(err)
 		}
 		call.verdict, call.body = f.serve(call)
-		if strings.HasPrefix(call.body, `{"action":"alert"`) {
-			call.verdict = "alert"
-		}
 		if call.verdict != want {
 			t.Errorf("%s: verdict %s, want %s; body %.160s", call.name, call.verdict, want, call.body)
 		}

@@ -91,9 +91,7 @@ func TestR104LeadProtectedCopyControl(t *testing.T) {
 			}
 			response := api.evaluateAgentHook(withManagedHookPeer(context.Background(), managedHookPeer{Home: home}),
 				agentHookRequest{ConnectorName: "claudecode", HookEventName: "PreToolUse", ToolName: "Bash", ToolArgs: args, CWD: cwd})
-			// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-			// A protected copy alerts; the ordinary copy does not block.
-			if tc.blocked && response.Action != "alert" || !tc.blocked && response.Action == "block" {
+			if got := response.Action == "block"; got != tc.blocked {
 				t.Fatalf("native Claude copy action=%q findings=%v rules=%v", response.Action, response.Findings, response.RuleIDs)
 			}
 			body := mustJSON(t, map[string]any{"session_id": "lead-copy", "hook_event_name": "PreToolUse",
@@ -103,8 +101,7 @@ func TestR104LeadProtectedCopyControl(t *testing.T) {
 			req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
 			writer := httptest.NewRecorder()
 			api.handleAgentHook("claudecode").ServeHTTP(writer, req)
-			if tc.blocked && !strings.HasPrefix(writer.Body.String(), `{"action":"alert"`) ||
-				!tc.blocked && strings.HasPrefix(writer.Body.String(), `{"action":"block"`) {
+			if got := strings.HasPrefix(writer.Body.String(), `{"action":"block"`); got != tc.blocked {
 				t.Fatalf("registered Claude copy status=%d body=%s", writer.Code, writer.Body.String())
 			}
 		})
@@ -182,10 +179,8 @@ func TestR104LeadOpenClawInspectHome(t *testing.T) {
 				t.Fatal(err)
 			}
 			verdict := api.inspectToolPolicyCtx(ctx, &ToolInspectRequest{Tool: "exec", Args: args, Connector: "openclaw"})
-			// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-			// The protected appends alert; the benign one does not block.
-			if tc.blocked && verdict.Action != "alert" || !tc.blocked && verdict.Action == "block" {
-				t.Fatalf("inspect action=%q severity=%q reason=%q, want protected=%v", verdict.Action, verdict.Severity, verdict.Reason, tc.blocked)
+			if got := verdict.Action == "block"; got != tc.blocked {
+				t.Fatalf("inspect action=%q severity=%q reason=%q, want blocked=%v", verdict.Action, verdict.Severity, verdict.Reason, tc.blocked)
 			}
 		})
 	}

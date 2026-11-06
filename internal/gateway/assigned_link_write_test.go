@@ -145,15 +145,8 @@ func TestAssignedAndTarDirectoryWritesThroughLinks(t *testing.T) {
 					} else {
 						got = perUserLinkHook(t, connector, string(body))
 					}
-					if tc.block {
-						// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-						var resp map[string]any
-						if err := json.Unmarshal([]byte(got), &resp); err != nil || resp["action"] != "alert" ||
-							!strings.Contains(got, nativeWriteAuthorizedKeysRule) {
-							t.Fatalf("protected write = %.600s, want alert with %s", got, nativeWriteAuthorizedKeysRule)
-						}
-					} else if blocked := nativeWriteBlocked(t, got); blocked {
-						t.Fatalf("blocked = true, want false: %.600s", got)
+					if blocked := nativeWriteBlocked(t, got); blocked != tc.block {
+						t.Fatalf("blocked = %t, want %t: %.600s", blocked, tc.block, got)
 					}
 				})
 			}

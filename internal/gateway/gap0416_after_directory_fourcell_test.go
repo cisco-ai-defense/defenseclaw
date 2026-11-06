@@ -27,8 +27,7 @@ func TestGAP0416AfterDirectoryFourCell(t *testing.T) {
 			for _, row := range []struct {
 				name, command, want string
 			}{
-				// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-				{"protected", `cd ~/proj/work && f=disklink; cp ../a.txt $f`, "alert"},
+				{"protected", `cd ~/proj/work && f=disklink; cp ../a.txt $f`, "block"},
 				{"ordinary", `cd ~/proj/work && f=out.txt; cp ../a.txt $f`, "allow"},
 			} {
 				t.Run(fmt.Sprintf("%s/managed=%t/%s", connector, managed, row.name), func(t *testing.T) {
@@ -48,7 +47,7 @@ func TestGAP0416AfterDirectoryFourCell(t *testing.T) {
 						}
 					}
 					if !strings.HasPrefix(got, `{"action":"`+row.want+`"`) ||
-						row.want == "alert" && !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+						row.want == "block" && !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
 						t.Errorf("%s = %.300s, want %s", row.name, got, row.want)
 					}
 				})

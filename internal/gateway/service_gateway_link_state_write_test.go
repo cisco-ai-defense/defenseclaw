@@ -5,7 +5,6 @@ package gateway
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -27,9 +26,6 @@ import (
 type serviceGatewayStateRow struct {
 	name, command, rule string
 	windowsOnly         bool
-	// alert marks a row of the shell-command protected-file class
-	// (rel-1-0-6:GAP-0675): the default profile alerts on it with rule.
-	alert bool
 }
 
 const rowParity = "parity"
@@ -113,24 +109,15 @@ func judgeServiceGatewayStateRows(t *testing.T, rows []serviceGatewayStateRow) {
 				recorder := httptest.NewRecorder()
 				api.handleAgentHook("claudecode").ServeHTTP(recorder, req.WithContext(ctx))
 				got := recorder.Body.String()
-				var answer struct {
-					Action string `json:"action"`
-				}
-				_ = json.Unmarshal(recorder.Body.Bytes(), &answer)
-				verdicts[managed] = answer.Action == "block"
+				blocked := strings.Contains(got, `"action":"block"`)
+				verdicts[managed] = blocked
 				if row.rule == rowParity {
 					continue
 				}
-				want := "allow"
-				if row.alert {
-					want = "alert"
-				} else if row.rule != "" {
-					want = "block"
-				}
-				if answer.Action != want {
-					t.Errorf("managed=%v %q: action=%s, want %s: %.400s", managed, command, answer.Action, want, got)
+				if blocked != (row.rule != "") {
+					t.Errorf("managed=%v %q: block=%v, want %v: %.400s", managed, command, blocked, row.rule != "", got)
 				} else if row.rule != "" && !strings.Contains(got, row.rule) {
-					t.Errorf("managed=%v %q: decided by another rule, want %s: %.400s", managed, command, row.rule, got)
+					t.Errorf("managed=%v %q: blocked by another rule, want %s: %.400s", managed, command, row.rule, got)
 				}
 			}
 			if len(verdicts) == 2 && verdicts[true] != verdicts[false] {
@@ -166,9 +153,8 @@ func TestServiceGatewayWriteThroughLinkToStateMatchesPerUser(t *testing.T) {
 		{name: "junction wrapped", command: `bash -lc 'cmd //c "mklink /J L4 {EB}"; echo x >> L4/y/config.yaml'`, rule: stateRule, windowsOnly: true},
 		{name: "junction renamed", command: `cmd //c "mklink /J L5 {EB}" ; mv L5 L6; echo x >> L6/y/config.yaml`, rule: stateRule, windowsOnly: true},
 		{name: "junction hook config", command: `cmd //c "mklink /J L1 {EB}" ; echo x >> L1/y/hooks/.hookcfg`, rule: stateRule, windowsOnly: true},
-		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-		{name: "keys twin disk link", command: `echo x >> {E}/x/authorized_keys`, rule: keysRule, alert: true},
-		{name: "keys twin junction", command: `cmd //c "mklink /J L7 {EB}" ; echo x >> L7/x/authorized_keys`, rule: keysRule, windowsOnly: true, alert: true},
+		{name: "keys twin disk link", command: `echo x >> {E}/x/authorized_keys`, rule: keysRule},
+		{name: "keys twin junction", command: `cmd //c "mklink /J L7 {EB}" ; echo x >> L7/x/authorized_keys`, rule: keysRule, windowsOnly: true},
 		{name: "new name direct", command: `echo x >> ~/.defenseclaw/p8.txt`, rule: rowParity},
 		{name: "new name disk link", command: `echo x >> {E}/y/p7.txt`, rule: rowParity},
 		{name: "new name junction", command: `cmd //c "mklink /J L1 {EB}" ; echo x >> L1/y/p1.txt`, rule: rowParity, windowsOnly: true},

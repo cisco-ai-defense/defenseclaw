@@ -49,11 +49,11 @@ func TestR105GAP1990UnreadableSiblingGlobCopy(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(filepath.Join(dec, "b"), 0o700) })
 	t.Setenv("HOME", home)
 	for _, tc := range []struct {
-		command, want string
+		command string
+		block   bool
 	}{
-		{"cp payload */payl*", "allow"},
-		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-		{"cp payload */keyl*", "alert"},
+		{"cp payload */payl*", false},
+		{"cp payload */keyl*", true},
 	} {
 		t.Run(tc.command, func(t *testing.T) {
 			body := string(mustJSON(t, map[string]any{"session_id": "gap1990", "hook_event_name": "PreToolUse",
@@ -69,10 +69,10 @@ func TestR105GAP1990UnreadableSiblingGlobCopy(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			api.handleAgentHook("codex").ServeHTTP(recorder, req)
 			got := recorder.Body.String()
-			if !strings.HasPrefix(got, `{"action":"`+tc.want+`"`) {
-				t.Fatalf("want %s: %.600s", tc.want, got)
+			if blocked := strings.HasPrefix(got, `{"action":"block"`); blocked != tc.block {
+				t.Fatalf("blocked = %t, want %t: %.600s", blocked, tc.block, got)
 			}
-			if tc.want == "alert" && !strings.Contains(got, "persistence.ssh_authorized_keys_command:") {
+			if tc.block && !strings.Contains(got, "persistence.ssh_authorized_keys_command:") {
 				t.Fatalf("protected copy without the SSH rule: %.600s", got)
 			}
 		})

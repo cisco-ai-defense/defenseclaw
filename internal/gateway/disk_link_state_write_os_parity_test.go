@@ -110,13 +110,7 @@ func judgeDiskLinkStateRows(t *testing.T, rows []diskLinkStateRow) {
 				api.handleAgentHook("claudecode").ServeHTTP(recorder, req)
 				got := recorder.Body.String()
 				blocked := strings.Contains(got, `"action":"block"`)
-				// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-				// The state rows keep their block.
-				if row.rule == diskLinkKeysRule {
-					if !strings.HasPrefix(got, `{"action":"alert"`) {
-						t.Fatalf("targets=%v %q: want alert: %.400s", withTargets, command, got)
-					}
-				} else if blocked != (row.rule != "") {
+				if blocked != (row.rule != "") {
 					t.Fatalf("targets=%v %q: block=%v, want %v: %.400s", withTargets, command, blocked, row.rule != "", got)
 				}
 				if row.rule == diskLinkAnyRule {

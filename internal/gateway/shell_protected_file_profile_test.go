@@ -19,6 +19,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // shellProtectedFileHome is a home with the protected files of the
@@ -111,6 +112,10 @@ func TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute(t *testing.T) {
 	}
 	home, cwd := shellProtectedFileHome(t)
 	const keysRule, profileRule, stateRule = "persistence.ssh_authorized_keys_command", "persistence.shell_profile_write", "tamper.detector_state_write"
+	if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "keyslink")); err != nil {
+		t.Fatal(err)
+	}
+	always := map[string]string{"default": "block", "permissive": "block", "strict": "block"}
 	rows := []struct {
 		name, command string
 		// want is the action per posture; rule is the rule id an alert or
@@ -118,14 +123,21 @@ func TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute(t *testing.T) {
 		want map[string]string
 		rule string
 	}{
-		{"keys append", "echo marker >> ~/.ssh/authorized_keys",
-			map[string]string{"default": "alert", "permissive": "alert", "strict": "block"}, keysRule},
-		{"keys copy", "cp notes.txt ~/.ssh/authorized_keys",
-			map[string]string{"default": "alert", "permissive": "alert", "strict": "block"}, keysRule},
+		// A protected file the call names, directly, by a value it assigns
+		// or through a link on disk, stays blocked in every profile (the
+		// Wave-3 rule: review 2 of GAP-0675).
+		{"keys append", "echo marker >> ~/.ssh/authorized_keys", always, keysRule},
+		{"keys copy", "cp notes.txt ~/.ssh/authorized_keys", always, keysRule},
+		{"keys known value", "dst=~/.ssh/authorized_keys; echo marker >> \"$dst\"", always, keysRule},
+		{"keys link append", "echo marker >> keyslink", always, keysRule},
+		{"keys copy onto link", "cp notes.txt keyslink", always, keysRule},
+		{"ssh control file", "echo Host >> ~/.ssh/config", always, keysRule},
+		{"keys shell body", "bash -c \"echo x >> ~/.ssh/authorized_keys\"", always, keysRule},
+		// A shell startup file is the rating of the pack (alert), never a
+		// silent allow, and a block in strict.
 		{"shell profile append", "echo marker >> ~/.bashrc",
 			map[string]string{"default": "alert", "permissive": "alert", "strict": "block"}, profileRule},
-		{"DefenseClaw state append", "printf changed >> ~/.defenseclaw/config.yaml",
-			map[string]string{"default": "block", "permissive": "block", "strict": "block"}, stateRule},
+		{"DefenseClaw state append", "printf changed >> ~/.defenseclaw/config.yaml", always, stateRule},
 		{"ordinary write", "echo marker >> notes.txt",
 			map[string]string{"default": "allow", "permissive": "allow", "strict": "allow"}, ""},
 	}
@@ -134,6 +146,9 @@ func TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute(t *testing.T) {
 			cell := connectorName + map[bool]string{false: " per-user", true: " managed"}[managed]
 			t.Run(cell, func(t *testing.T) {
 				for _, row := range rows {
+					if connectorName == "openclaw" && strings.Contains(row.name, "link") {
+						continue
+					}
 					for _, posture := range []string{"default", "permissive", "strict"} {
 						want, ok := row.want[posture]
 						if !ok {
@@ -162,10 +177,11 @@ func TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute(t *testing.T) {
 // posture keeps the class enforcing and the Secure Client integration
 // changes nothing.
 func TestGAP0675ShellProtectedFilePostureDecision(t *testing.T) {
-	marked := RuleFinding{RuleID: "persistence.ssh_authorized_keys_command", Severity: "CRITICAL", shellProtectedFile: true}
+	marked := RuleFinding{RuleID: "persistence.ssh_authorized_keys_command", Severity: "CRITICAL", shellFile: shellFileUnproven}
+	proven := RuleFinding{RuleID: "persistence.ssh_authorized_keys_command", Severity: "CRITICAL", shellFile: shellFileProven}
 	native := RuleFinding{RuleID: "persistence.ssh_authorized_keys_command", Severity: "CRITICAL"}
 	state := RuleFinding{RuleID: "tamper.detector_state_write", Severity: "HIGH"}
-	detection := RuleFinding{RuleID: "PATH-SSH-DIR", Severity: "HIGH", shellProtectedFile: true, enforcement: findingEnforcementDetectionOnly}
+	detection := RuleFinding{RuleID: "PATH-SSH-DIR", Severity: "HIGH", shellFile: shellFileUnproven, enforcement: findingEnforcementDetectionOnly}
 	stateDetection := RuleFinding{RuleID: "tamper.detector_state_write", Severity: "HIGH", enforcement: findingEnforcementDetectionOnly}
 	posture := func(name string) func() string { return func() string { return name } }
 	for _, tc := range []struct {
@@ -180,6 +196,11 @@ func TestGAP0675ShellProtectedFilePostureDecision(t *testing.T) {
 		{"permissive", []RuleFinding{marked, native, detection}, false, "permissive", []bool{true, false, false}, "alert"},
 		{"strict", []RuleFinding{marked, native, detection}, false, "strict", []bool{false, false, false}, "alert"},
 		{"secure client", []RuleFinding{marked, native, detection}, true, "default", []bool{false, false, false}, "allow"},
+		// A proven target keeps its enforcement in every posture and is at
+		// least an alert, as the unproven class is.
+		{"proven default", []RuleFinding{proven}, false, "default", []bool{false}, "alert"},
+		{"proven permissive", []RuleFinding{proven, marked}, false, "permissive", []bool{false, true}, "alert"},
+		{"proven strict", []RuleFinding{proven}, false, "strict", []bool{false}, "alert"},
 		{"self-protection permissive", []RuleFinding{state, marked}, false, "permissive", []bool{false, true}, "block"},
 		{"self-protection strict", []RuleFinding{state}, false, "strict", []bool{false}, "block"},
 		{"self-protection secure client", []RuleFinding{state}, true, "permissive", []bool{false}, "allow"},
@@ -212,17 +233,15 @@ func TestGAP0675ShellProtectedFilePostureDecision(t *testing.T) {
 		{"Bash", "", true}, {"shell", "", true}, {"exec_command", "", true}, {"terminal", "", true},
 		{"write_file", "", false}, {"Write", "", false}, {"apply_patch", "x", false}, {"persist", "", false},
 		{"anything", "echo x", true},
-		// A command that may name the DefenseClaw state is self-protection.
-		{"Bash", "ln -s ../.defenseclaw d && echo x >> d/config.yaml", false},
-		{"Bash", "d=.Defense; e=Claw; ln -s ../$d$e k; echo x >> k/config.yaml", false},
-		// A patch envelope a shell runs keeps the enforcement of the patch.
-		{"Bash", "apply_patch <<'P'\n*** Begin Patch\n*** Update File: x\n*** End Patch\nP", false},
-		{"exec_command", "cat k.patch | applypatch", false},
 	} {
 		marks := markShellProtectedFileFindings(trustedActionRequest{Input: actionfacts.Input{Tool: tc.tool, Command: tc.command}},
 			[]RuleFinding{{RuleID: "PERSISTENCE.SSH_AUTHORIZED_KEYS_COMMAND"}, {RuleID: "tamper.detector_state_write"}})
-		if marks[0].shellProtectedFile != tc.shell || marks[1].shellProtectedFile {
-			t.Errorf("%s %q: marks=%v,%v want %v,false", tc.tool, tc.command, marks[0].shellProtectedFile, marks[1].shellProtectedFile, tc.shell)
+		want := shellFileNone
+		if tc.shell {
+			want = shellFileUnproven
+		}
+		if marks[0].shellFile != want || marks[1].shellFile != shellFileNone {
+			t.Errorf("%s %q: marks=%v,%v want %v,none", tc.tool, tc.command, marks[0].shellFile, marks[1].shellFile, want)
 		}
 	}
 }
@@ -267,7 +286,7 @@ func TestGAP0675ShellProtectedFileAuditRowRecordsTheDecision(t *testing.T) {
 		t.Skip("POSIX home")
 	}
 	_, cwd := shellProtectedFileHome(t)
-	for posture, want := range map[string]string{"default": "alert", "strict": "block"} {
+	for posture, want := range map[string]string{"default": "block", "strict": "block"} {
 		t.Run(posture, func(t *testing.T) {
 			installToolCallCorpusProfileConnector(t, "claudecode", posture)
 			store, logger := testStoreAndLogger(t)
@@ -302,5 +321,62 @@ func TestGAP0675ShellProtectedFileAuditRowRecordsTheDecision(t *testing.T) {
 				t.Fatalf("audit row=%s, want action %q with the rule id", recorded, want)
 			}
 		})
+	}
+}
+
+// rel-1-0-6:GAP-0675 review 2: a command that names no protected file and
+// holds only an ordinary word, or a comment with the word, is never blocked
+// in the default profile on any hook route, per-user or managed; the class
+// is not decided by the words defense or apply_patch.
+func TestGAP0675BenignNearVariantsDoNotBlockInDefault(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell rows")
+	}
+	f := newB36ManagedHookFixture(t)
+	for _, connector := range []string{"claudecode", "codex"} {
+		installToolCallCorpusProfileConnector(t, connector, "default")
+	}
+	baseline := "for f in src/*.c; do b1=\"${f%.c}.bak\"; cp \"$f\" \"$b1\"; done\n{ g4=logs/g4.log; echo \"$c4\" >> \"$g4\"; }"
+	for _, row := range []struct{ name, command string }{
+		{"baseline", baseline},
+		{"comment defense", baseline + "\n# defense"},
+		{"comment apply_patch", baseline + "\n# apply_patch"},
+		{"comment begin patch", baseline + "\n# *** Begin Patch"},
+		{"ordinary word defense", baseline + "\necho defense > ordinary/note"},
+	} {
+		payload := f.payload(t, row.command)
+		header := f.clientHeader(t, payload)
+		for _, call := range everyMode(row.name, payload, header) {
+			mode := os.FileMode(0o700)
+			if call.managed {
+				mode = 0
+			}
+			if err := os.Chmod(f.homes, mode); err != nil {
+				t.Fatal(err)
+			}
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = call.connector
+			cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "default")
+			api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(call.payload)))
+			if call.managed && call.header != "" {
+				req.Header.Set(hookpaths.Header, call.header)
+			}
+			if call.connector == "codex" {
+				setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
+			}
+			if call.managed {
+				req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: f.home}))
+			}
+			recorder := httptest.NewRecorder()
+			api.handleAgentHook(call.connector).ServeHTTP(recorder, req)
+			if strings.HasPrefix(recorder.Body.String(), "{\"action\":\"block\"") {
+				t.Errorf("%s %s managed=%v: blocked: %.200s", row.name, call.connector, call.managed, recorder.Body.String())
+			}
+		}
+		if err := os.Chmod(f.homes, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

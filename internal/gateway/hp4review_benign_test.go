@@ -47,9 +47,8 @@ var hp4ReviewRows = []struct{ name, command, want string }{
 	{"r2-redir-echo-link-ordinary", "echo x >> $(echo node_modules/.bin/tsc)", "allow"},
 	{"r2-redir-dirlink-ordinary", "echo x >> $(echo node_modules/@acme/ui/index.js)", "allow"},
 	{"r2-known-hosts", "ssh-keyscan github.com >> ~/.ssh/known_hosts", "allow"},
-	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-	{"r2-ssh-config", "echo 'Host gh' >> ~/.ssh/config", "alert"},
-	{"r2-ssh-config-subst", "echo 'Host gh' >> $(echo ~/.ssh/config)", "alert"},
+	{"r2-ssh-config", "echo 'Host gh' >> ~/.ssh/config", "block"},
+	{"r2-ssh-config-subst", "echo 'Host gh' >> $(echo ~/.ssh/config)", "block"},
 	{"r2-pubkey-copy", "cat ~/.ssh/id_ed25519.pub > pubkey.txt", ""},
 	// R3 GAP-0313 shape: a pwsh writer to a project file.
 	{"r3-set-content-path", "pwsh -Command \"Set-Content -Path package.json -Value x\"", "allow"},
@@ -216,9 +215,8 @@ func TestHP4ReviewProjectPatternTargetsFourCell(t *testing.T) {
 	}
 	checkHP7ClientRows(t, f, []hp7ClientRow{
 		{"HP4/read-only-star", `pat='*'; ls -d $pat`, "allow", "allow"},
-		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-		{"HP4/writing-star", `pat='*'; touch $pat`, "alert", "alert"},
-		{"HP4/brace-member-link", `touch {1..300}`, "alert", "alert"},
+		{"HP4/writing-star", `pat='*'; touch $pat`, "block", "block"},
+		{"HP4/brace-member-link", `touch {1..300}`, "block", "block"},
 	})
 }
 

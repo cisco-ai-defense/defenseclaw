@@ -95,8 +95,6 @@ func (f b36ManagedHookFixture) post(t *testing.T, connector string, payload []by
 		return "block"
 	case strings.HasPrefix(body, `{"action":"allow"`):
 		return "allow"
-	case strings.HasPrefix(body, `{"action":"alert"`):
-		return "alert"
 	}
 	return fmt.Sprintf("status %d body %.200s", recorder.Code, body)
 }
@@ -131,9 +129,8 @@ func TestR103B36RealBoundedHeaderKeepsTruncation(t *testing.T) {
 			t.Fatalf("%s: the bounded map lists the last operand; the proof needs it omitted", name)
 		}
 		for _, connector := range []string{"claudecode", "codex"} {
-			// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-			if got := f.post(t, connector, payload, header); got != "alert" {
-				t.Errorf("%s/%s: bounded header verdict = %s, want alert", connector, name, got)
+			if got := f.post(t, connector, payload, header); got != "block" {
+				t.Errorf("%s/%s: bounded header verdict = %s, want block", connector, name, got)
 			}
 		}
 	}
@@ -182,14 +179,11 @@ func TestR103B36IncompleteEvidenceNotMorePermissive(t *testing.T) {
 		}
 		for _, connector := range []string{"claudecode", "codex"} {
 			baseline := f.post(t, connector, payload, header(noFact))
-			// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-			// A no-fact alert is compared as a block is: no other form may
-			// answer below it.
-			if baseline != "block" && baseline != "alert" {
+			if baseline != "block" {
 				continue
 			}
 			for mode, value := range modes {
-				if got := f.post(t, connector, payload, value); strongerGuardrailAction(got, baseline) != got {
+				if got := f.post(t, connector, payload, value); got != "block" {
 					t.Errorf("%s/%s %q = %s, more permissive than the no-fact header", connector, mode, command, got)
 				}
 			}
@@ -210,10 +204,8 @@ func TestR103B36HeaderlessManagedShellCallFailsClosed(t *testing.T) {
 			t.Fatalf("%s: the real client sends no header", command)
 		}
 		for _, connector := range []string{"claudecode", "codex"} {
-			// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute). The
-			// unplaced write is reported as a possible protected write.
-			if got := f.post(t, connector, payload, ""); got != "alert" {
-				t.Errorf("%s headerless %q = %s, want alert", connector, command, got)
+			if got := f.post(t, connector, payload, ""); got != "block" {
+				t.Errorf("%s headerless %q = %s, want block", connector, command, got)
 			}
 		}
 	}
@@ -290,23 +282,21 @@ func TestR103B36BoundedHeaderOmittedOperandsStayUnknown(t *testing.T) {
 			t.Fatal("real client header is not a bounded map")
 		}
 	}
-	// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-	// The case-variant spellings keep their block.
-	for name, row := range map[string]struct{ suffix, want string }{
-		"dynamic_var":        {`; x=keylink; echo hi > "$x"`, "alert"},
-		"dynamic_home":       {`; x=../.ssh/authorized_keys; echo hi > "$x"`, "alert"},
-		"absolute_protected": {" > " + f.keys, "alert"},
-		"parent_link":        {" > dirlink/authorized_keys", "alert"},
-		"link_dotdot":        {" > a/b/../authorized_keys", "alert"},
-		"ascii_case":         {" > ../.SSH/AUTHORIZED_KEYS", "block"},
-		"unicode_case":       {" > ../.ssh/authorİzed_keys", "block"},
+	for name, suffix := range map[string]string{
+		"dynamic_var":        `; x=keylink; echo hi > "$x"`,
+		"dynamic_home":       `; x=../.ssh/authorized_keys; echo hi > "$x"`,
+		"absolute_protected": " > " + f.keys,
+		"parent_link":        " > dirlink/authorized_keys",
+		"link_dotdot":        " > a/b/../authorized_keys",
+		"ascii_case":         " > ../.SSH/AUTHORIZED_KEYS",
+		"unicode_case":       " > ../.ssh/authorİzed_keys",
 	} {
-		payload := f.payload(t, filler.String()+row.suffix)
+		payload := f.payload(t, filler.String()+suffix)
 		header := f.clientHeader(t, payload)
 		bounded(header)
 		for _, connector := range []string{"claudecode", "codex"} {
-			if got := f.post(t, connector, payload, header); got != row.want {
-				t.Errorf("%s/%s: bounded header verdict = %s, want %s", connector, name, got, row.want)
+			if got := f.post(t, connector, payload, header); got != "block" {
+				t.Errorf("%s/%s: bounded header verdict = %s, want block", connector, name, got)
 			}
 		}
 	}
@@ -319,12 +309,9 @@ func TestR103B36BoundedHeaderOmittedOperandsStayUnknown(t *testing.T) {
 	link := f.payload(t, "echo hi > keylink")
 	markerOnly := encodeTargets(t, map[string]string{hookpaths.CWDKey: f.project, hookpaths.TruncatedKey: "1"})
 	for _, connector := range []string{"claudecode", "codex"} {
-		// rel-1-0-6:GAP-0675 (owner 2026-11-06): the default profile alerts on a shell-command protected-file write; strict blocks it (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
-		for mode, row := range map[string]struct{ header, want string }{
-			"reused_header": {benignHeader, "block"}, "cwd_and_marker": {markerOnly, "alert"},
-		} {
-			if got := f.post(t, connector, link, row.header); got != row.want {
-				t.Errorf("%s/%s: protected link write = %s, want %s", connector, mode, got, row.want)
+		for mode, header := range map[string]string{"reused_header": benignHeader, "cwd_and_marker": markerOnly} {
+			if got := f.post(t, connector, link, header); got != "block" {
+				t.Errorf("%s/%s: protected link write = %s, want block", connector, mode, got)
 			}
 		}
 		// Known limit: the omitted benign operands stay unknown.
