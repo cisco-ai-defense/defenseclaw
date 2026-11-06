@@ -1720,7 +1720,14 @@ func sendHookRequest(
 	opts.requestFacts.set(req.Header, opts, payload)
 	var delivery *hookDeliveryRequest
 	if wantsHookDeliveryReceipt(opts) {
+		// The answer timer ends the hook's wait, but the request body must
+		// remain writable long enough to carry the watchdog's outcome.
+		transportCtx, cancelTransport := context.WithDeadline(
+			context.WithoutCancel(req.Context()), opts.answerWatch.ceiling.Add(answerWatchdogLogWait))
+		req = req.WithContext(transportCtx)
 		req, delivery = prepareHookDeliveryRequest(req, payload, hookDeliveryWait(opts), hookDeliveryGatewayStarting(opts))
+		delivery.setCancel(cancelTransport)
+		opts.answerWatch.setDeadlineDelivery(delivery)
 	}
 
 	var connected atomic.Bool

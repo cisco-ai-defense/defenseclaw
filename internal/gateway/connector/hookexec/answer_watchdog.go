@@ -99,6 +99,7 @@ type answerWatchdog struct {
 	// allow, and replaces it with a block when one changed (hookexec,
 	// GAP-0488, GAP-0073). It reports whether it did.
 	revoke func(stdout, stderr io.Writer) (int, bool)
+	deadlineDelivery             *hookDeliveryRequest
 
 	// installCheck is the install look of a call whose fallback is not
 	// closed: the .install.lock of a per-user call's data directory
@@ -912,75 +913,99 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	w.fired = true
 	_, _ = w.stderr.Write(w.fallbackErr)
 	_, _ = w.stdout.Write(w.fallbackOut)
+	// The token and local record describe this same committed answer. Send
+	// them concurrently; neither may add a second exit wait to the hook.
+	receiptDone := make(chan struct{})
+	if delivery := w.deadlineDelivery; delivery != nil && !w.secureClient {
+		blocked := w.fallbackBlocked
+		// The transport remains open for the token after the answer timer
+		// ends. Close it at the same bounded exit window if the process is
+		// simulated rather than exited (as in tests).
+		time.AfterFunc(answerWatchdogLogWait, delivery.close)
+		go func() {
+			_ = delivery.deadline(blocked)
+			close(receiptDone)
+		}()
+	} else {
+		close(receiptDone)
+	}
 	if w.exit == nil {
 		if !w.failureLogged {
 			w.logFailure()
 		}
 		return
 	}
-	if w.failureLogged {
-		if w.failureLogDone != nil {
-			expired, stopWait := proofclock.NewTimer(answerWatchdogLogWait)
-			select {
-			case <-w.failureLogDone:
-			case <-expired:
-				select {
-				case <-w.failureLogDone:
-				default:
-					if w.failureLog.markerEnabled {
-						if w.fallbackBlocked {
-							w.failureLog.promoteFallbackClosed()
-						}
-						if saved, _ := w.failureLog.appendFallbackWithin(answerWatchdogLogWait); !saved {
-							fmt.Fprintln(os.Stderr, "defenseclaw: local failure record could not be appended before exit")
-						}
-					}
-				}
-			}
-			stopWait()
+	localDone := (<-chan struct{})(w.failureLogDone)
+	var markerDone <-chan bool
+	markerTried, ordinaryStarted := false, false
+	startOrdinary := func() {
+		if ordinaryStarted || w.failureLogged {
+			return
 		}
-		w.exit(w.fallbackCode)
-		return
+		ordinaryStarted = true
+		done := make(chan struct{})
+		localDone = done
+		logFailure := w.logFailure
+		go func() {
+			defer close(done)
+			logFailure()
+		}()
 	}
-	// If the ordinary log is still opening, the prepared marker can finish
-	// this deadline record without starting another open after exit.
-	if remaining > answerWatchdogLogWait && w.failureLog.markerEnabled && !w.failureLog.ordinaryReady() {
+	startMarker := func() {
+		if markerTried || !w.failureLog.markerEnabled {
+			return
+		}
+		markerTried = true
 		if w.fallbackBlocked {
 			w.failureLog.promoteFallbackClosed()
 		}
-		saved, _ := w.failureLog.appendFallbackWithin(answerWatchdogLogWait)
-		if saved {
-			w.failureLog.close()
-			w.exit(w.fallbackCode)
-			return
-		}
-		// If the marker is stalled, the ordinary logger still has a
-		// bounded chance to leave the call's decision before exit.
+		result := make(chan bool, 1)
+		markerDone = result
+		go func() { result <- w.failureLog.appendFallback() }()
 	}
-	logged := make(chan struct{})
-	logFailure := w.logFailure
-	go func() {
-		defer close(logged)
-		logFailure()
-	}()
-	expired, stopWait := proofclock.NewTimer(answerWatchdogLogWait)
-	select {
-	case <-logged:
-	case <-expired:
+	// Prefer a prepared ordinary descriptor. If its open is still pending,
+	// the prepared fallback can record the committed answer immediately.
+	if !w.failureLogged {
+		if remaining > answerWatchdogLogWait && w.failureLog.markerEnabled && !w.failureLog.ordinaryReady() {
+			startMarker()
+		} else {
+			startOrdinary()
+		}
+	}
+	recorded := false
+	deadlineExpired, stopDeadline := proofclock.NewTimer(answerWatchdogLogWait)
+	defer stopDeadline()
+	fallbackExpired, stopFallback := proofclock.NewTimer(answerWatchdogLogWait / 2)
+	defer stopFallback()
+	for !recorded || receiptDone != nil {
 		select {
-		case <-logged:
-		default:
-			if w.failureLog.markerEnabled {
-				if w.fallbackBlocked {
-					w.failureLog.promoteFallbackClosed()
-				}
-				if saved, finished := w.failureLog.appendFallbackWithin(answerWatchdogLogWait); !saved && finished {
-					w.failureLog.forceFallback()
+		case <-localDone:
+			localDone = nil
+			recorded = true
+		case <-receiptDone:
+			receiptDone = nil
+		case saved := <-markerDone:
+			markerDone = nil
+			if saved {
+				recorded = true
+			} else {
+				startOrdinary()
+			}
+		case <-fallbackExpired:
+			if !recorded {
+				if markerTried {
+					startOrdinary()
+				} else {
+					startMarker()
 				}
 			}
+		case <-deadlineExpired:
+			if !recorded {
+				fmt.Fprintln(os.Stderr, "defenseclaw: local failure record could not be appended before exit")
+			}
+			recorded, receiptDone = true, nil
 		}
 	}
-	stopWait()
 	// Production exits here; the lock is never released, so the call's own
 	// output cannot follow the answer.
 	w.exit(w.fallbackCode)
@@ -1255,5 +1280,13 @@ func (w *answerWatchdog) setRevoke(revoke func(stdout, stderr io.Writer) (int, b
 func (w *answerWatchdog) setDeliveryReceipt(receipt func(bool, bool)) {
 	w.mu.Lock()
 	w.deliveryReceipt = receipt
+	w.mu.Unlock()
+}
+
+func (w *answerWatchdog) setDeadlineDelivery(delivery *hookDeliveryRequest) {
+	w.mu.Lock()
+	if !w.fired {
+		w.deadlineDelivery = delivery
+	}
 	w.mu.Unlock()
 }
