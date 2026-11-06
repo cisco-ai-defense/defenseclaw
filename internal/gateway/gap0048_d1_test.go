@@ -75,7 +75,7 @@ func TestRV3GX048D1(t *testing.T) {
 		}
 		return false
 	}
-	total, judged := 0, 0
+	total, judged, strictGitBlocks := 0, 0, 0
 	tally := map[string]int{}
 	run := func(id, tool string, in map[string]any) {
 		judged++
@@ -89,6 +89,11 @@ func TestRV3GX048D1(t *testing.T) {
 			}
 			action := rv2Action(got)
 			tally[profile+"/"+action+"/"+rule]++
+			if profile == "strict" && action == "block" && rule != "-" {
+				if command, _ := in["command"].(string); strings.Contains(command, "git ") {
+					strictGitBlocks++
+				}
+			}
 			if rule != "-" {
 				text, _ := json.Marshal(in)
 				s := string(text)
@@ -149,5 +154,8 @@ func TestRV3GX048D1(t *testing.T) {
 	t.Logf("RV3D1TALLY total=%d judged=%d %v", total, judged, tally)
 	if tally["default/block/disable"] != 0 || tally["default/block/write"] != 0 {
 		t.Fatalf("balanced blocked benign gx048 calls: %v", tally)
+	}
+	if strictGitBlocks != 0 {
+		t.Fatalf("strict blocked %d benign git calls", strictGitBlocks)
 	}
 }

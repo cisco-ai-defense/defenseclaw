@@ -11,15 +11,15 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// ProtectedReach runs the shared concrete shell mutation reader against a
+// RegistrationWriteReach runs the shared concrete shell mutation reader against a
 // caller-supplied registration set. It uses the same value, directory and
 // link resolution as the protected state decision, including ordered shell
 // assignments and cd-relative operands. It reports only a proved write.
-func ProtectedReach(command, cwd, home string, names []string) bool {
+func RegistrationWriteReach(command, cwd, home string, names []string) bool {
 	if command == "" || !filepath.IsAbs(cwd) || len(names) == 0 {
 		return false
 	}
-	if !actionClientWriteCandidate(command) && !strings.Contains(command, "rmdir") && !strings.Contains(command, "perl") {
+	if !RegistrationWriteCandidate(command) {
 		return false
 	}
 	file, ok := parseShell(command)
@@ -27,6 +27,7 @@ func ProtectedReach(command, cwd, home string, names []string) bool {
 		return false
 	}
 	protected := make(protectedFiles, 0, len(names))
+	fileProtected := make(protectedFiles, 0, len(names))
 	for _, name := range names {
 		if !filepath.IsAbs(name) {
 			continue
@@ -39,12 +40,43 @@ func ProtectedReach(command, cwd, home string, names []string) bool {
 			entry.unknown = true
 		}
 		protected = append(protected, entry)
+		if entry.info == nil || !entry.info.IsDir() {
+			fileProtected = append(fileProtected, entry)
+		}
 	}
 	if actionClientResolvedProtectedWrite(file, command, cwd, home, protected, "") {
 		return true
 	}
-	if protectedPipelineRemoval(file, cwd, home, protected) {
+	readOperands := func(body, dir string) bool {
+		writes := LiteralWriteOperands(body, dir, home)
+		writes = append(writes, InPlaceEditOperands(body, dir, home)...)
+		if strings.Contains(body, ">") {
+			redirects, _, _ := ShellWriteOperands(body, dir, home)
+			writes = append(writes, redirects...)
+			bounded, _ := BoundedShellWriteOperands(body, dir, home)
+			writes = append(writes, bounded...)
+		}
+		for _, path := range writes {
+			if protectedReachPath(OperandPath(path, dir), fileProtected, "") {
+				return true
+			}
+		}
+		return false
+	}
+	if readOperands(command, cwd) {
 		return true
+	}
+	if registrationPatchReach(file, cwd, home, protected) {
+		return true
+	}
+	if strings.Contains(command, "cd ") || strings.Contains(command, "pushd ") {
+		if statements, ok := TopLevelStatements(command, cwd, home); ok {
+			for _, statement := range statements {
+				if readOperands(statement.Command, statement.Dir) {
+					return true
+				}
+			}
+		}
 	}
 	values := actionValues{"HOME": home, "PWD": cwd}
 	currentCWD := cwd
@@ -73,16 +105,30 @@ func ProtectedReach(command, cwd, home string, names []string) bool {
 			return true
 		}
 		program, known := staticProgramWord(call.Args[0], home)
-		if known && programBase(program) == "find" && protectedFindDelete(call, currentCWD, home, protected) {
-			found = true
-			return false
-		}
-		if known && programBase(program) == "perl" && protectedPerlInPlace(call, currentCWD, home, protected) {
-			found = true
-			return false
-		}
-		if known && (programBase(program) == "rm" || programBase(program) == "rmdir" || programBase(program) == "unlink") {
+		base := programBase(program)
+		if known && (base == "rm" || base == "rmdir" || base == "unlink" || base == "mv" ||
+			base == "chmod" || base == "chown" || base == "chgrp" || base == "setfacl" || base == "chattr") {
+			lastOperand := len(call.Args) - 1
+			targetDir := false
 			for _, word := range call.Args[1:] {
+				value, fixed := StaticWord(word, home)
+				if fixed && (value == "-t" || value == "--target-directory" || strings.HasPrefix(value, "--target-directory=")) {
+					targetDir = true
+				}
+			}
+			for index, word := range call.Args[1:] {
+				if base == "mv" && !targetDir && index+1 == lastOperand {
+					continue // the last operand receives the source
+				}
+				if actionWordHasBraceText(word) {
+					for _, value := range actionMentionBraceFields(word, home) {
+						if protectedReachPath(OperandPath(value, currentCWD), protected, "") {
+							found = true
+							return false
+						}
+					}
+					continue
+				}
 				value, known := actionWordValueWithGlob(word, values, currentCWD, home, true)
 				if !known || value == "" || strings.HasPrefix(value, "-") {
 					continue
@@ -112,97 +158,82 @@ func ProtectedReach(command, cwd, home string, names []string) bool {
 	return found
 }
 
-func protectedFindDelete(call *syntax.CallExpr, cwd, home string, protected protectedFiles) bool {
-	if len(call.Args) < 4 {
-		return false
+// RegistrationWriteCandidate is the shared reader's cheap hot-path gate.
+func RegistrationWriteCandidate(command string) bool {
+	if strings.ContainsAny(command, ">") {
+		return true
 	}
-	root, known := StaticWord(call.Args[1], home)
-	if !known {
-		return false
-	}
-	root = OperandPath(root, cwd)
-	name, deletes := "", false
-	for i := 2; i < len(call.Args); i++ {
-		word, known := StaticWord(call.Args[i], home)
-		if !known {
-			return false
-		}
-		switch word {
-		case "-name", "-iname":
-			i++
-			if i >= len(call.Args) {
-				return false
-			}
-			name, known = StaticWord(call.Args[i], home)
-			if !known {
-				return false
-			}
-		case "-delete":
-			deletes = true
-		}
-	}
-	if !deletes || name == "" {
-		return false
-	}
-	for _, target := range protected {
-		if target.path == root || !strings.HasPrefix(target.path, root+string(filepath.Separator)) {
-			continue
-		}
-		if match, err := filepath.Match(name, filepath.Base(target.path)); err == nil && match {
+	for _, word := range []string{"rm", "mv", "cp", "ln", "sed", "perl", "patch", "chmod", "chown", "chgrp", "setfacl", "chattr", "find", "truncate", "touch", "install", "rsync", "tar", "unzip", "dd", "tee", "sponge", "python", "node", "ruby", "bash", "zsh", "dash", "ksh", "sh"} {
+		if strings.Contains(command, word) {
 			return true
 		}
 	}
 	return false
 }
 
-func protectedPerlInPlace(call *syntax.CallExpr, cwd, home string, protected protectedFiles) bool {
-	inPlace, code := false, false
-	for _, arg := range call.Args[1:] {
-		value, known := StaticWord(arg, home)
-		if !known {
-			return false
-		}
-		if code {
-			code = false
-			continue
-		}
-		if value == "-e" {
-			code = true
-			continue
-		}
-		if strings.HasPrefix(value, "-") {
-			inPlace = inPlace || strings.Contains(value, "i")
-			continue
-		}
-		if inPlace && protectedReachPath(OperandPath(value, cwd), protected, "") {
-			return true
-		}
-	}
-	return false
-}
-
-func protectedPipelineRemoval(file *syntax.File, cwd, home string, protected protectedFiles) bool {
+// registrationPatchReach reads a literal patch source named by the same
+// command. It uses the caller's registration set for the target comparison.
+func registrationPatchReach(file *syntax.File, cwd, home string, protected protectedFiles) bool {
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
-		pipe, ok := node.(*syntax.BinaryCmd)
-		if !ok || pipe.Op != syntax.Pipe {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) < 2 || found {
+			return !found
+		}
+		program, fixed := StaticWord(call.Args[0], home)
+		if !fixed || programBase(program) != "patch" {
 			return true
 		}
-		producer, left := pipe.X.Cmd.(*syntax.CallExpr)
-		consumer, right := pipe.Y.Cmd.(*syntax.CallExpr)
-		if !left || !right || len(producer.Args) != 2 || len(consumer.Args) < 2 {
+		var operands []string
+		patchSource := ""
+		for i := 1; i < len(call.Args); i++ {
+			word, fixed := StaticWord(call.Args[i], home)
+			if !fixed {
+				return true
+			}
+			if word == "--dry-run" {
+				return true
+			}
+			if word == "-i" || word == "--input" {
+				i++
+				if i < len(call.Args) {
+					patchSource, _ = StaticWord(call.Args[i], home)
+				}
+				continue
+			}
+			if value, ok := strings.CutPrefix(word, "--input="); ok {
+				patchSource = value
+				continue
+			}
+			if strings.HasPrefix(word, "-") {
+				continue
+			}
+			operands = append(operands, word)
+		}
+		if len(operands) > 0 && protectedReachPath(OperandPath(operands[0], cwd), protected, "") {
+			found = true
+			return false
+		}
+		if patchSource == "" && len(operands) > 1 {
+			patchSource = operands[len(operands)-1]
+		}
+		if patchSource == "" {
 			return true
 		}
-		from, f := StaticWord(producer.Args[0], home)
-		to, t := StaticWord(consumer.Args[0], home)
-		remove, r := StaticWord(consumer.Args[1], home)
-		if !f || !t || !r || programBase(from) != "echo" || programBase(to) != "xargs" ||
-			programBase(remove) != "rm" {
+		body, err := os.ReadFile(OperandPath(patchSource, cwd))
+		if err != nil || len(body) > 1<<20 {
 			return true
 		}
-		path, known := StaticWord(producer.Args[1], home)
-		found = known && protectedReachPath(OperandPath(path, cwd), protected, "")
-		return !found
+		for _, line := range strings.Split(string(body), "\n") {
+			if path, ok := strings.CutPrefix(line, "+++ b/"); ok {
+				path, _, _ = strings.Cut(path, "\t")
+				if protectedReachPath(OperandPath(path, cwd), protected, "") {
+					found = true
+					return false
+				}
+			}
+		}
+		return true
 	})
 	return found
 }
