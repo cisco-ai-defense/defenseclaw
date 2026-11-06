@@ -207,7 +207,9 @@ try {
     $codexDir = [IO.Path]::Combine($script:ProgramData, 'OpenAI', 'Codex')
     $codexPolicy = [IO.Path]::Combine($codexDir, 'requirements.toml')
     $codexState = [IO.Path]::Combine($codexDir, '.defenseclaw-managed-hooks.state')
-    $codexLockPath = [IO.Path]::Combine($codexDir, '.defenseclaw-managed-hooks.lock')
+    $codexLockPath = [IO.Path]::Combine($codexDir, '.defenseclaw-managed-hooks.writer.lock')
+    # The lock of 1.0.8 and earlier goes too (GAP-0650).
+    $codexLegacyLockPath = [IO.Path]::Combine($codexDir, '.defenseclaw-managed-hooks.lock')
     $adminCodex = [Text.Encoding]::UTF8.GetBytes("approval_policy = `"never`"`n")
     $postimage = [Text.Encoding]::UTF8.GetBytes("approval_policy = `"never`"`n[hooks]`nmanaged = true`n")
     $standaloneRoot = [IO.Path]::Combine($script:ProgramFiles, 'Cisco', 'DefenseClaw')
@@ -233,13 +235,14 @@ try {
         New-SmokeFile -Path $codexPolicy -Text ([Text.Encoding]::UTF8.GetString($Policy))
         Write-SmokeJson -Path $codexState -Value @{ schema_version = 1; hook_executable = $standaloneHook }
         New-SmokeFile -Path $codexLockPath -Text ''
+        New-SmokeFile -Path $codexLegacyLockPath -Text ''
         Write-SmokeJson -Path $movedOwnership -Value $forcedOwnership
     }
     & $newForcedCase $postimage
     $result = Complete-DefenseClawForcedUninstall -Result ([pscustomobject]@{ ok = $true }) `
         -MovedStateRoot $moved -MovedInstallReceipt '' -Layout $forcedLayout
     Assert-Smoke (Test-SmokeSameBytes -Path $codexPolicy -Expected $adminCodex) 'the forced uninstall did not put the administrator''s Codex requirements.toml back'
-    Assert-Smoke (-not [IO.File]::Exists($codexState) -and -not [IO.File]::Exists($codexLockPath)) 'the forced uninstall left DefenseClaw''s Codex state beside the restored policy'
+    Assert-Smoke (-not [IO.File]::Exists($codexState) -and -not [IO.File]::Exists($codexLockPath) -and -not [IO.File]::Exists($codexLegacyLockPath)) 'the forced uninstall left DefenseClaw''s Codex state or a lock beside the restored policy'
     Assert-Smoke ($script:removedTrees -contains $moved -and $null -eq $result.PSObject.Properties['forced_state_root_kept']) 'the forced uninstall kept a StateRoot nothing needs'
     Assert-Smoke ([bool]$result.forced) 'the forced uninstall result is not marked forced'
 

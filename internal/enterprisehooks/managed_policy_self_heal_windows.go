@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
@@ -77,14 +78,19 @@ func windowsManagedPolicySelfHealFolders() []windowsManagedPolicySelfHealFolder 
 		})
 	}
 	if requirementsPath, err := windowsCodexMachineRequirementsPath(); err == nil {
-		// The Codex state and lock share the Claude leaf names; the Codex
-		// writer makes all three user-readable.
+		// The Codex state shares the Claude leaf name; the Codex writer makes
+		// it and requirements.toml user-readable. The Codex writer lock keeps
+		// its own descriptor (BUILTIN\Users read attributes only), which every
+		// transaction puts back, so the guardian only clears its attributes
+		// and repairs it when an untrusted account can write or owns it. The
+		// lock of 1.0.8 and earlier is no longer re-stamped user-readable: the
+		// first transaction of this release removes it (GAP-0650).
 		folders = append(folders, windowsManagedPolicySelfHealFolder{
 			path: filepath.Dir(requirementsPath),
 			files: append([]windowsManagedPolicySelfHealFile{
 				{name: filepath.Base(requirementsPath), userReadable: true, clear: windowsManagedPolicyStateAttributes, exact: true},
 				{name: windowsClaudeManagedStateFile, userReadable: true, clear: windowsManagedPolicyStateAttributes, exact: true, marker: true},
-				{name: windowsClaudeManagedLockFile, userReadable: true, clear: windowsManagedPolicyLockAttributes, exact: true, lock: true},
+				{name: connector.WindowsCodexManagedWriterLockFile, clear: windowsManagedPolicyLockAttributes, lock: true},
 			}, selector...),
 		})
 	}

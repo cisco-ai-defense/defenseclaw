@@ -145,9 +145,9 @@ func RemoveWindowsPerUserRuntimeSelectors() error {
 }
 
 // RemoveWindowsStandaloneManagedPolicyLocks removes the Claude Code and Codex
-// managed-policy transaction lock files in those vendors' machine-policy
-// folders. A lock that is not a plain administrator-owned file stays and is
-// reported.
+// managed-policy transaction lock files (the Codex writer lock and the lock of
+// 1.0.8 and earlier) in those vendors' machine-policy folders. A lock that is
+// not a plain administrator-owned file stays and is reported.
 func RemoveWindowsStandaloneManagedPolicyLocks(codexRequirementsPath string) error {
 	if !windowsEnterpriseStandaloneProcess() {
 		return nil
@@ -158,7 +158,11 @@ func RemoveWindowsStandaloneManagedPolicyLocks(codexRequirementsPath string) err
 	}
 	locks := []string{filepath.Join(filepath.Dir(policyPath), windowsClaudeManagedLockFile)}
 	if path := strings.TrimSpace(codexRequirementsPath); path != "" {
-		locks = append(locks, filepath.Join(filepath.Dir(filepath.Clean(path)), windowsClaudeManagedLockFile))
+		codexDir := filepath.Dir(filepath.Clean(path))
+		locks = append(locks,
+			filepath.Join(codexDir, connector.WindowsCodexManagedWriterLockFile),
+			// The lock of 1.0.8 and earlier (GAP-0650).
+			filepath.Join(codexDir, windowsClaudeManagedLockFile))
 	}
 	var errs []error
 	for _, lock := range locks {
