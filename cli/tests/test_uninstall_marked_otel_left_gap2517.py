@@ -54,7 +54,7 @@ def _homes(tmp_path, monkeypatch, codex: str, claude_env: dict) -> tuple[str, st
 
 
 def _run_uninstall(monkeypatch) -> str:
-    plan = SimpleNamespace(connectors=(), data_dir="")
+    plan = SimpleNamespace(connectors=(), data_dir="", legacy_setup=None)
     monkeypatch.setattr(cmd_uninstall, "_build_plan", lambda **_: plan)
     monkeypatch.setattr(cmd_uninstall, "_with_listed_sandboxes", lambda p, _stop: p)
     monkeypatch.setattr(cmd_uninstall, "_render_plan", lambda *_a, **_k: None)

@@ -615,7 +615,7 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             hook.parent.mkdir(parents=True)
             hook.write_bytes(b"MZ")
             (local / "DefenseClaw" / "InstallerState").mkdir()
-            with patch.object(cmd_uninstall, "_windows_local_app_data", return_value=str(local)):
+            with patch.object(cmd_uninstall.legacy_setup_install, "local_app_data", return_value=str(local)):
                 leftovers = cmd_uninstall._windows_setup_leftovers("win32")
                 self.assertEqual(len(leftovers), 2)
                 cmd_uninstall._remove_setup_leftovers(leftovers)
@@ -637,7 +637,7 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             copy.write_bytes(b"MZ")
             (runtime / "defenseclaw-hook.exe").write_bytes(b"MZ")
             state = runtime / "hook-runtime-state.json"
-            with patch.object(cmd_uninstall, "_windows_local_app_data", return_value=str(local)):
+            with patch.object(cmd_uninstall.legacy_setup_install, "local_app_data", return_value=str(local)):
                 state.write_text(json.dumps({"schema_version": 2, "hook_path": str(copy)}), encoding="utf-8")
                 leftovers = cmd_uninstall._windows_setup_leftovers("win32")
                 self.assertEqual(leftovers, (str(runtime),))
