@@ -134,7 +134,7 @@ Exit codes:
 
 func init() {
 	enterpriseHooksScrubCmd.Flags().StringVar(&scrubConnectorFlag, "connector", "",
-		"Connector whose entries to remove: codex, claudecode, or cursor (required)")
+		"Connector whose entries to remove: codex, claudecode, cursor, or copilot (required)")
 	enterpriseHooksScrubCmd.Flags().StringVar(&scrubFileFlag, "file", "",
 		"Path to the agent config file to scrub (required)")
 	enterpriseHooksScrubCmd.Flags().StringVar(&scrubDataDirMarker, "datadir-marker", "",
@@ -200,6 +200,7 @@ func runEnterpriseHooksScrub(cmd *cobra.Command, _ []string) error {
 		"cursor":     scrubCursorFile,
 		"claudecode": scrubClaudeCodeFile,
 		"codex":      scrubCodexFile,
+		"copilot":    scrubCopilotFile,
 	}[connector]
 	if !ok {
 		return &scrubExitError{code: 3, msg: fmt.Sprintf("enterprise hooks scrub: unsupported connector: %q", scrubConnectorFlag)}
@@ -276,6 +277,14 @@ func scrubCursorFile(path string, markers []string) (bool, error) {
 		return false, fmt.Errorf("parse JSON: %w", err)
 	}
 	hooks, _ := cfg["hooks"].(map[string]any)
+	scrubFlatHookEntries(hooks, markers)
+	return writeSortedJSON(path, cfg, data)
+}
+
+// scrubFlatHookEntries drops the owned entries from a hooks map whose
+// events list their commands directly (Cursor's hooks.json, Copilot's
+// hook files), and the events left empty.
+func scrubFlatHookEntries(hooks map[string]any, markers []string) {
 	// `range` over a nil map iterates zero times, so the previous
 	// `if hooks != nil` guard was redundant (golangci-lint S1031).
 	for event, raw := range hooks {
@@ -295,7 +304,52 @@ func scrubCursorFile(path string, markers []string) (bool, error) {
 			hooks[event] = kept
 		}
 	}
+}
+
+// ---- GitHub Copilot CLI JSON (~/.copilot/hooks/defenseclaw.json) -------
+
+// copilotOwnedHookFileName is the hook file DefenseClaw writes whole in
+// Copilot's hooks folder.
+const copilotOwnedHookFileName = "defenseclaw.json"
+
+// scrubCopilotFile removes DefenseClaw's entries from a Copilot hook file
+// ({"version": 1, "hooks": {event: [{"type": "command", "bash": ...}]}}).
+// defenseclaw.json is DefenseClaw's own file, so once no hook is left in it
+// and it holds nothing but version and hooks it is removed instead of being
+// left empty. Only a scrub running as the user removes it; as root (the
+// uninstaller's retry) the emptied document is written in place, so root
+// never deletes by a path the user controls.
+func scrubCopilotFile(path string, markers []string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return false, fmt.Errorf("parse JSON: %w", err)
+	}
+	hooks, _ := cfg["hooks"].(map[string]any)
+	scrubFlatHookEntries(hooks, markers)
+	if filepath.Base(path) == copilotOwnedHookFileName && len(hooks) == 0 && copilotHookFileOnlyEnvelope(cfg) && os.Geteuid() != 0 {
+		if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
+			if err := os.Remove(path); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+	}
 	return writeSortedJSON(path, cfg, data)
+}
+
+// copilotHookFileOnlyEnvelope reports whether cfg holds no key besides
+// Copilot's version and hooks.
+func copilotHookFileOnlyEnvelope(cfg map[string]any) bool {
+	for key := range cfg {
+		if key != "version" && key != "hooks" {
+			return false
+		}
+	}
+	return true
 }
 
 // ---- Claude Code JSON (~/.claude/settings.json) ------------------------

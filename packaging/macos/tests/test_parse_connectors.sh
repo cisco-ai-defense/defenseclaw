@@ -68,6 +68,8 @@ t_is_supported() {
   assert_status "${rc}" 0 "claudecode supported"
   is_supported_connector "cursor"; rc=$?
   assert_status "${rc}" 0 "cursor supported"
+  is_supported_connector "copilot"; rc=$?
+  assert_status "${rc}" 0 "copilot supported"
   is_supported_connector "opencode"; rc=$?
   assert_status "${rc}" 0 "opencode supported"
   is_supported_connector "retired-example"; rc=$?
@@ -80,7 +82,7 @@ t_classify_zero_target_none_installed() {
   # Rerun of the installer won't help — the enumerator's tick will pick
   # it up as soon as the user installs Amp/Codex/ClaudeCode/Cursor/OpenCode.
   local got
-  got="$(classify_zero_target_reason "amp,codex,claudecode,cursor,opencode")"
+  got="$(classify_zero_target_reason "amp,codex,claudecode,copilot,cursor,opencode")"
   assert_eq "${got}" "none-installed" "all-supported list -> none-installed"
   got="$(classify_zero_target_reason "amp")"
   assert_eq "${got}" "none-installed" "single-supported (amp) list -> none-installed"
@@ -88,6 +90,8 @@ t_classify_zero_target_none_installed() {
   assert_eq "${got}" "none-installed" "single-supported (codex) list -> none-installed"
   got="$(classify_zero_target_reason "opencode")"
   assert_eq "${got}" "none-installed" "single-supported (opencode) list -> none-installed"
+  got="$(classify_zero_target_reason "copilot")"
+  assert_eq "${got}" "none-installed" "single-supported (copilot) list -> none-installed"
   got="$(classify_zero_target_reason "codex,retired-example")"
   assert_eq "${got}" "none-installed" "mixed supported+unsupported -> none-installed (supported wins)"
 }
@@ -100,7 +104,7 @@ t_classify_zero_target_all_unsupported() {
   local got
   got="$(classify_zero_target_reason "retired-example")"
   assert_eq "${got}" "all-unsupported" "unknown single connector -> all-unsupported"
-  got="$(classify_zero_target_reason "retired-example,copilot")"
+  got="$(classify_zero_target_reason "retired-example,kiro")"
   assert_eq "${got}" "all-unsupported" "unknown multi-connector -> all-unsupported"
 }
 

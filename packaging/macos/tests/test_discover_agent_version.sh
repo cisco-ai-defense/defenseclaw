@@ -16,7 +16,7 @@ without_host_agent_bins() {
   local fakebin
   fakebin="$(mktest_tmp)"
   local bin
-  for bin in amp claude codex opencode; do
+  for bin in amp claude codex copilot opencode; do
     cat > "${fakebin}/${bin}" <<'SH'
 #!/usr/bin/env bash
 exit 127
@@ -36,6 +36,42 @@ JSON
   local got
   got="$(without_host_agent_bins discover_agent_version amp "${home}")"
   assert_eq "${got}" "0.0.1777777777-gabc123" "amp version from trusted package metadata"
+}
+
+t_copilot_from_user_npm_metadata_without_executing_cli() {
+  local home; home="$(mktest_tmp)"
+  local pkg_dir="${home}/.npm-global/lib/node_modules/@github/copilot"
+  mkdir -p "${pkg_dir}"
+  cat > "${pkg_dir}/package.json" <<'JSON'
+{ "name": "@github/copilot", "version": "1.0.105" }
+JSON
+  local got
+  got="$(without_host_agent_bins discover_agent_version copilot "${home}")"
+  assert_eq "${got}" "1.0.105" "copilot version from its npm package metadata"
+}
+
+t_copilot_from_nvm_global_metadata() {
+  local home; home="$(mktest_tmp)"
+  local pkg_dir="${home}/.nvm/versions/node/v22.11.0/lib/node_modules/@github/copilot"
+  mkdir -p "${pkg_dir}"
+  cat > "${pkg_dir}/package.json" <<'JSON'
+{ "name": "@github/copilot", "version": "1.0.97" }
+JSON
+  local got
+  got="$(without_host_agent_bins discover_agent_version copilot "${home}")"
+  assert_eq "${got}" "1.0.97" "copilot version from an nvm global install"
+}
+
+t_copilot_metadata_requires_package_identity() {
+  local home; home="$(mktest_tmp)"
+  local pkg_dir="${home}/.npm-global/lib/node_modules/@github/copilot"
+  mkdir -p "${pkg_dir}"
+  cat > "${pkg_dir}/package.json" <<'JSON'
+{ "name": "@attacker/not-copilot", "version": "9.9.9" }
+JSON
+  local got
+  got="$(without_host_agent_bins discover_agent_version copilot "${home}")"
+  [[ "${got}" != "9.9.9" ]] || _fail "a package that is not @github/copilot set the Copilot version"
 }
 
 t_amp_metadata_requires_package_identity() {
@@ -1110,6 +1146,9 @@ t_discover_agent_version_records_error_for_corrupt_codex_npm() {
 run_case "amp from trusted user npm metadata" t_amp_from_user_npm_metadata_without_executing_cli
 run_case "amp package metadata identity"      t_amp_metadata_requires_package_identity
 run_case "amp without metadata is unversioned" t_amp_missing_metadata_may_be_unversioned
+run_case "copilot from trusted user npm metadata" t_copilot_from_user_npm_metadata_without_executing_cli
+run_case "copilot from nvm global metadata"      t_copilot_from_nvm_global_metadata
+run_case "copilot package metadata identity"     t_copilot_metadata_requires_package_identity
 run_case "claudecode via Cursor extension"   t_claudecode_via_cursor_extension
 run_case "cursor versionless user bundle falls through" t_cursor_versionless_user_bundle_falls_through_to_system_root
 run_case "cursor app plist version probe" t_cursor_app_version_reads_plist_or_nothing
