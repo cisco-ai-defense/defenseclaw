@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -518,8 +517,9 @@ func outagePayloadNamesProtected(value interface{}, key, cwd, home, dataDir stri
 		switch strings.ToLower(key) {
 		case "command", "cmd", "script", "command_line", "commandline":
 			command := outageCommandWithEnv(item, env)
-			return hookpaths.ActionStateTargetMention(command, cwd, home) ||
+			return hookpaths.ActionStateTargetMention(item, cwd, home) ||
 				hookpaths.ActionCommandDecision(command, cwd, home) == "protected-target" ||
+				outageExpandedCommandTargetsProtected(command, cwd, home, dataDir) ||
 				outageCommandTargetsDataRoot(command, cwd, home, dataDir)
 		case "path", "file", "filepath", "file_path", "target", "destination", "dest", "output", "output_path", "filename":
 			path := strings.ReplaceAll(strings.ReplaceAll(item, "${HOME}", home), "$HOME", home)
@@ -552,33 +552,92 @@ func outageCommandWithEnv(command string, env map[string]interface{}) string {
 	if len(env) == 0 || runtime.GOOS == "windows" {
 		return command
 	}
-	names := make([]string, 0, len(env))
-	for name, value := range env {
-		if len(name) == 0 || !((name[0] >= 'A' && name[0] <= 'Z') || (name[0] >= 'a' && name[0] <= 'z') || name[0] == '_') {
+	var expanded strings.Builder
+	expanded.Grow(len(command))
+	quote := byte(0)
+	for i := 0; i < len(command); {
+		c := command[i]
+		if c == '\\' && quote != '\'' && i+1 < len(command) {
+			expanded.WriteString(command[i : i+2])
+			i += 2
 			continue
 		}
-		valid := true
-		for i := 1; i < len(name); i++ {
-			c := name[i]
-			if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
-				valid = false
-				break
+		if c == '\'' && quote != '"' || c == '"' && quote != '\'' {
+			if quote == c {
+				quote = 0
+			} else if quote == 0 {
+				quote = c
+			}
+			expanded.WriteByte(c)
+			i++
+			continue
+		}
+		if c != '$' || quote == '\'' {
+			expanded.WriteByte(c)
+			i++
+			continue
+		}
+		start := i + 1
+		end := start
+		braced := start < len(command) && command[start] == '{'
+		if braced {
+			start++
+			end = start
+		}
+		if start < len(command) && outageEnvNameStart(command[start]) {
+			end = start + 1
+			for end < len(command) && outageEnvNamePart(command[end]) {
+				end++
+			}
+			if !braced || end < len(command) && command[end] == '}' {
+				if value, ok := env[command[start:end]].(string); ok {
+					if quote == '"' {
+						replacer := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`, "`", "\\`")
+						expanded.WriteString(replacer.Replace(value))
+					} else {
+						expanded.WriteByte('\'')
+						expanded.WriteString(strings.ReplaceAll(value, "'", "'\\''"))
+						expanded.WriteByte('\'')
+					}
+					i = end
+					if braced {
+						i++
+					}
+					continue
+				}
 			}
 		}
-		if _, ok := value.(string); valid && ok {
-			names = append(names, name)
+		expanded.WriteByte(c)
+		i++
+	}
+	return expanded.String()
+}
+
+func outageEnvNameStart(c byte) bool {
+	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c == '_'
+}
+
+func outageEnvNamePart(c byte) bool {
+	return outageEnvNameStart(c) || c >= '0' && c <= '9'
+}
+
+func outageExpandedCommandTargetsProtected(command, cwd, home, dataDir string) bool {
+	facts := actionfacts.Analyze(actionfacts.Input{Tool: "exec", Command: command, CWD: cwd, ActiveHome: home})
+	for _, candidate := range facts.Paths {
+		switch candidate.Access {
+		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
+		default:
+			continue
+		}
+		path := candidate.Resolved
+		if path == "" {
+			path = candidate.Value
+		}
+		if path != "" && outagePathProtected(path, cwd, home, dataDir) {
+			return true
 		}
 	}
-	sort.Strings(names)
-	var prefix strings.Builder
-	for _, name := range names {
-		value := env[name].(string)
-		prefix.WriteString(name)
-		prefix.WriteString("='")
-		prefix.WriteString(strings.ReplaceAll(value, "'", "'\\''"))
-		prefix.WriteString("'; ")
-	}
-	return prefix.String() + command
+	return false
 }
 
 func outageCommandTargetsDataRoot(command, cwd, home, dataDir string) bool {
