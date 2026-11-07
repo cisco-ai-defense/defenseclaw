@@ -111,8 +111,17 @@ def python_timings(files: list[Path]) -> dict:
 # The Windows parts run one package at a time (-p=1), so every package also
 # pays for linking its test binary, which its reported elapsed time leaves out.
 WINDOWS_LINK_SECONDS = 6.0
-# The packages Windows Native CI splits by test (go_test_shards.py test mode).
-WINDOWS_TEST_SHARDED = ("internal/gateway", "internal/gateway/connector", "internal/gateway/connector/hookexec")
+# The packages Windows Native CI splits by test (go_test_shards.py test mode,
+# and package mode for internal/hookpaths: its program sweep and archive table
+# take about 20 minutes on a hosted runner, more than one shard step,
+# GAP-0749). A package missing here loses its per-test times at a refresh and
+# runs whole again.
+WINDOWS_TEST_SHARDED = (
+    "internal/gateway",
+    "internal/gateway/connector",
+    "internal/gateway/connector/hookexec",
+    "internal/hookpaths",
+)
 
 
 def windows_go_timings(files: list[Path], module: str) -> dict:
