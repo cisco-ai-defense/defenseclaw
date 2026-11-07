@@ -61,7 +61,7 @@
   "github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb": 0.1,
   "github.com/defenseclaw/defenseclaw/internal/hermespath": 1.1,
   "github.com/defenseclaw/defenseclaw/internal/hermesskills": 1.0,
-  "github.com/defenseclaw/defenseclaw/internal/hookpaths": 6.1,
+  "github.com/defenseclaw/defenseclaw/internal/hookpaths": 477.9,
   "github.com/defenseclaw/defenseclaw/internal/hookruntime": 0.1,
   "github.com/defenseclaw/defenseclaw/internal/inventory": 62.0,
   "github.com/defenseclaw/defenseclaw/internal/inventory/ideplugins": 3.8,
@@ -1858,6 +1858,21 @@
    "TestWatchdogArmedBeforeRunLogsItsAnswer": 3.0,
    "TestWatchdogRowSurvivesASlowAccountLookup": 4.7,
    "TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason": 2.8
+  },
+  "internal/hookpaths": {
+   "*": 0.084,
+   "TestClientStatementBudgetHeader": 3.2,
+   "TestGAP0055ArchiveProgramsShortArgvTable": 166.3,
+   "TestGAP0055ProgramBranchesShortArgvNoPanicPart0": 35.6,
+   "TestGAP0055ProgramBranchesShortArgvNoPanicPart1": 34.7,
+   "TestGAP0055ProgramBranchesShortArgvNoPanicPart2": 35.3,
+   "TestGAP0055ProgramBranchesShortArgvNoPanicPart3": 34.9,
+   "TestGAP0055ProgramBranchesShortArgvNoPanicPart4": 35.4,
+   "TestGAP0055ProgramBranchesShortArgvNoPanicPart5": 34.8,
+   "TestGAP0055ProgramBranchesShortArgvNoPanicPart6": 35.3,
+   "TestGAP0055ProgramBranchesShortArgvNoPanicPart7": 35.0,
+   "TestLongWindowsHeredocChecksEachDistinctCandidateOnce": 2.8,
+   "TestResolveConnectorBoundsDeepNesting": 2.9
   },
   "internal/observability/runtime": {
    "*": 1.609,
