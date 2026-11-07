@@ -47,6 +47,12 @@ func TestFileToolWindowsVendorFolderOrdinaryFileAndShortNameShapeAllowAndAliases
 				`C:\Program Files\ClaudeCode\notes.txt`,
 				`C:\P~1\ClaudeCode\managed-settings.json`,
 				`C:\PROG~1\ClaudeCode\managed-settings.json`,
+				`C:\Program Files\ClaudeCode\MANAGE~0.JSO`,
+				`C:\Program Files\ClaudeCode\MANAGE~5.JSO`,
+				`C:\PROGRA~0\ClaudeCode\managed-settings.json`,
+				`C:\PROGRA~5\ClaudeCode\managed-settings.json`,
+				`C:\ProgramData\OpenAI\CODEX~1\requirements.toml`,
+				`C:\ProgramData\CURSOR~1\hooks.json`,
 			} {
 				input := map[string]any{"file_path": file, "content": "x"}
 				if _, got := postFileToolCell(t, home, home+`\proj`, "Write", input, managed, pack); strings.HasPrefix(got, fileToolBlockPrefix) {
