@@ -1335,7 +1335,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				// calls; the gateway judges each (GAP-1016, agent-hook), so
 				// each is described and the maps are merged.
 				if list, isList := calls.([]any); isList && len(list) > 1 {
-					return resolveCopilotCalls(connector, surface, event, envelope, list)
+					return resolveCopilotCalls(connector, surface, event, envelope, list, watch)
 				}
 				return incompleteEvidence("")
 			}
@@ -2417,7 +2417,7 @@ func (w *PatchTargetWatch) Changed() bool {
 // TruncatedKey is set when any call's map is incomplete, and PatchCompleteKey
 // only when every apply_patch call is complete. A call that is not one fully
 // named call, or a merged map over the bounds, is incomplete.
-func resolveCopilotCalls(connector, surface, event string, envelope map[string]json.RawMessage, calls []any) string {
+func resolveCopilotCalls(connector, surface, event string, envelope map[string]json.RawMessage, calls []any, watch **PatchTargetWatch) string {
 	if len(calls) > MaxWriteTargets {
 		return incompleteEvidence("")
 	}
@@ -2481,6 +2481,15 @@ func resolveCopilotCalls(connector, surface, event string, envelope map[string]j
 	encoded, err := json.Marshal(merged)
 	if err != nil || len(encoded) > maxEncodedTargets || len(merged) > 2*MaxWriteTargets+6 {
 		return incompleteEvidence(cwd)
+	}
+	if watch != nil {
+		// Every target of every call is watched, taken from the merged map
+		// the hook sends: a complete attestation always comes with its watch.
+		home, err := os.UserHomeDir()
+		if err != nil && merged[PatchCompleteKey] == "1" {
+			return incompleteEvidence(cwd)
+		}
+		*watch = patchTargetWatchOf(merged, home)
 	}
 	return base64.RawURLEncoding.EncodeToString(encoded)
 }
