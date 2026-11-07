@@ -193,3 +193,39 @@ func TestGAP0669PurgeKeepsLifecycleLocksNoWriterCreates(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0669 review 4 M4: only the paths the managed writers create are managed.
+// The hook token is written as hooks/.hook-<name>.token and the flat hook
+// record as hooks/.hookcfg.<name>; a hook-like name at the root of the data
+// directory has no writer, so it is the account own, for every connector name
+// (built-in, removed or unknown) and survives with a kept entry.
+func TestGAP0669PurgeKeepsRootLevelHookLookalikes(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), ".defenseclaw")
+	keep := []string{
+		".hook-codex.token", ".hook-amp.token", ".hook-openhands.token", ".hook-notaconnector.token",
+		".hookcfg-codex.json", ".hookcfg-amp.json", ".hookcfg-openhands.json", ".hookcfg-notaconnector.json",
+		".hookcfg.codex",
+	}
+	managed := []string{"hooks/.hook-codex.token", "hooks/.hookcfg.codex", "session-facts.json"}
+	writeG669Files(t, dataDir, append(slices.Clone(keep), managed...))
+	result, err := PurgeUserStateWithResult(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Removed {
+		t.Errorf("the managed entries were not reported removed")
+	}
+	if !slices.Equal(slices.Sorted(slices.Values(result.Kept)), slices.Sorted(slices.Values(keep))) {
+		t.Errorf("kept = %v, want %v", result.Kept, keep)
+	}
+	for _, rel := range keep {
+		if got, err := os.ReadFile(filepath.Join(dataDir, rel)); err != nil || string(got) != rel {
+			t.Errorf("account entry %s changed: %q, %v", rel, got, err)
+		}
+	}
+	for _, rel := range managed {
+		if _, err := os.Lstat(filepath.Join(dataDir, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+			t.Errorf("managed entry %s stayed: %v", rel, err)
+		}
+	}
+}

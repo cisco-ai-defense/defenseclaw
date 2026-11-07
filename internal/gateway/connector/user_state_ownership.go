@@ -59,16 +59,6 @@ func ManagedUserStateFile(rel string) bool {
 			codexLifecycleLockName, hermesLifecycleLockName:
 			return true
 		}
-		if kind, ok := strings.CutPrefix(rel, ".hook-"); ok {
-			if kind, ok = strings.CutSuffix(kind, ".token"); ok && (IsKnownBuiltinConnector(kind) || IsRemovedConnector(kind)) {
-				return true
-			}
-		}
-		if kind, ok := strings.CutPrefix(rel, ".hookcfg-"); ok {
-			if kind, ok = strings.CutSuffix(kind, ".json"); ok && (IsKnownBuiltinConnector(kind) || IsRemovedConnector(kind)) {
-				return true
-			}
-		}
 		return false
 	}
 	if parts[0] == "acp" {
