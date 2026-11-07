@@ -252,9 +252,15 @@ func projectSkillSourceFolders(root, name, source, home, cwd string) []string {
 
 // projectSkillManifestFolder reports whether a resolved manifest path is the
 // SKILL.md of the folder holding it, so that folder is the skill it belongs to.
+// The two are compared by file identity, not by path: a hard link is the same
+// file under another spelling, while a distinct sibling manifest is not.
 func projectSkillManifestFolder(manifest string) bool {
-	own, err := filepath.EvalSymlinks(filepath.Join(filepath.Dir(manifest), "SKILL.md"))
-	return err == nil && projectSkillRootKey(own) == projectSkillRootKey(manifest)
+	own, err := os.Stat(filepath.Join(filepath.Dir(manifest), "SKILL.md"))
+	if err != nil {
+		return false
+	}
+	target, err := os.Stat(manifest)
+	return err == nil && os.SameFile(own, target)
 }
 
 // projectSkillSourceSelects reports whether a resolved source selects the
