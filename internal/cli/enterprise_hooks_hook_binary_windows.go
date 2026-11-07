@@ -170,7 +170,9 @@ func keepWindowsStandaloneHookBinary(stderr io.Writer, onlyWhenDamaged bool) {
 	damage, err := keepWindowsManagedFileCopy(target, copyPath, want, !onlyWhenDamaged)
 	reportWindowsHookBinaryDigestRefusal(stderr, target)
 	reportWindowsImageSwapLinkRefusal(stderr, target)
+	reportWindowsImageBackupRestrictFailure(stderr)
 	reportWindowsHeldSwapNotice(stderr, target)
+	reportWindowsHookHoldersClosed(stderr, target)
 	if err != nil {
 		if message := err.Error(); message != windowsHookBinaryLastErr {
 			windowsHookBinaryLastErr = message
@@ -202,6 +204,47 @@ func reportWindowsImageSwapLinkRefusal(stderr io.Writer, target string) {
 	}
 	windowsImageSwapLinkRefusalLogged = refusal
 	fmt.Fprintf(stderr, "[hook-guardian] notice: restored the hook binary %s without the one-step swap: %s; an agent starting it in that moment can get an error (GAP-0369)\n", target, refusal)
+}
+
+// windowsHookHoldersClosed is set when a check ended a hold on the hook by
+// closing the holders' handles; windowsHookHoldersLogged keeps it to one line
+// until a check finds the hook free (GAP-0755).
+var (
+	windowsHookHoldersClosed []string
+	windowsHookHoldersLogged bool
+)
+
+// reportWindowsHookHoldersClosed logs, once per hold, that the guardian
+// closed another program's handle on the hook.
+func reportWindowsHookHoldersClosed(stderr io.Writer, target string) {
+	closed := windowsHookHoldersClosed
+	windowsHookHoldersClosed = nil
+	if len(closed) == 0 || windowsHookHoldersLogged {
+		return
+	}
+	windowsHookHoldersLogged = true
+	fmt.Fprintf(stderr, "[hook-guardian] tamper: closed the handle %s had on the hook binary %s with no sharing, which refused every start of it; the file was not changed. Logged once until the hook is free\n", strings.Join(closed, ", "), target)
+}
+
+// windowsImageBackupRestrictFailure is set when a swap could not close the
+// backup name to users; windowsImageBackupRestrictLogged keeps one line per
+// error until a later restriction succeeds (review L9).
+var (
+	windowsImageBackupRestrictFailure struct{ backup, err string }
+	windowsImageBackupRestrictLogged  string
+)
+
+// reportWindowsImageBackupRestrictFailure logs, once per error, that the old
+// hook image kept under its backup name stays startable by users until the
+// backup is deleted.
+func reportWindowsImageBackupRestrictFailure(stderr io.Writer) {
+	failure := windowsImageBackupRestrictFailure
+	windowsImageBackupRestrictFailure.backup, windowsImageBackupRestrictFailure.err = "", ""
+	if failure.err == "" || failure.err == windowsImageBackupRestrictLogged {
+		return
+	}
+	windowsImageBackupRestrictLogged = failure.err
+	fmt.Fprintf(stderr, "[hook-guardian] notice: could not close the backup %s of the replaced hook binary to administrators: %s; until the guardian deletes it, users can start the old hook from that name; logged once until a swap closes a backup\n", failure.backup, failure.err)
 }
 
 // The guardian calls this while holding windowsHookBinaryMu, once after each
@@ -289,13 +332,24 @@ func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (st
 	default:
 		verdict, err := decideGuardianTargetDigest(target, want,
 			guardianTargetHookSHA256Hex, windowsFileSHA256Hex, windowsHookBinaryStructuralDamage)
+		held := ""
 		if err != nil {
-			return "", err
-		}
-		windowsHookBinarySharedDigestOK = verdict.refusal == ""
-		damage, missing = verdict.damage, verdict.missing
-		if damage != "" {
-			break
+			// GAP-0755: a handle that shares nothing (any user may open the
+			// hook that way) refuses the guardian's own reads as well as every
+			// start, so the digest cannot be read and this used to end the
+			// pass with a read error before the held check ran. When a
+			// start-style open is refused too, the hook is held, whatever
+			// the digest read said.
+			if held = windowsHookBinaryHeldOpen(target); held == "" {
+				return "", err
+			}
+		} else {
+			windowsHookBinarySharedDigestOK = verdict.refusal == ""
+			damage, missing = verdict.damage, verdict.missing
+			if damage != "" {
+				break
+			}
+			held = windowsHookBinaryHeldOpen(target)
 		}
 		// GAP-0656 review M2: a handle another program holds open for
 		// writing (sharing read and delete) leaves the bytes and the single
@@ -305,7 +359,29 @@ func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (st
 		// start-style open does not say which kind of handle it is (a writer,
 		// or a reader that shares no reading), so the verdict is "held
 		// open".
-		if held := windowsHookBinaryHeldOpen(target); held != "" {
+		if held != "" && windowsHookBinaryDeleteBlocked(target) {
+			// GAP-0755: a handle that shares no deletion (any user may open
+			// the hook that way) cannot be swapped around: the rename that
+			// puts the new file at the name fails for as long as the handle
+			// lives. The guardian closes that handle in its owner instead;
+			// the file stays as it is and starts work at once.
+			closed, closeErr := windowsCloseHookHolders(target)
+			if len(closed) > 0 && !windowsHookBinaryOpenRefused(target) {
+				windowsHookHoldersClosed = closed
+				return "", nil
+			}
+			reason := fmt.Sprintf("the hook binary %s is %s, and the guardian could not end the hold", target, held)
+			if len(closed) > 0 {
+				reason += " (it closed " + strings.Join(closed, ", ") + ", but a start is still refused)"
+			} else if closeErr != nil {
+				reason += " (" + closeErr.Error() + ")"
+			}
+			if err != nil {
+				return "", fmt.Errorf("%s: %w", reason, err)
+			}
+			return "", errors.New(reason)
+		}
+		if held != "" {
 			// The same verdict comes from a handle that shares no reading
 			// (any user may open the hook that way), and the swap cannot
 			// end that hold. So the swaps of one path are bounded: a
@@ -318,6 +394,7 @@ func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (st
 			damage = held
 			break
 		}
+		windowsHookHoldersLogged = false
 		windowsHookBinaryDigestRefusal = verdict.refusal
 		if !refresh {
 			return "", nil
@@ -451,15 +528,16 @@ var windowsHookBinaryOpenRefused = func(path string) bool {
 	return false
 }
 
-// The swaps a held-open verdict causes (GAP-0656 review S5). Any user may
-// open the hook with no sharing, because agents must run it, and that holds
-// every start off until the guardian swaps. The swap cannot end such a hold:
-// the holder reopens the new object, and its handle on the old object
-// blocks the backup's deletion. Unbounded, that is a full-size backup every
-// check. So these swaps back off exponentially for the same path, stop when
-// windowsHeldSwapBackupCap backups are still pending, and say so once. The
-// hold itself is a known limit of a hook image a user may start; the cap
-// bounds the cost, not the hold.
+// The swaps a held-open verdict causes (GAP-0656 review S5). A handle that
+// holds the hook open and shares deletion (a writer, a scanner) keeps every
+// start off until the guardian swaps; a handle that shares no deletion is
+// closed instead, because no swap can replace the name under it (GAP-0755).
+// A swap cannot end a hold: the holder reopens the new object, and its
+// handle on the old object blocks the backup's deletion. Unbounded, that is
+// a full-size backup every check. So these swaps back off exponentially for
+// the same path, stop when windowsHeldSwapBackupCap backups are still
+// pending, and say so once. That any user may hold a hook image they may
+// start is a known limit; the cap bounds the cost, not the hold.
 var (
 	windowsHeldSwapBackoffBase = 10 * time.Second
 	windowsHeldSwapBackoffMax  = 5 * time.Minute
@@ -486,7 +564,10 @@ type windowsHeldSwapState struct {
 func windowsHeldSwapAllowed() (bool, string) {
 	state := &windowsHeldSwaps
 	now := windowsHeldSwapNow()
-	if state.streak > 0 && now.Sub(state.last) > windowsHeldSwapStreakEnd {
+	// The streak ends, and with it the logged flag, ten minutes after the
+	// last held verdict, whether or not that streak ever swapped: a cap or a
+	// backoff can stop the very first verdict (review L8).
+	if !state.last.IsZero() && now.Sub(state.last) > windowsHeldSwapStreakEnd {
 		*state = windowsHeldSwapState{}
 	}
 	state.last = now

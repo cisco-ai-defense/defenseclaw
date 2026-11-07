@@ -6,7 +6,10 @@
 package cli
 
 import (
+	"bufio"
 	"flag"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -294,6 +297,144 @@ func TestKeepWindowsManagedFileCopyReplacesAHookHeldOpenForWriting(t *testing.T)
 	}
 }
 
+// startWindowsExclusiveHolder runs a child process that opens path with no
+// sharing and keeps it open until release is called. The child ends by itself
+// and prints "alive" if its handle was closed by someone else; it is never
+// killed by the test while the fixture is needed.
+func startWindowsExclusiveHolder(t *testing.T, path string) (release func() string) {
+	t.Helper()
+	shell := filepath.Join(os.Getenv("SystemRoot"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+	if _, err := os.Stat(shell); err != nil {
+		t.Skipf("Windows PowerShell unavailable: %v", err)
+	}
+	script := fmt.Sprintf(`$f = [IO.File]::Open('%s', 'Open', 'Read', 'None'); [Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); [void][Console]::In.ReadLine(); [Console]::Out.WriteLine('alive')`, strings.ReplaceAll(path, "'", "''"))
+	cmd := exec.Command(shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	lines := make(chan string, 4)
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			lines <- strings.TrimSpace(scanner.Text())
+		}
+		close(lines)
+	}()
+	select {
+	case line := <-lines:
+		if line != "ready" {
+			_ = cmd.Process.Kill()
+			t.Fatalf("holder said %q", line)
+		}
+	case <-time.After(30 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("the holder did not open the file")
+	}
+	done := false
+	release = func() string {
+		if done {
+			return ""
+		}
+		done = true
+		_, _ = io.WriteString(stdin, "\n")
+		answer := ""
+		select {
+		case line := <-lines:
+			answer = line
+		case <-time.After(20 * time.Second):
+		}
+		_ = stdin.Close()
+		_ = cmd.Wait()
+		return answer
+	}
+	t.Cleanup(func() {
+		if !done {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	})
+	return release
+}
+
+// GAP-0755: a handle that shares nothing, held by another process, refuses
+// the guardian's own digest read and every start. A swap cannot end it, so the
+// guardian closes that handle: the next start works on the same file, nothing
+// was moved, no process was ended, and the hold is logged once.
+func TestKeepWindowsManagedFileCopyEndsAnExclusiveHoldOfAnotherProcess(t *testing.T) {
+	resetWindowsHeldSwapsForTest(t)
+	windowsHookHoldersClosed, windowsHookHoldersLogged = nil, false
+	t.Cleanup(func() { windowsHookHoldersClosed, windowsHookHoldersLogged = nil, false })
+	root := t.TempDir()
+	target := filepath.Join(root, "bin", "defenseclaw-hook.exe")
+	copyPath := filepath.Join(root, "hook-guardian", "payload", "defenseclaw-hook.exe")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeWindowsSystemProgram(t, "HOSTNAME.EXE", target, nil)
+	want, err := windowsFileSHA256Hex(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, true); err != nil || damage != "" {
+		t.Fatalf("keep copy: restored %q, %v", damage, err)
+	}
+	before, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := startWindowsExclusiveHolder(t, target)
+	if _, err := exec.Command(target).Output(); err == nil {
+		t.Fatal("a start succeeded while another process held the hook with no sharing; the fixture does not reproduce the failure")
+	}
+	if _, err := windowsFileSHA256Hex(target); err == nil {
+		t.Fatal("the guardian's digest read succeeded under an exclusive handle; the fixture does not reproduce the failure")
+	}
+	damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false)
+	if err != nil || damage != "" {
+		t.Fatalf("first check: restored %q, %v", damage, err)
+	}
+	var log strings.Builder
+	reportWindowsHookHoldersClosed(&log, target)
+	if !strings.Contains(log.String(), "closed the handle powershell.exe (process id") || strings.Count(log.String(), "[hook-guardian]") != 1 {
+		t.Fatalf("log %q", log.String())
+	}
+	if out, err := exec.Command(target).Output(); err != nil || len(strings.TrimSpace(string(out))) == 0 {
+		t.Fatalf("start after the hold was ended: %q, %v", out, err)
+	}
+	after, err := os.Stat(target)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatalf("the hook file changed (%v)", err)
+	}
+	if left, _ := filepath.Glob(target + ".backup.*"); len(left) != 0 {
+		t.Fatalf("a swap was made: %q", left)
+	}
+	if answer := release(); answer != "alive" {
+		t.Fatalf("the holder process did not survive the close (said %q)", answer)
+	}
+	// A hold that returns is ended again; the second line is not logged
+	// until a check has found the hook free.
+	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false); err != nil || damage != "" {
+		t.Fatalf("check on the free hook: restored %q, %v", damage, err)
+	}
+	second := startWindowsExclusiveHolder(t, target)
+	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false); err != nil || damage != "" {
+		t.Fatalf("second hold: restored %q, %v", damage, err)
+	}
+	reportWindowsHookHoldersClosed(&log, target)
+	if strings.Count(log.String(), "[hook-guardian]") != 2 {
+		t.Fatalf("a hold after a free check is logged again, got %q", log.String())
+	}
+	_ = second()
+}
+
 // GAP-0656 review S1 (GAP-0369): on a volume or behind a filter driver that
 // refuses the backup hard link, the restore replaces the hook the older way
 // and the guardian says so once, instead of failing every check.
@@ -530,7 +671,7 @@ func TestWindowsHeldSwapStopsAtTheBackupCapAndLogsOnce(t *testing.T) {
 	}
 	var log strings.Builder
 	for i := 0; i < 5; i++ {
-		advance(time.Hour)
+		advance(time.Minute)
 		allowed, why := windowsHeldSwapAllowed()
 		if allowed {
 			t.Fatalf("check %d swapped with %d backups pending", i, windowsHeldSwapBackupCap)
@@ -551,6 +692,39 @@ func TestWindowsHeldSwapStopsAtTheBackupCapAndLogsOnce(t *testing.T) {
 	}
 	if allowed, _ := windowsHeldSwapAllowed(); !allowed {
 		t.Fatal("no swap once the backups were below the cap")
+	}
+}
+
+// Review L8: when the cap stops the very first held verdict of a streak, the
+// logged flag still ends with the streak, so a hold ten minutes later says so
+// again.
+func TestWindowsHeldSwapNoticeIsLoggedAgainAfterAStreakTheCapStopped(t *testing.T) {
+	resetWindowsHeldSwapsForTest(t)
+	advance := fakeWindowsHeldSwapClock(t)
+	for i := 0; i < windowsHeldSwapBackupCap; i++ {
+		deferWindowsImageBackupRemoval(filepath.Join(`C:\bin`, "defenseclaw-hook.exe.backup."+strings.Repeat("b", 31)+string(rune('a'+i))))
+	}
+	target := `C:\bin\defenseclaw-hook.exe`
+	var log strings.Builder
+	check := func() {
+		t.Helper()
+		allowed, why := windowsHeldSwapAllowed()
+		if allowed {
+			t.Fatal("swapped with the backup cap reached")
+		}
+		windowsHeldSwaps.notice = why
+		reportWindowsHeldSwapNotice(&log, target)
+	}
+	check()
+	advance(time.Minute)
+	check()
+	if got := strings.Count(log.String(), "notice: the hook binary"); got != 1 {
+		t.Fatalf("inside the streak, %d notices: %q", got, log.String())
+	}
+	advance(windowsHeldSwapStreakEnd + time.Second)
+	check()
+	if got := strings.Count(log.String(), "notice: the hook binary"); got != 2 {
+		t.Fatalf("after the streak ended, %d notices: %q", got, log.String())
 	}
 }
 
@@ -680,5 +854,54 @@ func TestSwapWindowsProgramImageClosesTheBackupToUsers(t *testing.T) {
 	t.Cleanup(func() { windowsImageBackupRestrict = previous })
 	if _, err := swapWindowsProgramImage(source, target); err != nil {
 		t.Fatalf("swap with a failing access-list step: %v", err)
+	}
+}
+
+// Review L9: a backup name that could not be closed to users is logged, once
+// per error, not dropped; a later swap that closes its backup ends the
+// suppression.
+func TestSwapWindowsProgramImageLogsAFailedBackupAccessListOnce(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "defenseclaw-hook.exe")
+	source := filepath.Join(dir, "source.exe")
+	_ = os.WriteFile(target, []byte("v0"), 0o600)
+	previous := windowsImageBackupRestrict
+	t.Cleanup(func() { windowsImageBackupRestrict = previous })
+	reset := func() {
+		windowsImageBackupRestrictFailure.backup, windowsImageBackupRestrictFailure.err = "", ""
+		windowsImageBackupRestrictLogged = ""
+	}
+	reset()
+	t.Cleanup(reset)
+	swap := func(body string, restrict func(string) error) string {
+		t.Helper()
+		windowsImageBackupRestrict = restrict
+		if err := os.WriteFile(source, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		backup, err := swapWindowsProgramImage(source, target)
+		if err != nil {
+			t.Fatalf("swap %s: %v", body, err)
+		}
+		return backup
+	}
+	denied := func(string) error { return windows.ERROR_ACCESS_DENIED }
+	var log strings.Builder
+	first := swap("v1", denied)
+	reportWindowsImageBackupRestrictFailure(&log)
+	swap("v2", denied)
+	reportWindowsImageBackupRestrictFailure(&log)
+	reportWindowsImageBackupRestrictFailure(&log)
+	text := log.String()
+	if strings.Count(text, "could not close the backup") != 1 || !strings.Contains(text, first) || !strings.Contains(text, windows.ERROR_ACCESS_DENIED.Error()) {
+		t.Fatalf("two failed swaps logged %q", text)
+	}
+	// A swap that closes its backup ends the suppression.
+	swap("v3", func(string) error { return nil })
+	reportWindowsImageBackupRestrictFailure(&log)
+	swap("v4", denied)
+	reportWindowsImageBackupRestrictFailure(&log)
+	if got := strings.Count(log.String(), "could not close the backup"); got != 2 {
+		t.Fatalf("after a closed backup, %d notices: %q", got, log.String())
 	}
 }

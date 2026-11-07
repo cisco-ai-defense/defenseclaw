@@ -469,6 +469,20 @@ Setup could not replace the named file while another program had it open. For th
 
 **Check.** The command exits `0`.
 
+#### Setup refuses to replace the installed hook
+
+The error says `refusing to replace the installed hook` and ends `Nothing was stopped or changed` (exit `1603`). The installed `defenseclaw-hook.exe` does not match the digest in `C:\ProgramData\Cisco\DefenseClaw\install\deployment.json` (`hashes.hook`), and the guardian's protected copy, `C:\ProgramData\Cisco\DefenseClaw\hook-guardian\payload\defenseclaw-hook.exe`, is missing or does not match it either. Before an upgrade Setup keeps a rollback copy of the hook and checks it against that digest; with no matching copy it stops. The new release's `/repair` does not help: a Setup repairs only its own release and exits `1639`. `/uninstall` refuses with `unrecorded artifact hash drift`.
+
+**Fix.** Wait about 5 seconds and run the new Setup again: a running guardian that still has its copy restores the hook itself. If it still refuses, run `/repair` with the Setup of the release that is installed (the release that installed it, for example 1.0.8, not the new one), as an administrator or as SYSTEM, from the folder with that Setup:
+
+```powershell
+.\DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1
+```
+
+It puts the hook back to the recorded digest and rebuilds the guardian's copy. Then run the new Setup again. Do not copy `defenseclaw-hook.exe` out of the release zip by hand: the digest Setup records is that of the hook inside Setup, and the zip's file need not match it (in 1.0.8 it does not), so the new Setup would still refuse.
+
+**Check.** The new Setup `/ensure` exits `0`.
+
 #### Setup `/ensure` exits `1603` while waiting for the hook guardian
 
 Setup waits up to 10 minutes for the guardian's first reconcile while it makes progress. The error says "the hook guardian's first reconcile is still running" or "the hook guardian process" is "no longer running during its first reconcile".
