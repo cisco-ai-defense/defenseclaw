@@ -261,7 +261,7 @@ Setup exits with Windows Installer codes:
 | --- | --- |
 | `0` | Success, or nothing to do |
 | `1603` | Failure. A failed install, upgrade or repair is rolled back, and a refusal before any change leaves the computer as it was. If the rollback cannot finish, the transaction stays pending ([Recover a pending transaction](#recover-a-pending-transaction)). For `status` and `verify`, the deployment is unhealthy |
-| `1618` | Another lifecycle run holds the lock. Retry later |
+| `1618` | Retry later: another lifecycle run holds the lock, or Setup stopped before it changed anything (`hook_calls_running`, `hook_in_use`, `codex_state_held` or `codex_requirements_held`: hook calls still run, or a program holds the installed hook or a Codex file open) |
 | `1639` | Invalid arguments: a malformed command line (a relative `CONFIG=` path, an unknown property), or arguments the lifecycle rejected (`/ensure` without `CONFIG=` on a computer with no deployment, a config the gateway cannot load, a run `enterprise.trust` refuses). Retrying does not help |
 | `3010` | Reserved. The lifecycle never requests a restart |
 
@@ -896,10 +896,23 @@ Other recovery notes:
   access, or without sharing read access, `/repair` and `/ensure` refuse that file
   by name and change nothing on it, not even its access list. Close the program
   that holds it (a user's agent, an editor), then run Setup `/ensure` again.
+  A file that already has the canonical access list is not written, so a holder
+  does not matter for it. For the Codex `requirements.toml` and the Codex state
+  file of 1.0.8, Setup checks before it stops any service: a program that holds
+  either one without read sharing, or `requirements.toml` with write or delete
+  access while its access list has to be written, stops the run after 30 seconds
+  with `codex_requirements_held` or `codex_state_held` (exit `1618`) and the
+  program's name. Nothing is stopped or changed, and the same command succeeds
+  once the program lets go. A Codex state copy (`.defenseclaw-managed-hooks.state.<n>`)
+  that a user holds open is neither refused nor changed behind the holder. When
+  it is the current copy and the holder denies read sharing, the next Codex
+  transaction publishes a fresh copy under a new name so that the hook and the
+  guardian can read the state; the held copy stays until it is released.
   Programs that only read the file, such as an antivirus scan, do not stop it.
-  The gateway's own database and log files, which the running services keep open for
-  write, refuse only a program that holds them with delete access or without sharing
-  read access.
+  Setup stamps the gateway's own database and log files, which the running
+  services keep open for write, without that hold. The repair the gateway runs on
+  its database files refuses only a program that holds them with delete access or
+  without sharing read access.
 - If Setup `/repair` refuses because the running gateway's installed config
   cannot be validated for rollback, restore an approved, gateway-valid
   `config.yaml` and retry `/repair`. If the refusal names an administrator-selected
