@@ -493,7 +493,7 @@ func (w *answerWatchdog) perUserOutageSeen(opts Options, sp spec, failMode strin
 	if w == nil || !perUserOutageError(opts, err) || !perUserRestartWindowCall(opts, sp) {
 		return
 	}
-	answer := renderPerUserRestartAnswer(opts, sp, failMode)
+	answer := renderPerUserRestartAnswer(opts, sp, failMode, perUserGatewayRestartingReason)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.restart == nil {
@@ -516,7 +516,11 @@ func perUserRestartWindowCall(opts Options, sp spec) bool {
 // gateway is restarting (perUserGatewayRestartingReason), in the outage mode
 // read for the call, with its failure row and install-window answer.
 type perUserRestartAnswer struct {
-	mode                   string
+	mode string
+	// reason is the failure row's reason: the gateway restarting
+	// (perUserGatewayRestartingReason) or a verified gateway that took the
+	// call and was late with an ordinary one (perUserGatewayNoAnswerReason).
+	reason                 string
 	out, err               []byte
 	code                   int
 	logFailure             func()
@@ -527,7 +531,7 @@ type perUserRestartAnswer struct {
 	installLogFailure      func()
 }
 
-func renderPerUserRestartAnswer(opts Options, sp spec, failMode string) *perUserRestartAnswer {
+func renderPerUserRestartAnswer(opts Options, sp spec, failMode, reason string) *perUserRestartAnswer {
 	outage := withPerUserOutage(opts)
 	outage.answerWatch = nil
 	mode := perUserOutageMode(&outage, closeDuringInstall(&outage, failMode))
@@ -536,15 +540,15 @@ func renderPerUserRestartAnswer(opts Options, sp spec, failMode string) *perUser
 	rendered := outage
 	rendered.Stdout, rendered.Stderr = &out, &errb
 	rendered.Home, rendered.FailureLogHome, rendered.HookDir = "", nil, ""
-	answer := &perUserRestartAnswer{mode: mode}
-	answer.code = failUnreachable(rendered, sp, mode, perUserGatewayRestartingReason)
+	answer := &perUserRestartAnswer{mode: mode, reason: reason}
+	answer.code = failUnreachable(rendered, sp, mode, reason)
 	answer.out, answer.err = out.Bytes(), errb.Bytes()
 	logged := outage
 	logged.Stdout, logged.Stderr = io.Discard, io.Discard
-	answer.logFailure = func() { _ = failUnreachable(logged, sp, mode, perUserGatewayRestartingReason) }
+	answer.logFailure = func() { _ = failUnreachable(logged, sp, mode, reason) }
 	if mode == "open" {
 		answer.visible = func() ([]byte, []byte, int) {
-			return renderVisibleOutage(outage, sp, mode, perUserGatewayRestartingReason)
+			return renderVisibleOutage(outage, sp, mode, reason)
 		}
 	}
 	answer.installCheck, answer.installOut, answer.installErr, answer.installCode, answer.installLogFailure =
@@ -576,15 +580,34 @@ func (w *answerWatchdog) restartWindowContact(opts Options, sp spec, failMode st
 	w.restartProof = func() restartProofResult { return proof(home, check) }
 	prepared := w.restart != nil
 	w.mu.Unlock()
-	if !perUserGatewayRecentlyStarted(home) {
+	fresh := perUserGatewayRecentlyStarted(home)
+	if !fresh && opts.lateOrdinary == nil {
 		return
 	}
-	perUserCaptureFreshGatewayOwner(check)
+	if fresh {
+		perUserCaptureFreshGatewayOwner(check)
+	}
 	if prepared {
 		return
 	}
 	go func() {
-		answer := renderPerUserRestartAnswer(opts, sp, failMode)
+		reason := perUserGatewayRestartingReason
+		if !fresh {
+			// A gateway that has been up for a while and took the call may
+			// only be late (a burst, a long operand list). Its call follows
+			// the outage mode at the deadline when the scan finds nothing a
+			// protected file could be reached through (GAP-0518); the proof
+			// is the verified connection itself, with no status or progress
+			// from it (restartWindowCandidateLocked).
+			if !opts.lateOrdinary() {
+				return
+			}
+			reason = perUserGatewayNoAnswerReason
+			w.mu.Lock()
+			w.restartProof = func() restartProofResult { return restartProofResult{ok: true} }
+			w.mu.Unlock()
+		}
+		answer := renderPerUserRestartAnswer(opts, sp, failMode, reason)
 		w.mu.Lock()
 		if w.restart == nil {
 			w.restart = answer
@@ -634,9 +657,9 @@ func (w *answerWatchdog) restartWindowSkipReasonLocked() string {
 // restartWindowProven runs the restart-window proof for the call's own
 // answer path (Run) and returns the outage mode it then follows. Safe on a
 // nil watchdog.
-func (w *answerWatchdog) restartWindowProven() (string, bool) {
+func (w *answerWatchdog) restartWindowProven() (mode, reason string, ok bool) {
 	if w == nil {
-		return "", false
+		return "", "", false
 	}
 	w.mu.Lock()
 	proof := w.restartWindowCandidateLocked()
@@ -644,20 +667,20 @@ func (w *answerWatchdog) restartWindowProven() (string, bool) {
 	w.mu.Unlock()
 	if proof == nil {
 		w.failureLog.setRestartReason(skipReason)
-		return "", false
+		return "", "", false
 	}
 	result := provenWithin(proof, restartProofWait)
 	if !result.ok {
 		w.failureLog.setRestartReason(result.reason)
-		return "", false
+		return "", "", false
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.restartWindowCandidateLocked() == nil {
 		w.failureLog.setRestartReason(w.restartWindowSkipReasonLocked())
-		return "", false
+		return "", "", false
 	}
-	return w.restart.mode, true
+	return w.restart.mode, w.restart.reason, true
 }
 
 // provenWithin runs proof bounded by wait: a proof that takes longer is none.
@@ -686,13 +709,13 @@ func failPerUserRestartWindow(ctx context.Context, opts Options, sp spec, failMo
 		(!gatewayNoAnswer(ctx) && !opts.answerWatch.hasPendingDecision()) {
 		return 0, false
 	}
-	mode, ok := opts.answerWatch.restartWindowProven()
+	mode, reason, ok := opts.answerWatch.restartWindowProven()
 	if !ok {
 		return 0, false
 	}
 	outage := withPerUserOutage(opts)
 	outage.OutageFailModeNow = func() string { return mode }
-	return failUnreachable(outage, sp, failMode, perUserGatewayRestartingReason), true
+	return failUnreachable(outage, sp, failMode, reason), true
 }
 
 // failureLogHomeLookup resolves the invoking user's diagnostic directory of

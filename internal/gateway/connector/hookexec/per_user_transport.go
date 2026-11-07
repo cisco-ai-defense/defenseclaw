@@ -176,6 +176,17 @@ const PerUserPostRestartNoAnswerExit = 10
 // socket-table or gateway.pid look can race the new listener (GAP-0497).
 const PerUserPostRestartOutageExit = 11
 
+// PerUserPostLateOrdinaryExit is the exit status of `hook-post` for a call
+// that got no answer from its verified gateway before the deadline (like
+// PerUserPostNoAnswerExit) and that plainly names nothing a protected file
+// could be reached through (hookpaths.LateOrdinaryCall): a gateway that is up
+// but slow under a burst or a long operand list (GAP-0518). The shell hooks
+// read it as the outage status 7, so the account's outage mode decides: open
+// with the visible warning in the default and permissive tiers, closed in
+// strict and managed ones. The warning names a running gateway that did not
+// answer, not a restart. Every other no-answer keeps PerUserPostNoAnswerExit.
+const PerUserPostLateOrdinaryExit = 12
+
 // PerUserPostNoAnswer reports whether err, from PostPerUserHook, is a request
 // that ended at its deadline with no status: not an outage the transport
 // proved, not a listener it could not verify, not a cut-off or invalid answer.
