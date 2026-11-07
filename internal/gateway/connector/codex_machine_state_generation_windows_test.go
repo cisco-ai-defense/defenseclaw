@@ -186,21 +186,41 @@ func TestWindowsCodexStateHeldOldCopyDoesNotBlockTheNextWrite(t *testing.T) {
 	}
 }
 
-// A transaction that does not write the state carries it forward under its
-// own end value; one that removes it leaves no copy at all.
+// A transaction that changes neither the state nor requirements.toml (Verify,
+// status, a guardian pass with nothing to do) leaves the hook copy alone and
+// the counter where it was (g582 round 9 L1); one that writes the requirements
+// carries the state forward under its own end value; one that removes the
+// state leaves no copy at all.
 func TestWindowsCodexStateCarriesForwardAndIsRemovedWithoutCopies(t *testing.T) {
 	f := newWindowsCodexStateTxFixture(t)
 	first := f.run(t, f.write("kept"))
+	firstCopy := windowsCodexStableStateFile(f.dir, first)
+	firstInfo, err := os.Stat(firstCopy)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var seen windowsCodexStableFile
 	second := f.run(t, func() error {
 		var err error
 		seen, err = readWindowsCodexManagedState(f.state, false)
 		return err
 	})
-	if !seen.existed || string(seen.data) != "kept" || second == first {
-		t.Fatalf("the transaction read %+v at counter %d after %d", seen, second, first)
+	if !seen.existed || string(seen.data) != "kept" || second != first {
+		t.Fatalf("the read-only transaction read %+v and ended at counter %d after %d; want the same counter", seen, second, first)
 	}
 	f.requireStateCopy(t, second, "kept")
+	if secondInfo, err := os.Stat(firstCopy); err != nil || !os.SameFile(firstInfo, secondInfo) || !secondInfo.ModTime().Equal(firstInfo.ModTime()) {
+		t.Fatalf("the read-only transaction rewrote the hook copy: %v", err)
+	}
+
+	third := f.run(t, func() error {
+		windowsCodexActiveManagedState.requirementsTouched = true
+		return nil
+	})
+	if third == second {
+		t.Fatalf("a transaction that wrote requirements.toml kept counter %d; the hook must see the pair change", third)
+	}
+	f.requireStateCopy(t, third, "kept")
 	if _, err := os.Lstat(windowsCodexStableStateFile(f.dir, first)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the earlier copy stayed: %v", err)
 	}
@@ -408,7 +428,7 @@ func TestWindowsCodexHeldRequirementsNamesTheHolderAndRetriesOnRelease(t *testin
 			if !errors.As(err, &heldErr) || report.OK {
 				t.Fatalf("still held: %+v, %v; want the named hold", report, err)
 			}
-			for _, want := range []string{opts.RequirementsPath, "held open by", self, "enforced Codex policy stays in place", "as soon as the file is released"} {
+			for _, want := range []string{opts.RequirementsPath, "held open by", self, "enforced Codex policy stays in place", windowsCodexHeldRetryPromise} {
 				if !strings.Contains(err.Error(), want) || (want == self && !strings.Contains(report.RequirementsHeldBy, self)) {
 					t.Fatalf("held error %q / held_by %q does not name %q", err, report.RequirementsHeldBy, want)
 				}
@@ -418,6 +438,100 @@ func TestWindowsCodexHeldRequirementsNamesTheHolderAndRetriesOnRelease(t *testin
 			}
 			if !windowsCodexStatePresentForTest(t, opts) {
 				t.Fatal("the state the hook reads went while the requirements stayed")
+			}
+		})
+	}
+}
+
+// g582 round 9 S1: the first transaction of 1.0.9 on a host 1.0.8 set up reads
+// the fixed state file, which 1.0.8 made user-readable. A user who holds it
+// open with no sharing at all stops the read. The holder is named and the
+// transaction waits for the release a bounded time, like it does for
+// requirements.toml; after a failed begin nothing was written, so the counter
+// goes back to the value it had and the hook copy it names stays the pair the
+// hook reads, never a half-begun transaction.
+func TestWindowsCodexMigrationOfAFixedNameHeldWithNoSharing(t *testing.T) {
+	for _, released := range []bool{true, false} {
+		t.Run(map[bool]string{true: "released", false: "still held"}[released], func(t *testing.T) {
+			f := newWindowsCodexStateTxFixture(t)
+			live := f.run(t, f.write("live"))
+			// The writer copy of this release is gone, so the next
+			// transaction reads the fixed name of 1.0.8.
+			if err := os.Remove(filepath.Join(f.dir, windowsCodexManagedStateCommittedFile)); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(f.state, []byte("legacy"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			held := holdWindowsCodexFileForTest(t, f.state, 0)
+			closed := false
+			closeHeld := func() {
+				if !closed {
+					closed = true
+					_ = windows.CloseHandle(held)
+				}
+			}
+			defer closeHeld()
+
+			previousWait, previousSleep, previousNow := windowsCodexHeldRetryWait, windowsCodexHeldRetrySleep, windowsCodexHeldRetryNow
+			t.Cleanup(func() {
+				windowsCodexHeldRetryWait, windowsCodexHeldRetrySleep, windowsCodexHeldRetryNow = previousWait, previousSleep, previousNow
+			})
+			now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+			windowsCodexHeldRetryNow = func() time.Time { return now }
+			windowsCodexHeldRetryWait = 10 * time.Second
+			polls := 0
+			windowsCodexHeldRetrySleep = func(d time.Duration) {
+				polls++
+				now = now.Add(d)
+				if released && polls == 1 {
+					closeHeld()
+				}
+			}
+
+			ran := 0
+			err := withWindowsCodexRequirementsReleaseRetry(func() error {
+				return withWindowsCodexMachinePolicyLock(f.requirements, func() error {
+					ran++
+					return nil
+				})
+			})
+			counter, counterErr := readWindowsCodexTransactionCounter(f.lock)
+			if counterErr != nil {
+				t.Fatal(counterErr)
+			}
+			if released {
+				if err != nil || ran != 1 {
+					t.Fatalf("after the release: err = %v, ran %d times; want one run of the transaction", err, ran)
+				}
+				if counter%2 != 0 || counter == live {
+					t.Fatalf("counter = %d after the migration, was %d", counter, live)
+				}
+				f.requireStateCopy(t, counter, "legacy")
+				if _, err := os.Lstat(f.state); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("the fixed name stayed once it was released: %v", err)
+				}
+				return
+			}
+			var heldErr *WindowsCodexRequirementsHeldError
+			self := fmt.Sprintf("(PID %d)", os.Getpid())
+			if !errors.As(err, &heldErr) || !heldErr.Reading || ran != 0 {
+				t.Fatalf("held fixed name: err = %v, ran %d; want the named read hold and no run", err, ran)
+			}
+			for _, want := range []string{f.state, "held open by", self, "cannot read it", windowsCodexHeldRetryPromise} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("held error %q does not name %q", err, want)
+				}
+			}
+			if counter != live {
+				t.Fatalf("counter = %d after the failed begin, want %d: the hook copy it names is still the pair", counter, live)
+			}
+			registry, err := resolveWindowsCodexManagedRuntimeRegistryStable(f.lock, func(stateFile string) (WindowsCodexManagedRuntimeRegistry, error) {
+				data, err := os.ReadFile(stateFile)
+				return WindowsCodexManagedRuntimeRegistry{Active: true, GatewayAddr: string(data)}, err
+			})
+			if err != nil || registry.GatewayAddr != "live" {
+				t.Fatalf("the hook read %+v, %v after the failed begin; want the state it had", registry, err)
 			}
 		})
 	}

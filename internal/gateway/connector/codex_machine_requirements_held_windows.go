@@ -26,8 +26,8 @@ import (
 // as long as the handle stays open. The requirements already in place stay
 // in force: the transaction counter returns to even and the hook keeps
 // reading the last committed pair. DefenseClaw names the holder where
-// Windows can tell (Restart Manager), and writes the update as soon as the
-// file is released.
+// Windows can tell (Restart Manager) and waits for the release a bounded
+// time (windowsCodexHeldRetryPromise says when the update lands).
 
 // WindowsCodexRequirementsHeldError is a requirements.toml write that another
 // process blocked by holding the file open.
@@ -35,15 +35,28 @@ type WindowsCodexRequirementsHeldError struct {
 	Path    string
 	Holders []string
 	Err     error
+	// Reading: the file DefenseClaw could not read was the state file of
+	// 1.0.8, not requirements.toml (g582 round 9 S1).
+	Reading bool
 }
 
 func (e *WindowsCodexRequirementsHeldError) Error() string {
+	action := "write"
+	if e.Reading {
+		action = "read"
+	}
 	return fmt.Sprintf(
-		"%s is held open by %s, so DefenseClaw cannot write it (%v); the enforced Codex policy stays in place, "+
-			"and DefenseClaw writes the update as soon as the file is released",
-		e.Path, e.holder(), e.Err,
+		"%s is held open by %s, so DefenseClaw cannot %s it (%v); the enforced Codex policy stays in place, "+
+			"and %s",
+		e.Path, e.holder(), action, e.Err, windowsCodexHeldRetryPromise,
 	)
 }
+
+// windowsCodexHeldRetryPromise says when the update lands (g582 round 9 S2).
+// It is the one sentence the status line, the error, the docs and the
+// CHANGELOG share.
+const windowsCodexHeldRetryPromise = "if the holder lets go within 30 seconds of the failed attempt, the running command applies the update; " +
+	"otherwise the guardian applies it at its next pass, about a minute later, and a failed Setup run needs the administrator to run it again"
 
 func (e *WindowsCodexRequirementsHeldError) Unwrap() error { return e.Err }
 
@@ -79,8 +92,8 @@ func WindowsCodexRequirementsHoldLine(path string, holders []string) string {
 		holder = strings.Join(holders, ", ")
 	}
 	return fmt.Sprintf("%s is held open by %s; Codex policy updates wait until it is released, "+
-		"the enforced Codex policy stays in place, and DefenseClaw writes the update as soon as the file is released",
-		path, holder)
+		"the enforced Codex policy stays in place, and %s",
+		path, holder, windowsCodexHeldRetryPromise)
 }
 
 // windowsCodexRequirementsHeldBy is the holder a held error names, or "".
@@ -100,8 +113,8 @@ var (
 	// replace it.
 	windowsCodexRequirementsHolders = processutil.FileHolders
 
-	// A held requirements.toml is written again as soon as it is released:
-	// the call polls the file every windowsCodexHeldRetryPoll, without the
+	// A held requirements.toml is written again after it is released: the
+	// call polls the file every windowsCodexHeldRetryPoll, without the
 	// writer lock, for at most windowsCodexHeldRetryWait, and otherwise
 	// returns the named failure for the next pass. Tests replace them.
 	windowsCodexHeldRetryWait  = 30 * time.Second
@@ -143,7 +156,18 @@ func windowsCodexFileHeldAgainstDelete(path string) bool {
 // handle holds the file open. A newer file another writer saved is not a
 // hold.
 func windowsCodexRequirementsHeldFailure(path string, err error) error {
+	return windowsCodexFileHeldFailure(path, err, false)
+}
+
+// windowsCodexFileHeldFailure is windowsCodexRequirementsHeldFailure for a
+// failed write (reading false) or read (reading true) of path. It does
+// nothing for Secure Client, which keeps the behavior it had before GAP-0650:
+// the failure is returned as it came.
+func windowsCodexFileHeldFailure(path string, err error, reading bool) error {
 	if err == nil || errors.Is(err, errWindowsCodexMachineFileChanged) {
+		return err
+	}
+	if tx := windowsCodexActiveManagedState; tx != nil && tx.direct {
 		return err
 	}
 	var held *WindowsCodexRequirementsHeldError
@@ -160,14 +184,15 @@ func windowsCodexRequirementsHeldFailure(path string, err error) error {
 	if !windowsCodexRequirementsHeld(path) {
 		return err
 	}
-	return &WindowsCodexRequirementsHeldError{Path: path, Holders: windowsCodexRequirementsHolders(path), Err: err}
+	return &WindowsCodexRequirementsHeldError{Path: path, Holders: windowsCodexRequirementsHolders(path), Err: err, Reading: reading}
 }
 
 // withWindowsCodexRequirementsReleaseRetry runs run (one whole transaction)
-// and, while it fails because requirements.toml is held open, logs the
-// holder, waits for the file to be released and runs it again, for at most
+// and, while it fails because requirements.toml, or the state file of 1.0.8
+// the first transaction migrates, is held open, logs the holder, waits for
+// the file to be released and runs it again, for at most
 // windowsCodexHeldRetryWait. The writer lock is not held while it waits.
-func withWindowsCodexRequirementsReleaseRetry(path string, run func() error) error {
+func withWindowsCodexRequirementsReleaseRetry(run func() error) error {
 	deadline := windowsCodexHeldRetryNow().Add(windowsCodexHeldRetryWait)
 	for {
 		err := run()
@@ -175,8 +200,8 @@ func withWindowsCodexRequirementsReleaseRetry(path string, run func() error) err
 		if !errors.As(err, &held) {
 			return err
 		}
-		emitManagedResilience(managed.MarkerDegraded, path, held.Error(), map[string]string{"held_by": held.holder()})
-		for windowsCodexRequirementsHeld(path) {
+		emitManagedResilience(managed.MarkerDegraded, held.Path, held.Error(), map[string]string{"held_by": held.holder()})
+		for windowsCodexRequirementsHeld(held.Path) {
 			if !windowsCodexHeldRetryNow().Before(deadline) {
 				return err
 			}

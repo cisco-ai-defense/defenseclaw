@@ -156,7 +156,12 @@ func TestWindowsCodexWriterLockGrantsUsersOnlyAttributesAndCountsTransactions(t 
 		t.Fatalf("BUILTIN\\Users mask 0x%x (found %v), want only read attributes, read control and synchronize (0x%x)", mask, found, allowed)
 	}
 
-	if err := withWindowsCodexMachinePolicyLock(requirements, func() error { return nil }); err != nil {
+	// A transaction that writes requirements.toml advances the counter; one
+	// that changes nothing leaves it (g582 round 9 L1).
+	if err := withWindowsCodexMachinePolicyLock(requirements, func() error {
+		windowsCodexActiveManagedState.requirementsTouched = true
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	second, err := readWindowsCodexTransactionCounter(lockPath)
@@ -165,6 +170,12 @@ func TestWindowsCodexWriterLockGrantsUsersOnlyAttributesAndCountsTransactions(t 
 	}
 	if second <= after || second%2 != 0 {
 		t.Fatalf("second transaction left counter %d after %d", second, after)
+	}
+	if err := withWindowsCodexMachinePolicyLock(requirements, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if third, err := readWindowsCodexTransactionCounter(lockPath); err != nil || third != second {
+		t.Fatalf("a transaction that changed nothing left counter %d (%v); want %d", third, err, second)
 	}
 }
 
@@ -187,8 +198,9 @@ func TestWindowsCodexWriterLockRestampsDriftAndRemovesTheOldLock(t *testing.T) {
 	if mask != windowsCodexWriterLockUsersAccess {
 		t.Fatalf("BUILTIN\\Users mask after the transaction = 0x%x, want 0x%x", mask, windowsCodexWriterLockUsersAccess)
 	}
-	if counter, err := readWindowsCodexTransactionCounter(lockPath); err != nil || counter != 6 {
-		t.Fatalf("counter = %d, %v; want 6 after a lock that held 4", counter, err)
+	// Nothing was written, so the counter stays where it was (g582 round 9 L1).
+	if counter, err := readWindowsCodexTransactionCounter(lockPath); err != nil || counter != 4 {
+		t.Fatalf("counter = %d, %v; want 4, the value the lock held", counter, err)
 	}
 	if _, err := os.Lstat(legacy); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the lock of an earlier release was kept: %v", err)

@@ -116,6 +116,13 @@ type windowsCodexManagedStateTx struct {
 	changed bool
 	// committedExisted: the writer copy existed when the transaction began.
 	committedExisted bool
+	// requirementsTouched: the transaction tried to change requirements.toml,
+	// so the hook's pair changes even when the state bytes do not.
+	requirementsTouched bool
+	// direct: Secure Client. The state is the fixed-name file of 1.0.8 and
+	// earlier, read and written in place under that release's lock, as
+	// before GAP-0650.
+	direct bool
 }
 
 var windowsCodexActiveManagedState *windowsCodexManagedStateTx
@@ -145,14 +152,19 @@ func beginWindowsCodexManagedState(dir string, end uint64) (*windowsCodexManaged
 		}
 		return tx, nil
 	}
+	legacyPath := filepath.Join(dir, windowsCodexManagedStateFile)
 	legacy, err := readWindowsCodexMachineFile(
-		filepath.Join(dir, windowsCodexManagedStateFile),
+		legacyPath,
 		windowsCodexManagedStateLimit,
 		true,
 		windowsCodexManagedStateLabel,
 	)
 	if err != nil {
-		return nil, err
+		// A user can open the fixed name of 1.0.8 (it was user-readable) and
+		// refuse every sharing mode. The holder is named, and the caller
+		// waits for the release a bounded time like it does for
+		// requirements.toml (g582 round 9 S1).
+		return nil, windowsCodexFileHeldFailure(legacyPath, err, true)
 	}
 	tx.exists = legacy.existed
 	tx.data = legacy.data
@@ -180,6 +192,9 @@ func readWindowsCodexManagedState(path string, allowMissing bool) (windowsCodexS
 	if err != nil {
 		return windowsCodexStableFile{}, err
 	}
+	if tx.direct {
+		return readWindowsCodexMachineFile(path, windowsCodexManagedStateLimit, allowMissing, windowsCodexManagedStateLabel)
+	}
 	if !tx.exists {
 		if !allowMissing {
 			return windowsCodexStableFile{}, fmt.Errorf("inspect %s: %w", windowsCodexManagedStateLabel, os.ErrNotExist)
@@ -194,6 +209,9 @@ func writeWindowsCodexManagedState(path string, data []byte) error {
 	tx, err := windowsCodexManagedStateFor(path)
 	if err != nil {
 		return err
+	}
+	if tx.direct {
+		return writeWindowsCodexMachineFile(path, data, windowsCodexManagedStateLimit, windowsCodexManagedStateLabel)
 	}
 	if len(data) == 0 || len(data) > windowsCodexManagedStateLimit {
 		return fmt.Errorf("%s must hold 1 to %d bytes", windowsCodexManagedStateLabel, windowsCodexManagedStateLimit)
@@ -210,12 +228,81 @@ func deleteWindowsCodexManagedState(path string) error {
 	if err != nil {
 		return err
 	}
+	if tx.direct {
+		return deleteWindowsCodexMachineFile(path, windowsCodexManagedStateLabel)
+	}
 	if tx.exists {
 		tx.changed = true
 	}
 	tx.data = nil
 	tx.exists = false
 	return nil
+}
+
+// unchanged reports a transaction that changed neither the state nor
+// requirements.toml and that began at the even counter previous, whose hook
+// copy is still in place. Verify, status and a guardian pass that finds
+// nothing to do are such transactions: they leave the hook copy alone and the
+// counter goes back to previous (g582 round 9 L1). A pass that finds no hook
+// copy for the state it holds writes one.
+func (tx *windowsCodexManagedStateTx) unchanged(previous uint64) bool {
+	// Counter 0 is a writer lock no transaction has used: the first one moves
+	// it, so the hook stops reading the fixed name of 1.0.8.
+	if tx.changed || tx.requirementsTouched || previous%2 != 0 || previous == 0 {
+		return false
+	}
+	if !tx.exists {
+		return !tx.committedExisted && !windowsCodexPathPresent(filepath.Join(tx.dir, windowsCodexManagedStateFile))
+	}
+	return tx.committedExisted &&
+		windowsCodexPathPresent(windowsCodexManagedStateGenerationPath(tx.dir, previous))
+}
+
+// keepsPrevious reports that the hook copy of the counter the transaction
+// began at is still a complete pair with requirements.toml, so a commit that
+// failed before it replaced the copy leaves the hook on it.
+func (tx *windowsCodexManagedStateTx) keepsPrevious(previous uint64) bool {
+	return !tx.requirementsTouched && tx.exists && previous%2 == 0 && previous > 0 &&
+		windowsCodexPathPresent(windowsCodexManagedStateGenerationPath(tx.dir, previous))
+}
+
+// settle ends the state part of a transaction while the counter is still odd
+// and returns the value the counter takes: previous when nothing changed or
+// the commit failed before it replaced the hook copy, the end value
+// otherwise.
+func (tx *windowsCodexManagedStateTx) settle(previous uint64) (uint64, error) {
+	if tx.unchanged(previous) {
+		keep := ""
+		if tx.exists {
+			keep = windowsCodexManagedStateGenerationPath(tx.dir, previous)
+		}
+		tx.dropOtherCopies(keep)
+		return previous, nil
+	}
+	if err := tx.commit(); err != nil {
+		if tx.keepsPrevious(previous) {
+			return previous, err
+		}
+		return tx.end, err
+	}
+	return tx.end, nil
+}
+
+// dropOtherCopies deletes, best effort, every hook copy but keep and the
+// fixed name of 1.0.8; one that is held open stays for a later transaction.
+func (tx *windowsCodexManagedStateTx) dropOtherCopies(keep string) {
+	generations, err := windowsCodexManagedStateGenerations(tx.dir)
+	if err == nil {
+		for _, path := range generations {
+			if keep == "" || !sameWindowsCodexMachinePath(path, keep) {
+				_ = deleteWindowsCodexMachineFile(path, windowsCodexManagedStateLabel)
+			}
+		}
+	}
+	legacyPath := filepath.Join(tx.dir, windowsCodexManagedStateFile)
+	if windowsCodexPathPresent(legacyPath) {
+		_ = deleteWindowsCodexMachineFile(legacyPath, windowsCodexManagedStateLabel)
+	}
 }
 
 // commit writes the state of the transaction while the counter is still odd.
