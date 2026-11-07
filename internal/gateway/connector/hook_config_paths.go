@@ -543,8 +543,7 @@ func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document 
 			want[spec.event] = hermesHookEntry(command, spec.event, spec.matcher, opts)
 		}
 		return hookEventEntriesMatch(hooks, want, func(_ string, entry interface{}) bool {
-			command, _ := hermesHookEntryCommand(entry)
-			return hermesReplaceableHookCommand(command, recognized)
+			return hermesHookEntryOwned(entry, hookCommand, recognized)
 		})
 	case "copilot":
 		events := c.copilotHookEvents(opts)
@@ -620,8 +619,7 @@ func HookRegistrationLacksOnlyFailClosed(conn Connector, opts SetupOpts) (bool, 
 		}
 		hooks, _ := document["hooks"].(map[string]interface{})
 		if !hookEventEntriesMatch(hooks, want, func(_ string, entry interface{}) bool {
-			command, _ := hermesHookEntryCommand(entry)
-			return hermesReplaceableHookCommand(command, recognized)
+			return hermesHookEntryOwned(entry, hookOnly.hookCommand(opts), recognized)
 		}) {
 			return false, nil
 		}
