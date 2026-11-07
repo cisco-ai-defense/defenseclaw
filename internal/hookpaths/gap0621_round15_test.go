@@ -110,3 +110,50 @@ func TestGAP0621R15PrivateManifestHardLinkedIntoRefusedFolder(t *testing.T) {
 		}
 	}
 }
+
+// REVIEW-15: a refused project whose manifest is a link to a file outside the
+// profile is that file wherever it is named, a hard link of it inside an
+// ordinary private skill included: by the link, by a symbolic link to it or
+// by a relative path. A distinct private copy, the private skill folder and
+// its manifest stay allowed.
+func TestGAP0621R15LinkedProjectManifestAliasInsidePrivateSkill(t *testing.T) {
+	home := t.TempDir()
+	project, root, target := round6Root(t, home)
+	linked := filepath.Join(t.TempDir(), "linked.md")
+	round14Write(t, linked, round14Manifest)
+	round14Link(t, os.Symlink, linked, filepath.Join(target, "sample", "SKILL.md"))
+	private := filepath.Join(home, ".claude", "skills", "ordinary")
+	round6Skill(t, private, "ordinary")
+	alias := filepath.Join(private, "refs", "linked.md")
+	round14Link(t, os.Link, linked, alias)
+	symlink := filepath.Join(private, "refs", "symbolic.md")
+	round14Link(t, os.Symlink, alias, symlink)
+	relative, err := filepath.Rel(project, alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copied := filepath.Join(private, "refs", "copy.md")
+	round14Write(t, copied, round14Manifest)
+	for _, tc := range []struct {
+		label, source string
+		bound         bool
+	}{
+		{"hard link", alias, true},
+		{"symbolic link to the hard link", symlink, true},
+		{"relative hard link", relative, true},
+		{"distinct private copy", copied, false},
+		{"private skill folder", private, false},
+		{"private skill manifest", filepath.Join(private, "SKILL.md"), false},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			got := round6Selected(round9Facts(root, home, project, tc.source))
+			var want []string
+			if tc.bound {
+				want = []string{filepath.Join(root, "sample")}
+			}
+			if !slices.Equal(got, want) {
+				t.Errorf("source %s selected %v; want %v", tc.source, got, want)
+			}
+		})
+	}
+}
