@@ -37,6 +37,11 @@ type SimpleCommand struct {
 	// in the action but this walk could not carry its value into Text. The
 	// original action decides the protected-write class for that value.
 	UnresolvedBoundVariable bool
+	// LoginGuess means this reading holds a value USER or LOGNAME has only as
+	// the guess that the login is the last element of the home. A rule over
+	// the command's words must not read it (the shell may hold another
+	// login); it only proves a write to protected state.
+	LoginGuess bool
 	// UnboundUser means Text names USER or LOGNAME after a binding the walk
 	// cannot follow (read, a loop, eval): the value is unknown, not the
 	// login the home spells. A reader may keep the guess that the name is
@@ -93,13 +98,35 @@ func (s simpleShellState) clone() simpleShellState {
 // pass. Ordinary assignments and known home or local variable expansions
 // are resolved; a subshell or pipeline stage has its own shell state.
 func SimpleCommands(input Input, facts Facts) []SimpleCommand {
-	return simpleCommands(input, facts, 0, "", nil)
+	result := simpleCommands(input, facts, 0, "", nil, false)
+	// USER and LOGNAME carry a value from the home only as the guess that the
+	// login is the home's last element, and the shell may hold another. A
+	// second walk reads the action with that guess, to prove a write to state
+	// spelled through the names. Only a reading the first walk did not make is
+	// added, marked LoginGuess: a rule over the words of the command reads the
+	// first walk (an unproven $USER is a runtime-expanded word), and the
+	// guess reading only proves a protected write (rel-1-0-6:GAP-0630
+	// integration: a word expanded at run time keeps its detection-only
+	// outcome). An action that names neither has no second reading.
+	if input.Command != "" && !strings.Contains(input.Command, "USER") && !strings.Contains(input.Command, "LOGNAME") {
+		return result
+	}
+	for _, guessed := range simpleCommands(input, facts, 0, "", nil, true) {
+		if !slices.Contains(result, guessed) {
+			guessed.LoginGuess = true
+			result = append(result, guessed)
+		}
+	}
+	return result
 }
 
-// simpleCommands reads the commands of input. inherited holds the values
-// USER and LOGNAME have where a shell body starts (simpleChildUserVars); nil
-// is the start of the action, where both keep the home base name.
-func simpleCommands(input Input, facts Facts, depth int, interpreter string, inherited map[string]string) []SimpleCommand {
+// simpleCommands reads the commands of input. guess gives USER and LOGNAME
+// the value the home spells where the action has not assigned one; without
+// it a name has a value only where the action assigns one, or a caller
+// hands one to a shell body. inherited holds the values USER and LOGNAME
+// have where a shell body starts (simpleChildUserVars); nil is the start of
+// the action, where guess gives both the home base name.
+func simpleCommands(input Input, facts Facts, depth int, interpreter string, inherited map[string]string, guess bool) []SimpleCommand {
 	if facts.Parse.Dialect == DialectPowerShell || facts.Parse.Dialect == DialectCMD {
 		return windowsSimpleCommands(input, facts)
 	}
@@ -193,8 +220,14 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	// read or eval that binds a name takes its value away from the point
 	// where it runs (the statements before it still read the value the
 	// name has there, review 4).
-	for name, value := range simpleInitialUserVars(home, inherited) {
-		initialVars[name] = value
+	login := map[string]string{}
+	if guess {
+		login = simpleInitialUserVars(home, nil)
+	}
+	if guess || inherited != nil {
+		for name, value := range simpleInitialUserVars(home, inherited) {
+			initialVars[name] = value
+		}
 	}
 	if simplePathAbs(input.CWD) {
 		initialVars["PWD"] = simplePathClean(input.CWD)
@@ -265,7 +298,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		emitted := make(map[SimpleCommand]bool)
 		for _, prior := range variants {
 			state := prior.clone()
-			simpleApplyLoopBinds(state.vars, part.binds, simpleInitialUserVars(home, nil))
+			simpleApplyLoopBinds(state.vars, part.binds, login)
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) == 0 && len(call.Assigns) != 0 && len(stmt.Redirs) == 0 {
 				updateSimpleVariables(state.vars, call.Assigns)
 				changed = true
@@ -386,7 +419,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						innerInterpreter = interpreter
 					}
 					inner := simpleCommands(innerInput, innerFacts, depth+1, innerInterpreter,
-						simpleChildUserVars(call, effective, shared, innerInterpreter, simpleInitialUserVars(home, nil)))
+						simpleChildUserVars(call, effective, shared, innerInterpreter, login), guess)
 					if len(inner) == 0 && strings.TrimSpace(innerInput.Command) != "" {
 						zshHistory := innerInterpreter == "zsh" && len(innerFacts.Commands) == 1 &&
 							innerFacts.Commands[0].Executable == "history"
