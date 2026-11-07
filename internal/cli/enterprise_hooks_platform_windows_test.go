@@ -1143,3 +1143,90 @@ func TestWindowsGuardianPrePassSecureClientReturnsTheDeferredCodexErrorAfterCurs
 		})
 	}
 }
+
+// g582 round 11c, the r11 residual. A requirements.toml that ordinary users
+// cannot read (a holder that denied read sharing kept the guardian from
+// restoring it, or a hand edit took the read) is published again with the
+// read restored by the Codex reconcile only, and the target publication that
+// follows verifies the read and fails on such a file. The guardian therefore
+// runs the reconcile first when the file is unreadable, even though the
+// registry reads as active, and never when the file is readable.
+func TestWindowsGuardianReconcilesAnUnreadableCodexRequirementsBeforePublishingTargets(t *testing.T) {
+	for _, unreadable := range []bool{true, false} {
+		name := map[bool]string{true: "unreadable", false: "readable"}[unreadable]
+		t.Run(name, func(t *testing.T) {
+			previousCfg := cfg
+			previousClaudeReader, previousClaudePublisher := enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher
+			previousCodexLayout, previousCodexReader := enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader
+			previousCodexReconciler, previousCodexPublisher := enterpriseHookCodexRequirementsReconciler, enterpriseHookCodexTargetsPublisher
+			previousUnreadable, previousFolder := enterpriseHookCodexRequirementsUnreadable, enterpriseHookCodexFolderEnsurer
+			previousLink := enterpriseHookVendorFolderLink
+			previousCursorReader, previousCursorPublisher := enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher
+			t.Cleanup(func() {
+				cfg = previousCfg
+				enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher = previousClaudeReader, previousClaudePublisher
+				enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader = previousCodexLayout, previousCodexReader
+				enterpriseHookCodexRequirementsReconciler, enterpriseHookCodexTargetsPublisher = previousCodexReconciler, previousCodexPublisher
+				enterpriseHookCodexRequirementsUnreadable, enterpriseHookCodexFolderEnsurer = previousUnreadable, previousFolder
+				enterpriseHookVendorFolderLink = previousLink
+				enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher = previousCursorReader, previousCursorPublisher
+			})
+			cfg = &config.Config{
+				DeploymentMode: managed.DeploymentModeManagedEnterprise,
+				Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileStandalone},
+				Guardrail:      config.GuardrailConfig{Connectors: map[string]config.PerConnectorGuardrailConfig{"codex": {}}},
+			}
+			var order []string
+			readable := !unreadable
+			enterpriseHookVendorFolderLink = func(string) string { return "" }
+			enterpriseHookCodexFolderEnsurer = func() (enterprisehooks.WindowsCodexMachineFolderEnsure, error) {
+				return enterprisehooks.WindowsCodexMachineFolderEnsure{Folder: `C:\ProgramData\OpenAI\Codex`}, nil
+			}
+			enterpriseHookClaudePolicyTargetsReader = func() ([]string, bool, error) { return nil, false, nil }
+			enterpriseHookCursorPolicyTargetsReader = func() ([]enterprisehooks.WindowsCursorManagedRuntimeTarget, bool, error) {
+				return nil, false, nil
+			}
+			enterpriseHookCodexRequirementsLayoutResolver = func(string) (connector.WindowsCodexMachineRequirementsOptions, error) {
+				return connector.WindowsCodexMachineRequirementsOptions{
+					HookBinary: `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`, GatewayAddr: "127.0.0.1:32109",
+					GatewayServiceName: "DefenseClawGateway", RequirementsPath: `C:\ProgramData\OpenAI\Codex\requirements.toml`,
+				}, nil
+			}
+			// The registry reads as active in both rows: reading it does not
+			// verify the read ordinary users need.
+			enterpriseHookCodexRuntimeRegistryReader = func(string) (connector.WindowsCodexManagedRuntimeRegistry, error) {
+				return connector.WindowsCodexManagedRuntimeRegistry{Active: true, GatewayAddr: "127.0.0.1:32109", GatewayServiceName: "DefenseClawGateway"}, nil
+			}
+			enterpriseHookCodexRequirementsUnreadable = func(path string) bool {
+				if path != `C:\ProgramData\OpenAI\Codex\requirements.toml` {
+					t.Fatalf("probed %s", path)
+				}
+				return !readable
+			}
+			enterpriseHookCodexRequirementsReconciler = func(connector.WindowsCodexMachineRequirementsOptions) (connector.WindowsCodexMachineRequirementsReport, error) {
+				order = append(order, "reconcile")
+				readable = true
+				return connector.WindowsCodexMachineRequirementsReport{OK: true}, nil
+			}
+			enterpriseHookClaudePolicyTargetsPublisher = func([]string) error { return nil }
+			enterpriseHookCursorPolicyTargetsPublisher = func([]enterprisehooks.WindowsCursorManagedRuntimeTarget) error { return nil }
+			enterpriseHookCodexTargetsPublisher = func(connector.WindowsCodexMachineRequirementsOptions, []connector.WindowsCodexManagedRuntimeTarget) error {
+				if !readable {
+					return errors.New("ordinary users cannot read the Codex machine requirements")
+				}
+				order = append(order, "publish")
+				return nil
+			}
+			if err := syncEnterpriseHookManagedMachineEnrollments(enterprisehooks.Manifest{}, "127.0.0.1:32109", true); err != nil {
+				t.Fatalf("the pass failed: %v", err)
+			}
+			want := []string{"publish"}
+			if unreadable {
+				want = []string{"reconcile", "publish"}
+			}
+			if !slices.Equal(order, want) {
+				t.Fatalf("order = %v, want %v", order, want)
+			}
+		})
+	}
+}
