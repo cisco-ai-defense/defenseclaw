@@ -173,6 +173,13 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 	if a == nil || a.store == nil {
 		return ctx, req, nil
 	}
+	// One attempt of a session at a time, from the read of its cursor to the
+	// commit that moves it (hookCorrelationSerial). The wait ends with ctx.
+	release, waitErr := a.hookCorrelationTurns.acquire(ctx, req.ConnectorName+"\x00"+req.SessionID)
+	if waitErr != nil {
+		return ctx, req, waitErr
+	}
+	defer release()
 	repo, err := a.store.CorrelationRepository()
 	if err != nil {
 		return ctx, req, err
@@ -435,7 +442,9 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 	}
 	defer tx.Rollback() //nolint:errcheck
 	if occurrence.Status == audit.CorrelationOccurrenceReplay {
-		if err := tx.Commit(); err != nil {
+		err := tx.Commit()
+		release()
+		if err != nil {
 			return ctx, req, err
 		}
 		resolved, resolveErr := repo.MatchOccurrence(ctx, audit.CorrelationMatchInput{
@@ -557,8 +566,10 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 			return ctx, req, resolveErr
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return ctx, req, err
+	commitErr := tx.Commit()
+	release()
+	if commitErr != nil {
+		return ctx, req, commitErr
 	}
 	correlatedCtx := contextWithHookCorrelation(ctx, req, traceID)
 	if emitErr := a.emitCorrelationRelationshipsV8(
