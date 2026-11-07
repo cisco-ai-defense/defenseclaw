@@ -1403,10 +1403,15 @@ func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, b
 				// scan as the finding baseline for the new content.
 				scanID = baseline.ScanID
 			}
-			w.persistSnapshot(evt, snap, scanID, w.admissionFingerprint(res, fingerprint))
-			switch res.Verdict {
-			case VerdictClean, VerdictAllowed, VerdictWarning:
-				w.releaseSupersededMCPRejection(evt, res.Verdict)
+			// The earlier rejection is lifted only with the baseline that
+			// admits this definition: a baseline the writer declined (the
+			// server has another definition by now) leaves the rejection
+			// to the admission of the definition it has.
+			if w.persistSnapshot(evt, snap, scanID, w.admissionFingerprint(res, fingerprint)) {
+				switch res.Verdict {
+				case VerdictClean, VerdictAllowed, VerdictWarning:
+					w.releaseSupersededMCPRejection(evt, res.Verdict)
+				}
 			}
 		}
 	}
@@ -1592,10 +1597,12 @@ func (w *InstallWatcher) recordAdmissionBaseline(evt InstallEvent, snap *TargetS
 }
 
 // persistSnapshot upserts the baseline snapshot (content/dep/config/endpoint
-// hashes plus the scan ID and scanner fingerprint) without running a scan.
-func (w *InstallWatcher) persistSnapshot(evt InstallEvent, snap *TargetSnapshot, scanID, fingerprint string) {
+// hashes plus the scan ID and scanner fingerprint) without running a scan. It
+// reports whether the baseline was written: false for an MCP server that no
+// longer has the snapshot definition, or a store that refused the row.
+func (w *InstallWatcher) persistSnapshot(evt InstallEvent, snap *TargetSnapshot, scanID, fingerprint string) bool {
 	if evt.Type == InstallMCP && !w.secureClientActive() && !w.mcpDefinitionIsSnapshot(evt, snap) {
-		return // the verdict is for a definition the snapshot does not name
+		return false // the verdict is for a definition the snapshot does not name
 	}
 	depJSON, _ := json.Marshal(snap.DependencyHashes)
 	cfgJSON, _ := json.Marshal(snap.ConfigHashes)
@@ -1605,11 +1612,12 @@ func (w *InstallWatcher) persistSnapshot(evt InstallEvent, snap *TargetSnapshot,
 		string(evt.Type), evt.Path, snap.ContentHash,
 		string(depJSON), string(cfgJSON), string(epJSON), scanID, fingerprint,
 	); err != nil {
-		return
+		return false
 	}
 	if evt.Type == InstallMCP {
 		w.noteMCPBaseline(evt.Path, snap.ContentHash, fingerprint)
 	}
+	return true
 }
 
 // findingDrift diffs a freshly scanned result against the baseline's previously
