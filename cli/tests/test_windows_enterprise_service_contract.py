@@ -6202,6 +6202,12 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     assert "if ($created -lt $stateCreated) {" in agent
     assert "[IO.Directory]::GetCreationTimeUtc($StateRoot)" in agent
     assert "$dacl.Count -ne 3" in agent and "$ace.AceFlags -ne $inherit" in agent
+    # GAP-0758 review S2: the selector purge never opens, creates or reads
+    # behind a link at the folder.
+    selector = _psm1_function(module, "Remove-DefenseClawOwnRuntimeSelector")
+    assert selector.index("Assert-DefenseClawNoReparsePath -Path $Directory -AllowMissingLeaf") < selector.index("Test-Path -LiteralPath $state")
+    lock = _psm1_function(module, "Open-DefenseClawRuntimeSelectorLock")
+    assert lock.index("Assert-DefenseClawNoReparsePath -Path ([IO.Path]::GetDirectoryName($Path))") < lock.index("[IO.FileMode]::CreateNew")
     assert "[bool]$ownership.preimage_existed" in agent and "[bool]$receipt.config_preexisting" in agent
     assert "$document['origin'] = $Origin" in _psm1_function(module, "Add-DefenseClawStandaloneCreatedFolderRecord")
     report = _psm1_function(module, "Write-DefenseClawUninstallCreatedFolderReport")

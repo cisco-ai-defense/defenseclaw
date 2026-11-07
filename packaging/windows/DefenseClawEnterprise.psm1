@@ -18076,6 +18076,8 @@ function Open-DefenseClawRuntimeSelectorLock {
                 $stream = [IO.FileStream]::new($Path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Delete)
                 return [pscustomobject]@{ Stream = $stream; Temporary = $false }
             }
+            # A lock is never created behind a link at the folder (GAP-0758).
+            Assert-DefenseClawNoReparsePath -Path ([IO.Path]::GetDirectoryName($Path))
             $stream = [IO.FileStream]::new($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Delete, 1, [IO.FileOptions]::DeleteOnClose)
             return [pscustomobject]@{ Stream = $stream; Temporary = $true }
         }
@@ -18103,6 +18105,15 @@ function Remove-DefenseClawOwnRuntimeSelector {
     )
     $state = [IO.Path]::Combine($Directory, '.defenseclaw-managed-runtime-selector.state')
     $lockPath = [IO.Path]::Combine($Directory, '.defenseclaw-managed-runtime-selector.lock')
+    # A link at the folder or above it is not followed (GAP-0758): nothing is
+    # tested, opened, created or read behind it, and the folder is named.
+    try {
+        Assert-DefenseClawNoReparsePath -Path $Directory -AllowMissingLeaf
+    }
+    catch {
+        "${Directory}: kept: a link sits here; DefenseClaw does not follow, change or remove it"
+        return
+    }
     if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $state) -and
         -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $lockPath)) {
         return
@@ -18209,6 +18220,8 @@ function Remove-DefenseClawStandaloneOrphanedHookMachineState {
     $escapedHook = [IO.Path]::GetFullPath([string]$Layout.HookPath).Replace('\', '\\')
     $namesThisHook = {
         param([string]$Path)
+        # A file behind a link at its folder is not read (GAP-0758).
+        Assert-DefenseClawNoReparsePath -Path ([IO.Path]::GetDirectoryName($Path)) -AllowMissingLeaf
         $info = [IO.FileInfo]::new($Path)
         if (-not $info.Exists) {
             return $null

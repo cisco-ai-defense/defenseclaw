@@ -1290,6 +1290,32 @@ $failures = & $module {
                     $failures.Add('GAP-0704 review 5 M1: Remove-DefenseClawAgentFolderBackfillMarker still exists')
                 }
 
+                # GAP-0758 review S2: the runtime selector purge neither tests,
+                # opens, creates nor reads behind a link at its folder, and names
+                # the folder.
+                $s2 = [IO.Path]::Combine($ag, 'g0758s2')
+                $s2Target = [IO.Path]::Combine($s2, 'target')
+                $s2Link = [IO.Path]::Combine($s2, 'link')
+                [void][IO.Directory]::CreateDirectory($s2Target)
+                Set-G091AdministratorsOwner -Path @($s2, $s2Target)
+                foreach ($name in @('.defenseclaw-managed-runtime-selector.state', '.defenseclaw-managed-hooks.state', '90-defenseclaw.json')) {
+                    [IO.File]::WriteAllText([IO.Path]::Combine($s2Target, $name), "decoy $name")
+                }
+                $s2Listing = {
+                    (@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $s2Target -Force | Microsoft.PowerShell.Utility\Sort-Object Name |
+                        Microsoft.PowerShell.Core\ForEach-Object { $_.Name + '=' + [IO.File]::ReadAllText($_.FullName) })) -join '|'
+                }
+                $s2Before = & $s2Listing
+                [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path $s2Link -Target $s2Target)
+                $junctions.Add($s2Link)
+                $s2Out = @(Remove-DefenseClawOwnRuntimeSelector -Directory $s2Link -OwnHook 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe')
+                if (@($s2Out | Microsoft.PowerShell.Core\Where-Object { ([string]$_).StartsWith("${s2Link}: kept: a link sits here") }).Count -ne 1) {
+                    $failures.Add("GAP-0758 review S2: the selector purge did not name the linked folder once: $($s2Out -join ' | ')")
+                }
+                if ((& $s2Listing) -cne $s2Before) {
+                    $failures.Add("GAP-0758 review S2: the selector purge changed the folder behind the link: $(& $s2Listing)")
+                }
+
                 # Rule (ii): Secure Client.
                 $scCisco = [IO.Path]::Combine($ag, 'sc', 'ProgramData', 'Cisco')
                 [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($ag, 'sc', 'Program Files'))
