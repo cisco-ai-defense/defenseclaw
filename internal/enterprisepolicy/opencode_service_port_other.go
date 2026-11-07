@@ -137,7 +137,7 @@ func checkOpenCodeServiceConfigFolders(_, path string) (sealed []string, err err
 // folder of another account fails here and is refused. The bit is read back:
 // a file system that ignores it is not a seal.
 func openCodeSealSharedFolder(path string, info os.FileInfo) (bool, error) {
-	if info.Mode()&os.ModeSticky != 0 || info.Mode().Perm()&0o020 == 0 {
+	if info.Mode()&os.ModeSticky != 0 || openCodePerm(path, info)&0o020 == 0 {
 		return false, nil
 	}
 	folder, err := os.OpenFile(path, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
@@ -158,6 +158,14 @@ func openCodeSealSharedFolder(path string, info os.FileInfo) (bool, error) {
 	return true, nil
 }
 
+// openCodePerm is the permission bits of an entry as they apply to other
+// accounts: where Linux reports a POSIX ACL mask as the group bits, the group
+// object entry decides, not the mask a root or owner entry raised. Named
+// entries are openCodePathACLOpen to judge.
+func openCodePerm(path string, info os.FileInfo) os.FileMode {
+	return managed.ModeWithoutACLMask(path, info.Mode().Perm())
+}
+
 // openCodeTrustedOwner reports an entry this account or root owns; either one
 // can change it anyway.
 func openCodeTrustedOwner(info os.FileInfo) bool {
@@ -175,7 +183,7 @@ func openCodeFolderOpenToOthers(path string, info os.FileInfo) bool {
 	if info.Mode()&os.ModeSticky != 0 {
 		return false
 	}
-	perm := info.Mode().Perm()
+	perm := openCodePerm(path, info)
 	return perm&0o002 != 0 || (perm&0o020 != 0 && !openCodeOwnerPrivateGroup(path, info))
 }
 
@@ -185,7 +193,7 @@ func openCodeFolderOpenToOthers(path string, info os.FileInfo) bool {
 // judge.
 func openCodeServiceFileShared(path string) bool {
 	info, err := os.Lstat(path)
-	return err != nil || info.Mode().Perm()&0o022 != 0 || openCodePathACLOpen(path)
+	return err != nil || openCodePerm(path, info)&0o022 != 0 || openCodePathACLOpen(path)
 }
 
 // openCodeImportFileTrusted reports that the open service.json is owned by
@@ -195,7 +203,7 @@ func openCodeServiceFileShared(path string) bool {
 // so what is read is what was checked.
 func openCodeImportFileTrusted(path string, file *os.File) bool {
 	info, err := file.Stat()
-	if err != nil || !openCodeTrustedOwner(info) || info.Mode().Perm()&0o022 != 0 {
+	if err != nil || !openCodeTrustedOwner(info) {
 		return false
 	}
 	resolved, err := filepath.EvalSymlinks(path)
@@ -203,7 +211,7 @@ func openCodeImportFileTrusted(path string, file *os.File) bool {
 		return false
 	}
 	at, err := os.Lstat(resolved)
-	if err != nil || !os.SameFile(info, at) {
+	if err != nil || !os.SameFile(info, at) || openCodePerm(resolved, info)&0o022 != 0 {
 		return false
 	}
 	return !openCodePathACLOpen(resolved)

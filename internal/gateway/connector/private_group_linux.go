@@ -44,7 +44,7 @@ const privateGroupGetentTimeout = 5 * time.Second
 // unreadable, duplicated or ambiguous answers false, so a shared group stays
 // refused.
 func ownerPrivateGroup(path string, info os.FileInfo) bool {
-	_, ok := ownerPrivateGroupName(path, info)
+	_, ok := ownerPrivateGroupName(path, info, false)
 	return ok
 }
 
@@ -57,7 +57,20 @@ func ownerPrivateGroup(path string, info os.FileInfo) bool {
 // the hook paths keep the local proof. Where getent is missing, times out or
 // answers anything unexpected, the folder is not private (REVIEW-3 MF1).
 func ownerPrivateGroupStrict(path string, info os.FileInfo) bool {
-	name, ok := ownerPrivateGroupName(path, info)
+	return ownerPrivateGroupStrictFor(path, info, false)
+}
+
+// ownerPrivateGroupStrictAfterACL is ownerPrivateGroupStrict for a caller that
+// has already judged every named entry of the access ACL of path and reads
+// the group bits as the group object (managed.ModeWithoutACLMask). An ACL then
+// does not by itself rule the private group out: a named entry for root or
+// for the owner adds no member to the group.
+func ownerPrivateGroupStrictAfterACL(path string, info os.FileInfo) bool {
+	return ownerPrivateGroupStrictFor(path, info, true)
+}
+
+func ownerPrivateGroupStrictFor(path string, info os.FileInfo, aclJudged bool) bool {
+	name, ok := ownerPrivateGroupName(path, info, aclJudged)
 	if !ok {
 		return false
 	}
@@ -107,14 +120,17 @@ func getentOutput(database, key string) (string, bool) {
 }
 
 // ownerPrivateGroupName is the local proof ownerPrivateGroup answers, with the
-// account name it found.
-func ownerPrivateGroupName(path string, info os.FileInfo) (string, bool) {
+// account name it found. A path with an access ACL fails it unless the caller
+// has judged the ACL (aclJudged).
+func ownerPrivateGroupName(path string, info os.FileInfo, aclJudged bool) (string, bool) {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uint32(os.Geteuid()) {
 		return "", false
 	}
-	if _, present, err := hookAPIReadLinuxXattr(path, "system.posix_acl_access"); err != nil || present {
-		return "", false
+	if !aclJudged {
+		if _, present, err := hookAPIReadLinuxXattr(path, "system.posix_acl_access"); err != nil || present {
+			return "", false
+		}
 	}
 	passwd, ok := privateGroupRecords(privateGroupPasswdFile)
 	if !ok {
