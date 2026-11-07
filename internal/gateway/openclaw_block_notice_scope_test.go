@@ -166,8 +166,8 @@ func TestGAP0644ResultWithoutACallIDTakesNothing(t *testing.T) {
 // Two blocks wait: a request that carries one call id takes that block only.
 func TestGAP0644RequestTakesOnlyItsOwnBlock(t *testing.T) {
 	resetOpenClawBlockNotices(t)
-	rememberOpenClawBlockNotice("exec", "call_a", "", []string{noticeTestRule}, "r")
-	rememberOpenClawBlockNotice("read", "call_b", "", []string{noticeTestRule}, "r")
+	rememberOpenClawBlockNotice("exec", "call_a", noticeTestSession, []string{noticeTestRule}, "r")
+	rememberOpenClawBlockNotice("read", "call_b", noticeTestSession, []string{noticeTestRule}, "r")
 	if out, _ := serveNoticeWith(t, noticeServe{reqBody: noticeChatReqFor("call_b"), ctype: noticeJSONType, respBody: noticeChatReply}); !strings.Contains(out, "Tool call blocked: read") || strings.Contains(out, "exec") {
 		t.Fatalf("the read block did not show alone: %s", out)
 	}

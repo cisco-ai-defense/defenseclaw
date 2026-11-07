@@ -33,8 +33,12 @@ const noticeTestRule = "persistence.ssh_authorized_keys_command"
 // noticeTestCallID is the id of the blocked call in the fixtures.
 const noticeTestCallID = "call_blk1"
 
+// noticeTestSession is the session of the blocked call and of the requests that
+// follow it in the fixtures, unless a test says otherwise.
+const noticeTestSession = "sess-n"
+
 func rememberTestNotice(tool string, ruleIDs []string, reason string) {
-	rememberOpenClawBlockNotice(tool, noticeTestCallID, "", ruleIDs, reason)
+	rememberOpenClawBlockNotice(tool, noticeTestCallID, noticeTestSession, ruleIDs, reason)
 }
 
 func noticeTestLine() string {
@@ -44,7 +48,9 @@ func noticeTestLine() string {
 // noticeServe describes one model request sent through the notice middleware.
 type noticeServe struct {
 	path       string // request path, /v1/x when empty
-	session    string // X-DefenseClaw-Session-Id
+	session    string // X-DefenseClaw-Session-Id; noticeTestSession when empty
+	noSession  bool   // the request names no session
+	unbound    bool   // the plugin did not mark the session as observed for this request
 	enc        string // Content-Encoding of the reply
 	deny       bool   // the request does not present the owner credential
 	active     string // connector this gateway serves; openclaw when empty, none when "-"
@@ -106,8 +112,14 @@ func serveNoticeWith(t *testing.T, o noticeServe) (string, int) {
 	default:
 		req = req.WithContext(withThresholdConnector(req.Context(), o.active))
 	}
+	if o.session == "" && !o.noSession {
+		o.session = noticeTestSession
+	}
 	if o.session != "" {
 		req.Header.Set(SessionIDHeader, o.session)
+		if !o.unbound {
+			req.Header.Set(SessionBoundHeader, "1")
+		}
 	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -369,9 +381,9 @@ func TestGAP0644LaunderKeepsAModelReplyThatCarriesANotice(t *testing.T) {
 // under the call id the plugin sent.
 func TestGAP0644InspectRecordsANoticeOnlyForEnforcedBlocks(t *testing.T) {
 	resetOpenClawBlockNotices(t)
-	const blocking = `{"tool":"exec","tool_call_id":"call_blk1","args":{"command":"echo k >> ~/.ssh/authorized_keys"}}`
+	const blocking = `{"tool":"exec","tool_call_id":"call_blk1","session_id":"sess-n","args":{"command":"echo k >> ~/.ssh/authorized_keys"}}`
 	api := testAPIServerWithConfig(t, "action")
-	_, benign := postInspectForConnector(t, api, "openclaw", `{"tool":"exec","tool_call_id":"call_ok9","args":{"command":"echo hello"}}`)
+	_, benign := postInspectForConnector(t, api, "openclaw", `{"tool":"exec","tool_call_id":"call_ok9","session_id":"sess-n","args":{"command":"echo hello"}}`)
 	if benign.Action != "allow" || openClawBlockNoticesPending() {
 		t.Fatalf("benign call: %+v pending=%v", benign, openClawBlockNoticesPending())
 	}
@@ -389,10 +401,10 @@ func TestGAP0644InspectRecordsANoticeOnlyForEnforcedBlocks(t *testing.T) {
 		t.Fatalf("the inspect answer carries notice data: %s", raw)
 	}
 	// The result of the allowed call takes nothing; the result of the blocked call does.
-	if got := takeOpenClawBlockNotices([]byte(noticeChatReqFor("call_ok9")), ""); len(got) != 0 {
+	if got := takeOpenClawBlockNotices([]byte(noticeChatReqFor("call_ok9")), noticeTestSession); len(got) != 0 {
 		t.Fatalf("the allowed call result took a notice: %+v", got)
 	}
-	got := takeOpenClawBlockNotices([]byte(noticeChatReq()), "")
+	got := takeOpenClawBlockNotices([]byte(noticeChatReq()), noticeTestSession)
 	if len(got) != 1 || !strings.Contains(got[0].line, openClawBlockNoticeMark+": exec") || !strings.Contains(got[0].line, "(rule ") {
 		t.Fatalf("notice=%+v", got)
 	}
@@ -426,7 +438,7 @@ func TestGAP0644AuditFailureBlockGetsANoticeOnlyWhenEnforced(t *testing.T) {
 			fixture.api.scannerCfg.Guardrail.Connector = "openclaw"
 			fixture.api.scannerCfg.Guardrail.RulePack = tc.pack
 			fixture.emitter.fail = true
-			body, _ := json.Marshal(map[string]any{"tool": "exec", "tool_call_id": noticeTestCallID, "args": map[string]any{"command": tc.command}, "connector": "openclaw"})
+			body, _ := json.Marshal(map[string]any{"tool": "exec", "tool_call_id": noticeTestCallID, "session_id": noticeTestSession, "args": map[string]any{"command": tc.command}, "connector": "openclaw"})
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/inspect/tool", bytes.NewReader(body))
 			req = req.WithContext(withAuthenticatedInspectConnector(req.Context(), "openclaw"))
 			w, verdict := postInspectHTTP(t, fixture.api, req)
@@ -438,7 +450,7 @@ func TestGAP0644AuditFailureBlockGetsANoticeOnlyWhenEnforced(t *testing.T) {
 			}
 			if tc.wantNotice {
 				// The result of the blocked call shows it.
-				got := takeOpenClawBlockNotices([]byte(noticeChatReq()), "")
+				got := takeOpenClawBlockNotices([]byte(noticeChatReq()), noticeTestSession)
 				if len(got) != 1 || !strings.Contains(got[0].line, openClawBlockNoticeMark+": exec") {
 					t.Fatalf("notice=%+v", got)
 				}
@@ -509,6 +521,8 @@ func TestGAP0644NoticeThroughThePassthroughHandler(t *testing.T) {
 				req.Header.Set("Content-Type", "application/json")
 				req.Header.Set("X-DC-Target-URL", upstream.URL)
 				req.Header.Set("X-AI-Auth", "Bearer sk-upstream")
+				req.Header.Set(SessionIDHeader, noticeTestSession)
+				req.Header.Set(SessionBoundHeader, "1")
 				resp, err := http.DefaultClient.Do(req)
 				if err != nil {
 					t.Fatal(err)
