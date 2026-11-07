@@ -16,7 +16,6 @@ scripts/test-install-lifecycle.ps1. These checks pin what other code relies on.
 
 from __future__ import annotations
 
-import ast
 import hashlib
 import json
 import os
@@ -37,6 +36,25 @@ INSTALL_PS1 = ROOT / "scripts" / "install.ps1"
 LIFECYCLE_PS1 = ROOT / "scripts" / "test-install-lifecycle.ps1"
 TOKEN = "__DEFENSECLAW_VERSION__"
 POWERSHELL = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or shutil.which("pwsh")
+
+
+def _skip_powershell_calls_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_run = subprocess.run
+
+    def run(args, *rest, **kwargs):  # type: ignore[no-untyped-def]
+        if POWERSHELL is None and args and (args[0] is None or str(args[0]) == "None"):
+            pytest.skip("PowerShell is not installed")
+        return real_run(args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+
+@pytest.fixture(autouse=True)
+def _skip_a_powershell_call_where_it_is_not_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Where PowerShell is not installed the interpreter path is None. Skip the
+    # test at the moment it tries to run it, rather than failing in subprocess.
+    if POWERSHELL is None:
+        _skip_powershell_calls_when_missing(monkeypatch)
 
 
 @pytest.fixture(autouse=True)
@@ -4671,35 +4689,28 @@ def test_hook_fail_mode_refresh_runs_without_json_sidecar(tmp_path: Path) -> Non
         installed.unlink()
 
 
-def test_every_test_that_runs_powershell_is_skipped_where_it_is_not_installed() -> None:
-    # GAP-0733: one test called _run_powershell without the skipif its
-    # siblings carry, so on a host without PowerShell it failed with a
-    # TypeError (the interpreter path was None) instead of being skipped.
-    source = Path(__file__).read_text(encoding="utf-8")
-    functions = [node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef)]
-    runners = {"_run_powershell", "POWERSHELL"}
-    grew = True
-    while grew:
-        grew = False
-        for node in functions:
-            if node.name.startswith("test_") or node.name in runners:
-                continue
-            if {name.id for name in ast.walk(node) if isinstance(name, ast.Name)} & runners:
-                runners.add(node.name)
-                grew = True
-    ungated = []
-    for node in functions:
-        if not node.name.startswith("test_"):
-            continue
-        if not {name.id for name in ast.walk(node) if isinstance(name, ast.Name)} & runners:
-            continue
-        gate = " ".join(ast.get_source_segment(source, decorator) or "" for decorator in node.decorator_list)
-        body = ast.get_source_segment(source, node) or ""
-        decorated = "POWERSHELL" in gate and "skipif" in gate
-        guarded = "if not POWERSHELL" in body and "pytest.skip(" in body
-        if not (decorated or guarded):
-            ungated.append(node.name)
-    assert ungated == []
+def test_a_test_that_runs_powershell_is_skipped_where_it_is_not_installed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # GAP-0733: one test called the runner without the skipif its siblings
+    # carry, so a host without PowerShell failed with a TypeError (the
+    # interpreter path was None) instead of skipping. The gate is the runtime
+    # fixture above, so it covers every way a test can reach PowerShell: the
+    # runner, an alias of it, or a direct subprocess call.
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "POWERSHELL", None)
+    _skip_powershell_calls_when_missing(monkeypatch)
+    alias = _run_powershell
+    for reach in (
+        lambda: _run_powershell("exit 0"),
+        lambda: alias("exit 0"),
+        lambda: subprocess.run([POWERSHELL, "-NoProfile", "-Command", "exit 0"], check=False),
+        lambda: subprocess.run([str(POWERSHELL), "-NoProfile", "-Command", "exit 0"], check=False),
+    ):
+        with pytest.raises(pytest.skip.Exception):
+            reach()
+    # Benign twin: a command that is not PowerShell still runs.
+    assert subprocess.run([sys.executable, "-c", "pass"], check=False).returncode == 0
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
