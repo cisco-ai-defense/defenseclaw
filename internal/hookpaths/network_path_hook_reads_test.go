@@ -148,8 +148,8 @@ func TestIndirectSourceOnAShareThatAnswersIsRead(t *testing.T) {
 }
 
 // rel-1-0-6:GAP-0482 (review 1): a hook call that names many fresh shares
-// that do not answer waits for them one answer wait in all, not one per
-// share, and reads every one of them as the first: unknown.
+// that do not answer waits for them networkShareCallWaits answer waits in
+// all, not one per share, and reads every one of them as the first: unknown.
 func TestOneHookCallWaitsForItsSharesOneAnswerWaitInAll(t *testing.T) {
 	const shares = 8
 	release := make(chan struct{})
@@ -180,8 +180,8 @@ func TestOneHookCallWaitsForItsSharesOneAnswerWaitInAll(t *testing.T) {
 	}
 	start := time.Now()
 	got := Resolve(payload)
-	if took := time.Since(start); took > 2*time.Second {
-		t.Fatalf("one hook call spent %v on %d shares that do not answer (%d probes); want one 750ms answer wait in all", took, shares, probes.Load())
+	if bound := networkShareCallWaits*750*time.Millisecond + 150*time.Millisecond; time.Since(start) > bound {
+		t.Fatalf("one hook call spent %v on %d shares that do not answer (%d probes); want %d 750ms answer waits in all", time.Since(start), shares, probes.Load(), networkShareCallWaits)
 	}
 	targets, ok := Decode(got)
 	if !ok {
