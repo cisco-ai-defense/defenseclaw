@@ -5,12 +5,16 @@ managed launcher reads. This test checks three structural facts:
 
 1. the page is current and is in the enterprise navigation;
 2. every page that quotes the launcher refusal links to it;
-3. every paragraph that makes a claim about what a managed computer offers or
-   refuses for a command in the table links to it.
+3. every paragraph that names a command of the table next to a managed
+   computer links to it.
 
 The commands for (3) come from the table itself, so a new row widens the check
-with no edit here. A sentence needs the link; the test does not decide whether
-the sentence is true, the table does.
+with no edit here. The rule is structural: a sentence that puts a managed
+computer and a table command together needs the link, whatever verb it uses
+(works, unavailable, returns exit code 3, ...). The test does not decide whether
+the sentence is true, the table does. Only the bare launcher name and the
+administrator commands, which the table does not list, also need a claim word,
+because docs mention them in many other ways.
 """
 
 from __future__ import annotations
@@ -35,22 +39,24 @@ MANAGED = re.compile(
     r"|\b(?:sandbox|packaged|installed) launcher\b|`defenseclaw` launcher|packaged `defenseclaw`",
     re.IGNORECASE,
 )
-# ... says something about running, offering or refusing, ...
+# ... and names a command of the table (structural, no verb needed) ...
+CODE_SPAN = re.compile(r"`[^`]*`")
+SENTENCE_BREAK = re.compile(r"(?<=[.;:!?])\s+|\n(?=\||- )")
+# ... or names the bare launcher or an administrator command and says something
+# about running, offering or refusing.
 CLAIM = re.compile(
     r"\b(?:runs?|offers?|accepts?|refus\w*|available|exits?\s+`?\d|elevat\w*|standard (?:user|account))\b",
     re.IGNORECASE,
 )
-# ... and names the launcher or a command of the table.
-CODE_SPAN = re.compile(r"`[^`]*`")
-SENTENCE_BREAK = re.compile(r"(?<=[.;:!?])\s+|\n(?=\||- )")
 
 
-def command_pattern(table: dict) -> re.Pattern[str]:
-    """Match the commands the table lists, and the administrator commands the refusal names."""
+def command_patterns(table: dict) -> tuple[re.Pattern[str], re.Pattern[str]]:
+    """Return (table commands, bare launcher and administrator commands)."""
     verbs: set[str] = set()
     for row in table["commands"]:
         for part in row["command"].split(","):
-            found = re.match(r"\s*(?:defenseclaw\s+)?([a-z][a-z-]*)", part)
+            # The first word or option after the launcher name: "--help", "status", "sandbox ...".
+            found = re.match(r"\s*(?:defenseclaw\s+)?(--[a-z][a-z-]*|[a-z][a-z-]*)", part)
             if found:
                 verbs.add(found.group(1))
     admin = {
@@ -58,14 +64,15 @@ def command_pattern(table: dict) -> re.Pattern[str]:
         for text in table["refusal"].values()
         for match in re.findall(r"enterprise (?:linux|macos|windows) [a-z-]+", text)
     }
-    alternatives = [r"`defenseclaw (?:%s)(?:\s[^`]*)?`|`defenseclaw`" % "|".join(sorted(verbs))]
-    alternatives += [r"`[^`]*%s[^`]*`" % re.escape(command) for command in sorted(admin)]
-    return re.compile("|".join(alternatives))
+    commands = re.compile(r"`defenseclaw (?:%s)(?:\s[^`]*)?`" % "|".join(re.escape(v) for v in sorted(verbs)))
+    others = [r"`defenseclaw`"]
+    others += [r"`[^`]*%s[^`]*`" % re.escape(command) for command in sorted(admin)]
+    return commands, re.compile("|".join(others))
 
 
 def pages_with_unlinked_claims(docs: Path, table: dict) -> list[str]:
-    """Return "page: sentence" for every availability claim whose paragraph lacks the link."""
-    names = command_pattern(table)
+    """Return "page: sentence" for every sentence that puts a managed computer and a command together without the link in its paragraph."""
+    commands, others = command_patterns(table)
     page = docs / "enterprise" / "managed-commands.mdx"
     found = []
     for path in sorted(docs.rglob("*.mdx")):
@@ -77,8 +84,10 @@ def pages_with_unlinked_claims(docs: Path, table: dict) -> list[str]:
             for sentence in SENTENCE_BREAK.split(block):
                 if sentence.lstrip().startswith("#"):
                     continue  # a heading names a topic and says nothing about it
+                if not MANAGED.search(sentence):
+                    continue
                 prose = CODE_SPAN.sub("", sentence)  # words inside code are not a claim
-                if MANAGED.search(sentence) and names.search(sentence) and CLAIM.search(prose):
+                if commands.search(sentence) or (others.search(sentence) and CLAIM.search(prose)):
                     found.append("%s: %s" % (path.relative_to(docs), " ".join(sentence.split())[:120]))
                     break
     return found
@@ -144,6 +153,14 @@ class AvailabilityClaimGateTests(unittest.TestCase):
             "On managed Linux and macOS, the user `defenseclaw` launcher offers only sandbox commands.\n",
             "The `defenseclaw` command of the enterprise packages runs only `sandbox` commands.\n",
             "| `defenseclaw doctor` | Refused on a managed computer. |\n",
+            # Other words for the same claim, and a command given as an option.
+            "On managed Linux, `defenseclaw policy show` works.\n",
+            "On managed Linux, `defenseclaw status` is unavailable.\n",
+            "On managed macOS, `defenseclaw status` is disabled.\n",
+            "On managed Linux, `defenseclaw --help` is refused.\n",
+            "On managed Linux, `defenseclaw status` returns exit code 3.\n",
+            "On managed Linux, `defenseclaw status --json` prints a table of connectors.\n",
+            "A managed Mac cannot use `defenseclaw tui`.\n",
         ):
             with self.subTest(text=text):
                 self.assertEqual(len(self.check(text)), 1)
@@ -154,6 +171,10 @@ class AvailabilityClaimGateTests(unittest.TestCase):
             "Run `defenseclaw doctor` on a per-user install; it runs the checks.\n",
             "A managed host keeps the earlier hook file.\n",
             "On managed Linux the gateway restarts after `enterprise linux ensure`.\n",
+            "On a per-user Linux install, `defenseclaw status` works.\n",
+            "On managed Linux, the user sees a table of connectors.\n",
+            "A managed host has no `defenseclaw` Python CLI.\n",
+            "On managed Linux, `defenseclaw status` is unavailable.\nSee [the table](%s).\n" % LINK,
         ):
             with self.subTest(text=text):
                 self.assertEqual(self.check(text), [])
