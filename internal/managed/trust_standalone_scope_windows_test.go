@@ -349,7 +349,7 @@ func TestStandaloneFileLeafDriftNullDACLAndUnsupportedEntry(t *testing.T) {
 		if got == nil || got.Path != leaf || got.SID != tc.sid || got.ACL != tc.acl || got.Owner || got.Error() != tc.verdict.Error() {
 			t.Errorf("%s: leaf verdict = %+v, want %s on %s", name, got, tc.sid, leaf)
 		}
-		if refused := RefuseStandaloneContentDrift(tc.verdict).Error(); !strings.Contains(refused, standaloneConfigDriftRecovery) {
+		if refused := RefuseStandaloneContentDrift(tc.verdict).Error(); !strings.Contains(refused, standaloneConfigDriftRecovery()) {
 			t.Errorf("%s: refusal %q does not name the config.yaml rewrite", name, refused)
 		}
 	}
@@ -407,7 +407,7 @@ func TestStandaloneFileLeafDriftNullDACLAndUnsupportedEntry(t *testing.T) {
 // source; any other content file is the administrator's to check.
 func TestStandaloneContentDriftNamesTheWorkingRecovery(t *testing.T) {
 	for name, want := range map[string]string{
-		"config.yaml":     "CONFIG=<the approved administrator-only config>` so Setup writes a new config.yaml",
+		"config.yaml":     "CONFIG=<the approved administrator-only config>'` so Setup writes a new config.yaml",
 		"targets.yaml":    "Setup writes a new targets.yaml enumerated from it",
 		"deployment.json": "remove that entry, or give the file back to Administrators, and check the file",
 		"journal.json":    "remove that entry, or give the file back to Administrators, and check the file",

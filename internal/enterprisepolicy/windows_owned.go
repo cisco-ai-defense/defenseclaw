@@ -40,7 +40,7 @@ var windowsGoOwnedNames = []string{ConnectorCopilot, ConnectorDevinCascade, Conn
 // windowsGoOwnedFolderUse is how the vendor of a Go-owned Windows target
 // uses the folder that holds its policy file: Copilot loads every *.json
 // file in it and OpenCode two config names, so another account that can add
-// a file there changes the policy; Devin and Windsurf read only hooks.json.
+// a file there changes the policy; Devin reads only hooks.json, in both of its folders.
 func windowsGoOwnedFolderUse(name string) policyFolderUse {
 	switch name {
 	case ConnectorCopilot:
@@ -183,7 +183,7 @@ func RemoveWindowsSecureClientCopilot(opts Options) (State, error) {
 // longer claims the connector. Such folders are returned, and the removal
 // then strips DefenseClaw's entry only from a recorded file it can still
 // trust (restoreOrStripUnprotected). Every target walks each folder it
-// removes a recorded file from, so Devin, Windsurf, OpenCode and Copilot
+// removes a recorded file from, so Devin (both folders), OpenCode and Copilot
 // behave the same (g582 review 7 S1).
 func takeBackWindowsGoOwnedForRemoval(opts Options, target Target) ([]unprotectedVendorFolder, error) {
 	paths, err := target.Paths(opts)
@@ -195,7 +195,7 @@ func takeBackWindowsGoOwnedForRemoval(opts Options, target Target) ([]unprotecte
 	use.removal = true
 	switch target.Name() {
 	case ConnectorDevinCascade:
-		// The pre-rename Windsurf file is removed as well when DefenseClaw
+		// The pre-rename Devin file is removed as well when DefenseClaw
 		// recorded writing it.
 		if len(paths) > 1 {
 			if record, err := loadRecord(opts, devinCascadeLegacyRecord); err == nil && record != nil {

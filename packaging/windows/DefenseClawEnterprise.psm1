@@ -2935,7 +2935,7 @@ namespace $nativeNamespace
             if (handle == new IntPtr(-1) &&
                 (error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION))
                 throw new InvalidOperationException(
-                    HeldFileRefusal + " (close the program that holds it, then run Setup /ensure again): " + path);
+                    HeldFileRefusal + " (close the program that holds it, then run the same command again): " + path);
             return handle;
         }
 
@@ -5210,7 +5210,7 @@ function Open-DefenseClawRestampHold {
         }
         throw ('refusing to re-stamp a managed file while another program holds it open' +
             ' with write or delete access, or without sharing read access, and nothing was changed ' +
-            '(close the program that holds it, then run Setup /ensure again): ' + $Path)
+            '(close the program that holds it, then ' + (Format-DefenseClawRerunStep) + '): ' + $Path)
     }
     return $handle
 }
@@ -17139,9 +17139,10 @@ function Assert-DefenseClawRepairableConfigAcl {
                 -IgnoreCreatorTemplates
         }
         catch {
-            throw ('refusing ACL repair for untrusted managed config path (remove that entry, then run Setup /ensure ' +
-                'again; for config.yaml itself, Setup /ensure CONFIG=<the approved config> writes a new config.yaml ' +
-                "from that administrator-only file instead): $($_.Exception.Message)")
+            throw ('refusing ACL repair for untrusted managed config path (remove that entry, then ' +
+                (Format-DefenseClawRerunStep) + '; for config.yaml itself, run ' +
+                (Format-DefenseClawSetupAction -Action '/ensure CONFIG=<the approved config>') +
+                " to write a new config.yaml from that administrator-only file instead): $($_.Exception.Message)")
         }
     }
 }
@@ -17165,6 +17166,10 @@ $script:StandaloneContentGateOutOfClass = @(
     [pscustomobject]@{
         Reason = 'a folder above the state root: Setup adds one traverse entry and never replaces its access list, and the trusted-ancestor walk judges it'
         Paths  = @('StateRootAncestors')
+    },
+    [pscustomobject]@{
+        Reason = 'a lazily created lock file (GAP-0766): it holds no bytes DefenseClaw reads, so re-stamping its access list adopts nothing a user wrote, and the stamp still refuses an untrusted owner'
+        Paths  = @('LazyLockFiles')
     },
     [pscustomobject]@{
         Reason = 'Secure Client only: the standalone profile has no install marker'
@@ -17263,21 +17268,21 @@ function Assert-DefenseClawStandaloneContentTrusted {
         [string[]]$Except = @()
     )
     $adminWriters = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
-    $again = 'run Setup /ensure again'
+    $again = Format-DefenseClawRerunStep
     $then = ''
     if ($Scope -ne 'Lifecycle') {
         $again = 'run the uninstall again'
         $then = ', then run the uninstall again'
     }
     # A non-purge uninstall keeps these; a purge deletes them unread.
-    $purgeDeletes = if ($Scope -eq 'Retain') { ', or run Setup /uninstall PURGE=1, which deletes it' } else { '' }
+    $purgeDeletes = if ($Scope -eq 'Retain') { ", or run $(Format-DefenseClawSetupAction -Action '/uninstall PURGE=1'), which deletes it" } else { '' }
     $folder = "remove that entry, or give the folder back to Administrators, then $again"
     $record = "Setup does not write this file from an administrator source: remove that entry, or give the file back to Administrators, and check the file, then $again"
     $state = "Setup does not write this from an administrator source: remove that entry, or give it back to Administrators, and check it, then $again$purgeDeletes"
     $secret = "Setup does not write a credential: remove that entry, then set the credential again (defenseclaw-gateway enterprise secret set) and $again$purgeDeletes"
-    $config = "run Setup /ensure CONFIG=<the approved administrator-only config>: Setup writes a new config.yaml from it$then"
-    $manifest = "run Setup /ensure CONFIG=<the approved config>: Setup writes a new targets.yaml enumerated from it, or from MANIFEST=<the approved administrator-only targets.yaml> in manifest enrollment mode$then"
-    $approved = "run Setup /ensure CONFIG=<the approved administrator-only config> (and MANIFEST=<the approved targets.yaml> in manifest enrollment mode): Setup publishes a fresh copy of the approved source$then"
+    $config = "run $(Format-DefenseClawSetupAction -Action '/ensure CONFIG=<the approved administrator-only config>'): Setup writes a new config.yaml from it$then"
+    $manifest = "run $(Format-DefenseClawSetupAction -Action '/ensure CONFIG=<the approved config>'): Setup writes a new targets.yaml enumerated from it, or from MANIFEST=<the approved administrator-only targets.yaml> in manifest enrollment mode$then"
+    $approved = "run $(Format-DefenseClawSetupAction -Action '/ensure CONFIG=<the approved administrator-only config>') (and MANIFEST=<the approved targets.yaml> in manifest enrollment mode): Setup publishes a fresh copy of the approved source$then"
     $every = @('Lifecycle', 'Retain', 'Purge')
     $kept = @('Lifecycle', 'Retain')
     $rows = @(
@@ -17303,8 +17308,15 @@ function Assert-DefenseClawStandaloneContentTrusted {
         @('CompilerDirectory', $folder, @('Lifecycle'))
     )
     if ((Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CodexTargetEnabled) -eq 'True') {
-        $rows += , @('CodexMachinePolicyPath', $record, $every)
-        $rows += , @('CodexManagedHooksStatePath', $record, $every)
+        # An uninstall keeps a link at the Codex machine-policy folder and
+        # opens nothing behind it, so the gate does not judge the files there
+        # (GAP-0773). Install, ensure and repair still judge them, and the
+        # judgement refuses the link by name.
+        if ($Scope -ceq 'Lifecycle' -or
+            [string]::IsNullOrEmpty((Get-DefenseClawCodexMachineFolderLink -Layout $Layout))) {
+            $rows += , @('CodexMachinePolicyPath', $record, $every)
+            $rows += , @('CodexManagedHooksStatePath', $record, $every)
+        }
     }
     # Writer 'Gateway': the gateway service writes in the runtime and IPC
     # folders, and owns what it creates there.
@@ -17471,7 +17483,7 @@ function Assert-DefenseClawStandaloneContentTrusted {
             $message += " ($index) (" + $refusals[$index]
         }
         if ($refusals.Count -gt $shown) {
-            $message += " and $($refusals.Count - $shown) more; fix these and run Setup again to see the rest"
+            $message += " and $($refusals.Count - $shown) more; fix these and $(Format-DefenseClawRerunStep) to see the rest"
         }
     }
     throw $message
@@ -18959,7 +18971,7 @@ function Assert-DefenseClawCodexMachinePolicyDirectory {
         if (-not (Test-DefenseClawEmptyAdministratorVendorFolder -Path $Path)) {
             throw ("an entry appeared in $Path while Setup took the empty vendor folder over, or an entry beneath it " +
                 'is not owned by SYSTEM, Administrators or TrustedInstaller; Setup now holds the folder but did not ' +
-                "adopt what is in it: check what is in $Path, remove what you did not put there, then run Setup /ensure " +
+                "adopt what is in it: check what is in $Path, remove what you did not put there, then $(Format-DefenseClawRerunStep) " +
                 "(before the takeover: $refusal)")
         }
         Assert-DefenseClawCodexMachinePolicyDirectoryAcl -Path $Path
@@ -27053,7 +27065,7 @@ function Assert-DefenseClawCodexFilesNotHeld {
     if ($named.Count -eq 0) {
         $named = @('a program')
     }
-    throw ("{0}: {1} has {2}, {3}, {4}; this run stopped and changed nothing, and the file is as it was. Next step: close that program, then run the same Setup command again (an MDM retries exit 1618 on its own)" -f $blocked.Code, ($named -join ', '), $blocked.Path, $blocked.What, $blocked.Why)
+    throw ("{0}: {1} has {2}, {3}, {4}; this run stopped and changed nothing, and the file is as it was. Next step: close that program, then run the same command again (an MDM retries exit 1618 on its own)" -f $blocked.Code, ($named -join ', '), $blocked.Path, $blocked.What, $blocked.Why)
 }
 
 function Test-DefenseClawFileReadBlocked {
@@ -35214,7 +35226,7 @@ function New-DefenseClawCodexFileHeldMessage {
     if ($named.Count -eq 0) {
         $named = @('a program')
     }
-    return ('{0}: {1} has {2}, {3}, {4}; the rollback stopped before it finished and the transaction is still pending. Next step: close that program, then run Setup /ensure or /repair again (an MDM retries exit 1618 on its own); it completes the rollback' -f $code, ($named -join ', '), $full, $what, $Why)
+    return ('{0}: {1} has {2}, {3}, {4}; the rollback stopped before it finished and the transaction is still pending. Next step: close that program, then run the same command again (an MDM retries exit 1618 on its own); it completes the rollback' -f $code, ($named -join ', '), $full, $what, $Why)
 }
 
 function Open-DefenseClawCodexRollbackHold {

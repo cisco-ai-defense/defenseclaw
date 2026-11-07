@@ -262,6 +262,12 @@ try {
             # enterprise-standalone-w2b-lifecycle-smoke.ps1.
             function script:Assert-DefenseClawStandaloneInstallRootNotHeld { param($Layout, $GatewayServiceName, $GuardianServiceName, $SelfUninstallCallerPID) }
             function script:Assert-DefenseClawStandaloneUninstallInstallTree { param($Layout) }
+            # The standalone content gate (g582) judges the fixture's managed paths
+            # (the journal sits in the run's temp folder, written by the account
+            # that runs the smoke); it has its own cases in
+            # enterprise-standalone-config-acl-repair-smoke.ps1 and the scope pin
+            # in enterprise-uninstall-transaction-smoke.ps1.
+            function script:Assert-DefenseClawStandaloneContentTrusted { param($Layout, $GatewayServiceName, $Scope, $Except) }
             function script:Assert-DefenseClawRecordedArtifactHashes { param($Metadata, $Layout, $Action) }
             function script:Remove-DefenseClawUninstallStateTreeLinks { param($Layout) }
             # This deployment's helper prepares the hook removal against the

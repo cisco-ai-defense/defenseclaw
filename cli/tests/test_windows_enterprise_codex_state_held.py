@@ -264,7 +264,7 @@ def test_a_holder_still_there_defers_the_run_and_the_state_is_untouched(tmp_path
     assert result["threw"].startswith("codex_state_held: holder.exe (process id 4343, EC2\\user1) has "), result
     assert "open without read sharing, so Setup could not read it" in result["threw"], result
     assert "this run stopped and changed nothing" in result["threw"], result
-    assert "run the same Setup command again" in result["threw"], result
+    assert "run the same command again" in result["threw"], result
     assert result["events"][-1] == "holders", result
     assert result["state"] == "state-of-1.0.8", result
 

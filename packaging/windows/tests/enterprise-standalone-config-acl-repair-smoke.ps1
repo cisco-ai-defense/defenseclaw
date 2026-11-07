@@ -54,7 +54,7 @@ try {
         }
         catch {
             $refused = $_.Exception.Message -match 'untrusted managed config path' -and
-                $_.Exception.Message -match 'Setup /ensure CONFIG='
+                $_.Exception.Message -match "/ensure '?CONFIG="
         }
         if (-not $refused -or $script:repairCalls -ne 0) {
             throw 'ACL repair accepted a user-writable config, changed ACLs before refusing it, or named no recovery'
@@ -117,7 +117,7 @@ try {
                 [Security.AccessControl.AccessControlType]::Allow))
             Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $acl
         }
-        Assert-GateRefuses -Path $Config -Recovery 'Setup /ensure CONFIG=<the approved administrator-only config>'
+        Assert-GateRefuses -Path $Config -Recovery 'CONFIG=<the approved administrator-only config>'
         if (-not @((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Config).Access | Microsoft.PowerShell.Core\Where-Object {
             (ConvertTo-DefenseClawSID -Identity $_.IdentityReference) -eq $script:UsersSID
         }).Count) {
@@ -186,7 +186,7 @@ try {
             $kind = if ($key -eq 'ConfigPath') { 'ConfigFile' } else { 'AdminFile' }
             $gatewaySID = if ($key -eq 'ConfigPath') { $sid } else { $script:AdministratorsSID }
             $recovery = switch ($key) {
-                'ConfigPath' { 'Setup /ensure CONFIG=<the approved administrator-only config>' }
+                'ConfigPath' { 'CONFIG=<the approved administrator-only config>' }
                 'ManifestPath' { 'Setup writes a new targets.yaml enumerated from it' }
                 default { 'remove that entry, or give the file back to Administrators' }
             }
@@ -633,13 +633,13 @@ public static class G582SmokePrivilege {
             $cells = @(
                 # The credential-file scenario: a standard user's write entry,
                 # then /repair.
-                @('Repair', $true, $false, $credential, 'set the credential again', 'run Setup /ensure again'),
+                @('Repair', $true, $false, $credential, 'set the credential again', 'run the same command again'),
                 # A reinstall over a tombstone with a retained drifted credential
                 # or a leftover teardown journal.
-                @('Install', $false, $false, $credential, 'set the credential again', 'run Setup /ensure again'),
-                @('Install', $false, $false, $teardownJournal, 'remove that entry, or give the file back to Administrators', 'run Setup /ensure again'),
+                @('Install', $false, $false, $credential, 'set the credential again', 'run the same command again'),
+                @('Install', $false, $false, $teardownJournal, 'remove that entry, or give the file back to Administrators', 'run the same command again'),
                 # A non-purge uninstall keeps the credential; PURGE=1 deletes it.
-                @('Uninstall', $true, $false, $credential, 'run Setup /uninstall PURGE=1, which deletes it', 'run the uninstall again'),
+                @('Uninstall', $true, $false, $credential, 'PURGE=1 (Setup is not installed on this computer: use the copy in your MDM package or the release download), which deletes it', 'run the uninstall again'),
                 # A purge still refuses a drifted Codex record before it restores it.
                 @('Uninstall', $true, $true, [string]$lifecycleLayout.CodexRequirementsOwnershipPath, 'remove that entry, or give the file back to Administrators', 'run the uninstall again')
             )
@@ -679,7 +679,7 @@ public static class G582SmokePrivilege {
                 $message = Invoke-TestLifecycle -Action Repair -Installed $true
                 $want = if ($restores) { 'past the gate' } else { 'refusing to change the deployment, and nothing was changed' }
                 if (-not $message.StartsWith($want) -or
-                    (-not $restores -and -not $message.Contains('Setup /ensure CONFIG=<the approved administrator-only config>'))) {
+                    (-not $restores -and -not $message.Contains('CONFIG=<the approved administrator-only config>'))) {
                     throw "Repair with a drifted config.yaml (restored $restores): '$message'"
                 }
                 Set-DefenseClawPathAcl -Path $Config -Kind ConfigFile -GatewayServiceSID $sid
