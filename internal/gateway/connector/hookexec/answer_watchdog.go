@@ -90,6 +90,10 @@ type answerWatchdog struct {
 	visibleOutage                func() ([]byte, []byte, int)
 	exit                         func(int)
 	deliveryReceipt              func(bool, bool)
+	// revoke reads the call's patch targets once more after finish wrote an
+	// allow, and replaces it with a block when one changed (hookexec,
+	// GAP-0488, GAP-0073). It reports whether it did.
+	revoke func(stdout, stderr io.Writer) (int, bool)
 
 	// installCheck is the install look of a call whose fallback is not
 	// closed: the .install.lock of a per-user call's data directory
@@ -1012,8 +1016,16 @@ func (w *answerWatchdog) finish(code int) int {
 	w.finished = true
 	_, _ = w.stderr.Write(w.err.Bytes())
 	_, _ = w.stdout.Write(w.out.Bytes())
+	closed := w.failureClosed
+	if code == 0 && w.revoke != nil {
+		// The agent reads the answer when this hook exits, so a target that
+		// changed while the answer was written is still refused.
+		if revoked, ok := w.revoke(w.stdout, w.stderr); ok {
+			code, closed = revoked, true
+		}
+	}
 	if w.deliveryReceipt != nil {
-		w.deliveryReceipt(true, w.failureClosed)
+		w.deliveryReceipt(true, closed)
 	}
 	return code
 }
@@ -1077,6 +1089,13 @@ func (w *answerWatchdog) answerLate() (code int, ok bool) {
 // w.mu is held.
 func (w *answerWatchdog) lateAnswerOwedLocked() bool {
 	return !w.fired && !w.finished && !w.answeredInTime.Load() && w.lateAnswerDue()
+}
+
+// setRevoke registers the check finish runs after it writes an allow.
+func (w *answerWatchdog) setRevoke(revoke func(stdout, stderr io.Writer) (int, bool)) {
+	w.mu.Lock()
+	w.revoke = revoke
+	w.mu.Unlock()
 }
 
 func (w *answerWatchdog) setDeliveryReceipt(receipt func(bool, bool)) {

@@ -1386,6 +1386,8 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		}
 		replacedLinks = movedOntoLinkEntriesOf(destinations, noTarget)
 	}
+	// A native patch call names its files in the call, not in a shell command.
+	nativePatch := isApplyPatchToolName(tool) || hermesV4A
 	targets := map[string]string{CWDKey: cwd}
 	// The fixed part counts the truncation marker, so setting it never
 	// exceeds the budget.
@@ -1472,6 +1474,16 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			// may be replaced, not followed (sed -i on the link).
 			if state, inState := links.stateTarget(filepath.Dir(resolutionPath), home, protected); inState {
 				resolved = filepath.Join(state, filepath.Base(resolutionPath))
+			}
+		}
+		if ok && nativePatch && !entryOnly && multiplyLinkedFile(resolved) {
+			// A hard link keeps its own name while it is a state file: a
+			// managed gateway cannot compare the identity of a file in the
+			// user's project, so the target map names the state file the
+			// patch target is (the full active-state set, as the gateway's
+			// own alias check reads it; GAP-0488, GAP-0073).
+			if state, same := ResolveActiveStateHardlinkTarget(resolved, home); same {
+				resolved = state
 			}
 		}
 		if !ok {
@@ -1945,35 +1957,68 @@ func sameAliasValue(a, b json.RawMessage) bool {
 	return bytes.Equal(compactA.Bytes(), compactB.Bytes())
 }
 
-// PatchTargetsChanged reports that a patch whose targets the hook attested
-// complete (PatchCompleteKey in evidence, the value the hook sent the gateway)
-// no longer reads as attested. Behind ProtectHome the gateway cannot read a
-// patch target again, so the hook is the only party that can, once the
-// gateway has answered and before the answer reaches the agent. Each target
-// the evidence lists is resolved again the way the first reading did, and the
-// patch changed when one resolves to another file than it did, or to a
-// protected key file (a link or a hard link made since). Only where a target
-// leads is compared, never the identity of the file at the path: an editor
-// that saves the same ordinary path again has not changed the patch. Evidence
-// that does not attest a complete patch is not rechecked here.
-func PatchTargetsChanged(evidence string) bool {
+// multiplyLinkedFile reports an existing regular file with more than one
+// link: the only kind that can be a hard link to a file of the active state,
+// so an ordinary single-link target costs one stat and no index lookup. An
+// unknown link count reads as more than one (linkCount).
+func multiplyLinkedFile(path string) bool {
+	info, err := pathStat(path)
+	return err == nil && info.Mode().IsRegular() && linkCount(path, info) > 1
+}
+
+// PatchTargetWatch reads the targets of a patch the hook attested complete
+// (PatchCompleteKey in the evidence the hook sent the gateway) again. Behind
+// ProtectHome the gateway cannot read a patch target a second time, so the
+// hook is the only party that can, after the gateway has answered and again
+// once the answer is written. It is nil for evidence that does not attest a
+// complete patch, and a nil watch never reports a change.
+type PatchTargetWatch struct {
+	targets   map[string]string
+	home      string
+	protected protectedFiles
+}
+
+// NewPatchTargetWatch returns the watch of evidence, or nil when it does not
+// attest a complete patch.
+func NewPatchTargetWatch(evidence string) *PatchTargetWatch {
 	targets, ok := Decode(evidence)
 	if !ok || targets[PatchCompleteKey] != "1" {
+		return nil
+	}
+	home, _ := os.UserHomeDir()
+	watch := &PatchTargetWatch{targets: targets, home: home}
+	if home != "" {
+		watch.protected = newProtectedFiles(home)
+	}
+	return watch
+}
+
+// Changed reports that a listed target no longer reads as attested: it
+// resolves to another file than it did, to a protected key file, or, by file
+// identity, to a file of the active DefenseClaw state (a link, a hard link or
+// a swap made since). Only where a target leads is compared, never the
+// identity of the file at the path against the first reading: an editor that
+// saves the same ordinary path again has not changed the patch.
+func (w *PatchTargetWatch) Changed() bool {
+	if w == nil {
 		return false
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
+	if w.home == "" {
 		return true
 	}
-	protected := newProtectedFiles(home)
 	links := shellLinks{known: true}
-	for path, attested := range targets {
+	for path, attested := range w.targets {
 		if !filepath.IsAbs(path) {
 			continue
 		}
-		resolved, ok := links.resolve(path, protected)
-		if !ok || resolved != attested || protected.has(resolved) {
+		resolved, ok := links.resolve(path, w.protected)
+		if !ok || resolved != attested || w.protected.has(resolved) {
 			return true
+		}
+		if multiplyLinkedFile(resolved) {
+			if _, state := ResolveActiveStateHardlinkTarget(resolved, w.home); state {
+				return true
+			}
 		}
 	}
 	return false

@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-// GAP-0488, GAP-0073: PatchTargetsChanged is true only for a patch the hook
+// GAP-0488, GAP-0073: PatchTargetWatch.Changed is true only for a patch the hook
 // attested complete whose targets lead somewhere else, or to a protected key
 // file, a second time. The identity of the file at an unchanged path is not
 // compared: an editor save of the same ordinary file is not a change.
@@ -89,18 +89,18 @@ func TestGAP0488PatchTargetsChangedFollowsWhereTargetsLead(t *testing.T) {
 						"tool_input": map[string]any{"filePath": filepath.Join(project, "swap.txt"), "content": "y"}, "cwd": project})
 				}
 				evidence := ResolveConnector(c.connector, "", c.event, body)
-				if PatchTargetsChanged(evidence) {
+				if NewPatchTargetWatch(evidence).Changed() {
 					t.Fatal("unchanged targets read as changed")
 				}
 				change.mutate(t, project, keys)
 				want := change.want && c.patch
-				if got := PatchTargetsChanged(evidence); got != want {
+				if got := NewPatchTargetWatch(evidence).Changed(); got != want {
 					t.Errorf("changed = %v, want %v", got, want)
 				}
 			})
 		}
 	}
-	if PatchTargetsChanged("") {
+	if NewPatchTargetWatch("").Changed() {
 		t.Error("no evidence read as changed")
 	}
 }
