@@ -15,10 +15,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// effectiveUID is the uid ownership decisions are made for. A variable so a
+// test can stand in for the root run it cannot be.
+var effectiveUID = os.Geteuid
+
 // ReclaimToDirectoryOwner gives a root-created private file back to the
 // operator who owns the already-trusted parent directory.
 func ReclaimToDirectoryOwner(path string) error {
-	if os.Geteuid() != 0 {
+	if effectiveUID() != 0 {
 		return nil
 	}
 	dir := filepath.Dir(path)
@@ -29,37 +33,11 @@ func ReclaimToDirectoryOwner(path string) error {
 	if base == "." || base == string(filepath.Separator) {
 		return fmt.Errorf("safefile: private file path has no basename: %s", path)
 	}
-	dirFD, err := unix.Open(dir, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_DIRECTORY, 0)
+	directory, dirInfo, ownerUID, ownerGID, err := openReclaimDirectory(dir)
 	if err != nil {
-		return fmt.Errorf("safefile: open private directory without following links %s: %w", dir, err)
-	}
-	directory := os.NewFile(uintptr(dirFD), dir)
-	if directory == nil {
-		_ = unix.Close(dirFD)
-		return fmt.Errorf("safefile: bind private directory descriptor %s", dir)
+		return err
 	}
 	defer directory.Close()
-	dirInfo, err := directory.Stat()
-	if err != nil {
-		return fmt.Errorf("safefile: stat opened private directory %s: %w", dir, err)
-	}
-	if !dirInfo.IsDir() {
-		return fmt.Errorf("safefile: private directory is not a trusted directory: %s", dir)
-	}
-	if dirInfo.Mode().Perm()&0o077 != 0 {
-		if err := relaxModeVerdict(dir, dirInfo.Mode().Perm(), fmt.Errorf("safefile: private directory is not a trusted directory: %s", dir)); err != nil {
-			return err
-		}
-	}
-	dirStat, ok := dirInfo.Sys().(*syscall.Stat_t)
-	if !ok {
-		return fmt.Errorf("safefile: private directory ownership is unavailable: %s", dir)
-	}
-	ownerUID := int(dirStat.Uid)
-	ownerGID := int(dirStat.Gid)
-	if !runtimeowner.Trusted(dirStat.Uid) {
-		return fmt.Errorf("safefile: private directory has an untrusted owner: %s", dir)
-	}
 	if ownerUID == 0 {
 		return nil
 	}
@@ -125,6 +103,115 @@ func ReclaimToDirectoryOwner(path string) error {
 		return err
 	}
 	return nil
+}
+
+// openReclaimDirectory opens dir without following links and proves it is a
+// directory this process may give files to: private enough and owned by a
+// trusted uid. ReclaimToDirectoryOwner and PreflightReclaimDirectory share it,
+// so the check that runs before a root start's first write is the one that
+// would refuse after it.
+func openReclaimDirectory(dir string) (directory *os.File, dirInfo os.FileInfo, ownerUID, ownerGID int, err error) {
+	dirFD, err := unix.Open(dir, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_DIRECTORY, 0)
+	if err != nil {
+		return nil, nil, 0, 0, fmt.Errorf("safefile: open private directory without following links %s: %w", dir, err)
+	}
+	directory = os.NewFile(uintptr(dirFD), dir)
+	if directory == nil {
+		_ = unix.Close(dirFD)
+		return nil, nil, 0, 0, fmt.Errorf("safefile: bind private directory descriptor %s", dir)
+	}
+	fail := func(err error) (*os.File, os.FileInfo, int, int, error) {
+		_ = directory.Close()
+		return nil, nil, 0, 0, err
+	}
+	dirInfo, err = directory.Stat()
+	if err != nil {
+		return fail(fmt.Errorf("safefile: stat opened private directory %s: %w", dir, err))
+	}
+	if !dirInfo.IsDir() {
+		return fail(fmt.Errorf("safefile: private directory is not a trusted directory: %s", dir))
+	}
+	if dirInfo.Mode().Perm()&0o077 != 0 {
+		if err := relaxModeVerdict(dir, dirInfo.Mode().Perm(), fmt.Errorf("safefile: private directory is not a trusted directory: %s", dir)); err != nil {
+			return fail(err)
+		}
+	}
+	dirStat, ok := dirInfo.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fail(fmt.Errorf("safefile: private directory ownership is unavailable: %s", dir))
+	}
+	if !runtimeowner.Trusted(dirStat.Uid) {
+		return fail(fmt.Errorf("safefile: private directory has an untrusted owner: %s", dir))
+	}
+	return directory, dirInfo, int(dirStat.Uid), int(dirStat.Gid), nil
+}
+
+// PreflightReclaimDirectory is the check a root run makes before its first
+// write into dir: the same one ReclaimToDirectoryOwner would refuse on after
+// the write. A refused root start otherwise leaves root-owned files the
+// account's own start cannot open (GAP-0714). It does nothing for a non-root
+// process.
+//
+// A directory that does not exist yet has no owner to prove, and a root run
+// would create it (and the log and PID record in it) owned by root. That is
+// right only where root is the owner: below a root-owned folder. Below a folder
+// another account owns, the root run would strand that account behind a
+// root-owned 0700 home, so it is refused before anything is created and no
+// state needs rolling back.
+func PreflightReclaimDirectory(dir string) error {
+	if effectiveUID() != 0 {
+		return nil
+	}
+	if _, err := os.Lstat(dir); os.IsNotExist(err) {
+		return preflightMissingDirectory(dir)
+	}
+	directory, _, _, _, err := openReclaimDirectory(dir)
+	if err != nil {
+		return err
+	}
+	return directory.Close()
+}
+
+// preflightMissingDirectory refuses a missing dir unless its nearest existing
+// ancestor is owned by root and no other account can write it. Root creates
+// the directory owned by root, so it is right only where nobody else has a
+// claim on the folder: below a folder another account owns, or one any account
+// can write into (/tmp is root-owned and open to everyone), the account the
+// home is for is left behind a root-owned private directory.
+func preflightMissingDirectory(dir string) error {
+	for ancestor := filepath.Dir(dir); ; ancestor = filepath.Dir(ancestor) {
+		uid, perm, err := pathOwnerAndMode(ancestor)
+		if err == nil {
+			switch {
+			case uid != 0:
+				return fmt.Errorf("safefile: private directory %s does not exist and root would create it inside a folder owned by uid %d: start the gateway as that account, or create the directory as that account first", dir, uid)
+			case perm&0o022 != 0:
+				return fmt.Errorf("safefile: private directory %s does not exist and root would create it inside %s, which other accounts can write (mode %04o): start the gateway as the account the directory is for, or create the directory as that account first", dir, ancestor, perm)
+			}
+			return nil
+		}
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("safefile: inspect the folder that would hold private directory %s: %w", dir, err)
+		}
+		if next := filepath.Dir(ancestor); next == ancestor {
+			return nil
+		}
+	}
+}
+
+// pathOwnerAndMode is the owner and the permission bits of the
+// existing path (links followed, as a create would). A variable so a test can
+// stand in for a root-owned folder it cannot make.
+var pathOwnerAndMode = func(path string) (uint32, os.FileMode, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, 0, fmt.Errorf("ownership is unavailable: %s", path)
+	}
+	return stat.Uid, info.Mode().Perm(), nil
 }
 
 func verifyOpenedPath(path string, opened os.FileInfo) error {

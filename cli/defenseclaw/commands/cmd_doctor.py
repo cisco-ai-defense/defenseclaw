@@ -1810,16 +1810,21 @@ def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
             check_id="doctor.state.sudo-leftovers",
         )
         return
-    remediation = (
-        "stop the gateway, preserve a backup, then rerun the gateway once with sudo "
-        "from the owning account so verified descriptor-bound ownership repair can run"
-    )
+    if _root_leftovers_account_can_repair(cfg):
+        remediation = _root_leftovers_remedy(cfg)
+        guidance = "; give them back to this account"
+    else:
+        remediation = (
+            "stop the gateway, preserve a backup, then rerun the gateway once with sudo "
+            "from the owning account so verified descriptor-bound ownership repair can run"
+        )
+        guidance = "; use the guided ownership repair"
     _emit(
         "fail",
         "Sudo leftovers",
         "root-owned from a sudo-started gateway: "
         + ", ".join(leftovers)
-        + "; use the guided ownership repair",
+        + guidance,
         r=r,
         check_id="doctor.state.sudo-leftovers",
         reason_code="sudo-runtime-leftovers",
@@ -1878,14 +1883,17 @@ def _root_gateway_remedy_for(platform_name: str, cfg) -> str:
             f"Stop it from an elevated PowerShell prompt ({stop}), "
             f"then start it as yourself from a normal PowerShell prompt ({start})"
         )
+    note = _root_gateway_recovery_note(cfg)
     if platform_name == "darwin":
         return (
-            "Open DefenseClawMac and choose Start Gateway: it stops the root gateway with "
+            note
+            + "Open DefenseClawMac and choose Start Gateway: it stops the root gateway with "
             "administrator approval, returns its files to you and starts the gateway as you. "
             "Without the app, run: " + _root_gateway_recovery_command(cfg)
         )
     return (
-        "Stop it, return its files to your account and start it as yourself with: "
+        note
+        + "Stop it, return its files to your account and start it as yourself with: "
         + _root_gateway_recovery_command(cfg)
     )
 
@@ -1906,15 +1914,107 @@ def _root_gateway_windows_executable() -> str:
 
 def _root_gateway_recovery_command(cfg) -> str:
     """Stop the root gateway, return the home and the store, start as this account."""
-    data_dir = _configured_gateway_data_dir(cfg)
-    homes = [_root_gateway_install_home(cfg)]
-    if data_dir and data_dir not in homes:
-        homes.append(data_dir)
+    return _root_gateway_stop_command(cfg) + " && " + _root_gateway_return_and_start_command(cfg)
+
+
+def _root_gateway_return_and_start_command(cfg) -> str:
+    """Give the install home and the moved store back to this account, then start."""
+    home = _root_gateway_install_home(cfg)
+    store = _root_gateway_moved_store()[0]
+    homes = [home]
+    if store and store not in homes:
+        homes.append(store)
     return (
-        _root_gateway_stop_command(cfg)
-        + ' && sudo chown -R "$(id -un)" '
-        + " ".join(shlex.quote(home) for home in homes)
+        'sudo chown -R "$(id -un)" '
+        + " ".join(shlex.quote(item) for item in homes)
         + " && defenseclaw-gateway start"
+    )
+
+
+def _root_gateway_moved_store() -> tuple[str, str, bool]:
+    """The folder the gateway's config moved the store to, as the gateway reads it.
+
+    Returns ``(store, config_file, unreadable)``. The gateway starts with the
+    install home as its working directory, so a relative ``DEFENSECLAW_CONFIG``
+    and a relative ``data_dir`` are both taken from there, not from the folder
+    doctor was run in (GAP-0711, GAP-0713). The config is read from that
+    place and from nowhere else: the data_dir this process loaded may come from
+    a different file of the same relative name in the folder doctor runs in, so
+    it never stands in. A config that does not exist moves nothing (the gateway
+    uses the install home); ``unreadable`` reports one that exists but cannot
+    be read, whose store is unknown, so the caller says the folder list may be
+    incomplete.
+    """
+    import yaml
+
+    from defenseclaw.config import (
+        CONFIG_FILE_NAME,
+        CONFIG_PATH_ENV,
+        default_data_path,
+        parse_config_yaml,
+        read_config_text,
+    )
+
+    home = os.path.abspath(os.fspath(default_data_path()))
+    config_file = os.environ.get(CONFIG_PATH_ENV) or os.path.join(home, CONFIG_FILE_NAME)
+    if not os.path.isabs(config_file):
+        config_file = os.path.join(home, config_file)
+    config_file = os.path.normpath(config_file)
+    try:
+        raw = parse_config_yaml(read_config_text(config_file))
+    except (FileNotFoundError, NotADirectoryError):
+        return "", config_file, False
+    except (OSError, UnicodeError, ValueError, yaml.YAMLError):
+        return "", config_file, True
+    configured = raw.get("data_dir") if isinstance(raw, dict) else None
+    if not isinstance(configured, str) or not configured.strip():
+        return "", config_file, False
+    return os.path.abspath(os.path.join(home, configured.strip())), config_file, False
+
+
+def _root_gateway_recovery_note(cfg) -> str:
+    """A sentence to read before the recovery command, or "".
+
+    The command itself stays one pasteable line. When the config exists but
+    cannot be read here, the moved store is unknown and the chown does not
+    cover it.
+    """
+    _store, config_file, unreadable = _root_gateway_moved_store()
+    if not unreadable:
+        return ""
+    return (
+        f"The configuration {config_file} could not be read here, so a data_dir it sets is "
+        "not in the chown command below: return that folder to your account too. "
+    )
+
+
+def _root_leftovers_account_can_repair(cfg) -> bool:
+    """Whether root-owned runtime files are this account's to take back.
+
+    A managed install keeps its runtime root-owned by design, and a Secure
+    Client host is unchanged, so both keep their own guidance.
+    """
+    if os.name == "nt" or _doctor_managed(cfg):
+        return False
+    from defenseclaw.enforce import asset_lists
+
+    return not asset_lists.is_secure_client(cfg)
+
+
+def _root_leftovers_remedy(cfg) -> str:
+    """The one repair for root-owned files a sudo-started gateway left behind.
+
+    The gateway refuses to run as root over an account's files, so asking for
+    another sudo run cannot repair them (GAP-0711, GAP-0713). The same
+    stop, return, start sequence as ``_root_gateway_remedy``, in that order:
+    a root gateway that is still alive keeps writing, and the stop of one that
+    is already stopped succeeds, so the sequence reads the same either way.
+    """
+    note = _root_gateway_recovery_note(cfg)
+    return (
+        (note + "Then stop" if note else "stop")
+        + " the gateway if it runs as root, give its files back to this account and start it as yourself: "
+        + _root_gateway_recovery_command(cfg)
     )
 
 
@@ -1922,7 +2022,7 @@ def _root_gateway_install_home(cfg) -> str:
     """The PID-record home that the root gateway was started for."""
     from defenseclaw.config import default_data_path
 
-    data_dir = _configured_gateway_data_dir(cfg) or os.fspath(default_data_path())
+    data_dir = _root_gateway_moved_store()[0] or os.fspath(default_data_path())
     try:
         return gateway_home_for_data_dir(data_dir)
     except (OSError, TypeError, ValueError):
@@ -2203,6 +2303,12 @@ def _configured_gateway_data_dir(cfg) -> str:
     if not raw_data_dir.strip():
         return ""
     try:
+        if not os.path.isabs(raw_data_dir):
+            # The gateway makes a relative data_dir absolute from its working
+            # directory, the install home, never from where doctor runs.
+            from defenseclaw.config import default_data_path
+
+            raw_data_dir = os.path.join(os.fspath(default_data_path()), raw_data_dir)
         return os.path.abspath(raw_data_dir)
     except (OSError, ValueError):
         return ""
@@ -18304,6 +18410,15 @@ def _check_hook_contract_lock(
         return
     except PermissionError:
         if root_owned_private_regular_file(lock_path):
+            if _root_leftovers_account_can_repair(cfg):
+                _emit(
+                    "fail",
+                    "Hook contract",
+                    "hook_contract_lock.json is root-owned from a sudo-started gateway",
+                    r=r,
+                    remediation=_root_leftovers_remedy(cfg),
+                )
+                return
             _emit(
                 "fail",
                 "Hook contract",
