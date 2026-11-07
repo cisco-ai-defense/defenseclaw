@@ -103,6 +103,13 @@ function blockNoticeSuffix(verdict: InspectVerdict): string {
   return typeof ref === "string" && NOTICE_REF.test(ref) ? ` (ref ${ref})` : "";
 }
 
+// toolCallIdOf is the id OpenClaw gave this call, which the gateway ties the
+// block notice to; empty when the host sent none.
+function toolCallIdOf(event: { toolCallId?: unknown }): { tool_call_id?: string } {
+  const id = event.toolCallId;
+  return typeof id === "string" && id !== "" ? { tool_call_id: id } : {};
+}
+
 function hasValidInspectActionContract(verdict: Record<string, unknown>): boolean {
   if (verdict.mode === "observe" && verdict.action !== "allow") return false;
   return verdict.raw_action === undefined || typeof verdict.raw_action === "string";
@@ -505,6 +512,7 @@ export default function (api: DefenseClawPluginHost) {
           args: event.params,
           content,
           direction: "outbound",
+          ...toolCallIdOf(event),
         },
         ctx,
       );
@@ -530,6 +538,7 @@ export default function (api: DefenseClawPluginHost) {
       {
         tool: event.toolName,
         args: event.params,
+        ...toolCallIdOf(event),
       },
       ctx,
     );

@@ -80,6 +80,9 @@ type ToolInspectRequest struct {
 	Direction       string          `json:"direction,omitempty"`
 	SessionID       string          `json:"session_id,omitempty"`
 	ApprovalSurface string          `json:"approval_surface,omitempty"`
+	// ToolCallID is the OpenClaw id of the call, sent by the OpenClaw plugin so
+	// an enforced block can be tied to the result of that call (GAP-0644).
+	ToolCallID string `json:"tool_call_id,omitempty"`
 	// Connector is an optional assertion. The authenticated server route
 	// selects the connector generation; a mismatched assertion is rejected.
 	Connector     string `json:"connector,omitempty"`
@@ -2404,7 +2407,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	if verdict.Action == "block" && verdict.Mode == "action" &&
 		strings.EqualFold(firstNonEmpty(req.Connector, connectorName), "openclaw") &&
 		openClawNoticeAllowed(a.decisionConfig(r.Context())) {
-		verdict.NoticeRef = rememberOpenClawBlockNotice(req.Tool, evalCtx.RuleIDs, verdict.Reason)
+		verdict.NoticeRef = rememberOpenClawBlockNotice(req.Tool, req.ToolCallID, evalCtx.RuleIDs, verdict.Reason)
 	}
 
 	a.emitCodeGuardTelemetry(r.Context(), &req, verdict, elapsed)
