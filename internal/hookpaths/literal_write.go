@@ -141,9 +141,11 @@ func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, f
 	// when the command may call it, so an uncalled body stays inert.
 	called := calledFunctions(file, home)
 	functions := map[string]*syntax.FuncDecl{}
+	redefined := map[string]bool{}
 	if include != nil {
 		for _, root := range file.Stmts {
 			if function, ok := root.Cmd.(*syntax.FuncDecl); ok && function.Name != nil {
+				redefined[function.Name.Value] = functions[function.Name.Value] != nil
 				functions[function.Name.Value] = function
 			}
 		}
@@ -154,10 +156,16 @@ func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, f
 	}
 	var knownValues map[*syntax.Word]string
 	knownValuesRead := false
+	var shadow *knownShadow
 	if include != nil {
-		knownNeutralizeShadowed(file, home)
+		shadow = newKnownShadow(file, home)
 	}
 	for _, root := range file.Stmts {
+		if depth >= 4 || !knownReachedCompound(root) {
+			// The reader scans the statements of a compound command as it
+			// reaches them.
+			shadow.scan(root)
+		}
 		candidates := append([]actionValues{values}, kept...)
 		if initial != nil && len(kept) > 0 {
 			candidates = kept
@@ -171,7 +179,7 @@ func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, f
 			// shell runs it, so a target only an unreached statement names is
 			// not a write. Past a reader bound other than the reading count,
 			// the whole statement is read below as if every part may run.
-			writes, after, complete, continues := knownReachedWrites(root, file, candidates, cwd, home, depth, include)
+			writes, after, complete, continues := knownReachedWrites(root, file, candidates, cwd, home, depth, include, shadow)
 			for _, name := range writes {
 				add(name)
 			}
@@ -456,7 +464,12 @@ func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, f
 		if trackKept {
 			next := actionUpdateValuesKept(root, kept, cwd, home, &steps)
 			if include != nil {
-				next = actionKeepAcrossFunctionCall(root, kept, next, home)
+				next = actionKeepAcrossFunctionCall(root, kept, next, func(name string) *syntax.FuncDecl {
+					if redefined[name] {
+						return nil
+					}
+					return functions[name]
+				}, cwd, home, &steps)
 			}
 			kept = next
 		}
