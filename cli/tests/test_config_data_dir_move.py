@@ -332,7 +332,7 @@ def test_config_set_data_dir_keeps_the_seals_a_populated_data_dir_already_has(tm
     # What the new folder kept does not match what setup sealed: say so, with the way out.
     assert "already has connector state that differs" in result.output
     assert "hook_contract_lock.json" in result.output
-    assert "connector_backups/codex/config.toml.json" in result.output
+    assert os.path.join("connector_backups", "codex", "config.toml.json") in result.output
     assert "defenseclaw setup <connector> --yes" in result.output
 
 
@@ -379,7 +379,7 @@ def test_config_set_data_dir_does_not_carry_a_backup_another_account_could_have_
     assert not os.path.lexists(moved / "connector_backups" / "codex" / "config.toml.json")
     assert (moved / "connector_backups" / "opencode" / "config.json").is_file()
     assert "warning: some connector state was not copied" in result.output
-    assert "connector_backups/codex/config.toml.json" in result.output
+    assert os.path.join("connector_backups", "codex", "config.toml.json") in result.output
 
 
 def test_config_set_data_dir_creates_the_audit_store_the_way_a_first_run_does(tmp_path, monkeypatch):
@@ -457,7 +457,7 @@ def test_config_set_data_dir_reports_an_identical_lock_the_gateway_would_refuse(
     assert "already has connector state that differs" in result.output
     assert "is open to other accounts" in result.output
     assert "hook_contract_lock.json" in result.output
-    assert "connector_backups/codex/config.toml.json" not in result.output
+    assert os.path.join("connector_backups", "codex", "config.toml.json") not in result.output
     assert "defenseclaw setup <connector> --yes" in result.output
 
 
@@ -479,7 +479,7 @@ def test_config_set_data_dir_reports_a_linked_backup_the_new_folder_already_has(
     assert os.path.islink(moved / "connector_backups" / "opencode" / "config.json")
     assert elsewhere.read_bytes() == b'{"original": "opencode"}\n'
     assert "already has connector state that differs" in result.output
-    assert "connector_backups/opencode/config.json" in result.output
+    assert os.path.join("connector_backups", "opencode", "config.json") in result.output
     assert "defenseclaw setup <connector> --yes" in result.output
 
 
@@ -575,4 +575,4 @@ def test_config_set_data_dir_copies_nothing_through_a_linked_folder_below_the_ba
     assert result.exit_code == 0, result.output
     assert os.listdir(outside) == []
     assert (moved / "connector_backups" / "opencode" / "config.json").is_file()
-    assert "connector_backups/codex/config.toml.json" in result.output
+    assert os.path.join("connector_backups", "codex", "config.toml.json") in result.output

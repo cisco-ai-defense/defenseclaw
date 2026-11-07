@@ -214,12 +214,18 @@ func TestRootRuntimeLeftoverNamesMatchDoctor(t *testing.T) {
 	}
 }
 
+// yamlSingleQuoted writes a path as a single-quoted YAML scalar, in which a
+// backslash is literal, so a Windows temp path reads back unchanged.
+func yamlSingleQuoted(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
 // The remedy is the Doctor chain: stop, return the home and the moved store,
 // start, in that order, and it ends with the command alone.
 func TestRootLeftoversRemedyReturnsHomeAndMovedStore(t *testing.T) {
 	home := t.TempDir()
 	store := filepath.Join(t.TempDir(), "moved store")
-	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("data_dir: \""+store+"\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("data_dir: "+yamlSingleQuoted(store)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("DEFENSECLAW_CONFIG", "")
