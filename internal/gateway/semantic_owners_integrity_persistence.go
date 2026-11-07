@@ -1526,10 +1526,11 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		return kept
 	}
 	commandText := strings.ToLower(input.Command)
-	overBudget, unresolved := false, false
+	overBudget, unresolved, resolvedTarget := false, false, false
 	evidence := request
 	evidence.overBudgetOmission = &overBudget
 	evidence.unresolvedTarget = &unresolved
+	evidence.resolvedTarget = &resolvedTarget
 	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(evidence, facts)
 	if !symlinkWrite && !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
 		(request.Connector == "claudecode" || request.Connector == "codex") &&
@@ -1599,12 +1600,17 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				// what it is, not as a key write (rel-1-0-2:GAP-0690).
 				title = unresolvedWriteTargetTitle
 			}
-			return append(kept, adjustConfidence(input.Tool, RuleFinding{
+			finding := adjustConfidence(input.Tool, RuleFinding{
 				RuleID: named.ID, Title: title, Severity: rule.Severity,
 				Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
 				Tags: append([]string(nil), named.Tags...), LineNumber: 1,
 				enforcement: findingEnforcementAllowed,
-			}))
+			})
+			if named.ID == rule.ID &&
+				(trustedAuthorizedKeysSymlinkWrite(input) || resolvedTarget && !overBudget && !unresolved) {
+				finding = finding.withTrustedActionProof(newResolvedTargetFindingProof(named.ID, true))
+			}
+			return append(kept, finding)
 		}
 	}
 	return appendTrustedCMDPrivateKeyReadFinding(
@@ -1745,7 +1751,6 @@ func trustedAuthorizedKeysWriteProofWith(input actionfacts.Input, facts actionfa
 		trustedUnknownOutputAuthorizedKeysWrite(facts) ||
 		trustedAwkOutputAuthorizedKeysWrite(facts) ||
 		trustedGitConfigEnvironmentAuthorizedKeysWrite(facts) ||
-		trustedUnknownKeyAuthorizedKeysWrite(input, facts) ||
 		homeResolvedTwinProves(input, facts, sshAuthorizedKeysCommandPrerequisite) ||
 		trustedStaticStatementAuthorizedKeysWrite(input) ||
 		trustedStaticRedirectAuthorizedKeysWrite(input, facts) ||
@@ -1856,22 +1861,6 @@ const unresolvedWriteTargetTitle = "A write target could not be resolved (unread
 // guidance never showed (GAP-1555).
 const archiveBeforeWriteTitle = "Archive extraction may create a link before a later write. " +
 	"Run the extraction and the write as separate commands"
-
-// trustedUnknownKeyAuthorizedKeysWrite judges the target of a native
-// file-write tool call (write, edit, multiedit, create) whose arguments
-// carry a key outside the tool's reviewed schema: the harness still writes
-// the file its target key names, so each such target is judged as the same
-// tool's structured write (actionfacts.UnknownKeyWriteTargetViews). Only a
-// match counts.
-func trustedUnknownKeyAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts) bool {
-	for _, view := range actionfacts.UnknownKeyWriteTargetViews(input, facts) {
-		projected := view.EnforcementProjection()
-		if projected.EnforcementEligible() && sshAuthorizedKeysStructuredPrerequisite(projected) {
-			return true
-		}
-	}
-	return false
-}
 
 // trustedSandboxGuestAuthorizedKeysWrite judges a sandbox call once more in
 // the guest's own namespace. The request's working directory is the host

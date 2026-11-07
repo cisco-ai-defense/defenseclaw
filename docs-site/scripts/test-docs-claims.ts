@@ -1760,7 +1760,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2451", page: "enterprise/troubleshooting.mdx", section: "Warnings", has: ["| `agent_settings_not_restored` (exporter not removed) | Windows |", "still holds the native OTLP exporter of an earlier per-user DefenseClaw install", "| `native_otlp_config_unchecked` | Linux, macOS, Windows |"], lacks: ["| `native_otlp_take_back_pending` | Windows |"] },
   { gap: "GAP-0059", page: "get-started/upgrade.mdx", has: ["the upgrade also prints, after `Upgraded from`, why no sandbox runs and the fix", "Until then DefenseClaw starts no sandbox and `defenseclaw doctor` fails its Gateway check. Stop running sandboxes first, then run: defenseclaw sandbox setup --install-openshell"] },
   { gap: "GAP-1613", page: "enterprise/sandboxes.mdx", has: ["`sandboxes are unavailable: OpenShell 0.1.5 runs no DefenseClaw sandbox: OpenShell 0.1.6 or later is required; ask your administrator to upgrade OpenShell`"], lacks: ["OpenShell 0.1.5 is installed, but that release is unsupported"] },
-  { gap: "GAP-1619", page: "guardrail/user-and-group-policies.mdx", has: ["`defenseclaw-gateway config validate FILE`", "`enterprise macos ensure --config FILE`", "`enterprise macos profile-explain`"] },
+  { gap: "GAP-1619", page: "guardrail/user-and-group-policies.mdx", has: ["`/opt/defenseclaw/bin/defenseclaw-gateway config validate FILE`", "`/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos ensure --config FILE`", "`/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain`"] },
   { gap: "GAP-1635", page: "policies/admission.mdx", has: ["`tool list` prints one table per connector", "`UPDATED` shows `-` for an entry until it is changed"] },
   { gap: "GAP-1659", page: "guardrail/user-and-group-policies.mdx", section: "A complete example", has: ["hilt: {enabled: true, min_severity: LOW}"], lacks: ["hilt: {enabled: true, min_severity: HIGH}"] },
   { gap: "GAP-0595", page: "ai-discovery.mdx", has: ["asks `Proceed? [Y/n]`; press Enter to continue. In a script or scheduled task, use `defenseclaw agent", "It asks `Proceed? [Y/n]`; `--yes` skips the question."] },
@@ -1853,7 +1853,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2223", page: "connectors/codex.mdx", has: ["A per-user install writes no `.env` block", "On a managed Linux or macOS computer, setup keeps a marked block in `$CODEX_HOME/.env`"], lacks: ["On Linux and macOS, setup keeps a marked block in `$CODEX_HOME/.env`"] },
   { gap: "GAP-2361", page: "enterprise/operations.mdx", has: ["On a managed standalone computer `/health` carries the `policy`", "`curl http://127.0.0.1:18970/health`, even under `sudo`, has no `policy` key", "sudo curl -s --unix-socket /opt/cisco/defenseclaw/run/hook.sock http://localhost/health"], lacks: ["The gateway stamps it on `/health` and `/status`"] },
   { gap: "GAP-2342", page: "get-started/first-run.mdx", has: ["You do not need `init` before `quickstart`.", "If `init` chose no agent and started the gateway, `quickstart --connector <name>` restarts the gateway so it loads the agent and writes its hooks."] },
-  { gap: "GAP-0010", page: "connectors/kiro.mdx", section: "ACP guard", has: ["In enterprise managed mode an administrator enrolls each user, editor and agent with `defenseclaw-gateway enterprise acp enroll`, and the user runs the setup command it reports.", "Managed ACP is preview"], lacks: ["ACP editors are not supported in enterprise managed mode"] },
+  { gap: "GAP-0010", page: "connectors/kiro.mdx", section: "ACP guard", has: ["In enterprise managed mode an administrator enrolls each user, editor and agent with `/opt/defenseclaw/bin/defenseclaw-gateway enterprise acp enroll` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS), and the user runs the setup command it reports.", "Managed ACP is preview"], lacks: ["ACP editors are not supported in enterprise managed mode"] },
   { gap: "GAP-2190", page: "connectors/codex.mdx", section: "Files DefenseClaw will modify", has: ["| Connector credentials | `~/.defenseclaw/hooks` | `%USERPROFILE%\\.defenseclaw\\hooks` | | Proxy bypass for cloud credentials (managed Linux and macOS only) | `$CODEX_HOME/.env` (marked block; a per-user install writes none) | not written |"] },
   { gap: "GAP-1536", page: "enterprise/mdm/intune-macos.mdx", has: ["| Upload script | Your edited copy of `defenseclaw-enterprise.sh`, with the config added |"], lacks: ["the wrapper is about"] },
   // pod docs i1 (2026-10-28)
@@ -2492,7 +2492,7 @@ describe('Sandboxes panel keys and status strip segments match tui.mdx (GAP-2349
 describe('rendered gateway.toml drift is reported without a pause (GAP-0730)', () => {
   it('only a changed rendered gateway configuration is non-blocking', () => {
     const go = source('internal/gateway/sandbox_daemon_openshell.go');
-    assert.ok(go.includes('renderedGatewayDriftField     = "gateway configuration"'), 'rendered drift field renamed: re-check observability/sandbox-telemetry.mdx and enterprise/sandboxes.mdx');
+    assert.ok(/renderedGatewayDriftField\s+= "gateway configuration"/.test(go), 'rendered drift field renamed: re-check observability/sandbox-telemetry.mdx and enterprise/sandboxes.mdx');
     assert.ok(go.includes('if item.Field != renderedGatewayDriftField || item.Have != "changed" {'), 'blockingOpenShellDrift changed: a changed render may pause again, re-check the GAP-0730 pages');
     assert.ok(go.includes('drift = blockingOpenShellDrift(drift)'), 'readyOpenShell no longer filters drift: re-check the GAP-0730 pages');
     assert.ok(go.includes('return "gateway_configuration"') && go.includes('driftFieldInvalid.ReplaceAllString(strings.ToLower(field), "_")'), 'driftEventField changed: re-check the field value sandbox-telemetry.mdx names');
@@ -2592,8 +2592,9 @@ describe('managed env-var rules match the registry (GAP-0045)', () => {
     };
     walk(reg);
     const tighten = entries.filter((e) => e.managed === 'tighten_only').map((e) => e.name).sort();
-    assert.ok(tighten.length >= 3, `parsed ${tighten}`);
+    assert.deepEqual(tighten, ['DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', 'DEFENSECLAW_STRICT_AVAILABILITY']);
     assert.equal(entries.find((e) => e.name === 'DEFENSECLAW_FAIL_MODE')?.managed, 'ignore');
+    assert.equal(entries.find((e) => e.name === 'DEFENSECLAW_HOOK_MAX_BODY')?.managed, 'ignore');
     const catalog = page('reference/env-vars.mdx');
     const tightenRow = catalog.split('| `tighten_only` |')[1].split('\n')[0];
     const ignoreRow = catalog.split('| `ignore` |')[1].split('\n')[0];
@@ -2603,9 +2604,11 @@ describe('managed env-var rules match the registry (GAP-0045)', () => {
       assert.ok(b17.includes('`' + name + '`'), `threat model B17 omits ${name}`);
     }
     // The ignore row's except-list names the tighten_only security opt-outs.
-    for (const name of tighten.filter((n) => n !== 'DEFENSECLAW_HOOK_MAX_BODY')) {
+    for (const name of tighten) {
       assert.ok(ignoreRow.includes('`' + name + '`'), `env-vars ignore row except-list omits ${name}`);
     }
+    assert.ok(ignoreRow.includes('`DEFENSECLAW_HOOK_MAX_BODY`'), 'env-vars ignore row omits the managed hook cap');
+    assert.match(catalog, /`DEFENSECLAW_HOOK_MAX_BODY`<br\/>[^\n]*Managed host: `ignore`/);
     assert.ok(!/`DEFENSECLAW_FAIL_MODE` remains `tighten_only`/.test(b17), 'B17 still calls DEFENSECLAW_FAIL_MODE tighten_only');
     // The ignore row names DEFENSECLAW_FAIL_MODE as ignored, before the
     // tighten_only exception, so it never reads as one of the tighten_only pair.

@@ -85,7 +85,6 @@ from defenseclaw.commands.cmd_doctor import (
     _run_cursor_windows_runtime_process,
 )
 
-
 # The exporter DefenseClaw writes into a sandboxed Codex config.
 _DEFENSECLAW_CODEX_EXPORTER = (
     '[otel.exporter.otlp-http]\nendpoint = "http://127.0.0.1:18970/otlp/codex/' + "a" * 64 + '/v1/logs"\n'
@@ -2574,9 +2573,10 @@ class TestCheckHookHealth(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "POSIX folder modes")
     def test_opencode_group_writable_plugin_folder_is_named_with_a_fix(self) -> None:
-        # Ubuntu's umask 002 left ~/.config/opencode/plugins at 0775; the
-        # gateway would not start and doctor only said the hook file is missing.
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp}):
+        # A shared group on the folder must still get a matching doctor hint.
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp}), patch(
+            "defenseclaw.file_permissions.owner_private_group", return_value=False
+        ):
             plugins = Path(tmp) / ".config" / "opencode" / "plugins"
             plugins.mkdir(parents=True)
             plugins.chmod(0o775)

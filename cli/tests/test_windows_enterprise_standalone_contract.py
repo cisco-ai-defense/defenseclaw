@@ -2598,3 +2598,16 @@ def test_the_config_step_records_over_a_hand_edit_only_for_this_runs_config_sour
     assert "if ($approvedConfigSHA256 -cnotmatch '^[0-9a-f]{64}$') {" in block
     assert "-RecordLifecycle:(-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout))" in block
     assert "config.generation.json" not in block and "Get-FileHash" not in block
+
+
+def test_bundle_repair_hint_names_the_installed_cli_without_a_bare_fallback() -> None:
+    # GAP-0081: Setup puts no DefenseClaw command on PATH, so the hint must never
+    # fall back to a bare defenseclaw.exe. Get-DefenseClawLayout is the only
+    # producer of a layout and always sets CLIPath, so the fallback was dead.
+    module = _text(MODULE)
+    hint = _function_body(module, "Get-DefenseClawStandaloneBundleRepairCommand")
+    assert "$cli = [string]$Layout['CLIPath']" in hint
+    assert "'defenseclaw.exe'" not in hint
+    assert "IsNullOrWhiteSpace" not in hint
+    layout = _function_body(module, "Get-DefenseClawLayout")
+    assert "CLIPath = (Microsoft.PowerShell.Management\\Join-Path $bin 'defenseclaw.exe')" in layout

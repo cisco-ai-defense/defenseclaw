@@ -18,10 +18,13 @@ package connector
 
 import (
 	"encoding/json"
+	"maps"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
@@ -43,6 +46,8 @@ const HermesMaxPatchTargets = 256
 type HermesWriteView struct {
 	Tool string
 	Args json.RawMessage
+	// PossibleOverflow marks extra-key values past the count or depth bound.
+	PossibleOverflow bool
 	// Path is the target as the call names it ("" for the unverified view).
 	Path string
 
@@ -117,15 +122,62 @@ func HermesTrustedWriteViews(toolName string, args json.RawMessage) (views []Her
 		if !ok {
 			return nil, false
 		}
-		return []HermesWriteView{view}, true
+		return withHermesHiddenTargets("write_file", []HermesWriteView{view}, args), true
 	case "patch":
 		if views, ok := hermesPatchViews(args); ok {
-			return views, true
+			return withHermesHiddenTargets("patch", views, args), true
 		}
 		return []HermesWriteView{hermesUnverifiedView()}, true
 	default:
 		return nil, false
 	}
+}
+
+// hermesReviewedKeys are the keys Hermes' handlers read, per tool
+// (tools/file_tools.py: WRITE_FILE_SCHEMA, PATCH_SCHEMA).
+var hermesReviewedKeys = map[string][]string{
+	"write_file": {"path", "content", "cross_profile"},
+	"patch":      {"mode", "path", "old_string", "new_string", "replace_all", "patch", "cross_profile"},
+}
+
+// withHermesHiddenTargets adds to the views of a Hermes write call one view
+// of the first per path-shaped value the call holds under a key Hermes does
+// not read: Hermes ignores such a key, but a key outside the reviewed
+// schema must not become a place to name a target the rules never see
+// (gas-ux-r1 GAP-0076, actionfacts.UnknownKeyTwins). Past the bound the
+// gateway receives a Possible overflow marker.
+func withHermesHiddenTargets(tool string, views []HermesWriteView, args json.RawMessage) []HermesWriteView {
+	if len(views) == 0 || views[0].pathKey == "" {
+		return views
+	}
+	fields, ok := hermesWriteFields(args)
+	if !ok {
+		return views
+	}
+	reviewed := hermesReviewedKeys[tool]
+	count, possible := 0, false
+	for _, key := range slices.Sorted(maps.Keys(fields)) {
+		if slices.Contains(reviewed, key) {
+			continue
+		}
+		targets, overflow := actionfacts.PathShapedArgumentValues(fields[key])
+		possible = possible || overflow
+		for _, target := range targets {
+			count++
+			if count > 16 {
+				possible = true
+				continue
+			}
+			if retargeted, ok := views[0].Retarget(target); ok {
+				views = append(views, HermesWriteView{Tool: views[0].Tool, Args: retargeted, Path: target,
+					fields: views[0].fields, pathKey: views[0].pathKey})
+			}
+		}
+	}
+	if possible {
+		views = append(views, HermesWriteView{PossibleOverflow: true})
+	}
+	return views
 }
 
 func hermesWriteFileView(args json.RawMessage) (HermesWriteView, bool) {

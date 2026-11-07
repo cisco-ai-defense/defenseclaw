@@ -42,6 +42,10 @@ func appendTrustedWriteTargetFindings(
 	request trustedActionRequest,
 	facts actionfacts.Facts,
 ) []RuleFinding {
+	if request.UnknownKeyPossibleOverflow {
+		findings = appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, request, facts)
+		return appendUnknownKeyOverflowFinding(findings, generation, request)
+	}
 	if !actionfacts.LimitExceededWriteTool(request.Input, facts) {
 		return appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, request, facts)
 	}
@@ -77,6 +81,54 @@ func appendTrustedWriteTargetFindings(
 			return findings
 		}
 	}
+	return appendUnverifiedWriteTargetFinding(findings, generation, request, overLimitUnverifiedWriteTitle)
+}
+
+// A count or nesting bound is Possible grade. A Named finding from a
+// completed reading remains stronger; otherwise strict blocks and balanced
+// gives a visible alert with an audit finding.
+func appendUnknownKeyOverflowFinding(findings []RuleFinding, generation *compiledRulePackCategories, request trustedActionRequest) []RuleFinding {
+	if !request.EnforcementCapable {
+		return findings
+	}
+	for _, finding := range findings {
+		if finding.contributesToEnforcement() {
+			return findings
+		}
+	}
+	ruleID := "PATH-SSH-KEY"
+	if actionfacts.StructuredWriteTool(request.Input.Tool) || actionfacts.ApplyPatchTool(request.Input.Tool) {
+		ruleID = "persistence.ssh_authorized_keys_command"
+	}
+	_, rule, ok := trustedActionCatalogRule(generation, ruleID)
+	if !ok {
+		return findings
+	}
+	enforcement := findingEnforcementAlertOnly
+	if request.StrictPolicy {
+		enforcement = findingEnforcementAllowed
+	}
+	return append(findings, adjustConfidence(request.Input.Tool, RuleFinding{
+		RuleID: rule.ID, Title: "Warning: file tool arguments exceed the target verification bound",
+		Severity: rule.Severity, Confidence: rule.Confidence,
+		Evidence: trustedActionInputText(request.Input, ""),
+		Tags:     append([]string(nil), rule.Tags...), LineNumber: 1,
+		enforcement: enforcement,
+	}))
+}
+
+// appendUnverifiedWriteTargetFinding adds the conservative block of the
+// persistence rule, with title, to an enforcement-capable write tool call
+// whose targets cannot all be read, unless a finding already enforces.
+func appendUnverifiedWriteTargetFinding(
+	findings []RuleFinding,
+	generation *compiledRulePackCategories,
+	request trustedActionRequest,
+	title string,
+) []RuleFinding {
+	if !request.EnforcementCapable {
+		return findings
+	}
 	for _, finding := range findings {
 		if finding.contributesToEnforcement() {
 			return findings
@@ -87,7 +139,7 @@ func appendTrustedWriteTargetFindings(
 		return findings
 	}
 	return append(findings, adjustConfidence(request.Input.Tool, RuleFinding{
-		RuleID: rule.ID, Title: overLimitUnverifiedWriteTitle, Severity: rule.Severity,
+		RuleID: rule.ID, Title: title, Severity: rule.Severity,
 		Confidence: rule.Confidence, Evidence: trustedActionInputText(request.Input, ""),
 		Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
 		enforcement: findingEnforcementAllowed,

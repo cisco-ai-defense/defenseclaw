@@ -586,7 +586,7 @@ A per-user gateway still running holds the managed port `127.0.0.1:18970` unless
 its user moved it. The install then stops before it changes anything with
 `api_port_held`, naming the process and the `kill` command. The package install
 completes, with the error in `last-package-result.json`. Stop that gateway or move
-it, then run `defenseclaw-gateway enterprise linux ensure --from-package`. A
+it, then run `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-package`. A
 per-user gateway on another port keeps running; the install, `status` and `verify`
 name each such account with `per_user_gateway_running`.
 
@@ -613,9 +613,9 @@ Run these as root from `/opt/defenseclaw/bin`.
 
 | Goal | Command |
 | --- | --- |
-| Stop and remove the deployment, its config, secrets and logs, most of its data and lifecycle state, and the `defenseclaw` account. Each user keeps `~/.defenseclaw`, and your policies in `/etc/defenseclaw/policies` stay. When an account keeps sandboxes, `/var/lib/defenseclaw/sandbox` and `/var/lib/defenseclaw/redaction-correlation.key` stay with the root-only records `/var/lib/defenseclaw-enterprise/openshell-state.kept.json` and `/var/lib/defenseclaw-enterprise/retained-state.json` and the marker `/var/lib/defenseclaw/.defenseclaw-retained`. They are root-owned while the service account is gone; the next `ensure` adopts them | `defenseclaw-gateway enterprise linux uninstall --json` |
-| Also remove each enrolled user's `~/.defenseclaw` and per-user binaries | `defenseclaw-gateway enterprise linux uninstall --purge --json` |
-| Keep the config, secrets, data and logs (and the account) for a reinstall | `defenseclaw-gateway enterprise linux uninstall --keep-state --json` |
+| Stop and remove the deployment, its config, secrets and logs, most of its data and lifecycle state, and the `defenseclaw` account. Each user keeps `~/.defenseclaw`, and your policies in `/etc/defenseclaw/policies` stay. When an account keeps sandboxes, `/var/lib/defenseclaw/sandbox` and `/var/lib/defenseclaw/redaction-correlation.key` stay with the root-only records `/var/lib/defenseclaw-enterprise/openshell-state.kept.json` and `/var/lib/defenseclaw-enterprise/retained-state.json` and the marker `/var/lib/defenseclaw/.defenseclaw-retained`. They are root-owned while the service account is gone; the next `ensure` adopts them | `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --json` |
+| Also remove each enrolled user's `~/.defenseclaw` and per-user binaries | `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --json` |
+| Keep the config, secrets, data and logs (and the account) for a reinstall | `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --keep-state --json` |
 | Keep only the `defenseclaw` account | Add `--keep-service-account` |
 
 Uninstall removes each user's DefenseClaw hook registrations and DefenseClaw's own

@@ -17,9 +17,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
@@ -237,5 +240,37 @@ func TestEnterpriseBundleAnchorsVerbIsRegistered(t *testing.T) {
 	cmd, _, err := newEnterpriseBundleCommand().Find([]string{"anchors", "install"})
 	if err != nil || cmd.Name() != "install" || cmd.Flags().Lookup("file") == nil || cmd.Flags().Lookup("lock-wait") == nil {
 		t.Fatalf("anchors install: %v", err)
+	}
+}
+
+// The example is typed by an administrator; the gateway is not on the PATH
+// (cowork-1-0-8 GAP-0081).
+func TestBundleAnchorsInstallExampleNamesTheGatewayByItsFullPath(t *testing.T) {
+	var example string
+	for _, sub := range newEnterpriseBundleAnchorsCommand().Commands() {
+		if sub.Name() == "install" {
+			example = sub.Example
+		}
+	}
+	want := "sudo " + managedHostGatewayCommand() + " enterprise bundle anchors install --file "
+	if !strings.Contains(example, want) || strings.Contains(example, "sudo defenseclaw-gateway") || !strings.Contains(example, "/bin/defenseclaw-gateway") {
+		t.Fatalf("example = %q, want it to contain %q", example, want)
+	}
+}
+
+// The anchors install example names the standalone gateway by its path. A
+// Secure Client computer has no enterprise bundle group, so it never shows
+// that example (review round 4, S1).
+func TestBundleAnchorsInstallExampleIsAbsentFromSecureClient(t *testing.T) {
+	saved := secureClientHost
+	t.Cleanup(func() { secureClientHost = saved })
+	secureClientHost = func() bool { return true }
+	root := &cobra.Command{Use: "defenseclaw-gateway"}
+	enterprise := &cobra.Command{Use: "enterprise"}
+	enterprise.AddCommand(newEnterpriseBundleCommand())
+	root.AddCommand(enterprise)
+	keepCommandTreeOfMainOnSecureClient(root)
+	if found, _, err := root.Find([]string{"enterprise", "bundle", "anchors", "install"}); err == nil && found.Name() == "install" {
+		t.Fatalf("Secure Client still has %q with example %q", found.CommandPath(), found.Example)
 	}
 }

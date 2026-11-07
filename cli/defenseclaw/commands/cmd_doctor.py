@@ -12338,6 +12338,16 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
         return
 
     label = "OpenClaw interception" if connectors == ["openclaw"] else "Proxy interception"
+    if "openclaw" in connectors:
+        from defenseclaw.openclaw_plugin_config import configured_openclaw_plugin_config_issue
+
+        if issue := configured_openclaw_plugin_config_issue(cfg):
+            _emit(
+                "fail", label, issue,
+                remediation="run `defenseclaw setup openclaw` to migrate the plugin config, then rerun doctor",
+                r=r,
+            )
+            return
     info = live_health.get("interception") if isinstance(live_health, dict) else None
     uptime_ms = live_health.get("uptime_ms") if isinstance(live_health, dict) else None
     if (
