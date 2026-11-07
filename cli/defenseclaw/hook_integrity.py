@@ -127,17 +127,18 @@ def _recorded_binary_digest(data_dir: str, name: str) -> str:
     return recorded
 
 
-def _differs_from_recorded(path: str, recorded: str) -> bool:
-    """True when the file at *path* is not the copy whose sha256 the installer *recorded*.
+def _recorded_match(path: str, recorded: str) -> bool | None:
+    """Whether the file at *path* is the copy whose sha256 the installer *recorded*.
 
-    A file larger than the installer ever records cannot be that copy, so a
-    size over the limit is a mismatch, not a digest that went unchecked. A
-    file that cannot be read is not proof of damage (Defender or a deny ACE
-    holding it), and nothing recorded means nothing to compare.
+    True when the digests agree, False when they differ. A file larger than the
+    installer ever records cannot be that copy, so a size over the limit is a
+    mismatch, not a digest that went unchecked. None when no digest can be
+    computed: nothing recorded, or the file cannot be read (Defender or a deny
+    ACE holding it), which is not proof of damage and not a match either.
     """
 
     if not recorded:
-        return False
+        return None
     digest = hashlib.sha256()
     read = 0
     try:
@@ -145,11 +146,17 @@ def _differs_from_recorded(path: str, recorded: str) -> bool:
             while chunk := stream.read(1024 * 1024):
                 read += len(chunk)
                 if read > _RECORDED_BINARY_SIZE_LIMIT:
-                    return True
+                    return False
                 digest.update(chunk)
     except OSError:
-        return False
-    return digest.hexdigest() != recorded
+        return None
+    return digest.hexdigest() == recorded
+
+
+def _differs_from_recorded(path: str, recorded: str) -> bool:
+    """True when the file at *path* is provably not the copy the installer *recorded*."""
+
+    return _recorded_match(path, recorded) is False
 
 
 def hook_guard_problem(data_dir: str, connector: str, guard: str) -> HookProblem | None:
@@ -230,7 +237,23 @@ def _strings(value: Any) -> list[str]:
 
 
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+_REPARSE_TAG_NAME_SURROGATE = 0x20000000  # symbolic links and junctions; not WOF or cloud placeholders
 LAUNCHER_UNVERIFIED_SUFFIX = "is not verified: the installer recorded no copy of it to compare with"
+LAUNCHER_UNREADABLE_SUFFIX = "is not verified: it cannot be read here to compare it with the installer record"
+
+
+def _is_link(info: os.stat_result) -> bool:
+    """Whether *info* describes a link: a symbolic link, or a Windows name-surrogate reparse point.
+
+    A regular Windows file can carry a reparse tag that is not a link (a
+    compressed executable, a cloud placeholder); it is still the installed file
+    when its digest agrees, so only a name surrogate counts as a link.
+    """
+
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    reparse = getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT
+    return bool(reparse and getattr(info, "st_reparse_tag", 0) & _REPARSE_TAG_NAME_SURROGATE)
 
 
 def _launcher_defect(launcher: str, data_dir: str = "") -> str:
@@ -242,7 +265,8 @@ def _launcher_defect(launcher: str, data_dir: str = "") -> str:
     under its name, or a truncated copy, differs from the record; nothing
     inside the file is parsed. A file that cannot be read is not proof of
     damage (Defender or a deny ACE holding it), and with nothing recorded
-    there is nothing to compare: :func:`hook_launcher_unverified` reports that.
+    there is nothing to compare; neither is a match, and
+    :func:`hook_launcher_unverified` reports both.
     """
 
     try:
@@ -251,7 +275,7 @@ def _launcher_defect(launcher: str, data_dir: str = "") -> str:
         return "is missing"
     except OSError:
         return ""
-    if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT:
+    if _is_link(info):
         return "is a link, not the installed file"
     if not stat.S_ISREG(info.st_mode):
         return "is not a regular file"
@@ -355,19 +379,38 @@ def hook_launcher_problems(cfg: Any, connector: str) -> list[str]:
     return []
 
 
+def _launcher_cannot_be_read(launcher: str, recorded: str) -> bool:
+    """Whether a launcher that is a regular file cannot be inspected or hashed here."""
+
+    try:
+        info = os.lstat(launcher)
+    except (FileNotFoundError, NotADirectoryError):
+        return False  # missing: reported as a defect
+    except OSError:
+        return True
+    if _is_link(info) or not stat.S_ISREG(info.st_mode):
+        return False  # reported as a defect
+    return _recorded_match(launcher, recorded) is None
+
+
 def hook_launcher_unverified(cfg: Any, connector: str) -> str:
-    """Name the registered launcher whose installer digest is not on record, else "".
+    """Name the registered launcher that was not compared with the installer record, else "".
 
     An install from before the installer recorded the launcher's digest has
-    nothing to compare the file with: doctor warns (status does not call it
-    unprotected), and the installer again records it (GAP-0810).
+    nothing to compare the file with, and a launcher that cannot be read here
+    cannot be compared: doctor warns in both cases and never passes the file
+    (status does not call it unprotected); the installer again records the
+    first (GAP-0810).
     """
 
     launchers, _ = _windows_hook_programs(cfg, connector)
     data_dir = str(getattr(cfg, "data_dir", "") or "")
+    recorded = _recorded_binary_digest(data_dir, LAUNCHER_NAME)
     for launcher in launchers:
-        if not _recorded_binary_digest(data_dir, LAUNCHER_NAME):
+        if not recorded:
             return f"{_LAUNCHER_PROBLEM_PREFIX}{launcher} {LAUNCHER_UNVERIFIED_SUFFIX}"
+        if _launcher_cannot_be_read(launcher, recorded):
+            return f"{_LAUNCHER_PROBLEM_PREFIX}{launcher} {LAUNCHER_UNREADABLE_SUFFIX}"
     return ""
 
 
