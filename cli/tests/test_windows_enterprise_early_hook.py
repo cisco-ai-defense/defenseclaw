@@ -241,7 +241,7 @@ if ($Case -like 'held*') {
     function Test-DefenseClawHookSharesDelete {
         param([string]$Path)
         $script:probes++
-        # GAP-0656 round 4: a hook start in flight fails the probe for
+        # GAP-0656: a hook start in flight fails the probe for
         # milliseconds; held-transient fails it twice and then succeeds.
         $answer = ($Case -eq 'held-shares-delete') -or ($Case -eq 'held-transient' -and $script:probes -ge 3)
         $script:events.Add('shares-delete:' + [string]$answer)
@@ -853,7 +853,7 @@ def test_the_run_goes_on_once_the_program_closed_the_hook(tmp_path: Path) -> Non
 
 
 def test_a_probe_failed_by_a_start_in_flight_does_not_ask_restart_manager(tmp_path: Path) -> None:
-    """GAP-0656 round 4 (L10): a program start in flight at the instant of the
+    """GAP-0656: a program start in flight at the instant of the
     probe fails it for milliseconds; the probe repeats before Restart Manager
     (which itself opens the hook with no sharing) is asked."""
     result = _run(tmp_path, "held-transient")

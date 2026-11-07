@@ -696,7 +696,7 @@ func startWindowsRotatingHolder(t *testing.T, shell, path string) (stop func(), 
 	}
 }
 
-// GAP-0755 round 5 (S1): a holder that hands its file to a new handle value
+// GAP-0755: a holder that hands its file to a new handle value
 // every 300 ms, so that no value lasts two checks and the hook is never free,
 // is closed at the second check, and then waits out the backoff. The session
 // and the account are injected (interactiveFactsSystem); the calls are real.
@@ -788,7 +788,7 @@ func TestKeepWindowsManagedFileCopyEndsAHoldThatRotatesItsHandle(t *testing.T) {
 	t.Logf("log: %s", log.String())
 }
 
-// GAP-0656 review S1 (GAP-0369): on a volume or behind a filter driver that
+// GAP-0369: on a volume or behind a filter driver that
 // refuses the backup hard link, the restore replaces the hook the older way
 // and the guardian says so once, instead of failing every check.
 func TestCopyWindowsManagedFileFallsBackWhenHardLinksAreRefused(t *testing.T) {
@@ -946,7 +946,7 @@ func runWindowsImageSwapLaunches(t *testing.T, target string, builds []string, s
 	return failures, starts.Load(), restoreErrs
 }
 
-// GAP-0656 review S5: a sharing violation on the start-style open also comes
+// GAP-0656: a sharing violation on the start-style open also comes
 // from a handle that shares no reading, which any user may hold on the
 // hook, and a swap cannot end that hold. The swaps back off for the same
 // path, stop at a cap of pending backups, and are logged once.
@@ -1143,7 +1143,7 @@ func TestKeepWindowsManagedFileCopyBacksOffFromAHoldItCannotEnd(t *testing.T) {
 	}
 }
 
-// GAP-0656 review S6: the older replacement runs after a refused hard link,
+// GAP-0656: the older replacement runs after a refused hard link,
 // and the "restored without the one-step swap" notice is set only if it
 // succeeded. A running hook refuses it; the notice stays empty.
 func TestCopyWindowsManagedFileClaimsNoRestoreWhenTheOlderReplacementIsRefused(t *testing.T) {

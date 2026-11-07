@@ -537,7 +537,7 @@ var windowsHookBinaryOpenRefused = func(path string) bool {
 	return false
 }
 
-// The swaps a held-open verdict causes (GAP-0656 review S5). A handle that
+// The swaps a held-open verdict causes (GAP-0656). A handle that
 // holds the hook open and shares deletion keeps every start off until the
 // guardian swaps (a writer opened with FileShare.ReadWrite | Delete); the
 // swap moves the name to a fresh file. A handle that shares no deletion (an
@@ -720,7 +720,7 @@ func copyWindowsManagedFile(source, destination, sddl string, replace, launchabl
 		return err
 	}
 	// The notice claims a restore without the one-step swap, so it is set
-	// only now that the older replacement has succeeded (review S6): a
+	// only now that the older replacement has succeeded: a
 	// MoveFileEx the running hook refuses leaves the hook as it was and the
 	// guardian retries at the next check.
 	if linkRefusal != "" {

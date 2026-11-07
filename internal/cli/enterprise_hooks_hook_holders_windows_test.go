@@ -22,7 +22,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
 
-// GAP-0755 round 4: the bounds of the guardian's handle close, tested with an
+// GAP-0755: the bounds of the guardian's handle close, tested with an
 // injected handle table and injected process facts. The syscall layer is
 // tested natively (TestKeepWindowsManagedFileCopyEndsAnExclusiveHoldOf...).
 
@@ -549,7 +549,7 @@ func TestWindowsHolderLeavesAHandleItsOwnerProtectedFromClosing(t *testing.T) {
 	}
 }
 
-// S1 (review r6). While a service (a refused holder) that could be what refuses
+// While a service (a refused holder) that could be what refuses
 // the start has the hook open, the guardian closes no user's handle at first:
 // it names the service, once, and backs off. After about 30 seconds of the
 // user's hold it closes that user's handles once in the streak, to rule the
@@ -612,7 +612,7 @@ func TestWindowsHolderARefusedHolderThatCouldRefuseTheStartKeepsTheGuardianOffUn
 	}
 }
 
-// S1 (review r6), the sharper rule. A start needs read and execute and shares
+// The sharper rule. A start needs read and execute and shares
 // read and delete, so a holder that only reads, beside another file object,
 // cannot be what refuses it: it is named and the user's blocker is closed.
 func TestWindowsHolderAReadOnlyRefusedHolderBesideAnotherObjectDoesNotKeepAUsersBlockerOpen(t *testing.T) {
@@ -701,7 +701,7 @@ func TestWindowsHolderHandlesWithoutAnObjectAddressAreObjectsOfTheirOwn(t *testi
 	}
 }
 
-// Review r5 -> r6 regression: a user's own handle that its owner protected
+// Regression: a user's own handle that its owner protected
 // from closing is skipped and named; the others are still closed.
 func TestWindowsHolderAUsersProtectedHandleIsSkippedAndTheOthersAreStillClosed(t *testing.T) {
 	rig := newHoldRig(t)
@@ -725,7 +725,7 @@ func TestWindowsHolderAUsersProtectedHandleIsSkippedAndTheOthersAreStillClosed(t
 	}
 }
 
-// S1 (review r6), point 4. A handle that only denies deletion is not closed
+// A handle that only denies deletion is not closed
 // once a start works.
 func TestWindowsHolderStopsClosingOnceAStartWorks(t *testing.T) {
 	rig := newHoldRig(t)
@@ -1092,7 +1092,7 @@ func TestWindowsHolderAuditRowsWaitForTheGatewayAndGoOutInOrder(t *testing.T) {
 	if !second.closed {
 		t.Fatal("the second holder was not closed while the gateway was down")
 	}
-	// Two hours with the gateway down: far past the 24 checks of round 4.
+	// Two hours with the gateway down: far past 24 checks.
 	for i := 0; i < 1440; i++ {
 		rig.advance(windowsHookBinaryCheckInterval)
 		reportWindowsHookHolders(&rig.log)
@@ -1362,7 +1362,7 @@ func queuedWindowsHolderRows() int {
 	return len(windowsHolderAuditQueue)
 }
 
-// M1 (review r5). A close that had begun when the guardian gave up finishes
+// A close that had begun when the guardian gave up finishes
 // afterwards and frees the hook. No further pass exists (the hook is free), so
 // the row cannot wait for one: it is written to the queue and to its file the
 // moment the close finishes, and the guardian's next check delivers it, once.
@@ -1444,7 +1444,7 @@ func TestWindowsHolderACloseThatHasBegunIsWaitedForABoundedExtraTime(t *testing.
 	}
 }
 
-// L2 (review r5). A close that hit a handle that was not the hook's is audited
+// A close that hit a handle that was not the hook's is audited
 // too: it closed something of the user's.
 func TestWindowsHolderACloseOfTheWrongObjectIsAudited(t *testing.T) {
 	rig := newHoldRig(t)
@@ -1460,7 +1460,7 @@ func TestWindowsHolderACloseOfTheWrongObjectIsAudited(t *testing.T) {
 	}
 }
 
-// L2 (review r6). DuplicateHandle with DUPLICATE_CLOSE_SOURCE closes the
+// DuplicateHandle with DUPLICATE_CLOSE_SOURCE closes the
 // source handle even when it fails: the guardian audits that as a close that
 // may have happened.
 func TestWindowsHolderACloseWhoseLastCallFailedIsAudited(t *testing.T) {
@@ -1477,7 +1477,7 @@ func TestWindowsHolderACloseWhoseLastCallFailedIsAudited(t *testing.T) {
 	}
 }
 
-// S2 (review r6). Only 400, 413, 415 and 422 describe a bad row.
+// Only 400, 413, 415 and 422 describe a bad row.
 func TestWindowsHolderAuditRefusalPermanentStatuses(t *testing.T) {
 	for status, want := range map[int]bool{400: true, 413: true, 415: true, 422: true, 401: false, 403: false, 404: false, 405: false, 408: false, 409: false, 429: false, 500: false, 503: false} {
 		if got := (windowsHolderAuditRefusal{Status: status}).permanent(); got != want {
