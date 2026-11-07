@@ -73,7 +73,7 @@ lists each):
 | Authorization ledger | `/var/lib/defenseclaw-hook-guardian`, with each user's latest AI Discovery scan in `ai-discovery/` | `root:defenseclaw`, `0750` |
 | Logs | `/var/log/defenseclaw`: empty unless a `jsonl` destination writes there. Services log to the journal ([Logs and events](/docs/enterprise/operations)) | `defenseclaw`, `0750` |
 | Hook socket | `/run/defenseclaw-hook/hook.sock` | Directory `defenseclaw`, `0755`. Socket `0666`: every user may connect, and the gateway authorizes each caller by uid |
-| Sandbox launcher | `/usr/bin/defenseclaw`, a link to `defenseclaw-gateway` that offers users only the `sandbox` commands | `root`, `0755` |
+| Launcher | `/usr/bin/defenseclaw`, a link to `defenseclaw-gateway`. The commands a standard user can run are in the table under [Policy changes on a managed host](/docs/enterprise#policy-changes-on-a-managed-host) | `root`, `0755` |
 | Sandbox state | `/var/lib/defenseclaw/sandbox/`, and `/etc/defenseclaw/openshell/gateway.toml` when `enterprise.openshell` is set | `defenseclaw`, `0600` files; `root` |
 
 The gateway runs as the `defenseclaw` system account, created with

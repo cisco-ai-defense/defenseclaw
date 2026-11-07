@@ -1352,21 +1352,26 @@ function launcherSentence(table: LauncherCommands): string {
   return `On managed Linux and macOS, the packaged \`defenseclaw\` runs ${offeredList(table)}; every other command exits \`2\` with the managed message.`;
 }
 
-// Where a sentence names a command of the table: a code span that starts with
-// the command, with or without the `defenseclaw` prefix and with or without
-// arguments (`status`, `status --json`, `defenseclaw doctor`), or the command
-// after the `defenseclaw` prefix outside a code span (defenseclaw status). One
-// rule serves an offered and a refused command. Bare words outside a code
-// span ("exit status", "status of the install") are ordinary prose and never
-// match, so a true sentence is not blocked for its spelling. The sandbox tree
-// counts as one command: a sentence about one of its subcommands
-// (`defenseclaw sandbox setup`) is about that subcommand.
+// Where a sentence names a command of the table, in one of three spellings
+// (one rule serves an offered and a refused command):
+//   - a code span that starts with the `defenseclaw` prefix, with or without
+//     an installed path before it, and any arguments (`defenseclaw doctor`,
+//     `/usr/bin/defenseclaw status --json`);
+//   - a code span that is the command alone or the command and flags
+//     (`status`, `status --json`, `guardrail profile explain --user alice`);
+//     for the sandbox tree, any subcommand (`sandbox setup`);
+//   - the command after the `defenseclaw` prefix outside a code span
+//     (defenseclaw status, /usr/bin/defenseclaw doctor).
+// Bare words, and code spans that begin with a table word followed by another
+// word (`start time`, `status message`), are ordinary prose and never match,
+// so a true sentence is not blocked for its spelling. The sandbox tree counts
+// as one command: a sentence about one of its subcommands is about it.
 function commandSpans(sentence: string, table: LauncherCommands): Array<[number, number]> {
   const patterns: RegExp[] = [];
   for (const name of [...table.offered, ...table.refused]) {
     const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const notSetting = name === 'sandbox' ? '(?! (?:user|section|block|key|setting))' : '';
-    patterns.push(new RegExp(`\`(?:defenseclaw )?${escaped}(?: [^\`]*)?\`${notSetting}|(?<![\\w./~-])defenseclaw ${escaped}(?![\\w-])`, 'g'));
+    const unprefixedArgs = name === 'sandbox' ? ' [^\\`]*' : ' -[^\\`]*';
+    patterns.push(new RegExp(`\`(?:[\\w./~-]*/)?defenseclaw ${escaped}(?: [^\`]*)?\`|\`${escaped}(?:${unprefixedArgs})?\`|(?<![\\w.~-])defenseclaw ${escaped}(?![\\w-])`, 'g'));
   }
   return patterns.flatMap((pattern) => [...sentence.matchAll(pattern)].map((m): [number, number] => [m.index, m.index + m[0].length]));
 }
@@ -1384,7 +1389,7 @@ function withoutRefusalQuote(text: string): string {
 // read: a page that wants to say something else about such a command names
 // the command without a managed OS word in that sentence, or says it in
 // bare words.
-const managedOsWord = /\bmanaged (?:Linux|macOS|Windows|host)\b/i;
+const managedOsWord = /\bmanaged (?:Linux|macOS|Windows|host)\b|\/usr\/(?:local\/)?bin\/defenseclaw(?![\w.-])/i;
 
 // The sentences of a page that are not the generated sentence and name a
 // command of the launcher's table together with a managed OS word.
@@ -1468,6 +1473,11 @@ describe('what a managed user can and cannot run (GAP-0635)', () => {
       ["On managed Linux, `alerts` is available to users.", "another refused command in its own code span"],
       ["On managed macOS, `tui` is available.", "a refused command in its own code span on macOS"],
       ["On managed Linux, `doctor --json` is refused.", "a refused command with an argument in its code span"],
+      ["On managed Linux, `sandbox` user commands are refused.", "the sandbox tree named in its own code span, whatever follows"],
+      ["On managed Linux, `/usr/bin/defenseclaw doctor` does run.", "the installed launcher path before a refused command"],
+      ["On managed macOS, `/usr/local/bin/defenseclaw status --json` is refused.", "the installed macOS path before an offered command"],
+      ["On managed Linux, /usr/bin/defenseclaw doctor does run.", "the installed path outside a code span"],
+      ["The launcher at `/usr/bin/defenseclaw` offers users only the `sandbox` commands.", "an exhaustive claim beside the installed launcher path, without a managed OS word"],
     ];
     for (const [text, why] of flagged) assert.equal(claims(text), 1, why);
     const allowed: Array<[string, string]> = [
@@ -1487,6 +1497,10 @@ describe('what a managed user can and cannot run (GAP-0635)', () => {
       ["On managed Linux, doctor does run on a standalone install and the status field is set.", "bare words are never commands"],
       ["The per-user setup commands on this page do not run on a managed computer.", "no table command named"],
       ["Managed host: `ignore`<br/>Values: `start`, `status`, `restart`", "a table cell: a line break ends the sentence"],
+      ["On managed Linux, the `start time` column shows when the process began.", "a code span that only begins with a table word"],
+      ["On managed Linux, the `status message` field explains the response.", "a field name that begins with status"],
+      ["On managed Linux, the `policy name` is set by the administrator.", "a field name that begins with a refused command"],
+      ["The launcher at `/usr/bin/defenseclaw` is a link to `defenseclaw-gateway`; the table on the Enterprise page lists the commands it runs.", "a pointer to the generated table names no command"],
     ];
     for (const [text, why] of allowed) assert.equal(claims(text), 0, why);
   });
