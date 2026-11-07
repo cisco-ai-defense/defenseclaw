@@ -95,21 +95,25 @@ func (s *hermesAnswerStore) load() {
 	if err != nil {
 		return
 	}
-	// Each stored answer is read the way the scanner reply is: a record with
-	// no entrypoints list, a null list or a null element is damaged, not an
-	// empty answer, and is dropped, so its manifests are unknown. Only an
-	// explicit empty list is an answer.
+	// Each record is read on its own, the way the scanner reply is: a record
+	// with no entrypoints list, a null list, a null element or a field of the
+	// wrong type is damaged, not an empty answer, and is dropped alone, so its
+	// manifests are unknown while the records of other digests still apply.
+	// Only an explicit empty list is an answer.
 	var file struct {
-		Answers map[string]struct {
-			Entrypoints *[]*string `json:"entrypoints"`
-			Seen        int64      `json:"seen"`
-		} `json:"answers"`
+		Answers map[string]json.RawMessage `json:"answers"`
 	}
 	if json.Unmarshal(data, &file) != nil {
 		return
 	}
-	for digest, record := range file.Answers {
-		if record.Entrypoints == nil {
+	damaged := 0
+	for digest, raw := range file.Answers {
+		var record struct {
+			Entrypoints *[]*string `json:"entrypoints"`
+			Seen        int64      `json:"seen"`
+		}
+		if json.Unmarshal(raw, &record) != nil || record.Entrypoints == nil {
+			damaged++
 			continue
 		}
 		entrypoints := make([]string, 0, len(*record.Entrypoints))
@@ -121,9 +125,14 @@ func (s *hermesAnswerStore) load() {
 			}
 			entrypoints = append(entrypoints, *entrypoint)
 		}
-		if intact {
-			s.answers[digest] = hermesStoredAnswer{Entrypoints: entrypoints, Seen: record.Seen}
+		if !intact {
+			damaged++
+			continue
 		}
+		s.answers[digest] = hermesStoredAnswer{Entrypoints: entrypoints, Seen: record.Seen}
+	}
+	if damaged > 0 {
+		fmt.Fprintf(os.Stderr, "[watcher] hermes plugin scanner store: %d damaged record(s) ignored\n", damaged)
 	}
 }
 
