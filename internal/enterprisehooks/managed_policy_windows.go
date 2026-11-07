@@ -1728,8 +1728,8 @@ func installWindowsClaudeManagedPolicyUnlocked(
 		*bodyRef = body
 	}
 	// A configured connector needs a guard before any account enrolls. An
-	// ensure pass must not replace a newer contract another reconcile already
-	// published while it waited for this transaction lock.
+	// ensure pass keeps the published contract, but upgrades an authenticated
+	// direct command even when every enrolled account is signed out.
 	if targetSID == nil && policySnapshot.existed {
 		if existingState.SchemaVersion != 2 ||
 			!sameWindowsEnterprisePath(existingState.HookExecutable, opts.HookExecutable) ||
@@ -1737,7 +1737,32 @@ func installWindowsClaudeManagedPolicyUnlocked(
 			existingState.GatewayServiceName != os.Getenv(connector.WindowsGatewayServiceNameEnv) {
 			return "", nil, errors.New("enterprise hooks: existing Claude machine policy belongs to another protected deployment")
 		}
-		return path, nil, nil
+		upgrade := false
+	searchPolicy:
+		for _, contract := range windowsClaudeRecordedPolicyContracts() {
+			for _, lock := range []bool{true, false} {
+				current, renderErr := renderWindowsClaudeRecordedPolicy(existingState, contract, lock)
+				if renderErr != nil {
+					return "", nil, renderErr
+				}
+				if bytes.Equal(policySnapshot.data, current) {
+					return path, nil, nil
+				}
+				previous, renderErr := renderWindowsClaudeRecordedPolicy(existingState, contract, lock, true)
+				if renderErr != nil {
+					return "", nil, renderErr
+				}
+				if bytes.Equal(policySnapshot.data, previous) {
+					body = current
+					*bodyRef = body
+					upgrade = true
+					break searchPolicy
+				}
+			}
+		}
+		if !upgrade {
+			return "", nil, errors.New("enterprise hooks: existing Claude machine policy has an unrecognized registered command")
+		}
 	}
 	// The transaction (withWindowsClaudeManagedPolicyTransaction) has
 	// already created managed-settings.d and ClaudeCode, and recorded the
