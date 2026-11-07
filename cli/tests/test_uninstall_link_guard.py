@@ -12,6 +12,7 @@ their behaviour.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -768,3 +769,128 @@ def test_the_data_folder_removal_refuses_a_path_that_resolves_elsewhere(profile)
             with pytest.raises(click.ClickException) as refused:
                 cmd_uninstall._remove_data_dir(str(data), platform_name="win32")
     assert "resolves to" in refused.value.message and (data / "audit.db").exists()
+
+# --- hardening round 4: a short name with a missing tail, a mapped network drive, a subst drive ---------------------
+
+
+@contextlib.contextmanager
+def _nt(*, exists=(), real=None):
+    """link_guard seen on Windows with ntpath: *exists* are the paths that exist, *real* maps a path to its real path."""
+    import ntpath
+
+    names = {name: getattr(ntpath, name) for name in dir(ntpath) if not name.startswith("__")}
+    names["lexists"] = lambda p: ntpath.normcase(p).rstrip("\\") in {ntpath.normcase(e).rstrip("\\") for e in exists}
+    names["realpath"] = real or (lambda p: p)
+    fake = SimpleNamespace(path=SimpleNamespace(**names), name="nt")
+    # The component look (lstat on every folder) is not what these tests are about: no link is on the way.
+    with patch.object(link_guard, "os", fake), patch.object(link_guard, "links_on_path", return_value=[]):
+        yield
+
+
+def test_a_short_name_with_a_missing_tail_is_the_same_place() -> None:
+    # GetLongPathName fails for a path that does not exist; realpath expands the part that does.
+    short = r"C:\revprobe\LONGFO~1\sub\missing\x.json"
+    real = lambda p: p.replace("LONGFO~1", "LongFolderName")  # noqa: E731
+    exists = [r"C:\revprobe\LONGFO~1\sub", r"C:\revprobe\LONGFO~1", r"C:\revprobe", "C:\\"]
+    long_of = lambda p: p.replace("LONGFO~1", "LongFolderName")  # noqa: E731
+    with patch.object(link_guard, "_windows", return_value=True), patch.object(link_guard, "_long_name", long_of):
+        with _nt(exists=exists, real=real):
+            assert link_guard.link_problem(short) is None
+            assert link_guard.link_problem(short, include_self=False) is None
+            assert link_guard.link_problem(short.upper()) is None
+        # The existing part still has to be where it is written.
+        with _nt(exists=exists, real=lambda p: p.replace("LONGFO~1", "Elsewhere")):
+            problem = link_guard.link_problem(short)
+    assert problem is not None and "a link" in problem and r"C:\revprobe\Elsewhere\sub\missing\x.json" in problem
+
+
+def test_a_mapped_network_drive_is_its_unc_target_and_a_later_link_still_counts() -> None:
+    home = r"H:\users\vn\.defenseclaw"
+    exists = [r"H:\users\vn", r"H:\users", "H:\\"]
+    unc = lambda p: p.replace("H:", r"\\srv\share")  # noqa: E731
+    with patch.object(link_guard, "_windows", return_value=True), patch.object(link_guard, "_long_name", lambda p: p):
+        with patch.object(link_guard, "_drive_kind", return_value=("network", r"\\srv\share")):
+            with _nt(exists=exists, real=unc):
+                assert link_guard.link_problem(home) is None
+                assert link_guard.link_problem(r"H:\users\vn", include_self=False) is None
+            # A DFS root: the share name WNetGetConnection gives is not what realpath says, but the root is.
+            dfs = lambda p: p.replace("H:", r"\\dfs\ns\home")  # noqa: E731
+            with _nt(exists=exists, real=dfs):
+                assert link_guard.link_problem(home) is None
+            # A link made under the mapped drive after the look still resolves elsewhere.
+            moved = lambda p: p.replace(r"H:\users", r"\\srv\share\other") if p.startswith(r"H:\users") else unc(p)  # noqa: E731
+            with _nt(exists=exists, real=moved):
+                problem = link_guard.link_problem(home)
+    assert problem is not None and "reached through a link" in problem and "subst" not in problem
+
+
+def test_a_subst_drive_is_refused_and_named() -> None:
+    with patch.object(link_guard, "_windows", return_value=True), patch.object(link_guard, "_long_name", lambda p: p):
+        with patch.object(link_guard, "_drive_kind", return_value=("subst", "")):
+            with _nt(exists=[r"X:\data", "X:\\"], real=lambda p: p.replace("X:", r"C:\real")):
+                problem = link_guard.link_problem(r"X:\data\.defenseclaw")
+                # Even a realpath that does not follow the substitution is refused.
+            with _nt(exists=[r"X:\data", "X:\\"]):
+                same = link_guard.link_problem(r"X:\data\.defenseclaw")
+    for found in (problem, same):
+        assert found is not None and "a substituted drive (subst)" in found and "a link" not in found
+        assert "subst X: /d" in found.step and "ask an administrator" in found.step
+    assert r"C:\real\data\.defenseclaw" in problem
+
+
+def _free_letter() -> str:
+    return next(letter for letter in "ZYXWVUTSR" if not os.path.exists(f"{letter}:\\"))
+
+
+@windows_only
+def test_real_short_names_are_the_same_place_with_and_without_a_missing_tail(tmp_path: Path) -> None:
+    import ctypes
+
+    folder = tmp_path.resolve() / "A Long Folder Name For Short Names" / "sub"
+    folder.mkdir(parents=True)
+    size = ctypes.windll.kernel32.GetShortPathNameW(str(folder), None, 0)
+    short = ""
+    if size:
+        buffer = ctypes.create_unicode_buffer(size)
+        ctypes.windll.kernel32.GetShortPathNameW(str(folder), buffer, size)
+        short = buffer.value
+    if not short or os.path.normcase(short) == os.path.normcase(str(folder)):
+        pytest.skip("8.3 short names are disabled on this volume, so there is no short name to compare")
+    assert "~" in short
+    assert link_guard.link_problem(short) is None
+    assert link_guard.link_problem(short.upper()) is None
+    assert link_guard.link_problem(os.path.join(short, "missing", "x.json")) is None
+    assert link_guard.link_problem(os.path.join(short, "missing"), include_self=False) is None
+    # A link made at the missing part afterwards is still refused.
+    elsewhere = tmp_path.resolve() / "elsewhere"
+    elsewhere.mkdir()
+    _link(folder / "linked", elsewhere)
+    found = link_guard.link_problem(os.path.join(short, "linked", "x.json"))
+    assert found is not None and "is a " in found
+
+
+@windows_only
+def test_a_real_subst_drive_is_refused_and_a_mapped_admin_share_is_not(tmp_path: Path) -> None:
+    base = tmp_path.resolve()
+    (base / "data").mkdir()
+    letter = _free_letter()
+    if subprocess.run(["subst", f"{letter}:", str(base)], capture_output=True, timeout=30).returncode != 0:
+        pytest.skip("subst is not available here")
+    try:
+        found = link_guard.link_problem(f"{letter}:\\data\\.defenseclaw")
+        assert found is not None and "a substituted drive (subst)" in found and f"subst {letter}: /d" in found.step
+    finally:
+        subprocess.run(["subst", f"{letter}:", "/d"], capture_output=True, timeout=30)
+    drive, rest = os.path.splitdrive(str(base))
+    if len(drive) != 2:
+        pytest.skip("the test folder is not on a lettered drive")
+    letter = _free_letter()
+    share = rf"\\localhost\{drive[0]}$"
+    mapped = subprocess.run(["net", "use", f"{letter}:", share], capture_output=True, timeout=60)
+    if mapped.returncode != 0:
+        pytest.skip(f"cannot map {share} here (net use rc {mapped.returncode})")
+    try:
+        assert link_guard.link_problem(f"{letter}:{rest}\\data\\.defenseclaw") is None
+        assert link_guard.link_problem(f"{letter}:{rest}\\data") is None
+    finally:
+        subprocess.run(["net", "use", f"{letter}:", "/delete", "/y"], capture_output=True, timeout=60)
