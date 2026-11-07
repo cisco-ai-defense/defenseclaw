@@ -119,21 +119,27 @@ func gap0055NoPanic(t *testing.T, name string, read func()) {
 	read()
 }
 
-// TestGAP0055ProgramBranchesShortArgvNoPanic is the class test of GAP-0055:
-// a program-specific branch that reads an argv word by position, or skips
-// an option's value, without checking that the word is there. Every word
-// and option the package's branches compare with is run with zero, one and
-// two arguments, alone and behind each lookup and wrapper, and every option
-// is put last with its value missing, through the hook client's evidence
-// (Resolve) and the extraction check. None may panic. A race build runs a
-// fixed stride of the forms and every archive program form.
-func TestGAP0055ProgramBranchesShortArgvNoPanic(t *testing.T) {
-	words, options := gap0055SourceLiterals(t)
-	if len(words) < 400 || len(options) < 200 {
-		t.Fatalf("source literals: %d words, %d options; the harvest is broken", len(words), len(options))
-	}
-	cwd, home := t.TempDir(), t.TempDir()
-	commands := append([]string(nil), gap0055Commands...)
+// gap0055BoundedSweep is true where one form costs far more than on a Linux
+// or macOS runner: a race build, and native Windows, where every form reads
+// the file system for the hook client evidence (about 380 probes a call, and
+// more for the Windows word checks) on a four-core runner. The full sweep is
+// about 116,000 forms; there it ran past the 1020 s step of the Windows
+// remaining-package shard pk3 (GAP-0749). Linux and macOS run every form.
+var gap0055BoundedSweep = gap0055RaceBuild || runtime.GOOS == "windows"
+
+// gap0055SweepStride is the stride of a bounded sweep, and gap0055SweepBudget
+// bounds its forms, so a source that grows more program-specific words
+// cannot push it past what a slow runner reads.
+const (
+	gap0055SweepStride = 11
+	gap0055SweepBudget = 30000
+)
+
+// gap0055SweepCommands is every form of the sweep: the GAP-0055 commands,
+// each word of the source behind each argv and wrapper, and each program
+// of the package with each option, last and after one operand.
+func gap0055SweepCommands(words, options []string) (commands, programs []string) {
+	commands = append([]string(nil), gap0055Commands...)
 	for _, word := range words {
 		for _, argv := range []string{"", " -v", " -", " --", " a", " a b", " ''", " $X"} {
 			commands = append(commands, word+argv)
@@ -142,7 +148,6 @@ func TestGAP0055ProgramBranchesShortArgvNoPanic(t *testing.T) {
 			commands = append(commands, fmt.Sprintf(wrapper, word))
 		}
 	}
-	var programs []string
 	for _, list := range [][]string{archivePrograms, copyPrograms, linkPrograms, renamePrograms, cdPrograms, multicallPrograms,
 		braceOperandPrograms, dataPrograms, hiddenDirectoryPrograms, knownWordPrograms, readOnlyLinkWordPrograms, readerPrograms,
 		{"env", "sudo", "doas", "nice", "exec", "timeout", "xargs", "command", "builtin", "nohup", "time", "stdbuf",
@@ -158,15 +163,46 @@ func TestGAP0055ProgramBranchesShortArgvNoPanic(t *testing.T) {
 			commands = append(commands, program+" "+option, program+" a "+option)
 		}
 	}
-	if gap0055RaceBuild {
-		var sample []string
-		for i, command := range commands {
-			if i%11 == 0 || slices.Contains(archivePrograms, strings.Fields(command + " x")[0]) {
-				sample = append(sample, command)
-			}
-		}
-		commands = sample
+	return commands, programs
+}
+
+// gap0055Sweep is the forms a run reads: all of them, or the bounded sample.
+func gap0055Sweep(commands []string, bounded bool) []string {
+	if !bounded {
+		return commands
 	}
+	return gap0055BoundSweep(commands)
+}
+
+// gap0055BoundSweep is a fixed stride of the forms and every archive
+// program form, the programs the GAP-0055 panic was in.
+func gap0055BoundSweep(commands []string) []string {
+	var sample []string
+	for i, command := range commands {
+		if i%gap0055SweepStride == 0 || slices.Contains(archivePrograms, strings.Fields(command + " x")[0]) {
+			sample = append(sample, command)
+		}
+	}
+	return sample
+}
+
+// TestGAP0055ProgramBranchesShortArgvNoPanic is the class test of GAP-0055:
+// a program-specific branch that reads an argv word by position, or skips
+// an option's value, without checking that the word is there. Every word
+// and option the package's branches compare with is run with zero, one and
+// two arguments, alone and behind each lookup and wrapper, and every option
+// is put last with its value missing, through the hook client's evidence
+// (Resolve) and the extraction check. None may panic. A race build and
+// native Windows run a fixed stride of the forms and every archive program
+// form (gap0055BoundedSweep).
+func TestGAP0055ProgramBranchesShortArgvNoPanic(t *testing.T) {
+	words, options := gap0055SourceLiterals(t)
+	if len(words) < 400 || len(options) < 200 {
+		t.Fatalf("source literals: %d words, %d options; the harvest is broken", len(words), len(options))
+	}
+	cwd, home := t.TempDir(), t.TempDir()
+	commands, programs := gap0055SweepCommands(words, options)
+	commands = gap0055Sweep(commands, gap0055BoundedSweep)
 	var mu sync.Mutex
 	reported := map[string]bool{}
 	failures := 0
@@ -257,4 +293,62 @@ func FuzzGAP0055CommandLinksRead(f *testing.F) {
 		}
 		Resolve(payload)
 	})
+}
+
+// TestGAP0749BoundedSweepStaysInBudgetAndCoversEveryProgramAndOption: the
+// bounded sweep (race builds, native Windows) holds to the budget of forms a
+// slow runner reads in its shard step, and still reads every program and
+// every option the full sweep reads, and every archive program form. The
+// full sweep ran past the 1020 s step of the Windows shard pk3 (GAP-0749).
+func TestGAP0749BoundedSweepStaysInBudgetAndCoversEveryProgramAndOption(t *testing.T) {
+	words, options := gap0055SourceLiterals(t)
+	full, programs := gap0055SweepCommands(words, options)
+	bounded := gap0055BoundSweep(full)
+	if len(bounded) > gap0055SweepBudget {
+		t.Fatalf("the bounded sweep has %d forms of %d; the budget is %d: raise the stride, not the budget", len(bounded), len(full), gap0055SweepBudget)
+	}
+	if len(bounded) >= len(full) {
+		t.Fatalf("the bounded sweep (%d forms) is not smaller than the full one (%d)", len(bounded), len(full))
+	}
+	t.Logf("bounded sweep: %d of %d forms, budget %d", len(bounded), len(full), gap0055SweepBudget)
+	inSweep := make(map[string]bool, len(bounded))
+	for _, command := range bounded {
+		inSweep[command] = true
+	}
+	for _, program := range programs {
+		covered := false
+		for _, option := range options {
+			if inSweep[program+" "+option] || inSweep[program+" a "+option] {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			t.Errorf("program %q has no option form in the bounded sweep", program)
+		}
+	}
+	for _, option := range options {
+		covered := false
+		for _, program := range programs {
+			if inSweep[program+" "+option] || inSweep[program+" a "+option] {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			t.Errorf("option %q has no program form in the bounded sweep", option)
+		}
+	}
+	for _, command := range full {
+		if slices.Contains(archivePrograms, strings.Fields(command + " x")[0]) && !inSweep[command] {
+			t.Fatalf("archive program form %q is not in the bounded sweep", command)
+		}
+	}
+	// The benign twin: a run that is not bounded reads every form.
+	if all := gap0055Sweep(full, false); len(all) != len(full) {
+		t.Errorf("an unbounded run reads %d of %d forms", len(all), len(full))
+	}
+	if got := gap0055Sweep(full, true); len(got) != len(bounded) {
+		t.Errorf("a bounded run reads %d forms, want %d", len(got), len(bounded))
+	}
 }
