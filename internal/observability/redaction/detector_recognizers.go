@@ -607,13 +607,15 @@ func recognizeHighEntropy(input string, fieldClass observability.FieldClass, pri
 		boundary := entropyBoundary(input, index[0], index[1])
 		span := input[index[0]:index[1]]
 		parts := splitAtProductFolders(span)
-		// A folder name is not what decides the outcome. When the span with its
-		// folder components taken out still reads as one key (it carries a digit
-		// and passes the value test), every remaining range is redacted, even
-		// when each piece alone is below the length minimum. A path made of
-		// ordinary words has no digit run to speak of, so it is not pulled in by
-		// the join. Otherwise each range is judged on its own.
-		whole := boundary && byteAny(span, isASCIIDigit) && validHighEntropy(joinRanges(span, parts), fieldClass)
+		// A folder name is not what decides the outcome. The span is a secret
+		// only when the detector would redact it as written and would still
+		// redact it with the folder components taken out; then every remaining
+		// range is redacted, even when each piece alone is below the length
+		// minimum, and the folder names stay readable. A span the detector
+		// leaves alone as written is never pulled in by the join, and a span
+		// that is only a secret because of a folder name is not one. Otherwise
+		// each range is judged on its own.
+		whole := boundary && validHighEntropy(span, fieldClass) && validHighEntropy(joinRanges(span, parts), fieldClass)
 		for _, part := range parts {
 			start, end := index[0]+part[0], index[0]+part[1]
 			accepted := whole || (boundary && validHighEntropy(input[start:end], fieldClass))
