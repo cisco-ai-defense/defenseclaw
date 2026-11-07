@@ -232,6 +232,119 @@ try {
         }
         finally { Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient }
         if (-not (Get-Sddl $requirements).Contains(';;;BU)')) { throw 'standalone: the recovery helper did not put the Users read entry back' }
+        # g582 round 11e, GAP-0803. A Codex file a program holds open without
+        # delete sharing, arrived after the gate, ends the rollback with the
+        # retryable held code naming the file, within the bound.
+        $codexDir = [IO.Path]::Combine($Scratch, 'codex-held'); [void][IO.Directory]::CreateDirectory($codexDir)
+        $heldRequirements = [IO.Path]::Combine($codexDir, 'requirements.toml'); [IO.File]::WriteAllText($heldRequirements, 'x')
+        $heldState = [IO.Path]::Combine($codexDir, '.defenseclaw-managed-hooks.state'); [IO.File]::WriteAllText($heldState, 'x')
+        $heldLayout = @{ CodexMachinePolicyPath = $heldRequirements; InstallRoot = $Scratch }
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+        try {
+            foreach ($case in @(
+                    @{ Path = $heldRequirements; Code = 'codex_requirements_held' },
+                    @{ Path = $heldState; Code = 'codex_state_held' })) {
+                foreach ($entry in $holders) {
+                    $handle = Open-Holder $case.Path $entry.Access $entry.Share
+                    try {
+                        $clock = [Diagnostics.Stopwatch]::StartNew()
+                        $message = ''
+                        try { [void](Open-DefenseClawCodexRollbackHold -Layout $heldLayout -Path $case.Path -TimeoutSeconds 1) } catch { $message = $_.Exception.Message }
+                        if (-not $message.StartsWith($case.Code + ': ') -or -not $message.Contains($case.Path) -or -not $message.Contains('still pending')) {
+                            throw "rollback hold, $($entry.Name) on $($case.Code): not refused by name: '$message'"
+                        }
+                        if ($clock.Elapsed.TotalSeconds -gt 20) { throw "rollback hold, $($entry.Name): waited $($clock.Elapsed.TotalSeconds) s" }
+                    }
+                    finally { Close-Holder $handle }
+                }
+                $released = Open-DefenseClawCodexRollbackHold -Layout $heldLayout -Path $case.Path -TimeoutSeconds 1
+                Close-DefenseClawRestampHold -Handle $released
+            }
+        }
+        finally { Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient }
+
+        # g582 round 11e, GAP-0802. The recorded preimage is used only when the
+        # record names this file and its stored bytes match the recorded hash.
+        $recDir = [IO.Path]::Combine($Scratch, 'codex-recover'); [void][IO.Directory]::CreateDirectory($recDir)
+        $recRequirements = [IO.Path]::Combine($recDir, 'requirements.toml')
+        $recOwnership = [IO.Path]::Combine($recDir, 'ownership.json')
+        $recInstallState = [IO.Path]::Combine($recDir, 'install-state'); [void][IO.Directory]::CreateDirectory($recInstallState)
+        $recLayout = @{ CodexMachinePolicyPath = $recRequirements; CodexRequirementsOwnershipPath = $recOwnership; InstallStateDirectory = $recInstallState; InstallRoot = $Scratch }
+        $preimage = [Text.Encoding]::UTF8.GetBytes("[features]`nfoo = true`n")
+        $sha = [Security.Cryptography.SHA256]::Create(); $preimageHash = ([BitConverter]::ToString($sha.ComputeHash($preimage)) -replace '-', '').ToLowerInvariant(); $sha.Dispose()
+        function Write-Record([string]$RequirementsPath, [string]$Hash, [bool]$Existed) {
+            $record = [ordered]@{ schema_version = 2; requirements_path = $RequirementsPath; preimage_existed = $Existed; preimage = [Convert]::ToBase64String($preimage); preimage_sha256 = $Hash }
+            [IO.File]::WriteAllText($recOwnership, ($record | ConvertTo-Json))
+        }
+        Write-Record $recRequirements $preimageHash $true
+        if ([Convert]::ToBase64String((Get-DefenseClawRecordedCodexRequirementsPreimage -Layout $recLayout)) -ne [Convert]::ToBase64String($preimage)) { throw 'recorded preimage: a matching record was not used' }
+        Write-Record $recRequirements ('0' * 64) $true
+        if ((Get-DefenseClawRecordedCodexRequirementsPreimage -Layout $recLayout).Length -ne 0) { throw 'recorded preimage: a record whose hash does not match was used' }
+        Write-Record ([IO.Path]::Combine($recDir, 'other.toml')) $preimageHash $true
+        if ((Get-DefenseClawRecordedCodexRequirementsPreimage -Layout $recLayout).Length -ne 0) { throw 'recorded preimage: a record of another file was used' }
+        Write-Record $recRequirements $preimageHash $false
+        if ((Get-DefenseClawRecordedCodexRequirementsPreimage -Layout $recLayout).Length -ne 0) { throw 'recorded preimage: a record without a preimage was used' }
+        [IO.File]::WriteAllText($recOwnership, '{ not json')
+        if ((Get-DefenseClawRecordedCodexRequirementsPreimage -Layout $recLayout).Length -ne 0) { throw 'recorded preimage: an unparseable record was used' }
+
+        # The recovery step, with the Codex command and the protected
+        # directory stubbed: merge, rebuild from the preimage, held, nothing
+        # to do, and Secure Client untouched.
+        $script:RecoverCalls = [Collections.Generic.List[string]]::new()
+        $script:RecoverPlan = @()
+        function script:Invoke-DefenseClawCodexRequirementsCommand {
+            param($Layout, $GatewayServiceName, $Action)
+            $step = $script:RecoverPlan[$script:RecoverCalls.Count]
+            $script:RecoverCalls.Add($Action + ':' + [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($Layout.CodexMachinePolicyPath)))
+            if ($step -ne 'ok') { throw "Codex requirements $Action failed: $step" }
+            if ($Action -eq 'reconcile') { [IO.File]::WriteAllText($Layout.CodexMachinePolicyPath, 'canonical') }
+        }
+        function script:New-DefenseClawProtectedDirectory { param($Path) [void][IO.Directory]::CreateDirectory($Path); return $true }
+        function Reset-Recovery([string[]]$Plan, [string]$Content) {
+            $script:RecoverCalls.Clear(); $script:RecoverPlan = $Plan
+            [IO.File]::WriteAllText($recRequirements, $Content)
+            foreach ($f in @(Get-ChildItem -LiteralPath $recInstallState -Recurse -File -ErrorAction SilentlyContinue)) { Remove-Item -LiteralPath $f.FullName -Force }
+        }
+        function Get-Backups { @(Get-ChildItem -LiteralPath $recInstallState -Recurse -File -Filter 'requirements.toml.hand-edited.*' -ErrorAction SilentlyContinue) }
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+        try {
+            # Nothing to do: verify passes, no backup, no reconcile.
+            Reset-Recovery @('ok') 'fine'
+            Repair-DefenseClawRecoveredCodexRequirements -Layout $recLayout -GatewayServiceName 'DefenseClawGateway'
+            if ($script:RecoverCalls.Count -ne 1 -or @(Get-Backups).Count -ne 0 -or [IO.File]::ReadAllText($recRequirements) -ne 'fine') { throw 'recovery: a file that verifies was touched' }
+            # Merge: the hand edit is saved byte for byte, the managed policy is published.
+            Reset-Recovery @('hooks.SessionStart has 0 exact DefenseClaw managed groups, want 1', 'ok') 'hand edit'
+            Repair-DefenseClawRecoveredCodexRequirements -Layout $recLayout -GatewayServiceName 'DefenseClawGateway'
+            $backups = @(Get-Backups)
+            if ($backups.Count -ne 1 -or [IO.File]::ReadAllText($backups[0].FullName) -ne 'hand edit') { throw 'recovery: the hand-edited bytes were not kept' }
+            if ([IO.File]::ReadAllText($recRequirements) -ne 'canonical' -or -not ($script:RecoverCalls -join '|').Contains('reconcile:hand edit')) { throw 'recovery: the managed policy was not merged into the file' }
+            if (-not (@(Get-DefenseClawResilienceEvents) -join "`n").Contains($backups[0].Name)) { throw 'recovery: the event does not name the backup' }
+            # Rebuild: a hand edit the merge refuses is replaced from the recorded preimage.
+            Write-Record $recRequirements $preimageHash $true
+            Reset-Recovery @('is not pinned true', 'allow_managed_hooks_only=false conflicts', 'ok') 'allow = false'
+            Repair-DefenseClawRecoveredCodexRequirements -Layout $recLayout -GatewayServiceName 'DefenseClawGateway'
+            if (($script:RecoverCalls -join '|') -notmatch 'reconcile:allow = false\|reconcile:\[features\]') { throw "recovery: the file was not rebuilt from the recorded preimage: $($script:RecoverCalls -join '|')" }
+            if (@(Get-Backups).Count -ne 1 -or [IO.File]::ReadAllText((Get-Backups)[0].FullName) -ne 'allow = false') { throw 'recovery: the refused hand edit was not kept' }
+            # Both fail: named, and the hand edit is still kept.
+            Reset-Recovery @('bad', 'bad merge', 'bad rebuild') 'edit'
+            $message = ''
+            try { Repair-DefenseClawRecoveredCodexRequirements -Layout $recLayout -GatewayServiceName 'DefenseClawGateway' } catch { $message = $_.Exception.Message }
+            if (-not $message.Contains('could not republish the managed policy') -or @(Get-Backups).Count -ne 1) { throw "recovery: failure not named or edit not kept: '$message'" }
+            # Held: the retryable code, nothing saved, no reconcile.
+            Reset-Recovery @('bad') 'edit'
+            $handle = Open-Holder $recRequirements $READ_DATA ($SHARE_R -bor $SHARE_W)
+            try {
+                $message = ''
+                try { Repair-DefenseClawRecoveredCodexRequirements -Layout $recLayout -GatewayServiceName 'DefenseClawGateway' } catch { $message = $_.Exception.Message }
+            }
+            finally { Close-Holder $handle }
+            if (-not $message.StartsWith('codex_requirements_held: ') -or @(Get-Backups).Count -ne 0 -or $script:RecoverCalls.Count -ne 1) { throw "recovery: a held file was not refused by name: '$message'" }
+        }
+        finally { Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient }
+        # Secure Client: the recovery step does nothing.
+        Reset-Recovery @('bad') 'edit'
+        Repair-DefenseClawRecoveredCodexRequirements -Layout $recLayout -GatewayServiceName 'DefenseClawGateway'
+        if ($script:RecoverCalls.Count -ne 0 -or @(Get-Backups).Count -ne 0 -or [IO.File]::ReadAllText($recRequirements) -ne 'edit') { throw 'Secure Client: the recovery step acted' }
     } $scratch $holderType
     'enterprise-standalone-held-file-restamp-smoke: OK'
 }

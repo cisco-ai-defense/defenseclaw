@@ -512,3 +512,19 @@ func TestWindowsEnterpriseStandaloneErrorTextHidesSecurityDescriptorDetail(t *te
 		}
 	}
 }
+
+// GAP-0803: a rollback a program holding a Codex file stopped is not told that
+// running it again "fails the same way" or to force the uninstall: the error
+// says to close the program, and the same command then finishes the rollback.
+func TestWindowsEnterpriseHeldRollbackNextStepNamesOnlyThePendingTransaction(t *testing.T) {
+	original := windowsEnterpriseRunningAsLocalSystem
+	t.Cleanup(func() { windowsEnterpriseRunningAsLocalSystem = original })
+	windowsEnterpriseRunningAsLocalSystem = func() bool { return true }
+	if got := windowsEnterpriseHeldRollbackNextStep(false, nil); got != "" {
+		t.Fatalf("without a pending transaction: %q", got)
+	}
+	got := windowsEnterpriseHeldRollbackNextStep(true, nil)
+	if !strings.Contains(got, "transaction is still pending") || strings.Contains(got, "fails the same way") || strings.Contains(got, "FORCE=1") {
+		t.Fatalf("held rollback next step = %q", got)
+	}
+}

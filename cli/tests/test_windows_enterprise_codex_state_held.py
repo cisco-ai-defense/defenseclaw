@@ -378,3 +378,42 @@ def test_a_rollback_to_a_release_without_writer_state_drops_the_writer_lock() ->
     assert body.index("[IO.File]::Delete($lock)", gate) < body.index("return", gate + 200)
     assert body.index("'.defenseclaw-managed-hooks.writer.lock'", gate) > gate
     assert gate < body.index("[IO.File]::ReadAllBytes($committed)")
+
+def test_a_recovery_republishes_a_hand_edited_requirements_file_instead_of_stopping() -> None:
+    """GAP-0802: the restored requirements.toml may carry an administrator's
+    edit of the managed policy; the standalone recovery replaces it."""
+    text = _text()
+    readiness = _function_body(text, "Assert-DefenseClawRestoredTransactionReadyForActivation")
+    assert "-RepairRecoveredCodexRequirements:(Test-DefenseClawStandaloneProfile)" in readiness
+    deployment = _function_body(text, "Assert-DefenseClawEnterpriseDeployment")
+    gate = deployment.index("if ($RepairRecoveredCodexRequirements -and $ServicingTransaction -and")
+    # The repair runs before the verify that used to stop the recovery.
+    assert gate < deployment.index("-Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))")
+    assert "(Test-DefenseClawStandaloneProfile)" in deployment[gate : gate + 200]
+    body = _function_body(text, "Repair-DefenseClawRecoveredCodexRequirements")
+    assert body.index("-Action verify)") < body.index("[IO.FileMode]::CreateNew") < body.index("-Action reconcile)")
+    # Held: the retryable code, before anything is saved or written.
+    assert body.index("New-DefenseClawCodexFileHeldMessage") < body.index("[IO.FileMode]::CreateNew")
+    # The content comes from DefenseClaw's record, verified by its hash.
+    assert "Get-DefenseClawRecordedCodexRequirementsPreimage" in body
+    assert "-Action reconcile" in body[body.index("Install-DefenseClawFileAtomic") :]
+    record = _function_body(text, "Get-DefenseClawRecordedCodexRequirementsPreimage")
+    assert "preimage_sha256" in record and "SHA256" in record and "requirements_path" in record
+    # Secure Client keeps its recovery.
+    assert body.index("if (-not (Test-DefenseClawStandaloneProfile)) {") < body.index("-Action verify)")
+    assert "recovered_codex_requirements" in text
+
+
+def test_a_rollback_that_a_late_holder_stops_ends_with_the_retryable_held_code() -> None:
+    """GAP-0803: bounded waits, then codex_*_held (exit 1618), transaction pending."""
+    text = _text()
+    restore = _function_body(text, "Restore-DefenseClawTransaction")
+    assert "-Why 'open without delete sharing, so the rollback could not put it back'" in restore
+    assert "Open-DefenseClawCodexRollbackHold -Layout $Layout -Path $destination" in restore
+    assert "-Why 'open without delete sharing, so the rollback could not remove it'" in restore
+    hold = _function_body(text, "Open-DefenseClawCodexRollbackHold")
+    assert "[ValidateRange(0, 120)][int]$TimeoutSeconds = 30" in hold
+    assert "Start-Sleep -Milliseconds 500" in hold
+    message = _function_body(text, "New-DefenseClawCodexFileHeldMessage")
+    assert "'codex_requirements_held'" in message and "'codex_state_held'" in message
+    assert "the transaction is still pending" in message

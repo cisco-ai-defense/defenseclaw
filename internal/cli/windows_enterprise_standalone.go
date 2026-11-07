@@ -151,6 +151,9 @@ type windowsEnterpriseInstallerReport struct {
 	// lifecycle left as it was because it could not open the file at all
 	// (GAP-1220).
 	SkippedRuntimeFiles []string `json:"skipped_runtime_files"`
+	// RecoveredCodexRequirements says what a recovery replaced in the Codex
+	// requirements.toml and where the hand-edited file is kept (GAP-0802).
+	RecoveredCodexRequirements []string `json:"recovered_codex_requirements"`
 	// SquattedRootNotes says what Install did with each standalone root a
 	// standard user created first: a link removed, a folder moved aside.
 	SquattedRootNotes []string `json:"squatted_root_notes"`
@@ -1928,7 +1931,7 @@ func applyWindowsEnterpriseInstallerReport(
 			configPath = opts.configPath
 			purge, force = opts.purge, opts.force
 		}
-		if next := windowsEnterpriseStandaloneNextStep(
+		next := windowsEnterpriseStandaloneNextStep(
 			result.Action,
 			configPath,
 			purge,
@@ -1938,7 +1941,12 @@ func applyWindowsEnterpriseInstallerReport(
 			decodeWindowsEnterpriseRecoveryGatewayRuns(report.RecoveryGatewayRuns),
 			decodeWindowsEnterpriseRecoveryGatewayRefusal(report.RecoveryGatewayRefusal),
 			windowsEnterpriseLiveStandaloneServices(),
-		); next != "" {
+		)
+		if windowsBundleHasCode(result.Errors[firstError:], "codex_requirements_held") ||
+			windowsBundleHasCode(result.Errors[firstError:], "codex_state_held") {
+			next = windowsEnterpriseHeldRollbackNextStep(report.TransactionPending, windowsEnterpriseLiveStandaloneServices())
+		}
+		if next != "" {
 			result.Errors[firstError].Message += " " + next
 		}
 	}
@@ -2366,6 +2374,12 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 		warnings = append(warnings, enterprisestatus.Message{
 			Code:    "root_squatted",
 			Message: "a standard user created a DefenseClaw root before the install: " + windowsEnterpriseBoundedDiagnostic(note),
+		})
+	}
+	for _, note := range report.RecoveredCodexRequirements {
+		warnings = append(warnings, enterprisestatus.Message{
+			Code:    "codex_requirements_replaced",
+			Message: "the recovery of an interrupted lifecycle transaction found Codex machine requirements that failed verification: " + windowsEnterpriseBoundedDiagnostic(note),
 		})
 	}
 	if len(report.TerminatedServiceProcesses) != 0 {
@@ -3364,6 +3378,11 @@ var windowsEnterpriseKnownCodes = []string{
 	"profile_conflict",
 	"downgrade_refused",
 	"root_squatted",
+	// A rollback that a program held open without delete sharing stopped:
+	// the code is inside the failure and rollback text, not at its start
+	// (GAP-0803).
+	"codex_requirements_held",
+	"codex_state_held",
 }
 
 // windowsEnterpriseBundleRefusalCodes are the bundle refusals a retry of the

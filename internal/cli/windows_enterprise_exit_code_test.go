@@ -102,3 +102,25 @@ func TestWindowsEnterpriseFailureCodesAreInTheExitCodeTable(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0803: a rollback that a program held open without delete sharing stopped
+// ends the run with the held code even when the module wrapped the rollback
+// text inside the failure of the run, so the MDM retries it (exit 1618).
+func TestWindowsEnterpriseRollbackHeldCodeSurvivesTheWrappingFailureText(t *testing.T) {
+	holder := "codex_requirements_held: notepad.exe (process id 4242, EC2AMAZ-X\\Administrator) has C:\\ProgramData\\OpenAI\\Codex\\requirements.toml, the Codex machine requirements, open without delete sharing, so the rollback could not put it back"
+	for name, message := range map[string]string{
+		"leading":       holder,
+		"upgrade":       "Upgrade failed (Codex requirements reconcile failed: boom); rollback also failed and protected recovery state was retained: managed lifecycle/hook restore failed: " + holder,
+		"state variant": "codex_state_held: a program (process id 7) has C:\\ProgramData\\OpenAI\\Codex\\.defenseclaw-managed-hooks.state, the Codex managed-hooks state, open without delete sharing, so the rollback could not put it back",
+	} {
+		code := windowsEnterpriseMessageCode(message, "lifecycle_error")
+		if code != "codex_requirements_held" && code != "codex_state_held" {
+			t.Fatalf("%s: code = %q, want a held code", name, code)
+		}
+		result := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "9.9.9")
+		result.AddError(code, message)
+		if got := windowsEnterpriseFailureCodeFor(result); got != enterprisestatus.WindowsExitBusy {
+			t.Fatalf("%s: exit = %d, want %d", name, got, enterprisestatus.WindowsExitBusy)
+		}
+	}
+}
