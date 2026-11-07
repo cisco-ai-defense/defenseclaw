@@ -1829,6 +1829,48 @@ namespace $nativeNamespace
             byte[] fileInformation,
             uint bufferSize);
 
+        // Publishes a staged data file without deleting the existing name
+        // first. The staged file keeps the access list its writer assigned.
+        // The classic request is used only where the volume refuses the
+        // POSIX request; the caller reports that fallback.
+        public static string RenameNonImageFile(string source, string destination)
+        {
+            const uint DELETE = 0x00010000;
+            const uint FILE_SHARE_READ = 0x00000001;
+            const uint FILE_SHARE_WRITE = 0x00000002;
+            const uint FILE_SHARE_DELETE = 0x00000004;
+            const uint OPEN_EXISTING = 3;
+            const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+            const int FileRenameInfo = 3;
+            const int FileRenameInfoEx = 22;
+            const uint FILE_RENAME_REPLACE_IF_EXISTS = 0x00000001;
+            const uint FILE_RENAME_POSIX_SEMANTICS = 0x00000002;
+            IntPtr file = CreateFileW(source, DELETE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, IntPtr.Zero);
+            if (file == new IntPtr(-1))
+                return "open:" + Marshal.GetLastWin32Error().ToString(System.Globalization.CultureInfo.InvariantCulture);
+            try
+            {
+                byte[] name = Encoding.Unicode.GetBytes(destination);
+                int nameOffset = IntPtr.Size == 8 ? 20 : 12;
+                byte[] rename = new byte[nameOffset + name.Length + 2];
+                BitConverter.GetBytes(FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS).CopyTo(rename, 0);
+                BitConverter.GetBytes((uint)name.Length).CopyTo(rename, nameOffset - 4);
+                name.CopyTo(rename, nameOffset);
+                if (SetFileInformationByHandleNative(file, FileRenameInfoEx, rename, (uint)rename.Length))
+                    return "";
+                int error = Marshal.GetLastWin32Error();
+                if (error != 50 && error != 87)
+                    return "rename:" + error.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                BitConverter.GetBytes(FILE_RENAME_REPLACE_IF_EXISTS).CopyTo(rename, 0);
+                if (SetFileInformationByHandleNative(file, FileRenameInfo, rename, (uint)rename.Length))
+                    return "classic";
+                return "rename:" + Marshal.GetLastWin32Error().ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+            finally { CloseHandle(file); }
+        }
+
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "DeleteFileW")]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool DeleteFileNative(string fileName);
@@ -9897,6 +9939,34 @@ function Assert-DefenseClawStandaloneInstallTreeNotInUse {
     }
 }
 
+function Move-DefenseClawNonImageFileReplacing {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        Microsoft.PowerShell.Management\Move-Item -LiteralPath $Source -Destination $Destination -Force
+        return
+    }
+    $native = Initialize-DefenseClawNativeSecurity
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        $result = [string]$native::RenameNonImageFile($Source, $Destination)
+        if ($result -ceq '') {
+            return
+        }
+        if ($result -ceq 'classic') {
+            Microsoft.PowerShell.Utility\Write-Warning 'DefenseClaw: this volume refused POSIX file replacement; concurrent readers may need to retry'
+            return
+        }
+        $stage, $code = $result.Split(':', 2)
+        if ($code -notin @('5', '32', '33') -or $clock.Elapsed.TotalSeconds -ge 3) {
+            throw [IO.IOException]::new("data file replacement failed ($result); the previous file remains at $Destination")
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 1
+    }
+}
+
 function Write-DefenseClawJsonAtomic {
     param(
         [Parameter(Mandatory)]$Value,
@@ -9917,7 +9987,7 @@ function Write-DefenseClawJsonAtomic {
         # A ReadOnly, Hidden or System attribute on the file being replaced
         # makes the replacing move fail with access denied.
         [void](Clear-DefenseClawRestrictiveFileAttributes -Path $Path)
-        Microsoft.PowerShell.Management\Move-Item -LiteralPath $temporary -Destination $Path -Force
+        Move-DefenseClawNonImageFileReplacing -Source $temporary -Destination $Path
     }
     finally {
         if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $temporary) {
@@ -26021,7 +26091,7 @@ function Write-DefenseClawDeploymentMetadataBytes {
             -Path $temporary `
             -Kind AdminFile `
             -GatewayServiceSID $script:AdministratorsSID
-        Microsoft.PowerShell.Management\Move-Item -LiteralPath $temporary -Destination $Path -Force
+        Move-DefenseClawNonImageFileReplacing -Source $temporary -Destination $Path
     }
     finally {
         if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $temporary) {
@@ -35468,10 +35538,7 @@ function Write-DefenseClawProtectedTextAtomic {
             -Path $temporary `
             -Kind AdminFile `
             -GatewayServiceSID $script:AdministratorsSID
-        Microsoft.PowerShell.Management\Move-Item `
-            -LiteralPath $temporary `
-            -Destination $destination `
-            -Force
+        Move-DefenseClawNonImageFileReplacing -Source $temporary -Destination $destination
         Set-DefenseClawPathAcl `
             -Path $destination `
             -Kind AdminFile `

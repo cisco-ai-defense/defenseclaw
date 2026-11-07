@@ -236,6 +236,26 @@ built:
   lifecycle requires a valid signature on each one. Pass `ALLOWEDSIGNERS=` to
   accept only your signer.
 
+### Concurrent file publication
+
+The managed-policy writer leaves an existing file in place when its bytes
+already match. The standalone module's JSON and metadata writers publish a
+staged file by rename without deleting the destination first. When an install,
+upgrade, repair, or policy change replaces a named file, Windows can briefly
+return `ERROR_FILE_NOT_FOUND` or a sharing error to another process opening
+that name. DefenseClaw's own managed-file readers retry transient opens for
+about 50 ms. A separate application that opens the file at that instant may
+need to reopen it. Run upgrades while clients are idle when possible.
+
+This is an observed Windows file-name replacement limit, not a field failure
+rate. In a 2026-11-06 Windows Server 2025 NTFS stress run of 400 changed-body
+publications and two concurrent readers, one accepted POSIX-style rename run
+returned a missing name in 1 of 78,734 opens. A classic rename run returned
+2 missing names in 132,180 opens. A loaded CI run of the POSIX-style path
+returned 2,667 in 69,765 opens. The rate varies with scheduling and workload;
+neither rename request establishes a zero-error guarantee for a fresh external
+open.
+
 ### Build
 
 `packaging/windows/standalone/build-setup.sh` builds the standalone Setup on
