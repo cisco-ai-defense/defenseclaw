@@ -727,6 +727,7 @@ func readHookSidecar(path string) map[string]string {
 	out := map[string]string{}
 	var data []byte
 	err := safefile.RetryTransientRead(func() error {
+		data = nil
 		// A link, another file type or a file past the writers' bound
 		// (gwconnector.HookSidecarMaxBytes) supplies no address.
 		info, err := pathidentity.LstatPinned(path)
@@ -747,8 +748,7 @@ func readHookSidecar(path string) map[string]string {
 			return err
 		}
 		if !os.SameFile(info, opened) {
-			data = nil
-			return nil
+			return safefile.ErrReadIdentityChanged
 		}
 		data, err = io.ReadAll(io.LimitReader(file, gwconnector.HookSidecarMaxBytes+1))
 		if err != nil {
@@ -758,8 +758,12 @@ func readHookSidecar(path string) map[string]string {
 		if err != nil {
 			return err
 		}
-		if !current.Mode().IsRegular() || !os.SameFile(opened, current) {
+		if !current.Mode().IsRegular() {
 			data = nil
+			return nil
+		}
+		if !os.SameFile(opened, current) {
+			return safefile.ErrReadIdentityChanged
 		}
 		return nil
 	})
