@@ -4017,15 +4017,17 @@ func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallE
 	if w != nil && !w.secureClientActive() && !errors.Is(err, enforce.ErrQuarantineRemovalDeferred) {
 		w.admissionNotes.Store(evt.Path, AdmissionIssue{Kind: AdmissionNotQuarantined, Detail: err.Error()})
 	}
-	// A rejected asset with a link inside is blocked and disabled, and its files
-	// stay where they are because quarantine does not follow links. That is
-	// stated as it is, at a lower severity than a move that failed (GAP-0826).
-	severity, alertTitle := "HIGH", "Quarantine failed; inspect the source and quarantine copy"
+	// A rejected asset with a link inside is not moved, because quarantine does
+	// not follow links, and its files stay where they are. The runtime disable
+	// is applied by the gateway after admission, so the watcher cannot say it
+	// was applied: the alert names the reason and keeps the HIGH severity of a
+	// failed quarantine until the disable is confirmed elsewhere (GAP-0826).
+	// Secure Client keeps the failed-quarantine record unchanged.
+	alertTitle := "Quarantine failed; inspect the source and quarantine copy"
 	auditDetail := fmt.Sprintf("type=%s quarantine failed; inspect the source and quarantine copy: %v", evt.Type, err)
-	if errors.Is(err, enforce.ErrLinkedAssetContent) {
-		severity = "MEDIUM"
-		alertTitle = "Rejected " + evt.Type.String() + " is blocked and disabled but not quarantined: its files contain a link, which quarantine does not follow"
-		auditDetail = fmt.Sprintf("type=%s blocked and disabled; not quarantined, its files contain a link and stay in place: %v", evt.Type, err)
+	if errors.Is(err, enforce.ErrLinkedAssetContent) && w != nil && !w.secureClientActive() {
+		alertTitle = "Rejected " + evt.Type.String() + " is not quarantined: its files contain a link, which quarantine does not follow; the files stay in place, confirm the asset is disabled in its runtime"
+		auditDetail = fmt.Sprintf("type=%s not quarantined, its files contain a link and stay in place; confirm the asset is disabled in its runtime: %v", evt.Type, err)
 	}
 	if w != nil && w.logger != nil {
 		_ = w.logger.RecordQuarantineActionMetric(ctx, "move_in", "error")
@@ -4033,7 +4035,7 @@ func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallE
 			envelope := audit.EnvelopeFromContext(ctx)
 			envelope.Connector = w.eventConnector(evt)
 			alertCtx := audit.ContextWithEnvelope(ctx, envelope)
-			_ = w.logger.LogAlertCtx(alertCtx, "watcher", severity, alertTitle, map[string]any{
+			_ = w.logger.LogAlertCtx(alertCtx, "watcher", "HIGH", alertTitle, map[string]any{
 				"asset_type": evt.Type.String(), "asset_name": evt.Name,
 				"path": evt.Path, "error": err.Error(), "connector": w.eventConnector(evt),
 			})
@@ -4043,7 +4045,7 @@ func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallE
 			Target:   evt.Path,
 			Actor:    "defenseclaw",
 			Details:  auditDetail,
-			Severity: severity,
+			Severity: "HIGH",
 		})
 	}
 	fmt.Fprintf(os.Stderr, "[watch] quarantine %s: %v\n", evt.Path, err)
