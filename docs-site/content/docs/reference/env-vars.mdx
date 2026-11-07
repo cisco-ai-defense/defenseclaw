@@ -348,7 +348,7 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 143 test-only variables">
+<Accordion title="Show the 144 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -366,6 +366,7 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_CODEX_POLICY_READY_PATH`<br/>Default: `unset`<br/>Values: `absolute test marker path`, `unset`<br/>Managed host: `ignore` | Test-only ready-signal path shared with the Codex policy process-tree fixture.<br/>**Read by:** `internal/gateway/connector/codex_policy_windows_test.go` |
 | `DEFENSECLAW_CODEX_POLICY_RELEASE`<br/>Default: `unset`<br/>Values: `test release-event token`, `unset`<br/>Managed host: `ignore` | Release-event token that tells the Codex policy process-tree fixture helpers when to exit, so the test controls their lifetime by event instead of by sleep.<br/>**Read by:** `internal/gateway/connector/codex_policy_windows_test.go` |
 | `DEFENSECLAW_CODEX_POLICY_TREE_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the Codex policy subprocess-tree fixture used to verify descendant cleanup.<br/>**Read by:** `internal/gateway/connector/codex_policy_windows_test.go` |
+| `DEFENSECLAW_CONTRACT_ALLOW_REAL_PROFILE`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | 1 says the account is disposable, so the Windows install harness may run outside a GitHub-hosted runner.<br/>**Read by:** `scripts/live-connector-e2e/run-windows-install.ps1`, `cli/tests/test_windows_connector_contract.py` |
 | `DEFENSECLAW_DELEGATION_ENV_SENTINEL`<br/>Default: `unset`<br/>Values: `test-defined value`, `unset`<br/>Managed host: `ignore` | Carries an inherited environment sentinel through the isolated stable-hook delegation fixture.<br/>**Read by:** `internal/hookruntime/delegation_windows_test.go` |
 | `DEFENSECLAW_E2E_CODEX_POLICY_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the bounded Codex app-server fixture used by native connector lifecycle E2E tests.<br/>**Read by:** `test/e2e/codex_policy_fixture_windows_test.go` |
 | `DEFENSECLAW_E2E_HARNESS`<br/>Default: `unset`<br/>Values: `hermes`, `antigravity`, `unset`<br/>Managed host: `ignore` | Names the hook-only harness the live hook-only sandbox test drives (hermes or antigravity); the test is skipped when it is unset.<br/>**Read by:** `test/e2e/openshell/hookonly_e2e_test.go` |

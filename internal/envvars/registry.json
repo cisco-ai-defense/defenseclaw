@@ -926,6 +926,30 @@
       "since": "0.7.0"
     },
     {
+      "name": "DEFENSECLAW_CONTRACT_ALLOW_REAL_PROFILE",
+      "category": "test_fixture",
+      "purpose": "1 says the account is disposable, so the Windows install harness may run outside a GitHub-hosted runner. The harness writes agent stand-ins to the real Known Folders and may edit the user Path, so without it the harness refuses to start anywhere but a GitHub-hosted runner.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "scripts/live-connector-e2e/run-windows-install.ps1",
+          "description": "The disposable-account guard runs before the profile is built and refuses to continue off a GitHub-hosted runner unless this is 1"
+        },
+        {
+          "location": "cli/tests/test_windows_connector_contract.py",
+          "description": "Pins that the guard exists and runs before the harness builds its profile"
+        }
+      ],
+      "since": "1.0.9"
+    },
+    {
       "name": "DEFENSECLAW_COWORK_NO_SYSTEMD",
       "category": "test_fixture",
       "purpose": "Makes the packaged Linux service installer start its helper and gateway as detached processes under a cgroup budget instead of systemd units, so the installer test covers that start path on a runner that does run systemd. The installer already uses this path on its own when /run/systemd/system is absent.",
