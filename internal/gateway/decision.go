@@ -129,10 +129,11 @@ func guardrailActionForConnectorFindings(
 	findings []RuleFinding,
 	confirmable bool,
 ) string {
-	floor := profileClassFloor(findings, cfg != nil && cfg.SecureClientIntegration())
-	return strongerGuardrailAction(floor, guardrailActionForFindings(findings, func(severity string) string {
-		return guardrailActionForConnector(cfg, connector, severity, confirmable)
-	}))
+	return guardrailActionForProfile(findings, cfg != nil && cfg.SecureClientIntegration(),
+		func() bool { return strictPackPosture(cfg, connector) },
+		func(severity string) string {
+			return guardrailActionForConnector(cfg, connector, severity, confirmable)
+		})
 }
 
 // profileMeetActionForFindings evaluates each member's own findings under its
@@ -241,10 +242,14 @@ func guardrailActionForGuardrailFindings(
 	findings []RuleFinding,
 	confirmable bool,
 ) string {
-	floor := profileClassFloor(findings, ManagedEnterpriseActive())
-	return strongerGuardrailAction(floor, guardrailActionForFindings(findings, func(severity string) string {
-		return guardrailActionForGuardrailConnector(gc, connector, severity, confirmable)
-	}))
+	return guardrailActionForProfile(findings, ManagedEnterpriseActive(),
+		func() bool {
+			ref := gc.EffectiveRulePackRef(connector)
+			return packPosture(ref, guardrailRulePackDir(gc, ref)) == config.HookPolicyTierStrict
+		},
+		func(severity string) string {
+			return guardrailActionForGuardrailConnector(gc, connector, severity, confirmable)
+		})
 }
 
 // guardrailActionForFindings maps enforceable findings with actionFor and
@@ -433,4 +438,14 @@ func clampPromptDirectionAction(direction, action string) (string, bool) {
 		return guardrailActionAlert, true
 	}
 	return action, false
+}
+
+// strictPackPosture reports whether the rule pack of connector in cfg has the
+// strict posture, read as the thresholds read it (packPostureFor).
+func strictPackPosture(cfg *config.Config, connector string) bool {
+	if cfg == nil {
+		return false
+	}
+	ref := cfg.EffectiveRulePackRefForConnector(connector)
+	return packPostureFor(cfg, ref, cfg.ResolveRulePackDir(ref)) == config.HookPolicyTierStrict
 }

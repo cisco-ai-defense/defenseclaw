@@ -61,7 +61,7 @@ func TestGAP0456OverBudgetWrappers(t *testing.T) {
 	}
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, mode := range []string{"action", "observe"} {
-			api := instructionProtectionTestAPI(t, connector, mode, "HIGH")
+			api := instructionProtectionTestAPIWithPack(t, connector, mode, "HIGH", "strict")
 			for _, cell := range []struct{ client, managed bool }{{false, false}, {true, false}, {true, true}} {
 				for _, row := range rows {
 					got := gap0568HookAction(t, api, connector, home, cwd, row.command, cell.client, cell.managed)
@@ -339,7 +339,7 @@ func TestGAP0458ReadNamesNeedStableBinding(t *testing.T) {
 	}
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, mode := range []string{"action", "observe"} {
-			api := instructionProtectionTestAPI(t, connector, mode, "HIGH")
+			api := instructionProtectionTestAPIWithPack(t, connector, mode, "HIGH", "strict")
 			for _, cell := range []struct{ client, managed bool }{{false, false}, {true, false}, {true, true}} {
 				for _, row := range rows {
 					tool := "PowerShell"
@@ -398,7 +398,7 @@ func TestGAP0459ShadowedPOSIXRead(t *testing.T) {
 	}
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, mode := range []string{"action", "observe"} {
-			api := instructionProtectionTestAPI(t, connector, mode, "HIGH")
+			api := instructionProtectionTestAPIWithPack(t, connector, mode, "HIGH", "strict")
 			for _, cell := range []struct{ client, managed bool }{{false, false}, {true, false}, {true, true}} {
 				for _, row := range rows {
 					got := gap0568HookAction(t, api, connector, home, cwd, row.command, cell.client, cell.managed)

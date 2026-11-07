@@ -96,7 +96,7 @@ func runGAP0146Table(t *testing.T, f b36ManagedHookFixture, commands []string, w
 // bound (300), the node bound (600, 1000 for the short form) and the input
 // bound (long_lines 250); every form, both tails, connector and mode stays.
 func TestGAP0146OneStatementBudget(t *testing.T) {
-	f := newB36ManagedHookFixture(t)
+	f := newB36ManagedHookFixture(t).strict(t)
 	const limit = "ACTION-COMPOUND-LIMIT"
 	const keys = "persistence.ssh_authorized_keys_command"
 	sizes := []int{100, 128, 129, 150, 300, 450, 500, 600, 1000, 5000}
@@ -147,7 +147,7 @@ func TestGAP0146OneStatementBudget(t *testing.T) {
 // evaluation budget, not an SSH authorized keys mutation. One statement
 // with many write operands is not over the statement budget.
 func TestGAP0146BoundedMapOverflowIsTheBudget(t *testing.T) {
-	f := newB36ManagedHookFixture(t)
+	f := newB36ManagedHookFixture(t).strict(t)
 	var redirects strings.Builder
 	redirects.WriteString("echo hi")
 	for i := 0; i < 600; i++ {
