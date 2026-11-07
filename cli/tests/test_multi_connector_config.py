@@ -557,6 +557,7 @@ class TestLoadAndRoundTrip(unittest.TestCase):
                 environment="macos",
                 guardrail=GuardrailConfig(
                     enabled=True,
+                    connector="claudecode",
                     connectors={
                         "codex": PerConnectorGuardrailConfig(enabled=False),
                         "claudecode": PerConnectorGuardrailConfig(),  # unset

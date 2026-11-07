@@ -387,7 +387,7 @@ def _save_enabling(app: AppContext) -> None:
     refusal leaves config.yaml unchanged (GAP-0588).
     """
     from defenseclaw import config_writer
-    from defenseclaw.commands.cmd_config import check_guardrail_connector_roster
+    from defenseclaw.guardrail_roster import check_guardrail_connector_roster
 
     try:
         app.cfg.save(check_candidate=check_guardrail_connector_roster)
