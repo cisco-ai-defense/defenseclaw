@@ -1361,7 +1361,13 @@ function namesLauncherCommand(sentence: string, name: string): boolean {
   if (name === 'help') return /`help`|\bhelp(?:,| and| or) (?:and |or )?(?:`?--)?version\b|\bversion(?:,| and| or) (?:and |or )?help\b/.test(sentence);
   if (name === '--version') return /`--version`|\bhelp(?:,| and| or) (?:and |or )?(?:`?--)?version\b|\bversion(?:,| and| or) (?:and |or )?help\b/.test(sentence);
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`\`${escaped}\`|\\bdefenseclaw ${escaped}(?![\\w-])|\\b${escaped} command\\b`).test(sentence);
+  if (new RegExp(`\`${escaped}\`|\\bdefenseclaw ${escaped}(?![\\w-])|\\b${escaped} command\\b`).test(sentence)) return true;
+  // The bare word as the subject of a predicate or the object of a verb
+  // ("status is unavailable", "users cannot run status"), not as part of
+  // another phrase ("exit status", "status 3", "the status of the install").
+  const subject = new RegExp(`(?<![\\w\`/.-])${escaped}\\s+(?:is|are|isn't|aren't|does|doesn't|do|don't|works?|runs?|fails?|exits?|will|won't|cannot|can't|can)\\b`, 'i');
+  const object = new RegExp(`\\b(?:run|runs|use|uses|call|type|invoke|execute|launch|refuses?|rejects?|blocks?|denies|deny|allows?|permits?|offers?|accepts?|supports?|lacks?|hides?)\\s+(?:the\\s+)?${escaped}(?![\\w\`/-])(?!\\.\\w)(?!\\s+(?:code|of|page|line|field|output))`, 'i');
+  return /^[a-z]+$/.test(name) && (subject.test(sentence) || object.test(sentence));
 }
 
 // The refusal itself quotes the offered commands; it is checked on its own.
@@ -1383,14 +1389,29 @@ const limitingWords = /\b(?:not|no|nor|neither|(?<!read-)only|just|solely|merely
 // page, so it is never allowed: a sentence must name the commands it means.
 const blanketClaim = /\b(?:commands|steps|instructions|examples)(?: \w+)? (?:on|in|of) (?:this|the) page\b|\bthis page's (?:commands|steps)\b|\bevery (?:command|step) on (?:this|the) page\b/i;
 const blanketBeside = /\b(?:commands|steps|instructions) (?:above|below)\b/i;
+// It is a claim about the launcher only when it says whether those commands
+// run: "the examples on this page show the administrator syntax" is not.
+const runsPredicate = /\b(?:run|runs|running|work|works|working|execut\w+|fail\w*|exit\w*|refus\w*|(?:un)?available|blocked|denied|rejected|allowed|permitted|supported|usable|need\w*|require\w*|apply|applies|not|no|never|cannot)\b|n't|\bbe (?:used|run|called|typed|invoked)\b/i;
 // A negation of what a command shows is guidance about its output, not a
 // statement that the command is refused: "does not show another account's state".
-const outputNegation = /\b(?:does(?:n't| not)|do(?:n't| not)|never|cannot|can(?:'t| not)|will not|won't)\s+(?:show|display|print|list|report|reveal|include|read|return|expose|contain|output|see|view|give|disclose)\b/gi;
+// "does not show up as an available command" is about availability, so
+// `show up` is not output guidance.
+const outputNegation = /\b(?:(?:does(?:n't| not)|do(?:n't| not)|never|cannot|can(?:'t| not)|will not|won't)\s+(?:show(?! up\b)|display|print|list|report|reveal|include|read|return|expose|contain|output|see|view|give|disclose)|(?:is|are)\s+(?:not|never)\s+(?:shown|displayed|printed|listed|reported|revealed|visible|exposed|included|returned))\b/gi;
+// A negation next to an availability word denies the command even when the
+// verb is `show`: "does not show up as an available command".
+const negation = /\b(?:not|no|never|cannot|neither|nor)\b|n't/i;
+const availability = /\b(?:available|offered|accessible|usable|supported|permitted|allowed|runnable|listed as|show(?:s|ed)? up)\b/i;
 // What is true of managed Windows: it has no launcher, and the per-user
 // commands exit `1` there; a sentence that says so is not a claim.
-const windowsManaged = /\b(?:managed|standalone)\b[^.]*\bWindows\b|\bWindows\b[^.]*\b(?:managed|standalone)\b/i;
+const managedWord = /\bmanag\w*|\bstandalone\b|\benterprise\b|\bMDM\b|\bIntune\b|\bGroup Policy\b|\bstandard users?\b|\badministrator[- ](?:installed|owned|deployed)\b/i;
+const windowsManaged = (sentence: string) => /\bWindows\b/.test(sentence) && managedWord.test(sentence);
 const windowsTruth = /\bexits? (?:with )?(?:status |code )?`?1\b|\bdefenseclaw\.exe\b/i;
-const userAudience = /\b(?:to|for) (?:the |a |standard )*users?\b|\bthe user(?:'s)?\b/i;
+// The user as the audience ("to the user", "for standard users") or as the
+// subject of a negative ("users cannot run ...", "you cannot").
+const userAudience = /\b(?:to|for|by) (?:the |a |an |another |any |each |every |standard |managed |ordinary )*users?\b|\bthe user(?:'s)?\b|\b(?:users?|you) (?:cannot|can't|can not|may not|must not|do not|don't|will not|won't|are not|aren't|is not|isn't|get|see)\b/i;
+// A command the administrator owns: the gateway's `status` and `verify`,
+// "the administrator's enterprise status command". Not the user's launcher.
+const administratorOwned = /\belevated\b|\bAdministrator prompt\b|\badministrator(?:'s|s')|\badministrator[- ](?:owned|run|only|view|gateway)|\bgateway\b|\benterprise \w+ command\b/i;
 const noLauncher = /\b(?:no|not a|without a|has no|have no) (?:`?defenseclaw`? )?launcher\b|\blauncher (?:is|does) not\b|\bno `?defenseclaw`? command\b/i;
 
 // The sentences of a page that claim anything about what the managed
@@ -1412,7 +1433,7 @@ function launcherClaims(raw: string, table: LauncherCommands): string[] {
     const flat = block.split(/\s+/).join(' ');
     for (const sentence of withoutRefusalQuote(flat.split(generated).join('')).split(/(?<=[.!?;])\s+(?=[A-Z`*(])/)) {
       if (!managedContext.test(sentence)) continue;
-      if (blanketClaim.test(sentence) || (blanketBeside.test(sentence) && limitingWords.test(sentence.replace(outputNegation, '')))) {
+      if ((blanketClaim.test(sentence) && runsPredicate.test(sentence)) || (blanketBeside.test(sentence) && limitingWords.test(sentence.replace(outputNegation, '')))) {
         found.push(sentence);
         continue;
       }
@@ -1421,12 +1442,14 @@ function launcherClaims(raw: string, table: LauncherCommands): string[] {
       // The sentence is about what a user runs: the launcher, the `defenseclaw`
       // command, or the user who types it. Administrator commands such as the
       // gateway's `status` and `verify` are not the launcher's.
-      if (!(packagedLauncher.test(sentence) || defenseclawCommand.test(sentence) || userAudience.test(sentence))) continue;
-      const denial = limitingWords.test(sentence.replace(outputNegation, ''));
+      const naming = packagedLauncher.test(sentence) || defenseclawCommand.test(sentence);
+      if (!naming && !(userAudience.test(sentence) && !administratorOwned.test(sentence))) continue;
+      const stripped = sentence.replace(outputNegation, '');
+      const denial = limitingWords.test(stripped) || (negation.test(stripped) && availability.test(stripped));
       // The Linux and macOS launcher given to Windows, in any wording: a
       // sentence about managed Windows that names an offered command and does
       // not say Windows has no launcher or that its commands exit `1`.
-      const windows = windowsManaged.test(sentence.replace(/\benterprise windows \w+/g, '')) && !noLauncher.test(sentence) && !windowsTruth.test(sentence);
+      const windows = windowsManaged(sentence.replace(/\benterprise windows \w+/g, '')) && !noLauncher.test(sentence) && !windowsTruth.test(sentence);
       if (named.length >= 2 || denial || windows) found.push(sentence);
     }
   }
@@ -1488,6 +1511,29 @@ describe('what a managed user can and cannot run (GAP-0635)', () => {
     assert.equal(claims('On a managed Windows computer the launcher is not installed, so use the administrator\'s `defenseclaw.exe`.'), 0, 'Windows has no launcher: a true statement');
     assert.equal(claims('On a managed computer, run `defenseclaw sandbox status` to see your sandboxes.'), 0, 'ordinary guidance that names one offered command');
     assert.equal(claims('On a managed computer an administrator runs `defenseclaw-gateway scan skill FOLDER`, and the per-user `defenseclaw skill` commands are not used.'), 0, 'a refused command named alone');
+    // Near variants of the same claims: the class is a statement about what the
+    // user's launcher runs, in any spelling of the command, the computer or the denial.
+    const denied: Array<[string, string]> = [
+      ['On managed Linux, status is unavailable to the user.', 'the command named bare, without backticks'],
+      ['On managed Linux, users cannot run status.', 'the command as the object of a verb'],
+      ['On managed Linux, status does not work for the user.', 'the bare command as a subject'],
+      ['On managed Linux, the user\'s launcher refuses status.', 'the bare command as the object of a launcher verb'],
+      ['On managed Linux, `status` is not offered to standard users.', 'an availability word with a plain negation'],
+      ['On Windows computers under management, `defenseclaw status` works for standard users.', 'managed Windows without the word managed'],
+      ['Under management on Windows, the standard user\'s `defenseclaw` runs `status`.', 'managed Windows through the word management'],
+      ['On managed Linux, `defenseclaw status` does not show up as an available command.', 'show up is availability, not output'],
+      ['On a managed computer, the commands on this page cannot be used.', 'a blanket claim that says the commands do not run'],
+      ['On a managed computer, none of the steps in this page work.', 'a blanket claim that says the steps do not run'],
+    ];
+    for (const [text, why] of denied) assert.equal(claims(text), 1, why);
+    const allowed: Array<[string, string]> = [
+      ['On managed Linux, the administrator\'s enterprise status command is unavailable to standard users.', 'the administrator\'s own command'],
+      ['On a managed computer, the examples on this page show the administrator gateway syntax.', 'a blanket sentence that does not say whether commands run'],
+      ['On managed Linux, `defenseclaw status` is available to standard users and does not show another account\'s state.', 'availability next to an output negation'],
+      ['On managed Linux, the exit status of a refused command is 2.', 'exit status is not the command'],
+      ['On managed Windows, run status and verify from an elevated Administrator prompt.', 'the administrator\'s commands on Windows'],
+    ];
+    for (const [text, why] of allowed) assert.equal(claims(text), 0, why);
   });
 
   it('no page says a command the launcher offers is refused', () => {
