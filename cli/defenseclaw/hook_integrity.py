@@ -229,153 +229,33 @@ def _strings(value: Any) -> list[str]:
     return []
 
 
-_PE32, _PE32_PLUS = 0x10B, 0x20B
-_PE_MACHINES_32 = (0x14C, 0x1C4)  # i386, ARM Thumb-2
-_PE_MACHINES_64 = (0x8664, 0xAA64)  # x64, ARM64
-_PE_SUBSYSTEMS = (2, 3)  # Windows GUI, Windows console
-_PE_MAX_DATA_DIRECTORIES = 16
-_PE_MAX_SECTIONS = 96
-_IMAGE_FILE_EXECUTABLE = 0x0002
-_IMAGE_FILE_DLL = 0x2000
-_IMAGE_SCN_MEM_EXECUTE = 0x20000000
-_PE_IMAGE_BASE_ALIGNMENT = 0x10000
-_PE_PAGE_SIZE = 0x1000
-
-
-def _le(buffer: bytes, at: int, width: int) -> int:
-    return int.from_bytes(buffer[at : at + width], "little")
-
-
-def _is_power_of_two(value: int) -> bool:
-    return value > 0 and value & (value - 1) == 0
-
-
-def _align_up(value: int, alignment: int) -> int:
-    return (value + alignment - 1) // alignment * alignment
-
-
-def _pe_image_defect(stream: Any, size: int) -> str:
-    """Why the open file *stream* of *size* bytes is not a runnable Windows executable, or "".
-
-    ``MZ`` starts every DOS stub and is not an image. The file must carry
-    what the Windows loader reads before it maps an executable: a PE header
-    where the DOS header points, a known machine whose bitness matches the
-    optional header, a consistent optional header (alignments, SizeOfImage,
-    SizeOfHeaders, ImageBase, the reserved Win32VersionValue, subsystem,
-    entry point), and sections that follow the headers in order, lie inside
-    SizeOfImage and inside the file, start and size on FileAlignment (or sit
-    at their own address when SectionAlignment is below a page), with the
-    entry point on executable bytes the file holds. A truncated, overwritten
-    or hand-made stub therefore reads like a missing launcher.
-    """
-
-    bad = "is not a Windows executable"
-    stream.seek(0)
-    dos = stream.read(64)
-    if len(dos) < 64 or dos[:2] != b"MZ":
-        return bad
-    lfanew = _le(dos, 0x3C, 4)
-    if lfanew < 64 or lfanew + 24 > size:
-        return bad
-    stream.seek(lfanew)
-    coff = stream.read(24)
-    if len(coff) < 24 or coff[:4] != b"PE\0\0":
-        return bad
-    machine = _le(coff, 4, 2)
-    sections = _le(coff, 6, 2)
-    optional_size = _le(coff, 20, 2)
-    characteristics = _le(coff, 22, 2)
-    if not 1 <= sections <= _PE_MAX_SECTIONS:
-        return bad
-    if not characteristics & _IMAGE_FILE_EXECUTABLE or characteristics & _IMAGE_FILE_DLL:
-        return bad
-    table_end = lfanew + 24 + optional_size + 40 * sections
-    if table_end > size:
-        return bad
-    body = stream.read(optional_size + 40 * sections)
-    if len(body) < optional_size + 40 * sections:
-        return bad
-    optional, raw = body[:optional_size], body[optional_size:]
-    magic = _le(optional, 0, 2)
-    if magic == _PE32_PLUS and machine in _PE_MACHINES_64:
-        fixed = 112
-    elif magic == _PE32 and machine in _PE_MACHINES_32:
-        fixed = 96
-    else:
-        return bad
-    if optional_size < fixed:
-        return bad
-    directories = _le(optional, fixed - 4, 4)
-    if directories > _PE_MAX_DATA_DIRECTORIES or optional_size < fixed + 8 * directories:
-        return bad
-    entry = _le(optional, 16, 4)
-    section_alignment, file_alignment = _le(optional, 32, 4), _le(optional, 36, 4)
-    image_size, headers_size = _le(optional, 56, 4), _le(optional, 60, 4)
-    if not (_is_power_of_two(file_alignment) and 512 <= file_alignment <= 65536):
-        return bad
-    if not _is_power_of_two(section_alignment) or section_alignment < file_alignment:
-        return bad
-    # Below a page the image is mapped as it lies in the file.
-    packed = section_alignment < _PE_PAGE_SIZE
-    if packed and file_alignment != section_alignment:
-        return bad
-    image_base = _le(optional, 24, 8) if magic == _PE32_PLUS else _le(optional, 28, 4)
-    if image_base % _PE_IMAGE_BASE_ALIGNMENT or _le(optional, 52, 4):
-        return bad
-    if _le(optional, 68, 2) not in _PE_SUBSYSTEMS:
-        return bad
-    if not table_end <= headers_size <= min(size, image_size):
-        return bad
-    if image_size % section_alignment or headers_size % file_alignment:
-        return bad
-    next_address = _align_up(headers_size, section_alignment)
-    entry_backed = False
-    for index in range(sections):
-        header = raw[40 * index : 40 * index + 40]
-        virtual_size, address = _le(header, 8, 4), _le(header, 12, 4)
-        raw_size, raw_at = _le(header, 16, 4), _le(header, 20, 4)
-        flags = _le(header, 36, 4)
-        span = virtual_size or raw_size
-        if span == 0 or address % section_alignment or address < next_address:
-            return bad
-        next_address = address + _align_up(span, section_alignment)
-        if next_address > image_size:
-            return bad
-        if raw_size and (raw_at < headers_size or raw_at + raw_size > size):
-            return bad
-        if raw_size and (raw_size % file_alignment or raw_at % file_alignment or (packed and raw_at != address)):
-            return bad
-        if address <= entry < address + min(span, raw_size) and flags & _IMAGE_SCN_MEM_EXECUTE:
-            entry_backed = True
-    return "" if entry_backed else bad
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+LAUNCHER_UNVERIFIED_SUFFIX = "is not verified: the installer recorded no copy of it to compare with"
 
 
 def _launcher_defect(launcher: str, data_dir: str = "") -> str:
-    """Why the launcher file at *launcher* cannot start, or "" when it can (or cannot be judged).
+    """Why the launcher file at *launcher* cannot be the installed one, or "".
 
-    A launcher that is gone, a folder in its place, or an empty, truncated or
-    non-PE file fails every call, and so does another program under its name
-    (the installer records its digest next to the guard's); an unreadable one
-    is not proof of damage (Defender or a deny ACE holding it).
+    One rule decides it: the launcher is a regular file (not missing, not a
+    folder, not a link) whose sha256 is the one the installer recorded for it
+    (``installer/binaries.sha256``, next to the guard's). Another program
+    under its name, or a truncated copy, differs from the record; nothing
+    inside the file is parsed. A file that cannot be read is not proof of
+    damage (Defender or a deny ACE holding it), and with nothing recorded
+    there is nothing to compare: :func:`hook_launcher_unverified` reports that.
     """
 
     try:
-        info = os.stat(launcher)
+        info = os.lstat(launcher)
     except (FileNotFoundError, NotADirectoryError):
         return "is missing"
     except OSError:
         return ""
+    if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT:
+        return "is a link, not the installed file"
     if not stat.S_ISREG(info.st_mode):
         return "is not a regular file"
-    try:
-        with open(launcher, "rb") as stream:
-            defect = _pe_image_defect(stream, info.st_size)
-    except OSError:
-        return ""
-    if defect:
-        return defect
-    recorded = _recorded_binary_digest(data_dir, LAUNCHER_NAME)
-    if _differs_from_recorded(launcher, recorded):
+    if _differs_from_recorded(launcher, _recorded_binary_digest(data_dir, LAUNCHER_NAME)):
         return "does not match the copy the installer recorded"
     return ""
 
@@ -425,25 +305,14 @@ def _launcher_paths(command: str) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
-def hook_launcher_problems(cfg: Any, connector: str) -> list[str]:
-    """Report a Windows hook registration whose native launcher file cannot start.
-
-    An antivirus quarantine or a cleanup tool can remove
-    ``defenseclaw-hook.exe``, or a folder can take its place; every hook call
-    then fails while status showed the connector as running (GAP-0378,
-    GAP-0810). The launcher is read from every string of the recorded hook
-    files and from the script of a PowerShell -EncodedCommand in it, so the
-    bridges Kiro, Antigravity and the Codex fallback register are covered the
-    same as a plain launcher path. A Codex or Devin entry that starts
-    the hook guard is reported when the guard is missing, not a regular file
-    or not the copy the installer recorded (rel-1-0-6 GAP-0676).
-    """
+def _windows_hook_programs(cfg: Any, connector: str) -> tuple[list[str], list[str]]:
+    """The launcher files and hook guards the recorded hook files of *connector* start (per-user Windows)."""
 
     if not _is_windows() or str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
         # Managed installs (Secure Client included) keep their own status.
-        return []
+        return [], []
+    launchers: list[str] = []
     guards: list[str] = []
-    data_dir = str(getattr(cfg, "data_dir", "") or "")
     for path in _hook_config_paths(cfg, connector):
         try:
             if not path.is_file() or path.stat().st_size > _CONFIG_LIMIT:
@@ -452,17 +321,54 @@ def hook_launcher_problems(cfg: Any, connector: str) -> list[str]:
         except (OSError, ValueError):
             continue
         for value in _strings(document):
-            for launcher in _launcher_paths(value):
-                if defect := _launcher_defect(launcher, data_dir):
-                    return [f"{_LAUNCHER_PROBLEM_PREFIX}{launcher} {defect}, so every hook call fails"]
+            launchers += [launcher for launcher in _launcher_paths(value) if launcher not in launchers]
             guard = hook_guard_program(connector, value)
             if guard and guard not in guards:
                 guards.append(guard)
+    return launchers, guards
+
+
+def hook_launcher_problems(cfg: Any, connector: str) -> list[str]:
+    """Report a Windows hook registration whose native launcher file cannot start.
+
+    An antivirus quarantine or a cleanup tool can remove
+    ``defenseclaw-hook.exe``, or a folder, a link or another program can take
+    its place; every hook call then fails while status showed the connector
+    as running (GAP-0378, GAP-0810). The launcher is read from every string
+    of the recorded hook files and from the script of a PowerShell
+    -EncodedCommand in it, so the bridges Kiro, Antigravity and the Codex
+    fallback register are covered the same as a plain launcher path. A Codex
+    or Devin entry that starts the hook guard is reported when the guard is
+    missing, not a regular file or not the copy the installer recorded
+    (rel-1-0-6 GAP-0676).
+    """
+
+    launchers, guards = _windows_hook_programs(cfg, connector)
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    for launcher in launchers:
+        if defect := _launcher_defect(launcher, data_dir):
+            return [f"{_LAUNCHER_PROBLEM_PREFIX}{launcher} {defect}, so every hook call fails"]
     for guard in guards:
         problem = hook_guard_problem(data_dir, connector, guard)
         if problem is not None:
             return [problem]
     return []
+
+
+def hook_launcher_unverified(cfg: Any, connector: str) -> str:
+    """Name the registered launcher whose installer digest is not on record, else "".
+
+    An install from before the installer recorded the launcher's digest has
+    nothing to compare the file with: doctor warns (status does not call it
+    unprotected), and the installer again records it (GAP-0810).
+    """
+
+    launchers, _ = _windows_hook_programs(cfg, connector)
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    for launcher in launchers:
+        if not _recorded_binary_digest(data_dir, LAUNCHER_NAME):
+            return f"{_LAUNCHER_PROBLEM_PREFIX}{launcher} {LAUNCHER_UNVERIFIED_SUFFIX}"
+    return ""
 
 
 def setup_command(connector: str) -> str:
