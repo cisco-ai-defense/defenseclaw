@@ -613,7 +613,7 @@ FACTS = [
         (('enterprise/windows.mdx',),
          "A user who can read it can also hold it open, and while it is held Windows does not let DefenseClaw replace it, so Codex policy updates wait."),
         (('enterprise/windows.mdx',),
-         "The enforced policy already in place stays in effect. Status names the process that holds the file (the warning `codex_requirements_held`), and DefenseClaw applies the update as soon as the file is released."),
+         "The enforced policy already in place stays in effect. Status names the process that holds the file (the warning `codex_requirements_held`). If the holder lets go within 30 seconds of the failed attempt, the running command applies the update. Otherwise the guardian applies it at its next pass, about a minute later, and a failed Setup run needs the administrator to run it again."),
     ]),
     # g582 review 7 M1: the vendor-folder fix also removes inherited entries.
     ("g582_vendor_folder_fix_removes_inherited_entries", [

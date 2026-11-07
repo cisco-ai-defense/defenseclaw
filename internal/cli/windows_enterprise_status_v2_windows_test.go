@@ -561,7 +561,7 @@ func TestWindowsStatusV2NamesTheHolderOfTheCodexRequirements(t *testing.T) {
 			}
 			continue
 		}
-		for _, want := range []string{path, "codex.exe (PID 4242)", "the enforced Codex policy stays in place", "as soon as the file is released"} {
+		for _, want := range []string{path, "codex.exe (PID 4242)", "the enforced Codex policy stays in place", "the guardian applies it at its next pass, about a minute later", "a failed Setup run needs the administrator to run it again"} {
 			if !strings.Contains(found, want) {
 				t.Fatalf("held warning = %q, want %q", found, want)
 			}

@@ -84,13 +84,19 @@ func windowsManagedPolicySelfHealFolders() []windowsManagedPolicySelfHealFolder 
 		// transaction puts back, so the guardian only clears its attributes
 		// and repairs it when an untrusted account can write or owns it. The
 		// lock of 1.0.8 and earlier is no longer re-stamped user-readable: the
-		// first transaction of this release removes it (GAP-0650).
+		// first transaction of this release removes it (GAP-0650). Secure
+		// Client keeps that lock and its re-stamp: its Codex writers still
+		// take it (g582 round 9, Secure Client rule).
+		codexLock := windowsManagedPolicySelfHealFile{name: connector.WindowsCodexManagedWriterLockFile, clear: windowsManagedPolicyLockAttributes, lock: true}
+		if secureClientHookDelivery() {
+			codexLock = windowsManagedPolicySelfHealFile{name: windowsClaudeManagedLockFile, userReadable: true, clear: windowsManagedPolicyLockAttributes, exact: true, lock: true}
+		}
 		folders = append(folders, windowsManagedPolicySelfHealFolder{
 			path: filepath.Dir(requirementsPath),
 			files: append([]windowsManagedPolicySelfHealFile{
 				{name: filepath.Base(requirementsPath), userReadable: true, clear: windowsManagedPolicyStateAttributes, exact: true},
 				{name: windowsClaudeManagedStateFile, userReadable: true, clear: windowsManagedPolicyStateAttributes, exact: true, marker: true},
-				{name: connector.WindowsCodexManagedWriterLockFile, clear: windowsManagedPolicyLockAttributes, lock: true},
+				codexLock,
 			}, selector...),
 		})
 	}
