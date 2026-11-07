@@ -285,7 +285,7 @@ func TestHermesManifestIncompleteReplyStillBindsNamedCacheFile(t *testing.T) {
 		t.Skip("shell fixture")
 	}
 	dir := t.TempDir()
-	writePluginFile(t, filepath.Join(dir, "plugin.yaml"), "name: p\nmain: __pycache__/Entry.cpython-312.pyc\n")
+	writePluginFile(t, filepath.Join(dir, "plugin.yaml"), "name: p\nmain: __pycache__/entry.cpython-312.pyc\n")
 	named := filepath.Join(dir, "__pycache__", "entry.cpython-312.pyc")
 	other := filepath.Join(dir, "__pycache__", "other.cpython-312.pyc")
 	writePluginFile(t, named, "one")
@@ -309,7 +309,7 @@ func TestHermesManifestIncompleteReplyStillBindsNamedCacheFile(t *testing.T) {
 func TestHermesManifestFailureFollowsThePolicyTier(t *testing.T) {
 	dir := t.TempDir()
 	writePluginFile(t, filepath.Join(dir, "plugin.yaml"), "name: p\nmain: lib/run.js\n")
-	writePluginFile(t, filepath.Join(dir, "package.json"), `{"main": "__pycache__/Named.cpython-312.pyc"}`)
+	writePluginFile(t, filepath.Join(dir, "package.json"), `{"main": "__pycache__/named.cpython-312.pyc"}`)
 	named := filepath.Join(dir, "__pycache__", "named.cpython-312.pyc")
 	ordinary := filepath.Join(dir, "__pycache__", "generated.cpython-312.pyc")
 	writePluginFile(t, named, "one")
@@ -395,5 +395,264 @@ func TestHermesManifestFailureInWatcherFollowsThePolicyTier(t *testing.T) {
 				t.Errorf("an ordinary cache rewrite caused %d admissions", got-admitted)
 			}
 		})
+	}
+}
+
+// failingManifestLoader is a manifest reader that cannot answer.
+func failingManifestLoader(map[string][]byte) ([]string, error) {
+	return nil, errors.New("manifest command unavailable")
+}
+
+// GAP-0645 review 20: while the reader cannot answer under the per-user
+// default, a cache file that any string of a manifest resolves to stays
+// bound however the manifest spells it, and a cache file that only shares a
+// base name with a string is not bound. Each manifest below declares the
+// entrypoint __pycache__/run.pyc (the scanner agrees, see the differential
+// test) except the two that do not.
+func TestHermesManifestOutageBindsNamedCacheFileWhateverTheSpelling(t *testing.T) {
+	for _, tc := range []struct {
+		name, manifest, text string
+		declares             bool
+	}{
+		{"json unicode escape", "package.json", `{"name":"p","main":"__pycache__/r\u0075n.pyc"}`, true},
+		{"json escaped slash", "package.json", `{"main":"__pycache__\/run.pyc"}`, true},
+		{"json surrogate pair beside it", "package.json", `{"x":"\ud83d\ude00","main":"__pycache__/run.pyc"}`, true},
+		{"yaml hex escape", "plugin.yaml", "name: p\nmain: \"__pycache__/r\\x75n.pyc\"\n", true},
+		{"yaml long escape", "plugin.yaml", "name: p\nmain: \"__pycache__/\\U00000072un.pyc\"\n", true},
+		{"yaml alias of an escaped value", "plugin.yaml", "name: p\nnote: &entry \"__pycache__/r\\x75n.pyc\"\nmain: *entry\n", true},
+		{"yaml line continuation", "plugin.yaml", "main: \"__pycache__/ru\\\n      n.pyc\"\n", true},
+		{"yaml single quoted", "plugin.yaml", "main: '__pycache__/run.pyc'\n", true},
+		{"yaml plain list item", "plugin.yaml", "entrypoints:\n  - __pycache__/run.pyc\n", true},
+		{"yaml flow list", "plugin.yaml", "entrypoints: [lib/a.js, __pycache__/run.pyc]\n", true},
+		{"yaml anchored plain value", "plugin.yaml", "main: &m __pycache__/run.pyc\n", true},
+		{"dot segments and a leading slash", "plugin.json", `{"main":"/./lib/../__pycache__/run.pyc"}`, true},
+		{"prose that only holds the base name", "plugin.yaml", "name: p\nmain: lib/a.js\ndescription: run.pyc\n", false},
+		{"the same base name in another folder", "plugin.yaml", "name: p\nmain: lib/run.pyc\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writePluginFile(t, filepath.Join(dir, tc.manifest), tc.text)
+			writePluginFile(t, filepath.Join(dir, "lib", "a.js"), "safe()\n")
+			writePluginFile(t, filepath.Join(dir, "lib", "run.pyc"), "safe()\n")
+			cache := filepath.Join(dir, "__pycache__", "run.pyc")
+			writePluginFile(t, cache, "one")
+			load := func(map[string][]byte) ([]string, error) {
+				return nil, fmt.Errorf("%w: reader unavailable", errHermesManifestFailOpen)
+			}
+			first := skippedTreeHash(dir, load)
+			writePluginFile(t, cache, "two")
+			second := skippedTreeHash(dir, load)
+			if tc.declares && (first == "" || first == second) {
+				t.Errorf("the declared cache file is not bound during the outage (hash %q then %q)", first, second)
+			}
+			if !tc.declares && (first != "" || second != "") {
+				t.Errorf("an ordinary cache file is bound during the outage (hash %q then %q)", first, second)
+			}
+		})
+	}
+}
+
+// Through the watcher, with the default policy: the escaped and aliased
+// spellings of a protected cache entrypoint are scanned when the file is
+// added during an outage, and a cache write that only shares a base name with
+// a manifest string is neither a scan nor an admission.
+func TestHermesManifestOutageInWatcherScansDeclaredAndLeavesOrdinaryCache(t *testing.T) {
+	for _, tc := range []struct {
+		name, manifest, text string
+		wantScans            int
+	}{
+		{"json unicode escape", "package.json", `{"name":"p","main":"__pycache__/r\u0075n.pyc"}`, 1},
+		{"yaml hex escape", "plugin.yaml", "name: p\nmain: \"__pycache__/r\\x75n.pyc\"\n", 1},
+		{"yaml alias of an escaped value", "plugin.yaml", "name: p\nnote: &entry \"__pycache__/r\\x75n.pyc\"\nmain: *entry\n", 1},
+		{"prose mention", "plugin.yaml", "name: p\nmain: lib/a.js\ndescription: run.pyc\n", 0},
+		{"same base name in another folder", "plugin.yaml", "name: p\nmain: lib/run.pyc\n", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHermesPluginFixture(t)
+			path := f.plugin(f.bundledRoot, "web/ddgs")
+			writePluginFile(t, filepath.Join(path, tc.manifest), tc.text)
+			writePluginFile(t, filepath.Join(path, "lib", "a.js"), "safe()\n")
+			writePluginFile(t, filepath.Join(path, "lib", "run.pyc"), "safe()\n")
+			f.pinVendor("web/ddgs", path)
+			f.w.runRescanCycle(context.Background())
+			f.unscannedVendor(path)
+			admitted := len(f.admitted[path])
+			f.w.hermesManifests = failingManifestLoader
+			writePluginFile(t, filepath.Join(path, "__pycache__", "run.pyc"), "exec()\n")
+			f.w.runRescanCycle(context.Background())
+			if got := f.scan.scans(path); got != tc.wantScans {
+				t.Errorf("cache file added during the outage caused %d scans, want %d", got, tc.wantScans)
+			}
+			if got := len(f.admitted[path]); tc.wantScans == 0 && got != admitted {
+				t.Errorf("an ordinary cache write caused %d admissions", got-admitted)
+			}
+		})
+	}
+}
+
+// The candidates are a superset of what the plugin scanner reads: for each
+// manifest the real scanner reports an entrypoint, the same string is among
+// the candidates. The test skips where the scanner CLI is absent.
+func TestHermesManifestCandidatesHoldEveryEntrypointTheScannerReads(t *testing.T) {
+	load := hermesScannerLoader(t)
+	for _, tc := range []struct{ name, manifest, text string }{
+		{"json escape", "package.json", `{"name":"p","main":"__pycache__/r\u0075n.pyc"}`},
+		{"yaml escape", "plugin.yaml", "name: p\nmain: \"__pycache__/r\\x75n.pyc\"\n"},
+		{"yaml alias", "plugin.yaml", "name: p\nnote: &entry \"__pycache__/r\\x75n.pyc\"\nmain: *entry\n"},
+		{"yaml bin map", "plugin.yaml", "name: p\nbin:\n  a: lib/a.js\n  b: __pycache__/run.pyc\n"},
+		{"yaml flow bin map", "plugin.yaml", "name: p\nbin: {a: lib/a.js, b: '__pycache__/run.pyc'}\n"},
+		{"yaml entrypoint", "plugin.yaml", "name: p\nentrypoint: \"./__pycache__/\\x72un.pyc\"\n"},
+		{"json bin map", "plugin.json", `{"bin":{"a":"lib/a.js","b":"./__pycache__/run.pyc"}}`},
+		{"json entry", "manifest.json", `{"entry":"__pycache__\/run.pyc"}`},
+		{"openclaw", "openclaw.plugin.json", `{"id":"p","main":"dist/\u0069ndex.js"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manifests := map[string][]byte{tc.manifest: []byte(tc.text)}
+			got, err := load(manifests)
+			if err != nil || len(got) == 0 {
+				t.Fatalf("scanner entrypoints = %q, %v", got, err)
+			}
+			candidates := hermesManifestCandidates(manifests)
+			for _, entrypoint := range got {
+				if !slices.Contains(candidates, entrypoint) {
+					t.Errorf("scanner entrypoint %q is not among the candidates %q", entrypoint, candidates)
+				}
+			}
+		})
+	}
+}
+
+// GAP-0645 review 20: the answer follows the scanner executable. Replacing
+// the file at the configured path, in place with another size or by another
+// file of the same size and time, asks the new scanner again.
+func TestHermesManifestAnswerFollowsExecutableReplacementAtOnePath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture")
+	}
+	manifests := map[string][]byte{"plugin.yaml": []byte("name: p\nmain: __pycache__/run.pyc\n")}
+	script := filepath.Join(t.TempDir(), "defenseclaw")
+	install := func(answer string, replaceFile bool) {
+		t.Helper()
+		body := []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '1.0.9\\n'; exit 0; fi\ncat >/dev/null\nprintf '%s' '" + answer + "'\n")
+		target := script
+		if replaceFile {
+			target = script + ".new"
+		}
+		if err := os.WriteFile(target, body, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if replaceFile {
+			old, err := os.Stat(script)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(target, old.ModTime(), old.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(target, script); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	cfg := &config.Config{}
+	cfg.Scanners.PluginScanner = script
+	w := &InstallWatcher{cfg: cfg}
+	install(`{"entrypoints":[]}`, false)
+	if got, err := w.manifestLoader()(manifests); err != nil || len(got) != 0 {
+		t.Fatalf("first scanner = %q, %v", got, err)
+	}
+	install(`{"entrypoints":["__pycache__/run.pyc"]}`, false)
+	if got, err := w.manifestLoader()(manifests); err != nil || !slices.Equal(got, []string{"__pycache__/run.pyc"}) {
+		t.Errorf("after an in-place replacement the watcher answers %q, %v", got, err)
+	}
+	// Another file of the same size and time: the answer text keeps its length.
+	install(`{"entrypoints":["__pycache__/run.pyd"]}`, true)
+	if got, err := w.manifestLoader()(manifests); err != nil || !slices.Equal(got, []string{"__pycache__/run.pyd"}) {
+		t.Errorf("after a replacement by another file the watcher answers %q, %v", got, err)
+	}
+}
+
+// The scanner answer the watcher uses is the one for the executable now at
+// the path, so a protected cache entrypoint declared by a replaced scanner is
+// scanned when it appears.
+func TestHermesManifestScannerReplacementReachesTheRescan(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture")
+	}
+	f := newHermesPluginFixture(t)
+	path := f.plugin(f.bundledRoot, "web/ddgs")
+	writePluginFile(t, filepath.Join(path, "plugin.yaml"), "name: p\nmain: __pycache__/run.pyc\n")
+	f.pinVendor("web/ddgs", path)
+	script := filepath.Join(t.TempDir(), "defenseclaw")
+	install := func(answer string) {
+		t.Helper()
+		body := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '1.0.9\\n'; exit 0; fi\ncat >/dev/null\nprintf '%s' '" + answer + "'\n"
+		if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	install(`{"entrypoints":[]}`)
+	f.w.hermesManifests = nil
+	f.cfg.Scanners.PluginScanner = script
+	f.w.runRescanCycle(context.Background())
+	f.unscannedVendor(path)
+	install(`{"entrypoints":["__pycache__/run.pyc"]}`)
+	writePluginFile(t, filepath.Join(path, "__pycache__", "run.pyc"), "exec()\n")
+	f.w.runRescanCycle(context.Background())
+	if got := f.scan.scans(path); got != 1 {
+		t.Errorf("a cache entrypoint declared by the replaced scanner caused %d scans, want 1", got)
+	}
+}
+
+// GAP-0645 review 20: a strict tier and a managed install take the closed
+// fallback on a manifest reader failure, whatever hook outage mode was saved.
+func TestHermesManifestFailureStaysClosedForStrictAndManagedWhateverModeWasSaved(t *testing.T) {
+	manifests := map[string][]byte{"plugin.yaml": []byte("main: __pycache__/run.pyc\n")}
+	for _, tc := range []struct {
+		name, mode, tier, saved string
+		open                    bool
+	}{
+		{"strict, saved open", "", "strict", "open", false},
+		{"managed, saved open", managed.DeploymentModeManagedEnterprise, "", "open", false},
+		{"strict, nothing saved", "", "strict", "", false},
+		{"default, saved closed", "", "", "closed", false},
+		{"default, saved open", "", "", "open", true},
+		{"default, nothing saved", "", "", "", true},
+		{"permissive, nothing saved", "", "permissive", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{DeploymentMode: tc.mode}
+			cfg.Guardrail.RulePack = tc.tier
+			cfg.Guardrail.HookFailMode = tc.saved
+			w := &InstallWatcher{cfg: cfg, hermesManifests: failingManifestLoader}
+			_, err := w.manifestLoader()(manifests)
+			if err == nil {
+				t.Fatal("a failing reader gave an answer")
+			}
+			if got := errors.Is(err, errHermesManifestFailOpen); got != tc.open {
+				t.Errorf("fail-open marker = %v, want %v", got, tc.open)
+			}
+		})
+	}
+}
+
+// GAP-0645 review 20: a null element is a malformed list, not an empty
+// entrypoint; with the strict fallback the declared cache file is bound.
+func TestHermesManifestNullListElementIsNotAnAnswer(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture")
+	}
+	ps := &scanner.PluginScanner{BinaryPath: hermesReplyScript(t, `{"entrypoints":[null]}`)}
+	manifests := map[string][]byte{"plugin.yaml": []byte("main: __pycache__/run.pyc\n")}
+	if got, err := ps.DeclaredEntrypoints(context.Background(), manifests); err == nil {
+		t.Fatalf("a null list element was accepted as %q", got)
+	}
+	dir := t.TempDir()
+	writePluginFile(t, filepath.Join(dir, "plugin.yaml"), "main: __pycache__/run.pyc\n")
+	writePluginFile(t, filepath.Join(dir, "__pycache__", "run.pyc"), "exec()\n")
+	cache := newHermesManifestCache()
+	load := cache.byPolicy(cache.loader(ps), func() bool { return false })
+	if skippedTreeHash(dir, load) == "" {
+		t.Error("the closed fallback left a declared cache file unhashed after an invalid reply")
 	}
 }

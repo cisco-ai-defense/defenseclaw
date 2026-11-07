@@ -23,10 +23,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -46,8 +51,9 @@ type hermesManifestLoader func(manifests map[string][]byte) ([]string, error)
 // errHermesManifestFailOpen marks a loader error under a policy that lets
 // ordinary activity continue while the scanner cannot answer (the per-user
 // default and permissive tiers, the same rule as a hook during an outage). The
-// caller then binds the cache files the manifests name, not every cache file;
-// without the mark (strict, managed) every cache file counts as declared.
+// caller then binds the cache files that any string of the manifests resolves
+// to (hermesManifestCandidates), not every cache file; without the mark
+// (strict, managed) every cache file counts as declared.
 var errHermesManifestFailOpen = errors.New("shipped Hermes plugin manifest reader unavailable, failing open")
 
 const (
@@ -68,36 +74,77 @@ type hermesManifestAnswer struct {
 // hermesManifestCache remembers what the plugin scanner answered, by the
 // scanner that was asked and the manifest bytes.
 type hermesManifestCache struct {
-	mu      sync.Mutex
-	answers map[string]hermesManifestAnswer
-	warned  map[string]bool
+	mu          sync.Mutex
+	answers     map[string]hermesManifestAnswer
+	warned      map[string]bool
+	executables map[string]hermesExecutable
+}
+
+// hermesExecutable is the last state seen of a scanner executable and how
+// many distinct states there have been.
+type hermesExecutable struct {
+	info       os.FileInfo
+	generation int
 }
 
 func newHermesManifestCache() *hermesManifestCache {
-	return &hermesManifestCache{answers: map[string]hermesManifestAnswer{}, warned: map[string]bool{}}
+	return &hermesManifestCache{answers: map[string]hermesManifestAnswer{}, warned: map[string]bool{}, executables: map[string]hermesExecutable{}}
+}
+
+// executableStamp names the state of the executable ps runs: the path it
+// resolves to and a count that moves whenever the file at that path is
+// another file or has another size or modification time, the same test the
+// scanner fingerprint applies (scannerBinaryVersion). An answer is therefore
+// never reused after the executable at the configured path was replaced.
+func (c *hermesManifestCache) executableStamp(ps *scanner.PluginScanner) string {
+	binary := strings.TrimSpace(ps.BinaryPath)
+	if binary == "" {
+		binary = "defenseclaw"
+	}
+	resolved, err := exec.LookPath(binary)
+	if err != nil {
+		return binary + ":unresolved"
+	}
+	info, err := pathidentity.StatPinned(resolved)
+	if err != nil {
+		return resolved + ":unreadable"
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	seen, ok := c.executables[resolved]
+	if !ok || !os.SameFile(seen.info, info) || seen.info.Size() != info.Size() || !seen.info.ModTime().Equal(info.ModTime()) {
+		seen = hermesExecutable{info: info, generation: seen.generation + 1}
+		c.executables[resolved] = seen
+	}
+	return fmt.Sprintf("%s:%d", resolved, seen.generation)
 }
 
 // loader asks ps, once per distinct scanner and set of manifest bytes: the
 // answer is a function of those two alone, so it is remembered by their
 // digests, and a changed manifest or a changed scanner (a configuration
-// reload that points at another launcher) is asked again. A failed answer is
-// remembered briefly.
+// reload that points at another launcher, or the executable at the same path
+// replaced) is asked again. A failed answer is remembered briefly.
 func (c *hermesManifestCache) loader(ps *scanner.PluginScanner) hermesManifestLoader {
-	identity := hermesScannerIdentity(ps)
+	settings := hermesScannerSettings(ps)
 	return func(manifests map[string][]byte) ([]string, error) {
-		key := identity + ":" + hermesManifestKey(manifests)
+		stamp := c.executableStamp(ps)
+		key := settings + ":" + stamp + ":" + hermesManifestKey(manifests)
 		c.mu.Lock()
 		cached, ok := c.answers[key]
 		c.mu.Unlock()
 		if !ok || (cached.err != nil && time.Since(cached.at) >= hermesManifestFailureTTL) {
 			entrypoints, err := ps.DeclaredEntrypoints(context.Background(), manifests)
 			cached = hermesManifestAnswer{entrypoints: entrypoints, err: err, at: time.Now()}
-			c.mu.Lock()
-			if len(c.answers) >= hermesManifestCacheMax {
-				clear(c.answers)
+			// An executable that changed while it ran gave an answer for
+			// neither state: it is not remembered.
+			if c.executableStamp(ps) == stamp {
+				c.mu.Lock()
+				if len(c.answers) >= hermesManifestCacheMax {
+					clear(c.answers)
+				}
+				c.answers[key] = cached
+				c.mu.Unlock()
 			}
-			c.answers[key] = cached
-			c.mu.Unlock()
 		}
 		return cached.entrypoints, cached.err
 	}
@@ -134,16 +181,17 @@ func (c *hermesManifestCache) warn(err error, open bool) {
 		return
 	}
 	if open {
-		fmt.Fprintf(os.Stderr, "[watcher] the plugin scanner could not read a shipped Hermes plugin manifest, so only the cache files the manifest names are treated as declared: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[watcher] the plugin scanner could not read a shipped Hermes plugin manifest, so only the cache files a string of the manifest resolves to are treated as declared: %v\n", err)
 		return
 	}
 	fmt.Fprintf(os.Stderr, "[watcher] the plugin scanner could not read a shipped Hermes plugin manifest, so every cache file of that plugin is treated as declared: %v\n", err)
 }
 
-// hermesScannerIdentity is a digest of everything that selects and
-// configures the scanner process (launcher path, policy, profile, judge
-// settings), so an answer is never reused for another scanner.
-func hermesScannerIdentity(ps *scanner.PluginScanner) string {
+// hermesScannerSettings is a digest of everything that selects and configures
+// the scanner process (launcher path, policy, profile, judge settings), so an
+// answer is never reused for another configuration. The executable is named
+// by executableStamp.
+func hermesScannerSettings(ps *scanner.PluginScanner) string {
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%+v", *ps)))
 	return hex.EncodeToString(sum[:])
 }
@@ -177,7 +225,16 @@ func (w *InstallWatcher) manifestLoader() hermesManifestLoader {
 		ps.LLM = cfg.ResolveLLM("scanners.plugin")
 		base = w.hermesManifestAnswers.loader(ps)
 	}
-	return w.hermesManifestAnswers.byPolicy(base, func() bool {
-		return cfg.EffectiveHookOutageFailModeForConnector("hermes") == "open"
-	})
+	return w.hermesManifestAnswers.byPolicy(base, func() bool { return hermesManifestFailsOpen(cfg) })
+}
+
+// hermesManifestFailsOpen reports whether a manifest reader outage lets
+// ordinary activity continue: a per-user install, outside the strict tier,
+// whose hook outage mode is open. A managed install and the strict tier are
+// closed whatever mode was saved, so an explicit open there does not leave a
+// named protected file unbound.
+func hermesManifestFailsOpen(cfg *config.Config) bool {
+	return cfg != nil && !managed.IsManagedEnterprise(cfg.DeploymentMode) &&
+		cfg.HookPolicyTierForConnector("hermes") != config.HookPolicyTierStrict &&
+		cfg.EffectiveHookOutageFailModeForConnector("hermes") == "open"
 }

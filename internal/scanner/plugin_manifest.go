@@ -90,7 +90,7 @@ func (s *PluginScanner) DeclaredEntrypoints(ctx context.Context, manifests map[s
 		return nil, fmt.Errorf("scanner: list manifest entrypoints: %w (stderr=%s)", err, scannerFailureText(stderr.String()))
 	}
 	var reply struct {
-		Entrypoints *[]string `json:"entrypoints"`
+		Entrypoints *[]*string `json:"entrypoints"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &reply); err != nil {
 		return nil, fmt.Errorf("scanner: list manifest entrypoints: %w", err)
@@ -100,5 +100,13 @@ func (s *PluginScanner) DeclaredEntrypoints(ctx context.Context, manifests map[s
 	if reply.Entrypoints == nil {
 		return nil, errors.New("scanner: list manifest entrypoints: the reply has no entrypoints list")
 	}
-	return *reply.Entrypoints, nil
+	// A null element is a malformed list, not an empty entrypoint.
+	entrypoints := make([]string, 0, len(*reply.Entrypoints))
+	for _, entrypoint := range *reply.Entrypoints {
+		if entrypoint == nil {
+			return nil, errors.New("scanner: list manifest entrypoints: the entrypoints list holds a null element")
+		}
+		entrypoints = append(entrypoints, *entrypoint)
+	}
+	return entrypoints, nil
 }
