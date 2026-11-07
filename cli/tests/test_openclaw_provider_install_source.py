@@ -16,6 +16,7 @@ import hashlib
 import http.client
 import json
 import shutil
+import sys
 import urllib.error
 
 import pytest
@@ -406,7 +407,6 @@ PROTECTED_SPELLINGS = {
     "climbing-path": "file:../../../.aws/provider.tgz",
     "windows-drive": "file:///C:/Users/user/.ssh/provider.tgz",
     "windows-backslash": "C:\\Users\\user\\.gnupg\\provider.tgz",
-    "windows-trailing-dot": "file:/home/user/.ssh./provider.tgz",
     "percent-encoded": "file:/home/user/%2Essh/provider.tgz",
     "named-package": PROVIDER + "@file:/home/user/.codex/provider.tgz",
     "credential-file": "link:/home/user/.claude.json",
@@ -572,6 +572,135 @@ def test_dependency_specs_of_other_packages_do_not_decide_this_install(
         assert vendor_identity.inspect_official_provider_tree(str(installed)) is not None
         for profile in ("default", "permissive"):
             assert _high(installed, profile) == set(), profile
+
+
+FOLDED_SPELLINGS = {
+    # spelling: the name foldings under which it is the protected folder
+    "file:/home/user/.SSH/provider.tgz": {"windows", "case"},
+    "file:/home/user/.ssh./provider.tgz": {"windows"},
+}
+
+
+@requires_symlink_privilege
+@pytest.mark.parametrize("folding", ["windows", "case", "exact"])
+def test_source_names_fold_the_way_the_platform_compares_them(
+    tmp_path, monkeypatch, folding,
+) -> None:
+    """``.SSH`` is the protected folder where names ignore case, and an ordinary
+    folder of its own on Linux; a trailing dot is dropped on Windows only."""
+
+    if folding == "exact" and sys.platform == "win32":
+        pytest.skip("Windows drops a trailing dot whatever the setting")
+    project, installed = _pinned_npm_install(tmp_path, monkeypatch)
+    monkeypatch.setattr(vendor_identity, "_name_folding", lambda: folding)
+    for spelling, protected_under in FOLDED_SPELLINGS.items():
+        root, target = _case(project, tmp_path, f"{folding}-{abs(hash(spelling))}")
+        _edit_manifest(target, lambda m, spelling=spelling: m.update(_resolved=spelling))
+        identity = vendor_identity.inspect_official_provider_tree(str(target))
+        if folding in protected_under:
+            assert identity is None, (folding, spelling)
+            for profile in ("default", "permissive", "strict"):
+                assert "SRC-EXEC" in _high(target, profile), (folding, spelling, profile)
+        else:
+            assert identity is not None, (folding, spelling)
+            for profile in ("default", "permissive"):
+                assert _high(target, profile) == set(), (folding, spelling, profile)
+
+
+def _link_to(root, folder: str, alias: str = "alias") -> None:
+    (root / folder).mkdir(parents=True)
+    (root / folder / "provider.tgz").write_bytes(b"fixture")
+    (root / alias).symlink_to(root / folder, target_is_directory=True)
+
+
+RELATIVE_THROUGH_ALIAS = {
+    "manifest-resolved": lambda t, r: _edit_manifest(
+        t, lambda m: m.update(_resolved="file:../../../alias/provider.tgz")),
+    "manifest-from": lambda t, r: _edit_manifest(
+        t, lambda m: m.update(_from="file:../../../alias/provider.tgz")),
+    "v3-root-spec": lambda t, r: _v3_root_spec(
+        r, "dependencies", "file:./alias/provider.tgz", entry=True),
+    "v3-root-spec-without-entry": lambda t, r: _v3_root_spec(
+        r, "devDependencies", "link:alias/provider.tgz", entry=False),
+    "v1-from": lambda t, r: _v1_lock(r, {
+        "version": VERSION, "resolved": _archive_address(VERSION),
+        "from": "file:./alias/provider.tgz",
+    }),
+}
+
+
+@requires_symlink_privilege
+@pytest.mark.parametrize("place", sorted(RELATIVE_THROUGH_ALIAS))
+def test_relative_source_through_a_link_to_protected_state_gives_no_identity(
+    tmp_path, monkeypatch, place,
+) -> None:
+    """A relative source is resolved: a link on its way to a protected folder
+    makes it a protected source, as the absolute spelling is."""
+
+    project, installed = _pinned_npm_install(tmp_path, monkeypatch)
+    root, target = _case(project, tmp_path, "protected")
+    _link_to(root, ".ssh")
+    RELATIVE_THROUGH_ALIAS[place](target, root)
+    assert vendor_identity.inspect_official_provider_tree(str(target)) is None, place
+    for profile in ("default", "permissive", "strict"):
+        assert "SRC-EXEC" in _high(target, profile), f"{place} {profile}"
+
+
+@requires_symlink_privilege
+@pytest.mark.parametrize("place", sorted(RELATIVE_THROUGH_ALIAS))
+def test_relative_source_through_a_link_to_an_ordinary_folder_keeps_the_identity(
+    tmp_path, monkeypatch, place,
+) -> None:
+    """Benign twin: the same links and spellings leading to an ordinary folder."""
+
+    project, installed = _pinned_npm_install(tmp_path, monkeypatch)
+    root, target = _case(project, tmp_path, "ordinary")
+    _link_to(root, "vendor")
+    RELATIVE_THROUGH_ALIAS[place](target, root)
+    assert vendor_identity.inspect_official_provider_tree(str(target)) is not None, place
+    for profile in ("default", "permissive"):
+        assert _high(target, profile) == set(), f"{place} {profile}"
+
+
+@requires_symlink_privilege
+def test_dependency_spec_of_the_owning_package_decides_a_nested_copy(tmp_path, monkeypatch) -> None:
+    """A copy below ``node_modules/a`` is the one ``a`` asks for: a protected
+    source in that spec names this copy, as the root spec names a top-level one."""
+
+    project, installed = _pinned_npm_install(tmp_path, monkeypatch)
+    nested_key = "node_modules/sibling/" + PACKAGE_KEY
+    registry = {"version": VERSION, "resolved": _archive_address(VERSION)}
+    owners = {
+        "v3-dependencies": {"lockfileVersion": 3, "packages": {
+            "node_modules/sibling": {"version": "1.0.0", "dependencies": {PROVIDER: "{spec}"}},
+            nested_key: registry,
+        }},
+        "v3-optional-dependencies": {"lockfileVersion": 3, "packages": {
+            "": {"dependencies": {"sibling": "1.0.0"}},
+            "node_modules/sibling": {"optionalDependencies": {PROVIDER: "{spec}"}},
+        }},
+        "v1-requires": {"lockfileVersion": 1, "dependencies": {"sibling": {
+            "version": "1.0.0", "requires": {PROVIDER: "{spec}"},
+            "dependencies": {PROVIDER: registry},
+        }}},
+    }
+    for label, spec, protected in (
+        ("protected", PROTECTED_SOURCE, True),
+        ("registry", VERSION, False),
+        ("unprotected-local", "file:../provider", False),
+    ):
+        for owner, lock in owners.items():
+            root = tmp_path / "nested" / f"{label}-{owner}"
+            nested = root / nested_key
+            nested.parent.mkdir(parents=True)
+            shutil.copytree(installed, nested, symlinks=True)
+            _write(root / "package-lock.json", json.dumps(lock).replace("{spec}", spec))
+            identity = vendor_identity.inspect_official_provider_tree(str(nested))
+            assert (identity is None) == protected, f"{label} {owner}"
+            for profile in ("default", "permissive"):
+                assert (("SRC-EXEC" in _high(nested, profile)) == protected), f"{label} {owner} {profile}"
+            if protected:
+                assert "SRC-EXEC" in _high(nested, "strict"), f"{label} {owner}"
 
 
 MANIFEST_EDITS = {
