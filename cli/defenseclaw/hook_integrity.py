@@ -54,7 +54,18 @@ LAUNCHER_REINSTALL_STEP = (
     "setup cannot recreate the launcher"
 )
 _LAUNCHER_PROBLEM_PREFIX = "the DefenseClaw hook launcher "
-_WINDOWS_LAUNCHER = re.compile(r"([A-Za-z]:[\\/][^\"'&|<>\r\n]*?defenseclaw-hook\.exe)", re.IGNORECASE)
+# A launcher path a plain command names: inside double quotes it may hold an
+# apostrophe or an ampersand; unquoted it ends at a shell separator. The
+# launcher inside a PowerShell bridge is read from its quoted literal instead
+# (_powershell_literals), so a path like C:/Users/O'Neil is not cut short.
+_WINDOWS_LAUNCHER = re.compile(
+    r'"([A-Za-z]:[\\/][^"\r\n]*?defenseclaw-hook\.exe)"|([A-Za-z]:[\\/][^"\'&|<>\r\n]*?defenseclaw-hook\.exe)',
+    re.IGNORECASE,
+)
+_LAUNCHER_LITERAL = re.compile(r"[A-Za-z]:[\\/].*defenseclaw-hook\.exe", re.IGNORECASE | re.DOTALL)
+# PowerShell reads the apostrophe and U+2018 to U+201B as single quotes, and
+# the renderers double each of them inside a literal (managed.PowerShellLiteral).
+_POWERSHELL_QUOTES = "'\u2018\u2019\u201a\u201b"
 
 # Per-user Windows Codex and Devin start this guard program instead of the
 # launcher on the events they can block; it starts the defenseclaw-hook.exe
@@ -62,6 +73,7 @@ _WINDOWS_LAUNCHER = re.compile(r"([A-Za-z]:[\\/][^\"'&|<>\r\n]*?defenseclaw-hook
 # GAP-0676). A missing or damaged guard lets those calls run uninspected, so
 # doctor and status check the guard itself.
 HOOK_GUARD_NAME = "defenseclaw-hook-guard.exe"
+LAUNCHER_NAME = "defenseclaw-hook.exe"
 _HOOK_GUARD_AGENTS = {"codex": "Codex", "devin": "Devin"}
 _HOOK_GUARD_COMMANDS = {
     # windowsCodexGuardedHookCommand: <system>\cmd.exe /d /v:off /c "<guard>" launcher-guard-sibling hook ...
@@ -208,28 +220,131 @@ def _strings(value: Any) -> list[str]:
     return []
 
 
-def _launcher_defect(launcher: str) -> str:
+_PE_OPTIONAL_MAGICS = (0x10B, 0x20B)
+_IMAGE_FILE_EXECUTABLE = 0x0002
+_IMAGE_FILE_DLL = 0x2000
+
+
+def _pe_image_defect(stream: Any, size: int) -> str:
+    """Why the open file *stream* of *size* bytes is not a runnable Windows executable, or "".
+
+    Two bytes of ``MZ`` start every DOS stub and are not an image: the PE
+    header must be where the DOS header points, name an executable (not a
+    DLL) with a sane optional header, and every section must lie inside the
+    file, so a truncated or overwritten launcher is named like a missing one.
+    """
+
+    bad = "is not a Windows executable"
+    dos = stream.read(64)
+    if len(dos) < 64 or dos[:2] != b"MZ":
+        return bad
+    lfanew = int.from_bytes(dos[0x3C:0x40], "little")
+    if lfanew < 64 or lfanew + 24 > size:
+        return bad
+    stream.seek(lfanew)
+    header = stream.read(24)
+    if len(header) < 24 or header[:4] != b"PE\0\0":
+        return bad
+    sections = int.from_bytes(header[6:8], "little")
+    optional = int.from_bytes(header[20:22], "little")
+    characteristics = int.from_bytes(header[22:24], "little")
+    if not 1 <= sections <= 96 or optional < 2 or not characteristics & _IMAGE_FILE_EXECUTABLE:
+        return bad
+    if characteristics & _IMAGE_FILE_DLL:
+        return bad
+    table = lfanew + 24 + optional
+    if table + 40 * sections > size:
+        return bad
+    magic = stream.read(2)
+    if len(magic) < 2 or int.from_bytes(magic, "little") not in _PE_OPTIONAL_MAGICS:
+        return bad
+    stream.seek(table)
+    raw = stream.read(40 * sections)
+    if len(raw) < 40 * sections:
+        return bad
+    for index in range(sections):
+        entry = raw[40 * index : 40 * index + 40]
+        raw_size = int.from_bytes(entry[16:20], "little")
+        raw_at = int.from_bytes(entry[20:24], "little")
+        if raw_size and raw_at + raw_size > size:
+            return bad
+    return ""
+
+
+def _launcher_defect(launcher: str, data_dir: str = "") -> str:
     """Why the launcher file at *launcher* cannot start, or "" when it can (or cannot be judged).
 
-    A launcher that is gone, a folder in its place, or an empty or non-PE file
-    fails every call; an unreadable one is not proof of damage (Defender or a
-    deny ACE holding it).
+    A launcher that is gone, a folder in its place, or an empty, truncated or
+    non-PE file fails every call, and so does another program under its name
+    (the installer records its digest next to the guard's); an unreadable one
+    is not proof of damage (Defender or a deny ACE holding it).
     """
 
     try:
-        mode = os.stat(launcher).st_mode
+        info = os.stat(launcher)
     except (FileNotFoundError, NotADirectoryError):
         return "is missing"
     except OSError:
         return ""
-    if not stat.S_ISREG(mode):
+    if not stat.S_ISREG(info.st_mode):
         return "is not a regular file"
     try:
         with open(launcher, "rb") as stream:
-            header = stream.read(2)
+            defect = _pe_image_defect(stream, info.st_size)
     except OSError:
         return ""
-    return "" if header == b"MZ" else "is not a Windows executable"
+    if defect:
+        return defect
+    recorded = _recorded_binary_digest(data_dir, LAUNCHER_NAME)
+    actual = _file_sha256(launcher) if recorded else ""
+    if recorded and actual and actual != recorded:
+        return "does not match the copy the installer recorded"
+    return ""
+
+
+def _powershell_literals(script: str) -> list[str]:
+    """The values of the single-quoted literals of the PowerShell *script*.
+
+    A doubled quote character inside a literal is one character of its
+    value, as ``managed.PowerShellLiteralValue`` reads it back.
+    """
+
+    values: list[str] = []
+    index, end = 0, len(script)
+    while index < end:
+        if script[index] not in _POWERSHELL_QUOTES:
+            index += 1
+            continue
+        index += 1
+        value: list[str] = []
+        closed = False
+        while index < end:
+            char = script[index]
+            if char in _POWERSHELL_QUOTES:
+                if index + 1 < end and script[index + 1] == char:
+                    value.append(char)
+                    index += 2
+                    continue
+                closed = True
+                index += 1
+                break
+            value.append(char)
+            index += 1
+        if closed:
+            values.append("".join(value))
+    return values
+
+
+def _launcher_paths(command: str) -> list[str]:
+    """The launcher paths *command* starts: named in it, or in the literals of its encoded script."""
+
+    paths = [match.group(1) or match.group(2) for match in _WINDOWS_LAUNCHER.finditer(command)]
+    paths += [
+        literal
+        for literal in _powershell_literals(_encoded_script(command))
+        if _LAUNCHER_LITERAL.fullmatch(literal)
+    ]
+    return list(dict.fromkeys(paths))
 
 
 def hook_launcher_problems(cfg: Any, connector: str) -> list[str]:
@@ -250,6 +365,7 @@ def hook_launcher_problems(cfg: Any, connector: str) -> list[str]:
         # Managed installs (Secure Client included) keep their own status.
         return []
     guards: list[str] = []
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
     for path in _hook_config_paths(cfg, connector):
         try:
             if not path.is_file() or path.stat().st_size > _CONFIG_LIMIT:
@@ -258,14 +374,12 @@ def hook_launcher_problems(cfg: Any, connector: str) -> list[str]:
         except (OSError, ValueError):
             continue
         for value in _strings(document):
-            for match in _WINDOWS_LAUNCHER.finditer(_decoded_command(value)):
-                launcher = match.group(1)
-                if defect := _launcher_defect(launcher):
+            for launcher in _launcher_paths(value):
+                if defect := _launcher_defect(launcher, data_dir):
                     return [f"{_LAUNCHER_PROBLEM_PREFIX}{launcher} {defect}, so every hook call fails"]
             guard = hook_guard_program(connector, value)
             if guard and guard not in guards:
                 guards.append(guard)
-    data_dir = str(getattr(cfg, "data_dir", "") or "")
     for guard in guards:
         problem = hook_guard_problem(data_dir, connector, guard)
         if problem is not None:
@@ -791,17 +905,23 @@ def _hook_command_lines(value: Any, connector: str) -> list[str]:
     return found
 
 
-def _decoded_command(command: str) -> str:
-    """*command*, followed by the script of a PowerShell -EncodedCommand in it."""
+def _encoded_script(command: str) -> str:
+    """The script of a PowerShell -EncodedCommand in *command*, else ""."""
 
     match = _ENCODED_SCRIPT.search(command)
     if not match:
-        return command
+        return ""
     try:
-        script = base64.b64decode(match.group(1), validate=True).decode("utf-16-le")
+        return base64.b64decode(match.group(1), validate=True).decode("utf-16-le")
     except (ValueError, UnicodeDecodeError):
-        return command
-    return command + "\n" + script
+        return ""
+
+
+def _decoded_command(command: str) -> str:
+    """*command*, followed by the script of a PowerShell -EncodedCommand in it."""
+
+    script = _encoded_script(command)
+    return command + "\n" + script if script else command
 
 
 def _defenseclaw_hook_command(cfg: Any, connector: str, command: str, *, strict: bool) -> bool:

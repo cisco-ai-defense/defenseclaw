@@ -26,6 +26,7 @@ healthy and running while every hook call was blocked (rel-1-0-6 GAP-0810).
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -39,10 +40,41 @@ from defenseclaw.hook_integrity import LAUNCHER_REINSTALL_STEP, hook_registratio
 _SYSTEM = "C:\\Windows\\System32"
 
 
+def _pe_image(*, dll: bool = False, extra: bytes = b"") -> bytes:
+    """A minimal PE32+ executable: one section whose bytes lie inside the file."""
+
+    lfanew, optional, raw_at, raw_size = 0x80, 240, 0x200, 0x200
+    dos = bytearray(64)
+    dos[:2] = b"MZ"
+    dos[0x3C:0x40] = lfanew.to_bytes(4, "little")
+    characteristics = 0x2022 if dll else 0x0022
+    header = (
+        b"PE\0\0"
+        + (0x8664).to_bytes(2, "little")
+        + (1).to_bytes(2, "little")
+        + bytes(12)
+        + optional.to_bytes(2, "little")
+        + characteristics.to_bytes(2, "little")
+    )
+    optional_header = (0x20B).to_bytes(2, "little") + bytes(optional - 2)
+    section = bytearray(40)
+    section[:6] = b".text\0"
+    section[16:20] = raw_size.to_bytes(4, "little")
+    section[20:24] = raw_at.to_bytes(4, "little")
+    head = bytes(dos).ljust(lfanew, b"\0") + header + optional_header + bytes(section)
+    return head.ljust(raw_at, b"\0") + bytes(raw_size) + extra
+
+
+def _quote_literal(value: str) -> str:
+    """*value* as managed.PowerShellLiteral renders it: every single-quote character doubled."""
+
+    return "'" + "".join(char * 2 if char in "'‘’‚‛" else char for char in value) + "'"
+
+
 def _bridge(launcher: str, connector: str) -> str:
     """The encoded bridge the per-user Windows renders register, around *launcher*."""
 
-    quoted = "'" + launcher.replace("'", "''") + "'"
+    quoted = _quote_literal(launcher)
     script = "; ".join(
         [
             "$ErrorActionPreference='Stop'",
@@ -59,8 +91,8 @@ def _bridge(launcher: str, connector: str) -> str:
     return powershell + encoded
 
 
-def _register(tmp_path: Path, connector: str, launcher: str):
-    command = _bridge(launcher, connector)
+def _register(tmp_path: Path, connector: str, launcher: str, *, plain: bool = False):
+    command = '"' + launcher + '" hook --connector ' + connector if plain else _bridge(launcher, connector)
     if connector == "kiro":
         command = _SYSTEM + "\\cmd.exe /d /c " + command + "\nexit $LASTEXITCODE"
         config = tmp_path / "home" / ".kiro" / "hooks" / "defenseclaw.json"
@@ -78,7 +110,7 @@ def _register(tmp_path: Path, connector: str, launcher: str):
         document = {
             "defenseclaw-antigravity-pretooluse": {
                 "enabled": True,
-                "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": command}]}],
+                "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": command, "timeout": 30}]}],
             }
         }
     config.parent.mkdir(parents=True, exist_ok=True)
@@ -91,8 +123,11 @@ def _register(tmp_path: Path, connector: str, launcher: str):
 
 
 @pytest.fixture
-def windows_launcher(tmp_path, monkeypatch):
-    """A launcher path with a drive letter that exists on this host, and the per-user Windows switch."""
+def make_launcher(tmp_path, monkeypatch):
+    """Make a launcher under a user folder, on a drive letter that exists on this host.
+
+    Switches the per-user Windows checks on.
+    """
 
     monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
     if sys.platform == "win32":
@@ -102,10 +137,19 @@ def windows_launcher(tmp_path, monkeypatch):
         # renders carry resolves to a real file.
         monkeypatch.chdir(tmp_path)
         base = tmp_path / "C:"
-    launcher = base / "Users" / "u" / ".local" / "bin" / "defenseclaw-hook.exe"
-    launcher.parent.mkdir(parents=True)
-    launcher.write_bytes(b"MZ")
-    return launcher, "C:/" + launcher.relative_to(base).as_posix()
+
+    def make(user: str = "u"):
+        launcher = base / "Users" / user / ".local" / "bin" / "defenseclaw-hook.exe"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_bytes(_pe_image())
+        return launcher, "C:/" + launcher.relative_to(base).as_posix()
+
+    return make
+
+
+@pytest.fixture
+def windows_launcher(make_launcher):
+    return make_launcher()
 
 
 def _damage(launcher: Path, shape: str) -> None:
@@ -191,4 +235,70 @@ def test_doctor_fails_the_kiro_row_when_the_launcher_is_missing_or_a_folder(tmp_
         assert row["remediation"] == LAUNCHER_REINSTALL_STEP
         if shape == "folder":
             launcher.rmdir()
-        launcher.write_bytes(b"MZ")
+        launcher.write_bytes(_pe_image())
+
+
+def _record_launcher_digest(cfg, body: bytes) -> None:
+    installer = Path(cfg.data_dir, "installer")
+    installer.mkdir(exist_ok=True)
+    digest = hashlib.sha256(body).hexdigest()
+    (installer / "binaries.sha256").write_text(f"{digest}  defenseclaw-hook.exe\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("connector", ["kiro", "antigravity"])
+@pytest.mark.parametrize("user", ["O'Neil", "A&B", "O’Neil", "Ana‘s ‚B‛"])
+def test_a_launcher_path_with_a_quote_or_ampersand_is_read_whole(tmp_path, make_launcher, connector, user):
+    # The renderers double every single-quote character inside the literal; the
+    # path checked is the one the literal holds, not the escaped spelling.
+    launcher, text = make_launcher(user)
+    cfg, _config = _register(tmp_path, connector, text)
+    assert hook_integrity.hook_launcher_problems(cfg, connector) == []
+
+    launcher.unlink()
+    assert hook_integrity.hook_launcher_problems(cfg, connector) == [
+        f"the DefenseClaw hook launcher {text} is missing, so every hook call fails"
+    ]
+
+
+@pytest.mark.parametrize("user", ["O'Neil", "A&B"])
+def test_a_double_quoted_plain_command_with_a_quote_or_ampersand_is_read_whole(tmp_path, make_launcher, user):
+    launcher, text = make_launcher(user)
+    cfg, _config = _register(tmp_path, "antigravity", text, plain=True)
+    assert hook_integrity.hook_launcher_problems(cfg, "antigravity") == []
+
+    launcher.unlink()
+    assert hook_integrity.hook_launcher_problems(cfg, "antigravity") == [
+        f"the DefenseClaw hook launcher {text} is missing, so every hook call fails"
+    ]
+
+
+@pytest.mark.parametrize("connector", ["kiro", "antigravity"])
+def test_an_image_that_only_starts_with_mz_is_not_a_working_launcher(tmp_path, windows_launcher, connector):
+    launcher, text = windows_launcher
+    cfg, _config = _register(tmp_path, connector, text)
+    whole = _pe_image()
+    for body in (b"MZ", b"MZ" + bytes(200), b"MZ\x90\x00" + b"junk" * 100, whole[:0x300], _pe_image(dll=True)):
+        launcher.write_bytes(body)
+        assert hook_integrity.hook_launcher_problems(cfg, connector) == [
+            f"the DefenseClaw hook launcher {text} is not a Windows executable, so every hook call fails"
+        ]
+    launcher.write_bytes(whole)
+    assert hook_integrity.hook_launcher_problems(cfg, connector) == []
+
+
+@pytest.mark.parametrize("connector", ["kiro", "antigravity"])
+def test_another_program_under_the_launcher_name_is_named_when_the_installer_recorded_its_digest(
+    tmp_path, windows_launcher, connector
+):
+    launcher, text = windows_launcher
+    cfg, _config = _register(tmp_path, connector, text)
+    _record_launcher_digest(cfg, launcher.read_bytes())
+    assert hook_integrity.hook_launcher_problems(cfg, connector) == []
+
+    launcher.write_bytes(_pe_image(extra=b"another program"))
+    problems = hook_registration_problems(cfg, connector)
+
+    assert problems == [
+        f"the DefenseClaw hook launcher {text} does not match the copy the installer recorded, so every hook call fails"
+    ]
+    assert repair_command(connector, problems[0]) == LAUNCHER_REINSTALL_STEP
