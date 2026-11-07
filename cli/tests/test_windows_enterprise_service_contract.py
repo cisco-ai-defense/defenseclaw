@@ -6239,16 +6239,13 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     assert consumer.index("$script:AgentFolderBackfillMarker") < consumer.index("[IO.Directory]::Delete($RecordDirectory, $false)")
     assert "Set-DefenseClawAgentFolderBackfillDone" not in lifecycle
     # Review 4 S1: the marker follows only a back-fill in which every
-    # candidate was recorded or refused by proof; a rolled-back transaction
-    # removes it.
+    # candidate was recorded or refused by proof. A rollback keeps it (review
+    # 5 M1): it does not undo an adoption.
     assert backfill.count("$null = Add-DefenseClawStandaloneCreatedFolderRecord") == 1
     assert "if (-not (Add-DefenseClawStandaloneCreatedFolderRecord -Path @($folder) -RecordDirectory $RecordDirectory -Roots $Roots -Origin upgrade)) {\n                $complete = $false" in backfill
     assert backfill.index("$complete = $false") < backfill.index("if ($complete) {\n            Set-DefenseClawAgentFolderBackfillDone -RecordDirectory $RecordDirectory")
     restore = _psm1_function(module, "Restore-DefenseClawTransaction")
-    assert "Remove-DefenseClawAgentFolderBackfillMarker" in restore
-    assert restore.index("Remove-DefenseClawTransactionCreatedSharedDirectories") < restore.index("Remove-DefenseClawAgentFolderBackfillMarker")
-    marker_removal = _psm1_function(module, "Remove-DefenseClawAgentFolderBackfillMarker")
-    assert "if (-not (Test-DefenseClawStandaloneProfile)) {" in marker_removal and "[IO.File]::Delete($marker)" in marker_removal
+    assert "AgentFolderBackfill" not in restore and "Remove-DefenseClawAgentFolderBackfillMarker" not in module
     # Review 4 L4: a failing report step warns.
     assert report.count("Write-Warning") == 4 and "Write-Verbose" not in report
     assert "'(?i)secure ?client|anyconnect'" in refusal

@@ -1161,8 +1161,8 @@ $failures = & $module {
                 # Review 4 S1: the one-shot marker is written only after a
                 # back-fill that succeeded: every candidate recorded, or refused
                 # by proof (a), (b) or (c), which is final. A record that could
-                # not be written is retried by the next run, and a rolled-back
-                # transaction removes the marker.
+                # not be written is retried by the next run. A rollback keeps the
+                # marker (review 5 M1).
                 $r5Marker = { param($c) [IO.File]::Exists([IO.Path]::Combine($c.Records, 'agent-folder-backfill.done')) }
                 $r5Cursor = {
                     param($c)
@@ -1266,26 +1266,28 @@ $failures = & $module {
                 if (& $r4Has $c $other) {
                     $failures.Add('GAP-0704 review 4 S1: a folder whose write failed has a record')
                 }
-                # A rolled-back transaction removes the marker; the records
-                # stay, and the next run back-fills again.
+                # A rollback keeps the marker (review 5 M1): it does not undo an
+                # adoption, so a folder an administrator made and a later run
+                # adopted (Setup stamps it with the same descriptor) must not be
+                # recorded by a later back-fill.
                 $c = & $r4New 'r5g'
                 $cursorFolder = & $r5Cursor $c
                 & $r4Fill $c
                 if (-not (& $r5Marker $c) -or -not (& $r4Has $c $cursorFolder)) {
-                    $failures.Add('GAP-0704 review 4 S1: the first run before the rollback did not record Cursor and write the marker')
+                    $failures.Add('GAP-0704 review 5 M1: the first run did not record Cursor and write the marker')
                 }
-                & {
-                    function Get-DefenseClawStandaloneCreatedFolderRecordDirectory { return $c.Records }
-                    Remove-DefenseClawAgentFolderBackfillMarker
-                    Remove-DefenseClawAgentFolderBackfillMarker
-                }
-                if ((& $r5Marker $c) -or -not (& $r4Has $c $cursorFolder)) {
-                    $failures.Add('GAP-0704 review 4 S1: the rollback did not remove the marker, or removed a record')
-                }
+                # The adopted folder: it passes (a), (b) and (c).
                 & $r4Codex $c -Committed
                 & $r4Fill $c
-                if (-not (& $r4Has $c $c.Codex) -or -not (& $r5Marker $c)) {
-                    $failures.Add('GAP-0704 review 4 S1: after the rollback the back-fill did not run again')
+                if (-not (& $r5Marker $c) -or -not (& $r4Has $c $cursorFolder)) {
+                    $failures.Add('GAP-0704 review 5 M1: a later back-fill removed the marker or a record')
+                }
+                if ((& $r4Has $c $c.Codex) -or (& $r4Has $c $c.OpenAI)) {
+                    $failures.Add('GAP-0704 review 5 M1: a later back-fill recorded a folder adopted after the first one')
+                }
+                $gone = (-not (Get-Command Remove-DefenseClawAgentFolderBackfillMarker -ErrorAction SilentlyContinue))
+                if (-not $gone) {
+                    $failures.Add('GAP-0704 review 5 M1: Remove-DefenseClawAgentFolderBackfillMarker still exists')
                 }
 
                 # Rule (ii): Secure Client.

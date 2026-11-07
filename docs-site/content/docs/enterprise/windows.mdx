@@ -978,7 +978,7 @@ it holds only DefenseClaw's own files. `ClaudeCode` and `OpenAI` follow when the
 recorded. Setup checks these folders once, on the first install, upgrade or repair after the
 upgrade; a folder an administrator makes later and Setup adopts is never recorded. The check counts
 as done when every folder was recorded or failed one of the three conditions; if a record cannot be
-written, or the run is rolled back, the next install, upgrade or repair checks again. A folder that
+written, the next install, upgrade or repair checks again. A rollback does not reset the check. A folder that
 fails any of these stays after a purge, and the purge names it once as
 "left in place: not provably created by DefenseClaw" when DefenseClaw had written a file or a
 folder into it. Such a record only lets a purge remove an

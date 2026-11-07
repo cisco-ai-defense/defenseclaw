@@ -19106,10 +19106,10 @@ function Remove-DefenseClawStandaloneCreatedFolders {
 # proof (a), (b) or (c), which is final. A record that could not be written
 # (the record folder is missing or unsafe, the write failed), a marker that
 # cannot be written, and an error out of the back-fill leave it to the next
-# run, which can only add a record. A rolled-back transaction removes the
-# marker (Remove-DefenseClawAgentFolderBackfillMarker). A purge removes it with
-# the record folder, so a new deployment starts clean. It is not part of the
-# deployment record, so g582's adoption needs no change.
+# run, which can only add a record. Nothing else removes the marker: a rollback
+# does not undo an adoption, so it keeps the marker too (review 5 M1). A purge
+# removes it with the record folder, so a new deployment starts clean. It is not
+# part of the deployment record, so g582's adoption needs no change.
 $script:AgentFolderBackfillMarker = 'agent-folder-backfill.done'
 
 function Test-DefenseClawAgentFolderBackfillDone {
@@ -19125,34 +19125,6 @@ function Set-DefenseClawAgentFolderBackfillDone {
     }
     $body = [Text.Encoding]::UTF8.GetBytes('{"schema_version":1,"agent_folder_backfill":"done"}')
     Write-DefenseClawCreatedFolderRecordFile -Path ([IO.Path]::Combine($RecordDirectory, $script:AgentFolderBackfillMarker)) -Body $body
-}
-
-# A rolled-back transaction removes the marker, so the next run back-fills
-# again (review 4 S1). Records stay: the back-fill only adds a record for a
-# folder that passes every proof, and skips one that has a record. Best effort,
-# standalone only, like Remove-DefenseClawStandaloneCreatedFolderRecord.
-function Remove-DefenseClawAgentFolderBackfillMarker {
-    param([string]$RecordDirectory)
-    if (-not (Test-DefenseClawStandaloneProfile)) {
-        return
-    }
-    try {
-        if ([string]::IsNullOrWhiteSpace($RecordDirectory)) {
-            $RecordDirectory = Get-DefenseClawStandaloneCreatedFolderRecordDirectory
-        }
-        $marker = [IO.Path]::Combine($RecordDirectory, $script:AgentFolderBackfillMarker)
-        if (-not [IO.File]::Exists($marker)) {
-            return
-        }
-        Assert-DefenseClawNoReparsePath -Path $marker
-        [IO.File]::Delete($marker)
-    }
-    catch {
-        Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
-            path   = [string]$RecordDirectory
-            reason = "agent-folder back-fill marker not removed: $($_.Exception.Message)"
-        }
-    }
 }
 
 # Upgrade back-fill (a computer installed before 1.0.9 kept no
@@ -21139,9 +21111,6 @@ function Restore-DefenseClawTransaction {
     Remove-DefenseClawTransactionCreatedSharedDirectories `
         -Snapshot $snapshot `
         -Layout $Layout
-    # The rolled-back run's one-shot agent-folder back-fill marker goes, so the
-    # next run back-fills again (GAP-0704 review 4 S1).
-    Remove-DefenseClawAgentFolderBackfillMarker
     # Fresh Install over a retained non-purge StateRoot temporarily grants the
     # new gateway SID access before enumeration. Restore that exact inactive
     # Admin boundary inside the idempotent recovery state machine, after every
