@@ -1335,6 +1335,77 @@ $failures = & $module {
                 }
                 $script:DefenseClawCreatedFoldersKept.Clear()
 
+                # GAP-0773: a link at the Codex machine-policy folder. A purge step
+                # that meets it writes a kept entry at the link, not "path: could not
+                # remove" for a file behind it; the Codex folder link is found without
+                # following it (standalone only); and the Codex removal report that
+                # says the link was kept is accepted, not refused as unexplained.
+                $g773 = [IO.Path]::Combine($ag, 'g0773')
+                $g773Target = [IO.Path]::Combine($g773, 'target')
+                $g773Link = [IO.Path]::Combine($g773, 'Codex')
+                $g773Plain = [IO.Path]::Combine($g773, 'plain')
+                [void][IO.Directory]::CreateDirectory($g773Target)
+                [void][IO.Directory]::CreateDirectory($g773Plain)
+                Set-G091AdministratorsOwner -Path @($g773, $g773Target, $g773Plain)
+                foreach ($name in @('requirements.toml', '.defenseclaw-managed-hooks.state', '.defenseclaw-managed-hooks.writer.lock')) {
+                    [IO.File]::WriteAllText([IO.Path]::Combine($g773Target, $name), "decoy $name")
+                }
+                $g773Listing = {
+                    (@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $g773Target -Force | Microsoft.PowerShell.Utility\Sort-Object Name |
+                        Microsoft.PowerShell.Core\ForEach-Object { $_.Name + '=' + [IO.File]::ReadAllText($_.FullName) })) -join '|'
+                }
+                $g773Before = & $g773Listing
+                [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path $g773Link -Target $g773Target)
+                $junctions.Add($g773Link)
+                $keptEntry = "${g773Link}: kept: a link sits here; DefenseClaw does not follow, change or remove it"
+                $g773Entry = Get-DefenseClawMachineStateFailureEntry -Path ([IO.Path]::Combine($g773Link, 'requirements.toml')) `
+                    -Message "reparse points are not allowed in managed path: $g773Link"
+                if ($g773Entry -cne $keptEntry) {
+                    $failures.Add("GAP-0773: a link failure was not turned into a kept entry at the link: $g773Entry")
+                }
+                $g773Plain1 = Get-DefenseClawMachineStateFailureEntry -Path 'C:\x\y' -Message 'access denied'
+                if ($g773Plain1 -cne 'C:\x\y: access denied') {
+                    $failures.Add("GAP-0773: a plain failure lost its path and reason: $g773Plain1")
+                }
+                if ((Get-DefenseClawCodexMachineFolderLink -Layout @{ CodexMachinePolicyDirectory = $g773Link }) -ne $g773Link) {
+                    $failures.Add('GAP-0773: the Codex folder link was not found')
+                }
+                if ((Get-DefenseClawCodexMachineFolderLink -Layout @{ CodexMachinePolicyDirectory = [IO.Path]::Combine($g773Link, 'sub') }) -ne $g773Link) {
+                    $failures.Add('GAP-0773: a folder below the Codex link was not reported as behind the link')
+                }
+                if ((Get-DefenseClawCodexMachineFolderLink -Layout @{ CodexMachinePolicyDirectory = $g773Plain }) -ne '' -or
+                    (Get-DefenseClawCodexMachineFolderLink -Layout @{ CodexMachinePolicyDirectory = [IO.Path]::Combine($g773Plain, 'absent') }) -ne '') {
+                    $failures.Add('GAP-0773: a plain or absent Codex folder was reported as a link')
+                }
+                Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
+                try {
+                    if ((Get-DefenseClawCodexMachineFolderLink -Layout @{ CodexMachinePolicyDirectory = $g773Link }) -ne '') {
+                        $failures.Add('GAP-0773: Secure Client kept a Codex link')
+                    }
+                }
+                finally {
+                    Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+                }
+                $g773Report = [pscustomobject]@{
+                    safe_to_remove_binary = $true; managed_state_existed = $false; managed_state_removed = $false
+                    managed_state_removed_or_absent = $true; surviving_owned_path_references = 0; disposition = 'link_kept'
+                }
+                try {
+                    Complete-DefenseClawCodexRequirementsRemoval -Layout @{} -GatewayServiceName 'DefenseClawGateway' -Report $g773Report
+                }
+                catch {
+                    $failures.Add("GAP-0773: the Codex removal that kept a link was refused: $($_.Exception.Message)")
+                }
+                $g773Report.disposition = 'bogus'
+                $g773Refused = $false
+                try { Complete-DefenseClawCodexRequirementsRemoval -Layout @{} -GatewayServiceName 'DefenseClawGateway' -Report $g773Report } catch { $g773Refused = $true }
+                if (-not $g773Refused) {
+                    $failures.Add('GAP-0773: an unexplained Codex removal disposition was accepted')
+                }
+                if ((& $g773Listing) -cne $g773Before) {
+                    $failures.Add("GAP-0773: a step changed the folder behind the Codex link: $(& $g773Listing)")
+                }
+
                 # GAP-0767: C:\ProgramData\ampcode. The 1.0.2 policy writer
                 # created it empty, with the descriptor above and no marker; a
                 # 1.0.9 upgrade back-fills it (origin upgrade) under the same three
