@@ -103,15 +103,16 @@ func TestVerifyManagedFileBackupsRejectsRecordsWithoutUsableTarget(t *testing.T)
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
-		name   string
-		target string
-		ok     bool
+		name    string
+		target  string
+		wantN   int
+		wantErr bool
 	}{
-		{"absolute target under home", path, true},
-		{"empty target", "", false},
-		{"relative target", "relative-hooks.json", false},
-		{"target outside home", filepath.Join(root, "elsewhere", "hooks.json"), false},
-		{"target inside the current data folder", filepath.Join(current, "hooks.json"), false},
+		{"absolute target under home", path, 1, false},
+		{"empty target", "", 0, true},
+		{"relative target", "relative-hooks.json", 0, true},
+		{"target outside home is skipped, not proof", filepath.Join(root, "elsewhere", "hooks.json"), 0, false},
+		{"target inside the current data folder", filepath.Join(current, "hooks.json"), 0, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			saved := filepath.Join(t.TempDir(), "saved-data")
@@ -135,12 +136,55 @@ func TestVerifyManagedFileBackupsRejectsRecordsWithoutUsableTarget(t *testing.T)
 				t.Fatal(err)
 			}
 			n, err := VerifyManagedFileBackups(saved, current, home)
-			if tc.ok && (n != 1 || err != nil) {
-				t.Fatalf("usable record = %d, %v; want 1, nil", n, err)
-			}
-			if !tc.ok && err == nil {
-				t.Fatalf("record target %q was accepted as rollback proof", tc.target)
+			if n != tc.wantN || (err != nil) != tc.wantErr {
+				t.Fatalf("record target %q = %d, %v; want %d, error=%v", tc.target, n, err, tc.wantN, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestVerifyManagedFileBackupsOutsideHomeRecordDoesNotVetoUsableOnes(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	current := filepath.Join(root, "data")
+	saved := filepath.Join(root, "saved-data")
+	inside := filepath.Join(home, ".agent", "hooks.json")
+	outside := filepath.Join(root, "moved-config", "config.json")
+	for _, p := range []string{inside, outside} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := captureManagedFileBackup(saved, "inside-connector", "hooks.json", inside); err != nil {
+		t.Fatal(err)
+	}
+	if err := captureManagedFileBackup(saved, "moved-connector", "config.json", outside); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := VerifyManagedFileBackups(saved, current, home); n != 1 || err != nil {
+		t.Fatalf("one usable and one outside-home record = %d, %v; want 1, nil", n, err)
+	}
+	// An outside-home record is still checked against its digest.
+	record := managedFileBackupPath(saved, "moved-connector", "config.json")
+	raw, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		t.Fatal(err)
+	}
+	rec["pristine_sha256"] = "00"
+	if raw, err = json.Marshal(rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(record, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyManagedFileBackups(saved, current, home); err == nil {
+		t.Fatal("an outside-home record with a bad digest was accepted")
 	}
 }

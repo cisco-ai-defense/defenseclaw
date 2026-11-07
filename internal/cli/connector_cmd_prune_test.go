@@ -760,3 +760,54 @@ func TestConnectorPruneOrphansWithoutConfigNeedsVerifiedBackupRecords(t *testing
 		})
 	}
 }
+
+// A connector whose config root the operator moved outside the account home
+// (Devin with an absolute XDG_CONFIG_HOME) leaves a valid backup record that
+// the restore skips. It must not stop the rollback from restoring and
+// cleaning the connectors whose files are under the home.
+func TestConnectorPruneOrphansRollbackIgnoresBackupOutsideAccountHome(t *testing.T) {
+	pristine := []byte("{\"operator\":\"before\"}\n")
+	path, saved, dataDir := setUpAntigravityRollbackFromNewer(t, pristine)
+	defer withConnectorState(t, dataDir, "codex")()
+	externalConfigRoot := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", externalConfigRoot)
+	// Run Devin Setup against the newer data folder, then swap the folders the
+	// way the real rollback does.
+	if err := os.Remove(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(saved, dataDir); err != nil {
+		t.Fatal(err)
+	}
+	opts := connector.SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	if err := connector.NewDevinConnector().Setup(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(dataDir, saved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	devinPath := connector.DevinHooksConfigPath(opts)
+	if devinPath != filepath.Join(externalConfigRoot, "devin", "config.json") {
+		t.Fatalf("Devin config path = %q, want the custom config root", devinPath)
+	}
+	if _, err := os.Stat(filepath.Join(saved, "connector_backups", "devin", "config.json")); err != nil {
+		t.Fatalf("Devin setup made no backup record: %v", err)
+	}
+	cfg = nil
+	_, stderr, exitCode := runConnectorCmd(t, "prune-orphans", "--data-dir", dataDir, "--rollback-backups-dir", saved)
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exitCode != 0 || !bytes.Equal(after, pristine) {
+		t.Fatalf("a backup outside the account home blocked the restore: exit=%d stderr=%q antigravity=%q", exitCode, stderr, after)
+	}
+	// The restore skips the file outside the home; the owned-entry cleanup
+	// still takes DefenseClaw out of it.
+	if devinAfter, err := os.ReadFile(devinPath); err != nil || strings.Contains(strings.ToLower(string(devinAfter)), "defenseclaw") {
+		t.Fatalf("the file outside the account home still holds DefenseClaw entries: %v", err)
+	}
+}
