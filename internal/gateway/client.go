@@ -43,6 +43,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
+	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
@@ -783,14 +784,17 @@ func (c *Client) tokenWatchEvery() time.Duration {
 	return tokenWatchInterval
 }
 
-// persistedTokenAppeared reports that openclaw.json now holds a gateway token
-// that differs from the one the last connect sent.
+// persistedTokenAppeared reports that openclaw.json now holds a gateway
+// token, or a reference to one DefenseClaw cannot read. The wait started
+// because it held none, so any token is a change to act on, including the
+// value DefenseClaw already sends: the operator persisted it and OpenClaw
+// has restarted to use it.
 func (c *Client) persistedTokenAppeared() bool {
 	if c.cfg.ClawHome == "" {
 		return false
 	}
-	token, ok, _ := readOpenClawGatewayToken(c.cfg.ClawHome)
-	return ok && token != c.cfg.Token
+	_, ok, err := readOpenClawGatewayToken(c.cfg.ClawHome)
+	return ok || errors.Is(err, errOpenClawTokenUnreadable)
 }
 
 // ---------------------------------------------------------------------------
@@ -825,6 +829,15 @@ const openClawTokenNotPersistedHint = "OpenClaw rejected the gateway token becau
 	"Persist one with 'openclaw config set gateway.auth.mode token' and 'openclaw config set gateway.auth.token <token>', " +
 	"restart OpenClaw, then run 'defenseclaw setup openclaw'. DefenseClaw retries every few minutes, and at once when " +
 	"openclaw.json gets a token"
+
+// openClawTokenEnvRejectedHint is the operator step when OpenClaw rejects the
+// token DefenseClaw already took from OPENCLAW_GATEWAY_TOKEN and openclaw.json
+// has no gateway.auth.token. OpenClaw may be using a token from its own
+// environment or a runtime token it generated; DefenseClaw cannot tell which.
+const openClawTokenEnvRejectedHint = "OpenClaw rejected the gateway token DefenseClaw took from OPENCLAW_GATEWAY_TOKEN, " +
+	"and openclaw.json has no gateway.auth.token. Start OpenClaw with that same OPENCLAW_GATEWAY_TOKEN, or persist " +
+	"one with 'openclaw config set gateway.auth.mode token' and 'openclaw config set gateway.auth.token <token>', " +
+	"restart OpenClaw, then run 'defenseclaw setup openclaw'"
 
 // openClawListenerUnverifiedHint is the operator step for an OpenClaw
 // gateway port that another account's process holds.
@@ -867,13 +880,31 @@ func (c *Client) handleConnectRejection(connectErr error) string {
 	if tokenErr != nil {
 		fmt.Fprintf(os.Stderr, "[gateway] %v\n", tokenErr)
 	}
+	fromEnv := false
 	if errors.Is(tokenErr, errOpenClawTokenNotPersisted) && isAuthError(connectErr) &&
 		!openClawPairingApprovalNeeded(connectErr) &&
 		strings.Contains(strings.ToLower(connectErr.Error()), "token") {
-		hint = openClawTokenNotPersistedHint
-		fmt.Fprintf(os.Stderr, "[gateway] %s\n", hint)
+		// openclaw.json holds no token. OpenClaw then takes
+		// OPENCLAW_GATEWAY_TOKEN from its environment when it has one, and
+		// generates a random runtime token when it does not.
+		switch env := openClawEnvGatewayToken(); {
+		case env == "":
+			hint = openClawTokenNotPersistedHint
+		case env != c.cfg.Token:
+			newToken, ok, fromEnv = env, true, true
+		default:
+			hint = openClawTokenEnvRejectedHint
+		}
+		if hint != "" {
+			fmt.Fprintf(os.Stderr, "[gateway] %s\n", hint)
+		}
 	}
-	if ok && newToken != c.cfg.Token {
+	if fromEnv && newToken != c.cfg.Token {
+		// Only this connection tries it. It is not DefenseClaw's own token,
+		// so it is not written to .env or the hook token file.
+		fmt.Fprintf(os.Stderr, "[gateway] openclaw.json has no gateway.auth.token; trying OPENCLAW_GATEWAY_TOKEN\n")
+		c.cfg.Token = newToken
+	} else if ok && newToken != c.cfg.Token {
 		fmt.Fprintf(os.Stderr, "[gateway] gateway token refreshed from openclaw.json\n")
 		c.cfg.Token = newToken
 		c.refreshedToken.Store(&newToken)
@@ -1095,7 +1126,9 @@ func readOpenClawGatewayToken(sandboxHome string) (string, bool, error) {
 			} `json:"auth"`
 		} `json:"gateway"`
 	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	// OpenClaw reads openclaw.json as JSON5 (comments, bare keys, single
+	// quotes, trailing commas).
+	if err := json.Unmarshal(jsonc.JSON5ToJSON(data), &cfg); err != nil {
 		return "", false, nil
 	}
 	raw := bytes.TrimSpace(cfg.Gateway.Auth.Token)
@@ -1119,6 +1152,17 @@ func readOpenClawGatewayToken(sandboxHome string) (string, bool, error) {
 		}
 	}
 	return "", false, errOpenClawTokenUnreadable
+}
+
+// openClawEnvGatewayToken is the token in OPENCLAW_GATEWAY_TOKEN, the one
+// OpenClaw itself reads when openclaw.json holds no gateway.auth.token. A
+// SecretRef text an earlier build saved there is not a token (#1404).
+func openClawEnvGatewayToken() string {
+	token := strings.TrimSpace(os.Getenv("OPENCLAW_GATEWAY_TOKEN"))
+	if envvars.IsSecretRefText(token) {
+		return ""
+	}
+	return token
 }
 
 var openClawEnvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
