@@ -6261,6 +6261,10 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
         "Remove-DefenseClawEmptyStandaloneInstallParent",
     ):
         assert retired not in module
+    # GAP-0758 round 2: the CLI's Go twin of the by-name removal is gone too, so
+    # the record is the only way a purge removes the ClaudeCode folders.
+    for go_file in (ROOT / "internal" / "cli").glob("windows_managed_hooks_teardown*.go"):
+        assert "removeEmptyWindowsClaudeManagedSettingsFolders" not in read(go_file), go_file.name
 
 
 def test_state_absent_purge_uses_only_exact_pinned_scope() -> None:

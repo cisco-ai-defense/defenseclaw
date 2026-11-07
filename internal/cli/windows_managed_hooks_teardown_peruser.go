@@ -369,38 +369,24 @@ var windowsManagedHooksStandaloneFloorPurger = purgeWindowsManagedHooksUnrecorde
 // Claude Code version floor drop-in that holds DefenseClaw's floor but whose
 // ownership record is gone (a rolled-back install left it), which the
 // teardown's recorded removal keeps.
+//
+// It removes the drop-in only. The ClaudeCode and managed-settings.d folders
+// it leaves are not removed here: the purge removes a vendor folder only when
+// the created-folder record names it (the lifecycle's record-driven removal,
+// Remove-DefenseClawStandaloneCreatedFolder, and enterprisehooks.
+// RemoveWindowsCreatedFolderIfEmpty), so an empty ClaudeCode folder an
+// administrator made before the install stays and the purge names it
+// (GAP-0758 round 2, the g091 record-only rule). A by-name removal used to
+// run here.
 func purgeWindowsManagedHooksUnrecordedClaudeFloor() error {
 	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
 	if err != nil {
 		return err
 	}
-	if _, err := enterprisepolicy.PurgeWindowsUnrecordedClaudeVersionFloor(
+	_, err = enterprisepolicy.PurgeWindowsUnrecordedClaudeVersionFloor(
 		enterprisepolicy.LayoutOptions(layout, programFiles, programData),
-	); err != nil {
-		return err
-	}
-	removeEmptyWindowsClaudeManagedSettingsFolders(programFiles)
-	return nil
-}
-
-// removeEmptyWindowsClaudeManagedSettingsFolders removes Claude Code's
-// managed-settings.d, and then its ClaudeCode folder, under programFiles when
-// the purge left them empty. Setup creates them for its drop-ins. A folder
-// that holds anything, or is not a plain directory, stays.
-func removeEmptyWindowsClaudeManagedSettingsFolders(programFiles string) {
-	root := filepath.Join(programFiles, "ClaudeCode")
-	for _, dir := range []string{filepath.Join(root, "managed-settings.d"), root} {
-		info, err := os.Lstat(dir)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil || !info.IsDir() || info.Mode()&os.ModeType != os.ModeDir {
-			return
-		}
-		if err := os.Remove(dir); err != nil {
-			return
-		}
-	}
+	)
+	return err
 }
 
 func restoreWindowsManagedHooksStandalonePerUserEnrollments(journal windowsManagedHooksTeardownJournal) error {
