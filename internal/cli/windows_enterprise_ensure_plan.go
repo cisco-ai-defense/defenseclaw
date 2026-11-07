@@ -48,8 +48,24 @@ const windowsEnterpriseCodexTargetTransactionReason = "the config turns Codex pr
 // version), so nothing is upgraded; it is used because the services read the
 // changed keys only at start, or the running deployment could not take the
 // change. The warning used to be ensure_upgrade, which administrators read
-// as a package upgrade in MDM results (GAP-0044).
+// as a package upgrade in MDM results (GAP-0044). A change of only the
+// guardian-rendered machine policy keys gets the same code from the hot
+// path, which restarts only the hook guardian and the gateway
+// (windowsEnterpriseGuardianRestartWarning).
 const windowsEnterpriseConfigRestartCode = "ensure_config_restart"
+
+// windowsEnterpriseGuardianRestartWarning is the ensure warning of a
+// configuration change the hot path applied by restarting only the hook
+// guardian and then the gateway (GAP-0044).
+func windowsEnterpriseGuardianRestartWarning(installedVersion string, startOnlyKeys []string) (code, message string) {
+	release := "the installed release"
+	if version := strings.TrimSpace(installedVersion); version != "" {
+		release += " " + version
+	}
+	return windowsEnterpriseConfigRestartCode, "ensure applied a configuration change (drift:config) to " + release +
+		" and upgraded nothing: the services read " + strings.Join(startOnlyKeys, ", ") +
+		" only at start, so ensure restarted the hook guardian and then the gateway on the new config; the other services kept running"
+}
 
 // windowsEnterpriseConfigFailedCode replaces it when that transaction did
 // not succeed: the change is then not known to be applied, and MDM

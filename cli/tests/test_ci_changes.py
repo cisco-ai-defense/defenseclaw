@@ -63,7 +63,7 @@ FAKE_REPO = {
     ),
     "internal/cli/docs_paths_test.go": 'var sandboxDoc = "sandboxes.mdx"\n',
     "scripts/gen_envvars_docs.py": 'OUT = "docs-site/content/docs/reference/env-vars.mdx"\n',
-    "scripts/live-connector-e2e/test-windows.ps1": "$ci = '.github\\workflows\\windows-native.yml'\n",
+    "scripts/windows-native-ci.ps1": "$ci = '.github\\workflows\\windows-native.yml'\n",
 }
 
 
@@ -108,7 +108,7 @@ def ran(outputs: dict) -> set[str]:
         "enterprise",
         "windows_go",
         "windows_python",
-        "windows_pkg",
+        "windows_contract",
         "pwsh",
         "workflows",
         "managed",
@@ -118,7 +118,7 @@ def ran(outputs: dict) -> set[str]:
 
 
 # What a managed path adds on top of its own rule.
-MANAGED_LANES = {"managed", "enterprise", "windows_go", "windows_python", "pwsh"}
+MANAGED_LANES = {"managed", "enterprise", "windows_go", "windows_python", "windows_contract", "pwsh"}
 
 
 @pytest.mark.parametrize("path", [
@@ -188,7 +188,7 @@ ALL_GROUPS = ran(ci_changes.everything("test")) - {"go_pinned"}
         ),
         pytest.param(
             ["cli/defenseclaw/commands/cmd_status.py"],
-            {"python", "python_tests", "python_lint", "wheel", "checks", "core", "install", "windows_python", "windows_pkg", "pwsh", "code"},
+            {"python", "python_tests", "python_lint", "wheel", "checks", "core", "install", "windows_python", "windows_contract", "pwsh", "code"},
             "",
             [],
             id="python-only",
@@ -202,14 +202,14 @@ ALL_GROUPS = ran(ci_changes.everything("test")) - {"go_pinned"}
         ),
         pytest.param(
             ["internal/gateway/router.go"],
-            {"go", "checks", "core", "install", "enterprise", "windows_go", "windows_pkg", "pwsh", "code"},
+            {"go", "checks", "core", "install", "enterprise", "windows_go", "windows_contract", "pwsh", "code"},
             "",
             [],
             id="go-only",
         ),
         pytest.param(
             ["packaging/windows/standalone/build-setup.sh"],
-            {"install", "windows_pkg", "code"} | MANAGED_LANES,
+            {"install", "windows_contract", "code"} | MANAGED_LANES,
             "",
             [],
             id="windows-packaging",
@@ -223,7 +223,7 @@ ALL_GROUPS = ran(ci_changes.everything("test")) - {"go_pinned"}
         ),
         pytest.param(
             ["extensions/defenseclaw/src/index.ts"],
-            {"go", "python", "ts", "python_tests", "python_lint", "wheel", "checks", "core", "install", "enterprise", "windows_go", "windows_python", "windows_pkg", "pwsh", "code"},
+            {"go", "python", "ts", "python_tests", "python_lint", "wheel", "checks", "core", "install", "enterprise", "windows_go", "windows_python", "windows_contract", "pwsh", "code"},
             "",
             [],
             id="extension-is-embedded",
@@ -237,23 +237,30 @@ ALL_GROUPS = ran(ci_changes.everything("test")) - {"go_pinned"}
         ),
         pytest.param(
             ["cli/defenseclaw/config_writer.py"],
-            {"python", "python_tests", "python_lint", "wheel", "checks", "core", "install", "windows_pkg", "code"} | MANAGED_LANES,
+            {"python", "python_tests", "python_lint", "wheel", "checks", "core", "install", "windows_contract", "code"} | MANAGED_LANES,
             "",
             [],
             id="managed-python-predicate-runs-the-managed-lanes",
         ),
         pytest.param(
             ["internal/enterprisehooks/installer.go"],
-            {"go", "checks", "core", "install", "windows_pkg", "code"} | MANAGED_LANES,
+            {"go", "checks", "core", "install", "windows_contract", "code"} | MANAGED_LANES,
             "",
             [],
             id="managed-go-runs-the-windows-enterprise-smokes",
+        ),
+        pytest.param(
+            [".github/workflows/windows-native.yml"],
+            {"workflows"} | MANAGED_LANES,
+            "",
+            [],
+            id="editing-the-windows-native-workflow-runs-its-contract-jobs",
         ),
         pytest.param(["Makefile"], ALL_GROUPS, "", [], id="shared-makefile-runs-everything"),
         pytest.param(["somewhere/new.file"], ALL_GROUPS, "", [], id="unknown-path-runs-everything"),
         pytest.param(
             ["docs-site/content/docs/hitl.mdx", "internal/gateway/router.go"],
-            {"go", "checks", "core", "install", "enterprise", "windows_go", "windows_pkg", "pwsh", "code"},
+            {"go", "checks", "core", "install", "enterprise", "windows_go", "windows_contract", "pwsh", "code"},
             "",
             [],
             id="mixed-is-the-union",
@@ -463,6 +470,16 @@ def test_a_release_workflow_change_runs_the_cowork_vm_install_suite() -> None:
     assert ci_changes.everything("test")["cowork_vm"]
     job = _workflow("ci.yml")["jobs"]["cowork-vm-package"]
     assert "needs.changes.outputs.cowork_vm != 'false'" in job["if"]
+
+
+def test_cowork_sign_attaches_signatures_and_leaves_the_notes_alone() -> None:
+    # Audit review S3: the release notes never name the Cowork packages
+    # (P2-1), so cowork-sign has no notes paragraph to remove.
+    steps = _workflow("release.yaml")["jobs"]["cowork-sign"]["steps"]
+    script = "\n".join(str(step.get("run", "")) for step in steps)
+    assert "gh release upload" in script
+    assert "gh release edit" not in script and "--notes" not in script
+    assert "cowork-vm-unsigned" not in (WORKFLOWS / "release.yaml").read_text(encoding="utf-8")
 
 
 def test_repro_paths_mirror_the_deterministic_build_push_paths() -> None:

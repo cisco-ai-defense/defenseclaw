@@ -37,6 +37,7 @@ import hashlib
 import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import zipfile
@@ -44,12 +45,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.inventory.claude_desktop import GLOB_MAX, claude_desktop_data_dirs, desktop_platform
 
 PLUGIN_NAME = "defenseclaw"
 STATE_DIR = "cowork"
 ZIP_NAME = "defenseclaw-cowork-plugin.zip"
 STATE_NAME = "plugin-state.json"
+UNINSTALLED_SUFFIX = ".cowork-uninstalled"
 # The gateway's last Cowork hook call (Go gateway.CoworkActivityFile), kept
 # across gateway restarts (cowork-1-0-8 GAP-0038).
 ACTIVITY_NAME = "gateway-activity.json"
@@ -78,6 +81,9 @@ REMOVE_PATH_TEXT = "Customize > Plugins, then the ... menu > Remove"
 
 _STATE_MAX_BYTES = 64 * 1024
 _ZIP_DATE = (1980, 1, 1, 0, 0, 0)
+_BUNDLED_GUARD = "hooks/defenseclaw-hook-guard.exe"
+_BUNDLED_GUARD_COMMAND = "${CLAUDE_PLUGIN_ROOT}/" + _BUNDLED_GUARD
+_GUARD_MAX_BYTES = 64 * 1024 * 1024
 
 
 def state_dir(data_dir: str) -> str:
@@ -90,6 +96,45 @@ def zip_path(data_dir: str) -> str:
 
 def state_path(data_dir: str) -> str:
     return os.path.join(state_dir(data_dir), STATE_NAME)
+
+
+def uninstalled_marker_path(data_dir: str) -> str:
+    return os.path.normpath(os.fspath(data_dir)) + UNINSTALLED_SUFFIX
+
+
+def mark_uninstalled(data_dir: str) -> None:
+    """Record a completed per-user removal outside the removed data folder.
+
+    Raises OSError when the folder that holds the marker is unsafe; on Windows
+    that is a folder whose owner or writers are outside the Windows owner
+    trust set. Such a folder gets no marker: its owner controls it, and the
+    plugin's guard ignores a marker there anyway (cowork-1-0-8 GAP-0085).
+    """
+    marker = uninstalled_marker_path(data_dir)
+    for suffix in (".notice", ".context"):
+        try:
+            os.rmdir(marker + suffix)
+        except OSError:
+            pass
+    atomic_write_private_bytes(
+        marker,
+        b"removed\n",
+        protect_parent=False,
+    )
+
+
+def clear_uninstalled_marker(data_dir: str) -> None:
+    """A new Cowork build is an installed account again."""
+    marker = uninstalled_marker_path(data_dir)
+    try:
+        os.unlink(marker)
+    except FileNotFoundError:
+        pass
+    for suffix in (".notice", ".context"):
+        try:
+            os.rmdir(marker + suffix)
+        except OSError:
+            pass
 
 
 def load_state(data_dir: str) -> dict[str, Any]:
@@ -204,13 +249,67 @@ def plugin_manifest(version: str, defenseclaw_version: str) -> dict[str, Any]:
     }
 
 
-def plugin_zip_bytes(hooks_doc: dict[str, Any], version: str, defenseclaw_version: str) -> bytes:
-    """The plugin zip: .claude-plugin/plugin.json and hooks/hooks.json only.
+def _bundled_windows_hooks(hooks_doc: dict[str, Any]) -> tuple[dict[str, Any], bytes | None]:
+    """Keep the Windows account hook runnable after installed binaries are removed."""
+    handlers = [handler for groups in hooks_doc["hooks"].values() for group in groups for handler in group["hooks"]]
+    cowork_handlers = [handler for handler in handlers if (handler.get("args") or [None])[0] == "cowork-guard"]
+    if not cowork_handlers:
+        return hooks_doc, None
+    if len(cowork_handlers) != len(handlers):
+        raise ValueError("the Cowork plugin mixes Windows guard and other handlers")
+    source = cowork_handlers[0].get("command")
+    if any(handler.get("command") != source for handler in cowork_handlers):
+        raise ValueError("the Cowork plugin names different Windows guards")
+    if (
+        not isinstance(source, str)
+        or not os.path.isabs(source)
+        or os.path.basename(source).lower() != "defenseclaw-hook-guard.exe"
+    ):
+        raise ValueError("the Cowork plugin has no installed Windows guard")
+    for event, groups in hooks_doc["hooks"].items():
+        for group in groups:
+            for handler in group["hooks"]:
+                args = handler.get("args")
+                if (
+                    not isinstance(args, list)
+                    or len(args) != 4
+                    or args[0] != "cowork-guard"
+                    or not all(isinstance(arg, str) for arg in args)
+                    or not os.path.isabs(args[1])
+                    or not os.path.isabs(args[2])
+                    or os.path.basename(args[2]).lower() != "defenseclaw-hook.exe"
+                    or args[3] != event
+                    or os.path.normcase(source) == os.path.normcase(args[2])
+                ):
+                    raise ValueError("the Cowork plugin has an invalid Windows guard invocation")
+    before = os.lstat(source)
+    if not stat.S_ISREG(before.st_mode) or before.st_size > _GUARD_MAX_BYTES:
+        raise ValueError("the installed Windows guard is not a regular file of supported size")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(source, flags)
+    with os.fdopen(fd, "rb") as guard_file:
+        opened = os.fstat(guard_file.fileno())
+        if not stat.S_ISREG(opened.st_mode) or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+            raise ValueError("the installed Windows guard changed while building the plugin")
+        guard = guard_file.read(_GUARD_MAX_BYTES + 1)
+    if len(guard) > _GUARD_MAX_BYTES:
+        raise ValueError("the installed Windows guard exceeds the plugin size limit")
+    bundled = json.loads(json.dumps(hooks_doc))
+    for groups in bundled["hooks"].values():
+        for group in groups:
+            for handler in group["hooks"]:
+                handler["command"] = _BUNDLED_GUARD_COMMAND
+    return bundled, guard
 
-    Cowork refuses a plugin with a top-level bin/ folder, and the hooks run
-    DefenseClaw's installed hook by absolute path, so nothing else ships.
+
+def plugin_zip_bytes(hooks_doc: dict[str, Any], version: str, defenseclaw_version: str) -> bytes:
+    """Build the account plugin, including its Windows guard when needed.
+
+    Cowork does not accept a top-level bin/ folder. A guard under hooks/ is
+    owned by the plugin, so the account hook remains runnable after uninstall.
     Fixed timestamps make the same inputs give the same bytes.
     """
+    hooks_doc, guard = _bundled_windows_hooks(hooks_doc)
     entries = {
         ".claude-plugin/plugin.json": plugin_manifest(version, defenseclaw_version),
         "hooks/hooks.json": hooks_doc,
@@ -222,6 +321,11 @@ def plugin_zip_bytes(hooks_doc: dict[str, Any], version: str, defenseclaw_versio
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o644 << 16
             zf.writestr(info, json.dumps(entries[name], indent=2) + "\n")
+        if guard is not None:
+            info = zipfile.ZipInfo(_BUNDLED_GUARD, date_time=_ZIP_DATE)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o755 << 16
+            zf.writestr(info, guard)
     return buf.getvalue()
 
 

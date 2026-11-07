@@ -2460,8 +2460,12 @@ targets:
                 [string]$InstallRootIdentity = '',
                 [string]$StateRootIdentity = '',
                 [bool]$UninstallPurgeRequested = $false,
-                [bool]$UninstallPurgeUserStateRequested = $false
+                [bool]$UninstallPurgeUserStateRequested = $false,
+                [hashtable]$ApprovedPolicySources = @{}
             )
+            if ($ApprovedPolicySources.Count -ne 0) {
+                throw 'Secure Client deployment metadata recorded approved policy sources'
+            }
             if ($null -eq $ManagedHooksActivation) {
                 throw 'deployment metadata fixture lost managed-hook activation evidence'
             }
@@ -2913,7 +2917,8 @@ targets:
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
-                [switch]$RecordLifecycle
+                [switch]$RecordLifecycle,
+                [string]$ApprovedConfigSHA256
             )
         }
         function script:Wait-DefenseClawEnterpriseReadiness {
@@ -2924,8 +2929,12 @@ targets:
                 [bool]$RequireBroker = $true,
                 [bool]$RequireEnumerator = $true,
                 [int]$TimeoutSeconds = 90,
-                [switch]$AllowFailedTargets
+                [switch]$AllowFailedTargets,
+                [string[]]$AllowedFailedTargetSIDs
             )
+            if ($null -ne $AllowedFailedTargetSIDs -and $AllowedFailedTargetSIDs.Count -ne 0) {
+                throw 'Secure Client lifecycle passed standalone skipped-account SIDs'
+            }
             $script:HarnessState.events.Add(
                 'readiness-require-broker:{0}' -f (
                     $RequireBroker.ToString().ToLowerInvariant()
@@ -2945,8 +2954,12 @@ targets:
                 [Parameter(Mandatory)][string]$GuardianServiceName,
                 [string]$ExpectedManifestSHA256,
                 [int]$TimeoutSeconds = 90,
-                [switch]$AllowFailedTargets
+                [switch]$AllowFailedTargets,
+                [string[]]$AllowedFailedTargetSIDs
             )
+            if ($null -ne $AllowedFailedTargetSIDs -and $AllowedFailedTargetSIDs.Count -ne 0) {
+                throw 'Secure Client lifecycle passed standalone skipped-account SIDs'
+            }
             if ($script:HarnessState.service_start_modes[
                     $GatewayServiceName
                 ] -ne 4) {
@@ -3026,8 +3039,12 @@ targets:
                 [switch]$AllowTransactionRecordedBrokerAbsence,
                 [switch]$AllowTransactionRecordedEnumeratorAbsence,
                 [string[]]$ExpectedGatewayAccount,
-                [switch]$AcceptDegradedTargets
+                [switch]$AcceptDegradedTargets,
+                [string[]]$AllowedFailedTargetSIDs
             )
+            if ($null -ne $AllowedFailedTargetSIDs -and $AllowedFailedTargetSIDs.Count -ne 0) {
+                throw 'Secure Client lifecycle passed standalone skipped-account SIDs'
+            }
             if ($null -ne $ExpectedGatewayAccount) {
                 $script:HarnessState.verified_gateway_account = @($ExpectedGatewayAccount)
             }
@@ -3317,8 +3334,12 @@ targets:
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
-                [switch]$AcceptDegradedTargets
+                [switch]$AcceptDegradedTargets,
+                [string[]]$AllowedFailedTargetSIDs
             )
+            if ($null -ne $AllowedFailedTargetSIDs -and $AllowedFailedTargetSIDs.Count -ne 0) {
+                throw 'Secure Client lifecycle passed standalone skipped-account SIDs'
+            }
             return [ordered]@{
                 ok = $true
                 installed = $false
@@ -7578,8 +7599,12 @@ targets:
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
-                [switch]$AcceptDegradedTargets
+                [switch]$AcceptDegradedTargets,
+                [string[]]$AllowedFailedTargetSIDs
             )
+            if ($null -ne $AllowedFailedTargetSIDs -and $AllowedFailedTargetSIDs.Count -ne 0) {
+                throw 'Secure Client lifecycle passed standalone skipped-account SIDs'
+            }
             return [pscustomobject]@{
                 schema_version = 1
                 ok = $true

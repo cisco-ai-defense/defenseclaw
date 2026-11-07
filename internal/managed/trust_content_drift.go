@@ -16,8 +16,9 @@ type StandaloneContentDriftError struct {
 
 func (e *StandaloneContentDriftError) Error() string {
 	return e.Err.Error() + "; a standalone install does not repair this file in place, because an account that could " +
-		"write it may have changed it: from an elevated prompt run Setup /ensure with the approved CONFIG= and " +
-		"MANIFEST= sources so Setup writes fresh files, then Setup /verify"
+		"write it may have changed it: from an elevated PowerShell prompt run `" + WindowsSetupCommand("/ensure", "CONFIG=<config>", "MANIFEST=<manifest>") +
+		"` with the approved sources so Setup writes fresh files, then `" + WindowsAdminCommand("enterprise", "windows", "verify", "--profile", "standalone") +
+		"`. " + WindowsSetupSource
 }
 
 func (e *StandaloneContentDriftError) Unwrap() error { return e.Err }

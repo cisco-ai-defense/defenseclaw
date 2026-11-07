@@ -20,6 +20,12 @@ func readClaudeDiscoveryState(path string) (servers, projects []string, err erro
 	if err != nil {
 		return nil, nil, err
 	}
+	return parseClaudeDiscoveryState(raw)
+}
+
+// parseClaudeDiscoveryState is readClaudeDiscoveryState for state the caller
+// already read (the sensor helper's brokered read).
+func parseClaudeDiscoveryState(raw []byte) (servers, projects []string, err error) {
 	var state struct {
 		MCPServers map[string]json.RawMessage `json:"mcpServers"`
 		Projects   map[string]struct {

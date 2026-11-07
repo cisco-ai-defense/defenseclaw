@@ -294,6 +294,26 @@ try {
             if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 2) {
                 $failures.Add("one account's folder link refused adoption: $($adoption.reason)")
             }
+            # GAP-0585: a link another principal (an administrator) owns at the
+            # account's folder fails only that account, counted the same way.
+            $foreignLink = [pscustomobject]@{
+                user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'claudecode'; ok = $false
+                error = 'enterprise hooks: the account''s DefenseClaw folder is a link its account does not own; it was left untouched and the account is not protected until an administrator removes the link'
+            }
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $foreignLink) -AccountLinkFailures 1
+            $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                -Activation $activation -InstalledManifestSHA256 $republishedSHA256
+            if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 2) {
+                $failures.Add("a link another principal owns refused adoption: $($adoption.reason)")
+            }
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $foreignLink)
+            Assert-TestSyncRefuses 'foreign link without trusted count' 'failure-free reconcile'
+            Set-TestGuardian $false $republishedSHA256 3 2 -Results @($linkHealthy, $foreignLink, [pscustomobject]@{
+                    user = 'carol'; sid = 'S-1-5-21-1-2-3-1019'; connector = 'codex'; ok = $false
+                    error = 'enterprise hooks: write managed Claude Code hook runtime: access is denied'
+                }) -AccountLinkFailures 1
+            Assert-TestSyncRefuses 'foreign link next to another failure' 'failure-free reconcile'
             Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $accountLink)
             Assert-TestSyncRefuses 'account link without trusted count' 'failure-free reconcile'
             Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, [pscustomobject]@{

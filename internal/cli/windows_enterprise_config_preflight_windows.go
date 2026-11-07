@@ -27,7 +27,7 @@ import (
 )
 
 // windowsEnterpriseStandaloneLayoutForPreflight is replaceable in tests.
-var windowsEnterpriseStandaloneLayoutForPreflight = managed.StandaloneWindowsLayout
+var windowsEnterpriseStandaloneLayoutForPreflight = windowsManagedStandaloneLayout
 var windowsEnterpriseStandaloneRuntimeCandidateCheck = config.ValidateManagedStandaloneRuntimeCandidate
 
 // windowsEnterpriseStandaloneConfigSource refuses an administrator config
@@ -68,7 +68,7 @@ func windowsEnterpriseStandaloneConfigPreflight(configPath string) error {
 			return fmt.Errorf("%s: %w; nothing was changed", configPath, err)
 		}
 		if refusal, found := config.ScanManagedEnvSecretReferences(raw).Refusal(configPath,
-			"from an elevated prompt with `defenseclaw.exe enterprise secret set --name <name> --from-file <key file>`",
+			"from an elevated PowerShell prompt with "+managedWindowsCommand("enterprise", "secret", "set", "--name", "<name>", "--from-file", "<key file>"),
 			config.EnterpriseSettingsReferenceURL); found {
 			return fmt.Errorf("%s; fix it and run again (nothing was changed)", refusal)
 		}
@@ -253,7 +253,7 @@ func windowsEnterpriseRulePackPrivacyProblems(cfg *config.Config) []string {
 	grant := managed.RulePackServiceReadGrant(os.Getenv(managed.WindowsServiceAccountEnv))
 	// The packs the product ships are the same on every computer and public.
 	var shipped string
-	if layout, err := managed.StandaloneWindowsLayout(); err == nil {
+	if layout, err := windowsManagedLayout.standalone(); err == nil {
 		shipped = strings.ToLower(filepath.Clean(layout.InstallRoot))
 	}
 	dirs := cfg.ReferencedRulePackDirs()
@@ -316,7 +316,7 @@ func addWindowsEnterpriseInstalledConfigWarnings(result *enterprisestatus.Result
 // transaction an interrupted run left: its recovery restores the deployment
 // as it was before, config and rule packs included. Tests replace it.
 var windowsEnterpriseStandaloneTransactionPending = func() bool {
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil || strings.TrimSpace(roots.MetadataPath) == "" {
 		return false
 	}
@@ -351,7 +351,7 @@ var windowsEnterpriseStandaloneRecoveryPending = func(opts *windowsEnterpriseLif
 // trusted roots, which name the production scope and the lifecycle folder.
 // Tests replace it.
 var windowsEnterpriseStandaloneRecoveryRoots = func() (winpath.EnterpriseRoots, error) {
-	return winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	return windowsManagedLayout.roots(managed.ProfileStandalone)
 }
 
 // The service names install-enterprise.ps1 takes when the CLI passes none
@@ -468,7 +468,8 @@ func windowsEnterpriseStandaloneRepairRulePackPreflight(suppliedConfig string) e
 		return nil
 	}
 	if err := windowsEnterpriseStandaloneRulePackBuild(runtime); err != nil {
-		return fmt.Errorf("the gateway cannot load the guardrail rule packs that the installed config %s selects, so a repair would restart it into a failed start: %v. The running gateway keeps its last good policy. Put the pack back as its digest pin names it, or apply a config with the new digest with Setup /ensure CONFIG=, then run the repair again (nothing was changed)", layout.ConfigPath, err)
+		return fmt.Errorf("the gateway cannot load the guardrail rule packs that the installed config %s selects, so a repair would restart it into a failed start: %v. The running gateway keeps its last good policy. Put the pack back as its digest pin names it, or apply a config with the new digest with %s from an elevated PowerShell prompt (%s), then run the repair again (nothing was changed)", layout.ConfigPath, err,
+			windowsEnterpriseSetupCommand("/ensure", "CONFIG=<config path>"), managed.WindowsSetupSource)
 	}
 	return nil
 }

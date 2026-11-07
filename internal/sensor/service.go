@@ -875,6 +875,7 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 		snapshot.HostPlaneGated = gated
 		snapshot.HostPlaneContainerEvents = s.hostPlane.containerEvents.Load()
 		snapshot.HostPlaneHookUnexpected = s.hostPlane.hookUnexpected.Load()
+		snapshot.HostPlaneClientExecs = s.hostPlane.clientExecs.counts()
 		snapshot.KernelEvents, snapshot.KernelEventsDropped = s.hostPlane.drainKernelEvents()
 		snapshot.CustomerKernelEvents, snapshot.CustomerKernelEventsDropped = s.hostPlane.drainCustomer()
 		for index := range snapshot.Planes {

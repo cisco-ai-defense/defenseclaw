@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sqlite3
 import stat
 import threading
@@ -1530,10 +1531,20 @@ class Store:
     def agent_facts_for_alerts(self, alert_ids: list[str]) -> dict[str, dict[str, str]]:
         """Map alert IDs to who the alert is about (GAP-0381).
 
-        The user, the agent identity (``agt-``), the agent instance (``ais-``),
-        the session and the sub-agent depth come from the alert row and from
-        the hook-decision row of the same request; the alert row's own value
-        wins.
+        The user, the verified agent identity (``agt-``), the agent instance
+        (``ais-``), the session and the sub-agent depth come from the alert
+        row's structured facts and from a hook-decision or direct-inspect row
+        of the same occurrence; the alert row's own structured value wins.
+
+        Request, run and session IDs are client supplied or shared by many
+        calls, so none of them names one occurrence. The gateway assigns the
+        agent instance (``ais-``) from the verified agent identity and the
+        session, and a row posted to ``/audit/event`` never carries one, so a
+        hook or inspect row is borrowed from only when it carries the same
+        non-empty instance as the alert row (GAP-0647). A row without
+        that instance is never borrowed from, and a fact the matching rows
+        disagree on is not shown, so a later request cannot change or replace
+        an earlier alert's Agent.
         """
         ids = [alert_id for alert_id in alert_ids if alert_id]
         columns, _tables = self._audit_projection_schema()
@@ -1542,21 +1553,34 @@ class Store:
 
         def row_facts(alias: str) -> str:
             cols = [f"{alias}.{name}" if name in columns else "NULL" for name in ("session_id", "agent_instance_id")]
-            cols += [
-                self._safe_json_extract(self._structured_sql(alias), f'$."{key}"') for key in self._ALERT_AGENT_KEYS
-            ]
+            for key in self._ALERT_AGENT_KEYS:
+                value = self._safe_json_extract(self._structured_sql(alias), f'$."{key}"')
+                cols.append(value)
             return ", ".join(cols)
 
         width = 2 + len(self._ALERT_AGENT_KEYS)
         join, hook_cols = "", ", ".join(["NULL"] * width)
-        if "request_id" in columns:
-            # Request IDs are client supplied. Borrow hook facts only when
-            # both records identify the same user independently of that ID.
+        if "request_id" in columns and "agent_instance_id" in columns:
+            # Borrow hook or direct inspect facts only from a row of the same
+            # occurrence: the same user and connector, the gateway-assigned
+            # agent instance of the alert row, and no conflicting run or
+            # session. OpenClaw tool checks have no hook_decision row.
             f_user = self._safe_json_extract(self._structured_sql("f"), '$."user.id"')
             h_user = self._safe_json_extract(self._structured_sql("h"), '$."user.id"')
+            occurrence = (
+                "AND COALESCE(f.agent_instance_id, '') <> '' AND h.agent_instance_id = f.agent_instance_id "
+                + "".join(
+                    f"AND (COALESCE(f.{name}, '') = '' OR COALESCE(h.{name}, '') = '' OR h.{name} = f.{name}) "
+                    for name in ("run_id", "session_id")
+                    if name in columns
+                )
+            )
             join = (
                 "LEFT JOIN audit_events AS h ON COALESCE(f.request_id, '') <> '' AND h.request_id = f.request_id "
-                "AND h.action IN ('hook_decision', 'action') AND h.id <> f.id "
+                "AND h.connector = f.connector "
+                "AND h.action IN ('hook_decision', 'action', 'inspect-tool-block', 'inspect-tool-confirm', "
+                "'inspect-tool-alert', 'inspect-tool-allow') "
+                f"AND h.id <> f.id {occurrence}"
                 f"AND COALESCE({f_user}, '') <> '' AND {f_user} = {h_user}"
             )
             hook_cols = row_facts("h")
@@ -1566,16 +1590,24 @@ class Store:
             ids,
         )
         names = ("session", "agent_instance", "user_name", "user_id", "agent_identity", "depth", "conversation")
-        found: dict[str, dict[str, str]] = {}
+        own: dict[str, dict[str, str]] = {}
+        borrowed: dict[str, dict[str, set[str]]] = {}
         for row in cur.fetchall():
-            facts = found.setdefault(row[0], {})
-            for values in (row[1:1 + width], row[1 + width:]):
-                for name, value in zip(names, values):
-                    text = "" if value is None else str(value).strip()
-                    if text and not facts.get(name):
-                        facts[name] = text
+            facts = own.setdefault(row[0], {})
+            for name, value in zip(names, row[1:1 + width]):
+                text = "" if value is None else str(value).strip()
+                if text:
+                    facts.setdefault(name, text)
+            others = borrowed.setdefault(row[0], {})
+            for name, value in zip(names, row[1 + width:]):
+                text = "" if value is None else str(value).strip()
+                if text:
+                    others.setdefault(name, set()).add(text)
         out: dict[str, dict[str, str]] = {}
-        for alert_id, facts in found.items():
+        for alert_id, facts in own.items():
+            for name, values in borrowed.get(alert_id, {}).items():
+                if not facts.get(name) and len(values) == 1:
+                    facts[name] = next(iter(values))
             shown = {
                 "user": facts.get("user_name") or facts.get("user_id", ""),
                 "agent_identity": facts.get("agent_identity", ""),
@@ -1617,8 +1649,22 @@ class Store:
                 "guardrail.raw_action", "sandbox.name",
             )
         )
+        # The structured agent surface of the request's hook rows (the hook
+        # decision's defenseclaw.agent.surface, the hook audit envelope's
+        # surface or extra.surface) survives a profile that drops the
+        # details, so alerts and the TUI agree on a Cowork call (cowork audit S1).
+        surfaces = ", ".join(
+            self._safe_json_extract(payload, path)
+            for path in ('$."defenseclaw.agent.surface"', "$.surface", "$.extra.surface")
+        )
+        # A row with a valid structured payload (the one alerts read, as
+        # coworkMarkerSQL in internal/audit/cowork_alert_target.go does) takes
+        # its surface from that payload only; its details hold free text
+        # (cowork audit review 2 N1).
+        structured = self._structured_sql("h")
+        has_payload = f"CASE WHEN COALESCE({structured}, '') <> '' AND json_valid({structured}) THEN 1 ELSE 0 END"
         cur = self.db.execute(
-            f"""SELECT f.id, h.action, h.details, {facts}
+            f"""SELECT f.id, h.action, h.details, {facts}, {has_payload}, {surfaces}
                FROM audit_events AS f
                JOIN audit_events AS h
                  ON h.request_id = f.request_id
@@ -1630,7 +1676,13 @@ class Store:
         )
         out: dict[str, list[str]] = {}
         rows = cur.fetchall()
-        for alert_id, action, details, effective, would_block, mode, acp_method, acp_client, raw, sandbox in rows:
+        for (alert_id, action, details, effective, would_block, mode, acp_method, acp_client, raw, sandbox,
+             has_payload, *row_surfaces) in rows:
+            if has_payload:
+                details = _without_detail_surface(details or "")
+            surface = next((str(v).strip().lower() for v in row_surfaces if isinstance(v, str) and v.strip()), "")
+            if surface and not any(ch.isspace() for ch in surface):
+                out.setdefault(alert_id, []).append(f"surface={surface}")
             # Only the hook decision of the request names the sandbox whose
             # session raised the finding (GAP-0232); names hold no spaces.
             sandbox = str(sandbox or "").strip()
@@ -1769,13 +1821,18 @@ class Store:
         now = datetime.now(timezone.utc).isoformat()
         init_json = json.dumps({field: value})
         path = f"$.{field}"
+        update = "json_set(actions_json, ?, ?)"
+        if field == "runtime":
+            # runtime_source is the deciding path the gateway records with
+            # its own runtime disable; any other runtime write drops it.
+            update = f"json_remove({update}, '$.runtime_source')"
         self.db.execute(
-            """INSERT INTO actions (
+            f"""INSERT INTO actions (
                  id, target_type, target_name, source_path, actions_json, reason,
                  updated_at, connector)
                VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
                ON CONFLICT(target_type, target_name, connector) DO UPDATE SET
-                 actions_json = json_set(actions_json, ?, ?),
+                 actions_json = {update},
                  reason = excluded.reason,
                  updated_at = excluded.updated_at""",
             (aid, target_type, target_name, init_json, reason, now, connector, path, value),
@@ -1792,8 +1849,11 @@ class Store:
         _validate(field, "")
         path = f"$.{field}"
         now = datetime.now(timezone.utc).isoformat()
+        remove = "json_remove(actions_json, ?)"
+        if field == "runtime":
+            remove = "json_remove(actions_json, ?, '$.runtime_source')"  # its provenance goes with it
         self.db.execute(
-            """UPDATE actions SET actions_json = json_remove(actions_json, ?), updated_at = ?
+            f"""UPDATE actions SET actions_json = {remove}, updated_at = ?
                WHERE target_type = ? AND target_name = ? AND connector = ?""",
             (path, now, target_type, target_name, connector),
         )
@@ -2174,12 +2234,16 @@ class Store:
 
         q_skill = "SELECT COUNT(*) FROM actions WHERE target_type='skill' AND json_extract(actions_json,'$.install')="
         q_mcp = "SELECT COUNT(*) FROM actions WHERE target_type='mcp' AND json_extract(actions_json,'$.install')="
+        q_blocked_mcp = (
+            "SELECT COUNT(*) FROM actions WHERE target_type IN ('mcp', 'mcp-account') "
+            "AND json_extract(actions_json,'$.install')='block'"
+        )
         alert_where = self._alert_where_clause(actionable=False)
         return self._with_operator_lists(
             Counts(
                 blocked_skills=_count(q_skill + "'block'"),
                 allowed_skills=_count(q_skill + "'allow'"),
-                blocked_mcps=_count(q_mcp + "'block'"),
+                blocked_mcps=_count(q_blocked_mcp),
                 allowed_mcps=_count(q_mcp + "'allow'"),
                 alerts=self._count_within(
                     f"SELECT COUNT(*) FROM audit_events WHERE {alert_where}", alert_count_seconds
@@ -2229,7 +2293,7 @@ class Store:
                         AND json_extract(actions_json, '$.install') = 'allow'
                        THEN 1 ELSE 0 END), 0),
                    COALESCE(SUM(CASE
-                       WHEN target_type = 'mcp'
+                       WHEN target_type IN ('mcp', 'mcp-account')
                         AND json_extract(actions_json, '$.install') = 'block'
                        THEN 1 ELSE 0 END), 0),
                    COALESCE(SUM(CASE
@@ -2237,7 +2301,7 @@ class Store:
                         AND json_extract(actions_json, '$.install') = 'allow'
                        THEN 1 ELSE 0 END), 0)
                FROM actions
-               WHERE target_type IN ('skill', 'mcp')"""
+               WHERE target_type IN ('skill', 'mcp', 'mcp-account')"""
         ).fetchone()
         blocked_skills, allowed_skills, blocked_mcps, allowed_mcps = (int(value or 0) for value in action_counts)
         return self._with_operator_lists(
@@ -2358,6 +2422,23 @@ def _event_connector_value(event: Event) -> str:
     if connector:
         return connector
     return _details_connector(event.details)
+
+
+_DETAIL_SURFACE_TOKEN = re.compile(r"(?<!\S)surface=\S*")
+
+
+def _without_detail_surface(details: str) -> str:
+    """The details with no ``surface=`` token before ``details_json``.
+
+    The connector-hook details of a row with a structured payload hold free
+    text split on spaces (an unquoted ``reason=``, a ``raw_payload=``); its
+    surface is the payload's, which hook_details_for_alerts adds as its own
+    entry (cowork audit review 2 N1). The decision fields are kept."""
+    if details.startswith("details_json="):
+        return details
+    head, sep, tail = details.partition(" details_json=")
+    # Any whitespace splits a token, as _kv reads it (audit review 3 S-1).
+    return _DETAIL_SURFACE_TOKEN.sub("", head) + sep + tail
 
 
 def _details_connector(details: str) -> str:

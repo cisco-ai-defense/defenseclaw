@@ -77,6 +77,8 @@ export class HealthMonitor {
     void this.check();
 
     this.timer = setInterval(() => void this.check(), this.pollIntervalMs);
+    // A poll timer must never keep the gateway process from exiting.
+    this.timer.unref?.();
   }
 
   stop(): void {

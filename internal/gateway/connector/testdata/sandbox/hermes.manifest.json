@@ -45,14 +45,14 @@
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 192671,
-      "sha256": "9aa1cb61fdcdbfd3fb31fde2f5a713fad49c853a2548a7b1efc20fa703b95c0b"
+      "size": 194227,
+      "sha256": "cf07dbf4aeefc9c32c77323e0388b9c5c90587e5cc4562d4bb4e528cd06e5ba9"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 15013,
-      "sha256": "1719b174996a7b43abff2076a084fe47f39580e3266e71ede64423bb50291e62"
+      "size": 15583,
+      "sha256": "87b2456a05bdb5cf9680a9ee50f3ac37cbb06e6f95357537ded8cd450373e784"
     },
     "/usr/local/lib/defenseclaw/hooks/hermes-hook.sh": {
       "mode": "-rwxr-xr-x",

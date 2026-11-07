@@ -47,16 +47,16 @@ type simpleShellState struct {
 	cwdUnknown bool
 	dirStack   []string
 	vars       map[string]string
-	// homeLocals holds, innermost last, the HOME of the caller of each
-	// function body that made HOME local; the body end restores it.
-	homeLocals []simpleHomeLocal
+	// locals holds, innermost last, the caller value of each name a
+	// function body made local; the body end restores it.
+	locals []simpleLocal
 }
 
-// simpleHomeLocal is the caller HOME saved by a local HOME in the function
-// body of scope.
-type simpleHomeLocal struct {
-	scope, home string
-	known       bool
+// simpleLocal is the caller value of name saved by a local declaration in
+// the function body of scope.
+type simpleLocal struct {
+	scope, name, value string
+	known              bool
 }
 
 const (
@@ -68,7 +68,7 @@ const (
 func (s simpleShellState) clone() simpleShellState {
 	copy := simpleShellState{cwd: s.cwd, cwdUnknown: s.cwdUnknown,
 		dirStack: slices.Clone(s.dirStack), vars: make(map[string]string, len(s.vars)),
-		homeLocals: slices.Clone(s.homeLocals)}
+		locals: slices.Clone(s.locals)}
 	for name, value := range s.vars {
 		copy.vars[name] = value
 	}
@@ -741,7 +741,7 @@ func uniqueSimpleStates(states []simpleShellState) []simpleShellState {
 		if !slices.ContainsFunc(result, func(previous simpleShellState) bool {
 			return previous.cwd == state.cwd && previous.cwdUnknown == state.cwdUnknown &&
 				slices.Equal(previous.dirStack, state.dirStack) && maps.Equal(previous.vars, state.vars) &&
-				slices.Equal(previous.homeLocals, state.homeLocals)
+				slices.Equal(previous.locals, state.locals)
 		}) {
 			result = append(result, state)
 		}
@@ -834,21 +834,23 @@ func simpleTooManyCompactionCases(source string) bool {
 	return cases > maxCompactionCases
 }
 
-// updateSimpleDeclVariables applies a HOME=value word of an export,
+// updateSimpleDeclVariables applies each NAME=value word of an export,
 // readonly, declare, typeset or local statement to vars, as
-// updateSimpleVariables applies a bare HOME=value: every later ~ and $HOME
-// then names value. HOME with no value keeps its value. An option other
-// than -x, -r and -g (export -n also assigns) can change what the value
-// means (a reference, an integer, a case or an array attribute): HOME then
-// keeps its previous value, so a later ~ or $HOME write is still judged
-// against a home the call can reach (GAP-2476, RV-pc11-1). Other names
-// keep the bound-variable reading the action-level resolver judges.
+// updateSimpleVariables applies a bare NAME=value: a later $NAME, and for
+// HOME every later ~, then names value. A name with no value keeps its
+// value. An option other than -x, -r and -g (export -n also assigns) can
+// change what the value means (a reference, an integer, a case or an array
+// attribute): HOME then keeps its previous value, so a later ~ or $HOME
+// write is still judged against a home the call can reach (GAP-2476,
+// RV-pc11-1), and any other name is unknown. export F=<file> names the
+// file for a later "$F" as F=<file> does; it was left unbound, so a write
+// through it named no file for any path rule (gas-ux-r1 GAP-0076).
 //
-// local HOME=v counts only in a function body, until the body ends: bash
-// refuses local outside a function (HOME is unchanged), and the caller
-// HOME is back once the function returns (RV-pod2-2). declare and typeset
-// without -g in a function body are local too; export, readonly and
-// declare -g there set the caller HOME (checker p3i3 D01-D21).
+// local NAME=v counts only in a function body, until the body ends: bash
+// refuses local outside a function (the name is unchanged), and the
+// caller value is back once the function returns (RV-pod2-2). declare and
+// typeset without -g in a function body are local too; export, readonly
+// and declare -g there set the caller value (checker p3i3 D01-D21).
 func updateSimpleDeclVariables(state *simpleShellState, decl *syntax.DeclClause, scope string) {
 	if decl == nil || decl.Variant == nil {
 		return
@@ -871,12 +873,18 @@ func updateSimpleDeclVariables(state *simpleShellState, decl *syntax.DeclClause,
 	}
 	if local {
 		body := simpleFunctionBodyScope(scope)
-		declaresHome := slices.ContainsFunc(decl.Args, func(assign *syntax.Assign) bool {
-			return assign != nil && assign.Name != nil && assign.Name.Value == "HOME"
-		})
-		if declaresHome && (len(state.homeLocals) == 0 || state.homeLocals[len(state.homeLocals)-1].scope != body) {
-			home, known := vars["HOME"]
-			state.homeLocals = append(state.homeLocals, simpleHomeLocal{scope: body, home: home, known: known})
+		for _, assign := range decl.Args {
+			if assign == nil || assign.Name == nil {
+				continue
+			}
+			name := assign.Name.Value
+			if slices.ContainsFunc(state.locals, func(saved simpleLocal) bool {
+				return saved.scope == body && saved.name == name
+			}) {
+				continue
+			}
+			value, known := vars[name]
+			state.locals = append(state.locals, simpleLocal{scope: body, name: name, value: value, known: known})
 		}
 	}
 	known := true
@@ -897,10 +905,13 @@ func updateSimpleDeclVariables(state *simpleShellState, decl *syntax.DeclClause,
 		}
 	}
 	for _, assign := range decl.Args {
-		if assign == nil || assign.Name == nil || assign.Naked || assign.Name.Value != "HOME" {
+		if assign == nil || assign.Name == nil || assign.Naked {
 			continue
 		}
 		if !known || assign.Index != nil || assign.Array != nil {
+			if assign.Name.Value != "HOME" {
+				delete(vars, assign.Name.Value)
+			}
 			continue
 		}
 		updateSimpleVariables(vars, []*syntax.Assign{assign})
@@ -958,19 +969,19 @@ func simpleFunctionBodyScope(scope string) string {
 	}
 }
 
-// simpleEndFunctionBody restores the caller HOME that a local HOME of the
-// function body of scope saved.
+// simpleEndFunctionBody restores the caller values that the local
+// declarations of the function body of scope saved.
 func simpleEndFunctionBody(states []simpleShellState, scope string) []simpleShellState {
 	ended := make([]simpleShellState, 0, len(states))
 	for _, state := range states {
 		state = state.clone()
-		if last := len(state.homeLocals) - 1; last >= 0 && state.homeLocals[last].scope == scope {
-			saved := state.homeLocals[last]
-			state.homeLocals = state.homeLocals[:last]
+		for last := len(state.locals) - 1; last >= 0 && state.locals[last].scope == scope; last-- {
+			saved := state.locals[last]
+			state.locals = state.locals[:last]
 			if saved.known {
-				state.vars["HOME"] = saved.home
+				state.vars[saved.name] = saved.value
 			} else {
-				delete(state.vars, "HOME")
+				delete(state.vars, saved.name)
 			}
 		}
 		ended = append(ended, state)
@@ -1703,7 +1714,8 @@ func simpleRelativePathOperand(source string) bool {
 		}
 	}
 	call, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
-	if !ok {
+	if !ok || len(call.Args) == 0 {
+		// No program word, so no path operand: a redirect-only or assignment-only statement.
 		return false
 	}
 	for _, arg := range call.Args[1:] {

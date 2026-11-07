@@ -153,7 +153,7 @@ var Kiro = register(&Spec{
 	},
 	probe: ProbeSpec{
 		VersionArgv: []string{"/usr/local/bin/kiro-cli-chat", "--version"},
-		VersionRE:   regexp.MustCompile(`^kiro-cli-chat ([0-9]+\.[0-9]+\.[0-9]+)`),
+		VersionRE:   regexp.MustCompile(`^kiro-cli-chat v?([0-9]+\.[0-9]+\.[0-9]+)`),
 		// kiro-cli-chat is the agent (it makes every model request); the
 		// kiro-cli front end runs the login flow.
 		NetworkBinaries: `readlink -f /usr/local/bin/kiro-cli-chat
@@ -167,7 +167,7 @@ readlink -f /usr/local/bin/kiro-cli`,
 		}
 		link := `for b in kiro-cli kiro-cli-chat kiro-cli-term; do [ -x "$root/bin/$b" ] || { echo "Kiro CLI archive lacks bin/$b" >&2; exit 1; }; ln -sfn "$root/bin/$b" "/usr/local/bin/$b"; done; ` +
 			`h="$(mktemp -d)"; got="$(HOME="$h" /usr/local/bin/kiro-cli-chat --version 2>/dev/null | head -n 1)"; rm -rf "$h"; ` +
-			`[ "$got" = ` + shellQuote("kiro-cli-chat "+version) + ` ] || { echo "Kiro CLI '$got' is not the pinned ` + version + `" >&2; exit 1; }`
+			`got="${got#kiro-cli-chat }"; ` + pinVersionCheck("Kiro CLI", version)
 		return []InstallStep{{
 			Comment: "Install Kiro CLI " + version + " from its release archive into a root-owned prefix (vendor sha256 checked)",
 			Run:     run + "; " + link,

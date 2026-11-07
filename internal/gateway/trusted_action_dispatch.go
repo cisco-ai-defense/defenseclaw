@@ -156,6 +156,9 @@ type trustedActionRequest struct {
 	LegacyText         string
 	Connector          string
 	EnforcementCapable bool
+	// StrictPolicy grades an unverifiable extra argument as a block.
+	StrictPolicy               bool
+	UnknownKeyPossibleOverflow bool
 	// ArtifactBody is set when LegacyText and Input.Command are the whole
 	// body of a script the call runs (the artifact lane): its comments and
 	// data are not tool-call text, so a migrated literal rule must match a
@@ -172,6 +175,10 @@ type trustedActionRequest struct {
 	DowngradeReadOnlyDataArgs bool
 	// A sandbox action may execute in a filesystem the gateway cannot see.
 	SkipLocalFilesystemResolution bool
+	// CopilotSharedLocalFile marks an exact file call decoded from a Local
+	// body in the per-user CLI document. Its link target and direct protected
+	// read have the same file-action authority as its lexical path.
+	CopilotSharedLocalFile bool
 	// ProtectedHomeHook is set only from a kernel-verified managed hook peer.
 	// Its gateway cannot inspect the caller's home when ProtectHome is active.
 	ProtectedHomeHook bool
@@ -213,6 +220,10 @@ type trustedActionRequest struct {
 	// resolve (an empty map value: an unreadable folder, a link loop) and
 	// this gateway cannot resolve either (rel-1-0-2:GAP-0690).
 	unresolvedTarget *bool
+	// resolvedTarget, when set, is told that the code-owned target walk
+	// confirmed a protected file rather than conservatively holding an
+	// unresolved write.
+	resolvedTarget *bool
 	// evidenceCWD places a simple command whose cwd the gateway cannot see
 	// (ProtectHome) where the managed hook client keyed its evidence: the
 	// client's cwd followed through the command's static cd.
@@ -408,6 +419,7 @@ func dispatchTrustedAction(
 		facts = actionfacts.Analyze(request.Input)
 		analyzed = true
 	}
+	facts = copilotSharedLocalFileFacts(facts, request)
 	// Only the Git hook rule uses the hook client's bounded directory. Parse
 	// that view when the action already names a possible active hook mutation;
 	// a text mention or an inactive .sample path needs no second reading.
@@ -419,6 +431,15 @@ func dispatchTrustedAction(
 		}
 	}
 	if twin, ok := overLimitWriteBoundedTwinRequest(request, facts); ok {
+		defer func() {
+			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
+	// A file-tool call with an argument key outside its reviewed schema is
+	// judged as each reading the harness may run (gas-ux-r1 GAP-0076).
+	twins, overflow := unknownKeyTwinRequests(request, facts)
+	request.UnknownKeyPossibleOverflow = request.UnknownKeyPossibleOverflow || overflow
+	for _, twin := range twins {
 		defer func() {
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
 		}()
@@ -491,6 +512,8 @@ func dispatchTrustedActionWith(
 		defer func() {
 			checkedWholeWrite := false
 			wholeWriteSafe := false
+			checkedLocalOrdinary := false
+			localOrdinary := false
 			wholeCommand, wholeCommandKnown := trustedBashCommandInput(request.Input)
 			simples := actionfacts.SimpleCommands(request.Input, facts)
 			if len(simples) == 0 && wholeCommandKnown &&
@@ -577,11 +600,34 @@ func dispatchTrustedActionWith(
 						wholeWriteSafe = wholeCommandKnown &&
 							request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(wholeCommand,
 								request.Input.CWD, request.Input.ActiveHome, request.Input.DialectHint, clientGlobFacts(request)) == ""
+						if !wholeWriteSafe && wholeCommandKnown && !request.ProtectedHomeHook &&
+							(request.Connector == "claudecode" || request.Connector == "codex") &&
+							trustedPOSIXShellCall(request.Input, facts) {
+							wholeWriteSafe = hookpaths.ProvedOrdinaryVariableTargets(
+								wholeCommand, request.Input.CWD, request.Input.ActiveHome)
+						}
 					}
 					if wholeWriteSafe {
 						// A child with a missing action-local value cannot prove a
 						// protected write by itself. The full action's class resolver
 						// has already judged that binding; retain every other rule.
+						childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
+							return f.RuleID == "persistence.ssh_authorized_keys_command"
+						})
+					}
+				}
+				if !simple.UnresolvedBoundVariable && wholeCommandKnown && !request.ProtectedHomeHook &&
+					(request.Connector == "claudecode" || request.Connector == "codex") &&
+					trustedPOSIXShellCall(request.Input, facts) &&
+					slices.ContainsFunc(childFindings, func(f RuleFinding) bool {
+						return f.RuleID == "persistence.ssh_authorized_keys_command"
+					}) {
+					if !checkedLocalOrdinary {
+						checkedLocalOrdinary = true
+						localOrdinary = hookpaths.ProvedOrdinaryVariableTargets(
+							wholeCommand, request.Input.CWD, request.Input.ActiveHome)
+					}
+					if localOrdinary {
 						childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
 							return f.RuleID == "persistence.ssh_authorized_keys_command"
 						})
@@ -918,6 +964,7 @@ func dispatchTrustedActionWith(
 		request.Input.Tool,
 		options,
 	)
+	scanned = append(scanned, copilotSharedLocalPathFindings(generation, request, facts, options)...)
 	fallbackLanes := func(
 		legacyFindings []RuleFinding,
 		facts actionfacts.Facts,
@@ -6324,7 +6371,7 @@ func finalizeTrustedActionFindings(
 	findings []RuleFinding,
 ) []RuleFinding {
 	findings = deduplicateTrustedActionFindings(findings)
-	findings = applyTrustedActionContextDisposition(generation, facts, findings)
+	findings = applyTrustedActionContextDisposition(generation, facts, findings, request.CopilotSharedLocalFile && request.Input.Tool == "read_file")
 	return applyTrustedActionProofBoundary(findings, request.EnforcementCapable)
 }
 

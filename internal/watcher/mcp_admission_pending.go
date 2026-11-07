@@ -5,12 +5,16 @@
 package watcher
 
 import (
+	"database/sql"
+	"errors"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/mcpkey"
 )
 
 // MCPAdmissionQuery names the MCP server a tool call reaches.
@@ -24,16 +28,41 @@ type MCPAdmissionQuery struct {
 	Home, CWD string
 }
 
-// MCPAdmissionPending reports an MCP server the watcher admits that has no
-// admission outcome yet, and queues its admission now (GAP-0112). Claude
-// Code starts the servers of a project it opens at once, and the discovery
-// poll finds a new project server up to its interval later, so a tool call
-// in between reached a server nothing had scanned and was allowed, even one
-// a later scan rejected. The hook refuses such a call until admission has
-// run: the call fails closed and a retry once the verdict allows it goes
-// through. A server whose definition changed since its outcome is pending
-// the same way, because that outcome was for another program (GAP-0216). It
-// returns the configured name of the server.
+// MCPAdmissionStatus is the current admission state of one configured server.
+// An empty state means no pending or failed admission applies to this call.
+type MCPAdmissionStatus struct {
+	Name        string
+	Pending     bool
+	Failed      bool
+	Unavailable bool
+	RetryAfter  time.Duration
+}
+
+type mcpKnownDefinition struct {
+	server config.MCPServerEntry
+	hash   string
+}
+
+const mcpSnapshotIdentityKey = "mcp.snapshot.identity.v1"
+
+// mcpSnapshotIdentity keeps the fields needed to match a call when the source
+// list is unavailable and validates versioned snapshot paths.
+type mcpSnapshotIdentity mcpkey.Identity
+
+func mcpIdentityForServer(server config.MCPServerEntry) mcpSnapshotIdentity {
+	return mcpSnapshotIdentity{server.Name, server.Connector, server.Home, server.Project}
+}
+
+func (identity mcpSnapshotIdentity) server() config.MCPServerEntry {
+	return config.MCPServerEntry{
+		Name: identity.Name, Connector: identity.Connector, Home: identity.Home, Project: identity.Project,
+	}
+}
+
+// MCPAdmissionPending reports an MCP server with no admission outcome yet
+// and queues admission now (GAP-0112). A server whose definition changed
+// since its outcome is pending the same way (GAP-0216). The hook applies the
+// selected tier to a pending result. The returned name is the configured one.
 //
 // A server the first rescan cycle lists at start stays with that cycle,
 // which admits or baselines it (an upgrade from 0.8.x only baselines), so
@@ -42,40 +71,113 @@ type MCPAdmissionQuery struct {
 // (take_action off), where it has no MCP source, before it has listed the
 // servers present at start, or on Secure Client (issue #1092).
 func (w *InstallWatcher) MCPAdmissionPending(q MCPAdmissionQuery) (string, bool) {
+	status := w.MCPAdmissionStatus(q)
+	return status.Name, status.Pending
+}
+
+// MCPAdmissionStatus distinguishes a scan still in progress from a completed
+// scan failure for the server's current definition. A failed scan stays
+// visible even when the admission policy kept the server installed.
+func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionStatus {
 	if w == nil || !w.admitNewMCP || w.store == nil || w.secureClientActive() ||
-		!w.takeActionFor(InstallEvent{Type: InstallMCP}) || strings.TrimSpace(q.Server) == "" {
-		return "", false
+		strings.TrimSpace(q.Server) == "" {
+		return MCPAdmissionStatus{}
 	}
 	firstCycle := !w.firstCycleDone.Load()
-	if firstCycle && !w.mcpStartupListed.Load() {
-		return "", false
-	}
 	servers, err := w.readMCPServers()
 	if err != nil {
-		return "", false
+		if failed := w.mcpFailedFromLastRead(q); failed.Failed {
+			return failed
+		}
+		return MCPAdmissionStatus{Name: q.Server, Unavailable: true, RetryAfter: defaultScanTimeout}
 	}
 	var pending []string
+	var pendingPath string
 	for _, server := range servers {
 		if server.Bundled || !mcpServerServesQuery(server, q) {
 			continue
 		}
 		path := MCPEventPath(server)
-		if firstCycle && w.listedAtStartup(path) {
+		row, err := mcpSnapshotForServer(w.store, server)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return MCPAdmissionStatus{Name: server.Name, Unavailable: true, RetryAfter: defaultScanTimeout}
+		}
+		matched := err == nil && mcpBaselineMatches(row, server)
+		if matched && mcpSnapshotFailed(row) {
+			return MCPAdmissionStatus{Name: server.Name, Failed: true}
+		}
+		if matched {
 			continue
 		}
-		if row, err := w.store.GetTargetSnapshot(string(InstallMCP), path); err == nil && mcpBaselineMatches(row, server) {
+		if firstCycle && (!w.mcpStartupListed.Load() || w.listedAtStartup(path)) {
 			continue
 		}
-		// No outcome yet, one that could not be read, or one for another
-		// definition of the server: refused either way, and admission says
-		// why when it runs.
+		if !w.takeActionFor(InstallEvent{Type: InstallMCP}) {
+			continue
+		}
+		// No outcome yet, or one for another definition of the server:
+		// admission says why when it runs.
 		pending = append(pending, server.Name)
+		if pendingPath == "" {
+			pendingPath = path
+		}
 	}
 	if len(pending) == 0 {
-		return "", false
+		return MCPAdmissionStatus{}
 	}
 	w.AdmitAddedMCPServers(pending)
-	return pending[0], true
+	return MCPAdmissionStatus{Name: pending[0], Pending: true, RetryAfter: w.mcpRetryAfter(pendingPath)}
+}
+
+// mcpFailedFromLastRead uses a prior successful listing only to keep a
+// completed failed scan effective during a source-list outage. The cache
+// holds identity and definition hash, not an old allow or pending verdict.
+func (w *InstallWatcher) mcpFailedFromLastRead(q MCPAdmissionQuery) MCPAdmissionStatus {
+	w.mcpAdmissionMu.RLock()
+	known := append([]mcpKnownDefinition(nil), w.mcpAdmissionKnown...)
+	listed := w.mcpAdmissionListed
+	w.mcpAdmissionMu.RUnlock()
+	for _, definition := range known {
+		if definition.server.Bundled || !mcpServerServesQuery(definition.server, q) {
+			continue
+		}
+		row, err := mcpSnapshotForServer(w.store, definition.server)
+		if err == nil && row != nil && row.ContentHash == definition.hash && mcpSnapshotFailed(row) {
+			return MCPAdmissionStatus{Name: definition.server.Name, Failed: true}
+		}
+	}
+	// After a restart the watcher can have durable failed snapshots but no
+	// successful source listing yet. Match their scoped paths until a fresh
+	// listing establishes the definition identities above.
+	if !listed {
+		paths, err := w.store.ListTargetSnapshotPaths(string(InstallMCP))
+		if err == nil {
+			for _, path := range paths {
+				row, err := w.store.GetTargetSnapshot(string(InstallMCP), path)
+				if err == nil && mcpSnapshotFailed(row) && mcpFailedSnapshotServesQuery(path, row, q) {
+					return MCPAdmissionStatus{Name: q.Server, Failed: true}
+				}
+			}
+		}
+	}
+	return MCPAdmissionStatus{}
+}
+
+// A failed baseline is usable only when its stored identity matches its
+// versioned key. Older rows cannot establish an account scope.
+func mcpFailedSnapshotServesQuery(path string, row *audit.SnapshotRow, q MCPAdmissionQuery) bool {
+	identity, ok := mcpStoredSnapshotIdentity(path, row)
+	return ok && mcpServerServesQuery(identity.server(), q)
+}
+
+func mcpSnapshotFailed(row *audit.SnapshotRow) bool {
+	if row == nil {
+		return false
+	}
+	fingerprint := row.ScannerFingerprint
+	return strings.HasSuffix(fingerprint, mcpScanFailedMark) ||
+		strings.HasSuffix(fingerprint, mcpLauncherRefusedMark) ||
+		strings.HasSuffix(fingerprint, unverifiedMCPMark)
 }
 
 // mcpBaselineMatches reports whether the baseline admission recorded for an

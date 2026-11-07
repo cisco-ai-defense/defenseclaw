@@ -183,7 +183,8 @@ else
     build "${STAGE_DIR}/defenseclaw-sensor-helper.exe" ./cmd/defenseclaw-sensor-helper sensor-helper gui
     echo "==> building the scanner runtime"
     "${REPO_ROOT}/packaging/windows/standalone/build-scanner-runtime.sh" --out-dir "${STAGE_DIR}/scanner-runtime"
-    cp -f "${STAGE_DIR}/scanner-runtime/runtime.zip" "${STAGE_DIR}/scanner-runtime/runtime.json" "${SCANNERS_EMBED_DIR}/"
+    cp -f "${STAGE_DIR}/scanner-runtime/runtime.zip" "${STAGE_DIR}/scanner-runtime/runtime.json" \
+        "${STAGE_DIR}/scanner-runtime/runtime.sha256" "${SCANNERS_EMBED_DIR}/"
     build "${STAGE_DIR}/defenseclaw-scanners.exe" ./cmd/defenseclaw-scanners launcher console
     # The CLI is the gateway image, exactly as in the Secure Client kit.
     cp -f "${STAGE_DIR}/defenseclaw-gateway.exe" "${STAGE_DIR}/defenseclaw.exe"

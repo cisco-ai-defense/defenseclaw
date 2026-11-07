@@ -52,8 +52,9 @@ The actions that set up and maintain a deployment: `install`, `upgrade`,
 
 | OS | How you run it |
 | --- | --- |
-| Linux, macOS | `defenseclaw-gateway enterprise linux <action>` or `enterprise macos <action>`, as root |
-| Windows | `defenseclaw.exe enterprise windows <action> --profile standalone` from an elevated prompt, or the Setup program (`/install`, `/ensure` and so on) |
+| Linux | `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux <action>`, as root |
+| macOS | `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos <action>`, as root |
+| Windows | `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows <action> --profile standalone` from an elevated PowerShell prompt, or the Setup program (`/install`, `/ensure` and so on) |
 
 The packages do not put `defenseclaw-gateway` on the `PATH`, so a fresh root
 login shell answers a bare `defenseclaw-gateway` with `command not found`. Use

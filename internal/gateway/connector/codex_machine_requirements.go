@@ -501,8 +501,8 @@ func windowsCodexRenderedHookCommand(command, hookBinary string) (event, contrac
 		return "", "", false
 	}
 	for _, match := range windowsCodexBoundArgumentsPattern.FindAllStringSubmatch(script, -1) {
-		event := strings.ReplaceAll(match[1], "''", "'")
-		contract := strings.ReplaceAll(match[2], "''", "'")
+		event := powershellLiteralValue(match[1])
+		contract := powershellLiteralValue(match[2])
 		if command == bridgeWindowsCodexBoundManagedHookCommand(hookBinary, event, contract) ||
 			command == legacyStartProcessWindowsCodexBoundManagedHookCommand(hookBinary, event, contract) {
 			return event, contract, true

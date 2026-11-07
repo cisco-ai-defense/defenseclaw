@@ -30,8 +30,8 @@ import (
 // which "allow" auto-approves the call. The command a DefenseClaw hook file
 // registers for that harness carries --hook-surface vscode-local; hookexec
 // forwards it in HookDialectHeader and the gateway swaps the Copilot profile
-// for CopilotVSCodeLocalProfile. Commands without the marker keep the Copilot
-// CLI dialect byte for byte.
+// for CopilotVSCodeLocalProfile. The per-user CLI document also receives
+// Local bodies, which its shared profile reads under the CLI-bound event.
 //
 // Vendor sources (reviewed 2026-09):
 //   - https://code.visualstudio.com/docs/copilot/customization/hooks
@@ -98,6 +98,35 @@ func CopilotVSCodeLocalProfile(base HookProfile) HookProfile {
 	p.ToolCallLifecycle = copilotVSCodeLocalToolCallLifecycle()
 	if spec, ok := CorrelationSpecForConnector("copilot", CopilotVSCodeLocalContractID); ok {
 		p.Correlation = spec
+	}
+	return p
+}
+
+// CopilotCLISharedProfile reads the two body shapes delivered to the per-user
+// CLI hook document. The command-bound event, CLI verdict capabilities and
+// response are fixed for both. A Local body must name that event's Local
+// counterpart; mixed tool fields are refused by the gateway.
+func CopilotCLISharedProfile(base HookProfile, boundEvent string) HookProfile {
+	p := base
+	p.Decode = func(payload map[string]interface{}) HookProfileRequest {
+		if _, local := copilotargs.CLIHookLocalEvent(boundEvent, hookFirstString(payload, "hook_event_name")); local {
+			return copilotVSCodeLocalDecode(payload)
+		}
+		return base.Decode(payload)
+	}
+	p.Respond = func(in HookRespondInput) HookRespondOutput {
+		out := base.Respond(in)
+		_, local := copilotargs.CLIHookLocalEvent(boundEvent, hookFirstString(in.Req.Payload, "hook_event_name"))
+		if !local || in.Req.HookEventName != "preToolUse" || out.Output == nil {
+			return out
+		}
+		if decision, ok := out.Output["permissionDecision"].(string); ok {
+			out.Output["hookSpecificOutput"] = map[string]interface{}{
+				"hookEventName": "PreToolUse", "permissionDecision": decision,
+				"permissionDecisionReason": out.Output["permissionDecisionReason"],
+			}
+		}
+		return out
 	}
 	return p
 }

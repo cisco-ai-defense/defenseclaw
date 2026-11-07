@@ -137,6 +137,9 @@ const (
 	// records the successful re-install.
 	ActionConnectorHookTampered Action = "connector-hook-tampered"
 	ActionConnectorHookRepaired Action = "connector-hook-repaired"
+	// The managed guardian retired a target after confirming its account
+	// was removed. The enumerator may still carry the manifest row.
+	ActionConnectorHookAccountRemoved Action = "connector-hook-account-removed"
 
 	// ActionProtectedFileChanged records a change to a protected file (SSH
 	// authorized keys, shell startup files, user autostart entries) that the
@@ -454,6 +457,7 @@ func AllActions() []Action {
 		ActionAssetPolicy,
 		ActionConnectorHookTampered,
 		ActionConnectorHookRepaired,
+		ActionConnectorHookAccountRemoved,
 		ActionProtectedFileChanged,
 		ActionEnterpriseExemptUser,
 		ActionIdentityRefreshCompleted,

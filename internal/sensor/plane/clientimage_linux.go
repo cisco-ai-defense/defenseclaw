@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -74,24 +75,80 @@ func pinProcImage(pid int, key imageKey) *os.File {
 
 // tetragonClientImage is the image identity of a Tetragon exec of binary:
 // pinned only while the pid still runs that binary, before and after the
-// open. The digest is the cached one, or "" while clientImages hashes it.
-func tetragonClientImage(pid int, binary string, account string) (sum, version string) {
+// open. The digest is the cached one, or "" while clientImages hashes it
+// (state pending: delivery gets the digest) or when it is not coming
+// (failed).
+func tetragonClientImage(
+	pid int, binary string, account string, delivery *digestDelivery,
+) (sum, version string, state DigestState) {
 	path, key, live := procImage(pid)
 	if !live || path != binary {
-		return "", ""
+		return "", "", ""
 	}
 	if version = claudeImageVersion(path); version == "" {
-		return "", ""
+		return "", "", ""
 	}
 	file := pinProcImage(pid, key)
 	if file == nil {
-		return "", version
+		return "", version, DigestFailed
 	}
 	if afterPath, afterKey, afterLive := procImage(pid); !afterLive || afterPath != path || afterKey != key {
 		file.Close()
-		return "", version
+		return "", version, DigestFailed
 	}
-	return clientImages.digestOf(file, key, account), version
+	var follow func(string, bool)
+	if delivery != nil {
+		delivery.version, follow = version, delivery.follow
+	}
+	sum, state = clientImages.digestOf(file, key, account, follow)
+	return sum, version, state
+}
+
+// digestDelivery delivers the KindImageDigest event of one exec event that
+// went out with its digest pending: PID, At and ImageVersion are the exec
+// event's, and the digest read, or failed. The digest event never goes out
+// before the exec's own: a read that ends first is kept until sent is
+// called, after the exec event is pushed.
+type digestDelivery struct {
+	push    func(Event)
+	pid     int
+	at      time.Time
+	version string
+
+	mu     sync.Mutex
+	sent   bool
+	early  bool
+	digest Event
+}
+
+func newDigestDelivery(push func(Event), pid int, at time.Time) *digestDelivery {
+	return &digestDelivery{push: push, pid: pid, at: at}
+}
+
+// follow is the hasher's callback once the read ends.
+func (d *digestDelivery) follow(sum string, read bool) {
+	event := Event{Kind: KindImageDigest, PID: d.pid, At: d.at, ImageVersion: d.version, ImageDigestState: DigestFailed}
+	if read && sum != "" {
+		event.ImageSHA256, event.ImageDigestState = sum, DigestRead
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.sent {
+		d.early, d.digest = true, event
+		return
+	}
+	d.push(event)
+}
+
+// execSent is called once the exec event is pushed.
+func (d *digestDelivery) execSent() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.sent = true
+	if d.early {
+		d.early = false
+		d.push(d.digest)
+	}
 }
 
 // clientImagePrewarmInterval is how often installed client images under the
@@ -144,7 +201,7 @@ func prewarmClientImages(homes []string) int {
 				file.Close()
 				continue
 			}
-			clientImages.digestOf(file, key, "uid:"+strconv.Itoa(int(stat.Uid)))
+			clientImages.digestOf(file, key, "uid:"+strconv.Itoa(int(stat.Uid)), nil)
 		}
 		dir.Close()
 	}

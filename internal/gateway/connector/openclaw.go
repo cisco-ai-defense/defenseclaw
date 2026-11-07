@@ -381,7 +381,7 @@ func openClawConfigRegistersDefenseClaw(configPath string) bool {
 		return false
 	}
 	if entries, ok := plugins["entries"].(map[string]interface{}); ok {
-		if _, found := entries["defenseclaw"]; found {
+		if openClawEntryHasDefenseClawKeys(entries["defenseclaw"]) {
 			return true
 		}
 	}
@@ -540,12 +540,13 @@ func writeEmbeddedTree(fsys embed.FS, srcRoot, dstRoot string, fileMode, dirMode
 func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropRejectedApprovals bool) error {
 	return withFileLock(configPath, func() error {
 		cfg := map[string]interface{}{}
-		if data, err := os.ReadFile(configPath); err == nil && len(data) > 0 {
-			if err := json.Unmarshal(data, &cfg); err != nil {
+		original, readErr := os.ReadFile(configPath)
+		if readErr == nil && len(original) > 0 {
+			if err := json.Unmarshal(original, &cfg); err != nil {
 				return fmt.Errorf("parse %s: %w", configPath, err)
 			}
-		} else if err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("read %s: %w", configPath, err)
+		} else if readErr != nil && !os.IsNotExist(readErr) {
+			return fmt.Errorf("read %s: %w", configPath, readErr)
 		}
 
 		plugins, _ := cfg["plugins"].(map[string]interface{})
@@ -559,7 +560,17 @@ func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropR
 		if entries == nil {
 			entries = map[string]interface{}{}
 		}
-		entries["defenseclaw"] = map[string]interface{}{"enabled": true}
+		// Merge, so keys an operator wrote under the entry (hooks, config)
+		// stay (GAP-0596). Only "enabled" is written by DefenseClaw.
+		entry, _ := entries["defenseclaw"].(map[string]interface{})
+		if entry == nil {
+			entry = map[string]interface{}{}
+		}
+		if err := reconcileOpenClawPluginConfig(entry, configPath, original); err != nil {
+			return err
+		}
+		entry["enabled"] = true
+		entries["defenseclaw"] = entry
 		plugins["entries"] = entries
 
 		load, _ := plugins["load"].(map[string]interface{})
@@ -631,7 +642,7 @@ func uninstallOpenClawExtension(ocHome string, dropRejectedApprovals bool) error
 	if plugins != nil {
 		plugins["allow"] = removeString(plugins["allow"], "defenseclaw")
 		if entries, ok := plugins["entries"].(map[string]interface{}); ok {
-			delete(entries, "defenseclaw")
+			removeDefenseClawEntryKeys(entries)
 			plugins["entries"] = entries
 		}
 		if load, ok := plugins["load"].(map[string]interface{}); ok {
@@ -682,6 +693,38 @@ func removeString(existing interface{}, s string) []interface{} {
 		out = append(out, v)
 	}
 	return out
+}
+
+// openClawEntryHasDefenseClawKeys reports whether plugins.entries.defenseclaw
+// still holds what setup writes ("enabled"), is empty, or is not an object.
+// An entry left with only keys an operator wrote (hooks, config) is theirs.
+func openClawEntryHasDefenseClawKeys(entry interface{}) bool {
+	if entry == nil {
+		return false
+	}
+	m, ok := entry.(map[string]interface{})
+	if !ok {
+		return true
+	}
+	_, enabled := m["enabled"]
+	return enabled || len(m) == 0
+}
+
+// removeDefenseClawEntryKeys takes back what setup wrote under
+// plugins.entries.defenseclaw: the "enabled" key, and the entry itself when
+// no key an operator wrote is left in it (GAP-0596).
+func removeDefenseClawEntryKeys(entries map[string]interface{}) {
+	entry, ok := entries["defenseclaw"].(map[string]interface{})
+	if !ok {
+		delete(entries, "defenseclaw")
+		return
+	}
+	delete(entry, "enabled")
+	if len(entry) == 0 {
+		delete(entries, "defenseclaw")
+		return
+	}
+	entries["defenseclaw"] = entry
 }
 
 func removeDefenseClawLoadPaths(existing interface{}) []interface{} {
@@ -737,7 +780,7 @@ func (c *OpenClawConnector) VerifyClean(opts SetupOpts) error {
 		if json.Unmarshal(data, &cfg) == nil {
 			if plugins, ok := cfg["plugins"].(map[string]interface{}); ok {
 				if entries, ok := plugins["entries"].(map[string]interface{}); ok {
-					if _, found := entries["defenseclaw"]; found {
+					if openClawEntryHasDefenseClawKeys(entries["defenseclaw"]) {
 						residual = append(residual, "openclaw.json still has defenseclaw plugin entry")
 					}
 				}

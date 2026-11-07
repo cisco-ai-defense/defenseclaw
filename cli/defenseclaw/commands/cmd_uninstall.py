@@ -72,10 +72,15 @@ from defenseclaw import config as config_module
 # Imported here, not where it is used: by then the data removal has deleted
 # the virtual environment this CLI runs from (GAP-1397).
 from defenseclaw.bootstrap import remove_own_api_port_claims
-from defenseclaw.commands import windows_native_uninstall, windows_uninstall_helper
+from defenseclaw.commands import legacy_setup_install, windows_uninstall_helper
 from defenseclaw.commands.cmd_doctor import _codex_otel_marked_kept
 from defenseclaw.connector_paths import claude_settings_paths, codex_home
 from defenseclaw.file_lock import tui_lock_held
+from defenseclaw.winquote import (
+    powershell_literal,
+    powershell_literal_before_typographic_quotes,
+    powershell_literal_value,
+)
 
 # Connectors whose teardown the Python CLI knows how to perform locally
 # without going through ``defenseclaw-gateway connector teardown``. This
@@ -241,6 +246,11 @@ class UninstallPlan:
     # DefenseClaw Setup left after the installer replaced it (Windows,
     # --binaries only).
     setup_leftovers: tuple[str, ...] = ()
+    # until the 0.8 bridge retires: legacy_setup is a DefenseClaw Setup 0.8.x
+    # install the installer left beside this one (its data in another folder,
+    # review L5 of cowork-1-0-8 GAP-0088). uninstall removes it without
+    # running any of its programs (Windows, uninstall only).
+    legacy_setup: legacy_setup_install.LegacySetupInstall | None = None
     # observability_teardown removes the local observability stack
     # (`defenseclaw setup local-observability`) and its data volumes before
     # its Compose files in data_dir go (uninstall --all only).
@@ -361,33 +371,29 @@ def uninstall_cmd(
     stop_sandboxes: bool = False,
 ) -> None:
     """Uninstall DefenseClaw (reversibly by default)."""
-    if _dispatch_native_windows_uninstall(
-        wipe_data=wipe_data,
-        binaries=binaries,
-        dry_run=dry_run,
-        yes=yes,
-    ):
-        return
-
     plan = _build_plan(
         wipe_data=wipe_data,
         binaries=binaries,
         revert_openclaw=not keep_openclaw,
         remove_plugin=not keep_openclaw,
         skip_sandbox_teardown=skip_sandbox_teardown,
+        legacy_setup=True,
     )
     plan = _with_listed_sandboxes(plan, stop_sandboxes)
     ux.banner("DefenseClaw Uninstall")
     _render_plan(plan, dry_run=dry_run)
     cowork_plugin = _cowork_plugin_built(plan)
-    if cowork_plugin and dry_run:
-        ux.echo(f"  • the Cowork plugin stays in your Claude account: {_COWORK_REMOVAL_STEP}")
+    if cowork_plugin:
+        ux.echo(f"  • {_COWORK_PLUGIN_STAYS}")
 
     if dry_run:
         refusal = _open_tui_refusal(plan) or _running_sandboxes_refusal(plan)
         if refusal:
             # The real run stops at plan validation (GAP-2585).
             ux.warn(f"a real run would stop before any change: {refusal}")
+        if cowork_plugin:
+            # The real run ends with this step; the dry run shows it too (GAP-0084 review F1).
+            ux.echo(f"  • DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
         ux.subhead("(dry-run — nothing modified)")
         return
 
@@ -401,7 +407,8 @@ def uninstall_cmd(
     # Found before the teardown: --binaries removes the CLI's own files.
     opencode_binary = opencode_service.account_binary() if "opencode" in plan.connectors else ""
     gateway_ports = _configured_gateway_ports()
-    _execute_plan(plan)
+    result = _execute_plan(plan)
+    cowork_problem = _record_cowork_removal(plan.data_dir) if cowork_plugin and plan.remove_data_dir else ""
     _remove_marked_native_otel_left(gateway_ports)
     if opencode_binary:
         # OpenCode V2's background server kept the plugin it loaded (rel-1-0-6 GAP-0026).
@@ -410,14 +417,46 @@ def uninstall_cmd(
     if plan.connectors:
         # The plan said so; the end says it again, once it is true (GAP-0255).
         ux.warn("Close any agent session still open: it runs without DefenseClaw's hooks now.")
-    if cowork_plugin:
+    if cowork_plugin and not cowork_problem:
         ux.warn(f"DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
     _render_kept_and_next_steps(plan)
+    legacy_left = _legacy_setup_left(result) if plan.legacy_setup is not None else ""
+    if cowork_problem:
+        if legacy_left:
+            _print_legacy_setup_left(legacy_left)
+        _report_cowork_removal_not_recorded(cowork_problem)
+    if legacy_left:
+        _print_legacy_setup_left(legacy_left)
+        raise SystemExit(1)
 
+
+_LEGACY_SETUP_PHASE = "DefenseClaw Setup 0.8.x removal"
+
+
+def _legacy_setup_left(result: ExecutionResult) -> str:
+    """What the removal of a DefenseClaw Setup 0.8.x install could not do ("" when all of it went)."""
+    for phase in result.phases:
+        if phase.name == _LEGACY_SETUP_PHASE and phase.status == "failed":
+            return phase.detail
+    return ""
+
+
+def _print_legacy_setup_left(detail: str) -> None:
+    ux.err(f"DefenseClaw Setup 0.8.x was not removed completely: {detail}")
+    ux.err("Fix what is named above (close a program that holds a file, for example), then run the command again.")
+
+
+# The one reminder that always reaches the user: the in-chat notice after an
+# uninstall reaches only the model, and Claude Desktop shows no banner. Every
+# path (uninstall plan, dry run, reset) prints this
+# constant (cowork-1-0-8 GAP-0084).
+_COWORK_PLUGIN_STAYS = (
+    "The DefenseClaw Cowork plugin stays in your Claude account. Remove it in Claude: Customize > Plugins."
+)
 
 _COWORK_REMOVAL_STEP = (
     "remove it in Claude Desktop (Customize > Plugins, then the ... menu > Remove). "
-    "Until then Cowork tool calls are blocked."
+    "A plugin built with 1.0.9 lets Cowork calls run after the data folder is removed; older plugins may block."
 )
 
 
@@ -426,6 +465,36 @@ def _cowork_plugin_built(plan: UninstallPlan) -> bool:
     from defenseclaw import cowork
 
     return bool(plan.data_dir) and os.path.exists(cowork.state_path(plan.data_dir))
+
+
+def _record_cowork_removal(data_dir: str) -> str:
+    """Write the Cowork removal marker; return why it could not, or "".
+
+    It runs after the teardown, so a refusal must not stop what is left of the
+    uninstall: the caller finishes, then reports it and exits 1
+    (cowork-1-0-8 GAP-0085). No marker means the plugin keeps blocking, never
+    that Cowork looks uninstalled.
+    """
+    from defenseclaw import cowork
+
+    try:
+        cowork.mark_uninstalled(data_dir)
+    except OSError as exc:
+        return str(exc)
+    return ""
+
+
+def _print_cowork_removal_not_recorded(problem: str) -> None:
+    ux.err(f"DefenseClaw could not record its removal for the Cowork plugin: {problem}")
+    ux.err(
+        "Until you remove the DefenseClaw plugin in Claude Desktop (Customize > Plugins, then the ... menu > "
+        "Remove), it blocks every Cowork tool call."
+    )
+
+
+def _report_cowork_removal_not_recorded(problem: str) -> None:
+    _print_cowork_removal_not_recorded(problem)
+    raise SystemExit(1)
 
 
 _NATIVE_OTEL_READ_LIMIT = 1024 * 1024
@@ -844,116 +913,6 @@ def _render_reinstall_step(plan: UninstallPlan) -> None:
         click.echo(f"      curl -LsSf {_INSTALL_URL}/install.sh | bash")
 
 
-def _dispatch_native_windows_uninstall(
-    *,
-    wipe_data: bool,
-    dry_run: bool,
-    yes: bool,
-    binaries: bool = False,
-    platform_name: str | None = None,
-) -> bool:
-    """Prefer authenticated native Setup before consulting generic markers.
-
-    Setup removes its own program files either way. With binaries, what an
-    earlier script install left in %USERPROFILE%\\.local\\bin (and its user
-    Path entry) and the folders a replaced Setup left go too, once Setup is
-    done.
-    """
-
-    try:
-        request = windows_native_uninstall.prepare_native_windows_uninstall(
-            wipe_data=wipe_data,
-            platform_name=platform_name,
-        )
-    except windows_native_uninstall.NativeWindowsUninstallRefusal as exc:
-        raise click.ClickException(str(exc)) from exc
-    if request is None:
-        return False
-
-    ux.banner("DefenseClaw Uninstall")
-    ux.echo(f"  {ux.dim('→')} authenticated native Windows installation")
-    ux.echo(f"  {ux.dim('→')} Setup: {request.setup_path}")
-    if wipe_data:
-        ux.echo(f"  {ux.dim('→')} user data will be deleted")
-    else:
-        ux.echo(f"  {ux.dim('→')} user data will be preserved")
-    if binaries:
-        ux.echo(
-            f"  {ux.dim('→')} after Setup: DefenseClaw files left in %USERPROFILE%\\.local\\bin "
-            "and its user Path entry are removed too"
-        )
-    ux.echo(f"  {ux.dim('→')} a restart may be required to finish exact cleanup")
-
-    if dry_run:
-        ux.subhead("(dry-run — nothing modified)")
-        return True
-    if not yes and not click.confirm("  Proceed?", default=False):
-        ux.subhead("Cancelled.")
-        raise SystemExit(1)
-
-    data_dir = str(config_module.default_data_path())
-    # until 1.1: read what a removed connector left before Setup runs: Setup
-    # may delete the data folder, and with it the records that name the
-    # agent configs outside it.
-    left_before = _removed_connector_leftover_lines(data_dir, data_removed=True) if wipe_data else []
-    gateway_ports = _configured_gateway_ports()
-    try:
-        outcome = windows_native_uninstall.execute_native_windows_uninstall(request)
-    except windows_native_uninstall.NativeWindowsUninstallRefusal as exc:
-        raise click.ClickException(str(exc)) from exc
-    if outcome.returncode == 0:
-        ux.ok("Native Windows uninstall completed.")
-        _relay_native_setup_removed_connector_leftovers(outcome.stdout, left_before, data_dir, wipe_data=wipe_data)
-        _remove_marked_native_otel_left(gateway_ports)
-        if binaries:
-            _remove_script_install_after_native_setup(request.platform_name)
-        return True
-    if outcome.restart_required:
-        ux.ok("Native Windows uninstall is armed; restart required (Windows exit code 3010).")
-        _relay_native_setup_removed_connector_leftovers(outcome.stdout, left_before, data_dir, wipe_data=wipe_data)
-        raise SystemExit(outcome.returncode)
-    if outcome.refused:
-        ux.err("Authenticated native Setup refused the uninstall (Windows exit code 1603).")
-        raise SystemExit(outcome.returncode)
-    ux.err(f"Authenticated native Setup exited with Windows code {outcome.returncode}.")
-    raise SystemExit(outcome.returncode)
-
-
-def _remove_script_install_after_native_setup(platform_name: str) -> None:
-    """Remove what install.ps1 left beside a native Setup install (--binaries).
-
-    The launchers go only when the plan validation proves them DefenseClaw's
-    (the installer's defenseclaw.cmd shim); a refusal is reported with what
-    stays, and the uninstall exits non-zero.
-    """
-    data_dir = str(config_module.default_data_path())
-    install_root, binary_targets = _owned_binary_targets(platform_name)
-    binary_targets += _installer_uv_targets(install_root, platform_name)
-    plan = UninstallPlan(
-        platform_name=platform_name,
-        install_root=install_root,
-        data_dir=data_dir,
-        managed_venv=os.path.join(data_dir, ".venv"),
-        gateway_path="",
-        binary_targets=binary_targets,
-        remove_binaries=True,
-    )
-    try:
-        if any(os.path.lexists(path) for path in binary_targets):
-            _remove_binaries(plan)
-        else:
-            _remove_install_bookkeeping(install_root, data_dir)
-            if _install_root_empties(plan):
-                with contextlib.suppress(OSError):
-                    os.rmdir(install_root)
-                _remove_user_path_entry(plan)
-        _remove_setup_leftovers(_windows_setup_leftovers(platform_name))
-    except (OSError, click.ClickException) as exc:
-        detail = exc.format_message() if isinstance(exc, click.ClickException) else str(exc)
-        ux.err(f"DefenseClaw files in {install_root} were not all removed: {detail}")
-        raise SystemExit(1) from exc
-
-
 # ---------------------------------------------------------------------------
 # reset
 # ---------------------------------------------------------------------------
@@ -997,6 +956,8 @@ def reset_cmd(skip_sandbox_teardown: bool, yes: bool, stop_sandboxes: bool = Fal
     _render_plan(plan, dry_run=False)
     # Read before the wipe: reset deletes the Cowork state this looks for.
     cowork_plugin = _cowork_plugin_built(plan)
+    if cowork_plugin:
+        ux.echo(f"  • {_COWORK_PLUGIN_STAYS}")
 
     _refuse_running_sandboxes(plan)
     if not yes and not click.confirm(
@@ -1007,9 +968,12 @@ def reset_cmd(skip_sandbox_teardown: bool, yes: bool, stop_sandboxes: bool = Fal
         raise SystemExit(1)
 
     _execute_plan(plan)
-    if cowork_plugin:
+    cowork_problem = _record_cowork_removal(plan.data_dir) if cowork_plugin else ""
+    if cowork_plugin and not cowork_problem:
         ux.warn(f"DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
     ux.ok("Reset complete. Run 'defenseclaw quickstart' to reinstall.")
+    if cowork_problem:
+        _report_cowork_removal_not_recorded(cowork_problem)
 
 
 # ---------------------------------------------------------------------------
@@ -1074,9 +1038,11 @@ def _build_plan(
     preserve_data_entries: tuple[str, ...] = (),
     platform_name: str | None = None,
     skip_sandbox_teardown: bool = False,
+    legacy_setup: bool = False,
 ) -> UninstallPlan:
     platform_name = platform_name or sys.platform
     data_dir = str(config_module.default_data_path())
+    legacy = legacy_setup_install.find(platform_name) if legacy_setup else None
     install_root, binary_targets = _owned_binary_targets(platform_name)
     binary_targets += _installer_uv_targets(install_root, platform_name)
     # Reset keeps .venv, so the launchers that run it keep working and stay:
@@ -1162,7 +1128,8 @@ def _build_plan(
         ),
         binary_targets=binary_targets,
         data_bound_launchers=data_bound_launchers,
-        setup_leftovers=_windows_setup_leftovers(platform_name) if binaries else (),
+        setup_leftovers=_windows_setup_leftovers(platform_name, legacy) if binaries else (),
+        legacy_setup=legacy,
         observability_teardown=(
             wipe_data and not preserve_data_entries and _local_observability_stack_file(data_dir) != ""
         ),
@@ -1289,20 +1256,22 @@ def _installed_mac_app(platform_name: str) -> str:
 _WINDOWS_SETUP_LEFTOVERS = ("HookRuntime", "InstallerState")
 
 
-def _windows_setup_leftovers(platform_name: str) -> tuple[str, ...]:
+def _windows_setup_leftovers(
+    platform_name: str, legacy: legacy_setup_install.LegacySetupInstall | None = None
+) -> tuple[str, ...]:
     if platform_name != "win32":
         return ()
-    try:
-        local_app_data = windows_native_uninstall._known_folder_path(windows_native_uninstall._LOCAL_APP_DATA_FOLDER_ID)
-    except Exception:  # noqa: BLE001 - no Known Folder means nothing to clean.
-        return ()
+    local_app_data = legacy_setup_install.local_app_data()
     root = os.path.join(local_app_data, "DefenseClaw") if local_app_data else ""
     state = os.path.join(root, "HookRuntime", "hook-runtime-state.json") if root else ""
+    # A DefenseClaw Setup 0.8.x install this uninstall removes takes its
+    # program folder, its cache and its launcher state with it.
+    removed = legacy is not None and not legacy.problem
     if (
         not root
-        or os.path.lexists(os.path.join(local_app_data, "Programs", "DefenseClaw"))
-        or os.path.lexists(os.path.join(root, "InstallerCache"))
-        or (os.path.lexists(state) and not _installer_launcher_trampoline(state, root))
+        or (not removed and os.path.lexists(os.path.join(local_app_data, "Programs", "DefenseClaw")))
+        or (not removed and os.path.lexists(os.path.join(root, "InstallerCache")))
+        or (os.path.lexists(state) and not removed and not _installer_launcher_trampoline(state, root))
     ):
         # A Setup install, or its cleanup after the next sign-in, still owns them.
         return ()
@@ -1324,6 +1293,16 @@ def _installer_launcher_trampoline(state_path: str, root: str) -> bool:
     except (OSError, ValueError, AttributeError):
         return False
     return isinstance(hook, str) and os.path.normcase(os.path.abspath(hook)).startswith(delegated)
+
+
+def _remove_legacy_setup_install(install: legacy_setup_install.LegacySetupInstall) -> list[str]:
+    """Remove a DefenseClaw Setup 0.8.x install; return what could not be done."""
+    done, problems = legacy_setup_install.remove(install, edit_user_path=_edit_windows_user_path)
+    for line in done:
+        ux.ok(line)
+    for line in problems:
+        ux.warn(line)
+    return problems
 
 
 def _remove_setup_leftovers(paths: tuple[str, ...]) -> None:
@@ -2449,72 +2428,6 @@ def _move_removed_connector_backups_out(data_dir: str) -> dict[str, str]:
     return moved
 
 
-def _setup_removed_connector_leftover_lines(stdout: str) -> list[str]:
-    """until 1.1: the removed-connector leftovers native Setup printed in quiet mode."""
-    lines: list[str] = []
-    in_block = False
-    for raw in (stdout or "").splitlines():
-        line = raw.rstrip()
-        if _LEFTOVER_HEADER.match(line):
-            in_block = True
-            lines.append(line)
-        elif in_block and line.startswith("  - "):
-            lines.append(line)
-        else:
-            in_block = False
-    return lines
-
-
-def _merge_leftover_lines(*blocks: list[str]) -> list[str]:
-    """One list of leftover lines: each connector's header once, each item once."""
-    order: list[str] = []
-    items: dict[str, list[str]] = {}
-    for block in blocks:
-        header = ""
-        for line in block:
-            if not line.startswith("  - "):
-                header = line
-                if header not in items:
-                    items[header] = []
-                    order.append(header)
-            elif header and line not in items[header]:
-                items[header].append(line)
-    out: list[str] = []
-    for header in order:
-        if items[header]:
-            out.append(header)
-            out.extend(items[header])
-    return out
-
-
-def _relay_native_setup_removed_connector_leftovers(
-    stdout: str, left_before: list[str], data_dir: str, *, wipe_data: bool
-) -> None:
-    """until 1.1: after native Setup, list what a removed connector left, with the steps.
-
-    Setup's teardown lists its leftovers on stdout in quiet mode, read before
-    it removes any data; *left_before* is this command's own list from before
-    Setup ran (the agent configs outside a data folder Setup deletes). Without
-    data removal the host is read again.
-    """
-    setup_lines = _setup_removed_connector_leftover_lines(stdout)
-    if wipe_data:
-        # What the data removal took is not listed.
-        under = os.path.normcase(os.path.join(os.path.abspath(data_dir), ""))
-        setup_lines = [
-            line
-            for line in setup_lines
-            if not (line.startswith("  - ") and os.path.normcase(line[len("  - ") :]).startswith(under))
-        ]
-    after = [] if wipe_data else _removed_connector_leftover_lines(data_dir, data_removed=False)
-    lines = _merge_leftover_lines(setup_lines, left_before, after)
-    if not lines:
-        return
-    if wipe_data:
-        lines.append(_DATA_REMOVED_LEFTOVER_NOTE)
-    click.echo("\n".join(lines))
-
-
 def _removed_connectors_in_active_state(data_dir: str) -> tuple[str, ...]:
     """Removed connector names the gateway's active roster still lists.
 
@@ -2718,6 +2631,11 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
                 f"      {ux.dim('·')} kept: {', '.join(os.path.basename(target) for target in kept)} "
                 f"in {plan.install_root} (add --binaries to remove them too)"
             )
+    if plan.legacy_setup is not None:
+        first, *rest = legacy_setup_install.plan_lines(plan.legacy_setup, plan.data_dir)
+        ux.echo(f"  • {ux.bold('DefenseClaw Setup:')}   {first}")
+        for line in rest:
+            ux.echo(f"      {ux.dim('·')} {line}")
     if plan.observability_teardown:
         ux.echo(
             f"  • {ux.bold('local observability:')} its containers and data volumes go (docker compose down --volumes)"
@@ -2801,9 +2719,19 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         # scripts and config patches. This helper is idempotent and
         # reports "already removed" when the teardown already removed it.
         run_phase("plugin removal", lambda: _remove_plugin(plan))
-    if plan.setup_leftovers:
+    setup_leftovers = plan.setup_leftovers
+    if plan.legacy_setup is not None:
+        # After connector teardown; before the leftovers and the data, which
+        # the old gateway may hold open when both use one data folder.
+        problems = _remove_legacy_setup_install(plan.legacy_setup)
+        phases.append(
+            ExecutionPhaseResult(_LEGACY_SETUP_PHASE, "failed" if problems else "succeeded", "; ".join(problems))
+        )
+        # What is left on disk now decides, not the plan.
+        setup_leftovers = _windows_setup_leftovers(plan.platform_name) if plan.remove_binaries else ()
+    if setup_leftovers:
         # After connector teardown, so no agent hook still runs the launcher.
-        run_phase("Setup leftovers removal", lambda: _remove_setup_leftovers(plan.setup_leftovers))
+        run_phase("Setup leftovers removal", lambda: _remove_setup_leftovers(setup_leftovers))
     if plan.hook_temp_dirs:
         # After connector teardown: no hook runs in them any more.
         _remove_hook_temp_dirs(plan.hook_temp_dirs)
@@ -3022,19 +2950,26 @@ def _orphan_copilot_handler_owned(handler: object) -> bool:
 
         if script == "; ".join([*statements, *run("")]):
             return True  # 1.0.0 render, before the removed-deployment guard
-        unquoted = binary[1:-1].replace("''", "'")
-        gateway = "'" + ntpath.join(ntpath.dirname(unquoted), "defenseclaw-gateway.exe").replace("'", "''") + "'"
-        guard = (
-            "if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { "
-            f"if (-not (Microsoft.PowerShell.Management\\Test-Path -LiteralPath {binary}) -and "
-            f"-not (Microsoft.PowerShell.Management\\Test-Path -LiteralPath {gateway})) {{ exit 0 }} }} "
-            f"elseif (-not [System.IO.File]::Exists({binary}) -and "
-            f"-not [System.IO.File]::Exists({gateway})) {{ exit 0 }}"
+        gateway = powershell_literal(
+            ntpath.join(ntpath.dirname(powershell_literal_value(binary[1:-1])), "defenseclaw-gateway.exe")
         )
+
+        def guard(gateway: str) -> str:
+            return (
+                "if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { "
+                f"if (-not (Microsoft.PowerShell.Management\\Test-Path -LiteralPath {binary}) -and "
+                f"-not (Microsoft.PowerShell.Management\\Test-Path -LiteralPath {gateway})) {{ exit 0 }} }} "
+                f"elseif (-not [System.IO.File]::Exists({binary}) -and "
+                f"-not [System.IO.File]::Exists({gateway})) {{ exit 0 }}"
+            )
+
         # The guarded render through 1.0.6, and the current one, whose
-        # Constrained Language branch exits 1 when the launcher never started.
+        # Constrained Language branch exits 1 when the launcher never started;
+        # builds before 1.0.9 doubled only the apostrophe of the gateway path
+        # (g072 review 3 M3), as they did the launcher's in binary.
         return script in {
-            "; ".join([*statements, guard, *run(fail_closed)])
+            "; ".join([*statements, guard(literal), *run(fail_closed)])
+            for literal in (gateway, powershell_literal_before_typographic_quotes(gateway))
             for fail_closed in ("", "if ($null -eq $LASTEXITCODE) { exit 1 }; ")
         }
 
@@ -3313,7 +3248,7 @@ def _windows_developer_files(install_root: str) -> list[str]:
 
 
 def _powershell_quoted_paths(files: list[str]) -> str:
-    return ", ".join("'" + path.replace("'", "''") + "'" for path in files)
+    return ", ".join(powershell_literal(path) for path in files)
 
 
 def _windows_developer_removal(files: list[str]) -> str:
@@ -4486,7 +4421,13 @@ def _revert_openclaw_python(plan: UninstallPlan) -> None:
     # Fall back to the surgical restore — removes our plugin registration
     # without rolling the file back to its exact prior state.
     try:
-        ok = restore_openclaw_config(plan.openclaw_config_file, original_model="")
+        # defenseclaw reset keeps the plugin folder (remove_plugin=False): leave the
+        # entry disabled so OpenClaw cannot load it again (GAP-0598).
+        ok = restore_openclaw_config(
+            plan.openclaw_config_file,
+            original_model="",
+            keep_disabled_if_plugin_present=not plan.remove_plugin,
+        )
         if ok:
             ux.ok(f"removed DefenseClaw entries from {plan.openclaw_config_file}")
         else:

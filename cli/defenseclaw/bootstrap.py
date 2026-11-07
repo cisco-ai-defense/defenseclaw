@@ -34,7 +34,6 @@ import io
 import json
 import os
 import re
-import shlex
 import shutil
 import stat
 import subprocess
@@ -49,7 +48,8 @@ from defenseclaw.connector_paths import (
     connector_config_files,
     connector_hook_config_paths,
     hermes_config_path,
-    opencode_writable_plugin_folder,
+    opencode_custody_text,
+    opencode_unsafe_plugin_paths,
 )
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.scanner_binary import MCP_SCANNER_BINARY, SKILL_SCANNER_BINARY
@@ -736,7 +736,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
 
     transaction_app = AppContext()
     transaction_app.cfg = cfg
-    from defenseclaw.commands.cmd_setup import _capture_setup_config_snapshot
+    from defenseclaw.commands.cmd_setup import RollbackSourceRefusedError, _capture_setup_config_snapshot
 
     preserved_trusted_prefixes: tuple[str, ...] | None = None
     if options.trusted_binary_prefixes is not None:
@@ -807,11 +807,13 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     try:
         setup_snapshot = _capture_setup_config_snapshot(cfg)
     except OSError as exc:
+        # The file is in this account's own data folder: name it (GAP-0074).
+        reason = exc.for_user("defenseclaw init") if isinstance(exc, RollbackSourceRefusedError) else str(exc)
         setup.append(
             StepResult(
                 "First-run transaction",
                 "fail",
-                f"could not establish the protected first-run rollback point: {exc}",
+                f"could not establish the protected first-run rollback point: {reason}",
                 "defenseclaw init",
             )
         )
@@ -2332,15 +2334,16 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
         path = connector_config_files("opencode")[0]
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "OpenCode bridge plugin found")
-        if loose := opencode_writable_plugin_folder([path]):
+        if unsafe := opencode_unsafe_plugin_paths([path]):
             # The gateway will not install its plugin there and does not
             # start; `setup opencode` would fail the same way.
+            advice = opencode_custody_text(unsafe)
             return StepResult(
                 "Connector",
                 "warn",
-                f"{loose} can be written by other accounts, so the gateway does not install the "
-                "OpenCode plugin there; fix its mode, then run `defenseclaw-gateway restart`",
-                f"chmod go-w {shlex.quote(loose)}",
+                f"{advice.named} {advice.why}, so the gateway does not install the OpenCode plugin there; "
+                f"{advice.action}, then run `defenseclaw-gateway restart`",
+                advice.remedy,
             )
         return StepResult(
             "Connector",

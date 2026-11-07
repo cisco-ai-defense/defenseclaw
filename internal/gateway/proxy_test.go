@@ -1530,9 +1530,7 @@ func TestResolveProvider_FetchInterceptor(t *testing.T) {
 // matches the overlay's Name, so per-instance TLS / sub-block posture still
 // apply.
 func TestResolveProvider_InstanceOverlay_FamilyMismatchAllowsNameMatch(t *testing.T) {
-	dir := t.TempDir()
-	overlayPath := filepath.Join(dir, "custom-providers.json")
-	overlay := `{
+	registry := overlayRegistryForTest(t, `{
 		"providers": [{
 			"name": "acme-bedrock",
 			"domains": ["llm.acme.internal"],
@@ -1540,18 +1538,7 @@ func TestResolveProvider_InstanceOverlay_FamilyMismatchAllowsNameMatch(t *testin
 			"base_url": "https://llm.acme.internal:8443",
 			"tls": {"insecure_skip_verify": true}
 		}]
-	}`
-	if err := os.WriteFile(overlayPath, []byte(overlay), 0o600); err != nil {
-		t.Fatalf("write overlay: %v", err)
-	}
-	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", overlayPath)
-	if err := ReloadProviderRegistry(); err != nil {
-		t.Fatalf("ReloadProviderRegistry: %v", err)
-	}
-	t.Cleanup(func() {
-		t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", "")
-		_ = ReloadProviderRegistry()
-	})
+	}`)
 
 	prov := &mockProvider{}
 	insp := newMockInspector()
@@ -1564,10 +1551,11 @@ func TestResolveProvider_InstanceOverlay_FamilyMismatchAllowsNameMatch(t *testin
 		Messages:     []ChatMessage{{Role: "user", Content: "hi"}},
 		TargetAPIKey: "test-key",
 		TargetURL:    "https://llm.acme.internal:8443",
+		providers:    registry,
 	}
 	got := proxy.resolveProviderFn(req)
 	if got == nil {
-		t.Fatalf("expected overlay-bound provider, got nil")
+		t.Fatal("expected overlay-bound provider, got nil")
 	}
 	bp, ok := got.(*bifrostProvider)
 	if !ok {
@@ -1588,26 +1576,13 @@ func TestResolveProvider_InstanceOverlay_FamilyMismatchAllowsNameMatch(t *testin
 // would be incorrect; the resolver must log and fall back. This is the
 // case the loosened guard intentionally still catches.
 func TestResolveProvider_InstanceOverlay_FamilyMismatchUnrelatedURLSkipsOverlay(t *testing.T) {
-	dir := t.TempDir()
-	overlayPath := filepath.Join(dir, "custom-providers.json")
-	overlay := `{
+	registry := overlayRegistryForTest(t, `{
 		"providers": [{
 			"name": "acme-bedrock",
 			"base_provider_type": "bedrock",
 			"base_url": "https://llm.acme.internal:8443"
 		}]
-	}`
-	if err := os.WriteFile(overlayPath, []byte(overlay), 0o600); err != nil {
-		t.Fatalf("write overlay: %v", err)
-	}
-	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", overlayPath)
-	if err := ReloadProviderRegistry(); err != nil {
-		t.Fatalf("ReloadProviderRegistry: %v", err)
-	}
-	t.Cleanup(func() {
-		t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", "")
-		_ = ReloadProviderRegistry()
-	})
+	}`)
 
 	prov := &mockProvider{}
 	insp := newMockInspector()
@@ -1620,6 +1595,7 @@ func TestResolveProvider_InstanceOverlay_FamilyMismatchUnrelatedURLSkipsOverlay(
 		Messages:     []ChatMessage{{Role: "user", Content: "hi"}},
 		TargetAPIKey: "sk-openai-key",
 		TargetURL:    "https://api.openai.com",
+		providers:    registry,
 	}
 	got := proxy.resolveProviderFn(req)
 	if got == nil {

@@ -12,17 +12,18 @@
 
 On Windows the managed install runs as LocalSystem and writes its per-user
 runtime into each enrolled account's ``%USERPROFILE%\\.defenseclaw`` with
-the managed access list (LocalSystem and Administrators full control). An
-uninstall from before 1.0.8 kept those files, and a later per-user install
-of the same account failed its first run: the hook contract lock was "not
-protected", so no rollback point could be taken (cowork-1-0-8 GAP-0045).
+the managed access list (LocalSystem and Administrators full control, the
+account Modify, a read-only OWNER RIGHTS entry). An uninstall from before
+1.0.8 kept those files, and a later per-user install of the same account
+failed its first run: the hook contract lock was "not protected", so no
+rollback point could be taken (cowork-1-0-8 GAP-0045).
 
 The first run of a per-user install with no configuration yet moves those
 files, and only those, to a dated folder beside the data folder before it
 takes its rollback point. It never reads them, so nothing in them is trusted
 or restored. Nothing moves while a managed deployment is installed, once a
-per-user configuration exists, or for an entry another account could have
-written.
+per-user configuration exists, for an entry another account could have
+written, or for one with only the profile's own access list.
 """
 
 from __future__ import annotations
@@ -91,22 +92,70 @@ def _managed_deployment() -> str | None:
     return managed_deployment()
 
 
+# The field lock the managed runtime puts on what it writes into an
+# account's folder (windowsUserPathCanonicalACEs in
+# internal/enterprisehooks/install_windows.go): LocalSystem and
+# Administrators full control, the account Modify (never the right to change
+# the access list or take ownership), and a read-only OWNER RIGHTS entry. A
+# file the runtime created in such a folder carries the same grants without
+# the OWNER RIGHTS entry (foreign-hook-env.json, logs\hook-failures.jsonl).
+# A profile's own access list grants the account full control, so an entry
+# that only inherited it is never the managed install's.
+_ADMINISTRATORS = "S-1-5-32-544"
+_OWNER_RIGHTS = "S-1-3-4"
+_FILE_ALL_ACCESS = 0x001F01FF
+_GENERIC_ALL = 0x10000000
+_WRITE_RIGHTS = _GENERIC_ALL | 0x40000000 | 0x000D0156  # GENERIC_WRITE, WRITE_DAC/OWNER, DELETE, data
+_CHANGE_ACCESS = _GENERIC_ALL | 0x00040000 | 0x00080000  # WRITE_DAC, WRITE_OWNER
+_INHERIT_ONLY_ACE = 0x08
+
+
+def field_locked(entries: list[tuple[int, int, int, str]], account_sid: str) -> bool:
+    """Whether a DACL (``_windows_acl_snapshot`` entries) is the managed field lock.
+
+    Administrators hold full control; the account may write but not change
+    the access list or take ownership; an OWNER RIGHTS entry, if any, is
+    read-only. Inherit-only entries do not apply to the object itself.
+    """
+    admins_full = account_writes = False
+    for mask, access_mode, flags, sid in entries:
+        if access_mode != 1 or flags & _INHERIT_ONLY_ACE:
+            continue
+        if sid == _ADMINISTRATORS and (mask & _GENERIC_ALL or mask & _FILE_ALL_ACCESS == _FILE_ALL_ACCESS):
+            admins_full = True
+        if sid == account_sid:
+            if mask & _CHANGE_ACCESS:
+                return False
+            account_writes = account_writes or bool(mask & _WRITE_RIGHTS)
+        if sid == _OWNER_RIGHTS and mask & _WRITE_RIGHTS:
+            return False
+    return admins_full and account_writes
+
+
 def managed_custody(path: str) -> bool:
     """Whether *path* is held the way the managed install leaves it.
 
-    The per-user rule (only this account, OWNER RIGHTS and LocalSystem may
-    write) refuses it, while only this account, LocalSystem, Administrators
-    or TrustedInstaller can write it. An entry another account could write
-    is not DefenseClaw's managed custody and is left alone.
+    Only this account, LocalSystem, Administrators or TrustedInstaller can
+    write it, and its access list is the managed field lock
+    (:func:`field_locked`). An entry another account could write, or one
+    with the profile's plain access list, is not DefenseClaw's managed
+    custody and is left alone (cowork-1-0-8 GAP-0069).
     """
     from defenseclaw.file_permissions import (
+        _windows_acl_snapshot,
+        _windows_current_user_sid,
         windows_acl_custody_write_error,
-        windows_acl_write_error,
     )
 
-    if windows_acl_write_error(path) is None:
+    if windows_acl_custody_write_error(path, allow_current_user=True) is not None:
         return False
-    return windows_acl_custody_write_error(path, allow_current_user=True) is None
+    try:
+        # A null DACL has no entries, so it is never the field lock.
+        _owner, _null_dacl, entries = _windows_acl_snapshot(os.fspath(path))
+        account_sid = _windows_current_user_sid()
+    except OSError:
+        return False
+    return bool(account_sid) and field_locked(entries, account_sid)
 
 
 def _plain_entry(path: str) -> bool:

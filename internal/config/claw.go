@@ -40,7 +40,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	toml "github.com/pelletier/go-toml/v2"
-	yaml "gopkg.in/yaml.v3"
 )
 
 func tomlUnmarshal(data []byte, v any) error { return toml.Unmarshal(data, v) }
@@ -153,18 +152,45 @@ func (c *Config) activeConnector() string {
 		return normalizeConnectorKey(name)
 	}
 	if roster := c.rosterConnectorNames(); len(roster) > 0 {
-		mode := normalizeConnectorKey(string(c.Claw.Mode))
-		for _, name := range roster {
-			if name == mode {
-				return mode
-			}
-		}
-		return roster[0]
+		return rosterPrimary(roster, c.Claw.Mode)
 	}
 	if mode := strings.TrimSpace(string(c.Claw.Mode)); mode != "" {
 		return normalizeConnectorKey(mode)
 	}
 	return ""
+}
+
+// rosterPrimary is the connector a roster resolves to when no
+// guardrail.connector names one: claw.mode when the roster lists it, else the
+// first name in sorted order. roster is normalized and sorted
+// (rosterConnectorNames). The Python Config.active_connector follows the same
+// rule; test/testdata/active-connectors.json pins both (GAP-0707).
+func rosterPrimary(roster []string, mode ClawMode) string {
+	want := normalizeConnectorKey(string(mode))
+	for _, name := range roster {
+		if name == want {
+			return want
+		}
+	}
+	return roster[0]
+}
+
+// migrateConnectorSelection settles the connector fields a load reads from. A
+// roster with no guardrail.connector boots the connector claw.mode names when
+// the roster lists it (rosterPrimary), as the Python CLI does (GAP-0707).
+// until 1.1: a retired singular connector, and every Secure Client config,
+// keep the first sorted roster key that dropRetiredConnectorSettings picks;
+// Secure Client selection does not change.
+func migrateConnectorSelection(cfg *Config, secureClient bool) {
+	unnamed := strings.TrimSpace(cfg.Guardrail.Connector) == ""
+	migrateLegacyConnectorIDs(cfg)
+	dropRetiredConnectorSettings(cfg)
+	if unnamed && !secureClient {
+		if roster := cfg.rosterConnectorNames(); len(roster) > 0 {
+			cfg.Guardrail.Connector = rosterPrimary(roster, cfg.Claw.Mode)
+		}
+	}
+	canonicalizeConnectorSelection(cfg)
 }
 
 // activeConnectors returns the configured connector roster for this config, in
@@ -178,6 +204,27 @@ func (c *Config) activeConnectors() []string {
 		return names
 	}
 	return []string{c.activeConnector()}
+}
+
+// GuardrailBootSet is the one decision the gateway boot makes from the roster.
+// multi is true when more than one connector is listed under
+// guardrail.connectors, enabled or not: the shared (multi-connector) boot runs
+// then and the single-connector boot does not. enabled and disabled split the
+// listed connectors by guardrail.connectors.<name>.enabled; enabled is what the
+// shared boot sets up, and a proxy connector in it makes that boot fail.
+// The Python config set check (cmd_config._check_guardrail_connector_roster)
+// refuses the files this decision cannot boot; test/testdata/active-connectors.json
+// pins both sides to the same cases.
+func (c *Config) GuardrailBootSet() (multi bool, enabled, disabled []string) {
+	configured := c.ActiveConnectors()
+	for _, name := range configured {
+		if c.Guardrail.EffectiveEnabled(strings.ToLower(strings.TrimSpace(name))) {
+			enabled = append(enabled, name)
+		} else {
+			disabled = append(disabled, name)
+		}
+	}
+	return len(configured) > 1, enabled, disabled
 }
 
 func (c *Config) rosterConnectorNames() []string {
@@ -831,26 +878,6 @@ func parseMCPServersJSONArray(data []byte) ([]MCPServerEntry, error) {
 	return entries, nil
 }
 
-// ParseMCPServersJSON is the exported wrapper around parseMCPServersJSON
-// so packages outside `config` (e.g. inventory's AI-discovery scanner)
-// can enumerate the servers declared inside a matched `mcp.json` /
-// `.cursor/mcp.json` / claude-desktop config file without duplicating the
-// parser. The input is the raw file bytes; the output is one
-// MCPServerEntry per top-level key in the JSON object form
-// (`{"mcpServers": {...}}` callers must pass the inner `mcpServers`
-// object; plain-object callers pass their whole file). Callers that need
-// the array shape should use ParseMCPServersJSONArray.
-func ParseMCPServersJSON(data []byte) ([]MCPServerEntry, error) {
-	return parseMCPServersJSON(data)
-}
-
-// ParseMCPServersJSONArray is the exported wrapper around
-// parseMCPServersJSONArray for callers that need the alternate top-level
-// array form (`[{"name": "...", ...}, ...]`).
-func ParseMCPServersJSONArray(data []byte) ([]MCPServerEntry, error) {
-	return parseMCPServersJSONArray(data)
-}
-
 // ReadMCPFromDotMCPJSON is the exported wrapper around the internal
 // `.mcp.json` reader so AI-discovery / signature-catalog callers can
 // enumerate the servers declared inside a matched file without
@@ -875,11 +902,7 @@ func ReadMCPFromJSONCPaths(path string, paths ...[]string) ([]MCPServerEntry, er
 	if err != nil {
 		return nil, err
 	}
-	var doc map[string]any
-	if err := json.Unmarshal(jsonc.Strip(data), &doc); err != nil {
-		return nil, err
-	}
-	return readMCPFromAnyPaths(doc, paths...)
+	return ParseMCPFromJSONCPaths(data, paths...)
 }
 
 // ReadMCPFromCodexConfigTOML is the exported wrapper around the
@@ -1498,9 +1521,7 @@ type claudeJSONScopes struct {
 // parseClaudeJSONScopes unmarshals ~/.claude.json once and splits the two
 // MCP-server scopes out. `user` is the top-level mcpServers map (user scope);
 // `projects` is the flattened union of every projects.<path>.mcpServers block
-// (local scope). Callers that already have the raw bytes should prefer this
-// helper to the pair of ReadMCPFromClaudeSettings + ReadMCPFromClaudeJSONProjects
-// wrappers, which each open and decode the file independently.
+// (local scope), from one decode of the raw bytes.
 func parseClaudeJSONScopes(data []byte) (user, projects []MCPServerEntry, err error) {
 	var doc claudeJSONScopes
 	if err := json.Unmarshal(data, &doc); err != nil {
@@ -1534,19 +1555,13 @@ func parseClaudeJSONScopes(data []byte) (user, projects []MCPServerEntry, err er
 // ReadMCPFromClaudeJSONBothScopes is the exported single-read helper: it
 // opens ~/.claude.json once and returns the union of user-scope
 // (top-level mcpServers) and local-scope (projects.<path>.mcpServers)
-// entries. Callers that need both scopes should prefer this over pairing
-// ReadMCPFromClaudeSettings + ReadMCPFromClaudeJSONProjects, which would
-// each read and decode the (often multi-megabyte) conversation-state file.
+// entries, decoding the (often multi-megabyte) conversation-state file once.
 func ReadMCPFromClaudeJSONBothScopes(path string) ([]MCPServerEntry, error) {
 	data, err := readMCPConfigFile(path, maxClaudeJSONConfigBytes)
 	if err != nil {
 		return nil, err
 	}
-	user, projects, err := parseClaudeJSONScopes(data)
-	if err != nil {
-		return nil, err
-	}
-	return append(user, projects...), nil
+	return ParseMCPFromClaudeJSONBothScopes(data)
 }
 
 func readMCPServersCodex(workspaceDir string) ([]MCPServerEntry, error) {
@@ -1703,37 +1718,7 @@ func readMCPFromCodexConfigTOML(path string) ([]MCPServerEntry, error) {
 	if !ok {
 		return nil, fmt.Errorf("Codex MCP config is unavailable, unstable, unsafe, or exceeds %d bytes: %s", maxCodexInventoryConfigBytes, path) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
-	var doc struct {
-		MCPServers map[string]struct {
-			Command   string            `toml:"command"`
-			Args      []string          `toml:"args"`
-			Env       map[string]string `toml:"env"`
-			URL       string            `toml:"url"`
-			Transport string            `toml:"transport"`
-		} `toml:"mcp_servers"`
-	}
-	if err := gatewayconnector.ParseCodexTOML(data, &doc); err != nil {
-		return nil, err
-	}
-	var rawDoc struct {
-		MCPServers map[string]map[string]any `toml:"mcp_servers"`
-	}
-	if err := gatewayconnector.ParseCodexTOML(data, &rawDoc); err != nil {
-		return nil, err
-	}
-	out := make([]MCPServerEntry, 0, len(doc.MCPServers))
-	for name, cfg := range doc.MCPServers {
-		out = append(out, MCPServerEntry{
-			Name:              name,
-			Command:           cfg.Command,
-			Args:              cfg.Args,
-			Env:               cfg.Env,
-			URL:               cfg.URL,
-			Transport:         cfg.Transport,
-			codexBuiltinShape: isCodexBuiltinMCPShape(name, rawDoc.MCPServers[name]),
-		})
-	}
-	return out, nil
+	return ParseMCPFromCodexConfigTOML(data)
 }
 
 func isCodexBuiltinMCPShape(name string, raw map[string]any) bool {
@@ -1985,11 +1970,7 @@ func readMCPFromYAMLPath(path string, paths ...[]string) ([]MCPServerEntry, erro
 	if err != nil {
 		return nil, err
 	}
-	var doc map[string]any
-	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return nil, err
-	}
-	return readMCPFromAnyPaths(doc, paths...)
+	return ParseMCPFromYAMLPaths(data, paths...)
 }
 
 func readMCPFromAnyPaths(doc any, paths ...[]string) ([]MCPServerEntry, error) {

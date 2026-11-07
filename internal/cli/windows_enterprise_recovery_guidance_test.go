@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func TestWindowsEnterpriseDeploymentRecordOwnerMessages(t *testing.T) {
@@ -39,7 +40,8 @@ func TestWindowsEnterpriseDeploymentRecordOwnerMessages(t *testing.T) {
 	}
 	for _, want := range []string{
 		"inspect the deployment record owner", "restore its expected owner",
-		"/uninstall FORCE=1 PURGE=1 JSON=1", "/ensure CONFIG=<config.yaml> JSON=1",
+		"/uninstall FORCE=1 PURGE=1 JSON=1", "/ensure 'CONFIG=<config.yaml>' JSON=1",
+		"& '.\\DefenseClawSetup-Enterprise-Standalone-x64.exe' /uninstall", managed.WindowsSetupSource,
 	} {
 		if !strings.Contains(next, want) {
 			t.Fatalf("next step %q does not name %q", next, want)
@@ -47,6 +49,39 @@ func TestWindowsEnterpriseDeploymentRecordOwnerMessages(t *testing.T) {
 	}
 	if got := windowsEnterpriseRecordOwnerMismatchNextStep("managed path owner/group do not match the exact canonical descriptor after ACL replacement: C:\\ProgramData\\Cisco\\DefenseClaw\\etc\\config.yaml"); got != "" {
 		t.Fatalf("unrelated path gained record remedy: %q", got)
+	}
+}
+
+func TestWindowsEnterpriseConfigRecoveryGuidance(t *testing.T) {
+	for _, tc := range []struct {
+		name, profile, platform string
+		bundle                  bool
+		want                    string
+	}{
+		{name: "signed bundle", profile: "standalone", platform: "windows", bundle: true, want: "/repair JSON=1"},
+		{name: "standalone config", profile: "standalone", platform: "windows", want: "/ensure 'CONFIG="},
+		{name: "secure client", profile: "secure_client", platform: "windows", bundle: true, want: "/ensure CONFIG="},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := enterprisestatus.New("verify", tc.profile, tc.platform, "1.0.9")
+			input := "config generation is unproven or records a hand edit; run " +
+				windowsEnterpriseSetupCommand("/ensure", "CONFIG=<approved absolute config path>", "JSON=1") + " from an elevated PowerShell prompt."
+			if tc.profile == "secure_client" {
+				// Secure Client keeps the text it always had, byte for byte.
+				input = "config generation is unproven or records a hand edit; run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1 from an elevated prompt"
+			}
+			result.AddError("lifecycle_error", input)
+			windowsEnterpriseConfigRecoveryGuidance(result, tc.bundle)
+			if len(result.Errors) != 1 || !strings.Contains(result.Errors[0].Message, tc.want) {
+				t.Fatalf("recovery errors = %+v, want %s", result.Errors, tc.want)
+			}
+			if tc.profile == "secure_client" && result.Errors[0].Message != input {
+				t.Fatalf("Secure Client text changed: %q", result.Errors[0].Message)
+			}
+			if tc.bundle && tc.profile == "standalone" && !strings.Contains(result.Errors[0].Message, managed.WindowsSetupSource) {
+				t.Fatalf("bundle recovery does not say where Setup comes from: %q", result.Errors[0].Message)
+			}
+		})
 	}
 }
 
@@ -70,20 +105,20 @@ func TestWindowsEnterpriseUntrustedDeploymentRecordCases(t *testing.T) {
 			name:    "standalone owner",
 			profile: "standalone", path: standalone,
 			reason: standalone + `: owner S-1-5-21-1001 is not trusted`,
-			want:   []string{"inspect the deployment record owner", "restore its expected owner and group", "/uninstall FORCE=1 PURGE=1 JSON=1", "/ensure CONFIG=<config.yaml> JSON=1"},
+			want:   []string{"inspect the deployment record owner", "restore its expected owner and group", "/uninstall FORCE=1 PURGE=1 JSON=1", "/ensure 'CONFIG=<config.yaml>' JSON=1", managed.WindowsSetupSource},
 		},
 		{
 			name:    "standalone unsafe ACL",
 			profile: "standalone", path: standalone,
 			reason: standalone + `: untrusted Windows principal S-1-5-21-1001 has write-like access mask 0x2`,
-			want:   []string{"unsafe permissions", "StateRoot", "remove the untrusted deployment record", "/ensure CONFIG=<config.yaml> JSON=1"},
+			want:   []string{"unsafe permissions", "StateRoot", "remove the untrusted deployment record", "/ensure 'CONFIG=<config.yaml>' JSON=1", managed.WindowsSetupSource},
 			absent: []string{"restore its expected owner", "If /ensure still refuses"},
 		},
 		{
 			name:    "standalone reparse point",
 			profile: "standalone", path: standalone,
 			reason: standalone + `: reparse points are not allowed in enterprise deployment record path`,
-			want:   []string{"reparse point", "StateRoot", "remove the untrusted deployment record", "/ensure CONFIG=<config.yaml> JSON=1"},
+			want:   []string{"reparse point", "StateRoot", "remove the untrusted deployment record", "/ensure 'CONFIG=<config.yaml>' JSON=1", managed.WindowsSetupSource},
 			absent: []string{"restore its expected owner", "If /ensure still refuses"},
 		},
 	} {
@@ -117,13 +152,17 @@ func TestWindowsEnterpriseStoppedServiceNextStep(t *testing.T) {
 	}
 	got := windowsEnterpriseStoppedServiceNextStep(services)
 	// GAP-1338: the repair names the installed CLI, which Setup keeps off PATH.
-	for _, want := range []string{"Next step:", "& '" + managedWindowsAdminCLI() + "' enterprise windows repair --profile standalone", "/repair JSON=1", "start DefenseClawHookGuardian again"} {
+	for _, want := range []string{"Next step:", "& '" + managedWindowsAdminCLI() + "' enterprise windows repair --profile standalone", "start DefenseClawHookGuardian again"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("next step %q lacks %q", got, want)
 		}
 	}
 	if strings.Contains(got, "DefenseClawGateway") {
 		t.Fatalf("next step names a running service: %q", got)
+	}
+	// GAP-0095: Setup is not installed on the computer, so it is not named.
+	if strings.Contains(got, "Setup") || strings.Contains(got, "/repair JSON=1") {
+		t.Fatalf("next step names a Setup that is not installed: %q", got)
 	}
 	services[1].State = "running"
 	if got := windowsEnterpriseStoppedServiceNextStep(services); got != "" {
@@ -254,7 +293,7 @@ func TestWindowsEnterpriseStandaloneNextStepAfterALocalSystemRecovery(t *testing
 	got := windowsEnterpriseStandaloneNextStep("ensure", `C:\stage\config.yaml`, false, false, false, true, nil, nil, nil)
 	if strings.Contains(got, "Next step: run DefenseClaw Setup") || !strings.Contains(got, "running it again unchanged fails the same way") ||
 		!strings.Contains(got, `/ensure CONFIG=C:\stage\config.yaml JSON=1`) || strings.Contains(got, "(the path and the account)") ||
-		!strings.Contains(got, "/uninstall FORCE=1 JSON=1") {
+		!strings.Contains(got, "/uninstall FORCE=1 JSON=1") || !strings.HasSuffix(got, windowsEnterpriseSetupSourceNote) {
 		t.Fatalf("next step = %q", got)
 	}
 	windowsEnterpriseRunningAsLocalSystem = func() bool { return false }
@@ -301,8 +340,9 @@ func TestWindowsEnterpriseStandaloneNextStepAfterAFailedForcedUninstall(t *testi
 			for _, want := range []string{
 				"The forced uninstall did not finish.",
 				"holds a DefenseClaw file",
-				"then run " + windowsEnterpriseStandaloneSetupName + " /uninstall FORCE=1 JSON=1 again as LocalSystem",
-				"restart Windows and run " + windowsEnterpriseStandaloneSetupName + " /uninstall FORCE=1 JSON=1 as LocalSystem",
+				"then run " + windowsEnterpriseSetupCommand("/uninstall", "FORCE=1", "JSON=1") + " again as LocalSystem",
+				"restart Windows and run " + windowsEnterpriseSetupCommand("/uninstall", "FORCE=1", "JSON=1") + " as LocalSystem",
+				managed.WindowsSetupSource,
 			} {
 				if !strings.Contains(got, want) {
 					t.Fatalf("localSystem=%t refusal=%v: next step %q does not say %q", localSystem, refusal, got, want)
@@ -403,7 +443,7 @@ func TestWindowsEnterprisePendingInspectionDoesNotClaimRunningServicesStopped(t 
 func TestWindowsEnterpriseCommittedJournalNextStep(t *testing.T) {
 	original := `Install committed, but its protected managed-hook lifecycle journal could not be retired: retire copilot managed runtime generations for SID S-1-5-21-1-2-3-1018: enterprise hooks: managed runtime generation directory is untrusted: C:\Users\dcw-std2\.defenseclaw\hooks: access denied`
 	step := windowsEnterpriseCommittedJournalNextStep(original, true)
-	for _, want := range []string{"installed and running", `C:\Users\dcw-std2\.defenseclaw was left by a per-user`, "uninstall --all --binaries --yes", "run Setup /ensure again"} {
+	for _, want := range []string{"installed and running", `C:\Users\dcw-std2\.defenseclaw was left by a per-user`, "uninstall --all --binaries --yes", "run " + windowsEnterpriseAdminCommand("ensure") + " from an elevated PowerShell prompt again"} {
 		if !strings.Contains(step, want) {
 			t.Fatalf("next step %q, want %q", step, want)
 		}

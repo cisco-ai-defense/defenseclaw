@@ -91,6 +91,9 @@ type hostPlane struct {
 	// wrapperHold is how long a transparent wrapper's record waits for its
 	// child's exec; zero records it at once.
 	wrapperHold time.Duration
+	// wrapperDirs are where the wrappers a Tetragon exec is matched with
+	// by image identity are installed (wrapperBinaryDirs).
+	wrapperDirs []string
 	// coldHold is how long a client exec's record waits for its release
 	// manifest, polled every coldPoll; zero records it at once.
 	coldHold, coldPoll time.Duration
@@ -100,7 +103,8 @@ type hostPlane struct {
 	// child's exec, by the wrapper's pid (GAP-0055).
 	wrappers map[int]*heldWrapper
 	// coldClients are the client exec records waiting for the release
-	// manifest of their version, by pid (GAP-0065).
+	// manifest of their version (GAP-0065) or for their image digest
+	// (GAP-0067), by pid.
 	coldClients map[int]*heldWrapper
 	// linkedWrappers counts the wrapper records that wait with a held child
 	// record instead of in wrappers; they count against maxHeldWrappers.
@@ -130,6 +134,11 @@ type hostPlane struct {
 	running    bool
 	started    bool
 	coverage   plane.Coverage
+	// retiredDrops are the buffer drops of the sources replaced before the
+	// running one started, named in its coverage; pendingRetired those of
+	// the source replaced last, named by its final coverage (coverage)
+	// until the next source starts (cowork-1-0-8 GAP-0080).
+	retiredDrops, pendingRetired int64
 
 	// handled counts every event consumed; containerEvents those from
 	// container processes, routed to that count and never joined to a host
@@ -140,6 +149,8 @@ type hostPlane struct {
 	containerEvents atomic.Int64
 	ownEvents       atomic.Int64
 	hookUnexpected  atomic.Int64
+	// clientExecs counts the client exec events by digest state.
+	clientExecs clientExecCounts
 	// customer holds the events of the host's own Tetragon policies:
 	// attributed records, the latest of them and per-policy counts.
 	customer customerPlane
@@ -195,6 +206,7 @@ func newHostPlane(
 		source: source, tracker: tracker, indicators: indicators,
 		clientChecksums: claudeReleases.checksums,
 		wrapperHold:     wrapperHold,
+		wrapperDirs:     wrapperBinaryDirs,
 		coldHold:        coldClientHold,
 		coldPoll:        coldClientPoll,
 		window:          window, minStages: minStages,
@@ -219,6 +231,8 @@ func (h *hostPlane) start(ctx context.Context) error {
 	h.running = true
 	h.started = true
 	h.done = done
+	h.retiredDrops += h.pendingRetired
+	h.pendingRetired = 0
 	h.coverage = source.Coverage()
 	h.mu.Unlock()
 
@@ -268,10 +282,28 @@ func (h *hostPlane) ended() bool {
 // replaceSource closes the source whose stream ended and puts next in its
 // place. A brokered stream cannot be started twice (its connection is gone
 // and its buffer is closed), so a reconnect needs a fresh source. Sessions,
-// counters and the lineage tracker carry over (GAP-1418).
+// counters and the lineage tracker carry over (GAP-1418), and so do the
+// events the ended source's buffers dropped: its final coverage stands until
+// the next source starts, which then names them (cowork-1-0-8 GAP-0080).
+// The final coverage is read before the swap, and the swap is one step, so
+// stats never shows the ended source's start coverage without its drops; a
+// source that never started (its start failed) leaves the coverage before
+// it standing (g072 review 2 N3).
 func (h *hostPlane) replaceSource(next plane.Source) {
 	h.mu.Lock()
 	previous := h.source
+	h.mu.Unlock()
+	var final plane.Coverage
+	if previous != nil {
+		final = previous.Coverage()
+	}
+	h.mu.Lock()
+	if previous != nil {
+		if h.started {
+			h.coverage = final
+		}
+		h.pendingRetired += final.BufferDropped
+	}
 	h.source = next
 	h.started = false
 	h.done = nil
@@ -288,6 +320,15 @@ func (h *hostPlane) handle(event plane.Event) {
 		// never a tactic, a score, a Plane B connect or a kernel control's
 		// outcome (customer.go).
 		h.handleCustomer(event)
+		return
+	}
+	if event.Kind == plane.KindImageDigest {
+		// The image digest of an earlier exec, read after that exec's
+		// event went out: it decides that exec's held record, if any. It
+		// is no process event of its own.
+		h.mu.Lock()
+		h.settleImageDigestLocked(event)
+		h.mu.Unlock()
 		return
 	}
 	if event.ContainerID != "" {
@@ -339,6 +380,17 @@ func (h *hostPlane) handle(event plane.Event) {
 		h.recordConnect(event)
 		return
 	}
+	if event.Kind == plane.KindExec && event.Fork && event.ImageVersion != "" && !h.indicators.KeepClientMCP {
+		// The fork of a process in a Claude release image: its image and
+		// argv are its parent's, already classified on the parent's exec,
+		// or, read after the child exec'd, that exec's, whose own event
+		// follows. It is never a client exec of its own: classifying or
+		// holding it recorded the client a second time (GAP-0067). The
+		// tracker has its lineage. Secure Client keeps classifying the
+		// client's own argv, so its forks too, as before.
+		h.clientExecs.forks.Add(1)
+		return
+	}
 
 	var (
 		lineage    agentchain.Lineage
@@ -361,7 +413,8 @@ func (h *hostPlane) handle(event plane.Event) {
 	// which an unprivileged gateway cannot and an exited process does not
 	// allow. The lineage gate runs first, and the manifest lookup never
 	// waits: an attributed client exec of a version not yet cached starts
-	// its fetch, and is classified as before until the manifest is in.
+	// its fetch and is classified as before; holdColdClientLocked keeps its
+	// record until the manifest, or a digest still being read, is in.
 	claudeClient, verifiedClient := false, false
 	if event.Kind == plane.KindExec && !h.indicators.KeepClientMCP && event.ImageVersion != "" && h.clientChecksums != nil {
 		if !looked {
@@ -369,6 +422,7 @@ func (h *hostPlane) handle(event plane.Event) {
 			looked = true
 		}
 		if attributed {
+			h.clientExecs.seen[digestStateIndex(event.ImageDigestState)].Add(1)
 			checksums, _ := h.clientChecksums(event.ImageVersion)
 			lower := strings.ToLower(cmdline)
 			verifiedClient = event.ImageSHA256 != "" && signedClaudeRelease(event.ImageSHA256, checksums)
@@ -421,6 +475,10 @@ func (h *hostPlane) handle(event plane.Event) {
 		h.recordLocked(event, lineage, match, at, instance)
 	case held.level() > 0:
 		h.holdWrapperLocked(held)
+	default:
+		// A client hold whose manifest came in since the lookup above is
+		// decided now, with the wrappers just linked to it.
+		h.settleColdClientLocked(event.PID, held, false)
 	}
 }
 
@@ -433,6 +491,9 @@ func (h *hostPlane) recordLocked(
 		user = event.User
 	}
 	h.classified++
+	if event.Kind == plane.KindExec && event.ImageVersion != "" {
+		h.clientExecs.reported[digestStateIndex(event.ImageDigestState)].Add(1)
+	}
 	root := hostSessionKey{
 		process:  procprobe.KeyOf(lineage.RootPID, lineage.RootKeyStart),
 		instance: lineage.RootInstance,
@@ -945,12 +1006,12 @@ func sessionOwnerEvidence(root procRef, observations []agentchain.Observation) (
 func (h *hostPlane) stats() (classified, gated int64, running bool, coverage plane.Coverage) {
 	h.mu.Lock()
 	classified, gated, running, coverage = h.classified, h.gated, h.running, h.coverage
-	source := h.source
+	source, retired := h.source, h.retiredDrops
 	h.mu.Unlock()
 	if running && source != nil {
 		coverage = source.Coverage()
 	}
-	return classified, gated, running, coverage
+	return classified, gated, running, plane.WithRetiredBufferDrops(coverage, retired)
 }
 
 func (h *hostPlane) close() error {

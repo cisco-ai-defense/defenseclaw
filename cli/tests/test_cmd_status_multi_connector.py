@@ -933,6 +933,28 @@ class TestStatusJson(unittest.TestCase):
         self.assertIsNone(sidecar["running"])
         self.assertIn("port 19081 is held by a process of another account", sidecar["reason"])
 
+    def test_text_and_json_name_this_homes_root_gateway(self):
+        from defenseclaw.commands.cmd_doctor import ROOT_GATEWAY_REASON
+
+        with (
+            patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None),
+            patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value=ROOT_GATEWAY_REASON),
+        ):
+            as_json = CliRunner().invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+            as_text = CliRunner().invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
+        self.assertEqual(as_json.exit_code, 0, as_json.output)
+        self.assertEqual(as_text.exit_code, 0, as_text.output)
+        reason = json.loads(as_json.output)["sidecar"]["reason"]
+        for shown in (reason, as_text.output):
+            self.assertIn(ROOT_GATEWAY_REASON, shown)
+            if sys.platform.startswith("win"):
+                # GAP-0747: the Windows remedy is an elevated PowerShell prompt, never sudo.
+                self.assertIn("elevated PowerShell prompt", shown)
+                self.assertNotIn("sudo", shown)
+            else:
+                self.assertIn("sudo env DEFENSECLAW_HOME=", shown)
+            self.assertNotIn("--api-port", shown)
+
     def test_json_roster_has_per_connector_mode(self):
         result = self._invoke_json()
         doc = json.loads(result.output)

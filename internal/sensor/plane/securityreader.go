@@ -141,12 +141,15 @@ type securityReader struct {
 	// stream (the cap or the budget ran out), and readErr while the last poll
 	// had to reopen one. Both clear on the next poll that reaches the end of
 	// both streams without dropping anything.
-	behind      bool
-	readErr     string
-	timeouts    int64
-	failures    int64
-	heldBack    int64
-	dropped     int64
+	behind   bool
+	readErr  string
+	timeouts int64
+	failures int64
+	heldBack int64
+	// lastDropped is the buffer drop count at the last poll: a poll that
+	// dropped events leaves the reader behind. The count itself is named
+	// once, by the source (WithBufferDrops), and stays named after the
+	// reader catches up (cowork-1-0-8 GAP-0072).
 	lastDropped int64
 	// released counts signal records delivered before the process records
 	// ahead of them were read, because they had waited signalHoldPolls polls
@@ -228,6 +231,7 @@ func (r *securityReader) pollOnce() {
 		if event, ok := translateSecurityRecord(record); ok {
 			if event.Kind == KindExec && r.image != nil {
 				event.ImageSHA256, event.ImageVersion = r.image(event.Exe, event.At, eventAccount(event))
+				event.ImageDigestState = digestStateOf(event.ImageSHA256, event.ImageVersion)
 			}
 			r.buffer.Push(event)
 		}
@@ -244,7 +248,6 @@ func (r *securityReader) pollOnce() {
 	}
 	newDrops := dropped - r.lastDropped
 	r.lastDropped = dropped
-	r.dropped = dropped
 	r.behind = behind || newDrops > 0
 	r.readErr = failure
 }
@@ -345,10 +348,10 @@ func (r *securityReader) limitations() []string {
 	if r.behind {
 		out = append(out, fmt.Sprintf(
 			"Security event log reader is behind (a process-event flood or a full event queue): "+
-				"%d polls stopped before the end of the log, %d read timeouts, %d events dropped, "+
+				"%d polls stopped before the end of the log, %d read timeouts, "+
 				"%d file or account events delivered before the process events ahead of them; "+
 				"it continues from the last record read and clears once it catches up",
-			r.heldBack, r.timeouts, r.dropped, r.released))
+			r.heldBack, r.timeouts, r.released))
 	}
 	if r.readErr != "" {
 		out = append(out, fmt.Sprintf(

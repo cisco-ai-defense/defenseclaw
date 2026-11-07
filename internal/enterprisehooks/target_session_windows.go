@@ -53,12 +53,40 @@ func windowsEnterpriseStandaloneDeferredDataDirAccountLink(home, dataDir string,
 // stays pending until it next signs in, when the guardian moves the link
 // aside and enrolls it. Status names such accounts.
 func WindowsAccountOwnedDataDirLink(home, sid string) bool {
+	return windowsAccountOwnedDataDirLinkPath(home, sid) != ""
+}
+
+// WindowsAccountOwnedRootDataDirLink reports only an account-owned link at
+// the canonical folder itself. A link below a plain folder does not qualify.
+func WindowsAccountOwnedRootDataDirLink(home, sid string) bool {
+	root := filepath.Join(filepath.Clean(home), ".defenseclaw")
+	return sameWindowsEnterprisePath(windowsAccountOwnedDataDirLinkPath(home, sid), root)
+}
+
+// WindowsForeignOwnedDataDirLink reports whether home's
+// %USERPROFILE%\.defenseclaw, or its hooks folder, is a link or junction that
+// the account (sid) does not own: one an administrator or another principal
+// made, or whose owner cannot be read (GAP-0585). Nothing follows or repairs
+// such a link, and no enrollment can move it aside, so the account stays
+// unprotected until an administrator removes it. A caller leaves that one
+// account out instead of failing the computer's lifecycle for it.
+func WindowsForeignOwnedDataDirLink(home, sid string) bool {
 	target, err := windows.StringToSid(strings.TrimSpace(sid))
 	if err != nil || strings.TrimSpace(home) == "" {
 		return false
 	}
 	home = filepath.Clean(home)
-	return windowsTargetOwnedDataDirLink(home, filepath.Join(home, ".defenseclaw"), target) != ""
+	_, owner, ok := windowsDataDirLink(home, filepath.Join(home, ".defenseclaw"))
+	return ok && (owner == nil || !owner.Equals(target))
+}
+
+func windowsAccountOwnedDataDirLinkPath(home, sid string) string {
+	target, err := windows.StringToSid(strings.TrimSpace(sid))
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ""
+	}
+	home = filepath.Clean(home)
+	return windowsTargetOwnedDataDirLink(home, filepath.Join(home, ".defenseclaw"), target)
 }
 
 // windowsAccountCreatedDataDirAt reads dataDir's owner and DACL and reports

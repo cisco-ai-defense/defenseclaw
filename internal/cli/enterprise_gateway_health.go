@@ -84,7 +84,7 @@ func appendStandaloneGatewayWarnings(result *enterprisestatus.Result, body, stat
 			summary = "see gateway /health telemetry.details.destinations"
 		}
 		result.AddWarning("optional_destination_failing", "optional telemetry destination failing: "+summary+
-			"; inspect `defenseclaw-gateway status` or gateway /health telemetry details")
+			"; inspect "+managedWindowsGatewayCommand("status")+" or gateway /health telemetry details")
 	}
 	// A project skill folder the hook guardian could not verify (a link in
 	// its path, a folder outside the user's own profile) is not watched and

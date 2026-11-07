@@ -991,7 +991,12 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		return w.rescanMCPAdmittedWithoutScan(ctx, evt, currentSnap, fingerprint)
 	}
 
-	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
+	var baseline *audit.SnapshotRow
+	if evt.Type == InstallMCP {
+		baseline, err = w.mcpSnapshotForEvent(evt)
+	} else {
+		baseline, err = w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
+	}
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			upgraded := w.configuredBeforeUpgrade(evt)
@@ -1217,7 +1222,7 @@ func (w *InstallWatcher) admitsMCPWithoutScan(ctx context.Context, evt InstallEv
 // the first cycle after a start lists without a baseline only gets one, as a
 // scanned server does.
 func (w *InstallWatcher) rescanMCPAdmittedWithoutScan(ctx context.Context, evt InstallEvent, snap *TargetSnapshot, fingerprint string) rescanOutcome {
-	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
+	baseline, err := w.mcpSnapshotForEvent(evt)
 	switch {
 	case err != nil && !errors.Is(err, sql.ErrNoRows):
 		fmt.Fprintf(os.Stderr, "[rescan] get baseline %s: %v\n", evt.Path, err)
@@ -1519,7 +1524,23 @@ func (w *InstallWatcher) admissionSnapshot(evt InstallEvent) *TargetSnapshot {
 // alerts for one install (GAP-2507). A target admission moved away gets no
 // baseline.
 func (w *InstallWatcher) recordAdmissionBaseline(evt InstallEvent, snap *TargetSnapshot, res AdmissionResult) {
-	if w.movedByAdmission(evt) || snap == nil || res.ScanID == "" {
+	if w.movedByAdmission(evt) || res.ScanID == "" {
+		return
+	}
+	if !w.cfg.Watch.RescanEnabled {
+		if evt.Type != InstallPlugin || w.secureClientActive() ||
+			(res.Verdict != VerdictRejected && res.Verdict != VerdictBlocked) {
+			return
+		}
+		if snap == nil {
+			var err error
+			snap, err = w.snapshotForEvent(evt)
+			if err != nil {
+				return
+			}
+		}
+	}
+	if snap == nil {
 		return
 	}
 	if _, err := os.Lstat(evt.Path); err != nil {
@@ -1535,10 +1556,12 @@ func (w *InstallWatcher) persistSnapshot(evt InstallEvent, snap *TargetSnapshot,
 	cfgJSON, _ := json.Marshal(snap.ConfigHashes)
 	epJSON, _ := json.Marshal(snap.NetworkEndpoints)
 
-	_ = w.store.SetTargetSnapshot(
+	if err := w.store.SetTargetSnapshot(
 		string(evt.Type), evt.Path, snap.ContentHash,
 		string(depJSON), string(cfgJSON), string(epJSON), scanID, fingerprint,
-	)
+	); err != nil {
+		return
+	}
 }
 
 // findingDrift diffs a freshly scanned result against the baseline's previously
@@ -1660,6 +1683,8 @@ func (w *InstallWatcher) scannerFingerprint(evt InstallEvent) string {
 		parts = append(parts,
 			"binary="+bin,
 			"binver="+w.scannerBinaryVersion(bin),
+			"policy="+pluginScannerPolicy(cfg, w.eventConnector(evt)),
+			fmt.Sprintf("vendor_identity_disabled=%t", cfg.SecureClientIntegration()),
 			"llm_model="+llm.Model,
 			"llm_provider="+llm.Provider,
 			"llm_base_url="+llm.BaseURL,
@@ -1890,6 +1915,9 @@ func compareSnapshots(baseline *audit.SnapshotRow, current *TargetSnapshot) []Dr
 		fmt.Fprintf(os.Stderr, "[rescan] corrupt baseline config_hashes for %s: %v\n", baseline.TargetPath, err)
 	}
 	for file, hash := range current.ConfigHashes {
+		if baseline.TargetType == string(InstallMCP) && file == mcpSnapshotIdentityKey {
+			continue
+		}
 		prev, exists := prevCfg[file]
 		if !exists {
 			deltas = append(deltas, DriftDelta{
@@ -1909,6 +1937,9 @@ func compareSnapshots(baseline *audit.SnapshotRow, current *TargetSnapshot) []Dr
 		}
 	}
 	for file, hash := range prevCfg {
+		if baseline.TargetType == string(InstallMCP) && file == mcpSnapshotIdentityKey {
+			continue
+		}
 		if _, exists := current.ConfigHashes[file]; !exists {
 			deltas = append(deltas, DriftDelta{
 				Type:        DriftConfigMutation,
@@ -2150,7 +2181,8 @@ func (w *InstallWatcher) snapshotForEvent(evt InstallEvent) (*TargetSnapshot, er
 		if _, err := os.Stat(path); err != nil {
 			return nil, err
 		}
-		return SnapshotTarget(path)
+		return snapshotTarget(path, evt.Type == InstallPlugin &&
+			(w.cfg == nil || !w.cfg.SecureClientIntegration()))
 	}
 }
 
@@ -2165,12 +2197,17 @@ func (w *InstallWatcher) snapshotMCPServer(evt InstallEvent) (*TargetSnapshot, e
 	if err != nil {
 		return nil, fmt.Errorf("marshal mcp server %s: %w", name, err)
 	}
+	identity, err := json.Marshal(mcpIdentityForServer(*entry))
+	if err != nil {
+		return nil, fmt.Errorf("marshal mcp identity %s: %w", name, err)
+	}
 
 	snap := &TargetSnapshot{
 		ContentHash:      hash,
 		DependencyHashes: map[string]string{},
 		ConfigHashes: map[string]string{
 			fmt.Sprintf("mcp.servers.%s", name): hash,
+			mcpSnapshotIdentityKey:              string(identity),
 		},
 		Timestamp: time.Now().UTC(),
 	}
@@ -2207,32 +2244,6 @@ func (w *InstallWatcher) targetStillPresent(evt InstallEvent) bool {
 	}
 	_, err := os.Lstat(evt.Path)
 	return err == nil
-}
-
-// MCPEventPath is the key of an MCP server in the watcher: its event Path
-// and target snapshot. A server a managed gateway read from a user home is
-// keyed by its name, connector and home, so a second user's server with the
-// same name has its own baseline and admission. A user-scope server a
-// connector lists is keyed by its name and connector; a server read without
-// a connector is keyed by its name.
-func MCPEventPath(server config.MCPServerEntry) string {
-	key := server.Name
-	switch {
-	case server.Home != "":
-		key += "@" + server.Connector + ":" + server.Home
-	case server.Connector != "" && server.Project == "":
-		// Claude Code and Codex each listing the server are two servers.
-		// Under one key the first copy was admitted (blocked when its scan
-		// failed) and the second got only a rescan of the first copy baseline,
-		// which recorded a failed scan and did nothing (GAP-1227).
-		key += "@" + server.Connector
-	}
-	// A project's server is its own: another project's server with the
-	// same name has its own baseline and admission (GAP-0405).
-	if server.Project != "" {
-		key += "@" + server.Connector + "#" + server.Project
-	}
-	return key
 }
 
 func (w *InstallWatcher) lookupMCPServer(evt InstallEvent) (*config.MCPServerEntry, error) {

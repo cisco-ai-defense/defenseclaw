@@ -24,6 +24,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 )
 
 // In-image layout of DefenseClaw's OpenShell overlay images. Everything under
@@ -75,6 +76,12 @@ const (
 	sandboxHookRetryMaxTimeSeconds      = 12
 	sandboxHookSessionEndMaxTimeSeconds = 1
 )
+
+// SandboxHookAttemptBudgets is how long the rendered sandbox hook waits for
+// its first ingress attempt and for its keyed retry (curl --max-time).
+func SandboxHookAttemptBudgets() (first, retry time.Duration) {
+	return sandboxHookMaxTimeSeconds * time.Second, sandboxHookRetryMaxTimeSeconds * time.Second
+}
 
 // SandboxOwner is the in-image owner of a rendered file.
 type SandboxOwner string

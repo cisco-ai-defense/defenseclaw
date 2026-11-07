@@ -60,6 +60,7 @@ func TestMCPAdmissionPendingReadsThePinnedGeneration(t *testing.T) {
 	pinnedCfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
 	pinnedCfg.Guardrail.Mode = "action"
 	pinnedCfg.Guardrail.Connector = "claudecode"
+	pinnedCfg.Guardrail.RulePack = "strict"
 	api := &APIServer{}
 	api.SetConfigRuntime(nil, func() *config.Config { return nil })
 	api.SetMCPAdmissionPending(func(_, server, _, _ string) (string, bool) { return server, true })

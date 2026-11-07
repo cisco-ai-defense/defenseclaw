@@ -115,7 +115,7 @@ func withCodexLifecycleTransaction(opts SetupOpts, fn func() error) error {
 
 	codexLifecycleMu.Lock()
 	defer codexLifecycleMu.Unlock()
-	return withOwnedFileLock(filepath.Join(lockDir, ".codex-lifecycle.lock"), fn)
+	return withOwnedFileLock(filepath.Join(lockDir, codexLifecycleLockName), fn)
 }
 
 type codexSetupRuntimeSnapshot struct {

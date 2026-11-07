@@ -354,9 +354,15 @@ The harness spec builds the environment passed to `openshell sandbox create
 - `DEFENSECLAW_EGRESS_URL` is
   `http://<user>:<secret>@host.openshell.internal:<egress_port>`, and
   `DEFENSECLAW_EGRESS_BYPASS` lists `host.openshell.internal` plus the
-  provider hosts of the harness's credential profile, so hooks reach the
-  ingress directly and LLM calls stay on OpenShell's provider rules. The
-  strict profile sets no proxy. `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`
+  provider hosts of the harness's credential profile and sandbox-local
+  loopback addresses (`localhost`, `127.0.0.1`, `127.0.0.0/8`, `::1`).
+  In proxy-enabled profiles, the workload's proxy endpoint is a listener on
+  the sandbox's own `127.0.0.1`. It connects loopback requests inside that
+  sandbox and relays other requests to the authenticated egress proxy. This
+  also covers clients that do not understand the CIDR or IPv6 exclusions.
+  The host egress guard still refuses loopback requests sent to it. The strict
+  profile sets no proxy or local listener.
+  `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`
   (and their lowercase forms) and `NODE_USE_ENV_PROXY=1` are passed too, but
   OpenShell 0.1.1 drops them at create, so the workload gets them from the
   shell fragment below. `NODE_NO_WARNINGS=1` goes with the proxy (see the
@@ -2975,6 +2981,15 @@ the lifecycle's prerequisite record carries the fallback's readiness under
 `fallback`. The driver and the reason are on the sandbox record, the banner,
 `status`, `policy explain`, `doctor` (`managed-driver`) and the telemetry
 (`defenseclaw.sandbox.driver_reason`).
+
+With OpenShell 0.1.6, a selected MicroVM on Linux with KVM is refused after
+create because the account owns the guest root folder and DefenseClaw cannot
+trust the guest's `localhost` resolver. This affects per-user and managed
+gateways. `driver_fallback: docker` does not cover this refusal: it is chosen
+before create when KVM or the driver is unavailable. Until a fixed OpenShell
+release is supported, a managed administrator sets
+`enterprise.openshell.driver: docker` and runs `ensure`. On a per-user install,
+run `defenseclaw sandbox setup` and answer no to MicroVMs.
 
 The enterprise packages install
 `defenseclaw` as a root-owned link to `defenseclaw-gateway`, which under that

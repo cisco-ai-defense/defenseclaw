@@ -85,11 +85,19 @@ if [ "$1" = hook-post ]; then
     # The installer lets go of its lock while the request waits (GAP-2443).
     [ "${DC_COLD_RELEASE_INSTALL_LOCK:-0}" != 1 ] || rmdir "$DEFENSECLAW_HOME/.install.lock"
     [ -z "${DC_COLD_FIRST_DELAY:-}" ] || sleep "$DC_COLD_FIRST_DELAY"
+    if [ "${DC_COLD_FIRST_RC:-7}" = 9 ] && [ -n "${DC_COLD_PROOF:-}" ]; then
+      printf 'DCPOSTPROOF1:%s' "$DC_COLD_PROOF"
+    fi
     exit "${DC_COLD_FIRST_RC:-7}"
   fi
   # Every later try fails with DC_COLD_THEN_RC when it is set (a gateway that
   # comes up and does not answer: hook-post's no-answer status 9).
-  [ -z "${DC_COLD_THEN_RC:-}" ] || exit "$DC_COLD_THEN_RC"
+  if [ -n "${DC_COLD_THEN_RC:-}" ]; then
+    if [ "$DC_COLD_THEN_RC" = 9 ] && [ -n "${DC_COLD_PROOF:-}" ]; then
+      printf 'DCPOSTPROOF1:%s' "$DC_COLD_PROOF"
+    fi
+    exit "$DC_COLD_THEN_RC"
+  fi
   printf '%s\n%s\n' '{"action":"allow","codex_output":{"decision":"allow"}}' '200'
   exit 0
 fi

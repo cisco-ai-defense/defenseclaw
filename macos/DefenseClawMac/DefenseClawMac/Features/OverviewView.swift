@@ -23,7 +23,6 @@ import Charts
 struct OverviewView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.openSettings) private var openSettings
-    @AppStorage("gatewayAdministratorMode") private var gatewayAdministratorMode = false
     @State private var summary: (blockedSkills: Int, allowedSkills: Int, blockedMCPs: Int, allowedMCPs: Int, totalScans: Int, activeAlerts: Int) = (0, 0, 0, 0, 0, 0)
     @State private var hourly: [HourlyPoint] = []
     @State private var doctorRunning = false
@@ -261,28 +260,6 @@ struct OverviewView: View {
                     Spacer()
                 }
                 .controlSize(.small)
-
-                VStack(alignment: .leading, spacing: 5) {
-                    HStack {
-                        Toggle("Run gateway as administrator", isOn: $gatewayAdministratorMode)
-                            .toggleStyle(.switch)
-                            .controlSize(.small)
-                            .fixedSize()
-                            .disabled(!appState.installationMutationsAllowed)
-                        Spacer()
-                        Button("Gateway Permissions…") {
-                            appState.selectedSettingsTab = .connection
-                            openSettings()
-                        }
-                        .controlSize(.small)
-                    }
-                    Text(gatewayAdministratorMode
-                         ? "Uses your installed gateway with macOS authorization. Runtime agent actions also require Full Disk Access."
-                         : "Enable administrator mode for Runtime monitoring across the machine, then start or restart the gateway.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
 
                 if let reason = appState.installationReadOnlyReason {
                     Divider()
@@ -1173,7 +1150,7 @@ struct OverviewView: View {
     }
 
     private func gatewayActionTitle(_ action: String) -> String {
-        gatewayAdministratorMode ? "\(action) Gateway as Administrator" : "\(action) Gateway"
+        "\(action) Gateway"
     }
 
     private func runGatewayLifecycle(_ action: String) {

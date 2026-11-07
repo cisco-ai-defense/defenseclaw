@@ -71,6 +71,36 @@ func TestSecureClientLayoutClassificationWithProtectedMetadata(t *testing.T) {
 	}
 }
 
+func TestSecureClientManagedLayoutMatchesOnlyInstalledProcessAndStateTree(t *testing.T) {
+	roots, err := winpath.EnterpriseRootsFor(winpath.EnterpriseProfileSecureClient, `C:\Program Files`, `C:\ProgramData`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := filepath.Join(roots.InstallRoot, "bin", "defenseclaw-gateway.exe")
+	hook := filepath.Join(roots.InstallRoot, "bin", "defenseclaw-hook.exe")
+	statePath := filepath.Join(roots.StateRoot, "audit")
+	for _, tc := range []struct {
+		name, executable, path string
+		gatewayService         bool
+		want                   bool
+	}{
+		{"gateway service state", gateway, statePath, true, true},
+		{"per-user gateway at installed path", gateway, statePath, false, false},
+		{"hook state", hook, statePath, false, true},
+		{"per-user state", gateway, `C:\ProgramData\Cisco\oss\audit`, true, false},
+		{"state sibling", gateway, roots.StateRoot + `-copy\audit`, true, false},
+		{"state root", gateway, roots.StateRoot, true, false},
+		{"per-user executable", `C:\Users\Sample\defenseclaw-gateway.exe`, statePath, false, false},
+		{"unregistered executable", filepath.Join(roots.InstallRoot, "bin", "other.exe"), statePath, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := secureClientManagedLayoutMatches(roots, tc.executable, tc.path, tc.gatewayService); got != tc.want {
+				t.Fatalf("managed layout match = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSecureClientHostRequiresProtectedLayoutAndRegisteredService(t *testing.T) {
 	roots, err := winpath.EnterpriseRootsFor(winpath.EnterpriseProfileSecureClient, `C:\Program Files`, `C:\ProgramData`)
 	if err != nil {
@@ -192,6 +222,7 @@ func TestSecureClientHostRequiresProtectedLayoutAndRegisteredService(t *testing.
 // production checks already accept, and the fixture is given the
 // BUILTIN\Administrators owner explicitly.
 func TestWindowsManagedRecordTrustUsesRealACLs(t *testing.T) {
+	requireAdministratorTestToken(t, "the fixture needs a BUILTIN\\Administrators owner on its folders, which only an administrator token can set (a standard user can create the folders under C:\\ProgramData, not give them that owner)")
 	programData, err := winpath.TrustedProgramData()
 	if err != nil {
 		t.Skipf("resolve ProgramData: %v", err)

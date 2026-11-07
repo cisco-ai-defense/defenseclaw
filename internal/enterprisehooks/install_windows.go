@@ -1208,35 +1208,54 @@ func moveWindowsTargetOwnedDataDirLinksAside(home, dataDir string, target *windo
 // administrator owns, a link anywhere else and a data dir that is not the
 // canonical one report "".
 func windowsTargetOwnedDataDirLink(home, dataDir string, target *windows.SID) string {
-	if target == nil || !sameWindowsEnterprisePath(dataDir, filepath.Join(home, ".defenseclaw")) {
+	if target == nil {
 		return ""
 	}
-	for _, path := range []string{filepath.Clean(dataDir), filepath.Join(filepath.Clean(dataDir), "hooks")} {
-		info, err := os.Lstat(path)
+	path, owner, ok := windowsDataDirLink(home, dataDir)
+	if !ok || owner == nil || !owner.Equals(target) {
+		return ""
+	}
+	return path
+}
+
+// windowsDataDirLink finds the first link or junction at the canonical
+// DefenseClaw folder (<home>\.defenseclaw) or at that folder's hooks folder
+// and returns its path and its owner (nil when the owner cannot be read).
+// ok is false when there is none, or when dataDir is not the canonical
+// folder. It only reads names, attributes and owners, never what a link
+// names. GAP-0193 (the account's own link) and GAP-0585 (a link another
+// principal owns, such as an administrator) share this one finder, so the two
+// cannot disagree about what counts as the account's folder link.
+func windowsDataDirLink(home, dataDir string) (path string, owner *windows.SID, ok bool) {
+	if !sameWindowsEnterprisePath(dataDir, filepath.Join(home, ".defenseclaw")) {
+		return "", nil, false
+	}
+	for _, candidate := range []string{filepath.Clean(dataDir), filepath.Join(filepath.Clean(dataDir), "hooks")} {
+		info, err := os.Lstat(candidate)
 		if err != nil {
-			return ""
+			return "", nil, false
 		}
-		ptr, err := winpath.UTF16Ptr(path)
+		ptr, err := winpath.UTF16Ptr(candidate)
 		if err != nil {
-			return ""
+			return "", nil, false
 		}
 		attributes, err := windows.GetFileAttributes(ptr)
 		if err != nil {
-			return ""
+			return "", nil, false
 		}
 		if info.Mode()&os.ModeSymlink == 0 && attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
 			if !info.IsDir() {
-				return ""
+				return "", nil, false
 			}
 			continue
 		}
-		owner, err := windowsPathOwnerNoFollow(path)
-		if err != nil || owner == nil || !owner.Equals(target) {
-			return ""
+		linkOwner, err := windowsPathOwnerNoFollow(candidate)
+		if err != nil {
+			linkOwner = nil
 		}
-		return path
+		return candidate, linkOwner, true
 	}
-	return ""
+	return "", nil, false
 }
 
 func quarantineWindowsTargetOwnedObstruction(home, path string, target *windows.SID, recreateDirectory bool, label string) error {

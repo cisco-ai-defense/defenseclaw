@@ -56,6 +56,6 @@ func readOwnStatus(ctx context.Context) ([]byte, error) {
 // agents: a standard account of a managed Windows computer has no other
 // view of its own.
 func ownStatusNextSteps() []string {
-	return []string{fmt.Sprintf("Your administrator sees your account's agents from an elevated PowerShell prompt with `& '%s' enterprise policy show --user %s`.",
-		managedWindowsAdminCLI(), managedHostCurrentAccountName())}
+	return []string{"Your administrator sees your account's agents from an elevated PowerShell prompt with " +
+		managedWindowsAccountAgentsCommand() + "."}
 }

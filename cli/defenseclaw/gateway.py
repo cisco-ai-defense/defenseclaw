@@ -580,12 +580,27 @@ def foreign_loopback_listener(host: str, port: int) -> str:
     else:
         problem = _foreign_loopback_listener_uncached(int(port), host=str(host))
     if problem:
+        if root_reason := _root_gateway_listener_reason(int(port)):
+            return root_reason
         problem = (
             f"{_url_host(str(host))}:{port} is held by {problem}, not by this account's gateway, "
             "so the gateway token was not sent. Run `defenseclaw-gateway start` to see how to "
             "move this account's gateway to a free port"
         )
     return problem
+
+
+def _root_gateway_listener_reason(port: int) -> str:
+    """Return the root-listener diagnosis without authorizing a token send."""
+    try:
+        from defenseclaw import config
+        from defenseclaw.commands.cmd_doctor import _trusted_gateway_listener
+
+        cfg = config.load(without_guardrail_profiles=True)
+        trust = _trusted_gateway_listener(cfg, api_port=int(port))
+    except Exception:  # noqa: BLE001 - unknown ownership stays untrusted
+        return ""
+    return trust.detail if trust.code == "root_gateway" else ""
 
 
 def _unproven_per_user_gateway_target(host: str, port: int) -> str:
@@ -1843,7 +1858,7 @@ _MANAGED_GATEWAY_BINARIES = {
 def _managed_gateway_binary() -> str | None:
     """The enterprise package's gateway on a managed Linux or macOS host.
 
-    An administrator's shell has it on no PATH, and the answer to "gateway
+    It is not on the PATH of an administrator's shell, and the answer to "gateway
     not found" there must not be ``defenseclaw upgrade``, which a managed
     device refuses (GAP-0168).
     """

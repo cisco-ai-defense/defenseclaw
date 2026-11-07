@@ -206,7 +206,20 @@ func CheckScannerRuntimeAdmitted(root, executable string) error {
 // CheckScannerRuntimeAdmittedDigest is CheckScannerRuntimeAdmitted that also
 // returns the admitted digest.
 func CheckScannerRuntimeAdmittedDigest(root, executable string) (string, error) {
-	const restore = "run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair to install the payload copy"
+	return checkScannerRuntimeAdmitted(root, executable, func() (string, error) { return FileSHA256(executable) })
+}
+
+// CheckScannerRuntimeAdmittedSHA256 is CheckScannerRuntimeAdmitted for a
+// caller that already hashed executable through a handle that keeps it from
+// being written, replaced or removed (no write or delete sharing) and still
+// holds it: got is that digest, so the file is not read again.
+func CheckScannerRuntimeAdmittedSHA256(root, executable, got string) error {
+	_, err := checkScannerRuntimeAdmitted(root, executable, func() (string, error) { return got, nil })
+	return err
+}
+
+func checkScannerRuntimeAdmitted(root, executable string, digest func() (string, error)) (string, error) {
+	restore := "run `" + WindowsSetupCommand("/repair", "JSON=1") + "` to install the payload copy. " + WindowsSetupSource
 	admitted, err := ReadScannerRuntimeAdmission(root)
 	if errors.Is(err, ErrScannerRuntimeAdmissionUnproven) {
 		return "", fmt.Errorf("%w: %s is not run: its admission record, from DefenseClaw 1.0.3 or earlier or an "+
@@ -216,7 +229,7 @@ func CheckScannerRuntimeAdmittedDigest(root, executable string) (string, error) 
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrScannerRuntimeNotAdmitted, err)
 	}
-	got, err := FileSHA256(executable)
+	got, err := digest()
 	if err != nil {
 		return "", fmt.Errorf("hash %s: %w", executable, err)
 	}

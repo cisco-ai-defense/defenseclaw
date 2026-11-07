@@ -63,7 +63,9 @@ declare module "@openclaw/plugin-sdk" {
 
   interface ServiceRegistration {
     id: string;
-    start: () => Promise<{ stop: () => void }>;
+    start: () => Promise<{ stop: () => void } | void>;
+    /** Called by current OpenClaw releases when the service is replaced or removed. */
+    stop?: () => void | Promise<void>;
   }
 
   export interface PluginApi {
@@ -71,8 +73,6 @@ declare module "@openclaw/plugin-sdk" {
     on(event: string, handler: (...args: any[]) => void | Promise<void>): void;
     registerCommand(def: CommandRegistration): void;
     registerService(def: ServiceRegistration): void;
-    /** OpenClaw plugin configuration (see openclaw.plugin.json configSchema). */
-    getPluginConfig?: () => Promise<Record<string, unknown>>;
     /** VS Code–style extension globalState for stable ids (optional). */
     globalState?: {
       get(key: string): unknown;

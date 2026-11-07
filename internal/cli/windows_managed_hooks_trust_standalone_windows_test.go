@@ -20,6 +20,7 @@ import (
 // is judged on its own). The Secure Client twin is
 // TestWindowsManagedHooksTrustRepairsThenAcceptsDrift.
 func TestWindowsManagedHooksTrustStandaloneDrift(t *testing.T) {
+	requireAdministratorTestToken(t, "the product trusts only administrator-owned state folders; a standard user's test folder is untrusted by design")
 	skipIfLocalSystem(t, "LocalSystem owns its t.TempDir() tree, so the fixture cannot stand in for a file a standard account owns")
 	t.Setenv(managed.TrustStrictAncestorsEnv, "")
 	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
@@ -41,7 +42,7 @@ func TestWindowsManagedHooksTrustStandaloneDrift(t *testing.T) {
 		grantUntrustedWriterForTest(t, path)
 	}
 	if err := validateWindowsManagedHooksTrustedFile(journal, managed.ObjectAdminFile, "lifecycle journal"); err == nil ||
-		!strings.Contains(err.Error(), "Setup /ensure") {
+		!strings.Contains(err.Error(), `.\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure`) {
 		t.Fatalf("drifted lifecycle journal = %v, want the strict refusal and the Setup step", err)
 	}
 	if err := validateWindowsManagedHooksTeardownJournalFile(teardown); err == nil {

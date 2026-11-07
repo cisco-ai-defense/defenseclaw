@@ -1,12 +1,14 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
-// Package hookguard is the per-user Windows Claude Code PreToolUse launcher
-// guard: it runs DefenseClaw's hook launcher with the Claude Code hook argv
-// and blocks when the launcher is missing or cannot start. Claude Code treats
+// Package hookguard supplies the per-user Windows Claude Code launcher guard
+// and the Cowork account plugin guard. It runs DefenseClaw's hook launcher
+// with the Claude Code hook argv and blocks when the launcher is missing or
+// cannot start, with a sentence that says which. Claude Code treats
 // a failed start of a hook command as a non-blocking error, so a launcher
 // that antivirus removed let tool calls run uninspected (GAP-1011). The
-// package uses only the standard library: defenseclaw-hook-guard.exe, the
+// package uses only the standard library and, on Windows,
+// golang.org/x/sys/windows to read an owner and a DACL: defenseclaw-hook-guard.exe, the
 // one-line install's guard, is built from it alone and stays small, and the
 // native hook and the gateway answer the same argv through it.
 package hookguard
@@ -15,6 +17,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -23,8 +27,16 @@ import (
 // Subcommand is the first argument of the guard argv.
 const Subcommand = "launcher-guard"
 
-// MissingMessage is the one sentence the guard prints when it blocks.
+// MissingMessage is the sentence the guard prints when it blocks because
+// nothing is at the launcher path. It is also the cmd.exe guard's sentence
+// (one argument per word), which teardown recognizes: keep it unchanged.
 const MissingMessage = "DefenseClaw blocked this: its Claude Code hook launcher is missing. " +
+	"Run the DefenseClaw installer again to repair it."
+
+// CannotStartMessage is the sentence the guard prints when it blocks because
+// the launcher is there but Windows cannot start it: a damaged or partly
+// written file, a folder, a file it may not run (cowork-1-0-8 GAP-0086).
+const CannotStartMessage = "DefenseClaw blocked this: its Claude Code hook launcher cannot start. " +
 	"Run the DefenseClaw installer again to repair it."
 
 const hookBinaryName = "defenseclaw-hook.exe"
@@ -74,19 +86,30 @@ func Argv(args []string) (launcher string, hookArgs []string, ok bool) {
 }
 
 // Run runs launcher with hookArgs and passes its stdin, stdout, stderr and
-// exit code through. When the launcher is missing or cannot start it prints
-// MissingMessage and returns 2, which Claude Code treats as a block.
+// exit code through. When the launcher cannot run it returns 2, which Claude
+// Code treats as a block, and prints MissingMessage when nothing is at the
+// launcher path and CannotStartMessage otherwise.
 func Run(launcher string, hookArgs []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	code, _ := run(launcher, hookArgs, stdin, stdout, stderr)
+	return code
+}
+
+// run is Run that also reports whether the launcher started.
+func run(launcher string, hookArgs []string, stdin io.Reader, stdout, stderr io.Writer) (int, bool) {
 	command := exec.Command(launcher, hookArgs...)
 	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, stderr
 	err := command.Run()
 	if err == nil {
-		return 0
+		return 0, true
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && exitErr.ExitCode() >= 0 {
-		return exitErr.ExitCode()
+		return exitErr.ExitCode(), true
 	}
-	fmt.Fprintln(stderr, MissingMessage)
-	return 2
+	if _, statErr := os.Lstat(launcher); errors.Is(statErr, fs.ErrNotExist) {
+		fmt.Fprintln(stderr, MissingMessage)
+	} else {
+		fmt.Fprintln(stderr, CannotStartMessage)
+	}
+	return 2, false
 }

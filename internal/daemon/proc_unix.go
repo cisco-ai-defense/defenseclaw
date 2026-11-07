@@ -19,6 +19,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -66,8 +67,13 @@ func processExists(pid int) bool {
 	if err != nil {
 		return false
 	}
+	// kill(2) with signal 0 answers ESRCH for a process that is gone and
+	// EPERM for one this account may not signal: that process exists. The
+	// gateway an administrator started for this home (the macOS app's
+	// privileged helper runs it as root) is such a process; reading EPERM
+	// as "gone" made status remove its PID record and report no gateway.
 	err = proc.Signal(syscall.Signal(0))
-	if err != nil {
+	if err != nil && !errors.Is(err, syscall.EPERM) {
 		return false
 	}
 	if runtime.GOOS == "linux" {
@@ -82,6 +88,17 @@ func processExists(pid int) bool {
 		}
 	}
 	return true
+}
+
+// processSignalable reports whether this account may signal pid. It is false
+// only for a live process of another account (EPERM); a process that is gone
+// stands in nobody's way.
+func processSignalable(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return true
+	}
+	return !errors.Is(proc.Signal(syscall.Signal(0)), syscall.EPERM)
 }
 
 func waitForProcessExit(_ *os.Process, pid int, timeout time.Duration) bool {

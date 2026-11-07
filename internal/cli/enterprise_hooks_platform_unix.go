@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -59,21 +60,73 @@ var enterpriseHookRemovedAccountRow = func(row enterpriseHookReconcileRow) bool 
 		!strings.HasSuffix(row.Error, ": "+errEnterpriseHookTargetNotFound.Error()) {
 		return false
 	}
+	return enterpriseHookGuardianTargetRemoved(context.Background(), enterprisehooks.ManifestTarget{User: user, Connector: row.Connector}, row, errEnterpriseHookTargetNotFound)
+}
+
+// A fresh Open Directory read avoids the account cache held by a running
+// macOS guardian. Linux uses a fresh account lookup plus the enumerator's
+// local-source evidence. An unavailable directory is never a removal.
+var enterpriseHookGuardianFreshAccountGone = unixidentity.AccountRecordGone
+
+// Prior records can disagree while a guardian pass is being repaired. An
+// identity is usable as removal evidence only when every positive prior UID
+// available for this target agrees.
+func enterpriseHookGuardianPriorUID(uids ...int) int {
+	uid := 0
+	for _, candidate := range uids {
+		if candidate <= 0 {
+			continue
+		}
+		if uid != 0 && uid != candidate {
+			return 0
+		}
+		uid = candidate
+	}
+	return uid
+}
+
+func enterpriseHookGuardianTargetRemoved(
+	ctx context.Context,
+	target enterprisehooks.ManifestTarget,
+	row enterpriseHookReconcileRow,
+	resolveErr error,
+) bool {
+	user := strings.TrimSpace(target.User)
+	if cfg == nil || !cfg.StandaloneEnterprise() || user == "" {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	recordedUID := row.UID
+	if target.UID != nil {
+		recordedUID = *target.UID
+	}
+	if recordedUID > 0 {
+		if enterpriseHookRecordedAccountGone(checkCtx, user, recordedUID) {
+			return true
+		}
+	}
+	if enterpriseHookGuardianFreshAccountGone(checkCtx, user) {
+		return true
+	}
+	if !errors.Is(resolveErr, errEnterpriseHookTargetNotFound) {
+		return false
+	}
 	if _, err := enterprisehooks.StandaloneResolver().LookupUser(user); !unixidentity.IsNotFound(err) {
 		return false
 	}
-	local, err := enterpriseHooksEnumerateLocalAccounts(context.Background())
+	local, err := enterpriseHooksEnumerateLocalAccounts(checkCtx)
 	if err != nil {
 		return false
 	}
 	if _, present := local[user]; present {
 		return false
 	}
-	if !enterpriseHooksEnumerateDirectoryConfigured() {
-		return true
-	}
 	state := enterprisehooks.LoadUnixEnumeratorState(enterpriseHookEnumeratorStatePath(enterpriseHookManifest))
-	return state.Sources[user] == "files"
+	return enterprisehooks.UnixMissConfirmed(state, user, target.Connector)
 }
 
 // enterpriseHookRemovedAccountNote follows a failed row whose local account

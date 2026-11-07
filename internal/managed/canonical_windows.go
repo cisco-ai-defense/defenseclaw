@@ -185,10 +185,10 @@ func canonicalize(path string, kind ObjectKind, opts CanonicalOptions, repair bo
 		reportUntrustedOwnerTransfer(clean, kind, desc.Owner, opts)
 	}
 	spec := canonicalSpecFor(kind, gatewaySID)
-	if gatewaySID == "" && spec.GatewayNeedsAccess && kind != ObjectConfigFile && kind != ObjectConfigDirectory {
+	if canonicalIdentityMissing(kind, spec, gatewaySID) {
 		// Every runtime form names the gateway service; stamping without it
 		// would lock the gateway out.
-		result.RepairError = "gateway service identity is unavailable"
+		result.RepairError = ErrCanonicalIdentityUnavailable.Error()
 		reportCanonicalResult(result, opts)
 		return result, nil
 	}
@@ -235,6 +235,126 @@ func canonicalize(path string, kind ObjectKind, opts CanonicalOptions, repair bo
 	}
 	reportCanonicalResult(result, opts)
 	return result, nil
+}
+
+// ErrCanonicalIdentityUnavailable reports that the gateway service identity
+// kind names could not be resolved, so no descriptor is stamped or created.
+var ErrCanonicalIdentityUnavailable = errors.New("gateway service identity is unavailable")
+
+// canonicalIdentityMissing reports whether spec names the gateway service but
+// its SID could not be resolved. Config objects only need it to read.
+func canonicalIdentityMissing(kind ObjectKind, spec canonicalSpec, gatewaySID string) bool {
+	return gatewaySID == "" && spec.GatewayNeedsAccess && kind != ObjectConfigFile && kind != ObjectConfigDirectory
+}
+
+// ErrCanonicalOwnerUnavailable reports that an object created by this process
+// could not be given the canonical owner, so it was removed again rather than
+// left as drift for the Guardian to repair.
+var ErrCanonicalOwnerUnavailable = errors.New("the canonical owner could not be assigned at creation")
+
+// CreateCanonicalDirectory creates path as a new directory that carries the
+// canonical protected descriptor of kind from its first instant: the same
+// owner, group and explicit protected DACL EnsureCanonical stamps, built from
+// the same spec. A directory made with a plain mkdir inherits its parent
+// entries unprotected, which the Guardian then logs as drift on its next
+// pass, so every DefenseClaw-created managed directory is created through
+// this. Success means the directory reads canonical:
+// ErrCanonicalIdentityUnavailable is returned, and nothing is created, when
+// the gateway service SID cannot be resolved, and
+// ErrCanonicalOwnerUnavailable when the canonical owner could not be assigned
+// (the new directory is removed again). An existing path fails like os.Mkdir
+// (errors.Is os.ErrExist); the parent must exist.
+func CreateCanonicalDirectory(path string, kind ObjectKind, opts CanonicalOptions) error {
+	if !kind.valid() || !kind.Directory() {
+		return fmt.Errorf("managed object kind %q is not a directory kind", kind)
+	}
+	return createCanonicalObject(path, kind, opts, func(pointer *uint16, attributes *windows.SecurityAttributes) error {
+		return windows.CreateDirectory(pointer, attributes)
+	})
+}
+
+// CreateCanonicalFile is CreateCanonicalDirectory for a new, empty file of a
+// file kind (a lock file). An existing path fails with errors.Is os.ErrExist.
+func CreateCanonicalFile(path string, kind ObjectKind, opts CanonicalOptions) error {
+	if !kind.valid() || kind.Directory() {
+		return fmt.Errorf("managed object kind %q is not a file kind", kind)
+	}
+	return createCanonicalObject(path, kind, opts, func(pointer *uint16, attributes *windows.SecurityAttributes) error {
+		handle, err := windows.CreateFile(pointer, windows.GENERIC_WRITE,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, attributes,
+			windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+		if err != nil {
+			return err
+		}
+		return windows.CloseHandle(handle)
+	})
+}
+
+// EnsureCanonicalLockFile makes sure the lock file at path exists, created in
+// the canonical protection of kind, when this process is pinned to a
+// standalone managed deployment and path lies in its tree
+// (StandaloneManagedTreeAccount). Anywhere else it does nothing and the
+// caller creates the file as before. A file that already exists is left to
+// the Guardian and to Setup repair, which list every lock file.
+func EnsureCanonicalLockFile(path string, kind ObjectKind) error {
+	account, ok := StandaloneManagedTreeAccount(path)
+	if !ok {
+		return nil
+	}
+	err := CreateCanonicalFile(path, kind, CanonicalOptions{GatewayServiceAccount: account, Quiet: true})
+	if err == nil || errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	return err
+}
+
+// createCanonicalObject creates path through create with the canonical
+// descriptor of kind and returns nil only when the result reads canonical.
+func createCanonicalObject(
+	path string, kind ObjectKind, opts CanonicalOptions,
+	create func(*uint16, *windows.SecurityAttributes) error,
+) error {
+	gatewaySID := ""
+	if sid, err := windowsVirtualServiceSID(canonicalGatewayAccount(opts)); err == nil && sid != nil {
+		gatewaySID = sid.String()
+	}
+	spec := canonicalSpecFor(kind, gatewaySID)
+	if canonicalIdentityMissing(kind, spec, gatewaySID) {
+		return ErrCanonicalIdentityUnavailable
+	}
+	pointer, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return err
+	}
+	sddl := spec.canonicalSDDL()
+	attributes, err := setupSecurityAttributes(sddl)
+	if err != nil {
+		return err
+	}
+	err = create(pointer, attributes)
+	if !errors.Is(err, windows.ERROR_INVALID_OWNER) {
+		return err
+	}
+	// The token cannot assign the canonical owner at creation: create with
+	// the default owner and the same protected DACL, then take the owner
+	// through the shared repair. Anything short of a canonical result is
+	// removed again and reported, never left as owner drift.
+	attributes, err = setupSecurityAttributes(strings.TrimPrefix(sddl, "O:"+spec.Forms[0].Owner))
+	if err != nil {
+		return err
+	}
+	if err := create(pointer, attributes); err != nil {
+		return err
+	}
+	quiet := opts
+	quiet.Quiet = true
+	result, _ := canonicalize(path, kind, quiet, !WindowsCurrentProcessIsGatewayService())
+	if result.Outcome == CanonicalOK || result.Outcome == CanonicalRepaired {
+		return nil
+	}
+	_ = os.Remove(path)
+	return fmt.Errorf("%w (%s): %s", ErrCanonicalOwnerUnavailable, result.Outcome,
+		strings.Join(append(append([]string(nil), result.Drift...), result.RepairError), "; "))
 }
 
 // reportUntrustedOwnerTransfer logs, as a MarkerBoundary finding, that a

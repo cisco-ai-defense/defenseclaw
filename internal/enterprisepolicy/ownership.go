@@ -271,9 +271,10 @@ func (r *ownershipRecord) noteRewrite(now time.Time) int {
 // DefenseClaw owns. The Claude Code version floor drop-in never gets here: a
 // floor file that changed is the administrator's, and DefenseClaw does not
 // rewrite it.
-func flapConflict(state *State, connector, path string, count int) {
+func flapConflict(goos string, state *State, connector, path string, count int) {
 	if count >= flapThreshold {
-		state.conflict("another writer replaced %s %d times in 24h and removed DefenseClaw's hooks each time; if an MDM or configuration tool owns this file, set enterprise.machine_policy.connectors.%s.ownership: verify_only and deploy the output of `defenseclaw-gateway enterprise policy export --connector %s` through that tool", path, count, connector, connector)
+		state.conflict("another writer replaced %s %d times in 24h and removed DefenseClaw's hooks each time; if an MDM or configuration tool owns this file, set enterprise.machine_policy.connectors.%s.ownership: verify_only and deploy the output of %s through that tool",
+			path, count, connector, policyExportCommand(goos, "--connector", connector))
 	}
 }
 
@@ -309,7 +310,7 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 	case !exists || sha256Hex(current) != record.PostimageSHA256:
 		outside = record.PostimageSHA256 != ""
 		if record.PostimageSHA256 != "" && exists && !ownedWasPresent {
-			flapConflict(state, connector, path, record.noteRewrite(opts.now()))
+			flapConflict(opts.goos(), state, connector, path, record.noteRewrite(opts.now()))
 		}
 		// A reserved drop-in keeps the preimage of its first publish.
 		// Copilot's shared drop-in follows parseable administrator edits,

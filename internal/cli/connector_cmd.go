@@ -67,17 +67,13 @@ config.yaml. 'defenseclaw guardrail status' lists the connector names.
 }
 
 var (
-	connectorFlagName                 string
-	connectorFlagJSON                 bool
-	connectorFlagDataDir              string
-	connectorFlagConfigHome           string
-	connectorFlagHookExe              string
-	connectorRollbackRestore          bool
-	connectorRollbackToVersion        string
-	connectorVerifySetupParent        string
-	connectorVerifySetupStartIdentity string
-	connectorVerifyCleanupRecord      string
-	connectorVerifyCleanupTransaction string
+	connectorFlagName          string
+	connectorFlagJSON          bool
+	connectorFlagDataDir       string
+	connectorFlagConfigHome    string
+	connectorFlagHookExe       string
+	connectorRollbackRestore   bool
+	connectorRollbackToVersion string
 )
 
 // connectorExit is the indirection used in place of os.Exit so tests can
@@ -96,7 +92,6 @@ var connectorSaveOpenCodeActive = connector.SaveActiveConnectors
 var connectorSaveOpenCodeLock = connector.SaveFreshHookContractLockEntry
 var connectorSaveAmpLock = connector.SaveFreshHookContractLockEntry
 var connectorEnsureHookAPIToken = connector.EnsureHookAPIToken
-var connectorVerifyRootPersistentPreRun = rootPersistentPreRunE
 var connectorCheckPlatformSupportOnHost = connector.CheckPlatformSupportOnHost
 
 var connectorTeardownCmd = &cobra.Command{
@@ -164,9 +159,8 @@ Exit codes:
   0   connector is clean
   1   connector has residual state (details printed to stderr)
   2   connector unknown / config error`,
-	Annotations:       map[string]string{auditOptionalAnnotation: "true", configOptionalAnnotation: "true"},
-	PersistentPreRunE: runConnectorVerifyPersistentPreRunE,
-	RunE:              runConnectorVerify,
+	Annotations: map[string]string{auditOptionalAnnotation: "true", configOptionalAnnotation: "true"},
+	RunE:        runConnectorVerify,
 }
 
 var connectorReconcileCmd = &cobra.Command{
@@ -246,34 +240,6 @@ func init() {
 	connectorCmd.PersistentFlags().StringVar(&connectorFlagHookExe, "hook-executable", "",
 		"Bind native connector maintenance to an installer-validated hook launcher")
 	_ = connectorCmd.PersistentFlags().MarkHidden("hook-executable")
-	connectorVerifyCmd.Flags().StringVar(
-		&connectorVerifySetupParent,
-		"internal-setup-parent",
-		"",
-		"internal authenticated Setup parent binding",
-	)
-	_ = connectorVerifyCmd.Flags().MarkHidden("internal-setup-parent")
-	connectorVerifyCmd.Flags().StringVar(
-		&connectorVerifySetupStartIdentity,
-		"internal-setup-start-identity",
-		"",
-		"internal authenticated Setup process-instance binding",
-	)
-	_ = connectorVerifyCmd.Flags().MarkHidden("internal-setup-start-identity")
-	connectorVerifyCmd.Flags().StringVar(
-		&connectorVerifyCleanupRecord,
-		"internal-deferred-cleanup-record",
-		"",
-		"internal authenticated deferred-cleanup record binding",
-	)
-	_ = connectorVerifyCmd.Flags().MarkHidden("internal-deferred-cleanup-record")
-	connectorVerifyCmd.Flags().StringVar(
-		&connectorVerifyCleanupTransaction,
-		"internal-deferred-cleanup-transaction",
-		"",
-		"internal authenticated deferred-cleanup transaction binding",
-	)
-	_ = connectorVerifyCmd.Flags().MarkHidden("internal-deferred-cleanup-transaction")
 
 	connectorReconcileCmd.Flags().BoolVar(&connectorReconcileEvery, "every-connector", false,
 		"refresh and read back every connector the config guards; exit 3 naming each that is not on its current hook")
@@ -288,25 +254,6 @@ func init() {
 	connectorCmd.AddCommand(connectorListBackupsCmd)
 
 	rootCmd.AddCommand(connectorCmd)
-}
-
-func runConnectorVerifyPersistentPreRunE(cmd *cobra.Command, args []string) error {
-	if connectorVerifySetupParent == "" &&
-		connectorVerifySetupStartIdentity == "" &&
-		connectorVerifyCleanupRecord == "" &&
-		connectorVerifyCleanupTransaction == "" {
-		return connectorVerifyRootPersistentPreRun(cmd, args)
-	}
-	if err := validateDeferredUninstallConnectorVerify(cmd); err != nil {
-		return fmt.Errorf("connector verify deferred-uninstall authorization: %w", err)
-	}
-	// The authenticated deferred-uninstall child is deliberately configless:
-	// DELETEUSERDATA has already removed the runtime v8 source. VerifyClean uses
-	// only the transaction-bound data/config homes validated above.
-	cfg = nil
-	activeObservabilityV8Startup = nil
-	version.SetBinaryVersion(appVersion)
-	return nil
 }
 
 // resolveActiveConnectorName returns the connector name to operate on for

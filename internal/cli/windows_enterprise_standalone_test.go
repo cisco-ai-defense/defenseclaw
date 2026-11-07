@@ -1009,6 +1009,7 @@ func TestWindowsEnterpriseConfigRefusalRecoversAPendingTransaction(t *testing.T)
 // On a host without the log folder the first run created it but still
 // reported it missing, so a first install carried lifecycle_log_failed.
 func TestWindowsEnterpriseLogDirectoryIsUsableOnFirstCreate(t *testing.T) {
+	requireAdministratorTestToken(t, "the product writer, not the fixture, needs it: ensureWindowsEnterpriseLogDirectory creates the lifecycle log folder with its windowsEnterpriseLogSDDL descriptor (O:BA, an Administrators owner), which only an administrator token can set")
 	directory := filepath.Join(t.TempDir(), "DefenseClaw")
 	if err := ensureWindowsEnterpriseLogDirectory(directory); errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the log folder this call created is reported missing: %v", err)
@@ -1170,11 +1171,17 @@ func (stub *ensureStub) install(t *testing.T) {
 	originalHookRuntime := windowsEnterpriseHookRuntimeDir
 	originalCopies := windowsEnterpriseRemoveReplacementCopies
 	originalCowork := windowsEnterpriseCoworkEnsureDrift
+	originalDataDir := windowsEnterpriseRepairDataDirBeforePlan
 	t.Cleanup(func() {
 		windowsEnterpriseHookRuntimeDir = originalHookRuntime
 		windowsEnterpriseRemoveReplacementCopies = originalCopies
 		windowsEnterpriseCoworkEnsureDrift = originalCowork
+		windowsEnterpriseRepairDataDirBeforePlan = originalDataDir
 	})
+	windowsEnterpriseRepairDataDirBeforePlan = func() string { return "" }
+	originalGuardianRepairs := windowsEnterpriseGuardianRepairsSinceLastRun
+	t.Cleanup(func() { windowsEnterpriseGuardianRepairsSinceLastRun = originalGuardianRepairs })
+	windowsEnterpriseGuardianRepairsSinceLastRun = func() []string { return nil }
 	// The host's real Cowork check stays out of scripted ensures; the
 	// Cowork drift tests replace this after install.
 	windowsEnterpriseCoworkEnsureDrift = func() (string, string) { return "", "" }
@@ -1273,6 +1280,61 @@ func TestWindowsEnterpriseEnsureProbesCarryNoMutationInputs(t *testing.T) {
 	}
 	if !result.OK || !result.Noop || result.NoopReason != "compliant" {
 		t.Fatalf("result %+v", result)
+	}
+
+	// GAP-0573: a compliant ensure that put a drifted runtime folder ACL
+	// back says so and is not a no-op.
+	stub = &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("verify")}}
+	stub.install(t)
+	windowsEnterpriseRepairDataDirBeforePlan = func() string {
+		return `restored the access control of C:\ProgramData\Cisco\DefenseClaw\runtime, which had drifted (untrusted writer S-1-5-32-545)`
+	}
+	stdout.Reset()
+	if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`); err != nil {
+		t.Fatalf("ensure after a runtime ACL repair: %v\n%s", err, stdout.String())
+	}
+	result = enterprisestatus.Result{}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.Noop || result.NoopReason != "" || !strings.Contains(strings.Join(result.Changes, "\n"), `restored the access control of C:\ProgramData\Cisco\DefenseClaw\runtime`) {
+		t.Fatalf("runtime ACL repair: result %+v", result)
+	}
+	// The guardian put it back first: ensure names that repair.
+	stub = &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("verify")}}
+	stub.install(t)
+	windowsEnterpriseGuardianRepairsSinceLastRun = func() []string {
+		return []string{`C:\ProgramData\Cisco\DefenseClaw\runtime at 2026-11-05T03:40:24Z (untrusted principal S-1-5-32-545 has write access)`}
+	}
+	stdout.Reset()
+	if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`); err != nil {
+		t.Fatalf("ensure after a guardian repair: %v\n%s", err, stdout.String())
+	}
+	result = enterprisestatus.Result{}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.Noop || !strings.Contains(fmt.Sprint(result.Warnings), "guardian_repaired_drift") {
+		t.Fatalf("guardian repair: result %+v", result)
+	}
+	// REVIEW-2: the run's flag outlives a pass. The re-planned pass after a
+	// concurrent install finds the drift already gone and must not make the
+	// run a no-op or name the guardian repair twice.
+	repaired := false
+	passResult := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	noteWindowsEnterpriseEnsureDriftRepairs(passResult, &repaired)
+	windowsEnterpriseGuardianRepairsSinceLastRun = func() []string { return nil }
+	noteWindowsEnterpriseEnsureDriftRepairs(passResult, &repaired)
+	windowsEnterpriseGuardianRepairsSinceLastRun = func() []string { return []string{"again"} }
+	noteWindowsEnterpriseEnsureDriftRepairs(passResult, &repaired)
+	count := 0
+	for _, warning := range passResult.Warnings {
+		if warning.Code == "guardian_repaired_drift" {
+			count++
+		}
+	}
+	if !repaired || count != 1 {
+		t.Fatalf("drift flag across passes: repaired=%t guardian warnings=%d", repaired, count)
 	}
 }
 
@@ -1586,7 +1648,7 @@ func TestWindowsEnterpriseEnsureRecordOwnerMismatchNamesRecovery(t *testing.T) {
 	}
 	for _, want := range []string{
 		record, "inspect the deployment record owner", "restore its expected owner",
-		"/uninstall FORCE=1 PURGE=1 JSON=1", "/ensure CONFIG=<config.yaml> JSON=1",
+		windowsEnterpriseSetupCommand("/uninstall", "FORCE=1", "PURGE=1", "JSON=1"), windowsEnterpriseSetupCommand("/ensure", "CONFIG=<config.yaml>", "JSON=1"), managed.WindowsSetupSource,
 	} {
 		if !strings.Contains(result.Errors[0].Message, want) {
 			t.Fatalf("error %q does not name %q", result.Errors[0].Message, want)
@@ -1889,7 +1951,8 @@ func TestWindowsEnterpriseUnparseableInstalledConfigMessage(t *testing.T) {
 	}
 	_, err := readWindowsEnterpriseConfiguredTrust("repair", &windowsEnterpriseLifecycleOptions{stateRoot: stateRoot})
 	if err == nil || !strings.Contains(err.Error(), "does not parse at line 1 (it holds text where a mapping of keys is expected)") ||
-		!strings.Contains(err.Error(), "/ensure CONFIG=<config.yaml> JSON=1") || strings.Contains(err.Error(), "struct {") {
+		!strings.Contains(err.Error(), windowsEnterpriseSetupCommand("/ensure", "CONFIG=<config.yaml>", "JSON=1")) || !strings.Contains(err.Error(), managed.WindowsSetupSource) ||
+		strings.Contains(err.Error(), "struct {") {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -2171,7 +2234,8 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 	// run was not LocalSystem, and names the next step.
 	if !strings.Contains(got[0].Message, "2 user connector registration(s) because this uninstall did not run as LocalSystem") ||
 		!strings.Contains(got[0].Message, sid+": devin, hermes") ||
-		!strings.Contains(got[0].Message, "Setup /ensure and then /uninstall, both as LocalSystem") {
+		!strings.Contains(got[0].Message, windowsEnterpriseSetupCommand("/ensure")+" and then "+windowsEnterpriseSetupCommand("/uninstall")+", both as LocalSystem") ||
+		!strings.Contains(got[0].Message, managed.WindowsSetupSource) {
 		t.Fatalf("warnings = %+v", got)
 	}
 	// A removal that was attempted and failed is still reported.
@@ -2180,7 +2244,7 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 	if len(attempted) != 2 || attempted[1].Code != "user_registrations_failed" ||
 		!strings.Contains(attempted[1].Message, `defenseclaw.json still holds`) ||
 		// GAP-1932: a failed removal names a next step.
-		!strings.Contains(attempted[1].Message, "remove the named DefenseClaw entries from those files as that user, or run DefenseClaw Setup /ensure and then /uninstall") {
+		!strings.Contains(attempted[1].Message, "remove the named DefenseClaw entries from those files as that user, or run "+windowsEnterpriseSetupCommand("/ensure")+" and then "+windowsEnterpriseSetupCommand("/uninstall")) {
 		t.Fatalf("attempted-failure warnings = %+v", attempted)
 	}
 	failedReport, err := parseWindowsEnterpriseInstallerReport([]byte(base + `,"user_registrations_failed":["claudecode/` + sid + `: settings still holds DefenseClaw's hook"]}`))
@@ -2231,7 +2295,7 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 	applyWindowsEnterpriseInstallerReport(failed, &windowsEnterpriseLifecycleOptions{purge: true}, notSystem, windowsEnterpriseStandaloneRun{})
 	if len(failed.Errors) != 1 || failed.Errors[0].Code != "per_user_state_remaining" || len(failed.Warnings) != 0 ||
 		!strings.Contains(failed.Errors[0].Message, "--purge did not run as LocalSystem") ||
-		!strings.Contains(failed.Errors[0].Message, "/uninstall PURGE=1, both as LocalSystem") ||
+		!strings.Contains(failed.Errors[0].Message, windowsEnterpriseLocalSystemRemedy("/uninstall PURGE=1")) ||
 		!strings.HasSuffix(failed.Errors[0].Message, `Accounts: alice (`+sid+`): C:\Users\alice\.defenseclaw`) {
 		t.Fatalf("not-LocalSystem purge: errors %+v warnings %+v", failed.Errors, failed.Warnings)
 	}
@@ -2352,7 +2416,8 @@ func TestWindowsEnterpriseFailedLifecycleNamesTheRecoveryStep(t *testing.T) {
 	for _, want := range []string{
 		`the permissions on C:\Users\alice\.defenseclaw\hooks are not the ones DefenseClaw set`,
 		"Next step: run the same Setup as LocalSystem",
-		`DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=C:\Staging\config.yaml JSON=1`,
+		`& '.\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure CONFIG=C:\Staging\config.yaml JSON=1`,
+		managed.WindowsSetupSource,
 	} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("error %q does not contain %q", message, want)
@@ -2415,7 +2480,7 @@ func TestWindowsEnterpriseFailedLifecycleNamesTheRecoveryStep(t *testing.T) {
 		}
 	}
 	if len(leftovers) != 2 ||
-		!strings.Contains(leftovers[0], "bob (S-1-5-21-1-2-3-1019) [codex, cursor]: DefenseClaw's agent registrations, because the account is not signed in; to remove it, run DefenseClaw Setup /ensure and then /uninstall") ||
+		!strings.Contains(leftovers[0], "bob (S-1-5-21-1-2-3-1019) [codex, cursor]: DefenseClaw's agent registrations, because the account is not signed in; to remove it, run "+windowsEnterpriseSetupCommand("/ensure")+" and then "+windowsEnterpriseSetupCommand("/uninstall")) ||
 		!strings.HasSuffix(leftovers[1], `hooks.json, which changed after DefenseClaw wrote it; remove DefenseClaw's entries from that file by hand`) {
 		t.Fatalf("rollback leftovers = %q", leftovers)
 	}
@@ -2711,7 +2776,7 @@ func TestWindowsEnterpriseResultNamesUntrustedUserRuntimeFolders(t *testing.T) {
 	}
 	if len(skipped) != 1 || !strings.Contains(skipped[0], "of 1 account(s)") ||
 		!strings.Contains(skipped[0], `C:\Users\stale\.defenseclaw\hooks`) ||
-		!strings.Contains(skipped[0], "run Setup /ensure again") {
+		!strings.Contains(skipped[0], "run "+windowsEnterpriseAdminCommand("ensure")+" from an elevated PowerShell prompt again to remove the old copies") {
 		t.Fatalf("skipped folder warning = %q", skipped)
 	}
 	if len(result.Errors) != 0 {
@@ -2817,7 +2882,6 @@ func TestWindowsEnterpriseResultNamesRemovedStaleLifecycleJournal(t *testing.T) 
 // error (1639) that names the profile to use, not a fatal install (1603).
 // GAP-2113: its --json result reports the installed deployment.
 func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
-	isolateWindowsEnterpriseHostReaders(t)
 	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentInstalled})
 	originalObserver := windowsEnterpriseStandaloneObserver
 	originalElevated := windowsEnterpriseIsElevated
@@ -3031,7 +3095,6 @@ func TestWindowsEnterpriseRefusedPowerShellReportsRecordedDeployment(t *testing.
 // service states) instead of installed=false with no services, and text
 // mode is the one refusal line. Exit 5 stays.
 func TestWindowsEnterpriseStandardUserStatusReportsRecordedDeployment(t *testing.T) {
-	isolateWindowsEnterpriseHostReaders(t)
 	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentUnknown})
 	originalRunner := windowsEnterpriseStandaloneRunner
 	originalObserver := windowsEnterpriseStandaloneObserver

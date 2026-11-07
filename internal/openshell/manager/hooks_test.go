@@ -1679,3 +1679,42 @@ func TestAnIdleSessionWithUnreachedHooksIsNotStopped(t *testing.T) {
 		t.Fatalf("an idle session: %d hook_silence finding(s), stopped %v; want none", n, stopped(t, r.harnessEnv, r.name))
 	}
 }
+
+// GAP-0715: an automatic hook alarm stop keeps its cause in both durable
+// lifecycle transitions; an ordinary user stop has no hook alarm cause.
+func TestGAP0715HookAlarmStopRecordsCause(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kind audit.SandboxFindingKind
+		want string
+	}{
+		{"silence", audit.SandboxFindingHookSilence, "hook_silence"},
+		{"tamper", audit.SandboxFindingHookTamper, "hook_tamper"},
+		{"ordinary stop", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t, nil)
+			e.create(sandboxapi.CreateRequest{Name: "causebox", Pack: "balanced"})
+			if tc.kind == "" {
+				e.stopBox("causebox")
+			} else {
+				e.m.stopForAlarm("causebox", e.binding("causebox").ID, tc.kind)
+			}
+			rows := where(&e.tel.mu, &e.tel.lifecycle, func(ev audit.SandboxLifecycleEvent) bool {
+				return ev.Sandbox.Name == "causebox" && ev.Trigger == audit.SandboxTriggerStop
+			})
+			if len(rows) < 2 {
+				t.Fatalf("%d stop lifecycle rows, want at least two", len(rows))
+			}
+			for _, row := range rows {
+				got := ""
+				if row.Condition != nil {
+					got = row.Condition.Reason
+				}
+				if got != tc.want {
+					t.Fatalf("%s cause = %q, want %q", row.Sandbox.Phase, got, tc.want)
+				}
+			}
+		})
+	}
+}

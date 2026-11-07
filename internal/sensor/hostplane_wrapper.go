@@ -4,7 +4,10 @@
 package sensor
 
 import (
+	"os"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -45,6 +48,13 @@ type heldWrapper struct {
 	// depth is the number of wrappers in this record's chain: its own level
 	// (1 for a wrapper, 0 for a client exec) and its deepest linked record's.
 	depth int
+	// resolved is a wrapper whose source names argv[0] by the resolved
+	// binary (Tetragon): its child's command line starts with the child's
+	// binary, not with the tail's program word.
+	resolved bool
+	// digest is a held client exec's image digest: the exec event's, or the
+	// one a later KindImageDigest event delivered ("" until then).
+	digest string
 }
 
 // level is the number of wrappers the record itself adds to a chain.
@@ -196,7 +206,18 @@ func (h *hostPlane) wrapperRecordLocked(
 		h.indicators.KeepClientMCP || h.clientChecksums == nil {
 		return nil
 	}
-	prefix, tail, ok := wrapperTail(event.Name, event.Cmdline)
+	name, cmdline, resolved := event.Name, event.Cmdline, event.Source == plane.SourceTetragon
+	if resolved {
+		// Tetragon names argv[0] by the binary it resolved, so neither the
+		// process name nor argv[0] says which program ran: the binary must
+		// be one of the installed wrappers, by file identity.
+		program, args, _ := strings.Cut(cmdline, " ")
+		if name = installedWrapper(event.Exe, h.wrapperDirs); name == "" || program != event.Exe {
+			return nil
+		}
+		cmdline = name + " " + args
+	}
+	prefix, tail, ok := wrapperTail(name, cmdline)
 	if !ok {
 		return nil
 	}
@@ -224,8 +245,68 @@ func (h *hostPlane) wrapperRecordLocked(
 	}
 	return &heldWrapper{
 		cmdline: event.Cmdline, tail: tail, event: event, lineage: lineage, match: match, at: at, instance: instance,
-		depth: 1,
+		depth: 1, resolved: resolved,
 	}
+}
+
+// wrapperBinaryDirs are where the allowlisted wrappers are installed.
+var wrapperBinaryDirs = []string{"/usr/bin", "/bin"}
+
+// installedWrapper is the allowlisted wrapper whose installed binary (in one
+// of dirs) the resolved executable path exe is, by image identity: a regular
+// file reached without a link that is the same file (device and inode) with
+// the same size and modification time as the binary installed under that
+// wrapper's name, itself not writable by group or others. A copy of a
+// wrapper, a binary only named like one, and a file installed under more
+// than one wrapper's name (a multi-call binary, whose resolved path does not
+// say which tool ran) are none.
+//
+// Only a path directly in one of dirs is looked at, so no other path (an
+// agent's own binary in a home, perhaps on a slow network file system) is
+// ever read under the host plane's lock.
+func installedWrapper(exe string, dirs []string) string {
+	if !filepath.IsAbs(exe) || filepath.Clean(exe) != exe || !slices.Contains(dirs, filepath.Dir(exe)) {
+		return ""
+	}
+	image, err := os.Lstat(exe)
+	if err != nil || !image.Mode().IsRegular() {
+		return ""
+	}
+	found := ""
+	for name := range transparentWrappers {
+		for _, dir := range dirs {
+			installed, err := os.Stat(filepath.Join(dir, name))
+			if err != nil || !installed.Mode().IsRegular() || installed.Mode().Perm()&0o022 != 0 ||
+				!os.SameFile(image, installed) || image.Size() != installed.Size() ||
+				!image.ModTime().Equal(installed.ModTime()) {
+				continue
+			}
+			if found != "" && found != name {
+				return ""
+			}
+			found = name
+		}
+	}
+	return found
+}
+
+// runsTail reports a child exec whose argv is the wrapper's tail. A native
+// source's command line is that argv as the wrapper passed it. Tetragon's
+// names the child's resolved binary in place of argv[0]; there the child
+// must be a Tetragon exec whose command line is its own binary and then the
+// tail's arguments, exactly.
+func (held *heldWrapper) runsTail(event plane.Event) bool {
+	if !held.resolved {
+		return event.Cmdline == held.tail
+	}
+	if event.Source != plane.SourceTetragon || event.Exe == "" {
+		return false
+	}
+	want := event.Exe
+	if _, args, ok := strings.Cut(held.tail, " "); ok {
+		want += " " + args
+	}
+	return event.Cmdline == want
 }
 
 // holdWrapperLocked holds a wrapper record from wrapperRecordLocked until
@@ -274,7 +355,7 @@ func (h *hostPlane) settleWrappersLocked(event plane.Event, verifiedClient, repo
 		}
 		delete(h.wrappers, pid)
 		switch {
-		case event.Cmdline != held.tail:
+		case !held.runsTail(event):
 			h.finishHeldLocked(held, true)
 		case verifiedClient && !reported:
 			h.finishHeldLocked(held, false)

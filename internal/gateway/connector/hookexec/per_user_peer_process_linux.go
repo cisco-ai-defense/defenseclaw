@@ -22,6 +22,10 @@ import (
 // accepted server socket of the connection client->server: the inode of its
 // procfs row, then the process whose open files hold that socket.
 func perUserConnectedPeerPID(client, server *net.TCPAddr) (int, bool) {
+	return perUserConnectedPeerPIDWithin(context.Background(), client, server)
+}
+
+func perUserConnectedPeerPIDWithin(ctx context.Context, client, server *net.TCPAddr) (int, bool) {
 	serverKey, table, err := procTCPEndpoint(server)
 	if err != nil {
 		return 0, false
@@ -36,47 +40,11 @@ func perUserConnectedPeerPID(client, server *net.TCPAddr) (int, bool) {
 	}
 	// More than one holder of the accepted socket (a dup in another
 	// process) is no known peer (review r3 finding 2).
-	holders := procSocketHolders(context.Background(), inode)
-	if len(holders) != 1 {
+	holders := procSocketHolders(ctx, inode)
+	if ctx.Err() != nil || len(holders) != 1 {
 		return 0, false
 	}
 	return holders[0], true
-}
-
-// perUserProcessHoldsConnection reports whether process pid holds the
-// accepted server socket of the connection client->server. It reads one
-// process's open files, not all of /proc.
-func perUserProcessHoldsConnection(pid int, client, server *net.TCPAddr) bool {
-	if pid <= 0 {
-		return false
-	}
-	serverKey, table, err := procTCPEndpoint(server)
-	if err != nil {
-		return false
-	}
-	clientKey, clientTable, err := procTCPEndpoint(client)
-	if err != nil || clientTable != table {
-		return false
-	}
-	inode := procSocketInode(table, "01", serverKey, clientKey)
-	if inode == "" && table == "tcp" {
-		inode = procSocketInode("tcp6", "01", mappedTCP6Endpoint(server), mappedTCP6Endpoint(client))
-	}
-	if inode == "" {
-		return false
-	}
-	want := "socket:[" + inode + "]"
-	fdDir := "/proc/" + strconv.Itoa(pid) + "/fd/"
-	fds, err := readDirNames(fdDir)
-	if err != nil {
-		return false
-	}
-	for _, fd := range fds {
-		if link, err := os.Readlink(fdDir + fd); err == nil && link == want {
-			return true
-		}
-	}
-	return false
 }
 
 // perUserListenerOwners is every process of this account that holds a

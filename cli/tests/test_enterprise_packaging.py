@@ -622,45 +622,8 @@ def test_third_party_license_text_and_platform_packaging_contracts():
         assert f"include {name}" in manifest
 
     bundle_builder = (ROOT / "scripts/build-macos-bundle.sh").read_text(encoding="utf-8")
-    windows_builder = (ROOT / "scripts/windows-native-ci.ps1").read_text(encoding="utf-8-sig")
-    windows_installer = (ROOT / "scripts/build-windows-installer.ps1").read_text(
-        encoding="utf-8-sig"
-    )
-    windows_gateway_license_staging = """\
-    foreach ($file in @('LICENSE', 'NOTICE', 'THIRD_PARTY_LICENSES.txt')) {
-        foreach ($targetRoot in @($gatewayVerificationStage, $stage)) {
-            Copy-Item -LiteralPath (Join-Path $WorkspaceRoot $file) -Destination $targetRoot -Force
-        }
-    }"""
     for name in ("LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.txt"):
         assert f'cp {name} ' in bundle_builder
-    assert windows_gateway_license_staging in windows_builder
-    assert (
-        "foreach ($file in @('pyproject.toml', 'README.md', 'LICENSE', 'NOTICE', "
-        "'THIRD_PARTY_LICENSES.txt', 'MANIFEST.in'))"
-    ) in windows_builder
-    assert (
-        "Copy-Item -LiteralPath (Join-Path $WorkspaceRoot $file) "
-        "-Destination $packageStage -Force"
-    ) in windows_builder
-    assert (
-        """\
-        '--source', $stage,
-        '--output', $gatewayArchive,"""
-        in windows_builder
-    )
-    assert (
-        """\
-        '--source', $gatewayVerificationStage,
-        '--output', $gatewayArchiveVerification,"""
-        in windows_builder
-    )
-    assert "gateway ZIP must contain exactly one root $file file" in windows_builder
-    assert "gateway ZIP $file differs from the canonical source file" in windows_builder
-    assert "Expand-Archive -LiteralPath $gatewayZip -DestinationPath $gatewayPayloadDir" in (
-        windows_installer
-    )
-    assert "Write-ZipFromDirectory $gatewayPayloadDir $embeddedGatewayZip" in windows_installer
 
 
 @pytest.mark.skipif(os.name == "nt", reason="launchd installer POSIX ownership and executable-bit contract")
@@ -2948,3 +2911,47 @@ def test_scanner_runtime_build_sets_every_mode() -> None:
     assert "path.chmod(0o755)" in script
     assert "path.chmod(0o755 if mode & 0o111 else 0o644)" in script
     assert 'sys.exit(f"{path} is not a file or folder")' in script
+
+
+def test_macos_pkg_preinstall_lists_only_the_parents_it_will_create(tmp_path: Path) -> None:
+    """GAP-0091: the pkg preinstall lists, after every refusal, the shared
+    payload parents that do not exist yet; the lifecycle moves the list into
+    the deployment record (internal/enterpriseunix created_parent_dirs.go), so
+    an uninstall removes those folders once empty and never one that existed."""
+    builder = (ROOT / "scripts" / "build-macos-enterprise-pkg.sh").read_text(encoding="utf-8")
+    match = re.search(r"cat >\"\$SCRIPTS/preinstall\" <<'EOF'\n(.*?)\nEOF\n", builder, re.DOTALL)
+    assert match, "the pkg preinstall heredoc was not found"
+    preinstall = match.group(1)
+    start = preinstall.index("# GAP-0091:")
+    assert preinstall.rstrip().endswith("exit 0") and start > preinstall.rindex("refuse ")
+    snippet = preinstall[start:]
+    go = (ROOT / "internal" / "enterpriseunix" / "created_parent_dirs.go").read_text(encoding="utf-8")
+    assert 'createdParentDirsName = "created-parent-dirs"' in go
+    assert '"$state/created-parent-dirs"' in snippet
+    parents = ("/opt", "/opt/cisco", "/usr/local", "/usr/local/bin")
+    for parent in parents:
+        assert f'"{parent}": true' in go
+    root = tmp_path / "root"
+    rooted = snippet.replace(
+        "for d_parent in /opt /opt/cisco /usr/local /usr/local/bin; do",
+        "for d_parent in " + " ".join(f"{root}{p}" for p in parents) + "; do",
+    )
+    assert rooted != snippet
+    state = root / "opt/cisco/defenseclaw/lifecycle"
+    (root / "usr/local").mkdir(parents=True)
+    # The Installer runs the script with a 077 umask; the parents it creates
+    # still get the payload's 0755, and only the lifecycle folder 0700.
+    script = f"umask 077\nstate={state}\n" + rooted
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    listed = (state / "created-parent-dirs").read_text(encoding="utf-8").split()
+    assert listed == [f"{root}/opt", f"{root}/opt/cisco", f"{root}/usr/local/bin"]
+    for parent in ("opt", "opt/cisco", "opt/cisco/defenseclaw"):
+        assert (root / parent).stat().st_mode & 0o777 == 0o755, parent
+    assert state.stat().st_mode & 0o777 == 0o700
+    # Everything present: nothing is listed again.
+    (root / "usr/local/bin").mkdir()
+    (state / "created-parent-dirs").unlink()
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert not (state / "created-parent-dirs").exists()

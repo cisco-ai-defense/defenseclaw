@@ -2000,6 +2000,7 @@ def test_fix_gateway_service_surfaces_only_safe_lifecycle_reason(tmp_path):
     with (
         # A gateway installed on this host's PATH would be named instead.
         patch.dict(os.environ, {"PATH": str(tmp_path)}),
+        patch("defenseclaw.gateway.canonical_install_path", return_value=str(tmp_path / "missing-gateway")),
         patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(0, "")),
         patch(
             "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",

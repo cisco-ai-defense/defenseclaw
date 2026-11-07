@@ -26,10 +26,13 @@ from defenseclaw.alert_semantics import (
     ALERT_NON_ALLOW_OUTCOMES,
     copilot_hook_target,
     copilot_hook_target_spellings,
+    cowork_hook_target,
+    surface_label,
 )
 from defenseclaw.audit_time_order import audit_time_order
 from defenseclaw.hook_metrics import (
     POST_TOOL_DECISION,
+    allowed_finding_hook_label,
     connector_hook_decision,
     detection_only_hook_label,
     parse_detail_tokens,
@@ -298,14 +301,6 @@ _DECISION_KEYS = (
 
 
 _SURFACE_KEY = "defenseclaw.agent.surface"
-_SURFACE_LABELS = {"cowork": "Cowork (Claude Code)"}
-
-
-def surface_label(surface: str) -> str:
-    """How the Alerts row and detail name an agent surface ("Cowork (Claude Code)")."""
-
-    surface = (surface or "").strip().lower()
-    return _SURFACE_LABELS.get(surface, surface)
 
 
 def _evaluation_surfaces(rows: Iterable[V8EventHistoryRow]) -> dict[str, str]:
@@ -325,19 +320,6 @@ def _evaluation_surfaces(rows: Iterable[V8EventHistoryRow]) -> dict[str, str]:
         if row.request_id:
             surfaces.setdefault(f"req:{row.request_id}", surface)
     return surfaces
-
-
-def _cowork_target(target: str, surface: str) -> str:
-    """``claudecode:PreToolUse`` reads ``cowork:PreToolUse`` for a Cowork call (GAP-0047)."""
-
-    if surface != "cowork":
-        return target
-    head, sep, rest = target.partition(":")
-    if sep and head.strip().lower() == "cowork":
-        return target
-    if sep and head.strip().lower() == "claudecode":
-        return f"cowork:{rest}"
-    return f"cowork {target}" if target else "cowork"
 
 
 def _evaluation_decisions(rows: Iterable[V8EventHistoryRow]) -> dict[str, str]:
@@ -486,7 +468,7 @@ def _v8_alert_event(
         id=row.id,
         severity=severity,
         action=action,
-        target=_cowork_target(copilot_hook_target(target, row.connector), surface),
+        target=cowork_hook_target(copilot_hook_target(target, row.connector), surface),
         details=" ".join(detail_parts),
         timestamp=row.timestamp or datetime.now(timezone.utc),
         actor=row.actor or row.source,
@@ -1418,7 +1400,7 @@ class AlertsPanelModel:
         if surface and hydrated is not None and event.target and not _is_hook_event(event):
             # The stored row names the connector; the list row and the Surface
             # line say Cowork, so the Target line does too (GAP-0056).
-            event = replace(event, target=_cowork_target(event.target, surface), surface=surface)
+            event = replace(event, target=cowork_hook_target(event.target, surface), surface=surface)
         if event.action == "scan-finding":
             # A hook-rule finding carries the rule, not the outcome; the
             # connector-hook row of the same request says whether the call was
@@ -1963,7 +1945,11 @@ def _hook_decision_from_rows(rows: Iterable[str], hook_target: str = "") -> str:
             # The same label as "defenseclaw alerts" (GAP-1560).
             decision = would_block_hook_label(hook_target, mode)
         elif not decision and action:
-            decision = "allowed" if action == "allow" else action
+            decision = (
+                allowed_finding_hook_label(hook_target, mode) or "allowed"
+                if action == "allow"
+                else action
+            )
     return decision
 
 

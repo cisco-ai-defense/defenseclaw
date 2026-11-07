@@ -15,7 +15,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
 
 // A Unix standalone managed hook that fails closed says, in one line that
@@ -172,6 +171,7 @@ func TestWindowsStandaloneHeldAPIPortFailsClosedNamingThePort(t *testing.T) {
 // instead (#1163): open allows the call, closed keeps the generic text; both
 // log the not-running reason.
 func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T) {
+	shortRestartBudget(t)
 	run := func(explain bool, failMode string) (int, string, string, string) {
 		home := t.TempDir()
 		token := "managed-test-token"
@@ -283,9 +283,7 @@ func TestManagedStandaloneOversizedPromptIsBlockedAndReported(t *testing.T) {
 // plain text and no operator-only advice a standard user cannot follow
 // (GAP-0680).
 func TestWindowsStandaloneFirstCallRetriesA401WithoutOperatorAdvice(t *testing.T) {
-	original := hookAuthRetryDelay
-	hookAuthRetryDelay = time.Millisecond
-	t.Cleanup(func() { hookAuthRetryDelay = original })
+	shortAuthRetryDelay(t)
 	managed := func(opts *Options) {
 		token := "managed-test-token"
 		opts.ManagedEnterprise = true
