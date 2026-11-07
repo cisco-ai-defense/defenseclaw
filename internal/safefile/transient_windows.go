@@ -25,6 +25,27 @@ var transientRetryDelays = func() [31]time.Duration {
 	return delays
 }()
 
+const publishedReadRetryWindow = 250 * time.Millisecond
+
+// RetryPublishedRead keeps sampling a validated read while a published name
+// is changing. A busy writer can consume a fixed number of attempts before
+// the name settles, so this variant uses elapsed time as its bound. Permanent
+// errors still return after one attempt.
+func RetryPublishedRead(read func() error) error {
+	deadline := time.Now().Add(publishedReadRetryWindow)
+	for {
+		err := read()
+		remaining := time.Until(deadline)
+		if !transientReadError(err) || remaining <= 0 {
+			return err
+		}
+		if remaining > time.Millisecond {
+			remaining = time.Millisecond
+		}
+		transientRetrySleep(remaining)
+	}
+}
+
 // SetTransientRetrySleepForTest replaces the wait between attempts. Tests can
 // publish a file at that boundary without relying on scheduler timing.
 // Call restore after a test that uses it; concurrent use is unsupported.
