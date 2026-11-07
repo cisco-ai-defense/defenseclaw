@@ -667,6 +667,26 @@ func TestConnectorPruneOrphansWithoutConfigNeedsVerifiedBackupRecords(t *testing
 		}
 		return root
 	}
+	setTarget := func(target func(dataDir string) string) func(t *testing.T, saved string) {
+		return func(t *testing.T, saved string) {
+			t.Helper()
+			eachRecord(t, saved, func(p string) {
+				var rec map[string]any
+				data, err := os.ReadFile(p)
+				if err != nil || json.Unmarshal(data, &rec) != nil {
+					t.Fatalf("read record: %v", err)
+				}
+				rec["path"] = target(filepath.Dir(filepath.Dir(filepath.Dir(p))))
+				data, err = json.Marshal(rec)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
 	for _, tc := range []struct {
 		name   string
 		change func(t *testing.T, saved string)
@@ -711,6 +731,11 @@ func TestConnectorPruneOrphansWithoutConfigNeedsVerifiedBackupRecords(t *testing
 				}
 			})
 		}},
+		{"a record names no target path", setTarget(func(string) string { return "" })},
+		{"a record names a relative target path", setTarget(func(string) string { return "relative-hooks.json" })},
+		{"a record names a target outside the account home", setTarget(func(string) string {
+			return filepath.Join(t.TempDir(), "elsewhere", "hooks.json")
+		})},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path, saved, dataDir := setUpAntigravityRollbackFromNewer(t, pristine)

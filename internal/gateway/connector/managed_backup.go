@@ -944,7 +944,7 @@ func RestoreManagedFileBackupsForRollback(
 			(onlyConnector != "" && !strings.EqualFold(b.Connector, onlyConnector)) {
 			return nil
 		}
-		if !managedBackupTargetInside(home, b.Path) || managedBackupTargetInside(currentDataDir, b.Path) {
+		if !managedBackupRollbackTargetUsable(b, currentDataDir, home) {
 			kept = append(kept, b.Path)
 			return nil
 		}
@@ -973,16 +973,28 @@ func managedBackupDigestMatches(b managedFileBackup) bool {
 	return managedFileSnapshotHash(b.PristineBytes, b.Existed) == b.PristineSHA256
 }
 
+// managedBackupRollbackTargetUsable reports whether a rollback may act on the
+// agent file the record names: an absolute path inside the account home and
+// outside the data directory now in place. Restore and verification share it,
+// so a record the restore would not touch is never counted as proof.
+func managedBackupRollbackTargetUsable(b managedFileBackup, currentDataDir, home string) bool {
+	return managedBackupTargetInside(home, b.Path) && !managedBackupTargetInside(currentDataDir, b.Path)
+}
+
 // VerifyManagedFileBackups reads every connector backup record in dataDir and
 // returns how many there are. A record that does not load, does not sit where
-// its connector and name put it, or does not match its saved digest is an
-// error, so a nil error with a positive count means the whole list is usable.
-// Rollback cleanup that has no config.yaml to go by needs that proof before it
-// removes anything.
-func VerifyManagedFileBackups(dataDir string) (int, error) {
+// its connector and name put it, does not match its saved digest, or names no
+// agent file a rollback could restore (a path that is empty, relative, outside
+// home, or inside currentDataDir) is an error, so a nil error with a positive
+// count means the whole list is usable. Rollback cleanup that has no
+// config.yaml to go by needs that proof before it removes anything.
+func VerifyManagedFileBackups(dataDir, currentDataDir, home string) (int, error) {
 	count := 0
 	err := forEachManagedFileBackup(dataDir, func(b managedFileBackup) error {
 		count++
+		if !managedBackupRollbackTargetUsable(b, currentDataDir, home) {
+			return fmt.Errorf("connector backup %q does not name an agent file under the account home", b.Path)
+		}
 		if !managedBackupDigestMatches(b) {
 			return fmt.Errorf("connector backup %s does not match its saved digest", b.Path)
 		}
