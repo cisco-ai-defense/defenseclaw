@@ -6,6 +6,7 @@ package connector
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -72,20 +73,74 @@ func TestVerifyManagedFileBackupsCountsOnlyUsableRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	saved := filepath.Join(root, "saved-data")
-	if n, err := VerifyManagedFileBackups(saved); n != 0 || err != nil {
+	if n, err := VerifyManagedFileBackups(saved, filepath.Join(root, "data"), home); n != 0 || err != nil {
 		t.Fatalf("missing folder = %d, %v; want 0, nil", n, err)
 	}
 	if err := captureManagedFileBackup(saved, "newer-connector", "hooks.json", path); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := VerifyManagedFileBackups(saved); n != 1 || err != nil {
+	if n, err := VerifyManagedFileBackups(saved, filepath.Join(root, "data"), home); n != 1 || err != nil {
 		t.Fatalf("one record = %d, %v; want 1, nil", n, err)
 	}
 	record := managedFileBackupPath(saved, "newer-connector", "hooks.json")
 	if err := os.WriteFile(record, []byte("{invalid"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifyManagedFileBackups(saved); err == nil {
+	if _, err := VerifyManagedFileBackups(saved, filepath.Join(root, "data"), home); err == nil {
 		t.Fatal("a record that does not parse was accepted")
+	}
+}
+
+func TestVerifyManagedFileBackupsRejectsRecordsWithoutUsableTarget(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	current := filepath.Join(root, "data")
+	path := filepath.Join(home, ".agent", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		target string
+		ok     bool
+	}{
+		{"absolute target under home", path, true},
+		{"empty target", "", false},
+		{"relative target", "relative-hooks.json", false},
+		{"target outside home", filepath.Join(root, "elsewhere", "hooks.json"), false},
+		{"target inside the current data folder", filepath.Join(current, "hooks.json"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			saved := filepath.Join(t.TempDir(), "saved-data")
+			if err := captureManagedFileBackup(saved, "newer-connector", "hooks.json", path); err != nil {
+				t.Fatal(err)
+			}
+			record := managedFileBackupPath(saved, "newer-connector", "hooks.json")
+			raw, err := os.ReadFile(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var rec map[string]any
+			if err := json.Unmarshal(raw, &rec); err != nil {
+				t.Fatal(err)
+			}
+			rec["path"] = tc.target
+			if raw, err = json.Marshal(rec); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(record, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			n, err := VerifyManagedFileBackups(saved, current, home)
+			if tc.ok && (n != 1 || err != nil) {
+				t.Fatalf("usable record = %d, %v; want 1, nil", n, err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatalf("record target %q was accepted as rollback proof", tc.target)
+			}
+		})
 	}
 }

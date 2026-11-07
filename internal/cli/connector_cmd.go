@@ -1270,8 +1270,9 @@ func runConnectorPruneOrphans(cmd *cobra.Command, _ []string) error {
 // directory (a link whose target is unavailable proves nothing about what was
 // inside), config.yaml is confirmed absent there (Lstat, so a link is a
 // present config), and the saved newer install folder holds connector backup
-// records that all load and match their digests (an empty or unrelated folder,
-// or a rejected record, is no evidence of what the newer install set up).
+// records that all load, match their digests and name an agent file under the
+// account home (an empty or unrelated folder, or a rejected record, is no
+// evidence of what the newer install set up).
 // Anything else is a refusal, with the reason, that removes nothing.
 func confirmedRollbackWithoutConfig(dataDir, savedDir string) error {
 	if savedDir == "" {
@@ -1283,7 +1284,11 @@ func confirmedRollbackWithoutConfig(dataDir, savedDir string) error {
 	if _, err := os.Lstat(filepath.Join(dataDir, config.DefaultConfigName)); !errors.Is(err, os.ErrNotExist) {
 		return errors.New("config.yaml is present in the older data folder")
 	}
-	count, err := connector.VerifyManagedFileBackups(savedDir)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("find the account home: %w", err)
+	}
+	count, err := connector.VerifyManagedFileBackups(savedDir, dataDir, home)
 	if err != nil {
 		return fmt.Errorf("the saved connector backups are not usable: %w", err)
 	}
