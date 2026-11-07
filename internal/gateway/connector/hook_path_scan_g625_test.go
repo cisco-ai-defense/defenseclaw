@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -413,6 +414,18 @@ func TestGAP0625PathScanProgramWordEscapesAndAdjacentParts(t *testing.T) {
 			func(program string) string {
 				return strings.NewReplacer("*", "\\*", "?", "\\?", ";", "\\;", " ", "\\ ").Replace(program)
 			}, false},
+		{"ansi-c word with an unknown escape", func(home, owned string) string { return filepath.Join(home, "ordinary\\q; "+owned) },
+			func(program string) string { return "$'" + program + "'" }, false},
+		{"ansi-c word with x and u escapes that have no digits", func(home, owned string) string { return filepath.Join(home, "ordinary\\x\\u; "+owned) },
+			func(program string) string { return "$'" + program + "'" }, false},
+		{"braces holding a text that is not a sequence", func(home, owned string) string { return filepath.Join(home, "ordinary{ab..cd}; "+owned) },
+			func(program string) string { return strings.NewReplacer(";", "\\;", " ", "\\ ").Replace(program) }, false},
+		{"braces holding an open sequence", func(home, owned string) string { return filepath.Join(home, "ordinary{1..}{..2}{1..2..x}; "+owned) },
+			func(program string) string { return strings.NewReplacer(";", "\\;", " ", "\\ ").Replace(program) }, false},
+		{"letter sequence after a quoted part", func(home, owned string) string { return filepath.Join(home, "ordinary; "+owned) },
+			func(program string) string { return "'" + program + "'{a..c}" }, true},
+		{"sequence with a step after a quoted part", func(home, owned string) string { return filepath.Join(home, "ordinary; "+owned) },
+			func(program string) string { return "'" + program + "'{-1..9..2}" }, true},
 		{"ansi-c word cut short by a NUL escape", func(home, owned string) string { return filepath.Join(home, "ordinary; "+owned) },
 			func(program string) string { return "$'" + program + "\\x00'" }, true},
 		{"ansi-c word with an escape it cannot decode", func(home, owned string) string { return filepath.Join(home, "ordinary; "+owned) },
@@ -462,6 +475,65 @@ func TestGAP0625PathScanAnsiCQuotedManagedHook(t *testing.T) {
 	}
 }
 
+// gap0625RunsInBash fails the test unless Bash runs the command, so a case
+// built on a file name is a command that really executes the file.
+func gap0625RunsInBash(t *testing.T, command string) {
+	t.Helper()
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("needs bash")
+	}
+	if output, err := exec.Command(bash, "-c", command).CombinedOutput(); err != nil {
+		t.Fatalf("Bash did not run %q: %v: %s", command, err, output)
+	}
+}
+
+// A program word that names a managed hook file, or a link to one, by a name
+// with an apostrophe is that hook in every quoting: the shell opens the exact
+// name, and the text scan, which drops quotes, cannot carry the apostrophe.
+// The same shapes beside an ordinary file stay.
+func TestGAP0625PathScanApostropheNamedProgram(t *testing.T) {
+	ansiC := strings.NewReplacer("/", "\\057", "'", "\\047")
+	quoted := func(name string) string { return "'" + strings.ReplaceAll(name, "'", "'\\''") + "'" }
+	for _, prefix := range []string{"", "env ", "command "} {
+		for _, tc := range []struct {
+			name    string
+			program func(home, owned string) string // the file the shell runs
+			word    func(program string) string
+			managed bool
+		}{
+			{"managed file ansi-c", func(_, owned string) string { return owned }, func(p string) string { return "$'" + ansiC.Replace(p) + "'" }, true},
+			{"managed file quoted", func(_, owned string) string { return owned }, quoted, true},
+			{"link ansi-c", func(home, owned string) string { return filepath.Join(home, "outside", "linked'file") },
+				func(p string) string { return "$'" + ansiC.Replace(p) + "'" }, true},
+			{"link quoted", func(home, owned string) string { return filepath.Join(home, "outside", "linked'file") }, quoted, true},
+			{"ordinary file ansi-c", func(home, owned string) string { return filepath.Join(home, "it's; "+owned) },
+				func(p string) string { return "$'" + ansiC.Replace(p) + "'" }, false},
+			{"ordinary file quoted", func(home, owned string) string { return filepath.Join(home, "it's; "+owned) }, quoted, false},
+		} {
+			t.Run(strings.TrimSpace(prefix)+"|"+tc.name, func(t *testing.T) {
+				verifyErr, commands, entry, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+					owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned'file"))
+					program := tc.program(home, owned)
+					if strings.Contains(tc.name, "link") {
+						program = gap0625Link(t, owned, program)
+					} else if !tc.managed {
+						gap0625WriteExecutable(t, program)
+					}
+					command := prefix + tc.word(program) + " --event pre_tool_call"
+					gap0625RunsInBash(t, command)
+					return command
+				})
+				if tc.managed {
+					gap0625ExpectProtected(t, verifyErr, commands, userHook)
+				} else {
+					gap0625ExpectOrdinary(t, verifyErr, commands, entry, userHook)
+				}
+			})
+		}
+	}
+}
+
 // hookLiteralWord reads only words whose text the shell fixes before it picks
 // the program.
 func TestGAP0625LiteralWordTable(t *testing.T) {
@@ -475,7 +547,10 @@ func TestGAP0625LiteralWordTable(t *testing.T) {
 		{`$'/a\x2fb\057cA'`, "/a/b/cA", true},
 		{`$'a\'b'`, "a'b", true},
 		{`$'a\x00b'`, "", false},
-		{`$'a\qb'`, "", false},
+		{`$'a\qb'`, `a\qb`, true},
+		{`$'a\x'`, `a\x`, true},
+		{`$'a\u'`, `a\u`, true},
+		{`$'a\777'`, "a\xff", true},
 		{`$'a\cb'`, "", false},
 		{`$'a\400'`, "", false},
 		{`/a/b~c`, "/a/b~c", true},
@@ -485,6 +560,14 @@ func TestGAP0625LiteralWordTable(t *testing.T) {
 		{`/a/{lit`, "/a/{lit", true},
 		{`/a/{x,y}`, "", false},
 		{`/a/{1..3}`, "", false},
+		{`/a/{ab..cd}`, "/a/{ab..cd}", true},
+		{`/a/{1..}`, "/a/{1..}", true},
+		{`/a/{..2}`, "/a/{..2}", true},
+		{`/a/{1..2..x}`, "/a/{1..2..x}", true},
+		{`/a/{1..2..3..4}`, "/a/{1..2..3..4}", true},
+		{`/a/{a..c}`, "", false},
+		{`/a/{-1..9..2}`, "", false},
+		{`/a/{1..3..-2}`, "", false},
 		{`/a/{x,{y}}`, "", false},
 		{`/a/{{y}}`, "/a/{{y}}", true},
 		{`/a/'{'x,y}`, "/a/{x,y}", true},
