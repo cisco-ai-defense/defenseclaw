@@ -1315,6 +1315,27 @@ $failures = & $module {
                 if ((& $s2Listing) -cne $s2Before) {
                     $failures.Add("GAP-0758 review S2: the selector purge changed the folder behind the link: $(& $s2Listing)")
                 }
+                # A failure of the link check that is not a link keeps its own message
+                # (GAP-0758 review L1): it is not labelled as a link, and a purge goes on.
+                $l1Drive = @('Q', 'R', 'S', 'T', 'U') | Microsoft.PowerShell.Core\Where-Object { -not [IO.Directory]::Exists("${_}:\") } | Microsoft.PowerShell.Utility\Select-Object -First 1
+                if ($null -ne $l1Drive) {
+                    $l1Directory = "${l1Drive}:\no\such\folder"
+                    $l1Out = @(Remove-DefenseClawOwnRuntimeSelector -Directory $l1Directory -OwnHook 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe')
+                    if ($l1Out.Count -ne 1 -or -not ([string]$l1Out[0]).StartsWith("${l1Directory}: cannot resolve existing ancestor") -or ([string]$l1Out[0]) -match 'a link sits') {
+                        $failures.Add("GAP-0758 review L1: the selector purge labelled a failure that is not a link: $($l1Out -join ' | ')")
+                    }
+                    $l1Threw = $false
+                    try {
+                        Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout @{ ClaudeManagedHooksLockPath = [IO.Path]::Combine($l1Directory, '.defenseclaw-managed-hooks.lock') }
+                    }
+                    catch {
+                        $l1Threw = ([string]$_.Exception.Message) -match 'cannot resolve existing ancestor'
+                    }
+                    if (-not $l1Threw -or @(Get-DefenseClawCreatedFoldersKept).Count -ne 0) {
+                        $failures.Add('GAP-0758 review L1: the committed lock removal kept a failure that is not a link as a kept link')
+                    }
+                    $script:DefenseClawCreatedFoldersKept.Clear()
+                }
                 # The committed-uninstall lock removal meets the same link: it
                 # neither throws (a 1603 over a link) nor touches the lock behind it.
                 $s2Lock = [IO.Path]::Combine($s2Target, '.defenseclaw-managed-hooks.lock')
@@ -1388,19 +1409,37 @@ $failures = & $module {
                 if ($g773SecureClient -cne '') {
                     $failures.Add("GAP-0773: Secure Client kept a Codex link: '$g773SecureClient'")
                 }
+                # The uninstall's removal reports a kept link as kept and not
+                # verified (no safe_to_remove_binary), and only the uninstall
+                # (-Teardown) accepts that report.
                 $g773Report = [pscustomobject]@{
-                    safe_to_remove_binary = $true; managed_state_existed = $false; managed_state_removed = $false
-                    managed_state_removed_or_absent = $true; surviving_owned_path_references = 0; disposition = 'link_kept'
+                    safe_to_remove_binary = $false; managed_state_existed = $false; managed_state_removed = $false
+                    managed_state_removed_or_absent = $false; surviving_owned_path_references = 0; disposition = 'link_kept'
+                    link_kept = $g773Link
                 }
                 try {
-                    Complete-DefenseClawCodexRequirementsRemoval -Layout @{} -GatewayServiceName 'DefenseClawGateway' -Report $g773Report
+                    Complete-DefenseClawCodexRequirementsRemoval -Layout @{} -GatewayServiceName 'DefenseClawGateway' -Report $g773Report -Teardown
                 }
                 catch {
-                    $failures.Add("GAP-0773: the Codex removal that kept a link was refused: $($_.Exception.Message)")
+                    $failures.Add("GAP-0773: the uninstall's Codex removal that kept a link was refused: $($_.Exception.Message)")
                 }
-                $g773Report.disposition = 'bogus'
                 $g773Refused = $false
                 try { Complete-DefenseClawCodexRequirementsRemoval -Layout @{} -GatewayServiceName 'DefenseClawGateway' -Report $g773Report } catch { $g773Refused = $true }
+                if (-not $g773Refused) {
+                    $failures.Add('GAP-0773: a Codex removal that is not the uninstall''s accepted a kept link')
+                }
+                $g773Report.link_kept = ''
+                $g773Refused = $false
+                try { Complete-DefenseClawCodexRequirementsRemoval -Layout @{} -GatewayServiceName 'DefenseClawGateway' -Report $g773Report -Teardown } catch { $g773Refused = $true }
+                if (-not $g773Refused) {
+                    $failures.Add('GAP-0773: link_kept without a named link was accepted')
+                }
+                $g773Report.link_kept = $g773Link
+                $g773Report.safe_to_remove_binary = $true
+                $g773Report.managed_state_removed_or_absent = $true
+                $g773Report.disposition = 'bogus'
+                $g773Refused = $false
+                try { Complete-DefenseClawCodexRequirementsRemoval -Layout @{} -GatewayServiceName 'DefenseClawGateway' -Report $g773Report -Teardown } catch { $g773Refused = $true }
                 if (-not $g773Refused) {
                     $failures.Add('GAP-0773: an unexplained Codex removal disposition was accepted')
                 }

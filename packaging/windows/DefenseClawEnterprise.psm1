@@ -18077,6 +18077,9 @@ function Remove-DefenseClawCommittedManagedHooksSerializationLocks {
             Assert-DefenseClawNoReparsePath -Path ([IO.Path]::GetDirectoryName($full)) -AllowMissingLeaf
         }
         catch {
+            if ($_.Exception.Message -notmatch '^reparse points are not allowed in managed path: ') {
+                throw
+            }
             Add-DefenseClawCreatedFolderKept -Folder ([IO.Path]::GetDirectoryName($full)) -Note ('kept: a link sits on its path, so the ' + $lock.Label + ' is not looked for behind it: ' +
                 (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512))
             continue
@@ -18163,7 +18166,8 @@ function Remove-DefenseClawOwnRuntimeSelector {
         Assert-DefenseClawNoReparsePath -Path $Directory -AllowMissingLeaf
     }
     catch {
-        "${Directory}: kept: a link sits here; DefenseClaw does not follow, change or remove it"
+        # Only a link is kept as a link; any other failure keeps its message.
+        Get-DefenseClawMachineStateFailureEntry -Path $Directory -Message $_.Exception.Message
         return
     }
     if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $state) -and
@@ -19541,11 +19545,12 @@ function Get-DefenseClawAgentFolderBackfillRefusal {
             return ''
         }
         if ($Kind -ceq 'Amp') {
-            # The 1.0.2 through 1.0.8 policy writer put nothing in
-            # ProgramData\ampcode (Amp reads it; DefenseClaw publishes no Amp
-            # policy there), so only an empty folder can be DefenseClaw alone. A
-            # folder holding the ownership marker the 1.0.9 writer adds was
-            # created by 1.0.9 and is removed through the marker.
+            # The 1.0.2 through 1.0.6 policy writer created ProgramData\ampcode
+            # empty, and 1.0.7 and later add an ownership marker when they
+            # create it (Amp reads the folder; DefenseClaw publishes no Amp
+            # policy there), so only an empty folder can be DefenseClaw alone
+            # from here. A folder holding the marker was created by a release
+            # that writes it and is removed through the marker.
             if ($children.Count -ne 0) {
                 return "it holds $($children[0].Name), which DefenseClaw does not write there"
             }
@@ -27066,19 +27071,30 @@ function Invoke-DefenseClawCodexRequirementsCommand {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)]
         [ValidateSet('inspect', 'reconcile', 'verify', 'remove')]
-        [string]$Action
+        [string]$Action,
+        # The uninstall's removal: it alone keeps a link at the Codex
+        # machine-policy folder (GAP-0773). Every other removal, and the
+        # disabled-Codex reconcile, refuses the link.
+        [switch]$Teardown
     )
     Assert-DefenseClawAdministrator
+    if ($Teardown -and $Action -cne 'remove') {
+        throw 'the Codex requirements teardown option applies to the remove action only'
+    }
+    $codexRequirementsArguments = @(
+        'enterprise',
+        'windows',
+        'codex-requirements',
+        $Action,
+        '--json'
+    )
+    if ($Teardown) {
+        $codexRequirementsArguments += '--uninstall'
+    }
     $probe = Invoke-DefenseClawGatewayCommand `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
-        -Arguments @(
-            'enterprise',
-            'windows',
-            'codex-requirements',
-            $Action,
-            '--json'
-        ) `
+        -Arguments $codexRequirementsArguments `
         -Capture `
         -AllowFailure
 
@@ -27282,7 +27298,10 @@ function Complete-DefenseClawCodexRequirementsRemoval {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
-        [Parameter(Mandatory)]$Report
+        [Parameter(Mandatory)]$Report,
+        # The report is the uninstall's: only then is a kept link accepted
+        # (GAP-0773).
+        [switch]$Teardown
     )
     foreach ($booleanName in @(
         'safe_to_remove_binary',
@@ -27294,6 +27313,26 @@ function Complete-DefenseClawCodexRequirementsRemoval {
         if ($null -eq $property -or $property.Value -isnot [bool]) {
             throw "Codex requirements removal did not report boolean $booleanName"
         }
+    }
+    $disposition = [string]$Report.disposition
+    $linkKept = $Report.PSObject.Properties['link_kept']
+    if ($Teardown -and $disposition -ceq 'link_kept' -and $null -ne $linkKept -and
+        -not [string]::IsNullOrWhiteSpace([string]$linkKept.Value)) {
+        # A link sits at the Codex machine-policy folder (GAP-0773). It was kept
+        # and nothing behind it was read, written or deleted, so the report
+        # attests neither safe_to_remove_binary nor a removed state: it is
+        # accepted by name, as kept and not verified, and only for the
+        # uninstall. There is no requirements file, state or preimage of this
+        # deployment to remove or restore there. What it recorded under
+        # StateRoot goes with StateRoot.
+        $survivingKept = $Report.PSObject.Properties['surviving_owned_path_references']
+        if ($null -eq $survivingKept -or
+            $survivingKept.Value -is [bool] -or
+            $survivingKept.Value -isnot [ValueType] -or
+            [Convert]::ToInt64($survivingKept.Value) -ne 0) {
+            throw 'Codex requirements removal did not prove zero surviving references to the owned binary tree'
+        }
+        return
     }
     if (-not [bool]$Report.safe_to_remove_binary -or
         -not [bool]$Report.managed_state_removed_or_absent -or
@@ -27309,14 +27348,6 @@ function Complete-DefenseClawCodexRequirementsRemoval {
         $survivingReferences.Value -isnot [ValueType] -or
         [Convert]::ToInt64($survivingReferences.Value) -ne 0) {
         throw 'Codex requirements removal did not prove zero surviving references to the owned binary tree'
-    }
-    $disposition = [string]$Report.disposition
-    if ($disposition -ceq 'link_kept') {
-        # A link sits at the Codex machine-policy folder (GAP-0773). It was kept
-        # and nothing behind it was read, written or deleted, so there is no
-        # requirements file, state or preimage of this deployment to remove
-        # or restore there. What it recorded under StateRoot goes with StateRoot.
-        return
     }
     $ownedRemovalDisposition = $disposition -in @(
         'restored_preimage',
@@ -27541,11 +27572,13 @@ function Invoke-DefenseClawLegacyHelperTombstoneHookTeardown {
             $codexRemoval = Invoke-DefenseClawCodexRequirementsCommand `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
-                -Action remove
+                -Action remove `
+                -Teardown
             Complete-DefenseClawCodexRequirementsRemoval `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
-                -Report $codexRemoval
+                -Report $codexRemoval `
+                -Teardown
         }
     }
     finally {
@@ -37153,11 +37186,13 @@ function Complete-DefenseClawCommittedManagedHooksFinalization {
                 $codexRemoval = Invoke-DefenseClawCodexRequirementsCommand `
                     -Layout $Layout `
                     -GatewayServiceName $GatewayServiceName `
-                    -Action remove
+                    -Action remove `
+                    -Teardown
                 Complete-DefenseClawCodexRequirementsRemoval `
                     -Layout $Layout `
                     -GatewayServiceName $GatewayServiceName `
-                    -Report $codexRemoval
+                    -Report $codexRemoval `
+                    -Teardown
             }
             Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $Layout
             Set-DefenseClawInstallTreeRetirementAcls -Layout $Layout -Committed
@@ -46911,11 +46946,13 @@ function Invoke-DefenseClawUninstallLifecycle {
                 $codexRemoval = Invoke-DefenseClawCodexRequirementsCommand `
                     -Layout $Layout `
                     -GatewayServiceName $GatewayServiceName `
-                    -Action remove
+                    -Action remove `
+                    -Teardown
                 Complete-DefenseClawCodexRequirementsRemoval `
                     -Layout $Layout `
                     -GatewayServiceName $GatewayServiceName `
-                    -Report $codexRemoval
+                    -Report $codexRemoval `
+                    -Teardown
             }
         }
         if (Microsoft.PowerShell.Management\Test-Path `

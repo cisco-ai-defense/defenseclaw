@@ -211,8 +211,9 @@ The guardian reserves `C:\ProgramData\ampcode` while installed because Amp
 reads that machine folder for every account. Setup records when it created the
 folder and removes it on uninstall if it holds only Setup's ownership marker.
 An Amp or administrator folder that predates Setup, and any folder with other
-content, remains. An older installation (1.0.2 through 1.0.8) has no ownership
-marker, so the first install, upgrade or repair of this release records the
+content, remains. An older installation (1.0.2 through 1.0.6) created the folder
+empty and has no ownership marker (1.0.7 and later write one when they create
+it), so the first install, upgrade or repair of this release records the
 empty folder as Setup-created only when it was created after
 `C:\ProgramData\Cisco\DefenseClaw` and has exactly the permissions Setup gives
 it; uninstall then removes it while it is empty. Otherwise uninstall leaves it

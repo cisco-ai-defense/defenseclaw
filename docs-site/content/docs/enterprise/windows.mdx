@@ -981,14 +981,21 @@ had recorded the folder), never as a file the uninstall could not remove, and th
 machine policy folders DefenseClaw writes itself for GitHub Copilot, OpenCode and Devin under
 `C:\ProgramData` are the one difference: a link a standard user made there is removed, the link only, and
 nothing is created in its place (what it points to is untouched), while a link an administrator made stays and
-is named. Install, ensure and repair still refuse to write through such a link.
+is named. Each path is decided on its own: a link at one of Devin's two folders (`Devin` or the older
+`Windsurf` folder) keeps that folder, and DefenseClaw's entry in the other one is still removed.
+Only the uninstall keeps a link at the Codex folder, and it reports it as kept and not verified: because
+nothing behind the link is read, a Codex requirement there may still name the DefenseClaw hook program
+that the uninstall removes, so check the policy behind a link you made. Install, ensure, repair, the reconcile that
+turns Codex off and the guardian's Codex removal never write through a link: they stop with an error that
+names a link at the Codex folder, and report a link at any other vendor folder as an error too, except that
+a link a standard user made at the Copilot, OpenCode or Devin policy folder is removed first.
 Releases before 1.0.9 kept no record. On a computer installed with one of them, the first 1.0.9
 install, upgrade or repair records `C:\Program Files\Cisco` and `C:\ProgramData\Cisco` when they
 still have the permissions Setup gave them and hold only DefenseClaw folders. It records
 `C:\Program Files\ClaudeCode\managed-settings.d`, `C:\ProgramData\Cursor`,
 `C:\ProgramData\OpenAI\Codex` and `C:\ProgramData\ampcode` only when all three hold: the folder was created after
 `C:\ProgramData\Cisco\DefenseClaw`, it has exactly the permissions DefenseClaw creates it with, and
-it holds only DefenseClaw's own files (`ampcode` must be empty: 1.0.2 and later releases create it empty). `ClaudeCode` and `OpenAI` follow when their only child is
+it holds only DefenseClaw's own files (`ampcode` must be empty: 1.0.2 through 1.0.6 create it empty, and 1.0.7 and later add an ownership marker when they create it). `ClaudeCode` and `OpenAI` follow when their only child is
 recorded. Setup checks these folders once, on the first install, upgrade or repair after the
 upgrade; a folder an administrator makes later and Setup adopts is never recorded. The check counts
 as done when every folder was recorded or failed one of the three conditions; if a record cannot be

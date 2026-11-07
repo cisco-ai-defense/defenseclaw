@@ -6289,6 +6289,62 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
         assert "removeEmptyWindowsClaudeManagedSettingsFolders" not in read(go_file), go_file.name
 
 
+def test_codex_machine_link_keep_belongs_to_the_uninstall_alone() -> None:
+    """GAP-0773 / GAP-0758 round 4: only the uninstall keeps a link at the Codex
+    machine-policy folder. The snapshot skip, the removal option and the kept
+    disposition are each pinned to the uninstall; install, ensure, repair and
+    the disabled-Codex reconcile keep the earlier refusal."""
+    module = read(MODULE)
+
+    # The uninstall's transaction alone skips the Codex files behind a link.
+    assert module.count("-SkipLinkedCodexMachineState") == 1
+    uninstall = _psm1_function(module, "Invoke-DefenseClawUninstallLifecycle")
+    assert uninstall.count("-SkipLinkedCodexMachineState `") == 1
+    transaction = _psm1_function(module, "New-DefenseClawTransaction")
+    assert "[switch]$SkipLinkedCodexMachineState" in transaction
+    assert "if ($SkipLinkedCodexMachineState) {" in transaction
+    assert "$codexFolderLink = Get-DefenseClawCodexMachineFolderLink -Layout $Layout" in transaction
+    # The loop skips only a destination that sits directly in the linked folder,
+    # and still snapshots the others (the ownership and ACL-backup files).
+    skip = transaction[transaction.index("if ($codexFolderLink -ne '' -and [string]::Equals("):]
+    skip = skip[: skip.index("$destinations.Add([string]$destination)")]
+    assert "[IO.Path]::GetDirectoryName([IO.Path]::GetFullPath([string]$destination))" in skip
+    assert "[IO.Path]::GetFullPath([string]$Layout.CodexMachinePolicyDirectory)" in skip
+    assert "continue" in skip and "[StringComparison]::OrdinalIgnoreCase" in skip
+
+    # Only the uninstall's three removal call sites pass -Teardown, to the
+    # command (which adds --uninstall to the remove action) and to the check
+    # that accepts a kept link; the reconcile that turns Codex off passes none.
+    invoke = _psm1_function(module, "Invoke-DefenseClawCodexRequirementsCommand")
+    assert "[switch]$Teardown" in invoke and "$codexRequirementsArguments += '--uninstall'" in invoke
+    assert "$Teardown -and $Action -cne 'remove'" in invoke
+    complete = _psm1_function(module, "Complete-DefenseClawCodexRequirementsRemoval")
+    assert "if ($Teardown -and $disposition -ceq 'link_kept'" in complete
+    assert complete.index("link_kept") < complete.index("did not prove managed runtime state")
+    assert len(re.findall(r"-Action remove `\n +-Teardown\n", module)) == 3
+    assert module.count("-Action remove") == 3
+    assert module.count("-Report $codexRemoval `\n") == 3
+    assert len(re.findall(r"-Report \$codexRemoval `\n +-Teardown\n", module)) == 3
+    reconcile_removal = module[module.index("-Action reconcile\n            Complete-DefenseClawCodexRequirementsRemoval"):]
+    reconcile_removal = reconcile_removal[: reconcile_removal.index("# Secure Client keeps")]
+    assert "-Teardown" not in reconcile_removal
+
+    # Go: the plain removal is strict; the option reaches the connector from the
+    # hidden --uninstall flag and the teardown caller only.
+    connector_go = read(ROOT / "internal" / "gateway" / "connector" / "codex_machine_requirements_windows.go")
+    assert "return removeWindowsCodexMachineRequirements(opts, false)" in connector_go
+    assert "return removeWindowsCodexMachineRequirements(opts, true)" in connector_go
+    assert connector_go.count("if keepLink {") == 1
+    cli_go = read(ROOT / "internal" / "cli" / "windows_codex_requirements.go")
+    assert 'if action == "remove" {' in cli_go and 'BoolVar(&uninstall, "uninstall"' in cli_go
+    assert "windowsCodexRequirementsTeardownRemover(opts)" in cli_go
+    teardown_go = read(ROOT / "internal" / "cli" / "windows_managed_hooks_teardown.go")
+    assert "removeReport, err := windowsManagedHooksTeardownCodexRemover(opts)" in teardown_go
+    assert "RemoveWindowsCodexMachineRequirementsForTeardown" not in read(
+        ROOT / "internal" / "cli" / "enterprise_hooks_platform_windows.go"
+    )
+
+
 def test_state_absent_purge_uses_only_exact_pinned_scope() -> None:
     """Missing metadata must never turn purge into a machine-wide wildcard."""
     module = read(MODULE)
