@@ -21,19 +21,17 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/procidentity"
+	"github.com/defenseclaw/defenseclaw/internal/proofclock"
 )
 
 // perUserFreshGatewayWindow covers the short interval after a gateway start
 // when its listener has returned but the first hook answer is still pending.
-//
-// It is a variable only so a test that waits on real processes can keep
-// the whole of its sequence inside the window on a loaded host.
-var perUserFreshGatewayWindow = 12 * time.Second
+const perUserFreshGatewayWindow = 12 * time.Second
 
 // freshOwnerCaptureWait bounds the background read of the sole holder of a
 // verified connection (perUserCaptureFreshGatewayOwner); a read past it
 // leaves the owner unknown and the call closed.
-var freshOwnerCaptureWait = time.Second
+const freshOwnerCaptureWait = time.Second
 
 // PerUserGatewayFreshStartNoAnswer recognizes a no-status call sent to a
 // recently started gateway recorded for this account. The connected peer,
@@ -76,7 +74,7 @@ func perUserGatewayRecentlyStarted(dataDir string) bool {
 	if err != nil || !info.Mode().IsRegular() {
 		return false
 	}
-	age := time.Since(info.ModTime())
+	age := proofclock.Since(info.ModTime())
 	return age > -2*time.Second && age <= perUserFreshGatewayWindow+2*time.Second
 }
 
@@ -154,10 +152,8 @@ func perUserCaptureFreshGatewayOwner(check *perUserPeerCheck) {
 	if !okc || !oks {
 		return
 	}
-	// Read now: the goroutine may outlive the call.
-	wait := freshOwnerCaptureWait
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), wait)
+		ctx, cancel := proofclock.WithTimeout(context.Background(), freshOwnerCaptureWait)
 		defer cancel()
 		pid, ok := perUserConnectedPeerPIDWithin(ctx, client, server)
 		if !ok {
@@ -204,7 +200,7 @@ func freshGatewayFromRecord(dataDir string) (perUserPeerProcess, bool) {
 	if !ok {
 		return perUserPeerProcess{}, false
 	}
-	age := time.Since(start)
+	age := proofclock.Since(start)
 	if age < 0 || age > perUserFreshGatewayWindow {
 		return perUserPeerProcess{}, false
 	}
@@ -315,7 +311,7 @@ func PerUserGatewayRecordObservedAnswer(dataDir string, peer *PerUserPeerRecord)
 	if !connected {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := proofclock.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	owners, found := perUserListenerOwners(ctx, server)
 	if found && ctx.Err() == nil && len(owners) == 1 && owners[0].identity != "" {
