@@ -315,7 +315,18 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
             + ", ".join(f"{name} ({connector})" for connector, name in held_after_failed_scan)
         )
         interval = getattr(getattr(app.cfg, "watch", None), "rescan_interval_min", 60)
+        # A managed device refuses ``mcp unblock``: its user asks the
+        # administrator to allow the server in the managed MCP policy.
+        managed_device = asset_lists.is_managed_standalone(app.cfg)
         for connector, name in held_after_failed_scan[:_FAILED_SCAN_HINT_LIMIT]:
+            if managed_device:
+                ux.subhead(
+                    f"{name} ({connector}): a new scan does not release this block. "
+                    "Ask your administrator to allow it in the managed MCP policy "
+                    "(asset_policy.mcp.allowed); the gateway also admits it again at its next rescan "
+                    f"(watch.rescan_interval_min, every {interval} min) once the scan succeeds"
+                )
+                continue
             ux.subhead(
                 f"{name} ({connector}): a new scan does not release this block. "
                 f"Release it now: defenseclaw mcp unblock {shlex.quote(name)} --connector {connector}; "
@@ -902,7 +913,7 @@ def _failed_scan_next_step(
         if managed else f"or trust it: defenseclaw mcp allow {shlex.quote(name)}"
     )
     err = (error or "").lower()
-    refusal = mcp_scan_refusal(entry) if entry is not None else None
+    refusal = mcp_scan_refusal(entry, managed) if entry is not None else None
     if refusal:
         return f"refused, {refusal}; fix: {mcp_scannable_fix(name, entry, connector)}, then: {cmd}; {allow}"
     if "--allow-private" in err:

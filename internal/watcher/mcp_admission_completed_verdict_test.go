@@ -140,3 +140,39 @@ func TestAllowedOutcomeReplacesTheFailedBaselineBeforeItsWrite(t *testing.T) {
 		t.Fatalf("a completed failure over a clean baseline: %+v, want failed", status)
 	}
 }
+
+// A verdict is for the definition that was scanned. The scanner reads the
+// definition by name when it runs, so a config rewrite between the snapshot
+// and the scan gave a clean verdict for the new definition to the snapshot of
+// the old one. When the old definition came back it read as admitted. Neither
+// the outcome nor the baseline is published for a definition the snapshot does
+// not name, so the server has no outcome (pending) and is admitted again.
+func TestVerdictIsNotPublishedForADefinitionThatMovedDuringTheScan(t *testing.T) {
+	h, scan := newScriptedMCPHarness(t)
+	server := &h.servers[0]
+	server.Command, server.Args = "node", []string{"server.js"}
+	h.w.scannerFactory = func(InstallEvent) scanner.Scanner {
+		server.Command, server.Args = "npx", []string{"-y", "."}
+		return scan
+	}
+	h.poll()
+	server.Command, server.Args = "node", []string{"server.js"}
+	if status := statusOf(h, *server); !status.Failed && !status.Pending {
+		t.Fatalf("the unscanned definition inherited the verdict of the one scanned: %+v", status)
+	}
+	if row, err := h.store.GetTargetSnapshot(string(InstallMCP), MCPEventPath(*server)); err == nil && mcpBaselineMatches(row, *server) {
+		t.Fatalf("a baseline was stored for the unscanned definition: %+v", row)
+	}
+}
+
+// Twin: a definition that stays as it was snapshotted keeps its verdict.
+func TestVerdictIsPublishedForTheDefinitionThatWasScanned(t *testing.T) {
+	h, scan := newScriptedMCPHarness(t)
+	server := &h.servers[0]
+	server.Command, server.Args = "npx", []string{"-y", "."}
+	h.w.scannerFactory = func(InstallEvent) scanner.Scanner { return scan }
+	h.poll()
+	if status := statusOf(h, *server); status.Failed || status.Pending {
+		t.Fatalf("a scanned, unchanged definition: %+v, want admitted", status)
+	}
+}

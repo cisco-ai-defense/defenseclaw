@@ -2540,6 +2540,31 @@ class TestMcpListMultiConnectorDefault(MCPCommandTestBase):
         self.assertIn("defenseclaw mcp unblock ctx7 --connector codex", flat)
         self.assertNotIn("fix reachability, then scan again", flat)
 
+    def test_a_managed_device_list_names_the_administrator_for_a_held_server(self):
+        # GAP-0776: a managed device refuses `mcp unblock`, so the list for a
+        # server blocked after a failed scan names the administrator policy,
+        # and the refusal text of a failed row carries no `mcp allow` clause.
+        self.app.cfg.mcp_servers = lambda connector=None, **_: [  # type: ignore[method-assign]
+            MCPServerEntry(name="srv", command="python3", args=["server.py"]),
+        ]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.store.set_action(
+            "mcp", "srv", "", ActionState(install="block", runtime="disable"),
+            "scanner failure (fail-closed): refused launcher", "codex",
+        )
+
+        with patch("defenseclaw.enforce.asset_lists.is_managed_standalone", return_value=True):
+            managed = self.invoke(["list"])
+        flat = " ".join(managed.output.split())
+        self.assertIn("Ask your administrator to allow it in the managed MCP policy", flat)
+        self.assertNotIn("mcp unblock", flat)
+        self.assertNotIn("mcp allow", flat)
+
+        # Twin: an unmanaged device is still told the command that releases it.
+        with patch("defenseclaw.enforce.asset_lists.is_managed_standalone", return_value=False):
+            plain = self.invoke(["list"])
+        self.assertIn("defenseclaw mcp unblock srv --connector codex", " ".join(plain.output.split()))
+
 
 # ---------------------------------------------------------------------------
 # _parse_args
@@ -2573,7 +2598,7 @@ class TestFailedScanNextStepNamesTheAllowCommand(unittest.TestCase):
         self.assertIn("python3", text)
         self.assertIn("ask your administrator", text)
         self.assertNotIn("or trust it", text)
-        self.assertNotIn("mcp allow srv", text)
+        self.assertNotIn("mcp allow", text)
 
     def test_an_unreachable_server_keeps_the_reachability_hint(self):
         # The benign twin: a scan that failed for reachability is not a
