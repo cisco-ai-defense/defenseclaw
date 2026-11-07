@@ -21,6 +21,16 @@ func review5Home(t *testing.T, home string) {
 	saved := hookAgentCommandLine
 	t.Cleanup(func() { hookAgentCommandLine = saved })
 	hookAgentCommandLine = func() ([]string, string, error) { return nil, "", agentprocess.ErrNoAgent }
+	stubHookAgentWorkingDirectory(t, "")
+}
+
+// stubHookAgentWorkingDirectory makes the hook read dir as the folder the
+// agent process runs in; "" is a platform that does not report it.
+func stubHookAgentWorkingDirectory(t *testing.T, dir string) {
+	t.Helper()
+	saved := hookAgentWorkingDirectory
+	t.Cleanup(func() { hookAgentWorkingDirectory = saved })
+	hookAgentWorkingDirectory = func() string { return dir }
 }
 
 func review5Write(t *testing.T, path, text string) {

@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
@@ -44,8 +45,19 @@ func TestAmbiguousPluginServerIsJudgedOnEveryCandidateOwnerText(t *testing.T) {
 }
 
 // Four installed plugins can own one plugin tool name: all four with ordinary
-// text allow the call, in the managed and the default configuration.
+// text allow the call, in the managed and the default configuration, whether
+// the text is a line or tens of KiB; a harmful fourth one still blocks.
 func TestFourOrdinaryPluginCandidateOwnersAllow(t *testing.T) {
+	for name, text := range map[string]string{
+		"short": gap0699Plain,
+		"large": strings.Repeat(gap0699Plain, 480),
+	} {
+		t.Run(name, func(t *testing.T) { fourOrdinaryPluginCandidateOwners(t, text) })
+	}
+}
+
+func fourOrdinaryPluginCandidateOwners(t *testing.T, text string) {
+	t.Helper()
 	saved := profileAssetScanApplies
 	t.Cleanup(func() { profileAssetScanApplies = saved })
 	profileAssetScanApplies = func(*config.Config) bool { return true }
@@ -53,7 +65,7 @@ func TestFourOrdinaryPluginCandidateOwnersAllow(t *testing.T) {
 	var contents []assetfacts.Content
 	for _, name := range names {
 		contents = append(contents, assetfacts.Content{Kind: assetfacts.ContentPlugin, Name: name,
-			Dir: filepath.Join(t.TempDir(), name), Files: []assetfacts.ContentFile{{Rel: "SKILL.md", Text: gap0699Plain}}})
+			Dir: filepath.Join(t.TempDir(), name), Files: []assetfacts.ContentFile{{Rel: "SKILL.md", Text: text}}})
 	}
 	req := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "mcp__plugin_p_a_b_c_d__run", MCPServerName: "plugin_p_a_b_c_d"}
 	facts := assetfacts.Facts{Contents: contents}
@@ -62,5 +74,9 @@ func TestFourOrdinaryPluginCandidateOwnersAllow(t *testing.T) {
 	}
 	if action, reason := gap0699Claude(t, config.DefaultConfig(), req, facts); action != "allow" {
 		t.Errorf("default configuration blocked: action=%q reason=%q", action, reason)
+	}
+	contents[3].Files[0].Text = gap0699Harmful + text
+	if action, reason := gap0699Claude(t, gap0699Config("claudecode"), req, assetfacts.Facts{Contents: contents}); action != "block" {
+		t.Errorf("harmful fourth candidate allowed: action=%q reason=%q", action, reason)
 	}
 }

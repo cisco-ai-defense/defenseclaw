@@ -79,7 +79,7 @@ func TestReadContentBoundIsExplicit(t *testing.T) {
 func TestEncodeKeepsOversizedContentAsTruncated(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "np10")
 	var contents []Content
-	for c := 0; c < 3; c++ {
+	for c := 0; c < 8; c++ {
 		var files []ContentFile
 		for i := 0; i < maxContentFiles; i++ {
 			files = append(files, ContentFile{Rel: strings.Repeat("d", 980) + string(rune(0x61+c)) + string(rune(0x61+i%26)) + string(rune(0x41+i/26)) + ".md", Text: strings.Repeat("t", 700)})

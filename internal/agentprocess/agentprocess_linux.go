@@ -93,6 +93,15 @@ func executablePath(pid int) string {
 	return strings.TrimSuffix(exe, " (deleted)")
 }
 
+// workingDirectory reads the /proc/<pid>/cwd link.
+func workingDirectory(pid int) string {
+	dir, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
+	if err != nil || strings.HasSuffix(dir, " (deleted)") {
+		return ""
+	}
+	return dir
+}
+
 // commandLine reads /proc/<pid>/cmdline, NUL-separated arguments, and the
 // process's working directory.
 func commandLine(pid int) ([]string, string, error) {

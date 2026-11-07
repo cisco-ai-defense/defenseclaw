@@ -74,6 +74,30 @@ func TestClaudePluginRootsReadTheRegistry(t *testing.T) {
 
 func jsonQuote(s string) string { return `"` + strings.ReplaceAll(s, `\`, `\\`) + `"` }
 
+// Ordinary candidate owners of one tool name with tens of KiB of text each
+// keep their text, and the encoded header stays within its bound.
+func TestEncodeKeepsLargeOrdinaryCandidateOwnerText(t *testing.T) {
+	text := strings.Repeat("Count the words in the file the user names and report the number.\n", 500)
+	var contents []Content
+	for c := 0; c < 8; c++ {
+		contents = append(contents, Content{Kind: ContentPlugin, Name: fmt.Sprintf("p_%d", c), Dir: filepath.Join(t.TempDir(), "p"),
+			Files: []ContentFile{{Rel: "skills/notes/SKILL.md", Text: text}}})
+	}
+	value := Encode(Facts{Contents: contents})
+	if len(value) == 0 || len(value) > maxHeaderBytes {
+		t.Fatalf("encoded header = %d bytes, want 1..%d", len(value), maxHeaderBytes)
+	}
+	got, ok := Decode(value)
+	if !ok || len(got.Contents) != len(contents) {
+		t.Fatalf("contents = %d ok=%v, want %d", len(got.Contents), ok, len(contents))
+	}
+	for _, content := range got.Contents {
+		if content.Truncated || len(content.Files) != 1 || content.Files[0].Text != text {
+			t.Errorf("content %q lost its text (truncated=%v files=%d)", content.Name, content.Truncated, len(content.Files))
+		}
+	}
+}
+
 // Every candidate owner of one tool name that fits the size budget keeps its
 // text, however many there are; one that does not is kept as a truncated
 // content without text.

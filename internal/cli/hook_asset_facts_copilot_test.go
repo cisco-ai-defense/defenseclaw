@@ -25,6 +25,7 @@ func TestHookAssetFactsCopilotSkillCarriesItsText(t *testing.T) {
 	saved := hookAgentCommandLine
 	t.Cleanup(func() { hookAgentCommandLine = saved })
 	hookAgentCommandLine = func() ([]string, string, error) { return nil, "", agentprocess.ErrNoAgent }
+	stubHookAgentWorkingDirectory(t, "")
 	write := func(path, text string) {
 		t.Helper()
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

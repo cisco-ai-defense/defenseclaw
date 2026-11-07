@@ -11,6 +11,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -843,15 +844,14 @@ func ruleMayMatchPins(rule config.AssetPolicyRule, pins *assetfacts.MCPPins) boo
 	if len(rule.ArgsPrefix) > pins.ArgCount {
 		return false
 	}
-	tail := pins.TailBytes()
 	for i, want := range rule.ArgsPrefix {
 		switch {
 		case i < len(pins.Args):
 			if assetfacts.PinArgSum(want) != pins.Args[i] {
 				return false
 			}
-		case i-len(pins.Args) < len(tail):
-			if assetfacts.PinTailByte(want) != tail[i-len(pins.Args)] {
+		default:
+			if held := pins.TailDigest(i - len(pins.Args)); held != nil && !bytes.Equal(assetfacts.PinTailDigest(want), held) {
 				return false
 			}
 		}

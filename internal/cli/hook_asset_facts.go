@@ -121,7 +121,7 @@ func hookSkillRoots(connector, home, cwd string) []string {
 		// skill of that name the agent does load.
 		roots = slices.DeleteFunc(roots, func(root string) bool { return root == filepath.Join(home, ".copilot", "skills") })
 	}
-	for _, root := range assetfacts.EnvSkillRoots(connector, home, cwd) {
+	for _, root := range assetfacts.EnvSkillRoots(connector, home, cwd, hookAgentWorkingDirectory()) {
 		if !slices.Contains(roots, root) {
 			roots = append(roots, root)
 		}
@@ -236,8 +236,12 @@ func hookInvokedPluginNames(claudeDir, toolName string, toolInput map[string]any
 	return names
 }
 
-// hookAgentCommandLine reads the agent process's arguments; tests replace it.
+// hookAgentCommandLine reads the agent process arguments; tests replace it.
 var hookAgentCommandLine = agentprocess.CommandLine
+
+// hookAgentWorkingDirectory reads the folder the agent process runs in, or ""
+// when it cannot be read; tests replace it.
+var hookAgentWorkingDirectory = agentprocess.WorkingDirectory
 
 const unprovenMCPSource = "unproven"
 
