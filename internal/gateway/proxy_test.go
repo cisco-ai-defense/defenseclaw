@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -1567,7 +1568,14 @@ func TestResolveProvider_InstanceOverlay_FamilyMismatchAllowsNameMatch(t *testin
 	}
 	got := proxy.resolveProviderFn(req)
 	if got == nil {
-		t.Fatalf("expected overlay-bound provider, got nil")
+		// GAP-0741: this failed once in a -race gate run and not in 12 more.
+		// Name the process-wide state the resolver read, so the next
+		// occurrence shows which input was missing: no registry entry for
+		// the host, an overlay not applied, or a generation published
+		// meanwhile (ReloadProviderRegistry then ignores the overlay path).
+		_, _, overlayApplied := providerRegistryResponseSnapshot()
+		t.Fatalf("expected overlay-bound provider, got nil: inferred provider=%q overlayApplied=%t overlay path=%q generation published=%t",
+			inferProviderFromURL(req.TargetURL), overlayApplied, configs.CustomProvidersPath(), currentGeneration() != nil)
 	}
 	bp, ok := got.(*bifrostProvider)
 	if !ok {
