@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -198,9 +199,87 @@ func TestGAP0625PathScanOrdinaryPathWithListPunctuation(t *testing.T) {
 	})
 }
 
-// The spans tried for one command are bounded, so a command made of thousands
-// of path starts finishes at once and counts as naming the managed directory,
-// while an ordinary list of paths is answered by reading its spans.
+// A quoted word after the program is shell text or an argument, whether or not
+// the same bytes name a file: "sh -c '<program>'" runs what follows the
+// semicolon. Only a quoted program word is one path.
+func TestGAP0625PathScanQuotedShellProgram(t *testing.T) {
+	t.Run("sh -c program that is also a file name", func(t *testing.T) {
+		verifyErr, commands, _, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+			owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
+			program := gap0625WriteExecutable(t, filepath.Join(home, "ordinary; "+owned))
+			return "sh -c " + shellWord(program)
+		})
+		gap0625ExpectProtected(t, verifyErr, commands, userHook)
+	})
+	t.Run("quoted argument that is also a file name", func(t *testing.T) {
+		verifyErr, commands, _, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+			owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
+			argument := gap0625WriteExecutable(t, filepath.Join(home, "ordinary; "+owned))
+			tool := gap0625WriteExecutable(t, filepath.Join(home, "tools", "tool"))
+			return tool + " " + shellWord(argument)
+		})
+		gap0625ExpectProtected(t, verifyErr, commands, userHook)
+	})
+	t.Run("quoted program that is also a file name", func(t *testing.T) {
+		verifyErr, commands, entry, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+			owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
+			return shellWord(gap0625WriteExecutable(t, filepath.Join(home, "ordinary; "+owned))) + " --event pre_tool_call"
+		})
+		gap0625ExpectOrdinary(t, verifyErr, commands, entry, userHook)
+	})
+	t.Run("sh -c ordinary program", func(t *testing.T) {
+		verifyErr, commands, entry, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+			return "sh -c " + shellWord(gap0625WriteExecutable(t, filepath.Join(home, "ordinary ", "tool")))
+		})
+		gap0625ExpectOrdinary(t, verifyErr, commands, entry, userHook)
+	})
+}
+
+// A list of ordinary paths is read to its end however long it is: no managed
+// directory is named, so the entry stays the user's. The same list with a
+// managed path at its end, or a link into the managed directory, is protected.
+func TestGAP0625PathScanLongPathList(t *testing.T) {
+	for _, count := range []int{220, 1000} {
+		list := func(home string) string {
+			paths := make([]string, count)
+			for i := range paths {
+				paths[i] = "/tmp/ordinary-path-" + strconv.Itoa(i)
+			}
+			return strings.Join(paths, ",")
+		}
+		t.Run(fmt.Sprintf("ordinary %d", count), func(t *testing.T) {
+			verifyErr, commands, entry, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+				return gap0625WriteExecutable(t, filepath.Join(home, "tools", "user-tool")) + " --paths=" + list(home)
+			})
+			gap0625ExpectOrdinary(t, verifyErr, commands, entry, userHook)
+		})
+		t.Run(fmt.Sprintf("managed at the end %d", count), func(t *testing.T) {
+			verifyErr, commands, _, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+				return gap0625WriteExecutable(t, filepath.Join(home, "tools", "user-tool")) + " --paths=" + list(home) + "," + filepath.Join(hooks, "hookX")
+			})
+			gap0625ExpectProtected(t, verifyErr, commands, userHook)
+		})
+		t.Run(fmt.Sprintf("link at the end %d", count), func(t *testing.T) {
+			verifyErr, commands, _, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+				owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
+				link := gap0625Link(t, owned, filepath.Join(home, "outside", "link"))
+				return gap0625WriteExecutable(t, filepath.Join(home, "tools", "user-tool")) + " --paths=" + list(home) + "," + link
+			})
+			gap0625ExpectProtected(t, verifyErr, commands, userHook)
+		})
+		t.Run(fmt.Sprintf("link then missing file %d", count), func(t *testing.T) {
+			verifyErr, commands, _, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+				gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
+				link := gap0625Link(t, hooks, filepath.Join(home, "outside", "dirlink"))
+				return gap0625WriteExecutable(t, filepath.Join(home, "tools", "user-tool")) + " --paths=" + list(home) + "," + link + "/gone/file"
+			})
+			gap0625ExpectProtected(t, verifyErr, commands, userHook)
+		})
+	}
+}
+
+// The work for one command is bounded, so a command made of thousands of path
+// starts finishes at once and counts as naming the managed directory.
 func TestGAP0625PathScanSpanBudget(t *testing.T) {
 	root := t.TempDir()
 	script := filepath.Join(root, ".defenseclaw", "hooks", "hook.sh")
@@ -210,12 +289,5 @@ func TestGAP0625PathScanSpanBudget(t *testing.T) {
 	}
 	if elapsed := time.Since(begin); elapsed > 5*time.Second {
 		t.Errorf("bounded scan took %v", elapsed)
-	}
-	var list []string
-	for i := 0; i < 60; i++ {
-		list = append(list, "/srv/data/dir"+strings.Repeat("x", i))
-	}
-	if hookCommandNamesHookDir("tool --paths="+strings.Join(list, ","), script) {
-		t.Error("an ordinary list of 60 paths was marked managed")
 	}
 }
