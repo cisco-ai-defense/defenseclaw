@@ -16,6 +16,7 @@ scripts/test-install-lifecycle.ps1. These checks pin what other code relies on.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -4670,6 +4671,28 @@ def test_hook_fail_mode_refresh_runs_without_json_sidecar(tmp_path: Path) -> Non
         installed.unlink()
 
 
+def test_every_test_that_runs_powershell_says_so_where_it_is_not_installed() -> None:
+    # GAP-0733: a test that launches PowerShell declares that dependency (a
+    # skipif on POWERSHELL or _POWERSHELLS, or a POWERSHELL check that skips in
+    # its body). Without it a host with no PowerShell fails the test with a
+    # TypeError from launching None, instead of skipping it. The check reads the
+    # test source, so it never guesses from how a launch ended.
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    uses = re.compile(r"\bPOWERSHELL\b|\b_POWERSHELLS\b|\b_run_powershell\(")
+    undeclared = []
+    for node in tree.body:
+        if not (isinstance(node, ast.FunctionDef) and node.name.startswith("test_")):
+            continue
+        if node.name == "test_every_test_that_runs_powershell_says_so_where_it_is_not_installed":
+            continue
+        declared = any(uses.search(ast.unparse(decorator)) for decorator in node.decorator_list)
+        body = "\n".join(ast.unparse(statement) for statement in node.body)
+        if uses.search(body) and not declared and "not POWERSHELL" not in body:
+            undeclared.append(node.name)
+    assert not undeclared, undeclared
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 def test_installed_hooks_are_refreshed_without_the_json_sidecar(tmp_path: Path) -> None:
     # GAP-0365: with hooks\.hookcfg gone, the refresh (and the hold for a
     # running gateway) was skipped, so a 1.0.2 copilot-hook.ps1 kept its baked
