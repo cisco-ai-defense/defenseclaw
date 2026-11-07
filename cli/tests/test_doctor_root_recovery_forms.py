@@ -226,3 +226,64 @@ def test_hook_contract_lock_is_read_from_the_store_the_gateway_reads(monkeypatch
     monkeypatch.setattr("builtins.open", tracking_open)
     cmd_doctor._check_hook_contract_lock(cfg, "codex", cmd_doctor._DoctorResult(quiet=True))
     assert opened and opened[0] == os.path.realpath(actual_store / "hook_contract_lock.json"), opened
+
+
+@pytest.mark.parametrize("absolute_config", [False, True])
+def test_hook_contract_lock_relative_data_dir_is_read_from_the_install_home(monkeypatch, tmp_path, absolute_config):
+    """A relative data_dir is the gateway's, taken from the install home, with any config form."""
+    home = tmp_path / "install"
+    elsewhere = tmp_path / "elsewhere"
+    actual_store = home / "moved"
+    for path in (home, elsewhere, actual_store):
+        path.mkdir(parents=True)
+    cfg_path = home / "config.yaml"
+    cfg_path.write_text("config_version: 8\ndata_dir: moved\n")
+    (actual_store / "hook_contract_lock.json").write_text("{}")
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    if absolute_config:
+        monkeypatch.setenv("DEFENSECLAW_CONFIG", str(cfg_path))
+    else:
+        monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    monkeypatch.chdir(elsewhere)
+    cfg = config_module.load()
+    assert cfg.data_dir == "moved"
+    opened = []
+    real_open = open
+
+    def tracking_open(path, *args, **kwargs):
+        if os.path.basename(str(path)) == "hook_contract_lock.json":
+            opened.append(os.path.abspath(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", tracking_open)
+    cmd_doctor._check_hook_contract_lock(cfg, "codex", cmd_doctor._DoctorResult(quiet=True))
+    assert opened and opened[0] == str(actual_store / "hook_contract_lock.json"), opened
+
+
+def test_tilde_store_recovery_returns_the_install_home_and_the_store(monkeypatch, tmp_path):
+    """The gateway keeps a ~/ data_dir as a folder under the install home; its PID record is in the home."""
+    home = tmp_path / "install"
+    elsewhere = tmp_path / "elsewhere"
+    home.mkdir()
+    elsewhere.mkdir()
+    raw = "config_version: 8\ndata_dir: ~/.dc-tilde\n"
+    (home / "other.yaml").write_text(raw)
+    (elsewhere / "other.yaml").write_text(raw)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", "other.yaml")
+    monkeypatch.chdir(elsewhere)
+    cfg = config_module.load()
+    store = str(home / "~" / ".dc-tilde")
+    assert cmd_doctor._install_home_store(cfg) == store
+    assert cmd_doctor._root_gateway_install_home(cfg) == str(home)
+    assert _chowned(cmd_doctor._root_gateway_return_and_start_command(cfg)) == [str(home), store]
+
+
+def test_managed_install_home_keeps_the_store_as_its_own_pid_home(monkeypatch, tmp_path):
+    """Benign twin: a managed runtime keeps its own PID home, as before."""
+    home = tmp_path / "install"
+    home.mkdir()
+    (home / "config.yaml").write_text("config_version: 8\ndeployment_mode: managed_enterprise\ndata_dir: moved\n")
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    assert config_module.install_home_for_bound_store(home / "moved") == str(home / "moved")

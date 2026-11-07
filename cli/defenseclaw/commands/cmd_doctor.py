@@ -1774,7 +1774,7 @@ def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
 
     if os.name == "nt":
         return
-    data_dir = _install_home_store(cfg) or _configured_gateway_data_dir(cfg)
+    data_dir = _gateway_store_dir(cfg)
     if not data_dir:
         return
     leftovers = sudo_runtime_leftover_relpaths(data_dir)
@@ -1994,6 +1994,17 @@ def _install_home_store(cfg) -> str:
     return os.path.abspath(os.fspath(default_data_path()))
 
 
+def _gateway_store_dir(cfg) -> str:
+    """The folder the gateway reads and writes its store in, as a checked path.
+
+    The one rule for every check of "the gateway's store": the install-home
+    config's store when ``cfg`` was loaded from another folder, else ``cfg``'s
+    ``data_dir`` made absolute from the install home, the gateway's working
+    directory (GAP-0711, GAP-0713). "" when no store is configured.
+    """
+    return _install_home_store(cfg) or _configured_gateway_data_dir(cfg)
+
+
 def _root_gateway_recovery_note(cfg) -> str:
     """A sentence to read before the recovery command, or "".
 
@@ -2042,9 +2053,12 @@ def _root_leftovers_remedy(cfg) -> str:
 
 def _root_gateway_install_home(cfg) -> str:
     """The PID-record home that the root gateway was started for."""
-    from defenseclaw.config import default_data_path
+    from defenseclaw.config import default_data_path, install_home_for_bound_store
 
-    data_dir = _root_gateway_moved_store()[0] or os.fspath(default_data_path())
+    store = _root_gateway_moved_store()[0]
+    if store:
+        return install_home_for_bound_store(store)
+    data_dir = os.fspath(default_data_path())
     try:
         return gateway_home_for_data_dir(data_dir)
     except (OSError, TypeError, ValueError):
@@ -18388,7 +18402,7 @@ def _check_hook_contract_lock(
             r=r,
         )
         return
-    data_dir = _install_home_store(cfg) or getattr(cfg, "data_dir", "") or ""
+    data_dir = _gateway_store_dir(cfg)
     lock_path = os.path.join(data_dir, "hook_contract_lock.json")
     try:
         with open(lock_path, encoding="utf-8") as fh:
