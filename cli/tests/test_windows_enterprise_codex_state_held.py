@@ -367,3 +367,14 @@ def test_the_gate_holds_the_files_so_a_late_holder_cannot_deny_the_read(tmp_path
         code = "codex_state_held" if case == "state-held" else "codex_requirements_held"
         assert result["code"] == code, result
         assert result["leftOpen"] == 0, result
+
+
+def test_a_rollback_to_a_release_without_writer_state_drops_the_writer_lock() -> None:
+    body = _function_body(_text(), "Sync-DefenseClawCodexManagedHooksStateCopy")
+    gate = body.index("if (-not [IO.File]::Exists($committed)) {")
+    # The lock goes only when the restored deployment has no writer copy, and
+    # before the function returns: the counter alone names a hook copy that
+    # the rollback removed, and the recovery verification failed on it.
+    assert body.index("[IO.File]::Delete($lock)", gate) < body.index("return", gate + 200)
+    assert body.index("'.defenseclaw-managed-hooks.writer.lock'", gate) > gate
+    assert gate < body.index("[IO.File]::ReadAllBytes($committed)")
