@@ -89,7 +89,7 @@ func TestSecureClientCodexMachinePolicyKeepsTheLockAndStateOf108(t *testing.T) {
 	}
 }
 
-// A requirements.toml a process holds open fails a Secure Client reconcile as
+// A requirements.toml a process holds open fails a Secure Client removal as
 // it did before GAP-0650: the plain error, no named holder, no wait for the
 // release.
 func TestSecureClientCodexMachinePolicyDoesNotWaitForAHeldRequirements(t *testing.T) {
@@ -99,7 +99,6 @@ func TestSecureClientCodexMachinePolicyDoesNotWaitForAHeldRequirements(t *testin
 	if report, err := ReconcileWindowsCodexMachineRequirements(opts); err != nil || !report.OK {
 		t.Fatalf("Secure Client reconcile: %+v, %v", report, err)
 	}
-	prependWindowsCodexRequirementForTest(t, opts.RequirementsPath, "admin_earlier")
 	held := holdWindowsCodexFileForTest(t, opts.RequirementsPath, windows.FILE_SHARE_READ)
 	defer windows.CloseHandle(held)
 	changed, err := os.ReadFile(opts.RequirementsPath)
@@ -109,9 +108,9 @@ func TestSecureClientCodexMachinePolicyDoesNotWaitForAHeldRequirements(t *testin
 
 	previousSleep := windowsCodexHeldRetrySleep
 	t.Cleanup(func() { windowsCodexHeldRetrySleep = previousSleep })
-	windowsCodexHeldRetrySleep = func(time.Duration) { t.Error("a Secure Client reconcile waited for the held requirements.toml") }
+	windowsCodexHeldRetrySleep = func(time.Duration) { t.Error("a Secure Client removal waited for the held requirements.toml") }
 
-	report, err := ReconcileWindowsCodexMachineRequirements(opts)
+	report, err := RemoveWindowsCodexMachineRequirements(opts)
 	var heldErr *WindowsCodexRequirementsHeldError
 	if err == nil || errors.As(err, &heldErr) || report.OK || report.RequirementsHeldBy != "" {
 		t.Fatalf("held requirements: %+v, %v; want the plain failure of 1.0.8, no named holder", report, err)
