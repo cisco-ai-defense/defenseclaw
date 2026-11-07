@@ -861,3 +861,169 @@ func TestWindowsCodexUpgradeFromAFixedNameReadHoldFailsRetryablyAndLeavesTheStat
 		})
 	}
 }
+
+// stampWindowsCodexSDDLForTest replaces the owner and the protected access
+// list of the existing file at path.
+func stampWindowsCodexSDDLForTest(t *testing.T, path, sddl string) {
+	t.Helper()
+	descriptor, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, _ := descriptor.Owner()
+	dacl, _, _ := descriptor.DACL()
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		owner, nil, dacl, nil); err != nil {
+		t.Fatalf("stamp %s: %v", path, err)
+	}
+}
+
+// g582 round 11c, S1. The no-change rule (GAP-0764) keeps the hook copy only
+// while that copy is what a pass would write: a copy that was truncated,
+// changed or given another access list since it was written is published
+// again under a new name, so the hook never reads a damaged or exposed copy
+// for longer than one guardian pass. A copy a user holds open without
+// sharing cannot be read; it counts as intact, and its access list, which is
+// read without opening the data, is still judged.
+func TestWindowsCodexUnchangedPassRepublishesADamagedOrExposedHookCopy(t *testing.T) {
+	canonicalPlusUsersWrite := "O:BAD:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;FRFW;;;BU)"
+	noHolder := ^uint32(0)
+	for _, row := range []struct {
+		name string
+		// damage changes the hook copy at path.
+		damage func(t *testing.T, path string)
+		// hold is the share mode of a user who holds the copy, or noHolder.
+		hold uint32
+		// republished: the pass writes a new copy.
+		republished bool
+	}{
+		{"bytes changed", func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte("tampered-state"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, noHolder, true},
+		{"truncated", func(t *testing.T, path string) {
+			if err := os.WriteFile(path, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, noHolder, true},
+		{"access list gives Users write", func(t *testing.T, path string) {
+			stampWindowsCodexSDDLForTest(t, path, canonicalPlusUsersWrite)
+		}, noHolder, true},
+		{"access list gives Users write while a user holds the copy with no sharing", func(t *testing.T, path string) {
+			stampWindowsCodexSDDLForTest(t, path, canonicalPlusUsersWrite)
+		}, 0, true},
+		{"intact copy held with no sharing", func(t *testing.T, path string) {}, 0, false},
+		{"intact copy held with write and delete sharing only", func(t *testing.T, path string) {},
+			windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			f := newWindowsCodexStateTxFixture(t)
+			first := f.run(t, f.write("state-one"))
+			current := windowsCodexStableStateFile(f.dir, first)
+			if row.hold != noHolder {
+				held := holdWindowsCodexFileForTest(t, current, row.hold)
+				defer func() { _ = windows.CloseHandle(held) }()
+			}
+			row.damage(t, current)
+			before := windowsCodexStateDirSnapshotForTest(t, f.dir)
+			second := f.run(t, func() error { return nil })
+			if !row.republished {
+				if second != first {
+					t.Fatalf("an intact copy moved the counter from %d to %d", first, second)
+				}
+				requireSameDirForTest(t, row.name, before, windowsCodexStateDirSnapshotForTest(t, f.dir))
+				return
+			}
+			if second == first {
+				t.Fatalf("a %s hook copy kept counter %d", row.name, first)
+			}
+			f.requireStateCopy(t, second, "state-one")
+			if row.hold != noHolder {
+				if _, err := os.Lstat(current); err != nil {
+					t.Fatalf("the held old copy should stay while it is held: %v", err)
+				}
+			} else if _, err := os.Lstat(current); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("the replaced copy stayed: %v", err)
+			}
+			// The pass after that finds nothing to do.
+			if third := f.run(t, func() error { return nil }); third != second {
+				t.Fatalf("the republished copy moved the counter from %d to %d", second, third)
+			}
+		})
+	}
+}
+
+// g582 round 11c, L1 (round 11b). publishWindowsCodexRequirements marks the
+// transaction as having touched requirements.toml only when the publication
+// writes it, through the real call: an identical readable file leaves the
+// flag alone; a file ordinary users cannot read is published again with the
+// read and counts.
+func TestWindowsCodexPublishRequirementsMarksTheTransactionOnlyWhenItWrites(t *testing.T) {
+	f := newWindowsCodexStateTxFixture(t)
+	body := []byte("[features]\nhooks = true\n")
+	for _, row := range []struct {
+		name string
+		sddl string
+		want bool
+	}{
+		{"identical file users can read", "O:BAD:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;FR;;;BU)", false},
+		{"identical file users cannot read", "O:BAD:P(A;;FA;;;BA)(A;;FA;;;SY)", true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			if err := os.WriteFile(f.requirements, body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stampWindowsCodexSDDLForTest(t, f.requirements, row.sddl)
+			var touched bool
+			f.run(t, func() error {
+				base, err := readWindowsCodexSharedRequirements(f.requirements)
+				if err != nil {
+					return err
+				}
+				if err := publishWindowsCodexRequirements(base, body, false); err != nil {
+					return err
+				}
+				touched = windowsCodexActiveManagedState.requirementsTouched
+				return nil
+			})
+			if touched != row.want {
+				t.Fatalf("requirementsTouched = %v, want %v", touched, row.want)
+			}
+		})
+	}
+}
+
+// g582 round 11c, the r11 residual. A program that opens requirements.toml
+// without read sharing but sharing delete was never found by the delete
+// probe, because that open asked for no data access and Windows does not
+// check such an open against the share mode of the other handle. The failed
+// read came back unnamed, was never waited for, and the guardian could not
+// recover.
+func TestWindowsCodexRequirementsHeldProbeSeesAHolderThatDeniesReadSharing(t *testing.T) {
+	f := newWindowsCodexStateTxFixture(t)
+	if err := os.WriteFile(f.requirements, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if windowsCodexFileHeldAgainstDelete(f.requirements) {
+		t.Fatal("a file nobody holds reads as held")
+	}
+	for _, share := range []struct {
+		name  string
+		share uint32
+		held  bool
+	}{
+		{"no sharing", 0, true},
+		{"write and delete sharing only", windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE, true},
+		{"read sharing only", windows.FILE_SHARE_READ, true},
+		{"everything shared", windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE, false},
+	} {
+		handle := holdWindowsCodexFileForTest(t, f.requirements, share.share)
+		got := windowsCodexFileHeldAgainstDelete(f.requirements)
+		_ = windows.CloseHandle(handle)
+		if got != share.held {
+			t.Errorf("%s: held = %v, want %v", share.name, got, share.held)
+		}
+	}
+}

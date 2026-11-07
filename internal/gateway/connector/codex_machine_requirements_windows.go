@@ -2228,7 +2228,7 @@ func windowsCodexRequirementsWriter() safefile.SharedFileWriter {
 // ordinary users cannot read is published even when candidate is its
 // content, so that it gets the read back.
 func publishWindowsCodexRequirements(base safefile.SharedFile, candidate []byte, remove bool) error {
-	if tx := windowsCodexActiveManagedState; tx != nil &&
+	if tx := windowsCodexActiveManagedState; tx != nil && !tx.direct &&
 		windowsCodexRequirementsPublishChanges(base, candidate, remove, windowsCodexRequirementsUnreadable(base)) {
 		tx.requirementsTouched = true
 	}
@@ -2259,6 +2259,22 @@ func windowsCodexRequirementsPublishChanges(base safefile.SharedFile, candidate 
 // present and that ordinary users cannot read (safefile.UsersCanRead).
 func windowsCodexRequirementsUnreadable(file safefile.SharedFile) bool {
 	return file.Exists && safefile.UsersCanRead(file.Metadata) != nil
+}
+
+// WindowsCodexRequirementsUnreadable reports a requirements.toml at path that
+// is present and that ordinary users cannot read. The reconcile publishes
+// such a file again with the read restored; it reads the access list only,
+// so a program that holds the file open does not change the answer.
+func WindowsCodexRequirementsUnreadable(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	metadata, err := safefile.ReadPathMetadata(path)
+	if err != nil {
+		return false
+	}
+	return safefile.UsersCanRead(metadata) != nil
 }
 
 // verifyWindowsCodexRequirementsUsersCanRead is the verification's check

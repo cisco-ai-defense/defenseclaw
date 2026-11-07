@@ -262,7 +262,32 @@ func (tx *windowsCodexManagedStateTx) unchanged(previous uint64) bool {
 		return !tx.committedExisted && !windowsCodexLegacyStatePresent(filepath.Join(tx.dir, windowsCodexManagedStateFile))
 	}
 	return tx.committedExisted &&
-		windowsCodexPathPresent(windowsCodexManagedStateGenerationPath(tx.dir, previous))
+		tx.hookCopyIntact(windowsCodexManagedStateGenerationPath(tx.dir, previous))
+}
+
+// hookCopyIntact reports that the hook copy at path is present, holds the
+// state the transaction holds, and carries DefenseClaw's protection. The hook
+// reads that copy and nothing else, so a copy that was truncated, changed or
+// given another access list since it was written is not the state the pass
+// would have written: it is published again under a new name (g582 round 11c,
+// S1). The access list is read first, with an open that asks for no data
+// access, so a copy a user holds open does not hide a drifted list. A user
+// who holds the copy open without read sharing (GAP-0650 allows it) keeps the
+// bytes from being read: a sharing violation counts as intact, so a hold
+// never brings back the pass-by-pass rewrite of GAP-0764.
+func (tx *windowsCodexManagedStateTx) hookCopyIntact(path string) bool {
+	if !windowsCodexPathPresent(path) {
+		return false
+	}
+	drift, err := windowsCodexMachineFileDrift(path)
+	if err != nil || !drift.Canonical {
+		return false
+	}
+	file, err := readWindowsCodexMachineFile(path, windowsCodexManagedStateLimit, false, windowsCodexManagedStateLabel)
+	if err != nil {
+		return errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_LOCK_VIOLATION)
+	}
+	return bytes.Equal(file.data, tx.data)
 }
 
 // keepsPrevious reports that the hook copy of the counter the transaction
