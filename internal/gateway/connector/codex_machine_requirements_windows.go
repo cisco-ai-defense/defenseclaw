@@ -929,7 +929,7 @@ func ResolveWindowsCodexManagedRuntimeRegistry(
 		return resolveWindowsCodexManagedRuntimeRegistryStable(writerLockPath, resolve)
 	}
 	if requirementsExists || stateExists {
-		return result, errors.New("Codex managed artifacts exist without the machine policy lock")
+		return result, errors.New("the Codex managed artifacts exist without the machine policy lock")
 	}
 	return result, nil
 }
