@@ -423,12 +423,17 @@ func (b *pyYAMLBuilder) constructMapping(n *yaml.Node, v *pyValue) (*pyValue, er
 	return v, nil
 }
 
-var pyYAMLTimestampRe = regexp.MustCompile(`^([0-9][0-9][0-9][0-9])-([0-9][0-9]?)-([0-9][0-9]?)(?:(?:[Tt]|[ \t]+)([0-9][0-9]?):([0-9][0-9]):([0-9][0-9])(?:\.([0-9]*))?(?:[ \t]*(?:Z|[-+][0-9][0-9]?(?::[0-9][0-9])?))?)?$`)
+var pyYAMLTimestampRe = regexp.MustCompile(`^([0-9][0-9][0-9][0-9])-([0-9][0-9]?)-([0-9][0-9]?)(?:(?:[Tt]|[ \t]+)([0-9][0-9]?):([0-9][0-9]):([0-9][0-9])(?:\.([0-9]*))?(?:[ \t]*(Z|([-+])([0-9][0-9]?)(?::([0-9][0-9]))?))?)?\n?$`)
 
 // pyYAMLTimestampKey reads a timestamp scalar as construct_yaml_timestamp
-// does: text the constructor pattern does not match, or a date or time that
-// datetime refuses, is an error. A date is one key however it is written; a
-// date and time is the key of its text.
+// does and returns the key of the value it builds. Text the constructor
+// pattern does not match (the $ of Python's pattern also accepts one trailing
+// newline), a date or time that datetime refuses, and a UTC offset that
+// datetime.timezone refuses (24 hours or more either way) are errors. Values
+// compare as Python compares them: a date is one key however it is written; a
+// datetime with a UTC offset is the instant it names, so Z, +00:00 and
+// 01:00+01:00 agree, with the fraction counted to the microsecond; a datetime
+// without an offset is never equal to one with an offset.
 func pyYAMLTimestampKey(text string) (string, error) {
 	m := pyYAMLTimestampRe.FindStringSubmatch(text)
 	if m == nil {
@@ -443,12 +448,31 @@ func pyYAMLTimestampKey(text string) (string, error) {
 		return "", errPyLoad
 	}
 	if m[4] == "" {
-		return fmt.Sprintf("t:%04d-%02d-%02d", year, month, day), nil
+		return fmt.Sprintf("t:date:%04d-%02d-%02d", year, month, day), nil
 	}
-	if num(4) > 23 || num(5) > 59 || num(6) > 59 {
+	hour, minute, second := num(4), num(5), num(6)
+	if hour > 23 || minute > 59 || second > 59 {
 		return "", errPyLoad
 	}
-	return "t:" + text, nil
+	micro := 0
+	if m[7] != "" {
+		micro, _ = strconv.Atoi((m[7] + "000000")[:6])
+	}
+	at := time.Date(year, time.Month(month), day, hour, minute, second, micro*1000, time.UTC)
+	if m[8] == "" {
+		return "t:naive:" + strconv.FormatInt(at.UnixMicro(), 10), nil
+	}
+	if m[9] != "" {
+		offset := num(10)*60 + num(11)
+		if offset >= 24*60 {
+			return "", errPyLoad
+		}
+		if m[9] == "-" {
+			offset = -offset
+		}
+		at = at.Add(-time.Duration(offset) * time.Minute)
+	}
+	return "t:utc:" + strconv.FormatInt(at.UnixMicro(), 10), nil
 }
 
 // pyYAMLBinaryKey reads a binary scalar as construct_yaml_binary does: text
