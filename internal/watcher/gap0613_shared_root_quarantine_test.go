@@ -276,7 +276,7 @@ func TestGAP0613SharedRootDeniedRestoredCopyIsDisabledAtRuntimeForTheDenyingConn
 	}
 	requireRuntimeHold(t, w, true)
 	entry, _ := w.store.GetActionForConnector("skill", evt.Name, "codex")
-	if entry == nil || entry.Actions.Install != "block" || entry.SourcePath != evt.Path || !strings.HasSuffix(entry.Reason, policyDenialMark) {
+	if entry == nil || entry.Actions.Install != "block" || entry.SourcePath != evt.Path || len(policyHeldFields(entry.Reason)) == 0 {
 		t.Errorf("codex journal = %+v, want install block, runtime disable and the source path", entry)
 	}
 	// The hold does not make the next admission quarantine the restored copy.
@@ -300,5 +300,149 @@ func TestGAP0613ScanVerdictBlockIsNotAPolicyHold(t *testing.T) {
 	}
 	if w.policyHoldReleases(evt) {
 		t.Error("the rescan would lift a block that no policy denial wrote")
+	}
+}
+
+// holdScanner runs onScan, which sees the journal while the scan is on.
+type holdScanner struct {
+	countingScanner
+	onScan func(ctx context.Context) error
+}
+
+func (s *holdScanner) Scan(ctx context.Context, target string) (*scanner.ScanResult, error) {
+	if err := s.onScan(ctx); err != nil {
+		return nil, err
+	}
+	return s.countingScanner.Scan(ctx, target)
+}
+
+func relaxCodexDefault(cfg *config.Config) {
+	cfg.AssetPolicy.Connectors["codex"] = config.PerConnectorAssetPolicy{Skill: &config.PerConnectorAssetTypePolicy{Default: "allow"}}
+}
+
+func codexDisabled(t *testing.T, w *InstallWatcher) bool {
+	t.Helper()
+	disabled, err := enforce.NewPolicyEngine(w.store).IsDisabledForConnector("skill", "blocked-skill", "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return disabled
+}
+
+// GAP-0613 review 11: the hold on a skill that stayed in its folder is lifted
+// when admission reaches a verdict that lets it run, not before the scan: the
+// skill stays disabled while the replacement scan runs, and a scan that finds
+// a critical issue or is cut off keeps the hold.
+func TestGAP0613PolicyHoldStaysUntilTheReplacementScanAllows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the quarantine store is made unwritable with a file")
+	}
+	critical := []scanner.Finding{{ID: "f1", RuleID: "SKILL-001", Severity: scanner.SeverityCritical, Title: "critical finding"}}
+	for _, tc := range []struct {
+		name     string
+		findings []scanner.Finding
+		cancel   bool
+		wantHeld bool
+	}{
+		{"clean scan lifts it", nil, false, false},
+		{"critical finding keeps it", critical, false, true},
+		{"interrupted scan keeps it", nil, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, cfg, evt := sharedRootDefaultDenyWatcher(t, false)
+			if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictBlocked {
+				t.Fatalf("admission = %+v, want blocked", res)
+			}
+			relaxCodexDefault(cfg)
+			var heldDuringScan bool
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			w.scannerFactory = func(InstallEvent) scanner.Scanner {
+				return &holdScanner{
+					countingScanner: countingScanner{name: "skill-scanner", findings: tc.findings},
+					onScan: func(ctx context.Context) error {
+						heldDuringScan = codexDisabled(t, w)
+						if tc.cancel {
+							cancel()
+							return ctx.Err()
+						}
+						return nil
+					},
+				}
+			}
+			w.runAdmission(ctx, evt)
+			if !heldDuringScan {
+				t.Error("the hold was lifted before the replacement scan ran")
+			}
+			if got := codexDisabled(t, w); got != tc.wantHeld {
+				t.Errorf("codex runtime disabled after admission = %v, want %v", got, tc.wantHeld)
+			}
+		})
+	}
+}
+
+// GAP-0613 review 11: OpenClaw's install journal is the global row, which
+// every connector's runtime check falls back to. When OpenClaw is the
+// connector whose rule denies the skill, its runtime disable is on its own
+// row: an unrelated connector's skill of the same name stays usable. The
+// install block keeps its legacy global row, and the hold lifts from both.
+func TestGAP0613OpenClawPolicyHoldDoesNotDisableAnotherConnectorsSkill(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the quarantine store is made unwritable with a file")
+	}
+	w, cfg, evt := sharedRootDefaultDenyWatcher(t, false)
+	cfg.AssetPolicy.Connectors = map[string]config.PerConnectorAssetPolicy{
+		"openclaw": {Skill: &config.PerConnectorAssetTypePolicy{Default: "deny"}},
+	}
+	w.SetRootConsumers([]RootConsumer{{"skill", filepath.Dir(evt.Path), "amp"}, {"skill", filepath.Dir(evt.Path), "openclaw"}})
+	if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictBlocked {
+		t.Fatalf("admission = %+v, want blocked", res)
+	}
+	pe := enforce.NewPolicyEngine(w.store)
+	for connector, want := range map[string]bool{"amp": true, "openclaw": true, "hermes": false, "": false} {
+		if got, err := pe.IsDisabledForConnector("skill", "blocked-skill", connector); err != nil || got != want {
+			t.Errorf("%q runtime disabled = %v (err %v), want %v", connector, got, err, want)
+		}
+	}
+	if global, _ := w.store.GetActionForConnector("skill", "blocked-skill", ""); global == nil || global.Actions.Install != "block" || global.Actions.Runtime != "" {
+		t.Errorf("global journal = %+v, want the legacy install block only", global)
+	}
+	cfg.AssetPolicy.Connectors["openclaw"] = config.PerConnectorAssetPolicy{Skill: &config.PerConnectorAssetTypePolicy{Default: "allow"}}
+	if !w.policyHoldReleases(evt) {
+		t.Fatal("the rescan does not notice the lifted denial")
+	}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "skill-scanner"} }
+	w.runAdmission(context.Background(), evt)
+	for _, scope := range []string{"", "amp", "openclaw"} {
+		if entry, _ := w.store.GetActionForConnector("skill", "blocked-skill", scope); entry != nil && (entry.Actions.Install != "" || entry.Actions.Runtime != "") {
+			t.Errorf("%q journal = %+v after the release, want no hold", scope, entry)
+		}
+	}
+}
+
+// GAP-0613 review 11: a runtime disable on a row for another reason (an
+// operator's) is not part of the policy hold. Lifting the hold clears what the
+// hold set and leaves that disable, with its reason.
+func TestGAP0613PolicyReleaseKeepsAnEarlierRuntimeBlock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the quarantine store is made unwritable with a file")
+	}
+	w, cfg, evt := sharedRootDefaultDenyWatcher(t, false)
+	if err := w.store.SetActionFieldForConnector("skill", "blocked-skill", "amp", "runtime", "disable", "disabled by the operator"); err != nil {
+		t.Fatal(err)
+	}
+	if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictBlocked {
+		t.Fatalf("admission = %+v, want blocked", res)
+	}
+	requireRuntimeHold(t, w, true)
+	relaxCodexDefault(cfg)
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "skill-scanner"} }
+	w.runAdmission(context.Background(), evt)
+	if codexDisabled(t, w) {
+		t.Error("codex is still disabled after the hold was lifted")
+	}
+	entry, _ := w.store.GetActionForConnector("skill", "blocked-skill", "amp")
+	if entry == nil || entry.Actions.Runtime != "disable" || entry.Actions.Install != "" || entry.Reason != "disabled by the operator" {
+		t.Errorf("amp journal = %+v, want the operator's runtime disable and its reason, no install block", entry)
 	}
 }
