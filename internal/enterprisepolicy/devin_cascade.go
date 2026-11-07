@@ -28,7 +28,7 @@ import (
 //
 // DefenseClaw no longer publishes it, because no file it could go into is
 // proved to be read only by builds that run Cascade:
-//   - the pre-rename Windsurf hooks file is imported as Devin Local hooks by
+//   - the pre-rename hooks file is imported as Devin Local hooks by
 //     the Devin CLI and the engine inside Devin Desktop, so an exit-2 entry
 //     there refuses current Devin Local too;
 //   - the Devin hooks file is opened by no current CLI, and Desktop 3.12.17
