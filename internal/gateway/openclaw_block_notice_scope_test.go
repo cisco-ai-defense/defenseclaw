@@ -41,11 +41,11 @@ func TestGAP0644OtherConnectorNeverTakesTheNotice(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resetOpenClawBlockNotices(t)
-			ref := rememberOpenClawBlockNotice("sess-a", "exec", []string{noticeTestRule}, "r")
+			ref := rememberOpenClawBlockNotice("exec", []string{noticeTestRule}, "r")
 			o := tc.o
 			o.session, o.reqBody, o.ctype, o.respBody = "sess-a", noticeChatReq(ref), noticeJSONType, noticeChatReply
 			out, _ := serveNoticeWith(t, o)
-			if out != noticeChatReply || !openClawBlockNoticesPending("sess-a") {
+			if out != noticeChatReply || !openClawBlockNoticesPending() {
 				t.Fatalf("another connector took or showed the OpenClaw notice: %s", out)
 			}
 		})
@@ -53,7 +53,7 @@ func TestGAP0644OtherConnectorNeverTakesTheNotice(t *testing.T) {
 	// The benign twin: OpenClaw own routes, with and without a connector prefix.
 	for _, path := range []string{"/v1/chat/completions", "/c/openclaw/v1/chat/completions"} {
 		resetOpenClawBlockNotices(t)
-		ref := rememberOpenClawBlockNotice("", "exec", []string{noticeTestRule}, "r")
+		ref := rememberOpenClawBlockNotice("exec", []string{noticeTestRule}, "r")
 		out, _ := serveNoticeWith(t, noticeServe{viaPrefix: true, path: path,
 			reqBody: noticeChatReq(ref), ctype: noticeJSONType, respBody: noticeChatReply})
 		if !noticeServed(out) {
@@ -64,31 +64,100 @@ func TestGAP0644OtherConnectorNeverTakesTheNotice(t *testing.T) {
 
 func TestGAP0644UnauthorizedRequestNeverTakesTheNotice(t *testing.T) {
 	resetOpenClawBlockNotices(t)
-	ref := rememberOpenClawBlockNotice("", "exec", []string{noticeTestRule}, "r")
+	ref := rememberOpenClawBlockNotice("exec", []string{noticeTestRule}, "r")
 	out, _ := serveNoticeWith(t, noticeServe{deny: true, reqBody: noticeChatReq(ref), ctype: noticeJSONType, respBody: noticeChatReply})
-	if out != noticeChatReply || !openClawBlockNoticesPending("") {
+	if out != noticeChatReply || !openClawBlockNoticesPending() {
 		t.Fatalf("a request without the owner credential took the notice: %s", out)
 	}
 }
 
-// A notice is delivered only to the session it was filed under. A request
-// that names no session cannot reach into one that does, and the reverse.
-func TestGAP0644NoticeStaysInItsSession(t *testing.T) {
-	for _, tc := range []struct {
-		notice, request string
-		want            bool
-	}{
-		{"sess-a", "sess-a", true},
-		{"", "", true},
-		{"sess-a", "sess-b", false},
-		{"sess-a", "", false},
-		{"", "sess-b", false},
-	} {
+// The reference rides in the result of its own block, so the session header
+// the model request carries does not decide the match: a plugin that stamps
+// another session (two sessions at once), an empty one or none still shows the
+// block of the call whose result the request carries (review 3, R3-2). The
+// notice is taken once, whatever the header said.
+func TestGAP0644SessionHeaderDoesNotDecideTheMatch(t *testing.T) {
+	for _, header := range []string{"sess-a", "sess-b", ""} {
 		resetOpenClawBlockNotices(t)
-		ref := rememberOpenClawBlockNotice(tc.notice, "exec", []string{noticeTestRule}, "r")
-		out, _ := serveNoticeWith(t, noticeServe{session: tc.request, reqBody: noticeChatReq(ref), ctype: noticeJSONType, respBody: noticeChatReply})
-		if noticeServed(out) != tc.want || (!tc.want && (out != noticeChatReply || !openClawBlockNoticesPending(tc.notice))) {
-			t.Errorf("notice in %q, request in %q: served=%v want %v: %s", tc.notice, tc.request, noticeServed(out), tc.want, out)
+		ref := rememberOpenClawBlockNotice("exec", []string{noticeTestRule}, "r")
+		out, _ := serveNoticeWith(t, noticeServe{session: header, reqBody: noticeChatReq(ref), ctype: noticeJSONType, respBody: noticeChatReply})
+		if !noticeServed(out) || openClawBlockNoticesPending() {
+			t.Errorf("header %q: served=%v pending=%v: %s", header, noticeServed(out), openClawBlockNoticesPending(), out)
+		}
+	}
+	// Two blocks from two sessions: each request takes its own block only,
+	// whichever header each carries.
+	resetOpenClawBlockNotices(t)
+	refA := rememberOpenClawBlockNotice("exec", []string{noticeTestRule}, "r")
+	refB := rememberOpenClawBlockNotice("read", []string{noticeTestRule}, "r")
+	out, _ := serveNoticeWith(t, noticeServe{session: "sess-b", reqBody: noticeChatReq(refA), ctype: noticeJSONType, respBody: noticeChatReply})
+	if !strings.Contains(out, "Tool call blocked: exec") || strings.Contains(out, "read") {
+		t.Fatalf("session A block did not show alone: %s", out)
+	}
+	out, _ = serveNoticeWith(t, noticeServe{session: "sess-a", reqBody: noticeChatReq(refB), ctype: noticeJSONType, respBody: noticeChatReply})
+	if !strings.Contains(out, "Tool call blocked: read") || strings.Contains(out, "exec") {
+		t.Fatalf("session B block did not show alone: %s", out)
+	}
+}
+
+// Review 3, R3-1: the reference counts only inside a tool result. The same
+// token in text a user or the model wrote, a system prompt or any other field
+// takes nothing and leaves the notice for the real result, in every provider
+// shape.
+func TestGAP0644ReferenceOutsideAToolResultTakesNothing(t *testing.T) {
+	resetOpenClawBlockNotices(t)
+	ref := rememberOpenClawBlockNotice("exec", []string{noticeTestRule}, "r")
+	outside := []struct{ name, body string }{
+		{"chat user text", `{"messages":[{"role":"user","content":"summarize REF"},{"role":"tool","tool_call_id":"ok","content":"ordinary output"}]}`},
+		{"chat user parts", `{"messages":[{"role":"user","content":[{"type":"text","text":"REF"}]}]}`},
+		{"chat assistant text", `{"messages":[{"role":"assistant","content":"the ref was REF"},{"role":"tool","tool_call_id":"ok","content":"fine"}]}`},
+		{"chat system", `{"messages":[{"role":"system","content":"REF"},{"role":"user","content":"hi"}]}`},
+		{"chat tool call arguments", `{"messages":[{"role":"assistant","tool_calls":[{"id":"c","function":{"name":"exec","arguments":"{\"x\":\"REF\"}"}}]}]}`},
+		{"responses user message", `{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"REF"}]},{"type":"function_call_output","call_id":"ok","output":"fine"}]}`},
+		{"responses instructions", `{"instructions":"REF","input":"hi"}`},
+		{"responses assistant output", `{"input":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"REF"}]}]}`},
+		{"anthropic user text", `{"system":"REF","messages":[{"role":"user","content":[{"type":"text","text":"REF"},{"type":"tool_result","tool_use_id":"ok","content":"fine"}]}]}`},
+		{"anthropic assistant text", `{"messages":[{"role":"assistant","content":[{"type":"text","text":"REF"}]}]}`},
+		{"bedrock user text", `{"messages":[{"role":"user","content":[{"text":"REF"},{"toolResult":{"toolUseId":"ok","content":[{"text":"fine"}]}}]}]}`},
+		{"gemini user text", `{"contents":[{"role":"user","parts":[{"text":"REF"}]},{"role":"user","parts":[{"functionResponse":{"name":"exec","response":{"ok":true}}}]}]}`},
+		{"gemini system", `{"systemInstruction":{"parts":[{"text":"REF"}]},"contents":[]}`},
+		{"ollama user text", `{"messages":[{"role":"user","content":"REF"},{"role":"tool","tool_name":"exec","content":"fine"}]}`},
+		{"not json", "tool result REF"},
+	}
+	for _, c := range outside {
+		out, _ := serveNoticeWith(t, noticeServe{session: "sess-a", reqBody: strings.ReplaceAll(c.body, "REF", ref), ctype: noticeJSONType, respBody: noticeChatReply})
+		if out != noticeChatReply || !openClawBlockNoticesPending() {
+			t.Fatalf("%s: a reference outside a tool result took the notice: %s", c.name, out)
+		}
+	}
+	// The real result still takes it, once.
+	out, _ := serveNoticeWith(t, noticeServe{session: "sess-a", reqBody: noticeChatReq(ref), ctype: noticeJSONType, respBody: noticeChatReply})
+	if !noticeServed(out) || openClawBlockNoticesPending() {
+		t.Fatalf("the blocked result did not show the notice: %s", out)
+	}
+}
+
+// Review 3, R3-1: a reference inside the result of each provider shape is the
+// block, even when the result nests it (an array of parts, a structured
+// response).
+func TestGAP0644ReferenceInsideEveryResultShapeTakesTheNotice(t *testing.T) {
+	shapes := []struct{ name, body string }{
+		{"chat string", `{"messages":[{"role":"tool","tool_call_id":"c","content":"blocked (ref REF)"}]}`},
+		{"chat parts", `{"messages":[{"role":"tool","tool_call_id":"c","content":[{"type":"text","text":"blocked (ref REF)"}]}]}`},
+		{"chat legacy function role", `{"messages":[{"role":"function","name":"exec","content":"blocked (ref REF)"}]}`},
+		{"responses output string", `{"input":[{"type":"function_call_output","call_id":"c","output":"blocked (ref REF)"}]}`},
+		{"responses output parts", `{"input":[{"type":"function_call_output","call_id":"c","output":[{"type":"input_text","text":"blocked (ref REF)"}]}]}`},
+		{"anthropic parts", `{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"c","content":[{"type":"text","text":"blocked (ref REF)"}]}]}]}`},
+		{"bedrock", `{"messages":[{"role":"user","content":[{"toolResult":{"toolUseId":"c","content":[{"text":"blocked (ref REF)"}]}}]}]}`},
+		{"gemini structured", `{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"exec","response":{"error":{"message":"blocked (ref REF)"}}}}]}]}`},
+		{"ollama", `{"messages":[{"role":"tool","tool_name":"exec","content":"blocked (ref REF)"}]}`},
+	}
+	for _, c := range shapes {
+		resetOpenClawBlockNotices(t)
+		ref := rememberOpenClawBlockNotice("exec", []string{noticeTestRule}, "r")
+		out, _ := serveNoticeWith(t, noticeServe{reqBody: strings.ReplaceAll(c.body, "REF", ref), ctype: noticeJSONType, respBody: noticeChatReply})
+		if !noticeServed(out) {
+			t.Errorf("%s: the blocked result did not take the notice: %s", c.name, out)
 		}
 	}
 }
@@ -98,8 +167,8 @@ func TestGAP0644NoticeStaysInItsSession(t *testing.T) {
 // a notice, in any provider shape.
 func TestGAP0644OnlyTheBlockReferenceTakesTheNotice(t *testing.T) {
 	resetOpenClawBlockNotices(t)
-	ref := rememberOpenClawBlockNotice("sess-a", "exec", []string{noticeTestRule}, "r")
-	other := rememberOpenClawBlockNotice("sess-a", "read", []string{noticeTestRule}, "r")
+	ref := rememberOpenClawBlockNotice("exec", []string{noticeTestRule}, "r")
+	other := rememberOpenClawBlockNotice("read", []string{noticeTestRule}, "r")
 	if ref == other || !regexp.MustCompile(`^dc-[0-9a-f]{16}$`).MatchString(ref) {
 		t.Fatalf("references are not distinct random tokens: %q %q", ref, other)
 	}
@@ -115,7 +184,7 @@ func TestGAP0644OnlyTheBlockReferenceTakesTheNotice(t *testing.T) {
 			t.Fatalf("%s took a notice: %s", l.name, out)
 		}
 	}
-	if !openClawBlockNoticesPending("sess-a") {
+	if !openClawBlockNoticesPending() {
 		t.Fatal("a look-alike request used up a notice")
 	}
 	// A request that carries one reference takes that block's notice only.
@@ -134,7 +203,7 @@ func TestGAP0644ExpiredNoticeIsNoLongerPending(t *testing.T) {
 	openClawBlockNotices.mu.Lock()
 	openClawBlockNotices.entries = []openClawBlockNotice{{ref: "dc-0000000000000000", line: "old", at: time.Now().Add(-3 * time.Minute)}}
 	openClawBlockNotices.mu.Unlock()
-	if openClawBlockNoticesPending("") {
+	if openClawBlockNoticesPending() {
 		t.Fatal("an expired notice still makes every POST take the buffered path")
 	}
 	openClawBlockNotices.mu.Lock()
@@ -144,8 +213,8 @@ func TestGAP0644ExpiredNoticeIsNoLongerPending(t *testing.T) {
 		t.Fatalf("expired notice kept: %d", n)
 	}
 	// A live notice is still pending.
-	rememberOpenClawBlockNotice("", "exec", nil, "r")
-	if !openClawBlockNoticesPending("") {
+	rememberOpenClawBlockNotice("exec", nil, "r")
+	if !openClawBlockNoticesPending() {
 		t.Fatal("a live notice is not pending")
 	}
 }
@@ -159,9 +228,9 @@ func TestGAP0644SyntheticBlockReplyIsNotPrefixed(t *testing.T) {
 	for _, tc := range []struct{ name, ctype, body string }{{"json", noticeJSONType, synthJSON}, {"sse", "text/event-stream", synthSSE}} {
 		t.Run(tc.name, func(t *testing.T) {
 			resetOpenClawBlockNotices(t)
-			req := noticeChatReq(rememberOpenClawBlockNotice("", "exec", []string{noticeTestRule}, "r"))
+			req := noticeChatReq(rememberOpenClawBlockNotice("exec", []string{noticeTestRule}, "r"))
 			out, _ := serveNotice(t, req, tc.ctype, tc.body, 0)
-			if out != tc.body || !openClawBlockNoticesPending("") {
+			if out != tc.body || !openClawBlockNoticesPending() {
 				t.Fatalf("synthetic reply was prefixed or used the notice: %s", out)
 			}
 			history, _ := json.Marshal(map[string]any{"messages": []any{map[string]any{"role": "assistant", "content": synth}}})
@@ -322,7 +391,7 @@ func TestGAP0644NoticeLeadsTheReplyForGeminiOllamaBedrockStreamAndGzip(t *testin
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			resetOpenClawBlockNotices(t)
-			ref := rememberOpenClawBlockNotice("", "exec", []string{noticeTestRule}, "matched: ssh authorized_keys write")
+			ref := rememberOpenClawBlockNotice("exec", []string{noticeTestRule}, "matched: ssh authorized_keys write")
 			c.o.reqBody = strings.ReplaceAll(c.o.reqBody, "REF", ref)
 			out, code := serveNoticeWith(t, c.o)
 			if code != 200 {

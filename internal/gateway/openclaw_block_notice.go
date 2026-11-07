@@ -34,12 +34,16 @@ import (
 // The inspect endpoint records each enforced OpenClaw tool block here under a
 // random reference and returns the reference to the plugin, which appends it
 // to the block reason the tool result carries. A model request of this
-// OpenClaw route and plugin session whose body carries a pending reference
+// OpenClaw route whose body carries a pending reference inside a tool result
 // takes the notice, and the proxy puts one line in front of the first text of
 // the reply (stream or not). The reference names one block and nothing else,
-// so no provider rewrite of a call id, no tool name and no older result of the
-// same tool can take another call's notice, and an allowed call has none. A
-// notice is taken by one request, so a block is shown once. A reply with no
+// so no provider rewrite of a call id, no tool name, no older result of the
+// same tool and no text a user or the model wrote can take another call
+// notice, and an allowed call has none. The session is not part of the match:
+// the reference is a random token that exists only in the result of its own
+// block, while the session header a model request carries can name another
+// session when two run at once. A notice is taken by one request, so a block
+// is shown once. A reply with no
 // text to lead with, or in a format that is not rewritten, gives the notice
 // back until it expires, so the line lands on the first reply that can carry
 // it. A reply DefenseClaw wrote itself (it starts with the block banner) is
@@ -59,10 +63,9 @@ const (
 type openClawBlockNotice struct {
 	// ref is the random reference the block reason carries back in the tool
 	// result of the blocked call.
-	ref     string
-	session string
-	line    string
-	at      time.Time
+	ref  string
+	line string
+	at   time.Time
 }
 
 var openClawBlockNotices struct {
@@ -124,7 +127,7 @@ func newOpenClawBlockRef() string {
 // rememberOpenClawBlockNotice records an enforced block of one OpenClaw tool
 // call and returns the reference the plugin puts in the block reason, which
 // is how the next model request is matched to this block.
-func rememberOpenClawBlockNotice(session, tool string, ruleIDs []string, reason string) string {
+func rememberOpenClawBlockNotice(tool string, ruleIDs []string, reason string) string {
 	ref := newOpenClawBlockRef()
 	if ref == "" {
 		return ""
@@ -134,8 +137,7 @@ func rememberOpenClawBlockNotice(session, tool string, ruleIDs []string, reason 
 	now := openClawToolOutcomeNow()
 	openClawBlockNotices.entries = append(pruneOpenClawBlockNotices(openClawBlockNotices.entries, now),
 		openClawBlockNotice{
-			ref: ref, session: strings.TrimSpace(session),
-			line: openClawBlockNoticeLine(tool, ruleIDs, reason), at: now,
+			ref: ref, line: openClawBlockNoticeLine(tool, ruleIDs, reason), at: now,
 		})
 	capOpenClawBlockNotices()
 	return ref
@@ -157,42 +159,42 @@ func pruneOpenClawBlockNotices(entries []openClawBlockNotice, now time.Time) []o
 	return kept
 }
 
-// openClawNoticeSessionFits reports whether a notice recorded in one session
-// may show in a request from another: only when both name the same session. A
-// request that names no session fits only a notice that names none, so a
-// missing header never reaches into another session.
-func openClawNoticeSessionFits(entry, request string) bool {
-	return entry == request
-}
-
-// openClawBlockNoticesPending reports whether a live notice may belong to a
-// request of this session. Expired notices are dropped first, so one block
-// costs later requests at most the notice lifetime.
-func openClawBlockNoticesPending(session string) bool {
+// openClawBlockNoticesPending reports whether a live notice waits for its
+// block result. Expired notices are dropped first, so one block costs later
+// requests at most the notice lifetime.
+func openClawBlockNoticesPending() bool {
 	openClawBlockNotices.mu.Lock()
 	defer openClawBlockNotices.mu.Unlock()
 	openClawBlockNotices.entries = pruneOpenClawBlockNotices(openClawBlockNotices.entries, openClawToolOutcomeNow())
-	for _, e := range openClawBlockNotices.entries {
-		if openClawNoticeSessionFits(e.session, session) {
-			return true
-		}
-	}
-	return false
+	return len(openClawBlockNotices.entries) > 0
 }
 
-// takeOpenClawBlockNotices removes and returns the live notices of this
-// session whose reference the request body carries.
-func takeOpenClawBlockNotices(body []byte, session string) []openClawBlockNotice {
+// takeOpenClawBlockNotices removes and returns the live notices whose
+// reference a tool result of the request body carries. The same reference in
+// a user message, an assistant message, a system prompt or any other part of
+// the request takes nothing.
+func takeOpenClawBlockNotices(body []byte) []openClawBlockNotice {
 	if !bytes.Contains(body, []byte(openClawBlockRefPrefix)) {
 		return nil
 	}
 	openClawBlockNotices.mu.Lock()
 	defer openClawBlockNotices.mu.Unlock()
 	openClawBlockNotices.entries = pruneOpenClawBlockNotices(openClawBlockNotices.entries, openClawToolOutcomeNow())
+	named := false
+	for _, e := range openClawBlockNotices.entries {
+		if bytes.Contains(body, []byte(e.ref)) {
+			named = true
+			break
+		}
+	}
+	if !named {
+		return nil
+	}
+	results := toolResultTexts(body, openClawBlockRefPrefix)
 	var taken []openClawBlockNotice
 	kept := make([]openClawBlockNotice, 0, len(openClawBlockNotices.entries))
 	for _, e := range openClawBlockNotices.entries {
-		if openClawNoticeSessionFits(e.session, session) && bytes.Contains(body, []byte(e.ref)) {
+		if textsContain(results, e.ref) {
 			taken = append(taken, e)
 		} else {
 			kept = append(kept, e)
@@ -200,6 +202,15 @@ func takeOpenClawBlockNotices(body []byte, session string) []openClawBlockNotice
 	}
 	openClawBlockNotices.entries = kept
 	return taken
+}
+
+func textsContain(texts []string, sub string) bool {
+	for _, t := range texts {
+		if strings.Contains(t, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 func restoreOpenClawBlockNotices(notices []openClawBlockNotice) {
@@ -236,8 +247,8 @@ type openClawNoticeBody struct {
 
 // openClawBlockNoticeMiddleware prefixes the first reply text that follows an
 // OpenClaw tool block with the block notice. Only a request that authorized
-// proves is the gateway owner's, that is not routed to another connector, and
-// whose session fits a live notice is read; every other request passes through
+// proves is the gateway owner and that is not routed to another connector is
+// read, and only while a live notice waits; every other request passes through
 // untouched and unbuffered.
 func openClawBlockNoticeMiddleware(next http.Handler, authorized func(*http.Request) bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -245,8 +256,7 @@ func openClawBlockNoticeMiddleware(next http.Handler, authorized func(*http.Requ
 			next.ServeHTTP(w, r)
 			return
 		}
-		session := strings.TrimSpace(r.Header.Get(SessionIDHeader))
-		if !openClawBlockNoticesPending(session) {
+		if !openClawBlockNoticesPending() {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -258,7 +268,7 @@ func openClawBlockNoticeMiddleware(next http.Handler, authorized func(*http.Requ
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
-		notices := takeOpenClawBlockNotices(body, session)
+		notices := takeOpenClawBlockNotices(body)
 		if len(notices) == 0 {
 			next.ServeHTTP(w, r)
 			return
