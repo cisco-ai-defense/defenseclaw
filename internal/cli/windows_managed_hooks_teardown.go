@@ -125,6 +125,17 @@ type windowsManagedHooksTeardownReport struct {
 	Error                        string                              `json:"error,omitempty"`
 }
 
+// windowsManagedHooksKeptUntrustedPolicyFiles lists the vendor policy files
+// the uninstall kept because another account can change them; replaceable in
+// tests.
+var windowsManagedHooksKeptUntrustedPolicyFiles = func() []string {
+	programData, err := winpath.TrustedProgramData()
+	if err != nil {
+		return nil
+	}
+	return enterprisepolicy.KeptUntrustedPolicyFiles(enterprisepolicy.Options{GOOS: "windows", WindowsProgramData: programData})
+}
+
 // windowsManagedHooksStandaloneUserRegistrationRemover is replaceable in
 // tests.
 var windowsManagedHooksStandaloneUserRegistrationRemover = removeWindowsManagedHooksStandalonePerUserRegistrations
@@ -160,6 +171,12 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 	// A link at a vendor folder stays (GAP-0758): name it, so the uninstall
 	// result says so instead of leaving it unmentioned.
 	report.MachineStateRemaining = append(report.MachineStateRemaining, windowsManagedHooksKeptLinkedFolders()...)
+	// A vendor policy file another account can change stays byte for byte
+	// (the removal never writes through it) and may still name DefenseClaw's
+	// hook: the result says so once (GAP-0761).
+	for _, entry := range windowsManagedHooksKeptUntrustedPolicyFiles() {
+		report.MachineStateRemaining = append(report.MachineStateRemaining, boundedEnterpriseHookUserCleanupText(entry))
+	}
 	report.UserRegistrationsRemoved = len(cleanup.Removed)
 	report.UserRegistrationsPending = cleanup.Pending
 	report.UserRegistrationsFailed = cleanup.Failed
