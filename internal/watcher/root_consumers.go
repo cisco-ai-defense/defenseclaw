@@ -1,0 +1,77 @@
+package watcher
+
+import (
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+)
+
+// rootConsumersOf is every connector that loads a watched root holding the
+// skill or plugin event, owner first. A root several connectors load (an
+// explicit gateway.watcher folder, or a shared layout) has one event owner,
+// but each of its consumers loads what lands there, so each consumer has its
+// connector-scoped asset rules applied to it. Connectors that do not load the
+// root are never in the list, so their scoped rules do not reach it.
+func (w *InstallWatcher) rootConsumersOf(evt InstallEvent, owner string) []string {
+	out := []string{owner}
+	if evt.Type != InstallSkill && evt.Type != InstallPlugin || len(w.rootConsumers) == 0 || strings.TrimSpace(evt.Path) == "" {
+		return out
+	}
+	path := w.rootCoveragePath(evt.Path)
+	prefix := string(evt.Type) + "\x00"
+	for key, connectors := range w.rootConsumers {
+		root, ok := strings.CutPrefix(key, prefix)
+		if !ok || !pathWithinRoot(path, root) {
+			continue
+		}
+		for _, connector := range connectors {
+			if !containsFold(out, connector) {
+				out = append(out, connector)
+			}
+		}
+	}
+	return out
+}
+
+func containsFold(list []string, name string) bool {
+	for _, item := range list {
+		if strings.EqualFold(item, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// evaluateRootAssetPolicy is the asset-policy decision for an install event
+// across every connector that loads its root: the first connector whose rules
+// block it, else the first whose rules would block it (observe mode), else
+// the owner decision. It returns the connector the decision belongs to.
+func (w *InstallWatcher) evaluateRootAssetPolicy(cfg *config.Config, evt InstallEvent, owner string, input func(connector string) config.AssetPolicyInput) (config.AssetPolicyDecision, string) {
+	best := cfg.EvaluateAssetPolicy(input(owner))
+	bestConnector, bestRank := owner, assetBlockRank(best)
+	if bestRank == 2 {
+		return best, bestConnector
+	}
+	for _, connector := range w.rootConsumersOf(evt, owner)[1:] {
+		decision := cfg.EvaluateAssetPolicy(input(connector))
+		if rank := assetBlockRank(decision); rank > bestRank {
+			best, bestConnector, bestRank = decision, connector, rank
+			if rank == 2 {
+				break
+			}
+		}
+	}
+	return best, bestConnector
+}
+
+// assetBlockRank is 2 for an enforced block, 1 for one that only would
+// block, 0 otherwise.
+func assetBlockRank(d config.AssetPolicyDecision) int {
+	switch {
+	case d.Enabled && d.RawAction == "block" && d.Action == "block":
+		return 2
+	case d.Enabled && d.RawAction == "block":
+		return 1
+	}
+	return 0
+}
