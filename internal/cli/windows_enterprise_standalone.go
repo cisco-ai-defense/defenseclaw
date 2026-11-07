@@ -780,6 +780,9 @@ func runWindowsEnterpriseStandaloneAction(
 	if err := refuseWindowsEnterpriseBelowProductFloor(action, opts); err != nil {
 		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 	}
+	if err := refuseWindowsEnterpriseRepairOverUnprovenApprovedSource(action, opts); err != nil {
+		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+	}
 	if err := refuseUntrustedWindowsScannerRuntimeBeforeChange(canonicalWindowsEnterpriseAction(action), opts); err != nil {
 		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 	}
@@ -905,10 +908,11 @@ func runWindowsEnterpriseStandaloneAction(
 		settleWindowsEnterpriseHotConfigClosure(ctx, result, action)
 	}
 	addWindowsEnterpriseNothingInstalledError(result, report, action)
-	if action == "upgrade" || action == "repair" {
+	if action == "install" || action == "upgrade" || action == "repair" {
 		// An upgrade without CONFIG= carries the earlier approved config
 		// source forward, and a repair that found nothing to restore leaves
-		// it as it is: heal it as ensure does (GAP-0779).
+		// it as it is: heal it as ensure does. Every one of them also leaves
+		// the proof a later Repair over a hand edit needs (GAP-0779).
 		healWindowsEnterpriseApprovedSourceOnSuccess(result, opts)
 	}
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
