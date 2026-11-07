@@ -271,10 +271,16 @@ func (tx *windowsCodexManagedStateTx) unchanged(previous uint64) bool {
 // given another access list since it was written is not the state the pass
 // would have written: it is published again under a new name (g582 round 11c,
 // S1). The access list is read first, with an open that asks for no data
-// access, so a copy a user holds open does not hide a drifted list. A user
-// who holds the copy open without read sharing (GAP-0650 allows it) keeps the
-// bytes from being read: a sharing violation counts as intact, so a hold
-// never brings back the pass-by-pass rewrite of GAP-0764.
+// access, so a copy a user holds open does not hide a drifted list. A copy
+// that cannot be read because a user holds it open without read sharing
+// (GAP-0650 allows that) is not intact either: the hook and the guardian read
+// that copy and nothing else, so while the hold lasts every hook call and the
+// guardian fail on it. The pass publishes the state under a new name, which
+// frees them within one pass; the held copy stays until it is released. Once
+// the new copy is the current one nothing is written again, so the rewrite of
+// GAP-0764 does not return. (A first version counted a sharing violation as
+// intact; the native run with a held current copy showed the guardian never
+// recovering and Setup stopping on its coverage.)
 func (tx *windowsCodexManagedStateTx) hookCopyIntact(path string) bool {
 	if !windowsCodexPathPresent(path) {
 		return false
@@ -285,7 +291,7 @@ func (tx *windowsCodexManagedStateTx) hookCopyIntact(path string) bool {
 	}
 	file, err := readWindowsCodexMachineFile(path, windowsCodexManagedStateLimit, false, windowsCodexManagedStateLabel)
 	if err != nil {
-		return errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_LOCK_VIOLATION)
+		return false
 	}
 	return bytes.Equal(file.data, tx.data)
 }

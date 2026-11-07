@@ -883,9 +883,10 @@ func stampWindowsCodexSDDLForTest(t *testing.T, path, sddl string) {
 // while that copy is what a pass would write: a copy that was truncated,
 // changed or given another access list since it was written is published
 // again under a new name, so the hook never reads a damaged or exposed copy
-// for longer than one guardian pass. A copy a user holds open without
-// sharing cannot be read; it counts as intact, and its access list, which is
-// read without opening the data, is still judged.
+// for longer than one guardian pass. A copy a user holds open without read
+// sharing cannot be read by the hook or the guardian either, so it is
+// published again too (the held old copy stays until it is released); an
+// older copy that is held changes nothing (see the GAP-0764 tests).
 func TestWindowsCodexUnchangedPassRepublishesADamagedOrExposedHookCopy(t *testing.T) {
 	canonicalPlusUsersWrite := "O:BAD:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;FRFW;;;BU)"
 	noHolder := ^uint32(0)
@@ -914,9 +915,13 @@ func TestWindowsCodexUnchangedPassRepublishesADamagedOrExposedHookCopy(t *testin
 		{"access list gives Users write while a user holds the copy with no sharing", func(t *testing.T, path string) {
 			stampWindowsCodexSDDLForTest(t, path, canonicalPlusUsersWrite)
 		}, 0, true},
-		{"intact copy held with no sharing", func(t *testing.T, path string) {}, 0, false},
+		{"intact copy held with no sharing", func(t *testing.T, path string) {}, 0, true},
 		{"intact copy held with write and delete sharing only", func(t *testing.T, path string) {},
-			windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE, false},
+			windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE, true},
+		{"intact copy held with delete sharing only", func(t *testing.T, path string) {},
+			windows.FILE_SHARE_DELETE, true},
+		{"intact copy held by a reader that shares everything", func(t *testing.T, path string) {},
+			windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			f := newWindowsCodexStateTxFixture(t)
@@ -940,13 +945,20 @@ func TestWindowsCodexUnchangedPassRepublishesADamagedOrExposedHookCopy(t *testin
 				t.Fatalf("a %s hook copy kept counter %d", row.name, first)
 			}
 			f.requireStateCopy(t, second, "state-one")
-			if row.hold != noHolder {
+			switch {
+			case row.hold == 0:
+				// No sharing at all: the held old copy cannot be deleted and stays.
 				if _, err := os.Lstat(current); err != nil {
 					t.Fatalf("the held old copy should stay while it is held: %v", err)
 				}
-			} else if _, err := os.Lstat(current); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("the replaced copy stayed: %v", err)
+			case row.hold == noHolder:
+				if _, err := os.Lstat(current); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("the replaced copy stayed: %v", err)
+				}
 			}
+			// A holder that shares delete lets the old copy go (it stays only
+			// as a delete-pending name until the holder closes), so nothing is
+			// asserted about it.
 			// The pass after that finds nothing to do.
 			if third := f.run(t, func() error { return nil }); third != second {
 				t.Fatalf("the republished copy moved the counter from %d to %d", second, third)
