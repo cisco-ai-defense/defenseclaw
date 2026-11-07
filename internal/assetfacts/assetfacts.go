@@ -45,10 +45,20 @@ import (
 const Header = "X-DefenseClaw-Asset-Facts"
 
 const (
-	// maxHeaderBytes bounds the encoded facts. The gateway reads request
-	// headers up to the net/http default of 1 MiB; this leaves room for the
-	// others.
-	maxHeaderBytes = 960 << 10
+	// maxHeaderBytes bounds the encoded facts. It holds the ordinary text of
+	// the most candidate owners one plugin tool name can have (23, each up to
+	// the per-file and escaped-text caps of content.go) even when the text
+	// does not shrink, together with the most an MCP definition adds. The
+	// gateway servers that take the hook request read headers up to
+	// MaxRequestHeaderBytes, which leaves room for the other headers. Their
+	// worst case is about 2.4 MiB of text (random printable characters deflate
+	// to four fifths). The argument digests of a Codex project definition (up
+	// to 0.7 MiB) come with a request that selects no plugin.
+	maxHeaderBytes = 3 << 20
+	// MaxRequestHeaderBytes is the request header limit of a gateway server
+	// that takes a hook request: the largest Header value plus room for the
+	// other headers (the net/http default of 1 MiB cannot carry it).
+	MaxRequestHeaderBytes = maxHeaderBytes + 64<<10
 	// compressedPrefix marks a header value whose JSON is deflated before
 	// the base64 step ('.' is not in the base64url alphabet, so it cannot be
 	// mistaken for the plain form). Only a large value is deflated: the
@@ -192,10 +202,10 @@ func (p *MCPPins) TailBytes() []byte {
 	return raw[:min(len(raw)/pinTailDigestLen, maxTailPins)*pinTailDigestLen]
 }
 
-// TailDigest is the digest at position i of the tail (the argument at
-// position len(Args)+i), or nil when the claim holds none there.
-func (p *MCPPins) TailDigest(i int) []byte {
-	tail := p.TailBytes()
+// TailDigestAt is the digest at position i of tail (TailBytes, decoded once
+// by the caller: the argument at position len(Args)+i), or nil when the claim
+// holds none there.
+func TailDigestAt(tail []byte, i int) []byte {
 	if i < 0 || (i+1)*pinTailDigestLen > len(tail) {
 		return nil
 	}
@@ -654,12 +664,10 @@ func EnvSkillRoots(connector, home, cwd string, launch func() string) []string {
 // launchWorkspaces are the folders a relative COPILOT_SKILLS_DIRS entry can
 // belong to: Copilot resolves it against the one folder it runs in, never
 // against the folders between it and the repository root. launch is that
-// folder as the hook read it from the agent process. When it is the event
-// cwd or a folder above it, it is the only root: a skill of another folder is
-// not loaded, so judging it would block the selected one. When it is anywhere
-// else the event does not tell where Copilot runs, so the agent folder is
-// still a root (a protected skill there must not be left unjudged) and the
-// guesses below follow it.
+// folder as the hook read it from the agent process. When the hook knows it,
+// it is the only root, whatever the event cwd is (below it, above it, beside
+// it or absent): a skill of any other folder is not loaded, so judging it
+// would decide the selection on a copy the agent never reads.
 // Without it the hook sees only its event cwd, which is that folder or a
 // folder below it, so the roots are cwd itself and the outermost folder above
 // it that is a repository root, or home when no repository is found below
@@ -667,22 +675,15 @@ func EnvSkillRoots(connector, home, cwd string, launch func() string) []string {
 // can neither be judged in place of the selected one nor hide it behind a
 // nested repository or the home folder.
 func launchWorkspaces(home, cwd, launch string) []string {
+	if launch = strings.TrimSpace(launch); filepath.IsAbs(launch) {
+		return []string{filepath.Clean(launch)}
+	}
 	dir := strings.TrimSpace(cwd)
 	if !filepath.IsAbs(dir) {
 		return nil
 	}
 	dir = filepath.Clean(dir)
-	var out []string
-	if launch = strings.TrimSpace(launch); filepath.IsAbs(launch) {
-		launch = filepath.Clean(launch)
-		if rel, err := filepath.Rel(launch, dir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return []string{launch}
-		}
-		out = append(out, launch)
-	}
-	if !slices.Contains(out, dir) {
-		out = append(out, dir)
-	}
+	out := []string{dir}
 	home = filepath.Clean(strings.TrimSpace(home))
 	outer, homeAbove := "", ""
 	for level := 0; level < maxProjectLevels; level++ {
@@ -702,7 +703,7 @@ func launchWorkspaces(home, cwd, launch string) []string {
 	if outer == "" {
 		outer = homeAbove
 	}
-	if outer != "" && !slices.Contains(out, outer) {
+	if outer != "" && outer != out[0] {
 		out = append(out, outer)
 	}
 	return out

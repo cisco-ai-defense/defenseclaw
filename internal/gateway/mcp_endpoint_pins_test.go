@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -189,5 +190,42 @@ func TestProjectMCPDenyDifferingDeepInALongArgumentListIsRuledOut(t *testing.T) 
 				t.Errorf("exact denied twin allowed: matched=%v decision=%+v", matched, decision)
 			}
 		})
+	}
+}
+
+// The tail of the claim is decoded once for a rule, not once per argument of
+// its prefix: an ordinary 10,242-argument server against a deny that differs
+// in its last argument is ruled out in a few milliseconds (decoding the whole
+// tail at every argument took most of a second).
+func TestProjectMCPDeepArgumentDenyDecodesTheTailOnce(t *testing.T) {
+	args := make([]string, 10242)
+	for i := range args {
+		args[i] = fmt.Sprintf("--arg-%d", i)
+	}
+	facts, ok := assetfacts.Decode(assetfacts.Encode(assetfacts.Facts{MCP: &assetfacts.MCPServer{
+		Name: "notes", Command: "/opt/tools/node", Args: args, ProjectScope: true, Digest: strings.Repeat("ab", 32)}}))
+	if !ok || facts.MCP == nil || facts.MCP.Pins == nil {
+		t.Fatalf("no pins: %+v", facts.MCP)
+	}
+	prefix := append([]string(nil), args...)
+	prefix[len(prefix)-1] = "--different"
+	rules := []config.AssetPolicyRule{{Name: "notes", Command: "node", ArgsPrefix: prefix}}
+	// One decode of the tail is the unit; decoding it at each of the 8,194
+	// arguments past the full digests costs thousands of them.
+	start := time.Now()
+	facts.MCP.Pins.TailBytes()
+	decode := time.Since(start)
+	start = time.Now()
+	may := deniedRulesMayPinClaim(rules, "codex", "notes", facts.MCP.Pins)
+	elapsed := time.Since(start)
+	if may {
+		t.Error("a deny that differs in the last argument may match")
+	}
+	if limit := max(1000*decode, 30*time.Millisecond); elapsed > limit {
+		t.Errorf("rule comparison took %v (one tail decode: %v), want under %v", elapsed, decode, limit)
+	}
+	rules[0].ArgsPrefix[len(prefix)-1] = args[len(prefix)-1]
+	if !deniedRulesMayPinClaim(rules, "codex", "notes", facts.MCP.Pins) {
+		t.Error("the exact deny may not match")
 	}
 }

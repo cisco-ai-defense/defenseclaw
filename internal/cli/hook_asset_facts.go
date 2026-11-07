@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
@@ -240,8 +241,30 @@ func hookInvokedPluginNames(claudeDir, toolName string, toolInput map[string]any
 var hookAgentCommandLine = agentprocess.CommandLine
 
 // hookAgentWorkingDirectory reads the folder the agent process runs in, or ""
-// when it cannot be read; tests replace it.
-var hookAgentWorkingDirectory = agentprocess.WorkingDirectory
+// when it cannot be read; tests replace it. The read walks the process table,
+// so it is made once for a parent process: a request asks for it from every
+// skill root list it builds, and the answer cannot change while the agent that
+// started this hook is the same process.
+var hookAgentWorkingDirectory = cachedPerParent(agentprocess.WorkingDirectory)
+
+// cachedPerParent returns read, called again only when the parent process of
+// this one is another process than at the last call.
+func cachedPerParent(read func() string) func() string {
+	var (
+		mu     sync.Mutex
+		parent int
+		value  string
+		have   bool
+	)
+	return func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		if now := os.Getppid(); !have || now != parent {
+			parent, value, have = now, read(), true
+		}
+		return value
+	}
+}
 
 const unprovenMCPSource = "unproven"
 
