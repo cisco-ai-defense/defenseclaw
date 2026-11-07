@@ -33637,7 +33637,7 @@ function Get-DefenseClawHandEditApprovedConfigSource {
     if (Test-DefenseClawSignedBundleStoreHoldsVersions -Layout $Layout) {
         throw ('Repair cannot prove that the recorded approved config source is current; ' +
             'run ' + (Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout) + ' ' +
-            'on a signed-bundle deployment, or Setup /ensure CONFIG=<approved absolute config path> otherwise')
+            'on a signed-bundle deployment, or ' + (Format-DefenseClawSetupAction -Action '/ensure CONFIG=<approved absolute config path>') + ' otherwise')
     }
     return (Get-DefenseClawApprovedPolicySource -Layout $Layout -Metadata $Metadata -Name config)
 }

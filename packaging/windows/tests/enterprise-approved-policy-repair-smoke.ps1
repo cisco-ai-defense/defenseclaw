@@ -402,7 +402,7 @@ try {
     catch { $refusal = $_.Exception.Message }
     $script:MetadataForPreflight = $noRecord
     Restore-DefenseClawApprovedConfigOverHandEdit -Layout $script:Layout -GatewayServiceName 'gateway'
-    if ($refusal -notmatch 'Setup /ensure' -or $script:Copies -ne $copiesBefore -or
+    if ($refusal -notlike ("*" + (Format-DefenseClawSetupAction -Action '/ensure CONFIG=<approved absolute path>') + "*") -or $script:Copies -ne $copiesBefore -or
         $script:ResilienceReasons.Count -ne 1 -or
         $script:ResilienceReasons[0] -notmatch 'kept the restored config') {
         throw 'a hand edit without a recorded approved source was not left as it was'
