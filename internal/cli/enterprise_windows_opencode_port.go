@@ -17,7 +17,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 )
@@ -39,7 +38,7 @@ type windowsOpenCodePortWarningRecord struct {
 }
 
 func windowsOpenCodePortWarningsPath() (string, error) {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return "", err
 	}
@@ -117,7 +116,7 @@ func readWindowsOpenCodePortWarnings() ([]windowsOpenCodePortWarning, error) {
 }
 
 func windowsOpenCodePortRecordPath() (string, error) {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return "", err
 	}
