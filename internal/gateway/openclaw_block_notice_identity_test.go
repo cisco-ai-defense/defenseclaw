@@ -41,16 +41,16 @@ func TestGAP0644OnlyTheBlockedCallResultTakesTheNotice(t *testing.T) {
 		// Providers whose results carry no call id: the tool name decides.
 		{"ollama other tool",
 			`{"messages":[{"role":"tool","tool_name":"echo","content":"ordinary echo REF"}]}`,
-			`{"messages":[{"role":"tool","tool_name":"exec","content":"blocked (ref REF)"}]}`},
+			`{"messages":[{"role":"tool","tool_name":"exec","content":"DefenseClaw: blocked (ref REF)"}]}`},
 		{"ollama no tool name",
 			`{"messages":[{"role":"tool","content":"ordinary echo REF"}]}`,
-			`{"messages":[{"role":"tool","tool_name":"exec","content":"blocked (ref REF)"}]}`},
+			`{"messages":[{"role":"tool","tool_name":"exec","content":"DefenseClaw: blocked (ref REF)"}]}`},
 		{"gemini other tool",
 			`{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"echo","response":{"text":"ordinary echo REF"}}}]}]}`,
-			`{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"exec","response":{"error":"blocked (ref REF)"}}}]}]}`},
+			`{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"exec","response":{"error":"DefenseClaw: blocked (ref REF)"}}}]}]}`},
 		{"gemini other call id",
 			`{"contents":[{"role":"user","parts":[{"functionResponse":{"id":"other-call","name":"exec","response":{"text":"ordinary echo REF"}}}]}]}`,
-			`{"contents":[{"role":"user","parts":[{"functionResponse":{"id":"call_blk1","name":"exec","response":{"error":"blocked (ref REF)"}}}]}]}`},
+			`{"contents":[{"role":"user","parts":[{"functionResponse":{"id":"call_blk1","name":"exec","response":{"error":"DefenseClaw: blocked (ref REF)"}}}]}]}`},
 		{"chat result without any id",
 			`{"messages":[{"role":"tool","content":"ordinary echo REF"}]}`,
 			`{"messages":[{"role":"tool","tool_call_id":"call_blk1","content":"blocked (ref REF)"}]}`},
@@ -73,9 +73,9 @@ func TestGAP0644OnlyTheBlockedCallResultTakesTheNotice(t *testing.T) {
 	}
 }
 
-// The ids a provider adapter may send back for the blocked call still tie the
-// result to it, and a notice with no call id never ties to a result that
-// names an id.
+// The ids a provider adapter may send back for the blocked call that depend on
+// the id alone still tie a result that only repeats the reference to it; the
+// ids that do not are decided by the block text.
 func TestGAP0644ProviderRewritesOfTheCallIDStillMatch(t *testing.T) {
 	chat := func(id, ref string) string {
 		return `{"messages":[{"role":"tool","tool_call_id":"` + id + `","content":"blocked (ref ` + ref + `)"}]}`
@@ -88,7 +88,7 @@ func TestGAP0644ProviderRewritesOfTheCallIDStillMatch(t *testing.T) {
 		{"call.abc|fc_1", "call_abc", true},       // characters outside the set replaced
 		{"call.abc", "callabc", true},             // letters and digits only
 		{"toolu_01ABCDEFGHIJ", "toolu01A", false}, // not a form of the id
-		{"abcdefghijklmnop", "abcdefghi", true},   // nine-character form
+		{"abcdefghijklmnop", "abcdefghi", false},  // nine-character form: only the block text ties it (see the replay test)
 		{"call_abc", "call_abd", false},           // a different call
 		{"call_abc", "call_abc2", false},          // a longer look-alike
 		{"", "call_abc", false},                   // no recorded id

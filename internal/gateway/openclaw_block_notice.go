@@ -40,10 +40,12 @@ import (
 // so no text a user or the model wrote can take another call notice, and an
 // allowed call has none. The notice also records the call id and tool name of
 // the block, and the result that carries the reference must be the result of
-// that call: its call id equals the recorded id (or a provider rewrite of
-// it), or, for a provider whose results carry no call id, its tool name equals
-// the recorded tool. An ordinary result that echoes the reference, another
-// call's or another tool's, takes nothing. The session is not part of the
+// that call: its call id equals the recorded id (or a rewrite of it that
+// depends on the id alone), or it holds the block text itself (OpenClaw replay
+// rewrites call ids in ways that cannot be predicted), and for a provider
+// whose results carry no call id its tool name equals the recorded tool. An
+// ordinary result that merely echoes the reference, from another call or
+// another tool, takes nothing. The session is not part of the
 // match: it can name another session when two run at once. A notice is taken
 // by one request, so a block is shown once. A reply with no
 // text to lead with, or in a format that is not rewritten, gives the notice

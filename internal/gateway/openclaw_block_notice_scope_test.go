@@ -142,15 +142,15 @@ func TestGAP0644ReferenceOutsideAToolResultTakesNothing(t *testing.T) {
 // response).
 func TestGAP0644ReferenceInsideEveryResultShapeTakesTheNotice(t *testing.T) {
 	shapes := []struct{ name, body string }{
-		{"chat string", `{"messages":[{"role":"tool","tool_call_id":"call_blk1","content":"blocked (ref REF)"}]}`},
-		{"chat parts", `{"messages":[{"role":"tool","tool_call_id":"call_blk1","content":[{"type":"text","text":"blocked (ref REF)"}]}]}`},
-		{"chat legacy function role", `{"messages":[{"role":"function","name":"exec","content":"blocked (ref REF)"}]}`},
-		{"responses output string", `{"input":[{"type":"function_call_output","call_id":"call_blk1","output":"blocked (ref REF)"}]}`},
-		{"responses output parts", `{"input":[{"type":"function_call_output","call_id":"call_blk1","output":[{"type":"input_text","text":"blocked (ref REF)"}]}]}`},
-		{"anthropic parts", `{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_blk1","content":[{"type":"text","text":"blocked (ref REF)"}]}]}]}`},
-		{"bedrock", `{"messages":[{"role":"user","content":[{"toolResult":{"toolUseId":"call_blk1","content":[{"text":"blocked (ref REF)"}]}}]}]}`},
-		{"gemini structured", `{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"exec","response":{"error":{"message":"blocked (ref REF)"}}}}]}]}`},
-		{"ollama", `{"messages":[{"role":"tool","tool_name":"exec","content":"blocked (ref REF)"}]}`},
+		{"chat string", `{"messages":[{"role":"tool","tool_call_id":"call_blk1","content":"DefenseClaw: blocked (ref REF)"}]}`},
+		{"chat parts", `{"messages":[{"role":"tool","tool_call_id":"call_blk1","content":[{"type":"text","text":"DefenseClaw: blocked (ref REF)"}]}]}`},
+		{"chat legacy function role", `{"messages":[{"role":"function","name":"exec","content":"DefenseClaw: blocked (ref REF)"}]}`},
+		{"responses output string", `{"input":[{"type":"function_call_output","call_id":"call_blk1","output":"DefenseClaw: blocked (ref REF)"}]}`},
+		{"responses output parts", `{"input":[{"type":"function_call_output","call_id":"call_blk1","output":[{"type":"input_text","text":"DefenseClaw: blocked (ref REF)"}]}]}`},
+		{"anthropic parts", `{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_blk1","content":[{"type":"text","text":"DefenseClaw: blocked (ref REF)"}]}]}]}`},
+		{"bedrock", `{"messages":[{"role":"user","content":[{"toolResult":{"toolUseId":"call_blk1","content":[{"text":"DefenseClaw: blocked (ref REF)"}]}}]}]}`},
+		{"gemini structured", `{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"exec","response":{"error":{"message":"DefenseClaw: blocked (ref REF)"}}}}]}]}`},
+		{"ollama", `{"messages":[{"role":"tool","tool_name":"exec","content":"DefenseClaw: blocked (ref REF)"}]}`},
 	}
 	for _, c := range shapes {
 		resetOpenClawBlockNotices(t)
@@ -314,17 +314,17 @@ func gzipText(t *testing.T, s string) string {
 func TestGAP0644NoticeLeadsTheReplyForGeminiOllamaBedrockStreamAndGzip(t *testing.T) {
 	line := noticeTestLine()
 	want := line + "\n\n" + "I could not run that."
-	gemReq := `{"contents":[{"role":"user","parts":[{"text":"go"}]},{"role":"user","parts":[{"functionResponse":{"name":"exec","response":{"error":"blocked (ref REF)"}}}]}]}`
+	gemReq := `{"contents":[{"role":"user","parts":[{"text":"go"}]},{"role":"user","parts":[{"functionResponse":{"name":"exec","response":{"error":"DefenseClaw: blocked (ref REF)"}}}]}]}`
 	gemJSON := `{"candidates":[{"content":{"role":"model","parts":[{"text":"private thought","thought":true},{"text":"I could not run that."}]}}]}`
 	gemSSE := "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"I could not \"}]}}]}\n\n" +
 		"data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"run that.\"}]},\"finishReason\":\"STOP\"}]}\n\n"
-	ollReq := `{"model":"m","messages":[{"role":"user","content":"go"},{"role":"tool","tool_name":"exec","content":"blocked (ref REF)"}]}`
+	ollReq := `{"model":"m","messages":[{"role":"user","content":"go"},{"role":"tool","tool_name":"exec","content":"DefenseClaw: blocked (ref REF)"}]}`
 	ollJSON := `{"model":"m","message":{"role":"assistant","content":"I could not run that."},"done":true}`
 	ollND := "{\"model\":\"m\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":false}\n" +
 		"{\"model\":\"m\",\"message\":{\"role\":\"assistant\",\"content\":\"I could not \"},\"done\":false}\n" +
 		"{\"model\":\"m\",\"message\":{\"role\":\"assistant\",\"content\":\"run that.\"},\"done\":false}\n" +
 		"{\"model\":\"m\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true}\n"
-	bedReq := `{"messages":[{"role":"user","content":[{"toolResult":{"toolUseId":"call_blk1","content":[{"text":"blocked (ref REF)"}]}}]}]}`
+	bedReq := `{"messages":[{"role":"user","content":[{"toolResult":{"toolUseId":"call_blk1","content":[{"text":"DefenseClaw: blocked (ref REF)"}]}}]}]}`
 	chatReq := noticeChatReq("REF")
 	chatJSON := `{"choices":[{"index":0,"message":{"role":"assistant","content":"I could not run that."}}]}`
 
