@@ -1619,9 +1619,9 @@ const r105Rows: DocRow[] = [
   // GAP-0656 (rel-1-0-6 r109): the upgrade-window measurement and the recovery from a refused hook replacement.
   { gap: "GAP-0656", page: "enterprise/windows.mdx", section: "Upgrades and downgrades", has: ["They made 222,039 hook starts and none failed.", "That hit about 3% of upgrades.", "No start storm ran during `/repair` or the purge", "not real agent calls by a standard user", "(the length of that hold was not measured in place; the hit rate is the measure)"], lacks: ["for about 23 ms", "within one check"] },
   // GAP-0755 (rel-1-0-6 r109): the bounds of the guardian's close of another program's handle on the hook.
-  { gap: "GAP-0755", page: "enterprise/windows.mdx", section: "Upgrades and downgrades", has: ["closing that one handle in the process that owns it", "It waits for the second check.", "It never closes a handle in a protected process, in a process that runs as LocalSystem, LocalService, NetworkService or another service account, or in session 0.", "writes a HIGH `connector-hook-tampered` audit row", "A holder that takes the handle again is closed again after 10 seconds, then 20, doubling to 5 minutes", "Secure Client is unchanged"] },
+  { gap: "GAP-0755", page: "enterprise/windows.mdx", section: "Upgrades and downgrades", has: ["closing that one handle in the process that owns it", "It waits for the second check.", "It never closes a handle in a protected process, in a process that runs as LocalSystem, LocalService, NetworkService or another service account, or in session 0.", "writes a HIGH `connector-hook-tampered` audit row", "A holder that takes the handle again is closed again after 10 seconds, then 20, doubling to 5 minutes", "Secure Client is unchanged", "if a user's process has several separate handles on the hook the guardian can close one that was not the cause (a read handle that shares deletion) before it reaches the one that was", "closes no more than it needs to start the hook", "such as a scanner's or a backup's read shorter than about 5 seconds, is not closed", "with a handle of the same user (account and session) on both, whatever the handle value or the process", "That handle does not stop the guardian from closing a signed-in user's handles", "`closed` set to `false`", "so a gateway that is down delays the row, never the close", "A user who keeps 24 such calls blocked"], lacks: ["with Defender on", "is never closed", "Any account may open the hook"] },
   { gap: "GAP-0656", page: "enterprise/troubleshooting.mdx", has: ["#### Setup refuses to replace the installed hook", "Do not copy `defenseclaw-hook.exe` out of the release zip by hand"] },
-  { gap: "GAP-0755", page: "enterprise/troubleshooting.mdx", has: ["#### A program holds the hook open and no agent can start it", "It never closes a handle in a protected process, in a service account's process (LocalSystem, LocalService, NetworkService and the others) or in session 0", "closes handles only in the processes of a signed-in user"] },
+  { gap: "GAP-0755", page: "enterprise/troubleshooting.mdx", has: ["#### A program holds the hook open and no agent can start it", "It never closes a handle in a protected process, in a service account's process (LocalSystem, LocalService, NetworkService and the others) or in session 0", "closes handles only in the processes of a signed-in user", "has the hook open and may be what refuses its starts", "if a user's process has several separate handles on the hook the guardian can close one that was not the cause before it reaches the one that was", "goes on to close a signed-in user's handles", "has `closed` set to `false`"], lacks: ["holds it with no sharing", "Any account may open the hook"] },
   { gap: "GAP-2049", page: "policies/deterministic-detection.mdx", section: "Action-mode rule details", has: ["The permissive pack keeps it at HIGH and reports it."] },
   { gap: "GAP-1519", page: "connectors/index.mdx", section: "Pick yours", has: ["| [GitHub Copilot CLI](/docs/connectors/copilot) | Hook | Tool calls | No: a confirmation blocks |", "Where an agent cannot ask, a confirm verdict becomes an alert with the original action kept; Copilot CLI blocks it instead."], lacks: ["| Tool calls | `preToolUse` |"] },
   { gap: "GAP-1537", page: "enterprise/mdm/intune-linux.mdx", has: ["The wrapper itself makes up to three attempts on exit `75` (busy): the first run and two retries, 10 seconds apart."], lacks: ["retries exit `75` (busy) up to three times"] },
@@ -2436,6 +2436,22 @@ describe('1.0.5 docs rows', () => {
       for (const phrase of row.lacks ?? []) assert.ok(!text.includes(phrase), `${row.page} still says: ${phrase}`);
     });
   }
+});
+
+// GAP-0755 (rel-1-0-6 r109): the release note carries the bounds of the guardian's handle close, the collateral caveat and the audit-row delivery.
+describe('the CHANGELOG states the guardian hook-handle close (GAP-0755)', () => {
+  it('names the collateral caveat, the rule for a brief read and the row delivery', () => {
+    const changelog = repoText('CHANGELOG.md');
+    for (const phrase of [
+      "when a user's process has several separate handles on the hook the guardian can close one that was not the cause before it reaches the one that was",
+      'a read shorter than about 5 seconds is not closed',
+      'with a handle of the same user (account and session) on both, whatever the handle value or process',
+      'so a gateway that is down delays the row and never the close',
+      '(`closed` false) and does not stop it closing a user\'s handle',
+      'A hook that a program holds open',
+    ]) assert.ok(changelog.includes(phrase), `CHANGELOG lacks: ${phrase}`);
+    assert.ok(!changelog.includes('A hook that any account holds open'), 'CHANGELOG still says any account can hold the hook');
+  });
 });
 
 // GH #1101 (p0 GAP-0677, GAP-0765): the limit messages the configuration pages quote.
