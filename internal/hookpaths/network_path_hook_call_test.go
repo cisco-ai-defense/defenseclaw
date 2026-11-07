@@ -15,12 +15,12 @@ import (
 	"time"
 )
 
-// hookCallShares is two shares that do not answer and one that answers in
+// hookCallShares is three shares that do not answer and one that answers in
 // 100 ms, below the 750 ms answer wait. The answering share holds an
 // ordinary sourced script and one that writes the local keys file.
 type hookCallShares struct {
-	home, dead, dead2, live, keys string
-	deadAsked                     chan struct{}
+	home, dead, dead2, dead3, live, keys string
+	deadAsked                            chan struct{}
 }
 
 func newHookCallShares(t *testing.T) hookCallShares {
@@ -28,10 +28,11 @@ func newHookCallShares(t *testing.T) hookCallShares {
 	home := t.TempDir()
 	s := hookCallShares{
 		home: home, dead: filepath.Join(home, "dead-share"), dead2: filepath.Join(home, "dead-share-2"),
-		live: filepath.Join(home, "live-share"),
-		keys: filepath.Join(home, ".ssh", "authorized_keys"), deadAsked: make(chan struct{}),
+		dead3: filepath.Join(home, "dead-share-3"),
+		live:  filepath.Join(home, "live-share"),
+		keys:  filepath.Join(home, ".ssh", "authorized_keys"), deadAsked: make(chan struct{}),
 	}
-	for _, dir := range []string{s.dead, s.dead2, s.live, filepath.Dir(s.keys)} {
+	for _, dir := range []string{s.dead, s.dead2, s.dead3, s.live, filepath.Dir(s.keys)} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -57,7 +58,7 @@ func newHookCallShares(t *testing.T) hookCallShares {
 		time.Sleep(100 * time.Millisecond)
 	})
 	networkShareRootOf = func(path string) string {
-		for _, root := range []string{s.dead, s.dead2, s.live} {
+		for _, root := range []string{s.dead, s.dead2, s.dead3, s.live} {
 			if path == root || strings.HasPrefix(path, root+string(filepath.Separator)) {
 				return root
 			}
@@ -245,4 +246,69 @@ func TestOneHookCallWaitIsBoundedAcrossDeadShares(t *testing.T) {
 	if took := time.Since(start); took > bound {
 		t.Fatalf("%d shares that do not answer held the call %v, want at most %v", shares, took, bound)
 	}
+}
+
+// rel-1-0-6:GAP-0482 (review 7): a call that spent its share budget on
+// shares that do not answer cannot read a script on the next share. The
+// body it could not read is recorded on the call, so the gateway never takes
+// it for a body that writes nothing, whatever the number of shares before.
+func TestOneHookCallBudgetCutOnAScriptBodyIsRecorded(t *testing.T) {
+	s := newHookCallShares(t)
+	defer HookCall()()
+	for _, dead := range []string{s.dead, s.dead2, s.dead3} {
+		if !networkPathUnanswered(filepath.Join(dead, "notes.txt")) {
+			t.Fatal("the share that does not answer answered")
+		}
+	}
+	if ShareBodyUnread() {
+		t.Fatal("a body was recorded unread before any body was asked")
+	}
+	if _, read := readIndirectSource("writer.sh", s.live); read {
+		t.Fatal("the script on the share asked after the budget was read")
+	}
+	if !ShareBodyUnread() {
+		t.Error("the body the budget kept unread was not recorded")
+	}
+}
+
+// The benign twins: nothing is recorded when the script is read, when only a
+// path (no body) was cut by the budget, when the share is slower than its own
+// wait with budget to spare, and outside a hook call.
+func TestOneHookCallRecordsOnlyABodyTheBudgetCut(t *testing.T) {
+	t.Run("answered body", func(t *testing.T) {
+		s := newHookCallShares(t)
+		defer HookCall()()
+		for _, dead := range []string{s.dead, s.dead2} {
+			networkPathUnanswered(filepath.Join(dead, "notes.txt"))
+		}
+		if _, read := readIndirectSource("safe.sh", s.live); !read || ShareBodyUnread() {
+			t.Errorf("the answering share: read %v, unread recorded %v", read, ShareBodyUnread())
+		}
+	})
+	t.Run("path read cut by the budget", func(t *testing.T) {
+		s := newHookCallShares(t)
+		defer HookCall()()
+		for _, dead := range []string{s.dead, s.dead2, s.dead3} {
+			networkPathUnanswered(filepath.Join(dead, "notes.txt"))
+		}
+		if !networkPathUnanswered(filepath.Join(s.live, "notes.txt")) || ShareBodyUnread() {
+			t.Errorf("a path read recorded an unread body: %v", ShareBodyUnread())
+		}
+	})
+	t.Run("lone share that does not answer", func(t *testing.T) {
+		s := newHookCallShares(t)
+		defer HookCall()()
+		if _, read := readIndirectSource("writer.sh", s.dead); read || ShareBodyUnread() {
+			t.Errorf("a lone share: read %v, unread recorded %v", read, ShareBodyUnread())
+		}
+	})
+	t.Run("outside a hook call", func(t *testing.T) {
+		s := newHookCallShares(t)
+		for _, dead := range []string{s.dead, s.dead2, s.dead3} {
+			networkPathUnanswered(filepath.Join(dead, "notes.txt"))
+		}
+		if _, read := readIndirectSource("safe.sh", s.live); !read || ShareBodyUnread() {
+			t.Errorf("outside a call: read %v, unread recorded %v", read, ShareBodyUnread())
+		}
+	})
 }
