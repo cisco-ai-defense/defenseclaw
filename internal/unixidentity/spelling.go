@@ -71,8 +71,8 @@ func LookupAccountSpelling(r Resolver, name string, facts func(uid int) (useride
 var LocalSpellingAccounts = LocalDatabaseAccounts
 
 // LookupAdminAccountSpelling is LookupAccountSpelling for an account an
-// administrator or a user names to profile-explain, policy show|verify or a
-// discovery filter, which also takes .\name, the spelling Windows tools and
+// administrator or a user names to profile-explain or policy show|verify,
+// which also takes .\name, the spelling Windows tools and
 // users entries print for an account of this computer (GAP-0759). It names
 // the local account of that name, never a directory account of the same
 // name, and returns the account its uid resolves to, so the spelling and the
@@ -94,13 +94,18 @@ func LookupAdminAccountSpelling(r Resolver, name string, facts func(uid int) (us
 		return Account{}, err
 	}
 	uid, ok := accounts[rest]
-	if !ok && runtime.GOOS == "darwin" { // Open Directory names are case-insensitive
+	if !ok {
+		// A case variant names the account only when exactly one local
+		// account has that name, as the users entry matcher takes .\name on
+		// every platform; an exact name always wins, and two names that
+		// differ only in case name nothing.
+		matches := 0
 		for candidate, id := range accounts {
 			if useridentity.EqualFold(candidate, rest) {
-				uid, ok = id, true
-				break
+				uid, matches = id, matches+1
 			}
 		}
+		ok = matches == 1
 	}
 	if !ok {
 		return Account{}, ErrNotFound
