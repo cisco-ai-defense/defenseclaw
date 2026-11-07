@@ -13092,6 +13092,11 @@ function Set-DefenseClawManagedAcls {
         }
     }
     Set-DefenseClawPathAcl -Path $Layout.RuntimeDirectory -Kind RuntimeDirectory -GatewayServiceSID $gatewaySID
+    foreach ($lockFile in @(Get-DefenseClawLazyLockFiles -Layout $Layout)) {
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $lockFile.Path -PathType Leaf) {
+            Set-DefenseClawPathAcl -Path $lockFile.Path -Kind $lockFile.Kind -GatewayServiceSID $gatewaySID
+        }
+    }
     $runtimeEnv = [IO.Path]::Combine([string]$Layout.RuntimeDirectory, '.env')
     if ((Test-DefenseClawStandaloneProfile) -and
         (Microsoft.PowerShell.Management\Test-Path -LiteralPath $runtimeEnv -PathType Leaf)) {
@@ -29312,6 +29317,34 @@ function Restore-DefenseClawCoworkCreatedDirectories {
     }
 }
 
+function Get-DefenseClawLazyLockFiles {
+    <#
+        The product-owned lock files that are created lazily after Setup and
+        sit inside the protected tree: the config writer's lock beside
+        config.yaml, and the ACP credential and enrollment locks in the
+        runtime directory. Each is stamped by repair and judged by verify
+        like the file it guards, so an entry an untrusted account added to
+        one is removed and reported (GAP-0766). Mirrors
+        managed.ManagedInstallLayout and acp.EnterpriseLockFilePaths.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $acpDirectory = Microsoft.PowerShell.Management\Join-Path ([string]$Layout.RuntimeDirectory) 'acp'
+    return @(
+        [pscustomobject]@{
+            Path = (Microsoft.PowerShell.Management\Join-Path ([string]$Layout.ConfigDirectory) 'config.yaml.lock')
+            Kind = 'ConfigFile'
+        },
+        [pscustomobject]@{
+            Path = (Microsoft.PowerShell.Management\Join-Path $acpDirectory '.enterprise-credentials.lock')
+            Kind = 'RuntimeFile'
+        },
+        [pscustomobject]@{
+            Path = (Microsoft.PowerShell.Management\Join-Path $acpDirectory '.enterprise-enrollment.lock')
+            Kind = 'RuntimeFile'
+        }
+    )
+}
+
 function Get-DefenseClawConfigSidecarPaths {
     <#
         The files the Go config step writes beside config.yaml inside the
@@ -32625,6 +32658,27 @@ function Assert-DefenseClawEnterpriseDeployment {
             -RequiredRights $adminRights `
             -RejectUntrustedRead `
             -SelfHealKind AdminFile `
+            -SelfHealGatewayServiceSID $gatewaySID
+    }
+    foreach ($lockFile in @(Get-DefenseClawLazyLockFiles -Layout $Layout)) {
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $lockFile.Path -PathType Leaf)) {
+            continue
+        }
+        if ($lockFile.Kind -ceq 'ConfigFile') {
+            $lockWriters = $adminWriters
+            $lockRights = $configRights
+        }
+        else {
+            $lockWriters = $runtimeWriters
+            $lockRights = $runtimeRights
+        }
+        Assert-DefenseClawPathAcl `
+            -Path $lockFile.Path `
+            -AllowedWriterSIDs $lockWriters `
+            -AllowedReaderSIDs $gatewayReaders `
+            -RequiredRights $lockRights `
+            -RejectUntrustedRead `
+            -SelfHealKind $lockFile.Kind `
             -SelfHealGatewayServiceSID $gatewaySID
     }
 

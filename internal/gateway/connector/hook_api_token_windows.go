@@ -697,19 +697,18 @@ func hookAPIWindowsSIDString(sid *windows.SID) string {
 	return sid.String()
 }
 
-// mkdirHookAPITokenDir creates the hooks directory. Under a managed
-// deployment that pins the gateway service it is created with the canonical
-// RuntimeDirectory descriptor, the one the Guardian keeps, so a fresh install
-// is already canonical and the Guardian logs no repair (GAP-0762). Otherwise
-// (a per-user install, or an unresolvable pin) it is an ordinary directory.
+// mkdirHookAPITokenDir creates the hooks directory, the one creator every
+// managed path uses (the hook token and the OTLP tokens). In the data
+// directory of a standalone managed deployment it is created with the
+// canonical RuntimeDirectory descriptor, the one the Guardian keeps, so a
+// fresh install is already canonical and the Guardian logs no repair
+// (GAP-0762); it fails, leaving nothing behind, when that descriptor cannot be
+// given. The Secure Client profile, a per-user install and any other folder
+// keep an ordinary directory.
 func mkdirHookAPITokenDir(hooksDir string) error {
-	account := strings.TrimSpace(os.Getenv(managed.WindowsServiceAccountEnv))
-	if account == "" || !managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
+	account, ok := managed.StandaloneManagedTreeAccount(hooksDir)
+	if !ok {
 		return os.Mkdir(hooksDir, 0o700)
 	}
-	err := managed.CreateCanonicalDirectory(hooksDir, managed.ObjectRuntimeDirectory, managed.CanonicalOptions{GatewayServiceAccount: account})
-	if errors.Is(err, managed.ErrCanonicalIdentityUnavailable) {
-		return os.Mkdir(hooksDir, 0o700)
-	}
-	return err
+	return managed.CreateCanonicalDirectory(hooksDir, managed.ObjectRuntimeDirectory, managed.CanonicalOptions{GatewayServiceAccount: account})
 }

@@ -215,6 +215,31 @@ func TestManagedDataPathsTargets(t *testing.T) {
 	}
 }
 
+// GAP-0766: the lock files the product creates lazily under the data
+// directory are repaired as runtime files, with their folder, so the Guardian
+// removes an entry an untrusted principal added.
+func TestManagedDataPathsLockFilesAreRepairTargets(t *testing.T) {
+	root := filepath.Join(string(filepath.Separator), "data")
+	locks := []string{
+		filepath.Join(root, "acp", ".enterprise-credentials.lock"),
+		filepath.Join(root, "acp", ".enterprise-enrollment.lock"),
+		"",
+	}
+	var got []string
+	for _, target := range (ManagedDataPaths{DataDir: root, LockFiles: locks}).targets() {
+		got = append(got, string(target.kind)+":"+target.path)
+	}
+	want := []string{
+		"RuntimeDirectory:" + root,
+		"RuntimeDirectory:" + filepath.Join(root, "acp"),
+		"RuntimeFile:" + locks[0],
+		"RuntimeFile:" + locks[1],
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("targets:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
 func TestReportCanonicalResultMarkersAndDedupe(t *testing.T) {
 	advisoryLogDedupe.reset()
 	t.Cleanup(advisoryLogDedupe.reset)

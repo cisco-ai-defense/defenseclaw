@@ -75,6 +75,10 @@ func (layout ManagedInstallLayout) targets() []managedDataTarget {
 		add(ObjectAdminDirectory, root, "logs", "guardian")
 		add(ObjectAdminDirectory, root, "logs", "cmid-broker")
 		addContent(ObjectConfigFile, root, "etc", "config.yaml")
+		// The config writer's lock sits beside the config and is created
+		// lazily; an untrusted write entry on it would let any account hold
+		// the lock (GAP-0766). Its bytes are never read, so it is not content.
+		add(ObjectConfigFile, root, "etc", "config.yaml.lock")
 		addContent(ObjectAdminFile, root, "hook-guardian", "targets.yaml")
 		for _, name := range []string{
 			"deployment.json",

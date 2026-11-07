@@ -154,6 +154,7 @@ func TestManagedInstallLayoutTargets(t *testing.T) {
 		"AdminDirectory:" + filepath.Join(state, "logs", "guardian"),
 		"AdminDirectory:" + filepath.Join(state, "logs", "cmid-broker"),
 		"ConfigFile:" + filepath.Join(state, "etc", "config.yaml"),
+		"ConfigFile:" + filepath.Join(state, "etc", "config.yaml.lock"),
 		"AdminFile:" + filepath.Join(state, "hook-guardian", "targets.yaml"),
 		"AdminFile:" + filepath.Join(state, "install", "deployment.json"),
 		"AdminFile:" + filepath.Join(state, "install", "agent-application-control-attestation.json"),
