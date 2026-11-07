@@ -1846,8 +1846,13 @@ func (a *APIServer) hookDecisionMeta(
 	req agentHookRequest,
 ) (llmEventMeta, string, bool) {
 	if req.ConnectorName == "opencode" && req.HookEventName == "defenseclaw.plugin.loaded" {
+		// A plugin load comes before any session, so it has no agent
+		// instance: it is a lifecycle event, and its connector audit row
+		// stays, rather than a hook decision that cannot name the instance
+		// (GAP-0577). A load that does carry an instance, and Secure Client,
+		// keep their decision.
 		cfg := a.decisionConfig(ctx)
-		if cfg == nil || (!cfg.SecureClientIntegration() && !managed.IsManagedEnterprise(cfg.DeploymentMode)) {
+		if (cfg == nil || !cfg.SecureClientIntegration()) && AgentIdentityFromContext(ctx).AgentInstanceID == "" {
 			return llmEventMeta{}, "", false
 		}
 	}
