@@ -219,9 +219,11 @@ func TestIdentityRefusalReadsWhateverTheRendererMakesOfIssuedValues(t *testing.T
 	}
 }
 
-// The command keeps the connector the refusal is about when the
-// configuration lists it without the build shipping it: explain without
-// --connector answers without the hook and inspect paths of that connector.
+// The command keeps the --connector argument of a connector the
+// configuration lists without the build shipping it: explain without it
+// answers without the hook and inspect paths of that connector. The value is
+// the placeholder, because the reason scrub is an allow-list and masks the
+// name of a configured connector, which must not be shown as written.
 func TestIdentityRefusalKeepsAConfiguredConnectorInTheCommand(t *testing.T) {
 	redaction.SetAgentReasonRedactionDisabled(false)
 	t.Cleanup(func() { redaction.SetAgentReasonRedactionDisabled(false) })
@@ -231,8 +233,8 @@ func TestIdentityRefusalKeepsAConfiguredConnectorInTheCommand(t *testing.T) {
 	}}}
 	subject := &profileSubject{UserID: "1006"}
 	reason := set.identityUncertaintyReason(subject, []string{"groups:unknown"}, name, "")
-	if !strings.Contains(reason, " --connector "+name) {
-		t.Errorf("refusal dropped its configured connector from the explain command: %q", reason)
+	if !strings.Contains(reason, " --connector "+profileConnectorPlaceholder+"`") || strings.Contains(reason, name) {
+		t.Errorf("refusal dropped its configured connector argument from the explain command: %q", reason)
 	}
 	for _, value := range []string{reason, sessionStartBlockedReason(reason)} {
 		for surface, got := range displaysOf(value) {
@@ -252,6 +254,7 @@ func TestIdentityRefusalKeepsAConfiguredConnectorInTheCommand(t *testing.T) {
 // A text pushed out of the bounded set reads as free-form, the safe side;
 // the newest stay trusted.
 func TestIdentityRefusalIssuedSetIsBounded(t *testing.T) {
+	resetIdentityRefusals(t)
 	first := issueIdentityRefusal("bounded set probe 0")
 	for i := 1; i <= identityRefusalIssuedMax; i++ {
 		issueIdentityRefusal(fmt.Sprintf("bounded set probe %d", i))
@@ -333,11 +336,12 @@ func TestSessionStartGateReleasesIdentityPins(t *testing.T) {
 	}
 }
 
-// A configured connector is named in the command whatever its length, and a
-// name shaped like a credential (a known key prefix, a key-shaped argument)
-// is replaced by a fixed placeholder: the refusal text is shown as written,
-// so it must not carry a value the secret detectors exist to mask, and its
-// fixed guidance stays readable.
+// A configured connector is named in the command only when the reason scrub
+// leaves its name as it is, whatever its length; any other name, a
+// credential-shaped one included (a known key prefix, a key-shaped argument,
+// a short secret-looking word), is replaced by a fixed placeholder: the
+// refusal text is shown as written, so it must not carry a value the display
+// scrub masks, and its fixed guidance stays readable.
 func TestIdentityRefusalConfiguredConnectorNameIsNotCredentialShaped(t *testing.T) {
 	redaction.SetAgentReasonRedactionDisabled(false)
 	t.Cleanup(func() { redaction.SetAgentReasonRedactionDisabled(false) })
@@ -347,13 +351,20 @@ func TestIdentityRefusalConfiguredConnectorNameIsNotCredentialShaped(t *testing.
 			Connectors: map[string]config.PerConnectorGuardrailConfig{name: {}},
 		}}}
 	}
-	for _, name := range []string{strings.Repeat("a", 65), strings.Repeat("plugin-", 20) + "x", "acme-plugin"} {
+	for _, name := range []string{"acme", strings.Repeat("a", 65), strings.Repeat("plugin-", 20) + "x", "acme-plugin"} {
 		if err := configured(name).base.Guardrail.Validate(); err != nil {
 			t.Fatalf("%q: not a valid configured connector: %v", name, err)
 		}
 		reason := configured(name).identityUncertaintyReason(subject, []string{"groups:unknown"}, name, "")
-		if !strings.Contains(reason, " --connector "+name) {
-			t.Errorf("valid configured connector %q left out of the command: %q", name, reason)
+		// The name is written only when the reason scrub leaves it as it
+		// is; the placeholder stands for it otherwise. Either way the
+		// refusal reads whole on every display.
+		want := profileConnectorPlaceholder
+		if redaction.ForSinkReason(name) == name {
+			want = name
+		}
+		if !strings.Contains(reason, " --connector "+want+"`") {
+			t.Errorf("configured connector %q: want --connector %s in %q", name, want, reason)
 		}
 		for surface, got := range displaysOf(reason) {
 			if got != reason {
@@ -364,6 +375,8 @@ func TestIdentityRefusalConfiguredConnectorNameIsNotCredentialShaped(t *testing.
 	for _, name := range []string{
 		"sk-live-0123456789abcdef", "AKIAIOSFODNN7EXAMPLE", "ghp_0123456789abcdefghijklmnopqrstuvwxyz",
 		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghijk", strings.Repeat("a", 64) + "1", "0123456789abcdef0123456789abcdef0123",
+		// Short names the detectors allow but the reason scrub masks.
+		"sk-test-123", "MySecretP4ssword", "sk-live-0123456789abc",
 	} {
 		reason := configured(name).identityUncertaintyReason(subject, []string{"groups:unknown"}, name, "")
 		if strings.Contains(reason, name) {
@@ -379,5 +392,118 @@ func TestIdentityRefusalConfiguredConnectorNameIsNotCredentialShaped(t *testing.
 				}
 			}
 		}
+	}
+}
+
+// resetIdentityRefusals empties the registry, including start windows other
+// tests left open, so a test of the bounds starts from nothing.
+func resetIdentityRefusals(t *testing.T) {
+	t.Helper()
+	reset := func() {
+		identityRefusals.mu.Lock()
+		identityRefusals.recent, identityRefusals.open, identityRefusals.pinned = nil, nil, nil
+		identityRefusals.order.Init()
+		identityRefusals.mu.Unlock()
+	}
+	reset()
+	t.Cleanup(reset)
+}
+
+func managedStandaloneProfileSet() *guardrailProfileSet {
+	return &guardrailProfileSet{base: &config.Config{
+		DeploymentMode: "managed_enterprise",
+		Enterprise:     config.EnterpriseConfig{Profile: "standalone"},
+	}}
+}
+
+// churnIdentityRefusals issues n refusals of other accounts.
+func churnIdentityRefusals(set *guardrailProfileSet, base, n int) {
+	for i := 0; i < n; i++ {
+		set.identityUncertaintyReason(&profileSubject{UserID: fmt.Sprintf("%d", base+i)}, []string{"groups:unknown"}, "claudecode", "")
+	}
+}
+
+func requireReadableBlockedStart(t *testing.T, gate *sessionStartGate, key string) {
+	t.Helper()
+	reason, blocked := gate.await(context.Background(), key, 0, 0, nil)
+	display := agentDisplayReason(reason, redaction.SinkPolicyDefault)
+	if !blocked || display != reason || !strings.Contains(display, "group membership is unconfirmed") ||
+		!strings.Contains(display, "Restart the agent") || strings.Contains(display, "<redacted") {
+		t.Errorf("blocked start lost its readable cause: blocked=%v display=%q", blocked, display)
+	}
+}
+
+// The reason a start refuses with is issued while the start is judged and
+// pinned only when the start finishes; no number of other refusals issued in
+// between turns it into redacted spans (GAP-0718).
+func TestIdentityRefusalIssuedWhileAStartIsJudgedSurvivesChurn(t *testing.T) {
+	resetIdentityRefusals(t)
+	redaction.SetAgentReasonRedactionDisabled(false)
+	t.Cleanup(func() { redaction.SetAgentReasonRedactionDisabled(false) })
+	set := managedStandaloneProfileSet()
+	var gate sessionStartGate
+	ticket := gate.begin("active-session")
+	reason := set.identityUncertaintyReason(&profileSubject{UserID: "1006"}, []string{"groups:unknown"}, "claudecode", "")
+	churnIdentityRefusals(set, 50000, 4*identityRefusalIssuedMax)
+	ticket.finish(true, reason)
+	requireReadableBlockedStart(t, &gate, "active-session")
+}
+
+// A reason issued before the start began and issued again while it is judged
+// is refreshed: other refusals evict the oldest, not the one in use.
+func TestIdentityRefusalReissuedWhileAStartIsJudgedSurvivesEviction(t *testing.T) {
+	resetIdentityRefusals(t)
+	redaction.SetAgentReasonRedactionDisabled(false)
+	t.Cleanup(func() { redaction.SetAgentReasonRedactionDisabled(false) })
+	set := managedStandaloneProfileSet()
+	subject := &profileSubject{UserID: "611111"}
+	first := set.identityUncertaintyReason(subject, []string{"groups:unknown"}, "claudecode", "")
+	churnIdentityRefusals(set, 79900, identityRefusalIssuedMax-1)
+	var gate sessionStartGate
+	ticket := gate.begin("reissued-session")
+	if again := set.identityUncertaintyReason(subject, []string{"groups:unknown"}, "claudecode", ""); again != first {
+		t.Fatal("fixture reason changed")
+	}
+	churnIdentityRefusals(set, 79999, 1)
+	ticket.finish(true, first)
+	requireReadableBlockedStart(t, &gate, "reissued-session")
+
+	// Reissue alone (no start window) refreshes too: the most recently used
+	// of a full list outlives older ones.
+	resetIdentityRefusals(t)
+	hot := set.identityUncertaintyReason(subject, []string{"groups:unknown"}, "claudecode", "")
+	churnIdentityRefusals(set, 81000, identityRefusalIssuedMax-1)
+	set.identityUncertaintyReason(subject, []string{"groups:unknown"}, "claudecode", "")
+	churnIdentityRefusals(set, 82000, 1)
+	if !trustedIdentityRefusalReason(hot) {
+		t.Error("a refusal in use was evicted before an older one")
+	}
+}
+
+// The hold ends with the start: once it finishes, the list is bounded again
+// and an unpinned text ages out; the hold itself is capped.
+func TestIdentityRefusalStartWindowIsBounded(t *testing.T) {
+	resetIdentityRefusals(t)
+	set := managedStandaloneProfileSet()
+	var gate sessionStartGate
+	ticket := gate.begin("window")
+	first := set.identityUncertaintyReason(&profileSubject{UserID: "1"}, []string{"groups:unknown"}, "claudecode", "")
+	churnIdentityRefusals(set, 100000, identityRefusalHeldMax+10)
+	identityRefusals.mu.Lock()
+	held := identityRefusals.order.Len()
+	identityRefusals.mu.Unlock()
+	if held > identityRefusalHeldMax {
+		t.Errorf("held %d texts, over the cap %d", held, identityRefusalHeldMax)
+	}
+	if trustedIdentityRefusalReason(first) {
+		t.Error("the hold outlived its cap")
+	}
+	ticket.finish(false, "")
+	churnIdentityRefusals(set, 200000, 1)
+	identityRefusals.mu.Lock()
+	after, open := identityRefusals.order.Len(), len(identityRefusals.open)
+	identityRefusals.mu.Unlock()
+	if after != identityRefusalIssuedMax || open != 0 {
+		t.Errorf("after the start finished: %d texts (want %d), %d open windows", after, identityRefusalIssuedMax, open)
 	}
 }
