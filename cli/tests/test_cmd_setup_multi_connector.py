@@ -93,7 +93,7 @@ def test_unsupported_codex_batch_refuses_without_roster_change():
         cleanup_app(app, db_path, root)
 
 
-@pytest.mark.parametrize("launcher_state", ["missing", "empty", "directory"])
+@pytest.mark.parametrize("launcher_state", ["missing", "empty", "directory", "damaged", "link"])
 def test_windows_hook_setup_refuses_unusable_launcher_before_changing_peer_runtime(
     tmp_path, capsys, launcher_state,
 ):
@@ -107,6 +107,12 @@ def test_windows_hook_setup_refuses_unusable_launcher_before_changing_peer_runti
             launcher.write_bytes(b"")
         elif launcher_state == "directory":
             launcher.mkdir()
+        elif launcher_state == "damaged":
+            launcher.write_bytes(b"not a Windows program")
+        elif launcher_state == "link":
+            unrelated = bin_dir / "unrelated.exe"
+            unrelated.write_bytes(b"unrelated program")
+            launcher.symlink_to(unrelated)
         app.cfg.guardrail.connector = "codex"
         app.cfg.guardrail.connectors = {
             "codex": PerConnectorGuardrailConfig(mode="action", hook_fail_mode="closed")
@@ -140,10 +146,19 @@ def test_windows_hook_setup_with_installed_launcher_continues_normal_preflight(t
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
         gateway = bin_dir / "defenseclaw-gateway.exe"
-        (bin_dir / "defenseclaw-hook.exe").write_bytes(b"installed launcher fixture")
+        (bin_dir / "defenseclaw-hook.exe").write_bytes(b"MZ native launcher fixture")
+        identity = json.dumps({
+            "schema_version": 1,
+            "name": "defenseclaw-hook-launcher",
+            "version": "1.0.8",
+            "commit": "fixture",
+        }).encode()
         with (
             patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
             patch("defenseclaw.gateway.canonical_install_path", return_value=str(gateway)),
+            patch("defenseclaw.commands.cmd_setup.subprocess.run", return_value=SimpleNamespace(
+                returncode=0, stdout=identity,
+            )) as launcher_probe,
             patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=False)
             as version_check,
         ):
@@ -152,6 +167,8 @@ def test_windows_hook_setup_with_installed_launcher_continues_normal_preflight(t
             )
         assert applied is False
         version_check.assert_called_once()
+        launcher_probe.assert_called_once()
+        assert launcher_probe.call_args.args[0] == [str(bin_dir / "defenseclaw-hook.exe"), "--version-json"]
         assert "defenseclaw-hook.exe) is missing or unusable" not in capsys.readouterr().err
     finally:
         cleanup_app(app, db_path, root)
@@ -869,7 +886,7 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         data_dir = self.app.cfg.data_dir
         # This test reaches a later OpenCode failure, so supply the native
         # launcher prerequisite that a real Windows install already has.
-        atomic_write_private_bytes(os.path.join(self.tmp_dir, "defenseclaw-hook.exe"), b"installed fixture")
+        atomic_write_private_bytes(os.path.join(self.tmp_dir, "defenseclaw-hook.exe"), b"MZ installed fixture")
         selection_path = os.path.join(data_dir, "agent_selection.json")
         lock_path = os.path.join(data_dir, "hook_contract_lock.json")
         runtime_path = os.path.join(data_dir, "hooks", "prior-posture.json")
@@ -913,6 +930,10 @@ class TestAdditiveSetupCommand(unittest.TestCase):
             patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=False),
             patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
             patch("defenseclaw.gateway.canonical_install_path", return_value=os.path.join(self.tmp_dir, "defenseclaw-gateway.exe")),
+            patch("defenseclaw.commands.cmd_setup.subprocess.run", return_value=SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"schema_version": 1, "name": "defenseclaw-hook-launcher"}).encode(),
+            )),
             patch("defenseclaw.agent_selection.record_setup_agent_selections", side_effect=_record),
         ):
             restart.side_effect = _restart
