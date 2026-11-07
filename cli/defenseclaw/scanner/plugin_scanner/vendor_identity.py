@@ -546,6 +546,51 @@ def _flat_v1(tree: object) -> dict[str, dict]:
     return flat
 
 
+def _specs_are_text(specs: object) -> bool:
+    return isinstance(specs, dict) and all(
+        isinstance(key, str) and isinstance(value, str) for key, value in specs.items()
+    )
+
+
+def _lock_entry_is_valid(entry: object, spec_fields: tuple[str, ...]) -> bool:
+    """Whether one lock entry has the shape npm writes for the fields read here."""
+
+    return isinstance(entry, dict) and all(
+        isinstance(entry[field], str)
+        for field in ("name", "version", "resolved", "integrity", "from") if field in entry
+    ) and isinstance(entry.get("link", False), bool) and all(
+        _specs_are_text(entry[field]) for field in spec_fields if field in entry
+    )
+
+
+def _lock_is_valid(lock: dict) -> bool:
+    """Whether the whole lock has the npm lock shape: every package table and every entry.
+
+    The lock is trusted all or nothing. A table or an entry of a type npm never
+    writes, at this install path or anywhere else in the file, means the file
+    is not read as an install record at all.
+    """
+
+    packages = lock.get("packages")
+    if packages is not None and not (
+        isinstance(packages, dict)
+        and all(_lock_entry_is_valid(entry, _DEPENDENCY_FIELDS) for entry in packages.values())
+    ):
+        return False
+    pending = [lock.get("dependencies")]
+    while pending:
+        tree = pending.pop()
+        if tree is None:
+            continue
+        if not isinstance(tree, dict):
+            return False
+        for entry in tree.values():
+            if not _lock_entry_is_valid(entry, ("requires",)):
+                return False
+            pending.append(entry.get("dependencies"))
+    return True
+
+
 def _lock_records(lock: dict, name: str, key: str | None) -> list[dict]:
     """The entries of an npm lock that record this package.
 
@@ -622,7 +667,7 @@ def _install_records(plugin_dir: str, manifest: dict, name: str) -> list[dict] |
     """The lock entries that record this install, or None if any place the
     install names its source does not say the registry, the copy is installed
     under another name than the package's (an alias), or a lock that is present
-    cannot be read as an install record."""
+    cannot be read as an install record (the whole lock is checked)."""
 
     if not all(
         field not in manifest or _registry_metadata(field, manifest[field], name)
@@ -651,7 +696,7 @@ def _install_records(plugin_dir: str, manifest: dict, name: str) -> list[dict] |
                 lock = json.loads(payload)
             except (UnicodeDecodeError, ValueError, RecursionError):
                 return None
-            if not isinstance(lock, dict):
+            if not isinstance(lock, dict) or not _lock_is_valid(lock):
                 return None
             if not all(_registry_request(spec, name) for spec in _owner_specs(lock, key)):
                 return None
