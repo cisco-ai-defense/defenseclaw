@@ -584,7 +584,9 @@ func dispatchEnterpriseHookStandaloneJobs(
 					continue
 				}
 				if !result.OK {
-					outcomes[target.Index] = enterpriseHookStandaloneOutcome{err: firstNonEmpty(result.Error, "worker reported an unspecified failure")}
+					// repaired: the target failed, and the worker (or the files)
+					// show it put hook files back first (GAP-0754).
+					outcomes[target.Index] = enterpriseHookStandaloneOutcome{repaired: result.Repaired, err: firstNonEmpty(result.Error, "worker reported an unspecified failure")}
 					continue
 				}
 				outcomes[target.Index] = enterpriseHookStandaloneOutcome{ok: true, repaired: result.Repaired, result: result.Result, agentConfig: result.AgentConfig}
@@ -1122,18 +1124,21 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			row.Result = outcome.result
 			row.UserHome = outcome.result.UserHome
 			row.Connector = outcome.result.Connector
-			if outcome.repaired {
-				repairedTargets[slot.key] = true
-				repaired = append(repaired, enterpriseHookGuardianRepair{User: row.User, Connector: row.Connector})
-				auditRepairs = append(auditRepairs, enterpriseHookGuardianAuditReport{User: row.User, UID: slot.account.UID, Connector: row.Connector})
-				repairs++
-			}
 			verified[index] = slot.verifiable && !outcome.repaired
 			if outcome.agentConfig != "" {
 				notices = append(notices, enterpriseHookGuardianNotice{User: row.User, Connector: row.Connector, AgentConfig: outcome.agentConfig})
 			}
 		default:
 			row.Error = outcome.err
+		}
+		if ok && outcome.repaired && !outcome.pending {
+			// A restore counts whether or not the target is healthy after it:
+			// a target the worker put back in part stays failed, and its
+			// retry must not be the only trace of the files it restored.
+			repairedTargets[slot.key] = true
+			repaired = append(repaired, enterpriseHookGuardianRepair{User: row.User, Connector: row.Connector})
+			auditRepairs = append(auditRepairs, enterpriseHookGuardianAuditReport{User: row.User, UID: slot.account.UID, Connector: row.Connector})
+			repairs++
 		}
 		rows[index] = row
 		if row.OK {
@@ -1220,10 +1225,10 @@ func reportEnterpriseHookStandaloneInterruptedRepairs(dataDir, hookSocket string
 	restoredAt := time.Now().UTC().Format(time.RFC3339Nano)
 	for index, slot := range slots {
 		outcome, ok := outcomes[index]
-		if !ok || !outcome.ok || !outcome.repaired || outcome.result == nil || index >= len(rows) {
+		if !ok || !outcome.repaired || outcome.pending || index >= len(rows) {
 			continue
 		}
-		user, name := rows[index].User, outcome.result.Connector
+		user, name := rows[index].User, rows[index].Connector
 		uid := slot.account.UID
 		repairedTargets[slot.key] = true
 		repaired = append(repaired, enterpriseHookGuardianRepair{User: user, Connector: name})
