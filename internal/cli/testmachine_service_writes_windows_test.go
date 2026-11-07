@@ -78,3 +78,65 @@ func TestTestMachineServiceFolderThisIdentityCannotListIgnoresTheServicesPasses(
 		t.Fatalf("the service's pass in a folder this identity cannot list is reported as a test's write: %v", changes)
 	}
 }
+
+// GAP-0093 (round 3, review 2 L2): as LocalSystem the temp folder is
+// C:\Windows\SystemTemp whatever TMP says, so a t.TempDir() is
+// C:\Windows\SystemTemp\TestXxxNNN\001, which neither of the run's two
+// folders names. A service log line that names only that path is still a
+// test's write; a line of the services' own is not.
+func TestTestRunMarkersCatchASystemTempTestFolder(t *testing.T) {
+	const systemTemp = `C:\Windows\SystemTemp`
+	runDirs := []string{systemTemp + `\defenseclaw-cli-run-7`, systemTemp + `\defenseclaw-cli-test-7`}
+	markers := testRunMarkersIn(runDirs, `Software\DefenseClaw-test-7`, "cli.test.exe", systemTemp)
+	found := false
+	for _, marker := range markers {
+		found = found || marker == systemTemp+`\Test`
+	}
+	if !found {
+		t.Fatalf("LocalSystem's run markers %q do not include %s\\Test", markers, systemTemp)
+	}
+	// A run whose TMP was honoured has the temp folder to itself.
+	for _, marker := range testRunMarkersIn(runDirs, `Software\DefenseClaw-test-7`, "cli.test.exe", runDirs[0]) {
+		if strings.HasSuffix(marker, `\Test`) {
+			t.Fatalf("a run with its own temp folder has the marker %q", marker)
+		}
+	}
+
+	dir := t.TempDir()
+	log := filepath.Join(dir, "hook-guardian.log")
+	base := "[hook-guardian] reconcile reason=interval status=ok users=3\n"
+	snapshot := func(before map[string]string) map[string]string {
+		out := map[string]string{}
+		fingerprintTestServiceFolders(out, testServiceFolders{roots: []string{dir}, before: before, runMarkers: markers})
+		return out
+	}
+	for _, tc := range []struct {
+		name, line string
+		want       int
+	}{
+		{"the services' own lines", base + "[hook-guardian] staged " + systemTemp + "\\defenseclaw-stage-1\\a.ps1\n", 0},
+		{"a line naming only a test's temp folder", "[hook-guardian] warn: restored " + systemTemp + "\\TestFoo123\\001\\x.json\n", 1},
+		{"the same in another case", "[hook-guardian] warn: " + strings.ToLower(systemTemp) + "\\testfoo123\\001\n", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(log, []byte(base), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshot(nil)
+			time.Sleep(20 * time.Millisecond) // a later modification time
+			file, err := os.OpenFile(log, os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := file.WriteString(tc.line); err != nil {
+				t.Fatal(err)
+			}
+			if err := file.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if changes := diffTestMachineRegistry(before, snapshot(before)); len(changes) != tc.want {
+				t.Fatalf("%d changes, want %d:\n%s", len(changes), tc.want, strings.Join(changes, "\n"))
+			}
+		})
+	}
+}

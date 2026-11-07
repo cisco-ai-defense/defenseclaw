@@ -229,6 +229,14 @@ func isolateTestMachineWriters(logDir string) func() {
 	sandboxSeam("windowsEnterpriseRestoreStartModes", &windowsEnterpriseRestoreStartModes, func(*windowsEnterpriseInstallerReport) error { return nil })
 	sandboxSeam("windowsEnterpriseRepairDataDirBeforePlan", &windowsEnterpriseRepairDataDirBeforePlan, func() string { return "" })
 	sandboxSeam("windowsEnterpriseRemoveReplacementCopies", &windowsEnterpriseRemoveReplacementCopies, func() []string { return nil })
+	// The guardian's self-heal (repairEnterpriseHookManagedInstallPlatform,
+	// reached from the hook watch's reconcile under a managed cfg) heals the
+	// install tree, the policy artifacts and the services' SCM descriptors
+	// and registry keys. Idempotent on a healthy computer, so the registry
+	// guard would not show it (GAP-0093, review 2 S2).
+	sandboxSeam("enterpriseWindowsManagedInstallRepair", &enterpriseWindowsManagedInstallRepair, func(managed.ManagedInstallLayout, managed.CanonicalOptions) []managed.CanonicalResult { return nil })
+	sandboxSeam("enterpriseWindowsManagedPolicyArtifactsRepair", &enterpriseWindowsManagedPolicyArtifactsRepair, func() {})
+	sandboxSeam("enterpriseWindowsManagedServiceSecurityRepair", &enterpriseWindowsManagedServiceSecurityRepair, func([]string) []managed.ServiceSecurityResult { return nil })
 	// The priority class is process state: a lifecycle test that lowered it
 	// left every later test, and cmd.exe and the other programs they start,
 	// below normal. TestWindowsLifecycleRunYieldsTheCPUToTheHooks checks the
@@ -531,9 +539,28 @@ func testRunTempIsTheRuns() bool {
 // L1), its HKCU registry sandbox and its executable. A service log line
 // written during the run that names one of them was written by a test.
 func testRunMarkers() []string {
-	markers := append(append([]string{}, testRunTempDirs...), testMachineRegistrySandbox)
-	if executable, err := os.Executable(); err == nil {
-		markers = append(markers, filepath.Base(executable))
+	executable, _ := os.Executable()
+	return testRunMarkersIn(testRunTempDirs, testMachineRegistrySandbox, filepath.Base(executable), os.TempDir())
+}
+
+// testRunMarkersIn is testRunMarkers for a run's temp folders, registry
+// sandbox, executable name and the process temp folder. When that temp
+// folder is not one of the run's (LocalSystem: GetTempPath2 gives it
+// C:\Windows\SystemTemp whatever TMP says), a t.TempDir() is
+// <temp folder>\TestXxxNNN\001, which neither run folder names, so
+// <temp folder>\Test is a marker too (GAP-0093, review 2 L2). The services'
+// text does not contain it.
+func testRunMarkersIn(runTempDirs []string, registrySandbox, executableName, osTemp string) []string {
+	markers := append(append([]string{}, runTempDirs...), registrySandbox)
+	if executableName != "" && executableName != "." {
+		markers = append(markers, executableName)
+	}
+	own := false
+	for _, dir := range runTempDirs {
+		own = own || strings.EqualFold(filepath.Clean(dir), filepath.Clean(osTemp))
+	}
+	if !own && osTemp != "" {
+		markers = append(markers, strings.TrimRight(osTemp, `\/`)+`\Test`)
 	}
 	return markers
 }
@@ -766,6 +793,11 @@ func isolateTestDeploymentReaders(dir string) {
 			return winpath.TrustedEnterpriseRoots(profile)
 		}
 		return missingRoots, missingRootsErr
+	})
+	// cowork-1-0-8 GAP-0093 (round 3, review 2 S2): the guardian's self-heal
+	// derives its install and state layout from these registrations.
+	sandboxSeam("windowsManagedLayout.programRoots", &windowsManagedLayout.programRoots, func() (string, string) {
+		return filepath.Join(dir, "no-program-files"), filepath.Join(dir, "no-program-data")
 	})
 	sandboxSeam("windowsEnterpriseInstalledConfigPath", &windowsEnterpriseInstalledConfigPath, func() (string, error) { return missing.ConfigPath, nil })
 	sandboxSeam("windowsEnterpriseInstalledConfigForStatus", &windowsEnterpriseInstalledConfigForStatus, func() (*config.Config, error) {
@@ -1160,6 +1192,21 @@ func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 	for _, path := range []string{standaloneRoots.InstallRoot, standaloneRoots.StateRoot, standaloneRoots.LifecycleDir, standaloneRoots.CertificationInstallBase} {
 		inTemp("the standalone roots", path)
 	}
+	// GAP-0093 (round 3, review 2 S2): the guardian's self-heal reads the
+	// run's missing Program Files and ProgramData, and its three repairs are
+	// the sandbox's no-ops, not the machine writers.
+	selfHealFiles, selfHealData := windowsManagedLayout.programRoots()
+	inTemp("the self-heal Program Files", selfHealFiles)
+	inTemp("the self-heal ProgramData", selfHealData)
+	for name, seam := range map[string][2]any{
+		"enterpriseWindowsManagedInstallRepair":         {enterpriseWindowsManagedInstallRepair, managed.RepairWindowsManagedInstall},
+		"enterpriseWindowsManagedPolicyArtifactsRepair": {enterpriseWindowsManagedPolicyArtifactsRepair, enterprisehooks.RepairWindowsManagedPolicyArtifacts},
+		"enterpriseWindowsManagedServiceSecurityRepair": {enterpriseWindowsManagedServiceSecurityRepair, managed.RepairWindowsManagedServiceSecurity},
+	} {
+		if reflect.ValueOf(seam[0]).Pointer() == reflect.ValueOf(seam[1]).Pointer() {
+			t.Fatalf("%s is the production repair of the computer's install, policy or services", name)
+		}
+	}
 	if want, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileSecureClient); err == nil {
 		if got, err := windowsManagedLayout.roots(winpath.EnterpriseProfileSecureClient); err != nil || got != want {
 			t.Fatalf("the Secure Client roots changed in the sandbox: %+v, %v; want %+v", got, err, want)
@@ -1256,7 +1303,9 @@ func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 		"windowsEnterpriseHotConfigGuardianReconcile", "windowsSecretRestartGateway", "windowsSecretSpawnRecovery",
 		"enterpriseHooksPlatformPreflight", "windowsEnterpriseStagingElevated", "windowsBundleSyncMarker",
 		"windowsEnterpriseLifecycleYield", "sidecarRaisePriority", "windowsEnterpriseRecordInspector",
-		"windowsManagedLayout.standalone", "windowsManagedLayout.roots", "windowsEnterpriseConfigLifecycleClaim"} {
+		"windowsManagedLayout.standalone", "windowsManagedLayout.roots", "windowsEnterpriseConfigLifecycleClaim",
+		"windowsManagedLayout.programRoots", "enterpriseWindowsManagedInstallRepair",
+		"enterpriseWindowsManagedPolicyArtifactsRepair", "enterpriseWindowsManagedServiceSecurityRepair"} {
 		if !registered[name] {
 			t.Errorf("seam %s is not registered with the sandbox guard", name)
 		}

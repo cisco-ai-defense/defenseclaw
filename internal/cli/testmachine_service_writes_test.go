@@ -482,8 +482,14 @@ func TestTestMachineServiceLogOverTheHashLimitIsComparedByContent(t *testing.T) 
 	}
 
 	// A tail longer than one copy buffer (32 KiB) that names the run where
-	// two writes to the scanner meet.
-	straddle := append(bytes.Repeat([]byte("x"), 32<<10-10), []byte(" warn: restore record in "+strings.ToUpper(runTemp)+`\TestX\001`+"\n")...)
+	// two writes to the scanner meet: the run's folder (in upper case) starts
+	// in the first 32768 bytes of the tail and ends in the second chunk
+	// (GAP-0093, review 2 L1).
+	marker := strings.ToUpper(runTemp)
+	straddle := append(bytes.Repeat([]byte("x"), 32<<10-len(marker)/2), []byte(marker+`\TestX\001`+"\n")...)
+	if at := bytes.Index(straddle, []byte(marker)); at >= 32<<10 || at+len(marker) <= 32<<10 {
+		t.Fatalf("the run's folder (%d bytes) at byte %d does not straddle byte %d", len(marker), at, 32<<10)
+	}
 	for _, tc := range []struct {
 		name  string
 		write func()

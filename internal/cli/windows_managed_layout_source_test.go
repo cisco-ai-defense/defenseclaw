@@ -20,6 +20,13 @@ import (
 // enterprise roots (cowork-1-0-8 GAP-0093, round 2).
 const windowsManagedLayoutSeamFile = "windows_managed_layout_windows.go"
 
+// windowsSelfHealFile is the guardian's self-heal. It repairs the install,
+// policy and service objects under the computer's Program Files and
+// ProgramData, so it asks windowsManagedLayout.programRoots for them and
+// never resolves the registrations itself (GAP-0093, review 2 S2). Other
+// files read the same registrations to classify a path and stay as they are.
+const windowsSelfHealFile = "enterprise_hooks_self_heal_windows.go"
+
 // testDeploymentResolverProblems lists where one parsed non-test file of
 // internal/cli goes around windowsManagedLayout: a direct use of
 // managed.StandaloneWindowsLayout or winpath.TrustedEnterpriseRoots (called
@@ -96,6 +103,13 @@ func testDeploymentResolverProblems(fset *token.FileSet, name string, file *ast.
 			if seamFile {
 				return true
 			}
+			if name == windowsSelfHealFile {
+				for _, member := range []string{"TrustedProgramFiles", "TrustedProgramData"} {
+					if selects(typed, winpathNames, member) {
+						report(typed, "winpath."+member+" is resolved directly in the guardian's self-heal; ask windowsManagedLayout.programRoots")
+					}
+				}
+			}
 			if selects(typed, managedNames, "StandaloneWindowsLayout") {
 				report(typed, "managed.StandaloneWindowsLayout is resolved directly; ask windowsManagedLayout.standalone")
 			}
@@ -146,7 +160,7 @@ func TestWindowsManagedLayoutIsTheOneSourceOfTheDeploymentRoots(t *testing.T) {
 	}
 	fset := token.NewFileSet()
 	var problems []string
-	uses, seamDeclared := 0, false
+	uses, seamDeclared, selfHealUses := 0, false, 0
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -162,6 +176,9 @@ func TestWindowsManagedLayoutIsTheOneSourceOfTheDeploymentRoots(t *testing.T) {
 			case *ast.SelectorExpr:
 				if ident, ok := typed.X.(*ast.Ident); ok && ident.Name == "windowsManagedLayout" {
 					uses++
+					if name == windowsSelfHealFile && typed.Sel.Name == "programRoots" {
+						selfHealUses++
+					}
 				}
 			case *ast.ValueSpec:
 				for _, ident := range typed.Names {
@@ -177,6 +194,9 @@ func TestWindowsManagedLayoutIsTheOneSourceOfTheDeploymentRoots(t *testing.T) {
 	}
 	if !seamDeclared {
 		t.Fatalf("windowsManagedLayout is not declared in %s", windowsManagedLayoutSeamFile)
+	}
+	if selfHealUses == 0 {
+		t.Fatalf("%s does not ask windowsManagedLayout.programRoots: the scan read the wrong file", windowsSelfHealFile)
 	}
 	// 29 layout and 29 roots call sites at the change, plus the two
 	// function values the package seams default to.
@@ -242,5 +262,37 @@ var secureClientHost = func() bool { return check(wp.TrustedEnterpriseRoots) }
 		if !strings.Contains(problem, "written") && !strings.Contains(problem, "address") {
 			t.Errorf("the seam file may name the resolvers: %s", problem)
 		}
+	}
+}
+
+// The guardian's self-heal may not resolve the Program Files and ProgramData
+// registrations itself; every other file may.
+func TestDeploymentResolverScanCoversTheSelfHealRoots(t *testing.T) {
+	const source = `package cli
+
+import wp "github.com/defenseclaw/defenseclaw/internal/winpath"
+
+func repair() {
+	programFiles, _ := wp.TrustedProgramFiles()
+	programData, _ := wp.TrustedProgramData()
+	_, _ = programFiles, programData
+	programFiles, programData = windowsManagedLayout.programRoots()
+}
+`
+	parse := func(name string) []string {
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, name, source, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return testDeploymentResolverProblems(fset, name, file)
+	}
+	problems := parse(windowsSelfHealFile)
+	got := strings.Join(problems, "\n")
+	if len(problems) != 2 || !strings.Contains(got, windowsSelfHealFile+":6:") || !strings.Contains(got, windowsSelfHealFile+":7:") {
+		t.Errorf("the scan reported %d problems in the self-heal file, want lines 6 and 7:\n%s", len(problems), got)
+	}
+	if other := parse("windows_managed_hooks_lifecycle.go"); len(other) != 0 {
+		t.Errorf("the scan reported a file that classifies a path by the registrations:\n%s", strings.Join(other, "\n"))
 	}
 }

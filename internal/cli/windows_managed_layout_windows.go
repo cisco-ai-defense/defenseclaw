@@ -29,9 +29,23 @@ import (
 var windowsManagedLayout = struct {
 	standalone func() (managed.StandaloneLayout, error)
 	roots      func(profile string) (winpath.EnterpriseRoots, error)
+	// programRoots is the protected 64-bit Program Files and ProgramData
+	// registrations, each empty when it cannot be read. The guardian's
+	// self-heal asks it (repairEnterpriseHookManagedInstallPlatform) for the
+	// roots it derives its install and state layout from.
+	programRoots func() (programFiles, programData string)
 }{
-	standalone: managed.StandaloneWindowsLayout,
-	roots:      winpath.TrustedEnterpriseRoots,
+	standalone:   managed.StandaloneWindowsLayout,
+	roots:        winpath.TrustedEnterpriseRoots,
+	programRoots: trustedWindowsProgramRoots,
+}
+
+// trustedWindowsProgramRoots is windowsManagedLayout.programRoots in
+// production: the two registrations, an unreadable one as an empty path.
+func trustedWindowsProgramRoots() (programFiles, programData string) {
+	programFiles, _ = winpath.TrustedProgramFiles()
+	programData, _ = winpath.TrustedProgramData()
+	return programFiles, programData
 }
 
 // windowsManagedStandaloneLayout is windowsManagedLayout's layout as a
