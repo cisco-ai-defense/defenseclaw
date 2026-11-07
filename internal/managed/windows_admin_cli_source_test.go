@@ -60,7 +60,6 @@ type managedWindowsSetupAllowance struct {
 // (cowork-1-0-8 GAP-0095). An entry no literal uses fails the test.
 var managedWindowsBareSetupAllowed = []managedWindowsSetupAllowance{
 	{path: "cmd/defenseclaw-enterprise-setup/", reason: "Setup's own usage and refusals: the administrator who reads them is running that Setup"},
-	{path: "cmd/defenseclaw-setup/", reason: "the per-user Setup's own messages: the person who reads them is running that Setup, which they downloaded; it is not the managed Setup"},
 	{path: "internal/cli/enterprise_bundle_apply_windows.go", words: "Windows takes bundles from Setup /ensure BUNDLE= or --bundle",
 		reason: "names the Setup switch that is the other way to deliver a bundle, beside --bundle; whoever delivers one holds Setup"},
 	{path: "internal/cli/windows_enterprise_bundle.go", words: "with Setup /ensure",
@@ -77,8 +76,12 @@ var managedWindowsBareSetupAllowed = []managedWindowsSetupAllowance{
 		reason: "windowsManagedHooksEnsureStep on Secure Client keeps the text it always had; the standalone profile names the installed CLI"},
 	{path: "internal/cli/windows_enterprise_prereq.go", words: "run Setup from an elevated administrator or LocalSystem context (the deployment system's machine context)", exact: true,
 		reason: "the elevation remedy of a Secure Client run keeps its text; a standalone run asks for the same command (input.Standalone)"},
-	{path: "internal/cli/windows_enterprise_prereq.go", words: "then run Setup again",
-		reason: "the script-block remedies are classified for a Secure Client run only (windowsEnterpriseRunPowerShell, !standalone) and keep their text"},
+	{path: "internal/cli/windows_enterprise_prereq.go", exact: true,
+		words:  "allow the DefenseClaw installer script and module in the antimalware or endpoint protection product (exclusion by signer or path), then run Setup again",
+		reason: "the antimalware script-block remedy is classified for a Secure Client run only (windowsEnterpriseRunPowerShell, !standalone) and keeps its text"},
+	{path: "internal/cli/windows_enterprise_prereq.go", exact: true,
+		words:  "set Turn on Script Execution (Group Policy, machine and user) to Not Configured or to allow the installer, or use the signed payload where AllSigned is enforced, then run Setup again",
+		reason: "the execution-policy script-block remedy is classified for a Secure Client run only (windowsEnterpriseRunPowerShell, !standalone) and keeps its text"},
 	{path: "internal/cli/windows_enterprise_service.go", words: "run Setup again", exact: true,
 		reason: "windowsEnterpriseStagingRetryStep on Secure Client keeps the text it always had; a standalone run asks for the same command"},
 }
@@ -785,7 +788,6 @@ func TestManagedWindowsLiteralProblems(t *testing.T) {
 		{"run DefenseClaw Setup, then", "internal/cli/x_windows.go", "run DefenseClaw Setup then verify", true, 1},
 		{"Setup of the installed release, command follows", "internal/cli/x_windows.go", "run DefenseClaw Setup of the installed release as LocalSystem: ", true, 0},
 		{"a retry as the same command", "internal/cli/x_windows.go", "then run the same command again", true, 0},
-		{"the per-user Setup's own message", "cmd/defenseclaw-setup/disk_space.go", "free some space and run Setup again", false, 0},
 		{"an exact allowance covers its literal", "internal/cli/windows_managed_hooks_lifecycle.go", "Setup /repair", true, 0},
 		{"an exact allowance covers only its literal", "internal/cli/windows_managed_hooks_lifecycle.go", "run Setup /repair now", true, 1},
 		{"an exact allowance, another file", "internal/cli/x_windows.go", "Setup /repair", true, 1},

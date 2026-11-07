@@ -1648,7 +1648,7 @@ func TestWindowsEnterpriseEnsureRecordOwnerMismatchNamesRecovery(t *testing.T) {
 	}
 	for _, want := range []string{
 		record, "inspect the deployment record owner", "restore its expected owner",
-		"/uninstall FORCE=1 PURGE=1 JSON=1", "/ensure CONFIG=<config.yaml> JSON=1",
+		windowsEnterpriseSetupCommand("/uninstall", "FORCE=1", "PURGE=1", "JSON=1"), windowsEnterpriseSetupCommand("/ensure", "CONFIG=<config.yaml>", "JSON=1"), managed.WindowsSetupSource,
 	} {
 		if !strings.Contains(result.Errors[0].Message, want) {
 			t.Fatalf("error %q does not name %q", result.Errors[0].Message, want)
@@ -1951,7 +1951,8 @@ func TestWindowsEnterpriseUnparseableInstalledConfigMessage(t *testing.T) {
 	}
 	_, err := readWindowsEnterpriseConfiguredTrust("repair", &windowsEnterpriseLifecycleOptions{stateRoot: stateRoot})
 	if err == nil || !strings.Contains(err.Error(), "does not parse at line 1 (it holds text where a mapping of keys is expected)") ||
-		!strings.Contains(err.Error(), "/ensure CONFIG=<config.yaml> JSON=1") || strings.Contains(err.Error(), "struct {") {
+		!strings.Contains(err.Error(), windowsEnterpriseSetupCommand("/ensure", "CONFIG=<config.yaml>", "JSON=1")) || !strings.Contains(err.Error(), managed.WindowsSetupSource) ||
+		strings.Contains(err.Error(), "struct {") {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -2294,7 +2295,7 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 	applyWindowsEnterpriseInstallerReport(failed, &windowsEnterpriseLifecycleOptions{purge: true}, notSystem, windowsEnterpriseStandaloneRun{})
 	if len(failed.Errors) != 1 || failed.Errors[0].Code != "per_user_state_remaining" || len(failed.Warnings) != 0 ||
 		!strings.Contains(failed.Errors[0].Message, "--purge did not run as LocalSystem") ||
-		!strings.Contains(failed.Errors[0].Message, "/uninstall PURGE=1, both as LocalSystem") ||
+		!strings.Contains(failed.Errors[0].Message, windowsEnterpriseLocalSystemRemedy("/uninstall PURGE=1")) ||
 		!strings.HasSuffix(failed.Errors[0].Message, `Accounts: alice (`+sid+`): C:\Users\alice\.defenseclaw`) {
 		t.Fatalf("not-LocalSystem purge: errors %+v warnings %+v", failed.Errors, failed.Warnings)
 	}
@@ -2775,7 +2776,7 @@ func TestWindowsEnterpriseResultNamesUntrustedUserRuntimeFolders(t *testing.T) {
 	}
 	if len(skipped) != 1 || !strings.Contains(skipped[0], "of 1 account(s)") ||
 		!strings.Contains(skipped[0], `C:\Users\stale\.defenseclaw\hooks`) ||
-		!strings.Contains(skipped[0], "run "+windowsEnterpriseAdminCommand("ensure")+" again from an elevated PowerShell prompt") {
+		!strings.Contains(skipped[0], "run "+windowsEnterpriseAdminCommand("ensure")+" from an elevated PowerShell prompt again to remove the old copies") {
 		t.Fatalf("skipped folder warning = %q", skipped)
 	}
 	if len(result.Errors) != 0 {

@@ -9184,7 +9184,8 @@ function Install-DefenseClawFileAtomic {
                 throw (
                     "another program holds $Destination open, so Setup could not replace it (" +
                     (ConvertTo-DefenseClawBoundedDiagnostic -Value $replaceFailure.Message -MaxLength 256) +
-                    '). Close the program that has the file open (for example an antivirus scan or an editor), then run the same command again'
+                    '). Close the program that has the file open (for example an antivirus scan or an editor), then ' +
+                    (Format-DefenseClawRerunStep)
                 )
             }
         }
@@ -48530,7 +48531,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                         # GAP-0274: Setup carries no compiler. It keeps the
                         # recorded compiler of a Fleet-enabled 1.0.2 install
                         # in place, unchanged, and installs none.
-                        throw 'Fleet-enabled standalone Setup carries no Fleet policy compiler and this host has no recorded one to keep; turn Fleet off in the config, then run the same command again with that config'
+                        throw ('Fleet-enabled standalone Setup carries no Fleet policy compiler and this host has no recorded one to keep; turn Fleet off in the config, then ' + (Format-DefenseClawRerunStep) + ' with that config')
                     }
                 }
             }
