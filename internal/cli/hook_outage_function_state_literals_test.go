@@ -97,6 +97,12 @@ func TestOpenClawOutageFixedLoopReplacementIgnoresFunctionsItCannotCall(t *testi
 		{"unused function that continues", old + `unused() { continue; }; ` + loop, "open"},
 		{"unused function with a computed command", old + `unused() { $X; }; ` + loop, "open"},
 		{"unused function with a loop of its own", old + `unused() { for y in a; do break; done; }; ` + loop, "open"},
+		{"unused function defined in the loop that returns", old + `for x in a; do unused() { return; }; f() { :; }; done; f; if true; then :; else rm "$OUT"; fi`, "open"},
+		{"unused function defined in the loop that breaks", old + `for x in a; do unused() { break; }; f() { :; }; done; f; if true; then :; else rm "$OUT"; fi`, "open"},
+		{"unused function defined in the loop that continues", old + `for x in a; do unused() { continue; }; f() { :; }; done; f; if true; then :; else rm "$OUT"; fi`, "open"},
+		{"unused function defined in the loop with a computed command", old + `for x in a; do unused() { $X; }; f() { :; }; done; f; if true; then :; else rm "$OUT"; fi`, "open"},
+		{"unused function defined in the loop that runs eval", old + `for x in a; do unused() { eval g; }; f() { :; }; done; f; if true; then :; else rm "$OUT"; fi`, "open"},
+		{"called function defined in the loop that breaks", old + `for x in a; do g() { break; }; g; f() { :; }; done; f; if true; then :; else rm "$OUT"; fi`, "protected"},
 		{"called function that returns", old + `g() { return; }; ` + called, "open"},
 		{"called function that returns a status", old + `g() { return 1; }; ` + called, "open"},
 		{"called function of a plain command", old + `g() { :; }; ` + called, "open"},
@@ -109,4 +115,43 @@ func TestOpenClawOutageFixedLoopReplacementIgnoresFunctionsItCannotCall(t *testi
 		{"loop with a computed command and a function that breaks", old + `unused() { break; }; for x in a; do $X; f() { :; }; done; f; if true; then :; else rm "$OUT"; fi`, "protected"},
 		{"loop that breaks itself", old + `for x in a; do if [ -n "$X" ]; then break; fi; f() { :; }; done; f; if true; then :; else rm "$OUT"; fi`, "protected"},
 	}), func(protected string) map[string]interface{} { return map[string]interface{}{"OUT": protected} })
+}
+
+// A brace with a comma and no closing brace is not an expansion in Bash or
+// dash: the name stays as typed, so a protected link named with it is still
+// the protected path, and an ordinary link named with it stays allowed,
+// typed directly, unquoted or quoted in a function call.
+func TestOpenClawOutageUnclosedBraceNameIsLiteral(t *testing.T) {
+	root, protected, ordinary := outageR10Fixture(t, "home")
+	take := `f() { OUT="$1"; }; `
+	ordinaryLink := filepath.Join(ordinary, "notes{a,b")
+	protectedLink := filepath.Join(ordinary, "config{a,b")
+	for link, target := range map[string]string{
+		ordinaryLink:  filepath.Join(ordinary, "notes.txt"),
+		protectedLink: protected,
+	} {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inherited := map[string]interface{}{"OUT": protected}
+	cases := []struct {
+		name, command, want string
+		environment         map[string]interface{}
+	}{
+		{"direct protected link", `rm "` + protectedLink + `"`, "protected", nil},
+		{"unquoted protected link", take + `f ` + protectedLink + `; rm "$OUT"`, "protected", nil},
+		{"quoted protected link", take + `f "` + protectedLink + `"; rm "$OUT"`, "protected", nil},
+		{"unquoted ordinary link replaces an inherited protected value", take + `f ` + ordinaryLink + `; rm "$OUT"`, "open", inherited},
+		{"quoted ordinary link replaces an inherited protected value", take + `f "` + ordinaryLink + `"; rm "$OUT"`, "open", inherited},
+		{"direct ordinary link", `rm "` + ordinaryLink + `"`, "open", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := outageR10Decision(t, root, ordinary, tc.command, tc.environment)
+			if got != tc.want {
+				t.Errorf("decision=%q want=%q command=%q", got, tc.want, tc.command)
+			}
+		})
+	}
 }
