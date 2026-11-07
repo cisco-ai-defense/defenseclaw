@@ -7136,3 +7136,49 @@ def test_module_smoke_removes_the_certification_folders_it_creates() -> None:
     assert final in smoke
     # The finally closes the block that holds the lock test and its else branch.
     assert smoke.index("Remove-DefenseClawManagedTree", block) < smoke.index(final)
+
+
+def test_hardening_harness_removes_the_cisco_folders_it_creates() -> None:
+    # GAP-0780: the harness recorded and removed the DefenseClaw-Cert parents but
+    # not the Cisco Secure Client and Cisco folders above them, so a host without
+    # Secure Client kept an empty "Cisco Secure Client" after a run. Both roots are
+    # recorded before anything is created, deepest first, and the cleanup accepts
+    # only those paths and removes them only when empty, real and not pre-existing.
+    harness = read(HARNESS)
+
+    names = (
+        "$script:ProgramFilesSecureClientRoot",
+        "$script:ProgramFilesCiscoRoot",
+        "$script:ProgramDataSecureClientRoot",
+        "$script:ProgramDataCiscoRoot",
+    )
+    for name in names:
+        assert f"{name} = ConvertTo-CanonicalPath (" in harness
+    assert "Join-Path $script:KnownProgramFiles 'Cisco\\Cisco Secure Client'" in harness
+    assert "Join-Path $script:KnownProgramData 'Cisco\\Cisco Secure Client'" in harness
+    assert "Join-Path $script:KnownProgramFiles 'Cisco'\n" in harness
+    assert "Join-Path $script:KnownProgramData 'Cisco'\n" in harness
+
+    record = harness.index("$script:CertificationParentRoots = @(\n    foreach")
+    recorded = harness[record : harness.index("$script:FixtureRoot =", record)]
+    assert "existed_before = Test-Path -LiteralPath $parentRoot" in recorded
+    positions = [
+        recorded.index(name)
+        for name in (
+            "$script:ProgramFilesCertificationRoot",
+            "$script:ProgramDataWorkRoot",
+            *names,
+        )
+    ]
+    assert positions == sorted(positions)  # each parent is listed after its children
+    assert recorded.index(names[2]) < recorded.index(names[3])
+    assert recorded.index(names[0]) < recorded.index(names[1])
+
+    start = harness.index("function Remove-EmptyCertificationParentRoot(")
+    cleanup = harness[start : harness.index("function Invoke-CertificationFailureInjection", start)]
+    for name in names:
+        assert name in cleanup
+    assert "if ([bool]$State.existed_before" in cleanup
+    assert "[IO.FileAttributes]::ReparsePoint" in cleanup
+    assert "$children.Count -ne 0" in cleanup
+    assert "-Recurse" not in cleanup

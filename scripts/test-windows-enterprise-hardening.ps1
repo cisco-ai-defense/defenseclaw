@@ -19638,7 +19638,11 @@ function Remove-EmptyCertificationParentRoot([object]$State) {
         $script:ProgramFilesCertificationRoot,
         $script:ProgramDataCertificationRoot,
         $script:ProgramDataStagingRoot,
-        $script:ProgramDataWorkRoot
+        $script:ProgramDataWorkRoot,
+        $script:ProgramFilesSecureClientRoot,
+        $script:ProgramFilesCiscoRoot,
+        $script:ProgramDataSecureClientRoot,
+        $script:ProgramDataCiscoRoot
     ) | Where-Object {
         [string]::Equals(
             (ConvertTo-CanonicalPath $_),
@@ -20836,6 +20840,21 @@ $script:ProgramDataStagingRoot = ConvertTo-CanonicalPath (
 $script:ProgramDataWorkRoot = ConvertTo-CanonicalPath (
     Join-Path $script:KnownProgramData 'Cisco\Cisco Secure Client\DefenseClaw-Cert-Work'
 )
+# The two folders above the certification roots. Creating a certification root
+# creates them when the host has no Secure Client, so they are recorded too and
+# removed only when this run created them and they are empty (GAP-0780).
+$script:ProgramFilesSecureClientRoot = ConvertTo-CanonicalPath (
+    Join-Path $script:KnownProgramFiles 'Cisco\Cisco Secure Client'
+)
+$script:ProgramFilesCiscoRoot = ConvertTo-CanonicalPath (
+    Join-Path $script:KnownProgramFiles 'Cisco'
+)
+$script:ProgramDataSecureClientRoot = ConvertTo-CanonicalPath (
+    Join-Path $script:KnownProgramData 'Cisco\Cisco Secure Client'
+)
+$script:ProgramDataCiscoRoot = ConvertTo-CanonicalPath (
+    Join-Path $script:KnownProgramData 'Cisco'
+)
 $script:InstallRoot = Assert-PathBelow `
     (Join-Path $script:ProgramFilesCertificationRoot $script:RunToken) `
     $script:ProgramFilesCertificationRoot `
@@ -20882,7 +20901,11 @@ $script:CertificationParentRoots = @(
         $script:ProgramFilesCertificationRoot,
         $script:ProgramDataCertificationRoot,
         $script:ProgramDataStagingRoot,
-        $script:ProgramDataWorkRoot
+        $script:ProgramDataWorkRoot,
+        $script:ProgramFilesSecureClientRoot,
+        $script:ProgramFilesCiscoRoot,
+        $script:ProgramDataSecureClientRoot,
+        $script:ProgramDataCiscoRoot
     )) {
         [pscustomobject]@{
             path = ConvertTo-CanonicalPath $parentRoot
