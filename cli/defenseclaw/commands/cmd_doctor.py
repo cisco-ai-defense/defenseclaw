@@ -1874,7 +1874,10 @@ def _root_gateway_remedy_for(platform_name: str, cfg) -> str:
         executable = _root_gateway_windows_executable()
         stop = powershell_command_line(executable, "stop")
         start = powershell_command_line(executable, "start")
-        return f"Stop it from an administrator prompt ({stop}), then start it as yourself ({start})"
+        return (
+            f"Stop it from an elevated PowerShell prompt ({stop}), "
+            f"then start it as yourself from a normal PowerShell prompt ({start})"
+        )
     if platform_name == "darwin":
         return (
             "Open DefenseClawMac and choose Start Gateway: it stops the root gateway with "

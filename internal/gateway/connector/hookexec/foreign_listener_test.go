@@ -97,20 +97,20 @@ func TestPerUserHookNamesSameHomeRootListenerWithoutSending(t *testing.T) {
 // namesRootGatewayRemedy reports whether text carries the remedy of the
 // given OS (GAP-0706, GAP-0746): macOS and Linux name the privileged
 // stop with the account's home (sudo env DEFENSECLAW_HOME=), Windows names
-// the administrator prompt and never sudo.
+// the elevated PowerShell prompt and never sudo.
 func namesRootGatewayRemedy(goos, text string) bool {
 	if goos == "windows" {
-		return strings.Contains(text, "administrator prompt") && !strings.Contains(text, "sudo ")
+		return strings.Contains(text, "elevated PowerShell prompt") && !strings.Contains(text, "sudo ")
 	}
 	return strings.Contains(text, "sudo env DEFENSECLAW_HOME=")
 }
 
 // GAP-0746: the root-gateway remedy check follows the OS. Each OS accepts its
 // own remedy only: the Unix sudo form is not a Windows remedy, and the
-// administrator prompt is not a macOS or Linux one.
+// elevated PowerShell prompt is not a macOS or Linux one.
 func TestGAP0746RootGatewayRemedyCheckFollowsTheOS(t *testing.T) {
 	const unix = "Stop it, return its files to your account and start it as yourself with: sudo env DEFENSECLAW_HOME='/h' '/bin/defenseclaw-gateway' stop && defenseclaw-gateway start"
-	const windows = "Stop it from an administrator prompt (& 'C:\\Users\\a\\bin\\defenseclaw-gateway.exe' stop), then start it as yourself (& 'C:\\Users\\a\\bin\\defenseclaw-gateway.exe' start)"
+	const windows = "Stop it from an elevated PowerShell prompt (& 'C:\\Users\\a\\bin\\defenseclaw-gateway.exe' stop), then start it as yourself from a normal PowerShell prompt (& 'C:\\Users\\a\\bin\\defenseclaw-gateway.exe' start)"
 	for _, tc := range []struct {
 		goos, text string
 		want       bool

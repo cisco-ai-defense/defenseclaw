@@ -73,12 +73,19 @@ func TestGAP0747WindowsRootGatewayRemedyIsRenderedNotTyped(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			stop := managed.WindowsCommandLine(tc.executable, "stop")
 			start := managed.WindowsCommandLine(tc.executable, "start")
-			want := "Stop it from an administrator prompt (" + stop + "), then start it as yourself (" + start + ")"
+			want := "Stop it from an elevated PowerShell prompt (" + stop + "), then start it as yourself from a normal PowerShell prompt (" + start + ")"
 			if got := windowsRootGatewayRemedy(tc.executable); got != want {
 				t.Fatalf("remedy = %q, want %q", got, want)
 			}
 			if !strings.HasPrefix(stop, "& '") || strings.Contains(want, "(defenseclaw-gateway ") {
 				t.Fatalf("remedy names a bare command: %q", want)
+			}
+			// The call-operator form runs only in PowerShell (not cmd.exe): the text must say so.
+			if !strings.Contains(want, "from an elevated PowerShell prompt (") || !strings.Contains(want, "from a normal PowerShell prompt (") {
+				t.Fatalf("remedy does not name PowerShell for both steps: %q", want)
+			}
+			if strings.Contains(want, "administrator prompt") {
+				t.Fatalf("remedy names an unnamed-shell prompt: %q", want)
 			}
 			if strings.Contains(want, "sudo") {
 				t.Fatalf("a Windows remedy names sudo: %q", want)

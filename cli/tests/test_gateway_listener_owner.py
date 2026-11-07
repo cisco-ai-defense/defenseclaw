@@ -151,8 +151,8 @@ def test_doctor_sidecar_root_listener_uses_root_remedy(monkeypatch) -> None:
     detail = cmd_doctor._foreign_gateway_port_detail(cfg, holder)
     remedy = cmd_doctor._foreign_gateway_port_remediation(cfg, holder=holder)
     if sys.platform.startswith("win"):
-        # GAP-0747: the Windows remedy is an administrator prompt, never sudo.
-        assert "administrator prompt" in detail and "sudo" not in detail and remedy in detail
+        # GAP-0747: the Windows remedy is an elevated PowerShell prompt, never sudo.
+        assert "elevated PowerShell prompt" in detail and "sudo" not in detail and remedy in detail
     else:
         assert "sudo env DEFENSECLAW_HOME=" in detail and remedy in detail
     assert "--api-port" not in detail
