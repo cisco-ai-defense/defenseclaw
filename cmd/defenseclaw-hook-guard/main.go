@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // defenseclaw-hook-guard is the one-line Windows install's Claude Code
-// PreToolUse guard (internal/hookguard). Release builds link it with
+// launcher guard (internal/hookguard). Release builds link it with
 // -H=windowsgui: the console gateway that was the guard before got a console
 // window of its own whenever a caller without a console started it, and
 // Windows Terminal showed it (GAP-2467). It is its own small file, not the
@@ -28,8 +28,8 @@ func main() {
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if launcher, hookArgs, event, wrapped, ok := hookguard.ParseInvocation(args); ok {
-		return hookguard.RunEvent(launcher, hookArgs, event, wrapped, stdin, stdout, stderr)
+	if launcher, hookArgs, event, wrapped, open, ok := hookguard.ParseInvocationMode(args); ok {
+		return hookguard.RunEventMode(launcher, hookArgs, event, wrapped, open, stdin, stdout, stderr)
 	}
 	if dataDir, launcher, event, ok := hookguard.CoworkArgv(args); ok {
 		return hookguard.RunCowork(dataDir, launcher, event, stdin, stdout, stderr)
