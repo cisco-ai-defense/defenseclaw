@@ -52,12 +52,12 @@ var managedAgentSettingsDirs = []managedSettingsDir{
 	{"/Library/Application Support/opencode", opencodeManagedEntries},
 }
 
-// CaseInsensitiveFilesystem reports a host whose default file system
-// ignores case: macOS, which the gateway's own OS or the user's home
-// (/Users/...) names. Linux file systems are case sensitive, so two names
-// that differ in case there are two files.
-func CaseInsensitiveFilesystem(home string) bool {
-	return runtime.GOOS == "darwin" || strings.HasPrefix(home, "/Users/")
+// CaseInsensitiveFilesystem reports a host whose default file system ignores
+// case: macOS. The platform this process runs on decides, never the spelling
+// of a home or a path: a Linux host that has a /Users directory still tells
+// two names that differ in case apart (rel-1-0-6:GAP-0734 review 11 M2).
+func CaseInsensitiveFilesystem() bool {
+	return runtime.GOOS == "darwin"
 }
 
 // ManagedAgentSettingsPath reports an absolute POSIX path that is one of
@@ -287,7 +287,10 @@ func WindowsLocalDrivePath(value string) (string, bool) {
 
 // windowsLocalHost reports a UNC host name that is this machine: localhost,
 // a loopback address in any spelling Windows resolves (127.0.0.0/8, ::1,
-// the ipv6-literal.net form), or the host's own name.
+// the ipv6-literal.net form), or one of the names of this host
+// (localHostNames). A name that only shares the first label with this host,
+// such as the same short name in another DNS domain, is another machine
+// (rel-1-0-6:GAP-0734 review 11 M1).
 func windowsLocalHost(host string) bool {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
@@ -298,12 +301,28 @@ func windowsLocalHost(host string) bool {
 	if address, err := netip.ParseAddr(host); err == nil {
 		return address.IsLoopback()
 	}
-	name, _, _ := strings.Cut(localHostName(), ".")
-	short, _, _ := strings.Cut(host, ".")
-	return name != "" && short == name
+	return host != "" && slices.Contains(localHostNames(), host)
 }
 
-var localHostName = sync.OnceValue(func() string {
-	name, _ := os.Hostname()
-	return strings.ToLower(name)
+// localHostNames are the names this machine answers to as a UNC server, lower
+// case and without a trailing dot: the host name the operating system gives,
+// its DNS fully qualified name where the platform has one, and the first
+// label of each (the short name). It is a variable so that a test can stand
+// in for a host.
+var localHostNames = sync.OnceValue(func() []string {
+	var names []string
+	if name, err := os.Hostname(); err == nil {
+		names = append(names, name)
+	}
+	names = append(names, osDNSHostName()...)
+	var all []string
+	for _, name := range names {
+		name = strings.ToLower(strings.TrimSuffix(name, "."))
+		if name == "" {
+			continue
+		}
+		short, _, _ := strings.Cut(name, ".")
+		all = append(all, name, short)
+	}
+	return all
 })

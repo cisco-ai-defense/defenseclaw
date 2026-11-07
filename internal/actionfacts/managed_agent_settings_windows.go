@@ -52,3 +52,19 @@ func longPathName(path string) (string, bool) {
 	}
 	return "", false
 }
+
+// osDNSHostName is the DNS fully qualified name of this computer
+// (GetComputerNameEx), which a UNC path can name it by; os.Hostname gives the
+// short label only.
+func osDNSHostName() []string {
+	var size uint32
+	_ = windows.GetComputerNameEx(windows.ComputerNameDnsFullyQualified, nil, &size)
+	if size == 0 {
+		return nil
+	}
+	buffer := make([]uint16, size)
+	if err := windows.GetComputerNameEx(windows.ComputerNameDnsFullyQualified, &buffer[0], &size); err != nil {
+		return nil
+	}
+	return []string{windows.UTF16ToString(buffer[:size])}
+}
