@@ -150,7 +150,10 @@ func readHandleBounded(handle windows.Handle, limit int64) ([]byte, error) {
 // marks the folder that holds the policy file. forStamp asks for the access
 // the stamp needs.
 func beginReprotect(recorded *recordedPolicyPaths, cur string, last bool, use policyFolderUse, forStamp bool) (*reprotectTx, error) {
-	access := uint32(windows.READ_CONTROL | windows.FILE_READ_ATTRIBUTES)
+	// Listing access is data access: an open that asks for none is not
+	// checked against other handles' share modes at all, so without it a
+	// handle that holds the folder with delete access would not be seen.
+	access := uint32(windows.READ_CONTROL | windows.FILE_READ_ATTRIBUTES | windows.FILE_LIST_DIRECTORY)
 	if forStamp {
 		access |= windows.WRITE_DAC | windows.WRITE_OWNER
 	}
