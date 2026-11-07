@@ -553,7 +553,7 @@ On a managed Linux computer the Plane C entry of the snapshot carries a `backend
 
 ### Identity, profiles and IDE inventory
 
-Three read-only routes back `defenseclaw guardrail profile explain`, `defenseclaw agent identities` and `defenseclaw agent ide-plugins`, and the managed `enterprise <os> profile-explain`, `agent-identities` and `ide-plugins` commands (which use the deployment's service token). They answer to the gateway token on loopback. Secure Client does not register them; each returns `404` there ([Identity and authentication](/docs/enterprise/identity-and-authentication)).
+Three read-only routes back `defenseclaw guardrail profile explain`, `defenseclaw agent identities` and `defenseclaw agent ide-plugins`, and the managed `enterprise <os> profile-explain`, `agent-identities` and `ide-plugins` commands (which use the deployment's service token). They answer to the gateway token on loopback. [Managed command availability](/docs/enterprise/managed-commands) lists which of the `defenseclaw` commands a managed computer offers. Secure Client does not register them; each returns `404` there ([Identity and authentication](/docs/enterprise/identity-and-authentication)).
 
 | Method | Path | Purpose |
 | --- | --- | --- |
