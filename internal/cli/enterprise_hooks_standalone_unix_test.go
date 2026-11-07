@@ -139,10 +139,11 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 		return os.WriteFile(path, []byte(body), 0o700)
 	}
 	enterpriseHookWorkerProber = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.HookElements, error) {
-		return enterprisehooks.HookElements{
-			Entry:   !entryBroken || holds(hermesConfig(opts.UserHome), "defenseclaw-hook"),
-			Runtime: runtimeIntact || holds(hermesScript(opts.UserHome), "restored"),
-		}, nil
+		elements := enterprisehooks.HookElements{Entry: !entryBroken || holds(hermesConfig(opts.UserHome), "defenseclaw-hook")}
+		if !runtimeIntact && !holds(hermesScript(opts.UserHome), "restored") {
+			elements.BrokenRuntime = []string{enterprisehooks.HookElementRuntime}
+		}
+		return elements, nil
 	}
 	enterpriseHookWorkerInstaller = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
 		if mode == "fail" {
