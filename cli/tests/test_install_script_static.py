@@ -2682,7 +2682,7 @@ def test_rollback_and_upgrade_prune_hook_entries_of_connectors_no_longer_configu
         'set -euo pipefail\nwarn() { echo "warn: $*"; }\n'
         + _install_sh_functions("prune_orphaned_hooks")
         + f'DEFENSECLAW_HOME="{home}" LOG="{tmp_path / "log"}"\n'
-        + f'prune_orphaned_hooks "" "{tmp_path / "missing"}" "{older}" "{newer}"\n',
+        + f'prune_orphaned_hooks "{tmp_path / "missing"}" "{older}" "{newer}"\n',
         encoding="utf-8",
     )
 
@@ -2698,10 +2698,10 @@ def test_rollback_and_upgrade_prune_hook_entries_of_connectors_no_longer_configu
     rollback = text[text.index('if [[ "${ROLLBACK}" == true ]]; then') : text.index("# ── Stage: nothing live changes")]
     # Run after the swap, for a 1.x install; a 0.x one gets its own teardown first.
     assert rollback.index("swap_with_previous || swapped=$?") < rollback.index(
-        'if ! version_lt "${back_to}" 1.0.0; then\n        prune_orphaned_hooks "${PREVIOUS}/data" "${BIN_DIR}/defenseclaw-gateway" "${PREVIOUS}/bin/defenseclaw-gateway"'
+        'if ! version_lt "${back_to}" 1.0.0; then\n        PRUNE_ROLLBACK_BACKUPS_DIR="${PREVIOUS}/data" prune_orphaned_hooks "${BIN_DIR}/defenseclaw-gateway" "${PREVIOUS}/bin/defenseclaw-gateway"'
     )
     swap = text[text.index("swap_in() {") : text.index("swap_app() {")]
-    assert 'prune_orphaned_hooks "" "${BIN_DIR}/defenseclaw-gateway"' in swap  # an upgrade heals a host already hit
+    assert 'prune_orphaned_hooks "${BIN_DIR}/defenseclaw-gateway"' in swap  # an upgrade heals a host already hit
 
 
 def _run_prune_orphaned_hooks(tmp_path: Path, backups_dir: str, *gateways: Path) -> tuple[subprocess.CompletedProcess[str], Path]:
@@ -2712,7 +2712,8 @@ def _run_prune_orphaned_hooks(tmp_path: Path, backups_dir: str, *gateways: Path)
         'set -euo pipefail\nwarn() { echo "warn: $*"; }\n'
         + _install_sh_functions("prune_orphaned_hooks")
         + f'DEFENSECLAW_HOME="{home}" LOG="{tmp_path / "log"}"\n'
-        + f'prune_orphaned_hooks "{backups_dir}" {quoted}\n',
+        + (f'PRUNE_ROLLBACK_BACKUPS_DIR="{backups_dir}" ' if backups_dir else "")
+        + f"prune_orphaned_hooks {quoted}\n",
         encoding="utf-8",
     )
     return _run([str(script)], tmp_path), home
