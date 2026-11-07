@@ -204,7 +204,7 @@ func TestVendorFolderRefusalsListsEachRefusedFolderOnce(t *testing.T) {
 		fmt.Errorf("devincascade: %w", refusal(devin)),
 		errors.New("opencode: some other failure"),
 		fmt.Errorf("copilot: %w", refusal(copilot)),
-		fmt.Errorf("windsurf: %w", refusal(strings.ToUpper(devin))),
+		fmt.Errorf("legacy devin folder: %w", refusal(strings.ToUpper(devin))),
 	)
 	got := VendorFolderRefusals(err)
 	if len(got) != 2 || got[0].Dir != devin || got[1].Dir != copilot ||

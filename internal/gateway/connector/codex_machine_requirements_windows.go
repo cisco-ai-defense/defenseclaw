@@ -1788,8 +1788,8 @@ func ensureWindowsCodexWriterLockDescriptor(handle windows.Handle, path string) 
 			ownerText = owner.String()
 		}
 		return fmt.Errorf(
-			"the Codex machine policy lock %s is owned by %s, not an administrator: from an elevated prompt delete it (del /a:h %q), then run Setup /ensure",
-			path, ownerText, path,
+			"the Codex machine policy lock %s is owned by %s, not an administrator: from an elevated prompt delete it (del /a:h %q), then run `%s`. %s",
+			path, ownerText, path, managed.WindowsSetupCommand("/ensure"), managed.WindowsSetupSource,
 		)
 	}
 	canonical, err := windows.SecurityDescriptorFromString(windowsCodexWriterLockSDDL)

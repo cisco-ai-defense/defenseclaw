@@ -6273,10 +6273,10 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     selector = _psm1_function(module, "Remove-DefenseClawOwnRuntimeSelector")
     assert selector.index("Assert-DefenseClawNoReparsePath -Path $Directory -AllowMissingLeaf") < selector.index("Test-Path -LiteralPath $state")
     committed = _psm1_function(module, "Remove-DefenseClawCommittedManagedHooksSerializationLocks")
-    assert committed.index("Assert-DefenseClawNoReparsePath -Path ([IO.Path]::GetDirectoryName($full)) -AllowMissingLeaf") < committed.index(
+    assert committed.index("Assert-DefenseClawNoReparsePath -Path ([IO.Path]::GetDirectoryName($path)) -AllowMissingLeaf") < committed.index(
         "Remove-DefenseClawManagedHooksSerializationLock"
     )
-    assert "Add-DefenseClawCreatedFolderKept -Folder ([IO.Path]::GetDirectoryName($full))" in committed
+    assert "Add-DefenseClawCreatedFolderKept -Folder ([IO.Path]::GetDirectoryName($path))" in committed
     lock = _psm1_function(module, "Open-DefenseClawRuntimeSelectorLock")
     assert lock.index("Assert-DefenseClawNoReparsePath -Path ([IO.Path]::GetDirectoryName($Path))") < lock.index("[IO.FileMode]::CreateNew")
     assert "[bool]$ownership.preimage_existed" in agent and "[bool]$receipt.config_preexisting" in agent
@@ -6366,6 +6366,15 @@ def test_codex_machine_link_keep_belongs_to_the_uninstall_alone() -> None:
     assert "[IO.Path]::GetDirectoryName([IO.Path]::GetFullPath([string]$destination))" in skip
     assert "[IO.Path]::GetFullPath([string]$Layout.CodexMachinePolicyDirectory)" in skip
     assert "continue" in skip and "[StringComparison]::OrdinalIgnoreCase" in skip
+
+    # The content gate (g582) does not judge the Codex files behind a kept link
+    # on an uninstall, so a purge over an administrator's junction goes on;
+    # install, ensure and repair (Lifecycle scope) still judge them and refuse.
+    gate = _psm1_function(module, "Assert-DefenseClawStandaloneContentTrusted")
+    codex_rows = gate[gate.index("CodexTargetEnabled) -eq 'True') {") :]
+    codex_rows = codex_rows[: codex_rows.index("# Writer 'Gateway'")]
+    assert "$Scope -ceq 'Lifecycle' -or" in codex_rows
+    assert codex_rows.index("Get-DefenseClawCodexMachineFolderLink -Layout $Layout") < codex_rows.index("'CodexMachinePolicyPath'")
 
     # Only the uninstall's three removal call sites pass -Teardown, to the
     # command (which adds --uninstall to the remove action) and to the check
@@ -7072,9 +7081,9 @@ def test_untrusted_config_acl_is_refused_before_the_transaction_stops_a_service(
         "if ($CheckOnly) {\n        return $true"
     ) < repair.index("Set-DefenseClawRetainedRuntimeAcls")
     refusal = _function_text(module, "Assert-DefenseClawRepairableConfigAcl")
-    assert "(remove that entry, then run Setup /ensure " in refusal
-    assert "CONFIG=<the approved config> writes a new config.yaml " in refusal
-    assert '"from that administrator-only file instead): $($_.Exception.Message)")' in refusal
+    assert "(remove that entry, then ' +\n                (Format-DefenseClawRerunStep) + '; for config.yaml itself, run ' +" in refusal
+    assert "(Format-DefenseClawSetupAction -Action '/ensure CONFIG=<the approved config>')" in refusal
+    assert '" to write a new config.yaml from that administrator-only file instead): $($_.Exception.Message)")' in refusal
 
     # GAP-0603: the standalone self-heal never re-stamps an untrusted owner
     # or a null DACL; Setup's own account as owner is still repaired.
@@ -7128,6 +7137,8 @@ _RESTAMP_VARIABLES = {
     "$item.FullName": {"CredentialFiles"},
     # The copy of the Codex state the hook reads (GAP-0650).
     "$codexStateCopy": {"CodexManagedHooksStatePath"},
+    # The lazily created lock files (GAP-0766): named out of class, they hold no bytes DefenseClaw reads.
+    "$lockFile.Path": {"LazyLockFiles"},
 }
 
 

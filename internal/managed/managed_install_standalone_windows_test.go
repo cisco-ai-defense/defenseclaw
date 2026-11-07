@@ -194,7 +194,7 @@ func TestStandaloneManagedInstallRepairRefusesAnUntrustedFolder(t *testing.T) {
 			}
 			if tc.refused {
 				if result.Outcome != CanonicalBoundary || !strings.Contains(result.RepairError, "/remove:g") ||
-					!strings.Contains(result.RepairError, "Setup /ensure") {
+					!strings.Contains(result.RepairError, "/ensure") {
 					t.Fatalf("result = %+v, want a boundary refusal naming the way out", result)
 				}
 				if assessed.Outcome != CanonicalBoundary {

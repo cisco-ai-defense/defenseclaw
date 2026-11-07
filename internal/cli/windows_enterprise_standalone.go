@@ -1361,7 +1361,7 @@ func windowsFreshFileHeldError(path string, err error) error {
 	if holders := processutil.FileHolders(path); len(holders) != 0 {
 		holder = strings.Join(holders, ", ")
 	}
-	return fmt.Errorf("%s is held open by %s, so Setup cannot put a new file in its place (%w): stop %s, or restart Windows, then run Setup /ensure again",
+	return fmt.Errorf("%s is held open by %s, so Setup cannot put a new file in its place (%w): stop %s, or restart Windows, then run the same command again",
 		path, holder, err, holder)
 }
 
@@ -3178,7 +3178,7 @@ func applyWindowsEnterpriseAmpMachineFolder(result *enterprisestatus.Result) {
 }
 
 // windowsEnterpriseVendorFolderProblems lists the vendor folders (Copilot's
-// policy.d, OpenCode's, Devin's and Windsurf's) that DefenseClaw did not
+// policy.d, OpenCode's and Devin's two) that DefenseClaw did not
 // create, that hold a file DefenseClaw recorded, and that another account
 // can use to delete or replace that file, or, for a vendor that loads every
 // file in the folder, to add one. It is the verdict the guardian's publish
@@ -3258,7 +3258,7 @@ const windowsEnterpriseVendorFolderCode = "vendor_folder_not_held"
 // refuseWindowsEnterpriseUntrustedVendorFolders is the install-like
 // lifecycle's and the reconcile's judgement of the vendor folders DefenseClaw
 // did not create that hold a file DefenseClaw recorded (E3 case c: Devin and
-// Windsurf, Copilot's policy.d, OpenCode). It runs before any service stops or
+// the pre-rename Devin folder, Copilot's policy.d, OpenCode). It runs before any service stops or
 // file changes, on a standalone deployment. A folder that lets another
 // account delete or replace the recorded file (or, for a vendor that loads
 // every file in it, add one) is put back to DefenseClaw's protected form by

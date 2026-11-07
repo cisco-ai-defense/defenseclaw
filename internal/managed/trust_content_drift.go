@@ -32,18 +32,6 @@ func standaloneConfigDriftRecovery() string {
 		"`. " + WindowsSetupSource
 }
 
-func standaloneManifestDriftRecovery() string {
-	return "from an elevated PowerShell prompt run `" + WindowsSetupCommand("/ensure", "CONFIG=<the approved config>") +
-		"` so Setup writes a new targets.yaml enumerated from it (in manifest enrollment mode add MANIFEST=<the approved targets.yaml>), then `" +
-		WindowsAdminCommand("enterprise", "windows", "verify", "--profile", "standalone") + "`. " + WindowsSetupSource
-}
-
-func standaloneRecordDriftRecovery() string {
-	return "Setup does not write this file from an administrator source and refuses it too, before it stops anything: remove that " +
-		"entry, or give the file back to Administrators, and check the file, then from an elevated PowerShell prompt run `" + WindowsSetupCommand("/ensure") + "` and `" +
-		WindowsAdminCommand("enterprise", "windows", "verify", "--profile", "standalone") + "`. " + WindowsSetupSource
-}
-
 // standaloneMachinePolicyDriftRecovery is the way out of a drifted Claude
 // Code, Codex or Cursor machine policy folder or DefenseClaw file in it,
 // which the hook guardian does not re-stamp (GAP-0633). A file is deleted,

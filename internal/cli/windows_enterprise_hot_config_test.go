@@ -678,7 +678,7 @@ func TestWriteFreshFileWithDACLNamesTheWayOutOfAHeldFile(t *testing.T) {
 	if err == nil || pending != "" || !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
 		t.Fatalf("write over a held file = %q, %v; want a sharing violation", pending, err)
 	}
-	for _, want := range []string{path + " is held open by ", "stop ", "or restart Windows, then run Setup /ensure again"} {
+	for _, want := range []string{path + " is held open by ", "stop ", "or restart Windows, then run the same command again"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q does not say %q", err, want)
 		}

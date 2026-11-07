@@ -76,35 +76,11 @@ func vendorFolderCases() []vendorFolderCase {
 		}
 	}
 	return []vendorFolderCase{
-		{
-			name: "Devin", connector: ConnectorDevinCascade, request: "devin", record: ConnectorDevinCascade,
-			options: windowsTestOptions,
-			file: func(t *testing.T, opts Options) string {
-				path, err := DevinSystemHooksPath(opts)
-				if err != nil {
-					t.Fatal(err)
-				}
-				return path
-			},
-			prepare: func(t *testing.T, _ Options, file string) { vendorDirs(t, filepath.Dir(file)) },
-		},
-		{
-			name: "Windsurf", connector: ConnectorDevinCascade, request: "devin", record: devinCascadeLegacyRecord,
-			options: windowsTestOptions,
-			file: func(t *testing.T, opts Options) string {
-				path, err := devinCascadeLegacyHooksPath(opts)
-				if err != nil {
-					t.Fatal(err)
-				}
-				return path
-			},
-			prepare: func(t *testing.T, _ Options, file string) {
-				// Only the pre-rename file exists, so the publish merges into
-				// the Windsurf folder and records that file.
-				vendorDirs(t, filepath.Dir(file))
-				writeFile(t, file, "{\n  \"hooks\": {}\n}\n")
-			},
-		},
+		// Devin is not a row any more: since rel GAP-0787 a 1.0.9 Devin Cascade
+		// target publishes nothing into its ProgramData folders and only
+		// withdraws what 1.0.5 to 1.0.8 wrote, so no file is recorded there to
+		// judge a folder by. The withdrawal over a link has its own row
+		// (TestWindowsGoOwnedRemovalKeepsOnlyTheLinkedDevinFolder).
 		{
 			name: "opencode", connector: ConnectorOpenCode, request: ConnectorOpenCode, record: ConnectorOpenCode,
 			options: windowsOpenCodeTestOptions,
@@ -229,7 +205,7 @@ func requireNotTakenOverMessage(t *testing.T, err error, folder string, siblings
 	}
 	text := err.Error()
 	if !strings.Contains(text, folder) || !strings.Contains(text, "does not take it over") ||
-		!strings.Contains(text, "Setup /ensure") {
+		!strings.Contains(text, "/ensure") {
 		t.Fatalf("err = %v; want the one message naming %s and the fix", err, folder)
 	}
 	requireFolderFix(t, text, folder)
@@ -351,7 +327,7 @@ func TestStandaloneRecordedVendorFolderAStandardUserCanReplaceFailsClosed(t *tes
 
 // Case c, benign twin: a vendor folder where standard users may only add
 // entries is left as it is (no takeover) and the publish goes on, when the
-// vendor reads only DefenseClaw's file name there (Devin and Windsurf read
+// vendor reads only DefenseClaw's file name there (Devin reads
 // only hooks.json): the recorded file keeps its own administrator-only
 // access list.
 func TestStandaloneRecordedVendorFolderUsersMayOnlyAddIsLeftAndPublished(t *testing.T) {
@@ -553,11 +529,6 @@ func TestStandaloneRecordedVendorFolderRemovalLeavesAFileItCannotTrust(t *testin
 // can change is replaced, never trusted as found.
 func TestStandaloneVendorFolderDefenseClawCreatedIsRestamped(t *testing.T) {
 	for _, tc := range vendorFolderCases() {
-		if tc.name == "Windsurf" {
-			// DefenseClaw never creates the pre-rename folder: it writes
-			// there only when the vendor file already exists.
-			continue
-		}
 		t.Run(tc.name, func(t *testing.T) {
 			pinReclaimStandalone(t, true)
 			opts := tc.options(t)

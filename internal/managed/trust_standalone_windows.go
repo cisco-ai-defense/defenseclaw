@@ -171,6 +171,20 @@ func standaloneLeafVerdict(err error) *UntrustedPrincipalError {
 	return &UntrustedPrincipalError{Path: dacl.Path, ACL: "unsupported", text: dacl.text}
 }
 
+// The targets.yaml and record recovery texts are only chosen on Windows
+// (standaloneContentDriftRecovery below), through the renderer.
+func standaloneManifestDriftRecovery() string {
+	return "from an elevated PowerShell prompt run `" + WindowsSetupCommand("/ensure", "CONFIG=<the approved config>") +
+		"` so Setup writes a new targets.yaml enumerated from it (in manifest enrollment mode add MANIFEST=<the approved targets.yaml>), then `" +
+		WindowsAdminCommand("enterprise", "windows", "verify", "--profile", "standalone") + "`. " + WindowsSetupSource
+}
+
+func standaloneRecordDriftRecovery() string {
+	return "Setup does not write this file from an administrator source and refuses it too, before it stops anything: remove that " +
+		"entry, or give the file back to Administrators, and check the file, then from an elevated PowerShell prompt run `" + WindowsSetupCommand("/ensure") + "` and `" +
+		WindowsAdminCommand("enterprise", "windows", "verify", "--profile", "standalone") + "`. " + WindowsSetupSource
+}
+
 // standaloneContentDriftRecovery is the recovery that works for the file
 // err refuses: Setup writes config.yaml and the guardian manifest new from
 // the approved source; every other content file is the administrator's to

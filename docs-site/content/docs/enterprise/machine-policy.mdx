@@ -173,7 +173,7 @@ On Windows, Codex, Claude Code and Cursor policy is written with Windows-specifi
   - A vendor folder DefenseClaw did not create that holds no file DefenseClaw recorded is taken over as described here.
   - A vendor folder DefenseClaw did not create that holds a file DefenseClaw recorded is not taken over on sight. An example is a `C:\ProgramData\Devin` the vendor made, holding DefenseClaw's `hooks.json`.
 
-  In that last case the recorded file keeps its own administrator-only access list. The folder is left as it is while no standard user can delete or replace that file there and the vendor reads only that file name there. Devin and Windsurf read only `hooks.json`, so the inherited "Users may add files" entry of `%ProgramData%` does no harm there.
+  In that last case the recorded file keeps its own administrator-only access list. The folder is left as it is while no standard user can delete or replace that file there and the vendor reads only that file name there. Devin reads only `hooks.json`, in both of its folders, so the inherited "Users may add files" entry of `%ProgramData%` does no harm there.
 
   The folder stops protecting the file when a standard user gains delete-child, change-permissions or ownership. If the vendor loads more than one file from the folder, it also stops protecting it when a standard user can add a file: GitHub Copilot loads every `*.json` in `policy.d`, and OpenCode prefers an `opencode.jsonc` over DefenseClaw's `opencode.json`. The next reconcile (the guardian pass, Setup `/ensure`, `/repair`, `/upgrade` or `/reconcile`) then puts the folder back to DefenseClaw's owner and protected access list in one safe transaction, and says so once.
 

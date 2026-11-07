@@ -40,7 +40,7 @@ const StaleHookKept = "stale hook: "
 
 // KeptUntrustedPolicyFiles lists, after an uninstall, the vendor policy files
 // of the Go-owned Windows connectors (Copilot's drop-in, OpenCode's managed
-// config, Devin's and Windsurf's hooks.json) that another account owns or can
+// config, Devin's two hooks.json files) that another account owns or can
 // change and that still name DefenseClaw. The uninstall never writes through
 // such a file (keepUntrustedRecordedFile), so the file stays byte for byte and
 // its DefenseClaw hook entries now name programs the uninstall removed. Each

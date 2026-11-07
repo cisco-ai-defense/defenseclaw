@@ -836,10 +836,17 @@ func TestWindowsCodexUpgradeFromAFixedNameReadHoldFailsRetryablyAndLeavesTheStat
 			if counter, err := readWindowsCodexTransactionCounter(f.lock); err != nil || counter != 0 {
 				t.Fatalf("counter after the failed attempt = %d, %v; want 0", counter, err)
 			}
-			if data, err := os.ReadFile(f.state); err != nil && hold.share != 0 {
+			// The holder does not share reading, so Windows may refuse this
+			// plain read (it does for SYSTEM and let it through for an
+			// Administrator on the same file); a read that works must see the
+			// state of 1.0.8 unchanged, and the file is checked below and after
+			// the release either way.
+			if data, err := os.ReadFile(f.state); err == nil {
+				if string(data) != "state of 1.0.8" {
+					t.Fatalf("the state of 1.0.8 was changed to %q", data)
+				}
+			} else if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
 				t.Fatalf("the state of 1.0.8 cannot be read back: %v", err)
-			} else if err == nil && string(data) != "state of 1.0.8" {
-				t.Fatalf("the state of 1.0.8 was changed to %q", data)
 			}
 			if _, err := os.Lstat(f.state); err != nil {
 				t.Fatalf("the state of 1.0.8 is gone: %v", err)
