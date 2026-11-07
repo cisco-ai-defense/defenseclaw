@@ -180,6 +180,8 @@ func TestRefreshManagedApprovedConfigSourceRefusesWhatItCannotBind(t *testing.T)
 		"not an object":         `[]`,
 		"bad digest":            `{"installed":true,"approved_policy_sources":{"config":"zz"}}`,
 		"unknown source":        `{"installed":true,"approved_policy_sources":{"other":"` + strings.Repeat("a", 64) + `"}}`,
+		"null record":           `null`,
+		"null source record":    `{"installed":true,"profile":"standalone","approved_policy_sources":null}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -189,6 +191,9 @@ func TestRefreshManagedApprovedConfigSourceRefusesWhatItCannotBind(t *testing.T)
 			}
 			if err := refreshManagedApprovedConfigSource(dir, []byte(approvedSourceConfigB)); err == nil {
 				t.Fatal("the refresh accepted a record it cannot bind")
+			}
+			if changed, err := healManagedApprovedConfigSource(dir, []byte(approvedSourceConfigB)); err == nil || changed {
+				t.Fatalf("the heal accepted a record it cannot bind: changed=%v err=%v", changed, err)
 			}
 			after, _ := os.ReadFile(path)
 			if string(after) != record {
@@ -223,5 +228,79 @@ func TestRefreshManagedApprovedConfigSourceRefusesWhatItCannotBind(t *testing.T)
 	}
 	if got, _ := os.ReadFile(target); string(got) != "x" {
 		t.Fatalf("the link target was written: %q", got)
+	}
+}
+
+// approvedRepairRestores is what Setup /repair does with the approved config
+// source over a config.yaml the generation record calls a hand edit
+// (Get-DefenseClawApprovedPolicySource): the copy is restored only when its
+// digest is the one deployment.json records.
+func approvedRepairRestores(t *testing.T, dir string) string {
+	t.Helper()
+	body, record := readApprovedSourceFolder(t, dir)
+	if approvedConfigDigest(record) != configwrite.SHA256Hex([]byte(body)) {
+		t.Fatal("Repair would refuse a copy its record does not name")
+	}
+	return body
+}
+
+// A then B (the older build records A and leaves it), a binary-only upgrade
+// and a compliant ensure of the same B, then a hand edit and a Repair: the
+// heal at the end of that compliant ensure makes B the approved source, so
+// Repair restores B, not A.
+func TestHealManagedApprovedConfigSourceReplacesAnOlderApprovedConfigBeforeRepair(t *testing.T) {
+	dir := approvedSourceFolder(t) // the older build approved A; B is installed
+	if got := approvedRepairRestores(t, dir); got != approvedSourceConfigA {
+		t.Fatalf("setup: the stale source is %q", got)
+	}
+	changed, err := healManagedApprovedConfigSource(dir, []byte(approvedSourceConfigB))
+	if err != nil || !changed {
+		t.Fatalf("heal: changed=%v err=%v", changed, err)
+	}
+	if got := approvedRepairRestores(t, dir); got != approvedSourceConfigB {
+		t.Fatalf("Repair after a hand edit restores %q, want the installed config B", got)
+	}
+	_, record := readApprovedSourceFolder(t, dir)
+	if sources := record["approved_policy_sources"].(map[string]any); sources["manifest"] != strings.Repeat("c", 64) {
+		t.Fatalf("the approved manifest digest changed: %v", sources)
+	}
+}
+
+// Benign twins: a current source is not rewritten, a deployment that records no
+// approved config source (or has no record at all) is left exactly as it is.
+func TestHealManagedApprovedConfigSourceLeavesWhatItDoesNotOwn(t *testing.T) {
+	writes := 0
+	restore := writeManagedApprovedSourceFile
+	t.Cleanup(func() { writeManagedApprovedSourceFile = restore })
+	writeManagedApprovedSourceFile = func(path string, data []byte, sibling string) error {
+		writes++
+		return restore(path, data, sibling)
+	}
+
+	dir := approvedSourceFolder(t)
+	if changed, err := healManagedApprovedConfigSource(dir, []byte(approvedSourceConfigA)); err != nil || changed || writes != 0 {
+		t.Fatalf("a current source was rewritten: changed=%v err=%v writes=%d", changed, err, writes)
+	}
+
+	none := t.TempDir()
+	record := `{"installed":true,"profile":"standalone","hashes":{}}`
+	if err := os.WriteFile(filepath.Join(none, managedDeploymentRecordFile), []byte(record), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := healManagedApprovedConfigSource(none, []byte(approvedSourceConfigB)); err != nil || changed || writes != 0 {
+		t.Fatalf("a deployment without an approved source was changed: changed=%v err=%v writes=%d", changed, err, writes)
+	}
+	if after, _ := os.ReadFile(filepath.Join(none, managedDeploymentRecordFile)); string(after) != record {
+		t.Fatalf("the record changed: %s", after)
+	}
+	if _, err := os.Stat(filepath.Join(none, managedApprovedConfigFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("an approved copy was created: %v", err)
+	}
+
+	if changed, err := healManagedApprovedConfigSource(t.TempDir(), []byte(approvedSourceConfigB)); err != nil || changed {
+		t.Fatalf("a folder without a deployment record: changed=%v err=%v", changed, err)
+	}
+	if _, err := healManagedApprovedConfigSource("", []byte(approvedSourceConfigB)); err == nil {
+		t.Fatal("an unknown install state folder was accepted")
 	}
 }

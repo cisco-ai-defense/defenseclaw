@@ -107,6 +107,68 @@ func approveWindowsStandaloneConfigSource(layout managed.StandaloneLayout) error
 	return refreshManagedApprovedConfigSource(layout.LifecycleDir, installed)
 }
 
+// windowsEnterpriseHealApprovedSource is the ensure-exit check that an
+// approved config source an earlier build left stale does not outlive a
+// compliant ensure (GAP-0779); tests replace it.
+var windowsEnterpriseHealApprovedSource = healWindowsStandaloneApprovedConfigSource
+
+// healWindowsStandaloneApprovedConfigSource puts the config an ensure run just
+// accepted into the approved config source when the deployment records one
+// that differs: a binary-only upgrade, or a repeat of the installed CONFIG=,
+// publishes none, so an older approved copy would otherwise survive and a
+// Repair after a hand edit would restore it. A signed-bundle deployment is
+// left alone (Repair refuses it, and Setup approved copy is not proof of the
+// bundle bytes). A refusal is a warning: the run itself is compliant.
+func healWindowsStandaloneApprovedConfigSource(result *enterprisestatus.Result) {
+	if !windowsEnterpriseIsElevated() {
+		return
+	}
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil {
+		return
+	}
+	// Only a deployment that records an approved config source has one to
+	// heal; check before taking the lock so a host without one is untouched.
+	if layout.LifecycleDir == "" {
+		return
+	}
+	if _, err := os.Stat(filepath.Join(layout.LifecycleDir, managedDeploymentRecordFile)); err != nil {
+		return
+	}
+	if windowsStandaloneBundleStoreHoldsVersions(layout) {
+		return
+	}
+	release, err := windowsEnterpriseHotConfigLock(filepath.Join(layout.LifecycleDir, "lifecycle.lock"))
+	if err != nil {
+		result.AddWarning("approved_config_source_unchecked", "another DefenseClaw lifecycle run holds lifecycle.lock; the approved config source was not checked and the next ensure checks it")
+		return
+	}
+	defer release()
+	installed, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
+	if err != nil {
+		return
+	}
+	changed, err := healManagedApprovedConfigSource(layout.LifecycleDir, installed)
+	switch {
+	case err != nil:
+		result.AddWarning("approved_config_source_stale", "the approved config source could not be refreshed ("+
+			windowsEnterpriseBoundedDiagnostic(err.Error())+"); a Setup /repair after a hand edit could restore an older config until /ensure CONFIG= runs with the current config")
+	case changed:
+		result.Changes = append(result.Changes, "refreshed the approved config source to the installed config, which an earlier release had left at an older config")
+	}
+}
+
+// windowsStandaloneBundleStoreHoldsVersions is whether the deployment ever
+// stored a signed policy bundle (a non-empty etc\bundles folder, as the
+// installer checks). An unreadable folder counts as holding versions.
+func windowsStandaloneBundleStoreHoldsVersions(layout managed.StandaloneLayout) bool {
+	entries, err := os.ReadDir(filepath.Join(layout.ConfigDir, "bundles"))
+	if err != nil {
+		return !errors.Is(err, os.ErrNotExist)
+	}
+	return len(entries) > 0
+}
+
 // reloadWindowsStandaloneBundlePolicy asks the installed gateway to load the
 // config now. A Windows directory notification can be lost during an atomic
 // config replacement; the bundle must not depend on that notification for
