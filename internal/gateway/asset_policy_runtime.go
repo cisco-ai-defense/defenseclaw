@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
@@ -829,6 +830,9 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 	if cfg == nil {
 		return config.AssetPolicyDecision{}, false
 	}
+	if decision, refused := a.profileAssetContentDecision(ctx, cfg, connector, targetType, runtimeSurface, probe); refused {
+		return decision, true
+	}
 	if targetType == "plugin" && !cfg.SecureClientIntegration() {
 		if decision, blocked := a.pluginJournalBlockDecision(probe.SkillName, connector, runtimeSurface); blocked {
 			return decision, true
@@ -1044,6 +1048,16 @@ func (a *APIServer) claudeCodePluginAssetDecision(ctx context.Context, req claud
 		}
 	}
 	owners, candidates := a.claudeCodeToolPlugins(ctx, req)
+	// A managed Windows gateway cannot read the plugin registry in a profile:
+	// the plugin the hook resolved for a bundled server's tool owns the call
+	// (GAP-0699).
+	if profileAssetScanApplies(cfg) && strings.HasPrefix(req.ToolName, "mcp__plugin_") {
+		for _, content := range claimedAssetFactsFromContext(ctx).Contents {
+			if content.Kind == assetfacts.ContentPlugin && !slices.ContainsFunc(owners, func(o string) bool { return strings.EqualFold(o, content.Name) }) {
+				owners = append(owners, content.Name)
+			}
+		}
+	}
 	for _, plugin := range owners {
 		probe := skillRuntimeProbe{
 			TargetType: "plugin", SkillName: plugin, ToolName: req.ToolName, Surface: "hook", Matched: true,
