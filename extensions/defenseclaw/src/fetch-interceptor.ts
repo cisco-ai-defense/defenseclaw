@@ -89,12 +89,20 @@ interface InterceptorSharedState {
   installed: boolean;
   guardrailPort: number | null;
   /**
+   * Set by an instance of this build when it installs the patch. State whose
+   * owner never set it belongs to an older plugin build still running in this
+   * process, which has no way to be asked to hand the transport over (GAP-0745).
+   */
+  generation?: number;
+  /**
    * start() of every instance that found the transport already patched by
    * another instance. When the installing instance stops, the next one takes
    * over, so a plugin reload never leaves the transport unguarded (GAP-0745).
    */
   waiting: Array<() => void>;
 }
+
+const SHARED_STATE_GENERATION = 2;
 
 function getOrCreateSharedState(): InterceptorSharedState {
   const existing = (globalThis as Record<symbol, unknown>)[
@@ -1524,6 +1532,52 @@ export function createFetchInterceptor(
   // may take the shared "installed" mark back down when it stops.
   let ownsInstall = false;
 
+  /** Give the transport to the next instance waiting for it, if any. */
+  function handOverTransport(): void {
+    const successor = _shared.waiting.shift();
+    if (!successor) return;
+    try {
+      successor();
+    } catch {
+      // The successor reports its own failure; stop() must not throw.
+    }
+  }
+
+  /**
+   * The copy holding the transport is from an older plugin build in this
+   * process. It cannot be asked to stop and has no waiting queue, but its
+   * stop() takes the shared mark down as its last act: watch that write and
+   * install in the same call, so the transport is never left to the native
+   * fetch. While that copy lives it keeps guarding the port it was started
+   * with, and this one stays inactive, which the interceptor-layer warning
+   * reports. A running OpenClaw gateway is only fully on this build after a
+   * restart (GAP-0745). Remove with the last supported upgrade from 1.0.8.
+   */
+  function watchOlderBuildOwner(): void {
+    const mark = Object.getOwnPropertyDescriptor(_shared, "installed");
+    if (!mark || !("value" in mark)) return; // already watched
+    console.warn(
+      "[defenseclaw] An older DefenseClaw plugin copy still guards this OpenClaw gateway process " +
+        `(guardrail port ${String(_shared.guardrailPort)}); this copy takes over when it stops. ` +
+        "Restart the OpenClaw gateway to load this version.",
+    );
+    Object.defineProperty(_shared, "installed", {
+      configurable: true,
+      enumerable: true,
+      get: () => true,
+      set: (value: boolean) => {
+        if (value) return;
+        Object.defineProperty(_shared, "installed", {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: false,
+        });
+        handOverTransport();
+      },
+    });
+  }
+
   function start(): void {
     if (originalFetch) return; // this instance already started
 
@@ -1535,6 +1589,7 @@ export function createFetchInterceptor(
       // Queue behind the installing instance: if it stops (a plugin reload
       // stops the old copy after the new one registered), this one installs.
       if (!_shared.waiting.includes(start)) _shared.waiting.push(start);
+      if (_shared.generation === undefined) watchOlderBuildOwner();
       // Pass the sidecar token like the first instance does: the
       // endpoint is authenticated, and an unauthenticated call is
       // logged as an api-auth-failure security event.
@@ -1545,10 +1600,16 @@ export function createFetchInterceptor(
       return;
     }
     _shared.installed = true;
+    _shared.generation = SHARED_STATE_GENERATION;
     _shared.guardrailPort = guardrailPort;
     ownsInstall = true;
 
-    originalFetch = globalThis.fetch;
+    // The wrappers below call these captured natives, not the mutable
+    // fields stop() clears: a model call admitted before a plugin reload
+    // stops this copy, or made through a reference to the wrapper that a
+    // caller kept, must still reach the guardrail proxy (GAP-0745).
+    const nativeFetch = globalThis.fetch;
+    originalFetch = nativeFetch;
     egressReporter = createEgressReporter({ guardrailPort });
 
     // Layer 4 (governance): pull the sidecar's merged provider
@@ -1559,7 +1620,7 @@ export function createFetchInterceptor(
     // out below so the bootstrap call is not intercepted by the
     // wrapper we're about to install.
     void bootstrapProviderOverlay(guardrailPort, {
-      fetchImpl: originalFetch,
+      fetchImpl: nativeFetch,
       token: loadSidecarConfig().token,
     });
 
@@ -1572,12 +1633,12 @@ export function createFetchInterceptor(
       // Never self-loop: a request already aimed at the guardrail proxy
       // short-circuits before any shape inspection so we don't peek its body.
       if (isAlreadyProxied(urlStr, guardrailPort)) {
-        return originalFetch!(input, init);
+        return nativeFetch(input, init);
       }
 
       if (shouldPassthroughChatGPTCodexResponseBackendUrl(urlStr)) {
         reportChatGPTCodexResponsePassthrough(urlStr);
-        return originalFetch!(input, init);
+        return nativeFetch(input, init);
       }
 
       // Layer 0: the known-provider allowlist is cheap and path-free.
@@ -1611,14 +1672,14 @@ export function createFetchInterceptor(
           decision: "allow",
           reason: "no-match",
         });
-        return originalFetch!(input, init);
+        return nativeFetch(input, init);
       }
 
       let original: URL;
       try {
         original = new URL(urlStr);
       } catch {
-        return originalFetch!(input, init);
+        return nativeFetch(input, init);
       }
 
       // Rewrite: keep path + query, replace scheme://host with proxy.
@@ -1713,7 +1774,7 @@ export function createFetchInterceptor(
 
       let response: Response;
       try {
-        response = await originalFetch!(proxied, newInit);
+        response = await nativeFetch(proxied, newInit);
       } catch (err) {
         if (!isConnectionRefused(err)) throw err;
         return gatewayDownResponse();
@@ -1747,8 +1808,10 @@ export function createFetchInterceptor(
     // delegate to node:https are intercepted. Note: undici-based clients
     // (including Node 18+ globalThis.fetch) are covered by the undici
     // dispatcher patch above, not this https.request patch.
-    originalHttpsRequest = https.request.bind(https);
-    originalHttpRequest = http.request.bind(http);
+    const nativeHttpsRequest = https.request.bind(https);
+    const nativeHttpRequest = http.request.bind(http);
+    originalHttpsRequest = nativeHttpsRequest;
+    originalHttpRequest = nativeHttpRequest;
     originalHttpGet = http.get.bind(http);
 
     type NodeRequestOptions = Record<string, unknown>;
@@ -1877,7 +1940,7 @@ export function createFetchInterceptor(
 
       if (urlStr && shouldPassthroughChatGPTCodexResponseBackendUrl(urlStr)) {
         reportChatGPTCodexResponsePassthrough(urlStr);
-        return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+        return nativeHttpsRequest(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
       }
 
       // Path-only shape detection for https.request — the body is
@@ -1912,7 +1975,7 @@ export function createFetchInterceptor(
         try {
           originalUrl = new URL(urlStr);
         } catch {
-          return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+          return nativeHttpsRequest(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
         }
 
         const hdrs = opts.headers as Record<string, string> ?? {};
@@ -2022,7 +2085,7 @@ export function createFetchInterceptor(
         // hop must use the captured original to avoid recursing
         // back into this branch.
         return explainRefusedProxyHop(
-          originalHttpRequest!(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]),
+          nativeHttpRequest(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]),
         );
       }
 
@@ -2042,7 +2105,7 @@ export function createFetchInterceptor(
           reason: "no-match",
         });
       }
-      return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+      return nativeHttpsRequest(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
     }
 
     https.request = patchedHttpsRequest as typeof https.request;
@@ -2082,7 +2145,7 @@ export function createFetchInterceptor(
           hasLLMPathSuffix(urlStr),
       );
       if (!knownCandidate && !shapedCandidate) {
-        return originalHttpRequest!(
+        return nativeHttpRequest(
           urlOrOptions as string,
           optionsOrCallback as NodeRequestOptions,
           callback,
@@ -2373,15 +2436,7 @@ export function createFetchInterceptor(
       ownsInstall = false;
       _shared.installed = false;
       _shared.guardrailPort = null;
-      // Hand the transport to an instance that was waiting for it.
-      const successor = _shared.waiting.shift();
-      if (successor) {
-        try {
-          successor();
-        } catch {
-          // The successor reports its own failure; stop() must not throw.
-        }
-      }
+      handOverTransport();
     }
     logInfo("[defenseclaw] LLM fetch interceptor stopped");
   }
