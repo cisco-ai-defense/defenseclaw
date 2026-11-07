@@ -593,13 +593,16 @@ func reclaimPolicyDirsFor(opts Options, dir string, use policyFolderUse) (policy
 					// DefenseClaw's protected form only when nothing holds
 					// it, its recorded files are as DefenseClaw wrote them
 					// and it holds nothing else; otherwise it is refused by
-					// name with the ACL unchanged.
-					healed, blocker := reprotectRecordedVendorFolder(recorded, cur, index == len(parts)-1, use, verdict.refused, validate)
+					// name with the ACL unchanged. A refusal found after the
+					// stamp is reported with the change it made.
+					healed, blocker := reprotectRecordedVendorFolder(opts, recorded, cur, index == len(parts)-1, use, verdict.refused, validate)
+					if healed.Dir != "" {
+						result.reprotected = append(result.reprotected, healed)
+					}
 					if blocker != nil {
 						verdict.refused.blocker = blocker.Error()
 						return result, verdict.refused
 					}
-					result.reprotected = append(result.reprotected, healed)
 					continue
 				}
 				result.left = append(result.left, fmt.Sprintf("left %s as it is: DefenseClaw did not create it and it "+

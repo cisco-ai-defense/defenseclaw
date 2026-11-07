@@ -214,7 +214,7 @@ func TestSafeTransactionRefusesWhatItCannotProve(t *testing.T) {
 				if !strings.Contains(publishErr.Error(), problems[0].Blocker) || !strings.Contains(publishErr.Error(), problems[0].Message) {
 					t.Fatalf("the publish error and the inspection differ:\n%v\n%s", publishErr, problems[0].Message)
 				}
-				if !IsVendorFolderRefusal(publishErr) || state.Covered || len(state.Reprotected) != 0 {
+				if len(VendorFolderRefusals(publishErr)) != 1 || state.Covered || len(state.Reprotected) != 0 {
 					t.Fatalf("publish: state = %+v, err = %v; want a refusal, not covered and nothing re-protected", state, publishErr)
 				}
 				if after := folderSDDL(t, folder); after != before {
