@@ -72,6 +72,7 @@ from defenseclaw.scanner.plugin_scanner.rules import (
     WRITE_FUNCTIONS,
 )
 from defenseclaw.scanner.plugin_scanner.types import Finding, PluginManifest
+from defenseclaw.scanner.plugin_scanner.vendor_identity import path_reaches_private_state
 
 # PluginManifest.source holds a schema label; connector manifests live in a
 # dot directory, so map their labels back to the real file (GAP-2214).
@@ -168,6 +169,7 @@ def check_dependencies(
     manifest: PluginManifest,
     findings: list[Finding],
     target: str,
+    protected_sources: bool = True,
 ) -> None:
     if not manifest.dependencies:
         return
@@ -232,12 +234,17 @@ def check_dependencies(
             )
 
         if version.startswith("file:"):
+            # A local source that names or resolves into protected state is
+            # not a development convenience; it is blocked on every profile.
+            protected = protected_sources and path_reaches_private_state(
+                os.path.join(target, version[len("file:"):]),
+            )
             findings.append(
                 make_finding(
                     len(findings) + 1,
                     rule_id="DEP-LOCAL-FILE",
-                    severity="MEDIUM",
-                    confidence=0.7,
+                    severity="HIGH" if protected else "MEDIUM",
+                    confidence=0.9 if protected else 0.7,
                     title=f'Dependency "{dep}" uses local file path',
                     evidence=f'"{dep}": "{version}"',
                     description=(
@@ -456,6 +463,7 @@ def scan_source_files(
     source_files_out: list | None = None,
     force_include: list[str] | None = None,
     python_host: bool = False,
+    secure_client_rules: bool = False,
 ) -> tuple[int, int]:
     """Returns (file_count, total_bytes).
 
@@ -599,7 +607,8 @@ def scan_source_files(
             )
 
         _scan_suspicious_patterns(
-            call_lines, rel_path, findings, capabilities, profile, in_test, "py" if is_py else "js", code_lines
+            call_lines, rel_path, findings, capabilities, profile, in_test, "py" if is_py else "js", code_lines,
+            regexp_aware=not secure_client_rules,
         )
         _check_for_hardcoded_secrets(lines, rel_path, findings, in_test)
         _check_for_credential_access(code_lines, rel_path, findings, capabilities, in_test)
@@ -627,8 +636,9 @@ def _scan_suspicious_patterns(
     in_test_path: bool,
     language: str = "js",
     evidence_lines: list[str] | None = None,
+    regexp_aware: bool = True,
 ) -> None:
-    receivers = RegexpReceivers(code_lines) if language == "js" else None
+    receivers = RegexpReceivers(code_lines) if language == "js" and regexp_aware else None
     for rule in SOURCE_PATTERN_RULES:
         if profile not in rule.profiles or language not in rule.languages:
             continue
