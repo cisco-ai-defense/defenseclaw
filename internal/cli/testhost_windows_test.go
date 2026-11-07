@@ -65,6 +65,7 @@ func isolateTestHost() func() {
 		restoreMachine := isolateTestMachineWriters("")
 		return func() {
 			restoreMachine()
+			removeWindowsWow64Holder()
 			restoreTemp()
 		}
 	}
@@ -80,6 +81,7 @@ func isolateTestHost() func() {
 	restoreMachine := isolateTestMachineWriters(filepath.Join(dir, "lifecycle-logs"))
 	return func() {
 		restoreMachine()
+		removeWindowsWow64Holder()
 		_ = os.RemoveAll(dir)
 		restoreTemp()
 	}

@@ -482,22 +482,56 @@ func isWindowsGoHolder(shell string) bool {
 	return strings.EqualFold(filepath.Base(shell), windowsGoHolderName)
 }
 
-// buildWindowsWow64Holder compiles the holder for GOARCH=386 into the test's
-// temp folder and returns its path. A 32-bit process on 64-bit Windows is a
-// WOW64 process whatever its language; the test builds one instead of using
+// The 32-bit holder is built once per test binary: the compile of the 386
+// runtime takes seconds, the holder keeps no state, and every test that needs
+// one starts a new process from the same image. The one build keeps its error,
+// so a build that failed fails every test that needs the holder with the
+// original message (a skip would hide it). The folder is removed by
+// removeWindowsWow64Holder when the run ends (isolateTestHost).
+var (
+	windowsWow64HolderOnce sync.Once
+	windowsWow64HolderDir  string
+	windowsWow64HolderExe  string
+	windowsWow64HolderErr  error
+)
+
+// buildWindowsWow64Holder returns the path of the 32-bit holder, compiling it
+// on the first call of the test binary. A 32-bit process on 64-bit Windows is
+// a WOW64 process whatever its language; the test builds one instead of using
 // the SysWOW64 PowerShell, which the hosted runner did not start within a
-// bounded wait. The build and every wait are bounded, and a failure says
-// which step failed.
+// bounded wait. The build is bounded, and a failure says which step failed.
+// The error is returned from the Once, not raised in it: a Fatalf there would
+// end the first test inside the Once and leave the others with no error.
 func buildWindowsWow64Holder(t *testing.T) string {
 	t.Helper()
+	windowsWow64HolderOnce.Do(func() {
+		started := time.Now()
+		windowsWow64HolderExe, windowsWow64HolderErr = compileWindowsWow64Holder()
+		if windowsWow64HolderErr == nil {
+			t.Logf("built the 32-bit holder in %s (once for this test binary)", time.Since(started).Round(time.Millisecond))
+		}
+	})
+	if windowsWow64HolderErr != nil {
+		t.Fatal(windowsWow64HolderErr)
+	}
+	return windowsWow64HolderExe
+}
+
+// compileWindowsWow64Holder compiles the holder for GOARCH=386 into a folder
+// of its own and checks that the result is a 32-bit image.
+func compileWindowsWow64Holder() (string, error) {
 	goTool, err := exec.LookPath("go")
 	if err != nil {
-		t.Fatalf("cannot build the 32-bit holder: there is no go tool on PATH (%v); the test needs a real 32-bit process and compiles one", err)
+		return "", fmt.Errorf("cannot build the 32-bit holder: there is no go tool on PATH (%v); the test needs a real 32-bit process and compiles one", err)
 	}
-	dir := t.TempDir()
+	dir, err := os.MkdirTemp("", "dc-wow64-holder-")
+	if err != nil {
+		return "", fmt.Errorf("cannot make the folder for the 32-bit holder: %w", err)
+	}
+	windowsWow64HolderDir = dir
 	src := filepath.Join(dir, "holder.go")
 	if err := os.WriteFile(src, []byte(windowsGoHolderSource), 0o600); err != nil {
-		t.Fatal(err)
+		return "", fmt.Errorf("cannot write the 32-bit holder source: %w", err)
 	}
 	exe := filepath.Join(dir, windowsGoHolderName)
 	ctx, cancel := context.WithTimeout(context.Background(), windowsGoHolderBuildLimit)
@@ -511,18 +545,25 @@ func buildWindowsWow64Holder(t *testing.T) string {
 		if len(out) > 4000 {
 			out = out[len(out)-4000:]
 		}
-		t.Fatalf("building the 32-bit holder (%s build, GOARCH=386) failed after %s: %v (build limit %s)\n%s", goTool, time.Since(started).Round(time.Millisecond), err, windowsGoHolderBuildLimit, out)
+		return "", fmt.Errorf("building the 32-bit holder (%s build, GOARCH=386) failed after %s: %v (build limit %s)\n%s", goTool, time.Since(started).Round(time.Millisecond), err, windowsGoHolderBuildLimit, out)
 	}
-	t.Logf("built the 32-bit holder in %s", time.Since(started).Round(time.Millisecond))
 	image, err := pe.Open(exe)
 	if err != nil {
-		t.Fatalf("the built holder is not a Windows image: %v", err)
+		return "", fmt.Errorf("the built holder is not a Windows image: %w", err)
 	}
 	defer image.Close()
 	if image.Machine != pe.IMAGE_FILE_MACHINE_I386 {
-		t.Fatalf("the built holder is machine 0x%04x, want a 32-bit image (0x%04x)", image.Machine, pe.IMAGE_FILE_MACHINE_I386)
+		return "", fmt.Errorf("the built holder is machine 0x%04x, want a 32-bit image (0x%04x)", image.Machine, pe.IMAGE_FILE_MACHINE_I386)
 	}
-	return exe
+	return exe, nil
+}
+
+// removeWindowsWow64Holder removes the folder of the built holder when the
+// test run ends. It is a no-op when no test needed the holder.
+func removeWindowsWow64Holder() {
+	if windowsWow64HolderDir != "" {
+		_ = os.RemoveAll(windowsWow64HolderDir)
+	}
 }
 
 // holderNeverReady ends a holder that did not say ready in time and fails the
