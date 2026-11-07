@@ -248,3 +248,19 @@ func TestRepairManagedDataPathsUnsupportedOffWindows(t *testing.T) {
 		t.Fatalf("results = %+v", results)
 	}
 }
+
+// GAP-0762: the descriptor a directory is created with is the one the
+// Guardian stamps: protected, owned by Administrators, with explicit
+// inheritable entries and no inherited-flag entry.
+func TestRuntimeDirectoryCreationDescriptorIsProtectedAndExplicit(t *testing.T) {
+	const gateway = "S-1-5-80-1"
+	sddl := canonicalSpecFor(ObjectRuntimeDirectory, gateway).canonicalSDDL()
+	if !strings.HasPrefix(sddl, "O:"+sidAdministrators+"G:BAD:P") {
+		t.Fatalf("descriptor must be administrator-owned and protected: %s", sddl)
+	}
+	for _, sid := range []string{sidLocalSystem, sidAdministrators, gateway} {
+		if !strings.Contains(sddl, "OICI;") || !strings.Contains(sddl, ";;;"+sid+")") {
+			t.Fatalf("entry for %s must be explicit and inheritable: %s", sid, sddl)
+		}
+	}
+}

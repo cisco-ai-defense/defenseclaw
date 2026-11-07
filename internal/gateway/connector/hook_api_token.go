@@ -127,7 +127,7 @@ func ensureHookAPITokenFileLocked(dataDir, tokenPath string) (string, error) {
 		if err := hookAPIValidateDirectory(dataDir); err != nil {
 			return "", fmt.Errorf("hook API token data dir %s is not trusted: %w", dataDir, err)
 		}
-		if err := os.Mkdir(hooksDir, 0o700); err == nil {
+		if err := mkdirHookAPITokenDir(hooksDir); err == nil {
 			hooksDirCreated = true
 		} else if !errors.Is(err, os.ErrExist) {
 			return "", fmt.Errorf("create hook API token dir: %w", err)
@@ -310,7 +310,7 @@ func publishHookAPITokenLocked(dataDir, tokenPath, token string) (returnErr erro
 		if err := hookAPIValidateDirectory(dataDir); err != nil {
 			return fmt.Errorf("hook API token data dir %s is not trusted: %w", dataDir, err)
 		}
-		if err := os.Mkdir(hooksDir, 0o700); err == nil {
+		if err := mkdirHookAPITokenDir(hooksDir); err == nil {
 			hooksDirCreated = true
 		} else if !errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("create hook API token dir: %w", err)
