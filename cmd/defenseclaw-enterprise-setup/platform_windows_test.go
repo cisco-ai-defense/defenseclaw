@@ -322,6 +322,30 @@ func TestEnterpriseLifecycleArgumentsOmitPolicyCompiler(t *testing.T) {
 	}
 }
 
+// Setup /repair is the repair that restores a deleted hook guard, so every
+// standalone change action carries the guard from the payload and Secure
+// Client, which has no guard, never does.
+func TestEnterpriseLifecycleArgumentsCarryTheStandaloneHookGuard(t *testing.T) {
+	stage := `C:\ProgramData\DefenseClaw-Enterprise-Setup-0123456789abcdef0123456789abcdef`
+	guard := filepath.Join(stage, "defenseclaw-hook-guard.exe")
+	has := func(arguments []string) bool {
+		for i := 0; i+1 < len(arguments); i++ {
+			if arguments[i] == "--hook-guard-binary" && arguments[i+1] == guard {
+				return true
+			}
+		}
+		return false
+	}
+	for _, action := range []string{"install", "upgrade", "repair", "ensure"} {
+		if got := enterpriseLifecycleArguments(stage, enterpriseSetupOptions{Action: action, Standalone: true}); !has(got) {
+			t.Errorf("standalone %s does not pass the hook guard: %#v", action, got)
+		}
+		if got := enterpriseLifecycleArguments(stage, enterpriseSetupOptions{Action: action}); has(got) {
+			t.Errorf("Secure Client %s passes a hook guard: %#v", action, got)
+		}
+	}
+}
+
 func TestStandaloneSetupReportsMalformedInputPathsAsInvalidArguments(t *testing.T) {
 	for _, value := range []string{
 		"config.yaml",

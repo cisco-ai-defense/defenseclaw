@@ -997,7 +997,7 @@ func TestWindowsBundleRollbackByTheInstalledCLIPutsTheLastGoodConfigBack(t *test
 		t.Run(tc.name, func(t *testing.T) {
 			host, opts := newHotConfigHost(t, bundleConfig, tc.lastGood)
 			host.adopted = true
-			opts.gatewayBinary, opts.acpBinary, opts.hookBinary, opts.sensorHelperBinary, opts.policyCompiler = "", "", "", "", ""
+			opts.gatewayBinary, opts.acpBinary, opts.hookBinary, opts.hookGuardBinary, opts.sensorHelperBinary, opts.policyCompiler = "", "", "", "", "", ""
 			opts.bundleRollback = true
 			savedRestart := windowsEnterpriseHotConfigRestart
 			t.Cleanup(func() { windowsEnterpriseHotConfigRestart = savedRestart })
@@ -1041,7 +1041,7 @@ func TestWindowsBundleRollbackByTheInstalledCLIPutsTheLastGoodConfigBack(t *test
 			return windowsServiceConfigValidation{}, nil
 		}
 		opts := windowsBundleRestoreOptions()
-		opts.gatewayBinary, opts.acpBinary, opts.hookBinary, opts.sensorHelperBinary, opts.policyCompiler = "", "", "", "", ""
+		opts.gatewayBinary, opts.acpBinary, opts.hookBinary, opts.hookGuardBinary, opts.sensorHelperBinary, opts.policyCompiler = "", "", "", "", "", ""
 		opts.noStart, opts.resolvedInstaller = false, `C:\stage\install-enterprise.ps1`
 		cmd, _ := windowsBundleCommand()
 		run := &windowsBundleRun{ctx: ctx, layout: host.layout, driver: newWindowsBundleDriver(host.layout),
@@ -1535,7 +1535,7 @@ func TestWindowsEnterpriseCodexTargetAction(t *testing.T) {
 		t.Fatalf("Setup payload: action %q, want upgrade", got)
 	}
 	installedCLI := ensureTestOptions()
-	installedCLI.gatewayBinary, installedCLI.acpBinary, installedCLI.hookBinary, installedCLI.sensorHelperBinary = "", "", "", ""
+	installedCLI.gatewayBinary, installedCLI.acpBinary, installedCLI.hookBinary, installedCLI.hookGuardBinary, installedCLI.sensorHelperBinary = "", "", "", "", ""
 	if got := windowsEnterpriseCodexTargetAction(installedCLI); got != "repair" {
 		t.Fatalf("installed CLI: action %q, want repair", got)
 	}
