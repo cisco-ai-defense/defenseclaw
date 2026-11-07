@@ -334,7 +334,12 @@ func hermesDeclaredFiles(root *os.Root, dir string, load hermesManifestLoader) (
 	}
 	entrypoints, err := load(manifests)
 	if errors.Is(err, errHermesManifestFailOpen) {
-		entrypoints, err = hermesManifestCandidates(manifests), nil
+		var decided bool
+		if entrypoints, decided = hermesManifestCandidates(manifests); !decided {
+			// Too large or too deep to read: what it declares is unknown.
+			return nil, true
+		}
+		err = nil
 	}
 	if err != nil || len(entrypoints) > hermesManifestMaxEntrypoints {
 		return nil, true
