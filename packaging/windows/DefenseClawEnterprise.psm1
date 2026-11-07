@@ -8001,7 +8001,7 @@ function Initialize-DefenseClawManagedRoot {
             }
         }
     }
-    Add-DefenseClawStandaloneCreatedFolderRecord -Path $createdAncestors.ToArray()
+    $null = Add-DefenseClawStandaloneCreatedFolderRecord -Path $createdAncestors.ToArray()
 
     if ($rootCreated -and $DeferFinalAcl) {
         [void](Assert-DefenseClawManagedRootStagingAcl `
@@ -17951,7 +17951,7 @@ function Initialize-DefenseClawCodexMachinePolicyParent {
                 -SnapshotPath $SnapshotPath `
                 -Path $directory `
                 -Layout $Layout
-            Add-DefenseClawStandaloneCreatedFolderRecord -Path @($directory)
+            $null = Add-DefenseClawStandaloneCreatedFolderRecord -Path @($directory)
         }
     }
 }
@@ -18473,7 +18473,11 @@ function Write-DefenseClawCreatedFolderRecordFile {
 
 # Records folders this run created. Best effort: a folder it cannot record
 # stays after a purge, the safe side, so a failure never fails the run that
-# created it. It never creates the lifecycle folder itself.
+# created it. It never creates the lifecycle folder itself. Returns $true when
+# every folder is recorded (or already was) and $false when one was not: it is
+# not recordable, the record folder is missing or unsafe, or the write failed.
+# The agent-folder back-fill writes its one-shot marker only on $true (review 4
+# S1); every other caller discards the result.
 function Add-DefenseClawStandaloneCreatedFolderRecord {
     param(
         [AllowEmptyCollection()][string[]]$Path = @(),
@@ -18487,38 +18491,52 @@ function Add-DefenseClawStandaloneCreatedFolderRecord {
         [ValidateSet('', 'upgrade')][string]$Origin = ''
     )
     if (-not (Test-DefenseClawStandaloneProfile) -or @($Path).Count -eq 0) {
-        return
+        return [bool](@($Path).Count -eq 0)
     }
+    $complete = $true
     try {
         if ([string]::IsNullOrWhiteSpace($RecordDirectory)) {
             $RecordDirectory = Get-DefenseClawStandaloneCreatedFolderRecordDirectory
         }
         if (-not (Initialize-DefenseClawCreatedFolderRecordDirectory -RecordDirectory $RecordDirectory)) {
-            return
+            return $false
         }
         foreach ($folder in @($Path)) {
             if (-not (Test-DefenseClawCreatedFolderRecordable -Path $folder -Roots $Roots)) {
+                $complete = $false
                 continue
             }
-            $full = [IO.Path]::GetFullPath($folder).TrimEnd('\')
-            $recordPath = [IO.Path]::Combine($RecordDirectory, (Get-DefenseClawCreatedFolderRecordName -Path $full))
-            if ([IO.File]::Exists($recordPath)) {
-                continue
+            # One folder's failure loses no other record.
+            try {
+                $full = [IO.Path]::GetFullPath($folder).TrimEnd('\')
+                $recordPath = [IO.Path]::Combine($RecordDirectory, (Get-DefenseClawCreatedFolderRecordName -Path $full))
+                if ([IO.File]::Exists($recordPath)) {
+                    continue
+                }
+                $document = [ordered]@{ schema_version = $script:CreatedFolderRecordSchema; path = $full }
+                if (-not [string]::IsNullOrEmpty($Origin)) {
+                    $document['origin'] = $Origin
+                }
+                $body = [Text.Encoding]::UTF8.GetBytes(($document | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress))
+                $null = Write-DefenseClawCreatedFolderRecordFile -Path $recordPath -Body $body
             }
-            $document = [ordered]@{ schema_version = $script:CreatedFolderRecordSchema; path = $full }
-            if (-not [string]::IsNullOrEmpty($Origin)) {
-                $document['origin'] = $Origin
+            catch {
+                $complete = $false
+                Microsoft.PowerShell.Utility\Write-Verbose (
+                    'created-folder record not written; the folder stays after a purge: ' +
+                    $_.Exception.Message)
             }
-            $body = [Text.Encoding]::UTF8.GetBytes(($document | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress))
-            Write-DefenseClawCreatedFolderRecordFile -Path $recordPath -Body $body
         }
     }
     catch {
         Microsoft.PowerShell.Utility\Write-Verbose (
             'created-folder record not written; the folder stays after a purge: ' +
             $_.Exception.Message)
+        return $false
     }
+    return $complete
 }
+
 
 # Whether no standalone deployment of any scope is left: the layout's roots,
 # the production roots and the certification bases are all gone.
@@ -18871,6 +18889,78 @@ function Get-DefenseClawStandaloneCreatedFolderPreview {
     }
 }
 
+# The scanner runtime folder (ProgramData\Cisco\DefenseClaw-ScannerRuntime,
+# beside the lifecycle folder) is DefenseClaw's own and holds no record, but
+# the Go scanner step removes it only after this script returned. A Setup
+# /uninstall therefore found the Cisco folder holding it, reported the folder
+# as kept ("it holds DefenseClaw-ScannerRuntime", a folder that was gone
+# moments later) and left it, its record and the lifecycle folder behind.
+# Called once no deployment of any scope is left and the purge holds the
+# lifecycle lock, this removes the runtime the way the Go step does: under
+# the scanner runtime lock (a run that holds it keeps the folder, and the Go
+# step retires it), only a real administrator-only folder, never through a
+# link (Remove-DefenseClawNoFollowTree), and a lock file that is itself a link
+# is refused, as the Go step opens it without following links. A folder that
+# cannot be removed this way stays for the Go step, which names it. The Go
+# certification-run guard (windowsScannerRuntimeCertificationRun) has no
+# counterpart here on purpose: this runs only when no deployment of any scope
+# is left, production roots included (Test-DefenseClawStandaloneNoDeploymentLeft),
+# so the runtime has no production owner a certification run could harm.
+function Remove-DefenseClawStandaloneScannerRuntimeLeftover {
+    param([Parameter(Mandatory)][string]$LifecycleFolder)
+    $stream = $null
+    try {
+        $root = [IO.Path]::Combine([IO.Path]::GetDirectoryName($LifecycleFolder), 'DefenseClaw-ScannerRuntime')
+        if (-not (Test-DefenseClawPathPresentNoFollow -Path $root)) {
+            return
+        }
+        $null = Assert-DefenseClawNoReparsePath -Path $root
+        Assert-DefenseClawPathAcl `
+            -Path $root `
+            -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+        $lock = [IO.Path]::Combine($root, 'scanner-runtime.lock')
+        # The Go step opens the lock with FILE_FLAG_OPEN_REPARSE_POINT; a
+        # FileStream follows a link, and delete-on-close would then delete
+        # the link's target. A lock file that is a link or junction is refused
+        # and the runtime is left for the Go step, which removes the link itself.
+        if (Test-DefenseClawPathPresentNoFollow -Path $lock) {
+            if (([IO.File]::GetAttributes($lock) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'the scanner runtime lock is a link or junction'
+            }
+        }
+        $stream = [IO.FileStream]::new(
+            $lock,
+            [IO.FileMode]::OpenOrCreate,
+            [IO.FileAccess]::ReadWrite,
+            [IO.FileShare]::None,
+            1,
+            [IO.FileOptions]::DeleteOnClose
+        )
+        $remaining = [Collections.Generic.List[string]]::new()
+        foreach ($child in @([IO.Directory]::GetFileSystemEntries($root))) {
+            if (-not [string]::Equals([IO.Path]::GetFileName($child), 'scanner-runtime.lock', [StringComparison]::OrdinalIgnoreCase)) {
+                $null = Remove-DefenseClawNoFollowTree -Path ([string]$child) -Remaining $remaining
+            }
+        }
+        $stream.Dispose()
+        $stream = $null
+        if ($remaining.Count -eq 0) {
+            [IO.Directory]::Delete($root, $false)
+        }
+        else {
+            Microsoft.PowerShell.Utility\Write-Verbose "scanner runtime stays: $($remaining[0])"
+        }
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Verbose "scanner runtime stays: $($_.Exception.Message)"
+    }
+    finally {
+        if ($null -ne $stream) {
+            $stream.Dispose()
+        }
+    }
+}
+
 # Runs under the lifecycle lock (Remove-DefenseClawStandaloneLifecycleLockLeftover
 # holds it exclusively), once no deployment of any scope is left, no
 # self-uninstall finalizer is pending and the lifecycle folder holds nothing
@@ -18916,6 +19006,10 @@ function Invoke-DefenseClawStandaloneCreatedFolderRemoval {
             return
         }
     }
+    # Nothing is left to own the scanner runtime, and it is the one DefenseClaw
+    # folder the Cisco folder can still hold: it goes first, so the Cisco
+    # folder and its record go with it in this run.
+    Remove-DefenseClawStandaloneScannerRuntimeLeftover -LifecycleFolder $lifecycle
     $records = @(Get-DefenseClawStandaloneCreatedFolderRecords -RecordDirectory $RecordDirectory)
     $lifecycleFull = [IO.Path]::GetFullPath($lifecycle).TrimEnd('\')
     $deferred = [Collections.Generic.List[object]]::new()
@@ -19007,10 +19101,15 @@ function Remove-DefenseClawStandaloneCreatedFolders {
 # made (the vendor folder case b, GAP-0092) and stamps it with the descriptor
 # that proof (b) tests for, so a later back-fill would take the adopted folder
 # for one DefenseClaw created and a purge would remove it. Any entry with this
-# name counts as done. A marker that cannot be written leaves the back-fill to
-# the next run, which can only add a record. A purge removes the marker with
-# the record folder, so a new deployment starts clean. It is not part of the
-# deployment record, so g582's adoption needs no change.
+# name counts as done. The marker is written only after a back-fill that
+# succeeded (review 4 S1): every candidate folder was recorded, or refused by
+# proof (a), (b) or (c), which is final. A record that could not be written
+# (the record folder is missing or unsafe, the write failed), a marker that
+# cannot be written, and an error out of the back-fill leave it to the next
+# run, which can only add a record. Nothing else removes the marker: a rollback
+# does not undo an adoption, so it keeps the marker too (review 5 M1). A purge
+# removes it with the record folder, so a new deployment starts clean. It is not
+# part of the deployment record, so g582's adoption needs no change.
 $script:AgentFolderBackfillMarker = 'agent-folder-backfill.done'
 
 function Test-DefenseClawAgentFolderBackfillDone {
@@ -19041,7 +19140,8 @@ function Set-DefenseClawAgentFolderBackfillDone {
 #   existing agent folder with the descriptor it creates one with, so the
 #   descriptor alone does not tell who made it; the folder's creation time
 #   does: a folder older than StateRoot existed before DefenseClaw. This part
-#   runs once per deployment (Test-DefenseClawAgentFolderBackfillDone).
+#   runs until a run has judged every candidate (Test-DefenseClawAgentFolderBackfillDone):
+#   a folder refused by a proof is final, a record that could not be written is retried.
 # A folder that fails any proof is not recorded and stays after a purge,
 # which names it (left in place: not provably created by DefenseClaw). Such
 # a record never gives ownership for a repair or a takeover; a purge uses it
@@ -19084,7 +19184,7 @@ function Add-DefenseClawStandaloneUpgradeVendorFolderRecords {
                 Microsoft.PowerShell.Utility\Write-Verbose "not recorded as created by DefenseClaw, so it stays after a purge: ${folder}: $refusal"
                 continue
             }
-            Add-DefenseClawStandaloneCreatedFolderRecord -Path @($folder) -RecordDirectory $RecordDirectory -Roots $Roots -Origin upgrade
+            $null = Add-DefenseClawStandaloneCreatedFolderRecord -Path @($folder) -RecordDirectory $RecordDirectory -Roots $Roots -Origin upgrade
         }
     }
     catch {
@@ -19106,6 +19206,10 @@ function Add-DefenseClawStandaloneUpgradeVendorFolderRecords {
         else {
             [IO.Path]::Combine($StateRoot, 'install', 'codex-requirements-ownership.json')
         }
+        # Done only when every candidate was recorded or refused by a proof
+        # (a), (b) or (c): a refusal is final. A record that could not be
+        # written leaves the back-fill to the next run (review 4 S1).
+        $complete = $true
         foreach ($agent in @(Get-DefenseClawAgentFolders -ProgramData $ProgramData -ProgramFiles $ProgramFiles)) {
             $folder = [string]$agent.Path
             if (-not [IO.Directory]::Exists($folder) -or
@@ -19122,9 +19226,16 @@ function Add-DefenseClawStandaloneUpgradeVendorFolderRecords {
                 Microsoft.PowerShell.Utility\Write-Verbose "not recorded as created by DefenseClaw, so it stays after a purge: ${folder}: $refusal"
                 continue
             }
-            Add-DefenseClawStandaloneCreatedFolderRecord -Path @($folder) -RecordDirectory $RecordDirectory -Roots $Roots -Origin upgrade
+            if (-not (Add-DefenseClawStandaloneCreatedFolderRecord -Path @($folder) -RecordDirectory $RecordDirectory -Roots $Roots -Origin upgrade)) {
+                $complete = $false
+            }
         }
-        Set-DefenseClawAgentFolderBackfillDone -RecordDirectory $RecordDirectory
+        if ($complete) {
+            Set-DefenseClawAgentFolderBackfillDone -RecordDirectory $RecordDirectory
+        }
+        else {
+            Microsoft.PowerShell.Utility\Write-Verbose 'agent folder back-fill incomplete: a record could not be written, so the next run tries again'
+        }
     }
     catch {
         Microsoft.PowerShell.Utility\Write-Verbose "agent folder back-fill skipped: $($_.Exception.Message)"
@@ -19455,7 +19566,9 @@ function Get-DefenseClawUnprovenVendorFolders {
 # the uninstall finished or failed, and an error here (a record folder that
 # cannot be listed, a resilience-event write that fails) must not replace the
 # lifecycle's own error or fail an uninstall that has already finished. Each
-# folder is reported on its own, so one failure loses no other.
+# folder is reported on its own, so one failure loses no other. A step that
+# fails says so with Write-Warning, so a lost created_folders_kept line leaves
+# a trace (review 4 L4).
 function Write-DefenseClawUninstallCreatedFolderReport {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -19468,12 +19581,12 @@ function Write-DefenseClawUninstallCreatedFolderReport {
                 Add-DefenseClawCreatedFolderKept -Folder $kept.Folder -Note $kept.Note
             }
             catch {
-                Microsoft.PowerShell.Utility\Write-Verbose "created-folder note not written: $($_.Exception.Message)"
+                Microsoft.PowerShell.Utility\Write-Warning "created-folder note not written: $($_.Exception.Message)"
             }
         }
     }
     catch {
-        Microsoft.PowerShell.Utility\Write-Verbose "created-folder preview not reported: $($_.Exception.Message)"
+        Microsoft.PowerShell.Utility\Write-Warning "created-folder preview not reported: $($_.Exception.Message)"
     }
     try {
         # GAP-0704 rule (i): once the deployment is gone, each touched vendor
@@ -19485,13 +19598,13 @@ function Write-DefenseClawUninstallCreatedFolderReport {
                     Add-DefenseClawCreatedFolderKept -Folder $unproven -Note 'left in place: not provably created by DefenseClaw'
                 }
                 catch {
-                    Microsoft.PowerShell.Utility\Write-Verbose "unproven-folder note not written: $($_.Exception.Message)"
+                    Microsoft.PowerShell.Utility\Write-Warning "unproven-folder note not written: $($_.Exception.Message)"
                 }
             }
         }
     }
     catch {
-        Microsoft.PowerShell.Utility\Write-Verbose "unproven vendor folders not reported: $($_.Exception.Message)"
+        Microsoft.PowerShell.Utility\Write-Warning "unproven vendor folders not reported: $($_.Exception.Message)"
     }
 }
 

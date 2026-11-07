@@ -43,9 +43,8 @@ var caVars = []string{"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "
 // trusted CAs keeps OpenShell's variables, and so does a sandbox where the
 // bundle cannot be written.
 func TestSandboxShellsGiveEveryRuntimeTheTrustedCAs(t *testing.T) {
-	if _, err := os.Stat("/bin/bash"); err != nil {
-		t.Skip("/bin/bash is required")
-	}
+	sh := binSh(t)
+	binBash(t) // the wrapper runs under bash -p
 	for _, name := range Names() {
 		spec, _ := Get(name)
 		if !strings.Contains(string(spec.Launcher().Data), trustedCAScript) {
@@ -88,9 +87,9 @@ func TestSandboxShellsGiveEveryRuntimeTheTrustedCAs(t *testing.T) {
 	}
 	run := func(env []string) map[string]map[string]string {
 		env = append([]string{"PATH=/usr/bin:/bin"}, env...)
-		login := exec.Command("/bin/sh", "-c", ". "+profile+"\n"+record.String())
+		login := exec.Command(sh, "-c", ". "+profile+"\n"+record.String())
 		login.Env = env
-		wrapped := exec.Command(wrapper, "/bin/sh", "-c", record.String())
+		wrapped := exec.Command(wrapper, sh, "-c", record.String())
 		wrapped.Env = env
 		out := map[string]map[string]string{}
 		for what, cmd := range map[string]*exec.Cmd{"login shell": login, "sandbox exec": wrapped} {
@@ -193,8 +192,8 @@ func TestSandboxShellsGiveEveryRuntimeTheTrustedCAs(t *testing.T) {
 	nestedWant := all(ours)
 	nestedWant["SSL_CERT_FILE"] = openshell.SandboxSystemCABundle
 	for what, cmd := range map[string]*exec.Cmd{
-		"login shell":  exec.Command("/bin/sh", "-c", ". "+profile+"\n. "+nestedLogin),
-		"sandbox exec": exec.Command(wrapper, "/bin/sh", nestedLogin),
+		"login shell":  exec.Command(sh, "-c", ". "+profile+"\n. "+nestedLogin),
+		"sandbox exec": exec.Command(wrapper, sh, nestedLogin),
 	} {
 		cmd.Env = append([]string{"PATH=/usr/bin:/bin"}, openShellEnv...)
 		b, err := cmd.CombinedOutput()

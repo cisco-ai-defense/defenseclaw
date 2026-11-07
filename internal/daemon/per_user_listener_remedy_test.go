@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // GAP-0706: the root-gateway remedy is written for the running OS. The macOS
@@ -56,5 +58,41 @@ func TestGAP0706RootGatewayRemedyIsWrittenPerOS(t *testing.T) {
 	}
 	if got, want := RootGatewayListenerRemedy(home), rootGatewayRemedyFor(runtime.GOOS, home); got != want {
 		t.Fatalf("RootGatewayListenerRemedy on %s = %q, want %q", runtime.GOOS, got, want)
+	}
+}
+
+// GAP-0747: the Windows remedy is rendered by managed.WindowsCommandLine, so
+// a path with a space or an apostrophe is one inert literal, and the answer is
+// the same wherever the table is read. The plain path is the benign twin.
+func TestGAP0747WindowsRootGatewayRemedyIsRenderedNotTyped(t *testing.T) {
+	for _, tc := range []struct{ name, executable string }{
+		{"plain", `C:\Users\account\.local\bin\defenseclaw-gateway.exe`},
+		{"space and apostrophe", `C:\Users\O'Brien Jr\bin\defenseclaw-gateway.exe`},
+		{"bare name", "defenseclaw-gateway.exe"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stop := managed.WindowsCommandLine(tc.executable, "stop")
+			start := managed.WindowsCommandLine(tc.executable, "start")
+			want := "Stop it from an elevated PowerShell prompt (" + stop + "), then start it as yourself from a normal PowerShell prompt (" + start + ")"
+			if got := windowsRootGatewayRemedy(tc.executable); got != want {
+				t.Fatalf("remedy = %q, want %q", got, want)
+			}
+			if !strings.HasPrefix(stop, "& '") || strings.Contains(want, "(defenseclaw-gateway ") {
+				t.Fatalf("remedy names a bare command: %q", want)
+			}
+			// The call-operator form runs only in PowerShell (not cmd.exe): the text must say so.
+			if !strings.Contains(want, "from an elevated PowerShell prompt (") || !strings.Contains(want, "from a normal PowerShell prompt (") {
+				t.Fatalf("remedy does not name PowerShell for both steps: %q", want)
+			}
+			if strings.Contains(want, "administrator prompt") {
+				t.Fatalf("remedy names an unnamed-shell prompt: %q", want)
+			}
+			if strings.Contains(want, "sudo") {
+				t.Fatalf("a Windows remedy names sudo: %q", want)
+			}
+		})
+	}
+	if got, want := rootGatewayRemedyFor("windows", t.TempDir()), windowsRootGatewayRemedy(rootGatewayWindowsExecutable()); got != want {
+		t.Fatalf("the OS table answers %q, want %q", got, want)
 	}
 }

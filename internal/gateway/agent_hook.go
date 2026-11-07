@@ -1846,8 +1846,13 @@ func (a *APIServer) hookDecisionMeta(
 	req agentHookRequest,
 ) (llmEventMeta, string, bool) {
 	if req.ConnectorName == "opencode" && req.HookEventName == "defenseclaw.plugin.loaded" {
+		// A plugin load comes before any session, so it has no agent
+		// instance: it is a lifecycle event, and its connector audit row
+		// stays, rather than a hook decision that cannot name the instance
+		// (GAP-0577). A load that does carry an instance, and Secure Client,
+		// keep their decision.
 		cfg := a.decisionConfig(ctx)
-		if cfg == nil || (!cfg.SecureClientIntegration() && !managed.IsManagedEnterprise(cfg.DeploymentMode)) {
+		if (cfg == nil || !cfg.SecureClientIntegration()) && AgentIdentityFromContext(ctx).AgentInstanceID == "" {
 			return llmEventMeta{}, "", false
 		}
 	}
@@ -3660,7 +3665,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// by returning advisory-only changes (action stays allow,
 	// rawAction promoted to block, wouldBlock=true). For events
 	// the connector itself does not declare blockable, we further
-	// downgrade through mapHookAction so we never tell the agent
+	// downgrade through its capability map so we never tell the agent
 	// to block on a surface it cannot honor.
 	for _, asset := range assetDecisions {
 		mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
@@ -3668,7 +3673,10 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			action, rawAction, severity, reason, findings,
 		)
 		if mergedAction == "block" {
-			capable, capableWouldBlock := mapHookActionForProfile("block", effectiveMode, req.HookEventName, caps, profile, req.Payload)
+			capable, capableWouldBlock := mapAssetBlockForProfile(
+				effectiveMode, req.HookEventName, caps, profile, req.Payload,
+				a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration(),
+			)
 			if capable != "block" {
 				mergedAction = capable
 				if capableWouldBlock {

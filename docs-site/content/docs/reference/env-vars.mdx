@@ -348,7 +348,7 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 144 test-only variables">
+<Accordion title="Show the 147 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -458,6 +458,9 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_TEST_KEY_NOTSET_12345`<br/>Default: `unset`<br/>Values: `unset`<br/>Managed host: `ignore` | Placeholder env var name used to assert 'unset' behavior in tests.<br/>**Read by:** `cli/tests/test_llm_env.py` |
 | `DEFENSECLAW_TEST_KIRO_SHELL_CHILD`<br/>Default: `unset`<br/>Values: `v3`, `v2`, `unset`<br/>Managed host: `ignore` | Turns the Windows connector test binary into a stand-in for the GUI-subsystem hook launcher when the Kiro shell-boundary test runs a rendered Kiro hook command; the value names the hook surface it expects.<br/>**Read by:** `internal/gateway/connector/kiro_windows_shell_test.go` |
 | `DEFENSECLAW_TEST_LAUNCHER_ARGS`<br/>Default: `unset`<br/>Values: `test-defined argument list`, `unset`<br/>Managed host: `ignore` | Passes the arguments of a sandbox launcher test to the child process that runs the real command tree under argv0 defenseclaw, so the in-place cut of the tree stays out of the parent test process.<br/>**Read by:** `internal/cli/launcher_real_tree_test.go` |
+| `DEFENSECLAW_TEST_LAUNCHER_START_BASE`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | 1 makes the Windows launcher-cannot-start test also run the hook command forms that releases before 1.0.9 wrote and log their rows, for native evidence; those rows are not asserted.<br/>**Read by:** `internal/gateway/connector/launcher_cannot_start_windows_test.go` |
+| `DEFENSECLAW_TEST_LAUNCHER_START_CHILD`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | 1 makes the Windows test binary act as the stand-in hook launcher or Codex and Devin guard in the launcher-cannot-start test.<br/>**Read by:** `internal/gateway/connector/launcher_cannot_start_windows_test.go` |
+| `DEFENSECLAW_TEST_LAUNCHER_START_EXIT`<br/>Default: `unset`<br/>Values: `integer exit status`, `unset`<br/>Managed host: `ignore` | The exit status the stand-in hook launcher returns in the Windows launcher-cannot-start test.<br/>**Read by:** `internal/gateway/connector/launcher_cannot_start_windows_test.go` |
 | `DEFENSECLAW_TEST_LEAK`<br/>Default: `unset`<br/>Values: `any-string`, `unset`<br/>Managed host: `ignore` | Marker a test sets in the parent environment to prove the per-user apply-target worker does not inherit it.<br/>**Read by:** `internal/cli/enterprise_hooks_standalone_unix_test.go` |
 | `DEFENSECLAW_TEST_LLM_KEY`<br/>Default: `unset`<br/>Values: `any-string`, `unset`<br/>Managed host: `ignore` | Placeholder LLM key used in some test setups when DEFENSECLAW_LLM_KEY needs an alternate target.<br/>**Read by:** `cli/tests/test_llm_env.py` |
 | `DEFENSECLAW_TEST_MARKER`<br/>Default: `unset`<br/>Values: `absolute file path`, `unset`<br/>Managed host: `ignore` | Test-only marker path used by the fake ClawHub launcher to record a single invocation.<br/>**Read by:** `cli/tests/test_cmd_skill.py` |

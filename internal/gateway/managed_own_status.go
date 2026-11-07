@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/coworkaudit"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
@@ -23,6 +24,10 @@ import (
 // ownStatusCoworkEvents reads the per-account last Cowork events from the
 // audit store; a seam for tests.
 var ownStatusCoworkEvents = coworkaudit.LastEvents
+
+// ownStatusGuardianAuthorization reads the same fresh, trusted guardian
+// record used by managed readiness and verification; a seam for tests.
+var ownStatusGuardianAuthorization = readManagedGuardianAuthorization
 
 // ownStatusWindowsAccountName names a verified Windows account SID for the
 // own-status answer (LookupAccountSid, set on Windows); "" when the LSA does
@@ -81,19 +86,37 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 		account["name"] = name
 	}
 	claudeCode := false
+	claudeConfigured := false
 	desktopRefused := false
 	auditDB := ""
 	if cfg != nil {
-		claudeCode = slices.Contains(cfg.ActiveConnectors(), enterprisepolicy.ConnectorClaudeCode)
+		claudeConfigured = slices.Contains(enterprisepolicy.StandaloneConnectors(cfg), enterprisepolicy.ConnectorClaudeCode)
+		claudeCode = claudeConfigured
 		desktopRefused = gatewayconnector.SurfaceRefused(enterprisepolicy.ConnectorClaudeCode, gatewayconnector.HostSurfaceDesktop,
 			cfg.Enterprise.Enrollment.UnverifiedVersionsFor(enterprisepolicy.ConnectorClaudeCode))
 		auditDB = strings.TrimSpace(cfg.AuditDB)
+	}
+	// The launcher lists every configured connector. On Unix, the policy-view
+	// watcher supplies the published vendor-source proof used to judge managed
+	// hook calls. A missing or changed view never claims protection.
+	var connectors map[string]any
+	if idKey == "uid" && cfg != nil {
+		connectors = a.ownConnectorStates(cfg, self, name)
+		claudeCode = false
+		if row, ok := connectors[enterprisepolicy.ConnectorClaudeCode].(map[string]any); ok {
+			claudeCode, _ = row["protected"].(bool)
+		}
+	} else if idKey == "sid" && cfg != nil {
+		connectors = ownWindowsConnectorStates(cfg, claudeCode)
 	}
 	cowork := map[string]any{}
 	if last, found := ownLastCoworkEvent(ctx, auditDB, self, name); found {
 		cowork["last_event_at"] = last.UTC().Format(time.RFC3339)
 	}
 	switch {
+	case !claudeCode && claudeConfigured:
+		cowork["protected"] = false
+		cowork["state"] = "not confirmed: Claude Code policy or enrollment is not verified for this account"
 	case !claudeCode:
 		cowork["protected"] = false
 		cowork["state"] = "not protected: your organization has not turned DefenseClaw on for Claude Code on this computer"
@@ -104,7 +127,7 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 		cowork["protected"] = true
 		cowork["state"] = "protected: Cowork runs the Claude Code hooks your organization manages"
 	}
-	return map[string]any{
+	answer := map[string]any{
 		"own":         true,
 		"managed":     true,
 		"managed_by":  "your organization",
@@ -112,6 +135,93 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 		"claude_code": map[string]any{"protected": claudeCode},
 		"cowork":      cowork,
 	}
+	if connectors != nil {
+		answer["connectors"] = connectors
+	}
+	return answer
+}
+
+// ownWindowsConnectorStates keeps the Windows status roster aligned with the
+// managed configuration. The own-status pipe proves the caller's SID, but it
+// does not carry per-connector hook proof. Keep the existing Claude Code
+// status and report the other configured connectors as unconfirmed.
+func ownWindowsConnectorStates(cfg *config.Config, claudeCode bool) map[string]any {
+	states := make(map[string]any)
+	for _, connector := range enterprisepolicy.StandaloneConnectors(cfg) {
+		state := map[string]any{"protected": false, "state": "not confirmed"}
+		if connector == enterprisepolicy.ConnectorClaudeCode && claudeCode {
+			state["protected"] = true
+			state["state"] = "protected"
+		}
+		states[connector] = state
+	}
+	return states
+}
+
+// ownConnectorStates reports the caller's configured connector roster. The
+// managed policy view is published before the Unix hook socket begins serving
+// requests and updated when the vendor policy changes. The guardian record
+// supplies each per-user connector's enrollment and strict machine-policy
+// enrollment; a missing or stale record is never reported protected.
+func (a *APIServer) ownConnectorStates(cfg *config.Config, uid, name string) map[string]any {
+	view := a.managedPolicyView.Load()
+	states := make(map[string]any)
+	guardian, _ := ownStatusGuardianAuthorization(a.configDataDir())
+	if guardian != nil {
+		if ok, _ := managedGuardianAuthorizationCovers(*guardian, nil, true); !ok {
+			guardian = nil
+		}
+	}
+	strict := strings.EqualFold(strings.TrimSpace(cfg.Enterprise.Enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny)
+	callerUID, err := strconv.Atoi(uid)
+	if err != nil {
+		return states
+	}
+	peer := managedHookPeer{UID: callerUID, Name: name}
+	strictExempt := strict && len(cfg.Enterprise.Enrollment.ExemptUsers) > 0 &&
+		(&managedHookAuthorizer{enrollment: cfg.Enterprise.Enrollment}).hostRunExempt(peer)
+	rootDenied := callerUID == 0 && strings.EqualFold(strings.TrimSpace(cfg.Enterprise.Enrollment.Root), config.EnterpriseRootDeny)
+	enrolled := func(connector string) bool {
+		if guardian == nil {
+			return false
+		}
+		for _, target := range guardian.ProtectedTargets {
+			if !target.OK || connector != "" && managedGuardianTargetConnector(target) != connector {
+				continue
+			}
+			if target.UID != 0 && target.UID == callerUID || target.UID == 0 && name != "" && target.User == name {
+				return true
+			}
+		}
+		return false
+	}
+	for _, connector := range enterprisepolicy.StandaloneConnectors(cfg) {
+		state := map[string]any{"protected": false, "state": "not confirmed"}
+		if view != nil && (view.admitted == nil || view.admitted[connector]) {
+			if proof, ok := view.connectors[connector]; ok {
+				protected := !rootDenied && !proof.shared && !proof.allAccounts && !proof.accounts[name] &&
+					(!strict || callerUID == 0 || strictExempt || enrolled(""))
+				state["protected"] = protected
+				if protected {
+					state["state"] = "protected"
+				} else if rootDenied || proof.shared || proof.allAccounts || proof.accounts[name] || guardian != nil {
+					state["state"] = "not protected"
+				}
+				states[connector] = state
+				continue
+			}
+		}
+		if guardian != nil || rootDenied {
+			if !rootDenied && enrolled(connector) {
+				state["protected"] = true
+				state["state"] = "protected"
+			} else {
+				state["state"] = "not protected"
+			}
+		}
+		states[connector] = state
+	}
+	return states
 }
 
 // ownLastCoworkEvent is the caller's own last Cowork hook event in the audit

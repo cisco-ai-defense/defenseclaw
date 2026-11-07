@@ -16442,6 +16442,9 @@ def _restart_services(
 
     # Names of services whose restart failed; non-empty ⇒ fail the command.
     failed: list[str] = []
+    # OpenClaw restart failed but its gateway answers (GAP-0744); the note that
+    # the config is kept is printed at the end, only if nothing else failed.
+    kept_note_pending = False
 
     hook_targets = sorted(
         {
@@ -16630,10 +16633,17 @@ def _restart_services(
         return
 
     if connector == "openclaw":
-        if not _restart_openclaw_gateway():
+        # GAP-0744: whether OpenClaw is running is decided by the health probe
+        # that follows, not by the exit status of `openclaw gateway restart`.
+        # That command needs a service manager (launchd GUI domain, systemd
+        # --user, a Windows service) and fails on an account that has none
+        # while the gateway, run in a terminal, keeps answering. Only a gateway
+        # that does not answer fails the step (and rolls the setup back).
+        restart_ok = _restart_openclaw_gateway()
+        if not _check_openclaw_gateway(oc_host, oc_port):
             failed.append("openclaw-gateway")
-        if not _check_openclaw_gateway(oc_host, oc_port) and "openclaw-gateway" not in failed:
-            failed.append("openclaw-gateway")
+        elif not restart_ok:
+            kept_note_pending = True
     elif connector in _PROXY_BACKED_CONNECTORS:
         # OpenClaw is the only proxy-backed connector that owns its own
         # gateway process; others (ZeptoClaw today) get the proxy
@@ -16665,6 +16675,24 @@ def _restart_services(
             )
 
     click.echo()
+    if kept_note_pending and not failed:
+        # Said only when nothing else failed: with a failed defenseclaw-gateway
+        # restart the setup rolls back, and the config is not kept.
+        # A rollback restart runs on the restored configuration: the attempted
+        # new one is not kept there.
+        outcome = (
+            "the previous configuration stays in place"
+            if title == _ROLLBACK_RESTART_TITLE
+            else "the new configuration is kept"
+        )
+        click.echo(
+            "  OpenClaw could not restart its gateway through a service manager here, but the "
+            f"gateway answers at {oc_host}:{oc_port}, so {outcome}."
+        )
+        click.echo(
+            "    OpenClaw reloads openclaw.json on its own; if it does not load the DefenseClaw "
+            "plugin, restart the gateway where it runs (for example `openclaw gateway run` in its terminal)."
+        )
     _fail_if_restart_failed(failed)
 
 
@@ -17702,7 +17730,7 @@ def _restart_openclaw_gateway() -> bool:
     effect.
 
     Returns True when the restart succeeded, False on any failure
-    (missing CLI, timeout, or non-zero exit). Avarice F-0143: this used
+    (missing or unrunnable CLI, timeout, or non-zero exit). Avarice F-0143: this used
     to swallow every failure and return ``None`` so the caller could not
     tell the OpenClaw gateway never came back — setup then reported
     success while traffic kept flowing past a down (fail-open) gateway."""
@@ -17711,7 +17739,10 @@ def _restart_openclaw_gateway() -> bool:
         result = subprocess.run(
             ["openclaw", "gateway", "restart"],
             capture_output=True,
-            text=True,
+            # Output is only shown to the operator: bytes that do not decode
+            # must not turn into an exception that skips the health probe.
+            encoding="utf-8",
+            errors="replace",
             timeout=60,
         )
         output = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
@@ -17751,10 +17782,18 @@ def _restart_openclaw_gateway() -> bool:
         return False
     except subprocess.TimeoutExpired:
         # OpenClaw owns this lifecycle and exposes no DefenseClaw pid/data-dir
-        # state that we can safely reconcile here.  A timeout is therefore a
-        # fail-closed restart failure; the native DefenseClaw gateway helper
-        # below performs its own identity-aware timeout reconciliation.
+        # state that we can safely reconcile here.  A timeout is reported as a
+        # failed restart; the caller then decides from the gateway health probe
+        # (GAP-0744), and the native DefenseClaw gateway helper below performs
+        # its own identity-aware timeout reconciliation.
         ux.echo(" ✗ (timed out)")
+        return False
+    except OSError as exc:
+        # Any other failure to start the command (not executable, wrong
+        # executable format, no permission) is a failed restart like a missing
+        # CLI; the caller decides from the health probe (GAP-0744).
+        ux.echo(f" ✗ (could not run the openclaw CLI: {exc.strerror or type(exc).__name__})")
+        click.echo("    Fix the openclaw CLI or restart its gateway manually.")
         return False
 
 

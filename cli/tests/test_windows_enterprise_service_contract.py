@@ -6040,11 +6040,14 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     # Every writer records only what it created, and only on standalone.
     root = _psm1_function(module, "Initialize-DefenseClawManagedRoot")
     assert "if (-not $isLeaf -and $createdThisComponent) {" in root
-    assert "Add-DefenseClawStandaloneCreatedFolderRecord -Path $createdAncestors.ToArray()" in root
+    assert "$null = Add-DefenseClawStandaloneCreatedFolderRecord -Path $createdAncestors.ToArray()" in root
     codex = _psm1_function(module, "Initialize-DefenseClawCodexMachinePolicyParent")
-    assert "Add-DefenseClawStandaloneCreatedFolderRecord -Path @($directory)" in codex
+    assert "$null = Add-DefenseClawStandaloneCreatedFolderRecord -Path @($directory)" in codex
     record = _psm1_function(module, "Add-DefenseClawStandaloneCreatedFolderRecord")
     assert "if (-not (Test-DefenseClawStandaloneProfile) -or @($Path).Count -eq 0) {" in record
+    # Review 4 S1: the writer says whether every folder was recorded.
+    assert "return [bool](@($Path).Count -eq 0)" in record and "return $complete" in record and "return $false" in record
+    assert "$null = Write-DefenseClawCreatedFolderRecordFile -Path $recordPath -Body $body" in record
     assert "Write-DefenseClawCreatedFolderRecordFile -Path $recordPath -Body $body" in record
     assert "[IO.FileMode]::CreateNew" in _psm1_function(module, "Write-DefenseClawCreatedFolderRecordFile")
     assert "_ = windowsCreatedFolderRecorder(created)" in ensure
@@ -6058,6 +6061,31 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     assert "SelfUninstallReceiptPath" in consumer
     assert "$entry.Name -cne 'lifecycle.lock' -and $entry.Name -cne $recordName" in consumer
     assert "@(Get-DefenseClawStandaloneCreatedFolderRecords -RecordDirectory $RecordDirectory)" in consumer
+    # The Go scanner step removes DefenseClaw-ScannerRuntime only after this
+    # script returned, so a Setup /uninstall found the Cisco folder holding it
+    # (created_folders_kept in the install and upgrade lanes) and left the
+    # folder and its record: the purge retires the runtime first, under its
+    # lock, never through a link.
+    assert consumer.index(
+        "Remove-DefenseClawStandaloneScannerRuntimeLeftover -LifecycleFolder $lifecycle"
+    ) < consumer.index("@(Get-DefenseClawStandaloneCreatedFolderRecords -RecordDirectory $RecordDirectory)")
+    assert consumer.index("$entry.Name -cne 'lifecycle.lock'") < consumer.index(
+        "Remove-DefenseClawStandaloneScannerRuntimeLeftover -LifecycleFolder $lifecycle"
+    )
+    scanner = _psm1_function(module, "Remove-DefenseClawStandaloneScannerRuntimeLeftover")
+    assert "'DefenseClaw-ScannerRuntime'" in scanner
+    assert "scanner-runtime.lock" in scanner
+    assert "[IO.FileShare]::None" in scanner
+    assert scanner.index("Assert-DefenseClawNoReparsePath -Path $root") < scanner.index("Assert-DefenseClawPathAcl")
+    assert scanner.index("Assert-DefenseClawPathAcl") < scanner.index("[IO.FileShare]::None")
+    # The Go step opens the lock with FILE_FLAG_OPEN_REPARSE_POINT; a FileStream
+    # follows a link and delete-on-close would delete its target, so a lock file
+    # that is a link or junction is refused before the open.
+    assert "[IO.File]::GetAttributes($lock) -band [IO.FileAttributes]::ReparsePoint" in scanner
+    assert scanner.index("[IO.FileAttributes]::ReparsePoint") < scanner.index("[IO.FileShare]::None")
+    assert scanner.index("[IO.FileShare]::None") < scanner.index("Remove-DefenseClawNoFollowTree")
+    assert "[IO.Directory]::Delete($root, $false)" in scanner
+    assert "Remove-Item" not in scanner
     reader = _psm1_function(module, "Get-DefenseClawStandaloneCreatedFolderRecords")
     assert "(Get-DefenseClawCreatedFolderRecordName -Path $recorded) -cne $item.Name" in reader
     # Review 2 L1: the record of the folder above the lifecycle folder goes
@@ -6176,7 +6204,7 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     assert "'left in place: not provably created by DefenseClaw'" in report
     # Review 3 L1: nothing in the report can replace the lifecycle's own
     # error or fail an uninstall that has finished: each step and each folder
-    # has its own try/catch with Write-Verbose, and the lifecycle `finally`
+    # has its own try/catch with Write-Warning, and the lifecycle `finally`
     # calls only this function for them.
     assert report.count("catch {") == 4 and report.count("try {") == 4
     assert "Get-DefenseClawUnprovenVendorFolders" not in lifecycle
@@ -6210,6 +6238,16 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     assert "$script:AgentFolderBackfillMarker" in consumer
     assert consumer.index("$script:AgentFolderBackfillMarker") < consumer.index("[IO.Directory]::Delete($RecordDirectory, $false)")
     assert "Set-DefenseClawAgentFolderBackfillDone" not in lifecycle
+    # Review 4 S1: the marker follows only a back-fill in which every
+    # candidate was recorded or refused by proof. A rollback keeps it (review
+    # 5 M1): it does not undo an adoption.
+    assert backfill.count("$null = Add-DefenseClawStandaloneCreatedFolderRecord") == 1
+    assert "if (-not (Add-DefenseClawStandaloneCreatedFolderRecord -Path @($folder) -RecordDirectory $RecordDirectory -Roots $Roots -Origin upgrade)) {\n                $complete = $false" in backfill
+    assert backfill.index("$complete = $false") < backfill.index("if ($complete) {\n            Set-DefenseClawAgentFolderBackfillDone -RecordDirectory $RecordDirectory")
+    restore = _psm1_function(module, "Restore-DefenseClawTransaction")
+    assert "AgentFolderBackfill" not in restore and "Remove-DefenseClawAgentFolderBackfillMarker" not in module
+    # Review 4 L4: a failing report step warns.
+    assert report.count("Write-Warning") == 4 and "Write-Verbose" not in report
     assert "'(?i)secure ?client|anyconnect'" in refusal
     assert 'Origin string `json:"origin,omitempty"`' in go
 

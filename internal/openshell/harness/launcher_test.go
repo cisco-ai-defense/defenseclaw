@@ -57,9 +57,7 @@ func startLauncher(t *testing.T, launcher, home, cwd string, env []string, args 
 // laid out below the directory. It returns the launcher and the directory.
 func launcherFixture(t *testing.T, spec *Spec, stubBody string) (string, string) {
 	t.Helper()
-	if _, err := os.Stat("/bin/bash"); err != nil {
-		t.Skip("/bin/bash is required")
-	}
+	binBash(t)
 	dir := t.TempDir()
 	writeExecutable(t, filepath.Join(dir, "stub"), "#!/bin/bash\n"+stubBody)
 	script := strings.ReplaceAll(string(spec.Launcher().Data), "/usr/local/bin/"+spec.Command+" ", filepath.Join(dir, "stub")+" ")

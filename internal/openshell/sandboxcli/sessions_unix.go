@@ -97,33 +97,40 @@ func (a *App) lockSandbox(ctx context.Context, name string, exclusive bool) (rel
 	var f *os.File
 	for f == nil {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
-			account()
-			return nil, err
-		}
-		g, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
-		if err != nil {
-			account()
-			return nil, err
-		}
-		err = syscall.Flock(int(g.Fd()), how|syscall.LOCK_NB)
-		switch {
-		case err == nil:
-			// A delete removes the sandbox's CLI state, its gate included,
-			// while another command waits on it: a gate no longer at path
-			// orders nothing, so take the one there now.
-			if held, serr := g.Stat(); serr == nil {
-				if now, perr := os.Stat(path); perr == nil && os.SameFile(held, now) {
-					f = g
-					continue
+			if !errors.Is(err, fs.ErrNotExist) {
+				account()
+				return nil, err
+			}
+		} else {
+			afterSessionGateDirReady(dir)
+			g, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+			if err != nil {
+				if !errors.Is(err, fs.ErrNotExist) {
+					account()
+					return nil, err
+				}
+			} else {
+				err = syscall.Flock(int(g.Fd()), how|syscall.LOCK_NB)
+				switch {
+				case err == nil:
+					// A delete removes the sandbox's CLI state, its gate included,
+					// while another command waits on it: a gate no longer at path
+					// orders nothing, so take the one there now.
+					if held, serr := g.Stat(); serr == nil {
+						if now, perr := os.Stat(path); perr == nil && os.SameFile(held, now) {
+							f = g
+							continue
+						}
+					}
+					_ = g.Close()
+				case !errors.Is(err, syscall.EWOULDBLOCK):
+					_ = g.Close()
+					account()
+					return nil, err
+				default:
+					_ = g.Close()
 				}
 			}
-			_ = g.Close()
-		case !errors.Is(err, syscall.EWOULDBLOCK):
-			_ = g.Close()
-			account()
-			return nil, err
-		default:
-			_ = g.Close()
 		}
 		if time.Now().After(deadline) {
 			account()
@@ -147,6 +154,10 @@ func (a *App) lockSandbox(ctx context.Context, name string, exclusive bool) (rel
 		})
 	}, nil
 }
+
+// afterSessionGateDirReady lets the gate test remove the directory at the
+// same point a concurrent sandbox delete can remove it.
+var afterSessionGateDirReady = func(string) {}
 
 // lockForStop takes sandbox name's gate exclusively for a stop or a delete
 // and counts, under it, the sessions attached to the sandbox: no session

@@ -57,7 +57,7 @@ func TestOpenCodeRefusalSaysHowToRemoveTheFileFromTheHost(t *testing.T) {
 	}
 	// The printed path, run as a shell word, names the planted file.
 	word := r.output[at+len(lead+start) : end]
-	if out, err := exec.Command("/bin/bash", "-c", "rm "+word).CombinedOutput(); err != nil {
+	if out, err := exec.Command(binBash(t), "-c", "rm "+word).CombinedOutput(); err != nil {
 		t.Fatalf("rm %s: %v\n%s", word, err, out)
 	}
 	if _, err := os.Stat(planted); !os.IsNotExist(err) {

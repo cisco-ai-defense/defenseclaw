@@ -151,7 +151,7 @@ from defenseclaw.process_liveness import pid_alive
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener, is_symlink
 from defenseclaw.scanner_binary import SKILL_SCANNER_BINARY, resolve_scanner_binary
 from defenseclaw.webhooks import list_webhooks, network_error_text, validate_webhook_url
-from defenseclaw.winquote import powershell_literal, run_instruction
+from defenseclaw.winquote import powershell_command_line, powershell_literal, run_instruction
 
 # Doctor status markers, recomputed per emission so the per-call
 # TTY/NO_COLOR gate in ``ux._color_enabled`` takes effect. Caching at
@@ -313,9 +313,11 @@ class _DoctorResult:
         # readiness check) skip it (GAP-0100).
         self.list_processes = not passive if list_processes is None else list_processes
         self.quiet = quiet
-        # "stopped" or "foreign" once the Sidecar API row explained that this
-        # account's gateway is not serving the API port; later rows that would
-        # only repeat it stay quiet.
+        # "stopped", "foreign" or "foreground" (this account's own gateway,
+        # started without a PID file, whose identity cannot authorize the
+        # token) once the Sidecar API row explained that this account's
+        # supervised gateway is not serving the API port; later rows that
+        # would only repeat it stay quiet.
         self.gateway_down = ""
         # True once the Sidecar API row found a listener on the API port that
         # is not this account's verified gateway (its /health still answers).
@@ -1871,9 +1873,12 @@ def _root_gateway_remedy(cfg) -> str:
 
 def _root_gateway_remedy_for(platform_name: str, cfg) -> str:
     if platform_name.startswith("win"):
+        executable = _root_gateway_windows_executable()
+        stop = powershell_command_line(executable, "stop")
+        start = powershell_command_line(executable, "start")
         return (
-            "Stop it from an administrator prompt (defenseclaw-gateway stop), "
-            "then start it as yourself (defenseclaw-gateway start)"
+            f"Stop it from an elevated PowerShell prompt ({stop}), "
+            f"then start it as yourself from a normal PowerShell prompt ({start})"
         )
     if platform_name == "darwin":
         return (
@@ -1885,6 +1890,20 @@ def _root_gateway_remedy_for(platform_name: str, cfg) -> str:
         "Stop it, return its files to your account and start it as yourself with: "
         + _root_gateway_recovery_command(cfg)
     )
+
+
+def _root_gateway_windows_executable() -> str:
+    """The gateway of this account for the Windows remedy, as the Go windowsRootGatewayRemedy renders it.
+
+    The resolved binary when it is an absolute path, else the bare file name
+    a per-user install has on PATH.
+    """
+    from defenseclaw.gateway import resolve_gateway_binary
+
+    binary = resolve_gateway_binary()
+    if binary and os.path.isabs(binary):
+        return binary
+    return "defenseclaw-gateway.exe"
 
 
 def _root_gateway_recovery_command(cfg) -> str:
@@ -5078,6 +5097,43 @@ def _foreign_gateway_port_holder(cfg, *, status_only: bool = False) -> str:
     return holder
 
 
+def _own_foreground_gateway(cfg, *, platform_name: str | None = None) -> _ForegroundGatewayOwner | None:
+    """This account's PID-file-less foreground gateway on the API port, or None.
+
+    The one ownership proof "defenseclaw status" and "defenseclaw-gateway
+    status" use (_foreground_gateway_status_owner), so Doctor cannot call
+    the same process foreign. A failed proof is "not proven", never an error.
+    """
+    try:
+        return _foreground_gateway_status_owner(cfg, platform_name=platform_name)
+    except Exception:  # noqa: BLE001 - a failed ownership proof is unverified
+        return None
+
+
+def _emit_foreground_gateway_sidecar(cfg, r: _DoctorResult, owner: _ForegroundGatewayOwner) -> None:
+    """The Sidecar API row for this account's own foreground gateway.
+
+    Ownership alone never authorizes sending the gateway token, so the
+    token-bearing checks are skipped (as for any unverified listener), but
+    the process is this account's own: it is not named foreign and the user
+    is not told to stop it.
+    """
+    _emit(
+        "warn",
+        "Sidecar API",
+        f"{_gateway_api_host(cfg)}:{cfg.gateway.api_port} is served by this account's own foreground "
+        f"gateway (PID {owner.pid}), started without a PID file; its live state is unverified, so the "
+        "checks that send the gateway token are skipped",
+        r=r,
+        remediation=(
+            "No action needed. To run those checks, start the gateway as a service with "
+            "'defenseclaw-gateway start' instead of in the foreground"
+        ),
+    )
+    r.sidecar_unverified = True
+    r.gateway_down = "foreground"
+
+
 def _holder_is_other_account(holder: str) -> bool:
     """Whether the named port holder is another account's process (GAP-1706)."""
     if "another account" in holder:
@@ -5293,6 +5349,9 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
             )
         elif trust.trusted:
             _emit("pass", "Sidecar API", f"{bind}:{cfg.gateway.api_port}", r=r)
+        elif (owner := _own_foreground_gateway(cfg)) is not None:
+            _emit_foreground_gateway_sidecar(cfg, r, owner)
+            return None
         elif holder:
             # Another process's /health says nothing about this account's
             # gateway, so its subsystem rows are not shown.
@@ -5506,7 +5565,9 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
         r.sidecar_unverified = True
     elif code == 0 and body.startswith("gateway listener identity is unverified:"):
         trust = _trusted_gateway_listener(cfg)
-        if holder := _foreign_gateway_port_holder(cfg):
+        if (owner := _own_foreground_gateway(cfg)) is not None:
+            _emit_foreground_gateway_sidecar(cfg, r, owner)
+        elif holder := _foreign_gateway_port_holder(cfg):
             _emit(
                 "fail",
                 "Sidecar API",
@@ -5528,6 +5589,8 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
         else:
             _emit("fail", "Sidecar API", body, r=r)
             r.sidecar_unverified = True
+    elif (owner := _own_foreground_gateway(cfg)) is not None:
+        _emit_foreground_gateway_sidecar(cfg, r, owner)
     elif holder := _foreign_gateway_port_holder(cfg):
         # A refused health probe does not prove the port is free. A holder
         # found independently is the cause the operator needs to act on.
@@ -6707,6 +6770,50 @@ def _foreground_current_uid() -> int:
     return os.geteuid() if hasattr(os, "geteuid") else -1
 
 
+def _linux_process_uids(pid: int, *, proc_root: str = "/proc") -> tuple[int, ...] | None:
+    """The real, effective, saved and filesystem uids the kernel reports for ``pid``."""
+    if pid <= 0:
+        return None
+    try:
+        with open(os.path.join(proc_root, str(pid), "status"), encoding="utf-8", errors="replace") as status:
+            lines = status.read(1 << 16).splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        if line.startswith("Uid:"):
+            fields = line.split()[1:]
+            if len(fields) == 4 and all(field.isascii() and field.isdecimal() for field in fields):
+                return tuple(int(field) for field in fields)
+            return None
+    return None
+
+
+def _foreground_process_owner_uid(
+    pid: int, process: ProcessEvidence, platform_name: str, evidence: GatewayEvidence
+) -> int:
+    """The one account that owns ``process``, or -1 when that is not proven.
+
+    macOS reports the owner with the process identity. On Linux the owner is
+    read from the kernel process table and must be the same account in all
+    four uid fields, for the same process generation that was identified.
+    """
+    if process.uid >= 0:
+        return process.uid
+    if not platform_name.startswith("linux"):
+        return -1
+    uids = _linux_process_uids(pid)
+    if not uids or len(uids) != 4 or len(set(uids)) != 1:
+        return -1
+    current = evidence.process(pid)
+    if (
+        current.status != "ok"
+        or current.start_identity != process.start_identity
+        or current.executable != process.executable
+    ):
+        return -1
+    return uids[0]
+
+
 @dataclass(frozen=True)
 class _ForegroundGatewayOwner:
     pid: int
@@ -6727,7 +6834,9 @@ def _foreground_gateway_status_owner(
     from defenseclaw.logger import _running_gateway_record
 
     platform_name = platform_name or sys.platform
-    if platform_name not in {"win32", "darwin"} or asset_lists.is_secure_client(cfg):
+    if not (platform_name in {"win32", "darwin"} or platform_name.startswith("linux")):
+        return None
+    if asset_lists.is_secure_client(cfg):
         return None
     if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
         return None
@@ -6795,7 +6904,7 @@ def _foreground_gateway_status_owner(
                 return None
         else:
             own_uid = _foreground_current_uid()
-            if own_uid <= 0 or process.uid != own_uid:
+            if own_uid <= 0 or _foreground_process_owner_uid(listener.pid, process, platform_name, evidence) != own_uid:
                 return None
     except (OSError, ValueError):
         return None
@@ -6959,6 +7068,35 @@ def _read_process_env_var(pid: int, var_name: str) -> str | None:
 _NEEDS_RUNNING_GATEWAY = "needs the gateway, which is not running (see Sidecar API)"
 
 
+def _emit_windows_foreground_gateway_rows(
+    cfg, r: _DoctorResult, evidence: GatewayEvidence, platform_name: str
+) -> bool:
+    """Skip the PID-bound rows for this account's own foreground gateway.
+
+    The Sidecar API row already named the process (r.gateway_down is
+    "foreground"). A gateway started without a PID file cannot pass the
+    PID-bound identity, owner, token and home rows, and the token is never
+    sent to it, so those rows would only call it foreign. The ownership is
+    proven again now, for the listener this pass sees, before any row is
+    downgraded; if the proof no longer holds the normal rows run and fail.
+    """
+    owner = _own_foreground_gateway(cfg, platform_name=platform_name)
+    if owner is None:
+        return False
+    # The rows are downgraded only while this pass still sees the proven
+    # process on the port. A missing, ambiguous or unreadable listener, or
+    # another PID, is what the normal rows fail on.
+    listener = evidence.listener(_gateway_api_port(cfg), host=_gateway_api_host(cfg))
+    if listener.status != "ok" or listener.pid != owner.pid:
+        return False
+    served = f"this account's own foreground gateway (PID {owner.pid}) serves the API port without a PID file"
+    _emit("skip", "Gateway PID identity", f"{served}; its identity is unverified (see Sidecar API)", r=r)
+    _emit("skip", "Gateway listener owner", f"{served}; ownership is proven, PID-bound checks do not apply", r=r)
+    for label in ("Gateway token drift", "Gateway home"):
+        _emit("skip", label, f"{served}; refusing to send the gateway token", r=r)
+    return True
+
+
 def _check_windows_gateway_diagnostics(
     cfg,
     r: _DoctorResult,
@@ -6987,6 +7125,8 @@ def _check_windows_gateway_diagnostics(
             _emit("skip", label, _NEEDS_RUNNING_GATEWAY, r=r)
         return True
     evidence = evidence or GatewayEvidence(platform_name=platform_name)
+    if r.gateway_down == "foreground" and _emit_windows_foreground_gateway_rows(cfg, r, evidence, platform_name):
+        return True
     pid_path = gateway_pid_path(data_dir)
     record = evidence.pid_record(pid_path)
     process = evidence.process(record.pid) if record.status == "ok" else None
@@ -20245,6 +20385,13 @@ def _fix_gateway_service(
     process_trust: _GatewayTrust | None = None
     inspected_fingerprint: tuple[int, int, int, int, bytes] | None = None
     port_refused = code == 0 and "refused" in body.lower()
+    foreground = None if port_refused else _own_foreground_gateway(cfg)
+    if foreground is not None:
+        return (
+            "skip",
+            f"this account's own foreground gateway (PID {foreground.pid}) serves the API port; "
+            "its state is unverified, so it was not restarted",
+        )
     foreign_holder = "" if port_refused else _foreign_gateway_port_holder(cfg)
     if foreign_holder:
         return ("fail", _foreign_gateway_port_detail(cfg, foreign_holder))

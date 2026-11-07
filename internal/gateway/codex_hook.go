@@ -393,13 +393,13 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			asset.decision, true, asset.targetType, req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings,
 		)
 		if mergedAction == "block" {
-			capable, capableWouldBlock := mapHookActionForProfile(
-				"block",
+			capable, capableWouldBlock := mapAssetBlockForProfile(
 				effectiveMode,
 				req.HookEventName,
 				caps,
 				profile,
 				req.Payload,
+				cfg != nil && cfg.SecureClientIntegration(),
 			)
 			if capable != "block" {
 				mergedAction = capable
@@ -698,6 +698,10 @@ func codexOutput(event, action, rawAction, reason, additional string) map[string
 func codexAdditionalContext(rawAction, severity, reason, mode string, wouldBlock bool) string {
 	if rawAction == "allow" || rawAction == "" {
 		return ""
+	}
+	if strings.HasPrefix(reason, "DefenseClaw is still scanning MCP server ") ||
+		strings.HasPrefix(reason, "DefenseClaw could not read admission for MCP server ") {
+		return reason
 	}
 	if mode != "action" && guardrailSeverityRank(severity) < codexObserveContextMinSeverity {
 		return ""

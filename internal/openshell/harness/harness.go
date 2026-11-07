@@ -785,9 +785,10 @@ func tomlStringValue(value string) string {
 
 // Env returns the environment for `openshell sandbox create --env`: the
 // connector artifacts' startup env, the DefenseClaw sandbox identity, the
-// egress proxy settings and the credential profile's env. Provider hosts and
-// host.openshell.internal bypass the proxy, so hooks reach the ingress and
-// OpenShell can inject LLM credentials on its direct provider rules. The
+// egress proxy settings and the credential profile's env. Provider hosts,
+// local service addresses and host.openshell.internal bypass the proxy.
+// Hooks reach the ingress, and OpenShell can inject LLM credentials on its
+// direct provider rules. The
 // proxy settings are also passed as openshell.EnvEgressURL and
 // openshell.EnvEgressBypass, from which the launcher exports them
 // (OpenShell 0.1.1 drops the standard names).
@@ -837,11 +838,27 @@ func (s *Spec) Env(opts EnvOptions) (map[string]string, error) {
 	return env, nil
 }
 
+// sandboxLoopbackNoProxy names local service addresses in the forms common
+// sandbox HTTP clients recognize. The exact IPv4 address is needed by clients
+// that do not understand CIDR entries.
+const sandboxLoopbackNoProxy = "localhost,127.0.0.1,127.0.0.0/8,::1"
+
 // SetNoProxy sets the proxy bypass list in every spelling a sandbox needs:
 // NO_PROXY and no_proxy for runtimes that read them, and
 // openshell.EnvEgressBypass, which survives OpenShell's environment filter
-// for the launchers.
+// for the launchers. Local service addresses are always present, including
+// when the manager adds credential hosts after Spec.Env.
 func SetNoProxy(env map[string]string, list string) {
+	seen := map[string]bool{}
+	var hosts []string
+	for _, host := range strings.Split(list+","+sandboxLoopbackNoProxy, ",") {
+		host = strings.TrimSpace(host)
+		if host != "" && !seen[host] {
+			seen[host] = true
+			hosts = append(hosts, host)
+		}
+	}
+	list = strings.Join(hosts, ",")
 	env["NO_PROXY"] = list
 	env["no_proxy"] = list
 	env[openshell.EnvEgressBypass] = list

@@ -361,6 +361,14 @@ func discoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 						return version, ""
 					}
 				}
+				// A user can install an npm CLI under an arbitrary prefix and
+				// link its bin entry into a searched directory. If the bounded
+				// live probe did not answer, use the linked package's version.
+				for _, pkg := range probe.npmPackages {
+					if version := linkedUnixPackageVersion(home, candidate, pkg); version != "" {
+						return version, ""
+					}
+				}
 			}
 			// Only the connector's own CLI name counts as evidence of an
 			// install; a generic alias ("agent") could be anything.
@@ -383,6 +391,41 @@ func discoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 		return "", UnixAgentUnversionedReasonPrefix + installedAt + installedNote
 	}
 	return "", fmt.Sprintf("no %s installation found for this user", connector)
+}
+
+// linkedUnixPackageVersion accepts metadata only from the package whose bin
+// entry the discovered link actually names. It keeps custom npm prefixes in
+// the same bounded, per-user metadata path as the known prefixes.
+func linkedUnixPackageVersion(home, candidate, pkg string) string {
+	info, err := os.Lstat(candidate)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return ""
+	}
+	target, err := filepath.EvalSymlinks(candidate)
+	if err != nil || filepath.Base(filepath.Dir(target)) != "bin" || !unixDiscoveryCandidateTrusted(home, target) {
+		return ""
+	}
+	packageDir := filepath.Dir(filepath.Dir(target))
+	metadata := filepath.Join(packageDir, "package.json")
+	if !unixDiscoveryCandidateTrusted(home, metadata) {
+		return ""
+	}
+	parsed, ok := readUnixPackageJSON(metadata, false)
+	if !ok || parsed.Name != pkg || !validUnixAgentVersion(strings.TrimSpace(parsed.Version)) {
+		return ""
+	}
+	var bins map[string]string
+	bin := ""
+	if json.Unmarshal(parsed.Bin, &bins) == nil {
+		bin = bins[filepath.Base(candidate)]
+	} else if filepath.Base(candidate) == filepath.Base(pkg) {
+		// npm also accepts a single bin path named after the package.
+		_ = json.Unmarshal(parsed.Bin, &bin)
+	}
+	if bin == "" || filepath.Clean(filepath.Join(packageDir, filepath.FromSlash(bin))) != target {
+		return ""
+	}
+	return strings.TrimSpace(parsed.Version)
 }
 
 // unixUntrustedCandidateNote follows the path of an installed CLI that
@@ -625,34 +668,16 @@ func readUnixInstallStampVersion(path string) string {
 }
 
 type unixPackageJSON struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
+	Name    string          `json:"name"`
+	Version string          `json:"version"`
+	Bin     json.RawMessage `json:"bin"`
 }
 
 // readUnixPackageVersion reads a bounded package.json. When requireRoot is
 // set every path element must be root-owned and not group/other writable.
 func readUnixPackageVersion(path, wantName string, requireRoot bool) (string, bool) {
-	if requireRoot && !rootOwnedChain(path) {
-		return "", false
-	}
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return "", false
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return "", false
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, unixAgentVersionMaxBytes+1))
-	if err != nil || len(data) > unixAgentVersionMaxBytes {
-		return "", false
-	}
-	var parsed unixPackageJSON
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		return "", false
-	}
-	if wantName != "" && strings.TrimSpace(parsed.Name) != wantName {
+	parsed, ok := readUnixPackageJSON(path, requireRoot)
+	if !ok || wantName != "" && strings.TrimSpace(parsed.Name) != wantName {
 		return "", false
 	}
 	version := strings.TrimSpace(parsed.Version)
@@ -660,6 +685,30 @@ func readUnixPackageVersion(path, wantName string, requireRoot bool) (string, bo
 		return "", false
 	}
 	return version, true
+}
+
+func readUnixPackageJSON(path string, requireRoot bool) (unixPackageJSON, bool) {
+	if requireRoot && !rootOwnedChain(path) {
+		return unixPackageJSON{}, false
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return unixPackageJSON{}, false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return unixPackageJSON{}, false
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, unixAgentVersionMaxBytes+1))
+	if err != nil || len(data) > unixAgentVersionMaxBytes {
+		return unixPackageJSON{}, false
+	}
+	var parsed unixPackageJSON
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return unixPackageJSON{}, false
+	}
+	return parsed, true
 }
 
 // unixDiscoveryUID is the account discovery reads and runs agent files for:

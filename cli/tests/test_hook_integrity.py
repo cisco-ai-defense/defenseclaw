@@ -247,6 +247,69 @@ def test_missing_windows_hook_launcher_names_the_installer(tmp_path, monkeypatch
     assert "installer" in hook_integrity.repair_command("claudecode", problems[0])
 
 
+@pytest.mark.parametrize("connector", ["codex", "devin"])
+def test_unusable_windows_hook_guard_blocks_status(tmp_path, monkeypatch, connector):
+    # rel-1-0-6 GAP-0676 S4: a guarded Codex or Devin entry starts the hook
+    # guard; a missing, non-regular or altered guard lets those calls run
+    # uninspected while status said the connector was running.
+    from defenseclaw import hook_integrity
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    guard = bin_dir / "defenseclaw-hook-guard.exe"
+    guard.write_bytes(b"MZguard")
+    if connector == "codex":
+        config = tmp_path / "config.toml"
+        command = (
+            f'C:\\Windows\\System32\\cmd.exe /d /v:off /c "{guard}" launcher-guard-sibling '
+            "hook --connector codex --event PreToolUse --hook-contract codex-hooks-v4"
+        )
+        table = "[[hooks.PreToolUse]]\nmatcher = '*'\n[[hooks.PreToolUse.hooks]]\ntype = 'command'\ntimeout = 30\n"
+        config.write_text(f"{table}command = '{command}'\n")
+    else:
+        config = tmp_path / "hooks.json"
+        command = f"'{guard}' launcher-guard-devin PreToolUse hook --connector devin"
+        handler = {"type": "command", "command": command, "timeout": 10}
+        config.write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "", "hooks": [handler]}]}}))
+    lock = {"version": 2, "connectors": {connector: {"locations": {"hook_config_paths": [str(config)]}}}}
+    (tmp_path / "hook_contract_lock.json").write_text(json.dumps(lock))
+    monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
+    cfg = SimpleNamespace(data_dir=str(tmp_path))
+    agent = {"codex": "Codex", "devin": "Devin"}[connector]
+    record = tmp_path / "installer" / "binaries.sha256"
+    record.parent.mkdir()
+
+    assert hook_integrity.hook_guard_program(connector, command) == str(guard)
+    assert hook_registration_problems(cfg, connector) == []
+    record.write_text(f"{hashlib.sha256(b'MZguard').hexdigest()}  defenseclaw-hook-guard.exe\n")
+    assert hook_registration_problems(cfg, connector) == []
+
+    record.write_text(f"{'ab' * 32}  defenseclaw-hook-guard.exe\n")
+    problems = hook_registration_problems(cfg, connector)
+    assert problems == [
+        f"the DefenseClaw hook guard {guard} does not match the copy the installer recorded, "
+        f"so {agent} prompts and tool calls may run without DefenseClaw"
+    ]
+    assert problems[0].blocking and "installer again" in repair_command(connector, problems[0])
+
+    guard.unlink()
+    problems = hook_registration_problems(cfg, connector)
+    assert problems == [
+        f"the DefenseClaw hook guard {guard} is missing, so {agent} prompts and tool calls run without DefenseClaw"
+    ]
+    assert problems[0].blocking
+    assert "defenseclaw-gateway restart" in repair_command(connector, problems[0])
+    assert f"defenseclaw setup {connector}" in repair_command(connector, problems[0])
+
+    guard.mkdir()
+    problems = hook_registration_problems(cfg, connector)
+    assert problems and problems[0].startswith(f"the DefenseClaw hook guard {guard} is not a regular file")
+    assert problems[0].blocking and "installer again" in repair_command(connector, problems[0])
+
+    managed = SimpleNamespace(data_dir=str(tmp_path), deployment_mode="managed_enterprise")
+    assert hook_integrity.hook_launcher_problems(managed, connector) == []
+
+
 def test_older_build_render_is_not_reported_fresh(tmp_path, monkeypatch):
     # GAP-1316: an older build's script still holds the freshness sentinels,
     # but it does not match the digest setup sealed.

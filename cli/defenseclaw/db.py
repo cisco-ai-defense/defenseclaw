@@ -1821,13 +1821,18 @@ class Store:
         now = datetime.now(timezone.utc).isoformat()
         init_json = json.dumps({field: value})
         path = f"$.{field}"
+        update = "json_set(actions_json, ?, ?)"
+        if field == "runtime":
+            # runtime_source is the deciding path the gateway records with
+            # its own runtime disable; any other runtime write drops it.
+            update = f"json_remove({update}, '$.runtime_source')"
         self.db.execute(
-            """INSERT INTO actions (
+            f"""INSERT INTO actions (
                  id, target_type, target_name, source_path, actions_json, reason,
                  updated_at, connector)
                VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
                ON CONFLICT(target_type, target_name, connector) DO UPDATE SET
-                 actions_json = json_set(actions_json, ?, ?),
+                 actions_json = {update},
                  reason = excluded.reason,
                  updated_at = excluded.updated_at""",
             (aid, target_type, target_name, init_json, reason, now, connector, path, value),
@@ -1844,8 +1849,11 @@ class Store:
         _validate(field, "")
         path = f"$.{field}"
         now = datetime.now(timezone.utc).isoformat()
+        remove = "json_remove(actions_json, ?)"
+        if field == "runtime":
+            remove = "json_remove(actions_json, ?, '$.runtime_source')"  # its provenance goes with it
         self.db.execute(
-            """UPDATE actions SET actions_json = json_remove(actions_json, ?), updated_at = ?
+            f"""UPDATE actions SET actions_json = {remove}, updated_at = ?
                WHERE target_type = ? AND target_name = ? AND connector = ?""",
             (path, now, target_type, target_name, connector),
         )
@@ -2226,12 +2234,16 @@ class Store:
 
         q_skill = "SELECT COUNT(*) FROM actions WHERE target_type='skill' AND json_extract(actions_json,'$.install')="
         q_mcp = "SELECT COUNT(*) FROM actions WHERE target_type='mcp' AND json_extract(actions_json,'$.install')="
+        q_blocked_mcp = (
+            "SELECT COUNT(*) FROM actions WHERE target_type IN ('mcp', 'mcp-account') "
+            "AND json_extract(actions_json,'$.install')='block'"
+        )
         alert_where = self._alert_where_clause(actionable=False)
         return self._with_operator_lists(
             Counts(
                 blocked_skills=_count(q_skill + "'block'"),
                 allowed_skills=_count(q_skill + "'allow'"),
-                blocked_mcps=_count(q_mcp + "'block'"),
+                blocked_mcps=_count(q_blocked_mcp),
                 allowed_mcps=_count(q_mcp + "'allow'"),
                 alerts=self._count_within(
                     f"SELECT COUNT(*) FROM audit_events WHERE {alert_where}", alert_count_seconds
@@ -2281,7 +2293,7 @@ class Store:
                         AND json_extract(actions_json, '$.install') = 'allow'
                        THEN 1 ELSE 0 END), 0),
                    COALESCE(SUM(CASE
-                       WHEN target_type = 'mcp'
+                       WHEN target_type IN ('mcp', 'mcp-account')
                         AND json_extract(actions_json, '$.install') = 'block'
                        THEN 1 ELSE 0 END), 0),
                    COALESCE(SUM(CASE
@@ -2289,7 +2301,7 @@ class Store:
                         AND json_extract(actions_json, '$.install') = 'allow'
                        THEN 1 ELSE 0 END), 0)
                FROM actions
-               WHERE target_type IN ('skill', 'mcp')"""
+               WHERE target_type IN ('skill', 'mcp', 'mcp-account')"""
         ).fetchone()
         blocked_skills, allowed_skills, blocked_mcps, allowed_mcps = (int(value or 0) for value in action_counts)
         return self._with_operator_lists(

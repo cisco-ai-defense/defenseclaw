@@ -567,7 +567,7 @@ func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document 
 		})
 	case "antigravity":
 		// Setup rewrites each DefenseClaw-owned outer key whole.
-		for key, rendered := range antigravityOwnedHookKeys(runtime.GOOS, hookCommand) {
+		for key, rendered := range antigravityOwnedHookKeys(runtime.GOOS, hookCommand, opts.ManagedEnterprise) {
 			if !sameHookJSON(document[key], rendered) {
 				return false
 			}

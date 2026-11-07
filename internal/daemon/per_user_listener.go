@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // PerUserListenerClass describes a listener for display. It never authorizes
@@ -44,12 +46,38 @@ func RootGatewayListenerRemedy(dataDir string) string {
 func rootGatewayRemedyFor(goos, dataDir string) string {
 	switch goos {
 	case "windows":
-		return "Stop it from an administrator prompt (defenseclaw-gateway stop), then start it as yourself (defenseclaw-gateway start)"
+		return windowsRootGatewayRemedy(rootGatewayWindowsExecutable())
 	case "darwin":
 		return "Open DefenseClawMac and choose Start Gateway: it stops the root gateway with administrator approval, " +
 			"returns its files to you and starts the gateway as you. Without the app, run: " + rootGatewayRecoveryCommand(dataDir)
 	}
 	return "Stop it, return its files to your account and start it as yourself with: " + rootGatewayRecoveryCommand(dataDir)
+}
+
+// windowsRootGatewayRemedy names the elevated stop and the account start of
+// the gateway at executable. Both commands are rendered by
+// managed.WindowsCommandLine, the one place a PowerShell command line is
+// built (TestManagedWindowsCommandsComeFromTheRenderer). The call-operator
+// form runs only in PowerShell, so the text names PowerShell for both steps
+// (a Command Prompt cannot run it); a bare command would not run as typed and a
+// path with a space or an apostrophe would break it.
+func windowsRootGatewayRemedy(executable string) string {
+	return "Stop it from an elevated PowerShell prompt (" + managed.WindowsCommandLine(executable, "stop") +
+		"), then start it as yourself from a normal PowerShell prompt (" + managed.WindowsCommandLine(executable, "start") + ")"
+}
+
+// rootGatewayWindowsExecutable is the gateway of this account: the running
+// binary when it is the gateway, else the one on PATH. With neither it is the
+// bare file name, which a per-user install has on PATH.
+func rootGatewayWindowsExecutable() string {
+	const name = "defenseclaw-gateway.exe"
+	if self, err := os.Executable(); err == nil && strings.EqualFold(filepath.Base(self), name) {
+		return self
+	}
+	if found, err := exec.LookPath(name); err == nil && filepath.IsAbs(found) {
+		return found
+	}
+	return name
 }
 
 // rootGatewayRecoveryCommand stops the root gateway, returns the home to the
