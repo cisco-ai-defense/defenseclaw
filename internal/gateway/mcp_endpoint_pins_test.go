@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -193,10 +192,10 @@ func TestProjectMCPDenyDifferingDeepInALongArgumentListIsRuledOut(t *testing.T) 
 	}
 }
 
-// The tail of the claim is decoded once for a rule, not once per argument of
-// its prefix: an ordinary 10,242-argument server against a deny that differs
-// in its last argument is ruled out in a few milliseconds (decoding the whole
-// tail at every argument took most of a second).
+// The tail of the claim is decoded once for a request, not once per rule or
+// per argument of a prefix, and comparing a prefix allocates nothing per
+// argument: an ordinary 10,242-argument server against a deny that differs in
+// its last argument is ruled out with a handful of allocations in all.
 func TestProjectMCPDeepArgumentDenyDecodesTheTailOnce(t *testing.T) {
 	args := make([]string, 10242)
 	for i := range args {
@@ -210,20 +209,27 @@ func TestProjectMCPDeepArgumentDenyDecodesTheTailOnce(t *testing.T) {
 	prefix := append([]string(nil), args...)
 	prefix[len(prefix)-1] = "--different"
 	rules := []config.AssetPolicyRule{{Name: "notes", Command: "node", ArgsPrefix: prefix}}
-	// One decode of the tail is the unit; decoding it at each of the 8,194
-	// arguments past the full digests costs thousands of them.
-	start := time.Now()
-	facts.MCP.Pins.TailBytes()
-	decode := time.Since(start)
-	start = time.Now()
-	may := deniedRulesMayPinClaim(rules, "codex", "notes", facts.MCP.Pins)
-	elapsed := time.Since(start)
+	var may bool
+	allocs := testing.AllocsPerRun(5, func() {
+		may = deniedRulesMayPinClaim(rules, "codex", "notes", facts.MCP.Pins)
+	})
 	if may {
 		t.Error("a deny that differs in the last argument may match")
 	}
-	if limit := max(1000*decode, 30*time.Millisecond); elapsed > limit {
-		t.Errorf("rule comparison took %v (one tail decode: %v), want under %v", elapsed, decode, limit)
+	// The decode of the tail and the config name comparisons are a few
+	// allocations; one per argument would be over eight thousand.
+	if allocs > 16 {
+		t.Errorf("rule comparison made %v allocations, want a constant few", allocs)
 	}
+	// Many rules share one decode.
+	shared := &claimTail{}
+	first := shared.of(facts.MCP.Pins)
+	held := facts.MCP.Pins.Tail
+	facts.MCP.Pins.Tail = ""
+	if again := shared.of(facts.MCP.Pins); len(first) == 0 || len(again) != len(first) {
+		t.Errorf("tail decoded again for a second rule: %d then %d bytes", len(first), len(again))
+	}
+	facts.MCP.Pins.Tail = held
 	rules[0].ArgsPrefix[len(prefix)-1] = args[len(prefix)-1]
 	if !deniedRulesMayPinClaim(rules, "codex", "notes", facts.MCP.Pins) {
 		t.Error("the exact deny may not match")

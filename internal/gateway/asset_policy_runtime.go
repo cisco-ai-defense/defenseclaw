@@ -11,7 +11,6 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -810,6 +809,7 @@ func rulesPinEndpointForServer(rules []config.AssetPolicyRule, connector, server
 // assetfacts maxPinArgs plus maxTailPins) cannot be ruled out. It checks the
 // constraints assetRuleMatches does.
 func deniedRulesMayPinClaim(rules []config.AssetPolicyRule, connector, server string, pins *assetfacts.MCPPins) bool {
+	var tail claimTail
 	for _, rule := range rules {
 		if rule.Name != "" && !config.SameAssetName(rule.Name, server) &&
 			!config.SameMCPToolServer(connector, rule.Name, server) {
@@ -827,14 +827,28 @@ func deniedRulesMayPinClaim(rules []config.AssetPolicyRule, connector, server st
 			// definition (assetRuleMatches).
 			continue
 		}
-		if pins == nil || ruleMayMatchPins(rule, pins) {
+		if pins == nil || ruleMayMatchPins(rule, pins, &tail) {
 			return true
 		}
 	}
 	return false
 }
 
-func ruleMayMatchPins(rule config.AssetPolicyRule, pins *assetfacts.MCPPins) bool {
+// claimTail decodes the tail digests of one claim at most once, however many
+// rules are compared with it (a request has one claim).
+type claimTail struct {
+	raw  []byte
+	read bool
+}
+
+func (t *claimTail) of(pins *assetfacts.MCPPins) []byte {
+	if !t.read {
+		t.raw, t.read = pins.TailBytes(), true
+	}
+	return t.raw
+}
+
+func ruleMayMatchPins(rule config.AssetPolicyRule, pins *assetfacts.MCPPins, tail *claimTail) bool {
 	if rule.URL != "" && assetfacts.PinSum(rule.URL) != pins.URL {
 		return false
 	}
@@ -844,19 +858,18 @@ func ruleMayMatchPins(rule config.AssetPolicyRule, pins *assetfacts.MCPPins) boo
 	if len(rule.ArgsPrefix) > pins.ArgCount {
 		return false
 	}
-	var tail []byte
+	var tailDigests []byte
 	if len(rule.ArgsPrefix) > len(pins.Args) {
-		// Decoded once for the whole prefix, not once per argument.
-		tail = pins.TailBytes()
+		tailDigests = tail.of(pins)
 	}
 	for i, want := range rule.ArgsPrefix {
 		switch {
 		case i < len(pins.Args):
-			if assetfacts.PinArgSum(want) != pins.Args[i] {
+			if !assetfacts.PinArgMatches(want, pins.Args[i]) {
 				return false
 			}
 		default:
-			if held := assetfacts.TailDigestAt(tail, i-len(pins.Args)); held != nil && !bytes.Equal(assetfacts.PinTailDigest(want), held) {
+			if held := assetfacts.TailDigestAt(tailDigests, i-len(pins.Args)); held != nil && !assetfacts.PinTailMatches(want, held) {
 				return false
 			}
 		}

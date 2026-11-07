@@ -395,6 +395,26 @@ func PinTailDigest(value string) []byte {
 // first pinArgDigestLen hex characters of PinSum.
 func PinArgSum(value string) string { return PinSum(value)[:pinArgDigestLen] }
 
+// PinArgMatches reports whether digest is PinArgSum(value). It allocates
+// nothing, so a rule prefix of thousands of arguments is compared without
+// garbage per argument.
+func PinArgMatches(value, digest string) bool {
+	if len(digest) != pinArgDigestLen {
+		return false
+	}
+	sum := sha256.Sum256([]byte(strings.TrimSpace(value)))
+	var hexed [pinArgDigestLen]byte
+	hex.Encode(hexed[:], sum[:pinArgDigestLen/2])
+	return string(hexed[:]) == digest
+}
+
+// PinTailMatches reports whether held is PinTailDigest(value), without
+// allocating.
+func PinTailMatches(value string, held []byte) bool {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(value)))
+	return bytes.Equal(sum[:pinTailDigestLen], held)
+}
+
 // pinsOf takes the pins of a definition: from its fields while it holds them,
 // otherwise the ones an earlier pass already took, or none: a claim from a
 // hook that took no pins cannot refute a rule.

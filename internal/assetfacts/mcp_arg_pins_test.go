@@ -81,3 +81,18 @@ func TestMCPPinsTailCoversArgumentsPastTheFullDigests(t *testing.T) {
 		t.Fatalf("the argument count was changed: %+v", big.MCP)
 	}
 }
+
+// The allocation-free comparisons agree with the digests the claim holds.
+func TestPinMatchesAgreeWithTheDigests(t *testing.T) {
+	for _, value := range []string{"", "--same", "  padded  ", "café", strings.Repeat("x", 300)} {
+		if !PinArgMatches(value, PinArgSum(value)) || PinArgMatches(value+"!", PinArgSum(value)) {
+			t.Errorf("PinArgMatches disagrees with PinArgSum for %q", value)
+		}
+		if !PinTailMatches(value, PinTailDigest(value)) || PinTailMatches(value+"!", PinTailDigest(value)) {
+			t.Errorf("PinTailMatches disagrees with PinTailDigest for %q", value)
+		}
+	}
+	if PinArgMatches("a", "short") || PinTailMatches("a", nil) {
+		t.Error("a malformed held digest matched")
+	}
+}
