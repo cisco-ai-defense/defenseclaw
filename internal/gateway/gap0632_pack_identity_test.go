@@ -18,6 +18,14 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
+// posixShellOperand spells a native path as one POSIX shell operand. A
+// Windows path with backslashes, unquoted, is read by a POSIX shell as escape
+// sequences and names a different (relative) file, so it is not the state
+// file the row means; single quotes keep the native spelling literal.
+func posixShellOperand(path string) string {
+	return "\x27" + path + "\x27"
+}
+
 func TestGAP0632PinnedPackIdentityKeepsStateProtection(t *testing.T) {
 	root := guardrailPoliciesRoot(t)
 	home := t.TempDir()
@@ -128,7 +136,7 @@ func TestGAP0632PinnedPackIdentityKeepsStateProtection(t *testing.T) {
 				{"value variable state", `printf "$X" > "$HOME"/.defenseclaw/config.yaml`, true},
 				{"tilde state", "printf marker >> ~/.defenseclaw/config.yaml", true},
 				{"literal home state", "printf marker > " + filepath.Join(home, ".defenseclaw", "config.yaml"), true},
-				{"state operand with expanded output", "truncate -s 0 " + state + " > out-*.txt", true},
+				{"state operand with expanded output", "truncate -s 0 " + posixShellOperand(state) + " > out-*.txt", true},
 				{"ordinary project file", "echo marker > " + filepath.Join(project, "notes.txt"), false},
 				{"ordinary expanded output", "printf marker > out-*.txt", false},
 				{"state path mention", `printf '%s\n' "$HOME/.defenseclaw/config.yaml" > notes.txt`, false},
