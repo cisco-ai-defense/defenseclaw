@@ -2545,6 +2545,34 @@ class TestMcpListMultiConnectorDefault(MCPCommandTestBase):
 # _parse_args
 # ---------------------------------------------------------------------------
 
+class TestFailedScanNextStepNamesTheAllowCommand(unittest.TestCase):
+    def test_refused_servers_name_the_reason_and_the_allow_command(self):
+        # GAP-0776: the agent-visible text of a failed admission scan names
+        # the cause and `defenseclaw mcp allow <name>`; mcp list says the same.
+        from defenseclaw.commands.cmd_mcp import _failed_scan_next_step
+
+        launcher = MCPServerEntry(name="srv", command="python3", args=["server.py"])
+        text = _failed_scan_next_step("srv", "claudecode", "", "", launcher)
+        self.assertIn("refused", text)
+        self.assertIn("python3", text)
+        self.assertIn("defenseclaw mcp allow srv", text)
+
+        loopback = _failed_scan_next_step(
+            "srv", "claudecode", "refusing: pass --allow-private", "http://127.0.0.1:18795/mcp", None,
+        )
+        self.assertIn("private or loopback address", loopback)
+        self.assertIn("defenseclaw mcp allow srv", loopback)
+
+    def test_an_unreachable_server_keeps_the_reachability_hint(self):
+        # The benign twin: a scan that failed for reachability is not a
+        # refusal and is not told to be trusted.
+        from defenseclaw.commands.cmd_mcp import _failed_scan_next_step
+
+        text = _failed_scan_next_step("srv", "claudecode", "connection reset", "https://example.com/mcp", None)
+        self.assertIn("fix reachability", text)
+        self.assertNotIn("mcp allow", text)
+
+
 class TestMCPSetHelpExamples(unittest.TestCase):
     def test_every_stdio_example_uses_a_scannable_launcher(self):
         # GAP-0373/GAP-0406: the help showed uvx context7-mcp (no such PyPI
