@@ -38,20 +38,21 @@ func (l StandaloneLayout) OwnedPaths() []string {
 	return owned
 }
 
-// StandaloneWindowsOwnFolders returns the folders, below a Program Files or
-// ProgramData root, that hold a standalone Windows deployment: the install
-// root, the state root, the hook runtime and the scanner runtime, each as
-// "Cisco\<name>". They come from the layout itself, so a root that the
-// lifecycle adds is covered as well. The Program Files and ProgramData
-// roots are chosen at install time (StandaloneWindowsLayout resolves them
-// from the protected registration), so a caller matches these folders under
-// whichever root a path names.
-func StandaloneWindowsOwnFolders() []string {
-	const programFiles, programData = `Z:\ProgramFiles`, `Z:\ProgramData`
+// StandaloneWindowsOwnFolders returns the folders that hold a standalone
+// Windows deployment under the given Program Files and ProgramData roots:
+// the install root below Program Files and the state root, the hook runtime
+// and the scanner runtime below ProgramData, each as a full path. They come
+// from the layout itself, so a folder that the lifecycle adds is covered as
+// well. The roots are the trusted registration (TrustedStandaloneWindowsRoots)
+// or any other canonical absolute drive roots StandaloneWindowsLayoutForRoots
+// accepts; nil when they are not.
+func StandaloneWindowsOwnFolders(programFiles, programData string) []string {
 	layout, err := StandaloneWindowsLayoutForRoots(programFiles, programData)
 	if err != nil {
 		return nil
 	}
+	programFiles = strings.TrimRight(strings.TrimSpace(programFiles), `\`)
+	programData = strings.TrimRight(strings.TrimSpace(programData), `\`)
 	owned := append(layout.OwnedPaths(), StandaloneWindowsScannerRuntimeDirForRoot(programData))
 	var folders []string
 	for _, value := range owned {
@@ -64,7 +65,7 @@ func StandaloneWindowsOwnFolders() []string {
 			if len(parts) < 2 {
 				continue
 			}
-			if folder := parts[0] + `\` + parts[1]; !slices.Contains(folders, folder) {
+			if folder := root + `\` + parts[0] + `\` + parts[1]; !slices.Contains(folders, folder) {
 				folders = append(folders, folder)
 			}
 		}

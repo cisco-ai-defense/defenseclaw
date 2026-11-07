@@ -236,6 +236,14 @@ func TestMachineLayoutWindowsFileToolWritesAreSelfProtection(t *testing.T) {
 		`C:\ProgramData\Other\DefenseClaw\a.txt`,
 		`C:\Users\tester\proj\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
 		`C:\Users\tester\proj\notes.txt`,
+		// The hook and scanner runtime are below ProgramData only, and a
+		// short name is the one NTFS makes: six characters, a tilde, a number.
+		`C:\Program Files\Cisco\DefenseClaw-HookRuntime\a.txt`,
+		`C:\Program Files\Cisco\DefenseClaw-ScannerRuntime\a.txt`,
+		`C:\ProgramData\Cisco\D~1\a.txt`,
+		`C:\ProgramData\Cisco\DE~9\a.txt`,
+		`C:\PRO~1\Cisco\DefenseClaw\a.txt`,
+		`C:\ProgramData\Cisco\DEFENSE~1\a.txt`,
 	}
 	for _, managed := range []bool{false, true} {
 		for _, pack := range []string{"", "permissive", "strict"} {
@@ -271,6 +279,87 @@ func TestMachineLayoutOnMacOSIgnoresCase(t *testing.T) {
 	for _, file := range []string{"/opt/CISCO/DefenseClaw/etc/config.yaml", "/ETC/defenseclaw/config.yaml"} {
 		if _, got := machineLayoutCall(t, home, project, "Write", map[string]any{"file_path": file, "content": "x"}, false, ""); strings.HasPrefix(got, `{"action":"block"`) {
 			t.Errorf("Write %s on Linux = %.200s, want allow", file, got)
+		}
+	}
+}
+
+// A relative path is a project file whatever its names are: the Windows
+// machine folders are absolute.
+func TestMachineLayoutRelativeWindowsNamesAreProjectFiles(t *testing.T) {
+	home, project := dynamicWordParityProject(t)
+	for _, file := range []string{
+		"ProgramData/Cisco/DefenseClaw/etc/project.yaml",
+		"Program Files/Cisco/DefenseClaw/bin/project.txt",
+		`ProgramData\Cisco\DefenseClaw\etc\project.yaml`,
+		"./ProgramData/Cisco/DefenseClaw-HookRuntime/project.txt",
+		"ProgramData/Cisco/DEFENS~1/project.txt",
+	} {
+		for _, pack := range []string{"", "permissive"} {
+			for _, tool := range []string{"Write", "Bash"} {
+				input := map[string]any{"file_path": file, "content": "x"}
+				if tool == "Bash" {
+					input = map[string]any{"command": "printf x > \x27" + file + "\x27", "description": "d"}
+				}
+				if _, got := machineLayoutCall(t, home, project, tool, input, false, pack); strings.HasPrefix(got, `{"action":"block"`) {
+					t.Errorf("%s %s pack=%q = %.200s, want allow", tool, file, pack, got)
+				}
+			}
+		}
+	}
+}
+
+// The Program Files and ProgramData roots are the ones the trusted machine
+// registration names (managed.StandaloneWindowsLayoutForRoots accepts any
+// absolute drive roots), not only the default folder names.
+func TestMachineLayoutWindowsRegisteredRootsAreSelfProtection(t *testing.T) {
+	previous := defenseClawMachineLayout
+	defenseClawMachineLayout = func() machineLayout {
+		return newMachineLayout(func() (string, string, error) { return `D:\Applications`, `E:\CompanyData`, nil })
+	}
+	t.Cleanup(func() { defenseClawMachineLayout = previous })
+	const home = `C:\Users\tester`
+	protected := []string{
+		`E:\CompanyData\Cisco\DefenseClaw\etc\config.yaml`,
+		`D:\Applications\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`,
+		`E:\CompanyData\Cisco\DefenseClaw-HookRuntime\enroll.json`,
+		`E:\CompanyData\Cisco\DefenseClaw-ScannerRuntime\defenseclaw-scanners.exe`,
+		`e:/companydata/cisco/defenseclaw/etc/config.yaml`,
+		`E:\COMPAN~1\Cisco\DEFENS~1\etc\config.yaml`,
+		`//localhost/D$/Applications/Cisco/DefenseClaw/bin/defenseclaw-hook.exe`,
+		`C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
+	}
+	ordinary := []string{
+		`D:\Applications\Cisco\DefenseClaw-HookRuntime\a.txt`,
+		`E:\CompanyData\Other\DefenseClaw\a.txt`,
+		`E:\Other\Cisco\DefenseClaw\a.txt`,
+		`D:\Applications\Cisco\Other\a.txt`,
+		`E:\CompanyData\Cisco\D~1\a.txt`,
+		`C:\Users\tester\proj\CompanyData\Cisco\DefenseClaw\a.txt`,
+	}
+	for _, managed := range []bool{false, true} {
+		for _, file := range protected {
+			if blocked, got := machineLayoutCall(t, home, home+`\proj`, "Write", map[string]any{"file_path": file, "content": "x"}, managed, ""); !blocked {
+				t.Errorf("Write %s managed=%t = %.200s, want protected block", file, managed, got)
+			}
+		}
+		for _, file := range ordinary {
+			if _, got := machineLayoutCall(t, home, home+`\proj`, "Write", map[string]any{"file_path": file, "content": "x"}, managed, ""); strings.HasPrefix(got, `{"action":"block"`) {
+				t.Errorf("Write %s managed=%t = %.200s, want allow", file, managed, got)
+			}
+		}
+	}
+}
+
+// A value the shell holds in a variable names the machine file as well.
+func TestMachineLayoutKnownShellValuesAreSelfProtection(t *testing.T) {
+	home, project := dynamicWordParityProject(t)
+	for _, command := range []string{
+		`target=/etc/defenseclaw/config.yaml; printf x >> "$target"`,
+		`root=/opt/defenseclaw/bin; printf x >> "$root/defenseclaw-hook"`,
+		`target=/opt/cisco/defenseclaw/etc/config.yaml; printf x >> "$target"`,
+	} {
+		if blocked, got := machineLayoutCall(t, home, project, "Bash", map[string]any{"command": command, "description": "d"}, false, ""); !blocked {
+			t.Errorf("%q = %.200s, want protected block", command, got)
 		}
 	}
 }

@@ -27,12 +27,28 @@ type machineLayout struct {
 	// posix are the absolute Linux and macOS roots in posixMachineKey form,
 	// as written (case sensitive file systems) and folded (macOS).
 	posix, posixFolded []string
-	// windows are the "cisco/<folder>" folders below Program Files or
-	// ProgramData, lower case.
-	windows []string
+	// windows are the folders of a standalone Windows deployment.
+	windows []windowsMachineFolder
 }
 
+// windowsMachineFolder is one Windows folder that holds DefenseClaw: the
+// drive it is on (empty for any drive) and its names below the drive, lower
+// case.
+type windowsMachineFolder struct {
+	drive string
+	names []string
+}
+
+// defenseClawMachineLayout is replaced by tests.
 var defenseClawMachineLayout = sync.OnceValue(func() machineLayout {
+	return newMachineLayout(managed.TrustedStandaloneWindowsRoots)
+})
+
+// newMachineLayout reads the Linux and macOS layouts, and the Windows layout
+// under the Program Files and ProgramData roots that registered returns (the
+// protected machine registration, on Windows) and under the default folder
+// names on any drive, so a Windows path is read on any host.
+func newMachineLayout(registered func() (programFiles, programData string, err error)) machineLayout {
 	var layout machineLayout
 	for _, goos := range []string{"linux", "darwin"} {
 		unix, err := managed.StandaloneLayoutFor(goos)
@@ -50,11 +66,27 @@ var defenseClawMachineLayout = sync.OnceValue(func() machineLayout {
 		slices.Sort(*roots)
 		*roots = slices.Compact(*roots)
 	}
-	for _, folder := range managed.StandaloneWindowsOwnFolders() {
-		layout.windows = append(layout.windows, strings.ToLower(strings.ReplaceAll(folder, `\`, "/")))
+	layout.windows = windowsMachineFolders(`Z:\Program Files`, `Z:\ProgramData`, true)
+	if programFiles, programData, err := registered(); err == nil {
+		layout.windows = append(layout.windows, windowsMachineFolders(programFiles, programData, false)...)
 	}
 	return layout
-})
+}
+
+func windowsMachineFolders(programFiles, programData string, anyDrive bool) []windowsMachineFolder {
+	var folders []windowsMachineFolder
+	for _, folder := range managed.StandaloneWindowsOwnFolders(programFiles, programData) {
+		var entry windowsMachineFolder
+		if !anyDrive {
+			entry.drive = strings.ToLower(folder[:1])
+		}
+		for _, name := range strings.Split(folder[3:], `\`) {
+			entry.names = append(entry.names, strings.ToLower(name))
+		}
+		folders = append(folders, entry)
+	}
+	return folders
+}
 
 // posixMachineKey is the form in which POSIX machine paths are compared:
 // cleaned, /var/run read as /run (the Linux link), and on a case-insensitive
@@ -114,17 +146,49 @@ func (l machineLayout) posixPath(value string, caseFold bool) bool {
 	return false
 }
 
-// windowsPath reads a Windows spelling of a path: C:\ or C:/, the \\?\ and
-// \\.\ namespaces, a \\host\C$ administrative share, and the /c/ , /mnt/c/
-// and /cygdrive/c/ forms of a POSIX shell on Windows. Names are compared
-// without case, without trailing dots and spaces and without a stream
-// suffix, as NTFS does, and the 8.3 short forms of Program Files,
-// ProgramData and the DefenseClaw folders count.
+// windowsPath reads a Windows spelling of a path that is, or is below, one of
+// the folders of the layout. See windowsVolumeAndNames for the spellings.
 func (l machineLayout) windowsPath(value string) bool {
+	drive, names, ok := windowsVolumeAndNames(value)
+	if !ok {
+		return false
+	}
+	for _, folder := range l.windows {
+		if folder.holds(drive, names) {
+			return true
+		}
+	}
+	return false
+}
+
+// holds reports a path on drive (empty when the path names none) whose
+// leading names are those of the folder, each by its long name or its 8.3
+// short name.
+func (f windowsMachineFolder) holds(drive string, names []string) bool {
+	if f.drive != "" && drive != "" && f.drive != drive || len(names) < len(f.names) {
+		return false
+	}
+	for i, name := range f.names {
+		if names[i] != name && !windowsShortNameOf(names[i], name) {
+			return false
+		}
+	}
+	return true
+}
+
+// windowsVolumeAndNames reads a Windows spelling of an absolute path: C:\ or
+// C:/, the \\?\ and \\.\ namespaces, a \\host\C$ administrative share, a path
+// on the current drive (\dir, drive empty), and the /c/ , /mnt/c/ and
+// /cygdrive/c/ forms of a POSIX shell on Windows. A relative path is not
+// absolute, so it is not a machine path whatever its names. Names are
+// returned lower case, without trailing dots and spaces and without a stream
+// suffix, as NTFS compares them, with . and .. applied.
+func windowsVolumeAndNames(value string) (drive string, names []string, ok bool) {
 	slashed := strings.ReplaceAll(value, `\`, "/")
-	if rest, ok := strings.CutPrefix(slashed, "//?/"); ok {
+	rooted := strings.HasPrefix(value, `\`) && !strings.HasPrefix(value, `\\`)
+	if rest, found := strings.CutPrefix(slashed, "//?/"); found {
 		slashed = rest
-	} else if rest, ok := strings.CutPrefix(slashed, "//./"); ok {
+	} else if rest, found := strings.CutPrefix(slashed, "//./"); found {
 		slashed = rest
 	}
 	if len(slashed) >= 4 && strings.EqualFold(slashed[:4], "unc/") {
@@ -136,23 +200,28 @@ func (l machineLayout) windowsPath(value string) bool {
 		// //host/C$/rest: the share names the volume.
 		parts := strings.SplitN(slashed[2:], "/", 3)
 		if len(parts) < 3 || len(parts[1]) != 2 || parts[1][1] != '$' || !isASCIILetterByte(parts[1][0]) {
-			return false
+			return "", nil, false
 		}
-		rest = parts[2]
+		drive, rest = strings.ToLower(parts[1][:1]), parts[2]
 	case len(slashed) >= 3 && isASCIILetterByte(slashed[0]) && slashed[1] == ':' && slashed[2] == '/':
-		rest = slashed[3:]
+		drive, rest = strings.ToLower(slashed[:1]), slashed[3:]
 	case len(slashed) >= 3 && slashed[0] == '/' && isASCIILetterByte(slashed[1]) && slashed[2] == '/':
-		rest = slashed[3:]
+		drive, rest = strings.ToLower(slashed[1:2]), slashed[3:]
+	case rooted:
+		rest = slashed[1:]
 	default:
-		rest = strings.TrimPrefix(slashed, "/")
-		for _, prefix := range []string{"mnt/", "cygdrive/"} {
-			if tail, ok := strings.CutPrefix(rest, prefix); ok && len(tail) >= 2 && isASCIILetterByte(tail[0]) && tail[1] == '/' {
-				rest = tail[2:]
+		tail := ""
+		for _, prefix := range []string{"/mnt/", "/cygdrive/"} {
+			if t, found := strings.CutPrefix(slashed, prefix); found {
+				tail = t
 				break
 			}
 		}
+		if len(tail) < 2 || !isASCIILetterByte(tail[0]) || tail[1] != '/' {
+			return "", nil, false
+		}
+		drive, rest = strings.ToLower(tail[:1]), tail[2:]
 	}
-	var names []string
 	for _, name := range strings.Split(rest, "/") {
 		if before, _, found := strings.Cut(name, ":"); found {
 			name = before
@@ -170,34 +239,20 @@ func (l machineLayout) windowsPath(value string) bool {
 			names = append(names, strings.ToLower(name))
 		}
 	}
-	if len(names) < 3 || !windowsMachineBase(names[0]) {
-		return false
-	}
-	for _, folder := range l.windows {
-		cisco, own, _ := strings.Cut(folder, "/")
-		if names[1] == cisco && (names[2] == own || windowsShortNameOf(names[2], own)) {
-			return true
-		}
-	}
-	return false
+	return drive, names, true
 }
 
-// windowsMachineBase reports the Program Files and ProgramData folders, by
-// name or by the 8.3 short name NTFS gives them (PROGRA~1, PROGRA~2, ...).
-func windowsMachineBase(name string) bool {
-	return name == "program files" || name == "program files (x86)" || name == "programdata" ||
-		windowsShortNameOf(name, "program files")
-}
-
-// windowsShortNameOf reports the 8.3 short form of a long name: its first
-// six characters, a tilde and a number (DEFENS~1 for DefenseClaw).
+// windowsShortNameOf reports the 8.3 short form NTFS gives a long name: its
+// first six characters without spaces, a tilde and a number (DEFENS~1 for
+// DefenseClaw, PROGRA~1 for Program Files). A name that is already 8.3 has no
+// short form, and a stem of any other length is not one NTFS makes.
 func windowsShortNameOf(name, long string) bool {
 	compact := strings.ReplaceAll(long, " ", "")
-	if len(compact) <= 8 {
+	if len(long) <= 8 && compact == long {
 		return false
 	}
 	stem, number, found := strings.Cut(name, "~")
-	return found && integrityDecimal(number) && len(stem) >= 1 && len(stem) <= 6 && strings.HasPrefix(compact, stem)
+	return found && integrityDecimal(number) && stem == compact[:min(6, len(compact))]
 }
 
 func isASCIILetterByte(b byte) bool {
