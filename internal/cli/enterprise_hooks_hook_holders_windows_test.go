@@ -1792,13 +1792,18 @@ func TestWindowsHolderAuditRowTheGatewayRefusesForGoodIsDroppedAndDoesNotBlockTh
 	}
 }
 
-// dataRig is a rig whose watched folder holds machine-policy.json and an
-// enrollment under a connector folder; only the paths in held are held.
+// dataRig is a rig whose watched folder holds every allow-listed runtime file
+// (machine-policy.json, the closure marker, and an enrollment and a selector
+// in each connector folder); only the paths in held are held.
 func dataRig(t *testing.T, held ...string) (rig *holdRig, dir string) {
 	t.Helper()
 	rig = newHoldRig(t)
 	dir = filepath.Join(t.TempDir(), "DefenseClaw-HookRuntime")
-	for _, name := range []string{"machine-policy.json", filepath.Join("claudecode", "enrollment-S-1-5-21-1.json")} {
+	names := []string{"machine-policy.json", ".defenseclaw-hot-config-undo-closed"}
+	for _, connector := range windowsHookRuntimeConnectors {
+		names = append(names, filepath.Join(connector, "enrollment.json"), filepath.Join(connector, ".defenseclaw-managed-runtime-selector.state"))
+	}
+	for _, name := range names {
 		path := filepath.Join(dir, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
@@ -1831,40 +1836,71 @@ func keepData(rig *holdRig) {
 	flushWindowsHolderAudit(&rig.log)
 }
 
-// GAP-0755 (lead, class fix). The watch list is the regular files under the
-// hook runtime folder, not links, a bounded depth and count; nothing else.
-func TestWindowsHookRuntimeWatchListIsTheRuntimeFolderOnly(t *testing.T) {
-	root := t.TempDir()
-	dir := filepath.Join(root, "DefenseClaw-HookRuntime")
-	deep := filepath.Join(dir, "a", "b", "c", "d", "e")
-	for _, path := range []string{
-		filepath.Join(dir, "machine-policy.json"),
-		filepath.Join(dir, "claudecode", "selector.json"),
-		filepath.Join(deep, "too-deep.json"),
-		filepath.Join(root, "config.yaml"), // beside the folder, not in it
-	} {
+// DefenseClaw's own lock files are held with no sharing for a whole
+// transaction by Setup and by the command line, and the hook never opens them.
+// A real share-0 hold of each of them, and of a temp file, is never scanned,
+// closed or reported, while a share-0 hold of machine-policy.json beside them
+// is closed at the second check with one row: the rig does act on a file the
+// hook reads.
+func TestWindowsHolderTheLockFilesDefenseClawHoldsAreNeverActedOn(t *testing.T) {
+	rig := newHoldRig(t)
+	dir := filepath.Join(t.TempDir(), "DefenseClaw-HookRuntime")
+	locks := []string{
+		filepath.Join(dir, "copilot", ".defenseclaw-enrollment.lock"),
+		filepath.Join(dir, "copilot", ".defenseclaw-managed-runtime-selector.lock"),
+		filepath.Join(dir, "hermes", ".defenseclaw-enrollment.lock"),
+		filepath.Join(dir, "hermes", ".defenseclaw-managed-runtime-selector.lock"),
+		filepath.Join(dir, "copilot", ".tmp-enrollment-1"),
+	}
+	policy := filepath.Join(dir, "machine-policy.json")
+	for _, path := range append([]string{policy}, locks...) {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	got := windowsHookRuntimeWatchList(dir)
-	want := []string{filepath.Join(dir, "claudecode", "selector.json"), filepath.Join(dir, "machine-policy.json")}
-	if strings.Join(got, "|") != strings.Join(want, "|") {
-		t.Fatalf("watch list %v, want %v", got, want)
-	}
-	if list := windowsHookRuntimeWatchList(""); len(list) != 0 {
-		t.Fatalf("an empty folder name listed %v", list)
-	}
-	for i := 0; i < windowsHolderWatchMaxFiles+10; i++ {
-		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("many-%03d.json", i)), []byte("x"), 0o600); err != nil {
+	hold := func(path string) {
+		name, err := windows.UTF16PtrFromString(path)
+		if err != nil {
 			t.Fatal(err)
 		}
+		handle, err := windows.CreateFile(name, windows.GENERIC_READ, 0, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		if err != nil {
+			t.Fatalf("hold %s: %v", path, err)
+		}
+		t.Cleanup(func() { _ = windows.CloseHandle(handle) })
 	}
-	if list := windowsHookRuntimeWatchList(dir); len(list) != windowsHolderWatchMaxFiles {
-		t.Fatalf("%d files listed, want the cap %d", len(list), windowsHolderWatchMaxFiles)
+	for _, path := range locks {
+		hold(path)
+		if !windowsOpenRefused(path, windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE) {
+			t.Fatalf("%s is not held: the test proves nothing", path)
+		}
+	}
+	windowsHookRuntimeDir = func() (string, error) { return dir, nil }
+	holder := rig.sys.culprit(0x44)
+	rig.sys.add(4100, fakeUserSID, 2, holder)
+	for i := 0; i < 6; i++ {
+		keepData(rig)
+		rig.advance(windowsHookBinaryCheckInterval)
+	}
+	if rig.sys.snapshots != 0 || holder.closed || len(rig.posted) != 0 {
+		t.Fatalf("a lock file was acted on: scans %d, closed %v, rows %+v", rig.sys.snapshots, holder.closed, rig.posted)
+	}
+	if strings.Contains(rig.log.String(), ".lock") {
+		t.Fatalf("log names a lock file: %q", rig.log.String())
+	}
+	// The control: the same rig closes the hold of the machine policy.
+	hold(policy)
+	windowsHookDataDeleteBlocked = func(path string) bool { return strings.EqualFold(path, policy) && rig.sys.blocked() }
+	windowsHookDataReadRefused = func(path string) bool { return strings.EqualFold(path, policy) && rig.sys.startRefused() }
+	for i := 0; i < 3; i++ {
+		keepData(rig)
+		rig.advance(windowsHookBinaryCheckInterval)
+	}
+	if !holder.closed || len(rig.posted) != 1 || rig.posted[0].Hook != policy {
+		t.Fatalf("control: closed %v, rows %+v", holder.closed, rig.posted)
 	}
 }
 
@@ -1924,7 +1960,7 @@ func TestWindowsHolderAHeldFileThatIsNotWatchedIsIgnored(t *testing.T) {
 	}
 	// Two watched files, one held: the gates are separate.
 	rig2, dir2 := dataRig(t, "machine-policy.json")
-	a, b := filepath.Join(dir2, "machine-policy.json"), filepath.Join(dir2, "claudecode", "enrollment-S-1-5-21-1.json")
+	a, b := filepath.Join(dir2, "machine-policy.json"), filepath.Join(dir2, "copilot", "enrollment.json")
 	h2 := rig2.sys.culprit(0x44)
 	rig2.sys.add(4100, fakeUserSID, 2, h2)
 	keepData(rig2)

@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -1030,42 +1029,8 @@ func windowsHolderRefusedWhat(path string) string {
 
 // The files besides the hook binary that a hook start reads, all of them
 // administrator-written and readable by the standard users whose hooks read
-// them: the public machine policy summary, the hot-config closure marker, and
-// the per-user connector enrollments, runtime selectors and generations, all in
-// the hook runtime folder. Everything else a hook reads is the user's own, or
-// is not readable by a standard user. The guardian watches exactly these.
-const (
-	windowsHolderWatchMaxFiles = 64
-	windowsHolderWatchDepth    = 4
-)
-
-// windowsHookRuntimeWatchList lists the regular files under the hook runtime
-// folder, at most windowsHolderWatchMaxFiles of them, not following links.
-func windowsHookRuntimeWatchList(dir string) []string {
-	if strings.TrimSpace(dir) == "" {
-		return nil
-	}
-	var files []string
-	base := filepath.Clean(dir)
-	_ = filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			rel, relErr := filepath.Rel(base, path)
-			if relErr != nil || (rel != "." && strings.Count(rel, string(filepath.Separator)) >= windowsHolderWatchDepth) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.Type().IsRegular() && len(files) < windowsHolderWatchMaxFiles {
-			files = append(files, path)
-		}
-		return nil
-	})
-	sort.Strings(files)
-	return files
-}
+// them, are the allow-list in enterprise_hooks_hook_runtime_watch.go. The
+// guardian watches exactly those and no other file of the folder.
 
 // windowsHookRuntimeDir is the hook runtime folder; tests replace it.
 var windowsHookRuntimeDir = func() (string, error) {
