@@ -3620,6 +3620,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			Args:                     trustedArgs,
 			CWD:                      agentHookTrustedActionCWDReported(ctx, req.CWD, req.ReportedCWD, toolCWD),
 			ActiveHome:               hookActiveHome(ctx),
+			CurrentWindowsDrive:      reportedWindowsDrive(req.ReportedCWD),
 			ToolResourceIdentity:     resourceIdentity,
 			CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 		}

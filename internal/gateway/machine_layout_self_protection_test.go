@@ -431,3 +431,36 @@ func TestMachineLayoutWindowsNestedRegisteredRootsKeepFolderBoundary(t *testing.
 		}
 	}
 }
+
+// A path with no drive is on the drive the hook runs on: registered on C:,
+// a drive-less machine folder is protected from C: and an ordinary file from
+// any other drive.
+func TestMachineLayoutWindowsDriveLessPathFollowsTheCurrentDrive(t *testing.T) {
+	previous := defenseClawMachineLayout
+	defenseClawMachineLayout = func() machineLayout {
+		return newMachineLayout(func() (string, string, error) { return `C:\Program Files`, `C:\ProgramData`, nil })
+	}
+	t.Cleanup(func() { defenseClawMachineLayout = previous })
+	const home = `C:\Users\tester`
+	files := []string{
+		`\ProgramData\Cisco\DefenseClaw\etc\project.yaml`,
+		`\Program Files\Cisco\DefenseClaw\bin\project.exe`,
+		`\ProgramData\Cisco\DefenseClaw-HookRuntime\project.txt`,
+	}
+	for _, managed := range []bool{false, true} {
+		for _, pack := range []string{"", "permissive"} {
+			for _, file := range files {
+				for _, project := range []string{`D:\proj`, `D:/proj`, `/mnt/d/proj`} {
+					if _, got := machineLayoutCall(t, home, project, "Write", map[string]any{"file_path": file, "content": "x"}, managed, pack); strings.HasPrefix(got, `{"action":"block"`) {
+						t.Errorf("Write %s from %s managed=%t pack=%q = %.200s, want allow", file, project, managed, pack, got)
+					}
+				}
+				for _, project := range []string{`C:\proj`, `c:/proj`, `/mnt/c/proj`} {
+					if blocked, got := machineLayoutCall(t, home, project, "Write", map[string]any{"file_path": file, "content": "x"}, managed, pack); !blocked {
+						t.Errorf("Write %s from %s managed=%t pack=%q = %.200s, want protected block", file, project, managed, pack, got)
+					}
+				}
+			}
+		}
+	}
+}

@@ -233,6 +233,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			Args:                                     actionArgs,
 			CWD:                                      req.CWD,
 			ActiveHome:                               hookActiveHome(ctx),
+			CurrentWindowsDrive:                      reportedWindowsDrive(req.reportedCWD),
 			ToolResourceIdentity:                     resourceIdentity,
 			CredentialLineageHMACKey:                 activeToolValueLineageProcessKey.material,
 			ActiveAgentFiles:                         activeAgentContext.files,
