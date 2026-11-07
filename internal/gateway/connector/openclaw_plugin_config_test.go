@@ -9,7 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 func TestGAP0690OpenClawPluginConfigMigration(t *testing.T) {
@@ -60,8 +63,12 @@ func TestGAP0690OpenClawPluginConfigMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("backup mode = %v, want 0600", info.Mode().Perm())
+	}
+	// Windows has no POSIX mode bits; owner-only means a private DACL there.
+	if err := safefile.ValidatePrivateFile(backups[0]); err != nil {
+		t.Fatalf("backup is not private to the owner: %v", err)
 	}
 	first, err := os.ReadFile(configPath)
 	if err != nil {
