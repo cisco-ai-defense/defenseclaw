@@ -186,7 +186,7 @@ Record these, with the source for each, in the contract `Notes` and in the corre
 7. **CI:**
    - `.github/workflows/connector-live-e2e.yml` (dispatch options, the `full=` matrix, the `COPILOT_GITHUB_TOKEN` scoping);
    - `.github/workflows/windows-native.yml` `connector-contract` matrix (the required Windows contract on an `install.ps1 -Local` install);
-   - `scripts/live-connector-e2e/run-windows-install.ps1` `ValidateSet` and its per-connector registration check (`Assert-CopilotSynchronousWindowsHookConfig` for Copilot);
+   - `scripts/live-connector-e2e/run-windows-install.ps1` `ValidateSet` and its per-connector registration check (`Assert-CopilotRegistration` for Copilot);
    - `scripts/live-connector-e2e/golden/copilot/pre_tool_block_windows.json`, the Windows block command;
    - `cli/tests/test_windows_connector_contract.py`, which pins the matrix to the Windows connector set.
 
