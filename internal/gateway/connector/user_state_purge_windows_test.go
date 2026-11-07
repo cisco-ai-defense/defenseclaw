@@ -69,3 +69,37 @@ func TestGAP0669WindowsPurgeKeepsDirectoryAtManagedFileName(t *testing.T) {
 		t.Fatalf("account file changed: %q, %v", got, err)
 	}
 }
+
+// GAP-0669 review M1: the ACP-only purge opens the acp folder as root. It
+// removes the managed copies there and keeps account files, including one
+// named like a managed file at the data directory's top.
+func TestGAP0669WindowsACPRootPurgeUsesThePathFromTheDataDir(t *testing.T) {
+	acpDir := filepath.Join(t.TempDir(), ".defenseclaw", "acp")
+	if err := os.MkdirAll(acpDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	foreign := filepath.Join(acpDir, "inventory.db")
+	token := filepath.Join(acpDir, "zed-kiro.token")
+	for path, body := range map[string]string{foreign: "account data", token: "managed token"} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := os.OpenRoot(acpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := PurgeUserStateInRootAt(root, "acp", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(foreign); err != nil || string(got) != "account data" {
+		t.Errorf("account file changed: %q, %v", got, err)
+	}
+	if _, err := os.Lstat(token); !os.IsNotExist(err) {
+		t.Errorf("managed token stayed: %v", err)
+	}
+	if err := PurgeUserStateInRootAt(root, "hooks", nil); err == nil {
+		t.Error("a folder that is not a managed folder was accepted")
+	}
+}

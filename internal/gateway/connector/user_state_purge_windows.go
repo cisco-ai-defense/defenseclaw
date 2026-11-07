@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // PurgeUserStateInRoot is PurgeUserState for the Windows uninstall, which
@@ -21,6 +22,24 @@ import (
 // list refuses the removal goes to removeDenied, when set.
 func PurgeUserStateInRoot(root *os.Root, removeDenied func(rel string) error) error {
 	return purgeUserStateInRootDir(root, ".", removeDenied)
+}
+
+// PurgeUserStateInRootAt is PurgeUserStateInRoot for root opened on prefix, a
+// managed folder below the data directory ("acp"). Ownership is decided by
+// the path from the data directory, so a file that is account data at the
+// data directory's top (inventory.db) stays when it sits in that folder.
+// removeDenied still gets paths relative to root.
+func PurgeUserStateInRootAt(root *os.Root, prefix string, removeDenied func(rel string) error) error {
+	if prefix == "" || prefix == "." || !ManagedUserStateDir(prefix) {
+		return fmt.Errorf("per-user state folder %q is not a managed folder", prefix)
+	}
+	var denied func(string) error
+	if removeDenied != nil {
+		denied = func(rel string) error {
+			return removeDenied(strings.TrimPrefix(rel, filepath.FromSlash(prefix)+string(filepath.Separator)))
+		}
+	}
+	return purgeUserStateInRootDir(root, filepath.FromSlash(prefix), denied)
 }
 
 func purgeUserStateInRootDir(root *os.Root, rel string, removeDenied func(string) error) error {
