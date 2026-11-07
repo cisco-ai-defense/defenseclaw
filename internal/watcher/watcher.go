@@ -1478,7 +1478,7 @@ func (w *InstallWatcher) blockedPluginDecisionUnchanged(issue AdmissionIssue) bo
 		return false
 	}
 	evt := InstallEvent{Type: InstallPlugin, Name: issue.Name, Path: issue.Path, Connector: issue.Connector}
-	entry, err := w.store.GetActionForConnector("plugin", journalName(evt), w.journalScope(w.eventConnector(evt)))
+	entry, err := w.store.GetActionForConnector("plugin", evt.Name, w.journalScope(w.eventConnector(evt)))
 	if err != nil || entry == nil || entry.Actions.Install != "block" || entry.Actions.Runtime != "disable" ||
 		!sameWatcherPath(entry.SourcePath, evt.Path) {
 		return false
