@@ -945,13 +945,13 @@ func TestWindowsCodexUnchangedPassRepublishesADamagedOrExposedHookCopy(t *testin
 				t.Fatalf("a %s hook copy kept counter %d", row.name, first)
 			}
 			f.requireStateCopy(t, second, "state-one")
-			switch {
-			case row.hold == 0:
+			switch row.hold {
+			case 0:
 				// No sharing at all: the held old copy cannot be deleted and stays.
 				if _, err := os.Lstat(current); err != nil {
 					t.Fatalf("the held old copy should stay while it is held: %v", err)
 				}
-			case row.hold == noHolder:
+			case noHolder:
 				if _, err := os.Lstat(current); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("the replaced copy stayed: %v", err)
 				}
