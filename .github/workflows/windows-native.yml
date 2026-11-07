@@ -313,23 +313,43 @@ jobs:
               '--shard-count', [string]$remainingPackageShardCount,
               '--shard-index', [string]$matrixShard
             ) -TimeoutSeconds 300 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-package-shard.log')
-            $remainingPackages = @(
+            # A line is a package to test whole, or "<package><TAB><-run regex>"
+            # for one part of a package too slow for one shard (internal/hookpaths,
+            # GAP-0749); the script fails unless every package, and every test
+            # of a split package, is in exactly one shard.
+            $selectedLines = @(
               [regex]::Split([string]$selection.StdOut, '\r?\n') |
                 ForEach-Object { $_.Trim() } |
                 Where-Object { $_ -match '^github\.com/defenseclaw/defenseclaw/' }
             )
-            if (-not $remainingPackages) {
+            $remainingPackages = @($selectedLines | Where-Object { $_ -notmatch "`t" })
+            $packageParts = @($selectedLines | Where-Object { $_ -match "`t" })
+            if (-not $remainingPackages -and -not $packageParts) {
               throw 'native Go package discovery selected no non-gateway packages'
             }
-            Write-Host "Native Windows remaining-package part $matrixShard of $remainingPackageShardCount runs $($remainingPackages.Count) packages."
+            Write-Host "Native Windows remaining-package part $matrixShard of $remainingPackageShardCount runs $($remainingPackages.Count) packages and $($packageParts.Count) parts of packages."
             # The remaining packages retain their 14m timeout below the
             # step's 1020 s and the job's 20 minutes (rel-1-0-6:GAP-0477).
-            $remainingArguments = @(
-              'test', '-vet=off', '-json', '-count=1', '-timeout=14m', '-p=1',
-              '-skip', $windowsInapplicable
-            ) + $remainingPackages
-            Invoke-WindowsNativeProcess $go $remainingArguments -TimeoutSeconds 1020 `
-              -LogPath $goTestLog -GoTestFailureSummaryPath $goFailureSummary -GoTestTimingSummary | Out-Null
+            if ($remainingPackages) {
+              $remainingArguments = @(
+                'test', '-vet=off', '-json', '-count=1', '-timeout=14m', '-p=1',
+                '-skip', $windowsInapplicable
+              ) + $remainingPackages
+              Invoke-WindowsNativeProcess $go $remainingArguments -TimeoutSeconds 1020 `
+                -LogPath $goTestLog -GoTestFailureSummaryPath $goFailureSummary -GoTestTimingSummary | Out-Null
+            }
+            $partIndex = 0
+            foreach ($packagePart in $packageParts) {
+              $partPackage, $partPattern = $packagePart -split "`t", 2
+              Write-Host "Native Windows Go part $($partIndex + 1) of $($packageParts.Count): $partPackage"
+              Invoke-WindowsNativeProcess $go @(
+                'test', '-vet=off', '-json', '-count=1', '-timeout=14m', '-p=1',
+                '-skip', $windowsInapplicable, '-run', $partPattern, $partPackage
+              ) -TimeoutSeconds 1020 `
+                -LogPath (Join-Path $env:DC_STATE_ROOT ("go-package-part-$partIndex.log")) `
+                -GoTestFailureSummaryPath $goFailureSummary -GoTestTimingSummary | Out-Null
+              $partIndex++
+            }
             return
           }
           if ($suiteKind -eq 'gateway' -and ($matrixShard -lt 0 -or $matrixShard -ge $nativeTestShardCount)) {

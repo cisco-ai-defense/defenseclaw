@@ -64,7 +64,7 @@
   "github.com/defenseclaw/defenseclaw/internal/hermespath": 6.0,
   "github.com/defenseclaw/defenseclaw/internal/hermesskills": 6.1,
   "github.com/defenseclaw/defenseclaw/internal/hookguard": 6.0,
-  "github.com/defenseclaw/defenseclaw/internal/hookpaths": 12.8,
+  "github.com/defenseclaw/defenseclaw/internal/hookpaths": 1141.0,
   "github.com/defenseclaw/defenseclaw/internal/hookruntime": 17.1,
   "github.com/defenseclaw/defenseclaw/internal/inventory": 65.8,
   "github.com/defenseclaw/defenseclaw/internal/inventory/ideplugins": 11.6,
@@ -541,6 +541,18 @@
    "TestWindowsOneCallPowerShellBridgeStillCountsItsStartup": 3.9,
    "TestWindowsStandaloneStopEventsAllow": 2.0,
    "TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason": 2.8
+  },
+  "internal/hookpaths": {
+   "*": 0.1,
+   "TestGAP0055ArchiveProgramsShortArgvTable": 360.0,
+   "TestGAP0055ProgramBranchesShortArgvNoPanicPart0": 96.97,
+   "TestGAP0055ProgramBranchesShortArgvNoPanicPart1": 95.13,
+   "TestGAP0055ProgramBranchesShortArgvNoPanicPart2": 96.65,
+   "TestGAP0055ProgramBranchesShortArgvNoPanicPart3": 96.5,
+   "TestGAP0055ProgramBranchesShortArgvNoPanicPart4": 96.5,
+   "TestGAP0055ProgramBranchesShortArgvNoPanicPart5": 96.5,
+   "TestGAP0055ProgramBranchesShortArgvNoPanicPart6": 96.5,
+   "TestGAP0055ProgramBranchesShortArgvNoPanicPart7": 96.5
   }
  }
 }
