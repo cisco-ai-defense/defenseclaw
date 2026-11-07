@@ -44,12 +44,14 @@ func TestD1BenignReplay(t *testing.T) {
 	if output == "" {
 		t.Fatal("DC_D1_OUTPUT must name the output TSV")
 	}
-	file, err := os.Create(output)
+	run, err := d1StartRun(output, os.Getenv("DC_D1_RESUME") == "1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
+	defer run.Output.Close()
 	for _, name := range []string{"corpus-shell.jsonl", "corpus-files.jsonl"} {
-		d1Replay(t, d1ShardRows(t, d1ReadRows(t, filepath.Join(root, name))), file, false)
+		if d1Replay(t, d1ShardRows(t, d1ReadRows(t, filepath.Join(root, name))), run) {
+			return
+		}
 	}
 }

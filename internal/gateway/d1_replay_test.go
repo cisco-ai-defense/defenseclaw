@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -237,21 +238,9 @@ func d1CellLimit(t *testing.T) time.Duration {
 	return limit
 }
 
-// d1TimedOutRows reads DC_D1_TIMEOUT_ROWS, comma-separated row IDs whose
-// evaluation outlived the cell limit in an earlier run.
-func d1TimedOutRows() map[string]bool {
-	rows := make(map[string]bool)
-	for _, id := range strings.Split(os.Getenv("DC_D1_TIMEOUT_ROWS"), ",") {
-		if id = strings.TrimSpace(id); id != "" {
-			rows[id] = true
-		}
-	}
-	return rows
-}
-
 // d1EvaluateBounded returns a timeout verdict when the evaluation outlives
 // limit. The evaluation keeps running in its goroutine until the test binary
-// exits; the replay fails on the timeout cell either way.
+// exits, so the replay stops after the row and a later run resumes.
 func d1EvaluateBounded(t *testing.T, api *APIServer, row d1ReplayRow, connector string, managed bool, home, cwd string, limit time.Duration) d1ReplayVerdict {
 	t.Helper()
 	done := make(chan d1ReplayVerdict, 1)
@@ -266,7 +255,71 @@ func d1EvaluateBounded(t *testing.T, api *APIServer, row d1ReplayRow, connector 
 	}
 }
 
-func d1Replay(t *testing.T, rows []d1ReplayRow, output *os.File, checkExpected bool) {
+// d1ReplayRun is one replay's output and resume state.
+type d1ReplayRun struct {
+	// Output receives one verdict line per cell; nil records nothing.
+	Output *os.File
+	// Check compares every cell with the row's expected verdict.
+	Check bool
+	// Done lists rows an earlier run already recorded completely.
+	Done map[string]bool
+	// Stalled names the marker file written when a cell outlives its limit.
+	// The replay then stops cleanly and the caller starts a new run, which
+	// resumes after that row. Empty means a timed-out cell fails the test.
+	Stalled string
+}
+
+// d1StartRun opens the verdict TSV. With resume it keeps the rows an earlier
+// run recorded completely (the four cells of a row), drops a partial row
+// left by a killed run, and appends; otherwise it starts the file anew. It
+// removes a stale stall marker.
+func d1StartRun(path string, resume bool) (d1ReplayRun, error) {
+	run := d1ReplayRun{Done: make(map[string]bool), Stalled: path + ".stalled"}
+	if err := os.Remove(run.Stalled); err != nil && !os.IsNotExist(err) {
+		return run, err
+	}
+	var kept []string
+	if data, err := os.ReadFile(path); resume && err == nil {
+		cells := make(map[string]map[string]bool)
+		lines := make(map[string][]string)
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.Split(line, "\t")
+			if len(fields) != 4 || fields[0] == "" {
+				continue
+			}
+			if cells[fields[0]] == nil {
+				cells[fields[0]] = make(map[string]bool)
+			}
+			cells[fields[0]][fields[1]] = true
+			lines[fields[0]] = append(lines[fields[0]], line)
+		}
+		for id, rowLines := range lines {
+			if len(rowLines) == 4 && len(cells[id]) == 4 {
+				run.Done[id] = true
+				kept = append(kept, rowLines...)
+			}
+		}
+		sort.Strings(kept)
+	} else if resume && !os.IsNotExist(err) {
+		return run, err
+	}
+	content := ""
+	if len(kept) > 0 {
+		content = strings.Join(kept, "\n") + "\n"
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		return run, err
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	run.Output = file
+	return run, err
+}
+
+// d1Replay evaluates the rows in four cells each and reports whether it
+// stopped early after a cell outlived its limit. An unfinished cell (error
+// or timeout) is recorded, not failed here: scripts/d1diff.py is the gate for
+// the private replay and fails it unless the owner ratified that exact cell.
+func d1Replay(t *testing.T, rows []d1ReplayRow, run d1ReplayRun) (stalled bool) {
 	t.Helper()
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
@@ -281,9 +334,12 @@ func d1Replay(t *testing.T, rows []d1ReplayRow, output *os.File, checkExpected b
 	pending := d1PendingProductDecisions()
 	seenPending := make(map[string]bool)
 	cellLimit := d1CellLimit(t)
-	timedOutRows := d1TimedOutRows()
+	unfinished := 0
 	for _, row := range rows {
-		rowTimedOut := timedOutRows[row.ID]
+		if run.Done[row.ID] {
+			continue
+		}
+		rowTimedOut := false
 		for _, connector := range []string{"claudecode", "codex"} {
 			for _, managed := range []bool{false, true} {
 				cell := connector + "/oss"
@@ -292,7 +348,7 @@ func d1Replay(t *testing.T, rows []d1ReplayRow, output *os.File, checkExpected b
 				}
 				var verdict d1ReplayVerdict
 				switch {
-				case checkExpected:
+				case run.Check:
 					verdict = d1Evaluate(t, apis[connector], row, connector, managed, home, cwd)
 				case rowTimedOut:
 					// Not evaluated again: each run would leave one more
@@ -302,12 +358,12 @@ func d1Replay(t *testing.T, rows []d1ReplayRow, output *os.File, checkExpected b
 					verdict = d1EvaluateBounded(t, apis[connector], row, connector, managed, home, cwd, cellLimit)
 					rowTimedOut = verdict.Decision == "timeout"
 				}
-				if output != nil {
-					if _, err := fmt.Fprintf(output, "%s\t%s\t%s\t%s\n", row.ID, cell, verdict.Decision, verdict.RuleID); err != nil {
+				if run.Output != nil {
+					if _, err := fmt.Fprintf(run.Output, "%s\t%s\t%s\t%s\n", row.ID, cell, verdict.Decision, verdict.RuleID); err != nil {
 						t.Fatal(err)
 					}
 				}
-				if checkExpected {
+				if run.Check {
 					key := row.ID + " " + cell
 					if _, listed := pending[key]; listed {
 						seenPending[key] = true
@@ -316,26 +372,36 @@ func d1Replay(t *testing.T, rows []d1ReplayRow, output *os.File, checkExpected b
 						t.Errorf("D1 %s %s: %v", row.ID, cell, err)
 					}
 				} else if verdict.Decision == "error" || verdict.Decision == "timeout" {
-					t.Errorf("D1 %s %s: evaluation %s", row.ID, cell, verdict.Decision)
+					unfinished++
 				}
 			}
 		}
 		// An evaluator that outlived its limit keeps running and allocating
 		// (GAP-0700 reached the host memory limit), so the replay stops
-		// after its row. A rerun lists the row in DC_D1_TIMEOUT_ROWS, which
-		// records it as timeout without evaluating it; d1diff fails that
-		// cell unless the owner ratified it.
-		if rowTimedOut && !timedOutRows[row.ID] {
-			t.Fatalf("D1 %s: evaluation did not return within %s; rerun with the row in DC_D1_TIMEOUT_ROWS", row.ID, cellLimit)
+		// after its row, which is recorded as timeout in every cell. A new
+		// run resumes after it.
+		if rowTimedOut {
+			if run.Stalled == "" {
+				t.Fatalf("D1 %s: evaluation did not return within %s", row.ID, cellLimit)
+			}
+			if err := os.WriteFile(run.Stalled, []byte(row.ID+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("D1: a row outlived the %s cell limit; stopping so a new run resumes after it", cellLimit)
+			return true
 		}
 	}
-	if checkExpected {
+	if unfinished > 0 {
+		t.Logf("D1: %d unfinished cells recorded; d1diff decides", unfinished)
+	}
+	if run.Check {
 		for key := range pending {
 			if !seenPending[key] {
 				t.Errorf("D1 pending decision absent from public corpus: %s", key)
 			}
 		}
 	}
+	return false
 }
 
 func TestD1PendingProductDecisionInventory(t *testing.T) {
@@ -366,10 +432,10 @@ func TestD1PublicShapes(t *testing.T) {
 		t.Fatalf("public D1 shape set has %d rows, want at least 250", len(rows))
 	}
 	if os.Getenv("DC_D1_RECORD") == "1" {
-		d1Replay(t, rows, os.Stdout, false)
+		d1Replay(t, rows, d1ReplayRun{Output: os.Stdout})
 		return
 	}
-	d1Replay(t, rows, nil, true)
+	d1Replay(t, rows, d1ReplayRun{Check: true})
 }
 
 func TestD1StrictArchiveShape(t *testing.T) {
