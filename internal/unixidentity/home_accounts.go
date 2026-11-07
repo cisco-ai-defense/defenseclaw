@@ -114,8 +114,8 @@ func comparableHome(path string) string {
 // plistNode is an XML element with its text and child elements.
 type plistNode struct {
 	XMLName  xml.Name
-	Text     string      `xml:",chardata"`
-	Children []plistNode `xml:",any"`
+	Text     string
+	Children []plistNode
 }
 
 // onlyElements reports whether the node holds nothing but white space between
@@ -175,10 +175,14 @@ func parseDSCLHomeRecords(output []byte) ([]dsclHomeRecord, error) {
 }
 
 // decodePlistRoot reads the root element into root. Before it only white
-// space, comments, the XML declaration and a doctype are allowed: any other
-// text or markup ahead of the document (a warning line from the directory
-// tool, say) means the answer is not one complete plist.
+// space, comments, one XML declaration that states its version and one
+// doctype of a plist are allowed: any other text or markup ahead of the
+// document (a warning line from the directory tool, say) means the answer is
+// not one complete plist. Inside the root only elements, text and comments
+// are allowed; a directive or processing instruction there is not part of a
+// property list either.
 func decodePlistRoot(decoder *xml.Decoder, root *plistNode) bool {
+	declared, typed := false, false
 	for {
 		token, err := decoder.Token()
 		if err != nil {
@@ -186,16 +190,52 @@ func decodePlistRoot(decoder *xml.Decoder, root *plistNode) bool {
 		}
 		switch t := token.(type) {
 		case xml.StartElement:
-			return decoder.DecodeElement(root, &t) == nil
-		case xml.Comment, xml.Directive:
-		case xml.ProcInst:
-			if t.Target != "xml" {
+			return readPlistElement(decoder, t, root)
+		case xml.Comment:
+		case xml.Directive:
+			if typed || !strings.HasPrefix(string(t), "DOCTYPE plist") {
 				return false
 			}
+			typed = true
+		case xml.ProcInst:
+			if declared || t.Target != "xml" || !strings.HasPrefix(strings.TrimSpace(string(t.Inst)), "version=") {
+				return false
+			}
+			declared = true
 		case xml.CharData:
 			if strings.TrimSpace(string(t)) != "" {
 				return false
 			}
+		default:
+			return false
+		}
+	}
+}
+
+// readPlistElement reads the element that start opened, with its text and
+// child elements, up to its end tag. A directive or processing instruction
+// inside it makes the answer not one complete plist.
+func readPlistElement(decoder *xml.Decoder, start xml.StartElement, node *plistNode) bool {
+	node.XMLName = start.Name
+	var text strings.Builder
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return false
+		}
+		switch t := token.(type) {
+		case xml.StartElement:
+			var child plistNode
+			if !readPlistElement(decoder, t, &child) {
+				return false
+			}
+			node.Children = append(node.Children, child)
+		case xml.EndElement:
+			node.Text = text.String()
+			return true
+		case xml.CharData:
+			text.Write(t)
+		case xml.Comment:
 		default:
 			return false
 		}
