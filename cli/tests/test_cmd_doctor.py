@@ -891,6 +891,7 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("the gateway is not running", result.checks[0]["detail"])
         self.assertIn("defenseclaw-gateway start", result.checks[0]["detail"])
 
+    @unittest.skipIf(os.name == "nt", "the root-owned start blocker and its sudo chain are POSIX only")
     def test_sidecar_check_names_root_owned_files_and_chain_for_a_stopped_gateway(self):
         """GAP-0788: a start cannot work over root-owned files, so the row prints the chain."""
         from defenseclaw.commands import cmd_doctor
@@ -915,6 +916,7 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertTrue(row["remediation"].rstrip().endswith("defenseclaw-gateway start"))
         self.assertNotIn("doctor --fix", row["detail"] + row["remediation"])
 
+    @unittest.skipIf(os.name == "nt", "the root-owned start blocker and its sudo chain are POSIX only")
     def test_stopped_gateway_chain_takes_away_group_and_other_access_before_the_start(self):
         from defenseclaw.commands import cmd_doctor
 
@@ -932,6 +934,7 @@ class DoctorGuardrailTests(unittest.TestCase):
             remediation,
         )
 
+    @unittest.skipIf(os.name == "nt", "the root-owned start blocker and its sudo chain are POSIX only")
     def test_stopped_gateway_chain_sweeps_a_hidden_store_after_the_owner_return(self):
         from defenseclaw.commands import cmd_doctor
 
@@ -956,6 +959,7 @@ class DoctorGuardrailTests(unittest.TestCase):
             self.assertIn("-name " + name, remediation)
         self.assertLess(remediation.index("chown -R"), remediation.index("find "))
 
+    @unittest.skipIf(os.name == "nt", "the root-owned start blocker and its sudo chain are POSIX only")
     def test_stopped_gateway_blocker_asks_about_the_configured_discovery(self):
         from defenseclaw.commands import cmd_doctor
 
@@ -965,6 +969,24 @@ class DoctorGuardrailTests(unittest.TestCase):
             with patch.object(cmd_doctor, "root_owned_start_blockers", return_value=([], [])) as blockers:
                 cmd_doctor._root_leftover_start_blocker(cfg)
             self.assertEqual(blockers.call_args.kwargs["ai_discovery_enabled"], enabled)
+
+    @unittest.skipUnless(os.name == "nt", "Windows has no root-owned leftovers to report")
+    def test_stopped_gateway_on_windows_names_no_root_owned_files_and_advises_a_start(self):
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = self._sidecar_alignment_cfg()
+        refused = (0, "<urlopen error [Errno 111] Connection refused>")
+        with (
+            patch.object(cmd_doctor, "_http_probe", return_value=refused),
+            patch.object(cmd_doctor, "root_owned_start_blockers") as blockers,
+        ):
+            self.assertEqual(cmd_doctor._root_leftover_start_blocker(cfg), ([], ""))
+            result = _DoctorResult()
+            _check_sidecar(cfg, result)
+        blockers.assert_not_called()
+        row = result.checks[0]
+        self.assertIn("start it: 'defenseclaw-gateway start' or 'defenseclaw doctor --fix'", row["detail"])
+        self.assertNotIn("chown", row["detail"] + row["remediation"])
 
     def test_sidecar_check_still_advises_a_start_without_root_owned_files(self):
         from defenseclaw.commands import cmd_doctor
