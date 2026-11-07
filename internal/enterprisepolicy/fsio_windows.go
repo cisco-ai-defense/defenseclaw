@@ -1372,8 +1372,11 @@ func (e *recordedVendorFolderError) folder() unprotectedVendorFolder {
 // /setowner alone leave an inherited entry, such as ProgramData's "Users may
 // add files and folders", in place; /inheritance:r removes the inherited
 // entries and /grant:r replaces the explicit Users entry. An explicit entry
-// of another account survives both, so every such account (the folder's
-// own allow entries, and the account the check named) is removed by name.
+// of another account that can change the folder survives both, so every such
+// account (the folder's own write-like allow entries, and the account the
+// check named) is removed by name. An explicit entry that only reads stays:
+// it can neither replace DefenseClaw's file nor add one beside it, and a
+// service account the vendor reads its policy as needs it (g582 round 9 L5).
 // The grants are for the folder; files inherit them, and DefenseClaw's own
 // file keeps its protected access list.
 func recordedVendorFolderFix(dir string, err error) [][]string {
@@ -1382,7 +1385,7 @@ func recordedVendorFolderFix(dir string, err error) [][]string {
 		{"icacls", dir, "/inheritance:r", "/grant:r",
 			"*" + systemSIDStr + ":(OI)(CI)F", "*" + adminOwnerSIDStr + ":(OI)(CI)F", "*" + usersSIDStr + ":(OI)(CI)RX"},
 	}
-	others := explicitOtherAllowSIDs(dir)
+	others := explicitWriteLikeAllowSIDs(dir)
 	var principal *managed.UntrustedPrincipalError
 	if errors.As(err, &principal) && principal.SID != "" && !principal.Owner {
 		others = append(others, principal.SID)
@@ -1405,10 +1408,10 @@ func recordedVendorFolderFix(dir string, err error) [][]string {
 	return fix
 }
 
-// explicitOtherAllowSIDs lists the accounts dir's own (not inherited) allow
-// entries name, in order. It is best effort: a descriptor it cannot read
-// adds nothing.
-func explicitOtherAllowSIDs(dir string) []string {
+// explicitWriteLikeAllowSIDs lists the accounts whose own (not inherited)
+// allow entry on dir lets them change it, in order. An entry that only reads
+// is not listed. It is best effort: a descriptor it cannot read adds nothing.
+func explicitWriteLikeAllowSIDs(dir string) []string {
 	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return nil
@@ -1423,7 +1426,8 @@ func explicitOtherAllowSIDs(dir string) []string {
 		if err := windows.GetAce(dacl, index, &ace); err != nil {
 			return sids
 		}
-		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags&windows.INHERITED_ACE != 0 {
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags&windows.INHERITED_ACE != 0 ||
+			!managed.WindowsWriteLikeAccess(ace.Mask) {
 			continue
 		}
 		sids = append(sids, (*windows.SID)(unsafe.Pointer(&ace.SidStart)).String())

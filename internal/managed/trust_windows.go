@@ -1430,6 +1430,11 @@ func acceptInheritedCreateChild(path, label string, flags uint8, mask windows.AC
 	return true
 }
 
+// WindowsWriteLikeAccess reports whether an allow entry's mask lets its
+// trustee change a file or folder (the leaf rule's test), for callers that
+// print what an administrator has to remove.
+func WindowsWriteLikeAccess(mask windows.ACCESS_MASK) bool { return windowsWriteLikeAccess(mask) }
+
 func windowsWriteLikeAccess(mask windows.ACCESS_MASK) bool {
 	const fileDeleteChild windows.ACCESS_MASK = 0x00000040
 	writeLike := windows.ACCESS_MASK(

@@ -444,11 +444,13 @@ func TestStandaloneRecordedVendorFolderUsersMayAddFailsClosedWhenTheVendorLoadsM
 	}
 }
 
-// g582 review 7 S1: in a case c folder that does not protect it, the
-// uninstall strips DefenseClaw's entry only from a recorded file it can
-// still trust. A file that changed after DefenseClaw wrote it, or that
-// another account can now change, is left byte for byte; the record still
-// goes and the folder is named.
+// g582 review 7 S1 and round 9 L4: in a case c folder that does not protect
+// it, the uninstall works only on a recorded file it can still trust. A
+// trusted file an administrator changed after DefenseClaw wrote it has
+// DefenseClaw's entries stripped, the rest kept. A file that another account
+// can now change is left byte for byte, and the warning says its DefenseClaw
+// hook entries now name binaries that are gone and how to take them out. The
+// record still goes and the folder is named.
 func TestStandaloneRecordedVendorFolderRemovalLeavesAFileItCannotTrust(t *testing.T) {
 	for _, tc := range vendorFolderCases() {
 		for _, variant := range []string{"changed after DefenseClaw wrote it", "another account can change it"} {
@@ -486,17 +488,33 @@ func TestStandaloneRecordedVendorFolderRemovalLeavesAFileItCannotTrust(t *testin
 				}
 
 				state := removeVendorCase(t, tc, opts, folder, before)
+				if variant == "changed after DefenseClaw wrote it" {
+					// An administrator's change leaves a file the uninstall
+					// can trust: DefenseClaw's entries go.
+					requireDefenseClawEntryGone(t, file)
+					for _, warning := range state.Warnings {
+						if strings.Contains(warning, "left "+file+" as it is") || strings.Contains(warning, "name binaries") {
+							t.Fatalf("warning %q says a trusted file was left with stale entries", warning)
+						}
+					}
+					if len(state.Warnings) == 0 {
+						t.Fatalf("no warning names the folder %s", folder)
+					}
+					return
+				}
 				if after, err := os.ReadFile(file); err != nil || string(after) != string(data) {
 					t.Fatalf("the uninstall changed a recorded file it cannot trust: %q, %v", after, err)
 				}
 				left := false
 				for _, warning := range state.Warnings {
-					if strings.Contains(warning, "left "+file+" as it is") {
+					if strings.Contains(warning, "left "+file+" as it is") &&
+						strings.Contains(warning, "name binaries the uninstall removed") &&
+						strings.Contains(warning, "delete the entries whose command names DefenseClaw's hook") {
 						left = true
 					}
 				}
 				if !left {
-					t.Fatalf("warnings = %q; want %s named as left", state.Warnings, file)
+					t.Fatalf("warnings = %q; want %s named as left and its stale hook entries explained", state.Warnings, file)
 				}
 			})
 		}
@@ -608,5 +626,38 @@ func TestVendorFolderWithoutAnAdministratorRecordKeepsTheTakeover(t *testing.T) 
 				}
 			})
 		}
+	}
+}
+
+// g582 round 9 L2: the M1 refusal (a folder standard users may add files to
+// does not protect a connector whose vendor loads more than DefenseClaw's
+// file) is standalone only. Secure Client keeps the takeover for the same
+// add-only folder, as before: Copilot reaches it through
+// PublishWindowsSecureClientCopilot, OpenCode and the rest through the same
+// publish.
+func TestSecureClientKeepsTheTakeoverOfAnAddOnlyVendorFolder(t *testing.T) {
+	for _, tc := range vendorFolderCases() {
+		if !tc.siblings {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			pinReclaimStandalone(t, false)
+			opts := tc.options(t)
+			file := tc.file(t, opts)
+			folder := filepath.Dir(file)
+			tc.prepare(t, opts, file)
+			requireCleanFirstPublish(t, tc, opts)
+			if err := applySDDL(folder, vendorFolderAddOnlyDACL); err != nil {
+				t.Fatal(err)
+			}
+
+			state, err := publishVendorCase(t, tc, opts)
+			if err != nil || !state.Covered {
+				t.Fatalf("publish: state = %+v, err = %v; want the takeover and the publish", state, err)
+			}
+			if err := validateTrustedLeafDir(folder); err != nil {
+				t.Fatalf("the add-only folder was not taken back on Secure Client: %v", err)
+			}
+		})
 	}
 }
