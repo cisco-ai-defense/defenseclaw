@@ -613,7 +613,7 @@ FACTS = [
         (('enterprise/windows.mdx',),
          "A user who can read it can also hold it open, and while it is held Windows does not let DefenseClaw replace it, so Codex policy updates wait."),
         (('enterprise/windows.mdx',),
-         "The enforced policy already in place stays in effect. Status names the process that holds the file (the warning `codex_requirements_held`). If the holder lets go within 30 seconds of the failed attempt, the running command applies the update. Otherwise the guardian applies it at its next pass, about a minute later, and a failed Setup run needs the administrator to run it again."),
+         "The enforced policy already in place stays in effect. Status names the process that holds the file (the warning `codex_requirements_held`). On a standalone deployment, if the holder lets go within 30 seconds of the failed attempt, the running command applies the update. Otherwise the guardian applies it at its next pass, about a minute later, and a failed Setup run needs the administrator to run it again. Secure Client keeps the earlier behavior and does not wait."),
     ]),
     # g582 review 7 M1: the vendor-folder fix also removes inherited entries.
     ("g582_vendor_folder_fix_removes_inherited_entries", [
@@ -640,6 +640,19 @@ def test_docs_keep_the_fact(fact: str) -> None:
     checks = dict(FACTS)[fact]
     for pages, phrase in checks:
         assert any(phrase in _flat(page) for page in pages), (fact, pages, phrase)
+
+
+@pytest.mark.parametrize("name", ["WINDOWS-ENTERPRISE-CERTIFICATION.md", "WINDOWS-ENTERPRISE-THREAT-MODEL.md"])
+def test_windows_codex_held_file_rows_say_standalone_and_when_it_changes(name: str) -> None:
+    # g582 round 10: the certification and threat-model rows carry the round 9
+    # wording: the retry and the per-change state file are standalone only.
+    text = " ".join((ROOT / "docs" / name).read_text(encoding="utf-8").split())
+    assert "in each transaction" not in text
+    assert "as soon as the file is released" not in text
+    assert "state file is written under a new name when it changes" in text
+    assert "On a standalone deployment" in text
+    assert "if the holder lets go within 30 seconds of the failed attempt" in text or "retried for up to 30 seconds from the failed attempt" in text
+    assert "Secure Client" in text
 
 
 def test_sandbox_docs_name_the_openshell_release_setup_installs() -> None:
