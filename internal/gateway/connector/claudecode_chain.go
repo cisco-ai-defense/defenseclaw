@@ -415,15 +415,26 @@ func claudeManagedGuardWrapperInvocation(event, launcher string, hookArgs []stri
 	return claudeCodeWindowsCommandProcessor(), claudeManagedGuardWrapperArgs(guard, launcher, event, hookArgs)
 }
 
+// claudeManagedGuardMissingWords is what the managed wrapper prints when the
+// guard image is absent from the install folder: it names the guard and the
+// one repair command. No word may hold a cmd.exe metacharacter, since the text
+// sits inside the wrapper's parenthesised block. The Python mirror is
+// _CLAUDE_MANAGED_GUARD_MISSING in cli/defenseclaw/hook_integrity.py.
+var claudeManagedGuardMissingWords = strings.Fields("DefenseClaw could not start its Claude Code hook guard " +
+	windowsHookGuardBinaryName + " because it is missing from the install folder. " +
+	"Run defenseclaw.exe enterprise windows repair --profile standalone from that folder as an administrator to restore it.")
+
 func claudeManagedGuardWrapperArgs(guard, launcher, event string, hookArgs []string) []string {
 	failCode := "2"
 	if hookguard.NeutralEvent(event) {
 		failCode = "1"
 	}
+	missing := append([]string{"echo"}, claudeManagedGuardMissingWords...)
+	missing = append(missing, "1>&2", "&", "exit", "/b", failCode)
 	warning := []string{"echo", "DefenseClaw", "could", "not", "start", "its", "Claude", "Code", "hook", "guard.",
 		"Run", "the", "DefenseClaw", "installer", "again", "to", "repair", "it.", "1>&2", "&", "exit", "/b", failCode}
 	args := []string{"/d", "/v:on", "/c", "if", "not", "exist", guard, "("}
-	args = append(args, warning...)
+	args = append(args, missing...)
 	args = append(args, ")", "&", guard)
 	args = append(args, claudeGuardEventArgs(launcher, hookArgs, event, true)...)
 	args = append(args,
