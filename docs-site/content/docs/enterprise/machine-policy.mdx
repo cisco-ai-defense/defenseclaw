@@ -64,7 +64,7 @@ What each route does during a gateway outage is in the [gateway outage table](/d
 | GitHub Copilot CLI (`copilot`) | Machine policy, with the foreign-hook guard | Same |
 | OpenCode (`opencode`) | Machine policy through the [managed OpenCode plugin](#managed-opencode-plugin), with the foreign-hook guard | Same |
 | Amp (`amp`) | Per user, with the gateway-backed foreign-hook guard | Per user (in-agent plugin), with a local foreign-hook session record; the plugin itself blocks gateway outages |
-| Devin (`devin`) | Per user, with the foreign-hook guard; Cascade in builds before 3.9.19 is turned off through machine policy (`devincascade`) | Per user (hook binary), with the guard; Cascade as on Linux and macOS |
+| Devin (`devin`) | Per user, with the foreign-hook guard; builds before 3.9.19 that still run Cascade are not covered | Per user (hook binary), with the guard; Cascade as on Linux and macOS |
 | Hermes (`hermes`) | Per user, with the foreign-hook guard | Per user (hook binary) |
 | Antigravity (`antigravity`) | Per user | Per user (hook binary) |
 | Kiro (`kiro`) | Per user: the user's global `~/.kiro/hooks/defenseclaw.json` plus the CLI 2.x `defenseclaw` agent | Per user: `%USERPROFILE%\.kiro\hooks\defenseclaw.json` plus the CLI 2.x `defenseclaw` agent, through the hook binary |
@@ -88,7 +88,7 @@ Per-user registrations differ by OS. On Windows every one runs the same hook bin
 | Cursor | `/etc/cursor/hooks.json` |
 | Copilot | `/etc/github-copilot/policy.d/90-defenseclaw.json` |
 | OpenCode | `/etc/opencode/opencode.json` |
-| Devin Desktop Cascade (`devincascade`) | `/etc/devin/hooks.json` |
+| Devin Desktop Cascade (`devincascade`, withdraws an earlier release's refusal only) | `/etc/devin/hooks.json` |
 
   </Tab>
   <Tab value="macOS">
@@ -100,7 +100,7 @@ Per-user registrations differ by OS. On Windows every one runs the same hook bin
 | Cursor | `/Library/Application Support/Cursor/hooks.json` |
 | Copilot | `/etc/github-copilot/policy.d/90-defenseclaw.json` |
 | OpenCode | `/Library/Application Support/opencode/opencode.json` |
-| Devin Desktop Cascade (`devincascade`) | `/Library/Application Support/Devin/hooks.json` |
+| Devin Desktop Cascade (`devincascade`, withdraws an earlier release's refusal only) | `/Library/Application Support/Devin/hooks.json` |
 
   </Tab>
   <Tab value="Windows">
@@ -112,14 +112,14 @@ Per-user registrations differ by OS. On Windows every one runs the same hook bin
 | Cursor | `%ProgramData%\Cursor\hooks.json` |
 | Copilot | `%ProgramData%\GitHub\Copilot\policy.d\90-defenseclaw.json` |
 | OpenCode | `%ProgramData%\opencode\opencode.json` |
-| Devin Desktop Cascade (`devincascade`) | `%ProgramData%\Devin\hooks.json` |
+| Devin Desktop Cascade (`devincascade`, withdraws an earlier release's refusal only) | `%ProgramData%\Devin\hooks.json` |
 
   </Tab>
 </Tabs>
 
 On Linux and macOS, only root may write the folders that hold these files. `verify` and `status` report a folder above them that another account can write (group or other write in the mode, or a POSIX or macOS ACL entry that grants write), and the connector does not count as covered. `ensure`, `repair` and the guardian remove those ACL entries and the write bits; read-only entries stay.
 
-For OpenCode, DefenseClaw uses an existing `opencode.jsonc` instead of `opencode.json`, as long as it holds no comments. The Cascade refusal goes only into the Devin hooks file, never into the pre-rename Cascade hooks file, which the Devin CLI also imports as Devin Local hooks; see [Cascade on older builds](/docs/connectors/devin). Cascade is published while `devin` is protected and is not a connector of its own: it enrolls no user.
+For OpenCode, DefenseClaw uses an existing `opencode.jsonc` instead of `opencode.json`, as long as it holds no comments. DefenseClaw publishes no Cascade refusal: the pre-rename Cascade hooks file is imported by the Devin CLI as Devin Local hooks, and no evidence shows that a Devin build running Cascade reads the Devin hooks file. `ensure` removes the refusal releases 1.0.5 to 1.0.8 wrote into either file, and builds before 3.9.19 are reported as not covered; see [Cascade on older builds](/docs/connectors/devin). `devincascade` is not a connector of its own: it enrolls no user.
 
 ## Who writes machine policy
 
@@ -336,7 +336,7 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy export --c
 | `cursor` | `json`: the enterprise `hooks.json` |
 | `copilot` | `json`: the `policy.d` drop-in |
 | `opencode` | `json`: a managed OpenCode config that loads `<install root>/share/opencode/index.js`. Deploy it only where that plugin is installed. |
-| `devincascade` | `json`: the Cascade `hooks.json` that turns Cascade off |
+| `devincascade` | None: DefenseClaw publishes no Cascade entry, so export returns an error |
 | `wsl` | Windows. `reg` (default), `json`, `intune`: the Claude Desktop `disableWslSessions` gate and, with `platform: disable`, `AllowWSL=0`. See [Agent sessions in WSL](/docs/enterprise/windows#agent-sessions-in-wsl) |
 
 - **`verify`** checks coverage and exits 1 when any machine-policy connector is not covered, or when `--user` finds a foreign hook that would be blocked.
