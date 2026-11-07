@@ -899,8 +899,9 @@ Other recovery notes:
   A file that already has the canonical access list is not written, so a holder
   does not matter for it. For the Codex `requirements.toml` and the Codex state
   file of 1.0.8, Setup checks before it stops any service: a program that holds
-  either one without read sharing, or `requirements.toml` with write or delete
-  access while its access list has to be written, stops the run after 30 seconds
+  either one without read sharing, `requirements.toml` without delete sharing,
+  or `requirements.toml` with write or delete access while its access list has
+  to be written, stops the run after 30 seconds
   with `codex_requirements_held` or `codex_state_held` (exit `1618`) and the
   program's name. Nothing is stopped or changed, and the same command succeeds
   once the program lets go. A Codex state copy (`.defenseclaw-managed-hooks.state.<n>`)
