@@ -4,9 +4,6 @@
 package gateway
 
 import (
-	"slices"
-	"strings"
-
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
@@ -41,27 +38,17 @@ func shellProtectedFileRule(ruleID string) bool {
 
 // trustedShellCommandInput reports an action that runs a shell command now:
 // the command text or argv of a shell or execution tool. A native write or
-// edit tool, an apply_patch envelope (also one a shell call runs or feeds:
-// mayRunApplyPatch) and a stored command payload are not shell commands
-// here; they keep their enforcement in every profile.
+// edit tool, the apply_patch tool and a stored command payload are not shell
+// commands here; they keep their enforcement in every profile. A shell call
+// that names apply_patch (a word, an echo, a patch it runs) is still a shell
+// command: its protected-file findings get the floor like any other, so the
+// word cannot switch the floor off for a separate write in the same call.
 func trustedShellCommandInput(input actionfacts.Input) bool {
-	if actionfacts.ApplyPatchTool(input.Tool) || mayRunApplyPatch(input) {
+	if actionfacts.ApplyPatchTool(input.Tool) {
 		return false
 	}
 	return input.Command != "" || len(input.Argv) > 0 ||
 		actionfacts.IsImmediateShellExecutionTool(input.Tool)
-}
-
-// mayRunApplyPatch reports a call whose text, argv or arguments name
-// apply_patch or carry a patch envelope. It over-matches on purpose: a false
-// answer only keeps the enforcement the call had before GAP-0675.
-func mayRunApplyPatch(input actionfacts.Input) bool {
-	names := func(text string) bool {
-		lower := strings.ToLower(text)
-		return strings.Contains(lower, "apply_patch") || strings.Contains(lower, "applypatch") ||
-			strings.Contains(lower, "apply-patch") || strings.Contains(lower, "*** begin patch")
-	}
-	return names(input.Command) || names(string(input.Args)) || slices.ContainsFunc(input.Argv, names)
 }
 
 // markShellProtectedFileFindings records, on the findings of one trusted
