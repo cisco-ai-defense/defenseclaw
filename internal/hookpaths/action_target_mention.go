@@ -2089,6 +2089,7 @@ func activeStateViewOf(activeRoot string) (files []activeStateIdentity, complete
 		activeStateViews.Unlock()
 	}
 	started := time.Now()
+	settleLimit := activeStateSettleLimit(started)
 	walk := &activeStateWalk{
 		limit:    math.MaxInt,
 		deadline: started.Add(activeStateExactBudget),
@@ -2099,7 +2100,7 @@ func activeStateViewOf(activeRoot string) (files []activeStateIdentity, complete
 		},
 	}
 	complete = walk.run(activeRoot)
-	if complete && len(files) <= activeStateViewFiles && len(walk.watches) <= activeStateViewWatches && walk.settledBefore(started.Add(-activeStateViewGuard)) {
+	if complete && len(files) <= activeStateViewFiles && len(walk.watches) <= activeStateViewWatches && walk.settledBefore(settleLimit) {
 		activeStateViews.Lock()
 		if activeStateViews.byRoot == nil || len(activeStateViews.byRoot) >= 4 {
 			activeStateViews.byRoot = make(map[string]activeStateView)
@@ -2108,6 +2109,20 @@ func activeStateViewOf(activeRoot string) (files []activeStateIdentity, complete
 		activeStateViews.Unlock()
 	}
 	return files, complete
+}
+
+// activeStateSettleLimit is the instant every fingerprint of a kept view must
+// precede. Where the kernel stamps changes from a clock the process can read
+// (filesystemClockNow) it is that clock present tick: a path stamped in an
+// earlier tick gets a later stamp when it changes again, whatever the delay,
+// so the view cannot miss the change. Elsewhere it is the walk start less
+// activeStateViewGuard. It is read before the walk, so a path changed after it
+// is never kept.
+func activeStateSettleLimit(started time.Time) time.Time {
+	if tick, ok := filesystemClockNow(); ok && tick.Before(started) {
+		return tick
+	}
+	return started.Add(-activeStateViewGuard)
 }
 
 // unchanged reports that every path of the view reads as it did.
