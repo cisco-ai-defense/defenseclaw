@@ -21,6 +21,10 @@ that starts defenseclaw-hook.exe, so the launcher path is only inside the
 base64 script. Reading the registration without decoding it found no
 launcher: a missing launcher, or a folder in its place, showed Kiro as
 healthy and running while every hook call was blocked (rel-1-0-6 GAP-0810).
+
+One rule decides the launcher: a regular file (not a folder, not a link)
+whose sha256 is the one the installer recorded. With no record, doctor warns
+that the launcher is not verified; it never passes.
 """
 
 from __future__ import annotations
@@ -28,6 +32,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,75 +44,7 @@ from defenseclaw.commands.cmd_doctor import _check_hook_health, _DoctorResult
 from defenseclaw.hook_integrity import LAUNCHER_REINSTALL_STEP, hook_registration_problems, repair_command
 
 _SYSTEM = "C:\\Windows\\System32"
-
-
-_COFF, _OPTIONAL, _SECTION = 0x84, 0x98, 0x98 + 240
-
-
-def _pe_image(*, dll: bool = False, extra: bytes = b"", patches: tuple = ()) -> bytes:
-    """A small PE32+ executable laid out the way the Windows loader reads one.
-
-    Console subsystem, one executable .text section whose first bytes are
-    ``xor eax,eax; ret``, an entry point on them, and the alignments,
-    SizeOfImage and SizeOfHeaders a linker writes. *patches* are
-    (offset, value, width) writes that break one field.
-    """
-
-    lfanew, raw_at = 0x80, 0x200
-    image = bytearray(raw_at + 0x200)
-
-    def put(at: int, value: int, width: int) -> None:
-        image[at : at + width] = value.to_bytes(width, "little")
-
-    image[:2] = b"MZ"
-    put(0x3C, lfanew, 4)
-    image[lfanew : lfanew + 4] = b"PE\0\0"
-    put(_COFF, 0x8664, 2)  # machine: x64
-    put(_COFF + 2, 1, 2)  # one section
-    put(_COFF + 16, 240, 2)  # SizeOfOptionalHeader
-    put(_COFF + 18, 0x2023 if dll else 0x0023, 2)  # executable, large address aware, relocations stripped
-    put(_OPTIONAL, 0x20B, 2)
-    put(_OPTIONAL + 4, 0x200, 4)  # SizeOfCode
-    put(_OPTIONAL + 16, 0x1000, 4)  # AddressOfEntryPoint
-    put(_OPTIONAL + 20, 0x1000, 4)  # BaseOfCode
-    put(_OPTIONAL + 24, 0x140000000, 8)  # ImageBase
-    put(_OPTIONAL + 32, 0x1000, 4)  # SectionAlignment
-    put(_OPTIONAL + 36, 0x200, 4)  # FileAlignment
-    put(_OPTIONAL + 40, 6, 2)  # MajorOperatingSystemVersion
-    put(_OPTIONAL + 48, 6, 2)  # MajorSubsystemVersion
-    put(_OPTIONAL + 56, 0x2000, 4)  # SizeOfImage
-    put(_OPTIONAL + 60, 0x200, 4)  # SizeOfHeaders
-    put(_OPTIONAL + 68, 3, 2)  # Subsystem: console
-    put(_OPTIONAL + 70, 0x100, 2)  # NX compatible
-    put(_OPTIONAL + 72, 0x100000, 8)
-    put(_OPTIONAL + 80, 0x1000, 8)
-    put(_OPTIONAL + 88, 0x100000, 8)
-    put(_OPTIONAL + 96, 0x1000, 8)
-    put(_OPTIONAL + 108, 16, 4)  # NumberOfRvaAndSizes
-    image[_SECTION : _SECTION + 6] = b".text\0"
-    put(_SECTION + 8, 0x10, 4)  # VirtualSize
-    put(_SECTION + 12, 0x1000, 4)  # VirtualAddress
-    put(_SECTION + 16, 0x200, 4)  # SizeOfRawData
-    put(_SECTION + 20, raw_at, 4)  # PointerToRawData
-    put(_SECTION + 36, 0x60000020, 4)  # code, executable, readable
-    image[raw_at : raw_at + 3] = b"\x31\xc0\xc3"
-    for at, value, width in patches:
-        put(at, value, width)
-    return bytes(image) + extra
-
-
-def _hand_made_stub() -> bytes:
-    """A 160-byte file with PE signatures but no optional header the loader could use."""
-
-    stub = bytearray(160)
-    stub[:2] = b"MZ"
-    stub[0x3C:0x40] = (0x40).to_bytes(4, "little")
-    stub[0x40:0x44] = b"PE\0\0"
-    stub[0x46:0x48] = (1).to_bytes(2, "little")  # one section
-    stub[0x54:0x56] = (2).to_bytes(2, "little")  # SizeOfOptionalHeader
-    stub[0x56:0x58] = (0x22).to_bytes(2, "little")
-    stub[0x58:0x5A] = (0x20B).to_bytes(2, "little")
-    return bytes(stub)
+_BODY = b"MZ the installed launcher"
 
 
 def _quote_literal(value: str) -> str:
@@ -185,7 +123,7 @@ def make_launcher(tmp_path, monkeypatch):
     def make(user: str = "u"):
         launcher = base / "Users" / user / ".local" / "bin" / "defenseclaw-hook.exe"
         launcher.parent.mkdir(parents=True)
-        launcher.write_bytes(_pe_image())
+        launcher.write_bytes(_BODY)
         return launcher, "C:/" + launcher.relative_to(base).as_posix()
 
     return make
@@ -196,32 +134,59 @@ def windows_launcher(make_launcher):
     return make_launcher()
 
 
+def _record_launcher_digest(cfg, body: bytes = _BODY) -> None:
+    installer = Path(cfg.data_dir, "installer")
+    installer.mkdir(exist_ok=True)
+    digest = hashlib.sha256(body).hexdigest()
+    (installer / "binaries.sha256").write_text(f"{digest}  defenseclaw-hook.exe\n", encoding="utf-8")
+
+
 def _damage(launcher: Path, shape: str) -> None:
-    if shape == "missing":
-        launcher.unlink()
-    elif shape == "folder":
-        launcher.unlink()
+    launcher.unlink()
+    if shape == "folder":
         launcher.mkdir()
-    elif shape == "empty":
-        launcher.write_bytes(b"")
-    elif shape == "not-pe":
-        launcher.write_bytes(b"#!/bin/sh\n")
+    elif shape == "link":
+        target = launcher.parent / "elsewhere.exe"
+        target.write_bytes(_BODY)
+        try:
+            launcher.symlink_to(target)
+        except OSError:
+            pytest.skip("this host cannot create symbolic links")
+    elif shape == "other-program":
+        launcher.write_bytes(b"another program")
+    elif shape == "truncated":
+        launcher.write_bytes(_BODY[:4])
 
 
+def _restore(launcher: Path) -> None:
+    if launcher.is_symlink() or launcher.is_file():
+        launcher.unlink()
+    elif launcher.is_dir():
+        launcher.rmdir()
+    launcher.write_bytes(_BODY)
+
+
+_MISSING = "is missing"
+_FOLDER = "is not a regular file"
+_LINK = "is a link, not the installed file"
+_MISMATCH = "does not match the copy the installer recorded"
 _DAMAGE = {
-    "missing": "is missing",
-    "folder": "is not a regular file",
-    "empty": "is not a Windows executable",
-    "not-pe": "is not a Windows executable",
+    "missing": _MISSING,
+    "folder": _FOLDER,
+    "link": _LINK,
+    "other-program": _MISMATCH,
+    "truncated": _MISMATCH,
 }
+_CONNECTORS = ["kiro", "antigravity"]
 
 
-@pytest.mark.parametrize("connector", ["kiro", "antigravity"])
+@pytest.mark.parametrize("connector", _CONNECTORS)
 @pytest.mark.parametrize("shape", sorted(_DAMAGE))
 def test_status_names_a_damaged_launcher_behind_the_encoded_bridge(tmp_path, windows_launcher, connector, shape):
     launcher, text = windows_launcher
     cfg, _config = _register(tmp_path, connector, text)
-    assert hook_integrity.hook_launcher_problems(cfg, connector) == []
+    _record_launcher_digest(cfg)
+    assert hook_registration_problems(cfg, connector) == []
 
     _damage(launcher, shape)
     problems = hook_registration_problems(cfg, connector)
@@ -230,24 +195,76 @@ def test_status_names_a_damaged_launcher_behind_the_encoded_bridge(tmp_path, win
     assert repair_command(connector, problems[0]) == LAUNCHER_REINSTALL_STEP
 
 
-@pytest.mark.parametrize("connector", ["kiro", "antigravity"])
-def test_a_working_launcher_behind_the_encoded_bridge_stays_healthy(tmp_path, windows_launcher, connector):
+@pytest.mark.parametrize("connector", _CONNECTORS)
+@pytest.mark.parametrize("shape", ["missing", "folder", "link"])
+def test_a_missing_folder_or_link_launcher_is_named_with_no_recorded_digest(tmp_path, windows_launcher, connector, shape):
+    launcher, text = windows_launcher
+    cfg, _config = _register(tmp_path, connector, text)
+
+    _damage(launcher, shape)
+
+    assert hook_registration_problems(cfg, connector) == [
+        f"the DefenseClaw hook launcher {text} {_DAMAGE[shape]}, so every hook call fails"
+    ]
+
+
+@pytest.mark.parametrize("connector", _CONNECTORS)
+def test_the_launcher_with_the_recorded_digest_is_healthy_and_verified(tmp_path, windows_launcher, connector):
+    _launcher, text = windows_launcher
+    cfg, _config = _register(tmp_path, connector, text)
+    _record_launcher_digest(cfg)
+
+    assert hook_integrity.hook_launcher_problems(cfg, connector) == []
+    assert hook_integrity.hook_launcher_unverified(cfg, connector) == ""
+
+
+@pytest.mark.parametrize("connector", _CONNECTORS)
+def test_a_launcher_with_no_recorded_digest_is_unverified_not_damaged(tmp_path, windows_launcher, connector):
+    # An install from before the installer recorded the launcher's digest.
     _launcher, text = windows_launcher
     cfg, _config = _register(tmp_path, connector, text)
 
-    assert hook_integrity.hook_launcher_problems(cfg, connector) == []
+    assert hook_registration_problems(cfg, connector) == []
+    assert hook_integrity.hook_launcher_unverified(cfg, connector) == (
+        f"the DefenseClaw hook launcher {text} is not verified: the installer recorded no copy of it to compare with"
+    )
+    _record_launcher_digest(cfg)
+    assert hook_integrity.hook_launcher_unverified(cfg, connector) == ""
+
+
+def test_a_digest_recorded_for_another_binary_is_no_record_for_the_launcher(tmp_path, windows_launcher):
+    _launcher, text = windows_launcher
+    cfg, _config = _register(tmp_path, "kiro", text)
+    installer = Path(cfg.data_dir, "installer")
+    installer.mkdir()
+    digest = hashlib.sha256(_BODY).hexdigest()
+    (installer / "binaries.sha256").write_text(f"{digest}  defenseclaw-gateway.exe\n", encoding="utf-8")
+
+    assert hook_integrity.hook_launcher_unverified(cfg, "kiro") != ""
 
 
 def test_a_launcher_that_cannot_be_read_is_not_called_damaged(tmp_path, windows_launcher, monkeypatch):
     # Defender or a deny ACE holding the file is not proof of damage.
     _launcher, text = windows_launcher
     cfg, _config = _register(tmp_path, "kiro", text)
+    _record_launcher_digest(cfg)
 
     def deny(*_args, **_kwargs):
         raise PermissionError("held")
 
     monkeypatch.setattr("builtins.open", deny)
-    assert hook_integrity._launcher_defect(text) == ""
+    assert hook_integrity._launcher_defect(text, cfg.data_dir) == ""
+    monkeypatch.setattr(os, "lstat", deny)
+    assert hook_integrity._launcher_defect(text, cfg.data_dir) == ""
+
+
+@pytest.mark.parametrize("kind", [stat.S_IFREG, stat.S_IFDIR])
+def test_a_windows_reparse_point_is_a_link(monkeypatch, kind):
+    # A junction or a cloud placeholder reads as a reparse point, not as the installed file.
+    info = SimpleNamespace(st_mode=kind | 0o644, st_file_attributes=0x400)
+    monkeypatch.setattr(os, "lstat", lambda _path: info)
+
+    assert hook_integrity._launcher_defect("C:/x/defenseclaw-hook.exe", "") == _LINK
 
 
 def test_managed_install_keeps_its_own_status(tmp_path, windows_launcher):
@@ -257,45 +274,67 @@ def test_managed_install_keeps_its_own_status(tmp_path, windows_launcher):
     cfg.deployment_mode = "managed_enterprise"
 
     assert hook_integrity.hook_launcher_problems(cfg, "kiro") == []
+    assert hook_integrity.hook_launcher_unverified(cfg, "kiro") == ""
 
 
-def test_doctor_fails_the_kiro_row_when_the_launcher_is_missing_or_a_folder(tmp_path, windows_launcher, monkeypatch):
-    launcher, text = windows_launcher
-    cfg, config = _register(tmp_path, "kiro", text)
+def _kiro_doctor_row(cfg, monkeypatch):
     monkeypatch.setattr("defenseclaw.commands.cmd_doctor._edited_hook_problem", lambda *_: "")
     monkeypatch.setattr("defenseclaw.commands.cmd_doctor._unguarded_tool_call_problem", lambda *_: "")
-
-    healthy = _DoctorResult(passive=True, quiet=True)
-    _check_hook_health(cfg, "kiro", healthy)
-    assert [(row["label"], row["status"]) for row in healthy.checks] == [("Kiro hooks", "pass")]
-
-    for shape in ("missing", "folder"):
-        _damage(launcher, shape)
-        result = _DoctorResult(passive=True, quiet=True)
-        _check_hook_health(cfg, "kiro", result)
-        (row,) = result.checks
-        assert (row["label"], row["status"]) == ("Kiro hooks", "fail")
-        assert text in row["detail"] and _DAMAGE[shape] in row["detail"]
-        assert row["remediation"] == LAUNCHER_REINSTALL_STEP
-        if shape == "folder":
-            launcher.rmdir()
-        launcher.write_bytes(_pe_image())
+    result = _DoctorResult(passive=True, quiet=True)
+    _check_hook_health(cfg, "kiro", result)
+    (row,) = result.checks
+    return row
 
 
-def _record_launcher_digest(cfg, body: bytes) -> None:
-    installer = Path(cfg.data_dir, "installer")
-    installer.mkdir(exist_ok=True)
-    digest = hashlib.sha256(body).hexdigest()
-    (installer / "binaries.sha256").write_text(f"{digest}  defenseclaw-hook.exe\n", encoding="utf-8")
+def test_doctor_passes_the_kiro_row_for_the_recorded_launcher(tmp_path, windows_launcher, monkeypatch):
+    _launcher, text = windows_launcher
+    cfg, _config = _register(tmp_path, "kiro", text)
+    _record_launcher_digest(cfg)
+
+    row = _kiro_doctor_row(cfg, monkeypatch)
+
+    assert (row["label"], row["status"]) == ("Kiro hooks", "pass")
 
 
-@pytest.mark.parametrize("connector", ["kiro", "antigravity"])
+def test_doctor_warns_the_kiro_row_when_no_launcher_digest_is_recorded(tmp_path, windows_launcher, monkeypatch):
+    _launcher, text = windows_launcher
+    cfg, _config = _register(tmp_path, "kiro", text)
+
+    row = _kiro_doctor_row(cfg, monkeypatch)
+
+    assert (row["label"], row["status"]) == ("Kiro hooks", "warn")
+    assert text in row["detail"] and "is not verified" in row["detail"]
+    assert row["remediation"] == LAUNCHER_REINSTALL_STEP
+
+
+@pytest.mark.parametrize("recorded", [True, False])
+@pytest.mark.parametrize("shape", ["missing", "folder", "link", "other-program"])
+def test_doctor_fails_the_kiro_row_for_a_launcher_that_is_not_the_installed_file(
+    tmp_path, windows_launcher, monkeypatch, shape, recorded
+):
+    launcher, text = windows_launcher
+    cfg, _config = _register(tmp_path, "kiro", text)
+    if recorded:
+        _record_launcher_digest(cfg)
+    elif shape == "other-program":
+        pytest.skip("a different program is told apart only by the recorded digest")
+
+    _damage(launcher, shape)
+    row = _kiro_doctor_row(cfg, monkeypatch)
+
+    assert (row["label"], row["status"]) == ("Kiro hooks", "fail")
+    assert text in row["detail"] and _DAMAGE[shape] in row["detail"]
+    assert row["remediation"] == LAUNCHER_REINSTALL_STEP
+
+
+@pytest.mark.parametrize("connector", _CONNECTORS)
 @pytest.mark.parametrize("user", ["O'Neil", "A&B", "O’Neil", "Ana‘s ‚B‛"])
 def test_a_launcher_path_with_a_quote_or_ampersand_is_read_whole(tmp_path, make_launcher, connector, user):
     # The renderers double every single-quote character inside the literal; the
     # path checked is the one the literal holds, not the escaped spelling.
     launcher, text = make_launcher(user)
     cfg, _config = _register(tmp_path, connector, text)
+    _record_launcher_digest(cfg)
     assert hook_integrity.hook_launcher_problems(cfg, connector) == []
 
     launcher.unlink()
@@ -308,6 +347,7 @@ def test_a_launcher_path_with_a_quote_or_ampersand_is_read_whole(tmp_path, make_
 def test_a_double_quoted_plain_command_with_a_quote_or_ampersand_is_read_whole(tmp_path, make_launcher, user):
     launcher, text = make_launcher(user)
     cfg, _config = _register(tmp_path, "antigravity", text, plain=True)
+    _record_launcher_digest(cfg)
     assert hook_integrity.hook_launcher_problems(cfg, "antigravity") == []
 
     launcher.unlink()
@@ -316,208 +356,29 @@ def test_a_double_quoted_plain_command_with_a_quote_or_ampersand_is_read_whole(t
     ]
 
 
-@pytest.mark.parametrize("connector", ["kiro", "antigravity"])
-def test_an_image_that_only_starts_with_mz_is_not_a_working_launcher(tmp_path, windows_launcher, connector):
-    launcher, text = windows_launcher
-    cfg, _config = _register(tmp_path, connector, text)
-    whole = _pe_image()
-    for body in (
-        b"MZ",
-        b"MZ" + bytes(200),
-        b"MZ\x90\x00" + b"junk" * 100,
-        whole[:0x300],
-        _pe_image(dll=True),
-    ):
-        launcher.write_bytes(body)
-        assert hook_integrity.hook_launcher_problems(cfg, connector) == [
-            f"the DefenseClaw hook launcher {text} is not a Windows executable, so every hook call fails"
-        ]
-    launcher.write_bytes(whole)
-    assert hook_integrity.hook_launcher_problems(cfg, connector) == []
-
-
-@pytest.mark.parametrize("connector", ["kiro", "antigravity"])
-def test_another_program_under_the_launcher_name_is_named_when_the_installer_recorded_its_digest(
-    tmp_path, windows_launcher, connector
-):
-    launcher, text = windows_launcher
-    cfg, _config = _register(tmp_path, connector, text)
-    _record_launcher_digest(cfg, launcher.read_bytes())
-    assert hook_integrity.hook_launcher_problems(cfg, connector) == []
-
-    launcher.write_bytes(_pe_image(extra=b"another program"))
-    problems = hook_registration_problems(cfg, connector)
-
-    assert problems == [
-        f"the DefenseClaw hook launcher {text} does not match the copy the installer recorded, so every hook call fails"
-    ]
-    assert repair_command(connector, problems[0]) == LAUNCHER_REINSTALL_STEP
-
-
-_BREAKS = {
-    "machine-unknown": [(_COFF, 0, 2)],
-    "machine-not-a-windows-machine": [(_COFF, 0x1234, 2)],
-    "machine-32-bit-with-a-pe32-plus-header": [(_COFF, 0x14C, 2)],
-    "optional-magic-pe32-on-x64": [(_OPTIONAL, 0x10B, 2)],
-    "optional-magic-unknown": [(_OPTIONAL, 0x107, 2)],
-    "too-many-data-directories": [(_OPTIONAL + 108, 17, 4)],
-    "data-directories-past-the-optional-header": [(_OPTIONAL + 108, 0xFFFFFFFF, 4)],
-    "section-alignment-zero": [(_OPTIONAL + 32, 0, 4)],
-    "section-alignment-not-a-power-of-two": [(_OPTIONAL + 32, 0x1800, 4)],
-    "section-alignment-below-file-alignment": [(_OPTIONAL + 32, 0x100, 4)],
-    "file-alignment-zero": [(_OPTIONAL + 36, 0, 4)],
-    "file-alignment-too-small": [(_OPTIONAL + 36, 4, 4)],
-    "image-size-zero": [(_OPTIONAL + 56, 0, 4)],
-    "image-size-unaligned": [(_OPTIONAL + 56, 0x1800, 4)],
-    "image-size-too-small-for-the-section": [(_OPTIONAL + 56, 0x1000, 4)],
-    "headers-size-zero": [(_OPTIONAL + 60, 0, 4)],
-    "headers-size-inside-the-section-table": [(_OPTIONAL + 60, 0x100, 4)],
-    "headers-size-past-the-file": [(_OPTIONAL + 60, 0x1000, 4)],
-    "subsystem-unknown": [(_OPTIONAL + 68, 0, 2)],
-    "subsystem-native": [(_OPTIONAL + 68, 1, 2)],
-    "entry-point-zero": [(_OPTIONAL + 16, 0, 4)],
-    "entry-point-outside-the-sections": [(_OPTIONAL + 16, 0x5000, 4)],
-    "entry-point-past-the-bytes-the-file-holds": [(_SECTION + 8, 0x1000, 4), (_OPTIONAL + 16, 0x1800, 4)],
-    "entry-section-not-executable": [(_SECTION + 36, 0x40000040, 4)],
-    "section-empty": [(_SECTION + 8, 0, 4), (_SECTION + 16, 0, 4)],
-    "section-address-unaligned": [(_SECTION + 12, 0x1234, 4)],
-    "section-address-inside-the-headers": [(_SECTION + 12, 0, 4)],
-    "section-past-the-image": [(_SECTION + 12, 0x2000, 4)],
-    "section-data-inside-the-headers": [(_SECTION + 20, 0x100, 4)],
-    "section-data-past-the-file": [(_SECTION + 16, 0x400, 4)],
-    "no-sections": [(_COFF + 2, 0, 2)],
-    "too-many-sections": [(_COFF + 2, 97, 2)],
-    "not-an-executable-image": [(_COFF + 18, 0x0020, 2)],
-    "pe-header-past-the-file": [(0x3C, 0x10000, 4)],
-    "pe-signature-wrong": [(0x80, ord("X"), 1)],
-    "image-base-not-64k-aligned": [(_OPTIONAL + 24, 0x140001000, 8)],
-    "reserved-win32-version-set": [(_OPTIONAL + 52, 1, 4)],
-    "headers-size-not-file-aligned": [(_OPTIONAL + 60, 0x1FC, 4)],
-    "section-raw-size-not-file-aligned": [(_SECTION + 16, 0x1F0, 4)],
-    "low-section-alignment-with-a-larger-file-alignment": [(_OPTIONAL + 32, 0x400, 4)],
-    "low-section-alignment-with-the-section-away-from-its-file-offset": [(_OPTIONAL + 32, 0x200, 4)],
-}
-
-# Breaks that need file bytes past the fixture, so only the one field is wrong.
-_BREAKS_NEEDING_SLACK = {
-    "section-raw-offset-not-file-aligned": [(_SECTION + 20, 0x210, 4)],
-}
-
-
-def test_the_fixture_is_a_working_executable_image(tmp_path):
-    image = tmp_path / "defenseclaw-hook.exe"
-    image.write_bytes(_pe_image())
-    assert hook_integrity._launcher_defect(str(image)) == ""
-
-
-@pytest.mark.parametrize("name", sorted(_BREAKS))
-def test_one_broken_loader_field_makes_the_launcher_not_a_windows_executable(tmp_path, name):
-    image = tmp_path / "defenseclaw-hook.exe"
-    image.write_bytes(_pe_image(patches=tuple(_BREAKS[name])))
-    assert hook_integrity._launcher_defect(str(image)) == "is not a Windows executable"
-
-
-@pytest.mark.parametrize("name", sorted(_BREAKS_NEEDING_SLACK))
-def test_a_break_that_needs_file_slack_is_still_not_a_windows_executable(tmp_path, name):
-    image = tmp_path / "defenseclaw-hook.exe"
-    image.write_bytes(_pe_image(extra=bytes(0x40), patches=tuple(_BREAKS_NEEDING_SLACK[name])))
-    assert hook_integrity._launcher_defect(str(image)) == "is not a Windows executable"
-
-
-_NEAR_VARIANTS = [
-    "image-base-not-64k-aligned",
-    "reserved-win32-version-set",
-    "headers-size-not-file-aligned",
-    "section-raw-size-not-file-aligned",
-    "low-section-alignment-with-a-larger-file-alignment",
-    "low-section-alignment-with-the-section-away-from-its-file-offset",
-]
-
-
-@pytest.mark.parametrize("connector", ["kiro", "antigravity"])
-@pytest.mark.parametrize("name", _NEAR_VARIANTS)
-def test_a_loader_invalid_layout_is_named_with_no_recorded_digest(tmp_path, windows_launcher, connector, name):
-    launcher, text = windows_launcher
-    cfg, _config = _register(tmp_path, connector, text)
-    assert not Path(cfg.data_dir, "installer").exists()
-    launcher.write_bytes(_pe_image(patches=tuple(_BREAKS[name])))
-
-    problems = hook_registration_problems(cfg, connector)
-
-    assert problems == [f"the DefenseClaw hook launcher {text} is not a Windows executable, so every hook call fails"]
-    assert repair_command(connector, problems[0]) == LAUNCHER_REINSTALL_STEP
-
-
-@pytest.mark.parametrize("name", _NEAR_VARIANTS)
-def test_doctor_fails_the_kiro_row_for_a_loader_invalid_layout(tmp_path, windows_launcher, monkeypatch, name):
-    launcher, text = windows_launcher
-    cfg, _config = _register(tmp_path, "kiro", text)
-    monkeypatch.setattr("defenseclaw.commands.cmd_doctor._edited_hook_problem", lambda *_: "")
-    monkeypatch.setattr("defenseclaw.commands.cmd_doctor._unguarded_tool_call_problem", lambda *_: "")
-    launcher.write_bytes(_pe_image(patches=tuple(_BREAKS[name])))
-
-    result = _DoctorResult(passive=True, quiet=True)
-    _check_hook_health(cfg, "kiro", result)
-
-    (row,) = result.checks
-    assert (row["label"], row["status"]) == ("Kiro hooks", "fail")
-    assert text in row["detail"] and "is not a Windows executable" in row["detail"]
-    assert row["remediation"] == LAUNCHER_REINSTALL_STEP
-
-
-def test_a_hand_made_stub_with_pe_signatures_is_not_a_working_launcher(tmp_path, windows_launcher):
-    launcher, text = windows_launcher
-    cfg, _config = _register(tmp_path, "kiro", text)
-    launcher.write_bytes(_hand_made_stub())
-
-    assert hook_registration_problems(cfg, "kiro") == [
-        f"the DefenseClaw hook launcher {text} is not a Windows executable, so every hook call fails"
-    ]
-
-
-def _distlib_launchers() -> list[Path]:
-    try:
-        from pip._vendor import distlib
-    except ImportError:
-        return []
-    return sorted(Path(distlib.__file__).parent.glob("[tw]*.exe"))
-
-
-def test_real_windows_launchers_are_accepted(tmp_path):
-    # pip ships real console and GUI launchers for x86, x64 and ARM64.
-    launchers = _distlib_launchers()
-    if not launchers:
-        pytest.skip("pip's vendored launcher executables are not installed")
-    for source in launchers:
-        image = tmp_path / source.name
-        image.write_bytes(source.read_bytes())
-        assert hook_integrity._launcher_defect(str(image)) == "", source.name
-
-
-@pytest.mark.parametrize("connector", ["kiro", "antigravity"])
+@pytest.mark.parametrize("connector", _CONNECTORS)
 def test_a_replacement_too_large_to_hash_is_not_the_recorded_copy(tmp_path, windows_launcher, connector, monkeypatch):
     launcher, text = windows_launcher
     cfg, _config = _register(tmp_path, connector, text)
-    _record_launcher_digest(cfg, launcher.read_bytes())
+    _record_launcher_digest(cfg)
     monkeypatch.setattr(hook_integrity, "_RECORDED_BINARY_SIZE_LIMIT", 4096)
     assert hook_integrity.hook_launcher_problems(cfg, connector) == []
 
-    launcher.write_bytes(_pe_image(extra=bytes(8192)))
+    launcher.write_bytes(bytes(8192))
     problems = hook_registration_problems(cfg, connector)
 
-    assert problems == [
-        f"the DefenseClaw hook launcher {text} does not match the copy the installer recorded, so every hook call fails"
-    ]
+    assert problems == [f"the DefenseClaw hook launcher {text} {_MISMATCH}, so every hook call fails"]
     assert repair_command(connector, problems[0]) == LAUNCHER_REINSTALL_STEP
 
 
-def test_a_large_launcher_with_no_recorded_digest_is_judged_by_its_image(tmp_path, windows_launcher, monkeypatch):
+def test_a_large_launcher_with_no_recorded_digest_is_unverified_not_read(tmp_path, windows_launcher, monkeypatch):
     launcher, text = windows_launcher
     cfg, _config = _register(tmp_path, "kiro", text)
     monkeypatch.setattr(hook_integrity, "_RECORDED_BINARY_SIZE_LIMIT", 4096)
-    launcher.write_bytes(_pe_image(extra=bytes(8192)))
+    launcher.write_bytes(bytes(8192))
 
     assert hook_integrity.hook_launcher_problems(cfg, "kiro") == []
+    assert hook_integrity.hook_launcher_unverified(cfg, "kiro") != ""
 
 
 def test_a_hook_guard_too_large_to_hash_is_not_the_recorded_copy(tmp_path, monkeypatch):

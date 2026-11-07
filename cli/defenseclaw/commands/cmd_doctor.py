@@ -11842,6 +11842,7 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
             _emit("fail", label, launcher, r=r, remediation=repair_command(connector, launcher))
             return
         if registered:
+            unverified = _hook_launcher_unverified(cfg, connector)
             if connector == "cursor":
                 _check_cursor_configured_runtime(
                     cfg,
@@ -11940,6 +11941,10 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                     "and complete lifecycle capture",
                     r=r,
                 )
+            elif unverified:
+                from defenseclaw.hook_integrity import LAUNCHER_REINSTALL_STEP
+
+                _emit("warn", label, f"reachable at {path}; {unverified}", r=r, remediation=LAUNCHER_REINSTALL_STEP)
             else:
                 _emit("pass", label, f"reachable at {path}", r=r)
             return
@@ -19037,6 +19042,16 @@ def _hook_launcher_problem(cfg, connector: str) -> str:
     except Exception:  # noqa: BLE001 - the hook rows still report what they can read.
         return ""
     return problems[0] if problems else ""
+
+
+def _hook_launcher_unverified(cfg, connector: str) -> str:
+    """The registered launcher no installer digest vouches for, or "" (GAP-0810)."""
+    from defenseclaw.hook_integrity import hook_launcher_unverified
+
+    try:
+        return hook_launcher_unverified(cfg, connector)
+    except Exception:  # noqa: BLE001 - the hook rows still report what they can read.
+        return ""
 
 
 def _hook_runtime_file_problems(cfg, connector: str) -> list[str]:
