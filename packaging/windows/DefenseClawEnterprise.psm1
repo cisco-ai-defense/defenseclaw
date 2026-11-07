@@ -5193,6 +5193,21 @@ function Open-DefenseClawRestampHold {
     return $handle
 }
 
+function Test-DefenseClawLiveWrittenFile {
+    <#
+        True for a managed file a running DefenseClaw service keeps open for
+        write while it runs: the gateway's runtime files (the audit database,
+        its logs, tokens) and the service logs. An in-place stamp of one of
+        these cannot require that no other program writes it, so it keeps the
+        stamp it always had; the files whose bytes are policy (the Codex
+        requirements and state, the config, the manifest, the records, the
+        bundle store) are held (GAP-0763).
+    #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Kind)
+    return ($Kind -in @('RuntimeFile', 'RuntimeSecretFile')) -or
+        ($Path -match '(?i)[\\/]logs[\\/]')
+}
+
 function Close-DefenseClawRestampHold {
     param([Parameter(Mandatory)][IntPtr]$Handle)
     if ($Handle -ne [IntPtr]::Zero) {
@@ -7603,7 +7618,8 @@ function Set-DefenseClawPathAcl {
     $hold = [IntPtr]::Zero
     if ((Test-DefenseClawStandaloneProfile) -and
         $Kind -notin @('InstallFile', 'ServiceInstallFile') -and
-        $Kind -notlike '*Directory') {
+        $Kind -notlike '*Directory' -and
+        -not (Test-DefenseClawLiveWrittenFile -Path $Path -Kind $Kind)) {
         $hold = Open-DefenseClawRestampHold -Path $Path
     }
     try {
@@ -7646,6 +7662,11 @@ function Invoke-DefenseClawPathAclStamp {
         # re-stamps the same descriptor under backup and restore privileges.
         $expectedSize = if ($Kind -eq 'RuntimeSecretFile') { [uint32]32 } else { [uint32]0 }
         $nativeSecurity = Initialize-DefenseClawNativeSecurity
+        if (Test-DefenseClawLiveWrittenFile -Path $Path -Kind $Kind) {
+            # A running service keeps this file open for write: the open of
+            # its stamp is the one it always had.
+            $nativeSecurity::RefuseHeldRestamp = $false
+        }
         $before = $nativeSecurity::GetRegularFileSecuritySnapshotNoFollow(
             $Path,
             $expectedSize
