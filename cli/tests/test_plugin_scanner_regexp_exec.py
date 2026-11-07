@@ -88,6 +88,43 @@ BENIGN = {
     "own-prototype-methods": (
         "function Parser() {}\nParser.prototype.parse = function (t) { return /x/.exec(t); };\n"
     ),
+    "unrelated-regexp-string": "const message = \"RegExp\";\n/x/.exec(text);\n",
+    "unrelated-regexp-literal": "const label = /RegExp/;\n/x/.exec(text);\n",
+    "unrelated-global-index": "const promise = globalThis[\"Promise\"];\n/x/.exec(text);\n",
+    "unrelated-prototype-read": (
+        "function Parser() {}\nconst keys = Object.keys(Parser.prototype);\n/x/.exec(text);\n"
+    ),
+    "unrelated-prototype-write": (
+        "function Parser() {}\nParser.prototype = { parse: () => 1 };\n/x/.exec(text);\n"
+    ),
+    "type-switch-on-the-name": (
+        "switch (kind) {\n  case \"RegExp\": return /x/.exec(text);\n  default: return null;\n}\n"
+    ),
+    "prototype-pollution-guard": (
+        "for (const key of Object.keys(src)) {\n"
+        "  if (key === \"__proto__\" || key === \"constructor\" || key === \"prototype\") continue;\n}\n"
+        "/x/.exec(text);\n"
+    ),
+    "constructor-name-and-own-prototype": (
+        "function Parser() {}\nParser.prototype.kind = function () { return this.constructor.name; };\n"
+        "/x/.exec(text);\n"
+    ),
+    "words-in-comments-and-strings": (
+        "/* function RegExp() {} with (obj) { Proxy } */\n// getPrototypeOf, defineProperty\n"
+        "const note = \"with (obj) { RegExp = 1 }\" + `Proxy ${1} getPrototypeOf`;\n/x/.exec(text);\n"
+    ),
+    "array-with-method": "const next = list.with(0, 1);\n/x/.exec(text);\n",
+    "literal-after-a-block": "function f() { return 1; }\n/x/.exec(text);\nif (a) { b(); }\n/y/.exec(text);\n",
+    "bundler-helpers": (
+        "var __defProp = Object.defineProperty;\nvar __create = Object.create;\n"
+        "var __getProtoOf = Object.getPrototypeOf;\nvar __getOwnPropDesc = Object.getOwnPropertyDescriptor;\n"
+        "var __export = (target, all) => { for (var name in all) __defProp(target, name, { get: all[name], enumerable: true }); };\n"
+        "var __toESM = (mod, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, "
+        "__defProp(target, \"default\", { value: mod, enumerable: true }));\n"
+        "Object.defineProperty(exports, \"__esModule\", { value: true });\n"
+        "const KIND = /^(?:a|b)$/;\nexport const kind = (v) => v.replace(/x/g, \"y\").match(KIND) ?? /z/.exec(v);\n"
+    ),
+    "regexp-called-over-lines": "const R = RegExp(\n  \"x\",\n  \"g\"\n);\nR.exec(text);\n",
 }
 
 
@@ -163,6 +200,86 @@ HOSTILE = {
         "const cp = require(`node:child_process`);\nconst holder = { kind: RegExp };\n"
         "Object.assign(holder.kind.prototype, { exec: cp.exec });\n/a/.exec(command);\n"
     ),
+    "function-declaration-after-a-comment": (
+        "function /* ordinary comment */ RegExp() { return require(`node:child_process`); }\n"
+        "RegExp(`x`).exec(command);\n"
+    ),
+    "function-declaration-after-a-line-break": (
+        "function\nRegExp() { return require(`node:child_process`); }\nRegExp(`x`).exec(command);\n"
+    ),
+    "function-declaration-after-a-line-comment": (
+        "function // note\nRegExp() { return require(`node:child_process`); }\nRegExp(`x`).exec(command);\n"
+    ),
+    "method-shorthand-in-a-with-statement": (
+        "with ({ RegExp() { return require(`node:child_process`); } }) {\n  RegExp(`x`).exec(command);\n}\n"
+    ),
+    "with-statement-over-a-variable": (
+        "const scope = { RegExp: () => require(`node:child_process`) };\n"
+        "with (scope) { RegExp(`x`).exec(command); }\n"
+    ),
+    "method-shorthand-on-an-object": (
+        "const scope = { RegExp() { return require(`node:child_process`); } };\n"
+        "Object.assign(globalThis, scope);\nRegExp(`x`).exec(command);\n"
+    ),
+    "quoted-method-on-the-global": (
+        "Object.assign(globalThis, { \"RegExp\"() { return require(`node:child_process`); } });\n"
+        "RegExp(`x`).exec(command);\n"
+    ),
+    "class-method-named-regexp": (
+        "class Scope { RegExp() { return require(`node:child_process`); } }\n"
+        "const scope = new Scope();\nscope.RegExp(`x`).exec(command);\n"
+    ),
+    "global-set-by-a-quoted-index": (
+        "globalThis[\"RegExp\"] = () => require(`node:child_process`);\nRegExp(`x`).exec(command);\n"
+    ),
+    "global-set-by-a-computed-index": (
+        "const name = [`Reg`, `Exp`].join(``);\nglobalThis[name] = () => require(`node:child_process`);\n"
+        "RegExp(`x`).exec(command);\n"
+    ),
+    "alternative-in-a-group": "const cp = require(`node:child_process`);\n(cp || /x/).exec(command);\n",
+    "name-bound-to-a-conjunction": (
+        "const cp = require(`node:child_process`);\nconst RE = /x/ && cp;\nRE.exec(command);\n"
+    ),
+    "name-bound-to-a-member": "const RE = /x/.source;\nRE.exec(command);\n",
+    "exec-assigned-by-destructuring": (
+        "const cp = require(`node:child_process`);\nconst RE = /x/;\n({ exec: RE.exec } = cp);\nRE.exec(command);\n"
+    ),
+    "exec-read-from-the-module": (
+        "const cp = require(`node:child_process`);\nconst RE = /x/;\nRE.exec = cp.exec;\nRE.exec(command);\n"
+    ),
+    "constructor-prototype-on-another-line": (
+        "const cp = require(`node:child_process`);\nconst C = /b/.constructor;\nconst P = C.prototype;\n"
+        "P[[`ex`, `ec`].join(``)] = cp.exec;\n/a/.exec(command);\n"
+    ),
+    "constructor-by-a-quoted-index": (
+        "const cp = require(`node:child_process`);\nconst C = /b/[\"constructor\"];\n"
+        "Object.assign(C[\"prototype\"], { exec: cp.exec });\n/a/.exec(command);\n"
+    ),
+    "constructor-by-destructuring": (
+        "const cp = require(`node:child_process`);\nconst { constructor: C } = /b/;\n"
+        "Object.assign(C.prototype, { exec: cp.exec });\n/a/.exec(command);\n"
+    ),
+    "prototype-by-a-quoted-name": (
+        "const cp = require(`node:child_process`);\nconst C = /b/.constructor;\n"
+        "const P = Object.getOwnPropertyDescriptor(C, \"prototype\").value;\nP.exec = cp.exec;\n/a/.exec(command);\n"
+    ),
+    "reflection-by-a-quoted-name": (
+        "const proto = Object[\"getPrototypeOf\"](/b/);\nproto[`exec`] = require(`node:child_process`).exec;\n"
+        "/a/.exec(command);\n"
+    ),
+    "prototype-of-a-regexp-handed-to-a-helper": (
+        "const cp = require(`node:child_process`);\nconst proto = (value) => Object.getPrototypeOf(value);\n"
+        "proto(/b/)[[`ex`, `ec`].join(``)] = cp.exec;\n/a/.exec(command);\n"
+    ),
+    "prototype-of-a-regexp-in-a-table": (
+        "const cp = require(`node:child_process`);\nconst rules = { pattern: /b/ };\n"
+        "const proto = Object.getPrototypeOf(rules.pattern);\nObject.assign(proto, { [`ex` + `ec`]: cp.exec });\n"
+        "/a/.exec(command);\n"
+    ),
+    "literal-hiding-a-rebinding-after-a-function-expression": (
+        "const f = function () {}\n/ (RegExp = require(`node:child_process`)) /g;\n"
+        "RegExp(`x`).exec(command);\n"
+    ),
 }
 
 
@@ -171,6 +288,20 @@ HOSTILE = {
 def test_r109_g610_command_execution_stays_reported(tmp_path, profile, case) -> None:
     _plugin(tmp_path / "provider", PROVIDER_SOURCE + HOSTILE[case])
     assert "SRC-EXEC" in _high(tmp_path / "provider", profile), case
+
+
+@pytest.mark.parametrize("profile", PROFILES)
+def test_r109_g610_a_prototype_taken_in_one_file_and_a_pattern_escaping_in_another(tmp_path, profile) -> None:
+    """The plugin shares values between files, so the two halves are joined plugin-wide."""
+
+    root = tmp_path / "provider"
+    _plugin(root, PROVIDER_SOURCE + "/a/.exec(command);\n")
+    (root / "reflect.js").write_text(
+        "export const proto = (value) => Object.getPrototypeOf(value);\n", encoding="utf-8",
+    )
+    assert _high(root, profile) == set()
+    (root / "table.js").write_text("export const rules = { pattern: /b/ };\n", encoding="utf-8")
+    assert "SRC-EXEC" in _high(root, profile)
 
 
 @pytest.mark.parametrize("profile", PROFILES)
@@ -213,6 +344,25 @@ def test_r109_g610_typescript_uses_of_the_regexp_type_are_not_findings(tmp_path,
         encoding="utf-8",
     )
     assert "SRC-EXEC" in _high(root, profile)
+
+
+@pytest.mark.parametrize("profile", PROFILES)
+def test_r109_g610_typescript_aliases_of_the_regexp_name_are_not_types(tmp_path, profile) -> None:
+    """A ternary branch and an import alias read like a type position; neither may hide a rebinding."""
+
+    root = tmp_path / "provider"
+    root.mkdir()
+    (root / "package.json").write_text(json.dumps({
+        "name": "ordinary-plugin", "version": "1.0.0", "main": "index.ts",
+    }), encoding="utf-8")
+    cases = (
+        "const cp = require(`node:child_process`);\nconst R = flag ? cp : RegExp;\n"
+        "Object.assign(R.prototype, { [`ex` + `ec`]: cp.exec });\n/a/.exec(command);\n",
+        "import { load as RegExp } from \"./hostile\";\nRegExp(`x`).exec(command);\n",
+    )
+    for source in cases:
+        (root / "index.ts").write_text(source, encoding="utf-8")
+        assert "SRC-EXEC" in _high(root, profile), source
 
 
 def _peer(tmp_path, destination) -> Path:
@@ -325,3 +475,41 @@ def test_r109_g610_secure_client_keeps_its_ordinary_scan(tmp_path) -> None:
     (linked / "node_modules" / "openclaw").symlink_to(protected, target_is_directory=True)
     (linked / "index.js").write_text("export const one = 1;\n", encoding="utf-8")
     assert "STRUCT-SYMLINK-ESCAPE" not in {f.rule_id for f in scan_plugin(str(linked), options).findings}
+
+
+@requires_symlink_privilege
+@pytest.mark.parametrize("profile", PROFILES)
+def test_r109_g610_a_protected_link_behind_an_ordinary_dependency_link_is_blocked(tmp_path, profile) -> None:
+    """The link audit follows an ordinary link to a folder; a protected link inside it is blocked."""
+
+    protected = tmp_path / "home" / ".ssh" / "secret"
+    protected.mkdir(parents=True)
+    ordinary = tmp_path / "ordinary-dependency"
+    ordinary.mkdir()
+    (ordinary / "index.js").write_text("module.exports = 1;\n", encoding="utf-8")
+    root = tmp_path / "provider"
+    _plugin(root, PROVIDER_SOURCE)
+    (root / "node_modules").mkdir()
+    (root / "node_modules" / "ordinary").symlink_to(ordinary, target_is_directory=True)
+    assert _high(root, profile) == set()
+
+    (ordinary / "nested").mkdir()
+    (ordinary / "nested" / "protected").symlink_to(protected, target_is_directory=True)
+    assert "STRUCT-SYMLINK-ESCAPE" in _high(root, profile)
+
+
+@requires_symlink_privilege
+@pytest.mark.parametrize("profile", PROFILES)
+def test_r109_g610_linked_dependency_folders_that_loop_are_walked_once(tmp_path, profile) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / "other").symlink_to(second, target_is_directory=True)
+    (second / "other").symlink_to(first, target_is_directory=True)
+    root = tmp_path / "provider"
+    _plugin(root, PROVIDER_SOURCE)
+    (root / "node_modules").mkdir()
+    (root / "node_modules" / "first").symlink_to(first, target_is_directory=True)
+    (root / "node_modules" / "self").symlink_to(root, target_is_directory=True)
+    assert _high(root, profile) == set()

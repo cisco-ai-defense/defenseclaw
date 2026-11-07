@@ -6,28 +6,48 @@
 ``exec(`` names two unrelated calls in JavaScript: ``child_process.exec`` runs
 a shell command, and ``RegExp.prototype.exec`` matches a pattern. The rule
 matches the word, so every package that matches text with ``/re/.exec(text)``
-was reported as running commands. A call is a pattern match only when its
-receiver is provably a regular expression in this file:
+was reported as running commands.
+
+Every judgement here is made on a *code view* of the source (``code_view``):
+comments are gone, string and template text is empty, and a regular expression
+literal is one marker. A word in a comment or in a string is therefore never a
+binding, a call or a mutation, and a comment between two tokens cannot hide a
+declaration. A few exact strings that name a property (``"exec"``,
+``"constructor"``, ``"prototype"`` and the reflection names) are kept so that a
+computed member (``obj["prototype"]``) is still seen.
+
+A call is a pattern match only when its receiver is provably a regular
+expression:
 
 * a regular expression literal, bare or in parentheses: ``/re/g.exec(t)``,
-  ``(/re/).exec(t)``;
+  ``(/re/).exec(t)``, ``(a, /re/).exec(t)``;
 * a construction: ``new RegExp(...)`` or ``RegExp(...)``;
-* a name whose single binding is one of those (``const NAME = /re/``, with or without a ``: RegExp`` type) and
-  whose every other use is the object of a property access (``NAME.exec(``,
-  ``NAME.lastIndex = 0``) or an argument of a logging call. A name that is
-  rebound, passed to any other function, returned, indexed or shadowed by a
-  parameter is not proven and keeps the finding.
+* a name whose single binding is one of those (``const NAME = /re/``, with or
+  without a ``: RegExp`` type) and whose every other use is the object of a
+  property access (``NAME.exec(``, ``NAME.lastIndex = 0``) or an argument of a
+  logging call. A name that is rebound, passed to any other function, returned,
+  indexed or shadowed is not proven and keeps the finding.
 
-Nothing is proven in a plugin that can change what a regular expression
-reaches. The guard reads every JavaScript and TypeScript file of the plugin,
-not the one with the call, and works from the routes that lead to the built-in
-object, not from spellings of the word ``exec``: the name ``RegExp`` may only be
-called, tested with ``instanceof`` or (in TypeScript) used as a type; a
-prototype is never read from an object, passed on, replaced or given a computed
-member; properties are never defined through reflection, proxies or the global
-object by computed name. A plugin that does any of this keeps the finding, as it
-did before this module. An unrelated string or key that happens to read
-'exec' does not change the proof.
+Nothing is proven in a plugin that can change what the built-in regular
+expression reaches. The guard reads every JavaScript and TypeScript file of the
+plugin and follows the routes *to* the built-in object, not spellings of one
+property:
+
+* the name ``RegExp`` may only be called (and never declared), tested with
+  ``instanceof`` or, in TypeScript, used as a type; quoted as an object key or
+  handed to a reflection call it is a route too;
+* ``exec`` is only ever called: reading, assigning, destructuring or indexing
+  it is not;
+* the global object is never indexed by a computed name, and a ``with``
+  statement can rebind any name;
+* taking a prototype (``getPrototypeOf``, ``__proto__``) or reading a
+  constructor in a plugin that names a prototype reaches the built-in only when
+  a regular expression can be handed to it, so it voids the proof when some file
+  lets a pattern escape (passes it to a call other than a string method that
+  only reads it, returns it, stores it). A bundler's ``defineProperty`` and
+  ``getPrototypeOf`` helpers over module objects are therefore not a finding.
+
+An unrelated string, comment or class prototype changes nothing.
 
 A bare ``exec(``, ``cp.exec(``, ``obj.pattern.exec(`` or any receiver this
 module cannot prove stays reported.
@@ -36,18 +56,201 @@ module cannot prove stays reported.
 from __future__ import annotations
 
 import re
+from typing import NamedTuple
 
-_LITERAL_RECEIVER = re.compile(
-    r"(?:^|[(,=:\[!&|?{};+\-*%<>~^]|\b(?:return|typeof|await|yield|case|void|in|of|else|do))"
-    r"\s*/(?![/*])(?:[^/\\\n\[]|\\.|\[(?:[^\]\\\n]|\\.)*\])+/[dgimsuvy]*$"
-)
-_REGEXP_CONSTRUCTION = re.compile(r"(?<![\w$.])(?:new\s+)?RegExp$")
+_REGEX_BODY = "\ue000"
+# A "/" after one of these characters starts a regular expression literal. "}",
+# ")" and "]" are left out: they can end an operand, and a literal wrongly read
+# as division only exposes its text to the guard (a false block), while the
+# reverse would hide code.
+_REGEX_AFTER = frozenset("(,=:[!&|?{;+-*%<>~^")
+_REGEX_AFTER_WORD = frozenset({
+    "return", "typeof", "await", "yield", "case", "void", "in", "of", "else", "do",
+    "delete", "instanceof", "new", "throw",
+})
+_EXPRESSION_KEYWORDS = frozenset({
+    "return", "typeof", "await", "yield", "case", "void", "in", "of", "delete", "instanceof", "new", "throw",
+})
+# Strings that name a property are kept in the code view.
+_KEPT_STRINGS = frozenset({"exec", "constructor", "prototype", "__proto__", "RegExp", "getPrototypeOf"})
+_SPECIAL = re.compile(r"[\"'`/{}]")
+_WORD_AT_END = re.compile(r"[A-Za-z_$][\w$]*$")
+_FLAGS = re.compile(r"[A-Za-z]*")
+
+
+def code_view(text: str) -> str:
+    """The source with comments, string text and literal bodies removed.
+
+    The view has the same number of lines as the source, so line ``n`` of the
+    view is line ``n`` of the file.
+    """
+
+    out: list[str] = []
+    tail = ""
+    length = len(text)
+    index = 0
+    templates: list[int] = []
+    braces: list[bool] = []
+    block_ended = False
+
+    def emit(piece: str) -> None:
+        nonlocal tail, block_ended
+        out.append(piece)
+        tail = (tail + piece)[-40:]
+        if piece.strip():
+            block_ended = False
+
+    def template_text(start: int) -> int:
+        """Skip template text from ``start``; return where code resumes."""
+
+        position = start
+        while position < length:
+            char = text[position]
+            if char == "\\":
+                position += 2
+            elif char == "`":
+                emit("\n" * text.count("\n", start, position) + "`")
+                return position + 1
+            elif char == "$" and text.startswith("{", position + 1):
+                emit("\n" * text.count("\n", start, position) + "${")
+                templates.append(0)
+                return position + 2
+            else:
+                position += 1
+        emit("\n" * text.count("\n", start, length))
+        return length
+
+    while index < length:
+        found = _SPECIAL.search(text, index)
+        if found is None:
+            emit(text[index:])
+            break
+        at = found.start()
+        if at > index:
+            emit(text[index:at])
+        char = text[at]
+        index = at + 1
+        if char == "{":
+            if templates:
+                templates[-1] += 1
+            braces.append(_opens_object(tail))
+            emit("{")
+        elif char == "}":
+            if templates and templates[-1] == 0:
+                templates.pop()
+                emit("}")
+                index = template_text(index)
+            else:
+                if templates:
+                    templates[-1] -= 1
+                literal = braces.pop() if braces else False
+                emit("}")
+                block_ended = not literal
+        elif char == "`":
+            emit("`")
+            index = template_text(index)
+        elif char in "\"'":
+            end, closed = _string_end(text, at)
+            body = text[at + 1:end - 1] if closed else text[at + 1:end]
+            emit(char + (body if body in _KEPT_STRINGS else "") + "\n" * body.count("\n") + char)
+            index = end
+        elif text.startswith("//", at):
+            newline = text.find("\n", at)
+            index = length if newline < 0 else newline
+            emit(" ")
+        elif text.startswith("/*", at):
+            close = text.find("*/", at + 2)
+            end = length if close < 0 else close + 2
+            emit(" " + "\n" * text.count("\n", at, end))
+            index = end
+        else:
+            end = _regex_end(text, at) if block_ended or _regex_allowed(tail) else None
+            if end is None:
+                emit("/")
+            else:
+                flags = _FLAGS.match(text, end + 1)
+                index = flags.end()
+                # After the end of a block the slash is a literal only if that
+                # block was a statement; the text stays visible in case it was not.
+                exposed = text[at + 1:end] if block_ended else ""
+                emit(f"{exposed}/{_REGEX_BODY}/{flags.group()}")
+    return "".join(out)
+
+
+def _opens_object(tail: str) -> bool:
+    """A "{" after this text opens an object literal, not a block."""
+
+    significant = tail.rstrip()
+    if not significant or significant.endswith("=>"):
+        return False
+    if significant[-1] in "(,=[?:!&|+-*%<>~^.":
+        return True
+    word = _WORD_AT_END.search(significant)
+    return word is not None and word.group() in _EXPRESSION_KEYWORDS
+
+
+def _regex_allowed(tail: str) -> bool:
+    significant = tail.rstrip()
+    if not significant:
+        return True
+    last = significant[-1]
+    if last in "+-":
+        return significant[-2:-1] != last
+    if last in _REGEX_AFTER:
+        return True
+    word = _WORD_AT_END.search(significant)
+    return word is not None and word.group() in _REGEX_AFTER_WORD
+
+
+def _string_end(text: str, start: int) -> tuple[int, bool]:
+    """Index after the closing quote, and whether there was one."""
+
+    quote = text[start]
+    position = start + 1
+    while position < len(text):
+        char = text[position]
+        if char == "\\":
+            position += 2
+        elif char == quote:
+            return position + 1, True
+        elif char == "\n":
+            return position, False
+        else:
+            position += 1
+    return len(text), False
+
+
+def _regex_end(text: str, start: int) -> int | None:
+    """Index of the closing slash of a literal that starts at ``start``."""
+
+    position = start + 1
+    in_class = False
+    while position < len(text):
+        char = text[position]
+        if char == "\n":
+            return None
+        if char == "\\":
+            position += 2
+            continue
+        if in_class:
+            in_class = char != "]"
+        elif char == "[":
+            in_class = True
+        elif char == "/":
+            return position
+        position += 1
+    return None
+
+
+_LITERAL = re.compile(rf"/{_REGEX_BODY}/[A-Za-z]*")
+_LITERAL_AT_END = re.compile(rf"/{_REGEX_BODY}/[A-Za-z]*$")
+_CONSTRUCTION = re.compile(r"(?:new\s+)?RegExp")
+_REGEXP_CONSTRUCTION_AT_END = re.compile(r"(?<![\w$.])(?:new\s+)?RegExp$")
 # A parenthesis after one of these groups an expression; after anything else
 # that ends a value it is a call, whose result is not proven.
 _GROUPING_KEYWORD = re.compile(r"\b(?:return|typeof|await|yield|case|void|in|of|else|do)$")
 _BINDING = re.compile(
-    r"(?<![\w$.])(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*RegExp\s*)?="
-    r"\s*(?:/(?![/*])|(?:new\s+)?RegExp\s*\()"
+    rf"(?<![\w$.])(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*RegExp\s*)?=\s*(?:/{_REGEX_BODY}/[A-Za-z]*|(?P<call>(?:new\s+)?RegExp\s*)(?=\())"
 )
 _EXEC_CALL = re.compile(r"\bexec\s*\(")
 _NAME_AT_END = re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)$")
@@ -55,54 +258,189 @@ _LOG_CALL_BEFORE = re.compile(
     r"(?<![\w$])(?:console|[\w$]*[Ll]og(?:ger)?)\s*\.\s*"
     r"(?:log|debug|info|warn|error|trace|dir|verbose|silly)\s*\([^()]*$"
 )
+_NOT_AFTER_INITIALIZER = frozenset(".([?+-*/%&|^<>=!`")
 _QUOTE = r"[\x27\"`]"
-# Anything that can change what a regular expression call reaches.
-_EXEC_CHANGED = re.compile(
-    r"\b(?:defineProperty|defineProperties|setPrototypeOf|getPrototypeOf|__proto__"
-    r"|__defineGetter__|__defineSetter__|Proxy)\b"
-    r"|\bReflect\s*\.\s*(?:set|defineProperty|setPrototypeOf)\b"
-    r"|\.\s*exec\s*=(?!=)"
-    rf"|\[\s*{_QUOTE}exec{_QUOTE}\s*\]\s*=(?!=)"
-    r"|\bprototype\s*\["
-    r"|\bprototype\b\s*(?:[,;)\]}>]|=(?!=)|$)"
-    r"|\bconstructor\b[^;\n]*\bprototype\b"
-    r"|\b(?:globalThis|global|window)\s*\["
-    r"|\b(?:function|class)\s+RegExp\b|\b(?:const|let|var)\s+RegExp\b",
-    re.MULTILINE,
+_NOT_QUOTED = r"(?<![\w$\x27\"`])"
+# Anything that can change what the built-in regular expression is or does.
+_CHANGES_THE_BUILTIN = re.compile(
+    # exec is only ever called; reading, assigning or destructuring it is not.
+    r"\.\s*exec\b(?!\s*(?:\(|\?\.\())"
+    rf"|\[\s*{_QUOTE}(?:exec|RegExp){_QUOTE}\s*\]"
+    # the name RegExp as a quoted object key or method name, or handed to a
+    # reflection call (defineProperty(global, "RegExp", ...), __defineGetter__("RegExp", ...))
+    rf"|(?:[{{,*]|\b(?:async|get|set|static))\s*{_QUOTE}RegExp{_QUOTE}\s*[:(]"
+    rf"|\(\s*{_QUOTE}RegExp{_QUOTE}\s*,|,\s*{_QUOTE}RegExp{_QUOTE}\s*,"
+    rf"|\b(?:globalThis|global|window)\s*,\s*{_QUOTE}RegExp{_QUOTE}"
+    # the global object indexed by anything but a plain string
+    rf"|\b(?:globalThis|global|window)\s*(?:\?\.\s*)?\[(?!\s*{_QUOTE}\s*{_QUOTE}\s*\])"
+    # a with statement can rebind any name
+    r"|(?<![\w$.])with\s*\(",
 )
-_REGEXP_NAME = re.compile(r"(?<![\w$])RegExp(?![\w$])")
+# Ways to take the prototype of a value: harmless unless a regular expression
+# can be handed to them (see _regex_escapes).
+_PROTOTYPE_OF = re.compile(
+    rf"{_NOT_QUOTED}getPrototypeOf\b|\[\s*{_QUOTE}(?:getPrototypeOf|__proto__){_QUOTE}\s*\]"
+    rf"|{_NOT_QUOTED}__proto__\b(?!\s*:\s*null\b)"
+)
+_CONSTRUCTOR_READ = re.compile(
+    r"\.\s*constructor\b(?!\s*\.\s*name\b)"
+    rf"|\[\s*{_QUOTE}constructor{_QUOTE}\s*\]"
+    r"|(?<![\w$.\x27\"`])constructor\s*[:,}]"
+)
+_PROTOTYPE_NAMED = re.compile(r"\bprototype\b")
+_REGEXP_NAME = re.compile(r"(?<![\w$\x27\"`])RegExp(?![\w$])")
+_REGEXP_VALUE = re.compile(
+    rf"/{_REGEX_BODY}/[A-Za-z]*|(?<![\w$.])(?:new\s+)?RegExp\s*\("
+)
+# Calls that read a regular expression they are given and keep nothing of it.
+_PATTERN_CONSUMER = re.compile(r"\.\s*(?:replace|replaceAll|match|matchAll|split|search|test)\s*$")
 _TYPESCRIPT = (".ts", ".tsx", ".cts", ".mts")
-_LITERAL_WINDOW = 2000
+_WINDOW = 4000
 
 
-def regexp_may_be_changed(path: str, lines: list[str]) -> bool:
-    """True when the file can change what a regular expression call reaches.
+class FileFacts(NamedTuple):
+    """What one file does that matters to the pattern-match proof."""
 
-    Judged over every file of the plugin before any call is proven, so a
-    change made by one file voids the proof in all of them.
+    changes: bool
+    reaches_prototype: bool
+    names_the_type: bool
+    names_a_prototype: bool
+    view: str
+
+
+def file_facts(path: str, view: str) -> FileFacts:
+    """Judge one file's ``code_view``; see ``regexp_may_be_changed`` for the plugin."""
+
+    typescript = path.casefold().endswith(_TYPESCRIPT)
+    uses = [
+        _regexp_name_use(view, name.start(), name.end(), typescript)
+        for name in _REGEXP_NAME.finditer(view)
+    ]
+    changes = _CHANGES_THE_BUILTIN.search(view) is not None or None in uses
+    reaches = _PROTOTYPE_OF.search(view) is not None or (
+        _CONSTRUCTOR_READ.search(view) is not None and _PROTOTYPE_NAMED.search(view) is not None
+    )
+    typed = "type" in uses
+    return FileFacts(changes, reaches, typed, _PROTOTYPE_NAMED.search(view) is not None, view)
+
+
+def regexp_may_be_changed(facts: list[FileFacts]) -> bool:
+    """True when the plugin can change what a regular expression call reaches.
+
+    Judged over every file of the plugin before any call is proven, so a change
+    made by one file voids the proof in all of them. Taking a prototype or a
+    constructor changes nothing by itself: it matters only when a regular
+    expression can reach it, so it voids the proof when some file lets one
+    escape (and, in the file that takes it, the escape need not be in the same
+    file: the plugin shares values between its files).
     """
 
-    text = "\n".join(lines)
-    if _EXEC_CHANGED.search(text) is not None:
+    if any(fact.changes for fact in facts):
         return True
-    typescript = path.casefold().endswith(_TYPESCRIPT)
-    for line in lines:
-        for name in _REGEXP_NAME.finditer(line):
-            if not _regexp_name_is_plain(line[:name.start()].rstrip(), line[name.end():].lstrip(), typescript):
+    # A TypeScript type position and a ternary branch read the same: in a plugin
+    # that also names a prototype, a mention of the type may be a value.
+    if any(fact.names_the_type for fact in facts) and any(fact.names_a_prototype for fact in facts):
+        return True
+    return any(fact.reaches_prototype for fact in facts) and any(_regex_escapes(fact.view) for fact in facts)
+
+
+def _regex_escapes(view: str) -> bool:
+    """A regular expression is handed to code the proof cannot see.
+
+    A literal or construction is contained when it is the object of a member
+    access (other than ``constructor`` or ``__proto__``), the pattern argument
+    of a string method that only reads it, or the single initializer of a name
+    whose every use is a property access or a log argument. Anything else (an
+    argument of another call, a returned or stored value, a name that is
+    passed on) lets it reach any helper in the plugin.
+    """
+
+    receivers = RegexpReceivers(view)
+    names = receivers.contained_names()
+    for found in _REGEXP_VALUE.finditer(view):
+        end = found.end()
+        if found.group().endswith("("):
+            close = _closing_parenthesis(view, end - 1)
+            if close is None:
                 return True
+            end = close + 1
+        else:
+            end = found.end()
+        before = view[max(0, found.start() - 80):found.start()].rstrip()
+        after = view[end:end + 40].lstrip()
+        member = re.match(r"\??\.\s*([A-Za-z_$][\w$]*)", after)
+        if member is not None and member.group(1) not in ("constructor", "__proto__"):
+            continue
+        opener = before[:-1].rstrip() if before.endswith("(") else None
+        if opener is not None:
+            grouping = not re.search(r"[\w$)\]]$", opener) or _GROUPING_KEYWORD.search(opener) is not None
+            if grouping and re.match(r"\)\s*\??\.\s*(?!constructor\b|__proto__\b)[A-Za-z_$]", after):
+                continue
+            if _PATTERN_CONSUMER.search(opener) and after.startswith((",", ")")):
+                continue
+        initializer = re.search(r"(?<![\w$.])(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*RegExp\s*)?=$", before)
+        if initializer is not None and initializer.group(1) in names:
+            continue
+        return True
     return False
 
 
-def _regexp_name_is_plain(before: str, after: str, typescript: bool) -> bool:
-    """The name is called, tested with instanceof, or (TypeScript) a type."""
+def _regexp_name_use(view: str, start: int, end: int, typescript: bool) -> str | None:
+    """How the name is used: "value" (called, not declared; tested with
+    instanceof), "type" (TypeScript type position) or None (anything else)."""
 
-    if after.startswith("("):
-        return not re.search(r"\b(?:function|class)\s*\*?$", before)
+    before = view[max(0, start - 80):start].rstrip()
+    after = end
+    while after < len(view) and view[after].isspace():
+        after += 1
+    if view.startswith("(", after):
+        if re.search(r"\b(?:function|class)\s*\*?$", before):
+            return None
+        close = _closing_parenthesis(view, after)
+        if close is None:
+            return None
+        following = close + 1
+        while following < len(view) and view[following].isspace():
+            following += 1
+        # RegExp(...) { is a method declaration; RegExp(...): T { is a typed one.
+        if view.startswith("{", following) or (typescript and view.startswith(":", following)):
+            return None
+        return "value"
     if re.search(r"(?<![\w$.])instanceof$", before):
-        return True
-    if not typescript:
-        return False
-    return before.endswith((":", "<", "|", "&")) or (before.endswith(",") and after.startswith(">"))
+        return "value"
+    if typescript and (
+        before.endswith((":", "<", "|", "&")) or (before.endswith(",") and view.startswith(">", after))
+    ):
+        return "type"
+    return None
+
+
+def _closing_parenthesis(text: str, opening: int) -> int | None:
+    depth = 0
+    for position in range(opening, min(len(text), opening + _WINDOW)):
+        char = text[position]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return position
+    return None
+
+
+def _opening_parenthesis(text: str, closing: int) -> int | None:
+    """Index of the parenthesis that the ")" at ``closing`` closes."""
+
+    depth = 0
+    for position in range(closing, max(-1, closing - _WINDOW), -1):
+        char = text[position]
+        if char == ")":
+            depth += 1
+        elif char == "(":
+            depth -= 1
+            if depth == 0:
+                return position
+    return None
 
 
 class RegexpReceivers:
@@ -112,20 +450,24 @@ class RegexpReceivers:
     ``regexp_may_be_changed``.
     """
 
-    def __init__(self, lines: list[str]) -> None:
-        self._text = "\n".join(lines)
+    def __init__(self, view: str) -> None:
+        self._view = view
+        self._starts = [0]
+        self._starts.extend(match.end() for match in re.finditer("\n", view))
         self._names: frozenset[str] | None = None
 
-    def only_pattern_matches(self, line: str) -> bool:
+    def only_pattern_matches(self, line_index: int) -> bool:
         """True when every ``exec(`` call on the line is a RegExp match."""
 
-        calls = list(_EXEC_CALL.finditer(line))
-        if not calls:
+        if line_index >= len(self._starts):
             return False
-        return all(self._is_pattern_match(line, call.start()) for call in calls)
+        begin = self._starts[line_index]
+        finish = self._starts[line_index + 1] if line_index + 1 < len(self._starts) else len(self._view)
+        calls = list(_EXEC_CALL.finditer(self._view, begin, finish))
+        return bool(calls) and all(self._is_pattern_match(call.start()) for call in calls)
 
-    def _is_pattern_match(self, line: str, start: int) -> bool:
-        receiver = line[:start].rstrip()
+    def _is_pattern_match(self, start: int) -> bool:
+        receiver = self._view[max(0, start - _WINDOW):start].rstrip()
         if not receiver.endswith("."):
             return False
         receiver = receiver[:-1].rstrip()
@@ -134,68 +476,115 @@ class RegexpReceivers:
         return self._is_regexp(receiver)
 
     def _is_regexp(self, receiver: str) -> bool:
-        if _LITERAL_RECEIVER.search(receiver[-_LITERAL_WINDOW:]):
+        """The last operand of ``receiver`` (it ends right before ``.exec``) is a regular expression."""
+
+        if _LITERAL_AT_END.search(receiver):
             return True
         if receiver.endswith(")"):
-            opening = _opening_of_last_parenthesis(receiver)
+            opening = _opening_parenthesis(receiver, len(receiver) - 1)
             if opening is None:
                 return False
             head = receiver[:opening].rstrip()
-            if _REGEXP_CONSTRUCTION.search(head):
+            if _REGEXP_CONSTRUCTION_AT_END.search(head):
                 return True
             if re.search(r"[\w$)\]]$", head) and not _GROUPING_KEYWORD.search(head):
                 return False
-            return self._is_regexp(receiver[opening + 1:-1].strip())
+            return self._is_whole(receiver[opening + 1:-1])
         name = _NAME_AT_END.search(receiver)
-        return name is not None and name.group(1) in self._regexp_names()
+        return name is not None and name.group(1) in self.regexp_names()
 
-    def _regexp_names(self) -> frozenset[str]:
+    def _is_whole(self, expression: str) -> bool:
+        """The value of the whole expression is a regular expression."""
+
+        expression = expression.strip()
+        comma = _last_top_level_comma(expression)
+        if comma is not None:
+            return self._is_whole(expression[comma + 1:])
+        if _LITERAL.fullmatch(expression):
+            return True
+        if expression.endswith(")"):
+            opening = _opening_parenthesis(expression, len(expression) - 1)
+            if opening is None:
+                return False
+            head = expression[:opening].strip()
+            if _CONSTRUCTION.fullmatch(head):
+                return True
+            return head == "" and self._is_whole(expression[opening + 1:-1])
+        return re.fullmatch(r"[A-Za-z_$][\w$]*", expression) is not None and expression in self.regexp_names()
+
+    def contained_names(self) -> frozenset[str]:
+        """Names bound to a regular expression that is only read, never passed on."""
+
+        return frozenset(
+            binding.group(1) for binding in _BINDING.finditer(self._view)
+            if _initializer_ends(self._view, binding) and _used_only_as_object(self._view, binding, consumers=True)
+        )
+
+    def regexp_names(self) -> frozenset[str]:
         if self._names is None:
             self._names = frozenset(
-                binding.group(1) for binding in _BINDING.finditer(self._text)
-                if _used_only_as_object(self._text, binding)
+                binding.group(1) for binding in _BINDING.finditer(self._view)
+                if _initializer_ends(self._view, binding) and _used_only_as_object(self._view, binding)
             )
         return self._names
 
 
-def _opening_of_last_parenthesis(text: str) -> int | None:
-    """Index of the parenthesis that the final ")" of the text closes."""
-
-    stack: list[int] = []
-    quote = ""
-    index = 0
-    while index < len(text):
-        char = text[index]
-        if quote:
-            if char == "\\":
-                index += 1
-            elif char == quote:
-                quote = ""
-        elif char in "\x27\"`":
-            quote = char
-        elif char == "(":
-            stack.append(index)
-        elif char == ")":
-            if not stack:
-                return None
-            opening = stack.pop()
-            if index == len(text) - 1:
-                return opening
-        index += 1
-    return None
+def _last_top_level_comma(expression: str) -> int | None:
+    depth = 0
+    found = None
+    for position, char in enumerate(expression):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            found = position
+    return found
 
 
-def _used_only_as_object(text: str, binding: re.Match[str]) -> bool:
-    """Every other use of the bound name is a property access or a log argument."""
+def _initializer_ends(view: str, binding: re.Match[str]) -> bool:
+    """The initializer is exactly the literal or construction (no ``|| other``, no member)."""
+
+    position = binding.end()
+    if binding.group("call") is not None:
+        close = _closing_parenthesis(view, position)
+        if close is None:
+            return False
+        position = close + 1
+    while position < len(view) and view[position] in " \t\r":
+        position += 1
+    if position >= len(view) or view[position] in ";,})":
+        return True
+    if view[position] != "\n":
+        return False
+    while position < len(view) and view[position].isspace():
+        position += 1
+    return position >= len(view) or view[position] not in _NOT_AFTER_INITIALIZER
+
+
+def _used_only_as_object(view: str, binding: re.Match[str], consumers: bool = False) -> bool:
+    """Every other use of the bound name is a property access or a log argument.
+
+    With ``consumers`` the pattern argument of a string method that only reads
+    it (``text.replace(NAME, ...)``) is a use too.
+    """
 
     name = re.escape(binding.group(1))
-    for use in re.finditer(rf"(?<![\w$.]){name}(?![\w$])", text):
+    for use in re.finditer(rf"(?<![\w$.]){name}(?![\w$])", view):
         if use.start() == binding.start(1):
             continue
-        if re.match(r"\s*\??\.", text[use.end():use.end() + 8]):
+        if re.match(r"\s*\??\.(?!\s*(?:constructor|__proto__)\b)", view[use.end():use.end() + 24]):
             continue
-        line_start = text.rfind("\n", 0, use.start()) + 1
-        if _LOG_CALL_BEFORE.search(text[line_start:use.start()]):
+        line_start = view.rfind("\n", 0, use.start()) + 1
+        if _LOG_CALL_BEFORE.search(view[line_start:use.start()]):
+            continue
+        opener = view[max(0, use.start() - 80):use.start()].rstrip()
+        if (
+            consumers
+            and opener.endswith("(")
+            and _PATTERN_CONSUMER.search(opener[:-1].rstrip())
+            and view[use.end():use.end() + 8].lstrip().startswith((",", ")"))
+        ):
             continue
         return False
     return True
