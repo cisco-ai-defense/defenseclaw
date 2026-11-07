@@ -8,7 +8,6 @@ package cli
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -153,7 +152,7 @@ func testGAP0689ActiveWorkerWriteKeepsItsRepairPass(t *testing.T, name string, r
 	if err := os.WriteFile(token, []byte("changed\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	want := fmt.Sprintf("reconcile reason=fsnotify status=ok targets=1 pending=0 failures=0 repairs=1")
+	want := "reconcile reason=fsnotify status=ok targets=1 pending=0 failures=0 repairs=1"
 	pathTag := "repair_path=" + strconv.Quote(token)
 	deadline := time.After(5 * time.Second)
 	poll := time.NewTicker(10 * time.Millisecond)

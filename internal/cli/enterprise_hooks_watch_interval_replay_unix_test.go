@@ -8,7 +8,6 @@ package cli
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -111,7 +110,8 @@ func testGAP0689IntervalConcurrentWriteReplaysFsnotify(t *testing.T, name string
 			return response, nil
 		}
 		call := applies.Add(1)
-		if call == 2 {
+		switch call {
+		case 2:
 			close(tamperReady)
 			if err := <-tamperErr; err != nil {
 				return response, err
@@ -122,7 +122,7 @@ func testGAP0689IntervalConcurrentWriteReplaysFsnotify(t *testing.T, name string
 				return response, errors.New("watch did not observe the worker's write")
 			}
 			time.Sleep(150 * time.Millisecond)
-		} else if call == 3 {
+		case 3:
 			if err := os.WriteFile(token, []byte(issued), 0o600); err != nil {
 				return response, err
 			}
@@ -165,7 +165,7 @@ func testGAP0689IntervalConcurrentWriteReplaysFsnotify(t *testing.T, name string
 	if intervalTick != nil {
 		intervalTick <- time.Now()
 	}
-	want := fmt.Sprintf("reconcile reason=fsnotify status=ok targets=1 pending=0 failures=0 repairs=1")
+	want := "reconcile reason=fsnotify status=ok targets=1 pending=0 failures=0 repairs=1"
 	pathTag := "repair_path=" + strconv.Quote(token)
 	deadline := time.After(5 * time.Second)
 	poll := time.NewTicker(10 * time.Millisecond)
