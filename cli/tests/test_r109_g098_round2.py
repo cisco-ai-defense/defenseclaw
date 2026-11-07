@@ -124,20 +124,21 @@ def test_a_0_8_install_without_hooks_in_the_settings_does_not_stop_init(tmp_path
 
 
 @pytest.mark.parametrize(
-    ("remove_data", "remove_binaries", "preserve", "expected"),
+    ("stop_gateway", "remove_data", "remove_binaries", "preserve", "expected"),
     [
-        (False, True, (), 1),  # kept data, binaries removed: the claim is stale
-        (True, True, (), 1),
-        (True, False, (), 1),
-        (False, False, (), 0),  # connector-only: the gateway may still run
-        (True, False, ("config.yaml",), 0),
+        (True, False, False, (), 1),  # the default uninstall: gateway stopped, data and programs kept
+        (False, False, True, (), 1),
+        (False, True, False, (), 1),
+        (False, False, False, (), 0),  # nothing stopped or removed: the gateway may still run
+        (False, True, False, ("config.yaml",), 0),
     ],
 )
-def test_uninstall_drops_this_accounts_port_claims(remove_data, remove_binaries, preserve, expected) -> None:
+def test_uninstall_drops_this_accounts_port_claims(stop_gateway, remove_data, remove_binaries, preserve, expected) -> None:
     plan = cmd_uninstall.UninstallPlan(
         platform_name="win32",
         data_dir=r"C:\Users\u\.defenseclaw",
         install_root=r"C:\Users\u\.local\bin",
+        stop_gateway=stop_gateway,
         remove_data_dir=remove_data,
         remove_binaries=remove_binaries,
         preserve_data_entries=preserve,

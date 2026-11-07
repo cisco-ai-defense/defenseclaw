@@ -1266,7 +1266,7 @@ On Windows, `uninstall` also removes a DefenseClaw Setup 0.8.x install that the 
 
 If part of that removal stays, `uninstall` exits 1 and prints one next step for each reason: close the program that holds a file, ask an administrator to remove what your account cannot, or sign in as the account that owns the folder. The step names the path.
 
-On Windows, `uninstall` also removes this account's `defenseclaw-api-port-<port>` file in `C:\ProgramData`, which the gateway leaves so that init on another account does not take its port. A run that keeps the data folder removes it too, once it removes the programs.
+On Windows, `uninstall` also removes this account's `defenseclaw-api-port-<port>` file in `C:\ProgramData`, which the gateway leaves so that init on another account does not take its port. The default run, which stops the gateway and keeps the data folder, removes it too; the next gateway start claims its port again.
 
 `uninstall` and `reset` cannot remove the Claude Cowork plugin that `defenseclaw setup cowork` adds to your Claude account, and they say so when one was built. In Claude Desktop, open **Customize > Plugins**, then the **...** menu on DefenseClaw, and choose **Remove**. Until you remove the plugin, Cowork tool calls are blocked. `uninstall --dry-run` lists the step. See [Remove the Cowork plugin](/docs/connectors/cowork#remove).
 

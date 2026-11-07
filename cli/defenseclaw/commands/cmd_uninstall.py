@@ -2796,11 +2796,12 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
             run_phase("launcher removal", lambda: _remove_data_bound_launchers(plan))
     if plan.remove_data_dir and not plan.preserve_data_entries:
         _remove_empty_plugin_cache()
-    if (plan.remove_data_dir and not plan.preserve_data_entries) or plan.remove_binaries:
+    if plan.stop_gateway or plan.remove_binaries or (plan.remove_data_dir and not plan.preserve_data_entries):
         # The gateway start leaves this account's API-port claim where every
-        # account's init reads it (%ProgramData% on Windows, /var/tmp), so it
-        # stays when the data is kept; with the gateway gone it is stale
-        # (cowork-1-0-8 GAP-0102).
+        # account's init reads it (%ProgramData% on Windows, /var/tmp). The
+        # default uninstall stops the gateway and keeps the data, so the claim
+        # stayed; with the gateway stopped it is stale, and the next gateway
+        # start claims its port again (cowork-1-0-8 GAP-0102).
         remove_own_api_port_claims()
     if plan.remove_binaries and not deferred:
         run_phase("binary removal", lambda: _remove_binaries(plan))
