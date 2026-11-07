@@ -1387,13 +1387,33 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		// are read again, so the reading is the last step before the answer.
 		_ = resp.Body.Close()
 	}
-	if hookpaths.PatchTargetsChanged(opts.requestFacts.evidence()) {
+	patchWatch := hookpaths.NewPatchTargetWatch(opts.requestFacts.evidence())
+	if patchWatch.Changed() {
 		// The gateway judged the patch targets the hook read before the
 		// request; one leads elsewhere now. Behind ProtectHome only this hook
 		// can read it again (GAP-0488, GAP-0073).
 		return failResponse(opts, sp, "closed", "a patch target changed after DefenseClaw reviewed it")
 	}
 	code := sp.decide(opts, body)
+	if code == 0 && patchWatch != nil && gatewayAllowed(body) {
+		// The allow is written to the agent by the answer watchdog after this
+		// returns, or already is; the agent reads it only when this hook
+		// exits. Read the targets once more after the write and revoke the
+		// allow (a failure exit and a block answer) when one changed.
+		revoke := func(stdout, stderr io.Writer) (int, bool) {
+			if !patchWatch.Changed() {
+				return 0, false
+			}
+			revoked := opts
+			revoked.answerWatch, revoked.Stdout, revoked.Stderr = nil, stdout, stderr
+			return failResponse(revoked, sp, "closed", "a patch target changed while DefenseClaw answered"), true
+		}
+		if opts.answerWatch != nil {
+			opts.answerWatch.setRevoke(revoke)
+		} else if revoked, ok := revoke(opts.Stdout, opts.Stderr); ok {
+			code = revoked
+		}
+	}
 	if opts.oversizedReview && validUniqueGatewayResponse(body) {
 		var verdict struct {
 			Action string `json:"action"`
@@ -1439,6 +1459,14 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		*requestHandedOff = true
 	}
 	return code
+}
+
+// gatewayAllowed reports a gateway answer whose action lets the call run.
+func gatewayAllowed(body []byte) bool {
+	var verdict struct {
+		Action string `json:"action"`
+	}
+	return json.Unmarshal(body, &verdict) == nil && (verdict.Action == "allow" || verdict.Action == "alert")
 }
 
 // failAfterErrorStatus fails a call the gateway answered with the error
