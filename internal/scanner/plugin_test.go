@@ -215,21 +215,33 @@ func resolvePluginCLI() (binary string, strict bool) {
 // and is never reported through this error.
 var errPluginCLIAbsent = errors.New("plugin CLI is not installed")
 
-// pathHoldsANonExecutable reports whether a bare command name matches a
-// regular file in a PATH directory. exec.LookPath returns ErrNotFound both for
-// a name with no such file and for a file without the execute permission, so
-// only after a lookup failure does a file by that name mean "present and
-// broken" rather than "not installed". Windows resolves a bare name through
-// PATHEXT, where a file without an executable extension is not a candidate.
+// pathHoldsANonExecutable reports whether a bare command name matches an
+// entry on PATH that exec.LookPath passed over. LookPath returns ErrNotFound
+// both for a name with no entry and for an entry it cannot use (no execute
+// permission, a symlink that cannot be resolved), so only after a lookup
+// failure does an entry by that name mean "present and broken" rather than
+// "not installed". It searches the way LookPath does: an empty PATH element
+// is the current directory. The one entry that still counts as absent is a
+// symlink whose target is gone, which is what a removed install leaves behind.
+// Windows resolves a bare name through PATHEXT, where a file without an
+// executable extension is not a candidate.
 func pathHoldsANonExecutable(name string) bool {
 	if runtime.GOOS == "windows" || strings.ContainsRune(name, '/') {
 		return false
 	}
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 		if dir == "" {
+			dir = "."
+		}
+		path := filepath.Join(dir, name)
+		if _, err := os.Lstat(path); err != nil {
 			continue
 		}
-		if info, err := os.Stat(filepath.Join(dir, name)); err == nil && !info.IsDir() {
+		info, err := os.Stat(path)
+		if err == nil && !info.IsDir() {
+			return true
+		}
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return true
 		}
 	}
@@ -414,6 +426,28 @@ func TestGatePluginCLIChoosesTheBareNameThroughPATH(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, true, true},
+		{"a symlink that loops back to itself fails", func(dir string) {
+			if err := os.Symlink(filepath.Join(dir, name), filepath.Join(dir, name+"-loop")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(filepath.Join(dir, name+"-loop"), filepath.Join(dir, name)); err != nil {
+				t.Fatal(err)
+			}
+		}, false, true},
+		{"a symlink that loops back to itself fails", func(dir string) {
+			if err := os.Symlink(filepath.Join(dir, name), filepath.Join(dir, name)); err != nil {
+				t.Fatal(err)
+			}
+		}, false, true},
+		{"a file without the execute bit in the current directory, named by an empty PATH element, fails", func(dir string) {
+			write(dir, name, "#!/bin/sh\nexit 0\n", 0o644)
+			t.Chdir(dir)
+			t.Setenv("PATH", string(os.PathListSeparator)+t.TempDir())
+		}, false, true},
+		{"an empty PATH element with no such file in the current directory skips", func(dir string) {
+			t.Chdir(dir)
+			t.Setenv("PATH", string(os.PathListSeparator)+t.TempDir())
+		}, true, true},
 		{"an executable file runs", func(dir string) { write(dir, name, "#!/bin/sh\nexit 0\n", 0o755) }, false, false},
 		{"an executable file later on PATH wins over an earlier non-executable one", func(dir string) {
 			first := filepath.Join(dir, "first")
@@ -466,7 +500,21 @@ func TestPluginScannerIntegrationDecidesAPathInstallByWhetherItIsPresent(t *test
 	if err != nil || !strings.Contains(output, "--- SKIP") || strings.Contains(output, "--- FAIL") {
 		t.Fatalf("no defenseclaw on PATH must skip the integration test, err=%v:\n%s", err, output)
 	}
+	// An empty PATH element names the current directory, which LookPath
+	// searches like any other entry.
+	here := t.TempDir()
+	if err := os.WriteFile(filepath.Join(here, "defenseclaw"), []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestPluginScanner_Integration$", "-test.v")
+	cmd.Dir = here
+	cmd.Env = []string{"PATH=" + string(os.PathListSeparator) + t.TempDir(), "HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir()}
+	combined, err := cmd.CombinedOutput()
+	if err == nil || strings.Contains(string(combined), "--- SKIP") || !strings.Contains(string(combined), "--- FAIL") {
+		t.Fatalf("a defenseclaw without the execute bit in the directory an empty PATH element names must fail the integration test, err=%v:\n%s", err, combined)
+	}
 }
+
 func TestResolvePluginCLIKeepsExplicitChoicesStrict(t *testing.T) {
 	t.Setenv("DEFENSECLAW_BIN", "/explicit/defenseclaw")
 	if binary, strict := resolvePluginCLI(); binary != "/explicit/defenseclaw" || !strict {
