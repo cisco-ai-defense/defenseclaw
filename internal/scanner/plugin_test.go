@@ -18,6 +18,7 @@ package scanner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -198,15 +199,83 @@ func resolvePluginCLI() (binary string, strict bool) {
 	return "defenseclaw", false
 }
 
-// pluginCLIStarts reports whether the CLI can start at all (interpreter and
-// entry point resolve), without scanning anything.
-func pluginCLIStarts(binary string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+// errPluginCLINotLaunchable marks a CLI the operating system could not run at
+// all: the file or its interpreter is missing, or a shell launcher reported
+// the POSIX "cannot execute" (126) or "not found" (127) status. Only this
+// outcome means "not installed". A CLI that ran and then failed or hung is a
+// real defect and is never reported through this error.
+var errPluginCLINotLaunchable = errors.New("plugin CLI cannot be launched")
+
+// pluginCLIStarts runs the CLI with --help (no scan). It returns an error
+// wrapping errPluginCLINotLaunchable when the CLI cannot be launched, a plain
+// error when it launched but exited nonzero or did not finish in time, and
+// nil when it answered.
+func pluginCLIStarts(binary string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	if output, err := exec.CommandContext(ctx, binary, "--help").CombinedOutput(); err != nil {
-		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+	output, err := exec.CommandContext(ctx, binary, "--help").CombinedOutput()
+	if err == nil {
+		return nil
 	}
-	return nil
+	detail := strings.TrimSpace(string(output))
+	if ctx.Err() != nil {
+		return fmt.Errorf("plugin CLI %s did not answer --help within %s: %w: %s", binary, timeout, err, detail)
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		if code := exit.ExitCode(); code == 126 || code == 127 {
+			return fmt.Errorf("%w: exit %d: %s", errPluginCLINotLaunchable, code, detail)
+		}
+		return fmt.Errorf("plugin CLI %s exited %d from --help: %s", binary, exit.ExitCode(), detail)
+	}
+	return fmt.Errorf("%w: %v", errPluginCLINotLaunchable, err)
+}
+
+// gatePluginCLI decides what the integration test does with the CLI it
+// picked. A CLI chosen on purpose (DEFENSECLAW_BIN or the repo .venv) must
+// start: a broken one is a real failure. A CLI found only on PATH can be a
+// stale install on a shared box (its interpreter removed with the tree it was
+// built from); only that, "cannot be launched", means skip. A PATH CLI that
+// launched and then failed or hung is still a failure.
+func gatePluginCLI(binary string, strict bool, timeout time.Duration) (skip bool, err error) {
+	err = pluginCLIStarts(binary, timeout)
+	return err != nil && !strict && errors.Is(err, errPluginCLINotLaunchable), err
+}
+
+func TestGatePluginCLISkipsOnlyAnAbsentPathInstall(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell shims are a Unix install shape")
+	}
+	dir := t.TempDir()
+	script := func(name, body string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	absent := filepath.Join(dir, "missing")
+	broken := script("broken", "#!/bin/sh\nexit 23\n")
+	working := script("working", "#!/bin/sh\nexit 0\n")
+	for _, tc := range []struct {
+		name     string
+		binary   string
+		strict   bool
+		wantSkip bool
+		wantErr  bool
+	}{
+		{"path install that is absent skips", absent, false, true, true},
+		{"path install that exits nonzero fails", broken, false, false, true},
+		{"explicit install that is absent fails", absent, true, false, true},
+		{"explicit install that exits nonzero fails", broken, true, false, true},
+		{"working path install runs", working, false, false, false},
+		{"working explicit install runs", working, true, false, false},
+	} {
+		skip, err := gatePluginCLI(tc.binary, tc.strict, time.Minute)
+		if skip != tc.wantSkip || (err != nil) != tc.wantErr {
+			t.Errorf("%s: skip=%v err=%v, want skip=%v err=%v", tc.name, skip, err, tc.wantSkip, tc.wantErr)
+		}
+	}
 }
 
 func TestPluginCLIStartsRejectsAStaleInstallAndAcceptsAWorkingOne(t *testing.T) {
@@ -214,18 +283,34 @@ func TestPluginCLIStartsRejectsAStaleInstallAndAcceptsAWorkingOne(t *testing.T) 
 		t.Skip("shebang shims are a Unix install shape")
 	}
 	dir := t.TempDir()
-	stale := filepath.Join(dir, "stale")
-	if err := os.WriteFile(stale, []byte("#!"+filepath.Join(dir, "removed-venv", "bin", "python")+"\nprint(1)\n"), 0o755); err != nil {
-		t.Fatal(err)
+	script := func(name, body string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
 	}
-	if err := pluginCLIStarts(stale); err == nil {
-		t.Fatal("a shim whose interpreter was removed must not count as an installed CLI")
+	stale := script("stale", "#!"+filepath.Join(dir, "removed-venv", "bin", "python")+"\nprint(1)\n")
+	if err := pluginCLIStarts(stale, time.Minute); !errors.Is(err, errPluginCLINotLaunchable) {
+		t.Fatalf("a shim whose interpreter was removed must count as not installed, got %v", err)
 	}
-	working := filepath.Join(dir, "working")
-	if err := os.WriteFile(working, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
+	launcher := script("launcher", "#!/bin/sh\nexit 127\n")
+	if err := pluginCLIStarts(launcher, time.Minute); !errors.Is(err, errPluginCLINotLaunchable) {
+		t.Fatalf("a launcher reporting command-not-found must count as not installed, got %v", err)
 	}
-	if err := pluginCLIStarts(working); err != nil {
+	if err := pluginCLIStarts(filepath.Join(dir, "missing"), time.Minute); !errors.Is(err, errPluginCLINotLaunchable) {
+		t.Fatalf("a missing file must count as not installed, got %v", err)
+	}
+	broken := script("broken", "#!/bin/sh\necho boom >&2\nexit 23\n")
+	if err := pluginCLIStarts(broken, time.Minute); err == nil || errors.Is(err, errPluginCLINotLaunchable) {
+		t.Fatalf("a CLI that starts and exits nonzero is broken, not absent, got %v", err)
+	}
+	hung := script("hung", "#!/bin/sh\nexec sleep 30\n")
+	if err := pluginCLIStarts(hung, 200*time.Millisecond); err == nil || errors.Is(err, errPluginCLINotLaunchable) {
+		t.Fatalf("a CLI that does not answer in time is broken, not absent, got %v", err)
+	}
+	working := script("working", "#!/bin/sh\nexit 0\n")
+	if err := pluginCLIStarts(working, time.Minute); err != nil {
 		t.Fatalf("a CLI that starts must pass: %v", err)
 	}
 }
@@ -246,15 +331,11 @@ func TestPluginScanner_Integration(t *testing.T) {
 			t.Skipf("skipping: %s not found: %v", binary, err)
 		}
 	}
-	// A CLI that was chosen on purpose (DEFENSECLAW_BIN or the repo .venv)
-	// must start: a broken one is a real failure. A CLI found only on PATH
-	// can be a stale install on a shared box (its interpreter removed with
-	// the tree it was built from); that is "not installed", not a regression.
-	if err := pluginCLIStarts(binary); err != nil {
-		if strict {
-			t.Fatalf("plugin scanner CLI %s does not start: %v", binary, err)
+	if skip, err := gatePluginCLI(binary, strict, 2*time.Minute); err != nil {
+		if skip {
+			t.Skipf("skipping: defenseclaw on PATH (%s) is not installed: %v", binary, err)
 		}
-		t.Skipf("skipping: defenseclaw on PATH (%s) does not start: %v", binary, err)
+		t.Fatalf("plugin scanner CLI %s does not start: %v", binary, err)
 	}
 
 	// The target CLI is v8-only and its scan occurrence must enter the
