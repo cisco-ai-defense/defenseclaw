@@ -98,6 +98,16 @@ interface TransportHolder {
   legacy: boolean;
   /** Older build: true once the copy that holds the transport has put it back. */
   restored?: () => boolean;
+  /**
+   * Older build that was already holding the transport when this module
+   * loaded: the transport it will put back is unknown, so `restored` can only
+   * see that the global fetch changed, which another component can also do.
+   * A release of such a holder is an inference, and the copy that takes over
+   * checks its patch again whenever an older copy reports a stop.
+   */
+  inferred?: boolean;
+  /** Takeover from an inferred release: patch again if an older copy removed the patch. */
+  recheck?: () => void;
   warned?: boolean;
 }
 
@@ -115,6 +125,8 @@ interface InterceptorSharedState {
    * plugin reload never leaves the transport unguarded (GAP-0745).
    */
   waiting: Array<() => void>;
+  /** Set while the hand-over from an inferred older-build release runs. */
+  provisionalTakeover?: boolean;
 }
 
 /** Give the transport to the next instance waiting for it, if any. */
@@ -142,7 +154,7 @@ function adoptSharedMarks(state: InterceptorSharedState): void {
   if (Object.getOwnPropertyDescriptor(state, "installed")?.get) return; // already adopted
   const guardedFetch = globalThis.fetch;
   state.owner = state.installed
-    ? { legacy: true, restored: () => globalThis.fetch !== guardedFetch }
+    ? { legacy: true, inferred: true, restored: () => globalThis.fetch !== guardedFetch }
     : null;
   let port = state.guardrailPort ?? null;
   Object.defineProperty(state, "installed", {
@@ -158,10 +170,22 @@ function adoptSharedMarks(state: InterceptorSharedState): void {
         }
         return;
       }
+      if (holder && !holder.legacy) {
+        // A stop of an older copy while a current copy holds the transport:
+        // no release. The older copy that really held it may have just put
+        // the old transport back over the new patch; the holder checks.
+        holder.recheck?.();
+        return;
+      }
       if (!holder?.legacy || !holder.restored?.()) return;
       state.owner = null;
       port = null;
-      handOverTransport();
+      state.provisionalTakeover = holder.inferred === true;
+      try {
+        handOverTransport();
+      } finally {
+        state.provisionalTakeover = false;
+      }
     },
   });
   Object.defineProperty(state, "guardrailPort", {
@@ -1444,6 +1468,7 @@ export function createFetchInterceptor(
     interceptorOpts.getCorrelationHeaders ?? emptyCorrelationHeaders;
   const proxyBase = `http://127.0.0.1:${guardrailPort}`;
   let originalFetch: typeof globalThis.fetch | null = null;
+  let transportIntact: (() => boolean) | null = null;
   let originalHttpsRequest: typeof https.request | null = null;
   let originalHttpRequest: typeof http.request | null = null;
   let originalHttpGet: typeof http.get | null = null;
@@ -1640,6 +1665,7 @@ export function createFetchInterceptor(
       return;
     }
     _shared.owner = ownerMark;
+    if (_shared.provisionalTakeover) ownerMark.recheck = recheckTransport;
     _shared.guardrailPort = guardrailPort;
 
     // The wrappers below call these captured natives, not the mutable
@@ -1841,6 +1867,7 @@ export function createFetchInterceptor(
 
       return response;
     };
+    const guardedFetch = globalThis.fetch;
 
     // Also patch https.request so axios and other HTTP clients that
     // delegate to node:https are intercepted. Note: undici-based clients
@@ -2224,6 +2251,7 @@ export function createFetchInterceptor(
     // swap, or calls undici.request()/fetch() directly, traffic
     // bypasses our globalThis.fetch patch. Intercepting at the
     // dispatcher level catches ALL undici-routed traffic.
+    let guardedDispatcher: unknown = null;
     if (
       undici &&
       typeof undici.getGlobalDispatcher === "function" &&
@@ -2243,6 +2271,7 @@ export function createFetchInterceptor(
         dispatch: { value: interceptingDispatch, writable: true, configurable: true },
       });
       undici.setGlobalDispatcher(proxyDispatcher);
+      guardedDispatcher = proxyDispatcher;
     }
 
     // The host application's own undici copy: its requests carry an explicit
@@ -2262,6 +2291,15 @@ export function createFetchInterceptor(
         );
       };
     }
+
+    const guardedHostDispatch = hostUndici ? hostUndici.base.dispatch : null;
+    transportIntact = () =>
+      globalThis.fetch === guardedFetch &&
+      https.request === (patchedHttpsRequest as typeof https.request) &&
+      http.request === (patchedHttpRequest as typeof http.request) &&
+      http.get === (patchedHttpGet as typeof http.get) &&
+      (guardedDispatcher === null || undici?.getGlobalDispatcher() === guardedDispatcher) &&
+      (guardedHostDispatch === null || hostUndici?.base.dispatch === guardedHostDispatch);
 
     logInfo(
       `[defenseclaw] LLM fetch interceptor active (proxy: ${proxyBase})`,
@@ -2428,7 +2466,35 @@ export function createFetchInterceptor(
     }
   }
 
+  /**
+   * An older plugin copy reported a stop while this copy holds the transport.
+   * If that copy was the one that really held it, its stop put the old
+   * transport back over this copy's patch: patch again on top of what is
+   * there now, in the same call, so no model call goes out unguarded. If the
+   * patch is intact, nothing happens (GAP-0745).
+   */
+  function recheckTransport(): void {
+    if (!originalFetch || !transportIntact || transportIntact()) return;
+    console.warn(
+      "[defenseclaw] An older DefenseClaw plugin copy removed the LLM transport patch when it stopped; " +
+        "this copy is patching again.",
+    );
+    originalFetch = null;
+    originalHttpsRequest = null;
+    originalHttpRequest = null;
+    originalHttpGet = null;
+    originalUndiciDispatcher = null;
+    hostUndici = null;
+    originalHostDispatch = null;
+    egressReporter?.stop();
+    egressReporter = null;
+    transportIntact = null;
+    _shared.owner = null;
+    start();
+  }
+
   function stop(): void {
+    transportIntact = null;
     if (originalFetch) {
       globalThis.fetch = originalFetch;
       originalFetch = null;
