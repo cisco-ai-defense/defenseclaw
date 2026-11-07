@@ -19,11 +19,11 @@ import (
 func resetOpenClawBlockNotices(t *testing.T) {
 	t.Helper()
 	openClawBlockNotices.mu.Lock()
-	openClawBlockNotices.entries = nil
+	openClawBlockNotices.entries, openClawBlockNotices.seen = nil, nil
 	openClawBlockNotices.mu.Unlock()
 	t.Cleanup(func() {
 		openClawBlockNotices.mu.Lock()
-		openClawBlockNotices.entries = nil
+		openClawBlockNotices.entries, openClawBlockNotices.seen = nil, nil
 		openClawBlockNotices.mu.Unlock()
 	})
 }

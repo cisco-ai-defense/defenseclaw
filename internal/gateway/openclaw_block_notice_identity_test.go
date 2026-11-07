@@ -98,26 +98,30 @@ func TestGAP0644ResultIDMustEqualTheRecordedID(t *testing.T) {
 // request sends back the call id alone. That equivalence holds for a
 // function_call_output item only.
 func TestGAP0644ResponsesResultIDIsTheCallPartOfTheRecordedID(t *testing.T) {
-	responses := func(id string) string {
-		return `{"input":[{"type":"function_call_output","call_id":"` + id + `","output":"blocked"}]}`
+	// The request carries the function_call item of the call (item id, if any)
+	// and a function_call_output whose call_id is sent.
+	responses := func(id, item string) string {
+		return responsesBody("function_call_output", id, [2]string{id, item})
 	}
 	for _, tc := range []struct {
-		recorded, sent string
-		want           bool
+		recorded, sent, item string
+		want                 bool
 	}{
-		{"call_abc|fc_123", "call_abc", true},
-		{"call_abc|fc_123", "call_abc|fc_123", true},
-		{"call_abc", "call_abc", true},
-		{"call_abc|fc_1", "call_abd", false},
-		{"call_abc|fc_1", "fc_1", false},
-		{"call_abc|fc_1", "call_ab", false},
-		{"|fc_1", "", false},
+		{"call_abc|fc_123", "call_abc", "fc_123", true},  // the call part, tied to the item of its own request
+		{"call_abc|fc_123", "call_abc", "fc_999", false}, // a sibling item of the same call part
+		{"call_abc|fc_123", "call_abc", "", false},       // no item to tie it to
+		{"call_abc|fc_123", "call_abc|fc_123", "", true}, // the full id sent back
+		{"call_abc", "call_abc", "fc_1", true},
+		{"call_abc|fc_1", "call_abd", "fc_1", false},
+		{"call_abc|fc_1", "fc_1", "fc_1", false},
+		{"call_abc|fc_1", "call_ab", "fc_1", false},
+		{"|fc_1", "", "", false},
 	} {
 		resetOpenClawBlockNotices(t)
 		rememberOpenClawBlockNotice("exec", tc.recorded, "", []string{noticeTestRule}, "r")
-		out, _ := serveNoticeWith(t, noticeServe{reqBody: responses(tc.sent), ctype: noticeJSONType, respBody: noticeChatReply})
+		out, _ := serveNoticeWith(t, noticeServe{reqBody: responses(tc.sent, tc.item), ctype: noticeJSONType, respBody: noticeChatReply})
 		if noticeServed(out) != tc.want || openClawBlockNoticesPending() == tc.want {
-			t.Errorf("recorded %q, responses call_id %q: served=%v pending=%v, want served=%v", tc.recorded, tc.sent, noticeServed(out), openClawBlockNoticesPending(), tc.want)
+			t.Errorf("recorded %q, responses call_id %q item %q: served=%v pending=%v, want served=%v", tc.recorded, tc.sent, tc.item, noticeServed(out), openClawBlockNoticesPending(), tc.want)
 		}
 	}
 }
