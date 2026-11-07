@@ -43,7 +43,7 @@ func projectPOSIXNonRootUIDZeroAccountWrites(
 	}
 	target, targetOK := object["path"].(string)
 	content, contentOK := object["content"].(string)
-	if !targetOK || !contentOK || target != posixPasswdPath ||
+	if !targetOK || !contentOK || EtcSpelling(target) != posixPasswdPath ||
 		content == "" || len(content) > maxCommandBytes ||
 		strings.ContainsAny(content, "\x00\r") ||
 		containsUnresolvedPasswdTemplate(content) ||

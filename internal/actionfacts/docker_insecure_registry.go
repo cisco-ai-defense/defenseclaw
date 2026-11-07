@@ -30,7 +30,7 @@ func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
 	}
 
 	target, content, ok := exactDockerDaemonFullWrite(input)
-	return ok && target == dockerDaemonConfigPath &&
+	return ok && EtcSpelling(target) == dockerDaemonConfigPath &&
 		exactDockerInsecureRegistryDocument(content)
 }
 
@@ -47,9 +47,9 @@ func exactDockerDaemonWriteFacts(facts Facts) bool {
 	}
 	path := facts.OperandPaths()[0]
 	return path.CommandID == command.ID && path.Access == PathAccessWrite &&
-		path.Flavor == PathFlavorPOSIX && path.Value == dockerDaemonConfigPath &&
-		path.Normalized == dockerDaemonConfigPath && path.Absolute &&
-		path.Resolved == dockerDaemonConfigPath
+		path.Flavor == PathFlavorPOSIX && EtcSpelling(path.Value) == dockerDaemonConfigPath &&
+		EtcSpelling(path.Normalized) == dockerDaemonConfigPath && path.Absolute &&
+		EtcSpelling(path.Resolved) == dockerDaemonConfigPath
 }
 
 // exactDockerDaemonFullWrite owns only the full-document write contracts that
@@ -83,7 +83,7 @@ func exactDockerDaemonFullWrite(input Input) (string, string, bool) {
 	}
 	target, targetOK := object[pathKey].(string)
 	content, contentOK := object["content"].(string)
-	if !targetOK || !contentOK || target != dockerDaemonConfigPath ||
+	if !targetOK || !contentOK || EtcSpelling(target) != dockerDaemonConfigPath ||
 		content == "" || len(content) > maxCommandBytes ||
 		!utf8.ValidString(content) || strings.ContainsRune(content, 0) {
 		return "", "", false
