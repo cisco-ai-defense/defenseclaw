@@ -8066,6 +8066,13 @@ def load(
     cfg._source_config_version = source_config_version
     cfg._loaded_generation = _generation_of_loaded_text(cfg_file, loaded_text)
     _apply_secure_client_hook_fail_default(cfg, raw)
+    # A relative guardrail.custom_packs path is read against the directory of the
+    # config file as loaded; hold that absolute base so a later chdir, or a copy
+    # of this config, never moves the pack (Go GuardrailConfig customPackBase).
+    try:
+        object.__setattr__(cfg.guardrail, "_custom_pack_base", os.path.dirname(os.path.abspath(cfg_file)))
+    except (AttributeError, TypeError):  # a test double without attributes
+        pass
     _mark_openclaw_not_installed(cfg)
     _migrate_llm_fields(cfg)
     _warn_plaintext_secrets(cfg)
