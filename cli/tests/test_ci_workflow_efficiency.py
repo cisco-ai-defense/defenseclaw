@@ -242,10 +242,6 @@ def _pull_request_jobs():
 # self-hosted runner) keep the longer budget of their live sessions.
 LIVE_ONLY_JOBS = {
     ("connector-live-e2e.yml", "live-matrix"),
-    ("connector-live-e2e.yml", "windows-live"),
-    ("connector-live-e2e.yml", "windows-copilot-live"),
-    ("connector-live-e2e.yml", "windows-antigravity-live"),
-    ("connector-live-e2e.yml", "windows-antigravity-held-state"),
 }
 
 

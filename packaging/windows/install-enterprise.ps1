@@ -4606,8 +4606,8 @@ try {
             throw ("DefenseClaw enterprise installer rejected its module before import: " +
                 "could not read the installed deployment metadata $($script:DefenseClawBootstrapUnreadableRecord), " +
                 'which holds the digest this deployment admits its installed module by; nothing was changed. ' +
-                'Run Setup /repair to rebuild it: the installed release''s DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1, ' +
-                'as LocalSystem or from an elevated prompt')
+                'Run Setup /repair to rebuild it: the installed release''s Setup, & ''.\DefenseClawSetup-Enterprise-Standalone-x64.exe'' /repair JSON=1, ' +
+                'as LocalSystem or from an elevated PowerShell prompt (Setup is not installed on this computer: use the copy in your MDM package or the release download)')
         }
         throw "DefenseClaw enterprise installer rejected its module before import: $rejection"
     }
@@ -4717,6 +4717,20 @@ try {
                     -MemberType NoteProperty `
                     -Name mdm_rotation_journal_kept `
                     -Value $journalKept `
+                    -Force
+        }
+    }
+    # The folders DefenseClaw created that a purge kept, with why, so the
+    # Setup and CLI JSON name them, not only the lifecycle log (GAP-0091).
+    if ($Action -eq 'Uninstall' -and $null -ne $result -and
+        $null -ne (Microsoft.PowerShell.Core\Get-Command -Name 'DefenseClawEnterprise\Get-DefenseClawCreatedFoldersKept' -ErrorAction SilentlyContinue)) {
+        $foldersKept = [string[]]@(DefenseClawEnterprise\Get-DefenseClawCreatedFoldersKept)
+        if ($foldersKept.Count -gt 0) {
+            $result |
+                Microsoft.PowerShell.Utility\Add-Member `
+                    -MemberType NoteProperty `
+                    -Name created_folders_kept `
+                    -Value $foldersKept `
                     -Force
         }
     }

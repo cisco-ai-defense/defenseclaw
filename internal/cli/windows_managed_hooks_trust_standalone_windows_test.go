@@ -42,7 +42,7 @@ func TestWindowsManagedHooksTrustStandaloneDrift(t *testing.T) {
 		grantUntrustedWriterForTest(t, path)
 	}
 	if err := validateWindowsManagedHooksTrustedFile(journal, managed.ObjectAdminFile, "lifecycle journal"); err == nil ||
-		!strings.Contains(err.Error(), "Setup /ensure") {
+		!strings.Contains(err.Error(), `.\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure`) {
 		t.Fatalf("drifted lifecycle journal = %v, want the strict refusal and the Setup step", err)
 	}
 	if err := validateWindowsManagedHooksTeardownJournalFile(teardown); err == nil {

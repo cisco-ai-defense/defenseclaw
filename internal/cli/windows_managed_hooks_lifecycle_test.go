@@ -32,6 +32,26 @@ func TestWindowsManagedHooksActivationBindingNamesInvalidField(t *testing.T) {
 		t.Fatalf("valid inactive binding: %v", err)
 	}
 	valid.State = "activated"
+	// The standalone profile has no Setup on the computer: the installed CLI's
+	// command is named (cowork-1-0-8 GAP-0095); Secure Client keeps its text.
+	t.Run("standalone names the installed CLI", func(t *testing.T) {
+		previous := windowsManagedHooksStandaloneProcess
+		t.Cleanup(func() { windowsManagedHooksStandaloneProcess = previous })
+		windowsManagedHooksStandaloneProcess = func() bool { return true }
+		changed := valid
+		changed.SchemaVersion = 0
+		err := validateWindowsManagedHooksLifecycleActivationBinding(&changed, 2)
+		if err == nil || !strings.Contains(err.Error(), "run "+windowsEnterpriseAdminCommand("repair")+" from an elevated PowerShell prompt") ||
+			strings.Contains(err.Error(), "Setup /repair") {
+			t.Fatalf("standalone: %v", err)
+		}
+		changed = valid
+		changed.TargetCount = 1
+		err = validateWindowsManagedHooksLifecycleActivationBinding(&changed, 2)
+		if err == nil || !strings.Contains(err.Error(), "run "+windowsEnterpriseAdminCommand("ensure")+" from an elevated PowerShell prompt again to reconcile the target roster") {
+			t.Fatalf("standalone target count: %v", err)
+		}
+	})
 	for _, tc := range []struct {
 		name, field, step string
 		change            func(*windowsManagedHooksActivationRecord)

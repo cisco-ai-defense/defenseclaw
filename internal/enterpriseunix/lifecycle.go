@@ -551,7 +551,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 	// directory; only an uninstall that leaves it empty removes it (see
 	// removeLockWithLastState), and acquireLock lets no waiter run on the
 	// removed file.
-	if err := env.ensureDir(env.P(env.Layout.LifecycleDir), 0o700, rootOwner()); err != nil {
+	if err := env.ensureLifecycleDir(); err != nil {
 		r.AddError(codeState, err.Error())
 		l.reportNoSpace(err)
 		return 0
@@ -931,7 +931,27 @@ func (l *lifecycle) removeLockWithLastState(record *Deployment) {
 	env := l.env
 	dir := env.P(env.Layout.LifecycleDir)
 	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 1 || entries[0].Name() != lockFileName || !entries[0].Type().IsRegular() {
+	if err != nil {
+		return
+	}
+	// The lock, and the list of shared parents created before any record
+	// (a run that never committed), are all that may be left.
+	var created []string
+	lockSeen := false
+	for _, entry := range entries {
+		switch {
+		case entry.Name() == lockFileName && entry.Type().IsRegular():
+			lockSeen = true
+		case entry.Name() == createdParentDirsName && entry.Type().IsRegular():
+			created = env.createdParentDirs()
+		default:
+			return
+		}
+	}
+	if !lockSeen {
+		return
+	}
+	if err := removeFile(env.P(env.createdParentDirsPath())); err != nil {
 		return
 	}
 	if err := os.Remove(filepath.Join(dir, lockFileName)); err != nil {
@@ -944,15 +964,16 @@ func (l *lifecycle) removeLockWithLastState(record *Deployment) {
 		return
 	}
 	_ = removeDirIfEmpty(env.P(env.Layout.InstallRoot))
+	// Only the parents the deployment recorded creating (/opt and /opt/cisco
+	// when absent, from the lifecycle or the package preinstall): one that
+	// existed before stays, empty or not (GAP-0091).
+	dirs := created
 	if record != nil {
-		dirs := append([]string(nil), record.CreatedDirs...)
-		sort.SliceStable(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
-		for _, created := range dirs {
-			_ = removeDirIfEmpty(env.P(created))
-		}
+		dirs = mergeUnique(dirs, record.CreatedDirs)
 	}
-	if env.GOOS == "darwin" {
-		_ = removeDirIfEmpty(env.P("/opt/cisco"))
+	sort.SliceStable(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
+	for _, dir := range dirs {
+		_ = removeDirIfEmpty(env.P(dir))
 	}
 }
 
@@ -2481,6 +2502,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 	newRecord.CreatedServiceAccount = newRecord.CreatedServiceAccount || account.Created
 	newRecord.CreatedDirs = mergeUnique(newRecord.CreatedDirs, createdDirs)
+	newRecord.CreatedDirs = mergeUnique(newRecord.CreatedDirs, env.createdParentDirs())
 	newRecord.CreatedDirs = slices.DeleteFunc(newRecord.CreatedDirs, func(dir string) bool { return slices.Contains(p.coworkRetiredDirs, dir) })
 	for _, file := range p.files {
 		newRecord.Files[file.Path] = file.SHA
@@ -2529,6 +2551,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if err := env.saveDeployment(newRecord); err != nil {
 		return failAndRollback(codeApply, err)
 	}
+	_ = removeFile(env.P(env.createdParentDirsPath()))
 	if l.bundle != nil {
 		// The commit point of the bundle: the gateway reported its policy
 		// above. A step below that fails does not undo it (finishBundle).
@@ -2567,6 +2590,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		if l.awaitGuardianReport(ctx, activationStarted) {
 			l.noteRepairedTargets(activationStarted)
 		}
+		// The enumerator restarted with the new install publishes its first
+		// record a few seconds later; the result below reads that record.
+		l.awaitInstallScan(ctx)
 	}
 	// The change succeeds only when the gateway runs it. A config.yaml
 	// replaced during the run is confirmed by its follow-up transaction, and
@@ -4224,10 +4250,6 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			if err := env.removeInstallRootKeepingLock(keep...); err != nil {
 				errs = append(errs, err)
 			}
-		}
-		if env.GOOS == "darwin" {
-			_ = removeDirIfEmpty(env.P("/opt/cisco"))
-			_ = removeDirIfEmpty(env.P("/Library/Logs/Cisco"))
 		}
 		if !l.opts.KeepServiceAccount {
 			// By now the services, the binaries (this CLI included) and the

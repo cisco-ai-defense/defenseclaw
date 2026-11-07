@@ -43,7 +43,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	gwconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // A config-only ensure used to run the whole upgrade transaction: it stops
@@ -68,7 +67,7 @@ const windowsEnterpriseHotConfigMaxBytes = 4 << 20
 var (
 	windowsEnterpriseHotConfigTimeout        = 30 * time.Second
 	windowsEnterpriseHotConfigRestartTimeout = 2 * time.Minute
-	windowsEnterpriseHotConfigLayout         = managed.StandaloneWindowsLayout
+	windowsEnterpriseHotConfigLayout         = windowsManagedStandaloneLayout
 	windowsEnterpriseHotConfigLock           = acquireWindowsEnterpriseLifecycleLock
 	windowsEnterpriseHotConfigValidate       = validateWindowsServiceConfig
 	windowsEnterpriseHotConfigPoll           = 2 * time.Second
@@ -210,7 +209,7 @@ func windowsBundleTakeOverPendingCommit(ctx context.Context, opts *windowsEnterp
 	if err != nil {
 		return false
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return false
 	}
@@ -309,7 +308,7 @@ func windowsEnterpriseHotConfigApply(
 	if config.NeedsMigrationV9(next) {
 		return unavailable("the staged config needs a config_version migration")
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return unavailable("cannot resolve the trusted enterprise roots: " + err.Error())
 	}
@@ -1588,7 +1587,7 @@ func installWindowsEnterpriseSuppliedConfigOverUnparseable(configPath string) (s
 	if err := windowsEnterpriseStandaloneConfigPreflight(supplied); err != nil {
 		return "", err
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return "", nil
 	}
@@ -1691,11 +1690,13 @@ var windowsEnterpriseLifecycleLockWait = 5 * time.Second
 
 // tryWindowsEnterpriseLifecycleLock opens lifecycle.lock with no sharing,
 // once: the error wraps windows.ERROR_SHARING_VIOLATION when another process
-// holds it, and fs.ErrNotExist when there is no lock file.
+// holds it, and fs.ErrNotExist when there is no lock file. A lock that is not
+// there says so as the base did ("is not a regular file"), and still wraps
+// the cause (GAP-0646 review L1, the port of 93d99c758d).
 func tryWindowsEnterpriseLifecycleLock(path string) (func(), error) {
 	info, err := os.Lstat(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("lifecycle lock %s is not a regular file: %w", path, err)
 	}
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("lifecycle lock %s is not a regular file", path)

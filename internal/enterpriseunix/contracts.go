@@ -32,7 +32,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
+
+var guardianFreshAccountRecordGone = unixidentity.AccountRecordGone
 
 // codeHookContractUnverified names a guardian target whose agent version
 // has no verified DefenseClaw hook contract. The guardian refuses to
@@ -113,7 +116,9 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 			continue
 		}
 		stateFailed[enterprisehooks.CredentialAttestationTarget{Connector: result.Connector, User: result.User, UserHome: result.UserHome}.Key()] = true
-		if (targetAccountMissingError(result.Error) || targetHomeUnavailableError(result.Error)) && l.accountAbsent(ctx, result.User) {
+		missingTarget := targetAccountMissingError(result.Error) || targetHomeUnavailableError(result.Error)
+		freshGone := missingTarget && guardianFreshAccountRecordGone(ctx, result.User)
+		if missingTarget && (freshGone || l.accountAbsent(ctx, result.User)) {
 			// An account that does not resolve, or whose home went with it, is
 			// not a protection failure.
 			// Say it is gone only when the enumerator confirmed it: a directory
@@ -122,7 +127,7 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 			// Even then it says the account does not resolve, not that it
 			// was deleted: while the directory is unreachable the lookup
 			// gives the same answer (GAP-0838).
-			if enterprisehooks.UnixMissConfirmed(enumeration, result.User, result.Connector) {
+			if freshGone || enterprisehooks.UnixMissConfirmed(enumeration, result.User, result.Connector) {
 				message := fmt.Sprintf("%s for user %s: the account does not resolve (the lookup answers \"no such account\"); "+
 					"if it was deleted, the enumerator removes this target after %d consecutive definitive misses, one per "+
 					"enumeration cycle; while the directory does not answer, nothing is removed",
@@ -413,6 +418,71 @@ func (l *lifecycle) reportInstallScanPending(age string) {
 	l.result.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
 }
 
+// installScanPendingReason says why the enumerator's unprotected-agents
+// record (data, last written at modTime) is not the current install's scan:
+// stale by age, or written by another install generation. A recent record
+// of the previous install is not this install's scan (GAP-1454): pending
+// until the current enumerator publishes.
+func installScanPendingReason(data []byte, modTime, now time.Time) (string, bool) {
+	if enterprisehooks.UnprotectedAgentsRecordStale(modTime, now) {
+		return enterprisehooks.UnprotectedAgentsRecordAge(modTime, now), true
+	}
+	if written := enterprisehooks.UnprotectedAgentsRecordGeneration(data); written != enterprisehooks.UnprotectedAgentsGeneration() {
+		return enterprisehooks.UnprotectedAgentsRecordFromEarlierInstall(written), true
+	}
+	return "", false
+}
+
+// installScanPending reports whether the record is missing or is not the
+// current install's scan, the two states the enumerator restarted by this
+// change resolves with its first cycle. A record that cannot be read is not
+// waited for: describeUnprotectedAgents reports it as it is.
+func (l *lifecycle) installScanPending() bool {
+	env := l.env
+	path := env.P(enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath))
+	data, err := readBounded(path, enterprisehooks.UnprotectedAgentsMaxBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	_, pending := installScanPendingReason(data, info.ModTime(), time.Now())
+	return pending
+}
+
+// awaitInstallScan waits, bounded by InstallScanTimeout, for the enumerator
+// this change restarted to publish its first record, so the result of an
+// upgrade reports the install scan of the new install, not the previous
+// one's. Without it an ensure that restarts the enumerator a moment before
+// its own verify read "NOT COVERED (scan pending)" from the record the
+// previous release wrote (GAP-0726: the Enterprise Upgrade Lane (pkg) step
+// "upgrade to 9.9.9" exited 0 with coverage_complete=false). The wait ends
+// at once when the record is already current, so a change that left the
+// enumerator running does not wait. A record still pending at the deadline
+// is reported by describeUnprotectedAgents with its remedy.
+func (l *lifecycle) awaitInstallScan(ctx context.Context) bool {
+	env := l.env
+	deadline := env.Now().Add(env.InstallScanTimeout)
+	for {
+		if !l.installScanPending() {
+			return true
+		}
+		if !env.Now().Before(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(env.PollInterval):
+		}
+	}
+}
+
 // describeUnprotectedAgents reports the agents the enumerator found
 // uncovered (its unprotected-agents record next to the
 // manifest) and marks the deployment security-incomplete. Each is one
@@ -457,12 +527,8 @@ func (l *lifecycle) describeUnprotectedAgents() {
 			r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
 		}
 		r.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
-	} else if now := time.Now(); enterprisehooks.UnprotectedAgentsRecordStale(info.ModTime(), now) {
-		l.reportInstallScanPending(enterprisehooks.UnprotectedAgentsRecordAge(info.ModTime(), now))
-	} else if written := enterprisehooks.UnprotectedAgentsRecordGeneration(data); written != enterprisehooks.UnprotectedAgentsGeneration() {
-		// A recent record of the previous install is not this install's
-		// scan (GAP-1454): pending until the current enumerator publishes.
-		l.reportInstallScanPending(enterprisehooks.UnprotectedAgentsRecordFromEarlierInstall(written))
+	} else if reason, pending := installScanPendingReason(data, info.ModTime(), time.Now()); pending {
+		l.reportInstallScanPending(reason)
 	}
 	// One machine-wide OpenCode V1 copy is one warning with the user count,
 	// not one per account (GAP-0071); every account still counts below.

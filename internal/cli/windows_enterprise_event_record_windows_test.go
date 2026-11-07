@@ -20,7 +20,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // A DefenseClaw Application-log event carries a record id that the
@@ -97,11 +96,12 @@ func TestWindowsEnterpriseEventCarriesARecordTheLifecycleLogHolds(t *testing.T) 
 	}
 }
 
-// windowsEnterpriseFootprintPresent reports a standalone install root on this
-// computer, which changes where a failed install's event goes.
+// windowsEnterpriseFootprintPresent reports a standalone install root where
+// the product looks for one (windowsManagedLayout, the run's sandbox), which
+// changes where a failed install's event goes.
 func windowsEnterpriseFootprintPresent(t *testing.T) bool {
 	t.Helper()
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		t.Fatal(err)
 	}

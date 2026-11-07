@@ -307,14 +307,15 @@ func VerifyAll(opts Options, connectors []string) (Result, error) {
 // policyExportCommand is the `enterprise policy export` whose output an
 // administrator deploys through a policy tool, in backticks. On Windows it is
 // the installed CLI as typed in an elevated PowerShell prompt: Setup puts no
-// DefenseClaw command on PATH (cowork-1-0-8 GAP-0076). Linux and macOS keep
-// the gateway command.
+// DefenseClaw command on PATH (cowork-1-0-8 GAP-0076). On Linux and macOS it
+// is the gateway by its absolute path: it is not on the PATH either
+// (cowork-1-0-8 GAP-0081).
 func policyExportCommand(goos string, args ...string) string {
 	export := append([]string{"enterprise", "policy", "export"}, args...)
 	if goos == "windows" {
 		return "`" + managed.WindowsAdminCommand(export...) + "` (from an elevated PowerShell prompt)"
 	}
-	return "`defenseclaw-gateway " + strings.Join(export, " ") + "`"
+	return "`" + managed.StandaloneGatewayPath(goos) + " " + strings.Join(export, " ") + "`"
 }
 
 // noteVerifyOnlyExport names the fix for a file DefenseClaw only checks

@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"os"
 	"path/filepath"
 	"strings"
@@ -311,8 +312,8 @@ func TestWindowsEnterpriseInstalledCLIEnsureConfigPointsAtSetup(t *testing.T) {
 	status := &windowsEnterpriseInstallerReport{OK: true, Installed: true, InstalledVersion: "1.0.921"}
 	opts := &windowsEnterpriseLifecycleOptions{resolvedProfile: "standalone", productVersion: "1.0.921", configPath: `C:\dc-test\cfg.yaml`}
 	_, err := planWindowsEnterpriseEnsure(status, opts, "")
-	if !errors.Is(err, errWindowsEnterpriseInvalidArguments) || !strings.Contains(err.Error(), "/ensure CONFIG=") ||
-		strings.Contains(err.Error(), "--gateway-binary") {
+	if !errors.Is(err, errWindowsEnterpriseInvalidArguments) || !strings.Contains(err.Error(), windowsEnterpriseSetupCommand("/ensure", "CONFIG=<absolute path of an administrator-only config>", "JSON=1")) ||
+		!strings.Contains(err.Error(), managed.WindowsSetupSource) || strings.Contains(err.Error(), "--gateway-binary") {
 		t.Fatalf("installed CLI ensure --config = %v", err)
 	}
 	opts.resolvedProfile = "secure_client"

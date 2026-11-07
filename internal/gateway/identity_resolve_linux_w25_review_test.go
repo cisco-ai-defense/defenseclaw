@@ -138,8 +138,17 @@ func TestResolveNSSPeerFactsUsesOnlyAvailableUnsharedUIDProof(t *testing.T) {
 			}
 		}
 		got := reviewPeerDecision(t, uid, fake.account.Name, facts, config.ProfileMatch{Users: []string{fake.account.Name}})
+		if got.Name != "watch" || got.Refused != "" || !slices.Equal(got.Unproven, []string{"account:unknown"}) {
+			t.Fatalf("default-tier users entry = %+v; want warned default", got)
+		}
+		subject := profileSubjectFromVerified(VerifiedSubject{UserID: strconv.Itoa(uid), IDKind: useridentity.KindPOSIXUID,
+			UserName: fake.account.Name, Directory: facts, Source: subjectSourcePeerCredentials}, true)
+		strict := identityTestSet(t, identityTestPlatforms[0], "watch",
+			config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Users: []string{fake.account.Name}}})
+		strict.base.Guardrail.RulePack = "strict"
+		got = strict.match(&subject, profileSubjectVerified, "codex", "")
 		if !slices.Equal(got.Unproven, []string{"account:unknown"}) || !strings.Contains(got.Refused, "account holder is unconfirmed") {
-			t.Fatalf("users entry = %+v; want only account:unknown", got)
+			t.Fatalf("strict-tier users entry = %+v; want only account:unknown", got)
 		}
 		if !slices.Contains(observedGroupDomains.list(), "corp.example") {
 			t.Fatalf("qualified process group domain was not observed: %v", observedGroupDomains.list())

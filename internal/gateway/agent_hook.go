@@ -3623,6 +3623,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			Connector:               req.ConnectorName,
 			CopilotSharedLocalFile:  copilotSharedLocalFileCall(ctx, req),
 			EnforcementCapable:      enforcementCapable,
+			StrictPolicy:            a.strictPolicyTierForHook(ctx, req.ConnectorName),
 			ManagedHookOverflowHold: managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
 			ResolvedWriteTargets:    resolvedWritesFromContext(ctx),
 			patchTarget:             hermesV4APatch,
@@ -3642,7 +3643,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	rawActionBeforeAssets := rawAction
 	caps := profile.Capabilities
 	effectiveMode := mode
-	if mode != "action" && a.provenActiveStateMutation(ctx, verdict) {
+	if mode != "action" && a.provenHookActionMustEnforce(ctx, verdict) {
 		effectiveMode = "action"
 	}
 	action, wouldBlock := mapHookActionForProfile(rawAction, effectiveMode, req.HookEventName, caps, profile, req.Payload)
@@ -4479,6 +4480,34 @@ func (a *APIServer) provenActiveStateMutation(ctx context.Context, verdict *Tool
 			(finding.proof.kind == findingProofActionFactsSemantic ||
 				finding.proof.kind == findingProofActionFactsSubgraph ||
 				finding.proof.kind == findingProofActiveStateMutation) {
+			return true
+		}
+	}
+	return false
+}
+
+// A holder-uncertain OSS fallback keeps ordinary work on the profile selected
+// by proven facts. It cannot turn a code-proven action finding into an
+// observe-only result while a possible account assignment would enforce it.
+func (a *APIServer) provenHookActionMustEnforce(ctx context.Context, verdict *ToolInspectVerdict) bool {
+	if a.provenActiveStateMutation(ctx, verdict) {
+		return true
+	}
+	resolved := resolvedGuardrailProfileFrom(ctx)
+	if resolved == nil || !resolved.decision.holderFallback || verdict == nil ||
+		normalizeCodexAction(verdict.Action) != "block" {
+		return false
+	}
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
+		return false
+	}
+	for _, finding := range verdict.DetailedFindings {
+		if !finding.contributesToEnforcement() || !finding.proof.authorizes(finding.RuleID) {
+			continue
+		}
+		switch finding.proof.kind {
+		case findingProofActionFactsSemantic, findingProofActionFactsSubgraph,
+			findingProofExactFallback, findingProofResolvedTarget, findingProofActiveStateMutation:
 			return true
 		}
 	}

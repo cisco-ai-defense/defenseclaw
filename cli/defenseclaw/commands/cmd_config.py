@@ -449,11 +449,24 @@ _ADMISSION_TYPES = ("skill", "mcp", "plugin")
 _TRUST_KEY = ["guardrail", "cisco_trust_level"]
 
 
+def _hook_fail_mode_connector(parts: list) -> str | None:
+    """The connector ("" for the global key) of a guardrail hook_fail_mode key, else None."""
+    if parts == ["guardrail", "hook_fail_mode"]:
+        return ""
+    if len(parts) == 4 and parts[:2] == ["guardrail", "connectors"] and parts[3] == "hook_fail_mode":
+        return parts[2]
+    return None
+
+
 def _resolves_when_unset(parts: list) -> bool:
     """Keys whose default is resolved (a rule pack level, the Cisco trust
-    level, the admission and update sections) rather than blank."""
-    return parts[0] in ("admission", "update") or parts == _TRUST_KEY or (
-        parts[0] == "guardrail" and parts[-1] in _LEVEL_KEYS
+    level, the hook fail mode, the admission and update sections) rather than
+    blank."""
+    return (
+        parts[0] in ("admission", "update")
+        or parts == _TRUST_KEY
+        or (parts[0] == "guardrail" and parts[-1] in _LEVEL_KEYS)
+        or _hook_fail_mode_connector(parts) is not None
     )
 
 
@@ -503,6 +516,12 @@ def _effective_value(app: AppContext, parts: list[str]) -> tuple[object, str] | 
         if which == "alert_at" and levels.alert_clamped:
             label += " (clamped to block_at)"
         return value, label
+    hook_connector = _hook_fail_mode_connector(parts)
+    if hook_connector is not None:
+        # The one resolver the hooks, init, doctor and status read: a key
+        # config.yaml leaves out is the mode the deployment runs, never the
+        # model placeholder.
+        return cfg.guardrail.hook_fail_mode_resolution(hook_connector)
     if parts == _TRUST_KEY:
         written = str(getattr(cfg.guardrail, "cisco_trust_level", "") or "").strip().lower()
         if written in ("full", "advisory", "none"):
@@ -1690,7 +1709,7 @@ def _show_effective_scanner_settings(masked: dict) -> None:
 
 
 def _resolve_defaults(app: AppContext, view: dict, written: dict, *, profiles: bool = True) -> None:
-    """Replace the placeholders of admission and update with what the gateway runs with.
+    """Replace the placeholders of admission, update and the hook fail mode with what the gateway runs with.
 
     The dataclass dump shows an unset admission or update key as null or {}, which
     reads as "no policy". Each asset type shows its resolved policy, and update shows
@@ -1710,6 +1729,22 @@ def _resolve_defaults(app: AppContext, view: dict, written: dict, *, profiles: b
         view["admission"] = resolved
     if isinstance(view.get("update"), dict):
         view["update"] = _update_view(cfg)[0]
+    if isinstance(view.get("guardrail"), dict):
+        _resolve_hook_fail_modes(cfg, view["guardrail"], written.get("guardrail"))
+
+
+def _resolve_hook_fail_modes(cfg: object, guardrail: dict, written: object) -> None:
+    """Show the hook fail mode a key config.yaml leaves out as the mode the
+    deployment runs, from the resolver that config get, init, doctor and
+    status read, never as the model placeholder (GAP-0719)."""
+    saved = written if isinstance(written, dict) else {}
+    resolver = cfg.guardrail.hook_fail_mode_resolution  # type: ignore[attr-defined]
+    if not str(saved.get("hook_fail_mode") or "").strip():
+        guardrail["hook_fail_mode"] = resolver("")[0]
+    connectors = guardrail.get("connectors")
+    for name, entry in (connectors.items() if isinstance(connectors, dict) else ()):
+        if isinstance(entry, dict) and not str(entry.get("hook_fail_mode") or "").strip():
+            entry["hook_fail_mode"] = resolver(name)[0]
 
 
 def _merge_defaults(written: dict, defaults: dict) -> dict:
@@ -1734,7 +1769,9 @@ def _show_data(app: AppContext, *, source: bool, effective: bool, provenance: bo
         # No config.yaml yet: show the defaults the CLI would run with.
         if source or effective or provenance:
             raise click.ClickException(f"config.yaml does not exist yet; {config_module.first_run_hint()}")
-        return _v8_defaults(app)
+        defaults = _v8_defaults(app)
+        _resolve_defaults(app, defaults, {})
+        return defaults
     resolved_only = effective or provenance
     masked: dict = {}
     if not resolved_only:
@@ -2234,6 +2271,9 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
         suggestion = re.search(r"suggested field ([^;]+)", text)
         hint = f' (did you mean "{suggestion.group(1).strip()}"?)' if suggestion else ""
         return f"{where}{field}: unknown field{hint}. All fields: {_ALL_FIELDS_COMMAND}"
+
+    if code == "config_schema_invalid" and text.startswith(f"{field} was retired in config_version "):
+        return f"{where}{text}"
 
     if (code == "maxLength" or "maxLength constraint" in text) and isinstance(node, yaml.ScalarNode):
         # The gateway's limit for this field ("a string of at most 512

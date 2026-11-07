@@ -310,7 +310,7 @@ func migrateManagedStandaloneConfig(ctx context.Context, path, approvedSHA256 st
 	// record that decodes only in part (a truncated write) proves no counter
 	// either; the Windows ensure recovers a provable one before this step.
 	if _, err := configwrite.ReadGenerationState(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("cannot prove the previous config generation from %s; restore that file from the last verified administrator backup, then run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1", configwrite.GenerationPath(path))
+		return fmt.Errorf("cannot prove the previous config generation from %s; restore that file from the last verified administrator backup, then run %s.%s", configwrite.GenerationPath(path), windowsEnterpriseSetupCommand("/ensure", "CONFIG=<approved absolute config path>", "JSON=1"), windowsEnterpriseSetupSourceNote)
 	}
 	restoreACL, err := keepConfigDACL(path)
 	if err != nil {
@@ -348,6 +348,16 @@ func migrateManagedStandaloneConfig(ctx context.Context, path, approvedSHA256 st
 		}
 	}
 	if !fromBundle {
+		// Bytes the hook guardian kept as an edit it could not record yet
+		// (it could not tell whether a lifecycle run owned config.yaml) are
+		// recorded as that hand edit first, so this step goes on exactly as
+		// if the guardian had recorded them, and never adopts them as the
+		// lifecycle's (GAP-0646 review L2, REVIEW-g646 #5).
+		if handEdit, ok := managedConfigHandEditOptions(path, raw, approvedSHA256, "the Windows lifecycle config step"); ok {
+			if _, err := configwrite.Locked(ctx, path, handEdit, func() (bool, error) { return true, nil }); err != nil {
+				return err
+			}
+		}
 		if repaired, err := repairManagedStandaloneCursorFailMode(ctx, path, raw, opt); err != nil {
 			return err
 		} else if repaired {
@@ -372,6 +382,11 @@ func migrateManagedStandaloneConfig(ctx context.Context, path, approvedSHA256 st
 	managedStandaloneConfigBeforeRecord(path)
 	if _, err := configwrite.Locked(ctx, path, opt, func() (bool, error) { return true, nil }); err != nil {
 		return err
+	}
+	if opt.RecordSHA256 != "" {
+		// This run installed exactly these bytes from its approved source:
+		// a hand edit kept for them is approved now.
+		forgetManagedConfigHandEdit(path, raw)
 	}
 	return restoreACL(written...)
 }
@@ -499,9 +514,14 @@ func recordRestoredManagedStandaloneConfig(ctx context.Context, path string) err
 	if err != nil {
 		return fmt.Errorf("read the access control list of %s: %w", path, err)
 	}
-	if _, err := configwrite.Locked(ctx, path, configwrite.Options{
-		Actor: configwrite.ActorLifecycle, Reason: "enterprise windows rollback",
-	}, func() (bool, error) { return true, nil }); err != nil {
+	opt := configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise windows rollback"}
+	// A restored config the hook guardian kept as a hand edit (recorded as
+	// one before this run recorded its own, or one it could not record) is
+	// recorded as that edit again, not as the rollback's (GAP-0646 review L2).
+	if handEdit, kept := managedConfigHandEditOptions(path, raw, "", "an enterprise windows rollback"); kept {
+		opt = handEdit
+	}
+	if _, err := configwrite.Locked(ctx, path, opt, func() (bool, error) { return true, nil }); err != nil {
 		return err
 	}
 	return restoreACL(configwrite.GenerationPath(path))
@@ -576,7 +596,7 @@ func repairManagedStandaloneConfigGeneration(ctx context.Context, path string, a
 	}
 	opt.RecordSHA256 = configwrite.SHA256Hex(approved)
 	if opt.GenerationFloor == 0 {
-		return false, fmt.Errorf("cannot prove the previous config generation; restore %s from the last verified administrator backup, then run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1", configwrite.GenerationPath(path))
+		return false, fmt.Errorf("cannot prove the previous config generation; restore %s from the last verified administrator backup, then run %s.%s", configwrite.GenerationPath(path), windowsEnterpriseSetupCommand("/ensure", "CONFIG=<approved absolute config path>", "JSON=1"), windowsEnterpriseSetupSourceNote)
 	}
 	restoreACL, err := keepConfigDACL(path)
 	if err != nil {

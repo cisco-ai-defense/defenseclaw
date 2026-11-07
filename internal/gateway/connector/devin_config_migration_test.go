@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Earlier builds put the macOS Devin config under ~/Library/Application
@@ -97,6 +98,133 @@ func TestDevinSetupMigratesAReceiptBoundToTheOldMacOSConfigRoot(t *testing.T) {
 			}
 			if err := conn.VerifyClean(current); err != nil {
 				t.Fatalf("VerifyClean: %v", err)
+			}
+		})
+	}
+}
+
+func TestDevinTargetMoveDropsTheOldWorkspaceRestoreState(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		dropReceipt   bool
+		dropOldNotice bool
+	}{
+		{name: "receipt present"},
+		{name: "receipt missing", dropReceipt: true},
+		{name: "copy only", dropReceipt: true, dropOldNotice: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previous := DevinHooksPathOverride
+			DevinHooksPathOverride = ""
+			t.Cleanup(func() { DevinHooksPathOverride = previous })
+			home := t.TempDir()
+			dataDir := filepath.Join(home, ".defenseclaw")
+			workspace := filepath.Join(home, "old-project")
+			if err := os.MkdirAll(workspace, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			conn := NewDevinConnector()
+			old := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "tok-test", WorkspaceDir: workspace}
+			if err := conn.Setup(context.Background(), old); err != nil {
+				t.Fatalf("workspace Setup: %v", err)
+			}
+			oldPath := devinHooksPath(old)
+			spec, _ := agentConfigSpecFor("devin")
+			if err := spec.writeNotice(dataDir, agentConfigNotice{
+				Version: agentConfigCopyVersion, Path: oldPath, Source: AgentConfigHooksOnly,
+				SettingsLost: true, At: "2026-11-06T00:00:00Z",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if tc.dropReceipt {
+				discardManagedFileBackup(dataDir, "devin", "config")
+			}
+			if tc.dropOldNotice {
+				if err := os.Remove(spec.noticePath(dataDir)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.RemoveAll(workspace); err != nil {
+				t.Fatal(err)
+			}
+			global := old
+			global.WorkspaceDir = ""
+			global.ConfigHome = filepath.Join(home, ".config", "devin")
+			if err := conn.Setup(context.Background(), global); err != nil {
+				t.Fatalf("global Setup: %v", err)
+			}
+			if _, err := os.Lstat(workspace); !os.IsNotExist(err) {
+				t.Fatalf("old project was recreated: %v", err)
+			}
+			if _, ok := spec.readNotice(dataDir); ok {
+				t.Fatal("old workspace restore notice survived the target move")
+			}
+			if copy, ok := spec.readCopy(dataDir, devinHooksPath(global)); !ok || copy.Path != devinHooksPath(global) {
+				t.Fatalf("global copy = %+v, valid=%t", copy, ok)
+			}
+		})
+	}
+}
+
+func TestDevinCurrentReceiptRetiresOnlyPreviousTargetRestoreState(t *testing.T) {
+	previous := DevinHooksPathOverride
+	DevinHooksPathOverride = ""
+	t.Cleanup(func() { DevinHooksPathOverride = previous })
+	for _, tc := range []struct {
+		name      string
+		oldTarget bool
+		viaStatus bool
+	}{
+		{name: "setup removes previous target notice", oldTarget: true},
+		{name: "verify removes previous target notice", oldTarget: true, viaStatus: true},
+		{name: "setup keeps current target notice"},
+		{name: "verify keeps current target notice", viaStatus: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			dataDir := filepath.Join(home, ".defenseclaw")
+			opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "tok-test", ConfigHome: filepath.Join(home, ".config", "devin")}
+			conn := NewDevinConnector()
+			if err := conn.Setup(context.Background(), opts); err != nil {
+				t.Fatalf("initial Setup: %v", err)
+			}
+			currentPath := devinHooksPath(opts)
+			if got := managedFileBackupTargetPath(dataDir, "devin", "config", ""); got != currentPath {
+				t.Fatalf("receipt bound to %q, want %q", got, currentPath)
+			}
+			spec, _ := agentConfigSpecFor("devin")
+			noticePath := currentPath
+			if tc.oldTarget {
+				noticePath = filepath.Join(home, "old-project", ".devin", "hooks.v1.json")
+			}
+			if err := spec.writeNotice(dataDir, agentConfigNotice{
+				Version: agentConfigCopyVersion, Path: noticePath, Source: AgentConfigHooksOnly,
+				SettingsLost: true, At: "2026-11-06T00:00:00Z",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(spec.seenPath(dataDir), []byte("seen\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.viaStatus {
+				_ = AgentConfigStatus("devin", opts, time.Time{}, true)
+			} else if err := conn.Setup(context.Background(), opts); err != nil {
+				t.Fatalf("same-target Setup: %v", err)
+			}
+			_, noticePresent := spec.readNotice(dataDir)
+			if noticePresent == tc.oldTarget {
+				t.Fatalf("restore notice present = %t, old target = %t", noticePresent, tc.oldTarget)
+			}
+			if _, err := os.Stat(spec.seenPath(dataDir)); tc.oldTarget && !os.IsNotExist(err) {
+				t.Fatalf("previous target seen marker remains: %v", err)
+			} else if !tc.oldTarget && err != nil {
+				t.Fatalf("current target seen marker missing: %v", err)
+			}
+			if _, ok := spec.readCopy(dataDir, currentPath); !ok {
+				t.Fatal("current target copy was not retained")
+			}
+			if _, err := os.Lstat(filepath.Join(home, "old-project")); !os.IsNotExist(err) {
+				t.Fatalf("previous project was created: %v", err)
 			}
 		})
 	}

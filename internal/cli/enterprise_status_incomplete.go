@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // windowsClaudeAttestationHint names the step that verifies Claude Code's
@@ -24,8 +25,7 @@ import (
 // installed CLI: it is not on PATH (g072 review 2 M3).
 func windowsClaudeAttestationHint() string {
 	return " (it needs an administrator's attestation, and each upgrade makes the last one stale: " +
-		"confirm that an enrolled user's Claude Code runs DefenseClaw's hooks, then run Setup /repair ATTESTCLAUDEEFFECTIVEPOLICY=1, " +
-		"or " + managedWindowsCommand("enterprise", "windows", "repair", "--profile", "standalone", "--attest-claude-effective-policy") +
+		"confirm that an enrolled user's Claude Code runs DefenseClaw's hooks, then run " + managedWindowsCommand("enterprise", "windows", "repair", "--profile", "standalone", "--attest-claude-effective-policy") +
 		" from an elevated PowerShell prompt)"
 }
 
@@ -33,10 +33,12 @@ func windowsClaudeAttestationHint() string {
 // enrolled nobody for Codex, Claude Code or Cursor is not security-complete.
 // It said only that the installer gave no reason, and pointed at a guardian
 // log that names none (GAP-0223).
-const windowsEnterpriseNoAgentTargetReason = "no account is enrolled for Codex, Claude Code or Cursor " +
-	"(the target manifest has no enabled row for any of them, and security_complete needs one): " +
-	"enable at least one of them under guardrail.connectors, check that the enrollment lists include an eligible account, " +
-	"and apply the config with Setup /ensure CONFIG=<path>"
+func windowsEnterpriseNoAgentTargetReason() string {
+	return "no account is enrolled for Codex, Claude Code or Cursor " +
+		"(the target manifest has no enabled row for any of them, and security_complete needs one): " +
+		"enable at least one of them under guardrail.connectors, check that the enrollment lists include an eligible account, " +
+		"and apply the config with " + windowsEnterpriseSetupCommand("/ensure", "CONFIG=<path>") + " from an elevated PowerShell prompt (" + managed.WindowsSetupSource + ")"
+}
 
 // enterpriseInformationalWarningCodes are warnings that say what the lifecycle
 // restored or left by itself (old runtime copies in a per-user folder it could
@@ -49,6 +51,7 @@ var enterpriseInformationalWarningCodes = map[string]bool{
 	"user_runtime_folder_untrusted":            true,
 	"runtime_generations_not_collected":        true,
 	"rule_pack_readable_by_users":              true,
+	"claude_project_skipped":                   true,
 	enterprisestatus.CodeSandboxDefaultProfile: true,
 	enterprisestatus.CodeSandboxAdvisory:       true,
 }
@@ -106,7 +109,7 @@ func addEnterpriseSecurityIncompleteReasons(result *enterprisestatus.Result, tra
 	// Windows lists a machine policy for each enabled Codex, Claude Code and
 	// Cursor target; security_complete needs one of them.
 	if len(result.MachinePolicy) == 0 && !transactionPending {
-		reasons = append(reasons, windowsEnterpriseNoAgentTargetReason)
+		reasons = append(reasons, windowsEnterpriseNoAgentTargetReason())
 	}
 	names := make([]string, 0, len(result.MachinePolicy))
 	for name := range result.MachinePolicy {

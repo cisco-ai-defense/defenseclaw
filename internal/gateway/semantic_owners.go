@@ -668,7 +668,7 @@ func sshIdentityConsumer(command actionfacts.CommandFact) bool {
 
 func shadowContentAccessPrerequisite(facts actionfacts.Facts) bool {
 	for _, candidate := range facts.Paths {
-		if canonicalSemanticPath(semanticPathValue(candidate)) != "/etc/shadow" {
+		if systemEtcPath(canonicalSemanticPath(semanticPathValue(candidate))) != "/etc/shadow" {
 			continue
 		}
 		command, ok := integrityCommandByID(facts, candidate.CommandID)
@@ -858,6 +858,18 @@ func isDefiniteFixturePath(
 		return false
 	}
 	return true
+}
+
+// systemEtcPath names a file below the system /etc by its /etc spelling. On
+// macOS /etc is a link to /private/etc, so a resolved target (a link to
+// /etc/shadow) arrives as /private/etc/shadow, whether or not the file exists.
+// The exact system-file rules compare this form, so the resolved name is
+// judged like the direct one (GAP-0769).
+func systemEtcPath(value string) string {
+	if value == "/private/etc" || strings.HasPrefix(value, "/private/etc/") {
+		return strings.TrimPrefix(value, "/private")
+	}
+	return value
 }
 
 func canonicalSemanticPath(value string) string {

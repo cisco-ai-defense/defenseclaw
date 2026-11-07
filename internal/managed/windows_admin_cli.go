@@ -34,6 +34,25 @@ func WindowsGatewayBeside(cli string) string {
 	return cli[:strings.LastIndexAny(cli, `/\`)+1] + "defenseclaw-gateway.exe"
 }
 
+// WindowsStandaloneSetupName is the standalone Setup a release ships. Setup
+// is not installed on the computer it manages (the MDM kit removes its staged
+// copy when a run ends), so a hint that needs it runs it from the folder that
+// holds it (WindowsSetupCommand) and says where it comes from
+// (WindowsSetupSource). cowork-1-0-8 GAP-0095.
+const WindowsStandaloneSetupName = "DefenseClawSetup-Enterprise-Standalone-x64.exe"
+
+// WindowsSetupSource says that Setup is not on the computer and where an
+// administrator gets it. A hint that names a Setup command ends with it, once.
+const WindowsSetupSource = "Setup is not installed on this computer: use the copy in your MDM package or the release download"
+
+// WindowsSetupCommand is the standalone Setup run with args in PowerShell from
+// the folder that holds it: & '.\DefenseClawSetup-Enterprise-Standalone-x64.exe' /repair JSON=1.
+// PowerShell does not run a program of the current folder by its bare name, so
+// the bare name a hint printed was "not recognized" even beside the file.
+func WindowsSetupCommand(args ...string) string {
+	return WindowsCommandLine(`.\`+WindowsStandaloneSetupName, args...)
+}
+
 // WindowsAdminCommand is a managed defenseclaw.exe command as it is typed in
 // PowerShell on a Windows standalone computer: `& '<path>' arg...`. Setup
 // puts no DefenseClaw command on PATH, so a bare `defenseclaw ...` is "not

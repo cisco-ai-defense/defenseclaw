@@ -13,6 +13,7 @@
 package enterpriseunix
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -67,15 +68,24 @@ type snapshot struct {
 // own. The returned directory is recorded in the pending intent before the
 // first mutation.
 func (e *Env) takeSnapshot(id string, files, dirs []string) (_ *snapshot, err error) {
-	dir := filepath.Join(e.P(e.Layout.LifecycleDir), snapshotsDirName, id)
-	if err := os.MkdirAll(filepath.Join(dir, "files"), 0o700); err != nil {
-		return nil, fmt.Errorf("create snapshot: %w", err)
-	}
+	root := e.P(e.Layout.LifecycleDir)
+	store := filepath.Join(root, snapshotsDirName)
+	dir := filepath.Join(store, id)
+	_, preexistingErr := os.Lstat(dir)
+	created := errors.Is(preexistingErr, os.ErrNotExist)
 	defer func() {
-		if err != nil {
+		if err != nil && created {
 			e.discardSnapshot(&snapshot{Dir: dir})
 		}
 	}()
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return nil, fmt.Errorf("create snapshot: %w", err)
+	}
+	for _, path := range []string{store, dir, filepath.Join(dir, "files")} {
+		if err := e.secureSnapshotDir(path); err != nil {
+			return nil, fmt.Errorf("create snapshot: %w", err)
+		}
+	}
 	snap := &snapshot{Dir: dir}
 	seen := map[string]bool{}
 	for index, canonical := range files {
@@ -149,6 +159,31 @@ func (e *Env) takeSnapshot(id string, files, dirs []string) (_ *snapshot, err er
 		return nil, err
 	}
 	return snap, nil
+}
+
+// secureSnapshotDir clears inherited ACLs before a child can be created.
+// Preserved hard links must not have their ACLs cleared through their
+// snapshot names: they share ACLs with the live files repaired later.
+func (e *Env) secureSnapshotDir(path string) error {
+	if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is not a snapshot directory", path)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		return fmt.Errorf("set snapshot directory mode of %s: %w", path, err)
+	}
+	if e.GOOS == "darwin" {
+		if _, err := e.Runner.Run(context.Background(), "chmod", "-h", "-N", path); err != nil {
+			return fmt.Errorf("clear snapshot directory ACL of %s: %w", path, err)
+		}
+	}
+	return nil
 }
 
 // snapshotLinks records, beside the files of snap, the symbolic links a
@@ -335,7 +370,12 @@ func (e *Env) restoreFiles(snap *snapshot) error {
 		path := e.P(entry.Path)
 		switch {
 		case entry.Dir:
-			if entry.Present {
+			// A directory whose mode and owner are already the snapshotted
+			// ones is left alone: a shared parent the plan only lists
+			// (/usr/local on macOS) is SIP-protected, and root gets EPERM
+			// from even a no-op chmod there, which failed every rollback
+			// with rollback_failed (GAP-0091 launcher parents).
+			if entry.Present && !e.dirMetadataIs(path, entry) {
 				if err := os.Chmod(path, entry.Mode); err != nil && !errors.Is(err, os.ErrNotExist) {
 					errs = append(errs, err)
 				}
@@ -367,6 +407,17 @@ func (e *Env) restoreFiles(snap *snapshot) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// dirMetadataIs reports whether the directory at path already has the mode
+// and owner the snapshot recorded.
+func (e *Env) dirMetadataIs(path string, entry snapshotEntry) bool {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	uid, gid, err := e.OwnerOf(path)
+	return err == nil && info.Mode().Perm() == entry.Mode.Perm() && uid == entry.UID && gid == entry.GID
 }
 
 // restoreFile puts a preserved blob back at path without copying its bytes

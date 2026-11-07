@@ -751,7 +751,11 @@ type enterpriseHookReconcileRow struct {
 	OK        bool   `json:"ok"`
 	// Pending is valid only for an administrator-authored deferred manifest
 	// row whose exact WTSActive token is currently unavailable.
-	Pending bool                           `json:"pending,omitempty"`
+	Pending bool `json:"pending,omitempty"`
+	// Removed records a target whose account or profile was confirmed gone.
+	// It remains in the manifest until enumeration catches up, but has no
+	// account in which a repair could run.
+	Removed bool                           `json:"removed,omitempty"`
 	Error   string                         `json:"error,omitempty"`
 	Result  *enterprisehooks.InstallResult `json:"result,omitempty"`
 	// UID and HomeInode identify a standalone Unix target so the gateway
@@ -789,6 +793,16 @@ type enterpriseHookReconcileRun struct {
 	// WatchPathOwners ties owned-file events to their manifest targets. A
 	// failed target must not change how another target's events are handled.
 	WatchPathOwners map[string][]string
+}
+
+func (run enterpriseHookReconcileRun) attentionFailures() int {
+	failures := 0
+	for _, row := range run.Rows {
+		if !row.OK && !row.Pending && !row.Removed {
+			failures++
+		}
+	}
+	return failures
 }
 
 var (
@@ -1151,9 +1165,10 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	attentionFailures := run.attentionFailures()
 	if enterpriseHookJSON {
 		payload := map[string]any{
-			"ok":       run.Failures == 0 && run.StateErr == nil,
+			"ok":       attentionFailures == 0 && run.StateErr == nil,
 			"manifest": run.Manifest,
 			"results":  run.Rows,
 		}
@@ -1161,11 +1176,11 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 			payload["state_error"] = run.StateErr.Error()
 		}
 		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(payload)
-		if run.Failures > 0 || run.StateErr != nil {
+		if attentionFailures > 0 || run.StateErr != nil {
 			if run.StateErr != nil {
 				return fmt.Errorf("enterprise hooks reconcile state write failed: %w", run.StateErr)
 			}
-			return fmt.Errorf("enterprise hooks reconcile failed for %d target(s)", run.Failures)
+			return fmt.Errorf("enterprise hooks reconcile failed for %d target(s)", attentionFailures)
 		}
 		return nil
 	}
@@ -1176,6 +1191,8 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s reconciled%s\n", Style("✓", "fg=green", "bold"), label, enterpriseHookAgentVersionNote(row))
 		} else if row.Pending {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s pending an exact active Windows session\n", Style("•", "fg=yellow", "bold"), label)
+		} else if row.Removed {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s removed: account or profile no longer exists\n", Style("•", "fg=yellow", "bold"), label)
 		} else {
 			fmt.Fprintf(cmd.ErrOrStderr(), "  %s %s: %s\n", Style("✗", "fg=red", "bold"), label, row.Error)
 		}
@@ -1184,8 +1201,8 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "  %s hook guardian state: %s\n", Style("✗", "fg=red", "bold"), run.StateErr.Error())
 		return fmt.Errorf("enterprise hooks reconcile state write failed: %w", run.StateErr)
 	}
-	if run.Failures > 0 {
-		return fmt.Errorf("enterprise hooks reconcile failed for %d target(s)", run.Failures)
+	if attentionFailures > 0 {
+		return fmt.Errorf("enterprise hooks reconcile failed for %d target(s)", attentionFailures)
 	}
 	return nil
 }
@@ -2525,6 +2542,16 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 			row.SID = resolved.sid
 			row.UserHome = resolved.home
 		}
+		if enterpriseHookGuardianTargetRemoved(ctx, target, row, targetErr) {
+			row.Removed = true
+			row.Error = "enterprise hooks: target account or profile removed"
+			run.Failures++
+			if prior, ok := recorded[enterpriseHookProtectedTargetKey(row)]; ok && enterpriseHookRemovedAccountRow(prior) {
+				run.Excused = append(run.Excused, row)
+			}
+			run.Rows = append(run.Rows, row)
+			continue
+		}
 		var previousProtection enterpriseHookPreviousProtection
 		if targetErr == nil {
 			previousProtection, targetErr = previousEnterpriseHookProtection(
@@ -2978,6 +3005,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	if err != nil {
 		return run, err
 	}
+	previousState, _, _ := loadEnterpriseHookGuardianState(cfg.DataDir)
 	reportEnterpriseHookManifestSkippedRowsPlatform(enterpriseHookManifest, manifest.Skipped)
 	run.ManifestSHA256 = manifestSHA256
 	apiAddr := strings.TrimSpace(enterpriseHookAPIAddr)
@@ -3055,6 +3083,18 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		if err == nil {
 			row.SID = strings.TrimSpace(resolved.sid)
 			row.UserHome = strings.TrimSpace(resolved.home)
+		}
+		if enterpriseHookGuardianTargetRemoved(ctx, target, row, err) {
+			row.Removed = true
+			row.RevokeProtection = true
+			row.Error = "enterprise hooks: target account or profile removed"
+			rows = append(rows, row)
+			failures++
+			unenrolled[enterpriseHookEnrollmentUnit(target)] = struct{}{}
+			enterpriseHookTargetHealth.clear(row)
+			continue
+		}
+		if err == nil {
 			var authorizationErr error
 			previousProtection, authorizationErr = previousEnterpriseHookProtection(
 				cfg.DataDir,
@@ -3337,6 +3377,9 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		failures,
 		enrollmentErr == nil,
 	)
+	if stateErr == nil {
+		logEnterpriseHookRemovedTransitions(os.Stderr, previousState.Results, rows)
+	}
 	if stateErr == nil && enrollmentErr != nil {
 		stateErr = fmt.Errorf(
 			"publish exact protected enrollment set: %w",
@@ -3588,7 +3631,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			failedOwnedPaths = enterpriseHookWatchFailedOwnedPaths(run)
 		}
 		status := "ok"
-		if run.Failures > 0 || run.StateErr != nil {
+		if run.attentionFailures() > 0 || run.StateErr != nil {
 			status = "attention"
 		}
 		rowsHash := enterpriseHookReconcileRowsHash(run.Rows)
@@ -3867,15 +3910,22 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	}
 	// Reconcile on the watch loop, but consume owned-file events while it
 	// runs. Only the watch loop updates retry and snapshot state.
+	replayPending := false
 	reconcileWatchPass := func(reason string) (bool, error) {
 		if legacyWatch {
 			_, err := reconcile(reason)
 			return false, err
 		}
 		passCtx, cancel := context.WithCancel(cmd.Context())
+		activeWorkers := newEnterpriseHookWatchActiveWorkers(previousRun)
+		passCtx = context.WithValue(passCtx, enterpriseHookWatchActiveWorkersKey{}, activeWorkers)
 		interrupted := make(chan fsnotify.Event, 1)
 		stop := make(chan struct{})
 		stopped := make(chan struct{})
+		// The pump alone writes this map; the watch loop reads it after
+		// stopped closes. Recheck a worker's event once the pass ends so a
+		// concurrent account write cannot disappear into its final snapshot.
+		activeEvents := map[string]fsnotify.Op{}
 		owned := make(map[string]struct{}, len(exclusiveOwned)+len(sharedOwned))
 		for path := range exclusiveOwned {
 			owned[path] = struct{}{}
@@ -3907,6 +3957,16 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 					if _, exclusive := priorExclusive[path]; exclusive {
 						passWrites.observe(event, priorLeft)
 					}
+					// A late event for a completed repair is the worker's
+					// tail only while the verified bytes remain in place.
+					// A fresh change after the worker returns interrupts the
+					// pass so that account is inspected promptly.
+					workerActive, workerRepaired := activeWorkers.state(path)
+					if workerActive || ((workerRepaired || activeEvents[path] != 0) &&
+						enterpriseHookOwnedFileFingerprint(path) == priorLeft[path]) {
+						activeEvents[path] |= event.Op
+						continue
+					}
 					drop, _ := enterpriseHookWatchEventDropped(time.Now(), priorSettleUntil, event,
 						priorFailed[path], priorExclusive, priorShared, priorFound, priorLeft,
 						enterpriseHookOwnedFileFingerprint, true)
@@ -3922,16 +3982,67 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		close(stop)
 		<-stopped
 		cancel()
+		for path, op := range activeEvents {
+			if before, known := priorLeft[path]; known && before != "absent" &&
+				enterpriseHookOwnedFileFingerprint(path) != before {
+				// The completed run may have snapped the remaining drift as
+				// its new baseline. Keep the last verified fingerprint until
+				// the queued pass has inspected and repaired this file.
+				ownedSnapshot[path] = before
+				lastTriggerPath, lastTriggerOp = enterpriseHookWatchNoteTrigger(lastTriggerPath, lastTriggerOp,
+					fsnotify.Event{Name: path, Op: op})
+				queueWatchPath(path)
+				replayPending = true
+			}
+		}
 		select {
 		case event := <-interrupted:
 			handleWatchEvent(event)
+			if debouncePending {
+				replayPending = true
+			}
 			return true, err
 		default:
 			return false, err
 		}
 	}
 
+	// Events queued during a pass keep their filesystem attribution even
+	// when another interval tick arrives before their debounce expires.
+	intervalDeferred := false
+	runIntervalPass := func() bool {
+		if enterpriseHookStandaloneConfigChanged(standaloneConfigFingerprint, cmd.ErrOrStderr()) {
+			return true
+		}
+		interrupted, err := reconcileWatchPass("interval")
+		if err != nil && !errors.Is(err, context.Canceled) {
+			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] interval reconcile failed: %s\n", err)
+		}
+		if interrupted {
+			return false
+		}
+		hostChecks.Run()
+		if repairRetryNeeded() {
+			scheduleRepairRetry()
+		} else {
+			cancelRepairRetry()
+			if legacyWatch || !replayPending {
+				cancelPendingDebounce()
+			}
+		}
+		return false
+	}
+
 	for {
+		if intervalDeferred && !debouncePending {
+			if err := cmd.Context().Err(); err != nil {
+				return err
+			}
+			intervalDeferred = false
+			if runIntervalPass() {
+				return nil
+			}
+		}
 		select {
 		case <-cmd.Context().Done():
 			return cmd.Context().Err()
@@ -3966,6 +4077,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		case <-debounce.C:
 			if debouncePending {
 				debouncePending = false
+				replayPending = false
 				// If only a healthy path's event reached this loop, retain any
 				// failed owned path whose current state differs from the last
 				// reconcile. Save the old fingerprints now; check the files
@@ -4114,28 +4226,70 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 				debounceReason = "account database change"
 			}
 		case <-intervalTicks:
-			if enterpriseHookStandaloneConfigChanged(standaloneConfigFingerprint, cmd.ErrOrStderr()) {
-				return nil
-			}
-			interrupted, err := reconcileWatchPass("interval")
-			if err != nil && !errors.Is(err, context.Canceled) {
-				fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] interval reconcile failed: %s\n", err)
-			}
-			if interrupted {
+			if !legacyWatch && replayPending && debouncePending {
+				intervalDeferred = true
 				continue
 			}
-			hostChecks.Run()
-			if repairRetryNeeded() {
-				scheduleRepairRetry()
-			} else {
-				cancelRepairRetry()
-				cancelPendingDebounce()
+			if runIntervalPass() {
+				return nil
 			}
 		}
 	}
 }
 
 type enterpriseHookWatchPassWritesKey struct{}
+
+type enterpriseHookWatchActiveWorkersKey struct{}
+
+// The watch pump must not cancel a pass for a write made by one of that
+// pass's workers, even if its first event arrives after the worker returns.
+// It still preempts a slow pass for a changed file in another account.
+type enterpriseHookWatchActiveWorkers struct {
+	mu         sync.RWMutex
+	owners     map[string][]string
+	targetKeys map[string]string
+	active     map[string]int
+	repaired   map[string]bool
+}
+
+func newEnterpriseHookWatchActiveWorkers(prior enterpriseHookReconcileRun) *enterpriseHookWatchActiveWorkers {
+	w := &enterpriseHookWatchActiveWorkers{
+		owners: prior.WatchPathOwners, targetKeys: make(map[string]string, len(prior.Rows)),
+	}
+	for _, row := range prior.Rows {
+		home, connector := row.UserHome, row.Connector
+		if row.Result != nil {
+			if home == "" {
+				home = row.Result.UserHome
+			}
+			if connector == "" {
+				connector = row.Result.Connector
+			}
+		}
+		if id, key := enterpriseHookWatchTargetID(home, connector), enterpriseHookProtectedTargetKey(row); id != "" && key != "" {
+			w.targetKeys[id] = key
+		}
+	}
+	return w
+}
+
+func enterpriseHookWatchTargetID(home, connector string) string {
+	if strings.TrimSpace(home) == "" || strings.TrimSpace(connector) == "" {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(connector)) + "\x00" + filepath.Clean(home)
+}
+
+func (w *enterpriseHookWatchActiveWorkers) state(path string) (active, repaired bool) {
+	path = filepath.Clean(path)
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	for _, key := range w.owners[path] {
+		active = active || w.active[key] > 0
+		repaired = repaired || w.repaired[key]
+	}
+	return active, repaired
+}
 
 // enterpriseHookWatchPassWrites records owned files observed with bytes or
 // mode different from the last verified snapshot while a pass is running.
@@ -4614,7 +4768,7 @@ func writeEnterpriseHookReconcileLog(
 		// outcome names each failing target once. Unchanged reconciles stay a
 		// single line, and `enterprise hooks status` repeats the reasons.
 		for _, row := range run.Rows {
-			if row.OK || row.Pending {
+			if row.OK || row.Pending || row.Removed {
 				continue
 			}
 			fmt.Fprintf(writer, "[hook-guardian] target %s failed: %s\n",
@@ -4637,6 +4791,30 @@ func writeEnterpriseHookReconcileLog(
 		watchDirs,
 		triggerTag,
 	)
+}
+
+// The state file persists the transition marker, so interval and retry
+// passes report a confirmed removal only once. A later enrollment under the
+// same name gets a new live row and can be removed again in a later pass.
+func logEnterpriseHookRemovedTransitions(writer io.Writer, previous, current []enterpriseHookReconcileRow) []enterpriseHookReconcileRow {
+	seen := make(map[string]bool, len(previous))
+	for _, row := range previous {
+		if row.Removed {
+			seen[enterpriseHookProtectedTargetKey(row)] = true
+		}
+	}
+	var removed []enterpriseHookReconcileRow
+	for _, row := range current {
+		key := enterpriseHookProtectedTargetKey(row)
+		if !row.Removed || seen[key] {
+			continue
+		}
+		seen[key] = true
+		removed = append(removed, row)
+		fmt.Fprintf(writer, "[hook-guardian] target %s removed: account or profile no longer exists\n",
+			enterpriseHookReconcileLogDetail(enterpriseHookReconcileRowLabel(row)))
+	}
+	return removed
 }
 
 func enterpriseHooksManagedMutationPreflight() error {
@@ -5007,6 +5185,9 @@ func writeEnterpriseHookGuardianState(
 	for _, row := range rows {
 		if row.OK && row.Pending {
 			return fmt.Errorf("hook guardian reconcile row cannot be both successful and pending")
+		}
+		if row.Removed && (row.OK || row.Pending || row.Result != nil || !row.RevokeProtection || strings.TrimSpace(row.Error) == "") {
+			return fmt.Errorf("hook guardian removed row has an inconsistent disposition")
 		}
 		if row.Pending && (row.Result != nil || strings.TrimSpace(row.Error) != "") {
 			return fmt.Errorf("hook guardian pending row contains result or error state")
@@ -5471,7 +5652,7 @@ func mergeProtectedEnterpriseHookTargets(previous, current []enterpriseHookRecon
 		}
 		// A reused or reassigned uid, or a retired Windows target, must not
 		// inherit the previous authorization through the carried-forward row.
-		if row.RevokeProtection {
+		if row.RevokeProtection || row.Removed {
 			continue
 		}
 		if prior, ok := previousByKey[key]; ok {

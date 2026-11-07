@@ -31,7 +31,7 @@ $ErrorActionPreference = 'Stop'
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$null, [ref]$errors)
 if ($errors.Count -gt 0) { throw $errors[0].Message }
-foreach ($name in @('Invoke-DefenseClawForcedUninstallPreparation', 'ConvertTo-DefenseClawBoundedDiagnostic')) {
+foreach ($name in @('Invoke-DefenseClawForcedUninstallPreparation', 'ConvertTo-DefenseClawBoundedDiagnostic', 'Format-DefenseClawSetupAction')) {
     $definition = $ast.Find({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -91,6 +91,10 @@ def test_forced_uninstall_says_a_file_in_state_root_is_in_use(tmp_path: Path) ->
     assert output.startswith("REFUSED: "), output
     assert f"could not move StateRoot {state_root} aside" in output, output
     assert "a file or folder inside it is in use by another program" in output, output
-    assert "run Setup /uninstall FORCE=1 again" in output, output
+    # cowork-1-0-8 GAP-0095: Setup is not installed on the computer, so the retry runs it from its folder and says where it comes from.
+    assert (
+        "run & '.\\DefenseClawSetup-Enterprise-Standalone-x64.exe' /uninstall FORCE=1 (Setup is not installed on this computer: "
+        "use the copy in your MDM package or the release download) again."
+    ) in output, output
     assert "Exception calling" not in output, output
     assert state_root.is_dir()

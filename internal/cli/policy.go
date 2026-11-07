@@ -505,7 +505,7 @@ var policyReloadCmd = &cobra.Command{
 		// The reload carries the gateway token: never to a listener that is
 		// not this account's gateway (GAP-1563).
 		if problem := foreignGatewayListener(cfg); problem != "" {
-			return fmt.Errorf("policy reload: %s; the gateway token was not sent. %s", problem, foreignGatewayListenerFix(cfg))
+			return fmt.Errorf("policy reload: %s; the gateway token was not sent. %s", problemClause(problem), foreignGatewayListenerFix(cfg))
 		}
 
 		url := "http://" + net.JoinHostPort(bind, strconv.Itoa(port)) + "/policy/reload"

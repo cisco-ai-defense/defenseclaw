@@ -314,10 +314,51 @@ func TestLoadEnterprisePayloadAcceptsEmitterManifestContract(t *testing.T) {
 
 func TestLoadEnterprisePayloadRejectsInvalidEmitterManifestContract(t *testing.T) {
 	tests := map[string]struct {
-		mutate func(*enterprisePayloadManifest)
-		want   string
+		// unsigned and standalone pick the fixture the mutation starts from.
+		unsigned   bool
+		standalone bool
+		mutate     func(*enterprisePayloadManifest)
+		want       string
 	}{
 		"unsigned flavor mismatch": {
+			mutate: func(manifest *enterprisePayloadManifest) {
+				manifest.Unsigned = true
+			},
+			want: "identity is invalid",
+		},
+		// The ordinary (per-user) build labels its payload "oss". The
+		// enterprise Setup must never accept such a payload as its own, in
+		// any of its four flavors.
+		"ordinary oss flavor": {
+			mutate: func(manifest *enterprisePayloadManifest) {
+				manifest.DistributionFlavor = "oss"
+			},
+			want: "identity is invalid",
+		},
+		"ordinary oss flavor, unsigned": {
+			unsigned: true,
+			mutate: func(manifest *enterprisePayloadManifest) {
+				manifest.DistributionFlavor = "oss"
+			},
+			want: "identity is invalid",
+		},
+		"ordinary oss flavor, standalone inventory": {
+			standalone: true,
+			mutate: func(manifest *enterprisePayloadManifest) {
+				manifest.DistributionFlavor = "oss"
+			},
+			want: "identity is invalid",
+		},
+		"ordinary oss flavor, unsigned standalone inventory": {
+			unsigned:   true,
+			standalone: true,
+			mutate: func(manifest *enterprisePayloadManifest) {
+				manifest.DistributionFlavor = "oss"
+			},
+			want: "identity is invalid",
+		},
+		"standalone label with the unsigned flag": {
+			standalone: true,
 			mutate: func(manifest *enterprisePayloadManifest) {
 				manifest.Unsigned = true
 			},
@@ -356,7 +397,7 @@ func TestLoadEnterprisePayloadRejectsInvalidEmitterManifestContract(t *testing.T
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			payloadFS, manifest := newEnterprisePayloadFixture(t, false)
+			payloadFS, manifest := newEnterprisePayloadFixtureForFlavor(t, test.unsigned, test.standalone)
 			test.mutate(&manifest)
 			writeEnterprisePayloadManifest(t, payloadFS, manifest)
 			if _, err := loadEnterprisePayload(payloadFS); err == nil || !strings.Contains(err.Error(), test.want) {

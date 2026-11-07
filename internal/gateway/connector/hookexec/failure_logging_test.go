@@ -131,6 +131,7 @@ func TestFailOpenDiagnosticEscapesReason(t *testing.T) {
 }
 
 func TestManagedNativeOutageLogsInCallingUsersHome(t *testing.T) {
+	shortRestartBudget(t)
 	for _, mode := range []string{"open", "closed"} {
 		t.Run(mode, func(t *testing.T) {
 			userHome := t.TempDir()
@@ -218,6 +219,7 @@ func TestManagedNativeAnsweredServerErrorLogsAsResponse(t *testing.T) {
 // a failed account lookup) writes no row, and never one into the
 // administrator-owned enforcement home it runs with.
 func TestManagedFailureLogNeverFallsBackToTheEnforcementHome(t *testing.T) {
+	shortRestartBudget(t)
 	for name, resolver := range map[string]func() string{"no resolver": nil, "unresolved account": func() string { return "" }} {
 		for _, mode := range []string{"open", "closed"} {
 			t.Run(name+" "+mode, func(t *testing.T) {
@@ -248,6 +250,7 @@ func TestManagedFailureLogNeverFallsBackToTheEnforcementHome(t *testing.T) {
 // absence the next call must still report (rel-1-0-4 GAP-0593, GAP-0561).
 // The decision is unchanged and no row is written.
 func TestManagedFailureLogNeverCreatesTheDiagnosticDirectory(t *testing.T) {
+	shortRestartBudget(t)
 	for _, mode := range []string{"open", "closed"} {
 		t.Run(mode, func(t *testing.T) {
 			userHome := filepath.Join(t.TempDir(), ".defenseclaw")

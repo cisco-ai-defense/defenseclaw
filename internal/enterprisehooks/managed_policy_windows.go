@@ -1644,20 +1644,14 @@ func installWindowsClaudeManagedPolicyUnlocked(
 		}
 		return path, nil, nil
 	}
-	policyDir := filepath.Dir(path)
-	policyRoot := filepath.Dir(policyDir)
-	createdPolicyDir := !windowsPathExists(policyDir)
-	createdPolicyRoot := !windowsPathExists(policyRoot)
-	removeCreatedDirs := func() {
-		if createdPolicyDir {
-			_ = os.Remove(policyDir)
-		}
-		if createdPolicyRoot {
-			_ = os.Remove(policyRoot)
-		}
-	}
-	if err := ensureWindowsManagedPolicyDirectory(policyDir); err != nil {
-		removeCreatedDirs()
+	// The transaction (withWindowsClaudeManagedPolicyTransaction) has
+	// already created managed-settings.d and ClaudeCode, and recorded the
+	// ones it created (GAP-0091), before it took its lock file in there;
+	// this only checks them again. A rollback below leaves both folders, and
+	// their records with them: the lock files stay in managed-settings.d, so
+	// neither folder is empty, and a purge removes both once it is
+	// (GAP-0091 review 2 S1).
+	if err := ensureWindowsManagedPolicyDirectory(filepath.Dir(path)); err != nil {
 		return "", nil, err
 	}
 
@@ -1704,7 +1698,6 @@ func installWindowsClaudeManagedPolicyUnlocked(
 				failures = append(failures, err.Error())
 			}
 		}
-		removeCreatedDirs()
 		if len(failures) > 0 {
 			return fmt.Errorf("%s", strings.Join(failures, "; "))
 		}
@@ -2230,6 +2223,10 @@ func ensureWindowsManagedPolicyDirectory(path string) error {
 			return cleanupCreated(fmt.Errorf("enterprise hooks: verify managed policy directory %s: %w", directory, err))
 		}
 	}
+	// A purge removes these folders once they are empty, and only these
+	// (GAP-0091): a folder that already existed is never recorded. Best
+	// effort; an unrecorded folder just stays after a purge.
+	_ = windowsCreatedFolderRecorder(created)
 	return nil
 }
 

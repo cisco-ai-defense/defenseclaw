@@ -158,7 +158,7 @@ With `fleet.enabled: true`, a managed install with no compiler stops before it c
   to `<dir>/edge-connector/tools/policy_compiler.py`. Neither archive works alone:
   the per-user archive has no `defenseclaw-hook` (`payload is missing
   defenseclaw-hook`) and the enterprise archive has no compiler. On macOS or
-  Linux without fapolicyd, run `defenseclaw-gateway enterprise linux|macos install --payload <dir>`.
+  Linux without fapolicyd, run `<dir>/defenseclaw-gateway enterprise linux|macos install --payload <dir>`.
   On Linux with fapolicyd, trust the complete staged payload after copying the
   compiler, then follow the [two-stage tarball install](/docs/enterprise/linux#3b-or-install-from-the-tarball);
   add installed-tree trust before activation. A later `repair` or `ensure`
@@ -166,7 +166,7 @@ With `fleet.enabled: true`, a managed install with no compiler stops before it c
   already installed fails with `already_installed`. A Linux host whose binaries
   belong to the RPM or DEB refuses `--payload` with `package_owned_binaries`,
   so keep Fleet off there. Python 3 and PyYAML must be on the host.
-- **Windows.** Setup neither carries nor passes a compiler. It keeps the compiler a Fleet-enabled install already recorded on the host; with none it refuses: `turn Fleet off in the config, then run Setup again`. To install one, run the lifecycle CLI from a payload folder with `--policy-compiler <file>`, using `policy_compiler.py` from the same release. A file that differs from that release's compiler is refused.
+- **Windows.** Setup neither carries nor passes a compiler. It keeps the compiler a Fleet-enabled install already recorded on the host; with none it refuses: `turn Fleet off in the config, then run the same command again with that config`. To install one, run the lifecycle CLI from a payload folder with `--policy-compiler <file>`, using `policy_compiler.py` from the same release. A file that differs from that release's compiler is refused.
 
 The compiler's output is described in [policies](/docs/edge-connector/policies#compile-the-policy).
 

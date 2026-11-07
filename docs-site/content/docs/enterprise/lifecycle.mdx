@@ -488,7 +488,7 @@ the same way. In order, on Linux and macOS:
    every protected credential the file names. A failure is `config_invalid` and the
    installed config stays.
 2. **Migrate a version 8 config.** A `config_version: 8` config is migrated to version 9 in
-   memory by the same library as `defenseclaw-gateway config migrate`, validated again, and
+   memory by the same library as the gateway's `config migrate`, validated again, and
    installed in place of the version 8 bytes. No `defenseclaw` CLI is needed on the host. If
    your configuration management puts the same version 8 file back, `ensure` leaves its
    bytes in place and the gateway migrates it in memory.
@@ -580,10 +580,10 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --js
 ```
 
 ```powershell title="Windows"
-& 'C:\ProgramData\DefenseClaw-Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /repair JSON=1
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows repair --profile standalone
 ```
 
-`repair` stops and restarts every DefenseClaw service for a few seconds and lists what it changed (`nothing to repair` on a healthy deployment); `ensure` leaves a healthy deployment running. It also removes the guardian targets of deleted accounts. For Linux package installs, reinstall the package to restore binaries. On Windows use the Setup of the installed release.
+`repair` stops and restarts every DefenseClaw service for a few seconds and lists what it changed (`nothing to repair` on a healthy deployment); `ensure` leaves a healthy deployment running. It also removes the guardian targets of deleted accounts. For Linux package installs, reinstall the package to restore binaries. On Windows the installed CLI repairs the deployment without a payload, so it cannot put back a file that went missing. For that, run the Setup of the installed release with `/repair JSON=1` from an elevated PowerShell prompt, as `& .\DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1` in the folder that holds it. Setup is not installed on the computer: use the copy in your MDM package or the release download.
 
 To re-run the guardian now, and repair DefenseClaw's machine-policy entries, without
 re-applying the deployment files, use `reconcile`:
@@ -629,7 +629,8 @@ On Windows, `reconcile` restarts the guardian and waits for a fresh reconcile:
   accounts that no longer exist. Otherwise they stay 10 to 15 minutes, with the warning
   `guardian_target_account_removed`. See
   [New, changed and removed users](/docs/enterprise/enrollment#new-changed-and-removed-users).
-- **Windows.** Use the Setup of the release that is installed. `/ensure` also repairs a
+- **Windows.** Use the installed CLI's `repair` (above), or the Setup of the release that is
+  installed when a file must be restored from the payload. `/ensure` also repairs a
   deployment whose `verify` fails.
 - **Claude Code attestation (Windows).** After you confirm that a real Claude Code session
   runs DefenseClaw's managed hooks, record it with `/repair ATTESTCLAUDEEFFECTIVEPOLICY=1 JSON=1`
@@ -646,7 +647,7 @@ commands below to restart the managed gateway.
 | --- | --- | --- |
 | Linux | `sudo systemctl restart defenseclaw-gateway.service` | `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux repair --json` |
 | macOS | `sudo launchctl kickstart -k system/com.cisco.defenseclaw.gateway` | `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --json` |
-| Windows | Run the installed release's Setup with `/repair JSON=1` | The same |
+| Windows | From an elevated PowerShell prompt: `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows repair --profile standalone` | The same |
 
 To stop the managed gateway, for example to see what your users get while it is down, and to start it again:
 
@@ -959,8 +960,8 @@ deployment was activated, with the `agent_sessions_restart_required` warning.
    the Windows Application event log and `%WINDIR%\Logs\DefenseClaw` are not removed. See
    [Logs and events](/docs/enterprise/operations#logs-and-events). To review a retained audit
    database after purge, keep its `audit.db` and companion `audit.db-wal` and `audit.db-shm` files
-   together, then run `defenseclaw-gateway audit export --db <copied-audit.db>` as root on Linux or
-   from an elevated Administrator prompt on Windows. The export opens the copy read-only and does
+   together, then run `/opt/defenseclaw/bin/defenseclaw-gateway audit export --db <copied-audit.db>` as root on Linux (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS) or
+   `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' audit export --db <copied-audit.db>` from an elevated Administrator prompt on Windows. The export opens the copy read-only and does
    not need the former deployment's config.
 3. **Uninstall with purge**, as in [Uninstall](#uninstall).
 4. **Confirm that nothing remains:**
@@ -988,7 +989,7 @@ deployment was activated, with the `agent_sessions_restart_required` warning.
   [Review the audit log](/docs/enterprise/windows#review-the-audit-log)).
 - **Check the machine policy after removal.** On managed Windows, Claude Code, Codex and Cursor must
   refuse the cut-off account even with zero enrolled users for that agent. Run
-  `defenseclaw-gateway enterprise policy verify --json` and review each enabled agent. If its policy
+  `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy verify --json` and review each enabled agent. If its policy
   is missing, keep the account disabled, stop that agent with application control, and repair the
   deployment before allowing agent use. On Linux and macOS the policy stays machine-wide; use
   `unenrolled_users: deny` when enrollment alone must refuse a call.
