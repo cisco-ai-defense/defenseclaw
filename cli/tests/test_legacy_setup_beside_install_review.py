@@ -322,32 +322,6 @@ def test_a_mention_outside_the_hook_commands_is_not_a_registration(tmp_path: Pat
     assert legacy_setup_install.hook_entries(install, files) == [str(toml_hook), str(cursor)]
 
 
-# ---- S5: the link step names the exact link found
-
-
-def test_the_link_step_names_the_link_found_and_never_a_relative_one(tmp_path: Path) -> None:
-    real = tmp_path / "real"
-    (real / "Programs" / "DefenseClaw").mkdir(parents=True)
-    link = tmp_path / "AppData"
-    try:
-        link.symlink_to(real, target_is_directory=True)
-    except OSError:
-        pytest.skip("this account cannot create symbolic links")
-    root = link / "Programs" / "DefenseClaw"
-    step = legacy_setup_install._link_step(str(root))
-    assert f"{link} is a link" in step
-    assert "above it" not in step
-    # Never a blanket delete: only a stray link, and the profile's own links stay.
-    assert "delete only that link" in step and "do not delete it" in step
-    assert f"ask an administrator to remove {root}" in step
-
-
-def test_the_link_step_without_a_link_found_asks_an_administrator(tmp_path: Path) -> None:
-    step = legacy_setup_install._link_step(str(tmp_path / "Programs" / "DefenseClaw"))
-    assert step.startswith("Ask an administrator to check ")
-    assert "delete" not in step.lower()
-
-
 # ---- S6: a path named by an editable file is named, never advised for deletion
 
 

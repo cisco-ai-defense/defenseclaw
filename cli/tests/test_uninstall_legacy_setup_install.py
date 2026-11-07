@@ -440,9 +440,9 @@ def test_real_program_folder_that_is_a_junction_is_refused(real_local: Path, tmp
     root = _install(elsewhere)
     (real_local / "Programs").mkdir()
     _junction(real_local / "Programs" / "DefenseClaw", root)
-    assert legacy_setup_install._ownership_problem(str(real_local / "Programs" / "DefenseClaw")) == (
-        "its program folder is a link"
-    )
+    problem = legacy_setup_install._ownership_problem(str(real_local / "Programs" / "DefenseClaw"))
+    assert f"{real_local / 'Programs' / 'DefenseClaw'} is a junction" in problem
+    assert f'cmd /c rmdir "{real_local / "Programs" / "DefenseClaw"}"' in problem.step
 
 
 @windows_only
@@ -458,11 +458,13 @@ def test_real_program_folder_below_a_junction_is_refused(real_local: Path, tmp_p
     state_path.write_text(json.dumps(state), encoding="utf-8")
     linked = real_local / "Programs" / "DefenseClaw"
     problem = legacy_setup_install._ownership_problem(str(linked))
-    assert "reparse-point ancestor" in problem and str(real_local / "Programs").lower() in problem.lower()
+    assert f"{real_local / 'Programs'} is a junction" in problem
+    assert f'cmd /c rmdir "{real_local / "Programs"}"' in problem.step
     # find() stops even earlier: the install state is never read through a link.
     found = legacy_setup_install.find("win32")
     assert found is not None
-    assert found.problem and str(real_local / "Programs") in found.problem
+    assert f"{real_local / 'Programs'} is a junction" in found.problem
+    assert "yourself" not in found.problem_step
     done, problems = legacy_setup_install.remove(found, edit_user_path=lambda _path: True)
     assert done == [] and problems
     assert (elsewhere / "Programs" / "DefenseClaw" / "bin" / "defenseclaw-gateway.exe").is_file()
