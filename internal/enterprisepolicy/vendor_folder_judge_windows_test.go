@@ -395,8 +395,9 @@ func TestRemovalKeepsAnUntrustedRecordedFileAndWarnsOnce(t *testing.T) {
 			// The lifecycle's result names the file once, from the folder as it
 			// is after the uninstall, whatever record is left.
 			kept := KeptUntrustedPolicyFiles(opts)
-			if len(kept) != 1 || !strings.HasPrefix(kept[0], file+": "+StaleHookKept) || !strings.Contains(kept[0], "S-1-5-32-545") {
-				t.Fatalf("kept = %q; want one entry for %s naming the account", kept, file)
+			if len(kept) != 1 || !strings.HasPrefix(kept[0], file+": "+StaleHookKept) || !strings.Contains(kept[0], "S-1-5-32-545") ||
+				!strings.Contains(kept[0], `Fix: icacls "`+file+`" /remove:g "*S-1-5-32-545"`) {
+				t.Fatalf("kept = %q; want one entry for %s naming the account and the icacls command", kept, file)
 			}
 			if err := applySDDL(file, publicFileSDDL); err != nil {
 				t.Fatal(err)
