@@ -1927,16 +1927,20 @@ def _root_gateway_recovery_command(cfg, loosen: tuple[str, ...] = ()) -> str:
 def _root_gateway_return_and_start_command(cfg, loosen: tuple[str, ...] = ()) -> str:
     """Give the install home and the moved store back to this account, then start.
 
-    ``loosen`` files lose their group and other access between the two.
+    The owner change alone leaves a root-owned file of mode 000 or 044, or a
+    folder without owner access, unusable to its new owner, so the owner bits
+    are restored (``chmod -R u+rwX``, group and other bits untouched) before
+    ``loosen`` files lose their group and other access and the gateway starts.
+    Go renders the same chain in ``rootGatewayRecoveryStepsLoosening``.
     """
     home = _root_gateway_install_home(cfg)
     store = _root_gateway_moved_store()[0]
     homes = [home]
     if store and store not in homes:
         homes.append(store)
+    owned = " ".join(shlex.quote(item) for item in homes)
     return (
-        'sudo chown -R "$(id -un)" '
-        + " ".join(shlex.quote(item) for item in homes)
+        f'sudo chown -R "$(id -un)" {owned} && chmod -R u+rwX {owned}'
         + "".join(" && " + step for step in _root_gateway_loosen_steps(loosen))
         + " && defenseclaw-gateway start"
     )

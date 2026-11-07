@@ -103,13 +103,19 @@ func rootGatewayRecoverySteps(dataDir string) (command, note string) {
 // rootGatewayRecoveryStepsLoosening is rootGatewayRecoverySteps with a chmod
 // between the return and the start for the root-owned files that also grant
 // group or others access (GAP-0788): the gateway refuses such a file after the
-// owner is returned.
+// owner is returned. The owner change alone does not make a file usable: a
+// root-owned file whose owner bits lack read or write (mode 000, 044) or a
+// folder without owner access stays unusable to its new owner, so the chain
+// restores the owner bits on the returned folders (chmod -R u+rwX, group and
+// other bits untouched) before the loosening step and the start.
 func rootGatewayRecoveryStepsLoosening(dataDir string, loosen []string) (command, note string) {
 	dirs, configFile, storeErr := rootGatewayRecoveryDirs(dataDir)
 	for i, dir := range dirs {
 		dirs[i] = shellQuote(dir)
 	}
-	command = rootGatewayStopCommand(dataDir) + " && sudo chown -R \"$(id -un)\" " + strings.Join(dirs, " ")
+	owned := strings.Join(dirs, " ")
+	command = rootGatewayStopCommand(dataDir) + " && sudo chown -R \"$(id -un)\" " + owned +
+		" && chmod -R u+rwX " + owned
 	if step := rootGatewayLoosenStep(loosen); step != "" {
 		command += " && " + step
 	}

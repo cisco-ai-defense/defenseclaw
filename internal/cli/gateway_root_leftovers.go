@@ -20,6 +20,10 @@ import (
 // files it cannot create as an ordinary user.
 var rootRuntimeStartBlockers = daemon.RootOwnedStartBlockers
 
+// failedPIDRecord is a variable for the same reason: a test cannot make root
+// the owner of the PID record that the real start preflight refuses.
+var failedPIDRecord = daemon.FailedPIDRecord
+
 // rootOwnedRuntimeLeftoversRefusal stops a gateway start or restart that the
 // gateway would refuse over state only root can change. A gateway that was
 // started with sudo and then stopped leaves it behind, and the account's own
@@ -68,21 +72,22 @@ func rootOwnedStartRefusal(cfg *config.Config, verb string) (pidBlockers []strin
 // records failed validation. The PID check runs before the config is read, so
 // a root-owned PID record reached the raw identity error and never the chain.
 // When the record that failed is root-owned (or the root-owned install home
-// hides it) and the account could not read it, the report and the chain replace
-// the identity text: the owner change is what clears that failure. A record
-// refused for its own content (malformed, invalid PID) is not cleared by
-// returning the ownership, whether it is account-owned or itself root-owned and
-// readable, and whether a different PID record is root-owned: the identity
-// error and its guidance stay first and the root-owned report follows. An identity error with no root-owned state is returned
-// unchanged. The start is refused in every case.
+// hides it) and root is what denied the account the read, the report and the
+// chain replace the identity text: the chain returns the ownership and the
+// owner access, which is what clears that failure. Every other refusal keeps
+// its own reason first and the root-owned report follows: a record refused for
+// its content (malformed, invalid PID), a permission error on a file the
+// account owns, and any case where a different PID record is the root-owned
+// one. An identity error with no root-owned state is returned unchanged. The
+// start is refused in every case.
 func refuseOverRootOwnedState(cmd *cobra.Command, verb string, identityErr error) error {
 	cfg, _ := loadDaemonConfig(cmd)
 	pidBlockers, refusal := rootOwnedStartRefusal(cfg, verb)
 	if refusal == nil {
 		return identityErr
 	}
-	failed, unreadable := daemon.FailedPIDRecord(identityErr)
-	if failed != "" && unreadable && (slices.Contains(pidBlockers, failed) || slices.Contains(pidBlockers, daemon.StoreDirEntry)) {
+	failed, rootDenied := failedPIDRecord(identityErr)
+	if failed != "" && rootDenied && (slices.Contains(pidBlockers, failed) || slices.Contains(pidBlockers, daemon.StoreDirEntry)) {
 		return refusal
 	}
 	return fmt.Errorf("%w; separately, %s", identityErr, refusal)
