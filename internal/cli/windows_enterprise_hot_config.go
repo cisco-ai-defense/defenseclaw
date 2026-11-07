@@ -107,52 +107,52 @@ func approveWindowsStandaloneConfigSource(layout managed.StandaloneLayout) error
 	return refreshManagedApprovedConfigSource(layout.LifecycleDir, installed)
 }
 
-// windowsEnterpriseHealApprovedSource is the ensure-exit check that an
-// approved config source an earlier build left stale does not outlive a
-// compliant ensure (GAP-0779); tests replace it.
+// windowsEnterpriseHealApprovedSource is the check at the end of a lifecycle
+// run that an approved config source an earlier build left stale does not
+// outlive it (GAP-0779); tests replace it.
 var windowsEnterpriseHealApprovedSource = healWindowsStandaloneApprovedConfigSource
 
-// healWindowsStandaloneApprovedConfigSource puts the config an ensure run just
-// accepted into the approved config source when the deployment records one
-// that differs: a binary-only upgrade, or a repeat of the installed CONFIG=,
-// publishes none, so an older approved copy would otherwise survive and a
-// Repair after a hand edit would restore it. A signed-bundle deployment is
-// left alone (Repair refuses it, and Setup approved copy is not proof of the
-// bundle bytes). A refusal is a warning: the run itself is compliant.
+// healWindowsStandaloneApprovedConfigSource puts the config a finished
+// lifecycle run accepted into the approved config source when the deployment
+// records one that differs: a binary-only upgrade, a repeat of the installed
+// CONFIG= or a repair publishes none, so an older approved copy would
+// otherwise survive and a Repair after a hand edit would restore it. It
+// publishes only bytes config.generation.json binds to a lifecycle write, and
+// the caller runs it last, after every proof of the run, so a run that fails
+// later never changed the source. A signed-bundle deployment is left alone
+// (Repair refuses it, and Setup approved copy is not proof of the bundle
+// bytes). A source that is stale and cannot be refreshed fails the run: it
+// must not report success while Repair could restore an older config.
 func healWindowsStandaloneApprovedConfigSource(result *enterprisestatus.Result) {
 	if !windowsEnterpriseIsElevated() {
 		return
 	}
 	layout, err := windowsEnterpriseHotConfigLayout()
-	if err != nil {
+	if err != nil || layout.LifecycleDir == "" {
 		return
 	}
 	// Only a deployment that records an approved config source has one to
 	// heal; check before taking the lock so a host without one is untouched.
-	if layout.LifecycleDir == "" {
-		return
-	}
 	if _, err := os.Stat(filepath.Join(layout.LifecycleDir, managedDeploymentRecordFile)); err != nil {
 		return
 	}
 	if windowsStandaloneBundleStoreHoldsVersions(layout) {
 		return
 	}
-	release, err := windowsEnterpriseHotConfigLock(filepath.Join(layout.LifecycleDir, "lifecycle.lock"))
-	if err != nil {
-		result.AddWarning("approved_config_source_unchecked", "another DefenseClaw lifecycle run holds lifecycle.lock; the approved config source was not checked and the next ensure checks it")
-		return
-	}
-	defer release()
-	installed, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
-	if err != nil {
-		return
-	}
-	changed, err := healManagedApprovedConfigSource(layout.LifecycleDir, installed)
+	changed, err := healManagedApprovedConfigSourceBound(layout.LifecycleDir, layout.ConfigPath, func() (func(), error) {
+		release, err := windowsEnterpriseHotConfigLock(filepath.Join(layout.LifecycleDir, "lifecycle.lock"))
+		if windowsLifecycleLockBusy(err) {
+			return nil, errManagedApprovedSourceBusy
+		}
+		return release, err
+	})
 	switch {
+	case errors.Is(err, errManagedApprovedSourceBusy):
+		result.AddError("lifecycle_busy", "another DefenseClaw lifecycle run holds lifecycle.lock, so the approved config source, which differs from the installed config, was not refreshed and a Setup /repair after a hand edit could restore an older config; the run can be retried")
 	case err != nil:
-		result.AddWarning("approved_config_source_stale", "the approved config source could not be refreshed ("+
-			windowsEnterpriseBoundedDiagnostic(err.Error())+"); a Setup /repair after a hand edit could restore an older config until /ensure CONFIG= runs with the current config")
+		result.AddError("approved_config_source_stale", "the approved config source differs from the installed config and could not be refreshed ("+
+			windowsEnterpriseBoundedDiagnostic(err.Error())+"); a Setup /repair after a hand edit could restore an older config. Next step: run "+
+			windowsEnterpriseSetupCommand("/ensure", "CONFIG=<approved absolute config path>", "JSON=1")+" from an elevated PowerShell prompt."+windowsEnterpriseSetupSourceNote)
 	case changed:
 		result.Changes = append(result.Changes, "refreshed the approved config source to the installed config, which an earlier release had left at an older config")
 	}

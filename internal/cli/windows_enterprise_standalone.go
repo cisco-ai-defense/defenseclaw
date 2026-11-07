@@ -905,7 +905,25 @@ func runWindowsEnterpriseStandaloneAction(
 		settleWindowsEnterpriseHotConfigClosure(ctx, result, action)
 	}
 	addWindowsEnterpriseNothingInstalledError(result, report, action)
+	if action == "upgrade" || action == "repair" {
+		// An upgrade without CONFIG= carries the earlier approved config
+		// source forward, and a repair that found nothing to restore leaves
+		// it as it is: heal it as ensure does (GAP-0779).
+		healWindowsEnterpriseApprovedSourceOnSuccess(result, opts)
+	}
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+}
+
+// healWindowsEnterpriseApprovedSourceOnSuccess runs the approved config source
+// check for a lifecycle run that ended with no error on an installed
+// deployment and delivered no signed bundle. It reports whether the check
+// added an error.
+func healWindowsEnterpriseApprovedSourceOnSuccess(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) bool {
+	if len(result.Errors) != 0 || !result.Installed || opts.bundle != nil {
+		return false
+	}
+	windowsEnterpriseHealApprovedSource(result)
+	return len(result.Errors) != 0
 }
 
 // settleWindowsEnterpriseHotConfigClosure handles the closure a config change
@@ -3919,12 +3937,14 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		// even for a clean run, so the closure is settled on the error list
 		// as repair and verify settle it: released once the gateway proves
 		// the installed config, otherwise named (GAP-2087).
-		if len(result.Errors) == 0 && result.Installed && opts.bundle == nil {
-			windowsEnterpriseHealApprovedSource(result)
-		}
 		errorsBefore := len(result.Errors)
 		settleWindowsEnterpriseHotConfigClosure(ctx, result, "ensure")
 		if len(result.Errors) != errorsBefore {
+			code = windowsEnterpriseFailureCodeFor(result)
+		}
+		// Last, after the closure proof: the approved config source changes
+		// only for a run that otherwise succeeded (GAP-0779).
+		if healWindowsEnterpriseApprovedSourceOnSuccess(result, opts) {
 			code = windowsEnterpriseFailureCodeFor(result)
 		}
 		return finishWindowsEnterpriseStandalone(cmd, opts, result, code)
