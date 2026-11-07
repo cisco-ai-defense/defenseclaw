@@ -2399,10 +2399,15 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	// is decided on the final verdict, after a failed audit write may have
 	// turned an allow into a block (GAP-0644). Secure Client answers stay as
 	// they were.
-	if verdict.Action == "block" && verdict.Mode == "action" &&
-		strings.EqualFold(firstNonEmpty(req.Connector, connectorName), "openclaw") &&
+	if strings.EqualFold(firstNonEmpty(req.Connector, connectorName), "openclaw") &&
 		openClawNoticeAllowed(a.decisionConfig(r.Context())) {
-		rememberOpenClawBlockNotice(req.Tool, req.ToolCallID, strings.TrimSpace(req.SessionID), evalCtx.RuleIDs, verdict.Reason)
+		if session := strings.TrimSpace(req.SessionID); verdict.Action == "block" && verdict.Mode == "action" {
+			rememberOpenClawBlockNotice(req.Tool, req.ToolCallID, session, evalCtx.RuleIDs, verdict.Reason)
+		} else {
+			// Not a block: the call id is noted so that a block of another
+			// session under the same id is known to be ambiguous.
+			observeOpenClawToolCall(req.ToolCallID, session)
+		}
 	}
 
 	a.emitCodeGuardTelemetry(r.Context(), &req, verdict, elapsed)

@@ -43,16 +43,21 @@ import (
 // ids) cannot be keyed and shows nothing. An allowed call records nothing.
 //
 // A call id is not unique: OpenClaw replay rewrites a repeated id, and two
-// sessions of one account can send the same one. The notice therefore records
-// the session of the block and is shown only when exactly one live block
-// claims the result id. A model request that names another session is not the
-// session of the block. Two blocks that claim one result id, in the same
-// session or in sessions the request does not tell apart, are ambiguous and
-// show nothing. The session is a veto and never a key: the plugin stamps model
-// requests from the last tool context, which can be a concurrent session, so a
-// request of the blocked session may carry another session and then waits for
-// the notice to expire. Not showing a line is the safe error. A notice is
-// taken by one request, so a block is shown once. A reply with no
+// sessions of one account can send the same one. Two facts keep a result from
+// taking the notice of another call. First, the notice records the session of
+// the block and is claimed only by a request of exactly that session: a
+// request that names no session, or a block recorded with none, is not the
+// session of the block (two empty sessions are equal, which is the account
+// whose plugin sends none). Second, the plugin stamps model requests from the
+// last tool context, so a header can be stale; the header alone is therefore
+// not proof. Every OpenClaw tool call the inspect endpoint sees, allowed or
+// blocked, is noted with its id and session for a while, and a block whose id
+// another session also used (before or after the block) is ambiguous. Two
+// blocks recorded under one id and session are ambiguous too: equal text is
+// not an event identity, so a repeat is never taken for a retry. An ambiguous
+// block shows nothing and is consumed silently by the first result that
+// claims it. Not showing a line is the safe error. A notice is taken by one
+// request, so a block is shown once. A reply with no
 // text to lead with, or in a format that is not rewritten, gives the notice
 // back until it expires, so the line lands on the first reply that can carry
 // it. A reply DefenseClaw wrote itself (it starts with the block banner) is
@@ -61,6 +66,8 @@ import (
 const (
 	openClawBlockNoticeTTL      = 2 * time.Minute
 	openClawBlockNoticeCap      = 256
+	openClawSeenCallTTL         = 30 * time.Minute
+	openClawSeenCallCap         = 1024
 	openClawBlockNoticeMark     = "[DefenseClaw] Tool call blocked"
 	openClawBlockNoticeMaxBody  = 32 << 20
 	openClawBlockNoticeMaxFrame = 4 << 20
@@ -75,15 +82,25 @@ type openClawBlockNotice struct {
 	session string
 	line    string
 	at      time.Time
-	// ambiguous is set when a second, different block was recorded under the
-	// same call id and session: no result can be told apart, so the notice is
-	// consumed by the first result that claims it and shows nothing.
+	// ambiguous is set when another block under the same call id and session,
+	// or a call of another session under the same call id, was recorded: no
+	// result can be told apart, so the notice is consumed by the first result
+	// that claims it and shows nothing.
 	ambiguous bool
+}
+
+// openClawSeenCall is one tool call the inspect endpoint saw, kept only to
+// tell that two sessions used one call id.
+type openClawSeenCall struct {
+	callID  string
+	session string
+	at      time.Time
 }
 
 var openClawBlockNotices struct {
 	mu      sync.Mutex
 	entries []openClawBlockNotice
+	seen    []openClawSeenCall
 }
 
 func openClawNoticeText(s string, limit int) string {
@@ -129,35 +146,64 @@ func openClawNoticeAllowed(cfg *config.Config) bool {
 
 // rememberOpenClawBlockNotice records an enforced block of one OpenClaw tool
 // call under its call id and session. A call without an id cannot be tied to
-// its result and records nothing. The same block recorded again (a retry of
-// the inspect call) refreshes its entry; a different block under the same id
-// and session makes that entry ambiguous instead of replacing it, so one
-// block never shows the reason of another.
+// its result and records nothing. A second block under the same id and session
+// is never a retry (nothing in the inspect call tells the two events apart):
+// both are marked ambiguous, so one block never shows the reason of another.
 func rememberOpenClawBlockNotice(tool, callID, session string, ruleIDs []string, reason string) {
+	line := openClawBlockNoticeLine(tool, ruleIDs, reason)
+	recordOpenClawToolCall(callID, session, &line)
+}
+
+// observeOpenClawToolCall notes an OpenClaw tool call that was not blocked, so
+// a block recorded under the same call id by another session is known to be
+// ambiguous. It records no notice.
+func observeOpenClawToolCall(callID, session string) {
+	recordOpenClawToolCall(callID, session, nil)
+}
+
+// recordOpenClawToolCall notes one inspected call and, when blockLine is set,
+// records its block notice. A call of another session under the same id makes
+// every live block under that id ambiguous, whichever came first.
+func recordOpenClawToolCall(callID, session string, blockLine *string) {
 	if callID == "" {
 		return
 	}
 	openClawBlockNotices.mu.Lock()
 	defer openClawBlockNotices.mu.Unlock()
 	now := openClawToolOutcomeNow()
-	line := openClawBlockNoticeLine(tool, ruleIDs, reason)
-	kept := pruneOpenClawBlockNotices(openClawBlockNotices.entries, now)
-	n := kept[:0]
-	collided := false
-	for _, e := range kept {
-		if e.callID != callID || e.session != session {
-			n = append(n, e)
-			continue
-		}
-		if e.ambiguous || e.line != line {
-			e.ambiguous, collided = true, true
-			n = append(n, e)
+	entries := pruneOpenClawBlockNotices(openClawBlockNotices.entries, now)
+	seen := openClawBlockNotices.seen[:0]
+	otherSession := false
+	for _, c := range openClawBlockNotices.seen {
+		switch {
+		case now.Sub(c.at) >= openClawSeenCallTTL:
+		case c.callID == callID && c.session == session:
+			// the same call id of the same session is refreshed below
+		default:
+			otherSession = otherSession || c.callID == callID
+			seen = append(seen, c)
 		}
 	}
-	if !collided {
-		n = append(n, openClawBlockNotice{callID: callID, session: session, line: line, at: now})
+	seen = append(seen, openClawSeenCall{callID: callID, session: session, at: now})
+	if n := len(seen); n > openClawSeenCallCap {
+		seen = seen[n-openClawSeenCallCap:]
 	}
-	openClawBlockNotices.entries = n
+	openClawBlockNotices.seen = seen
+
+	repeated := false
+	for i := range entries {
+		switch {
+		case entries[i].callID != callID:
+		case entries[i].session != session:
+			entries[i].ambiguous = true
+		case blockLine != nil:
+			entries[i].ambiguous, repeated = true, true
+		}
+	}
+	if blockLine != nil && !repeated {
+		entries = append(entries, openClawBlockNotice{callID: callID, session: session, line: *blockLine, at: now, ambiguous: otherSession})
+	}
+	openClawBlockNotices.entries = entries
 	capOpenClawBlockNotices()
 }
 
@@ -187,10 +233,11 @@ func openClawBlockNoticesPending() bool {
 	return len(openClawBlockNotices.entries) > 0
 }
 
-// inSession is false only when both the block and the request name a session
-// and the two differ.
+// inSession is true only for a request of the session the block was recorded
+// for. A request that names no session, or a block recorded with none, is not
+// that session unless both name none.
 func (n openClawBlockNotice) inSession(session string) bool {
-	return n.session == "" || session == "" || n.session == session
+	return n.session == session
 }
 
 // takeOpenClawBlockNotices removes and returns the live notices whose call id

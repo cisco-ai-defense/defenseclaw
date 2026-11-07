@@ -15,12 +15,14 @@ import (
 // a tool definition, the content of any result or any other field names no
 // result and takes no notice.
 
-// toolResultID is the call id one tool-result message carries. responses is
-// true only for the id of a Responses function_call_output item, the one
-// adapter whose id form differs from the id OpenClaw gave the call.
+// toolResultID is the call id one tool-result message carries. itemRef is set
+// only for a Responses function_call_output, the one adapter whose id form
+// differs from the id OpenClaw gave the call ("<call id>|<item id>"): it is the
+// full id rebuilt from the request own function_call item of that call, and is
+// empty unless exactly one such item names the call.
 type toolResultID struct {
-	id        string
-	responses bool
+	id      string
+	itemRef string
 }
 
 // toolResultIDs returns the call id of every tool-result message of the
@@ -56,13 +58,32 @@ func toolResultIDs(body []byte) []toolResultID {
 			}
 		}
 	}
-	// Responses: input[] items of a tool call output carry it in call_id.
-	for _, item := range objectItems(root["input"]) {
-		if typ, _ := item["type"].(string); strings.HasSuffix(strings.ToLower(strings.TrimSpace(typ)), "_call_output") {
-			if id, _ := item["call_id"].(string); id != "" {
-				ids = append(ids, toolResultID{id: id, responses: true})
-			}
+	// Responses: input[] items of a tool call output carry it in call_id. That
+	// is the call part of the id OpenClaw gave the call; the item part sits on
+	// the function_call item of the same request, so a function_call_output is
+	// tied to the full id only when exactly one function_call item names its
+	// call. Two items of one call part, or none, leave the result without the
+	// full id and it matches nothing but an id equal to its call_id.
+	input := objectItems(root["input"])
+	itemsOfCall := map[string][]string{}
+	for _, item := range input {
+		if responsesItemType(item) == "function_call" {
+			callID, _ := item["call_id"].(string)
+			itemID, _ := item["id"].(string)
+			itemsOfCall[callID] = append(itemsOfCall[callID], itemID)
 		}
+	}
+	for _, item := range input {
+		typ := responsesItemType(item)
+		callID, _ := item["call_id"].(string)
+		if callID == "" || !strings.HasSuffix(typ, "_call_output") {
+			continue
+		}
+		r := toolResultID{id: callID}
+		if items := itemsOfCall[callID]; typ == "function_call_output" && len(items) == 1 && items[0] != "" {
+			r.itemRef = callID + "|" + items[0]
+		}
+		ids = append(ids, r)
 	}
 	// Gemini: contents[].parts[].functionResponse.id, when the request has one.
 	for _, content := range objectItems(root["contents"]) {
@@ -75,6 +96,11 @@ func toolResultIDs(body []byte) []toolResultID {
 		}
 	}
 	return ids
+}
+
+func responsesItemType(item map[string]any) string {
+	typ, _ := item["type"].(string)
+	return strings.ToLower(strings.TrimSpace(typ))
 }
 
 func isToolRole(role string) bool {
@@ -100,17 +126,10 @@ func objectItems(v any) []map[string]any {
 // isResultOf reports whether one result id is the id of the call this notice
 // was recorded for. The id must equal the recorded id. The one provider form
 // that differs is the Responses function_call_output: OpenClaw names a
-// Responses call "<call id>|<item id>" and sends back only the call id, so on
-// that adapter alone the part before "|" is the same call. On every other
-// adapter a recorded id with "|" is matched only by itself, and a result whose
-// id is only the head of it is another call.
+// Responses call "<call id>|<item id>" and sends back only the call id, so that
+// result matches through the full id its request rebuilds (itemRef) and never
+// through the call part alone, which a sibling item of the same call part also
+// carries. A recorded id with "|" is otherwise matched only by itself.
 func (n openClawBlockNotice) isResultOf(r toolResultID) bool {
-	if r.id == n.callID {
-		return true
-	}
-	if !r.responses {
-		return false
-	}
-	head, _, found := strings.Cut(n.callID, "|")
-	return found && head != "" && r.id == head
+	return r.id == n.callID || (r.itemRef != "" && r.itemRef == n.callID)
 }

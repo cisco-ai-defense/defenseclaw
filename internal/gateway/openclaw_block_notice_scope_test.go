@@ -45,7 +45,7 @@ func TestGAP0644OtherConnectorNeverTakesTheNotice(t *testing.T) {
 			resetOpenClawBlockNotices(t)
 			rememberTestNotice("exec", []string{noticeTestRule}, "r")
 			o := tc.o
-			o.session, o.reqBody, o.ctype, o.respBody = "sess-a", noticeChatReq(), noticeJSONType, noticeChatReply
+			o.reqBody, o.ctype, o.respBody = noticeChatReq(), noticeJSONType, noticeChatReply
 			out, _ := serveNoticeWith(t, o)
 			if out != noticeChatReply || !openClawBlockNoticesPending() {
 				t.Fatalf("another connector took or showed the OpenClaw notice: %s", out)
@@ -70,35 +70,6 @@ func TestGAP0644UnauthorizedRequestNeverTakesTheNotice(t *testing.T) {
 	out, _ := serveNoticeWith(t, noticeServe{deny: true, reqBody: noticeChatReq(), ctype: noticeJSONType, respBody: noticeChatReply})
 	if out != noticeChatReply || !openClawBlockNoticesPending() {
 		t.Fatalf("a request without the owner credential took the notice: %s", out)
-	}
-}
-
-// The call id rides in the result message of its own call, so the session
-// header the model request carries does not decide the match: a plugin that
-// stamps another session (two sessions at once), an empty one or none still
-// shows the block of the call whose result the request carries (review 3,
-// R3-2). The notice is taken once, whatever the header said.
-func TestGAP0644SessionHeaderDoesNotDecideTheMatch(t *testing.T) {
-	for _, header := range []string{"sess-a", "sess-b", ""} {
-		resetOpenClawBlockNotices(t)
-		rememberTestNotice("exec", []string{noticeTestRule}, "r")
-		out, _ := serveNoticeWith(t, noticeServe{session: header, reqBody: noticeChatReq(), ctype: noticeJSONType, respBody: noticeChatReply})
-		if !noticeServed(out) || openClawBlockNoticesPending() {
-			t.Errorf("header %q: served=%v pending=%v: %s", header, noticeServed(out), openClawBlockNoticesPending(), out)
-		}
-	}
-	// Two blocks from two sessions: each request takes its own block only,
-	// whichever header each carries.
-	resetOpenClawBlockNotices(t)
-	rememberOpenClawBlockNotice("exec", "call_a", "", []string{noticeTestRule}, "r")
-	rememberOpenClawBlockNotice("read", "call_b", "", []string{noticeTestRule}, "r")
-	out, _ := serveNoticeWith(t, noticeServe{session: "sess-b", reqBody: noticeChatReqFor("call_a"), ctype: noticeJSONType, respBody: noticeChatReply})
-	if !strings.Contains(out, "Tool call blocked: exec") || strings.Contains(out, "read") {
-		t.Fatalf("session A block did not show alone: %s", out)
-	}
-	out, _ = serveNoticeWith(t, noticeServe{session: "sess-a", reqBody: noticeChatReqFor("call_b"), ctype: noticeJSONType, respBody: noticeChatReply})
-	if !strings.Contains(out, "Tool call blocked: read") || strings.Contains(out, "exec") {
-		t.Fatalf("session B block did not show alone: %s", out)
 	}
 }
 
@@ -132,13 +103,13 @@ func TestGAP0644CallIDOutsideAToolResultTakesNothing(t *testing.T) {
 		{"not json", "tool result ID"},
 	}
 	for _, c := range outside {
-		out, _ := serveNoticeWith(t, noticeServe{session: "sess-a", reqBody: strings.ReplaceAll(c.body, "ID", id), ctype: noticeJSONType, respBody: noticeChatReply})
+		out, _ := serveNoticeWith(t, noticeServe{reqBody: strings.ReplaceAll(c.body, "ID", id), ctype: noticeJSONType, respBody: noticeChatReply})
 		if out != noticeChatReply || !openClawBlockNoticesPending() {
 			t.Fatalf("%s: a call id outside a tool-result message took the notice: %s", c.name, out)
 		}
 	}
 	// The real result still takes it, once.
-	out, _ := serveNoticeWith(t, noticeServe{session: "sess-a", reqBody: noticeChatReq(), ctype: noticeJSONType, respBody: noticeChatReply})
+	out, _ := serveNoticeWith(t, noticeServe{reqBody: noticeChatReq(), ctype: noticeJSONType, respBody: noticeChatReply})
 	if !noticeServed(out) || openClawBlockNoticesPending() {
 		t.Fatalf("the blocked result did not show the notice: %s", out)
 	}
@@ -180,14 +151,14 @@ func TestGAP0644ResultWithoutACallIDTakesNothing(t *testing.T) {
 		"chat result naming the tool":    `{"messages":[{"role":"tool","name":"exec","content":"DefenseClaw: blocked"}]}`,
 		"chat result id is the tool":     `{"messages":[{"role":"tool","tool_call_id":"exec","name":"exec","content":"fine"}]}`,
 	} {
-		if out, _ := serveNoticeWith(t, noticeServe{session: "sess-a", reqBody: body, ctype: noticeJSONType, respBody: noticeChatReply}); out != noticeChatReply {
+		if out, _ := serveNoticeWith(t, noticeServe{reqBody: body, ctype: noticeJSONType, respBody: noticeChatReply}); out != noticeChatReply {
 			t.Fatalf("%s took a notice: %s", name, out)
 		}
 	}
 	if !openClawBlockNoticesPending() {
 		t.Fatal("a request without a call id used up the notice")
 	}
-	if out, _ := serveNoticeWith(t, noticeServe{session: "sess-a", reqBody: noticeChatReq(), ctype: noticeJSONType, respBody: noticeChatReply}); !noticeServed(out) {
+	if out, _ := serveNoticeWith(t, noticeServe{reqBody: noticeChatReq(), ctype: noticeJSONType, respBody: noticeChatReply}); !noticeServed(out) {
 		t.Fatalf("the blocked result did not show the notice: %s", out)
 	}
 }
