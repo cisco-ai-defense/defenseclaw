@@ -2957,17 +2957,31 @@ namespace $nativeNamespace
             const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
             const int ERROR_SHARING_VIOLATION = 32;
             const int ERROR_LOCK_VIOLATION = 33;
+            const int ERROR_ACCESS_DENIED = 5;
             held = false;
             IntPtr handle;
             int error;
-            using (new UninstallFilePrivilegeScope(true))
+            // A plain open first: with backup semantics Windows does not
+            // refuse a read open on a holder that denies read sharing, so the
+            // privileged open is only the fallback for a file whose access
+            // list does not let the caller read it.
+            handle = CreateFileNoFollowWithRetry(
+                path,
+                FILE_READ_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                FILE_SHARE_READ,
+                out error);
+            if (handle == new IntPtr(-1) && error == ERROR_ACCESS_DENIED)
             {
-                handle = CreateFileNoFollowWithRetry(
-                    path,
-                    FILE_READ_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL,
-                    FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
-                    FILE_SHARE_READ,
-                    out error);
+                using (new UninstallFilePrivilegeScope(true))
+                {
+                    handle = CreateFileNoFollowWithRetry(
+                        path,
+                        FILE_READ_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL,
+                        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                        FILE_SHARE_READ,
+                        out error);
+                }
             }
             if (handle == new IntPtr(-1))
             {
