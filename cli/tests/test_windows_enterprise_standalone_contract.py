@@ -158,8 +158,8 @@ def test_deployment_metadata_retry_keeps_permanent_failures_and_secure_client_si
     assert "return Get-DefenseClawDeploymentMetadataOnce -Layout $Layout -Required:$Required" in reader
     assert "if (-not (Test-DefenseClawTransientDeploymentMetadataError" in reader
     assert "$exception -is [Management.Automation.ItemNotFoundException]" in transient
-    assert "NativeErrorCode -in @(2, 3, 32)" in transient
-    assert "$exception.HResult -band 0xffff) -in @(2, 3, 32)" in transient
+    assert "NativeErrorCode -in @(2, 3, 32, 33)" in transient
+    assert "$exception.HResult -band 0xffff) -in @(2, 3, 32, 33)" in transient
 
 
 def test_deployment_metadata_retry_recovers_only_a_transient_name(tmp_path: Path) -> None:
@@ -195,6 +195,12 @@ function Get-DefenseClawDeploymentMetadataOnce {
     if ($script:Mode -eq 'sharing' -and $script:Attempts -eq 1) {
         throw [ComponentModel.Win32Exception]::new(32)
     }
+    if ($script:Mode -eq 'lock_win32' -and $script:Attempts -eq 1) {
+        throw [ComponentModel.Win32Exception]::new(33)
+    }
+    if ($script:Mode -eq 'lock_io' -and $script:Attempts -eq 1) {
+        throw [IO.IOException]::new('metadata is locked', 0x80070021)
+    }
     if ($script:Mode -eq 'denied') {
         throw [UnauthorizedAccessException]::new('metadata access denied')
     }
@@ -207,6 +213,12 @@ $transientAttempts = $script:Attempts
 $script:Mode = 'sharing'; $script:Attempts = 0
 $shared = Get-DefenseClawDeploymentMetadata -Layout $layout -Required
 $sharingAttempts = $script:Attempts
+$script:Mode = 'lock_win32'; $script:Attempts = 0
+$lockedWin32 = Get-DefenseClawDeploymentMetadata -Layout $layout -Required
+$lockWin32Attempts = $script:Attempts
+$script:Mode = 'lock_io'; $script:Attempts = 0
+$lockedIO = Get-DefenseClawDeploymentMetadata -Layout $layout -Required
+$lockIOAttempts = $script:Attempts
 $script:Mode = 'denied'; $script:Attempts = 0
 $denied = $false
 try { [void](Get-DefenseClawDeploymentMetadata -Layout $layout -Required) }
@@ -225,6 +237,10 @@ catch { $secureClientThrew = $_.Exception -is [IO.FileNotFoundException] }
     transient_attempts = $transientAttempts
     sharing_accepted = [bool]$shared.installed
     sharing_attempts = $sharingAttempts
+    lock_win32_accepted = [bool]$lockedWin32.installed
+    lock_win32_attempts = $lockWin32Attempts
+    lock_io_accepted = [bool]$lockedIO.installed
+    lock_io_attempts = $lockIOAttempts
     denied = $denied
     denied_attempts = $deniedAttempts
     missing = ($null -eq $missing)
@@ -247,10 +263,102 @@ catch { $secureClientThrew = $_.Exception -is [IO.FileNotFoundException] }
         "transient_attempts": 2,
         "sharing_accepted": True,
         "sharing_attempts": 2,
+        "lock_win32_accepted": True,
+        "lock_win32_attempts": 2,
+        "lock_io_accepted": True,
+        "lock_io_attempts": 2,
         "denied": True,
         "denied_attempts": 1,
         "missing": True,
         "missing_attempts": 7,
+        "secure_client_threw": True,
+        "secure_client_attempts": 1,
+    }
+
+
+def test_deployment_metadata_entry_retries_first_lock_violation(tmp_path: Path) -> None:
+    import json
+
+    engine = _portable_pwsh()
+    if engine is None:
+        pytest.skip("PowerShell 7 (pwsh) is not installed")
+    module = _text(MODULE)
+    classifier = _function_body(module, "Test-DefenseClawTransientDeploymentMetadataError")
+    entry_probe = _function_body(module, "Test-DefenseClawDeploymentMetadataPresent")
+    # The production probe qualifies Test-Path. Replace only that command in
+    # this harness so each first open can report a controlled Windows error.
+    entry_probe = entry_probe.replace(
+        "Microsoft.PowerShell.Management\\Test-Path", "Test-TransientProbePath"
+    )
+    harness = tmp_path / "metadata-entry-lock.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\nSet-StrictMode -Version Latest\n"
+        + classifier
+        + entry_probe
+        + r"""
+$script:Standalone = $true
+$script:Mode = 'lock_win32'
+$script:Attempts = 0
+function Test-DefenseClawStandaloneProfile { return $script:Standalone }
+function Test-TransientProbePath {
+    param([string]$LiteralPath, [string]$PathType)
+    if ($PathType -eq 'Container') { return $true }
+    $script:Attempts++
+    if ($script:Attempts -eq 1) {
+        if ($script:Mode -eq 'lock_win32') {
+            throw [ComponentModel.Win32Exception]::new(33)
+        }
+        if ($script:Mode -eq 'lock_io') {
+            throw [IO.IOException]::new('metadata is locked', 0x80070021)
+        }
+        if ($script:Mode -eq 'denied') {
+            throw [UnauthorizedAccessException]::new('metadata access denied')
+        }
+    }
+    return $true
+}
+$path = [IO.Path]::Combine([IO.Path]::GetTempPath(), 'deployment.json')
+$win32Present = Test-DefenseClawDeploymentMetadataPresent -Path $path
+$win32Attempts = $script:Attempts
+$script:Mode = 'lock_io'; $script:Attempts = 0
+$ioPresent = Test-DefenseClawDeploymentMetadataPresent -Path $path
+$ioAttempts = $script:Attempts
+$script:Mode = 'denied'; $script:Attempts = 0
+$denied = $false
+try { [void](Test-DefenseClawDeploymentMetadataPresent -Path $path) }
+catch { $denied = $_.Exception -is [UnauthorizedAccessException] }
+$deniedAttempts = $script:Attempts
+$script:Standalone = $false; $script:Mode = 'lock_win32'; $script:Attempts = 0
+$secureClientThrew = $false
+try { [void](Test-DefenseClawDeploymentMetadataPresent -Path $path) }
+catch { $secureClientThrew = $_.Exception -is [ComponentModel.Win32Exception] }
+[pscustomobject]@{
+    win32_present = $win32Present
+    win32_attempts = $win32Attempts
+    io_present = $ioPresent
+    io_attempts = $ioAttempts
+    denied = $denied
+    denied_attempts = $deniedAttempts
+    secure_client_threw = $secureClientThrew
+    secure_client_attempts = $script:Attempts
+} | ConvertTo-Json -Compress
+""",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [engine, "-NoProfile", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout) == {
+        "win32_present": True,
+        "win32_attempts": 2,
+        "io_present": True,
+        "io_attempts": 2,
+        "denied": True,
+        "denied_attempts": 1,
         "secure_client_threw": True,
         "secure_client_attempts": 1,
     }
