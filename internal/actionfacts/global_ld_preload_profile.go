@@ -58,8 +58,11 @@ func ExactGlobalLDPreloadProfileWrite(input Input, facts Facts) bool {
 func ExactGlobalLDPreloadProfilePath(value string) bool {
 	if value == "" || len(value) > maxScalarBytes || !utf8.ValidString(value) ||
 		strings.TrimSpace(value) != value || strings.IndexByte(value, 0) >= 0 ||
-		path.Clean(value) != value || hasUnresolvedPathSyntax(value) ||
-		!strings.HasPrefix(value, globalLDPreloadProfileDirectory) {
+		path.Clean(value) != value || hasUnresolvedPathSyntax(value) {
+		return false
+	}
+	value = EtcSpelling(value)
+	if !strings.HasPrefix(value, globalLDPreloadProfileDirectory) {
 		return false
 	}
 	leaf := strings.TrimPrefix(value, globalLDPreloadProfileDirectory)

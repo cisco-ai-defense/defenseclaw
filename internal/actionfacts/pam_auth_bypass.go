@@ -107,6 +107,7 @@ func exactProtectedPAMPath(value string) bool {
 		path.Clean(value) != value || hasUnresolvedPathSyntax(value) {
 		return false
 	}
+	value = EtcSpelling(value)
 	if value == "/etc/pam.conf" {
 		return true
 	}

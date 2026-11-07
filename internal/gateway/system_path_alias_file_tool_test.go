@@ -106,3 +106,36 @@ func TestOverLimitPatchOnASystemLinkKeepsItsVerdict(t *testing.T) {
 		t.Fatalf("padded verdict %q, small %q", padded, small)
 	}
 }
+
+// TestFileToolOnThePhysicalSystemSpellingKeepsItsContentRule pins GAP-0819:
+// a whole-file write that names a protected system file by its physical macOS
+// spelling (/private/etc, where /etc is a link) gets the verdict the same
+// write gets under /etc. The benign twins stay allowed under both spellings.
+func TestFileToolOnThePhysicalSystemSpellingKeepsItsContentRule(t *testing.T) {
+	home, project := hermesPatchHome(t)
+	const preload = "# logger\nexport LD_PRELOAD=/usr/local/lib/liblogger.so\n"
+	for _, c := range []struct {
+		name, connector, tool, pathKey, target, content string
+		blocked                                         bool
+	}{
+		{"docker insecure registry", "claudecode", "Write", "file_path", "/etc/docker/daemon.json", overLimitDockerHTTPRegistry, true},
+		{"global preload fragment", "claudecode", "Write", "file_path", "/etc/profile.d/logger.sh", preload, true},
+		{"benign daemon settings", "claudecode", "Write", "file_path", "/etc/docker/daemon.json", `{"log-level":"warn"}`, false},
+		{"benign profile fragment", "claudecode", "Write", "file_path", "/etc/profile.d/colors.sh", "export CLICOLOR=1\n", false},
+	} {
+		for _, spelling := range []string{"/etc", "/private/etc"} {
+			t.Run(c.name+"/"+spelling, func(t *testing.T) {
+				target := spelling + strings.TrimPrefix(c.target, "/etc")
+				call := nativeWriteCall{c.connector, c.tool, func(path string) map[string]any {
+					return map[string]any{c.pathKey: path, "content": c.content}
+				}}
+				body := call.body(t, project, target)
+				evidence := hookpaths.ResolveConnector(c.connector, "", "preToolUse", []byte(body))
+				action := overLimitHookAction(t, overLimitHostHookWithEvidence(t, c.connector, home, body, evidence))
+				if c.blocked != (action == "block") {
+					t.Fatalf("%s: action = %q, want blocked=%v", target, action, c.blocked)
+				}
+			})
+		}
+	}
+}
