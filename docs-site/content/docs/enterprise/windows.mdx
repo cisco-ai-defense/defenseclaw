@@ -982,10 +982,10 @@ is named. Install, ensure and repair still refuse to write through such a link.
 Releases before 1.0.9 kept no record. On a computer installed with one of them, the first 1.0.9
 install, upgrade or repair records `C:\Program Files\Cisco` and `C:\ProgramData\Cisco` when they
 still have the permissions Setup gave them and hold only DefenseClaw folders. It records
-`C:\Program Files\ClaudeCode\managed-settings.d`, `C:\ProgramData\Cursor` and
-`C:\ProgramData\OpenAI\Codex` only when all three hold: the folder was created after
+`C:\Program Files\ClaudeCode\managed-settings.d`, `C:\ProgramData\Cursor`,
+`C:\ProgramData\OpenAI\Codex` and `C:\ProgramData\ampcode` only when all three hold: the folder was created after
 `C:\ProgramData\Cisco\DefenseClaw`, it has exactly the permissions DefenseClaw creates it with, and
-it holds only DefenseClaw's own files. `ClaudeCode` and `OpenAI` follow when their only child is
+it holds only DefenseClaw's own files (`ampcode` must be empty: 1.0.2 and later releases create it empty). `ClaudeCode` and `OpenAI` follow when their only child is
 recorded. Setup checks these folders once, on the first install, upgrade or repair after the
 upgrade; a folder an administrator makes later and Setup adopts is never recorded. The check counts
 as done when every folder was recorded or failed one of the three conditions; if a record cannot be

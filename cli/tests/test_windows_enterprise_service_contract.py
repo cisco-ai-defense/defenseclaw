@@ -6201,7 +6201,18 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     agent = _psm1_function(module, "Get-DefenseClawAgentFolderBackfillRefusal")
     assert "if ($created -lt $stateCreated) {" in agent
     assert "[IO.Directory]::GetCreationTimeUtc($StateRoot)" in agent
-    assert "$dacl.Count -ne 3" in agent and "$ace.AceFlags -ne $inherit" in agent
+    descriptor = _psm1_function(module, "Get-DefenseClawAgentFolderDescriptorRefusal")
+    assert "Get-DefenseClawAgentFolderDescriptorRefusal -Path $Path" in agent
+    assert "$dacl.Count -ne 3" in descriptor and "$ace.AceFlags -ne $inherit" in descriptor
+    # GAP-0767: ProgramData\ampcode (empty, 1.0.2 descriptor) joins the same
+    # one-shot back-fill under the same three proofs, and a purge names it
+    # once when it stays, whatever it holds, while it carries that descriptor.
+    folders = _psm1_function(module, "Get-DefenseClawAgentFolders")
+    assert "[IO.Path]::Combine($ProgramData, 'ampcode'); Kind = 'Amp'" in folders
+    assert "Parent', 'Amp')" in agent and "if ($Kind -ceq 'Amp') {" in agent
+    assert "$children.Count -ne 0" in agent
+    touched_amp = _psm1_function(module, "Get-DefenseClawTouchedUnrecordedVendorFolders")
+    assert "[string]$agent.Kind -ceq 'Amp'" in touched_amp and "Get-DefenseClawAgentFolderDescriptorRefusal -Path $folder" in touched_amp
     # GAP-0758 review S2: the selector purge never opens, creates or reads
     # behind a link at the folder.
     selector = _psm1_function(module, "Remove-DefenseClawOwnRuntimeSelector")

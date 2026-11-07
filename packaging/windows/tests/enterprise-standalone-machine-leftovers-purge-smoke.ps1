@@ -1316,6 +1316,111 @@ $failures = & $module {
                     $failures.Add("GAP-0758 review S2: the selector purge changed the folder behind the link: $(& $s2Listing)")
                 }
 
+                # GAP-0767: C:\ProgramData\ampcode. The 1.0.2 policy writer
+                # created it empty, with the descriptor above and no marker; a
+                # 1.0.9 upgrade back-fills it (origin upgrade) under the same three
+                # proofs, in the same one-shot, and a purge then removes it. A
+                # folder that fails a proof, or holds a foreign file, stays and is
+                # named once.
+                $am = [IO.Path]::Combine($ag, 'g0767')
+                $amPd = [IO.Path]::Combine($am, 'ProgramData')
+                $amPf = [IO.Path]::Combine($am, 'Program Files')
+                $amVendor = [IO.Path]::Combine($amPd, 'Cisco')
+                $amState = [IO.Path]::Combine($amVendor, 'DefenseClaw')
+                $amLife = [IO.Path]::Combine($amVendor, 'DefenseClaw-Lifecycle')
+                $amRecords = [IO.Path]::Combine($amLife, 'created-folders')
+                $amDir = [IO.Path]::Combine($amPd, 'ampcode')
+                $amArgs = @{ RecordDirectory = $amRecords; Roots = @($amPd, $amPf); StateRoot = $amState; ProgramData = $amPd; ProgramFiles = $amPf
+                    ProgramDataVendorFolder = $amVendor; ProgramFilesVendorFolder = [IO.Path]::Combine($amPf, 'Cisco') }
+                foreach ($folder in @($am, $amPd, $amPf, $amVendor, $amState)) {
+                    [void][IO.Directory]::CreateDirectory($folder)
+                }
+                Set-G091AdministratorsOwner -Path @($am, $amPd, $amPf, $amVendor, $amState)
+                [void]$native::CreateDirectorySecure($amLife, $adminOnly)
+                [IO.File]::WriteAllText([IO.Path]::Combine($amLife, 'lifecycle.lock'), '')
+                $amStateBorn = [IO.Directory]::GetCreationTimeUtc($amState)
+                $amRecordFile = [IO.Path]::Combine($amRecords, (Get-DefenseClawCreatedFolderRecordName -Path $amDir))
+                $amMarker = [IO.Path]::Combine($amRecords, 'agent-folder-backfill.done')
+                $amFresh = {
+                    # A computer that has not run the back-fill: no record, no marker.
+                    foreach ($leftover in @($amRecordFile, $amMarker)) {
+                        if ([IO.File]::Exists($leftover)) {
+                            [IO.File]::Delete($leftover)
+                        }
+                    }
+                    if ([IO.Directory]::Exists($amDir)) {
+                        foreach ($entry in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $amDir -Force)) {
+                            [IO.File]::Delete($entry.FullName)
+                        }
+                        [IO.Directory]::Delete($amDir, $false)
+                    }
+                }
+                # An empty folder in the 1.0.2 descriptor, born after StateRoot.
+                & $amFresh
+                [void]$native::CreateDirectorySecure($amDir, $agentSddl)
+                Add-DefenseClawStandaloneUpgradeVendorFolderRecords @amArgs
+                if (-not [IO.File]::Exists($amRecordFile)) {
+                    $failures.Add('GAP-0767: an empty ampcode in the 1.0.2 descriptor, created after StateRoot, was not back-filled')
+                }
+                elseif (([IO.File]::ReadAllText($amRecordFile) | Microsoft.PowerShell.Utility\ConvertFrom-Json).origin -cne 'upgrade') {
+                    $failures.Add('GAP-0767: the ampcode record is not origin:upgrade')
+                }
+                if (-not [IO.File]::Exists($amMarker)) {
+                    $failures.Add('GAP-0767: the back-fill that judged ampcode left no one-shot marker')
+                }
+                # The purge removes it, and its record.
+                if (-not [string]::IsNullOrEmpty((Remove-DefenseClawStandaloneCreatedFolder -Path $amDir -Roots @($amPd, $amPf))) -or [IO.Directory]::Exists($amDir)) {
+                    $failures.Add('GAP-0767: a purge did not remove the back-filled empty ampcode')
+                }
+                # The one-shot: the marker is there, so a folder that appears
+                # later is not judged.
+                [void]$native::CreateDirectorySecure($amDir, $agentSddl)
+                [IO.File]::Delete($amRecordFile)
+                Add-DefenseClawStandaloneUpgradeVendorFolderRecords @amArgs
+                if ([IO.File]::Exists($amRecordFile)) {
+                    $failures.Add('GAP-0767: a second back-fill recorded ampcode')
+                }
+                # (a) born before StateRoot, (b) another descriptor, (c) a foreign file.
+                & $amFresh
+                [void]$native::CreateDirectorySecure($amDir, $agentSddl)
+                [IO.Directory]::SetCreationTimeUtc($amDir, $amStateBorn.AddMinutes(-5))
+                $amWhy = [string](Get-DefenseClawAgentFolderBackfillRefusal -Path $amDir -Kind Amp -StateRoot $amState -RecordDirectory $amRecords)
+                if (-not $amWhy.Contains('before DefenseClaw')) {
+                    $failures.Add("GAP-0767 (a): an ampcode born before StateRoot was not refused for it: '$amWhy'")
+                }
+                & $amFresh
+                [void][IO.Directory]::CreateDirectory($amDir)
+                $amWhy = [string](Get-DefenseClawAgentFolderBackfillRefusal -Path $amDir -Kind Amp -StateRoot $amState -RecordDirectory $amRecords)
+                if ([string]::IsNullOrEmpty($amWhy)) {
+                    $failures.Add('GAP-0767 (b): an ampcode with an inherited descriptor was not refused')
+                }
+                $amTouched = @(Get-DefenseClawTouchedUnrecordedVendorFolders -RecordDirectory $amRecords -ProgramData $amPd -ProgramFiles $amPf)
+                if (@($amTouched | Microsoft.PowerShell.Core\Where-Object { $_ -ceq $amDir }).Count -ne 0) {
+                    $failures.Add('GAP-0767: an ampcode without DefenseClaw descriptor was named as touched')
+                }
+                & $amFresh
+                [void]$native::CreateDirectorySecure($amDir, $agentSddl)
+                [IO.File]::WriteAllText([IO.Path]::Combine($amDir, 'managed-settings.json'), '{}')
+                Add-DefenseClawStandaloneUpgradeVendorFolderRecords @amArgs
+                if ([IO.File]::Exists($amRecordFile)) {
+                    $failures.Add('GAP-0767 (c): an ampcode holding a foreign file was back-filled')
+                }
+                if (-not [IO.File]::Exists($amMarker)) {
+                    $failures.Add('GAP-0767 (c): a refusal by a proof is final, so the back-fill is done and leaves the marker')
+                }
+                $amTouched = @(Get-DefenseClawTouchedUnrecordedVendorFolders -RecordDirectory $amRecords -ProgramData $amPd -ProgramFiles $amPf)
+                $amUnproven = @(Get-DefenseClawUnprovenVendorFolders -Touched $amTouched -RecordDirectory $amRecords)
+                if (@($amUnproven | Microsoft.PowerShell.Core\Where-Object { $_ -ceq $amDir }).Count -ne 1) {
+                    $failures.Add("GAP-0767 (c): an ampcode holding a foreign file is not listed once as not provably created: $($amUnproven -join '; ')")
+                }
+                if (-not [string]::IsNullOrEmpty((Remove-DefenseClawStandaloneCreatedFolder -Path $amDir -Roots @($amPd, $amPf))) -eq $false) {
+                    $failures.Add('GAP-0767 (c): removal of a folder holding a foreign file reported it gone')
+                }
+                if (-not [IO.File]::Exists([IO.Path]::Combine($amDir, 'managed-settings.json'))) {
+                    $failures.Add('GAP-0767 (c): the foreign file in ampcode is gone')
+                }
+                & $amFresh
+
                 # Rule (ii): Secure Client.
                 $scCisco = [IO.Path]::Combine($ag, 'sc', 'ProgramData', 'Cisco')
                 [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($ag, 'sc', 'Program Files'))

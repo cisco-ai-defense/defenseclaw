@@ -19153,8 +19153,14 @@ function Set-DefenseClawAgentFolderBackfillDone {
 #   (Get-DefenseClawVendorFolderBackfillRefusal);
 # - the agent folders the hooks and Setup create, Program Files\ClaudeCode\
 #   managed-settings.d, ProgramData\Cursor and ProgramData\OpenAI\Codex, and
-#   ClaudeCode or OpenAI when their only child is recorded (GAP-0704,
-#   Get-DefenseClawAgentFolderBackfillRefusal). DefenseClaw re-stamps an
+#   ClaudeCode or OpenAI when their only child is recorded, and
+#   ProgramData\ampcode, which the 1.0.2 policy writer created empty with the
+#   same descriptor and no marker (GAP-0704, GAP-0767,
+#   Get-DefenseClawAgentFolderBackfillRefusal). Ampcode is judged in the same
+#   one-shot as the others: no release before 1.0.9 wrote the marker, so a
+#   computer upgraded from 1.0.2 through 1.0.8 has not run it, and a second
+#   one-shot would reopen the window in which a folder an administrator made
+#   and Setup adopted looks like one DefenseClaw created. DefenseClaw re-stamps an
 #   existing agent folder with the descriptor it creates one with, so the
 #   descriptor alone does not tell who made it; the folder's creation time
 #   does: a folder older than StateRoot existed before DefenseClaw. This part
@@ -19274,6 +19280,7 @@ function Get-DefenseClawAgentFolders {
         [pscustomobject]@{ Path = [IO.Path]::Combine($claude, 'managed-settings.d'); Kind = 'ClaudeDropIns' },
         [pscustomobject]@{ Path = [IO.Path]::Combine($ProgramData, 'Cursor'); Kind = 'Cursor' },
         [pscustomobject]@{ Path = [IO.Path]::Combine($openai, 'Codex'); Kind = 'Codex' },
+        [pscustomobject]@{ Path = [IO.Path]::Combine($ProgramData, 'ampcode'); Kind = 'Amp' },
         [pscustomobject]@{ Path = $claude; Kind = 'Parent' },
         [pscustomobject]@{ Path = $openai; Kind = 'Parent' })
 }
@@ -19363,48 +19370,14 @@ function Get-DefenseClawCodexStateRequirementsHashes {
     return $hashes.ToArray()
 }
 
-# Why an agent folder is not provably one DefenseClaw created, or '' when it
-# is (GAP-0704). All three must hold, and anything that cannot be read
-# refuses:
-# (a) created no earlier than StateRoot: an earlier creation time means the
-#     folder existed before DefenseClaw was installed. A re-stamp of the
-#     owner or the permissions does not change it, and on these
-#     administrator-only folders only an administrator can;
-# (b) exactly the permissions the hooks and Setup create it with: owner
-#     Administrators, inheritance off, then only SYSTEM and Administrators
-#     full control and Users read and execute, each inherited by all below
-#     (O:BA D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU));
-# (c) it holds only DefenseClaw's own files, plain files with no reparse
-#     point: its lock, state and selector files, and a file with an agent's
-#     own name (requirements.toml, hooks.json) only when DefenseClaw's state
-#     binds its hash and records that it was not there before. A parent
-#     (ClaudeCode, OpenAI) must hold only its recorded child.
-function Get-DefenseClawAgentFolderBackfillRefusal {
-    param(
-        [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][ValidateSet('ClaudeDropIns', 'Cursor', 'Codex', 'Parent')][string]$Kind,
-        [Parameter(Mandatory)][string]$StateRoot,
-        [Parameter(Mandatory)][string]$RecordDirectory,
-        [string]$CodexOwnershipPath
-    )
+# Proof (b) of the agent-folder back-fill: why the folder does not have exactly
+# the owner and permissions DefenseClaw gives a folder it creates, or ''
+# (O:BA D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)). The Go policy
+# writer creates ProgramData\ampcode with the same descriptor
+# (enterprisepolicy publicDirSDDL, the same in 1.0.2 and every later release).
+function Get-DefenseClawAgentFolderDescriptorRefusal {
+    param([Parameter(Mandatory)][string]$Path)
     try {
-        $null = Assert-DefenseClawNoReparsePath -Path $Path
-        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Container)) {
-            return 'not a folder'
-        }
-        # (a)
-        if (-not [IO.Directory]::Exists($StateRoot)) {
-            return 'StateRoot is missing, so its creation time cannot be compared'
-        }
-        $stateCreated = [IO.Directory]::GetCreationTimeUtc($StateRoot)
-        $created = [IO.Directory]::GetCreationTimeUtc($Path)
-        if ($stateCreated.Year -lt 1990 -or $created.Year -lt 1990) {
-            return 'its creation time cannot be read'
-        }
-        if ($created -lt $stateCreated) {
-            return "it was created at $($created.ToString('o')), before DefenseClaw's StateRoot ($($stateCreated.ToString('o')))"
-        }
-        # (b)
         $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
         $raw = [Security.AccessControl.RawSecurityDescriptor]::new([byte[]]$acl.GetSecurityDescriptorBinaryForm(), 0)
         if ($null -eq $raw.Owner -or $raw.Owner.Value -cne $script:AdministratorsSID) {
@@ -19433,6 +19406,59 @@ function Get-DefenseClawAgentFolderBackfillRefusal {
                 return "entry $index ($($ace.SecurityIdentifier)) is not the one DefenseClaw gives a folder it creates"
             }
         }
+        return ''
+    }
+    catch {
+        return [string]$_.Exception.Message
+    }
+}
+
+# Why an agent folder is not provably one DefenseClaw created, or '' when it
+# is (GAP-0704). All three must hold, and anything that cannot be read
+# refuses:
+# (a) created no earlier than StateRoot: an earlier creation time means the
+#     folder existed before DefenseClaw was installed. A re-stamp of the
+#     owner or the permissions does not change it, and on these
+#     administrator-only folders only an administrator can;
+# (b) exactly the permissions the hooks and Setup create it with: owner
+#     Administrators, inheritance off, then only SYSTEM and Administrators
+#     full control and Users read and execute, each inherited by all below
+#     (O:BA D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU));
+# (c) it holds only DefenseClaw's own files, plain files with no reparse
+#     point: its lock, state and selector files, and a file with an agent's
+#     own name (requirements.toml, hooks.json) only when DefenseClaw's state
+#     binds its hash and records that it was not there before. A parent
+#     (ClaudeCode, OpenAI) must hold only its recorded child.
+function Get-DefenseClawAgentFolderBackfillRefusal {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][ValidateSet('ClaudeDropIns', 'Cursor', 'Codex', 'Parent', 'Amp')][string]$Kind,
+        [Parameter(Mandatory)][string]$StateRoot,
+        [Parameter(Mandatory)][string]$RecordDirectory,
+        [string]$CodexOwnershipPath
+    )
+    try {
+        $null = Assert-DefenseClawNoReparsePath -Path $Path
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Container)) {
+            return 'not a folder'
+        }
+        # (a)
+        if (-not [IO.Directory]::Exists($StateRoot)) {
+            return 'StateRoot is missing, so its creation time cannot be compared'
+        }
+        $stateCreated = [IO.Directory]::GetCreationTimeUtc($StateRoot)
+        $created = [IO.Directory]::GetCreationTimeUtc($Path)
+        if ($stateCreated.Year -lt 1990 -or $created.Year -lt 1990) {
+            return 'its creation time cannot be read'
+        }
+        if ($created -lt $stateCreated) {
+            return "it was created at $($created.ToString('o')), before DefenseClaw's StateRoot ($($stateCreated.ToString('o')))"
+        }
+        # (b)
+        $descriptorRefusal = Get-DefenseClawAgentFolderDescriptorRefusal -Path $Path
+        if (-not [string]::IsNullOrEmpty($descriptorRefusal)) {
+            return $descriptorRefusal
+        }
         # (c)
         $children = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $Path -Force)
         if ($Kind -ceq 'Parent') {
@@ -19443,6 +19469,17 @@ function Get-DefenseClawAgentFolderBackfillRefusal {
             if (-not $child.PSIsContainer -or ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
                 -not [IO.File]::Exists([IO.Path]::Combine($RecordDirectory, (Get-DefenseClawCreatedFolderRecordName -Path $child.FullName)))) {
                 return "it holds $($child.Name), which has no record"
+            }
+            return ''
+        }
+        if ($Kind -ceq 'Amp') {
+            # The 1.0.2 through 1.0.8 policy writer put nothing in
+            # ProgramData\ampcode (Amp reads it; DefenseClaw publishes no Amp
+            # policy there), so only an empty folder can be DefenseClaw alone. A
+            # folder holding the ownership marker the 1.0.9 writer adds was
+            # created by 1.0.9 and is removed through the marker.
+            if ($children.Count -ne 0) {
+                return "it holds $($children[0].Name), which DefenseClaw does not write there"
             }
             return ''
         }
@@ -19514,6 +19551,15 @@ function Get-DefenseClawTouchedUnrecordedVendorFolders {
     foreach ($agent in @(Get-DefenseClawAgentFolders -ProgramData $ProgramData -ProgramFiles $ProgramFiles)) {
         $folder = [string]$agent.Path
         if (-not [IO.Directory]::Exists($folder) -or (& $recorded $folder)) {
+            continue
+        }
+        if ([string]$agent.Kind -ceq 'Amp') {
+            # The guardian reserves ProgramData\ampcode on every pass from 1.0.2
+            # on and holds it with the DefenseClaw descriptor, so a folder that
+            # carries it is one DefenseClaw touched, whatever it holds.
+            if ([string]::IsNullOrEmpty((Get-DefenseClawAgentFolderDescriptorRefusal -Path $folder))) {
+                [void]$touched.Add($folder)
+            }
             continue
         }
         try {
