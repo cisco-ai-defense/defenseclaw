@@ -158,8 +158,9 @@ func TestGAP0693ReusedNameRetiresRecordedUID(t *testing.T) {
 		uidGone    bool
 		wantRetire bool
 	}{
-		{name: "fresh local name has another UID", localUID: oldUID + 1, wantRetire: true},
+		{name: "fresh local name has another UID and old UID is gone", localUID: oldUID + 1, uidGone: true, wantRetire: true},
 		{name: "fresh directory search confirms old UID left", localErr: errors.New("local listing unavailable"), uidGone: true, wantRetire: true},
+		{name: "directory account shares a name with a local record", localUID: oldUID + 1},
 		{name: "same account remains", localUID: oldUID},
 		{name: "uncertain local listing", localErr: errors.New("local listing unavailable")},
 	} {
@@ -202,6 +203,73 @@ func TestGAP0693ReusedNameRetiresRecordedUID(t *testing.T) {
 			}
 			if got := len(f.ledger(t).ProtectedTargets); (got == 0) != tc.wantRetire {
 				t.Fatalf("protected targets = %d, want retired=%v", got, tc.wantRetire)
+			}
+		})
+	}
+}
+
+// A target without a manifest UID still has a recorded identity from its
+// previous protected pass. Keep that identity through the enumerator's
+// catch-up period, including after the first removal revoked its binding.
+func TestGAP0693UIDlessTargetUsesPriorRecordedUID(t *testing.T) {
+	oldUID, gid := os.Getuid(), os.Getgid()
+	for _, tc := range []struct {
+		name           string
+		uidGone        bool
+		withoutBinding bool
+		wantRemoved    bool
+	}{
+		{name: "recorded UID left", uidGone: true, wantRemoved: true},
+		{name: "protected record supplies UID", uidGone: true, withoutBinding: true, wantRemoved: true},
+		{name: "recorded UID remains", uidGone: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+			f := newStandaloneFixture(t, resolver)
+			home := f.home(t, "reused", 0o700)
+			resolver.accounts["reused"] = unixidentity.Account{Name: "reused", UID: oldUID, GID: gid, Home: home}
+			f.writeManifest(t, enterprisehooks.ManifestTarget{User: "reused", UserHome: home, Connector: "hermes"})
+			prior := protectedRow("reused", home, "hermes")
+			prior.UID = oldUID
+			f.writeLedger(t, prior)
+			if !tc.withoutBinding {
+				f.writeBindings(t, map[string]enterpriseHookUnixBinding{
+					enterpriseHookProtectedTargetKey(prior): {UID: oldUID, Home: home},
+				})
+			}
+			previousLocal, previousNameGone, previousUIDGone := enterpriseHooksEnumerateLocalAccounts,
+				enterpriseHookGuardianFreshAccountGone, enterpriseHookRecordedAccountGone
+			t.Cleanup(func() {
+				enterpriseHooksEnumerateLocalAccounts = previousLocal
+				enterpriseHookGuardianFreshAccountGone = previousNameGone
+				enterpriseHookRecordedAccountGone = previousUIDGone
+			})
+			enterpriseHooksEnumerateLocalAccounts = func(context.Context) (map[string]int, error) {
+				return map[string]int{"reused": oldUID + 1}, nil
+			}
+			enterpriseHookGuardianFreshAccountGone = func(context.Context, string) bool { return false }
+			enterpriseHookRecordedAccountGone = func(_ context.Context, user string, uid int) bool {
+				if user != "reused" || uid != oldUID {
+					t.Fatalf("fresh UID check asked for %q uid %d", user, uid)
+				}
+				return tc.uidGone
+			}
+			for pass := 0; pass < 2; pass++ {
+				run, err := runEnterpriseHookReconcileOnce(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				requireLedgerOrStateTrust(t, run.StateErr)
+				if len(run.Rows) != 1 || run.Rows[0].Removed != tc.wantRemoved ||
+					run.Rows[0].RevokeProtection != tc.wantRemoved || run.Rows[0].OK == tc.wantRemoved {
+					t.Fatalf("pass %d disposition = %+v, want removed=%v", pass, run.Rows, tc.wantRemoved)
+				}
+				if run.Rows[0].Removed && run.Rows[0].UID != oldUID {
+					t.Fatalf("pass %d removed UID = %d, want %d", pass, run.Rows[0].UID, oldUID)
+				}
+				if got := len(f.ledger(t).ProtectedTargets); (got == 0) != tc.wantRemoved {
+					t.Fatalf("pass %d protected targets = %d, want removed=%v", pass, got, tc.wantRemoved)
+				}
 			}
 		})
 	}
