@@ -466,10 +466,12 @@ def test_release_cache_keeps_unchanged_peer_version_during_schema_upgrade(
 ):
     if os.name == "nt":
         set_known_windows_directory_acl(tmp_path)
-    binary = tmp_path / "claude"
+    (tmp_path / "bin").mkdir()
+    binary = tmp_path / "bin" / "claude"
     binary.write_text("agent binary", encoding="utf-8")
     old = os.stat(binary).st_mtime - 600
     os.utime(binary, (old, old))
+    time.sleep(0.05)  # the scan is newer than the file and its folder (their change time cannot be set back)
     cached = _discovery("claudecode")
     cached.scanned_at = ad._format_rfc3339(ad._now_utc())
     cached.agents["claudecode"].binary_path = str(binary)
@@ -2905,10 +2907,12 @@ def test_timed_out_probe_keeps_version_of_unchanged_binary(monkeypatch, tmp_path
     """RHEL-U3-13: one slow --version on a busy host erased a peer's version,
     so the gateway refused that peer in action mode and setup of another
     connector did not converge."""
-    binary = tmp_path / "amp"
+    (tmp_path / "bin").mkdir()
+    binary = tmp_path / "bin" / "amp"
     binary.write_text("#!/bin/sh\n", encoding="utf-8")
     old = os.stat(binary).st_mtime - 600
     os.utime(binary, (old, old))
+    time.sleep(0.05)  # the scan is newer than the file and its folder (their change time cannot be set back)
 
     def scan(version: str, error: str):
         def fake(name: str, **_kwargs) -> ad.AgentSignal:
@@ -2938,10 +2942,12 @@ def test_a_refresh_that_cannot_find_an_unchanged_binary_keeps_its_version(monkey
     """GAP-0231: the upgrade's discovery refresh ran with a PATH that lacked
     the agents' folder, found no binary and erased the versions the gateway
     needs, so every action-mode connector was skipped after the upgrade."""
-    binary = tmp_path / "claude"
+    (tmp_path / "bin").mkdir()
+    binary = tmp_path / "bin" / "claude"
     binary.write_text("#!/bin/sh\n", encoding="utf-8")
     old = os.stat(binary).st_mtime - 600
     os.utime(binary, (old, old))
+    time.sleep(0.05)  # the scan is newer than the file and its folder (their change time cannot be set back)
 
     def scan(found: bool):
         def fake(name: str, **_kwargs) -> ad.AgentSignal:
@@ -2971,6 +2977,7 @@ def test_a_refresh_that_cannot_find_an_unchanged_binary_keeps_its_version(monkey
 
     # Removed: not installed.
     os.utime(binary, (old, old))
+    time.sleep(0.05)
     monkeypatch.setattr(ad, "_scan_agent", scan(True))
     ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
     binary.unlink()
