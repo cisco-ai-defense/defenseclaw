@@ -32,7 +32,7 @@ func TestProductFolderNamesStayVisibleInPathTargets(t *testing.T) {
 			`C:\Program Files\Cisco\Cisco Secure Client\%s\1234567890\x.log`,
 			`\\?\C:\ProgramData\Cisco\%s\`,
 			`"C:\ProgramData\Cisco\%s\run"`,
-			`C:/ProgramData/Cisco/%s/x`,
+			`C:/ProgramData/Cisco/%s`,
 			`/opt/cisco/%s/x`,
 			`%s`,
 		} {
@@ -81,16 +81,18 @@ func TestProductFolderPrefixOrSuffixIsNotAllowed(t *testing.T) {
 	}
 }
 
-// A high-entropy value does not become readable because a product folder name
-// sits between two pieces of it: the folder is taken out before judging, and
-// what remains is judged as one value.
+// A high-entropy value the detector redacts as written does not become
+// readable because a product folder name sits between two pieces of it: the
+// folder is taken out before judging, and what remains is judged as one value.
+// (A hyphenated folder name such as DefenseClaw-HookRuntime makes the span fail
+// the detector alphabet check as written, so a value split by it was never
+// redacted and is outside this test.)
 func TestProductFolderBetweenSecretPiecesDoesNotHideTheSecret(t *testing.T) {
 	t.Parallel()
 	for _, folder := range []string{
 		productlayout.ProductFolder,
 		strings.ToLower(productlayout.ProductFolder),
 		strings.ToUpper(productlayout.ProductFolder),
-		productlayout.WindowsHookRuntimeFolder,
 	} {
 		for _, shape := range []string{
 			`aB3dE5gH7jK/%s/mN1pQ3sT5uV`,
@@ -119,6 +121,38 @@ func TestProductFolderBesideOrdinaryComponentsStaysVisible(t *testing.T) {
 			if got := redactAuditTarget(t, input); got != input {
 				t.Errorf("ordinary path redacted: %q -> %q", input, got)
 			}
+		}
+	}
+}
+
+// A letter-only high-entropy value split by a product folder component is
+// still one value: the detector redacted it before the folder was special, and
+// a digit is not what makes a value a key.
+func TestProductFolderBetweenLetterOnlyPiecesDoesNotHideTheSecret(t *testing.T) {
+	t.Parallel()
+	for _, folder := range []string{productlayout.ProductFolder, strings.ToLower(productlayout.ProductFolder), strings.ToUpper(productlayout.ProductFolder)} {
+		input := "aBcDeFgHiJkL/" + folder + "/mNoPqRsTuVwX"
+		got := redactAuditTarget(t, input)
+		if got == input || strings.Contains(got, "aBcDeFgHiJkL") || strings.Contains(got, "mNoPqRsTuVwX") {
+			t.Errorf("letter-only pieces left readable around %q: %q -> %q", folder, input, got)
+		}
+		if !strings.Contains(got, folder) {
+			t.Errorf("product folder lost beside letter-only pieces: %q -> %q", input, got)
+		}
+	}
+}
+
+// The benign twin: a path the detector leaves alone as written is not
+// redacted because the folder component is taken out and the remainder looks
+// denser, whatever the child names (digits or not).
+func TestProductFolderBesideDatedOrdinaryChildStaysVisible(t *testing.T) {
+	t.Parallel()
+	for _, input := range []string{
+		"C:/ProgramData/Cisco/" + productlayout.WindowsHookRuntimeFolder + "/Release2026",
+		"/opt/MyService/" + productlayout.WindowsHookRuntimeFolder + "/Reports2026",
+	} {
+		if got := redactAuditTarget(t, input); got != input {
+			t.Errorf("ordinary dated path redacted: %q -> %q", input, got)
 		}
 	}
 }
