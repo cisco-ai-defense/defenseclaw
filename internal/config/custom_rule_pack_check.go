@@ -202,10 +202,7 @@ func builtinRulePackFallback(name string, registered, broken bool) string {
 // recorded, or that has since been edited, is checked again at each read.
 func (c *Config) CheckCustomRulePacks() {
 	g := &c.Guardrail
-	g.customPackBase = ""
-	if strings.TrimSpace(c.ConfigFilePath) != "" {
-		g.customPackBase = filepath.Dir(c.ConfigFilePath)
-	}
+	g.customPackBase = configDirectory(c.ConfigFilePath)
 	g.customRulePackChecks = make(map[string]customRulePackCheck, len(g.CustomPacks))
 	for name, pack := range g.CustomPacks {
 		g.customRulePackChecks[name] = checkCustomRulePack(name, pack, c.customRulePackDir(pack))
@@ -220,10 +217,25 @@ func (c *Config) customRulePackDir(pack CustomRulePack) string {
 // customPackBase is the directory relative custom_packs paths resolve
 // against: the one recorded at load, else this configuration's file.
 func (c *Config) customPackBase() string {
-	if c.Guardrail.customPackBase != "" || strings.TrimSpace(c.ConfigFilePath) == "" {
+	if c.Guardrail.customPackBase != "" {
 		return c.Guardrail.customPackBase
 	}
-	return filepath.Dir(c.ConfigFilePath)
+	return configDirectory(c.ConfigFilePath)
+}
+
+// configDirectory is the absolute directory of the config file at path, "" for
+// no path. LoadFromFile accepts a relative path, so the directory is made
+// absolute when it is recorded: a later change of working directory must not
+// move the folder a relative custom_packs path names.
+func configDirectory(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	dir := filepath.Dir(path)
+	if abs, err := filepath.Abs(dir); err == nil {
+		return abs
+	}
+	return dir
 }
 
 // customRulePackCheck is the check of entry name, whatever the integration.

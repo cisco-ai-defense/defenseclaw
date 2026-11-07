@@ -3082,11 +3082,16 @@ class GuardrailConfig:
             from types import SimpleNamespace
 
             cfg = SimpleNamespace(guardrail=self, policy_dir="", data_dir="")
-        if name in (getattr(self, "custom_packs", None) or {}) and policy_catalog.custom_pack_problem(cfg, name):
-            # A broken custom_packs entry is a config error, whatever its name:
-            # its selection loads the built-in fallback, and no pack posture it
-            # claims can open an outage (Go: brokenCustomRulePackSelected).
-            return "strict"
+        if name in (getattr(self, "custom_packs", None) or {}):
+            problem, verified = policy_catalog.custom_pack_check(cfg, name)
+            if problem or not verified:
+                # A broken custom_packs entry is a config error, whatever its
+                # name: its selection loads the built-in fallback, and no pack
+                # posture it claims can open an outage (Go:
+                # brokenCustomRulePackSelected). A pack the Go loader has not
+                # vouched for grants no posture either (Go: a standalone
+                # selection without the loader stays strict).
+                return "strict"
         if name in {"default", "strict", "permissive"} and name not in (getattr(self, "custom_packs", None) or {}):
             # A built-in pack's tier is its name, also where its folder is not
             # installed (Go: a built-in name without a manifest posture).

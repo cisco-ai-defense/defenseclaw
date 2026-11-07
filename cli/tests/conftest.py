@@ -228,3 +228,21 @@ def _no_live_gateway_policy_reload(monkeypatch: pytest.MonkeyPatch):
         raise requests.ConnectionError("test isolation: no gateway")
 
     monkeypatch.setattr(gateway.OrchestratorClient, "reload_policy", _unreachable)
+
+
+@pytest.fixture(autouse=True)
+def _no_installed_rule_loader(monkeypatch: pytest.MonkeyPatch):
+    """Keep the Go rule loader helper out of tests that only read a custom pack entry.
+
+    ``policy_catalog.custom_pack_check`` asks ``defenseclaw-gateway rulepack
+    validate`` whether a ``guardrail.custom_packs`` folder loads and matches
+    its pin. A gateway binary installed on the test host must not decide
+    those tests; they see an unavailable verdict unless they install a
+    stand-in (``tests/test_gap0632_custom_pack_error.py``).
+    """
+    from defenseclaw import rulepack_validation
+
+    def _unavailable(path, *, gateway_binary=None):
+        raise rulepack_validation.RulePackValidationBridgeError("test isolation: no helper", code="gateway_unavailable")
+
+    monkeypatch.setattr(rulepack_validation, "validate_rule_pack", _unavailable)
