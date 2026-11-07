@@ -2343,7 +2343,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			// quarantined (GAP-0133). An asset that stays in its folder,
 			// because the move failed or an operator-restored copy is
 			// kept, is held for the connector whose rule denied it too.
-			w.journalPolicyDenied(evt, targetType, w.enforceBlockWith(ctx, evt, true, ""), assetDenying)
+			w.journalPolicyDenied(cfg, evt, targetType, w.enforceBlockWith(ctx, evt, true, ""), assetDenying)
 			w.recordAdmission(ctx, "blocked", targetType)
 			res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: assetDecision.Reason}
 			return res
@@ -2518,7 +2518,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 				fmt.Sprintf("type=%s reason=%s source=%s post-scan", targetType, decision.Reason, decision.Source))
 			scanID := w.logScanID(ctx, evt, result, "blocked")
-			w.journalPolicyDenied(evt, targetType, w.enforceBlockWith(ctx, evt, true, ""), denying)
+			w.journalPolicyDenied(post, evt, targetType, w.enforceBlockWith(ctx, evt, true, ""), denying)
 			w.recordAdmission(ctx, "blocked", targetType)
 			res = AdmissionResult{
 				ScanID: scanID,
@@ -3444,7 +3444,9 @@ func (w *InstallWatcher) policyHoldScopes(evt InstallEvent) []string {
 }
 
 // journalPolicyDenied records, after enforceBlockWith (err is its result) on
-// an asset an asset_policy rule denied, that the asset is still in its
+// an asset an asset_policy rule denied (cfg is the policy generation that
+// decided the denial, so the tier that holds the root owner is the one that
+// denied, not the config the process started with), that the asset is still in its
 // folder: because the quarantine failed (err), or because the files of an
 // operator restore are kept while the install block stands. Every connector
 // in denying (each one whose rule denied the copy, as each loads it) gets the
@@ -3460,7 +3462,7 @@ func (w *InstallWatcher) policyHoldScopes(evt InstallEvent) []string {
 // enable is no block and the hold replaces it. releasePolicyHolds lifts what the hold set when the denial goes; an
 // operator enable clears it too. A removed link, or an asset that is gone,
 // leaves nothing to run and no runtime disable.
-func (w *InstallWatcher) journalPolicyDenied(evt InstallEvent, targetType string, err error, denying []string) {
+func (w *InstallWatcher) journalPolicyDenied(cfg *config.Config, evt InstallEvent, targetType string, err error, denying []string) {
 	if w.store == nil || w.secureClientActive() {
 		return
 	}
@@ -3492,7 +3494,7 @@ func (w *InstallWatcher) journalPolicyDenied(evt InstallEvent, targetType string
 	}
 	owner := w.eventConnector(evt)
 	var connectors []string
-	if len(denying) == 0 || PolicyHoldStrict(w.cfg, owner) {
+	if len(denying) == 0 || PolicyHoldStrict(cfg, owner) {
 		connectors = []string{owner}
 	}
 	for _, connector := range denying {
