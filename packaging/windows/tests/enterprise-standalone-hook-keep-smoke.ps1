@@ -17,6 +17,8 @@
 #   - Setup's own account may own a kept file but not write it (review L4);
 #   - a healthy install keeps every payload file a repair rewrites with
 #     -SkipIfContentMatches, with no "is not kept" notice (review S7);
+#   - the hold check Setup runs before the swap blocks no hook start (the
+#     upgrade window, GAP-0656);
 #   - the rollback copy of the installed hook has the digest the deployment
 #     records, or is the guardian's protected copy with it, or the run throws
 #     before anything stops (review M3).
@@ -386,6 +388,46 @@ try {
                 }
             }
             $lines.Add('m3: matching hook copied; drifted hook refused, guardian copy used; neither: refused before anything stops')
+
+            # GAP-0656 (upgrade window): the hold check Setup runs about 5 s before
+            # it swaps the hook must not block a hook start. Restart Manager,
+            # asked about the hook, opens it with no sharing for about 23 ms the
+            # first time (80 us after that), and every hook start in that moment
+            # failed with a sharing violation (4 starts of one native upgrade).
+            # A sampler opens the hook as a program start does, as fast as it
+            # can, while the check runs; it must never see error 32.
+            $hook = New-SmokeHook -Name 'holdcheck'
+            $state = [hashtable]::Synchronized(@{ stop = $false; samples = 0; refused = 0 })
+            $sampler = [powershell]::Create()
+            [void]$sampler.AddScript({
+                    param($path, $state, $native)
+                    while (-not $state.stop) {
+                        $error32 = $native::GetReadOpenWithoutWriteSharingError($path)
+                        $state.samples = $state.samples + 1
+                        if ($error32 -ne 0) { $state.refused = $state.refused + 1 }
+                    }
+                }).AddArgument($hook).AddArgument($state).AddArgument($native)
+            $sampling = $sampler.BeginInvoke()
+            Start-Sleep -Milliseconds 300
+            $holdLayout = @{ HookPath = $hook; InstallRoot = [IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName($hook)) }
+            try {
+                foreach ($check in 1..5) {
+                    Assert-DefenseClawHookNotHeld -Layout $holdLayout -TimeoutSeconds 5
+                }
+            }
+            finally {
+                Start-Sleep -Milliseconds 100
+                $state.stop = $true
+                [void]$sampler.EndInvoke($sampling)
+                $sampler.Dispose()
+            }
+            if ($state.refused -gt 0) {
+                $failures.Add("holdcheck: the hold check made $($state.refused) of $($state.samples) program-start style opens of the hook fail")
+            }
+            if ($state.samples -lt 1000) {
+                $failures.Add("holdcheck: the sampler made only $($state.samples) opens")
+            }
+            $lines.Add("holdcheck: 5 hold checks beside $($state.samples) start-style opens of the hook, $($state.refused) refused")
         }
         finally {
             foreach ($handle in $handles) { $handle.Dispose() }

@@ -24973,11 +24973,19 @@ function Assert-DefenseClawHookNotHeld {
     [void]$excluded.Add([int]$PID)
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ($true) {
-        $holders = @((Get-DefenseClawStateFileHolders -Layout $Layout -Paths @([string]$Layout.HookPath) -Excluded $excluded).Values)
-        if ($holders.Count -eq 0) {
+        # GAP-0656 (upgrade window): the delete probe comes first. Restart
+        # Manager, asked about the hook, opens it with no sharing for about
+        # 20 ms (Win32 error 32 for every start meanwhile); the upgrade of 1.0.8
+        # failed 4 hook starts in that moment, 5 s before the swap. The probe
+        # is an open for DELETE that allows every sharing mode, so it blocks
+        # no start; when it succeeds no holder stands in the swap's way, which
+        # is what both earlier exits meant. Restart Manager only runs, to
+        # name the holder, once the probe says one blocks the swap.
+        if (Test-DefenseClawHookSharesDelete -Path ([string]$Layout.HookPath)) {
             return
         }
-        if (Test-DefenseClawHookSharesDelete -Path ([string]$Layout.HookPath)) {
+        $holders = @((Get-DefenseClawStateFileHolders -Layout $Layout -Paths @([string]$Layout.HookPath) -Excluded $excluded).Values)
+        if ($holders.Count -eq 0) {
             return
         }
         if ([DateTime]::UtcNow -ge $deadline) {

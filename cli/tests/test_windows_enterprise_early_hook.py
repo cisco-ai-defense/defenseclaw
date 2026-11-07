@@ -838,7 +838,7 @@ def test_a_program_holding_the_hook_open_defers_the_run_before_anything_changes(
 def test_the_run_goes_on_once_the_program_closed_the_hook(tmp_path: Path) -> None:
     result = _run(tmp_path, "held-closes")
     assert result["threw"] == "", result
-    assert result["events"] == ["holders:1", "shares-delete:False", "holders:2", "shares-delete:False", "holders:3", "returned"], result
+    assert result["events"] == ["shares-delete:False", "holders:1", "shares-delete:False", "holders:2", "shares-delete:False", "holders:3", "returned"], result
 
 
 def test_a_holder_that_shares_delete_does_not_defer_the_run(tmp_path: Path) -> None:
@@ -848,7 +848,18 @@ def test_a_holder_that_shares_delete_does_not_defer_the_run(tmp_path: Path) -> N
     delete sharing still is (held-stays, held-closes)."""
     result = _run(tmp_path, "held-shares-delete")
     assert result["threw"] == "", result
-    assert result["events"] == ["holders:1", "shares-delete:True", "returned"], result
+    assert result["events"] == ["shares-delete:True", "returned"], result
+
+
+def test_the_hold_check_probes_delete_sharing_before_it_asks_restart_manager() -> None:
+    """GAP-0656: Restart Manager opens the hook with no sharing for about 20
+    ms while it lists the holders, and every hook start in that moment failed
+    with a sharing violation (4 starts in one of 21 native upgrades of 1.0.8,
+    5.5 s before the swap). The delete probe blocks no start and answers the
+    same question first."""
+    body = _function_body(_text(), "Assert-DefenseClawHookNotHeld")
+    probe = body.index("Test-DefenseClawHookSharesDelete -Path ([string]$Layout.HookPath)")
+    assert probe < body.index("Get-DefenseClawStateFileHolders -Layout $Layout -Paths @([string]$Layout.HookPath)")
 
 
 def test_the_transaction_checks_for_a_hook_holder_before_it_stops_anything() -> None:
