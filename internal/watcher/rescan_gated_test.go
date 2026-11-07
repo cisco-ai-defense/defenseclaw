@@ -324,6 +324,45 @@ func TestRescanCycleUngatedScansEveryCycle(t *testing.T) {
 }
 
 func TestMCPFingerprintChangesWithRulePackFile(t *testing.T) {
+	// A custom pack is read only once the loader has accepted it (GAP-0632):
+	// a valid folder, pinned by its files digest. The loader records that
+	// verdict once per load, so the fingerprint must follow the folder
+	// content after it.
+	dir := t.TempDir()
+	original, err := os.ReadFile(filepath.Join("..", "..", "policies", "guardrail", "default", "suppressions.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "suppressions.yaml")
+	if err := os.WriteFile(file, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pin, err := guardrail.RulePackDigest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Guardrail.RulePack = "local"
+	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{"local": {Path: dir, Digest: "sha256:" + pin}}
+	cfg.CheckCustomRulePacks()
+	if err := cfg.Guardrail.CustomRulePackError("local"); err != nil {
+		t.Fatalf("fixture pack refused: %v", err)
+	}
+	w := New(cfg, nil, nil, nil, nil, nil, nil)
+	evt := InstallEvent{Type: InstallMCP, Connector: "codex"}
+	before := w.scannerFingerprint(evt)
+	if err := os.WriteFile(file, append(original, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if after := w.scannerFingerprint(evt); after == before {
+		t.Fatal("MCP fingerprint did not change with the rule-pack file")
+	}
+}
+
+// A custom pack the loader refuses (here: no pin) is not read by any scan, so
+// its folder is not a fingerprint input; the built-in pack the selection falls
+// back to is.
+func TestMCPFingerprintIgnoresRefusedRulePackFolder(t *testing.T) {
 	dir := t.TempDir()
 	original, err := os.ReadFile(filepath.Join("..", "..", "policies", "guardrail", "default", "suppressions.yaml"))
 	if err != nil {
@@ -336,14 +375,18 @@ func TestMCPFingerprintChangesWithRulePackFile(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Guardrail.RulePack = "local"
 	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{"local": {Path: dir}}
+	cfg.CheckCustomRulePacks()
+	if cfg.Guardrail.CustomRulePackError("local") == nil {
+		t.Fatal("an unpinned custom pack must be refused")
+	}
 	w := New(cfg, nil, nil, nil, nil, nil, nil)
 	evt := InstallEvent{Type: InstallMCP, Connector: "codex"}
 	before := w.scannerFingerprint(evt)
 	if err := os.WriteFile(file, append(original, '\n'), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if after := w.scannerFingerprint(evt); after == before {
-		t.Fatal("MCP fingerprint did not change with the rule-pack file")
+	if after := w.scannerFingerprint(evt); after != before {
+		t.Fatal("MCP fingerprint followed a rule-pack folder the loader refused")
 	}
 }
 
