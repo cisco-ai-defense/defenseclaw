@@ -4,6 +4,7 @@
 package redaction
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -252,5 +253,39 @@ func TestProductFolderPathsStayWithinFieldBudgets(t *testing.T) {
 	secret := detect(strings.Repeat(plantedPathToken+`/`+plain+`/`+plantedPathToken+` `, 200))
 	if secret.Failure != "" || strings.Contains(secret.Value, plantedPathToken) || !strings.Contains(secret.Value, plain) {
 		t.Errorf("repeated secret paths: failure=%q folderKept=%v tokenLeft=%v", secret.Failure, strings.Contains(secret.Value, plain), strings.Contains(secret.Value, plantedPathToken))
+	}
+}
+
+// A span a credential detector claims in part is still charged to the match
+// limits once for each accepted range set: the accepted continuation of a split
+// span uses a slot of its own beside the credential, as a whole match does in
+// the unchanged detector, so the field limit holds at MaxFieldMatches.
+func TestProductFolderContinuationAfterCredentialClaimIsCharged(t *testing.T) {
+	t.Parallel()
+	key := make([]byte, hashV1KeySize)
+	folder := productlayout.ProductFolder
+	field := func(paths int) string {
+		var builder strings.Builder
+		for i := 0; i < paths; i++ {
+			fmt.Fprintf(&builder, "AKIAZ3Q7XK9M2P4%04dW/%s/%s%03d ", i, folder, plantedPathToken, i)
+		}
+		return builder.String()
+	}
+	detect := func(paths int) (DetectionResult, *RecordMatchBudget, error) {
+		budget := NewRecordMatchBudget()
+		result, err := DetectAndRedact(field(paths), observability.FieldClassContent, DetectorGroups(), key, budget)
+		return result, budget, err
+	}
+	// Each path is one credential match and one accepted continuation: two slots.
+	result, _, err := detect(MaxFieldMatches / 2)
+	if err != nil {
+		t.Fatalf("%d paths: %v", MaxFieldMatches/2, err)
+	}
+	if result.AcceptedMatches != MaxFieldMatches || strings.Contains(result.Value, plantedPathToken) || !strings.Contains(result.Value, folder) {
+		t.Errorf("%d paths: accepted=%d tokenLeft=%v folderKept=%v", MaxFieldMatches/2, result.AcceptedMatches, strings.Contains(result.Value, plantedPathToken), strings.Contains(result.Value, folder))
+	}
+	result, _, err = detect(MaxFieldMatches/2 + 1)
+	if err == nil || result.Failure != FailureFieldMatchLimit {
+		t.Errorf("%d paths (%d accepted ranges): failure=%q err=%v, want %q", MaxFieldMatches/2+1, MaxFieldMatches+2, result.Failure, err, FailureFieldMatchLimit)
 	}
 }

@@ -91,7 +91,8 @@ type candidate struct {
 	accepted bool
 	// continues marks a further range of the span the previous candidate
 	// started (a span split around product folder names). It is one lexical
-	// span, so it does not count toward the candidate or match limits again.
+	// span: it is not a new candidate, and the span is charged to the match
+	// limits once, by its first accepted range (not by its first range).
 	continues bool
 }
 
@@ -148,8 +149,10 @@ func DetectAndRedact(
 		if scanErr != nil {
 			return failedDetection(codeFromError(scanErr))
 		}
+		spanCharged := false
 		for _, item := range found {
 			if !item.continues {
+				spanCharged = false
 				candidateCount++
 				if candidateCount > MaxFieldCandidates {
 					return failedDetectionWithCandidates(FailureCandidateLimit, candidateCount)
@@ -162,7 +165,8 @@ func DetectAndRedact(
 				start: item.start, end: item.end, id: definition.id,
 				group: definition.group, order: definition.order,
 			})
-			if !item.continues {
+			if !spanCharged {
+				spanCharged = true
 				acceptedSpans++
 			}
 			if acceptedSpans > MaxFieldMatches {
