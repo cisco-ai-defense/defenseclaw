@@ -24,15 +24,18 @@ const knownReachedMaxReads = 256
 // is read as if it may run. Only targets include accepts are kept.
 //
 // The flow it follows rests on the meaning of exit, break, continue, true,
-// false and ":". A command that can redefine one of them has them renamed
-// first (knownNeutralizeShadowed), so the reader sees an unknown command and
-// reads every statement as if it may run.
+// false and ":". Once a statement it reaches can redefine one of them
+// (knownShadow), that name is renamed in the parsed command, so the reader
+// sees an unknown command from then on and reads every statement as if it
+// may run. A function body is read only when a state that reaches the call
+// has the definition, so a definition in a branch the shell skips, or made
+// after the call, is not a call target.
 type knownReached struct {
 	cwd, home   string
 	depth       int
 	include     func(string) bool
-	prelude     string
-	functions   []*syntax.FuncDecl
+	shadow      *knownShadow
+	definitions []*knownFunction
 	ifsAssigned bool
 	loops       int
 	inexact     bool
@@ -42,61 +45,167 @@ type knownReached struct {
 	writes      []string
 }
 
+// knownFunction is a function definition of the command and its printed
+// source, which is printed again when a rename changes it.
+type knownFunction struct {
+	decl    *syntax.FuncDecl
+	stmt    *syntax.Stmt
+	text    string
+	version int
+}
+
 // knownShadowable names the builtins whose result the reader reads from the
 // command word alone.
 var knownShadowable = map[string]bool{"exit": true, "break": true, "continue": true, "true": true, "false": true, ":": true}
 
-// knownNeutralizeShadowed renames the builtins the reader relies on, in the
-// definitions and in the command words of a command that can redefine them,
-// to a name with no meaning to the reader. The parsed command is changed in
-// place; only the known-value reader, which parses its own copy, calls it.
-func knownNeutralizeShadowed(file *syntax.File, home string) {
-	if !knownFlowShadowed(file, home) {
+// knownShadow follows the commands that can give one of those builtins
+// another meaning, in the order the shell reaches them: a function of that
+// name, or a command that defines or enables names at run time (alias, enable,
+// source, a computed command word, or eval of text it cannot read). An eval
+// of fixed text redefines only the names that text defines. Each name it
+// finds is renamed once, in the definitions and in the command words of the
+// parsed command, to a name with no meaning to the reader. The parsed command
+// is changed in place; only the known-value reader, which parses its own
+// copy, uses it.
+type knownShadow struct {
+	file     *syntax.File
+	home     string
+	shadowed map[string]bool
+	version  int
+	depth    int
+}
+
+func newKnownShadow(file *syntax.File, home string) *knownShadow {
+	return &knownShadow{file: file, home: home, shadowed: map[string]bool{}}
+}
+
+// stamp changes whenever a rename changes the printed source of the command.
+func (s *knownShadow) stamp() int {
+	if s == nil {
+		return 0
+	}
+	return s.version
+}
+
+// scan applies what every command inside node can redefine.
+func (s *knownShadow) scan(node syntax.Node) {
+	if s == nil || node == nil {
 		return
 	}
-	syntax.Walk(file, func(node syntax.Node) bool {
+	syntax.Walk(node, func(node syntax.Node) bool {
 		switch node := node.(type) {
 		case *syntax.FuncDecl:
 			if node.Name != nil && knownShadowable[node.Name.Value] {
+				s.rename(node.Name.Value)
+			}
+		case *syntax.CallExpr:
+			s.call(node)
+		}
+		return len(s.shadowed) != len(knownShadowable)
+	})
+}
+
+// call applies one command: the program word, through command and builtin.
+func (s *knownShadow) call(call *syntax.CallExpr) {
+	args := call.Args
+	for len(args) > 0 {
+		name, known := StaticWord(args[0], s.home)
+		if !known {
+			// The command word is computed: it may be eval or alias.
+			if knownWordComputes(args[0]) {
+				s.renameAll()
+			}
+			return
+		}
+		switch name {
+		case "command", "builtin":
+			args = args[1:]
+			for len(args) > 0 {
+				if option, fixed := StaticWord(args[0], s.home); !fixed || !strings.HasPrefix(option, "-") {
+					break
+				}
+				args = args[1:]
+			}
+			continue
+		case "eval":
+			s.eval(args[1:])
+		case "alias", "enable", "source", ".":
+			s.renameAll()
+		}
+		return
+	}
+}
+
+// knownWordComputes reports a word whose value the shell computes.
+func knownWordComputes(word *syntax.Word) bool {
+	computed := false
+	syntax.Walk(word, func(node syntax.Node) bool {
+		switch node.(type) {
+		case *syntax.ParamExp, *syntax.CmdSubst, *syntax.ArithmExp, *syntax.ProcSubst:
+			computed = true
+		}
+		return !computed
+	})
+	return computed
+}
+
+// eval applies the commands of fixed eval text; any other text may define
+// any name.
+func (s *knownShadow) eval(args []*syntax.Word) {
+	words := make([]string, 0, len(args))
+	for _, arg := range args {
+		word, known := StaticWord(arg, s.home)
+		if !known {
+			s.renameAll()
+			return
+		}
+		words = append(words, word)
+	}
+	parsed, ok := parseShell(strings.Join(words, " "))
+	if !ok || s.depth >= 8 {
+		s.renameAll()
+		return
+	}
+	s.depth++
+	s.scan(parsed)
+	s.depth--
+}
+
+func (s *knownShadow) renameAll() {
+	var names []string
+	for name := range knownShadowable {
+		names = append(names, name)
+	}
+	s.rename(names...)
+}
+
+// rename gives the names that are not yet shadowed the unknown name.
+func (s *knownShadow) rename(names ...string) {
+	fresh := map[string]bool{}
+	for _, name := range names {
+		if !s.shadowed[name] {
+			s.shadowed[name], fresh[name] = true, true
+		}
+	}
+	if len(fresh) == 0 {
+		return
+	}
+	s.version++
+	syntax.Walk(s.file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.FuncDecl:
+			if node.Name != nil && fresh[node.Name.Value] {
 				node.Name.Value = "shadowed-" + node.Name.Value
 			}
 		case *syntax.CallExpr:
 			if len(node.Args) != 0 {
-				if name, known := StaticWord(node.Args[0], home); known && knownShadowable[name] {
+				if name, known := StaticWord(node.Args[0], s.home); known && fresh[name] {
 					node.Args[0].Parts = []syntax.WordPart{&syntax.Lit{Value: "shadowed-" + name}}
 				}
 			}
 		}
 		return true
 	})
-}
-
-// knownFlowShadowed reports a command that may give one of the builtins the
-// reader relies on another meaning: a function of that name, or a command
-// that defines or enables names at run time. The static flow of such a
-// command is not known, so its reading must not skip a statement.
-func knownFlowShadowed(file *syntax.File, home string) bool {
-	shadowed := false
-	syntax.Walk(file, func(node syntax.Node) bool {
-		switch node := node.(type) {
-		case *syntax.FuncDecl:
-			if node.Name != nil && knownShadowable[node.Name.Value] {
-				shadowed = true
-			}
-		case *syntax.CallExpr:
-			if len(node.Args) != 0 {
-				switch name, known := StaticWord(node.Args[0], home); {
-				case !known:
-					// The command word is computed: it may be eval or alias.
-					shadowed = shadowed || wordExpandsParameter(node.Args[0])
-				case name == "eval" || name == "alias" || name == "enable" || name == "source" || name == ".":
-					shadowed = true
-				}
-			}
-		}
-		return !shadowed
-	})
-	return shadowed
 }
 
 // knownReachedCompound reports a statement form the reader follows itself.
@@ -117,36 +226,31 @@ func knownReachedCompound(stmt *syntax.Stmt) bool {
 // paths the shell can take through it, and the value states that follow it.
 // complete is false when the reading passed its bounds; continues is false
 // when every path through root leaves the shell.
-func knownReachedWrites(root *syntax.Stmt, file *syntax.File, states []actionValues, cwd, home string, depth int, include func(string) bool) (writes []string, after []actionValues, complete, continues bool) {
-	reader := &knownReached{cwd: cwd, home: home, depth: depth, include: include}
+func knownReachedWrites(root *syntax.Stmt, file *syntax.File, states []actionValues, cwd, home string, depth int, include func(string) bool, shadow *knownShadow) (writes []string, after []actionValues, complete, continues bool) {
+	reader := &knownReached{cwd: cwd, home: home, depth: depth, include: include, shadow: shadow}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if assign, ok := node.(*syntax.Assign); ok && assign.Name != nil && assign.Name.Value == "IFS" {
 			reader.ifsAssigned = true
 		}
 		return !reader.ifsAssigned
 	})
-	// A call in a body reaches the function definitions of the command,
-	// wherever it makes them.
-	var functions []*syntax.Stmt
+	// A call reaches the definitions the shell has made when it runs, in
+	// whatever statement it makes them (r.prelude).
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if stmt, ok := node.(*syntax.Stmt); ok {
-			if function, ok := stmt.Cmd.(*syntax.FuncDecl); ok {
-				functions = append(functions, stmt)
-				reader.functions = append(reader.functions, function)
+			if function, ok := stmt.Cmd.(*syntax.FuncDecl); ok && function.Name != nil {
+				reader.definitions = append(reader.definitions, &knownFunction{decl: function, stmt: stmt, version: -1})
 				return false
 			}
 		}
 		return true
 	})
-	if len(functions) > 0 {
-		var source strings.Builder
-		if syntax.NewPrinter().Print(&source, &syntax.File{Stmts: functions}) != nil {
-			return nil, nil, false, true
-		}
-		reader.prelude = source.String() + "\n"
-	}
 	flow := reader.statement(root, states)
 	if reader.incomplete {
+		// Past a bound the rest of the command was not followed: whatever it
+		// redefines counts, and every protected value it may hold counts as
+		// written.
+		shadow.scan(root)
 		for _, state := range states {
 			reader.close(root, state)
 		}
@@ -181,12 +285,17 @@ func (r *knownReached) read(stmt *syntax.Stmt, states []actionValues) {
 		r.incomplete = true
 		return
 	}
-	text := r.prelude + source.String()
 	for _, state := range states {
 		if r.reads++; r.reads > knownReachedMaxReads {
 			r.assume(stmt, state)
 			continue
 		}
+		prelude, printed := r.prelude(state)
+		if !printed {
+			r.incomplete = true
+			return
+		}
+		text := prelude + source.String()
 		found, _ := literalWriteOperandsWithParsedKnown(text, r.cwd, r.home, r.depth+1, nil, state, r.include)
 		for _, target := range found {
 			if r.include(target) {
@@ -213,9 +322,44 @@ func (r *knownReached) assume(stmt *syntax.Stmt, state actionValues) {
 		})
 	}
 	check(stmt)
-	for _, function := range r.functions {
-		check(function)
+	for _, definition := range r.definitions {
+		check(definition.decl)
 	}
+}
+
+// prelude returns the source of the function definitions a state has: the
+// ones the shell has made by the time it reaches the statement being read.
+func (r *knownReached) prelude(state actionValues) (string, bool) {
+	var out strings.Builder
+	for _, definition := range r.definitions {
+		if _, defined := state[actionFunctionValuePrefix+definition.decl.Name.Value]; !defined {
+			continue
+		}
+		if stamp := r.shadow.stamp(); definition.version != stamp {
+			var source strings.Builder
+			if syntax.NewPrinter().Print(&source, &syntax.File{Stmts: []*syntax.Stmt{definition.stmt}}) != nil {
+				return "", false
+			}
+			definition.text, definition.version = source.String()+"\n", stamp
+		}
+		out.WriteString(definition.text)
+	}
+	return out.String(), true
+}
+
+// function names the one definition of a function the command has, which a
+// call of it runs. A name defined twice is not named.
+func (r *knownReached) function(name string) *syntax.FuncDecl {
+	var found *syntax.FuncDecl
+	for _, definition := range r.definitions {
+		if definition.decl.Name.Value == name {
+			if found != nil {
+				return nil
+			}
+			found = definition.decl
+		}
+	}
+	return found
 }
 
 // close records the protected values a root the reader could not follow to
@@ -263,7 +407,7 @@ func (r *knownReached) redirects(stmt *syntax.Stmt, states []actionValues) {
 }
 
 func (r *knownReached) update(stmt *syntax.Stmt, states []actionValues) []actionValues {
-	next := actionKeepAcrossFunctionCall(stmt, states, actionUpdateValuesKept(stmt, states, r.cwd, r.home, &r.steps), r.home)
+	next := actionKeepAcrossFunctionCall(stmt, states, actionUpdateValuesKept(stmt, states, r.cwd, r.home, &r.steps), r.function, r.cwd, r.home, &r.steps)
 	if actionKeptSaturated(next) {
 		r.incomplete = true
 	}
@@ -301,6 +445,7 @@ func (r *knownReached) statement(stmt *syntax.Stmt, states []actionValues) actio
 		return actionLoopFlow{}
 	}
 	if !knownReachedCompound(stmt) {
+		r.shadow.scan(stmt)
 		if knownExitStatement(stmt, r.home) {
 			return actionLoopFlow{}
 		}
@@ -397,10 +542,14 @@ func (r *knownReached) compound(stmt *syntax.Stmt, states []actionValues) action
 		}
 		return flow
 	case *syntax.ForClause:
+		// A later pass reaches what the body redefines before its first
+		// statement.
+		r.shadow.scan(command)
 		r.loops++
 		defer func() { r.loops-- }()
 		return r.forClause(command, states)
 	case *syntax.WhileClause:
+		r.shadow.scan(command)
 		r.loops++
 		defer func() { r.loops-- }()
 		return r.whileClause(command, states)
