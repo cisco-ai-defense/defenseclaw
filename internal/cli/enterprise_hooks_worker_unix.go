@@ -593,8 +593,8 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 	case enterpriseHookWorkerOpNativeOTLPCheck:
 		return respond(runEnterpriseHookWorkerNativeOTLPCheck(request), 0)
 	case enterpriseHookWorkerOpOpenCodePortRead:
-		port, err := enterprisepolicy.ReadOpenCodeServicePortAsUser(filepath.Clean(request.Home))
-		report := &enterpriseHookWorkerOpenCodePortReport{Port: port}
+		port, sealed, err := enterprisepolicy.ReadOpenCodeServicePortSealed(filepath.Clean(request.Home))
+		report := &enterpriseHookWorkerOpenCodePortReport{Port: port, Sealed: sealed}
 		if err != nil {
 			report.Error = err.Error()
 		}

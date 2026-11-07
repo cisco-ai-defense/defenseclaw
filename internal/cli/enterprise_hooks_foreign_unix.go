@@ -686,9 +686,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		if want := outcome.Job.Request.OpenCodeServicePort; want > 0 {
 			report := outcome.Response.OpenCodeServicePort
 			if report != nil {
-				for _, dir := range boundedStrings(report.Sealed, 8) {
-					fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: made %s's folder %s sticky: its group can write it, so now only the owner of an entry in it can rename or remove it\n", user, boundedString(dir, 512))
-				}
+				logOpenCodeSealedFolders(stderr, user, report.Sealed)
 			}
 			account := enterprisehooks.UnixEligibleAccount{UID: outcome.Job.Account.UID, User: user, Home: outcome.Job.Account.Home}
 			path := enterprisepolicy.OpenCodeServiceConfigPath(outcome.Job.Account.Home)
@@ -1155,6 +1153,11 @@ var enterpriseHookReadOpenCodePortsAsUsers = func(ctx context.Context, stderr io
 			}
 			<-slots
 			report := got.response.OpenCodeServicePort
+			if report != nil {
+				mu.Lock()
+				logOpenCodeSealedFolders(stderr, account.User, report.Sealed)
+				mu.Unlock()
+			}
 			switch {
 			case got.err != nil:
 				note(account, got.err.Error())
@@ -1178,6 +1181,14 @@ var enterpriseHookReadOpenCodePortsAsUsers = func(ctx context.Context, stderr io
 	return ports, unknown
 }
 
+// logOpenCodeSealedFolders reports the group-writable folders the read or the
+// write made sticky.
+func logOpenCodeSealedFolders(stderr io.Writer, user string, dirs []string) {
+	for _, dir := range boundedStrings(dirs, 8) {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: made %s's folder %s sticky: its group can write it, so now only the owner of an entry in it can rename or remove it\n", user, boundedString(dir, 512))
+	}
+}
+
 // openCodeUnknownFix is the administrator's step that lets the guardian read
 // the account's OpenCode service.json again, by the reason it could not.
 func openCodeUnknownFix(account enterprisehooks.UnixEligibleAccount, path, reason string, port int) string {
@@ -1186,6 +1197,8 @@ func openCodeUnknownFix(account enterprisehooks.UnixEligibleAccount, path, reaso
 	switch {
 	case strings.Contains(lower, "sticky"):
 		return fmt.Sprintf("close the folder named above to other accounts (as its owner: chmod g-w, or chmod +t), or make it owned by %s; the next pass retries", user)
+	case strings.Contains(lower, "another account"):
+		return fmt.Sprintf("the folder or file named above belongs to, or can be changed by, another account: as %s (or root) make it %s's own and close it to other accounts (chown, chmod go-w), or remove it; the next pass retries", user, user)
 	case port > 0 && (strings.Contains(lower, "not a directory") || strings.Contains(lower, "read-only") || strings.Contains(lower, "permission") || strings.Contains(lower, "denied")):
 		return fmt.Sprintf("as %s, run 'opencode service set port %d' (it writes through a link), or make %s a folder (not a link) that %s can write; the next pass retries", user, port, filepath.Dir(path), user)
 	case strings.Contains(lower, "not available") || strings.Contains(lower, "did not answer") || strings.Contains(lower, "timed out") || strings.Contains(lower, "deadline"):
