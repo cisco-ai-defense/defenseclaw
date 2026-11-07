@@ -62,3 +62,62 @@ func TestManagedGuardianRepairAuditRequiresRootAndWritesRepairRow(t *testing.T) 
 		t.Fatalf("repair audit events = %+v", repairEvents)
 	}
 }
+
+// GAP-0754: a report that names the restored element is audited with it, and
+// a report without one keeps the whole-target row.
+func TestManagedGuardianRepairAuditNamesTheRestoredElement(t *testing.T) {
+	fixture, api, _ := newCLIObservabilityV8Fixture(t)
+	handler := api.managedHookPeerAuth(newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{}, nil, nil), api.managedHookSocketMux())
+	send := func(body string) int {
+		request := httptest.NewRequest(http.MethodPost, managedGuardianRepairAuditPath, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-DefenseClaw-Client", "hook-guardian")
+		request = request.WithContext(withManagedHookPeer(request.Context(), managedHookPeer{UID: 0}))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response.Code
+	}
+	for _, invalid := range []string{
+		`{"user":"alice","uid":1001,"connector":"hermes","element":"\n"}`,
+		`{"user":"alice","uid":1001,"connector":"hermes","element":"` + strings.Repeat("x", 300) + `"}`,
+	} {
+		if status := send(invalid); status != http.StatusBadRequest {
+			t.Fatalf("invalid element report status=%d, want 400", status)
+		}
+	}
+	for _, body := range []string{
+		`{"user":"alice","uid":1001,"connector":"hermes","element":"hook runtime file hermes-hook.sh"}`,
+		`{"user":"alice","uid":1001,"connector":"hermes","element":"hook entry"}`,
+		`{"user":"alice","uid":1001,"connector":"opencode"}`,
+	} {
+		if status := send(body); status != http.StatusNoContent {
+			t.Fatalf("report %s status=%d, want 204", body, status)
+		}
+	}
+	events, err := fixture.store.ListEvents(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	details := map[string]string{}
+	for _, event := range events {
+		if event.Action == string(audit.ActionConnectorHookRepaired) {
+			if event.Severity != "HIGH" {
+				t.Fatalf("repair event severity = %q, want HIGH", event.Severity)
+			}
+			details[event.Details] = event.Connector
+		}
+	}
+	want := map[string]string{
+		"restored hook runtime file hermes-hook.sh for user alice": "hermes",
+		"restored hook entry for user alice":                       "hermes",
+		"re-installed hook entries after deletion for user alice":  "opencode",
+	}
+	if len(details) != len(want) {
+		t.Fatalf("repair events = %v, want %v", details, want)
+	}
+	for detail, connectorName := range want {
+		if details[detail] != connectorName {
+			t.Fatalf("repair events = %v, want %v", details, want)
+		}
+	}
+}

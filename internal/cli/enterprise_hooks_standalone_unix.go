@@ -1148,8 +1148,8 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			// matching is a restore.
 			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] %s restored: %s\n", enterpriseHookTargetLabel(row), strings.Join(outcome.restored, ", "))
 			repaired = append(repaired, enterpriseHookGuardianRepair{User: row.User, Connector: row.Connector})
-			auditRepairs = append(auditRepairs, enterpriseHookGuardianAuditReport{User: row.User, UID: slot.account.UID, Connector: row.Connector})
-			repairs++
+			auditRepairs = append(auditRepairs, enterpriseHookRestoreAudits(row.User, slot.account.UID, row.Connector, outcome.restored)...)
+			repairs += len(outcome.restored)
 		}
 		rows[index] = row
 		if row.OK {
@@ -1233,6 +1233,7 @@ func reportEnterpriseHookStandaloneInterruptedRepairs(dataDir, hookSocket string
 	var audits []enterpriseHookGuardianAuditReport
 	var restored []enterpriseHookGuardianRestore
 	var notices []enterpriseHookGuardianNotice
+	count := 0
 	answered := map[string]bool{}
 	restoredAt := time.Now().UTC().Format(time.RFC3339Nano)
 	for index, slot := range slots {
@@ -1250,7 +1251,8 @@ func reportEnterpriseHookStandaloneInterruptedRepairs(dataDir, hookSocket string
 		uid := slot.account.UID
 		fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] %s restored: %s\n", enterpriseHookTargetLabel(rows[index]), strings.Join(outcome.restored, ", "))
 		repaired = append(repaired, enterpriseHookGuardianRepair{User: user, Connector: name})
-		audits = append(audits, enterpriseHookGuardianAuditReport{User: user, UID: uid, Connector: name})
+		audits = append(audits, enterpriseHookRestoreAudits(user, uid, name, outcome.restored)...)
+		count += len(outcome.restored)
 		restored = append(restored, enterpriseHookGuardianRestore{UID: &uid, User: user, Connector: name, RestoredAt: restoredAt})
 		answered[user+"\x00"+strings.ToLower(name)] = true
 		if outcome.agentConfig != "" {
@@ -1275,7 +1277,19 @@ func reportEnterpriseHookStandaloneInterruptedRepairs(dataDir, hookSocket string
 	reportEnterpriseHookGuardianRepairs(ctx, hookSocket, audits)
 	// A failed record is kept in memory and written by a later pass.
 	_ = recordEnterpriseHookGuardianRestores(enterpriseHookWorkerLog, dataDir, rows, restored)
-	return repairedTargets, len(repaired)
+	return repairedTargets, count
+}
+
+// enterpriseHookRestoreAudits is the audit report of one restore: one record
+// per protected element that went from not matching to matching, each naming
+// its element, so a restored script and a restored entry are two counted and
+// audited repairs on every path (GAP-0754).
+func enterpriseHookRestoreAudits(user string, uid int, connectorName string, elements []string) []enterpriseHookGuardianAuditReport {
+	reports := make([]enterpriseHookGuardianAuditReport, 0, len(elements))
+	for _, element := range elements {
+		reports = append(reports, enterpriseHookGuardianAuditReport{User: user, UID: uid, Connector: connectorName, Element: element})
+	}
+	return reports
 }
 
 // knownEnterpriseHookElements keeps the protected element names the guardian

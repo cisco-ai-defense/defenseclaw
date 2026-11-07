@@ -25,6 +25,9 @@ type enterpriseHookGuardianAuditReport struct {
 	User      string `json:"user"`
 	UID       int    `json:"uid"`
 	Connector string `json:"connector"`
+	// Element names the protected element the guardian put back; empty for
+	// a repair of a target as a whole.
+	Element string `json:"element,omitempty"`
 }
 
 var guardianAuditClientFactory = hookexec.NewManagedStandaloneHookSocketHTTPClient
@@ -58,13 +61,13 @@ func reportEnterpriseHookGuardianRepairs(ctx context.Context, socket string, rep
 		request.Header.Set("X-DefenseClaw-Client", "hook-guardian")
 		response, err := client.Do(request)
 		if err != nil {
-			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] warn: report hook repair for %s to audit: %v\n", repair.Connector, err)
+			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] warn: report hook repair for %s to audit: %v\n", firstNonEmpty(repair.Element, repair.Connector), err)
 			continue
 		}
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 		_ = response.Body.Close()
 		if response.StatusCode != http.StatusNoContent {
-			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] warn: report hook repair for %s to audit: HTTP %d\n", repair.Connector, response.StatusCode)
+			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] warn: report hook repair for %s to audit: HTTP %d\n", firstNonEmpty(repair.Element, repair.Connector), response.StatusCode)
 		}
 	}
 }
