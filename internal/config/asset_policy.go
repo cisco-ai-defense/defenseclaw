@@ -686,12 +686,12 @@ func (c *Config) AssetRegistryPinsUnknown(in AssetPolicyInput) []string {
 	return out
 }
 
-// canonicalMCPTransport folds the names of one transport together, so a
+// CanonicalMCPTransport folds the names of one transport together, so a
 // registry rule pinned to streamable-http admits the same URL server added as
 // http or with no transport at all (GAP-2122). An empty transport takes the one
 // the server's shape implies: http for a URL, stdio for a command. sse and the
 // other transports stay distinct.
-func canonicalMCPTransport(transport, url, command string) string {
+func CanonicalMCPTransport(transport, url, command string) string {
 	t := strings.ToLower(strings.TrimSpace(transport))
 	switch t {
 	case "http", "streamable-http", "streamable_http", "streamablehttp":
@@ -750,7 +750,7 @@ func assetRuleMatches(rule AssetPolicyRule, in AssetPolicyInput) bool {
 	}
 	if rule.Transport != "" {
 		hasConstraint = true
-		if canonicalMCPTransport(rule.Transport, "", "") != canonicalMCPTransport(in.Transport, in.URL, in.Command) {
+		if CanonicalMCPTransport(rule.Transport, "", "") != CanonicalMCPTransport(in.Transport, in.URL, in.Command) {
 			return false
 		}
 	}

@@ -232,12 +232,14 @@ func (a *APIServer) mcpUnpublishedSourceDecision(ctx context.Context, connectorN
 	if server.ProjectScope {
 		runtime, _ := cfg.AssetRuntimeDetectionFor("mcp")
 		enforcing := cfg.AssetPolicy.Enabled && assetRuntimeModeIsAction(cfg.EffectiveAssetPolicyModeForConnector(connectorName)) && runtime.Enabled
-		// A claim that did not fit the header holds the name and the digest
-		// only, so a deny pinned to where the server points cannot be checked
-		// against it: it is refused where such a rule exists, as for any
-		// definition that cannot be resolved (GAP-1187).
+		// A claim that did not fit the header holds the name, the digest and
+		// the pins of its endpoint, not the endpoint: a deny pinned to where
+		// the server points is checked against the pins, and the call is
+		// refused where one may match, or where the claim holds no pins to
+		// check it with, as for any definition that cannot be resolved
+		// (GAP-1187). A deny pinned to another endpoint does not refuse it.
 		unresolved := server.URL == "" && server.Command == "" &&
-			rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Denied, connectorName, probe.ServerName)
+			deniedRulesMayPinClaim(cfg.AssetPolicy.MCP.Denied, connectorName, probe.ServerName, server.Pins)
 		if !published.Named && !enforcing && !unresolved {
 			return config.AssetPolicyDecision{}, false
 		}
@@ -797,6 +799,62 @@ func rulesPinEndpointForServer(rules []config.AssetPolicyRule, connector, server
 	return false
 }
 
+// deniedRulesMayPinClaim reports whether a rule of rules that matches the
+// server by name and connector and pins where it points may match the
+// definition behind a claim that holds only its pins. Without pins every such
+// rule may match. With them a rule is ruled out when the digest of a value it
+// compares exactly (the URL, the command's base name, an argument of its
+// prefix, the transport) differs, or when it asks for more arguments than the
+// definition has; a prefix longer than the arguments the claim holds digests
+// of cannot be ruled out. It checks the constraints assetRuleMatches does.
+func deniedRulesMayPinClaim(rules []config.AssetPolicyRule, connector, server string, pins *assetfacts.MCPPins) bool {
+	for _, rule := range rules {
+		if rule.Name != "" && !config.SameAssetName(rule.Name, server) &&
+			!config.SameMCPToolServer(connector, rule.Name, server) {
+			continue
+		}
+		if rule.Connector != "" && !config.SameConnector(rule.Connector, connector) {
+			continue
+		}
+		if !rulesPinEndpoint([]config.AssetPolicyRule{rule}) {
+			continue
+		}
+		if pins == nil || ruleMayMatchPins(rule, pins) {
+			return true
+		}
+	}
+	return false
+}
+
+func ruleMayMatchPins(rule config.AssetPolicyRule, pins *assetfacts.MCPPins) bool {
+	if rule.URL != "" && assetfacts.PinSum(rule.URL) != pins.URL {
+		return false
+	}
+	if rule.Command != "" && assetfacts.PinSum(filepath.Base(strings.TrimSpace(rule.Command))) != pins.Command {
+		return false
+	}
+	if len(rule.ArgsPrefix) > pins.ArgCount {
+		return false
+	}
+	for i, want := range rule.ArgsPrefix {
+		if i < len(pins.Args) && assetfacts.PinSum(want) != pins.Args[i] {
+			return false
+		}
+	}
+	if rule.Transport != "" {
+		shape := func(sum string) string {
+			if sum != "" {
+				return "x"
+			}
+			return ""
+		}
+		if config.CanonicalMCPTransport(rule.Transport, "", "") != config.CanonicalMCPTransport(pins.Transport, shape(pins.URL), shape(pins.Command)) {
+			return false
+		}
+	}
+	return true
+}
+
 // mcpListsPinEndpoint reports whether a denied or allowed MCP rule matches
 // on how a server starts (url, command, args_prefix, transport), which a
 // name-only probe needs resolving for.
@@ -1057,10 +1115,17 @@ func (a *APIServer) claudeCodePluginAssetDecision(ctx context.Context, req claud
 	owners, candidates := a.claudeCodeToolPlugins(ctx, req)
 	// A managed Windows gateway cannot read the plugin registry in a profile:
 	// the plugin the hook resolved for a bundled server's tool owns the call
-	// (GAP-0699).
+	// (GAP-0699). A plugin the hook names owns the call even when the server
+	// name could belong to other plugins: the registry the hook read decides,
+	// so the candidates' own missing content does not refuse it.
+	ownerClaimed := false
 	if profileAssetScanApplies(cfg) && strings.HasPrefix(req.ToolName, "mcp__plugin_") {
 		for _, content := range claimedAssetFactsFromContext(ctx).Contents {
-			if content.Kind == assetfacts.ContentPlugin && !slices.ContainsFunc(owners, func(o string) bool { return strings.EqualFold(o, content.Name) }) {
+			if content.Kind != assetfacts.ContentPlugin {
+				continue
+			}
+			ownerClaimed = true
+			if !slices.ContainsFunc(owners, func(o string) bool { return strings.EqualFold(o, content.Name) }) {
 				owners = append(owners, content.Name)
 			}
 		}
@@ -1074,7 +1139,7 @@ func (a *APIServer) claudeCodePluginAssetDecision(ctx context.Context, req claud
 		}
 	}
 	if len(candidates) > 0 {
-		return a.claudeCodePluginOwnerUnknownDecision(ctx, req, candidates)
+		return a.claudeCodePluginOwnerUnknownDecision(ctx, req, candidates, ownerClaimed)
 	}
 	return config.AssetPolicyDecision{}, false
 }
@@ -1097,8 +1162,13 @@ const claudeCodePluginOwnerUnknownSource = "plugin-owner-unknown"
 // asset_policy.plugin decides an unknown plugin: default-deny and
 // registry_required refuse it where they are on, and the default profile
 // lets it run. Secure Client never reaches this function.
+//
+// Where a managed Windows gateway judges the plugin text the hook sends
+// (profileAssetContentDecision) and no content names the owner, a candidate
+// that holds no content is a plugin nothing scanned, and the call is refused
+// as owner unknown like any other refusal of a candidate (GAP-0699).
 func (a *APIServer) claudeCodePluginOwnerUnknownDecision(
-	ctx context.Context, req claudeCodeHookRequest, candidates []string,
+	ctx context.Context, req claudeCodeHookRequest, candidates []string, ownerClaimed bool,
 ) (config.AssetPolicyDecision, bool) {
 	server := strings.TrimSpace(req.MCPServerName)
 	if server == "" {
@@ -1115,8 +1185,14 @@ func (a *APIServer) claudeCodePluginOwnerUnknownDecision(
 		if !matched {
 			continue
 		}
+		refusal := false
 		switch decision.Source {
 		case "admin-deny", "install-block", "runtime-disable":
+			refusal = true
+		case "profile-asset-unscanned", "profile-asset-verdict":
+			refusal = !ownerClaimed
+		}
+		if refusal {
 			decision.Reason = fmt.Sprintf("plugin owner of mcp server %q is unknown: the plugin registry does not prove it, "+
 				"and a refusal of a plugin the name can belong to cannot be ruled out (%s)", server, decision.Source)
 			decision.Source = claudeCodePluginOwnerUnknownSource

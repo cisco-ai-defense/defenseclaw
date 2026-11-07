@@ -62,7 +62,7 @@ func hookAssetFacts(connector string, payload []byte) string {
 		}
 	}
 	if name := hookInvokedSkillName(connector, event.ToolName, event.ToolInput, event.Prompt); name != "" {
-		for _, root := range assetfacts.SkillRoots(connector, home, event.CWD) {
+		for _, root := range hookSkillRoots(connector, home, event.CWD) {
 			dir := filepath.Join(root, name)
 			addSkill(name, dir)
 			if _, err := os.Lstat(dir); err == nil {
@@ -73,7 +73,7 @@ func hookAssetFacts(connector string, payload []byte) string {
 	for _, ref := range assetfacts.SkillFolderRefs(event.ToolInput, home, event.CWD) {
 		addSkill(ref.Name, ref.Dir)
 		if _, err := os.Lstat(ref.Dir); errors.Is(err, os.ErrNotExist) {
-			for _, root := range assetfacts.SkillRoots(connector, home, event.CWD) {
+			for _, root := range hookSkillRoots(connector, home, event.CWD) {
 				addSkill(ref.Name, filepath.Join(root, ref.Name))
 			}
 		}
@@ -109,6 +109,20 @@ func hookAssetFacts(connector string, payload []byte) string {
 	return assetfacts.Encode(facts)
 }
 
+// hookSkillRoots are the skill folders the agent loads from for this user:
+// the connector's own and the ones its environment adds (Copilot's
+// COPILOT_HOME and COPILOT_SKILLS_DIRS), which only a hook that runs as the
+// user can see.
+func hookSkillRoots(connector, home, cwd string) []string {
+	roots := assetfacts.SkillRoots(connector, home, cwd)
+	for _, root := range assetfacts.EnvSkillRoots(connector, home, cwd) {
+		if !slices.Contains(roots, root) {
+			roots = append(roots, root)
+		}
+	}
+	return roots
+}
+
 // hookToolArgs decodes the tool arguments of a hook that spells them toolArgs:
 // Copilot CLI sends them as a JSON object or as a string holding one.
 func hookToolArgs(raw json.RawMessage) map[string]any {
@@ -136,6 +150,10 @@ func hookAssetContents(connector, home, toolName string, toolInput map[string]an
 	for _, dir := range skillDirs {
 		if content, ok := assetfacts.ReadContent(assetfacts.ContentSkill, filepath.Base(dir), dir); ok {
 			out = append(out, content)
+		} else {
+			// A folder the hook found but cannot read is still a skill that
+			// would run: say so, so the gateway refuses it as unscanned.
+			out = append(out, assetfacts.UnreadContent(assetfacts.ContentSkill, filepath.Base(dir), dir))
 		}
 	}
 	if connector != "claudecode" {
@@ -146,9 +164,18 @@ func hookAssetContents(connector, home, toolName string, toolInput map[string]an
 		claudeDir = filepath.Join(home, ".claude")
 	}
 	for _, plugin := range hookInvokedPluginNames(claudeDir, toolName, toolInput, prompt, commandName) {
-		for _, root := range assetfacts.ClaudePluginRoots(claudeDir, plugin) {
+		roots := assetfacts.ClaudePluginRoots(claudeDir, plugin)
+		if len(roots) == 0 {
+			// The request selects a plugin the registry does not give a folder
+			// for (it is missing, unreadable, past the bound the hook reads, or
+			// does not list the plugin): the same failure state, not silence.
+			out = append(out, assetfacts.UnreadContent(assetfacts.ContentPlugin, plugin, ""))
+		}
+		for _, root := range roots {
 			if content, ok := assetfacts.ReadContent(assetfacts.ContentPlugin, plugin, root); ok {
 				out = append(out, content)
+			} else {
+				out = append(out, assetfacts.UnreadContent(assetfacts.ContentPlugin, plugin, root))
 			}
 		}
 	}
@@ -185,6 +212,12 @@ func hookInvokedPluginNames(claudeDir, toolName string, toolInput map[string]any
 			if strings.HasPrefix(server, plugin+"_") && len(plugin) > len(best) {
 				best = plugin
 			}
+		}
+		if best == "" {
+			// No registered plugin name starts the server name: the plugin is
+			// not known, so the whole server name stands for it and carries the
+			// failure state (a plugin the registry cannot be read for).
+			best = server
 		}
 		add(best)
 	}
@@ -235,14 +268,16 @@ func hookCommandLineMCPServer(connector, cwd, server string) (config.MCPServerEn
 	}
 }
 
-// hookInvokedSkillName is the skill a Claude Code or Copilot skill call or
-// /name prompt, or a Codex "$name" prompt, selects, when it is a plain folder name.
+// hookInvokedSkillName is the skill a tool call, a Claude Code or Copilot
+// /name prompt, or a Codex "$name" prompt selects, when it is a plain folder
+// name. A tool call selects a skill under every spelling the gateway's probe
+// recognizes (assetfacts.SkillNameFromInput), whatever the tool is called.
 func hookInvokedSkillName(connector, toolName string, toolInput map[string]any, prompt string) string {
-	name := ""
+	name := assetfacts.SkillNameFromInput(toolInput)
 	fields := strings.Fields(prompt)
 	switch {
+	case name != "":
 	case strings.EqualFold(strings.TrimSpace(toolName), "Skill"):
-		name, _ = toolInput["skill"].(string)
 	case len(fields) > 0 && strings.HasPrefix(fields[0], "$"):
 		name = strings.TrimPrefix(fields[0], "$")
 	case len(fields) > 0 && (connector == "claudecode" || connector == "copilot") && strings.HasPrefix(fields[0], "/"):

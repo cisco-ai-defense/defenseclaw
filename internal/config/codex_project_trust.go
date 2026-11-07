@@ -7,21 +7,29 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // codexProjectTrust is what the Codex user config.toml says about projects:
-// the paths with trust_level "trusted" under [projects]. Codex reads the
-// .codex/config.toml of a project only for a trusted project.
+// every path under [projects] with its trust_level. Codex reads the
+// .codex/config.toml of a project only for a trusted project, and the entry
+// nearest the project decides: a project marked untrusted below a trusted
+// folder is not trusted.
 type codexProjectTrust struct {
 	// unknown is set when the user config exists but cannot be read, so the
 	// trust of a project cannot be told: every project then counts as trusted
 	// (the protective reading) rather than letting a project definition pass
 	// as ignored.
 	unknown bool
-	paths   []string
+	entries []codexProjectEntry
+}
+
+type codexProjectEntry struct {
+	path    string
+	trusted bool
 }
 
 func readCodexProjectTrust(userPath string) codexProjectTrust {
@@ -42,28 +50,70 @@ func readCodexProjectTrust(userPath string) codexProjectTrust {
 	}
 	var out codexProjectTrust
 	for path, project := range doc.Projects {
-		if strings.EqualFold(strings.TrimSpace(project.TrustLevel), "trusted") {
-			out.paths = append(out.paths, path)
+		entry := codexProjectEntry{
+			path:    codexTrustPath(path),
+			trusted: strings.EqualFold(strings.TrimSpace(project.TrustLevel), "trusted"),
 		}
+		// Two spellings of one path (case, separators) that disagree count as
+		// trusted: the protective reading.
+		if i := slices.IndexFunc(out.entries, func(e codexProjectEntry) bool { return e.path == entry.path }); i >= 0 {
+			out.entries[i].trusted = out.entries[i].trusted || entry.trusted
+			continue
+		}
+		out.entries = append(out.entries, entry)
 	}
 	return out
 }
 
-// covers reports whether a trusted path is the project layer, a folder above
-// it or one below it, or relates the same way to the working folder. Which
-// folder Codex keys a project by (the repository root, the working folder)
-// varies, so any relation counts as trusted: a project file is treated as
+// covers reports whether the project layer, or the working folder, is
+// trusted. The entry nearest a folder (the folder itself or the closest one
+// above it) decides for that folder, so a project marked untrusted below a
+// trusted folder stays untrusted. Which folder Codex keys a project by (the
+// repository root, the working folder) varies, so either folder trusted
+// counts as trusted. When no entry sits at or above either folder, a trusted
+// entry below one still counts, as before: a project file is treated as
 // ignored only when no trusted path touches it.
 func (t codexProjectTrust) covers(layer, cwd string) bool {
 	if t.unknown {
 		return true
 	}
-	for _, path := range t.paths {
-		if codexPathsRelated(path, layer) || (cwd != "" && codexPathsRelated(path, cwd)) {
+	decided := false
+	for _, folder := range []string{layer, cwd} {
+		if codexTrustPath(folder) == "" {
+			continue
+		}
+		if entry, ok := t.nearest(folder); ok {
+			decided = true
+			if entry.trusted {
+				return true
+			}
+		}
+	}
+	if decided {
+		return false
+	}
+	for _, entry := range t.entries {
+		if entry.trusted && (codexPathsRelated(entry.path, layer) || (cwd != "" && codexPathsRelated(entry.path, cwd))) {
 			return true
 		}
 	}
 	return false
+}
+
+// nearest is the entry for folder itself or for the closest folder above it.
+func (t codexProjectTrust) nearest(folder string) (codexProjectEntry, bool) {
+	folder = codexTrustPath(folder)
+	var best codexProjectEntry
+	found := false
+	for _, entry := range t.entries {
+		if entry.path == "" || !(folder == entry.path || strings.HasPrefix(folder, strings.TrimSuffix(entry.path, "/")+"/")) {
+			continue
+		}
+		if !found || len(entry.path) > len(best.path) {
+			best, found = entry, true
+		}
+	}
+	return best, found
 }
 
 func codexTrustPath(path string) string {
