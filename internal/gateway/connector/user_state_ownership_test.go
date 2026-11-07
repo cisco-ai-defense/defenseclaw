@@ -3,36 +3,71 @@
 
 package connector
 
-import "testing"
+import (
+	"io/fs"
+	"path"
+	"slices"
+	"strings"
+	"testing"
+)
 
-// The Windows hook adapters are the hook script names with .ps1 for .sh.
-// A purge that runs on a Windows account must own every one of them, or the
-// adapter stays behind (a read-only copy included).
-func TestManagedUserStateFileOwnsTheWindowsAdapterOfEveryHookScript(t *testing.T) {
-	for _, scripts := range connectorHookScripts {
-		for _, script := range scripts {
-			sh := "hooks/" + script
-			ps1 := sh[:len(sh)-len(".sh")] + ".ps1"
-			if !ManagedUserStateFile(sh) {
-				t.Errorf("%s is a hook script and is not owned", sh)
-			}
-			if !ManagedUserStateFile(ps1) {
-				t.Errorf("%s is the Windows adapter of %s and is not owned", ps1, sh)
-			}
+// The Windows PowerShell adapters are the hook assets Setup writes
+// (connectorHookAdapters, HookScriptNames); a purge owns each of them, so one
+// does not stay behind.
+func TestManagedUserStateFileOwnsEveryWrittenWindowsAdapter(t *testing.T) {
+	var adapters []string
+	for _, names := range connectorHookAdapters {
+		adapters = append(adapters, names...)
+	}
+	if len(adapters) == 0 {
+		t.Fatal("no Windows adapters are listed")
+	}
+	for _, name := range adapters {
+		if !ManagedUserStateFile("hooks/" + name) {
+			t.Errorf("hooks/%s is written by Setup and is not owned", name)
 		}
 	}
-	for _, rel := range []string{"hooks/devin-hook.ps1", "hooks/codex-hook.ps1", "hooks/claude-code-hook.ps1"} {
-		if !ManagedUserStateFile(rel) {
-			t.Errorf("%s is not owned", rel)
+	// The writer set and the shipped PowerShell assets are the same set.
+	entries, err := fs.ReadDir(hookFS, "hooks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".ps1") && !slices.Contains(adapters, entry.Name()) {
+			t.Errorf("hooks/%s is a PowerShell asset no Setup writer lists", entry.Name())
 		}
 	}
 }
 
-// Benign twin: a PowerShell file that is no hook adapter is the account own.
-func TestManagedUserStateFileKeepsPowerShellFilesThatAreNotHookAdapters(t *testing.T) {
+// Benign twin: a PowerShell file with no Setup writer is the account own, even
+// when a hook script of the same stem exists (a script has an adapter only for
+// the connectors that register one).
+func TestManagedUserStateFileKeepsPowerShellFilesNoSetupWrites(t *testing.T) {
+	var adapters []string
+	for _, names := range connectorHookAdapters {
+		adapters = append(adapters, names...)
+	}
+	entries, err := fs.ReadDir(hookFS, "hooks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, entry := range entries {
+		stem, ok := strings.CutSuffix(entry.Name(), ".sh")
+		if !ok || slices.Contains(adapters, stem+".ps1") {
+			continue
+		}
+		checked++
+		if rel := path.Join("hooks", stem+".ps1"); ManagedUserStateFile(rel) {
+			t.Errorf("%s is owned but no Setup writes it", rel)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no hook script without an adapter was checked")
+	}
 	for _, rel := range []string{
-		"hooks/personal.ps1", "hooks/unknown-hook.ps1", "hooks/devin-hook.ps1.bak",
-		"hooks/amp-plugin.ps1", "hooks/sub/devin-hook.ps1", "devin-hook.ps1", "logs/devin-hook.ps1",
+		"hooks/personal.ps1", "hooks/inspect-tool.ps1", "hooks/devin-hook.ps1", "hooks/codex-hook.ps1",
+		"hooks/cursor-hook.ps1.bak", "hooks/sub/cursor-hook.ps1", "cursor-hook.ps1", "logs/cursor-hook.ps1",
 	} {
 		if ManagedUserStateFile(rel) {
 			t.Errorf("%s is owned but is not a DefenseClaw hook adapter", rel)
