@@ -971,10 +971,13 @@ folder above it. Setup records each folder it creates in
 it is still administrator-owned and only administrators can change it or its parent; a folder that
 stays keeps its record, so the next purge tries again. The JSON result names it with the reason
 (a `created_folders_kept` warning), and so does the lifecycle log.
-If a link or junction sits at one of these vendor folders, for example a user made one at
-`C:\ProgramData\Cursor` after the folder was removed, the uninstall does not follow it, change it or remove it,
-and does not stop for it: the link and what it points to stay as they are, the folder is named in a
-`created_folders_kept` or `machine_state_kept` warning, and the rest of the uninstall completes. The
+If a link or junction sits at one of these vendor folders or on the path to one, for example a user made one at
+`C:\ProgramData\Cursor` after the folder was removed, or an administrator made `C:\ProgramData\OpenAI\Codex`
+a junction to another folder, the uninstall does not follow it, change it or remove it,
+and does not stop for it. Nothing behind the link is read, opened, locked, written or deleted, even a file
+that looks like DefenseClaw's own, such as a Codex `requirements.toml` or a writer lock. The link and what it points to stay as they are,
+the link is named once in a `machine_state_kept` warning (and in `created_folders_kept` when DefenseClaw
+had recorded the folder), never as a file the uninstall could not remove, and the rest of the uninstall completes. The
 machine policy folders DefenseClaw writes itself for GitHub Copilot, OpenCode and Devin under
 `C:\ProgramData` are the one difference: a link a standard user made there is removed, the link only, and
 nothing is created in its place (what it points to is untouched), while a link an administrator made stays and
