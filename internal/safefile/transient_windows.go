@@ -14,13 +14,14 @@ import (
 
 // Repeated Windows replacements can change the name between every lookup,
 // protection check and open. Sample through that burst without increasing the
-// nominal wait budget of a genuinely absent file. Each read still validates
-// the whole path and opened file before returning its body.
+// nominal wait budget of a genuinely absent file. Callers retain their path
+// and opened-file checks on every attempt.
 var transientRetryDelays = func() [31]time.Duration {
 	var delays [31]time.Duration
 	for i := range delays {
 		delays[i] = time.Millisecond
 	}
+	delays[len(delays)-1] = 20 * time.Millisecond
 	return delays
 }()
 
