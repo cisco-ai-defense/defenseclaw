@@ -2130,11 +2130,30 @@ func interpreterCommentStart(code string, i int, language string) bool {
 // (hookpaths.PatchTargetWatch, after the answer and again once it is written).
 // The strict policy tier does not trust a link it cannot read again: there
 // only a target resolved to itself is proved (request.strictPatchLinks).
+//
+// The file a listed target leads to is proved with it. The file-tool link
+// resolver (fileToolLinkTargetFacts) judges that file as a path of its own, and
+// it is the very file the hook named for the target, so it needs no second walk
+// the gateway cannot make (GAP-0797 with GAP-0488). In the strict tier a link
+// is already refused at its own name, so the file behind it is not proved there.
 func hermesClientPatchTarget(request trustedActionRequest, clientTargets map[string]string, clientCWD, target string) bool {
-	return request.ProtectedHomeHook && filepath.IsAbs(clientCWD) && filepath.IsAbs(target) &&
-		clientTargets[hookpaths.CWDKey] == clientCWD &&
-		clientTargets[hookpaths.PatchCompleteKey] == "1" &&
-		clientTargets[hookpaths.TruncatedKey] == "" &&
-		clientTargets[hookpaths.UnprovenReasonKey] == "" &&
-		clientTargets[target] != "" && (!request.strictPatchLinks || clientTargets[target] == target)
+	if !request.ProtectedHomeHook || !filepath.IsAbs(clientCWD) || !filepath.IsAbs(target) ||
+		clientTargets[hookpaths.CWDKey] != clientCWD ||
+		clientTargets[hookpaths.PatchCompleteKey] != "1" ||
+		clientTargets[hookpaths.TruncatedKey] != "" ||
+		clientTargets[hookpaths.UnprovenReasonKey] != "" {
+		return false
+	}
+	if clientTargets[target] != "" {
+		return !request.strictPatchLinks || clientTargets[target] == target
+	}
+	if request.strictPatchLinks {
+		return false
+	}
+	for listed, resolved := range clientTargets {
+		if resolved == target && filepath.IsAbs(listed) {
+			return true
+		}
+	}
+	return false
 }
