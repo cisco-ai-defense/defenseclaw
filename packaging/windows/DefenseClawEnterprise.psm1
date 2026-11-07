@@ -45177,7 +45177,11 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             # snapshot refused and the recovery refused again). The later
             # Initialize-DefenseClawCodexMachinePolicyParent finds a folder
             # that already passes.
-            foreach ($codexVendorFolder in @($Layout.CodexVendorDirectory, $Layout.CodexMachinePolicyDirectory)) {
+            foreach ($codexFolderKey in @('CodexVendorDirectory', 'CodexMachinePolicyDirectory')) {
+                if (-not $Layout.ContainsKey($codexFolderKey)) {
+                    continue
+                }
+                $codexVendorFolder = [string]$Layout[$codexFolderKey]
                 if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $codexVendorFolder -PathType Container) {
                     Assert-DefenseClawCodexMachinePolicyDirectory -Path $codexVendorFolder -Adopt
                 }
