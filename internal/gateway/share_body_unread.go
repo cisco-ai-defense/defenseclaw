@@ -6,6 +6,8 @@ package gateway
 import (
 	"context"
 	"slices"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // A hook call reads the script bodies a command runs (an explicit source,
@@ -36,6 +38,37 @@ func withShareBodyStrict(ctx context.Context, strict func() bool) context.Contex
 func shareBodyStrictFrom(ctx context.Context) bool {
 	strict, _ := ctx.Value(shareBodyStrictKey{}).(func() bool)
 	return strict != nil && strict()
+}
+
+// shareBodyStrictTier reports whether the request judges an unread share body
+// in the strict tier: the tier of the configuration that decides the request
+// (strictPolicyTierForHook), or, when proven assignments meet, the tier of any
+// member that blocks on the hook path. A meet scans with each member's own rule
+// pack but derives its configuration from the base pack, so the derived tier
+// alone would let an enforcing strict member lose its block to a default
+// member (guardrail_profile_meet.go: the final action is the strongest member
+// action). A strict member that only observes contributes at most an alert,
+// as everywhere else in the meet.
+func (a *APIServer) shareBodyStrictTier(ctx context.Context, connectorName string) bool {
+	if a == nil {
+		return false
+	}
+	if a.strictPolicyTierForHook(ctx, connectorName) {
+		return true
+	}
+	if a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration() {
+		return false
+	}
+	resolved := a.resolvedProfile(ctx)
+	meet := resolved.evaluationMeet()
+	if meet == nil {
+		return false
+	}
+	return slices.ContainsFunc(meet.members, func(member string) bool {
+		cfg := resolved.set.profileConfig(member)
+		return cfg != nil && configBlocksOn(cfg, connectorName, profilePathHook) &&
+			cfg.HookPolicyTierForConnector(connectorName) == config.HookPolicyTierStrict
+	})
 }
 
 // shareBodyUnreadRuleID is the alert the default and permissive tiers raise
