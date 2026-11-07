@@ -79,8 +79,9 @@ const shareBodyUnreadRuleID = "ACTION-SHARE-BODY-UNREAD"
 // shareBodyUnreadFindings is the verdict of a hook call that kept a script
 // body on a network share unread: the evaluation-limit finding in the strict
 // tier, an alert that never blocks in the others. It adds nothing to findings
-// that already carry its verdict.
-func shareBodyUnreadFindings(ctx context.Context, findings []RuleFinding, enforcementCapable bool) []RuleFinding {
+// that already carry its verdict. budget and linkBound are why the body was
+// left unread (hookpaths.ShareBodyUnreadCauses); they only word the alert.
+func shareBodyUnreadFindings(ctx context.Context, findings []RuleFinding, enforcementCapable, budget, linkBound bool) []RuleFinding {
 	has := func(ruleID string) bool {
 		return slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == ruleID })
 	}
@@ -93,9 +94,16 @@ func shareBodyUnreadFindings(ctx context.Context, findings []RuleFinding, enforc
 	if has("ACTION-COMPOUND-LIMIT") || has(shareBodyUnreadRuleID) {
 		return findings
 	}
+	title := "Script on a network share was not read: the share did not answer within the hook call wait"
+	switch {
+	case linkBound && budget:
+		title = "Script was not read: a share on its path did not answer within the hook call wait, or its path passes more links than the hook call follows"
+	case linkBound:
+		title = "Script was not read: its path passes more links than the hook call follows, so a network share on it may not have been asked"
+	}
 	return append(findings, RuleFinding{
 		RuleID: shareBodyUnreadRuleID, Severity: "MEDIUM", Confidence: 1,
-		Title:       "Script on a network share was not read: the share did not answer within the hook call wait",
+		Title:       title,
 		enforcement: findingEnforcementAlertOnly,
 	})
 }
