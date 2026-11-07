@@ -1377,14 +1377,16 @@ $failures = & $module {
                     (Get-DefenseClawCodexMachineFolderLink -Layout @{ CodexMachinePolicyDirectory = [IO.Path]::Combine($g773Plain, 'absent') }) -ne '') {
                     $failures.Add('GAP-0773: a plain or absent Codex folder was reported as a link')
                 }
+                $g773SecureClient = 'unset'
                 Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
                 try {
-                    if ((Get-DefenseClawCodexMachineFolderLink -Layout @{ CodexMachinePolicyDirectory = $g773Link }) -ne '') {
-                        $failures.Add('GAP-0773: Secure Client kept a Codex link')
-                    }
+                    $g773SecureClient = Get-DefenseClawCodexMachineFolderLink -Layout @{ CodexMachinePolicyDirectory = $g773Link }
                 }
                 finally {
                     Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+                }
+                if ($g773SecureClient -cne '') {
+                    $failures.Add("GAP-0773: Secure Client kept a Codex link: '$g773SecureClient'")
                 }
                 $g773Report = [pscustomobject]@{
                     safe_to_remove_binary = $true; managed_state_existed = $false; managed_state_removed = $false
