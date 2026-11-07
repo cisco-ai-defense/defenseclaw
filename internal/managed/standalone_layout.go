@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"path"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/productlayout"
 )
 
 // Standalone service identities. The gateway never runs as root or
@@ -229,11 +231,11 @@ func StandaloneWindowsLayoutForRoots(programFiles, programData string) (Standalo
 // never walk its thousands of files. Only LocalSystem and Administrators
 // write it; the gateway service reads and runs it.
 func StandaloneWindowsScannerRuntimeDirForRoot(programData string) string {
-	return strings.TrimRight(strings.TrimSpace(programData), `\`) + `\Cisco\DefenseClaw-ScannerRuntime`
+	return strings.TrimRight(strings.TrimSpace(programData), `\`) + `\Cisco\` + productlayout.WindowsScannerRuntimeFolder
 }
 
 // StandaloneWindowsHookRuntimeDirName is the Windows HookRuntimeDir folder name.
-const StandaloneWindowsHookRuntimeDirName = "DefenseClaw-HookRuntime"
+const StandaloneWindowsHookRuntimeDirName = productlayout.WindowsHookRuntimeFolder
 
 // StandaloneWindowsScannerRuntimeName is the scanner runtime executable.
 const StandaloneWindowsScannerRuntimeName = "defenseclaw-scanners.exe"

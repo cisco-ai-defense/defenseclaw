@@ -19,6 +19,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/productlayout"
 	"github.com/defenseclaw/defenseclaw/internal/sensitivequery"
 )
 
@@ -603,14 +604,53 @@ func recognizeHighEntropy(input string, fieldClass observability.FieldClass, pri
 	indices := entropyRE.FindAllStringIndex(input, -1)
 	result := make([]candidate, 0, len(indices))
 	for _, index := range indices {
-		value := input[index[0]:index[1]]
-		accepted := entropyBoundary(input, index[0], index[1]) && validHighEntropy(value, fieldClass)
-		if overlapsCredentialClaim(index[0], index[1], prior) {
-			accepted = false
+		boundary := entropyBoundary(input, index[0], index[1])
+		for _, part := range splitAtProductFolders(input[index[0]:index[1]]) {
+			start, end := index[0]+part[0], index[0]+part[1]
+			accepted := boundary && validHighEntropy(input[start:end], fieldClass)
+			if overlapsCredentialClaim(start, end, prior) {
+				accepted = false
+			}
+			result = append(result, candidate{start: start, end: end, accepted: accepted})
 		}
-		result = append(result, candidate{start: index[0], end: index[1], accepted: accepted})
 	}
 	return result
+}
+
+// splitAtProductFolders returns the byte ranges of span that remain candidates
+// once product folder names are taken out. A product folder name
+// (DefenseClaw-HookRuntime, DefenseClaw, ...) is a public layout constant, not
+// key material, and the entropy alphabet includes the slash, so a POSIX-form
+// path reaches the detector as one span with the folder inside it. A folder
+// name is recognized only as a whole path component; a secret that merely
+// contains or extends one stays in the surrounding range and is judged as
+// before. A span without a product folder component is returned whole.
+func splitAtProductFolders(span string) [][2]int {
+	parts := make([][2]int, 0, 1)
+	runStart, runEnd := -1, 0
+	flush := func() {
+		if runStart >= 0 && runEnd > runStart {
+			parts = append(parts, [2]int{runStart, runEnd})
+		}
+		runStart = -1
+	}
+	for componentStart := 0; componentStart <= len(span); {
+		componentEnd := componentStart + strings.IndexByte(span[componentStart:], byte(0x2f))
+		if componentEnd < componentStart {
+			componentEnd = len(span)
+		}
+		if productlayout.IsFolderName(span[componentStart:componentEnd]) {
+			flush()
+		} else {
+			if runStart < 0 {
+				runStart = componentStart
+			}
+			runEnd = componentEnd
+		}
+		componentStart = componentEnd + 1
+	}
+	flush()
+	return parts
 }
 
 func validHighEntropy(value string, fieldClass observability.FieldClass) bool {
