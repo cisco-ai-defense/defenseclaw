@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from defenseclaw.scanner.plugin_scanner.scanner import scan_plugin
@@ -73,6 +74,24 @@ def test_r109_g610_provider_with_peer_link_is_admitted_for_any_release(tmp_path,
         assert _high(root, profile) == set(), version
 
 
+BENIGN = {
+    "parenthesized-literal": "(/x/).exec(text);\n",
+    "construction": "RegExp(\"x\").exec(text);\nnew RegExp(\"x\", \"g\").exec(text);\n",
+    "parenthesized-construction": "(new RegExp(\"x\")).exec(text);\n",
+    "name-used-by-a-logger": "const RE = /x/;\nconsole.log(\"pattern\", RE);\nlogger.debug(RE);\nRE.exec(text);\n",
+    "name-from-construction": "const RE = RegExp(\"x\");\nRE.test(text);\nRE.exec(text);\n",
+    "optional-call": "const RE = /x/;\nRE?.exec(text);\n",
+    "literal-in-expression": "return (a, /x/g).exec(text) ?? (/y/).exec(text);\n",
+}
+
+
+@pytest.mark.parametrize("profile", PROFILES)
+@pytest.mark.parametrize("case", sorted(BENIGN))
+def test_r109_g610_ordinary_pattern_matching_spellings_are_not_findings(tmp_path, profile, case) -> None:
+    _plugin(tmp_path / "provider", BENIGN[case])
+    assert _high(tmp_path / "provider", profile) == set(), case
+
+
 HOSTILE = {
     "bare-call": "exec(command);\n",
     "shell-receiver": "const shell = require(`node:child_process`);\nshell.exec(command);\n",
@@ -91,6 +110,33 @@ HOSTILE = {
     "regexp-name-passed-on": "const RE = /a/;\nuse(RE);\nRE.exec(command);\n",
     "division-not-a-literal": "const q = total /count/g.exec(command);\n",
     "name-without-regexp-binding": "const RE = load();\nRE.exec(command);\n",
+    "instance-exec-replaced": (
+        "const RE = /a/;\nRE.exec = require(`node:child_process`).exec;\nRE.exec(command);\n"
+    ),
+    "prototype-exec-replaced": (
+        "RegExp.prototype.exec = require(`node:child_process`).exec;\n/a/.exec(command);\n"
+    ),
+    "exec-replaced-by-index": (
+        "const RE = /a/;\nRE[`exec`] = require(`node:child_process`).exec;\nRE.exec(command);\n"
+    ),
+    "exec-replaced-by-define": (
+        "const cp = require(`node:child_process`);\n"
+        "Object.defineProperty(RegExp.prototype, `exec`, { value: cp.exec });\n/a/.exec(command);\n"
+    ),
+    "exec-copied-onto-the-name": (
+        "const RE = /a/;\nObject.assign(RE, { exec: require(`node:child_process`).exec });\n"
+        "RE.exec(command);\n"
+    ),
+    "prototype-replaced-through-an-index": (
+        "const key = [`ex`, `ec`].join(``);\nRegExp.prototype[key] = require(`node:child_process`).exec;\n"
+        "/a/.exec(command);\n"
+    ),
+    "regexp-rebound": (
+        "const RegExp = require(`node:child_process`);\nRegExp(`a`).exec(command);\n"
+    ),
+    "call-result-of-a-construction": "make(RegExp(`a`)).exec(command);\n",
+    "parenthesized-module": "(require(`node:child_process`)).exec(command);\n",
+    "parenthesized-name": "const cp = require(`node:child_process`);\n(cp).exec(command);\n",
 }
 
 
@@ -106,3 +152,82 @@ def test_r109_g610_a_regexp_name_is_judged_per_file(tmp_path, profile) -> None:
     _plugin(tmp_path / "provider", PROVIDER_SOURCE)
     (tmp_path / "provider" / "other.js").write_text("BEDROCK_REGION_RE.exec(command);\n", encoding="utf-8")
     assert "SRC-EXEC" in _high(tmp_path / "provider", profile)
+
+
+def _peer(tmp_path, destination) -> Path:
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / "package.json").write_text(json.dumps({"name": "openclaw"}), encoding="utf-8")
+    root = tmp_path / "provider"
+    _plugin(root, PROVIDER_SOURCE)
+    (root / "node_modules").mkdir()
+    return root
+
+
+@requires_symlink_privilege
+@pytest.mark.parametrize("profile", PROFILES)
+def test_r109_g610_a_peer_link_into_protected_state_is_blocked(tmp_path, profile) -> None:
+    """Direct, aliased and nested links are judged where they resolve; an ordinary peer is not."""
+
+    protected = tmp_path / "home" / ".ssh" / "openclaw"
+    root = _peer(tmp_path, protected)
+    (root / "node_modules" / "openclaw").symlink_to(protected, target_is_directory=True)
+    assert "STRUCT-SYMLINK-ESCAPE" in _high(root, profile)
+
+    alias = tmp_path / "alias"
+    alias.symlink_to(protected.parent, target_is_directory=True)
+    (root / "node_modules" / "openclaw").unlink()
+    (root / "node_modules" / "openclaw").symlink_to(alias / "openclaw", target_is_directory=True)
+    assert "STRUCT-SYMLINK-ESCAPE" in _high(root, profile)
+
+    (root / "node_modules" / "openclaw").unlink()
+    (root / "node_modules" / "dep" / "node_modules").mkdir(parents=True)
+    (root / "node_modules" / "dep" / "node_modules" / "openclaw").symlink_to(
+        protected, target_is_directory=True,
+    )
+    assert "STRUCT-SYMLINK-ESCAPE" in _high(root, profile)
+
+    ordinary = tmp_path / "host" / "node_modules" / "openclaw"
+    ordinary.mkdir(parents=True)
+    (ordinary / "package.json").write_text(json.dumps({"name": "openclaw"}), encoding="utf-8")
+    (root / "node_modules" / "dep" / "node_modules" / "openclaw").unlink()
+    (root / "node_modules" / "openclaw").symlink_to(ordinary, target_is_directory=True)
+    assert _high(root, profile) == set()
+
+
+@requires_symlink_privilege
+def test_r109_g610_a_peer_link_into_the_state_folder_is_blocked(tmp_path) -> None:
+    state = tmp_path / "state"
+    root = _peer(tmp_path, state / "openclaw")
+    (root / "node_modules" / "openclaw").symlink_to(state / "openclaw", target_is_directory=True)
+    findings = scan_plugin(str(root), PluginScanOptions(data_dir=str(state))).findings
+    assert "STRUCT-SYMLINK-ESCAPE" in {f.rule_id for f in findings if f.severity == "HIGH"}
+
+
+@pytest.mark.parametrize("profile", PROFILES)
+def test_r109_g610_a_local_source_in_protected_state_is_blocked(tmp_path, profile) -> None:
+    root = tmp_path / "provider"
+    _plugin(root, PROVIDER_SOURCE)
+    manifest = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    manifest["dependencies"] = {"helper": "file:../home/.ssh/helper"}
+    (root / "package.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert "DEP-LOCAL-FILE" in _high(root, profile)
+
+    manifest["dependencies"] = {"helper": "file:../sibling"}
+    (root / "package.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert "DEP-LOCAL-FILE" not in _high(root, profile)
+
+
+@requires_symlink_privilege
+def test_r109_g610_secure_client_keeps_its_ordinary_scan(tmp_path) -> None:
+    """Secure Client options (vendor identity off) see neither the pattern proof nor the new links."""
+
+    options = PluginScanOptions(disable_vendor_identity=True)
+    root = tmp_path / "pattern"
+    _plugin(root, PROVIDER_SOURCE)
+    assert "SRC-EXEC" in {f.rule_id for f in scan_plugin(str(root), options).findings if f.severity == "HIGH"}
+
+    protected = tmp_path / "home" / ".ssh" / "openclaw"
+    linked = _peer(tmp_path, protected)
+    (linked / "node_modules" / "openclaw").symlink_to(protected, target_is_directory=True)
+    (linked / "index.js").write_text("export const one = 1;\n", encoding="utf-8")
+    assert "STRUCT-SYMLINK-ESCAPE" not in {f.rule_id for f in scan_plugin(str(linked), options).findings}
