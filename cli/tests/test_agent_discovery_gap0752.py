@@ -1883,3 +1883,104 @@ def test_a_cache_before_identities_is_read_again_and_rewritten_with_the_identity
     cached = ad._read_cache(data_dir=data).agents["cursor"]
     assert cached.version == expected
     assert cached.identity == ad._executable_identity(str(binary))
+
+
+def _kiro_signal(binary: Path, version: str, *, identified: bool) -> ad.AgentSignal:
+    banner = f"kiro-cli {version}"
+    return ad.AgentSignal(
+        name="kiro",
+        installed=True,
+        config_path="",
+        binary_path=str(binary),
+        version=banner,
+        error="",
+        kiro_cli_version=banner,
+        kiro_forms=[{"kind": "cli", "version": banner, "unread": "", "path": str(binary)}],
+        identity=ad._executable_identity(str(binary)) if identified else [],
+    )
+
+
+def _kiro_cached(monkeypatch, tmp_path: Path, *, identified: bool, configured: bool = True):
+    """A Kiro CLI at its hook floor, read into the cache; returns (data, binary, rescans)."""
+    data, bindir = tmp_path / "data", tmp_path / "bin"
+    data.mkdir()
+    bindir.mkdir()
+    binary = bindir / "kiro-cli"
+    binary.write_text("2.27.1", encoding="utf-8")
+    rescans: list[str] = []
+
+    def scan(name, **_kwargs):
+        rescans.append(name)
+        if name != "kiro":
+            return _signal(name)
+        return _kiro_signal(binary, binary.read_text(encoding="utf-8"), identified=True)
+
+    monkeypatch.setattr(ad, "_configured_probe_names", lambda *_a, **_k: frozenset({"kiro"} if configured else ()))
+    monkeypatch.setattr(ad, "_scan_agent", scan)
+    agents = {name: _signal(name) for name in ad.DISCOVERABLE_CONNECTORS}
+    agents["kiro"] = _kiro_signal(binary, "2.27.1", identified=identified)
+    time.sleep(0.02)
+    assert ad._write_cache(
+        ad.AgentDiscovery(scanned_at=ad._format_rfc3339(ad._now_utc()), agents=agents, cache_hit=False),
+        data_dir=data,
+    )
+    return data, binary, rescans
+
+
+def _kiro_protected(disc: ad.AgentDiscovery) -> bool:
+    from defenseclaw.connector_contracts import assess_kiro_signal
+
+    return assess_kiro_signal(disc.agents["kiro"]).selected is not None
+
+
+def test_a_kiro_cached_before_identities_is_read_again_and_not_judged_at_its_old_version(monkeypatch, tmp_path):
+    data, binary, rescans = _kiro_cached(monkeypatch, tmp_path, identified=False)
+    assert not ad._read_cache_payload(ad._cache_path(data_dir=data))["agents"]["kiro"].get("identity")
+    binary.write_text("2.26.1", encoding="utf-8")
+
+    disc = ad.discover_agents(data_dir=data)
+
+    assert "kiro" in rescans and disc.cache_hit is False
+    assert disc.agents["kiro"].version == "kiro-cli 2.26.1"
+    assert _kiro_protected(disc) is False
+    cached = ad._read_cache(data_dir=data).agents["kiro"]
+    assert cached.version == "kiro-cli 2.26.1" and cached.identity == ad._executable_identity(str(binary))
+
+
+def test_a_kiro_cached_before_identities_at_a_protected_version_is_read_again_and_stays_protected(monkeypatch, tmp_path):
+    data, _binary, rescans = _kiro_cached(monkeypatch, tmp_path, identified=False)
+
+    disc = ad.discover_agents(data_dir=data)
+
+    assert "kiro" in rescans
+    assert _kiro_protected(disc) is True
+    assert ad._read_cache(data_dir=data).agents["kiro"].identity
+
+
+def test_an_identified_kiro_replaced_after_the_scan_is_read_again(monkeypatch, tmp_path):
+    data, binary, rescans = _kiro_cached(monkeypatch, tmp_path, identified=True)
+    time.sleep(0.02)
+    _replace(binary, "2.26.1")
+
+    disc = ad.discover_agents(data_dir=data)
+
+    assert "kiro" in rescans
+    assert _kiro_protected(disc) is False
+
+
+def test_an_identified_kiro_that_did_not_change_is_served_from_the_cache(monkeypatch, tmp_path):
+    data, _binary, rescans = _kiro_cached(monkeypatch, tmp_path, identified=True)
+
+    disc = ad.discover_agents(data_dir=data)
+
+    assert not rescans and disc.cache_hit is True
+    assert _kiro_protected(disc) is True
+
+
+def test_a_kiro_nobody_set_up_is_never_run_for_a_cache_before_identities(monkeypatch, tmp_path):
+    data, binary, rescans = _kiro_cached(monkeypatch, tmp_path, identified=False, configured=False)
+    binary.write_text("2.26.1", encoding="utf-8")
+
+    disc = ad.discover_agents(data_dir=data)
+
+    assert not rescans and disc.cache_hit is True

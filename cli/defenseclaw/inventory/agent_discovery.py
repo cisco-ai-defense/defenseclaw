@@ -1328,9 +1328,12 @@ def _configured_agent_evidence_is_stale(cached: AgentDiscovery, data_dir: str | 
     folder on its way was written, replaced or re-linked at or after the scan
     (:func:`_resolves_unchanged_since`), or the launch order now offers a
     different executable ahead of it (:func:`_unchanged_candidates_ahead`).
-    Agents nobody set up are never run (GAP-0901); Kiro, which has several
-    forms, and an agent whose probe already failed for another reason are left
-    to ``agent discover --refresh``, so a broken CLI is not run on every call.
+    Agents nobody set up are never run (GAP-0901); an agent whose probe
+    already failed for another reason is left to ``agent discover --refresh``,
+    so a broken CLI is not run on every call. Kiro, which has several forms,
+    is judged like the rest by the executable its version was read from (an
+    entry that records none is read again); only the launch-order check is
+    skipped, as the forms are not ordered candidates of one selection.
     """
     configured = _configured_probe_names(data_dir)
     if not configured or _PROBE_ONLY.get() is not None:
@@ -1339,7 +1342,7 @@ def _configured_agent_evidence_is_stale(cached: AgentDiscovery, data_dir: str | 
     if scanned is None:
         return False
     since = scanned.timestamp()
-    for name in configured - {"kiro"}:
+    for name in configured:
         signal = cached.agents.get(name)
         if signal is None or not signal.installed or not signal.binary_path:
             continue
@@ -1351,6 +1354,8 @@ def _configured_agent_evidence_is_stale(cached: AgentDiscovery, data_dir: str | 
             return True
         if _executable_replaced_since_read(signal.binary_path, signal.identity):
             return True
+        if name == "kiro":
+            continue
         recorded = {"skipped_binaries": list(signal.skipped_binaries)}
         if _unchanged_candidates_ahead(name, signal.binary_path, recorded, since, data_dir) is None:
             return True
