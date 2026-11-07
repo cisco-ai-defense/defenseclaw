@@ -2455,14 +2455,17 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 			return fmt.Errorf("%s teardown incomplete: config still references %s", c.name, c.scriptName)
 		}
 	}
+	if c.name == "hermes" {
+		// Hermes ownership is structural (hermesHookEntryOwned): the file is not
+		// searched for the script name, so a comment or a user command that only
+		// names it does not fail verification.
+		return verifyHermesCleanup(opts, configPath, needle, hermesConfiguredHookCommand(needle, opts.HookExecutable))
+	}
 	if bytes.Contains(data, []byte(needle)) || bytes.Contains(data, []byte(c.scriptName)) ||
 		(c.name == "antigravity" && bytes.Contains(data, []byte(legacyAntigravityWindowsHookCommand()))) ||
 		(c.name == "antigravity" && bytes.Contains(data, []byte(legacyAntigravityNonWaitingWindowsHookCommand()))) ||
 		(c.name == "antigravity" && bytes.Contains(data, []byte(legacyAntigravityStartProcessWindowsHookCommand()))) {
 		return fmt.Errorf("%s teardown incomplete: config still references %s", c.name, c.scriptName)
-	}
-	if c.name == "hermes" {
-		return verifyHermesCleanup(opts, configPath, needle, hermesConfiguredHookCommand(needle, opts.HookExecutable))
 	}
 	return c.verifyCursorHookArtifactsClean(opts)
 }
@@ -5000,16 +5003,21 @@ const hermesHookScriptName = "hermes-hook.sh"
 // some other way belongs to the user: teardown keeps it and warns
 // (hermesKeptDefenseClawEvents).
 func hermesHookEntryOwned(entry interface{}, hookScript string, recognizedCommands map[string]struct{}) bool {
-	if containsHookScript(entry, hookScript) ||
-		editedDefenseClawHookEntry(entry, hookScriptBaseName(hookScript)) {
-		return true
-	}
 	command, ok := hermesHookEntryCommand(entry)
 	if !ok {
 		return false
 	}
-	_, recognized := recognizedCommands[command]
-	return recognized
+	if command == hookScript || command == shellWord(hookScript) {
+		return true
+	}
+	if _, recognized := recognizedCommands[command]; recognized {
+		return true
+	}
+	// The generated script at an edited path. Its matchers trim blanks, which
+	// would claim a command Setup did not write, so a command with a blank at
+	// either end is the user's.
+	return command == strings.TrimSpace(command) &&
+		editedDefenseClawHookCommand(command, hookScriptBaseName(hookScript))
 }
 
 func hermesRecognizedHookCommands(current string) map[string]struct{} {

@@ -82,6 +82,11 @@ func captureHermesNotices(t *testing.T) *bytes.Buffer {
 	return &notice
 }
 
+// hermesSetupCommandIn is the command Setup writes for a data directory.
+func hermesSetupCommandIn(dataDir string) string {
+	return hermesConfiguredHookCommand(filepath.Join(dataDir, "hooks", hermesHookScriptName), "")
+}
+
 // An entry is DefenseClaw's when its command is a string Setup writes, byte for
 // byte, whatever the account home is called: apostrophes, spaces and double
 // quotes in the home all come back out of the same quoting Setup used. The
@@ -154,13 +159,20 @@ func TestHermesCommandsSetupDidNotWriteAreUserEntriesKeptAndListed(t *testing.T)
 		"space and dotdot out to a user script": {"", func(d, _ string) string {
 			return "bash \"" + d + "/hooks/folder with space/../../../user-hook.sh\""
 		}, true},
-		"renamed hook, absolute":    {"", func(d, _ string) string { return filepath.Join(d, "hooks", "hookX") }, true},
-		"renamed hook, tilde":       {"", func(_, _ string) string { return "~/.defenseclaw/hooks/hookX" }, true},
-		"renamed hook, home var":    {"", func(_, _ string) string { return "$HOME/.defenseclaw/hooks/hookX" }, true},
-		"renamed hook, arguments":   {"", func(d, _ string) string { return filepath.Join(d, "hooks", "hookX") + " --event pre_tool_call" }, true},
-		"renamed hook, after bash":  {"", func(d, _ string) string { return "bash " + filepath.Join(d, "hooks", "hookX") }, true},
-		"adjacent directory":        {"", func(d, _ string) string { return d + "-hooks/hookX" }, true},
-		"relative word":             {"", func(_, _ string) string { return "cd .defenseclaw/hooks && bash ./hookX" }, true},
+		"renamed hook, absolute":        {"", func(d, _ string) string { return filepath.Join(d, "hooks", "hookX") }, true},
+		"renamed hook, tilde":           {"", func(_, _ string) string { return "~/.defenseclaw/hooks/hookX" }, true},
+		"renamed hook, home var":        {"", func(_, _ string) string { return "$HOME/.defenseclaw/hooks/hookX" }, true},
+		"renamed hook, arguments":       {"", func(d, _ string) string { return filepath.Join(d, "hooks", "hookX") + " --event pre_tool_call" }, true},
+		"renamed hook, after bash":      {"", func(d, _ string) string { return "bash " + filepath.Join(d, "hooks", "hookX") }, true},
+		"adjacent directory":            {"", func(d, _ string) string { return d + "-hooks/hookX" }, true},
+		"relative word":                 {"", func(_, _ string) string { return "cd .defenseclaw/hooks && bash ./hookX" }, true},
+		"setup command, leading space":  {"", func(d, _ string) string { return " " + hermesSetupCommandIn(d) }, true},
+		"setup command, trailing space": {"", func(d, _ string) string { return hermesSetupCommandIn(d) + " " }, true},
+		"setup command, trailing tab":   {"", func(d, _ string) string { return hermesSetupCommandIn(d) + "\t" }, true},
+		"edited path script, padded": {"", func(d, _ string) string {
+			return " " + filepath.Join(d, "hooks", "hermes-hook.sh.off") + " --event pre_tool_call"
+		}, true},
+		"echo of the script name":   {"", func(_, _ string) string { return "echo hermes-hook.sh" }, false},
 		"user script":               {"", func(_, home string) string { return filepath.Join(home, "user-hooks", "hookX") }, false},
 		"user script in spaced dir": {"operator with space", func(_, home string) string { return "'" + filepath.Join(home, "my hooks", "hookX") + "'" }, false},
 	}
@@ -218,5 +230,40 @@ func TestHermesRepairReplacesTheCommandsSetupWroteAndKeepsOtherEntries(t *testin
 	got := hermesPreToolCommands(t, configPath)
 	if len(got) != 3 || got[0] != want || got[1] != renamed || got[2] != user {
 		t.Fatalf("repaired commands = %q; want %q, %q, %q", got, want, renamed, user)
+	}
+}
+
+// VerifyClean reads hook registrations, not the file text: a comment that only
+// names the generated script is not a registration, and a user hook beside it
+// stays untouched.
+func TestHermesVerifyCleanIgnoresACommentThatNamesTheScript(t *testing.T) {
+	var user string
+	conn, opts, configPath, _ := hermesHookDirFixture(t, "", func(_, home string) []string {
+		user = filepath.Join(home, "user-hooks", "hookX")
+		return []string{user}
+	})
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append([]byte("# the old hermes-hook.sh was removed by hand\n"), data...)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean rejected a comment: %v", err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if got := hermesPreToolCommands(t, configPath); len(got) != 1 || got[0] != user {
+		t.Fatalf("remaining commands = %q; want the user hook", got)
+	}
+	// The same file with an entry Setup wrote still fails verification.
+	conn, opts, _, _ = hermesHookDirFixture(t, "", func(dataDir, _ string) []string {
+		return []string{hermesSetupCommandIn(dataDir)}
+	})
+	if err := conn.VerifyClean(opts); err == nil {
+		t.Fatal("VerifyClean accepted a file with an entry Setup wrote")
 	}
 }
