@@ -549,6 +549,75 @@ func TestConnectorPruneOrphansWithoutConfigStillGuessesNothing(t *testing.T) {
 			t.Fatalf("a dangling config link caused cleanup: %q, %v", after, err)
 		}
 	})
+	// The older data folder can be a link whose target is unavailable: that
+	// proves nothing about the config or the active state inside it, so the
+	// saved backups are not consumed and no registration is removed.
+	t.Run("older data folder is a link that does not resolve", func(t *testing.T) {
+		path, saved, dataDir := setUpAntigravityRollbackFromNewer(t, pristine)
+		defer withConnectorState(t, dataDir, "codex")()
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := connector.SaveActiveConnectors(dataDir, []string{"antigravity"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dataDir, "config.yaml"), []byte("old-config\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(filepath.Dir(dataDir), "old-data-target")
+		if err := os.Rename(dataDir, target); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, dataDir); err != nil {
+			t.Skipf("data folder symlink not available: %v", err)
+		}
+		if err := os.Rename(target, target+"-offline"); err != nil {
+			t.Fatal(err)
+		}
+		cfg = nil
+		_, stderr, _ := runConnectorCmd(t, "prune-orphans", "--data-dir", dataDir, "--rollback-backups-dir", saved)
+		if !strings.Contains(stderr, "config.yaml is not loaded; nothing was removed") {
+			t.Fatalf("stderr = %q", stderr)
+		}
+		if after, err := os.ReadFile(path); err != nil || !bytes.Equal(after, before) {
+			t.Fatalf("an unavailable data folder caused cleanup: %q, %v", after, err)
+		}
+	})
+	// A saved folder that is missing, or holds no connector backup records, is
+	// not rollback evidence.
+	for _, tc := range []struct {
+		name  string
+		saved func(t *testing.T, saved, dataDir string) string
+	}{
+		{"saved backup folder is missing", func(_ *testing.T, _, dataDir string) string {
+			return filepath.Join(filepath.Dir(dataDir), "missing-saved-newer-data")
+		}},
+		{"saved backup folder holds no backup records", func(t *testing.T, _, dataDir string) string {
+			empty := filepath.Join(filepath.Dir(dataDir), "empty-saved-data")
+			if err := os.MkdirAll(empty, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return empty
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path, saved, dataDir := setUpAntigravityRollbackFromNewer(t, pristine)
+			defer withConnectorState(t, dataDir, "codex")()
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg = nil
+			_, stderr, _ := runConnectorCmd(t, "prune-orphans", "--data-dir", dataDir, "--rollback-backups-dir", tc.saved(t, saved, dataDir))
+			if !strings.Contains(stderr, "config.yaml is not loaded; nothing was removed") {
+				t.Fatalf("stderr = %q", stderr)
+			}
+			if after, err := os.ReadFile(path); err != nil || !bytes.Equal(after, before) {
+				t.Fatalf("an unconfirmed saved folder caused cleanup: %q, %v", after, err)
+			}
+		})
+	}
 	t.Run("connector still named by the older install", func(t *testing.T) {
 		path, saved, dataDir := setUpAntigravityRollbackFromNewer(t, pristine)
 		defer withConnectorState(t, dataDir, "codex")()
