@@ -677,7 +677,11 @@ func (g *HookConfigGuard) repairCurrent(
 			return errors.New("authoritative hook runtime fail mode is invalid")
 		}
 		opts.HookFailMode = policy.hookFailMode
-		opts.PolicyTier = policy.policyTier
+		// Only per-user hook availability follows the rule-pack tier.
+		// Managed and Secure Client registrations keep their own policy.
+		if !opts.ManagedEnterprise && !opts.SecureClientHookDelivery {
+			opts.PolicyTier = policy.policyTier
+		}
 		opts.GuardrailMode = policy.guardrailMode
 		opts.HILTEnabled = policy.hiltEnabled
 	}
