@@ -298,3 +298,74 @@ func TestPolicyHoldSecureClientKeepsTheJournalDecision(t *testing.T) {
 		t.Errorf("Secure Client plugin journal decision changed to allow: %+v", decision)
 	}
 }
+
+// A skill_path field names the path a call runs. A link that sits in the held
+// copy, a link that passes through one and a hard link to a held file are the
+// protected copy in every profile (balanced, strict, managed standalone); the
+// admitted copy of the name, named through the same field, runs.
+func TestPolicyHoldRefusesNamedLinksAndHardLinksOfTheHeldCopyInEveryProfile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("links need privileges on Windows")
+	}
+	for _, profile := range []string{"balanced", "strict", "managed-standalone"} {
+		t.Run(profile, func(t *testing.T) {
+			api, store := policyHoldAPIForTest(t)
+			switch profile {
+			case "strict":
+				api.scannerCfg.Guardrail.RulePackDir = filepath.Join(t.TempDir(), "strict")
+			case "managed-standalone":
+				api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+				api.scannerCfg.Enterprise.Profile = managed.ProfileStandalone
+			}
+			root := t.TempDir()
+			name := "shared-skill"
+			held := policyHoldCopyForTest(t, filepath.Join(root, "held"), name)
+			admitted := policyHoldCopyForTest(t, filepath.Join(root, "admitted"), name)
+			outward := filepath.Join(held, "outward-link")
+			if err := os.Symlink(filepath.Join(admitted, "SKILL.md"), outward); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+			viaLink := filepath.Join(root, "via-link")
+			if err := os.Symlink(outward, viaLink); err != nil {
+				t.Fatal(err)
+			}
+			hard := filepath.Join(root, "hard-link")
+			if err := os.Link(filepath.Join(held, "SKILL.md"), hard); err != nil {
+				t.Skipf("hard links unavailable: %v", err)
+			}
+			hardAdmitted := filepath.Join(root, "hard-admitted")
+			if err := os.Link(filepath.Join(admitted, "SKILL.md"), hardAdmitted); err != nil {
+				t.Skipf("hard links unavailable: %v", err)
+			}
+			if err := store.SetActionFieldForConnector("skill", name, "codex", "runtime", "disable", policyHoldReasonForTest("runtime", held)); err != nil {
+				t.Fatal(err)
+			}
+			blocked := func(path string) bool {
+				probe := skillProbeFromFields("Skill", map[string]interface{}{"skill_name": name, "skill_path": path}, nil)
+				if probe.SourcePath != path || !probe.Matched {
+					t.Fatalf("the hook field parser did not keep the named path %s: %+v", path, probe)
+				}
+				_, matched := api.runtimeSkillAssetPolicyDecision(context.Background(), "codex", probe)
+				return matched
+			}
+			for label, path := range map[string]string{
+				"the held file":                     filepath.Join(held, "SKILL.md"),
+				"a link in the held copy":           outward,
+				"a link to a link in the held copy": viaLink,
+				"a hard link to the held file":      hard,
+			} {
+				if !blocked(path) {
+					t.Errorf("%s: the protected path was allowed", label)
+				}
+			}
+			for label, path := range map[string]string{
+				"the admitted file":                filepath.Join(admitted, "SKILL.md"),
+				"a hard link to the admitted file": hardAdmitted,
+			} {
+				if blocked(path) {
+					t.Errorf("%s: the ordinary path was refused", label)
+				}
+			}
+		})
+	}
+}
