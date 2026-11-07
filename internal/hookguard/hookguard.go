@@ -92,7 +92,7 @@ func AbsoluteHookExecutable(path string) bool {
 // Older registrations without a mode keep their released closed answer.
 func ParseInvocationMode(args []string) (launcher string, hookArgs []string, event string, wrapped, open, ok bool) {
 	want := []string{"hook", "--connector", "claudecode"}
-	if len(args) != 2+len(want) && len(args) != 4+len(want) && len(args) != 6+len(want) {
+	if len(args) < 2+len(want) || len(args) > 7+len(want) {
 		return "", nil, "", false, false, false
 	}
 	if args[0] != Subcommand && args[0] != WrappedSubcommand ||
@@ -104,23 +104,38 @@ func ParseInvocationMode(args []string) (launcher string, hookArgs []string, eve
 			return "", nil, "", false, false, false
 		}
 	}
-	if len(args) >= 4+len(want) {
-		if args[5] != "--event" || !validEventName(args[6]) {
+	hookArgs = append([]string(nil), want...)
+	next := 2 + len(want)
+	if len(args) > next && args[next] == "--enterprise-managed" {
+		if args[0] != WrappedSubcommand {
 			return "", nil, "", false, false, false
 		}
-		event = args[6]
+		hookArgs = append(hookArgs, "--enterprise-managed")
+		next++
+	}
+	if len(args) >= next+2 {
+		if args[next] != "--event" || !validEventName(args[next+1]) {
+			return "", nil, "", false, false, false
+		}
+		event = args[next+1]
+		next += 2
 	} else if args[0] == WrappedSubcommand {
 		return "", nil, "", false, false, false
 	} else {
 		event = "PreToolUse" // the released direct guard form
 	}
-	if len(args) == 6+len(want) {
-		if args[7] != "--unavailable-mode" || args[8] != "open" {
+	if len(args) == next+2 {
+		if args[next] != "--unavailable-mode" || args[next+1] != "open" {
+			return "", nil, "", false, false, false
+		}
+		if len(hookArgs) != len(want) {
 			return "", nil, "", false, false, false
 		}
 		open = true
+	} else if len(args) != next {
+		return "", nil, "", false, false, false
 	}
-	return args[1], append([]string(nil), want...), event, args[0] == WrappedSubcommand, open, true
+	return args[1], hookArgs, event, args[0] == WrappedSubcommand, open, true
 }
 
 func validEventName(event string) bool {
