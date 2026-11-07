@@ -6040,11 +6040,14 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     # Every writer records only what it created, and only on standalone.
     root = _psm1_function(module, "Initialize-DefenseClawManagedRoot")
     assert "if (-not $isLeaf -and $createdThisComponent) {" in root
-    assert "Add-DefenseClawStandaloneCreatedFolderRecord -Path $createdAncestors.ToArray()" in root
+    assert "$null = Add-DefenseClawStandaloneCreatedFolderRecord -Path $createdAncestors.ToArray()" in root
     codex = _psm1_function(module, "Initialize-DefenseClawCodexMachinePolicyParent")
-    assert "Add-DefenseClawStandaloneCreatedFolderRecord -Path @($directory)" in codex
+    assert "$null = Add-DefenseClawStandaloneCreatedFolderRecord -Path @($directory)" in codex
     record = _psm1_function(module, "Add-DefenseClawStandaloneCreatedFolderRecord")
     assert "if (-not (Test-DefenseClawStandaloneProfile) -or @($Path).Count -eq 0) {" in record
+    # Review 4 S1: the writer says whether every folder was recorded.
+    assert "return [bool](@($Path).Count -eq 0)" in record and "return $complete" in record and "return $false" in record
+    assert "$null = Write-DefenseClawCreatedFolderRecordFile -Path $recordPath -Body $body" in record
     assert "Write-DefenseClawCreatedFolderRecordFile -Path $recordPath -Body $body" in record
     assert "[IO.FileMode]::CreateNew" in _psm1_function(module, "Write-DefenseClawCreatedFolderRecordFile")
     assert "_ = windowsCreatedFolderRecorder(created)" in ensure
@@ -6201,7 +6204,7 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     assert "'left in place: not provably created by DefenseClaw'" in report
     # Review 3 L1: nothing in the report can replace the lifecycle's own
     # error or fail an uninstall that has finished: each step and each folder
-    # has its own try/catch with Write-Verbose, and the lifecycle `finally`
+    # has its own try/catch with Write-Warning, and the lifecycle `finally`
     # calls only this function for them.
     assert report.count("catch {") == 4 and report.count("try {") == 4
     assert "Get-DefenseClawUnprovenVendorFolders" not in lifecycle
@@ -6235,6 +6238,19 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     assert "$script:AgentFolderBackfillMarker" in consumer
     assert consumer.index("$script:AgentFolderBackfillMarker") < consumer.index("[IO.Directory]::Delete($RecordDirectory, $false)")
     assert "Set-DefenseClawAgentFolderBackfillDone" not in lifecycle
+    # Review 4 S1: the marker follows only a back-fill in which every
+    # candidate was recorded or refused by proof; a rolled-back transaction
+    # removes it.
+    assert backfill.count("$null = Add-DefenseClawStandaloneCreatedFolderRecord") == 1
+    assert "if (-not (Add-DefenseClawStandaloneCreatedFolderRecord -Path @($folder) -RecordDirectory $RecordDirectory -Roots $Roots -Origin upgrade)) {\n                $complete = $false" in backfill
+    assert backfill.index("$complete = $false") < backfill.index("if ($complete) {\n            Set-DefenseClawAgentFolderBackfillDone -RecordDirectory $RecordDirectory")
+    restore = _psm1_function(module, "Restore-DefenseClawTransaction")
+    assert "Remove-DefenseClawAgentFolderBackfillMarker" in restore
+    assert restore.index("Remove-DefenseClawTransactionCreatedSharedDirectories") < restore.index("Remove-DefenseClawAgentFolderBackfillMarker")
+    marker_removal = _psm1_function(module, "Remove-DefenseClawAgentFolderBackfillMarker")
+    assert "if (-not (Test-DefenseClawStandaloneProfile)) {" in marker_removal and "[IO.File]::Delete($marker)" in marker_removal
+    # Review 4 L4: a failing report step warns.
+    assert report.count("Write-Warning") == 4 and "Write-Verbose" not in report
     assert "'(?i)secure ?client|anyconnect'" in refusal
     assert 'Origin string `json:"origin,omitempty"`' in go
 

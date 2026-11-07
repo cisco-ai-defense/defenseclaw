@@ -316,8 +316,8 @@ $failures = & $module {
                 # recorded: Preexisting and Shared, which existed before.
                 $recorded = @($vendor, $cursor, $openai, $codex, $claude, $dropIns, $sharedSub, $gone,
                     $leafLink, $throughParent, $recreated, $userParentChild, $openRecordFolder)
-                Add-DefenseClawStandaloneCreatedFolderRecord -Path $recorded -RecordDirectory $records -Roots $roots
-                Add-DefenseClawStandaloneCreatedFolderRecord -Path @($cursor, ($cursor + '\'), [IO.Path]::Combine($root, 'Elsewhere'), $pd) -RecordDirectory $records -Roots $roots
+                $null = Add-DefenseClawStandaloneCreatedFolderRecord -Path $recorded -RecordDirectory $records -Roots $roots
+                $null = Add-DefenseClawStandaloneCreatedFolderRecord -Path @($cursor, ($cursor + '\'), [IO.Path]::Combine($root, 'Elsewhere'), $pd) -RecordDirectory $records -Roots $roots
                 $files = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $records -Force)
                 if ($files.Count -ne $recorded.Count) {
                     $failures.Add("GAP-0091: want $($recorded.Count) write-once records (no duplicate, nothing outside or at a root), got $($files.Count)")
@@ -459,7 +459,7 @@ $failures = & $module {
                 $rollbackCodex = [IO.Path]::Combine($rollbackVendor, 'Codex')
                 [void][IO.Directory]::CreateDirectory($rollbackCodex)
                 Set-G091AdministratorsOwner -Path @($vendor, $rollbackVendor, $rollbackCodex)
-                Add-DefenseClawStandaloneCreatedFolderRecord -Path @($rollbackVendor, $rollbackCodex) -RecordDirectory $records -Roots $roots
+                $null = Add-DefenseClawStandaloneCreatedFolderRecord -Path @($rollbackVendor, $rollbackCodex) -RecordDirectory $records -Roots $roots
                 & {
                     function Get-DefenseClawStandaloneCreatedFolderRecordDirectory { return $records }
                     function Assert-DefenseClawCodexMachinePolicyDirectory { param([string]$Path) }
@@ -472,7 +472,7 @@ $failures = & $module {
                         @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $records -Force).Count -ne 0) {
                         $failures.Add('GAP-0091: a rollback left the Codex folders it created, or their records')
                     }
-                    Add-DefenseClawStandaloneCreatedFolderRecord -Path @($rollbackVendor) -RecordDirectory $records -Roots $roots
+                    $null = Add-DefenseClawStandaloneCreatedFolderRecord -Path @($rollbackVendor) -RecordDirectory $records -Roots $roots
                     $snapshot = [pscustomobject]@{ created_shared_directories = @($rollbackVendor) }
                     Remove-DefenseClawTransactionCreatedSharedDirectories -Snapshot $snapshot -Layout $codexLayout
                     if (@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $records -Force).Count -ne 0) {
@@ -586,7 +586,7 @@ $failures = & $module {
                     [Security.AccessControl.PropagationFlags]::None,
                     [Security.AccessControl.AccessControlType]::Allow))
                 Microsoft.PowerShell.Security\Set-Acl -LiteralPath $r3open -AclObject $openAcl
-                Add-DefenseClawStandaloneCreatedFolderRecord -Path @($r3vendor, $r3deep) -RecordDirectory $r3records -Roots $r3roots
+                $null = Add-DefenseClawStandaloneCreatedFolderRecord -Path @($r3vendor, $r3deep) -RecordDirectory $r3records -Roots $r3roots
                 $logged.Clear()
                 $script:DefenseClawCreatedFoldersKept.Clear()
                 $r3layout = @{ SelfUninstallReceiptPath = [IO.Path]::Combine($r3life, ('self-uninstall-' + ('2' * 64) + '.json')) }
@@ -787,7 +787,7 @@ $failures = & $module {
                 Set-G091AdministratorsOwner -Path @($pvpd, $pvpf, $pvvendor, $pvcursor, $pvpfvendor, ([IO.Path]::Combine($pvpfvendor, ('DefenseClaw.retired-' + ('a' * 32)))))
                 [void]$native::CreateDirectorySecure($pvlife, $adminOnly)
                 [IO.File]::WriteAllText([IO.Path]::Combine($pvcursor, 'cursor-own.json'), '{}')
-                Add-DefenseClawStandaloneCreatedFolderRecord -Path @($pvvendor, $pvpfvendor, $pvcursor) -RecordDirectory $pvrecords -Roots @($pvpd, $pvpf)
+                $null = Add-DefenseClawStandaloneCreatedFolderRecord -Path @($pvvendor, $pvpfvendor, $pvcursor) -RecordDirectory $pvrecords -Roots @($pvpd, $pvpf)
                 $pvlayout = @{ SelfUninstallReceiptPath = [IO.Path]::Combine($pvlife, ('self-uninstall-' + ('3' * 64) + '.json')) }
                 if (@(Get-DefenseClawStandaloneCreatedFolderPreview -Layout $pvlayout -RecordDirectory $pvrecords -Roots @($pvpd, $pvpf)).Count -ne 0) {
                     $failures.Add('review 2 L3: the preview ran with no self-uninstall finalizer pending')
@@ -1101,7 +1101,7 @@ $failures = & $module {
                 if ($unproven.Count -ne $touched.Count) {
                     $failures.Add("GAP-0704 review 3 L4: unproven = '$($unproven -join '; ')', want the touched folders: '$($touched -join '; ')'")
                 }
-                Add-DefenseClawStandaloneCreatedFolderRecord -Path @($mdmCursor) -RecordDirectory $c.Records -Roots $c.Roots
+                $null = Add-DefenseClawStandaloneCreatedFolderRecord -Path @($mdmCursor) -RecordDirectory $c.Records -Roots $c.Roots
                 if (@(Get-DefenseClawUnprovenVendorFolders -Touched $touched -RecordDirectory $c.Records | Microsoft.PowerShell.Core\Where-Object { $_ -ceq $mdmCursor }).Count -ne 0) {
                     $failures.Add('GAP-0704 review 3 L4: a recorded folder is still named as not provably created')
                 }
@@ -1110,6 +1110,7 @@ $failures = & $module {
                 # must not escape the lifecycle `finally`, and one folder's
                 # failure loses no other.
                 $reported = [Collections.Generic.List[string]]::new()
+                $warnLog = [Collections.Generic.List[string]]::new()
                 $reportThrew = ''
                 & {
                     function Get-DefenseClawStandaloneCreatedFolderPreview { param($Layout, $RecordDirectory, $Roots) throw 'the record folder cannot be listed' }
@@ -1120,12 +1121,20 @@ $failures = & $module {
                         $reported.Add($Folder)
                     }
                     try {
-                        Write-DefenseClawUninstallCreatedFolderReport -Layout @{ Marker = 1 } -Touched @('C:\one', 'C:\two') -LeftNothing $true
+                        Write-DefenseClawUninstallCreatedFolderReport -Layout @{ Marker = 1 } -Touched @('C:\one', 'C:\two') -LeftNothing $true -WarningVariable warned -WarningAction SilentlyContinue
                     }
                     catch {
                         $reportThrew = [string]$_.Exception.Message
                     }
+                    foreach ($warning in @($warned)) {
+                        $warnLog.Add([string]$warning)
+                    }
                 }
+                # Review 4 L4: each failed step leaves a warning, not silence.
+                if ($warnLog.Count -ne 2 -or -not $warnLog[0].Contains('preview not reported') -or -not $warnLog[1].Contains('unproven-folder note not written')) {
+                    $failures.Add("GAP-0704 review 4 L4: want a warning for the preview and one for the first folder, got: $($warnLog -join ' | ')")
+                }
+                $warnLog.Clear()
                 if ($reportThrew -ne '' -or $reported.Count -ne 1 -or $reported[0] -cne 'C:\two') {
                     $failures.Add("GAP-0704 review 3 L1: the uninstall report threw '$reportThrew' or lost the second folder: $($reported -join '; ')")
                 }
@@ -1133,14 +1142,150 @@ $failures = & $module {
                 & {
                     function Get-DefenseClawUnprovenVendorFolders { param($Touched, $RecordDirectory) throw 'the record folder cannot be listed' }
                     try {
-                        Write-DefenseClawUninstallCreatedFolderReport -Layout @{ Marker = 1 } -Touched @('C:\one') -LeftNothing $true
+                        Write-DefenseClawUninstallCreatedFolderReport -Layout @{ Marker = 1 } -Touched @('C:\one') -LeftNothing $true -WarningVariable warned -WarningAction SilentlyContinue
                     }
                     catch {
                         $reportThrew = [string]$_.Exception.Message
                     }
+                    foreach ($warning in @($warned)) {
+                        $warnLog.Add([string]$warning)
+                    }
                 }
                 if ($reportThrew -ne '') {
                     $failures.Add("GAP-0704 review 3 L1: an unlistable record folder escaped the uninstall report: $reportThrew")
+                }
+                if ($warnLog.Count -ne 1 -or -not $warnLog[0].Contains('unproven vendor folders not reported')) {
+                    $failures.Add("GAP-0704 review 4 L4: want one warning for the unlistable record folder, got: $($warnLog -join ' | ')")
+                }
+
+                # Review 4 S1: the one-shot marker is written only after a
+                # back-fill that succeeded: every candidate recorded, or refused
+                # by proof (a), (b) or (c), which is final. A record that could
+                # not be written is retried by the next run, and a rolled-back
+                # transaction removes the marker.
+                $r5Marker = { param($c) [IO.File]::Exists([IO.Path]::Combine($c.Records, 'agent-folder-backfill.done')) }
+                $r5Cursor = {
+                    param($c)
+                    $folder = [IO.Path]::Combine($c.Pd, 'Cursor')
+                    & $agNew @($folder)
+                    [IO.File]::WriteAllText([IO.Path]::Combine($folder, '.defenseclaw-managed-runtime-selector.lock'), '')
+                    $folder
+                }
+                $r5Real = ${function:Write-DefenseClawCreatedFolderRecordFile}
+                # A refusal for (a), (b) or (c) is final: the marker is written.
+                foreach ($case in @(@('r5a', '(a) created before StateRoot'), @('r5b', '(b) another descriptor'), @('r5c', '(c) a foreign file'))) {
+                    $c = & $r4New $case[0]
+                    $cursorFolder = [IO.Path]::Combine($c.Pd, 'Cursor')
+                    if ($case[0] -ceq 'r5a') {
+                        & $agNew @($cursorFolder)
+                        [IO.Directory]::SetCreationTimeUtc($cursorFolder, [IO.Directory]::GetCreationTimeUtc($c.State).AddMinutes(-5))
+                    }
+                    elseif ($case[0] -ceq 'r5b') {
+                        [void][IO.Directory]::CreateDirectory($cursorFolder)
+                    }
+                    else {
+                        & $agNew @($cursorFolder)
+                        [IO.File]::WriteAllText([IO.Path]::Combine($cursorFolder, 'settings.json'), '{}')
+                    }
+                    & $r4Fill $c
+                    if (-not (& $r5Marker $c)) {
+                        $failures.Add("GAP-0704 review 4 S1: a folder refused by proof $($case[1]) is final, but the back-fill left no marker")
+                    }
+                    if (& $r4Has $c $cursorFolder) {
+                        $failures.Add("GAP-0704 review 4 S1: the folder refused by proof $($case[1]) was recorded")
+                    }
+                }
+                # A record that could not be written is not done: no marker,
+                # the folders that were written stay recorded, and the next
+                # run records the rest and writes the marker.
+                $c = & $r4New 'r5d'
+                $cursorFolder = & $r5Cursor $c
+                & $r4Codex $c -Committed
+                $failName = Get-DefenseClawCreatedFolderRecordName -Path $c.Codex
+                & {
+                    function Write-DefenseClawCreatedFolderRecordFile {
+                        param([string]$Path, [byte[]]$Body)
+                        if ($Path.EndsWith($failName, [StringComparison]::OrdinalIgnoreCase)) {
+                            throw 'the disk is full'
+                        }
+                        & $r5Real -Path $Path -Body $Body
+                    }
+                    $fillArgs = $c.Args
+                    Add-DefenseClawStandaloneUpgradeVendorFolderRecords @fillArgs
+                }
+                if (& $r5Marker $c) {
+                    $failures.Add('GAP-0704 review 4 S1: a record write failed, but the back-fill wrote its marker')
+                }
+                if (-not (& $r4Has $c $cursorFolder) -or (& $r4Has $c $c.Codex)) {
+                    $failures.Add('GAP-0704 review 4 S1: want the Cursor record written and the Codex record not, after one write failed')
+                }
+                & $r4Fill $c
+                if (-not (& $r5Marker $c) -or -not (& $r4Has $c $c.Codex) -or -not (& $r4Has $c $c.OpenAI)) {
+                    $failures.Add('GAP-0704 review 4 S1: the next run did not record the rest and write the marker')
+                }
+                # No record folder (the lifecycle folder is gone): nothing is
+                # recorded, no marker, no error, and nothing is created.
+                $c = & $r4New 'r5e'
+                $null = & $r5Cursor $c
+                [IO.File]::Delete([IO.Path]::Combine($c.Life, 'lifecycle.lock'))
+                [IO.Directory]::Delete($c.Life, $false)
+                $fillThrew = ''
+                try {
+                    & $r4Fill $c
+                }
+                catch {
+                    $fillThrew = [string]$_.Exception.Message
+                }
+                if ($fillThrew -ne '' -or (& $r5Marker $c) -or [IO.Directory]::Exists($c.Life)) {
+                    $failures.Add("GAP-0704 review 4 S1: with no lifecycle folder the back-fill threw '$fillThrew', wrote a marker or created the folder")
+                }
+                # The writer's result: success or failure.
+                $c = & $r4New 'r5f'
+                $cursorFolder = & $r5Cursor $c
+                $other = [IO.Path]::Combine($c.Pd, 'OtherVendor')
+                & $agNew @($other)
+                $outside = [IO.Path]::Combine($r4Root, 'r5f-outside')
+                [void][IO.Directory]::CreateDirectory($outside)
+                $r5Want = {
+                    param([string]$Name, $Got, [bool]$Want)
+                    $list = @($Got)
+                    if ($list.Count -ne 1 -or $list[0] -isnot [bool] -or [bool]$list[0] -ne $Want) {
+                        $failures.Add("GAP-0704 review 4 S1: the record writer returned '$($list -join ',')' for $Name, want $Want")
+                    }
+                }
+                & $r5Want 'a folder it recorded' (Add-DefenseClawStandaloneCreatedFolderRecord -Path @($cursorFolder) -RecordDirectory $c.Records -Roots $c.Roots -Origin upgrade) $true
+                & $r5Want 'a folder already recorded' (Add-DefenseClawStandaloneCreatedFolderRecord -Path @($cursorFolder) -RecordDirectory $c.Records -Roots $c.Roots -Origin upgrade) $true
+                & $r5Want 'no folder' (Add-DefenseClawStandaloneCreatedFolderRecord -Path @() -RecordDirectory $c.Records -Roots $c.Roots) $true
+                & $r5Want 'a folder outside the roots' (Add-DefenseClawStandaloneCreatedFolderRecord -Path @($outside) -RecordDirectory $c.Records -Roots $c.Roots) $false
+                & $r5Want 'a missing lifecycle folder' (Add-DefenseClawStandaloneCreatedFolderRecord -Path @($other) -RecordDirectory ([IO.Path]::Combine($c.Pd, 'no-lifecycle', 'created-folders')) -Roots $c.Roots) $false
+                $failedWrite = & {
+                    function Write-DefenseClawCreatedFolderRecordFile { param([string]$Path, [byte[]]$Body) throw 'the disk is full' }
+                    Add-DefenseClawStandaloneCreatedFolderRecord -Path @($other) -RecordDirectory $c.Records -Roots $c.Roots
+                }
+                & $r5Want 'a failed write' $failedWrite $false
+                if (& $r4Has $c $other) {
+                    $failures.Add('GAP-0704 review 4 S1: a folder whose write failed has a record')
+                }
+                # A rolled-back transaction removes the marker; the records
+                # stay, and the next run back-fills again.
+                $c = & $r4New 'r5g'
+                $cursorFolder = & $r5Cursor $c
+                & $r4Fill $c
+                if (-not (& $r5Marker $c) -or -not (& $r4Has $c $cursorFolder)) {
+                    $failures.Add('GAP-0704 review 4 S1: the first run before the rollback did not record Cursor and write the marker')
+                }
+                & {
+                    function Get-DefenseClawStandaloneCreatedFolderRecordDirectory { return $c.Records }
+                    Remove-DefenseClawAgentFolderBackfillMarker
+                    Remove-DefenseClawAgentFolderBackfillMarker
+                }
+                if ((& $r5Marker $c) -or -not (& $r4Has $c $cursorFolder)) {
+                    $failures.Add('GAP-0704 review 4 S1: the rollback did not remove the marker, or removed a record')
+                }
+                & $r4Codex $c -Committed
+                & $r4Fill $c
+                if (-not (& $r4Has $c $c.Codex) -or -not (& $r5Marker $c)) {
+                    $failures.Add('GAP-0704 review 4 S1: after the rollback the back-fill did not run again')
                 }
 
                 # Rule (ii): Secure Client.
@@ -1168,7 +1313,7 @@ $failures = & $module {
                 $scFolder = [IO.Path]::Combine($pd, 'SecureClientVendor')
                 [void][IO.Directory]::CreateDirectory($scLife)
                 [void][IO.Directory]::CreateDirectory($scFolder)
-                Add-DefenseClawStandaloneCreatedFolderRecord -Path @($scFolder) -RecordDirectory ([IO.Path]::Combine($scLife, 'created-folders')) -Roots $roots
+                $null = Add-DefenseClawStandaloneCreatedFolderRecord -Path @($scFolder) -RecordDirectory ([IO.Path]::Combine($scLife, 'created-folders')) -Roots $roots
                 Remove-DefenseClawStandaloneCreatedFolders -Path @($scFolder) -Roots $roots
                 Add-DefenseClawStandaloneUpgradeVendorFolderRecords -ProgramDataVendorFolder $scFolder -ProgramFilesVendorFolder $scFolder -RecordDirectory ([IO.Path]::Combine($scLife, 'created-folders')) -Roots $roots
                 if ((Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::Combine($scLife, 'created-folders'))) -or
