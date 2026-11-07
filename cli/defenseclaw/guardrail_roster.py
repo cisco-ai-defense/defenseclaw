@@ -86,8 +86,12 @@ def check_guardrail_connector_roster(path: str, candidate: bytes) -> None:
     if not (isinstance(named, str) and named.strip()):
         named = claw.get("mode") if "mode" in claw else None
     if not (isinstance(named, str) and named.strip()):
-        current, _, _ = config_writer._read_current(path)
-        named = _file_selected_connector(config_writer._parse_config_document(current))
+        # A file that exists selected something before the edit (an implicit
+        # OpenClaw counts); a first save has no earlier selection, and the
+        # roster it writes names its own primary, as the gateway reads it.
+        current, _, exists = config_writer._read_current(path)
+        document_now = config_writer._parse_config_document(current if exists else candidate)
+        named = _file_selected_connector(document_now)
     if isinstance(named, str) and named.strip() and not config_module._is_retired_connector_name(named):
         installed = normalize_connector(named)
         own = next(
