@@ -193,11 +193,7 @@ def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
     too) to its last name, and the final destination is judged again.
     """
 
-    from defenseclaw.config import default_data_path
-
-    roots = {os.path.realpath(str(default_data_path()))}
-    if data_dir:
-        roots.add(os.path.realpath(data_dir))
+    roots = _private_roots(data_dir)
 
     def private(location: str) -> bool:
         resolved = os.path.realpath(location)
@@ -257,6 +253,39 @@ def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
     destination = os.path.realpath(link)
     return _names_private_state(destination) or any(
         _path_within(root, destination) for root in roots
+    )
+
+
+def _private_roots(data_dir: str) -> set[str]:
+    from defenseclaw.config import default_data_path
+
+    roots = {os.path.realpath(str(default_data_path()))}
+    if data_dir:
+        roots.add(os.path.realpath(data_dir))
+    return roots
+
+
+def link_reaches_private_state(link: str, data_dir: str = "") -> bool:
+    """A link or junction names or resolves into protected state, hop by hop.
+
+    A path that cannot be walked (too deep, too many links, unreadable) is
+    treated as reaching it: an unjudged link is not a trusted one.
+    """
+
+    try:
+        return _peer_path_uses_private_state(link, data_dir)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return True
+
+
+def path_reaches_private_state(path: str, data_dir: str = "") -> bool:
+    """A path, as written or as it resolves, names or lies in protected state."""
+
+    resolved = os.path.realpath(path)
+    return (
+        _names_private_state(path)
+        or _names_private_state(resolved)
+        or any(_path_within(root, resolved) for root in _private_roots(data_dir))
     )
 
 
