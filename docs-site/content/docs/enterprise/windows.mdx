@@ -628,8 +628,8 @@ on an asset in an enrolled user's folder name that user (`user.id`,
 
 ### MCP servers in user profiles
 
-An enrolled user's Claude Code and Kiro MCP servers (user scope, local scope and
-a project's `.mcp.json`) get an install scan and an admission decision like any
+An enrolled user's Claude Code, Kiro and Codex MCP servers (Claude Code user and
+local scope and a project's `.mcp.json`, Kiro user scope, Codex user scope) get an install scan and an admission decision like any
 other server. The scanner runs in the gateway service, so the user cannot change
 its verdict. Only the server's own process runs as the user:
 
@@ -661,6 +661,15 @@ they sign in, and are scanned again within about 30 seconds. If `seclogon` is
 disabled, set it back to Manual. MCP servers of other connectors in a profile,
 and Codex project `.codex\config.toml` files, are not published and get no
 install scan.
+
+Codex reads one user `config.toml`: the one under `CODEX_HOME` when that is set,
+otherwise `.codex\config.toml`. The enumerator publishes only that file for the
+account, so an old definition in the unused file never replaces the one that runs
+and an unreadable unused file does not block the account. `CODEX_HOME` counts
+when it is set for the account (the user environment); one set only for a
+session is not seen by the enumerator, and the gateway refuses a call to a Codex
+server defined in that file until the same definition is published
+(`mcp-source-unpublished`).
 
 ### Release a blocked or quarantined skill
 

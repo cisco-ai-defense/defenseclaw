@@ -8899,6 +8899,13 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 			Connector: connector, Server: server, Home: home, CWD: cwd,
 		})
 	})
+	if watcherUsesEnrolledUserDirs(s.currentConfig()) {
+		api.SetMCPDefinitionPublished(func(connector, server, home, cwd string, def config.MCPServerEntry) bool {
+			return s.installWatcher.Load().MCPDefinitionPublished(watcher.MCPAdmissionQuery{
+				Connector: connector, Server: server, Home: home, CWD: cwd,
+			}, def)
+		})
+	}
 	api.SetMCPRefreshBeforeCall(s.refreshEnrolledMCPBeforeCall)
 	if s.configMgr != nil {
 		api.SetConfigRuntime(s.configMgr.Reload, s.currentConfig)

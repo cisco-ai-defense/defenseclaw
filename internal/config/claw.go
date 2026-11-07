@@ -1101,6 +1101,20 @@ func openClawBinaryFallbacks() []string {
 	return paths
 }
 
+// CodexHomeRelocated reports whether the calling process runs Codex with a
+// CODEX_HOME other than ~/.codex, so the config.toml it reads is not the one
+// under the user's home (GAP-0686).
+func CodexHomeRelocated() bool {
+	if strings.TrimSpace(os.Getenv("CODEX_HOME")) == "" {
+		return false
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return true
+	}
+	return !strings.EqualFold(connectorEnvHome("CODEX_HOME", ".codex"), filepath.Join(home, ".codex"))
+}
+
 func connectorEnvHome(variable, defaultDir string) string {
 	if configured := strings.TrimSpace(os.Getenv(variable)); configured != "" {
 		configured = expandPath(configured)

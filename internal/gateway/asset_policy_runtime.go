@@ -196,6 +196,39 @@ func (a *APIServer) mcpDefinitionRefreshDecision(ctx context.Context, connectorN
 		watcher.MCPAdmissionStatus{Name: probe.ServerName, Unavailable: true, RetryAfter: enrolledMCPRefreshBudget})
 }
 
+// mcpRelocatedUnpublishedDecision refuses, on a managed Windows gateway (the
+// only one that wires mcpDefinitionPublished), the
+// tool call of a Codex server the account's agent runs from a CODEX_HOME the
+// hook enumerator did not publish: a session-only CODEX_HOME is not in the
+// account environment the enumerator reads, so the server has no install
+// admission and no scan verdict, and nothing else would stop it (GAP-0686).
+// The hook names the definition it read from that file (assetfacts Relocated);
+// a definition the published record holds is admitted by the checks that
+// follow, so an ordinary server, the default one or one of a persistent
+// CODEX_HOME, stays allowed. Secure Client keeps main (#1092).
+func (a *APIServer) mcpRelocatedUnpublishedDecision(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
+	cfg := a.requestConfig(ctx)
+	if a.mcpDefinitionPublished == nil || cfg == nil || cfg.SecureClientIntegration() ||
+		!probe.Matched || probe.Surface != "hook" || !mcpCallAboutToRun(hookEvent) {
+		return config.AssetPolicyDecision{}, false
+	}
+	server := claimedAssetFactsFromContext(ctx).MCP
+	home, serviceAccount := callerHomeForAssets(ctx)
+	if server == nil || !server.Relocated || !serviceAccount || home == "" || !config.SameMCPToolServer(connectorName, server.Name, probe.ServerName) {
+		return config.AssetPolicyDecision{}, false
+	}
+	def := config.MCPServerEntry{Name: server.Name, URL: server.URL, Command: server.Command, Args: server.Args}
+	if a.mcpDefinitionPublished(connectorName, probe.ServerName, home, probe.WorkspaceDir, def) {
+		return config.AssetPolicyDecision{}, false
+	}
+	reason := fmt.Sprintf("mcp server %q runs from a Codex config.toml under a CODEX_HOME that DefenseClaw has not scanned; set CODEX_HOME for the account (not only for the session) so its servers are admitted", probe.ServerName)
+	decision := runtimeAssetDisableBlockDecision("mcp", probe.ServerName, connectorName, "hook", reason, "mcp-source-unpublished")
+	decision.RegistryStatus = "unknown"
+	a.logAssetPolicyAudit(ctx, connectorName, "mcp:"+probe.ServerName, fmt.Sprintf(
+		"action=block source=%s hook=%s tool=%s connector=%s reason=%s", decision.Source, hookEvent, probe.ToolName, connectorName, reason))
+	return decision, true
+}
+
 // mcpCallAboutToRun reports a hook event sent before a tool runs, however
 // the connector spells it (Kiro CLI 2.x sends preToolUse).
 func mcpCallAboutToRun(hookEvent string) bool {
@@ -324,6 +357,9 @@ func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequ
 		return decision, true
 	}
 	if decision, refused := a.mcpStateUnreadableDecision(ctx, "codex", req.HookEventName, probe); refused {
+		return decision, true
+	}
+	if decision, refused := a.mcpRelocatedUnpublishedDecision(ctx, "codex", req.HookEventName, probe); refused {
 		return decision, true
 	}
 	a.noteHookReportedMCPServer(ctx, "codex", req.HookEventName, probe)
