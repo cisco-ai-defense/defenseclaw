@@ -6770,6 +6770,50 @@ def _foreground_current_uid() -> int:
     return os.geteuid() if hasattr(os, "geteuid") else -1
 
 
+def _linux_process_uids(pid: int, *, proc_root: str = "/proc") -> tuple[int, ...] | None:
+    """The real, effective, saved and filesystem uids the kernel reports for ``pid``."""
+    if pid <= 0:
+        return None
+    try:
+        with open(os.path.join(proc_root, str(pid), "status"), encoding="utf-8", errors="replace") as status:
+            lines = status.read(1 << 16).splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        if line.startswith("Uid:"):
+            fields = line.split()[1:]
+            if len(fields) == 4 and all(field.isascii() and field.isdecimal() for field in fields):
+                return tuple(int(field) for field in fields)
+            return None
+    return None
+
+
+def _foreground_process_owner_uid(
+    pid: int, process: ProcessEvidence, platform_name: str, evidence: GatewayEvidence
+) -> int:
+    """The one account that owns ``process``, or -1 when that is not proven.
+
+    macOS reports the owner with the process identity. On Linux the owner is
+    read from the kernel process table and must be the same account in all
+    four uid fields, for the same process generation that was identified.
+    """
+    if process.uid >= 0:
+        return process.uid
+    if not platform_name.startswith("linux"):
+        return -1
+    uids = _linux_process_uids(pid)
+    if not uids or len(uids) != 4 or len(set(uids)) != 1:
+        return -1
+    current = evidence.process(pid)
+    if (
+        current.status != "ok"
+        or current.start_identity != process.start_identity
+        or current.executable != process.executable
+    ):
+        return -1
+    return uids[0]
+
+
 @dataclass(frozen=True)
 class _ForegroundGatewayOwner:
     pid: int
@@ -6790,7 +6834,9 @@ def _foreground_gateway_status_owner(
     from defenseclaw.logger import _running_gateway_record
 
     platform_name = platform_name or sys.platform
-    if platform_name not in {"win32", "darwin"} or asset_lists.is_secure_client(cfg):
+    if not (platform_name in {"win32", "darwin"} or platform_name.startswith("linux")):
+        return None
+    if asset_lists.is_secure_client(cfg):
         return None
     if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
         return None
@@ -6858,7 +6904,7 @@ def _foreground_gateway_status_owner(
                 return None
         else:
             own_uid = _foreground_current_uid()
-            if own_uid <= 0 or process.uid != own_uid:
+            if own_uid <= 0 or _foreground_process_owner_uid(listener.pid, process, platform_name, evidence) != own_uid:
                 return None
     except (OSError, ValueError):
         return None
@@ -7037,8 +7083,11 @@ def _emit_windows_foreground_gateway_rows(
     owner = _own_foreground_gateway(cfg, platform_name=platform_name)
     if owner is None:
         return False
+    # The rows are downgraded only while this pass still sees the proven
+    # process on the port. A missing, ambiguous or unreadable listener, or
+    # another PID, is what the normal rows fail on.
     listener = evidence.listener(_gateway_api_port(cfg), host=_gateway_api_host(cfg))
-    if listener.status == "ok" and listener.pid != owner.pid:
+    if listener.status != "ok" or listener.pid != owner.pid:
         return False
     served = f"this account's own foreground gateway (PID {owner.pid}) serves the API port without a PID file"
     _emit("skip", "Gateway PID identity", f"{served}; its identity is unverified (see Sidecar API)", r=r)
