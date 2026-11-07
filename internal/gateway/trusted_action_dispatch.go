@@ -337,6 +337,7 @@ func dispatchTrustedAction(
 	parent context.Context,
 	request trustedActionRequest,
 ) (findings []RuleFinding) {
+	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
 	if ManagedEnterpriseActive() {
 		return nil
 	}
