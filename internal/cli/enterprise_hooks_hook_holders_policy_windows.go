@@ -1103,7 +1103,14 @@ func (gate *windowsHolderState) pass(target string, now time.Time, last bool) (c
 		case reason == "":
 			eligible = append(eligible, holder)
 		case windowsHolderRefusal(holder.Process) != "" && blockers[holder.objectKey()]:
-			blocking, blockingReasons = append(blocking, holder), append(blockingReasons, reason)
+			why := "it can write or append"
+			switch {
+			case holder.Object == 0:
+				why = "the system did not show its file object"
+			case holder.Access&windowsHolderWriteAccess == 0:
+				why = "it is the only file object open on the hook"
+			}
+			blocking, blockingReasons = append(blocking, holder), append(blockingReasons, reason+" ("+why+")")
 		default:
 			named, namedReasons = append(named, holder), append(namedReasons, reason)
 		}
