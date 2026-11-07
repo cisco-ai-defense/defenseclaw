@@ -552,17 +552,6 @@ The scan and scan-finding rows of a `scan skill` or `scan plugin` run of the ins
 on an asset in an enrolled user's folder name that user (`user.id`,
 `defenseclaw.user.name`), and the judge model when the judge ran
 (`gen_ai.request.model`, `judge=` in the scan row details).
-When the only skill and plugin folders are in profiles, the watcher starts with
-none: its audit row reads `watcher ready: dirs=0` and
-`defenseclaw-gateway status --json` reports it degraded with
-`profile_roots_skipped: true`. That is expected, not a failure, and a skill moved
-into a user's `.claude\skills` folder is not scanned or quarantined by it. For
-install admission, set `gateway.watcher.enabled: true`,
-`gateway.watcher.skill.enabled: true` (or `gateway.watcher.plugin.enabled: true`)
-with `take_action: true` to enforce the verdict, and list a folder outside
-profiles in `gateway.watcher.skill.dirs` (or `gateway.watcher.plugin.dirs`). Claude
-Code and Kiro MCP servers in profiles are admitted either way ([MCP servers in user
-profiles](#mcp-servers-in-user-profiles)).
 
 - **Verdicts.** A level whose `admission.<type>.actions` is `block` blocks the
   asset and leaves its folder in place (`file_action=none`). `quarantine` copies
@@ -622,6 +611,18 @@ profiles](#mcp-servers-in-user-profiles)).
   source=admin-deny asset_type=plugin asset_name=<plugin>`. MCP servers a plugin
   bundles are admitted with it; `asset_policy.mcp` rules name them
   `plugin:<plugin>:<server>`.
+- **A watcher with no folders.** When every skill and plugin folder is in a
+  profile, the watcher starts with none: its audit row reads
+  `watcher ready: dirs=0` and `defenseclaw-gateway status --json` reports it
+  degraded with `profile_roots_skipped: true`. That is expected, not a failure.
+  The watcher does not scan or quarantine a skill or plugin in a profile; the
+  start of this section says what the hook applies to profile assets. For
+  install admission of a shared folder, set `gateway.watcher.enabled: true` and
+  `gateway.watcher.skill.enabled: true` (or `gateway.watcher.plugin.enabled: true`),
+  add `take_action: true` to enforce the verdict, and list a folder outside
+  profiles in `gateway.watcher.skill.dirs` (or `gateway.watcher.plugin.dirs`).
+  Claude Code and Kiro MCP servers in profiles are admitted either way
+  ([MCP servers in user profiles](#mcp-servers-in-user-profiles)).
 
 ### MCP servers in user profiles
 
