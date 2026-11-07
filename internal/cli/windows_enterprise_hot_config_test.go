@@ -2010,7 +2010,7 @@ func TestWindowsEnterpriseEnsureUndoesAHotApplyWhoseApprovedSourceRecordIsMalfor
 		if err != nil {
 			return err
 		}
-		return refreshManagedApprovedConfigSource(stateDir, installed)
+		return refreshManagedApprovedConfigSource(stateDir, host.configPath, installed)
 	}
 	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify"), installedStatus("Upgrade")}}
 	runHotConfigEnsure(t, host, opts, stub)

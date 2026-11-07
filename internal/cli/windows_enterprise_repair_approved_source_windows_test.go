@@ -87,7 +87,7 @@ func TestWindowsEnterpriseRepairOverAHandEditStopsOnAnUnprovenApprovedSource(t *
 		t.Fatal(err)
 	}
 	stageConfigGeneration(t, configPath, approvedSourceConfigB, "lifecycle")
-	if err := refreshManagedApprovedConfigSource(dir, []byte(approvedSourceConfigB)); err != nil {
+	if err := refreshManagedApprovedConfigSource(dir, configPath, []byte(approvedSourceConfigB)); err != nil {
 		t.Fatal(err)
 	}
 	handEditAfter(t, configPath, approvedSourceConfigB)
