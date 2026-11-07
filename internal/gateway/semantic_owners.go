@@ -668,7 +668,7 @@ func sshIdentityConsumer(command actionfacts.CommandFact) bool {
 
 func shadowContentAccessPrerequisite(facts actionfacts.Facts) bool {
 	for _, candidate := range facts.Paths {
-		if systemEtcPath(canonicalSemanticPath(semanticPathValue(candidate))) != "/etc/shadow" {
+		if canonicalSemanticPath(semanticPathValue(candidate)) != "/etc/shadow" {
 			continue
 		}
 		command, ok := integrityCommandByID(facts, candidate.CommandID)
@@ -1470,7 +1470,10 @@ func semanticPathValue(path actionfacts.PathFact) string {
 	if value == "" {
 		value = path.Value
 	}
-	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/"))
+	// Every exact /etc rule reads this value, so the macOS physical spelling of
+	// a resolved target is folded once here instead of in each matcher
+	// (GAP-0769).
+	return systemEtcPath(strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/")))
 }
 
 func matchesActiveSensitivePath(
