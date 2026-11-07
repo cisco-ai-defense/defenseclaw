@@ -992,6 +992,7 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 
 func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, patchTarget bool, memo *TargetMemo,
 	lstat func(string) (os.FileInfo, error), readlink func(string) (string, error),
+	procLink func(string) bool,
 ) (string, []string, int, bool) {
 	if linkDepth > maxWriteTargetLinkDepth {
 		return "", nil, linkDepth, false
@@ -1078,9 +1079,9 @@ func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, pat
 			}
 			unknown := os.IsNotExist(err)
 			if err == nil && (info.Mode()&os.ModeSymlink != 0 || windowsMountPointLink(candidate, info)) {
-				// The cwd proc link is interpreted by the process opening the
-				// operand. Resolving it in the hook would prove a different path.
-				if ProcCWDWriteOperand(candidate) {
+				// A process link the hook reads for another process than the
+				// one opening the operand would prove a different path.
+				if procLink(candidate) {
 					return fail()
 				}
 				link, err := readlink(candidate)
@@ -1096,7 +1097,7 @@ func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, pat
 				var extra []string
 				var nextDepth int
 				var ok bool
-				current, extra, nextDepth, ok = walkWritePathMemoWithReaders(current, link, linkDepth+1, collect, patchTarget, nil, lstat, readlink)
+				current, extra, nextDepth, ok = walkWritePathMemoWithReaders(current, link, linkDepth+1, collect, patchTarget, nil, lstat, readlink, procLink)
 				if !ok || collect && len(forms)+len(extra) > maxOpaquePathForms {
 					return fail()
 				}
