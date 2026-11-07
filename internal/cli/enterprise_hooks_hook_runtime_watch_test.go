@@ -101,6 +101,7 @@ func TestWindowsHookRuntimeWatchListIsTheAllowListOnly(t *testing.T) {
 // source, link by link, and the constant has this value. A name that nothing on
 // a hook start reads fails here, so it cannot stay on the list.
 func TestWindowsHookRuntimeFilesAreReadOnTheHookPath(t *testing.T) {
+	requireInternalSources(t)
 	if len(windowsHookRuntimeFiles) == 0 {
 		t.Fatal("the allow-list is empty")
 	}
@@ -147,6 +148,7 @@ func TestWindowsHookRuntimeFilesAreReadOnTheHookPath(t *testing.T) {
 // runtime: the cases of ResolveWindowsManagedHookRuntime that call
 // resolveWindowsPerUserManagedHookRuntime.
 func TestWindowsHookRuntimeConnectorsAreTheResolverCases(t *testing.T) {
+	requireInternalSources(t)
 	file, err := parser.ParseFile(token.NewFileSet(), filepath.Join("..", "enterprisehooks", "managed_runtime_windows.go"), nil, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -188,6 +190,16 @@ func TestWindowsHookRuntimeConnectorsAreTheResolverCases(t *testing.T) {
 	sort.Strings(want)
 	if len(got) == 0 || !reflect.DeepEqual(got, want) {
 		t.Fatalf("resolver cases %v, connector folders %v", got, want)
+	}
+}
+
+// requireInternalSources skips a test that reads the source of the other
+// packages when the test binary runs away from the repository (the native
+// Windows run copies the compiled binary to a host without the source).
+func requireInternalSources(t *testing.T) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join("..", "enterprisehooks")); err != nil {
+		t.Skip("the internal/ source tree is not next to the test binary")
 	}
 }
 

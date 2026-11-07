@@ -1856,6 +1856,10 @@ func TestWindowsHolderTheRuntimeFilePassIsBoundedPerCheck(t *testing.T) {
 	if rig.sys.snapshots != 2*windowsHolderDataHeldPerTick {
 		t.Fatalf("%d scans after two checks, want %d: the second check must reach the files the first left", rig.sys.snapshots, 2*windowsHolderDataHeldPerTick)
 	}
+	for check := 2; check < (len(files)+windowsHolderDataHeldPerTick-1)/windowsHolderDataHeldPerTick; check++ {
+		rig.advance(windowsHookBinaryCheckInterval)
+		keepData(rig)
+	}
 	scanned := 0
 	for _, gate := range windowsHolderDataGates {
 		if !gate.streakLast.IsZero() {
@@ -1863,7 +1867,7 @@ func TestWindowsHolderTheRuntimeFilePassIsBoundedPerCheck(t *testing.T) {
 		}
 	}
 	if scanned != len(files) {
-		t.Fatalf("%d of %d files were reached in two checks", scanned, len(files))
+		t.Fatalf("%d of %d files were reached in %d checks", scanned, len(files), (len(files)+windowsHolderDataHeldPerTick-1)/windowsHolderDataHeldPerTick)
 	}
 }
 
@@ -2021,7 +2025,7 @@ func TestWindowsHolderAHeldFileThatIsNotWatchedIsIgnored(t *testing.T) {
 	keepData(rig2)
 	rig2.advance(windowsHookBinaryCheckInterval)
 	keepData(rig2)
-	if !h2.closed || len(windowsHolderDataGates) != 2 || windowsHolderDataGates[strings.ToLower(a)].closes != 1 || windowsHolderDataGates[strings.ToLower(b)].closes != 0 {
+	if !h2.closed || len(windowsHolderDataGates) != len(windowsHookRuntimeWatchList(dir2)) || windowsHolderDataGates[strings.ToLower(a)].closes != 1 || windowsHolderDataGates[strings.ToLower(b)].closes != 0 {
 		t.Fatalf("closed %v, gates %d", h2.closed, len(windowsHolderDataGates))
 	}
 }
