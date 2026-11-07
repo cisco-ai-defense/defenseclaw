@@ -1567,7 +1567,8 @@ def _unchanged_candidates_ahead(
     previous_scan: float,
 ) -> tuple[str, ...] | None:
     """Return the candidates ahead of *previous_binary* when they are exactly
-    the ones the last probe passed over and none changed since, else None."""
+    the ones the last probe passed over and none resolves differently since
+    (:func:`_resolves_unchanged_since`), else None."""
     candidates = _binary_candidates_for_agent(name, _SPECS.get(name, _AgentSpec((), "", ("--version",))))
     if previous_binary not in candidates:
         return None
@@ -1575,10 +1576,11 @@ def _unchanged_candidates_ahead(
     if ahead != _recorded_skipped_binaries(previous):
         return None
     for candidate in ahead:
-        try:
-            if os.stat(os.path.realpath(candidate)).st_mtime >= previous_scan:
-                return None
-        except OSError:
+        # A skipped candidate counts as changed by the same rule as the
+        # selected one: its file, its folder or any link on the way written or
+        # re-linked since the scan. A link moved to another installed version
+        # keeps that version's old mtime, so the target alone cannot show it.
+        if not _resolves_unchanged_since(candidate, previous_scan):
             return None
     return ahead
 
@@ -3354,6 +3356,11 @@ def _write_cache(
         return False
 
 
+def _scan_read_version(signal: AgentSignal) -> bool:
+    """Whether a scan observed an installed agent and read a version from it."""
+    return signal.installed and bool(signal.version or signal.kiro_cli_version or signal.kiro_ide_version)
+
+
 def _publish_agent_signal(
     disc: AgentDiscovery,
     name: str,
@@ -3366,9 +3373,13 @@ def _publish_agent_signal(
     A scan made for one connector can miss an unrelated peer for a moment (a
     slow or unreadable CLI), and the gateway reads each peer version from this
     cache, so publishing the whole scan would erase a version a peer was
-    reviewed at. A missing or unreadable cache has nothing to keep and takes
-    the scan; a cache past its time limit is left alone: it is no longer
-    read, and the next discovery scans again (GAP-0752).
+    reviewed at. A peer the scan did read (installed, with a version) is a
+    newer fact than the cache holds and replaces it, whichever way the version
+    moved: the gateway admits a peer by the version in this file. A peer the
+    scan could not read keeps its cached entry. A missing or unreadable cache
+    has nothing to keep and takes the scan; a cache past its time limit is
+    left alone: it is no longer read, and the next discovery scans again
+    (GAP-0752).
     """
     signal = disc.agents.get(name)
     if signal is None:
@@ -3390,7 +3401,9 @@ def _publish_agent_signal(
     scanned = _parse_rfc3339(str(payload.get("scanned_at") or ""))
     if scanned is None or _now_utc() - scanned > timedelta(seconds=CACHE_TTL_SECONDS):
         return False
-    payload["agents"][name] = asdict(signal)
+    for peer, fresh in disc.agents.items():
+        if peer == name or _scan_read_version(fresh):
+            payload["agents"][peer] = asdict(fresh)
     try:
         body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
         atomic_write_private_bytes(path, body.encode("utf-8"))

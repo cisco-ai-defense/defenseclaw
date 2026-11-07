@@ -2983,11 +2983,13 @@ def test_an_unprobed_agent_keeps_the_version_of_the_candidate_last_probed(monkey
     """GAP-0002: setup of one connector probes only it. A peer whose first
     binary candidate is not the one the last scan probed lost its version,
     and the restarted gateway stopped enforcing it."""
-    first, probed = tmp_path / "cursor", tmp_path / "agent"
+    (tmp_path / "bin").mkdir()
+    first, probed = tmp_path / "bin" / "cursor", tmp_path / "bin" / "agent"
     for binary in (first, probed):
         binary.write_text("#!/bin/sh\n", encoding="utf-8")
         old = os.stat(binary).st_mtime - 600
         os.utime(binary, (old, old))
+    time.sleep(1.1)  # a passed-over candidate counts as changed unless the scan is newer than its ctime
 
     def scan(probe: bool):
         def fake(name: str, **_kwargs) -> ad.AgentSignal:
@@ -3063,8 +3065,10 @@ def test_an_unprobed_agent_does_not_keep_a_version_across_a_newly_preferred_bina
 
 
 def test_an_unprobed_agent_does_not_keep_a_version_when_a_passed_over_binary_changed(monkeypatch, tmp_path):
-    first, probed = tmp_path / "cursor", tmp_path / "agent"
+    (tmp_path / "bin").mkdir()
+    first, probed = tmp_path / "bin" / "cursor", tmp_path / "bin" / "agent"
     _old_binaries(first, probed)
+    time.sleep(1.1)  # the scan must be newer than the files' ctime
     scan = _cursor_scans(probed, (str(first),))
     monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
     monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda name, _spec: (str(first), str(probed)))
@@ -3078,8 +3082,10 @@ def test_an_unprobed_agent_does_not_keep_a_version_when_a_passed_over_binary_cha
 
 
 def test_an_unprobed_agent_does_not_keep_the_version_of_an_untrusted_binary(monkeypatch, tmp_path):
-    first, probed = tmp_path / "cursor", tmp_path / "agent"
+    (tmp_path / "bin").mkdir()
+    first, probed = tmp_path / "bin" / "cursor", tmp_path / "bin" / "agent"
     _old_binaries(first, probed)
+    time.sleep(1.1)  # the scan must be newer than the files' ctime
     monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
     monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda name, _spec: (str(first), str(probed)))
     monkeypatch.setattr(ad, "_scan_agent", _cursor_scans(probed, (str(first),))(True))
