@@ -1538,7 +1538,7 @@ if [[ "${ROLLBACK}" == true ]]; then
     # hook that no longer exists (Claude Code blocked every prompt). The
     # newer gateway of the two knows the entries; only DefenseClaw's go.
     if ! version_lt "${back_to}" 1.0.0; then
-        prune_orphaned_hooks "${BIN_DIR}/defenseclaw-gateway" "${PREVIOUS}/bin/defenseclaw-gateway"
+        prune_orphaned_hooks "${PREVIOUS}/data" "${BIN_DIR}/defenseclaw-gateway" "${PREVIOUS}/bin/defenseclaw-gateway"
     fi
     # GAP-0483: the install now back had sandboxes off and none of the
     # running sandboxes' hook bindings, so their hooks failed closed as
@@ -2592,7 +2592,7 @@ swap_in() {
         fi
         # A rollback by an earlier release left hook entries of a connector
         # this install does not configure (GAP-0009). Best effort.
-        prune_orphaned_hooks "${BIN_DIR}/defenseclaw-gateway"
+        prune_orphaned_hooks "" "${BIN_DIR}/defenseclaw-gateway"
     fi
 }
 
@@ -3364,18 +3364,41 @@ drop_newer_hook_helper() {
         || warn "Could not remove the newer hook helper ${live}; if hook calls are refused after the rollback, remove it and run: defenseclaw-gateway restart"
 }
 
-# prune_orphaned_hooks GATEWAY...: with the first GATEWAY that has the
-# command, remove the DefenseClaw hook entries of every connector the live
-# install does not configure (GAP-0009). Only DefenseClaw-owned entries go;
-# it says which.
+# prune_orphaned_hooks ROLLBACK_BACKUPS_DIR GATEWAY...: remove the DefenseClaw
+# hook entries of every connector the live install does not configure
+# (GAP-0009). Every GATEWAY that has the command runs: the older release can
+# have it without knowing connectors added later. A rollback passes the saved
+# newer install's data folder as ROLLBACK_BACKUPS_DIR (an upgrade passes an
+# empty one): a gateway that takes --rollback-backups-dir runs first and puts
+# back each vendor file that is still as DefenseClaw wrote it, to the bytes it
+# had before setup, or removes it when setup created it; the surgical cleanup
+# of the other readers then handles a file the operator changed since. Without
+# that step a file that did not exist before setup stayed behind as an empty
+# shell (GAP-0813); install.ps1 does the same in Invoke-PruneOrphanedHooks.
+# Only DefenseClaw-owned entries go; it says which.
 prune_orphaned_hooks() {
-    local gateway
+    local backups_dir="$1" gateway help
+    local with_backups=() plain=()
+    shift
     for gateway in "$@"; do
-        # An older gateway prints the connector help for an unknown subcommand.
-        [[ -x "${gateway}" ]] && "${gateway}" connector prune-orphans --help 2>/dev/null | grep "connector prune-orphans" >/dev/null || continue
+        [[ -x "${gateway}" ]] || continue
+        # An older gateway prints the connector help for an unknown subcommand
+        # or flag.
+        help="$("${gateway}" connector prune-orphans --help 2>/dev/null || true)"
+        [[ "${help}" == *"connector prune-orphans"* ]] || continue
+        if [[ -n "${backups_dir}" && "${help}" == *--rollback-backups-dir* ]]; then
+            with_backups+=("${gateway}")
+        else
+            plain+=("${gateway}")
+        fi
+    done
+    for gateway in ${with_backups[@]+"${with_backups[@]}"}; do
+        "${gateway}" connector prune-orphans --data-dir "${DEFENSECLAW_HOME}" --rollback-backups-dir "${backups_dir}" 2>>"${LOG}" \
+            || warn "Could not remove the DefenseClaw hook entries of connectors that are not configured (see ${LOG}); 'defenseclaw doctor' lists them"
+    done
+    for gateway in ${plain[@]+"${plain[@]}"}; do
         "${gateway}" connector prune-orphans --data-dir "${DEFENSECLAW_HOME}" 2>>"${LOG}" \
             || warn "Could not remove the DefenseClaw hook entries of connectors that are not configured (see ${LOG}); 'defenseclaw doctor' lists them"
-        return 0
     done
     return 0
 }
