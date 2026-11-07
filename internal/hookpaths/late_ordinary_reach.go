@@ -90,14 +90,15 @@ func (s *lateScan) follow(path string) (string, bool) {
 // protected folder or anything below it, and, for a regular file with a
 // second hard link, any file below such a folder. Only a proven identity is
 // protected: what the scan could not list or index (an unreadable folder, a
-// tree over the bound) is not proven, and a not-proven ordinary alias must not
-// be denied for the budget the scan ran out of.
+// tree over the bound, an authorized-keys file it could not read) is not
+// proven, and a not-proven ordinary alias must not be denied for the budget
+// the scan ran out of or for a protected file it could not read.
 func (s *lateScan) reachesProtected(real string, info os.FileInfo) bool {
 	if !s.reach.haveKeys {
 		s.reach.keys, s.reach.haveKeys = newProtectedFiles(s.home), true
 	}
 	for _, key := range s.reach.keys {
-		if key.unknown || key.info != nil && os.SameFile(info, key.info) {
+		if key.info != nil && os.SameFile(info, key.info) {
 			return true
 		}
 	}
