@@ -151,7 +151,7 @@ from defenseclaw.process_liveness import pid_alive
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener, is_symlink
 from defenseclaw.scanner_binary import SKILL_SCANNER_BINARY, resolve_scanner_binary
 from defenseclaw.webhooks import list_webhooks, network_error_text, validate_webhook_url
-from defenseclaw.winquote import powershell_literal, run_instruction
+from defenseclaw.winquote import powershell_command_line, powershell_literal, run_instruction
 
 # Doctor status markers, recomputed per emission so the per-call
 # TTY/NO_COLOR gate in ``ux._color_enabled`` takes effect. Caching at
@@ -1871,10 +1871,10 @@ def _root_gateway_remedy(cfg) -> str:
 
 def _root_gateway_remedy_for(platform_name: str, cfg) -> str:
     if platform_name.startswith("win"):
-        return (
-            "Stop it from an administrator prompt (defenseclaw-gateway stop), "
-            "then start it as yourself (defenseclaw-gateway start)"
-        )
+        executable = _root_gateway_windows_executable()
+        stop = powershell_command_line(executable, "stop")
+        start = powershell_command_line(executable, "start")
+        return f"Stop it from an administrator prompt ({stop}), then start it as yourself ({start})"
     if platform_name == "darwin":
         return (
             "Open DefenseClawMac and choose Start Gateway: it stops the root gateway with "
@@ -1885,6 +1885,20 @@ def _root_gateway_remedy_for(platform_name: str, cfg) -> str:
         "Stop it, return its files to your account and start it as yourself with: "
         + _root_gateway_recovery_command(cfg)
     )
+
+
+def _root_gateway_windows_executable() -> str:
+    """The gateway of this account for the Windows remedy, as the Go windowsRootGatewayRemedy renders it.
+
+    The resolved binary when it is an absolute path, else the bare file name
+    a per-user install has on PATH.
+    """
+    from defenseclaw.gateway import resolve_gateway_binary
+
+    binary = resolve_gateway_binary()
+    if binary and os.path.isabs(binary):
+        return binary
+    return "defenseclaw-gateway.exe"
 
 
 def _root_gateway_recovery_command(cfg) -> str:

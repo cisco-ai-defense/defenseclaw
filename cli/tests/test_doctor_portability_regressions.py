@@ -876,6 +876,24 @@ def test_root_gateway_remedy_is_written_for_the_running_os(monkeypatch, tmp_path
     assert ("sudo chown -R" in remedy) == (platform_name != "win32")
     assert not remedy.endswith(".") and ".." not in remedy
     assert (cmd_doctor.ROOT_GATEWAY_REASON + " " + remedy + ".").count("..") == 0
+    if platform_name == "win32":
+        # GAP-0747: rendered like managed.WindowsCommandLine, never a bare command.
+        assert remedy == (
+            "Stop it from an administrator prompt (& 'defenseclaw-gateway.exe' stop), "
+            "then start it as yourself (& 'defenseclaw-gateway.exe' start)"
+        )
+        assert "(defenseclaw-gateway " not in remedy
+
+
+def test_windows_root_gateway_remedy_quotes_the_resolved_gateway_path(monkeypatch, tmp_path) -> None:
+    """GAP-0747: a gateway path with a space or an apostrophe is one inert literal."""
+    path = os.fspath(tmp_path / "O'Brien Jr" / "defenseclaw-gateway.exe")
+    monkeypatch.setattr(gateway_module, "resolve_gateway_binary", lambda: path)
+    remedy = cmd_doctor._root_gateway_remedy_for("win32", SimpleNamespace(data_dir=os.fspath(tmp_path), deployment_mode=""))
+    quoted = path.replace("'", "''")
+    assert f"(& '{quoted}' stop)" in remedy
+    assert f"(& '{quoted}' start)" in remedy
+    assert "sudo" not in remedy
 
 
 def _gateway_account_fixture(monkeypatch, tmp_path, *, process_uid, deployment_mode=""):

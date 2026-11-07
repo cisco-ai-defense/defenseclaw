@@ -68,7 +68,7 @@ func namesRootGatewayRemedy(goos, text string) bool {
 // administrator prompt is not a macOS or Linux one.
 func TestGAP0746RootGatewayRemedyCheckFollowsTheOS(t *testing.T) {
 	const unix = "Stop it, return its files to your account and start it as yourself with: sudo env DEFENSECLAW_HOME='/h' '/bin/defenseclaw-gateway' stop && defenseclaw-gateway start"
-	const windows = "Stop it from an administrator prompt (defenseclaw-gateway stop), then start it as yourself (defenseclaw-gateway start)"
+	const windows = "Stop it from an administrator prompt (& 'C:\\Users\\a\\bin\\defenseclaw-gateway.exe' stop), then start it as yourself (& 'C:\\Users\\a\\bin\\defenseclaw-gateway.exe' start)"
 	for _, tc := range []struct {
 		goos, text string
 		want       bool
