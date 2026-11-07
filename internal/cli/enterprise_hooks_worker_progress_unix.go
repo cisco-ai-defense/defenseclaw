@@ -131,12 +131,8 @@ func repairEnterpriseHookTarget(ctx context.Context, progress *enterpriseHookWor
 func restoredHookElements(broken []string, after enterprisehooks.HookElements) []string {
 	var restored []string
 	for _, name := range broken {
-		switch {
-		case name == enterprisehooks.HookElementEntry && after.Entry,
-			name == enterprisehooks.HookElementRuntime && after.Runtime:
-			if !slices.Contains(restored, name) {
-				restored = append(restored, name)
-			}
+		if after.Matches(name) && !slices.Contains(restored, name) {
+			restored = append(restored, name)
 		}
 	}
 	return restored

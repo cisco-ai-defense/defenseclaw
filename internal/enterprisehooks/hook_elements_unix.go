@@ -9,31 +9,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-// The protected elements of a target hook install, as the guardian counts a
-// restore: it reports an element that did not match what DefenseClaw renders
-// before a repair and matches it after (GAP-0754). A write to a file the agent
-// also writes for its own settings is not a restore, so the evidence is the
-// element and never the file.
-const (
-	// HookElementEntry is the DefenseClaw hook entry in the agent config.
-	HookElementEntry = "hook entry"
-	// HookElementRuntime is the hook runtime files DefenseClaw renders in the
-	// data folder of the account: the hook script, the shared scripts and
-	// records, or the managed plugin.
-	HookElementRuntime = "hook runtime files"
-)
-
 // HookElements says which protected elements of a target match what
 // DefenseClaw renders for it. The registration check also reads the hook
-// runtime files, so a registration is judged only once they match: while
-// Runtime is false, Entry is not judged and reads true.
+// runtime files, so a registration is judged only once every one of them
+// matches: while a runtime element is broken, Entry is not judged and reads
+// true.
 type HookElements struct {
-	Entry   bool
-	Runtime bool
+	Entry bool
+	// BrokenRuntime names the runtime file elements that do not match, in a
+	// fixed order; HookElementRuntime stands for a fault of the runtime as a
+	// whole.
+	BrokenRuntime []string
 }
 
 // Broken names the elements that do not match, in a fixed order.
@@ -42,10 +33,19 @@ func (e HookElements) Broken() []string {
 	if !e.Entry {
 		broken = append(broken, HookElementEntry)
 	}
-	if !e.Runtime {
-		broken = append(broken, HookElementRuntime)
+	return append(broken, e.BrokenRuntime...)
+}
+
+// Matches says whether the element name is one the guardian knows and it
+// matches. An unknown name never matches.
+func (e HookElements) Matches(name string) bool {
+	switch {
+	case !KnownHookElement(name):
+		return false
+	case name == HookElementEntry:
+		return e.Entry
 	}
-	return broken
+	return !slices.Contains(e.BrokenRuntime, name)
 }
 
 // ProbeHookElements checks each protected element of one target on its own,
@@ -67,9 +67,16 @@ func ProbeHookElements(ctx context.Context, opts InstallOptions) (HookElements, 
 		platformPrepareAgentPolicy(ctx, conn.Name(), target.home, target.dataDir, target.uid, target.gid, &setupOpts)
 		return withOwnerCredentials(target.uid, target.gid, func() error {
 			lock, lockErr := connector.LoadHookContractLockEntryForMode(target.dataDir, conn.Name(), false)
-			elements.Runtime = lockErr == nil && lock.Connector == conn.Name() &&
-				verifyStandaloneHookRuntime(conn, setupOpts, opts.GuardrailMode, lock, target.uid) == nil
-			if !elements.Runtime {
+			if lockErr != nil || lock.Connector != conn.Name() {
+				elements.BrokenRuntime = []string{HookElementRuntime}
+			} else {
+				for _, fault := range standaloneHookRuntimeFaults(conn, setupOpts, opts.GuardrailMode, lock, target.uid, true) {
+					if !slices.Contains(elements.BrokenRuntime, fault.element) {
+						elements.BrokenRuntime = append(elements.BrokenRuntime, fault.element)
+					}
+				}
+			}
+			if len(elements.BrokenRuntime) > 0 {
 				elements.Entry = true
 				return nil
 			}
