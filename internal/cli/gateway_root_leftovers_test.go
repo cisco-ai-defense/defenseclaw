@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -153,8 +154,29 @@ func pidIdentityError(t *testing.T, record string) error {
 		t.Fatal(err)
 	}
 	err := daemon.New(home).ValidateStartIdentityFiles()
-	if err == nil || daemon.FailedPIDRecord(err) != record {
-		t.Fatalf("identity preflight for %s = %v", record, err)
+	if failed, unreadable := daemon.FailedPIDRecord(err); err == nil || failed != record || unreadable {
+		t.Fatalf("identity preflight for %s = %v (record %q unreadable %v)", record, err, failed, unreadable)
+	}
+	return err
+}
+
+// unreadablePIDIdentityError is the real start preflight failing on a PID
+// record this account may not read, the failure a root-owned 0600 record gives.
+// The record is made unreadable by its mode, since the test cannot create a
+// root-owned file.
+func unreadablePIDIdentityError(t *testing.T, record string) error {
+	t.Helper()
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("a mode cannot make a file unreadable here")
+	}
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", home)
+	if err := os.WriteFile(filepath.Join(home, record), []byte("1\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	err := daemon.New(home).ValidateStartIdentityFiles()
+	if failed, unreadable := daemon.FailedPIDRecord(err); err == nil || failed != record || !unreadable {
+		t.Fatalf("identity preflight for unreadable %s = %v (record %q unreadable %v)", record, err, failed, unreadable)
 	}
 	return err
 }
@@ -164,7 +186,7 @@ func pidIdentityError(t *testing.T, record string) error {
 // raw identity text. An identity error with no root-owned cause is unchanged.
 func TestRefuseOverRootOwnedStateReplacesOnlyARootOwnedCause(t *testing.T) {
 	for _, record := range []string{"gateway.pid", "watchdog.pid"} {
-		identityErr := pidIdentityError(t, record)
+		identityErr := unreadablePIDIdentityError(t, record)
 		stubRootRuntimeLeftovers(t, record)
 		for _, verb := range []string{"start", "restart"} {
 			err := refuseOverRootOwnedState(startCmd, verb, identityErr)
@@ -213,6 +235,33 @@ func TestRefuseOverRootOwnedStateKeepsAnIndependentPIDCause(t *testing.T) {
 	}
 }
 
+// A root-owned PID record (or a root-owned install home) that the account can
+// read can still be malformed. Returning the ownership leaves it malformed and
+// the next start fails again, so its own reason stays first and the chain
+// follows (GAP-0788 review 4). The benign twin is the unreadable record above,
+// where the chain does replace the identity text.
+func TestRefuseOverRootOwnedStateKeepsAMalformedRecordThatIsItselfRootOwned(t *testing.T) {
+	for _, record := range []string{"gateway.pid", "watchdog.pid"} {
+		for _, blocker := range []string{record, "./"} {
+			t.Run(record+"_"+strings.TrimSuffix(blocker, "/"), func(t *testing.T) {
+				identityErr := pidIdentityError(t, record)
+				stubRootRuntimeLeftovers(t, blocker)
+				for _, verb := range []string{"start", "restart"} {
+					err := refuseOverRootOwnedState(startCmd, verb, identityErr)
+					if err == nil || !errors.Is(err, identityErr) ||
+						!strings.Contains(err.Error(), "cannot "+verb+" the gateway") ||
+						!strings.Contains(err.Error(), `sudo chown -R "$(id -un)" `) {
+						t.Fatalf("%s: the malformed record reason or the chain is missing: %v", verb, err)
+					}
+					if strings.Index(err.Error(), identityErr.Error()) > strings.Index(err.Error(), "cannot "+verb) {
+						t.Errorf("%s: the malformed record reason does not come first: %v", verb, err)
+					}
+				}
+			})
+		}
+	}
+}
+
 // A root-owned install home the account cannot enter hides its PID records, so
 // the store entry is the PID cause only when the store is the install home.
 func TestRootOwnedStartRefusalAttributesAHiddenStoreToThePIDCheckOnlyInTheInstallHome(t *testing.T) {
@@ -235,7 +284,7 @@ func TestRootOwnedStartRefusalAttributesAHiddenStoreToThePIDCheckOnlyInTheInstal
 // replaces the identity text for either record.
 func TestRefuseOverRootOwnedStateHiddenInstallHomeReplacesEitherPIDRecord(t *testing.T) {
 	for _, record := range []string{"gateway.pid", "watchdog.pid"} {
-		identityErr := pidIdentityError(t, record)
+		identityErr := unreadablePIDIdentityError(t, record)
 		stubRootRuntimeLeftovers(t, "./")
 		err := refuseOverRootOwnedState(startCmd, "start", identityErr)
 		if err == nil || errors.Is(err, identityErr) || !strings.Contains(err.Error(), "cannot start the gateway") {

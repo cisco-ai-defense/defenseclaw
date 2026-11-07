@@ -1208,7 +1208,7 @@ func (d *Daemon) protectedDaemonPIDs() (trackedPID int, watchdogPID int, err err
 		}
 		trackedPID = info.PID
 	} else if !errors.Is(readErr, os.ErrNotExist) {
-		return 0, 0, &pidRecordError{record: PIDFileName, err: fmt.Errorf(
+		return 0, 0, &pidRecordError{record: PIDFileName, unreadable: errors.Is(readErr, fs.ErrPermission), err: fmt.Errorf(
 			"%w: gateway PID file %s cannot be trusted: %v",
 			ErrUnsafeProcessIdentity,
 			d.pidFile,
@@ -1228,7 +1228,7 @@ func (d *Daemon) protectedDaemonPIDs() (trackedPID int, watchdogPID int, err err
 				readErr,
 			)}
 		}
-		return 0, 0, &pidRecordError{record: WatchdogPIDFileName, err: fmt.Errorf(
+		return 0, 0, &pidRecordError{record: WatchdogPIDFileName, unreadable: errors.Is(readErr, fs.ErrPermission), err: fmt.Errorf(
 			"%w: watchdog PID file %s cannot be trusted: %v",
 			ErrUnsafeProcessIdentity,
 			filepath.Join(d.dataDir, WatchdogPIDFileName),
