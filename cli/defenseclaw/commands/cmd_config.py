@@ -1282,12 +1282,15 @@ def _file_selected_connector(document: object) -> str:
 
 
 def _check_guardrail_connector_roster(path: str, candidate: bytes) -> None:
-    """Refuse a final file that puts a proxy connector beside another enabled one.
+    """Refuse a final file the gateway cannot boot with its proxy connector.
 
     A proxy connector (openclaw, zeptoclaw) needs its own proxy binding, so it
     cannot share a gateway process with hook connectors (GAP-0588). The
-    process is the enabled roster entries plus the installed connector; an
-    entry that is explicitly disabled is not part of it. When the final file
+    process is the enabled roster entries plus the installed connector. The
+    gateway also chooses the shared (multi-connector) boot from the number of
+    entries listed, enabled or not (Config.GuardrailBootSet), so a proxy in the
+    process beside any second listed entry, even a disabled one, is refused:
+    a successful edit never saves a file the gateway would reject. When the final file
     names no connector, the installed one is what the file selected before
     the edit, so an implicit default OpenClaw (no guardrail.connector, no
     claw.mode, no roster) counts, whether the edit adds one entry or a whole
@@ -1303,6 +1306,11 @@ def _check_guardrail_connector_roster(path: str, candidate: bytes) -> None:
     guardrail = guardrail if isinstance(guardrail, dict) else {}
     roster = guardrail.get("connectors", {})
     roster = roster if isinstance(roster, dict) else {}
+    listed = {
+        normalize_connector(name)
+        for name in roster
+        if isinstance(name, str) and name.strip() and not config_module._is_retired_connector_name(name)
+    }
     process = {
         normalize_connector(name)
         for name, entry in roster.items()
@@ -1325,13 +1333,14 @@ def _check_guardrail_connector_roster(path: str, candidate: bytes) -> None:
         if not (isinstance(own, dict) and own.get("enabled") is False):
             process.add(installed)
     proxies = sorted(process & {"openclaw", "zeptoclaw"})
-    if proxies and len(process) > 1:
+    if proxies and (len(process) > 1 or len(listed) > 1):
         proxy = proxies[0]
-        others = sorted(process - {proxy})
+        others = sorted((process | listed) - {proxy})
         label = "hook connectors" if not set(others) & {"openclaw", "zeptoclaw"} else "other connectors"
         raise config_writer.ConfigWriteError(
             f"{proxy} needs a proxy binding and cannot share a gateway process "
-            f"with {label} ({', '.join(others)})."
+            f"with {label} ({', '.join(others)}). A disabled entry under guardrail.connectors "
+            "still counts: remove the other entries first."
         )
 
 

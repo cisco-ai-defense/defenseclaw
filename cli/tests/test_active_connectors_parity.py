@@ -30,3 +30,28 @@ def test_python_resolves_what_the_shared_fixture_says(case: dict, tmp_path: Path
     assert cfg.policy_connectors() == case["policy"]
     for connector, pack in case.get("rule_pack", {}).items():
         assert cfg.guardrail.effective_rule_pack(connector) == pack
+
+
+_BOOT_CASES = json.loads(_FIXTURE.read_text(encoding="utf-8"))["boot_cases"]
+
+
+@pytest.mark.parametrize("case", _BOOT_CASES, ids=[case["name"] for case in _BOOT_CASES])
+def test_config_set_check_agrees_with_the_gateway_boot(case: dict, tmp_path: Path) -> None:
+    """A file the shared boot cannot start is refused; the rest follow the fixture (GAP-0588).
+
+    internal/config TestGuardrailBootSetParityFixture checks the Go side of the same cases.
+    """
+    from defenseclaw import config_writer
+    from defenseclaw.commands import cmd_config
+
+    candidate = (f"config_version: 9\ndata_dir: {json.dumps(str(tmp_path))}\n" + case["config"]).encode()
+    path = tmp_path / "config.yaml"
+    path.write_bytes(candidate)
+    refused = False
+    try:
+        cmd_config._check_guardrail_connector_roster(str(path), candidate)
+    except config_writer.ConfigWriteError:
+        refused = True
+    assert refused == (case["config_set"] == "refused")
+    if case["proxy_boot_fails"]:
+        assert refused, "config set must never save a file the gateway boot rejects"
