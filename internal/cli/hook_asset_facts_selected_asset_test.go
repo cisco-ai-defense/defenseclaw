@@ -5,8 +5,10 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
@@ -248,7 +250,7 @@ func TestCopilotRelativeSkillRootFollowsTheAgentWorkingDirectory(t *testing.T) {
 			t.Errorf("protected skill of the intermediate launch folder omitted: %+v", got)
 		}
 	})
-	t.Run("an agent folder that is not above the event folder is not trusted", func(t *testing.T) {
+	t.Run("an agent folder that is not above the event folder is read and the guessed roots stay", func(t *testing.T) {
 		workspace, _, sub := setup(t)
 		review5Write(t, filepath.Join(workspace, "relative-skills", "selected", "SKILL.md"), selectedAssetHarmful)
 		stubHookAgentWorkingDirectory(t, t.TempDir())
@@ -257,4 +259,123 @@ func TestCopilotRelativeSkillRootFollowsTheAgentWorkingDirectory(t *testing.T) {
 			t.Errorf("the guessed repository root was dropped for an unrelated agent folder: %+v", got)
 		}
 	})
+}
+
+// A known agent folder that is a sibling of the event folder is still a root:
+// the protected selected skill of a relative COPILOT_SKILLS_DIRS entry there is
+// sent, and the ordinary one is not mixed with it.
+func TestCopilotAgentFolderOutsideTheEventFolderIsStillARoot(t *testing.T) {
+	review5Home(t, t.TempDir())
+	root := t.TempDir()
+	launch, event := filepath.Join(root, "launch"), filepath.Join(root, "event")
+	for _, dir := range []string{launch, event} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	review5Write(t, filepath.Join(root, ".git", "HEAD"), "ref: refs/heads/main\n")
+	selected := filepath.Join(launch, "relative-skills", "selected")
+	review5Write(t, filepath.Join(selected, "SKILL.md"), selectedAssetHarmful)
+	t.Setenv("COPILOT_SKILLS_DIRS", "relative-skills")
+	stubHookAgentWorkingDirectory(t, launch)
+	facts, _ := assetfacts.Decode(hookAssetFacts("copilot", selectedAssetCopilotEvent(t, event, "selected")))
+	got := facts.ContentsFor(assetfacts.ContentSkill, "selected")
+	if len(got) != 1 || got[0].Dir != selected || len(got[0].Files) == 0 {
+		t.Errorf("protected selected skill of the known agent folder omitted: %+v", got)
+	}
+	// The benign twin: an ordinary skill of that folder is sent, complete.
+	review5Write(t, filepath.Join(selected, "SKILL.md"), review5Skill)
+	facts, _ = assetfacts.Decode(hookAssetFacts("copilot", selectedAssetCopilotEvent(t, event, "selected")))
+	if got := facts.ContentsFor(assetfacts.ContentSkill, "selected"); len(got) != 1 || got[0].Truncated || len(got[0].Files) == 0 {
+		t.Errorf("ordinary selected skill of the known agent folder = %+v", got)
+	}
+}
+
+// The agent process is read only when a relative COPILOT_SKILLS_DIRS entry needs
+// the folder it runs in: a Claude Code or Codex skill call, and a Copilot one
+// with no relative entry, never walk the process table.
+func TestHookReadsTheAgentFolderOnlyForARelativeCopilotSkillRoot(t *testing.T) {
+	calls := 0
+	count := func(t *testing.T) {
+		t.Helper()
+		calls = 0
+		saved := hookAgentWorkingDirectory
+		t.Cleanup(func() { hookAgentWorkingDirectory = saved })
+		hookAgentWorkingDirectory = func() string { calls++; return "" }
+	}
+	home := t.TempDir()
+	review5Home(t, home)
+	review5Write(t, filepath.Join(home, ".claude", "skills", "notes", "SKILL.md"), review5Skill)
+	review5Write(t, filepath.Join(home, ".copilot", "skills", "notes", "SKILL.md"), review5Skill)
+	cwd := filepath.Join(home, "project")
+	if err := os.MkdirAll(cwd, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("claude code and codex", func(t *testing.T) {
+		count(t)
+		t.Setenv("COPILOT_SKILLS_DIRS", "relative-skills")
+		hookAssetFacts("claudecode", []byte(`{"tool_name":"Skill","tool_input":{"skill":"notes"}}`))
+		hookAssetFacts("codex", []byte(`{"tool_name":"Skill","tool_input":{"skill":"notes"}}`))
+		if calls != 0 {
+			t.Errorf("agent folder read %d times for a connector with no environment skill roots", calls)
+		}
+	})
+	t.Run("copilot without a relative entry", func(t *testing.T) {
+		count(t)
+		t.Setenv("COPILOT_SKILLS_DIRS", "~/shared,"+filepath.Join(home, "absolute"))
+		hookAssetFacts("copilot", selectedAssetCopilotEvent(t, cwd, "notes"))
+		if calls != 0 {
+			t.Errorf("agent folder read %d times with no relative entry", calls)
+		}
+	})
+	t.Run("copilot with a relative entry reads it once", func(t *testing.T) {
+		count(t)
+		t.Setenv("COPILOT_SKILLS_DIRS", "one,two")
+		hookAssetFacts("copilot", selectedAssetCopilotEvent(t, cwd, "notes"))
+		if calls != 1 {
+			t.Errorf("agent folder read %d times, want once", calls)
+		}
+	})
+}
+
+// The most registered plugins one Claude Code tool name can have as owners
+// (a tool name is at most 64 characters) all keep their complete text, each an
+// ordinary document of tens of KiB, so a call that every one of them leaves
+// allowed is not refused for the size of the claim.
+func TestHookSendsTheTextOfEveryPossiblePluginOwnerOfOneToolName(t *testing.T) {
+	claudeDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	review5Home(t, t.TempDir())
+	name, owners := "p", 23
+	registry := map[string]any{}
+	for i := 0; i < owners; i++ {
+		if i > 0 {
+			name += "_a"
+		}
+		var doc strings.Builder
+		for line := 0; line < 450; line++ {
+			fmt.Fprintf(&doc, "Section %d.%d: ordinary documentation of option %d of the notes tool.\n", i, line, line*7)
+		}
+		dir := filepath.Join(t.TempDir(), name)
+		review5Write(t, filepath.Join(dir, "skills", "notes", "SKILL.md"), doc.String())
+		registry[name+"@local"] = []map[string]string{{"installPath": dir}}
+	}
+	data, err := json.Marshal(map[string]any{"plugins": registry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	review5Write(t, filepath.Join(claudeDir, "plugins", "installed_plugins.json"), string(data))
+	tool := "mcp__plugin_" + name + "_z__run"
+	if len(tool) > 64 {
+		t.Fatalf("tool name %q is longer than 64 characters", tool)
+	}
+	facts, ok := assetfacts.Decode(hookAssetFacts("claudecode", []byte(`{"tool_name":"`+tool+`"}`)))
+	if !ok || len(facts.Contents) != owners {
+		t.Fatalf("hook sent %d contents (ok=%v), want %d", len(facts.Contents), ok, owners)
+	}
+	for _, content := range facts.Contents {
+		if content.Truncated || len(content.Files) == 0 {
+			t.Errorf("candidate owner %q lost its text: truncated=%v files=%d", content.Name, content.Truncated, len(content.Files))
+		}
+	}
 }

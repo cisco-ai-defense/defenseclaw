@@ -23,6 +23,7 @@ package assetfacts
 
 import (
 	"bytes"
+	"compress/flate"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -47,10 +48,19 @@ const (
 	// maxHeaderBytes bounds the encoded facts. The gateway reads request
 	// headers up to the net/http default of 1 MiB; this leaves room for the
 	// others.
-	maxHeaderBytes = 768 << 10
-	maxSkills      = 16
-	maxFieldBytes  = 1024
-	maxArgs        = 32
+	maxHeaderBytes = 960 << 10
+	// compressedPrefix marks a header value whose JSON is deflated before
+	// the base64 step ('.' is not in the base64url alphabet, so it cannot be
+	// mistaken for the plain form). Only a large value is deflated: the
+	// ordinary small claim keeps the plain form and its cost.
+	compressedPrefix = "z."
+	compressAbove    = 16 << 10
+	// maxDecodedBytes bounds the JSON a header value may expand to, so that a
+	// small deflated value cannot make the gateway allocate without limit.
+	maxDecodedBytes = 8 << 20
+	maxSkills       = 16
+	maxFieldBytes   = 1024
+	maxArgs         = 32
 	// maxPinArgs bounds the argument digests a claim carries: a definition
 	// past maxArgs still pins every argument a deny prefix can sensibly name.
 	// A prefix longer than this cannot be ruled out and is refused.
@@ -59,7 +69,9 @@ const (
 	// bytes each) that follow the maxPinArgs full ones, so a deny prefix that
 	// differs deep in a long argument list is still ruled out. An argument
 	// past both bounds cannot be ruled out and is refused as a possible match.
-	maxTailPins = 1 << 13
+	// The bound is the one the one-byte digests had (65,536 positions): a
+	// wider digest must not shorten the list an ordinary call can have.
+	maxTailPins = 1 << 16
 	// pinTailDigestLen is the byte length of a tail digest. It is as wide as
 	// the full ones (pinArgDigestLen hex characters), so an argument that is
 	// not the one a rule names has no practical chance of sharing it: a
@@ -204,7 +216,13 @@ func Encode(facts Facts) string {
 	if encoder.Encode(facts) != nil {
 		return ""
 	}
-	value := base64.RawURLEncoding.EncodeToString(bytes.TrimSuffix(raw.Bytes(), []byte{10}))
+	plain := bytes.TrimSuffix(raw.Bytes(), []byte{10})
+	value := base64.RawURLEncoding.EncodeToString(plain)
+	if len(value) > compressAbove {
+		if packed, ok := deflate(plain); ok && len(packed) < len(value) {
+			value = packed
+		}
+	}
 	if len(value) > maxHeaderBytes {
 		if len(facts.Contents) > 0 && hasContentFiles(facts.Contents) {
 			// Too much text for one header: keep the facts, and the contents
@@ -218,6 +236,42 @@ func Encode(facts Facts) string {
 	return value
 }
 
+// deflate renders json as a compressed header value: the prefix and the
+// base64url of the deflated bytes. Ordinary text (the candidate owners of one
+// tool name, each a few tens of KiB of documentation) shrinks to a fraction of
+// its size; digests do not, and keep their own bound.
+func deflate(json []byte) (string, bool) {
+	var packed bytes.Buffer
+	writer, err := flate.NewWriter(&packed, flate.DefaultCompression)
+	if err != nil {
+		return "", false
+	}
+	if _, err := writer.Write(json); err != nil || writer.Close() != nil {
+		return "", false
+	}
+	return compressedPrefix + base64.RawURLEncoding.EncodeToString(packed.Bytes()), true
+}
+
+// decodeValue returns the JSON a header value carries, or false when it is
+// malformed or expands past maxDecodedBytes.
+func decodeValue(value string) ([]byte, bool) {
+	rest, compressed := strings.CutPrefix(value, compressedPrefix)
+	raw, err := base64.RawURLEncoding.DecodeString(rest)
+	if err != nil {
+		return nil, false
+	}
+	if !compressed {
+		return raw, true
+	}
+	reader := flate.NewReader(bytes.NewReader(raw))
+	defer reader.Close()
+	out, err := io.ReadAll(io.LimitReader(reader, maxDecodedBytes+1))
+	if err != nil || len(out) > maxDecodedBytes {
+		return nil, false
+	}
+	return out, true
+}
+
 // Decode parses a header value. ok is false for an absent, oversized or
 // malformed value; the fields are bounded as Encode bounds them.
 func Decode(value string) (Facts, bool) {
@@ -225,8 +279,8 @@ func Decode(value string) (Facts, bool) {
 	if value == "" || len(value) > maxHeaderBytes {
 		return Facts{}, false
 	}
-	raw, err := base64.RawURLEncoding.DecodeString(value)
-	if err != nil {
+	raw, ok := decodeValue(value)
+	if !ok {
 		return Facts{}, false
 	}
 	var facts Facts
@@ -552,11 +606,17 @@ func CopilotHomeSet() bool {
 // agent process, otherwise the guesses of launchWorkspaces). Only the
 // standalone hook, which runs in the environment of the agent, can know them;
 // the environment of a gateway is not the one of the user.
-func EnvSkillRoots(connector, home, cwd, launch string) []string {
+//
+// launch reads the folder Copilot runs in from the agent process. It is called
+// at most once and only for a relative entry, the one case that needs it, so a
+// hook without such an entry never walks the process table.
+func EnvSkillRoots(connector, home, cwd string, launch func() string) []string {
 	if strings.ToLower(strings.TrimSpace(connector)) != "copilot" {
 		return nil
 	}
 	var roots []string
+	var launched string
+	launchRead := false
 	if configured, exists := os.LookupEnv("COPILOT_HOME"); exists {
 		if strings.TrimSpace(configured) == configured && !strings.ContainsAny(configured, "\x00\r\n") &&
 			filepath.IsAbs(configured) && filepath.Clean(configured) == configured {
@@ -574,7 +634,10 @@ func EnvSkillRoots(connector, home, cwd, launch string) []string {
 			}
 			dir = filepath.Join(home, dir[2:])
 		case !filepath.IsAbs(dir):
-			for _, level := range launchWorkspaces(home, cwd, launch) {
+			if !launchRead && launch != nil {
+				launchRead, launched = true, launch()
+			}
+			for _, level := range launchWorkspaces(home, cwd, launched) {
 				if root := filepath.Join(level, dir); !slices.Contains(roots, root) {
 					roots = append(roots, root)
 				}
@@ -591,10 +654,12 @@ func EnvSkillRoots(connector, home, cwd, launch string) []string {
 // launchWorkspaces are the folders a relative COPILOT_SKILLS_DIRS entry can
 // belong to: Copilot resolves it against the one folder it runs in, never
 // against the folders between it and the repository root. launch is that
-// folder as the hook read it from the agent process; it is used when it is
-// the event cwd or a folder above it (an agent that reports anything else is
-// not trusted to name the root), and then it is the only root: a skill of
-// another folder is not loaded, so judging it would block the selected one.
+// folder as the hook read it from the agent process. When it is the event
+// cwd or a folder above it, it is the only root: a skill of another folder is
+// not loaded, so judging it would block the selected one. When it is anywhere
+// else the event does not tell where Copilot runs, so the agent folder is
+// still a root (a protected skill there must not be left unjudged) and the
+// guesses below follow it.
 // Without it the hook sees only its event cwd, which is that folder or a
 // folder below it, so the roots are cwd itself and the outermost folder above
 // it that is a repository root, or home when no repository is found below
@@ -607,13 +672,17 @@ func launchWorkspaces(home, cwd, launch string) []string {
 		return nil
 	}
 	dir = filepath.Clean(dir)
+	var out []string
 	if launch = strings.TrimSpace(launch); filepath.IsAbs(launch) {
 		launch = filepath.Clean(launch)
 		if rel, err := filepath.Rel(launch, dir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return []string{launch}
 		}
+		out = append(out, launch)
 	}
-	out := []string{dir}
+	if !slices.Contains(out, dir) {
+		out = append(out, dir)
+	}
 	home = filepath.Clean(strings.TrimSpace(home))
 	outer, homeAbove := "", ""
 	for level := 0; level < maxProjectLevels; level++ {

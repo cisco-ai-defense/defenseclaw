@@ -140,7 +140,7 @@ func gap0686SameFirstByte(value string) string {
 // An exact deny of an argument list longer than the pinned positions blocks: the
 // count a claim states is not clamped below it.
 func TestProjectMCPExactDenyOfAVeryLongArgumentListBlocks(t *testing.T) {
-	args := make([]string, 1<<14+1)
+	args := make([]string, 1<<16+1)
 	for i := range args {
 		args[i] = "--same"
 	}
@@ -152,5 +152,42 @@ func TestProjectMCPExactDenyOfAVeryLongArgumentListBlocks(t *testing.T) {
 	decision, matched := gap0686Hook(t, api, t.TempDir(), "PreToolUse", gap0686Claim(entry, false))
 	if !matched || decision.Action != "block" {
 		t.Errorf("exact denied prefix past ArgCount clamp allowed: matched=%v decision=%+v", matched, decision)
+	}
+}
+
+// A deny that differs from an ordinary server only at one argument deep in a
+// long list is ruled out, wherever that argument is, up to the last position
+// the claim holds a digest for, and the exact deny of the same list still
+// blocks. The list lengths are the ones past the full digests and the largest
+// one with a digest for every position.
+func TestProjectMCPDenyDifferingDeepInALongArgumentListIsRuledOut(t *testing.T) {
+	for _, total := range []int{10242, 20000, 2048 + 1<<16} {
+		t.Run(fmt.Sprint(total), func(t *testing.T) {
+			args := make([]string, total)
+			for i := range args {
+				args[i] = fmt.Sprintf("--arg-%d", i)
+			}
+			entry := config.MCPServerEntry{Name: "notes", Command: "/opt/tools/node", Args: args}
+			cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+			cfg.Guardrail.Mode = "balanced"
+			deep := total - 1
+			if total == 10242 {
+				deep = 10240
+			}
+			prefix := append([]string(nil), args[:deep+1]...)
+			prefix[deep] = "--different"
+			cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{Name: "notes", Command: "node", ArgsPrefix: prefix}}
+			api := &APIServer{scannerCfg: cfg}
+			gap0686Publish(api, cfg)
+			decision, matched := gap0686Hook(t, api, t.TempDir(), "PreToolUse", gap0686Claim(entry, false))
+			if matched && decision.Action == "block" {
+				t.Errorf("ordinary server blocked for an argument at %d: %+v", deep, decision)
+			}
+			cfg.AssetPolicy.MCP.Denied[0].ArgsPrefix[deep] = args[deep]
+			decision, matched = gap0686Hook(t, api, t.TempDir(), "PreToolUse", gap0686Claim(entry, false))
+			if !matched || decision.Action != "block" {
+				t.Errorf("exact denied twin allowed: matched=%v decision=%+v", matched, decision)
+			}
+		})
 	}
 }

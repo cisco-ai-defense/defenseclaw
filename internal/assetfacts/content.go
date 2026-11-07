@@ -28,11 +28,16 @@ const (
 	maxContentFile    = 64 << 10
 	maxContentEscaped = 96 << 10
 	// maxContentTotal bounds the escaped text of every content in one fact
-	// set, so that the encoded header fits maxHeaderBytes with the most an
+	// set, so that the facts decode within maxDecodedBytes with the most an
 	// MCP definition adds (its pins). It holds the ordinary text of the many
 	// candidate owners one plugin tool name can have (an install per
-	// version, and a plugin per name prefix), a few tens of KiB each.
-	maxContentTotal = 384 << 10
+	// version, and a plugin per name prefix: a tool name of at most 64
+	// characters has about 26 of the first), each up to maxContentEscaped.
+	// Whether the encoded header fits is decided by Encode, on the deflated
+	// size: ordinary documentation shrinks to a fraction, and a set that
+	// still does not fit keeps its contents as truncated ones, which the
+	// gateway refuses.
+	maxContentTotal = 3 << 20
 	// contentFraming is charged to maxContentTotal for each content, with
 	// its name and folder, so that the number of contents is bounded by the
 	// same budget as their text and not by a count a valid set of candidate
