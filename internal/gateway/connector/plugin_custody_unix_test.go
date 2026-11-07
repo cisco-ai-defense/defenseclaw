@@ -8,6 +8,7 @@ package connector
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -287,5 +288,36 @@ func TestPluginCustodyRepairOfAFolderNamedLikeARepairMarker(t *testing.T) {
 	}
 	if err := validatePluginArtifactDestination(filepath.Join(plugins, "defenseclaw.js")); err != nil && errors.Is(err, ErrPluginFolderCustody) {
 		t.Fatalf("a private folder with that name was refused: %v", err)
+	}
+}
+
+// GAP-0798: the gateway skips one connector for this refusal only when the
+// refusal is the whole failure. A refusal joined with another failure may
+// have left a change behind, so it must not read as "nothing was written".
+func TestPluginFolderRefusedBeforeChangeIsTheRefusalAloneThroughWrappers(t *testing.T) {
+	_, _, plugin := custodyFixture(t, 0o757, 0o757)
+	refusal := validatePluginArtifactDestination(plugin)
+	if refusal == nil || !errors.Is(refusal, ErrPluginFolderCustody) {
+		t.Fatalf("fixture did not produce the custody refusal: %v", refusal)
+	}
+	for name, tc := range map[string]struct {
+		err  error
+		want bool
+	}{
+		"refusal":                  {refusal, true},
+		"wrapped like setup does":  {fmt.Errorf("connector opencode setup failed: %w", fmt.Errorf("opencode validate plugin destination: %w", refusal)), true},
+		"joined with a rollback":   {errors.Join(errors.New("capture plugin backup failed"), refusal), false},
+		"marker without a refusal": {fmt.Errorf("x: %w", ErrPluginFolderCustody), false},
+		"another error":            {errors.New("settings busy"), false},
+		"nil":                      {nil, false},
+	} {
+		if got := PluginFolderRefusedBeforeChange(tc.err); got != tc.want {
+			t.Errorf("%s: PluginFolderRefusedBeforeChange = %t, want %t", name, got, tc.want)
+		}
+	}
+	// Benign twin: private folders are accepted, so there is no refusal.
+	_, _, private := custodyFixture(t, 0o700, 0o700)
+	if err := validatePluginArtifactDestination(private); err != nil {
+		t.Fatalf("private folders refused: %v", err)
 	}
 }
