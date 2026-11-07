@@ -32,8 +32,7 @@ type machineLayout struct {
 }
 
 // windowsMachineFolder is one Windows folder that holds DefenseClaw: the
-// drive it is on (empty for any drive) and its names below the drive, lower
-// case.
+// drive it is on and its names below the drive, lower case.
 type windowsMachineFolder struct {
 	drive string
 	names []string
@@ -46,8 +45,11 @@ var defenseClawMachineLayout = sync.OnceValue(func() machineLayout {
 
 // newMachineLayout reads the Linux and macOS layouts, and the Windows layout
 // under the Program Files and ProgramData roots that registered returns (the
-// protected machine registration, on Windows) and under the default folder
-// names on any drive, so a Windows path is read on any host.
+// protected machine registration, on Windows), so a Windows path is read on
+// any host. Where nothing is registered (a host without a managed Windows
+// install) the layout is the default one, on the C: drive. The registered
+// roots replace the default ones: the same folder names on another drive are
+// project files.
 func newMachineLayout(registered func() (programFiles, programData string, err error)) machineLayout {
 	var layout machineLayout
 	for _, goos := range []string{"linux", "darwin"} {
@@ -66,20 +68,18 @@ func newMachineLayout(registered func() (programFiles, programData string, err e
 		slices.Sort(*roots)
 		*roots = slices.Compact(*roots)
 	}
-	layout.windows = windowsMachineFolders(`Z:\Program Files`, `Z:\ProgramData`, true)
-	if programFiles, programData, err := registered(); err == nil {
-		layout.windows = append(layout.windows, windowsMachineFolders(programFiles, programData, false)...)
+	programFiles, programData, err := registered()
+	if err != nil {
+		programFiles, programData = `C:\Program Files`, `C:\ProgramData`
 	}
+	layout.windows = windowsMachineFolders(programFiles, programData)
 	return layout
 }
 
-func windowsMachineFolders(programFiles, programData string, anyDrive bool) []windowsMachineFolder {
+func windowsMachineFolders(programFiles, programData string) []windowsMachineFolder {
 	var folders []windowsMachineFolder
 	for _, folder := range managed.StandaloneWindowsOwnFolders(programFiles, programData) {
-		var entry windowsMachineFolder
-		if !anyDrive {
-			entry.drive = strings.ToLower(folder[:1])
-		}
+		entry := windowsMachineFolder{drive: strings.ToLower(folder[:1])}
 		for _, name := range strings.Split(folder[3:], `\`) {
 			entry.names = append(entry.names, strings.ToLower(name))
 		}
@@ -161,11 +161,11 @@ func (l machineLayout) windowsPath(value string) bool {
 	return false
 }
 
-// holds reports a path on drive (empty when the path names none) whose
-// leading names are those of the folder, each by its long name or its 8.3
-// short name.
+// holds reports a path on drive (empty when the path names none, a path on
+// the current drive) whose leading names are those of the folder, each by its
+// long name or its 8.3 short name.
 func (f windowsMachineFolder) holds(drive string, names []string) bool {
-	if f.drive != "" && drive != "" && f.drive != drive || len(names) < len(f.names) {
+	if drive != "" && f.drive != drive || len(names) < len(f.names) {
 		return false
 	}
 	for i, name := range f.names {

@@ -223,7 +223,6 @@ func TestMachineLayoutWindowsFileToolWritesAreSelfProtection(t *testing.T) {
 		`C:\ProgramData\Cisco\DefenseClaw-ScannerRuntime\defenseclaw-scanners.exe`,
 		`c:\programdata\cisco\defenseclaw\etc\CONFIG.YAML`,
 		`C:/ProgramData/Cisco/DefenseClaw/etc/config.yaml`,
-		`D:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
 		`\\?\C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
 		`//localhost/C$/ProgramData/Cisco/DefenseClaw/etc/config.yaml`,
 		`C:\PROGRA~3\Cisco\DEFENS~1\etc\config.yaml`,
@@ -236,6 +235,9 @@ func TestMachineLayoutWindowsFileToolWritesAreSelfProtection(t *testing.T) {
 		`C:\ProgramData\Other\DefenseClaw\a.txt`,
 		`C:\Users\tester\proj\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
 		`C:\Users\tester\proj\notes.txt`,
+		// Without a registration the layout is the default one, on C:.
+		`D:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
+		`D:\Program Files\Cisco\DefenseClaw\bin\project.exe`,
 		// The hook and scanner runtime are below ProgramData only, and a
 		// short name is the one NTFS makes: six characters, a tilde, a number.
 		`C:\Program Files\Cisco\DefenseClaw-HookRuntime\a.txt`,
@@ -326,7 +328,6 @@ func TestMachineLayoutWindowsRegisteredRootsAreSelfProtection(t *testing.T) {
 		`e:/companydata/cisco/defenseclaw/etc/config.yaml`,
 		`E:\COMPAN~1\Cisco\DEFENS~1\etc\config.yaml`,
 		`//localhost/D$/Applications/Cisco/DefenseClaw/bin/defenseclaw-hook.exe`,
-		`C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
 	}
 	ordinary := []string{
 		`D:\Applications\Cisco\DefenseClaw-HookRuntime\a.txt`,
@@ -335,6 +336,13 @@ func TestMachineLayoutWindowsRegisteredRootsAreSelfProtection(t *testing.T) {
 		`D:\Applications\Cisco\Other\a.txt`,
 		`E:\CompanyData\Cisco\D~1\a.txt`,
 		`C:\Users\tester\proj\CompanyData\Cisco\DefenseClaw\a.txt`,
+		// The default folders on a drive that is not registered, and the
+		// registered names on the other registered drive.
+		`C:\ProgramData\Cisco\DefenseClaw\etc\project.yaml`,
+		`D:\ProgramData\Cisco\DefenseClaw\etc\project.yaml`,
+		`D:\Program Files\Cisco\DefenseClaw\bin\project.exe`,
+		`E:\Applications\Cisco\DefenseClaw\bin\project.exe`,
+		`D:\CompanyData\Cisco\DefenseClaw\etc\project.yaml`,
 	}
 	for _, managed := range []bool{false, true} {
 		for _, file := range protected {
@@ -360,6 +368,66 @@ func TestMachineLayoutKnownShellValuesAreSelfProtection(t *testing.T) {
 	} {
 		if blocked, got := machineLayoutCall(t, home, project, "Bash", map[string]any{"command": command, "description": "d"}, false, ""); !blocked {
 			t.Errorf("%q = %.200s, want protected block", command, got)
+		}
+	}
+}
+
+// The default Windows folder names on a drive that is not a registered root
+// are project files, in balanced and permissive alike; the registered roots
+// stay protected.
+func TestMachineLayoutWindowsUnregisteredDriveIsOrdinary(t *testing.T) {
+	previous := defenseClawMachineLayout
+	defenseClawMachineLayout = func() machineLayout {
+		return newMachineLayout(func() (string, string, error) { return `C:\Program Files`, `C:\ProgramData`, nil })
+	}
+	t.Cleanup(func() { defenseClawMachineLayout = previous })
+	const home = `C:\Users\tester`
+	for _, pack := range []string{"", "permissive"} {
+		for _, file := range []string{
+			`D:\ProgramData\Cisco\DefenseClaw\etc\project.yaml`,
+			`D:\Program Files\Cisco\DefenseClaw\bin\project.exe`,
+			`D:\ProgramData\Cisco\DefenseClaw-HookRuntime\project.txt`,
+		} {
+			if _, got := machineLayoutCall(t, home, home+`\proj`, "Write", map[string]any{"file_path": file, "content": "x"}, false, pack); strings.HasPrefix(got, `{"action":"block"`) {
+				t.Errorf("Write %s pack=%q = %.200s, want allow", file, pack, got)
+			}
+		}
+		for _, file := range []string{
+			`C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
+			`C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`,
+		} {
+			if blocked, got := machineLayoutCall(t, home, home+`\proj`, "Write", map[string]any{"file_path": file, "content": "x"}, false, pack); !blocked {
+				t.Errorf("Write %s pack=%q = %.200s, want protected block", file, pack, got)
+			}
+		}
+	}
+}
+
+// With one registered root below the other, only the layout folders are
+// protected; their neighbors between the roots are project files.
+func TestMachineLayoutWindowsNestedRegisteredRootsKeepFolderBoundary(t *testing.T) {
+	previous := defenseClawMachineLayout
+	defenseClawMachineLayout = func() machineLayout {
+		return newMachineLayout(func() (string, string, error) { return `D:\Applications`, `D:\Applications\Data`, nil })
+	}
+	t.Cleanup(func() { defenseClawMachineLayout = previous })
+	const home = `C:\Users\tester`
+	for _, file := range []string{
+		`D:\Applications\Data\Cisco\Other\a.txt`,
+		`D:\Applications\Data\Cisco\Notes\project.txt`,
+		`D:\Applications\Cisco\Other\a.txt`,
+	} {
+		if _, got := machineLayoutCall(t, home, home+`\proj`, "Write", map[string]any{"file_path": file, "content": "x"}, false, ""); strings.HasPrefix(got, `{"action":"block"`) {
+			t.Errorf("Write %s = %.200s, want allow", file, got)
+		}
+	}
+	for _, file := range []string{
+		`D:\Applications\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`,
+		`D:\Applications\Data\Cisco\DefenseClaw\etc\config.yaml`,
+		`D:\Applications\Data\Cisco\DefenseClaw-HookRuntime\enroll.json`,
+	} {
+		if blocked, got := machineLayoutCall(t, home, home+`\proj`, "Write", map[string]any{"file_path": file, "content": "x"}, false, ""); !blocked {
+			t.Errorf("Write %s = %.200s, want protected block", file, got)
 		}
 	}
 }
