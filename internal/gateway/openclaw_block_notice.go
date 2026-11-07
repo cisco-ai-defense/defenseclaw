@@ -37,13 +37,15 @@ import (
 // OpenClaw route whose body carries a pending reference inside a tool result
 // takes the notice, and the proxy puts one line in front of the first text of
 // the reply (stream or not). The reference names one block and nothing else,
-// so no provider rewrite of a call id, no tool name, no older result of the
-// same tool and no text a user or the model wrote can take another call
-// notice, and an allowed call has none. The session is not part of the match:
-// the reference is a random token that exists only in the result of its own
-// block, while the session header a model request carries can name another
-// session when two run at once. A notice is taken by one request, so a block
-// is shown once. A reply with no
+// so no text a user or the model wrote can take another call notice, and an
+// allowed call has none. The notice also records the call id and tool name of
+// the block, and the result that carries the reference must be the result of
+// that call: its call id equals the recorded id (or a provider rewrite of
+// it), or, for a provider whose results carry no call id, its tool name equals
+// the recorded tool. An ordinary result that echoes the reference, another
+// call's or another tool's, takes nothing. The session is not part of the
+// match: it can name another session when two run at once. A notice is taken
+// by one request, so a block is shown once. A reply with no
 // text to lead with, or in a format that is not rewritten, gives the notice
 // back until it expires, so the line lands on the first reply that can carry
 // it. A reply DefenseClaw wrote itself (it starts with the block banner) is
@@ -63,9 +65,12 @@ const (
 type openClawBlockNotice struct {
 	// ref is the random reference the block reason carries back in the tool
 	// result of the blocked call.
-	ref  string
-	line string
-	at   time.Time
+	ref string
+	// tool and callID name the blocked call (callID is empty when the plugin
+	// had none), so a result carrying the reference is tied to that call.
+	tool, callID string
+	line         string
+	at           time.Time
 }
 
 var openClawBlockNotices struct {
@@ -125,9 +130,10 @@ func newOpenClawBlockRef() string {
 }
 
 // rememberOpenClawBlockNotice records an enforced block of one OpenClaw tool
-// call and returns the reference the plugin puts in the block reason, which
-// is how the next model request is matched to this block.
-func rememberOpenClawBlockNotice(tool string, ruleIDs []string, reason string) string {
+// call (its tool name and call id) and returns the reference the plugin puts
+// in the block reason, which is how the next model request is matched to this
+// block.
+func rememberOpenClawBlockNotice(tool, callID string, ruleIDs []string, reason string) string {
 	ref := newOpenClawBlockRef()
 	if ref == "" {
 		return ""
@@ -137,7 +143,7 @@ func rememberOpenClawBlockNotice(tool string, ruleIDs []string, reason string) s
 	now := openClawToolOutcomeNow()
 	openClawBlockNotices.entries = append(pruneOpenClawBlockNotices(openClawBlockNotices.entries, now),
 		openClawBlockNotice{
-			ref: ref, line: openClawBlockNoticeLine(tool, ruleIDs, reason), at: now,
+			ref: ref, tool: tool, callID: callID, line: openClawBlockNoticeLine(tool, ruleIDs, reason), at: now,
 		})
 	capOpenClawBlockNotices()
 	return ref
@@ -170,13 +176,13 @@ func openClawBlockNoticesPending() bool {
 }
 
 // takeOpenClawBlockNotices removes and returns the live notices whose
-// reference a tool result of the request body carries. The same reference in
-// a user message, an assistant message, a system prompt or any other part of
-// the request takes nothing.
+// reference the result of the blocked call carries in the request body. The
+// same reference in a user message, an assistant message, a system prompt, the
+// result of another call or any other part of the request takes nothing.
 func takeOpenClawBlockNotices(body []byte) []openClawBlockNotice {
 	// The body is decoded before any reference is looked for: JSON allows the
 	// same string to be spelled with escapes, which a raw byte search misses.
-	results := toolResultTexts(body, openClawBlockRefPrefix)
+	results := toolResults(body, openClawBlockRefPrefix)
 	if len(results) == 0 {
 		return nil
 	}
@@ -186,7 +192,7 @@ func takeOpenClawBlockNotices(body []byte) []openClawBlockNotice {
 	var taken []openClawBlockNotice
 	kept := make([]openClawBlockNotice, 0, len(openClawBlockNotices.entries))
 	for _, e := range openClawBlockNotices.entries {
-		if textsContain(results, e.ref) {
+		if claimedBy(e, results) {
 			taken = append(taken, e)
 		} else {
 			kept = append(kept, e)
@@ -194,6 +200,15 @@ func takeOpenClawBlockNotices(body []byte) []openClawBlockNotice {
 	}
 	openClawBlockNotices.entries = kept
 	return taken
+}
+
+func claimedBy(n openClawBlockNotice, results []openClawToolResult) bool {
+	for _, r := range results {
+		if n.claims(r) {
+			return true
+		}
+	}
+	return false
 }
 
 func textsContain(texts []string, sub string) bool {

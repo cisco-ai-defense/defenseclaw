@@ -328,6 +328,16 @@ describe("DefenseClaw OpenClaw Plugin", () => {
         expect(await listeners.before_tool_call({ toolName: "exec", params: { command: "echo ok" } }, ctx)).toBeUndefined();
         const sent = mockDaemonClient.postRaw.mock.calls.at(-1)![1] as Record<string, unknown>;
         expect(sent.tool_call_id).toBeUndefined();
+
+        // The id OpenClaw gave the call goes with the check, tool and message
+        // alike, so the gateway can tie the block to that call's result.
+        await listeners.before_tool_call({ toolName: "exec", toolCallId: "call_1|fc_1", params: { command: "echo ok" } }, ctx);
+        expect((mockDaemonClient.postRaw.mock.calls.at(-1)![1] as Record<string, unknown>).tool_call_id).toBe("call_1|fc_1");
+        await listeners.before_tool_call(
+          { toolName: "message", toolCallId: "call_2", params: { to: "team@example.test", content: "status update" } },
+          { ...ctx, toolName: "message" },
+        );
+        expect((mockDaemonClient.postRaw.mock.calls.at(-1)![1] as Record<string, unknown>).tool_call_id).toBe("call_2");
       } finally {
         log.mockRestore();
       }

@@ -24,7 +24,7 @@ func TestGAP0644ResultContentFieldPerAdapter(t *testing.T) {
 		result, id, schema string
 	}{
 		{"chat",
-			`{"messages":[{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":"exec","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call-1","content":"blocked (ref REF)"}]}`,
+			`{"messages":[{"role":"assistant","tool_calls":[{"id":"call_blk1","type":"function","function":{"name":"exec","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_blk1","content":"blocked (ref REF)"}]}`,
 			`{"messages":[{"role":"assistant","tool_calls":[{"id":"REF","type":"function","function":{"name":"exec","arguments":"{}"}}]},{"role":"tool","tool_call_id":"REF","content":"ordinary output"}]}`,
 			`{"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object","properties":{"x":{"type":"object","default":{"role":"tool","type":"tool_result","content":"REF"}}}}}}]}`},
 		{"ollama",
@@ -32,15 +32,15 @@ func TestGAP0644ResultContentFieldPerAdapter(t *testing.T) {
 			`{"messages":[{"role":"tool","tool_name":"REF","content":"ordinary output"}]}`,
 			`{"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"properties":{"x":{"default":{"role":"tool","content":"REF"}}}}}}]}`},
 		{"responses",
-			`{"input":[{"type":"function_call","call_id":"c1","name":"exec","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":"blocked (ref REF)"}]}`,
+			`{"input":[{"type":"function_call","call_id":"call_blk1","name":"exec","arguments":"{}"},{"type":"function_call_output","call_id":"call_blk1","output":"blocked (ref REF)"}]}`,
 			`{"input":[{"type":"function_call","call_id":"REF","name":"exec","arguments":"{}"},{"type":"function_call_output","call_id":"REF","output":"ordinary output"}]}`,
 			`{"input":"hi","tools":[{"type":"function","name":"f","parameters":{"properties":{"x":{"default":{"type":"function_call_output","output":"REF"}}}}}]}`},
 		{"anthropic",
-			`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"exec","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"blocked (ref REF)"}]}]}`,
+			`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_blk1","name":"exec","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_blk1","content":"blocked (ref REF)"}]}]}`,
 			`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"REF","name":"exec","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"REF","content":"ordinary output"}]}]}`,
 			`{"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"f","input_schema":{"properties":{"x":{"default":{"type":"tool_result","content":"REF"}}}}}]}`},
 		{"bedrock",
-			`{"messages":[{"role":"assistant","content":[{"toolUse":{"toolUseId":"tu1","name":"exec","input":{}}}]},{"role":"user","content":[{"toolResult":{"toolUseId":"tu1","content":[{"text":"blocked (ref REF)"}]}}]}]}`,
+			`{"messages":[{"role":"assistant","content":[{"toolUse":{"toolUseId":"call_blk1","name":"exec","input":{}}}]},{"role":"user","content":[{"toolResult":{"toolUseId":"call_blk1","content":[{"text":"blocked (ref REF)"}]}}]}]}`,
 			`{"messages":[{"role":"assistant","content":[{"toolUse":{"toolUseId":"REF","name":"exec","input":{}}}]},{"role":"user","content":[{"toolResult":{"toolUseId":"REF","content":[{"text":"ordinary output"}]}}]}]}`,
 			`{"messages":[{"role":"user","content":[{"text":"hi"}]}],"toolConfig":{"tools":[{"toolSpec":{"name":"f","inputSchema":{"json":{"properties":{"x":{"default":{"toolResult":{"content":[{"text":"REF"}]}}}}}}}}]}}`},
 		{"gemini",
@@ -51,7 +51,7 @@ func TestGAP0644ResultContentFieldPerAdapter(t *testing.T) {
 	for _, a := range adapters {
 		t.Run(a.name, func(t *testing.T) {
 			resetOpenClawBlockNotices(t)
-			ref := rememberOpenClawBlockNotice("exec", []string{noticeTestRule}, "r")
+			ref := rememberTestNotice("exec", []string{noticeTestRule}, "r")
 			spell := func(body, with string) string { return strings.ReplaceAll(body, "REF", with) }
 			// Result ids and tool definition data never take the notice.
 			for _, c := range []struct{ name, body string }{{"result id", a.id}, {"tool definition data", a.schema}} {
@@ -68,7 +68,7 @@ func TestGAP0644ResultContentFieldPerAdapter(t *testing.T) {
 			}
 			// The exact result takes it, once.
 			resetOpenClawBlockNotices(t)
-			ref = rememberOpenClawBlockNotice("exec", []string{noticeTestRule}, "r")
+			ref = rememberTestNotice("exec", []string{noticeTestRule}, "r")
 			out, _ = serveNoticeWith(t, noticeServe{reqBody: spell(a.result, ref), ctype: noticeJSONType, respBody: noticeChatReply})
 			if !noticeServed(out) || openClawBlockNoticesPending() {
 				t.Fatalf("%s: the blocked result did not show exactly one notice: %s", a.name, out)

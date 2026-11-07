@@ -31,6 +31,13 @@ func resetOpenClawBlockNotices(t *testing.T) {
 
 const noticeTestRule = "persistence.ssh_authorized_keys_command"
 
+// noticeTestCallID is the id of the blocked call in the fixtures.
+const noticeTestCallID = "call_blk1"
+
+func rememberTestNotice(tool string, ruleIDs []string, reason string) string {
+	return rememberOpenClawBlockNotice(tool, noticeTestCallID, ruleIDs, reason)
+}
+
 func noticeTestLine() string {
 	return openClawBlockNoticeLine("exec", []string{noticeTestRule}, "matched: ssh authorized_keys write")
 }
@@ -231,7 +238,7 @@ func TestGAP0644NoticeLeadsTheReplyInEveryFormat(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			resetOpenClawBlockNotices(t)
-			ref := rememberOpenClawBlockNotice("exec", []string{noticeTestRule}, "matched: ssh authorized_keys write")
+			ref := rememberTestNotice("exec", []string{noticeTestRule}, "matched: ssh authorized_keys write")
 			req := strings.ReplaceAll(c.req, "REF", ref)
 			out, code := serveNotice(t, req, c.ctype, c.resp, 0)
 			if code != 200 {
@@ -261,7 +268,7 @@ func TestGAP0644AllowedCallsAndOtherRepliesAreUntouched(t *testing.T) {
 				t.Fatalf("allowed call changed the reply: %q", out)
 			}
 			// A block for another call does not leak into this one.
-			rememberOpenClawBlockNotice("exec", []string{noticeTestRule}, "r")
+			rememberTestNotice("exec", []string{noticeTestRule}, "r")
 			if out, _ := serveNotice(t, chatReq, tc.ctype, tc.body, 0); out != tc.body {
 				t.Fatalf("another call notice changed the reply: %q", out)
 			}
@@ -274,7 +281,7 @@ func TestGAP0644AllowedCallsAndOtherRepliesAreUntouched(t *testing.T) {
 
 func TestGAP0644NoticeWaitsForAReplyWithText(t *testing.T) {
 	resetOpenClawBlockNotices(t)
-	ref := rememberOpenClawBlockNotice("exec", []string{noticeTestRule}, "r")
+	ref := rememberTestNotice("exec", []string{noticeTestRule}, "r")
 	req := noticeChatReq(ref)
 	toolOnlyJSON := `{"choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_2"}]}}]}`
 	toolOnlySSE := "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_2\"}]}}]}\n\ndata: [DONE]\n\n"
@@ -300,7 +307,7 @@ func TestGAP0644NoticeWaitsForAReplyWithText(t *testing.T) {
 
 func TestGAP0644UnrewrittenFormatsKeepTheNoticeForALaterReply(t *testing.T) {
 	resetOpenClawBlockNotices(t)
-	req := noticeChatReq(rememberOpenClawBlockNotice("exec", nil, "r"))
+	req := noticeChatReq(rememberTestNotice("exec", nil, "r"))
 	// A reply format that is not rewritten, and a compressed stream, pass
 	// through byte for byte and do not use up the notice.
 	for _, tc := range []struct{ ctype, enc string }{{"text/plain", ""}, {"text/event-stream", "br"}, {"application/json", "zstd"}} {
@@ -362,7 +369,7 @@ func TestGAP0644LaunderKeepsAModelReplyThatCarriesANotice(t *testing.T) {
 // block only.
 func TestGAP0644InspectIssuesAReferenceOnlyForEnforcedBlocks(t *testing.T) {
 	resetOpenClawBlockNotices(t)
-	const blocking = `{"tool":"exec","args":{"command":"echo k >> ~/.ssh/authorized_keys"}}`
+	const blocking = `{"tool":"exec","tool_call_id":"call_blk1","args":{"command":"echo k >> ~/.ssh/authorized_keys"}}`
 	api := testAPIServerWithConfig(t, "action")
 	_, benign := postInspectForConnector(t, api, "openclaw", `{"tool":"exec","args":{"command":"echo hello"}}`)
 	if benign.Action != "allow" || benign.NoticeRef != "" || openClawBlockNoticesPending() {
@@ -407,7 +414,7 @@ func TestGAP0644AuditFailureBlockGetsAReferenceOnlyWhenEnforced(t *testing.T) {
 			fixture.api.scannerCfg.Guardrail.Connector = "openclaw"
 			fixture.api.scannerCfg.Guardrail.RulePack = tc.pack
 			fixture.emitter.fail = true
-			body, _ := json.Marshal(map[string]any{"tool": "exec", "args": map[string]any{"command": tc.command}, "connector": "openclaw"})
+			body, _ := json.Marshal(map[string]any{"tool": "exec", "tool_call_id": noticeTestCallID, "args": map[string]any{"command": tc.command}, "connector": "openclaw"})
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/inspect/tool", bytes.NewReader(body))
 			req = req.WithContext(withAuthenticatedInspectConnector(req.Context(), "openclaw"))
 			w, verdict := postInspectHTTP(t, fixture.api, req)
@@ -484,7 +491,7 @@ func TestGAP0644NoticeThroughThePassthroughHandler(t *testing.T) {
 			}))
 			defer front.Close()
 
-			ref := rememberOpenClawBlockNotice("exec", []string{noticeTestRule}, "matched: ssh authorized_keys write")
+			ref := rememberTestNotice("exec", []string{noticeTestRule}, "matched: ssh authorized_keys write")
 			send := func() string {
 				body := `{"model":"gpt-4.1","stream":` + strconv.FormatBool(stream) + `,"input":[{"type":"function_call_output","call_id":"call_blk1","output":"blocked (ref ` + ref + `)"}]}`
 				req, _ := http.NewRequest(http.MethodPost, front.URL+"/v1/responses", strings.NewReader(body))
