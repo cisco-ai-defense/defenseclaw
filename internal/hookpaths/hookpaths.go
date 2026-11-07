@@ -1111,6 +1111,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	opaqueFacts := map[string]string{}
 	var globFacts, walkFacts map[string]string
 	var unprovenReason string
+	var parseBoundOrdinary bool
 	var protectedDecision bool
 	var noDereferenceTouchSafe bool
 	// identities is the file-identity evidence for InstructionIdentityKey:
@@ -1198,6 +1199,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				}
 				if !isApplyPatchToolName(tool) && unprovenReason == "" {
 					unprovenReason = ActionCommandAuditReasonWithDialect(command, cwd, home, hookShellDialect(connector, tool))
+					parseBoundOrdinary = unprovenReason == "shell-parse-bound" && !truncated && BoundedTextOrdinary(command, cwd, home)
 				}
 				if !isApplyPatchToolName(tool) && !protectedDecision {
 					protectedDecision = actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concreteOperands)
@@ -1676,6 +1678,13 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		}
 		targets[UnprovenReasonKey] = unprovenReason
 		size += entry
+		if parseBoundOrdinary {
+			entry = len(jsonString(ParseBoundOrdinaryKey)) + 1 + len(jsonString("1")) + 1
+			if size+entry <= maxEncodedTargets {
+				targets[ParseBoundOrdinaryKey] = "1"
+				size += entry
+			}
+		}
 	}
 	if identity != "" {
 		entry := len(jsonString(InstructionIdentityKey)) + 1 + len(jsonString(identity)) + 1
@@ -2025,6 +2034,7 @@ func Decode(value string) (map[string]string, bool) {
 		(targets[PatchCompleteKey] != "" && targets[PatchCompleteKey] != "1") ||
 		(targets[ActionDecisionKey] != "" && targets[ActionDecisionKey] != ProtectedTargetDecision) ||
 		(targets[NoDereferenceTouchSafeKey] != "" && targets[NoDereferenceTouchSafeKey] != "1") ||
+		(targets[ParseBoundOrdinaryKey] != "" && (targets[ParseBoundOrdinaryKey] != "1" || targets[UnprovenReasonKey] != "shell-parse-bound")) ||
 		(targets[LinksStableKey] != "" && targets[LinksStableKey] != "1") ||
 		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {
 		return nil, false

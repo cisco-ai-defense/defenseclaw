@@ -62,9 +62,13 @@ func TestGAP0330ConditionalBindingBeforeAbsoluteKeysFourCell(t *testing.T) {
 		}
 		rows = append(rows, hp7ClientRow{"GAP0330/" + form.name + "-benign", form.prefix + benignWrite + ordinary, "allow", "allow"})
 	}
-	// The base already blocks this quoted tee form in per-user mode, while
-	// managed mode allows the overwritten ordinary destination.
-	rows = append(rows, hp7ClientRow{"GAP0389/tee-overwritten-benign", `f=keylink; f=out3.txt; echo m | tee "$f"`, "allow", "block"})
+	// The tee writes out3.txt, an ordinary file: the value keylink is
+	// overwritten before the write. The base blocked this form per-user (a
+	// false block of GAP-0403); the balanced profile runs it and the
+	// per-user gateway answers with an alert (owner steer, Wave-3: balanced
+	// allows the ordinary command; rel-1-0-6:GAP-0675 review 5). Managed
+	// allows it. The twin below that writes through the link keeps its block.
+	rows = append(rows, hp7ClientRow{"GAP0389/tee-overwritten-benign", `f=keylink; f=out3.txt; echo m | tee "$f"`, "allow", "alert"})
 	rows = append(rows, hp7ClientRow{"GAP0389/tee-quoted-protected", `f=keylink; echo m | tee "$f"`, "block", "block"})
 	checkHP7ClientRows(t, f, rows)
 }

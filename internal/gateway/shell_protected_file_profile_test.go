@@ -401,7 +401,7 @@ func TestGAP0675ProtectedOperandNameReadsOperandsOnly(t *testing.T) {
 		".ssh", "C:\\Users\\u\\.ssh\\config", "~/.ssh/id_ed25519", "~/.bashrc", "/home/u/.zshrc", "repo/.git/hooks",
 		"repo/.git/hooks/pre-commit", "~/.config/fish/config.fish",
 	} {
-		if !protectedOperandName(operand, false) {
+		if !hookpaths.ProtectedOperandName(operand, false) {
 			t.Errorf("%q is a protected name", operand)
 		}
 	}
@@ -409,11 +409,11 @@ func TestGAP0675ProtectedOperandNameReadsOperandsOnly(t *testing.T) {
 		"", "notes.txt", "logs/g4.log", "ssh-notes.md", "authorized-users.txt", "~/.ssh/known_hosts", "bashrc.bak",
 		"# authorized_keys", "src/hooks/pre-commit", "keys/rc",
 	} {
-		if protectedOperandName(operand, false) {
+		if hookpaths.ProtectedOperandName(operand, false) {
 			t.Errorf("%q is not a protected name", operand)
 		}
 	}
-	if protectedOperandName("../.defenseclaw", false) || !protectedOperandName("../.defenseclaw", true) {
+	if hookpaths.ProtectedOperandName("../.defenseclaw", false) || !hookpaths.ProtectedOperandName("../.defenseclaw", true) {
 		t.Error("the state folder is a protected name only as the target of a link")
 	}
 }

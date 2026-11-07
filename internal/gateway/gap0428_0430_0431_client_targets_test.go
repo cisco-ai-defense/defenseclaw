@@ -80,8 +80,14 @@ func TestGAP0428PrintfBoundDestinationsFourCell(t *testing.T) {
 func TestGAP0428DynamicPrintfRedirectOrderFourCell(t *testing.T) {
 	f := newB36ManagedHookFixture(t)
 	checkHP7ClientRows(t, f, []hp7ClientRow{
-		{"GAP0428/dynamic-same-redirect", `f=keylink; f=a.txt; printf "$fmt" >> "$f"`, "allow", "block"},
-		{"GAP0428/fixed-same-redirect", `f=keylink; f=a.txt; printf %s m >> "$f"`, "allow", "block"},
+		// These two redirect into a.txt, an ordinary file: keylink is
+		// overwritten before the write. The base blocked them per-user (a
+		// false block of GAP-0403); the balanced profile allows the ordinary
+		// command, as managed always did (owner steer, Wave-3;
+		// rel-1-0-6:GAP-0675 review 5). The third row, whose later write
+		// goes through the link, keeps its block.
+		{"GAP0428/dynamic-same-redirect", `f=keylink; f=a.txt; printf "$fmt" >> "$f"`, "allow", "allow"},
+		{"GAP0428/fixed-same-redirect", `f=keylink; f=a.txt; printf %s m >> "$f"`, "allow", "allow"},
 		{"GAP0428/dynamic-later-target", `f=a.txt; opt=-vf; printf "$opt" %s keylink; echo m >> "$f"`, "block", "block"},
 	})
 }

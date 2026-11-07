@@ -361,8 +361,14 @@ func actionClientQuotedVariableTarget(word *syntax.Word) bool {
 	if word == nil || len(word.Parts) != 1 {
 		return false
 	}
-	_, quoted := word.Parts[0].(*syntax.DblQuoted)
-	return quoted
+	quoted, ok := word.Parts[0].(*syntax.DblQuoted)
+	if !ok || len(quoted.Parts) != 1 {
+		return false
+	}
+	// The word is the value of the variable and nothing else: a suffix such
+	// as "$f/../name" names another file than the value does.
+	_, parameter := quoted.Parts[0].(*syntax.ParamExp)
+	return parameter
 }
 
 // A shell startup file can install a DEBUG trap between a conditional and

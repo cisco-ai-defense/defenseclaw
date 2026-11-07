@@ -105,6 +105,8 @@ func (f b36ManagedHookFixture) serve(call *hookCall) (string, string) {
 		return "block", body
 	case strings.HasPrefix(body, `{"action":"allow"`):
 		return "allow", body
+	case strings.HasPrefix(body, `{"action":"alert"`):
+		return "alert", body
 	}
 	return fmt.Sprintf("status %d body %.200s", recorder.Code, body), body
 }

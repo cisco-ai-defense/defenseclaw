@@ -131,7 +131,7 @@ func markShellProtectedFileFindings(request trustedActionRequest, findings []Rul
 			}
 		case shellCommandMayReachState(request):
 			// Self-protection, not the class.
-		case shellCallUnresolved(request):
+		case shellCallUnresolved(request) || !request.ProtectedHomeHook && shellCallWritesComputedWord(request.Input):
 			mark = shellFileKept
 		default:
 			mark = shellFileUnproven
@@ -147,56 +147,24 @@ func markShellProtectedFileFindings(request trustedActionRequest, findings []Rul
 
 // markRecoveredParseOrdinary labels the over-limit finding of a call whose
 // recovered parse the user-side hook could not bound (hookpaths
-// shell-parse-bound) as unproven when nothing in the call reaches a file that
-// is protected or owned: no word has a dot-folder or a protected name, the
-// call makes no link and no word of it is a link on disk, and it cannot reach
-// the DefenseClaw state. The default and permissive profiles then warn;
-// strict blocks as before (rel-1-0-6:GAP-0534 closes through GAP-0675).
+// shell-parse-bound) as unproven when the hook read the bounded text and found
+// that no word of it reaches a protected or owned place, a link on disk
+// included (hookpaths.BoundedTextOrdinary, sent as ParseBoundOrdinaryKey: only
+// the hook reads the links of the user, also behind ProtectHome). The call
+// must also make no link and cannot reach the DefenseClaw state. The default
+// and permissive profiles then warn; strict blocks as before
+// (rel-1-0-6:GAP-0534 closes through GAP-0675). Without the fact the finding
+// keeps its block.
 func markRecoveredParseOrdinary(request trustedActionRequest, findings []RuleFinding) []RuleFinding {
-	if !trustedShellCommandInput(request.Input) || shellCommandMayReachState(request) ||
-		shellCallMakesOrCopiesLinks(request) || commandNamesOwnedPath(request.Input) ||
-		commandWordIsLink(request.Input) {
+	if request.ResolvedWriteTargets[hookpaths.ParseBoundOrdinaryKey] != "1" ||
+		!trustedShellCommandInput(request.Input) || shellCommandMayReachState(request) ||
+		shellCallMakesOrCopiesLinks(request) {
 		return findings
 	}
 	for index := range findings {
 		findings[index].shellFile = shellFileUnproven
 	}
 	return findings
-}
-
-// ownedPathName finds a word of a command that is a dot-folder or dotfile,
-// the place a startup file, the SSH folder, a Git folder or an agent or
-// DefenseClaw folder sits in.
-var ownedPathName = regexp.MustCompile(`(?i)(^|[\s"\x27=:/\\(])\.[a-z0-9_][a-z0-9_.-]*([/\\"\x27\s);]|$)`)
-
-// commandNamesOwnedPath reports a command with a word that could be a
-// protected or DefenseClaw-owned file: a dot-folder or dotfile, or a name of
-// the protected class (protectedOperandName), anywhere in its text.
-func commandNamesOwnedPath(input actionfacts.Input) bool {
-	text := input.Command
-	if text == "" {
-		text = string(input.Args)
-	}
-	if ownedPathName.MatchString(text) || strings.Contains(strings.ToLower(text), "authorized_keys") {
-		return true
-	}
-	for _, word := range strings.Fields(strings.NewReplacer(";", " ", "(", " ", ")", " ", "\"", " ", "\x27", " ").Replace(text)) {
-		if protectedOperandName(word, true) {
-			return true
-		}
-	}
-	return false
-}
-
-// commandWordIsLink reports a word of the command that names a link on disk,
-// to anywhere: a file the call removes or writes may be a link to a file it
-// does not name. One readlink per word, on at most stateLinkWordsMax words.
-func commandWordIsLink(input actionfacts.Input) bool {
-	command, ok := trustedBashCommandInput(input)
-	if !ok {
-		command = input.Command
-	}
-	return commandWordLinks(command, input.CWD, input.ActiveHome, func(string) bool { return true })
 }
 
 // shellCallProvedOrdinary reports a call the local gateway proves ordinary the
@@ -212,8 +180,8 @@ func shellCallProvedOrdinary(request trustedActionRequest, facts actionfacts.Fac
 	// The hook proof knows the authorized-keys files only: a path fact that
 	// names a startup profile, a Git hook or an SSH file is not cleared by it.
 	for _, path := range facts.Paths {
-		if protectedOperandName(path.Value, false) || protectedOperandName(path.Normalized, false) ||
-			protectedOperandName(path.Resolved, false) {
+		if hookpaths.ProtectedOperandName(path.Value, false) || hookpaths.ProtectedOperandName(path.Normalized, false) ||
+			hookpaths.ProtectedOperandName(path.Resolved, false) {
 			return false
 		}
 	}
@@ -222,7 +190,7 @@ func shellCallProvedOrdinary(request trustedActionRequest, facts actionfacts.Fac
 		return strings.ContainsRune(" \t\n;&|()<>={}$\"\x27", r)
 	})
 	for _, word := range words {
-		if protectedOperandName(word, false) {
+		if hookpaths.ProtectedOperandName(word, false) {
 			return false
 		}
 	}
@@ -306,8 +274,8 @@ func shellWritesProvenProtectedFile(request trustedActionRequest) bool {
 	}
 	for _, path := range facts.Paths {
 		command, ok := integrityCommandByID(facts, path.CommandID)
-		if !ok || !protectedOperandName(path.Value, false) && !protectedOperandName(path.Normalized, false) &&
-			!protectedOperandName(path.Resolved, false) {
+		if !ok || !hookpaths.ProtectedOperandName(path.Value, false) && !hookpaths.ProtectedOperandName(path.Normalized, false) &&
+			!hookpaths.ProtectedOperandName(path.Resolved, false) {
 			continue
 		}
 		if resolved := request.ResolvedWriteTargets[placedPath(path, sourceCWD)]; linkFree && resolved != "" &&
@@ -324,7 +292,7 @@ func shellWritesProvenProtectedFile(request trustedActionRequest) bool {
 				continue
 			}
 			for _, operand := range command.Argv[index+1 : len(command.Argv)-1] {
-				if !strings.HasPrefix(operand, "-") && protectedOperandName(operand, true) {
+				if !strings.HasPrefix(operand, "-") && hookpaths.ProtectedOperandName(operand, true) {
 					return true
 				}
 			}
@@ -438,6 +406,20 @@ func shellCallUnresolved(request trustedActionRequest) bool {
 		request.ProtectedHomeHook && shellCallPlacementUnclear(request)
 }
 
+// shellCallWritesComputedWord reports a call that writes with a word the shell
+// computes (a variable or a command substitution) and climbs with dot-dot, and
+// for which no proof above found the targets ordinary: where such a word lands
+// is not read here, so the finding keeps the rating of the pack. A managed call is judged by the
+// walk of the hook client instead (its decision, or the reason it gives).
+func shellCallWritesComputedWord(input actionfacts.Input) bool {
+	command, ok := trustedBashCommandInput(input)
+	if !ok {
+		return false
+	}
+	command = shellCommentText.ReplaceAllString(command, " ")
+	return computedWord.MatchString(command) && (strings.Contains(command, ">") || fileWritingWord.MatchString(command))
+}
+
 // shellCallRunsUnseenCode reports a call that sources a file, evaluates text,
 // or hands a patch envelope to apply_patch through a computed word: code or
 // targets no reader of the call can see.
@@ -463,6 +445,12 @@ var (
 	linkMakingWord = regexp.MustCompile(`(^|[\s;&|(])(ln|mklink)([\s;&|)]|$)`)
 	// forWordList finds the word list of a for loop.
 	forWordList = regexp.MustCompile(`\bfor\s+\w+\s+in\s[^;\n]*`)
+	// computedWord finds a word that holds an expansion (a variable or a
+	// command substitution) and a dot-dot component: where it lands depends
+	// on the value, and the proofs read the value, not the climb above it.
+	computedWord = regexp.MustCompile("[^\\s;&|]*(\\$[A-Za-z_{(]|`)[^\\s;&|]*\\.\\.[/\\\\]|[^\\s;&|]*\\.\\.[/\\\\][^\\s;&|]*(\\$[A-Za-z_{(]|`)")
+	// fileWritingWord finds a program that writes or places a file as a command word.
+	fileWritingWord = regexp.MustCompile(`(^|[\s;&|(])(cp|mv|install|rsync|tee|dd|ln|ditto|touch|truncate)\s`)
 	// sourceOrEvalWord finds source, a lone dot or eval as a command word.
 	sourceOrEvalWord = regexp.MustCompile(`(^|[\s;&|(])(\.|source|eval)\s`)
 	// shellCommentText finds a comment to the end of its line.
@@ -570,42 +558,6 @@ func fileMovingProgram(program string) bool {
 
 func programBaseName(word string) string {
 	return strings.ToLower(filepath.Base(strings.ReplaceAll(word, "\\", "/")))
-}
-
-// protectedOperandName reports an operand that names a protected file by its
-// last components: an authorized-keys file, the SSH folder, an SSH control
-// file or private key below it, a shell startup profile, the Git hooks
-// folder, and, with state, the DefenseClaw state folder (the target of a
-// link). It reads the operand only: a comment or a data word of the call is
-// never passed here.
-func protectedOperandName(operand string, state bool) bool {
-	operand = strings.ToLower(strings.NewReplacer("\\", "/", "\x27", "", "\"", "").Replace(operand))
-	parts := strings.FieldsFunc(operand, func(r rune) bool { return r == rune(0x2f) })
-	if len(parts) == 0 {
-		return false
-	}
-	base := parts[len(parts)-1]
-	parent := ""
-	if len(parts) > 1 {
-		parent = parts[len(parts)-2]
-	}
-	switch {
-	case strings.HasPrefix(base, "authorized_keys"), strings.Contains(base, "administrators_authorized_keys"):
-		return true
-	case base == ".ssh", parent == ".ssh" && (slices.Contains(hookpaths.SSHControlFiles[:], base) || strings.HasPrefix(base, "id_")):
-		return true
-	case parent == ".git" && base == "hooks", parent == "hooks" && len(parts) > 2 && parts[len(parts)-3] == ".git", base == "hookspath":
-		return true
-	case slices.Contains(shellStartupNames, base), strings.Contains(base, "powershell_profile"):
-		return true
-	}
-	return state && slices.Contains(parts, ".defenseclaw")
-}
-
-// shellStartupNames are the shell startup profiles of the user.
-var shellStartupNames = []string{
-	".bashrc", ".bash_profile", ".bash_login", ".zshrc", ".zprofile", ".zshenv", ".zlogin", ".profile",
-	"config.fish", "profile.ps1", "profile",
 }
 
 // placedPath is the absolute spelling of a path fact in cwd.
