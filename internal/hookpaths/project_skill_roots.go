@@ -237,14 +237,24 @@ func projectSkillSourceFolders(root, name, source, home, cwd string) []string {
 		if err != nil {
 			continue
 		}
-		// A linked manifest is selected by its own spelling or by the
-		// folder that holds it, as for a linked folder.
+		// A linked manifest is selected by its own spelling, or by the
+		// folder whose own SKILL.md is that same file. A folder holding
+		// the target under another name, with a manifest of its own, is a
+		// separate skill that this link does not own.
 		if projectSkillSourceSelects(home, resolved, resolvedSource) ||
-			kind == fs.ModeDir && projectSkillSourceSelects(home, filepath.Dir(resolved), resolvedSource) {
+			kind == fs.ModeDir && projectSkillManifestFolder(resolved) &&
+				projectSkillSourceSelects(home, filepath.Dir(resolved), resolvedSource) {
 			return []string{dir}
 		}
 	}
 	return nil
+}
+
+// projectSkillManifestFolder reports whether a resolved manifest path is the
+// SKILL.md of the folder holding it, so that folder is the skill it belongs to.
+func projectSkillManifestFolder(manifest string) bool {
+	own, err := filepath.EvalSymlinks(filepath.Join(filepath.Dir(manifest), "SKILL.md"))
+	return err == nil && projectSkillRootKey(own) == projectSkillRootKey(manifest)
 }
 
 // projectSkillSourceSelects reports whether a resolved source selects the
