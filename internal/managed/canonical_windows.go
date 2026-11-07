@@ -632,6 +632,50 @@ func (r *standaloneStampRefusal) Error() string {
 // is opened; tests replace it to change the object in between.
 var canonicalBeforeStamp = func(string) {}
 
+// canonicalOpenForStamp opens the object a standalone repair stamps; tests
+// replace it to answer as if another program held the object open.
+var canonicalOpenForStamp = openCanonicalObjectShared
+
+// heldFileRefusal starts the refusal of an in-place re-stamp of a file that
+// another program holds open (GAP-0763). The stamp is one transaction on one
+// handle: open it so that nothing else can write or delete the object, check
+// holders and links, judge the descriptor, then write; a holder stops it
+// before anything is written, and the file is named.
+const heldFileRefusal = "refusing to re-stamp a managed file while another program holds it open " +
+	"with write or delete access, or without sharing read access, and nothing was changed"
+
+func heldFileError(path string) error {
+	return fmt.Errorf("%s (close the program that holds it, then run Setup /ensure again): %s", heldFileRefusal, path)
+}
+
+func isSharingViolation(err error) bool {
+	return errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_LOCK_VIOLATION)
+}
+
+// heldAgainstWriters reports the kinds whose standalone in-place stamp is
+// made under a handle that no other program may write under: the recorded
+// content files (config.yaml, targets.yaml, deployment.json, the Codex
+// records), which only administrators write and which are only ever written
+// by DefenseClaw's own short transactions. The database and log files the
+// gateway holds open for write (RuntimeFile) keep the delete-only check, and
+// the credential file keeps its own, so a live gateway never blocks the
+// guardian's repair of them.
+func (kind ObjectKind) heldAgainstWriters() bool {
+	return kind == ObjectConfigFile || kind == ObjectAdminFile
+}
+
+// standaloneHoldFor widens the repair handle of a recorded content file: it
+// asks for read access and shares read only, so another handle with write or
+// delete access, or one that does not share read, makes the open fail. Opens
+// that ask for no data access (READ_CONTROL, WRITE_DAC) are not checked
+// against a share mode, and readers that share read do not conflict.
+func standaloneHoldFor(kind ObjectKind, share uint32) (uint32, uint32) {
+	if kind.heldAgainstWriters() {
+		return windows.FILE_SHARE_READ, windows.FILE_READ_DATA
+	}
+	return share, 0
+}
+
 // stampCanonicalDescriptor writes sddl's owner, group and protected DACL to
 // the object open as readHandle, through a second handle proven to be the same
 // file. With refuseUntrusted (standalone) that handle is opened without
@@ -660,17 +704,22 @@ func stampCanonicalDescriptor(readHandle windows.Handle, path string, kind Objec
 	}
 	canonicalBeforeStamp(path)
 	share := uint32(windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE)
+	extraAccess := uint32(0)
 	if refuseUntrusted {
 		share = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE
+		share, extraAccess = standaloneHoldFor(kind, share)
 	}
 	return RunWithWindowsRepairPrivileges(func() error {
-		full := uint32(windows.READ_CONTROL | windows.WRITE_DAC | windows.WRITE_OWNER | windows.FILE_READ_ATTRIBUTES)
-		handle, openErr := openCanonicalObjectShared(path, full, share)
+		full := uint32(windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER|windows.FILE_READ_ATTRIBUTES) | extraAccess
+		handle, openErr := canonicalOpenForStamp(path, full, share)
 		ownerToo := openErr == nil
-		if openErr != nil {
-			handle, openErr = openCanonicalObjectShared(path, uint32(windows.READ_CONTROL|windows.WRITE_DAC|windows.FILE_READ_ATTRIBUTES), share)
+		if openErr != nil && (!refuseUntrusted || !isSharingViolation(openErr)) {
+			handle, openErr = canonicalOpenForStamp(path, uint32(windows.READ_CONTROL|windows.WRITE_DAC|windows.FILE_READ_ATTRIBUTES)|extraAccess, share)
 		}
 		if openErr != nil {
+			if refuseUntrusted && isSharingViolation(openErr) {
+				return heldFileError(path)
+			}
 			return fmt.Errorf("open for repair: %w", openErr)
 		}
 		defer func() { _ = windows.CloseHandle(handle) }()
@@ -768,10 +817,14 @@ func StampStandaloneTrustedObject(path string, kind ObjectKind, sddl string) err
 	}
 	canonicalBeforeStamp(clean)
 	return RunWithWindowsRepairPrivileges(func() error {
-		handle, err := openCanonicalObjectShared(clean,
-			uint32(windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER|windows.FILE_READ_ATTRIBUTES),
-			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
+		share, extraAccess := standaloneHoldFor(kind, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
+		handle, err := canonicalOpenForStamp(clean,
+			uint32(windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER|windows.FILE_READ_ATTRIBUTES)|extraAccess,
+			share)
 		if err != nil {
+			if isSharingViolation(err) {
+				return heldFileError(clean)
+			}
 			return fmt.Errorf("open %s for repair: %w", clean, err)
 		}
 		defer func() { _ = windows.CloseHandle(handle) }()
