@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -763,4 +764,131 @@ func TestGAP0613AllowForSecondDeniedCopyKeepsTheFirstCopyHeld(t *testing.T) {
 	}
 	requireRuntimeHold(t, w, false)
 	requireJournalClear(t, w)
+}
+
+// denyAmpSkillsByDefault makes the root owner deny every skill as codex does.
+func denyAmpSkillsByDefault(cfg *config.Config) {
+	cfg.AssetPolicy.Connectors["amp"] = config.PerConnectorAssetPolicy{Skill: &config.PerConnectorAssetTypePolicy{Default: "deny"}}
+}
+
+// A copy that stays in the folder after a failed quarantine is loadable by
+// every connector that loads the root. When two of them deny it, each one
+// holds it, not only the owner and the first denier.
+func TestGAP0613EveryDenyingConnectorHoldsACopyWhoseQuarantineFails(t *testing.T) {
+	w, cfg, evt := sharedRootDefaultDenyWatcher(t, false)
+	denyAmpSkillsByDefault(cfg)
+	if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictBlocked {
+		t.Fatalf("verdict = %+v, want blocked", res)
+	}
+	requireRuntimeHold(t, w, true)
+	for _, connector := range []string{"amp", "codex"} {
+		if entry, err := w.store.GetActionForConnector("skill", evt.Name, connector); err != nil || entry == nil || entry.Actions.Install != "block" {
+			t.Errorf("%s journal = %+v (err %v), want the install block", connector, entry, err)
+		}
+	}
+	// Both denials go: the hold is lifted from both rows.
+	relaxCodexDefault(cfg)
+	cfg.AssetPolicy.Connectors["amp"] = cfg.AssetPolicy.Connectors["codex"]
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "skill-scanner"} }
+	if !w.policyHoldReleases(evt) {
+		t.Error("the rescan does not notice the releasable hold")
+	}
+	if res := w.runAdmission(context.Background(), evt); !notDenied(res.Verdict) {
+		t.Fatalf("replacement scan = %+v, want clean or allowed", res)
+	}
+	requireRuntimeHold(t, w, false)
+	requireJournalClear(t, w)
+}
+
+// Benign twins: a connector whose rules allow the copy is not held because
+// another connector denies it, and a denial whose quarantine works leaves no
+// hold on any row.
+func TestGAP0613ConnectorThatAllowsTheCopyIsNotHeldByAnotherConnectorsDenial(t *testing.T) {
+	w, cfg, evt := sharedRootDefaultDenyWatcher(t, false)
+	relaxCodexDefault(cfg)
+	denyAmpSkillsByDefault(cfg)
+	if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictBlocked {
+		t.Fatalf("verdict = %+v, want blocked", res)
+	}
+	if disabled, err := enforce.NewPolicyEngine(w.store).IsDisabledForConnector("skill", evt.Name, "amp"); err != nil || !disabled {
+		t.Errorf("amp runtime disabled = %v (err %v), want true", disabled, err)
+	}
+	if codexDisabled(t, w) {
+		entry, _ := w.store.GetActionForConnector("skill", evt.Name, "codex")
+		t.Errorf("codex allows the copy but is held: %+v", entry)
+	}
+}
+
+func TestGAP0613EveryDenyingConnectorLeavesNoHoldWhenTheQuarantineWorks(t *testing.T) {
+	w, cfg, evt := sharedRootDefaultDenyWatcher(t, true)
+	denyAmpSkillsByDefault(cfg)
+	if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictBlocked {
+		t.Fatalf("verdict = %+v, want blocked", res)
+	}
+	requireRuntimeHold(t, w, false)
+}
+
+// The hold tag is read by the gateway, which cannot see the watcher
+// constants; its test builds a reason in this shape.
+func TestGAP0613PolicyHoldTagShape(t *testing.T) {
+	if got, want := policyDenialMark([]string{"install", "runtime"}, []string{"YQ", "Yg"}), " [asset policy: install,runtime copies=YQ,Yg]"; got != want {
+		t.Errorf("policyDenialMark = %q, want %q", got, want)
+	}
+}
+
+// A hold covers the copies it was written for. Another copy of the name that
+// an allow rule admitted is outside it; the held copy, a path below it, a
+// link to it and any path that cannot be placed are not.
+func TestGAP0613PolicyHoldCoversOnlyTheHeldCopies(t *testing.T) {
+	w, cfg, first := sharedRootDefaultDenyWatcher(t, false)
+	firstRoot := filepath.Dir(first.Path)
+	secondRoot := filepath.Join(filepath.Dir(firstRoot), "second-skill-root")
+	second := first
+	second.Path = filepath.Join(secondRoot, first.Name)
+	writeSkillCopy(t, second.Path, first.Name)
+	w.skillDirs = append(w.skillDirs, secondRoot)
+	w.SetRootConnectors(map[string]string{firstRoot: "amp", secondRoot: "amp"})
+	w.SetRootConsumers([]RootConsumer{
+		{"skill", firstRoot, "amp"}, {"skill", firstRoot, "codex"},
+		{"skill", secondRoot, "amp"}, {"skill", secondRoot, "codex"},
+	})
+	for _, evt := range []InstallEvent{first, second} {
+		if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictBlocked {
+			t.Fatalf("policy denial of %s = %+v, want blocked", evt.Path, res)
+		}
+	}
+	cfg.AssetPolicy.Skill.Allowed = []config.AssetPolicyRule{{Name: second.Name, Connector: "codex", SourcePathContains: []string{second.Path}}}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "skill-scanner"} }
+	if res := w.runAdmission(context.Background(), second); !notDenied(res.Verdict) {
+		t.Fatalf("second copy source allow = %+v, want admitted", res)
+	}
+	entry, err := w.store.GetActionForConnector("skill", first.Name, "codex")
+	if err != nil || entry == nil || entry.Actions.Runtime != "disable" {
+		t.Fatalf("codex row = %+v (err %v), want the first copy runtime hold", entry, err)
+	}
+	check := func(label string, want bool, paths ...string) {
+		t.Helper()
+		if got := PolicyHoldIgnores(entry, "runtime", paths); got != want {
+			t.Errorf("%s: PolicyHoldIgnores = %v, want %v", label, got, want)
+		}
+	}
+	check("admitted second copy", true, second.Path)
+	check("file in the admitted second copy", true, filepath.Join(second.Path, "SKILL.md"))
+	check("held first copy", false, first.Path)
+	check("file in the held first copy", false, filepath.Join(first.Path, "SKILL.md"))
+	check("both copies named", false, second.Path, first.Path)
+	check("no path", false)
+	check("empty path", false, "")
+	check("relative path", false, filepath.Join("skills", first.Name))
+	check("parent element", false, second.Path+string(filepath.Separator)+".."+string(filepath.Separator)+first.Name)
+	if runtime.GOOS != "windows" {
+		link := filepath.Join(secondRoot, "alias-of-first")
+		if err := os.Symlink(first.Path, link); err != nil {
+			t.Fatal(err)
+		}
+		check("link to the held first copy", false, filepath.Join(link, "SKILL.md"))
+	}
+	if PolicyHoldIgnores(&audit.ActionEntry{Reason: "operator disabled"}, "runtime", []string{second.Path}) {
+		t.Error("a row with no hold ignored a path")
+	}
 }
