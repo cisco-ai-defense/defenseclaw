@@ -58,7 +58,8 @@ func TestOpenClawOutageKnownValuesKeepShellFlowHonest(t *testing.T) {
 
 // An unquoted known value splits at the field separators the shell has: the
 // default ones, not every Unicode space, or the IFS the command or the
-// environment set.
+// environment set. The separator the cases set is a comma: a Windows path
+// holds a colon after its drive letter, and the shell splits it there.
 func TestOpenClawOutageKnownValuesSplitAtShellSeparators(t *testing.T) {
 	root, protected, ordinary := outageR10Fixture(t, "home with nbsp")
 	cases := []struct {
@@ -68,12 +69,12 @@ func TestOpenClawOutageKnownValuesSplitAtShellSeparators(t *testing.T) {
 		{"quoted nonbreaking space path", `for x in "$PROT"; do rm "$x"; done`, "", protected, "protected"},
 		{"default split ordinary", `for x in $PROT; do rm "$x"; done`, "", "notes.txt other.txt", "open"},
 		{"default split reaches protected", `for x in $PROT; do rm "$x"; done`, "", "notes.txt " + protected, "protected"},
-		{"local IFS whole value", `IFS=:; for x in $PROT; do rm "$x"; done`, "", protected, "protected"},
-		{"environment IFS whole value", `for x in $PROT; do rm "$x"; done`, ":", protected, "protected"},
-		{"local IFS splits to protected", `IFS=:; for x in $PROT; do rm "$x"; done`, "", "notes.txt:" + protected, "protected"},
-		{"local IFS splits ordinary", `IFS=:; for x in $PROT; do rm "$x"; done`, "", "notes.txt:other.txt", "open"},
-		{"environment IFS splits ordinary", `for x in $PROT; do rm "$x"; done`, ":", "notes.txt:other.txt", "open"},
-		{"unknown IFS keeps whole value", `IFS=$(printf :); for x in $PROT; do rm "$x"; done`, "", protected, "protected"},
+		{"local IFS whole value", `IFS=,; for x in $PROT; do rm "$x"; done`, "", protected, "protected"},
+		{"environment IFS whole value", `for x in $PROT; do rm "$x"; done`, ",", protected, "protected"},
+		{"local IFS splits to protected", `IFS=,; for x in $PROT; do rm "$x"; done`, "", "notes.txt," + protected, "protected"},
+		{"local IFS splits ordinary", `IFS=,; for x in $PROT; do rm "$x"; done`, "", "notes.txt,other.txt", "open"},
+		{"environment IFS splits ordinary", `for x in $PROT; do rm "$x"; done`, ",", "notes.txt,other.txt", "open"},
+		{"unknown IFS keeps whole value", `IFS=$(printf ,); for x in $PROT; do rm "$x"; done`, "", protected, "protected"},
 		{"empty IFS keeps whole value", `IFS=; for x in $PROT; do rm "$x"; done`, "", protected, "protected"},
 		{"empty IFS ordinary", `IFS=; for x in $PROT; do rm "$x"; done`, "", "notes.txt other.txt", "open"},
 	}
