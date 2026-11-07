@@ -1853,8 +1853,8 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1573", page: "get-started/install.mdx", section: "Check it worked", has: ["`✓ All components in sync.`", "piped to another command, as above, they use text"] },
   { gap: "GAP-1581", page: "get-started/upgrade.mdx", section: "Rollback", has: ["A previous install that never ran `defenseclaw init` has no configuration, and what rollback does then depends on the gateway:", "If the gateway is running, rollback must start the previous gateway, which refuses with `no config.yaml exists yet`. Rollback then undoes itself and exits 1", "There is nothing to fix there:", "If the gateway is stopped, rollback completes and exits 0, and the previous install runs with no `config.yaml`", "run `defenseclaw rollback` again to roll forward to your current install and its configuration"], lacks: ["Rollback needs a previous install that was initialized. If that install never ran `defenseclaw init`, rollback says `no config.yaml exists yet`, undoes itself and exits 1; the current install stays."] },
   { gap: "GAP-1567", page: "policies/recipes.mdx", has: ["In every mode, observe included, DefenseClaw blocks an agent that copies into `~/.defenseclaw` (`tamper.detector_state_write`"] },
-  { gap: "GAP-2419", page: "policies/recipes.mdx", has: ["In every mode, observe included, DefenseClaw blocks an agent that copies into `~/.defenseclaw`", "with the permissive pack it only reports it)."], lacks: ["In action mode DefenseClaw blocks an agent that copies into"] },
-  { gap: "GAP-2419", page: "guardrail/index.mdx", has: ["is blocked in every mode (rule `tamper.detector_state_write`; the permissive pack only reports it)."] },
+  { gap: "GAP-2419", page: "policies/recipes.mdx", has: ["In every mode, observe included, DefenseClaw blocks an agent that copies into `~/.defenseclaw`", "DefenseClaw protects its own files with every rule pack)."], lacks: ["In action mode DefenseClaw blocks an agent that copies into", "with the permissive pack it only reports it"] },
+  { gap: "GAP-2419", page: "guardrail/index.mdx", has: ["is blocked in every mode (rule `tamper.detector_state_write`, with every rule pack)."], lacks: ["the permissive pack only reports it"] },
   { gap: "GAP-2419", page: "enterprise/concepts.mdx", has: ["DefenseClaw's own files: that is blocked in every mode."], lacks: ["policy verdicts never block and DefenseClaw\nrecords what it would have blocked. In `action`"] },
   { gap: "GAP-2424", page: "guardrail/index.mdx", has: ["The picker's \"never block\" covers policy findings. Observe still blocks an agent that changes DefenseClaw's own files"] },
   { gap: "GAP-2424", page: "guardrail/multi-connector.mdx", has: ["The picker's \"never block\" covers policy findings. Observe still blocks an agent that changes DefenseClaw's own files"] },
@@ -2086,6 +2086,21 @@ describe('authorized_keys writes block in action mode and alert in observe (GAP-
       assert.ok(rule, `${pack}: no persistence.ssh_authorized_keys_command rule`);
       assert.match(rule, /^ {4}severity: CRITICAL$/m, `${pack}: not CRITICAL (GAP-1461 sentence)`);
     }
+  });
+});
+
+// rel-1-0-6 GAP-0675: the pages and the CHANGELOG name the rules of the
+// shell-command protected-file class the gateway decides by posture.
+describe('shell-command protected-file class matches the pages (rel-1-0-6 GAP-0675)', () => {
+  it('lists the same four rules in the gateway and the CHANGELOG', () => {
+    const go = source('internal/gateway/shell_protected_file_profile.go');
+    const changelog = source('CHANGELOG.md');
+    for (const rule of ['persistence.ssh_authorized_keys_command', 'PATH-SSH-DIR', 'persistence.shell_profile_write', 'persistence.git_hook_write']) {
+      assert.ok(go.split('\n').some((line) => line.trim().replace(/\s+/g, ' ') === `"${rule.toUpperCase()}": true,`), `gateway class lacks ${rule}`);
+      assert.ok(changelog.includes(`\`${rule}\``), `CHANGELOG lacks ${rule}`);
+    }
+    const classBlock = go.split('var shellProtectedFileRules = map[string]bool{\n')[1]?.split('\n}\n')[0] ?? '';
+    assert.equal((classBlock.match(/^\t"[A-Z0-9_.-]+":\s+true,$/gm) ?? []).length, 4, 'the gateway class changed: re-check the pages and the CHANGELOG');
   });
 });
 
@@ -2639,11 +2654,14 @@ describe('rendered gateway.toml drift is reported without a pause (GAP-0730)', (
 describe('saved installer protection matches the rule packs (GAP-1922)', () => {
   it('names installer/ and previous/installer/ in tamper.detector_state_write of every pack, for writes and deletes', () => {
     const text = page('policies/deterministic-detection.mdx');
-    assert.ok(text.includes('DefenseClaw also protects its saved installer (`~/.defenseclaw/installer/` and `~/.defenseclaw/previous/installer/`): with the default and strict rule packs, an agent that writes, truncates or deletes it is blocked in every mode, like `config.yaml`. The permissive pack rates this rule HIGH and blocks only CRITICAL, so with it such a write to the saved installer or `config.yaml` is reported, not blocked, in both modes. Reading or running the saved installer stays allowed.'));
-    assert.ok(!text.includes('`~/.defenseclaw/previous/installer/`): an agent that writes, truncates or deletes it is blocked in every mode'), 'GAP-0046: unqualified every-mode claim is back');
-    assert.ok(page('policies/recipes.mdx').includes('DefenseClaw protects its own files; with the permissive pack it only reports it).'), 'GAP-0046: recipes step 2 lost the pack qualifier');
-    // GAP-0046: the page's per-pack split is the shipped severity against the
-    // posture thresholds (default and strict block it, permissive reports it).
+    assert.ok(text.includes('DefenseClaw also protects its saved installer (`~/.defenseclaw/installer/` and `~/.defenseclaw/previous/installer/`): an agent that writes, truncates or deletes it is blocked in every mode and with every rule pack, like `config.yaml`. The permissive pack rates this rule HIGH, and DefenseClaw still blocks a change to its own files there. Reading or running the saved installer stays allowed.'));
+    // rel-1-0-6 GAP-0675 review 1 M3a: self-protection blocks with every pack
+    // (selfProtectionRules), so the GAP-0046 permissive qualifier is gone.
+    assert.ok(!text.includes('is reported, not blocked, in both modes'), 'GAP-0675: the permissive report-only sentence is back');
+    assert.ok(page('policies/recipes.mdx').includes('DefenseClaw protects its own files with every rule pack).'), 'GAP-0675: recipes step 2 lost the every-pack claim');
+    assert.match(source('internal/gateway/shell_protected_file_profile.go'), /var selfProtectionRules = map\[string\]bool\{\n\t"TAMPER.DETECTOR_STATE_WRITE": true,\n\}/, 'GAP-0675: the every-pack self-protection rule changed; re-check the pages');
+    // GAP-0046: the shipped severity against the posture thresholds; the
+    // severity no longer decides the self-protection block (GAP-0675).
     const thresholds = source('internal/gateway/decision.go');
     assert.match(thresholds, /case "strict":\n\t\treturn severityMedium, severityLow\n\tcase "permissive":\n\t\treturn severityCritical, severityHigh\n\tdefault:\n\t\treturn severityCritical, severityMedium/, 'GAP-0046: posture thresholds changed; re-check the per-pack sentence');
     const packSeverity: Record<string, string> = { default: 'CRITICAL', strict: 'HIGH', permissive: 'HIGH' };
