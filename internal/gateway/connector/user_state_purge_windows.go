@@ -21,17 +21,19 @@ import (
 // removes the directory itself when it is empty. An owned file whose access
 // list refuses the removal goes to removeDenied, when set.
 func PurgeUserStateInRoot(root *os.Root, removeDenied func(rel string) error) error {
-	return purgeUserStateInRootDir(root, ".", removeDenied)
+	return purgeUserStateInRootDir(root, ".", ManagedUserStateFile, removeDenied)
 }
 
-// PurgeUserStateInRootAt is PurgeUserStateInRoot for root opened on prefix, a
-// managed folder below the data directory ("acp"). Ownership is decided by
-// the path from the data directory, so a file that is account data at the
-// data directory's top (inventory.db) stays when it sits in that folder.
-// removeDenied still gets paths relative to root.
+// PurgeUserStateInRootAt is PurgeUserStateInRoot for root opened on prefix, the
+// ACP folder below the data directory ("acp"), for an account that has no
+// per-user install to remove. Ownership is decided by the path from the data
+// directory, so a file that is account data at the data directory's top
+// (inventory.db) stays when it sits in that folder. The folder's .token is the
+// per-user guard key of the account's own install: it stays, as the managed
+// token copies beside it go. removeDenied still gets paths relative to root.
 func PurgeUserStateInRootAt(root *os.Root, prefix string, removeDenied func(rel string) error) error {
-	if prefix == "" || prefix == "." || !ManagedUserStateDir(prefix) {
-		return fmt.Errorf("per-user state folder %q is not a managed folder", prefix)
+	if prefix != "acp" {
+		return fmt.Errorf("per-user state folder %q is not the ACP folder", prefix)
 	}
 	var denied func(string) error
 	if removeDenied != nil {
@@ -39,10 +41,14 @@ func PurgeUserStateInRootAt(root *os.Root, prefix string, removeDenied func(rel 
 			return removeDenied(strings.TrimPrefix(rel, filepath.FromSlash(prefix)+string(filepath.Separator)))
 		}
 	}
-	return purgeUserStateInRootDir(root, filepath.FromSlash(prefix), denied)
+	return purgeUserStateInRootDir(root, filepath.FromSlash(prefix), func(rel string) bool {
+		return filepath.ToSlash(rel) != "acp/.token" && ManagedUserStateFile(rel)
+	}, denied)
 }
 
-func purgeUserStateInRootDir(root *os.Root, rel string, removeDenied func(string) error) error {
+// purgeUserStateInRootDir removes the files owned reports below root, which is
+// opened on rel (the path from the data directory).
+func purgeUserStateInRootDir(root *os.Root, rel string, owned func(string) bool, removeDenied func(string) error) error {
 	names, err := rootEntryNames(root, ".")
 	if err != nil {
 		return err
@@ -58,7 +64,7 @@ func purgeUserStateInRootDir(root *os.Root, rel string, removeDenied func(string
 			// A known managed file may deny LocalSystem even a stat. The
 			// privileged callback checks that it is a plain file before
 			// removing it; it cannot remove an uninspected directory.
-			if errors.Is(err, fs.ErrPermission) && ManagedUserStateFile(child) && removeDenied != nil {
+			if errors.Is(err, fs.ErrPermission) && owned(child) && removeDenied != nil {
 				if deniedErr := removeDenied(child); deniedErr != nil {
 					errs = append(errs, errors.Join(err, deniedErr))
 				}
@@ -80,7 +86,7 @@ func purgeUserStateInRootDir(root *os.Root, rel string, removeDenied func(string
 				errs = append(errs, fmt.Errorf("per-user state directory changed while opening: %s", child))
 				continue
 			}
-			if err := purgeUserStateInRootDir(childRoot, child, removeDenied); err != nil {
+			if err := purgeUserStateInRootDir(childRoot, child, owned, removeDenied); err != nil {
 				errs = append(errs, err)
 			}
 			_ = childRoot.Close()
@@ -94,7 +100,7 @@ func purgeUserStateInRootDir(root *os.Root, rel string, removeDenied func(string
 					errs = append(errs, err)
 				}
 			}
-		case info.Mode().IsRegular() && ManagedUserStateFile(child):
+		case info.Mode().IsRegular() && owned(child):
 			if err := removeManagedFileInRoot(root, name, child, removeDenied); err != nil {
 				errs = append(errs, err)
 			}

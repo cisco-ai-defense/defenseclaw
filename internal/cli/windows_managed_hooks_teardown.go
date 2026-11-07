@@ -250,6 +250,14 @@ func windowsManagedHooksStandaloneACPUserState(accountLinks []windowsManagedHook
 			remaining = append(remaining, label+": "+boundedEnterpriseHookUserCleanupText(err.Error()))
 			continue
 		}
+		// The purge keeps what it does not own (a personal .token, an
+		// account file); the result names it, as for the data directory.
+		if kept := connector.RemainingUserStateEntries(filepath.Join(copy.Home, ".defenseclaw", "acp")); len(kept) > 0 {
+			for i, name := range kept {
+				kept[i] = "acp/" + name
+			}
+			label += windowsManagedHooksKeptEntriesMarker + strings.Join(kept, ", ")
+		}
 		purged = append(purged, label)
 	}
 	sort.Strings(remaining)
