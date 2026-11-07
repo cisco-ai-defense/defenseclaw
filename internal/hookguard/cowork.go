@@ -114,7 +114,7 @@ func coworkRemovalState(dataDir string) (complete, refused bool) {
 func RunCowork(dataDir, launcher, event string, stdin io.Reader, stdout, stderr io.Writer) int {
 	complete, refused := coworkRemovalState(dataDir)
 	if !complete {
-		code, started := run(launcher, []string{"hook", "--connector", "claudecode"}, event, stdin, stdout, stderr)
+		code, started := run(launcher, []string{"hook", "--connector", "claudecode"}, event, false, stdin, stdout, stderr)
 		if !started && refused {
 			fmt.Fprintln(stderr, CoworkMarkerRefusedMessage)
 		}

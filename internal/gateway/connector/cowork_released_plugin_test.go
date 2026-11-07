@@ -190,7 +190,8 @@ func TestCoworkReleasedPluginHandlersStillRun(t *testing.T) {
 			}
 			if event == "PreToolUse" {
 				// defenseclaw-hook-guard.exe and defenseclaw-hook.exe accept its argv.
-				if l, h, ok := hookguard.Argv(gotArgs); !ok || l != launcher || strings.Join(h, " ") != "hook --connector claudecode" {
+				if l, h, _, wrapped, open, ok := hookguard.ParseInvocationMode(gotArgs); !ok ||
+					l != launcher || strings.Join(h, " ") != "hook --connector claudecode" || wrapped || open {
 					t.Fatalf("PreToolUse: the guard refuses the released argv %q", gotArgs)
 				}
 			}

@@ -849,7 +849,7 @@ CLAUDE_LAUNCHER_GUARD_WORDS = (
 ).split()
 
 
-# The per-user Windows PreToolUse handler runs the installed full hook as this
+# The per-user Windows direct handler runs the installed full hook as this
 # guard instead of cmd.exe, which Cursor's argument-free import of the hook
 # could not run (GAP-1011). Keep it identical to ClaudeCodeLauncherGuardArgv.
 CLAUDE_LAUNCHER_GUARD_SUBCOMMAND = "launcher-guard"
@@ -872,14 +872,17 @@ def _claude_wrapper_safe(path: str) -> bool:
     )
 
 
-def _claude_chain_wrapper_words(compare: str, guard: str, approved: str, launcher: str, event: str) -> list[str]:
-    fail_code = "1" if event in _CLAUDE_NEUTRAL_EVENTS else "2"
+def _claude_chain_wrapper_words(
+    compare: str, guard: str, approved: str, launcher: str, event: str, unavailable_open: bool = False,
+) -> list[str]:
+    fail_code = "1" if event in _CLAUDE_NEUTRAL_EVENTS or unavailable_open else "2"
     warning = ["echo", *_CLAUDE_CHAIN_WARNING, "1>&2", "&", "exit", "/b", fail_code]
+    mode = ["--unavailable-mode", "open"] if unavailable_open else []
     return [
         "/d", "/v:on", "/c", "if", "not", "exist", guard, "(", *warning, ")",
         "&", compare, "/b", guard, approved, ">nul", "2>&1", "||", "(", *warning, ")",
         "&", guard, _CLAUDE_WRAPPED_GUARD_SUBCOMMAND, launcher, "hook", "--connector", "claudecode",
-        "--event", event,
+        "--event", event, *mode,
         "&", "set", "dc_hook_status=!errorlevel!",
         "&", "if", "!dc_hook_status!", "equ", "0", "exit", "/b", "0",
         "&", "if", "!dc_hook_status!", "equ", "2", "exit", "/b", "2",
@@ -926,7 +929,8 @@ def _claude_chain_wrapper_parts(handler: Any) -> tuple[str, list[str], str, str]
         event = args[i + 7]
         if not event or len(event) > 64 or not event.isascii() or not event.isalnum():
             return None
-        if args == _claude_chain_wrapper_words(compare, guard, approved, launcher, event):
+        unavailable_open = args[i + 8:i + 10] == ["--unavailable-mode", "open"]
+        if args == _claude_chain_wrapper_words(compare, guard, approved, launcher, event, unavailable_open):
             return launcher, inner, guard, approved
     return None
 
@@ -993,11 +997,15 @@ def _claude_pretool_guard_program(path: str) -> bool:
 
 
 def _claude_pretool_guard_view(handler: dict, command: str, args: list[str]) -> dict | None:
-    if len(args) not in (5, 7) or args[0] != CLAUDE_LAUNCHER_GUARD_SUBCOMMAND:
+    if len(args) not in (5, 7, 9) or args[0] != CLAUDE_LAUNCHER_GUARD_SUBCOMMAND:
         return None
     if args[2:5] != ["hook", "--connector", "claudecode"]:
         return None
-    if len(args) == 7 and args[5:] != ["--event", "PreToolUse"]:
+    if len(args) >= 7 and (
+        args[5] != "--event" or not args[6] or len(args[6]) > 64 or not args[6].isascii() or not args[6].isalnum()
+    ):
+        return None
+    if len(args) == 9 and args[7:] != ["--unavailable-mode", "open"]:
         return None
     launcher = args[1]
     if not _claude_pretool_guard_program(command) or not _claude_guardable_hook_executable(launcher):
@@ -1006,7 +1014,7 @@ def _claude_pretool_guard_view(handler: dict, command: str, args: list[str]) -> 
         return None
     view = dict(handler)
     view["command"] = launcher
-    view["args"] = list(args[2:])
+    view["args"] = list(args[2:5])
     return view
 
 

@@ -362,6 +362,27 @@ def test_claude_chain_view_and_guard_drift(tmp_path, monkeypatch):
     assert hook_integrity.claude_launcher_guard_view(direct)["command"] == launcher
 
 
+def test_claude_chain_profile_bound_open_answer_is_owned(tmp_path):
+    launcher = str(tmp_path / "defenseclaw-hook.exe")
+    guard = str(tmp_path / "chain-abc123" / "defenseclaw-hook-guard.exe")
+    approved = str(tmp_path / "chain-abc123" / "defenseclaw-hook-guard.approved")
+    compare = "C:\\Windows\\System32\\fc.exe"
+    command = "C:\\Windows\\System32\\cmd.exe"
+    words = hook_integrity._claude_chain_wrapper_words(
+        compare, guard, approved, launcher, "UserPromptSubmit", unavailable_open=True
+    )
+    handler = {"command": command, "args": words}
+    assert words[-1] == "1"
+    assert hook_integrity.claude_launcher_guard_view(handler)["command"] == launcher
+    changed = {**handler, "args": [*words[:-1], "2"]}
+    assert hook_integrity.claude_launcher_guard_view(changed) is changed
+    direct = {"command": guard, "args": [
+        "launcher-guard", launcher, "hook", "--connector", "claudecode",
+        "--event", "PreToolUse", "--unavailable-mode", "open",
+    ]}
+    assert hook_integrity.claude_launcher_guard_view(direct)["args"] == ["hook", "--connector", "claudecode"]
+
+
 def test_windows_copilot_adapter_in_a_data_dir_not_named_defenseclaw_is_registered(tmp_path, monkeypatch):
     # The Windows Copilot entry runs the PowerShell adapter in the data
     # directory's hooks folder; only the data directory names DefenseClaw, and
