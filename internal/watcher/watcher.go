@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -3222,10 +3223,16 @@ func (w *InstallWatcher) journalFailedQuarantine(evt InstallEvent, targetType st
 
 // policyDenialMarkPrefix opens the tag that ends the journal reason of a hold
 // journalPolicyDenied wrote. The tag lists the fields of the row the hold
-// set, so releasePolicyHolds lifts those and only those once no connector rule
-// denies the asset; an install block or runtime disable that was on the row
-// for another reason is not in the list and stays.
+// set and the copies of the asset it was written for, so releasePolicyHolds
+// lifts those fields, and only once the last of those copies is allowed; an
+// install block or runtime disable that was on the row for another reason is
+// not in the list and stays. A journal row is keyed by the asset's name, not
+// by its path, so the copies are recorded in the tag: the row's source path
+// belongs to an earlier block, or to whichever copy was judged last.
 const policyDenialMarkPrefix = " [asset policy: "
+
+// policyHeldCopiesMark separates, in the tag, the held fields from the copies.
+const policyHeldCopiesMark = " copies="
 
 // policyDenialSep follows, in the reason of a row the hold shares with an
 // earlier runtime disable, the reason of that earlier block; releasing the
@@ -3236,18 +3243,50 @@ const policyDenialSep = " | asset policy hold: "
 // copy that stays in its folder although a connector rule denies it.
 const retainedPolicyReason = "a restored copy stays in its folder while an asset policy rule denies it"
 
-func policyDenialMark(fields []string) string {
-	return policyDenialMarkPrefix + strings.Join(fields, ",") + "]"
+func policyDenialMark(fields, copies []string) string {
+	return policyDenialMarkPrefix + strings.Join(fields, ",") + policyHeldCopiesMark + strings.Join(copies, ",") + "]"
 }
 
-// policyHeldFields are the fields a journal reason records as set by a policy
-// hold, or nil when the reason carries no tag.
-func policyHeldFields(reason string) []string {
+// parsePolicyHold returns the fields and the copies a journal reason records
+// as held by a policy hold, or nil when the reason carries no tag.
+func parsePolicyHold(reason string) (fields, copies []string) {
 	i := strings.LastIndex(reason, policyDenialMarkPrefix)
 	if i < 0 || !strings.HasSuffix(reason, "]") {
-		return nil
+		return nil, nil
 	}
-	return strings.Split(strings.TrimSuffix(reason[i+len(policyDenialMarkPrefix):], "]"), ",")
+	body, list, found := strings.Cut(strings.TrimSuffix(reason[i+len(policyDenialMarkPrefix):], "]"), policyHeldCopiesMark)
+	if found && list != "" {
+		copies = strings.Split(list, ",")
+	}
+	return strings.Split(body, ","), copies
+}
+
+// policyCopyKey names one copy of an asset in a hold tag: its absolute,
+// cleaned path (folded on Windows, as sameWatcherPath does), encoded so that
+// no path can end or split the tag.
+func policyCopyKey(path string) string {
+	abs, err := filepath.Abs(strings.TrimSpace(path))
+	if err != nil {
+		abs = strings.TrimSpace(path)
+	}
+	abs = filepath.Clean(abs)
+	if runtime.GOOS == "windows" {
+		abs = strings.ToLower(abs)
+	}
+	return base64.RawURLEncoding.EncodeToString([]byte(abs))
+}
+
+// livePolicyCopies are the copies of a tag other than skip whose folder is
+// still there; a copy that is gone leaves nothing to run and holds nothing.
+func livePolicyCopies(copies []string, skip string) []string {
+	var live []string
+	for _, key := range copies {
+		raw, err := base64.RawURLEncoding.DecodeString(key)
+		if key != skip && err == nil && assetStillThere(string(raw)) && !slices.Contains(live, key) {
+			live = append(live, key)
+		}
+	}
+	return live
 }
 
 // policyPriorReason is the reason of the block a hold shares its row with
@@ -3359,7 +3398,8 @@ func (w *InstallWatcher) journalPolicyDenied(evt InstallEvent, targetType string
 	name := journalName(evt)
 	for _, row := range rows {
 		prev, _ := w.store.GetActionForConnector(targetType, name, row.scope)
-		owned := policyHeldFields(reasonOf(prev))
+		owned, prevCopies := parsePolicyHold(reasonOf(prev))
+		copies := append(livePolicyCopies(prevCopies, policyCopyKey(evt.Path)), policyCopyKey(evt.Path))
 		// A field already at its protective value that no hold of ours set is an
 		// earlier block (an operator, a scan verdict, a failed quarantine). The
 		// hold does not claim it, rebind its source path or lift it later. Any
@@ -3392,7 +3432,7 @@ func (w *InstallWatcher) journalPolicyDenied(evt InstallEvent, targetType string
 		if len(claim) == 0 {
 			continue
 		}
-		rowReason := reason + policyDenialMark(claim)
+		rowReason := reason + policyDenialMark(claim, copies)
 		if prior := policyPriorReason(reasonOf(prev)); prior != "" {
 			rowReason = prior + policyDenialSep + rowReason
 		} else if earlier && owned == nil && reasonOf(prev) != "" {
@@ -3439,7 +3479,8 @@ func assetStillThere(path string) bool {
 
 // policyHeldScopes are the journal rows of the owner and of every consumer of
 // the root holding evt that hold something a journalPolicyDenied wrote for
-// this path.
+// this copy. A row pinned to another copy by an earlier block still counts:
+// the hold is the copy's own.
 func (w *InstallWatcher) policyHeldScopes(evt InstallEvent) []string {
 	if w.secureClientActive() || w.store == nil || (evt.Type != InstallSkill && evt.Type != InstallPlugin) {
 		return nil
@@ -3447,11 +3488,14 @@ func (w *InstallWatcher) policyHeldScopes(evt InstallEvent) []string {
 	var scopes []string
 	for _, scope := range w.policyHoldScopes(evt) {
 		entry, err := w.store.GetActionForConnector(string(evt.Type), journalName(evt), scope)
-		if err != nil || entry == nil ||
-			(entry.SourcePath != "" && !sameWatcherPath(entry.SourcePath, evt.Path)) {
+		if err != nil || entry == nil {
 			continue
 		}
-		for _, field := range policyHeldFields(entry.Reason) {
+		fields, copies := parsePolicyHold(entry.Reason)
+		if !slices.Contains(copies, policyCopyKey(evt.Path)) {
+			continue
+		}
+		for _, field := range fields {
 			if actionFieldValue(entry, field) != "" {
 				scopes = append(scopes, scope)
 				break
@@ -3467,15 +3511,28 @@ func (w *InstallWatcher) policyHeldScopes(evt InstallEvent) []string {
 // denying connector) or a policy that no longer denies. Without it an allow
 // rule cleared only the owner row and the allowed skill stayed blocked for
 // the denying connector. A block or disable that was on a row before the
-// hold stays.
+// hold stays, and so does the hold itself while another copy of the same name
+// is still denied.
 func (w *InstallWatcher) releasePolicyHolds(evt InstallEvent) {
 	for _, scope := range w.policyHeldScopes(evt) {
 		entry, err := w.store.GetActionForConnector(string(evt.Type), journalName(evt), scope)
 		if err != nil || entry == nil {
 			continue
 		}
+		fields, copies := parsePolicyHold(entry.Reason)
+		if others := livePolicyCopies(copies, policyCopyKey(evt.Path)); len(others) > 0 {
+			// Another copy of the name is still denied: its hold stays whole,
+			// and only this copy leaves the tag.
+			reason := entry.Reason[:strings.LastIndex(entry.Reason, policyDenialMarkPrefix)] + policyDenialMark(fields, others)
+			for _, field := range fields {
+				if value := actionFieldValue(entry, field); value != "" {
+					_ = w.store.SetActionFieldForConnector(string(evt.Type), journalName(evt), scope, field, value, reason)
+				}
+			}
+			continue
+		}
 		var cleared []string
-		for _, field := range policyHeldFields(entry.Reason) {
+		for _, field := range fields {
 			if actionFieldValue(entry, field) == "" {
 				continue
 			}
@@ -3725,8 +3782,11 @@ func (w *InstallWatcher) releaseAllowListed(evt InstallEvent, reason string) {
 		return
 	}
 	var cleared []string
+	held, _ := parsePolicyHold(entry.Reason)
 	for field, value := range map[string]string{"runtime": entry.Actions.Runtime, "install": entry.Actions.Install} {
-		if value == "" {
+		// A field a policy hold set is lifted by releasePolicyHolds, which
+		// keeps it while another copy of the name is still denied.
+		if value == "" || slices.Contains(held, field) {
 			continue
 		}
 		if err := w.store.ClearActionFieldForConnector(string(evt.Type), evt.Name, scope, field); err == nil {
