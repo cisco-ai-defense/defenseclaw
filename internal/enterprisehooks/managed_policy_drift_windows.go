@@ -158,9 +158,11 @@ func renderRecordedWindowsClaudeManagedPolicy(record windowsClaudeManagedPolicyS
 	}
 	for _, contract := range windowsClaudeRecordedPolicyContracts() {
 		for _, lock := range []bool{true, false} {
-			body, err := renderWindowsClaudeRecordedPolicy(record, contract, lock)
-			if err == nil && windowsManagedPolicyDigest(body) == record.PolicySHA256 {
-				return body, nil
+			for _, previousForm := range []bool{false, true} {
+				body, err := renderWindowsClaudeRecordedPolicy(record, contract, lock, previousForm)
+				if err == nil && windowsManagedPolicyDigest(body) == record.PolicySHA256 {
+					return body, nil
+				}
 			}
 		}
 	}
@@ -179,12 +181,14 @@ func windowsClaudeRecordedPolicyContracts() []string {
 
 // renderWindowsClaudeRecordedPolicy renders the drop-in for the record's hook
 // executable and gateway under contract, with or without the
-// managed-hooks-only lock.
-func renderWindowsClaudeRecordedPolicy(record windowsClaudeManagedPolicyState, contract string, lock bool) ([]byte, error) {
+// managed-hooks-only lock. The previous direct command remains readable so
+// an ownership record written before the guard parent can still be restored.
+func renderWindowsClaudeRecordedPolicy(record windowsClaudeManagedPolicyState, contract string, lock bool, previousForm ...bool) ([]byte, error) {
 	return connector.NewClaudeCodeConnector().ManagedHookPolicy(connector.SetupOpts{
 		APIAddr:                     record.GatewayAddr,
 		HookFailMode:                "closed",
 		ManagedEnterprise:           true,
+		SecureClientHookDelivery:    secureClientHookDelivery() || len(previousForm) > 0 && previousForm[0],
 		HookExecutable:              record.HookExecutable,
 		HookContractID:              contract,
 		ClaudeAllowManagedHooksOnly: lock,
@@ -248,8 +252,15 @@ func ApplyWindowsClaudeManagedHooksOnlyLock() (bool, error) {
 		}
 		var body []byte
 		for _, contract := range windowsClaudeRecordedPolicyContracts() {
-			current, renderErr := renderWindowsClaudeRecordedPolicy(record, contract, !want)
-			if renderErr != nil || !bytes.Equal(current, policy.data) {
+			matches := false
+			for _, previousForm := range []bool{false, true} {
+				current, renderErr := renderWindowsClaudeRecordedPolicy(record, contract, !want, previousForm)
+				if renderErr == nil && bytes.Equal(current, policy.data) {
+					matches = true
+					break
+				}
+			}
+			if !matches {
 				continue
 			}
 			if body, err = renderWindowsClaudeRecordedPolicy(record, contract, want); err != nil {

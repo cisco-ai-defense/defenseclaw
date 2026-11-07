@@ -20,7 +20,7 @@ On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes prec
 | Platform | Status | Connector path |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | Portable command hooks; native OpenTelemetry only in isolated OpenShell. |
-| Native Windows x64 | **Supported** | Per-user hooks use a small native guard and the system `cmd.exe`; managed hooks use Claude Code's `command` plus `args` exec form. |
+| Native Windows x64 | **Supported** | Per-user and managed hooks use a small native guard and the system `cmd.exe`; Secure Client hooks keep the exec form. |
 
 On Windows, install and run Claude Code from PowerShell or CMD ([native setup](https://code.claude.com/docs/en/setup)). Git for Windows is optional for Claude's Bash tool. Git for Windows is not part of the DefenseClaw hook contract. WSL, Git Bash, Cygwin, MSYS, containers and virtual machines are outside the native connector path.
 

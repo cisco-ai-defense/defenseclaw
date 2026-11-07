@@ -2781,6 +2781,7 @@ func hookPolicyNeedsSetup(oldCfg, newCfg *config.Config) bool {
 func hookRuntimePolicyChanged(oldCfg, newCfg *config.Config, name string) bool {
 	return oldCfg.EffectiveHookFailModeForConnector(name) != newCfg.EffectiveHookFailModeForConnector(name) ||
 		oldCfg.EffectiveHookOutageFailModeForConnector(name) != newCfg.EffectiveHookOutageFailModeForConnector(name) ||
+		oldCfg.HookPolicyTierForConnector(name) != newCfg.HookPolicyTierForConnector(name) ||
 		oldCfg.EffectiveGuardrailModeForConnector(name) != newCfg.EffectiveGuardrailModeForConnector(name) ||
 		oldCfg.EffectiveHILTForConnector(name).Enabled != newCfg.EffectiveHILTForConnector(name).Enabled
 }
@@ -2967,6 +2968,7 @@ func (s *Sidecar) bindHookRuntimePolicyResolver(guard *HookConfigGuard) {
 		}
 		return hookRuntimePolicy{
 			hookFailMode:  cfg.EffectiveHookOutageFailModeForConnector(connectorName),
+			policyTier:    cfg.HookPolicyTierForConnector(connectorName),
 			guardrailMode: cfg.EffectiveGuardrailModeForConnector(connectorName),
 			hiltEnabled:   cfg.EffectiveHILTForConnector(connectorName).Enabled,
 		}, sync.OnceFunc(s.hookPolicyMu.RUnlock), true
