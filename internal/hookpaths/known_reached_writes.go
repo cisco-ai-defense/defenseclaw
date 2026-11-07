@@ -90,14 +90,20 @@ func knownUnshadowed(name string) string {
 // A call of a function scans the body of the definitions the shell can have
 // made when it reaches the call (current): a definition the scan has not
 // reached, one in a branch a static condition skips, and one a later
-// definition at the top of the command has replaced, are not scanned, and the
+// definition the shell certainly runs has replaced, are not scanned, and the
 // statements of a body are followed the way the reader follows the command.
+// A statement is certainly run (maybe is zero) when the shell reaches it in
+// straight-line order: not in a branch an unknown condition decides, a loop,
+// a subshell, a background list, or the body of a function. A function of the
+// name eval (sure) takes the place of the builtin, so the text of its call is
+// not eval text, unless a command may have removed the function.
 type knownShadow struct {
 	trees      []*syntax.File
 	home       string
 	shadowed   map[string]bool
-	top        map[*syntax.FuncDecl]bool
 	current    map[string][]*syntax.FuncDecl
+	sure       map[string]bool
+	maybe      int
 	scanned    map[*syntax.FuncDecl]int
 	generation int
 	opaque     bool
@@ -111,24 +117,19 @@ type knownShadow struct {
 const knownShadowMaxBodies = 512
 
 func newKnownShadow(file *syntax.File, home string) *knownShadow {
-	s := &knownShadow{home: home, shadowed: map[string]bool{}, top: map[*syntax.FuncDecl]bool{},
-		current: map[string][]*syntax.FuncDecl{}, scanned: map[*syntax.FuncDecl]int{}}
+	s := &knownShadow{home: home, shadowed: map[string]bool{}, current: map[string][]*syntax.FuncDecl{},
+		sure: map[string]bool{}, scanned: map[*syntax.FuncDecl]int{}}
 	s.trees = append(s.trees, file)
-	for _, stmt := range file.Stmts {
-		if function, ok := stmt.Cmd.(*syntax.FuncDecl); ok && !stmt.Background && !stmt.Coprocess {
-			// A definition at the top of the command replaces the ones before it.
-			s.top[function] = true
-		}
-	}
 	return s
 }
 
 // reach records a definition the scan has reached: a call may run it from now
-// on, and a definition at the top of the command replaces the earlier ones.
-func (s *knownShadow) reach(function *syntax.FuncDecl) {
+// on, and a definition the shell certainly runs replaces the earlier ones.
+func (s *knownShadow) reach(function *syntax.FuncDecl, certain bool) {
 	name := knownUnshadowed(function.Name.Value)
 	known := s.current[name]
-	if s.top[function] {
+	if certain {
+		s.sure[name] = true
 		if len(known) == 1 && known[0] == function {
 			return
 		}
@@ -150,10 +151,15 @@ func (s *knownShadow) stamp() int {
 }
 
 // scan applies what every command inside node can redefine. The body of a
-// function declared inside node runs only where a command calls it.
+// function declared inside node runs only where a command calls it. When node
+// is a statement the shell certainly runs, its own command is certain.
 func (s *knownShadow) scan(node syntax.Node) {
 	if s == nil || node == nil {
 		return
+	}
+	var certain syntax.Node
+	if stmt, ok := node.(*syntax.Stmt); ok && s.maybe == 0 && !stmt.Background && !stmt.Coprocess {
+		certain = stmt.Cmd
 	}
 	syntax.Walk(node, func(node syntax.Node) bool {
 		switch node := node.(type) {
@@ -162,11 +168,11 @@ func (s *knownShadow) scan(node syntax.Node) {
 				if knownShadowable[node.Name.Value] && !s.keepsOutcome(node) {
 					s.rename(node.Name.Value)
 				}
-				s.reach(node)
+				s.reach(node, node == certain)
 			}
 			return false
 		case *syntax.CallExpr:
-			s.call(node)
+			s.call(node, node == certain)
 		}
 		return len(s.shadowed) != len(knownShadowable)
 	})
@@ -197,7 +203,7 @@ func (s *knownShadow) scanStmt(stmt *syntax.Stmt) bool {
 	case *syntax.Block:
 		return s.scanStmts(command.Stmts)
 	case *syntax.Subshell:
-		s.scanStmts(command.Stmts)
+		s.possibly(func() { s.scanStmts(command.Stmts) })
 	case *syntax.IfClause:
 		return s.scanIf(command)
 	case *syntax.WhileClause:
@@ -212,16 +218,18 @@ func (s *knownShadow) scanStmt(stmt *syntax.Stmt) bool {
 			truth = -truth
 		}
 		if truth >= 0 {
-			s.passes(func() { s.scanStmts(command.Do); s.scanStmts(command.Cond) })
+			s.possibly(func() { s.passes(func() { s.scanStmts(command.Do); s.scanStmts(command.Cond) }) })
 		}
 	case *syntax.ForClause:
 		s.scan(command.Loop)
-		s.passes(func() { s.scanStmts(command.Do) })
+		s.possibly(func() { s.passes(func() { s.scanStmts(command.Do) }) })
 	case *syntax.CaseClause:
 		s.scan(command.Word)
-		for _, item := range command.Items {
-			s.scanStmts(item.Stmts)
-		}
+		s.possibly(func() {
+			for _, item := range command.Items {
+				s.scanStmts(item.Stmts)
+			}
+		})
 	case *syntax.TimeClause:
 		return s.scanStmt(command.Stmt)
 	case *syntax.BinaryCmd:
@@ -236,13 +244,30 @@ func (s *knownShadow) scanStmt(stmt *syntax.Stmt) bool {
 		and := command.Op == syntax.AndStmt
 		skipped := truth == 0 || and && truth < 0 || !and && truth > 0
 		if truth == 0 || and && truth > 0 || !and && truth < 0 {
-			return s.scanStmt(command.Y) || skipped
+			continues := false
+			if truth == 0 {
+				s.possibly(func() { continues = s.scanStmt(command.Y) })
+			} else {
+				continues = s.scanStmt(command.Y)
+			}
+			return continues || skipped
 		}
 	default:
 		s.scan(stmt)
 		return !s.leaves(stmt)
 	}
 	return true
+}
+
+// possibly runs a scan of statements the shell may or may not reach.
+func (s *knownShadow) possibly(scan func()) {
+	if s == nil {
+		scan()
+		return
+	}
+	s.maybe++
+	defer func() { s.maybe-- }()
+	scan()
 }
 
 // passes scans a loop body again while a pass has redefined something, as a
@@ -281,6 +306,11 @@ func (s *knownShadow) scanIf(clause *syntax.IfClause) bool {
 		return false
 	}
 	truth := actionStaticCondition(clause.Cond[len(clause.Cond)-1], s.home)
+	if truth == 0 {
+		// An unknown condition: either branch may be the one that runs.
+		s.maybe++
+		defer func() { s.maybe-- }()
+	}
 	continues := false
 	if truth >= 0 {
 		continues = s.scanStmts(clause.Then)
@@ -320,8 +350,9 @@ func (s *knownShadow) keepsOutcome(function *syntax.FuncDecl) bool {
 }
 
 // call applies one command: the program word, through command and builtin,
-// which skip a function of the name they are given.
-func (s *knownShadow) call(call *syntax.CallExpr) {
+// which skip a function of the name they are given. certain is true when the
+// shell certainly runs the command.
+func (s *knownShadow) call(call *syntax.CallExpr, certain bool) {
 	args := call.Args
 	skipsFunctions := false
 	for len(args) > 0 {
@@ -351,14 +382,27 @@ func (s *knownShadow) call(call *syntax.CallExpr) {
 			continue
 		case "eval":
 			if !skipsFunctions {
-				s.functionBodies(name)
+				s.functionBodies(name, certain)
 			}
-			s.eval(args[1:])
+			if skipsFunctions || !s.sure[name] {
+				// A function of that name reads its arguments as parameters;
+				// the builtin reads them as text.
+				s.eval(args[1:], certain)
+			}
+		case "unset":
+			// A removed function gives the name back to the builtin.
+			for _, arg := range args[1:] {
+				if word, known := StaticWord(arg, s.home); known {
+					delete(s.sure, word)
+				} else {
+					clear(s.sure)
+				}
+			}
 		case "alias", "enable", "source", ".":
 			s.renameAll()
 		default:
 			if !skipsFunctions {
-				s.functionBodies(name)
+				s.functionBodies(name, certain)
 			}
 		}
 		return
@@ -369,8 +413,20 @@ func (s *knownShadow) call(call *syntax.CallExpr) {
 // redefine. The name may be the one a rename gave the function. A body is
 // read again only after the scan has reached another definition or renamed
 // another builtin, which can change what it reaches.
-func (s *knownShadow) functionBodies(name string) {
-	for _, function := range slices.Clone(s.current[knownUnshadowed(name)]) {
+func (s *knownShadow) functionBodies(name string, certain bool) {
+	name = knownUnshadowed(name)
+	candidates := slices.Clone(s.current[name])
+	// The body of the one definition the shell certainly made runs in
+	// straight-line order unless it can return early.
+	if certain && len(candidates) == 1 && s.sure[name] && !knownLeavesEarly(candidates[0].Body, s.home) {
+		s.bodiesOf(candidates)
+		return
+	}
+	s.possibly(func() { s.bodiesOf(candidates) })
+}
+
+func (s *knownShadow) bodiesOf(candidates []*syntax.FuncDecl) {
+	for _, function := range candidates {
 		if s.scanned[function] == s.generation+1 {
 			continue
 		}
@@ -397,8 +453,9 @@ func knownWordComputes(word *syntax.Word) bool {
 }
 
 // eval applies the commands of fixed eval text; any other text may define
-// any name.
-func (s *knownShadow) eval(args []*syntax.Word) {
+// any name. Its definitions are certain when the eval is and the text has no
+// return or loop control that can end it before its last command.
+func (s *knownShadow) eval(args []*syntax.Word, certain bool) {
 	words := make([]string, 0, len(args))
 	for _, arg := range args {
 		word, known := StaticWord(arg, s.home)
@@ -417,8 +474,26 @@ func (s *knownShadow) eval(args []*syntax.Word) {
 	s.trees = append(s.trees, parsed)
 	s.renameTree(parsed, s.shadowed)
 	s.depth++
-	s.scanStmts(parsed.Stmts)
+	if certain && !knownLeavesEarly(parsed, s.home) {
+		s.scanStmts(parsed.Stmts)
+	} else {
+		s.possibly(func() { s.scanStmts(parsed.Stmts) })
+	}
 	s.depth--
+}
+
+// knownLeavesEarly reports text with a return or a loop control, which can end
+// it before its last command.
+func knownLeavesEarly(tree syntax.Node, home string) bool {
+	leaves := false
+	syntax.Walk(tree, func(node syntax.Node) bool {
+		if call, ok := node.(*syntax.CallExpr); ok && len(call.Args) != 0 {
+			name, known := StaticWord(call.Args[0], home)
+			leaves = leaves || !known || name == "return" || name == "break" || name == "continue"
+		}
+		return !leaves
+	})
+	return leaves
 }
 
 func (s *knownShadow) renameAll() {
@@ -739,7 +814,7 @@ func (r *knownReached) statement(stmt *syntax.Stmt, states []actionValues) actio
 			// pipeline keeps its own reading as well.
 			for _, side := range []*syntax.Stmt{binary.X, binary.Y} {
 				if knownReachedCompound(side) {
-					r.statement(side, states)
+					r.possibly(func() { r.statement(side, states) })
 				}
 			}
 		}
@@ -749,13 +824,19 @@ func (r *knownReached) statement(stmt *syntax.Stmt, states []actionValues) actio
 		return actionLoopFlow{ended: r.update(stmt, states)}
 	}
 	r.redirects(stmt, states)
-	flow := r.compound(stmt, states)
 	if stmt.Background || stmt.Coprocess {
-		// An asynchronous list runs in a subshell: its loop controls and
-		// assignments do not reach the statements after it.
+		// An asynchronous list runs in a subshell: its loop controls,
+		// definitions and assignments do not reach the statements after it.
+		r.possibly(func() { r.compound(stmt, states) })
 		return actionLoopFlow{ended: states}
 	}
-	return flow
+	return r.compound(stmt, states)
+}
+
+// possibly reads statements the shell may or may not reach, or reaches in a
+// subshell: what they define is not certain for the statements after them.
+func (r *knownReached) possibly(read func()) {
+	r.shadow.possibly(read)
 }
 
 func (r *knownReached) compound(stmt *syntax.Stmt, states []actionValues) actionLoopFlow {
@@ -763,7 +844,7 @@ func (r *knownReached) compound(stmt *syntax.Stmt, states []actionValues) action
 	case *syntax.Block:
 		return r.body(command.Stmts, states)
 	case *syntax.Subshell:
-		r.body(command.Stmts, states)
+		r.possibly(func() { r.body(command.Stmts, states) })
 		return actionLoopFlow{ended: states}
 	case *syntax.TimeClause:
 		return r.statement(command.Stmt, states)
@@ -778,7 +859,7 @@ func (r *knownReached) compound(stmt *syntax.Stmt, states []actionValues) action
 				flow.ended = r.merge(flow.ended, []actionValues{state})
 				items = command.Items
 				for _, item := range items {
-					flow.add(r.body(item.Stmts, []actionValues{state}))
+					r.possibly(func() { flow.add(r.body(item.Stmts, []actionValues{state})) })
 				}
 				continue
 			}
@@ -801,7 +882,11 @@ func (r *knownReached) compound(stmt *syntax.Stmt, states []actionValues) action
 			flow.ended = r.merge(flow.ended, left.ended)
 		}
 		if truth == 0 || and && truth > 0 || !and && truth < 0 {
-			flow.add(r.statement(command.Y, left.ended))
+			if truth == 0 {
+				r.possibly(func() { flow.add(r.statement(command.Y, left.ended)) })
+			} else {
+				flow.add(r.statement(command.Y, left.ended))
+			}
 		}
 		return flow
 	case *syntax.ForClause:
@@ -811,7 +896,9 @@ func (r *knownReached) compound(stmt *syntax.Stmt, states []actionValues) action
 	case *syntax.WhileClause:
 		r.loops++
 		defer func() { r.loops-- }()
-		return r.whileClause(command, states)
+		var flow actionLoopFlow
+		r.possibly(func() { flow = r.whileClause(command, states) })
+		return flow
 	}
 	r.incomplete = true
 	return actionLoopFlow{}
@@ -827,14 +914,25 @@ func (r *knownReached) ifClause(clause *syntax.IfClause, states []actionValues) 
 		flow.addBeyond(level, beyond)
 	}
 	truth := actionStaticCondition(clause.Cond[len(clause.Cond)-1], r.home)
+	if truth == 0 {
+		// An unknown condition: either branch may be the one that runs.
+		r.possibly(func() { flow = r.branches(clause, flow, condition.ended, truth) })
+		return flow
+	}
+	return r.branches(clause, flow, condition.ended, truth)
+}
+
+// branches reads the branches of an if clause a condition of the given truth
+// leaves open.
+func (r *knownReached) branches(clause *syntax.IfClause, flow actionLoopFlow, states []actionValues, truth int) actionLoopFlow {
 	if truth >= 0 {
-		flow.add(r.body(clause.Then, condition.ended))
+		flow.add(r.body(clause.Then, states))
 	}
 	if truth <= 0 {
 		if clause.Else == nil {
-			flow.ended = r.merge(flow.ended, condition.ended)
+			flow.ended = r.merge(flow.ended, states)
 		} else {
-			flow.add(r.ifClause(clause.Else, condition.ended))
+			flow.add(r.ifClause(clause.Else, states))
 		}
 	}
 	return flow
@@ -856,6 +954,12 @@ func (r *knownReached) leave(flow *actionLoopFlow, part actionLoopFlow) {
 
 func (r *knownReached) forClause(clause *syntax.ForClause, states []actionValues) actionLoopFlow {
 	var flow actionLoopFlow
+	// The body of a loop over a fixed list runs in order, once for each item,
+	// unless a loop control or return can end a pass early.
+	early := knownLeavesEarly(clause, r.home)
+	for _, definition := range r.definitions {
+		early = early || knownLeavesEarly(definition.decl, r.home)
+	}
 	for _, state := range states {
 		name, items, fixed := actionFixedForItems(clause, state, r.cwd, r.home)
 		if _, set := state["IFS"]; fixed && !set && r.ifsAssigned {
@@ -882,8 +986,10 @@ func (r *knownReached) forClause(clause *syntax.ForClause, states []actionValues
 			flow.ended = r.merge(flow.ended, []actionValues{state})
 			// A later pass reaches what the body redefines before its first
 			// statement.
-			r.shadow.scan(clause)
-			r.passes(&flow, clause.Do, current)
+			r.possibly(func() {
+				r.shadow.scan(clause)
+				r.passes(&flow, clause.Do, current)
+			})
 			continue
 		}
 		current := []actionValues{state}
@@ -897,7 +1003,12 @@ func (r *knownReached) forClause(clause *syntax.ForClause, states []actionValues
 				value[name] = item
 				bound = append(bound, value)
 			}
-			part := r.body(clause.Do, bound)
+			var part actionLoopFlow
+			if early {
+				r.possibly(func() { part = r.body(clause.Do, bound) })
+			} else {
+				part = r.body(clause.Do, bound)
+			}
 			r.leave(&flow, part)
 			current = r.merge(part.ended, part.continued)
 		}
