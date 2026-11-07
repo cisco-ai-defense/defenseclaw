@@ -1107,12 +1107,16 @@ func runConnectorPruneOrphans(cmd *cobra.Command, _ []string) error {
 	// Every other connector is an orphan whose DefenseClaw
 	// entries go, with the operator own bytes kept.
 	configured := map[string]bool{}
+	noConfig := false
 	if cfg != nil {
 		for _, name := range cfg.ActiveConnectors() {
 			configured[strings.ToLower(strings.TrimSpace(name))] = true
 		}
-	} else if !confirmedRollbackWithoutConfig(dataDir, connectorRollbackBackupsDir) {
-		return fmt.Errorf("connector prune-orphans: config.yaml is not loaded; nothing was removed")
+	} else {
+		if err := confirmedRollbackWithoutConfig(dataDir, connectorRollbackBackupsDir); err != nil {
+			return fmt.Errorf("connector prune-orphans: config.yaml is not loaded; nothing was removed (%v)", err)
+		}
+		noConfig = true
 	}
 	active, _, err := connector.ReadActiveConnectorState(dataDir)
 	if err != nil {
@@ -1144,7 +1148,10 @@ func runConnectorPruneOrphans(cmd *cobra.Command, _ []string) error {
 		)
 	}
 	for _, name := range names {
-		if configured[name] {
+		// With no config.yaml the verified saved backups are the only
+		// evidence of what the newer install set up: a restore that failed
+		// leaves the vendor files as they are.
+		if configured[name] || (noConfig && restoreErr != nil) {
 			continue
 		}
 		conn, _ := reg.Get(name)
@@ -1205,24 +1212,32 @@ func runConnectorPruneOrphans(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-// confirmedRollbackWithoutConfig reports whether the missing config is a
+// confirmedRollbackWithoutConfig returns nil when the missing config is a
 // confirmed absence on a rollback: the older data folder resolves to a usable
 // directory (a link whose target is unavailable proves nothing about what was
 // inside), config.yaml is confirmed absent there (Lstat, so a link is a
-// present config), and the saved newer install folder is a directory that holds
-// connector backup records. Anything else is a refusal that removes nothing.
-func confirmedRollbackWithoutConfig(dataDir, savedDir string) bool {
+// present config), and the saved newer install folder holds connector backup
+// records that all load and match their digests (an empty or unrelated folder,
+// or a rejected record, is no evidence of what the newer install set up).
+// Anything else is a refusal, with the reason, that removes nothing.
+func confirmedRollbackWithoutConfig(dataDir, savedDir string) error {
 	if savedDir == "" {
-		return false
+		return errors.New("no saved newer install folder was given")
 	}
 	if info, err := os.Stat(dataDir); err != nil || !info.IsDir() {
-		return false
+		return errors.New("the older data folder is not available")
 	}
 	if _, err := os.Lstat(filepath.Join(dataDir, config.DefaultConfigName)); !errors.Is(err, os.ErrNotExist) {
-		return false
+		return errors.New("config.yaml is present in the older data folder")
 	}
-	info, err := os.Stat(filepath.Join(savedDir, "connector_backups"))
-	return err == nil && info.IsDir()
+	count, err := connector.VerifyManagedFileBackups(savedDir)
+	if err != nil {
+		return fmt.Errorf("the saved connector backups are not usable: %w", err)
+	}
+	if count == 0 {
+		return errors.New("the saved newer install folder holds no connector backup records")
+	}
+	return nil
 }
 
 // pruneOrphanedConnector tears down name, which is not configured, when its
