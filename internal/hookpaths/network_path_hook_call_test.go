@@ -16,7 +16,7 @@ import (
 )
 
 // hookCallShares is two shares that do not answer and one that answers in
-// 100 ms, below the 750 ms answer wait. The answering share holds an
+// 100 ms (500 ms for newSlowHookCallShares), below the 750 ms answer wait. The answering share holds an
 // ordinary sourced script and one that writes the local keys file.
 type hookCallShares struct {
 	home, dead, dead2, live, keys string
@@ -24,6 +24,11 @@ type hookCallShares struct {
 }
 
 func newHookCallShares(t *testing.T) hookCallShares {
+	t.Helper()
+	return newSlowHookCallShares(t, 100*time.Millisecond)
+}
+
+func newSlowHookCallShares(t *testing.T, liveAnswersIn time.Duration) hookCallShares {
 	t.Helper()
 	home := t.TempDir()
 	s := hookCallShares{
@@ -54,7 +59,7 @@ func newHookCallShares(t *testing.T) hookCallShares {
 			<-release
 			return
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(liveAnswersIn)
 	})
 	networkShareRootOf = func(path string) string {
 		for _, root := range []string{s.dead, s.dead2, s.live} {
@@ -205,6 +210,26 @@ func TestOneHookCallTwoDeadSharesDoNotStarveAnAnsweringShare(t *testing.T) {
 	s.checkLiveRead(t)
 }
 
+// rel-1-0-6:GAP-0482 (review 6): the third share answers in 500 ms, inside
+// the 750 ms answer wait, after two that did not answer have spent two
+// waits. It is read, and the script there that writes the local keys file
+// through its protected path is seen, as it is on a build with no share
+// bound. The call stays inside its budget.
+func TestOneHookCallTwoDeadSharesDoNotStarveAShareAnsweringInHalfTheWait(t *testing.T) {
+	s := newSlowHookCallShares(t, 500*time.Millisecond)
+	defer HookCall()()
+	start := time.Now()
+	for _, dead := range []string{s.dead, s.dead2} {
+		if !networkPathUnanswered(filepath.Join(dead, "notes.txt")) {
+			t.Fatal("the share that does not answer answered")
+		}
+	}
+	s.checkLiveRead(t)
+	if took, bound := time.Since(start), networkShareCallWaits*networkShareAnswerWait+150*time.Millisecond; took > bound {
+		t.Errorf("the call waited %v, want at most %v", took, bound)
+	}
+}
+
 // The benign twin: the same call without the shares that do not answer
 // reads the answering share, and its ordinary script writes nothing
 // protected.
@@ -217,9 +242,10 @@ func TestOneHookCallAnsweringShareAloneIsReadWithoutProtectedWrite(t *testing.T)
 }
 
 // The bound of a call holds: shares that do not answer cost it no more than
-// two answer waits and the slack of a loaded test host (the full waits and the
-// tail of half a wait are inside it), and a share asked after that reads as
-// unknown at once. The bound is the one of review 1 and is not raised.
+// networkShareCallWaits answer waits and the slack of a loaded test host, and
+// a share asked after that reads as unknown at once. The wait count moved
+// from two to three for review 6 (a share answering in half its wait, asked
+// after two that did not); the slack is the one of review 1.
 func TestOneHookCallWaitIsBoundedAcrossDeadShares(t *testing.T) {
 	const shares = 6
 	release := make(chan struct{})
@@ -241,7 +267,7 @@ func TestOneHookCallWaitIsBoundedAcrossDeadShares(t *testing.T) {
 			t.Fatal("the share that does not answer answered")
 		}
 	}
-	bound := networkShareCallShares*200*time.Millisecond + 150*time.Millisecond
+	bound := networkShareCallWaits*200*time.Millisecond + 150*time.Millisecond
 	if took := time.Since(start); took > bound {
 		t.Fatalf("%d shares that do not answer held the call %v, want at most %v", shares, took, bound)
 	}
