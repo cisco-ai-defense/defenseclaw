@@ -249,3 +249,33 @@ func TestGatewayReadinessFailureEndsWithTheRepairStep(t *testing.T) {
 		})
 	}
 }
+
+// A valid audit folder with a long name makes the whole refusal longer than the
+// 400 bytes other causes are cut to. The final error keeps the complete folder, the
+// chmod go-w repair and the restart step, up to the longest path the system allows.
+func TestGatewayReadinessFailureKeepsTheCompleteRepairForALongFolder(t *testing.T) {
+	probe := fmt.Errorf("%w (last health probe: dial tcp: connection refused)", errGatewayExitedBeforeReadiness)
+	long := "/home/u"
+	for len(long) < 3000 {
+		long += "/" + strings.Repeat("b", 200)
+	}
+	for _, folder := range []string{"/home/u/" + strings.Repeat("a", 180), long} {
+		logPath := filepath.Join(t.TempDir(), "gateway.log")
+		repair := "audit: database directory " + folder + " is group- or other-writable; as the account that owns it, " +
+			"run: chmod go-w \x27" + folder + "\x27, then run: defenseclaw-gateway restart"
+		if err := os.WriteFile(logPath, []byte("Error: failed to open audit store: "+repair+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cause := gatewayExitedBeforeReadinessError(probe, logPath, 0)
+		for _, prefix := range []string{"start daemon readiness", "restart daemon readiness"} {
+			msg := gatewayReadinessFailure(prefix, cause, logPath).Error()
+			if !strings.Contains(msg, "database directory "+folder+" is group- or other-writable") ||
+				!strings.Contains(msg, "chmod go-w \x27"+folder+"\x27") {
+				t.Errorf("%d-byte folder: %s lost the folder or the chmod repair", len(folder), prefix)
+			}
+			if !strings.HasSuffix(msg, "then run: defenseclaw-gateway restart") {
+				t.Errorf("%d-byte folder: %s lost its final step", len(folder), prefix)
+			}
+		}
+	}
+}

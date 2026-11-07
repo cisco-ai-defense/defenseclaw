@@ -77,6 +77,7 @@ from defenseclaw.fail_mode import (
     FileSnapshot,
     fail_mode_transaction_lock,
     proxy_model_outage_mode,
+    proxy_outage_source,
     proxy_outage_summary,
     proxy_requests_note,
     reconcile_connector_registration,
@@ -1714,16 +1715,10 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         else:
             runtime_value = runtime_state.runtime or "unknown"
         click.echo(f"  {ux.bold(f'{label} ({key}) hook_fail_mode:')} {ux.accent(runtime_value)}")
-        global_saved = saved_hook_fail_mode_scope(gc, "") == "global"
-        if proxy and not global_saved:
-            # An unsaved global value is only the schema default: the policy
-            # tier decides the outage mode, so do not call it inherited (GAP-0824).
-            if has_override:
-                ux.subhead("per-connector override.", indent="  ")
-            else:
-                ux.subhead(
-                    f"from the policy tier ({gc.hook_policy_tier(key)} tier); no fail mode is saved.", indent="  "
-                )
+        if proxy:
+            # The source follows the order the outage resolver applies, so the line never
+            # contradicts the value above it (GAP-0824).
+            ux.subhead(proxy_outage_source(app.cfg, key), indent="  ")
         elif has_override:
             ux.subhead(f"per-connector override (global default: {global_fm}).", indent="  ")
         else:
@@ -2104,7 +2099,8 @@ def _outage_open_note(app: AppContext, calls: str) -> str:
 
 
 _PER_USER_OUTAGE_RULE = (
-    "On a per-user install an explicit saved mode wins. When unset, the gateway-outage mode follows the "
+    "On a per-user install an explicit saved mode wins (OpenClaw under the strict policy stays closed); a "
+    "managed computer or Secure Client uses the administrator mode. When unset, the gateway-outage mode follows the "
     "policy tier: the default (balanced) and permissive rule packs let a call run with a warning while "
     "the gateway is not running, strict blocks it. "
     "Every other failure (an error or unusable gateway answer, a missing token, an install or upgrade) blocks."
@@ -2125,6 +2121,7 @@ def _show_per_user_outage_modes(app: AppContext) -> None:
             shown = "disabled (no hooks)"
         elif _is_proxy_connector(name):
             shown = proxy_outage_summary(proxy_model_outage_mode(app.cfg, name))
+            shown += " (" + proxy_outage_source(app.cfg, name).rstrip(".") + ")"
         else:
             tier = gc.hook_policy_tier(name) if hasattr(gc, "hook_policy_tier") else "default"
             resolver = getattr(gc, "effective_hook_fail_mode", None)

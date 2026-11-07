@@ -777,6 +777,50 @@ def proxy_model_outage_mode(cfg: Any, connector: str, *, saved: str | None = Non
     return normalize_fail_mode(saved)
 
 
+def proxy_outage_source(cfg: Any, connector: str) -> str:
+    """Say where a proxy-backed connector gets its outage mode, in the order the resolver applies it (GAP-0824).
+
+    A managed or Secure Client install takes the administrator mode (an unset one
+    is the Secure Client or managed default); a saved mode comes next, except that
+    OpenClaw under the strict policy stays closed on a per-user install; an unset
+    mode follows the policy tier. ZeptoClaw has no outage mode to explain.
+    """
+
+    if normalize(connector) != "openclaw":
+        return "model requests are always blocked while the gateway is down; no fail mode applies."
+    guardrail = cfg.guardrail
+    mode, source = guardrail.hook_fail_mode_resolution(connector)
+    effective = normalize_fail_mode(guardrail.effective_hook_outage_fail_mode(connector))
+    if source == "secure-client-default":
+        return (
+            f"set by Secure Client ({effective} unless the administrator chose otherwise); "
+            "the policy tier does not change it."
+        )
+    if source == "managed-default":
+        return (
+            "set by this managed computer (closed unless the administrator chose open); "
+            "the policy tier does not change it."
+        )
+    if source.startswith("config:"):
+        if "application_protection" in source:
+            where = "automatic-protection"
+        elif ".connectors." in source:
+            where = "per-connector"
+        else:
+            where = "global"
+        if guardrail._managed_outage_install():
+            return f"the administrator saved {where} mode ({effective}); the policy tier does not change it."
+        if effective != mode:
+            return (
+                f"closed by the strict policy: the saved {where} {mode} mode does not apply to OpenClaw "
+                "under the strict tier."
+            )
+        if where == "global":
+            return f"inherited from global default ({effective})."
+        return f"the saved {where} mode ({effective}); the policy tier does not change it."
+    return f"from the policy tier ({guardrail.hook_policy_tier(connector)} tier); no fail mode is saved."
+
+
 def proxy_outage_note(mode: str) -> str:
     if mode == "open":
         return "no hooks: model requests continue with a warning while the gateway is down"

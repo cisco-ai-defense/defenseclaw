@@ -57,6 +57,7 @@ def make_ctx(*, enabled: bool = True, connector: str = "openclaw",
     )
     guardrail_cfg.effective_hook_outage_fail_mode = lambda connector="": guardrail_cfg.hook_fail_mode
     guardrail_cfg._managed_outage_install = lambda: False
+    guardrail_cfg.hook_fail_mode_resolution = lambda connector="": (guardrail_cfg.hook_fail_mode, "config:guardrail.hook_fail_mode")
     guardrail_cfg.hook_policy_tier = lambda connector="": "default"
     cfg = SimpleNamespace(
         guardrail=guardrail_cfg,
