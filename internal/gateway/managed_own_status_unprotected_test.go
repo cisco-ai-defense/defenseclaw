@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -15,16 +16,34 @@ import (
 
 // rel-1-0-6 GAP-0789: a managed user whose only OpenCode is a machine-wide
 // V1, which cannot run the DefenseClaw plugin, was told "OpenCode protected"
-// while the administrator's status listed the user as opencode_v1_unprotected.
-// The caller's own status now reads the same unprotected-agents entries, for
-// every connector, so it never says protected where the administrator says
-// the agent is not.
+// while the administrator status listed the user as opencode_v1_unprotected.
+// The caller own status now reads the same completed scan, for every
+// connector, so it never says protected where the administrator says the
+// agent is not, and never from a scan it does not know.
+
+// completeOwnStatusScan makes the enumerator scan the own status reads a
+// completed scan that found agents (none for nil).
+func completeOwnStatusScan(t *testing.T, agents []enterprisehooks.UnprotectedAgent) {
+	t.Helper()
+	failOwnStatusScan(t, agents, nil)
+}
+
+// failOwnStatusScan makes the scan read return agents and readErr.
+func failOwnStatusScan(t *testing.T, agents []enterprisehooks.UnprotectedAgent, readErr error) {
+	t.Helper()
+	previous := ownStatusUnprotectedAgents
+	ownStatusUnprotectedAgents = func(string, string, bool) ([]enterprisehooks.UnprotectedAgent, error) {
+		return agents, readErr
+	}
+	t.Cleanup(func() { ownStatusUnprotectedAgents = previous })
+}
+
 func ownStatusUnprotectedFixture(t *testing.T, agents []enterprisehooks.UnprotectedAgent, readErr error) *APIServer {
 	t.Helper()
-	previousGuardian, previousAgents := ownStatusGuardianAuthorization, ownStatusUnprotectedAgents
+	previousGuardian := ownStatusGuardianAuthorization
 	ownStatusGuardianAuthorization = func(string) (*managedGuardianAuthorization, string) { return nil, "unavailable" }
-	ownStatusUnprotectedAgents = func(string) ([]enterprisehooks.UnprotectedAgent, error) { return agents, readErr }
-	t.Cleanup(func() { ownStatusGuardianAuthorization, ownStatusUnprotectedAgents = previousGuardian, previousAgents })
+	t.Cleanup(func() { ownStatusGuardianAuthorization = previousGuardian })
+	failOwnStatusScan(t, agents, readErr)
 	enabled := true
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
@@ -65,14 +84,14 @@ func TestOwnStatusMachineWideOpenCodeV1IsNotProtected(t *testing.T) {
 	state, _ := row["state"].(string)
 	if row["protected"] != false || !strings.HasPrefix(state, "not protected: ") ||
 		!strings.Contains(state, "OpenCode V2") || !strings.Contains(state, "@opencode/cli") {
-		t.Fatalf("V1-only user's OpenCode row = %#v, want not protected with the administrator's reason and remedy", row)
+		t.Fatalf("V1-only user OpenCode row = %#v, want not protected with the administrator reason and remedy", row)
 	}
-	// The class: the same user's other connectors stay as the policy view
+	// The class: the same user other connectors stay as the policy view
 	// says, and another account sharing the machine-wide copy is judged by its
 	// own entry only.
 	for _, connector := range []string{"claudecode", "codex"} {
 		if row := ownStatusConnectorRow(t, api, "5001", "alice", connector); row["protected"] != true {
-			t.Fatalf("alice's %s row = %#v, want protected", connector, row)
+			t.Fatalf("alice %s row = %#v, want protected", connector, row)
 		}
 	}
 	if row := ownStatusConnectorRow(t, api, "5002", "bob", "opencode"); row["protected"] != true || row["state"] != "protected" {
@@ -84,10 +103,10 @@ func TestOwnStatusMachineWideOpenCodeV1IsNotProtected(t *testing.T) {
 // protected; the record listing only a V1 for someone else changes nothing.
 func TestOwnStatusOpenCodeV2UserStaysProtected(t *testing.T) {
 	other := unprotectedAgentFor("bob", 5002, "opencode", enterprisehooks.UnprotectedCodeOpenCodeV1, "V1")
-	for name, agents := range map[string][]enterprisehooks.UnprotectedAgent{"no record": nil, "another user's V1 entry": {other}} {
+	for name, agents := range map[string][]enterprisehooks.UnprotectedAgent{"empty completed scan": nil, "another user V1 entry": {other}} {
 		api := ownStatusUnprotectedFixture(t, agents, nil)
 		if row := ownStatusConnectorRow(t, api, "5001", "alice", "opencode"); row["protected"] != true || row["state"] != "protected" {
-			t.Fatalf("%s: V2 user's OpenCode row = %#v, want protected", name, row)
+			t.Fatalf("%s: V2 user OpenCode row = %#v, want protected", name, row)
 		}
 	}
 }
@@ -110,14 +129,18 @@ func TestOwnStatusEveryUnprotectedConnectorIsNotProtected(t *testing.T) {
 	api := ownStatusUnprotectedFixture(t, []enterprisehooks.UnprotectedAgent{codex, named}, nil)
 	if row := ownStatusConnectorRow(t, api, "5001", "alice", "codex"); row["protected"] != false ||
 		!strings.Contains(row["state"].(string), "hook contract") {
-		t.Fatalf("alice's Codex row = %#v, want not protected with the reason", row)
+		t.Fatalf("alice Codex row = %#v, want not protected with the reason", row)
 	}
 	if row := ownStatusConnectorRow(t, api, "5003", "carol", "claudecode"); row["protected"] != false {
-		t.Fatalf("carol's Claude Code row = %#v, want not protected", row)
+		t.Fatalf("carol Claude Code row = %#v, want not protected", row)
+	}
+	// A Unix name is exact: another case is another account.
+	if row := ownStatusConnectorRow(t, api, "5004", "Carol", "claudecode"); row["protected"] != true {
+		t.Fatalf("Carol (another account) Claude Code row = %#v, want protected", row)
 	}
 	answer := api.ownStatusAnswer(context.Background(), "uid", "5003", "carol")
 	if answer["claude_code"].(map[string]any)["protected"] != false {
-		t.Fatalf("carol's claude_code = %#v, want not protected, as the roster says", answer["claude_code"])
+		t.Fatalf("carol claude_code = %#v, want not protected, as the roster says", answer["claude_code"])
 	}
 }
 
@@ -134,19 +157,137 @@ func TestOwnStatusAccountLevelEntryCoversEveryConnector(t *testing.T) {
 	}
 }
 
-// A record that cannot be read confirms nothing.
-func TestOwnStatusUnreadableUnprotectedRecordIsNotConfirmed(t *testing.T) {
+// A scan that is unknown confirms nothing.
+func TestOwnStatusUnknownScanIsNotConfirmed(t *testing.T) {
 	api := ownStatusUnprotectedFixture(t, nil, errors.New("record is not trusted"))
 	row := ownStatusConnectorRow(t, api, "5001", "alice", "opencode")
 	if row["protected"] != false || row["state"] != "not confirmed" {
 		t.Fatalf("OpenCode row = %#v, want not confirmed", row)
 	}
+	if answer := api.ownStatusAnswer(context.Background(), "uid", "5001", "alice"); answer["claude_code"].(map[string]any)["protected"] != false {
+		t.Fatalf("claude_code = %#v, want not protected while the scan is unknown", answer["claude_code"])
+	}
 }
 
-func TestReadManagedUnprotectedAgentsMissingRecordIsNone(t *testing.T) {
-	t.Setenv("DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR", t.TempDir())
-	agents, err := readManagedUnprotectedAgents("/nonexistent")
-	if err != nil || len(agents) != 0 {
-		t.Fatalf("missing record = %v, %v; want none", agents, err)
+// One connector with several unprotected installs names each distinct reason,
+// so a Kiro CLI and a Kiro IDE with different remedies both show theirs.
+func TestOwnStatusSeveralInstallsOfOneConnectorShowEachReason(t *testing.T) {
+	cli := unprotectedAgentFor("alice", 5001, "codex", enterprisehooks.UnprotectedCodeHookContractUnverified, "the CLI copy needs an upgrade")
+	ide := unprotectedAgentFor("alice", 5001, "codex", enterprisehooks.UnprotectedCodeAgentUnprotected, "the IDE copy needs a setting")
+	twin := unprotectedAgentFor("alice", 5001, "codex", enterprisehooks.UnprotectedCodeAgentUnprotected, "the CLI copy needs an upgrade")
+	api := ownStatusUnprotectedFixture(t, []enterprisehooks.UnprotectedAgent{cli, ide, twin}, nil)
+	state, _ := ownStatusConnectorRow(t, api, "5001", "alice", "codex")["state"].(string)
+	if !strings.Contains(state, "CLI copy needs an upgrade") || !strings.Contains(state, "IDE copy needs a setting") ||
+		strings.Count(state, "CLI copy needs an upgrade") != 1 {
+		t.Fatalf("Codex state = %q, want each distinct reason once", state)
+	}
+}
+
+// GAP-0789 on Windows: the standard account own status is the same class.
+// Claude Code was protected from configuration alone while the administrator
+// status listed the account Claude Code (a private unsupported copy) as
+// unprotected.
+func windowsOwnStatusRow(t *testing.T, api *APIServer, sid, connector string) (map[string]any, map[string]any) {
+	t.Helper()
+	var out map[string]any
+	if err := json.Unmarshal(api.ownStatusForWindowsAccount(context.Background(), sid), &out); err != nil {
+		t.Fatal(err)
+	}
+	row, _ := out["connectors"].(map[string]any)[connector].(map[string]any)
+	if row == nil {
+		t.Fatalf("no %s row in %#v", connector, out)
+	}
+	return row, out
+}
+
+func windowsOwnStatusAPI(t *testing.T, agents []enterprisehooks.UnprotectedAgent, readErr error) *APIServer {
+	t.Helper()
+	previous := ownStatusWindowsAccountName
+	ownStatusWindowsAccountName = func(sid string) string {
+		if sid == windowsAliceSID {
+			return `WIN11\alice`
+		}
+		return `WIN11\bob`
+	}
+	t.Cleanup(func() { ownStatusWindowsAccountName = previous })
+	failOwnStatusScan(t, agents, readErr)
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {Enabled: &enabled}}
+	return NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+}
+
+const (
+	windowsAliceSID = "S-1-5-21-1004336348-1177238915-682003330-1001"
+	windowsBobSID   = "S-1-5-21-1004336348-1177238915-682003330-1002"
+)
+
+func TestOwnStatusWindowsPrivateClaudeCopyIsNotProtected(t *testing.T) {
+	private := enterprisehooks.UnprotectedAgent{User: "alice", SID: windowsAliceSID, Connector: "claudecode", Version: "2.0.77",
+		InstallPath: `C:\Users\alice\old-a\node_modules\@anthropic-ai\claude-code`,
+		Code:        enterprisehooks.UnprotectedCodeHookContractUnverified, Reason: "unsupported version"}
+	// The entry may carry the SID in another case, or no SID and only the
+	// account name (with or without its domain).
+	byName := private
+	byName.SID, byName.User = "", "alice"
+	byDomainName := private
+	byDomainName.SID, byDomainName.User = "", `WIN11\alice`
+	for name, entry := range map[string]enterprisehooks.UnprotectedAgent{
+		"sid": private, "sid in another case": func() enterprisehooks.UnprotectedAgent {
+			e := private
+			e.SID = strings.ToLower(e.SID)
+			return e
+		}(), "bare account name": byName, "domain account name": byDomainName,
+	} {
+		api := windowsOwnStatusAPI(t, []enterprisehooks.UnprotectedAgent{entry}, nil)
+		row, out := windowsOwnStatusRow(t, api, windowsAliceSID, "claudecode")
+		if row["protected"] != false || !strings.Contains(row["state"].(string), "unsupported version") {
+			t.Fatalf("%s: Claude Code row = %#v, want not protected with the administrator reason", name, row)
+		}
+		if out["claude_code"].(map[string]any)["protected"] != false || out["cowork"].(map[string]any)["protected"] != false {
+			t.Fatalf("%s: claude_code/cowork = %#v / %#v, want not protected", name, out["claude_code"], out["cowork"])
+		}
+		// Another account sharing the computer is judged by its own entries.
+		if row, _ := windowsOwnStatusRow(t, api, windowsBobSID, "claudecode"); row["protected"] != true {
+			t.Fatalf("%s: bob Claude Code row = %#v, want protected", name, row)
+		}
+	}
+}
+
+// Benign twin: an account with no unprotected entry of its own stays protected
+// for Claude Code, and a Codex entry changes only the Codex row.
+func TestOwnStatusWindowsAccountWithoutAnEntryStaysProtected(t *testing.T) {
+	codex := enterprisehooks.UnprotectedAgent{User: "alice", SID: windowsAliceSID, Connector: "codex",
+		Code: enterprisehooks.UnprotectedCodeHookContractUnverified, Reason: "codex copy not verified"}
+	for name, agents := range map[string][]enterprisehooks.UnprotectedAgent{"empty completed scan": nil, "a codex entry": {codex}} {
+		api := windowsOwnStatusAPI(t, agents, nil)
+		row, out := windowsOwnStatusRow(t, api, windowsAliceSID, "claudecode")
+		if row["protected"] != true || row["state"] != "protected" || out["cowork"].(map[string]any)["protected"] != true {
+			t.Fatalf("%s: Claude Code row = %#v, cowork = %#v, want protected", name, row, out["cowork"])
+		}
+	}
+	api := windowsOwnStatusAPI(t, []enterprisehooks.UnprotectedAgent{codex}, nil)
+	if row, _ := windowsOwnStatusRow(t, api, windowsAliceSID, "codex"); row["protected"] != false ||
+		!strings.Contains(row["state"].(string), "codex copy not verified") {
+		t.Fatalf("Codex row = %#v, want not protected with the reason", row)
+	}
+}
+
+func TestOwnStatusWindowsAccountLevelEntryAndUnknownScan(t *testing.T) {
+	account := enterprisehooks.UnprotectedAgent{User: "alice", SID: windowsAliceSID, Code: enterprisehooks.UnprotectedCodeHomeUntrusted, Reason: "home is not trusted"}
+	api := windowsOwnStatusAPI(t, []enterprisehooks.UnprotectedAgent{account}, nil)
+	for _, connector := range []string{"claudecode", "codex"} {
+		if row, _ := windowsOwnStatusRow(t, api, windowsAliceSID, connector); row["protected"] != false {
+			t.Fatalf("%s row = %#v, want not protected", connector, row)
+		}
+	}
+	// A missing, old or unmatched scan confirms nothing: not even Claude Code.
+	api = windowsOwnStatusAPI(t, nil, errors.New("the unprotected agents record is missing"))
+	row, out := windowsOwnStatusRow(t, api, windowsAliceSID, "claudecode")
+	if row["protected"] != false || row["state"] != "not confirmed" ||
+		out["claude_code"].(map[string]any)["protected"] != false || out["cowork"].(map[string]any)["protected"] != false {
+		t.Fatalf("unknown scan: Claude Code row = %#v, answer = %#v, want not confirmed", row, out)
 	}
 }

@@ -351,6 +351,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		if _, recordErr := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, unprotected); recordErr != nil {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the unprotected agents: %v\n", recordErr)
 		}
+		publishEnterpriseWindowsGatewayUnprotectedAgents(cfg, stderr, unprotected)
 		for _, agent := range unprotected {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN %s: %s\n", agent.Code, agent.Message())
 		}
@@ -451,6 +452,7 @@ func publishEnterpriseWindowsManifestInstallScan(ctx context.Context, stderr io.
 	if _, err := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, agents); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the unprotected agents: %s\n", enumeratorErrorText(err))
 	}
+	publishEnterpriseWindowsGatewayUnprotectedAgents(cfg, stderr, agents)
 	for _, agent := range agents {
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN %s: %s\n", agent.Code, agent.Message())
 	}
@@ -962,6 +964,9 @@ var (
 	enterpriseWindowsIDEAppDataSpoolWriter       = enterprisehooks.WriteWindowsIDEAppDataSpool
 	enterpriseWindowsManifestGroupCacheRefresher = enterprisehooks.RefreshWindowsManifestIdentityGroups
 	enterpriseWindowsEnumerateUnprotectedWriter  = enterprisehooks.WriteWindowsUnprotectedAgents
+	// enterpriseWindowsEnumerateGatewayAgents is the gateway's copy of that
+	// record: the gateway service cannot read the protected one.
+	enterpriseWindowsEnumerateGatewayAgents = publishEnterpriseHookGatewayUnprotectedAgents
 	// enterpriseWindowsInventoryReadRevoker takes the gateway's inventory
 	// ACEs from the profiles a cycle stopped enrolling.
 	enterpriseWindowsInventoryReadRevoker = enterprisehooks.RevokeGatewayInventoryReadForManifest
@@ -1026,4 +1031,15 @@ func standaloneWindowsEnumerateIdleReason(cfg *config.Config) string {
 		return "enterprise.enrollment.mode is manifest; the administrator publishes targets"
 	}
 	return ""
+}
+
+// publishEnterpriseWindowsGatewayUnprotectedAgents publishes the cycle's
+// completed scan where the gateway service can read it, so a standard
+// account's own status never says protected for an agent the administrator's
+// status lists as unprotected (rel-1-0-6 GAP-0789). The Windows record is not
+// stamped with a config generation.
+func publishEnterpriseWindowsGatewayUnprotectedAgents(cfg *config.Config, stderr io.Writer, agents []enterprisehooks.UnprotectedAgent) {
+	if err := enterpriseWindowsEnumerateGatewayAgents(cfg.DataDir, agents, 0, ""); err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the unprotected agents for the gateway: %s\n", enumeratorErrorText(err))
+	}
 }
