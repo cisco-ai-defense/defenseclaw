@@ -59,6 +59,7 @@ import ntpath
 import os
 import posixpath
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -3098,18 +3099,23 @@ def devin_rule_files(workspace_dir: str | None = None) -> list[str]:
     return _dedup(files)
 
 
-def opencode_writable_plugin_folder(plugin_paths: list[str]) -> str:
-    """Return the first unsafe ancestor of an OpenCode plugin destination.
+def opencode_unsafe_plugin_paths(plugin_paths: list[str]) -> list[str]:
+    """Return every unsafe element of an OpenCode plugin destination, outermost first.
 
     Match the gateway's directory walk, including custom config roots and
-    root-owned sticky ancestors above the plugin folder.
+    root-owned sticky ancestors above the plugin folder. The gateway checks
+    the leaf first and stops there, but fixing the leaf does not clear the
+    refusal while a folder above it is as open, so every refused element is
+    returned (folders from the top down, then the plugin file), and one
+    command fixes them all (:func:`opencode_custody_text`).
     """
     if os.name == "nt":
-        return ""
+        return []
     from defenseclaw.file_permissions import other_accounts_can_write
 
     for plugin_path in plugin_paths:
-        plugin_folder = os.path.dirname(os.path.realpath(plugin_path))
+        real_plugin = os.path.realpath(plugin_path)
+        plugin_folder = os.path.dirname(real_plugin)
         folder = plugin_folder
         ancestors = []
         while True:
@@ -3118,6 +3124,7 @@ def opencode_writable_plugin_folder(plugin_paths: list[str]) -> str:
             if parent == folder:
                 break
             folder = parent
+        unsafe = []
         for folder in reversed(ancestors):
             try:
                 info = os.lstat(folder)
@@ -3127,8 +3134,22 @@ def opencode_writable_plugin_folder(plugin_paths: list[str]) -> str:
                 continue
             if folder != plugin_folder and info.st_uid == 0 and info.st_mode & stat.S_ISVTX:
                 continue
-            return folder
-    return ""
+            unsafe.append(folder)
+        try:
+            info = os.lstat(real_plugin)
+        except OSError:
+            info = None
+        if info is not None and stat.S_ISREG(info.st_mode) and other_accounts_can_write(real_plugin, info):
+            unsafe.append(real_plugin)
+        if unsafe:
+            return unsafe
+    return []
+
+
+def opencode_custody_text(unsafe: list[str]) -> tuple[str, str]:
+    """Return what to name and the one command for :func:`opencode_unsafe_plugin_paths`."""
+    named = unsafe[0] if len(unsafe) == 1 else f"{unsafe[0]} (and {', '.join(unsafe[1:])})"
+    return named, "chmod go-w " + " ".join(shlex.quote(path) for path in unsafe)
 
 
 def _opencode_config_dir() -> str:

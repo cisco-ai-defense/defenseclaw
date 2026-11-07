@@ -1733,6 +1733,13 @@ func validatePluginArtifactDestination(path string) error {
 // validatePluginArtifactDestinationFor also trusts trustedOwnerSID, the
 // per-user target a Windows guardian verifies without that user's token.
 func validatePluginArtifactDestinationFor(path, trustedOwnerSID string) error {
+	// A refusal names what to fix: every refused folder and the one command
+	// (GAP-0730, GAP-0731), not just the first element the walk met.
+	return explainPluginArtifactRefusal(path, checkPluginArtifactDestination(path, trustedOwnerSID))
+}
+
+// checkPluginArtifactDestination is the custody check itself.
+func checkPluginArtifactDestination(path, trustedOwnerSID string) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("plugin path must be absolute: %q", path)
 	}
