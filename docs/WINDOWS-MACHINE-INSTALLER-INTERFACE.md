@@ -52,7 +52,7 @@ refuses them, and the standalone profile refuses `--broker-binary`:
 | `--product-version <version>` | The version recorded for the deployment. The default is the CLI's own version. |
 
 `ensure` fills each unset `--gateway-binary`, `--acp-binary`, `--hook-binary`,
-`--sensor-helper-binary` and `--cli-binary` from the installer script's own
+`--hook-guard-binary` (standalone profile only), `--sensor-helper-binary` and `--cli-binary` from the installer script's own
 directory, which is how the standalone Setup and an extracted MDM package lay
 out the payload. Installing or upgrading through `ensure` needs the gateway,
 ACP, hook and sensor-helper sources; the CLI source is optional. A first
