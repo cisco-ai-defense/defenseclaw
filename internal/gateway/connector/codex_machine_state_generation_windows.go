@@ -333,13 +333,13 @@ func (tx *windowsCodexManagedStateTx) dropOtherCopies(keep string) {
 	if err == nil {
 		for _, path := range generations {
 			if keep == "" || !sameWindowsCodexMachinePath(path, keep) {
-				_ = deleteWindowsCodexMachineFile(path, windowsCodexManagedStateLabel)
+				_ = deleteWindowsCodexManagedStateCopy(path)
 			}
 		}
 	}
 	legacyPath := filepath.Join(tx.dir, windowsCodexManagedStateFile)
 	if windowsCodexLegacyStatePresent(legacyPath) {
-		_ = deleteWindowsCodexMachineFile(legacyPath, windowsCodexManagedStateLabel)
+		_ = deleteWindowsCodexManagedStateCopy(legacyPath)
 	}
 }
 
@@ -375,10 +375,10 @@ func (tx *windowsCodexManagedStateTx) commit() error {
 	}
 	for _, path := range generations {
 		if current == "" || !sameWindowsCodexMachinePath(path, current) {
-			_ = deleteWindowsCodexMachineFile(path, windowsCodexManagedStateLabel)
+			_ = deleteWindowsCodexManagedStateCopy(path)
 		}
 	}
-	_ = deleteWindowsCodexMachineFile(legacyPath, windowsCodexManagedStateLabel)
+	_ = deleteWindowsCodexManagedStateCopy(legacyPath)
 	if !tx.exists && !windowsCodexLegacyStatePresent(legacyPath) {
 		// Nothing a later transaction could take for state is left, so the
 		// empty writer copy goes too.
