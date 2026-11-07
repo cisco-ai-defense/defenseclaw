@@ -223,12 +223,20 @@ describe('Observe mode policy findings and gateway outages', () => {
 
   it('qualifies proxy connector claims for OpenClaw and ZeptoClaw', () => {
     assert.match(source('internal/gateway/proxy.go'), /verdict.Action == "block" && mode == "action"/);
-    for (const connector of ['openclaw', 'zeptoclaw']) {
-      const setup = page(`connectors/${connector}.mdx`).split('## Setup')[1]?.split('## Check it')[0] ?? '';
-      assert.match(setup, /Observe records policy findings without blocking on those findings/i, connector);
-      assert.match(setup, /gateway outage still stops proxied requests/i, connector);
-      assert.match(page(`connectors/${connector}.mdx`), /While the gateway is down, requests are blocked/i, connector);
-    }
+    const interceptor = source('extensions/defenseclaw/src/fetch-interceptor.ts');
+    assert.match(interceptor, /if \(getOutageMode\(\) !== "open"\) return false;/);
+    assert.match(interceptor, /onOutageWarning\?\.\(MODEL_OUTAGE_WARNING\)/);
+    const openclaw = page('connectors/openclaw.mdx');
+    const openclawSetup = openclaw.split('## Setup')[1]?.split('## Check it')[0] ?? '';
+    assert.match(openclawSetup, /Observe records policy findings without blocking on those findings/i);
+    assert.match(openclawSetup, /During a gateway outage, the saved outage mode decides whether a model request continues directly to its configured provider with a warning/i);
+    assert.match(openclaw, /On a classified proxy outage.{0,200}default and permissive policies continue the original request to its configured provider with an agent warning; strict and managed policies block/i);
+    assert.ok(!/While the gateway is down, requests are blocked/i.test(openclaw));
+    const zeptoclaw = page('connectors/zeptoclaw.mdx');
+    const zeptoclawSetup = zeptoclaw.split('## Setup')[1]?.split('## Check it')[0] ?? '';
+    assert.match(zeptoclawSetup, /Observe records policy findings without blocking on those findings/i);
+    assert.match(zeptoclawSetup, /gateway outage still stops proxied requests/i);
+    assert.match(zeptoclaw, /While the gateway is down, requests are blocked/i);
   });
 
   it('scopes general guardrail observe guidance to policy findings', () => {
