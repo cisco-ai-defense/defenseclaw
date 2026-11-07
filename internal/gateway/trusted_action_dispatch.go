@@ -519,7 +519,7 @@ func dispatchTrustedAction(
 	request.UnknownKeyPossibleOverflow = request.UnknownKeyPossibleOverflow || overflow
 	for _, twin := range twins {
 		defer func() {
-			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+			findings = withOverLimitTwinFindings(findings, twin.findings(parent))
 		}()
 	}
 	if conflict, ok := conflictingToolArgumentKeys(request, facts); ok {

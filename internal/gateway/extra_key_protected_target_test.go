@@ -11,10 +11,14 @@ import (
 )
 
 // rel-1-0-6:GAP-0729 GAP-0734: a native file-write call is the write of every
-// protected file it names, in its reviewed key or in a key outside the
-// schema of the tool, whatever the key is called and in whatever spelling of
-// the local volume. The same key holding an ordinary file stays allowed.
-func TestG235bExtraKeyProtectedTargets(t *testing.T) {
+// file it names in its reviewed key, whatever the file is. In a key outside
+// the schema of the tool the rule is by class: DefenseClaw's own state blocks
+// in every profile under any key at any depth, in every spelling of the local
+// volume; any other protected file (the vendors' managed settings, an SSH
+// key file) counts only under a key that names a place (path, file, target,
+// destination, output, to, ...), and is text under metadata, commentary and
+// the like. The same keys holding an ordinary file stay allowed.
+func TestExtraKeyProtectedTargetsByClass(t *testing.T) {
 	const winHome = `C:\Users\vn`
 	posixHome, posixProject := dynamicWordParityProject(t)
 	keys := filepath.Join(posixHome, ".ssh", "authorized_keys")
@@ -26,39 +30,70 @@ func TestG235bExtraKeyProtectedTargets(t *testing.T) {
 	}
 	type target struct {
 		name, home, cwd, project, file, rule string
+		self                                 bool
 	}
 	const state = "tamper.detector_state_write"
-	win := func(name, file string) target {
-		return target{name, winHome, winHome + `\proj`, winHome + `\proj\notes.txt`, file, state}
+	win := func(name, file string, self bool) target {
+		return target{name, winHome, winHome + `\proj`, winHome + `\proj\notes.txt`, file, state, self}
 	}
 	targets := []target{
-		{"ssh-keys", posixHome, posixProject, posixProject + "/notes.txt", keys, "ssh_authorized_keys"},
-		win("state-share", `\\localhost\C$\Users\vn\.defenseclaw\config.yaml`),
-		win("state-slashes", `//localhost/C$/Users/vn/.defenseclaw/config.yaml`),
-		win("state-unc", `//?/UNC/localhost/C$/Users/vn/.defenseclaw/config.yaml`),
-		win("managed-share", `\\localhost\C$\Program Files\ClaudeCode\managed-settings.json`),
-		win("managed-slashes", `//localhost/C$/Program Files/ClaudeCode/managed-settings.json`),
-		win("managed-loopback", `//127.0.0.1/C$/Program Files/ClaudeCode/managed-settings.json`),
-		win("managed-unc", `//?/UNC/localhost/C$/Program Files/ClaudeCode/managed-settings.json`),
+		{"ssh-keys", posixHome, posixProject, posixProject + "/notes.txt", keys, "ssh_authorized_keys", false},
+		win("state-share", `\\localhost\C$\Users\vn\.defenseclaw\config.yaml`, true),
+		win("state-slashes", `//localhost/C$/Users/vn/.defenseclaw/config.yaml`, true),
+		win("state-unc", `//?/UNC/localhost/C$/Users/vn/.defenseclaw/config.yaml`, true),
+		win("managed-share", `\\localhost\C$\Program Files\ClaudeCode\managed-settings.json`, false),
+		win("managed-slashes", `//localhost/C$/Program Files/ClaudeCode/managed-settings.json`, false),
+		win("managed-loopback", `//127.0.0.1/C$/Program Files/ClaudeCode/managed-settings.json`, false),
+		win("managed-unc", `//?/UNC/localhost/C$/Program Files/ClaudeCode/managed-settings.json`, false),
+	}
+	// shapes place the file in the call; place is true when a key that names
+	// a place holds it.
+	type shape struct {
+		name  string
+		place bool
+		extra func(file string) map[string]any
+	}
+	shapes := []shape{
+		{"f", false, func(f string) map[string]any { return map[string]any{"f": f} }},
+		{"metadata", false, func(f string) map[string]any { return map[string]any{"metadata": f} }},
+		{"commentary", false, func(f string) map[string]any { return map[string]any{"commentary": f} }},
+		{"meta.note", false, func(f string) map[string]any { return map[string]any{"meta": map[string]any{"note": f}} }},
+		{"payload[].note", false, func(f string) map[string]any {
+			return map[string]any{"payload": []any{map[string]any{"note": f}}}
+		}},
+		{"target_alias", true, func(f string) map[string]any { return map[string]any{"target_alias": f} }},
+		{"destination", true, func(f string) map[string]any { return map[string]any{"destination": f} }},
+		{"meta.output", true, func(f string) map[string]any { return map[string]any{"meta": map[string]any{"output": f}} }},
+		{"destinations[].note", true, func(f string) map[string]any {
+			return map[string]any{"destinations": []any{map[string]any{"note": f}}}
+		}},
 	}
 	for _, tc := range targets {
-		for _, key := range []string{"", "f", "target_alias", "destination"} {
-			for _, managed := range []bool{false, true} {
-				for _, pack := range []string{"", "strict", "permissive"} {
-					input := map[string]any{"file_path": tc.file, "content": "x"}
-					if key != "" {
-						input["file_path"] = tc.project
-						input[key] = tc.file
+		for _, managed := range []bool{false, true} {
+			for _, pack := range []string{"", "strict", "permissive"} {
+				direct := map[string]any{"file_path": tc.file, "content": "x"}
+				if _, got := postFileToolCell(t, tc.home, tc.cwd, "Write", direct, managed, pack); !strings.HasPrefix(got, fileToolBlockPrefix) || !strings.Contains(got, tc.rule) {
+					t.Errorf("%s direct managed=%t pack=%q: %.200s, want a %s block", tc.name, managed, pack, got, tc.rule)
+				}
+				for _, sh := range shapes {
+					input := map[string]any{"file_path": tc.project, "content": "x"}
+					for key, value := range sh.extra(tc.file) {
+						input[key] = value
 					}
-					if _, got := postFileToolCell(t, tc.home, tc.cwd, "Write", input, managed, pack); !strings.HasPrefix(got, `{"action":"block"`) || !strings.Contains(got, tc.rule) {
-						t.Errorf("%s key=%q managed=%t pack=%q: %.200s, want a %s block", tc.name, key, managed, pack, got, tc.rule)
+					_, got := postFileToolCell(t, tc.home, tc.cwd, "Write", input, managed, pack)
+					blocked := strings.HasPrefix(got, fileToolBlockPrefix) && strings.Contains(got, tc.rule)
+					switch want := tc.self || sh.place; {
+					case want && !blocked:
+						t.Errorf("%s %s managed=%t pack=%q: %.200s, want a %s block", tc.name, sh.name, managed, pack, got, tc.rule)
+					case !want && strings.HasPrefix(got, fileToolBlockPrefix):
+						t.Errorf("%s %s managed=%t pack=%q: %.200s, want allow (text under a key that names no place)", tc.name, sh.name, managed, pack, got)
 					}
-					if key == "" {
-						continue
+					ordinary := map[string]any{"file_path": tc.project, "content": "x"}
+					for key, value := range sh.extra(tc.project) {
+						ordinary[key] = value
 					}
-					ordinary := map[string]any{"file_path": tc.project, "content": "x", key: tc.project}
-					if _, got := postFileToolCell(t, tc.home, tc.cwd, "Write", ordinary, managed, pack); strings.HasPrefix(got, `{"action":"block"`) {
-						t.Errorf("%s key=%q managed=%t pack=%q holding an ordinary file: %.200s, want allow", tc.name, key, managed, pack, got)
+					if _, got := postFileToolCell(t, tc.home, tc.cwd, "Write", ordinary, managed, pack); strings.HasPrefix(got, fileToolBlockPrefix) {
+						t.Errorf("%s %s managed=%t pack=%q holding an ordinary file: %.200s, want allow", tc.name, sh.name, managed, pack, got)
 					}
 				}
 			}

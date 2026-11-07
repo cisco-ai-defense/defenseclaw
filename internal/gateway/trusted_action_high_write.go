@@ -228,6 +228,10 @@ func provedHighWriteFindings(
 	// under its own path, so every target, however it was found, is judged
 	// by the same instructionTarget once.
 	seenTargets := make(map[string]bool)
+	// selfOnly limits addTarget to the rule that protects DefenseClaw's own
+	// state: the judgement of a string under a key that names no place
+	// (actionfacts.UnknownKeyTwin.SelfProtectionOnly).
+	selfOnly := false
 	addTarget := func(resolved string, flavor actionfacts.PathFlavor, proofForRule func(string) findingProof, note string) {
 		if seenTargets[resolved] {
 			return
@@ -237,6 +241,9 @@ func provedHighWriteFindings(
 		instruction := instructionProof != instructionNotProved
 		for _, category := range generation.categories {
 			for _, rule := range category.Rules {
+				if selfOnly && rule.ID != "tamper.detector_state_write" {
+					continue
+				}
 				if !highWriteCatalogRule(rule) || !highWriteRuleMatchesTarget(rule, resolved, flavor, instruction) {
 					continue
 				}
@@ -360,9 +367,37 @@ func provedHighWriteFindings(
 	// partial and names no path; each file it may write is judged as the
 	// reviewed call that writes it (actionfacts.UnknownKeyWriteTargetViews,
 	// the readings dispatchTrustedAction judges as twins).
-	for _, view := range actionfacts.UnknownKeyWriteTargetViews(request.Input, facts) {
-		judgePaths(view)
+	// Those under a key that names no place come last and are judged for
+	// DefenseClaw's own state only; the hook client's listing of their
+	// targets, which resolves links for any rule, is not read for another
+	// (rel-1-0-6:GAP-0729).
+	views := actionfacts.UnknownKeyWriteTargetViews(request.Input, facts)
+	named := map[string]bool{}
+	notePaths := func(view actionfacts.Facts) {
+		for _, target := range view.Paths {
+			named[firstNonEmpty(target.Resolved, target.Normalized)] = true
+		}
 	}
+	notePaths(facts)
+	for _, view := range views {
+		if !view.SelfProtectionOnly {
+			notePaths(view.Facts)
+			judgePaths(view.Facts)
+		}
+	}
+	selfOnly = true
+	selfOnlyOperands := map[string]bool{}
+	for _, view := range views {
+		if view.SelfProtectionOnly {
+			judgePaths(view.Facts)
+			for _, target := range view.Facts.Paths {
+				if operand := firstNonEmpty(target.Resolved, target.Normalized); !named[operand] {
+					selfOnlyOperands[operand] = true
+				}
+			}
+		}
+	}
+	selfOnly = false
 	// `powershell -Command "Add-Content CLAUDE.md x"` from a POSIX shell
 	// (Git Bash, Claude Code's Bash tool on Windows): the outer shell call
 	// names no path, the PowerShell body does. Its writes are judged like
@@ -385,7 +420,8 @@ func provedHighWriteFindings(
 	// the gateway cannot read the user's filesystem itself.
 	for operand, resolved := range request.ResolvedWriteTargets {
 		if strings.HasPrefix(operand, "\x00") || resolved == "" ||
-			!filepath.IsAbs(operand) || !filepath.IsAbs(resolved) {
+			!filepath.IsAbs(operand) || !filepath.IsAbs(resolved) ||
+			selfOnlyOperands[operand] || selfOnlyOperands[filepath.ToSlash(operand)] {
 			continue
 		}
 		addClientTarget(resolved, "")

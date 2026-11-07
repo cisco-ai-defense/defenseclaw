@@ -1793,7 +1793,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	// those keys and each path-shaped value they hold
 	// (actionfacts.UnknownKeyTwins): list the files they write.
 	for _, view := range actionfacts.UnknownKeyWriteTargetViews(input, facts) {
-		facts.Paths = append(facts.Paths, view.Paths...)
+		facts.Paths = append(facts.Paths, view.Facts.Paths...)
 	}
 	// A connector can name the shell text "cmd" while ActionFacts requires
 	// its canonical command field. Resolve that exact string as a shell too.
