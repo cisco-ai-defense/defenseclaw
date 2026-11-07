@@ -6,6 +6,7 @@
 package connector
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -216,6 +217,12 @@ func writeWindowsCodexManagedState(path string, data []byte) error {
 	if len(data) == 0 || len(data) > windowsCodexManagedStateLimit {
 		return fmt.Errorf("%s must hold 1 to %d bytes", windowsCodexManagedStateLabel, windowsCodexManagedStateLimit)
 	}
+	if tx.exists && bytes.Equal(tx.data, data) {
+		// The same bytes the transaction already holds change nothing: the
+		// hook copy and the counter stay, whoever asked (g582 round 11,
+		// GAP-0764).
+		return nil
+	}
 	tx.data = append([]byte(nil), data...)
 	tx.exists = true
 	tx.changed = true
@@ -252,7 +259,7 @@ func (tx *windowsCodexManagedStateTx) unchanged(previous uint64) bool {
 		return false
 	}
 	if !tx.exists {
-		return !tx.committedExisted && !windowsCodexPathPresent(filepath.Join(tx.dir, windowsCodexManagedStateFile))
+		return !tx.committedExisted && !windowsCodexLegacyStatePresent(filepath.Join(tx.dir, windowsCodexManagedStateFile))
 	}
 	return tx.committedExisted &&
 		windowsCodexPathPresent(windowsCodexManagedStateGenerationPath(tx.dir, previous))
@@ -300,7 +307,7 @@ func (tx *windowsCodexManagedStateTx) dropOtherCopies(keep string) {
 		}
 	}
 	legacyPath := filepath.Join(tx.dir, windowsCodexManagedStateFile)
-	if windowsCodexPathPresent(legacyPath) {
+	if windowsCodexLegacyStatePresent(legacyPath) {
 		_ = deleteWindowsCodexMachineFile(legacyPath, windowsCodexManagedStateLabel)
 	}
 }
@@ -326,7 +333,7 @@ func (tx *windowsCodexManagedStateTx) commit() error {
 		if err := createWindowsCodexManagedStateGeneration(current, tx.data); err != nil {
 			return err
 		}
-	} else if tx.committedExisted || windowsCodexPathPresent(legacyPath) {
+	} else if tx.committedExisted || windowsCodexLegacyStatePresent(legacyPath) {
 		if err := writeWindowsCodexMachineFile(committedPath, []byte{}, windowsCodexManagedStateLimit, label); err != nil {
 			return err
 		}
@@ -341,7 +348,7 @@ func (tx *windowsCodexManagedStateTx) commit() error {
 		}
 	}
 	_ = deleteWindowsCodexMachineFile(legacyPath, windowsCodexManagedStateLabel)
-	if !tx.exists && !windowsCodexPathPresent(legacyPath) {
+	if !tx.exists && !windowsCodexLegacyStatePresent(legacyPath) {
 		// Nothing a later transaction could take for state is left, so the
 		// empty writer copy goes too.
 		if err := deleteWindowsCodexMachineFile(committedPath, label); err != nil {
@@ -351,9 +358,21 @@ func (tx *windowsCodexManagedStateTx) commit() error {
 	return nil
 }
 
+// windowsCodexPathPresent reports that path can be inspected: a hook copy
+// that cannot be inspected counts as missing, so the pass writes one.
 func windowsCodexPathPresent(path string) bool {
 	_, err := os.Lstat(path)
 	return err == nil
+}
+
+// windowsCodexLegacyStatePresent reports the fixed-name state file of 1.0.8
+// as present unless it is known to be missing. A file that cannot be
+// inspected (a sharing violation, an access error) is never taken for an
+// absent one: the empty writer copy stays that keeps a later transaction from
+// taking it for the state, and nothing is concluded from the error (GAP-0765).
+func windowsCodexLegacyStatePresent(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil || !errors.Is(err, os.ErrNotExist)
 }
 
 // windowsCodexStateGenerationTaken reports a hook copy already named for
