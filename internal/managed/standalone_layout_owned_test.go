@@ -41,6 +41,9 @@ func TestStandaloneWindowsOwnFoldersAreTheLayoutRoots(t *testing.T) {
 	for _, roots := range [][2]string{
 		{`C:\Program Files`, `C:\ProgramData`},
 		{`D:\Applications`, `E:\CompanyData\`},
+		// One root below the other: the folders between them are not owned.
+		{`D:\Applications`, `D:\Applications\Data`},
+		{`D:\Applications\Data`, `D:\Applications`},
 	} {
 		programFiles, programData := strings.TrimRight(roots[0], `\`), strings.TrimRight(roots[1], `\`)
 		got := StandaloneWindowsOwnFolders(roots[0], roots[1])

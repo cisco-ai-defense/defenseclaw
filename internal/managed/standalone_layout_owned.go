@@ -46,18 +46,27 @@ func (l StandaloneLayout) OwnedPaths() []string {
 // well. The roots are the trusted registration (TrustedStandaloneWindowsRoots)
 // or any other canonical absolute drive roots StandaloneWindowsLayoutForRoots
 // accepts; nil when they are not.
+//
+// Which root a layout path belongs to is read from a layout built on two
+// roots that do not contain one another, never from a prefix of the real
+// roots: one root may sit below the other (D:\Applications and
+// D:\Applications\Data), and the folders between them are not owned.
 func StandaloneWindowsOwnFolders(programFiles, programData string) []string {
-	layout, err := StandaloneWindowsLayoutForRoots(programFiles, programData)
+	if _, err := StandaloneWindowsLayoutForRoots(programFiles, programData); err != nil {
+		return nil
+	}
+	const probeFiles, probeData = `Z:\files`, `Z:\data`
+	probe, err := StandaloneWindowsLayoutForRoots(probeFiles, probeData)
 	if err != nil {
 		return nil
 	}
 	programFiles = strings.TrimRight(strings.TrimSpace(programFiles), `\`)
 	programData = strings.TrimRight(strings.TrimSpace(programData), `\`)
-	owned := append(layout.OwnedPaths(), StandaloneWindowsScannerRuntimeDirForRoot(programData))
+	owned := append(probe.OwnedPaths(), StandaloneWindowsScannerRuntimeDirForRoot(probeData))
 	var folders []string
 	for _, value := range owned {
-		for _, root := range []string{programFiles, programData} {
-			rest, ok := strings.CutPrefix(value, root+`\`)
+		for _, root := range [][2]string{{probeFiles, programFiles}, {probeData, programData}} {
+			rest, ok := strings.CutPrefix(value, root[0]+`\`)
 			if !ok {
 				continue
 			}
@@ -65,7 +74,7 @@ func StandaloneWindowsOwnFolders(programFiles, programData string) []string {
 			if len(parts) < 2 {
 				continue
 			}
-			if folder := root + `\` + parts[0] + `\` + parts[1]; !slices.Contains(folders, folder) {
+			if folder := root[1] + `\` + parts[0] + `\` + parts[1]; !slices.Contains(folders, folder) {
 				folders = append(folders, folder)
 			}
 		}
