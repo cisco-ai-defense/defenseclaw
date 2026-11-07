@@ -74,6 +74,9 @@ func TestCompareAndSwapFileKeepsAPolicyAtTheNameThroughout(t *testing.T) {
 				failure string
 				reads   int
 				refused atomic.Bool
+				// GAP-0742: where the swap was when a read found no policy.
+				swapNumber atomic.Int64
+				swapActive atomic.Bool
 			)
 			stop := make(chan struct{})
 			done := make(chan struct{})
@@ -104,10 +107,19 @@ func TestCompareAndSwapFileKeepsAPolicyAtTheNameThroughout(t *testing.T) {
 						data, err = readForSwapReaderTest(destination, reader.share)
 					}
 					refused.Store(false)
+					where := ""
+					if err != nil {
+						// Name whether the miss fell inside a swap and whether
+						// the name is back at once, so a red run says if the
+						// rename dropped the name or the name stayed missing.
+						_, statErr := os.Stat(destination)
+						where = fmt.Sprintf(" (swap %d in progress=%t when read; name stat just after: %v)",
+							swapNumber.Load(), swapActive.Load(), statErr)
+					}
 					mu.Lock()
 					reads++
 					if failure == "" && (err != nil || (!bytes.Equal(data, versions[0]) && !bytes.Equal(data, versions[1]))) {
-						failure = fmt.Sprintf("read %q, err=%v", data, err)
+						failure = fmt.Sprintf("read %q, err=%v%s", data, err, where)
 					}
 					mu.Unlock()
 					if reader.pause > 0 {
@@ -121,8 +133,11 @@ func TestCompareAndSwapFileKeepsAPolicyAtTheNameThroughout(t *testing.T) {
 				if err := os.WriteFile(source, versions[(swaps+1)%2], 0o600); err != nil {
 					t.Fatal(err)
 				}
+				swapNumber.Store(int64(swaps))
+				swapActive.Store(true)
 				result, err := CompareAndSwapFile(source, destination,
 					SwapExpectation{Exists: true, Data: versions[swaps%2]}, 64, nil)
+				swapActive.Store(false)
 				if err != nil || !result.Swapped || !result.Replaced {
 					close(stop)
 					<-done
