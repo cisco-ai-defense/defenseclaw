@@ -49,6 +49,7 @@ func TestOpenCodeImageUsesOnlyTheV2PackageAndVerifiedNativeBinary(t *testing.T) 
 }
 
 func TestOpenCodePinnedVersionDisplay(t *testing.T) {
+	requirePOSIXShell(t)
 	steps, err := OpenCode.InstallSteps("")
 	if err != nil {
 		t.Fatal(err)
