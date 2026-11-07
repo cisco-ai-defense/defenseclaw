@@ -125,6 +125,64 @@ BENIGN = {
         "const KIND = /^(?:a|b)$/;\nexport const kind = (v) => v.replace(/x/g, \"y\").match(KIND) ?? /z/.exec(v);\n"
     ),
     "regexp-called-over-lines": "const R = RegExp(\n  \"x\",\n  \"g\"\n);\nR.exec(text);\n",
+    "object-method-named-regexp": (
+        "const formatter = { RegExp() { return 1; } };\n/x/.exec(text);\n"
+    ),
+    "class-method-named-regexp": (
+        "class Formatter { RegExp() { return 1; } }\n/x/.exec(text);\n"
+    ),
+    "static-and-async-methods-named-regexp": (
+        "class Formatter { static RegExp() { return 1; } async RegExp2() { return 2; } }\nconst holder = { async RegExp() { return 1; }, get RegExp3() { return 3; } };\n/x/.exec(text);\n"
+    ),
+    "unbraced-if": (
+        "if (ok) /x/.exec(text);\n"
+    ),
+    "unbraced-while": (
+        "let n = 0;\nwhile (n++ < 1) /x/.exec(text);\n"
+    ),
+    "unbraced-for": (
+        "for (let i = 0; i < 1; i++) /x/.exec(text);\n"
+    ),
+    "unbraced-for-of-and-else": (
+        "for (const item of list) /x/.exec(item);\nif (a(b)) /x/.exec(text); else /y/.exec(text);\n"
+    ),
+    "do-while-statement": (
+        "do /x/.exec(text); while (more());\n"
+    ),
+    "global-object-members-and-typeof": (
+        "const browser = typeof window !== \"undefined\" && window.document;\nconst buffer = global.Buffer;\nconst proc = globalThis.process;\nconst plain = globalThis[\"Promise\"];\n/x/.exec(text);\n"
+    ),
+    "global-object-compared-and-tested": (
+        "if (window === undefined) { run(); }\nif (global !== undefined && !window) { run(); }\n/x/.exec(text);\n"
+    ),
+    "global-named-parameters-and-keys": (
+        "(function (window, document) { return /x/.exec(window.name); })(win, doc);\nconst fn = (global) => global.name;\nconst gn = window => window.name;\nconst options = { global: true, window: 1 };\nconst re = /x/;\nre.exec(text);\n"
+    ),
+    "global-named-variable": (
+        "var global = makeScope();\nlet window = makeScope();\n/x/.exec(text);\n"
+    ),
+    "regexp-flag-named-global": (
+        "const flags = { global: re.global };\n/x/.exec(text);\n"
+    ),
+    "division-after-a-parenthesis": (
+        "const half = (total) / 2 / 3;\nconst third = fn(a) / 3;\n/x/.exec(text);\n"
+    ),
+    "umd-wrapper-assigning-the-global-name": (
+        "(function (global, factory) {\n  global = typeof globalThis !== \"undefined\" ? globalThis : global || self;\n  global.lib = factory();\n})(this, function () { return /x/.exec(text); });\n"
+    ),
+    "global-kept-by-a-name-used-through-members": (
+        "var freeGlobal = typeof global == \"object\" && global && global.Object === Object && global;\nvar root = freeGlobal || self;\nconst Sym = root.Symbol;\n/x/.exec(text);\n"
+    ),
+    "membership-test-on-the-global": "if (!(\"fetch\" in globalThis)) { setup(); }\n/x/.exec(text);\n",
+    "destructuring-members-of-the-global": (
+        "const { Deno, process } = globalThis;\n/x/.exec(text);\n"
+    ),
+    "local-variable-named-global": (
+        "function replace(re, text) {\n  const global = re.global;\n  for (const next of text.matchAll(global)) { use(next); }\n}\n/x/.exec(text);\n"
+    ),
+    "parameter-named-global-or-window": (
+        "function replace(re, global) { return text.matchAll(global); }\nconst show = (window) => render(window);\nconst pick = (a, window) => window;\n/x/.exec(text);\n"
+    ),
 }
 
 
@@ -279,6 +337,60 @@ HOSTILE = {
     "literal-hiding-a-rebinding-after-a-function-expression": (
         "const f = function () {}\n/ (RegExp = require(`node:child_process`)) /g;\n"
         "RegExp(`x`).exec(command);\n"
+    ),
+    "global-passed-to-an-iife": (
+        "(function (g) { g[[`Reg`, `Exp`].join(``)] = () => require(`node:child_process`); })(globalThis);\nRegExp(`x`).exec(command);\n"
+    ),
+    "global-kept-by-another-name": (
+        "const g = global;\ng[`Reg` + `Exp`] = () => require(`node:child_process`);\nRegExp(`x`).exec(command);\n"
+    ),
+    "window-kept-by-another-name": (
+        "const g = window;\nconst name = `RegExp`;\ng[name] = () => require(`node:child_process`);\nRegExp(`x`).exec(command);\n"
+    ),
+    "global-returned-by-a-helper": (
+        "function root() { return globalThis; }\nroot()[[`Reg`, `Exp`].join(``)] = () => require(`node:child_process`);\nRegExp(`x`).exec(command);\n"
+    ),
+    "global-picked-by-a-condition": (
+        "const g = typeof window !== `undefined` ? window : global;\ng[`Reg` + `Exp`] = () => require(`node:child_process`);\nRegExp(`x`).exec(command);\n"
+    ),
+    "global-in-a-table": (
+        "const table = { root: globalThis };\ntable.root[[`Reg`, `Exp`].join(``)] = () => require(`node:child_process`);\nRegExp(`x`).exec(command);\n"
+    ),
+    "global-set-by-reflection": (
+        "Reflect.set(globalThis, [`Reg`, `Exp`].join(``), () => require(`node:child_process`));\nRegExp(`x`).exec(command);\n"
+    ),
+    "global-from-a-string": (
+        "Function(`return this`)()[[`Reg`, `Exp`].join(``)] = () => require(`node:child_process`);\nRegExp(`x`).exec(command);\n"
+    ),
+    "global-from-eval": (
+        "(0, eval)(`this`)[[`Reg`, `Exp`].join(``)] = () => require(`node:child_process`);\nRegExp(`x`).exec(command);\n"
+    ),
+    "command-after-an-unbraced-statement": (
+        "if (ok) cp.exec(command);\nelse /x/.exec(text);\n"
+    ),
+    "command-in-an-unbraced-loop": (
+        "for (const c of commands) require(`node:child_process`).exec(c);\n"
+    ),
+    "rebinding-after-a-control-head-slash": (
+        "if (ok) /x/.exec(text);\nconst f = function () {}\n/ (RegExp = require(`node:child_process`)) /g;\nRegExp(`x`).exec(command);\n"
+    ),
+    "global-handed-on-through-two-names": (
+        "const a = globalThis;\nconst b = a;\nb[[`Reg`, `Exp`].join(``)] = () => require(`node:child_process`);\nRegExp(`x`).exec(command);\n"
+    ),
+    "global-used-after-a-local_of_the_same_name_ended": (
+        "{ const global = 1; use(global); }\nObject.defineProperty(global, [`Reg`, `Exp`].join(``), { value: () => require(`node:child_process`) });\nRegExp(`x`).exec(command);\n"
+    ),
+    "global-used-after-a-function_with_a_parameter_of_the_same_name": (
+        "function f(global) { return global; }\nObject.assign(global, { [[`Reg`, `Exp`].join(``)]: () => require(`node:child_process`) });\nRegExp(`x`).exec(command);\n"
+    ),
+    "global-passed-to-a-call-in-an-initializer": (
+        "const g = identity(globalThis);\ng[[`Reg`, `Exp`].join(``)] = () => require(`node:child_process`);\nRegExp(`x`).exec(command);\n"
+    ),
+    "global-assigned-through-a-chain": (
+        "let holder; const g = holder = globalThis;\nholder[[`Reg`, `Exp`].join(``)] = () => require(`node:child_process`);\nRegExp(`x`).exec(command);\n"
+    ),
+    "destructuring-the-regexp-name-out-of-the-global": (
+        "const { RegExp: R } = globalThis;\nR.prototype[[`ex`, `ec`].join(``)] = require(`node:child_process`).exec;\n/a/.exec(command);\n"
     ),
 }
 
