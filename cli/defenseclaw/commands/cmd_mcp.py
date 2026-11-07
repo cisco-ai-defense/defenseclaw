@@ -295,9 +295,12 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
         )
         # GAP-1992: the next step follows each server's stored error; a
         # policy refusal is not fixed by "fix reachability".
+        managed = asset_lists.is_managed_standalone(app.cfg)
         for connector, name, error, entry in failed_rows[:_FAILED_SCAN_HINT_LIMIT]:
             url = (entry.url or "") if entry is not None else ""
-            ux.subhead(f"{name} ({connector}): {_failed_scan_next_step(name, connector, error, url, entry)}")
+            ux.subhead(
+                f"{name} ({connector}): {_failed_scan_next_step(name, connector, error, url, entry, managed)}"
+            )
         if len(failed_rows) > _FAILED_SCAN_HINT_LIMIT:
             ux.subhead(
                 f"... and {len(failed_rows) - _FAILED_SCAN_HINT_LIMIT} more; "
@@ -878,6 +881,7 @@ def _mcp_scan_command(name: str, connector: str = "", url: str | None = None) ->
 
 def _failed_scan_next_step(
     name: str, connector: str, error: str, url: str = "", entry: MCPServerEntry | None = None,
+    managed: bool = False,
 ) -> str:
     """Say what to do about one failed scan, based on its stored error (GAP-1992).
 
@@ -892,7 +896,11 @@ def _failed_scan_next_step(
     # GAP-0776: the agent-visible block text names the same one next step, so
     # the user finds it here: trust the server by name, or give it a
     # definition a scan can start.
-    allow = f"or trust it: defenseclaw mcp allow {shlex.quote(name)}"
+    # A managed device refuses that command: its user asks the administrator.
+    allow = (
+        "or ask your administrator to allow it in the managed MCP policy (asset_policy.mcp.allowed)"
+        if managed else f"or trust it: defenseclaw mcp allow {shlex.quote(name)}"
+    )
     err = (error or "").lower()
     refusal = mcp_scan_refusal(entry) if entry is not None else None
     if refusal:
