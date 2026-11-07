@@ -87,8 +87,9 @@ def test_folders_another_account_can_write_stay_refused(monkeypatch, tmp_path, c
     }[case]
     _accounts(monkeypatch, tmp_path, gid, **kwargs)
 
-    loose = connector_paths.opencode_writable_plugin_folder([str(plugin)])
-    assert loose == os.path.realpath(home / ".config" / "opencode")
+    unsafe = connector_paths.opencode_unsafe_plugin_paths([str(plugin)])
+    assert [str(path) for path in unsafe] == [os.path.realpath(home / ".config" / "opencode")]
+    assert unsafe[0].problems == ("mode",)
     monkeypatch.setattr(connector_paths, "connector_config_files", lambda _name: [str(plugin)])
     from defenseclaw.commands import cmd_setup
 
