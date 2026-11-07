@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -532,6 +533,328 @@ func TestWindowsCodexMigrationOfAFixedNameHeldWithNoSharing(t *testing.T) {
 			})
 			if err != nil || registry.GatewayAddr != "live" {
 				t.Fatalf("the hook read %+v, %v after the failed begin; want the state it had", registry, err)
+			}
+		})
+	}
+}
+
+// windowsCodexStateDirSnapshotForTest records the identity and modification
+// time of every file in dir, so a later snapshot shows what a pass rewrote.
+func windowsCodexStateDirSnapshotForTest(t *testing.T, dir string) map[string]os.FileInfo {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := map[string]os.FileInfo{}
+	for _, entry := range entries {
+		info, err := os.Stat(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshot[entry.Name()] = info
+	}
+	return snapshot
+}
+
+// requireSameDirForTest fails when a file appeared, vanished or was replaced
+// or rewritten between two snapshots. The writer lock changes size with the
+// counter, so it is compared by its size (the counter) and left out of the
+// modification-time check.
+func requireSameDirForTest(t *testing.T, when string, before, after map[string]os.FileInfo) {
+	t.Helper()
+	for name, old := range before {
+		now, ok := after[name]
+		if !ok {
+			t.Fatalf("%s: %s vanished", when, name)
+		}
+		if !os.SameFile(old, now) || old.Size() != now.Size() {
+			t.Fatalf("%s: %s was replaced or resized (size %d to %d)", when, name, old.Size(), now.Size())
+		}
+		if !strings.EqualFold(name, WindowsCodexManagedWriterLockFile) && !old.ModTime().Equal(now.ModTime()) {
+			t.Fatalf("%s: %s was rewritten (%s to %s)", when, name, old.ModTime(), now.ModTime())
+		}
+	}
+	for name := range after {
+		if _, ok := before[name]; !ok {
+			t.Fatalf("%s: %s appeared", when, name)
+		}
+	}
+}
+
+// One no-change rule serves every caller (g582 round 11, GAP-0764): a pass
+// that sets the state to the bytes it already holds, or publishes the
+// requirements.toml it already has, changes nothing the hook reads, so it
+// keeps the hook copy and the counter and writes nothing, whether a standard
+// account held an older copy meanwhile or not.
+func TestWindowsCodexStateUnchangedPassesAfterAReleasedHoldWriteNothing(t *testing.T) {
+	f := newWindowsCodexStateTxFixture(t)
+	first := f.run(t, f.write("state-one"))
+	// A standard account holds the current copy, refusing every sharing.
+	held := holdWindowsCodexFileForTest(t, windowsCodexStableStateFile(f.dir, first), 0)
+	closed := false
+	defer func() {
+		if !closed {
+			_ = windows.CloseHandle(held)
+		}
+	}()
+	second := f.run(t, f.write("state-two"))
+	if second == first {
+		t.Fatalf("a changed state kept counter %d", second)
+	}
+	f.requireStateCopy(t, second, "state-two")
+
+	// Passes that set the same bytes, read, or publish an identical
+	// requirements.toml, while the older copy is held and after it is
+	// released.
+	passes := []func() error{
+		f.write("state-two"),
+		func() error {
+			_, err := readWindowsCodexManagedState(f.state, false)
+			return err
+		},
+		func() error {
+			windowsCodexActiveManagedState.requirementsTouched = windowsCodexRequirementsPublishChanges(
+				safefile.SharedFile{Exists: true, Data: []byte("same")}, []byte("same"), false)
+			return nil
+		},
+		func() error { return nil },
+	}
+	runAll := func(when string) {
+		t.Helper()
+		before := windowsCodexStateDirSnapshotForTest(t, f.dir)
+		for index, pass := range passes {
+			if counter := f.run(t, pass); counter != second {
+				t.Fatalf("%s: pass %d moved the counter from %d to %d", when, index, second, counter)
+			}
+		}
+		after := windowsCodexStateDirSnapshotForTest(t, f.dir)
+		if when == "after the release" {
+			// The first pass after the release removes the older copy that
+			// was held; nothing else changes.
+			delete(before, filepath.Base(windowsCodexStableStateFile(f.dir, first)))
+		}
+		requireSameDirForTest(t, when, before, after)
+		f.requireStateCopy(t, second, "state-two")
+	}
+	runAll("while the older copy is held")
+	if _, err := os.Lstat(windowsCodexStableStateFile(f.dir, first)); err != nil {
+		t.Fatalf("the held older copy should stay while it is held: %v", err)
+	}
+	_ = windows.CloseHandle(held)
+	closed = true
+	runAll("after the release")
+	runAll("a second round after the release")
+	if _, err := os.Lstat(windowsCodexStableStateFile(f.dir, first)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the older copy stayed after its release: %v", err)
+	}
+
+	// A real change still advances the counter and writes the new copy.
+	if third := f.run(t, f.write("state-three")); third == second {
+		t.Fatalf("a changed state kept counter %d", third)
+	}
+}
+
+// windowsCodexRequirementsPublishChanges is the rule behind the requirements
+// side of the no-change rule.
+func TestWindowsCodexRequirementsPublishChangesOnlyWhenTheFileChanges(t *testing.T) {
+	existing := safefile.SharedFile{Exists: true, Data: []byte("a")}
+	for _, row := range []struct {
+		name      string
+		base      safefile.SharedFile
+		candidate []byte
+		remove    bool
+		want      bool
+	}{
+		{"same bytes", existing, []byte("a"), false, false},
+		{"other bytes", existing, []byte("b"), false, true},
+		{"new file", safefile.SharedFile{}, []byte("a"), false, true},
+		{"remove an existing file", existing, nil, true, true},
+		{"remove an absent file", safefile.SharedFile{}, nil, true, false},
+	} {
+		if got := windowsCodexRequirementsPublishChanges(row.base, row.candidate, row.remove); got != row.want {
+			t.Errorf("%s: changes = %v, want %v", row.name, got, row.want)
+		}
+	}
+}
+
+// The whole guardian pass: the target publication, the reconcile and the
+// verification, over a state a standard account held open meanwhile. Once
+// the policy and the targets are as they should be, further passes leave the
+// current copy, the writer copy, requirements.toml and the counter alone.
+func TestWindowsCodexGuardianPassesThatChangeNothingKeepTheStateCopy(t *testing.T) {
+	row := windowsCodexRemovalRowsForTest[0]
+	opts := newWindowsCodexMachineGuardFixtureForTest(t, row.requirements)
+	dir := filepath.Dir(opts.RequirementsPath)
+	lock := filepath.Join(dir, WindowsCodexManagedWriterLockFile)
+	alice := WindowsCodexManagedRuntimeTarget{SID: "S-1-5-21-111-222-333-1001", DataDir: `C:\Users\alice\.defenseclaw`}
+	bob := WindowsCodexManagedRuntimeTarget{SID: "S-1-5-21-111-222-333-1002", DataDir: `C:\Users\bob\.defenseclaw`}
+	if report, err := ReconcileWindowsCodexMachineRequirements(opts); err != nil || !report.OK {
+		t.Fatalf("reconcile: %+v, %v", report, err)
+	}
+	if err := PublishWindowsCodexManagedRuntimeTargets(opts, []WindowsCodexManagedRuntimeTarget{alice}); err != nil {
+		t.Fatal(err)
+	}
+	current := func() (uint64, string) {
+		t.Helper()
+		counter, err := readWindowsCodexTransactionCounter(lock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return counter, windowsCodexStableStateFile(dir, counter)
+	}
+	counter, copyPath := current()
+	held := holdWindowsCodexFileForTest(t, copyPath, 0)
+	closed := false
+	defer func() {
+		if !closed {
+			_ = windows.CloseHandle(held)
+		}
+	}()
+	// The reconcile that follows a real change makes a newer copy.
+	if err := PublishWindowsCodexManagedRuntimeTargets(opts, []WindowsCodexManagedRuntimeTarget{alice, bob}); err != nil {
+		t.Fatal(err)
+	}
+	changed, _ := current()
+	if changed == counter {
+		t.Fatalf("a changed target set kept counter %d", counter)
+	}
+	pass := func() {
+		t.Helper()
+		if err := PublishWindowsCodexManagedRuntimeTargets(opts, []WindowsCodexManagedRuntimeTarget{alice, bob}); err != nil {
+			t.Fatal(err)
+		}
+		if report, err := ReconcileWindowsCodexMachineRequirements(opts); err != nil || !report.OK {
+			t.Fatalf("reconcile: %+v, %v", report, err)
+		}
+		if report, err := VerifyWindowsCodexMachineRequirements(opts); err != nil || !report.OK {
+			t.Fatalf("verify: %+v, %v", report, err)
+		}
+	}
+	// The first pass settles any normalisation of the target set.
+	pass()
+	settled, settledCopy := current()
+	before := windowsCodexStateDirSnapshotForTest(t, dir)
+	for i := 0; i < 3; i++ {
+		pass()
+	}
+	if after, afterCopy := current(); after != settled || afterCopy != settledCopy {
+		t.Fatalf("unchanged passes moved the current copy from %s (%d) to %s (%d)", settledCopy, settled, afterCopy, after)
+	}
+	requireSameDirForTest(t, "unchanged passes while an older copy is held", before, windowsCodexStateDirSnapshotForTest(t, dir))
+
+	_ = windows.CloseHandle(held)
+	closed = true
+	pass() // removes the older copy that was held
+	before = windowsCodexStateDirSnapshotForTest(t, dir)
+	for i := 0; i < 3; i++ {
+		pass()
+	}
+	if after, _ := current(); after != settled {
+		t.Fatalf("unchanged passes after the release moved the counter from %d to %d", settled, after)
+	}
+	requireSameDirForTest(t, "unchanged passes after the release", before, windowsCodexStateDirSnapshotForTest(t, dir))
+}
+
+// GAP-0765. The first Codex transaction of this release on a host upgraded
+// from 1.0.8 reads the state at its fixed name. A user who holds that file
+// open and refuses read sharing (no sharing at all, or write and delete
+// sharing only) makes the read fail with a sharing violation. It is never
+// taken for an absent state: the transaction retries for its bounded time,
+// then fails with the named, retryable read hold; the file, the writer copy
+// and the counter are as they were (nothing written, no success), and once
+// the holder lets go the next attempt migrates the state.
+func TestWindowsCodexUpgradeFromAFixedNameReadHoldFailsRetryablyAndLeavesTheStateIntact(t *testing.T) {
+	for _, hold := range []struct {
+		name  string
+		share uint32
+	}{
+		{name: "no sharing", share: 0},
+		{name: "write and delete sharing only", share: windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE},
+	} {
+		t.Run(hold.name, func(t *testing.T) {
+			f := newWindowsCodexStateTxFixture(t)
+			if err := os.WriteFile(f.state, []byte("state of 1.0.8"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			held := holdWindowsCodexFileForTest(t, f.state, hold.share)
+			closed := false
+			closeHeld := func() {
+				if !closed {
+					closed = true
+					_ = windows.CloseHandle(held)
+				}
+			}
+			defer closeHeld()
+
+			previousWait, previousSleep, previousNow := windowsCodexHeldRetryWait, windowsCodexHeldRetrySleep, windowsCodexHeldRetryNow
+			previousHolders := windowsCodexRequirementsHolders
+			t.Cleanup(func() {
+				windowsCodexHeldRetryWait, windowsCodexHeldRetrySleep, windowsCodexHeldRetryNow = previousWait, previousSleep, previousNow
+				windowsCodexRequirementsHolders = previousHolders
+			})
+			now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+			windowsCodexHeldRetryNow = func() time.Time { return now }
+			windowsCodexHeldRetryWait = 30 * time.Second
+			slept := time.Duration(0)
+			windowsCodexHeldRetrySleep = func(d time.Duration) { slept += d; now = now.Add(d) }
+			windowsCodexRequirementsHolders = func(string) []string { return []string{"holder.exe (PID 4242)"} }
+
+			ran := 0
+			attempt := func() error {
+				return withWindowsCodexRequirementsReleaseRetry(func() error {
+					return withWindowsCodexMachinePolicyLock(f.requirements, func() error {
+						ran++
+						return nil
+					})
+				})
+			}
+			before := windowsCodexStateDirSnapshotForTest(t, f.dir)
+			err := attempt()
+			var heldErr *WindowsCodexRequirementsHeldError
+			if err == nil || !errors.As(err, &heldErr) || !heldErr.Reading || ran != 0 {
+				t.Fatalf("a held fixed name: err = %v, ran %d times; want the named read hold and no run, never a success", err, ran)
+			}
+			for _, want := range []string{f.state, "holder.exe (PID 4242)", "cannot read it", windowsCodexHeldRetryPromise} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("held error %q does not name %q", err, want)
+				}
+			}
+			if slept < windowsCodexHeldRetryWait-windowsCodexHeldRetryPoll {
+				t.Fatalf("the transaction waited %s for the release; want about %s", slept, windowsCodexHeldRetryWait)
+			}
+			// Nothing but the writer lock was created, still at counter 0, so
+			// the hook keeps reading the state of 1.0.8.
+			after := windowsCodexStateDirSnapshotForTest(t, f.dir)
+			for name := range after {
+				if _, ok := before[name]; !ok && !strings.EqualFold(name, WindowsCodexManagedWriterLockFile) {
+					t.Fatalf("the failed attempt created %s", name)
+				}
+			}
+			if counter, err := readWindowsCodexTransactionCounter(f.lock); err != nil || counter != 0 {
+				t.Fatalf("counter after the failed attempt = %d, %v; want 0", counter, err)
+			}
+			if data, err := os.ReadFile(f.state); err != nil && hold.share != 0 {
+				t.Fatalf("the state of 1.0.8 cannot be read back: %v", err)
+			} else if err == nil && string(data) != "state of 1.0.8" {
+				t.Fatalf("the state of 1.0.8 was changed to %q", data)
+			}
+			if _, err := os.Lstat(f.state); err != nil {
+				t.Fatalf("the state of 1.0.8 is gone: %v", err)
+			}
+
+			// The holder lets go: the next attempt migrates the state.
+			closeHeld()
+			if err := attempt(); err != nil || ran != 1 {
+				t.Fatalf("after the release: err = %v, ran %d times; want one run", err, ran)
+			}
+			counter, err := readWindowsCodexTransactionCounter(f.lock)
+			if err != nil || counter == 0 || counter%2 != 0 {
+				t.Fatalf("counter after the migration = %d, %v", counter, err)
+			}
+			f.requireStateCopy(t, counter, "state of 1.0.8")
+			if _, err := os.Lstat(f.state); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("the fixed name stayed once it was released: %v", err)
 			}
 		})
 	}

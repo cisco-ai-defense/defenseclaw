@@ -3344,10 +3344,11 @@ func windowsEnterpriseFailureCodeFor(result *enterprisestatus.Result) int {
 			return enterprisestatus.WindowsExitBusy
 		case "bundle_apply_failed", "bundle_policy_not_adopted", "bundle_post_verify_failed", "bundle_targets_refresh_failed":
 			return enterprisestatus.WindowsExitBusy
-		case "hook_calls_running", "hook_in_use":
+		case "hook_calls_running", "hook_in_use", "codex_state_held":
 			// The lifecycle deferred before it changed anything, while hook
-			// calls of the installed release still run (GAP-1124) or another
-			// program holds the installed hook open (GAP-2001).
+			// calls of the installed release still run (GAP-1124), another
+			// program holds the installed hook open (GAP-2001) or a user
+			// holds the Codex state of 1.0.8 open without sharing (GAP-0765).
 			return enterprisestatus.WindowsExitBusy
 		case "scanner_runtime_unavailable":
 			if strings.HasSuffix(message.Message, windowsScannerPrepareRetryNotice) {
