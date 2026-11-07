@@ -19,9 +19,10 @@ The test reads the pages of ``docs-site/content`` the way
 code span), and two packaging files, and fails on:
 
 * A bare ``defenseclaw-gateway enterprise``: that family exists only on a managed
-  computer. ``reference/cli.mdx`` lists the family in table rows under one
-  sentence that says to run it by the full paths; those rows are not flagged, and
-  the test fails if the sentence is lost.
+  computer. ``reference/cli.mdx`` lists the family in the table rows of its
+  "## Enterprise" section, under the sentence there that says to run it by the
+  full path; only those rows are not flagged, and the test fails if the sentence
+  is lost.
 * A bare ``defenseclaw-gateway`` followed by an administrator command in a page of
   ``enterprise/`` (every page there is for a managed computer). ``windows.mdx`` is
   left to the Windows test.
@@ -42,7 +43,7 @@ from tests.test_managed_windows_docs_commands import ROOT, SITE, _units
 
 ENTERPRISE = SITE / "docs/enterprise"
 CLI_REFERENCE = SITE / "docs/reference/cli.mdx"
-CLI_REFERENCE_SENTENCE = "in this section, run it by those full paths"
+CLI_REFERENCE_SENTENCE = "run it by its full path from the table below"
 # Packaging files with a printed or commented administrator command.
 PACKAGING_FILES = ("packaging/identity/ad/README.md", "packaging/identity/ad/sandbox-profiles.example.yaml")
 
@@ -83,6 +84,14 @@ def _line_of(text: str, number: int) -> str:
     return text.splitlines()[number - 1]
 
 
+def _enterprise_section(text: str) -> range:
+    """The line numbers of the "## Enterprise" section of reference/cli.mdx."""
+    lines = text.splitlines()
+    start = next(number for number, line in enumerate(lines, 1) if line == "## Enterprise")
+    end = next((number for number, line in enumerate(lines[start:], start + 1) if line.startswith("## ")), len(lines) + 1)
+    return range(start, end)
+
+
 def _findings() -> list[tuple[str, int, str]]:
     found = []
     for path in _files():
@@ -93,17 +102,18 @@ def _findings() -> list[tuple[str, int, str]]:
             lines = list(enumerate(text.splitlines(), 1))
         else:
             lines = [(number, unit) for number, unit, _ in _units(text)]
+        section = _enterprise_section(text) if rel == _rel(CLI_REFERENCE) else range(0)
         for number, unit in lines:
-            why = _bare_gateway(rel, unit, _line_of(text, number))
+            why = _bare_gateway(rel, unit, _line_of(text, number), number in section)
             if why:
                 found.append((rel, number, f"{why}: {' '.join(unit.split())[:110]}"))
     return found
 
 
-def _bare_gateway(rel: str, unit: str, line: str) -> str | None:
+def _bare_gateway(rel: str, unit: str, line: str, in_cli_enterprise_section: bool = False) -> str | None:
     unit = " ".join(unit.split())
     if _ENTERPRISE_COMMAND.search(unit):
-        if rel == _rel(CLI_REFERENCE) and line.lstrip().startswith("|"):
+        if rel == _rel(CLI_REFERENCE) and in_cli_enterprise_section and line.lstrip().startswith("|"):
             return None
         return "bare defenseclaw-gateway enterprise"
     in_enterprise_page = rel.startswith("docs-site/content/docs/enterprise/")
@@ -120,7 +130,7 @@ def _bare_gateway(rel: str, unit: str, line: str) -> str | None:
 def test_no_bare_managed_unix_gateway_command_in_the_docs() -> None:
     hits = _findings()
     assert not hits, (
-        "The managed Linux and macOS packages put defenseclaw-gateway on no PATH. Write "
+        "defenseclaw-gateway is not on the PATH of a managed Linux or macOS host. Write "
         "/opt/defenseclaw/bin/defenseclaw-gateway (Linux) or /opt/cisco/defenseclaw/bin/defenseclaw-gateway (macOS):\n"
         + "\n".join(f"  {rel}:{number}: {why}" for rel, number, why in hits)
     )
@@ -187,3 +197,12 @@ def test_concepts_page_states_the_gateway_is_on_no_path() -> None:
 )
 def test_matcher(rel: str, unit: str, bare: bool) -> None:
     assert bool(_bare_gateway(rel, unit, unit)) is bare
+
+
+def test_cli_reference_table_rows_are_exempt_only_in_the_enterprise_section() -> None:
+    row = "| `defenseclaw-gateway enterprise policy show` | Show each connector's route |"
+    cli = _rel(CLI_REFERENCE)
+    assert _bare_gateway(cli, row, row, True) is None
+    assert _bare_gateway(cli, row, row, False)
+    section = _enterprise_section(CLI_REFERENCE.read_text(encoding="utf-8"))
+    assert len(section) > 50, "the Enterprise section of reference/cli.mdx is gone or empty"

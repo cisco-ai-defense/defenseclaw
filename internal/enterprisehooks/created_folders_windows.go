@@ -18,8 +18,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"unsafe"
 
@@ -52,6 +54,13 @@ const (
 type windowsCreatedFolderRecord struct {
 	SchemaVersion int    `json:"schema_version"`
 	Path          string `json:"path"`
+	// Origin is "upgrade" on a record the lifecycle back-filled on a
+	// computer installed before 1.0.9 (GAP-0704); the hooks never write
+	// one. Binding rule: such a record never gives ownership for a repair,
+	// a re-stamp or a takeover; it only lets a purge remove the folder once
+	// it is empty, which is all RemoveWindowsCreatedFolderIfEmpty does with
+	// any record.
+	Origin string `json:"origin,omitempty"`
 }
 
 // windowsCreatedFolderRoots returns the trusted Program Files and ProgramData
@@ -99,7 +108,11 @@ func recordWindowsCreatedFolders(created []string) error {
 }
 
 // windowsCreatedFolderRecordable keeps machine vendor folders: an absolute
-// path strictly below ProgramData or Program Files.
+// path strictly below ProgramData or Program Files, outside DefenseClaw's own
+// folders there (Cisco\DefenseClaw, Cisco\DefenseClaw-HookRuntime, ...). The
+// purge removes those with the deployment, and the hooks remove the hook
+// runtime folders at teardown, so a record of one would outlive its folder
+// (GAP-0091 review 2 S1: a record goes with its folder).
 func windowsCreatedFolderRecordable(path string, roots ...string) bool {
 	if !filepath.IsAbs(path) {
 		return false
@@ -108,10 +121,26 @@ func windowsCreatedFolderRecordable(path string, roots ...string) bool {
 	for _, root := range roots {
 		root = strings.TrimRight(filepath.Clean(strings.TrimSpace(root)), `\`)
 		if root != "" && isWindowsManagedPolicyAncestorOf(root, path) {
-			return true
+			return !windowsDefenseClawOwnFolder(path, root)
 		}
 	}
 	return false
+}
+
+// windowsDefenseClawOwnFolderName is the name of a DefenseClaw folder in
+// the Cisco vendor folder: DefenseClaw or DefenseClaw-<letters>.
+var windowsDefenseClawOwnFolderName = regexp.MustCompile(`(?i)^DefenseClaw(-[A-Za-z]+)?$`)
+
+// windowsDefenseClawOwnFolder reports whether path is root\Cisco\DefenseClaw*
+// or lies below one.
+func windowsDefenseClawOwnFolder(path, root string) bool {
+	relative, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	parts := strings.Split(relative, `\`)
+	return len(parts) >= 2 && strings.EqualFold(parts[0], "Cisco") &&
+		windowsDefenseClawOwnFolderName.MatchString(parts[1])
 }
 
 // windowsCreatedFolderRecordName is the record file name for path: the
@@ -204,4 +233,93 @@ func writeWindowsCreatedFolderRecord(lifecycleDir, path string) error {
 		return fmt.Errorf("enterprise hooks: write the created-folder record for %s: %w", path, err)
 	}
 	return nil
+}
+
+// RemoveWindowsCreatedFolderIfEmpty removes path, and then its record, when
+// DefenseClaw recorded creating it and it is an empty plain folder that
+// SYSTEM, Administrators or TrustedInstaller own and alone can write, with no
+// reparse point on its path (the purge's rule,
+// Remove-DefenseClawStandaloneCreatedFolder). It reports whether path is gone
+// now. An unrecorded folder, one that holds anything and any failed check
+// leave the folder and its record; a missing folder leaves an unused record
+// for the purge, which deletes it. Standalone only.
+func RemoveWindowsCreatedFolderIfEmpty(path string) (bool, error) {
+	if !windowsEnterpriseStandaloneProcess() || !filepath.IsAbs(path) {
+		return false, nil
+	}
+	path = filepath.Clean(path)
+	programFiles, programData, lifecycleDir, err := windowsCreatedFolderRoots()
+	if err != nil {
+		return false, fmt.Errorf("enterprise hooks: resolve the created-folder record: %w", err)
+	}
+	if !windowsCreatedFolderRecordable(path, programFiles, programData) {
+		return false, nil
+	}
+	dir := filepath.Join(lifecycleDir, windowsCreatedFolderRecordDirName)
+	recordPath := filepath.Join(dir, windowsCreatedFolderRecordName(path))
+	if recorded, err := readWindowsCreatedFolderRecord(dir, recordPath, path); err != nil || !recorded {
+		return false, err
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeIrregular != 0 {
+		return false, fmt.Errorf("enterprise hooks: recorded folder %s is not a plain folder", path)
+	}
+	if err := rejectWindowsReparseChain(path); err != nil {
+		return false, err
+	}
+	for _, folder := range []string{path, filepath.Dir(path)} {
+		if err := windowsManagedPolicyAncestorTrustCheck(folder); err != nil {
+			return false, fmt.Errorf("enterprise hooks: recorded folder %s stays: %w", path, err)
+		}
+	}
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, windows.ERROR_DIR_NOT_EMPTY) {
+			return false, nil
+		}
+		return false, err
+	}
+	if err := os.Remove(recordPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return true, fmt.Errorf("enterprise hooks: remove the record of %s: %w", path, err)
+	}
+	return true, nil
+}
+
+// readWindowsCreatedFolderRecord reports whether recordPath is a trusted
+// record naming path: an administrator-only regular file in an
+// administrator-only record folder, schema 1, naming path.
+func readWindowsCreatedFolderRecord(dir, recordPath, path string) (bool, error) {
+	if _, err := os.Lstat(recordPath); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	for _, check := range []func() error{
+		func() error { return rejectWindowsReparseChain(recordPath) },
+		func() error { return windowsManagedPolicyAncestorTrustCheck(dir) },
+		func() error { return windowsManagedPolicyFileTrustCheck(recordPath) },
+	} {
+		if err := check(); err != nil {
+			return false, fmt.Errorf("enterprise hooks: the created-folder record of %s is untrusted: %w", path, err)
+		}
+	}
+	file, err := os.Open(recordPath)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	body, err := io.ReadAll(io.LimitReader(file, windowsCreatedFolderRecordLimit+1))
+	if err != nil {
+		return false, err
+	}
+	var record windowsCreatedFolderRecord
+	if len(body) > windowsCreatedFolderRecordLimit || json.Unmarshal(body, &record) != nil ||
+		record.SchemaVersion != windowsCreatedFolderRecordSchema ||
+		windowsCreatedFolderRecordName(record.Path) != windowsCreatedFolderRecordName(path) {
+		return false, fmt.Errorf("enterprise hooks: the created-folder record of %s is not one", path)
+	}
+	return true, nil
 }

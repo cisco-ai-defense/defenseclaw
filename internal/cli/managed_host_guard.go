@@ -729,11 +729,7 @@ func managedHostPlatform() string {
 // secure_path does not include the install directory, so a bare
 // `defenseclaw-gateway` in a hint fails with "command not found".
 func managedHostGatewayCommand() string {
-	layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
-	if err != nil {
-		return "defenseclaw-gateway"
-	}
-	return layout.BinDir + "/defenseclaw-gateway"
+	return managed.StandaloneGatewayPath(runtime.GOOS)
 }
 
 // managedRecordTrusted reports whether a managed-deployment record at path

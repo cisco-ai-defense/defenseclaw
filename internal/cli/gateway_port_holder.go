@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -82,6 +83,8 @@ func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string 
 	switch {
 	case holderErr == nil && holder.UID >= 0 && holder.UID != ownUID:
 		return fmt.Sprintf("%s is held by %s, not by this account's gateway", addr, who)
+	// Windows names no UID for the holder or this account (both -1); its
+	// platform proof compares the process token's user instead.
 	case holderErr == nil && holder.UID == ownUID && sameHomeGatewayProcess(holder.PID, config.DefaultDataPath()):
 		return ""
 	case holderErr != nil:
@@ -107,10 +110,71 @@ func sameHomeGatewayProcess(pid int, home string) bool {
 		return false
 	}
 	executable, err := gatewayExecutable()
-	if err != nil || filepath.Base(executable) != "defenseclaw-gateway" {
+	if err != nil || !gatewayExecutableName(executable, runtime.GOOS) {
 		return false
 	}
 	return sameHomeGatewayProcessPlatform(pid, home, executable)
+}
+
+// gatewayExecutableName reports whether executable is the gateway program:
+// defenseclaw-gateway, or defenseclaw-gateway.exe on Windows (GAP-0694).
+func gatewayExecutableName(executable, goos string) bool {
+	if goos == "windows" {
+		return strings.EqualFold(filepath.Base(executable), "defenseclaw-gateway.exe")
+	}
+	return filepath.Base(executable) == "defenseclaw-gateway"
+}
+
+// foregroundLaunchHome is the DefenseClaw home of a gateway launched with
+// environment, by the rule of config.DefaultDataPath: a non-empty
+// DEFENSECLAW_HOME, otherwise HOME's .defenseclaw. Linux and macOS share it,
+// so a foreground gateway on the default home is recognised on both
+// (GAP-0705). A relative or repeated value proves nothing.
+func foregroundLaunchHome(environment []string) (string, bool) {
+	return foregroundLaunchHomeFrom(environment, "HOME")
+}
+
+// foregroundLaunchHomeFrom is foregroundLaunchHome for a platform whose
+// account home variable is userHomeKey (USERPROFILE on Windows, the one
+// os.UserHomeDir reads).
+func foregroundLaunchHomeFrom(environment []string, userHomeKey string) (string, bool) {
+	var override, userHome string
+	seenOverride, seenHome := false, false
+	for _, entry := range environment {
+		switch {
+		case strings.HasPrefix(entry, "DEFENSECLAW_HOME="):
+			if seenOverride {
+				return "", false
+			}
+			seenOverride, override = true, strings.TrimPrefix(entry, "DEFENSECLAW_HOME=")
+		case strings.HasPrefix(entry, userHomeKey+"="):
+			if seenHome {
+				return "", false
+			}
+			seenHome, userHome = true, strings.TrimPrefix(entry, userHomeKey+"=")
+		}
+	}
+	if override != "" {
+		if !filepath.IsAbs(override) {
+			return "", false
+		}
+		return override, true
+	}
+	if filepath.IsAbs(userHome) {
+		return filepath.Join(userHome, config.DefaultDataDirName), true
+	}
+	return "", false
+}
+
+// sameForegroundFile reports whether two absolute paths name one file, so a
+// link to the gateway counts and a copy of it does not.
+func sameForegroundFile(left, right string) bool {
+	if !filepath.IsAbs(left) || !filepath.IsAbs(right) {
+		return false
+	}
+	leftInfo, leftErr := os.Stat(left)
+	rightInfo, rightErr := os.Stat(right)
+	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
 }
 
 // otherAccountListenerAt explains a listener on host:port that belongs to
@@ -136,6 +200,13 @@ func otherAccountListenerAt(host string, port int) string {
 	return fmt.Sprintf("%s is held by %s, not by this account's gateway", addr, who)
 }
 
+// problemClause is a foreignGatewayListener problem inside a longer sentence:
+// the root-gateway reason is a full sentence with its own final period, which
+// the surrounding text must not double (GAP-0706).
+func problemClause(problem string) string {
+	return strings.TrimSuffix(problem, ".")
+}
+
 // explainForeignListenerAtReadiness names the holder when another listener
 // answered readiness on the API port. The start check passed, but another
 // account's gateway took the port before this one bound it, and start
@@ -148,7 +219,7 @@ func explainForeignListenerAtReadiness(cfg *config.Config, err error) error {
 		return err
 	}
 	if problem := foreignGatewayListener(cfg); problem != "" {
-		return fmt.Errorf("%w: %s. %s", err, problem, foreignGatewayListenerFix(cfg))
+		return fmt.Errorf("%w: %s. %s", err, problemClause(problem), foreignGatewayListenerFix(cfg))
 	}
 	return err
 }

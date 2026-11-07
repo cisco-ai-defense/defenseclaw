@@ -946,6 +946,28 @@ func TestProxyLargeUploadBlockAbsoluteForm(t *testing.T) {
 	}
 }
 
+func TestGAP0667ForwardUploadCutPrecedesAllowedEvent(t *testing.T) {
+	h := newHarness(t, uploadBlock(1024))
+	h.serve(80, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+	})
+	resp, err := h.clientFor(h.cred, nil).Post("http://example.com/upload", "application/octet-stream",
+		bytes.NewReader(bytes.Repeat([]byte("p"), 64<<10)))
+	must(t, err)
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("forwarded upload status: %d", resp.StatusCode)
+	}
+	got := h.sink.wait(t, EventLargeUpload, 1)
+	if len(got) != 1 || !got[0].Terminated || got[0].TunnelID == "" {
+		t.Fatalf("forwarded upload event: %+v", got)
+	}
+	if allowed := h.sink.ofKind(EventAllowed); len(allowed) != 0 {
+		t.Fatalf("cut request emitted allowed event: %+v", allowed)
+	}
+}
+
 // startHTTPCounter runs an HTTP/1.1 upstream that answers every request
 // with "ok" and counts the bytes it receives, request heads included.
 func startHTTPCounter(t *testing.T) (string, func() int64) {

@@ -29,6 +29,7 @@ import (
 	"golang.org/x/sys/windows/svc/eventlog"
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -536,20 +537,22 @@ func removeEmptyWindowsRegistryKey(path string) error {
 }
 
 // removeEmptyWindowsEnterpriseInstallParent removes the folder the install
-// root sits in (C:\Program Files\Cisco), which the install created, once
-// an uninstall left it empty. A folder that holds anything stays: Remove
-// fails on it.
+// root sits in (C:\Program Files\Cisco) once an uninstall or a rolled-back
+// first install left it empty, but only when the install recorded creating
+// it, and it takes the record with it (GAP-0091: a folder that existed
+// before the install stays, and a record goes with its folder). It used to
+// remove any empty Cisco folder there by name. A folder that holds anything,
+// or fails the purge's ownership checks, stays with its record.
 var removeEmptyWindowsEnterpriseInstallParent = func() {
 	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
 	if err != nil || strings.TrimSpace(roots.InstallRoot) == "" {
 		return
 	}
 	root := filepath.Clean(roots.InstallRoot)
-	parent := filepath.Dir(root)
-	if _, err := os.Lstat(root); !errors.Is(err, fs.ErrNotExist) || !strings.EqualFold(filepath.Base(parent), "Cisco") {
+	if _, err := os.Lstat(root); !errors.Is(err, fs.ErrNotExist) {
 		return
 	}
-	_ = os.Remove(parent)
+	_, _ = enterprisehooks.RemoveWindowsCreatedFolderIfEmpty(filepath.Dir(root))
 }
 
 // readWindowsEnterpriseSelfUpdateDisabled reads

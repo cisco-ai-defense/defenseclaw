@@ -161,6 +161,9 @@ func configSchemaProblem(err error) (string, bool) {
 	}
 	field := strings.TrimPrefix(schemaErr.Path, "$.")
 	if schemaErr.Keyword == "additionalProperties" && field != "" && field != "$" {
+		if retired, ok := schemaErr.RetiredKeyMessage(); ok {
+			return fmt.Sprintf("%s: %s", where, retired), true
+		}
 		// A typo'd or undeclared key (GAP-2173).
 		hint := ""
 		if schemaErr.Suggestion != "" {

@@ -31,8 +31,8 @@ import (
 // source: the platform machine id, a kernel- or credential-verified user (or
 // the user a per-user gateway runs as), the route's connector, and the config
 // root the gateway resolved for that user. Headers and payload fields never
-// contribute. The ID is "" before the hook path runs, on non-hook traffic and
-// under the Secure Client integration.
+// contribute. The ID is "" before the hook or authenticated OpenClaw inspect
+// path resolves it, on other non-hook traffic and under Secure Client.
 func agentIdentityFromContext(ctx context.Context) (id string, verified bool) {
 	identity := AgentIdentityFromContext(ctx)
 	if identity.IdentityID == "" {
@@ -617,6 +617,42 @@ func inventoryAgentIdentityID(connectorName, userID, userName string) string {
 		Connector: connectorName, InstallFP: agentIdentityInstallFP(connectorName, user),
 		Incarnation: agentIdentityAccountIncarnation(user),
 	})
+}
+
+// openClawInspectIdentity joins a token-authenticated, per-user OpenClaw
+// inspect call to the same install identity its hook-based peers derive. The
+// plugin's agent and session headers remain correlation claims; the install
+// identity comes only from the gateway's verified subject.
+func openClawInspectIdentity(ctx context.Context, connectorName string) context.Context {
+	if connectorName != "openclaw" || !identityFactsEnabled.Load() || ManagedEnterpriseActive() {
+		return ctx
+	}
+	subject, ok := verifiedSubjectFromContext(ctx)
+	if !ok {
+		return ctx
+	}
+	facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connectorName})
+	if !facts.Verified || facts.ID == "" || facts.UserID != agentidentity.NormalizeUserID(subject.UserID) {
+		return ctx
+	}
+	identity := AgentIdentityFromContext(ctx)
+	identity.IdentityID, identity.IdentityVerified = facts.ID, true
+	// The session's agent instance (ais-) is assigned here from the verified
+	// identity and the session, as on the hook path, so the inspect audit row
+	// and the findings it raises carry one key that a later request cannot
+	// reuse for another identity. The plugin's agent ID stays a claim.
+	if session := SessionIDFromContext(ctx); session != "" {
+		if reg := SharedAgentRegistry(); reg != nil {
+			if resolved, _ := reg.ResolveForAgentIdentity(ctx, facts.ID, session, identity.AgentID); resolved.AgentInstanceID != "" {
+				identity.AgentInstanceID = resolved.AgentInstanceID
+			}
+		}
+	}
+	if identity.AgentID == "" {
+		identity.AgentID = facts.ID
+	}
+	ctx = ContextWithAgentIdentity(ctx, identity)
+	return refreshAuditEnvelopeFromIdentity(ctx, SessionIDFromContext(ctx), identity)
 }
 
 // withSessionAgentInstance joins a request outside the hook path (the Codex

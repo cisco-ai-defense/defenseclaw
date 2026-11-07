@@ -28,22 +28,54 @@ const (
 
 const RootGatewayListenerReason = "Your DefenseClaw gateway is running as root."
 
-// RootGatewayListenerRemedy names the PID-record home and executable before
-// sudo resets the caller's environment.
+// RootGatewayListenerRemedy is the next step for a root-run gateway on this
+// account's home, in the words of the running OS (GAP-0706). It names the
+// PID-record home and executable before sudo resets the caller's environment.
+// It carries no final period: callers end the sentence themselves.
 func RootGatewayListenerRemedy(dataDir string) string {
-	return "Stop it with " + rootGatewayStopCommand(dataDir) + ", then start it as yourself (defenseclaw-gateway start). On macOS, use DefenseClawMac to repair root-owned gateway files."
+	return rootGatewayRemedyFor(runtime.GOOS, dataDir)
+}
+
+// rootGatewayRemedyFor is the one table of root-gateway remedies. A root run
+// leaves root-owned files in the home, so an account start fails until they
+// are returned: the Unix remedy is one sequence that stops the root gateway,
+// returns the home and starts it as the account (GAP-0711, GAP-0713).
+// DefenseClawMac exists only on macOS.
+func rootGatewayRemedyFor(goos, dataDir string) string {
+	switch goos {
+	case "windows":
+		return "Stop it from an administrator prompt (defenseclaw-gateway stop), then start it as yourself (defenseclaw-gateway start)"
+	case "darwin":
+		return "Open DefenseClawMac and choose Start Gateway: it stops the root gateway with administrator approval, " +
+			"returns its files to you and starts the gateway as you. Without the app, run: " + rootGatewayRecoveryCommand(dataDir)
+	}
+	return "Stop it, return its files to your account and start it as yourself with: " + rootGatewayRecoveryCommand(dataDir)
+}
+
+// rootGatewayRecoveryCommand stops the root gateway, returns the home to the
+// calling account and starts the gateway as that account.
+func rootGatewayRecoveryCommand(dataDir string) string {
+	return rootGatewayStopCommand(dataDir) + " && sudo chown -R \"$(id -un)\" " + shellQuote(absoluteDataDir(dataDir)) +
+		" && defenseclaw-gateway start"
 }
 
 func rootGatewayStopCommand(dataDir string) string {
-	if absolute, err := filepath.Abs(dataDir); err == nil {
-		dataDir = absolute
-	}
-	quotedHome := "'" + strings.ReplaceAll(dataDir, "'", "'\\''") + "'"
 	executable := "\"$(command -v defenseclaw-gateway)\""
 	if path := rootGatewayExecutablePath(); path != "" {
-		executable = "'" + strings.ReplaceAll(path, "'", "'\\''") + "'"
+		executable = shellQuote(path)
 	}
-	return "sudo env DEFENSECLAW_HOME=" + quotedHome + " " + executable + " stop"
+	return "sudo env DEFENSECLAW_HOME=" + shellQuote(absoluteDataDir(dataDir)) + " " + executable + " stop"
+}
+
+func absoluteDataDir(dataDir string) string {
+	if absolute, err := filepath.Abs(dataDir); err == nil {
+		return absolute
+	}
+	return dataDir
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func rootGatewayExecutablePath() string {

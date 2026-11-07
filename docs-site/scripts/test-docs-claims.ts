@@ -2492,7 +2492,7 @@ describe('Sandboxes panel keys and status strip segments match tui.mdx (GAP-2349
 describe('rendered gateway.toml drift is reported without a pause (GAP-0730)', () => {
   it('only a changed rendered gateway configuration is non-blocking', () => {
     const go = source('internal/gateway/sandbox_daemon_openshell.go');
-    assert.ok(go.includes('renderedGatewayDriftField     = "gateway configuration"'), 'rendered drift field renamed: re-check observability/sandbox-telemetry.mdx and enterprise/sandboxes.mdx');
+    assert.ok(/renderedGatewayDriftField\s+= "gateway configuration"/.test(go), 'rendered drift field renamed: re-check observability/sandbox-telemetry.mdx and enterprise/sandboxes.mdx');
     assert.ok(go.includes('if item.Field != renderedGatewayDriftField || item.Have != "changed" {'), 'blockingOpenShellDrift changed: a changed render may pause again, re-check the GAP-0730 pages');
     assert.ok(go.includes('drift = blockingOpenShellDrift(drift)'), 'readyOpenShell no longer filters drift: re-check the GAP-0730 pages');
     assert.ok(go.includes('return "gateway_configuration"') && go.includes('driftFieldInvalid.ReplaceAllString(strings.ToLower(field), "_")'), 'driftEventField changed: re-check the field value sandbox-telemetry.mdx names');

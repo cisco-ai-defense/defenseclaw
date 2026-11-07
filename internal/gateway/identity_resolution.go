@@ -443,18 +443,23 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	}
 	// A per-user gateway can prove its process groups while only root can
 	// confirm that SSSD has no second holder of its uid. When this is the
-	// sole missing fact and the unproven profile differs only in its hook
+	// sole missing fact and the unproven profile differs only in its block
 	// threshold, the OSS default and permissive tiers use the profile selected
 	// by proven assignments on hook decisions and pathless explanations when
-	// every represented connector has an eligible tier. Inspection, a
-	// different sandbox, or a different rule pack still needs account proof.
-	// Strict and managed installs keep their proof requirement.
+	// every represented connector has an eligible tier. An inspection takes
+	// the same fallback when the proven profile already enforces on it, so
+	// only the threshold differs (an inspection refused here refused every
+	// prompt of the account, GAP-0732); a profile that would start enforcing
+	// there still needs account proof. A different sandbox, rule pack or
+	// approval control also needs it. Strict and managed installs keep their
+	// proof requirement.
 	if verified && subject.holderUnproven && !subject.LookupFailed &&
-		path != profilePathInspect && slices.Equal(needed, []string{"account:unknown"}) &&
+		slices.Equal(needed, []string{"account:unknown"}) &&
 		set.base != nil && !managed.IsManagedEnterprise(set.base.DeploymentMode) &&
 		!slices.ContainsFunc(scans, func(name string) bool {
 			return set.base.HookPolicyTierForConnector(name) == config.HookPolicyTierStrict
 		}) &&
+		(path != profilePathInspect || set.provenEnforcesInspection(proven, scans)) &&
 		set.unconfirmedHolderOnlyTightensHook(uncoveredMaybe, proven, scans) {
 		decision := set.decision(proven, profileMatchDefaultLookupFailed, "", source)
 		if len(yes) > 0 {
@@ -512,6 +517,16 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	decision.Candidates = candidates
 	decision.Refused = set.identityUncertaintyReason(subject, decision.Unproven, connectorName, agent)
 	return decision
+}
+
+// provenEnforcesInspection reports whether the selected profile blocks on the
+// inspect path of every connector in scans, so an unconfirmed account can only
+// lower the severity that blocks there.
+func (set *guardrailProfileSet) provenEnforcesInspection(proven string, scans []string) bool {
+	cfg := set.profilePathConfig(proven, profilePathInspect)
+	return cfg != nil && len(scans) > 0 && !slices.ContainsFunc(scans, func(name string) bool {
+		return !configBlocksOn(cfg, name, profilePathInspect)
+	})
 }
 
 // unconfirmedHolderOnlyTightensHook allows the OSS proven selection when an
@@ -683,9 +698,9 @@ func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, c
 	if standalone {
 		switch runtime.GOOS {
 		case "linux":
-			command = "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user " + user
+			command = "sudo " + managed.StandaloneGatewayPath("linux") + " enterprise linux profile-explain --user " + user
 		case "darwin":
-			command = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain --user " + user
+			command = "sudo " + managed.StandaloneGatewayPath("darwin") + " enterprise macos profile-explain --user " + user
 		case "windows":
 			// The installed CLI under the registered Program Files, with
 			// the user quoted for PowerShell (cowork-1-0-8 GAP-0076).
@@ -1076,8 +1091,9 @@ func (set *guardrailProfileSet) profileSandbox(name string) *config.OpenShellAdm
 
 // profileStricter orders profiles that do not cover each other: a blocks
 // (action) where b only observes, or both block and a blocks from a lower
-// severity (block_at). A name that is not a profile is the base
-// configuration.
+// severity (block_at). A block_at left unset is the level the rule pack of
+// the connector blocks from, so a profile that sets one is compared with that
+// level (GAP-0732). A name that is not a profile is the base configuration.
 func (set *guardrailProfileSet) profileStricter(a, b, connectorName string) bool {
 	ca, cb := set.profileConfig(a), set.profileConfig(b)
 	modeA, modeB := ca.HookModeForConnector(connectorName), cb.HookModeForConnector(connectorName)
@@ -1085,7 +1101,13 @@ func (set *guardrailProfileSet) profileStricter(a, b, connectorName string) bool
 		return modeA == "action"
 	}
 	rankA, rankB := blockAtRank(ca, connectorName), blockAtRank(cb, connectorName)
-	return rankA > 0 && rankB > 0 && rankA > rankB
+	if rankA > 0 && rankB > 0 {
+		return rankA > rankB
+	}
+	// guardrailThresholdRanks counts up from LOW, so a lower level blocks more.
+	effA, _ := guardrailThresholdRanks(resolveThresholds(ca, connectorName))
+	effB, _ := guardrailThresholdRanks(resolveThresholds(cb, connectorName))
+	return effA < effB
 }
 
 // profileConfig is the configuration a decision for profile name applies.

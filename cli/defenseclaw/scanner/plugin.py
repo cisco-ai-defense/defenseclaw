@@ -72,6 +72,7 @@ class PluginScannerWrapper:
         binary: str = SCANNER_NAME,
         *,
         llm: LLMConfig | None = None,
+        data_dir: str = "",
     ) -> None:
         # binary param kept for backward-compat but no longer used
         self._binary = binary
@@ -81,6 +82,7 @@ class PluginScannerWrapper:
         # overrides applied) reaches the plugin scanner without
         # requiring callers to hand-author a YAML policy.
         self._llm: LLMConfig | None = llm
+        self._data_dir = data_dir
 
     def name(self) -> str:
         return "plugin-scanner"
@@ -120,6 +122,7 @@ class PluginScannerWrapper:
 
         # Map CLI flags to PluginScanOptions
         options = PluginScanOptions()
+        options.data_dir = self._data_dir
         if policy:
             options.policy = policy
         elif lenient:

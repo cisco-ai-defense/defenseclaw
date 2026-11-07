@@ -63,6 +63,21 @@ def _is_regular_file(info: os.stat_result) -> bool:
     )
 
 
+# Defined only in Windows builds of the stat module.
+_IO_REPARSE_TAG_MOUNT_POINT = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003)
+
+
+def _is_link_or_junction(info: os.stat_result) -> bool:
+    """An entry path resolution follows: a symlink or a Windows junction.
+
+    Windows reports a junction as a directory with a mount-point reparse tag,
+    not as ``S_IFLNK``, so a symlink-only test misses it.
+    """
+    return stat.S_ISLNK(info.st_mode) or (
+        getattr(info, "st_reparse_tag", 0) == _IO_REPARSE_TAG_MOUNT_POINT
+    )
+
+
 def _read_regular_file(path: str, *, max_bytes: int) -> bytes | None:
     """Return one bounded, stable, non-link file snapshot."""
 
@@ -178,7 +193,7 @@ def _tree_sha256(skill_dir: str, *, tolerated_links: frozenset[str] = frozenset(
                 child = os.path.join(current, name)
                 info = os.stat(child, follow_symlinks=False)
                 relative = os.path.relpath(child, root).replace("\\", "/")
-                if stat.S_ISLNK(info.st_mode) and relative in tolerated_links:
+                if _is_link_or_junction(info) and relative in tolerated_links:
                     continue
                 if _is_real_directory(info):
                     safe_dirs.append(name)
@@ -189,7 +204,7 @@ def _tree_sha256(skill_dir: str, *, tolerated_links: frozenset[str] = frozenset(
                 full = os.path.join(current, name)
                 info = os.stat(full, follow_symlinks=False)
                 relative = os.path.relpath(full, root).replace("\\", "/")
-                if stat.S_ISLNK(info.st_mode) and relative in tolerated_links:
+                if _is_link_or_junction(info) and relative in tolerated_links:
                     continue
                 if not _is_regular_file(info):
                     return None

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -113,4 +114,42 @@ func distinctPaths(n int) []any {
 		out = append(out, fmt.Sprintf("/tmp/out/f%d.txt", i))
 	}
 	return out
+}
+
+// TestUnknownKeyTwinsJoinTheHomeInTheConnectorDialect pins that a home form
+// under an unknown key joins ActiveHome with slashes whatever the gateway
+// host is (a Windows gateway joined /sandbox as \sandbox, which then
+// resolved under the cwd and hid the DefenseClaw state file), and that a
+// Windows-form call resolves its state file too.
+func TestUnknownKeyTwinsJoinTheHomeInTheConnectorDialect(t *testing.T) {
+	for _, test := range []struct{ name, cwd, home, value, want string }{
+		{"posix home form", "/sandbox/work/app", "/sandbox", "~/.defenseclaw/config.yaml", "/sandbox/.defenseclaw/config.yaml"},
+		{"posix $HOME form", "/sandbox/work/app", "/sandbox", "$HOME/.defenseclaw/config.yaml", "/sandbox/.defenseclaw/config.yaml"},
+		{"windows home form", `C:\Users\x\work`, `C:\Users\x`, "~/.defenseclaw/config.yaml", "C:/Users/x/.defenseclaw/config.yaml"},
+		{"windows literal path", `C:\Users\x\work`, `C:\Users\x`, `C:\Users\x\.defenseclaw\config.yaml`, "C:/Users/x/.defenseclaw/config.yaml"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			notes := test.cwd + "/notes.txt"
+			if strings.Contains(test.cwd, `\`) {
+				notes = test.cwd + `\` + "notes.txt"
+			}
+			raw, err := json.Marshal(map[string]any{"file_path": notes, "content": "k", "f": test.value})
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := Input{Tool: "Write", Args: raw, CWD: test.cwd, ActiveHome: test.home}
+			twins, _ := UnknownKeyTwins(input, Analyze(input))
+			var got []string
+			for _, twin := range twins {
+				for _, path := range twin.Facts.Paths {
+					if path.Access == PathAccessWrite {
+						got = append(got, path.Resolved)
+					}
+				}
+			}
+			if !slices.Contains(got, test.want) {
+				t.Fatalf("write targets = %q, want one of them to be %q", got, test.want)
+			}
+		})
+	}
 }

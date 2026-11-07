@@ -386,7 +386,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	}
 	if !rotationTransaction {
 		if problem := foreignGatewayListener(cfg); problem != "" {
-			return fmt.Errorf("cannot start the gateway: %s. %s", problem, foreignGatewayListenerFix(cfg))
+			return fmt.Errorf("cannot start the gateway: %s. %s", problemClause(problem), foreignGatewayListenerFix(cfg))
 		}
 	}
 	if !coldStart {
@@ -849,7 +849,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("restart preflight: %w", err)
 	}
 	if problem := foreignGatewayListener(cfg); problem != "" {
-		return fmt.Errorf("cannot restart the gateway: %s. %s", problem, foreignGatewayListenerFix(cfg))
+		return fmt.Errorf("cannot restart the gateway: %s. %s", problemClause(problem), foreignGatewayListenerFix(cfg))
 	}
 	upgradeAuditStoreBeforeStart(cfg, os.Stdout, os.Stderr)
 	claimGatewayAPIPort(cfg)

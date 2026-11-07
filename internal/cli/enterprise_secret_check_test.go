@@ -17,6 +17,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
@@ -99,12 +101,29 @@ func TestEnterpriseSecretCheckReportsTheKeyOutcome(t *testing.T) {
 	}
 }
 
-// The example runs the gateway by its absolute path: the packages put it on no
-// PATH (cowork-1-0-8 GAP-0081).
+// The example runs the gateway by its absolute path: it is not on the PATH
+// (cowork-1-0-8 GAP-0081).
 func TestSecretCheckExampleNamesTheGatewayByItsFullPath(t *testing.T) {
 	example := newEnterpriseSecretCheckCommand().Example
 	want := "sudo " + managedHostGatewayCommand() + " enterprise secret check"
 	if !strings.Contains(example, want) || strings.Contains(example, "sudo defenseclaw-gateway") {
 		t.Fatalf("example = %q, want it to contain %q", example, want)
+	}
+}
+
+// A Secure Client computer keeps the example of release 1.0.5 after the
+// command tree is cut down to the one of main (review round 4, S1).
+func TestSecretCheckExampleOnSecureClientKeepsTheReleasedText(t *testing.T) {
+	previous := secureClientHost
+	t.Cleanup(func() { secureClientHost = previous })
+	root := &cobra.Command{Use: "defenseclaw-gateway"}
+	check := newEnterpriseSecretCheckCommand()
+	root.AddCommand(check)
+
+	secureClientHost = func() bool { return true }
+	keepCommandTreeOfMainOnSecureClient(root)
+	const released = "  sudo defenseclaw-gateway enterprise secret check --name ai-defense-api-key --json"
+	if check.Example != released {
+		t.Fatalf("Secure Client example = %q, want %q", check.Example, released)
 	}
 }
