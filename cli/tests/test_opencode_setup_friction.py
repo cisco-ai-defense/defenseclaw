@@ -21,8 +21,9 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import click
 import pytest
-from defenseclaw import bootstrap, file_permissions, opencode_service
+from defenseclaw import bootstrap, connector_paths, file_permissions, opencode_service
 from defenseclaw.config import default_config
 
 linux_only = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="user private groups are a Linux convention")
@@ -32,14 +33,18 @@ posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX background server
 # ---------------------------------------------------------------- private-group folders
 
 
-def _opencode_home(tmp_path: Path, mode: int = 0o775) -> tuple[Path, Path]:
-    """A home whose ~/.config and ~/.config/opencode have *mode* (Ubuntu umask 002: 0775)."""
+def _opencode_home(tmp_path: Path, mode: int = 0o775, *, config_mode: int | None = None) -> tuple[Path, Path]:
+    """A home whose ~/.config and ~/.config/opencode have *mode* (Ubuntu umask 002: 0775).
+
+    *config_mode* gives ~/.config another mode, so that ~/.config/opencode is the only
+    unsafe ancestor (GAP-0657 names the first unsafe ancestor, outermost first).
+    """
     home = tmp_path / "home"
     plugins = home / ".config" / "opencode" / "plugins"
     plugins.mkdir(parents=True)
     plugins.chmod(0o700)
-    for folder in (home / ".config", home / ".config" / "opencode"):
-        folder.chmod(mode)
+    (home / ".config").chmod(mode if config_mode is None else config_mode)
+    (home / ".config" / "opencode").chmod(mode)
     # Some hosts give their temp root a default ACL; with one the group bits
     # are the ACL mask and the rule rightly refuses.
     for folder in (tmp_path, home, home / ".config", home / ".config" / "opencode", plugins):
@@ -66,6 +71,29 @@ def _accounts(monkeypatch, tmp_path: Path, gid: int, *, passwd_extra: str = "", 
     monkeypatch.setattr(pwd, "getpwuid", lambda _uid: SimpleNamespace(pw_name="me", pw_gid=gid))
     monkeypatch.setattr(grp, "getgrgid", lambda _gid: SimpleNamespace(gr_name="me", gr_mem=list(nss_members)))
 
+
+
+@linux_only
+@pytest.mark.parametrize("case", ["other-primary-account", "nss-member", "no-group-entry"])
+def test_folders_another_account_can_write_stay_refused(monkeypatch, tmp_path, case):
+    """The r13 refusal cases that test_gap0657_opencode_private_group.py does not pin."""
+    home, plugin = _opencode_home(tmp_path, 0o775, config_mode=0o755)
+    monkeypatch.setenv("HOME", str(home))
+    gid = os.stat(home / ".config").st_gid
+    kwargs = {
+        "other-primary-account": {"passwd_extra": f"bob:x:{os.geteuid() + 1}:{gid}::/home/bob:/bin/bash\n"},
+        "nss-member": {"nss_members": ("bob",)},
+        "no-group-entry": {"group_line": f"other:x:{gid + 1}:\n"},
+    }[case]
+    _accounts(monkeypatch, tmp_path, gid, **kwargs)
+
+    loose = connector_paths.opencode_writable_plugin_folder([str(plugin)])
+    assert loose == os.path.realpath(home / ".config" / "opencode")
+    monkeypatch.setattr(connector_paths, "connector_config_files", lambda _name: [str(plugin)])
+    from defenseclaw.commands import cmd_setup
+
+    with pytest.raises(click.ClickException, match="chmod go-w"):
+        cmd_setup._preflight_opencode_plugin_folder()
 
 
 # ---------------------------------------------------------------- per-account service port
