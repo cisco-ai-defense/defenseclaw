@@ -22,16 +22,22 @@ func TestLookupAdminAccountSpellingLocal(t *testing.T) {
 	other := Account{Name: "shared", UID: 1070}
 	r := spellingResolver{answers: map[string]Account{
 		"short": local, "short@dclab.test": directory, "shared": other,
+		"Dup": {Name: "Dup", UID: 1080}, "dup": {Name: "dup", UID: 1081},
 	}}
 	prev := LocalSpellingAccounts
 	t.Cleanup(func() { LocalSpellingAccounts = prev })
-	locals := map[string]int{"short": 1059, "ghost": 1071, "taken": 1070}
+	locals := map[string]int{"short": 1059, "ghost": 1071, "taken": 1070, "Dup": 1080, "dup": 1081}
 	LocalSpellingAccounts = func(context.Context) (map[string]int, error) { return locals, nil }
 	for _, tt := range []struct {
 		name string
 		want int
 	}{
 		{`.\short`, 1059},
+		{`.\SHORT`, 1059}, // a case variant of the one local account (review M1)
+		{`.\Short`, 1059},
+		{`.\Dup`, 1080}, // an exact name wins over its case variants
+		{`.\dup`, 1081},
+		{`.\DUP`, -1}, // two accounts differ only in case: names neither
 		{` .\short `, 1059},
 		{`.\ghost`, -1},  // in the passwd file, not answered by NSS
 		{`.\taken`, -1},  // its uid answers under another name

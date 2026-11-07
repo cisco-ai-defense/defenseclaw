@@ -63,6 +63,7 @@ func TestGAP0759LocalSpellingExplainsTheSamePrincipalAsTheUID(t *testing.T) {
 		{"local only, uid", []unixidentity.Account{local}, map[string]int{"short": 1059}, "1059", "1059", ""},
 		{"local only, bare name", []unixidentity.Account{local}, map[string]int{"short": 1059}, "short", "1059", ""},
 		{"local namesake of AD, dot-backslash", []unixidentity.Account{local, directory}, map[string]int{"short": 1059}, `.\short`, "1059", ""},
+		{"local namesake of AD, dot-backslash case variant", []unixidentity.Account{local, directory}, map[string]int{"short": 1059}, `.\SHORT`, "1059", ""},
 		{"local namesake of AD, uid", []unixidentity.Account{local, directory}, map[string]int{"short": 1059}, "1059", "1059", ""},
 		{"local namesake of AD, UPN", []unixidentity.Account{local, directory}, map[string]int{"short": 1059}, "short@dclab.test", "94408157", ""},
 		{"AD only, dot-backslash", []unixidentity.Account{directory}, map[string]int{}, `.\short`, "", "no local account named"},
@@ -149,8 +150,10 @@ func TestGAP0759PerUserOwnerCheckTakesOnlyTheOwnerLocalSpelling(t *testing.T) {
 		refused bool
 	}{
 		{local, `.\short`, false},
+		{local, `.\SHORT`, false},
 		{local, "1059", false},
 		{directory, `.\short`, true},
+		{directory, `.\SHORT`, true},
 		{directory, "94408157", false},
 		{local, `.\nobody`, true},
 	} {
