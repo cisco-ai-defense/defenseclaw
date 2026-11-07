@@ -1514,6 +1514,52 @@ func defaultEnterpriseHookWorkerExecutable() (string, error) {
 	return exe, nil
 }
 
+// enterpriseHookWorkerInterruptDrain is how long a worker that is running when
+// its caller is interrupted may take to answer before it is killed, for a
+// caller that asked for it (withEnterpriseHookWorkerInterruptDrain). The
+// guardian watch loop interrupts a pass for every new file event. A worker
+// killed there loses the answer that says it put a hook file or config entry
+// back, and the restore is then counted, audited and recorded nowhere
+// (GAP-0754). A worker answers within its recheck window, well under this.
+var enterpriseHookWorkerInterruptDrain = 5 * time.Second
+
+type enterpriseHookWorkerInterruptDrainKey struct{}
+
+// withEnterpriseHookWorkerInterruptDrain marks ctx so that
+// runEnterpriseHookWorker lets a running worker finish, up to
+// enterpriseHookWorkerInterruptDrain, when ctx is canceled, and accepts its
+// answer. A worker not yet started when ctx is canceled is not started.
+// Without the mark a canceled ctx kills the worker at once, as before.
+func withEnterpriseHookWorkerInterruptDrain(ctx context.Context) context.Context {
+	return context.WithValue(ctx, enterpriseHookWorkerInterruptDrainKey{}, true)
+}
+
+// enterpriseHookWorkerContext derives the context of one worker process from
+// the context of its caller: bounded by timeout and, for a caller that marked
+// its context, by the interrupt drain instead of by the cancellation of the
+// caller. stopDrain releases the drain watcher. A marked context that is
+// already canceled yields its error.
+func enterpriseHookWorkerContext(parent context.Context, timeout time.Duration) (ctx context.Context, cancel context.CancelFunc, stopDrain func() bool, err error) {
+	if drains, _ := parent.Value(enterpriseHookWorkerInterruptDrainKey{}).(bool); !drains {
+		ctx, cancel = context.WithTimeout(parent, timeout)
+		return ctx, cancel, func() bool { return true }, nil
+	}
+	if err := parent.Err(); err != nil {
+		return nil, nil, nil, err
+	}
+	ctx, cancel = context.WithTimeout(context.WithoutCancel(parent), timeout)
+	stopDrain = context.AfterFunc(parent, func() {
+		timer := time.NewTimer(enterpriseHookWorkerInterruptDrain)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			cancel()
+		case <-ctx.Done():
+		}
+	})
+	return ctx, cancel, stopDrain, nil
+}
+
 type workerOutputBuffer struct {
 	buf      bytes.Buffer
 	limit    int
@@ -1562,7 +1608,11 @@ func runEnterpriseHookWorker(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(ctx, workerTimeout(request))
+	ctx, cancel, stopDrain, err := enterpriseHookWorkerContext(ctx, workerTimeout(request))
+	if err != nil {
+		return enterpriseHookWorkerResponse{}, err
+	}
+	defer stopDrain()
 	defer cancel()
 	cmd := exec.CommandContext(ctx, exe, enterpriseHookWorkerArgs...)
 	cmd.Dir = "/"
