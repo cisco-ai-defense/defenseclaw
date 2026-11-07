@@ -45,7 +45,7 @@ from defenseclaw.scanner.plugin_scanner.helpers import (
     strip_comment,
     strip_hash_comment,
 )
-from defenseclaw.scanner.plugin_scanner.regexp_receiver import RegexpReceivers
+from defenseclaw.scanner.plugin_scanner.regexp_receiver import RegexpReceivers, regexp_may_be_changed
 from defenseclaw.scanner.plugin_scanner.rules import (
     BINARY_EXTENSIONS,
     BUNDLE_DIRS,
@@ -170,6 +170,7 @@ def check_dependencies(
     findings: list[Finding],
     target: str,
     protected_sources: bool = True,
+    data_dir: str = "",
 ) -> None:
     if not manifest.dependencies:
         return
@@ -237,7 +238,7 @@ def check_dependencies(
             # A local source that names or resolves into protected state is
             # not a development convenience; it is blocked on every profile.
             protected = protected_sources and path_reaches_private_state(
-                os.path.join(target, version[len("file:"):]),
+                os.path.join(target, version[len("file:"):]), data_dir,
             )
             findings.append(
                 make_finding(
@@ -558,13 +559,26 @@ def scan_source_files(
 
     total_bytes = 0
 
+    loaded: list[tuple[str, str]] = []
     for file_path in ts_files:
         try:
             with open(file_path, encoding="utf-8", errors="replace") as fh:
-                content = fh.read()
+                loaded.append((file_path, fh.read()))
         except OSError:
             continue
 
+    # A RegExp match is told from a command only when no file of the plugin
+    # can change what a regular expression reaches (see regexp_receiver).
+    scripts = [(path, text) for path, text in loaded if not path.casefold().endswith(".py")]
+    regexp_aware = not secure_client_rules and not (
+        any("exec" in text for _, text in scripts)
+        and any(
+            regexp_may_be_changed(path, [strip_comment(line) for line in text.split("\n")])
+            for path, text in scripts
+        )
+    )
+
+    for file_path, content in loaded:
         total_bytes += len(content)
 
         rel_path = (
@@ -608,7 +622,7 @@ def scan_source_files(
 
         _scan_suspicious_patterns(
             call_lines, rel_path, findings, capabilities, profile, in_test, "py" if is_py else "js", code_lines,
-            regexp_aware=not secure_client_rules,
+            regexp_aware=regexp_aware,
         )
         _check_for_hardcoded_secrets(lines, rel_path, findings, in_test)
         _check_for_credential_access(code_lines, rel_path, findings, capabilities, in_test)

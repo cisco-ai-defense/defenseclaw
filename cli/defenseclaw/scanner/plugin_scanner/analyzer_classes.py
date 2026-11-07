@@ -71,6 +71,7 @@ class DependencyAnalyzer:
         check_dependencies(
             ctx.manifest, findings, ctx.plugin_dir,
             protected_sources=not ctx.metadata.get("secure_client_rules"),
+            data_dir=ctx.metadata.get("data_dir", ""),
         )
         return findings
 

@@ -54,7 +54,8 @@ def _flagged(root: str, data_dir: str):
     if _is_link_or_junction(info):
         if link_reaches_private_state(root, data_dir):
             yield root, "reaches protected state"
-        return
+            return
+        # An ordinary link to a dependency folder: what it holds is judged too.
     seen = 0
     for current, dirs, files in os.walk(root, followlinks=False):
         for name in (*dirs, *files):
