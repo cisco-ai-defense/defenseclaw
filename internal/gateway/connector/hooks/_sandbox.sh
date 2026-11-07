@@ -80,6 +80,7 @@ readonly DC_SANDBOX_RETRY_MAX_TIME={{.SandboxRetryMaxTime}}
 readonly DC_SANDBOX_SESSION_END_MAX_TIME={{.SandboxSessionEndMaxTime}}
 readonly DC_SANDBOX_HOOK_STARTED=$SECONDS
 DC_SANDBOX_RECEIPT_STATUS=transport
+DC_SANDBOX_RECEIPT_BODY=""
 
 # DC_SANDBOX_UNREACHABLE is why a sandbox hook blocked when DefenseClaw did not
 # answer, worded for the agent and for the user who reads its screen: what is
@@ -126,6 +127,34 @@ defenseclaw_sandbox_unreachable_reason() {
       esac ;;
     *) printf '%s' "$DC_SANDBOX_UNREACHABLE" ;;
   esac
+}
+
+# defenseclaw_sandbox_budget_reason BODY prints why a sandbox hook blocked a
+# call the managed gateway refused 429 because the user's sandboxes used up
+# their call budget: the gateway's own message names the rate (it is the one
+# place the numbers live), cut to one printable line of at most 300
+# characters. A refusal for its rate is not an outage and says so.
+defenseclaw_sandbox_budget_reason() {
+  local message
+  message="$(printf %s "$1" | _dc_jq -r 'if type == "object" then (.message // "") else "" end' 2>/dev/null)" || message=""
+  message="$(printf %s "$message" | LC_ALL=C tr -d '\000-\037\177')"
+  message="${message:0:300}"
+  if [ -n "$message" ]; then
+    printf 'DefenseClaw refused this tool call, it is over a call budget (not an outage): %s' "$message"
+  else
+    printf %s "DefenseClaw refused this tool call, it is over the call budget of this user's sandboxes (not an outage): retry in a few seconds"
+  fi
+}
+
+# defenseclaw_sandbox_receipt_failure prints why a sandbox hook blocked after
+# its delivery receipt was not acknowledged: the budget message for a 429,
+# else the status.
+defenseclaw_sandbox_receipt_failure() {
+  if [ "$DC_SANDBOX_RECEIPT_STATUS" = 429 ]; then
+    defenseclaw_sandbox_budget_reason "$DC_SANDBOX_RECEIPT_BODY"
+  else
+    printf 'sandbox hook receipt was not acknowledged (status %s)' "$DC_SANDBOX_RECEIPT_STATUS"
+  fi
 }
 
 # defenseclaw_sandbox_require_token CONNECTOR HOOK_NAME SUBJECT
@@ -324,6 +353,7 @@ defenseclaw_sandbox_confirm_receipt() {
     -H "Authorization: Bearer ${DEFENSECLAW_SANDBOX_TOKEN}")" || status=$?
   code="${reply##*$'\n'}"
   case "$code" in [0-9][0-9][0-9]) DC_SANDBOX_RECEIPT_STATUS="$code" ;; esac
+  [ "$code" = 429 ] && DC_SANDBOX_RECEIPT_BODY="${reply%$'\n'*}"
   [ "$status" -eq 0 ] && [ "$code" = 200 ] || return 1
   received="$(printf '%s' "${reply%$'\n'*}" | _dc_jq -r '.received // false' 2>/dev/null)" || return 1
   [ "$received" = true ]

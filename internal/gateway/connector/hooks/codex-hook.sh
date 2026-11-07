@@ -748,7 +748,9 @@ elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/nul
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}  fail_response "gateway returned HTTP ${HTTP_CODE}"
 {{else}}  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
 {{end}}
-elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
+{{if .Sandbox}}elif [ "$HTTP_CODE" = 429 ]; then
+  fail_response "$(defenseclaw_sandbox_budget_reason "$RESULT")"
+{{end}}elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi{{end}}
 
@@ -821,7 +823,7 @@ case "$ACTION" in
 esac
 
 {{if .Sandbox}}if ! defenseclaw_sandbox_confirm_receipt "/api/v1/codex/hook" "$RESULT"; then
-  fail_unreachable "sandbox hook receipt was not acknowledged (status ${DC_SANDBOX_RECEIPT_STATUS})"
+  fail_unreachable "$(defenseclaw_sandbox_receipt_failure)"
 fi
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"

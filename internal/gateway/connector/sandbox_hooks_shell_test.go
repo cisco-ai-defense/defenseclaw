@@ -325,6 +325,31 @@ defenseclaw_sandbox_confirm_receipt /hook '{"action":"allow"}'`)
 				t.Fatalf("failed receipt did not report the response status: %q", run.stderr)
 			}
 		})
+		// A call the managed gateway refused for the call budget of the user
+		// (429) is blocked with the gateway message, which names the budget
+		// and says it is not an outage; a refused receipt is no longer read as
+		// a call that was "not acknowledged" (rel-1-0-6 GAP-0490).
+		budgetBody := `{"error":"rate_limited","reason":"enterprise_managed_rate_limited","message":"DefenseClaw allows the sandboxes of one user 40 tool calls a second together (a burst of 100); this call is over that budget and did not run, so retry in a few seconds","retry_after_seconds":"1"}`
+		for _, refused := range []struct {
+			name      string
+			responses []string
+			calls     int
+		}{
+			{"budget_refused_proposal", []string{"429|" + budgetBody}, 1},
+			{"budget_refused_receipt", []string{`200|{"action":"allow","delivery_receipt":"` + receiptID + `"}`, "429|" + budgetBody}, 2},
+		} {
+			t.Run(tc.connector+"/"+refused.name, func(t *testing.T) {
+				run := h.run(t, SandboxHookDir+"/"+tc.script, tc.args, tc.stdin, env, refused.responses)
+				if !tc.blocked(run) || len(run.calls) != refused.calls {
+					t.Fatalf("refused call exit=%d calls=%d stdout=%q stderr=%q", run.exitCode, len(run.calls), run.stdout, run.stderr)
+				}
+				text := run.stdout + run.stderr
+				if !strings.Contains(text, "40 tool calls a second together (a burst of 100)") || !strings.Contains(text, "not an outage") ||
+					strings.Contains(text, "not acknowledged") || strings.Contains(text, "does not answer") {
+					t.Fatalf("refusal did not name the call budget: stdout=%q stderr=%q", run.stdout, run.stderr)
+				}
+			})
+		}
 	}
 }
 

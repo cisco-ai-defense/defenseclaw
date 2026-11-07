@@ -11,6 +11,7 @@
 package gateway
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"sync"
@@ -32,25 +33,35 @@ import (
 // gateway-wide in-flight cap stays shared by every key.
 //
 // Sizing: a daemon's per-binding limiter (sandboxauth.DefaultLimiterConfig,
-// 25/s burst 100) is the first limit one sandbox meets; sandbox-hook at
-// 100/s carries four sandboxes at that rate and burst 200 lets two burst
-// at once. The delivery receipt that confirms an allowed answer is a second
-// post on the hook route: sandbox-receipt, the same rate and burst, counts
-// those (hookCallerAdmissionKey), so a receipt never spends the evaluation
-// rate. There is no four-binding limit: one account can use its budget
-// across more bindings, each with its own in-flight limit (sandboxauth.DefaultMaxInFlight). The
-// shared hook and receipt admission therefore holds the most calls the
-// account bucket can admit during each managed request's actual lifetime,
-// including its initial burst (GAP-0490). The 60 s policy/current poll is
-// one call a minute per live registration.
+// 25/s burst 100) is the first limit one sandbox meets. The account budget
+// is what the managed gateway answers inside the hook's 3.5 s window: every
+// relayed call (a proposal and its delivery receipt) makes about two dozen
+// audit writes under one SQLite write lock, and four sandboxes at 10 calls a
+// second answer in about a second on the shared build box (p95 under 1 s),
+// while 96 calls a second did not answer in time in half the runs
+// (rel-1-0-6 GAP-0490). The budget is therefore 40 calls a second with a
+// burst of 100 (the burst one sandbox may itself send), and a call past it
+// is refused at once with a 429 and a message that names the budget, instead
+// of waiting past the hook's window for an answer that comes too late. The
+// delivery receipt that confirms an allowed answer is a second post on the
+// hook route: sandbox-receipt, the same rate and burst, counts those
+// (hookCallerAdmissionKey), so a receipt never spends the evaluation rate.
+// There is no four-binding limit: one account can use its budget across
+// more bindings, each with its own in-flight limit
+// (sandboxauth.DefaultMaxInFlight). The shared hook and receipt admission
+// therefore holds the most calls the account bucket can admit during each
+// managed request's actual lifetime, including its initial burst. Raising
+// the budget toward 100/s needs less work under the audit write lock
+// (the 1.0.10 performance rows). The 60 s policy/current poll is one call a
+// minute per live registration.
 const (
 	sandboxBudgetHook    = "sandbox-hook"
 	sandboxBudgetReceipt = "sandbox-receipt"
 	sandboxBudgetPending = "sandbox-pending"
 	sandboxBudgetPolicy  = "sandbox-policy"
 	sandboxBudgetEvents  = "sandbox-events"
-	sandboxUserHookRate  = 100
-	sandboxUserHookBurst = 200
+	sandboxUserHookRate  = 40
+	sandboxUserHookBurst = 100
 )
 
 var sandboxUserHookInFlight, sandboxUserReceiptInFlight = managedSandboxInFlightLimits()
@@ -217,4 +228,26 @@ func sandboxBudgetForKey(key string) (sandboxBudgetLimit, bool) {
 	}
 	limit, ok := sandboxBudgetLimits[key[at+1:]]
 	return limit, ok
+}
+
+// sandboxHookBudgetMessage is the text of the 429 an account's relayed hook
+// or receipt gets when the account budget is empty: it names the budget, so
+// the user knows the call was refused for its rate, not lost to an outage.
+func sandboxHookBudgetMessage() string {
+	return fmt.Sprintf("DefenseClaw allows the sandboxes of one user %d tool calls a second together (a burst of %d); this call is over that budget and did not run, so retry in a few seconds",
+		sandboxUserHookRate, sandboxUserHookBurst)
+}
+
+// isSandboxHookClassKey reports whether a limiter key is one of the account's
+// relayed hook or receipt classes.
+func isSandboxHookClassKey(key string) bool {
+	at := strings.LastIndexByte(key, '|')
+	if at < 0 {
+		return false
+	}
+	switch key[at+1:] {
+	case sandboxBudgetHook, sandboxBudgetPending, sandboxBudgetReceipt:
+		return true
+	}
+	return false
 }
