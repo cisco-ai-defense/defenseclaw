@@ -36,17 +36,38 @@ INSTALL_PS1 = ROOT / "scripts" / "install.ps1"
 LIFECYCLE_PS1 = ROOT / "scripts" / "test-install-lifecycle.ps1"
 TOKEN = "__DEFENSECLAW_VERSION__"
 POWERSHELL = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or shutil.which("pwsh")
+# Call shapes bound at import, before any fixture patches subprocess.
+_RUN_BOUND_AT_IMPORT = subprocess.run
+_POPEN_BOUND_AT_IMPORT = subprocess.Popen
+
+
+def _launches_a_missing_powershell(args, kwargs) -> bool:  # type: ignore[no-untyped-def]
+    # Where PowerShell is not installed POWERSHELL is None, and a test that
+    # builds [POWERSHELL, ...] (or [str(POWERSHELL), ...]) launches "None".
+    if POWERSHELL is not None:
+        return False
+    first = kwargs.get("executable")
+    if first is None:
+        first = args[0] if isinstance(args, (list, tuple)) and args else args
+    if isinstance(first, str) and not isinstance(args, (list, tuple)):
+        first = first.split(None, 1)[0] if first.strip() else first
+    return first is None or str(first) == "None"
 
 
 def _skip_powershell_calls_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    real_run = subprocess.run
+    # Gate the one place every launch passes through: subprocess.Popen
+    # construction. subprocess.run, check_output, check_call, a name bound to
+    # any of them before this runs, `from subprocess import Popen` and a Popen
+    # subclass all end in Popen.__init__, so none of those call shapes can
+    # reach a missing PowerShell and fail with a TypeError instead of skipping.
+    real_init = subprocess.Popen.__init__
 
-    def run(args, *rest, **kwargs):  # type: ignore[no-untyped-def]
-        if POWERSHELL is None and args and (args[0] is None or str(args[0]) == "None"):
+    def init(self, args, *rest, **kwargs):  # type: ignore[no-untyped-def]
+        if _launches_a_missing_powershell(args, kwargs):
             pytest.skip("PowerShell is not installed")
-        return real_run(args, *rest, **kwargs)
+        real_init(self, args, *rest, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(subprocess.Popen, "__init__", init)
 
 
 @pytest.fixture(autouse=True)
@@ -4695,22 +4716,37 @@ def test_a_test_that_runs_powershell_is_skipped_where_it_is_not_installed(
     # GAP-0733: one test called the runner without the skipif its siblings
     # carry, so a host without PowerShell failed with a TypeError (the
     # interpreter path was None) instead of skipping. The gate is the runtime
-    # fixture above, so it covers every way a test can reach PowerShell: the
-    # runner, an alias of it, or a direct subprocess call.
+    # fixture above on Popen construction, so it covers every way a test can
+    # reach PowerShell: the runner, an alias of subprocess.run bound before the
+    # fixture, subprocess.Popen directly or by alias, and the check_* helpers.
     module = sys.modules[__name__]
     monkeypatch.setattr(module, "POWERSHELL", None)
     _skip_powershell_calls_when_missing(monkeypatch)
     alias = _run_powershell
+    ps_args = ["-NoProfile", "-Command", "exit 0"]
     for reach in (
         lambda: _run_powershell("exit 0"),
         lambda: alias("exit 0"),
-        lambda: subprocess.run([POWERSHELL, "-NoProfile", "-Command", "exit 0"], check=False),
-        lambda: subprocess.run([str(POWERSHELL), "-NoProfile", "-Command", "exit 0"], check=False),
+        lambda: subprocess.run([POWERSHELL, *ps_args], check=False),
+        lambda: subprocess.run([str(POWERSHELL), *ps_args], check=False),
+        lambda: _RUN_BOUND_AT_IMPORT([POWERSHELL, *ps_args], check=False),
+        lambda: _RUN_BOUND_AT_IMPORT([str(POWERSHELL), *ps_args], check=False),
+        lambda: subprocess.Popen([POWERSHELL, *ps_args]),
+        lambda: _POPEN_BOUND_AT_IMPORT([str(POWERSHELL), *ps_args]),
+        lambda: subprocess.check_output([POWERSHELL, *ps_args]),
+        lambda: subprocess.check_call([str(POWERSHELL), *ps_args]),
+        lambda: subprocess.run(f"{POWERSHELL} -NoProfile -Command exit", shell=True, check=False),
     ):
         with pytest.raises(pytest.skip.Exception):
             reach()
-    # Benign twin: a command that is not PowerShell still runs.
-    assert subprocess.run([sys.executable, "-c", "pass"], check=False).returncode == 0
+    # Benign twins: a command that is not PowerShell still runs through every
+    # one of those shapes.
+    python = [sys.executable, "-c", "pass"]
+    assert subprocess.run(python, check=False).returncode == 0
+    assert _RUN_BOUND_AT_IMPORT(python, check=False).returncode == 0
+    assert _POPEN_BOUND_AT_IMPORT(python).wait() == 0
+    assert subprocess.check_call(python) == 0
+    assert subprocess.check_output([sys.executable, "-c", "print('ok')"], text=True).strip() == "ok"
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
