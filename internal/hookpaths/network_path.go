@@ -222,22 +222,38 @@ func networkPathRead(path string) (unanswered, budgetCut bool) {
 // opens them: a link inside an answered share may lead on to another share,
 // and a name with a trailing separator opens its last link as well
 // (os.Lstat follows it), so the walk goes on from each answered share until
-// no link leads into a further share (rel-1-0-9:GAP-0621).
+// no link leads into a further share (rel-1-0-9:GAP-0621). A walk that the
+// link bound stopped has not shown that no unasked share is left, so it is
+// reported as unanswered, never as a completed check; a chain of links that
+// comes back to a path it has asked is a loop, which the system fails, and
+// every share on it has been asked.
 func networkPathReadAs(path string, followLast bool) (unanswered, budgetCut bool) {
 	if path != "" && os.IsPathSeparator(path[len(path)-1]) {
 		followLast = true
 	}
+	var seen map[string]bool
 	for range networkLinkHopLimit + 1 {
 		if root := networkShareRootOf(path); root != "" {
 			if silent, cut := askNetworkShare(root); silent {
 				return true, cut
 			}
 		}
-		if path = linkIntoShare(path, followLast); path == "" {
+		next, exhausted := linkIntoShare(path, followLast)
+		switch {
+		case exhausted:
+			return true, false
+		case next == "":
+			return false, false
+		case seen[next]:
 			return false, false
 		}
+		if seen == nil {
+			seen = make(map[string]bool)
+		}
+		seen[next] = true
+		path = next
 	}
-	return false, false
+	return true, false
 }
 
 // askNetworkShare asks the share root once for every call that names it and
