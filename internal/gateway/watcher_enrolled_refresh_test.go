@@ -59,9 +59,11 @@ func TestEnrolledMCPServersAreReadAgainBeforeAToolCall(t *testing.T) {
 // refresh that fails refuses the call; a tool result and Secure Client do not
 // refresh.
 func TestHookDecidesMCPToolCallOnTheRefreshedDefinition(t *testing.T) {
-	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy(), DeploymentMode: "managed_enterprise",
+		Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "claudecode"
+	cfg.Guardrail.RulePack = "strict"
 	api := &APIServer{scannerCfg: cfg}
 	refreshed, refreshErr := 0, error(nil)
 	api.SetMCPRefreshBeforeCall(func(_ context.Context, connector string) error {
@@ -139,7 +141,8 @@ func TestSlowRefreshRefusesTheCallInsideTheHookWait(t *testing.T) {
 		},
 		reload: func() { reads++ },
 	})
-	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy(), DeploymentMode: "managed_enterprise",
+		Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "claudecode"
 	api := &APIServer{scannerCfg: cfg}
@@ -148,7 +151,7 @@ func TestSlowRefreshRefusesTheCallInsideTheHookWait(t *testing.T) {
 	api.SetMCPAdmissionPending(func(_, server, _, _ string) (string, bool) { return server, false })
 	call := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "mcp__gb05-benign__ping",
 		ToolInput: map[string]interface{}{}, CWD: `C:\Users\dcw-std1\r103-gb05-proj`}
-	const wait = "DefenseClaw is still scanning MCP server gb05-benign"
+	const wait = "DefenseClaw could not read admission for MCP server gb05-benign"
 
 	started := time.Now()
 	resp := api.evaluateClaudeCodeHook(context.Background(), call)
@@ -216,7 +219,8 @@ func TestKiroMCPToolCallIsDecidedOnTheRefreshedDefinition(t *testing.T) {
 	saved := agentHookMCPFromEnrolledSpool
 	agentHookMCPFromEnrolledSpool = func(*config.Config) bool { return true }
 	t.Cleanup(func() { agentHookMCPFromEnrolledSpool = saved })
-	api := &APIServer{scannerCfg: &config.Config{}}
+	api := &APIServer{scannerCfg: &config.Config{DeploymentMode: "managed_enterprise",
+		Enterprise: config.EnterpriseConfig{Profile: "standalone"}}}
 	refreshed, refreshErr := 0, error(nil)
 	api.SetMCPRefreshBeforeCall(func(_ context.Context, connector string) error {
 		if connector != "kiro" {
@@ -319,7 +323,8 @@ func TestPartialRefreshRefusesOnlyTheCallsOfTheRecordsItDidNotPublish(t *testing
 	saved := agentHookMCPFromEnrolledSpool
 	agentHookMCPFromEnrolledSpool = func(*config.Config) bool { return true }
 	t.Cleanup(func() { agentHookMCPFromEnrolledSpool = saved })
-	api := &APIServer{scannerCfg: &config.Config{}}
+	api := &APIServer{scannerCfg: &config.Config{DeploymentMode: "managed_enterprise",
+		Enterprise: config.EnterpriseConfig{Profile: "standalone"}}}
 	api.SetMCPRefreshBeforeCall(s.refreshEnrolledMCPBeforeCall)
 	api.SetMCPAdmissionPending(func(_, server, _, _ string) (string, bool) { return server, false })
 	answer = aliceClaude

@@ -116,6 +116,8 @@ Both hook configs hold the system `cmd.exe /d /c`, which runs system Windows Pow
 
 Kiro proceeds past any exit status other than 0 and 2, so a block has to reach Kiro as exit 2. It does in every way Kiro can start the command. `pwsh -Command` or `powershell -Command` (Kiro CLI 2.24 starts every hook as `"pwsh" -Command "<command>"`) report a native exit other than 0 as 1 unless the command exits with it, which the second line does. `cmd.exe /c` stops reading at the line break and never runs the second line. A hook also exits 2 when it fails inside DefenseClaw, for a usage error or an invalid flag value, in every fail mode. A gateway that is not running follows the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage); a call it blocks exits 2.
 
+When `defenseclaw-hook.exe` is missing or cannot start (a folder, an empty or damaged file, a file you may not run), the script exits 2 in every fail mode, with `DefenseClaw blocked this: its Kiro hook launcher cannot start. Run the DefenseClaw installer again to repair it.` on stderr. Kiro blocks the tool call; on its other events exit 2 is a warning.
+
 ## Enterprise (standalone profile)
 
 The [guardian](/docs/enterprise/concepts) enrolls Kiro per user on Linux, macOS and Windows and repairs these files.
@@ -139,7 +141,7 @@ Managed Windows pins each enrolled user to one of two reviewed contracts: `kiro-
 
 ## ACP guard
 
-The ACP guard is an enforcement path of its own. It vetoes prompts, output, permissions, filesystem, terminal and extension methods at the protocol boundary, whichever Kiro surface the editor launches. See the [ACP guard guide](/docs/acp-guard). It runs on every OS for per-user installs, for editors that start Kiro over ACP. In enterprise managed mode an administrator enrolls each user, editor and agent with `defenseclaw-gateway enterprise acp enroll`, and the user runs the setup command it reports. Managed ACP is preview: it has not passed a live round in this release ([Support matrix](/docs/support-matrix)).
+The ACP guard is an enforcement path of its own. It vetoes prompts, output, permissions, filesystem, terminal and extension methods at the protocol boundary, whichever Kiro surface the editor launches. See the [ACP guard guide](/docs/acp-guard). It runs on every OS for per-user installs, for editors that start Kiro over ACP. In enterprise managed mode an administrator enrolls each user, editor and agent with `/opt/defenseclaw/bin/defenseclaw-gateway enterprise acp enroll` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS), and the user runs the setup command it reports. Managed ACP is preview: it has not passed a live round in this release ([Support matrix](/docs/support-matrix)).
 
 ```bash
 defenseclaw acp setup --client zed --agent kiro

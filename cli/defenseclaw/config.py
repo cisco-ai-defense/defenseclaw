@@ -574,8 +574,8 @@ def config_path_for_data_dir(data_dir: str | os.PathLike[str] | None = None) -> 
 
 GATEWAY_PID_FILE_NAME = "gateway.pid"
 
-# (path, st_dev, st_ino, st_size, st_mtime_ns) -> the data_dir that config names.
-_home_data_dir_cache: dict[tuple[str, int, int, int, int], str | None] = {}
+# (path, st_dev, st_ino, st_size, st_mtime_ns) -> (configured data_dir, managed mode).
+_home_config_cache: dict[tuple[str, str, int, int, int, int], tuple[str | None, bool]] = {}
 
 
 def gateway_home_for_data_dir(data_dir: str | os.PathLike[str]) -> str:
@@ -589,28 +589,52 @@ def gateway_home_for_data_dir(data_dir: str | os.PathLike[str]) -> str:
     config write create a second config.yaml there, without the account ports
     (rel-1-0-6 GAP-0232), and setup read the default API port and found no
     gateway.pid, so it rolled the connector back while the gateway served
-    (GAP-0230). The Go hook runtime had the same gap (GAP-0224). A data_dir
-    holding any config.yaml entry stays its own home, so the default layout
-    and a managed install are unchanged.
+    (GAP-0230). The Go hook runtime had the same gap (GAP-0224). The active
+    config's data_dir binding selects the PID-record home even if a moved
+    store still has an older config.yaml. An explicit per-user config path can
+    be outside the install home; its PID record remains under
+    ``DEFENSECLAW_HOME`` (or the default home). Unrelated stores and managed
+    runtimes keep their own PID home.
     """
     own = os.fspath(data_dir)
     try:
-        os.lstat(os.path.join(own, CONFIG_FILE_NAME))
-        return own
-    except FileNotFoundError:
-        pass
-    except OSError:
-        return own
-    if os.environ.get(CONFIG_PATH_ENV):
-        return own
-    try:
-        home = os.fspath(default_data_path())
+        home, configured, managed = _install_home_binding()
     except (OSError, KeyError, NotImplementedError):
         return own
-    configured = _home_config_data_dir(os.path.join(home, CONFIG_FILE_NAME))
+    if managed:
+        return own
     if configured and _same_folder(configured, own):
         return home
     return own
+
+
+def _install_home_binding() -> tuple[str, str | None, bool]:
+    """The install home, the store its active config binds, and whether it is managed."""
+    home = os.fspath(default_data_path())
+    active_config = os.environ.get(CONFIG_PATH_ENV) or os.path.join(home, CONFIG_FILE_NAME)
+    if not os.path.isabs(active_config):
+        # The gateway starts in the install home, so it reads a relative
+        # config path from there, whatever folder this process runs in.
+        active_config = os.path.join(home, active_config)
+    configured, managed = _home_config_binding(active_config, home)
+    return home, configured, managed or _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV))
+
+
+def install_home_for_bound_store(store: str | os.PathLike[str]) -> str:
+    """The PID-record home of a store the install-home config itself names.
+
+    ``store`` came from reading that config's ``data_dir`` the way the gateway
+    does, so the config binds it by construction: the PID record is in the
+    install home. Asking :func:`gateway_home_for_data_dir` again would compare
+    the store with a second reading of the same text, which can differ (a
+    ``~/`` data_dir), and then name the store as the home (GAP-0711, GAP-0713).
+    A managed runtime keeps its own PID home.
+    """
+    try:
+        home, _configured, managed = _install_home_binding()
+    except (OSError, KeyError, NotImplementedError):
+        return os.fspath(store)
+    return os.fspath(store) if managed else home
 
 
 def gateway_pid_path(data_dir: str | os.PathLike[str]) -> str:
@@ -618,28 +642,35 @@ def gateway_pid_path(data_dir: str | os.PathLike[str]) -> str:
     return os.path.join(gateway_home_for_data_dir(data_dir), GATEWAY_PID_FILE_NAME)
 
 
-def _home_config_data_dir(path: str) -> str | None:
-    """The data_dir the account config.yaml names, resolved; None when it names none."""
+def _home_config_binding(path: str, home: str) -> tuple[str | None, bool]:
+    """Return the config's resolved store and whether it declares managed mode.
+
+    The gateway starts in the install home ``home``, so it makes a relative
+    data_dir absolute from there, not from the folder of the config or the one
+    this process runs in.
+    """
     try:
         st = os.stat(path)
     except OSError:
-        return None
-    key = (path, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
-    if key in _home_data_dir_cache:
-        return _home_data_dir_cache[key]
+        return None, False
+    key = (path, home, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+    if key in _home_config_cache:
+        return _home_config_cache[key]
     resolved: str | None = None
+    managed = False
     try:
         raw = parse_config_yaml(read_config_text(path))
     except (OSError, UnicodeError, yaml.YAMLError):
         raw = None
     if isinstance(raw, dict):
+        managed = _is_managed_enterprise_mode(str(raw.get("deployment_mode") or ""))
         configured = raw.get("data_dir")
         if isinstance(configured, str) and configured.strip():
-            resolved = _configured_data_dir(raw, os.path.dirname(path))
-    if len(_home_data_dir_cache) > 32:
-        _home_data_dir_cache.clear()
-    _home_data_dir_cache[key] = resolved
-    return resolved
+            resolved = os.path.abspath(os.path.join(home, _expand_store_home(configured.strip())))
+    if len(_home_config_cache) > 32:
+        _home_config_cache.clear()
+    _home_config_cache[key] = (resolved, managed)
+    return resolved, managed
 
 
 def _same_folder(a: str, b: str) -> bool:
@@ -2898,15 +2929,21 @@ class GuardrailConfig:
         (e.g. ``"Claude-Code"``, ``"claude_code"``). Mirrors
         ``GuardrailConfig.connectorOverride`` in Go.
         """
+        key = self._connector_override_key(connector)
+        return self.connectors[key] if key is not None else None
+
+    def _connector_override_key(self, connector: str) -> str | None:
+        """The key ``connectors`` holds ``connector``'s override under, as
+        saved (an alias spelling stays the alias), so a reported source names
+        a key that exists in config.yaml."""
         if not connector or not self.connectors:
             return None
-        pc = self.connectors.get(connector)
-        if pc is not None:
-            return pc
+        if self.connectors.get(connector) is not None:
+            return connector
         want = connector_paths.normalize(connector)
         for name, entry in self.connectors.items():
-            if connector_paths.normalize(name) == want:
-                return entry
+            if entry is not None and connector_paths.normalize(name) == want:
+                return name
         return None
 
     def effective_mode(self, connector: str = "") -> str:
@@ -2956,6 +2993,14 @@ class GuardrailConfig:
     def effective_hook_fail_mode(self, connector: str = "") -> str:
         """Resolve hook failure behavior for this deployment profile.
 
+        The value of :meth:`hook_fail_mode_resolution`, the one place every
+        reader (config get, init, doctor, status, the hooks) takes it from.
+        """
+        return self.hook_fail_mode_resolution(connector)[0]
+
+    def hook_fail_mode_resolution(self, connector: str = "") -> tuple[str, str]:
+        """Resolve hook failure behavior and name where it comes from.
+
         Mirrors Go ``Config.EffectiveHookFailModeForConnector``:
 
         - a managed config (Secure Client or the standalone profile,
@@ -2971,26 +3016,44 @@ class GuardrailConfig:
           ``closed`` for strict and ``open`` for default and permissive. Every failure that is
           not an outage (an answer the gateway gave, a malformed or partial
           one, a missing token, the install window) blocks in every tier.
+
+        The source is ``config:<key>`` for a saved value, ``managed-default``
+        or ``secure-client-default`` for an unset one on those profiles, and
+        ``pack-default:<tier>`` for an unset per-user one.
         """
         owner = getattr(self, "_owner", None)
         cfg = owner() if callable(owner) else None
         owned = cfg is not None and getattr(cfg, "guardrail", None) is self
         standalone = owned and cfg.managed_outside_secure_client()
-        if owned:
+        name = connector_paths.normalize(connector)
+        # The global key (no connector) is no automatic-protection connector:
+        # only a named connector outside the active set takes that overlay.
+        if owned and name:
             application = cfg.application_protection
-            if application.enabled and connector_paths.normalize(connector) not in cfg.active_connectors():
-                override = application._connector_override(connector)
-                overlay = override.guardrail if override is not None else application.guardrail
+            if application.enabled and name not in cfg.active_connectors():
+                saved = application._connector_override_key(connector)
+                overlay = application.connectors[saved].guardrail if saved is not None else application.guardrail
                 if overlay.hook_fail_mode.strip():
-                    return _normalize_hook_fail_mode(overlay.hook_fail_mode)
-        pc = self._connector_override(connector)
-        if pc is not None and pc.hook_fail_mode.strip():
-            return _normalize_hook_fail_mode(pc.hook_fail_mode)
+                    key = (
+                        f"application_protection.connectors.{saved}.guardrail.hook_fail_mode"
+                        if saved is not None
+                        else "application_protection.guardrail.hook_fail_mode"
+                    )
+                    return _normalize_hook_fail_mode(overlay.hook_fail_mode), f"config:{key}"
+        saved = self._connector_override_key(connector)
+        if saved is not None and self.connectors[saved].hook_fail_mode.strip():
+            return (
+                _normalize_hook_fail_mode(self.connectors[saved].hook_fail_mode),
+                f"config:guardrail.connectors.{saved}.hook_fail_mode",
+            )
         if getattr(self, "_hook_fail_mode_saved", False) and self.hook_fail_mode.strip():
-            return _normalize_hook_fail_mode(self.hook_fail_mode)
-        if standalone or self.secure_client_hook_fail_modes():
-            return "closed" if standalone else "open"
-        return "closed" if self.hook_policy_tier(connector) == "strict" else "open"
+            return _normalize_hook_fail_mode(self.hook_fail_mode), "config:guardrail.hook_fail_mode"
+        if standalone:
+            return "closed", "managed-default"
+        if self.secure_client_hook_fail_modes():
+            return "open", "secure-client-default"
+        tier = self.hook_policy_tier(connector)
+        return ("closed" if tier == "strict" else "open"), f"pack-default:{tier}"
 
     def effective_hook_outage_fail_mode(self, connector: str = "") -> str:
         """What ``connector``'s hooks do while the gateway is down.
@@ -4192,15 +4255,19 @@ class ApplicationProtectionConfig:
         return any(_normalize_connector_key(c) == name for c in self.include_connectors)
 
     def _connector_override(self, connector: str) -> ApplicationProtectionConnectorConfig | None:
+        key = self._connector_override_key(connector)
+        return self.connectors[key] if key is not None else None
+
+    def _connector_override_key(self, connector: str) -> str | None:
+        """The key ``connectors`` holds ``connector``'s override under, as saved."""
         if not connector or not self.connectors:
             return None
-        pc = self.connectors.get(connector)
-        if pc is not None:
-            return pc
+        if self.connectors.get(connector) is not None:
+            return connector
         want = _normalize_connector_key(connector)
         for name, entry in self.connectors.items():
-            if _normalize_connector_key(name) == want:
-                return entry
+            if entry is not None and _normalize_connector_key(name) == want:
+                return name
         return None
 
     def validate(self) -> None:
@@ -6789,7 +6856,10 @@ def _apply_secure_client_hook_fail_default(cfg: Config, raw: dict[str, Any]) -> 
     guardrail_raw = raw.get("guardrail")
     configured = guardrail_raw.get("hook_fail_mode") if isinstance(guardrail_raw, dict) else None
     if not str(configured or "").strip():
-        cfg.guardrail.hook_fail_mode = "open"
+        # The value the document runs with, not one it saves: the tracked
+        # setter would make config.yaml look as if it set the mode, and every
+        # reader would report "configured: open" for an unset key (GAP-0719).
+        object.__setattr__(cfg.guardrail, "hook_fail_mode", "open")
 
 
 def _merge_hilt(raw: dict[str, Any] | None) -> HILTConfig:

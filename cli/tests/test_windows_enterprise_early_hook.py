@@ -118,7 +118,7 @@ $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
-foreach ($name in @('Publish-DefenseClawEarlyHook', 'Assert-DefenseClawEarlyHookPublished', 'Restore-DefenseClawEarlyHook', 'Get-DefenseClawEarlyHookField', 'Hold-DefenseClawEarlyHookGuard', 'Restore-DefenseClawSnapshotHookAfterActivation', 'Wait-DefenseClawPriorHookCalls', 'Get-DefenseClawPriorHookProcessIds', 'Assert-DefenseClawInstalledHookCallsEnded', 'Assert-DefenseClawHookNotHeld', 'Wait-DefenseClawServiceProcessExit', 'Test-DefenseClawProcessIdentityRunning')) {
+foreach ($name in @('Publish-DefenseClawEarlyHook', 'Assert-DefenseClawEarlyHookPublished', 'Restore-DefenseClawEarlyHook', 'Get-DefenseClawEarlyHookField', 'Hold-DefenseClawEarlyHookGuard', 'Restore-DefenseClawSnapshotHookAfterActivation', 'Wait-DefenseClawPriorHookCalls', 'Get-DefenseClawPriorHookProcessIds', 'Assert-DefenseClawInstalledHookCallsEnded', 'Assert-DefenseClawHookNotHeld', 'Wait-DefenseClawServiceProcessExit', 'Test-DefenseClawProcessIdentityRunning', 'Format-DefenseClawSetupAction', 'Format-DefenseClawRerunStep')) {
     $definition = $ast.Find({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -657,7 +657,10 @@ def test_a_hook_call_still_running_before_the_transaction_defers_the_run(tmp_pat
     result = _run(tmp_path, "drain-deferred")
     assert result["threw"].startswith("hook_calls_running: 1 DefenseClaw hook process(es)"), result
     assert "process ids 4242" in result["threw"], result
-    assert "run the same Setup command again" in result["threw"], result
+    # The stub profile is standalone, which has no Setup installed and may have
+    # run the installed CLI: it asks for the same command (cowork-1-0-8 GAP-0095).
+    assert "then run the same command again (an MDM retries exit 1618 on its own)" in result["threw"], result
+    assert "Setup command" not in result["threw"], result
     assert "returned" not in result["events"], result
     assert not any(e.startswith("publish:") for e in result["events"]), result
     assert result["hook"] == "hook-1.0.2", result

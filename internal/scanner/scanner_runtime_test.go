@@ -110,8 +110,8 @@ func TestScannerRuntimeCommandLines(t *testing.T) {
 		t.Fatal("the scanner environment drops PROCESSOR_ARCHITECTURE")
 	}
 
-	plugin := &PluginScanner{BinaryPath: runtimeBinary, Connector: "codex", IncludeSelf: true}
-	if _, args := plugin.pluginScanCommand("C:/p"); !reflect.DeepEqual(args, []string{"plugin-scan", "C:/p", "--connector", "codex", "--include-self"}) {
+	plugin := &PluginScanner{BinaryPath: runtimeBinary, Connector: "codex", IncludeSelf: true, DisableVendorIdentity: true}
+	if _, args := plugin.pluginScanCommand("C:/p"); !reflect.DeepEqual(args, []string{"plugin-scan", "C:/p", "--connector", "codex", "--include-self", "--disable-vendor-identity"}) {
 		t.Fatalf("plugin args = %v", args)
 	}
 	// GAP-1408: the runtime's plugin scan gets the scanners.plugin judge.

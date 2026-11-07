@@ -314,7 +314,7 @@ var managedHostRecordTrusted = func(path string) error {
 // The Secure Client profile registers the same service name with its own
 // executable; the image path tells them apart. A seam for tests.
 var managedHostStandaloneService = func() (string, error) {
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return "", err
 	}

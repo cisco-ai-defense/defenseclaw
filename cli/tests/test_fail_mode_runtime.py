@@ -1734,7 +1734,11 @@ def test_doctor_never_passes_an_unverified_managed_windows_mode(
     assert not state.runtime_verified and not state.current
     assert report["runtime_verified"] is False and report["current"] is False
     assert report["provenance"] == "windows-managed-runtime-unverified"
-    assert "defenseclaw enterprise windows verify" in report["note"]
+    # cowork-1-0-8 GAP-0076: the installed CLI as typed in PowerShell; Setup
+    # puts no DefenseClaw command on PATH.
+    verify = r"`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows verify --profile standalone`"
+    assert verify + " from an elevated PowerShell prompt" in report["note"], report["note"]
+    assert "`defenseclaw enterprise windows" not in report["note"]
     emitted: list[tuple[str, str, str, str]] = []
     with (
         patch("defenseclaw.fail_mode.connector_fail_mode_report", return_value=report),
@@ -1750,7 +1754,7 @@ def test_doctor_never_passes_an_unverified_managed_windows_mode(
         cmd_doctor._check_connector_inventory(cfg, "codex", cmd_doctor._DoctorResult())
     rows = [row for row in emitted if row[1] == "Mode"]
     assert [row[0] for row in rows] == ["warn"], rows
-    assert "unverified" in rows[0][2] and "enterprise windows verify" in rows[0][3]
+    assert "unverified" in rows[0][2] and rows[0][3] == "from an elevated PowerShell prompt run " + verify, rows
 
 
 @pytest.mark.parametrize(
@@ -3369,3 +3373,23 @@ def test_fail_mode_change_rolls_back_over_a_stale_claude_shell_entry(
     assert "registration-command-stale" in result.output
     assert (settings.read_bytes(), script.read_bytes()) == before
     assert cfg.guardrail.connectors["claudecode"].hook_fail_mode == "open"
+
+
+def test_managed_windows_verify_command_ignores_a_poisoned_program_files(monkeypatch):
+    """g072 review 2 S2: the verify command an administrator pastes elevated
+    names the registered Program Files, not a ProgramFiles a standard user set."""
+    from defenseclaw import fail_mode
+
+    want = r"& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows verify --profile standalone"
+    for poison in (r"C:\Users\dcw-std1\Controlled", r"D:\Apps' x"):
+        monkeypatch.setenv("ProgramFiles", poison)
+        if sys.platform == "win32":
+            from defenseclaw import windows_owner
+
+            monkeypatch.setattr(windows_owner, "_program_files_dir", lambda: "C:\\Program Files")
+        assert fail_mode.managed_windows_verify_command() == want
+    if sys.platform == "win32":
+        from defenseclaw import windows_owner
+
+        monkeypatch.setattr(windows_owner, "_program_files_dir", lambda: "D:\\O\u2019Brien Apps\\")
+        assert fail_mode.managed_windows_verify_command().startswith("& 'D:\\O\u2019\u2019Brien Apps\\Cisco\\")

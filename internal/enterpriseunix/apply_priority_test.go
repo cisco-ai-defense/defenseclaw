@@ -42,6 +42,16 @@ func TestYieldToHooksLowersEveryThread(t *testing.T) {
 		t.Skip("the lifecycle runs on Linux and macOS")
 	}
 	if os.Getenv("DC_TEST_YIELD_CHILD") == "1" {
+		// yieldToHooks raises the priority to lifecycleNice and leaves an
+		// already-lower one alone, so under `nice -n 15` every thread and
+		// child stays at 15 (GAP-0678). Normally the start is 0 and the
+		// expected value is exactly lifecycleNice.
+		want := lifecycleNice
+		if runtime.GOOS == "linux" {
+			if raw, err := syscall.Getpriority(syscall.PRIO_PROCESS, 0); err == nil && 20-raw > want {
+				want = 20 - raw
+			}
+		}
 		yieldToHooks()
 		yieldToHooks() // a second call keeps the value
 		if runtime.GOOS == "darwin" {
@@ -56,13 +66,13 @@ func TestYieldToHooksLowersEveryThread(t *testing.T) {
 		}
 		for _, entry := range entries {
 			tid, _ := strconv.Atoi(entry.Name())
-			if raw, err := syscall.Getpriority(syscall.PRIO_PROCESS, tid); err == nil && 20-raw < lifecycleNice {
-				t.Fatalf("thread %d nice = %d", tid, 20-raw)
+			if raw, err := syscall.Getpriority(syscall.PRIO_PROCESS, tid); err == nil && 20-raw < want {
+				t.Fatalf("thread %d nice = %d, want at least %d", tid, 20-raw, want)
 			}
 		}
 		out, err := exec.Command("sh", "-c", "cut -d' ' -f19 /proc/self/stat").Output()
-		if err != nil || strings.TrimSpace(string(out)) != strconv.Itoa(lifecycleNice) {
-			t.Fatalf("a child started after the yield has nice %q, %v", out, err)
+		if err != nil || strings.TrimSpace(string(out)) != strconv.Itoa(want) {
+			t.Fatalf("a child started after the yield has nice %q, want %d, %v", out, want, err)
 		}
 		return
 	}

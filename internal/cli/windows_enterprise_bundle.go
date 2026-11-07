@@ -68,8 +68,9 @@ const (
 	windowsBundleInterruptedWarning = "bundle_interrupted"
 	windowsBundleUnconfirmedWarning = "bundle_unconfirmed"
 	// windowsBundlePendingMessage is the bundle_pending warning of a settle
-	// that found a committed bundle while the gateway could not be read.
-	windowsBundlePendingMessage         = "%d policy bundle(s) a previous run installed are not confirmed yet because the gateway could not be read (not running or not ready); they stay pending and are never failed for that: run `defenseclaw enterprise windows ensure --profile standalone` again once the gateway runs to confirm them"
+	// that found a committed bundle while the gateway could not be read; %s
+	// is the ensure command (windowsEnterpriseAdminCommand).
+	windowsBundlePendingMessage         = "%d policy bundle(s) a previous run installed are not confirmed yet because the gateway could not be read (not running or not ready); they stay pending and are never failed for that: run %s again from an elevated PowerShell prompt once the gateway runs to confirm them"
 	windowsBundleStateUnreadableWarning = "bundle_state_unreadable"
 	windowsBundleSettleDeferredWarning  = "bundle_settle_deferred"
 	windowsBundleMarkerFailedWarning    = "bundle_marker_failed"
@@ -85,14 +86,14 @@ func windowsBundlePendingReportMessage(report enterprisebundle.SettleReport) str
 				len(report.Pending), id, boundedPolicyMessage(reason))
 		}
 	}
-	return fmt.Sprintf(windowsBundlePendingMessage, len(report.Pending))
+	return fmt.Sprintf(windowsBundlePendingMessage, len(report.Pending), windowsEnterpriseAdminCommand("ensure"))
 }
 
 var errWindowsBundleStoreBusy = errors.New("another policy bundle run holds the bundle store; retry when it ends")
 
 // Seams for tests.
 var (
-	windowsBundleLayout                 = managed.StandaloneWindowsLayout
+	windowsBundleLayout                 = windowsManagedStandaloneLayout
 	windowsBundlePolicy                 = readWindowsBundleGatewayPolicy
 	windowsBundleSleep                  = time.Sleep
 	windowsBundleTrust                  = func(path string) error { return managed.ValidateTrustedFilePath(path, "policy bundle store") }
@@ -803,15 +804,15 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	}
 	if opts.refuseCapabilityLoss && action != "ensure" {
 		if opts.bundlePath == "" {
-			return refuseArguments("invalid_arguments", "REFUSECAPABILITYLOSS=1 (--refuse-capability-loss) requires BUNDLE= (--bundle) and is valid only with Setup /ensure; nothing was changed: deliver both with Setup /ensure (defenseclaw enterprise windows ensure)")
+			return refuseArguments("invalid_arguments", "REFUSECAPABILITYLOSS=1 (--refuse-capability-loss) requires BUNDLE= (--bundle) and is valid only with Setup /ensure; nothing was changed: deliver both with Setup /ensure or, from an elevated PowerShell prompt, with "+windowsEnterpriseAdminCommand("ensure"))
 		}
-		return refuseArguments("invalid_arguments", "REFUSECAPABILITYLOSS=1 (--refuse-capability-loss) is valid only with Setup /ensure; nothing was changed: deliver BUNDLE= and REFUSECAPABILITYLOSS=1 with Setup /ensure (defenseclaw enterprise windows ensure)")
+		return refuseArguments("invalid_arguments", "REFUSECAPABILITYLOSS=1 (--refuse-capability-loss) is valid only with Setup /ensure; nothing was changed: deliver BUNDLE= and REFUSECAPABILITYLOSS=1 with Setup /ensure or, from an elevated PowerShell prompt, with "+windowsEnterpriseAdminCommand("ensure"))
 	}
 	if requested && action != "ensure" {
-		return refuseArguments("invalid_arguments", "BUNDLE= (--bundle) and TRUSTANCHORS= (--trust-anchors) are valid only with ensure; nothing was changed: deliver them with Setup /ensure (defenseclaw enterprise windows ensure)")
+		return refuseArguments("invalid_arguments", "BUNDLE= (--bundle) and TRUSTANCHORS= (--trust-anchors) are valid only with ensure; nothing was changed: deliver them with Setup /ensure or, from an elevated PowerShell prompt, with "+windowsEnterpriseAdminCommand("ensure"))
 	}
 	if opts.refuseCapabilityLoss && opts.bundlePath == "" {
-		return refuseArguments("invalid_arguments", "REFUSECAPABILITYLOSS=1 (--refuse-capability-loss) requires BUNDLE= (--bundle); nothing was changed: deliver both with Setup /ensure (defenseclaw enterprise windows ensure)")
+		return refuseArguments("invalid_arguments", "REFUSECAPABILITYLOSS=1 (--refuse-capability-loss) requires BUNDLE= (--bundle); nothing was changed: deliver both with Setup /ensure or, from an elevated PowerShell prompt, with "+windowsEnterpriseAdminCommand("ensure"))
 	}
 	if opts.deviceGroup != "" && opts.trustAnchors == "" {
 		return refuseArguments("invalid_arguments", "DEVICEGROUP= (--device-group) pins the trust anchors that TRUSTANCHORS= (--trust-anchors) installs; give both; nothing was changed")
@@ -1192,7 +1193,7 @@ func settleWindowsInterruptedBundles(settle *windowsBundleSettle, layout managed
 			settle.replacing = label
 			message += "this run re-installs the last good bundle"
 		default:
-			message += "run `enterprise windows ensure --profile standalone` to re-install the last good bundle"
+			message += "run " + windowsEnterpriseAdminCommand("ensure") + " from an elevated PowerShell prompt to re-install the last good bundle"
 		}
 		settle.warn(windowsBundleUnconfirmedWarning, message)
 	}
@@ -1220,7 +1221,7 @@ func finishWindowsInterruptedBundles(opts *windowsEnterpriseLifecycleOptions, re
 		}
 		if settle.deferred {
 			settle.warn(windowsBundleSettleDeferredWarning, "an install transaction is still pending, so the policy bundle receipts a killed run left were not settled; "+
-				"the current or last good bundle keeps enforcing: run `enterprise windows ensure --profile standalone` again")
+				"the current or last good bundle keeps enforcing: run "+windowsEnterpriseAdminCommand("ensure")+" again from an elevated PowerShell prompt")
 		}
 	}
 	for _, w := range settle.warnings {
@@ -1543,14 +1544,14 @@ func (t *windowsBundleRollbackTarget) writeOptions(expectSHA string) (configwrit
 	if ref == nil || t.ref == nil || ref.BundleID != t.ref.BundleID || ref.Version != t.ref.Version ||
 		ref.ManifestSHA256 != t.ref.ManifestSHA256 || ref.SignerKeyID != t.ref.SignerKeyID ||
 		ref.EffectivePolicyDigest != t.ref.EffectivePolicyDigest || configwrite.SHA256Hex(raw) != t.restored {
-		return configwrite.Options{}, errors.New("confirmed bundle changed before rollback; run defenseclaw.exe enterprise windows ensure --profile standalone")
+		return configwrite.Options{}, errors.New("confirmed bundle changed before rollback; run " + windowsEnterpriseAdminCommand("ensure") + " from an elevated PowerShell prompt")
 	}
 	opt, ok, err := driver.ConfigGenerationOptions(raw)
 	if err != nil {
 		return opt, err
 	}
 	if !ok {
-		return opt, errors.New("cannot prove the confirmed rollback principal; run defenseclaw.exe enterprise windows ensure --profile standalone")
+		return opt, errors.New("cannot prove the confirmed rollback principal; run " + windowsEnterpriseAdminCommand("ensure") + " from an elevated PowerShell prompt")
 	}
 	opt.ExpectSHA256 = expectSHA
 	if t.before.BundleID == ref.BundleID && t.before.BundleVersion == ref.Version &&

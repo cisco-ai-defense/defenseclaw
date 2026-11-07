@@ -47,7 +47,7 @@ import click
 import yaml
 
 from defenseclaw import config as config_module
-from defenseclaw import ux
+from defenseclaw import connector_paths, ux
 from defenseclaw.config import gateway_pid_path
 from defenseclaw.config_inspect import (
     ConfigInspectError,
@@ -449,11 +449,24 @@ _ADMISSION_TYPES = ("skill", "mcp", "plugin")
 _TRUST_KEY = ["guardrail", "cisco_trust_level"]
 
 
+def _hook_fail_mode_connector(parts: list) -> str | None:
+    """The connector ("" for the global key) of a guardrail hook_fail_mode key, else None."""
+    if parts == ["guardrail", "hook_fail_mode"]:
+        return ""
+    if len(parts) == 4 and parts[:2] == ["guardrail", "connectors"] and parts[3] == "hook_fail_mode":
+        return parts[2]
+    return None
+
+
 def _resolves_when_unset(parts: list) -> bool:
     """Keys whose default is resolved (a rule pack level, the Cisco trust
-    level, the admission and update sections) rather than blank."""
-    return parts[0] in ("admission", "update") or parts == _TRUST_KEY or (
-        parts[0] == "guardrail" and parts[-1] in _LEVEL_KEYS
+    level, the hook fail mode, the admission and update sections) rather than
+    blank."""
+    return (
+        parts[0] in ("admission", "update")
+        or parts == _TRUST_KEY
+        or (parts[0] == "guardrail" and parts[-1] in _LEVEL_KEYS)
+        or _hook_fail_mode_connector(parts) is not None
     )
 
 
@@ -503,6 +516,12 @@ def _effective_value(app: AppContext, parts: list[str]) -> tuple[object, str] | 
         if which == "alert_at" and levels.alert_clamped:
             label += " (clamped to block_at)"
         return value, label
+    hook_connector = _hook_fail_mode_connector(parts)
+    if hook_connector is not None:
+        # The one resolver the hooks, init, doctor and status read: a key
+        # config.yaml leaves out is the mode the deployment runs, never the
+        # model placeholder.
+        return cfg.guardrail.hook_fail_mode_resolution(hook_connector)
     if parts == _TRUST_KEY:
         written = str(getattr(cfg.guardrail, "cisco_trust_level", "") or "").strip().lower()
         if written in ("full", "advisory", "none"):
@@ -1214,8 +1233,64 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
             f"an empty value does not set {key}; use defenseclaw config unset {key}"
         )
     roster_change = parts == ["guardrail"] or parts[:2] == ["guardrail", "connectors"]
-    check_candidate = _check_guardrail_connector_roster if roster_change else None
+    selection_change = parts and parts[0] in {"guardrail", "claw"}
+
+    def _check_candidate(path: str, candidate: bytes) -> None:
+        if roster_change:
+            _check_guardrail_connector_roster(path, candidate)
+        _check_config_connector_selection(path, candidate)
+
+    check_candidate = _check_candidate if selection_change else None
     _write_config_change(app, [Change(key, parsed)], expect_sha256, "set", check_candidate=check_candidate)
+
+
+def _configured_connector_selection(document: object) -> tuple[set[str], str]:
+    """Resolve the enabled roster and primary from the written config shape."""
+    if not isinstance(document, dict):
+        return set(), ""
+    guardrail = document.get("guardrail")
+    guardrail = guardrail if isinstance(guardrail, dict) else {}
+    claw = document.get("claw")
+    claw = claw if isinstance(claw, dict) else {}
+    primary = guardrail.get("connector")
+    primary = connector_paths.normalize(primary) if isinstance(primary, str) and primary.strip() else ""
+    # A missing claw.mode loads as OpenClaw in Config.load and the Go loader.
+    mode = claw.get("mode", "openclaw")
+    mode = connector_paths.normalize(mode) if isinstance(mode, str) and mode.strip() else ""
+    roster = guardrail.get("connectors")
+    if isinstance(roster, dict) and roster:
+        enabled = {
+            connector_paths.normalize(name)
+            for name, entry in roster.items()
+            if isinstance(name, str) and isinstance(entry, dict) and entry.get("enabled") is not False
+        }
+        names = sorted(connector_paths.normalize(name) for name in roster if isinstance(name, str))
+        selected = primary or (mode if mode in names else names[0] if names else "")
+        return enabled, selected
+    selected = primary or mode
+    return ({selected} if selected else set()), selected
+
+
+def _check_config_connector_selection(path: str, candidate: bytes, *, allow_removal: bool = False) -> None:
+    """A settings edit cannot select another live connector as a side effect."""
+    from defenseclaw import config_writer
+
+    after = config_writer._parse_config_document(candidate)
+    if config_writer.secure_client_document(after):
+        return
+    current, _, _ = config_writer._read_current(path)
+    before = config_writer._parse_config_document(current) if current else {}
+    active_before, primary_before = _configured_connector_selection(before)
+    active_after, primary_after = _configured_connector_selection(after)
+    # A whole-entry unset explicitly removes its guardrail scope and already
+    # reports that to the operator. It may drop an enabled name, but cannot
+    # select a new primary or enable another entry in the same batch.
+    enabled_changed = (active_after - active_before) if allow_removal else (active_after ^ active_before)
+    if enabled_changed or primary_after != primary_before:
+        raise config_writer.ConfigWriteError(
+            "connector selection requires setup; use defenseclaw setup or a connector command "
+            "to change the active connector"
+        )
 
 
 def _check_guardrail_connector_roster(_path: str, candidate: bytes) -> None:
@@ -1302,7 +1377,16 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
         parts == ["guardrail"] or parts[:2] == ["guardrail", "connectors"]
         for _key, parts in parsed
     )
-    check_candidate = _check_guardrail_connector_roster if roster_change else None
+    selection_change = any(
+        parts and parts[0] in {"guardrail", "claw"} for _key, parts in parsed
+    )
+
+    def _check_candidate(path: str, candidate: bytes) -> None:
+        if roster_change:
+            _check_guardrail_connector_roster(path, candidate)
+        _check_config_connector_selection(path, candidate, allow_removal=True)
+
+    check_candidate = _check_candidate if selection_change else None
     if _write_config_change(app, changes, expect_sha256, "unset", check_candidate=check_candidate):
         for note in _left_roster_notes(parsed, roster):
             click.echo(note)
@@ -1625,7 +1709,7 @@ def _show_effective_scanner_settings(masked: dict) -> None:
 
 
 def _resolve_defaults(app: AppContext, view: dict, written: dict, *, profiles: bool = True) -> None:
-    """Replace the placeholders of admission and update with what the gateway runs with.
+    """Replace the placeholders of admission, update and the hook fail mode with what the gateway runs with.
 
     The dataclass dump shows an unset admission or update key as null or {}, which
     reads as "no policy". Each asset type shows its resolved policy, and update shows
@@ -1645,6 +1729,22 @@ def _resolve_defaults(app: AppContext, view: dict, written: dict, *, profiles: b
         view["admission"] = resolved
     if isinstance(view.get("update"), dict):
         view["update"] = _update_view(cfg)[0]
+    if isinstance(view.get("guardrail"), dict):
+        _resolve_hook_fail_modes(cfg, view["guardrail"], written.get("guardrail"))
+
+
+def _resolve_hook_fail_modes(cfg: object, guardrail: dict, written: object) -> None:
+    """Show the hook fail mode a key config.yaml leaves out as the mode the
+    deployment runs, from the resolver that config get, init, doctor and
+    status read, never as the model placeholder (GAP-0719)."""
+    saved = written if isinstance(written, dict) else {}
+    resolver = cfg.guardrail.hook_fail_mode_resolution  # type: ignore[attr-defined]
+    if not str(saved.get("hook_fail_mode") or "").strip():
+        guardrail["hook_fail_mode"] = resolver("")[0]
+    connectors = guardrail.get("connectors")
+    for name, entry in (connectors.items() if isinstance(connectors, dict) else ()):
+        if isinstance(entry, dict) and not str(entry.get("hook_fail_mode") or "").strip():
+            entry["hook_fail_mode"] = resolver(name)[0]
 
 
 def _merge_defaults(written: dict, defaults: dict) -> dict:
@@ -1669,7 +1769,9 @@ def _show_data(app: AppContext, *, source: bool, effective: bool, provenance: bo
         # No config.yaml yet: show the defaults the CLI would run with.
         if source or effective or provenance:
             raise click.ClickException(f"config.yaml does not exist yet; {config_module.first_run_hint()}")
-        return _v8_defaults(app)
+        defaults = _v8_defaults(app)
+        _resolve_defaults(app, defaults, {})
+        return defaults
     resolved_only = effective or provenance
     masked: dict = {}
     if not resolved_only:
@@ -2169,6 +2271,9 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
         suggestion = re.search(r"suggested field ([^;]+)", text)
         hint = f' (did you mean "{suggestion.group(1).strip()}"?)' if suggestion else ""
         return f"{where}{field}: unknown field{hint}. All fields: {_ALL_FIELDS_COMMAND}"
+
+    if code == "config_schema_invalid" and text.startswith(f"{field} was retired in config_version "):
+        return f"{where}{text}"
 
     if (code == "maxLength" or "maxLength constraint" in text) and isinstance(node, yaml.ScalarNode):
         # The gateway's limit for this field ("a string of at most 512

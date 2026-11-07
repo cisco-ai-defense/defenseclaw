@@ -608,18 +608,11 @@ def test_amp_validation_status_is_boolean_and_pending_note_is_explicit() -> None
     assert "live=false" in validated["notes"]
 
 
-def test_windows_live_harness_avoids_automatic_variable_assignments() -> None:
-    text = (ROOT / "scripts/live-connector-e2e/run-windows.ps1").read_text(encoding="utf-8").lower()
+def test_windows_workflows_avoid_automatic_variable_assignments() -> None:
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8").lower()
     native_workflow = (ROOT / ".github/workflows/windows-native.yml").read_text(
         encoding="utf-8"
     ).lower()
-    assert "$agentargs =" in text
-    assert "$eventrecord =" in text
-    assert "[string]$eventname," in text
-    assert "$args =" not in text
-    assert "$event =" not in text
-    assert "[string]$event," not in text
     assert "$profile =" not in workflow + native_workflow
     assert "windows-native-required:" in native_workflow
     assert "name: windows native required" in native_workflow
@@ -637,31 +630,3 @@ def test_windows_native_ci_concurrency_cannot_cross_cancel_push_and_manual_runs(
         "${{ github.event.pull_request.number || github.sha }}"
     ) in workflow
     assert "group: windows-native-${{ github.event.pull_request.number || github.ref }}" not in workflow
-
-
-def test_disposable_connector_workspace_includes_the_v8_jsonl_validator() -> None:
-    launcher = (ROOT / "scripts/invoke-windows-setup-standard-user-ci.ps1").read_text(
-        encoding="utf-8"
-    )
-    contract_files = launcher[
-        launcher.index("if ($Mode -eq 'contract')") : launcher.index(
-            "foreach ($file in $harnessFiles)"
-        )
-    ]
-
-    assert "'assert-observability-v8-jsonl.py'" in contract_files
-
-
-def test_disposable_setup_workspace_includes_the_packaged_v8_validator() -> None:
-    launcher = (ROOT / "scripts/invoke-windows-setup-standard-user-ci.ps1").read_text(
-        encoding="utf-8"
-    )
-    harness_files_start = launcher.index("$harnessFiles = @(")
-    harness_files = launcher[
-        harness_files_start : launcher.index(
-            "if ($Mode -eq 'contract')", harness_files_start
-        )
-    ]
-
-    assert "'windows-native-ci.ps1'" in harness_files
-    assert "'validate_packaged_v8_resources.py'" in harness_files

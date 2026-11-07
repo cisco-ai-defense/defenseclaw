@@ -187,8 +187,8 @@ func requireFlags(flags map[string]string) error {
 }
 
 // validateSourceCommit refuses anything but a 40-char lowercase hex
-// git OID. This is the same shape scripts/build-windows-installer.ps1
-// asserts for gateway-source-commit.txt.
+// git OID, the shape packaging/scripts/build-managed-windows-bundle.sh
+// writes to gateway-source-commit.txt.
 func validateSourceCommit(sha string) error {
 	if len(sha) != 40 {
 		return errors.New("--source-commit must be a 40-char lowercase git OID")

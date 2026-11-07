@@ -262,6 +262,10 @@ func configV8ValidationFailure(err error) configV8WireFailure {
 			result.ConfigVersion = schemaError.Version
 		}
 		result.Path = configV8DiagnosticPath(schemaError.Path)
+		if retired, ok := schemaError.RetiredKeyMessage(); ok {
+			result.Reason = configV8DiagnosticReason("config_schema_invalid", retired, "", "")
+			break
+		}
 		detail := schemaError.Expected
 		if schemaError.Suggestion != "" {
 			if detail != "" {

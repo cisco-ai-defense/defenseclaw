@@ -75,7 +75,18 @@ func hermesWriteViewRequests(ctx context.Context, action trustedActionRequest, v
 	for i, view := range views {
 		if i > 0 {
 			request := base
-			request.Input.Tool, request.Input.Args = view.Tool, view.Args
+			if view.PossibleOverflow {
+				request.UnknownKeyPossibleOverflow = true
+			} else {
+				request.Input.Tool, request.Input.Args = view.Tool, view.Args
+			}
+			if !view.PossibleOverflow && view.Path != "" {
+				if target := actionfacts.KnownExtraKeyPath(view.Path, base.Input.ActiveHome); target != view.Path {
+					if args, ok := view.Retarget(target); ok {
+						request.Input.Args = args
+					}
+				}
+			}
 			requests = append(requests, request)
 		}
 		if request, ok := hermesSandboxGuestDirRequest(ctx, base, view); ok {

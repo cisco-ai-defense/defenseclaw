@@ -37,6 +37,7 @@ from defenseclaw.file_permissions import (
     read_regular_file_no_follow,
     windows_guard_private_file_error,
 )
+from defenseclaw.winquote import powershell_command_line, powershell_literal, run_instruction
 
 _SCHEMA_VERSION = "schema-v1.21.0"
 _SCHEMA_SHA256 = "caf62ff962ada396878372ced11efb2c6764e59d90919a38583c319948931a42"
@@ -1987,7 +1988,7 @@ def _verify(app: AppContext, client: str | None, agent: str | None, data_dir: st
         problems = _verify_binding(data_dir, pair_client, pair_agent, app.cfg.acp, _expected_gateway(app.cfg))
         if problems:
             command = setup_repair_command(app.cfg, pair_client, pair_agent, data_dir)
-            failures.append(f"{pair_client}/{pair_agent}: " + "; ".join(problems) + f"; run {command}")
+            failures.append(f"{pair_client}/{pair_agent}: " + "; ".join(problems) + f"; {run_instruction(command)}")
         else:
             click.echo(f"Verified {pair_client}/{pair_agent}: editor entry and executable digests match")
     if failures:
@@ -2021,7 +2022,7 @@ def setup_repair_command(cfg: Any, client: str, agent: str, data_dir: str) -> st
     if cfg.deployment_mode == "managed_enterprise":
         command.extend(["--managed", "--runtime-data-dir", data_dir])
     if os.name == "nt":
-        return "defenseclaw " + " ".join("'" + value.replace("'", "''") + "'" for value in command[1:])
+        return "defenseclaw " + " ".join(powershell_literal(value) for value in command[1:])
     return shlex.join(command)
 
 
@@ -2047,7 +2048,8 @@ def _enterprise_setup_command(
     port = getattr(getattr(cfg, "gateway", None), "api_port", None) or 18970
     command.extend(["--data-dir", data_dir, "--api-port", str(port), "--guard-binary", guard])
     if os.name == "nt":
-        return "& " + " ".join("'" + value.replace("'", "''") + "'" for value in command)
+        # The Go copy is enterpriseACPCommandLine (managed.WindowsCommandLine).
+        return powershell_command_line(*command)
     return shlex.join(command)
 
 

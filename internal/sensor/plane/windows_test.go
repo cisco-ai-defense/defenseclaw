@@ -29,6 +29,51 @@ import (
 	"testing"
 )
 
+// bufferedSources are the host sensor sources Windows builds, each with the
+// buffer its Coverage counts (TestEverySourceNamesItsBufferDropsInCoverage):
+// before Start (no reader), and with a reader that is behind, whose line
+// clears once it catches up while the drops stay named.
+func bufferedSources() map[string]func() (Source, *Buffer) {
+	return map[string]func() (Source, *Buffer){
+		"security log before start": func() (Source, *Buffer) {
+			source := NewSource(nil).(*windowsSource)
+			return source, source.buffer
+		},
+		"security log reader behind": func() (Source, *Buffer) {
+			source := NewSource(nil).(*windowsSource)
+			source.coverage = Coverage{Mechanism: "Windows Security event log (wevtapi)", Limitations: []string{"start limitation"}}
+			source.reader = &securityReader{buffer: source.buffer, behind: true, heldBack: 1}
+			return source, source.buffer
+		},
+	}
+}
+
+// cowork-1-0-8 GAP-0072: while the reader was behind, one Coverage showed
+// two drop counts: the reader line's snapshot from the last poll ("0 events
+// dropped") beside the cumulative line, which reads the live counter. The
+// cumulative line is the only count, behind or not.
+func TestWindowsCoverageNamesTheDropCountOnce(t *testing.T) {
+	source := NewSource(nil).(*windowsSource)
+	source.reader = &securityReader{buffer: source.buffer, behind: true, heldBack: 2, timeouts: 1}
+	for index := 0; index < eventBuffer+3; index++ {
+		source.buffer.Push(Event{Kind: KindFileRead, PID: index})
+	}
+	limitations := source.Coverage().Limitations
+	counts, behind := 0, false
+	for _, limitation := range limitations {
+		if strings.Contains(limitation, "dropped") {
+			counts++
+		}
+		if strings.HasPrefix(limitation, "Security event log reader is behind") {
+			behind = true
+		}
+	}
+	if counts != 1 || !behind || !strings.Contains(strings.Join(limitations, "; "),
+		"3 events were dropped from the sensor's event buffer under back-pressure") {
+		t.Fatalf("limitations = %q, want the reader-behind line and one drop count (3)", limitations)
+	}
+}
+
 // A representative Security-channel 4688 record, in the exact XML wevtapi
 // renders. Decoding is tested against the real wire shape because the shape is
 // what a Windows release can change.

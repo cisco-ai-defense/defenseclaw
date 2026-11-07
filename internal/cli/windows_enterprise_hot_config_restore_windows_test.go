@@ -410,3 +410,51 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoIsNotRestarted(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0646: Setup records the supplied config it writes over an unparseable
+// config.yaml as the lifecycle's config generation with the write. The hook
+// guardian then finds the bytes recorded and never takes the repair's own
+// write for a hand edit (it did, and the gateway refused to start on it).
+func TestWindowsEnterpriseUnparseableRescueRecordsTheSuppliedConfigAsTheLifecycleGeneration(t *testing.T) {
+	t.Cleanup(func() { managedConfigRecordDeferredTo = "" })
+	const broken = "invalid: [\n"
+	const recorded = "config_version: 9\n# the recorded generation\n"
+	candidate := strings.Replace(standaloneGatewayCheckConfig, "config_version: 8\n", "config_version: 9\n", 1)
+	originalLayout, originalSource := windowsEnterpriseStandaloneLayoutForPreflight, windowsEnterpriseStandaloneConfigSource
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneLayoutForPreflight = originalLayout
+		windowsEnterpriseStandaloneConfigSource = originalSource
+	})
+	windowsEnterpriseStandaloneLayoutForPreflight = func() (managed.StandaloneLayout, error) {
+		return managed.StandaloneLayout{}, errors.New("no preflight layout in this test")
+	}
+	windowsEnterpriseStandaloneConfigSource = func(string) error { return nil }
+
+	host, opts := newHotConfigHost(t, recorded, candidate)
+	if _, err := configwrite.Locked(context.Background(), host.configPath,
+		configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise windows ensure"},
+		func() (bool, error) { return true, nil }); err != nil {
+		t.Fatal(err)
+	}
+	before, err := configwrite.ReadGenerationState(host.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(host.configPath, []byte(broken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath)
+	if err != nil || kept == "" {
+		t.Fatalf("rescue = (%q, %v), want the broken config kept", kept, err)
+	}
+	state, err := configwrite.ReadGenerationState(host.configPath)
+	if err != nil || state.Actor != configwrite.ActorLifecycle || state.ConfigSHA256 != configwrite.SHA256Hex([]byte(candidate)) ||
+		state.Generation != before.Generation+1 || state.Reason != windowsEnterpriseSuppliedConfigRecordReason {
+		t.Fatalf("record after the rescue = %+v, %v; want generation %d by the lifecycle for the supplied config", state, err, before.Generation+1)
+	}
+	var log strings.Builder
+	recordUnrecordedManagedConfig(host.configPath, &log, nil)
+	if after, err := configwrite.ReadGenerationState(host.configPath); err != nil || after != state || log.Len() != 0 {
+		t.Fatalf("the guardian recorded the rescue's own write: %+v, %v\n%s", after, err, log.String())
+	}
+}

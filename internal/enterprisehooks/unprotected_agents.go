@@ -187,9 +187,11 @@ type UnprotectedAgent struct {
 }
 
 type unprotectedAgentsFile struct {
-	Version    int                `json:"version"`
-	Generation string             `json:"generation,omitempty"`
-	Agents     []UnprotectedAgent `json:"agents"`
+	Version          int                `json:"version"`
+	Generation       string             `json:"generation,omitempty"`
+	ConfigGeneration uint64             `json:"config_generation,omitempty"`
+	ConfigSHA256     string             `json:"config_sha256,omitempty"`
+	Agents           []UnprotectedAgent `json:"agents"`
 }
 
 // UnprotectedAgentsPath is the unprotected-agents record for manifestPath.
@@ -250,12 +252,47 @@ func (a UnprotectedAgent) Message() string {
 // entry per user and connector, except separate Kiro CLI and IDE surfaces)
 // so an unchanged set rewrites nothing.
 func MarshalUnprotectedAgents(agents []UnprotectedAgent) ([]byte, error) {
+	return MarshalUnprotectedAgentsForConfig(agents, 0, "")
+}
+
+// MarshalUnprotectedAgentsForConfig binds a completed Unix scan to the
+// config generation and config digest the enumerator observed before
+// loading its inputs. The digest is the identity: a generation number can be
+// reused when the generation record is rebuilt, a digest cannot name another
+// config. Zero and empty keep older records and platforms without a
+// lifecycle generation readable; status cannot infer their config freshness
+// from these fields.
+func MarshalUnprotectedAgentsForConfig(agents []UnprotectedAgent, configGeneration uint64, configSHA256 string) ([]byte, error) {
 	normalized := normalizeUnprotectedAgents(agents)
-	data, err := json.MarshalIndent(unprotectedAgentsFile{Version: 1, Generation: UnprotectedAgentsGeneration(), Agents: normalized}, "", "  ")
+	data, err := json.MarshalIndent(unprotectedAgentsFile{Version: 1, Generation: UnprotectedAgentsGeneration(), ConfigGeneration: configGeneration, ConfigSHA256: configSHA256, Agents: normalized}, "", "  ")
 	if err != nil {
 		return nil, err
 	}
 	return append(data, '\n'), nil
+}
+
+// UnprotectedAgentsRecordConfigGeneration is the config generation a
+// completed scan covered, or zero for a legacy record.
+func UnprotectedAgentsRecordConfigGeneration(data []byte) uint64 {
+	var record struct {
+		ConfigGeneration uint64 `json:"config_generation"`
+	}
+	if json.Unmarshal(data, &record) != nil {
+		return 0
+	}
+	return record.ConfigGeneration
+}
+
+// UnprotectedAgentsRecordConfigSHA256 is the config digest a completed scan
+// covered, or empty for a legacy record.
+func UnprotectedAgentsRecordConfigSHA256(data []byte) string {
+	var record struct {
+		ConfigSHA256 string `json:"config_sha256"`
+	}
+	if json.Unmarshal(data, &record) != nil {
+		return ""
+	}
+	return record.ConfigSHA256
 }
 
 // ParseUnprotectedAgents decodes a record written by MarshalUnprotectedAgents.

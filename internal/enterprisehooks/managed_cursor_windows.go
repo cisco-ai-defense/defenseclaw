@@ -844,7 +844,7 @@ func windowsCursorManagedAdapterMatchesState(state windowsCursorManagedPolicySta
 		state.AdapterSHA256 != windowsManagedPolicyDigest(adapter) {
 		return false
 	}
-	hookExecutable := "'" + strings.ReplaceAll(state.HookExecutable, "'", "''") + "'"
+	hookExecutable := managed.PowerShellLiteral(state.HookExecutable)
 	return bytes.Contains(adapter, []byte(hookExecutable))
 }
 

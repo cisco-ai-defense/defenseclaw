@@ -55,7 +55,7 @@ command changes and stores nothing. --name must be the credential that
 enterprise.inspection.ai_defense.credential names. Exit codes: 0 when AI
 Defense accepted the key, 1603 when it did not (errors[0].code names why),
 1639 invalid arguments, 5 not elevated on a managed computer.`,
-		Example:      `  & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' enterprise secret check --name ai-defense-api-key --json`,
+		Example:      "  # in an elevated PowerShell prompt\n  " + managedWindowsGatewayCommandLine("enterprise", "secret", "check", "--name", "ai-defense-api-key", "--json"),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runEnterpriseSecretCheck(cmd, opts)

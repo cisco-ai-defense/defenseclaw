@@ -35,11 +35,11 @@ func newLauncherStatusCommand() *cobra.Command {
 	var asJSON bool
 	status := &cobra.Command{
 		Use:   "status",
-		Short: "Show whether DefenseClaw protects your Claude Code and Cowork sessions (read-only)",
+		Short: "Show whether DefenseClaw protects your Claude Code and Cowork sessions and other managed connectors",
 		Long: `Show whether DefenseClaw, managed by your organization on this computer,
-protects your Claude Code and Claude Cowork sessions, and when your last Cowork
-event was. It reads only your own state and changes nothing; an administrator
-sees every account.`,
+protects your configured connectors and Claude Cowork sessions, and when your
+last Cowork event was. It reads only your own state and changes nothing;
+administrator status and verify show deployment-wide coverage.`,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {

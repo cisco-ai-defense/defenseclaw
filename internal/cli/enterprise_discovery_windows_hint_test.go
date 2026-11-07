@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -32,20 +33,24 @@ func TestWindowsEnterpriseAdminViewCommandNamesItsOwnPath(t *testing.T) {
 	}
 	what, view, args := windowsEnterpriseAdminViewCommand(list)
 	if what != "the sandbox registrations" || view != "enterprise windows sandbox list" ||
-		args != "enterprise windows sandbox list --user dcw-std1" {
+		strings.Join(args, "|") != "enterprise|windows|sandbox|list|--user|dcw-std1" {
 		t.Fatalf("sandbox list = %q, %q, %q", what, view, args)
 	}
+	// The user is one argument, and the answer quotes it for PowerShell
+	// (rel-1-0-2 GAP-0086): a space, an apostrophe and a domain prefix.
 	if err := list.Flags().Set("user", `DCLAB\o'brien smith`); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, args := windowsEnterpriseAdminViewCommand(list); args != `enterprise windows sandbox list --user 'DCLAB\o''brien smith'` {
-		t.Fatalf("quoted user = %q", args)
+	_, _, args = windowsEnterpriseAdminViewCommand(list)
+	if strings.Join(args, "|") != `enterprise|windows|sandbox|list|--user|DCLAB\o'brien smith` {
+		t.Fatalf("user argument = %q", args)
 	}
-	if got := windowsPowerShellArgument(`DCLAB\ent-bob`); got != `DCLAB\ent-bob` {
-		t.Fatalf("plain user = %q", got)
+	if answer := windowsManagedStandardUserViewAnswer(what, args...); !strings.Contains(answer,
+		`\defenseclaw-gateway.exe' enterprise windows sandbox list --user 'DCLAB\o''brien smith'`+"`") {
+		t.Fatalf("quoted user answer = %q", answer)
 	}
 	what, view, args = windowsEnterpriseAdminViewCommand(identity)
-	if what != "the identity views" || view != "enterprise windows profile-explain" || args != view {
+	if what != "the identity views" || view != "enterprise windows profile-explain" || strings.Join(args, " ") != view {
 		t.Fatalf("identity view = %q, %q, %q", what, view, args)
 	}
 }

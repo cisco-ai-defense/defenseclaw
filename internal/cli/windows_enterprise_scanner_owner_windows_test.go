@@ -8,6 +8,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,7 +64,8 @@ func TestWindowsRecoveryToAnEarlierReleaseDoesNotFailOnItsScannerRuntime(t *test
 			// The plain ensure clears it, so the warning names it, not /repair.
 			for _, warning := range result.Warnings {
 				if warning.Code == "scanner_runtime_unavailable" &&
-					(!strings.Contains(warning.Message, "/ensure CONFIG=") || strings.Contains(warning.Message, "/repair")) {
+					(!strings.Contains(warning.Message, windowsEnterpriseSetupCommand("/ensure", "CONFIG=<config.yaml>", "JSON=1")) || !strings.Contains(warning.Message, managed.WindowsSetupSource) ||
+						strings.Contains(warning.Message, "/repair")) {
 					t.Errorf("%s over %s: warning does not name the clearing /ensure: %s", tc.action, tc.installed, warning.Message)
 				}
 			}

@@ -112,6 +112,7 @@ ACTION_ASSET_POLICY: Final[str]                = "asset-policy"
 # user manually removes it while the gateway is running.
 ACTION_CONNECTOR_HOOK_TAMPERED: Final[str]     = "connector-hook-tampered"
 ACTION_CONNECTOR_HOOK_REPAIRED: Final[str]     = "connector-hook-repaired"
+ACTION_CONNECTOR_HOOK_ACCOUNT_REMOVED: Final[str] = "connector-hook-account-removed"
 ACTION_PROTECTED_FILE_CHANGED: Final[str]      = "protected-file-changed"
 
 # A standalone enterprise hook call from an exempt_users account. Mirrors

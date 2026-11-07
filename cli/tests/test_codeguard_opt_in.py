@@ -24,6 +24,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import skipUnless
 
+import defenseclaw.commands.cmd_codeguard as cmd_codeguard_module
+import pytest
 from click.testing import CliRunner
 from defenseclaw import commands as command_helpers
 from defenseclaw import gateway
@@ -33,6 +35,7 @@ from defenseclaw.codeguard_skill import (
 )
 from defenseclaw.commands.cmd_codeguard import codeguard
 from defenseclaw.context import AppContext
+from defenseclaw.winquote import powershell_command_line
 
 from tests.permissions import assert_owner_only_directory
 
@@ -57,9 +60,7 @@ def _make_runnable(path) -> None:
 def _expected_scan_hint(executable) -> str:
     argv = (os.path.abspath(str(executable)), "scan", "code", "<path to scan>")
     if os.name == "nt":
-        quoted = ("'" + arg.replace("'", "''") + "'" for arg in argv)
-        command = "& " + " ".join(quoted)
-        return f"Scan code now (PowerShell):  {command}"
+        return f"Scan code now (PowerShell):  {powershell_command_line(*argv)}"
     return f"Scan code now:  {shlex.join(argv)}"
 
 
@@ -655,3 +656,29 @@ def test_codeguard_install_antigravity_skill_fans_out_with_peers(tmp_path, monke
     assert "[claudecode]" in result.output
     assert "[codex]" in result.output
     assert "install failed" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("executable", "expected"),
+    [
+        (
+            "C:\\Program Files\\Cisco\\DefenseClaw\\defenseclaw-gateway.exe",
+            "& 'C:\\Program Files\\Cisco\\DefenseClaw\\defenseclaw-gateway.exe' scan code <path to scan>",
+        ),
+        (
+            "C:\\Users\\O\u2019Brien\\AppData\\Local\\DefenseClaw\\bin\\defenseclaw-gateway.exe",
+            "& 'C:\\Users\\O\u2019\u2019Brien\\AppData\\Local\\DefenseClaw\\bin\\defenseclaw-gateway.exe'"
+            " scan code <path to scan>",
+        ),
+    ],
+)
+def test_windows_scan_hint_is_pinned_by_a_literal(monkeypatch, executable, expected):
+    """g072 review 4 S2: the visible Windows hint, pinned without winquote.
+
+    Since 1.0.9 the plain words are bare (as managed.WindowsCommandLine
+    renders them): a pasted path with a space in place of <path to scan>
+    must be quoted.
+    """
+    monkeypatch.setattr(cmd_codeguard_module, "_path_gateway_is", lambda _executable: False)
+    monkeypatch.setattr(cmd_codeguard_module, "os", SimpleNamespace(name="nt"))
+    assert cmd_codeguard_module._format_code_scan_command(executable) == expected

@@ -1043,13 +1043,14 @@ func hookShellDialect(connector, tool string) actionfacts.Dialect {
 // gateway's profile for that connector reads it. surface and event are the
 // hook command's --hook-surface value and bound event, the values the hook
 // sends the gateway; only Copilot reads them. A Copilot body is read in the
-// dialect the gateway selects from them (copilotargs.LocalDialect): the
-// CLI's toolName/toolArgs (or native PermissionRequest toolInput), or the VS
-// Code Local harness's tool_name/tool_input, through the copilotargs
-// projection the gateway's Copilot profiles use. A body
-// that spells the tool name, or the tool arguments, twice with different
-// values is marked incomplete: no client sends one, and an operand this map
-// does not list fails closed where the gateway cannot place it.
+// dialect the gateway selects from them (copilotargs.LocalDialect), or in a
+// per-user CLI document's matching Local body: the CLI's toolName/toolArgs
+// (or native PermissionRequest toolInput), or the Local harness's
+// tool_name/tool_input, through the copilotargs projection. A body
+// that mixes CLI and Local fields is marked incomplete, as is a call that
+// spells the tool name or arguments twice with different values: no client
+// sends one, and an operand this map does not list fails closed where the
+// gateway cannot place it.
 //
 // A structured write call over the ActionFacts analysis limits is judged by
 // the gateway on its reduced call (actionfacts.OverLimitWriteTargetReduction),
@@ -1217,10 +1218,10 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		// The gateway judges the reduced call: list its targets.
 		facts = view
 	}
-	// A native write call with a key outside its reviewed schema stays
-	// partial, but the harness writes the file its target key names, and
-	// the gateway judges that target (actionfacts.UnknownKeyWriteTargetViews):
-	// list it.
+	// A file-tool call with a key outside its reviewed schema stays
+	// partial; the gateway judges each of its readings, the call without
+	// those keys and each path-shaped value they hold
+	// (actionfacts.UnknownKeyTwins): list the files they write.
 	for _, view := range actionfacts.UnknownKeyWriteTargetViews(input, facts) {
 		facts.Paths = append(facts.Paths, view.Paths...)
 	}
@@ -1384,6 +1385,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				// gateway reads the same result and fails closed on it.
 				if strings.Contains(command, ">") {
 					assignedOperands = AdjacentAssignedWriteOperands(command, cwd, home)
+					assignedOperands = append(assignedOperands, DeclaredRedirectWriteOperands(command, cwd, home)...)
 					boundedOperands, _ := BoundedShellWriteOperands(command, cwd, home)
 					literalOperands = append(literalOperands, boundedOperands...)
 				}
@@ -1925,8 +1927,9 @@ func movedDirectorySightingPath(candidate actionfacts.PathFact, facts actionfact
 
 // copilotCall returns the tool name and the projected arguments of a Copilot
 // hook body as the gateway's profile for its dialect reads them
-// (copilotargs.LocalDialect), and whether another spelling of the tool name
-// or of the arguments carries a different value. A native PermissionRequest
+// (copilotargs.LocalDialect and CLIHookLocalEvent), and whether another spelling
+// of the tool name or arguments carries a different value. A Local body with
+// CLI-only fields is also incomplete. A native PermissionRequest
 // reads toolInput only when toolArgs is absent, through the projection the
 // gateway's profile uses (copilotargs.PermissionToolArgs): an edit whose
 // diff does not prove the declared target is incomplete. The other
@@ -1935,6 +1938,9 @@ func copilotCall(envelope map[string]json.RawMessage, surface, event string) (js
 	var hookEvent string
 	_ = json.Unmarshal(envelope["hook_event_name"], &hookEvent)
 	_, local := copilotargs.LocalDialect(surface, event)
+	_, localFromCLI := copilotargs.CLIHookLocalEvent(event, hookEvent)
+	localFromCLI = surface == "" && localFromCLI
+	local = local || localFromCLI
 	toolNames := []string{"toolName", "tool_name"}
 	argNames := []string{"toolArgs", "tool_input", "toolInput", "tool_args", "args", "arguments"}
 	var nativeHook string
@@ -1955,6 +1961,14 @@ func copilotCall(envelope map[string]json.RawMessage, surface, event string) (js
 	}
 	if local && (aliasSet(envelope["toolName"]) || aliasSet(envelope["toolArgs"])) {
 		toolConflict = true
+	}
+	if localFromCLI {
+		for key := range envelope {
+			if copilotargs.CLIHookLocalForeignField(key) {
+				toolConflict = true
+				break
+			}
+		}
 	}
 	var tool string
 	_ = json.Unmarshal(toolRaw, &tool)
@@ -5702,10 +5716,18 @@ func copyPreservesLinks(args []string, static []bool) bool {
 	return cpOperands(args, static).preserves
 }
 
+// staticAt reports that argument i of an argv's static flags is in range
+// and static. The archive readers below read options by position; a word
+// past the end is not static, so a short argv is read as plain words and
+// never indexes out of range (gas-ux-r1 GAP-0055).
+func staticAt(static []bool, i int) bool {
+	return i >= 0 && i < len(static) && static[i]
+}
+
 func archiveCopiesLinks(program string, args []string, static []bool) bool {
 	if program == "rsync" {
 		for i, arg := range args {
-			if static[i] && (arg == "--links" || arg == "--archive" ||
+			if staticAt(static, i) && (arg == "--links" || arg == "--archive" ||
 				strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && strings.ContainsAny(arg[1:], "al")) {
 				return true
 			}
@@ -5713,7 +5735,7 @@ func archiveCopiesLinks(program string, args []string, static []bool) bool {
 	}
 	if program == "cpio" || program == "bsdcpio" || program == "pax" {
 		for i, arg := range args {
-			if static[i] && strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") &&
+			if staticAt(static, i) && strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") &&
 				(program == "pax" && strings.ContainsRune(arg, 'w') || strings.ContainsRune(arg, 'p')) {
 				return true
 			}
@@ -5726,7 +5748,7 @@ func archiveCopiesLinks(program string, args []string, static []bool) bool {
 func archiveMayLink(program string, args []string, static []bool) bool {
 	if program == "jar" {
 		for i, arg := range args {
-			if static[i] && (arg == "--extract" || arg == "-x" ||
+			if staticAt(static, i) && (arg == "--extract" || arg == "-x" ||
 				len(arg) > 0 && len(strings.TrimLeft(arg, "-")) > 0 &&
 					strings.HasPrefix(strings.TrimLeft(arg, "-"), "x")) {
 				return true
@@ -5736,7 +5758,7 @@ func archiveMayLink(program string, args []string, static []bool) bool {
 	}
 	if program == "ditto" {
 		for i, arg := range args {
-			if static[i] && (arg == "-x" || arg == "--extract") {
+			if staticAt(static, i) && (arg == "-x" || arg == "--extract") {
 				return true
 			}
 		}
@@ -5748,28 +5770,32 @@ func archiveMayLink(program string, args []string, static []bool) bool {
 	if program == "unzip" || strings.HasPrefix(program, "7z") {
 		// Listing and test modes do not extract. 7z needs an x or e command.
 		if program == "unzip" {
-			// -v prints the version without an archive, or lists one
-			// archive verbosely. Neither form extracts (GAP-0395).
-			if static[0] && args[0] == "-v" &&
-				(len(args) == 1 || len(args) == 2 && static[1] && args[1] != "" && !strings.HasPrefix(args[1], "-")) {
+			// A bare unzip prints its usage (gas-ux-r1 GAP-0055). -v prints
+			// the version without an archive, or lists one archive
+			// verbosely. None of these forms extracts (GAP-0395).
+			if len(args) == 0 {
+				return false
+			}
+			if staticAt(static, 0) && args[0] == "-v" &&
+				(len(args) == 1 || len(args) == 2 && staticAt(static, 1) && args[1] != "" && !strings.HasPrefix(args[1], "-")) {
 				return false
 			}
 			for i, arg := range args {
-				if static[i] && (arg == "-l" || arg == "-t" || arg == "-Z") {
+				if staticAt(static, i) && (arg == "-l" || arg == "-t" || arg == "-Z") {
 					return false
 				}
 			}
 			return true
 		}
 		for i, arg := range args {
-			if static[i] && (arg == "x" || arg == "e") {
+			if staticAt(static, i) && (arg == "x" || arg == "e") {
 				return true
 			}
 		}
 		return false
 	}
 	for i, arg := range args {
-		if !static[i] {
+		if !staticAt(static, i) {
 			continue
 		}
 		if arg == "--" {

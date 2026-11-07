@@ -15,7 +15,7 @@
 //
 //	defenseclaw-scanners skill-scanner <skill-scanner arguments>
 //	defenseclaw-scanners mcp-scan --input-stdin <url>
-//	defenseclaw-scanners plugin-scan <plugin dir> [--policy p] [--profile p] [--connector c] [--include-self]
+//	defenseclaw-scanners plugin-scan <plugin dir> [--policy p] [--profile p] [--connector c] [--include-self] [--disable-vendor-identity]
 //	defenseclaw-scanners versions | --version | prepare | prune
 package main
 
@@ -40,6 +40,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 //go:embed all:payload
@@ -102,6 +104,8 @@ while i<len(a):
         i+=2
     elif x=="--include-self":
         o.include_self=True; i+=1
+    elif x=="--disable-vendor-identity":
+        o.disable_vendor_identity=True; i+=1
     elif t is None and not x.startswith("--"):
         t=x; i+=1
     else:
@@ -252,7 +256,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	defer release()
 	if err := validateRuntimeCodeTree(); err != nil {
-		fmt.Fprintf(stderr, "defenseclaw-scanners: runtime code is not trusted: %v; run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1 as LocalSystem\n", err)
+		fmt.Fprintf(stderr, "defenseclaw-scanners: runtime code is not trusted: %v; run `%s` as LocalSystem. %s\n", err, managed.WindowsSetupCommand("/repair", "JSON=1"), managed.WindowsSetupSource)
 		return 1
 	}
 	pythonDir := filepath.Join(dir, "python")
@@ -510,7 +514,7 @@ func prepareRuntime(manifest runtimeManifest) (string, error) {
 		return "", fmt.Errorf("the unpacked scanner runtime does not match this build: %w", err)
 	}
 	if err := validateRuntimeCodeTree(); err != nil {
-		return "", fmt.Errorf("the unpacked scanner runtime code is not trusted: %w; run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1 as LocalSystem", err)
+		return "", fmt.Errorf("the unpacked scanner runtime code is not trusted: %w; run `%s` as LocalSystem. %s", err, managed.WindowsSetupCommand("/repair", "JSON=1"), managed.WindowsSetupSource)
 	}
 	return dir, nil
 }
@@ -554,9 +558,13 @@ func clearRuntimeDir(dir string) error {
 
 // notPreparedError tells a standard account that cannot create the runtime
 // that an administrator prepares it, instead of a bare "Access is denied".
+// The repair is named as typed: Setup puts no DefenseClaw command on PATH,
+// and the standalone profile is the one that ships this runtime
+// (cowork-1-0-8 GAP-0076).
 func notPreparedError(err error) error {
 	if errors.Is(err, fs.ErrPermission) {
-		return fmt.Errorf("the scanner runtime is not prepared and this account cannot prepare it; an administrator prepares it with `defenseclaw enterprise windows repair`: %w", err)
+		return fmt.Errorf("the scanner runtime is not prepared and this account cannot prepare it; an administrator prepares it from an elevated PowerShell prompt with `%s`: %w",
+			managed.WindowsAdminCommand("enterprise", "windows", "repair", "--profile", "standalone"), err)
 	}
 	return err
 }

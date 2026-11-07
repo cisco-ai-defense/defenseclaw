@@ -142,9 +142,10 @@ var managedInstallRefusesContentDrift = StandaloneRefusesContentDrift
 
 // standaloneContentRepairRefusal is the recovery step logged with a refused
 // content file.
-const standaloneContentRepairRefusal = "not repaired in place on a standalone install, because an account " +
-	"that could write this file may have changed it: from an elevated prompt run Setup /ensure so Setup " +
-	"writes a fresh file, then Setup /verify (GAP-0561)"
+var standaloneContentRepairRefusal = "not repaired in place on a standalone install, because an account " +
+	"that could write this file may have changed it: from an elevated PowerShell prompt run `" + WindowsSetupCommand("/ensure") +
+	"` so Setup writes a fresh file, then `" + WindowsAdminCommand("enterprise", "windows", "verify", "--profile", "standalone") +
+	"` (GAP-0561). " + WindowsSetupSource
 
 // refuseStandaloneContentRepair reads target's descriptor without writing.
 // When an untrusted principal can write or owns the file, or the strict

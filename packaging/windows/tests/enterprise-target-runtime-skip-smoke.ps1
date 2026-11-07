@@ -19,7 +19,7 @@ $ast = [Management.Automation.Language.Parser]::ParseFile($modulePath, [ref]$nul
 if (@($parseErrors).Count -ne 0) {
     throw "module does not parse: $(@($parseErrors)[0])"
 }
-foreach ($name in @('Get-DefenseClawTargetRuntimeSkippedProfiles', 'Write-DefenseClawTargetRuntimeSkippedProfiles', 'ConvertTo-DefenseClawResilienceFieldValue', 'Format-DefenseClawResilienceEvent')) {
+foreach ($name in @('Get-DefenseClawTargetRuntimeSkippedProfiles', 'Write-DefenseClawTargetRuntimeSkippedProfiles', 'ConvertTo-DefenseClawResilienceFieldValue', 'Format-DefenseClawResilienceEvent', 'Test-DefenseClawStandaloneProfile', 'Format-DefenseClawSetupAction')) {
     $definition = $ast.Find({
             param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
@@ -30,6 +30,7 @@ foreach ($name in @('Get-DefenseClawTargetRuntimeSkippedProfiles', 'Write-Defens
     . ([scriptblock]::Create($definition.Extent.Text))
 }
 
+$script:DefenseClawEnterpriseProfile = 'Standalone'
 $script:ResilienceMarkers = @('defenseclaw_repair', 'defenseclaw_skip')
 $script:ResilienceEvents = [Collections.Generic.List[string]]::new()
 
@@ -103,7 +104,7 @@ try {
         -WarningVariable pendingWarnings -WarningAction SilentlyContinue
     $pendingText = (@($pendingWarnings) | Microsoft.PowerShell.Core\ForEach-Object { [string]$_ }) -join "`n"
     if (-not $pendingText.Contains('left pending in this lifecycle run') -or
-        -not $pendingText.Contains('run Setup /ensure to retry enrollment') -or
+        -not $pendingText.Contains("run & '.\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure (Setup is not installed on this computer: use the copy in your MDM package or the release download) to retry enrollment") -or
         -not $pendingText.Contains('sharing violation after 10 attempts')) {
         throw "validation skip did not name the account and recovery: $pendingText"
     }

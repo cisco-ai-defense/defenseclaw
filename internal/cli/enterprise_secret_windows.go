@@ -61,7 +61,7 @@ const (
 var (
 	// windowsSecretLayout resolves the standalone layout (tests use a
 	// temporary tree).
-	windowsSecretLayout = managed.StandaloneWindowsLayout
+	windowsSecretLayout = windowsManagedStandaloneLayout
 	// windowsSecretGatewayAccount is the service whose SID may read the
 	// credentials.
 	windowsSecretGatewayAccount = `NT SERVICE\` + managed.StandaloneWindowsGatewaySvc
@@ -90,13 +90,15 @@ var (
 	// windowsSecretLifecycleLock are the two locks set and remove take.
 	windowsSecretLockBundleStore   = lockWindowsBundleStoreWithin
 	windowsSecretLifecycleLockPath = func() (string, error) {
-		roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+		roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 		if err != nil {
 			return "", err
 		}
 		return filepath.Join(roots.LifecycleDir, "lifecycle.lock"), nil
 	}
-	windowsSecretLifecycleLock = acquireWindowsEnterpriseLifecycleLock
+	// windowsSecretLifecycleLock takes the lock once; acquireWindowsLockWithin
+	// waits windowsSecretInstallerLockWait around it.
+	windowsSecretLifecycleLock = tryWindowsEnterpriseLifecycleLock
 	// windowsSecretInstallerLockWait is the fixed wait for the installer's
 	// lifecycle.lock: the 30 s default of Enter-DefenseClawLifecycleLock
 	// (packaging/windows/DefenseClawEnterprise.psm1).
@@ -125,14 +127,14 @@ func init() {
 // changed.
 func windowsSecretStandardUserAnswer(action string, opts *enterpriseSecretOptions) string {
 	if action == "status" {
-		return windowsManagedStandardUserViewAnswer("The protected credentials", "enterprise secret status")
+		return windowsManagedStandardUserViewAnswer("The protected credentials", "enterprise", "secret", "status")
 	}
-	command := "enterprise secret " + action
+	command := []string{"enterprise", "secret", action}
 	if opts != nil && managed.ValidCredentialName(opts.name) {
-		command += " --name " + opts.name
+		command = append(command, "--name", opts.name)
 	}
-	return "a standard account cannot " + action + " a protected credential of the managed deployment. Ask your administrator, who runs it from an elevated PowerShell prompt with `& '" +
-		managedWindowsAdminCLI() + "' " + command + "`. Nothing was changed."
+	return "a standard account cannot " + action + " a protected credential of the managed deployment. Ask your administrator, who runs it from an elevated PowerShell prompt with " +
+		managedWindowsCommand(command...) + ". Nothing was changed."
 }
 
 type windowsSecretState struct {
@@ -633,7 +635,8 @@ func requireWindowsSecretDeployment() error {
 		return secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	if !installed {
-		return secretFailed("not_installed", windowsSecretExitFailure, errors.New("no standalone managed deployment is installed; run `enterprise windows ensure --profile standalone` first"))
+		return secretFailed("not_installed", windowsSecretExitFailure, errors.New("no standalone managed deployment is installed; run "+
+			windowsEnterpriseAdminCommand("ensure")+" from an elevated PowerShell prompt first"))
 	}
 	return nil
 }

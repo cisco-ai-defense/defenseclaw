@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // GAP-0935, GAP-0680: the guardian keeps a copy of the recorded hook binary
@@ -59,8 +61,16 @@ func TestKeepWindowsManagedFileCopyRestoresADamagedHookBinary(t *testing.T) {
 	if err := os.Remove(target); err != nil {
 		t.Fatal(err)
 	}
-	if damage, err := keepWindowsManagedFileCopy(target, copyPath, "0000", true); err == nil || damage != "" {
+	damage, err := keepWindowsManagedFileCopy(target, copyPath, "0000", true)
+	if err == nil || damage != "" {
 		t.Fatalf("a copy of another release was restored: %q, %v", damage, err)
+	}
+	// Only Setup carries a payload to restore the binary from, and it is not
+	// installed on the computer: the error runs it from its folder and says
+	// where it comes from (cowork-1-0-8 GAP-0095).
+	if message := err.Error(); !strings.Contains(message, windowsEnterpriseSetupCommand("/repair", "JSON=1")) ||
+		!strings.Contains(message, managed.WindowsSetupSource) || strings.Contains(message, "Setup /repair") {
+		t.Fatalf("no-copy error = %q", message)
 	}
 }
 

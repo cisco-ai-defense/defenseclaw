@@ -300,7 +300,7 @@ Some policy sources outrank the files DefenseClaw writes.
 
 `higher_precedence_sources` decides what happens when a visible source does not include DefenseClaw's hooks. Visible sources exist on macOS and on Windows (the Claude Code HKLM `Settings` value). On Windows the setting changes only what `policy show` and `verify` report: the lifecycle never publishes the Claude Code drop-in while that value is set.
 
-- **`fail` (default).** The source is recorded as a conflict and the connector counts as not covered. `ensure` and `status` report the warning `machine_policy_incomplete`, which names the source, with `security_complete: false`. `defenseclaw-gateway enterprise macos verify` exits 1. Enrollment continues.
+- **`fail` (default).** The source is recorded as a conflict and the connector counts as not covered. `ensure` and `status` report the warning `machine_policy_incomplete`, which names the source, with `security_complete: false`. `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos verify` exits 1. Enrollment continues.
 - **`warn`.** The source is reported as a note, and the connector can still count as covered.
 
 ## Inspect, export and verify

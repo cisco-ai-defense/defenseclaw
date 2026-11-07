@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/winowner"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -110,10 +111,14 @@ func ValidatePrivateDirectoryOwnership(path string) error {
 }
 
 // ValidatePrivateDirectoryOwnershipAllowingAdministrators is
-// ValidatePrivateDirectoryOwnership that also admits write entries for the
-// built-in Administrators group, matched by its well-known SID. Folders an
-// agent or a plain mkdir creates under the profile inherit that entry, and a
-// local administrator can already take over the account's files.
+// ValidatePrivateDirectoryOwnership for a folder DefenseClaw did not create:
+// the owner and the write entries may also be the Windows system owners in
+// internal/winowner (LocalSystem, BUILTIN Administrators, TrustedInstaller),
+// matched by well-known SID. Folders an agent or a plain mkdir creates under
+// the profile inherit the Administrators entry, the folders a member of the
+// Administrators group creates are owned by that group (cowork-1-0-8
+// GAP-0085), and a local administrator can already take over the account's
+// files.
 func ValidatePrivateDirectoryOwnershipAllowingAdministrators(path string) error {
 	return validatePrivateOwnership(path, true, true)
 }
@@ -154,7 +159,7 @@ func ValidatePrivateHandle(handle windows.Handle) error {
 	return nil
 }
 
-func validatePrivateOwnership(path string, wantDirectory, trustAdministrators bool) error {
+func validatePrivateOwnership(path string, wantDirectory, trustSystemOwners bool) error {
 	if err := rejectReparseChain(path); err != nil {
 		return err
 	}
@@ -170,14 +175,17 @@ func validatePrivateOwnership(path string, wantDirectory, trustAdministrators bo
 	if err != nil {
 		return err
 	}
-	owned, err := windowsPathOwnedBySubject(path, identity)
+	owner, err := windowsPathOwner(path)
 	if err != nil {
 		return err
 	}
-	if !owned {
+	if !ownerTrustedForSubject(owner, identity, trustSystemOwners) {
+		if trustSystemOwners {
+			return fmt.Errorf("safefile: path owner %s is not this account, SYSTEM, BUILTIN Administrators or TrustedInstaller: %s", owner, path)
+		}
 		return fmt.Errorf("safefile: private path is not owned by the current user: %s", path)
 	}
-	repairable, err := privateDACLIsWriterRepairableForSubject(path, identity, trustAdministrators)
+	repairable, err := privateDACLIsWriterRepairableForSubject(path, identity, trustSystemOwners)
 	if err != nil {
 		return err
 	}
@@ -209,6 +217,16 @@ func withLockedDirectory(path string, write func() error) error {
 		return err
 	}
 	return write()
+}
+
+// ownerTrustedForSubject is the owner rule of validatePrivateOwnership: the
+// subject itself, and with trustSystemOwners also the Windows system owners
+// of internal/winowner.
+func ownerTrustedForSubject(owner *windows.SID, identity windowsProtectionSubject, trustSystemOwners bool) bool {
+	if owner == nil || identity.sid == nil {
+		return false
+	}
+	return owner.Equals(identity.sid) || (trustSystemOwners && winowner.Trusted(owner.String(), ""))
 }
 
 func windowsPathOwnedByCurrentUser(path string) (bool, error) {
@@ -816,7 +834,7 @@ func privateSecurityDescriptorIsSafeForSubject(
 func privateDACLIsWriterRepairableForSubject(
 	path string,
 	identity windowsProtectionSubject,
-	trustAdministrators bool,
+	trustSystemOwners bool,
 ) (bool, error) {
 	extended, err := winpath.Extended(path)
 	if err != nil {
@@ -830,13 +848,13 @@ func privateDACLIsWriterRepairableForSubject(
 	if err != nil {
 		return false, err
 	}
-	return privateSecurityDescriptorIsWriterRepairableForSubject(sd, identity, trustAdministrators)
+	return privateSecurityDescriptorIsWriterRepairableForSubject(sd, identity, trustSystemOwners)
 }
 
 func privateSecurityDescriptorIsWriterRepairableForSubject(
 	sd *windows.SECURITY_DESCRIPTOR,
 	identity windowsProtectionSubject,
-	trustAdministrators bool,
+	trustSystemOwners bool,
 ) (bool, error) {
 	if sd == nil {
 		return false, nil
@@ -856,7 +874,7 @@ func privateSecurityDescriptorIsWriterRepairableForSubject(
 	if identity.sid == nil {
 		return false, fmt.Errorf("safefile: protection subject SID is unavailable")
 	}
-	if owner == nil || !owner.Equals(identity.sid) {
+	if !ownerTrustedForSubject(owner, identity, trustSystemOwners) {
 		return false, nil
 	}
 	untrustedWrite := windows.ACCESS_MASK(
@@ -885,7 +903,7 @@ func privateSecurityDescriptorIsWriterRepairableForSubject(
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		trusted := sid.Equals(identity.sid) || sid.Equals(system) ||
 			sid.IsWellKnown(windows.WinCreatorOwnerRightsSid) ||
-			(trustAdministrators && sid.IsWellKnown(windows.WinBuiltinAdministratorsSid))
+			(trustSystemOwners && winowner.Trusted(sid.String(), ""))
 		if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE {
 			if trusted && ace.Mask != 0 {
 				return false, nil

@@ -1,0 +1,32 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import "github.com/defenseclaw/defenseclaw/internal/actionfacts"
+
+// unknownKeyTwinRequests are the requests for the readings of a file-tool
+// call with argument keys outside its reviewed schema
+// (actionfacts.UnknownKeyTwins): the call without those
+// keys, and the same tool aimed at each path-shaped value they hold. Each
+// reading is judged by every lane, so an extra key never hides the file a
+// call names from a path rule, the state-write block or the credential and
+// key rules (gas-ux-r1 GAP-0076). Only what a reading proves counts
+// (withOverLimitTwinFindings): a reading never removes a finding of the
+// call.
+func unknownKeyTwinRequests(request trustedActionRequest, facts actionfacts.Facts) ([]trustedActionRequest, bool) {
+	twins, overflow := actionfacts.UnknownKeyTwins(request.Input, facts)
+	if len(twins) == 0 {
+		return nil, overflow
+	}
+	out := make([]trustedActionRequest, 0, len(twins))
+	for _, reading := range twins {
+		twin := request
+		twin.Input.Args = reading.Args
+		twin.LegacyText = string(reading.Args)
+		twin.conflictSource = nil
+		twin.record, twin.recordTelemetry = nil, nil
+		out = append(out, twin)
+	}
+	return out, overflow
+}

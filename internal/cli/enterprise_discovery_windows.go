@@ -36,12 +36,12 @@ func pinEnterpriseDiscoveryEnv() error {
 		// (enterprise_sandbox_views.go).
 		what, view, adminArgs := windowsEnterpriseAdminViewCommand(runtimeCommand)
 		return pinManagedAdministratorEnvironment(view, func() string {
-			return windowsManagedStandardUserViewAnswer(what, adminArgs)
+			return windowsManagedStandardUserViewAnswer(what, adminArgs...)
 		})
 	}
 	return pinManagedAdministratorEnvironment("enterprise windows discovery", func() string {
 		return windowsManagedStandardUserViewAnswer("the AI Discovery inventory",
-			"enterprise windows discovery --user "+managedHostCurrentAccountName())
+			"enterprise", "windows", "discovery", "--user", managedHostCurrentAccountName())
 	})
 }
 
@@ -50,31 +50,21 @@ func pinEnterpriseDiscoveryEnv() error {
 // root, and the arguments an administrator runs it with. The path is the
 // command's own: "enterprise windows " + its leaf named `enterprise windows
 // list`, which does not exist, for `enterprise windows sandbox list`
-// (#1201). A --user the caller gave is kept.
-func windowsEnterpriseAdminViewCommand(cmd *cobra.Command) (what, view, adminArgs string) {
+// (#1201). A --user the caller gave is kept, as one argument: the renderer
+// quotes it for PowerShell (rel-1-0-2 GAP-0086, cowork-1-0-8 GAP-0076).
+func windowsEnterpriseAdminViewCommand(cmd *cobra.Command) (what, view string, adminArgs []string) {
 	view = strings.TrimSpace(strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()))
 	what = "the identity views"
 	if parent := cmd.Parent(); parent != nil && parent.Name() == "sandbox" {
 		what = "the sandbox registrations"
 	}
-	adminArgs = view
+	adminArgs = strings.Fields(view)
 	if flag := cmd.Flags().Lookup("user"); flag != nil && flag.Changed {
 		if user := strings.TrimSpace(flag.Value.String()); user != "" {
-			adminArgs += " --user " + windowsPowerShellArgument(user)
+			adminArgs = append(adminArgs, "--user", user)
 		}
 	}
 	return what, view, adminArgs
-}
-
-// windowsPowerShellArgument quotes value for the PowerShell command a hint
-// asks the administrator to paste, when it holds a space or a character
-// PowerShell would read as syntax: the --user value was pasted bare
-// (rel-1-0-2 GAP-0086).
-func windowsPowerShellArgument(value string) string {
-	if !strings.ContainsAny(value, " \t'\"`$;&|(){}@,<>#") {
-		return value
-	}
-	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 // newWindowsDiscoveryCommand is `enterprise windows discovery`, the Windows

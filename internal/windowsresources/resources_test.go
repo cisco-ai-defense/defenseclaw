@@ -26,7 +26,7 @@ func repositoryIcon(t *testing.T) string {
 func TestCompleteWindowsExecutableInventory(t *testing.T) {
 	want := []Component{
 		"gateway", "acp-guard", "cmid-broker", "sensor-helper", "hook",
-		"hook-guard", "launcher", "startup", "setup", "enterprise-setup",
+		"hook-guard", "launcher", "startup", "enterprise-setup",
 		"enterprise-setup-standalone",
 	}
 	if len(AllComponents) != len(want) {
@@ -152,7 +152,7 @@ func TestManifestArchitectureMatchesTarget(t *testing.T) {
 }
 
 func TestSetupResourcesRemainAMD64Only(t *testing.T) {
-	for _, component := range []Component{ComponentSetup, ComponentEnterpriseSetup, ComponentEnterpriseStandaloneSetup} {
+	for _, component := range []Component{ComponentEnterpriseSetup, ComponentEnterpriseStandaloneSetup} {
 		manifest, err := ManifestForTarget(TargetWindowsAMD64, component, "1.2.3")
 		if err != nil {
 			t.Fatal(err)
@@ -171,11 +171,11 @@ func TestSetupResourcesRemainAMD64Only(t *testing.T) {
 
 func TestResourceSetIsDeterministicAndComplete(t *testing.T) {
 	icon := repositoryIcon(t)
-	first, err := expectedResourceSet(TargetWindowsAMD64, ComponentSetup, "1.2.3", icon)
+	first, err := expectedResourceSet(TargetWindowsAMD64, ComponentEnterpriseStandaloneSetup, "1.2.3", icon)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := expectedResourceSet(TargetWindowsAMD64, ComponentSetup, "1.2.3", icon)
+	second, err := expectedResourceSet(TargetWindowsAMD64, ComponentEnterpriseStandaloneSetup, "1.2.3", icon)
 	if err != nil {
 		t.Fatal(err)
 	}

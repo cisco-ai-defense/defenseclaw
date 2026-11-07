@@ -19,9 +19,10 @@ import (
 const maxLaunchEnvironmentBytes = 1 << 20
 
 // LaunchEnvironmentForPID reads only the launch selectors needed by managed
-// coverage. It requires a privileged process handle and never returns the
-// complete environment, which can contain credentials. A failed or partial
-// read leaves coverage unverified.
+// coverage and by the foreground gateway home proof (DEFENSECLAW_HOME). It
+// requires a privileged process handle and never returns the complete
+// environment, which can contain credentials. A failed or partial read
+// leaves coverage unverified.
 func LaunchEnvironmentForPID(pid int) (map[string]string, error) {
 	if pid <= 0 || uint64(pid) > uint64(^uint32(0)) {
 		return nil, errors.New("invalid process ID")
@@ -193,7 +194,7 @@ func parseLaunchEnvironmentBlock(raw []byte) (map[string]string, error) {
 
 func launchEnvironmentKey(key string) bool {
 	switch key {
-	case "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "XDG_CONFIG_HOME",
+	case "DEFENSECLAW_HOME", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "XDG_CONFIG_HOME",
 		"OPENCODE_PURE", "OPENCODE_TEST_MANAGED_CONFIG_DIR",
 		"KIRO_HOME", "KIRO_AGENT_CONFIG_DIR", "KIRO_TEST_AGENTS_DIR",
 		"HERMES_HOME", "HERMES_MANAGED_DIR", "HERMES_SAFE_MODE":

@@ -2917,7 +2917,8 @@ targets:
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
-                [switch]$RecordLifecycle
+                [switch]$RecordLifecycle,
+                [string]$ApprovedConfigSHA256
             )
         }
         function script:Wait-DefenseClawEnterpriseReadiness {

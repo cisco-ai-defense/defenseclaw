@@ -103,7 +103,13 @@ def uninstalled_marker_path(data_dir: str) -> str:
 
 
 def mark_uninstalled(data_dir: str) -> None:
-    """Record a completed per-user removal outside the removed data folder."""
+    """Record a completed per-user removal outside the removed data folder.
+
+    Raises OSError when the folder that holds the marker is unsafe; on Windows
+    that is a folder whose owner or writers are outside the Windows owner
+    trust set. Such a folder gets no marker: its owner controls it, and the
+    plugin's guard ignores a marker there anyway (cowork-1-0-8 GAP-0085).
+    """
     marker = uninstalled_marker_path(data_dir)
     for suffix in (".notice", ".context"):
         try:
@@ -114,7 +120,6 @@ def mark_uninstalled(data_dir: str) -> None:
         marker,
         b"removed\n",
         protect_parent=False,
-        allow_windows_system_controllers_in_parent=os.name == "nt",
     )
 
 

@@ -146,6 +146,9 @@ type APIServer struct {
 	// mcpAdmissionPending names an MCP server the install watcher admits
 	// but has not admitted yet (GAP-0112). Set once before serving.
 	mcpAdmissionPending func(connector, server, home, cwd string) (string, bool)
+	// mcpAdmissionStatus also distinguishes a completed scan failure from a
+	// pending scan and carries the scan's remaining timeout.
+	mcpAdmissionStatus func(connector, server, home, cwd string) watcher.MCPAdmissionStatus
 	// mcpRefreshBeforeCall brings the gateway's view of the enrolled users'
 	// MCP servers up to date before an MCP tool call is decided (GAP-0216).
 	// Set once before serving.
@@ -1206,6 +1209,14 @@ func (a *APIServer) SetMCPAdmissionPending(pending func(connector, server, home,
 		return
 	}
 	a.mcpAdmissionPending = pending
+}
+
+// SetMCPAdmissionStatus wires the watcher's current admission state.
+func (a *APIServer) SetMCPAdmissionStatus(status func(connector, server, home, cwd string) watcher.MCPAdmissionStatus) {
+	if a == nil {
+		return
+	}
+	a.mcpAdmissionStatus = status
 }
 
 // SetMCPRefreshBeforeCall wires the refresh of the enrolled users' MCP
@@ -3055,6 +3066,8 @@ func (a *APIServer) handleAuditEvent(w http.ResponseWriter, r *http.Request) {
 	// Sandbox attribution comes only from an authenticated sandbox binding
 	// (audit.CorrelationEnvelope), never from a request body.
 	event.SandboxID, event.SandboxName = "", ""
+	// The same holds for the agent identity and the verified caller facts.
+	dropBodyAssignedIdentity(&event)
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}
@@ -3525,11 +3538,11 @@ func windowsProfileScanNextStep(kind, target string) string {
 	}
 	review := `C:\DefenseClawReview`
 	copyTo := review + `\` + name
-	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+	quote := managed.PowerShellLiteral
 	return "standard accounts cannot run managed scans, so an administrator copies the folder out of the profiles and scans the copy " +
 		"from an elevated PowerShell prompt: `New-Item -ItemType Directory -Force " + quote(review) + " | Out-Null; " +
-		"Copy-Item -Recurse -Force -LiteralPath " + quote(target) + " -Destination " + quote(copyTo) + "`, then `& " +
-		quote(managed.WindowsStandaloneAdminCLI()) + " scan " + kind + " " + quote(copyTo) + "`"
+		"Copy-Item -Recurse -Force -LiteralPath " + quote(target) + " -Destination " + quote(copyTo) + "`, then `" +
+		managed.WindowsAdminCommand("scan", kind, copyTo) + "`"
 }
 
 func (a *APIServer) isBundledMCPScanRequest(req mcpScanRequest) bool {

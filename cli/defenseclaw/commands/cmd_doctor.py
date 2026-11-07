@@ -151,6 +151,7 @@ from defenseclaw.process_liveness import pid_alive
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener, is_symlink
 from defenseclaw.scanner_binary import SKILL_SCANNER_BINARY, resolve_scanner_binary
 from defenseclaw.webhooks import list_webhooks, network_error_text, validate_webhook_url
+from defenseclaw.winquote import powershell_command_line, powershell_literal, run_instruction
 
 # Doctor status markers, recomputed per emission so the per-call
 # TTY/NO_COLOR gate in ``ux._color_enabled`` takes effect. Caching at
@@ -312,9 +313,11 @@ class _DoctorResult:
         # readiness check) skip it (GAP-0100).
         self.list_processes = not passive if list_processes is None else list_processes
         self.quiet = quiet
-        # "stopped" or "foreign" once the Sidecar API row explained that this
-        # account's gateway is not serving the API port; later rows that would
-        # only repeat it stay quiet.
+        # "stopped", "foreign" or "foreground" (this account's own gateway,
+        # started without a PID file, whose identity cannot authorize the
+        # token) once the Sidecar API row explained that this account's
+        # supervised gateway is not serving the API port; later rows that
+        # would only repeat it stay quiet.
         self.gateway_down = ""
         # True once the Sidecar API row found a listener on the API port that
         # is not this account's verified gateway (its /health still answers).
@@ -1773,7 +1776,10 @@ def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
 
     if os.name == "nt":
         return
-    data_dir = _configured_gateway_data_dir(cfg)
+    if _gateway_store_unknown(cfg):
+        _emit_gateway_store_unknown("Sudo leftovers", r)
+        return
+    data_dir = _gateway_store_dir(cfg)
     if not data_dir:
         return
     leftovers = sudo_runtime_leftover_relpaths(data_dir)
@@ -1809,16 +1815,21 @@ def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
             check_id="doctor.state.sudo-leftovers",
         )
         return
-    remediation = (
-        "stop the gateway, preserve a backup, then rerun the gateway once with sudo "
-        "from the owning account so verified descriptor-bound ownership repair can run"
-    )
+    if _root_leftovers_account_can_repair(cfg):
+        remediation = _root_leftovers_remedy(cfg)
+        guidance = "; give them back to this account"
+    else:
+        remediation = (
+            "stop the gateway, preserve a backup, then rerun the gateway once with sudo "
+            "from the owning account so verified descriptor-bound ownership repair can run"
+        )
+        guidance = "; use the guided ownership repair"
     _emit(
         "fail",
         "Sudo leftovers",
         "root-owned from a sudo-started gateway: "
         + ", ".join(leftovers)
-        + "; use the guided ownership repair",
+        + guidance,
         r=r,
         check_id="doctor.state.sudo-leftovers",
         reason_code="sudo-runtime-leftovers",
@@ -1853,6 +1864,287 @@ def _process_uid(pid: int) -> int | None:
     return int(value) if completed.returncode == 0 and value.isdecimal() else None
 
 
+ROOT_GATEWAY_REASON = "Your DefenseClaw gateway is running as root."
+
+
+def _root_gateway_remedy(cfg) -> str:
+    """The next step for a root-run gateway, in the words of this OS (GAP-0706).
+
+    Same table as ``daemon.RootGatewayListenerRemedy``. A root run leaves
+    root-owned files in the home, so the Unix remedy is one sequence that stops
+    the root gateway, returns the home and starts it as this account
+    (GAP-0711, GAP-0713). DefenseClawMac exists only on macOS. No final period:
+    callers end the sentence themselves.
+    """
+    return _root_gateway_remedy_for(sys.platform, cfg)
+
+
+def _root_gateway_remedy_for(platform_name: str, cfg) -> str:
+    if platform_name.startswith("win"):
+        executable = _root_gateway_windows_executable()
+        stop = powershell_command_line(executable, "stop")
+        start = powershell_command_line(executable, "start")
+        return (
+            f"Stop it from an elevated PowerShell prompt ({stop}), "
+            f"then start it as yourself from a normal PowerShell prompt ({start})"
+        )
+    note = _root_gateway_recovery_note(cfg)
+    if platform_name == "darwin":
+        return (
+            note
+            + "Open DefenseClawMac and choose Start Gateway: it stops the root gateway with "
+            "administrator approval, returns its files to you and starts the gateway as you. "
+            "Without the app, run: " + _root_gateway_recovery_command(cfg)
+        )
+    return (
+        note
+        + "Stop it, return its files to your account and start it as yourself with: "
+        + _root_gateway_recovery_command(cfg)
+    )
+
+
+def _root_gateway_windows_executable() -> str:
+    """The gateway of this account for the Windows remedy, as the Go windowsRootGatewayRemedy renders it.
+
+    The resolved binary when it is an absolute path, else the bare file name
+    a per-user install has on PATH.
+    """
+    from defenseclaw.gateway import resolve_gateway_binary
+
+    binary = resolve_gateway_binary()
+    if binary and os.path.isabs(binary):
+        return binary
+    return "defenseclaw-gateway.exe"
+
+
+def _root_gateway_recovery_command(cfg) -> str:
+    """Stop the root gateway, return the home and the store, start as this account."""
+    return _root_gateway_stop_command(cfg) + " && " + _root_gateway_return_and_start_command(cfg)
+
+
+def _root_gateway_return_and_start_command(cfg) -> str:
+    """Give the install home and the moved store back to this account, then start."""
+    home = _root_gateway_install_home(cfg)
+    store = _root_gateway_moved_store()[0]
+    homes = [home]
+    if store and store not in homes:
+        homes.append(store)
+    return (
+        'sudo chown -R "$(id -un)" '
+        + " ".join(shlex.quote(item) for item in homes)
+        + " && defenseclaw-gateway start"
+    )
+
+
+def _root_gateway_moved_store() -> tuple[str, str, bool]:
+    """The folder the gateway's config moved the store to, as the gateway reads it.
+
+    Returns ``(store, config_file, unreadable)``. The gateway starts with the
+    install home as its working directory, so a relative ``DEFENSECLAW_CONFIG``
+    and a relative ``data_dir`` are both taken from there, not from the folder
+    doctor was run in (GAP-0711, GAP-0713). The config is read from that
+    place and from nowhere else: the data_dir this process loaded may come from
+    a different file of the same relative name in the folder doctor runs in, so
+    it never stands in. A config that does not exist moves nothing (the gateway
+    uses the install home); ``unreadable`` reports one that exists but cannot
+    be read, whose store is unknown, so the caller says the folder list may be
+    incomplete.
+    """
+    import yaml
+
+    from defenseclaw.config import (
+        CONFIG_FILE_NAME,
+        CONFIG_PATH_ENV,
+        default_data_path,
+        parse_config_yaml,
+        read_config_text,
+    )
+
+    home = os.path.abspath(os.fspath(default_data_path()))
+    config_file = os.environ.get(CONFIG_PATH_ENV) or os.path.join(home, CONFIG_FILE_NAME)
+    if not os.path.isabs(config_file):
+        config_file = os.path.join(home, config_file)
+    config_file = os.path.normpath(config_file)
+    try:
+        raw = parse_config_yaml(read_config_text(config_file))
+    except (FileNotFoundError, NotADirectoryError):
+        return "", config_file, False
+    except (OSError, UnicodeError, ValueError, yaml.YAMLError):
+        return "", config_file, True
+    configured = raw.get("data_dir") if isinstance(raw, dict) else None
+    if not isinstance(configured, str) or not configured.strip():
+        return "", config_file, False
+    return os.path.abspath(os.path.join(home, configured.strip())), config_file, False
+
+
+def _install_home_store(cfg) -> str:
+    """The store the gateway reads when ``cfg`` was loaded from another folder, else "".
+
+    A relative ``DEFENSECLAW_CONFIG`` names a file in the folder this process
+    runs in, but the gateway starts in the install home and reads it there
+    (GAP-0711, GAP-0713). ``cfg`` then came from a different file of the same
+    name, so a check of the store the gateway owns reads the install home's one,
+    the store the printed recovery command names. With an absolute or no
+    ``DEFENSECLAW_CONFIG`` both readers see the same file and ``cfg`` stands. A
+    config that exists but cannot be read leaves the store unknown: "" again.
+    """
+    from defenseclaw.config import CONFIG_PATH_ENV, default_data_path
+
+    configured = os.environ.get(CONFIG_PATH_ENV)
+    if not configured or os.path.isabs(configured):
+        return ""
+    store, _config_file, unreadable = _root_gateway_moved_store()
+    if store or unreadable:
+        return store
+    return os.path.abspath(os.fspath(default_data_path()))
+
+
+def _gateway_store_unknown(cfg) -> bool:
+    """Whether the gateway reads a config doctor cannot read, so its store is unknown.
+
+    A relative ``DEFENSECLAW_CONFIG`` names a file in the install home for the
+    gateway. When that file exists but cannot be read here, nothing doctor
+    loaded from another folder says where the gateway keeps its store, so no
+    check may stand a different folder in for it (GAP-0711, GAP-0713).
+    """
+    from defenseclaw.config import CONFIG_PATH_ENV
+
+    configured = os.environ.get(CONFIG_PATH_ENV)
+    if not configured or os.path.isabs(configured):
+        return False
+    return _root_gateway_moved_store()[2]
+
+
+def _gateway_store_dir(cfg) -> str:
+    """The folder the gateway reads and writes its store in, as a checked path.
+
+    The one rule for every check of the gateway store: the install-home
+    config store when ``cfg`` was loaded from another folder, else ``cfg``
+    ``data_dir`` made absolute from the install home, the gateway working
+    directory (GAP-0711, GAP-0713). "" when no store is configured or the store
+    is unknown (``_gateway_store_unknown``), never another folder.
+    """
+    if _gateway_store_unknown(cfg):
+        return ""
+    return _install_home_store(cfg) or _configured_gateway_data_dir(cfg)
+
+
+def _emit_gateway_store_unknown(label: str, r: _DoctorResult) -> None:
+    """Report a check that could not run because the gateway store is unknown."""
+    config_file = _root_gateway_moved_store()[1]
+    _emit(
+        "warn",
+        label,
+        f"not checked: the configuration {config_file} the gateway reads could not be read "
+        "here, so the folder it keeps its store in is unknown",
+        r=r,
+    )
+
+
+def _root_gateway_recovery_note(cfg) -> str:
+    """A sentence to read before the recovery command, or "".
+
+    The command itself stays one pasteable line. When the config exists but
+    cannot be read here, the moved store is unknown and the chown does not
+    cover it.
+    """
+    _store, config_file, unreadable = _root_gateway_moved_store()
+    if not unreadable:
+        return ""
+    return (
+        f"The configuration {config_file} could not be read here, so a data_dir it sets is "
+        "not in the chown command below: return that folder to your account too. "
+    )
+
+
+def _root_leftovers_account_can_repair(cfg) -> bool:
+    """Whether root-owned runtime files are this account's to take back.
+
+    A managed install keeps its runtime root-owned by design, and a Secure
+    Client host is unchanged, so both keep their own guidance.
+    """
+    if os.name == "nt" or _doctor_managed(cfg):
+        return False
+    from defenseclaw.enforce import asset_lists
+
+    return not asset_lists.is_secure_client(cfg)
+
+
+def _root_leftovers_remedy(cfg) -> str:
+    """The one repair for root-owned files a sudo-started gateway left behind.
+
+    The gateway refuses to run as root over an account's files, so asking for
+    another sudo run cannot repair them (GAP-0711, GAP-0713). The same
+    stop, return, start sequence as ``_root_gateway_remedy``, in that order:
+    a root gateway that is still alive keeps writing, and the stop of one that
+    is already stopped succeeds, so the sequence reads the same either way.
+    """
+    note = _root_gateway_recovery_note(cfg)
+    return (
+        (note + "Then stop" if note else "stop")
+        + " the gateway if it runs as root, give its files back to this account and start it as yourself: "
+        + _root_gateway_recovery_command(cfg)
+    )
+
+
+def _root_gateway_install_home(cfg) -> str:
+    """The PID-record home that the root gateway was started for."""
+    from defenseclaw.config import default_data_path, install_home_for_bound_store
+
+    store = _root_gateway_moved_store()[0]
+    if store:
+        return install_home_for_bound_store(store)
+    data_dir = os.fspath(default_data_path())
+    try:
+        return gateway_home_for_data_dir(data_dir)
+    except (OSError, TypeError, ValueError):
+        return data_dir
+
+
+def _root_gateway_stop_command(cfg) -> str:
+    """Use the PID-record home and resolve the binary before sudo resets PATH."""
+    from defenseclaw.gateway import resolve_gateway_binary
+
+    install_home = _root_gateway_install_home(cfg)
+    binary = resolve_gateway_binary()
+    if binary and os.path.isabs(binary) and os.path.isfile(binary) and os.access(binary, os.X_OK):
+        executable = shlex.quote(binary)
+    else:
+        # The caller's shell can still find a just-installed binary when the
+        # Python process was launched with an older PATH.
+        executable = '"$(command -v defenseclaw-gateway)"'
+    return f"sudo env DEFENSECLAW_HOME={shlex.quote(install_home)} {executable} stop"
+
+
+def _root_gateway_record_without_listener(cfg, trust: _GatewayTrust) -> bool:
+    """Recognize a home-bound root process while listener evidence is pending."""
+    if trust.code not in {"missing_listener", "ambiguous_listener", "unavailable"} or not trust.home_bound:
+        return False
+    record = trust.record
+    return bool(
+        record is not None
+        and record.status == "ok"
+        and record.pid > 0
+        and record.pid == trust.pid
+        and record.executable
+        and record.start_identity
+        and record.data_dir
+        and _gateway_record_home_matches(cfg, record.data_dir)
+        and gateway_executable_name(record.executable, platform_name=sys.platform) in GATEWAY_PROCESS_NAMES
+        and (
+            (trust.process is None and _process_uid(record.pid) == 0)
+            or (
+                trust.process is not None
+                and trust.process.status == "ok"
+                and trust.process.pid == record.pid
+                and trust.process.start_identity == record.start_identity
+                and trust.process.uid == 0
+            )
+        )
+        and pid_alive(record.pid)
+    )
+
+
 def _check_gateway_account(cfg, r: _DoctorResult) -> None:
     """Warn when this per-user home's live gateway runs as root.
 
@@ -1864,29 +2156,19 @@ def _check_gateway_account(cfg, r: _DoctorResult) -> None:
 
     if os.name == "nt" or _doctor_managed(cfg) or os.geteuid() == 0:
         return
-    data_dir = _configured_gateway_data_dir(cfg)
-    if not data_dir:
+    from defenseclaw.enforce import asset_lists
+
+    if asset_lists.is_secure_client(cfg):
         return
-    record = read_pid_record(os.path.join(data_dir, "gateway.pid"))
-    if record.status != "ok" or not pid_alive(record.pid):
+    trust = _trusted_gateway_listener(cfg)
+    if trust.code != "root_gateway" and not _root_gateway_record_without_listener(cfg, trust):
         return
-    if _process_uid(record.pid) != 0:
-        return
-    remediation = (
-        "on macOS open DefenseClawMac and choose Start Gateway: it stops the root gateway with "
-        "administrator approval, returns its files to you and starts the gateway as you. "
-        "Otherwise: sudo defenseclaw-gateway stop && sudo chown -R "
-        + shlex.quote(getpass.getuser())
-        + " "
-        + shlex.quote(data_dir)
-        + " && defenseclaw-gateway start"
-    )
+    remediation = _root_gateway_remedy(cfg)
     _emit(
         "warn",
         "Gateway account",
-        f"the gateway for this per-user home (pid {record.pid}) runs as root; a per-user gateway "
-        "must run as its account (root-run gateways leave root-owned files in the home and the CLI "
-        "cannot verify them)",
+        f"{ROOT_GATEWAY_REASON} PID {trust.pid} runs for this per-user home; "
+        "this account's gateway token is withheld until it runs as this account.",
         r=r,
         check_id="doctor.gateway.account",
         reason_code="per-user-gateway-runs-as-root",
@@ -2093,6 +2375,12 @@ def _configured_gateway_data_dir(cfg) -> str:
     if not raw_data_dir.strip():
         return ""
     try:
+        if not os.path.isabs(raw_data_dir):
+            # The gateway makes a relative data_dir absolute from its working
+            # directory, the install home, never from where doctor runs.
+            from defenseclaw.config import default_data_path
+
+            raw_data_dir = os.path.join(os.fspath(default_data_path()), raw_data_dir)
         return os.path.abspath(raw_data_dir)
     except (OSError, ValueError):
         return ""
@@ -4285,17 +4573,21 @@ def _check_component_connector_compatibility(
 ) -> None:
     """Render bounded component and connector-contract evidence.
 
-    Discovery is read from the existing protected cache only.  This keeps
-    ``doctor --fix --dry-run`` read-only and prevents Doctor from executing an
-    unsupported connector binary merely to decide whether it should be
-    repaired.
+    Discovery is read from the existing protected cache only, and never
+    rescanned or written, so ``doctor --fix --dry-run`` stays read-only. The
+    one thing run is the bounded ``--version`` probe of the executable that
+    evidence names, at a trusted install path (``recheck_installed_versions``):
+    a cached or setup-recorded version can be a day or an agent update old,
+    and the row must not call it installed (GAP-0723). A probe that cannot
+    run leaves the row on the recorded version and says so.
     """
 
     from defenseclaw.doctor_health import (
         HealthStatus,
         build_health_report,
         hook_call_after_scan,
-        read_cached_discovery,
+        read_run_discovery,
+        recheck_installed_versions,
         supported_range_text,
     )
 
@@ -4320,7 +4612,8 @@ def _check_component_connector_compatibility(
         return live_activity.get(connector)
 
     try:
-        discovery = read_cached_discovery(data_dir)
+        rechecked = recheck_installed_versions(read_run_discovery(data_dir), enabled, data_dir)
+        discovery = rechecked.discovery
         report = build_health_report(
             enabled,
             discovery,
@@ -4373,8 +4666,20 @@ def _check_component_connector_compatibility(
     agents = getattr(discovery, "agents", None)
     for finding in report.connectors:
         detail = finding.summary
-        if finding.installed_version:
+        if finding.installed_version and finding.connector in rechecked.unchecked:
+            detail += (
+                f"; recorded={finding.installed_version} "
+                f"(not re-checked now: {rechecked.unchecked[finding.connector]})"
+            )
+        elif finding.installed_version:
             detail += f"; installed={finding.installed_version}"
+            if finding.connector in rechecked.changed:
+                # Only a plain semver of the recorded text reaches the row.
+                was = rechecked.changed[finding.connector]
+                detail += (
+                    f" (recorded as {was} before the agent updated)" if was else " (it changed since it was recorded)"
+                )
+        if finding.installed_version:
             signal = agents.get(finding.connector) if isinstance(agents, dict) else None
             if getattr(signal, "source", "") == "claude-desktop":
                 # GAP-0036: the version is the one of Claude Desktop's engine.
@@ -4941,23 +5246,68 @@ def _free_api_port_hint(cfg) -> str:
 def _foreign_gateway_port_holder(cfg, *, status_only: bool = False) -> str:
     """Name an unverified holder; status may use the public foreground proof."""
     holder = _gateway_port_holder(cfg)
+    trust = None
+    if holder or sys.platform == "darwin":
+        try:
+            trust = _trusted_gateway_listener(cfg)
+            if trust.code == "root_gateway":
+                return ROOT_GATEWAY_REASON
+        except Exception:  # noqa: BLE001 - ownership inspection remains best effort
+            pass
     if not holder:
         # macOS lsof sees only this account's sockets. A peer listener can
         # answer on the port while lsof gives us no PID; use the same
         # loopback holder check that protects token-bearing CLI calls.
         from defenseclaw.gateway import foreign_loopback_listener
 
-        if foreign_loopback_listener(_gateway_api_host(cfg), cfg.gateway.api_port):
+        problem = foreign_loopback_listener(_gateway_api_host(cfg), cfg.gateway.api_port)
+        if problem.startswith(ROOT_GATEWAY_REASON):
+            return ROOT_GATEWAY_REASON
+        if problem:
             return "a process of another account"
         return ""
-    try:
-        if _trusted_gateway_listener(cfg).trusted:
-            return ""
-    except Exception:  # noqa: BLE001 - an unverifiable holder is still foreign
-        pass
+    if trust is not None and trust.trusted:
+        return ""
     if status_only and _foreground_gateway_status_owner(cfg) is not None:
         return ""
     return holder
+
+
+def _own_foreground_gateway(cfg, *, platform_name: str | None = None) -> _ForegroundGatewayOwner | None:
+    """This account's PID-file-less foreground gateway on the API port, or None.
+
+    The one ownership proof "defenseclaw status" and "defenseclaw-gateway
+    status" use (_foreground_gateway_status_owner), so Doctor cannot call
+    the same process foreign. A failed proof is "not proven", never an error.
+    """
+    try:
+        return _foreground_gateway_status_owner(cfg, platform_name=platform_name)
+    except Exception:  # noqa: BLE001 - a failed ownership proof is unverified
+        return None
+
+
+def _emit_foreground_gateway_sidecar(cfg, r: _DoctorResult, owner: _ForegroundGatewayOwner) -> None:
+    """The Sidecar API row for this account's own foreground gateway.
+
+    Ownership alone never authorizes sending the gateway token, so the
+    token-bearing checks are skipped (as for any unverified listener), but
+    the process is this account's own: it is not named foreign and the user
+    is not told to stop it.
+    """
+    _emit(
+        "warn",
+        "Sidecar API",
+        f"{_gateway_api_host(cfg)}:{cfg.gateway.api_port} is served by this account's own foreground "
+        f"gateway (PID {owner.pid}), started without a PID file; its live state is unverified, so the "
+        "checks that send the gateway token are skipped",
+        r=r,
+        remediation=(
+            "No action needed. To run those checks, start the gateway as a service with "
+            "'defenseclaw-gateway start' instead of in the foreground"
+        ),
+    )
+    r.sidecar_unverified = True
+    r.gateway_down = "foreground"
 
 
 def _holder_is_other_account(holder: str) -> bool:
@@ -4983,6 +5333,8 @@ def _holder_is_other_account(holder: str) -> bool:
 
 
 def _foreign_gateway_port_remediation(cfg, then: str = "start", holder: str = "") -> str:
+    if holder == ROOT_GATEWAY_REASON:
+        return _root_gateway_remedy(cfg)
     # The same command as defenseclaw-gateway status and start; another
     # account's process is not this account's to stop (GAP-1706).
     lead = "That process belongs to another account, so move" if _holder_is_other_account(holder) else (
@@ -4997,10 +5349,17 @@ def _foreign_gateway_port_remediation(cfg, then: str = "start", holder: str = ""
 
 
 def _foreign_gateway_port_detail(cfg, holder: str) -> str:
+    if holder == ROOT_GATEWAY_REASON:
+        return ROOT_GATEWAY_REASON + " " + _root_gateway_remedy(cfg)
     return (
         f"{_gateway_api_host(cfg)}:{cfg.gateway.api_port} is held by {holder}, not by this account's gateway. "
         + _foreign_gateway_port_remediation(cfg, holder=holder)
     )
+
+
+def _foreign_gateway_port_detail_with_trust(cfg, holder: str, trust: _GatewayTrust) -> str:
+    detail = _foreign_gateway_port_detail(cfg, holder)
+    return detail if holder == ROOT_GATEWAY_REASON else f"{detail} ({trust.detail})"
 
 
 def _token_probe_failure(code: int, body: str) -> str:
@@ -5166,13 +5525,16 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
             )
         elif trust.trusted:
             _emit("pass", "Sidecar API", f"{bind}:{cfg.gateway.api_port}", r=r)
+        elif (owner := _own_foreground_gateway(cfg)) is not None:
+            _emit_foreground_gateway_sidecar(cfg, r, owner)
+            return None
         elif holder:
             # Another process's /health says nothing about this account's
             # gateway, so its subsystem rows are not shown.
             _emit(
                 "fail",
                 "Sidecar API",
-                f"{_foreign_gateway_port_detail(cfg, holder)} ({trust.detail})",
+                _foreign_gateway_port_detail_with_trust(cfg, holder, trust),
                 r=r,
                 remediation=_foreign_gateway_port_remediation(cfg, holder=holder),
             )
@@ -5379,11 +5741,13 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
         r.sidecar_unverified = True
     elif code == 0 and body.startswith("gateway listener identity is unverified:"):
         trust = _trusted_gateway_listener(cfg)
-        if holder := _foreign_gateway_port_holder(cfg):
+        if (owner := _own_foreground_gateway(cfg)) is not None:
+            _emit_foreground_gateway_sidecar(cfg, r, owner)
+        elif holder := _foreign_gateway_port_holder(cfg):
             _emit(
                 "fail",
                 "Sidecar API",
-                f"{_foreign_gateway_port_detail(cfg, holder)} ({trust.detail})",
+                _foreign_gateway_port_detail_with_trust(cfg, holder, trust),
                 r=r,
                 remediation=_foreign_gateway_port_remediation(cfg, holder=holder),
             )
@@ -5401,6 +5765,8 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
         else:
             _emit("fail", "Sidecar API", body, r=r)
             r.sidecar_unverified = True
+    elif (owner := _own_foreground_gateway(cfg)) is not None:
+        _emit_foreground_gateway_sidecar(cfg, r, owner)
     elif holder := _foreign_gateway_port_holder(cfg):
         # A refused health probe does not prove the port is free. A holder
         # found independently is the cause the operator needs to act on.
@@ -5855,19 +6221,8 @@ def _gateway_process_home_binding(
     data_dir (gateway_home_for_data_dir) is this home as well; setup otherwise
     called its own running gateway foreign and timed out (rel-1-0-6 GAP-0287).
     """
-    homes = [cfg.data_dir]
-    try:
-        install_home = gateway_home_for_data_dir(cfg.data_dir)
-    except (OSError, TypeError, ValueError):
-        install_home = ""
-    if install_home and not paths_same(install_home, cfg.data_dir):
-        homes.append(install_home)
-
-    def bound(value: str) -> bool:
-        return any(paths_same(value, home) for home in homes)
-
     if record.data_dir:
-        matches = bound(record.data_dir)
+        matches = _gateway_record_home_matches(cfg, record.data_dir)
         return matches, not matches
     if not platform_name.startswith("linux"):
         return False, False
@@ -5875,9 +6230,23 @@ def _gateway_process_home_binding(
     for env_name in ("DEFENSECLAW_DATA_DIR", "DEFENSECLAW_HOME"):
         value = _read_linux_process_env_var(process.pid, env_name)
         if value:
-            matches = bound(value)
+            matches = _gateway_record_home_matches(cfg, value)
             return matches, not matches
     return False, False
+
+
+def _gateway_record_home_matches(cfg, recorded_home: str) -> bool:
+    """Accept the configured store or the install home holding gateway.pid."""
+    data_dir = _configured_gateway_data_dir(cfg)
+    if not data_dir or not recorded_home:
+        return False
+    if paths_same(recorded_home, data_dir):
+        return True
+    try:
+        install_home = gateway_home_for_data_dir(data_dir)
+    except (OSError, TypeError, ValueError):
+        return False
+    return paths_same(recorded_home, install_home)
 
 
 def _darwin_origin_main_launch_generation_matches(
@@ -6262,6 +6631,9 @@ def _trusted_gateway_listener(
         platform_name=platform_name,
     )
     if not process_trust.trusted:
+        root_listener = _linux_root_gateway_diagnosis(cfg, process_trust, host, api_port, platform_name)
+        if root_listener is not None:
+            return root_listener
         from defenseclaw.enforce import asset_lists
 
         if (
@@ -6287,7 +6659,122 @@ def _trusted_gateway_listener(
         corroborated = _other_account_gateway_listener_evidence(cfg, process_trust.pid, host, api_port)
         if corroborated is not None:
             listener = corroborated
-    return _gateway_listener_trust(process_trust, listener)
+    trust = _gateway_listener_trust(process_trust, listener)
+    if trust.trusted and _per_user_root_gateway_process(cfg, trust):
+        return _GatewayTrust(
+            "root_gateway", ROOT_GATEWAY_REASON + " " + _root_gateway_remedy(cfg),
+            trust.pid, home_bound=trust.home_bound, record=trust.record, process=trust.process,
+        )
+    return trust
+
+
+def _per_user_root_gateway_process(cfg, trust: _GatewayTrust) -> bool:
+    """The fully proven listener is root-owned for a non-root per-user caller."""
+    if os.name == "nt" or os.geteuid() == 0 or _doctor_managed(cfg):
+        return False
+    from defenseclaw.enforce import asset_lists
+
+    return (
+        not asset_lists.is_secure_client(cfg)
+        and trust.home_bound
+        and trust.record is not None
+        and bool(trust.record.start_identity)
+        and bool(trust.record.data_dir)
+        and trust.process is not None
+        and trust.process.uid == 0
+    )
+
+
+def _linux_root_gateway_diagnosis(
+    cfg, process_trust: _GatewayTrust, host: str, port: int, platform_name: str
+) -> _GatewayTrust | None:
+    """Name a root listener when procfs hides its executable from this account.
+
+    This result can only explain a refusal. It never has the trusted code used
+    for a token-bearing call.
+    """
+    if (
+        not platform_name.startswith("linux")
+        or os.name == "nt"
+        or os.geteuid() == 0
+        or _doctor_managed(cfg)
+        or process_trust.code not in {"unavailable", "identity"}
+    ):
+        return None
+    from defenseclaw.enforce import asset_lists
+
+    if asset_lists.is_secure_client(cfg):
+        return None
+    record = process_trust.record
+    data_dir = _configured_gateway_data_dir(cfg)
+    if (
+        record is None
+        or record.status != "ok"
+        or record.pid <= 0
+        or not record.start_identity
+        or not record.executable
+        or not record.data_dir
+        or not data_dir
+        or not _gateway_record_home_matches(cfg, record.data_dir)
+        or gateway_executable_name(record.executable, platform_name="linux") not in GATEWAY_PROCESS_NAMES
+        or _process_uid(record.pid) != 0
+        or not pid_alive(record.pid)
+        or not _linux_root_process_identity_matches(record)
+        or not _linux_root_listener_at(host, port)
+    ):
+        return None
+    return _GatewayTrust(
+        "root_gateway", ROOT_GATEWAY_REASON + " " + _root_gateway_remedy(cfg),
+        record.pid, home_bound=True, record=record, process=process_trust.process,
+    )
+
+
+def _linux_root_process_identity_matches(record: PIDRecord) -> bool:
+    """Match the kernel start generation and command name without /proc/PID/exe."""
+    try:
+        with open(f"/proc/{record.pid}/stat", encoding="ascii") as stream:
+            raw = stream.read(1 << 20)
+        with open(f"/proc/{record.pid}/comm", encoding="ascii") as stream:
+            command = stream.read(256).strip()
+    except (OSError, UnicodeError):
+        return False
+    end = raw.rfind(")")
+    if end < 0:
+        return False
+    fields = raw[end + 1 :].split()
+    return (
+        len(fields) >= 20
+        and fields[19] == record.start_identity
+        and command == os.path.basename(record.executable)[:15]
+    )
+
+
+def _linux_root_listener_at(host: str, port: int) -> bool:
+    """Whether the exact loopback target has a root-owned listening socket."""
+    from defenseclaw.doctor_gateway import _linux_proc_net_endpoint, linux_proc_net_table
+
+    try:
+        target = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return False
+    if not target.is_loopback or not 1 <= port <= 65_535:
+        return False
+    for table_name in ("tcp", "tcp6"):
+        try:
+            with open(linux_proc_net_table(table_name), encoding="ascii") as table:
+                rows = table.readlines()[1:]
+        except (OSError, UnicodeError):
+            continue
+        for row in rows:
+            fields = row.split()
+            if len(fields) < 8 or fields[3] != "0A" or fields[7] != "0":
+                continue
+            endpoint = _linux_proc_net_endpoint(fields[1])
+            if endpoint is not None and endpoint[1] == port and endpoint[0].version == target.version and (
+                endpoint[0] == target or endpoint[0].is_unspecified
+            ):
+                return True
+    return False
 
 
 def _gateway_runs_as_another_account(trust: _GatewayTrust) -> bool:
@@ -6459,6 +6946,50 @@ def _foreground_current_uid() -> int:
     return os.geteuid() if hasattr(os, "geteuid") else -1
 
 
+def _linux_process_uids(pid: int, *, proc_root: str = "/proc") -> tuple[int, ...] | None:
+    """The real, effective, saved and filesystem uids the kernel reports for ``pid``."""
+    if pid <= 0:
+        return None
+    try:
+        with open(os.path.join(proc_root, str(pid), "status"), encoding="utf-8", errors="replace") as status:
+            lines = status.read(1 << 16).splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        if line.startswith("Uid:"):
+            fields = line.split()[1:]
+            if len(fields) == 4 and all(field.isascii() and field.isdecimal() for field in fields):
+                return tuple(int(field) for field in fields)
+            return None
+    return None
+
+
+def _foreground_process_owner_uid(
+    pid: int, process: ProcessEvidence, platform_name: str, evidence: GatewayEvidence
+) -> int:
+    """The one account that owns ``process``, or -1 when that is not proven.
+
+    macOS reports the owner with the process identity. On Linux the owner is
+    read from the kernel process table and must be the same account in all
+    four uid fields, for the same process generation that was identified.
+    """
+    if process.uid >= 0:
+        return process.uid
+    if not platform_name.startswith("linux"):
+        return -1
+    uids = _linux_process_uids(pid)
+    if not uids or len(uids) != 4 or len(set(uids)) != 1:
+        return -1
+    current = evidence.process(pid)
+    if (
+        current.status != "ok"
+        or current.start_identity != process.start_identity
+        or current.executable != process.executable
+    ):
+        return -1
+    return uids[0]
+
+
 @dataclass(frozen=True)
 class _ForegroundGatewayOwner:
     pid: int
@@ -6479,7 +7010,9 @@ def _foreground_gateway_status_owner(
     from defenseclaw.logger import _running_gateway_record
 
     platform_name = platform_name or sys.platform
-    if platform_name not in {"win32", "darwin"} or asset_lists.is_secure_client(cfg):
+    if not (platform_name in {"win32", "darwin"} or platform_name.startswith("linux")):
+        return None
+    if asset_lists.is_secure_client(cfg):
         return None
     if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
         return None
@@ -6547,7 +7080,7 @@ def _foreground_gateway_status_owner(
                 return None
         else:
             own_uid = _foreground_current_uid()
-            if own_uid <= 0 or process.uid != own_uid:
+            if own_uid <= 0 or _foreground_process_owner_uid(listener.pid, process, platform_name, evidence) != own_uid:
                 return None
     except (OSError, ValueError):
         return None
@@ -6711,6 +7244,35 @@ def _read_process_env_var(pid: int, var_name: str) -> str | None:
 _NEEDS_RUNNING_GATEWAY = "needs the gateway, which is not running (see Sidecar API)"
 
 
+def _emit_windows_foreground_gateway_rows(
+    cfg, r: _DoctorResult, evidence: GatewayEvidence, platform_name: str
+) -> bool:
+    """Skip the PID-bound rows for this account's own foreground gateway.
+
+    The Sidecar API row already named the process (r.gateway_down is
+    "foreground"). A gateway started without a PID file cannot pass the
+    PID-bound identity, owner, token and home rows, and the token is never
+    sent to it, so those rows would only call it foreign. The ownership is
+    proven again now, for the listener this pass sees, before any row is
+    downgraded; if the proof no longer holds the normal rows run and fail.
+    """
+    owner = _own_foreground_gateway(cfg, platform_name=platform_name)
+    if owner is None:
+        return False
+    # The rows are downgraded only while this pass still sees the proven
+    # process on the port. A missing, ambiguous or unreadable listener, or
+    # another PID, is what the normal rows fail on.
+    listener = evidence.listener(_gateway_api_port(cfg), host=_gateway_api_host(cfg))
+    if listener.status != "ok" or listener.pid != owner.pid:
+        return False
+    served = f"this account's own foreground gateway (PID {owner.pid}) serves the API port without a PID file"
+    _emit("skip", "Gateway PID identity", f"{served}; its identity is unverified (see Sidecar API)", r=r)
+    _emit("skip", "Gateway listener owner", f"{served}; ownership is proven, PID-bound checks do not apply", r=r)
+    for label in ("Gateway token drift", "Gateway home"):
+        _emit("skip", label, f"{served}; refusing to send the gateway token", r=r)
+    return True
+
+
 def _check_windows_gateway_diagnostics(
     cfg,
     r: _DoctorResult,
@@ -6739,6 +7301,8 @@ def _check_windows_gateway_diagnostics(
             _emit("skip", label, _NEEDS_RUNNING_GATEWAY, r=r)
         return True
     evidence = evidence or GatewayEvidence(platform_name=platform_name)
+    if r.gateway_down == "foreground" and _emit_windows_foreground_gateway_rows(cfg, r, evidence, platform_name):
+        return True
     pid_path = gateway_pid_path(data_dir)
     record = evidence.pid_record(pid_path)
     process = evidence.process(record.pid) if record.status == "ok" else None
@@ -9846,11 +10410,6 @@ def _managed_plugin_drift(cfg, path: str, connector: str = "opencode") -> str:
     return ""
 
 
-def _powershell_literal(value: str) -> str:
-    """Return one inert single-quoted PowerShell string literal."""
-    return "'" + value.replace("'", "''") + "'"
-
-
 def _connector_health_row(document: str, connector: str) -> dict[str, object] | None:
     try:
         parsed = json.loads(document)
@@ -10253,8 +10812,8 @@ def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
             "$OutputEncoding = [System.Text.Encoding]::UTF8; "
             "Import-Module -ErrorAction Stop -Name "
             f"{_CURSOR_WINDOWS_PROBE_CORE_MODULES}; "
-            f"Get-Content -LiteralPath {_powershell_literal(vendor_input)} -Raw | "
-            f"& {{ $input | & {_powershell_literal(adapter_path)} }}"
+            f"Get-Content -LiteralPath {powershell_literal(vendor_input)} -Raw | "
+            f"& {{ $input | & {powershell_literal(adapter_path)} }}"
         )
         encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
         powershell, windows_directory = _windows_system_powershell()
@@ -11668,7 +12227,7 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
             lock_drift,
         )
 
-    configured_mode = str(fail_mode.get("configured") or "")
+    configured_mode = str(fail_mode.get("configured") or fail_mode.get("desired") or "")
     lock_mode_target = configured_mode
     # Runtime locks are rendered from the mode-aware desired posture.  The
     # report keeps the raw legacy/global value in ``configured`` so Status can
@@ -12075,6 +12634,16 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
         return
 
     label = "OpenClaw interception" if connectors == ["openclaw"] else "Proxy interception"
+    if "openclaw" in connectors:
+        from defenseclaw.openclaw_plugin_config import configured_openclaw_plugin_config_issue
+
+        if issue := configured_openclaw_plugin_config_issue(cfg):
+            _emit(
+                "fail", label, issue,
+                remediation="run `defenseclaw setup openclaw` to migrate the plugin config, then rerun doctor",
+                r=r,
+            )
+            return
     info = live_health.get("interception") if isinstance(live_health, dict) else None
     uptime_ms = live_health.get("uptime_ms") if isinstance(live_health, dict) else None
     if (
@@ -15097,6 +15666,12 @@ def doctor(
     failed/dependency-blocked repair.
     """
     global _json_mode
+    from defenseclaw.doctor_health import begin_installed_version_run, end_installed_version_run
+
+    # One version probe per agent for the whole run, however long it takes (GAP-0723).
+    begin_installed_version_run()
+    if (click_ctx := click.get_current_context(silent=True)) is not None:
+        click_ctx.call_on_close(end_installed_version_run)
     if dry_run and not do_fix:
         raise click.UsageError("--dry-run requires --fix")
     if assume_yes and not do_fix:
@@ -15890,13 +16465,15 @@ def _connector_compatibility_problems(cfg) -> tuple[object, ...]:
     from defenseclaw.doctor_health import (
         HealthStatus,
         assess_connector_health,
-        read_cached_discovery,
+        read_run_discovery,
+        recheck_installed_versions,
     )
 
     connectors = tuple(connector for connector in _doctor_active_connectors(cfg) if _connector_enabled(cfg, connector))
     if not connectors:
         return ()
-    discovery = read_cached_discovery(str(getattr(cfg, "data_dir", "") or ""))
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    discovery = recheck_installed_versions(read_run_discovery(data_dir), connectors, data_dir).discovery
     findings = assess_connector_health(connectors, discovery)
     return tuple(finding for finding in findings if finding.status is not HealthStatus.SUPPORTED)
 
@@ -16062,6 +16639,9 @@ def _fix_connector_compatibility_review(cfg, *, assume_yes: bool) -> tuple[str, 
             "fail",
             f"{type(exc).__name__}: bounded connector version discovery failed; no version change was attempted",
         )
+    from defenseclaw.doctor_health import reset_installed_version_probes
+
+    reset_installed_version_probes()  # the refresh just re-read every version
     remaining = _connector_compatibility_problems(cfg)
     if not remaining:
         return ("pass", "refreshed version evidence now matches registered connector contracts")
@@ -17634,6 +18214,7 @@ def _check_connector_mode(cfg, gc, connector: str, r: _DoctorResult) -> None:
             try:
                 from defenseclaw.fail_mode import (
                     connector_fail_mode_report,
+                    managed_windows_verify_command,
                     rendered_fail_mode,
                     report_renders_fail_mode,
                 )
@@ -17675,7 +18256,7 @@ def _check_connector_mode(cfg, gc, connector: str, r: _DoctorResult) -> None:
                         "Mode",
                         f"{detail}; runtime fail mode unverified: the guardian's runtime generation sets it",
                         r=r,
-                        remediation="run `defenseclaw enterprise windows verify` from an elevated prompt",
+                        remediation=f"from an elevated PowerShell prompt run `{managed_windows_verify_command()}`",
                     )
                 elif fail_mode.get("runtime_verified") is False:
                     # The installed hook takes its mode from the agent's
@@ -17978,7 +18559,10 @@ def _check_hook_contract_lock(
             r=r,
         )
         return
-    data_dir = getattr(cfg, "data_dir", "") or ""
+    if _gateway_store_unknown(cfg):
+        _emit_gateway_store_unknown("Hook contract", r)
+        return
+    data_dir = _gateway_store_dir(cfg)
     lock_path = os.path.join(data_dir, "hook_contract_lock.json")
     try:
         with open(lock_path, encoding="utf-8") as fh:
@@ -18022,6 +18606,15 @@ def _check_hook_contract_lock(
         return
     except PermissionError:
         if root_owned_private_regular_file(lock_path):
+            if _root_leftovers_account_can_repair(cfg):
+                _emit(
+                    "fail",
+                    "Hook contract",
+                    "hook_contract_lock.json is root-owned from a sudo-started gateway",
+                    r=r,
+                    remediation=_root_leftovers_remedy(cfg),
+                )
+                return
             _emit(
                 "fail",
                 "Hook contract",
@@ -18487,6 +19080,8 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
             # Setup re-pins the agent and the guard; refresh never re-pins
             # a changed agent binary.
             fix = cmd_acp.setup_repair_command(cfg, client, agent, data_dir)
+            if os.name == "nt":
+                fix = run_instruction(fix)
         if managed:
             # A managed enrollment keeps its locks in a per-user runtime dir
             # that doctor does not know, so only acp verify can be sure.
@@ -19978,6 +20573,13 @@ def _fix_gateway_service(
     process_trust: _GatewayTrust | None = None
     inspected_fingerprint: tuple[int, int, int, int, bytes] | None = None
     port_refused = code == 0 and "refused" in body.lower()
+    foreground = None if port_refused else _own_foreground_gateway(cfg)
+    if foreground is not None:
+        return (
+            "skip",
+            f"this account's own foreground gateway (PID {foreground.pid}) serves the API port; "
+            "its state is unverified, so it was not restarted",
+        )
     foreign_holder = "" if port_refused else _foreign_gateway_port_holder(cfg)
     if foreign_holder:
         return ("fail", _foreign_gateway_port_detail(cfg, foreign_holder))
@@ -20735,7 +21337,7 @@ def _fix_acp_guard_pins(
         )
         agent_note = (
             f"{', '.join(agent_drift)}: the agent executable changed since setup (for example, it updated); "
-            f"doctor does not re-pin it, so review it and run {commands}"
+            f"doctor does not re-pin it, so review it and {run_instruction(commands)}"
         )
     if not pending:
         current = "the ACP guard pins are current"

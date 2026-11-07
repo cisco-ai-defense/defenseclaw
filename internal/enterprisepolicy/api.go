@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // Result is the aggregate lifecycle outcome.
@@ -303,6 +304,20 @@ func VerifyAll(opts Options, connectors []string) (Result, error) {
 	return result, errors.Join(errs...)
 }
 
+// policyExportCommand is the `enterprise policy export` whose output an
+// administrator deploys through a policy tool, in backticks. On Windows it is
+// the installed CLI as typed in an elevated PowerShell prompt: Setup puts no
+// DefenseClaw command on PATH (cowork-1-0-8 GAP-0076). On Linux and macOS it
+// is the gateway by its absolute path: it is not on the PATH either
+// (cowork-1-0-8 GAP-0081).
+func policyExportCommand(goos string, args ...string) string {
+	export := append([]string{"enterprise", "policy", "export"}, args...)
+	if goos == "windows" {
+		return "`" + managed.WindowsAdminCommand(export...) + "` (from an elevated PowerShell prompt)"
+	}
+	return "`" + managed.StandaloneGatewayPath(goos) + " " + strings.Join(export, " ") + "`"
+}
+
 // noteVerifyOnlyExport names the fix for a file DefenseClaw only checks
 // (ownership: verify_only) that carries none of its entries: deploy the
 // export. enterprise policy verify listed a conflict per missing entry and
@@ -317,7 +332,8 @@ func noteVerifyOnlyExport(opts Options, state *State) {
 			return
 		}
 	}
-	state.detail("missing_defenseclaw_hooks: DefenseClaw does not write this file (ownership: verify_only); deploy the output of `defenseclaw-gateway enterprise policy export --connector %s` through your policy tool, then run ensure", state.Connector)
+	state.detail("missing_defenseclaw_hooks: DefenseClaw does not write this file (ownership: verify_only); deploy the output of %s through your policy tool, then run ensure",
+		policyExportCommand(opts.goos(), "--connector", state.Connector))
 }
 
 // RemoveAll removes DefenseClaw's machine policy for every connector with a

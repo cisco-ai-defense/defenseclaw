@@ -1129,7 +1129,7 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		if err := prepareHermesLifecycleDataDir(opts); err != nil {
 			return fmt.Errorf("prepare Hermes lifecycle state: %w", err)
 		}
-		return withOwnedFileLock(filepath.Join(opts.DataDir, ".hermes-lifecycle.lock"), func() error {
+		return withOwnedFileLock(filepath.Join(opts.DataDir, hermesLifecycleLockName), func() error {
 			// The home an earlier Setup bound the receipts to is released
 			// first, or capturing the configured home fails on a target
 			// mismatch (an upgrade from 1.0.3 on Windows, GAP-0499).
@@ -1234,6 +1234,13 @@ func (c *hookOnlyConnector) migrateDevinConfigTarget(opts SetupOpts, target stri
 func (c *hookOnlyConnector) migrateConfigTarget(opts SetupOpts, target, label string) error {
 	backup, err := loadManagedFileBackupPath(managedFileBackupPath(opts.DataDir, c.name, "config"))
 	if os.IsNotExist(err) {
+		// Older installations can retain a copy or notice after their
+		// receipt is gone. Keep only state bound to this target.
+		if spec, ok := agentConfigSpecFor(c.name); ok {
+			if err := spec.removeOtherTargetState(opts.DataDir, target); err != nil {
+				return fmt.Errorf("retire previous %s restore state: %w", label, err)
+			}
+		}
 		return nil
 	}
 	if err != nil {
@@ -1252,19 +1259,31 @@ func (c *hookOnlyConnector) migrateConfigTarget(opts SetupOpts, target, label st
 		equal = strings.EqualFold(oldPath, newPath)
 	}
 	if equal {
+		// An earlier target's notice can outlive the receipt migration.
+		if spec, ok := agentConfigSpecFor(c.name); ok {
+			if err := spec.removeOtherTargetState(opts.DataDir, target); err != nil {
+				return fmt.Errorf("retire previous %s restore state: %w", label, err)
+			}
+		}
 		return nil
 	}
 	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, "config", oldPath)
 	if err != nil {
 		return fmt.Errorf("restore previous %s config target: %w", label, err)
 	}
-	if restored {
-		return nil
+	if !restored {
+		if err := c.removeConfigEntries(oldPath, c.hookCommand(opts), opts); err != nil {
+			return fmt.Errorf("remove previous %s hook entries: %w", label, err)
+		}
+		discardManagedFileBackup(opts.DataDir, c.name, "config")
 	}
-	if err := c.removeConfigEntries(oldPath, c.hookCommand(opts), opts); err != nil {
-		return fmt.Errorf("remove previous %s hook entries: %w", label, err)
+	// A kept settings copy and restore notice are bound to the old target.
+	// They must not inform a later setup at the new target.
+	if spec, ok := agentConfigSpecFor(c.name); ok {
+		if err := spec.removeOtherTargetState(opts.DataDir, target); err != nil {
+			return fmt.Errorf("retire previous %s restore state: %w", label, err)
+		}
 	}
-	discardManagedFileBackup(opts.DataDir, c.name, "config")
 	return nil
 }
 
@@ -1736,7 +1755,7 @@ func validatePluginArtifactDestinationFor(path, trustedOwnerSID string) error {
 	if err := hookAPIValidateOwnerFor(path, info, trustedOwnerSID); err != nil {
 		return err
 	}
-	return nil
+	return hookAPIValidatePluginFilePermissions(path, info)
 }
 
 // hookCommand returns the command an agent runs for this connector's hook. On
@@ -1795,7 +1814,7 @@ func (c *hookOnlyConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 		if err := prepareHermesLifecycleDataDir(opts); err != nil {
 			return fmt.Errorf("prepare Hermes lifecycle state: %w", err)
 		}
-		if err := withOwnedFileLock(filepath.Join(opts.DataDir, ".hermes-lifecycle.lock"), func() error {
+		if err := withOwnedFileLock(filepath.Join(opts.DataDir, hermesLifecycleLockName), func() error {
 			return c.teardown(ctx, opts, configPath)
 		}); err != nil {
 			return err
@@ -2489,7 +2508,7 @@ func verifyHermesCleanup(opts SetupOpts, configPath, command string) error {
 			// therefore has no disabled state to prove. The lifecycle lock is a
 			// persistent marker: once Setup or Teardown has run, a missing state
 			// remains a cleanup failure instead of being mistaken for fresh state.
-			lockPath := filepath.Join(opts.DataDir, ".hermes-lifecycle.lock")
+			lockPath := filepath.Join(opts.DataDir, hermesLifecycleLockName)
 			if _, lockErr := os.Lstat(lockPath); os.IsNotExist(lockErr) {
 				return nil
 			} else if lockErr != nil {
@@ -2838,11 +2857,13 @@ func (c *hookOnlyConnector) patchConfig(opts SetupOpts, hookScript string) error
 			c.effectiveFailClosed(opts),
 		)
 	case "devin":
-		err = patchDevinHooks(path, hookScript, devinOwnedHookCommands(opts, hookScript)...)
+		err = patchDevinHooksForEvents(path, func(event string) string {
+			return devinHookCommandForEvent(runtime.GOOS, opts, hookScript, event)
+		}, devinOwnedHookCommands(opts, hookScript)...)
 	case "copilot":
 		err = patchCopilotHooksForOS(path, hookScript, c.copilotHookEvents(opts), runtime.GOOS)
 	case "antigravity":
-		err = patchAntigravityHooks(path, hookScript)
+		err = patchAntigravityHooksFor(path, hookScript, runtime.GOOS, opts.ManagedEnterprise)
 	default:
 		err = fmt.Errorf("unknown hook connector %q", c.name)
 	}
@@ -5413,15 +5434,17 @@ func (c *hookOnlyConnector) cursorRuntimePath(opts SetupOpts) string {
 	return filepath.Join(opts.DataDir, "hooks", name)
 }
 
+// cursorManagedHookCommands are the commands setup replaces. The Windows
+// adapter command's pre-1.0.9 render (a profile like C:\Users\O’Brien, whose
+// typographic quote those releases did not double) is DefenseClaw's too, so
+// setup rewrites it instead of adding a second entry (g072 review 4 M1).
 func cursorManagedHookCommands(hookScript, legacyShellScript string) []string {
-	return uniqueNonEmptyStrings(append(
-		[]string{
-			hookScript,
-			legacyShellScript,
-			hookInvocationCommandFor("windows", "cursor", legacyShellScript),
-		},
-		legacyCursorNativeHookCommands()...,
-	))
+	commands := []string{hookScript, legacyShellScript}
+	if runtime.GOOS == "windows" {
+		commands = appendWithPreTypographicQuoteForm(commands, hookScript)
+	}
+	commands = appendWithPreTypographicQuoteForm(commands, hookInvocationCommandFor("windows", "cursor", legacyShellScript))
+	return uniqueNonEmptyStrings(append(commands, legacyCursorNativeHookCommands()...))
 }
 
 // replaceManagedCursorHooks drops DefenseClaw's entries, including one whose
@@ -5440,15 +5463,12 @@ func replaceManagedCursorHooks(
 	return append(out, entry)
 }
 
+// cursorOwnedHookCommands are the commands teardown removes, the Windows
+// adapter command's pre-1.0.9 render included (g072 review 4 M1).
 func cursorOwnedHookCommands(opts SetupOpts) []string {
 	portableScript := filepath.Join(opts.DataDir, "hooks", "cursor-hook.sh")
-	return uniqueNonEmptyStrings(append(
-		[]string{
-			portableScript,
-			hookInvocationCommandFor("windows", "cursor", portableScript),
-		},
-		legacyCursorNativeHookCommands()...,
-	))
+	commands := appendWithPreTypographicQuoteForm([]string{portableScript}, hookInvocationCommandFor("windows", "cursor", portableScript))
+	return uniqueNonEmptyStrings(append(commands, legacyCursorNativeHookCommands()...))
 }
 
 // legacyCursorNativeHookCommands returns only direct-native command strings
@@ -5646,7 +5666,7 @@ func copilotBoundEventOwnsCommand(key, command, hookScript string) bool {
 		// A previous DefenseClaw adapter may have been deleted along with
 		// its data directory. Its event-bound command still identifies it.
 		if binding := copilotPowerShellAdapterBinding.FindStringSubmatch(strings.TrimSpace(command)); len(binding) == 3 {
-			adapter := strings.ReplaceAll(binding[1], "''", "'")
+			adapter := powershellLiteralValue(binding[1])
 			if _, err := os.Lstat(adapter); errors.Is(err, os.ErrNotExist) {
 				return true
 			}
@@ -5697,7 +5717,7 @@ func copilotMarkedAdapterCommand(command string) bool {
 	if len(binding) != 3 || !ValidCopilotHookEvent(binding[2]) {
 		return false
 	}
-	adapter := strings.ReplaceAll(binding[1], "''", "'")
+	adapter := powershellLiteralValue(binding[1])
 	body, err := safefile.ReadRegularFileBounded(adapter, 1<<20)
 	if err != nil {
 		return false
@@ -5746,8 +5766,10 @@ func copilotLiveOperatorLookalike(raw interface{}, hookScript string) bool {
 			continue
 		}
 		if binding := copilotPowerShellAdapterBinding.FindStringSubmatch(strings.TrimSpace(command)); len(binding) == 3 {
-			adapter := strings.ReplaceAll(binding[1], "''", "'")
-			current := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(hookScript), "& '"), "'")
+			adapter := powershellLiteralValue(binding[1])
+			// Both sides decoded: the registered body doubles every PowerShell
+			// single quote (g072 review 3 N5).
+			current := powershellLiteralValue(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(hookScript), "& '"), "'"))
 			if !strings.EqualFold(adapter, current) && !copilotMarkedAdapterCommand(command) {
 				if info, err := os.Lstat(adapter); err == nil && info.Mode().IsRegular() {
 					return true
@@ -5915,7 +5937,7 @@ func copilotPowerShellCommandClaimsHandler(raw interface{}, adapter string) bool
 					lowered := strings.ToLower(command)
 					missingAdapter := false
 					if binding := copilotPowerShellAdapterBinding.FindStringSubmatch(strings.TrimSpace(command)); len(binding) == 3 {
-						path := strings.ReplaceAll(binding[1], "''", "'")
+						path := powershellLiteralValue(binding[1])
 						_, err := os.Lstat(path)
 						missingAdapter = errors.Is(err, os.ErrNotExist)
 					}
@@ -5992,11 +6014,18 @@ func antigravityOwnedHookCommands(hookScript string) []string {
 func antigravityOwnedHookCommandsForOS(goos, hookScript string) []string {
 	commands := []string{hookScript}
 	for _, event := range antigravityLifecycleEvents {
-		command := antigravityHookInvocationCommandForEvent(goos, event, hookScript)
-		commands = append(commands, command)
-		// The 1.0.x render of the Windows bridge stays owned for teardown.
-		if legacy, ok := legacyWindowsAwaitedHookCommand(command); ok {
-			commands = append(commands, legacy)
+		forms := []string{antigravityHookInvocationCommandForEvent(goos, event, hookScript)}
+		if goos == "windows" {
+			// The bridge releases before 1.0.9 rendered, without the
+			// launcher-start answer (rel-1-0-6 GAP-0676).
+			forms = append(forms, windowsNativePowerShellHookCommandForEvent("antigravity", event, defenseclawHookBinary()))
+		}
+		for _, command := range forms {
+			commands = append(commands, command)
+			// The 1.0.x render of the Windows bridge stays owned for teardown.
+			if legacy, ok := legacyWindowsAwaitedHookCommand(command); ok {
+				commands = append(commands, legacy)
+			}
 		}
 	}
 	return uniqueNonEmptyStrings(commands)
@@ -6036,6 +6065,12 @@ func patchAntigravityHooks(path, hookScript string) error {
 }
 
 func patchAntigravityHooksForOS(path, hookScript, goos string) error {
+	return patchAntigravityHooksFor(path, hookScript, goos, false)
+}
+
+// patchAntigravityHooksFor is patchAntigravityHooksForOS for a per-user or a
+// managed install (antigravityHookCommandForEvent).
+func patchAntigravityHooksFor(path, hookScript, goos string, managed bool) error {
 	if goos != "windows" && strings.IndexFunc(hookScript, unicode.IsSpace) >= 0 {
 		// Antigravity splits the command on whitespace and runs it directly.
 		// Shell metacharacters and Unicode letters do not need shell quoting.
@@ -6045,20 +6080,21 @@ func patchAntigravityHooksForOS(path, hookScript, goos string) error {
 	if err != nil {
 		return err
 	}
-	for key, value := range antigravityOwnedHookKeys(goos, hookScript) {
+	for key, value := range antigravityOwnedHookKeys(goos, hookScript, managed) {
 		cfg[key] = value
 	}
 	return writeJSONObject(path, cfg)
 }
 
 // antigravityOwnedHookKeys renders the outer keys DefenseClaw owns in
-// Antigravity's hooks.json, one per lifecycle event.
-func antigravityOwnedHookKeys(goos, hookScript string) map[string]interface{} {
+// Antigravity's hooks.json, one per lifecycle event, for a per-user or a
+// managed install.
+func antigravityOwnedHookKeys(goos, hookScript string, managed bool) map[string]interface{} {
 	keys := make(map[string]interface{}, len(antigravityLifecycleEvents))
 	for _, event := range antigravityLifecycleEvents {
 		handler := map[string]interface{}{
 			"type":    "command",
-			"command": antigravityHookInvocationCommandForEvent(goos, event, hookScript),
+			"command": antigravityHookCommandForEvent(goos, event, hookScript, managed),
 			"timeout": 30,
 		}
 		var handlers []interface{}

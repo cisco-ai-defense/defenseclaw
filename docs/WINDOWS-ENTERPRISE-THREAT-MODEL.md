@@ -115,7 +115,7 @@ and macOS managed-enterprise deployments, expressed in Windows-native terms:
 
 | Zone | Secure Client profile | Standalone profile |
 | --- | --- | --- |
-| Z0 Trusted platform and administrator | SCM, LSA, Administrators, Secure Client running `DefenseClawSetup-Enterprise-x64.exe` elevated | SCM, LSA, Administrators, the MDM agent as SYSTEM (for example the Intune Management Extension) running `DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure` or `defenseclaw.exe enterprise windows ensure` |
+| Z0 Trusted platform and administrator | SCM, LSA, Administrators, Secure Client running `DefenseClawSetup-Enterprise-x64.exe` elevated | SCM, LSA, Administrators, the MDM agent as SYSTEM (for example the Intune Management Extension) running `DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure` or `enterprise windows ensure` of the installed `defenseclaw.exe` |
 | Z1 Privileged DefenseClaw services | `DefenseClawCMIDBroker` (LocalSystem, `SeChangeNotifyPrivilege` only); `DefenseClawSensorHelper` (LocalSystem, `SeChangeNotifyPrivilege` only); `DefenseClawHookGuardian` and `DefenseClawHookEnumerator` (LocalSystem, explicit privilege list) | Same without the broker |
 | Z2 Restricted gateway | `NT SERVICE\DefenseClawGateway`, restricted service SID | Same |
 | Z3 Administrator-owned state | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw`, `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw`, `%ProgramData%\OpenAI\Codex`, `C:\Program Files\ClaudeCode`, `%ProgramData%\Cursor` | `C:\Program Files\Cisco\DefenseClaw`, `C:\ProgramData\Cisco\DefenseClaw` (including `secrets\`), the same vendor machine-policy roots plus `%ProgramData%\GitHub\Copilot\policy.d` |

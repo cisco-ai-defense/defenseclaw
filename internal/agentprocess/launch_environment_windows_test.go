@@ -73,8 +73,8 @@ func TestWindowsLaunchEnvironmentRejectsIncompleteAndConflictingBlocks(t *testin
 			t.Fatalf("malformed block was accepted: %q", raw)
 		}
 	}
-	parsed, err := parseLaunchEnvironmentBlock(encode("=C:=C:\\Users\\alice\x00UserProfile=C:\\Users\\alice\x00ProgramData=C:\\ProgramData\x00OPENCODE_CONFIG_DIR=C:\\extra\x00DC_PRIVATE_MARKER=secret\x00\x00"))
-	if err != nil || !strings.EqualFold(parsed["USERPROFILE"], `C:\Users\alice`) || parsed["PROGRAMDATA"] != `C:\ProgramData` || len(parsed) != 2 {
+	parsed, err := parseLaunchEnvironmentBlock(encode("=C:=C:\\Users\\alice\x00UserProfile=C:\\Users\\alice\x00Defenseclaw_Home=C:\\dc\x00ProgramData=C:\\ProgramData\x00OPENCODE_CONFIG_DIR=C:\\extra\x00DC_PRIVATE_MARKER=secret\x00\x00"))
+	if err != nil || !strings.EqualFold(parsed["USERPROFILE"], `C:\Users\alice`) || parsed["PROGRAMDATA"] != `C:\ProgramData` || parsed["DEFENSECLAW_HOME"] != `C:\dc` || len(parsed) != 3 {
 		t.Fatalf("selected keys = %v, %v", parsed, err)
 	}
 	var pointer [8]byte

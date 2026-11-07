@@ -248,10 +248,7 @@ func (s *linuxSource) Coverage() Coverage {
 		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), fmt.Sprintf(
 			"process events were lost %d times when the netlink receive buffer overflowed (ENOBUFS)", lost))
 	}
-	if dropped := s.bufferDropped(); dropped > 0 {
-		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), bufferDropLimitation(dropped))
-	}
-	return coverage
+	return WithBufferDrops(coverage, s.bufferDropped(), SensorEventBuffer)
 }
 
 // bufferDropped is how many events this source's own buffer dropped under
@@ -261,13 +258,6 @@ func (s *linuxSource) bufferDropped() int64 {
 		return 0
 	}
 	return s.buffer.Dropped()
-}
-
-// bufferDropLimitation names the events a source's buffer dropped, as the
-// ENOBUFS loss is named: reduced coverage, never a silence (GAP-0071).
-func bufferDropLimitation(dropped int64) string {
-	return fmt.Sprintf("%d events were dropped from the sensor's event buffer under back-pressure "+
-		"(file events first; process events displaced the oldest)", dropped)
 }
 
 func (s *linuxSource) Start(ctx context.Context) error {

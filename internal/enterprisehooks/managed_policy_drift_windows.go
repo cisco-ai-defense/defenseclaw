@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // RestoreWindowsClaudeManagedPolicyDrift puts DefenseClaw's own Claude Code
@@ -70,7 +71,13 @@ func RestoreWindowsClaudeManagedPolicyDrift() (bool, error) {
 			return nil
 		}
 		if record.SchemaVersion != 2 {
-			return errors.New("enterprise hooks: the Claude Code managed policy ownership record is from an earlier release; run Setup /ensure")
+			// A standalone computer has no Setup installed: name where it comes
+			// from (cowork-1-0-8 GAP-0095). Secure Client keeps its text.
+			step := "Setup /ensure"
+			if windowsEnterpriseStandaloneProcess() {
+				step = "`" + managed.WindowsSetupCommand("/ensure") + "` (" + managed.WindowsSetupSource + ")"
+			}
+			return errors.New("enterprise hooks: the Claude Code managed policy ownership record is from an earlier release; run " + step)
 		}
 		body, err := renderRecordedWindowsClaudeManagedPolicy(record)
 		setAside := false

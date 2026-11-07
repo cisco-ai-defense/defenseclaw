@@ -30,6 +30,7 @@ from defenseclaw.connector_paths import (
     normalize,
 )
 from defenseclaw.file_lock import _lock_file_exclusive, _unlock_file
+from defenseclaw.winquote import powershell_command_line
 
 _VALID_MODES = frozenset({"open", "closed"})
 _MAX_RUNTIME_FILE = 2 * 1024 * 1024
@@ -143,6 +144,24 @@ def normalize_fail_mode(value: object, *, default: str = "closed") -> str:
     return raw if raw in _VALID_MODES else default
 
 
+def managed_windows_verify_command() -> str:
+    """The managed Windows deployment's verify as an administrator types it.
+
+    Setup puts no DefenseClaw command on PATH, so the installed CLI is named
+    by its path under Program Files, as a PowerShell literal: the form of
+    managed.WindowsAdminCommand in the Go CLI (cowork-1-0-8 GAP-0076).
+    Program Files comes from the machine registration, never the
+    ProgramFiles variable a standard user can set (g072 review 2 S2).
+    """
+    root = ""
+    if sys.platform == "win32":
+        from defenseclaw import windows_owner
+
+        root = windows_owner._program_files_dir()
+    cli = (root.strip().rstrip("\\") or r"C:\Program Files") + r"\Cisco\DefenseClaw\bin\defenseclaw.exe"
+    return powershell_command_line(cli, "enterprise", "windows", "verify", "--profile", "standalone")
+
+
 @dataclass(frozen=True)
 class ConnectorFailModeState:
     connector: str
@@ -246,8 +265,8 @@ class ConnectorFailModeState:
         if not self.runtime_verified and self._managed_windows_runtime:
             notes.append(
                 "the managed native hook runs the mode of the runtime generation the guardian publishes, "
-                "which this command cannot verify: `defenseclaw enterprise windows verify` from an elevated "
-                "prompt checks it"
+                f"which this command cannot verify: `{managed_windows_verify_command()}` from an elevated "
+                "PowerShell prompt checks it"
             )
         elif not self.runtime_verified:
             default = f" (default {self.runtime})" if self.runtime else ""
@@ -264,13 +283,18 @@ class ConnectorFailModeState:
             "effective": self.effective,
             "provenance": self.provenance,
             "note": self.note,
-            "configured": self.configured,
+            # None when config.yaml saves no mode: the normalized default is
+            # no value the user chose (GAP-0719).
+            "configured": self.configured if self.configured_saved else None,
             "desired": self.desired,
             "runtime": self.runtime,
             "current": self.current,
             "runtime_verified": self.runtime_verified,
             "drift": list(self.drift),
-            "sources": [{"name": source, "mode": mode} for source, mode in self.sources],
+            "sources": [
+                {"name": source, "mode": mode if source != "config" or self.configured_saved else None}
+                for source, mode in self.sources
+            ],
         }
 
 
@@ -365,6 +389,24 @@ def _fail_mode_note_context(cfg: Any, guardrail: Any, connector: str) -> tuple[s
     return "per-user", str(tier(connector)) if callable(tier) else ""
 
 
+def _hook_fail_mode_saved(guardrail: Any, name: str) -> bool:
+    """Whether config.yaml saves a hook fail mode for *name* (or globally).
+
+    GuardrailConfig fills an unset global hook_fail_mode with closed and
+    records whether config.yaml saved one (_hook_fail_mode_saved); that
+    placeholder is never a mode the user chose.
+    """
+
+    entry = guardrail._connector_override(name) if hasattr(guardrail, "_connector_override") else None
+    if entry is None:
+        entry = (getattr(guardrail, "connectors", {}) or {}).get(name)
+    raw = getattr(entry, "hook_fail_mode", "") if entry is not None else ""
+    return str(raw or "").strip().lower() in _VALID_MODES or (
+        bool(getattr(guardrail, "_hook_fail_mode_saved", True))
+        and str(getattr(guardrail, "hook_fail_mode", "") or "").strip().lower() in _VALID_MODES
+    )
+
+
 def resolve_connector_fail_mode(
     cfg: Any,
     connector: str,
@@ -382,12 +424,7 @@ def resolve_connector_fail_mode(
     raw = getattr(entry, "hook_fail_mode", "") if entry is not None else ""
     saved_value = raw or getattr(guardrail, "hook_fail_mode", "")
     configured = normalize_fail_mode(saved_value)
-    # GuardrailConfig fills an unset global hook_fail_mode with closed and
-    # records whether config.yaml saved one (_hook_fail_mode_saved).
-    configured_saved = str(raw or "").strip().lower() in _VALID_MODES or (
-        bool(getattr(guardrail, "_hook_fail_mode_saved", True))
-        and str(getattr(guardrail, "hook_fail_mode", "") or "").strip().lower() in _VALID_MODES
-    )
+    configured_saved = _hook_fail_mode_saved(guardrail, name)
     resolver = getattr(guardrail, "effective_hook_fail_mode", None)
     desired = normalize_fail_mode(resolver(name) if callable(resolver) else configured)
     deployment, policy_tier = _fail_mode_note_context(cfg, guardrail, name)
@@ -730,7 +767,9 @@ def connector_fail_mode_report(
     name = normalize(connector)
     guardrail = cfg.guardrail
     resolver = getattr(guardrail, "effective_hook_fail_mode", None)
-    configured = normalize_fail_mode(resolver(name) if callable(resolver) else getattr(guardrail, "hook_fail_mode", ""))
+    resolved = normalize_fail_mode(resolver(name) if callable(resolver) else getattr(guardrail, "hook_fail_mode", ""))
+    saved = _hook_fail_mode_saved(guardrail, name)
+    configured = resolved if saved else None
     # The upstream fail-open connectors (Antigravity, Copilot, Hermes) have no
     # runtime record of their own, so they are never in this branch; outside
     # Secure Client they resolve from their rendered hooks below.
@@ -787,11 +826,11 @@ def connector_fail_mode_report(
             inspect_effective_policy=inspect_effective_policy,
         ).to_report()
     return {
-        "effective": configured,
+        "effective": resolved,
         "provenance": "config",
         "note": "",
         "configured": configured,
-        "desired": configured,
+        "desired": resolved,
         "runtime": None,
         "current": False if unguarded else None,
         "runtime_verified": None,

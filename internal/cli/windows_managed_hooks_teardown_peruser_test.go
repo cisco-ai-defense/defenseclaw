@@ -662,6 +662,43 @@ func TestWindowsManagedHooksTeardownPurgeRemovesEveryAccountsACPCopies(t *testin
 	}
 }
 
+// GAP-0669 review 2 M5: an ACP-only account whose folder keeps entries the
+// purge does not own (an account file, its own .token) is reported as purged
+// with those entries named; a folder that is empty is reported as before.
+func TestWindowsManagedHooksTeardownPurgeNamesKeptACPEntries(t *testing.T) {
+	originalCopies, originalACPPurger := windowsManagedHooksStandaloneACPUserCopies, windowsManagedHooksStandaloneACPUserPurger
+	originalIdentity := enterpriseHookWindowsUserCleanupIdentity
+	t.Cleanup(func() {
+		windowsManagedHooksStandaloneACPUserCopies, windowsManagedHooksStandaloneACPUserPurger = originalCopies, originalACPPurger
+		enterpriseHookWindowsUserCleanupIdentity = originalIdentity
+	})
+	enterpriseHookWindowsUserCleanupIdentity = func() error { return nil }
+	const mixed, clean = "S-1-5-21-1-2-3-3921", "S-1-5-21-1-2-3-3922"
+	mixedHome, cleanHome := filepath.Join(t.TempDir(), "mixed"), filepath.Join(t.TempDir(), "clean")
+	for _, name := range []string{".token", "inventory.db"} {
+		path := filepath.Join(mixedHome, ".defenseclaw", "acp", name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	windowsManagedHooksStandaloneACPUserCopies = func() ([]enterprisehooks.WindowsACPUserCopy, error) {
+		return []enterprisehooks.WindowsACPUserCopy{{SID: mixed, Home: mixedHome}, {SID: clean, Home: cleanHome}}, nil
+	}
+	windowsManagedHooksStandaloneACPUserPurger = func(string, string) error { return nil }
+	remaining, purged := windowsManagedHooksStandaloneACPUserState(nil)
+	if len(remaining) != 0 || len(purged) != 2 {
+		t.Fatalf("remaining = %v, purged = %v", remaining, purged)
+	}
+	wantMixed := mixed + ": " + filepath.Join(mixedHome, ".defenseclaw", "acp") + windowsManagedHooksKeptEntriesMarker + "acp/.token, acp/inventory.db"
+	wantClean := clean + ": " + filepath.Join(cleanHome, ".defenseclaw", "acp")
+	if purged[0] != wantMixed || purged[1] != wantClean {
+		t.Fatalf("purged = %q, want %q and %q", purged, wantMixed, wantClean)
+	}
+}
+
 // Uninstall cleans every per-user registration the guardian made or still
 // owes, as each user; when an interactive administrator cannot act as another
 // user, every registration still present is reported.

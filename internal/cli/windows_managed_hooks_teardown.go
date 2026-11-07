@@ -205,7 +205,8 @@ func finishWindowsCursorTombstoneCleanup(report *windowsManagedHooksTeardownRepo
 		} else {
 			for _, path := range paths {
 				report.MachineStateRemaining = append(report.MachineStateRemaining,
-					path+": kept: pending Cursor registration; clear it with Setup /ensure and /uninstall in an active session, or use Setup /uninstall PURGE=1")
+					path+": kept: pending Cursor registration; clear it with "+windowsEnterpriseSetupCommand("/ensure")+" and "+windowsEnterpriseSetupCommand("/uninstall")+
+						" in an active session, or use "+windowsEnterpriseSetupCommand("/uninstall", "PURGE=1")+" ("+managed.WindowsSetupSource+")")
 			}
 		}
 	} else if err := windowsManagedHooksStandaloneCursorTombstonePurger(); err != nil {
@@ -249,6 +250,14 @@ func windowsManagedHooksStandaloneACPUserState(accountLinks []windowsManagedHook
 		if err := windowsManagedHooksStandaloneACPUserPurger(copy.Home, copy.SID); err != nil {
 			remaining = append(remaining, label+": "+boundedEnterpriseHookUserCleanupText(err.Error()))
 			continue
+		}
+		// The purge keeps what it does not own (a personal .token, an
+		// account file); the result names it, as for the data directory.
+		if kept := connector.RemainingUserStateEntries(filepath.Join(copy.Home, ".defenseclaw", "acp")); len(kept) > 0 {
+			for i, name := range kept {
+				kept[i] = "acp/" + name
+			}
+			label += windowsManagedHooksKeptEntriesMarker + strings.Join(kept, ", ")
 		}
 		purged = append(purged, label)
 	}
@@ -441,6 +450,9 @@ func windowsManagedHooksStandaloneUserState(
 				binaries, err = windowsManagedHooksStandaloneUserBinariesPurger(home, sid)
 			}
 			if err == nil {
+				if kept := connector.RemainingUserStateEntries(dataDir); len(kept) > 0 {
+					label += windowsManagedHooksKeptEntriesMarker + strings.Join(kept, ", ")
+				}
 				purged = append(purged, windowsManagedHooksPurgedLabel(label, binaries))
 				continue
 			}

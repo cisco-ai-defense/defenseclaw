@@ -88,6 +88,26 @@ interface InterceptorSharedState {
   ollamaPorts: string[];
   installed: boolean;
   guardrailPort: number | null;
+  /**
+   * Set by the copy that patched the transport (builds that predate GAP-0745
+   * never set it). A later copy of the plugin, loaded again by a hot reload in
+   * the same process, hands its config to this controller instead of patching
+   * again or leaving the patch pointing at a copy that was replaced.
+   */
+  controller?: InterceptorController | null;
+}
+
+interface InterceptorController {
+  adopt(owner: object, config: AdoptedConfig): void;
+  release(owner: object): void;
+  describeLayers(): InterceptorLayers;
+  verifyInterception(): Promise<InterceptionSelfTest>;
+  runSelfTest(): Promise<InterceptionSelfTest>;
+}
+
+interface AdoptedConfig {
+  guardrailPort: number;
+  getCorrelationHeaders: CorrelationHeadersGetter;
 }
 
 function getOrCreateSharedState(): InterceptorSharedState {
@@ -103,6 +123,7 @@ function getOrCreateSharedState(): InterceptorSharedState {
     ollamaPorts: providersConfig.ollama_ports.map(String),
     installed: false,
     guardrailPort: null,
+    controller: null,
   };
   (globalThis as Record<symbol, unknown>)[INTERCEPTOR_STATE_KEY] = state;
   return state;
@@ -1346,10 +1367,18 @@ export function createFetchInterceptor(
     typeof portOrOpts === "number"
       ? { guardrailPort: portOrOpts }
       : portOrOpts;
-  const guardrailPort = interceptorOpts.guardrailPort;
-  const getCorrelationHeaders =
+  // Config of the copy of the plugin that currently owns the patch. The
+  // wrappers read these at call time, so a reload swaps them in place.
+  let guardrailPort = interceptorOpts.guardrailPort;
+  let getCorrelationHeaders =
     interceptorOpts.getCorrelationHeaders ?? emptyCorrelationHeaders;
-  const proxyBase = `http://127.0.0.1:${guardrailPort}`;
+  let proxyBase = `http://127.0.0.1:${guardrailPort}`;
+  // Identifies this copy to the controller. The copies served by the patch
+  // are kept in load order; the last one supplies the config.
+  const self = {};
+  let holders: Array<{ copy: object; config: AdoptedConfig }> = [];
+  let started = false;
+  let olderHolderWarned = false;
   let originalFetch: typeof globalThis.fetch | null = null;
   let originalHttpsRequest: typeof https.request | null = null;
   let originalHttpRequest: typeof http.request | null = null;
@@ -1365,7 +1394,7 @@ export function createFetchInterceptor(
   let originalHostDispatch: UndiciDispatchFn | null = null;
   let lastHostProbeDestination = "";
 
-  function describeLayers(): InterceptorLayers {
+  function describeOwnLayers(): InterceptorLayers {
     return {
       fetch: originalFetch !== null && globalThis.fetch !== originalFetch,
       httpRequest: originalHttpRequest !== null && http.request !== originalHttpRequest,
@@ -1510,13 +1539,30 @@ export function createFetchInterceptor(
   }
 
   function start(): void {
-    if (originalFetch) return; // this instance already started
+    if (started) return; // this instance already started
 
-    // Idempotent cross-instance guard: if another module evaluation
-    // already patched the transport, we only bootstrap the overlay
-    // (so our operator-added domains merge into the shared list) and
-    // return without re-wrapping fetch/https/http/undici.
+    // A copy of this build already patched the transport (a hot reload loaded
+    // the plugin again): serve that patch with the config of this copy.
+    // Nothing is wrapped a second time, and no wrapper is left behind a
+    // stopped copy.
+    const controller = _shared.controller;
+    if (controller) {
+      started = true;
+      controller.adopt(self, { guardrailPort, getCorrelationHeaders });
+      return;
+    }
+
+    // An older build (no controller) patched the transport: it cannot hand
+    // over, so we only bootstrap the overlay (so our operator-added domains
+    // merge into the shared list) and leave its patch alone.
     if (_shared.installed) {
+      started = true;
+      if (!olderHolderWarned) {
+        olderHolderWarned = true;
+        console.warn(
+          "[defenseclaw] an older DefenseClaw plugin copy guards model calls in this process; restart the OpenClaw gateway to load this one",
+        );
+      }
       // Pass the sidecar token like the first instance does: the
       // endpoint is authenticated, and an unauthenticated call is
       // logged as an api-auth-failure security event.
@@ -1526,10 +1572,17 @@ export function createFetchInterceptor(
       });
       return;
     }
+    started = true;
     _shared.installed = true;
     _shared.guardrailPort = guardrailPort;
+    _shared.controller = controllerImpl;
+    holders = [{ copy: self, config: { guardrailPort, getCorrelationHeaders } }];
 
-    originalFetch = globalThis.fetch;
+    // Natives are bound here: a call that is still in flight when the patch is
+    // taken out must finish through the same transport, not through fields
+    // that the stop cleared (GAP-0745).
+    const nativeFetch: typeof globalThis.fetch = globalThis.fetch;
+    originalFetch = nativeFetch;
     egressReporter = createEgressReporter({ guardrailPort });
 
     // Layer 4 (governance): pull the sidecar's merged provider
@@ -1540,7 +1593,7 @@ export function createFetchInterceptor(
     // out below so the bootstrap call is not intercepted by the
     // wrapper we're about to install.
     void bootstrapProviderOverlay(guardrailPort, {
-      fetchImpl: originalFetch,
+      fetchImpl: nativeFetch,
       token: loadSidecarConfig().token,
     });
 
@@ -1553,12 +1606,12 @@ export function createFetchInterceptor(
       // Never self-loop: a request already aimed at the guardrail proxy
       // short-circuits before any shape inspection so we don't peek its body.
       if (isAlreadyProxied(urlStr, guardrailPort)) {
-        return originalFetch!(input, init);
+        return nativeFetch(input, init);
       }
 
       if (shouldPassthroughChatGPTCodexResponseBackendUrl(urlStr)) {
         reportChatGPTCodexResponsePassthrough(urlStr);
-        return originalFetch!(input, init);
+        return nativeFetch(input, init);
       }
 
       // Layer 0: the known-provider allowlist is cheap and path-free.
@@ -1592,14 +1645,14 @@ export function createFetchInterceptor(
           decision: "allow",
           reason: "no-match",
         });
-        return originalFetch!(input, init);
+        return nativeFetch(input, init);
       }
 
       let original: URL;
       try {
         original = new URL(urlStr);
       } catch {
-        return originalFetch!(input, init);
+        return nativeFetch(input, init);
       }
 
       // Rewrite: keep path + query, replace scheme://host with proxy.
@@ -1694,7 +1747,7 @@ export function createFetchInterceptor(
 
       let response: Response;
       try {
-        response = await originalFetch!(proxied, newInit);
+        response = await nativeFetch(proxied, newInit);
       } catch (err) {
         if (!isConnectionRefused(err)) throw err;
         return gatewayDownResponse();
@@ -1728,8 +1781,10 @@ export function createFetchInterceptor(
     // delegate to node:https are intercepted. Note: undici-based clients
     // (including Node 18+ globalThis.fetch) are covered by the undici
     // dispatcher patch above, not this https.request patch.
-    originalHttpsRequest = https.request.bind(https);
-    originalHttpRequest = http.request.bind(http);
+    const nativeHttpsRequest = https.request.bind(https);
+    const nativeHttpRequest = http.request.bind(http);
+    originalHttpsRequest = nativeHttpsRequest;
+    originalHttpRequest = nativeHttpRequest;
     originalHttpGet = http.get.bind(http);
 
     type NodeRequestOptions = Record<string, unknown>;
@@ -1858,7 +1913,7 @@ export function createFetchInterceptor(
 
       if (urlStr && shouldPassthroughChatGPTCodexResponseBackendUrl(urlStr)) {
         reportChatGPTCodexResponsePassthrough(urlStr);
-        return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+        return nativeHttpsRequest(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
       }
 
       // Path-only shape detection for https.request — the body is
@@ -1893,7 +1948,7 @@ export function createFetchInterceptor(
         try {
           originalUrl = new URL(urlStr);
         } catch {
-          return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+          return nativeHttpsRequest(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
         }
 
         const hdrs = opts.headers as Record<string, string> ?? {};
@@ -2003,7 +2058,7 @@ export function createFetchInterceptor(
         // hop must use the captured original to avoid recursing
         // back into this branch.
         return explainRefusedProxyHop(
-          originalHttpRequest!(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]),
+          nativeHttpRequest(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]),
         );
       }
 
@@ -2023,7 +2078,7 @@ export function createFetchInterceptor(
           reason: "no-match",
         });
       }
-      return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+      return nativeHttpsRequest(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
     }
 
     https.request = patchedHttpsRequest as typeof https.request;
@@ -2063,7 +2118,7 @@ export function createFetchInterceptor(
           hasLLMPathSuffix(urlStr),
       );
       if (!knownCandidate && !shapedCandidate) {
-        return originalHttpRequest!(
+        return nativeHttpRequest(
           urlOrOptions as string,
           optionsOrCallback as NodeRequestOptions,
           callback,
@@ -2146,13 +2201,13 @@ export function createFetchInterceptor(
     logInfo(
       `[defenseclaw] LLM fetch interceptor active (proxy: ${proxyBase})`,
     );
-    const layers = describeLayers();
+    const layers = describeOwnLayers();
     logStartupBanner(layers);
     scheduleSelfTest();
   }
 
-  async function verifyInterception(): Promise<InterceptionSelfTest> {
-    const layers = describeLayers();
+  async function verifyOwnInterception(): Promise<InterceptionSelfTest> {
+    const layers = describeOwnLayers();
     const expectedDest = `${proxyBase}/v1/chat/completions`;
     if (!originalFetch) {
       return {
@@ -2166,7 +2221,7 @@ export function createFetchInterceptor(
     // only short-circuits inside our own wrapper. If globalThis.fetch is not
     // ours -- never installed, or replaced by another module after start() --
     // the probe would become genuine unguarded egress from the guardrail
-    // itself, repeated on every verify tick. describeLayers() already reports
+    // itself, repeated on every verify tick. describeOwnLayers() already reports
     // that condition with no network call, so answer from it instead.
     if (!layers.fetch) {
       return {
@@ -2283,8 +2338,8 @@ export function createFetchInterceptor(
     }
   }
 
-  async function runSelfTest(): Promise<InterceptionSelfTest> {
-    const result = await verifyInterception();
+  async function runOwnSelfTest(): Promise<InterceptionSelfTest> {
+    const result = await verifyOwnInterception();
     const line =
       `[defenseclaw] interception self-test ok=${result.ok} dest=${result.destination || "none"} ` +
       `reason=${result.reason}`;
@@ -2301,14 +2356,17 @@ export function createFetchInterceptor(
   function scheduleSelfTest(): void {
     if (selfTestTimer) return;
     selfTestTimer = setInterval(() => {
-      void runSelfTest();
+      void runOwnSelfTest();
     }, INTERCEPTION_SELF_TEST_INTERVAL_MS);
     if (typeof selfTestTimer === "object" && selfTestTimer && "unref" in selfTestTimer) {
       (selfTestTimer as { unref?: () => void }).unref?.();
     }
   }
 
-  function stop(): void {
+  // Takes the patch out. Only the controller runs it, once the last copy it
+  // serves has stopped, so the stop of a copy that a reload replaced leaves
+  // the patch of its successor alone.
+  function uninstall(): void {
     if (originalFetch) {
       globalThis.fetch = originalFetch;
       originalFetch = null;
@@ -2350,8 +2408,63 @@ export function createFetchInterceptor(
     }
     _shared.installed = false;
     _shared.guardrailPort = null;
+    _shared.controller = null;
+    holders = [];
     logInfo("[defenseclaw] LLM fetch interceptor stopped");
   }
 
-  return { start, stop, describeLayers, verifyInterception, runSelfTest };
+  // Points the wrappers at the config of the copy that was loaded last.
+  function serve(config: AdoptedConfig): void {
+    guardrailPort = config.guardrailPort;
+    getCorrelationHeaders = config.getCorrelationHeaders;
+    proxyBase = `http://127.0.0.1:${guardrailPort}`;
+    _shared.guardrailPort = guardrailPort;
+    egressReporter?.stop();
+    egressReporter = createEgressReporter({ guardrailPort });
+    void bootstrapProviderOverlay(guardrailPort, {
+      fetchImpl: originalFetch ?? globalThis.fetch,
+      token: loadSidecarConfig().token,
+    });
+    logInfo(`[defenseclaw] LLM fetch interceptor serving proxy ${proxyBase}`);
+  }
+
+  const controllerImpl: InterceptorController = {
+    adopt(copy, config) {
+      holders = holders.filter((h) => h.copy !== copy);
+      holders.push({ copy, config });
+      serve(config);
+    },
+    release(copy) {
+      const wasLast = holders[holders.length - 1]?.copy === copy;
+      holders = holders.filter((h) => h.copy !== copy);
+      if (holders.length === 0) {
+        uninstall();
+      } else if (wasLast) {
+        serve(holders[holders.length - 1].config);
+      }
+    },
+    describeLayers: describeOwnLayers,
+    verifyInterception: verifyOwnInterception,
+    runSelfTest: runOwnSelfTest,
+  };
+
+  // A copy that adopted the patch of an earlier copy reports on that patch.
+  function served(): InterceptorController | null {
+    const controller = _shared.controller;
+    return started && controller && controller !== controllerImpl ? controller : null;
+  }
+
+  function stop(): void {
+    if (!started) return;
+    started = false;
+    _shared.controller?.release(self);
+  }
+
+  return {
+    start,
+    stop,
+    describeLayers: () => (served() ?? controllerImpl).describeLayers(),
+    verifyInterception: () => (served() ?? controllerImpl).verifyInterception(),
+    runSelfTest: () => (served() ?? controllerImpl).runSelfTest(),
+  };
 }

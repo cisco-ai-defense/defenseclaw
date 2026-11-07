@@ -93,7 +93,8 @@ func protectedWindowsChangeSpool(layout managed.StandaloneLayout) (enterprisesta
 					return createWindowsBundleDirectory(path, windowsBundleVersionSDDL(service.String(), true))
 				})
 			if err != nil {
-				return fmt.Errorf("prepare protected change spool: %w; run `enterprise windows repair --profile standalone --json` from an elevated administrator or SYSTEM session, then retry the credential command", err)
+				return fmt.Errorf("prepare protected change spool: %w; run %s from an elevated PowerShell prompt (or as SYSTEM), then retry the credential command",
+					err, windowsEnterpriseAdminCommand("repair", "--json"))
 			}
 			return nil
 		},

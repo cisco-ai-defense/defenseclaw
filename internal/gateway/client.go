@@ -58,8 +58,13 @@ type Client struct {
 	// replaces conn and disconnCh only after the readLoop of the previous
 	// connection has exited (readDone), so a reader that is still unwinding
 	// never touches the state of the next connection.
-	mu        sync.Mutex
-	conn      *websocket.Conn
+	mu   sync.Mutex
+	conn *websocket.Conn
+
+	// writeMu serializes data writes for the lifetime of this Client, including
+	// requests that overlap a connection change. Response waits do not hold it.
+	writeMu sync.Mutex
+
 	closed    atomic.Bool
 	seqMu     sync.Mutex
 	lastSeq   int
@@ -570,16 +575,27 @@ func (c *Client) request(ctx context.Context, method string, params interface{})
 		method, id[:min(8, len(id))], id[max(0, len(id)-4):], len(data))
 
 	ch := make(chan *ResponseFrame, 1)
+	c.writeMu.Lock()
+	if err := ctx.Err(); err != nil {
+		c.writeMu.Unlock()
+		return nil, err
+	}
 	c.mu.Lock()
 	conn := c.conn
 	if conn == nil {
 		c.mu.Unlock()
+		c.writeMu.Unlock()
 		return nil, fmt.Errorf("gateway: not connected")
 	}
 	c.pending[id] = ch
 	c.mu.Unlock()
 
-	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+	err = conn.WriteMessage(websocket.TextMessage, data)
+	if err != nil {
+		_ = conn.Close()
+	}
+	c.writeMu.Unlock()
+	if err != nil {
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()

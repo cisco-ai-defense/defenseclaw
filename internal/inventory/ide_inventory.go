@@ -435,9 +435,21 @@ var currentIDEOwner = func() ideOwner {
 	if err != nil {
 		return ideOwner{}
 	}
-	// The bare account name, as agent identities and hook records spell it
-	// (DOMAIN\name and user@realm are the principal, reported separately).
-	return ideOwner{id: u.Uid, name: useridentity.BareAccountName(u.Username)}
+	return processIDEOwner(u)
+}
+
+// processIDEOwner retains the account database's full spelling. The gateway
+// checks it against the current holder before attaching directory facts to
+// any inventory record, including a removal after a uid changes hands.
+func processIDEOwner(u *user.User) ideOwner {
+	if u == nil {
+		return ideOwner{}
+	}
+	name := strings.TrimSpace(u.Username)
+	if useridentity.KindForID(u.Uid) == useridentity.KindWindowsSID {
+		name = useridentity.BareAccountName(name)
+	}
+	return ideOwner{id: u.Uid, name: name}
 }
 
 // programFilesDirs lists the Program Files roots of the machine-wide IDE

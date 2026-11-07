@@ -841,7 +841,14 @@ func (e *Env) lifecycleCommand(action string) string {
 	if e.GOOS == "darwin" {
 		group = "macos"
 	}
-	return filepath.Join(e.Layout.BinDir, binGateway) + " enterprise " + group + " " + action
+	return e.gatewayCommand("enterprise " + group + " " + action)
+}
+
+// gatewayCommand is the installed gateway, by its absolute path, with args:
+// it is not on the PATH, and sudo's secure_path does not include
+// the install directory, so a bare defenseclaw-gateway is "command not found".
+func (e *Env) gatewayCommand(args string) string {
+	return filepath.Join(e.Layout.BinDir, binGateway) + " " + args
 }
 
 // hookBinaryProblem names a damaged hook binary, what it means for the
@@ -1430,7 +1437,7 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 	}
 	if health.Telemetry.Details.OptionalState == "degraded" {
 		l.result.AddWarning(codeOptionalDestination, "optional telemetry destination failing: "+health.Telemetry.Details.FailureSummary+
-			"; inspect `defenseclaw-gateway status` or the gateway /health telemetry details")
+			"; inspect `"+l.env.gatewayCommand("status")+"` or the gateway /health telemetry details")
 	}
 	if d := health.Directory; d != nil && d.Failing > 0 {
 		which := ""

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -103,8 +104,24 @@ func TestImageDigestsTravelInTheirOwnFrame(t *testing.T) {
 		gateway.buffer.Push(plane.Event{Kind: plane.KindFileRead, PID: index})
 	}
 	if limits := gateway.Coverage().Limitations; len(limits) != 1 ||
-		limits[0] != "1 events from the sensor helper were dropped from the gateway's event buffer under back-pressure" {
+		limits[0] != "1 events were dropped from the gateway's event buffer for the sensor helper's stream under back-pressure "+
+			"(file events first; process events displaced the oldest)" {
 		t.Fatalf("gateway buffer limitations = %v", limits)
+	}
+	// GAP-0080: the helper's own drops come over the wire as a count, and
+	// the gateway's buffer adds its own, for the host plane to carry.
+	helperSide := plane.WithBufferDrops(plane.Coverage{Mechanism: "cn_proc"}, 2, plane.SensorEventBuffer)
+	frame, err := json.Marshal(encodeCoverage(helperSide))
+	if err != nil || !strings.Contains(string(frame), `"buffer_dropped":2`) {
+		t.Fatalf("coverage frame = %s, %v", frame, err)
+	}
+	var decoded wireCoverage
+	if err := json.Unmarshal(frame, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	gateway.coverage = decodeCoverage(decoded)
+	if got := gateway.Coverage(); got.BufferDropped != 3 || len(got.Limitations) != 2 {
+		t.Fatalf("helper and gateway drops = %d, %q; want 3 in two lines", got.BufferDropped, got.Limitations)
 	}
 
 	// An exec from a helper that predates the state decodes with none.

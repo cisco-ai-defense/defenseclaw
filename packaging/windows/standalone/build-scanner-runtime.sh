@@ -14,10 +14,11 @@
 #                                 win-unicode-console source and this
 #                                 checkout's DefenseClaw wheel (plugin scanner)
 #
-# These are the inputs and pins of the per-user Windows installer
-# (scripts/build-windows-installer.ps1), so a managed host scans with the same
-# scanner versions a per-user host does. Runs on Linux or macOS: uv installs
-# the Windows wheels for the target platform without running them.
+# The pins come from uv.lock, the same lock the release's requirements file
+# (make dist-requirements) that install.ps1 installs from is exported from, so
+# a managed host scans with the same scanner versions a per-user host does.
+# Runs on Linux or macOS: uv installs the Windows wheels for the target
+# platform without running them.
 #
 # Usage: build-scanner-runtime.sh --out-dir <dir>
 #   writes <dir>/runtime.zip, <dir>/runtime.json and <dir>/runtime.sha256 (the

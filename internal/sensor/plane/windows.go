@@ -98,16 +98,17 @@ func (s *windowsSource) Events() <-chan Event { return s.buffer.Events() }
 
 // Coverage is the coverage found at Start plus whatever the reader reports
 // right now: a reader that fell behind or had to reopen a stream is reduced
-// coverage while it lasts, and says so (GAP-1473).
+// coverage while it lasts, and says so (GAP-1473). The events the buffer
+// dropped stay named after the reader catches up: they are lost
+// (cowork-1-0-8 GAP-0072).
 func (s *windowsSource) Coverage() Coverage {
 	coverage := s.coverage
-	if s.reader == nil {
-		return coverage
+	if s.reader != nil {
+		if live := s.reader.limitations(); len(live) > 0 {
+			coverage.Limitations = append(append([]string(nil), coverage.Limitations...), live...)
+		}
 	}
-	if live := s.reader.limitations(); len(live) > 0 {
-		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), live...)
-	}
-	return coverage
+	return WithBufferDrops(coverage, s.buffer.Dropped(), SensorEventBuffer)
 }
 
 func (s *windowsSource) Start(ctx context.Context) error {

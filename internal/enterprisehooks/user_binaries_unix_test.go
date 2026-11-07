@@ -27,9 +27,9 @@ import (
 
 // uninstall --purge kept the per-user install's binaries and the launcher
 // links into ~/.defenseclaw, which the purge left dangling. For a folder
-// that holds only what DefenseClaw wrote there (no own install: its .venv
-// and installer state are gone), the purge removes all of ~/.defenseclaw
-// and every DefenseClaw entry in ~/.local/bin, and leaves no dangling link;
+// that holds no own install (its .venv and installer state are gone), the
+// purge removes managed entries and every DefenseClaw entry in ~/.local/bin,
+// keeps saved account originals, and leaves no dangling link;
 // the account's own tools stay. A folder with the install's .venv is the
 // account's own install and is kept (rel-1-0-6 GAP-0484,
 // purge_fresh_own_install_unix_test.go).
@@ -97,8 +97,8 @@ func TestPurgeUserStateRemovesPerUserBinariesAndLinks(t *testing.T) {
 	if _, err := PurgeUserState(context.Background(), opts); err != nil {
 		t.Fatalf("PurgeUserState: %v", err)
 	}
-	if _, err := os.Lstat(dataDir); !os.IsNotExist(err) {
-		t.Fatalf("~/.defenseclaw stayed: %v", err)
+	if got, err := os.ReadFile(filepath.Join(dataDir, "foreign-hooks-backup", "cursor", "hooks.json")); err != nil || string(got) != "{}" {
+		t.Fatalf("the saved account hook changed: %q, %v", got, err)
 	}
 	if _, err := os.Lstat(filepath.Join(home, ".defenseclaw-install-custody")); !os.IsNotExist(err) {
 		t.Fatalf("the legacy custody folder stayed: %v", err)

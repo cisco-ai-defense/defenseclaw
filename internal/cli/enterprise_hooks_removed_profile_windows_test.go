@@ -6,15 +6,36 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows/registry"
 )
+
+func TestGAP0693WindowsDeletedSIDWithoutProfileLeavesRepairAttention(t *testing.T) {
+	previousCfg, previousDeleted := cfg, windowsEnterpriseAccountDeleted
+	t.Cleanup(func() { cfg, windowsEnterpriseAccountDeleted = previousCfg, previousDeleted })
+	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		Enterprise: config.EnterpriseConfig{Profile: managed.ProfileStandalone}}
+	const deletedSID = "S-1-5-21-1111-2222-3333-1107"
+	windowsEnterpriseAccountDeleted = func(sid string) bool { return sid == deletedSID }
+	removed := enterpriseHookReconcileRow{SID: deletedSID, Connector: "hermes"}
+	if !enterpriseHookGuardianTargetRemoved(context.Background(), enterprisehooks.ManifestTarget{SID: deletedSID}, removed, nil) ||
+		!enterpriseHookRemovedAccountRow(removed) {
+		t.Fatal("a confirmed deleted SID without a profile was kept in repair attention")
+	}
+	live := enterpriseHookReconcileRow{SID: "S-1-5-21-1111-2222-3333-1108", Connector: "hermes"}
+	if enterpriseHookGuardianTargetRemoved(context.Background(), enterprisehooks.ManifestTarget{SID: live.SID}, live, nil) ||
+		enterpriseHookRemovedAccountRow(live) {
+		t.Fatal("a live SID was retired")
+	}
+}
 
 // GAP-1657: a domain account whose profile an administrator removed keeps
 // failing guardian rows until the enumerator's next pass. Status, verify and

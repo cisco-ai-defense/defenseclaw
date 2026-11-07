@@ -242,7 +242,7 @@ Every variable DefenseClaw reads has a managed-host policy in the [environment v
 | --- | --- | --- |
 | `allow` | The value is used | Runtime paths, credentials, values the hook scripts set for themselves |
 | `ignore` | The value is ignored, in the process environment and in `.env` | Security opt-outs, debug switches, test fixtures, `DEFENSECLAW_REPO`, and `DEFENSECLAW_DEPLOYMENT_MODE` and `DEFENSECLAW_ENTERPRISE_PROFILE` |
-| `tighten_only` | The value is used only if it makes things stricter | `DEFENSECLAW_STRICT_AVAILABILITY` (`DEFENSECLAW_HOOK_MAX_BODY` is `tighten_only` in the registry, but managed hooks ignore it and keep 1 MiB) |
+| `tighten_only` | The value is used only if it makes things stricter | `DEFENSECLAW_STRICT_AVAILABILITY`, `DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS` (`DEFENSECLAW_HOOK_MAX_BODY` is `ignore`; managed hooks keep 1 MiB) |
 
 Hook fail mode comes only from installed policy. `DEFENSECLAW_FAIL_MODE` in the agent environment has no effect.
 

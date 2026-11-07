@@ -34,7 +34,7 @@ func TestStandaloneGatewayConfigCheckNamesTheKeyAMovedStorePathKeyBecame(t *test
 	} {
 		path := writeStandaloneGatewayCheckConfig(t, movedStorePathKeyConfig+key+": /var/tmp/store.db\n")
 		err := validateStandaloneGatewayConfig(path, dataDir, "")
-		if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), key+" is an unknown setting; it moved to "+home) {
+		if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), key+" was retired in config_version 8; use "+home) {
 			t.Fatalf("%s: ensure preflight = %v, want it to name %s", key, err, home)
 		}
 		_, loadErr := loadManagedCandidateV8File(path, dataDir, "")
@@ -42,7 +42,7 @@ func TestStandaloneGatewayConfigCheckNamesTheKeyAMovedStorePathKeyBecame(t *test
 		if !errors.As(loadErr, &schemaErr) {
 			t.Fatalf("%s: load = %v, want a schema error", key, loadErr)
 		}
-		if failure := configV8ValidationFailure(loadErr); failure.Path != "$."+key || !strings.Contains(failure.Reason, "suggested field "+home) {
+		if failure := configV8ValidationFailure(loadErr); failure.Path != "$."+key || !strings.Contains(failure.Reason, key+" was retired in config_version 8; use "+home) {
 			t.Fatalf("%s: validate diagnostic = %+v, want it to name %s", key, failure, home)
 		}
 	}

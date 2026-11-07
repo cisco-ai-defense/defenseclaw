@@ -445,7 +445,6 @@ def test_uninstall_dry_run_names_the_cowork_removal_step(app) -> None:
     cowork.save_state(_data_dir(app), {"build": 1, "version": "1.0.1"})
     plan = cmd_uninstall.UninstallPlan(data_dir=_data_dir(app))
     with (
-        patch("defenseclaw.commands.windows_native_uninstall.prepare_native_windows_uninstall", return_value=None),
         patch.object(cmd_uninstall, "_build_plan", return_value=plan),
         patch.object(cmd_uninstall, "_render_plan"),
         patch.object(cmd_uninstall, "_execute_plan") as execute,
@@ -456,6 +455,8 @@ def test_uninstall_dry_run_names_the_cowork_removal_step(app) -> None:
         "The DefenseClaw Cowork plugin stays in your Claude account. Remove it in Claude: Customize > Plugins."
         in result.output
     )
+    assert "Customize > Plugins, then the ... menu > Remove" in result.output
+    assert "older plugins may block" in result.output
     execute.assert_not_called()
 
 
@@ -464,7 +465,6 @@ def test_completed_uninstall_records_cowork_removal(app) -> None:
     cowork.save_state(data_dir, {"build": 1, "version": "1.0.1"})
     plan = cmd_uninstall.UninstallPlan(data_dir=data_dir, remove_data_dir=True)
     with (
-        patch("defenseclaw.commands.windows_native_uninstall.prepare_native_windows_uninstall", return_value=None),
         patch.object(cmd_uninstall, "_build_plan", return_value=plan),
         patch.object(cmd_uninstall, "_render_plan"),
         patch.object(cmd_uninstall, "_execute_plan"),

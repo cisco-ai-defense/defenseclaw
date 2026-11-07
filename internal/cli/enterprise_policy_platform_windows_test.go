@@ -21,13 +21,13 @@ import (
 // standalone managed host reads the managed deployment's config, not the
 // administrator's own profile.
 func TestEnterprisePolicyPinsTheManagedDeploymentForAnAdministrator(t *testing.T) {
-	withAuditExportManagedSeams(t, true, true)
+	layout := withAuditExportManagedSeams(t, true, true)
 	if err := pinStandaloneManagedEnv(); err != nil {
 		t.Fatalf("pin: %v", err)
 	}
 	for key, want := range map[string]string{
-		"DEFENSECLAW_HOME":           `C:\ProgramData\Cisco\DefenseClaw\runtime`,
-		managed.ConfigPathEnv:        `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
+		"DEFENSECLAW_HOME":           layout.DataDir,
+		managed.ConfigPathEnv:        layout.ConfigPath,
 		managed.DeploymentModeEnv:    "managed_enterprise",
 		managed.EnterpriseProfileEnv: managed.ProfileStandalone,
 	} {

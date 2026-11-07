@@ -6,3 +6,5 @@
 package cli
 
 func enterpriseHookAccountOwnedDataDirLinkPlatform(string, string) bool { return false }
+
+func enterpriseHookForeignDataDirLinkPlatform(string, string) bool { return false }

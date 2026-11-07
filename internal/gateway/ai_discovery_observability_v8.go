@@ -22,6 +22,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -407,7 +408,7 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 			// lifecycle records can be split by user like the observations.
 			UserID:                aiDiscoveryV8OptionalText(signal.UserID),
 			DefenseClawUserIDKind: v8UserIDKind(discoveryUserIDKind(signal.UserID)),
-			DefenseClawUserName:   v8UserName(signal.UserName, aiDiscoveryV8OptionalText),
+			DefenseClawUserName:   v8UserName(inventoryTelemetryUserName(signal.UserID, signal.UserName), aiDiscoveryV8OptionalText),
 			// The agent identity of the connector install the signal belongs
 			// to, so discovery joins that agent's decisions.
 			DefenseClawAgentIdentityID: agentIdentityV8(inventoryAgentIdentityID(signal.SupportedConnector, signal.UserID, signal.UserName)),
@@ -541,6 +542,18 @@ func ideV8UserName(value string) observability.Optional[string] {
 	return ideV8Optional(value, ideV8UserNamePattern, 256)
 }
 
+// An NSS spelling remains on the inventory row for identity binding. When
+// that spelling is outside the telemetry name syntax, use its account part
+// for the POSIX display field; the verified principal stays separate.
+func ideV8DisplayUserName(userID, fullName string) observability.Optional[string] {
+	name := v8UserName(fullName, ideV8UserName)
+	if name.IsPresent() || !identityFactsEnabled.Load() ||
+		useridentity.KindForID(userID) != useridentity.KindPOSIXUID {
+		return name
+	}
+	return v8UserName(inventoryTelemetryUserName(userID, fullName), ideV8UserName)
+}
+
 func ideV8Optional(value string, pattern *regexp.Regexp, limit int) observability.Optional[string] {
 	value = strings.TrimSpace(value)
 	if value == "" || len(value) > limit || !pattern.MatchString(value) {
@@ -608,7 +621,7 @@ func (adapter *aiDiscoveryV8Adapter) emitIDEPluginLog(
 			DefenseClawAIDiscoveryScanID: aiDiscoveryV8Optional(summary.ScanID),
 			UserID:                       ideV8Optional(plugin.UserID, ideV8UserPattern, 256),
 			DefenseClawUserIDKind:        v8UserIDKind(discoveryUserIDKind(plugin.UserID)),
-			DefenseClawUserName:          v8UserName(plugin.UserName, ideV8UserName),
+			DefenseClawUserName:          ideV8DisplayUserName(plugin.UserID, plugin.UserName),
 		}
 		inventoryIdentityFor(plugin.UserID, plugin.UserName).applyTo(&base)
 		switch plugin.State {

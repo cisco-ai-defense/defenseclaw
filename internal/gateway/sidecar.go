@@ -4422,9 +4422,9 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		// earlier versions kept under the bare name move to their account
 		// before the watcher runs (GAP-0216).
 		if moved, kept, err := watcher.MigrateAccountMCPJournal(s.store); err != nil {
-			fmt.Fprintf(os.Stderr, "[watcher] move MCP journal rows to their accounts: %v (bare rows stay and keep refusing by name)\n", err)
+			fmt.Fprintf(os.Stderr, "[watcher] move MCP journal rows to their accounts: %v\n", err)
 		} else if moved > 0 || kept > 0 {
-			fmt.Fprintf(os.Stderr, "[watcher] moved %d MCP journal rows to their accounts; %d blocking rows stay by name\n", moved, kept)
+			fmt.Fprintf(os.Stderr, "[watcher] moved %d MCP journal rows to their accounts; %d bare rows retained\n", moved, kept)
 		}
 		// Retries a server whose admission could not run at the poll.
 		w.SetMCPDiscoveryPoll(true)
@@ -8796,8 +8796,8 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	addr := apiListenAddr(s.currentConfig())
 	api := newAPIServer(addr, s.health, s.client, s.store, s.logger, cloneConfig(s.currentConfig()))
 	api.SetShutdownRequester(s.requestProcessShutdown)
-	api.SetMCPAdmissionPending(func(connector, server, home, cwd string) (string, bool) {
-		return s.installWatcher.Load().MCPAdmissionPending(watcher.MCPAdmissionQuery{
+	api.SetMCPAdmissionStatus(func(connector, server, home, cwd string) watcher.MCPAdmissionStatus {
+		return s.installWatcher.Load().MCPAdmissionStatus(watcher.MCPAdmissionQuery{
 			Connector: connector, Server: server, Home: home, CWD: cwd,
 		})
 	})

@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/winowner"
 )
 
 // CoworkSubcommand is the account plugin's native Windows entrypoint. Paths
@@ -20,6 +22,13 @@ const CoworkSubcommand = "cowork-guard"
 const CoworkRemovalMarkerSuffix = ".cowork-uninstalled"
 
 const CoworkUninstalledMessage = "DefenseClaw was uninstalled for this user. Remove the DefenseClaw plugin in Claude Desktop under Customize > Plugins."
+
+// CoworkMarkerRefusedMessage follows the launcher sentence when the launcher
+// cannot start and the removal marker is there, with DefenseClaw's records
+// gone, but is not trusted (cowork-1-0-8 GAP-0085): the plugin keeps blocking
+// until one of the two steps it names is taken.
+const CoworkMarkerRefusedMessage = "DefenseClaw's removal record for this user is not trusted, so the DefenseClaw plugin keeps blocking. " +
+	"Remove the DefenseClaw plugin in Claude Desktop under Customize > Plugins, or run the DefenseClaw installer again."
 
 var coworkEvents = map[string]bool{
 	"SessionStart": true, "UserPromptSubmit": true, "PreToolUse": true,
@@ -63,26 +72,53 @@ func CoworkUninstalledJSON(event string, notice bool) string {
 	return string(data)
 }
 
-func coworkRemovalComplete(dataDir string) bool {
+// coworkOwnersTrusted applies the Windows owner trust set to the removal
+// marker and the folder that holds it (cowork-1-0-8 GAP-0085). The uninstall
+// writes no marker into a folder whose owner is outside the set, and the
+// guard ignores one found there: whoever owns a folder controls it, and could
+// otherwise rename the data folder away and leave a marker so that Cowork
+// looked uninstalled. A marker another account planted is owned by that
+// account (an account cannot give a file it creates to someone else), so it
+// is ignored too, and the guard keeps running the installed launcher. On
+// Windows coworkMarkerTrusted also refuses a folder others may write and a
+// marker with more than one link.
+func coworkOwnersTrusted(markerOwner, folderOwner, current string) bool {
+	return winowner.Trusted(markerOwner, current) && winowner.Trusted(folderOwner, current)
+}
+
+// coworkRemovalState reports whether the removal is complete: the marker is
+// a trusted regular file and every installed record is gone. refused is set
+// when the records are gone and something is at the marker path that is not
+// honoured.
+func coworkRemovalState(dataDir string) (complete, refused bool) {
 	marker, installed := CoworkRemovalPaths(dataDir)
 	info, err := os.Lstat(marker)
-	if err != nil || !info.Mode().IsRegular() {
-		return false
+	if err != nil {
+		return false, false
 	}
 	for _, path := range installed {
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-			return false
+			return false, false
 		}
 	}
-	return true
+	if !info.Mode().IsRegular() || !coworkMarkerTrusted(marker) {
+		return false, true
+	}
+	return true, false
 }
 
 // RunCowork uses filesystem calls for the account-removal check, then runs
 // the installed launcher with the ordinary Claude Code hook argv. A missing
-// or failed launcher remains a blocking hook result while installed.
+// or failed launcher remains a blocking hook result while installed, and
+// after a refused marker it also prints CoworkMarkerRefusedMessage.
 func RunCowork(dataDir, launcher, event string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if !coworkRemovalComplete(dataDir) {
-		return Run(launcher, []string{"hook", "--connector", "claudecode"}, stdin, stdout, stderr)
+	complete, refused := coworkRemovalState(dataDir)
+	if !complete {
+		code, started := run(launcher, []string{"hook", "--connector", "claudecode"}, stdin, stdout, stderr)
+		if !started && refused {
+			fmt.Fprintln(stderr, CoworkMarkerRefusedMessage)
+		}
+		return code
 	}
 	marker, _ := CoworkRemovalPaths(dataDir)
 	if event == "UserPromptSubmit" {

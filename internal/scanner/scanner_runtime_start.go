@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // StandaloneRuntimeStartProblem says why a standalone Windows enterprise
@@ -46,7 +48,7 @@ func (c runtimeStartCheck) problem() error {
 	}
 	if err := c.trustTree(root, "scanner Python runtime"); err != nil {
 		return fmt.Errorf("the gateway does not start on the untrusted scanner runtime %s (%v); "+
-			"run the DefenseClaw Setup with /repair, which replaces it", root, err)
+			"run `%s`, which replaces it. %s", root, err, managed.WindowsSetupCommand("/repair", "JSON=1"), managed.WindowsSetupSource)
 	}
 	return nil
 }

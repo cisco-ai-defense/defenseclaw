@@ -219,6 +219,11 @@ type enterpriseHookWorkerTarget struct {
 	Mode                string                      `json:"mode"`
 	PreviouslyProtected bool                        `json:"previously_protected,omitempty"`
 	Options             enterpriseHookWorkerOptions `json:"options"`
+	// PriorCredentials are the target's credentials from the other key of
+	// the credential rotation the guardian holds
+	// (enterpriseHookPriorUserTokens). They only classify a reinstall as
+	// configuration; nothing is rendered from them.
+	PriorCredentials *enterprisehooks.HookCredentials `json:"prior_credentials,omitempty"`
 }
 
 type enterpriseHookWorkerRequest struct {
@@ -341,8 +346,7 @@ type enterpriseHookWorkerTargetResult struct {
 	// Hermes or Devin config put back or recreated, GAP-0564). It is kept
 	// out of the result, which the guardian state stores.
 	AgentConfig string `json:"agent_config,omitempty"`
-	// Purged is what a purge target found and removed (booleans only, so
-	// nothing the account controls reaches the administrator's output).
+	// Purged is what a purge target found, removed and kept.
 	Purged *enterpriseHookPurgeDetail `json:"purged,omitempty"`
 	// Remove reports are produced as the account, before and after teardown.
 	// Presence distinguishes an empty path set from an older worker response.
@@ -358,11 +362,12 @@ type enterpriseHookWorkerTargetResult struct {
 // Kept says ~/.defenseclaw holds the account's own per-user install, which
 // the purge left as it is (GAP-0727).
 type enterpriseHookPurgeDetail struct {
-	Data     bool `json:"data,omitempty"`
-	Kept     bool `json:"kept,omitempty"`
-	Binaries bool `json:"binaries,omitempty"`
-	Gateway  bool `json:"gateway,omitempty"`
-	UVCache  bool `json:"uv_cache,omitempty"`
+	Data        bool     `json:"data,omitempty"`
+	Kept        bool     `json:"kept,omitempty"`
+	KeptEntries []string `json:"kept_entries,omitempty"`
+	Binaries    bool     `json:"binaries,omitempty"`
+	Gateway     bool     `json:"gateway,omitempty"`
+	UVCache     bool     `json:"uv_cache,omitempty"`
 	// RemovedConnectorBackups names the folders the OpenHands/OmniGent
 	// backups were moved to, comma separated (GAP-2015).
 	RemovedConnectorBackups string `json:"removed_connector_backups,omitempty"`
@@ -719,8 +724,9 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			result, err = enterpriseHookWorkerVerifier(ctx, opts)
 			recheck = err == nil && recheckWindow > 0
 			if err != nil {
+				policyOnly := request.Standalone && enterprisehooks.PreviousHookRuntimeIntactForConfigurationChange(ctx, opts, target.PriorCredentials)
 				result, err = enterpriseHookWorkerInstaller(ctx, opts)
-				outcome.Repaired = err == nil
+				outcome.Repaired = err == nil && !policyOnly
 			}
 		case enterpriseHookWorkerModeRemove:
 			previousHome := strings.TrimSpace(target.Options.PreviousHome)
@@ -828,7 +834,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 			var summary enterprisehooks.PurgeSummary
 			if summary, err = enterpriseHookWorkerPurger(ctx, opts); err == nil {
-				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Kept: summary.Kept, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache, RemovedConnectorBackups: strings.Join(summary.KeptRemovedConnectorBackups, ", "), UnrestorableConnectorBackups: strings.Join(summary.KeptUnrestorableConnectorBackups, ", ")}
+				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Kept: summary.Kept, KeptEntries: summary.KeptEntries, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache, RemovedConnectorBackups: strings.Join(summary.KeptRemovedConnectorBackups, ", "), UnrestorableConnectorBackups: strings.Join(summary.KeptUnrestorableConnectorBackups, ", ")}
 			}
 		case enterpriseHookWorkerModeRestoreOwnInstall:
 			if purgeBlocked != "" {
@@ -1810,13 +1816,36 @@ func runEnterpriseHookWorkerPoolReporting(ctx context.Context, jobs []enterprise
 	}
 	outcomes := make([]enterpriseHookWorkerOutcome, len(jobs))
 	semaphore := make(chan struct{}, parallelism)
+	active, _ := ctx.Value(enterpriseHookWatchActiveWorkersKey{}).(*enterpriseHookWatchActiveWorkers)
 	var wg sync.WaitGroup
 	for i := range jobs {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			semaphore <- struct{}{}
+			var watchedKeys []string
+			var watchedIndex map[int]string
+			if active != nil {
+				watchedIndex = make(map[int]string, len(jobs[i].Request.Targets))
+				for _, target := range jobs[i].Request.Targets {
+					key := active.targetKey(jobs[i].Account.Home, jobs[i].Account.User, target.Options.ConnectorName)
+					if key != "" {
+						watchedKeys = append(watchedKeys, key)
+						watchedIndex[target.Index] = key
+					}
+				}
+				active.start(watchedKeys)
+			}
 			response, err := enterpriseHookWorkerRunner(ctx, jobs[i].Account, jobs[i].Request)
+			if active != nil {
+				var repairedKeys []string
+				for _, target := range response.Targets {
+					if key := watchedIndex[target.Index]; target.Repaired && key != "" {
+						repairedKeys = append(repairedKeys, key)
+					}
+				}
+				active.finish(watchedKeys, repairedKeys)
+			}
 			// The slot is free before done runs: a removal record that waits
 			// for its account's lock never holds off another account's worker.
 			<-semaphore
@@ -1978,4 +2007,40 @@ func (found *enterpriseHookWorkerDiscovery) response(connectors []string) enterp
 	}
 	response.PrivateInstalls = append(installs, found.unlisted...)
 	return response
+}
+
+func (w *enterpriseHookWatchActiveWorkers) targetKey(home, user, connector string) string {
+	if key := w.targetKeys[enterpriseHookWatchTargetID(home, connector)]; key != "" {
+		return key
+	}
+	return enterpriseHookProtectedTargetKey(enterpriseHookReconcileRow{User: user, UserHome: home, Connector: connector})
+}
+
+func (w *enterpriseHookWatchActiveWorkers) start(keys []string) {
+	w.mu.Lock()
+	if w.active == nil {
+		w.active = make(map[string]int)
+	}
+	for _, key := range keys {
+		w.active[key]++
+	}
+	w.mu.Unlock()
+}
+
+func (w *enterpriseHookWatchActiveWorkers) finish(keys, repairedKeys []string) {
+	w.mu.Lock()
+	if len(repairedKeys) > 0 && w.repaired == nil {
+		w.repaired = make(map[string]bool)
+	}
+	for _, key := range repairedKeys {
+		w.repaired[key] = true
+	}
+	for _, key := range keys {
+		if w.active[key] <= 1 {
+			delete(w.active, key)
+		} else {
+			w.active[key]--
+		}
+	}
+	w.mu.Unlock()
 }

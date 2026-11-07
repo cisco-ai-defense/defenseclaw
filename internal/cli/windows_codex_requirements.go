@@ -334,7 +334,7 @@ func resolveWindowsStagedRetireInstallRoot(executable string) (string, error) {
 	if !exists {
 		return "", errors.New("staged managed-hook retirement requires protected installed deployment metadata")
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileStandalone)
+	roots, err := windowsManagedLayout.roots(winpath.EnterpriseProfileStandalone)
 	if err != nil {
 		return "", err
 	}
