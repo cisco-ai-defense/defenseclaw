@@ -27,8 +27,8 @@ Use a terminal of at least 80×24. Wider terminals show more columns and put the
 
 This page is for a DefenseClaw you installed yourself. A managed computer (an
 enterprise package, MDM or Setup) has no TUI and no `defenseclaw init`. On
-Linux and macOS the user's `defenseclaw` offers only `sandbox` commands,
-`help` and `--version`, and answers `tui`, `init` and anything else with
+Linux and macOS the user's `defenseclaw` runs only the commands in
+[Managed command availability](/docs/enterprise/managed-commands), and answers `tui`, `init` and anything else with
 "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy." followed, on Linux and macOS, by the administrator views of that computer (the installed gateway's `enterprise linux status` or `enterprise macos status`, `verify` and `audit export --since 2h`)
 and exit `2`. On Windows the managed `defenseclaw.exe` is the
 administrator CLI. An administrator checks a managed computer as shown in
@@ -109,7 +109,7 @@ sandbox. `defenseclaw agent usage --sandbox NAME` lists one sandbox's.
 
 The Runtime panel reads the same gateway as `agent discovery runtime status`. WATCHING means every selected plane is running, with a coverage note (for example, without elevation shadow egress sees only your own connections). DEGRADED means a selected plane is unavailable or not running.
 It has no Tetragon lines. Only a managed Linux gateway reports Tetragon, and
-the managed Linux packages ship no TUI, and their `defenseclaw` runs only `sandbox` commands. On managed Linux,
+the managed Linux packages ship no TUI ([Managed command availability](/docs/enterprise/managed-commands)). On managed Linux,
 `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery`
 prints the kernel sensor, the kernel controls and your own Tetragon policies,
 `enterprise linux tetragon status` the rest, and `/opt/defenseclaw/bin/defenseclaw-gateway status`
