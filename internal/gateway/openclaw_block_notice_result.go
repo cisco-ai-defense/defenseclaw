@@ -130,15 +130,24 @@ func collectResultStrings(v any, sub string, out *[]string) {
 	}
 }
 
-// openClawStrictIDLength is the length of the alphanumeric call ids some
-// provider adapters rewrite every call id to.
-const openClawStrictIDLength = 9
+// openClawBlockReasonMark and openClawBlockRefTag are the shape the OpenClaw
+// plugin gives the text of a blocked tool call result: "DefenseClaw: <reason>
+// (ref <ref>)" (extensions/defenseclaw/src/index.ts, blockReason). A result
+// that holds the reference in that shape is the block text itself, not a tool
+// output that happens to repeat the reference.
+const (
+	openClawBlockReasonMark = "DefenseClaw: "
+	openClawBlockRefTag     = " (ref "
+)
 
-// openClawCallIDForms returns the ids a provider request can name for the
-// call OpenClaw knows as id: the id itself, the part before "|" (OpenClaw
-// Responses ids are "<call id>|<item id>"), and the rewrites provider
-// adapters apply to ids (characters outside letters, digits, "_" and "-"
-// replaced by "_", letters and digits only, and the nine-character form).
+// openClawCallIDForms returns the ids a provider request names for the call
+// OpenClaw knows as id, by the rewrites that depend on the id alone: the id
+// itself, the part before "|" (OpenClaw Responses ids are "<call id>|<item
+// id>"), characters outside letters, digits, "_" and "-" replaced by "_", and
+// letters and digits only. A rewrite that does not depend on the id alone
+// (the nine and forty character caps of the strict replay modes, the new id a
+// repeated call id receives) cannot be listed; the block text decides those
+// results (see claims).
 func openClawCallIDForms(id string) []string {
 	id = strings.TrimSpace(id)
 	if i := strings.Index(id, "|"); i >= 0 {
@@ -159,22 +168,35 @@ func openClawCallIDForms(id string) []string {
 			kept.WriteByte('_')
 		}
 	}
-	forms := []string{id, kept.String(), alnum.String()}
-	if a := alnum.String(); len(a) > openClawStrictIDLength {
-		forms = append(forms, a[:openClawStrictIDLength])
+	return []string{id, kept.String(), alnum.String()}
+}
+
+// isBlockText reports whether one of the strings is the text a block put in
+// its tool result: the plugin block reason mark, then the reference tag with
+// this notice reference.
+func (n openClawBlockNotice) isBlockText(texts []string) bool {
+	for _, t := range texts {
+		if i := strings.Index(t, openClawBlockReasonMark); i >= 0 &&
+			strings.Contains(t[i+len(openClawBlockReasonMark):], openClawBlockRefTag+n.ref+")") {
+			return true
+		}
 	}
-	return forms
+	return false
 }
 
 // claims reports whether the tool result is the result of the call this notice
 // was issued for. The reference must be in the result (the caller searched
 // for it); on top of that the result must belong to the blocked call:
-//   - a result that names a call id (Chat, Responses, Anthropic, Bedrock and a
-//     Gemini request that carries ids) must name the id of the blocked call,
-//     in the id itself or a provider rewrite of it; a notice issued with no
-//     call id never matches such a result;
-//   - a result with no call id (Ollama, Gemini without ids) must name the
-//     tool of the blocked call; one that names no tool matches nothing.
+//   - a result whose call id is the recorded id, or a rewrite of it that
+//     depends on the id alone, belongs to it;
+//   - any other result belongs to it only when it holds the block text: the
+//     reference in the shape the block wrote it. OpenClaw replay rewrites call
+//     ids in ways the recorded id cannot predict (a cap of nine or forty
+//     characters, a new id for a repeated call id), so an unlisted id is no
+//     evidence against the call, and a mere echo of the reference is no
+//     evidence for it. A result with no call id (Ollama, Gemini without ids)
+//     must also name the tool of the blocked call; one that names no tool
+//     matches nothing.
 //
 // When the result cannot be tied to the block, the notice stays unclaimed: it
 // is a UX line, so showing nothing is the safe outcome.
@@ -188,7 +210,8 @@ func (n openClawBlockNotice) claims(r openClawToolResult) bool {
 				return true
 			}
 		}
+	} else if r.name == "" || r.name != n.tool {
 		return false
 	}
-	return r.name != "" && r.name == n.tool
+	return n.isBlockText(r.texts)
 }
