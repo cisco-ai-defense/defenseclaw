@@ -2552,17 +2552,11 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 	if proxyAddr == "" {
 		proxyAddr = fmt.Sprintf("127.0.0.1:%d", cfg.Guardrail.Port)
 	}
-	if err := verifyEnterpriseHookManagedEnrollments(manifest, apiAddr); err != nil {
-		if run.AuthorizationErr == nil {
-			run.AuthorizationErr = fmt.Errorf("protected enrollment set is not exact: %w", err)
-		} else {
-			run.AuthorizationErr = fmt.Errorf(
-				"%v; protected enrollment set is not exact: %w",
-				run.AuthorizationErr,
-				err,
-			)
-		}
-	}
+	// The targets the Guardian leaves out of the protected enrollment set it
+	// publishes (a failed target that was never protected, a removed account).
+	// Verify compares the published set with the enabled manifest minus
+	// exactly these, after the rows below say which they are.
+	unenrolled := map[string]struct{}{}
 	registry := newEnterpriseHooksConnectorRegistry()
 	claudeMachineContract := enterpriseHookMachinePolicyContract(manifest)
 	for _, target := range manifest.Targets {
@@ -2589,6 +2583,7 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 			run.Failures++
 			if prior, ok := recorded[enterpriseHookProtectedTargetKey(row)]; ok && enterpriseHookRemovedAccountRow(prior) {
 				run.Excused = append(run.Excused, row)
+				unenrolled[enterpriseHookEnrollmentUnit(target)] = struct{}{}
 			}
 			run.Rows = append(run.Rows, row)
 			continue
@@ -2729,6 +2724,7 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 				}
 				run.RecordedProtected[enterpriseHookProtectedTargetKey(row)] = true
 			}
+			excusedBefore := len(run.Excused)
 			if excused > 0 && row.Error == enterpriseHookAccountLinkFailure &&
 				enterpriseHookAccountLinkRow(recorded[enterpriseHookProtectedTargetKey(row)]) &&
 				enterpriseHookTargetAccountLink(target, row.UserHome, row.SID) {
@@ -2746,8 +2742,22 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 				}
 				run.AwaitingSignIn[enterpriseHookProtectedTargetKey(row)] = awaitingSignIn[enterpriseHookProtectedTargetKey(row)]
 			}
+			if len(run.Excused) > excusedBefore {
+				enterpriseHookNoteExcusedUnenrolled(unenrolled, target, previousProtection.PreviouslyProtected)
+			}
 		}
 		run.Rows = append(run.Rows, row)
+	}
+	if err := verifyEnterpriseHookManagedEnrollments(enterpriseHookEnrollmentManifest(manifest, unenrolled), apiAddr); err != nil {
+		if run.AuthorizationErr == nil {
+			run.AuthorizationErr = fmt.Errorf("protected enrollment set is not exact: %w", err)
+		} else {
+			run.AuthorizationErr = fmt.Errorf(
+				"%v; protected enrollment set is not exact: %w",
+				run.AuthorizationErr,
+				err,
+			)
+		}
 	}
 	if run.AuthorizationErr == nil && exists && activationExists {
 		proof := enterpriseHookRecordedProtectionProof(run)
@@ -3415,7 +3425,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	// release published. A failed target that was never protected, and a
 	// non-deferred pending target, are left out of the published set until a
 	// later tick succeeds for them.
-	enrollmentManifest := enterpriseHookEnrollmentManifest(manifest, rows, unenrolled)
+	enrollmentManifest := enterpriseHookEnrollmentManifest(manifest, unenrolled)
 	enrollmentErr := enterpriseHookReconcileStageDeferredPolicies(
 		enrollmentManifest,
 		pendingTargets,
