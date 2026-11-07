@@ -125,7 +125,7 @@ func TestVerifyWaitsForTheGuardianToReconcileANewManifest(t *testing.T) {
 				stale:     `{"ok":false,"scope":"machine_hook_registration","hermes_session_coverage":"not_covered","authorization_error":"protected hook guardian activation does not cover the current manifest bytes","results":[{"connector":"hermes","user":"alice","user_home":"` + home + `","uid":1001,"ok":false}]}`,
 			}
 			h.env.Runner = runner
-			h.env.GuardianReportTimeout = 10 * time.Second
+			h.env.GuardianReconcileTimeout = 10 * time.Second
 			h.env.PollInterval = 10 * time.Millisecond
 
 			// The guardian reconciles the new manifest 300 ms after verify starts.
@@ -151,7 +151,7 @@ func TestVerifyWaitsForTheGuardianToReconcileANewManifest(t *testing.T) {
 
 			// A guardian that never reconciles: verify stops waiting at the
 			// bound, still fails, and names the pending reconcile.
-			h.env.GuardianReportTimeout = 100 * time.Millisecond
+			h.env.GuardianReconcileTimeout = 100 * time.Millisecond
 			writeActivation(t, h, strings.Repeat("0", 64))
 			started := time.Now()
 			stuck := h.run(Options{Action: ActionVerify})
@@ -166,7 +166,7 @@ func TestVerifyWaitsForTheGuardianToReconcileANewManifest(t *testing.T) {
 			}
 
 			// status never waits.
-			h.env.GuardianReportTimeout = 10 * time.Second
+			h.env.GuardianReconcileTimeout = 10 * time.Second
 			started = time.Now()
 			h.run(Options{Action: ActionStatus})
 			if elapsed := time.Since(started); elapsed > 5*time.Second {
