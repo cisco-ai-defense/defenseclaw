@@ -54,7 +54,7 @@ type sessionStartEntry struct {
 	// does not. A call does not wait for it past its answer window.
 	inPlace bool
 	// pinned is the identity refusal text this entry holds trusted
-	// (pinIdentityRefusal) for as long as the gate keeps the entry.
+	// (identityRefusalWatch.pin) for as long as the gate keeps the entry.
 	pinned string
 }
 
@@ -64,10 +64,18 @@ type sessionStartTicket struct {
 	key   string
 	entry *sessionStartEntry
 	once  sync.Once
-	// window keeps the identity refusals issued while this start is judged
-	// trusted until finish pins the one the start ends with
-	// (openStartWindow).
-	window uint64
+	// watch records the identity refusals issued while this start is judged,
+	// so finish can pin the one the start ends with (watchIdentityRefusals).
+	// Each start has its own.
+	watch *identityRefusalWatch
+}
+
+// adopt records the identity refusal the start's own request was resolved to
+// before the start began (see identityRefusalWatch.adopt).
+func (t *sessionStartTicket) adopt(refusal string) {
+	if t != nil {
+		t.watch.adopt(refusal)
+	}
 }
 
 const (
@@ -173,7 +181,7 @@ func (g *sessionStartGate) beginLocked(key string) *sessionStartTicket {
 	g.dropLocked(key)
 	g.entries[key] = entry
 	g.seenLocked(key, entry.at)
-	return &sessionStartTicket{gate: g, key: key, entry: entry, window: openStartWindow()}
+	return &sessionStartTicket{gate: g, key: key, entry: entry, watch: watchIdentityRefusals()}
 }
 
 // evictLocked drops expired blocks, then the oldest finished ones until the
@@ -245,13 +253,13 @@ func (t *sessionStartTicket) finish(blocked bool, reason string) {
 		if g.entries[t.key] == t.entry {
 			if !blocked {
 				g.dropLocked(t.key)
-			} else if pinIdentityRefusal(reason) {
+			} else if t.watch.pin(reason) {
 				// A live blocked session keeps its readable cause however
 				// many other refusals are issued meanwhile (GAP-0718).
 				t.entry.pinned = reason
 			}
 		}
-		closeStartWindow(t.window)
+		t.watch.close()
 		g.mu.Unlock()
 		close(t.entry.done)
 	})

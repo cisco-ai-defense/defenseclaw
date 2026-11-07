@@ -665,6 +665,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		startVerdictBlocked, startVerdictReason := true, sessionStartUnfinishedReason
 		if canonicalHookLifecycleEvent(req.HookEventName) == "session_start" {
 			startTicket = a.sessionStartGate.begin(startGateKey)
+			// The refusal this request was resolved to was issued before the
+			// start began; the start is expected to end with it.
+			startTicket.adopt(profileRefusal(r.Context()))
 			defer func() { startTicket.finish(startVerdictBlocked, startVerdictReason) }()
 		}
 		// tokenAuth wraps this handler in APIServer.Run, so reaching this point
