@@ -37,9 +37,9 @@ import (
 // ensure publishes it here, so no ensure path leaves an older approved config
 // for a repair to restore (GAP-0779).
 //
-// A config.yaml the generation record calls a hand edit keeps no record of the
-// lifecycle config it replaced, so the approved copy alone cannot prove it is
-// that config: an earlier release applied a config in place and left the copy
+// A config.yaml the generation record calls a hand edit does not show by itself
+// which lifecycle config it replaced, so the approved copy alone cannot prove
+// it is that config: an earlier release applied a config in place and left the copy
 // at an older one, with a matching digest. approved-config.current.json is
 // the proof. A lifecycle run writes it, next to the copy, only for a copy that
 // is the config the run applied; it names the digest of that copy and the
