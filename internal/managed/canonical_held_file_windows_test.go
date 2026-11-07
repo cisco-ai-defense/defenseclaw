@@ -179,11 +179,12 @@ func TestStandaloneRepairRefusesAFileWithAnotherHardLinkAndWritesNothing(t *test
 	before := privilegedDescriptorForTest(t, path)
 
 	result, err := EnsureCanonical(path, ObjectAdminFile, heldTestOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Outcome == CanonicalRepaired || result.Outcome == CanonicalOK {
+	// The structural check refuses a second link as an error, before any write.
+	if err == nil && (result.Outcome == CanonicalRepaired || result.Outcome == CanonicalOK) {
 		t.Fatalf("outcome = %+v; want the linked file refused", result)
+	}
+	if err != nil && !strings.Contains(err.Error(), "hard link") {
+		t.Fatalf("err = %v; want the hard link named", err)
 	}
 	if after := privilegedDescriptorForTest(t, path); after != before {
 		t.Fatalf("the refused repair changed the descriptor: %s -> %s", before, after)
