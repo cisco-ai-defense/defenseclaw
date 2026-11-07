@@ -500,7 +500,7 @@ try {
                         -Name Write-DefenseClawDeploymentMetadataBytes `
                         -CommandType Function
                 ).ScriptBlock
-                function Write-DefenseClawDeploymentMetadataBytes {
+                $metadataWriterProbe = {
                     param([string]$Path, [byte[]]$Bytes)
                     if ($Path -cne $script:TestMetadataPath) {
                         throw 'manifest rebind selected another metadata path'
@@ -509,6 +509,9 @@ try {
                     $script:TestMetadataPublicationBytes = [byte[]]$Bytes.Clone()
                     & $script:TestOriginalMetadataWriter -Path $Path -Bytes $Bytes
                 }
+                Microsoft.PowerShell.Management\Set-Item `
+                    -Path Function:\Write-DefenseClawDeploymentMetadataBytes `
+                    -Value $metadataWriterProbe
                 try {
                     $didRebind = Invoke-TestSync
                 }
