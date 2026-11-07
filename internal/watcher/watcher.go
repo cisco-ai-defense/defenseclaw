@@ -2337,14 +2337,17 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 
 	cfg := decisionPolicy.Config
 	connector := w.eventConnector(evt)
-	assetDecision := cfg.EvaluateAssetPolicy(w.withMCPDefinition(cfg, evt, config.AssetPolicyInput{
-		TargetType:     targetType,
-		Name:           evt.Name,
-		DeclaredNames:  declaredAssetNames(cfg, evt),
-		Connector:      connector,
-		SourcePath:     evt.Path,
-		RuntimeSurface: "watcher",
-	}))
+	// A root several connectors load applies each one scoped asset rules.
+	assetDecision, assetConnector := w.evaluateRootAssetPolicy(cfg, evt, connector, func(c string) config.AssetPolicyInput {
+		return w.withMCPDefinition(cfg, evt, config.AssetPolicyInput{
+			TargetType:     targetType,
+			Name:           evt.Name,
+			DeclaredNames:  declaredAssetNames(cfg, evt),
+			Connector:      c,
+			SourcePath:     evt.Path,
+			RuntimeSurface: "watcher",
+		})
+	})
 	if assetDecision.Enabled && assetDecision.RawAction == "block" {
 		if assetDecision.Action == "block" {
 			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
@@ -2359,7 +2362,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: assetDecision.Reason}
 			return res
 		}
-		w.logAssetPolicyWouldBlock(ctx, evt, targetType, connector, assetDecision)
+		w.logAssetPolicyWouldBlock(ctx, evt, targetType, assetConnector, assetDecision)
 	}
 
 	if res, done := w.legacyAllowPathMismatch(ctx, cfg, evt, targetType); done {
@@ -2535,10 +2538,12 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	// the scan ran applies as the pre-scan check applies it; the lists
 	// alone missed it (GAP-1155).
 	if post := decisionPolicy.Config; post != nil {
-		if decision := post.EvaluateAssetPolicy(w.withMCPDefinition(post, evt, config.AssetPolicyInput{
-			TargetType: targetType, Name: evt.Name, DeclaredNames: declaredAssetNames(post, evt),
-			Connector: connector, SourcePath: evt.Path, RuntimeSurface: "watcher",
-		})); decision.Enabled && decision.RawAction == "block" && decision.Action == "block" {
+		if decision, _ := w.evaluateRootAssetPolicy(post, evt, connector, func(c string) config.AssetPolicyInput {
+			return w.withMCPDefinition(post, evt, config.AssetPolicyInput{
+				TargetType: targetType, Name: evt.Name, DeclaredNames: declaredAssetNames(post, evt),
+				Connector: c, SourcePath: evt.Path, RuntimeSurface: "watcher",
+			})
+		}); decision.Enabled && decision.RawAction == "block" && decision.Action == "block" {
 			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 				fmt.Sprintf("type=%s reason=%s source=%s post-scan", targetType, decision.Reason, decision.Source))
 			scanID := w.logScanID(ctx, evt, result, "blocked")
