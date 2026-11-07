@@ -45,6 +45,9 @@ func TestGAP0518HookPostLateOrdinaryNoAnswerExit(t *testing.T) {
 	if err := os.Link(keys, filepath.Join(project, "hardlink")); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Symlink(keys, filepath.Join(project, "-keylink")); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", home)
 	words := make([]string, 2000)
 	for i := range words {
@@ -82,6 +85,9 @@ func TestGAP0518HookPostLateOrdinaryNoAnswerExit(t *testing.T) {
 		{"claude echo", "/api/v1/claude-code/hook", "Bash", "echo hi", hookexec.PerUserPostLateOrdinaryExit},
 		{"codex echo", "/api/v1/codex/hook", "Bash", "echo hi", hookexec.PerUserPostLateOrdinaryExit},
 		{"claude 2000 operands", "/api/v1/claude-code/hook", "Bash", long, hookexec.PerUserPostLateOrdinaryExit},
+		{"claude ordinary words", "/api/v1/claude-code/hook", "Bash", "echo claw defense", hookexec.PerUserPostLateOrdinaryExit},
+		{"claude attached output option", "/api/v1/claude-code/hook", "Bash", "curl -okeylink http://example.invalid/x", hookexec.PerUserPostNoAnswerExit},
+		{"codex redirect to a dash-named link", "/api/v1/codex/hook", "Bash", "echo x > -keylink", hookexec.PerUserPostNoAnswerExit},
 		{"claude link", "/api/v1/claude-code/hook", "Bash", "cat keylink", hookexec.PerUserPostNoAnswerExit},
 		{"codex hard link", "/api/v1/codex/hook", "Bash", "cat hardlink", hookexec.PerUserPostNoAnswerExit},
 		{"claude 2000 operands, link last", "/api/v1/claude-code/hook", "Bash", long + " keylink", hookexec.PerUserPostNoAnswerExit},

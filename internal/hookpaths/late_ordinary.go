@@ -27,12 +27,19 @@ import (
 //     tilde, a backslash, a substitution, a subshell, a background job, a
 //     here-document, an unmodelled redirect, a pipe into anything but a
 //     plain filter, a shell, eval or interpreter code);
-//   - a path word, or the working directory, names the SSH folder or a
-//     DefenseClaw folder or file in any spelling (the text carries "ssh",
-//     "authorized", "defense" or "claw"), is "..", or reaches the root or
-//     the user's home itself;
+//   - a path word, or the working directory, names the SSH folder, an
+//     authorized-keys file or a DefenseClaw, OpenClaw or ZeptoClaw folder
+//     or file in any case (the text carries "ssh", "authorized",
+//     "defenseclaw", "openclaw" or "zeptoclaw", or a hidden folder name
+//     with "claw" or "defense" in it), is "..", or reaches the root or the
+//     user's home itself; an ordinary word such as claw or defense is not
+//     a name, because a protected file is a place and a place is told by
+//     its folder, its link or its state-folder name, not by one word;
 //   - a path word, or a folder in front of it, is a link, or the file is a
-//     regular file with a second hard link: a link candidate;
+//     regular file with a second hard link: a link candidate. A program may
+//     read a path out of any word (-ofile, of=file, --out=file, a:file), so
+//     every part of a word that can start a value is looked at, not only
+//     the word;
 //   - the call has a key the scan does not know, so it may carry a path.
 //
 // A protected target spelled in a way the scan cannot see is a detection
@@ -151,12 +158,20 @@ func newLateScan(cwd string) (*lateScan, bool) {
 	return &lateScan{cwd: realCWD, home: realHome, seen: map[string]bool{}}, true
 }
 
-// lateNamesProtected reports text that names, in any case, the SSH folder or
-// a DefenseClaw folder or file, or an authorized-keys file.
+// lateNamesProtected reports text that names, in any case, the SSH folder,
+// an authorized-keys file, or a DefenseClaw, OpenClaw or ZeptoClaw folder or
+// file, or a hidden folder (.name) with "claw" or "defense" in it. A word
+// such as claw or defense on its own names nothing: the working directory
+// and every link are checked as places.
 func lateNamesProtected(text string) bool {
 	lower := strings.ToLower(text)
-	for _, name := range []string{"ssh", "authorized", "defense", "claw"} {
+	for _, name := range []string{"ssh", "authorized", "defenseclaw", "openclaw", "zeptoclaw"} {
 		if strings.Contains(lower, name) {
+			return true
+		}
+	}
+	for _, part := range strings.Split(lower, "/") {
+		if strings.HasPrefix(part, ".") && (strings.Contains(part, "claw") || strings.Contains(part, "defense")) {
 			return true
 		}
 	}
@@ -353,24 +368,33 @@ func lateIdentifier(name string) bool {
 	return true
 }
 
-// word checks the path an argument may name: the word itself, the value of
-// a --name=value option, or the part of an attached option from its first
-// slash.
+// word checks every path an argument may name: see lateCandidates.
 func (s *lateScan) word(text string) bool {
 	if lateNamesProtected(text) {
 		return false
 	}
-	if strings.HasPrefix(text, "-") {
-		if _, value, found := strings.Cut(text, "="); found {
-			text = value
-		} else if slash := strings.IndexByte(text, '/'); slash >= 0 {
-			text = text[slash:]
-		} else {
-			return true
-		}
-		if text == "" {
-			return true
+	for _, candidate := range lateCandidates(text) {
+		if !s.path(candidate) {
+			return false
 		}
 	}
-	return s.path(text)
+	return true
+}
+
+// lateCandidates are the paths a program may read out of one word: the word
+// itself (an operand, a redirect target, a file named like an option), the
+// part after any "=", ":", ",", "@", "+" or "%" (--out=file, of=file,
+// a:file), and for a word that starts with "-" every part from its second
+// character on, since a short option takes its value attached (-ofile,
+// -vofile, -f/path). A part that is a link, a hard link or ".." makes the
+// call not ordinary; a part that is no file is ordinary.
+func lateCandidates(text string) []string {
+	candidates := []string{text}
+	attached := strings.HasPrefix(text, "-")
+	for i := 1; i < len(text); i++ {
+		if attached || strings.IndexByte("=:,@+%", text[i-1]) >= 0 {
+			candidates = append(candidates, text[i:])
+		}
+	}
+	return candidates
 }

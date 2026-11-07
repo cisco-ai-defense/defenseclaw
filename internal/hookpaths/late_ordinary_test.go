@@ -45,6 +45,9 @@ func newLateFixture(t *testing.T) lateFixture {
 	if err := os.Symlink(keys, filepath.Join(project, "keylink")); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Symlink(keys, filepath.Join(project, "-keylink")); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(project, "dirlink")); err != nil {
 		t.Fatal(err)
 	}
@@ -105,6 +108,15 @@ func TestGAP0518LateOrdinaryCall(t *testing.T) {
 		{"option value", "go test --count=1 ./src", true},
 		{"environment prefix", "CI=1 make build", true},
 		{"2000 plain operands", lateOperands(2000, "", ""), true},
+		// Ordinary words that merely read like a protected name (review 1).
+		{"word claw", "echo claw", true},
+		{"word defense", "echo defense", true},
+		{"file named like a word", "cat claw.txt", true},
+		{"folder named like a word", "ls clawbot-notes defense-plan/x", true},
+		{"short flags", "ls -la", true},
+		{"attached option, no link", "curl -o out.txt http://example.invalid/x", true},
+		{"attached option value", "tar -czf out.tgz src", true},
+		{"colon value", "go test -run Test:Sub ./src", true},
 
 		{"direct keys path", "cat " + filepath.Join(f.home, ".ssh", "authorized_keys"), false},
 		{"relative ssh folder", "cat ../.ssh/authorized_keys", false},
@@ -136,6 +148,23 @@ func TestGAP0518LateOrdinaryCall(t *testing.T) {
 		{"2000 operands, link middle", lateOperands(2000, "keylink", "middle"), false},
 		{"2000 operands, link last", lateOperands(2000, "keylink", "last"), false},
 		{"2000 operands, keys path last", lateOperands(2000, filepath.Join(f.home, ".ssh", "authorized_keys"), "last"), false},
+		// A value attached to an option, a redirect target that starts with a
+		// dash and a key=value operand name the link as well (review 1).
+		{"attached output option", "curl -okeylink http://example.invalid/x", false},
+		{"bundled attached output option", "curl -sSokeylink http://example.invalid/x", false},
+		{"attached folder option", "tar -Cdirlink -xf plain.txt", false},
+		{"option equals value", "curl -o=keylink http://example.invalid/x", false},
+		{"long option value", "curl --output=keylink http://example.invalid/x", false},
+		{"key=value operand", "d" + "d if=plain.txt of=keylink", false},
+		{"colon operand", "cat a:keylink", false},
+		{"comma operand", "cat plain.txt,keylink", false},
+		{"redirect to a dash-named link", "echo x > -keylink", false},
+		{"append to a dash-named link", "echo x >> -keylink", false},
+		{"dash-named link operand", "cat -keylink", false},
+		{"attached option with a keys path", "curl -o" + filepath.Join(f.home, ".ssh", "authorized_keys") + " x", false},
+		{"hidden claw folder", "ls .openclaw .defenseclaw .zeptoclaw .claw", false},
+		{"state folder name", "cat openclaw.json defenseclaw.yaml", false},
+		{"2000 operands, attached option last", lateOperands(2000, "-okeylink", "last"), false},
 		{"2000 operands, hard link middle", lateOperands(2000, "hardlink", "middle"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -186,6 +215,24 @@ func TestGAP0518LateOrdinaryCallEnvelope(t *testing.T) {
 	} {
 		if LateOrdinaryCall("claudecode", payload) {
 			t.Errorf("%s: ordinary, want not", name)
+		}
+	}
+	for _, name := range []string{"clawbot", "defense-notes"} {
+		cwd := filepath.Join(f.home, name)
+		if err := os.MkdirAll(cwd, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if !LateOrdinaryCall("claudecode", bash(cwd, map[string]any{"command": "ls"})) {
+			t.Errorf("a working directory named %s is ordinary", name)
+		}
+	}
+	for _, name := range []string{".openclaw", ".defenseclaw", "zeptoclaw"} {
+		cwd := filepath.Join(f.home, name)
+		if err := os.MkdirAll(cwd, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if LateOrdinaryCall("claudecode", bash(cwd, map[string]any{"command": "ls"})) {
+			t.Errorf("a working directory named %s is not ordinary", name)
 		}
 	}
 	write, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": f.project, "tool_name": "Write",
