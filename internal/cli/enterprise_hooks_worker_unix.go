@@ -773,9 +773,9 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			recheck = err == nil && recheckWindow > 0
 			if err != nil {
 				policyOnly := request.Standalone && enterprisehooks.PreviousHookRuntimeIntactForConfigurationChange(ctx, opts, target.PriorCredentials)
-				progress.begin()
+				progress.begin(target, !policyOnly)
 				repairing = true
-				result, err = enterpriseHookWorkerInstaller(ctx, opts)
+				result, err = reinstallEnterpriseHookTarget(ctx, opts)
 				outcome.Repaired = err == nil && !policyOnly
 			}
 		case enterpriseHookWorkerModeRemove:
@@ -926,7 +926,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			progress.end(outcome)
 		}
 		if recheck {
-			rechecks = append(rechecks, enterpriseHookWorkerRecheck{result: len(results) - 1, opts: opts})
+			rechecks = append(rechecks, enterpriseHookWorkerRecheck{result: len(results) - 1, target: target, opts: opts})
 			recheckedAt = append(recheckedAt, time.Now())
 		}
 	}
@@ -937,8 +937,8 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		},
 		func(index int, _ error) {
 			outcome := &results[rechecks[index].result]
-			progress.begin()
-			result, err := enterpriseHookWorkerInstaller(ctx, rechecks[index].opts)
+			progress.begin(rechecks[index].target, true)
+			result, err := reinstallEnterpriseHookTarget(ctx, rechecks[index].opts)
 			if err != nil {
 				outcome.OK, outcome.Result, outcome.AgentConfig = false, nil, ""
 				outcome.Pending = enterprisehooks.PendingTargetError(err) &&
@@ -961,7 +961,25 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 // is checked again over the request's recheck window.
 type enterpriseHookWorkerRecheck struct {
 	result int
+	target enterpriseHookWorkerTarget
 	opts   enterprisehooks.InstallOptions
+}
+
+// reinstallEnterpriseHookTarget puts a protected target back after its check
+// found it broken. An install that returns an error after it published (the
+// installer keeps a verified registration it could not finish) has still put
+// the target back, so a failed install is followed by a check: a target that
+// verifies now was restored, and the repair counts (GAP-0754). A target that
+// still fails keeps the install's error.
+func reinstallEnterpriseHookTarget(ctx context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+	result, err := enterpriseHookWorkerInstaller(ctx, opts)
+	if err == nil {
+		return result, nil
+	}
+	if verified, verifyErr := enterpriseHookWorkerVerifier(ctx, opts); verifyErr == nil {
+		return verified, nil
+	}
+	return result, err
 }
 
 // repairManagedCodexUserFeature runs with the target user's uid. The machine
