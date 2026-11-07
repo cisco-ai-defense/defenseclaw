@@ -974,3 +974,83 @@ def test_lock_that_is_present_and_cannot_be_read_gives_no_identity(tmp_path, mon
             for profile in ("default", "permissive"):
                 assert ("SRC-EXEC" in _high(target, profile)) == (not admitted), f"{name} {profile}"
             assert "SRC-EXEC" in _high(target, "strict"), f"{name} strict"
+
+
+MALFORMED_LOCKS = {
+    "packages-is-a-list": {"lockfileVersion": 3, "packages": []},
+    "packages-is-text": {"lockfileVersion": 3, "packages": "file:../.ssh/provider.tgz"},
+    "entry-at-path-is-text": {"lockfileVersion": 3, "packages": {PACKAGE_KEY: "file:../.ssh/provider.tgz"}},
+    "entry-at-path-is-a-list": {"lockfileVersion": 3, "packages": {PACKAGE_KEY: ["file:../.ssh/provider.tgz"]}},
+    "entry-of-another-package-is-text": {"lockfileVersion": 3, "packages": {
+        "node_modules/other": "file:../.ssh/other.tgz",
+        PACKAGE_KEY: {"version": VERSION, "resolved": _archive_address(VERSION)},
+    }},
+    "version-is-a-number": {"lockfileVersion": 3, "packages": {PACKAGE_KEY: {"version": 1}}},
+    "resolved-is-a-list": {"lockfileVersion": 3, "packages": {
+        PACKAGE_KEY: {"version": VERSION, "resolved": ["file:../.ssh/provider.tgz"]},
+    }},
+    "integrity-is-an-object": {"lockfileVersion": 3, "packages": {
+        PACKAGE_KEY: {"version": VERSION, "integrity": {"value": INTEGRITY}},
+    }},
+    "link-is-text": {"lockfileVersion": 3, "packages": {PACKAGE_KEY: {"version": VERSION, "link": "yes"}}},
+    "spec-table-is-text": {"lockfileVersion": 3, "packages": {
+        "": {"dependencies": "file:../.ssh/provider.tgz"},
+        PACKAGE_KEY: {"version": VERSION, "resolved": _archive_address(VERSION)},
+    }},
+    "spec-is-an-object": {"lockfileVersion": 3, "packages": {
+        "": {"dependencies": {PROVIDER: {"path": "../.ssh/provider"}}},
+        PACKAGE_KEY: {"version": VERSION, "resolved": _archive_address(VERSION)},
+    }},
+    "dependencies-is-a-list": {"lockfileVersion": 1, "dependencies": []},
+    "dependency-entry-is-text": {"lockfileVersion": 1, "dependencies": {PROVIDER: "file:../.ssh/provider.tgz"}},
+    "dependency-entry-is-a-list": {"lockfileVersion": 1, "dependencies": {PROVIDER: ["file:../.ssh/provider.tgz"]}},
+    "nested-dependency-entry-is-text": {"lockfileVersion": 1, "dependencies": {
+        PROVIDER: {"version": VERSION, "resolved": _archive_address(VERSION), "dependencies": {"x": "file:../.ssh/x"}},
+    }},
+    "requires-is-text": {"lockfileVersion": 1, "dependencies": {
+        PROVIDER: {"version": VERSION, "resolved": _archive_address(VERSION), "requires": "file:../.ssh/x"},
+    }},
+    "v1-version-is-a-list": {"lockfileVersion": 1, "dependencies": {PROVIDER: {"version": [VERSION]}}},
+    "v2-valid-packages-malformed-dependencies": {
+        "lockfileVersion": 2,
+        "packages": {PACKAGE_KEY: {"version": VERSION, "resolved": _archive_address(VERSION)}},
+        "dependencies": {PROVIDER: "file:../.ssh/provider.tgz"},
+    },
+}
+WELL_FORMED_LOCKS = {
+    "no-entry": {"lockfileVersion": 3, "packages": {}},
+    "registry-entry-with-npm-extras": {"lockfileVersion": 3, "packages": {
+        "": {"name": "project", "version": "1.0.0", "dependencies": {PROVIDER: "^" + VERSION}},
+        PACKAGE_KEY: {
+            "version": VERSION, "resolved": _archive_address(VERSION), "integrity": INTEGRITY,
+            "dev": True, "license": ["MIT"], "engines": {"node": ">=20"}, "peerDependencies": {"openclaw": "*"},
+        },
+        "node_modules/other": {"version": "1.0.0", "link": False, "bin": {"other": "cli.js"}},
+    }},
+    "v1-registry-entry": {"lockfileVersion": 1, "dependencies": {PROVIDER: {
+        "version": VERSION, "resolved": _archive_address(VERSION), "integrity": INTEGRITY,
+        "requires": {"left-pad": "^1.0.0"}, "dependencies": {"left-pad": {"version": "1.3.0"}},
+    }}},
+}
+
+
+@requires_symlink_privilege
+def test_lock_that_has_any_malformed_part_is_not_an_install_record(tmp_path, monkeypatch) -> None:
+    """The whole lock is trusted or none of it: a malformed package table, an
+    entry of a wrong type (at this install's path or elsewhere in the file) or a
+    wrong-typed field gives the ordinary verdict in every profile, where a lock
+    of the npm shape keeps the identity."""
+
+    project, _ = _pinned_npm_install(tmp_path, monkeypatch)
+    for place, locate in LOCK_PLACES.items():
+        for label, lock in {**MALFORMED_LOCKS, **WELL_FORMED_LOCKS}.items():
+            root, target = _case(project, tmp_path, f"{place}-{label}")
+            path = locate(root, target)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(lock), encoding="utf-8")
+            name = f"{place} {label}"
+            admitted = label in WELL_FORMED_LOCKS
+            assert (vendor_identity.inspect_official_provider_tree(str(target)) is not None) == admitted, name
+            for profile in ("default", "permissive"):
+                assert ("SRC-EXEC" in _high(target, profile)) == (not admitted), f"{name} {profile}"
+            assert "SRC-EXEC" in _high(target, "strict"), f"{name} strict"
