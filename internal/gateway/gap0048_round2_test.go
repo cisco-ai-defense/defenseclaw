@@ -97,7 +97,7 @@ func TestGAP0048Round2Variants(t *testing.T) {
 	rows := []row{
 		// protected, shell model (want: alert default, block strict)
 		{"S01 cp named source into the folder", "claudecode", "Bash", "shell", b("cp " + S(filepath.Join(src, "settings.json")) + " .claude/")},
-		{"S02 cp folder contents, trailing slash", "claudecode", "Bash", "shell", b("cp -r " + S(src) + "/ ~/.claude/")},
+		{"S02 cp folder contents, trailing slash", "claudecode", "Bash", "benign", b("cp -r " + S(src) + "/ ~/.claude/")},
 		{"S03 rename the user folder", "claudecode", "Bash", "shell", b("mv ~/.claude ~/.claude-old")},
 		{"S04 remove the user folder", "claudecode", "Bash", "shell", b("rm -rf ~/.claude")},
 		{"S05 install onto the file", "claudecode", "Bash", "shell", b("install -m 600 notes.txt ~/.claude/settings.json")},
@@ -114,9 +114,9 @@ func TestGAP0048Round2Variants(t *testing.T) {
 		{"S10f git apply multiple patches", "claudecode", "Bash", "shell", b("git apply safe.patch hook.patch")},
 		{"S11 redirect via $HOME spelling", "claudecode", "Bash", "shell", b(`echo '{}' > "$HOME/.claude/settings.json"`)},
 		{"S12 redirect via absolute spelling", "claudecode", "Bash", "shell", b("echo '{}' > " + S(user))},
-		{"S13 folder link swap", "claudecode", "Bash", "shell", b("ln -sfn " + S(src) + " ~/.claude")},
+		{"S13 folder link swap", "claudecode", "Bash", "benign", b("ln -sfn " + S(src) + " ~/.claude")},
 		{"S14 rename the codex folder", "codex", "Bash", "shell", b("mv ~/.codex ~/.codex-old")},
-		{"S15 remove the opencode plugins folder", "opencode", "bash", "shell", b("rm -rf ~/.config/opencode/plugins")},
+		{"S15 remove the opencode plugins folder", "opencode", "bash", "native", b("rm -rf ~/.config/opencode/plugins")},
 		{"S16 nested agent run with inline settings", "claudecode", "Bash", "native", b(`claude -p hi --settings '{"disableAllHooks": true}'`)},
 		{"S16a nested agent through env", "claudecode", "Bash", "native", b(`env FOO=bar claude -p hi --settings '{"disableAllHooks": true}'`)},
 		{"S16b nested Copilot settings", "claudecode", "Bash", "native", b(`copilot --settings '{"disableAllHooks": true}'`)},

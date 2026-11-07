@@ -1139,6 +1139,9 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 					}
 				}
 			}
+			if folder := hookpaths.RegistrationArchivePossibleReach(part.Command, part.Dir, guard.home, registered); folder != "" {
+				add(agentHookConfigWriteRuleID, "archive may replace a registered hook file", folder)
+			}
 		}
 		if len(parts) > 1 && part.Command == rawCommand &&
 			(strings.Contains(rawCommand, "cd ") || strings.Contains(rawCommand, "pushd ")) {
