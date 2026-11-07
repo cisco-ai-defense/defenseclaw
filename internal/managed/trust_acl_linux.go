@@ -36,7 +36,11 @@ const (
 // group entries can effectively write the path. The group mode bits
 // already reflect the ACL mask, so this is mostly belt and braces, but it
 // names the entry instead of reporting a bare mode.
-func validateTrustedPathACL(path string) error {
+func validateTrustedPathACL(path string) error { return inspectPOSIXAccessACL(path, nil) }
+
+// inspectPOSIXAccessACL reads the access ACL of path and judges every named
+// entry except those skip accepts.
+func inspectPOSIXAccessACL(path string, skip func(tag uint16, id uint32) bool) error {
 	buf := make([]byte, 4096)
 	size, err := unix.Lgetxattr(path, posixACLAccessXattr, buf)
 	if err != nil {
@@ -48,14 +52,27 @@ func validateTrustedPathACL(path string) error {
 		}
 		return fmt.Errorf("%s: read POSIX ACL: %w", path, err)
 	}
-	return checkPOSIXAccessACL(path, buf[:size])
+	return checkPOSIXAccessACLFor(path, buf[:size], skip)
 }
 
 // validateStrictPathACL is validateTrustedPathACL on Linux: the POSIX rule
 // has no administrator principals to treat differently.
 func validateStrictPathACL(path string) error { return validateTrustedPathACL(path) }
 
+// validateAccountPathACL is ValidatePathACLForAccount on Linux: a named entry
+// for root or for the account itself adds no authority, so it is not judged.
+func validateAccountPathACL(path string, uid int, _ string) error {
+	return inspectPOSIXAccessACL(path, func(tag uint16, id uint32) bool {
+		return tag == posixACLUser && (id == 0 || (uid >= 0 && int(id) == uid))
+	})
+}
+
 func checkPOSIXAccessACL(path string, data []byte) error {
+	return checkPOSIXAccessACLFor(path, data, nil)
+}
+
+// checkPOSIXAccessACLFor judges every named entry except those skip accepts.
+func checkPOSIXAccessACLFor(path string, data []byte, skip func(tag uint16, id uint32) bool) error {
 	if len(data) < 4 || (len(data)-4)%8 != 0 {
 		return fmt.Errorf("%s: malformed POSIX ACL", path)
 	}
@@ -82,7 +99,7 @@ func checkPOSIXAccessACL(path string, data []byte) error {
 		}
 	}
 	for _, e := range named {
-		if e.perm&posixACLWrite == 0 || !maskWrite {
+		if e.perm&posixACLWrite == 0 || !maskWrite || (skip != nil && skip(e.tag, e.id)) {
 			continue
 		}
 		kind := "user"
