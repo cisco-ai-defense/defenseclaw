@@ -571,8 +571,8 @@ func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubjec
 	if subject != nil && subject.tokenGroupsCause != "" {
 		why = append(why, subject.tokenGroupsCause)
 	}
-	return identityRefusalPrefix + strings.Join(why, "; ") +
-		"; run `" + set.profileExplainCommand(subject, connectorName, agent, slices.Contains(facts, "agent:unknown")) + "`" + set.profileExplainPrompt() + identityRefusalTail
+	return issueIdentityRefusal(identityRefusalPrefix + strings.Join(why, "; ") +
+		"; run `" + set.profileExplainCommand(subject, connectorName, agent, slices.Contains(facts, "agent:unknown")) + "`" + set.profileExplainPrompt() + identityRefusalTail)
 }
 
 // explainOnRequestPaths is explain's decision for connectorName's requests:
@@ -677,14 +677,11 @@ func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, c
 			command = managed.WindowsAdminCommand("enterprise", "windows", "profile-explain", "--user", user)
 		}
 	}
-	return command + profileCommandSuffix(connectorName, agent, agentNeeded)
+	return command + set.profileCommandSuffix(connectorName, agent, agentNeeded)
 }
 
 // The explain command of each platform up to its --user argument, and the
-// placeholder for an account without a verified ID. They are the one source
-// of the producer above and of the display recognizer
-// (trustedIdentityExplainCommand): a variable part of the command is only
-// ever a value that passes the matching predicate below.
+// placeholder for an account without a verified ID.
 const (
 	profileExplainList            = "defenseclaw guardrail profile list"
 	profileExplainOSS             = "defenseclaw guardrail profile explain"
@@ -694,11 +691,12 @@ const (
 )
 
 // profileCommandSuffix is the --connector and --agent arguments of an
-// explain command: a connector the build ships and the verified agent ID,
-// never another value.
-func profileCommandSuffix(connectorName, agent string, agentNeeded bool) string {
+// explain command: a connector the build ships or the configuration names
+// (explain without it cannot check the hook and inspect paths of that
+// connector) and the verified agent ID, never another value.
+func (set *guardrailProfileSet) profileCommandSuffix(connectorName, agent string, agentNeeded bool) string {
 	suffix := ""
-	if profileCommandConnector(connectorName) {
+	if set.profileCommandConnector(connectorName) {
 		suffix += " --connector " + connectorName
 	}
 	if agentNeeded && profileCommandAgent(agent) {
@@ -712,9 +710,23 @@ func profileCommandUser(id string) bool {
 	return id == strings.TrimSpace(id) && useridentity.KindForID(id) != ""
 }
 
-// profileCommandConnector reports a connector name the build ships.
-func profileCommandConnector(name string) bool {
-	return connector.IsKnownBuiltinConnector(name)
+// profileCommandConnector reports a connector name the build ships or the
+// configuration lists, spelled as a plain token.
+func (set *guardrailProfileSet) profileCommandConnector(name string) bool {
+	return profileCommandToken(name) && (connector.IsKnownBuiltinConnector(name) || set.knownConnector(name))
+}
+
+func profileCommandToken(value string) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // profileCommandAgent reports an agent ID as agentidentity derives it:
