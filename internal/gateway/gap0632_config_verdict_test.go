@@ -97,8 +97,10 @@ func TestGAP0632GuardrailOnlyThresholdsFollowTheFallback(t *testing.T) {
 
 // GAP-0632: the config-load check reads the pack the way the gateway loads
 // it: a folder with no files, a pack with a malformed component and a pack
-// whose files do not hash to the pin each are one config error, the built-in
-// fallback pack and a strict (closed) hook tier, whatever the pin string.
+// whose files do not hash to the pin each are one config error and a strict
+// (closed) hook tier, whatever the pin string. The first two load the built-in
+// fallback pack; a stale pin is an integrity refusal instead: the entry stays
+// the selected pack and the gateway refuses it.
 func TestGAP0632InvalidContentIsConfigErrorAndBuiltinFallback(t *testing.T) {
 	policies := filepath.Dir(guardrailPoliciesRoot(t))
 	for _, variant := range []string{"empty folder", "invalid component", "wrong pin"} {
@@ -131,8 +133,16 @@ func TestGAP0632InvalidContentIsConfigErrorAndBuiltinFallback(t *testing.T) {
 			if problems := cfg.CustomRulePackErrors(); len(problems) != 1 || !strings.Contains(problems[0].Error(), "guardrail.custom_packs.operator") {
 				t.Errorf("config errors = %v, want one naming the entry", problems)
 			}
-			if got := cfg.BuiltinRulePackFor("operator"); got != "default" {
-				t.Errorf("fallback = %q, want default", got)
+			stale := variant == "wrong pin"
+			if stale != config.IsStalePinError(cfg.CustomRulePackError("operator")) {
+				t.Errorf("config error %v: stale pin = %v, want %v", cfg.CustomRulePackError("operator"), !stale, stale)
+			}
+			wantFallback := "default"
+			if stale {
+				wantFallback = ""
+			}
+			if got := cfg.BuiltinRulePackFor("operator"); got != wantFallback {
+				t.Errorf("fallback = %q, want %q", got, wantFallback)
 			}
 			if got := cfg.HookPolicyTierForConnector("codex"); got != config.HookPolicyTierStrict {
 				t.Errorf("tier = %q, want strict", got)
@@ -141,6 +151,15 @@ func TestGAP0632InvalidContentIsConfigErrorAndBuiltinFallback(t *testing.T) {
 				t.Errorf("outage mode = %q, want closed", got)
 			}
 			loaded, err := loadGlobalRulePack(guardrail.NewRulePackCache(), cfg, "config")
+			if stale {
+				if err == nil || !strings.Contains(err.Error(), "custom_packs pin") {
+					t.Errorf("gateway load of a stale pin = %v, want the digest refusal", err)
+				}
+				if err := CheckRulePacks(cfg); err == nil {
+					t.Error("the writer check accepted a stale pin")
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("gateway load = %v, want the built-in fallback", err)
 			}

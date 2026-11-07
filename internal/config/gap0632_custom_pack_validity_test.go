@@ -43,10 +43,11 @@ func TestGAP0632ValidatorVerdictIsTheConfigError(t *testing.T) {
 		name, pin string
 		validate  RulePackValidator
 		wantErr   string
+		stale     bool
 	}{
 		{name: "loader refuses the pack", pin: files, validate: func(string) (string, string, error) { return "", "", errors.New("bad component") }, wantErr: "not a valid rule pack"},
-		{name: "pin does not match the files", pin: "sha256:" + strings.Repeat("2", 64), validate: func(string) (string, string, error) { return files, "strict", nil }, wantErr: "does not match guardrail.custom_packs.operator.digest"},
-		{name: "no pin", pin: " ", validate: func(string) (string, string, error) { return files, "strict", nil }, wantErr: "does not match guardrail.custom_packs.operator.digest"},
+		{name: "pin does not match the files", pin: "sha256:" + strings.Repeat("2", 64), validate: func(string) (string, string, error) { return files, "strict", nil }, wantErr: "does not match guardrail.custom_packs.operator.digest", stale: true},
+		{name: "no pin", pin: " ", validate: func(string) (string, string, error) { return files, "strict", nil }, wantErr: "does not match guardrail.custom_packs.operator.digest", stale: true},
 		{name: "usable", pin: strings.ToUpper(files), validate: func(string) (string, string, error) { return files, "permissive", nil }},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -67,8 +68,23 @@ func TestGAP0632ValidatorVerdictIsTheConfigError(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), row.wantErr) {
 				t.Fatalf("config error = %v, want %q", err, row.wantErr)
 			}
-			if got := cfg.BuiltinRulePackFor("operator"); got != "default" {
-				t.Errorf("fallback = %q, want default", got)
+			// A stale or missing pin is an integrity refusal: the entry stays the
+			// selected pack (the gateway refuses it) and nothing is enforced in
+			// its place. Every other error loads the built-in fallback.
+			wantFallback := "default"
+			if row.stale {
+				wantFallback = ""
+				if !IsStalePinError(err) {
+					t.Errorf("config error %v is not a stale pin", err)
+				}
+				if _, usable := cfg.UsableCustomRulePack("operator"); !usable {
+					t.Error("a stale pin must keep the entry as the selected pack")
+				}
+			} else if IsStalePinError(err) {
+				t.Errorf("config error %v must not be a stale pin", err)
+			}
+			if got := cfg.BuiltinRulePackFor("operator"); got != wantFallback {
+				t.Errorf("fallback = %q, want %q", got, wantFallback)
 			}
 			if got := cfg.EffectiveHookOutageFailModeForConnector("codex"); got != "closed" {
 				t.Errorf("outage mode = %q, want closed", got)
