@@ -30,17 +30,22 @@ func TestGAP0694GatewayExecutableNameNamesWindowsGateway(t *testing.T) {
 }
 
 func TestGAP0705ForegroundLaunchHomeFollowsDefaultDataPath(t *testing.T) {
+	// An absolute path is OS-specific: /home/account is relative on Windows.
+	// The fixture is rooted in the temp dir, which is absolute on every OS.
+	account := filepath.Join(t.TempDir(), "account")
+	gatewayHome := filepath.Join(account, "gateway home")
+	other := filepath.Join(t.TempDir(), "other")
 	for _, tc := range []struct {
 		name string
 		env  []string
 		want string
 	}{
-		{"explicit", []string{"HOME=/home/account", "DEFENSECLAW_HOME=/home/account/gateway home"}, "/home/account/gateway home"},
-		{"default", []string{"PATH=/usr/bin", "HOME=/home/account"}, filepath.Join("/home/account", config.DefaultDataDirName)},
-		{"empty override", []string{"DEFENSECLAW_HOME=", "HOME=/home/account"}, filepath.Join("/home/account", config.DefaultDataDirName)},
-		{"duplicate home", []string{"HOME=/home/account", "HOME=/home/other"}, ""},
-		{"duplicate override", []string{"DEFENSECLAW_HOME=/a", "DEFENSECLAW_HOME=/a"}, ""},
-		{"relative override", []string{"DEFENSECLAW_HOME=relative", "HOME=/home/account"}, ""},
+		{"explicit", []string{"HOME=" + account, "DEFENSECLAW_HOME=" + gatewayHome}, gatewayHome},
+		{"default", []string{"PATH=/usr/bin", "HOME=" + account}, filepath.Join(account, config.DefaultDataDirName)},
+		{"empty override", []string{"DEFENSECLAW_HOME=", "HOME=" + account}, filepath.Join(account, config.DefaultDataDirName)},
+		{"duplicate home", []string{"HOME=" + account, "HOME=" + other}, ""},
+		{"duplicate override", []string{"DEFENSECLAW_HOME=" + other, "DEFENSECLAW_HOME=" + other}, ""},
+		{"relative override", []string{"DEFENSECLAW_HOME=relative", "HOME=" + account}, ""},
 		{"relative home", []string{"HOME=relative"}, ""},
 		{"no home", []string{"PATH=/usr/bin"}, ""},
 	} {
