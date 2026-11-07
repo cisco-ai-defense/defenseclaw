@@ -6,89 +6,65 @@ package gateway
 import (
 	"encoding/json"
 	"strings"
-	"unicode"
 )
 
-// GAP-0644: a block reference counts only where the block put it, in the
-// content of the blocked tool call result, read at the place each provider
-// request carries that content, and only in the result of the blocked call.
-// The same token in a user message, an assistant message, a system prompt, a
-// call id, a tool definition or any other field of a model request names no
-// result and takes no notice; so does a result of another call that happens
-// to carry it. The body is decoded first, so a JSON escape cannot hide a
-// reference.
+// GAP-0644: a block notice is keyed by the call id of the blocked call and by
+// nothing else. The request body is decoded, and the id is read only from the
+// id field of a tool-result message at the place each provider request carries
+// it. The same token in a user message, an assistant message, a system prompt,
+// a tool definition, the content of any result or any other field names no
+// result and takes no notice.
 
-// openClawToolResult is one tool result of a model request: the call id the
-// provider carries on it (empty when the provider has none), the tool name it
-// carries (empty when the provider has none), and the strings of its content
-// that contain the searched text.
-type openClawToolResult struct {
-	id, name string
-	texts    []string
-}
-
-// toolResults returns the tool results of the request body whose content
-// contains sub. A body that is not a JSON object has no tool result.
-func toolResults(body []byte, sub string) []openClawToolResult {
+// toolResultIDs returns the call id of every tool-result message of the
+// request body. A body that is not a JSON object has none, and a result that
+// carries no id (Ollama, Gemini without ids, the legacy function role) adds
+// none.
+func toolResultIDs(body []byte) []string {
 	var root map[string]any
 	if err := json.Unmarshal(body, &root); err != nil {
 		return nil
 	}
-	var out []openClawToolResult
-	add := func(id, name string, content any) {
-		var texts []string
-		collectResultStrings(content, sub, &texts)
-		if len(texts) > 0 {
-			out = append(out, openClawToolResult{id: strings.TrimSpace(id), name: strings.TrimSpace(name), texts: texts})
+	var ids []string
+	add := func(v any) {
+		if id, _ := v.(string); id != "" {
+			ids = append(ids, id)
 		}
 	}
 
 	// Chat Completions, Ollama, Anthropic Messages and Bedrock Converse:
-	// messages[]. A tool or function message carries the result in content
-	// (Chat: tool_call_id; Ollama: tool_name; legacy function role: name); an
-	// Anthropic tool_result or Bedrock toolResult part inside the content array
-	// carries it in its own content, with tool_use_id / toolUseId.
+	// messages[]. A tool message carries the id in tool_call_id; an Anthropic
+	// tool_result part inside the content array carries it in tool_use_id and
+	// a Bedrock toolResult part in toolUseId.
 	for _, msg := range objectItems(root["messages"]) {
 		if role, _ := msg["role"].(string); isToolRole(role) {
-			name := resultString(msg["tool_name"], msg["name"])
-			add(resultString(msg["tool_call_id"]), name, msg["content"])
+			add(msg["tool_call_id"])
 		}
 		for _, part := range objectItems(msg["content"]) {
 			if typ, _ := part["type"].(string); strings.EqualFold(strings.TrimSpace(typ), "tool_result") {
-				add(resultString(part["tool_use_id"]), "", part["content"])
+				add(part["tool_use_id"])
 			}
 			if res, ok := part["toolResult"].(map[string]any); ok {
-				add(resultString(res["toolUseId"]), "", res["content"])
+				add(res["toolUseId"])
 			}
 		}
 	}
-	// Responses: input[] items of a tool call output carry it in output.
+	// Responses: input[] items of a tool call output carry it in call_id.
 	for _, item := range objectItems(root["input"]) {
 		if typ, _ := item["type"].(string); strings.HasSuffix(strings.ToLower(strings.TrimSpace(typ)), "_call_output") {
-			add(resultString(item["call_id"]), "", item["output"])
+			add(item["call_id"])
 		}
 	}
-	// Gemini: contents[].parts[].functionResponse.response, with the call id
-	// when the request has one, else the function name.
+	// Gemini: contents[].parts[].functionResponse.id, when the request has one.
 	for _, content := range objectItems(root["contents"]) {
 		for _, part := range objectItems(content["parts"]) {
 			for _, key := range []string{"functionResponse", "function_response"} {
 				if fr, ok := part[key].(map[string]any); ok {
-					add(resultString(fr["id"]), resultString(fr["name"]), fr["response"])
+					add(fr["id"])
 				}
 			}
 		}
 	}
-	return out
-}
-
-func resultString(vs ...any) string {
-	for _, v := range vs {
-		if s, _ := v.(string); strings.TrimSpace(s) != "" {
-			return s
-		}
-	}
-	return ""
+	return ids
 }
 
 func isToolRole(role string) bool {
@@ -111,107 +87,16 @@ func objectItems(v any) []map[string]any {
 	return out
 }
 
-// collectResultStrings gathers every string beneath a tool result content
-// value (a string, an array of parts, a structured response) that contains sub.
-func collectResultStrings(v any, sub string, out *[]string) {
-	switch x := v.(type) {
-	case string:
-		if strings.Contains(x, sub) {
-			*out = append(*out, x)
-		}
-	case []any:
-		for _, e := range x {
-			collectResultStrings(e, sub, out)
-		}
-	case map[string]any:
-		for _, e := range x {
-			collectResultStrings(e, sub, out)
-		}
-	}
-}
-
-// openClawBlockReasonMark and openClawBlockRefTag are the shape the OpenClaw
-// plugin gives the text of a blocked tool call result: "DefenseClaw: <reason>
-// (ref <ref>)" (extensions/defenseclaw/src/index.ts, blockReason). A result
-// that holds the reference in that shape is the block text itself, not a tool
-// output that happens to repeat the reference.
-const (
-	openClawBlockReasonMark = "DefenseClaw: "
-	openClawBlockRefTag     = " (ref "
-)
-
-// openClawCallIDForms returns the ids a provider request names for the call
-// OpenClaw knows as id, by the rewrites that depend on the id alone: the id
-// itself, the part before "|" (OpenClaw Responses ids are "<call id>|<item
-// id>"), characters outside letters, digits, "_" and "-" replaced by "_", and
-// letters and digits only. A rewrite that does not depend on the id alone
-// (the nine and forty character caps of the strict replay modes, the new id a
-// repeated call id receives) cannot be listed; the block text decides those
-// results (see claims).
-func openClawCallIDForms(id string) []string {
-	id = strings.TrimSpace(id)
-	if i := strings.Index(id, "|"); i >= 0 {
-		id = id[:i]
-	}
-	if id == "" {
-		return nil
-	}
-	var kept, alnum strings.Builder
-	for _, r := range id {
-		switch {
-		case r < unicode.MaxASCII && (unicode.IsLetter(r) || unicode.IsDigit(r)):
-			kept.WriteRune(r)
-			alnum.WriteRune(r)
-		case r == '_' || r == '-':
-			kept.WriteRune(r)
-		default:
-			kept.WriteByte('_')
-		}
-	}
-	return []string{id, kept.String(), alnum.String()}
-}
-
-// isBlockText reports whether one of the strings is the text a block put in
-// its tool result: the plugin block reason mark, then the reference tag with
-// this notice reference.
-func (n openClawBlockNotice) isBlockText(texts []string) bool {
-	for _, t := range texts {
-		if i := strings.Index(t, openClawBlockReasonMark); i >= 0 &&
-			strings.Contains(t[i+len(openClawBlockReasonMark):], openClawBlockRefTag+n.ref+")") {
+// isResultOfAny reports whether one of the result ids is the id of the call
+// this notice was recorded for. OpenClaw Responses ids are "<call id>|<item
+// id>" and the Responses request sends back the part before "|", so that part
+// is the same id; every other difference is a different or an unknown call.
+func (n openClawBlockNotice) isResultOfAny(ids []string) bool {
+	head, _, _ := strings.Cut(n.callID, "|")
+	for _, id := range ids {
+		if id == n.callID || (head != "" && id == head) {
 			return true
 		}
 	}
 	return false
-}
-
-// claims reports whether the tool result is the result of the call this notice
-// was issued for. The reference must be in the result (the caller searched
-// for it); on top of that the result must belong to the blocked call:
-//   - a result whose call id is the recorded id, or a rewrite of it that
-//     depends on the id alone, belongs to it;
-//   - any other result belongs to it only when it holds the block text: the
-//     reference in the shape the block wrote it. OpenClaw replay rewrites call
-//     ids in ways the recorded id cannot predict (a cap of nine or forty
-//     characters, a new id for a repeated call id), so an unlisted id is no
-//     evidence against the call, and a mere echo of the reference is no
-//     evidence for it. A result with no call id (Ollama, Gemini without ids)
-//     must also name the tool of the blocked call; one that names no tool
-//     matches nothing.
-//
-// When the result cannot be tied to the block, the notice stays unclaimed: it
-// is a UX line, so showing nothing is the safe outcome.
-func (n openClawBlockNotice) claims(r openClawToolResult) bool {
-	if !textsContain(r.texts, n.ref) {
-		return false
-	}
-	if r.id != "" {
-		for _, f := range openClawCallIDForms(n.callID) {
-			if f == r.id {
-				return true
-			}
-		}
-	} else if r.name == "" || r.name != n.tool {
-		return false
-	}
-	return n.isBlockText(r.texts)
 }

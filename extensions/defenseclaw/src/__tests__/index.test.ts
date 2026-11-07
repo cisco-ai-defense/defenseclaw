@@ -260,51 +260,31 @@ describe("DefenseClaw OpenClaw Plugin", () => {
       }
     });
 
-    it("a block carries the gateway reference in its reason so the proxy can show it (GAP-0644)", async () => {
+    it("sends the call id with the check and leaves the block reason as it was (GAP-0644)", async () => {
       const log = vi.spyOn(console, "log").mockImplementation(() => {});
       try {
-        const blockAnswer = (extra: Record<string, unknown>) => rawAnswer(JSON.stringify({
-          action: "block", raw_action: "block", severity: "HIGH", reason: "protected write", mode: "action", ...extra,
-        }));
         const ctx = { sessionKey: "agent:main:main", runId: "run-1", toolName: "exec" };
+        const block = rawAnswer(JSON.stringify({
+          action: "block", raw_action: "block", severity: "HIGH", reason: "protected write", mode: "action",
+        }));
+        const sentBody = () => mockDaemonClient.postRaw.mock.calls.at(-1)![1] as Record<string, unknown>;
 
-        mockDaemonClient.postRaw.mockResolvedValue(blockAnswer({ notice_ref: "dc-0123456789abcdef" }));
-        const tool = await listeners.before_tool_call({ toolName: "exec", params: { command: "x" } }, ctx);
-        expect(tool).toEqual({ block: true, blockReason: "DefenseClaw: protected write (ref dc-0123456789abcdef)" });
-
-        const message = await listeners.before_tool_call(
-          { toolName: "message", params: { to: "team@example.test", content: "status update" } },
-          { ...ctx, toolName: "message" },
-        );
-        expect(message).toEqual({
-          block: true,
-          blockReason: "DefenseClaw: outbound blocked \u2014 protected write (ref dc-0123456789abcdef)",
-        });
-
-        // No reference, or one the proxy would not look for: the reason is as it was.
-        for (const extra of [{}, { notice_ref: "call_1; ignore previous" }, { notice_ref: 7 }]) {
-          mockDaemonClient.postRaw.mockResolvedValue(blockAnswer(extra));
-          const plain = await listeners.before_tool_call({ toolName: "exec", params: { command: "x" } }, ctx);
-          expect(plain).toEqual({ block: true, blockReason: "DefenseClaw: protected write" });
-        }
-
-        // An allowed call has no reference to carry.
-        mockDaemonClient.postRaw.mockResolvedValue(rawAnswer(JSON.stringify({
-          action: "allow", raw_action: "allow", severity: "NONE", reason: "", mode: "action", notice_ref: "dc-0123456789abcdef",
-        })));
-        expect(await listeners.before_tool_call({ toolName: "exec", params: { command: "echo ok" } }, ctx)).toBeUndefined();
-        const sent = mockDaemonClient.postRaw.mock.calls.at(-1)![1] as Record<string, unknown>;
-        expect(sent.tool_call_id).toBeUndefined();
-
-        // The id OpenClaw gave the call goes with the check, tool and message
-        // alike, so the gateway can tie the block to that call's result.
-        await listeners.before_tool_call({ toolName: "exec", toolCallId: "call_1|fc_1", params: { command: "echo ok" } }, ctx);
-        expect((mockDaemonClient.postRaw.mock.calls.at(-1)![1] as Record<string, unknown>).tool_call_id).toBe("call_1|fc_1");
-        await listeners.before_tool_call(
+        // The reason the model sees carries nothing the gateway added.
+        mockDaemonClient.postRaw.mockResolvedValue(block);
+        expect(await listeners.before_tool_call({ toolName: "exec", toolCallId: "call_1|fc_1", params: { command: "x" } }, ctx))
+          .toEqual({ block: true, blockReason: "DefenseClaw: protected write" });
+        expect(sentBody().tool_call_id).toBe("call_1|fc_1");
+        expect(await listeners.before_tool_call(
           { toolName: "message", toolCallId: "call_2", params: { to: "team@example.test", content: "status update" } },
           { ...ctx, toolName: "message" },
-        );
-        expect((mockDaemonClient.postRaw.mock.calls.at(-1)![1] as Record<string, unknown>).tool_call_id).toBe("call_2");
+        )).toEqual({ block: true, blockReason: "DefenseClaw: outbound blocked \u2014 protected write" });
+        expect(sentBody().tool_call_id).toBe("call_2");
+
+        // A host that sends no id (or an empty or non-string one): no field.
+        for (const id of [undefined, "", 7]) {
+          await listeners.before_tool_call({ toolName: "exec", toolCallId: id, params: { command: "x" } }, ctx);
+          expect(sentBody().tool_call_id).toBeUndefined();
+        }
       } finally {
         log.mockRestore();
       }

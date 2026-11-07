@@ -89,22 +89,11 @@ type InspectVerdict = {
   reason: string;
   mode: "action" | "observe";
   approval_timeout_ms?: number;
-  // Reference of an enforced block; the block reason carries it so the proxy
-  // can show the block on the model reply that follows (GAP-0644).
-  notice_ref?: string;
 };
 
-// blockNoticeSuffix is the reference the gateway issued for this block, in the
-// shape the proxy looks for in the tool result. Nothing when the gateway
-// issued none.
-const NOTICE_REF = /^dc-[0-9a-f]{16}$/;
-function blockNoticeSuffix(verdict: InspectVerdict): string {
-  const ref = verdict.notice_ref;
-  return typeof ref === "string" && NOTICE_REF.test(ref) ? ` (ref ${ref})` : "";
-}
-
-// toolCallIdOf is the id OpenClaw gave this call, which the gateway ties the
-// block notice to; empty when the host sent none.
+// toolCallIdOf is the id OpenClaw gave this call. The gateway keys the block
+// notice shown on the next model reply by it (GAP-0644); empty when the host
+// sent none.
 function toolCallIdOf(event: { toolCallId?: unknown }): { tool_call_id?: string } {
   const id = event.toolCallId;
   return typeof id === "string" && id !== "" ? { tool_call_id: id } : {};
@@ -523,10 +512,7 @@ export default function (api: DefenseClawPluginHost) {
       logInspectWarning("message", verdict);
 
       if (verdict.action === "block" && verdict.mode === "action") {
-        return {
-          block: true,
-          blockReason: `DefenseClaw: outbound blocked — ${verdict.reason}${blockNoticeSuffix(verdict)}`,
-        };
+        return { block: true, blockReason: `DefenseClaw: outbound blocked — ${verdict.reason}` };
       }
       if (verdict.action === "confirm" && verdict.mode === "action") {
         return buildApprovalRequest("outbound message", verdict);
@@ -549,7 +535,7 @@ export default function (api: DefenseClawPluginHost) {
     logInspectWarning(event.toolName, verdict);
 
     if (verdict.action === "block" && verdict.mode === "action") {
-      return { block: true, blockReason: `DefenseClaw: ${verdict.reason}${blockNoticeSuffix(verdict)}` };
+      return { block: true, blockReason: `DefenseClaw: ${verdict.reason}` };
     }
     if (verdict.action === "confirm" && verdict.mode === "action") {
       return buildApprovalRequest(event.toolName, verdict);
