@@ -212,14 +212,6 @@ func TestGAP0632PinnedPackIdentityKeepsStateProtection(t *testing.T) {
 }
 
 func TestGAP0632StateProtectionSurvivesRulePackRemoval(t *testing.T) {
-	home := t.TempDir()
-	state := filepath.Join(home, ".defenseclaw", "config.yaml")
-	if err := os.MkdirAll(filepath.Dir(state), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(state, []byte("guardrail: {}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	categories := cloneRuleCategories(defaultRuleCategories())
 	for index := range categories {
 		categories[index].Rules = slices.DeleteFunc(categories[index].Rules, func(rule PatternRule) bool {
@@ -227,12 +219,24 @@ func TestGAP0632StateProtectionSurvivesRulePackRemoval(t *testing.T) {
 		})
 	}
 	generation := mustCompileRulePackGeneration(categories)
-	findings := dispatchTrustedAction(context.Background(), trustedActionRequest{
-		Input:     actionfacts.Input{Tool: "Bash", Command: "echo marker > " + state, CWD: home, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX},
-		Connector: "codex", EnforcementCapable: true, generation: generation,
-	})
-	if finding := findingWithID(findings, "tamper.detector_state_write"); finding == nil || !finding.contributesToEnforcement() {
-		t.Fatalf("state protection missing after pack rule removal: %v", FindingStrings(findings))
+	for _, homeName := range []string{"home", "home with space"} {
+		t.Run(homeName, func(t *testing.T) {
+			home := filepath.Join(t.TempDir(), homeName)
+			state := filepath.Join(home, ".defenseclaw", "config.yaml")
+			if err := os.MkdirAll(filepath.Dir(state), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(state, []byte("guardrail: {}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			findings := dispatchTrustedAction(context.Background(), trustedActionRequest{
+				Input:     actionfacts.Input{Tool: "Bash", Command: "echo marker > " + posixShellOperand(state), CWD: home, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX},
+				Connector: "codex", EnforcementCapable: true, generation: generation,
+			})
+			if finding := findingWithID(findings, "tamper.detector_state_write"); finding == nil || !finding.contributesToEnforcement() {
+				t.Fatalf("state protection missing after pack rule removal: %v", FindingStrings(findings))
+			}
+		})
 	}
 }
 
