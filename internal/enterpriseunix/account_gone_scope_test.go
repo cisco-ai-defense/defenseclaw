@@ -251,6 +251,41 @@ func TestUnclearHomeHoldersLeaveStatusAndVerifyPending(t *testing.T) {
 	}
 }
 
+// An unclear read of who holds a home is pending even where a recorded
+// account is live there: the live account does not prove the home has no
+// other holder. The live account keeps its own check (its home stays in
+// scope), and the benign twin, a clear read of no other holder, reports
+// nothing.
+func TestUnclearHomeReadBesideARecordedLiveAccountIsPending(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	writeHostFile(t, h, enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath),
+		`{"version":1,"accounts":[{"user":"old","uid":501,"home":"/home/shared"},{"user":"live","uid":502,"home":"/home/shared"}]}`)
+	cfg := &config.Config{}
+	cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"copilot": {}}
+	cfg.Enterprise.Enrollment.ExcludeUsers = []string{"old"}
+	shared := h.env.P("/home/shared")
+	scopeOf := func() copilotHomeScope {
+		scope, err := (&policyManager{env: h.env}).copilotAccountScope(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return scope
+	}
+	stubAccountsGone(t, "old")
+	clear := scopeOf()
+	if len(clear.unclear) != 0 || !reflect.DeepEqual(slices.Compact(clear.scoped), []string{shared}) {
+		t.Fatalf("a clear read: scoped=%v unclear=%v", clear.scoped, clear.unclear)
+	}
+	guardianAccountsAtHome = func(string) ([]unixidentity.HomeAccount, error) { return nil, errors.New("unclear plist") }
+	unclear := scopeOf()
+	if !reflect.DeepEqual(unclear.unclear, []string{shared}) {
+		t.Fatalf("an unclear read beside a recorded live account is pending: unclear=%v", unclear.unclear)
+	}
+	if !reflect.DeepEqual(slices.Compact(unclear.scoped), []string{shared}) || len(unclear.outOfScope) != 0 {
+		t.Fatalf("the recorded live account keeps its own check: scoped=%v out=%v", unclear.scoped, unclear.outOfScope)
+	}
+}
+
 // A home is scoped by the account that holds it now, not by the deleted one
 // the record still names (GAP-0777 review 3): the replacement is judged by
 // its own uid and name, whether enrollment excludes it, and whether the
