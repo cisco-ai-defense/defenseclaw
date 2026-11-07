@@ -6,6 +6,7 @@
 package sandboxauth
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -37,7 +38,7 @@ func TestDefaultBindingBoundHoldsEveryCallTheRateAdmits(t *testing.T) {
 						_, err = l.Acquire(b, RouteHook)
 					}
 					if err != nil {
-						if err != ErrRateLimited {
+						if !errors.Is(err, ErrRateLimited) {
 							t.Fatalf("call %d after %v: %v, want the rate to be the only limit", open+1, at, err)
 						}
 						break

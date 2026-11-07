@@ -32,6 +32,39 @@ var (
 	ErrTooManyInFlight = errors.New("sandboxauth: too many concurrent sandbox requests")
 )
 
+// Limit names the bucket or cap that refused a request.
+type Limit int
+
+const (
+	// LimitHook is a binding's hook, notify and inspect bucket or slots.
+	LimitHook Limit = iota
+	// LimitReceipt is a binding's delivery-receipt bucket or slots.
+	LimitReceipt
+	// LimitTelemetry is a binding's OTLP bucket or slots.
+	LimitTelemetry
+	// LimitTelemetryTotal is the OTLP concurrency cap shared by all bindings.
+	LimitTelemetryTotal
+)
+
+// LimitError is what the limiter returns for a refusal: it matches
+// ErrRateLimited or ErrTooManyInFlight with errors.Is and carries the limit
+// that was in force for that binding and bucket (its override, when it has
+// one), so a caller can tell the user the real number.
+type LimitError struct {
+	// Kind is ErrRateLimited or ErrTooManyInFlight.
+	Kind error
+	// Limit is the bucket or cap that refused.
+	Limit Limit
+	// RPS and Burst are the bucket's rate and burst (ErrRateLimited).
+	RPS   float64
+	Burst int
+	// MaxInFlight is the concurrency cap (ErrTooManyInFlight).
+	MaxInFlight int
+}
+
+func (e *LimitError) Error() string { return e.Kind.Error() }
+func (e *LimitError) Unwrap() error { return e.Kind }
+
 // LimiterConfig holds the per-binding defaults. A binding's RateLimit
 // overrides the hook-bucket rate, burst and concurrency.
 //
@@ -123,6 +156,10 @@ type limiterEntry struct {
 	receipt *rate.Limiter
 	slots   *limiterSlots
 	maxIn   int
+	// hookRPS and hookBurst are the effective hook and receipt bucket
+	// values (the binding's override, else the defaults), for refusals.
+	hookRPS   float64
+	hookBurst int
 	// override is the RateLimit the buckets were built from; a changed
 	// binding override rebuilds them.
 	override RateLimit
@@ -204,12 +241,12 @@ func (l *Limiter) ChargeHookBody(b Binding, receipt bool) error {
 	l.sweepLocked(now)
 	entry := l.entryLocked(b, now)
 	entry.lastSeen = now
-	bucket := entry.hook
+	bucket, limit := entry.hook, LimitHook
 	if receipt {
-		bucket = entry.receipt
+		bucket, limit = entry.receipt, LimitReceipt
 	}
 	if !bucket.AllowN(now, 1) {
-		return ErrRateLimited
+		return entry.rateRefusal(limit, l.cfg)
 	}
 	return nil
 }
@@ -232,23 +269,26 @@ func (l *Limiter) acquire(b Binding, class limiterClass) (release func(), err er
 	entry := l.entryLocked(b, now)
 	entry.lastSeen = now
 	slots := entry.slots
-	bucket, held := entry.hook, &slots.hook
+	bucket, held, limit := entry.hook, &slots.hook, LimitHook
 	switch class {
 	case limiterOTLP:
-		if slots.otlp >= l.cfg.OTLPMaxInFlight || l.otlpTotal >= l.cfg.OTLPMaxInFlightTotal {
-			return nil, ErrTooManyInFlight
+		if slots.otlp >= l.cfg.OTLPMaxInFlight {
+			return nil, &LimitError{Kind: ErrTooManyInFlight, Limit: LimitTelemetry, MaxInFlight: l.cfg.OTLPMaxInFlight}
 		}
-		bucket, held = entry.otlp, &slots.otlp
+		if l.otlpTotal >= l.cfg.OTLPMaxInFlightTotal {
+			return nil, &LimitError{Kind: ErrTooManyInFlight, Limit: LimitTelemetryTotal, MaxInFlight: l.cfg.OTLPMaxInFlightTotal}
+		}
+		bucket, held, limit = entry.otlp, &slots.otlp, LimitTelemetry
 	case limiterReceipt:
-		bucket, held = entry.receipt, &slots.receipt
+		bucket, held, limit = entry.receipt, &slots.receipt, LimitReceipt
 	case limiterPendingHook:
 		held = &slots.pending
 	}
 	if class != limiterOTLP && *held >= entry.maxIn {
-		return nil, ErrTooManyInFlight
+		return nil, &LimitError{Kind: ErrTooManyInFlight, Limit: limit, MaxInFlight: entry.maxIn}
 	}
 	if class != limiterPendingHook && !bucket.AllowN(now, 1) {
-		return nil, ErrRateLimited
+		return nil, entry.rateRefusal(limit, l.cfg)
 	}
 	*held++
 	if class == limiterOTLP {
@@ -270,6 +310,16 @@ func (l *Limiter) acquire(b Binding, class limiterClass) (release func(), err er
 			l.mu.Unlock()
 		})
 	}, nil
+}
+
+// rateRefusal is the error for a bucket that had no token: the bucket's own
+// rate and burst, as built for this binding.
+func (e *limiterEntry) rateRefusal(limit Limit, cfg LimiterConfig) *LimitError {
+	rps, burst := e.hookRPS, e.hookBurst
+	if limit == LimitTelemetry {
+		rps, burst = cfg.OTLPRPS, cfg.OTLPBurst
+	}
+	return &LimitError{Kind: ErrRateLimited, Limit: limit, RPS: rps, Burst: burst}
 }
 
 // Forget drops a binding's state, e.g. after revoke.
@@ -295,13 +345,15 @@ func (l *Limiter) entryLocked(b Binding, now time.Time) *limiterEntry {
 		maxIn = b.RateLimit.MaxInFlight
 	}
 	next := &limiterEntry{
-		hook:     rate.NewLimiter(rate.Limit(hookRPS), hookBurst),
-		otlp:     rate.NewLimiter(rate.Limit(l.cfg.OTLPRPS), l.cfg.OTLPBurst),
-		receipt:  rate.NewLimiter(rate.Limit(hookRPS), hookBurst),
-		slots:    &limiterSlots{},
-		maxIn:    maxIn,
-		override: b.RateLimit,
-		lastSeen: now,
+		hook:      rate.NewLimiter(rate.Limit(hookRPS), hookBurst),
+		otlp:      rate.NewLimiter(rate.Limit(l.cfg.OTLPRPS), l.cfg.OTLPBurst),
+		receipt:   rate.NewLimiter(rate.Limit(hookRPS), hookBurst),
+		slots:     &limiterSlots{},
+		maxIn:     maxIn,
+		hookRPS:   hookRPS,
+		hookBurst: hookBurst,
+		override:  b.RateLimit,
+		lastSeen:  now,
 	}
 	if ok {
 		// A changed override keeps the requests already admitted so the

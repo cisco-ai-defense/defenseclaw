@@ -71,8 +71,8 @@
     "/usr/local/lib/defenseclaw/hooks/kiro-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 7258,
-      "sha256": "fb2c28944a7e4309ea09cdf555585b46d4af0d6b46e001f5f544ef98a3b7c279"
+      "size": 7427,
+      "sha256": "1c2fb4baefb44905799b5019bd52abdc5891a75ea897ab180d15127e6f2c1249"
     },
     "/usr/local/lib/defenseclaw/kiro/defenseclaw.json": {
       "mode": "-rw-r--r--",
