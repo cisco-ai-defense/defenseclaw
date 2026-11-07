@@ -552,6 +552,21 @@ func dispatchTrustedActionWith(
 				child := request
 				child.Input.Command = simple.Text
 				child.Input.CWD = simple.CWD
+				if simple.AbsoluteOnly {
+					// The shell directory is unknown (an eval, a cd the walk
+					// cannot read) but no operand of the command depends on
+					// it: the directory the action starts in judges it as it
+					// judges the same command written out, so a no-op eval
+					// before a write does not hide the write.
+					child.Input.CWD = request.Input.CWD
+				}
+				if simple.UnboundUser {
+					// A name a read, loop or eval binds is not the login the
+					// home spells. The child keeps the spelling of the path
+					// as the home path it reads, but a file it reaches only
+					// through a link on disk is not a file the command names.
+					child.SkipLocalFilesystemResolution = true
+				}
 				// An earlier cd, pushd or env -C of the action moved a Git
 				// Bash shell to another native Windows directory: the
 				// child's operands resolve there (GAP-2473). The flag stays
@@ -3959,11 +3974,7 @@ func protectedHomePlacedReading(facts actionfacts.Facts, request trustedActionRe
 // placed; a command whose directory changes it cannot place is read whole
 // in its own directory.
 func placedLinkedStateWrite(request trustedActionRequest, text, home string, links hookpaths.Links) bool {
-	statements, placed := hookpaths.TopLevelStatements(text, request.Input.CWD, home)
-	if !placed || len(statements) == 0 {
-		statements = []hookpaths.PlacedStatement{{Command: text, Dir: request.Input.CWD}}
-	}
-	for _, statement := range statements {
+	for _, statement := range hookpaths.PlacedOrWhole(text, request.Input.CWD, home) {
 		input := request.Input
 		input.Args, input.Argv, input.Command, input.CWD = nil, nil, statement.Command, statement.Dir
 		projected := actionfacts.Analyze(input).EnforcementProjection()
@@ -3982,7 +3993,7 @@ func placedLinkedStateWrite(request trustedActionRequest, text, home string, lin
 				return true
 			}
 		}
-		for _, operand := range hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home, hookpaths.ActionKnownUser(text, home)) {
+		for _, operand := range hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home, statement.User) {
 			targets := links.AliasTargets(operand, true)
 			if !request.SkipLocalFilesystemResolution && !request.ProtectedHomeHook {
 				// The linked entry's parent can go on through an existing
@@ -4030,15 +4041,10 @@ func provenFollowedInPlaceStateWrite(facts actionfacts.Facts, request trustedAct
 	if home == "" {
 		return false
 	}
-	statements, placed := hookpaths.TopLevelStatements(text, request.Input.CWD, home)
-	if !placed || len(statements) == 0 {
-		statements = []hookpaths.PlacedStatement{{Command: text, Dir: request.Input.CWD}}
-	}
 	links := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, home)
-	user := hookpaths.ActionKnownUser(text, home)
-	for _, statement := range statements {
-		operands := hookpaths.FollowedInPlaceEditOperands(statement.Command, statement.Dir, home, user)
-		entries := hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home, user)
+	for _, statement := range hookpaths.PlacedOrWhole(text, request.Input.CWD, home) {
+		operands := hookpaths.FollowedInPlaceEditOperands(statement.Command, statement.Dir, home, statement.User)
+		entries := hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home, statement.User)
 		if len(operands) == 0 && len(entries) == 0 {
 			continue
 		}
