@@ -368,9 +368,12 @@ func calledFunctions(file *syntax.File, home string) map[string]bool {
 // filepath.Join would erase a directory link before the following dot-dot.
 func OperandPath(name, cwd string) string {
 	// Keep the old canonical spelling for ordinary operands. Only dot-dot
-	// needs a raw spelling until the component walk has followed links.
-	if !strings.Contains(filepath.ToSlash(name), "/../") &&
-		!strings.HasSuffix(filepath.ToSlash(name), "/..") {
+	// needs a raw spelling until the component walk has followed links: a
+	// dot-dot step at any position, also the first (a leading step is
+	// applied to the supplied directory, which may itself be a link).
+	slashed := filepath.ToSlash(name)
+	if !strings.Contains(slashed, "/../") && !strings.HasSuffix(slashed, "/..") &&
+		slashed != ".." && !strings.HasPrefix(slashed, "../") {
 		if !filepath.IsAbs(name) && filepath.IsAbs(cwd) {
 			return filepath.Join(cwd, name)
 		}
