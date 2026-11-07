@@ -190,6 +190,30 @@ try {
             try { Assert-Healed { Set-DefenseClawPathAcl -Path $path -Kind MachinePolicyFile -GatewayServiceSID $admins } $path "Secure Client with $($entry.Name)" }
             finally { Close-Holder $handle }
         }
+
+        # g582 round 11c twin. Secure Client keeps its stamp of a Codex state
+        # copy, held or not (no tolerance, no refusal), and the recovery
+        # helper that puts the requirements read back before the guardian
+        # starts does nothing there; the standalone profile heals the file.
+        foreach ($entry in $holders) {
+            $path = New-DriftedFile ('.defenseclaw-managed-hooks.state.' + (Get-Random -Minimum 100000 -Maximum 999999))
+            $handle = Open-Holder $path $entry.Access $entry.Share
+            try { Assert-Healed { Set-DefenseClawPathAcl -Path $path -Kind MachinePolicyFile -GatewayServiceSID $admins } $path "Secure Client, state copy held by $($entry.Name)" }
+            finally { Close-Holder $handle }
+        }
+        $requirements = New-DriftedFile 'requirements.toml'
+        $ownership = [IO.Path]::Combine($Scratch, 'codex-requirements-ownership.json')
+        [IO.File]::WriteAllText($ownership, '{}')
+        $recoveryLayout = @{ CodexMachinePolicyPath = $requirements; CodexRequirementsOwnershipPath = $ownership }
+        $before = Get-Sddl $requirements
+        Repair-DefenseClawCodexRequirementsAccessBeforeGuardian -Layout $recoveryLayout -GatewayServiceName 'DefenseClawGateway'
+        if ((Get-Sddl $requirements) -ne $before) { throw 'Secure Client: the recovery helper changed the requirements access list' }
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+        try {
+            Repair-DefenseClawCodexRequirementsAccessBeforeGuardian -Layout $recoveryLayout -GatewayServiceName 'DefenseClawGateway'
+        }
+        finally { Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient }
+        if (-not (Get-Sddl $requirements).Contains(';;;BU)')) { throw 'standalone: the recovery helper did not put the Users read entry back' }
     } $scratch $holderType
     'enterprise-standalone-held-file-restamp-smoke: OK'
 }
