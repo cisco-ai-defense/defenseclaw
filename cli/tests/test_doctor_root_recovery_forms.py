@@ -27,7 +27,10 @@ pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX per-user gateway 
 
 def _chowned(remedy: str) -> list[str]:
     tail = remedy.split('sudo chown -R "$(id -un)" ', 1)[1]
-    return shlex.split(tail.split(" && defenseclaw-gateway start", 1)[0])
+    returned, restore = tail.split(" && chmod -R u+rwX ", 1)
+    # The owner bits are restored on the folders that were returned, no others.
+    assert shlex.split(restore.split(" && defenseclaw-gateway start", 1)[0]) == shlex.split(returned)
+    return shlex.split(returned)
 
 
 def _surfaces(cfg) -> dict[str, str]:

@@ -124,7 +124,13 @@ func TestGAP0711RootGatewayRemedyReturnsInstallHomeAndMovedStore(t *testing.T) {
 		if !ok {
 			t.Fatalf("remedy returns no files: %q", remedy)
 		}
-		dirs, _, _ := strings.Cut(rest, " && defenseclaw-gateway start")
+		dirs, afterChown, ok := strings.Cut(rest, " && chmod -R u+rwX ")
+		if !ok {
+			t.Fatalf("remedy does not restore owner access after the return: %q", remedy)
+		}
+		if restored, _, _ := strings.Cut(afterChown, " && defenseclaw-gateway start"); restored != dirs {
+			t.Fatalf("owner access restored on %q, files returned from %q", restored, dirs)
+		}
 		return dirs
 	}
 	for _, goos := range []string{"linux", "darwin"} {
@@ -194,7 +200,14 @@ func TestGAP0711RootGatewayRemedyResolvesTheStoreLikeTheGateway(t *testing.T) {
 		if !ok {
 			t.Fatalf("remedy returns no files: %q", remedy)
 		}
-		dirs, tail, _ := strings.Cut(rest, " && defenseclaw-gateway start")
+		dirs, afterChown, ok := strings.Cut(rest, " && chmod -R u+rwX ")
+		if !ok {
+			t.Fatalf("remedy does not restore owner access after the return: %q", command)
+		}
+		restored, tail, _ := strings.Cut(afterChown, " && defenseclaw-gateway start")
+		if restored != dirs {
+			t.Fatalf("owner access restored on %q, files returned from %q", restored, dirs)
+		}
 		if tail != "" {
 			t.Fatalf("text follows the chain: %q", tail)
 		}

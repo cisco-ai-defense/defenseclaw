@@ -112,14 +112,14 @@ func NamesGatewayPIDRecord(blocker string) bool {
 }
 
 // pidRecordError marks which PID record failed the identity check, and whether
-// the account could not read it at all, so a caller that explains a refused
-// start can tell a record only an owner change repairs (unreadable) from one
-// that is refused for its own content (malformed, invalid PID, not a regular
-// file), which stays refused after the owner change. The text is the wrapped
-// error unchanged.
+// root refused the account the read, so a caller that explains a refused start
+// can tell a record only an owner change repairs from one that is refused for
+// anything else: its content (malformed, invalid PID, not a regular file), a
+// permission its own account owns (a mode on an account-owned file), or a
+// writer holding it. The text is the wrapped error unchanged.
 type pidRecordError struct {
 	record     string
-	unreadable bool
+	rootDenied bool
 	err        error
 }
 
@@ -128,15 +128,30 @@ func (e *pidRecordError) Unwrap() error { return e.err }
 
 // FailedPIDRecord names the PID record (gateway.pid or watchdog.pid) whose
 // validation produced err, or "" when err does not come from that check.
-// unreadable is true only when the record was refused because this account is
-// not permitted to read it (or to reach it), the one cause that returning the
-// ownership clears.
-func FailedPIDRecord(err error) (record string, unreadable bool) {
+// rootDenied is true only when the record was refused because this account is
+// not permitted to read it (or to reach it) and root owns what refuses it: the
+// one cause that returning the ownership clears. A permission error on a file
+// or folder another account, or this one, owns is an independent failure.
+func FailedPIDRecord(err error) (record string, rootDenied bool) {
 	var rec *pidRecordError
 	if errors.As(err, &rec) {
-		return rec.record, rec.unreadable
+		return rec.record, rec.rootDenied
 	}
 	return "", false
+}
+
+// deniedByRoot reports whether readErr is a permission refusal of path whose
+// cause is owned by root: the file itself, or, when the account cannot even
+// look at the file, the folder that hides it.
+func deniedByRoot(path string, readErr error) bool {
+	if !errors.Is(readErr, fs.ErrPermission) {
+		return false
+	}
+	if info, err := os.Lstat(path); err == nil {
+		return rootOwned(info)
+	}
+	info, err := os.Lstat(filepath.Dir(path))
+	return err == nil && rootOwned(info)
 }
 
 type rootOwnedEntry struct {

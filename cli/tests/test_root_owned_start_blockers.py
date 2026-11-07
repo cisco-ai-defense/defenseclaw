@@ -11,7 +11,9 @@ the files they list (an ordinary user cannot create root-owned ones).
 from __future__ import annotations
 
 import os
+import shlex
 import stat
+import subprocess
 
 import pytest
 from defenseclaw import file_permissions as fp
@@ -124,3 +126,51 @@ def test_an_account_owned_store_has_no_blockers(tmp_path):
 
     assert fp.root_owned_start_blockers(tmp_path, ai_discovery_enabled=True, pid_dir=tmp_path) == ([], [])
     assert fp.root_owned_start_blockers(tmp_path / "missing", ai_discovery_enabled=True) == ([], [])
+
+
+def _local_chain_steps(command: str) -> list[str]:
+    """The printed steps this account can run itself: not sudo, not the start."""
+    return [step for step in command.split(" && ") if not step.startswith("sudo ") and "defenseclaw-gateway start" not in step]
+
+
+def test_chain_restores_owner_access_so_the_files_are_usable(tmp_path, monkeypatch) -> None:
+    """The owner return alone leaves a mode 000 file (or 044, once loosened) unreadable.
+
+    The printed chain restores the owner bits (group and other untouched), then
+    takes group and other access away from the loose one. The steps run for
+    real on files of this account, in the order they are printed.
+    """
+    from defenseclaw.commands import cmd_doctor
+
+    home = tmp_path / "install home"
+    unreadable = _write(home, "active_connector.json", 0)
+    loose = _write(home, "hook_contract_lock.json", 0o044)
+    token = _write(home, "hooks/.hook-a.token", 0)
+    (home / "hooks").chmod(0)
+    monkeypatch.setattr(cmd_doctor, "_root_gateway_install_home", lambda _cfg: os.fspath(home))
+    monkeypatch.setattr(cmd_doctor, "_root_gateway_moved_store", lambda: ("", "", False))
+    try:
+        command = cmd_doctor._root_gateway_return_and_start_command(None, (os.fspath(loose),))
+        local = _local_chain_steps(command)
+        owned = shlex.quote(os.fspath(home))
+        assert command.startswith(f'sudo chown -R "$(id -un)" {owned} && chmod -R u+rwX {owned} && chmod go-rwx ')
+        assert len(local) == 2, local
+        subprocess.run(["sh", "-c", " && ".join(local)], check=True)
+        for path in (unreadable, loose, token):
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600, path
+            assert path.read_text() == "{}"
+    finally:
+        (home / "hooks").chmod(0o700)
+
+
+def test_chain_without_named_files_restores_owner_access_on_what_it_returns(monkeypatch, tmp_path) -> None:
+    """Status and the Sidecar API row know no file: the chain is still the same."""
+    from defenseclaw.commands import cmd_doctor
+
+    home = tmp_path / "home"
+    monkeypatch.setattr(cmd_doctor, "_root_gateway_install_home", lambda _cfg: os.fspath(home))
+    monkeypatch.setattr(cmd_doctor, "_root_gateway_moved_store", lambda: ("", "", False))
+    quoted = shlex.quote(os.fspath(home))
+    assert cmd_doctor._root_gateway_return_and_start_command(None).endswith(
+        f"{quoted} && chmod -R u+rwX {quoted} && defenseclaw-gateway start"
+    )

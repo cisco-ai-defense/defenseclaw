@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -247,8 +248,8 @@ func TestRootLeftoversRemedyTakesAwayGroupAndOtherAccessBeforeTheStart(t *testin
 	if !strings.HasSuffix(remedy, want) || !strings.Contains(remedy, ` chown -R "$(id -un)" `) {
 		t.Fatalf("remedy = %q", remedy)
 	}
-	if strings.Contains(RootLeftoversRemedy(home, nil), "chmod") {
-		t.Fatal("a chain with nothing loose runs chmod")
+	if strings.Contains(RootLeftoversRemedy(home, nil), "chmod go-rwx") {
+		t.Fatal("a chain with nothing loose takes group and other access away")
 	}
 }
 
@@ -298,21 +299,162 @@ func TestFailedPIDRecordNamesTheRefusedRecord(t *testing.T) {
 	}
 }
 
-// A record this account may not read is flagged unreadable, the only refusal
-// that returning the ownership clears; a readable record is not, whatever its
-// content (GAP-0788 review 4).
-func TestFailedPIDRecordFlagsOnlyAnUnreadableRecord(t *testing.T) {
+// Only a permission refusal that root causes is flagged: the record or the
+// folder hiding it is root-owned. The same refusal on a file the account owns
+// (a mode it set itself), or a record it can read whatever its content, is an
+// independent failure that returning the ownership does not clear (GAP-0788
+// reviews 4 and 5). Root ownership is stood in for through ownerOfFile.
+func TestFailedPIDRecordFlagsOnlyARootDeniedRecord(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("a mode cannot make a file unreadable here")
 	}
+	rootOwns := func(t *testing.T, name string) {
+		t.Helper()
+		old := ownerOfFile
+		t.Cleanup(func() { ownerOfFile = old })
+		ownerOfFile = func(info fs.FileInfo) (uint32, bool) {
+			if info.Name() == name {
+				return 0, true
+			}
+			return old(info)
+		}
+	}
 	for _, record := range []string{PIDFileName, WatchdogPIDFileName} {
-		dir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(dir, record), []byte("1\n"), 0o000); err != nil {
+		write := func(t *testing.T, content string, mode os.FileMode) *Daemon {
+			t.Helper()
+			dir := t.TempDir()
+			path := filepath.Join(dir, record)
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, mode); err != nil {
+				t.Fatal(err)
+			}
+			return New(dir)
+		}
+		hiddenFolder := false
+		check := func(t *testing.T, d *Daemon, want bool) {
+			t.Helper()
+			failedWant := record
+			if hiddenFolder {
+				failedWant = PIDFileName // a hidden folder fails the gateway record first
+			}
+			err := d.ValidateStartIdentityFiles()
+			if failed, rootDenied := FailedPIDRecord(err); err == nil || failed != failedWant || rootDenied != want {
+				t.Fatalf("%s: err=%v record=%q root-denied=%v, want %q %v", record, err, failed, rootDenied, failedWant, want)
+			}
+		}
+		t.Run(record+"_account_owned_mode_000", func(t *testing.T) {
+			check(t, write(t, "1\n", 0), false)
+		})
+		t.Run(record+"_root_owned_mode_000", func(t *testing.T) {
+			rootOwns(t, record)
+			check(t, write(t, "1\n", 0), true)
+		})
+		t.Run(record+"_root_owned_but_readable_and_malformed", func(t *testing.T) {
+			rootOwns(t, record)
+			check(t, write(t, "invalid\n", 0o600), false)
+		})
+		t.Run(record+"_hidden_by_a_root_owned_folder", func(t *testing.T) {
+			d := write(t, "1\n", 0o600)
+			if err := os.Chmod(d.dataDir, 0); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(d.dataDir, 0o700) })
+			hiddenFolder = true
+			check(t, d, false)
+			rootOwns(t, filepath.Base(d.dataDir))
+			check(t, d, true)
+		})
+	}
+}
+
+// The printed chain has to leave the files usable. After the owner is returned,
+// a file whose owner bits lack read access (mode 000, or 044 once the group and
+// other access is taken away) is still refused to its new owner, so the chain
+// restores the owner bits between the return and the start. The steps that need
+// root (stop, chown) and the start are left out; the rest runs for real on files
+// of this account, in the order the chain prints it (GAP-0788 review 5).
+func TestRootLeftoversRemedyLeavesRootOwnedFilesUsable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX modes")
+	}
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_CONFIG", "")
+	files := map[string]os.FileMode{
+		"active_connector.json":   0o000,
+		"hook_contract_lock.json": 0o044,
+		"hooks/.hook-a.token":     0o000,
+	}
+	if err := os.MkdirAll(filepath.Join(home, "hooks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var loose []string
+	for rel, mode := range files {
+		path := filepath.Join(home, rel)
+		if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		err := New(dir).ValidateStartIdentityFiles()
-		if failed, unreadable := FailedPIDRecord(err); err == nil || failed != record || !unreadable {
-			t.Fatalf("%s unreadable: err=%v record=%q unreadable=%v", record, err, failed, unreadable)
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
 		}
+		if mode&0o077 != 0 {
+			loose = append(loose, path)
+		}
+	}
+	if err := os.Chmod(filepath.Join(home, "hooks"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(home, "hooks"), 0o700) })
+
+	_, chain, ok := strings.Cut(RootLeftoversRemedy(home, loose), ": ")
+	if !ok {
+		t.Fatal("the remedy has no command")
+	}
+	var local []string
+	for _, step := range strings.Split(chain, " && ") {
+		if !strings.HasPrefix(step, "sudo ") && !strings.Contains(step, "defenseclaw-gateway start") {
+			local = append(local, step)
+		}
+	}
+	if len(local) < 2 || !strings.HasPrefix(local[0], "chmod -R u+rwX ") || !strings.HasPrefix(local[1], "chmod go-rwx ") {
+		t.Fatalf("the steps between the return and the start are %q", local)
+	}
+	if out, err := exec.Command("sh", "-c", strings.Join(local, " && ")).CombinedOutput(); err != nil {
+		t.Fatalf("chain steps failed: %v\n%s", err, out)
+	}
+	for rel := range files {
+		info, err := os.Stat(filepath.Join(home, rel))
+		if err != nil {
+			t.Fatalf("%s: %v", rel, err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Errorf("%s is %04o after the chain, want 0600", rel, got)
+		}
+		if _, err := os.ReadFile(filepath.Join(home, rel)); err != nil {
+			t.Errorf("%s is still unreadable to its owner: %v", rel, err)
+		}
+	}
+	// The owner bits are all the first step adds: nothing grants group or other access.
+	if strings.Contains(local[0], "go") || strings.Contains(local[0], "a+") {
+		t.Fatalf("the restore step touches other bits: %q", local[0])
+	}
+}
+
+// The chain every surface prints restores the owner bits on exactly the
+// folders it returns, before the loosening step and the start, even when no
+// file is named (status and the Sidecar API row know no file).
+func TestRootLeftoversRemedyRestoresOwnerAccessOnWhatItReturns(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_CONFIG", "")
+	loose := filepath.Join(home, "active_connector.json")
+	remedy := RootLeftoversRemedy(home, []string{loose})
+	dirs := shellQuote(home)
+	want := `sudo chown -R "$(id -un)" ` + dirs + " && chmod -R u+rwX " + dirs + " && chmod go-rwx " + shellQuote(loose) + " && defenseclaw-gateway start"
+	if !strings.HasSuffix(remedy, want) {
+		t.Fatalf("remedy = %q, want it to end with %q", remedy, want)
+	}
+	if plain := rootGatewayRemedyFor("linux", home); !strings.Contains(plain, " && chmod -R u+rwX "+dirs+" && defenseclaw-gateway start") {
+		t.Fatalf("the chain without named files lacks the owner restore: %q", plain)
 	}
 }

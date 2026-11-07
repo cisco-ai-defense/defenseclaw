@@ -163,7 +163,8 @@ func pidIdentityError(t *testing.T, record string) error {
 // unreadablePIDIdentityError is the real start preflight failing on a PID
 // record this account may not read, the failure a root-owned 0600 record gives.
 // The record is made unreadable by its mode, since the test cannot create a
-// root-owned file.
+// root-owned file, so it is account-owned and the daemon rightly does not
+// attribute the refusal to root: asRootDenied stands in for the owner.
 func unreadablePIDIdentityError(t *testing.T, record string) error {
 	t.Helper()
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
@@ -175,10 +176,22 @@ func unreadablePIDIdentityError(t *testing.T, record string) error {
 		t.Fatal(err)
 	}
 	err := daemon.New(home).ValidateStartIdentityFiles()
-	if failed, unreadable := daemon.FailedPIDRecord(err); err == nil || failed != record || !unreadable {
-		t.Fatalf("identity preflight for unreadable %s = %v (record %q unreadable %v)", record, err, failed, unreadable)
+	if failed, rootDenied := daemon.FailedPIDRecord(err); err == nil || failed != record || rootDenied {
+		t.Fatalf("identity preflight for unreadable %s = %v (record %q root-denied %v)", record, err, failed, rootDenied)
 	}
 	return err
+}
+
+// asRootDenied makes the refusal count as root, as it is when root owns the
+// record (the daemon tests pin that classification with the owner stubbed).
+func asRootDenied(t *testing.T) {
+	t.Helper()
+	old := failedPIDRecord
+	t.Cleanup(func() { failedPIDRecord = old })
+	failedPIDRecord = func(err error) (string, bool) {
+		record, _ := daemon.FailedPIDRecord(err)
+		return record, record != ""
+	}
 }
 
 // A root-owned PID record fails the identity check that runs before the
@@ -187,6 +200,7 @@ func unreadablePIDIdentityError(t *testing.T, record string) error {
 func TestRefuseOverRootOwnedStateReplacesOnlyARootOwnedCause(t *testing.T) {
 	for _, record := range []string{"gateway.pid", "watchdog.pid"} {
 		identityErr := unreadablePIDIdentityError(t, record)
+		asRootDenied(t)
 		stubRootRuntimeLeftovers(t, record)
 		for _, verb := range []string{"start", "restart"} {
 			err := refuseOverRootOwnedState(startCmd, verb, identityErr)
@@ -285,10 +299,31 @@ func TestRootOwnedStartRefusalAttributesAHiddenStoreToThePIDCheckOnlyInTheInstal
 func TestRefuseOverRootOwnedStateHiddenInstallHomeReplacesEitherPIDRecord(t *testing.T) {
 	for _, record := range []string{"gateway.pid", "watchdog.pid"} {
 		identityErr := unreadablePIDIdentityError(t, record)
+		asRootDenied(t)
 		stubRootRuntimeLeftovers(t, "./")
 		err := refuseOverRootOwnedState(startCmd, "start", identityErr)
 		if err == nil || errors.Is(err, identityErr) || !strings.Contains(err.Error(), "cannot start the gateway") {
 			t.Fatalf("hidden install home over a failed %s = %v", record, err)
+		}
+	}
+}
+
+// A record the account cannot read because of a mode on a file it owns itself
+// is not cleared by the chain, whatever root-owned state sits beside it: the
+// refusal keeps its own text first and the chain is only reported after it, so
+// nothing promises a start that would fail again (GAP-0788 review 5).
+func TestRefuseOverRootOwnedStateKeepsAnUnreadableRecordThatRootDoesNotOwn(t *testing.T) {
+	for _, record := range []string{"gateway.pid", "watchdog.pid"} {
+		for _, blocker := range []string{record, "./", "active_connector.json"} {
+			t.Run(record+"_"+strings.TrimSuffix(blocker, "/"), func(t *testing.T) {
+				identityErr := unreadablePIDIdentityError(t, record)
+				stubRootRuntimeLeftovers(t, blocker)
+				err := refuseOverRootOwnedState(startCmd, "start", identityErr)
+				if err == nil || !errors.Is(err, identityErr) ||
+					strings.Index(err.Error(), identityErr.Error()) > strings.Index(err.Error(), "cannot start the gateway") {
+					t.Fatalf("the independent permission failure was folded into the chain: %v", err)
+				}
+			})
 		}
 	}
 }

@@ -871,7 +871,9 @@ def _moved_store_config(monkeypatch, tmp_path, **extra):
 def _chowned_dirs(remediation: str) -> list[str]:
     """The directories the printed chown returns, as the shell would read them."""
     tail = remediation.split('sudo chown -R "$(id -un)" ', 1)[1]
-    return shlex.split(tail.split(" && defenseclaw-gateway start", 1)[0])
+    returned, restore = tail.split(" && chmod -R u+rwX ", 1)
+    assert shlex.split(restore.split(" && defenseclaw-gateway start", 1)[0]) == shlex.split(returned)
+    return shlex.split(returned)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX sudo leftover naming")
@@ -889,10 +891,11 @@ def test_doctor_leftovers_remedy_returns_install_home_and_moved_store(monkeypatc
     # already stopped), return the files, start. A live root gateway makes the
     # start before the stop fail, so the stop comes first.
     steps = remediation.split(": sudo env ", 1)[1].split(" && ")
-    assert len(steps) == 3, remediation
+    assert len(steps) == 4, remediation
     assert steps[0].endswith(" stop") and steps[0].startswith("DEFENSECLAW_HOME=")
     assert steps[1].startswith('sudo chown -R "$(id -un)" ')
-    assert steps[2] == "defenseclaw-gateway start"
+    assert steps[2].startswith("chmod -R u+rwX ")
+    assert steps[3] == "defenseclaw-gateway start"
     assert "rerun the gateway once with sudo" not in remediation
     assert "stopped first" not in remediation
 
