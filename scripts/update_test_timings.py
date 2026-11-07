@@ -129,7 +129,11 @@ def windows_go_timings(files: list[Path], module: str) -> dict:
     packages: dict[str, float] = {}
     for file in files:
         for match in pattern.finditer(file.read_text(encoding="utf-8", errors="replace")):
-            packages[match.group(1)] = float(match.group(2)) + WINDOWS_LINK_SECONDS
+            # A package split into parts (internal/hookpaths) prints one line
+            # per part, each with its own link: its weight is their sum, as
+            # go_test_shards.py splits a package by its recorded weight.
+            package = match.group(1)
+            packages[package] = packages.get(package, 0.0) + float(match.group(2)) + WINDOWS_LINK_SECONDS
     # The test-level shards balance on their recorded test times.
     tests = {rel: names for rel, names in go_timings(files, module)["tests"].items() if rel in WINDOWS_TEST_SHARDED}
     return {"packages": {package: round(value, 1) for package, value in sorted(packages.items())}, "tests": tests}
