@@ -856,7 +856,10 @@ jobs:
     needs: [changes, contract-assets]
     if: ${{ !cancelled() && needs.contract-assets.result == 'success' }}
     runs-on: windows-latest
-    timeout-minutes: 20
+    # Hosted runners are slower than the EC2 hosts the cells were timed on
+    # (files-in-use took 480-505 s there; release.yaml measured about 7 minutes
+    # a lane on hosted runners). This is the job's budget, not a test timeout.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -882,7 +885,7 @@ jobs:
           path: ${{ runner.temp }}\contract-assets
       - name: Install, check, repair and uninstall
         if: ${{ matrix.cell == 'uninstall' }}
-        run: ./scripts/live-connector-e2e/run-windows-install.ps1 -Operation lifecycle -Assets (Join-Path $env:RUNNER_TEMP 'contract-assets') -StateRoot (Join-Path $env:DC_STATE_ROOT 'lifecycle')
+        run: ./scripts/live-connector-e2e/run-windows-install.ps1 -Operation lifecycle -PersistPath -Assets (Join-Path $env:RUNNER_TEMP 'contract-assets') -StateRoot (Join-Path $env:DC_STATE_ROOT 'lifecycle')
       - name: Lifecycle lane ${{ matrix.cell }}
         if: ${{ matrix.cell != 'uninstall' }}
         run: |

@@ -11,6 +11,7 @@ fails here, and so does a new Windows connector nobody added.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -30,7 +31,11 @@ GOLDEN = REPO / "scripts" / "live-connector-e2e" / "golden"
 
 # Windows connectors outside the shell-hook list of run.sh, and why.
 PLUGIN_CONNECTORS = {"opencode"}  # a plugin: its golden commands go through the installed plugin
-NO_CONTRACT = {"kiro"}  # no golden hook contract in the live harness on any OS
+# Kiro has no golden hook contract in the live harness on any OS, so it stays out of the 1.0.9 gate.
+# GAP-0676 changes its per-user Windows command (a cmd.exe-wrapped bridge that answers a launcher
+# that cannot start); the Go Windows shard exercises that. A registration-only cell or a golden
+# is a 1.0.10 item.
+NO_CONTRACT = {"kiro"}
 
 
 def _jobs() -> dict:
@@ -108,3 +113,44 @@ def test_the_parser_self_test_runs_in_the_powershell_job() -> None:
     harness = HARNESS.read_text(encoding="utf-8")
     # Both Codex start forms and both bridge forms (rel-1-0-6 GAP-0676).
     assert "launcher-guard-sibling" in harness and "(?<answer>" in harness
+
+
+def test_the_self_test_reads_bridges_as_the_generator_renders_them() -> None:
+    """The fixture holds decoded generator output, not a hand-written copy.
+
+    g676's launcher-start answer writes its sentence through [Console]::Error
+    and, in Constrained Language mode, through Write-Error. A parser written
+    against another text rejects every shipped bridge (review g088r M1).
+    """
+    harness = HARNESS.read_text(encoding="utf-8")
+    assert "windows-hook-bridges.json" in harness
+    bridges = json.loads((HARNESS.parent / "testdata" / "windows-hook-bridges.json").read_text(encoding="utf-8"))["bridges"]
+    answering = [bridge for bridge in bridges if not bridge["name"].endswith("unanswered")]
+    assert any(bridge["name"] == "antigravity/PreToolUse" for bridge in answering)
+    assert sum(bridge["name"].startswith("codex/") for bridge in answering) >= 7
+    assert len(answering) < len(bridges)
+    for bridge in answering:
+        script = bridge["script"]
+        # The same answer in the three places, each with the Write-Error fallback.
+        assert script.count("Microsoft.PowerShell.Utility\\Write-Error -Message") == 3, bridge["name"]
+        assert "catch { }" not in script, bridge["name"]
+    # The parser accepts the Write-Error form and the self-test refuses `catch { }`.
+    assert "Microsoft\\.PowerShell\\.Utility\\\\Write-Error -Message" in harness
+    assert "catch { } in all three places" in harness
+
+
+def test_the_harness_runs_only_on_a_disposable_account() -> None:
+    """It writes agent stand-ins to the real Known Folders and may edit the user Path."""
+    harness = HARNESS.read_text(encoding="utf-8")
+    assert "$env:RUNNER_ENVIRONMENT -eq 'github-hosted'" in harness
+    assert "DEFENSECLAW_CONTRACT_ALLOW_REAL_PROFILE" in harness
+    # The guard runs before the profile is built and before anything is installed.
+    assert harness.index("DEFENSECLAW_CONTRACT_ALLOW_REAL_PROFILE") < harness.index("function Enter-Profile")
+
+
+def test_the_lifecycle_cell_has_a_user_path_entry_to_remove() -> None:
+    lifecycle = _jobs()["install-lifecycle"]
+    steps = "\n".join(step.get("run", "") for step in lifecycle["steps"])
+    assert "run-windows-install.ps1 -Operation lifecycle -PersistPath" in steps
+    # fresh and files-in-use took 8 and 3.5 minutes on a faster host: the job needs room.
+    assert lifecycle["timeout-minutes"] >= 30

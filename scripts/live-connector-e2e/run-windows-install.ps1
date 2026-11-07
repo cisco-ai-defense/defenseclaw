@@ -24,15 +24,24 @@
            (assert-opencode-plugin.mjs);
         3. the canonical observability v8 records of the run (audit
            projection and the JSONL destination) are valid.
-      -Operation lifecycle
+      -Operation lifecycle [-PersistPath]
         install, version, status, doctor, the TUI at 80x24, a repair re-run of
         install.ps1, then `defenseclaw uninstall --all --binaries --yes` and
-        nothing of the install left (files, processes, Run value, Path entry).
+        nothing of the install left (files, processes and, with -PersistPath,
+        the user Path entry install.ps1 added; the user Path is back to what it
+        was). No 1.0 release writes a Run value (install.ps1 only removes the
+        ones a 0.8 Setup wrote), so there is none to check.
       -Operation self-test
         the hook command parsers read every form setup renders (no install).
 
     No vendor agent is installed or run: the hook contract is the installed
     DefenseClaw entrypoint. A green cell is not connector certification.
+
+    Run it on an ephemeral CI runner. The version-only vendor stand-ins go in
+    the account's real Known Folders (the folders setup trusts), and a
+    lifecycle with -PersistPath edits the account's user Path, so the harness
+    refuses to run outside a GitHub-hosted runner unless
+    DEFENSECLAW_CONTRACT_ALLOW_REAL_PROFILE=1 says the account is disposable.
 #>
 [CmdletBinding()]
 param(
@@ -41,12 +50,23 @@ param(
     [string]$Connector = 'codex',
     [string]$Assets = '',
     [string]$StateRoot = '',
+    # lifecycle: let install.ps1 add the install's bin folder to the user Path,
+    # so that "uninstall leaves no Path entry" is checked against a real entry.
+    [switch]$PersistPath,
     [int]$CommandTimeoutSeconds = 300
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+
+# The stand-ins below go in the account's real Known Folders and -PersistPath
+# edits its user Path: only a disposable account may run this.
+if ($Operation -ne 'self-test' -and -not ($env:GITHUB_ACTIONS -eq 'true' -and $env:RUNNER_ENVIRONMENT -eq 'github-hosted') -and
+    $env:DEFENSECLAW_CONTRACT_ALLOW_REAL_PROFILE -ne '1') {
+    throw 'run-windows-install.ps1 writes agent stand-ins to the real Known Folders of this account and may edit its user Path. ' +
+        'It runs on a GitHub-hosted runner; elsewhere set DEFENSECLAW_CONTRACT_ALLOW_REAL_PROFILE=1 only on a disposable account.'
+}
 
 $WorkspaceRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 if ($Operation -eq 'self-test') { $StateRoot = Join-Path ([IO.Path]::GetTempPath()) ('dc-contract-self-test-' + [Guid]::NewGuid().ToString('N')) }
@@ -60,6 +80,8 @@ $script:Failures = [Collections.Generic.List[string]]::new()
 $script:HarnessBash = $null
 $script:Bin = ''
 $script:AgentFixtures = @()
+$script:UserPathBefore = ''
+$script:SeededConfig = $null
 $script:FixtureDirectories = [Collections.Generic.List[string]]::new()
 $WindowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 
@@ -161,7 +183,9 @@ function Install-DefenseClaw {
     $installer = Join-Path $Assets 'install.ps1'
     $started = Get-Date
     # Windows PowerShell 5.1 runs the installer, as for users.
-    $result = Invoke-Tool $WindowsPowerShell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $installer, '-Local', $Assets, '-Yes', '-NoPersistPath') -Allowed @(0, 1) -Timeout 900
+    $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $installer, '-Local', $Assets, '-Yes')
+    if (-not $PersistPath) { $arguments += '-NoPersistPath' }
+    $result = Invoke-Tool $WindowsPowerShell $arguments -Allowed @(0, 1) -Timeout 900
     if ($result.ExitCode -ne 0) {
         throw "install.ps1 -Local exited $($result.ExitCode):`n$((($result.StdOut + $result.StdErr) -split "`r?`n" | Select-Object -Last 40) -join "`n")"
     }
@@ -169,6 +193,28 @@ function Install-DefenseClaw {
         if (-not (Test-Path -LiteralPath (Join-Path $script:Bin $name) -PathType Leaf)) { throw "install.ps1 did not install $name in $script:Bin" }
     }
     Write-Result install pass ("install.ps1 -Local {0} in {1:n0}s" -f $Assets, ((Get-Date) - $started).TotalSeconds)
+}
+
+# The user Path as stored (unexpanded), and the edits a lifecycle with -PersistPath needs.
+function Get-UserPathRaw {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+    if ($null -eq $key) { return '' }
+    try { return [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } finally { $key.Close() }
+}
+
+function Get-UserPathEntryCount([string]$Directory) {
+    return @((Get-UserPathRaw) -split ';' | Where-Object { $_ -and [string]::Equals($_.TrimEnd('\'), $Directory.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase) }).Count
+}
+
+function Remove-UserPathEntry([string]$Directory) {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    if ($null -eq $key) { return }
+    try {
+        $kind = $key.GetValueKind('Path')
+        $raw = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $kept = @($raw -split ';' | Where-Object { -not ($_ -and [string]::Equals($_.TrimEnd('\'), $Directory.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) }) -join ';'
+        if ($kept -cne $raw) { $key.SetValue('Path', $kept, $kind) }
+    } finally { $key.Close() }
 }
 
 function Get-FreePort {
@@ -420,13 +466,17 @@ function Get-DirectHookCommand([string]$Command) {
 # a launcher that exits at once still returns its status, and Constrained
 # Language mode falls back to the call operator. A per-user bridge since 1.0.9
 # answers a launcher that cannot start with the agent's block instead, the
-# same statements in all three places (rel-1-0-6 GAP-0676); both are read.
+# same statements in all three places (rel-1-0-6 GAP-0676); both are read. The
+# answer is what launcherStartAnswer.powershell() renders: its sentence goes to
+# stderr through [Console]::Error, and through Write-Error where Constrained
+# Language mode refuses that call. The earlier `catch { }` was never rendered
+# by a release, so it is refused (the self-test checks it).
 function Get-AwaitedHookBridge([string]$Script) {
     $pattern = '^\$ErrorActionPreference=''Stop''; \$env:NoDefaultCurrentDirectoryInExePath=''1''; ' +
         'if \(\$ExecutionContext\.SessionState\.LanguageMode -ne ''FullLanguage''\) \{ \$ErrorActionPreference=''Continue''; ' +
         '& (?<file>''(?:''''|[^''])+'')(?<quoted>(?: ''[^'' ]+'')+) \| Microsoft\.PowerShell\.Core\\Out-Host; ' +
         '(?:if \(\$null -eq \$LASTEXITCODE\) \{ exit 1 \}; |if \(\$null -eq \$LASTEXITCODE -or \$LASTEXITCODE -lt 0\) \{ ' +
-        '(?<answer>try \{ \[Console\]::Error\.WriteLine\(''[^'']*''\) \} catch \{ \}; (?:''[^'']*''; )?exit [02]) \}; )' +
+        '(?<answer>try \{ \[Console\]::Error\.WriteLine\(''[^'']*''\) \} catch \{ Microsoft\.PowerShell\.Utility\\Write-Error -Message ''[^'']*'' -ErrorAction Continue \}; (?:''[^'']*''; )?exit [02]) \}; )' +
         'exit \$LASTEXITCODE \}; ' +
         '\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\(\k<file>,''(?<arguments>[^'' ]+(?: [^'' ]+)*)''\); ' +
         '\$hookStart\.UseShellExecute=\$false; \$hookStart\.RedirectStandardError=\$true; ' +
@@ -803,15 +853,60 @@ function Invoke-Teardown {
     Invoke-Tool (Join-Path $script:Bin 'defenseclaw-gateway.exe') @('connector', 'verify', '--connector', $Connector) | Out-Null
 }
 
+# A user's own vendor config, in a shape setup does not write (CRLF, tabs, no
+# final newline for Codex), that setup must merge into and teardown must give
+# back byte for byte. Absent for the connectors whose config setup owns whole.
+function Get-UserVendorSeed([string]$Name) {
+    switch ($Name) {
+        'codex' { return @{
+            Text = "model = `"gpt-5.2`"`r`nuser_marker_defenseclaw_contract = true`r`n`r`n[projects.'C:\Users\work']`r`ntrust_level = `"trusted`""
+            Markers = @('user_marker_defenseclaw_contract', 'trust_level') } }
+        'claudecode' { return @{
+            Text = "{`r`n`t`"theme`": `"dark`",`r`n`t`"userMarkerDefenseclawContract`": true,`r`n`t`"hooks`": {`r`n`t`t`"Notification`": [ { `"hooks`": [ { `"type`": `"command`", `"command`": `"echo user-notification`" } ] } ]`r`n`t}`r`n}`r`n"
+            Markers = @('userMarkerDefenseclawContract', 'echo user-notification') } }
+        'cursor' { return @{
+            Text = "{`r`n  `"version`": 1,`r`n  `"userMarkerDefenseclawContract`": true,`r`n  `"hooks`": {`r`n    `"afterFileEdit`": [ { `"command`": `"node user-format.js`" } ]`r`n  }`r`n}"
+            Markers = @('userMarkerDefenseclawContract', 'node user-format.js') } }
+    }
+    return $null
+}
+
+function Set-UserVendorConfig([string]$Config) {
+    $seed = Get-UserVendorSeed $Connector
+    if ($null -eq $seed) { return $null }
+    if (Test-Path -LiteralPath $Config) { throw "the throwaway profile already has $Config" }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Config) | Out-Null
+    [IO.File]::WriteAllBytes($Config, [Text.UTF8Encoding]::new($false).GetBytes($seed.Text))
+    $script:SeededConfig = @{ Path = $Config; State = Get-FileState $Config; Markers = $seed.Markers }
+    return $script:SeededConfig
+}
+
+# The seeded config is the baseline of both phases: after setup it still holds
+# the user's own entries, and after teardown it is the same bytes.
+function Assert-UserVendorConfigKept([string]$Stage) {
+    if ($null -eq $script:SeededConfig) { return }
+    $state = Get-FileState $script:SeededConfig.Path
+    if ($state -cne $script:SeededConfig.State) { throw "$Stage left the user's $Connector config as $state, was $($script:SeededConfig.State)" }
+    Write-Result "$Connector`:user-config" pass "$Stage restored the user's own config byte for byte ($state)"
+}
+
 function Invoke-ObservePhase {
     $config = Get-ConnectorConfigPath $Connector
+    $seeded = Set-UserVendorConfig $config
     $before = Get-FileState $config
     Invoke-Setup observe
     Assert-Registration
+    if ($seeded) {
+        $text = [IO.File]::ReadAllText($config)
+        foreach ($marker in $seeded.Markers) {
+            if ($text.IndexOf($marker, [StringComparison]::Ordinal) -lt 0) { throw "setup dropped the user's own entry '$marker' from $config" }
+        }
+    }
     if ($Connector -eq 'opencode') { Assert-OpenCodeTamper }
     Invoke-Teardown
     $after = Get-FileState $config
     if ($after -cne $before) { throw "teardown left $config as $after, was $before" }
+    Assert-UserVendorConfigKept 'the observe teardown'
     if ($Connector -eq 'cursor') {
         foreach ($name in 'cursor-hook.ps1', 'cursor-hook.sh') {
             if (Test-Path -LiteralPath (Join-Path $script:DcHome "hooks\$name")) { throw "teardown left the Cursor adapter $name" }
@@ -940,6 +1035,10 @@ function Invoke-Lifecycle {
     $cli = Join-Path $script:Bin 'defenseclaw.exe'
     $wheel = (Get-ChildItem -LiteralPath $Assets -Filter 'defenseclaw-*-py3-none-any.whl' | Select-Object -First 1).Name
     $version = [regex]::Match($wheel, '\d+\.\d+\.\d+').Value
+    if ($PersistPath) {
+        if ((Get-UserPathEntryCount $script:Bin) -ne 1) { throw "install.ps1 left $(Get-UserPathEntryCount $script:Bin) entries for $script:Bin on the user Path, want 1" }
+        Write-Result 'lifecycle:path-added' pass "install.ps1 added $script:Bin to the user Path"
+    }
     $reported = (Invoke-Tool $cli @('--version')).StdOut
     if ($reported -notmatch [regex]::Escape($version)) { throw "defenseclaw --version says '$reported', the assets are $version" }
     Write-Result 'lifecycle:version' pass $version
@@ -982,6 +1081,7 @@ sys.exit(0 if "DEFENSECLAW" in text.upper() and "Overview" in text and "Tracebac
     Install-DefenseClaw
     Wait-Gateway
     if ((Get-FileState $config) -cne $configBefore) { throw 'the repair re-run changed config.yaml' }
+    if ($PersistPath -and (Get-UserPathEntryCount $script:Bin) -ne 1) { throw "the repair re-run left $(Get-UserPathEntryCount $script:Bin) user Path entries for $script:Bin, want 1" }
     Write-Result 'lifecycle:repair' pass 'install.ps1 re-run kept config.yaml and the gateway healthy'
 
     $uninstall = Invoke-Tool $cli @('uninstall', '--all', '--binaries', '--yes') -Allowed @(0, 1) -Timeout 600
@@ -1001,12 +1101,11 @@ sys.exit(0 if "DEFENSECLAW" in text.upper() and "Overview" in text and "Tracebac
     $prefix = $script:ProfileHome.TrimEnd('\') + '\'
     $running = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) })
     if ($running.Count) { throw "uninstall left processes running: $(($running | ForEach-Object { "$($_.ProcessId) $($_.ExecutablePath)" }) -join '; ')" }
-    $run = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -ErrorAction SilentlyContinue
-    $runValues = @(if ($run) { $run.PSObject.Properties | Where-Object { $_.Value -is [string] -and $_.Value.IndexOf($prefix, [StringComparison]::OrdinalIgnoreCase) -ge 0 } })
-    if ($runValues.Count) { throw "uninstall left Run values: $(($runValues | ForEach-Object Name) -join ', ')" }
-    $userPath = [string][Environment]::GetEnvironmentVariable('Path', 'User')
-    if ($userPath.IndexOf($script:Bin, [StringComparison]::OrdinalIgnoreCase) -ge 0) { throw "uninstall left $script:Bin on the user Path" }
-    Write-Result 'lifecycle:uninstall' pass 'no files, processes, Run value or Path entry left'
+    if ($PersistPath) {
+        if ((Get-UserPathEntryCount $script:Bin) -ne 0) { throw "uninstall left $script:Bin on the user Path" }
+        if ((Get-UserPathRaw) -cne $script:UserPathBefore) { throw 'uninstall left the user Path different from what it was before the install' }
+    }
+    Write-Result 'lifecycle:uninstall' pass $(if ($PersistPath) { 'no files or processes left; the user Path is as it was before the install' } else { 'no files or processes left (-NoPersistPath: the user Path was not touched)' })
 }
 
 # -- Self-test of the hook command parsers -------------------------------------
@@ -1033,26 +1132,43 @@ function Invoke-ParserSelfTest {
         if ($null -ne $parsed -and $parsed.File -ceq $hook -and ($parsed.Arguments -join ' ') -ceq ($bound -join ' ')) { throw "lookalike read as the hook: $lookalike" }
         $cases++
     }
-    $arguments = 'hook --connector antigravity --event PreToolUse'
-    $quoted = " 'hook' '--connector' 'antigravity' '--event' 'PreToolUse'"
-    $answer = "try { [Console]::Error.WriteLine('DefenseClaw blocked this: its Antigravity hook launcher cannot start. Run the DefenseClaw installer again to repair it.') } catch { }; exit 2"
-    $head = "`$ErrorActionPreference='Stop'; `$env:NoDefaultCurrentDirectoryInExePath='1'; if (`$ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { `$ErrorActionPreference='Continue'; & '$hook'$quoted | Microsoft.PowerShell.Core\Out-Host; "
-    $start = "`$hookStart=[System.Diagnostics.ProcessStartInfo]::new('$hook','$arguments'); `$hookStart.UseShellExecute=`$false; `$hookStart.RedirectStandardError=`$true; "
-    $copy = "`$hookProcess.StandardError.BaseStream.CopyTo([Console]::OpenStandardError()); `$hookProcess.WaitForExit(); "
-    $old = $head + "if (`$null -eq `$LASTEXITCODE) { exit 1 }; exit `$LASTEXITCODE }; " + $start + "`$hookProcess=[System.Diagnostics.Process]::Start(`$hookStart); " + $copy + "exit `$hookProcess.ExitCode"
-    $answering = $head + "if (`$null -eq `$LASTEXITCODE -or `$LASTEXITCODE -lt 0) { $answer }; exit `$LASTEXITCODE }; " + $start +
-        "try { `$hookProcess=[System.Diagnostics.Process]::Start(`$hookStart) } catch { $answer }; " + $copy + "if (`$hookProcess.ExitCode -lt 0) { $answer }; exit `$hookProcess.ExitCode"
-    foreach ($script in @($old, $answering)) {
+    # The bridges as the generator renders them: testdata\windows-hook-bridges.json
+    # holds the decoded scripts of windowsAnsweringPowerShellHookCommand
+    # (internal/gateway/connector/launcher_start_answer.go), not hand-written
+    # copies: the answering bridges of Antigravity PreToolUse and of Codex's
+    # blockable events, and the ones that keep the earlier form.
+    $fixture = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'testdata\windows-hook-bridges.json')) | ConvertFrom-Json
+    $bridges = @($fixture.bridges)
+    $answering = 0
+    $writeError = 'catch \{ Microsoft\.PowerShell\.Utility\\Write-Error -Message ''[^'']*'' -ErrorAction Continue \}'
+    foreach ($entry in $bridges) {
+        $script = [string]$entry.script
         $bridge = Get-AwaitedHookBridge $script
-        if ($null -eq $bridge -or $bridge.File -cne $hook -or ($bridge.Arguments -join ' ') -cne $arguments) { throw "bridge form not read: $script" }
+        if ($null -eq $bridge -or $bridge.File -cne $entry.hook -or ($bridge.Arguments -join ' ') -cne $entry.arguments) { throw "bridge not read: $($entry.name)" }
         $encoded = '-NoProfile -NonInteractive -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
-        if ((Get-EncodedHookBridge $encoded 'self-test').File -cne $hook) { throw 'encoded bridge not read' }
+        if ((Get-EncodedHookBridge $encoded "self-test $($entry.name)").File -cne $entry.hook) { throw "encoded bridge not read: $($entry.name)" }
         $cases++
+        $isAnswering = $script -cmatch $writeError
+        if ($entry.name -like '*unanswered') {
+            if ($isAnswering) { throw "$($entry.name) is not the earlier bridge" }
+            continue
+        }
+        if (-not $isAnswering) { throw "$($entry.name) does not answer a launcher that cannot start" }
+        $answering++
+        # Lookalikes of the answer: the plain `catch { }` form no release renders, in all three places
+        # or in the first only, and a last answer that exits with another status. None may be read.
+        $lastExit = $script.LastIndexOf('exit 0 }; exit $hookProcess.ExitCode')
+        foreach ($lookalike in @(
+            @{ Name = 'catch { } in all three places'; Script = [regex]::Replace($script, $writeError, 'catch { }') },
+            @{ Name = 'catch { } in the first place'; Script = [regex]::new($writeError).Replace($script, 'catch { }', 1) },
+            @{ Name = 'another exit status in the last answer'; Script = $(if ($lastExit -ge 0) { $script.Substring(0, $lastExit) + 'exit 2 }; exit $hookProcess.ExitCode' } else { $script }) }
+        )) {
+            if ($lookalike.Script -ceq $script) { throw "lookalike '$($lookalike.Name)' did not change $($entry.name)" }
+            if ($null -ne (Get-AwaitedHookBridge $lookalike.Script)) { throw "$($entry.name): a bridge with $($lookalike.Name) was read" }
+            $cases++
+        }
     }
-    # The answer must be the same in all three places.
-    $edited = $answering.Substring(0, $answering.LastIndexOf('exit 2')) + 'exit 0 }; exit $hookProcess.ExitCode'
-    if ($null -ne (Get-AwaitedHookBridge $edited)) { throw 'a bridge whose answers differ was read' }
-    $cases++
+    if ($answering -lt 8 -or $bridges.Count -le $answering) { throw "windows-hook-bridges.json holds $answering answering of $($bridges.Count) bridges" }
     # Devin's direct command and its guarded start (rel-1-0-6 GAP-0676).
     $script:Bin = 'C:\Users\u\.local\bin'
     foreach ($command in @(
@@ -1069,7 +1185,7 @@ function Invoke-ParserSelfTest {
     if (-not $refused) { throw 'a Devin guard start bound to another event was accepted' }
     $cases++
     $script:Bin = ''
-    Write-Result 'self-test:parsers' pass "$cases cases: direct and guard-sibling Codex commands, old and answering bridges, direct and guarded Devin, lookalikes refused"
+    Write-Result 'self-test:parsers' pass "$cases cases: direct and guard-sibling Codex commands, $($bridges.Count) bridges as the generator renders them ($answering answering), direct and guarded Devin, lookalikes refused"
 }
 
 # -- Main -----------------------------------------------------------------------
@@ -1080,6 +1196,7 @@ if ($Operation -eq 'self-test') {
 } else {
     try {
         Enter-Profile
+        if ($PersistPath) { $script:UserPathBefore = Get-UserPathRaw }
         Install-DefenseClaw
         Initialize-DefenseClaw
         if ($Operation -eq 'contract') { Install-AgentFixtures }
@@ -1088,6 +1205,7 @@ if ($Operation -eq 'self-test') {
         } else {
             Invoke-ObservePhase
             if ($Connector -eq 'opencode') { Invoke-OpenCodeActionPhase } else { Invoke-ContractSmoke }
+            Assert-UserVendorConfigKept 'the action-mode run and its teardown'
             Assert-ObservabilityV8
         }
     } catch {
@@ -1096,6 +1214,10 @@ if ($Operation -eq 'self-test') {
         # A lifecycle that stopped before its uninstall leaves the gateway running.
         if ($script:Bin) { try { Stop-Gateway } catch { Write-Host "gateway stop: $($_.Exception.Message)" } }
         try { Remove-AgentFixtures } catch { Write-Result agent-fixtures fail "cleanup: $($_.Exception.Message)" }
+        # A lifecycle that stopped before its uninstall leaves the entry install.ps1 added.
+        if ($PersistPath -and $script:Bin) {
+            try { Remove-UserPathEntry $script:Bin } catch { Write-Result 'lifecycle:path-cleanup' fail $_.Exception.Message }
+        }
     }
 }
 $failed = @(Get-Content -LiteralPath $script:Results -ErrorAction SilentlyContinue | Where-Object { $_ -match '"status":"fail"' })
