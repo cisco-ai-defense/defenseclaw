@@ -432,6 +432,60 @@ func TestConnectorPruneOrphansRestoresBackupWhenRolledBackInstallHasNoConfig(t *
 	}
 }
 
+// The operator edits the vendor file after the newer install set Antigravity
+// up: the exact-hash restore keeps the edit, and the rollback still removes
+// the registrations the older install does not name (GAP-0697). A connector the
+// older install names keeps its registrations in the same edited file.
+func TestConnectorPruneOrphansRollbackKeepsOperatorEditAndRemovesRegistrations(t *testing.T) {
+	pristine := []byte("{\n  \"operator\": \"keep\"\n}\n")
+	edit := func(t *testing.T, path string) {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		edited := bytes.Replace(data, []byte("\"operator\": \"keep\""), []byte("\"operator\": \"edited\""), 1)
+		if bytes.Equal(edited, data) {
+			t.Fatalf("operator field not found in %q", data)
+		}
+		if err := os.WriteFile(path, edited, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		state []string
+		want  bool // registrations stay
+	}{
+		{"no state", nil, false},
+		{"other connector active", []string{"codex"}, false},
+		{"antigravity still named", []string{"antigravity"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path, saved, dataDir := setUpAntigravityRollbackFromNewer(t, pristine)
+			defer withConnectorState(t, dataDir, "codex")()
+			if tc.state != nil {
+				if err := connector.SaveActiveConnectors(dataDir, tc.state); err != nil {
+					t.Fatal(err)
+				}
+			}
+			edit(t, path)
+			cfg = nil
+			_, stderr, exitCode := runConnectorCmd(t, "prune-orphans", "--data-dir", dataDir, "--rollback-backups-dir", saved)
+			after, err := os.ReadFile(path)
+			if err != nil || exitCode != 0 {
+				t.Fatalf("rollback exit=%d stderr=%q read=%v", exitCode, stderr, err)
+			}
+			if !bytes.Contains(after, []byte("\"edited\"")) {
+				t.Fatalf("the operator edit was lost: %q", after)
+			}
+			if got := bytes.Contains(after, []byte("defenseclaw-antigravity-")); got != tc.want {
+				t.Fatalf("registrations present=%v, want %v: %q", got, tc.want, after)
+			}
+		})
+	}
+}
+
 // The benign twins: with no saved backup folder, or when the older install has
 // a config.yaml that does not load, nothing is removed on a guess; and an
 // Antigravity the older install still names keeps its registrations.
