@@ -414,7 +414,7 @@ type hookPathRun struct {
 // the rest of the text, and a complete name is always among them. A span that
 // exists and is not managed is one ordinary path: the starts inside it are not
 // read, so "/home/u/a,/home/u/.defenseclaw/hooks/b" stays the user's file when
-// it exists. A program word that is one quoted existing path is one word (see
+// it exists. A program word that is a literal existing path is one word (see
 // blankOrdinaryPrograms). The text is never run.
 func hookCommandNamesDir(command, home string, files, dirs []string, fold bool) bool {
 	scan := &hookPathScan{files: files, dirs: dirs, fold: fold, exists: map[string]bool{}}
@@ -445,8 +445,8 @@ func hookCommandNamesDir(command, home string, files, dirs []string, fold bool) 
 	return false
 }
 
-// blankOrdinaryPrograms returns command with each program word that is one
-// quoted literal, naming an existing absolute path that is not managed,
+// blankOrdinaryPrograms returns command with each program word that is
+// literal (hookLiteralWord), naming an existing absolute path that is not managed,
 // replaced by "_". A shell runs that word as the program whatever its
 // characters are, so the managed path inside
 // "/home/u/a /home/u/.defenseclaw/hooks/b" is not a word of its own. The words
@@ -454,8 +454,9 @@ func hookCommandNamesDir(command, home string, files, dirs []string, fold bool) 
 // text: the program is the first word of a command after its assignments and
 // the prefixes env, command, exec, nohup and nice (hookProgramWord), wherever
 // the command stands. A word that holds an expansion or command substitution
-// ($(...), backticks) is not a literal, whatever file the bytes name: the shell
-// runs the substitution before it picks the program. A quoted word that is not
+// ($(...), backticks) is not a literal, whatever file the bytes name; escapes and
+// adjacent quoted parts are read as the shell reads them: the shell
+// runs the substitution before it picks the program. A word that is not
 // the program is an argument and the program may run its text as a shell line
 // ("sh -c ..."), so it stays. Text the lexer does not read stays whole.
 func (s *hookPathScan) blankOrdinaryPrograms(command, home string) string {
@@ -478,7 +479,7 @@ func (s *hookPathScan) blankOrdinaryPrograms(command, home string) string {
 		if from < copied || from >= to || to > len(command) {
 			return true
 		}
-		literal, ok := hookQuotedLiteral(word, s.fold)
+		literal, ok := hookLiteralWord(word, s.fold)
 		if !ok {
 			return true
 		}
@@ -501,32 +502,92 @@ func (s *hookPathScan) blankOrdinaryPrograms(command, home string) string {
 	return out.String()
 }
 
-// hookQuotedLiteral returns the text of a word made of one single-quoted or
-// one double-quoted literal. A double-quoted word with an expansion or a
-// command substitution is not a literal, and neither is one with an escape
-// (the escape would have to be run) unless Windows separators are read.
-func hookQuotedLiteral(word *syntax.Word, windows bool) (string, bool) {
-	if len(word.Parts) != 1 {
-		return "", false
-	}
-	switch part := word.Parts[0].(type) {
-	case *syntax.SglQuoted:
-		return part.Value, !part.Dollar
-	case *syntax.DblQuoted:
-		if part.Dollar {
-			return "", false
-		}
-		var text strings.Builder
-		for _, inner := range part.Parts {
-			lit, ok := inner.(*syntax.Lit)
-			if !ok || (!windows && strings.Contains(lit.Value, "\\")) {
+// hookLiteralWord returns the text a shell makes of word when every part of it
+// is literal: single-quoted, double-quoted and unquoted text side by side form
+// one word, each with the escapes of the part it stands in (inside double
+// quotes a backslash before $, a backtick, a double quote, a backslash or a
+// newline; outside quotes a backslash before any character). A part with an
+// expansion, a command substitution (backticks too), ANSI-C quoting, or an
+// unquoted glob, brace or tilde character is not literal: the shell resolves it
+// before it picks the program, so the bytes name no file. With windows set a
+// backslash is a path separator, not an escape.
+func hookLiteralWord(word *syntax.Word, windows bool) (string, bool) {
+	var text strings.Builder
+	for _, part := range word.Parts {
+		switch part := part.(type) {
+		case *syntax.SglQuoted:
+			if part.Dollar {
 				return "", false
 			}
-			text.WriteString(lit.Value)
+			text.WriteString(part.Value)
+		case *syntax.DblQuoted:
+			if part.Dollar {
+				return "", false
+			}
+			for _, inner := range part.Parts {
+				lit, ok := inner.(*syntax.Lit)
+				if !ok {
+					return "", false
+				}
+				text.WriteString(hookUnescape(lit.Value, windows, true))
+			}
+		case *syntax.Lit:
+			if strings.ContainsAny(hookUnescapedOnly(part.Value, windows), "*?[~{") {
+				return "", false
+			}
+			text.WriteString(hookUnescape(part.Value, windows, false))
+		default:
+			return "", false
 		}
-		return text.String(), true
 	}
-	return "", false
+	return text.String(), text.Len() > 0
+}
+
+// hookUnescape removes the shell escapes from raw literal text: a backslash
+// before $, a backtick, a double quote, a backslash or a newline inside double
+// quotes (a backslash before a newline outside them is removed together with
+// it), and a backslash before any character outside quotes. A backslash is
+// kept as it is when windows is set.
+func hookUnescape(raw string, windows, double bool) string {
+	if windows || !strings.Contains(raw, "\\") {
+		return raw
+	}
+	var out strings.Builder
+	for i := 0; i < len(raw); i++ {
+		if raw[i] != '\\' || i+1 == len(raw) {
+			out.WriteByte(raw[i])
+			continue
+		}
+		next := raw[i+1]
+		switch {
+		case next == '\n':
+			i++
+		case !double || strings.IndexByte("$`\"\\", next) >= 0:
+			out.WriteByte(next)
+			i++
+		default:
+			out.WriteByte('\\')
+		}
+	}
+	return out.String()
+}
+
+// hookUnescapedOnly returns raw unquoted literal text without the characters a
+// backslash escapes, so a scan for glob, brace and tilde characters sees only
+// the ones the shell would expand.
+func hookUnescapedOnly(raw string, windows bool) string {
+	if windows || !strings.Contains(raw, "\\") {
+		return raw
+	}
+	var out strings.Builder
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == '\\' {
+			i++
+			continue
+		}
+		out.WriteByte(raw[i])
+	}
+	return out.String()
 }
 
 // hookProgramWord returns the word a command runs as its program: the first
