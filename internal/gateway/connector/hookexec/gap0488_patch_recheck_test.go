@@ -20,8 +20,9 @@ import (
 // GAP-0488, GAP-0073: behind ProtectHome the gateway takes a patch target
 // from the evidence the managed hook read before the request, and cannot read
 // it again. A target that is swapped for a link to the keys file after that
-// reading, before the gateway answers, is refused by the hook whatever the
-// gateway said. The same patch with the target unchanged runs.
+// reading, while the gateway answers or when its answer is closed, is refused
+// by the hook whatever the gateway said. The same patch with the target
+// unchanged, or saved again as the same ordinary file by an editor, runs.
 func TestGAP0488PatchTargetSwappedAfterReadingIsRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name, connector, event, allow string
@@ -43,11 +44,18 @@ func TestGAP0488PatchTargetSwappedAfterReadingIsRefused(t *testing.T) {
 			},
 		},
 	} {
-		for _, swap := range []bool{false, true} {
-			name := tc.name + " unchanged target"
-			if swap {
-				name = tc.name + " target swapped for a link to the keys file"
-			}
+		for _, tm := range []struct {
+			name, when string
+			swap       bool
+		}{
+			{" unchanged target", "", false},
+			{" target saved again as the same ordinary file", "answer", false},
+			{" target swapped for a link to the keys file", "answer", true},
+			{" target swapped for a link to the keys file as the answer closes", "close", true},
+			{" target saved again as the same ordinary file as the answer closes", "close", false},
+		} {
+			swap := tm.swap
+			name := tc.name + tm.name
 			t.Run(name, func(t *testing.T) {
 				home, err := filepath.EvalSymlinks(t.TempDir())
 				if err != nil {
@@ -79,15 +87,36 @@ func TestGAP0488PatchTargetSwappedAfterReadingIsRefused(t *testing.T) {
 				rt.onRequest = func(s *stubRT, req *http.Request) (*http.Response, error) {
 					targets, decoded := hookpaths.Decode(req.Header.Get(hookpaths.Header))
 					sawEvidence = decoded && targets[hookpaths.PatchCompleteKey] == "1" && targets[target] == target
-					if swap {
-						if err := os.Remove(target); err != nil {
+					change := func() {
+						if tm.when == "" {
+							return
+						}
+						if swap {
+							if err := os.Remove(target); err != nil {
+								t.Fatal(err)
+							}
+							if err := os.Symlink(keys, target); err != nil {
+								t.Fatal(err)
+							}
+							return
+						}
+						// An editor save: the same ordinary path, written to a
+						// new file and renamed over the old one.
+						saved := target + ".tmp"
+						if err := os.WriteFile(saved, []byte("x\n"), 0o600); err != nil {
 							t.Fatal(err)
 						}
-						if err := os.Symlink(keys, target); err != nil {
+						if err := os.Rename(saved, target); err != nil {
 							t.Fatal(err)
 						}
 					}
-					return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(tc.allow)), Header: make(http.Header)}, nil
+					body := io.NopCloser(strings.NewReader(tc.allow))
+					if tm.when == "close" {
+						body = &closeHook{Reader: strings.NewReader(tc.allow), onClose: change}
+					} else {
+						change()
+					}
+					return &http.Response{StatusCode: 200, Body: body, Header: make(http.Header)}, nil
 				}
 				result := run(t, tc.connector, rt, func(o *Options) {
 					o.Event = tc.event
@@ -108,4 +137,19 @@ func TestGAP0488PatchTargetSwappedAfterReadingIsRefused(t *testing.T) {
 			})
 		}
 	}
+}
+
+// closeHook runs a function when the response body is closed.
+type closeHook struct {
+	io.Reader
+	onClose func()
+	closed  bool
+}
+
+func (c *closeHook) Close() error {
+	if !c.closed {
+		c.closed = true
+		c.onClose()
+	}
+	return nil
 }
