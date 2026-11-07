@@ -117,10 +117,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	if !ok {
 		return []SimpleCommand{{EvaluationFailure: "parse"}}
 	}
-	var bound, unfollowed map[string]bool
+	var bound map[string]bool
 	if strings.ContainsRune(source, '$') {
 		file, _ := shellparse.Parse(source)
-		bound, unfollowed = simpleBoundVariables(file)
+		bound = simpleBoundVariables(file)
 	}
 	if len(parts) == 0 {
 		return nil
@@ -177,9 +177,11 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	// and the hook target scans read both names), changed in order by the
 	// assignments below and handed to a shell body by the call that starts
 	// it. A child command spelled with them is judged as its literal
-	// spelling (rel-1-0-6:GAP-0601, GAP-0681, GAP-0630 review 3). A name
-	// that a loop, read or eval binds has no value the walk can follow.
-	for name, value := range simpleInitialUserVars(home, inherited, unfollowed) {
+	// spelling (rel-1-0-6:GAP-0601, GAP-0681, GAP-0630 review 3). A loop,
+	// read or eval that binds a name takes its value away from the point
+	// where it runs (the statements before it still read the value the
+	// name has there, review 4).
+	for name, value := range simpleInitialUserVars(home, inherited) {
 		initialVars[name] = value
 	}
 	if simplePathAbs(input.CWD) {
@@ -205,7 +207,8 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			switch previousScope[index+1] {
 			case 'c':
 				if ran {
-					states[parent] = uniqueSimpleStates(append(simpleScopeStates(states, parent), body...))
+					merged := append(simpleScopeStates(states, parent), body...)
+					states[parent] = uniqueSimpleStates(simpleJoinForgottenUserVars(merged, body))
 				}
 			case 'f':
 				// A called function body always runs; its local HOME ends
@@ -239,6 +242,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		emitted := make(map[SimpleCommand]bool)
 		for _, prior := range variants {
 			state := prior.clone()
+			simpleForgetUserVars(state.vars, part.binds)
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) == 0 && len(call.Assigns) != 0 && len(stmt.Redirs) == 0 {
 				updateSimpleVariables(state.vars, call.Assigns)
 				changed = true
@@ -354,7 +358,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						innerInterpreter = interpreter
 					}
 					inner := simpleCommands(innerInput, innerFacts, depth+1, innerInterpreter,
-						simpleChildUserVars(call, effective, shared))
+						simpleChildUserVars(call, effective, shared, innerInterpreter, simpleInitialUserVars(home, nil)))
 					if len(inner) == 0 && strings.TrimSpace(innerInput.Command) != "" {
 						zshHistory := innerInterpreter == "zsh" && len(innerFacts.Commands) == 1 &&
 							innerFacts.Commands[0].Executable == "history"
@@ -389,6 +393,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				// export HOME=v sets HOME for the commands after it, as
 				// HOME=v; export HOME does (GAP-2476).
 				updateSimpleDeclVariables(&state, decl, part.scope)
+			}
+			if call != nil {
+				simpleForgetUserVars(state.vars, simpleCallBindsUser(call))
 			}
 			nextCWD, changedDirectory := simpleCommandNextCWD(text, &state, effective)
 			if !changedDirectory {
@@ -1032,14 +1039,10 @@ func updateSimpleVariables(vars map[string]string, assigns []*syntax.Assign) {
 
 // The full action may bind a value that the simple-command walk cannot
 // resolve. Record only shell bindings, using the shared shell parser.
-//
-// unfollowed holds the names a for or select loop, read, mapfile, printf -v
-// or the text of an eval, trap or source binds: no plain assignment of the
-// walk gives them a value.
-func simpleBoundVariables(file *syntax.File) (bound, unfollowed map[string]bool) {
-	bound, unfollowed = make(map[string]bool), make(map[string]bool)
+func simpleBoundVariables(file *syntax.File) (bound map[string]bool) {
+	bound = make(map[string]bool)
 	if file == nil {
-		return bound, unfollowed
+		return bound
 	}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch part := node.(type) {
@@ -1049,17 +1052,7 @@ func simpleBoundVariables(file *syntax.File) (bound, unfollowed map[string]bool)
 			}
 		case *syntax.WordIter:
 			if part.Name != nil {
-				bound[part.Name.Value], unfollowed[part.Name.Value] = true, true
-			}
-		case *syntax.DeclClause:
-			// A local name ends with its function: the walk gives it no
-			// value.
-			if part.Variant != nil && part.Variant.Value != "export" && part.Variant.Value != "readonly" {
-				for _, assign := range part.Args {
-					if assign != nil && assign.Name != nil && slices.Contains(simpleUserNames, assign.Name.Value) {
-						unfollowed[assign.Name.Value] = true
-					}
-				}
+				bound[part.Name.Value] = true
 			}
 		case *syntax.FuncDecl:
 			for i := '1'; i <= '9'; i++ {
@@ -1077,7 +1070,7 @@ func simpleBoundVariables(file *syntax.File) (bound, unfollowed map[string]bool)
 			case "printf":
 				if len(part.Args) >= 3 && part.Args[1].Lit() == "-v" {
 					if name, known := simpleStaticWord(part.Args[2], nil); known && simpleVariableName(name) {
-						bound[name], unfollowed[name] = true, true
+						bound[name] = true
 					}
 				}
 			case "read", "mapfile", "readarray":
@@ -1090,22 +1083,90 @@ func simpleBoundVariables(file *syntax.File) (bound, unfollowed map[string]bool)
 						continue
 					}
 					if simpleVariableName(name) {
-						bound[name], unfollowed[name] = true, true
+						bound[name] = true
 					}
 					break
-				}
-			case "eval", "trap", ".", "source":
-				for _, arg := range part.Args[1:] {
-					if text, known := simpleStaticWord(arg, nil); !known || strings.Contains(text, "USER") ||
-						strings.Contains(text, "LOGNAME") {
-						unfollowed["USER"], unfollowed["LOGNAME"] = true, true
-					}
 				}
 			}
 		}
 		return true
 	})
-	return bound, unfollowed
+	return bound
+}
+
+// simpleCallBindsUser returns the names of USER and LOGNAME that the call
+// binds where the walk cannot follow the value: read, mapfile and readarray
+// name them, printf -v names one, and the text of an eval, trap or source
+// may bind any it spells (any when it is not static). The statements after
+// the call read no value for them; the statements before it do.
+func simpleCallBindsUser(call *syntax.CallExpr) []string {
+	if call == nil || len(call.Args) == 0 {
+		return nil
+	}
+	program, known := simpleStaticWord(call.Args[0], nil)
+	if !known {
+		return nil
+	}
+	var names []string
+	add := func(name string) {
+		if slices.Contains(simpleUserNames, name) && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	switch program {
+	case "printf":
+		if len(call.Args) >= 3 && call.Args[1].Lit() == "-v" {
+			if name, known := simpleStaticWord(call.Args[2], nil); known {
+				add(name)
+			}
+		}
+	case "read", "mapfile", "readarray":
+		for _, arg := range call.Args[1:] {
+			if name, known := simpleStaticWord(arg, nil); known {
+				add(name)
+			}
+		}
+	case "eval", "trap", ".", "source":
+		for _, arg := range call.Args[1:] {
+			text, known := simpleStaticWord(arg, nil)
+			for _, name := range simpleUserNames {
+				if !known || strings.Contains(text, name) {
+					add(name)
+				}
+			}
+		}
+	}
+	return names
+}
+
+// simpleForgetUserVars drops the value of each name from vars.
+func simpleForgetUserVars(vars map[string]string, names []string) {
+	for _, name := range names {
+		delete(vars, name)
+	}
+}
+
+// simpleJoinForgottenUserVars is merged less the USER and LOGNAME values
+// that a conditional or loop body forgot: a name that a read or a loop
+// binds in the body has no value the walk can follow after it.
+func simpleJoinForgottenUserVars(merged, body []simpleShellState) []simpleShellState {
+	var forgotten []string
+	for _, name := range simpleUserNames {
+		if slices.ContainsFunc(body, func(state simpleShellState) bool {
+			_, has := state.vars[name]
+			return !has
+		}) {
+			forgotten = append(forgotten, name)
+		}
+	}
+	if len(forgotten) == 0 {
+		return merged
+	}
+	for index := range merged {
+		merged[index] = merged[index].clone()
+		simpleForgetUserVars(merged[index].vars, forgotten)
+	}
+	return merged
 }
 
 func simpleVariableName(name string) bool {
@@ -1913,15 +1974,11 @@ var simpleUserNames = []string{"USER", "LOGNAME"}
 
 // simpleInitialUserVars is the value of each of USER and LOGNAME where a
 // walk starts: the base name of a POSIX home at the start of the action,
-// the values inherited where a shell body starts. A name in unfollowed has
-// none (a for, select, read or eval binds it where the walk cannot follow).
-func simpleInitialUserVars(home string, inherited map[string]string, unfollowed map[string]bool) map[string]string {
+// the values inherited where a shell body starts.
+func simpleInitialUserVars(home string, inherited map[string]string) map[string]string {
 	vars := make(map[string]string, len(simpleUserNames))
 	user := path.Base(home)
 	for _, name := range simpleUserNames {
-		if unfollowed[name] {
-			continue
-		}
 		if inherited != nil {
 			if value, ok := inherited[name]; ok {
 				vars[name] = value
@@ -1933,14 +1990,16 @@ func simpleInitialUserVars(home string, inherited map[string]string, unfollowed 
 	return vars
 }
 
-// simpleChildUserVars is USER and LOGNAME as the shell that call starts
-// sees them: the caller values in effective (prefix assignments applied),
-// changed by the NAME=value words an env wrapper puts before the shell. A
-// name is left out when a wrapper option or a word the walk cannot read may
-// change the environment (env with an option, sudo, a command
-// substitution): the body then reads it as an unknown name. A shared body
-// (eval, trap) runs in the caller itself.
-func simpleChildUserVars(call *syntax.CallExpr, effective map[string]string, shared bool) map[string]string {
+// simpleChildUserVars is USER and LOGNAME as the shell (shell, bash when
+// empty) that call starts sees them: the caller values in effective (prefix
+// assignments applied), changed in order by what an env wrapper puts before
+// the shell. NAME=value sets a name; env -u NAME or -i unsets it, which a
+// bash or sh child reads as empty and a zsh child as the login name again
+// (login holds those values); the other names stay what they are. A name is
+// left out when another wrapper option, sudo, or a word the walk cannot read
+// may change the environment: the body then reads it as an unknown name. A
+// shared body (eval, trap) runs in the caller itself.
+func simpleChildUserVars(call *syntax.CallExpr, effective map[string]string, shared bool, shell string, login map[string]string) map[string]string {
 	child := make(map[string]string, len(simpleUserNames))
 	for _, name := range simpleUserNames {
 		if value, ok := effective[name]; ok {
@@ -1950,9 +2009,57 @@ func simpleChildUserVars(call *syntax.CallExpr, effective map[string]string, sha
 	if shared || call == nil {
 		return child
 	}
-	for _, arg := range call.Args {
-		word, static := simpleStaticWord(arg, effective)
-		if !static || strings.HasPrefix(word, "-") {
+	unset := func(name string) {
+		if !slices.Contains(simpleUserNames, name) {
+			return
+		}
+		if value, ok := login[name]; ok && shell == "zsh" {
+			child[name] = value
+		} else if shell == "zsh" {
+			delete(child, name)
+		} else {
+			child[name] = ""
+		}
+	}
+	env := false
+	for index := 0; index < len(call.Args); index++ {
+		word, static := simpleStaticWord(call.Args[index], effective)
+		if !static {
+			clear(child)
+			return child
+		}
+		if index == 0 {
+			env = filepath.Base(word) == "env"
+		} else if env {
+			switch {
+			case word == "-i" || word == "--ignore-environment" || word == "-":
+				for _, name := range simpleUserNames {
+					unset(name)
+				}
+				continue
+			case word == "-u" || word == "--unset":
+				index++
+				name, known := "", false
+				if index < len(call.Args) {
+					name, known = simpleStaticWord(call.Args[index], effective)
+				}
+				if !known {
+					clear(child)
+					return child
+				}
+				unset(name)
+				continue
+			case strings.HasPrefix(word, "--unset="):
+				unset(strings.TrimPrefix(word, "--unset="))
+				continue
+			case strings.HasPrefix(word, "-u") && !strings.HasPrefix(word, "--") && len(word) > 2:
+				unset(word[2:])
+				continue
+			case word == "-0" || word == "--null" || word == "-v" || word == "--debug":
+				continue
+			}
+		}
+		if index != 0 && strings.HasPrefix(word, "-") {
 			clear(child)
 			return child
 		}

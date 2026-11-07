@@ -93,6 +93,36 @@ func TestG235bKnownValueOrderAndIndependentNames(t *testing.T) {
 			row{"nested-bound-ordinary-" + name + "-redirect", name + `=ordinary; bash -c ` + sq + `printf x > ` + parent + o + `/statealias` + sq, false},
 			row{"nested-prefix-ordinary-" + name + "-editor", name + `=ordinary bash -c ` + sq + `sed -i d ` + parent + o + `/aliasdir/config.yaml` + sq, false},
 		)
+		// Review 4: a binding that comes later (a read, printf -v, a loop,
+		// a declaration or an eval) leaves the write before it as it is; a
+		// local value ends with its function; env -u and -i change only the
+		// names they name, and a bash child then reads an unset name as empty.
+		editor := `sed -i d ` + parent + o + `/aliasdir/config.yaml`
+		redirect := `printf x > ` + parent + o + `/statealias`
+		rows = append(rows,
+			row{name + "-before-read-editor", editor + `; read ` + name + ` </dev/null`, true},
+			row{name + "-before-read-redirect", redirect + `; read ` + name + ` </dev/null`, true},
+			row{name + "-before-printf-v-editor", editor + `; printf -v ` + name + ` %s ordinary`, true},
+			row{name + "-before-loop-editor", editor + `; for ` + name + ` in ordinary; do :; done`, true},
+			row{name + "-before-declare-editor", editor + `; declare ` + name + `=ordinary`, true},
+			row{name + "-before-eval-editor", editor + `; eval ` + sq + name + `=ordinary` + sq, true},
+			row{name + "-in-loop-before-read-editor", `for i in 1 2; do ` + editor + `; read ` + name + ` </dev/null; done`, true},
+			row{name + "-nested-before-read-redirect", `bash -c ` + sq + redirect + `; read ` + name + ` </dev/null` + sq, true},
+			row{name + "-local-after-function-editor", `f() { local ` + name + `=ordinary; :; }; f; ` + editor, true},
+			row{name + "-declare-after-function-editor", `f() { declare ` + name + `=ordinary; :; }; f; ` + editor, true},
+			row{name + "-local-after-function-redirect", `f() { local ` + name + `=ordinary; :; }; f; ` + redirect, true},
+			row{name + "-env-unset-other-editor", `env -u ` + notName + ` bash -c ` + sq + editor + sq, true},
+			row{name + "-env-unset-other-redirect", `env -u ` + notName + ` bash -c ` + sq + redirect + sq, true},
+			row{name + "-env-unset-long-other-redirect", `env --unset=` + notName + ` bash -c ` + sq + redirect + sq, true},
+			row{name + "-env-unset-zsh-redirect", `env -u ` + name + ` zsh -c ` + sq + redirect + sq, true},
+			row{name + "-env-clear-set-redirect", `env -i ` + name + `=` + active + ` bash -c ` + sq + redirect + sq, true},
+			row{name + "-ordinary-before-read-editor", name + `=ordinary; ` + editor + `; read ` + name + ` </dev/null`, false},
+			row{name + "-local-in-function-editor", `f() { local ` + name + `=ordinary; ` + editor + `; }; f`, false},
+			row{name + "-env-unset-ordinary", `env -u ` + name + ` bash -c ` + sq + redirect + sq, false},
+			row{name + "-env-unset-long-ordinary", `env --unset=` + name + ` bash -c ` + sq + redirect + sq, false},
+			row{name + "-env-clear-ordinary", `env -i bash -c ` + sq + redirect + sq, false},
+			row{name + "-env-clear-editor-ordinary", `env -i bash -c ` + sq + editor + sq, false},
+		)
 	}
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, pack := range []string{"", "strict", "permissive"} {
