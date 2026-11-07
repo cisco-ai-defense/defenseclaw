@@ -18,7 +18,7 @@ import (
 // whose probe runs probe, and restores the real share handling after the test.
 func fakeNetworkShare(t *testing.T, prefix string, wait, deadAfter time.Duration, probe func(string)) *atomic.Int64 {
 	t.Helper()
-	oldRoot, oldProbe := networkShareRootOf, probeNetworkShare
+	oldRoot, oldProbe, oldWalk := networkShareRootOf, probeNetworkShare, networkShareLinkWalk
 	oldWait, oldDead := networkShareAnswerWait, networkShareDeadAfter
 	networkShares.mu.Lock()
 	oldProbes := networkShares.probes
@@ -39,9 +39,10 @@ func fakeNetworkShare(t *testing.T, prefix string, wait, deadAfter time.Duration
 		probes.Add(1)
 		probe(root)
 	}
+	networkShareLinkWalk = true
 	networkShareAnswerWait, networkShareDeadAfter = wait, deadAfter
 	t.Cleanup(func() {
-		networkShareRootOf, probeNetworkShare = oldRoot, oldProbe
+		networkShareRootOf, probeNetworkShare, networkShareLinkWalk = oldRoot, oldProbe, oldWalk
 		networkShareAnswerWait, networkShareDeadAfter = oldWait, oldDead
 		networkShares.mu.Lock()
 		networkShares.probes = oldProbes
