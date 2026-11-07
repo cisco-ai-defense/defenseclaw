@@ -224,7 +224,9 @@ func yamlSingleQuoted(value string) string {
 // start, in that order, and it ends with the command alone.
 func TestRootLeftoversRemedyReturnsHomeAndMovedStore(t *testing.T) {
 	home := t.TempDir()
-	store := filepath.Join(t.TempDir(), "moved store")
+	// The store name carries an apostrophe: the YAML scalar doubles it and the
+	// printed command escapes it, and both must give back the same path.
+	store := filepath.Join(t.TempDir(), "O'Connor moved store")
 	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("data_dir: "+yamlSingleQuoted(store)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +239,7 @@ func TestRootLeftoversRemedyReturnsHomeAndMovedStore(t *testing.T) {
 		t.Fatalf("remedy is not stop, return, start: %q", remedy)
 	}
 	for _, dir := range []string{home, store} {
-		if !strings.Contains(remedy, "'"+dir+"'") {
+		if !strings.Contains(remedy, shellQuote(dir)) {
 			t.Errorf("remedy does not return %q: %q", dir, remedy)
 		}
 	}
