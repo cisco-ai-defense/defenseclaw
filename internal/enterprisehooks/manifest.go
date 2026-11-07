@@ -77,7 +77,7 @@ func loadManifestWithSHA256(path string, validateTarget func(int, ManifestTarget
 		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest path is required")
 	}
 	var data []byte
-	err := safefile.RetryTransientRead(func() error {
+	err := safefile.RetryPublishedRead(func() error {
 		var readErr error
 		data, readErr = readManifestStableBytes(path)
 		return readErr
