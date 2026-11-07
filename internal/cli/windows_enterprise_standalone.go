@@ -2195,7 +2195,7 @@ func windowsEnterprisePurgeRerunFindsAccounts(report *windowsEnterpriseInstaller
 // look for behind it, or a folder below it, is not listed as one it could not
 // remove, and a link below another kept link is not named again (GAP-0773).
 func addWindowsEnterpriseMachineStateWarning(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
-	var failed, kept []string
+	var failed, kept, stale []string
 	seen := map[string]bool{}
 	entries := windowsEnterpriseReportStrings(report.MachineStateRemaining)
 	var links []string
@@ -2214,7 +2214,9 @@ func addWindowsEnterpriseMachineStateWarning(result *enterprisestatus.Result, re
 			continue
 		}
 		seen[key] = true
-		if strings.HasPrefix(reason, "kept: ") {
+		if strings.HasPrefix(reason, enterprisepolicy.StaleHookKept) {
+			stale = append(stale, entry)
+		} else if strings.HasPrefix(reason, "kept: ") {
 			if strings.HasPrefix(reason, windowsEnterpriseKeptLinkReason) && windowsEnterpriseCodexLinkPath(path) {
 				// A link at the Codex folder is named with what it cannot
 				// promise, whichever step met it first (GAP-0773).
@@ -2231,6 +2233,15 @@ func addWindowsEnterpriseMachineStateWarning(result *enterprisestatus.Result, re
 			len(failed),
 			windowsEnterpriseBoundedLabels(failed),
 		))
+	}
+	if len(stale) > 0 {
+		result.AddWarning("vendor_policy_hook_left", fmt.Sprintf(
+			"the uninstall left %d vendor policy file(s) byte for byte because another account can change them, and they may still hold "+
+				"DefenseClaw hook entries that name programs the uninstall removed; the agent runs those entries at its next tool call, "+
+				"the program is not there, and depending on the agent the call fails or is blocked until they are gone. For each file, "+
+				"remove the other account's access entry (the Fix command), check the file, then delete the entries whose command names "+
+				"DefenseClaw's hook (defenseclaw-hook.exe), or restore the file from a backup: %s",
+			len(stale), windowsEnterpriseBoundedLabels(stale)))
 	}
 	if len(kept) > 0 {
 		result.AddWarning("machine_state_kept", fmt.Sprintf(

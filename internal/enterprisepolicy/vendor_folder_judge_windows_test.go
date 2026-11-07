@@ -388,6 +388,18 @@ func TestRemovalKeepsAnUntrustedRecordedFileAndWarnsOnce(t *testing.T) {
 			if record, err := loadRecord(opts, tc.record); err != nil || record != nil {
 				t.Fatalf("record = %+v, %v; want it dropped", record, err)
 			}
+			// The lifecycle's result names the file once, from the folder as it
+			// is after the uninstall, whatever record is left.
+			kept := KeptUntrustedPolicyFiles(opts)
+			if len(kept) != 1 || !strings.HasPrefix(kept[0], file+": "+StaleHookKept) || !strings.Contains(kept[0], "S-1-5-32-545") {
+				t.Fatalf("kept = %q; want one entry for %s naming the account", kept, file)
+			}
+			if err := applySDDL(file, publicFileSDDL); err != nil {
+				t.Fatal(err)
+			}
+			if kept := KeptUntrustedPolicyFiles(opts); len(kept) != 0 {
+				t.Fatalf("a file only administrators can change is listed: %q", kept)
+			}
 			state, _ := stateNamed(result, tc.connector)
 			named := 0
 			for _, warning := range state.Warnings {

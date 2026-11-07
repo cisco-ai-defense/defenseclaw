@@ -982,3 +982,9 @@ func IsVendorFolderRefusal(error) bool { return false }
 // reclaimRefusesContentDrift is the Windows standalone rule for vendor
 // folders; no unix vendor folder is taken over or kept, so it is false.
 var reclaimRefusesContentDrift = func() bool { return false }
+
+// StaleHookKept is the reason of a KeptUntrustedPolicyFiles entry.
+const StaleHookKept = "stale hook: "
+
+// KeptUntrustedPolicyFiles lists nothing off Windows.
+func KeptUntrustedPolicyFiles(Options) []string { return nil }
