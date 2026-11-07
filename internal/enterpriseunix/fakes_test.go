@@ -459,6 +459,14 @@ func newTestHost(t *testing.T, goos string) *testHost {
 		t.Fatal(err)
 	}
 	h := &testHost{t: t, runner: &fakeRunner{versions: map[string]string{}}, healthy: true, owners: map[string][2]int{}}
+	// The fresh account-record proof reads the account database of the machine
+	// running the test, whatever the fake host claims to be: on a macOS runner
+	// it answered "gone" for fixture names and turned every missing-account
+	// miss into a confirmed removal. A fake host proves nothing unless a test
+	// replaces this after newTestHost.
+	previousRecordProof := guardianFreshAccountRecordGone
+	guardianFreshAccountRecordGone = func(context.Context, string) bool { return false }
+	t.Cleanup(func() { guardianFreshAccountRecordGone = previousRecordProof })
 	if goos == "darwin" {
 		// A fake macOS host never reads a real process's argv: the fake ps
 		// lists made-up PIDs, and kern.procargs2 of a live PID with the same
