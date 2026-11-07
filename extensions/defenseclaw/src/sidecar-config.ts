@@ -162,6 +162,10 @@ export function loadSidecarConfig(): SidecarConfig {
     }
   }
 
+  // The plugin keys its listener proof by host and connects to it: name the
+  // address the gateway binds instead of a name that may resolve to ::1.
+  if (host.trim().toLowerCase() === "localhost") host = DEFAULT_HOST;
+
   cached = {
     host,
     apiPort,

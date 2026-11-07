@@ -1099,6 +1099,9 @@ func applyWindowsEnterprisePolicyAs(ctx context.Context, result *enterprisestatu
 	if state != nil && state.ConfigUnrecorded {
 		result.SecurityComplete, result.Noop, result.NoopReason = false, false, ""
 		result.AddError("lifecycle_error", "config generation is unproven or records a hand edit; run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1 from an elevated prompt")
+		if current, err := windowsBundleCurrent(); err == nil && current {
+			windowsEnterpriseConfigRecoveryGuidance(result, true)
+		}
 	}
 	if state == nil {
 		result.SecurityComplete = false
@@ -1190,41 +1193,6 @@ func writeWindowsEnterprisePolicyState(state *enterprisestatus.PolicyState) erro
 		return err
 	}
 	return writeFileKeepingDACL(filepath.Join(filepath.Dir(deployment.MetadataPath), enterprisestatus.PolicyStateFileName), append(data, '\n'), deployment.MetadataPath)
-}
-
-// writeFileKeepingDACL replaces path with data, giving the new file the
-// DACL of sibling before it is renamed into place, so it is never readable
-// by more than sibling is. Each write stages in its own exclusively created
-// file beside path: two lifecycle runs that finish at the same time shared
-// path+".tmp" before, so one could publish the other's bytes or fail on a
-// staging file the other had already renamed (GAP-1404).
-func writeFileKeepingDACL(path string, data []byte, sibling string) error {
-	restore, err := keepConfigDACL(sibling)
-	if err != nil {
-		return err
-	}
-	staging, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	temporary := staging.Name()
-	_, writeErr := staging.Write(data)
-	if closeErr := staging.Close(); writeErr == nil {
-		writeErr = closeErr
-	}
-	if writeErr != nil {
-		_ = os.Remove(temporary)
-		return writeErr
-	}
-	if err := restore(temporary); err != nil {
-		_ = os.Remove(temporary)
-		return err
-	}
-	if err := os.Rename(temporary, path); err != nil {
-		_ = os.Remove(temporary)
-		return err
-	}
-	return nil
 }
 
 // windowsStandaloneGatewayHealth reads /health of the standalone gateway on
@@ -1546,8 +1514,8 @@ func addWindowsEnterpriseMissingCredentialWarnings(result *enterprisestatus.Resu
 			continue
 		}
 		result.AddWarning("credential_missing", fmt.Sprintf(
-			"the config names the protected credential %s (%s) but it is not stored, so %s; store it from an elevated prompt with `defenseclaw.exe enterprise secret set --name %s --from-file <key file>`",
-			name, named.key, named.effect, name))
+			"the config names the protected credential %s (%s) but it is not stored, so %s; store it from an elevated PowerShell prompt with %s",
+			name, named.key, named.effect, managedWindowsCommand("enterprise", "secret", "set", "--name", name, "--from-file", "<key file>")))
 	}
 }
 
@@ -2565,14 +2533,16 @@ func applyWindowsEnterpriseGatewayStartFailure(result *enterprisestatus.Result, 
 	message := fmt.Sprintf("the %s service is not running; the last error it logged: %s (log: %s)",
 		report.GatewayService, windowsEnterpriseBoundedDiagnostic(reason), logPath)
 	if strings.Contains(reason, "Access is denied") {
-		message += "; " + windowsEnterpriseRepairServiceAccess
+		message += "; " + windowsEnterpriseRepairServiceAccess()
 	}
 	result.AddError("gateway_start_failed", message)
 }
 
 // windowsEnterpriseRepairServiceAccess is what restores a DefenseClaw
 // service's access to its folders.
-const windowsEnterpriseRepairServiceAccess = "run defenseclaw enterprise windows repair --profile standalone from an elevated prompt to restore the service's access"
+func windowsEnterpriseRepairServiceAccess() string {
+	return "run " + windowsEnterpriseAdminCommand("repair") + " from an elevated PowerShell prompt to restore the service's access"
+}
 
 // windowsEnterpriseServiceRightsPattern matches the lifecycle's report that a
 // managed path lacks the rights of a service's virtual account, which it
@@ -2610,7 +2580,7 @@ func windowsEnterpriseNameServiceRights(message string, repair bool) string {
 	text := fmt.Sprintf("the %s service (NT SERVICE\\%s, %s) is missing required rights on %s (required %s, has %s)",
 		name, name, sid, message[match[8]:match[9]], message[match[4]:match[5]], message[match[6]:match[7]])
 	if repair {
-		text += "; " + windowsEnterpriseRepairServiceAccess
+		text += "; " + windowsEnterpriseRepairServiceAccess()
 	}
 	return message[:match[0]] + text
 }
@@ -4301,7 +4271,13 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		followStatus, _, statusErr := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs("status", windowsEnterpriseEnsureProbeOptions(opts)))
 		// A follow-up probe that cannot read the host leaves the completed
 		// repair as the result, exactly like a probe that failed to launch.
-		if statusErr == nil && !followStatus.probeFailed {
+		if statusErr == nil && !followStatus.probeFailed && !deferredActivation &&
+			windowsEnterpriseRecoveryRestoredOtherRelease(opts, followStatus) {
+			// The installed CLI recovered a transaction of another release
+			// and carries no payload to finish it: the rollback is the
+			// result, with the next step (rel-1-0-6 GAP-0649).
+			result.AddWarning("recovered_pending_transaction", windowsEnterpriseRolledBackMessage(followStatus.InstalledVersion))
+		} else if statusErr == nil && !followStatus.probeFailed {
 			followPlan, planErr := planWindowsEnterpriseEnsure(followStatus, opts, script)
 			if planErr != nil {
 				applyWindowsEnterpriseInstallerReport(result, opts, report, run)
@@ -4492,6 +4468,22 @@ func planWindowsEnterpriseEnsure(
 		return windowsEnterpriseEnsurePlan{Action: "upgrade", Reason: "drift:" + drift}, nil
 	}
 	return windowsEnterpriseEnsurePlan{Reason: "compliant"}, nil
+}
+
+// windowsEnterpriseRecoveryRestoredOtherRelease reports a pending-transaction
+// recovery by a run without a payload (the installed CLI: Remediate-Fix, an
+// MDM ensure) that restored a release other than this CLI's. The transaction
+// was that other release's change, cut off part way (rel-1-0-6 GAP-0649);
+// only its Setup can finish it, so planning the upgrade here can only fail.
+func windowsEnterpriseRecoveryRestoredOtherRelease(opts *windowsEnterpriseLifecycleOptions, status *windowsEnterpriseInstallerReport) bool {
+	if opts == nil || status == nil || !status.Installed || status.TransactionPending {
+		return false
+	}
+	if len(missingWindowsEnterpriseSources(opts)) == 0 {
+		return false
+	}
+	installed := strings.TrimSpace(status.InstalledVersion)
+	return installed != "" && compareWindowsEnterpriseVersions(opts.productVersion, installed) != 0
 }
 
 // windowsEnterpriseEnsureProbeFailure carries the failed status probe's own

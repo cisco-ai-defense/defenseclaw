@@ -259,7 +259,7 @@ func runSidecarStatusJSON(w io.Writer) error {
 	if problem := foreignGatewayListener(cfg); problem != "" {
 		doc.Error = problem
 		doc.Hint = foreignGatewayListenerFix(cfg)
-		failure = errors.New("the gateway port is held by another process")
+		failure = foreignGatewayStatusError(problem)
 	} else if clientErr != nil {
 		doc.Error = clientErr.Error()
 		failure = clientErr
@@ -282,6 +282,20 @@ func runSidecarStatusJSON(w io.Writer) error {
 		return err
 	}
 	return failure
+}
+
+func foreignGatewayStatusLabel(problem string) string {
+	if problem == daemon.RootGatewayListenerReason {
+		return "Sidecar Status: RUNNING AS ROOT"
+	}
+	return "Sidecar Status: NOT THIS ACCOUNT'S GATEWAY"
+}
+
+func foreignGatewayStatusError(problem string) error {
+	if problem == daemon.RootGatewayListenerReason {
+		return errors.New("the gateway is running as root")
+	}
+	return errors.New("the gateway port is held by another process")
 }
 
 // gatewayStatusConfigLoadError adds the daemon state and the next step when
@@ -450,11 +464,11 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	// another home's or account's gateway as this one.
 	if problem := foreignGatewayListener(cfg); problem != "" {
 		fmt.Println()
-		Warn("Sidecar Status: NOT THIS ACCOUNT'S GATEWAY")
+		Warn(foreignGatewayStatusLabel(problem))
 		printGatewayKV("Endpoint", addr)
-		Subhead(problem + ". Its status is not shown.")
+		Subhead(strings.TrimSuffix(problem, ".") + ". Its status is not shown.")
 		Subhead(foreignGatewayListenerFix(cfg))
-		return fmt.Errorf("the gateway port is held by another process")
+		return foreignGatewayStatusError(problem)
 	}
 
 	client, clientErr := gatewayPeerClientForURL(cfg, addr, 5*time.Second)
@@ -465,11 +479,11 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		if problem := foreignGatewayListener(cfg); problem != "" {
 			fmt.Println()
-			Warn("Sidecar Status: NOT THIS ACCOUNT'S GATEWAY")
+			Warn(foreignGatewayStatusLabel(problem))
 			printGatewayKV("Endpoint", addr)
-			Subhead(problem + ". Its status is not shown.")
+			Subhead(strings.TrimSuffix(problem, ".") + ". Its status is not shown.")
 			Subhead(foreignGatewayListenerFix(cfg))
-			return fmt.Errorf("the gateway port is held by another process")
+			return foreignGatewayStatusError(problem)
 		}
 		var requestErr *url.Error
 		if errors.As(err, &requestErr) {

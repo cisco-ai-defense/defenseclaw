@@ -269,6 +269,18 @@ $script:DefenseClawQuarantinedRoots = @()
 # ran with that gateway, and why it declined one. Reset per lifecycle run.
 $script:DefenseClawRecoveryGatewayCandidate = $null
 $script:DefenseClawRecoveryGatewayRuns = @()
+# The SHA-256 of this module's bytes as imported (rel-1-0-6 GAP-0649). A
+# Repair that recovered a pending transaction compares it with the module the
+# recovery put back: this module never drives another release's payload.
+$script:DefenseClawRunningModuleSHA256 = ''
+try {
+    $script:DefenseClawRunningModuleSHA256 = (
+        Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+}
+catch {
+    $script:DefenseClawRunningModuleSHA256 = ''
+}
 # Standalone: the gateway of the running Setup payload, which puts back the
 # OWNER RIGHTS entry an owner write took out of the managed state of the
 # enrolled accounts before the installed helper prepares, collects or purges
@@ -7888,6 +7900,10 @@ function Initialize-DefenseClawManagedRoot {
     $relative = $full.Substring($base.Length).TrimStart('\')
     $components = @($relative.Split('\') | Microsoft.PowerShell.Core\Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     $rootCreated = $false
+    # The vendor folders above the root this call creates (C:\ProgramData\Cisco,
+    # C:\Program Files\Cisco): recorded so a purge removes them once empty, and
+    # only them (GAP-0091).
+    $createdAncestors = [Collections.Generic.List[string]]::new()
     for ($index = 0; $index -lt $components.Count; $index++) {
         $current = Microsoft.PowerShell.Management\Join-Path $current $components[$index]
         $isLeaf = $index -eq $components.Count - 1
@@ -7902,6 +7918,9 @@ function Initialize-DefenseClawManagedRoot {
                 else {
                     ''
                 })
+            if (-not $isLeaf -and $createdThisComponent) {
+                $createdAncestors.Add($current)
+            }
             if ($index -eq $components.Count - 1) {
                 $rootCreated = [bool]$createdThisComponent
                 if (-not $rootCreated -and $DeferFinalAcl) {
@@ -7935,6 +7954,7 @@ function Initialize-DefenseClawManagedRoot {
             }
         }
     }
+    Add-DefenseClawStandaloneCreatedFolderRecord -Path $createdAncestors.ToArray()
 
     if ($rootCreated -and $DeferFinalAcl) {
         [void](Assert-DefenseClawManagedRootStagingAcl `
@@ -13062,6 +13082,15 @@ function Set-DefenseClawManagedAcls {
     Invoke-DefenseClawBundleAclContract -Layout $Layout -GatewayServiceSID $gatewaySID -Repair
     Set-DefenseClawPathAcl -Path $Layout.ConfigPath -Kind ConfigFile -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.ManifestPath -Kind AdminFile -GatewayServiceSID $gatewaySID
+    if (Test-DefenseClawStandaloneProfile) {
+        foreach ($name in @('config', 'manifest')) {
+            $approvedPath = Get-DefenseClawApprovedPolicyPath -Layout $Layout -Name $name
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $approvedPath -PathType Leaf) {
+                Set-DefenseClawPathAcl -Path $approvedPath -Kind AdminFile `
+                    -GatewayServiceSID $script:AdministratorsSID
+            }
+        }
+    }
     Set-DefenseClawPathAcl -Path $Layout.RuntimeDirectory -Kind RuntimeDirectory -GatewayServiceSID $gatewaySID
     $runtimeEnv = [IO.Path]::Combine([string]$Layout.RuntimeDirectory, '.env')
     if ((Test-DefenseClawStandaloneProfile) -and
@@ -15288,7 +15317,8 @@ function New-DefenseClawDeploymentMetadata {
         [string]$InstallRootIdentity = '',
         [string]$StateRootIdentity = '',
         [bool]$UninstallPurgeRequested = $false,
-        [bool]$UninstallPurgeUserStateRequested = $false
+        [bool]$UninstallPurgeUserStateRequested = $false,
+        [hashtable]$ApprovedPolicySources = @{}
     )
     if ($Installed -and
         ($UninstallPurgeRequested -or $UninstallPurgeUserStateRequested)) {
@@ -15461,6 +15491,9 @@ function New-DefenseClawDeploymentMetadata {
         # Client metadata keeps its historical field set exactly.
         $metadata['broker_account'] = ''
         $metadata['profile'] = 'standalone'
+        if ($Installed -and $ApprovedPolicySources.Count -gt 0) {
+            $metadata['approved_policy_sources'] = $ApprovedPolicySources
+        }
         $metadata['trust_mode'] = if ([string]$script:DefenseClawTrustMode -ceq 'HashPinned') {
             'hash_pinned'
         }
@@ -16374,6 +16407,9 @@ function New-DefenseClawTransaction {
     }
     # Standalone only: the Secure Client snapshot is unchanged.
     if (Test-DefenseClawStandaloneProfile) {
+        foreach ($name in @('config', 'manifest')) {
+            $destinations.Add((Get-DefenseClawApprovedPolicyPath -Layout $Layout -Name $name))
+        }
         foreach ($destination in @(Get-DefenseClawConfigSidecarPaths -Layout $Layout)) {
             # An existing generation record is not snapshotted: the counter
             # never goes back, so a rollback leaves it and records the
@@ -17866,6 +17902,7 @@ function Initialize-DefenseClawCodexMachinePolicyParent {
                 -SnapshotPath $SnapshotPath `
                 -Path $directory `
                 -Layout $Layout
+            Add-DefenseClawStandaloneCreatedFolderRecord -Path @($directory)
         }
     }
 }
@@ -18095,35 +18132,6 @@ function Get-DefenseClawRuntimeSelectorOtherHooks {
     }
 }
 
-# Setup creates Claude Code's managed-settings.d (and ClaudeCode) for its
-# drop-ins. The finalize purge cannot remove them: the Claude serialization
-# lock is still inside until the step above drops it (GAP-0100). A purge
-# removes each one that is now empty; anything else, or a reparse point,
-# stays. Writes "path: reason" for an empty folder it could not remove.
-function Remove-DefenseClawEmptyClaudeManagedSettingsFolders {
-    param([Parameter(Mandatory)][string]$ProgramFiles)
-    $root = [IO.Path]::Combine($ProgramFiles, 'ClaudeCode')
-    foreach ($directory in @([IO.Path]::Combine($root, 'managed-settings.d'), $root)) {
-        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $directory -Force -ErrorAction SilentlyContinue
-        if ($null -eq $item) {
-            continue
-        }
-        if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-            return
-        }
-        if ($null -ne (Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $directory -Force | Microsoft.PowerShell.Utility\Select-Object -First 1)) {
-            return
-        }
-        try {
-            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $directory -Force -ErrorAction Stop
-        }
-        catch {
-            "${directory}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
-            return
-        }
-    }
-}
-
 # A deployment that is gone (its StateRoot was removed, or a fresh install
 # rolled back onto files an earlier one left) can leave DefenseClaw's Claude
 # Code drop-ins in managed-settings.d: the policy (90-defenseclaw.json), its
@@ -18201,7 +18209,6 @@ function Remove-DefenseClawStandaloneOrphanedHookMachineState {
             "${path}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
         }
     }
-    Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles $ProgramFiles
 }
 
 # The public machine policy summary (machine-policy.json) lives in
@@ -18287,16 +18294,615 @@ function Add-DefenseClawStandalonePurgeMachineLeftovers {
     return $Result
 }
 
+# The standalone created-folder record (GAP-0091). Setup and the managed
+# hooks create vendor folders under ProgramData and Program Files that hold
+# DefenseClaw's files: C:\ProgramData\Cisco (above StateRoot and the
+# lifecycle folder), C:\Program Files\Cisco (above InstallRoot),
+# C:\ProgramData\OpenAI and OpenAI\Codex, C:\ProgramData\Cursor and
+# C:\Program Files\ClaudeCode with managed-settings.d. Whoever creates one
+# writes a write-once administrator-only record of it in
+# <LifecycleDirectory>\created-folders, named by the SHA-256 of the path
+# with ASCII letters in lower case; the Go writer (enterprisehooks,
+# created_folders_windows.go) uses the same name and schema. A folder that
+# already existed is never recorded. A purge that leaves no deployment
+# removes each recorded folder that is empty and still DefenseClaw's
+# (administrator-owned, no reparse point on the way, its parent
+# administrator-controlled), deepest first, after everything else: a folder
+# that existed before the install, or that holds another program's files,
+# stays, and the walk up stops at the first folder DefenseClaw did not
+# create. A record goes only once its folder is gone; a rollback that
+# removes a folder it created takes the record too. The record sits outside
+# StateRoot so it outlives that purge. Standalone only.
+$script:CreatedFolderRecordSchema = 1
+
+function Get-DefenseClawStandaloneCreatedFolderRecordDirectory {
+    return [IO.Path]::Combine(
+        [string](Get-DefenseClawProfileRoots -EnterpriseProfile Standalone).LifecycleDirectory,
+        'created-folders'
+    )
+}
+
+# The record name folds only the ASCII letters A-Z to lower case, as the Go
+# writer does (windowsCreatedFolderRecordName): .NET ToLowerInvariant and Go
+# strings.ToLower disagree on some other letters (U+0130 for one), so a full
+# fold would let one side refuse the other's record. Two spellings of one
+# folder that differ in the case of a non-ASCII letter get two records,
+# which both name that folder.
+function ConvertTo-DefenseClawAsciiLowerCase {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+    $chars = $Value.ToCharArray()
+    for ($index = 0; $index -lt $chars.Length; $index++) {
+        $code = [int]$chars[$index]
+        if ($code -ge 0x41 -and $code -le 0x5A) {
+            $chars[$index] = [char]($code + 0x20)
+        }
+    }
+    return [string]::new($chars)
+}
+
+function Get-DefenseClawCreatedFolderRecordName {
+    param([Parameter(Mandatory)][string]$Path)
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes((ConvertTo-DefenseClawAsciiLowerCase -Value $full)))
+    }
+    finally {
+        $sha.Dispose()
+    }
+    return (-join @($hash | Microsoft.PowerShell.Core\ForEach-Object { $_.ToString('x2') })) + '.json'
+}
+
+# A machine vendor folder: strictly below one of Roots (ProgramData,
+# Program Files), never a root itself.
+function Test-DefenseClawCreatedFolderRecordable {
+    param(
+        [AllowEmptyString()][string]$Path,
+        [Parameter(Mandatory)][string[]]$Roots
+    )
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not [IO.Path]::IsPathRooted($Path)) {
+        return $false
+    }
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    foreach ($root in $Roots) {
+        if ([string]::IsNullOrWhiteSpace($root)) {
+            continue
+        }
+        $base = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+        if ($full.Length -gt $base.Length -and
+            $full.StartsWith($base, [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+# Records folders this run created. Best effort: a folder it cannot record
+# stays after a purge, the safe side, so a failure never fails the run that
+# created it. It never creates the lifecycle folder itself.
+function Add-DefenseClawStandaloneCreatedFolderRecord {
+    param(
+        [AllowEmptyCollection()][string[]]$Path = @(),
+        [string]$RecordDirectory,
+        [string[]]$Roots = @($script:ProgramData, $script:ProgramFiles)
+    )
+    if (-not (Test-DefenseClawStandaloneProfile) -or @($Path).Count -eq 0) {
+        return
+    }
+    try {
+        if ([string]::IsNullOrWhiteSpace($RecordDirectory)) {
+            $RecordDirectory = Get-DefenseClawStandaloneCreatedFolderRecordDirectory
+        }
+        $lifecycle = [IO.Path]::GetDirectoryName($RecordDirectory)
+        if (-not [IO.Directory]::Exists($lifecycle)) {
+            return
+        }
+        Assert-DefenseClawNoReparsePath -Path $lifecycle
+        if (-not [IO.Directory]::Exists($RecordDirectory)) {
+            [void](New-DefenseClawProtectedDirectory -Path $RecordDirectory)
+        }
+        Assert-DefenseClawNoReparsePath -Path $RecordDirectory
+        Assert-DefenseClawPathAcl `
+            -Path $RecordDirectory `
+            -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+        foreach ($folder in @($Path)) {
+            if (-not (Test-DefenseClawCreatedFolderRecordable -Path $folder -Roots $Roots)) {
+                continue
+            }
+            $full = [IO.Path]::GetFullPath($folder).TrimEnd('\')
+            $recordPath = [IO.Path]::Combine($RecordDirectory, (Get-DefenseClawCreatedFolderRecordName -Path $full))
+            if ([IO.File]::Exists($recordPath)) {
+                continue
+            }
+            $body = [Text.Encoding]::UTF8.GetBytes((
+                [ordered]@{ schema_version = $script:CreatedFolderRecordSchema; path = $full } |
+                    Microsoft.PowerShell.Utility\ConvertTo-Json -Compress))
+            try {
+                $stream = [IO.FileStream]::new($recordPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            }
+            catch [IO.IOException] {
+                if ([IO.File]::Exists($recordPath)) {
+                    continue
+                }
+                throw
+            }
+            try {
+                $stream.Write($body, 0, $body.Length)
+            }
+            finally {
+                $stream.Dispose()
+            }
+            Set-DefenseClawPathAcl -Path $recordPath -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+        }
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Verbose (
+            'created-folder record not written; the folder stays after a purge: ' +
+            $_.Exception.Message)
+    }
+}
+
+# Whether no standalone deployment of any scope is left: the layout's roots,
+# the production roots and the certification bases are all gone.
+function Test-DefenseClawStandaloneNoDeploymentLeft {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $roots = Get-DefenseClawProfileRoots -EnterpriseProfile Standalone
+    foreach ($root in @(
+            [string]$Layout.StateRoot,
+            [string]$Layout.InstallRoot,
+            [string]$roots.StateRoot,
+            [string]$roots.InstallRoot,
+            [string]$roots.CertificationStateBase,
+            [string]$roots.CertificationInstallBase)) {
+        if (-not [string]::IsNullOrWhiteSpace($root) -and
+            (Microsoft.PowerShell.Management\Test-Path -LiteralPath $root)) {
+            return $false
+        }
+    }
+    return $true
+}
+
+# Retracts the record of a recorded folder DefenseClaw removes itself (a
+# fresh-install rollback removing the Codex folders it created), so the
+# record does not outlive its folder: a stale record would let a later purge
+# act on whatever stands at that path by then (GAP-0091 review M1). Best
+# effort: a record left behind is judged again, like any other, before a
+# purge removes anything. Standalone only.
+function Remove-DefenseClawStandaloneCreatedFolderRecord {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string]$RecordDirectory
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    try {
+        if ([string]::IsNullOrWhiteSpace($RecordDirectory)) {
+            $RecordDirectory = Get-DefenseClawStandaloneCreatedFolderRecordDirectory
+        }
+        $record = [IO.Path]::Combine($RecordDirectory, (Get-DefenseClawCreatedFolderRecordName -Path $Path))
+        if (-not [IO.File]::Exists($record)) {
+            return
+        }
+        Assert-DefenseClawNoReparsePath -Path $record
+        [IO.File]::Delete($record)
+    }
+    catch {
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
+            path   = $Path
+            reason = "created-folder record not retracted: $($_.Exception.Message)"
+        }
+    }
+}
+
+# Throws unless a recorded folder may be removed as SYSTEM (GAP-0091 review
+# M1). A record can outlive its folder (a vendor uninstaller or an
+# administrator deletes it), so the record alone is not enough: no component
+# of the path may be a reparse point, the folder must be owned by SYSTEM,
+# Administrators or TrustedInstaller with no one else able to write it, and
+# so must its parent, so no one can swap a component between this check and
+# the delete. A parent that is ProgramData or Program Files itself is the
+# operating system's folder and is judged as an ancestor
+# (Assert-DefenseClawTrustedAncestor -Strict): its stock permissions let
+# standard users add folders, not delete, rename or take over one they did
+# not create. A folder a user or a vendor made again at a recorded path
+# fails here and stays.
+function Assert-DefenseClawCreatedFolderRemovable {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string[]]$Roots
+    )
+    $writers = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+    $null = Assert-DefenseClawNoReparsePath -Path $Path
+    $null = Assert-DefenseClawPathAcl -Path $Path -AllowedWriterSIDs $writers -AllowInheritance -IgnoreCreatorTemplates
+    $parent = [IO.Path]::GetDirectoryName($Path)
+    $parentIsRoot = $false
+    foreach ($root in $Roots) {
+        if (-not [string]::IsNullOrWhiteSpace($root) -and
+            [string]::Equals([IO.Path]::GetFullPath($root).TrimEnd('\'), $parent, [StringComparison]::OrdinalIgnoreCase)) {
+            $parentIsRoot = $true
+        }
+    }
+    if ($parentIsRoot) {
+        $null = Assert-DefenseClawTrustedAncestor -Path $parent -Strict
+    }
+    else {
+        $null = Assert-DefenseClawPathAcl -Path $parent -AllowedWriterSIDs $writers -AllowInheritance -IgnoreCreatorTemplates
+    }
+}
+
+# Appends one line to the lifecycle log (%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log)
+# for a fact a purge reports after its result was written: the
+# self-uninstall finalizer, which removes the recorded folders, runs after
+# the CLI that writes the log has exited. The line carries only time, source
+# and diagnostics, so the event check (windows_enterprise_event_check.go),
+# which reads only lines with an event record, skips it. The Go lifecycle
+# creates and protects the folder; this never creates it. Best effort.
+function Write-DefenseClawLifecycleLogDiagnostic {
+    param([Parameter(Mandatory)][string]$Message)
+    try {
+        $directory = [IO.Path]::Combine([string]$script:WindowsDirectory, 'Logs', 'DefenseClaw')
+        if (-not [IO.Directory]::Exists($directory)) {
+            return
+        }
+        $path = [IO.Path]::Combine($directory, 'enterprise-lifecycle.log')
+        Assert-DefenseClawNoReparsePath -Path $path -AllowMissingLeaf
+        $line = [ordered]@{
+            time        = [DateTime]::UtcNow.ToString('o')
+            source      = 'DefenseClawEnterprise.psm1'
+            diagnostics = @($Message)
+        } | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress
+        $bytes = [Text.Encoding]::UTF8.GetBytes($line + "`n")
+        $stream = [IO.FileStream]::new($path, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+        try {
+            $stream.Write($bytes, 0, $bytes.Length)
+        }
+        finally {
+            $stream.Dispose()
+        }
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Verbose "lifecycle log not written: $($_.Exception.Message)"
+    }
+}
+
+# Removes one recorded folder when it is empty and may go
+# (Assert-DefenseClawCreatedFolderRemovable). Returns '' when the folder is
+# gone (removed now, or already absent with no reparse point on the way),
+# otherwise why it stays; a folder that stays is named in the lifecycle log.
+function Remove-DefenseClawStandaloneCreatedFolder {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string[]]$Roots
+    )
+    $folder = $Path
+    $reason = ''
+    try {
+        $folder = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+        if (-not (Test-DefenseClawCreatedFolderRecordable -Path $folder -Roots $Roots)) {
+            $reason = 'it is not below ProgramData or Program Files'
+        }
+        else {
+            $null = Assert-DefenseClawNoReparsePath -Path $folder -AllowMissingLeaf
+            if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $folder)) {
+                return ''
+            }
+            if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $folder -PathType Container)) {
+                $reason = 'it is not a folder'
+            }
+            else {
+                Assert-DefenseClawCreatedFolderRemovable -Path $folder -Roots $Roots
+                if ($null -ne (Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $folder -Force |
+                        Microsoft.PowerShell.Utility\Select-Object -First 1)) {
+                    $reason = 'it holds files or folders DefenseClaw did not write'
+                }
+                else {
+                    [IO.Directory]::Delete($folder, $false)
+                    return ''
+                }
+            }
+        }
+    }
+    catch {
+        $reason = [string]$_.Exception.Message
+    }
+    $stays = 'a folder DefenseClaw created stays, and so does its record: ' +
+        (ConvertTo-DefenseClawBoundedDiagnostic -Value $reason -MaxLength 512)
+    Write-DefenseClawResilienceEvent -Marker defenseclaw_skip -Fields @{
+        path   = $folder
+        reason = $stays
+    }
+    Write-DefenseClawLifecycleLogDiagnostic -Message "defenseclaw_skip path=${folder}: $stays"
+    return $reason
+}
+
+# Runs under the lifecycle lock (Remove-DefenseClawStandaloneLifecycleLockLeftover
+# holds it exclusively), once no deployment of any scope is left, no
+# self-uninstall finalizer is pending and the lifecycle folder holds nothing
+# but its lock and the record (no other scope's receipt or run state).
+# Removes each recorded folder that is empty and may go, deepest first, so a
+# recorded parent goes once its recorded children are gone
+# (Remove-DefenseClawStandaloneCreatedFolder), and deletes a record only
+# once its folder is gone. A folder that stays keeps its record, so a later
+# purge tries again, and the lifecycle log says why it stays. A record file
+# that is not administrator-only, not this schema or not named for its path
+# is not used and stays. A recorded folder above the lifecycle folder
+# (C:\ProgramData\Cisco) cannot go while the lock is in it: when every other
+# recorded folder went, its record is deleted and it is returned, for
+# Remove-DefenseClawStandaloneCreatedFolders to remove once the lock folder
+# is gone; otherwise it keeps its record too.
+function Invoke-DefenseClawStandaloneCreatedFolderRemoval {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [string]$RecordDirectory,
+        [string[]]$Roots = @($script:ProgramData, $script:ProgramFiles),
+        [switch]$SkipDeploymentCheck
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($RecordDirectory)) {
+        $RecordDirectory = Get-DefenseClawStandaloneCreatedFolderRecordDirectory
+    }
+    if (-not [IO.Directory]::Exists($RecordDirectory)) {
+        return
+    }
+    if (-not $SkipDeploymentCheck -and -not (Test-DefenseClawStandaloneNoDeploymentLeft -Layout $Layout)) {
+        return
+    }
+    $receipt = Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name SelfUninstallReceiptPath
+    if (-not [string]::IsNullOrWhiteSpace($receipt) -and [IO.File]::Exists($receipt)) {
+        return
+    }
+    $lifecycle = [IO.Path]::GetDirectoryName($RecordDirectory)
+    $recordName = [IO.Path]::GetFileName($RecordDirectory)
+    foreach ($entry in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $lifecycle -Force)) {
+        if ($entry.Name -cne 'lifecycle.lock' -and $entry.Name -cne $recordName) {
+            return
+        }
+    }
+    Assert-DefenseClawNoReparsePath -Path $RecordDirectory
+    Assert-DefenseClawPathAcl `
+        -Path $RecordDirectory `
+        -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+    $records = [Collections.Generic.List[object]]::new()
+    foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $RecordDirectory -Force)) {
+        if ($item.PSIsContainer -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $item.Name -cnotmatch '^[0-9a-f]{64}\.json$' -or
+            $item.Length -gt 4096) {
+            continue
+        }
+        try {
+            Assert-DefenseClawPathAcl `
+                -Path $item.FullName `
+                -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+            $document = [IO.File]::ReadAllText($item.FullName) | Microsoft.PowerShell.Utility\ConvertFrom-Json -ErrorAction Stop
+            $recorded = [string]$document.path
+            if ([int]$document.schema_version -ne $script:CreatedFolderRecordSchema -or
+                [string]::IsNullOrWhiteSpace($recorded) -or
+                -not [IO.Path]::IsPathRooted($recorded) -or
+                (Get-DefenseClawCreatedFolderRecordName -Path $recorded) -cne $item.Name) {
+                continue
+            }
+        }
+        catch {
+            continue
+        }
+        $records.Add([pscustomobject]@{
+            Folder = [IO.Path]::GetFullPath($recorded).TrimEnd('\')
+            File   = $item.FullName
+        })
+    }
+    $lifecycleFull = [IO.Path]::GetFullPath($lifecycle).TrimEnd('\')
+    $deferred = [Collections.Generic.List[object]]::new()
+    $stayed = $false
+    foreach ($record in @($records | Microsoft.PowerShell.Utility\Sort-Object -Property @{ Expression = { $_.Folder.Length }; Descending = $true })) {
+        if ($lifecycleFull.StartsWith($record.Folder + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            $deferred.Add($record)
+            continue
+        }
+        if ([string]::IsNullOrEmpty((Remove-DefenseClawStandaloneCreatedFolder -Path $record.Folder -Roots $Roots))) {
+            [IO.File]::Delete($record.File)
+        }
+        else {
+            $stayed = $true
+        }
+    }
+    if ($stayed) {
+        foreach ($record in $deferred) {
+            $stays = 'a folder DefenseClaw created stays, and so does its record: the lifecycle folder in it keeps the records of the folders that stayed'
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_skip -Fields @{
+                path   = $record.Folder
+                reason = $stays
+            }
+            Write-DefenseClawLifecycleLogDiagnostic -Message "defenseclaw_skip path=$($record.Folder): $stays"
+        }
+        return
+    }
+    foreach ($record in $deferred) {
+        [IO.File]::Delete($record.File)
+    }
+    if ($null -eq (Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $RecordDirectory -Force |
+            Microsoft.PowerShell.Utility\Select-Object -First 1)) {
+        [IO.Directory]::Delete($RecordDirectory, $false)
+    }
+    return [string[]]@($deferred | Microsoft.PowerShell.Core\ForEach-Object { [string]$_.Folder })
+}
+
+# Removes the recorded folders above the lifecycle folder that
+# Invoke-DefenseClawStandaloneCreatedFolderRemoval returned, deepest first,
+# once the lock folder (and, in the lifecycle, the MDM journal) is gone.
+# Their records lived in the lifecycle folder and are gone already; each
+# folder is checked again as it is removed (Remove-DefenseClawStandaloneCreatedFolder).
+# An install that starts in between and creates the lifecycle folder again
+# leaves the folder non-empty, so it stays.
+function Remove-DefenseClawStandaloneCreatedFolders {
+    param(
+        [AllowEmptyCollection()][string[]]$Path = @(),
+        [string[]]$Roots = @($script:ProgramData, $script:ProgramFiles)
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $ordered = @(@($Path) |
+        Microsoft.PowerShell.Core\Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+        Microsoft.PowerShell.Core\ForEach-Object { [IO.Path]::GetFullPath([string]$_).TrimEnd('\') } |
+        Microsoft.PowerShell.Utility\Sort-Object -Unique |
+        Microsoft.PowerShell.Utility\Sort-Object -Property Length -Descending)
+    foreach ($folder in $ordered) {
+        [void](Remove-DefenseClawStandaloneCreatedFolder -Path $folder -Roots $Roots)
+    }
+}
+
+# Upgrade back-fill for C:\Program Files\Cisco and C:\ProgramData\Cisco
+# (GAP-0526 on a computer installed before 1.0.9, which kept no
+# created-folder record). Setup records either one on install, upgrade or
+# repair only when it is provably the folder an earlier Setup created
+# (Get-DefenseClawVendorFolderBackfillRefusal). No other vendor folder is
+# back-filled: DefenseClaw re-stamps an existing Claude Code, Cursor or
+# OpenAI folder with the same descriptor it creates one with (the Go repair,
+# the Codex assertion), so nothing on disk tells who made those. Best
+# effort, standalone only.
+function Add-DefenseClawStandaloneUpgradeVendorFolderRecords {
+    param(
+        [string]$ProgramDataVendorFolder,
+        [string]$ProgramFilesVendorFolder,
+        [string]$RecordDirectory,
+        [string[]]$Roots = @($script:ProgramData, $script:ProgramFiles)
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    try {
+        $profileRoots = Get-DefenseClawProfileRoots -EnterpriseProfile Standalone
+        if ([string]::IsNullOrWhiteSpace($ProgramDataVendorFolder)) {
+            $ProgramDataVendorFolder = [IO.Path]::GetDirectoryName([string]$profileRoots.StateRoot)
+        }
+        if ([string]::IsNullOrWhiteSpace($ProgramFilesVendorFolder)) {
+            $ProgramFilesVendorFolder = [IO.Path]::GetDirectoryName([string]$profileRoots.InstallRoot)
+        }
+        if ([string]::IsNullOrWhiteSpace($RecordDirectory)) {
+            $RecordDirectory = Get-DefenseClawStandaloneCreatedFolderRecordDirectory
+        }
+        foreach ($vendor in @(
+                @{ Path = $ProgramDataVendorFolder; UsersInherit = $false },
+                @{ Path = $ProgramFilesVendorFolder; UsersInherit = $true })) {
+            $folder = [IO.Path]::GetFullPath([string]$vendor.Path).TrimEnd('\')
+            if (-not [IO.Directory]::Exists($folder) -or
+                [IO.File]::Exists([IO.Path]::Combine($RecordDirectory, (Get-DefenseClawCreatedFolderRecordName -Path $folder)))) {
+                continue
+            }
+            $refusal = Get-DefenseClawVendorFolderBackfillRefusal -Path $folder -UsersInherit:([bool]$vendor.UsersInherit)
+            if (-not [string]::IsNullOrEmpty($refusal)) {
+                Microsoft.PowerShell.Utility\Write-Verbose "not recorded as created by DefenseClaw, so it stays after a purge: ${folder}: $refusal"
+                continue
+            }
+            Add-DefenseClawStandaloneCreatedFolderRecord -Path @($folder) -RecordDirectory $RecordDirectory -Roots $Roots
+        }
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Verbose "vendor folder back-fill skipped: $($_.Exception.Message)"
+    }
+}
+
+# Why Path is not provably the vendor folder an earlier Setup created, or ''
+# when it is. Setup has created it with one exact descriptor since 1.0.2
+# (New-DefenseClawProtectedDirectory): owner Administrators, inheritance off,
+# then exactly SYSTEM and Administrators with full control inherited by all
+# below, and Users read and execute (inherited on the Program Files folder,
+# this folder only on the ProgramData one). It never stamps that descriptor
+# on a vendor folder it finds: an existing one is only validated, and a
+# missing Users entry is added as its own recorded entry (the Users-read
+# grant record, GAP-0578), which this refuses. The only other entries
+# allowed are the gateway's traverse grants: a service SID with read and
+# execute on this folder alone (Grant-DefenseClawStateAncestorTraverse). The
+# folder must also hold nothing but DefenseClaw's own folders. An inherited
+# descriptor (an MSI or an administrator made it), another owner or entry,
+# a file or another product's folder all refuse.
+function Get-DefenseClawVendorFolderBackfillRefusal {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$UsersInherit
+    )
+    try {
+        $null = Assert-DefenseClawNoReparsePath -Path $Path
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Container)) {
+            return 'not a folder'
+        }
+        $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
+        $raw = [Security.AccessControl.RawSecurityDescriptor]::new([byte[]]$acl.GetSecurityDescriptorBinaryForm(), 0)
+        if ($null -eq $raw.Owner -or $raw.Owner.Value -cne $script:AdministratorsSID) {
+            return "owner is $($raw.Owner)"
+        }
+        if (($raw.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -eq 0) {
+            return 'its permissions are inherited'
+        }
+        $dacl = $raw.DiscretionaryAcl
+        if ($null -eq $dacl -or $dacl.Count -lt 3) {
+            return 'its permissions are not the ones Setup gives a folder it creates'
+        }
+        # Cast from the name list: -bor on this byte enum throws in
+        # Windows PowerShell 5.1.
+        $inherit = [Security.AccessControl.AceFlags]'ObjectInherit, ContainerInherit'
+        $usersFlags = if ($UsersInherit) { $inherit } else { [Security.AccessControl.AceFlags]::None }
+        $expected = @(
+            @($script:SystemSID, 0x1F01FF, $inherit),
+            @($script:AdministratorsSID, 0x1F01FF, $inherit),
+            @($script:UsersSID, 0x1200A9, $usersFlags))
+        for ($index = 0; $index -lt $dacl.Count; $index++) {
+            $ace = $dacl[$index]
+            if ($ace -isnot [Security.AccessControl.CommonAce] -or
+                $ace.AceQualifier -ne [Security.AccessControl.AceQualifier]::AccessAllowed -or
+                $ace.IsCallback) {
+                return "entry $index is not an allow entry"
+            }
+            $sid = $ace.SecurityIdentifier.Value
+            $mask = [int64]$ace.AccessMask -band 0xFFFFFFFFL
+            if ($index -lt 3) {
+                if ($sid -cne $expected[$index][0] -or $mask -ne $expected[$index][1] -or $ace.AceFlags -ne $expected[$index][2]) {
+                    return "entry $index ($sid) is not the one Setup gives a folder it creates"
+                }
+            }
+            elseif ($sid -cnotmatch '^S-1-5-80-' -or $mask -ne 0x1200A9 -or
+                $ace.AceFlags -ne [Security.AccessControl.AceFlags]::None) {
+                return "entry $index ($sid) is not a gateway traverse grant"
+            }
+        }
+        if ($null -ne (Get-DefenseClawVendorUsersReadGrantRecord -Path $Path)) {
+            return 'Setup added its Users entry to a folder it found'
+        }
+        foreach ($child in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $Path -Force)) {
+            if (-not $child.PSIsContainer -or
+                ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                $child.Name -cnotmatch '^DefenseClaw(-[A-Za-z]+)?$') {
+                return "it holds $($child.Name)"
+            }
+        }
+        return ''
+    }
+    catch {
+        return [string]$_.Exception.Message
+    }
+}
+
 # The lifecycle lock outlives every run. After a standalone purge it goes,
 # with its folder once empty, but only when no other lifecycle holds it: the
-# exclusive open fails then, and the file is deleted when it closes.
+# exclusive open fails then, and the file is deleted when it closes. While
+# it holds the lock it removes the recorded folders DefenseClaw created
+# (GAP-0091, Invoke-DefenseClawStandaloneCreatedFolderRemoval), so no
+# install can start in between, and returns the recorded folders above the
+# lifecycle folder, which the caller removes last
+# (Remove-DefenseClawStandaloneCreatedFolders).
 function Remove-DefenseClawStandaloneLifecycleLockLeftover {
     param([Parameter(Mandatory)][hashtable]$Layout)
     if (-not (Test-DefenseClawStandaloneProfile)) {
         return
     }
+    $createdFolders = [string[]]@()
     try {
         $path = [string]$Layout.LifecycleLockPath
+        $stream = $null
         if ([IO.File]::Exists($path)) {
             Assert-DefenseClawNoReparsePath -Path $path
             $stream = [IO.FileStream]::new(
@@ -18307,7 +18913,19 @@ function Remove-DefenseClawStandaloneLifecycleLockLeftover {
                 1,
                 [IO.FileOptions]::DeleteOnClose
             )
-            $stream.Dispose()
+        }
+        try {
+            $createdFolders = [string[]]@(Invoke-DefenseClawStandaloneCreatedFolderRemoval `
+                -Layout $Layout `
+                -RecordDirectory ([IO.Path]::Combine([string]$Layout.LifecycleLockDirectory, 'created-folders')))
+        }
+        catch {
+            Microsoft.PowerShell.Utility\Write-Verbose "created-folder record stays: $($_.Exception.Message)"
+        }
+        finally {
+            if ($null -ne $stream) {
+                $stream.Dispose()
+            }
         }
         $directory = [string]$Layout.LifecycleLockDirectory
         $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $directory -Force -ErrorAction SilentlyContinue
@@ -18321,6 +18939,7 @@ function Remove-DefenseClawStandaloneLifecycleLockLeftover {
     catch {
         Microsoft.PowerShell.Utility\Write-Verbose "lifecycle lock stays: $($_.Exception.Message)"
     }
+    return $createdFolders
 }
 
 # An elevated enterprise CLI run stages the installer scripts in
@@ -18406,6 +19025,8 @@ function Remove-DefenseClawTransactionCreatedSharedDirectories {
             throw "transaction contains an unowned shared directory: $directory"
         }
         if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $directory)) {
+            # Gone already: its created-folder record goes too (GAP-0091).
+            Remove-DefenseClawStandaloneCreatedFolderRecord -Path $directory
             continue
         }
         if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $directory -PathType Container)) {
@@ -18421,6 +19042,7 @@ function Remove-DefenseClawTransactionCreatedSharedDirectories {
                 throw "refusing to remove non-empty transaction-created shared directory: $directory"
             }
             Microsoft.PowerShell.Management\Remove-Item -LiteralPath $directory -Force
+            Remove-DefenseClawStandaloneCreatedFolderRecord -Path $directory
             continue
         }
         # Rollback never fails over this folder: one that drifted or that
@@ -18440,6 +19062,9 @@ function Remove-DefenseClawTransactionCreatedSharedDirectories {
                 continue
             }
             Microsoft.PowerShell.Management\Remove-Item -LiteralPath $directory -Force
+            # The rollback removed the folder it created: so goes its
+            # created-folder record, which would otherwise outlive it (GAP-0091).
+            Remove-DefenseClawStandaloneCreatedFolderRecord -Path $directory
         }
         catch {
             Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
@@ -23608,6 +24233,168 @@ function Recover-DefenseClawPendingTransaction {
     }
 }
 
+function Test-DefenseClawRecoveryRestoredOtherRelease {
+    <#
+        Standalone Repair right after a pending-transaction recovery
+        (rel-1-0-6 GAP-0649). The recovery puts back the payload the
+        transaction replaced. When the module it put back is not the module
+        running this lifecycle, the restored binaries are another release's:
+        their helper commands and flags are not this module's (a 1.0.9 Repair
+        called the restored 1.0.8 gateway with --skip-account-failures and
+        failed 1603). Repair then ends with the recovery: Setup re-plans an
+        upgrade with its own payload, and the installed CLI reports the
+        rollback. A Repair that brings its own gateway restages the payload
+        and continues, as before. An Uninstall from the installed CLI (Add or
+        Remove Programs) stops the same way, before it removes anything with
+        this module's flags; run again, it uses the restored release's own
+        installer (g649 review F4). Setup /uninstall brings its gateway and
+        continues.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Recovery,
+        [Parameter(Mandatory)][string]$Action,
+        [hashtable]$Sources = @{}
+    )
+    if ($Action -notin @('Repair', 'Uninstall') -or
+        -not (Test-DefenseClawStandaloneProfile) -or
+        -not [bool]$Recovery.recovered -or
+        [bool]$Recovery.fresh_install_rollback -or
+        $Sources.ContainsKey('gateway') -or
+        [string]::IsNullOrEmpty([string]$script:DefenseClawRunningModuleSHA256) -or
+        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.ModulePath -PathType Leaf)) {
+        return $false
+    }
+    Assert-DefenseClawNoReparsePath -Path $Layout.ModulePath
+    $restored = (
+        Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Layout.ModulePath -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    return $restored -cne [string]$script:DefenseClawRunningModuleSHA256
+}
+
+function Get-DefenseClawRecoveryRestoredOtherReleaseResult {
+    <#
+        The result of a Repair that stopped after its recovery restored another
+        release (Test-DefenseClawRecoveryRestoredOtherRelease): the restored
+        deployment's status, with a warning that names what happened. An
+        Uninstall that stopped there fails with the next step: nothing was
+        removed, and the same uninstall run again now uses the restored
+        release's installer (g649 review F4).
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [string]$Action = 'Repair'
+    )
+    if ($Action -eq 'Uninstall') {
+        throw (
+            'uninstall rolled back an interrupted lifecycle change and restored the release it replaced; ' +
+            'nothing was removed. Run the same uninstall again: it now uses the restored release''s own installer'
+        )
+    }
+    $result = Get-DefenseClawLifecycleStatus `
+        -Action 'Repair' `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName
+    $warnings = [Collections.Generic.List[string]]::new()
+    $existing = $result.PSObject.Properties['warnings']
+    if ($null -ne $existing) {
+        foreach ($item in @($existing.Value)) {
+            $warnings.Add([string]$item)
+        }
+    }
+    $warnings.Add(
+        'Repair rolled back an interrupted lifecycle change and restored the release it replaced; ' +
+        'it did not reapply that release with this release''s installer'
+    )
+    $result |
+        Microsoft.PowerShell.Utility\Add-Member `
+            -MemberType NoteProperty `
+            -Name warnings `
+            -Value ([string[]]@($warnings.ToArray())) `
+            -Force
+    return $result
+}
+
+function Write-DefenseClawTransactionLifecyclePins {
+    <#
+        Standalone (rel-1-0-6 GAP-0649). Before a transaction copies its first
+        payload file, record the SHA-256 of the installer and module it
+        installs in the protected transaction directory. Until the transaction
+        commits or rolls back, the installed installer then admits exactly
+        that pair (the release that wrote the transaction and can recover it)
+        besides the pair the deployment record pins. The pinned check itself
+        is unchanged.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SnapshotPath,
+        [hashtable]$Sources = @{}
+    )
+    if (-not (Test-DefenseClawStandaloneProfile) -or
+        -not $Sources.ContainsKey('installer') -or
+        -not $Sources.ContainsKey('module')) {
+        return
+    }
+    $installer = ([string]$Sources['installer'].sha256).ToLowerInvariant()
+    $module = ([string]$Sources['module'].sha256).ToLowerInvariant()
+    foreach ($digest in @($installer, $module)) {
+        if ($digest -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'transaction lifecycle pins need the SHA-256 of the installer and module sources'
+        }
+    }
+    $pins = [ordered]@{
+        schema_version = 1
+        installer = $installer
+        module = $module
+    }
+    if ($Sources.ContainsKey('cli')) {
+        # The CLI is staged right after the pair; an installed-CLI uninstall
+        # runs it as its native cleanup executable (g649 review F4).
+        $cli = ([string]$Sources['cli'].sha256).ToLowerInvariant()
+        if ($cli -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'transaction lifecycle pins need the SHA-256 of the cli source'
+        }
+        $pins['cli'] = $cli
+    }
+    $path = Microsoft.PowerShell.Management\Join-Path `
+        ([IO.Path]::GetDirectoryName($SnapshotPath)) `
+        'lifecycle-pins.json'
+    Write-DefenseClawJsonAtomic -Value $pins -Path $path
+    Set-DefenseClawPathAcl `
+        -Path $path `
+        -Kind AdminFile `
+        -GatewayServiceSID $script:AdministratorsSID
+}
+
+function Get-DefenseClawStagingOrder {
+    <#
+        Standalone (rel-1-0-6 GAP-0649): the installer, then the module, then
+        the CLI, then the other payload files. An interrupted transaction then
+        leaves the lifecycle toolchain of one release: an older installer never
+        meets a newer module, and once the pair is new its transaction pins
+        admit it. Secure Client keeps its order.
+    #>
+    param([string[]]$Names = @())
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return @($Names)
+    }
+    $first = @('installer', 'module', 'cli')
+    $ordered = [Collections.Generic.List[string]]::new()
+    foreach ($name in $first) {
+        if ($Names -ccontains $name) {
+            $ordered.Add($name)
+        }
+    }
+    foreach ($name in @($Names | Microsoft.PowerShell.Utility\Sort-Object)) {
+        if ($first -cnotcontains $name) {
+            $ordered.Add([string]$name)
+        }
+    }
+    return @($ordered.ToArray())
+}
+
 function Assert-DefenseClawRecoveryActivatedForAction {
     <#
         Repair reapplies the installed payload, which is the release recovery
@@ -24138,14 +24925,22 @@ function Get-DefenseClawTargetRuntimeSkippedProfiles {
 function Write-DefenseClawTargetRuntimeSkippedProfiles {
     param(
         [Parameter(Mandatory)]$Plan,
-        [Parameter(Mandatory)][hashtable]$Layout
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [switch]$ValidationOnly
     )
     $entries = @()
     foreach ($profile in @(Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan)) {
-        $entries += ((
-            'target_runtime_profile_skipped: user {0} at {1} was left out of this install ' +
-            'and is not protected until the Guardian enrolls it after the folder is free: {2}'
-        ) -f [string]$profile.sid, [string]$profile.user_home, [string]$profile.reason)
+        $description = if ($ValidationOnly) {
+            'was left pending in this lifecycle run; its folder was not changed. ' +
+            'Correct the named account profile and run Setup /ensure to retry enrollment: {0}'
+        }
+        else {
+            'was left out of this install and is not protected until the Guardian ' +
+            'enrolls it after the folder is free: {0}'
+        }
+        $entries += ('target_runtime_profile_skipped: user {0} at {1} {2}' -f `
+            [string]$profile.sid, [string]$profile.user_home,
+            ($description -f [string]$profile.reason))
     }
     foreach ($profile in @(Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan -Repaired)) {
         $entries += ((
@@ -24568,7 +25363,7 @@ function Invoke-DefenseClawTargetRuntimePreparation {
         $ValidationOnly -and (Test-DefenseClawStandaloneProfile)
     )
     if ($standaloneValidation) {
-        $planArguments += '--validate-only'
+        $planArguments += @('--validate-only', '--skip-account-failures')
     }
     if ($AllowSkipBusyProfiles) {
         # Last, so the plan helper's argument shape stays fixed otherwise.
@@ -24595,7 +25390,7 @@ function Invoke-DefenseClawTargetRuntimePreparation {
     # cannot open in every mode, so Upgrade and Repair heal one user without
     # failing all of them. A skipped user keeps its manifest row and simply
     # has no root in this plan; each one is recorded.
-    Write-DefenseClawTargetRuntimeSkippedProfiles -Plan $plan -Layout $Layout
+    Write-DefenseClawTargetRuntimeSkippedProfiles -Plan $plan -Layout $Layout -ValidationOnly:$ValidationOnly
     if ($ValidationOnly) {
         # A standalone deferred account's pending root (absent, or created by
         # the account before enrollment) is the guardian's to create or adopt
@@ -28856,6 +29651,11 @@ function Assert-DefenseClawInstalledConfig {
         # Only the install-like lifecycle records (and migrates) the config,
         # inside its transaction; verify validates read-only.
         [switch]$RecordLifecycle,
+        # The sha256 of the approved source this run installed as config.yaml
+        # (CONFIG=), '' for none. A hand-edit record of exactly those bytes is
+        # the hook guardian's claim on the lifecycle's own write, and the
+        # config step records them as the lifecycle generation (GAP-0646).
+        [string]$ApprovedConfigSHA256 = '',
         [switch]$RepairRollback
     )
     $arguments = @(
@@ -28867,6 +29667,9 @@ function Assert-DefenseClawInstalledConfig {
     )
     if ($RecordLifecycle) {
         $arguments += '--record-lifecycle'
+        if (-not [string]::IsNullOrEmpty($ApprovedConfigSHA256)) {
+            $arguments += @('--approved-config-sha256', $ApprovedConfigSHA256)
+        }
     }
     if ($RepairRollback) {
         $arguments += '--repair-rollback'
@@ -28928,14 +29731,64 @@ function Assert-DefenseClawRepairRollbackConfig {
             -RepairRollback
     }
     catch {
+        $validationError = $_.Exception.Message
+        if (-not $Sources.ContainsKey('config')) {
+            try {
+                $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
+                $approved = Get-DefenseClawRepairRollbackApprovedConfigSource `
+                    -Layout $Layout -Metadata $metadata
+                if ($null -ne $approved) {
+                    # Keep the installed path's directory for relative policy
+                    # paths and credential lookup. The candidate is checked
+                    # before Repair changes config.yaml or stops the gateway.
+                    $candidate = [IO.Path]::Combine(
+                        [string]$Layout.ConfigDirectory,
+                        "config.repair-rollback.$([Guid]::NewGuid().ToString('N')).yaml"
+                    )
+                    try {
+                        Install-DefenseClawFileAtomic `
+                            -Source ([string]$approved.path) `
+                            -Destination $candidate `
+                            -ExpectedSHA256 ([string]$approved.sha256)
+                        Set-DefenseClawPathAcl -Path $candidate -Kind ConfigFile `
+                            -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)
+                        $candidateLayout = $Layout.Clone()
+                        $candidateLayout.ConfigPath = $candidate
+                        Assert-DefenseClawInstalledConfig `
+                            -Layout $candidateLayout `
+                            -GatewayServiceName $GatewayServiceName `
+                            -GatewaySource $gatewaySource `
+                            -RepairRollback
+                        return
+                    }
+                    finally {
+                        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $candidate) {
+                            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $candidate -Force
+                        }
+                    }
+                }
+            }
+            catch {
+                # Keep the installed config's reason: it names the setting
+                # the next step asks the administrator to fix. Unreadable
+                # metadata or an unusable approved copy only says why Repair
+                # could not check the recorded approved bytes instead.
+                $validationError = $validationError +
+                    ' The recorded approved config could not be used: ' +
+                    $_.Exception.Message
+            }
+        }
         throw (
             "Repair refused: the running gateway's installed config cannot " +
             'be validated for rollback (services and deployment metadata ' +
-            'were not changed): ' + $_.Exception.Message +
+            'were not changed): ' + $validationError +
             ' Next step: fix the named config setting or administrator-selected ' +
             'path permissions, restore an approved gateway-valid config.yaml ' +
             'if needed, and retry Setup /repair; or run Setup /ensure ' +
-            'CONFIG=<approved config> when deployment metadata is readable.'
+            'CONFIG=<approved config> when deployment metadata is readable. ' +
+            'For a signed-bundle deployment, run ' +
+            (Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout) +
+            ' from an elevated PowerShell prompt.'
         )
     }
 }
@@ -29216,7 +30069,8 @@ function Get-DefenseClawGuardianReadinessProbe {
         # As in Wait-DefenseClawFreshGuardianReconcile: a complete reconcile
         # whose only problem is failed targets is accepted (rollback restores it;
         # activation runs degraded). With -LiveVerify, only Guardian-failed targets.
-        [switch]$AllowFailedTargets
+        [switch]$AllowFailedTargets,
+        [string[]]$AllowedFailedTargetSIDs
     )
     $service = Microsoft.PowerShell.Management\Get-Service -Name $GuardianServiceName -ErrorAction SilentlyContinue
     if ($null -eq $service -or
@@ -29239,7 +30093,9 @@ function Get-DefenseClawGuardianReadinessProbe {
         $report = Get-DefenseClawGuardianStatusReport `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName
-        if (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $report) {
+        if ((Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $report) -and
+            (Test-DefenseClawGuardianFailedTargetsWithinSIDs `
+                -Report $report -AllowedSIDs $AllowedFailedTargetSIDs)) {
             $accepted = -not $LiveVerify
             if ($LiveVerify) {
                 # A live verify may fail only on the targets the Guardian
@@ -29299,14 +30155,16 @@ function Test-DefenseClawGuardianReady {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [switch]$LiveVerify,
-        [switch]$AllowFailedTargets
+        [switch]$AllowFailedTargets,
+        [string[]]$AllowedFailedTargetSIDs
     )
     $readiness = Get-DefenseClawGuardianReadinessProbe `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
         -LiveVerify:$LiveVerify `
-        -AllowFailedTargets:$AllowFailedTargets
+        -AllowFailedTargets:$AllowFailedTargets `
+        -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
     return [bool]$readiness.ready
 }
 
@@ -29319,7 +30177,8 @@ function Wait-DefenseClawEnterpriseReadiness {
         [bool]$RequireEnumerator = $true,
         [int]$TimeoutSeconds = 90,
         # Rollback, recovery and activation; see Get-DefenseClawGuardianReadinessProbe.
-        [switch]$AllowFailedTargets
+        [switch]$AllowFailedTargets,
+        [string[]]$AllowedFailedTargetSIDs
     )
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Write-DefenseClawLifecyclePhase -Stage 'enterprise readiness wait'
@@ -29350,7 +30209,8 @@ function Wait-DefenseClawEnterpriseReadiness {
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
-                -AllowFailedTargets:$AllowFailedTargets
+                -AllowFailedTargets:$AllowFailedTargets `
+                -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
         }
         $enumerator = Microsoft.PowerShell.Management\Get-Service `
             -Name $enumeratorServiceName `
@@ -30676,7 +31536,8 @@ function Assert-DefenseClawEnterpriseDeployment {
         # Install/Upgrade activation: live readiness accepts a completed
         # reconcile whose only failures are user targets the Guardian itself
         # reported failed (see Get-DefenseClawGuardianReadinessProbe).
-        [switch]$AcceptDegradedTargets
+        [switch]$AcceptDegradedTargets,
+        [string[]]$AllowedFailedTargetSIDs
     )
     if ($null -eq $ExpectedGatewayAccount -or $ExpectedGatewayAccount.Count -eq 0) {
         $ExpectedGatewayAccount = Get-DefenseClawAcceptedGatewayServiceAccounts `
@@ -31608,7 +32469,8 @@ function Assert-DefenseClawEnterpriseDeployment {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -LiveVerify `
-            -AllowFailedTargets:$AcceptDegradedTargets
+            -AllowFailedTargets:$AcceptDegradedTargets `
+            -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
         if (-not [bool]$guardianReadiness.ready) {
             throw (
                 'guardian SCM process is running but protected target ' +
@@ -31926,6 +32788,213 @@ function Get-DefenseClawLifecycleSources {
     return $sources
 }
 
+function Get-DefenseClawApprovedPolicyPath {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][ValidateSet('config', 'manifest')][string]$Name
+    )
+    $leaf = if ($Name -ceq 'config') { 'approved-config.yaml' } else { 'approved-targets.yaml' }
+    return [IO.Path]::Combine([string]$Layout.InstallStateDirectory, $leaf)
+}
+
+function Get-DefenseClawApprovedPolicyHash {
+    param(
+        [Parameter(Mandatory)]$Metadata,
+        [Parameter(Mandatory)][ValidateSet('config', 'manifest')][string]$Name
+    )
+    $record = $Metadata.PSObject.Properties['approved_policy_sources']
+    if ($null -eq $record) { return '' }
+    if ($record.Value -isnot [Management.Automation.PSCustomObject]) {
+        throw 'deployment metadata has an invalid approved policy source record'
+    }
+    foreach ($property in $record.Value.PSObject.Properties) {
+        if ($property.Name -notin @('config', 'manifest') -or
+            [string]$property.Value -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'deployment metadata has an invalid approved policy source digest'
+        }
+    }
+    $entry = $record.Value.PSObject.Properties[$Name]
+    if ($null -eq $entry) { return '' }
+    return [string]$entry.Value
+}
+
+function Get-DefenseClawStandaloneBundleRepairCommand {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $cli = [string]$Layout['CLIPath']
+    return "& '$($cli.Replace("'", "''"))' enterprise windows repair --profile standalone --json"
+}
+
+function Get-DefenseClawApprovedPolicySource {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Metadata,
+        [Parameter(Mandatory)][ValidateSet('config', 'manifest')][string]$Name
+    )
+    $bundleRepair = Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout
+    $inputName = if ($Name -ceq 'config') { 'CONFIG' } else { 'MANIFEST' }
+    $nextStep = "run Setup /ensure $inputName=<approved absolute path>, or $bundleRepair on a signed-bundle deployment"
+    $expected = Get-DefenseClawApprovedPolicyHash -Metadata $Metadata -Name $Name
+    if ([string]::IsNullOrEmpty($expected)) {
+        throw "Repair has no recorded approved $Name source; $nextStep"
+    }
+    $path = Get-DefenseClawApprovedPolicyPath -Layout $Layout -Name $Name
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "Repair cannot read the recorded approved $Name source; $nextStep"
+    }
+    Assert-DefenseClawPathAcl `
+        -Path $path `
+        -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+        -AllowedReaderSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+        -RejectUntrustedRead `
+        -AllowInheritance `
+        -IgnoreCreatorTemplates
+    $source = Get-DefenseClawSourceDescriptor -Path $path -Label "approved $Name source"
+    if ([string]$source.sha256 -ne $expected) {
+        throw "Repair found a changed approved $Name source; $nextStep"
+    }
+    return $source
+}
+
+function Get-DefenseClawRecordedConfigGenerationHash {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $generationPath = [IO.Path]::Combine([string]$Layout.ConfigDirectory, 'config.generation.json')
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $generationPath -PathType Leaf)) {
+        return ''
+    }
+    Assert-DefenseClawPathAcl -Path $generationPath `
+        -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+        -AllowInheritance -IgnoreCreatorTemplates
+    $generation = Microsoft.PowerShell.Management\Get-Content `
+        -LiteralPath $generationPath -Raw |
+        Microsoft.PowerShell.Utility\ConvertFrom-Json
+    $activeHash = [string]$generation.config_sha256
+    if ($activeHash -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'Repair cannot read the recorded config generation; run Setup /ensure CONFIG=<approved absolute config path>'
+    }
+    return $activeHash
+}
+
+function Get-DefenseClawRepairRollbackApprovedConfigSource {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Metadata
+    )
+    $activeHash = Get-DefenseClawRecordedConfigGenerationHash -Layout $Layout
+    if ([string]::IsNullOrEmpty($activeHash)) { return $null }
+    Assert-DefenseClawNoReparsePath -Path $Layout.ConfigPath -AllowMissingLeaf
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.ConfigPath -PathType Leaf) {
+        $installedHash = (
+            Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Layout.ConfigPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        if ($installedHash -ceq $activeHash) { return $null }
+    }
+    $approved = Get-DefenseClawApprovedPolicySource -Layout $Layout -Metadata $Metadata -Name config
+    if (([string]$approved.sha256).ToLowerInvariant() -cne $activeHash) {
+        throw ('Repair cannot prove that the recorded approved config source is current; ' +
+            'run ' + (Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout) + ' ' +
+            'on a signed-bundle deployment, or Setup /ensure CONFIG=<approved absolute config path> otherwise')
+    }
+    return $approved
+}
+
+function Invoke-DefenseClawRepairApprovedPolicyRecovery {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Sources,
+        [Parameter(Mandatory)]$Metadata,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    $adminWriters = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+    foreach ($name in @('config', 'manifest')) {
+        if ($Sources.ContainsKey($name)) { continue }
+        $destination = Get-DefenseClawArtifactPath -Layout $Layout -Name $name
+        $directory = [IO.Path]::GetDirectoryName([string]$destination)
+        $parentPaths = @($Layout.StateRoot, $directory)
+        foreach ($parent in $parentPaths) {
+            Assert-DefenseClawPathAcl -Path ([string]$parent) `
+                -AllowedWriterSIDs $adminWriters -AllowInheritance -IgnoreCreatorTemplates
+        }
+        $needsRewrite = -not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $destination -PathType Leaf)
+        if (-not $needsRewrite) {
+            try {
+                Assert-DefenseClawPathAcl -Path $destination `
+                    -AllowedWriterSIDs $adminWriters -AllowInheritance -IgnoreCreatorTemplates
+            }
+            catch {
+                $needsRewrite = $true
+            }
+        }
+        $activeHash = ''
+        if ($name -ceq 'config') {
+            $activeHash = Get-DefenseClawRecordedConfigGenerationHash -Layout $Layout
+        }
+        else {
+            $activeHash = [string]$Metadata.managed_hooks_activation.manifest_sha256
+        }
+        if (-not $needsRewrite -and -not [string]::IsNullOrEmpty($activeHash)) {
+            $installedHash = (
+                Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $destination -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+            if ($installedHash -ne $activeHash) {
+                if ($name -ceq 'config') {
+                    $needsRewrite = $true
+                }
+                else {
+                    $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                        -Layout $Layout -GatewayServiceName $GatewayServiceName `
+                        -Activation $Metadata.managed_hooks_activation `
+                        -InstalledManifestSHA256 $installedHash
+                    $needsRewrite = -not [bool]$adoption.ok
+                }
+            }
+        }
+        if (-not $needsRewrite) { continue }
+        $approved = Get-DefenseClawApprovedPolicySource `
+            -Layout $Layout -Metadata $Metadata -Name $name
+        if ([string]::IsNullOrEmpty($activeHash) -or
+            [string]$approved.sha256 -ne $activeHash) {
+            $inputName = if ($name -ceq 'config') { 'CONFIG' } else { 'MANIFEST' }
+            throw ("Repair cannot prove that the recorded approved $name source is current; " +
+                "run Setup /ensure $inputName=<approved absolute path>, or " +
+                (Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout) +
+                ' on a signed-bundle deployment')
+        }
+        Install-DefenseClawSourceDescriptor -Source $approved -Destination $destination
+        $kind = if ($name -ceq 'config') { 'ConfigFile' } else { 'AdminFile' }
+        Set-DefenseClawPathAcl -Path $destination -Kind $kind `
+            -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)
+    }
+}
+
+function Publish-DefenseClawApprovedPolicySources {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Sources,
+        $PriorMetadata
+    )
+    $record = @{}
+    if ($null -ne $PriorMetadata) {
+        foreach ($name in @('config', 'manifest')) {
+            $priorHash = Get-DefenseClawApprovedPolicyHash -Metadata $PriorMetadata -Name $name
+            if (-not [string]::IsNullOrEmpty($priorHash)) { $record[$name] = $priorHash }
+        }
+    }
+    foreach ($name in @('config', 'manifest')) {
+        if (-not $Sources.ContainsKey($name)) { continue }
+        $installed = Get-DefenseClawArtifactPath -Layout $Layout -Name $name
+        $copy = Get-DefenseClawApprovedPolicyPath -Layout $Layout -Name $name
+        $digest = (
+            Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $installed -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        Install-DefenseClawFileAtomic -Source $installed -Destination $copy -ExpectedSHA256 $digest
+        Set-DefenseClawPathAcl -Path $copy -Kind AdminFile `
+            -GatewayServiceSID $script:AdministratorsSID
+        $record[$name] = $digest
+    }
+    return $record
+}
+
 function Assert-DefenseClawLifecycleSourcesCurrent {
     param([Parameter(Mandatory)][hashtable]$Sources)
     foreach ($name in @(
@@ -32068,7 +33137,8 @@ function Get-DefenseClawLifecycleStatus {
         # The result of an activation that accepted a completed reconcile
         # with failed user targets: those targets are logged as
         # defenseclaw_degraded instead of failing the result.
-        [switch]$AcceptDegradedTargets
+        [switch]$AcceptDegradedTargets,
+        [string[]]$AllowedFailedTargetSIDs
     )
     $errors = [Collections.Generic.List[string]]::new()
     $metadata = $null
@@ -32142,14 +33212,17 @@ function Get-DefenseClawLifecycleStatus {
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
-                -AllowFailedTargets:$AcceptDegradedTargets
+                -AllowFailedTargets:$AcceptDegradedTargets `
+                -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
             $guardianReport = Get-DefenseClawGuardianStatusReport `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName
             $generation = Get-DefenseClawGuardianGeneration -Report $guardianReport
             $guardianDegraded = [bool](
                 $AcceptDegradedTargets -and
-                (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $guardianReport)
+                (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $guardianReport) -and
+                (Test-DefenseClawGuardianFailedTargetsWithinSIDs `
+                    -Report $guardianReport -AllowedSIDs $AllowedFailedTargetSIDs)
             )
             if ($guardianDegraded) {
                 Write-DefenseClawGuardianDegradedTargets -Report $guardianReport
@@ -32422,7 +33495,8 @@ function Test-DefenseClawGuardianCoverageReport {
         [AllowEmptyString()][string]$CurrentStateIdentity,
         [AllowEmptyString()][string]$ExpectedManifestSHA256,
         [Parameter(Mandatory)][DateTime]$StartedAfter,
-        [switch]$AllowFailedTargets
+        [switch]$AllowFailedTargets,
+        [string[]]$AllowedFailedTargetSIDs
     )
     $reject = {
         param([string]$Reason)
@@ -32436,7 +33510,9 @@ function Test-DefenseClawGuardianCoverageReport {
     # A digest-bound activation still has to prove its exact activation
     # identity below; only the report's ok=false is excused.
     $degradedAccepted = $AllowFailedTargets -and
-        (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $Report)
+        (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $Report) -and
+        (Test-DefenseClawGuardianFailedTargetsWithinSIDs `
+            -Report $Report -AllowedSIDs $AllowedFailedTargetSIDs)
     if (-not $degradedAccepted -and
         ($null -eq $Report -or
         $null -eq $Report.PSObject.Properties['ok'] -or
@@ -32806,6 +33882,46 @@ function Get-DefenseClawGuardianFailedTargets {
     return @($failed.ToArray())
 }
 
+# An activation that skipped account roots may accept Guardian failures only
+# for those accounts. An empty list preserves the existing Secure Client and
+# rollback behavior, where any completed per-target failure is reported as
+# degraded. The caller must first validate the report as complete.
+function Test-DefenseClawGuardianFailedTargetsWithinSIDs {
+    param(
+        [Parameter(Mandatory)]$Report,
+        [string[]]$AllowedSIDs
+    )
+    if ($null -eq $AllowedSIDs -or $AllowedSIDs.Count -eq 0) {
+        return $true
+    }
+    $allowed = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($sid in $AllowedSIDs) {
+        if ([string]::IsNullOrWhiteSpace($sid)) {
+            return $false
+        }
+        [void]$allowed.Add($sid)
+    }
+    foreach ($target in @(Get-DefenseClawGuardianFailedTargets -Report $Report)) {
+        if (-not $allowed.Contains([string]$target.sid)) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Get-DefenseClawAllowedFailedTargetSIDs {
+    param([Parameter(Mandatory)]$Plan)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return , [string[]]@()
+    }
+    return , [string[]]@(
+        Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan |
+            Microsoft.PowerShell.Core\ForEach-Object { [string]$_.sid }
+    )
+}
+
 # Install and Upgrade succeed when the Guardian completed a fresh reconcile in
 # which some user targets failed: the deployment is live and every other user
 # is protected. Each failed target is recorded once as defenseclaw_degraded.
@@ -32922,7 +34038,8 @@ function Wait-DefenseClawFreshGuardianReconcile {
         # Upgrade activation the deployment is live and degraded (each
         # failed target is logged). A reconcile that never completes, or a
         # status that is not fresh, still fails.
-        [switch]$AllowFailedTargets
+        [switch]$AllowFailedTargets,
+        [string[]]$AllowedFailedTargetSIDs
     )
     if (-not [string]::IsNullOrWhiteSpace($ExpectedManifestSHA256) -and
         $ExpectedManifestSHA256 -cnotmatch '^[0-9a-f]{64}$') {
@@ -33014,7 +34131,8 @@ function Wait-DefenseClawFreshGuardianReconcile {
             -CurrentStateIdentity $currentStateIdentity `
             -ExpectedManifestSHA256 $ExpectedManifestSHA256 `
             -StartedAfter $startedAfter `
-            -AllowFailedTargets:$AllowFailedTargets
+            -AllowFailedTargets:$AllowFailedTargets `
+            -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
         if ([bool]$coverage.ok) {
             if ($AllowFailedTargets) {
                 Write-DefenseClawGuardianDegradedTargets -Report $report
@@ -36899,44 +38017,6 @@ function Complete-DefenseClawDeferredSelfUninstallRetirement {
     }
 }
 
-# The standalone install root sits in C:\Program Files\Cisco, which the
-# install creates. A CLI uninstall still runs from the install root when it
-# finishes, so the empty parent can go only once this finalizer has removed
-# the retired root (GAP-0526). A parent that holds anything else (other
-# Cisco software) or is a reparse point stays. The Secure Client profile
-# shares the folder with Secure Client and is unchanged.
-function Remove-DefenseClawEmptyStandaloneInstallParent {
-    param([Parameter(Mandatory)][hashtable]$Layout)
-    if (-not (Test-DefenseClawStandaloneProfile)) {
-        return
-    }
-    $root = [IO.Path]::GetFullPath([string]$Layout.InstallRoot).TrimEnd('\')
-    $parent = [IO.Path]::GetDirectoryName($root)
-    if ((Microsoft.PowerShell.Management\Test-Path -LiteralPath $root) -or
-        -not [string]::Equals([IO.Path]::GetFileName($parent), 'Cisco', [StringComparison]::OrdinalIgnoreCase) -or
-        -not [string]::Equals(
-            [IO.Path]::GetDirectoryName($parent).TrimEnd('\'),
-            ([string]$script:ProgramFiles).TrimEnd('\'),
-            [StringComparison]::OrdinalIgnoreCase
-        )) {
-        return
-    }
-    $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $parent -Force -ErrorAction SilentlyContinue
-    if ($null -eq $item -or -not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        return
-    }
-    if ($null -ne (Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $parent -Force | Microsoft.PowerShell.Utility\Select-Object -First 1)) {
-        return
-    }
-    try {
-        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $parent -Force -ErrorAction Stop
-    }
-    catch {
-        # Best effort: the next Setup uninstall removes an empty parent.
-        return
-    }
-}
-
 # Whether a self-uninstall finalizer drops the lifecycle lock as it exits:
 # only once its receipt is gone, and when it ran a standalone purge itself
 # (a deferred retirement) or no deployment is left. A CLI uninstall runs
@@ -37106,7 +38186,6 @@ function Complete-DefenseClawSelfUninstallRetirement {
                 Remove-DefenseClawSelfUninstallEvidence `
                     -Layout $layout `
                     -Receipt $receipt
-                Remove-DefenseClawEmptyStandaloneInstallParent -Layout $layout
                 return
             }
             catch {
@@ -37193,7 +38272,11 @@ function Complete-DefenseClawSelfUninstallRetirement {
             Exit-DefenseClawLifecycleLock -Lock $lock
             if (Test-DefenseClawSelfUninstallFinalizerDropsLifecycleLock -Layout $layout) {
                 $script:DefenseClawRemoveLifecycleLockOnExit = $false
-                Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout
+                # Last: the folders this deployment created, now empty
+                # (GAP-0091), C:\Program Files\Cisco once the retired root
+                # is gone among them.
+                Remove-DefenseClawStandaloneCreatedFolders -Path @(
+                    Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout)
             }
         }
         if ($null -eq $cleanupFailure) {
@@ -38881,8 +39964,7 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
                     [IO.Path]::Combine($script:ProgramFiles, 'ClaudeCode', 'managed-settings.d'),
                     [string]$Layout.CodexMachinePolicyDirectory,
                     [IO.Path]::Combine($script:ProgramData, 'Cursor')
-                )) +
-            @(Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles $script:ProgramFiles)
+                ))
         )
     }
     foreach ($ancestor in @($Layout.StateRootAncestors)) {
@@ -40330,6 +41412,20 @@ function Invoke-DefenseClawPreLayoutRecovery {
                 Assert-DefenseClawRecoveryActivatedForAction `
                     -Recovery $pendingRecovery `
                     -Action $Action
+                if (Test-DefenseClawRecoveryRestoredOtherRelease `
+                        -Layout $Layout `
+                        -Recovery $pendingRecovery `
+                        -Action $Action `
+                        -Sources $Sources) {
+                    return [pscustomobject]@{
+                        handled = $true
+                        result = (Get-DefenseClawRecoveryRestoredOtherReleaseResult `
+                            -Layout $Layout `
+                            -Action $Action `
+                            -GatewayServiceName $GatewayServiceName `
+                            -GuardianServiceName $GuardianServiceName)
+                    }
+                }
                 if ([bool]$pendingRecovery.fresh_install_rollback) {
                     if ($Action -eq 'Uninstall' -and $Purge) {
                         $result = Get-DefenseClawLifecycleStatus `
@@ -40809,6 +41905,13 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -ReplacedArtifacts $replaced `
             -Action $Action
     }
+    if ($Action -eq 'Repair' -and (Test-DefenseClawStandaloneProfile)) {
+        Invoke-DefenseClawRepairApprovedPolicyRecovery `
+            -Layout $Layout `
+            -Sources $Sources `
+            -Metadata $metadata `
+            -GatewayServiceName $GatewayServiceName
+    }
 
     $priorCodexTargetEnabled = $false
     if ($null -ne $metadata -and
@@ -40957,6 +42060,11 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         -SnapshotPath $snapshot)
     $committedLifecycleRecovery = $null
     try {
+        # Inside the rollback scope: a failed pins write rolls this
+        # transaction back in the same run (g649 review F5).
+        Write-DefenseClawTransactionLifecyclePins `
+            -SnapshotPath $snapshot `
+            -Sources $Sources
         if ($Action -eq 'Install' -and $null -ne $metadata -and
             -not $reconcileInstall) {
             # The inactive uninstall tombstone remains the authority for
@@ -41021,9 +42129,10 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         else {
             @('config', 'manifest')
         }
-        foreach ($name in @($Sources.Keys | Microsoft.PowerShell.Core\Where-Object {
-            $_ -notin $deferredPolicySources -and $_ -ne 'provider_library'
-        })) {
+        foreach ($name in @(Get-DefenseClawStagingOrder -Names @($Sources.Keys) |
+                Microsoft.PowerShell.Core\Where-Object {
+                    $_ -notin $deferredPolicySources -and $_ -ne 'provider_library'
+                })) {
             $destination = Get-DefenseClawArtifactPath -Layout $Layout -Name $name
             # A release binary whose installed bytes are the source's is
             # kept: a config-only ensure on the installed release copied
@@ -41221,6 +42330,13 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 $Action -eq 'Install' -and -not $reconcileInstall -and
                 $targetRuntimePreparationMode -ceq 'prepare'
             )
+        $allowedFailedTargetSIDs = [string[]](
+            Get-DefenseClawAllowedFailedTargetSIDs -Plan $targetRuntimePlan
+        )
+        if ((Test-DefenseClawStandaloneProfile) -and
+            $allowedFailedTargetSIDs.Count -gt 0) {
+            $acceptDegradedTargets = $true
+        }
         $expectedGuardianManifestSHA256 = [string]$targetRuntimePlan.manifest_sha256
         if ($expectedGuardianManifestSHA256 -cnotmatch '^[0-9a-f]{64}$') {
             throw 'target runtime plan did not bind an exact manifest SHA-256'
@@ -41384,8 +42500,18 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -Report $codexRemoval
         }
         # Secure Client keeps its validate-only config check (issue #1092).
+        # The approved source this run installed as config.yaml (CONFIG=):
+        # the sha256 its source descriptor recorded, '' without one (GAP-0646).
+        $approvedConfigSHA256 = ''
+        if ($Sources.ContainsKey('config') -and $Sources['config'] -is [System.Collections.IDictionary]) {
+            $approvedConfigSHA256 = ([string]$Sources['config']['sha256']).ToLowerInvariant()
+        }
+        if ($approvedConfigSHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            $approvedConfigSHA256 = ''
+        }
         Assert-DefenseClawInstalledConfig -Layout $Layout -GatewayServiceName $GatewayServiceName `
-            -RecordLifecycle:(-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout))
+            -RecordLifecycle:(-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) `
+            -ApprovedConfigSHA256 $approvedConfigSHA256
         if (Test-DefenseClawStandaloneProfile) {
             Invoke-DefenseClawCoworkDelivery -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName -SnapshotPath $snapshot `
@@ -41444,6 +42570,11 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -TargetCount ([Convert]::ToInt64(
                     $targetRuntimePlan.target_count
                 ))
+        $approvedPolicySources = @{}
+        if (Test-DefenseClawStandaloneProfile) {
+            $approvedPolicySources = Publish-DefenseClawApprovedPolicySources `
+                -Layout $Layout -Sources $Sources -PriorMetadata $metadata
+        }
         $newMetadata = New-DefenseClawDeploymentMetadata `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
@@ -41451,7 +42582,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -DeferredConfigPending:([bool](
                 $DeferredConfig -or $priorDeferredConfigPending
             )) `
-            -ManagedHooksActivation $managedHooksActivation
+            -ManagedHooksActivation $managedHooksActivation `
+            -ApprovedPolicySources $approvedPolicySources
         Write-DefenseClawJsonAtomic -Value $newMetadata -Path $Layout.MetadataPath
         Set-DefenseClawManagedAcls -Layout $Layout -GatewayServiceName $GatewayServiceName
         Set-DefenseClawStandaloneSecretsAcls `
@@ -41521,17 +42653,17 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Set-DefenseClawServiceStartMode `
                 -Name $GuardianServiceName `
                 -StartMode 3
-            # Secure Client: one user's failed target does not fail the
-            # deployment: a completed, fresh, digest-bound reconcile with
-            # failed targets activates degraded and logs each failed target.
-            # Standalone still requires every target to reconcile.
+            # A completed, fresh, digest-bound reconcile with failed targets
+            # activates degraded only for Secure Client or for accounts the
+            # standalone target runtime plan explicitly skipped.
             try {
                 [void](Wait-DefenseClawFreshGuardianReconcile `
                     -Layout $Layout `
                     -GatewayServiceName $GatewayServiceName `
                     -GuardianServiceName $GuardianServiceName `
                     -ExpectedManifestSHA256 $expectedGuardianManifestSHA256 `
-                    -AllowFailedTargets:$acceptDegradedTargets)
+                    -AllowFailedTargets:$acceptDegradedTargets `
+                    -AllowedFailedTargetSIDs $allowedFailedTargetSIDs)
             }
             finally {
                 if (Test-DefenseClawStandaloneProfile) {
@@ -41586,7 +42718,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
-                -AllowFailedTargets:$acceptDegradedTargets
+                -AllowFailedTargets:$acceptDegradedTargets `
+                -AllowedFailedTargetSIDs $allowedFailedTargetSIDs
             # Canonicalize dynamic logs/authorization after the service-created
             # files exist, then verify exact effective rights.
             Set-DefenseClawManagedAcls -Layout $Layout -GatewayServiceName $GatewayServiceName
@@ -41596,7 +42729,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -GuardianServiceName $GuardianServiceName `
                 -RequireReadiness `
                 -PendingTransaction `
-                -AcceptDegradedTargets:$acceptDegradedTargets
+                -AcceptDegradedTargets:$acceptDegradedTargets `
+                -AllowedFailedTargetSIDs $allowedFailedTargetSIDs
             # Only fully verified live state may become boot-active. A crash
             # before pending cleanup can start only validated services.
             Set-DefenseClawServiceStartMode `
@@ -41626,7 +42760,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
                 -RequireReadiness `
-                -AcceptDegradedTargets:$acceptDegradedTargets
+                -AcceptDegradedTargets:$acceptDegradedTargets `
+                -AllowedFailedTargetSIDs $allowedFailedTargetSIDs
             if ($priorDeferredConfigPending) {
                 # Keep the authenticated activation marker set through every
                 # mutable policy/runtime step and the complete live readiness
@@ -41735,7 +42870,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
-        -AcceptDegradedTargets:$acceptDegradedTargets
+        -AcceptDegradedTargets:$acceptDegradedTargets `
+        -AllowedFailedTargetSIDs $allowedFailedTargetSIDs
     if ($NoStart) {
         $result.ok = $true
     }
@@ -45682,6 +46818,139 @@ function Initialize-DefenseClawRecordedPayloadTrust {
             $script:DefenseClawPinnedPayloadSHA256[$leaf] = ([string]$property.Value).ToLowerInvariant()
         }
     }
+    # An interrupted transaction may already have installed its own installer
+    # and module (rel-1-0-6 GAP-0649): the pair the bootstrap admitted by the
+    # transaction's pins. Admit exactly that pair, and only while both files
+    # on disk are it, in place of the recorded pair.
+    $transactionPins = Get-DefenseClawPendingTransactionLifecyclePins -Layout $Layout
+    if ($null -eq $transactionPins) {
+        return
+    }
+    $pair = @(
+        @([string]$Layout.InstallerPath, [string]$transactionPins.installer, 'installer'),
+        @([string]$Layout.ModulePath, [string]$transactionPins.module, 'module')
+    )
+    foreach ($entry in $pair) {
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $entry[0] -PathType Leaf)) {
+            return
+        }
+        $onDisk = (
+            Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $entry[0] -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        if ($onDisk -cne $entry[1]) {
+            return
+        }
+    }
+    foreach ($entry in $pair) {
+        $leaf = [IO.Path]::GetFileName($entry[0]).ToLowerInvariant()
+        $recorded = $Metadata.hashes.PSObject.Properties[$entry[2]]
+        # A payload manifest's pin (Setup) is never replaced.
+        if (-not $script:DefenseClawPinnedPayloadSHA256.ContainsKey($leaf) -or
+            ($null -ne $recorded -and
+                $script:DefenseClawPinnedPayloadSHA256[$leaf] -ceq ([string]$recorded.Value).ToLowerInvariant())) {
+            $script:DefenseClawPinnedPayloadSHA256[$leaf] = $entry[1]
+        }
+    }
+    # The CLI the transaction staged right after the pair, by the same rule
+    # and only while the file on disk is it: an installed-CLI uninstall runs
+    # it as its native cleanup executable (g649 review F4).
+    $cliPath = [string]$Layout['CLIPath']
+    if ([string]::IsNullOrEmpty([string]$transactionPins.cli) -or
+        [string]::IsNullOrWhiteSpace($cliPath) -or
+        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $cliPath -PathType Leaf)) {
+        return
+    }
+    $cliOnDisk = (
+        Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $cliPath -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ($cliOnDisk -cne [string]$transactionPins.cli) {
+        return
+    }
+    $cliLeaf = [IO.Path]::GetFileName($cliPath).ToLowerInvariant()
+    $recordedCli = $Metadata.hashes.PSObject.Properties['cli']
+    if (-not $script:DefenseClawPinnedPayloadSHA256.ContainsKey($cliLeaf) -or
+        ($null -ne $recordedCli -and
+            $script:DefenseClawPinnedPayloadSHA256[$cliLeaf] -ceq ([string]$recordedCli.Value).ToLowerInvariant())) {
+        $script:DefenseClawPinnedPayloadSHA256[$cliLeaf] = [string]$transactionPins.cli
+    }
+}
+
+function Get-DefenseClawPendingTransactionLifecyclePins {
+    <#
+        The installer and module SHA-256 a pending transaction recorded before
+        it copied them (Write-DefenseClawTransactionLifecyclePins), or $null
+        without a pending transaction, without pins, or when the record is not
+        an administrator-only file in this deployment's transactions folder
+        (rel-1-0-6 GAP-0649).
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    try {
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath -PathType Leaf)) {
+            return $null
+        }
+        Assert-DefenseClawNoReparsePath -Path $Layout.PendingPath
+        $pending = Microsoft.PowerShell.Management\Get-Content -LiteralPath $Layout.PendingPath -Raw |
+            Microsoft.PowerShell.Utility\ConvertFrom-Json
+        $snapshot = $pending.PSObject.Properties['snapshot']
+        if ($null -eq $snapshot -or [string]::IsNullOrWhiteSpace([string]$snapshot.Value)) {
+            return $null
+        }
+        $transactions = [IO.Path]::GetFullPath([string]$Layout.TransactionsDirectory).TrimEnd('\') + '\'
+        $directory = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath([string]$snapshot.Value))
+        if (-not $directory.StartsWith($transactions, [StringComparison]::OrdinalIgnoreCase) -or
+            $directory.Length -le $transactions.Length -or
+            $directory.Substring($transactions.Length).Contains('\')) {
+            return $null
+        }
+        $path = Microsoft.PowerShell.Management\Join-Path $directory 'lifecycle-pins.json'
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
+            return $null
+        }
+        Assert-DefenseClawNoReparsePath -Path $path
+        Assert-DefenseClawPathAcl `
+            -Path $path `
+            -AllowedWriterSIDs @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID
+            ) `
+            -AllowedReaderSIDs @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID
+            ) `
+            -RequiredRights (New-DefenseClawRequiredRights -Kind Admin) `
+            -RejectUntrustedRead
+        if ([int64](Microsoft.PowerShell.Management\Get-Item -LiteralPath $path -Force).Length -gt 65536) {
+            return $null
+        }
+        $pins = Microsoft.PowerShell.Management\Get-Content -LiteralPath $path -Raw |
+            Microsoft.PowerShell.Utility\ConvertFrom-Json
+        $schema = $pins.PSObject.Properties['schema_version']
+        $installer = $pins.PSObject.Properties['installer']
+        $module = $pins.PSObject.Properties['module']
+        if ($null -eq $schema -or [string]$schema.Value -cne '1' -or
+            $null -eq $installer -or [string]$installer.Value -cnotmatch '^[0-9a-f]{64}$' -or
+            $null -eq $module -or [string]$module.Value -cnotmatch '^[0-9a-f]{64}$') {
+            return $null
+        }
+        $cli = $pins.PSObject.Properties['cli']
+        $cliDigest = ''
+        if ($null -ne $cli) {
+            if ([string]$cli.Value -cnotmatch '^[0-9a-f]{64}$') {
+                return $null
+            }
+            $cliDigest = [string]$cli.Value
+        }
+        return [pscustomobject]@{
+            installer = [string]$installer.Value
+            module = [string]$module.Value
+            cli = $cliDigest
+        }
+    }
+    catch {
+        return $null
+    }
 }
 
 function Add-DefenseClawProductionUninstallNativeCleanupSource {
@@ -46736,6 +48005,11 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                         -KeepProtectedAcl:(Test-DefenseClawStandaloneProfile))
                 }
                 New-DefenseClawLayoutDirectories -Layout $layout
+                if ($Action -in @('Install', 'Upgrade', 'Repair')) {
+                    # A computer installed before 1.0.9 has no record of the
+                    # two Cisco folders Setup created (GAP-0526, GAP-0091).
+                    Add-DefenseClawStandaloneUpgradeVendorFolderRecords
+                }
                 $pendingRecovery = Recover-DefenseClawPendingTransaction `
                     -Layout $layout `
                     -GatewayServiceName $GatewayServiceName `
@@ -46744,6 +48018,17 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 Assert-DefenseClawRecoveryActivatedForAction `
                     -Recovery $pendingRecovery `
                     -Action $Action
+                if (Test-DefenseClawRecoveryRestoredOtherRelease `
+                        -Layout $layout `
+                        -Recovery $pendingRecovery `
+                        -Action $Action `
+                        -Sources $sources) {
+                    return Get-DefenseClawRecoveryRestoredOtherReleaseResult `
+                        -Layout $layout `
+                        -Action $Action `
+                        -GatewayServiceName $GatewayServiceName `
+                        -GuardianServiceName $GuardianServiceName
+                }
                 if ([bool]$pendingRecovery.fresh_install_rollback) {
                     if ($Action -eq 'Uninstall' -and $Purge) {
                         $result = Get-DefenseClawLifecycleStatus `
@@ -46903,9 +48188,10 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         Exit-DefenseClawPurgeBundleLock
         Exit-DefenseClawLifecycleLock -Lock $lifecycleLock
         $leftNothing = Test-DefenseClawStandaloneUninstallLeftNothing -Action $Action -Layout $layout
+        $createdFolders = [string[]]@()
         if ($script:DefenseClawRemoveLifecycleLockOnExit -or $leftNothing) {
             $script:DefenseClawRemoveLifecycleLockOnExit = $false
-            Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout
+            $createdFolders = [string[]]@(Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout)
         }
         $script:DefenseClawMdmRotationJournalKept = ''
         if ($leftNothing) {
@@ -46933,6 +48219,9 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 Microsoft.PowerShell.Utility\Write-Warning -Message $script:DefenseClawMdmRotationJournalKept
             }
         }
+        # Last, once the lock, its folder and the MDM journal are gone: the
+        # vendor folders this deployment created, if they are empty (GAP-0091).
+        Remove-DefenseClawStandaloneCreatedFolders -Path $createdFolders
     }
 }
 

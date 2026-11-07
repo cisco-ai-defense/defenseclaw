@@ -238,7 +238,7 @@ func restoreWindowsBundleConfig(ctx context.Context, replacing string) windowsBu
 		if err != nil {
 			detail = windowsEnterpriseBoundedDiagnostic(err.Error())
 		}
-		return fail("bundle_restore_failed", "cannot prove the confirmed bundle principal ("+detail+"); run defenseclaw.exe enterprise windows ensure --profile standalone from an elevated prompt")
+		return fail("bundle_restore_failed", "cannot prove the confirmed bundle principal ("+detail+"); run "+windowsEnterpriseAdminCommand("ensure")+" from an elevated PowerShell prompt")
 	}
 	writeOptions.ExpectSHA256 = plan.ExpectSHA256
 	missing := plan.Missing

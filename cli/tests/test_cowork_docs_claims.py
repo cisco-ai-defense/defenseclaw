@@ -350,3 +350,13 @@ def test_public_docs_do_not_name_the_vm_sensor(path):
     text = path.read_text(encoding="utf-8")
     assert not _SENSOR_TERMS.findall(text), _SENSOR_TERMS.findall(text)
     assert _SENSOR_TERMS.search("the Cowork VM sensor") and not _SENSOR_TERMS.search("the Cowork VM")
+
+
+def test_the_printed_uninstall_step_is_the_documented_reminder():
+    """GAP-0084: the CLI line is the one guaranteed channel, and the page says so."""
+    from defenseclaw.commands import cmd_uninstall
+
+    text = _page()
+    assert cmd_uninstall._COWORK_PLUGIN_STAYS in text
+    assert "best effort" in text
+    assert "guaranteed reminder" in text

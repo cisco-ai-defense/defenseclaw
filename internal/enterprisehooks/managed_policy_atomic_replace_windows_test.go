@@ -8,6 +8,7 @@ package enterprisehooks
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -30,12 +31,12 @@ func TestWindowsManagedPolicyWriterNeverLeavesTheFileMissing(t *testing.T) {
 			if refused {
 				t.Cleanup(safefile.RefusePOSIXRenameForTest())
 			}
-			requireManagedPolicyWriterKeepsTheFile(t)
+			requireManagedPolicyWriterKeepsTheFile(t, refused)
 		})
 	}
 }
 
-func requireManagedPolicyWriterKeepsTheFile(t *testing.T) {
+func requireManagedPolicyWriterKeepsTheFile(t *testing.T, refused bool) {
 	paths := withWindowsCursorStandaloneSeamsForTest(t)
 	path := paths.Adapter
 	if err := writeWindowsManagedFile(path, []byte("version 0\r\n"), true); err != nil {
@@ -71,10 +72,12 @@ func requireManagedPolicyWriterKeepsTheFile(t *testing.T) {
 	close(stop)
 	readers.Wait()
 	if writeErr != nil {
-		t.Fatal(writeErr)
+		t.Fatalf("%v\n%s", writeErr, managedPolicyWriterRunnerHints(filepath.Dir(path), refused, runSystemTool))
 	}
 	if missing.Load() != 0 {
-		t.Fatalf("a reader found %s missing %d times in %d reads while it was replaced %d times", path, missing.Load(), reads.Load(), writes)
+		t.Fatalf("a reader found %s missing %d times in %d reads while it was replaced %d times\n%s",
+			path, missing.Load(), reads.Load(), writes,
+			managedPolicyWriterRunnerHints(filepath.Dir(path), refused, runSystemTool))
 	}
 	if reads.Load() == 0 {
 		t.Fatal("fixture: the readers never read the file")

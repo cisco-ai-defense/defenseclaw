@@ -81,7 +81,7 @@ func TestManagedAdministratorViewRefusesAStandardAccountWithElevationRequired(t 
 	managedHostCurrentAccount = func() string { return `HOST\dcw-std1` }
 	refusal := func() string {
 		return windowsManagedStandardUserViewAnswer("the AI Discovery inventory",
-			"enterprise windows discovery --user "+managedHostCurrentAccountName())
+			"enterprise", "windows", "discovery", "--user", managedHostCurrentAccountName())
 	}
 	err := pinManagedAdministratorEnvironment("enterprise windows discovery", refusal)
 	if err == nil || commandExitCode(err) != 5 {

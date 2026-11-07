@@ -21,7 +21,7 @@ evidence:
 
 | Surface | Required result |
 | --- | --- |
-| Enterprise opt-in | A build containing enterprise support makes no machine-level change until an authorized invocation activates it. Interactive administrators run `DefenseClawSetup-Enterprise-x64.exe /install` or `defenseclaw enterprise windows install`; both authenticate through the signed CLI. Direct execution of `packaging/windows/install-enterprise.ps1` is supported only from a protected LocalSystem endpoint-management context (the script has no `deployment_mode` parameter; `deployment_mode: managed_enterprise` is set inside the protected `-Config` file the invocation supplies). |
+| Enterprise opt-in | A build containing enterprise support makes no machine-level change until an authorized invocation activates it. Interactive administrators run `DefenseClawSetup-Enterprise-x64.exe /install` or `.\defenseclaw.exe enterprise windows install` from the signed release folder; both authenticate through the signed CLI. Direct execution of `packaging/windows/install-enterprise.ps1` is supported only from a protected LocalSystem endpoint-management context (the script has no `deployment_mode` parameter; `deployment_mode: managed_enterprise` is set inside the protected `-Config` file the invocation supplies). |
 | Normal-mode repair/no-op | Empty/default and every non-managed deployment mode retain the existing gateway application-protection repair and hook self-heal owner. Without the protected installer-owned service-name marker, Windows process startup does not even call the SCM-host detector or service executor. Before installation, the candidate reports enterprise enforcement disabled without creating a service, data root, or machine policy. A separate disposable normal-mode setup then replaces its user hook registration and must auto-heal the exact bytes while every enterprise-protected machine artifact remains unchanged. |
 | Managed-root provenance | Default install, state, staging, and work roots come from Windows known folders. Poisoned process `ProgramFiles` or `ProgramData` variables cannot redirect them and no poisoned path is created. |
 | Trusted release input | The installer, module, broker, gateway, hook, CLI, config, manifest, and required separately version-stamped upgrade binaries are copied byte-stably into an administrator/System-only staging tree before full lifecycle execution. The Cisco provider DLL remains at its trusted Secure Client path and must match the public CLI resolver selection with an exact Cisco signer and pinned digest. `-AllowUnsigned` is accepted before module import only for `Install`/`Upgrade`/`Repair` with the exact same-id certification service names, roots, and required certification CODEX_HOME scope marker; production defaults and near misses fail closed. It does not weaken either source-path trust boundary. |
@@ -119,8 +119,8 @@ retarget, take ownership of, or change the DACL on another hard-link name.
   preference variables from reaching bootstrap. Outside the harness, start
   this fixed engine from a clean endpoint-management process: a script cannot
   undo loader injection that acted before the script began.
-- Use the signed `defenseclaw enterprise windows ...` CLI for interactive
-  administrator lifecycle operations. Direct `install-enterprise.ps1`
+- Use the signed `defenseclaw.exe enterprise windows` CLI, by its full
+  path (it is not on the `PATH`), for interactive administrator lifecycle operations. Direct `install-enterprise.ps1`
   execution is supported only from a trusted LocalSystem or
   endpoint-management startup context whose loader environment was protected
   before PowerShell started. Its internal protected bootstrap directory
@@ -357,12 +357,12 @@ proof to the current manifest hash. Only that second transaction may make
 aggregate `security_complete=true`.
 
 The public signed CLI maps one-to-one to those installer parameters. For the
-first transaction, use `defenseclaw enterprise windows install` with
+first transaction, use `.\defenseclaw.exe enterprise windows install` from the signed release folder, with
 `--gateway-binary`, `--hook-binary`, `--cli-binary`, `--config`, `--manifest`,
 and the normal signed release inputs. Add
 `--attest-agent-application-control` only when WDAC or AppLocker has been
 independently deployed and tested. After the independent live Claude proof,
-use `defenseclaw enterprise windows repair` with the same protected release
+use `& 'C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw.exe' enterprise windows repair` (the Secure Client install root) from an elevated PowerShell prompt, with the same protected release
 inputs, repeat that optional application-control attestation if used, and add
 `--attest-claude-effective-policy`. Then require both
 `enterprise windows status --json` and `enterprise windows verify --json` to

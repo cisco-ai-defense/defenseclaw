@@ -30,6 +30,7 @@ const (
 	findingProofActionFactsSubgraph
 	findingProofExactCodeGuard
 	findingProofExactFallback
+	findingProofResolvedTarget
 	findingProofParserShadow
 	findingProofEvaluationFailure
 	findingProofActiveStateMutation
@@ -118,6 +119,12 @@ func newExactFallbackFindingProof(
 	)
 }
 
+// newResolvedTargetFindingProof records a code-owned target walk that
+// confirmed a protected write target. An unresolved target is not this proof.
+func newResolvedTargetFindingProof(ruleID string, targetConfirmed bool) findingProof {
+	return newFindingProof(findingProofResolvedTarget, ruleID, targetConfirmed)
+}
+
 func newParserShadowFindingProof(ruleID string) findingProof {
 	return newFindingProof(findingProofParserShadow, ruleID, false)
 }
@@ -160,6 +167,7 @@ func (p findingProof) authorizes(ruleID string) bool {
 		findingProofActiveStateMutation,
 		findingProofExactCodeGuard,
 		findingProofExactFallback,
+		findingProofResolvedTarget,
 		findingProofEvaluationFailure:
 		return true
 	default:

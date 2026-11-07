@@ -314,7 +314,7 @@ ConvertFrom-SecureString -SecureString $key -AsPlainText | & $cli enterprise sec
 
 The key goes from the prompt to standard input and never touches the disk. To
 automate it, have your secrets agent write the key to a file only SYSTEM and
-Administrators can change, run `enterprise secret set --name ai-defense-api-key
+Administrators can change, run `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise secret set --name ai-defense-api-key
 --from-file <file>` as SYSTEM, then delete the file. The command writes
 `C:\ProgramData\Cisco\DefenseClaw\secrets\ai-defense-api-key` and restarts the
 gateway. `enterprise secret status` never shows the value.

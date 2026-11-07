@@ -352,7 +352,7 @@ func validateWindowsManagedFileLockNameForTarget(
 	if err := validateWindowsManagedFileLockHandleForTarget(
 		windows.Handle(named.Fd()),
 		target,
-	); err != nil && !windowsManagedLockDriftAccepted(err) {
+	); err != nil && !windowsManagedLockDriftAccepted(err, windows.Handle(named.Fd()), target) {
 		return err
 	}
 	heldIdentity, err := atomicTransformOpenFileIdentity(held)
@@ -565,9 +565,11 @@ func validateWindowsManagedFileLockHandleForTarget(
 
 // windowsManagedLockDriftAccepted reports whether a re-validation failure is
 // permission drift the open path already repaired or accepted and logged.
-// Strict mode keeps every verdict fatal.
-func windowsManagedLockDriftAccepted(err error) bool {
-	return isManagedPermissionDrift(err) && !managed.TrustStrictAncestors()
+// Strict mode keeps every verdict fatal, and a standalone process refuses a
+// lock an untrusted principal can write (GAP-0566).
+func windowsManagedLockDriftAccepted(err error, handle windows.Handle, target *windows.SID) bool {
+	return isManagedPermissionDrift(err) && !managed.TrustStrictAncestors() &&
+		!windowsManagedLockStandaloneBoundary(handle, windowsManagedTargetRuntimeDriftPolicy(target))
 }
 
 // windowsManagedTargetRuntimeDriftPolicy is the canonical per-user runtime

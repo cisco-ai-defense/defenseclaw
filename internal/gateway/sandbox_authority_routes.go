@@ -238,9 +238,8 @@ func sandboxEnterprise(cfg *config.Config, floor config.OpenShellAdminConfig) sa
 	if out.Install == "" {
 		out.Install = "prerequisite"
 	}
-	// The release the daemon installs in setup mode (the 1.0.3 pin "0.1.3"
-	// runs no sandbox), as ensure renders it.
-	out.Version, _ = openshell.ManagedSetupPin(out.Install == config.EnterpriseOpenShellInstallSetup, strings.TrimSpace(out.Version))
+	// Use the same effective version requirement as managed ensure.
+	out.Version, _, _ = openshell.ManagedVersionPin(out.Version)
 	if out.GatewayPort == 0 {
 		out.GatewayPort = config.DefaultEnterpriseOpenShellGatewayPort
 	}

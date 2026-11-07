@@ -421,6 +421,10 @@ type APIServer struct {
 	// SetSandboxIngress (api_sandbox_ingress.go); nil when sandboxes are off.
 	sandboxIngressMu sync.RWMutex
 	sandboxIngress   *sandboxIngressState
+	// The receipt's fallback, audit, and settlement use SQLite's one writer.
+	// Queue those writes in the gateway instead of making parallel receipts
+	// contend in SQLite's busy handler while their hook answers wait.
+	sandboxReceiptWriteMu sync.Mutex
 
 	// sandboxCtl is the OpenShell sandbox manager behind /api/v1/sandbox/
 	// (api_sandbox.go); nil when sandboxes are off.
@@ -709,7 +713,9 @@ func (a *APIServer) lookupOTLPPathToken(source string) string {
 	a.otlpPathTokenLastStatAt[scope] = time.Now()
 
 	tok, err := connector.LoadOTLPPathToken(dataDir, scope)
-	if err != nil && connector.IsManagedPermissionDrift(err) && haveCached {
+	// A credential every local account could read is not drift: the value
+	// may be copied, so the cached token is dropped below (GAP-0566).
+	if err != nil && connector.IsManagedPermissionDrift(err) && !errors.Is(err, connector.ErrCredentialDisclosed) && haveCached {
 		// Owner or writer drift on the token file is not a reason to fail
 		// every OTLP request: keep the cached token and let the guardian
 		// republish the file.
@@ -760,7 +766,9 @@ func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 		return cached != "" && constantTimeStringMatch(presented, cached)
 	}
 	tok, err := connector.LoadHookAPIToken(dataDir, name)
-	if err != nil && connector.IsManagedPermissionDrift(err) {
+	// A credential every local account could read is not drift: the value
+	// may be copied, so the cached token is dropped below (GAP-0566).
+	if err != nil && connector.IsManagedPermissionDrift(err) && !errors.Is(err, connector.ErrCredentialDisclosed) {
 		// Owner or writer drift on the token file must not reject every hook
 		// request: keep authenticating against the cached token and let the
 		// guardian republish the file.
@@ -3516,11 +3524,11 @@ func windowsProfileScanNextStep(kind, target string) string {
 	}
 	review := `C:\DefenseClawReview`
 	copyTo := review + `\` + name
-	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+	quote := managed.PowerShellLiteral
 	return "standard accounts cannot run managed scans, so an administrator copies the folder out of the profiles and scans the copy " +
 		"from an elevated PowerShell prompt: `New-Item -ItemType Directory -Force " + quote(review) + " | Out-Null; " +
-		"Copy-Item -Recurse -Force -LiteralPath " + quote(target) + " -Destination " + quote(copyTo) + "`, then `& " +
-		quote(managed.WindowsStandaloneAdminCLI()) + " scan " + kind + " " + quote(copyTo) + "`"
+		"Copy-Item -Recurse -Force -LiteralPath " + quote(target) + " -Destination " + quote(copyTo) + "`, then `" +
+		managed.WindowsAdminCommand("scan", kind, copyTo) + "`"
 }
 
 func (a *APIServer) isBundledMCPScanRequest(req mcpScanRequest) bool {
@@ -4318,6 +4326,20 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			// credential (user_scoped_listener_proof.go). Every other
 			// profile keeps the ordinary authentication below.
 			a.serveUserScopedListenerProof(w, r)
+			return
+		}
+		if isGatewayTokenListenerProofRequest(r) && (a.scannerCfg == nil || !a.scannerCfg.SecureClientIntegration()) {
+			// The per-user OpenClaw plugin proves this listener with the
+			// gateway token before it sends that token (GAP-0594).
+			expected := ""
+			if a.scannerCfg != nil {
+				expected = a.scannerCfg.Gateway.Token
+			}
+			if !writeGatewayTokenListenerProof(w, r, expected, a.client.RefreshedToken()) {
+				a.emitHTTPAuthFailure(r.Context(), r, connector.UserScopedListenerProofPath,
+					gatewaylog.ErrCodeAuthInvalidToken, userScopedListenerProofRefusedReason)
+				writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			}
 			return
 		}
 		route := r.Pattern

@@ -22,7 +22,7 @@ import (
 // Setup. DC_WINDOWS_BUNDLE_TEST_ROOT lets an isolated Windows ACL probe inspect
 // the tree after the test; ordinary test runs use a disposable temp directory.
 func TestWindowsBundleReceiptEventsSetupAndPublisherContract(t *testing.T) {
-	if !windowsEnterpriseIsElevated() {
+	if !testTokenIsElevated() {
 		t.Skip("setting the Administrators owner requires elevation")
 	}
 	root := os.Getenv("DC_WINDOWS_BUNDLE_TEST_ROOT")
@@ -83,7 +83,7 @@ func TestWindowsBundleReceiptEventsSetupAndPublisherContract(t *testing.T) {
 }
 
 func TestWindowsBundleReceiptEventRepairsDirectoryACL(t *testing.T) {
-	if !windowsEnterpriseIsElevated() {
+	if !testTokenIsElevated() {
 		t.Skip("setting the Administrators owner requires elevation")
 	}
 	bundles := filepath.Join(t.TempDir(), "bundles")
@@ -130,7 +130,7 @@ func TestWindowsBundleReceiptEventRepairsDirectoryACL(t *testing.T) {
 }
 
 func TestWindowsBundleReceiptEventsRepairPriorFiles(t *testing.T) {
-	if !windowsEnterpriseIsElevated() {
+	if !testTokenIsElevated() {
 		t.Skip("setting the Administrators owner requires elevation")
 	}
 	bundles := filepath.Join(t.TempDir(), "bundles")

@@ -586,11 +586,9 @@ func (s *ContinuousDiscoveryService) detectUserScans(now time.Time) ([]AISignal,
 		if record.Report.Summary.Result != "ok" {
 			errs["user_scan:"+record.User] = "partial scan: " + userScanDetectorNames(record.Report.Summary.DetectorErrors)
 		}
-		// The guardian names the account as NSS does (dcad-alice@dclab.test
-		// on an SSSD host with fully qualified names). Records name it bare,
-		// as the hook, model and tool records of the same uid do; the
-		// qualified form is the principal (GAP-0447).
-		user := useridentity.BareAccountName(record.User)
+		// Keep the guardian's full NSS spelling for the gateway's current-
+		// holder check. Display names are shortened when records are emitted.
+		user := strings.TrimSpace(record.User)
 		for _, sig := range record.Report.Signals {
 			out = append(out, s.attributeUserScanSignal(sig, uid, user))
 		}
@@ -700,10 +698,10 @@ func (s *ContinuousDiscoveryService) attributeUserScanSignal(sig AISignal, uid, 
 	sig.ModelAPISourceHash = ""
 	if sig.Runtime != nil {
 		runtimeInfo := *sig.Runtime
-		runtimeInfo.User = user
+		runtimeInfo.User = useridentity.BareAccountName(user)
 		runtimeInfo.OtherInstances = nil
 		for _, other := range sig.Runtime.OtherInstances {
-			other.User = user
+			other.User = useridentity.BareAccountName(user)
 			other.OtherInstances = nil
 			runtimeInfo.OtherInstances = append(runtimeInfo.OtherInstances, other)
 		}

@@ -508,7 +508,6 @@ def ensure_grafana_admin_password(stack_dir: str | os.PathLike[str]) -> tuple[Pa
                 path,
                 (password + "\n").encode("ascii"),
                 protect_parent=False,
-                allow_windows_system_controllers_in_parent=True,
             )
         except OSError as exc:
             raise LocalStackError(
@@ -576,7 +575,6 @@ def persist_grafana_access_mode(
             path,
             (mode + "\n").encode("ascii"),
             protect_parent=False,
-            allow_windows_system_controllers_in_parent=True,
         )
     except OSError as exc:
         raise LocalStackError(f"could not persist the Grafana access mode at {path}: {exc}") from exc

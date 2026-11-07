@@ -546,6 +546,50 @@
       "since": "0.9.0"
     },
     {
+      "name": "DEFENSECLAW_CLI_TEST_GUARDED_PARENT",
+      "category": "test_fixture",
+      "purpose": "Set by the top-level internal/cli test run to its own PID, so the helper child processes it starts with os.Args[0] inherit it and skip the TestMain process-state guard; a helper changes its priority class or environment on purpose and exits (GAP-0079).",
+      "default": "unset",
+      "accepted_values": [
+        "parent test process PID",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/testprocess_guard_test.go",
+          "description": "The internal/cli TestMain guard sets it to the run's PID and skips the process-state check in helper children that inherit it"
+        },
+        {
+          "location": "internal/cli/testhost_windows_test.go",
+          "description": "A Windows helper child that inherits it checks only the registry sandbox, not the process state"
+        }
+      ],
+      "since": "1.0.9"
+    },
+    {
+      "name": "DEFENSECLAW_CLI_TEST_REGISTRY_SANDBOX",
+      "category": "test_fixture",
+      "purpose": "Passes the internal/cli Windows test run's HKCU sandbox key (Software\\DefenseClaw-test-<id>) to its helper child processes, so every registry write of the run lands in one per-run sandbox instead of the machine registry (GAP-0079).",
+      "default": "unset",
+      "accepted_values": [
+        "HKCU subkey under Software\\DefenseClaw-test-",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/testhost_windows_test.go",
+          "description": "The Windows internal/cli test host creates the sandbox key once per run and shares it with helper children through this variable"
+        }
+      ],
+      "since": "1.0.9"
+    },
+    {
       "name": "DEFENSECLAW_CLAWHUB_CWD",
       "category": "hook_internal",
       "purpose": "Working directory used by the temporary Windows ClawHub command adapter. Set only in the child process environment; inherited values are overwritten.",
@@ -2533,7 +2577,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
-      "managed": "tighten_only",
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/hooks/_hardening.sh",
@@ -4966,7 +5010,7 @@
     {
       "name": "DEFENSECLAW_SCRUB_BIN",
       "category": "runtime_path",
-      "purpose": "Override the DefenseClaw gateway binary used by the macOS uninstaller for the per-user agent-config scrub step (`defenseclaw-gateway enterprise hooks scrub`). Discovery order without this env var: /opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway, then a `defenseclaw` or `defenseclaw-gateway` executable next to the uninstall.sh script. Bundle-fixture and dev-tree tests set this so they can drive uninstall.sh against a stub binary without needing the managed install tree present.",
+      "purpose": "Override the DefenseClaw gateway binary used by the macOS uninstaller for the per-user agent-config scrub step (the gateway's `enterprise hooks scrub` command). Discovery order without this env var: /opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway, then a `defenseclaw` or `defenseclaw-gateway` executable next to the uninstall.sh script. Bundle-fixture and dev-tree tests set this so they can drive uninstall.sh against a stub binary without needing the managed install tree present.",
       "default": "unset (auto-discover in order: /opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway, then a `defenseclaw` or `defenseclaw-gateway` executable next to uninstall.sh)",
       "accepted_values": [
         "any-absolute-path-to-executable",

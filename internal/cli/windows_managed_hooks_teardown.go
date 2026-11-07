@@ -610,7 +610,7 @@ func runWindowsManagedHooksUserStatePurge() (windowsManagedHooksTeardownReport, 
 	if os.Getenv(windowsManagedHooksPurgeUserStateEnv) != "1" {
 		return fail(errors.New("the per-user purge of a committed uninstall requires an uninstall with purge"))
 	}
-	if err := enterpriseHooksNativePlatformPreflight(); err != nil {
+	if err := enterpriseHooksPlatformPreflight(); err != nil {
 		return fail(err)
 	}
 	runtimeDir, err := exactWindowsCodexLayoutEnv("DEFENSECLAW_HOME")
@@ -738,7 +738,7 @@ func runWindowsManagedHooksOwnerRightsRestoreMode(probe, upgradeOnly bool) (wind
 	if !enterprisehooks.WindowsStandaloneProcess() {
 		return fail(errors.New("the OWNER RIGHTS restore requires the standalone profile"))
 	}
-	if err := enterpriseHooksNativePlatformPreflight(); err != nil {
+	if err := enterpriseHooksPlatformPreflight(); err != nil {
 		return fail(err)
 	}
 	runtimeDir, err := exactWindowsCodexLayoutEnv("DEFENSECLAW_HOME")
@@ -884,7 +884,7 @@ func runWindowsManagedHooksTeardown(
 		return fail(fmt.Errorf("unsupported managed-hook teardown action %q", action))
 	}
 	// Authorization intentionally precedes protected layout discovery.
-	if err := enterpriseHooksNativePlatformPreflight(); err != nil {
+	if err := enterpriseHooksPlatformPreflight(); err != nil {
 		return fail(err)
 	}
 	opts, err := resolveWindowsCodexRequirementsLayout("remove")

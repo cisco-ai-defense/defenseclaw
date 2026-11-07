@@ -47,7 +47,7 @@ import click
 import yaml
 
 from defenseclaw import config as config_module
-from defenseclaw import ux
+from defenseclaw import connector_paths, ux
 from defenseclaw.config import gateway_pid_path
 from defenseclaw.config_inspect import (
     ConfigInspectError,
@@ -1214,8 +1214,64 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
             f"an empty value does not set {key}; use defenseclaw config unset {key}"
         )
     roster_change = parts == ["guardrail"] or parts[:2] == ["guardrail", "connectors"]
-    check_candidate = _check_guardrail_connector_roster if roster_change else None
+    selection_change = parts and parts[0] in {"guardrail", "claw"}
+
+    def _check_candidate(path: str, candidate: bytes) -> None:
+        if roster_change:
+            _check_guardrail_connector_roster(path, candidate)
+        _check_config_connector_selection(path, candidate)
+
+    check_candidate = _check_candidate if selection_change else None
     _write_config_change(app, [Change(key, parsed)], expect_sha256, "set", check_candidate=check_candidate)
+
+
+def _configured_connector_selection(document: object) -> tuple[set[str], str]:
+    """Resolve the enabled roster and primary from the written config shape."""
+    if not isinstance(document, dict):
+        return set(), ""
+    guardrail = document.get("guardrail")
+    guardrail = guardrail if isinstance(guardrail, dict) else {}
+    claw = document.get("claw")
+    claw = claw if isinstance(claw, dict) else {}
+    primary = guardrail.get("connector")
+    primary = connector_paths.normalize(primary) if isinstance(primary, str) and primary.strip() else ""
+    # A missing claw.mode loads as OpenClaw in Config.load and the Go loader.
+    mode = claw.get("mode", "openclaw")
+    mode = connector_paths.normalize(mode) if isinstance(mode, str) and mode.strip() else ""
+    roster = guardrail.get("connectors")
+    if isinstance(roster, dict) and roster:
+        enabled = {
+            connector_paths.normalize(name)
+            for name, entry in roster.items()
+            if isinstance(name, str) and isinstance(entry, dict) and entry.get("enabled") is not False
+        }
+        names = sorted(connector_paths.normalize(name) for name in roster if isinstance(name, str))
+        selected = primary or (mode if mode in names else names[0] if names else "")
+        return enabled, selected
+    selected = primary or mode
+    return ({selected} if selected else set()), selected
+
+
+def _check_config_connector_selection(path: str, candidate: bytes, *, allow_removal: bool = False) -> None:
+    """A settings edit cannot select another live connector as a side effect."""
+    from defenseclaw import config_writer
+
+    after = config_writer._parse_config_document(candidate)
+    if config_writer.secure_client_document(after):
+        return
+    current, _, _ = config_writer._read_current(path)
+    before = config_writer._parse_config_document(current) if current else {}
+    active_before, primary_before = _configured_connector_selection(before)
+    active_after, primary_after = _configured_connector_selection(after)
+    # A whole-entry unset explicitly removes its guardrail scope and already
+    # reports that to the operator. It may drop an enabled name, but cannot
+    # select a new primary or enable another entry in the same batch.
+    enabled_changed = (active_after - active_before) if allow_removal else (active_after ^ active_before)
+    if enabled_changed or primary_after != primary_before:
+        raise config_writer.ConfigWriteError(
+            "connector selection requires setup; use defenseclaw setup or a connector command "
+            "to change the active connector"
+        )
 
 
 def _check_guardrail_connector_roster(_path: str, candidate: bytes) -> None:
@@ -1302,7 +1358,16 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
         parts == ["guardrail"] or parts[:2] == ["guardrail", "connectors"]
         for _key, parts in parsed
     )
-    check_candidate = _check_guardrail_connector_roster if roster_change else None
+    selection_change = any(
+        parts and parts[0] in {"guardrail", "claw"} for _key, parts in parsed
+    )
+
+    def _check_candidate(path: str, candidate: bytes) -> None:
+        if roster_change:
+            _check_guardrail_connector_roster(path, candidate)
+        _check_config_connector_selection(path, candidate, allow_removal=True)
+
+    check_candidate = _check_candidate if selection_change else None
     if _write_config_change(app, changes, expect_sha256, "unset", check_candidate=check_candidate):
         for note in _left_roster_notes(parsed, roster):
             click.echo(note)

@@ -32,6 +32,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // Static inspection cannot prove what a client actually loads: a
@@ -45,10 +46,12 @@ import (
 // start the client as another account, and a standard account cannot read
 // the managed configuration), so there the note names the proof that works:
 // a tool call in the user's own session, then its record read from an
-// elevated prompt (GAP-0010).
+// elevated PowerShell prompt with the installed CLI, which is not on PATH
+// (GAP-0010, cowork-1-0-8 GAP-0076).
 func liveProofNote(opts Options, connectorName, client, what string) string {
 	if opts.goos() == "windows" {
-		return fmt.Sprintf("on Windows `enterprise policy verify --live` is not available: to prove the effective %s, make a tool call in %s from the user's own session, then read its record from an elevated Administrator prompt with `defenseclaw audit export --connector %s -o <file>`", what, client, connectorName)
+		return fmt.Sprintf("on Windows `enterprise policy verify --live` is not available: to prove the effective %s, make a tool call in %s from the user's own session, then read its record from an elevated PowerShell prompt with `%s`",
+			what, client, managed.WindowsAdminCommand("audit", "export", "--connector", connectorName, "-o", "<file>"))
 	}
 	return fmt.Sprintf("`enterprise policy verify --live --connector %s --user <user>` proves the effective %s", connectorName, what)
 }

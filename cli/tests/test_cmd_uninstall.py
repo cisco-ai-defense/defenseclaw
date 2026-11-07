@@ -231,6 +231,254 @@ class UninstallCommandTests(unittest.TestCase):
             exec_mock.assert_called_once()
 
 
+class CoworkPluginLineTests(unittest.TestCase):
+    """The printed step is the one reminder that always reaches the user (cowork-1-0-8 GAP-0084).
+
+    The in-chat notice after an uninstall reaches only the model, so uninstall
+    (dry run and real) and reset print the same line whenever setup cowork
+    built a plugin, and print nothing about Cowork otherwise.
+    """
+
+    LINE = "The DefenseClaw Cowork plugin stays in your Claude account. Remove it in Claude: Customize > Plugins."
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._data = Path(self._tmp.name) / "data"
+        self._data.mkdir()
+        for target in (
+            "defenseclaw.commands.windows_native_uninstall.prepare_native_windows_uninstall",
+        ):
+            patcher = patch(target, return_value=None)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = patch(
+            "defenseclaw.commands.cmd_uninstall.config_module.default_data_path",
+            return_value=self._data,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _cowork_state(self) -> None:
+        from defenseclaw import cowork
+
+        state = Path(cowork.state_path(str(self._data)))
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text("{}")
+
+    def _uninstall(self, *args: str) -> str:
+        plan = cmd_uninstall.UninstallPlan(data_dir=str(self._data), remove_data_dir="--all" in args)
+        with (
+            patch.object(cmd_uninstall, "_build_plan", return_value=plan),
+            patch.object(cmd_uninstall, "_render_plan"),
+            patch.object(cmd_uninstall, "_execute_plan"),
+            patch.object(cmd_uninstall, "_configured_gateway_ports", return_value=frozenset()),
+            patch.object(cmd_uninstall, "_remove_marked_native_otel_left"),
+            patch.object(cmd_uninstall, "_render_kept_and_next_steps"),
+        ):
+            result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, list(args))
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        return " ".join(result.output.split())
+
+    def _reset(self) -> str:
+        with patch.object(cmd_uninstall, "_execute_plan"):
+            result = CliRunner().invoke(cmd_uninstall.reset_cmd, ["--yes"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        return " ".join(result.output.split())
+
+    def test_dry_run_uninstall_prints_the_line(self):
+        self._cowork_state()
+        self.assertIn(self.LINE, self._uninstall("--dry-run"))
+
+    def test_real_uninstall_prints_the_line_in_the_plan(self):
+        self._cowork_state()
+        flat = self._uninstall("--yes")
+        self.assertIn(self.LINE, flat)
+        # In the plan, before the work and the closing warning.
+        self.assertLess(flat.index(self.LINE), flat.index("cannot remove its Cowork plugin"))
+
+    def test_real_uninstall_with_all_prints_the_line(self):
+        self._cowork_state()
+        self.assertIn(self.LINE, self._uninstall("--all", "--yes"))
+
+    def test_dry_run_uninstall_prints_the_full_removal_step_too(self):
+        # A 1.0.8-plugin user doing a dry run must still hear that calls may block (review F1).
+        self._cowork_state()
+        flat = self._uninstall("--dry-run")
+        self.assertIn("Customize > Plugins, then the ... menu > Remove", flat)
+        self.assertIn("older plugins may block", flat)
+        self.assertLess(flat.index(self.LINE), flat.index("cannot remove its Cowork plugin"))
+        self.assertLess(flat.index("older plugins may block"), flat.index("dry-run"))
+
+    def _native_request(self):
+        from defenseclaw.commands.windows_native_uninstall import NativeWindowsUninstallRequest
+
+        return NativeWindowsUninstallRequest(
+            platform_name="win32",
+            wipe_data=False,
+            install_root="C:\\Program Files\\DefenseClaw",
+            state_path="state.json",
+            payload_manifest_path="manifest.json",
+            setup_path="C:\\Program Files\\DefenseClaw\\Setup.exe",
+            version="1.0.9",
+            source_commit="0" * 40,
+            state_sha256="0" * 64,
+            payload_manifest_sha256="0" * 64,
+            argv=("Setup.exe", "/uninstall"),
+        )
+
+    def _native_uninstall(self, *args: str, returncode: int | None = None):
+        """Run the native Windows uninstall with Setup stubbed to `returncode`."""
+        from defenseclaw.commands.windows_native_uninstall import NativeWindowsUninstallOutcome
+
+        with (
+            patch(
+                "defenseclaw.commands.windows_native_uninstall.prepare_native_windows_uninstall",
+                return_value=self._native_request(),
+            ),
+            patch(
+                "defenseclaw.commands.windows_native_uninstall.execute_native_windows_uninstall",
+                return_value=NativeWindowsUninstallOutcome(returncode=returncode or 0),
+            ) as execute,
+            patch.object(cmd_uninstall, "_build_plan") as build_plan,
+            patch.object(cmd_uninstall, "_configured_gateway_ports", return_value=frozenset()),
+            patch.object(cmd_uninstall, "_remove_marked_native_otel_left"),
+            patch.object(cmd_uninstall, "_relay_native_setup_removed_connector_leftovers"),
+        ):
+            result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, list(args))
+        build_plan.assert_not_called()
+        return result, " ".join(result.output.split()), execute
+
+    def test_native_windows_dry_run_prints_both_lines(self):
+        # The native Windows path has its own dry-run block (review F2, N1).
+        self._cowork_state()
+        result, flat, execute = self._native_uninstall("--dry-run")
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("authenticated native Windows installation", flat)
+        self.assertIn(self.LINE, flat)
+        self.assertIn("Customize > Plugins, then the ... menu > Remove", flat)
+        self.assertIn("older plugins may block", flat)
+        self.assertIn("dry-run", flat)
+        self.assertLess(flat.index(self.LINE), flat.index("cannot remove its Cowork plugin"))
+        self.assertLess(flat.index("older plugins may block"), flat.index("dry-run"))
+        execute.assert_not_called()
+
+    def test_native_windows_real_run_prints_the_full_step_once(self):
+        self._cowork_state()
+        result, flat, _ = self._native_uninstall("--yes", returncode=0)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(flat.count("older plugins may block"), 1)
+
+    def test_native_windows_restart_required_prints_the_full_step_once(self):
+        # Setup exit 3010 is a successful uninstall that waits for a restart (review N2).
+        self._cowork_state()
+        result, flat, _ = self._native_uninstall("--yes", returncode=3010)
+        self.assertEqual(result.exit_code, 3010, msg=result.output)
+        self.assertIn("restart required", flat)
+        self.assertIn(self.LINE, flat)
+        self.assertEqual(flat.count("older plugins may block"), 1)
+        self.assertLess(flat.index(self.LINE), flat.index("cannot remove its Cowork plugin"))
+
+    def test_native_windows_failed_setup_prints_no_removal_step(self):
+        self._cowork_state()
+        for code in (1603, 5):
+            result, flat, _ = self._native_uninstall("--yes", returncode=code)
+            self.assertEqual(result.exit_code, code, msg=result.output)
+            self.assertNotIn("cannot remove its Cowork plugin", flat)
+
+    def test_reset_prints_the_line(self):
+        self._cowork_state()
+        flat = self._reset()
+        self.assertIn(self.LINE, flat)
+        self.assertLess(flat.index(self.LINE), flat.index("Reset complete"))
+
+    def test_no_cowork_state_prints_no_cowork_line(self):
+        for output in (self._uninstall("--dry-run"), self._uninstall("--yes"), self._reset()):
+            self.assertNotIn("Cowork", output)
+            self.assertNotIn(self.LINE, output)
+
+
+class CoworkRemovalNotRecordedTests(unittest.TestCase):
+    """A refused Cowork marker never crashes uninstall or reset after the teardown (cowork-1-0-8 GAP-0085).
+
+    What is left of the work still runs; then the reason, which names the
+    folder owner, and the plugin removal step are printed and the exit is 1.
+    """
+
+    PROBLEM = (
+        "unsafe export parent C:\\Users\\a: owner SID S-1-5-21-1-2-3-1002 is not this account, SYSTEM, "
+        "BUILTIN Administrators or TrustedInstaller"
+    )
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._data = Path(self._tmp.name) / "data"
+        self._data.mkdir()
+        for target, value in (
+            ("defenseclaw.commands.windows_native_uninstall.prepare_native_windows_uninstall", None),
+            ("defenseclaw.commands.cmd_uninstall.config_module.default_data_path", self._data),
+        ):
+            patcher = patch(target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        from defenseclaw import cowork
+
+        state = Path(cowork.state_path(str(self._data)))
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text("{}")
+        self._marker = Path(cowork.uninstalled_marker_path(str(self._data)))
+
+    def _uninstall(self, refused: bool):
+        plan = cmd_uninstall.UninstallPlan(data_dir=str(self._data), remove_data_dir=True)
+        refusal = patch("defenseclaw.cowork.mark_uninstalled", side_effect=OSError(self.PROBLEM))
+        with (
+            patch.object(cmd_uninstall, "_build_plan", return_value=plan),
+            patch.object(cmd_uninstall, "_render_plan"),
+            patch.object(cmd_uninstall, "_execute_plan") as execute,
+            patch.object(cmd_uninstall, "_configured_gateway_ports", return_value=frozenset()),
+            patch.object(cmd_uninstall, "_remove_marked_native_otel_left") as otel,
+            patch.object(cmd_uninstall, "_render_kept_and_next_steps") as next_steps,
+            refusal if refused else contextlib.nullcontext(),
+        ):
+            result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--all", "--yes"])
+        execute.assert_called_once_with(plan)
+        otel.assert_called_once()
+        next_steps.assert_called_once_with(plan)
+        return result, " ".join(result.output.split())
+
+    def test_refused_marker_finishes_the_uninstall_then_exits_1_naming_the_owner(self):
+        result, flat = self._uninstall(refused=True)
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIsInstance(result.exception, SystemExit)
+        self.assertIn(f"DefenseClaw could not record its removal for the Cowork plugin: {self.PROBLEM}", flat)
+        self.assertIn("it blocks every Cowork tool call", flat)
+        self.assertNotIn("lets Cowork calls run after the data folder is removed", flat)
+        self.assertFalse(self._marker.exists())
+
+    def test_written_marker_is_the_ordinary_uninstall(self):
+        result, flat = self._uninstall(refused=False)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(self._marker.read_text(), "removed\n")
+        self.assertIn("lets Cowork calls run after the data folder is removed", flat)
+        self.assertNotIn("could not record", flat)
+
+    def test_refused_marker_finishes_the_reset_then_exits_1(self):
+        with (
+            patch.object(cmd_uninstall, "_execute_plan") as execute,
+            patch("defenseclaw.cowork.mark_uninstalled", side_effect=OSError(self.PROBLEM)),
+        ):
+            result = CliRunner().invoke(cmd_uninstall.reset_cmd, ["--yes"])
+        execute.assert_called_once()
+        flat = " ".join(result.output.split())
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIsInstance(result.exception, SystemExit)
+        self.assertIn("Reset complete", flat)
+        self.assertIn(self.PROBLEM, flat)
+        self.assertLess(flat.index("Reset complete"), flat.index("could not record its removal"))
+        self.assertNotIn("lets Cowork calls run after the data folder is removed", flat)
+
+
 class KeptAndNextStepsTests(unittest.TestCase):
     """GAP-1093: a partial uninstall says what it kept and how to go on."""
 
@@ -303,11 +551,13 @@ class KeptAndNextStepsTests(unittest.TestCase):
 class ResetCommandTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
+        self._data = Path(self._tmp.name) / "data"
+        self._data.mkdir()
         self.addCleanup(self._tmp.cleanup)
-        (Path(self._tmp.name) / ".venv").mkdir()
+        (self._data / ".venv").mkdir()
         patcher = patch(
             "defenseclaw.commands.cmd_uninstall.config_module.default_data_path",
-            return_value=self._tmp.name,
+            return_value=self._data,
         )
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -335,7 +585,7 @@ class ResetCommandTests(unittest.TestCase):
         # what only the user can remove, as uninstall does.
         from defenseclaw import cowork
 
-        state = Path(cowork.state_path(self._tmp.name))
+        state = Path(cowork.state_path(self._data))
         state.parent.mkdir(parents=True, exist_ok=True)
         state.write_text("{}")
         runner = CliRunner()
@@ -345,7 +595,8 @@ class ResetCommandTests(unittest.TestCase):
         flat = " ".join(result.output.split())
         self.assertIn("cannot remove its Cowork plugin from your Claude account", flat)
         self.assertIn("Customize > Plugins, then the ... menu > Remove", flat)
-        self.assertIn("Until then Cowork tool calls are blocked.", flat)
+        self.assertIn("A plugin built with 1.0.9 lets Cowork calls run after the data folder is removed", flat)
+        self.assertEqual(Path(cowork.uninstalled_marker_path(self._data)).read_text(), "removed\n")
         self.assertLess(flat.index("Cowork plugin"), flat.index("Reset complete"))
 
     def test_reset_without_a_cowork_plugin_prints_no_cowork_line(self):

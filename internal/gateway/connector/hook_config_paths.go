@@ -181,6 +181,20 @@ func OwnedHooksPresent(conn Connector, opts SetupOpts) (bool, error) {
 	return OwnedHooksPresentContext(context.Background(), conn, opts)
 }
 
+// OwnedHooksPresentForPendingInstall checks the registration against the
+// runtime digests rendered by this install transaction before publishing its
+// contract lock. Ordinary readers continue to require the persisted lock.
+func OwnedHooksPresentForPendingInstall(conn Connector, opts SetupOpts, pending HookContractLockEntry) (bool, error) {
+	if conn == nil || normalizeConnectorName(pending.Connector) != normalizeConnectorName(conn.Name()) {
+		return false, errors.New("pending hook contract names a different connector")
+	}
+	opts.pendingHookScriptDigests = make(map[string]string, len(pending.HookScriptDigests))
+	for name, digest := range pending.HookScriptDigests {
+		opts.pendingHookScriptDigests[name] = digest
+	}
+	return OwnedHooksPresent(conn, opts)
+}
+
 // OwnedHooksPresentContext is the cancellable form used by managed guardians
 // when a connector's effective policy check may perform bounded external work.
 // A registration that still holds an edited DefenseClaw entry next to the

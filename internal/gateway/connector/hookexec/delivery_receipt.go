@@ -95,6 +95,8 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 	// round trip waits for that loop: the body ends with the request, also
 	// after the gateway advertised the receipt.
 	context.AfterFunc(req.Context(), delivery.close)
+	// Read now: the goroutine below outlives the call by a moment (GAP-0680).
+	poll := hookDeliveryStartPoll
 	go func() {
 		if _, err := writer.Write(payload); err != nil {
 			delivery.close()
@@ -116,7 +118,7 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 			if starting != nil && starting(req.Context()) {
 				seenStarting = true
 				delivery.markHeldForStart()
-				timer.Reset(hookDeliveryStartPoll)
+				timer.Reset(poll)
 				continue
 			}
 			if seenStarting {
@@ -147,13 +149,19 @@ var hookDeliveryStartPoll = 100 * time.Millisecond
 // probe only runs after the capability wait passed without a 103, and the
 // request deadline bounds the wait. Elsewhere no probe is wired and the
 // release comes at the capability wait, as before.
-var hookDeliveryGatewayStarting = func(ctx context.Context, opts Options) bool {
+// It returns the look of the call opts makes (nil: none); the call reads
+// the service probe when it prepares the request, because the look runs on
+// the request body's goroutine, which outlives the call by a moment: a test
+// that replaced the probe after it raced that read (rel-1-0-6 GAP-0680).
+var hookDeliveryGatewayStarting = func(opts Options) func(context.Context) bool {
 	probe := standaloneGatewayServiceProbe
 	if !opts.ManagedEnterprise || !opts.ManagedStandalone || opts.SecureClient || probe == nil {
-		return false
+		return nil
 	}
-	state, err := probe(ctx)
-	return err == nil && gatewayServiceNotServing(state)
+	return func(ctx context.Context) bool {
+		state, err := probe(ctx)
+		return err == nil && gatewayServiceNotServing(state)
+	}
 }
 
 // gatewayServiceNotServing reports a unit state in which the gateway does not

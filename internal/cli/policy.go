@@ -82,7 +82,7 @@ func policyConfigOnlyPreRunE(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	if err := pinManagedAdministratorEnvironment("policy", func() string {
-		return windowsManagedStandardUserViewAnswer("the managed policy", "enterprise policy show --user "+managedHostCurrentAccountName())
+		return windowsManagedStandardUserViewAnswer("the managed policy", "enterprise", "policy", "show", "--user", managedHostCurrentAccountName())
 	}); err != nil {
 		return err
 	}

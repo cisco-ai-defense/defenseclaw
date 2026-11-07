@@ -95,6 +95,12 @@ var windowsStandaloneTrustScope = func() bool {
 	return StandaloneTrustScope() || WindowsStandaloneInstallExecutable()
 }
 
+// WindowsStandaloneTrustScope is the shared standalone rule for managed
+// lock validation in the connector.
+func WindowsStandaloneTrustScope() bool {
+	return windowsStandaloneTrustScope()
+}
+
 // StandaloneRefusesContentDrift reports whether a drifted policy or data
 // file (config.yaml, the guardian manifest, the managed-hook journals, the
 // Codex machine requirements) must be refused without an in-place ACL

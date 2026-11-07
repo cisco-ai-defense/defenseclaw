@@ -17,6 +17,9 @@
 package harness
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -42,5 +45,46 @@ func TestOpenCodeImageUsesOnlyTheV2PackageAndVerifiedNativeBinary(t *testing.T) 
 	// npm postinstall's separate copy selected by this build host's CPU.
 	if !strings.Contains(steps[0].Run, `ln -sfn "$bin" /usr/local/bin/opencode`) {
 		t.Fatal("the launch path is not the verified platform binary")
+	}
+}
+
+func TestOpenCodePinnedVersionDisplay(t *testing.T) {
+	steps, err := OpenCode.InstallSteps("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.LastIndex(steps[0].Run, `h="$(mktemp -d)"`)
+	if start < 0 {
+		t.Fatal("OpenCode install has no version check")
+	}
+	bin := filepath.Join(t.TempDir(), "opencode")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s\\n' \"$VERSION_REPLY\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	check := strings.Replace(steps[0].Run[start:], "/usr/local/bin/opencode --version", shellQuote(bin)+" --version", 1)
+	for _, tc := range []struct {
+		name, output string
+		allow        bool
+	}{
+		{"version with release marker", "opencode v2.1.4", true},
+		{"capitalized display name", "OpenCode v2.1.4", true},
+		{"bare version", "2.1.4", true},
+		{"different version", "opencode v2.1.5", false},
+		{"extra version text", "opencode v2.1.4-extra", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command("/bin/sh", "-c", check)
+			cmd.Env = append(os.Environ(), "VERSION_REPLY="+tc.output)
+			out, err := cmd.CombinedOutput()
+			if (err == nil) != tc.allow {
+				t.Fatalf("version %q: allowed=%t, want %t: %s", tc.output, err == nil, tc.allow, out)
+			}
+			if tc.allow {
+				matches := OpenCode.Probe().VersionRE.FindStringSubmatch(tc.output)
+				if len(matches) != 2 || matches[1] != OpenCode.DefaultVersion {
+					t.Fatalf("probe version %q: %v", tc.output, matches)
+				}
+			}
+		})
 	}
 }

@@ -224,7 +224,7 @@ Before the first install no `defenseclaw-gateway.exe` can print the digest. Put 
 placeholder (`sha256:` and 64 zeros) in the config and run Setup: it refuses with
 `1639` and prints the pack's digest. Review the pack, put the digest in the
 config and run Setup again. Once installed,
-`defenseclaw-gateway.exe rulepack validate --dir "$Packs\my-pack"` prints it as
+`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' rulepack validate --dir "$Packs\my-pack"` prints it as
 `custom_packs pin:`. Setup also refuses a pack folder with the wrong owner or
 permissions (`1639`, with the fix), and warns `rule_pack_readable_by_users` when
 `Users`, `Authenticated Users`, `Everyone`, `INTERACTIVE` or `Domain Users` can
@@ -278,7 +278,7 @@ Setup properties use `NAME=value`; names are case-insensitive and ignore dashes.
 | `NOSTART=1` | Install with the services stopped and disabled (`not_started` warning); a later `/repair` starts them |
 | `PURGE=1` | With `/uninstall`: also remove each enrolled account's per-user data ([Remove](#remove)) |
 | `FORCE=1` | With `/uninstall`: remove the deployment without recovering a pending transaction |
-| `TIMEOUTSECONDS=<n>` | Lifecycle timeout, 60 to 7200, counted from when Setup starts. Default 1800. It also bounds the `ensure` Setup runs (Setup gives them what is left of the limit less a tenth, taking off at most 2 minutes), so a slow upgrade is no longer cut off at 12 minutes. A direct `defenseclaw.exe ... ensure` keeps its 12-minute limit. A run that stops at the limit prints the retry command with the same properties and `TIMEOUTSECONDS=7200`. A standalone run stopped at the limit then recovers for up to 10 more minutes: allow `TIMEOUTSECONDS` plus 10 minutes. A run with less than about a minute of it left after the payload checks does not start the lifecycle and changes nothing, so a change (`/install`, `/ensure`, `/upgrade`, `/repair`, `/uninstall`) needs at least about 2 minutes (`120`); a lower value suits only `/verify` and `/status` |
+| `TIMEOUTSECONDS=<n>` | Lifecycle timeout, 60 to 7200, counted from when Setup starts. Default 1800. It also bounds the `ensure` Setup runs (Setup gives them what is left of the limit less a tenth, taking off at most 2 minutes), so a slow upgrade is no longer cut off at 12 minutes. A direct run of `enterprise windows ensure` with `defenseclaw.exe` keeps its 12-minute limit. A run that stops at the limit prints the retry command with the same properties and `TIMEOUTSECONDS=7200`. A standalone run stopped at the limit then recovers for up to 10 more minutes: allow `TIMEOUTSECONDS` plus 10 minutes. A run with less than about a minute of it left after the payload checks does not start the lifecycle and changes nothing, so a change (`/install`, `/ensure`, `/upgrade`, `/repair`, `/uninstall`) needs at least about 2 minutes (`120`); a lower value suits only `/verify` and `/status` |
 
 The other actions are `/install`, `/upgrade`, `/repair`, `/reconcile`, `/status`,
 `/verify` and `/uninstall`. Prefer `/ensure`; `/install` also needs `MANIFEST=`.
@@ -368,6 +368,31 @@ hook, and returns a nonzero exit code when anything fails. Healthy values:
 
 Add/Remove Programs lists **Cisco DefenseClaw Enterprise**, and the `DefenseClaw`
 event log has one entry per lifecycle run ([event IDs](/docs/enterprise/operations)).
+
+### A user's own status
+
+`defenseclaw status` shows an account's own protection (its agents and Cowork) only
+in a PowerShell prompt that is not elevated. Setup puts no DefenseClaw command on
+`PATH`, so use the full path. Sign in as the standard account and run:
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' status
+```
+
+The `&` form is PowerShell's. In a Command Prompt (`cmd.exe`) quote the path with
+double quotes instead: `"C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe" status`.
+
+An elevated prompt, and every prompt of the built-in Administrator account, gets the
+administrator's commands instead. From an elevated PowerShell prompt, check the
+deployment and one account's agents:
+
+```powershell title="Elevated PowerShell prompt"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --profile standalone
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy show --user <account>
+```
+
+Quote an account name that has a space or an apostrophe, as PowerShell does:
+`--user 'John Smith'`, `--user 'O''Brien'`.
 
 ### What Windows shows after an install
 
@@ -523,7 +548,7 @@ profiles. A profile asset is never admission-blocked, and project skill folders
 inside profiles are skipped before verification or registration: no install
 scan, no "is not scanned yet" refusal and no `project_skill_root_unverified`
 warning. Watcher rows for roots outside profiles carry no per-user attribution.
-The scan and scan-finding rows of a `defenseclaw.exe scan skill` or `scan plugin` run
+The scan and scan-finding rows of a `scan skill` or `scan plugin` run of the installed `defenseclaw.exe`
 on an asset in an enrolled user's folder name that user (`user.id`,
 `defenseclaw.user.name`), and the judge model when the judge ran
 (`gen_ai.request.model`, `judge=` in the scan row details).
@@ -682,10 +707,14 @@ an elevated prompt.
 `show` lists each connector's route, lock and coverage. `verify` exits `1` while
 coverage is incomplete. A missing machine policy is a protection failure, even
 with zero enrolled users: stop the affected agent with application control, fix
-the reported cause, and from an elevated session run
-`defenseclaw enterprise windows reconcile --profile standalone` or
-`defenseclaw enterprise windows repair --profile standalone`, then rerun
-`enterprise policy verify`. A missing hook executable is also a protection
+the reported cause, and from an elevated PowerShell prompt run one of:
+
+```powershell title="Elevated PowerShell prompt"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows reconcile --profile standalone
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows repair --profile standalone
+```
+
+Then rerun `enterprise policy verify` as above. A missing hook executable is also a protection
 failure for Claude Code, Codex, Cursor and Copilot while their machine policy files
 stay installed. Stop affected agent use, repair the installation, and require the full
 `enterprise windows verify --profile standalone --json` check to pass before
@@ -753,6 +782,11 @@ release, the result warns `recovered_pending_transaction`: run the newer Setup
 may retry once with the gateway in the running Setup's payload, and reports
 `recovery_gateway_fallback`, `recovery_gateway_not_used` or
 `recovery_activation_deferred`. Do not edit DefenseClaw files by hand.
+
+The installed CLI can also refuse a cut-off upgrade outright, when it stopped
+between the installer and the module, forward or during its rollback ("module
+SHA-256 does not match the pinned payload manifest"). Run that release's Setup
+`/ensure`; see [the troubleshooting entry](/docs/enterprise/troubleshooting#after-a-cut-off-windows-upgrade-the-installed-cli-refuses-with-module-sha-256-does-not-match).
 
 If no recovery finishes, fix what its error names, then as the last resort remove
 the deployment without recovering the transaction and install again:
@@ -924,7 +958,19 @@ removed it also removes the files the managed runtime wrote in
 `%USERPROFILE%\.defenseclaw` (see **Per-user runtime files** below); the account keeps
 its other files there and the per-user binaries. Add `PURGE=1` to Setup or `--purge`
 to the CLI to remove those too. The marker key, the Add/Remove Programs entry and a `DisableSelfUpdate`
-value the lifecycle wrote are removed, and the lifecycle log stays. A standalone
+value the lifecycle wrote are removed, and the lifecycle log stays.
+Once nothing of the deployment is left, uninstall also removes the vendor folders DefenseClaw
+created, such as `C:\ProgramData\Cisco`, `C:\Program Files\Cisco`, `C:\ProgramData\Cursor`,
+`C:\ProgramData\OpenAI\Codex` and `C:\Program Files\ClaudeCode`, if they are empty. A folder
+that existed before the install, or that holds another program's files, stays, and so does every
+folder above it. Setup records each folder it creates in
+`C:\ProgramData\Cisco\DefenseClaw-Lifecycle\created-folders`. A folder is removed only while
+it is still administrator-owned and only administrators can change it or its parent; a folder that
+stays keeps its record, so the next purge tries again, and the lifecycle log says why it stayed.
+Releases before 1.0.9 kept no record. On a computer installed with one of them, the first 1.0.9
+install, upgrade or repair records `C:\Program Files\Cisco` and `C:\ProgramData\Cisco` when they
+still have the permissions Setup gave them and hold only DefenseClaw folders. The other vendor
+folders, such as `C:\Program Files\ClaudeCode\managed-settings.d`, stay until you remove them. A standalone
 Setup uninstall removes the administrator-only
 `C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock` and its directory even
 without `PURGE=1`. A plain installed CLI uninstall leaves the lock file and its folder

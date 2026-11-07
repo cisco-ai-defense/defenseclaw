@@ -332,7 +332,7 @@ func TestEnterpriseACPUserSetupRefusesAReplacedEnrollment(t *testing.T) {
 		return err
 	}
 	if err := setup("obs"); err == nil || !strings.Contains(err.Error(), "enrolled you for zed/kiro in profile act") ||
-		!strings.Contains(err.Error(), "Run: setup --profile act --mode action") {
+		!strings.Contains(err.Error(), enterpriseACPRunInstruction(runtime.GOOS == "windows")+": setup --profile act --mode action") {
 		t.Fatalf("the setup of a replaced enrollment: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(home, ".config", "zed", "settings.json")); !os.IsNotExist(err) {

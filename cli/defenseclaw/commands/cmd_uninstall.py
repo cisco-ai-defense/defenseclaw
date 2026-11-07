@@ -76,6 +76,11 @@ from defenseclaw.commands import windows_native_uninstall, windows_uninstall_hel
 from defenseclaw.commands.cmd_doctor import _codex_otel_marked_kept
 from defenseclaw.connector_paths import claude_settings_paths, codex_home
 from defenseclaw.file_lock import tui_lock_held
+from defenseclaw.winquote import (
+    powershell_literal,
+    powershell_literal_before_typographic_quotes,
+    powershell_literal_value,
+)
 
 # Connectors whose teardown the Python CLI knows how to perform locally
 # without going through ``defenseclaw-gateway connector teardown``. This
@@ -380,14 +385,17 @@ def uninstall_cmd(
     ux.banner("DefenseClaw Uninstall")
     _render_plan(plan, dry_run=dry_run)
     cowork_plugin = _cowork_plugin_built(plan)
-    if cowork_plugin and dry_run:
-        ux.echo(f"  • the Cowork plugin stays in your Claude account: {_COWORK_REMOVAL_STEP}")
+    if cowork_plugin:
+        ux.echo(f"  • {_COWORK_PLUGIN_STAYS}")
 
     if dry_run:
         refusal = _open_tui_refusal(plan) or _running_sandboxes_refusal(plan)
         if refusal:
             # The real run stops at plan validation (GAP-2585).
             ux.warn(f"a real run would stop before any change: {refusal}")
+        if cowork_plugin:
+            # The real run ends with this step; the dry run shows it too (GAP-0084 review F1).
+            ux.echo(f"  • DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
         ux.subhead("(dry-run — nothing modified)")
         return
 
@@ -402,6 +410,7 @@ def uninstall_cmd(
     opencode_binary = opencode_service.account_binary() if "opencode" in plan.connectors else ""
     gateway_ports = _configured_gateway_ports()
     _execute_plan(plan)
+    cowork_problem = _record_cowork_removal(plan.data_dir) if cowork_plugin and plan.remove_data_dir else ""
     _remove_marked_native_otel_left(gateway_ports)
     if opencode_binary:
         # OpenCode V2's background server kept the plugin it loaded (rel-1-0-6 GAP-0026).
@@ -410,14 +419,24 @@ def uninstall_cmd(
     if plan.connectors:
         # The plan said so; the end says it again, once it is true (GAP-0255).
         ux.warn("Close any agent session still open: it runs without DefenseClaw's hooks now.")
-    if cowork_plugin:
+    if cowork_plugin and not cowork_problem:
         ux.warn(f"DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
     _render_kept_and_next_steps(plan)
+    if cowork_problem:
+        _report_cowork_removal_not_recorded(cowork_problem)
 
+
+# The one reminder that always reaches the user: the in-chat notice after an
+# uninstall reaches only the model, and Claude Desktop shows no banner. Every
+# path (uninstall plan, dry run, native Windows uninstall, reset) prints this
+# constant (cowork-1-0-8 GAP-0084).
+_COWORK_PLUGIN_STAYS = (
+    "The DefenseClaw Cowork plugin stays in your Claude account. Remove it in Claude: Customize > Plugins."
+)
 
 _COWORK_REMOVAL_STEP = (
     "remove it in Claude Desktop (Customize > Plugins, then the ... menu > Remove). "
-    "Until then Cowork tool calls are blocked."
+    "A plugin built with 1.0.9 lets Cowork calls run after the data folder is removed; older plugins may block."
 )
 
 
@@ -426,6 +445,36 @@ def _cowork_plugin_built(plan: UninstallPlan) -> bool:
     from defenseclaw import cowork
 
     return bool(plan.data_dir) and os.path.exists(cowork.state_path(plan.data_dir))
+
+
+def _record_cowork_removal(data_dir: str) -> str:
+    """Write the Cowork removal marker; return why it could not, or "".
+
+    It runs after the teardown, so a refusal must not stop what is left of the
+    uninstall: the caller finishes, then reports it and exits 1
+    (cowork-1-0-8 GAP-0085). No marker means the plugin keeps blocking, never
+    that Cowork looks uninstalled.
+    """
+    from defenseclaw import cowork
+
+    try:
+        cowork.mark_uninstalled(data_dir)
+    except OSError as exc:
+        return str(exc)
+    return ""
+
+
+def _print_cowork_removal_not_recorded(problem: str) -> None:
+    ux.err(f"DefenseClaw could not record its removal for the Cowork plugin: {problem}")
+    ux.err(
+        "Until you remove the DefenseClaw plugin in Claude Desktop (Customize > Plugins, then the ... menu > "
+        "Remove), it blocks every Cowork tool call."
+    )
+
+
+def _report_cowork_removal_not_recorded(problem: str) -> None:
+    _print_cowork_removal_not_recorded(problem)
+    raise SystemExit(1)
 
 
 _NATIVE_OTEL_READ_LIMIT = 1024 * 1024
@@ -870,6 +919,11 @@ def _dispatch_native_windows_uninstall(
     if request is None:
         return False
 
+    data_dir = str(config_module.default_data_path())
+    from defenseclaw import cowork
+
+    cowork_plugin = os.path.exists(cowork.state_path(data_dir))
+
     ux.banner("DefenseClaw Uninstall")
     ux.echo(f"  {ux.dim('→')} authenticated native Windows installation")
     ux.echo(f"  {ux.dim('→')} Setup: {request.setup_path}")
@@ -883,15 +937,18 @@ def _dispatch_native_windows_uninstall(
             "and its user Path entry are removed too"
         )
     ux.echo(f"  {ux.dim('→')} a restart may be required to finish exact cleanup")
+    if cowork_plugin:
+        ux.echo(f"  • {_COWORK_PLUGIN_STAYS}")
 
     if dry_run:
+        if cowork_plugin:
+            ux.echo(f"  • DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
         ux.subhead("(dry-run — nothing modified)")
         return True
     if not yes and not click.confirm("  Proceed?", default=False):
         ux.subhead("Cancelled.")
         raise SystemExit(1)
 
-    data_dir = str(config_module.default_data_path())
     # until 1.1: read what a removed connector left before Setup runs: Setup
     # may delete the data folder, and with it the records that name the
     # agent configs outside it.
@@ -907,10 +964,23 @@ def _dispatch_native_windows_uninstall(
         _remove_marked_native_otel_left(gateway_ports)
         if binaries:
             _remove_script_install_after_native_setup(request.platform_name)
+        if wipe_data and cowork_plugin and (cowork_problem := _record_cowork_removal(data_dir)):
+            _report_cowork_removal_not_recorded(cowork_problem)
+        if cowork_plugin:
+            ux.warn(f"DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
         return True
     if outcome.restart_required:
         ux.ok("Native Windows uninstall is armed; restart required (Windows exit code 3010).")
+        # Setup removed the data before 3010; the restart only retires the disabled launcher.
+        # A refused marker keeps exit 3010 (cowork-1-0-8 GAP-0088).
+        cowork_problem = _record_cowork_removal(data_dir) if wipe_data and cowork_plugin else ""
+        if cowork_problem:
+            _print_cowork_removal_not_recorded(cowork_problem)
         _relay_native_setup_removed_connector_leftovers(outcome.stdout, left_before, data_dir, wipe_data=wipe_data)
+        if cowork_plugin and not cowork_problem:
+            # The uninstall succeeded and waits for a restart; the plugin step is the same (review N2).
+            # After a refused marker the lines above already say the plugin blocks; not both (review W1).
+            ux.warn(f"DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
         raise SystemExit(outcome.returncode)
     if outcome.refused:
         ux.err("Authenticated native Setup refused the uninstall (Windows exit code 1603).")
@@ -997,6 +1067,8 @@ def reset_cmd(skip_sandbox_teardown: bool, yes: bool, stop_sandboxes: bool = Fal
     _render_plan(plan, dry_run=False)
     # Read before the wipe: reset deletes the Cowork state this looks for.
     cowork_plugin = _cowork_plugin_built(plan)
+    if cowork_plugin:
+        ux.echo(f"  • {_COWORK_PLUGIN_STAYS}")
 
     _refuse_running_sandboxes(plan)
     if not yes and not click.confirm(
@@ -1007,9 +1079,12 @@ def reset_cmd(skip_sandbox_teardown: bool, yes: bool, stop_sandboxes: bool = Fal
         raise SystemExit(1)
 
     _execute_plan(plan)
-    if cowork_plugin:
+    cowork_problem = _record_cowork_removal(plan.data_dir) if cowork_plugin else ""
+    if cowork_plugin and not cowork_problem:
         ux.warn(f"DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
     ux.ok("Reset complete. Run 'defenseclaw quickstart' to reinstall.")
+    if cowork_problem:
+        _report_cowork_removal_not_recorded(cowork_problem)
 
 
 # ---------------------------------------------------------------------------
@@ -3022,19 +3097,26 @@ def _orphan_copilot_handler_owned(handler: object) -> bool:
 
         if script == "; ".join([*statements, *run("")]):
             return True  # 1.0.0 render, before the removed-deployment guard
-        unquoted = binary[1:-1].replace("''", "'")
-        gateway = "'" + ntpath.join(ntpath.dirname(unquoted), "defenseclaw-gateway.exe").replace("'", "''") + "'"
-        guard = (
-            "if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { "
-            f"if (-not (Microsoft.PowerShell.Management\\Test-Path -LiteralPath {binary}) -and "
-            f"-not (Microsoft.PowerShell.Management\\Test-Path -LiteralPath {gateway})) {{ exit 0 }} }} "
-            f"elseif (-not [System.IO.File]::Exists({binary}) -and "
-            f"-not [System.IO.File]::Exists({gateway})) {{ exit 0 }}"
+        gateway = powershell_literal(
+            ntpath.join(ntpath.dirname(powershell_literal_value(binary[1:-1])), "defenseclaw-gateway.exe")
         )
+
+        def guard(gateway: str) -> str:
+            return (
+                "if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { "
+                f"if (-not (Microsoft.PowerShell.Management\\Test-Path -LiteralPath {binary}) -and "
+                f"-not (Microsoft.PowerShell.Management\\Test-Path -LiteralPath {gateway})) {{ exit 0 }} }} "
+                f"elseif (-not [System.IO.File]::Exists({binary}) -and "
+                f"-not [System.IO.File]::Exists({gateway})) {{ exit 0 }}"
+            )
+
         # The guarded render through 1.0.6, and the current one, whose
-        # Constrained Language branch exits 1 when the launcher never started.
+        # Constrained Language branch exits 1 when the launcher never started;
+        # builds before 1.0.9 doubled only the apostrophe of the gateway path
+        # (g072 review 3 M3), as they did the launcher's in binary.
         return script in {
-            "; ".join([*statements, guard, *run(fail_closed)])
+            "; ".join([*statements, guard(literal), *run(fail_closed)])
+            for literal in (gateway, powershell_literal_before_typographic_quotes(gateway))
             for fail_closed in ("", "if ($null -eq $LASTEXITCODE) { exit 1 }; ")
         }
 
@@ -3313,7 +3395,7 @@ def _windows_developer_files(install_root: str) -> list[str]:
 
 
 def _powershell_quoted_paths(files: list[str]) -> str:
-    return ", ".join("'" + path.replace("'", "''") + "'" for path in files)
+    return ", ".join(powershell_literal(path) for path in files)
 
 
 def _windows_developer_removal(files: list[str]) -> str:

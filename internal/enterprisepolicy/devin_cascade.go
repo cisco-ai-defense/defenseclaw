@@ -299,7 +299,7 @@ func (t devinCascadeTarget) Reconcile(opts Options) (State, error) {
 	}
 	inspectDevinCascade(opts, files, &state)
 	if policy.Ownership == config.MachinePolicyOwnershipVerifyOnly && state.OwnedEntries == 0 {
-		state.detail("missing_defenseclaw_hooks: deploy the output of `defenseclaw-gateway enterprise policy export --connector devincascade` through your policy tool")
+		state.detail("missing_defenseclaw_hooks: deploy the output of %s through your policy tool", policyExportCommand(opts.goos(), "--connector", "devincascade"))
 	}
 	state.finish()
 	return state, nil

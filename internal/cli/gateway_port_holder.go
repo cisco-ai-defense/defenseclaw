@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -26,15 +25,18 @@ var (
 	gatewayManagedState       = func() (bool, int) { return daemon.New(config.DefaultDataPath()).IsRunning() }
 	gatewayRunsReplacedBinary = func() bool { return daemon.New(config.DefaultDataPath()).RunsReplacedExecutable() }
 	gatewayExecutable         = os.Executable
+	gatewayListenerClass      = daemon.ClassifyPerUserListener
 )
 
 // foreignGatewayListener explains a listener on the configured API port that
 // is not the gateway this account started with `defenseclaw-gateway start`
 // for this DefenseClaw home: a gateway left running by another home or test
 // run, another account's process, or any other program. It returns "" when
-// the port is free or held by the managed gateway.
+// the port is free, the managed gateway owns it, or the connected-peer check
+// must decide ownership of an unlisted process from this account.
 //
-// It never sends the gateway token to the listener. Managed deployments run
+// An unlisted account process reaches the separate connected-peer check;
+// this diagnosis never sends a gateway token. Managed deployments run
 // the gateway as a service, so they keep their own checks. On Windows the
 // holder is named by PID and program (GAP-1344): status showed another
 // account's gateway on this account's port as this account's, rc 0.
@@ -56,14 +58,20 @@ func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string 
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	holder, holderErr := gatewayPortHolder(host, port)
 	// lsof on macOS does not list another account's sockets, so a missing
-	// holder is confirmed with a connection attempt. Such a holder can still
-	// be this account's gateway: the macOS app's privileged helper runs it as
-	// root for this home, and this home's live PID record (IsRunning) says so.
+	// holder is confirmed with a connection attempt. The PID record may then
+	// identify a root-run gateway for this home for diagnosis only.
 	if holderErr != nil && !gatewayPortAnswers(addr) {
 		return ""
 	}
 	if holderErr != nil {
 		holder = daemon.PortHolder{UID: -1}
+	}
+	class := gatewayListenerClass(host, port, config.DefaultDataPath(), holder, holderErr, holderErr != nil)
+	if class == daemon.PerUserListenerOwnGatewayRunAsRoot {
+		return daemon.RootGatewayListenerReason
+	}
+	if class == daemon.PerUserListenerOwnGateway || class == daemon.PerUserListenerUnlistedOwnProcess {
+		return ""
 	}
 	running, managedPID := gatewayManagedState()
 	ownUID := os.Getuid()
@@ -76,6 +84,8 @@ func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string 
 		return fmt.Sprintf("%s is held by %s, not by this account's gateway", addr, who)
 	case holderErr == nil && holder.UID == ownUID && sameHomeGatewayProcess(holder.PID, config.DefaultDataPath()):
 		return ""
+	case holderErr != nil:
+		return fmt.Sprintf("%s is held by %s, not by this account's verified gateway", addr, who)
 	case !running:
 		return fmt.Sprintf(
 			"%s is held by %s, not by this account's gateway: no gateway started for %s is running",
@@ -93,37 +103,14 @@ func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string 
 // file, such as a transient service. The listener's account is checked by
 // the caller before this process identity is accepted.
 func sameHomeGatewayProcess(pid int, home string) bool {
-	if runtime.GOOS != "linux" || pid <= 0 || !filepath.IsAbs(home) {
+	if pid <= 0 || !filepath.IsAbs(home) {
 		return false
 	}
 	executable, err := gatewayExecutable()
 	if err != nil || filepath.Base(executable) != "defenseclaw-gateway" {
 		return false
 	}
-	expected, err := os.Stat(executable)
-	if err != nil {
-		return false
-	}
-	actual, err := os.Stat("/proc/" + strconv.Itoa(pid) + "/exe")
-	if err != nil || !os.SameFile(expected, actual) {
-		return false
-	}
-	environment, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/environ")
-	if err != nil || len(environment) == 0 || len(environment) > 4*1024*1024 {
-		return false
-	}
-	count := 0
-	for _, entry := range strings.Split(string(environment), "\x00") {
-		if !strings.HasPrefix(entry, "DEFENSECLAW_HOME=") {
-			continue
-		}
-		value := strings.TrimPrefix(entry, "DEFENSECLAW_HOME=")
-		if !filepath.IsAbs(value) || filepath.Clean(value) != filepath.Clean(home) {
-			return false
-		}
-		count++
-	}
-	return count == 1
+	return sameHomeGatewayProcessPlatform(pid, home, executable)
 }
 
 // otherAccountListenerAt explains a listener on host:port that belongs to
@@ -181,6 +168,14 @@ func foreignGatewayListenerFix(cfg *config.Config) string {
 // foreignGatewayListenerFixAt is foreignGatewayListenerFix for the API
 // listener at host:apiPort (the observability-v8 helpers, GAP-1670).
 func foreignGatewayListenerFixAt(host string, apiPort int) string {
+	holder, err := gatewayPortHolder(host, apiPort)
+	if err != nil {
+		holder = daemon.PortHolder{UID: -1}
+	}
+	if gatewayListenerClass(host, apiPort, config.DefaultDataPath(), holder, err,
+		err != nil && gatewayPortAnswers(net.JoinHostPort(host, strconv.Itoa(apiPort)))) == daemon.PerUserListenerOwnGatewayRunAsRoot {
+		return daemon.RootGatewayListenerRemedy(config.DefaultDataPath())
+	}
 	port := "<free port>"
 	if free := freeGatewayAPIPort(host, apiPort); free > 0 {
 		port = strconv.Itoa(free)

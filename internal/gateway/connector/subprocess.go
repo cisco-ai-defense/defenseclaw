@@ -822,7 +822,7 @@ func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, man
 		HookHomeSH:           homeSH,
 		ScopedToken:          scopedToken,
 		ConnectorName:        strings.ToLower(strings.TrimSpace(connectorName)),
-		HookBinaryPS:         strings.ReplaceAll(defenseclawHookBinary(), "'", "''"),
+		HookBinaryPS:         powershellLiteralBody(defenseclawHookBinary()),
 		HookTimeoutMS:        windowsHookAdapterTimeoutMS,
 		CursorHookTimeoutMS:  cursorWindowsHookAdapterTimeoutMS,
 		CopilotHookTimeoutMS: copilotWindowsHookAdapterTimeoutMS,

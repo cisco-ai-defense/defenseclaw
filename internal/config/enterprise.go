@@ -115,9 +115,8 @@ type EnterpriseOpenShellConfig struct {
 	// contact. A profile's sandbox.driver_fallback: none tightens it per
 	// user; nothing loosens none.
 	DriverFallback string `mapstructure:"driver_fallback" yaml:"driver_fallback,omitempty"`
-	// Version is an exact version ("0.1.5") or a range inside
-	// ">=0.1.1 <0.2.0"; setup needs an exact pin, and raises one older than
-	// the release sandboxes need (openshell.ManagedSetupPin).
+	// Version is an exact version or a range inside ">=0.1.1 <0.2.0";
+	// setup needs an exact pin. Managed ensure applies the OpenShell floor.
 	Version string `mapstructure:"version" yaml:"version,omitempty"`
 	// GatewayPort is the OpenShell gateway's bind port (0 =
 	// DefaultEnterpriseOpenShellGatewayPort).
@@ -705,7 +704,7 @@ func validateEnterpriseTetragon(t EnterpriseTetragonConfig) error {
 	}
 	for _, ack := range acks {
 		if !tetragonEnforceAckPattern.MatchString(ack) {
-			return fmt.Errorf("config: enterprise.tetragon.enforce_ack %q must be sha256: and 12 lowercase hex digits, the kernel_policy digest that `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for enforce` prints", ack)
+			return fmt.Errorf("config: enterprise.tetragon.enforce_ack %q must be sha256: and 12 lowercase hex digits, the kernel_policy digest that `sudo %s enterprise linux tetragon verify --ready-for enforce` prints", ack, managed.StandaloneGatewayPath("linux"))
 		}
 	}
 	if err := oneOf("enterprise.tetragon.customer_events", t.CustomerEvents,
@@ -981,11 +980,11 @@ func validateEnterpriseOpenShell(cfg *Config, goos string) error {
 		bounds := enterpriseOpenShellVersionRange.FindStringSubmatch(v)
 		switch {
 		case !exact && bounds == nil:
-			return fmt.Errorf("config: enterprise.openshell.version %q must be an exact version such as 0.1.5 or a range such as \">=0.1.5 <0.2.0\"", o.Version)
+			return fmt.Errorf("config: enterprise.openshell.version %q must be an exact version or a range with a lower bound and optional upper bound", o.Version)
 		case bounds != nil && bounds[2] != "" && compareDottedVersions(bounds[1], bounds[2]) >= 0:
 			return fmt.Errorf("config: enterprise.openshell.version %q is an empty range", o.Version)
 		case bounds != nil && o.Install == EnterpriseOpenShellInstallSetup:
-			return fmt.Errorf("config: enterprise.openshell.version %q is a range; install: setup needs an exact version such as 0.1.5", o.Version)
+			return fmt.Errorf("config: enterprise.openshell.version %q is a range; install: setup needs an exact version", o.Version)
 		}
 	}
 	if dir := o.E2fsprogsDir; dir != "" {

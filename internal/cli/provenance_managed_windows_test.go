@@ -76,8 +76,8 @@ func TestManagedWindowsProvenanceShowsTheRunningGatewaySnapshot(t *testing.T) {
 }
 
 // A standard account cannot read the gateway token: it is told an
-// administrator runs the command, not shown a scan message or a local
-// generation 0.
+// administrator runs the gateway's provenance show from an elevated
+// PowerShell prompt, not shown a scan message or a local generation 0.
 func TestManagedWindowsProvenanceNamesTheAdministratorStepForAStandardAccount(t *testing.T) {
 	withManagedWindowsProvenanceHost(t, "18970", func(path string, _ int64) ([]byte, error) {
 		return nil, &fs.PathError{Op: "open", Path: path, Err: windows.ERROR_ACCESS_DENIED}
@@ -86,7 +86,8 @@ func TestManagedWindowsProvenanceNamesTheAdministratorStepForAStandardAccount(t 
 	cmd := &cobra.Command{}
 	cmd.SetOut(&out)
 	err := runProvenanceShow(cmd, nil)
-	if err == nil || !strings.Contains(err.Error(), "elevated Administrator prompt") || strings.Contains(err.Error(), "scan") || strings.Contains(out.String(), "generation: 0") {
+	if err == nil || !strings.Contains(err.Error(), managedWindowsGatewayCommand("provenance", "show")+" from an elevated PowerShell prompt") ||
+		strings.Contains(err.Error(), "scan") || strings.Contains(out.String(), "generation: 0") {
 		t.Fatalf("standard account: err = %v, out = %q", err, out.String())
 	}
 }
