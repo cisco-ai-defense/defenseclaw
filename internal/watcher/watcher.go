@@ -167,6 +167,10 @@ type InstallWatcher struct {
 	// hermesVendorNoted holds the shipped Hermes plugins already reported as
 	// vendor content in this process, so a rescan cycle reports each once.
 	hermesVendorNoted sync.Map
+	// hermesManifests reads shipped Hermes plugin manifests through the
+	// plugin scanner (manifestLoader); a test may set it.
+	hermesManifests    hermesManifestLoader
+	hermesManifestOnce sync.Once
 	// markedWatchRoots caches the root markers written by this process
 	// (rescan goroutine only).
 	markedWatchRoots map[string]bool

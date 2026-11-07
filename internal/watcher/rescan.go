@@ -2174,7 +2174,7 @@ func (w *InstallWatcher) snapshotForEvent(evt InstallEvent) (*TargetSnapshot, er
 		// The snapshot leaves out folders and links the plugin scanner
 		// audits; a shipped Hermes plugin binds them into its content hash.
 		if _, shipped := w.hermesShippedPlugin(evt); shipped {
-			if extra := skippedTreeHash(path); extra != "" {
+			if extra := skippedTreeHash(path, w.manifestLoader()); extra != "" {
 				sum := sha256.Sum256([]byte(snap.ContentHash + "\n" + extra))
 				snap.ContentHash = hex.EncodeToString(sum[:])
 			}

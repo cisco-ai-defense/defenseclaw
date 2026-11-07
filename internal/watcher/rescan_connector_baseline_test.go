@@ -5,10 +5,7 @@ package watcher
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -99,6 +96,7 @@ func newHermesPluginFixture(t *testing.T) *hermesPluginFixture {
 // watch points w at the fixture scanner and records its admissions.
 func (f *hermesPluginFixture) watch(w *InstallWatcher) {
 	f.w = w
+	w.hermesManifests = hermesScannerLoader(f.t)
 	w.scannerFactory = func(InstallEvent) scanner.Scanner { return f.scan }
 	w.onAdmit = func(res AdmissionResult) {
 		f.admitMu.Lock()
@@ -167,7 +165,7 @@ func (f *hermesPluginFixture) plugin(root, name string) string {
 // pinVendor records the current bytes of a plugin as the vendor digest.
 func (f *hermesPluginFixture) pinVendor(name, path string) {
 	f.t.Helper()
-	digest, err := hermesPluginTreeDigest(path)
+	digest, err := hermesPluginTreeDigest(path, hermesScannerLoader(f.t))
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -374,7 +372,7 @@ func TestHermesPluginTreeDigestCoversEveryReadByte(t *testing.T) {
 	dir := t.TempDir()
 	writePluginFile(t, filepath.Join(dir, "plugin.yaml"), "name: a\n")
 	writePluginFile(t, filepath.Join(dir, "lib", "a.py"), "A = 1\n")
-	base, err := hermesPluginTreeDigest(dir)
+	base, err := hermesPluginTreeDigest(dir, hermesScannerLoader(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +384,7 @@ func TestHermesPluginTreeDigestCoversEveryReadByte(t *testing.T) {
 		func() { writePluginFile(t, filepath.Join(dir, "node_modules", "x.js"), "") },
 	} {
 		change()
-		got, err := hermesPluginTreeDigest(dir)
+		got, err := hermesPluginTreeDigest(dir, hermesScannerLoader(t))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -396,11 +394,11 @@ func TestHermesPluginTreeDigestCoversEveryReadByte(t *testing.T) {
 		seen = append(seen, got)
 	}
 	writePluginFile(t, filepath.Join(dir, "lib", "__pycache__", "a.pyc"), "cache")
-	if got, err := hermesPluginTreeDigest(dir); err != nil || got != seen[len(seen)-1] {
+	if got, err := hermesPluginTreeDigest(dir, hermesScannerLoader(t)); err != nil || got != seen[len(seen)-1] {
 		t.Fatalf("bytecode cache changed the digest: %s, %v", got, err)
 	}
 	writePluginFile(t, filepath.Join(dir, "lib", "__pycache__", "x.node"), "native")
-	if _, err := hermesPluginTreeDigest(dir); err == nil {
+	if _, err := hermesPluginTreeDigest(dir, hermesScannerLoader(t)); err == nil {
 		t.Fatal("a native payload in a bytecode cache produced a vendor digest")
 	}
 	if err := os.Remove(filepath.Join(dir, "lib", "__pycache__", "x.node")); err != nil {
@@ -409,7 +407,7 @@ func TestHermesPluginTreeDigestCoversEveryReadByte(t *testing.T) {
 	if err := os.Symlink(filepath.Join(dir, "plugin.yaml"), filepath.Join(dir, "link.yaml")); err != nil {
 		t.Skipf("symlink: %v", err)
 	}
-	if _, err := hermesPluginTreeDigest(dir); err == nil {
+	if _, err := hermesPluginTreeDigest(dir, hermesScannerLoader(t)); err == nil {
 		t.Fatal("a linked entry produced a vendor digest")
 	}
 }
@@ -419,12 +417,12 @@ func TestHermesPluginTreeDigestCoversEveryReadByte(t *testing.T) {
 func TestSkippedTreeHashCoversWhatTheSnapshotLeavesOut(t *testing.T) {
 	dir := t.TempDir()
 	writePluginFile(t, filepath.Join(dir, "plugin.yaml"), "name: a\n")
-	if got := skippedTreeHash(dir); got != "" {
+	if got := skippedTreeHash(dir, hermesScannerLoader(t)); got != "" {
 		t.Fatalf("plain plugin skipped-tree hash = %q, want empty", got)
 	}
 	writePluginFile(t, filepath.Join(dir, "__pycache__", "a.cpython-312.pyc"), "cache")
 	writePluginFile(t, filepath.Join(dir, "lib", "__pycache__", "a.cpython-312.pyc"), "cache")
-	if got := skippedTreeHash(dir); got != "" {
+	if got := skippedTreeHash(dir, hermesScannerLoader(t)); got != "" {
 		t.Fatalf("bytecode cache skipped-tree hash = %q, want empty", got)
 	}
 	var seen []string
@@ -437,7 +435,7 @@ func TestSkippedTreeHashCoversWhatTheSnapshotLeavesOut(t *testing.T) {
 		func() { _ = os.Symlink(filepath.Join(dir, "plugin.yaml"), filepath.Join(dir, "link.yaml")) },
 	} {
 		change()
-		got := skippedTreeHash(dir)
+		got := skippedTreeHash(dir, hermesScannerLoader(t))
 		if got == "" || slices.Contains(seen, got) {
 			t.Fatalf("skipped-tree hash did not change: %q", got)
 		}
@@ -841,18 +839,18 @@ func TestSkippedTreeHashBounds(t *testing.T) {
 	}
 	main := filepath.Join(dir, "node_modules", "main.js")
 	writePluginFile(t, main, "safe()\n")
-	before := skippedTreeHash(dir)
+	before := skippedTreeHash(dir, hermesScannerLoader(t))
 	writePluginFile(t, main, "eval()\n")
-	if after := skippedTreeHash(dir); after == before {
+	if after := skippedTreeHash(dir, hermesScannerLoader(t)); after == before {
 		t.Fatal("same-size entrypoint edit left the skipped-tree hash unchanged")
 	}
-	if skippedTreeHash(dir) != skippedTreeHash(dir) {
+	if again, same := skippedTreeHash(dir, hermesScannerLoader(t)), skippedTreeHash(dir, hermesScannerLoader(t)); again != same {
 		t.Fatal("skipped-tree hash of an unchanged tree differs between reads")
 	}
 	limit := hermesSkippedTreeMaxBytes
 	hermesSkippedTreeMaxBytes = 4
 	t.Cleanup(func() { hermesSkippedTreeMaxBytes = limit })
-	if first, second := skippedTreeHash(dir), skippedTreeHash(dir); first == second {
+	if first, second := skippedTreeHash(dir, hermesScannerLoader(t)), skippedTreeHash(dir, hermesScannerLoader(t)); first == second {
 		t.Fatal("a tree past the read bound has a stable hash")
 	}
 }
@@ -991,31 +989,42 @@ func TestHermesUndeclaredBytecodeCacheStaysUnhashedWithManifest(t *testing.T) {
 	writePluginFile(t, filepath.Join(dir, "lib", "run.js"), "safe()\n")
 	writePluginFile(t, filepath.Join(dir, "__pycache__", "run.cpython-312.pyc"), "one")
 	writePluginFile(t, filepath.Join(dir, "lib", "__pycache__", "run.js"), "not declared")
-	if got := skippedTreeHash(dir); got != "" {
+	if got := skippedTreeHash(dir, hermesScannerLoader(t)); got != "" {
 		t.Fatalf("undeclared cache files hashed: %q", got)
 	}
 	writePluginFile(t, filepath.Join(dir, "__pycache__", "run.cpython-312.pyc"), "two")
 	writePluginFile(t, filepath.Join(dir, "lib", "__pycache__", "run.js"), "still not declared")
-	if got := skippedTreeHash(dir); got != "" {
+	if got := skippedTreeHash(dir, hermesScannerLoader(t)); got != "" {
 		t.Fatalf("rewritten undeclared cache files hashed: %q", got)
 	}
 }
 
-// A manifest this package cannot read or parse may still be read by the
-// scanner, so every cache file is then treated as declared.
+// A manifest the plugin scanner cannot decide (bytes that are not UTF-8 make a
+// scan raise) may still be read by it, so every cache file is then treated as
+// declared. A manifest the scanner refuses (text its loader rejects) declares
+// nothing, as in a scan: ordinary cache writes beside it are not hashed.
 func TestHermesUnparsedManifestHashesBytecodeCache(t *testing.T) {
-	for name, body := range map[string]string{"package.json": "{\"main\": \"\xff\"}", "plugin.yaml": "name: [unclosed\n"} {
+	dir := t.TempDir()
+	writePluginFile(t, filepath.Join(dir, "package.json"), "{\"main\": \"\xff\"}")
+	writePluginFile(t, filepath.Join(dir, "__pycache__", "a.cpython-312.pyc"), "one")
+	first := skippedTreeHash(dir, hermesScannerLoader(t))
+	if first == "" {
+		t.Fatal("cache file not hashed beside a manifest the scanner cannot decode")
+	}
+	writePluginFile(t, filepath.Join(dir, "__pycache__", "a.cpython-312.pyc"), "two")
+	if skippedTreeHash(dir, hermesScannerLoader(t)) == first {
+		t.Fatal("cache edit not seen beside a manifest the scanner cannot decode")
+	}
+}
+
+func TestHermesRefusedManifestDeclaresNothing(t *testing.T) {
+	for name, body := range map[string]string{"package.json": "{\"main\": ", "plugin.yaml": "name: [unclosed\n", "plugin.yml": "main: [unclosed\n"} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			writePluginFile(t, filepath.Join(dir, name), body)
 			writePluginFile(t, filepath.Join(dir, "__pycache__", "a.cpython-312.pyc"), "one")
-			first := skippedTreeHash(dir)
-			if first == "" {
-				t.Fatal("cache file not hashed beside an unparsed manifest")
-			}
-			writePluginFile(t, filepath.Join(dir, "__pycache__", "a.cpython-312.pyc"), "two")
-			if skippedTreeHash(dir) == first {
-				t.Fatal("cache edit not seen beside an unparsed manifest")
+			if got := skippedTreeHash(dir, hermesScannerLoader(t)); got != "" {
+				t.Fatalf("cache file hashed beside a manifest the scanner refuses: %q", got)
 			}
 		})
 	}
@@ -1029,9 +1038,9 @@ func TestHermesDeclaredCacheEntrypointThroughLinkIsHashed(t *testing.T) {
 	if err := os.Symlink(filepath.Join(dir, "__pycache__"), filepath.Join(dir, "alias")); err != nil {
 		t.Skipf("symlink: %v", err)
 	}
-	first := skippedTreeHash(dir)
+	first := skippedTreeHash(dir, hermesScannerLoader(t))
 	writePluginFile(t, filepath.Join(dir, "__pycache__", "run.js"), "exec()\n")
-	if skippedTreeHash(dir) == first {
+	if skippedTreeHash(dir, hermesScannerLoader(t)) == first {
 		t.Fatal("edit of a cache entrypoint declared through a link was not seen")
 	}
 }
@@ -1176,7 +1185,7 @@ func TestHermesManifestProseDeclaresNothing(t *testing.T) {
 				path := f.plugin(f.bundledRoot, "web/ddgs")
 				writePluginFile(t, filepath.Join(path, filepath.FromSlash(manifest.file)),
 					strings.ReplaceAll(manifest.body, "DIR", dir))
-				before, err := hermesPluginTreeDigest(path)
+				before, err := hermesPluginTreeDigest(path, hermesScannerLoader(t))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1197,174 +1206,13 @@ func TestHermesManifestProseDeclaresNothing(t *testing.T) {
 				if got := len(f.admitted[path]); got != admissions {
 					t.Fatalf("generated cache file caused %d admissions", got-admissions)
 				}
-				if after, err := hermesPluginTreeDigest(path); err != nil || after != before {
+				if after, err := hermesPluginTreeDigest(path, hermesScannerLoader(t)); err != nil || after != before {
 					t.Fatalf("generated cache file changed the vendor digest: %v", err)
 				}
-				if extra := skippedTreeHash(path); extra != "" {
+				if extra := skippedTreeHash(path, hermesScannerLoader(t)); extra != "" {
 					t.Fatalf("generated cache file hashed: %q", extra)
 				}
 			})
 		}
-	}
-}
-
-// The entrypoint keys the digest and the rescan hash resolve are the ones the
-// plugin scanner reads from a manifest.
-func TestHermesManifestEntrypointKeysMatchScanner(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join("..", "..", "cli", "defenseclaw", "scanner", "plugin_scanner", "scanner.py"))
-	if err != nil {
-		t.Skipf("plugin scanner: %v", err)
-	}
-	body := regexp.MustCompile(`(?s)def _manifest_entrypoints\(.*?\n    return eps`).Find(src)
-	if body == nil {
-		t.Fatal("_manifest_entrypoints not found in the plugin scanner")
-	}
-	var scanned []string
-	for _, m := range regexp.MustCompile(`raw\.get\("([A-Za-z_]+)"\)`).FindAllSubmatch(body, -1) {
-		scanned = append(scanned, string(m[1]))
-	}
-	if loop := regexp.MustCompile(`for key in \(([^)]*)\)`).FindSubmatch(body); loop != nil {
-		for _, m := range regexp.MustCompile(`"([A-Za-z_]+)"`).FindAllSubmatch(loop[1], -1) {
-			scanned = append(scanned, string(m[1]))
-		}
-	}
-	ours := slices.Clone(hermesManifestEntrypointKeys)
-	slices.Sort(scanned)
-	slices.Sort(ours)
-	scanned = slices.Compact(scanned)
-	if len(scanned) == 0 || !slices.Equal(scanned, ours) {
-		t.Fatalf("entrypoint keys = %q, scanner reads %q", ours, scanned)
-	}
-}
-
-// hermesScannerEntrypointReader returns a function that loads the plugin in a
-// directory with the real plugin scanner and returns the entrypoints it
-// declares. The test skips where Python or the scanner is absent.
-func hermesScannerEntrypointReader(t *testing.T) func(dir string) ([]string, error) {
-	t.Helper()
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python3 not found")
-	}
-	cli, err := filepath.Abs(filepath.Join("..", "..", "cli"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	const script = `import json, sys
-sys.path.insert(0, sys.argv[2])
-from defenseclaw.scanner.plugin_scanner import scanner
-m = scanner._load_manifest(sys.argv[1])
-print(json.dumps(m.entrypoints if m else []))`
-	run := func(dir string) ([]string, error) {
-		cmd := exec.Command(python, "-I", "-c", script, dir, cli)
-		cmd.Env = append(os.Environ(), "PYTHONDONTWRITEBYTECODE=1")
-		out, err := cmd.Output()
-		if err != nil {
-			return nil, err
-		}
-		var list []string
-		return list, json.Unmarshal(out, &list)
-	}
-	if _, err := run(t.TempDir()); err != nil {
-		t.Skipf("plugin scanner not importable: %v", err)
-	}
-	return run
-}
-
-// GAP-0645 review 14: for YAML manifests whose pairs are replaced by a later
-// key or by a merge precedence, the watcher binds exactly the entrypoints the
-// plugin scanner reads: not a replaced one (a false block on an ordinary
-// cache write) and not less than the winning one (a protected allow).
-func TestHermesYAMLEntrypointsMatchScannerPrecedence(t *testing.T) {
-	run := hermesScannerEntrypointReader(t)
-	forms := map[string]string{}
-	for name, body := range hermesShadowedEntrypointForms {
-		forms["shadowed/"+name] = body
-	}
-	for name, form := range hermesDeclaredEntrypointForms {
-		if strings.HasPrefix(name, "yaml-") && form.alsoFile == "" && form.file == "plugin.yaml" && !strings.Contains(name, "complex") {
-			forms[name] = form.body
-		}
-	}
-	for name, body := range forms {
-		t.Run(name, func(t *testing.T) {
-			body = strings.ReplaceAll(body, "DIR", "__pycache__")
-			dir := t.TempDir()
-			writePluginFile(t, filepath.Join(dir, "plugin.yaml"), body)
-			read, err := run(dir)
-			if err != nil {
-				t.Fatalf("scanner: %v", err)
-			}
-			ours, ok := hermesManifestEntrypoints("plugin.yaml", []byte(body))
-			if !ok {
-				t.Fatal("watcher cannot parse a manifest the scanner reads")
-			}
-			slices.Sort(read)
-			slices.Sort(ours)
-			if read, ours = slices.Compact(read), slices.Compact(ours); !slices.Equal(read, ours) {
-				t.Fatalf("scanner reads %q, watcher binds %q", read, ours)
-			}
-		})
-	}
-}
-
-// GAP-0645 review 13: the entrypoints the watcher binds are a superset of
-// what the plugin scanner reads from the same manifest text, so a manifest
-// the scanner accepts is never read as less here. The scanner is run on each
-// manifest form; the case skips where Python or PyYAML is absent.
-func TestHermesManifestEntrypointsCoverScanner(t *testing.T) {
-	run := hermesScannerEntrypointReader(t)
-	manifests := map[string]struct{ file, body string }{}
-	for name, form := range hermesDeclaredEntrypointForms {
-		manifests["form/"+name] = struct{ file, body string }{form.file, form.body}
-	}
-	manifests["yaml-multi-document"] = struct{ file, body string }{"plugin.yaml", "main: DIR/run.js\n---\nname: p\n"}
-	manifests["yaml-tagged-key"] = struct{ file, body string }{"plugin.yaml", "!!str main: DIR/run.js\n"}
-	manifests["yaml-block-scalar"] = struct{ file, body string }{"plugin.yaml", "main: |\n  DIR/run.js\n"}
-	manifests["json-duplicate-keys"] = struct{ file, body string }{"package.json", `{"main":"a.js","main":"DIR/run.js","bin":{"a":"b.js","a":"DIR/run.js"}}`}
-	manifests["json-infinity"] = struct{ file, body string }{"package.json", `{"x":-Infinity,"bin":{"p":"DIR/run.js"}}`}
-	for name, manifest := range manifests {
-		t.Run(name, func(t *testing.T) {
-			dir := t.TempDir()
-			body := strings.ReplaceAll(manifest.body, "DIR", "__pycache__")
-			writePluginFile(t, filepath.Join(dir, filepath.FromSlash(manifest.file)), body)
-			read, err := run(dir)
-			if err != nil {
-				t.Fatalf("scanner: %v", err)
-			}
-			ours, ok := hermesManifestEntrypoints(manifest.file, []byte(body))
-			if !ok && len(read) > 0 {
-				t.Fatalf("scanner reads %q from a manifest the watcher cannot parse", read)
-			}
-			for _, entry := range read {
-				if ok && !slices.Contains(ours, entry) {
-					t.Errorf("scanner reads entrypoint %q, watcher binds %q", entry, ours)
-				}
-			}
-		})
-	}
-}
-
-// The walk over a YAML manifest is bounded: merge keys that fan out make the
-// manifest unparseable, so every cache file is bound, and a plain manifest is
-// not.
-func TestHermesYAMLEntrypointsBounded(t *testing.T) {
-	var fan strings.Builder
-	fan.WriteString("m0: &m0\n  a: 1\n")
-	for i := 1; i <= 12; i++ {
-		fmt.Fprintf(&fan, "m%d: &m%d\n  <<: [%s*m%d]\n", i, i, strings.Repeat(fmt.Sprintf("*m%d, ", i-1), 9), i-1)
-	}
-	fan.WriteString("<<: *m12\nmain: a.js\n")
-	if _, ok := hermesYAMLEntrypoints([]byte(fan.String())); ok {
-		t.Fatal("manifest whose merge keys fan out was walked in full")
-	}
-	if got, ok := hermesYAMLEntrypoints([]byte("name: p\nmain: a.js\n")); !ok || !slices.Equal(got, []string{"a.js"}) {
-		t.Fatalf("plain manifest = %q, %v", got, ok)
-	}
-	if got, ok := hermesYAMLEntrypoints([]byte("")); !ok || len(got) != 0 {
-		t.Fatalf("empty manifest = %q, %v", got, ok)
-	}
-	if _, ok := hermesYAMLEntrypoints([]byte("main: [unclosed\n")); ok {
-		t.Fatal("malformed YAML reported parseable")
 	}
 }

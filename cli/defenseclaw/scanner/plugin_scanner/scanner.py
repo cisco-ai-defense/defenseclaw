@@ -23,6 +23,7 @@ assessment.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import stat
@@ -513,6 +514,14 @@ def _safe_read_manifest(candidate: str, scan_root: str) -> dict | None:
             except OSError:
                 pass
 
+    return _parse_manifest_text(candidate, raw_text)
+
+
+def _parse_manifest_text(candidate: str, raw_text: str) -> dict | None:
+    """Parse manifest text as a scan does: YAML for .yaml/.yml, JSON otherwise.
+
+    Returns None for text that is not a mapping or that the loader refuses.
+    """
     try:
         if candidate.endswith((".yaml", ".yml")):
             data = yaml.load(raw_text, Loader=_YAML_LOADER)
@@ -521,6 +530,31 @@ def _safe_read_manifest(candidate: str, scan_root: str) -> dict | None:
     except (json.JSONDecodeError, ValueError, yaml.YAMLError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def declared_entrypoints(manifests: dict[str, bytes]) -> list[str]:
+    """Entrypoints declared by manifest bytes that the caller already read.
+
+    The gateway watcher must know which files of a shipped plugin a scan can
+    read (a declared entrypoint is read wherever it lives). It asks this
+    module, so the manifest grammar has one reader. manifests maps a candidate
+    path (slash-separated, as in _MANIFEST_CANDIDATES) to the bytes the caller
+    read once. The bytes are decoded and parsed exactly as _safe_read_manifest
+    does (UTF-8 text mode), and the entrypoints of every manifest present are
+    united, which is a superset of what one scan reads. Text the loader refuses
+    declares nothing, as in a scan; bytes that are not UTF-8 raise, as in a scan.
+    """
+    declared: list[str] = []
+    for rel_path, _label in _MANIFEST_CANDIDATES:
+        raw = manifests.get(rel_path.replace(os.sep, "/"))
+        if raw is None:
+            continue
+        with io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8") as handle:
+            data = _parse_manifest_text(rel_path, handle.read())
+        if data is None:
+            continue
+        declared.extend(ep for ep in _manifest_entrypoints(data) if ep not in declared)
+    return declared
 
 
 def _manifest_parent_is_safe(directory: str, rel_path: str, scan_root: str) -> bool:

@@ -30,7 +30,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
@@ -116,7 +115,7 @@ func (w *InstallWatcher) hermesVendorPlugin(evt InstallEvent) bool {
 	if !ok || hermesPluginVendorDigests[name] == "" {
 		return false
 	}
-	digest, err := hermesPluginTreeDigest(filepath.Clean(evt.Path))
+	digest, err := hermesPluginTreeDigest(filepath.Clean(evt.Path), w.manifestLoader())
 	if err != nil || digest != hermesPluginVendorDigests[name] {
 		return false
 	}
@@ -177,14 +176,14 @@ func (w *InstallWatcher) logHermesVendorPlugin(evt InstallEvent, targetType stri
 // an entrypoint (hermesDeclaredFiles), which the scanner reads and which is
 // hashed like any other file; a native payload inside a cache makes the tree
 // unverifiable, as the scanner reports it.
-func hermesPluginTreeDigest(path string) (string, error) {
+func hermesPluginTreeDigest(path string, load hermesManifestLoader) (string, error) {
 	root, err := os.OpenRoot(path)
 	if err != nil {
 		return "", err
 	}
 	defer root.Close()
 	digest := sha256.New()
-	declared := &hermesDeclaredSet{root: root, dir: path}
+	declared := &hermesDeclaredSet{root: root, dir: path, load: load}
 	entries, total := 0, int64(0)
 	err = fs.WalkDir(root.FS(), ".", func(name string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -285,58 +284,23 @@ var hermesManifestFiles = []string{
 // resolves.
 const hermesManifestMaxEntrypoints = 10000
 
-// hermesManifestEntrypointKeys are the top-level manifest keys the plugin
-// scanner reads as runtime entrypoints: a string for main, entrypoint and
-// entry, a string or a map of strings for bin (_manifest_entrypoints in
-// plugin_scanner/scanner.py; TestHermesManifestEntrypointKeysMatchScanner
-// keeps them equal). No other manifest string names an entrypoint, so prose
-// such as a description that mentions a file declares nothing.
-var hermesManifestEntrypointKeys = []string{"main", "bin", "entrypoint", "entry"}
-
-// hermesManifestMaxNodes bounds the YAML nodes hermesYAMLEntrypoints visits,
-// so aliases and merge keys that fan out cannot make a manifest expensive.
-const hermesManifestMaxNodes = 100000
-
-// hermesManifestEntrypoints lists the entrypoint strings of the manifest rel
-// with contents data, as the plugin scanner reads them: a .yaml or .yml
-// manifest as PyYAML loads it (hermes_vendor_yaml.go), any other manifest as
-// json.loads reads it (hermes_vendor_json.go), and no entrypoint from a
-// manifest the scanner refuses. The text is never tried as the other format,
-// since the scanner does not. ok is false when this package cannot decide what
-// the scanner reads.
-func hermesManifestEntrypoints(rel string, data []byte) ([]string, bool) {
-	if !utf8.Valid(data) {
-		return nil, false
-	}
-	if strings.HasSuffix(rel, ".yaml") || strings.HasSuffix(rel, ".yml") {
-		return hermesYAMLEntrypoints(data)
-	}
-	top, err := hermesPyJSON(data)
-	switch {
-	case errors.Is(err, errPyLoad):
-		return nil, true
-	case err != nil:
-		return nil, false
-	}
-	return pyManifestEntrypoints(top), true
-}
-
 // hermesDeclaredFiles returns the files in root that a plugin manifest names
 // as a runtime entrypoint, wherever they are. The plugin scanner reads each
 // declared entrypoint whatever folder it is in (resolve_entrypoint_files), so
 // a declared file in a bytecode cache is scanner-readable. The manifests are
-// read through root (the open folder dir), and every entrypoint of every
-// manifest the scanner reads is resolved, so a manifest that is shadowed by
-// another still binds its files. An entrypoint is resolved as a path under
-// dir, as the scanner does, with links followed and with the name taken both
-// as written and with its dot segments folded, so the set is a superset of
-// what the scanner opens. ok is false when a manifest exists that cannot be read or parsed
-// here, since the scanner may still read it; the caller then treats every
-// file as declared.
-func hermesDeclaredFiles(root *os.Root, dir string) (declared []fs.FileInfo, ok bool) {
-	resolved := 0
-	for _, rel := range hermesManifestFiles {
-		rel = filepath.FromSlash(rel)
+// read once through root (the open folder dir) and handed, as bytes, to load,
+// which is the plugin scanner own reader of them; no manifest is parsed here.
+// Every entrypoint of every manifest the scanner reads is resolved, so a
+// manifest that is shadowed by another still binds its files. An entrypoint is
+// resolved as a path under dir, as the scanner does, with links followed and
+// with the name taken both as written and with its dot segments folded, so the
+// set is a superset of what the scanner opens. ok is false when a manifest
+// exists that cannot be read, or the scanner cannot answer; the caller then
+// treats every file as declared.
+func hermesDeclaredFiles(root *os.Root, dir string, load hermesManifestLoader) (declared []fs.FileInfo, ok bool) {
+	manifests := map[string][]byte{}
+	for _, name := range hermesManifestFiles {
+		rel := filepath.FromSlash(name)
 		info, err := root.Lstat(rel)
 		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
 			continue
@@ -357,23 +321,24 @@ func hermesDeclaredFiles(root *os.Root, dir string) (declared []fs.FileInfo, ok 
 		if err != nil || len(data) > hermesPluginMaxFileBytes {
 			return nil, false
 		}
-		entrypoints, parsed := hermesManifestEntrypoints(rel, data)
-		if !parsed {
-			return nil, false
+		manifests[name] = data
+	}
+	if len(manifests) == 0 {
+		return nil, true
+	}
+	entrypoints, err := load(manifests)
+	if err != nil || len(entrypoints) > hermesManifestMaxEntrypoints {
+		return nil, false
+	}
+	for _, value := range entrypoints {
+		value = strings.TrimLeft(strings.TrimSpace(value), "/\\")
+		if value == "" || len(value) > 4096 || strings.ContainsRune(value, 0) {
+			continue
 		}
-		for _, value := range entrypoints {
-			if resolved++; resolved > hermesManifestMaxEntrypoints {
-				return nil, false
-			}
-			value = strings.TrimLeft(strings.TrimSpace(value), "/\\")
-			if value == "" || len(value) > 4096 || strings.ContainsRune(value, 0) {
-				continue
-			}
-			written := dir + string(os.PathSeparator) + filepath.FromSlash(value)
-			for _, candidate := range []string{written, filepath.Clean(written)} {
-				if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
-					declared = append(declared, info)
-				}
+		written := dir + string(os.PathSeparator) + filepath.FromSlash(value)
+		for _, candidate := range []string{written, filepath.Clean(written)} {
+			if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
+				declared = append(declared, info)
 			}
 		}
 	}
@@ -385,6 +350,7 @@ func hermesDeclaredFiles(root *os.Root, dir string) (declared []fs.FileInfo, ok 
 type hermesDeclaredSet struct {
 	root   *os.Root
 	dir    string
+	load   hermesManifestLoader
 	loaded bool
 	files  []fs.FileInfo
 	ok     bool
@@ -394,7 +360,7 @@ type hermesDeclaredSet struct {
 // may name it because a manifest could not be read.
 func (s *hermesDeclaredSet) declares(info fs.FileInfo) bool {
 	if !s.loaded {
-		s.files, s.ok = hermesDeclaredFiles(s.root, s.dir)
+		s.files, s.ok = hermesDeclaredFiles(s.root, s.dir, s.load)
 		s.loaded = true
 	}
 	return !s.ok || slices.ContainsFunc(s.files, func(d fs.FileInfo) bool { return os.SameFile(info, d) })
@@ -414,7 +380,7 @@ func (s *hermesDeclaredSet) declares(info fs.FileInfo) bool {
 // since the scanner reads none of its bytes. A tree over
 // hermesSkippedTreeMaxBytes has no stable hash. An entry that cannot be read
 // is recorded as unreadable, so it also differs from a clean read.
-func skippedTreeHash(root string) string {
+func skippedTreeHash(root string, load hermesManifestLoader) string {
 	var entries []string
 	read := int64(0)
 	// declaredEntrypoint reports a bytecode cache file the scanner can read
@@ -423,7 +389,7 @@ func skippedTreeHash(root string) string {
 	declared := &hermesDeclaredSet{loaded: true}
 	if rootHandle, err := os.OpenRoot(root); err == nil {
 		defer rootHandle.Close()
-		declared = &hermesDeclaredSet{root: rootHandle, dir: root}
+		declared = &hermesDeclaredSet{root: rootHandle, dir: root, load: load}
 	}
 	declaredEntrypoint := func(path string) bool {
 		info, err := os.Lstat(path)
