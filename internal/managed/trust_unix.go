@@ -35,6 +35,14 @@ import (
 // its ACL with this, as the trust checks here do.
 func ValidatePathACL(path string) error { return validateStrictPathACL(path) }
 
+// ValidatePathACLForAccount is ValidatePathACL for a path owned by the account
+// with the given uid and name (its own configuration folders): an entry for
+// root or for the account itself adds no authority and is not judged, and an
+// entry for any other principal is judged as ValidatePathACL does.
+func ValidatePathACLForAccount(path string, uid int, account string) error {
+	return validateAccountPathACL(path, uid, account)
+}
+
 // ValidateTrustedInstallMarkerDir accepts a Secure Client install marker
 // only when root owns it and every ancestor, with no group, other or ACL
 // writer and no symlink. An advisory installer ancestor cannot certify a

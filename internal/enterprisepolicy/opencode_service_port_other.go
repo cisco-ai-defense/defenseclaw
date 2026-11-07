@@ -8,7 +8,9 @@ package enterprisepolicy
 import (
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -25,9 +27,24 @@ var openCodeOwnerPrivateGroup = connector.OwnerPrivateGroup
 // openCodePathACLOpen reports a path whose access control list lets another
 // principal write it. macOS grants write and append through an ACL entry
 // without changing the mode bits, so every mode check below asks this too
-// (GAP-0053 REVIEW-6 MF1). A list that cannot be read counts as open. Tests
-// replace it.
-var openCodePathACLOpen = func(path string) bool { return managed.ValidatePathACL(path) != nil }
+// (GAP-0053 REVIEW-6 MF1). The folders and files here belong to this account,
+// so an entry for root, an administrator group or the account itself adds no
+// authority and is not judged (REVIEW-7 MF1); an entry for any other principal
+// is. A list that cannot be read counts as open. Tests replace it.
+var openCodePathACLOpen = func(path string) bool {
+	return managed.ValidatePathACLForAccount(path, os.Geteuid(), openCodeAccountName()) != nil
+}
+
+// openCodeAccountName is the short name of the account the process runs as,
+// "" when the name service cannot say (then only root and the administrator
+// groups are accepted in an ACL).
+func openCodeAccountName() string {
+	account, err := user.LookupId(strconv.Itoa(os.Geteuid()))
+	if err != nil {
+		return ""
+	}
+	return account.Username
+}
 
 func writeOpenCodeServiceConfig(_ string, path string, data []byte) error {
 	return writePrivateUserFile(path, data)
