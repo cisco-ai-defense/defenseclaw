@@ -888,6 +888,15 @@ Other recovery notes:
   or `etc` stops the gateway from starting. `repair`, `/ensure`, `/uninstall` and
   recovery put the deployment's permissions back. A redaction correlation key
   another account can open is refused before any service stops.
+- A file another program holds open stops the repair of that file. Before Setup
+  puts back the access list of a recorded file (`config.yaml`, `targets.yaml`,
+  `deployment.json`, the Codex `requirements.toml` and its records), it holds
+  the file so that no other program can write or delete it, checks that it has
+  one link and judges it. If a program already holds it open with write or delete
+  access, or without sharing read access, `/repair` and `/ensure` refuse that file
+  by name and change nothing on it, not even its access list. Close the program
+  that holds it (a user's agent, an editor), then run Setup `/ensure` again.
+  Programs that only read the file, such as an antivirus scan, do not stop it.
 - If Setup `/repair` refuses because the running gateway's installed config
   cannot be validated for rollback, restore an approved, gateway-valid
   `config.yaml` and retry `/repair`. If the refusal names an administrator-selected

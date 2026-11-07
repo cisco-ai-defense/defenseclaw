@@ -849,6 +849,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-claude-policy-binding-smoke.ps1",
     "enterprise-standalone-codex-vendor-folder-smoke.ps1",
     "enterprise-standalone-config-acl-repair-smoke.ps1",
+    "enterprise-standalone-held-file-restamp-smoke.ps1",
     "enterprise-standalone-cowork-delivery-smoke.ps1",
     "enterprise-standalone-enumerator-environment-smoke.ps1",
     "enterprise-standalone-forced-uninstall-residue-smoke.ps1",

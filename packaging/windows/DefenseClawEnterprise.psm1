@@ -680,6 +680,11 @@ function Get-DefenseClawPolicyBlockEvent {
 function Initialize-DefenseClawNativeSecurity {
     if ($null -ne $script:DefenseClawNativeSecurityType) {
         $script:DefenseClawNativeSecurityType::StandaloneHolderProbe = [bool](Test-DefenseClawStandaloneProfile)
+
+        # Every native stamp asks for the type first; the standalone gate for
+        # holding a file before an in-place re-stamp (GAP-0763) is read here,
+        # at the moment of use, so it follows the profile of this run.
+        $script:DefenseClawNativeSecurityType::RefuseHeldRestamp = [bool](Test-DefenseClawStandaloneProfile)
         return $script:DefenseClawNativeSecurityType
     }
     # Never trust a predictable type name in an ambient elevated PowerShell
@@ -2876,6 +2881,146 @@ namespace $nativeNamespace
             const uint FILE_SHARE_READ = 0x00000001;
             const uint FILE_SHARE_WRITE = 0x00000002;
             const uint FILE_SHARE_DELETE = 0x00000004;
+            return CreateFileNoFollowWithRetry(
+                path,
+                desiredAccess,
+                flags,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                out error);
+        }
+
+        // Set by the PowerShell side (Initialize-DefenseClawNativeSecurity)
+        // before every use, from the standalone profile gate: when true,
+        // every in-place re-stamp of a regular file through this helper
+        // first holds the file (OpenFileForRestamp). Secure Client leaves it
+        // false and keeps the open it always had.
+        public static bool RefuseHeldRestamp;
+
+        private const string HeldFileRefusal =
+            "refusing to re-stamp a managed file while another program holds it open " +
+            "with write or delete access, or without sharing read access, and nothing was changed";
+
+        // The open of an in-place re-stamp of a regular file. On the
+        // standalone profile it asks for read access and shares read only:
+        // while the handle is open no other program can write or delete the
+        // file or deny others read access, and the file cannot be renamed
+        // away, so the object checked here is the object stamped through
+        // this handle. An existing handle that has write or delete access, or
+        // that does not share read, makes the open fail with a sharing
+        // violation, retried briefly and then refused by name before any
+        // access list, owner or attribute is written. Opens that ask for no
+        // data access (the stamp's own READ_CONTROL and WRITE_DAC open) are
+        // not checked against this share mode, so the stamp proceeds while
+        // the handle is open; readers that share read (the gateway, an
+        // antivirus scan, a backup agent) do not conflict with it.
+        private static IntPtr OpenFileForRestamp(
+            string path,
+            uint desiredAccess,
+            uint flags,
+            bool directory,
+            out int error)
+        {
+            const uint FILE_READ_DATA = 0x00000001;
+            const uint FILE_SHARE_READ = 0x00000001;
+            const int ERROR_SHARING_VIOLATION = 32;
+            const int ERROR_LOCK_VIOLATION = 33;
+            if (!RefuseHeldRestamp || directory)
+                return CreateFileNoFollowWithRetry(path, desiredAccess, flags, out error);
+            IntPtr handle = CreateFileNoFollowWithRetry(
+                path,
+                desiredAccess | FILE_READ_DATA,
+                flags,
+                FILE_SHARE_READ,
+                out error);
+            if (handle == new IntPtr(-1) &&
+                (error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION))
+                throw new InvalidOperationException(
+                    HeldFileRefusal + " (close the program that holds it, then run Setup /ensure again): " + path);
+            return handle;
+        }
+
+        // Holds one regular file for an in-place re-stamp that is made with a
+        // path-based call (Set-Acl): the same open as OpenFileForRestamp,
+        // kept open by the caller until the stamp is done and closed with
+        // ReleaseHeldFile. held is set when another program holds the file
+        // (nothing is returned then); a link, a directory or a file with
+        // more than one hard link is refused.
+        public static IntPtr HoldRegularFileForRestampNoFollow(string path, out bool held)
+        {
+            const uint FILE_READ_DATA = 0x00000001;
+            const uint FILE_READ_ATTRIBUTES = 0x00000080;
+            const uint READ_CONTROL = 0x00020000;
+            const uint FILE_SHARE_READ = 0x00000001;
+            const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+            const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+            const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
+            const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
+            const int ERROR_SHARING_VIOLATION = 32;
+            const int ERROR_LOCK_VIOLATION = 33;
+            held = false;
+            IntPtr handle;
+            int error;
+            using (new UninstallFilePrivilegeScope(true))
+            {
+                handle = CreateFileNoFollowWithRetry(
+                    path,
+                    FILE_READ_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL,
+                    FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                    FILE_SHARE_READ,
+                    out error);
+            }
+            if (handle == new IntPtr(-1))
+            {
+                if (error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION)
+                {
+                    held = true;
+                    return IntPtr.Zero;
+                }
+                throw new Win32Exception(
+                    error,
+                    "open managed file to hold it for an ACL re-stamp failed: " + path);
+            }
+            try
+            {
+                BY_HANDLE_FILE_INFORMATION information;
+                if (!GetFileInformationByHandle(handle, out information))
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "query managed file identity failed: " + path);
+                if ((information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+                    ((information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
+                        !IsBenignFileReparseHandle(handle, path)))
+                    throw new InvalidOperationException(
+                        "refusing to re-stamp a managed path that is a link or a directory: " + path);
+                if (information.NumberOfLinks != 1)
+                    throw new InvalidOperationException(
+                        "refusing to re-stamp a managed file with more than one hard link (links=" +
+                        information.NumberOfLinks.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+                        "), and nothing was changed: " + path);
+                IntPtr result = handle;
+                handle = IntPtr.Zero;
+                return result;
+            }
+            finally
+            {
+                if (handle != IntPtr.Zero)
+                    CloseHandle(handle);
+            }
+        }
+
+        public static void ReleaseHeldFile(IntPtr handle)
+        {
+            if (handle != IntPtr.Zero && handle != new IntPtr(-1))
+                CloseHandle(handle);
+        }
+
+        private static IntPtr CreateFileNoFollowWithRetry(
+            string path,
+            uint desiredAccess,
+            uint flags,
+            uint share,
+            out int error)
+        {
             const uint OPEN_EXISTING = 3;
             const int ERROR_SHARING_VIOLATION = 32;
             const int ERROR_LOCK_VIOLATION = 33;
@@ -2886,7 +3031,7 @@ namespace $nativeNamespace
                 handle = CreateFileW(
                     path,
                     desiredAccess,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    share,
                     IntPtr.Zero,
                     OPEN_EXISTING,
                     flags,
@@ -2989,10 +3134,11 @@ namespace $nativeNamespace
 
                 {
                     int openError;
-                    IntPtr handle = CreateFileNoFollowWithRetry(
+                    IntPtr handle = OpenFileForRestamp(
                         path,
                         FILE_READ_ATTRIBUTES | READ_CONTROL | WRITE_DAC | WRITE_OWNER,
                         flags,
+                        directory,
                         out openError);
                     if (handle == new IntPtr(-1))
                     {
@@ -3003,10 +3149,11 @@ namespace $nativeNamespace
                                     (openError == ERROR_ACCESS_DENIED
                                         ? MissingPrivilegeSuffix(scope)
                                         : String.Empty));
-                        IntPtr ownerHandle = CreateFileNoFollowWithRetry(
+                        IntPtr ownerHandle = OpenFileForRestamp(
                             path,
                             FILE_READ_ATTRIBUTES | WRITE_OWNER,
                             flags,
+                            directory,
                             out openError);
                         if (ownerHandle == new IntPtr(-1))
                             throw new Win32Exception(
@@ -3037,10 +3184,11 @@ namespace $nativeNamespace
                         {
                             CloseHandle(ownerHandle);
                         }
-                        handle = CreateFileNoFollowWithRetry(
+                        handle = OpenFileForRestamp(
                             path,
                             FILE_READ_ATTRIBUTES | READ_CONTROL | WRITE_DAC | WRITE_OWNER,
                             flags,
+                            directory,
                             out openError);
                         if (handle == new IntPtr(-1))
                             throw new Win32Exception(
@@ -3813,19 +3961,22 @@ namespace $nativeNamespace
             uint desiredAccess,
             uint expectedSize,
             out BY_HANDLE_FILE_INFORMATION information,
-            bool backupIntent = false)
+            bool backupIntent = false,
+            bool restamp = false)
         {
             const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
             const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
             // Delete sharing lets an antivirus or backup agent that holds the
             // file keep its handle; the identity is rechecked after the write.
+            // An in-place re-stamp (restamp) on the standalone profile holds
+            // the file instead and refuses a file another program holds open
+            // for write or delete (OpenFileForRestamp).
             int openError;
-            IntPtr handle = CreateFileNoFollowWithRetry(
-                path,
-                desiredAccess,
-                FILE_FLAG_OPEN_REPARSE_POINT |
-                    (backupIntent ? FILE_FLAG_BACKUP_SEMANTICS : 0),
-                out openError);
+            uint openFlags = FILE_FLAG_OPEN_REPARSE_POINT |
+                (backupIntent ? FILE_FLAG_BACKUP_SEMANTICS : 0);
+            IntPtr handle = restamp
+                ? OpenFileForRestamp(path, desiredAccess, openFlags, false, out openError)
+                : CreateFileNoFollowWithRetry(path, desiredAccess, openFlags, out openError);
             if (handle == new IntPtr(-1))
                 throw new Win32Exception(
                     openError,
@@ -4334,12 +4485,15 @@ namespace $nativeNamespace
                         "managed secret descriptor has no DACL");
 
                 BY_HANDLE_FILE_INFORMATION before;
+                // The uninstall's authority repair (backupIntent) keeps the
+                // open it always had: a removal must not wait for a holder.
                 IntPtr handle = OpenFixedRegularFileSecurity(
                     path,
                     FILE_READ_ATTRIBUTES | READ_CONTROL | WRITE_DAC | WRITE_OWNER,
                     expectedSize,
                     out before,
-                    backupIntent);
+                    backupIntent,
+                    !backupIntent);
                 try
                 {
                     string beforeIdentity = FileIdentity(before);
@@ -4980,7 +5134,89 @@ namespace $nativeNamespace
         [Environment]::SetEnvironmentVariable('SystemRoot', $previousSystemRoot, 'Process')
         [Environment]::SetEnvironmentVariable('windir', $previousWindir, 'Process')
     }
+    $script:DefenseClawNativeSecurityType::RefuseHeldRestamp = [bool](Test-DefenseClawStandaloneProfile)
     return $script:DefenseClawNativeSecurityType
+}
+
+# GAP-0763: an in-place re-stamp of a recorded regular file (standalone) is
+# one transaction: hold the file first, with a handle no other program can
+# write or delete under, check links, re-judge and stamp while it is held. A
+# program that holds the file open with write or delete access, or without
+# sharing read access, stops the stamp before anything is written, and the
+# refusal names the file. Secure Client keeps its stamps as they were.
+$script:DefenseClawHeldFileRefusalMarker = 'refusing to re-stamp a managed '
+
+function Get-DefenseClawHeldFileRefusal {
+    # The text of a hold refusal (a file another program holds open, a link,
+    # a directory or a file with more than one hard link) in an error record
+    # (the native helper's exception arrives wrapped by PowerShell), or $null.
+    param([Parameter(Mandatory)]$ErrorRecord)
+    $exception = $ErrorRecord.Exception
+    while ($null -ne $exception) {
+        if ([string]$exception.Message -like ($script:DefenseClawHeldFileRefusalMarker + '*')) {
+            return [string]$exception.Message
+        }
+        $exception = $exception.InnerException
+    }
+    return $null
+}
+
+function Open-DefenseClawRestampHold {
+    <#
+        Holds Path for an in-place re-stamp and returns the handle, or a zero
+        handle when nothing is held: Secure Client, a path that is not an
+        existing regular file. Pair with Close-DefenseClawRestampHold in a
+        finally block.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-DefenseClawStandaloneProfile) -or
+        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return [IntPtr]::Zero
+    }
+    Assert-DefenseClawNoReparsePath -Path $Path
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    $held = $false
+    $handle = [IntPtr]::Zero
+    try {
+        $handle = $nativeSecurity::HoldRegularFileForRestampNoFollow($Path, [ref]$held)
+    }
+    catch {
+        $inner = $_.Exception
+        while ($null -ne $inner.InnerException) { $inner = $inner.InnerException }
+        throw ([string]$inner.Message)
+    }
+    if ($held) {
+        throw ('refusing to re-stamp a managed file while another program holds it open' +
+            ' with write or delete access, or without sharing read access, and nothing was changed ' +
+            '(close the program that holds it, then run Setup /ensure again): ' + $Path)
+    }
+    return $handle
+}
+
+function Close-DefenseClawRestampHold {
+    param([Parameter(Mandatory)][IntPtr]$Handle)
+    if ($Handle -ne [IntPtr]::Zero) {
+        $nativeSecurity = Initialize-DefenseClawNativeSecurity
+        $nativeSecurity::ReleaseHeldFile($Handle)
+    }
+}
+
+function Invoke-DefenseClawHeldFileStamp {
+    <#
+        Runs Stamp (a script block that writes the access list or owner of
+        Path) while Path is held; see Open-DefenseClawRestampHold.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][scriptblock]$Stamp
+    )
+    $hold = Open-DefenseClawRestampHold -Path $Path
+    try {
+        & $Stamp
+    }
+    finally {
+        Close-DefenseClawRestampHold -Handle $hold
+    }
 }
 
 function Assert-DefenseClawAdministrator {
@@ -7344,6 +7580,41 @@ function Assert-DefenseClawCanonicalPathAcl {
 }
 
 function Set-DefenseClawPathAcl {
+    <#
+        The in-place stamp of a managed path's canonical access list. On the
+        standalone profile a regular file is held first (GAP-0763): a program
+        that holds it open with write or delete access, or without sharing
+        read access, or a link or a second hard link, refuses the stamp by
+        name before any access list, owner or attribute is written; the stamp
+        and the check that follows it run while the file is held. The program
+        files under Program Files (InstallFile, ServiceInstallFile) are
+        excluded: no standard account ever held a grant on them and a running
+        image is open for execute. Directories are stamped through the handle
+        the native helper opens without delete sharing. Secure Client stamps
+        as it always did.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]
+        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'SecureClientMarkerDirectory', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'BundleDirectory', 'BundleReceipt', 'BundleVersionDirectory', 'BundleVersionFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'RuntimeSecretFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory', 'ManagedIPCDirectory')]
+        [string]$Kind,
+        [Parameter(Mandatory)][string]$GatewayServiceSID
+    )
+    $hold = [IntPtr]::Zero
+    if ((Test-DefenseClawStandaloneProfile) -and
+        $Kind -notin @('InstallFile', 'ServiceInstallFile') -and
+        $Kind -notlike '*Directory') {
+        $hold = Open-DefenseClawRestampHold -Path $Path
+    }
+    try {
+        Invoke-DefenseClawPathAclStamp -Path $Path -Kind $Kind -GatewayServiceSID $GatewayServiceSID
+    }
+    finally {
+        Close-DefenseClawRestampHold -Handle $hold
+    }
+}
+
+function Invoke-DefenseClawPathAclStamp {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)]
@@ -7488,6 +7759,11 @@ function Set-DefenseClawSharedPathAcl {
         catch {
             if (Test-DefenseClawTrustStrictAncestors) {
                 throw
+            }
+            $held = Get-DefenseClawHeldFileRefusal -ErrorRecord $_
+            if ($null -ne $held) {
+                # Waiting does not release a file another program holds open.
+                throw $held
             }
             Write-DefenseClawAclSelfHealAdvisory `
                 -Path $Path `
@@ -9240,6 +9516,13 @@ function Assert-DefenseClawPathAcl {
                     -GatewayServiceSID $SelfHealGatewayServiceSID
             }
             catch {
+                # A file another program holds open (or a link) is refused by
+                # name with the access list as it was (GAP-0763); the re-read
+                # below would only report the drift it left in place.
+                $held = Get-DefenseClawHeldFileRefusal -ErrorRecord $_
+                if ($null -ne $held) {
+                    throw $held
+                }
                 # AVC can win the race again while we re-stamp. Whether that
                 # actually left us non-compliant is decided by the re-read
                 # below, not by the failure to write.
@@ -22443,41 +22726,50 @@ function Restore-DefenseClawTransaction {
                     [string]$securityProperty.Value,
                     [Security.AccessControl.AccessControlSections]::All
                 )
+                # The restored file is held while its recorded access list
+                # is written back; a program that holds it open stops the
+                # restore before anything on it changes (GAP-0763).
+                $restoreHold = Open-DefenseClawRestampHold -Path $destination
                 try {
-                    Microsoft.PowerShell.Security\Set-Acl `
-                        -LiteralPath $destination `
-                        -AclObject $security
-                }
-                catch {
-                    # A recorded owner the installer token may not assign (a
-                    # standard user, another admin, TrustedInstaller) needs
-                    # the restore privilege; failing that, restore the DACL.
-                    $restoreError = $_.Exception.Message
                     try {
-                        $nativeSecurity = Initialize-DefenseClawNativeSecurity
-                        [void]$nativeSecurity::SetPathSecurityDescriptorPrivilegedNoFollow(
-                            $destination,
-                            [string]$securityProperty.Value,
-                            $false
-                        )
-                    }
-                    catch {
-                        if (Test-DefenseClawTrustStrictAncestors) {
-                            throw
-                        }
-                        $daclOnly = [Security.AccessControl.FileSecurity]::new()
-                        $daclOnly.SetSecurityDescriptorSddlForm(
-                            [string]$securityProperty.Value,
-                            [Security.AccessControl.AccessControlSections]::Access
-                        )
                         Microsoft.PowerShell.Security\Set-Acl `
                             -LiteralPath $destination `
-                            -AclObject $daclOnly
-                        Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
-                            path   = $destination
-                            reason = "restored the shared Codex file DACL without its recorded owner: $restoreError"
+                            -AclObject $security
+                    }
+                    catch {
+                        # A recorded owner the installer token may not assign (a
+                        # standard user, another admin, TrustedInstaller) needs
+                        # the restore privilege; failing that, restore the DACL.
+                        $restoreError = $_.Exception.Message
+                        try {
+                            $nativeSecurity = Initialize-DefenseClawNativeSecurity
+                            [void]$nativeSecurity::SetPathSecurityDescriptorPrivilegedNoFollow(
+                                $destination,
+                                [string]$securityProperty.Value,
+                                $false
+                            )
+                        }
+                        catch {
+                            if (Test-DefenseClawTrustStrictAncestors) {
+                                throw
+                            }
+                            $daclOnly = [Security.AccessControl.FileSecurity]::new()
+                            $daclOnly.SetSecurityDescriptorSddlForm(
+                                [string]$securityProperty.Value,
+                                [Security.AccessControl.AccessControlSections]::Access
+                            )
+                            Microsoft.PowerShell.Security\Set-Acl `
+                                -LiteralPath $destination `
+                                -AclObject $daclOnly
+                            Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
+                                path   = $destination
+                                reason = "restored the shared Codex file DACL without its recorded owner: $restoreError"
+                            }
                         }
                     }
+                }
+                finally {
+                    Close-DefenseClawRestampHold -Handle $restoreHold
                 }
             }
         }
@@ -28967,29 +29259,38 @@ function Restore-DefenseClawStandaloneCodexRequirementsAcl {
         -PathType Leaf)) {
         return
     }
-    Assert-DefenseClawCodexMachinePolicyFilePreflight -Layout $Layout
-    $actualHash = (
-        Microsoft.PowerShell.Utility\Get-FileHash `
-            -LiteralPath $Layout.CodexMachinePolicyPath `
-            -Algorithm SHA256
-    ).Hash.ToLowerInvariant()
-    if ($actualHash -ceq [string]$Backup.sha256) {
-        $security = [Security.AccessControl.FileSecurity]::new()
-        $security.SetSecurityDescriptorSddlForm(
-            [string]$Backup.security_descriptor,
-            [Security.AccessControl.AccessControlSections]::All
-        )
-        Microsoft.PowerShell.Security\Set-Acl `
-            -LiteralPath $Layout.CodexMachinePolicyPath `
-            -AclObject $security
+    # The file is held before its content is judged and its access list
+    # written back, so nothing that holds it open can change it between the
+    # two (GAP-0763).
+    $hold = Open-DefenseClawRestampHold -Path $Layout.CodexMachinePolicyPath
+    try {
         Assert-DefenseClawCodexMachinePolicyFilePreflight -Layout $Layout
-        return
+        $actualHash = (
+            Microsoft.PowerShell.Utility\Get-FileHash `
+                -LiteralPath $Layout.CodexMachinePolicyPath `
+                -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        if ($actualHash -ceq [string]$Backup.sha256) {
+            $security = [Security.AccessControl.FileSecurity]::new()
+            $security.SetSecurityDescriptorSddlForm(
+                [string]$Backup.security_descriptor,
+                [Security.AccessControl.AccessControlSections]::All
+            )
+            Microsoft.PowerShell.Security\Set-Acl `
+                -LiteralPath $Layout.CodexMachinePolicyPath `
+                -AclObject $security
+            Assert-DefenseClawCodexMachinePolicyFilePreflight -Layout $Layout
+            return
+        }
+        Set-DefenseClawPathAcl `
+            -Path $Layout.CodexMachinePolicyPath `
+            -Kind MachinePolicyFile `
+            -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)
+        Assert-DefenseClawCodexMachinePolicyFile -Layout $Layout
     }
-    Set-DefenseClawPathAcl `
-        -Path $Layout.CodexMachinePolicyPath `
-        -Kind MachinePolicyFile `
-        -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)
-    Assert-DefenseClawCodexMachinePolicyFile -Layout $Layout
+    finally {
+        Close-DefenseClawRestampHold -Handle $hold
+    }
 }
 
 function Complete-DefenseClawCodexRequirementsRemoval {
@@ -29114,28 +29415,36 @@ function Complete-DefenseClawCodexRequirementsRemoval {
                 -PathType Leaf)) {
                 throw 'Codex requirements preimage was not restored'
             }
-            $actualHash = (
-                Microsoft.PowerShell.Utility\Get-FileHash `
+            # Held before the content is judged and the recorded access list
+            # is written back (GAP-0763).
+            $hold = Open-DefenseClawRestampHold -Path $Layout.CodexMachinePolicyPath
+            try {
+                $actualHash = (
+                    Microsoft.PowerShell.Utility\Get-FileHash `
+                        -LiteralPath $Layout.CodexMachinePolicyPath `
+                        -Algorithm SHA256
+                ).Hash.ToLowerInvariant()
+                if ($actualHash -cne [string]$backup.sha256 -or
+                    -not [string]::Equals(
+                        [string]$Report.preimage_sha256,
+                        [string]$backup.sha256,
+                        [StringComparison]::Ordinal
+                    )) {
+                    throw 'restored Codex requirements do not match the authenticated preimage'
+                }
+                $security = [Security.AccessControl.FileSecurity]::new()
+                $security.SetSecurityDescriptorSddlForm(
+                    [string]$backup.security_descriptor,
+                    [Security.AccessControl.AccessControlSections]::All
+                )
+                Microsoft.PowerShell.Security\Set-Acl `
                     -LiteralPath $Layout.CodexMachinePolicyPath `
-                    -Algorithm SHA256
-            ).Hash.ToLowerInvariant()
-            if ($actualHash -cne [string]$backup.sha256 -or
-                -not [string]::Equals(
-                    [string]$Report.preimage_sha256,
-                    [string]$backup.sha256,
-                    [StringComparison]::Ordinal
-                )) {
-                throw 'restored Codex requirements do not match the authenticated preimage'
+                    -AclObject $security
+                Assert-DefenseClawCodexMachinePolicyFilePreflight -Layout $Layout
             }
-            $security = [Security.AccessControl.FileSecurity]::new()
-            $security.SetSecurityDescriptorSddlForm(
-                [string]$backup.security_descriptor,
-                [Security.AccessControl.AccessControlSections]::All
-            )
-            Microsoft.PowerShell.Security\Set-Acl `
-                -LiteralPath $Layout.CodexMachinePolicyPath `
-                -AclObject $security
-            Assert-DefenseClawCodexMachinePolicyFilePreflight -Layout $Layout
+            finally {
+                Close-DefenseClawRestampHold -Handle $hold
+            }
         }
         elseif (Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $Layout.CodexMachinePolicyPath) {
@@ -38021,11 +38330,21 @@ function Set-DefenseClawStandaloneSecretSddl {
         $Sddl,
         [Security.AccessControl.AccessControlSections]::All
     )
-    Microsoft.PowerShell.Security\Set-Acl `
-        -LiteralPath $Path `
-        -AclObject $security `
-        -ErrorAction Stop
-    Assert-DefenseClawCanonicalPathAcl -Path $Path -Expected $security
+    # A credential file is held while its access list is written (GAP-0763).
+    $hold = [IntPtr]::Zero
+    if (-not $IsDirectory) {
+        $hold = Open-DefenseClawRestampHold -Path $Path
+    }
+    try {
+        Microsoft.PowerShell.Security\Set-Acl `
+            -LiteralPath $Path `
+            -AclObject $security `
+            -ErrorAction Stop
+        Assert-DefenseClawCanonicalPathAcl -Path $Path -Expected $security
+    }
+    finally {
+        Close-DefenseClawRestampHold -Handle $hold
+    }
 }
 
 # A non-purge uninstall resets every retained item to administrator-only ACLs
