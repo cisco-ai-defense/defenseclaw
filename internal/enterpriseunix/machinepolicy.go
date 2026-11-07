@@ -168,7 +168,7 @@ func (m *policyManager) copilotAccountHomes(cfg *config.Config) ([]string, []str
 	}
 	var scoped, outOfScope []string
 	seen := map[string]bool{}
-	goneHomes := confirmedGoneHomes{}
+	goneHomes := newConfirmedGoneHomes()
 	for _, account := range accounts {
 		home := env.P(account.Home)
 		if leftOut[account.User] || leftOut[strconv.Itoa(account.UID)] {
@@ -268,19 +268,52 @@ func (env *Env) accountRecords(recordPath string) []accountRecord {
 	return accounts
 }
 
-// confirmedGoneHomes are the homes of accounts a fresh directory read
+// confirmedGoneHomes tracks, per home, the accounts a fresh directory read
 // confirms gone, by the evidence the guardian retires a target on
-// (guardianAccountConfirmedGone). Each account is asked once.
-type confirmedGoneHomes map[string]bool
-
-func (g confirmedGoneHomes) note(user string, uid int, home string) {
-	if _, asked := g[home]; asked || user == "" {
-		return
-	}
-	g[home] = guardianAccountConfirmedGone(user, uid)
+// (guardianAccountConfirmedGone). A home is gone only while every account
+// recorded at it is: a live account that took over the home of a deleted
+// one (a shared home, or a record that still lists the old uid first) keeps
+// it. Each account (name and uid) is asked once.
+type confirmedGoneHomes struct {
+	asked map[string]bool
+	homes map[string]*goneHome
 }
 
-func (g confirmedGoneHomes) has(home string) bool { return g[home] }
+type goneHome struct{ gone, live bool }
+
+func newConfirmedGoneHomes() *confirmedGoneHomes {
+	return &confirmedGoneHomes{asked: map[string]bool{}, homes: map[string]*goneHome{}}
+}
+
+// note records one account recorded at home. An account with no name is
+// never confirmed gone.
+func (g *confirmedGoneHomes) note(user string, uid int, home string) {
+	state := g.homes[home]
+	if state == nil {
+		state = &goneHome{}
+		g.homes[home] = state
+	}
+	if user == "" {
+		state.live = true
+		return
+	}
+	key := user + ":" + strconv.Itoa(uid)
+	gone, asked := g.asked[key]
+	if !asked {
+		gone = guardianAccountConfirmedGone(user, uid)
+		g.asked[key] = gone
+	}
+	if gone {
+		state.gone = true
+	} else {
+		state.live = true
+	}
+}
+
+func (g *confirmedGoneHomes) has(home string) bool {
+	state := g.homes[home]
+	return state != nil && state.gone && !state.live
+}
 
 // guardianAccountConfirmedGone is unixidentity.AccountUIDGone for a recorded
 // uid and AccountRecordGone for a name alone: a directory that does not

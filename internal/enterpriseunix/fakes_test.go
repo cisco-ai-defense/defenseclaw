@@ -493,8 +493,8 @@ func newTestHost(t *testing.T, goos string) *testHost {
 		ReadyTimeout:   200 * time.Millisecond,
 		PollInterval:   10 * time.Millisecond,
 		// No guardian runs in the fake host.
-		GuardianReportTimeout: 50 * time.Millisecond,
-		GuardianRetireTimeout: 50 * time.Millisecond,
+		GuardianReportTimeout:    50 * time.Millisecond,
+		GuardianReconcileTimeout: 50 * time.Millisecond,
 		// Nor does its enumerator publish a record (testHost.run does).
 		InstallScanTimeout: 5 * time.Millisecond,
 	}
