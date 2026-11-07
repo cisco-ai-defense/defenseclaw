@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -285,14 +286,33 @@ func TestFailedPIDRecordNamesTheRefusedRecord(t *testing.T) {
 			t.Fatal(err)
 		}
 		err := New(dir).ValidateStartIdentityFiles()
-		if err == nil || FailedPIDRecord(err) != record {
-			t.Fatalf("%s: err=%v record=%q", record, err, FailedPIDRecord(err))
+		if failed, unreadable := FailedPIDRecord(err); err == nil || failed != record || unreadable {
+			t.Fatalf("%s: err=%v record=%q unreadable=%v", record, err, failed, unreadable)
 		}
 		if !errors.Is(err, ErrUnsafeProcessIdentity) || !strings.Contains(err.Error(), record) {
 			t.Fatalf("%s: the identity text changed: %v", record, err)
 		}
 	}
-	if got := FailedPIDRecord(errors.New("other")); got != "" {
-		t.Fatalf("FailedPIDRecord(other) = %q", got)
+	if got, unreadable := FailedPIDRecord(errors.New("other")); got != "" || unreadable {
+		t.Fatalf("FailedPIDRecord(other) = %q, %v", got, unreadable)
+	}
+}
+
+// A record this account may not read is flagged unreadable, the only refusal
+// that returning the ownership clears; a readable record is not, whatever its
+// content (GAP-0788 review 4).
+func TestFailedPIDRecordFlagsOnlyAnUnreadableRecord(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("a mode cannot make a file unreadable here")
+	}
+	for _, record := range []string{PIDFileName, WatchdogPIDFileName} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, record), []byte("1\n"), 0o000); err != nil {
+			t.Fatal(err)
+		}
+		err := New(dir).ValidateStartIdentityFiles()
+		if failed, unreadable := FailedPIDRecord(err); err == nil || failed != record || !unreadable {
+			t.Fatalf("%s unreadable: err=%v record=%q unreadable=%v", record, err, failed, unreadable)
+		}
 	}
 }

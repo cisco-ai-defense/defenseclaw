@@ -111,13 +111,16 @@ func NamesGatewayPIDRecord(blocker string) bool {
 	return slices.Contains(gatewayPIDRecordNames, filepath.Base(blocker))
 }
 
-// pidRecordError marks which PID record failed the identity check, so a caller
-// that explains a refused start can tell a record it can repair (root-owned)
-// from a record that is refused for its own reason (malformed). The text is the
-// wrapped error unchanged.
+// pidRecordError marks which PID record failed the identity check, and whether
+// the account could not read it at all, so a caller that explains a refused
+// start can tell a record only an owner change repairs (unreadable) from one
+// that is refused for its own content (malformed, invalid PID, not a regular
+// file), which stays refused after the owner change. The text is the wrapped
+// error unchanged.
 type pidRecordError struct {
-	record string
-	err    error
+	record     string
+	unreadable bool
+	err        error
 }
 
 func (e *pidRecordError) Error() string { return e.err.Error() }
@@ -125,12 +128,15 @@ func (e *pidRecordError) Unwrap() error { return e.err }
 
 // FailedPIDRecord names the PID record (gateway.pid or watchdog.pid) whose
 // validation produced err, or "" when err does not come from that check.
-func FailedPIDRecord(err error) string {
+// unreadable is true only when the record was refused because this account is
+// not permitted to read it (or to reach it), the one cause that returning the
+// ownership clears.
+func FailedPIDRecord(err error) (record string, unreadable bool) {
 	var rec *pidRecordError
 	if errors.As(err, &rec) {
-		return rec.record
+		return rec.record, rec.unreadable
 	}
-	return ""
+	return "", false
 }
 
 type rootOwnedEntry struct {
