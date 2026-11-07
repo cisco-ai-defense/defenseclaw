@@ -251,6 +251,7 @@ func TestCopyWindowsManagedFileSwapsUnderConcurrentLaunches(t *testing.T) {
 // still holds the old one.
 func TestKeepWindowsManagedFileCopyReplacesAHookHeldOpenForWriting(t *testing.T) {
 	requireAdministratorTestToken(t, "the product restore writes the hook binary with the install file descriptor (an Administrators owner)")
+	resetWindowsHeldSwapsForTest(t)
 	root := t.TempDir()
 	target := filepath.Join(root, "bin", "defenseclaw-hook.exe")
 	copyPath := filepath.Join(root, "hook-guardian", "payload", "defenseclaw-hook.exe")
@@ -459,6 +460,18 @@ func resetWindowsHeldSwapsForTest(t *testing.T) {
 	t.Helper()
 	windowsHeldSwaps = windowsHeldSwapState{}
 	t.Cleanup(func() { windowsHeldSwaps = windowsHeldSwapState{} })
+	// The cap counts the process-wide pending backups: a test that left some
+	// behind (a failed one, a test that never ran the later check) must not
+	// refuse the swaps of the tests after it.
+	windowsImageBackups.Lock()
+	previous := windowsImageBackups.pending
+	windowsImageBackups.pending = map[string]windowsImageBackup{}
+	windowsImageBackups.Unlock()
+	t.Cleanup(func() {
+		windowsImageBackups.Lock()
+		windowsImageBackups.pending = previous
+		windowsImageBackups.Unlock()
+	})
 }
 
 func fakeWindowsHeldSwapClock(t *testing.T) (advance func(time.Duration)) {
@@ -512,15 +525,6 @@ func TestWindowsHeldSwapBacksOffExponentiallyUpToTheMaximum(t *testing.T) {
 func TestWindowsHeldSwapStopsAtTheBackupCapAndLogsOnce(t *testing.T) {
 	resetWindowsHeldSwapsForTest(t)
 	advance := fakeWindowsHeldSwapClock(t)
-	windowsImageBackups.Lock()
-	previous := windowsImageBackups.pending
-	windowsImageBackups.pending = map[string]windowsImageBackup{}
-	windowsImageBackups.Unlock()
-	t.Cleanup(func() {
-		windowsImageBackups.Lock()
-		windowsImageBackups.pending = previous
-		windowsImageBackups.Unlock()
-	})
 	for i := 0; i < windowsHeldSwapBackupCap; i++ {
 		deferWindowsImageBackupRemoval(filepath.Join(`C:\bin`, "defenseclaw-hook.exe.backup."+strings.Repeat("a", 31)+string(rune('a'+i))))
 	}
