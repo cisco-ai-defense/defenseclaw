@@ -11933,26 +11933,32 @@ _RECORDED_REASON_FIX_LIMIT = 8192
 
 
 def _bounded_recorded_reason(reason: object) -> str:
-    """Whitespace-collapse the gateway's recorded reason and bound its cause, never its repair.
+    """Bound the gateway's recorded reason: its cause, never its repair, and never the repair's bytes.
 
     The gateway ends a custody refusal with ``; fix: <command>`` (or, when only
-    a person can repair it, ``; by hand: <steps>``). Bounding the whole text
-    would cut that off, so only the cause is bounded and the tail is kept
-    whole. A tail past the (large) limit is not
-    shown cut: the row says it was left out and where the whole text is.
+    a person can repair it, ``; by hand: <steps>``; or, when the repair did not
+    fit the health field, ``; repair omitted: ...``). The cause is prose: its
+    whitespace is collapsed and it is bounded. The tail holds paths and
+    accounts inside quotes, where a run of spaces is part of the argument, so it
+    is shown exactly as recorded. A tail past the (large) limit is not shown
+    cut: the row says it was left out and where the whole text is.
     """
-    text = " ".join(str(reason).split())
-    head, marker, fix = text.rpartition("; fix: ")
-    if not marker:
-        # A refusal only a person can repair ends with "; by hand: ..." and has no command.
-        head, marker, fix = text.rpartition("; by hand: ")
-    if not marker:
+    text = str(reason)
+    start = -1
+    for marker in ("; fix: ", "; by hand: ", "; repair omitted: "):
+        start = text.rfind(marker)
+        if start >= 0:
+            break
+    if start < 0:
+        text = " ".join(text.split())
         return text if len(text) <= _RECORDED_REASON_CAUSE_LIMIT else text[:_RECORDED_REASON_CAUSE_LIMIT] + "…"
+    head = " ".join(text[:start].split())
+    tail = text[start:]
     if len(head) > _RECORDED_REASON_CAUSE_LIMIT:
         head = head[:_RECORDED_REASON_CAUSE_LIMIT] + "…"
-    if len(fix) > _RECORDED_REASON_FIX_LIMIT:
-        return f"{head}; the repair is {len(fix)} characters, too long for this row: gateway.log has it whole"
-    return head + marker + fix
+    if len(tail) > _RECORDED_REASON_FIX_LIMIT:
+        return f"{head}; the repair is {len(tail)} characters, too long for this row: gateway.log has it whole"
+    return head + tail
 
 
 def _check_connector_skipped_at_start(connector: str, live_health: dict | None, r: _DoctorResult) -> None:

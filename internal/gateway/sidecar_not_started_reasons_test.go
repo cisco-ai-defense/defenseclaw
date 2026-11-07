@@ -26,6 +26,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -122,5 +123,65 @@ func TestNoteNotStartedBoundsTheReason(t *testing.T) {
 	}
 	if !strings.HasPrefix(reason, "é") || strings.ContainsRune(reason, '�') {
 		t.Fatal("the truncated reason is not valid UTF-8 text")
+	}
+}
+
+// carrierReason is a Windows custody refusal the way the connector renders it:
+// the cause, every carrier outermost first, and one icacls step per carrier.
+func carrierReason(count, folderLen int) (reason, fix string) {
+	var carriers, steps []string
+	for i := 1; i <= count; i++ {
+		carrier := `C:\Users\lane` + strings.Repeat(`\`+strings.Repeat("x", folderLen/count), i)
+		carriers = append(carriers, carrier)
+		steps = append(steps, "icacls '"+carrier+"' /remove:g 'H\\other'")
+	}
+	fix = strings.Join(steps, "; ")
+	cause := "safefile: private path DACL is unsafe to repair: " + carriers[count-1] + " (H\\other has write access there)"
+	return cause + "; every folder or file to fix, outermost first: " + strings.Join(carriers, ", ") + "; fix: " + fix, fix
+}
+
+func TestNoteNotStartedKeepsTheWholeRepairOfALongReason(t *testing.T) {
+	for _, count := range []int{2, 3, 4, 6} {
+		reason, fix := carrierReason(count, 180)
+		var transaction multiConnectorSetupTransaction
+		transaction.noteNotStarted("opencode", errors.New(reason))
+		got := transaction.notStartedReasonsFor([]string{"opencode"})["opencode"]
+		if !strings.HasSuffix(got, "; fix: "+fix) {
+			t.Fatalf("%d carriers: the recorded reason does not end with the whole repair: %q", count, got)
+		}
+		if !utf8.ValidString(got) {
+			t.Fatalf("%d carriers: the recorded reason is not valid UTF-8", count)
+		}
+	}
+}
+
+func TestNoteNotStartedKeepsAManualRepairWhole(t *testing.T) {
+	steps := "replace the link " + strings.Repeat("/Users/lane/very/long/path/", 20) + "with a real folder"
+	reason := "validate plugin directory custody: " + strings.Repeat("x", 1100) + "; by hand: " + steps
+	var transaction multiConnectorSetupTransaction
+	transaction.noteNotStarted("opencode", errors.New(reason))
+	got := transaction.notStartedReasonsFor([]string{"opencode"})["opencode"]
+	if !strings.HasSuffix(got, "; by hand: "+steps) || len(got) >= len(reason) {
+		t.Fatalf("the manual repair is not whole after the cause was bounded: %q", got)
+	}
+}
+
+func TestNoteNotStartedLeavesOutARepairTooLongForTheField(t *testing.T) {
+	reason := "validate plugin directory custody: refused; fix: icacls '" + strings.Repeat("p", notStartedRepairMaxBytes) + "'"
+	var transaction multiConnectorSetupTransaction
+	transaction.noteNotStarted("opencode", errors.New(reason))
+	got := transaction.notStartedReasonsFor([]string{"opencode"})["opencode"]
+	if strings.Contains(got, "icacls") || strings.Contains(got, "ppp") || !strings.Contains(got, "; repair omitted: ") || !strings.Contains(got, "gateway log has it whole") {
+		t.Fatalf("a repair past the limit is shown cut or not said to be left out: %q", got)
+	}
+}
+
+func TestNoteNotStartedLeavesAShortReasonAlone(t *testing.T) {
+	reason, _ := carrierReason(2, 60)
+	if len(reason) > notStartedReasonMaxBytes {
+		t.Fatalf("test reason is %d bytes, want a short one", len(reason))
+	}
+	if got := boundNotStartedReason(reason); got != reason {
+		t.Fatalf("a short reason changed: %q", got)
 	}
 }
