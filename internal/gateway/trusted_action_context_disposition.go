@@ -388,7 +388,7 @@ func trustedActionExactPathMatcher(
 	expected string,
 ) trustedActionSensitivePathMatcher {
 	return func(_ actionfacts.Facts, candidate actionfacts.PathFact) bool {
-		return strings.TrimRight(semanticPathValue(candidate), "/") == expected
+		return systemEtcPath(strings.TrimRight(semanticPathValue(candidate), "/")) == expected
 	}
 }
 
