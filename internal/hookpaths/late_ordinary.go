@@ -315,7 +315,7 @@ func (s *lateScan) lookup(path string) lateEntry {
 		}
 	}
 	hardLinked := info.Mode().IsRegular() && linkCount(found.real, info) > 1
-	found.ok = !(linked || hardLinked) || !s.reachesProtected(found.real, info)
+	found.ok = (!linked && !hardLinked) || !s.reachesProtected(found.real, info)
 	return found
 }
 
