@@ -1944,20 +1944,38 @@ func sameAliasValue(a, b json.RawMessage) bool {
 	return bytes.Equal(compactA.Bytes(), compactB.Bytes())
 }
 
-// PatchEvidenceChanged reports that a patch whose targets the hook attested
+// PatchTargetsChanged reports that a patch whose targets the hook attested
 // complete (PatchCompleteKey in evidence, the value the hook sent the gateway)
-// reads differently now. Behind ProtectHome the gateway cannot read a patch
-// target again, so the hook is the only party that can: it reads the same
-// call a second time once the gateway has answered, before the answer reaches
-// the agent. A target swapped for a link after the first reading changes the
-// map, and the call is refused whatever the gateway said. Evidence that does
-// not attest a complete patch is not rechecked here.
-func PatchEvidenceChanged(connector, surface, event string, payload []byte, evidence string) bool {
+// no longer reads as attested. Behind ProtectHome the gateway cannot read a
+// patch target again, so the hook is the only party that can, once the
+// gateway has answered and before the answer reaches the agent. Each target
+// the evidence lists is resolved again the way the first reading did, and the
+// patch changed when one resolves to another file than it did, or to a
+// protected key file (a link or a hard link made since). Only where a target
+// leads is compared, never the identity of the file at the path: an editor
+// that saves the same ordinary path again has not changed the patch. Evidence
+// that does not attest a complete patch is not rechecked here.
+func PatchTargetsChanged(evidence string) bool {
 	targets, ok := Decode(evidence)
 	if !ok || targets[PatchCompleteKey] != "1" {
 		return false
 	}
-	return ResolveConnector(connector, surface, event, payload) != evidence
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return true
+	}
+	protected := newProtectedFiles(home)
+	links := shellLinks{known: true}
+	for path, attested := range targets {
+		if !filepath.IsAbs(path) {
+			continue
+		}
+		resolved, ok := links.resolve(path, protected)
+		if !ok || resolved != attested || protected.has(resolved) {
+			return true
+		}
+	}
+	return false
 }
 
 // incompleteEvidence is the header for a tool call whose write operands
