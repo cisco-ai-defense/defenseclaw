@@ -148,13 +148,21 @@ func removeWindowsReplacementCopies(dir string) []string {
 
 // keepWindowsStandaloneHookBinary keeps the guardian copy of the recorded
 // hook binary and restores the binary from it when it is damaged. With
-// onlyWhenDamaged it does not refresh the copy.
+// onlyWhenDamaged it does not refresh the copy. The audit rows of the
+// guardian's handle closes go to the gateway after windowsHookBinaryMu is
+// released, so a gateway that is down or slow never holds up the guardian.
 func keepWindowsStandaloneHookBinary(stderr io.Writer, onlyWhenDamaged bool) {
+	keepWindowsStandaloneHookBinaryLocked(stderr, onlyWhenDamaged)
+	flushWindowsHolderAudit(stderr)
+}
+
+func keepWindowsStandaloneHookBinaryLocked(stderr io.Writer, onlyWhenDamaged bool) {
 	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil || !strings.HasPrefix(strings.ToLower(filepath.Clean(enterpriseHookManifest)), strings.ToLower(roots.StateRoot)+`\`) {
 		return
 	}
 	target := filepath.Join(roots.InstallRoot, "bin", "defenseclaw-hook.exe")
+	setWindowsHolderAuditPath(filepath.Join(roots.StateRoot, "hook-guardian", "holder-audit-queue.json"))
 	windowsHookBinaryMu.Lock()
 	defer windowsHookBinaryMu.Unlock()
 	// A backup an earlier swap kept goes at a later check, once no program
@@ -172,7 +180,7 @@ func keepWindowsStandaloneHookBinary(stderr io.Writer, onlyWhenDamaged bool) {
 	reportWindowsImageSwapLinkRefusal(stderr, target)
 	reportWindowsImageBackupRestrictFailure(stderr)
 	reportWindowsHeldSwapNotice(stderr, target)
-	reportWindowsHookHolders(stderr)
+	writeWindowsHolderLog(stderr)
 	if err != nil {
 		if message := err.Error(); message != windowsHookBinaryLastErr {
 			windowsHookBinaryLastErr = message
@@ -322,9 +330,9 @@ func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (st
 			guardianTargetHookSHA256Hex, windowsFileSHA256Hex, windowsHookBinaryStructuralDamage)
 		held := ""
 		if err != nil {
-			// GAP-0755: a handle that shares nothing (any user may open the
-			// hook that way) refuses the guardian's own reads as well as every
-			// start, so the digest cannot be read and this used to end the
+			// GAP-0755: a handle that shares nothing refuses the guardian's own
+			// reads as well as every start,
+			// so the digest cannot be read and this used to end the
 			// pass with a read error before the held check ran. When a
 			// start-style open is refused too, the hook is held, whatever
 			// the digest read said.
@@ -348,8 +356,8 @@ func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (st
 		// or a reader that shares no reading), so the verdict is "held
 		// open".
 		if held != "" && windowsHolderCloserEnabled() && windowsHookBinaryDeleteBlocked(target) {
-			// GAP-0755: a handle that shares no deletion (any user may open
-			// the hook that way) cannot be swapped around: the rename that
+			// GAP-0755: a handle that shares no deletion cannot be swapped
+			// around: the rename that
 			// puts the new file at the name fails for as long as the handle
 			// lives. On the standalone profile the guardian closes that
 			// handle in its owner instead, inside the bounds listed at
@@ -378,7 +386,7 @@ func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (st
 		}
 		if held != "" {
 			// The same verdict comes from a handle that shares no reading
-			// (any user may open the hook that way), and the swap cannot
+			// (a program can open the hook that way), and the swap cannot
 			// end that hold. So the swaps of one path are bounded: a
 			// backoff between them and a cap on the backups still pending
 			// (S5).

@@ -180,11 +180,19 @@ func (windowsNativeHolderSystem) Snapshot(path string) (windowsHolderSnapshot, e
 
 // OpenProcess opens a process to duplicate handles out of it and reads what
 // the close rules need to know about it. A process the guardian cannot open
-// for DUP_HANDLE (a protected one) is an error.
+// for DUP_HANDLE (a protected one) is an error, and so is one that ended
+// (ERROR_INVALID_PARAMETER, which the scan reads as "gone", not "protected").
 func (windowsNativeHolderSystem) OpenProcess(pid uint32) (windowsHolderProc, error) {
 	process, err := windows.OpenProcess(windows.PROCESS_DUP_HANDLE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	if err != nil {
+		// ERROR_INVALID_PARAMETER: no such process (it ended after the
+		// snapshot). ERROR_ACCESS_DENIED: a process the guardian may not open.
 		return nil, err
+	}
+	if event, _ := windows.WaitForSingleObject(process, 0); event == windows.WAIT_OBJECT_0 {
+		// The process ended and something still holds its object: gone.
+		_ = windows.CloseHandle(process)
+		return nil, fmt.Errorf("the process had ended: %w", windows.ERROR_INVALID_PARAMETER)
 	}
 	proc := &windowsNativeHolderProc{process: process, facts: windowsHolderProcess{PID: pid}}
 	proc.readFacts()
@@ -285,7 +293,12 @@ var errWindowsHolderChanged = errors.New("the handle no longer names the hook")
 // DUPLICATE_CLOSE_SOURCE cannot be conditional, so the window between the
 // fresh check and the close is two calls wide; the check after it tells a
 // close that hit something else.
-func (p *windowsNativeHolderProc) CloseIf(handle uintptr, want windowsHookHolderIdentity) error {
+//
+// The caller runs all of it on a worker with a timeout (closeWindowsHolderHandle):
+// the owner can close the handle value and get it back as a synchronous pipe
+// with a read pending, and GetFileType on a duplicate of that blocks. proceed
+// is false once the caller gave up; the close is then not made.
+func (p *windowsNativeHolderProc) CloseIf(handle uintptr, want windowsHookHolderIdentity, proceed func() bool) error {
 	fresh, err := p.duplicate(handle, 0)
 	if err != nil {
 		return fmt.Errorf("%w (%v)", errWindowsHolderChanged, err)
@@ -304,6 +317,9 @@ func (p *windowsNativeHolderProc) CloseIf(handle uintptr, want windowsHookHolder
 	_ = windows.CloseHandle(fresh)
 	if !valid {
 		return errWindowsHolderChanged
+	}
+	if !proceed() {
+		return errWindowsHolderTimedOut
 	}
 	closing, err := p.duplicate(handle, windows.DUPLICATE_CLOSE_SOURCE)
 	if err != nil {

@@ -7,6 +7,7 @@ package cli
 
 import (
 	"bufio"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"io"
@@ -368,8 +369,9 @@ func startWindowsExclusiveHolder(t *testing.T, shell, path string) (release func
 // interactiveFactsSystem is the real handle table and the real processes, with
 // every process taken for a signed-in user's: the test runs in session 0 or as
 // SYSTEM, which the bound (c) rules refuse (they are tested with injected
-// facts, and on the host in a real interactive session). What it proves is
-// the Windows calls: listing, duplicating, identifying, closing.
+// facts, and on the host in a real interactive session: the real token and
+// session reads are covered only by the live cells). What it proves is the
+// Windows calls: listing, duplicating, identifying, closing.
 type interactiveFactsSystem struct{ windowsHolderSystem }
 
 func (s interactiveFactsSystem) OpenProcess(pid uint32) (windowsHolderProc, error) {
@@ -419,10 +421,10 @@ func endsAnExclusiveHold(t *testing.T, shell string) {
 	windowsHolderStandalone = func() bool { return true }
 	windowsHolderSys = interactiveFactsSystem{windowsNativeHolderSystem{}}
 	windowsHolderAuditPost = func(row windowsHolderAuditRow) error { rows = append(rows, row); return nil }
-	windowsHolderGate, windowsHolderLog, windowsHolderAuditQueue = windowsHolderState{}, nil, nil
+	resetWindowsHolderOutputForTest()
 	t.Cleanup(func() {
 		windowsHolderStandalone, windowsHolderSys, windowsHolderAuditPost = savedStandalone, savedSys, savedPost
-		windowsHolderGate, windowsHolderLog, windowsHolderAuditQueue = windowsHolderState{}, nil, nil
+		resetWindowsHolderOutputForTest()
 	})
 	root := t.TempDir()
 	target := filepath.Join(root, "bin", "defenseclaw-hook.exe")
@@ -589,6 +591,201 @@ func startWindowsReacquiringHolder(t *testing.T, shell, path string) (stop func(
 		time.Sleep(1500 * time.Millisecond) // the holder polls every 100 ms
 		return int(opens.Load())
 	}
+}
+
+// startWindowsRotatingHolder opens path with no sharing and, every 300 ms,
+// duplicates that handle to a new value and closes the old one, so the file
+// is never free and no handle value lasts two checks. When its handle is
+// closed by someone else it opens the file again. state is the latest handle
+// value, how many times it rotated and how many times it lost the handle.
+func startWindowsRotatingHolder(t *testing.T, shell, path string) (stop func(), state func() (handle int64, rotations, lost int)) {
+	t.Helper()
+	if _, err := os.Stat(shell); err != nil {
+		t.Skipf("PowerShell unavailable: %v", err)
+	}
+	script := strings.Join([]string{
+		`Add-Type -TypeDefinition @'`,
+		`using System; using System.Runtime.InteropServices;`,
+		`public static class R {`,
+		`  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern IntPtr CreateFileW(string p, uint a, uint s, IntPtr c, uint d, uint f, IntPtr t);`,
+		`  [DllImport("kernel32.dll", SetLastError=true)] public static extern bool DuplicateHandle(IntPtr sp, IntPtr sh, IntPtr tp, out IntPtr th, uint acc, bool inh, uint opt);`,
+		`  [DllImport("kernel32.dll")] public static extern IntPtr GetCurrentProcess();`,
+		`  [DllImport("kernel32.dll", SetLastError=true)] public static extern bool CloseHandle(IntPtr h);`,
+		`}`,
+		`'@`,
+		fmt.Sprintf(`$p = '%s'`, strings.ReplaceAll(path, "'", "''")),
+		`$me = [R]::GetCurrentProcess(); $rot = 0; $lost = 0; $keep = @()`,
+		`$h = [R]::CreateFileW($p, 2147483648, 0, [IntPtr]::Zero, 3, 128, [IntPtr]::Zero)`,
+		`[Console]::Out.WriteLine('ready'); [Console]::Out.Flush()`,
+		`for ($i = 0; $i -lt 600; $i++) {`,
+		`  Start-Sleep -Milliseconds 300`,
+		`  $keep += New-Object System.Threading.ManualResetEvent($false)`, // takes a handle slot, so that values do not just alternate
+		`  $n = [IntPtr]::Zero`,
+		// -1 is "could not open" (the hook is in use for a moment): try again; it is not a handle to rotate.
+		`  if ($h.ToInt64() -eq -1) { $h = [R]::CreateFileW($p, 2147483648, 0, [IntPtr]::Zero, 3, 128, [IntPtr]::Zero) }`,
+		`  elseif ([R]::DuplicateHandle($me, $h, $me, [ref]$n, 0, $false, 2)) { [void][R]::CloseHandle($h); $h = $n; $rot++ }`,
+		`  else { $lost++; $h = [R]::CreateFileW($p, 2147483648, 0, [IntPtr]::Zero, 3, 128, [IntPtr]::Zero) }`,
+		`  [Console]::Out.WriteLine('state ' + $h.ToInt64() + ' ' + $rot + ' ' + $lost); [Console]::Out.Flush()`,
+		`}`,
+	}, "\n")
+	encoded := make([]byte, 0, 2*len(script))
+	for _, unit := range windows.StringToUTF16(script) {
+		encoded = append(encoded, byte(unit), byte(unit>>8))
+	}
+	cmd := exec.Command(shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", base64.StdEncoding.EncodeToString(encoded))
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var all []string
+	t.Cleanup(func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if t.Failed() {
+			t.Logf("holder said: %q", all)
+		}
+	})
+	var last struct {
+		handle        int64
+		rotations, lo int
+	}
+	ready := make(chan struct{})
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "ready" {
+				close(ready)
+				continue
+			}
+			var h int64
+			var r, l int
+			mu.Lock()
+			all = append(all, line)
+			mu.Unlock()
+			if _, err := fmt.Sscanf(line, "state %d %d %d", &h, &r, &l); err == nil {
+				mu.Lock()
+				last.handle, last.rotations, last.lo = h, r, l
+				mu.Unlock()
+			}
+		}
+	}()
+	select {
+	case <-ready:
+	case <-time.After(60 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("the holder did not open the file")
+	}
+	stopped := false
+	stop = func() {
+		if !stopped {
+			stopped = true
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	}
+	t.Cleanup(stop)
+	return stop, func() (int64, int, int) {
+		mu.Lock()
+		defer mu.Unlock()
+		return last.handle, last.rotations, last.lo
+	}
+}
+
+// GAP-0755 round 5 (S1): a holder that hands its file to a new handle value
+// every 300 ms, so that no value lasts two checks and the hook is never free,
+// is closed at the second check, and then waits out the backoff. The session
+// and the account are injected (interactiveFactsSystem); the calls are real.
+func TestKeepWindowsManagedFileCopyEndsAHoldThatRotatesItsHandle(t *testing.T) {
+	resetWindowsHeldSwapsForTest(t)
+	advance := fakeWindowsHeldSwapClock(t)
+	var rows []windowsHolderAuditRow
+	savedStandalone, savedSys, savedPost := windowsHolderStandalone, windowsHolderSys, windowsHolderAuditPost
+	windowsHolderStandalone = func() bool { return true }
+	windowsHolderSys = interactiveFactsSystem{windowsNativeHolderSystem{}}
+	windowsHolderAuditPost = func(row windowsHolderAuditRow) error { rows = append(rows, row); return nil }
+	resetWindowsHolderOutputForTest()
+	t.Cleanup(func() {
+		windowsHolderStandalone, windowsHolderSys, windowsHolderAuditPost = savedStandalone, savedSys, savedPost
+		resetWindowsHolderOutputForTest()
+	})
+	root := t.TempDir()
+	target := filepath.Join(root, "bin", "defenseclaw-hook.exe")
+	copyPath := filepath.Join(root, "hook-guardian", "payload", "defenseclaw-hook.exe")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeWindowsSystemProgram(t, "HOSTNAME.EXE", target, nil)
+	want, err := windowsFileSHA256Hex(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, true); err != nil || damage != "" {
+		t.Fatalf("keep copy: restored %q, %v", damage, err)
+	}
+	var log strings.Builder
+	check := func() {
+		t.Helper()
+		if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false); err != nil || damage != "" {
+			t.Fatalf("check: restored %q, %v", damage, err)
+		}
+		reportWindowsHookHolders(&log)
+	}
+	started := func() bool {
+		out, err := exec.Command(target).Output()
+		return err == nil && len(strings.TrimSpace(string(out))) > 0
+	}
+	_, state := startWindowsRotatingHolder(t, powershellForTest(false), target)
+	if started() {
+		t.Fatal("a start succeeded while another process held the hook with no sharing")
+	}
+	waitFor(t, 30*time.Second, func() bool { _, rot, _ := state(); return rot >= 1 })
+	check() // check 1: the hold is seen
+	first, rot1, _ := state()
+	if started() || len(rows) != 0 {
+		t.Fatalf("the first check acted (rows %d)", len(rows))
+	}
+	time.Sleep(900 * time.Millisecond) // the handle value changes before the next check
+	_, _, lostBefore := state()
+	advance(windowsHookBinaryCheckInterval)
+	check() // check 2: another handle value, the same hold
+	second, rot2, _ := state()
+	if rot2 < rot1+2 {
+		t.Fatalf("the holder rotated its handle %d time(s) between the checks, want at least 2", rot2-rot1)
+	}
+	t.Logf("handle value %d at check 1, %d at check 2 (%d rotations between)", first, second, rot2-rot1)
+	if !started() || len(rows) != 1 || !rows[0].Closed {
+		t.Fatalf("second check: start works %v, rows %+v", started(), rows)
+	}
+	waitFor(t, 10*time.Second, func() bool { _, _, l := state(); return l > lostBefore })
+	time.Sleep(900 * time.Millisecond) // it has opened the file again by now
+	// The next check is inside the backoff (10 s).
+	advance(windowsHookBinaryCheckInterval)
+	check()
+	_, _, lost := state()
+	if len(rows) != 1 || strings.Count(log.String(), "tamper: closed the handle") != 1 {
+		t.Fatalf("closed again inside the backoff: rows %d, log %q", len(rows), log.String())
+	}
+	// 10 s after the first close the hold is seen again (the two checks start
+	// over after a close), and 15 s after it is closed again.
+	time.Sleep(900 * time.Millisecond)
+	advance(windowsHookBinaryCheckInterval)
+	check()
+	if len(rows) != 1 || strings.Count(log.String(), "tamper: closed the handle") != 1 {
+		t.Fatalf("closed at the first sight after the backoff: rows %d, log %q", len(rows), log.String())
+	}
+	time.Sleep(900 * time.Millisecond)
+	advance(windowsHookBinaryCheckInterval)
+	check()
+	waitFor(t, 10*time.Second, func() bool { _, _, l := state(); return l > lost })
+	if strings.Count(log.String(), "tamper: closed the handle") != 2 || len(rows) != 1 {
+		t.Fatalf("second close after the backoff: rows %d, log %q", len(rows), log.String())
+	}
+	t.Logf("log: %s", log.String())
 }
 
 // GAP-0656 review S1 (GAP-0369): on a volume or behind a filter driver that
