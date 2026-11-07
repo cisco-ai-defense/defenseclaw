@@ -19181,8 +19181,32 @@ function Sync-DefenseClawCodexManagedHooksStateCopy {
             reason = 'a copy of the Codex managed runtime state is held open; the next Codex transaction removes it'
         }
     }
+    if (-not [IO.File]::Exists($committed)) {
+        # The restored deployment has no writer copy: no transaction of this
+        # release had run before the one being undone, so the fixed name the
+        # restore put back is the state. The writer lock keeps the counter
+        # that transaction left, and the counter alone names a hook copy that
+        # no longer exists: the recovery's own verification looked for it
+        # ("state is missing: ...state.2") and failed every run after, with
+        # the services stopped. A lock with no counter, or no lock, leaves the
+        # fixed name as the state, as in the release that was restored; the
+        # next Codex transaction creates the lock again (g582 round 11c, the
+        # rollback after the Codex transaction).
+        $lock = [IO.Path]::Combine($directory, '.defenseclaw-managed-hooks.writer.lock')
+        if ([IO.File]::Exists($lock)) {
+            try {
+                [IO.File]::Delete($lock)
+            }
+            catch {
+                Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                    path   = $lock
+                    reason = "the Codex writer lock of the rolled-back transaction could not be removed: $($_.Exception.Message)"
+                }
+            }
+        }
+        return
+    }
     if ([string]::Equals($current, $statePath, [StringComparison]::OrdinalIgnoreCase) -or
-        -not [IO.File]::Exists($committed) -or
         $left -contains $current) {
         return
     }
