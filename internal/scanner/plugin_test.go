@@ -32,6 +32,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -223,6 +224,10 @@ var errPluginCLIAbsent = errors.New("plugin CLI is not installed")
 // "not installed". It searches the way LookPath does: an empty PATH element
 // is the current directory. The one entry that still counts as absent is a
 // symlink whose target is gone, which is what a removed install leaves behind.
+// An entry that cannot even be looked at (a PATH directory without search
+// permission) is not shown absent: the file may be in it, so it counts as
+// present and broken. Only "no such entry" and "a PATH element that is not a
+// directory" show a name is not there.
 // Windows resolves a bare name through PATHEXT, where a file without an
 // executable extension is not a candidate.
 func pathHoldsANonExecutable(name string) bool {
@@ -235,7 +240,10 @@ func pathHoldsANonExecutable(name string) bool {
 		}
 		path := filepath.Join(dir, name)
 		if _, err := os.Lstat(path); err != nil {
-			continue
+			if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+				continue
+			}
+			return true
 		}
 		info, err := os.Stat(path)
 		if err == nil && !info.IsDir() {
@@ -466,6 +474,75 @@ func TestGatePluginCLIChoosesTheBareNameThroughPATH(t *testing.T) {
 		skip, err := gatePluginCLI(name, false, time.Minute)
 		if skip != tc.wantSkip || (err != nil) != tc.wantErr {
 			t.Errorf("%s: skip=%v err=%v, want skip=%v err=%v", tc.name, skip, err, tc.wantSkip, tc.wantErr)
+		}
+	}
+}
+
+// TestGatePluginCLIFailsWhenAPathDirectoryCannotBeSearched covers a PATH
+// directory the user may not search: the CLI can be inside it, and LookPath
+// folds that access error into "not found". The gate cannot show the CLI is
+// absent, so it fails; a lookup that finds the CLI elsewhere still runs, and
+// entries that show absence (no such directory, an element that is a file)
+// still skip.
+func TestGatePluginCLIFailsWhenAPathDirectoryCannotBeSearched(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell shims are a Unix install shape")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root searches every directory")
+	}
+	const name = "defenseclaw-path-locked"
+	locked := func(withCLI bool) string {
+		dir := filepath.Join(t.TempDir(), "locked")
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if withCLI {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Chmod(dir, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+		return dir
+	}
+	working := t.TempDir()
+	if err := os.WriteFile(filepath.Join(working, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	notADirectory := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(notADirectory, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sep := string(os.PathListSeparator)
+	for _, tc := range []struct {
+		name     string
+		path     string
+		wantSkip bool
+		wantErr  bool
+	}{
+		{"a directory without search permission that holds the CLI fails", locked(true), false, true},
+		{"a directory without search permission that may hold the CLI fails", locked(false), false, true},
+		{"the CLI later on PATH runs past a directory without search permission", locked(true) + sep + working, false, false},
+		{"a PATH element that does not exist skips", filepath.Join(t.TempDir(), "gone"), true, true},
+		{"a PATH element that is a file skips", notADirectory, true, true},
+	} {
+		t.Setenv("PATH", tc.path)
+		skip, err := gatePluginCLI(name, false, time.Minute)
+		if skip != tc.wantSkip || (err != nil) != tc.wantErr {
+			t.Errorf("%s: skip=%v err=%v, want skip=%v err=%v", tc.name, skip, err, tc.wantSkip, tc.wantErr)
+		}
+	}
+	// The integration test itself, with a defenseclaw behind a directory it
+	// cannot search: it fails rather than skipping.
+	if binary, strict := resolvePluginCLI(); !strict {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestPluginScanner_Integration$", "-test.v")
+		cmd.Env = []string{"PATH=" + locked(true), "HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir()}
+		output, err := cmd.CombinedOutput()
+		if err == nil || strings.Contains(string(output), "--- SKIP") || !strings.Contains(string(output), "--- FAIL") {
+			t.Fatalf("a PATH directory without search permission must fail the integration test (%s), err=%v:\n%s", binary, err, output)
 		}
 	}
 }
