@@ -559,6 +559,7 @@ func TestWindowsHolderARefusedHolderThatCouldRefuseTheStartKeepsTheGuardianOffUn
 	user := rig.sys.sharing(0x44)
 	userProc := rig.sys.add(4100, fakeUserSID, 2, user)
 	service := rig.sys.culprit(0x90)
+	service.access = fakeWriteAccess
 	rig.sys.add(700, "S-1-5-18", 0, service)
 	if _, err := rig.check(); err != nil {
 		t.Fatal(err)
@@ -659,7 +660,7 @@ func TestWindowsHolderARefusedHolderThatCanRefuseTheStartStillBlocksTheClose(t *
 	}{
 		{"it can write", 100, fakeWriteAccess, 200},
 		{"the only object", 100, 0x120089, 100},
-		{"an object the system did not show", 0, 0x120089, 200},
+		{"objects the system did not show, and it can write", 0, fakeWriteAccess, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -680,6 +681,23 @@ func TestWindowsHolderARefusedHolderThatCanRefuseTheStartStillBlocksTheClose(t *
 				t.Fatalf("rows %+v", rig.posted)
 			}
 		})
+	}
+}
+
+// The guardian service gets no file object addresses on Windows Server 2025:
+// every handle then counts as an object of its own, so a read-only service
+// handle beside a user's blocker is exonerated and the blocker is closed.
+func TestWindowsHolderHandlesWithoutAnObjectAddressAreObjectsOfTheirOwn(t *testing.T) {
+	rig := newHoldRig(t)
+	service := rig.sys.culprit(0x90)
+	service.allowsStart = true // object 0, read only
+	rig.sys.add(700, "S-1-5-18", 0, service)
+	user := rig.sys.culprit(0x44)
+	user.access = fakeWriteAccess // object 0
+	rig.sys.add(4100, fakeUserSID, 2, user)
+	_, _ = rig.check()
+	if closed, err := rig.tick(); closed != 1 || err != nil || !user.closed || service.closed {
+		t.Fatalf("closed %d, %v (user %v)", closed, err, user.closed)
 	}
 }
 
@@ -730,6 +748,7 @@ func TestWindowsHolderAServiceHandleSeenOnceIsWaitedFor(t *testing.T) {
 	rig.sys.add(4100, fakeUserSID, 2, user)
 	_, _ = rig.check()
 	service := rig.sys.sharing(0x90)
+	service.access = fakeWriteAccess
 	rig.sys.add(700, "S-1-5-18", 0, service)
 	if closed, err := rig.tick(); closed != 0 || err != nil || user.closed || len(rig.posted) != 0 {
 		t.Fatalf("a service's first sight: closed %d, %v, rows %d", closed, err, len(rig.posted))
@@ -1937,6 +1956,7 @@ func TestWindowsHolderAServiceHoldOfARuntimeFileIsNamedAndNotClosed(t *testing.T
 	rig, dir := dataRig(t, "machine-policy.json")
 	policy := filepath.Join(dir, "machine-policy.json")
 	service := rig.sys.culprit(0x90)
+	service.access = fakeWriteAccess
 	rig.sys.add(700, "S-1-5-18", 0, service)
 	user := rig.sys.sharing(0x44)
 	rig.sys.add(4100, fakeUserSID, 2, user)

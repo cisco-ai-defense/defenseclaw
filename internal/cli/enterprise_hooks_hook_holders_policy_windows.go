@@ -861,12 +861,15 @@ const windowsHolderWriteAccess = windows.FILE_WRITE_DATA | windows.FILE_APPEND_D
 // object without a write or append handle shares reading, and cannot be the
 // cause. An object can refuse the start if it is the only object on the hook
 // or one of its handles can write or append. A handle whose object address the
-// system does not show may be anything: its object counts as one that can.
+// system does not show (the guardian service gets no addresses on Windows
+// Server 2025) counts as an object of its own: two handles on one file object
+// then look like two objects, and the guardian may close a user's handle that
+// frees nothing; that is bounded by the backoff and audited.
 func windowsHolderStartBlockers(holders []windowsHolderHandle) map[windowsHolderObjectKey]bool {
 	can := map[windowsHolderObjectKey]bool{}
 	for _, h := range holders {
 		key := h.objectKey()
-		can[key] = can[key] || h.Access&windowsHolderWriteAccess != 0 || h.Object == 0
+		can[key] = can[key] || h.Access&windowsHolderWriteAccess != 0
 	}
 	if len(can) == 1 {
 		for key := range can {
@@ -1307,10 +1310,7 @@ func (gate *windowsHolderState) pass(target string, probes windowsHolderProbes, 
 			eligible = append(eligible, holder)
 		case windowsHolderRefusal(holder.Process) != "" && blockers[holder.objectKey()]:
 			why := "it can write or append"
-			switch {
-			case holder.Object == 0:
-				why = "the system did not show its file object"
-			case holder.Access&windowsHolderWriteAccess == 0:
+			if holder.Access&windowsHolderWriteAccess == 0 {
 				why = "it is the only file object open on the hook"
 			}
 			blocking, blockingReasons = append(blocking, holder), append(blockingReasons, reason+" ("+why+")")
