@@ -16,22 +16,31 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 )
 
 func TestGAP0694ForegroundGatewayHelper(t *testing.T) {
 	if os.Getenv("DC_GAP0694_HELPER") == "1" {
+		if ready := os.Getenv("DC_GAP0694_READY"); ready != "" {
+			if err := os.WriteFile(ready, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
 		time.Sleep(30 * time.Second)
 	}
 }
 
 // startGAP0694Gateway starts a gateway stand-in from the copy named
-// defenseclaw-gateway.exe, with the launch environment env.
+// defenseclaw-gateway.exe, with the launch environment env, and returns once
+// the stand-in runs its own code: a status check reads a gateway that listens,
+// not a process the loader has not finished starting.
 func startGAP0694Gateway(t *testing.T, path string, env []string) int {
 	t.Helper()
+	ready := filepath.Join(t.TempDir(), "ready")
 	child := exec.Command(path, "-test.run=^TestGAP0694ForegroundGatewayHelper$")
-	child.Env = append(env, "DC_GAP0694_HELPER=1")
+	child.Env = append(env, "DC_GAP0694_HELPER=1", "DC_GAP0694_READY="+ready)
 	if err := child.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +48,26 @@ func startGAP0694Gateway(t *testing.T, path string, env []string) int {
 		_ = child.Process.Kill()
 		_ = child.Wait()
 	})
-	return child.Process.Pid
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			return child.Process.Pid
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the gateway stand-in did not start")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// foregroundProofFailure explains a foreground proof that did not resolve:
+// the read of the stand-in launch environment is the step that can fail
+// for a reason other than the home.
+func foregroundProofFailure(pid int) string {
+	if _, err := agentprocess.LaunchEnvironmentForPID(pid); err != nil {
+		return "launch environment read: " + err.Error()
+	}
+	return "launch environment read succeeded"
 }
 
 // gatewayCopyForGAP0694 is a copy of this test binary named
@@ -129,7 +157,7 @@ func TestGAP0694WindowsForegroundGatewayUsesOwnerImageAndHome(t *testing.T) {
 		return daemon.PortHolder{PID: pid, UID: -1}, nil
 	}
 	if !sameHomeGatewayProcess(pid, home) {
-		t.Fatal("foreground process proof did not resolve")
+		t.Fatalf("foreground process proof did not resolve (%s)", foregroundProofFailure(pid))
 	}
 	if problem := foreignGatewayListener(config.DefaultConfig()); problem != "" {
 		t.Fatalf("same-home foreground gateway reported foreign: %s", problem)
@@ -199,7 +227,7 @@ func TestGAP0694WindowsForegroundGatewayOnDefaultHome(t *testing.T) {
 	path := gatewayCopyForGAP0694(t)
 	pid := startGAP0694Gateway(t, path, append(withoutEnv(os.Environ(), "DEFENSECLAW_HOME", "USERPROFILE"), "USERPROFILE="+profile))
 	if !sameHomeGatewayProcessPlatform(pid, home, path) {
-		t.Fatal("a gateway on the default home was not recognised")
+		t.Fatalf("a gateway on the default home was not recognised (%s)", foregroundProofFailure(pid))
 	}
 	if sameHomeGatewayProcessPlatform(pid, t.TempDir(), path) {
 		t.Fatal("a gateway on the default home matched another home")

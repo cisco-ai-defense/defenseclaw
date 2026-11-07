@@ -1500,11 +1500,16 @@ func TestWindowsHolderAProcessHandleIsReleasedWhenAnAbandonedProbeReturns(t *tes
 	}
 	close(pipe.block)
 	waitFor(t, 2*time.Second, func() bool { return proc.released.Load() == 1 })
-	// A scan that found a handle releases it once, at the end of the pass.
+	// A scan that found a handle releases it once, at the end of the pass. The
+	// worker of a probe drops its own reference just after it answers, so the
+	// last release can land a moment after the pass returns: wait for it, then
+	// check that no further release follows.
 	rig2 := newHoldRig(t)
 	found := rig2.sys.add(4100, fakeUserSID, 2, rig2.sys.culprit(0x44))
 	_, _ = rig2.check()
 	_, _ = rig2.tick()
+	waitFor(t, 2*time.Second, func() bool { return found.released.Load() >= 2 })
+	time.Sleep(100 * time.Millisecond)
 	if found.released.Load() != 2 {
 		t.Fatalf("released %d times in two passes, want once per pass", found.released.Load())
 	}

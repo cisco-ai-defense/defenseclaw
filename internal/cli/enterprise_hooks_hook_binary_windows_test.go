@@ -312,6 +312,8 @@ func startWindowsExclusiveHolder(t *testing.T, shell, path string) (release func
 	}
 	script := fmt.Sprintf(`$f = [IO.File]::Open('%s', 'Open', 'Read', 'None'); [Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); [void][Console]::In.ReadLine(); [Console]::Out.WriteLine('alive')`, strings.ReplaceAll(path, "'", "''"))
 	cmd := exec.Command(shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
+	var holderErrors strings.Builder
+	cmd.Stderr = &holderErrors
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -339,7 +341,8 @@ func startWindowsExclusiveHolder(t *testing.T, shell, path string) (release func
 		}
 	case <-time.After(30 * time.Second):
 		_ = cmd.Process.Kill()
-		t.Fatal("the holder did not open the file")
+		_ = cmd.Wait()
+		t.Fatalf("the holder did not open the file (holder error output %q)", holderErrors.String())
 	}
 	done := false
 	release = func() string {

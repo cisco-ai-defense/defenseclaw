@@ -10,6 +10,12 @@ import (
 	"testing"
 )
 
+// outageUnquotedPath spells a file path for a word the shell reads unquoted.
+// A POSIX shell takes a backslash there as an escape, so a Windows path would
+// reach the command without its separators; with forward slashes the word is
+// the path on every OS. A quoted word keeps the path as the OS spells it.
+func outageUnquotedPath(path string) string { return filepath.ToSlash(path) }
+
 // A protected name with literal braces (a pair without a comma or a sequence
 // is not brace-expanded) reaches a function as it is typed: unquoted, with
 // the braces escaped, or next to a quoted known value. The ordinary twin
@@ -26,22 +32,22 @@ func TestOpenClawOutageLiteralBraceNameReachesAFunctionWhole(t *testing.T) {
 	}
 	escape := func(name string) string { return strings.NewReplacer("{", `\{`, "}", `\}`).Replace(name) }
 	base := filepath.Dir(filepath.Dir(root))
-	tail := strings.TrimPrefix(protected, base)
+	tail := outageUnquotedPath(strings.TrimPrefix(protected, base))
 	take := `f() { OUT="$1"; }; `
 	cases := []struct {
 		name, command, want string
 		environment         map[string]interface{}
 	}{
-		{"literal file", take + `f ` + protected + `; rm "$OUT"`, "protected", nil},
-		{"literal link", take + `f ` + braceLink + `; rm "$OUT"`, "protected", nil},
-		{"escaped braces in a file", take + `f ` + escape(protected) + `; rm "$OUT"`, "protected", nil},
-		{"escaped braces in a link", take + `f ` + escape(braceLink) + `; rm "$OUT"`, "protected", nil},
+		{"literal file", take + `f ` + outageUnquotedPath(protected) + `; rm "$OUT"`, "protected", nil},
+		{"literal link", take + `f ` + outageUnquotedPath(braceLink) + `; rm "$OUT"`, "protected", nil},
+		{"escaped braces in a file", take + `f ` + escape(outageUnquotedPath(protected)) + `; rm "$OUT"`, "protected", nil},
+		{"escaped braces in a link", take + `f ` + escape(outageUnquotedPath(braceLink)) + `; rm "$OUT"`, "protected", nil},
 		{"quoted known value then literal braces", take + `f "$BASE"` + tail + `; rm "$OUT"`, "protected", map[string]interface{}{"BASE": base}},
-		{"second parameter", `f() { OUT="$2"; }; f x ` + protected + `; rm "$OUT"`, "protected", nil},
+		{"second parameter", `f() { OUT="$2"; }; f x ` + outageUnquotedPath(protected) + `; rm "$OUT"`, "protected", nil},
 		{"quoted file", take + `f "` + protected + `"; rm "$OUT"`, "protected", nil},
 		{"direct literal file", `rm ` + protected, "protected", nil},
-		{"literal ordinary link", take + `f ` + braceOrdinary + `; rm "$OUT"`, "open", nil},
-		{"escaped ordinary link", take + `f ` + escape(braceOrdinary) + `; rm "$OUT"`, "open", nil},
+		{"literal ordinary link", take + `f ` + outageUnquotedPath(braceOrdinary) + `; rm "$OUT"`, "open", nil},
+		{"escaped ordinary link", take + `f ` + escape(outageUnquotedPath(braceOrdinary)) + `; rm "$OUT"`, "open", nil},
 		{"quoted known value then literal braces, ordinary", take + `f "$BASE"/notes{link}; rm "$OUT"`, "open", map[string]interface{}{"BASE": ordinary}},
 	}
 	for _, tc := range cases {
@@ -140,9 +146,9 @@ func TestOpenClawOutageUnclosedBraceNameIsLiteral(t *testing.T) {
 		environment         map[string]interface{}
 	}{
 		{"direct protected link", `rm "` + protectedLink + `"`, "protected", nil},
-		{"unquoted protected link", take + `f ` + protectedLink + `; rm "$OUT"`, "protected", nil},
+		{"unquoted protected link", take + `f ` + outageUnquotedPath(protectedLink) + `; rm "$OUT"`, "protected", nil},
 		{"quoted protected link", take + `f "` + protectedLink + `"; rm "$OUT"`, "protected", nil},
-		{"unquoted ordinary link replaces an inherited protected value", take + `f ` + ordinaryLink + `; rm "$OUT"`, "open", inherited},
+		{"unquoted ordinary link replaces an inherited protected value", take + `f ` + outageUnquotedPath(ordinaryLink) + `; rm "$OUT"`, "open", inherited},
 		{"quoted ordinary link replaces an inherited protected value", take + `f "` + ordinaryLink + `"; rm "$OUT"`, "open", inherited},
 		{"direct ordinary link", `rm "` + ordinaryLink + `"`, "open", nil},
 	}
