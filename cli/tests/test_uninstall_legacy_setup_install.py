@@ -479,7 +479,9 @@ def test_real_program_folder_owned_by_another_account_is_refused(real_local: Pat
     assert _windows_current_user_sid() != system
     found = legacy_setup_install.find("win32")
     assert found is not None
-    assert found.problem.startswith(f"its program folder belongs to another account ({system})")
+    # Windows names the account as well as the SID (NT AUTHORITY\SYSTEM, S-1-5-18).
+    assert found.problem.startswith("its program folder belongs to another account (")
+    assert f"{system})" in found.problem.split(";")[0]
     assert "delete the folder yourself" in found.problem
     done, problems = legacy_setup_install.remove(found, edit_user_path=lambda _path: True)
     assert done == [] and problems
