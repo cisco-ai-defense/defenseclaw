@@ -33,12 +33,18 @@ expression reaches. The guard reads every JavaScript and TypeScript file of the
 plugin and follows the routes *to* the built-in object, not spellings of one
 property:
 
-* the name ``RegExp`` may only be called (and never declared), tested with
-  ``instanceof`` or, in TypeScript, used as a type; quoted as an object key or
-  handed to a reflection call it is a route too;
+* the name ``RegExp`` may only be called (and never declared as a function,
+  class, variable or parameter), tested with ``instanceof`` or, in TypeScript,
+  used as a type; quoted as an object key or handed to a reflection call it is
+  a route too. A method of an object or class that happens to be called
+  ``RegExp`` binds nothing: it matters only through the routes above (the
+  global object, ``with``);
 * ``exec`` is only ever called: reading, assigning, destructuring or indexing
   it is not;
-* the global object is never indexed by a computed name, and a ``with``
+* the global object (``globalThis``, ``global``, ``window``) is only read
+  through a plain member or a plain string index, never passed, assigned,
+  returned or aliased, because a copy can be written to by a computed name;
+  ``eval(`` and ``Function(`` can reach it from a string, and a ``with``
   statement can rebind any name;
 * taking a prototype (``getPrototypeOf``, ``__proto__``) or reading a
   constructor in a plugin that names a prototype reaches the built-in only when
@@ -62,7 +68,9 @@ _REGEX_BODY = "\ue000"
 # A "/" after one of these characters starts a regular expression literal. "}",
 # ")" and "]" are left out: they can end an operand, and a literal wrongly read
 # as division only exposes its text to the guard (a false block), while the
-# reverse would hide code.
+# reverse would hide code. The exceptions are the ")" that closes the head of
+# an if, while, for or with statement (what follows is a statement, never a
+# division) and the "}" that ends a statement block.
 _REGEX_AFTER = frozenset("(,=:[!&|?{;+-*%<>~^")
 _REGEX_AFTER_WORD = frozenset({
     "return", "typeof", "await", "yield", "case", "void", "in", "of", "else", "do",
@@ -73,9 +81,10 @@ _EXPRESSION_KEYWORDS = frozenset({
 })
 # Strings that name a property are kept in the code view.
 _KEPT_STRINGS = frozenset({"exec", "constructor", "prototype", "__proto__", "RegExp", "getPrototypeOf"})
-_SPECIAL = re.compile(r"[\"'`/{}]")
+_SPECIAL = re.compile(r"[\"'`/{}()]")
 _WORD_AT_END = re.compile(r"[A-Za-z_$][\w$]*$")
 _FLAGS = re.compile(r"[A-Za-z]*")
+_CONTROL_HEAD = re.compile(r"(?<![\w$.])(?:if|while|for(?:\s+await)?|with)\s*$")
 
 
 def code_view(text: str) -> str:
@@ -91,14 +100,17 @@ def code_view(text: str) -> str:
     index = 0
     templates: list[int] = []
     braces: list[bool] = []
+    parens: list[bool] = []
     block_ended = False
+    control_ended = False
 
     def emit(piece: str) -> None:
-        nonlocal tail, block_ended
+        nonlocal tail, block_ended, control_ended
         out.append(piece)
         tail = (tail + piece)[-40:]
         if piece.strip():
             block_ended = False
+            control_ended = False
 
     def template_text(start: int) -> int:
         """Skip template text from ``start``; return where code resumes."""
@@ -146,6 +158,13 @@ def code_view(text: str) -> str:
                 literal = braces.pop() if braces else False
                 emit("}")
                 block_ended = not literal
+        elif char == "(":
+            parens.append(_CONTROL_HEAD.search(tail) is not None)
+            emit("(")
+        elif char == ")":
+            control = parens.pop() if parens else False
+            emit(")")
+            control_ended = control
         elif char == "`":
             emit("`")
             index = template_text(index)
@@ -164,7 +183,7 @@ def code_view(text: str) -> str:
             emit(" " + "\n" * text.count("\n", at, end))
             index = end
         else:
-            end = _regex_end(text, at) if block_ended or _regex_allowed(tail) else None
+            end = _regex_end(text, at) if block_ended or control_ended or _regex_allowed(tail) else None
             if end is None:
                 emit("/")
             else:
@@ -270,12 +289,22 @@ _CHANGES_THE_BUILTIN = re.compile(
     # reflection call (defineProperty(global, "RegExp", ...), __defineGetter__("RegExp", ...))
     rf"|(?:[{{,*]|\b(?:async|get|set|static))\s*{_QUOTE}RegExp{_QUOTE}\s*[:(]"
     rf"|\(\s*{_QUOTE}RegExp{_QUOTE}\s*,|,\s*{_QUOTE}RegExp{_QUOTE}\s*,"
-    rf"|\b(?:globalThis|global|window)\s*,\s*{_QUOTE}RegExp{_QUOTE}"
-    # the global object indexed by anything but a plain string
-    rf"|\b(?:globalThis|global|window)\s*(?:\?\.\s*)?\[(?!\s*{_QUOTE}\s*{_QUOTE}\s*\])"
     # a with statement can rebind any name
     r"|(?<![\w$.])with\s*\(",
 )
+_GLOBAL_NAMES = ("globalThis", "global", "window")
+# Uses of the global object that give nobody a copy of it.
+_GLOBAL_READ_AFTER = re.compile(
+    rf"\s*(?:\??\.\s*[A-Za-z_$#]|(?:\?\.\s*)?\[\s*{_QUOTE}\s*{_QUOTE}\s*\]|[!=]==?|=>?)"
+)
+_GLOBAL_NOT_A_VALUE_BEFORE = re.compile(
+    r"(?<![\w$.])(?:typeof|in|var|let|const|function|class|import|declare)\s*$|[!=]==?\s*$|!\s*$"
+)
+# "name = <names, operators and members>": the right side hands the global object to a name.
+_ALIAS_INITIALIZER = re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*=(?![=>])([\w$\s?:|&!=<>.\x27\"`]*)$")
+_DESTRUCTURED_FROM = re.compile(r"(?:const|let|var)\s*\{[^{}\[\]]*\}\s*=$")
+# Strings that run code can reach the global object by a name nobody wrote.
+_STRING_TO_CODE = re.compile(r"(?<![\w$.])(?:eval(?![\w$])|(?:new\s+)?Function\s*\()")
 # Ways to take the prototype of a value: harmless unless a regular expression
 # can be handed to them (see _regex_escapes).
 _PROTOTYPE_OF = re.compile(
@@ -316,12 +345,150 @@ def file_facts(path: str, view: str) -> FileFacts:
         _regexp_name_use(view, name.start(), name.end(), typescript)
         for name in _REGEXP_NAME.finditer(view)
     ]
-    changes = _CHANGES_THE_BUILTIN.search(view) is not None or None in uses
+    changes = (
+        _CHANGES_THE_BUILTIN.search(view) is not None
+        or _STRING_TO_CODE.search(view) is not None
+        or _global_object_escapes(view)
+        or None in uses
+    )
     reaches = _PROTOTYPE_OF.search(view) is not None or (
         _CONSTRUCTOR_READ.search(view) is not None and _PROTOTYPE_NAMED.search(view) is not None
     )
     typed = "type" in uses
     return FileFacts(changes, reaches, typed, _PROTOTYPE_NAMED.search(view) is not None, view)
+
+
+def _global_object_escapes(view: str) -> bool:
+    """The global object is used as a value the proof cannot follow.
+
+    A copy of it can be written to under a name computed at run time. A name
+    that is assigned the global object (``root = typeof window !== "" ? window :
+    global``) is followed the same way, so it may only be read through a member.
+    Reading a member or a plain string index, comparing it, ``typeof``, ``in``, naming a
+    variable, a key or a parameter ``global``, and destructuring it are not
+    uses of the value; neither is a use inside the scope of a variable of the
+    same name that holds something else.
+    """
+
+    names = set(_GLOBAL_NAMES)
+    for _ in range(8):
+        pattern = re.compile(r"(?<![\w$.])(?:" + "|".join(map(re.escape, sorted(names))) + r")(?![\w$])")
+        grown = False
+        for use in pattern.finditer(view):
+            if _global_use_is_harmless(view, use, pattern):
+                continue
+            alias = _alias_of(view, use)
+            if alias is None:
+                return True
+            if alias not in names:
+                names.add(alias)
+                grown = True
+        if not grown:
+            return False
+    return True
+
+
+def _global_use_is_harmless(view: str, use: re.Match[str], pattern: re.Pattern[str]) -> bool:
+    before = view[max(0, use.start() - 40):use.start()].rstrip()
+    after = view[use.end():use.end() + 80]
+    if _GLOBAL_READ_AFTER.match(after) or _GLOBAL_NOT_A_VALUE_BEFORE.search(before):
+        return True
+    if before.endswith(("{", ",")) and after.lstrip().startswith(":"):
+        return True
+    if _DESTRUCTURED_FROM.search(view[max(0, use.start() - 120):use.start()].rstrip()):
+        return True
+    if before.endswith(("(", ",")) and _parameter_list_end(view, use.start()) is not None:
+        return True
+    return _shadowed(view, use.group(), use.start(), pattern)
+
+
+def _alias_of(view: str, use: re.Match[str]) -> str | None:
+    """The name that ``use`` is assigned to, when the statement is ``name = <expression of names>``."""
+
+    head = view[max(0, use.start() - 200):use.start()]
+    head = head[max(head.rfind(";"), head.rfind("{"), head.rfind("}")) + 1:]
+    found = _ALIAS_INITIALIZER.search(head)
+    if found is None or "=" in re.sub(r"[!=]==?", "", found.group(2)):
+        return None
+    return found.group(1)
+
+
+def _parameter_list_end(view: str, position: int) -> int | None:
+    """Index of the ")" closing the parameter list around ``position`` (a body or an arrow follows), if it is one."""
+
+    depth = 0
+    for index in range(position - 1, max(-1, position - _WINDOW), -1):
+        char = view[index]
+        if char == ")":
+            depth += 1
+        elif char == "(":
+            if depth:
+                depth -= 1
+                continue
+            close = _closing_parenthesis(view, index)
+            if close is not None and view[close + 1:close + 61].lstrip().startswith(("{", "=>", ":")):
+                return close
+            return None
+    return None
+
+
+def _matching_brace(view: str, opening: int) -> int:
+    depth = 0
+    for index in range(opening, len(view)):
+        if view[index] == "{":
+            depth += 1
+        elif view[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    return len(view)
+
+
+def _enclosing_block_end(view: str, position: int) -> int:
+    depth = 0
+    for index in range(position - 1, -1, -1):
+        if view[index] == "}":
+            depth += 1
+        elif view[index] == "{":
+            if depth == 0:
+                return _matching_brace(view, index)
+            depth -= 1
+    return len(view)
+
+
+def _body_end(view: str, close: int) -> int:
+    """End of the function whose parameter list closes at ``close``."""
+
+    rest = view[close + 1:close + 61]
+    body = close + 1 + (len(rest) - len(rest.lstrip()))
+    if view.startswith("=>", body):
+        body += 2
+        while body < len(view) and view[body].isspace():
+            body += 1
+    elif view.startswith(":", body):
+        brace = view.find("{", body)
+        body = brace if 0 <= brace <= body + 80 else body
+    if view.startswith("{", body):
+        return _matching_brace(view, body)
+    stop = [at for at in (view.find(";", body), view.find("\n", body)) if at >= 0]
+    return min(stop) if stop else len(view)
+
+
+def _shadowed(view: str, name: str, position: int, pattern: re.Pattern[str]) -> bool:
+    """``name`` at ``position`` is a variable or parameter of that name, not the global object."""
+
+    word = re.escape(name)
+    for declared in re.finditer(rf"(?<![\w$.])(?:const|let|var)\s+{word}(?![\w$])", view[:position]):
+        initializer = re.split(r"[;\n]", view[declared.end():declared.end() + 200], maxsplit=1)[0]
+        if pattern.search(initializer):
+            continue
+        if position < _enclosing_block_end(view, declared.start()):
+            return True
+    for parameter in re.finditer(rf"[(,]\s*{word}(?![\w$])", view[:position]):
+        close = _parameter_list_end(view, parameter.end())
+        if close is not None and close < position < _body_end(view, close):
+            return True
+    return False
 
 
 def regexp_may_be_changed(facts: list[FileFacts]) -> bool:
@@ -396,16 +563,9 @@ def _regexp_name_use(view: str, start: int, end: int, typescript: bool) -> str |
     if view.startswith("(", after):
         if re.search(r"\b(?:function|class)\s*\*?$", before):
             return None
-        close = _closing_parenthesis(view, after)
-        if close is None:
-            return None
-        following = close + 1
-        while following < len(view) and view[following].isspace():
-            following += 1
-        # RegExp(...) { is a method declaration; RegExp(...): T { is a typed one.
-        if view.startswith("{", following) or (typescript and view.startswith(":", following)):
-            return None
-        return "value"
+        # RegExp(...) { is a method declaration. It binds nothing: only a route
+        # to the global object or a with statement could make it the callee.
+        return "value" if _closing_parenthesis(view, after) is not None else None
     if re.search(r"(?<![\w$.])instanceof$", before):
         return "value"
     if typescript and (
