@@ -174,6 +174,21 @@ func TestGAP0769ShellWriteLinkedToExactEtcRuleIsProtected(t *testing.T) {
 		{"macOS linked system profile", "profile-mac.txt", "/etc/profile", "echo export GUARD=1 >> %s", "persistence.shell_profile_write", true, false},
 		{"macOS linked hosts twin", "hosts-mac.txt", "/etc/hosts", "echo 127.0.0.1 guard >> %s", "", true, false},
 		{"ordinary twin", "", "", "echo notes > %s", "", false, false},
+		// A write that opens the link reaches the system file; a command that
+		// replaces the link entry leaves it alone (GAP-0769 review round 7).
+		{"copy through a link", "shadow-cp.txt", "/etc/shadow", "cp /etc/hosts %s", "PATH-ETC-SHADOW", false, true},
+		{"redirect through a link", "shadow-redirect.txt", "/etc/shadow", "echo x > %s", "PATH-ETC-SHADOW", false, true},
+		{"macOS copy through a link", "shadow-mac.txt", "/etc/shadow", "cp /etc/hosts %s", "PATH-ETC-SHADOW", true, true},
+		{"direct ln onto the file", "", "/etc/shadow", "ln -sf /etc/hosts %s", "PATH-ETC-SHADOW", false, true},
+		{"direct remove-destination copy", "", "/etc/shadow", "cp --remove-destination /etc/hosts %s", "PATH-ETC-SHADOW", false, true},
+		{"ln through a linked directory", "etc-dir-ln", "/etc", "ln -sf /etc/hosts %s/shadow", "PATH-ETC-SHADOW", false, true},
+		{"remove-destination copy through a linked directory", "etc-dir-cp", "/etc", "cp --remove-destination /etc/hosts %s/shadow", "PATH-ETC-SHADOW", false, true},
+		{"ln replaces the link", "ln-replace.txt", "/etc/shadow", "ln -sf /etc/hosts %s", "", false, false},
+		{"remove-destination copy replaces the link", "cp-replace.txt", "/etc/shadow", "cp --remove-destination /etc/hosts %s", "", false, false},
+		{"abbreviated remove-destination replaces the link", "cp-rem.txt", "/etc/shadow", "cp --rem /etc/hosts %s", "", false, false},
+		{"install replaces the link", "install-replace.txt", "/etc/shadow", "install -m 644 /etc/hosts %s", "", false, false},
+		{"move replaces the link", "mv-replace.txt", "/etc/shadow", "mv notes.txt %s", "", false, false},
+		{"macOS ln replaces the link", "ln-replace-mac.txt", "/etc/shadow", "ln -sf /etc/hosts %s", "", true, false},
 	}
 	for _, tier := range []string{"implicit", "default", "permissive"} {
 		t.Run(tier, func(t *testing.T) {
