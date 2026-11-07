@@ -10,8 +10,11 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"slices"
 	"sync"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 )
 
 // A worker answers once, after its last target. The guardian watch loop
@@ -23,15 +26,23 @@ import (
 // one line to its output when it begins to repair a target, and one when it
 // ends, with the repaired target's result. The parent keeps those results when
 // it kills the worker, and does not kill a worker that is in the middle of a
-// repair (enterpriseHookWorkerContext).
+// repair (enterpriseHookWorkerContext). A repair that began and never ended
+// (the worker timed out or died inside the install, possibly after it wrote)
+// is kept as a restore too: the worker had verified the protected target
+// broken, and an install that writes before it returns cannot be told from
+// one that did not by the parent. A later clean pass cannot reconstruct that
+// restore, so it is counted, audited and recorded now.
 
 // enterpriseHookWorkerProgress is one of those lines.
 type enterpriseHookWorkerProgress struct {
-	// Repairing: the worker began to repair a protected target.
+	// Repairing: the worker began to repair the protected target Index.
 	Repairing bool `json:"repairing,omitempty"`
-	// Result ends a repair: the target the worker put back. A repair that
-	// ended without one (it failed, or it only changed configuration) leaves
-	// it nil.
+	Index     int  `json:"index"`
+	// Result: on a begin line, the target as it counts if the worker never
+	// ends the repair (nil when the install only changes configuration, the
+	// hook runtime being intact); on an end line, the target the worker put
+	// back. A repair that ended without one (it failed, or it only changed
+	// configuration) leaves it nil.
 	Result *enterpriseHookWorkerTargetResult `json:"result,omitempty"`
 }
 
@@ -64,15 +75,25 @@ func (w *enterpriseHookWorkerProgressWriter) emit(progress enterpriseHookWorkerP
 	_ = json.NewEncoder(w.out).Encode(enterpriseHookWorkerResponse{Version: enterpriseHookWorkerProtocolVersion, Progress: &progress})
 }
 
-// begin says a repair of a protected target starts.
-func (w *enterpriseHookWorkerProgressWriter) begin() {
-	w.emit(enterpriseHookWorkerProgress{Repairing: true})
+// begin says a repair of a protected target starts. repairs is false when the
+// install only changes configuration, so that an unfinished one is not a
+// restore.
+func (w *enterpriseHookWorkerProgressWriter) begin(target enterpriseHookWorkerTarget, repairs bool) {
+	if w == nil {
+		return
+	}
+	progress := enterpriseHookWorkerProgress{Repairing: true, Index: target.Index}
+	if repairs {
+		progress.Result = &enterpriseHookWorkerTargetResult{Index: target.Index, OK: true, Repaired: true,
+			Result: &enterprisehooks.InstallResult{Connector: target.Options.ConnectorName, UserHome: target.Options.UserHome}}
+	}
+	w.emit(progress)
 }
 
 // end says the repair that began has ended, with the target when it put one
 // back.
 func (w *enterpriseHookWorkerProgressWriter) end(outcome enterpriseHookWorkerTargetResult) {
-	progress := enterpriseHookWorkerProgress{}
+	progress := enterpriseHookWorkerProgress{Index: outcome.Index}
 	if outcome.OK && outcome.Repaired {
 		progress.Result = &outcome
 	}
@@ -84,7 +105,8 @@ func (w *enterpriseHookWorkerProgressWriter) end(outcome enterpriseHookWorkerTar
 type enterpriseHookWorkerOutput struct {
 	// repairing counts the repairs that began and have not ended.
 	repairing int
-	// repaired holds the targets the worker ended a repair of, by index.
+	// repaired holds the targets the worker ended a repair of, by index, then
+	// the targets whose restore began and did not end.
 	repaired []enterpriseHookWorkerTargetResult
 	// response is the answer, once answered. err is why the output holds none.
 	response enterpriseHookWorkerResponse
@@ -94,8 +116,20 @@ type enterpriseHookWorkerOutput struct {
 
 // parseEnterpriseHookWorkerOutput reads raw, which may end in the middle of
 // a line (the worker is still writing, or was killed).
-func parseEnterpriseHookWorkerOutput(raw []byte) enterpriseHookWorkerOutput {
-	var out enterpriseHookWorkerOutput
+func parseEnterpriseHookWorkerOutput(raw []byte) (out enterpriseHookWorkerOutput) {
+	open := map[int]*enterpriseHookWorkerTargetResult{}
+	defer func() {
+		if out.answered {
+			return // the answer is complete
+		}
+		out.repairing = len(open)
+		for _, unfinished := range open {
+			if unfinished != nil && !slices.ContainsFunc(out.repaired, func(done enterpriseHookWorkerTargetResult) bool { return done.Index == unfinished.Index }) {
+				out.repaired = append(out.repaired, *unfinished)
+			}
+		}
+		slices.SortFunc(out.repaired, func(a, b enterpriseHookWorkerTargetResult) int { return a.Index - b.Index })
+	}()
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	for {
@@ -112,10 +146,10 @@ func parseEnterpriseHookWorkerOutput(raw []byte) enterpriseHookWorkerOutput {
 			continue
 		}
 		if line.Progress.Repairing {
-			out.repairing++
+			open[line.Progress.Index] = line.Progress.Result
 			continue
 		}
-		out.repairing = max(out.repairing-1, 0)
+		delete(open, line.Progress.Index)
 		if result := line.Progress.Result; result != nil {
 			replaced := false
 			for i := range out.repaired {

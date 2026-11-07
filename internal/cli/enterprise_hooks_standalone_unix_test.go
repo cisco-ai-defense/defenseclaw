@@ -113,9 +113,29 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 			HookContractID: os.Getenv(enterprisehooks.TrustedBinPrefixesEnv),
 		}
 	}
+	restoresScript := mode == "hang-after-write" || mode == "exit-after-write" || mode == "fail-after-write"
 	enterpriseHookWorkerInstaller = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
 		if mode == "fail" {
 			return enterprisehooks.InstallResult{}, errors.New("install refused")
+		}
+		if restoresScript {
+			// The install puts the Hermes script back, then does not return
+			// normally (GAP-0754): it outlives the worker, exits abruptly or
+			// fails after it published.
+			path := filepath.Join(opts.UserHome, ".defenseclaw", "hooks", "hermes-hook.sh")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				return enterprisehooks.InstallResult{}, err
+			}
+			if err := os.WriteFile(path, []byte("#!/bin/sh\n# restored\n"), 0o700); err != nil {
+				return enterprisehooks.InstallResult{}, err
+			}
+			switch mode {
+			case "exit-after-write":
+				os.Exit(17)
+			case "fail-after-write":
+				return enterprisehooks.InstallResult{}, errors.New("install failed after it published")
+			}
+			time.Sleep(time.Minute)
 		}
 		if mode == "slow-repair" {
 			// The repair is under way: say so, then take a while to answer.
@@ -143,6 +163,13 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 				return enterprisehooks.InstallResult{}, err
 			}
 			time.Sleep(3 * time.Second)
+			return result(opts), nil
+		}
+		if restoresScript {
+			// Broken until the install has put the script back.
+			if _, err := os.Stat(filepath.Join(opts.UserHome, ".defenseclaw", "hooks", "hermes-hook.sh")); err != nil {
+				return enterprisehooks.InstallResult{}, errors.New("hook script missing")
+			}
 			return result(opts), nil
 		}
 		if mode == "drift" || mode == "fail" || mode == "slow-repair" || (mode == "slow-second" && opts.ConnectorName == "hermes") {
