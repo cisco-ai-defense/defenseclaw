@@ -552,6 +552,21 @@ namespace DefenseClaw.Windows.Tests
         if ([int]$json.schema_version -ne 1 -or -not [bool]$json.ok) {
             throw 'atomic JSON writer did not round-trip its payload'
         }
+        $previousProfile = Get-DefenseClawEnterpriseProfile
+        try {
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+            Write-DefenseClawJsonAtomic `
+                -Value ([ordered]@{ schema_version = 2; ok = $true }) `
+                -Path $jsonPath
+            $changed = [IO.File]::ReadAllText($jsonPath) |
+                Microsoft.PowerShell.Utility\ConvertFrom-Json
+            if ([int]$changed.schema_version -ne 2 -or -not [bool]$changed.ok) {
+                throw 'standalone JSON writer did not publish changed content'
+            }
+        }
+        finally {
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile $previousProfile
+        }
     }
     finally {
         if ([IO.Directory]::Exists($jsonRoot)) {
@@ -572,6 +587,43 @@ namespace DefenseClaw.Windows.Tests
             [StringComparison]::Ordinal
         )) {
         throw "Win32 native security helper did not use a generated type: $nativeSecurityType"
+    }
+    # GAP-0655: a refused changed-content publication keeps the old name and
+    # stage; the same staged body publishes after the reader releases it.
+    $renameRoot = Join-Path ([IO.Path]::GetTempPath()) `
+        ('defenseclaw-rename-smoke-' + [Guid]::NewGuid().ToString('N'))
+    try {
+        [void][IO.Directory]::CreateDirectory($renameRoot)
+        $renameSource = Join-Path $renameRoot 'stage.json'
+        $renameDestination = Join-Path $renameRoot 'state.json'
+        [IO.File]::WriteAllText($renameSource, 'new')
+        [IO.File]::WriteAllText($renameDestination, 'old')
+        $held = [IO.File]::Open($renameDestination, [IO.FileMode]::Open,
+            [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try {
+            $refused = [string]$nativeSecurityType::RenameNonImageFile(
+                $renameSource, $renameDestination)
+            if ($refused -notmatch '^rename:(5|32|33)$' -or
+                [IO.File]::ReadAllText($renameDestination) -cne 'old' -or
+                [IO.File]::ReadAllText($renameSource) -cne 'new') {
+                throw "refused data publication changed a file: $refused"
+            }
+        }
+        finally { $held.Dispose() }
+        $published = [string]$nativeSecurityType::RenameNonImageFile(
+            $renameSource, $renameDestination)
+        if ($published -cne '' -and $published -cne 'classic') {
+            throw "data publication failed after release: $published"
+        }
+        if ([IO.File]::Exists($renameSource) -or
+            [IO.File]::ReadAllText($renameDestination) -cne 'new') {
+            throw 'changed data was not published'
+        }
+    }
+    finally {
+        if ([IO.Directory]::Exists($renameRoot)) {
+            [IO.Directory]::Delete($renameRoot, $true)
+        }
     }
     $failureActions = [byte[]](Get-DefenseClawFailureActionsBytes)
     if ($failureActions.Length -ne 44) {
