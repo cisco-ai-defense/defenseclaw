@@ -34,9 +34,6 @@ const (
 	// managedAdminOnly: the command runs only from an elevated prompt; a
 	// standard account is told so.
 	managedAdminOnly managedAvailability = "Administrators only"
-	// managedNotInstalled: the managed install has no such command (the
-	// per-user Python CLI is not part of it).
-	managedNotInstalled managedAvailability = "Not installed"
 	// managedUnsupported: the platform cannot run the command at all.
 	managedUnsupported managedAvailability = "Not supported"
 )
@@ -143,10 +140,10 @@ var managedCommands = []managedCommand{
 	},
 	{
 		Command: "defenseclaw alerts",
-		Windows: managedNotInstalled,
+		Windows: managedRefused,
 		Probes:  [][]string{{"alerts"}},
 		PerUser: perUserEverywhere, PerUserPath: []string{"alerts"},
-		Note: "The managed Windows install has no per-user alerts command.",
+		Note: "The per-user alerts view is not part of a managed install; an administrator reads the deployment with the enterprise status command.",
 	},
 	{
 		Command: "defenseclaw tui",
@@ -217,6 +214,13 @@ var managedCommands = []managedCommand{
 		Probes:  [][]string{{"tool"}},
 		PerUser: perUserEverywhere, PerUserPath: []string{"tool"},
 		Note: "Same as `skill`.",
+	},
+	{
+		Command: "defenseclaw <other per-user command>",
+		Windows: managedRefused,
+		Probes:  [][]string{{"acp"}, {"agent"}, {"aibom"}, {"codeguard"}, {"edge-connector"}, {"init"}, {"keys"}, {"migrate"}, {"observability"}, {"quickstart"}, {"registry"}, {"reset"}, {"settings"}, {"uninstall"}, {"version"}},
+		PerUser: perUserEverywhere, PerUserPath: []string{"agent"},
+		Note: "Every other per-user command (acp, agent, aibom, codeguard, edge-connector, init, keys, migrate, observability, quickstart, registry, reset, settings, uninstall, version) belongs to the per-user install; each answers with the managed message and changes nothing.",
 	},
 	{
 		Command: "defenseclaw policy show",

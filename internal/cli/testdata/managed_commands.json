@@ -62,10 +62,10 @@
       "command": "defenseclaw alerts",
       "managed_linux": "Refused",
       "managed_macos": "Refused",
-      "managed_windows": "Not installed",
+      "managed_windows": "Refused",
       "per_user": "Linux, macOS, Windows",
       "per_user_path": "alerts",
-      "note": "The managed Windows install has no per-user alerts command."
+      "note": "The per-user alerts view is not part of a managed install; an administrator reads the deployment with the enterprise status command."
     },
     {
       "command": "defenseclaw tui",
@@ -156,6 +156,15 @@
       "per_user": "Linux, macOS, Windows",
       "per_user_path": "tool",
       "note": "Same as `skill`."
+    },
+    {
+      "command": "defenseclaw <other per-user command>",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Refused",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "agent",
+      "note": "Every other per-user command (acp, agent, aibom, codeguard, edge-connector, init, keys, migrate, observability, quickstart, registry, reset, settings, uninstall, version) belongs to the per-user install; each answers with the managed message and changes nothing."
     },
     {
       "command": "defenseclaw policy show",

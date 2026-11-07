@@ -120,11 +120,19 @@ func TestManagedCommandsMatchTheWindowsBinary(t *testing.T) {
 	t.Setenv(managed.ConfigPathEnv, "")
 	t.Setenv("DEFENSECLAW_HOME", "")
 
+	// The installed binary's root: the commands it serves are not answered.
 	answers := &cobra.Command{Use: "defenseclaw"}
+	served := map[string]bool{}
+	for _, command := range rootCmd.Commands() {
+		served[command.Name()] = true
+		answers.AddCommand(&cobra.Command{Use: command.Name()})
+	}
 	addManagedWindowsSetupAnswer(answers)
 	answered := map[string]bool{}
 	for _, command := range answers.Commands() {
-		answered[command.Name()] = true
+		if !served[command.Name()] {
+			answered[command.Name()] = true
+		}
 	}
 	// config set and unset are answered on the real config command.
 	for _, verb := range []string{"set", "unset"} {
@@ -150,10 +158,6 @@ func TestManagedCommandsMatchTheWindowsBinary(t *testing.T) {
 			case managedOffered:
 				if !installed || answered[probe[0]] {
 					t.Errorf("%s: marked Offered but %q is %s", command.Command, probe, map[bool]string{true: "answered, not run", false: "not in the command tree"}[answered[probe[0]]])
-				}
-			case managedNotInstalled:
-				if installed || answered[probe[0]] {
-					t.Errorf("%s: marked Not installed but the binary has %q", command.Command, probe)
 				}
 			case managedUnsupported:
 				if !installed || sandboxHostRefusal("windows", "amd64", false) == nil {

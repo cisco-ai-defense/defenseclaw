@@ -21,7 +21,6 @@ This table says which `defenseclaw` commands a standard user gets on a computer 
 | Offered | The command runs for the user. |
 | Refused | The command answers with a message that names the managed alternative, and exits non-zero. |
 | Administrators only | The command runs from an elevated prompt; a standard account is told so. |
-| Not installed | The managed install has no such command. |
 | Not supported | The platform cannot run the command. |
 
 | Command | Managed Linux | Managed macOS | Managed Windows | Per-user install | Notes |
@@ -32,7 +31,7 @@ This table says which `defenseclaw` commands a standard user gets on a computer 
 | `defenseclaw guardrail profile explain` | Offered | Offered | Refused | Linux, macOS, Windows | Shows the guardrail profile that applies to your agents. On Windows the answer points to the administrator's policy view. |
 | `defenseclaw guardrail` | Refused | Refused | Refused | Linux, macOS, Windows | Every guardrail command except `profile explain`, which the row above offers. The guardrail is set in the administrator's config. |
 | `defenseclaw doctor` | Refused | Refused | Refused | Linux, macOS, Windows | An administrator reads the deployment with the enterprise status and verify commands. |
-| `defenseclaw alerts` | Refused | Refused | Not installed | Linux, macOS, Windows | The managed Windows install has no per-user alerts command. |
+| `defenseclaw alerts` | Refused | Refused | Refused | Linux, macOS, Windows | The per-user alerts view is not part of a managed install; an administrator reads the deployment with the enterprise status command. |
 | `defenseclaw tui` | Refused | Refused | Refused | Linux, macOS, Windows | The terminal UI is part of the per-user install. |
 | `defenseclaw upgrade` | Refused | Refused | Refused | Linux, macOS, Windows | The administrator's lifecycle applies updates. |
 | `defenseclaw rollback` | Refused | Refused | Refused | Linux, macOS, Windows | The administrator's lifecycle applies rollbacks. |
@@ -43,6 +42,7 @@ This table says which `defenseclaw` commands a standard user gets on a computer 
 | `defenseclaw mcp ...` | Refused | Refused | Refused | Linux, macOS, Windows | Same as `skill`. |
 | `defenseclaw plugin ...` | Refused | Refused | Refused | Linux, macOS, Windows | Same as `skill`. |
 | `defenseclaw tool ...` | Refused | Refused | Refused | Linux, macOS, Windows | Same as `skill`. |
+| `defenseclaw <other per-user command>` | Refused | Refused | Refused | Linux, macOS, Windows | Every other per-user command (acp, agent, aibom, codeguard, edge-connector, init, keys, migrate, observability, quickstart, registry, reset, settings, uninstall, version) belongs to the per-user install; each answers with the managed message and changes nothing. |
 | `defenseclaw policy show` | Refused | Refused | Administrators only | Linux, macOS, Windows | A standard account is told to use an elevated prompt. |
 | `defenseclaw audit export` | Refused | Refused | Administrators only | Linux, macOS, Windows | The managed audit log is administrator-only. |
 
