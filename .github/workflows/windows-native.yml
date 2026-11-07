@@ -330,25 +330,39 @@ jobs:
             Write-Host "Native Windows remaining-package part $matrixShard of $remainingPackageShardCount runs $($remainingPackages.Count) packages and $($packageParts.Count) parts of packages."
             # The remaining packages retain their 14m timeout below the
             # step's 1020 s and the job's 20 minutes (rel-1-0-6:GAP-0477).
+            # Every run is made even when an earlier one fails, so one red
+            # package does not hide the parts behind it; the step fails after.
+            $packageRunFailures = @()
             if ($remainingPackages) {
               $remainingArguments = @(
                 'test', '-vet=off', '-json', '-count=1', '-timeout=14m', '-p=1',
                 '-skip', $windowsInapplicable
               ) + $remainingPackages
-              Invoke-WindowsNativeProcess $go $remainingArguments -TimeoutSeconds 1020 `
-                -LogPath $goTestLog -GoTestFailureSummaryPath $goFailureSummary -GoTestTimingSummary | Out-Null
+              try {
+                Invoke-WindowsNativeProcess $go $remainingArguments -TimeoutSeconds 1020 `
+                  -LogPath $goTestLog -GoTestFailureSummaryPath $goFailureSummary -GoTestTimingSummary | Out-Null
+              } catch {
+                $packageRunFailures += "packages: $($_.Exception.Message)"
+              }
             }
             $partIndex = 0
             foreach ($packagePart in $packageParts) {
               $partPackage, $partPattern = $packagePart -split "`t", 2
               Write-Host "Native Windows Go part $($partIndex + 1) of $($packageParts.Count): $partPackage"
-              Invoke-WindowsNativeProcess $go @(
-                'test', '-vet=off', '-json', '-count=1', '-timeout=14m', '-p=1',
-                '-skip', $windowsInapplicable, '-run', $partPattern, $partPackage
-              ) -TimeoutSeconds 1020 `
-                -LogPath (Join-Path $env:DC_STATE_ROOT ("go-package-part-$partIndex.log")) `
-                -GoTestFailureSummaryPath $goFailureSummary -GoTestTimingSummary | Out-Null
+              try {
+                Invoke-WindowsNativeProcess $go @(
+                  'test', '-vet=off', '-json', '-count=1', '-timeout=14m', '-p=1',
+                  '-skip', $windowsInapplicable, '-run', $partPattern, $partPackage
+                ) -TimeoutSeconds 1020 `
+                  -LogPath (Join-Path $env:DC_STATE_ROOT ("go-package-part-$partIndex.log")) `
+                  -GoTestFailureSummaryPath $goFailureSummary -GoTestTimingSummary | Out-Null
+              } catch {
+                $packageRunFailures += "$($partPackage) part $($partIndex + 1): $($_.Exception.Message)"
+              }
               $partIndex++
+            }
+            if ($packageRunFailures) {
+              throw "native Windows Go shard $matrixShard failed: $($packageRunFailures -join '; ')"
             }
             return
           }
