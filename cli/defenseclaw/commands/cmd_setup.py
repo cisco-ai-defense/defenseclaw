@@ -8643,9 +8643,32 @@ def _windows_hook_launcher_setup_refusal(cfg, *, restart: bool, connectors: Iter
 
     launcher = os.path.join(os.path.dirname(canonical_install_path()), "defenseclaw-hook.exe")
     try:
-        info = os.stat(launcher)
-        usable = stat.S_ISREG(info.st_mode) and info.st_size > 0
-    except OSError:
+        info = os.lstat(launcher)
+        usable = (
+            stat.S_ISREG(info.st_mode)
+            and info.st_size > 0
+            and not (getattr(info, "st_file_attributes", 0) & _WINDOWS_REPARSE_POINT_ATTRIBUTE)
+        )
+        if usable:
+            # Both the installed hook and the stable launcher expose this
+            # bounded identity mode without starting a hook or changing state.
+            probe = subprocess.run(  # noqa: S603 - fixed identity argument and selected installed path.
+                [launcher, "--version-json"],
+                input=b"",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            identity = _json.loads(probe.stdout) if probe.returncode == 0 and len(probe.stdout) <= 4096 else None
+            usable = (
+                isinstance(identity, dict)
+                and type(identity.get("schema_version")) is int
+                and identity["schema_version"] == 1
+                and identity.get("name") in {"defenseclaw-hook", "defenseclaw-hook-launcher"}
+            )
+    except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
         usable = False
     if usable:
         return ""
