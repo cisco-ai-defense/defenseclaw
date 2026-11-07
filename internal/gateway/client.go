@@ -819,16 +819,19 @@ const openClawTokenRejectedHint = "OpenClaw rejected the gateway token. DefenseC
 	"in OPENCLAW_GATEWAY_TOKEN or DEFENSECLAW_GATEWAY_TOKEN and restart it"
 
 // openClawTokenNotPersistedHint is the operator step when OpenClaw rejects the
-// gateway token and openclaw.json holds no gateway.auth.token. OpenClaw then
-// generates a new random token at every start ("auth token was missing ...
-// runtime token") and tells nobody, so no token DefenseClaw holds can match
-// and no re-read can find one. Hooks and the guardrail proxy do not use this
-// connection.
-const openClawTokenNotPersistedHint = "OpenClaw rejected the gateway token because openclaw.json has no " +
-	"gateway.auth.token: OpenClaw generates a new runtime token at every start that DefenseClaw cannot read. " +
-	"Persist one with 'openclaw config set gateway.auth.mode token' and 'openclaw config set gateway.auth.token <token>', " +
-	"restart OpenClaw, then run 'defenseclaw setup openclaw'. DefenseClaw retries every few minutes, and at once when " +
-	"openclaw.json gets a token"
+// gateway token and openclaw.json holds no gateway.auth.token. The token
+// OpenClaw expects then comes from somewhere DefenseClaw cannot see: its own
+// environment (OPENCLAW_GATEWAY_TOKEN, its .env file, its service unit), or a
+// runtime token it generates at start when none is set. DefenseClaw cannot
+// tell which, so the hint names the fixes that work for each. Hooks and the
+// guardrail proxy do not use this connection.
+const openClawTokenNotPersistedHint = "OpenClaw rejected the gateway token and openclaw.json has no " +
+	"gateway.auth.token, so DefenseClaw cannot tell which token OpenClaw expects: it takes one from its own " +
+	"environment (OPENCLAW_GATEWAY_TOKEN, its .env file or service unit) or generates a runtime token at start. " +
+	"Give the DefenseClaw gateway that same token in OPENCLAW_GATEWAY_TOKEN and restart it, or persist one with " +
+	"'openclaw config set gateway.auth.mode token' and 'openclaw config set gateway.auth.token <token>', " +
+	"restart OpenClaw, then run 'defenseclaw setup openclaw'. DefenseClaw retries every few minutes, and at once " +
+	"when openclaw.json gets a token"
 
 // openClawTokenEnvRejectedHint is the operator step when OpenClaw rejects the
 // token DefenseClaw already took from OPENCLAW_GATEWAY_TOKEN and openclaw.json
@@ -885,8 +888,10 @@ func (c *Client) handleConnectRejection(connectErr error) string {
 		!openClawPairingApprovalNeeded(connectErr) &&
 		strings.Contains(strings.ToLower(connectErr.Error()), "token") {
 		// openclaw.json holds no token. OpenClaw then takes
-		// OPENCLAW_GATEWAY_TOKEN from its environment when it has one, and
-		// generates a random runtime token when it does not.
+		// OPENCLAW_GATEWAY_TOKEN from its environment when it has one. The
+		// sidecar's own environment is not OpenClaw's (its .env file and
+		// service unit are not visible here), so an empty variable proves
+		// no cause.
 		switch env := openClawEnvGatewayToken(); {
 		case env == "":
 			hint = openClawTokenNotPersistedHint
@@ -1105,7 +1110,7 @@ var errOpenClawTokenUnreadable = errors.New("openclaw.json gateway.auth.token is
 
 // errOpenClawTokenNotPersisted reports an openclaw.json that parses and holds
 // no gateway.auth.token. It is not a failure of the file; it tells the caller
-// that OpenClaw issues runtime tokens DefenseClaw cannot learn.
+// that the token OpenClaw expects is one DefenseClaw cannot read.
 var errOpenClawTokenNotPersisted = errors.New("openclaw.json has no gateway.auth.token")
 
 // readOpenClawGatewayToken reads gateway.auth.token from the OpenClaw
