@@ -34,6 +34,7 @@ func writeOpenClawJSON(t *testing.T, home, body string) {
 
 func rejectionClient(t *testing.T, home string) *Client {
 	t.Helper()
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
 	dataDir := testenv.PrivateTempDir(t)
 	client, err := NewClient(&config.GatewayConfig{
 		Token:         "defenseclaw-own-token",
@@ -55,6 +56,7 @@ func TestTokenRejectionWithoutPersistedOpenClawTokenNamesTheCause(t *testing.T) 
 		"no gateway block":           `{}`,
 		"null token":                 `{"gateway":{"auth":{"token":null}}}`,
 		"empty token":                `{"gateway":{"auth":{"token":""}}}`,
+		"json5 with comments, bare keys and trailing commas": "{ // OpenClaw accepts JSON5\n gateway: {auth: {mode: 'token',},},}\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			home := t.TempDir()
@@ -80,6 +82,17 @@ func TestTokenRejectionKeepsItsStepWhenOpenClawHoldsAToken(t *testing.T) {
 		}
 		if client.cfg.Token != "persisted-token" {
 			t.Errorf("token = %q, want the persisted token adopted", client.cfg.Token)
+		}
+	})
+	t.Run("json5 persisted token is adopted", func(t *testing.T) {
+		home := t.TempDir()
+		writeOpenClawJSON(t, home, "{ // note\n gateway: {auth: {token: 'json5-token',},},}\n")
+		client := rejectionClient(t, home)
+		if hint := client.handleConnectRejection(errors.New(tokenMismatchRejection)); hint != openClawTokenRejectedHint {
+			t.Errorf("hint = %q, want the token step", hint)
+		}
+		if client.cfg.Token != "json5-token" {
+			t.Errorf("token = %q, want the json5 token adopted", client.cfg.Token)
 		}
 	})
 	t.Run("openclaw.json missing", func(t *testing.T) {
@@ -194,5 +207,45 @@ func TestConnectWithRetryStopsSpinningUntilOpenClawPersistsAToken(t *testing.T) 
 	}
 	if client.cfg.Token != persisted {
 		t.Errorf("token = %q, want the persisted token", client.cfg.Token)
+	}
+}
+
+// OpenClaw takes OPENCLAW_GATEWAY_TOKEN from its environment when
+// openclaw.json holds no token, so a token in that variable is a real
+// candidate, not proof of a random runtime token.
+func TestTokenRejectionWithoutPersistedTokenUsesTheEnvironmentToken(t *testing.T) {
+	home := t.TempDir()
+	writeOpenClawJSON(t, home, `{"gateway":{"auth":{"mode":"token"}}}`)
+	client := rejectionClient(t, home)
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "openclaw-env-token")
+
+	if hint := client.handleConnectRejection(errors.New(tokenMismatchRejection)); hint == openClawTokenNotPersistedHint {
+		t.Fatalf("an environment token was diagnosed as a random runtime token: %q", hint)
+	}
+	if client.cfg.Token != "openclaw-env-token" {
+		t.Fatalf("token = %q, want the environment token tried", client.cfg.Token)
+	}
+	if client.RefreshedToken() != "" {
+		t.Errorf("the environment token was offered to the API server as a refreshed token")
+	}
+
+	// Rejected again: the cause is not provable, so the step must not claim one.
+	hint := client.handleConnectRejection(errors.New(tokenMismatchRejection))
+	if hint != openClawTokenEnvRejectedHint {
+		t.Errorf("second rejection hint = %q, want the environment-token step", hint)
+	}
+}
+
+// Persisting the value DefenseClaw already sends still ends the wait.
+func TestPersistedTokenAppearedWakesOnTheSameToken(t *testing.T) {
+	home := t.TempDir()
+	writeOpenClawJSON(t, home, `{"gateway":{"auth":{"mode":"token"}}}`)
+	client := &Client{cfg: &config.GatewayConfig{ClawHome: home, Token: "same-token"}}
+	if client.persistedTokenAppeared() {
+		t.Fatal("woke before a token was persisted")
+	}
+	writeOpenClawJSON(t, home, `{gateway: {auth: {mode: 'token', token: 'same-token',},},}`)
+	if !client.persistedTokenAppeared() {
+		t.Fatal("the persisted token equal to the current one did not end the wait")
 	}
 }
