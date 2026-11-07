@@ -1051,10 +1051,12 @@ func enterpriseHookOpenCodePortsPath(manifestPath string) string {
 }
 
 // sweepOpenCodePortsTemp removes the temp files a killed record write left in
-// the record's folder (REVIEW-gx053-13 S2). It runs inside the reconcile pass,
-// which holds the guardian reconcile lock of the authorization folder, and
-// only when the record is in that folder, so the lock covers every writer of
-// the record. A file at or after the pass start is a live writer's and stays.
+// the record's folder (REVIEW-gx053-13 S2). It must run only inside the
+// reconcile pass, which holds the guardian reconcile lock of the authorization
+// folder, and only when the record is in that folder: every writer of the
+// record takes that lock, so none has a temp file in flight while the sweep
+// runs. That lock is the guarantee for a live writer; the pass-start check only
+// spares a file created after the pass began. Do not call it without the lock.
 func sweepOpenCodePortsTemp(stderr io.Writer, recordPath string, passStart time.Time) {
 	if cfg == nil || filepath.Dir(recordPath) != managed.HookGuardianAuthorizationDir(cfg.DataDir) {
 		return
