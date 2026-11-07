@@ -18,6 +18,8 @@ from defenseclaw.doctor_gateway import PIDRecord, ProcessEvidence
 from defenseclaw.file_permissions import UnsafePathError
 from defenseclaw.pinned_exec import pinned_executable, run_pinned_executable
 
+from tests.native_programs import native_program
+
 
 def test_python_dotenv_loader_ignores_process_control_and_malformed_entries(
     monkeypatch: pytest.MonkeyPatch,
@@ -906,7 +908,7 @@ def test_lifecycle_launch_never_runs_a_controller_swapped_in_after_verification(
         shutil.copyfile(os.path.join(os.environ["SystemRoot"], "System32", "cmd.exe"), controller)
         replacement.write_bytes(b"replacement controller")
     else:
-        shutil.copyfile("/bin/echo", controller)
+        native_program(controller, "echo")
         replacement.write_text("#!/bin/sh\necho replacement\n", encoding="utf-8")
         for path in (controller, replacement):
             path.chmod(0o755)
@@ -948,7 +950,7 @@ def test_pinned_executable_launches_with_private_pid_namespace(tmp_path, monkeyp
     if kind == "script":
         controller.write_text("#!/bin/sh\necho \"$1\"\n", encoding="utf-8")
     else:
-        shutil.copyfile("/bin/echo", controller)
+        native_program(controller, "echo")
     controller.chmod(0o755)
 
     with monkeypatch.context() as patched:

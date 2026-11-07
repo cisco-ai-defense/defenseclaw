@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestAccountAgentProcessMayRunIgnoresManagementArguments(t *testing.T) {
@@ -36,10 +38,7 @@ func TestAccountAgentProcessMayRunIgnoresManagementArguments(t *testing.T) {
 		t.Fatal("management command was counted as a running agent")
 	}
 
-	sleeper, err := exec.LookPath("sleep")
-	if err != nil {
-		t.Skip("sleep unavailable")
-	}
+	sleeper := testenv.NativeSleep(t)
 	agentImage := filepath.Join(t.TempDir(), agent)
 	if err := os.Symlink(sleeper, agentImage); err != nil {
 		t.Fatal(err)
@@ -111,10 +110,7 @@ func TestRemovePerUserConnectorHookFilesAfterWrappedRemoval(t *testing.T) {
 					t.Fatalf("management command did not complete: %q, %v", line, err)
 				}
 				if running {
-					sleeper, err := exec.LookPath("sleep")
-					if err != nil {
-						t.Fatal(err)
-					}
+					sleeper := testenv.NativeSleep(t)
 					agentImage := filepath.Join(t.TempDir(), probeAgent)
 					if err := os.Symlink(sleeper, agentImage); err != nil {
 						t.Fatal(err)

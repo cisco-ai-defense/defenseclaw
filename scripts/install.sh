@@ -735,8 +735,10 @@ lock_record() {
 take_lock "${LOCK_DIR}" "${LOCK_HINT}"
 LOG="${DEFENSECLAW_HOME}/logs/install-$(date +%Y%m%dT%H%M%S).log"
 # tee ignores Ctrl+C: it went down with the installer's process group, and the
-# cancel message then died on a broken pipe (exit 141, GAP-1901).
-exec > >(trap '' INT TERM; exec tee -a "${LOG}") 2>&1
+# cancel message then died on a broken pipe (exit 141, GAP-1901). tee -i ignores
+# it itself: bash 5.3 (Ubuntu 26.04) drops the inherited ignore when the
+# subshell runs trap '' INT.
+exec > >(trap '' TERM; exec tee -ia "${LOG}") 2>&1
 # A run that stops after it staged the release and before the swap (a
 # refusal, a failed check, a cancel) leaves nothing it staged or added for uv
 # (drop_unswapped_stage, GAP-1120).

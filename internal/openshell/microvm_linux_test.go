@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // linuxVMTOML is the gateway.toml of a Linux user (uid 1000, gid 1000)
@@ -396,10 +397,7 @@ func TestConfiguredVMDriverUsesRunningGatewayWithSpaces(t *testing.T) {
 		"[openshell.drivers.vm]\ndriver_dir = \""+configuredDir+"\"\n", 1), f.started.Add(-time.Minute))
 	runningDir := filepath.Join(f.home, "running gateway", "bin")
 	runningGateway := filepath.Join(runningDir, openshell.GatewayBinary)
-	sleep, err := exec.LookPath("sleep")
-	if err != nil {
-		t.Fatal(err)
-	}
+	sleep := testenv.NativeSleep(t)
 	contents, err := os.ReadFile(sleep)
 	if err != nil {
 		t.Fatal(err)
