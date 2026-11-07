@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookguard"
 )
 
 // pinClaudeCodePreToolGuard makes guard the installed full hook the
@@ -72,8 +74,8 @@ func TestWindowsClaudeCodePreToolUseGuardBlocksAMissingLauncherAndSuitsCursor(t 
 				if command != tc.guard || !reflect.DeepEqual(args, want) {
 					t.Fatalf("%s handler = %q %q, want the guard %q %q", group.eventType, command, args, tc.guard, want)
 				}
-				if launcher, gotArgs, ok := ClaudeCodeLauncherGuardArgv(args); !ok || launcher != tc.launcher ||
-					!reflect.DeepEqual(gotArgs, hookArgs) {
+				if launcher, gotArgs, _, wrapped, open, ok := hookguard.ParseInvocationMode(args); !ok ||
+					launcher != tc.launcher || !reflect.DeepEqual(gotArgs, hookArgs) || wrapped || open {
 					t.Fatalf("the guard binary does not accept the argv Setup writes: %q", args)
 				}
 			}
@@ -152,8 +154,8 @@ func TestClaudeCodePreToolGuardIsTheSeparateInstalledHookOfAPackagedInstall(t *t
 func TestClaudeCodeLauncherGuardArgvStartsOnlyTheClaudeHookOfADefenseClawLauncher(t *testing.T) {
 	launcher := `C:\Users\u\AppData\Local\DefenseClaw\HookRuntime\defenseclaw-hook.exe`
 	hookArgs := []string{"hook", "--connector", "claudecode"}
-	if got, args, ok := ClaudeCodeLauncherGuardArgv(append([]string{"launcher-guard", launcher}, hookArgs...)); !ok ||
-		got != launcher || !reflect.DeepEqual(args, hookArgs) {
+	if got, args, _, wrapped, open, ok := hookguard.ParseInvocationMode(append([]string{"launcher-guard", launcher}, hookArgs...)); !ok ||
+		got != launcher || !reflect.DeepEqual(args, hookArgs) || wrapped || open {
 		t.Fatalf("the generated argv was refused: %q %q %v", got, args, ok)
 	}
 	for name, args := range map[string][]string{
@@ -169,7 +171,7 @@ func TestClaudeCodeLauncherGuardArgvStartsOnlyTheClaudeHookOfADefenseClawLaunche
 		"variable in launcher": {"launcher-guard", `C:\%TEMP%\defenseclaw-hook.exe`, "hook", "--connector", "claudecode"},
 		"padded launcher":      {"launcher-guard", launcher + " ", "hook", "--connector", "claudecode"},
 	} {
-		if _, _, ok := ClaudeCodeLauncherGuardArgv(args); ok {
+		if _, _, _, _, _, ok := hookguard.ParseInvocationMode(args); ok {
 			t.Errorf("%s: %q was accepted", name, args)
 		}
 	}
