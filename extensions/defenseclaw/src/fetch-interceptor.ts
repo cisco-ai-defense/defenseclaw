@@ -83,141 +83,38 @@ try {
 // only one instance installs the transport patch.
 const INTERCEPTOR_STATE_KEY = Symbol.for("defenseclaw.interceptor.state");
 
-/**
- * Who holds the transport patch right now. Ownership follows the current
- * holder through every reload, copy and restart: it is named in the shared
- * state and is never inferred from a mark an earlier holder left behind
- * (GAP-0745).
- */
-interface TransportHolder {
-  /**
-   * An older plugin build. It has no queue and no stop hook, and only writes
-   * the shared `installed` mark: true when it installs, false when any of its
-   * copies stops, including a copy that never held the transport.
-   */
-  legacy: boolean;
-  /** Older build: true once the copy that holds the transport has put it back. */
-  restored?: () => boolean;
-  /**
-   * Older build that was already holding the transport when this module
-   * loaded: the transport it will put back is unknown, so `restored` can only
-   * see that every layer it patched was replaced (its stop puts all of them
-   * back in one call; another component wrapping some layers does not).
-   * A release of such a holder is still an inference, and the copy that takes
-   * over checks its patch again whenever an older copy reports a stop.
-   */
-  inferred?: boolean;
-  /** Takeover from an inferred release: patch again if an older copy removed every layer of the patch. */
-  recheck?: () => void;
-  warned?: boolean;
-}
-
 interface InterceptorSharedState {
   llmDomains: string[];
   ollamaPorts: string[];
-  /** True while a holder exists; a write from an older build is read through `owner`. */
   installed: boolean;
   guardrailPort: number | null;
-  /** The copy that put the transport patch in place, or null. */
-  owner: TransportHolder | null;
   /**
-   * start() of every instance that found the transport already patched by
-   * another instance. When the holder stops, the next one takes over, so a
-   * plugin reload never leaves the transport unguarded (GAP-0745).
+   * Set by the copy that patched the transport (builds that predate GAP-0745
+   * never set it). A later copy of the plugin, loaded again by a hot reload in
+   * the same process, hands its config to this controller instead of patching
+   * again or leaving the patch pointing at a copy that was replaced.
    */
-  waiting: Array<() => void>;
-  /** Set while the hand-over from an inferred older-build release runs. */
-  provisionalTakeover?: boolean;
+  controller?: InterceptorController | null;
 }
 
-/** Give the transport to the next instance waiting for it, if any. */
-function handOverTransport(): void {
-  const successor = _shared.waiting.shift();
-  if (!successor) return;
-  try {
-    successor();
-  } catch {
-    // The successor reports its own failure; stop() must not throw.
-  }
+interface InterceptorController {
+  adopt(owner: object, config: AdoptedConfig): void;
+  release(owner: object): void;
+  describeLayers(): InterceptorLayers;
+  verifyInterception(): Promise<InterceptionSelfTest>;
+  runSelfTest(): Promise<InterceptionSelfTest>;
 }
 
-/**
- * Route the marks an older build writes through the holder record, so a stop
- * of a copy that is not the holder, or a second stop of one that already
- * stopped, cannot take the mark down under the real holder.
- *   - installed=true from an older build: it holds the transport; it restores
- *     the fetch it found when it stops.
- *   - installed=false: the holder is released only when its transport is back.
- *   - guardrailPort=null while a holder exists is ignored (diagnostic mark).
- * Remove with the last supported upgrade from 1.0.8 (1.0.10 at the earliest).
- */
-function adoptSharedMarks(state: InterceptorSharedState): void {
-  if (Object.getOwnPropertyDescriptor(state, "installed")?.get) return; // already adopted
-  // Every build that writes the shared mark patches these four layers and
-  // restores all of them in the same stop, before it writes the mark down. A
-  // holder is therefore gone only when none of them is still what it left.
-  const layers = (): unknown[] => [globalThis.fetch, https.request, http.request, http.get];
-  const held = layers();
-  state.owner = state.installed
-    ? {
-        legacy: true,
-        inferred: true,
-        restored: () => layers().every((layer, index) => layer !== held[index]),
-      }
-    : null;
-  let port = state.guardrailPort ?? null;
-  Object.defineProperty(state, "installed", {
-    configurable: true,
-    enumerable: true,
-    get: () => state.owner !== null,
-    set: (value: boolean) => {
-      const holder = state.owner;
-      if (value) {
-        if (holder === null) {
-          const nativeFetch = globalThis.fetch;
-          state.owner = { legacy: true, restored: () => globalThis.fetch === nativeFetch };
-        }
-        return;
-      }
-      if (holder && !holder.legacy) {
-        // A stop of an older copy while a current copy holds the transport:
-        // no release. The older copy that really held it may have just put
-        // the old transport back over the new patch; the holder checks.
-        holder.recheck?.();
-        return;
-      }
-      if (!holder?.legacy || !holder.restored?.()) return;
-      state.owner = null;
-      port = null;
-      state.provisionalTakeover = holder.inferred === true;
-      try {
-        handOverTransport();
-      } finally {
-        state.provisionalTakeover = false;
-      }
-    },
-  });
-  Object.defineProperty(state, "guardrailPort", {
-    configurable: true,
-    enumerable: true,
-    get: () => port,
-    set: (value: number | null) => {
-      if (value === null && state.owner !== null) return;
-      port = value;
-    },
-  });
+interface AdoptedConfig {
+  guardrailPort: number;
+  getCorrelationHeaders: CorrelationHeadersGetter;
 }
 
 function getOrCreateSharedState(): InterceptorSharedState {
   const existing = (globalThis as Record<symbol, unknown>)[
     INTERCEPTOR_STATE_KEY
   ] as InterceptorSharedState | undefined;
-  if (existing) {
-    // State created by an older plugin build in this process has no queue.
-    existing.waiting ??= [];
-    adoptSharedMarks(existing);
-    return existing;
-  }
+  if (existing) return existing;
 
   const state: InterceptorSharedState = {
     llmDomains: providersConfig.providers.flatMap(
@@ -226,10 +123,8 @@ function getOrCreateSharedState(): InterceptorSharedState {
     ollamaPorts: providersConfig.ollama_ports.map(String),
     installed: false,
     guardrailPort: null,
-    owner: null,
-    waiting: [],
+    controller: null,
   };
-  adoptSharedMarks(state);
   (globalThis as Record<symbol, unknown>)[INTERCEPTOR_STATE_KEY] = state;
   return state;
 }
@@ -1245,22 +1140,6 @@ export interface InterceptionSelfTest {
 
 const INTERCEPTION_SELF_TEST_URL = "https://api.openai.com/v1/chat/completions";
 const INTERCEPTION_SELF_TEST_INTERVAL_MS = 60_000;
-// A copy that checks whether its own fetch wrapper is still reachable sends a
-// call to this URL, a provider host like any model call, so that a wrapper of
-// another component (a local-network filter, a cache, a request allow-list)
-// handles it as it handles model traffic. It carries a header naming the one
-// check it belongs to; the wrapper of this copy answers it locally and notes
-// it for that check only. Only the answer "reached" is evidence, and it can
-// only come from this copy's own wrapper. The bound ends a wrapper of another
-// component that never forwards the call. Where no wrapper of this copy is in
-// the chain the call reaches the real transport: one credential-free GET of
-// the provider model-list path, ended at once (first check) or when the check
-// settles (second check), and it carries no request data.
-const REACHABILITY_PROBE_URL = "https://api.openai.com/v1/models";
-/** A different address for every check, so a cache of another component cannot answer one for the next. */
-const reachabilityProbeUrl = (id: string): string => `${REACHABILITY_PROBE_URL}?dc-probe=${id}`;
-const REACHABILITY_PROBE_HEADER = "X-DC-Transport-Probe";
-const REACHABILITY_PROBE_TIMEOUT_MS = 30_000;
 export const INTERCEPTION_PROBE_HEADER = "X-DC-Interception-Probe";
 
 function readUndiciHeader(headers: unknown, name: string): string {
@@ -1488,50 +1367,19 @@ export function createFetchInterceptor(
     typeof portOrOpts === "number"
       ? { guardrailPort: portOrOpts }
       : portOrOpts;
-  const guardrailPort = interceptorOpts.guardrailPort;
-  const getCorrelationHeaders =
+  // Config of the copy of the plugin that currently owns the patch. The
+  // wrappers read these at call time, so a reload swaps them in place.
+  let guardrailPort = interceptorOpts.guardrailPort;
+  let getCorrelationHeaders =
     interceptorOpts.getCorrelationHeaders ?? emptyCorrelationHeaders;
-  const proxyBase = `http://127.0.0.1:${guardrailPort}`;
+  let proxyBase = `http://127.0.0.1:${guardrailPort}`;
+  // Identifies this copy to the controller. The copies served by the patch
+  // are kept in load order; the last one supplies the config.
+  const self = {};
+  let holders: Array<{ copy: object; config: AdoptedConfig }> = [];
+  let started = false;
+  let olderHolderWarned = false;
   let originalFetch: typeof globalThis.fetch | null = null;
-  /** One transport patch of this copy: what it found, and what it put in place. */
-  interface PatchState {
-    originalFetch: typeof globalThis.fetch | null;
-    originalHttpsRequest: typeof https.request | null;
-    originalHttpRequest: typeof http.request | null;
-    originalHttpGet: typeof http.get | null;
-    originalUndiciDispatcher: UndiciDispatcher | null;
-    hostUndici: ReturnType<typeof resolveHostUndici>;
-    originalHostDispatch: UndiciDispatchFn | null;
-    egressReporter: EgressReporter | null;
-    ours: OurWrappers | null;
-    disarm: (() => void) | null;
-  }
-  interface OurWrappers {
-    fetch: typeof globalThis.fetch;
-    httpsRequest: typeof https.request;
-    httpRequest: typeof http.request;
-    httpGet: typeof http.get;
-    undiciDispatcher: unknown;
-    hostDispatch: UndiciDispatchFn | null;
-    /** The layers as they were found, unbound, so a retraction puts back the very same functions. */
-    found: { httpsRequest: typeof https.request; httpRequest: typeof http.request; httpGet: typeof http.get };
-  }
-  // The wrappers of the current patch, null before start() and after stop().
-  let ours: OurWrappers | null = null;
-  let disarmCurrent: (() => void) | null = null;
-  // Earlier patches of this copy (oldest first) that a re-patch left in place
-  // until it is known whether they are still reachable.
-  let superseded: PatchState[] = [];
-  // Earlier patches a check could not show to be in the chain (removed, or kept
-  // from the probe by another component): they stay below this copy's current
-  // patch and are disarmed by its stop, so none keeps routing calls to a copy
-  // that stopped.
-  let suspected: PatchState[] = [];
-  // The reachability checks in flight, by id: a wrapper that forwards a probe
-  // late (after the check ended or was replaced) notes nothing in a later one.
-  const pendingProbes = new Map<string, { seen: boolean }>();
-  let probeCounter = 0;
-  let recheckSeq = 0;
   let originalHttpsRequest: typeof https.request | null = null;
   let originalHttpRequest: typeof http.request | null = null;
   let originalHttpGet: typeof http.get | null = null;
@@ -1546,7 +1394,7 @@ export function createFetchInterceptor(
   let originalHostDispatch: UndiciDispatchFn | null = null;
   let lastHostProbeDestination = "";
 
-  function describeLayers(): InterceptorLayers {
+  function describeOwnLayers(): InterceptorLayers {
     return {
       fetch: originalFetch !== null && globalThis.fetch !== originalFetch,
       httpRequest: originalHttpRequest !== null && http.request !== originalHttpRequest,
@@ -1690,34 +1538,31 @@ export function createFetchInterceptor(
     return next(opts, handler);
   }
 
-  // Names this instance as the holder of the transport patch: only it may
-  // release the shared owner when it stops.
-  const ownerMark: TransportHolder = { legacy: false };
-
-  /** An older build holds the transport: this copy waits for it and says so once. */
-  function warnOlderBuildOwner(): void {
-    const holder = _shared.owner;
-    if (!holder?.legacy || holder.warned) return;
-    holder.warned = true;
-    console.warn(
-      "[defenseclaw] An older DefenseClaw plugin copy still guards this OpenClaw gateway process " +
-        `(guardrail port ${String(_shared.guardrailPort)}); this copy takes over when it stops. ` +
-        "Restart the OpenClaw gateway to load this version.",
-    );
-  }
-
   function start(): void {
-    if (originalFetch) return; // this instance already started
+    if (started) return; // this instance already started
 
-    // Idempotent cross-instance guard: if another module evaluation
-    // already patched the transport, we only bootstrap the overlay
-    // (so our operator-added domains merge into the shared list) and
-    // return without re-wrapping fetch/https/http/undici.
+    // A copy of this build already patched the transport (a hot reload loaded
+    // the plugin again): serve that patch with the config of this copy.
+    // Nothing is wrapped a second time, and no wrapper is left behind a
+    // stopped copy.
+    const controller = _shared.controller;
+    if (controller) {
+      started = true;
+      controller.adopt(self, { guardrailPort, getCorrelationHeaders });
+      return;
+    }
+
+    // An older build (no controller) patched the transport: it cannot hand
+    // over, so we only bootstrap the overlay (so our operator-added domains
+    // merge into the shared list) and leave its patch alone.
     if (_shared.installed) {
-      // Queue behind the installing instance: if it stops (a plugin reload
-      // stops the old copy after the new one registered), this one installs.
-      if (!_shared.waiting.includes(start)) _shared.waiting.push(start);
-      warnOlderBuildOwner();
+      started = true;
+      if (!olderHolderWarned) {
+        olderHolderWarned = true;
+        console.warn(
+          "[defenseclaw] an older DefenseClaw plugin copy guards model calls in this process; restart the OpenClaw gateway to load this one",
+        );
+      }
       // Pass the sidecar token like the first instance does: the
       // endpoint is authenticated, and an unauthenticated call is
       // logged as an api-auth-failure security event.
@@ -1727,21 +1572,18 @@ export function createFetchInterceptor(
       });
       return;
     }
-    _shared.owner = ownerMark;
-    if (_shared.provisionalTakeover) ownerMark.recheck = recheckTransport;
+    started = true;
+    _shared.installed = true;
     _shared.guardrailPort = guardrailPort;
+    _shared.controller = controllerImpl;
+    holders = [{ copy: self, config: { guardrailPort, getCorrelationHeaders } }];
 
-    // The wrappers below call these captured natives, not the mutable
-    // fields stop() clears: a model call admitted before a plugin reload
-    // stops this copy, or made through a reference to the wrapper that a
-    // caller kept, must still reach the guardrail proxy (GAP-0745).
-    const nativeFetch = globalThis.fetch;
+    // Natives are bound here: a call that is still in flight when the patch is
+    // taken out must finish through the same transport, not through fields
+    // that the stop cleared (GAP-0745).
+    const nativeFetch: typeof globalThis.fetch = globalThis.fetch;
     originalFetch = nativeFetch;
     egressReporter = createEgressReporter({ guardrailPort });
-    // A patch that a re-patch found to be redundant is disarmed: it hands every
-    // call to what it found and guards nothing (it may stay in a chain that
-    // another component wrapped around it).
-    let armed = true;
 
     // Layer 4 (governance): pull the sidecar's merged provider
     // registry so operator-added domains (via `defenseclaw setup
@@ -1759,19 +1601,7 @@ export function createFetchInterceptor(
       input: RequestInfo | URL,
       init?: RequestInit,
     ): Promise<Response> => {
-      if (!armed) return nativeFetch(input, init);
       const urlStr = String(input instanceof Request ? input.url : input);
-
-      if (urlStr.startsWith(`${REACHABILITY_PROBE_URL}?dc-probe=`)) {
-        const probeId = new Headers(
-          init?.headers ?? (input instanceof Request ? input.headers : undefined),
-        ).get(REACHABILITY_PROBE_HEADER);
-        if (probeId !== null) {
-          const probe = pendingProbes.get(probeId);
-          if (probe) probe.seen = true;
-          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
-        }
-      }
 
       // Never self-loop: a request already aimed at the guardrail proxy
       // short-circuits before any shape inspection so we don't peek its body.
@@ -1946,7 +1776,6 @@ export function createFetchInterceptor(
 
       return response;
     };
-    const guardedFetch = globalThis.fetch;
 
     // Also patch https.request so axios and other HTTP clients that
     // delegate to node:https are intercepted. Note: undici-based clients
@@ -1954,11 +1783,9 @@ export function createFetchInterceptor(
     // dispatcher patch above, not this https.request patch.
     const nativeHttpsRequest = https.request.bind(https);
     const nativeHttpRequest = http.request.bind(http);
-    const foundLayers = { httpsRequest: https.request, httpRequest: http.request, httpGet: http.get };
-    const nativeHttpGet = http.get.bind(http);
     originalHttpsRequest = nativeHttpsRequest;
     originalHttpRequest = nativeHttpRequest;
-    originalHttpGet = nativeHttpGet;
+    originalHttpGet = http.get.bind(http);
 
     type NodeRequestOptions = Record<string, unknown>;
     type NodeIncomingMessage = unknown;
@@ -2082,9 +1909,6 @@ export function createFetchInterceptor(
       optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
       callback?: (res: NodeIncomingMessage) => void,
     ): NodeClientRequest {
-      if (!armed) {
-        return nativeHttpsRequest(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
-      }
       const urlStr = buildUrlStringFromArgs(urlOrOptions, optionsOrCallback);
 
       if (urlStr && shouldPassthroughChatGPTCodexResponseBackendUrl(urlStr)) {
@@ -2272,9 +2096,6 @@ export function createFetchInterceptor(
       optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
       callback?: (res: NodeIncomingMessage) => void,
     ): NodeClientRequest {
-      if (!armed) {
-        return nativeHttpRequest(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
-      }
       const urlStr = buildUrlStringFromArgs(urlOrOptions, optionsOrCallback);
       // Layer 0: known provider domain or registered local LLM port
       // with a recognizable LLM path (original Ollama-only gate).
@@ -2320,9 +2141,6 @@ export function createFetchInterceptor(
       optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
       callback?: (res: NodeIncomingMessage) => void,
     ): NodeClientRequest {
-      if (!armed) {
-        return nativeHttpGet(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
-      }
       const req = patchedHttpRequest(urlOrOptions, optionsOrCallback, callback);
       try {
         (req as unknown as { end?: () => void }).end?.();
@@ -2333,9 +2151,6 @@ export function createFetchInterceptor(
     }
 
     http.get = patchedHttpGet as typeof http.get;
-
-    let ourUndiciDispatcher: unknown = null;
-    let ourHostDispatch: UndiciDispatchFn | null = null;
 
     // ─── Undici dispatcher interception ───
     // Node 18+ globalThis.fetch is backed by undici's internal
@@ -2352,10 +2167,10 @@ export function createFetchInterceptor(
       originalUndiciDispatcher = undici.getGlobalDispatcher() as UndiciDispatcher;
       const parentDispatcher = originalUndiciDispatcher;
 
-      const parentDispatch = (nextOpts: UndiciDispatchOptions, nextHandler: unknown): boolean =>
-        (parentDispatcher as unknown as { dispatch: UndiciDispatchFn }).dispatch(nextOpts, nextHandler);
       const interceptingDispatch: UndiciDispatchFn = (opts, handler) =>
-        armed ? interceptUndiciDispatch(opts, handler, "global", parentDispatch) : parentDispatch(opts, handler);
+        interceptUndiciDispatch(opts, handler, "global", (nextOpts, nextHandler) =>
+          (parentDispatcher as unknown as { dispatch: UndiciDispatchFn }).dispatch(nextOpts, nextHandler),
+        );
 
       // Proxy object that delegates dispatch to our interceptor and
       // all other Dispatcher methods to the original.
@@ -2363,7 +2178,6 @@ export function createFetchInterceptor(
         dispatch: { value: interceptingDispatch, writable: true, configurable: true },
       });
       undici.setGlobalDispatcher(proxyDispatcher);
-      ourUndiciDispatcher = proxyDispatcher;
     }
 
     // The host application's own undici copy: its requests carry an explicit
@@ -2378,37 +2192,22 @@ export function createFetchInterceptor(
         opts: UndiciDispatchOptions,
         handler: unknown,
       ): boolean {
-        if (!armed) return original.call(this, opts, handler);
         return interceptUndiciDispatch(opts, handler, "host", (nextOpts, nextHandler) =>
           original.call(this, nextOpts, nextHandler),
         );
       };
-      ourHostDispatch = base.dispatch;
     }
-
-    ours = {
-      fetch: guardedFetch,
-      httpsRequest: patchedHttpsRequest as typeof https.request,
-      httpRequest: patchedHttpRequest as typeof http.request,
-      httpGet: patchedHttpGet as typeof http.get,
-      undiciDispatcher: ourUndiciDispatcher,
-      hostDispatch: ourHostDispatch,
-      found: foundLayers,
-    };
-    disarmCurrent = () => {
-      armed = false;
-    };
 
     logInfo(
       `[defenseclaw] LLM fetch interceptor active (proxy: ${proxyBase})`,
     );
-    const layers = describeLayers();
+    const layers = describeOwnLayers();
     logStartupBanner(layers);
     scheduleSelfTest();
   }
 
-  async function verifyInterception(): Promise<InterceptionSelfTest> {
-    const layers = describeLayers();
+  async function verifyOwnInterception(): Promise<InterceptionSelfTest> {
+    const layers = describeOwnLayers();
     const expectedDest = `${proxyBase}/v1/chat/completions`;
     if (!originalFetch) {
       return {
@@ -2422,7 +2221,7 @@ export function createFetchInterceptor(
     // only short-circuits inside our own wrapper. If globalThis.fetch is not
     // ours -- never installed, or replaced by another module after start() --
     // the probe would become genuine unguarded egress from the guardrail
-    // itself, repeated on every verify tick. describeLayers() already reports
+    // itself, repeated on every verify tick. describeOwnLayers() already reports
     // that condition with no network call, so answer from it instead.
     if (!layers.fetch) {
       return {
@@ -2539,8 +2338,8 @@ export function createFetchInterceptor(
     }
   }
 
-  async function runSelfTest(): Promise<InterceptionSelfTest> {
-    const result = await verifyInterception();
+  async function runOwnSelfTest(): Promise<InterceptionSelfTest> {
+    const result = await verifyOwnInterception();
     const line =
       `[defenseclaw] interception self-test ok=${result.ok} dest=${result.destination || "none"} ` +
       `reason=${result.reason}`;
@@ -2557,234 +2356,17 @@ export function createFetchInterceptor(
   function scheduleSelfTest(): void {
     if (selfTestTimer) return;
     selfTestTimer = setInterval(() => {
-      void runSelfTest();
+      void runOwnSelfTest();
     }, INTERCEPTION_SELF_TEST_INTERVAL_MS);
     if (typeof selfTestTimer === "object" && selfTestTimer && "unref" in selfTestTimer) {
       (selfTestTimer as { unref?: () => void }).unref?.();
     }
   }
 
-  /**
-   * An older copy that held the transport puts fetch, https.request,
-   * http.request and http.get back in one stop; another component wrapping
-   * one of them leaves the others ours. The dispatchers are not looked at:
-   * not every older build restores them.
-   */
-  function transportGone(): boolean {
-    return (
-      ours !== null &&
-      globalThis.fetch !== ours.fetch &&
-      https.request !== ours.httpsRequest &&
-      http.request !== ours.httpRequest &&
-      http.get !== ours.httpGet
-    );
-  }
-
-  function adoptPatch(patch: PatchState): void {
-    originalFetch = patch.originalFetch;
-    originalHttpsRequest = patch.originalHttpsRequest;
-    originalHttpRequest = patch.originalHttpRequest;
-    originalHttpGet = patch.originalHttpGet;
-    originalUndiciDispatcher = patch.originalUndiciDispatcher;
-    hostUndici = patch.hostUndici;
-    originalHostDispatch = patch.originalHostDispatch;
-    egressReporter = patch.egressReporter;
-    ours = patch.ours;
-    disarmCurrent = patch.disarm;
-  }
-
-  function currentPatch(): PatchState {
-    return {
-      originalFetch,
-      originalHttpsRequest,
-      originalHttpRequest,
-      originalHttpGet,
-      originalUndiciDispatcher,
-      hostUndici,
-      originalHostDispatch,
-      egressReporter,
-      ours,
-      disarm: disarmCurrent,
-    };
-  }
-
-  function cancelPendingCheck(): void {
-    recheckSeq++;
-    pendingProbes.clear();
-  }
-
-  /** Start a check of reachability: a probe id, and the record the wrapper of this copy notes it in. */
-  function newProbe(): { id: string; probe: { seen: boolean } } {
-    const id = `${++probeCounter}`;
-    const probe = { seen: false };
-    pendingProbes.set(id, probe);
-    return { id, probe };
-  }
-
-  /**
-   * Does a call through the global fetch reach the wrapper of this copy before
-   * the call returns? Only a positive answer is evidence: a wrapper that
-   * forwards later, or not for a call that is already aborted, looks the same
-   * as a removed patch.
-   */
-  function patchReachableAtOnce(): boolean {
-    const { id, probe } = newProbe();
-    // Aborted right after the call is issued: the wrapper of this copy answers
-    // in that same call; a call that finds no such wrapper is ended before it
-    // sends anything.
-    const controller = new AbortController();
-    try {
-      void Promise.resolve(
-        globalThis.fetch(reachabilityProbeUrl(id), {
-          headers: { [REACHABILITY_PROBE_HEADER]: id },
-          signal: controller.signal,
-        }),
-      ).catch(() => undefined);
-    } catch {
-      // a wrapper that throws did not forward the probe
-    } finally {
-      controller.abort();
-      pendingProbes.delete(id);
-    }
-    return probe.seen;
-  }
-
-  /**
-   * An older plugin copy reported a stop while this copy holds the transport.
-   * If that copy was the one that held it, its stop put the old transport
-   * back over every layer of the patch of this copy, and the next model call
-   * would go to the provider directly. This runs inside that stop, so it
-   * cannot wait for an answer to "was the patch removed?": if no layer is ours
-   * and a call does not reach our wrapper at once, the transport is patched
-   * again in the same call (GAP-0745). Whether that was needed is checked
-   * afterwards, however long a wrapper of another component takes to forward
-   * (verifyPatchedAgain), and a redundant patch is taken back out.
-   */
-  function recheckTransport(): void {
-    if (!originalFetch || !transportGone()) return;
-    cancelPendingCheck();
-    if (patchReachableAtOnce()) return;
-    const earlier = currentPatch();
-    superseded.push(earlier);
-    originalFetch = null;
-    originalHttpsRequest = null;
-    originalHttpRequest = null;
-    originalHttpGet = null;
-    originalUndiciDispatcher = null;
-    hostUndici = null;
-    originalHostDispatch = null;
-    egressReporter = null;
-    ours = null;
-    disarmCurrent = null;
-    _shared.owner = null;
-    start();
-    verifyPatchedAgain(earlier);
-  }
-
-  /**
-   * The patch made by recheckTransport stays until a probe call shows whether
-   * the earlier patch of this copy is still in the chain. The probe goes
-   * through what the new patch found, so it passes any wrapper of another
-   * component sitting there and reaches the earlier patch if it is there:
-   *   reached: the older copy removed nothing and the new patch was redundant;
-   *     it is taken out (identity restored where it is still on top,
-   *     disarmed where another component wrapped it meanwhile);
-   *   not reached: the earlier patch is gone and the new one is the guard.
-   * A stop of this copy in between cancels the check and puts back what the
-   * first patch of this copy found.
-   */
-  function verifyPatchedAgain(earlier: PatchState): void {
-    if (!originalFetch) return;
-    const seq = ++recheckSeq;
-    const below = originalFetch;
-    const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const bound = new Promise<void>((resolve) => {
-      timer = setTimeout(() => {
-        controller.abort();
-        resolve();
-      }, REACHABILITY_PROBE_TIMEOUT_MS);
-      (timer as { unref?: () => void }).unref?.();
-    });
-    const { id, probe } = newProbe();
-    let call: Promise<unknown>;
-    try {
-      call = Promise.resolve(
-        below(reachabilityProbeUrl(id), {
-          headers: { [REACHABILITY_PROBE_HEADER]: id },
-          signal: controller.signal,
-        }),
-      );
-    } catch {
-      call = Promise.resolve(); // a wrapper that throws did not forward the probe
-    }
-    void Promise.race([call.then(() => undefined, () => undefined), bound]).then(() => {
-      clearTimeout(timer);
-      if (seq !== recheckSeq) return;
-      cancelPendingCheck();
-      if (probe.seen) retractPatch(earlier);
-      else commitPatch();
-    });
-  }
-
-  function retractPatch(earlier: PatchState): void {
-    const mine = ours;
-    if (mine) {
-      if (originalFetch && globalThis.fetch === mine.fetch) globalThis.fetch = originalFetch;
-      if (https.request === mine.httpsRequest) https.request = mine.found.httpsRequest;
-      if (http.request === mine.httpRequest) http.request = mine.found.httpRequest;
-      if (http.get === mine.httpGet) http.get = mine.found.httpGet;
-      if (
-        undici &&
-        originalUndiciDispatcher &&
-        mine.undiciDispatcher &&
-        undici.getGlobalDispatcher() === mine.undiciDispatcher
-      ) {
-        undici.setGlobalDispatcher(originalUndiciDispatcher);
-      }
-      if (hostUndici && originalHostDispatch && mine.hostDispatch && hostUndici.base.dispatch === mine.hostDispatch) {
-        hostUndici.base.dispatch = originalHostDispatch;
-      }
-    }
-    disarmCurrent?.();
-    egressReporter?.stop();
-    superseded = superseded.filter((patch) => patch !== earlier);
-    adoptPatch(earlier);
-  }
-
-  /**
-   * The earlier patch did not answer the probe: it is gone, or something in
-   * the chain kept the probe from reaching it, and the answer cannot tell
-   * those apart. The current patch guards either way. The earlier ones stay
-   * armed until this copy stops, then they are disarmed (stop()), so a patch
-   * that is still in the chain below another component's wrapper no longer
-   * routes calls to this copy.
-   */
-  function commitPatch(): void {
-    for (const patch of superseded) patch.egressReporter?.stop();
-    suspected.push(...superseded);
-    superseded = [];
-    console.warn(
-      "[defenseclaw] An older DefenseClaw plugin copy removed the LLM transport patch when it stopped; " +
-        "this copy patched it again.",
-    );
-  }
-
-  function stop(): void {
-    cancelPendingCheck();
-    if (superseded.length > 0) {
-      // Put back what the first patch of this copy found, under every patch
-      // this copy made since.
-      egressReporter?.stop();
-      for (const patch of superseded.slice(1)) patch.egressReporter?.stop();
-      const first = superseded[0];
-      superseded = [];
-      adoptPatch(first);
-    }
-    ours = null;
-    disarmCurrent = null;
-    for (const patch of suspected) patch.disarm?.();
-    suspected = [];
+  // Takes the patch out. Only the controller runs it, once the last copy it
+  // serves has stopped, so the stop of a copy that a reload replaced leaves
+  // the patch of its successor alone.
+  function uninstall(): void {
     if (originalFetch) {
       globalThis.fetch = originalFetch;
       originalFetch = null;
@@ -2824,15 +2406,65 @@ export function createFetchInterceptor(
       clearInterval(selfTestTimer);
       selfTestTimer = null;
     }
-    const queued = _shared.waiting.indexOf(start);
-    if (queued >= 0) _shared.waiting.splice(queued, 1);
-    if (_shared.owner === ownerMark) {
-      _shared.owner = null;
-      _shared.guardrailPort = null;
-      handOverTransport();
-    }
+    _shared.installed = false;
+    _shared.guardrailPort = null;
+    _shared.controller = null;
+    holders = [];
     logInfo("[defenseclaw] LLM fetch interceptor stopped");
   }
 
-  return { start, stop, describeLayers, verifyInterception, runSelfTest };
+  // Points the wrappers at the config of the copy that was loaded last.
+  function serve(config: AdoptedConfig): void {
+    guardrailPort = config.guardrailPort;
+    getCorrelationHeaders = config.getCorrelationHeaders;
+    proxyBase = `http://127.0.0.1:${guardrailPort}`;
+    _shared.guardrailPort = guardrailPort;
+    egressReporter?.stop();
+    egressReporter = createEgressReporter({ guardrailPort });
+    void bootstrapProviderOverlay(guardrailPort, {
+      fetchImpl: originalFetch ?? globalThis.fetch,
+      token: loadSidecarConfig().token,
+    });
+    logInfo(`[defenseclaw] LLM fetch interceptor serving proxy ${proxyBase}`);
+  }
+
+  const controllerImpl: InterceptorController = {
+    adopt(copy, config) {
+      holders = holders.filter((h) => h.copy !== copy);
+      holders.push({ copy, config });
+      serve(config);
+    },
+    release(copy) {
+      const wasLast = holders[holders.length - 1]?.copy === copy;
+      holders = holders.filter((h) => h.copy !== copy);
+      if (holders.length === 0) {
+        uninstall();
+      } else if (wasLast) {
+        serve(holders[holders.length - 1].config);
+      }
+    },
+    describeLayers: describeOwnLayers,
+    verifyInterception: verifyOwnInterception,
+    runSelfTest: runOwnSelfTest,
+  };
+
+  // A copy that adopted the patch of an earlier copy reports on that patch.
+  function served(): InterceptorController | null {
+    const controller = _shared.controller;
+    return started && controller && controller !== controllerImpl ? controller : null;
+  }
+
+  function stop(): void {
+    if (!started) return;
+    started = false;
+    _shared.controller?.release(self);
+  }
+
+  return {
+    start,
+    stop,
+    describeLayers: () => (served() ?? controllerImpl).describeLayers(),
+    verifyInterception: () => (served() ?? controllerImpl).verifyInterception(),
+    runSelfTest: () => (served() ?? controllerImpl).runSelfTest(),
+  };
 }
