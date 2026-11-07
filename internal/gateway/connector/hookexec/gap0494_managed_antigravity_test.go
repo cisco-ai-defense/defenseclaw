@@ -14,6 +14,7 @@ import (
 )
 
 func TestGAP0494ManagedAntigravityOutageReasonAndBenignTwin(t *testing.T) {
+	shortRestartBudget(t)
 	home := t.TempDir()
 	token := "managed-test-token"
 	var stdout, stderr bytes.Buffer

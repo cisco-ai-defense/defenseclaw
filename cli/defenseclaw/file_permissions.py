@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import shlex
 import socket
@@ -53,6 +54,104 @@ UNSAFE_PATH_INSPECTION_FAILED = "unsafe-path-inspection-failed"
 UNSAFE_PATH_NAMESPACE_VIEW = "unsafe-path-namespace-view"
 
 _tracked_host_stat_lock = threading.Lock()
+
+# The local account records are checked alongside NSS before a group is
+# considered private. Tests replace these paths with isolated account data.
+_PASSWD_FILE = "/etc/passwd"
+_GROUP_FILE = "/etc/group"
+
+
+def _account_records(path: str) -> list[list[str]] | None:
+    try:
+        with open(path, encoding="utf-8", errors="strict") as handle:
+            lines = handle.read().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    records = []
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line.startswith(("+", "-")):
+            return None
+        records.append(line.split(":"))
+    return records
+
+
+def _has_access_acl(path: str) -> bool:
+    """Treat an unreadable ACL as present; group mode bits can be its mask."""
+    getxattr = getattr(os, "getxattr", None)
+    if getxattr is None:
+        return True
+    for attribute in ("system.posix_acl_access", "system.nfs4_acl", "system.nfs4acl"):
+        try:
+            getxattr(path, attribute, follow_symlinks=False)
+        except OSError as exc:
+            if exc.errno in (errno.ENODATA, errno.ENOTSUP, getattr(errno, "ENOATTR", errno.ENODATA)):
+                continue
+            return True
+        return True
+    return False
+
+
+def owner_private_group(path: str, info: os.stat_result) -> bool:
+    """Whether a Linux path is owned by this account and its private group."""
+    if not sys.platform.startswith("linux") or os.name == "nt":
+        return False
+    uid, gid = os.geteuid(), info.st_gid
+    try:
+        target = os.path.realpath(path)
+        resolved = os.stat(target)
+    except OSError:
+        return False
+    if (resolved.st_dev, resolved.st_ino) != (info.st_dev, info.st_ino):
+        return False
+    if info.st_uid != uid or _has_access_acl(target):
+        return False
+    passwd = _account_records(_PASSWD_FILE)
+    groups = _account_records(_GROUP_FILE)
+    if passwd is None or groups is None:
+        return False
+    try:
+        owners = [rec for rec in passwd if len(rec) >= 4 and int(rec[2]) == uid]
+        if len(owners) != 1:
+            return False
+        name = owners[0][0]
+        if not name:
+            return False
+        for rec in passwd:
+            if len(rec) < 4:
+                return False
+            record_uid, record_gid = int(rec[2]), int(rec[3])
+            if record_gid == gid and record_uid != uid:
+                return False
+            if rec[0] == name and (record_uid != uid or record_gid != gid):
+                return False
+        matches = [rec for rec in groups if len(rec) >= 4 and int(rec[2]) == gid]
+    except ValueError:
+        return False
+    if not matches:
+        return False
+    for rec in matches:
+        members = {member.strip() for member in rec[3].split(",") if member.strip()}
+        if rec[0] != name or not members <= {name}:
+            return False
+    try:
+        import grp
+        import pwd
+
+        account = pwd.getpwuid(uid)
+        group = grp.getgrgid(gid)
+    except (ImportError, KeyError, OSError):
+        return False
+    return account.pw_name == name and account.pw_gid == gid and group.gr_name == name and set(group.gr_mem) <= {name}
+
+
+def other_accounts_can_write(path: str, info: os.stat_result) -> bool:
+    """Check other-write and group-write after proving a private group."""
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & 0o002:
+        return True
+    return bool(mode & 0o020) and not owner_private_group(path, info)
 
 
 def tracked_host_owner_uid(path: str | os.PathLike[str], info: os.stat_result) -> int:
@@ -327,6 +426,11 @@ def sudo_runtime_leftover_relpaths(data_dir: str | os.PathLike[str]) -> list[str
     return leftovers
 
 
+# The one Windows owner trust set, besides the account itself, for folders and
+# files DefenseClaw validates but did not create: a profile folder is owned by
+# BUILTIN\Administrators when a member of that group created it, elevated or
+# not (cowork-1-0-8 GAP-0085). Matched by well-known SID only. Go's
+# internal/winowner.SystemOwnerSIDs holds the same list; a test pins the two.
 _WINDOWS_TRUSTED_SYSTEM_CONTROLLER_SIDS = frozenset(
     {
         "S-1-5-18",  # LocalSystem
@@ -335,6 +439,33 @@ _WINDOWS_TRUSTED_SYSTEM_CONTROLLER_SIDS = frozenset(
         "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
     }
 )
+
+
+# Every right that lets a principal change a folder's entries or a file's
+# content, DACL or owner: GENERIC_ALL, GENERIC_WRITE, DELETE, WRITE_DAC,
+# WRITE_OWNER, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_WRITE_EA,
+# FILE_DELETE_CHILD and FILE_WRITE_ATTRIBUTES. Go's
+# internal/winowner.CustodyWriteMask holds the same value (the Cowork guard
+# applies it to the removal marker's folder); a test pins the two.
+_WINDOWS_CUSTODY_WRITE_MASK = 0x10000000 | 0x40000000 | 0x000D0156
+
+
+def windows_owner_problem(owner_sid: str, current_sid: str) -> str | None:
+    """Return why *owner_sid* is outside the Windows owner trust set, or ``None``.
+
+    The set is *current_sid* (when known) and
+    ``_WINDOWS_TRUSTED_SYSTEM_CONTROLLER_SIDS``. Users, Authenticated Users,
+    Everyone and every other account are refused; the message names the owner.
+    """
+    if owner_sid and (
+        (current_sid and owner_sid == current_sid) or owner_sid in _WINDOWS_TRUSTED_SYSTEM_CONTROLLER_SIDS
+    ):
+        return None
+    trusted = "SYSTEM, BUILTIN Administrators or TrustedInstaller"
+    if current_sid:
+        trusted = "this account, " + trusted
+    return f"owner SID {owner_sid or '<unknown>'} is not {trusted}"
+
 
 _DOTENV_PROCESS_CONTROL_NAMES = frozenset(
     {
@@ -1472,7 +1603,6 @@ def atomic_write_private(
     write: Callable[[int], None],
     *,
     protect_parent: bool = True,
-    allow_windows_system_controllers_in_parent: bool = False,
     windows_managed_custody: bool = False,
     windows_managed_security: WindowsFileSecurity | None = None,
 ) -> None:
@@ -1493,18 +1623,12 @@ def atomic_write_private(
     so the exact accepted descriptor, rather than generation B's descriptor,
     is applied to the staged replacement before publication.
 
-    ``allow_windows_system_controllers_in_parent`` applies only when an
-    operator-selected parent is preserved. It admits the Windows system
-    controller SIDs already trusted by the custody policy while still
-    requiring current-user ownership and rejecting every other writer. The
-    staged and published file retains the stricter owner/SYSTEM-only policy.
+    ``protect_parent=False`` preserves an operator-selected or account folder
+    as it is and validates it with :func:`_validate_unmodified_parent`. The
+    staged and published file keeps the stricter owner/SYSTEM-only policy.
     """
     if windows_managed_security is not None and not windows_managed_custody:
         raise ValueError("managed Windows security requires managed-custody mode")
-    if allow_windows_system_controllers_in_parent and protect_parent:
-        raise ValueError("trusted Windows parent custody requires protect_parent=False")
-    if allow_windows_system_controllers_in_parent and windows_managed_custody:
-        raise ValueError("trusted Windows parent custody and managed-custody mode are mutually exclusive")
     target = os.path.abspath(os.fspath(path))
     parent = os.path.dirname(target) or os.curdir
     _reject_reparse_chain(parent)
@@ -1522,10 +1646,7 @@ def atomic_write_private(
         elif protect_parent:
             _protect_private_directory(parent)
         else:
-            _validate_unmodified_parent(
-                parent,
-                allow_windows_system_controllers=allow_windows_system_controllers_in_parent,
-            )
+            _validate_unmodified_parent(parent)
         _reject_reparse_path(target, allow_missing=True)
 
         managed_security = windows_managed_security
@@ -1600,7 +1721,6 @@ def atomic_write_private_bytes(
     data: bytes,
     *,
     protect_parent: bool = True,
-    allow_windows_system_controllers_in_parent: bool = False,
     windows_managed_custody: bool = False,
     windows_managed_security: WindowsFileSecurity | None = None,
 ) -> None:
@@ -1618,13 +1738,9 @@ def atomic_write_private_bytes(
         path,
         _write,
         protect_parent=protect_parent,
-        allow_windows_system_controllers_in_parent=allow_windows_system_controllers_in_parent,
         windows_managed_custody=windows_managed_custody,
         windows_managed_security=windows_managed_security,
     )
-
-
-_WINDOWS_BUILTIN_ADMINISTRATORS_SID = "S-1-5-32-544"
 
 
 def windows_acl_write_error(
@@ -1635,11 +1751,14 @@ def windows_acl_write_error(
     """Return why an untrusted SID can write *path*, or ``None`` when safe.
 
     Only the current user (who must own *path*), OWNER RIGHTS and LocalSystem
-    may hold write rights. ``trust_administrators`` also admits the built-in
-    Administrators group, matched by its well-known SID only: a profile folder
-    such as ``~\\.local\\bin`` inherits its full-control entry, and a local
-    administrator can already take over the account's files.
+    may hold write rights. ``trust_administrators`` is for a folder or file
+    DefenseClaw did not create, such as ``~\\.local\\bin``: it applies the
+    one Windows owner trust set of :func:`windows_acl_custody_write_error`,
+    whose owners and writers also include BUILTIN Administrators and
+    TrustedInstaller (cowork-1-0-8 GAP-0085).
     """
+    if trust_administrators:
+        return windows_acl_custody_write_error(path, allow_current_user=True)
     if os.name != "nt":
         return None
     try:
@@ -1659,8 +1778,6 @@ def windows_acl_write_error(
         return f"owner SID {owner_sid or '<unknown>'} is not the current user"
 
     trusted = {"S-1-3-4", "S-1-5-18", current_sid}  # OWNER RIGHTS, LocalSystem, current user
-    if trust_administrators:
-        trusted.add(_WINDOWS_BUILTIN_ADMINISTRATORS_SID)
     write_mask = 0x10000000 | 0x40000000 | 0x000D0156
     for permissions, access_mode, inheritance, sid in entries:
         if access_mode not in (1, 2) or not permissions & write_mask:
@@ -1709,13 +1826,10 @@ def windows_acl_custody_write_error(
         if not current_sid:
             return "current user SID could not be resolved"
     system_controllers = set(_WINDOWS_TRUSTED_SYSTEM_CONTROLLER_SIDS)
-    trusted_owners = set(system_controllers)
-    if trust_current_user:
-        trusted_owners.add(current_sid)
     if require_current_user_owner and owner_sid != current_sid:
         return f"owner SID {owner_sid or '<unknown>'} is not the current user"
-    if not require_current_user_owner and owner_sid not in trusted_owners:
-        return f"owner SID {owner_sid or '<unknown>'} is not a trusted custody principal"
+    if not require_current_user_owner and (problem := windows_owner_problem(owner_sid, current_sid)):
+        return problem
 
     trusted_writers = system_controllers | {
         "S-1-3-4",  # OWNER RIGHTS, constrained by the owner check above
@@ -1723,7 +1837,7 @@ def windows_acl_custody_write_error(
     }
     if trust_current_user:
         trusted_writers.add(current_sid)
-    write_mask = 0x10000000 | 0x40000000 | 0x000D0156
+    write_mask = _WINDOWS_CUSTODY_WRITE_MASK
     ancestor_replace_mask = 0x10000000 | 0x40000000 | 0x00010000 | 0x00040000 | 0x00080000 | 0x40
     for permissions, access_mode, inheritance, sid in entries:
         if access_mode not in (1, 2):
@@ -1959,21 +2073,17 @@ def _protect_private_directory(path: str) -> None:
         copy_windows_dacl(path, path)
 
 
-def _validate_unmodified_parent(
-    path: str,
-    *,
-    allow_windows_system_controllers: bool = False,
-) -> None:
-    """Fail closed when an operator-selected parent is replaceable by others."""
+def _validate_unmodified_parent(path: str) -> None:
+    """Fail closed when an operator-selected parent is replaceable by others.
+
+    On Windows the parent is a folder DefenseClaw did not create, such as the
+    profile folder that holds the Cowork removal marker, so it gets the one
+    Windows owner trust set: owned by this account, SYSTEM, BUILTIN
+    Administrators or TrustedInstaller, and writable by no one else
+    (cowork-1-0-8 GAP-0085).
+    """
     if os.name == "nt":
-        if allow_windows_system_controllers:
-            problem = windows_acl_custody_write_error(
-                path,
-                allow_current_user=True,
-                require_current_user_owner=True,
-            )
-        else:
-            problem = windows_acl_write_error(path)
+        problem = windows_acl_custody_write_error(path, allow_current_user=True)
         if problem is not None:
             raise OSError(f"unsafe export parent {path}: {problem}")
         return

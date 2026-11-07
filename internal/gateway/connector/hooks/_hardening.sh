@@ -2498,6 +2498,11 @@ defenseclaw_gateway_unreachable_reason() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) printf '%s' 'gateway unreachable'; return 0 ;;
   esac
+  case "${RESPONSE:-}" in
+    "DCPOSTROOT1:Your DefenseClaw gateway is running as root."*)
+      printf '%s' "${RESPONSE#DCPOSTROOT1:}"
+      return 0 ;;
+  esac
   if [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] && [ -n "${API_ADDR:-}" ] &&
      defenseclaw_api_listener_unproven "$API_ADDR"; then
     printf '%s' "${API_ADDR} is not proven to be this account's gateway; no token or payload was sent to it. Another account may hold the port. Run \`defenseclaw setup gateway --api-port <free-port>\` to choose a free port"
@@ -4144,6 +4149,11 @@ _dc_gateway_post_once() {
         # must not change the outage decision (rel-1-0-6 GAP-0497).
         11) return 7 ;;
         126|127) ;;
+        8)
+          _dc_post_peer_final=1
+          case "$_dc_post_output" in
+            "DCPOSTROOT1:Your DefenseClaw gateway is running as root."*) printf '%s' "$_dc_post_output" ;;
+          esac ;;
         9)
           _dc_post_sent_noanswer=1
           case "$_dc_post_output" in

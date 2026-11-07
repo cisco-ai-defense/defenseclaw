@@ -591,6 +591,11 @@ func writePerUserGatewayHelperRecord(hookDir string) error {
 // under, beside the per-user hooks it renders (cli hookConfigRecordName).
 const perUserConfigRecordName = ".config-record"
 
+// perUserInstallHomeRecordName is the record of the folder that holds the
+// gateway.pid of this account, beside the hooks. It is separate from the config
+// record because DEFENSECLAW_CONFIG can name a file outside the install home.
+const perUserInstallHomeRecordName = ".install-home-record"
+
 // writePerUserConfigRecord records, beside the hooks, the absolute config
 // file this gateway runs under, as config.ConfigPath names it
 // (DEFENSECLAW_CONFIG, else DEFENSECLAW_HOME/config.yaml, else
@@ -621,6 +626,19 @@ func writePerUserConfigRecord(hookDir string) error {
 	}
 	if err := hookRuntimeFileWriter(false)(filepath.Join(hookDir, perUserConfigRecordName), []byte(path+"\n"), 0o600); err != nil {
 		return fmt.Errorf("write hook config record: %w", err)
+	}
+	// Written under the same cold-start guard as the config record.
+	home := os.Getenv("DEFENSECLAW_HOME")
+	if home == "" {
+		if account := userHomeDir(); account != "" {
+			home = filepath.Join(account, ".defenseclaw")
+		}
+	}
+	if !filepath.IsAbs(home) {
+		return nil
+	}
+	if err := hookRuntimeFileWriter(false)(filepath.Join(hookDir, perUserInstallHomeRecordName), []byte(filepath.Clean(home)+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write hook install home record: %w", err)
 	}
 	return nil
 }
@@ -822,7 +840,7 @@ func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, man
 		HookHomeSH:           homeSH,
 		ScopedToken:          scopedToken,
 		ConnectorName:        strings.ToLower(strings.TrimSpace(connectorName)),
-		HookBinaryPS:         strings.ReplaceAll(defenseclawHookBinary(), "'", "''"),
+		HookBinaryPS:         powershellLiteralBody(defenseclawHookBinary()),
 		HookTimeoutMS:        windowsHookAdapterTimeoutMS,
 		CursorHookTimeoutMS:  cursorWindowsHookAdapterTimeoutMS,
 		CopilotHookTimeoutMS: copilotWindowsHookAdapterTimeoutMS,
@@ -863,6 +881,7 @@ const hookRuntimeRenderMaxBytes = 4 << 20
 type renderedHookRuntimeFile struct {
 	path string
 	body []byte
+	mode os.FileMode
 }
 
 // HookScriptRenderDrift compares the hook runtime files conn's managed Setup
@@ -879,6 +898,24 @@ type renderedHookRuntimeFile struct {
 // recorded digest. Files are read with the caller's credentials, bounded and
 // without following a link.
 func HookScriptRenderDrift(conn Connector, opts SetupOpts) (string, error) {
+	return hookScriptRenderDrift(conn, opts, nil)
+}
+
+// HookScriptRenderDriftWithMetadata also checks the file protection expected
+// by a caller that owns the installed runtime. The standalone Unix guardian
+// supplies this check; other profiles retain HookScriptRenderDrift's byte
+// comparison.
+func HookScriptRenderDriftWithMetadata(
+	conn Connector, opts SetupOpts,
+	check func(string, os.FileMode) (bool, error),
+) (string, error) {
+	return hookScriptRenderDrift(conn, opts, check)
+}
+
+func hookScriptRenderDrift(
+	conn Connector, opts SetupOpts,
+	check func(string, os.FileMode) (bool, error),
+) (string, error) {
 	files, err := renderedHookRuntimeFiles(conn, opts)
 	if err != nil {
 		return filepath.Join(opts.DataDir, "hooks"), err
@@ -893,6 +930,12 @@ func HookScriptRenderDrift(conn Connector, opts SetupOpts) (string, error) {
 		}
 		if !bytes.Equal(installed, file.body) {
 			return file.path, nil
+		}
+		if check != nil {
+			matches, err := check(file.path, file.mode)
+			if err != nil || !matches {
+				return file.path, err
+			}
 		}
 	}
 	return "", nil
@@ -953,10 +996,10 @@ func renderedHookRuntimeFiles(conn Connector, opts SetupOpts) ([]renderedHookRun
 		if err != nil {
 			return nil, fmt.Errorf("read hook helper %s: %w", name, err)
 		}
-		files = append(files, renderedHookRuntimeFile{path: filepath.Join(hookDir, name), body: content})
+		files = append(files, renderedHookRuntimeFile{path: filepath.Join(hookDir, name), body: content, mode: 0o600})
 	}
 	for _, script := range scripts {
-		files = append(files, renderedHookRuntimeFile{path: filepath.Join(hookDir, script.name), body: script.body})
+		files = append(files, renderedHookRuntimeFile{path: filepath.Join(hookDir, script.name), body: script.body, mode: 0o700})
 	}
 	return files, nil
 }

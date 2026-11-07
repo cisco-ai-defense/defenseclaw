@@ -1815,6 +1815,7 @@ def test_repair_rebuilds_deployment_metadata_that_is_not_json(tmp_path: Path) ->
             "ConvertFrom-DefenseClawDeploymentMetadataText",
             "Get-DefenseClawDeploymentMetadata",
             "Repair-DefenseClawUnreadableDeploymentMetadata",
+            "Format-DefenseClawSetupAction",
             "Write-DefenseClawJsonAtomic",
             "Clear-DefenseClawRestrictiveFileAttributes",
         )
@@ -1910,7 +1911,12 @@ Invoke-Case 'valid drifted' $valid $true $full
         assert cases[name]["read"].startswith("could not read the installed deployment metadata"), cases[name]
         assert cases[name]["resets"] == 0, cases[name]
         assert cases[name]["repair"] == "rebuilt=True installed=True stamps=1 drifted=False", cases[name]
-    assert "only Setup /repair" in cases["garbage without payload"]["repair"]
+    # GAP-0095: Setup is not installed on the computer; the hint runs it from its folder and says where it comes from.
+    assert (
+        "only the installed release's Setup carries every artifact it must re-record (acp, hook, sensor_helper, installer, module); "
+        "run & '.\\DefenseClawSetup-Enterprise-Standalone-x64.exe' /repair (Setup is not installed on this computer: "
+        "use the copy in your MDM package or the release download)"
+    ) in cases["garbage without payload"]["repair"], cases["garbage without payload"]
     assert cases["valid drifted"]["read"].startswith("managed DACL is not protected")
     assert cases["valid drifted"]["repair"].startswith("managed DACL is not protected")
 
@@ -1964,11 +1970,16 @@ def _repair_rollback_config_cases(tmp_path: Path) -> dict[str, dict]:
             "Assert-DefenseClawRepairRollbackConfig",
             "Repair-DefenseClawUnreadableDeploymentMetadata",
             "Get-DefenseClawRepairRollbackApprovedConfigSource",
+            "Get-DefenseClawRecordedConfigGeneration",
             "Get-DefenseClawRecordedConfigGenerationHash",
+            "Test-DefenseClawSignedBundleStoreHoldsVersions",
+            "Get-DefenseClawHandEditApprovedConfigSource",
             "Get-DefenseClawApprovedPolicySource",
             "Get-DefenseClawApprovedPolicyHash",
             "Get-DefenseClawApprovedPolicyPath",
             "Get-DefenseClawStandaloneBundleRepairCommand",
+            "Format-DefenseClawSetupAction",
+            "Format-DefenseClawRepairAction",
         )
     )
     harness = tmp_path / "repair-rollback-config.ps1"
@@ -1976,6 +1987,7 @@ def _repair_rollback_config_cases(tmp_path: Path) -> dict[str, dict]:
         "$ErrorActionPreference = 'Stop'\nSet-StrictMode -Version Latest\n"
         + functions
         + r"""
+function Test-DefenseClawStandaloneProfile { return $true }
 $script:SchemaVersion = 1
 $script:AdministratorsSID = 'S-1-5-32-544'
 $script:SystemSID = 'S-1-5-18'
@@ -2138,21 +2150,145 @@ def test_repair_checks_the_running_gateway_rollback_config_before_rebuilding_met
     assert "0.0.0.0" in stale["config"], stale
 
 
+_SETUP_HINT_FUNCTIONS = (
+    "Test-DefenseClawStandaloneProfile",
+    "Format-DefenseClawSetupAction",
+    "Format-DefenseClawRepairAction",
+    "Format-DefenseClawRerunStep",
+    "Get-DefenseClawStandaloneBundleRepairCommand",
+)
+
+
+def test_module_hints_do_not_name_setup_as_a_bare_command() -> None:
+    # cowork-1-0-8 GAP-0095: Setup is not installed on a managed computer, so a
+    # hint reaches it only through Format-DefenseClawSetupAction (the command
+    # run from its folder, with where it comes from) or, for a repair, the
+    # installed CLI. The two literals left name it for a profile that is not
+    # standalone (Secure Client), which keeps the text it always had.
+    module = re.sub(r"<#.*?#>", "", _text(MODULE), flags=re.DOTALL)
+    named = [
+        line.strip()
+        for line in module.splitlines()
+        if not line.lstrip().startswith("#")
+        and re.search(r"\bSetup\s+/(?:repair|ensure|uninstall|install|upgrade|verify)\b", line)
+    ]
+    assert len(named) == 2, named
+    assert "return 'Setup /repair'" in named[0], named
+    assert "only Setup /repair carries every artifact" in named[1], named
+    assert "DefenseClawSetup-Enterprise-Standalone-x64.exe" not in re.sub(r"<#.*?#>", "", module.replace(
+        "\"& '.\\DefenseClawSetup-Enterprise-Standalone-x64.exe' $arguments\"", ""))
+    # "Run Setup again" names Setup with no command and no source. It is said
+    # only by Format-DefenseClawRerunStep, for a profile that is not standalone
+    # (the standalone profile asks for "the same command").
+    phrases = [
+        line.strip()
+        for line in module.splitlines()
+        if not line.lstrip().startswith("#")
+        and re.search(r"\b[Rr]un\s+(?:the\s+(?:same\s+)?)?Setup(?:\s+command)?\s+again\b|\bSetup\s+again\b", line)
+    ]
+    assert phrases == [
+        "if ($SameSetupCommand) { return 'run the same Setup command again' }",
+        "return 'run Setup again'",
+    ], phrases
+
+
+@pytest.mark.skipif(not _portable_pwsh(), reason="PowerShell 7 (pwsh) is not installed")
+def test_setup_hints_run_the_setup_from_its_folder_and_repair_through_the_cli(tmp_path: Path) -> None:
+    import json
+
+    module = _text(MODULE)
+    functions = "\n".join(_function_body(module, name) for name in _SETUP_HINT_FUNCTIONS)
+    harness = tmp_path / "hints.ps1"
+    harness.write_text(
+        functions
+        + r"""
+$Layout = @{ CLIPath = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' }
+$script:DefenseClawEnterpriseProfile = 'Standalone'
+$standalone = [ordered]@{
+    ensure = Format-DefenseClawSetupAction -Action '/ensure'
+    config = Format-DefenseClawSetupAction -Action '/ensure CONFIG=<approved absolute config path>'
+    either = Format-DefenseClawSetupAction -Action @('/install', '/uninstall PURGE=1')
+    repair = Format-DefenseClawRepairAction -Layout $Layout
+    rerun = Format-DefenseClawRerunStep
+    rerunSetup = Format-DefenseClawRerunStep -SameSetupCommand
+}
+$script:DefenseClawEnterpriseProfile = 'SecureClient'
+$other = [ordered]@{
+    ensure = Format-DefenseClawSetupAction -Action '/ensure'
+    config = Format-DefenseClawSetupAction -Action '/ensure CONFIG=<approved config>'
+    either = Format-DefenseClawSetupAction -Action @('/install', '/uninstall PURGE=1')
+    repair = Format-DefenseClawRepairAction -Layout $Layout
+    rerun = Format-DefenseClawRerunStep
+    rerunSetup = Format-DefenseClawRerunStep -SameSetupCommand
+}
+[ordered]@{ standalone = $standalone; other = $other } | ConvertTo-Json -Compress
+""",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [_portable_pwsh(), "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(harness)],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    source = "Setup is not installed on this computer: use the copy in your MDM package or the release download"
+    setup = "& '.\\DefenseClawSetup-Enterprise-Standalone-x64.exe'"
+    assert result["standalone"]["ensure"] == f"{setup} /ensure ({source})"
+    # A placeholder is quoted as the Go hints quote it: unquoted, PowerShell reads "<" as an error.
+    assert result["standalone"]["config"] == f"{setup} /ensure 'CONFIG=<approved absolute config path>' ({source})"
+    # Alternatives are separate commands, not one command with "or" as an argument.
+    assert result["standalone"]["either"] == f"{setup} /install or {setup} /uninstall PURGE=1 ({source})"
+    assert result["standalone"]["rerun"] == result["standalone"]["rerunSetup"] == "run the same command again"
+    assert result["standalone"]["repair"] == (
+        "& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw.exe' enterprise windows repair --profile standalone --json"
+    )
+    # Another profile keeps "Setup /..." as it was, byte for byte.
+    assert result["other"] == {
+        "ensure": "Setup /ensure",
+        "config": "Setup /ensure CONFIG=<approved config>",
+        "either": "Setup /install or /uninstall PURGE=1",
+        "repair": "Setup /repair",
+        "rerun": "run Setup again",
+        "rerunSetup": "run the same Setup command again",
+    }
+
+
 def test_repair_rollback_refusal_names_the_supported_next_step(tmp_path: Path) -> None:
     cases = _repair_rollback_config_cases(tmp_path)
     for name in ("invalid malformed", "invalid valid", "approved stale"):
         assert "Next step:" in cases[name]["error"], cases[name]
-        assert "/ensure CONFIG=" in cases[name]["error"], cases[name]
+        # The placeholder is quoted, as the Go hints quote it (PowerShell reads an unquoted "<" as an error).
+        assert "/ensure 'CONFIG=" in cases[name]["error"], cases[name]
     assert "enterprise windows repair --profile standalone --json" in cases["approved stale"]["error"]
     assert "administrator-selected path permissions" in cases["external policy ACL drift"]["error"]
     assert "Next step:" in cases["transitional service"]["error"]
-    assert "retry Setup /repair" in cases["transitional service"]["error"]
+    # GAP-0095: the installed CLI repairs, by its full path; Setup is not on the computer.
+    assert "then retry & '" in cases["transitional service"]["error"], cases["transitional service"]
+    assert "enterprise windows repair --profile standalone --json" in cases["transitional service"]["error"]
+    assert "Setup /repair" not in cases["transitional service"]["error"]
 
 
 def _csharp_method_body(text: str, name: str) -> str:
     start = text.index(f" {name}(string path)\n")
     end = text.index("\n        }\n", start)
     return text[start : end + 11]
+
+
+def test_a_hand_edited_config_is_replaced_by_the_approved_source_before_the_gateway_starts() -> None:
+    # GAP-0743: a hand edit is recorded in config.generation.json for the
+    # installed bytes, so Repair must not treat installed == recorded as
+    # approved, and a rollback must not restore bytes managed startup refuses.
+    module = _text(MODULE)
+    install = _function_body(module, "Invoke-DefenseClawInstallLikeLifecycle")
+    recovery = install.index("-ApprovedConfig $repairApprovedConfig")
+    assert recovery < install.index("Stop-DefenseClawService -Name $GatewayServiceName")
+    assert recovery < install.index("$approvedConfigSHA256 = [string]$repairApprovedConfig['config']")
+    restore = _function_body(module, "Restore-DefenseClawTransaction")
+    approved = restore.index("Restore-DefenseClawApprovedConfigOverHandEdit")
+    assert approved < restore.index("Register-DefenseClawRestoredConfigGeneration")
+    assert approved < restore.index("Start-DefenseClawTransactionServices")
+    generation = _function_body(module, "Get-DefenseClawRecordedConfigGeneration")
+    assert "hand-edit:*" in generation
 
 
 def test_squatted_root_messages_name_the_link_owner() -> None:
@@ -2573,3 +2709,61 @@ def test_gap_0583_standalone_teardown_refuses_activation_drift_before_the_commit
     rebind = recovery.index("Sync-DefenseClawStandaloneUninstallTombstoneBinding")
     assert rebind < recovery.index("$retiredContractReceipt =")
     assert "$committedMetadata = Get-DefenseClawDeploymentMetadata" in recovery[rebind : rebind + 400]
+
+
+def test_the_config_step_records_over_a_hand_edit_only_for_this_runs_config_source() -> None:
+    # GAP-0646: the transaction's config step records a hand-edit record of
+    # the installed bytes as the lifecycle's generation only for the approved
+    # source this run installed (CONFIG=). The sha256 comes from that source
+    # descriptor alone, never from config.yaml or config.generation.json, and
+    # rides only on the recording call: verify, status, the Repair rollback
+    # preflight and Secure Client (validate-only) never pass it.
+    module = _text(MODULE)
+    check = _function_body(module, "Assert-DefenseClawInstalledConfig")
+    record = check.index("if ($RecordLifecycle) {")
+    record_end = check.index("\n    }\n", record)
+    assert check.count("--approved-config-sha256") == 1
+    assert "'--approved-config-sha256'" in check[record:record_end]
+    assert module.count("-ApprovedConfigSHA256") == 1
+    install = _function_body(module, "Invoke-DefenseClawInstallLikeLifecycle")
+    call = install.index("-ApprovedConfigSHA256 $approvedConfigSHA256")
+    source = install.rindex("# The approved source this run installed as config.yaml (CONFIG=):", 0, call)
+    block = install[source:call]
+    assert "if ($Sources.ContainsKey('config') -and $Sources['config'] -is [System.Collections.IDictionary]) {" in block
+    assert "$approvedConfigSHA256 = ([string]$Sources['config']['sha256']).ToLowerInvariant()" in block
+    assert "if ($approvedConfigSHA256 -cnotmatch '^[0-9a-f]{64}$') {" in block
+    assert "-RecordLifecycle:(-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout))" in block
+    assert "config.generation.json" not in block and "Get-FileHash" not in block
+
+
+def test_bundle_repair_hint_names_the_installed_cli_without_a_bare_fallback() -> None:
+    # GAP-0081: Setup puts no DefenseClaw command on PATH, so the hint must never
+    # fall back to a bare defenseclaw.exe. Get-DefenseClawLayout is the only
+    # producer of a layout and always sets CLIPath, so the fallback was dead.
+    module = _text(MODULE)
+    hint = _function_body(module, "Get-DefenseClawStandaloneBundleRepairCommand")
+    assert "$cli = [string]$Layout['CLIPath']" in hint
+    assert "'defenseclaw.exe'" not in hint
+    assert "IsNullOrWhiteSpace" not in hint
+    layout = _function_body(module, "Get-DefenseClawLayout")
+    assert "CLIPath = (Microsoft.PowerShell.Management\\Join-Path $bin 'defenseclaw.exe')" in layout
+
+
+def _function_body(text: str, name: str) -> str:
+    start = text.index(f"function {name} ")
+    return text[start : text.index("\nfunction ", start + 1)]
+
+
+def test_lazy_lock_files_are_standalone_only_and_name_every_product_lock() -> None:
+    # GAP-0766: Setup repair and verify stamp and judge the lazily created
+    # lock files of the standalone profile, including the runtime .env lock;
+    # the Secure Client profile keeps the objects it handled before.
+    body = _function_body(_text(MODULE), "Get-DefenseClawLazyLockFiles")
+    guard = body.index("Test-DefenseClawStandaloneProfile")
+    assert guard < body.index("pscustomobject"), "the standalone guard must come first"
+    for name in ("config.yaml.lock", ".enterprise-credentials.lock", ".enterprise-enrollment.lock", ".env.lock"):
+        assert f"{name}" in body, name
+    callers = [
+        line for line in _text(MODULE).splitlines() if "Get-DefenseClawLazyLockFiles -Layout" in line
+    ]
+    assert len(callers) == 2, "stamp (repair) and verify both read the one list"

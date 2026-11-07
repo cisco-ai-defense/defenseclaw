@@ -58,7 +58,7 @@ On per-user Windows, a sustained hook flood can outpace the local audit writer (
 
 The guardrail mode does not change the outage mode: observe and action mode fail the same way. Current per-user hooks read the saved mode or tier in their installed runtime's `config.yaml` when they classify an outage (`defenseclaw-gateway hook-outage-mode`). A saved `closed` takes effect on the next call even while the gateway is stopped; a missing or unreadable config closes the outage. So a rule pack switched while the gateway is stopped is no fail-mode drift in `defenseclaw guardrail status`. The registration lock keeps the earlier mode until the gateway starts and renders the hooks again. `defenseclaw guardrail fail-mode` shows each connector's mode and any registration drift.
 
-With a custom `data_dir` (`defenseclaw config set data_dir`), the hooks are rendered into `<data_dir>/hooks` and follow the account's own `~/.defenseclaw/config.yaml`; an agent session that started before the move keeps the hooks it loaded and follows the same config. If `~/.defenseclaw/config.yaml` is strict or has a saved `closed`, the hooks of this install close on an outage.
+With a custom `data_dir` (`defenseclaw config set data_dir`), the hooks are rendered into `<data_dir>/hooks` and follow the account's own `~/.defenseclaw/config.yaml`. The move carries the active connectors' private hook credentials into the new store, so an agent session that started before the move keeps the hooks it loaded and continues through the restarted gateway. If the command warns that a credential could not be carried, restart that agent session after restarting the gateway. If `~/.defenseclaw/config.yaml` is strict or has a saved `closed`, the hooks of this install close on an outage.
 
 **Limit: a custom install `DEFENSECLAW_HOME`.** When DefenseClaw was installed with `DEFENSECLAW_HOME` set to another folder and there is no `~/.defenseclaw/config.yaml`, the only thing that tells a hook where the install's config is, is the `.config-record` file the gateway writes in each hooks folder. That file belongs to your account, so any program running as you can point it at another config, just as it can edit `config.yaml` itself. In that layout nothing else anchors the outage mode. Keep a strict posture in `~/.defenseclaw/config.yaml` too, or install with the default `DEFENSECLAW_HOME`, if a program running as you must not be able to reopen an outage.
 
@@ -90,6 +90,10 @@ A call whose audit record cannot be written (a full disk, or an audit database t
 On a per-user Windows install, a sustained flood of about 10 hook calls a second in action mode makes the audit log grow faster than it can be copied into `audit.db`. To restart the log, the gateway holds the audit writer while SQLite flushes `audit.db` to disk, for up to about 1 second. Hook calls that arrive during the hold wait for it. In 30-minute floods at 10 calls a second, the 99th-percentile answer time went over 1 second in 4 of 30 minutes in a test that drove the gateway's hook handler directly, and in 9 to 13 of 31 minutes through an installed per-user hook; the second figure includes minutes in which the host itself stalled.
 
 The hold stays under the hook's 3.5-second answer budget, so it does not block a call by itself. A host that stalls for longer (up to 12 seconds was seen on a busy shared Windows host) can still push calls past the budget, and those calls then follow the rules above. Removing this hold needs a change to how the audit records are written; until then it is a known limit.
+
+### A hook held past its time budget
+
+A hook's time budget counts from when the operating system started the hook process. Since 1.0.9, a hook the computer held past its budget before it reached the gateway, for example during a freeze or a sleep while it started, is blocked in every fail mode. A managed hook whose verdict arrives after its budget is blocked too, also when the computer froze or slept in the middle of the call. A per-user hook held after it sent its call can still get the gateway's verdict when it arrives late. That late answer is always the verdict of a gateway that decided, never an allow for an outage. Before 1.0.9, a hook held for more than 30 seconds got a new budget. Secure Client hooks are unchanged.
 
 ### Claude Cowork
 
@@ -158,6 +162,8 @@ The hook has to know the event first. Codex and GitHub Copilot name it in the re
 ### Hooks the agent cannot start
 
 Fail mode applies only to a hook the agent can start. A script that is missing, unreadable or not executable (an antivirus quarantine, a restored backup with the wrong mode, a home move) makes the shell exit 126 or 127, which Claude Code and other agents treat as a non-blocking error: the call runs unguarded whatever the fail mode. `defenseclaw guardrail status`, `defenseclaw status` and `defenseclaw doctor` say the connector is not guarded and name the repair: `defenseclaw doctor --fix` restores the script mode; `defenseclaw setup <connector>` or `defenseclaw-gateway restart` renders the scripts and re-points the hooks.
+
+On Windows the agent starts a DefenseClaw command, which then starts `defenseclaw-hook.exe`. When that launcher is missing or cannot start on a per-user install, the Codex and Devin (one-line install), Kiro, Antigravity, GitHub Copilot CLI and Cursor commands block the events that can block, in every fail mode. Stop events are not blocked. Each connector page says what it does.
 
 On a managed Linux or macOS host the hook is the administrator-owned `defenseclaw-hook` binary. When it is missing, empty, not executable, not root-owned or not the installed binary (hash mismatch), `enterprise linux status` (or `macos`) and `verify` fail with the path, the state and `security_complete: false`. The hook guardian starts the lifecycle's config-apply job within seconds, which restores the binary from the sealed copy (checked against its recorded SHA-256, renamed into place as root with mode `0755`). `enterprise linux repair` does the same at once. On Windows the standalone guardian restores a missing, empty or different `defenseclaw-hook.exe` from its protected copy within seconds.
 
@@ -241,7 +247,7 @@ defenseclaw guardrail fail-mode   # effective value per connector
 defenseclaw doctor --passive      # no synthetic telemetry, LLM or inspection probes
 ```
 
-These commands are for a per-user install. On a managed standalone Linux or macOS computer `defenseclaw` offers users only `sandbox` commands, `help` and `--version` (anything else exits 2), and `defenseclaw-gateway` is not on their `PATH`. On native Windows the managed `defenseclaw` is the administrator's command, which refuses `guardrail` commands (exit `3`) and has no `version` command. The administrator reads each connector's `effective_hook_fail_mode` from `status --json` or `verify --json`:
+These commands are for a per-user install. On a managed standalone Linux or macOS computer `defenseclaw` offers users only `sandbox` commands, `help` and `--version` (anything else exits 2), and `defenseclaw-gateway` is not on their `PATH`. On native Windows the managed `defenseclaw.exe` is the administrator's command (run it by its full path: Setup puts nothing on `PATH`), which refuses `guardrail` commands (exit `3`) and has no `version` command. The administrator reads each connector's `effective_hook_fail_mode` from `status --json` or `verify --json`:
 
 ```bash title="Linux"
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status --json

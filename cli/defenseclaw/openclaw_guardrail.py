@@ -108,6 +108,11 @@ def patch_openclaw_config(
     except (OSError, json.JSONDecodeError):
         return None
 
+    from defenseclaw.openclaw_plugin_config import openclaw_plugin_config_issue
+
+    if issue := openclaw_plugin_config_issue(path, os.path.dirname(path)):
+        raise ValueError(f"OpenClaw setup cannot keep plugin config: {issue}")
+
     # Record pristine backup BEFORE any writes so we always capture the
     # untouched file. ``record_pristine_backup`` is idempotent — once a
     # pristine copy exists for this config path it will not be

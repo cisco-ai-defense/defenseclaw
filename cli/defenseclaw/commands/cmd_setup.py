@@ -44,6 +44,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from functools import cmp_to_key
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -126,6 +127,7 @@ from defenseclaw.connector_contracts import (
     stable_agent_version,
 )
 from defenseclaw.context import SETUP_RESTART_HANDLED_META_KEY, SETUP_SECRET_CHANGED_META_KEY, AppContext, pass_ctx
+from defenseclaw.doctor_health import VersionRange, supported_range_text, version_range_label
 from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
     UnsafePathError,
@@ -6159,53 +6161,21 @@ def _connector_contract_upgrade_guidance(
         return f"Use a {label} version covered by a DefenseClaw hook contract, then run: {rerun}."
 
     contract = contracts[0]
-    if len(contracts) > 1 and normalized_version:
+    ranged = _ranged_contracts(contracts)
+    if len(contracts) > 1 and normalized_version and ranged:
         # A connector may carry consecutive reviewed contracts. For a version
         # below or above the entire covered span, point at the nearest exact
         # contract so remediation names a useful boundary instead of falling
-        # back to a generic "covered version" message.
-        ranged = [
-            candidate
-            for candidate in contracts
-            if candidate.min_agent_version or candidate.max_agent_version
-        ]
-        if ranged:
-            first = ranged[0]
-            last = ranged[0]
-            for candidate in ranged[1:]:
-                if candidate.min_agent_version and (
-                    not first.min_agent_version
-                    or compare_agent_versions(
-                        candidate.min_agent_version,
-                        first.min_agent_version,
-                    )
-                    < 0
-                ):
-                    first = candidate
-                if candidate.max_agent_version and (
-                    not last.max_agent_version
-                    or compare_agent_versions(
-                        candidate.max_agent_version,
-                        last.max_agent_version,
-                    )
-                    > 0
-                ):
-                    last = candidate
-            if first.min_agent_version and compare_agent_versions(
-                normalized_version,
-                first.min_agent_version,
-            ) < 0:
-                contract = first
-            elif last.max_agent_version and compare_agent_versions(
-                normalized_version,
-                last.max_agent_version,
-            ) >= 0:
-                contract = last
-            else:
-                return (
-                    f"Use a {label} version covered by a DefenseClaw hook contract, "
-                    f"then run: {rerun}."
-                )
+        # back to a generic "covered version" message. The latest contract is
+        # the one that starts last: without an upper bound, nothing is above
+        # the span (a capped older contract was taken for the last one).
+        first, last = ranged[0], ranged[-1]
+        if first.min_agent_version and compare_agent_versions(normalized_version, first.min_agent_version) < 0:
+            contract = first
+        elif last.max_agent_version and compare_agent_versions(normalized_version, last.max_agent_version) >= 0:
+            contract = last
+        else:
+            return f"Use a {label} version covered by a DefenseClaw hook contract, then run: {rerun}."
     requirement_parts: list[str] = []
     pins = contract.exact_agent_versions
     if normalized_version:
@@ -6221,21 +6191,37 @@ def _connector_contract_upgrade_guidance(
         )
     if pins:
         requirement_parts.append("one of " + ", ".join(pins))
-    range_requirement = ""
-    if contract.min_agent_version and contract.max_agent_version:
-        range_requirement = f">={contract.min_agent_version} and <{contract.max_agent_version}"
-    elif contract.min_agent_version:
-        range_requirement = f">={contract.min_agent_version}"
-    elif contract.max_agent_version:
-        range_requirement = f"<{contract.max_agent_version}"
+    range_requirement = version_range_label(contract.min_agent_version, contract.max_agent_version)
     if range_requirement:
         requirement_parts.append(range_requirement)
     requirement = " or ".join(requirement_parts) if requirement_parts else "an explicitly supported version"
+    # With consecutive contracts, the nearest one alone reads as if newer
+    # releases were unsupported (GAP-0049: "claudecode-hooks-v1 requires
+    # >=2.1.154 and <2.1.219" for Claude Code 2.1.121, though
+    # claudecode-hooks-v2 covers >=2.1.219). Name the whole supported range.
+    supported = (
+        supported_range_text(
+            VersionRange(
+                contract_id=c.contract_id,
+                min_inclusive=c.min_agent_version,
+                max_exclusive=c.max_agent_version,
+            )
+            for c in ranged
+        )
+        if len(contracts) > 1
+        else ""
+    )
     if normalized_version and range_requirement:
         if contract.min_agent_version and compare_agent_versions(
             normalized_version,
             contract.min_agent_version,
         ) < 0:
+            if supported:
+                return (
+                    f"Upgrade {label}; installed version {normalized_version} is older than the validated "
+                    f"minimum. DefenseClaw supports {label} {supported}; {contract.contract_id} covers "
+                    f"{requirement}. Then run: {rerun}."
+                )
             return (
                 f"Upgrade {label}; installed version {normalized_version} is older than the validated "
                 f"minimum. {contract.contract_id} requires {requirement}. Then run: {rerun}."
@@ -6246,12 +6232,20 @@ def _connector_contract_upgrade_guidance(
         ) >= 0:
             return (
                 f"{label} {normalized_version} is newer than DefenseClaw's validated range "
-                f"({requirement}). Use a validated version, or update DefenseClaw when a matching "
-                f"hook contract is available; then run: {rerun}."
+                f"({supported or requirement}). Use a validated version, or update DefenseClaw when a "
+                f"matching hook contract is available; then run: {rerun}."
             )
     return (
         f"{label} {normalized_version or 'version'} is outside the validated hook contract; "
         f"{contract.contract_id} requires {requirement}. Use a covered version, then run: {rerun}."
+    )
+
+
+def _ranged_contracts(contracts: tuple[Any, ...]) -> list[Any]:
+    """The contracts that bound a version range, oldest first."""
+    return sorted(
+        (c for c in contracts if c.min_agent_version or c.max_agent_version),
+        key=cmp_to_key(lambda a, b: compare_agent_versions(a.min_agent_version or "0", b.min_agent_version or "0")),
     )
 
 
@@ -7040,10 +7034,21 @@ def _warn_openclaw_setup_advisories(
             "and openclaw.json names a Bedrock model without it, so OpenClaw model calls fail with "
             '"No API provider registered for api: bedrock-converse-stream".'
         )
-        ux.subhead(
-            f"Run: openclaw plugins install {OPENCLAW_BEDROCK_PLUGIN_PACKAGE} "
-            "(it adds amazon-bedrock to plugins.allow), then openclaw gateway restart."
-        )
+        ux.subhead(f"Run: openclaw plugins install {OPENCLAW_BEDROCK_PLUGIN_PACKAGE}")
+        ux.subhead("Then: openclaw plugins enable amazon-bedrock")
+        plugins = openclaw_config.get("plugins") if isinstance(openclaw_config, dict) else None
+        if isinstance(plugins, dict):
+            allowed = plugins.get("allow")
+            if isinstance(allowed, list) and "amazon-bedrock" not in allowed:
+                value = _json.dumps([*allowed, "amazon-bedrock"], separators=(",", ":"))
+                ux.subhead(f"Then: openclaw config set plugins.allow {shlex.quote(value)} --strict-json")
+            denied = plugins.get("deny")
+            if isinstance(denied, list) and "amazon-bedrock" in denied:
+                value = _json.dumps(
+                    [name for name in denied if name != "amazon-bedrock"], separators=(",", ":"),
+                )
+                ux.subhead(f"Then: openclaw config set plugins.deny {shlex.quote(value)} --strict-json")
+        ux.subhead("Then: openclaw gateway restart")
 
 
 def _hilt_support_note(connector: str) -> str:
@@ -11772,6 +11777,7 @@ def _apply_hook_connector_setup(
                     connector=connector,
                     connectors=_guarded_connectors(cfg, _actives),
                     wait_for_connector_ready=True,
+                    notice_connectors=[connector],
                 )
         except Exception as exc:  # noqa: BLE001 — readiness failure triggers transaction rollback.
             with _temporary_codex_setup_marker(None) if connector == "codex" else nullcontext():
@@ -16399,6 +16405,7 @@ def _restart_services(
     summary_exclude: frozenset[str] = frozenset(),
     teardown: bool = False,
     required_connectors: frozenset[str] = frozenset(),
+    notice_connectors: list[str] | None = None,
 ) -> None:
     """Restart defenseclaw-gateway and, when OpenClaw is the selected
     connector, restart the OpenClaw gateway too so it picks up the
@@ -16425,7 +16432,9 @@ def _restart_services(
     ``summary_exclude`` names connectors left out of the closing roster line
     because they stay disabled (GAP-1809); the restart itself is unchanged.
     ``teardown`` marks a ``guardrail disable`` restart: the closing line says
-    the hooks were removed instead of announcing enforcement (GAP-1985)."""
+    the hooks were removed instead of announcing enforcement (GAP-1985).
+    ``notice_connectors`` limits restore notices to connectors selected by
+    this setup; a global setup reports notices for every active connector."""
     ux.section(title)
     ctx = click.get_current_context(silent=True)
     if ctx is not None:
@@ -16433,6 +16442,9 @@ def _restart_services(
 
     # Names of services whose restart failed; non-empty ⇒ fail the command.
     failed: list[str] = []
+    # OpenClaw restart failed but its gateway answers (GAP-0744); the note that
+    # the config is kept is printed at the end, only if nothing else failed.
+    kept_note_pending = False
 
     hook_targets = sorted(
         {
@@ -16564,8 +16576,16 @@ def _restart_services(
     # time, also when the step did not wait for the connector runtime (a
     # `setup hermes` run said nothing then, GAP-0333).
     if hook_targets and not teardown:
-        agent_config_notice.wait_for_put_back(data_dir, hook_targets)
-        for note in agent_config_notice.put_back_notes(data_dir, hook_targets):
+        # A connector setup restarts the shared gateway, but its result is
+        # about the selected connector. A peer's earlier restore notice is
+        # reported when that peer is set up (or by a global setup).
+        notice_targets = (
+            sorted({normalize_connector(name) for name in notice_connectors} & set(hook_targets))
+            if notice_connectors is not None
+            else hook_targets
+        )
+        agent_config_notice.wait_for_put_back(data_dir, notice_targets)
+        for note in agent_config_notice.put_back_notes(data_dir, notice_targets):
             ux.warn(note)
 
     # Multi-connector global change: every active hook connector is affected
@@ -16613,10 +16633,17 @@ def _restart_services(
         return
 
     if connector == "openclaw":
-        if not _restart_openclaw_gateway():
+        # GAP-0744: whether OpenClaw is running is decided by the health probe
+        # that follows, not by the exit status of `openclaw gateway restart`.
+        # That command needs a service manager (launchd GUI domain, systemd
+        # --user, a Windows service) and fails on an account that has none
+        # while the gateway, run in a terminal, keeps answering. Only a gateway
+        # that does not answer fails the step (and rolls the setup back).
+        restart_ok = _restart_openclaw_gateway()
+        if not _check_openclaw_gateway(oc_host, oc_port):
             failed.append("openclaw-gateway")
-        if not _check_openclaw_gateway(oc_host, oc_port) and "openclaw-gateway" not in failed:
-            failed.append("openclaw-gateway")
+        elif not restart_ok:
+            kept_note_pending = True
     elif connector in _PROXY_BACKED_CONNECTORS:
         # OpenClaw is the only proxy-backed connector that owns its own
         # gateway process; others (ZeptoClaw today) get the proxy
@@ -16648,6 +16675,24 @@ def _restart_services(
             )
 
     click.echo()
+    if kept_note_pending and not failed:
+        # Said only when nothing else failed: with a failed defenseclaw-gateway
+        # restart the setup rolls back, and the config is not kept.
+        # A rollback restart runs on the restored configuration: the attempted
+        # new one is not kept there.
+        outcome = (
+            "the previous configuration stays in place"
+            if title == _ROLLBACK_RESTART_TITLE
+            else "the new configuration is kept"
+        )
+        click.echo(
+            "  OpenClaw could not restart its gateway through a service manager here, but the "
+            f"gateway answers at {oc_host}:{oc_port}, so {outcome}."
+        )
+        click.echo(
+            "    OpenClaw reloads openclaw.json on its own; if it does not load the DefenseClaw "
+            "plugin, restart the gateway where it runs (for example `openclaw gateway run` in its terminal)."
+        )
     _fail_if_restart_failed(failed)
 
 
@@ -17602,10 +17647,10 @@ def _wait_for_connector_runtime(
                     tolerated=tolerated,
                 )
             if snapshot_ready:
-                # The Windows native setup launcher publishes the complete roster
-                # before this sequential passive-Doctor pass. Do not make that
-                # roster share the residual publication no-progress window; the
-                # existing count-aware absolute deadline is its transaction bound.
+                # On Windows the complete roster is published before this
+                # sequential passive-Doctor pass. Do not make that roster share
+                # the residual publication no-progress window; the existing
+                # count-aware absolute deadline is its transaction bound.
                 # Preserve the established non-Windows timing contract in this
                 # Windows-parity change.
                 deadline = (
@@ -17685,7 +17730,7 @@ def _restart_openclaw_gateway() -> bool:
     effect.
 
     Returns True when the restart succeeded, False on any failure
-    (missing CLI, timeout, or non-zero exit). Avarice F-0143: this used
+    (missing or unrunnable CLI, timeout, or non-zero exit). Avarice F-0143: this used
     to swallow every failure and return ``None`` so the caller could not
     tell the OpenClaw gateway never came back — setup then reported
     success while traffic kept flowing past a down (fail-open) gateway."""
@@ -17694,7 +17739,10 @@ def _restart_openclaw_gateway() -> bool:
         result = subprocess.run(
             ["openclaw", "gateway", "restart"],
             capture_output=True,
-            text=True,
+            # Output is only shown to the operator: bytes that do not decode
+            # must not turn into an exception that skips the health probe.
+            encoding="utf-8",
+            errors="replace",
             timeout=60,
         )
         output = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
@@ -17715,8 +17763,9 @@ def _restart_openclaw_gateway() -> bool:
             # the gateway answers, and it reloads openclaw.json on its own.
             click.echo(" - (no OpenClaw gateway service to restart)")
             click.echo(
-                "    If OpenClaw runs in a terminal (openclaw gateway run), restart it there if it does not "
-                "load the DefenseClaw plugin."
+                "    Restart required: a gateway that was already running in a terminal (openclaw gateway run) "
+                "must be stopped and started again there so it loads the DefenseClaw plugin at startup; "
+                "do not rely on its config hot reload."
             )
             return True
         if result.returncode == 0:
@@ -17734,10 +17783,18 @@ def _restart_openclaw_gateway() -> bool:
         return False
     except subprocess.TimeoutExpired:
         # OpenClaw owns this lifecycle and exposes no DefenseClaw pid/data-dir
-        # state that we can safely reconcile here.  A timeout is therefore a
-        # fail-closed restart failure; the native DefenseClaw gateway helper
-        # below performs its own identity-aware timeout reconciliation.
+        # state that we can safely reconcile here.  A timeout is reported as a
+        # failed restart; the caller then decides from the gateway health probe
+        # (GAP-0744), and the native DefenseClaw gateway helper below performs
+        # its own identity-aware timeout reconciliation.
         ux.echo(" ✗ (timed out)")
+        return False
+    except OSError as exc:
+        # Any other failure to start the command (not executable, wrong
+        # executable format, no permission) is a failed restart like a missing
+        # CLI; the caller decides from the health probe (GAP-0744).
+        ux.echo(f" ✗ (could not run the openclaw CLI: {exc.strerror or type(exc).__name__})")
+        click.echo("    Fix the openclaw CLI or restart its gateway manually.")
         return False
 
 
@@ -17762,6 +17819,16 @@ def _gateway_lifecycle_executable(
     native: bool = False,
     search_path: str | None = None,
 ) -> str | None:
+    """Return the selected gateway only when its executable custody is trusted."""
+    candidate = _gateway_lifecycle_candidate(native=native, search_path=search_path)
+    return _trusted_gateway_lifecycle_executable(candidate) if candidate else None
+
+
+def _gateway_lifecycle_candidate(
+    *,
+    native: bool = False,
+    search_path: str | None = None,
+) -> str | None:
     """Resolve one stable executable for a complete gateway lifecycle call.
 
     A packaged Windows CLI must use the gateway beside its verified embedded
@@ -17782,7 +17849,8 @@ def _gateway_lifecycle_executable(
     if packaged_windows_install_root():
         # A corroborated package with a missing sibling is broken; fail closed
         # instead of allowing PATH/current-directory executable shadowing.
-        return packaged_windows_gateway_path()
+        packaged = packaged_windows_gateway_path()
+        return str(Path(packaged).resolve()) if packaged else None
     raw_search_path = os.environ.get("PATH", os.defpath) if search_path is None else search_path
     current_directory = os.path.normcase(os.path.realpath(os.curdir))
     search_directories: list[str] = []
@@ -17822,79 +17890,63 @@ def _gateway_lifecycle_executable(
     resolved = Path(executable).expanduser().resolve()
     if native and os.name == "nt" and resolved.suffix.lower() != ".exe":
         return None
-    return _trusted_gateway_lifecycle_executable(str(resolved))
+    return str(resolved)
+
+
+def _gateway_lifecycle_resolution(
+    *,
+    native: bool = False,
+    search_path: str | None = None,
+) -> tuple[str | None, str]:
+    """Select once and retain the custody result for a lifecycle message."""
+    candidate = _gateway_lifecycle_candidate(native=native, search_path=search_path)
+    return _trusted_gateway_lifecycle_resolution(candidate) if candidate else (None, "")
 
 
 def _trusted_gateway_lifecycle_executable(executable: str) -> str | None:
     """Return a custody-checked concrete executable for lifecycle mutation."""
+    return _trusted_gateway_lifecycle_resolution(executable)[0]
+
+
+def _trusted_gateway_lifecycle_resolution(executable: str) -> tuple[str | None, str]:
+    """Return the trusted path or the reason the selected path was refused."""
     if not executable or not os.path.isabs(executable):
-        return None
+        return None, ""
     resolved = str(Path(executable).resolve())
-    if os.name != "nt":
-        from defenseclaw.file_permissions import trusted_posix_executable_path
-
-        try:
-            return trusted_posix_executable_path(resolved)
-        except OSError:
-            return None
-
-    from defenseclaw.file_permissions import windows_acl_write_error
-    from defenseclaw.gateway import packaged_windows_gateway_path
-
-    packaged = packaged_windows_gateway_path()
-    if packaged:
-        try:
-            if os.path.samefile(resolved, packaged):
-                return resolved
-        except OSError:
-            pass
-    for candidate in (resolved, os.path.dirname(resolved)):
-        if windows_acl_write_error(candidate, trust_administrators=True) is not None:
-            return None
-    return resolved
-
-
-def _refused_gateway_lifecycle_candidate(search_path: str | None = None) -> str:
-    """Name an installed gateway the lifecycle custody check refused, or "".
-
-    The lifecycle reported such a binary as "binary not found" with a build
-    hint, although the gateway was installed and only its ACL or mode was
-    refused.
-    """
-    from defenseclaw.gateway import GATEWAY_BIN_NAME, canonical_install_path, packaged_windows_install_root
-
-    if os.name == "nt" and packaged_windows_install_root():
-        return ""
-    raw_search_path = os.environ.get("PATH", os.defpath) if search_path is None else search_path
-    found = shutil.which(GATEWAY_BIN_NAME, path=raw_search_path)
-    if (not found or not os.path.isabs(found)) and os.name == "nt":
-        # The per-user installer's folder, which the lifecycle also falls
-        # back to.
-        canonical = canonical_install_path()
-        found = canonical if os.path.isfile(canonical) else ""
-    if not found or not os.path.isabs(found):
-        return ""
-    found = str(Path(found).resolve())
     if os.name != "nt":
         from defenseclaw.file_permissions import UnsafePathError, trusted_posix_executable_path, unsafe_gateway_remedy
 
         try:
-            trusted_posix_executable_path(found)
+            return trusted_posix_executable_path(resolved), ""
         except UnsafePathError as exc:
-            return f"refusing to run {found}: {unsafe_gateway_remedy(exc)}"
-        return ""
-    from defenseclaw.file_permissions import windows_acl_write_error
+            return None, f"refusing to run {resolved}: {unsafe_gateway_remedy(exc)}"
+        except OSError:
+            return None, ""
 
-    for candidate in (found, os.path.dirname(found)):
-        problem = windows_acl_write_error(candidate, trust_administrators=True)
+    custody_problem = _windows_gateway_lifecycle_custody_problem(resolved)
+    if custody_problem is not None:
+        candidate, problem = custody_problem
+        return None, (
+            f"refusing to run {resolved}: {candidate}: {problem}. Restore ownership and write access "
+            "to this account or a trusted Windows system controller (SYSTEM, BUILTIN Administrators, "
+            "TrustedInstaller), then retry. For an installed gateway, rerun the DefenseClaw installer "
+            "to restore its permissions"
+        )
+    return resolved, ""
+
+
+def _windows_gateway_lifecycle_custody_problem(executable: str) -> tuple[str, str] | None:
+    """Check the executable and its folder against the shared Windows custody set."""
+    for candidate in (executable, os.path.dirname(executable)):
+        problem = windows_acl_custody_write_error(candidate, allow_current_user=True)
         if problem is not None:
-            return (
-                f"refusing to run {found}: {candidate}: {problem}; only this account, SYSTEM and "
-                "Administrators may write the gateway and its folder. Run the DefenseClaw installer "
-                "again, which restricts "
-                "the folder, or remove the other accounts' write access"
-            )
-    return ""
+            return candidate, problem
+    return None
+
+
+def _refused_gateway_lifecycle_candidate(search_path: str | None = None) -> str:
+    """Name the custody reason for the gateway selected by the lifecycle."""
+    return _gateway_lifecycle_resolution(search_path=search_path)[1]
 
 
 # A lifecycle command's own 30 s progress lines go to its captured output, so
@@ -18505,6 +18557,7 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
                     wait_for_connector_ready=True,
                     start_if_stopped=True,
                     required_connectors=frozenset(focus),
+                    notice_connectors=focus,
                 )
             for connector, audit_mode in batch_audits:
                 _log_setup_action(

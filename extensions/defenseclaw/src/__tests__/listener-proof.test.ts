@@ -4,6 +4,7 @@
  */
 
 import { createHmac } from "node:crypto";
+import { execFile } from "node:child_process";
 import { createServer, request, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { Socket, type AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -133,6 +134,50 @@ describe("listener proof (GAP-0594)", () => {
     expect(Date.now() - started).toBeLessThan(1_500);
     expect(stalled.destroyed).toBe(true);
   });
+
+  it("expires the deadline in a quiet process, with no other event to wake the loop", async () => {
+    // Inside vitest the runner wakes the loop on its own; a child process
+    // whose only other wake-up is a timer far past the deadline shows whether
+    // the deadline fires by itself. It once waited for that next event.
+    const deadlineMs = 200;
+    const wakeMs = 10_000;
+    const child = `
+      const net = await import("node:net");
+      const { provenCreateConnection } = await import(process.argv[1]);
+      const late = setTimeout(() => { console.log(JSON.stringify({ late: true })); process.exit(0); }, ${wakeMs});
+      const run = (impl, port) => new Promise((resolve) => {
+        const t0 = Date.now();
+        provenCreateConnection("127.0.0.1", port, "${TOKEN}", impl, ${deadlineMs})({}, (e) =>
+          resolve({ ms: Date.now() - t0, msg: String(e && e.message) }));
+      });
+      const stalled = new net.Socket();
+      const connect = await run(() => stalled, 9);
+      const mute = net.createServer(() => {});
+      await new Promise((r) => mute.listen(0, "127.0.0.1", r));
+      const proof = await run(net.connect, mute.address().port);
+      clearTimeout(late);
+      console.log(JSON.stringify({ connect, proof, destroyed: stalled.destroyed }));
+      process.exit(0);
+    `;
+    const src = new URL("../listener-proof.ts", import.meta.url).href;
+    const out = await new Promise<string>((resolve, reject) => {
+      execFile(
+        process.execPath,
+        ["--experimental-strip-types", "--no-warnings", "--input-type=module", "-e", child, src],
+        { timeout: wakeMs * 2 },
+        (err, stdout, stderr) => (err ? reject(new Error(`${err.message}\n${stderr}`)) : resolve(stdout)),
+      );
+    });
+    const got = JSON.parse(out.trim().split("\n").pop() ?? "{}");
+    expect(got.late).toBeUndefined();
+    expect(got.connect.msg).toContain("connect timed out");
+    expect(got.proof.msg).toContain("did not prove");
+    // Bounded by the deadline, far ahead of the next unrelated wake-up.
+    expect(got.connect.ms).toBeGreaterThanOrEqual(deadlineMs - 5);
+    expect(got.connect.ms).toBeLessThan(wakeMs / 4);
+    expect(got.proof.ms).toBeLessThan(wakeMs / 4);
+    expect(got.destroyed).toBe(true);
+  }, 30_000);
 
   it("keeps a proof whose answer arrives after a 700 ms event-loop stall (R3-M1)", async () => {
     const { server, port, seen } = await listener(TOKEN);

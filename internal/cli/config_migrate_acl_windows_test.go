@@ -28,7 +28,7 @@ func TestMigrateManagedStandaloneConfigRestoresTheRecordDACL(t *testing.T) {
 	if err := os.WriteFile(path, []byte("config_version: 9\nobservability: {}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
 		t.Fatal(err)
 	}
 	record := configwrite.GenerationPath(path)
@@ -57,7 +57,7 @@ func TestMigrateManagedStandaloneConfigRestoresTheRecordDACL(t *testing.T) {
 	}
 	setDACL(path, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)(A;;FR;;;WD)")
 	setDACL(record, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)")
-	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := readDACL(record), readDACL(path); got != want {
@@ -78,6 +78,9 @@ func TestMigrateManagedStandaloneConfigKeepsDotEnvDACL(t *testing.T) {
 	if err := os.WriteFile(path, []byte(v8), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The migration loads the .env into the process environment; every test
+	// after this one inherited GATEWAY_TOKEN (GAP-0079).
+	unsetEnvironmentForDotenvTest(t, "GATEWAY_TOKEN")
 	if err := os.WriteFile(envPath, []byte("GATEWAY_TOKEN=existing\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +111,7 @@ func TestMigrateManagedStandaloneConfigKeepsDotEnvDACL(t *testing.T) {
 	setDACL(path, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)(A;;FR;;;BU)")
 	setDACL(envPath, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)")
 	before := readDACL(envPath)
-	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
 		t.Fatal(err)
 	}
 	if got := readDACL(envPath); got != before {

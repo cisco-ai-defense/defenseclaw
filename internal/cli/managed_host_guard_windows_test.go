@@ -222,6 +222,7 @@ func TestSecureClientHostRequiresProtectedLayoutAndRegisteredService(t *testing.
 // production checks already accept, and the fixture is given the
 // BUILTIN\Administrators owner explicitly.
 func TestWindowsManagedRecordTrustUsesRealACLs(t *testing.T) {
+	requireAdministratorTestToken(t, "the fixture needs a BUILTIN\\Administrators owner on its folders, which only an administrator token can set (a standard user can create the folders under C:\\ProgramData, not give them that owner)")
 	programData, err := winpath.TrustedProgramData()
 	if err != nil {
 		t.Skipf("resolve ProgramData: %v", err)

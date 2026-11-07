@@ -3769,7 +3769,7 @@ func parseLegacyClaudeCodeNativeHookCommand(command string) (string, bool) {
 			return "", false
 		}
 		quoted = '\''
-		executable = strings.ReplaceAll(executable[1:len(executable)-1], `''`, `'`)
+		executable = powershellLiteralValue(executable[1 : len(executable)-1])
 	}
 	if executable == "" || strings.Contains(executable, `"`) {
 		return "", false

@@ -649,7 +649,8 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 			if opts.goos() == "darwin" {
 				format = "plist"
 			}
-			message := fmt.Sprintf("%s has higher precedence than file-based managed settings and does not include DefenseClaw's hooks for %s; add \"managedSourcesBehavior\": \"merge\" to it (Claude Code %s+) or deploy `defenseclaw-gateway enterprise policy export --connector claudecode --format %s` through it (the export also sets requiredMinimumVersion under version_floor: enforce)", source.name, strings.Join(missing, ", "), claudeMergeMinimumVersion, format)
+			message := fmt.Sprintf("%s has higher precedence than file-based managed settings and does not include DefenseClaw's hooks for %s; add \"managedSourcesBehavior\": \"merge\" to it (Claude Code %s+) or deploy %s through it (the export also sets requiredMinimumVersion under version_floor: enforce)", source.name, strings.Join(missing, ", "), claudeMergeMinimumVersion,
+				policyExportCommand(opts.goos(), "--connector", "claudecode", "--format", format))
 			if policy.HigherPrecedenceSources == config.HigherPrecedenceWarn {
 				state.detail("%s", message)
 				state.HigherPrecedence = state.HigherPrecedence[:len(state.HigherPrecedence)-1]
@@ -721,7 +722,7 @@ func (t claudeTarget) Reconcile(opts Options) (State, error) {
 		return state, err
 	}
 	if policy.Ownership == config.MachinePolicyOwnershipVerifyOnly && state.OwnedEntries == 0 {
-		state.detail("missing_defenseclaw_hooks: deploy the output of `defenseclaw-gateway enterprise policy export --connector claudecode` through your policy tool")
+		state.detail("missing_defenseclaw_hooks: deploy the output of %s through your policy tool", policyExportCommand(opts.goos(), "--connector", "claudecode"))
 	}
 	state.finish()
 	return state, nil

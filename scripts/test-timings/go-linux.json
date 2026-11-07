@@ -12,7 +12,6 @@
   "github.com/defenseclaw/defenseclaw/cmd/defenseclaw-launcher": 1.0,
   "github.com/defenseclaw/defenseclaw/cmd/defenseclaw-scanners": 1.1,
   "github.com/defenseclaw/defenseclaw/cmd/defenseclaw-sensor-helper": 4.7,
-  "github.com/defenseclaw/defenseclaw/cmd/defenseclaw-setup": 2.5,
   "github.com/defenseclaw/defenseclaw/cmd/defenseclaw-startup": 1.0,
   "github.com/defenseclaw/defenseclaw/cmd/generate-guardrail-catalog": 1.1,
   "github.com/defenseclaw/defenseclaw/cmd/windows-avc-assembler": 1.3,

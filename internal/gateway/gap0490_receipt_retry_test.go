@@ -8,11 +8,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/google/uuid"
 )
 
 func TestGAP0490ReceiptIDsDoNotSerialize(t *testing.T) {
@@ -125,4 +128,58 @@ func gap0490RetryRequest(binding sandboxauth.Binding, route sandboxauth.Route, k
 	req.Header.Set(SandboxHookIdempotencyHeader, key)
 	ctx := sandboxauth.WithRequest(req.Context(), binding, nil)
 	return req.WithContext(withSandboxIngressRoute(ctx, route))
+}
+
+// Each sandbox receipt window recovers its own journal row from a timer
+// (scheduleSandboxHookReceiptRecovery), so rows of distinct receipts are
+// recovered at the same time. Their per-row try counts are shared state: the
+// race detector caught two timers forgetting settled rows at once in the
+// 400-call capacity test (PR #1427 CI).
+func TestGAP0490ConcurrentReceiptRecoveriesForgetTheirRows(t *testing.T) {
+	f := newManagedHookAuditFixture(t, nil)
+	const rows = 32
+	entries := make([]audit.HookDeliveryJournalEntry, 0, rows)
+	for i := 0; i < rows; i++ {
+		p := &pendingHookOccurrence{
+			ID:      uuid.NewString(),
+			Request: pendingRequest(agentHookRequest{ConnectorName: "claudecode", HookEventName: "PreToolUse"}),
+			Settled: true,
+			SandboxReceipt: &sandboxPendingHookReceipt{
+				BindingID: "g490-recovery", OfferedAt: time.Now().Add(-2 * sandboxHookReceiptWindow),
+			},
+		}
+		data, err := encodePendingHookOccurrence(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.store.JournalHookDelivery(t.Context(), p.ID, f.api.deliveryProcessID(), data, pendingHookJournalLimits); err != nil {
+			t.Fatal(err)
+		}
+		entry, found, err := f.store.HookDelivery(t.Context(), p.ID)
+		if err != nil || !found {
+			t.Fatalf("journal row %s: found=%v err=%v", p.ID, found, err)
+		}
+		entries = append(entries, entry)
+	}
+	start := make(chan struct{})
+	errs := make([]error, rows)
+	var wg sync.WaitGroup
+	for i, entry := range entries {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs[i] = f.api.recoverPendingHook(t.Context(), entry)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	for i, entry := range entries {
+		if errs[i] != nil {
+			t.Errorf("recovery of %s: %v", entry.ID, errs[i])
+		}
+		if _, found, err := f.store.HookDelivery(t.Context(), entry.ID); err != nil || found {
+			t.Errorf("settled row %s after its recovery: found=%v err=%v", entry.ID, found, err)
+		}
+	}
 }

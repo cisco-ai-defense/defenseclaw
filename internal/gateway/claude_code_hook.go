@@ -330,7 +330,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
 	action := rawAction
-	stateMutation := a.provenActiveStateMutation(ctx, verdict) && claudeCodeCanEnforce(req)
+	stateMutation := a.provenHookActionMustEnforce(ctx, verdict) && claudeCodeCanEnforce(req)
 	wouldBlock := rawAction == "block" && mode != "action" && !stateMutation
 	if rawAction == "block" && !claudeCodeCanEnforce(req) {
 		action = "allow"
@@ -720,6 +720,10 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 func claudeCodeAdditionalContext(rawAction, severity, reason string, wouldBlock bool) string {
 	if rawAction == "allow" || rawAction == "" {
 		return ""
+	}
+	if strings.HasPrefix(reason, "DefenseClaw is still scanning MCP server ") ||
+		strings.HasPrefix(reason, "DefenseClaw could not read admission for MCP server ") {
+		return reason
 	}
 	lead := "DefenseClaw observed"
 	finding := fmt.Sprintf("a %s Claude Code hook finding", severity)

@@ -211,6 +211,9 @@ type profileDecision struct {
 	// provenMembers keeps every proven assignment's rule and audit scope
 	// even when one profile covers the others for policy selection.
 	provenMembers []string
+	// holderFallback marks an OSS hook decision made with an unconfirmed
+	// account holder. Code-proven action findings still enforce on that path.
+	holderFallback bool
 }
 
 // guardrailProfileSet is every profile derived from one configuration.
@@ -840,9 +843,9 @@ func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profile
 	switch {
 	case !lookupAttempted || !windowsToken:
 	case s.Directory.GroupsPartial:
-		tokenGroupsCause = "the account has no desktop session, so its sign-in token groups are unknown until it signs in at the desktop again"
+		tokenGroupsCause = tokenGroupsCauseNoDesktopSession
 	case awaitingSpool(s.Directory):
-		tokenGroupsCause = "the guardian has no identity record for this account yet; a desktop sign-in (console or Remote Desktop) writes it"
+		tokenGroupsCause = tokenGroupsCauseNoGuardianRecord
 	}
 	accountDomain := s.Directory.AccountDomain
 	if accountDomain == "" && runtime.GOOS == "windows" {
@@ -974,7 +977,7 @@ func lookupDirectoryProfileSubject(name string) (profileSubject, error) {
 		return profileSubjectLookupFailed(id, userName, err), nil
 	}
 	if facts.ResolvedAt.IsZero() {
-		if local, localErr := lookupLocalProfileSubject(name); localErr == nil {
+		if local, localErr := lookupLocalProfileSubject(profileExplainLocalKey(name, id)); localErr == nil {
 			if !identityLookupBlocking.Load() {
 				local.LookupFailed = false
 			}
@@ -1896,13 +1899,15 @@ func (a *APIServer) serveGuardrailProfileResolve(w http.ResponseWriter, r *http.
 			found, err = profileSubject{UserName: user}, refusal
 		} else {
 			found, err = profileExplainSubjectLookup(user)
-			if caller, ok := profileExplainCallerSubject(query.Get("caller_facts"), user); ok && !own {
-				// The administrator's own NSS lookup as root resolved the
-				// account (GAP-0500); the gateway's lookup above still
-				// refreshed what the hooks read, and the cache block says
-				// what they use.
-				found, err = caller, nil
-				out["facts_source"] = "caller"
+			if !own && (err != nil || found.LookupFailed || found.LookupError != "" || found.UserID == "" || found.accountUnresolved) {
+				if caller, ok := profileExplainCallerSubject(query.Get("caller_facts"), user); ok &&
+					(found.UserID == "" || found.UserID == caller.UserID) {
+					// A completed gateway lookup uses the same facts as the
+					// hook. Root's NSS facts are a fallback for a lookup the
+					// gateway service cannot complete (GAP-0500).
+					found, err = caller, nil
+					out["facts_source"] = "caller"
+				}
 			}
 			if refusal := perUserExplainOfAnotherAccount(found); refusal != nil && !own {
 				found, err = profileSubject{UserName: user}, refusal

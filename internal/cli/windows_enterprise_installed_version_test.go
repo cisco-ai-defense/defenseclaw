@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"os"
 	"path/filepath"
 	"strings"
@@ -177,6 +178,34 @@ func TestWindowsEnterpriseEnsureUpgradesAfterFinishingAPendingTransaction(t *tes
 		!containsString(codes, "recovered_pending_transaction") || !containsString(codes, "ensure_upgrade") {
 		t.Fatalf("result ok=%v installed=%q warnings=%v", result.OK, result.InstalledVersion, codes)
 	}
+
+	// The installed 1.4.0 CLI (Remediate-Fix) carries no payload: the
+	// recovery that restored 1.3.0 is the result, with the next step, not
+	// an upgrade it cannot run (rel-1-0-6 GAP-0649).
+	actions, statusCalls = nil, 0
+	stdout.Reset()
+	installed := &windowsEnterpriseLifecycleOptions{
+		profile: "standalone", resolvedProfile: "standalone", productVersion: "1.4.0", jsonOutput: true, trustMode: "authenticode",
+	}
+	if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, installed, `C:\p\install-enterprise.ps1`); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(actions, ","); got != "Status,Repair,Status" {
+		t.Fatalf("installed CLI installer actions %s", got)
+	}
+	result = enterprisestatus.Result{}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode %q: %v", stdout.String(), err)
+	}
+	rolledBack := false
+	for _, warning := range result.Warnings {
+		if warning.Code == "recovered_pending_transaction" && strings.Contains(warning.Message, "rolled back") {
+			rolledBack = true
+		}
+	}
+	if !result.OK || result.InstalledVersion != "1.3.0" || !rolledBack || len(result.Errors) != 0 {
+		t.Fatalf("installed CLI result ok=%v installed=%q warnings=%v errors=%v", result.OK, result.InstalledVersion, result.Warnings, result.Errors)
+	}
 }
 
 // A pending repair transaction whose restored release cannot be
@@ -283,8 +312,8 @@ func TestWindowsEnterpriseInstalledCLIEnsureConfigPointsAtSetup(t *testing.T) {
 	status := &windowsEnterpriseInstallerReport{OK: true, Installed: true, InstalledVersion: "1.0.921"}
 	opts := &windowsEnterpriseLifecycleOptions{resolvedProfile: "standalone", productVersion: "1.0.921", configPath: `C:\dc-test\cfg.yaml`}
 	_, err := planWindowsEnterpriseEnsure(status, opts, "")
-	if !errors.Is(err, errWindowsEnterpriseInvalidArguments) || !strings.Contains(err.Error(), "/ensure CONFIG=") ||
-		strings.Contains(err.Error(), "--gateway-binary") {
+	if !errors.Is(err, errWindowsEnterpriseInvalidArguments) || !strings.Contains(err.Error(), windowsEnterpriseSetupCommand("/ensure", "CONFIG=<absolute path of an administrator-only config>", "JSON=1")) ||
+		!strings.Contains(err.Error(), managed.WindowsSetupSource) || strings.Contains(err.Error(), "--gateway-binary") {
 		t.Fatalf("installed CLI ensure --config = %v", err)
 	}
 	opts.resolvedProfile = "secure_client"

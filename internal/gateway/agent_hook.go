@@ -439,8 +439,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Copilot hook event registration is required", "reason": hookexec.MalformedHookPayloadReason})
 				return
 			}
-			// The registered hook surface and event own the dialect. Body
-			// fields cannot select a different parser.
+			// The registered surface selects the profile and the command
+			// binds the event. The per-user CLI profile reads either body
+			// shape under the same CLI policy.
 			var vscodeLocal bool
 			event, vscodeLocal = copilotargs.LocalDialect(copilotHookDialectFromHeaders(r.Header), event)
 			if vscodeLocal {
@@ -462,6 +463,17 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_event", int64(len(b)))
 				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Copilot hook event", "reason": hookexec.MalformedHookPayloadReason})
 				return
+			} else {
+				// The per-user CLI document is read by both harnesses. Its
+				// shared parser accepts two disjoint body shapes under the
+				// command-bound event and keeps the same CLI policy for each.
+				// Strict, managed and Secure Client keep their exact schemas.
+				cfg := a.decisionConfig(r.Context())
+				if cfg != nil && !cfg.SecureClientIntegration() &&
+					!managed.IsManagedEnterprise(cfg.DeploymentMode) &&
+					cfg.HookPolicyTierForConnector("copilot") != config.HookPolicyTierStrict {
+					r = r.WithContext(withCopilotCLISharedEvent(r.Context(), event))
+				}
 			}
 			if hookName := payloadString(payload, "hookName"); hookName != "" && hookName != event {
 				a.recordConnectorHookRejection(r.Context(), connectorName, event, "bound_event_mismatch", int64(len(b)))
@@ -600,6 +612,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		structuredToolRoute := toolRoute == connector.ToolEventRouteStructuredAction ||
 			profile.ToolCallLifecycle.Version == 0 && isGenericToolInspectionEvent(req.HookEventName)
 		if structuredToolRoute {
+			copilotCLILocalBody := false
+			if connectorName == "copilot" {
+				_, copilotCLILocalBody = copilotargs.CLIHookLocalEvent(
+					copilotCLISharedEventFromContext(r.Context()), payloadString(payload, "hook_event_name"))
+			}
 			if !hookToolCallJSONUnambiguous(connectorName, rawBody) {
 				req.ToolCallUnparsed = true
 			}
@@ -610,8 +627,15 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				req.ToolCallUnparsed = true
 			}
 			if connectorName == "copilot" && !copilotVSCodeLocalFromContext(r.Context()) &&
+				!copilotCLILocalBody &&
 				(payload["hook_event_name"] != nil || payload["tool_name"] != nil ||
 					payload["tool_input"] != nil) {
+				req.ToolCallUnparsed = true
+			}
+			if connectorName == "copilot" && copilotCLILocalBody &&
+				(copilotCLIMixedLocalFields(payload) ||
+					payload["tool_name"] == nil || payload["tool_input"] == nil ||
+					req.ToolName == "" || req.ToolArgsProjectionUncertain) {
 				req.ToolCallUnparsed = true
 			}
 			if connectorName == "copilot" && req.HookEventName == "permissionRequest" {
@@ -665,6 +689,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		startVerdictBlocked, startVerdictReason := true, sessionStartUnfinishedReason
 		if canonicalHookLifecycleEvent(req.HookEventName) == "session_start" {
 			startTicket = a.sessionStartGate.begin(startGateKey)
+			// The refusal this request was resolved to was issued before the
+			// start began; the start is expected to end with it.
+			startTicket.adopt(profileRefusal(r.Context()))
 			defer func() { startTicket.finish(startVerdictBlocked, startVerdictReason) }()
 		}
 		// tokenAuth wraps this handler in APIServer.Run, so reaching this point
@@ -1822,8 +1849,13 @@ func (a *APIServer) hookDecisionMeta(
 	req agentHookRequest,
 ) (llmEventMeta, string, bool) {
 	if req.ConnectorName == "opencode" && req.HookEventName == "defenseclaw.plugin.loaded" {
+		// A plugin load comes before any session, so it has no agent
+		// instance: it is a lifecycle event, and its connector audit row
+		// stays, rather than a hook decision that cannot name the instance
+		// (GAP-0577). A load that does carry an instance, and Secure Client,
+		// keep their decision.
 		cfg := a.decisionConfig(ctx)
-		if cfg == nil || (!cfg.SecureClientIntegration() && !managed.IsManagedEnterprise(cfg.DeploymentMode)) {
+		if (cfg == nil || !cfg.SecureClientIntegration()) && AgentIdentityFromContext(ctx).AgentInstanceID == "" {
 			return llmEventMeta{}, "", false
 		}
 	}
@@ -3597,7 +3629,9 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			LegacyText:              string(req.ToolArgs),
 			conflictSource:          conflictSource,
 			Connector:               req.ConnectorName,
+			CopilotSharedLocalFile:  copilotSharedLocalFileCall(ctx, req),
 			EnforcementCapable:      enforcementCapable,
+			StrictPolicy:            a.strictPolicyTierForHook(ctx, req.ConnectorName),
 			ManagedHookOverflowHold: managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
 			ResolvedWriteTargets:    resolvedWritesFromContext(ctx),
 			patchTarget:             hermesV4APatch,
@@ -3617,7 +3651,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	rawActionBeforeAssets := rawAction
 	caps := profile.Capabilities
 	effectiveMode := mode
-	if mode != "action" && a.provenActiveStateMutation(ctx, verdict) {
+	if mode != "action" && a.provenHookActionMustEnforce(ctx, verdict) {
 		effectiveMode = "action"
 	}
 	action, wouldBlock := mapHookActionForProfile(rawAction, effectiveMode, req.HookEventName, caps, profile, req.Payload)
@@ -3634,7 +3668,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// by returning advisory-only changes (action stays allow,
 	// rawAction promoted to block, wouldBlock=true). For events
 	// the connector itself does not declare blockable, we further
-	// downgrade through mapHookAction so we never tell the agent
+	// downgrade through its capability map so we never tell the agent
 	// to block on a surface it cannot honor.
 	for _, asset := range assetDecisions {
 		mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
@@ -3642,7 +3676,10 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			action, rawAction, severity, reason, findings,
 		)
 		if mergedAction == "block" {
-			capable, capableWouldBlock := mapHookActionForProfile("block", effectiveMode, req.HookEventName, caps, profile, req.Payload)
+			capable, capableWouldBlock := mapAssetBlockForProfile(
+				effectiveMode, req.HookEventName, caps, profile, req.Payload,
+				a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration(),
+			)
 			if capable != "block" {
 				mergedAction = capable
 				if capableWouldBlock {
@@ -4454,6 +4491,34 @@ func (a *APIServer) provenActiveStateMutation(ctx context.Context, verdict *Tool
 			(finding.proof.kind == findingProofActionFactsSemantic ||
 				finding.proof.kind == findingProofActionFactsSubgraph ||
 				finding.proof.kind == findingProofActiveStateMutation) {
+			return true
+		}
+	}
+	return false
+}
+
+// A holder-uncertain OSS fallback keeps ordinary work on the profile selected
+// by proven facts. It cannot turn a code-proven action finding into an
+// observe-only result while a possible account assignment would enforce it.
+func (a *APIServer) provenHookActionMustEnforce(ctx context.Context, verdict *ToolInspectVerdict) bool {
+	if a.provenActiveStateMutation(ctx, verdict) {
+		return true
+	}
+	resolved := resolvedGuardrailProfileFrom(ctx)
+	if resolved == nil || !resolved.decision.holderFallback || verdict == nil ||
+		normalizeCodexAction(verdict.Action) != "block" {
+		return false
+	}
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
+		return false
+	}
+	for _, finding := range verdict.DetailedFindings {
+		if !finding.contributesToEnforcement() || !finding.proof.authorizes(finding.RuleID) {
+			continue
+		}
+		switch finding.proof.kind {
+		case findingProofActionFactsSemantic, findingProofActionFactsSubgraph,
+			findingProofExactFallback, findingProofResolvedTarget, findingProofActiveStateMutation:
 			return true
 		}
 	}

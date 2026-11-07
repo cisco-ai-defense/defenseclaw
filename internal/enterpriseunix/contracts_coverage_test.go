@@ -64,7 +64,7 @@ func TestAgentWithoutAHookContractIsNotCovered(t *testing.T) {
 	// The entries are the ones EnumerateUnix writes for a Hermes 0.18.0 and
 	// for a Hermes whose version it cannot read
 	// (TestEnumerateUnixEnrollsNoHermesWithoutAHookContract).
-	data, err := enterprisehooks.MarshalUnprotectedAgents([]enterprisehooks.UnprotectedAgent{{
+	data, err := h.marshalCompletedScan([]enterprisehooks.UnprotectedAgent{{
 		User:      "r103t8h",
 		Connector: "hermes",
 		Version:   "0.18.0",

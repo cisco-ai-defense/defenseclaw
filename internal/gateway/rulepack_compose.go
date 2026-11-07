@@ -25,11 +25,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
@@ -146,6 +148,22 @@ func loadConnectorRulePack(cache *guardrail.RulePackCache, cfg *config.Config, c
 	return loadScopedRulePack(cache, cfg, connectorRulePackScope(cfg, connector), scope)
 }
 
+// rulePackValidateCommand is the `rulepack validate` an operator runs to print
+// a pack's pin. On a standalone managed install the gateway is not on the PATH,
+// so it is named by its path (cowork-1-0-8 GAP-0081; Windows by the managed
+// renderer, GAP-0076); a per-user install has it on the PATH. Every other
+// profile, Secure Client included, keeps the text of release 1.0.5 (review
+// round 4, S1).
+func rulePackValidateCommand(cfg *config.Config, goos string) string {
+	if cfg.EnterpriseProfile() != managed.ProfileStandalone {
+		return "defenseclaw-gateway rulepack validate --dir <pack dir>"
+	}
+	if goos == "windows" {
+		return managed.WindowsGatewayCommand("rulepack", "validate", "--dir", "<pack-dir>")
+	}
+	return managed.StandaloneGatewayPath(goos) + " rulepack validate --dir <pack dir>"
+}
+
 func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s rulePackScope, scope string) (*guardrail.RulePack, error) {
 	if s.ref.Name != "" && s.dir == "" && !cfg.EmbeddedRulePack(s.ref) {
 		if config.IsBuiltinRulePack(s.ref.Name) {
@@ -177,10 +195,10 @@ func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s ru
 				hint = fmt.Sprintf("; on this install: defenseclaw config set guardrail.custom_packs.%s.digest %s", s.ref.Name, got)
 			}
 			return nil, fmt.Errorf("%s rule pack %q: digest %s does not match guardrail.custom_packs.%s.digest; "+
-				"review the pack, then pin the digest above in that key (`defenseclaw-gateway rulepack validate --dir <pack dir>` "+
+				"review the pack, then pin the digest above in that key (`%s` "+
 				"prints it on the \"custom_packs pin\" line; a pin computed by a release before the digest covered only the pack's own files "+
 				"needs this one-time re-pin)%s",
-				scope, s.ref.Name, got, s.ref.Name, hint)
+				scope, s.ref.Name, got, s.ref.Name, rulePackValidateCommand(cfg, runtime.GOOS), hint)
 		}
 	}
 	// A read-only v8 load pins the original custom pack, then runs the same

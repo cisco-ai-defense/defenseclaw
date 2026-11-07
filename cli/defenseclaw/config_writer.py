@@ -421,6 +421,14 @@ def _transact(
     validate_candidate(target, candidate)
     if check_candidate is not None:
         check_candidate(target, candidate)
+    if decided is not None:
+        # Every ordinary write that turns protection on is judged here, whatever
+        # check the caller also supplies, so no command can save a roster the
+        # gateway refuses to boot (GAP-0588). A migration or restore (as_is)
+        # writes the bytes it was given.
+        from defenseclaw.guardrail_roster import check_guardrail_activation
+
+        check_guardrail_activation(target, candidate)
     # A hand edit does not take config.yaml.lock. Recheck the exact source
     # bytes after validation before installing the candidate.
     latest, _, latest_exists = _read_current(target)

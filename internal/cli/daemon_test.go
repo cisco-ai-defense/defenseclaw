@@ -20,8 +20,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
@@ -134,5 +137,31 @@ func TestRunStartRefusesUnsafeIdentityBeforeAlreadyRunningFastPath(t *testing.T)
 	}
 	if running, currentPID := d.IsRunning(); !running || currentPID != pid {
 		t.Fatalf("gateway after refused CLI start = running %v PID %d, want running PID %d", running, currentPID, pid)
+	}
+}
+
+// GAP-0714: start and restart refuse a home whose owner cannot be proven
+// before any write into it (login path, start lock, installer helpers), so a
+// refused root start leaves nothing the account's own start cannot open.
+func TestGAP0714RefusedStartAndRestartWriteNothingIntoTheHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", home)
+	old := refuseStartInUntrustedHome
+	t.Cleanup(func() { refuseStartInUntrustedHome = old })
+	refuseStartInUntrustedHome = func(string) error {
+		return errors.New("safefile: private directory has an untrusted owner")
+	}
+	for name, run := range map[string]func(*cobra.Command, []string) error{"start": runStart, "restart": runRestart} {
+		cmd := startCmd
+		if name == "restart" {
+			cmd = restartCmd
+		}
+		if err := run(cmd, nil); err == nil || !strings.Contains(err.Error(), "untrusted owner") {
+			t.Fatalf("%s in an unprovable home = %v", name, err)
+		}
+		entries, err := os.ReadDir(home)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("the refused %s left %d entries in the home (%v): %v", name, len(entries), err, entries)
+		}
 	}
 }

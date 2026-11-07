@@ -37,7 +37,7 @@ func TestEnumerateCommandIsStandaloneOnlyAndIdlesInManifestMode(t *testing.T) {
 	t.Cleanup(func() { enterpriseHooksEnumerateConfigLoader = origLoader })
 	current := standaloneTestConfig(f.dataDir)
 	current.Enterprise.Enrollment.Mode = config.EnterpriseEnrollmentManifest
-	enterpriseHooksEnumerateConfigLoader = func() (*config.Config, error) { return current, nil }
+	enterpriseHooksEnumerateConfigLoader = func() (*config.Config, string, error) { return current, "", nil }
 	var stdout bytes.Buffer
 	opts := enterpriseHooksEnumerateOptions{manifest: f.manifest, jsonOut: true, dryRun: true}
 	if err := runEnterpriseHooksEnumerate(context.Background(), &stdout, io.Discard, opts); err != nil {
@@ -71,7 +71,7 @@ func TestEnumerateCommandDryRunDiscoversThroughTheWorker(t *testing.T) {
 	current.Enterprise.Enrollment.HomeRoots = []string{f.homes}
 	enabled := true
 	current.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {Enabled: &enabled}}
-	enterpriseHooksEnumerateConfigLoader = func() (*config.Config, error) { return current, nil }
+	enterpriseHooksEnumerateConfigLoader = func() (*config.Config, string, error) { return current, "", nil }
 	enterpriseHooksEnumerateResolver = func(context.Context) unixidentity.Resolver { return resolver }
 	enterpriseHookSessionUIDs = func() []int { return nil }
 	enterpriseHookWorkerRunner = func(_ context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
@@ -126,7 +126,7 @@ func TestManifestModePublishesPrivateInstallScanWithoutRewritingTargets(t *testi
 	cfg.Enterprise.Enrollment.HomeRoots = []string{f.homes}
 	enabled := true
 	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"claudecode": {Enabled: &enabled}}
-	enterpriseHooksEnumerateConfigLoader = func() (*config.Config, error) { return cfg, nil }
+	enterpriseHooksEnumerateConfigLoader = func() (*config.Config, string, error) { return cfg, "", nil }
 	enterpriseHooksEnumerateResolver = func(context.Context) unixidentity.Resolver { return resolver }
 	enterpriseHookSessionUIDs = func() []int { return nil }
 	enterpriseHookWorkerRunner = func(_ context.Context, _ enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
@@ -142,7 +142,7 @@ func TestManifestModePublishesPrivateInstallScanWithoutRewritingTargets(t *testi
 		return false, nil
 	}
 	var published []enterprisehooks.UnprotectedAgent
-	enterpriseHooksEnumerateUnprotectedWriter = func(_ string, agents []enterprisehooks.UnprotectedAgent) error {
+	enterpriseHooksEnumerateUnprotectedWriter = func(_ string, agents []enterprisehooks.UnprotectedAgent, _ uint64, _ string) error {
 		published = append([]enterprisehooks.UnprotectedAgent(nil), agents...)
 		return nil
 	}
@@ -233,7 +233,7 @@ func TestEnumerateCyclePublishesTheUnprotectedAgentsRecord(t *testing.T) {
 	current.Enterprise.Enrollment.HomeRoots = []string{f.homes}
 	enabled := true
 	current.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"opencode": {Enabled: &enabled}}
-	enterpriseHooksEnumerateConfigLoader = func() (*config.Config, error) { return current, nil }
+	enterpriseHooksEnumerateConfigLoader = func() (*config.Config, string, error) { return current, "", nil }
 	enterpriseHooksEnumerateResolver = func(context.Context) unixidentity.Resolver { return resolver }
 	enterpriseHookSessionUIDs = func() []int { return nil }
 	var requests []enterpriseHookWorkerRequest
@@ -252,7 +252,7 @@ func TestEnumerateCyclePublishesTheUnprotectedAgentsRecord(t *testing.T) {
 	}
 	var recordPath string
 	var recorded []enterprisehooks.UnprotectedAgent
-	enterpriseHooksEnumerateUnprotectedWriter = func(path string, agents []enterprisehooks.UnprotectedAgent) error {
+	enterpriseHooksEnumerateUnprotectedWriter = func(path string, agents []enterprisehooks.UnprotectedAgent, _ uint64, _ string) error {
 		recordPath, recorded = path, append([]enterprisehooks.UnprotectedAgent(nil), agents...)
 		return nil
 	}
@@ -305,7 +305,7 @@ func TestRevokeGoneCommandRemovesDeletedAccountsTargets(t *testing.T) {
 		enterpriseHooksEnumerateManifestWriter, enterpriseHooksRevokeGoneRootCheck = origWriter, origRoot
 	})
 	current := standaloneTestConfig(f.dataDir)
-	enterpriseHooksEnumerateConfigLoader = func() (*config.Config, error) { return current, nil }
+	enterpriseHooksEnumerateConfigLoader = func() (*config.Config, string, error) { return current, "", nil }
 	enterpriseHooksEnumerateResolver = func(context.Context) unixidentity.Resolver { return resolver }
 	enterpriseHooksEnumerateLocalAccounts = func(context.Context) (map[string]int, error) { return map[string]int{"alice": 1501}, nil }
 	enterpriseHooksEnumerateDirectoryConfigured = func() bool { return true }

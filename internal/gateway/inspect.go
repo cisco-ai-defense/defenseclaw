@@ -980,6 +980,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	req *ToolInspectRequest,
 	action trustedActionRequest,
 ) *ToolInspectVerdict {
+	action.StrictPolicy = a.strictPolicyTierForHook(ctx, action.Connector)
 	// managed_enterprise: Cisco AI Defense is the sole decision-maker.
 	// Skip static block/allow + MCP-server block, connector regex packs,
 	// CodeGuard, and the judge lane; AID inspects the tool call directly
@@ -2199,6 +2200,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Connector = serverConnector
+	r = r.WithContext(openClawInspectIdentity(r.Context(), serverConnector))
 
 	scanTimeout := inspectScanTimeout
 	if a.inspectToolScanTimeout > 0 {
@@ -2217,23 +2219,33 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		v *ToolInspectVerdict
 	}
 	ch := make(chan verdictResult, 1)
-	workerDone := a.inspectToolWorkerDone
-	go func() {
-		if workerDone != nil {
-			defer workerDone()
-		}
-		var v *ToolInspectVerdict
-		if strings.EqualFold(req.Tool, "message") {
-			v = a.inspectMessageContent(workerCtx, &req)
-		} else {
-			// Pass the 200ms-capped ctx so the tool-call judge lane's
-			// deadline guard short-circuits on this generic endpoint
-			// (mirroring the message lane); native hook callers go
-			// through inspectToolPolicy with a deadline-free context.
-			v = a.inspectToolPolicyCtx(workerCtx, &req)
-		}
-		ch <- verdictResult{v}
-	}()
+	// The strict install-window decision is independent of the scanner.
+	// Decide it on the request goroutine so a saturated scanner cannot turn
+	// this required refusal into a scan timeout.
+	installVerdict := &ToolInspectVerdict{}
+	a.strictInstallWindowInspect(r.Context(), serverConnector, &req, installVerdict)
+	installBlocked := installVerdict.Action == "block"
+	if installBlocked {
+		ch <- verdictResult{installVerdict}
+	} else {
+		workerDone := a.inspectToolWorkerDone
+		go func() {
+			if workerDone != nil {
+				defer workerDone()
+			}
+			var v *ToolInspectVerdict
+			if strings.EqualFold(req.Tool, "message") {
+				v = a.inspectMessageContent(workerCtx, &req)
+			} else {
+				// Pass the 200ms-capped ctx so the tool-call judge lane's
+				// deadline guard short-circuits on this generic endpoint
+				// (mirroring the message lane); native hook callers go
+				// through inspectToolPolicy with a deadline-free context.
+				v = a.inspectToolPolicyCtx(workerCtx, &req)
+			}
+			ch <- verdictResult{v}
+		}()
+	}
 
 	var verdict *ToolInspectVerdict
 	select {
@@ -2253,14 +2265,15 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if req.BoundedPrefixReview {
-		verdict.markOversizeUninspected()
+	if !installBlocked {
+		if req.BoundedPrefixReview {
+			verdict.markOversizeUninspected()
+		}
+		verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), serverConnector))
+		a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)
+		// A lock that appeared during the scan still decides this request.
+		a.strictInstallWindowInspect(r.Context(), serverConnector, &req, verdict)
 	}
-	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), serverConnector))
-	a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)
-	// The strict tier refuses a call while an install or upgrade holds this
-	// account's data directory, as on the hook route (GAP-1438).
-	a.strictInstallWindowInspect(r.Context(), serverConnector, &req, verdict)
 
 	// Count the check against the authenticated connector so /health (and the
 	// TUI's "0 requests ... verify your agent is dialing the gateway port"
@@ -2481,6 +2494,11 @@ func (a *APIServer) inspectAuditEvent(r *http.Request, route, action, target, de
 		structured["connector"] = connectorName
 	}
 	auditCallerIdentity(ctx).addTo(structured)
+	if identityFactsEnabled.Load() {
+		if id, verified := agentIdentityFromContext(ctx); verified {
+			structured["defenseclaw.agent.identity.id"] = id
+		}
+	}
 	return audit.Event{
 		Action:     action,
 		Target:     target,

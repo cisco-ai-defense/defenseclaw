@@ -27,6 +27,7 @@ Unix checks are skipped there.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import ntpath
 import os
@@ -54,6 +55,119 @@ LAUNCHER_REINSTALL_STEP = (
 )
 _LAUNCHER_PROBLEM_PREFIX = "the DefenseClaw hook launcher "
 _WINDOWS_LAUNCHER = re.compile(r"([A-Za-z]:[\\/][^\"'&|<>\r\n]*?defenseclaw-hook\.exe)", re.IGNORECASE)
+
+# Per-user Windows Codex and Devin start this guard program instead of the
+# launcher on the events they can block; it starts the defenseclaw-hook.exe
+# beside it and answers a block when that launcher cannot start (rel-1-0-6
+# GAP-0676). A missing or damaged guard lets those calls run uninspected, so
+# doctor and status check the guard itself.
+HOOK_GUARD_NAME = "defenseclaw-hook-guard.exe"
+_HOOK_GUARD_AGENTS = {"codex": "Codex", "devin": "Devin"}
+_HOOK_GUARD_COMMANDS = {
+    # windowsCodexGuardedHookCommand: <system>\cmd.exe /d /v:off /c "<guard>" launcher-guard-sibling hook ...
+    "codex": re.compile(
+        r'/d /v:off /c "([^"\r\n]*[\\/](?i:defenseclaw-hook-guard\.exe))" '
+        r"launcher-guard-sibling hook --connector codex(?: |$)"
+    ),
+    # hookguard/devin.go: '<guard>' launcher-guard-devin <Event> hook --connector devin
+    "devin": re.compile(
+        r"^'((?:[^'\r\n]|'\\'')*/(?i:defenseclaw-hook-guard\.exe))' "
+        r"launcher-guard-devin [A-Za-z0-9._-]+ hook --connector devin$"
+    ),
+}
+# install.ps1 Save-HelperRecoveryCopy records "<sha256>  <name>" lines here.
+_BINARY_DIGESTS = ("installer", "binaries.sha256")
+_BINARY_DIGESTS_LIMIT = 64 * 1024
+_HOOK_GUARD_SIZE_LIMIT = 512 * 1024 * 1024
+_SHA256_HEX = re.compile(r"[0-9a-fA-F]{64}")
+
+
+def hook_guard_program(connector: str, command: str) -> str:
+    """The hook guard a per-user Windows Codex or Devin hook *command* starts, else ""."""
+
+    pattern = _HOOK_GUARD_COMMANDS.get(connector)
+    match = pattern.search(command.strip()) if pattern is not None else None
+    if match is None:
+        return ""
+    return match.group(1).replace("'\\''", "'") if connector == "devin" else match.group(1)
+
+
+def _recorded_binary_digest(data_dir: str, name: str) -> str:
+    """The sha256 the installer recorded for the binary *name*, else ""."""
+
+    if not data_dir:
+        return ""
+    path = os.path.join(data_dir, *_BINARY_DIGESTS)
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return ""
+        with open(path, "rb") as stream:
+            body = stream.read(_BINARY_DIGESTS_LIMIT + 1)
+    except OSError:
+        return ""
+    if len(body) > _BINARY_DIGESTS_LIMIT:
+        return ""
+    recorded = ""
+    for line in body.decode("utf-8", "replace").splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[1] == name and _SHA256_HEX.fullmatch(fields[0]):
+            recorded = fields[0].lower()
+    return recorded
+
+
+def _file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    read = 0
+    try:
+        with open(path, "rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                read += len(chunk)
+                if read > _HOOK_GUARD_SIZE_LIMIT:
+                    return ""
+                digest.update(chunk)
+    except OSError:
+        return ""
+    return digest.hexdigest()
+
+
+def hook_guard_problem(data_dir: str, connector: str, guard: str) -> HookProblem | None:
+    """A missing, non-regular or altered hook *guard* of a Codex or Devin entry, else None.
+
+    The gateway puts a missing guard back from the installer copy when it
+    starts (per_user_helper_restore.go); it never replaces something at the
+    guard path, so a damaged guard needs the installer.
+    """
+
+    agent = _HOOK_GUARD_AGENTS.get(connector, connector)
+    setup = setup_command(connector)
+    subject = f"the DefenseClaw hook guard {guard}"
+    try:
+        mode = os.lstat(guard).st_mode
+    except (FileNotFoundError, NotADirectoryError):
+        return HookProblem(
+            f"{subject} is missing, so {agent} prompts and tool calls run without DefenseClaw",
+            f"run `defenseclaw-gateway restart` to put the guard back from the installer copy, "
+            f"or `{setup}` to start the launcher directly",
+            blocking=True,
+        )
+    except OSError:
+        return None  # unreadable here is not proof of damage
+    if not stat.S_ISREG(mode):
+        return HookProblem(
+            f"{subject} is not a regular file, so {agent} prompts and tool calls run without DefenseClaw",
+            LAUNCHER_REINSTALL_STEP,
+            blocking=True,
+        )
+    recorded = _recorded_binary_digest(data_dir, HOOK_GUARD_NAME)
+    actual = _file_sha256(guard) if recorded else ""
+    if recorded and actual and actual != recorded:
+        return HookProblem(
+            f"{subject} does not match the copy the installer recorded, "
+            f"so {agent} prompts and tool calls may run without DefenseClaw",
+            LAUNCHER_REINSTALL_STEP,
+            blocking=True,
+        )
+    return None
 
 
 def _is_windows() -> bool:
@@ -99,12 +213,15 @@ def hook_launcher_problems(cfg: Any, connector: str) -> list[str]:
 
     An antivirus quarantine or a cleanup tool can remove
     ``defenseclaw-hook.exe``; every hook call then fails while status showed
-    the connector as running (GAP-0378).
+    the connector as running (GAP-0378). A Codex or Devin entry that starts
+    the hook guard is reported when the guard is missing, not a regular file
+    or not the copy the installer recorded (rel-1-0-6 GAP-0676).
     """
 
     if not _is_windows() or str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
         # Managed installs (Secure Client included) keep their own status.
         return []
+    guards: list[str] = []
     for path in _hook_config_paths(cfg, connector):
         try:
             if not path.is_file() or path.stat().st_size > _CONFIG_LIMIT:
@@ -117,6 +234,14 @@ def hook_launcher_problems(cfg: Any, connector: str) -> list[str]:
                 launcher = match.group(1)
                 if not os.path.isfile(launcher):
                     return [f"{_LAUNCHER_PROBLEM_PREFIX}{launcher} is missing, so every hook call fails"]
+            guard = hook_guard_program(connector, value)
+            if guard and guard not in guards:
+                guards.append(guard)
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    for guard in guards:
+        problem = hook_guard_problem(data_dir, connector, guard)
+        if problem is not None:
+            return [problem]
     return []
 
 
@@ -692,12 +817,28 @@ def _registers_defenseclaw_hooks(cfg: Any, connector: str, path: Path, *, strict
     raw = path.read_bytes()
     if path.suffix.lower() not in _STRUCTURED_SUFFIXES:
         return "defenseclaw" in raw.decode("utf-8", errors="replace").lower()
+    native = None
+    if connector == "claudecode" and strict:
+        from defenseclaw.fail_mode import _claude_per_user_native_registration
+
+        native = _claude_per_user_native_registration(cfg)
     try:
         document = _load_agent_document(path, raw)
     except ValueError:
         # A file the parser cannot read is reported by the agent itself;
         # never call it unregistered on that ground alone.
-        return "defenseclaw" in raw.decode("utf-8", errors="replace").lower()
+        return native is None and "defenseclaw" in raw.decode("utf-8", errors="replace").lower()
+    if native is not None:
+        # The native Linux registration has no hooks/ script path. Use the
+        # verifier shared with Doctor and fail-mode, which checks the exact
+        # executable, argv, required events and synchronous companions.
+        from defenseclaw.fail_mode import _claude_native_registration_problem, claude_missing_registration
+
+        return (
+            _claude_native_registration_problem(raw.decode("utf-8", errors="replace"), native, str(cfg.data_dir))
+            is None
+            and claude_missing_registration(cfg, document) is None
+        )
     section = _hook_section(document, path)
     if section is None:
         return False
@@ -865,14 +1006,29 @@ def _unguarded_tool_events(cfg: Any, connector: str, document: Any, path: Path) 
     if section is None:
         return False, []
     strict = _tool_inspection_strict(cfg)
+    native = None
+    if connector == "claudecode" and strict:
+        # The native launcher sits outside hooks/. Share its exact invocation
+        # with the registration check before inspecting the tool event fields.
+        from defenseclaw.fail_mode import _claude_native_primary_handler, _claude_per_user_native_registration
+
+        native = _claude_per_user_native_registration(cfg)
 
     def owns(handler: Any) -> bool:
+        if native is not None:
+            return isinstance(handler, dict) and _claude_native_primary_handler(handler, native)
         return any(
             _defenseclaw_hook_command(cfg, connector, command, strict=strict)
             for command in hook_handler_command_lines(handler, connector)
         )
 
-    if not any(
+    if native is not None:
+        from defenseclaw.hook_guard_matrix import _entries
+
+        spec = TOOL_GUARD_HOOKS[connector]
+        if not any(owns(entry.handler) for event in spec.events for entry in _entries(spec, document, event)):
+            return False, []
+    elif not any(
         _defenseclaw_hook_command(cfg, connector, command, strict=strict)
         for command in _hook_command_lines(section, connector)
     ):

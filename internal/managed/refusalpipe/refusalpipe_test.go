@@ -32,3 +32,15 @@ func TestCommandReportCarriesOnlyFixedWordsAndAReason(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0722: a Windows standalone call refused for credentials the gateway has
+// not accepted yet is a reportable refusal; an unknown reason is still dropped.
+func TestNormalizeAcceptsTheCredentialPendingReason(t *testing.T) {
+	report, ok := Report{Connector: "Claudecode", Reason: ReasonCredentialPending, Event: "UserPromptSubmit"}.Normalize()
+	if !ok || report.Connector != "claudecode" || report.Reason != ReasonCredentialPending {
+		t.Fatalf("Normalize = %+v, %v", report, ok)
+	}
+	if _, ok := (Report{Connector: "claudecode", Reason: "enterprise_managed_credential_other"}).Normalize(); ok {
+		t.Error("an unknown reason was accepted")
+	}
+}

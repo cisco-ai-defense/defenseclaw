@@ -71,7 +71,7 @@ var OpenCode = register(&Spec{
 	},
 	probe: ProbeSpec{
 		VersionArgv: []string{"/usr/local/bin/opencode", "--version"},
-		VersionRE:   regexp.MustCompile(`^([0-9]+\.[0-9]+\.[0-9]+)$`),
+		VersionRE:   regexp.MustCompile(`^(?:[Oo]pen[Cc]ode )?v?([0-9]+\.[0-9]+\.[0-9]+)$`),
 		// The npm package installs one Bun-compiled executable that makes
 		// every model request itself.
 		NetworkBinaries: `readlink -f "$(command -v opencode)"`,
@@ -86,7 +86,7 @@ var OpenCode = register(&Spec{
 		// platform binary whose digest installRun checked above.
 		run = strings.Replace(run, `ln -sfn "$root/bin/opencode" /usr/local/bin/opencode`, `ln -sfn "$bin" /usr/local/bin/opencode`, 1)
 		check := `h="$(mktemp -d)"; got="$(HOME="$h" OPENCODE_DISABLE_AUTOUPDATE=1 /usr/local/bin/opencode --version 2>/dev/null | head -n 1)"; rm -rf "$h"; ` +
-			`[ "$got" = ` + shellQuote(version) + ` ] || { echo "OpenCode '$got' is not the pinned ` + version + `" >&2; exit 1; }`
+			`case "$got" in [Oo]pen[Cc]ode\ *) got="${got#* }" ;; esac; ` + pinVersionCheck("OpenCode", version)
 		return []InstallStep{{
 			Comment: "Replace the base image's OpenCode with the pinned " + version + " in a root-owned prefix (registry integrity and native sha256 checked)",
 			Run:     run + "; " + check,

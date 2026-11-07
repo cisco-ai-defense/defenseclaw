@@ -164,6 +164,7 @@ type AssetPolicyDecision struct {
 	Action             string // allow | block
 	RawAction          string // allow | block
 	WouldBlock         bool
+	RetryAfterSeconds  int // bounded admission retry guidance, zero for other decisions
 	Reason             string
 	Source             string
 	RegistryStatus     string // registered | unregistered | unknown

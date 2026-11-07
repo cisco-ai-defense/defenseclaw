@@ -433,7 +433,7 @@ func TestWindowsBundleVersionACLGrantsServiceReadOnly(t *testing.T) {
 }
 
 func TestWindowsBundleReceiptsDirectoryCreatedProtected(t *testing.T) {
-	if !windowsEnterpriseIsElevated() {
+	if !testTokenIsElevated() {
 		t.Skip("setting the Administrators owner requires elevation")
 	}
 	path := filepath.Join(t.TempDir(), "install", enterprisebundle.ReceiptsDirName)
@@ -470,7 +470,7 @@ func TestWindowsBundleReceiptsDirectoryCreatedProtected(t *testing.T) {
 }
 
 func TestWindowsBundlePublicReceiptEventsCreatedProtected(t *testing.T) {
-	if !windowsEnterpriseIsElevated() {
+	if !testTokenIsElevated() {
 		t.Skip("setting the Administrators owner requires elevation")
 	}
 	const sid = "S-1-5-80-1-2-3-4-5"
@@ -547,7 +547,7 @@ func TestWindowsBundlePublicReceiptEventsCreatedProtected(t *testing.T) {
 }
 
 func TestWindowsBundleInheritedDirectoriesRepairExactACL(t *testing.T) {
-	if !windowsEnterpriseIsElevated() {
+	if !testTokenIsElevated() {
 		t.Skip("setting the Administrators owner requires elevation")
 	}
 	const sid = "S-1-5-80-1-2-3-4-5"
@@ -608,7 +608,7 @@ func TestWindowsBundleInheritedDirectoriesRepairExactACL(t *testing.T) {
 }
 
 func TestWindowsBundleStageDirectoryRepeatedCreationRepairsExactACL(t *testing.T) {
-	if !windowsEnterpriseIsElevated() {
+	if !testTokenIsElevated() {
 		t.Skip("setting the Administrators owner requires elevation")
 	}
 	root := filepath.Join(t.TempDir(), ".staging-test")
@@ -646,7 +646,20 @@ func TestWindowsBundleStageDirectoryRepeatedCreationRepairsExactACL(t *testing.T
 // layout whose gateway enforces windowsBundleTestDigest.
 func stubWindowsBundleHost(t *testing.T) managed.StandaloneLayout {
 	t.Helper()
-	root := t.TempDir()
+	// A short root, not t.TempDir(): the bundle fixture's config names
+	// paths under it (ai_discovery.signature_packs allows 256 characters),
+	// and t.TempDir() adds the test's name. Under a standard user's profile
+	// temp folder the longest names went over the limit and every prepare
+	// failed with config_invalid (GAP-0079).
+	root, err := os.MkdirTemp("", "dcb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(root); err != nil {
+			t.Errorf("remove the bundle host root: %v", err)
+		}
+	})
 	layout, err := managed.StandaloneWindowsLayoutForRoots(filepath.Join(root, "pf"), filepath.Join(root, "pd"))
 	if err != nil {
 		t.Fatal(err)
@@ -663,6 +676,10 @@ func stubWindowsBundleHost(t *testing.T) managed.StandaloneLayout {
 	savedPrivate, savedSeal, savedPublish, savedReceipt, savedEnsure := windowsBundlePrivateStage, windowsBundleSealVersion, windowsBundlePublishVersion, windowsBundlePublishReceipt, windowsBundleEnsureDirectory
 	savedEnsurePrivate, savedPublishPrivate := windowsBundleEnsurePrivateDirectory, windowsBundlePublishPrivateFile
 	savedEnsureStage, savedPublishStage := windowsBundleEnsureStageDirectory, windowsBundlePublishStageFile
+	savedSpool, savedReceiptEvents := windowsChangeSpool, windowsBundleEnsurePublicReceiptEventsDirectory
+	t.Cleanup(func() {
+		windowsChangeSpool, windowsBundleEnsurePublicReceiptEventsDirectory = savedSpool, savedReceiptEvents
+	})
 	t.Cleanup(func() {
 		windowsBundleLayout, windowsBundlePolicy, windowsBundleSleep, windowsBundleTrust, bundleAnchorTrust = savedLayout, savedPolicy, savedSleep, savedTrust, savedAnchorTrust
 		windowsBundlePrivateStage, windowsBundleSealVersion, windowsBundlePublishVersion = savedPrivate, savedSeal, savedPublish
@@ -701,6 +718,20 @@ func stubWindowsBundleHost(t *testing.T) managed.StandaloneLayout {
 	windowsBundleEnsureDirectory = func(layout managed.StandaloneLayout) error {
 		return os.MkdirAll(filepath.Join(layout.ConfigDir, enterprisebundle.BundlesDirName), 0o700)
 	}
+	// The change spool of the layout, in plain folders like the store above:
+	// its protected folders need an Administrators owner, which only an
+	// elevated token can set, and the bundle tests are not about its ACL
+	// (TestWindowsChangeSpoolProtectsTheBundleParent and
+	// TestWindowsFirstChangeEventAndReservationKeepCanonicalACLs are).
+	// GAP-0079: as a standard user every bundle prepare failed here.
+	windowsChangeSpool = func(layout managed.StandaloneLayout) (enterprisestatus.ChangeSpool, error) {
+		return enterprisestatus.ChangeSpool{Dir: enterprisestatus.ChangeEventsDir(layout.ConfigDir), StateDir: layout.LifecycleDir,
+			Reported: func(id string) bool { return enterprisestatus.ChangeReported(layout.DataDir, id) }}, nil
+	}
+	// The public receipt events folder too: its descriptor has an
+	// Administrators owner, and TestWindowsBundlePublicReceiptEventsCreatedProtected
+	// checks it (g079 review F4).
+	windowsBundleEnsurePublicReceiptEventsDirectory = func(path string) error { return os.MkdirAll(path, 0o700) }
 	bundleAnchorTrust = nil
 	return layout
 }
@@ -1050,7 +1081,7 @@ func TestWindowsEnsureBundleConfirmsThenRequiresBundles(t *testing.T) {
 	if err := os.WriteFile(layout.ConfigPath, rendered, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := migrateManagedStandaloneConfig(ctx, layout.ConfigPath); err != nil {
+	if err := migrateManagedStandaloneConfig(ctx, layout.ConfigPath, ""); err != nil {
 		t.Fatalf("record installed bundle config: %v", err)
 	}
 	attribution, ok := observabilityruntime.ReadBundleAttribution(layout.ConfigPath)

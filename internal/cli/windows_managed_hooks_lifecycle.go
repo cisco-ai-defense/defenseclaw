@@ -233,7 +233,7 @@ func runWindowsManagedHooksLifecycleWithStagedRetire(
 		action != "prune-orphaned-selectors" {
 		return fail(fmt.Errorf("unsupported managed-hook lifecycle snapshot action %q", action))
 	}
-	if err := enterpriseHooksNativePlatformPreflight(); err != nil {
+	if err := enterpriseHooksPlatformPreflight(); err != nil {
 		return fail(err)
 	}
 	ctx, err := resolveWindowsManagedHooksLifecycleContext(stagedRetire)
@@ -907,27 +907,51 @@ func windowsManagedHooksLifecycleCommittedTransactionID(
 		acceptWindowsManagedHooksActivationDrift(*activation, manifestSHA256, len(ctx.targets))
 	} else if activation.ManifestSHA256 != manifestSHA256 {
 		return "", errors.New(
-			"deployment managed-hook activation manifest_sha256 does not match the current protected manifest; run Setup /ensure again to reconcile the target roster",
+			"deployment managed-hook activation manifest_sha256 does not match the current protected manifest; run " +
+				windowsEnterpriseAdminCommand("ensure") + " from an elevated PowerShell prompt again to reconcile the target roster",
 		)
 	}
 	return activation.DeploymentGenerationID, nil
 }
 
+// windowsManagedHooksStandaloneProcess is a seam for the tests: the managed
+// hooks lifecycle serves Secure Client too, whose text stays as it was.
+var windowsManagedHooksStandaloneProcess = enterprisehooks.WindowsStandaloneProcess
+
+// windowsManagedHooksRepairStep is what an administrator runs to put the
+// deployment's records right: on the standalone profile the installed CLI's
+// repair by its full path (Setup is not installed there, cowork-1-0-8
+// GAP-0095), "Setup /repair" on Secure Client.
+func windowsManagedHooksRepairStep() string {
+	if windowsManagedHooksStandaloneProcess() {
+		return windowsEnterpriseAdminCommand("repair") + " from an elevated PowerShell prompt"
+	}
+	return "Setup /repair"
+}
+
+// windowsManagedHooksEnsureStep is windowsManagedHooksRepairStep for ensure.
+func windowsManagedHooksEnsureStep() string {
+	if windowsManagedHooksStandaloneProcess() {
+		return windowsEnterpriseAdminCommand("ensure") + " from an elevated PowerShell prompt"
+	}
+	return "Setup /ensure"
+}
+
 func validateWindowsManagedHooksLifecycleActivationBinding(activation *windowsManagedHooksActivationRecord, targetCount int) error {
 	if activation.SchemaVersion != 1 {
-		return fmt.Errorf("deployment managed-hook activation schema_version is %d, expected 1; run Setup /repair", activation.SchemaVersion)
+		return fmt.Errorf("deployment managed-hook activation schema_version is %d, expected 1; run %s", activation.SchemaVersion, windowsManagedHooksRepairStep())
 	}
 	if !validWindowsManagedHooksLifecycleTransactionID(activation.DeploymentGenerationID) {
-		return errors.New("deployment managed-hook activation deployment_generation_id is invalid; run Setup /repair")
+		return errors.New("deployment managed-hook activation deployment_generation_id is invalid; run " + windowsManagedHooksRepairStep())
 	}
 	if activation.State != "never_activated" && activation.State != "activated" {
-		return fmt.Errorf("deployment managed-hook activation state %q is invalid; run Setup /repair", activation.State)
+		return fmt.Errorf("deployment managed-hook activation state %q is invalid; run %s", activation.State, windowsManagedHooksRepairStep())
 	}
 	if !validWindowsManagedHooksLifecycleHex(activation.ManifestSHA256, sha256.Size) {
-		return errors.New("deployment managed-hook activation manifest_sha256 is invalid; run Setup /repair")
+		return errors.New("deployment managed-hook activation manifest_sha256 is invalid; run " + windowsManagedHooksRepairStep())
 	}
 	if activation.TargetCount != targetCount {
-		return fmt.Errorf("deployment managed-hook activation target_count is %d, current protected manifest has %d; run Setup /ensure again to reconcile the target roster", activation.TargetCount, targetCount)
+		return fmt.Errorf("deployment managed-hook activation target_count is %d, current protected manifest has %d; run %s again to reconcile the target roster", activation.TargetCount, targetCount, windowsManagedHooksEnsureStep())
 	}
 	return nil
 }
@@ -2312,7 +2336,7 @@ var windowsManagedHooksVendorFolderTakeBack = func() error {
 	} {
 		if _, err := enterprisepolicy.TakeBackVendorPolicyFolder(opts, dir); err != nil {
 			return fmt.Errorf(
-				"%s or a folder above it was created by a standard user before DefenseClaw and could not be taken back (rename it aside as an administrator and run Setup again): %w",
+				"%s or a folder above it was created by a standard user before DefenseClaw and could not be taken back (rename it aside as an administrator and run the same command again): %w",
 				dir, err,
 			)
 		}
@@ -2564,12 +2588,12 @@ func collectWindowsManagedHooksLifecycleGenerations(
 ) ([]string, int, error) {
 	if pendingExists {
 		return nil, 0, errors.New(
-			"managed-hook lifecycle collect refused: a lifecycle transaction is pending; Setup /ensure finishes it and collects the old runtime copies",
+			"managed-hook lifecycle collect refused: a lifecycle transaction is pending; " + windowsManagedHooksEnsureStep() + " finishes it and collects the old runtime copies",
 		)
 	}
 	if _, err := os.Lstat(ctx.journalPath); err == nil {
 		return nil, 0, errors.New(
-			"managed-hook lifecycle collect refused: a committed lifecycle journal is waiting for its retire; Setup /ensure retires it and collects the old runtime copies",
+			"managed-hook lifecycle collect refused: a committed lifecycle journal is waiting for its retire; " + windowsManagedHooksEnsureStep() + " retires it and collects the old runtime copies",
 		)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, 0, err

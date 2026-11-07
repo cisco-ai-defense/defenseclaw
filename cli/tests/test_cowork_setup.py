@@ -29,13 +29,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import click
 import pytest
 from click.testing import CliRunner
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw import cowork
-from defenseclaw.commands import cmd_doctor, cmd_setup, cmd_status, cmd_uninstall
+from defenseclaw.commands import cmd_doctor, cmd_setup, cmd_setup_cowork, cmd_status, cmd_uninstall
 from defenseclaw.commands.cmd_setup import setup as setup_group
 from defenseclaw.config import PerConnectorGuardrailConfig
 from defenseclaw.inventory import claude_desktop
@@ -103,7 +104,7 @@ def app():
         patch.object(cowork, "managed_host", return_value=""),
         patch.object(cowork, "claude_desktop_installed", return_value=True),
         patch.object(cowork, "open_claude", return_value=True),
-        patch.object(cmd_setup, "_gateway_lifecycle_executable", return_value=GATEWAY),
+        patch.object(cmd_setup, "_gateway_lifecycle_resolution", return_value=(GATEWAY, "")),
     ):
         yield ctx
     cleanup_app(ctx, db_path, tmp_dir)
@@ -118,6 +119,30 @@ def _setup(app, *args: str, gateway=None, input: str | None = None):
 
 def _data_dir(app) -> str:
     return str(app.cfg.data_dir)
+
+
+def test_cowork_names_found_gateway_with_unsafe_acl(app) -> None:
+    reason = "refusing to run the gateway: ACL grants write access to untrusted SID S-1-5-32-545; Restore its ACL"
+    with (
+        patch.object(cmd_setup, "_gateway_lifecycle_resolution", return_value=(None, reason)),
+    ):
+        with pytest.raises(click.ClickException) as exc:
+            cmd_setup_cowork._render_hooks(app.cfg)
+
+    assert "S-1-5-32-545" in str(exc.value)
+    assert "Restore its ACL" in str(exc.value)
+    assert "was not found" not in str(exc.value)
+
+
+def test_cowork_missing_gateway_keeps_install_guidance(app) -> None:
+    with (
+        patch.object(cmd_setup, "_gateway_lifecycle_resolution", return_value=(None, "")),
+    ):
+        with pytest.raises(click.ClickException) as exc:
+            cmd_setup_cowork._render_hooks(app.cfg)
+
+    assert "was not found" in str(exc.value)
+    assert "Run the DefenseClaw installer" in str(exc.value)
 
 
 def test_plugin_zip_has_only_the_manifest_and_hooks() -> None:
@@ -420,7 +445,6 @@ def test_uninstall_dry_run_names_the_cowork_removal_step(app) -> None:
     cowork.save_state(_data_dir(app), {"build": 1, "version": "1.0.1"})
     plan = cmd_uninstall.UninstallPlan(data_dir=_data_dir(app))
     with (
-        patch("defenseclaw.commands.windows_native_uninstall.prepare_native_windows_uninstall", return_value=None),
         patch.object(cmd_uninstall, "_build_plan", return_value=plan),
         patch.object(cmd_uninstall, "_render_plan"),
         patch.object(cmd_uninstall, "_execute_plan") as execute,
@@ -431,6 +455,8 @@ def test_uninstall_dry_run_names_the_cowork_removal_step(app) -> None:
         "The DefenseClaw Cowork plugin stays in your Claude account. Remove it in Claude: Customize > Plugins."
         in result.output
     )
+    assert "Customize > Plugins, then the ... menu > Remove" in result.output
+    assert "older plugins may block" in result.output
     execute.assert_not_called()
 
 
@@ -439,7 +465,6 @@ def test_completed_uninstall_records_cowork_removal(app) -> None:
     cowork.save_state(data_dir, {"build": 1, "version": "1.0.1"})
     plan = cmd_uninstall.UninstallPlan(data_dir=data_dir, remove_data_dir=True)
     with (
-        patch("defenseclaw.commands.windows_native_uninstall.prepare_native_windows_uninstall", return_value=None),
         patch.object(cmd_uninstall, "_build_plan", return_value=plan),
         patch.object(cmd_uninstall, "_render_plan"),
         patch.object(cmd_uninstall, "_execute_plan"),

@@ -330,6 +330,20 @@ def make_separate_stderr_runner() -> CliRunner:
         return CliRunner()
 
 
+def registered_audit_action_count() -> int:
+    # schemas/audit-event.json is the registry that make check-audit-actions
+    # holds equal to the Go and Python constants, and the unfiltered audit-sink
+    # selector lists exactly these actions. Tests that pin the selector size
+    # read it here, so adding an action cannot leave a stale literal behind.
+    schema = json.loads(
+        (Path(__file__).resolve().parents[2] / "schemas" / "audit-event.json").read_text(encoding="utf-8")
+    )
+    for branch in schema["properties"]["action"]["anyOf"]:
+        if "enum" in branch:
+            return len(branch["enum"])
+    raise AssertionError("schemas/audit-event.json has no literal action enum")
+
+
 def cleanup_app(app: AppContext, db_path: str, tmp_dir: str) -> None:
     """Close store and clean up temp files."""
     import shutil

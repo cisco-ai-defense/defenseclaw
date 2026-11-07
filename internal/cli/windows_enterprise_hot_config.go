@@ -43,7 +43,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	gwconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // A config-only ensure used to run the whole upgrade transaction: it stops
@@ -68,7 +67,7 @@ const windowsEnterpriseHotConfigMaxBytes = 4 << 20
 var (
 	windowsEnterpriseHotConfigTimeout        = 30 * time.Second
 	windowsEnterpriseHotConfigRestartTimeout = 2 * time.Minute
-	windowsEnterpriseHotConfigLayout         = managed.StandaloneWindowsLayout
+	windowsEnterpriseHotConfigLayout         = windowsManagedStandaloneLayout
 	windowsEnterpriseHotConfigLock           = acquireWindowsEnterpriseLifecycleLock
 	windowsEnterpriseHotConfigValidate       = validateWindowsServiceConfig
 	windowsEnterpriseHotConfigPoll           = 2 * time.Second
@@ -210,7 +209,7 @@ func windowsBundleTakeOverPendingCommit(ctx context.Context, opts *windowsEnterp
 	if err != nil {
 		return false
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return false
 	}
@@ -309,7 +308,7 @@ func windowsEnterpriseHotConfigApply(
 	if config.NeedsMigrationV9(next) {
 		return unavailable("the staged config needs a config_version migration")
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return unavailable("cannot resolve the trusted enterprise roots: " + err.Error())
 	}
@@ -1588,7 +1587,7 @@ func installWindowsEnterpriseSuppliedConfigOverUnparseable(configPath string) (s
 	if err := windowsEnterpriseStandaloneConfigPreflight(supplied); err != nil {
 		return "", err
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return "", nil
 	}
@@ -1610,7 +1609,9 @@ func installWindowsEnterpriseSuppliedConfigOverUnparseable(configPath string) (s
 	if kept == "" {
 		return "", fmt.Errorf("the installed %s does not parse and could not be kept as rejected-config.yaml", layout.ConfigPath)
 	}
-	if err := writeFileKeepingDACL(layout.ConfigPath, next, layout.ConfigPath); err != nil {
+	if err := recordWindowsEnterpriseLifecycleConfigWrite(layout.ConfigPath, next, windowsEnterpriseSuppliedConfigRecordReason, func() error {
+		return writeFileKeepingDACL(layout.ConfigPath, next, layout.ConfigPath)
+	}); err != nil {
 		return "", fmt.Errorf("install the supplied config over the unparseable %s: %w", layout.ConfigPath, err)
 	}
 	return kept, nil
@@ -1622,12 +1623,82 @@ func windowsEnterpriseUnparseableConfigChange(kept, action string) string {
 	return "the installed config.yaml did not parse; kept it as " + kept + " and installed the supplied config before the " + action
 }
 
+// windowsEnterpriseSuppliedConfigRecordReason is the reason of the config
+// generation Setup records when it writes the supplied config over a
+// config.yaml the transaction refuses.
+const windowsEnterpriseSuppliedConfigRecordReason = "enterprise windows lifecycle (the supplied config replaced a refused config.yaml)"
+
+// recordWindowsEnterpriseLifecycleConfigWrite runs write, which puts approved
+// at the managed config path, and records approved as the lifecycle's config
+// generation in the same config.yaml.lock critical section, while the caller
+// holds lifecycle.lock (GAP-0646). Setup used to write the supplied config
+// here with no record and release lifecycle.lock before the transaction took
+// it again: the hook guardian then found bytes config.generation.json did not
+// record, recorded them as hand-edit:unattributed, and the gateway refused to
+// start on them, so the repair ended 1603. The record carries the options the
+// lifecycle's config step records for the same bytes
+// (managedStandaloneLifecycleRecordOptions) and config.yaml's access list, as
+// that step gives it. A record that is there but does not read is the only
+// proof of the counter (GAP-0236): the bytes are written without one, and the
+// transaction's config step refuses that record as before.
+func recordWindowsEnterpriseLifecycleConfigWrite(path string, approved []byte, reason string, write func() error) error {
+	if _, err := configwrite.ReadGenerationState(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return write()
+	}
+	opt, err := managedStandaloneLifecycleRecordOptions(path, approved, reason)
+	if err != nil {
+		return err
+	}
+	opt.RecordSHA256 = configwrite.SHA256Hex(approved)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := configwrite.Locked(ctx, path, opt, func() (bool, error) { return true, write() }); err != nil {
+		return err
+	}
+	restoreACL, err := keepConfigDACL(path)
+	if err != nil {
+		return fmt.Errorf("read the access control list of %s: %w", path, err)
+	}
+	return restoreACL(configwrite.GenerationPath(path))
+}
+
 // acquireWindowsEnterpriseLifecycleLock opens the lifecycle lock the way the
-// PowerShell lifecycle does for a mutation, exclusively, and does not wait:
-// a busy lock sends the change to the upgrade transaction, which waits for
-// it.
+// PowerShell lifecycle does for a mutation, exclusively. It waits up to
+// windowsEnterpriseLifecycleLockWait, and only on a sharing violation, so the
+// hook guardian's short hold never turns a step into "nothing to do"; a busy
+// lock after that sends the change to the upgrade transaction, which waits
+// for it. Only the windowsEnterpriseHotConfigLock seam uses it (Setup's
+// pre-step, hot apply, bundle restore, generation repair); passes that must
+// not wait take tryWindowsEnterpriseLifecycleLock (GAP-0646 review 2).
 func acquireWindowsEnterpriseLifecycleLock(path string) (func(), error) {
-	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+	deadline := time.Now().Add(windowsEnterpriseLifecycleLockWait)
+	for {
+		release, err := tryWindowsEnterpriseLifecycleLock(path)
+		if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) || !time.Now().Before(deadline) {
+			return release, err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// windowsEnterpriseLifecycleLockWait bounds how long a Go lifecycle step
+// waits for lifecycle.lock. The hook guardian holds it only while it records
+// an administrator's edit of config.yaml (GAP-0646), at most
+// managedConfigRecordHold; a lifecycle run holds it for minutes, so a take
+// during a run still fails as busy. A seam for tests.
+var windowsEnterpriseLifecycleLockWait = 5 * time.Second
+
+// tryWindowsEnterpriseLifecycleLock opens lifecycle.lock with no sharing,
+// once: the error wraps windows.ERROR_SHARING_VIOLATION when another process
+// holds it, and fs.ErrNotExist when there is no lock file. A lock that is not
+// there says so as the base did ("is not a regular file"), and still wraps
+// the cause (GAP-0646 review L1, the port of 93d99c758d).
+func tryWindowsEnterpriseLifecycleLock(path string) (func(), error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("lifecycle lock %s is not a regular file: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("lifecycle lock %s is not a regular file", path)
 	}
 	name, err := windows.UTF16PtrFromString(path)

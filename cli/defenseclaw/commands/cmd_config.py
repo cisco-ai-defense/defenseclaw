@@ -59,6 +59,7 @@ from defenseclaw.config_inspect import (
 from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.file_permissions import UNSAFE_PATH_NAMESPACE_VIEW
+from defenseclaw.guardrail_roster import check_guardrail_connector_roster, guardrail_enabled
 from defenseclaw.observability.v8_config import (
     MAX_SOURCE_BYTES,
     RETIRED_KEY_ACTION_PREFIX,
@@ -449,11 +450,24 @@ _ADMISSION_TYPES = ("skill", "mcp", "plugin")
 _TRUST_KEY = ["guardrail", "cisco_trust_level"]
 
 
+def _hook_fail_mode_connector(parts: list) -> str | None:
+    """The connector ("" for the global key) of a guardrail hook_fail_mode key, else None."""
+    if parts == ["guardrail", "hook_fail_mode"]:
+        return ""
+    if len(parts) == 4 and parts[:2] == ["guardrail", "connectors"] and parts[3] == "hook_fail_mode":
+        return parts[2]
+    return None
+
+
 def _resolves_when_unset(parts: list) -> bool:
     """Keys whose default is resolved (a rule pack level, the Cisco trust
-    level, the admission and update sections) rather than blank."""
-    return parts[0] in ("admission", "update") or parts == _TRUST_KEY or (
-        parts[0] == "guardrail" and parts[-1] in _LEVEL_KEYS
+    level, the hook fail mode, the admission and update sections) rather than
+    blank."""
+    return (
+        parts[0] in ("admission", "update")
+        or parts == _TRUST_KEY
+        or (parts[0] == "guardrail" and parts[-1] in _LEVEL_KEYS)
+        or _hook_fail_mode_connector(parts) is not None
     )
 
 
@@ -503,6 +517,12 @@ def _effective_value(app: AppContext, parts: list[str]) -> tuple[object, str] | 
         if which == "alert_at" and levels.alert_clamped:
             label += " (clamped to block_at)"
         return value, label
+    hook_connector = _hook_fail_mode_connector(parts)
+    if hook_connector is not None:
+        # The one resolver the hooks, init, doctor and status read: a key
+        # config.yaml leaves out is the mode the deployment runs, never the
+        # model placeholder.
+        return cfg.guardrail.hook_fail_mode_resolution(hook_connector)
     if parts == _TRUST_KEY:
         written = str(getattr(cfg.guardrail, "cisco_trust_level", "") or "").strip().lower()
         if written in ("full", "advisory", "none"):
@@ -785,6 +805,7 @@ def _shadowed_hilt_notes(changes: list) -> list[str]:
 # patched (teardown restores it).
 _MOVED_DATA_DIR_RECORD = "agent_discovery.json"
 _MOVED_DATA_DIR_BACKUP_SUFFIX = "_backup.json"
+_HOOK_CREDENTIAL_PATTERN = re.compile(rb"[0-9a-f]{64}")
 
 
 def _carry_connector_records(old_dir: str, new_dir: str) -> list[str]:
@@ -855,6 +876,93 @@ def _carry_connector_records(old_dir: str, new_dir: str) -> list[str]:
     return notes
 
 
+def _read_moved_hook_credential(path: str) -> bytes:
+    """Read an account-owned scoped credential from a private regular file."""
+    from defenseclaw.file_permissions import open_regular_file_no_follow
+
+    info = os.lstat(path)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077):
+        raise OSError("hook credential is not an account-private regular file")
+    with os.fdopen(open_regular_file_no_follow(path, expected_stat=info), "rb") as handle:
+        data = handle.read(4097)
+    token = data.strip()
+    if len(data) > 4096 or not _HOOK_CREDENTIAL_PATTERN.fullmatch(token):
+        raise OSError("hook credential is not valid")
+    return token
+
+
+def _carry_hook_credentials(old_dir: str, new_dir: str, connectors: list[str]) -> list[str]:
+    """Keep existing sessions' scoped credentials valid after a store move."""
+    if os.name == "nt" or config_module._is_admin_process() or not old_dir or not new_dir:
+        return []
+    try:
+        if os.path.samefile(old_dir, new_dir):
+            return []
+    except OSError:
+        if os.path.abspath(old_dir) == os.path.abspath(new_dir):
+            return []
+    from defenseclaw.file_permissions import atomic_write_private_bytes, make_private_directory
+
+    old_hooks = os.path.join(old_dir, "hooks")
+    try:
+        for directory in (old_dir, old_hooks):
+            info = os.lstat(directory)
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                    or info.st_mode & 0o022):
+                raise OSError("hook credential directory is not account-owned and private")
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return [
+            "warning: existing hook credentials could not be carried to the new data_dir; "
+            "restart active agent sessions after the gateway restart."
+        ]
+
+    new_hooks = os.path.join(new_dir, "hooks")
+    carried: list[str] = []
+    unavailable: list[str] = []
+    for name in sorted({normalize_connector(name) for name in connectors}):
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", name):
+            continue
+        source = os.path.join(old_hooks, f".hook-{name}.token")
+        if not os.path.lexists(source):
+            continue
+        target = os.path.join(new_hooks, f".hook-{name}.token")
+        try:
+            token = _read_moved_hook_credential(source)
+            make_private_directory(new_dir)
+            make_private_directory(new_hooks)
+            for directory in (new_dir, new_hooks):
+                info = os.lstat(directory)
+                if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                        or info.st_mode & 0o022):
+                    raise OSError("new hook credential directory is not account-owned and private")
+            if os.path.lexists(target):
+                info = os.lstat(target)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+                    raise OSError("new hook credential is not an account-owned regular file")
+                try:
+                    current = _read_moved_hook_credential(target)
+                except OSError:
+                    current = b""
+                if current == token:
+                    continue
+            atomic_write_private_bytes(target, token + b"\n")
+            carried.append(name)
+        except OSError:
+            unavailable.append(name)
+    notes = []
+    if carried:
+        notes.append("Kept the scoped hook credentials for the new data_dir: " + ", ".join(carried) + ".")
+    if unavailable:
+        notes.append(
+            "warning: scoped hook credentials for " + ", ".join(unavailable) +
+            " could not be carried to the new data_dir; restart active agent sessions after the gateway restart."
+        )
+    return notes
+
+
 def _seed_moved_data_dir(changes: list, old_data_dir: str = "") -> list[str]:
     """Seed the rule packs, Rego policies and connector records under a new data_dir.
 
@@ -870,7 +978,13 @@ def _seed_moved_data_dir(changes: list, old_data_dir: str = "") -> list[str]:
         cfg = config_module.load()
     except Exception:  # noqa: BLE001 - the change is committed; seeding is best effort
         return []
-    notes = _carry_connector_records(old_data_dir, str(cfg.data_dir or ""))
+    new_data_dir = str(cfg.data_dir or "")
+    notes = _carry_connector_records(old_data_dir, new_data_dir)
+    if not cfg.guardrail.secure_client_hook_fail_modes():
+        notes.extend(_carry_hook_credentials(
+            old_data_dir, new_data_dir,
+            [name for name in cfg.active_connectors() if cfg.guardrail.effective_enabled(name)],
+        ))
     return notes + _seed_moved_policies(cfg)
 
 
@@ -1213,39 +1327,41 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
         raise click.ClickException(
             f"an empty value does not set {key}; use defenseclaw config unset {key}"
         )
-    roster_change = parts == ["guardrail"] or parts[:2] == ["guardrail", "connectors"]
-    check_candidate = _check_guardrail_connector_roster if roster_change else None
+    check_candidate = _connector_roster_check([parts])
     _write_config_change(app, [Change(key, parsed)], expect_sha256, "set", check_candidate=check_candidate)
 
 
-def _check_guardrail_connector_roster(_path: str, candidate: bytes) -> None:
-    """Check the final enabled roster while the writer holds config.yaml.lock."""
-    from defenseclaw import config_writer
+def _selects_connectors(parts: list) -> bool:
+    """True for a key that can change which connectors share the gateway process."""
+    return (
+        parts in (["guardrail"], ["claw"], ["guardrail", "connector"], ["claw", "mode"])
+        or parts[:2] == ["guardrail", "connectors"]
+    )
 
-    document = config_writer._parse_config_document(candidate)
-    if config_writer.secure_client_document(document):
-        return
-    guardrail = document.get("guardrail", {}) if isinstance(document, dict) else {}
-    roster = guardrail.get("connectors", {}) if isinstance(guardrail, dict) else {}
-    if not isinstance(roster, dict):
-        return
-    configured = {normalize_connector(name) for name in roster if isinstance(name, str)}
-    if len(configured) < 2:
-        return
-    enabled = {
-        normalize_connector(name)
-        for name, entry in roster.items()
-        if isinstance(name, str) and isinstance(entry, dict) and entry.get("enabled") is not False
-    }
-    proxies = sorted(enabled & {"openclaw", "zeptoclaw"})
-    if proxies:
-        proxy = proxies[0]
-        others = sorted(configured - {proxy})
-        label = "hook connectors" if not set(others) & {"openclaw", "zeptoclaw"} else "other connectors"
-        raise config_writer.ConfigWriteError(
-            f"{proxy} needs a proxy binding and cannot share a gateway process "
-            f"with {label} ({', '.join(others)})."
-        )
+
+def _connector_roster_check(parts_list: list[list]):
+    """The final-file check for a set or unset that can change the process.
+
+    One rule for every selection key (guardrail.connector, claw.mode, an entry
+    under guardrail.connectors, or a whole map) and for guardrail.enabled
+    turning on: judge the written file, not the key. The guardrail enable
+    commands pass the same check to ``Config.save``.
+    """
+    if any(_selects_connectors(parts) for parts in parts_list):
+        return check_guardrail_connector_roster
+    if any(parts == ["guardrail", "enabled"] for parts in parts_list):
+        return _check_roster_when_guardrail_on
+    return None
+
+
+def _check_roster_when_guardrail_on(path: str, candidate: bytes) -> None:
+    """Turning the guardrail on activates whatever roster the file already holds.
+
+    Judged only when the final file has it on, so switching it off or unsetting
+    it (default off) is never refused for a roster that was already there.
+    """
+    if guardrail_enabled(candidate):
+        check_guardrail_connector_roster(path, candidate)
 
 
 def _refuse_retired_scanner_key(key: str, parts: list) -> None:
@@ -1298,11 +1414,7 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
         )
         for key, parts in parsed
     ]
-    roster_change = any(
-        parts == ["guardrail"] or parts[:2] == ["guardrail", "connectors"]
-        for _key, parts in parsed
-    )
-    check_candidate = _check_guardrail_connector_roster if roster_change else None
+    check_candidate = _connector_roster_check([parts for _key, parts in parsed])
     if _write_config_change(app, changes, expect_sha256, "unset", check_candidate=check_candidate):
         for note in _left_roster_notes(parsed, roster):
             click.echo(note)
@@ -1625,7 +1737,7 @@ def _show_effective_scanner_settings(masked: dict) -> None:
 
 
 def _resolve_defaults(app: AppContext, view: dict, written: dict, *, profiles: bool = True) -> None:
-    """Replace the placeholders of admission and update with what the gateway runs with.
+    """Replace the placeholders of admission, update and the hook fail mode with what the gateway runs with.
 
     The dataclass dump shows an unset admission or update key as null or {}, which
     reads as "no policy". Each asset type shows its resolved policy, and update shows
@@ -1645,6 +1757,22 @@ def _resolve_defaults(app: AppContext, view: dict, written: dict, *, profiles: b
         view["admission"] = resolved
     if isinstance(view.get("update"), dict):
         view["update"] = _update_view(cfg)[0]
+    if isinstance(view.get("guardrail"), dict):
+        _resolve_hook_fail_modes(cfg, view["guardrail"], written.get("guardrail"))
+
+
+def _resolve_hook_fail_modes(cfg: object, guardrail: dict, written: object) -> None:
+    """Show the hook fail mode a key config.yaml leaves out as the mode the
+    deployment runs, from the resolver that config get, init, doctor and
+    status read, never as the model placeholder (GAP-0719)."""
+    saved = written if isinstance(written, dict) else {}
+    resolver = cfg.guardrail.hook_fail_mode_resolution  # type: ignore[attr-defined]
+    if not str(saved.get("hook_fail_mode") or "").strip():
+        guardrail["hook_fail_mode"] = resolver("")[0]
+    connectors = guardrail.get("connectors")
+    for name, entry in (connectors.items() if isinstance(connectors, dict) else ()):
+        if isinstance(entry, dict) and not str(entry.get("hook_fail_mode") or "").strip():
+            entry["hook_fail_mode"] = resolver(name)[0]
 
 
 def _merge_defaults(written: dict, defaults: dict) -> dict:
@@ -1669,7 +1797,9 @@ def _show_data(app: AppContext, *, source: bool, effective: bool, provenance: bo
         # No config.yaml yet: show the defaults the CLI would run with.
         if source or effective or provenance:
             raise click.ClickException(f"config.yaml does not exist yet; {config_module.first_run_hint()}")
-        return _v8_defaults(app)
+        defaults = _v8_defaults(app)
+        _resolve_defaults(app, defaults, {})
+        return defaults
     resolved_only = effective or provenance
     masked: dict = {}
     if not resolved_only:
@@ -2169,6 +2299,9 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
         suggestion = re.search(r"suggested field ([^;]+)", text)
         hint = f' (did you mean "{suggestion.group(1).strip()}"?)' if suggestion else ""
         return f"{where}{field}: unknown field{hint}. All fields: {_ALL_FIELDS_COMMAND}"
+
+    if code == "config_schema_invalid" and text.startswith(f"{field} was retired in config_version "):
+        return f"{where}{text}"
 
     if (code == "maxLength" or "maxLength constraint" in text) and isinstance(node, yaml.ScalarNode):
         # The gateway's limit for this field ("a string of at most 512

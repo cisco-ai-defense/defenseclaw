@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,6 +29,10 @@ type ownStatusView struct {
 	ClaudeCode struct {
 		Protected bool `json:"protected"`
 	} `json:"claude_code"`
+	Connectors map[string]struct {
+		Protected bool   `json:"protected"`
+		State     string `json:"state"`
+	} `json:"connectors"`
 	Cowork struct {
 		Protected   bool   `json:"protected"`
 		State       string `json:"state"`
@@ -90,7 +95,32 @@ func showOwnStatus(cmd *cobra.Command, asJSON bool) error {
 	}
 	fmt.Fprintln(out, "This computer is managed by your organization.")
 	fmt.Fprintf(out, "  Account       %s\n", account)
-	fmt.Fprintf(out, "  Claude Code   %s\n", protected(view.ClaudeCode.Protected))
+	if row, ok := view.Connectors["claudecode"]; ok {
+		state := row.State
+		if state == "" {
+			state = protected(row.Protected)
+		}
+		fmt.Fprintf(out, "  Claude Code   %s\n", state)
+	} else if view.Connectors == nil {
+		// Older gateways use the legacy Claude Code field and do not send
+		// a connector roster.
+		fmt.Fprintf(out, "  Claude Code   %s\n", protected(view.ClaudeCode.Protected))
+	}
+	names := make([]string, 0, len(view.Connectors))
+	for name := range view.Connectors {
+		if name != "claudecode" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		row := view.Connectors[name]
+		state := row.State
+		if state == "" {
+			state = protected(row.Protected)
+		}
+		fmt.Fprintf(out, "  %-13s %s\n", ownConnectorLabel(name), state)
+	}
 	fmt.Fprintf(out, "  Cowork        %s\n", view.Cowork.State)
 	fmt.Fprintf(out, "  Last Cowork   %s\n", last)
 	fmt.Fprintln(out)
@@ -98,6 +128,21 @@ func showOwnStatus(cmd *cobra.Command, asJSON bool) error {
 		fmt.Fprintln(out, line)
 	}
 	return nil
+}
+
+func ownConnectorLabel(name string) string {
+	switch name {
+	case "opencode":
+		return "OpenCode"
+	case "openclaw":
+		return "OpenClaw"
+	case "claudecode":
+		return "Claude Code"
+	}
+	if name == "" {
+		return ""
+	}
+	return strings.ToUpper(name[:1]) + name[1:]
 }
 
 func writeOwnStatusJSON(w io.Writer, value map[string]any) {

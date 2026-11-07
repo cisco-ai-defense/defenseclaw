@@ -210,6 +210,61 @@ func TestDiscoverUnixAgentVersionFindsVersionManagerInstalls(t *testing.T) {
 	}
 }
 
+// GAP-0637: the per-user worker may find a CLI through a searched bin link
+// while its package lives under a custom npm prefix. The package still
+// identifies the installed version when the bounded live probe cannot read
+// one. A readable live version takes precedence over older metadata.
+func TestDiscoverUnixAgentVersionReadsLinkedPackageMetadata(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("the per-user worker runs with the account's credentials")
+	}
+	oldPrefixes := machinePrefixes
+	machinePrefixes = func() []string { return nil }
+	SetStandaloneUnix(true)
+	t.Cleanup(func() { machinePrefixes = oldPrefixes; SetStandaloneUnix(false) })
+	home := t.TempDir()
+	pkgDir := filepath.Join(home, ".oc2", "node_modules", "@opencode", "cli")
+	binDir := filepath.Join(home, ".local", "bin")
+	for _, dir := range []string{filepath.Join(pkgDir, "bin"), binDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "package.json"), []byte(`{"name":"@opencode/cli","version":"2.2.5","bin":{"opencode":"./bin/opencode.exe"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	program := filepath.Join(pkgDir, "bin", "opencode.exe")
+	link := filepath.Join(binDir, "opencode")
+	if err := os.Symlink(program, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, output, want string
+	}{
+		{"worker environment has no version", "if [ \"$CI\" = 1 ]; then exit 0; fi\necho 'opencode v2.2.5'", "2.2.5"},
+		{"live version wins", "echo 'opencode v2.2.6'", "2.2.6"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(program, []byte("#!/bin/sh\n"+tc.output+"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			got, reason := DiscoverUnixAgentVersion(context.Background(), home, "opencode", true)
+			if got != tc.want || reason != "" {
+				t.Fatalf("version = %q (%s), want %q", got, reason, tc.want)
+			}
+		})
+	}
+	if err := os.WriteFile(program, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "package.json"), []byte(`{"name":"@opencode/cli","version":"2.2.5","bin":{"other":"./bin/opencode.exe"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, reason := DiscoverUnixAgentVersion(context.Background(), home, "opencode", true); got != "" || !UnixAgentInstalledWithoutVersion(reason) {
+		t.Fatalf("unrelated package bin entry certified version %q (%s)", got, reason)
+	}
+}
+
 func TestUserNPMRCPrefix(t *testing.T) {
 	home := t.TempDir()
 	for content, want := range map[string]string{

@@ -2278,6 +2278,7 @@ var _ SandboxController = (*managedSandboxController)(nil)
 func (c *managedSandboxController) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	st, err := c.Manager.Status(ctx)
 	if st != nil {
+		st.DaemonPID = os.Getpid()
 		s := c.d.freshSettings(ctx)
 		st.Managed = c.d.managedStatusFor(ctx, s)
 		st.IngressPort, st.EgressPort = s.Operational.IngressPort, s.Operational.EgressPort

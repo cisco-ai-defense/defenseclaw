@@ -44,17 +44,11 @@ from defenseclaw.paths import (
     bundled_local_observability_dir,
     bundled_splunk_bridge_dir,
 )
-from defenseclaw.process_liveness import _process_image_path_windows, _process_parent_id_windows
 from defenseclaw.safety import DotenvValueError, sanitize_dotenv_value
 
 _supports_terminal_redraw = terminal_checkbox.supports_terminal_redraw
 _checkbox_key_name = terminal_checkbox.checkbox_key_name
 _render_checkbox_menu = terminal_checkbox.render_checkbox_menu
-_INTERNAL_SETUP_CONNECTOR_ENV = "DEFENSECLAW_INTERNAL_SETUP_CONNECTOR"
-_INTERNAL_SETUP_PARENT_ENV = "DEFENSECLAW_INTERNAL_SETUP_PARENT"
-_INSTALL_ROOT_ENV = "DEFENSECLAW_INSTALL_ROOT"
-_WINDOWS_SETUP_EXECUTABLE = "DefenseClawSetup-x64.exe"
-_WINDOWS_LAUNCHER_EXECUTABLE = "defenseclaw.exe"
 
 
 def refuse_first_run_when_managed() -> None:
@@ -77,7 +71,6 @@ def refuse_first_run_when_managed() -> None:
 @click.option("--non-interactive", is_flag=True, help="Run the guided first-run backend without prompts.")
 @click.option("--yes", "-y", is_flag=True, help="Assume defaults/yes for first-run prompts.")
 @click.option("--rescan-agents", is_flag=True, help="Refresh cached local agent discovery before choosing a connector.")
-@click.option("--native-setup-copilot", is_flag=True, hidden=True)
 @click.option(
     "--connector",
     type=click.Choice(
@@ -242,7 +235,6 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     non_interactive: bool,
     yes: bool,
     rescan_agents: bool,
-    native_setup_copilot: bool,
     connector: str | None,
     profile: str | None,
     observe_all: bool,
@@ -320,39 +312,6 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         # Run only the CLIs of the connectors being set up (GAP-0901).
         token = agent_discovery.restrict_probes([c for c in requested_connectors if c != "none"])
         click.get_current_context().call_on_close(lambda: agent_discovery.end_probe_restriction(token))
-    installer_copilot = native_setup_copilot and _native_setup_copilot_invocation_allowed(
-        connector=connector,
-        requested_connectors=requested_connectors,
-        skip_install=skip_install,
-        non_interactive=non_interactive,
-        yes=yes,
-        observe_all=observe_all,
-        action_connectors=action_connectors,
-        start_gateway=start_gateway,
-        verify=verify,
-    )
-    if native_setup_copilot and not installer_copilot:
-        raise click.ClickException(
-            "--native-setup-copilot is reserved for the exact non-interactive native Windows Setup invocation"
-        )
-    internal_antigravity_binding = bool(
-        os.environ.get(_INTERNAL_SETUP_CONNECTOR_ENV, "").strip()
-        or os.environ.get(_INTERNAL_SETUP_PARENT_ENV, "").strip()
-    )
-    if internal_antigravity_binding and not _native_setup_antigravity_invocation_allowed(
-        connector=connector,
-        requested_connectors=requested_connectors,
-        skip_install=skip_install,
-        non_interactive=non_interactive,
-        yes=yes,
-        observe_all=observe_all,
-        action_connectors=action_connectors,
-        start_gateway=start_gateway,
-        verify=verify,
-    ):
-        raise click.ClickException(
-            "internal Antigravity Setup binding is invalid for this invocation"
-        )
     for requested in requested_connectors:
         if requested == "none":
             continue
@@ -2717,94 +2676,10 @@ def _normalize_connector_arg(
     return value
 
 
-def _native_setup_copilot_invocation_allowed(
-    *,
-    connector: str | None,
-    requested_connectors: list[str],
-    skip_install: bool,
-    non_interactive: bool,
-    yes: bool,
-    observe_all: bool,
-    action_connectors: str,
-    start_gateway: bool | None,
-    verify: bool | None,
-) -> bool:
-    """Recognize only Setup's narrow, backward-compatible Copilot bootstrap."""
-
-    return (
-        platform_support.host_os() == "windows"
-        and _normalize_connector_arg(connector) == "copilot"
-        and requested_connectors == ["copilot"]
-        and skip_install
-        and non_interactive
-        and yes
-        and not observe_all
-        and not action_connectors.strip()
-        and start_gateway is False
-        and verify is False
-    )
 
 
-def _native_setup_antigravity_invocation_allowed(
-    *,
-    connector: str | None,
-    requested_connectors: list[str],
-    skip_install: bool,
-    non_interactive: bool,
-    yes: bool,
-    observe_all: bool,
-    action_connectors: str,
-    start_gateway: bool | None,
-    verify: bool | None,
-) -> bool:
-    """Recognize only Setup's parent-bound Antigravity initialization."""
-
-    return (
-        platform_support.host_os() == "windows"
-        and _internal_antigravity_setup_parent_matches()
-        and _normalize_connector_arg(connector) == "antigravity"
-        and requested_connectors == ["antigravity"]
-        and skip_install
-        and non_interactive
-        and yes
-        and not observe_all
-        and not action_connectors.strip()
-        and start_gateway is False
-        and verify is False
-    )
 
 
-def _internal_antigravity_setup_parent_matches() -> bool:
-    """Bind packaged Antigravity initialization to Setup through its launcher."""
-
-    if os.environ.get(_INTERNAL_SETUP_CONNECTOR_ENV, "").strip().lower() != "antigravity":
-        return False
-    expected = os.environ.get(_INTERNAL_SETUP_PARENT_ENV, "").strip()
-    if not expected or not os.path.isabs(expected):
-        return False
-    if os.path.basename(expected).casefold() != _WINDOWS_SETUP_EXECUTABLE.casefold():
-        return False
-    # The packaged launcher removes ambient copies and restores this value
-    # from its validated installer-owned state before starting Python.
-    install_root = os.environ.get(_INSTALL_ROOT_ENV, "").strip()
-    if not install_root or not os.path.isabs(install_root):
-        return False
-    expected_launcher = os.path.join(install_root, "bin", _WINDOWS_LAUNCHER_EXECUTABLE)
-    launcher_pid = os.getppid()
-    try:
-        actual_launcher = _process_image_path_windows(launcher_pid)
-        setup_pid = _process_parent_id_windows(launcher_pid)
-        actual_setup = _process_image_path_windows(setup_pid) if setup_pid else None
-    except OSError:
-        return False
-    if not actual_launcher or not actual_setup:
-        return False
-    return (
-        os.path.normcase(os.path.abspath(actual_launcher))
-        == os.path.normcase(os.path.abspath(expected_launcher))
-        and os.path.normcase(os.path.abspath(actual_setup))
-        == os.path.normcase(os.path.abspath(expected))
-    )
 
 
 def _describe_connector_set(report, connectors: list[str]) -> None:

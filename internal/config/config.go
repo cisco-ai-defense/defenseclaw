@@ -3188,9 +3188,7 @@ func loadConfigSourceCheckedWithLayout(
 	cfg.legacyConnectorRouteSelectors = legacyConnectorRouteSelectorPaths(viper.Get("observability.destinations"))
 	// Move retired connector IDs to their replacement before any connector
 	// key is normalized or checked for duplicates.
-	migrateLegacyConnectorIDs(&cfg)
-	dropRetiredConnectorSettings(&cfg)
-	canonicalizeConnectorSelection(&cfg)
+	migrateConnectorSelection(&cfg, resolvesToSecureClient(&cfg, pinnedDeploymentMode))
 
 	if err := checkRuntimeConfigVersion(cfg.ConfigVersion, resolvesToSecureClient(&cfg, pinnedDeploymentMode)); err != nil {
 		return nil, err

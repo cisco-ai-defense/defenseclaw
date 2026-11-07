@@ -544,6 +544,16 @@ func inventoryIdentityFor(userID, userName string) *llmEventIdentity {
 	return inventoryIdentityFacts(userID)
 }
 
+// inventoryTelemetryUserName keeps the short POSIX display name while the
+// inventory record retains its full account spelling for holder validation.
+// Windows account names keep their existing domain-qualified display form.
+func inventoryTelemetryUserName(userID, userName string) string {
+	if useridentity.KindForID(userID) == useridentity.KindPOSIXUID {
+		return useridentity.BareAccountName(userName)
+	}
+	return userName
+}
+
 func inventoryIdentityFacts(userID string) *llmEventIdentity {
 	facts, _ := verifiedIdentityDirectory(userID, true)
 	if facts.Empty() {
@@ -1160,7 +1170,7 @@ func emitEndpointInventoryComponent(
 			DefenseClawInventoryItemDescription:             aiDiscoveryV8OptionalText(component.itemDescription),
 			UserID:                                          aiDiscoveryV8OptionalText(component.userID),
 			DefenseClawUserIDKind:                           v8UserIDKind(component.userIDKind),
-			DefenseClawUserName:                             v8UserName(component.userName, aiDiscoveryV8OptionalText),
+			DefenseClawUserName:                             v8UserName(inventoryTelemetryUserName(component.userID, component.userName), aiDiscoveryV8OptionalText),
 			DefenseClawUserEmail:                            v8UserEmail(component.userEmail),
 			DefenseClawInventoryConnectorSource:             aiDiscoveryV8OptionalText(component.connectorSource),
 			DefenseClawInventoryConnectorToolInspectionMode: aiDiscoveryV8OptionalText(component.connectorToolInspectionMode),

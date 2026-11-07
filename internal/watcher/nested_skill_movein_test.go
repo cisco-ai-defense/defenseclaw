@@ -121,7 +121,7 @@ func TestWatcherLargeMovedCategoryReaderStall(t *testing.T) {
 	cfg.Guardrail.Connector = "hermes"
 	cfg.Watch.RescanEnabled = false
 	cfg.Gateway.Watcher.Skill.TakeAction = true
-	cfg.AssetPolicy.Skill.Allowed = []config.AssetPolicyRule{{Name: "drop", Reason: "test policy"}}
+	cfg.AssetPolicy.Skill.Allowed = []config.AssetPolicyRule{{Name: "drop", Reason: "test policy"}, {Name: "quick", Reason: "test policy"}}
 	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "blocked-skill", Reason: "test policy"}}
 	home := t.TempDir()
 	root := filepath.Join(home, ".hermes", "skills")
@@ -146,8 +146,17 @@ func TestWatcherLargeMovedCategoryReaderStall(t *testing.T) {
 	}
 	moved := filepath.Join(root, "drop")
 	quick := filepath.Join(root, "quick")
+	second := filepath.Join(root, "second")
 	watchProgress := make(chan struct{}, 1)
-	quickRead := make(chan time.Time, 1)
+	releaseWatch := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(releaseWatch)
+		}
+	}()
+	quickRead := make(chan struct{}, 1)
+	secondRead := make(chan struct{}, 1)
 	admitted := make(chan AdmissionResult, 4)
 	watchEvents := &watcherTestRuntime{}
 	logger.SetRuntimeV8Emitter(watchEvents)
@@ -158,12 +167,22 @@ func TestWatcherLargeMovedCategoryReaderStall(t *testing.T) {
 			case watchProgress <- struct{}{}:
 			default:
 			}
+			<-releaseWatch
 		}
 	}
 	w.onReadEvent = func(event fsnotify.Event) {
-		if event.Name == quick {
+		if event.Op&fsnotify.Create == 0 {
+			return
+		}
+		switch event.Name {
+		case quick:
 			select {
-			case quickRead <- time.Now():
+			case quickRead <- struct{}{}:
+			default:
+			}
+		case second:
+			select {
+			case secondRead <- struct{}{}:
 			default:
 			}
 		}
@@ -181,28 +200,53 @@ func TestWatcherLargeMovedCategoryReaderStall(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("large moved category watch did not reach 1,024 directories")
 	}
-	start := time.Now()
+	// Keep the traversal worker parked at directory 1,024. Reading a second
+	// root event proves the reader finished handling the first one while the
+	// worker was held. The timeout is only a deadlock guard; a wall-clock
+	// measurement includes runner scheduling and notification delivery.
+	readerDeadline := time.After(100 * w.debounce)
 	if err := os.Mkdir(quick, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case read := <-quickRead:
-		stall := read.Sub(start)
-		t.Logf("reader stall during 32,768-directory move-in: %s", stall)
-		if stall >= 50*time.Millisecond {
-			t.Fatalf("reader stalled %s, want <50ms", stall)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("reader did not serve unrelated create")
+	if err := os.WriteFile(filepath.Join(quick, "SKILL.md"), []byte("# quick\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	select {
-	case result := <-admitted:
-		want := filepath.Join(moved, "zz-blocked-skill")
-		if result.Event.Path != want || result.Event.Name != "blocked-skill" || result.Verdict != VerdictBlocked {
-			t.Fatalf("large move admission = %+v; want blocked nested skill", result)
+	case <-quickRead:
+	case <-readerDeadline:
+		t.Fatal("reader did not read unrelated create while traversal was held")
+	}
+	if err := os.Mkdir(second, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-secondRead:
+	case <-readerDeadline:
+		t.Fatal("reader did not finish unrelated create while traversal was held")
+	}
+	close(releaseWatch)
+	released = true
+	wantBlocked := filepath.Join(moved, "zz-blocked-skill")
+	gotBlocked, gotAllowed := false, false
+	deadline := time.After(30 * time.Second)
+	for !gotBlocked || !gotAllowed {
+		select {
+		case result := <-admitted:
+			switch result.Event.Path {
+			case wantBlocked:
+				if result.Event.Name != "blocked-skill" || result.Verdict != VerdictBlocked {
+					t.Fatalf("large move admission = %+v; want blocked nested skill", result)
+				}
+				gotBlocked = true
+			case quick:
+				if result.Verdict != VerdictAllowed {
+					t.Fatalf("unrelated skill admission = %+v; want allowed", result)
+				}
+				gotAllowed = true
+			}
+		case <-deadline:
+			t.Fatalf("admissions after traversal: blocked=%t allowed=%t", gotBlocked, gotAllowed)
 		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("denied skill after traversal cap received no admission")
 	}
 }
 

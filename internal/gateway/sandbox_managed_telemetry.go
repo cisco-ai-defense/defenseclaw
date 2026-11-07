@@ -515,8 +515,10 @@ func emitSandboxDaemonEvent(ctx context.Context, a *APIServer, reg sandboxreg.Re
 }
 
 // emitSandboxTelemetryClaim records one of the daemon's sandbox telemetry
-// records (daemonRelayTelemetry): a phase change (log.sandbox.lifecycle) or
-// an egress decision or connection end (log.egress.*) of reg's sandbox. The
+// records (daemonRelayTelemetry): a phase change (log.sandbox.lifecycle),
+// an egress decision or connection end (log.egress.*), an opt-in process
+// tree event (log.sandbox.process_tree), or a finding
+// (log.finding.observed) of reg's sandbox. The
 // sandbox name and id, its registration, guardrail profile and policy stamp
 // and the person come from reg, which the gateway verified is the peer's own
 // (handleSandboxEvents), as on every other managed sandbox record; the
@@ -546,7 +548,8 @@ func emitSandboxTelemetryClaim(ctx context.Context, a *APIServer, reg sandboxreg
 	subject := sandboxRecordSubject(reg)
 	r := a.managedSandboxRecorder()
 	record := func(identity audit.SandboxIdentity) error {
-		if ev.Kind == sandboxrelay.EventSandboxLifecycle {
+		switch ev.Kind {
+		case sandboxrelay.EventSandboxLifecycle:
 			// The phase sets the severity (error HIGH, unknown MEDIUM).
 			e := audit.SandboxLifecycleEvent{Sandbox: identity, PreviousPhase: audit.SandboxPhase(c.PreviousPhase),
 				Trigger: audit.SandboxLifecycleTrigger(c.Trigger), ExitCode: c.ExitCode, Timestamp: ev.Time,
@@ -560,6 +563,25 @@ func emitSandboxTelemetryClaim(ctx context.Context, a *APIServer, reg sandboxreg
 					Reason: c.Condition.Reason, Message: c.Condition.Message}
 			}
 			return r.RecordSandboxLifecycle(ctx, e)
+		case sandboxrelay.EventSandboxProcess:
+			return r.RecordSandboxProcess(ctx, audit.SandboxProcessEvent{
+				Sandbox: identity, Event: c.ProcessEvent, Source: c.ProcessSource,
+				PID: c.PID, ParentPID: c.ParentPID, HostPID: c.HostPID, ExecID: c.ExecID,
+				Executable: c.Executable, Name: c.Name, CommandLine: c.CommandLine,
+				WorkingDirectory: c.WorkingDirectory, ExitCode: c.ProcessExitCode, Lineage: c.Lineage,
+				ConversationID: c.ConversationID, Timestamp: ev.Time,
+				UserID: subject.UserID, UserName: subject.UserName})
+		case sandboxrelay.EventSandboxFinding:
+			floor := observability.SeverityInfo
+			if c.FindingKind == audit.SandboxFindingHookSilence || c.FindingKind == audit.SandboxFindingHookTamper {
+				floor = observability.SeverityHigh
+			}
+			return r.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
+				Sandbox: identity, Kind: c.FindingKind, FindingID: c.FindingID, RuleID: c.RuleID,
+				Severity: sandboxClaimSeverity(c.Severity, floor), Title: c.Title, Description: c.Description,
+				Evidence: c.Evidence, Remediation: c.Remediation, TargetRef: c.TargetRef,
+				Confidence: c.Confidence, Timestamp: ev.Time,
+				UserID: subject.UserID, UserName: subject.UserName})
 		}
 		floor := observability.SeverityInfo
 		if c.Blocked {
@@ -590,7 +612,7 @@ func emitSandboxTelemetryClaim(ctx context.Context, a *APIServer, reg sandboxreg
 	// The gateway stamps receipt time: queued creation records predate the bind.
 	// Tombstone telemetry still records the sandbox's last phases, but cannot
 	// establish a new sighting for a revoked registration.
-	if reg.State != sandboxreg.StateRevoked {
+	if reg.State != sandboxreg.StateRevoked && ev.Kind != sandboxrelay.EventSandboxProcess && ev.Kind != sandboxrelay.EventSandboxFinding {
 		a.sandboxMarkGuestSeen(reg)
 	}
 }
@@ -598,8 +620,8 @@ func emitSandboxTelemetryClaim(ctx context.Context, a *APIServer, reg sandboxreg
 // sandboxTelemetryAfterRevoke is how long after a registration was revoked
 // (its daemon reported the sandbox deleted, or the gateway revoked it) its
 // tombstone still takes the sandbox's last records (the stopping, stopped,
-// error, deleting and deleted phases, the ends of its connections), which
-// the daemon posts within seconds.
+// error, deleting and deleted phases, the ends of its connections and
+// process exits), which the daemon posts within seconds.
 const sandboxTelemetryAfterRevoke = sandboxreg.RevokedTelemetryWindow
 
 // sandboxClaimMaxDuration bounds a claimed connection duration.
@@ -616,8 +638,8 @@ const sandboxClaimMaxDuration = 30 * 24 * time.Hour
 //     policy or subject: the daemon then stops and deletes the sandbox and
 //     reports its going away), but never once its daemon reported the
 //     sandbox foreign, which the registration never named: 410 otherwise.
-//     What such a tombstone takes is the sandbox's going away alone
-//     (sandboxTelemetryRecordAllowed);
+//     What such a tombstone takes is the sandbox's going away and findings
+//     emitted before revocation (sandboxTelemetryRecordAllowed);
 //   - the account's records budget (sandboxRecordBudget): 429 with
 //     Retry-After when it is spent.
 func sandboxTelemetryAdmit(w http.ResponseWriter, auth *sandboxAuthority, peer managedHookPeer, reg sandboxreg.Registration, n int) bool {
@@ -667,9 +689,10 @@ func sandboxEventRows(ev sandboxrelay.Event) int {
 // admitted batch (sandboxTelemetryAdmit) is recorded: never one dated before
 // its registration was made, and under a tombstone only the records of its
 // sandbox going away (the stopping, stopped, error, deleting and deleted
-// phases and the ends of its connections), dated before the tombstone stops
-// taking records. None of them tracks the sandbox's phase again
-// (audit.SandboxLifecycleEvent.TrackedOnly).
+// phases, the ends of its connections and process exits, and findings
+// emitted before revocation), dated before
+// the tombstone stops taking records. None tracks the sandbox's phase
+// again (audit.SandboxLifecycleEvent.TrackedOnly).
 func sandboxTelemetryRecordAllowed(reg sandboxreg.Registration, ev sandboxrelay.Event) bool {
 	if !reg.CreatedAt.IsZero() && ev.Time.Before(reg.CreatedAt) {
 		return false
@@ -687,6 +710,12 @@ func sandboxTelemetryRecordAllowed(reg sandboxreg.Registration, ev sandboxrelay.
 	if ev.Kind == sandboxrelay.EventSandboxEgress {
 		return c.End != ""
 	}
+	if ev.Kind == sandboxrelay.EventSandboxProcess {
+		return c.ProcessEvent == audit.SandboxProcessExit
+	}
+	if ev.Kind == sandboxrelay.EventSandboxFinding {
+		return !ev.Time.After(reg.RevokedAt)
+	}
 	switch audit.SandboxPhase(c.Phase) {
 	case audit.SandboxPhaseStopping, audit.SandboxPhaseStopped, audit.SandboxPhaseError,
 		audit.SandboxPhaseDeleting, audit.SandboxPhaseDeleted:
@@ -695,7 +724,7 @@ func sandboxTelemetryRecordAllowed(reg sandboxreg.Registration, ev sandboxrelay.
 	return false
 }
 
-// sandboxClaimSeverity is the severity of a claimed egress record: the
+// sandboxClaimSeverity is the severity of a claimed egress or finding record: the
 // claim, raised to floor (a block is at least MEDIUM) and capped at HIGH, so
 // a daemon can neither make up a CRITICAL nor play a block down; floor for
 // a claim that is no severity.

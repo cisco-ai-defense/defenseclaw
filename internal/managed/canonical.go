@@ -714,6 +714,10 @@ type ManagedDataPaths struct {
 	// RuntimeDirs are further gateway-writable directories below DataDir,
 	// such as the hooks directory.
 	RuntimeDirs []string
+	// LockFiles are product-owned lock files below DataDir that are created
+	// lazily (the ACP credential and enrollment locks). They are repaired as
+	// runtime files, so an entry an untrusted principal added is removed.
+	LockFiles []string
 }
 
 // sqliteSideFileSuffixes are the SQLite side files repaired with each
@@ -774,6 +778,13 @@ func (paths ManagedDataPaths) targets() []managedDataTarget {
 		}
 		addDir(filepath.Dir(logPath))
 		addFile(logPath, ObjectRuntimeFile)
+	}
+	for _, lockPath := range paths.LockFiles {
+		if strings.TrimSpace(lockPath) == "" {
+			continue
+		}
+		addDir(filepath.Dir(lockPath))
+		addFile(lockPath, ObjectRuntimeFile)
 	}
 	// Parents before children.
 	sort.SliceStable(dirs, func(i, j int) bool {

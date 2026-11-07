@@ -12,13 +12,25 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
+// AccountMCPJournalType is the target type under which the actions journal
+// keeps the install block and runtime disable of an enrolled account's MCP
+// server. The row is identified by (type, name, connector), and a server
+// name is free text: an account-less server may be named exactly like an
+// account server's versioned key, and under one type the two would share a
+// row, so the scan or release of one would overwrite or erase the other's
+// decision. Under their own type the two cannot meet, whatever a server is
+// named.
+const AccountMCPJournalType = audit.AccountMCPActionType
+
 // MCPJournalName is the name under which the actions journal keeps the
-// install block and runtime disable of an MCP server. A server a managed
-// gateway read from an enrolled user's home is journaled under its event
-// path (name, connector, account home and project), so the verdict of one
+// install block and runtime disable of an MCP server, and MCPJournalType the
+// target type of that row. A server a managed gateway read from an enrolled
+// user's home is journaled under AccountMCPJournalType and its event path
+// (name, connector, account home and project), so the verdict of one
 // account's server never refuses, and the rescan of one never releases,
-// another account's server of the same name (GAP-0216). Every other server
-// keeps its name, as before.
+// another account's server of the same name (GAP-0216), nor an account-less
+// server of any name. Every other server keeps its name under the "mcp" type,
+// as before.
 func MCPJournalName(server config.MCPServerEntry) string {
 	if server.Home != "" {
 		return MCPEventPath(server)
@@ -26,28 +38,32 @@ func MCPJournalName(server config.MCPServerEntry) string {
 	return server.Name
 }
 
-// journalName is the journal name of the target of evt: MCPJournalName for
-// an enrolled account's MCP server, the event name for everything else.
-func journalName(evt InstallEvent) string {
-	if evt.Type == InstallMCP && IsAccountMCPJournalName(evt.Name, evt.Path) {
-		return evt.Path
+// MCPJournalType is the target type of the journal row MCPJournalName names.
+func MCPJournalType(server config.MCPServerEntry) string {
+	if server.Home != "" {
+		return AccountMCPJournalType
 	}
-	return evt.Name
+	return string(InstallMCP)
 }
 
-// IsAccountMCPJournalName reports whether key is the event path of the MCP
-// server name of an enrolled account (name@<connector>:<home>, then
-// @<connector>#<project> for a project server).
+// journalTarget is the journal row (target type and name) of the target of
+// evt: an enrolled account's MCP server under AccountMCPJournalType and its
+// event path, everything else under targetType and the event name.
+func journalTarget(evt InstallEvent, targetType string) (string, string) {
+	if evt.Type == InstallMCP && IsAccountMCPJournalName(evt.Name, evt.Path) {
+		return AccountMCPJournalType, evt.Path
+	}
+	return targetType, evt.Name
+}
+
+// IsAccountMCPJournalName reports whether key is the versioned event path of
+// the MCP server name of an enrolled account.
 func IsAccountMCPJournalName(name, key string) bool {
 	if strings.TrimSpace(name) == "" {
 		return false
 	}
-	rest, ok := strings.CutPrefix(key, name+"@")
-	if !ok {
-		return false
-	}
-	connector, home, ok := strings.Cut(rest, ":")
-	return ok && connector != "" && !strings.ContainsAny(connector, "@#") && home != ""
+	identity, ok := decodeMCPEventPath(key)
+	return ok && identity.Name == name && identity.Connector != "" && identity.Home != ""
 }
 
 // MCPAccountJournalServes reports whether the account journal row key (an
@@ -56,35 +72,22 @@ func IsAccountMCPJournalName(name, key string) bool {
 // home and, for a project server, a project the agent works in. A caller
 // whose home is not known matches every account, and a call without a
 // working folder matches every project of the account: both refuse rather
-// than miss a block (fail closed).
+// than miss a block (fail closed). Old unstructured keys match nothing.
 func MCPAccountJournalServes(key string, q MCPAdmissionQuery) bool {
-	connector := strings.ToLower(strings.TrimSpace(q.Connector))
-	if connector == "" {
-		return false
-	}
-	marker := "@" + connector + ":"
-	i := strings.Index(key, marker)
-	if i <= 0 {
-		return false
-	}
-	name, rest := key[:i], key[i+len(marker):]
-	if !config.SameMCPToolServer(connector, name, q.Server) {
-		return false
-	}
-	home, project := rest, ""
-	if j := strings.Index(rest, "@"+connector+"#"); j >= 0 {
-		home, project = rest[:j], rest[j+len("@"+connector+"#"):]
-	}
-	if home == "" {
-		return false
-	}
-	if q.Home != "" && !sameMCPFolder(home, q.Home) {
-		return false
-	}
-	if project != "" && q.CWD != "" && !mcpFolderWithin(q.CWD, project) {
-		return false
-	}
-	return true
+	identity, ok := decodeMCPEventPath(key)
+	return ok && identity.Connector != "" && identity.Home != "" && mcpServerServesQuery(identity.server(), q)
+}
+
+// MCPAccountRuntimeDisabled reports an account journal row (of
+// AccountMCPJournalType) whose runtime disable is its own server's admission
+// decision: the disable was written with the row's key as its deciding path,
+// in one statement (audit.SetRuntimeDisableForConnector). No release before
+// 1.0.9 wrote that path, and every other runtime write drops it, so a row
+// moved here from a bare-name row (MigrateAccountMCPJournal) stays inert
+// until normal admission records a new outcome, while a fresh decision needs
+// no other table to be in force.
+func MCPAccountRuntimeDisabled(row audit.ActionEntry) bool {
+	return row.Actions.Runtime == "disable" && row.RuntimeSource != "" && row.RuntimeSource == row.TargetName
 }
 
 // MigrateAccountMCPJournal moves the MCP journal rows that earlier versions
@@ -94,9 +97,9 @@ func MCPAccountJournalServes(key string, q MCPAdmissionQuery) bool {
 // path, so it names the account the verdict was for. The account row is
 // written before the bare row is removed, so the block holds at every
 // moment; fields an account row already has are kept, and missing ones are
-// added from the bare row. A bare row without an account source path (an
-// operator row, or one whose server cannot be told) stays as it is and
-// keeps refusing every account's server of that name (fail closed).
+// added from the bare row. An old row without a versioned source path stays
+// stored but is ignored by runtime policy until normal admission records a
+// new outcome. Explicit operator decisions come from asset_policy.
 func MigrateAccountMCPJournal(store *audit.Store) (moved, kept int, err error) {
 	if store == nil {
 		return 0, 0, nil
@@ -106,22 +109,24 @@ func MigrateAccountMCPJournal(store *audit.Store) (moved, kept int, err error) {
 		return 0, 0, err
 	}
 	for _, row := range rows {
-		if row.Connector == "" || row.TargetName == row.SourcePath {
-			continue // a global row, or an account row already
+		if row.Connector == "" {
+			continue // a global row
 		}
 		if !IsAccountMCPJournalName(row.TargetName, row.SourcePath) {
-			if row.Actions.Runtime == "disable" || row.Actions.Install == "block" {
+			_, versioned := decodeMCPEventPath(row.SourcePath)
+			if (row.SourcePath == "" || versioned) &&
+				(row.Actions.Runtime == "disable" || row.Actions.Install == "block") {
 				kept++
 			}
 			continue
 		}
 		key := row.SourcePath
-		current, err := store.GetActionForConnector(row.TargetType, key, row.Connector)
+		current, err := store.GetActionForConnector(AccountMCPJournalType, key, row.Connector)
 		if err != nil {
 			return moved, kept, err
 		}
 		if current == nil {
-			if err := store.SetActionForConnector(row.TargetType, key, row.Connector, row.SourcePath, row.Actions, row.Reason); err != nil {
+			if err := store.SetActionForConnector(AccountMCPJournalType, key, row.Connector, row.SourcePath, row.Actions, row.Reason); err != nil {
 				return moved, kept, fmt.Errorf("move mcp journal row %s: %w", row.TargetName, err)
 			}
 		} else {
@@ -129,7 +134,7 @@ func MigrateAccountMCPJournal(store *audit.Store) (moved, kept int, err error) {
 				if value == "" || accountFieldSet(current.Actions, field) {
 					continue
 				}
-				if err := store.SetActionFieldForConnector(row.TargetType, key, row.Connector, field, value, row.Reason); err != nil {
+				if err := store.SetActionFieldForConnector(AccountMCPJournalType, key, row.Connector, field, value, row.Reason); err != nil {
 					return moved, kept, fmt.Errorf("move mcp journal row %s: %w", row.TargetName, err)
 				}
 			}
@@ -160,7 +165,7 @@ func ClearAccountMCPJournal(store *audit.Store, name, connector, field string) e
 	if store == nil || strings.TrimSpace(name) == "" {
 		return nil
 	}
-	rows, err := store.ListActionsByTypeForConnector(string(InstallMCP), connector)
+	rows, err := store.ListActionsByTypeForConnector(AccountMCPJournalType, connector)
 	if err != nil {
 		return err
 	}

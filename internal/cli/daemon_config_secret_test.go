@@ -129,6 +129,9 @@ observability:
       token_env: DC_SHUTDOWN_TEST_UNSET
 `
 	t.Setenv("DC_SHUTDOWN_TEST_UNSET", "")
+	// stop loads the .env token into the process environment; every test
+	// after this one inherited it (GAP-0079).
+	unsetEnvironmentForDotenvTest(t, "DEFENSECLAW_GATEWAY_TOKEN")
 	if err := os.WriteFile(config.ConfigPath(), []byte(source), 0o600); err != nil {
 		t.Fatal(err)
 	}

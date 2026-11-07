@@ -153,7 +153,6 @@ func TestWindowsPendingUnprotectedRecordIsAWarningNotAVerifyFailure(t *testing.T
 // (the lifecycle's hook, guardian target or ACL errors, a record agent that
 // fails verify) fails verify with the same errors and exit code beside it.
 func TestWindowsPendingRecordKeepsEveryOtherVerifyFailure(t *testing.T) {
-	isolateWindowsEnterpriseHostReaders(t)
 	records := []struct {
 		name   string
 		agents []enterprisehooks.UnprotectedAgent
@@ -400,7 +399,8 @@ func TestWindowsStandaloneInspectionNamesAPendingTransaction(t *testing.T) {
 		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.0")
 		applyWindowsEnterpriseInstallerReport(result, &windowsEnterpriseLifecycleOptions{}, report, windowsEnterpriseStandaloneRun{ExitCode: 1})
 		text := fmt.Sprintf("%+v %+v", result.Errors, result.Warnings)
-		if !strings.Contains(text, "as LocalSystem: "+windowsEnterpriseStandaloneSetupName+" /ensure") || strings.Contains(text, "run Repair") {
+		if !strings.Contains(text, "as LocalSystem: "+windowsEnterpriseStandaloneSetupCommand("ensure", "", false)) ||
+			!strings.Contains(text, managed.WindowsSetupSource) || strings.Contains(text, "run Repair") {
 			t.Fatalf("%s of a pending transaction: %s", action, text)
 		}
 	}

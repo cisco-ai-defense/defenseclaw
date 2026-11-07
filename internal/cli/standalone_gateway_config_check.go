@@ -54,8 +54,8 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 			var schemaErr *config.V8SchemaError
 			if errors.As(err, &schemaErr) {
 				// The same words as the Linux and macOS refusal (GAP-0188).
-				if hint, moved := schemaErr.MovedKeyHint(); moved {
-					reason = strings.TrimPrefix(schemaErr.Path, "$.") + " is an unknown setting; " + hint
+				if retired, ok := schemaErr.RetiredKeyMessage(); ok {
+					reason = retired
 				}
 			}
 			return fmt.Errorf("the gateway cannot load %s at %s: %s", configPath, location, reason)

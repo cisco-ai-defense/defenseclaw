@@ -213,7 +213,8 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 	if opts != nil && opts.scannerRuntimeRetired != "" {
 		result.AddWarning("scanner_runtime_untrusted_removed", "the scanner runtime "+opts.scannerRuntimeRetired+
 			" failed the trust check, so this run removed it before the services started: the gateway does not start on it (GAP-0490). "+
-			"A run from the DefenseClaw Setup installs it again; otherwise every scan fails closed until DefenseClawSetup-Enterprise-Standalone-x64.exe /repair")
+			"A run from the DefenseClaw Setup installs it again; otherwise every scan fails closed until "+windowsEnterpriseSetupCommand("/repair", "JSON=1")+
+			" runs. "+managed.WindowsSetupSource)
 	}
 	action := result.Action
 	if opts != nil && opts.runningDeploymentLabel {
@@ -254,9 +255,9 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 				result.AddError("scanner_runtime_admission_unproven",
 					"the shared scanner runtime has an admission record that does not prove the production deployment admitted it, "+
 						"and this run could not quarantine it ("+err.Error()+"); remove "+managed.StandaloneWindowsScannerRuntimeAdmissionName+
-						" from the scanner runtime folder as an administrator, then run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair")
+						" from the scanner runtime folder as an administrator, then run "+windowsEnterpriseSetupCommand("/repair", "JSON=1")+". "+managed.WindowsSetupSource)
 			case quarantined != "":
-				result.AddWarning("scanner_runtime_admission_quarantined", windowsScannerRuntimeAdmissionQuarantined+" (not proven: "+quarantined+")")
+				result.AddWarning("scanner_runtime_admission_quarantined", windowsScannerRuntimeAdmissionQuarantined()+" (not proven: "+quarantined+")")
 			}
 			if err == nil {
 				result.AddWarning("scanner_runtime_not_scoped", windowsScannerRuntimeNotScoped)
@@ -356,8 +357,8 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 					// The plain ensure clears it, not /repair (GAP-1709).
 					message = "the skill, MCP and plugin scanner runtime in place is the one DefenseClaw " + result.InstalledVersion +
 						" uses, which this recovery put back; this release's admission rule does not prove that release's record. " +
-						"The next DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<config.yaml> JSON=1 as LocalSystem " +
-						"installs and admits this release's runtime"
+						"The next " + windowsEnterpriseSetupCommand("/ensure", "CONFIG=<config.yaml>", "JSON=1") + " as LocalSystem " +
+						"installs and admits this release's runtime. " + managed.WindowsSetupSource
 				}
 				if (result.Action == "verify" || result.Action == "recover") && !restoredOlder {
 					result.AddError("scanner_runtime_unavailable", message)
@@ -369,11 +370,13 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 				if windowsStandaloneSkillJudgeDisabled() {
 					result.AddWarning("scanner_judge_missing",
 						"the skill scanner runs without its LLM judge because scanners.skill_scanner.use_llm is false in the admin config "+
-							"(recommended: the quiet policy with the LLM judge); set it to true, with llm.model and its key stored by `enterprise secret set`")
+							"(recommended: the quiet policy with the LLM judge); set it to true, with llm.model and its key stored by "+
+							windowsScannerJudgeSecretCommand())
 				} else {
 					result.AddWarning("scanner_judge_missing",
 						"the scanners run without an LLM judge (recommended: the quiet policy with the LLM judge); "+
-							"set llm.model in the admin config and store its key with `enterprise secret set`, named by enterprise.inspection.llm.credential")
+							"set llm.model in the admin config and store its key with "+windowsScannerJudgeSecretCommand()+
+							", named by enterprise.inspection.llm.credential")
 				}
 			}
 		}
@@ -564,10 +567,12 @@ const windowsScannerRuntimeNotScoped = "this certification scope does not instal
 
 // windowsScannerRuntimeAdmissionQuarantined is the warning of a run that
 // removed an admission record no production admission proves.
-const windowsScannerRuntimeAdmissionQuarantined = "the shared scanner runtime had an admission record that does not prove the production deployment admitted it " +
-	"(DefenseClaw 1.0.3 and earlier wrote the same record for an --allow-unsigned or certification run's unsigned scanner), " +
-	"so the record was removed and no gateway runs that scanner; every scan fails closed until " +
-	"DefenseClawSetup-Enterprise-Standalone-x64.exe /repair, or its upgrade, admits the production payload copy again"
+func windowsScannerRuntimeAdmissionQuarantined() string {
+	return "the shared scanner runtime had an admission record that does not prove the production deployment admitted it " +
+		"(DefenseClaw 1.0.3 and earlier wrote the same record for an --allow-unsigned or certification run's unsigned scanner), " +
+		"so the record was removed and no gateway runs that scanner; every scan fails closed until " +
+		windowsEnterpriseSetupCommand("/repair", "JSON=1") + ", or its upgrade, admits the production payload copy again. " + managed.WindowsSetupSource
+}
 
 // quarantineUnprovenWindowsScannerRuntimeAdmission is the certification-run
 // step for an admission record in the shared runtime root that does not
@@ -818,7 +823,7 @@ func windowsScannerRuntimeCertificationRun(opts *windowsEnterpriseLifecycleOptio
 // and state roots, from the trusted known folders as the installer resolves
 // them; a seam for tests.
 var windowsEnterpriseProductionRoots = func() (install, state string, err error) {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return "", "", err
 	}
@@ -1420,7 +1425,13 @@ func windowsScannerRuntimeServiceProblem() string {
 	}
 	return "the skill, MCP and plugin scanner runtime is prepared but the gateway service cannot run it (" + err.Error() +
 		"), so every skill, MCP server and plugin install is blocked (scanner failure, fail-closed); " +
-		"restore the access it names, then run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair"
+		"restore the access it names, then run " + windowsEnterpriseAdminCommand("repair") + " from an elevated PowerShell prompt"
+}
+
+// windowsScannerJudgeSecretCommand is the command that stores the LLM
+// judge's key, as an administrator types it (g072 review 2 M3).
+func windowsScannerJudgeSecretCommand() string {
+	return managedWindowsCommand("enterprise", "secret", "set", "--name", "<name>", "--from-file", "<key file>") + " from an elevated PowerShell prompt"
 }
 
 // windowsScannerRuntimeUnavailable says what a scanner runtime that is not
@@ -1430,26 +1441,26 @@ func windowsScannerRuntimeUnavailable(scanners *enterprisestatus.ScannerRuntime)
 	state := scanners.State
 	if state == "not_prepared" && scanners.Problem != "" {
 		return "the skill, MCP and plugin scanner runtime is prepared but damaged (" + scanners.Problem + "), " + blocked +
-			"; run enterprise windows repair, or DefenseClawSetup-Enterprise-Standalone-x64.exe /repair, to unpack it again"
+			"; run " + windowsEnterpriseAdminCommand("repair") + " from an elevated PowerShell prompt to unpack it again"
 	}
 	if state == "untrusted" && scanners.Problem != "" {
 		return "the skill, MCP and plugin scanner runtime can be changed by an account other than SYSTEM and Administrators (" +
 			scanners.Problem + "), so DefenseClaw does not run it, " + blocked +
 			"; remove any access it names on a folder above the runtime (Setup does not change those), then run " +
-			"DefenseClawSetup-Enterprise-Standalone-x64.exe /repair, which puts back the runtime folder's protected permissions and the payload copy"
+			windowsEnterpriseSetupCommand("/repair", "JSON=1") + ", which puts back the runtime folder's protected permissions and the payload copy. " + managed.WindowsSetupSource
 	}
 	if state == "untrusted" {
 		return "the skill, MCP and plugin scanner runtime executable is not one the production payload trust policy admitted " +
 			"(it was changed or replaced outside DefenseClaw, or its admission record, from DefenseClaw 1.0.3 or earlier, " +
 			"does not prove a production admission), so DefenseClaw does not run it, " + blocked +
-			"; run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair to restore the payload copy"
+			"; run " + windowsEnterpriseSetupCommand("/repair", "JSON=1") + " to restore the payload copy. " + managed.WindowsSetupSource
 	}
 	if state == "not_prepared" {
 		return "the skill, MCP and plugin scanner runtime is installed but not prepared, " + blocked +
-			"; run enterprise windows repair, or DefenseClawSetup-Enterprise-Standalone-x64.exe /repair, to prepare it"
+			"; run " + windowsEnterpriseAdminCommand("repair") + " from an elevated PowerShell prompt to prepare it"
 	}
 	return "the skill, MCP and plugin scanner runtime is missing, " + blocked +
-		"; run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair (or /ensure) to install it"
+		"; run " + windowsEnterpriseSetupCommand("/repair", "JSON=1") + " (or " + windowsEnterpriseSetupCommand("/ensure", "JSON=1") + ") to install it. " + managed.WindowsSetupSource
 }
 
 // reprepareInstalledWindowsScannerRuntime unpacks the runtime of an installed
@@ -1471,7 +1482,7 @@ func reprepareInstalledWindowsScannerRuntime(result *enterprisestatus.Result, op
 		return nil
 	}
 	if why != "" {
-		result.AddWarning("scanner_runtime_admission_quarantined", windowsScannerRuntimeAdmissionQuarantined+" (not proven: "+why+")")
+		result.AddWarning("scanner_runtime_admission_quarantined", windowsScannerRuntimeAdmissionQuarantined()+" (not proven: "+why+")")
 	}
 	current := windowsScannerRuntimeReader()
 	if current.State == "ready" {
@@ -1560,7 +1571,7 @@ func windowsScannerRuntimePrepareFailed(err error) string {
 	}
 	return "DefenseClaw is installed and its services run, but the skill, MCP and plugin scanner runtime could not be prepared (" +
 		err.Error() + "), so every skill, MCP server and plugin install is blocked (scanner failure, fail-closed) and verify fails; " +
-		"run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1 as LocalSystem to prepare it"
+		"run " + windowsEnterpriseSetupCommand("/repair", "JSON=1") + " as LocalSystem to prepare it. " + managed.WindowsSetupSource
 }
 
 // errWindowsScannerPrepareTimedOut marks a scanner runtime step stopped at
@@ -1569,7 +1580,7 @@ var errWindowsScannerPrepareTimedOut = errors.New("the bound was reached")
 
 // windowsScannerPrepareRetryNotice ends the message of a prepare that hit its
 // bound; windowsEnterpriseFailureCodeFor reads it as retry-later.
-const windowsScannerPrepareRetryNotice = "run the same DefenseClawSetup-Enterprise-Standalone-x64.exe command again (an MDM retry does): it continues the preparation"
+const windowsScannerPrepareRetryNotice = "run the same command again (an MDM retry does): it continues the preparation"
 
 // windowsScannerProgress receives a scanner runtime step progress lines:
 // standard output for a person, the lifecycle log's diagnostics in a JSON
@@ -1898,7 +1909,7 @@ func (d windowsStandaloneScannerDocument) skillJudgeDisabled() bool {
 // readWindowsStandaloneScannerConfig reads the installed admin config; a
 // seam for tests.
 var readWindowsStandaloneScannerConfig = func() ([]byte, error) {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return nil, err
 	}

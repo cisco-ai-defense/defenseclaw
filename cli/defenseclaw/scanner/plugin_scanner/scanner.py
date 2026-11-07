@@ -59,7 +59,7 @@ from defenseclaw.scanner.plugin_scanner.types import (
     ScanMetadata,
     ScanResult,
 )
-from defenseclaw.scanner.plugin_scanner.vendor_identity import is_official_provider_tree
+from defenseclaw.scanner.plugin_scanner.vendor_identity import inspect_official_provider_tree
 
 # The C loader is several times faster on manifests; same safe semantics.
 _YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
@@ -93,12 +93,6 @@ def scan_plugin(
             ScanMetadata(manifest_name="defenseclaw"),
         )
 
-    if not (options and options.include_self) and is_official_provider_tree(target):
-        return build_result(
-            target, [], start_ms,
-            ScanMetadata(manifest_name="@openclaw/amazon-bedrock-provider"),
-        )
-
     # --- Load policy ---
     policy: PluginScanPolicy
     if options and options.policy:
@@ -124,6 +118,34 @@ def scan_plugin(
 
     # Profile from options overrides policy profile
     profile = (options.profile if options and options.profile else None) or policy.profile
+
+    if (profile in ("default", "permissive")
+            and policy.profile in ("default", "permissive")
+            and not (options and (options.include_self or options.disable_vendor_identity))):
+        official = inspect_official_provider_tree(
+            target, data_dir=options.data_dir if options else "",
+        )
+        if official is not None:
+            findings = audit_skipped_dirs_for_native(target)
+            if official.possible_peer:
+                findings.append(make_finding(
+                    len(findings) + 1,
+                    rule_id="VENDOR-PEER-POSSIBLE",
+                    severity="INFO",
+                    confidence=1.0,
+                    title="OpenClaw peer link has possible provenance",
+                    description=(
+                        "Published provider bytes match. The peer link resolves to an "
+                        "OpenClaw package outside protected and state paths; the "
+                        "active runtime package is not verified."
+                    ),
+                    location=os.path.join(target, "node_modules", "openclaw"),
+                    tags=["supply-chain"],
+                ))
+            return build_result(
+                target, findings, start_ms,
+                ScanMetadata(manifest_name=official.name),
+            )
 
     # --- Load manifest ---
     manifest = _load_manifest(target)

@@ -85,7 +85,6 @@ from defenseclaw.commands.cmd_doctor import (
     _run_cursor_windows_runtime_process,
 )
 
-
 # The exporter DefenseClaw writes into a sandboxed Codex config.
 _DEFENSECLAW_CODEX_EXPORTER = (
     '[otel.exporter.otlp-http]\nendpoint = "http://127.0.0.1:18970/otlp/codex/' + "a" * 64 + '/v1/logs"\n'
@@ -1605,7 +1604,14 @@ class TestCheckHookContractLock(unittest.TestCase):
         self.assertEqual(check["status"], "fail")
         self.assertEqual(check["label"], "Hook contract")
         self.assertIn("root-owned from a sudo-started gateway", check["detail"])
-        self.assertIn("verified descriptor-bound ownership repair", check["detail"])
+        self.assertNotIn("descriptor-bound", check["detail"])
+        self.assertNotIn("rerun it once with sudo", check["detail"])
+        self.assertIn('sudo chown -R "$(id -un)" ', check["remediation"])
+        self.assertIn("defenseclaw-gateway start", check["remediation"])
+        # stop, return, start: a start before the stop fails while a root gateway lives.
+        remediation = check["remediation"]
+        self.assertLess(remediation.index(" stop && sudo chown"), remediation.index("sudo chown -R"))
+        self.assertLess(remediation.index("sudo chown -R"), remediation.index("&& defenseclaw-gateway start"))
         self.assertTrue(
             check["detail"].startswith(
                 "hook_contract_lock.json is root-owned from a sudo-started gateway"
@@ -2567,9 +2573,10 @@ class TestCheckHookHealth(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "POSIX folder modes")
     def test_opencode_group_writable_plugin_folder_is_named_with_a_fix(self) -> None:
-        # Ubuntu's umask 002 left ~/.config/opencode/plugins at 0775; the
-        # gateway would not start and doctor only said the hook file is missing.
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp}):
+        # A shared group on the folder must still get a matching doctor hint.
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp}), patch(
+            "defenseclaw.file_permissions.owner_private_group", return_value=False
+        ):
             plugins = Path(tmp) / ".config" / "opencode" / "plugins"
             plugins.mkdir(parents=True)
             plugins.chmod(0o775)

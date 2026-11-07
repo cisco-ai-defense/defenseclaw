@@ -295,10 +295,10 @@ func (m *Manager) declaredHostPortAsk(ctx context.Context, b *box, e egress.Even
 		// No ask the user can't answer (GAP-0468): the agent and the feed
 		// hear the organization's refusal instead of "this machine".
 		m.refusals.forgetNote(e.BindingID, strings.TrimSuffix(strings.ToLower(e.Host), "."), e.Port, "")
-		m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
+		m.sink.recordProxyAudit(ctx, b, audit.SandboxEgressEvent{
 			Sandbox: ident, Source: audit.SandboxEgressSourceProxy, Host: openshellHostAlias, Port: e.Port, Blocked: true,
 			DecisionCode: "SANDBOX_EGRESS_HOST_PORT_REFUSED", Timestamp: e.Time, Reason: truncate(strings.ReplaceAll(text, "\n", " "), 512),
-		})
+		}, proxyAuditSource{tunnelID: e.TunnelID, kind: e.Kind})
 		m.refusals.noteRefused(e.BindingID, name, openshellHostAlias, e.Port, text, m.now())
 		m.mu.Lock()
 		news := b.newPortLine(e.Port, false)
@@ -310,11 +310,11 @@ func (m *Manager) declaredHostPortAsk(ctx context.Context, b *box, e egress.Even
 		}
 		return true
 	}
-	m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
+	m.sink.recordProxyAudit(ctx, b, audit.SandboxEgressEvent{
 		Sandbox: ident, Source: audit.SandboxEgressSourceProxy, Host: openshellHostAlias, Port: e.Port, Blocked: true,
 		DecisionCode: "SANDBOX_EGRESS_HOST_PORT_ASK", Timestamp: e.Time,
 		Reason: fmt.Sprintf("the sandbox asks to reach port %d on your machine (--host-port %d): answer it with defenseclaw sandbox approvals", e.Port, e.Port),
-	})
+	}, proxyAuditSource{tunnelID: e.TunnelID, kind: e.Kind})
 	// The agent hears of the ask, not of "this machine".
 	m.refusals.forgetNote(e.BindingID, strings.TrimSuffix(strings.ToLower(e.Host), "."), e.Port, "")
 	m.hostPortAsk(ctx, b, e.Port, "")
