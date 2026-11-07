@@ -486,6 +486,7 @@ func (s *asUserRefusalScanner) Scan(context.Context, string) (*scanner.ScanResul
 // the project folder never stands in for the refused cwd.
 func TestAsUserServerWithARefusedFolderIsBlockedNotAllowed(t *testing.T) {
 	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Guardrail.RulePack = "strict"
 	server := config.MCPServerEntry{Name: "notes", Command: "npx", Args: []string{"-y", "."}, CWD: "server",
 		Project: `C:\Users\dcw-std1\proj`, Connector: "claudecode", Home: `C:\Users\dcw-std1`, RunAsSID: "S-1-5-21-1-2-3-1001"}
 	rows := auditRows(t, logger)

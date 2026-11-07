@@ -7,6 +7,8 @@ package watcher
 import (
 	"database/sql"
 	"errors"
+	"net/netip"
+	"net/url"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -36,11 +38,105 @@ type MCPAdmissionStatus struct {
 	Failed      bool
 	Unavailable bool
 	RetryAfter  time.Duration
+	// ScanIssue says, for a Failed server, why DefenseClaw cannot scan it
+	// when the definition shows it: MCPScanIssueLauncher or
+	// MCPScanIssueAddress. "" when the cause is not known from the
+	// definition (the hook then points to defenseclaw mcp list).
+	ScanIssue string
+}
+
+// The definitions a scan refuses, as the hook and mcp list word them.
+const (
+	// MCPScanIssueLauncher is a local server started by anything but the
+	// bare launchers npx or uvx.
+	MCPScanIssueLauncher = "launcher"
+	// MCPScanIssueAddress is a server URL on a loopback, private,
+	// link-local or multicast address, which the scanner never dials.
+	MCPScanIssueAddress = "address"
+)
+
+// mcpScanIssue names why the scanner refuses server, from its definition
+// alone: the scanner stays the judge, this only words the refusal.
+func mcpScanIssue(server config.MCPServerEntry) string {
+	if rawURL := strings.TrimSpace(server.URL); rawURL != "" {
+		if parsed, err := url.Parse(rawURL); err == nil && mcpLocalHost(parsed.Hostname()) {
+			return MCPScanIssueAddress
+		}
+		return ""
+	}
+	command := strings.TrimSpace(server.Command)
+	if command == "" {
+		return ""
+	}
+	base := strings.ToLower(command)
+	if strings.ContainsAny(base, `/\`) {
+		return MCPScanIssueLauncher
+	}
+	if base != "npx" && base != "uvx" {
+		return MCPScanIssueLauncher
+	}
+	return ""
+}
+
+func mcpLocalHost(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	ip = ip.Unmap()
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() || ip.IsUnspecified()
+}
+
+// failedMCPStatus is the status of a server whose completed admission scan
+// failed, with the cause its definition shows.
+func failedMCPStatus(server config.MCPServerEntry) MCPAdmissionStatus {
+	return MCPAdmissionStatus{Name: server.Name, Failed: true, ScanIssue: mcpScanIssue(server)}
+}
+
+// noteMCPAdmissionOutcome records the outcome of an admission run on snap's
+// definition as soon as it is decided: a scan failure is kept by (key, hash)
+// so MCPAdmissionStatus reports it as failed whether or not the baseline row
+// is written yet, or could be written at all. Any other completed outcome
+// forgets an earlier failure of the key, and a run the watcher stopping cut
+// off decides nothing.
+func (w *InstallWatcher) noteMCPAdmissionOutcome(evt InstallEvent, snap *TargetSnapshot, res AdmissionResult) {
+	if evt.Type != InstallMCP || snap == nil || res.Interrupted || w.secureClientActive() {
+		return
+	}
+	failed := mcpScanFailureBlocked(res) ||
+		(res.Verdict == VerdictScanError && keptUnscannedMCPReason(res.Reason))
+	w.mcpAdmissionMu.Lock()
+	defer w.mcpAdmissionMu.Unlock()
+	if !failed {
+		delete(w.mcpFailedOutcomes, evt.Path)
+		return
+	}
+	if w.mcpFailedOutcomes == nil {
+		w.mcpFailedOutcomes = map[string]string{}
+	}
+	w.mcpFailedOutcomes[evt.Path] = snap.ContentHash
+}
+
+// mcpFailedOutcome reports a scan failure this process completed for the
+// definition with this hash at this key.
+func (w *InstallWatcher) mcpFailedOutcome(path, hash string) bool {
+	w.mcpAdmissionMu.RLock()
+	defer w.mcpAdmissionMu.RUnlock()
+	known, ok := w.mcpFailedOutcomes[path]
+	return ok && hash != "" && known == hash
 }
 
 type mcpKnownDefinition struct {
 	server config.MCPServerEntry
 	hash   string
+	// issue is mcpScanIssue of the definition, kept instead of the command
+	// and URL themselves.
+	issue string
 }
 
 const mcpSnapshotIdentityKey = "mcp.snapshot.identity.v1"
@@ -104,10 +200,16 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 		}
 		matched := err == nil && mcpBaselineMatches(row, server)
 		if matched && mcpSnapshotFailed(row) {
-			return MCPAdmissionStatus{Name: server.Name, Failed: true}
+			return failedMCPStatus(server)
 		}
 		if matched {
 			continue
+		}
+		// The verdict for this exact definition is decided but its baseline
+		// is not (yet) readable: it is a completed failure, not a scan that
+		// is still running (GAP-0775).
+		if hash, hashErr := mcpDefinitionHash(server); hashErr == nil && w.mcpFailedOutcome(path, hash) {
+			return failedMCPStatus(server)
 		}
 		if firstCycle && (!w.mcpStartupListed.Load() || w.listedAtStartup(path)) {
 			continue
@@ -143,7 +245,9 @@ func (w *InstallWatcher) mcpFailedFromLastRead(q MCPAdmissionQuery) MCPAdmission
 		}
 		row, err := mcpSnapshotForServer(w.store, definition.server)
 		if err == nil && row != nil && row.ContentHash == definition.hash && mcpSnapshotFailed(row) {
-			return MCPAdmissionStatus{Name: definition.server.Name, Failed: true}
+			status := failedMCPStatus(definition.server)
+			status.ScanIssue = definition.issue
+			return status
 		}
 	}
 	// After a restart the watcher can have durable failed snapshots but no
