@@ -292,3 +292,97 @@ func TestHermesManifestAnswerFollowsScannerDependency(t *testing.T) {
 		t.Errorf("the cache file the changed scanner declares caused %d scans in total, want 2", got)
 	}
 }
+
+// A stored answer that is not a scanner answer is damaged, so its manifests are
+// unknown and the tier decides: a record with no entrypoints list, a null list
+// or a null element is dropped, as the scanner reply decoder rejects the same
+// shapes. An explicit empty list is an answer.
+func TestHermesManifestOutageDamagedStoredAnswerIsUnknown(t *testing.T) {
+	digest := hermesManifestDigest(protectedManifests)
+	open, closed := func() bool { return true }, func() bool { return false }
+	for _, tc := range []struct {
+		name, record string
+		wantAnswer   bool
+	}{
+		{"entrypoints missing", `{"seen":123}`, false},
+		{"entrypoints null", `{"entrypoints":null,"seen":123}`, false},
+		{"null element", `{"entrypoints":[null],"seen":123}`, false},
+		{"null element after a name", `{"entrypoints":["lib/run.js",null],"seen":123}`, false},
+		{"explicit empty list", `{"entrypoints":[],"seen":123}`, true},
+		{"named entrypoint", `{"entrypoints":["` + cachedProtected + `"],"seen":123}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := t.TempDir()
+			writePluginFile(t, filepath.Join(data, hermesStoreFileName), `{"answers":{"`+digest+`":`+tc.record+`}}`)
+			if got, err := newHermesManifestPolicy(data, nil).byPolicy(failingManifestLoader, open)(protectedManifests); tc.wantAnswer != (err == nil) {
+				t.Errorf("per-user default: %q, %v, want an answer = %v", got, err, tc.wantAnswer)
+			} else if !tc.wantAnswer && !errors.Is(err, errHermesManifestFailOpen) {
+				t.Errorf("per-user default error = %v, want the fail-open outage rule", err)
+			}
+			outage := newHermesManifestPolicy(data, nil).byPolicy(failingManifestLoader, closed)
+			if got, err := outage(protectedManifests); tc.wantAnswer != (err == nil) {
+				t.Errorf("strict: %q, %v, want an answer = %v", got, err, tc.wantAnswer)
+			} else if !tc.wantAnswer && errors.Is(err, errHermesManifestFailOpen) {
+				t.Errorf("strict error = %v, want the closed outage rule", err)
+			}
+			// Strict binds the declared cache file when the answer is unknown
+			// and when it names the file; an explicit empty list binds none.
+			dir := outagePlugin(t)
+			first := skippedTreeHash(dir, outage)
+			writePluginFile(t, filepath.Join(dir, filepath.FromSlash(cachedProtected)), "two")
+			bound := skippedTreeHash(dir, outage) != first
+			wantBound := !tc.wantAnswer || tc.record != `{"entrypoints":[],"seen":123}`
+			if bound != wantBound {
+				t.Errorf("strict: an edit of the declared cache file changed the hash = %v, want %v", bound, wantBound)
+			}
+		})
+	}
+}
+
+// The strict tier scans a declared cache file written during an outage when
+// the store holds a damaged answer for the plugin's manifests.
+func TestHermesManifestOutageDamagedStoredAnswerInStrictWatcher(t *testing.T) {
+	f := newHermesPluginFixture(t)
+	f.w.cfg.Guardrail.RulePack = "strict"
+	path := f.plugin(f.bundledRoot, "web/ddgs")
+	writePluginFile(t, filepath.Join(path, "plugin.yaml"), string(protectedManifests["plugin.yaml"]))
+	f.pinVendor("web/ddgs", path)
+	f.w.runRescanCycle(context.Background())
+	f.unscannedVendor(path)
+	digest := hermesManifestDigest(protectedManifests)
+	writePluginFile(t, filepath.Join(f.w.cfg.DataDir, hermesStoreFileName), `{"answers":{"`+digest+`":{"entrypoints":null,"seen":123}}}`)
+	f.w.hermesManifests = failingManifestLoader
+	writePluginFile(t, filepath.Join(path, filepath.FromSlash(cachedProtected)), "exec()\n")
+	f.w.runRescanCycle(context.Background())
+	if got := f.scan.scans(path); got == 0 {
+		t.Fatal("the declared cache file written during the outage was not scanned")
+	}
+}
+
+// An answer given again is the most recent, so the bound drops the manifests
+// unseen for longest, and an active manifest keeps its answer.
+func TestHermesManifestStoreKeepsAnswersGivenAgain(t *testing.T) {
+	data := t.TempDir()
+	open := func() bool { return true }
+	live := newHermesManifestPolicy(data, nil).byPolicy(healthyManifestLoader, open)
+	if _, err := live(protectedManifests); err != nil {
+		t.Fatal(err)
+	}
+	for i := range hermesStoreMaxEntries - 1 {
+		if _, err := live(map[string][]byte{"plugin.yaml": []byte(fmt.Sprintf("name: distinct-%d\n", i))}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// protectedManifests is now the oldest; it is given again, then one more
+	// manifest is added past the bound.
+	if _, err := live(protectedManifests); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := live(map[string][]byte{"plugin.yaml": []byte("name: last\n")}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := newHermesManifestPolicy(data, nil).byPolicy(failingManifestLoader, open)(protectedManifests)
+	if err != nil || !slices.Equal(got, []string{cachedProtected}) {
+		t.Errorf("the manifest given again lost its answer: %q, %v", got, err)
+	}
+}

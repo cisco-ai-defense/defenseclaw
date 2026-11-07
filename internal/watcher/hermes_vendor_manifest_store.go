@@ -95,12 +95,34 @@ func (s *hermesAnswerStore) load() {
 	if err != nil {
 		return
 	}
+	// Each stored answer is read the way the scanner reply is: a record with
+	// no entrypoints list, a null list or a null element is damaged, not an
+	// empty answer, and is dropped, so its manifests are unknown. Only an
+	// explicit empty list is an answer.
 	var file struct {
-		Answers map[string]hermesStoredAnswer `json:"answers"`
+		Answers map[string]struct {
+			Entrypoints *[]*string `json:"entrypoints"`
+			Seen        int64      `json:"seen"`
+		} `json:"answers"`
 	}
-	if json.Unmarshal(data, &file) == nil {
-		for digest, answer := range file.Answers {
-			s.answers[digest] = answer
+	if json.Unmarshal(data, &file) != nil {
+		return
+	}
+	for digest, record := range file.Answers {
+		if record.Entrypoints == nil {
+			continue
+		}
+		entrypoints := make([]string, 0, len(*record.Entrypoints))
+		intact := true
+		for _, entrypoint := range *record.Entrypoints {
+			if entrypoint == nil {
+				intact = false
+				break
+			}
+			entrypoints = append(entrypoints, *entrypoint)
+		}
+		if intact {
+			s.answers[digest] = hermesStoredAnswer{Entrypoints: entrypoints, Seen: record.Seen}
 		}
 	}
 }
@@ -127,7 +149,15 @@ func (s *hermesAnswerStore) remember(digest string, entrypoints []string) error 
 		entrypoints = []string{}
 	}
 	if known, ok := s.answers[digest]; ok && slices.Equal(known.Entrypoints, entrypoints) {
-		return nil
+		// An answer given again is the most recent, so the bound drops the
+		// manifests unseen for longest. The file is rewritten for this only when
+		// the bound is reached, the one time recency decides what is kept.
+		known.Seen = time.Now().UnixNano()
+		s.answers[digest] = known
+		if len(s.answers) < hermesStoreMaxEntries {
+			return nil
+		}
+		return s.writeLocked()
 	}
 	s.answers[digest] = hermesStoredAnswer{Entrypoints: slices.Clone(entrypoints), Seen: time.Now().UnixNano()}
 	for len(s.answers) > hermesStoreMaxEntries {
@@ -139,6 +169,12 @@ func (s *hermesAnswerStore) remember(digest string, entrypoints []string) error 
 		}
 		delete(s.answers, oldest)
 	}
+	return s.writeLocked()
+}
+
+// writeLocked writes the answers to the file, if the store has one. The
+// caller holds mu.
+func (s *hermesAnswerStore) writeLocked() error {
 	if s.path == "" {
 		return nil
 	}
