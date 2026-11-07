@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -21,8 +22,8 @@ import (
 
 // GAP-0613: on a folder two connectors load, a skill denied by the second
 // connector rule whose quarantine fails stays in the folder. The journal says
-// so for the connector whose rule denied it as well as for the event owner,
-// so neither is left without the install block.
+// so for the connector whose rule denied it. The root owner, whose rules allow
+// the skill, is not held in the balanced tier: it runs the ordinary skill.
 func TestGAP0613SharedRootDeniedSkillWhoseQuarantineFailsIsJournaledForTheDenyingConnector(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("needs POSIX permissions as a non-root user")
@@ -55,11 +56,12 @@ func TestGAP0613SharedRootDeniedSkillWhoseQuarantineFailsIsJournaledForTheDenyin
 	if _, err := os.Lstat(path); err != nil {
 		t.Fatalf("expected the skill to stay in place: %v", err)
 	}
-	for _, connector := range []string{"amp", "codex"} {
-		entry, err := store.GetActionForConnector("skill", "denied-skill", connector)
-		if err != nil || entry == nil || entry.Actions.Install != "block" || !strings.HasPrefix(entry.Reason, "quarantine failed: ") {
-			t.Errorf("%s journal = %+v (err %v), want install block with quarantine failed", connector, entry, err)
-		}
+	entry, err := store.GetActionForConnector("skill", "denied-skill", "codex")
+	if err != nil || entry == nil || entry.Actions.Install != "block" || !strings.HasPrefix(entry.Reason, "quarantine failed: ") {
+		t.Errorf("codex journal = %+v (err %v), want install block with quarantine failed", entry, err)
+	}
+	if owner, err := store.GetActionForConnector("skill", "denied-skill", "amp"); err != nil || (owner != nil && (owner.Actions.Install != "" || owner.Actions.Runtime != "")) {
+		t.Errorf("amp journal = %+v (err %v), want no hold for the owner whose rules allow the skill", owner, err)
 	}
 }
 
@@ -94,9 +96,17 @@ func sharedRootDefaultDenyWatcher(t *testing.T, quarantineWorks bool) (*InstallW
 	return w, cfg, InstallEvent{Type: InstallSkill, Name: "blocked-skill", Path: skill, Connector: "amp", Timestamp: time.Now()}
 }
 
+// requireRuntimeHold checks the runtime hold of the denying connector (codex)
+// and that the root owner (amp), whose rules allow the skill, is never held.
 func requireRuntimeHold(t *testing.T, w *InstallWatcher, held bool) {
 	t.Helper()
-	for _, connector := range []string{"amp", "codex"} {
+	requireRuntimeHoldFor(t, w, held, "codex")
+	requireRuntimeHoldFor(t, w, false, "amp")
+}
+
+func requireRuntimeHoldFor(t *testing.T, w *InstallWatcher, held bool, connectors ...string) {
+	t.Helper()
+	for _, connector := range connectors {
 		disabled, err := enforce.NewPolicyEngine(w.store).IsDisabledForConnector("skill", "blocked-skill", connector)
 		if err != nil || disabled != held {
 			entry, _ := w.store.GetActionForConnector("skill", "blocked-skill", connector)
@@ -136,11 +146,9 @@ func TestGAP0613SharedRootDefaultDenyWhoseQuarantineFailsIsDisabledAtRuntime(t *
 		t.Fatalf("expected the skill to stay in place: %v", err)
 	}
 	requireRuntimeHold(t, w, true)
-	for _, connector := range []string{"amp", "codex"} {
-		if entry, _ := w.store.GetActionForConnector("skill", "blocked-skill", connector); entry == nil || entry.Actions.Install != "block" ||
-			!strings.HasPrefix(entry.Reason, "quarantine failed: ") || entry.SourcePath != evt.Path {
-			t.Errorf("%s journal = %+v, want install block, quarantine failed reason and the source path", connector, entry)
-		}
+	if entry, _ := w.store.GetActionForConnector("skill", "blocked-skill", "codex"); entry == nil || entry.Actions.Install != "block" ||
+		!strings.HasPrefix(entry.Reason, "quarantine failed: ") || entry.SourcePath != evt.Path {
+		t.Errorf("codex journal = %+v, want install block, quarantine failed reason and the source path", entry)
 	}
 }
 
@@ -385,7 +393,8 @@ func TestGAP0613PolicyHoldStaysUntilTheReplacementScanAllows(t *testing.T) {
 // GAP-0613 review 11: OpenClaw's install journal is the global row, which
 // every connector's runtime check falls back to. When OpenClaw is the
 // connector whose rule denies the skill, its runtime disable is on its own
-// row: an unrelated connector's skill of the same name stays usable. The
+// row: an unrelated connector's skill of the same name stays usable, the root
+// owner whose rules allow it included. The
 // install block keeps its legacy global row, and the hold lifts from both.
 func TestGAP0613OpenClawPolicyHoldDoesNotDisableAnotherConnectorsSkill(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -400,7 +409,7 @@ func TestGAP0613OpenClawPolicyHoldDoesNotDisableAnotherConnectorsSkill(t *testin
 		t.Fatalf("admission = %+v, want blocked", res)
 	}
 	pe := enforce.NewPolicyEngine(w.store)
-	for connector, want := range map[string]bool{"amp": true, "openclaw": true, "hermes": false, "": false} {
+	for connector, want := range map[string]bool{"amp": false, "openclaw": true, "hermes": false, "": false} {
 		if got, err := pe.IsDisabledForConnector("skill", "blocked-skill", connector); err != nil || got != want {
 			t.Errorf("%q runtime disabled = %v (err %v), want %v", connector, got, err, want)
 		}
@@ -435,7 +444,7 @@ func TestGAP0613PolicyReleaseKeepsAnEarlierRuntimeBlock(t *testing.T) {
 	if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictBlocked {
 		t.Fatalf("admission = %+v, want blocked", res)
 	}
-	requireRuntimeHold(t, w, true)
+	requireRuntimeHoldFor(t, w, true, "codex")
 	relaxCodexDefault(cfg)
 	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "skill-scanner"} }
 	w.runAdmission(context.Background(), evt)
@@ -780,7 +789,7 @@ func TestGAP0613EveryDenyingConnectorHoldsACopyWhoseQuarantineFails(t *testing.T
 	if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictBlocked {
 		t.Fatalf("verdict = %+v, want blocked", res)
 	}
-	requireRuntimeHold(t, w, true)
+	requireRuntimeHoldFor(t, w, true, "amp", "codex")
 	for _, connector := range []string{"amp", "codex"} {
 		if entry, err := w.store.GetActionForConnector("skill", evt.Name, connector); err != nil || entry == nil || entry.Actions.Install != "block" {
 			t.Errorf("%s journal = %+v (err %v), want the install block", connector, entry, err)
@@ -868,8 +877,8 @@ func TestGAP0613PolicyHoldCoversOnlyTheHeldCopies(t *testing.T) {
 	}
 	check := func(label string, want bool, paths ...string) {
 		t.Helper()
-		if got := PolicyHoldIgnores(entry, "runtime", paths); got != want {
-			t.Errorf("%s: PolicyHoldIgnores = %v, want %v", label, got, want)
+		if got := slices.Contains(PolicyHoldIgnoredFields(entry, paths).Ignored, "runtime"); got != want {
+			t.Errorf("%s: hold ignored = %v, want %v", label, got, want)
 		}
 	}
 	check("admitted second copy", true, second.Path)
@@ -888,7 +897,7 @@ func TestGAP0613PolicyHoldCoversOnlyTheHeldCopies(t *testing.T) {
 		}
 		check("link to the held first copy", false, filepath.Join(link, "SKILL.md"))
 	}
-	if PolicyHoldIgnores(&audit.ActionEntry{Reason: "operator disabled"}, "runtime", []string{second.Path}) {
+	if len(PolicyHoldIgnoredFields(&audit.ActionEntry{Reason: "operator disabled"}, []string{second.Path}).Ignored) != 0 {
 		t.Error("a row with no hold ignored a path")
 	}
 }
