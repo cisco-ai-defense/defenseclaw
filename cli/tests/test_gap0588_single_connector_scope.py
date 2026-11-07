@@ -14,6 +14,7 @@ from defenseclaw import config_writer
 from defenseclaw.commands import cmd_config, cmd_guardrail
 from defenseclaw.context import AppContext
 from defenseclaw.fail_mode import ConnectorFailModeState
+from defenseclaw.file_permissions import protect_private_file
 
 
 def _app(tmp_path: Path, names: list[str]) -> AppContext:
@@ -670,6 +671,9 @@ def _setup_guardrail(tmp_path: Path, guardrail: str, *args: str):
 
     path = tmp_path / "config.yaml"
     path.write_text(f"config_version: 9\ndata_dir: {tmp_path}\nguardrail:\n{guardrail}", encoding="utf-8")
+    # setup reads the config as its rollback point only when it is protected the way
+    # DefenseClaw writes it (owner-only mode, or a private DACL on Windows).
+    protect_private_file(path)
     before = path.read_bytes()
     patches = (
         patch.object(dcconfig, "config_path", return_value=path),

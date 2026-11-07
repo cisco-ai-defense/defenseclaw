@@ -876,13 +876,37 @@ def _carry_connector_records(old_dir: str, new_dir: str) -> list[str]:
     return notes
 
 
+def _hook_store_entry_is_account_private(path: str, info: os.stat_result) -> bool:
+    """Whether *path* is a token file or folder only this account can change.
+
+    POSIX: owned by the effective user, with no group or other access to a
+    file and no group or other write on a folder. Windows: the test the
+    gateway applies to the same token (``safefile.ValidatePrivateFile``): no
+    reparse point on the path, a regular file owned by this account with a
+    private DACL. A folder only has to be a real directory there, because a
+    token another account put in it fails the file test.
+    """
+    from defenseclaw.file_permissions import reject_reparse_path, windows_guard_private_file_error
+
+    if os.name == "nt":
+        try:
+            reject_reparse_path(path)
+        except OSError:
+            return False
+        if stat.S_ISDIR(info.st_mode):
+            return True
+        return stat.S_ISREG(info.st_mode) and windows_guard_private_file_error(path) is None
+    if stat.S_ISDIR(info.st_mode):
+        return info.st_uid == os.geteuid() and not info.st_mode & 0o022
+    return stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and not info.st_mode & 0o077
+
+
 def _read_moved_hook_credential(path: str) -> bytes:
     """Read an account-owned scoped credential from a private regular file."""
     from defenseclaw.file_permissions import open_regular_file_no_follow
 
     info = os.lstat(path)
-    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
-            or info.st_mode & 0o077):
+    if not _hook_store_entry_is_account_private(path, info):
         raise OSError("hook credential is not an account-private regular file")
     with os.fdopen(open_regular_file_no_follow(path, expected_stat=info), "rb") as handle:
         data = handle.read(4097)
@@ -894,7 +918,7 @@ def _read_moved_hook_credential(path: str) -> bytes:
 
 def _carry_hook_credentials(old_dir: str, new_dir: str, connectors: list[str]) -> list[str]:
     """Keep existing sessions' scoped credentials valid after a store move."""
-    if os.name == "nt" or config_module._is_admin_process() or not old_dir or not new_dir:
+    if config_module._is_admin_process() or not old_dir or not new_dir:
         return []
     try:
         if os.path.samefile(old_dir, new_dir):
@@ -907,9 +931,7 @@ def _carry_hook_credentials(old_dir: str, new_dir: str, connectors: list[str]) -
     old_hooks = os.path.join(old_dir, "hooks")
     try:
         for directory in (old_dir, old_hooks):
-            info = os.lstat(directory)
-            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
-                    or info.st_mode & 0o022):
+            if not _hook_store_entry_is_account_private(directory, os.lstat(directory)):
                 raise OSError("hook credential directory is not account-owned and private")
     except FileNotFoundError:
         return []
@@ -934,13 +956,11 @@ def _carry_hook_credentials(old_dir: str, new_dir: str, connectors: list[str]) -
             make_private_directory(new_dir)
             make_private_directory(new_hooks)
             for directory in (new_dir, new_hooks):
-                info = os.lstat(directory)
-                if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
-                        or info.st_mode & 0o022):
+                if not _hook_store_entry_is_account_private(directory, os.lstat(directory)):
                     raise OSError("new hook credential directory is not account-owned and private")
             if os.path.lexists(target):
                 info = os.lstat(target)
-                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+                if not stat.S_ISREG(info.st_mode) or (os.name != "nt" and info.st_uid != os.geteuid()):
                     raise OSError("new hook credential is not an account-owned regular file")
                 try:
                     current = _read_moved_hook_credential(target)

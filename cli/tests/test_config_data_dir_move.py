@@ -4,12 +4,17 @@
 """config set data_dir moves the folders the gateway reads (GAP-2126)."""
 
 import os
+import subprocess
 
 from click.testing import CliRunner
 from defenseclaw import config as config_module
 from defenseclaw.commands import cmd_config
 from defenseclaw.context import AppContext
-from defenseclaw.file_permissions import windows_acl_confidentiality_error
+from defenseclaw.file_permissions import (
+    protect_private_file,
+    windows_acl_confidentiality_error,
+    windows_guard_private_file_error,
+)
 
 from tests.environment import isolated_home_env
 
@@ -31,6 +36,22 @@ def _install_home(tmp_path, monkeypatch):
     monkeypatch.setattr("defenseclaw.gateway.local_policy_digest", lambda *a, **kw: None)
     monkeypatch.setattr(cmd_config, "_refresh_stopped_gateway_hooks", lambda *a: [])
     return home, path
+
+
+def _is_private(path) -> bool:
+    """The account-private form the gateway demands of a hook credential."""
+    if os.name == "nt":
+        return windows_guard_private_file_error(path) is None
+    return os.stat(path).st_mode & 0o077 == 0
+
+
+def _expose(path) -> None:
+    """Let every local account read *path* (0644, or an Everyone read grant on Windows)."""
+    if os.name == "nt":
+        subprocess.run(["icacls", str(path), "/grant", "*S-1-1-0:R"], check=True, capture_output=True)
+    else:
+        path.chmod(0o644)
+    assert not _is_private(path)
 
 
 def test_omitted_paths_are_under_the_data_dir_config_yaml_names(tmp_path, monkeypatch):
@@ -118,10 +139,10 @@ def test_config_set_data_dir_keeps_live_hook_credentials(tmp_path, monkeypatch):
     for name, token in tokens.items():
         source = old_hooks / f".hook-{name}.token"
         source.write_text(token + "\n", encoding="ascii")
-        source.chmod(0o600)
+        protect_private_file(source)
     disabled = old_hooks / ".hook-cursor.token"
     disabled.write_text(os.urandom(32).hex() + "\n", encoding="ascii")
-    disabled.chmod(0o600)
+    protect_private_file(disabled)
     moved = tmp_path / "dcdata"
     monkeypatch.setattr(cmd_config.config_module, "_is_admin_process", lambda: False)
 
@@ -133,7 +154,7 @@ def test_config_set_data_dir_keeps_live_hook_credentials(tmp_path, monkeypatch):
         target = moved / "hooks" / f".hook-{name}.token"
         assert source.read_text(encoding="ascii").strip() == token
         assert target.read_text(encoding="ascii").strip() == token
-        assert target.stat().st_mode & 0o077 == 0
+        assert _is_private(target)
     assert not (moved / "hooks" / ".hook-cursor.token").exists()
 
 
@@ -160,7 +181,7 @@ def test_config_set_data_dir_uses_the_current_hook_credential_in_a_populated_sto
     source = old_hooks / ".hook-claudecode.token"
     live_token = os.urandom(32).hex()
     source.write_text(live_token + "\n", encoding="ascii")
-    source.chmod(0o600)
+    protect_private_file(source)
     moved = tmp_path / "dcdata"
     new_hooks = moved / "hooks"
     new_hooks.mkdir(parents=True, mode=0o700)
@@ -168,7 +189,7 @@ def test_config_set_data_dir_uses_the_current_hook_credential_in_a_populated_sto
     prior_token = os.urandom(32).hex()
     assert prior_token != live_token
     target.write_text(prior_token + "\n", encoding="ascii")
-    target.chmod(0o600)
+    protect_private_file(target)
     monkeypatch.setattr(cmd_config.config_module, "_is_admin_process", lambda: False)
 
     result = CliRunner().invoke(cmd_config.config_cmd, ["set", "data_dir", str(moved)], obj=AppContext())
@@ -176,7 +197,7 @@ def test_config_set_data_dir_uses_the_current_hook_credential_in_a_populated_sto
     assert result.exit_code == 0, result.output
     assert source.read_text(encoding="ascii") == live_token + "\n"
     assert target.read_text(encoding="ascii") == source.read_text(encoding="ascii")
-    assert target.stat().st_mode & 0o077 == 0
+    assert _is_private(target)
 
 
 def test_config_set_data_dir_does_not_carry_an_untrusted_hook_credential(tmp_path, monkeypatch):
@@ -190,7 +211,7 @@ def test_config_set_data_dir_does_not_carry_an_untrusted_hook_credential(tmp_pat
     hooks.mkdir(mode=0o700)
     source = hooks / ".hook-claudecode.token"
     source.write_text(os.urandom(32).hex() + "\n", encoding="ascii")
-    source.chmod(0o644)
+    _expose(source)
     moved = tmp_path / "dcdata"
     monkeypatch.setattr(cmd_config.config_module, "_is_admin_process", lambda: False)
 
