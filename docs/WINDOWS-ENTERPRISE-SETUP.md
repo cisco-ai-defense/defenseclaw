@@ -251,7 +251,7 @@ return `ERROR_FILE_NOT_FOUND` or a sharing error to another process opening
 that name. DefenseClaw's own managed-file readers use a bounded retry for
 transient opens. A separate application that opens the file at that instant may
 need to reopen it. Run upgrades while clients are idle when possible.
-Third-party readers must open with `FILE_SHARE_DELETE` or retry a transient open failure.
+Third-party readers should share deletion and retry transient open failures.
 
 This is an observed Windows file-name replacement limit, not a field failure
 rate. In a 2026-11-06 Windows Server 2025 NTFS stress run of 400 changed-body
