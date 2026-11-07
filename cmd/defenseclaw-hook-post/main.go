@@ -20,10 +20,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 const maxInput = hookexec.MaxPerUserPluginRequest
@@ -48,6 +50,14 @@ func run(args []string, input io.Reader, output io.Writer) error {
 // runWithPeer is run; peer, when set, receives the process behind the
 // request's connection (hookexec.WithPerUserPeerRecord).
 func runWithPeer(args []string, input io.Reader, output io.Writer, peer *hookexec.PerUserPeerRecord) error {
+	return runCall(args, input, output, peer, nil)
+}
+
+// postedCall is the path and body of the request a run sent (runCall).
+type postedCall struct{ path, body string }
+
+// runCall is runWithPeer; call, when set, receives the request that was sent.
+func runCall(args []string, input io.Reader, output io.Writer, peer *hookexec.PerUserPeerRecord, call *postedCall) error {
 	if len(args) == 1 && args[0] == "--version" {
 		_, err := fmt.Fprintf(output, "defenseclaw-hook-post version %s (commit=%s, built=%s)\n", version, commit, date)
 		return err
@@ -95,6 +105,9 @@ func runWithPeer(args []string, input io.Reader, output io.Writer, peer *hookexe
 		return err
 	}
 	timeout := requestTimeout(opts.maxTime)
+	if call != nil {
+		*call = postedCall{path: request.Path, body: request.Body}
+	}
 	if request.Headers == nil {
 		request.Headers = map[string]string{}
 	}
@@ -269,7 +282,8 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 	dataDir := os.Getenv(hookPostDataDirEnv)
 	peer := hookexec.NewPerUserPeerRecord()
 	stopObservingStart := observeGatewayStartDuringCall(dataDir, peer)
-	err := runWithPeer(args, input, output, peer)
+	var call postedCall
+	err := runCall(args, input, output, peer, &call)
 	startObservation := stopObservingStart()
 	if err == nil {
 		return 0
@@ -318,9 +332,31 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 				_, _ = fmt.Fprint(output, "DCPOSTPROOF1:"+reason)
 			}
 		}
+		if lateOrdinary(call) {
+			// A gateway that is up and late with a call that names nothing
+			// protected is no reason to deny it (GAP-0518): the shell reads
+			// this status as the outage and follows the outage mode.
+			return hookexec.PerUserPostLateOrdinaryExit
+		}
 		return hookexec.PerUserPostNoAnswerExit
 	}
 	return 1
+}
+
+// lateOrdinary reports a sent Claude Code or Codex tool call that the scan
+// finds ordinary (hookpaths.LateOrdinaryCall). The connector is named by the
+// request path; any other path is not scanned.
+func lateOrdinary(call postedCall) bool {
+	var connector string
+	switch {
+	case strings.Contains(call.path, "claude-code") || strings.Contains(call.path, "claudecode"):
+		connector = "claudecode"
+	case strings.Contains(call.path, "codex"):
+		connector = "codex"
+	default:
+		return false
+	}
+	return hookpaths.LateOrdinaryCall(connector, []byte(call.body))
 }
 
 func runUserHookGuardAt(self string, args []string, input io.Reader, output, errOutput io.Writer) int {
