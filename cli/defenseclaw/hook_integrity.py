@@ -862,6 +862,17 @@ _CLAUDE_CHAIN_WARNING = (
 ).split()
 
 
+# The managed standalone wrapper names the missing guard and the repair command.
+# Keep it identical to claudeManagedGuardMissingWords in
+# internal/gateway/connector/claudecode_chain.go.
+_CLAUDE_MANAGED_GUARD_MISSING = (
+    "DefenseClaw could not start its Claude Code hook guard defenseclaw-hook-guard.exe "
+    "because it is missing from the install folder. "
+    "Run defenseclaw.exe enterprise windows repair --profile standalone "
+    "from that folder as an administrator to restore it."
+).split()
+
+
 def _claude_wrapper_safe(path: str) -> bool:
     return (
         bool(path)
@@ -937,9 +948,10 @@ def _claude_chain_wrapper_parts(handler: Any) -> tuple[str, list[str], str, str]
 
 def _claude_managed_wrapper_words(guard: str, launcher: str, event: str) -> list[str]:
     fail_code = "1" if event in _CLAUDE_NEUTRAL_EVENTS else "2"
+    missing = ["echo", *_CLAUDE_MANAGED_GUARD_MISSING, "1>&2", "&", "exit", "/b", fail_code]
     warning = ["echo", *_CLAUDE_CHAIN_WARNING, "1>&2", "&", "exit", "/b", fail_code]
     return [
-        "/d", "/v:on", "/c", "if", "not", "exist", guard, "(", *warning, ")",
+        "/d", "/v:on", "/c", "if", "not", "exist", guard, "(", *missing, ")",
         "&", guard, _CLAUDE_WRAPPED_GUARD_SUBCOMMAND, launcher,
         "hook", "--connector", "claudecode", "--enterprise-managed", "--event", event,
         "&", "set", "dc_hook_status=!errorlevel!",

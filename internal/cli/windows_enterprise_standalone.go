@@ -5176,6 +5176,7 @@ func windowsEnterpriseKeepsInstalledConfig(opts *windowsEnterpriseLifecycleOptio
 
 func clearWindowsEnterpriseSources(opts *windowsEnterpriseLifecycleOptions) {
 	opts.gatewayBinary, opts.acpBinary, opts.hookBinary = "", "", ""
+	opts.hookGuardBinary = ""
 	opts.sensorHelperBinary, opts.cliBinary = "", ""
 	opts.policyCompiler = ""
 	opts.configPath, opts.manifestPath, opts.mode, opts.connector = "", "", "", ""
@@ -5193,6 +5194,7 @@ func defaultWindowsEnterpriseEnsurePayload(opts *windowsEnterpriseLifecycleOptio
 		{&opts.gatewayBinary, "defenseclaw-gateway.exe"},
 		{&opts.acpBinary, "defenseclaw-acp.exe"},
 		{&opts.hookBinary, "defenseclaw-hook.exe"},
+		{&opts.hookGuardBinary, "defenseclaw-hook-guard.exe"},
 		{&opts.sensorHelperBinary, "defenseclaw-sensor-helper.exe"},
 		{&opts.policyCompiler, "policy_compiler.py"},
 		{&opts.cliBinary, "defenseclaw.exe"},
@@ -5239,6 +5241,7 @@ func windowsEnterpriseEnsureDrift(opts *windowsEnterpriseLifecycleOptions, scrip
 		{"gateway", opts.gatewayBinary},
 		{"acp", opts.acpBinary},
 		{"hook", opts.hookBinary},
+		{"hook_guard", opts.hookGuardBinary},
 		{"sensor_helper", opts.sensorHelperBinary},
 		{"compiler", opts.policyCompiler},
 		{"cli", opts.cliBinary},
@@ -5249,6 +5252,11 @@ func windowsEnterpriseEnsureDrift(opts *windowsEnterpriseLifecycleOptions, scrip
 			continue
 		}
 		recorded := strings.ToLower(strings.TrimSpace(metadata.Hashes[source.key]))
+		if source.key == "hook_guard" && recorded == "" {
+			// A deployment from before the guard shipped records none: the
+			// supplied guard is drift until an upgrade installs it.
+			return source.key, nil
+		}
 		if source.key == "compiler" {
 			// Setup always carries the optional Fleet source, including when
 			// Fleet is off. Only a Fleet-enabled target config makes it an
