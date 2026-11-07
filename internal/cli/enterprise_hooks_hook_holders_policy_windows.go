@@ -1032,6 +1032,12 @@ func windowsHolderRefusedWhat(path string) string {
 // them, are the allow-list in enterprise_hooks_hook_runtime_watch.go. The
 // guardian watches exactly those and no other file of the folder.
 
+// windowsHolderDataHeldPerTick bounds the runtime files whose hold the guardian
+// works on in one check, so that a standard user who holds many of them
+// cannot take the check's time. The files left over are looked at first at the
+// next check (windowsHolderDataCursor).
+const windowsHolderDataHeldPerTick = 4
+
 // windowsHookRuntimeDir is the hook runtime folder; tests replace it.
 var windowsHookRuntimeDir = func() (string, error) {
 	layout, err := windowsManagedLayout.standalone()
@@ -1072,14 +1078,20 @@ func windowsOpenRefused(path string, access, share uint32) bool {
 var (
 	windowsHolderDataGates = map[string]*windowsHolderState{}
 	windowsHolderDataLast  = map[string]string{}
+	// windowsHolderDataCursor is where the next check starts in the watch list,
+	// after a check that stopped at windowsHolderDataHeldPerTick held files.
+	windowsHolderDataCursor int
 )
 
 // keepWindowsHookRuntimeFiles is the guardian's check of the runtime files a
-// hook start reads, called with windowsHookBinaryMu held. A file that refuses
-// the hook's own read and an open for deletion is a hold; the guardian ends it
-// by the same bounded close as the hook binary's (there is no swap for a data
-// file), with its own persistence, backoff and streak per file. A file that is
-// not on the watch list is never looked at.
+// hook start reads, called with windowsHookBinaryMu held and after the hook
+// binary's own check. A file that refuses the hook's own read and an open for
+// deletion is a hold; the guardian ends it by the same bounded close as the
+// hook binary's (there is no swap for a data file), with its own persistence,
+// backoff and streak per file. A check works on at most
+// windowsHolderDataHeldPerTick held files; the rest wait for the next check,
+// which starts where this one stopped. A file that is not on the watch list is
+// never looked at.
 func keepWindowsHookRuntimeFiles(stderr io.Writer) {
 	if !windowsHolderCloserEnabled() {
 		return
@@ -1088,10 +1100,20 @@ func keepWindowsHookRuntimeFiles(stderr io.Writer) {
 	if err != nil {
 		return
 	}
+	list := windowsHookRuntimeWatchList(dir)
 	watched := map[string]bool{}
-	for _, path := range windowsHookRuntimeWatchList(dir) {
+	for _, path := range list {
+		watched[strings.ToLower(path)] = true
+	}
+	start := 0
+	if len(list) > 0 {
+		start = windowsHolderDataCursor % len(list)
+	}
+	windowsHolderDataCursor = 0
+	held := 0
+	for i := range list {
+		path := list[(start+i)%len(list)]
 		key := strings.ToLower(path)
-		watched[key] = true
 		gate := windowsHolderDataGates[key]
 		if gate == nil {
 			gate = &windowsHolderState{}
@@ -1102,6 +1124,11 @@ func keepWindowsHookRuntimeFiles(stderr io.Writer) {
 			delete(windowsHolderDataLast, key)
 			continue
 		}
+		if held >= windowsHolderDataHeldPerTick {
+			windowsHolderDataCursor = (start + i) % len(list)
+			break
+		}
+		held++
 		closed, holdErr := endWindowsExclusiveHoldOn(gate, path, windowsHolderDataProbes)
 		var message string
 		switch {

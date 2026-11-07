@@ -179,14 +179,16 @@ func keepWindowsStandaloneHookBinaryLocked(stderr io.Writer, onlyWhenDamaged boo
 		return
 	}
 	copyPath := filepath.Join(roots.StateRoot, "hook-guardian", "payload", "defenseclaw-hook.exe")
-	// The runtime files a hook start reads besides the binary: the same
-	// bounded close, per file (GAP-0755).
-	keepWindowsHookRuntimeFiles(stderr)
 	damage, err := keepWindowsManagedFileCopy(target, copyPath, want, !onlyWhenDamaged)
 	reportWindowsHookBinaryDigestRefusal(stderr, target)
 	reportWindowsImageSwapLinkRefusal(stderr, target)
 	reportWindowsImageBackupRestrictFailure(stderr)
 	reportWindowsHeldSwapNotice(stderr, target)
+	// The runtime files a hook start reads besides the binary: the same
+	// bounded close, per file, after the binary's check and restore and for a
+	// bounded number of held files, so a user who holds many of them cannot
+	// delay the binary (GAP-0755).
+	keepWindowsHookRuntimeFiles(stderr)
 	writeWindowsHolderLog(stderr)
 	if err != nil {
 		if message := err.Error(); message != windowsHookBinaryLastErr {

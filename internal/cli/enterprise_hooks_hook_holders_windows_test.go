@@ -272,7 +272,7 @@ func resetWindowsHolderOutputForTest() {
 	windowsHolderAuditSeq, windowsHolderAuditPath, windowsHolderAuditLoaded = 0, "", false
 	windowsHolderAuditLastErr, windowsHolderAuditFails, windowsHolderAuditNext, windowsHolderAuditSaveErr = "", 0, time.Time{}, ""
 	windowsHolderNames.Clear()
-	windowsHolderDataGates, windowsHolderDataLast = map[string]*windowsHolderState{}, map[string]string{}
+	windowsHolderDataGates, windowsHolderDataLast, windowsHolderDataCursor = map[string]*windowsHolderState{}, map[string]string{}, 0
 }
 
 // reportWindowsHookHolders is what the guardian does after a check: the log
@@ -1834,6 +1834,37 @@ func keepData(rig *holdRig) {
 	keepWindowsHookRuntimeFiles(&rig.log)
 	writeWindowsHolderLog(&rig.log)
 	flushWindowsHolderAudit(&rig.log)
+}
+
+// The guardian's check works on at most windowsHolderDataHeldPerTick held
+// files, and the next check starts where it stopped, so that a user who holds
+// many runtime files does not take the whole check and every file is reached.
+func TestWindowsHolderTheRuntimeFilePassIsBoundedPerCheck(t *testing.T) {
+	rig, dir := dataRig(t)
+	files := windowsHookRuntimeWatchList(dir)
+	if len(files) != 2+2*len(windowsHookRuntimeConnectors) {
+		t.Fatalf("%d files on the watch list", len(files))
+	}
+	windowsHookDataReadRefused = func(string) bool { return true }
+	windowsHookDataDeleteBlocked = func(string) bool { return true }
+	keepData(rig)
+	if rig.sys.snapshots != windowsHolderDataHeldPerTick {
+		t.Fatalf("%d scans in the first check, want the bound %d", rig.sys.snapshots, windowsHolderDataHeldPerTick)
+	}
+	rig.advance(windowsHookBinaryCheckInterval)
+	keepData(rig)
+	if rig.sys.snapshots != 2*windowsHolderDataHeldPerTick {
+		t.Fatalf("%d scans after two checks, want %d: the second check must reach the files the first left", rig.sys.snapshots, 2*windowsHolderDataHeldPerTick)
+	}
+	scanned := 0
+	for _, gate := range windowsHolderDataGates {
+		if !gate.streakLast.IsZero() {
+			scanned++
+		}
+	}
+	if scanned != len(files) {
+		t.Fatalf("%d of %d files were reached in two checks", scanned, len(files))
+	}
 }
 
 // DefenseClaw's own lock files are held with no sharing for a whole
