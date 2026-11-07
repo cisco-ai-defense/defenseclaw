@@ -129,31 +129,22 @@ defenseclaw_sandbox_unreachable_reason() {
   esac
 }
 
-# defenseclaw_sandbox_budget_reason BODY prints why a sandbox hook blocked a
-# call the managed gateway refused 429 because the user's sandboxes used up
-# their call budget: the gateway's own message names the rate (it is the one
-# place the numbers live), cut to one printable line of at most 300
-# characters. A refusal for its rate is not an outage and says so.
-defenseclaw_sandbox_budget_reason() {
+# defenseclaw_sandbox_rate_refusal_reason BODY prints why a sandbox hook
+# blocked a call the gateway refused 429. The gateway's own message names
+# which limit refused it (this sandbox's rate, its waiting requests, the
+# user's sandboxes together, or the gateway as a whole): the cause and the
+# numbers live there, not here. It is cut to one printable line of at most
+# 300 characters. A refusal for rate is the gateway answering, not an outage,
+# and says so.
+defenseclaw_sandbox_rate_refusal_reason() {
   local message
-  message="$(printf %s "$1" | _dc_jq -r 'if type == "object" then (.message // "") else "" end' 2>/dev/null)" || message=""
+  message="$(printf %s "$1" | _dc_jq -r 'if type == "object" then (.message // .error // "") else "" end' 2>/dev/null)" || message=""
   message="$(printf %s "$message" | LC_ALL=C tr -d '\000-\037\177')"
   message="${message:0:300}"
   if [ -n "$message" ]; then
-    printf 'DefenseClaw refused this tool call, it is over a call budget (not an outage): %s' "$message"
+    printf 'DefenseClaw refused this tool call, the gateway is limiting requests (not an outage): %s' "$message"
   else
-    printf %s "DefenseClaw refused this tool call, it is over the call budget of this user's sandboxes (not an outage): retry in a few seconds"
-  fi
-}
-
-# defenseclaw_sandbox_receipt_failure prints why a sandbox hook blocked after
-# its delivery receipt was not acknowledged: the budget message for a 429,
-# else the status.
-defenseclaw_sandbox_receipt_failure() {
-  if [ "$DC_SANDBOX_RECEIPT_STATUS" = 429 ]; then
-    defenseclaw_sandbox_budget_reason "$DC_SANDBOX_RECEIPT_BODY"
-  else
-    printf 'sandbox hook receipt was not acknowledged (status %s)' "$DC_SANDBOX_RECEIPT_STATUS"
+    printf %s "DefenseClaw refused this tool call, the gateway answered HTTP 429 (too many requests, not an outage): retry in a few seconds"
   fi
 }
 

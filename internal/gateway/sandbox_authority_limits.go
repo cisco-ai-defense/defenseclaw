@@ -11,6 +11,7 @@
 package gateway
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
@@ -250,4 +252,34 @@ func isSandboxHookClassKey(key string) bool {
 		return true
 	}
 	return false
+}
+
+// Stable reasons of a sandbox request refused 429 by its own binding's
+// limiter (sandboxauth), as distinct from the account budget
+// (managedHookReasonRateLimited) and the gateway-wide bound
+// (managedHookReasonOverloaded).
+const (
+	sandboxReasonBindingRate     = "sandbox_rate_limited"
+	sandboxReasonBindingInFlight = "sandbox_too_many_requests"
+)
+
+// sandboxHookRefusal names the cause of a 429 on a sandbox request: the
+// stable reason and a message that says which limit refused it, so a hook
+// shows the real cause and not the account budget for every refusal. err is
+// what the binding's limiter returned, or the refusal string the account
+// class budget (hookCallerLimiter.chargeClass) or admission produced.
+func sandboxHookRefusal(err error) (reason, message string) {
+	switch {
+	case errors.Is(err, sandboxauth.ErrRateLimited):
+		return sandboxReasonBindingRate, fmt.Sprintf("DefenseClaw is limiting how fast this one sandbox may send requests (tool calls: %d a second, a burst of %d); this request did not run, so retry in a few seconds",
+			sandboxauth.DefaultHookRPS, sandboxauth.DefaultHookBurst)
+	case errors.Is(err, sandboxauth.ErrTooManyInFlight):
+		return sandboxReasonBindingInFlight, fmt.Sprintf("this sandbox already has as many requests waiting for DefenseClaw's answer as it may (%d); this request did not run, so retry in a few seconds",
+			sandboxauth.DefaultMaxInFlight)
+	case err != nil && err.Error() == managedHookReasonOverloaded:
+		return managedHookReasonOverloaded, managedHookOverloadedMessage
+	case err != nil && err.Error() == managedHookReasonRateLimited:
+		return managedHookReasonRateLimited, sandboxHookBudgetMessage()
+	}
+	return managedHookReasonRateLimited, managedHookRateLimitedMessage
 }
