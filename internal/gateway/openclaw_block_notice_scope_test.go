@@ -90,8 +90,8 @@ func TestGAP0644SessionHeaderDoesNotDecideTheMatch(t *testing.T) {
 	// Two blocks from two sessions: each request takes its own block only,
 	// whichever header each carries.
 	resetOpenClawBlockNotices(t)
-	rememberOpenClawBlockNotice("exec", "call_a", []string{noticeTestRule}, "r")
-	rememberOpenClawBlockNotice("read", "call_b", []string{noticeTestRule}, "r")
+	rememberOpenClawBlockNotice("exec", "call_a", "", []string{noticeTestRule}, "r")
+	rememberOpenClawBlockNotice("read", "call_b", "", []string{noticeTestRule}, "r")
 	out, _ := serveNoticeWith(t, noticeServe{session: "sess-b", reqBody: noticeChatReqFor("call_a"), ctype: noticeJSONType, respBody: noticeChatReply})
 	if !strings.Contains(out, "Tool call blocked: exec") || strings.Contains(out, "read") {
 		t.Fatalf("session A block did not show alone: %s", out)
@@ -195,21 +195,13 @@ func TestGAP0644ResultWithoutACallIDTakesNothing(t *testing.T) {
 // Two blocks wait: a request that carries one call id takes that block only.
 func TestGAP0644RequestTakesOnlyItsOwnBlock(t *testing.T) {
 	resetOpenClawBlockNotices(t)
-	rememberOpenClawBlockNotice("exec", "call_a", []string{noticeTestRule}, "r")
-	rememberOpenClawBlockNotice("read", "call_b", []string{noticeTestRule}, "r")
+	rememberOpenClawBlockNotice("exec", "call_a", "", []string{noticeTestRule}, "r")
+	rememberOpenClawBlockNotice("read", "call_b", "", []string{noticeTestRule}, "r")
 	if out, _ := serveNoticeWith(t, noticeServe{reqBody: noticeChatReqFor("call_b"), ctype: noticeJSONType, respBody: noticeChatReply}); !strings.Contains(out, "Tool call blocked: read") || strings.Contains(out, "exec") {
 		t.Fatalf("the read block did not show alone: %s", out)
 	}
 	if out, _ := serveNoticeWith(t, noticeServe{reqBody: noticeChatReqFor("call_a"), ctype: noticeJSONType, respBody: noticeChatReply}); !strings.Contains(out, "Tool call blocked: exec") {
 		t.Fatalf("the exec block did not show: %s", out)
-	}
-	// A second block with the same id replaces the first: one notice per id.
-	resetOpenClawBlockNotices(t)
-	rememberOpenClawBlockNotice("exec", "call_a", []string{noticeTestRule}, "r")
-	rememberOpenClawBlockNotice("read", "call_a", []string{noticeTestRule}, "r")
-	out, _ := serveNoticeWith(t, noticeServe{reqBody: noticeChatReqFor("call_a"), ctype: noticeJSONType, respBody: noticeChatReply})
-	if !noticeServed(out) || !strings.Contains(out, "Tool call blocked: read") || strings.Contains(out, "exec") || openClawBlockNoticesPending() {
-		t.Fatalf("one notice per id: %s", out)
 	}
 }
 

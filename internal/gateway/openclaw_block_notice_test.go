@@ -34,7 +34,7 @@ const noticeTestRule = "persistence.ssh_authorized_keys_command"
 const noticeTestCallID = "call_blk1"
 
 func rememberTestNotice(tool string, ruleIDs []string, reason string) {
-	rememberOpenClawBlockNotice(tool, noticeTestCallID, ruleIDs, reason)
+	rememberOpenClawBlockNotice(tool, noticeTestCallID, "", ruleIDs, reason)
 }
 
 func noticeTestLine() string {
@@ -389,10 +389,10 @@ func TestGAP0644InspectRecordsANoticeOnlyForEnforcedBlocks(t *testing.T) {
 		t.Fatalf("the inspect answer carries notice data: %s", raw)
 	}
 	// The result of the allowed call takes nothing; the result of the blocked call does.
-	if got := takeOpenClawBlockNotices([]byte(noticeChatReqFor("call_ok9"))); len(got) != 0 {
+	if got := takeOpenClawBlockNotices([]byte(noticeChatReqFor("call_ok9")), ""); len(got) != 0 {
 		t.Fatalf("the allowed call result took a notice: %+v", got)
 	}
-	got := takeOpenClawBlockNotices([]byte(noticeChatReq()))
+	got := takeOpenClawBlockNotices([]byte(noticeChatReq()), "")
 	if len(got) != 1 || !strings.Contains(got[0].line, openClawBlockNoticeMark+": exec") || !strings.Contains(got[0].line, "(rule ") {
 		t.Fatalf("notice=%+v", got)
 	}
@@ -438,7 +438,7 @@ func TestGAP0644AuditFailureBlockGetsANoticeOnlyWhenEnforced(t *testing.T) {
 			}
 			if tc.wantNotice {
 				// The result of the blocked call shows it.
-				got := takeOpenClawBlockNotices([]byte(noticeChatReq()))
+				got := takeOpenClawBlockNotices([]byte(noticeChatReq()), "")
 				if len(got) != 1 || !strings.Contains(got[0].line, openClawBlockNoticeMark+": exec") {
 					t.Fatalf("notice=%+v", got)
 				}

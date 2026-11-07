@@ -15,19 +15,27 @@ import (
 // a tool definition, the content of any result or any other field names no
 // result and takes no notice.
 
+// toolResultID is the call id one tool-result message carries. responses is
+// true only for the id of a Responses function_call_output item, the one
+// adapter whose id form differs from the id OpenClaw gave the call.
+type toolResultID struct {
+	id        string
+	responses bool
+}
+
 // toolResultIDs returns the call id of every tool-result message of the
 // request body. A body that is not a JSON object has none, and a result that
 // carries no id (Ollama, Gemini without ids, the legacy function role) adds
 // none.
-func toolResultIDs(body []byte) []string {
+func toolResultIDs(body []byte) []toolResultID {
 	var root map[string]any
 	if err := json.Unmarshal(body, &root); err != nil {
 		return nil
 	}
-	var ids []string
+	var ids []toolResultID
 	add := func(v any) {
 		if id, _ := v.(string); id != "" {
-			ids = append(ids, id)
+			ids = append(ids, toolResultID{id: id})
 		}
 	}
 
@@ -51,7 +59,9 @@ func toolResultIDs(body []byte) []string {
 	// Responses: input[] items of a tool call output carry it in call_id.
 	for _, item := range objectItems(root["input"]) {
 		if typ, _ := item["type"].(string); strings.HasSuffix(strings.ToLower(strings.TrimSpace(typ)), "_call_output") {
-			add(item["call_id"])
+			if id, _ := item["call_id"].(string); id != "" {
+				ids = append(ids, toolResultID{id: id, responses: true})
+			}
 		}
 	}
 	// Gemini: contents[].parts[].functionResponse.id, when the request has one.
@@ -87,16 +97,20 @@ func objectItems(v any) []map[string]any {
 	return out
 }
 
-// isResultOfAny reports whether one of the result ids is the id of the call
-// this notice was recorded for. OpenClaw Responses ids are "<call id>|<item
-// id>" and the Responses request sends back the part before "|", so that part
-// is the same id; every other difference is a different or an unknown call.
-func (n openClawBlockNotice) isResultOfAny(ids []string) bool {
-	head, _, _ := strings.Cut(n.callID, "|")
-	for _, id := range ids {
-		if id == n.callID || (head != "" && id == head) {
-			return true
-		}
+// isResultOf reports whether one result id is the id of the call this notice
+// was recorded for. The id must equal the recorded id. The one provider form
+// that differs is the Responses function_call_output: OpenClaw names a
+// Responses call "<call id>|<item id>" and sends back only the call id, so on
+// that adapter alone the part before "|" is the same call. On every other
+// adapter a recorded id with "|" is matched only by itself, and a result whose
+// id is only the head of it is another call.
+func (n openClawBlockNotice) isResultOf(r toolResultID) bool {
+	if r.id == n.callID {
+		return true
 	}
-	return false
+	if !r.responses {
+		return false
+	}
+	head, _, found := strings.Cut(n.callID, "|")
+	return found && head != "" && r.id == head
 }

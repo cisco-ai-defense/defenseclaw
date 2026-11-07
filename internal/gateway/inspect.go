@@ -2402,7 +2402,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	if verdict.Action == "block" && verdict.Mode == "action" &&
 		strings.EqualFold(firstNonEmpty(req.Connector, connectorName), "openclaw") &&
 		openClawNoticeAllowed(a.decisionConfig(r.Context())) {
-		rememberOpenClawBlockNotice(req.Tool, req.ToolCallID, evalCtx.RuleIDs, verdict.Reason)
+		rememberOpenClawBlockNotice(req.Tool, req.ToolCallID, strings.TrimSpace(req.SessionID), evalCtx.RuleIDs, verdict.Reason)
 	}
 
 	a.emitCodeGuardTelemetry(r.Context(), &req, verdict, elapsed)
