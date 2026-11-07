@@ -5,6 +5,7 @@ package hookpaths
 
 import (
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -90,7 +91,8 @@ func actionFunctionField(value string) bool {
 // not. A function the tracker knows, and one whose body only assigns names
 // (actionFunctionBodyEffect), leave exactly the states they establish, so a
 // value the call overwrites is not kept and a value it assigns from a known
-// parameter is not lost.
+// parameter is not lost. A call with assignments of its own leaves the states
+// its body establishes as well: the assignments hold for the body only.
 func actionKeepAcrossFunctionCall(stmt *syntax.Stmt, before, after []actionValues, lookup func(string) *syntax.FuncDecl, cwd, home string, steps *int) []actionValues {
 	call, ok := stmt.Cmd.(*syntax.CallExpr)
 	if !ok || len(call.Args) == 0 {
@@ -109,9 +111,9 @@ func actionKeepAcrossFunctionCall(stmt *syntax.Stmt, before, after []actionValue
 	if !defined {
 		return after
 	}
-	// A call in the background, or with assignments of its own, does not
-	// leave the states its body establishes in this shell.
-	foreground := !stmt.Background && !stmt.Coprocess && len(call.Assigns) == 0
+	// A call in the background runs in a subshell: it does not leave the
+	// states its body establishes in this shell.
+	foreground := !stmt.Background && !stmt.Coprocess
 	var next []actionValues
 	for _, state := range before {
 		through := actionUpdateValuesKept(stmt, []actionValues{state}, cwd, home, steps)
@@ -120,7 +122,7 @@ func actionKeepAcrossFunctionCall(stmt *syntax.Stmt, before, after []actionValue
 				through = actionAppendValueCandidates(through, []actionValues{state})
 			} else if applied := maps.Clone(state); !actionFunctionApplies(program, applied) {
 				// The tracker forgot every value at this call.
-				if effect, known := actionFunctionBodyEffect(lookup(program), call, state, cwd, home, steps); known {
+				if effect, known := actionFunctionBodyEffect(lookup(program), call, state, lookup, 0, cwd, home, steps); known {
 					through = effect
 				} else {
 					through = actionAppendValueCandidates(through, []actionValues{state})
@@ -140,13 +142,14 @@ func actionFunctionApplies(name string, values actionValues) bool {
 }
 
 // actionFunctionBodyEffect returns the states a call of a function leaves
-// when its body does nothing but assign names, from the state before the
-// call, with the known words of the call as its parameters. It reads no
+// when its body does nothing but assign names or call such a function, from
+// the state before the call, with the known words of the call as its
+// parameters. It reads no
 // body that uses another parameter, a name that is readonly, or an
 // assignment whose value is not known afterwards; the caller then keeps the
 // states before the call as well.
-func actionFunctionBodyEffect(function *syntax.FuncDecl, call *syntax.CallExpr, state actionValues, cwd, home string, steps *int) ([]actionValues, bool) {
-	if function == nil || function.Body == nil || function.Body.Background || function.Body.Negated ||
+func actionFunctionBodyEffect(function *syntax.FuncDecl, call *syntax.CallExpr, state actionValues, lookup func(string) *syntax.FuncDecl, depth int, cwd, home string, steps *int) ([]actionValues, bool) {
+	if depth >= actionFunctionMaxDepth || function == nil || function.Body == nil || function.Body.Background || function.Body.Negated ||
 		function.Body.Coprocess || len(function.Body.Redirs) != 0 {
 		return nil, false
 	}
@@ -154,6 +157,7 @@ func actionFunctionBodyEffect(function *syntax.FuncDecl, call *syntax.CallExpr, 
 	if !ok || len(block.Stmts) == 0 || len(block.Stmts) > actionFunctionMaxSteps {
 		return nil, false
 	}
+	params := actionCallParameters(call, state, cwd, home)
 	var assigned []string
 	for _, stmt := range block.Stmts {
 		body, ok := stmt.Cmd.(*syntax.CallExpr)
@@ -161,15 +165,27 @@ func actionFunctionBodyEffect(function *syntax.FuncDecl, call *syntax.CallExpr, 
 			return nil, false
 		}
 		if len(body.Args) != 0 {
-			// Only a call that changes no state: the colon.
-			if name, fixed := StaticWord(body.Args[0], home); len(body.Args) != 1 || len(body.Assigns) != 0 || !fixed || name != ":" {
+			name, fixed := StaticWord(body.Args[0], home)
+			if !fixed || len(body.Assigns) != 0 {
+				return nil, false
+			}
+			if _, defined := state[actionFunctionValuePrefix+name]; defined {
+				// A function the command defines: its effect is read when
+				// the body runs.
+				if lookup(name) == nil {
+					return nil, false
+				}
+				continue
+			}
+			// Otherwise only a call that changes no state: the colon.
+			if len(body.Args) != 1 || name != ":" {
 				return nil, false
 			}
 			continue
 		}
 		for _, assign := range body.Assigns {
 			if assign.Name == nil || assign.Value == nil || assign.Array != nil || assign.Index != nil ||
-				assign.Name.Value == "HOME" || assign.Name.Value == "PWD" || !actionWordUsesGivenParameters(assign.Value, len(call.Args)-1) {
+				assign.Name.Value == "HOME" || assign.Name.Value == "PWD" || !actionWordUsesGivenParameters(assign.Value, len(params)) {
 				return nil, false
 			}
 			if _, readonly := state[actionReadonlyValuePrefix+assign.Name.Value]; readonly {
@@ -178,22 +194,60 @@ func actionFunctionBodyEffect(function *syntax.FuncDecl, call *syntax.CallExpr, 
 			assigned = append(assigned, assign.Name.Value)
 		}
 	}
-	// The parameters of the call are the words it gives, when each is one
-	// known word.
 	bound := maps.Clone(state)
-	for i, arg := range call.Args[1:] {
-		value, known := actionWordValue(arg, state, cwd, home)
-		key := strconv.Itoa(i + 1)
-		if !known || strings.ContainsAny(value, " \t\n*?[") {
-			delete(bound, key)
-			continue
+	// The assignments before the call hold for the body.
+	prefix := map[string]bool{}
+	for _, assign := range call.Assigns {
+		if assign.Name == nil || assign.Array != nil || assign.Index != nil || assign.Append ||
+			assign.Name.Value == "HOME" || assign.Name.Value == "PWD" || assign.Name.Value == "IFS" {
+			return nil, false
 		}
-		bound[key] = value
+		if _, readonly := state[actionReadonlyValuePrefix+assign.Name.Value]; readonly {
+			return nil, false
+		}
+		prefix[assign.Name.Value] = true
+		value, known := "", true
+		if assign.Value != nil {
+			value, known = actionWordValue(assign.Value, state, cwd, home)
+		}
+		if known {
+			bound[assign.Name.Value] = value
+		} else {
+			delete(bound, assign.Name.Value)
+		}
 	}
-	states := actionKeptStatements(block.Stmts, []actionValues{bound}, cwd, home, steps)
-	if actionKeptSaturated(states) {
-		return nil, false
+	for i, param := range params {
+		if key := strconv.Itoa(i + 1); param != nil {
+			bound[key] = *param
+		} else {
+			delete(bound, key)
+		}
 	}
+	states := []actionValues{bound}
+	for _, stmt := range block.Stmts {
+		inner := stmt.Cmd.(*syntax.CallExpr)
+		name := ""
+		if len(inner.Args) != 0 {
+			name, _ = StaticWord(inner.Args[0], home)
+		}
+		if _, defined := bound[actionFunctionValuePrefix+name]; !defined || name == "" {
+			states = actionUpdateValuesKept(stmt, states, cwd, home, steps)
+		} else {
+			var next []actionValues
+			for _, current := range states {
+				effect, known := actionFunctionBodyEffect(lookup(name), inner, current, lookup, depth+1, cwd, home, steps)
+				if !known {
+					return nil, false
+				}
+				next = actionAppendValueCandidates(next, effect)
+			}
+			states = next
+		}
+		if actionKeptSaturated(states) {
+			return nil, false
+		}
+	}
+	var result []actionValues
 	for _, after := range states {
 		for _, name := range assigned {
 			if _, known := after[name]; !known {
@@ -201,7 +255,7 @@ func actionFunctionBodyEffect(function *syntax.FuncDecl, call *syntax.CallExpr, 
 			}
 		}
 		// The parameters belong to the call, not to the caller.
-		for i := range call.Args[1:] {
+		for i := range params {
 			key := strconv.Itoa(i + 1)
 			if value, had := state[key]; had {
 				after[key] = value
@@ -209,8 +263,90 @@ func actionFunctionBodyEffect(function *syntax.FuncDecl, call *syntax.CallExpr, 
 				delete(after, key)
 			}
 		}
+		// A name set before the call returns to its value, unless the body
+		// assigned it: a shell may keep that assignment, so both are kept.
+		restore := func(skip func(string) bool) actionValues {
+			restored := maps.Clone(after)
+			for name := range prefix {
+				if skip(name) {
+					continue
+				}
+				if value, had := state[name]; had {
+					restored[name] = value
+				} else {
+					delete(restored, name)
+				}
+			}
+			return restored
+		}
+		result = actionAppendValueCandidates(result, []actionValues{restore(func(string) bool { return false })})
+		if slices.ContainsFunc(assigned, func(name string) bool { return prefix[name] }) {
+			result = actionAppendValueCandidates(result, []actionValues{restore(func(name string) bool { return slices.Contains(assigned, name) })})
+		}
 	}
-	return states, true
+	return result, true
+}
+
+// actionCallParameters returns the positional parameters a call gives, in
+// order: nil for a field of a value not known. A quoted word is one field
+// whatever its value; an unquoted word with a known value is the fields the
+// default separators leave of it, none for an empty value. The list stops at
+// a word whose fields are not known (a pattern or brace character, a list
+// such as "$@", an unknown value, a separator set the command changed): the
+// parameters after it have no known position.
+func actionCallParameters(call *syntax.CallExpr, state actionValues, cwd, home string) []*string {
+	var params []*string
+	_, ifs := state["IFS"]
+	for _, arg := range call.Args[1:] {
+		value, known := actionWordValue(arg, state, cwd, home)
+		if actionWordQuotedField(arg) {
+			if known {
+				params = append(params, &value)
+			} else {
+				params = append(params, nil)
+			}
+			continue
+		}
+		if !known || ifs || strings.ContainsAny(value, "*?[{") {
+			break
+		}
+		for _, field := range strings.FieldsFunc(value, func(r rune) bool { return r == ' ' || r == '\t' || r == '\n' }) {
+			params = append(params, &field)
+		}
+	}
+	return params
+}
+
+// actionWordQuotedField reports a word that expands to exactly one field:
+// quoted text, and literal text without a pattern or brace character, but no
+// unquoted expansion and no list such as "$@".
+func actionWordQuotedField(word *syntax.Word) bool {
+	if word == nil || len(word.Parts) == 0 {
+		return false
+	}
+	for _, part := range word.Parts {
+		switch part := part.(type) {
+		case *syntax.SglQuoted:
+		case *syntax.Lit:
+			if strings.ContainsAny(part.Value, "*?[{~") {
+				return false
+			}
+		case *syntax.DblQuoted:
+			list := false
+			syntax.Walk(part, func(node syntax.Node) bool {
+				if param, ok := node.(*syntax.ParamExp); ok {
+					list = list || param.Param == nil || param.Param.Value == "@" || param.Index != nil
+				}
+				return !list
+			})
+			if list {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // actionWordUsesGivenParameters reports that a word reads no special

@@ -733,7 +733,7 @@ func literalPipelineOperands(file *syntax.File, called map[string]bool, cwd, hom
 	var operands []string
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if declaration, isFunction := node.(*syntax.FuncDecl); isFunction {
-			return declaration.Name != nil && called[declaration.Name.Value]
+			return declaration.Name != nil && (called[declaration.Name.Value] || called[knownUnshadowed(declaration.Name.Value)])
 		}
 		binary, ok := node.(*syntax.BinaryCmd)
 		if !ok || binary.Op != syntax.Pipe && binary.Op != syntax.PipeAll {

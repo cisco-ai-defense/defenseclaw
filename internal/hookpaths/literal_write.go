@@ -221,7 +221,7 @@ func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, f
 		}
 		syntax.Walk(root, func(node syntax.Node) bool {
 			if declaration, isFunction := node.(*syntax.FuncDecl); isFunction {
-				return declaration.Name != nil && called[declaration.Name.Value]
+				return declaration.Name != nil && (called[declaration.Name.Value] || called[knownUnshadowed(declaration.Name.Value)])
 			}
 			stmt, ok := node.(*syntax.Stmt)
 			if !ok {
@@ -465,6 +465,9 @@ func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, f
 			next := actionUpdateValuesKept(root, kept, cwd, home, &steps)
 			if include != nil {
 				next = actionKeepAcrossFunctionCall(root, kept, next, func(name string) *syntax.FuncDecl {
+					if _, known := functions[name]; !known {
+						name = knownUnshadowed(name)
+					}
 					if redefined[name] {
 						return nil
 					}
