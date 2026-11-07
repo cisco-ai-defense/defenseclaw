@@ -37,6 +37,22 @@ func RegisterCustomRulePackValidator(validate RulePackValidator) {
 	customRulePackValidator = validate
 }
 
+// StalePinError is the config error of a custom_packs entry whose folder is a
+// valid rule pack but whose files no longer hash to the pin of the entry. It
+// is an integrity refusal, not a fallback: the pack the administrator pinned
+// is not the pack on disk, so nothing is enforced in its place silently. The
+// gateway refuses to load it until the pin is reviewed and corrected, and
+// status and doctor name the error (IsStalePinError).
+type StalePinError struct{ message string }
+
+func (e *StalePinError) Error() string { return e.message }
+
+// IsStalePinError reports that err is the stale pin of a custom_packs entry.
+func IsStalePinError(err error) bool {
+	var stale *StalePinError
+	return errors.As(err, &stale)
+}
+
 // customRulePackCheck is one guardrail.custom_packs entry as it was checked:
 // the entry and folder that were read, and the verdict. posture is the
 // manifest posture of a pack the loader accepted (validated).
@@ -97,9 +113,9 @@ func checkCustomRulePack(name string, pack CustomRulePack, dir string) customRul
 		return out
 	}
 	if !strings.EqualFold(pin, digest) {
-		out.err = fmt.Errorf("the files in %q hash to %s, which does not match %s.digest; review the pack, then pin that digest "+
+		out.err = &StalePinError{fmt.Sprintf("the files in %q hash to %s, which does not match %s.digest; review the pack, then pin that digest "+
 			"(`defenseclaw config set %s.digest %s` on a per-user install; `defenseclaw-gateway rulepack validate --dir %s` "+
-			"prints it on the \"custom_packs pin\" line)", dir, digest, key, key, digest, dir)
+			"prints it on the \"custom_packs pin\" line)", dir, digest, key, key, digest, dir)}
 		return out
 	}
 	out.validated, out.posture = true, posture
@@ -175,7 +191,15 @@ func (g *GuardrailConfig) BuiltinRulePackFor(name string) string {
 		return ""
 	}
 	_, registered := g.CustomPacks[name]
-	return builtinRulePackFallback(name, registered, g.CustomRulePackError(name) != nil)
+	return builtinRulePackFallback(name, registered, g.CustomRulePackFallsBack(name))
+}
+
+// CustomRulePackFallsBack reports that custom_packs entry name has a config
+// error whose selection loads its built-in pack (BuiltinRulePackFor). A stale
+// pin does not: the entry stays the selected pack and the gateway refuses it.
+func (g *GuardrailConfig) CustomRulePackFallsBack(name string) bool {
+	err := g.CustomRulePackError(name)
+	return err != nil && !IsStalePinError(err)
 }
 
 // builtinRulePackFallback is the built-in pack a selected name loads when no
@@ -271,18 +295,26 @@ func (c *Config) CustomRulePackErrors() []error {
 	return out
 }
 
-// UsableCustomRulePack is the custom_packs entry name selects when it passes
-// CustomRulePackError. A broken entry is not a pack: the selection loads its
-// built-in fallback (BuiltinRulePackFor).
+// UsableCustomRulePack is the custom_packs entry name selects unless its
+// config error makes the selection load its built-in fallback
+// (CustomRulePackFallsBack, BuiltinRulePackFor). A stale pin keeps the entry:
+// the gateway then refuses its files.
 func (c *Config) UsableCustomRulePack(name string) (CustomRulePack, bool) {
 	if c == nil {
 		return CustomRulePack{}, false
 	}
 	pack, ok := c.Guardrail.CustomPacks[name]
-	if !ok || c.CustomRulePackError(name) != nil {
+	if !ok || c.CustomRulePackFallsBack(name) {
 		return CustomRulePack{}, false
 	}
 	return pack, true
+}
+
+// CustomRulePackFallsBack is GuardrailConfig.CustomRulePackFallsBack with the
+// Secure Client exemption of CustomRulePackError.
+func (c *Config) CustomRulePackFallsBack(name string) bool {
+	err := c.CustomRulePackError(name)
+	return err != nil && !IsStalePinError(err)
 }
 
 // BuiltinRulePackFor is the built-in pack a selected name loads when no
@@ -292,11 +324,12 @@ func (c *Config) BuiltinRulePackFor(name string) string {
 		return ""
 	}
 	_, registered := c.Guardrail.CustomPacks[name]
-	return builtinRulePackFallback(name, registered, c.CustomRulePackError(name) != nil)
+	return builtinRulePackFallback(name, registered, c.CustomRulePackFallsBack(name))
 }
 
 // brokenCustomRulePackSelected reports that ref selects a custom_packs entry
-// that fails CustomRulePackError.
+// that fails CustomRulePackError, a stale pin included: no posture such a
+// pack claims sets a hook outage tier.
 func (c *Config) brokenCustomRulePackSelected(ref RulePackRef) bool {
 	if c == nil || ref.Name == "" {
 		return false

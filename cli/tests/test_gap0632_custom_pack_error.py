@@ -81,15 +81,38 @@ def _expect_config_error(cfg, name: str, fallback: str) -> None:
 
 
 @pytest.mark.parametrize("name", ["strict", "default", "operator"])
-@pytest.mark.parametrize("variant", ["wrong pin", "missing pin", "empty folder"])
-def test_content_and_pin_come_from_the_go_loader_verdict(tmp_path, loader, name, variant):
-    """Python takes the Go loader verdict: a pack that does not load, or whose files do not hash to the pin, is a config error."""
+def test_pack_the_go_loader_refuses_is_a_config_error(tmp_path, loader, name):
+    """Python takes the Go loader verdict: a pack that does not load is a config error with the built-in fallback."""
     folder = _pack(tmp_path, "copy")
-    pin = {"wrong pin": "sha256:" + "b" * 64, "missing pin": "", "empty folder": PIN}[variant]
-    if variant == "empty folder":
-        loader.answers["copy"] = "the folder holds no pack files"
-    cfg = _cfg(tmp_path, name, CustomRulePack(path=folder, digest=pin))
+    loader.answers["copy"] = "the folder holds no pack files"
+    cfg = _cfg(tmp_path, name, CustomRulePack(path=folder, digest=PIN))
     _expect_config_error(cfg, name, name if name in policy_catalog.RULE_PACK_PRESETS else "default")
+
+
+@pytest.mark.parametrize("name", ["strict", "default", "operator"])
+@pytest.mark.parametrize("variant", ["wrong pin", "missing pin"])
+def test_stale_pin_is_refused_not_replaced_by_a_builtin_pack(tmp_path, loader, name, variant):
+    """A valid pack whose files do not hash to the pin is an integrity refusal (Go StalePinError).
+
+    The entry keeps its folder (the gateway refuses it), no built-in pack is
+    named as its replacement, and the hook stays on the strict tier (closed).
+    """
+    folder = _pack(tmp_path, "copy")
+    pin = {"wrong pin": "sha256:" + "b" * 64, "missing pin": ""}[variant]
+    cfg = _cfg(tmp_path, name, CustomRulePack(path=folder, digest=pin))
+    problem = policy_catalog.custom_pack_problem(cfg, name)
+    assert isinstance(problem, policy_catalog.StalePinProblem)
+    assert f"guardrail.custom_packs.{name}.digest" in problem
+    assert not policy_catalog.custom_pack_falls_back(cfg, name)
+    assert cfg.guardrail.effective_rule_pack_dir("codex") == folder
+    assert cfg.guardrail.hook_policy_tier("codex") == "strict"
+    assert cfg.guardrail.effective_hook_outage_fail_mode("codex") == "closed"
+    result = _DoctorResult()
+    _emit_custom_pack_config_error(cfg.guardrail, cfg, "codex", result)
+    (row,) = result.checks
+    assert row["status"] == "fail"
+    assert "refuses the pack until the pin matches the files" in row["detail"]
+    assert "built-in" not in row["detail"]
 
 
 @pytest.mark.parametrize("name", ["strict", "operator"])

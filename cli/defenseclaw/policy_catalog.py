@@ -674,6 +674,15 @@ def _loader_verdict(path: str) -> tuple[str, str] | None:
     return (f"{issue.code} at {issue.path}: {issue.reason}" if issue else "not a valid rule pack"), ""
 
 
+class StalePinProblem(str):
+    """The config error of an entry whose valid pack no longer hashes to its pin.
+
+    An integrity refusal, not a fallback (Go ``config.StalePinError``): the
+    gateway refuses the pack until the pin is reviewed and corrected, and no
+    built-in pack is enforced in its place.
+    """
+
+
 def custom_pack_check(cfg: Any, name: str) -> tuple[str, bool]:
     """``(problem, verified)`` for ``guardrail.custom_packs.<name>``.
 
@@ -716,8 +725,10 @@ def custom_pack_check(cfg: Any, name: str) -> tuple[str, bool]:
         return f"{key}.path {path!r} is not a valid rule pack: {reason}", True
     if pin.lower() != f"sha256:{files_digest}":
         return (
-            f"the files in {path!r} hash to sha256:{files_digest}, which does not match {key}.digest; "
-            "review the pack, then pin that digest",
+            StalePinProblem(
+                f"the files in {path!r} hash to sha256:{files_digest}, which does not match {key}.digest; "
+                "review the pack, then pin that digest"
+            ),
             True,
         )
     return "", True
@@ -726,6 +737,15 @@ def custom_pack_check(cfg: Any, name: str) -> tuple[str, bool]:
 def custom_pack_problem(cfg: Any, name: str) -> str:
     """The config error of ``guardrail.custom_packs.<name>`` (:func:`custom_pack_check`)."""
     return custom_pack_check(cfg, name)[0]
+
+
+def custom_pack_falls_back(cfg: Any, name: str) -> bool:
+    """Whether the entry has a config error whose selection loads its built-in pack.
+
+    A stale pin does not (Go ``Config.CustomRulePackFallsBack``).
+    """
+    problem = custom_pack_problem(cfg, name)
+    return bool(problem) and not isinstance(problem, StalePinProblem)
 
 
 def builtin_rule_pack_fallback(name: str) -> str:
@@ -742,14 +762,15 @@ def configured_pack_dir(cfg: Any, block: Any) -> str:
     A scope selects its ``rule_pack``: a preset name or a
     ``guardrail.custom_packs`` key (``config.ResolveRulePackDir`` in the gateway).
     A custom entry with a config error (:func:`custom_pack_problem`) loads its
-    built-in fallback pack, as the gateway does, and never shadows a preset.
+    built-in fallback pack, as the gateway does, and never shadows a preset;
+    a stale pin keeps its folder, which the gateway refuses.
     """
     name = str(getattr(block, "rule_pack", "") or "").strip()
     if not name:
         return ""
     custom = (getattr(_guardrail(cfg), "custom_packs", None) or {}).get(name)
     if custom is not None:
-        if custom_pack_problem(cfg, name):
+        if custom_pack_falls_back(cfg, name):
             return preset_pack_dir(cfg, builtin_rule_pack_fallback(name))
         return custom_pack_dir(cfg, custom)
     if name in RULE_PACK_PRESETS:

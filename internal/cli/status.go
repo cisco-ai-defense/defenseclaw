@@ -516,8 +516,12 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	printGatewayKV("Started", snap.StartedAt.Format(time.RFC3339))
 	printGatewayKV("Uptime", formatDuration(uptime))
 	for _, problem := range cfg.CustomRulePackErrors() {
-		// The gateway runs the selection's built-in pack meanwhile.
 		Warn("Config error: " + problem.Error())
+		if config.IsStalePinError(problem) {
+			Subhead("The gateway refuses this pack until its pin matches the files")
+			continue
+		}
+		// The gateway runs the built-in pack of the selection meanwhile.
 		Subhead("A setting that selects this pack loads its built-in pack until the entry is fixed")
 	}
 	if !cfg.StandaloneEnterprise() && !managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) &&

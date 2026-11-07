@@ -107,9 +107,10 @@ func (g *GuardrailConfig) EffectiveRulePackRef(connector string) RulePackRef {
 
 // ResolveRulePackDir returns the directory a reference loads from: a
 // built-in name is <policy_dir>/guardrail/<name>, a custom_packs name its
-// path, and a v8 rule_pack_dir itself. A custom_packs entry that fails
-// CustomRulePackError loads its built-in fallback (BuiltinRulePackFor). On the Linux and macOS standalone
-// layout a built-in name whose policy_dir folder does not exist is the
+// path, and a v8 rule_pack_dir itself. A custom_packs entry with a config
+// error loads its built-in fallback (BuiltinRulePackFor), except one with a
+// stale pin, which stays the pack the gateway then refuses. On the Linux and
+// macOS standalone layout a built-in name whose policy_dir folder does not exist is the
 // shipped vendor pack, as the implicit default pack is
 // (standaloneRulePackDefault). An unknown name resolves to "" (the
 // gateway's generation build rejects it before anything loads). A copy set

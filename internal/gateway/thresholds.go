@@ -125,7 +125,7 @@ func packPosture(ref config.RulePackRef, dir string) string {
 // loader's own refusals apply and an entry always names its folder.
 func guardrailPackPosture(gc *config.GuardrailConfig, ref config.RulePackRef) string {
 	if gc != nil && ref.Name != "" {
-		if _, ok := gc.CustomPacks[ref.Name]; ok && (ManagedEnterpriseActive() || gc.CustomRulePackError(ref.Name) == nil) {
+		if _, ok := gc.CustomPacks[ref.Name]; ok && (ManagedEnterpriseActive() || !gc.CustomRulePackFallsBack(ref.Name)) {
 			return packPosture(ref, gc.CustomRulePackPath(ref.Name))
 		}
 		if name := gc.BuiltinRulePackFor(ref.Name); name != "" {

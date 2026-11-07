@@ -244,8 +244,9 @@ func (s *Sidecar) reportUnrebasedRulePacks(ctx context.Context) {
 }
 
 // reportBrokenCustomRulePacks warns at start of each guardrail.custom_packs
-// entry that fails config.CustomRulePackError: a selection of it loads its
-// built-in fallback pack, and status names the same error.
+// entry that fails config.CustomRulePackError, and status names the same
+// error. A selection of it loads its built-in fallback pack; a stale pin is
+// refused instead, until the pin is reviewed and corrected.
 func (s *Sidecar) reportBrokenCustomRulePacks(ctx context.Context) {
 	cfg := s.currentConfig()
 	if cfg == nil || s.logger == nil {
@@ -253,6 +254,9 @@ func (s *Sidecar) reportBrokenCustomRulePacks(ctx context.Context) {
 	}
 	for _, problem := range cfg.CustomRulePackErrors() {
 		failure := problem.Error() + "; a setting that selects it loads its built-in pack"
+		if config.IsStalePinError(problem) {
+			failure = problem.Error() + "; the gateway refuses it until the pin matches the files"
+		}
 		fmt.Fprintln(os.Stderr, "[guardrail] WARNING: "+failure)
 		_ = s.logger.LogActionCtxSeverity(ctx, string(audit.ActionConfigUpdate), "rule-pack",
 			"custom_pack=invalid "+failure, "HIGH")

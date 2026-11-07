@@ -18009,11 +18009,15 @@ def _emit_custom_pack_config_error(gc: object, cfg: object, connector: str, r: o
         return
     if not problem:
         return
-    fallback = policy_catalog.builtin_rule_pack_fallback(name)
+    if isinstance(problem, policy_catalog.StalePinProblem):
+        consequence = "the gateway refuses the pack until the pin matches the files"
+    else:
+        fallback = policy_catalog.builtin_rule_pack_fallback(name)
+        consequence = f"the connector enforces the built-in {fallback} pack"
     _emit(
         "fail",
         "Rule pack",
-        f"config error: {problem}; the connector enforces the built-in {fallback} pack, "
+        f"config error: {problem}; {consequence}, "
         f"and its hooks fail {mode} while the gateway is down",
         r=r,
         remediation=(
