@@ -35,8 +35,13 @@ import (
 //     user's home itself; an ordinary word such as claw or defense is not
 //     a name, because a protected file is a place and a place is told by
 //     its folder, its link or its state-folder name, not by one word;
-//   - a path word, or a folder in front of it, is a link, or the file is a
-//     regular file with a second hard link: a link candidate. A program may
+//   - a path word, or a folder in front of it, is a link that leads to
+//     anything above (a missing target, a protected name, the root, the
+//     home or a parent of it, a file with a second hard link), or the file
+//     is a regular file with a second hard link: a link candidate. A link
+//     whose whole target is ordinary is as ordinary as its target, because
+//     a program that reads or writes through it touches only that target.
+//     A program may
 //     read a path out of any word (-ofile, of=file, --out=file, a:file), so
 //     every part of a word that can start a value is looked at, not only
 //     the word;
@@ -150,9 +155,19 @@ func lateCommandText(args map[string]json.RawMessage) (string, bool) {
 // shell where it was), the physical home, and the folders and files already
 // looked at.
 type lateScan struct {
-	cwds []string
-	home string
-	seen map[string]bool
+	cwds   []string // where the next command may run
+	chain  []string // every folder the shell may have stood in so far
+	orSeen bool     // a "||" since the last ";": a later "&&" may run without the cd before it
+	home   string
+	seen   map[string]lateEntry
+}
+
+// lateEntry is what the scan found at one path: whether the entry is
+// ordinary, whether it exists, and its physical path (a link is replaced by
+// the place it leads to).
+type lateEntry struct {
+	ok, exists bool
+	real       string
 }
 
 // lateMaxCwds bounds the working directories one call may visit.
@@ -171,7 +186,7 @@ func newLateScan(cwd string) (*lateScan, bool) {
 	if err != nil || lateNamesProtected(realCWD) || realCWD == string(filepath.Separator) {
 		return nil, false
 	}
-	return &lateScan{cwds: []string{realCWD}, home: realHome, seen: map[string]bool{}}, true
+	return &lateScan{cwds: []string{realCWD}, chain: []string{realCWD}, home: realHome, seen: map[string]lateEntry{}}, true
 }
 
 // lateNamesProtected reports text that names, in any case, the SSH folder,
@@ -238,46 +253,69 @@ func (s *lateScan) walk(cwd, word string) bool {
 		case "..":
 			return false
 		}
-		current = filepath.Join(current, name)
-		if state, known := s.seen[current]; known {
-			if !state {
-				return false
-			}
-			continue
-		}
-		ok, exists := s.entryOrdinary(current)
-		s.seen[current] = ok
-		if !ok {
+		entry := s.entry(filepath.Join(current, name))
+		if !entry.ok {
 			return false
 		}
-		if !exists {
+		current = entry.real
+		if !entry.exists {
 			break
 		}
 	}
-	return current != string(filepath.Separator) && current != s.home &&
-		!strings.HasPrefix(s.home, current+string(filepath.Separator))
+	return s.placeReachable(current)
 }
 
-// entryOrdinary reports an entry that is not a link; exists is false for an
-// entry that is not there, which ends the walk of a path.
-func (s *lateScan) entryOrdinary(path string) (ordinary, exists bool) {
+// placeReachable reports a physical path that is not the root, the home or a
+// parent of the home.
+func (s *lateScan) placeReachable(path string) bool {
+	return path != string(filepath.Separator) && path != s.home && !strings.HasPrefix(s.home, path+string(filepath.Separator))
+}
+
+// placeOrdinary reports a physical path that is also free of protected names.
+func (s *lateScan) placeOrdinary(path string) bool {
+	return !lateNamesProtected(path) && s.placeReachable(path)
+}
+
+// entry looks at one path once. A missing entry is ordinary and ends a walk;
+// a regular file with a second hard link is not; a link is as ordinary as
+// the place it finally leads to (a missing target, a protected name, the
+// root or the home are not, and the target is looked at as an entry too).
+func (s *lateScan) entry(path string) lateEntry {
+	if known, seen := s.seen[path]; seen {
+		return known
+	}
+	found := s.lookup(path)
+	s.seen[path] = found
+	return found
+}
+
+func (s *lateScan) lookup(path string) lateEntry {
 	info, err := pathLstat(path)
 	if err != nil {
-		return os.IsNotExist(err), false
+		return lateEntry{ok: os.IsNotExist(err), real: path}
 	}
-	if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
-		return false, true
+	found := lateEntry{exists: true, real: path}
+	if info.Mode()&os.ModeIrregular != 0 {
+		return found
 	}
-	if info.Mode().IsRegular() && linkCount(path, info) > 1 {
-		return false, true
+	if info.Mode()&os.ModeSymlink != 0 {
+		if found.real, err = filepath.EvalSymlinks(path); err != nil || !s.placeOrdinary(found.real) {
+			return found
+		}
+		if info, err = pathLstat(found.real); err != nil {
+			return found
+		}
 	}
-	return true, true
+	found.ok = !info.Mode().IsRegular() || linkCount(found.real, info) <= 1
+	return found
 }
 
-// chdir adds the folders a "cd dir" may enter. Each must exist as a real
-// folder (no link on the way, no hard link, no name of a protected folder, not
-// the root, the home or a parent of it); ".." steps to the parent of a folder
-// already known to be real. The old folders stay, because a cd may fail.
+// chdir moves the folders the next command may run in to the folders "cd dir"
+// enters. Each must exist as a real folder (no link on the way, no hard link,
+// no name of a protected folder, not the root, the home or a parent of it);
+// ".." steps to the parent of a folder already known to be real. After "&&"
+// only the new folders count, because the next command runs only when the
+// cd worked; after ";" or "||" the old folders count too (lateSeparator).
 func (s *lateScan) chdir(word string) bool {
 	if word == "" || strings.IndexByte(word, 0) >= 0 || strings.HasPrefix(word, "-") || strings.HasPrefix(word, "~") ||
 		lateNamesProtected(word) || len(word) > 4096 {
@@ -298,28 +336,52 @@ func (s *lateScan) chdir(word string) bool {
 				continue
 			}
 			current = filepath.Join(current, name)
-			if ok, exists := s.entryOrdinary(current); !ok || !exists {
+			if entry := s.entry(current); !entry.ok || !entry.exists || entry.real != current {
 				return false
 			}
 		}
 		info, err := pathLstat(current)
-		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || lateNamesProtected(current) ||
-			current == string(filepath.Separator) || current == s.home ||
-			strings.HasPrefix(s.home, current+string(filepath.Separator)) {
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !s.placeOrdinary(current) {
 			return false
 		}
-		if !slices.Contains(s.cwds, current) && !slices.Contains(entered, current) {
+		if !slices.Contains(entered, current) {
 			entered = append(entered, current)
 		}
 		if filepath.IsAbs(word) {
 			break
 		}
 	}
-	if len(s.cwds)+len(entered) > lateMaxCwds {
+	chain := slices.Clone(s.chain)
+	for _, dir := range entered {
+		if !slices.Contains(chain, dir) {
+			chain = append(chain, dir)
+		}
+	}
+	if len(chain) > lateMaxCwds {
 		return false
 	}
-	s.cwds = append(s.cwds, entered...)
+	s.cwds, s.chain = entered, chain
+	if s.orSeen {
+		s.cwds = slices.Clone(chain)
+	}
 	return true
+}
+
+// separator applies a command separator to the folders: after "&&" the next
+// command runs in the folders the last cd entered; after ";" or "||" it may
+// also run where an earlier cd of the chain failed, so every folder the
+// chain has stood in counts. Once a "||" has come, a later "&&" may run
+// although the cd before it was skipped (true || cd d && cmd), so a cd then
+// adds its folders to the old ones, until the next ";".
+func (s *lateScan) separator(separator string) {
+	switch separator {
+	case "||":
+		s.orSeen = true
+		s.cwds = slices.Clone(s.chain)
+	case ";":
+		s.orSeen = false
+		s.cwds = slices.Clone(s.chain)
+	}
 }
 
 var (
@@ -450,6 +512,7 @@ func (s *lateScan) command(command string) bool {
 			switch {
 			case slices.Contains(lateSeparators, token.text):
 				atCommand, afterPipe = true, false
+				s.separator(token.text)
 			case token.text == "|":
 				atCommand, afterPipe = true, true
 			default:
@@ -583,117 +646,223 @@ func (q *lateSed) accept(text string) (ordinary, isPath bool) {
 }
 
 // lateSedScript reports a script of commands that touch no file and run
-// nothing: each is [address]p, d, q, P, D, = or n, or [address]s/old/new/flags
-// with the flags g, p, I, i, M or a number, and ";" separates them. Each piece
-// must be one whole command, so a piece cut out of a longer s command, or one
-// that is anything else (w, r, e, a block), is not ordinary.
+// nothing. A script is read as sed reads it, command by command, so a
+// semicolon inside a regexp or a replacement, spaces around a separator and
+// a trailing separator are what they are. Each command is [address[,address]]
+// [!] and one of p, d, q, Q, P, D, =, n, N, g, G, h, H, x, l, F or z (q, Q
+// and l may end in a number), y/old/new/ or s/old/new/flags with the flags
+// g, p, I, i, M, m or a number. Any other command (w, r, e, a, c, i, a block,
+// a label, a comment) and any flag but those, and a backslash anywhere, is
+// not ordinary.
 func lateSedScript(script string) bool {
-	for piece := range strings.SplitSeq(script, ";") {
-		if !lateSedCommand(strings.TrimLeft(piece, " \t")) {
+	if strings.Contains(script, "\\") {
+		return false
+	}
+	rest := strings.TrimLeft(script, " \t;")
+	for rest != "" {
+		var ok bool
+		if rest, ok = lateSedCommand(rest); !ok {
 			return false
 		}
+		rest = strings.TrimLeft(rest, " \t")
+		if rest != "" && rest[0] != ';' {
+			return false
+		}
+		rest = strings.TrimLeft(rest, " \t;")
 	}
 	return true
 }
 
-// lateSedCommand reports one sed command of the shapes lateSedScript knows.
-// An address is a line number, a range of two, or a /regexp/; ! may follow
-// it. The delimiter of s is one of / | # and a comma, and old and new hold no
-// further delimiter.
-func lateSedCommand(script string) bool {
-	rest := script
-	number := func() bool {
-		n := len(rest) - len(strings.TrimLeft(rest, "0123456789"))
-		rest = rest[n:]
-		return n > 0
-	}
+// lateSedAddress takes one address off the front of script: a line number,
+// $, first~step, or /regexp/ with the flags I and M. ok is false for a
+// regexp that does not end.
+func lateSedAddress(script string) (rest string, found, ok bool) {
 	switch {
-	case strings.HasPrefix(rest, "/"):
-		end := strings.Index(rest[1:], "/")
+	case strings.HasPrefix(script, "/"):
+		end := strings.Index(script[1:], "/")
 		if end < 0 {
-			return false
+			return script, false, false
 		}
-		rest = rest[end+2:]
-	case number():
+		return strings.TrimLeft(script[end+2:], "IM"), true, true
+	case strings.HasPrefix(script, "$"):
+		return script[1:], true, true
+	}
+	rest = strings.TrimLeft(script, "0123456789")
+	if rest == script {
+		return script, false, true
+	}
+	if strings.HasPrefix(rest, "~") {
+		rest = strings.TrimLeft(rest[1:], "0123456789")
+	}
+	return rest, true, true
+}
+
+// lateSedCommand reads one command of the shapes lateSedScript knows and
+// returns what follows it.
+func lateSedCommand(script string) (rest string, ok bool) {
+	rest, found, ok := lateSedAddress(script)
+	if !ok {
+		return script, false
+	}
+	if found {
+		rest = strings.TrimLeft(rest, " \t")
 		if strings.HasPrefix(rest, ",") {
-			rest = rest[1:]
-			if !number() {
-				return false
+			second := strings.TrimLeft(rest[1:], " \t")
+			if strings.HasPrefix(second, "+") || strings.HasPrefix(second, "~") {
+				second = second[1:]
+			}
+			if rest, found, ok = lateSedAddress(second); !ok || !found {
+				return script, false
 			}
 		}
 	}
-	rest = strings.TrimPrefix(rest, "!")
-	if slices.Contains([]string{"p", "d", "q", "P", "D", "=", "n"}, rest) {
-		return true
+	rest = strings.TrimLeft(rest, " \t")
+	if found && strings.HasPrefix(rest, "!") {
+		rest = strings.TrimLeft(rest[1:], " \t!")
 	}
-	if len(rest) < 4 || !strings.HasPrefix(rest, "s") || strings.IndexByte("/|#,", rest[1]) < 0 {
-		return false
+	if rest == "" {
+		return script, false
 	}
-	parts := strings.Split(rest[2:], rest[1:2])
-	if len(parts) != 3 {
-		return false
+	switch rest[0] {
+	case 'p', 'd', 'P', 'D', '=', 'n', 'N', 'g', 'G', 'h', 'H', 'x', 'F', 'z':
+		return rest[1:], true
+	case 'q', 'Q', 'l':
+		return strings.TrimLeft(rest[1:], "0123456789"), true
+	case 'y', 's':
+		delimiter := rest[1:]
+		if delimiter == "" || strings.IndexByte(lateLetters+"0123456789 \t", delimiter[0]) >= 0 {
+			return script, false
+		}
+		parts := strings.SplitN(delimiter[1:], delimiter[:1], 3)
+		if len(parts) != 3 {
+			return script, false
+		}
+		flags := strings.TrimLeft(parts[2], "gpIiMm0123456789")
+		if rest[0] == 'y' {
+			flags = parts[2]
+		}
+		return flags, true
 	}
-	return strings.Trim(parts[2], "gpIiM0123456789") == ""
+	return script, false
 }
 
-// latePatternPrograms are the programs whose options and first operand can be
-// a text pattern, not a path: grep (the pattern, or -e / --regexp; with -f
-// or --file the patterns come from a file and every operand is a path) and
-// ls (-I / --ignore / --hide). A pattern is looked at as text (textWord); a
-// file option, an operand after the pattern and every option the table does
-// not list are read as paths.
-var latePatternPrograms = map[string]struct {
-	short, file string
-	long        []string
-	first       bool
-}{
-	"grep": {short: "e", file: "f", long: []string{"--regexp"}, first: true},
-	"ls":   {short: "I", long: []string{"--ignore", "--hide"}},
+// latePatternOptions describes the options of a program whose words are
+// text: a pattern or a plain value (grep: -e, -f, -A 3, --include=glob; ls:
+// -I). short and long hold the options whose value is the pattern, file the
+// short letters and files the long options whose value is a path (patterns
+// or names read from it), text the short letters and values the long
+// options that take a plain value (a count, a glob), and flags the other
+// long options, which are listed only so an abbreviation (--incl) is told
+// like GNU getopt tells it. first is true when the first operand is the
+// pattern unless an option gave it.
+type latePatternOptions struct {
+	short, file, text string
+	long, files       []string
+	values, flags     []string
+	first             bool
 }
 
-// latePattern follows the pattern words of one program call.
-type latePattern struct{ expect, done bool }
+var latePatternPrograms = map[string]latePatternOptions{
+	"grep": {
+		short: "e", file: "f", text: "ABCmdD", first: true,
+		long:  []string{"regexp"},
+		files: []string{"file", "exclude-from"},
+		values: []string{"max-count", "after-context", "before-context", "context", "directories", "devices",
+			"binary-files", "include", "exclude", "exclude-dir", "label", "group-separator"},
+		flags: []string{"basic-regexp", "extended-regexp", "fixed-regexp", "fixed-strings", "perl-regexp", "ignore-case",
+			"no-ignore-case", "invert-match", "word-regexp", "line-regexp", "count", "color", "colour", "files-without-match",
+			"files-with-matches", "only-matching", "quiet", "silent", "no-messages", "byte-offset", "with-filename",
+			"no-filename", "line-number", "initial-tab", "null", "null-data", "text", "recursive", "dereference-recursive",
+			"line-buffered", "binary", "unix-byte-offsets", "no-group-separator", "help", "version"},
+	},
+	"ls": {short: "I", long: []string{"ignore", "hide"}},
+}
 
-// patternWord handles a word that is a text pattern of program. handled is
-// false for any other word, which the caller reads as a path word.
+// lateOptionKind is what a long option takes after it.
+type lateOptionKind int
+
+const (
+	lateOptionOther   lateOptionKind = iota // no value, or not told: read as a path word
+	lateOptionPattern                       // a pattern: text
+	lateOptionText                          // a plain value: text
+	lateOptionFile                          // a path
+)
+
+// longKind tells a long option name (without the dashes), also when it is an
+// abbreviation every option it could stand for agrees on.
+func (o latePatternOptions) longKind(name string) lateOptionKind {
+	kind, seen := lateOptionOther, false
+	for _, group := range []struct {
+		names []string
+		kind  lateOptionKind
+	}{{o.long, lateOptionPattern}, {o.files, lateOptionFile}, {o.values, lateOptionText}, {o.flags, lateOptionOther}} {
+		for _, candidate := range group.names {
+			switch {
+			case candidate == name:
+				return group.kind
+			case strings.HasPrefix(candidate, name):
+				if seen && kind != group.kind {
+					return lateOptionOther
+				}
+				kind, seen = group.kind, true
+			}
+		}
+	}
+	return kind
+}
+
+// latePattern follows the pattern and value words of one program call:
+// expect says what the next word is, and done that the pattern is given.
+type latePattern struct {
+	expect lateOptionKind
+	done   bool
+}
+
+// patternWord handles a word that is text of program (a pattern, or a value
+// of an option that takes a plain one), or the path value of an option.
+// handled is false for any other word, which the caller reads as a path word.
 func (s *lateScan) patternWord(program string, st *latePattern, text string) (handled, ok bool) {
 	opts, listed := latePatternPrograms[program]
 	if !listed {
 		return false, false
 	}
-	if st.expect {
-		st.expect = false
+	if expected := st.expect; expected != lateOptionOther {
+		st.expect = lateOptionOther
+		if expected == lateOptionFile {
+			return false, false
+		}
 		return true, s.textWord(text)
 	}
 	switch {
 	case strings.HasPrefix(text, "--") && len(text) > 2:
-		name, value, hasValue := strings.Cut(text, "=")
-		if slices.Contains(opts.long, name) {
+		name, value, hasValue := strings.Cut(text[2:], "=")
+		switch opts.longKind(name) {
+		case lateOptionPattern:
 			st.done = true
-			if hasValue {
-				return true, s.textWord(value)
+			return st.optionValue(s, lateOptionPattern, value, hasValue)
+		case lateOptionText:
+			return st.optionValue(s, lateOptionText, value, hasValue)
+		case lateOptionFile:
+			if name == "file" {
+				st.done = true
+			} else if !hasValue {
+				st.expect = lateOptionFile
 			}
-			st.expect = true
-			return true, true
-		}
-		if name == "--file" {
-			st.done = true
 		}
 	case strings.HasPrefix(text, "-") && len(text) > 1:
 		known := lateShortOptions[program]
 		for i := 1; i < len(text); i++ {
+			letter := text[i]
 			switch {
-			case strings.IndexByte(opts.short, text[i]) >= 0:
+			case strings.IndexByte(opts.short, letter) >= 0:
 				st.done = true
-				if i+1 == len(text) {
-					st.expect = true
-					return true, true
-				}
-				return true, s.textWord(text[i+1:])
-			case strings.IndexByte(opts.file, text[i]) >= 0:
+				return st.optionValue(s, lateOptionPattern, text[i+1:], i+1 < len(text))
+			case strings.IndexByte(opts.text, letter) >= 0:
+				return st.optionValue(s, lateOptionText, text[i+1:], i+1 < len(text))
+			case strings.IndexByte(opts.file, letter) >= 0:
 				st.done = true
 				return false, false
-			case strings.IndexByte(known.flags, text[i]) < 0:
+			case strings.IndexByte(known.flags, letter) < 0:
 				return false, false
 			}
 		}
@@ -702,6 +871,16 @@ func (s *lateScan) patternWord(program string, st *latePattern, text string) (ha
 		return true, s.textWord(text)
 	}
 	return false, false
+}
+
+// optionValue reads the value of an option that takes text: the part of the
+// word after the option when it has one, else the next word.
+func (st *latePattern) optionValue(s *lateScan, kind lateOptionKind, value string, attached bool) (handled, ok bool) {
+	if !attached {
+		st.expect = kind
+		return true, true
+	}
+	return true, value == "" || s.textWord(value)
 }
 
 // word checks every path an argument of program may name: see
