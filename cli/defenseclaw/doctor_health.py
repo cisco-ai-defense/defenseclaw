@@ -626,6 +626,12 @@ def recheck_installed_versions(
     run leaves the recorded version in place and says why in ``unchecked``.
     One probe answer is shared by every caller of a Doctor run
     (:func:`reset_installed_version_probes`).
+
+    An installed agent whose evidence holds no version at all (the scan that
+    wrote it ran before the connector was set up, or an update followed the
+    scan) is read the same way: the row would otherwise warn that the version
+    was not observed until `agent discover --refresh` (GAP-0752). Only active
+    connectors are probed, so an agent nobody set up is never run.
     """
 
     agents = getattr(discovery, "agents", None)
@@ -646,7 +652,6 @@ def recheck_installed_versions(
             or not dataclasses.is_dataclass(signal)
             or not getattr(signal, "installed", False)
             or not isinstance(recorded, str)
-            or not (recorded.strip() or name == "kiro")
         ):
             continue
         if name == "kiro":
@@ -670,7 +675,7 @@ def recheck_installed_versions(
             continue
         version_changed = found.strip() != recorded.strip()
         moved = agent_discovery._path_key(path) != agent_discovery._path_key(recorded_path) if recorded_path else True
-        if version_changed:
+        if version_changed and recorded.strip():
             changed[name] = _safe_semver_from_agent(recorded)
         if version_changed or moved:
             updated[raw_name] = dataclasses.replace(

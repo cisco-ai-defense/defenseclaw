@@ -1212,6 +1212,12 @@ def discover_agents(
             for agent_name, signal in cached.agents.items():
                 signal.config_path = _agent_config_path(agent_name, include_workspace_config=False)
                 signal.configured = bool(signal.config_path)
+            if _configured_agent_evidence_is_stale(cached, data_dir):
+                # A configured connector the cache never probed, or whose
+                # executable changed since the scan, is read again now instead
+                # of reporting the old (or no) version for up to a day. The new
+                # scan carries its own time, so this happens once per change.
+                return discover_agents(use_cache=False, refresh=True, data_dir=data_dir, persist_cache=persist_cache)
             return cached
 
     scanned_at = _format_rfc3339(_now_utc())
@@ -1294,6 +1300,45 @@ def discover_agents(
     if persist_cache:
         _write_cache(discovery, data_dir=data_dir)
     return discovery
+
+
+def _configured_agent_evidence_is_stale(cached: AgentDiscovery, data_dir: str | os.PathLike[str] | None) -> bool:
+    """Whether a configured connector cached record needs a version probe.
+
+    That is an installed agent the scan never ran (``VERSION_NOT_PROBED``: it
+    was not set up when the scan ran, as on a fresh account after ``init``),
+    or one whose executable was written or replaced at or after the scan (an
+    agent update). Agents nobody set up are never run (GAP-0901); Kiro, which
+    has several forms, and an agent whose probe already failed for another
+    reason are left to ``agent discover --refresh``, so a broken CLI is not
+    run on every call.
+    """
+    configured = _configured_probe_names(data_dir)
+    if not configured or _PROBE_ONLY.get() is not None:
+        return False
+    scanned = _parse_rfc3339(cached.scanned_at)
+    if scanned is None:
+        return False
+    for name in configured - {"kiro"}:
+        signal = cached.agents.get(name)
+        if signal is None or not signal.installed or not signal.binary_path:
+            continue
+        if not signal.version and signal.error == VERSION_NOT_PROBED:
+            return True
+        if signal.version and _executable_changed_since(signal.binary_path, scanned.timestamp()):
+            return True
+    return False
+
+
+def _executable_changed_since(path: str, since: float) -> bool:
+    """Whether the file *path* resolves to was written, replaced or re-linked
+    at or after *since* (ctime cannot be set back, so an update that keeps the
+    old mtime still counts). A file that cannot be read counts as changed."""
+    try:
+        info = os.stat(os.path.realpath(path))
+    except OSError:
+        return True
+    return max(info.st_mtime, info.st_ctime) >= since
 
 
 def _keep_versions_of_slow_unchanged_agents(
