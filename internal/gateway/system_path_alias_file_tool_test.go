@@ -12,14 +12,25 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
+
+// hostLinksEtc makes the test run as a host where /etc is a link to
+// /private/etc (macOS) or as one where /private/etc is an ordinary directory.
+func hostLinksEtc(t *testing.T, linked bool) {
+	t.Helper()
+	was := actionfacts.HostLinksEtcToPrivate
+	actionfacts.HostLinksEtcToPrivate = linked
+	t.Cleanup(func() { actionfacts.HostLinksEtcToPrivate = was })
+}
 
 // systemAliasEvidence rewrites the hook client evidence the way a macOS
 // client writes it: /etc, /var and /tmp are links into /private, so the
 // client lists each file under them with its physical name.
 func systemAliasEvidence(t *testing.T, evidence string) string {
 	t.Helper()
+	hostLinksEtc(t, true)
 	targets, ok := hookpaths.Decode(evidence)
 	if !ok {
 		t.Fatalf("hook evidence %q is not readable", evidence)
@@ -125,6 +136,7 @@ func TestFileToolOnThePhysicalSystemSpellingKeepsItsContentRule(t *testing.T) {
 	} {
 		for _, spelling := range []string{"/etc", "/private/etc"} {
 			t.Run(c.name+"/"+spelling, func(t *testing.T) {
+				hostLinksEtc(t, true)
 				target := spelling + strings.TrimPrefix(c.target, "/etc")
 				call := nativeWriteCall{c.connector, c.tool, func(path string) map[string]any {
 					return map[string]any{c.pathKey: path, "content": c.content}
@@ -137,5 +149,74 @@ func TestFileToolOnThePhysicalSystemSpellingKeepsItsContentRule(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestPAMConfigWriteOnThePhysicalSystemSpellingKeepsItsContentRule pins
+// GAP-0819: the PAM grammar of the single /etc/pam.conf file is chosen for its
+// physical macOS spelling too, so a permit auth line written whole or inserted
+// by a literal edit is judged under both spellings. The service-directory
+// files and the benign twins keep their verdicts.
+func TestPAMConfigWriteOnThePhysicalSystemSpellingKeepsItsContentRule(t *testing.T) {
+	home, project := hermesPatchHome(t)
+	write := func(content string) func(string) map[string]any {
+		return func(path string) map[string]any { return map[string]any{"file_path": path, "content": content} }
+	}
+	edit := func(oldText, newText string) func(string) map[string]any {
+		return func(path string) map[string]any {
+			return map[string]any{"file_path": path, "old_string": oldText, "new_string": newText, "replace_all": true}
+		}
+	}
+	for _, c := range []struct {
+		name, tool, target string
+		args               func(string) map[string]any
+		blocked            bool
+	}{
+		{"pam.conf full write", "Write", "/etc/pam.conf", write("login auth sufficient pam_permit.so\n"), true},
+		{"pam.conf literal edit", "Edit", "/etc/pam.conf", edit("login auth required pam_deny.so", "login auth required pam_deny.so\nlogin auth sufficient pam_permit.so"), true},
+		{"service file full write", "Write", "/etc/pam.d/sshd", write("auth sufficient pam_permit.so\n"), true},
+		{"benign pam.conf write", "Write", "/etc/pam.conf", write("login auth required pam_unix.so\n"), false},
+		{"benign service file write", "Write", "/etc/pam.d/sshd", write("auth required pam_unix.so\n"), false},
+	} {
+		for _, spelling := range []string{"/etc", "/private/etc"} {
+			t.Run(c.name+"/"+spelling, func(t *testing.T) {
+				hostLinksEtc(t, true)
+				target := spelling + strings.TrimPrefix(c.target, "/etc")
+				call := nativeWriteCall{"claudecode", c.tool, c.args}
+				body := call.body(t, project, target)
+				evidence := hookpaths.ResolveConnector("claudecode", "", "preToolUse", []byte(body))
+				action := overLimitHookAction(t, overLimitHostHookWithEvidence(t, "claudecode", home, body, evidence))
+				if c.blocked != (action == "block") {
+					t.Fatalf("%s: action = %q, want blocked=%v", target, action, c.blocked)
+				}
+			})
+		}
+	}
+}
+
+// TestPhysicalEtcSpellingIsAnOrdinaryPathWhereEtcIsNotALink pins that the
+// macOS alias is not applied elsewhere: on a host where /private/etc is an
+// ordinary directory, whole-file writes below it, including a long note, keep
+// the allow they get at any other ordinary path (GAP-0819).
+func TestPhysicalEtcSpellingIsAnOrdinaryPathWhereEtcIsNotALink(t *testing.T) {
+	home, project := hermesPatchHome(t)
+	hostLinksEtc(t, false)
+	pad := strings.Repeat("# note\n", 12000)
+	for _, c := range []struct{ name, target, content string }{
+		{"daemon settings", "/private/etc/docker/daemon.json", `{"log-level":"warn"}`},
+		{"long profile note", "/private/etc/profile.d/colors.sh", "export CLICOLOR=1\n" + pad},
+		{"long daemon note", "/private/etc/docker/daemon.json", `{"log-level":"warn"}` + pad},
+		{"pam.conf note", "/private/etc/pam.conf", "login auth required pam_unix.so\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			call := nativeWriteCall{"claudecode", "Write", func(path string) map[string]any {
+				return map[string]any{"file_path": path, "content": c.content}
+			}}
+			body := call.body(t, project, c.target)
+			evidence := hookpaths.ResolveConnector("claudecode", "", "preToolUse", []byte(body))
+			if action := overLimitHookAction(t, overLimitHostHookWithEvidence(t, "claudecode", home, body, evidence)); action == "block" {
+				t.Fatalf("%s: ordinary file blocked", c.target)
+			}
+		})
 	}
 }
