@@ -897,6 +897,9 @@ Other recovery notes:
   by name and change nothing on it, not even its access list. Close the program
   that holds it (a user's agent, an editor), then run Setup `/ensure` again.
   Programs that only read the file, such as an antivirus scan, do not stop it.
+  The gateway's own database and log files, which the running services keep open for
+  write, refuse only a program that holds them with delete access or without sharing
+  read access.
 - If Setup `/repair` refuses because the running gateway's installed config
   cannot be validated for rollback, restore an approved, gateway-valid
   `config.yaml` and retry `/repair`. If the refusal names an administrator-selected
