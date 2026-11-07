@@ -42,6 +42,9 @@ func TestRecordedVendorFolderFixTextWorksOnARealProgramDataFolder(t *testing.T) 
 		name   string
 		shell  string
 		icacls [][]string
+		// keptSDDL is an entry of the folder's own list that the fix must not
+		// remove: a read-only grant (g582 round 9 L5).
+		keptSDDL string
 	}{
 		{name: "inherited ProgramData entries only", shell: "cmd"},
 		{name: "inherited entries in PowerShell", shell: "powershell"},
@@ -49,6 +52,11 @@ func TestRecordedVendorFolderFixTextWorksOnARealProgramDataFolder(t *testing.T) 
 		{name: "explicit Everyone and Authenticated Users", shell: "cmd",
 			icacls: [][]string{{"/grant", "*S-1-1-0:(OI)(CI)W", "*S-1-5-11:(OI)(CI)M"}}},
 		{name: "owned by Users", shell: "powershell", icacls: [][]string{{"/setowner", "*S-1-5-32-545"}}},
+		// A read-only entry of a service account the vendor reads its policy
+		// as stays; the Users owner and the explicit Users modify entry go.
+		{name: "explicit read for another account is kept", shell: "cmd",
+			icacls:   [][]string{{"/grant", "*S-1-5-19:(OI)(CI)R"}, {"/grant", "*S-1-5-32-545:(OI)(CI)M"}},
+			keptSDDL: ";;;LS)"},
 	}
 	for index, variant := range variants {
 		t.Run(variant.name, func(t *testing.T) {
@@ -92,6 +100,9 @@ func TestRecordedVendorFolderFixTextWorksOnARealProgramDataFolder(t *testing.T) 
 			}
 			if after := folderSDDL(t, file); after != fileBefore {
 				t.Fatalf("the fix changed DefenseClaw's protected file: %s, was %s", after, fileBefore)
+			}
+			if variant.keptSDDL != "" && !strings.Contains(folderSDDL(t, dir), variant.keptSDDL) {
+				t.Fatalf("the fix removed a read-only entry it should keep (%s): %s", variant.keptSDDL, folderSDDL(t, dir))
 			}
 		})
 	}

@@ -562,29 +562,46 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 		}
 	}
 	if record != nil {
-		// Deepest first: a directory recorded later can be the parent of
-		// one recorded earlier.
-		dirs := append([]string(nil), record.CreatedDirs...)
-		sort.SliceStable(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
-		for _, dir := range dirs {
-			if err := removeDirIfEmpty(opts, dir); err != nil {
-				state.detail("left %s in place: %v", dir, err)
-			}
-		}
+		removeRecordedCreatedDirs(opts, record, state, false)
 	}
 	return deleteRecord(opts, connector)
+}
+
+// removeRecordedCreatedDirs removes the folders DefenseClaw created for a
+// record that are still empty. Deepest first: a directory recorded later can
+// be the parent of one recorded earlier. With trustedParents (a vendor folder
+// that does not protect the file, restoreOrStripUnprotected) a folder whose
+// parent an untrusted account can change is left, since removal there is not
+// DefenseClaw's to do (g582 round 9 L3).
+func removeRecordedCreatedDirs(opts Options, record *ownershipRecord, state *State, trustedParents bool) {
+	dirs := append([]string(nil), record.CreatedDirs...)
+	sort.SliceStable(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
+	for _, dir := range dirs {
+		if trustedParents && !opts.SkipTrustChecks {
+			if err := validateTrustedAncestors(opts, platformPath(opts, dir)); err != nil {
+				state.detail("left %s in place: %v", dir, err)
+				continue
+			}
+		}
+		if err := removeDirIfEmpty(opts, dir); err != nil {
+			state.detail("left %s in place: %v", dir, err)
+		}
+	}
 }
 
 // restoreOrStripUnprotected is restoreOrStrip for a recorded file in a
 // vendor folder DefenseClaw did not create and that does not protect it
 // (Windows, case c; g582 review 7 S1). The removal neither takes the folder
-// over nor fails closed on it. It restores the administrator's original, or
-// removes DefenseClaw's file, only while the recorded file is still the one
-// DefenseClaw wrote: a regular single-link file only SYSTEM, Administrators
-// and TrustedInstaller own and can change, byte for byte the recorded
-// postimage. Any other file is left as it is, since its content may no
-// longer be DefenseClaw's or the administrator's. Either way DefenseClaw's
-// record goes, and one warning names the folder and the fix.
+// over nor fails closed on it. It works only on a file it can trust: a
+// regular single-link file only SYSTEM, Administrators and TrustedInstaller
+// own and can change. Such a file that is still byte for byte what DefenseClaw
+// wrote gets the administrator's original back, or goes. One that an
+// administrator changed since has DefenseClaw's entries stripped and the
+// rest kept, as for any trusted file (g582 round 9 L4). A file it cannot trust
+// is left as it is, since its content may no longer be DefenseClaw's or the
+// administrator's, and the warning says that its DefenseClaw hook entries now
+// name binaries the uninstall removed and how to take them out. Either way
+// DefenseClaw's record goes, and one warning names the folder and the fix.
 func restoreOrStripUnprotected(opts Options, connector string, record *ownershipRecord, strip stripFunc, folder unprotectedVendorFolder, state *State) error {
 	if record == nil {
 		return nil
@@ -592,13 +609,36 @@ func restoreOrStripUnprotected(opts Options, connector string, record *ownership
 	path := record.Path
 	current, exists, why := readUnprotectedRecordedFile(opts, path)
 	outcome := ""
+	// staleEntries: the file stays and may still hold DefenseClaw's entries.
+	staleEntries := false
 	switch {
 	case why != "":
 		outcome = fmt.Sprintf("left %s as it is (%s)", path, why)
+		staleEntries = true
 	case !exists:
 		outcome = fmt.Sprintf("%s is already gone", path)
 	case sha256Hex(current) != record.PostimageSHA256:
-		outcome = fmt.Sprintf("left %s as it is (it changed after DefenseClaw wrote it)", path)
+		admin, owned, err := strip(current)
+		base := policyFileBase{exists: true, data: current}
+		switch {
+		case err != nil:
+			outcome = fmt.Sprintf("left %s as it is (it changed after DefenseClaw wrote it and cannot be read: %v)", path, err)
+			staleEntries = true
+		case !owned:
+			outcome = fmt.Sprintf("%s no longer holds DefenseClaw entries; left it unchanged", path)
+		case blank(admin):
+			if err := removePolicyFileOver(opts, path, base); err != nil {
+				return err
+			}
+			outcome = fmt.Sprintf("removed %s (only DefenseClaw content remained)", path)
+			state.Changed = true
+		default:
+			if err := atomicWriteOver(opts, platformPath(opts, path), base, admin); err != nil {
+				return err
+			}
+			outcome = fmt.Sprintf("%s changed after DefenseClaw wrote it; removed only DefenseClaw entries", path)
+			state.Changed = true
+		}
 	default:
 		var admin []byte
 		if record.PreimageExisted {
@@ -623,8 +663,16 @@ func restoreOrStripUnprotected(opts Options, connector string, record *ownership
 		state.Changed = true
 	}
 	state.detail("%s", outcome)
-	state.warn("%s; the uninstall %s and dropped DefenseClaw's record without taking the folder over. "+
-		"To protect the folder, from an elevated prompt run %s", folder.reason, outcome, folder.fix)
+	// The folders DefenseClaw itself created above the vendor's folder go as
+	// they do for any record, when their own parents are trusted.
+	removeRecordedCreatedDirs(opts, record, state, true)
+	stale := ""
+	if staleEntries {
+		stale = fmt.Sprintf(" DefenseClaw's hook entries in %s now name binaries the uninstall removed: delete the "+
+			"entries whose command names DefenseClaw's hook (after the commands below) or restore the file from a backup.", path)
+	}
+	state.warn("%s; the uninstall %s and dropped DefenseClaw's record without taking the folder over.%s "+
+		"To protect the folder, from an elevated prompt run %s", folder.reason, outcome, stale, folder.fix)
 	return deleteRecord(opts, connector)
 }
 
