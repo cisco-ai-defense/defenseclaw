@@ -3828,7 +3828,7 @@ def _pid_file_names_a_live_process(path: str) -> bool:
 
 def _stop_gateway(plan: UninstallPlan | None = None) -> bool:
     """Stop the sidecar: True when `stop` worked, False when there was nothing to stop."""
-    gw = plan.gateway_path if plan is not None else path_gateway()
+    gw = plan.gateway_path if plan is not None else path_gateway(honor_override=False)
     if gw is None:
         ux.subhead("sidecar not on PATH — nothing to stop")
         return False
@@ -4231,7 +4231,7 @@ def _gateway_supports_connector_teardown(gateway_path: str | None = None) -> boo
     by asking for ``--help`` on the ``connector`` subcommand — which is
     a non-destructive probe — and checking exit code + output.
     """
-    gw = gateway_path or path_gateway()
+    gw = gateway_path or path_gateway(honor_override=False)
     if gw is None:
         return False
     try:
@@ -4321,7 +4321,7 @@ def _gateway_connector_is_unknown(connector: str, *, plan: UninstallPlan | None 
     gateway, a launch failure, or residue all return False so the caller keeps
     its fail-closed abort.
     """
-    gw = plan.gateway_path if plan is not None and plan.gateway_path else path_gateway()
+    gw = plan.gateway_path if plan is not None and plan.gateway_path else path_gateway(honor_override=False)
     if gw is None:
         return False
     try:
@@ -4370,7 +4370,7 @@ def _run_gateway_connector_teardown(
                 return lines[-1]
         return ""
 
-    gw = plan.gateway_path if plan is not None else path_gateway()
+    gw = plan.gateway_path if plan is not None else path_gateway(honor_override=False)
     if gw is None:
         return False
     ux.subhead(f"tearing down {connector} (on a busy host this can take a few minutes)...")

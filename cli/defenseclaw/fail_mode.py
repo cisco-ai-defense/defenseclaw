@@ -2221,7 +2221,7 @@ def restore_fail_mode_transaction(snapshots: tuple[FileSnapshot, ...]) -> None:
 
 def reconcile_connector_registration(cfg: Any, connector: str) -> ConnectorFailModeState:
     name = normalize(connector)
-    executable = path_gateway()
+    executable = path_gateway(honor_override=False)
     if not executable or (_is_windows() and Path(executable).suffix.lower() != ".exe"):
         raise OSError("native defenseclaw-gateway executable not found")
     environment = os.environ.copy()

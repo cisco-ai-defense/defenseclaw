@@ -1884,8 +1884,12 @@ def path_gateway(*, honor_override: bool = True) -> str | None:
     before this one (a terminal opened before the install), that was the 0.8.x
     gateway, which rejects this release's ``config.yaml`` (GAP-0099).
 
-    ``honor_override=False`` skips ``DEFENSECLAW_GATEWAY_BIN``, for the uninstall
-    plan, which accepts only a gateway named ``defenseclaw-gateway``.
+    ``honor_override=False`` skips ``DEFENSECLAW_GATEWAY_BIN``. The variable is not
+    custody-checked, so a caller that runs the result to change state passes it,
+    as Doctor's lifecycle code ignores the variable: uninstall, hook registration,
+    sidecar start and restart. ``resolve_gateway_binary`` (the general CLI
+    lookup), the readiness report and the trusted verifier (which checks
+    custody itself) follow it.
     """
     override = os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip() if honor_override else ""
     if override:

@@ -2110,7 +2110,7 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
     :func:`_running_connector_from_state_file` for the I-don't-know
     sentinel rule.
     """
-    gw = path_gateway()
+    gw = path_gateway(honor_override=False)
     if not gw:
         return StepResult(
             "Sidecar",

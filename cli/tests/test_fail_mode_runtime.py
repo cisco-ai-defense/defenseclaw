@@ -760,7 +760,7 @@ def test_windows_registration_freshness_retries_access_denied_without_accepting_
     assert validate.call_count == attempts
     assert len(waits) == attempts - 1 and sum(waits) <= 2
     if expected:
-        monkeypatch.setattr("defenseclaw.fail_mode.path_gateway", lambda: str(tmp_path / "gateway.exe"))
+        monkeypatch.setattr("defenseclaw.fail_mode.path_gateway", lambda **_kwargs: str(tmp_path / "gateway.exe"))
         monkeypatch.setattr(
             "defenseclaw.fail_mode.subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0)
         )
