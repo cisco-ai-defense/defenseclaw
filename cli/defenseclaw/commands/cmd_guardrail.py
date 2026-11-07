@@ -1692,6 +1692,10 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
                 f"open ({label} upstream; failures cannot be made fail-closed;"
                 f" configured provenance: {configured_mode})"
             )
+        elif _is_proxy_connector(key):
+            # No hooks: the model requests follow the outage mode the unscoped
+            # view and status print, resolved by the one shared helper (GAP-0824).
+            runtime_value = proxy_outage_summary(proxy_model_outage_mode(app.cfg, key))
         elif runtime_state.limit:
             runtime_value = runtime_state.effective
             if runtime_value == "closed":

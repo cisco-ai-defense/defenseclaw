@@ -102,3 +102,33 @@ def test_zeptoclaw_requests_stay_blocked_whatever_the_value_says(
     assert result.exit_code == 0, result.output
     assert "blocked while the gateway is down, whatever this value says" in _words(result.output)
     assert _CONTINUES not in _words(result.output)
+
+
+@pytest.mark.parametrize("entry", [False, True])
+@pytest.mark.parametrize(
+    ("name", "pack", "want"),
+    [
+        ("openclaw", "default", "open"),
+        ("openclaw", "permissive", "open"),
+        ("openclaw", "strict", "closed"),
+        ("zeptoclaw", "default", "closed"),
+    ],
+)
+def test_the_scoped_fail_mode_view_matches_the_unscoped_view_for_a_proxy_connector(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str, pack: str, want: str, entry: bool
+) -> None:
+    from defenseclaw.config import PerConnectorGuardrailConfig
+
+    cfg = _single(monkeypatch, tmp_path, name, pack)
+    if entry:
+        cfg.guardrail.connectors = {name: PerConnectorGuardrailConfig()}
+    unscoped = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, [], obj=_app(cfg))
+    scoped = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["--connector", name], obj=_app(cfg))
+    assert unscoped.exit_code == 0, unscoped.output
+    assert scoped.exit_code == 0, scoped.output
+    out = _words(scoped.output)
+    assert f"{want} (proxy-backed, no hooks:" in out
+    assert "hook_fail_mode: unknown" not in out
+    assert (_CONTINUES in out) is (want == "open")
+    assert (_BLOCKED in out) is (want == "closed")
+    assert f"{want} (proxy-backed, no hooks:" in _words(unscoped.output)
