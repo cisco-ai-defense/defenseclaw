@@ -173,6 +173,36 @@ func TestGuardInvocationAndCrashClass(t *testing.T) {
 	}
 }
 
+func TestManagedAvailabilityInvocationPreservesStartedAnswer(t *testing.T) {
+	launcher := availabilityTestLauncher(t)
+	args := []string{WrappedSubcommand, launcher, "hook", "--connector", "claudecode", "--enterprise-managed", "--event", "UserPromptSubmit"}
+	got, inner, event, wrapped, open, ok := ParseInvocationMode(args)
+	if !ok || got != launcher || event != "UserPromptSubmit" || !wrapped || open ||
+		!reflect.DeepEqual(inner, []string{"hook", "--connector", "claudecode", "--enterprise-managed"}) {
+		t.Fatalf("managed invocation = %q %q %q %t %t %t", got, inner, event, wrapped, open, ok)
+	}
+	if _, _, _, _, _, ok := ParseInvocationMode(append(append([]string(nil), args...), "--unavailable-mode", "open")); ok {
+		t.Fatal("managed invocation selected the per-user open answer")
+	}
+	for _, tc := range []struct {
+		name, code string
+		want       int
+	}{
+		{"ordinary allow", "0", 0},
+		{"ordinary block", "2", 2},
+		{"ordinary nonblocking", "7", WrappedExitBase + 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DC_HOOKGUARD_AVAILABILITY_TEST_CHILD", tc.code)
+			var output, warning bytes.Buffer
+			if code := RunEventMode(launcher, inner, event, wrapped, open, nil, &output, &warning); code != tc.want ||
+				output.String() != "ordinary answer\n" || warning.String() != "ordinary note\n" {
+				t.Fatalf("started answer = %d, %q, %q", code, output.String(), warning.String())
+			}
+		})
+	}
+}
+
 func TestNeutralEventsMatchHookLifecycle(t *testing.T) {
 	want := hookexec.NeutralLifecycleEvents("claudecode")
 	sort.Strings(want)
