@@ -10,8 +10,8 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// A word is brace-expanded only for an unquoted pair of braces with a comma or
-// a sequence at its top level; the other brace characters are literal text.
+// A word is brace-expanded only for an unquoted, closed pair of braces with a
+// comma or a sequence at its top level; the other brace characters are literal text.
 func TestActionWordBraceExpandsOnlyForACommaOrSequence(t *testing.T) {
 	cases := []struct {
 		word string
@@ -29,6 +29,14 @@ func TestActionWordBraceExpandsOnlyForACommaOrSequence(t *testing.T) {
 		{"home{one}/.defenseclaw/config.yaml", false},
 		{"{}", false},
 		{"{a", false},
+		{"{a,b", false},
+		{"a{b,c", false},
+		{"notes{a,b", false},
+		{"{a..b", false},
+		{"{a,{b", false},
+		{"{a,{b,c}", true},
+		{"{a,b}{c,d", true},
+		{"{a,b}x{", true},
 		{"a}", false},
 		{"a,b", false},
 		{"a..b", false},

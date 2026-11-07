@@ -513,7 +513,7 @@ func (s *knownShadow) eval(args []*syntax.Word, certain bool) {
 // it before its last command.
 func knownLeavesEarly(tree syntax.Node, home string) bool {
 	leaves := false
-	syntax.Walk(tree, func(node syntax.Node) bool {
+	knownWalkRun(tree, func(node syntax.Node) bool {
 		if call, ok := node.(*syntax.CallExpr); ok && len(call.Args) != 0 {
 			name, known := StaticWord(call.Args[0], home)
 			leaves = leaves || !known || name == "return" || name == "break" || name == "continue"
@@ -521,6 +521,18 @@ func knownLeavesEarly(tree syntax.Node, home string) bool {
 		return !leaves
 	})
 	return leaves
+}
+
+// knownWalkRun visits the nodes the shell runs when it reaches the tree. A
+// function definition runs none of its body: a return or loop control in it
+// matters only where the function is called.
+func knownWalkRun(tree syntax.Node, visit func(syntax.Node) bool) {
+	syntax.Walk(tree, func(node syntax.Node) bool {
+		if _, defines := node.(*syntax.FuncDecl); defines {
+			return false
+		}
+		return visit(node)
+	})
 }
 
 // calledFunctionsEndLoop reports that a function the loop can call has a loop
@@ -542,7 +554,7 @@ func (r *knownReached) calledFunctionsEndLoop(loop syntax.Node) bool {
 		pending = pending[:len(pending)-1]
 		var names []string
 		anyFunction := false
-		syntax.Walk(tree, func(node syntax.Node) bool {
+		knownWalkRun(tree, func(node syntax.Node) bool {
 			if call, ok := node.(*syntax.CallExpr); ok && len(call.Args) != 0 {
 				name, known := StaticWord(call.Args[0], r.home)
 				switch name {
@@ -557,7 +569,7 @@ func (r *knownReached) calledFunctionsEndLoop(loop syntax.Node) bool {
 		if anyFunction {
 			for _, decls := range byName {
 				for _, decl := range decls {
-					if knownBreaksOut(decl, r.home) {
+					if knownBreaksOut(decl.Body, r.home) {
 						return true
 					}
 				}
@@ -570,7 +582,7 @@ func (r *knownReached) calledFunctionsEndLoop(loop syntax.Node) bool {
 			}
 			seen[name] = true
 			for _, decl := range byName[name] {
-				if knownBreaksOut(decl, r.home) {
+				if knownBreaksOut(decl.Body, r.home) {
 					return true
 				}
 				pending = append(pending, decl.Body)
@@ -584,7 +596,7 @@ func (r *knownReached) calledFunctionsEndLoop(loop syntax.Node) bool {
 // in the tree of a function a loop calls.
 func knownBreaksOut(tree syntax.Node, home string) bool {
 	leaves := false
-	syntax.Walk(tree, func(node syntax.Node) bool {
+	knownWalkRun(tree, func(node syntax.Node) bool {
 		if call, ok := node.(*syntax.CallExpr); ok && len(call.Args) != 0 {
 			name, known := StaticWord(call.Args[0], home)
 			leaves = leaves || !known || name == "break" || name == "continue"

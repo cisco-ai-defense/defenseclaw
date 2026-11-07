@@ -378,7 +378,7 @@ func actionWordFields(word *syntax.Word, state actionValues, cwd, home string) (
 }
 
 // actionWordBraceExpands reports a word the shell brace-expands: an unquoted
-// pair of braces with an unquoted comma or ".." at its top level. Quoted text,
+// and closed pair of braces with an unquoted comma or ".." at its top level. Quoted text,
 // an escaped brace and the value of an expansion are never brace-expanded, and
 // a pair without a comma or a sequence, such as {name}, is literal text.
 func actionWordBraceExpands(word *syntax.Word) bool {
@@ -403,7 +403,7 @@ func actionWordBraceExpands(word *syntax.Word) bool {
 		if text[start] != 0x7b {
 			continue
 		}
-		depth := 0
+		depth, splits := 0, false
 		for end := start; end < len(text); end++ {
 			switch {
 			case text[end] == 0x7b:
@@ -411,9 +411,14 @@ func actionWordBraceExpands(word *syntax.Word) bool {
 			case text[end] == 0x7d:
 				depth--
 			case depth == 1 && (text[end] == 0x2c || text[end] == 0x2e && end+1 < len(text) && text[end+1] == 0x2e):
-				return true
+				splits = true
 			}
 			if depth == 0 {
+				// Only a pair that closes expands; an opening brace with a
+				// comma after it and no closing brace is literal text.
+				if splits {
+					return true
+				}
 				break
 			}
 		}
