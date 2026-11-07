@@ -831,3 +831,146 @@ def test_registry_outage_does_not_admit_edited_extensionless_entrypoint_that_nam
     for profile in ("default", "permissive", "strict"):
         assert "CRED-CODEX-AUTH" in _high(target, profile), profile
         assert "VENDOR-REGISTRY-UNVERIFIED" not in _rules(target, profile), profile
+
+
+def _installed_under(project, tmp_path, label: str, key: str):
+    """A copy of the pinned install placed at ``key`` below a fresh project."""
+
+    root = tmp_path / "placed" / label
+    target = root / key
+    target.parent.mkdir(parents=True)
+    shutil.copytree(project / PACKAGE_KEY, target, symlinks=True)
+    return root, target
+
+
+def _alias_lock(root, key: str, owner: str, dependencies: dict, *, field: str = "dependencies") -> None:
+    packages = {
+        owner: {field: dependencies},
+        key: {"name": PROVIDER, "version": VERSION, "resolved": _archive_address(VERSION)},
+    }
+    _write(root / "package-lock.json", json.dumps({"lockfileVersion": 3, "packages": packages}))
+
+
+@requires_symlink_privilege
+def test_copy_installed_under_another_name_gets_the_ordinary_verdict(tmp_path, monkeypatch) -> None:
+    """An alias is another name for a source: the entry at the alias path
+    names the provider and the registry, but the spec its owner files under
+    the alias decides the source, and an alias is never the registry."""
+
+    project, _ = _pinned_npm_install(tmp_path, monkeypatch)
+    alias_specs = {
+        "npm-alias": f"npm:{PROVIDER}@{VERSION}",
+        "protected-file": PROTECTED_SOURCE,
+        "ordinary-spec": VERSION,
+        "no-spec": None,
+    }
+    places = {
+        "root": ("node_modules/bedrock-alias", "", "node_modules/bedrock-alias"),
+        "nested": (
+            "node_modules/sibling/node_modules/bedrock-alias", "node_modules/sibling",
+            "node_modules/sibling/node_modules/bedrock-alias",
+        ),
+    }
+    for place, (key, owner, _) in places.items():
+        for label, spec in alias_specs.items():
+            root, target = _installed_under(project, tmp_path, f"{place}-{label}", key)
+            _alias_lock(root, key, owner, {} if spec is None else {"bedrock-alias": spec})
+            name = f"{place} {label}"
+            assert vendor_identity.inspect_official_provider_tree(str(target)) is None, name
+            for profile in ("default", "permissive", "strict"):
+                assert "SRC-EXEC" in _high(target, profile), f"{name} {profile}"
+
+    # Benign twin: the same layout under the package's own name is identified.
+    for place, key, owner in (
+        ("root", PACKAGE_KEY, ""),
+        ("nested", "node_modules/sibling/" + PACKAGE_KEY, "node_modules/sibling"),
+    ):
+        root, target = _installed_under(project, tmp_path, f"own-name-{place}", key)
+        _alias_lock(root, key, owner, {PROVIDER: VERSION})
+        assert vendor_identity.inspect_official_provider_tree(str(target)) is not None, place
+        assert _high(target, "default") == set(), place
+
+
+REQUESTED_MEMBERS_THAT_SAY_ANOTHER_SOURCE = {
+    "path-only": {"type": "version", "path": PROTECTED_SOURCE},
+    "path-beside-request": {"type": "version", "rawSpec": VERSION, "path": PROTECTED_SOURCE},
+    "resolved": {"type": "version", "rawSpec": VERSION, "resolved": PROTECTED_SOURCE},
+    "from": {"type": "version", "rawSpec": VERSION, "from": "file:../provider"},
+    "where": {"type": "version", "rawSpec": VERSION, "where": PROTECTED_SOURCE},
+    "unknown-member": {"type": "version", "rawSpec": VERSION, "anything": "x"},
+    "fetch-spec": {"type": "version", "rawSpec": VERSION, "fetchSpec": PROTECTED_SOURCE},
+    "other-name": {"type": "version", "rawSpec": VERSION, "name": "other"},
+    "other-scope": {"type": "version", "rawSpec": VERSION, "scope": "@other"},
+    "no-type": {"rawSpec": VERSION},
+    "empty": {},
+    "directory": {"type": "directory", "rawSpec": VERSION},
+}
+
+
+@requires_symlink_privilege
+def test_requested_object_names_only_registry_members(tmp_path, monkeypatch) -> None:
+    """Every member of the npm 6 request object is judged; one that is not part
+    of a registry request gives no identity whatever it holds, and the manifest
+    spec field is judged like the others."""
+
+    project, _ = _pinned_npm_install(tmp_path, monkeypatch)
+    real = {
+        "type": "version", "registry": True, "raw": f"{PROVIDER}@{VERSION}", "name": PROVIDER,
+        "escapedName": "@openclaw%2famazon-bedrock-provider", "scope": "@openclaw",
+        "rawSpec": VERSION, "saveSpec": None, "fetchSpec": VERSION,
+    }
+    cases = {
+        **{f"requested/{k}": ({"_requested": v}, False) for k, v in REQUESTED_MEMBERS_THAT_SAY_ANOTHER_SOURCE.items()},
+        "requested/real-npm6-shape": ({"_requested": real}, True),
+        "requested/range": ({"_requested": {**real, "type": "range", "rawSpec": "^2026.10.0", "fetchSpec": "^2026.10.0"}}, True),
+        "spec/registry": ({"_spec": f"{PROVIDER}@{VERSION}"}, True),
+        "spec/protected-file": ({"_spec": PROTECTED_SOURCE}, False),
+        "spec/relative-file": ({"_spec": "file:../provider"}, False),
+        "spec/not-text": ({"_spec": {"path": PROTECTED_SOURCE}}, False),
+    }
+    for label, (fields, admitted) in cases.items():
+        root, target = _case(project, tmp_path, label.replace("/", "-"))
+        _edit_manifest(target, lambda m, fields=fields: m.update(fields))
+        assert (vendor_identity.inspect_official_provider_tree(str(target)) is not None) == admitted, label
+        for profile in ("default", "permissive", "strict"):
+            high = _high(target, profile)
+            if admitted:
+                assert (profile == "strict") == ("SRC-EXEC" in high), f"{label} {profile}"
+            else:
+                assert "SRC-EXEC" in high, f"{label} {profile}"
+
+
+@requires_symlink_privilege
+def test_lock_that_is_present_and_cannot_be_read_gives_no_identity(tmp_path, monkeypatch) -> None:
+    """A lock file in the places the install record is read from that does not
+    parse into a lock gives the ordinary verdict; a missing lock, or one that
+    simply has no entry for the package, does not hold the install against."""
+
+    project, _ = _pinned_npm_install(tmp_path, monkeypatch)
+    unreadable = {
+        "invalid-json": b"{",
+        "empty-file": b"",
+        "not-an-object": b"[]",
+        "null": b"null",
+        "invalid-utf8": b"\xff\xfe{\x80",
+        "too-deep": b"[" * 100000,
+    }
+    readable = {
+        "no-entry": json.dumps({"lockfileVersion": 3, "packages": {}}).encode(),
+        "registry-entry": json.dumps({"lockfileVersion": 3, "packages": {
+            PACKAGE_KEY: {"version": VERSION, "resolved": _archive_address(VERSION)},
+        }}).encode(),
+    }
+    for place, locate in LOCK_PLACES.items():
+        for label, payload in {**unreadable, **readable, "absent": None}.items():
+            root, target = _case(project, tmp_path, f"{place}-{label}")
+            if payload is not None:
+                path = locate(root, target)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payload)
+            name = f"{place} {label}"
+            admitted = label not in unreadable
+            assert (vendor_identity.inspect_official_provider_tree(str(target)) is not None) == admitted, name
+            for profile in ("default", "permissive"):
+                assert ("SRC-EXEC" in _high(target, profile)) == (not admitted), f"{name} {profile}"
+            assert "SRC-EXEC" in _high(target, "strict"), f"{name} strict"
