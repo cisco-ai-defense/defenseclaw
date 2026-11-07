@@ -191,6 +191,24 @@ try {
             finally { Close-Holder $handle }
         }
 
+        # g582 round 11c. The delete probe the Codex file gate uses: a holder
+        # that denies delete sharing is seen, one that shares everything is not.
+        $probePath = [IO.Path]::Combine($Scratch, 'delete-probe.toml')
+        [IO.File]::WriteAllText($probePath, 'x')
+        if (Test-DefenseClawFileDeleteBlocked -Path $probePath) { throw 'delete probe: a file nobody holds reads as blocked' }
+        foreach ($case in @(
+                @{ Name = 'read sharing only'; Share = ($SHARE_R); Blocked = $true },
+                @{ Name = 'read and write sharing'; Share = ($SHARE_R -bor $SHARE_W); Blocked = $true },
+                @{ Name = 'write and delete sharing'; Share = ($SHARE_W -bor $SHARE_D); Blocked = $false },
+                @{ Name = 'everything shared'; Share = ($SHARE_R -bor $SHARE_W -bor $SHARE_D); Blocked = $false })) {
+            $handle = Open-Holder $probePath $READ_DATA $case.Share
+            try {
+                $got = [bool](Test-DefenseClawFileDeleteBlocked -Path $probePath)
+                if ($got -ne $case.Blocked) { throw "delete probe with a holder of $($case.Name): blocked=$got, want $($case.Blocked)" }
+            }
+            finally { Close-Holder $handle }
+        }
+
         # g582 round 11c twin. Secure Client keeps its stamp of a Codex state
         # copy, held or not (no tolerance, no refusal), and the recovery
         # helper that puts the requirements read back before the guardian

@@ -26900,6 +26900,21 @@ function Get-DefenseClawCodexFileHold {
         catch {
             $serviceSID = ''
         }
+        # The Codex reconcile publishes a changed requirements.toml by
+        # replacing the file, and a rollback puts the recorded file back the
+        # same way; a program that holds it without delete sharing stops both,
+        # and a run that fails after the services stopped then cannot roll
+        # back: they stay stopped and the transaction stays pending. Setup
+        # cannot know before it starts whether the file has to change, so a
+        # holder like that defers the run, found now with nothing stopped.
+        if (Test-DefenseClawFileDeleteBlocked -Path $requirements) {
+            return [pscustomobject]@{
+                Path = $requirements
+                Code = 'codex_requirements_held'
+                What = 'the Codex machine requirements'
+                Why  = 'open without delete sharing, so Setup could not replace it'
+            }
+        }
         # The access list is written only when it is not canonical already
         # (Set-DefenseClawPathAcl), and the write needs a file nobody holds
         # with write or delete access: found now, with nothing stopped.
@@ -27005,6 +27020,24 @@ function Test-DefenseClawFileReadBlocked {
     }
     catch [IO.IOException] {
         return ((([int]$_.Exception.HResult) -band 0xFFFF) -in @(32, 33))
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-DefenseClawFileDeleteBlocked {
+    <#
+        g582 round 11c: whether another handle keeps Path from being replaced
+        or deleted: an open for DELETE with every sharing mode allowed fails
+        with a sharing or lock violation (Win32 error 32 or 33) exactly then.
+        Any other refusal or a failed probe answers $false: the step that
+        needs the file reports it.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $native = Initialize-DefenseClawNativeSecurity
+        return ([int]$native::GetDirectoryOpenError($Path, [uint32]0x00010000) -in @(32, 33))
     }
     catch {
         return $false
