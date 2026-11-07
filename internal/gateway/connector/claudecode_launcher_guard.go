@@ -33,8 +33,8 @@ import (
 // and Secure Client hook registrations retain their exec form.
 //
 // An older cmd.exe guard and a direct launcher guard remain recognizable for
-// supported upgrade, teardown and rollback. A custom hook layout without the
-// small guard keeps its earlier form.
+// supported upgrade, teardown and rollback. Setup requires a working small
+// guard for every Windows launcher layout.
 //
 // Hook-shape compatibility rule (GAP-1284): a hook entry that release N
 // writes must keep a shape that every earlier 1.x teardown recognises, or
@@ -143,14 +143,6 @@ func claudeCodePreToolGuardArgs(launcher string, hookArgs []string) []string {
 	return append([]string{ClaudeCodeLauncherGuardSubcommand, launcher}, hookArgs...)
 }
 
-// ClaudeCodeLauncherGuardArgv returns the launcher and hook argv that the
-// PreToolUse guard runs for args, its arguments after the program name. Only
-// an absolute defenseclaw-hook.exe launcher with the per-user Claude Code hook
-// argv is accepted, so the guard starts nothing but DefenseClaw's launcher.
-func ClaudeCodeLauncherGuardArgv(args []string) (launcher string, hookArgs []string, ok bool) {
-	return hookguard.Argv(args)
-}
-
 // claudeCodeAbsoluteHookExecutable reports an absolute path whose file name is
 // defenseclaw-hook.exe.
 func claudeCodeAbsoluteHookExecutable(path string) bool {
@@ -183,11 +175,8 @@ func claudeCodePreToolGuardParts(hook map[string]interface{}) (string, []string,
 	if !ok || len(args) == 0 || args[0] != hookguard.Subcommand {
 		return "", nil, false
 	}
-	if len(args) == 7 && (args[5] != "--event" || args[6] != "PreToolUse") {
-		return "", nil, false
-	}
-	launcher, hookArgs, ok := ClaudeCodeLauncherGuardArgv(args)
-	if !ok || normalizeWindowsHookExecutable(launcher) == normalizeWindowsHookExecutable(command) {
+	launcher, hookArgs, _, wrapped, _, ok := hookguard.ParseInvocationMode(args)
+	if !ok || wrapped || normalizeWindowsHookExecutable(launcher) == normalizeWindowsHookExecutable(command) {
 		return "", nil, false
 	}
 	return launcher, hookArgs, true
@@ -286,6 +275,31 @@ func claudeCodeRecordedHookCommand(command string, args []string) string {
 }
 
 // claudeCodeWindowsHookInvocation is the per-user or managed Windows argv.
+func claudeCodeUnavailableOpen(opts SetupOpts) bool {
+	return !opts.ManagedEnterprise && !opts.SecureClientHookDelivery &&
+		!strings.EqualFold(strings.TrimSpace(opts.PolicyTier), "strict")
+}
+
+func claudeCodeChainAdmission(opts SetupOpts, command string, args []string, goos string) error {
+	if goos != "windows" || opts.ManagedEnterprise || opts.SecureClientHookDelivery {
+		return nil
+	}
+	launcher, _, guarded := claudeCodeCmdGuardParts(map[string]interface{}{"command": command, "args": args})
+	if !guarded {
+		launcher = command
+		if !hookguard.AbsoluteHookExecutable(launcher) {
+			return nil
+		}
+	}
+	if !claudeWrapperSafe(launcher) {
+		return fmt.Errorf("the Claude Code hook launcher path cannot be rendered by cmd.exe")
+	}
+	if guard, _ := claudeChainFor(launcher); guard == "" {
+		return fmt.Errorf("the Claude Code hook guard is unavailable; run the DefenseClaw installer again")
+	}
+	return nil
+}
+
 func claudeCodeWindowsHookInvocation(opts SetupOpts, executable string) (string, []string) {
 	args := []string{"hook", "--connector", "claudecode"}
 	if !opts.ManagedEnterprise && claudeCodeLauncherGuardable(executable) {
@@ -295,9 +309,10 @@ func claudeCodeWindowsHookInvocation(opts SetupOpts, executable string) (string,
 }
 
 // claudeCodeHandlerInvocation binds each event to the per-user Windows
-// chain when Setup installed one. The exact old forms remain available for a
-// supported custom layout and for release upgrade.
-func claudeCodeHandlerInvocation(eventType, command string, args []string) (string, []string) {
+// chain when Setup installed one. Exact older forms remain readable for
+// upgrade and teardown, but are not published again.
+func claudeCodeHandlerInvocation(eventType, command string, args []string, unavailableOpen ...bool) (string, []string) {
+	open := len(unavailableOpen) > 0 && unavailableOpen[0]
 	hook := map[string]interface{}{"command": command, "args": args}
 	launcher, hookArgs, ok := claudeCodeCmdGuardParts(hook)
 	if !ok {
@@ -308,20 +323,24 @@ func claudeCodeHandlerInvocation(eventType, command string, args []string) (stri
 			// The installed full hook remains an independent start path on
 			// packaged installs. A lost chain copy must not weaken it.
 			if direct := claudeCodePreToolGuardExecutable(launcher); direct != "" {
-				return direct, claudeGuardEventArgs(launcher, hookArgs, eventType, false)
+				return direct, claudeGuardEventArgs(launcher, hookArgs, eventType, false, open)
 			}
-			return guard, claudeGuardEventArgs(launcher, hookArgs, eventType, false)
+			return guard, claudeGuardEventArgs(launcher, hookArgs, eventType, false, open)
 		}
-		return claudeCodeWindowsCommandProcessor(), claudeGuardWrapperArgs(guard, approved, launcher, eventType, hookArgs)
+		return claudeCodeWindowsCommandProcessor(), claudeGuardWrapperArgs(guard, approved, launcher, eventType, hookArgs, open)
+	}
+	guard := claudeCodePreToolGuardExecutable(launcher)
+	if guard != "" {
+		guardArgs := claudeCodePreToolGuardArgs(launcher, hookArgs)
+		if eventType != "PreToolUse" || open {
+			guardArgs = claudeGuardEventArgs(launcher, hookArgs, eventType, false, open)
+		}
+		return guard, guardArgs
 	}
 	if eventType != "PreToolUse" {
-		return command, args
-	}
-	guardArgs := claudeCodePreToolGuardArgs(launcher, hookArgs)
-	if guard := claudeCodePreToolGuardExecutable(launcher); guard != "" {
-		if _, _, valid := ClaudeCodeLauncherGuardArgv(guardArgs); valid {
-			return guard, guardArgs
-		}
+		// Setup refuses to publish an incomplete chain. An empty command is
+		// the error value for callers that render before that preflight.
+		return "", nil
 	}
 	return launcher, hookArgs
 }

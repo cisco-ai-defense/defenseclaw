@@ -32,6 +32,7 @@ const claudeChainApprovedName = "defenseclaw-hook-guard.approved"
 const claudeChainMaxGuardBytes = 64 << 20
 
 var claudeChainMu sync.Mutex
+var claudeChainGatewayExecutable = os.Executable
 
 // claudeChainDir is outside the replaceable install tree. A registered
 // command stays valid while the installer swaps its binaries.
@@ -105,8 +106,8 @@ func claudeWrapperSafe(path string) bool {
 	return strings.ContainsAny(path, " \t") || !strings.ContainsAny(path, "&|<>^(),;=")
 }
 
-// claudeChainSource selects the small guard installed with either supported
-// Windows layout. A custom hook layout without it keeps its released form.
+// claudeChainSource selects the small guard installed with the launcher or
+// the running gateway. A custom launcher may live outside the gateway's bin.
 var claudeChainSource = func(launcher string) string {
 	if !hookguard.AbsoluteHookExecutable(launcher) {
 		return ""
@@ -117,6 +118,9 @@ var claudeChainSource = func(launcher string) string {
 		// inventory. A spare file beside HookRuntime's stable launcher is not
 		// the installer source for this layout.
 		candidates = []string{filepath.Join(filepath.Dir(installed), windowsHookGuardBinaryName)}
+	}
+	if gateway, err := claudeChainGatewayExecutable(); err == nil && strings.EqualFold(filepath.Base(gateway), windowsGatewayBinaryName) {
+		candidates = append(candidates, filepath.Join(filepath.Dir(gateway), windowsHookGuardBinaryName))
 	}
 	for _, candidate := range candidates {
 		if info, err := os.Lstat(candidate); err == nil && info.Mode().IsRegular() && info.Size() <= claudeChainMaxGuardBytes {
@@ -203,8 +207,11 @@ var claudeChainProbe = func(program, dir string) error {
 // Existing registrations keep their pair throughout an update.
 func ensureClaudeChain(launcher string) error {
 	dir := claudeChainDir()
-	if dir == "" || !claudeWrapperSafe(launcher) {
+	if dir == "" {
 		return nil
+	}
+	if !claudeWrapperSafe(launcher) {
+		return fmt.Errorf("the Claude Code hook launcher path cannot be rendered by cmd.exe")
 	}
 	rootFiles := claudeChainFilesIn(dir)
 	if !claudeWrapperSafe(rootFiles.guard) || !claudeWrapperSafe(rootFiles.approved) {
@@ -231,7 +238,7 @@ func ensureClaudeChain(launcher string) error {
 		if stable := canonicalNativeWindowsHookBinary(); stable != "" && pathidentity.Same(launcher, stable) {
 			return fmt.Errorf("the packaged Claude Code hook guard is unavailable; run the DefenseClaw installer again")
 		}
-		return nil
+		return fmt.Errorf("the Claude Code hook guard is unavailable; run the DefenseClaw installer again")
 	}
 	info, err := os.Lstat(source)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > claudeChainMaxGuardBytes {
@@ -334,28 +341,33 @@ var claudeChainFor = func(launcher string) (guard, approved string) {
 	return files.guard, files.approved
 }
 
-func claudeGuardEventArgs(launcher string, hookArgs []string, event string, wrapped bool) []string {
+func claudeGuardEventArgs(launcher string, hookArgs []string, event string, wrapped bool, unavailableOpen ...bool) []string {
 	command := hookguard.Subcommand
 	if wrapped {
 		command = hookguard.WrappedSubcommand
 	}
 	args := append([]string{command, launcher}, hookArgs...)
-	return append(args, "--event", event)
+	args = append(args, "--event", event)
+	if len(unavailableOpen) > 0 && unavailableOpen[0] {
+		args = append(args, "--unavailable-mode", "open")
+	}
+	return args
 }
 
 func claudeGuardCompareProgram() string {
 	return strings.TrimRight(windowsSystemDirectory(), `\/`) + `\fc.exe`
 }
 
-func claudeGuardWrapperArgs(guard, approved, launcher, event string, hookArgs []string) []string {
-	code := "2"
-	if hookguard.NeutralEvent(event) {
-		code = "1"
-	}
-	return claudeGuardWrapperArgsWith(claudeGuardCompareProgram(), guard, approved, launcher, event, hookArgs, code)
+func claudeGuardWrapperArgs(guard, approved, launcher, event string, hookArgs []string, unavailableOpen ...bool) []string {
+	open := len(unavailableOpen) > 0 && unavailableOpen[0]
+	return claudeGuardWrapperArgsWith(claudeGuardCompareProgram(), guard, approved, launcher, event, hookArgs, open)
 }
 
-func claudeGuardWrapperArgsWith(compare, guard, approved, launcher, event string, hookArgs []string, failCode string) []string {
+func claudeGuardWrapperArgsWith(compare, guard, approved, launcher, event string, hookArgs []string, unavailableOpen bool) []string {
+	failCode := "2"
+	if hookguard.NeutralEvent(event) || unavailableOpen {
+		failCode = "1"
+	}
 	warning := []string{"echo", "DefenseClaw", "could", "not", "start", "its", "Claude", "Code", "hook", "guard.",
 		"Run", "the", "DefenseClaw", "installer", "again", "to", "repair", "it.", "1>&2", "&", "exit", "/b", failCode}
 	fail := func() []string { return append([]string(nil), warning...) }
@@ -364,7 +376,7 @@ func claudeGuardWrapperArgsWith(compare, guard, approved, launcher, event string
 	args = append(args, ")", "&", compare, "/b", guard, approved, ">nul", "2>&1", "||", "(")
 	args = append(args, fail()...)
 	args = append(args, ")", "&", guard)
-	args = append(args, claudeGuardEventArgs(launcher, hookArgs, event, true)...)
+	args = append(args, claudeGuardEventArgs(launcher, hookArgs, event, true, unavailableOpen)...)
 	args = append(args,
 		"&", "set", "dc_hook_status=!errorlevel!",
 		"&", "if", "!dc_hook_status!", "equ", "0", "exit", "/b", "0",
@@ -404,16 +416,15 @@ func claudeGuardWrapperParts(hook map[string]interface{}) (string, []string, boo
 		if args[i] != guard || args[i+1] != hookguard.WrappedSubcommand {
 			continue
 		}
-		launcher, hookArgs, event, wrapped, valid := hookguard.ParseInvocation(args[i+1 : i+8])
-		if !valid || !wrapped || !claudeWrapperSafe(launcher) {
-			return "", nil, false
-		}
-		code := "2"
-		if hookguard.NeutralEvent(event) {
-			code = "1"
-		}
-		if slices.Equal(args, claudeGuardWrapperArgsWith(compare, guard, approved, launcher, event, hookArgs, code)) {
-			return launcher, hookArgs, true
+		for _, width := range []int{7, 9} {
+			if i+1+width > len(args) {
+				continue
+			}
+			launcher, hookArgs, event, wrapped, open, valid := hookguard.ParseInvocationMode(args[i+1 : i+1+width])
+			if valid && wrapped && claudeWrapperSafe(launcher) &&
+				slices.Equal(args, claudeGuardWrapperArgsWith(compare, guard, approved, launcher, event, hookArgs, open)) {
+				return launcher, hookArgs, true
+			}
 		}
 	}
 	return "", nil, false
