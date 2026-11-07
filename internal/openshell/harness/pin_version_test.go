@@ -42,11 +42,13 @@ func runPinnedVersionScript(t *testing.T, script, reply string, external interp.
 	runner, err := interp.New(
 		interp.Env(expand.ListEnviron("VERSION_REPLY="+reply)),
 		interp.StdIO(nil, &output, &output),
-		interp.ExecHandler(func(ctx context.Context, args []string) error {
-			if external != nil {
-				return external(ctx, args)
+		interp.ExecHandlers(func(interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+			return func(ctx context.Context, args []string) error {
+				if external != nil {
+					return external(ctx, args)
+				}
+				return fmt.Errorf("unexpected image command %q", args)
 			}
-			return fmt.Errorf("unexpected image command %q", args)
 		}),
 	)
 	if err != nil {
