@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -41,19 +42,26 @@ var ownerOfFile = fileOwnerUID
 // It is a variable so a test can stand in for a root-owned directory.
 var dirUsable = accountCanUseDir
 
-// RootOwnedStartBlockers returns what root owns under dataDir (GAP-0788) that
-// stops a gateway start by an account that is not root, and which of those
-// files also grant group or others access. A gateway stopped after a sudo run
-// leaves them: this account cannot read or replace them, so the start fails
-// inside the daemon with the raw protected-state text. It is the Go side of
-// Doctor root_owned_start_blockers and reads with lstat, which needs no read
-// access:
-//   - a root-owned file from the runtime list, of any mode; the gateway also
-//     refuses one that grants group or others access, so loose reports it and
-//     the repair takes that access away after the owner is returned;
-//   - StoreDirEntry when root owns the data directory and this account cannot
-//     write there, since a root-owned 0700 store hides every file in it;
-//   - the PID records in pidDir when that is another folder than dataDir;
+// RootOwnedStartBlockers returns what root owns that stops a gateway start by
+// an account that is not root (GAP-0788), and which of those files also grant
+// group or others access. A gateway stopped after a sudo run leaves them: this
+// account cannot read or replace them, so the start fails inside the daemon
+// with the raw protected-state text. It is the Go side of Doctor
+// root_owned_start_blockers and reads with lstat, which needs no read access.
+// Each file list is scoped to the folder the start reads it from:
+//   - dataDir is the store (cfg.DataDir): the runtime files from the list and
+//     the hooks folder with its tokens, of any mode; the gateway also refuses
+//     one that grants group or others access, so loose reports it and the
+//     repair takes that access away after the owner is returned. Its PID
+//     records belong to it only when pidDir is the same folder;
+//   - pidDir is the install home, where start validates the PID records: when
+//     it is another folder than dataDir only those records are scanned there
+//     (its hooks folder and the rest are not read by the start);
+//   - StoreDirEntry when root owns the store and this account cannot write
+//     there, since a root-owned 0700 store hides every file in it. loose then
+//     also lists the store with a trailing separator: the files inside cannot
+//     be seen, so the repair takes group and other access away from the
+//     runtime files it finds there after the owner is returned;
 //   - ai_discovery_state.json only when discovery is enabled, because the
 //     gateway reads it then and not otherwise.
 //
@@ -64,23 +72,28 @@ func RootOwnedStartBlockers(dataDir, pidDir string, aiDiscoveryEnabled bool) (bl
 	if dataDir == "" || os.Geteuid() <= 0 {
 		return nil, nil
 	}
+	pidsElsewhere := pidDir != "" && filepath.Clean(pidDir) != filepath.Clean(dataDir)
 	names := make([]string, 0, len(rootRuntimeLeftoverNames))
 	for _, name := range rootRuntimeLeftoverNames {
-		if aiDiscoveryEnabled || name != "ai_discovery_state.json" {
+		switch {
+		case name == "ai_discovery_state.json" && !aiDiscoveryEnabled:
+		case pidsElsewhere && slices.Contains(gatewayPIDRecordNames, name):
+		default:
 			names = append(names, name)
 		}
 	}
 	if info, err := os.Lstat(dataDir); err == nil && info.IsDir() && rootOwned(info) && !dirUsable(dataDir) {
 		blockers = append(blockers, StoreDirEntry)
+		loose = append(loose, filepath.Clean(dataDir)+string(filepath.Separator))
 	}
-	for _, entry := range rootOwnedRuntimeFiles(dataDir, names) {
+	for _, entry := range rootOwnedRuntimeFiles(dataDir, names, true) {
 		blockers = append(blockers, entry.rel)
 		if entry.loose {
 			loose = append(loose, filepath.Join(dataDir, entry.rel))
 		}
 	}
-	if pidDir != "" && filepath.Clean(pidDir) != filepath.Clean(dataDir) {
-		for _, entry := range rootOwnedRuntimeFiles(pidDir, gatewayPIDRecordNames) {
+	if pidsElsewhere {
+		for _, entry := range rootOwnedRuntimeFiles(pidDir, gatewayPIDRecordNames, false) {
 			path := filepath.Join(pidDir, entry.rel)
 			blockers = append(blockers, path)
 			if entry.loose {
@@ -91,15 +104,21 @@ func RootOwnedStartBlockers(dataDir, pidDir string, aiDiscoveryEnabled bool) (bl
 	return blockers, loose
 }
 
+// NamesGatewayPIDRecord reports whether a RootOwnedStartBlockers entry is one
+// of the PID records start and restart validate, in either folder.
+func NamesGatewayPIDRecord(blocker string) bool {
+	return slices.Contains(gatewayPIDRecordNames, filepath.Base(blocker))
+}
+
 type rootOwnedEntry struct {
 	rel   string
 	loose bool
 }
 
 // rootOwnedRuntimeFiles lists the root-owned regular files from names under
-// dir, and the hooks directory and its tokens, with whether each grants group
-// or others anything.
-func rootOwnedRuntimeFiles(dir string, names []string) []rootOwnedEntry {
+// dir and, with hooks, the hooks directory and its tokens, with whether each
+// grants group or others anything.
+func rootOwnedRuntimeFiles(dir string, names []string, hooks bool) []rootOwnedEntry {
 	var found []rootOwnedEntry
 	add := func(rel string) {
 		info, err := os.Lstat(filepath.Join(dir, rel))
@@ -110,6 +129,9 @@ func rootOwnedRuntimeFiles(dir string, names []string) []rootOwnedEntry {
 	}
 	for _, name := range names {
 		add(name)
+	}
+	if !hooks {
+		return found
 	}
 	hooksDir := filepath.Join(dir, "hooks")
 	info, err := os.Lstat(hooksDir)

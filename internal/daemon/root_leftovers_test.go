@@ -83,22 +83,59 @@ func TestRootOwnedStartBlockersNamesRootFilesOfAnyMode(t *testing.T) {
 	}
 }
 
-// A root-owned PID record is a blocker too, in the data directory and in the
-// install home when the store moved, so the identity refusal can report it.
-func TestRootOwnedStartBlockersNamesRootPIDRecords(t *testing.T) {
+// The start validates the PID records in the install home, so a root-owned
+// record there is a blocker; the same name in a moved store is not read by the
+// start and does not stop it (GAP-0788 review 2).
+func TestRootOwnedStartBlockersNamesRootPIDRecordsOfTheInstallHomeOnly(t *testing.T) {
 	store, home := t.TempDir(), t.TempDir()
-	pid := writeRuntimeFile(t, store, "gateway.pid", 0o600)
+	stale := writeRuntimeFile(t, store, "gateway.pid", 0o600)
 	watchdog := writeRuntimeFile(t, home, "watchdog.pid", 0o600)
 	writeRuntimeFile(t, home, "device.key", 0o600) // root-owned in a home the store left: not read
-	rootOwnedByName(t, pid, watchdog, filepath.Join(home, "device.key"))
+	rootOwnedByName(t, stale, watchdog, filepath.Join(home, "device.key"))
 	usableDirs(t, true)
 
 	blockers, loose := RootOwnedStartBlockers(store, home, true)
-	if got, want := strings.Join(blockers, ","), "gateway.pid,"+filepath.Join(home, "watchdog.pid"); got != want {
+	if got, want := strings.Join(blockers, ","), filepath.Join(home, "watchdog.pid"); got != want {
 		t.Fatalf("blockers = %q, want %q", got, want)
 	}
 	if len(loose) != 0 {
 		t.Fatalf("loose = %v", loose)
+	}
+	// With the store and the home one folder, the record is read from it.
+	blockers, _ = RootOwnedStartBlockers(store, store, true)
+	if got, want := strings.Join(blockers, ","), "gateway.pid"; got != want {
+		t.Fatalf("same folder: blockers = %q, want %q", got, want)
+	}
+}
+
+// The hook files are read from the store (cfg.DataDir/hooks), so a root-owned
+// hooks folder of the install home the store left is not a start blocker, and
+// the store own hooks folder is.
+func TestRootOwnedStartBlockersReadsTheHookFilesOfTheStoreNotTheInstallHome(t *testing.T) {
+	store, home := t.TempDir(), t.TempDir()
+	oldToken := writeRuntimeFile(t, home, "hooks/.hook-old.token", 0o600)
+	newToken := writeRuntimeFile(t, store, "hooks/.hook-new.token", 0o600)
+	rootOwnedByName(t, oldToken, filepath.Join(home, "hooks"), newToken)
+	usableDirs(t, true)
+
+	blockers, _ := RootOwnedStartBlockers(store, home, true)
+	if got, want := strings.Join(blockers, ","), "hooks/.hook-new.token"; got != want {
+		t.Fatalf("blockers = %q, want %q", got, want)
+	}
+	if blockers, _ = RootOwnedStartBlockers(store, store, true); strings.Join(blockers, ",") != "hooks/.hook-new.token" {
+		t.Fatalf("same folder blockers = %v", blockers)
+	}
+}
+
+// NamesGatewayPIDRecord recognises the records in either folder.
+func TestNamesGatewayPIDRecord(t *testing.T) {
+	for name, want := range map[string]bool{
+		"gateway.pid": true, "/home/u/.defenseclaw/watchdog.pid": true,
+		"active_connector.json": false, StoreDirEntry: false, "hooks/": false,
+	} {
+		if got := NamesGatewayPIDRecord(name); got != want {
+			t.Errorf("NamesGatewayPIDRecord(%q) = %v, want %v", name, got, want)
+		}
 	}
 }
 
@@ -109,8 +146,12 @@ func TestRootOwnedStartBlockersNamesAStoreTheAccountCannotUse(t *testing.T) {
 	dir := t.TempDir()
 	rootOwnedByName(t, dir)
 	usableDirs(t, false)
-	if blockers, _ := RootOwnedStartBlockers(dir, "", true); strings.Join(blockers, ",") != StoreDirEntry {
+	blockers, loose := RootOwnedStartBlockers(dir, "", true)
+	if strings.Join(blockers, ",") != StoreDirEntry {
 		t.Fatalf("blockers = %v, want the store itself", blockers)
+	}
+	if want := dir + string(filepath.Separator); strings.Join(loose, ",") != want {
+		t.Fatalf("loose = %v, want the store as a folder to sweep (%q)", loose, want)
 	}
 	usableDirs(t, true)
 	if blockers, _ := RootOwnedStartBlockers(dir, "", true); len(blockers) != 0 {
@@ -206,5 +247,30 @@ func TestRootLeftoversRemedyTakesAwayGroupAndOtherAccessBeforeTheStart(t *testin
 	}
 	if strings.Contains(RootLeftoversRemedy(home, nil), "chmod") {
 		t.Fatal("a chain with nothing loose runs chmod")
+	}
+}
+
+// A store root owns and the account cannot enter hides its files, so the chain
+// sweeps the runtime files in it after the owner is returned, and a visible
+// file gets the plain chmod. Without a hidden store there is no find.
+func TestRootLeftoversRemedySweepsAHiddenStoreAfterTheReturn(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_CONFIG", "")
+	store := filepath.Join(t.TempDir(), "moved store") + string(filepath.Separator)
+	remedy := RootLeftoversRemedy(home, []string{store})
+	sweep := " && find " + shellQuote(store) + " -maxdepth 2 -type f \\( -name gateway.pid -o "
+	if !strings.Contains(remedy, sweep) || !strings.HasSuffix(remedy, " -path '*/hooks/.hook-*.token' \\) -exec chmod go-rwx {} + && defenseclaw-gateway start") {
+		t.Fatalf("remedy has no sweep of the hidden store before the start: %q", remedy)
+	}
+	for _, name := range rootRuntimeLeftoverNames {
+		if !strings.Contains(remedy, "-name "+name) {
+			t.Errorf("sweep does not cover %s: %q", name, remedy)
+		}
+	}
+	if strings.Index(remedy, "chown -R") > strings.Index(remedy, "find ") {
+		t.Fatalf("the sweep runs before the owner is returned: %q", remedy)
+	}
+	if strings.Contains(RootLeftoversRemedy(home, []string{filepath.Join(home, "x.json")}), "find ") {
+		t.Fatal("a visible file is repaired with a sweep")
 	}
 }

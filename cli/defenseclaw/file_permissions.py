@@ -398,13 +398,15 @@ def _root_owned_runtime_files(
     names: tuple[str, ...],
     *,
     private_only: bool,
+    hooks: bool = True,
 ) -> list[tuple[str, bool]]:
     """``(relative path, group/other bits set)`` of root-owned files under *data_dir*.
 
     ``lstat`` needs no read access. With *private_only* a file that grants
     group or others anything is left out (the Sudo leftovers row of Doctor); without
     it the file is named and flagged, because the gateway refuses such a file
-    too and a change of owner alone does not repair it.
+    too and a change of owner alone does not repair it. Without *hooks* the
+    hooks folder and its tokens are not scanned.
     """
 
     if os.name == "nt" or not hasattr(os, "geteuid") or os.geteuid() == 0:
@@ -427,6 +429,8 @@ def _root_owned_runtime_files(
     for name in names:
         add(name)
 
+    if not hooks:
+        return found
     hooks_dir = os.path.join(root, "hooks")
     try:
         info = os.lstat(hooks_dir)
@@ -467,16 +471,31 @@ def root_owned_start_blockers(
     Returns ``(blockers, loose)``: the paths to name, and the ones of those
     whose group/other bits the gateway also refuses, which the repair must
     take away after the owner is returned. Unlike the Sudo leftovers row this
-    names a root-owned file of any mode, the data directory itself when root
-    owns it and this account cannot write there (its files are then invisible,
-    as in a root-owned 0700 moved store), and the PID records in *pid_dir*
-    when that is another folder. The AI discovery state is named only when
-    discovery is enabled: the gateway reads it then and not otherwise.
+    names a root-owned file of any mode. Each file list is scoped to the
+    folder the start reads it from: *data_dir* is the store, with the runtime
+    files and the hooks folder with its tokens (its PID records only when
+    *pid_dir* is the same folder); *pid_dir* is the install home, where start
+    validates the PID records, and when it is another folder only those are
+    scanned there. The store itself is named (``STORE_DIR_ENTRY``) when root
+    owns it and this account cannot write there, as with a root-owned 0700
+    moved store: its files are invisible, so *loose* then also holds the store
+    with a trailing separator, for the repair to take group and other access
+    away from the runtime files it finds there once the owner is returned. The
+    AI discovery state is named only when discovery is enabled: the gateway
+    reads it then and not otherwise.
     """
 
     if os.name == "nt" or not hasattr(os, "geteuid") or os.geteuid() == 0:
         return [], []
-    names = tuple(n for n in SUDO_RUNTIME_LEFTOVER_NAMES if ai_discovery_enabled or n != "ai_discovery_state.json")
+    pids_elsewhere = pid_dir is not None and os.path.abspath(os.fspath(pid_dir)) != os.path.abspath(
+        os.fspath(data_dir)
+    )
+    names = tuple(
+        n
+        for n in SUDO_RUNTIME_LEFTOVER_NAMES
+        if (ai_discovery_enabled or n != "ai_discovery_state.json")
+        and not (pids_elsewhere and n in GATEWAY_PID_RECORD_NAMES)
+    )
     blockers: list[str] = []
     loose: list[str] = []
     try:
@@ -490,12 +509,15 @@ def root_owned_start_blockers(
         and not os.access(data_dir, os.W_OK | os.X_OK)
     ):
         blockers.append(STORE_DIR_ENTRY)
+        loose.append(os.path.join(os.path.normpath(os.fspath(data_dir)), ""))
     for rel, is_loose in _root_owned_runtime_files(data_dir, names, private_only=False):
         blockers.append(rel)
         if is_loose:
             loose.append(os.path.join(os.fspath(data_dir), rel))
-    if pid_dir is not None and os.path.abspath(os.fspath(pid_dir)) != os.path.abspath(os.fspath(data_dir)):
-        for rel, is_loose in _root_owned_runtime_files(pid_dir, GATEWAY_PID_RECORD_NAMES, private_only=False):
+    if pids_elsewhere:
+        for rel, is_loose in _root_owned_runtime_files(
+            pid_dir, GATEWAY_PID_RECORD_NAMES, private_only=False, hooks=False
+        ):
             path = os.path.join(os.fspath(pid_dir), rel)
             blockers.append(path)
             if is_loose:

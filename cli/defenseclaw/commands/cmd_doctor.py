@@ -130,6 +130,7 @@ from defenseclaw.envvars import active_security_overrides
 from defenseclaw.file_lock import FileLockTimeoutError, locked_file_update
 from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
+    SUDO_RUNTIME_LEFTOVER_NAMES,
     atomic_write_private_bytes,
     darwin_acl_confidentiality_error,
     darwin_acl_write_error,
@@ -1936,9 +1937,34 @@ def _root_gateway_return_and_start_command(cfg, loosen: tuple[str, ...] = ()) ->
     return (
         'sudo chown -R "$(id -un)" '
         + " ".join(shlex.quote(item) for item in homes)
-        + (" && chmod go-rwx " + " ".join(shlex.quote(item) for item in loosen) if loosen else "")
+        + "".join(" && " + step for step in _root_gateway_loosen_steps(loosen))
         + " && defenseclaw-gateway start"
     )
+
+
+def _root_gateway_loosen_steps(loosen: tuple[str, ...]) -> list[str]:
+    """Take group and other access away from the files the owner return leaves loose.
+
+    A path that ends in a separator is a folder whose files could not be seen
+    (a root-owned 0700 store): a ``find`` over it takes the access away from
+    the runtime files it holds. Go renders the same steps in
+    ``rootGatewayLoosenStep``.
+    """
+    files = [item for item in loosen if not item.endswith(os.sep)]
+    folders = [item for item in loosen if item.endswith(os.sep)]
+    steps: list[str] = []
+    if files:
+        steps.append("chmod go-rwx " + " ".join(shlex.quote(item) for item in files))
+    if folders:
+        tests = [f"-name {name}" for name in SUDO_RUNTIME_LEFTOVER_NAMES] + ["-path '*/hooks/.hook-*.token'"]
+        steps.append(
+            "find "
+            + " ".join(shlex.quote(item) for item in folders)
+            + " -maxdepth 2 -type f \\( "
+            + " -o ".join(tests)
+            + " \\) -exec chmod go-rwx {} +"
+        )
+    return steps
 
 
 def _root_gateway_moved_store() -> tuple[str, str, bool]:

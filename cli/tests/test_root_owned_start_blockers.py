@@ -68,7 +68,10 @@ def test_the_sudo_leftovers_row_still_names_private_files_only(tmp_path, monkeyp
 def test_a_root_owned_store_this_account_cannot_use_is_named_as_a_whole(tmp_path, monkeypatch):
     _owned_by_root(monkeypatch, tmp_path)
     monkeypatch.setattr(fp.os, "access", lambda *_a, **_k: False)
-    assert fp.root_owned_start_blockers(tmp_path, ai_discovery_enabled=True) == ([fp.STORE_DIR_ENTRY], [])
+    blockers, loose = fp.root_owned_start_blockers(tmp_path, ai_discovery_enabled=True)
+    assert blockers == [fp.STORE_DIR_ENTRY]
+    # Its files are invisible, so the store is also listed as a folder to sweep.
+    assert loose == [os.fspath(tmp_path) + os.sep]
 
     # The benign twin: the same owner with write access to the store is no blocker.
     monkeypatch.setattr(fp.os, "access", lambda *_a, **_k: True)
@@ -86,15 +89,32 @@ def test_discovery_state_blocks_only_while_discovery_is_enabled(tmp_path, monkey
 def test_a_root_owned_pid_record_in_the_install_home_blocks_a_moved_store(tmp_path, monkeypatch):
     store = tmp_path / "store"
     home = tmp_path / "home"
-    store.mkdir()
+    stale = _write(store, "gateway.pid", 0o600)  # the start reads the record from the home, not here
     pid = _write(home, "gateway.pid", 0o600)
     _write(home, "device.key", 0o600)  # root-owned in a home the store left: not read
-    _owned_by_root(monkeypatch, pid, home / "device.key")
+    _owned_by_root(monkeypatch, stale, pid, home / "device.key")
 
     blockers, loose = fp.root_owned_start_blockers(store, ai_discovery_enabled=True, pid_dir=home)
 
     assert blockers == [str(pid)]
     assert loose == []
+    # With the store and the install home one folder, the record is read from it.
+    assert fp.root_owned_start_blockers(store, ai_discovery_enabled=True, pid_dir=store)[0] == ["gateway.pid"]
+
+
+def test_the_hook_files_are_read_from_the_store_not_the_install_home(tmp_path, monkeypatch):
+    store = tmp_path / "store"
+    home = tmp_path / "home"
+    old_token = _write(home, "hooks/.hook-old.token", 0o600)
+    new_token = _write(store, "hooks/.hook-new.token", 0o600)
+    _owned_by_root(monkeypatch, old_token, home / "hooks", new_token)
+
+    blockers, _ = fp.root_owned_start_blockers(store, ai_discovery_enabled=True, pid_dir=home)
+
+    assert blockers == ["hooks/.hook-new.token"]
+    # The benign twin: nothing root-owned under the store, a stale hooks folder in the old home.
+    new_token.unlink()
+    assert fp.root_owned_start_blockers(store, ai_discovery_enabled=True, pid_dir=home) == ([], [])
 
 
 def test_an_account_owned_store_has_no_blockers(tmp_path):

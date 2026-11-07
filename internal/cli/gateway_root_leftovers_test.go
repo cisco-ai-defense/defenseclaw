@@ -161,3 +161,46 @@ func TestRefuseOverRootOwnedStateReplacesOnlyARootOwnedCause(t *testing.T) {
 		t.Fatalf("an identity error with no root-owned cause was replaced: %v", err)
 	}
 }
+
+// A PID record the account owns can be malformed while another runtime file is
+// root-owned. Returning the ownership does not make the record valid, so the
+// identity error and its guidance stay first and the root-owned report follows
+// (GAP-0788 review 2).
+func TestRefuseOverRootOwnedStateKeepsAnIndependentPIDCause(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	identityErr := errors.New("gateway PID record is malformed")
+
+	stubRootRuntimeLeftovers(t, "active_connector.json")
+	for _, verb := range []string{"start", "restart"} {
+		err := refuseOverRootOwnedState(startCmd, verb, identityErr)
+		if err == nil || !errors.Is(err, identityErr) {
+			t.Fatalf("%s: the PID reason was lost: %v", verb, err)
+		}
+		for _, want := range []string{"active_connector.json", `sudo chown -R "$(id -un)" `, "cannot " + verb + " the gateway"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: mixed refusal lacks %q: %v", verb, want, err)
+			}
+		}
+		if strings.Index(err.Error(), identityErr.Error()) > strings.Index(err.Error(), "active_connector.json") {
+			t.Errorf("%s: the PID reason does not come first: %v", verb, err)
+		}
+	}
+}
+
+// A root-owned install home the account cannot enter hides its PID records, so
+// the store entry is the PID cause only when the store is the install home.
+func TestRootOwnedStartRefusalAttributesAHiddenStoreToThePIDCheckOnlyInTheInstallHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", home)
+	stubRootRuntimeLeftovers(t, "./")
+	cfg := config.DefaultConfig()
+
+	cfg.DataDir = config.DefaultDataPath()
+	if refusal, pidCause := rootOwnedStartRefusal(cfg, "start"); refusal == nil || !pidCause {
+		t.Fatalf("hidden install home: refusal=%v pidCause=%v", refusal, pidCause)
+	}
+	cfg.DataDir = filepath.Join(t.TempDir(), "moved")
+	if refusal, pidCause := rootOwnedStartRefusal(cfg, "start"); refusal == nil || pidCause {
+		t.Fatalf("hidden moved store: refusal=%v pidCause=%v", refusal, pidCause)
+	}
+}

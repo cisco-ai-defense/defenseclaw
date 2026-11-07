@@ -932,6 +932,30 @@ class DoctorGuardrailTests(unittest.TestCase):
             remediation,
         )
 
+    def test_stopped_gateway_chain_sweeps_a_hidden_store_after_the_owner_return(self):
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = self._sidecar_alignment_cfg()
+        store = "/tmp/moved store" + os.sep
+        with patch.object(
+            cmd_doctor,
+            "root_owned_start_blockers",
+            return_value=(["./"], [store]),
+        ):
+            detail, remediation = cmd_doctor._stopped_gateway_start_advice(cfg)
+        self.assertIn("./", detail)
+        sweep = " && find " + shlex.quote(store) + " -maxdepth 2 -type f \\( -name gateway.pid -o "
+        self.assertIn(sweep, remediation)
+        self.assertTrue(
+            remediation.endswith(
+                " -path '*/hooks/.hook-*.token' \\) -exec chmod go-rwx {} + && defenseclaw-gateway start"
+            ),
+            remediation,
+        )
+        for name in cmd_doctor.SUDO_RUNTIME_LEFTOVER_NAMES:
+            self.assertIn("-name " + name, remediation)
+        self.assertLess(remediation.index("chown -R"), remediation.index("find "))
+
     def test_stopped_gateway_blocker_asks_about_the_configured_discovery(self):
         from defenseclaw.commands import cmd_doctor
 
