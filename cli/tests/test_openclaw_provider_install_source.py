@@ -18,6 +18,7 @@ import base64
 import hashlib
 import http.client
 import json
+import os
 import shutil
 import urllib.error
 
@@ -636,6 +637,7 @@ def test_install_below_protected_state_is_judged_by_its_source_only(tmp_path, mo
             ), f"{label} {profile}"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="a file name cannot hold a colon on Windows, so the link this test needs cannot exist there")
 @requires_symlink_privilege
 def test_registry_address_is_identity_data_and_never_a_path(tmp_path, monkeypatch) -> None:
     """A local link named like the scheme of an address changes nothing."""
