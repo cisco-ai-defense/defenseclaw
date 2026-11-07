@@ -17,6 +17,7 @@
 package watcher
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -24,6 +25,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -215,7 +217,7 @@ func hermesPluginTreeDigest(path string, load hermesManifestLoader) (string, err
 			if err != nil {
 				return err
 			}
-			if !declared.declares(info) {
+			if !declared.declares(info, name) {
 				return nil
 			}
 		}
@@ -294,10 +296,14 @@ const hermesManifestMaxEntrypoints = 10000
 // manifest that is shadowed by another still binds its files. An entrypoint is
 // resolved as a path under dir, as the scanner does, with links followed and
 // with the name taken both as written and with its dot segments folded, so the
-// set is a superset of what the scanner opens. ok is false when a manifest
-// exists that cannot be read, or the scanner cannot answer; the caller then
-// treats every file as declared.
-func hermesDeclaredFiles(root *os.Root, dir string, load hermesManifestLoader) (declared []fs.FileInfo, ok bool) {
+// set is a superset of what the scanner opens. The mode says how to read the
+// result: when a manifest exists that cannot be read, or the scanner cannot
+// answer under a strict or managed policy, every file counts as declared; when
+// the scanner cannot answer under a policy that fails open (a per-user default
+// or permissive tier), a file counts as declared when a manifest holds its name
+// (texts), so a known protected file stays bound and an ordinary generated
+// cache file is not rejected for an outage of the reader.
+func hermesDeclaredFiles(root *os.Root, dir string, load hermesManifestLoader) (declared []fs.FileInfo, texts [][]byte, mode hermesDeclaredMode) {
 	manifests := map[string][]byte{}
 	for _, name := range hermesManifestFiles {
 		rel := filepath.FromSlash(name)
@@ -306,7 +312,7 @@ func hermesDeclaredFiles(root *os.Root, dir string, load hermesManifestLoader) (
 			continue
 		}
 		if err != nil {
-			return nil, false
+			return nil, nil, hermesDeclaredEvery
 		}
 		if !info.Mode().IsRegular() {
 			// The scanner reads a manifest only when it is a plain file.
@@ -314,21 +320,29 @@ func hermesDeclaredFiles(root *os.Root, dir string, load hermesManifestLoader) (
 		}
 		file, err := root.Open(rel)
 		if err != nil {
-			return nil, false
+			return nil, nil, hermesDeclaredEvery
 		}
 		data, err := io.ReadAll(io.LimitReader(file, hermesPluginMaxFileBytes+1))
 		file.Close()
 		if err != nil || len(data) > hermesPluginMaxFileBytes {
-			return nil, false
+			return nil, nil, hermesDeclaredEvery
 		}
 		manifests[name] = data
 	}
 	if len(manifests) == 0 {
-		return nil, true
+		return nil, nil, hermesDeclaredByScanner
 	}
 	entrypoints, err := load(manifests)
+	if errors.Is(err, errHermesManifestFailOpen) {
+		for _, name := range hermesManifestFiles {
+			if data, found := manifests[name]; found {
+				texts = append(texts, bytes.ToLower(data))
+			}
+		}
+		return nil, texts, hermesDeclaredByName
+	}
 	if err != nil || len(entrypoints) > hermesManifestMaxEntrypoints {
-		return nil, false
+		return nil, nil, hermesDeclaredEvery
 	}
 	for _, value := range entrypoints {
 		value = strings.TrimLeft(strings.TrimSpace(value), "/\\")
@@ -342,8 +356,21 @@ func hermesDeclaredFiles(root *os.Root, dir string, load hermesManifestLoader) (
 			}
 		}
 	}
-	return declared, true
+	return declared, nil, hermesDeclaredByScanner
 }
+
+// hermesDeclaredMode says how the result of hermesDeclaredFiles is read.
+type hermesDeclaredMode int
+
+const (
+	// hermesDeclaredByScanner: the files are exactly what the scanner declared.
+	hermesDeclaredByScanner hermesDeclaredMode = iota
+	// hermesDeclaredByName: the scanner could not answer and the policy fails
+	// open; a file is declared when a manifest holds its name.
+	hermesDeclaredByName
+	// hermesDeclaredEvery: every file counts as declared.
+	hermesDeclaredEvery
+)
 
 // hermesDeclaredSet answers whether a manifest declares a file, reading the
 // manifests of one plugin root at most once.
@@ -353,17 +380,28 @@ type hermesDeclaredSet struct {
 	load   hermesManifestLoader
 	loaded bool
 	files  []fs.FileInfo
-	ok     bool
+	texts  [][]byte
+	mode   hermesDeclaredMode
 }
 
-// declares reports whether a manifest names the file described by info, or
-// may name it because a manifest could not be read.
-func (s *hermesDeclaredSet) declares(info fs.FileInfo) bool {
+// declares reports whether a manifest names the file described by info (at
+// rel, slash-separated, under the plugin folder), or may name it because a
+// manifest could not be read (see hermesDeclaredFiles).
+func (s *hermesDeclaredSet) declares(info fs.FileInfo, rel string) bool {
 	if !s.loaded {
-		s.files, s.ok = hermesDeclaredFiles(s.root, s.dir, s.load)
+		s.files, s.texts, s.mode = hermesDeclaredFiles(s.root, s.dir, s.load)
 		s.loaded = true
 	}
-	return !s.ok || slices.ContainsFunc(s.files, func(d fs.FileInfo) bool { return os.SameFile(info, d) })
+	switch s.mode {
+	case hermesDeclaredEvery:
+		return true
+	case hermesDeclaredByName:
+		// The name alone, folded to lower case as a case-insensitive disk
+		// folds it: any spelling of a path that ends in it holds it.
+		name := []byte(strings.ToLower(path.Base(rel)))
+		return slices.ContainsFunc(s.texts, func(text []byte) bool { return bytes.Contains(text, name) })
+	}
+	return slices.ContainsFunc(s.files, func(d fs.FileInfo) bool { return os.SameFile(info, d) })
 }
 
 // skippedTreeHash describes what SnapshotTarget leaves out of a plugin, as
@@ -386,14 +424,15 @@ func skippedTreeHash(root string, load hermesManifestLoader) string {
 	// declaredEntrypoint reports a bytecode cache file the scanner can read
 	// because a manifest declares it; the manifests are read at most once. A
 	// plugin folder that cannot be opened has every cache file declared.
-	declared := &hermesDeclaredSet{loaded: true}
+	declared := &hermesDeclaredSet{loaded: true, mode: hermesDeclaredEvery}
 	if rootHandle, err := os.OpenRoot(root); err == nil {
 		defer rootHandle.Close()
 		declared = &hermesDeclaredSet{root: rootHandle, dir: root, load: load}
 	}
-	declaredEntrypoint := func(path string) bool {
-		info, err := os.Lstat(path)
-		return err != nil || declared.declares(info)
+	declaredEntrypoint := func(file string) bool {
+		info, err := os.Lstat(file)
+		rel, relErr := filepath.Rel(root, file)
+		return err != nil || relErr != nil || declared.declares(info, filepath.ToSlash(rel))
 	}
 	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		rel, relErr := filepath.Rel(root, path)

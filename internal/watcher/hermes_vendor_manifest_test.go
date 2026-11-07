@@ -32,6 +32,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -217,7 +219,7 @@ func TestHermesManifestLoaderAsksTheScannerOncePerManifest(t *testing.T) {
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	load := newHermesManifestLoader(&scanner.PluginScanner{BinaryPath: script})
+	load := newHermesManifestCache().loader(&scanner.PluginScanner{BinaryPath: script})
 	runs := func() int {
 		data, _ := os.ReadFile(count)
 		return strings.Count(string(data), "x")
@@ -234,5 +236,164 @@ func TestHermesManifestLoaderAsksTheScannerOncePerManifest(t *testing.T) {
 	}
 	if _, err := load(map[string][]byte{"plugin.yaml": []byte("name: q\n")}); err != nil || runs() != 2 {
 		t.Fatalf("changed manifest: err %v, %d runs", err, runs())
+	}
+}
+
+// hermesReplyScript writes a launcher named defenseclaw that prints reply
+// (or fails when reply is empty) and returns its path.
+func hermesReplyScript(t *testing.T, reply string) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "defenseclaw")
+	body := "#!/bin/sh\ncat >/dev/null\nexit 1\n"
+	if reply != "" {
+		body = fmt.Sprintf("#!/bin/sh\ncat >/dev/null\nprintf %%s %q\n", reply)
+	}
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
+// GAP-0645 review 19: a reply that carries no entrypoints list is not the
+// answer "declares nothing". Only an explicit empty list is.
+func TestHermesManifestReplyWithoutEntrypointsListIsNotAnAnswer(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture")
+	}
+	manifests := map[string][]byte{"plugin.yaml": []byte("name: p\n")}
+	for _, reply := range []string{"{}", `{"entrypoints":null}`, "null", "[]", `{"entry":["a"]}`, "", "not json"} {
+		reply := reply
+		t.Run(reply, func(t *testing.T) {
+			ps := &scanner.PluginScanner{BinaryPath: hermesReplyScript(t, reply)}
+			if got, err := ps.DeclaredEntrypoints(context.Background(), manifests); err == nil {
+				t.Fatalf("reply %q accepted as %q", reply, got)
+			}
+		})
+	}
+	ps := &scanner.PluginScanner{BinaryPath: hermesReplyScript(t, `{"entrypoints":[]}`)}
+	if got, err := ps.DeclaredEntrypoints(context.Background(), manifests); err != nil || len(got) != 0 {
+		t.Fatalf("an explicit empty list = %q, %v", got, err)
+	}
+}
+
+// The incomplete reply binds a cache file a manifest names directly, in the
+// full tree hash, whatever the policy: strict binds every cache file, the
+// per-user default binds the named one.
+func TestHermesManifestIncompleteReplyStillBindsNamedCacheFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture")
+	}
+	dir := t.TempDir()
+	writePluginFile(t, filepath.Join(dir, "plugin.yaml"), "name: p\nmain: __pycache__/Entry.cpython-312.pyc\n")
+	named := filepath.Join(dir, "__pycache__", "entry.cpython-312.pyc")
+	other := filepath.Join(dir, "__pycache__", "other.cpython-312.pyc")
+	writePluginFile(t, named, "one")
+	writePluginFile(t, other, "one")
+	for _, open := range []bool{true, false} {
+		ps := &scanner.PluginScanner{BinaryPath: hermesReplyScript(t, "{}")}
+		cache := newHermesManifestCache()
+		load := cache.byPolicy(cache.loader(ps), func() bool { return open })
+		first := skippedTreeHash(dir, load)
+		writePluginFile(t, named, "two")
+		if skippedTreeHash(dir, load) == first {
+			t.Errorf("open=%v: an edit of the named cache file was not seen", open)
+		}
+		writePluginFile(t, named, "one")
+	}
+}
+
+// GAP-0645 review 19: while the scanner cannot answer, the per-user default
+// and permissive tiers warn and leave an ordinary generated cache file alone,
+// and a strict or managed policy counts every cache file as declared.
+func TestHermesManifestFailureFollowsThePolicyTier(t *testing.T) {
+	dir := t.TempDir()
+	writePluginFile(t, filepath.Join(dir, "plugin.yaml"), "name: p\nmain: lib/run.js\n")
+	writePluginFile(t, filepath.Join(dir, "package.json"), `{"main": "__pycache__/Named.cpython-312.pyc"}`)
+	named := filepath.Join(dir, "__pycache__", "named.cpython-312.pyc")
+	ordinary := filepath.Join(dir, "__pycache__", "generated.cpython-312.pyc")
+	writePluginFile(t, named, "one")
+	writePluginFile(t, ordinary, "one")
+	failing := func(map[string][]byte) ([]string, error) {
+		return nil, fmt.Errorf("%w: scanner unavailable", errHermesManifestFailOpen)
+	}
+	base := skippedTreeHash(dir, failing)
+	if base == "" {
+		t.Fatal("the cache file a manifest names was not hashed while the scanner cannot answer")
+	}
+	writePluginFile(t, ordinary, "two")
+	if skippedTreeHash(dir, failing) != base {
+		t.Error("an ordinary cache write changed the hash under a fail-open policy")
+	}
+	writePluginFile(t, named, "two")
+	if skippedTreeHash(dir, failing) == base {
+		t.Error("an edit of a named cache file was not seen under a fail-open policy")
+	}
+}
+
+// The watcher chooses the fallback from the policy of the current
+// configuration, and follows a reload of the scanner it points at.
+func TestHermesManifestLoaderFollowsPolicyAndConfigurationReload(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture")
+	}
+	manifests := map[string][]byte{"plugin.yaml": []byte("name: p\n")}
+	older := hermesReplyScript(t, `{"entrypoints":[]}`)
+	newer := hermesReplyScript(t, `{"entrypoints":["__pycache__/x.pyc"]}`)
+	broken := hermesReplyScript(t, "")
+
+	cfg := &config.Config{}
+	cfg.Scanners.PluginScanner = older
+	w := &InstallWatcher{cfg: cfg}
+	if got, err := w.manifestLoader()(manifests); err != nil || len(got) != 0 {
+		t.Fatalf("older scanner = %q, %v", got, err)
+	}
+	cfg.Scanners.PluginScanner = newer
+	if got, err := w.manifestLoader()(manifests); err != nil || !slices.Equal(got, []string{"__pycache__/x.pyc"}) {
+		t.Fatalf("after a reload the watcher still reads the older answer: %q, %v", got, err)
+	}
+
+	cfg.Scanners.PluginScanner = broken
+	if _, err := w.manifestLoader()(manifests); !errors.Is(err, errHermesManifestFailOpen) {
+		t.Fatalf("per-user default: error %v is not the fail-open fallback", err)
+	}
+	cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	if _, err := w.manifestLoader()(manifests); err == nil || errors.Is(err, errHermesManifestFailOpen) {
+		t.Fatalf("managed: error %v must stay closed", err)
+	}
+}
+
+// GAP-0645 review 19, through the watcher: while the manifest reader fails, an
+// ordinary generated cache write of a shipped plugin is not a scan or an
+// admission under the per-user default, and is scanned under a managed policy.
+func TestHermesManifestFailureInWatcherFollowsThePolicyTier(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mode      string
+		wantScans int
+	}{
+		{"per-user default", "", 0},
+		{"managed", managed.DeploymentModeManagedEnterprise, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHermesPluginFixture(t)
+			path := f.plugin(f.bundledRoot, "web/ddgs")
+			writePluginFile(t, filepath.Join(path, "plugin.yaml"), "name: p\nmain: lib/run.js\n")
+			writePluginFile(t, filepath.Join(path, "lib", "run.js"), "safe()\n")
+			f.pinVendor("web/ddgs", path)
+			f.w.runRescanCycle(context.Background())
+			f.unscannedVendor(path)
+			admitted := len(f.admitted[path])
+			f.w.cfg.DeploymentMode = tc.mode
+			f.w.hermesManifests = func(map[string][]byte) ([]string, error) { return nil, errors.New("manifest command unavailable") }
+			writePluginFile(t, filepath.Join(path, "__pycache__", "run.pyc"), "generated cache")
+			f.w.runRescanCycle(context.Background())
+			if got := f.scan.scans(path); got != tc.wantScans {
+				t.Errorf("ordinary cache rewrite caused %d scans, want %d", got, tc.wantScans)
+			}
+			if got := len(f.admitted[path]); tc.wantScans == 0 && got != admitted {
+				t.Errorf("an ordinary cache rewrite caused %d admissions", got-admitted)
+			}
+		})
 	}
 }

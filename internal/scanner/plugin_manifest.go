@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -56,7 +57,8 @@ func (s *PluginScanner) manifestEntrypointsCommand() (string, []string, error) {
 // only reader of the manifest grammar, so a caller that must know which files
 // a scan can read asks it instead of parsing the same text a second time. A
 // manifest the scanner refuses declares nothing. An error means the scanner
-// could not answer, and the caller must not treat that as "declares nothing".
+// could not answer, which includes a reply that carries no entrypoints list,
+// and the caller must not treat that as "declares nothing".
 func (s *PluginScanner) DeclaredEntrypoints(ctx context.Context, manifests map[string][]byte) ([]string, error) {
 	binaryPath, args, err := s.manifestEntrypointsCommand()
 	if err != nil {
@@ -88,10 +90,15 @@ func (s *PluginScanner) DeclaredEntrypoints(ctx context.Context, manifests map[s
 		return nil, fmt.Errorf("scanner: list manifest entrypoints: %w (stderr=%s)", err, scannerFailureText(stderr.String()))
 	}
 	var reply struct {
-		Entrypoints []string `json:"entrypoints"`
+		Entrypoints *[]string `json:"entrypoints"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &reply); err != nil {
 		return nil, fmt.Errorf("scanner: list manifest entrypoints: %w", err)
 	}
-	return reply.Entrypoints, nil
+	// A reply with no entrypoints member (or null) is not an answer: only an
+	// explicit empty list says that no manifest declares a file.
+	if reply.Entrypoints == nil {
+		return nil, errors.New("scanner: list manifest entrypoints: the reply has no entrypoints list")
+	}
+	return *reply.Entrypoints, nil
 }
