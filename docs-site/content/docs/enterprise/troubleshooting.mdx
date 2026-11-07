@@ -691,7 +691,7 @@ The registry marks it `ignore` on a managed standalone host, so the value is rea
 
 **Fix.** Set the equivalent key in the admin config. See [Policy changes on a managed host](/docs/enterprise#policy-changes-on-a-managed-host).
 
-**Check.** On managed Linux and macOS, `doctor` is refused by the packaged launcher ([Managed command availability](/docs/enterprise/managed-commands)). As root, run the installed gateway's `enterprise linux status --json` or `enterprise macos status --json` and check that `policy.applied` is `true`. The `Ignored environment overrides` row belongs to the per-user Python CLI.
+**Check.** On managed Linux and macOS, `doctor` is unavailable: the packaged launcher refuses it ([Managed command availability](/docs/enterprise/managed-commands)). As root, run the installed gateway's `enterprise linux status --json` or `enterprise macos status --json` and check that `policy.applied` is `true`. The `Ignored environment overrides` row belongs to the per-user Python CLI.
 
 #### AI Defense is not used
 

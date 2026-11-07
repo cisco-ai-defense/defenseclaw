@@ -30,15 +30,19 @@ This table says which `defenseclaw` commands a standard user gets on a computer 
 | `defenseclaw status` | Offered | Offered | Offered | Linux, macOS, Windows | Shows your own protection state. An administrator's run shows the deployment. |
 | `defenseclaw sandbox ...` | Offered | Offered | Not supported | Linux, macOS | OpenShell sandboxes run on Linux and macOS only. |
 | `defenseclaw guardrail profile explain` | Offered | Offered | Refused | Linux, macOS, Windows | Shows the guardrail profile that applies to your agents. On Windows the answer points to the administrator's policy view. |
-| `defenseclaw guardrail (every other command)` | Refused | Refused | Refused | Linux, macOS, Windows | The guardrail is set in the administrator's config. |
+| `defenseclaw guardrail` | Refused | Refused | Refused | Linux, macOS, Windows | Every guardrail command except `profile explain`, which the row above offers. The guardrail is set in the administrator's config. |
 | `defenseclaw doctor` | Refused | Refused | Refused | Linux, macOS, Windows | An administrator reads the deployment with the enterprise status and verify commands. |
 | `defenseclaw alerts` | Refused | Refused | Not installed | Linux, macOS, Windows | The managed Windows install has no per-user alerts command. |
 | `defenseclaw tui` | Refused | Refused | Refused | Linux, macOS, Windows | The terminal UI is part of the per-user install. |
 | `defenseclaw upgrade` | Refused | Refused | Refused | Linux, macOS, Windows | The administrator's lifecycle applies updates. |
 | `defenseclaw rollback` | Refused | Refused | Refused | Linux, macOS, Windows | The administrator's lifecycle applies rollbacks. |
 | `defenseclaw setup ...` | Refused | Refused | Refused | Linux, macOS, Windows | Setup belongs to the per-user install. |
-| `defenseclaw config set, config unset` | Refused | Refused | Refused | Linux, macOS, Windows | The configuration is changed in the administrator's config. |
-| `defenseclaw skill, mcp, plugin, tool ...` | Refused | Refused | Refused | Linux, macOS, Windows | The admission policy is set in the administrator's config; an administrator scans an asset from an elevated prompt. |
+| `defenseclaw config set` | Refused | Refused | Refused | Linux, macOS, Windows | The configuration is changed in the administrator's config. |
+| `defenseclaw config unset` | Refused | Refused | Refused | Linux, macOS, Windows | The configuration is changed in the administrator's config. |
+| `defenseclaw skill ...` | Refused | Refused | Refused | Linux, macOS, Windows | The admission policy is set in the administrator's config; an administrator scans an asset from an elevated prompt. |
+| `defenseclaw mcp ...` | Refused | Refused | Refused | Linux, macOS, Windows | Same as `skill`. |
+| `defenseclaw plugin ...` | Refused | Refused | Refused | Linux, macOS, Windows | Same as `skill`. |
+| `defenseclaw tool ...` | Refused | Refused | Refused | Linux, macOS, Windows | Same as `skill`. |
 | `defenseclaw policy show` | Refused | Refused | Administrators only | Linux, macOS, Windows | A standard account is told to use an elevated prompt. |
 | `defenseclaw audit export` | Refused | Refused | Administrators only | Linux, macOS, Windows | The managed audit log is administrator-only. |
 
