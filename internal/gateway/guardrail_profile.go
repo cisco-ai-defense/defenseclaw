@@ -977,7 +977,7 @@ func lookupDirectoryProfileSubject(name string) (profileSubject, error) {
 		return profileSubjectLookupFailed(id, userName, err), nil
 	}
 	if facts.ResolvedAt.IsZero() {
-		if local, localErr := lookupLocalProfileSubject(name); localErr == nil {
+		if local, localErr := lookupLocalProfileSubject(profileExplainLocalKey(name, id)); localErr == nil {
 			if !identityLookupBlocking.Load() {
 				local.LookupFailed = false
 			}

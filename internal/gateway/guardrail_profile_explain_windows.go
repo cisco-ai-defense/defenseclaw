@@ -24,6 +24,11 @@ func init() {
 	windowsSAMNameForUPN = func(upn string) string { return useridentity.SAMNameForUPN(upn, profileExplainUPNWait) }
 }
 
+// profileExplainLocalKey is the key the OS account database is asked for the
+// explained account: the name as typed, which the LSA takes in every
+// spelling (.\name included, LookupWindowsAccount).
+func profileExplainLocalKey(name, _ string) string { return name }
+
 // LookupWindowsAccount names a user account given as a SID, DOMAIN\name,
 // bare name or UPN through the LSA (see resolveWindowsExplainAccount).
 // Entra ID accounts resolve only this way; `enterprise policy show|verify
