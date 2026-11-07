@@ -40,6 +40,7 @@ from defenseclaw.scanner.plugin_scanner.helpers import (
     deduplicate_findings,
     inspect_path_link,
     make_finding,
+    resolve_entrypoint_files,
 )
 from defenseclaw.scanner.plugin_scanner.llm_analyzer import JUDGE_TAG
 from defenseclaw.scanner.plugin_scanner.policy import (
@@ -77,8 +78,17 @@ def _names_protected_content(target: str, profile: str) -> bool:
     the ordinary scan, in every profile.
     """
 
+    # The ordinary scan also reads the entrypoints the manifest declares, whatever
+    # their extension or folder; so does this check.
+    manifest = _load_manifest(target)
     found: list[Finding] = []
-    scan_source_files(target, found, set(), profile)
+    scan_source_files(
+        target, found, set(), profile,
+        force_include=resolve_entrypoint_files(
+            target, manifest.entrypoints if manifest is not None else None,
+        ),
+        python_host=manifest is not None and manifest.source in ("plugin.yaml", "plugin.yml"),
+    )
     return any(f.rule_id.startswith("CRED-") or f.rule_id == "COG-TAMPER" for f in found)
 
 
