@@ -16,14 +16,70 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"mvdan.cc/sh/v3/expand"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // posixShellOperand spells a native path as one POSIX shell operand. A
 // Windows path with backslashes, unquoted, is read by a POSIX shell as escape
-// sequences and names a different (relative) file, so it is not the state
-// file the row means; single quotes keep the native spelling literal.
+// sequences and names a different (relative) file, and a path with a space or
+// an apostrophe splits or breaks the command; single quotes keep the native
+// spelling literal and an embedded apostrophe is closed, escaped and reopened.
 func posixShellOperand(path string) string {
-	return "\x27" + path + "\x27"
+	return "\x27" + strings.ReplaceAll(path, "\x27", "\x27\\\x27\x27") + "\x27"
+}
+
+func TestGAP0632PosixShellOperandIsOneLiteralWord(t *testing.T) {
+	for _, path := range []string{
+		`/tmp/plain/.defenseclaw/config.yaml`,
+		`/tmp/with space/.defenseclaw/config.yaml`,
+		"/tmp/o\x27neil/.defenseclaw/config.yaml",
+		"/tmp/a \x27b\x27 c/.defenseclaw/config.yaml",
+		"C:\\Users\\o\x27neil home\\.defenseclaw\\config.yaml",
+	} {
+		file, err := syntax.NewParser().Parse(strings.NewReader("echo marker > "+posixShellOperand(path)), "")
+		if err != nil {
+			t.Fatalf("%q: spelling is not valid shell: %v", path, err)
+		}
+		fields, err := expand.Fields(&expand.Config{}, file.Stmts[0].Redirs[0].Word)
+		if err != nil || len(fields) != 1 || fields[0] != path {
+			t.Fatalf("operand for %q reads back as %q (err %v)", path, fields, err)
+		}
+	}
+}
+
+func TestGAP0632QuotedStateOperandBlocksUnderUnusualHome(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "o\x27neil home")
+	state := filepath.Join(home, ".defenseclaw", "config.yaml")
+	project := filepath.Join(home, "project")
+	for _, dir := range []string{filepath.Dir(state), project} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(state, []byte("guardrail: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	generation := mustCompileRulePackGeneration(cloneRuleCategories(defaultRuleCategories()))
+	for _, command := range []struct {
+		name, text string
+		block      bool
+	}{
+		{"redirect to state", "echo marker > " + posixShellOperand(state), true},
+		{"state operand with expanded output", "truncate -s 0 " + posixShellOperand(state) + " > out-*.txt", true},
+		{"ordinary project file", "echo marker > " + posixShellOperand(filepath.Join(project, "notes.txt")), false},
+	} {
+		t.Run(command.name, func(t *testing.T) {
+			findings := dispatchTrustedAction(context.Background(), trustedActionRequest{
+				Input:     actionfacts.Input{Tool: "Bash", Command: command.text, CWD: project, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX},
+				Connector: "codex", EnforcementCapable: true, generation: generation,
+			})
+			finding := findingWithID(findings, "tamper.detector_state_write")
+			if got := finding != nil && finding.contributesToEnforcement(); got != command.block {
+				t.Fatalf("state protection=%t, want %t; findings=%v", got, command.block, FindingStrings(findings))
+			}
+		})
+	}
 }
 
 func TestGAP0632PinnedPackIdentityKeepsStateProtection(t *testing.T) {
@@ -131,13 +187,13 @@ func TestGAP0632PinnedPackIdentityKeepsStateProtection(t *testing.T) {
 				name, text string
 				block      bool
 			}{
-				{"protected state", "echo marker > " + state, true},
+				{"protected state", "echo marker > " + posixShellOperand(state), true},
 				{"home variable state", `printf marker > "$HOME/.defenseclaw/config.yaml"`, true},
 				{"value variable state", `printf "$X" > "$HOME"/.defenseclaw/config.yaml`, true},
 				{"tilde state", "printf marker >> ~/.defenseclaw/config.yaml", true},
-				{"literal home state", "printf marker > " + filepath.Join(home, ".defenseclaw", "config.yaml"), true},
+				{"literal home state", "printf marker > " + posixShellOperand(filepath.Join(home, ".defenseclaw", "config.yaml")), true},
 				{"state operand with expanded output", "truncate -s 0 " + posixShellOperand(state) + " > out-*.txt", true},
-				{"ordinary project file", "echo marker > " + filepath.Join(project, "notes.txt"), false},
+				{"ordinary project file", "echo marker > " + posixShellOperand(filepath.Join(project, "notes.txt")), false},
 				{"ordinary expanded output", "printf marker > out-*.txt", false},
 				{"state path mention", `printf '%s\n' "$HOME/.defenseclaw/config.yaml" > notes.txt`, false},
 			} {
