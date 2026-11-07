@@ -2373,16 +2373,6 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 			rememberOpenClawToolOutcome(sessionID, meta.RunID, req.Tool, req.Args, outcome,
 				AgentIdentityFromContext(r.Context()))
 		}
-		// The proxy shows an enforced block on the reply that follows it,
-		// whichever tool made the call (GAP-0644). Secure Client answers
-		// stay as they were.
-		if verdict.Action == "block" && verdict.Mode == "action" {
-			if openClawNoticeAllowed(a.decisionConfig(r.Context())) {
-				verdict.NoticeRef = rememberOpenClawBlockNotice(
-					firstNonEmpty(strings.TrimSpace(r.Header.Get(SessionIDHeader)), req.SessionID),
-					req.Tool, evalCtx.RuleIDs, verdict.Reason)
-			}
-		}
 	}
 
 	requestID := RequestIDFromContext(r.Context())
@@ -2416,6 +2406,17 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprintf(os.Stderr, "[inspect] inspect audit persistence failed tool=%q action=%s denied_for_audit=%t: %v\n",
 			req.Tool, verdict.Action, denied, auditErr)
+	}
+
+	// The proxy shows an enforced OpenClaw block on the reply that follows it,
+	// whichever tool made the call and whichever step made the block, so this
+	// is decided on the final verdict, after a failed audit write may have
+	// turned an allow into a block (GAP-0644). Secure Client answers stay as
+	// they were.
+	if verdict.Action == "block" && verdict.Mode == "action" &&
+		strings.EqualFold(firstNonEmpty(req.Connector, connectorName), "openclaw") &&
+		openClawNoticeAllowed(a.decisionConfig(r.Context())) {
+		verdict.NoticeRef = rememberOpenClawBlockNotice(req.Tool, evalCtx.RuleIDs, verdict.Reason)
 	}
 
 	a.emitCodeGuardTelemetry(r.Context(), &req, verdict, elapsed)
