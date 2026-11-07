@@ -34,6 +34,10 @@ from pathlib import Path
 import pytest
 from defenseclaw.inventory import agent_discovery as ad
 
+#: A file system stamps a write with its coarse clock (about 16 ms on NTFS), so
+#: two writes closer together than one tick can carry the same change time.
+_FILE_CLOCK_TICK = 0.05
+
 _CONFIG = "guardrail:\n  enabled: true\n  connector: codex\n  connectors:\n    codex:\n      enabled: true\n"
 
 
@@ -465,6 +469,13 @@ def test_a_busy_cache_lock_means_no_unserialized_write(monkeypatch, tmp_path):
     assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == "3.19.0"
 
 
+def _file_times_of_this_system(monkeypatch) -> None:
+    """The lookup rules of the system the tests run on: on Windows the change time of a
+    folder (not its creation time) says that it was swapped."""
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: os.name == "nt")
+    monkeypatch.setattr(ad, "_windows_configured_package_manager_bin_prefixes", lambda: ())
+
+
 def _skipped_candidate_in_folder_cache(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     """Cache whose selected codex sits behind a skipped (failed) candidate that
     is two folders below a folder an installer can replace as a whole."""
@@ -485,6 +496,7 @@ def _skipped_candidate_in_folder_cache(tmp_path: Path) -> tuple[Path, Path, Path
 
 
 def test_a_skipped_candidate_behind_a_replaced_higher_folder_is_probed_again(monkeypatch, tmp_path):
+    _file_times_of_this_system(monkeypatch)
     # The file and the folder holding it keep their old times when the folder
     # above them is swapped for a ready-made one.
     candidate, active, spare, data = _skipped_candidate_in_folder_cache(tmp_path)
@@ -502,6 +514,7 @@ def test_a_skipped_candidate_behind_a_replaced_higher_folder_is_probed_again(mon
 
 
 def test_a_skipped_candidate_behind_an_untouched_higher_folder_keeps_the_cached_version(monkeypatch, tmp_path):
+    _file_times_of_this_system(monkeypatch)
     # A folder above the data folder changes whenever anything is saved in it
     # and is not part of the install: saving a file there is not a change.
     candidate, _active, _spare, data = _skipped_candidate_in_folder_cache(tmp_path)
@@ -1308,6 +1321,7 @@ def test_a_same_size_rewrite_that_restores_the_modification_time_changes_the_ide
     before = ad._executable_identity(str(binary))
     assert ad._executable_identity(str(binary)) == before
 
+    time.sleep(_FILE_CLOCK_TICK)
     binary.write_text("2.3.999", encoding="utf-8")
     os.utime(binary, ns=(first.st_atime_ns, first.st_mtime_ns))
 
@@ -1481,7 +1495,11 @@ def _filetime(unix_ns: int) -> int:
 def _on_windows(monkeypatch, original: os.stat_result, binary: Path) -> None:
     """Windows semantics for one file: ``st_ctime`` is the creation time (it
     stays what the file was created with), and the NTFS change time moves with
-    every write (here the change time this system keeps)."""
+    every write (here the change time this system keeps). On Windows itself the
+    file system already behaves so and its own change time is read."""
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    if os.name == "nt":
+        return
     real_stat = os.stat
 
     class WindowsStat:
@@ -1492,7 +1510,6 @@ def _on_windows(monkeypatch, original: os.stat_result, binary: Path) -> None:
         def __getattr__(self, name):
             return getattr(self.wrapped, name)
 
-    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
     monkeypatch.setattr(ad.os, "stat", lambda path, *a, **k: WindowsStat(real_stat(path, *a, **k)))
     monkeypatch.setattr(ad, "_windows_change_time", lambda path: _filetime(real_stat(path).st_ctime_ns))
     real_lstat = os.lstat
@@ -1507,11 +1524,42 @@ def test_a_same_size_rewrite_with_the_modification_time_restored_changes_the_ide
     before = ad._executable_identity(str(binary))
     assert ad._executable_identity(str(binary)) == before
 
-    time.sleep(0.02)
+    time.sleep(_FILE_CLOCK_TICK)
     binary.write_text("2.3.999", encoding="utf-8")
     os.utime(binary, ns=(original.st_atime_ns, original.st_mtime_ns))
 
     assert ad._executable_identity(str(binary)) != before
+
+
+def _folder_changed_at(monkeypatch, tmp_path: Path, changed_ns: dict[str, int]) -> tuple[Path, float]:
+    """A Windows host whose folder times are the creation time in ``st_ctime`` and the
+    change time given per path. Returns the executable and a scan time after every
+    file time ``st_*`` reports."""
+    folder = tmp_path / "bin"
+    folder.mkdir()
+    binary = folder / "codex"
+    binary.write_text("codex", encoding="utf-8")
+    since = time.time() + 10
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(
+        ad,
+        "_windows_change_time",
+        lambda path: _filetime(changed_ns.get(path, int((since - 600) * 1e9))),
+    )
+    return binary, since
+
+
+def test_a_folder_renamed_on_windows_is_changed_though_its_creation_time_is_old(monkeypatch, tmp_path):
+    folder = str(tmp_path / "bin")
+    binary, since = _folder_changed_at(monkeypatch, tmp_path, {folder: int((time.time() + 11) * 1e9)})
+
+    assert not ad._resolves_unchanged_since(str(binary), since, tmp_path / "data")
+
+
+def test_a_folder_not_changed_since_the_scan_on_windows_keeps_the_version(monkeypatch, tmp_path):
+    binary, since = _folder_changed_at(monkeypatch, tmp_path, {})
+
+    assert ad._resolves_unchanged_since(str(binary), since, tmp_path / "data")
 
 
 def test_a_windows_executable_that_was_not_written_to_keeps_its_identity_and_its_version(monkeypatch, tmp_path):
@@ -1531,7 +1579,7 @@ def test_a_windows_in_place_rewrite_after_the_scan_is_not_cached_at_the_old_vers
     original = binary.stat()
     _on_windows(monkeypatch, original, binary)
     scan = _identified_scan(binary, "3.19.13")
-    time.sleep(0.02)
+    time.sleep(_FILE_CLOCK_TICK)
     binary.write_text("2.3.999", encoding="utf-8")
     os.utime(binary, ns=(original.st_atime_ns, original.st_mtime_ns))
 
@@ -1659,14 +1707,14 @@ def _cursor_discovery_setup(monkeypatch, tmp_path: Path, scan_version: str):
     monkeypatch.setattr(ad, "_configured_probe_names", lambda *_a, **_k: frozenset({"cursor"}))
     monkeypatch.setattr(ad, "_unchanged_candidates_ahead", lambda *_a, **_k: ())
     monkeypatch.setattr(ad, "_scan_agent", scan)
-    time.sleep(0.02)
+    time.sleep(_FILE_CLOCK_TICK)
     assert ad._write_cache(_identified_scan(binary, "3.19.13"), data_dir=data)
     return data, binary, original, rescans
 
 
 def test_a_windows_cached_discovery_reads_again_an_executable_rewritten_in_place(monkeypatch, tmp_path):
     data, binary, original, rescans = _cursor_discovery_setup(monkeypatch, tmp_path, "cursor 2.3.99")
-    time.sleep(0.02)
+    time.sleep(_FILE_CLOCK_TICK)
     binary.write_text("2.3.999", encoding="utf-8")
     os.utime(binary, ns=(original.st_atime_ns, original.st_mtime_ns))
 
@@ -1701,10 +1749,10 @@ def test_a_legacy_entry_is_never_trusted_whether_or_not_its_file_was_written_to(
     binary.write_text("3.19.13", encoding="utf-8")
     original = binary.stat()
     os.utime(binary, ns=(original.st_atime_ns, original.st_mtime_ns - 60_000_000_000))
-    time.sleep(0.02)
+    time.sleep(_FILE_CLOCK_TICK)
     assert ad._write_cache(_legacy_scan(binary, "3.19.13"), data_dir=tmp_path)
     if rewritten:
-        time.sleep(0.02)
+        time.sleep(_FILE_CLOCK_TICK)
         binary.write_text("2.3.999", encoding="utf-8")
         os.utime(binary, ns=(original.st_atime_ns, original.st_mtime_ns - 60_000_000_000))
     payload = ad._read_cache_payload(ad._cache_path(data_dir=tmp_path))
@@ -1724,7 +1772,7 @@ def _link_cache(tmp_path: Path):
     old.write_text("3.19.13", encoding="utf-8")
     new.write_text("cursor 2.3.99", encoding="utf-8")
     link.symlink_to(old)
-    time.sleep(0.02)
+    time.sleep(_FILE_CLOCK_TICK)
     assert ad._write_cache(_legacy_scan(link, "3.19.13"), data_dir=tmp_path)
     return old, new, link
 
@@ -1741,7 +1789,7 @@ def _peer_scan_that_timed_out_on(link: Path) -> ad.AgentDiscovery:
 def test_a_legacy_entry_is_not_kept_whether_or_not_its_launch_link_moved(tmp_path, moved):
     _old, new, link = _link_cache(tmp_path)
     if moved:
-        time.sleep(0.02)
+        time.sleep(_FILE_CLOCK_TICK)
         staged = link.parent / "moved"
         staged.symlink_to(new)
         os.replace(staged, link)
@@ -1789,7 +1837,7 @@ def _legacy_cursor_cache(tmp_path: Path) -> Path:
     binary.write_text("3.19.13", encoding="utf-8")
     original = binary.stat()
     os.utime(binary, ns=(original.st_atime_ns, original.st_mtime_ns - 120_000_000_000))
-    time.sleep(0.02)
+    time.sleep(_FILE_CLOCK_TICK)
     assert ad._write_cache(_legacy_scan(binary, "3.19.13"), data_dir=tmp_path)
     return binary
 
@@ -1805,7 +1853,7 @@ def test_a_slow_probe_keeps_no_version_from_a_cache_before_identities(tmp_path, 
     binary = _legacy_cursor_cache(tmp_path)
     kept = binary.stat()
     if rewritten:
-        time.sleep(0.02)
+        time.sleep(_FILE_CLOCK_TICK)
         binary.write_text("2.3.999", encoding="utf-8")
         os.utime(binary, ns=(kept.st_atime_ns, kept.st_mtime_ns))
     agents = _slow_cursor_agents(binary)
@@ -1829,9 +1877,9 @@ def _swap_parent_folder(tmp_path: Path, *, restore_times: bool) -> Path:
     old = (launch.stat().st_atime_ns, launch.stat().st_mtime_ns - 120_000_000_000)
     for folder in (launch, ready, tmp_path):
         os.utime(folder, ns=old)
-    time.sleep(0.02)
+    time.sleep(_FILE_CLOCK_TICK)
     assert ad._write_cache(_legacy_scan(launch / "cursor", "3.19.13"), data_dir=tmp_path)
-    time.sleep(0.02)
+    time.sleep(_FILE_CLOCK_TICK)
     os.rename(launch, tmp_path / "retired")
     os.rename(ready, launch)
     if restore_times:
@@ -1919,7 +1967,7 @@ def _kiro_cached(monkeypatch, tmp_path: Path, *, identified: bool, configured: b
     monkeypatch.setattr(ad, "_scan_agent", scan)
     agents = {name: _signal(name) for name in ad.DISCOVERABLE_CONNECTORS}
     agents["kiro"] = _kiro_signal(binary, "2.27.1", identified=identified)
-    time.sleep(0.02)
+    time.sleep(_FILE_CLOCK_TICK)
     assert ad._write_cache(
         ad.AgentDiscovery(scanned_at=ad._format_rfc3339(ad._now_utc()), agents=agents, cache_hit=False),
         data_dir=data,
@@ -1959,7 +2007,7 @@ def test_a_kiro_cached_before_identities_at_a_protected_version_is_read_again_an
 
 def test_an_identified_kiro_replaced_after_the_scan_is_read_again(monkeypatch, tmp_path):
     data, binary, rescans = _kiro_cached(monkeypatch, tmp_path, identified=True)
-    time.sleep(0.02)
+    time.sleep(_FILE_CLOCK_TICK)
     _replace(binary, "2.26.1")
 
     disc = ad.discover_agents(data_dir=data)

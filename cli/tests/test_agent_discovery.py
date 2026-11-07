@@ -474,20 +474,26 @@ def test_release_cache_keeps_a_peer_version_only_for_an_entry_that_names_its_exe
     is kept while that file is the one there."""
     if os.name == "nt":
         set_known_windows_directory_acl(tmp_path)
+    # The executable is not inside the data folder: writing the cache re-applies
+    # that folder access list to everything below it on Windows, which moves the
+    # change time of a file there (nothing of an agent install lives in it).
+    data = tmp_path / "data"
+    data.mkdir()
     (tmp_path / "bin").mkdir()
     binary = tmp_path / "bin" / "claude"
     binary.write_text("agent binary", encoding="utf-8")
     old = os.stat(binary).st_mtime - 600
     os.utime(binary, (old, old))
     time.sleep(0.05)
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: windows_semantics)
     cached = _discovery("claudecode")
     cached.scanned_at = ad._format_rfc3339(ad._now_utc())
     cached.agents["claudecode"].binary_path = str(binary)
     cached.agents["claudecode"].version = "2.1.286 (Claude Code)"
     if identified:
         cached.agents["claudecode"].identity = ad._executable_identity(str(binary))
-    assert ad._write_cache(cached, data_dir=tmp_path)
-    path = tmp_path / ad.CACHE_FILENAME
+    assert ad._write_cache(cached, data_dir=data)
+    path = data / ad.CACHE_FILENAME
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["version"] = schema
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -499,17 +505,16 @@ def test_release_cache_keeps_a_peer_version_only_for_an_entry_that_names_its_exe
             signal.error = ad.VERSION_NOT_PROBED
         return signal
 
-    monkeypatch.setattr(ad, "_is_windows_host", lambda: windows_semantics)
     monkeypatch.setattr(ad, "_windows_configured_package_manager_bin_prefixes", lambda: ())
     monkeypatch.setattr(ad, "_scan_agent", scan)
-    result = ad.discover_with_probes(["codex"], use_cache=False, refresh=True, data_dir=tmp_path)
+    result = ad.discover_with_probes(["codex"], use_cache=False, refresh=True, data_dir=data)
 
     kept = "2.1.286 (Claude Code)" if identified else ""
     assert result.agents["claudecode"].version == kept
-    assert ad._read_cache(data_dir=tmp_path).agents["claudecode"].version == kept
+    assert ad._read_cache(data_dir=data).agents["claudecode"].version == kept
 
     os.utime(binary, None)
-    assert ad.discover_with_probes(["codex"], use_cache=False, refresh=True, data_dir=tmp_path).agents["claudecode"].version == ""
+    assert ad.discover_with_probes(["codex"], use_cache=False, refresh=True, data_dir=data).agents["claudecode"].version == ""
 
 
 def test_empty_connector_home_does_not_detect_opencode(monkeypatch, tmp_path):
@@ -2918,6 +2923,8 @@ def test_timed_out_probe_keeps_version_of_unchanged_binary(monkeypatch, tmp_path
     """RHEL-U3-13: one slow --version on a busy host erased a peer's version,
     so the gateway refused that peer in action mode and setup of another
     connector did not converge."""
+    data = tmp_path / "data"  # the executable is outside it (see the release-cache test)
+    data.mkdir()
     (tmp_path / "bin").mkdir()
     binary = tmp_path / "bin" / "amp"
     binary.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -2937,15 +2944,15 @@ def test_timed_out_probe_keeps_version_of_unchanged_binary(monkeypatch, tmp_path
 
     monkeypatch.setattr(ad, "_is_windows_host", lambda: windows)
     monkeypatch.setattr(ad, "_scan_agent", scan("amp 0.0.1", ""))
-    ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=data)
 
     monkeypatch.setattr(ad, "_scan_agent", scan("", f"{binary}: {ad.VERSION_PROBE_TIMED_OUT}"))
-    slow = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+    slow = ad.discover_agents(use_cache=False, refresh=True, data_dir=data)
     assert (slow.agents["amp"].version, slow.agents["amp"].error) == ("amp 0.0.1", "")
-    assert ad._read_cache(data_dir=tmp_path).agents["amp"].version == "amp 0.0.1"
+    assert ad._read_cache(data_dir=data).agents["amp"].version == "amp 0.0.1"
 
     os.utime(binary, None)  # replaced after the earlier scan: no stale version
-    changed = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+    changed = ad.discover_agents(use_cache=False, refresh=True, data_dir=data)
     assert changed.agents["amp"].version == ""
 
 
