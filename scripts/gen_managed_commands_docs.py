@@ -68,7 +68,6 @@ def render(data: dict) -> str:
         "| Offered | The command runs for the user. |",
         "| Refused | The command answers with a message that names the managed alternative, and exits non-zero. |",
         "| Administrators only | The command runs from an elevated prompt; a standard account is told so. |",
-        "| Not installed | The managed install has no such command. |",
         "| Not supported | The platform cannot run the command. |",
         "",
         "| " + " | ".join(name for name, _ in COLUMNS) + " |",
