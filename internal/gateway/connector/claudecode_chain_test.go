@@ -118,6 +118,112 @@ func TestClaudeCodeChainKeepsPackagedPreToolStartPath(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeChainAvailabilityFollowsPolicyTier(t *testing.T) {
+	launcher := `C:\Users\Owner\bin\defenseclaw-hook.exe`
+	guard := `C:\Users\Owner\chain\chain-abc123\defenseclaw-hook-guard.exe`
+	approved := `C:\Users\Owner\chain\chain-abc123\defenseclaw-hook-guard.approved`
+	previous := claudeChainFor
+	claudeChainFor = func(string) (string, string) { return guard, approved }
+	t.Cleanup(func() { claudeChainFor = previous })
+	baseCommand, baseArgs := claudeCodeWindowsHookInvocation(SetupOpts{}, launcher)
+	hookArgs := []string{"hook", "--connector", "claudecode"}
+	for _, tc := range []struct {
+		name string
+		opts SetupOpts
+		open bool
+	}{
+		{"default", SetupOpts{}, true},
+		{"permissive", SetupOpts{PolicyTier: "permissive"}, true},
+		{"strict", SetupOpts{PolicyTier: "strict"}, false},
+		{"managed", SetupOpts{ManagedEnterprise: true}, false},
+		{"secure client", SetupOpts{SecureClientHookDelivery: true}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := claudeCodeUnavailableOpen(tc.opts); got != tc.open {
+				t.Fatalf("open = %v, want %v", got, tc.open)
+			}
+			command, args := claudeCodeHandlerInvocation("UserPromptSubmit", baseCommand, baseArgs, tc.open)
+			want := claudeGuardWrapperArgs(guard, approved, launcher, "UserPromptSubmit", hookArgs, tc.open)
+			if command != baseCommand || !slices.Equal(args, want) {
+				t.Fatalf("prompt handler = %q %q, want %q %q", command, args, baseCommand, want)
+			}
+			if args[len(args)-1] != map[bool]string{true: "1", false: "2"}[tc.open] {
+				t.Fatalf("unavailable answer = %q", args[len(args)-1])
+			}
+			if got, _, ok := claudeGuardWrapperParts(map[string]interface{}{"command": command, "args": args}); !ok || got != launcher {
+				t.Fatal("profile-bound wrapper was not recognized")
+			}
+			command, args = claudeCodeHandlerInvocation("PreToolUse", baseCommand, baseArgs, tc.open)
+			if command != guard || !slices.Equal(args, claudeGuardEventArgs(launcher, hookArgs, "PreToolUse", false, tc.open)) {
+				t.Fatalf("PreToolUse handler = %q %q", command, args)
+			}
+		})
+	}
+}
+
+func TestClaudeCodeCustomLayoutRequiresAWorkingGuard(t *testing.T) {
+	launcher := `C:\Custom\Hooks\defenseclaw-hook.exe`
+	dir := filepath.Join(t.TempDir(), "chain")
+	source := filepath.Join(t.TempDir(), windowsHookGuardBinaryName)
+	oldDir, oldSource, oldProbe := claudeChainDir, claudeChainSource, claudeChainProbe
+	claudeChainDir = func() string { return dir }
+	claudeChainSource = func(string) string { return "" }
+	claudeChainProbe = func(string, string) error { return nil }
+	t.Cleanup(func() { claudeChainDir, claudeChainSource, claudeChainProbe = oldDir, oldSource, oldProbe })
+	if err := ensureClaudeChain(launcher); err == nil {
+		t.Fatal("custom layout without a guard was admitted")
+	}
+	command, args := claudeCodeWindowsHookInvocation(SetupOpts{HookExecutable: launcher}, launcher)
+	if err := claudeCodeChainAdmission(SetupOpts{HookExecutable: launcher}, command, args, "windows"); err == nil {
+		t.Fatal("custom layout without a chain passed setup admission")
+	}
+	if generated, _ := claudeCodeHandlerInvocation("UserPromptSubmit", command, args); generated != "" {
+		t.Fatalf("custom layout without a chain generated %q", generated)
+	}
+	if _, err := os.Stat(claudeChainFilesIn(dir).record); !os.IsNotExist(err) {
+		t.Fatalf("a failed guard preflight published a record: %v", err)
+	}
+	if err := os.WriteFile(source, []byte("MZ guard fixture"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	claudeChainSource = func(string) string { return source }
+	if err := ensureClaudeChain(launcher); err != nil {
+		t.Fatal(err)
+	}
+	if err := claudeCodeChainAdmission(SetupOpts{HookExecutable: launcher}, command, args, "windows"); err != nil {
+		t.Fatalf("working custom chain was refused: %v", err)
+	}
+	if err := ensureClaudeChain(`C:\Custom%Name\defenseclaw-hook.exe`); err == nil {
+		t.Fatal("a launcher path cmd.exe cannot render was admitted")
+	}
+	generated, generatedArgs := claudeCodeHandlerInvocation("UserPromptSubmit", command, args)
+	if _, _, old := claudeCodeCmdGuardParts(map[string]interface{}{"command": generated, "args": generatedArgs}); old {
+		t.Fatal("the custom launcher retained the presence-only form")
+	}
+	if got, _, ok := claudeGuardWrapperParts(map[string]interface{}{"command": generated, "args": generatedArgs}); !ok || got != launcher {
+		t.Fatalf("working custom chain was not recognized: %q %q", generated, generatedArgs)
+	}
+}
+
+func TestClaudeCodeCustomLayoutUsesGatewayGuardSource(t *testing.T) {
+	root := t.TempDir()
+	gateway := filepath.Join(root, "bin", windowsGatewayBinaryName)
+	guard := filepath.Join(filepath.Dir(gateway), windowsHookGuardBinaryName)
+	launcher := filepath.Join(root, "custom", windowsHookBinaryName)
+	if err := os.MkdirAll(filepath.Dir(guard), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(guard, []byte("MZ guard fixture"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previous := claudeChainGatewayExecutable
+	claudeChainGatewayExecutable = func() (string, error) { return gateway, nil }
+	t.Cleanup(func() { claudeChainGatewayExecutable = previous })
+	if got := claudeChainSource(launcher); got != guard {
+		t.Fatalf("custom launcher guard source = %q, want %q", got, guard)
+	}
+}
+
 func TestClaudeCodeChainKeepsAnApprovedGuardAndRepairsItsWorkingCopy(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "chain")
 	source := filepath.Join(t.TempDir(), windowsHookGuardBinaryName)
