@@ -12,4 +12,4 @@ import "os"
 func ownerPrivateGroup(string, os.FileInfo) bool { return false }
 
 // Group write on non-Linux Unix remains untrusted for the managed setter too.
-func ownerPrivateGroupStrict(string, os.FileInfo) bool { return false }
+func ownerPrivateGroupStrictAfterACL(string, os.FileInfo) bool { return false }
