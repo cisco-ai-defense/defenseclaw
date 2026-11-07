@@ -179,6 +179,7 @@ $script:SourceDigests = [ordered]@{}
 $script:PowerShellSelection = $null
 $script:PowerShellPrerequisite = $null
 $script:FailureEvidence = $null
+$script:CertificationParentRootPaths = @()
 $script:CertificationParentRoots = @()
 $script:LifecycleLockPreinstallBaseline = $null
 $script:LifecycleLockCleanupBaseline = $null
@@ -19634,16 +19635,7 @@ function Remove-EmptyCertificationParentRoot([object]$State) {
         -not (Test-Path -LiteralPath ([string]$State.path))) {
         return
     }
-    $expected = @(
-        $script:ProgramFilesCertificationRoot,
-        $script:ProgramDataCertificationRoot,
-        $script:ProgramDataStagingRoot,
-        $script:ProgramDataWorkRoot,
-        $script:ProgramFilesSecureClientRoot,
-        $script:ProgramFilesCiscoRoot,
-        $script:ProgramDataSecureClientRoot,
-        $script:ProgramDataCiscoRoot
-    ) | Where-Object {
+    $expected = @($script:CertificationParentRootPaths) | Where-Object {
         [string]::Equals(
             (ConvertTo-CanonicalPath $_),
             (ConvertTo-CanonicalPath ([string]$State.path)),
@@ -20896,17 +20888,20 @@ $script:WorkRoot = Assert-PathBelow `
     (Join-Path $script:ProgramDataWorkRoot $script:RunToken) `
     $script:ProgramDataWorkRoot `
     'work root'
+# One list feeds the cleanup allowlist (Remove-EmptyCertificationParentRoot) and
+# the recorded parent states, so the two cannot drift apart.
+$script:CertificationParentRootPaths = @(
+    $script:ProgramFilesCertificationRoot,
+    $script:ProgramDataCertificationRoot,
+    $script:ProgramDataStagingRoot,
+    $script:ProgramDataWorkRoot,
+    $script:ProgramFilesSecureClientRoot,
+    $script:ProgramFilesCiscoRoot,
+    $script:ProgramDataSecureClientRoot,
+    $script:ProgramDataCiscoRoot
+)
 $script:CertificationParentRoots = @(
-    foreach ($parentRoot in @(
-        $script:ProgramFilesCertificationRoot,
-        $script:ProgramDataCertificationRoot,
-        $script:ProgramDataStagingRoot,
-        $script:ProgramDataWorkRoot,
-        $script:ProgramFilesSecureClientRoot,
-        $script:ProgramFilesCiscoRoot,
-        $script:ProgramDataSecureClientRoot,
-        $script:ProgramDataCiscoRoot
-    )) {
+    foreach ($parentRoot in $script:CertificationParentRootPaths) {
         [pscustomobject]@{
             path = ConvertTo-CanonicalPath $parentRoot
             existed_before = Test-Path -LiteralPath $parentRoot

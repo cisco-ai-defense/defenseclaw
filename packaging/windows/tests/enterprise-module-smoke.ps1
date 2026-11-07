@@ -51,6 +51,7 @@ $certificationLayoutParents = @(
 )
 
 function Remove-CertificationLayoutParentsCreatedBySmoke {
+    $leftBehind = @()
     for ($index = $certificationLayoutParents.Count - 1; $index -ge 0; $index--) {
         $entry = $certificationLayoutParents[$index]
         if ($entry.Existed) {
@@ -59,13 +60,24 @@ function Remove-CertificationLayoutParentsCreatedBySmoke {
         $item = Get-Item -LiteralPath $entry.Path -Force -ErrorAction SilentlyContinue
         if ($null -eq $item -or
             -not $item.PSIsContainer -or
-            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-            $null -ne (Get-ChildItem -LiteralPath $entry.Path -Force -ErrorAction SilentlyContinue |
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            continue
+        }
+        if ($null -ne (Get-ChildItem -LiteralPath $entry.Path -Force -ErrorAction SilentlyContinue |
                 Select-Object -First 1)) {
+            # One warning per leftover; its parents are not empty because of it.
+            $coveredByChild = @($leftBehind | Where-Object {
+                $_.StartsWith($entry.Path + '\', [StringComparison]::OrdinalIgnoreCase)
+            }).Count -ne 0
+            if (-not $coveredByChild) {
+                Write-Warning "left the folder this smoke created because it is not empty: $($entry.Path)"
+            }
+            $leftBehind += $entry.Path
             continue
         }
         try {
-            Remove-Item -LiteralPath $entry.Path -Force -ErrorAction Stop
+            # Fails without a prompt if a child appeared since the check above.
+            [IO.Directory]::Delete($entry.Path, $false)
         }
         catch {
             Write-Warning "could not remove the empty folder this smoke created: $($entry.Path): $($_.Exception.Message)"

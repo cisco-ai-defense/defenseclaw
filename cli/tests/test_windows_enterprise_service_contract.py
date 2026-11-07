@@ -5632,8 +5632,12 @@ def test_certification_cleanup_handles_partial_profiles_and_empty_parents() -> N
             "function Register-CertificationSecretFile"
         )
     ]
-    assert "$script:ProgramDataStagingRoot" in parent_cleanup
-    assert "$script:ProgramDataWorkRoot" in parent_cleanup
+    # The allowlist is the one list the recorded states are built from.
+    assert "@($script:CertificationParentRootPaths)" in parent_cleanup
+    shared = harness[harness.index("$script:CertificationParentRootPaths = @(\n    $script:") :]
+    shared = shared[: shared.index("\n)\n")]
+    assert "$script:ProgramDataStagingRoot" in shared
+    assert "$script:ProgramDataWorkRoot" in shared
     assert "existed_before" in parent_cleanup
     assert "[IO.FileAttributes]::ReparsePoint" in parent_cleanup
     assert "$children = @(" in parent_cleanup
@@ -7127,8 +7131,13 @@ def test_module_smoke_removes_the_certification_folders_it_creates() -> None:
     assert "if ($entry.Existed) {" in cleanup
     assert "[IO.FileAttributes]::ReparsePoint" in cleanup
     assert "Select-Object -First 1" in cleanup
-    assert "Remove-Item -LiteralPath $entry.Path -Force -ErrorAction Stop" in cleanup
+    # An atomic delete of an empty folder: no prompt, no recursion.
+    assert "[IO.Directory]::Delete($entry.Path, $false)" in cleanup
+    assert "Remove-Item" not in cleanup
     assert "-Recurse" not in cleanup
+    # A created parent that is left because it is not empty is named once.
+    assert "left the folder this smoke created because it is not empty: $($entry.Path)" in cleanup
+    assert "$coveredByChild" in cleanup
     assert "$index--" in cleanup  # deepest parent first
 
     assert "try {\n    if ($elevated) {" in smoke
@@ -7159,8 +7168,9 @@ def test_hardening_harness_removes_the_cisco_folders_it_creates() -> None:
     assert "Join-Path $script:KnownProgramFiles 'Cisco'\n" in harness
     assert "Join-Path $script:KnownProgramData 'Cisco'\n" in harness
 
-    record = harness.index("$script:CertificationParentRoots = @(\n    foreach")
+    record = harness.index("$script:CertificationParentRootPaths = @(\n    $script:")
     recorded = harness[record : harness.index("$script:FixtureRoot =", record)]
+    assert "foreach ($parentRoot in $script:CertificationParentRootPaths)" in recorded
     assert "existed_before = Test-Path -LiteralPath $parentRoot" in recorded
     positions = [
         recorded.index(name)
@@ -7176,8 +7186,10 @@ def test_hardening_harness_removes_the_cisco_folders_it_creates() -> None:
 
     start = harness.index("function Remove-EmptyCertificationParentRoot(")
     cleanup = harness[start : harness.index("function Invoke-CertificationFailureInjection", start)]
+    # The allowlist is the shared list, not a second copy of the eight paths.
+    assert "@($script:CertificationParentRootPaths)" in cleanup
     for name in names:
-        assert name in cleanup
+        assert name not in cleanup
     assert "if ([bool]$State.existed_before" in cleanup
     assert "[IO.FileAttributes]::ReparsePoint" in cleanup
     assert "$children.Count -ne 0" in cleanup
