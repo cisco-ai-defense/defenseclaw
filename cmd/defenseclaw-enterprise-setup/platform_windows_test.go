@@ -285,6 +285,7 @@ func TestEnterpriseLifecycleArgumentsForStandalonePayload(t *testing.T) {
 		"--gateway-binary", filepath.Join(stage, "defenseclaw-gateway.exe"),
 		"--acp-binary", filepath.Join(stage, "defenseclaw-acp.exe"),
 		"--hook-binary", filepath.Join(stage, "defenseclaw-hook.exe"),
+		"--hook-guard-binary", filepath.Join(stage, "defenseclaw-hook-guard.exe"),
 		"--sensor-helper-binary", filepath.Join(stage, "defenseclaw-sensor-helper.exe"),
 		"--cli-binary", filepath.Join(stage, "defenseclaw.exe"),
 		"--config", `C:\staging\config.yaml`,
