@@ -151,11 +151,11 @@ func projectSkillSelectedFolders(root, name string) []string {
 		return nil
 	}
 	direct := filepath.Join(root, name)
-	info, directErr := os.Stat(filepath.Join(direct, "SKILL.md"))
+	info, directErr := pathStat(filepath.Join(direct, "SKILL.md"))
 	if directErr == nil && info.Mode().IsRegular() {
 		return []string{direct}
 	}
-	entries, err := os.ReadDir(root)
+	entries, err := pathReadDir(root)
 	if err != nil {
 		if directErr != nil && !errors.Is(directErr, fs.ErrNotExist) {
 			return []string{direct}
@@ -167,7 +167,7 @@ func projectSkillSelectedFolders(root, name string) []string {
 			continue
 		}
 		dir := filepath.Join(root, entry.Name())
-		info, err := os.Stat(dir)
+		info, err := pathStat(dir)
 		if err != nil || !info.IsDir() {
 			continue
 		}
@@ -191,8 +191,8 @@ func projectSkillSourceFolders(root, name, source, home, cwd string) []string {
 		source = filepath.Join(cwd, source)
 	}
 	source = filepath.Clean(source)
-	resolvedSource, sourceErr := filepath.EvalSymlinks(source)
-	resolvedRoot, rootErr := filepath.EvalSymlinks(root)
+	resolvedSource, sourceErr := pathEvalSymlinks(source)
+	resolvedRoot, rootErr := pathEvalSymlinks(root)
 	if projectSkillRootKey(source) == projectSkillRootKey(root) ||
 		sourceErr == nil && rootErr == nil && projectSkillRootKey(resolvedSource) == projectSkillRootKey(resolvedRoot) &&
 			projectSkillSourceSelects(home, resolvedRoot, resolvedSource) {
@@ -214,7 +214,7 @@ func projectSkillSourceFolders(root, name, source, home, cwd string) []string {
 	// to the source. A plain folder or file resolves under the resolved root,
 	// which the checks above cover, so only the other entries are resolved,
 	// all of them.
-	entries, err := os.ReadDir(root)
+	entries, err := pathReadDir(root)
 	if err != nil {
 		return nil
 	}
@@ -237,11 +237,11 @@ func projectSkillSourceFolders(root, name, source, home, cwd string) []string {
 			// A plain folder can still hold a manifest that is a link to
 			// the source: the manifest is then the entry to resolve.
 			path = filepath.Join(dir, "SKILL.md")
-			if info, err := os.Lstat(path); err != nil || info.Mode().IsRegular() {
+			if info, err := pathLstat(path); err != nil || info.Mode().IsRegular() {
 				continue
 			}
 		}
-		resolved, err := filepath.EvalSymlinks(path)
+		resolved, err := pathEvalSymlinks(path)
 		if err != nil {
 			continue
 		}
@@ -277,7 +277,7 @@ type projectSkillIdentities struct {
 // tells those apart from a distinct copy with the same bytes.
 func projectSkillSourceIdentities(home, source string) projectSkillIdentities {
 	var ids projectSkillIdentities
-	info, err := os.Stat(source)
+	info, err := pathStat(source)
 	if err != nil {
 		return ids
 	}
@@ -289,7 +289,7 @@ func projectSkillSourceIdentities(home, source string) projectSkillIdentities {
 		dir = filepath.Dir(source)
 	}
 	for {
-		if manifest, err := os.Stat(filepath.Join(dir, "SKILL.md")); err == nil && manifest.Mode().IsRegular() {
+		if manifest, err := pathStat(filepath.Join(dir, "SKILL.md")); err == nil && manifest.Mode().IsRegular() {
 			if projectSkillPrivateOwner(home, dir) {
 				ids.placed, ids.any = ids.any, nil
 				return ids
@@ -309,11 +309,11 @@ func projectSkillSourceIdentities(home, source string) projectSkillIdentities {
 // link to one, holds a SKILL.md that is one of the identities. An entry that
 // is not a folder is no skill folder, whatever it links to.
 func projectSkillIdentityMatches(home, entry string, ids projectSkillIdentities) bool {
-	dir, err := os.Stat(entry)
+	dir, err := pathStat(entry)
 	if err != nil || !dir.IsDir() {
 		return false
 	}
-	manifest, err := os.Stat(filepath.Join(entry, "SKILL.md"))
+	manifest, err := pathStat(filepath.Join(entry, "SKILL.md"))
 	if err != nil || !manifest.Mode().IsRegular() {
 		return false
 	}
@@ -327,7 +327,7 @@ func projectSkillIdentityMatches(home, entry string, ids projectSkillIdentities)
 	// file: a regular file placed in the folder, or a link that leaves the
 	// profile or lands where another user can write. A link to a private
 	// file is only a pointer to the user own selection.
-	final, err := filepath.EvalSymlinks(filepath.Join(entry, "SKILL.md"))
+	final, err := pathEvalSymlinks(filepath.Join(entry, "SKILL.md"))
 	return err == nil && !projectSkillPrivateFolder(home, final)
 }
 
@@ -346,11 +346,11 @@ func projectSkillSourceSelects(home, folder, source string) bool {
 	// A project link to a skill folder reaches its manifest as a child named
 	// SKILL.md. That child is no folder: the folder holding it is the
 	// candidate, so its owner is weighed like any other.
-	if info, err := os.Stat(folder); err == nil && !info.IsDir() {
+	if info, err := pathStat(folder); err == nil && !info.IsDir() {
 		folder = filepath.Dir(folder)
 	}
 	for dir := source; ; dir = filepath.Dir(dir) {
-		if info, err := os.Stat(filepath.Join(dir, "SKILL.md")); err == nil && info.Mode().IsRegular() {
+		if info, err := pathStat(filepath.Join(dir, "SKILL.md")); err == nil && info.Mode().IsRegular() {
 			return !projectSkillPrivateOwner(home, dir)
 		}
 		if parent := filepath.Dir(dir); projectSkillRootKey(dir) == projectSkillRootKey(folder) || parent == dir {
@@ -368,14 +368,14 @@ func projectSkillPrivateOwner(home, dir string) bool {
 	if !projectSkillPrivateFolder(home, dir) {
 		return false
 	}
-	manifest, err := filepath.EvalSymlinks(filepath.Join(dir, "SKILL.md"))
+	manifest, err := pathEvalSymlinks(filepath.Join(dir, "SKILL.md"))
 	return err == nil && projectSkillPrivateFolder(home, manifest)
 }
 
 // projectSkillPrivateFolder reports whether a resolved folder lies in the
 // caller's profile with no folder on the way to it writable by another user.
 func projectSkillPrivateFolder(home, dir string) bool {
-	realHome, err := filepath.EvalSymlinks(home)
+	realHome, err := pathEvalSymlinks(home)
 	if err != nil || !projectSkillPathWithin(realHome, dir) {
 		return false
 	}
@@ -413,7 +413,7 @@ func projectSkillRootFacts(connector, home, cwd string) map[string]string {
 		}
 		finding := inspectProjectSkillRoot(home, root)
 		if finding == "" {
-			if info, err := os.Stat(root); err == nil && info.IsDir() {
+			if info, err := pathStat(root); err == nil && info.IsDir() {
 				if facts == nil {
 					facts = map[string]string{}
 				}
@@ -450,24 +450,24 @@ func projectSkillPathWithin(home, path string) bool {
 }
 
 func inspectProjectSkillRoot(home, root string) string {
-	if info, err := os.Lstat(root); errors.Is(err, fs.ErrNotExist) {
+	if info, err := pathLstat(root); errors.Is(err, fs.ErrNotExist) {
 		return ""
 	} else if err != nil {
 		return ProjectSkillRootUnreadable
 	} else if !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 		return ""
 	}
-	realHome, err := filepath.EvalSymlinks(home)
+	realHome, err := pathEvalSymlinks(home)
 	if err != nil {
 		return ProjectSkillRootUnreadable
 	}
-	realRoot, err := filepath.EvalSymlinks(root)
+	realRoot, err := pathEvalSymlinks(root)
 	if errors.Is(err, fs.ErrNotExist) {
 		return ""
 	} else if err != nil {
 		return ProjectSkillRootUnreadable
 	}
-	info, err := os.Stat(realRoot)
+	info, err := pathStat(realRoot)
 	if errors.Is(err, fs.ErrNotExist) || err == nil && !info.IsDir() {
 		return ""
 	} else if err != nil {
