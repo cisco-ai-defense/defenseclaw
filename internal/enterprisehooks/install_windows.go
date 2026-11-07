@@ -38,7 +38,37 @@ var (
 	// windowsConnectorSupportedOnHost is the native Windows certification
 	// table; tests of the generic lifecycle replace it for a fixture name.
 	windowsConnectorSupportedOnHost = connector.ConnectorSupportedOnHostOS
+	// The CLI registers the shared OpenCode service.json writer without an
+	// enterprisehooks -> enterprisepolicy import cycle.
+	windowsOpenCodeServicePortWriter func(string, int) (int, error)
 )
+
+func SetWindowsOpenCodeServicePortWriter(write func(string, int) (int, error)) {
+	windowsOpenCodeServicePortWriter = write
+}
+
+func ensureWindowsManagedOpenCodePort(connectorName, home, sid string, assigned int, required bool) error {
+	if connectorName != "opencode" {
+		return nil
+	}
+	if assigned <= 0 {
+		if required {
+			return fmt.Errorf("enterprise hooks: OpenCode service port for target SID %s is unavailable", sid)
+		}
+		return nil
+	}
+	if windowsOpenCodeServicePortWriter == nil {
+		return fmt.Errorf("enterprise hooks: OpenCode service port writer is unavailable")
+	}
+	port, err := windowsOpenCodeServicePortWriter(home, assigned)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: OpenCode service port for target SID %s: %w", sid, err)
+	}
+	if port != assigned {
+		return fmt.Errorf("enterprise hooks: OpenCode service port for target SID %s differs from the guardian assignment", sid)
+	}
+	return nil
+}
 
 func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, bool, error) {
 	if err := requireWindowsEnterpriseManagedAgentVersion(
@@ -730,6 +760,9 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 			// Hash the guardian-selected image as the target user and record
 			// it where the connector's executable admission reads it.
 			if err := recordWindowsManagedSetupSelection(target); err != nil {
+				return err
+			}
+			if err := ensureWindowsManagedOpenCodePort(target.conn.Name(), target.home, target.sid.String(), opts.OpenCodeServicePort, opts.OpenCodeServicePortRequired); err != nil {
 				return err
 			}
 			target.conn.SetCredentials(target.setup.APIToken, opts.MasterKey)
