@@ -602,6 +602,11 @@ func dispatchTrustedActionWith(
 				// the call budget, like its parent.
 				child.generation, child.budget = generation, budget
 				childFindings := dispatchTrustedAction(ctx, child)
+				if simple.LoginGuess {
+					childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
+						return !loginGuessProvedFinding(f)
+					})
+				}
 				if child.Input.MovedWindowsShellCWD && !request.Input.MovedWindowsShellCWD {
 					// The moved-directory reading only adds findings: the
 					// child's reading without it (a hooks-dir removal or move
@@ -4455,6 +4460,16 @@ func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
 		}
 	}
 	return findings
+}
+
+// loginGuessProvedFinding reports a finding a LoginGuess reading of a simple
+// command may add: the proof of a write to DefenseClaw state. The reading
+// gives USER and LOGNAME the login the home spells, a guess the shell may
+// not hold, so it never decides a rule over the words of the command: a word
+// expanded at run time stays unproven (detection-only) there, as it is in the
+// reading without the guess.
+func loginGuessProvedFinding(finding RuleFinding) bool {
+	return trustedActionFindingKey(finding.RuleID) == canonicalTrustedRuleID("tamper.detector_state_write")
 }
 
 // withSimpleCommandFindings adds each command's ordinary standalone result
