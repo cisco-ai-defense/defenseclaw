@@ -446,9 +446,14 @@ func TestMachineLayoutWindowsDriveLessPathFollowsTheCurrentDrive(t *testing.T) {
 		`\ProgramData\Cisco\DefenseClaw\etc\project.yaml`,
 		`\Program Files\Cisco\DefenseClaw\bin\project.exe`,
 		`\ProgramData\Cisco\DefenseClaw-HookRuntime\project.txt`,
+		`/ProgramData/Cisco/DefenseClaw/etc/project.yaml`,
+		`/Program Files/Cisco/DefenseClaw/bin/project.exe`,
+		`/ProgramData/Cisco/DefenseClaw-HookRuntime/project.txt`,
+		`/ProgramData\Cisco/DefenseClaw\etc/project.yaml`,
+		`\Program Files/Cisco\DefenseClaw/bin\project.exe`,
 	}
 	for _, managed := range []bool{false, true} {
-		for _, pack := range []string{"", "permissive"} {
+		for _, pack := range []string{"", "permissive", "strict"} {
 			for _, file := range files {
 				for _, project := range []string{`D:\proj`, `D:/proj`, `/mnt/d/proj`} {
 					if _, got := machineLayoutCall(t, home, project, "Write", map[string]any{"file_path": file, "content": "x"}, managed, pack); strings.HasPrefix(got, `{"action":"block"`) {
