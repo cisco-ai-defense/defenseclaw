@@ -774,7 +774,7 @@ func (s *Sidecar) publishConfig(cfg *config.Config) *config.Config {
 		return nil
 	}
 	snapshot := cloneConfig(cfg)
-	bindPackPostures(snapshot, boundPackPostures(cfg))
+	snapshot.BindRulePackPosturesFrom(cfg)
 	s.hookPolicyMu.Lock()
 	s.cfgCurrent.Store(snapshot)
 	s.hookPolicyMu.Unlock()
@@ -2455,7 +2455,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		s.health.beginConnectorSetup(next.ActiveConnectors())
 	}
 	if !onlyReloadModeChange {
-		bindPackPostures(&next, boundPackPostures(nextGen.Config))
+		next.BindRulePackPosturesFrom(nextGen.Config)
 		appliedCfg = s.publishConfig(&next)
 	} else {
 		// The reload mode belongs to the manager until a restart. Publish the
@@ -2463,7 +2463,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		// previous generation can still hold the current config for hook
 		// registration repair and in-flight decisions.
 		modeApplied := cloneConfig(current)
-		bindPackPostures(modeApplied, boundPackPostures(nextGen.Config))
+		modeApplied.BindRulePackPosturesFrom(nextGen.Config)
 		appliedCfg = s.publishConfig(modeApplied)
 	}
 	nextGen.Config = appliedCfg
@@ -2793,23 +2793,12 @@ func hookPolicyNeedsSetup(oldCfg, newCfg *config.Config) bool {
 }
 
 func hookRuntimePolicyChanged(oldCfg, newCfg *config.Config, name string) bool {
-	oldTier, newTier := hookPolicyTierForConnector(oldCfg, name), hookPolicyTierForConnector(newCfg, name)
+	oldTier, newTier := oldCfg.HookPolicyTierForConnector(name), newCfg.HookPolicyTierForConnector(name)
 	return oldCfg.EffectiveHookFailModeForConnector(name) != newCfg.EffectiveHookFailModeForConnector(name) ||
 		oldCfg.EffectiveHookOutageFailModeForConnectorAtTier(name, oldTier) != newCfg.EffectiveHookOutageFailModeForConnectorAtTier(name, newTier) ||
 		oldTier != newTier ||
 		oldCfg.EffectiveGuardrailModeForConnector(name) != newCfg.EffectiveGuardrailModeForConnector(name) ||
 		oldCfg.EffectiveHILTForConnector(name).Enabled != newCfg.EffectiveHILTForConnector(name).Enabled
-}
-
-func hookPolicyTierForConnector(cfg *config.Config, name string) string {
-	if cfg == nil {
-		return config.HookPolicyTierDefault
-	}
-	if boundPackPostures(cfg) != nil {
-		ref := cfg.EffectiveRulePackRefForConnector(name)
-		return packPostureFor(cfg, ref, cfg.ResolveRulePackDir(ref))
-	}
-	return cfg.HookPolicyTierForConnector(name)
 }
 
 // connectorHookSettings keeps, per connector, only whether its hooks are
@@ -2992,7 +2981,7 @@ func (s *Sidecar) bindHookRuntimePolicyResolver(guard *HookConfigGuard) {
 			s.hookPolicyMu.RUnlock()
 			return hookRuntimePolicy{}, nil, false
 		}
-		tier := hookPolicyTierForConnector(cfg, connectorName)
+		tier := cfg.HookPolicyTierForConnector(connectorName)
 		return hookRuntimePolicy{
 			hookFailMode:  cfg.EffectiveHookOutageFailModeForConnectorAtTier(connectorName, tier),
 			policyTier:    tier,
@@ -7416,7 +7405,7 @@ func (s *Sidecar) publishMultiConnectorReadyState(
 
 func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, proxyAddr, apiAddr string) (connector.SetupOpts, error) {
 	cfg := s.currentConfig()
-	policyTier := hookPolicyTierForConnector(cfg, conn.Name())
+	policyTier := cfg.HookPolicyTierForConnector(conn.Name())
 	agentVersion := connector.LoadCachedAgentVersion(cfg.DataDir, conn.Name())
 	agentExecutable := connector.LoadCachedAgentExecutable(cfg.DataDir, conn.Name())
 	contractResolution := connector.ResolveHookContract(conn.Name(), agentVersion)

@@ -48,7 +48,7 @@ func TestModeOnlyReloadKeepsPreviousPackPostureForHookRefresh(t *testing.T) {
 			publishPackPostures()
 			published := fixture.sidecar.publishConfig(initial)
 			fixture.sidecar.generation.Store(&Generation{Config: published})
-			if got := hookPolicyTierForConnector(published, "claudecode"); got != tc.before {
+			if got := published.HookPolicyTierForConnector("claudecode"); got != tc.before {
 				t.Fatalf("initial tier = %q, want %q", got, tc.before)
 			}
 			if bound, err := fixture.sidecar.BootstrapObservabilityRuntime(t.Context(), fixture.configPath, initialRaw); err != nil || !bound {
@@ -82,10 +82,10 @@ func TestModeOnlyReloadKeepsPreviousPackPostureForHookRefresh(t *testing.T) {
 			if current == published && tc.before != tc.after {
 				t.Fatal("mode-only reload reused the previous published config")
 			}
-			if got := hookPolicyTierForConnector(published, "claudecode"); got != tc.before {
+			if got := published.HookPolicyTierForConnector("claudecode"); got != tc.before {
 				t.Fatalf("previous tier = %q, want %q", got, tc.before)
 			}
-			if got := hookPolicyTierForConnector(current, "claudecode"); got != tc.after {
+			if got := current.HookPolicyTierForConnector("claudecode"); got != tc.after {
 				t.Fatalf("current tier = %q, want %q", got, tc.after)
 			}
 			if got := hookRuntimePolicyChanged(published, current, "claudecode"); got != (tc.before != tc.after) {
