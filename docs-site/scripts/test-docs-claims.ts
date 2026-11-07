@@ -232,6 +232,11 @@ describe('Observe mode policy findings and gateway outages', () => {
     assert.match(openclawSetup, /During a gateway outage, the saved outage mode decides whether a model request continues directly to its configured provider with a warning/i);
     assert.match(openclaw, /On a classified proxy outage.{0,200}default and permissive policies continue the original request to its configured provider with an agent warning; strict and managed policies block/i);
     assert.ok(!/While the gateway is down, requests are blocked/i.test(openclaw));
+    const outageRow = openclaw.split('| Gateway outage |')[1]?.split('| Proxy port |')[0] ?? '';
+    assert.ok(outageRow !== '', 'OpenClaw setup table lost its Gateway outage row');
+    assert.match(outageRow, /saved outage mode.*default and permissive continue with a warning, strict and managed `closed`/i);
+    assert.match(outageRow, /guardrail fail-mode open\\\|closed --connector openclaw/);
+    assert.ok(!/not configurable|does not apply|no hooks/i.test(outageRow), 'OpenClaw setup table must not call the gateway outage mode fixed or unconfigurable');
     const zeptoclaw = page('connectors/zeptoclaw.mdx');
     const zeptoclawSetup = zeptoclaw.split('## Setup')[1]?.split('## Check it')[0] ?? '';
     assert.match(zeptoclawSetup, /Observe records policy findings without blocking on those findings/i);
