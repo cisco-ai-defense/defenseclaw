@@ -306,9 +306,11 @@ dc_invoke_hook() {
     fi
     # The installed plugin posts to the address setup rendered into it; a
     # harness that moved the gateway off its default port names it here.
+    # An empty array expands to nothing only through the ${a[@]+...} form:
+    # macOS bash 3.2 fails "${a[@]}" on an empty array under set -u.
     local amp_addr=()
     [ -n "${DEFENSECLAW_GATEWAY_ADDR:-}" ] && amp_addr=(--api-addr "${DEFENSECLAW_GATEWAY_ADDR}")
-    out="$(defenseclaw-gateway hook --connector amp --event "${event}" "${amp_addr[@]}" < "${payload}" 2>&1)" && code=0 || code=$?
+    out="$(defenseclaw-gateway hook --connector amp --event "${event}" ${amp_addr[@]+"${amp_addr[@]}"} < "${payload}" 2>&1)" && code=0 || code=$?
   elif dc_is_windows; then
     if [ "${connector}" = "codex" ]; then
       # The native hook takes the contract setup bound for the installed
