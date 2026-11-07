@@ -191,11 +191,15 @@ func WriteUnixOpenCodeServicePortsFull(path string, state UnixOpenCodeServicePor
 // SweepUnixOpenCodeServicePortsTemp removes the temp files a killed record
 // write left beside the record at path (REVIEW-gx053-13 S2): regular files in
 // the record's own folder whose name matches the writer's temp pattern and
-// whose modification time is before passStart. A temp file at or after
-// passStart belongs to a writer that is still at work and is kept. The caller
-// holds the guardian reconcile lock of that folder (LockUnixGuardianReconcile),
-// so no writer that takes the lock is mid-write; the sweep follows no link and
-// never descends into a folder. It returns the number of files removed.
+// whose modification time is before passStart.
+//
+// The caller MUST hold the guardian reconcile lock of that folder
+// (LockUnixGuardianReconcile). The lock is what keeps a live writer's temp file
+// safe: every writer of the record (the guardian pass, opencode-port-clear)
+// takes it, so none is mid-write while the sweep runs. The modification-time
+// check does not protect a writer that does not hold the lock; it only spares
+// a file created after the pass began. The sweep follows no link and never
+// descends into a folder. It returns the number of files removed.
 func SweepUnixOpenCodeServicePortsTemp(path string, passStart time.Time) (int, error) {
 	dir := filepath.Dir(filepath.Clean(strings.TrimSpace(path)))
 	entries, err := os.ReadDir(dir)
