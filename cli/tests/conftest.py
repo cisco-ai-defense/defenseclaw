@@ -109,6 +109,21 @@ def _inject_supported_connector_host(request, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture(autouse=True)
+def _doctor_run_scope_closed():
+    """The Doctor run scope is module state that a test calling the command body
+    directly (no Click context to close it) leaves open; the next test to read the
+    discovery evidence would then be handed what an earlier test cached for its folder."""
+    def close() -> None:
+        module = sys.modules.get("defenseclaw.doctor_health")
+        if module is not None:
+            module.end_installed_version_run()
+
+    close()
+    yield
+    close()
+
+
+@pytest.fixture(autouse=True)
 def _config_writer_python_validation(monkeypatch: pytest.MonkeyPatch):
     """Validate config writes with the Python checks, not a host gateway binary.
 

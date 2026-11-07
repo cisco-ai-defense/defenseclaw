@@ -1588,12 +1588,25 @@ def _resolves_unchanged_since(
             info = os.lstat(checked)
         except OSError:
             return False
-        if max(info.st_mtime, info.st_ctime) >= since:
+        if max(info.st_mtime, _changed_at(checked, info)) >= since:
             return False
     try:
         return stat.S_ISREG(os.lstat(resolved).st_mode)
     except OSError:
         return False
+
+
+def _changed_at(path: str, info: os.stat_result) -> float:
+    """When the file or folder at *path* last changed, in Unix seconds: ``st_ctime``
+    where that is the change time. On Windows it is the creation time, which a
+    rename leaves alone, so a folder swapped for a ready-made one would look
+    untouched; the NTFS change time (:func:`_windows_change_time`) moves with the
+    rename. A link is made new when it is retargeted, so its creation time says."""
+    if _is_windows_host() and not stat.S_ISLNK(info.st_mode):
+        ticks = _windows_change_time(path)
+        if ticks is not None:
+            return max(info.st_ctime, (ticks - _WINDOWS_TICKS_AT_UNIX_EPOCH) / 10_000_000)
+    return info.st_ctime
 
 
 def _data_dir_holders(data_dir: str | os.PathLike[str] | None) -> frozenset[str]:
