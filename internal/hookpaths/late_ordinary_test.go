@@ -48,6 +48,13 @@ func newLateFixture(t *testing.T) lateFixture {
 	if err := os.Symlink(keys, filepath.Join(project, "-keylink")); err != nil {
 		t.Fatal(err)
 	}
+	// A link whose name is one letter, and one with a space in its name.
+	if err := os.Symlink(filepath.Join(project, "plain.txt"), filepath.Join(project, "l")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(keys, filepath.Join(project, "key link")); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(project, "dirlink")); err != nil {
 		t.Fatal(err)
 	}
@@ -166,11 +173,85 @@ func TestGAP0518LateOrdinaryCall(t *testing.T) {
 		{"state folder name", "cat openclaw.json defenseclaw.yaml", false},
 		{"2000 operands, attached option last", lateOperands(2000, "-okeylink", "last"), false},
 		{"2000 operands, hard link middle", lateOperands(2000, "hardlink", "middle"), false},
+		// Round 3: the text of a call is told by what the program does with a
+		// word, not by its look. A quoted word may hold several; a sed script
+		// is a program of its own.
+		{"echo of a state folder word", "echo openclaw defenseclaw .ssh authorized_keys", true},
+		{"echo of a flag with a link of that name", "echo -l", true},
+		{"printf text", "printf %s-l x", true},
+		{"flags of ls with a one-letter link", "ls -l && ls -la src", true},
+		{"flags of head and a number", "head -n5 plain.txt && tail -5 plain.txt", true},
+		{"grep flags", "grep -rn needle src", true},
+		{"sed print range", "sed -n 1,5p plain.txt", true},
+		{"sed regexp print", "sed -n /x/p plain.txt", true},
+		{"sed substitute", "sed -e s/a/b/g plain.txt && sed -i s/a/b/ plain.txt", true},
+		{"sed bundled flags and script", "sed -ne p plain.txt", true},
+		{"echo redirect to a link", "echo x > keylink", false},
+		{"printf redirect to a link", "printf x >> keylink", false},
+		{"sed w command in a quoted script", "sed -n -e \"w keylink\" plain.txt", false},
+		{"sed w command without a space", "sed -n wkeylink plain.txt", false},
+		{"sed w flag of s", "sed -n \"s/a/b/w keylink\" plain.txt", false},
+		{"sed w flag of s, no space", "sed s/a/b/wkeylink plain.txt", false},
+		{"sed e flag", "sed s/a/b/e plain.txt", false},
+		{"sed e command", "sed -n \"1e id\" plain.txt", false},
+		{"sed script file", "sed -f script.sed plain.txt", false},
+		{"sed attached script file", "sed -fscript.sed plain.txt", false},
+		{"sed two commands", "sed -n \"p;w keylink\" plain.txt", false},
+		{"sed expression option", "sed --expression=\"w keylink\" plain.txt", false},
+		{"sed read command", "sed -n \"r keylink\" plain.txt", false},
+		{"sed in place on a link", "sed -i s/a/b/ keylink", false},
+		{"sed backup folder", "sed -idirlink/ s/a/b/ plain.txt", false},
+		{"sed script after the file", "sed plain.txt -e \"w keylink\"", false},
+		{"quoted word with a link name", "cat \"key link\"", false},
+		{"quoted word with a link part", "cat \"x keylink\"", false},
+		{"quoted tilde", "cat \"~/.ssh/authorized_keys\"", false},
+		{"editor command", "vim -c \"wkeylink\" plain.txt", false},
+		{"ls with an attached value", "ls -Ikeylink", false},
+		{"grep pattern file attached", "grep -fkeylink plain.txt", false},
+		{"sort output attached", "sort -okeylink plain.txt", false},
+		{"cp target folder attached", "cp -tdirlink plain.txt", false},
+		{"tail with a link after the flags", "tail -n5 keylink", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, call := range []struct{ connector, tool string }{{"claudecode", "Bash"}, {"codex", "exec_command"}} {
 				if got := LateOrdinaryCall(call.connector, lateBash(t, call.tool, f.project, tc.command)); got != tc.want {
 					t.Errorf("%s %s: %q ordinary=%v, want %v", call.connector, call.tool, tc.command, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestGAP0518LateOrdinaryCallArgv: an argv is a list of words, so a space or
+// a shell character inside one stays in the word (round 3).
+func TestGAP0518LateOrdinaryCallArgv(t *testing.T) {
+	f := newLateFixture(t)
+	for _, tc := range []struct {
+		name string
+		argv []string
+		want bool
+	}{
+		{"plain file", []string{"cat", "plain.txt"}, true},
+		{"flags", []string{"ls", "-la"}, true},
+		{"echo text with a space", []string{"echo", "a b", "openclaw"}, true},
+		{"file with a literal semicolon", []string{"cat", "a;b"}, true},
+		{"link with a space in its name", []string{"cat", "key link"}, false},
+		{"part of a word is a link", []string{"cat", "x keylink"}, false},
+		{"link", []string{"cat", "keylink"}, false},
+		{"redirect word is a plain word of echo", []string{"echo", "x", ">", "keylink"}, true},
+		{"shell wrapper", []string{"bash", "-lc", "echo hi"}, false},
+		{"quote in a word", []string{"cat", "it\x27s"}, false},
+		{"empty word", []string{"cat", ""}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, call := range []struct{ connector, field, tool string }{{"claudecode", "command", "Bash"}, {"codex", "cmd", "exec_command"}} {
+				payload, err := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": f.project, "tool_name": call.tool,
+					"tool_input": map[string]any{call.field: tc.argv}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := LateOrdinaryCall(call.connector, payload); got != tc.want {
+					t.Errorf("%s: %q ordinary=%v, want %v", call.connector, tc.argv, got, tc.want)
 				}
 			}
 		})
