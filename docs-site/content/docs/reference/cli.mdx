@@ -1264,9 +1264,9 @@ The moved keys, sample output and the way back are in [Migrate to config version
 
 On Windows, `uninstall` also removes a DefenseClaw Setup 0.8.x install that the installer left in place because its data is in another folder (`DEFENSECLAW_HOME`). It stops that install, removes its program folder, cached Setup, Apps & Features entry, sign-in start and `PATH` entry, and turns its hook launcher off. It never runs that install's programs and keeps its data folder.
 
-If part of that removal stays, `uninstall` exits 1 and prints one next step for each reason: close the program that holds a file, ask an administrator to remove what your account cannot, or sign in as the account that owns the folder. The step names the path.
+If part of that removal stays, `uninstall` exits 1 and prints one next step for each reason: close the program that holds a file, ask an administrator to remove what your account cannot, or sign in as the account that owns the folder. The step names the path, and for a link it names the link found and tells you to delete only that link, and only if it is stray.
 
-On Windows, `uninstall` also removes this account's `defenseclaw-api-port-<port>` file in `C:\ProgramData`, which the gateway leaves so that init on another account does not take its port. The default run, which stops the gateway and keeps the data folder, removes it too; the next gateway start claims its port again.
+After it stops the gateway, `uninstall` removes this account's port claim files (`defenseclaw-api-port-<port>` and `defenseclaw-guardrail-port-<port>`): in `C:\ProgramData` on Windows, in `/var/tmp` on Linux and macOS. The gateway leaves them so that init on another account does not take its ports. Only the ports of the gateway that was stopped, and only files that belong to this account, are removed; the next gateway start claims its ports again.
 
 `uninstall` and `reset` cannot remove the Claude Cowork plugin that `defenseclaw setup cowork` adds to your Claude account, and they say so when one was built. In Claude Desktop, open **Customize > Plugins**, then the **...** menu on DefenseClaw, and choose **Remove**. Until you remove the plugin, Cowork tool calls are blocked. `uninstall --dry-run` lists the step. See [Remove the Cowork plugin](/docs/connectors/cowork#remove).
 

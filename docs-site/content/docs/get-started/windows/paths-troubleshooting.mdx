@@ -188,7 +188,7 @@ A DefenseClaw Setup 0.8.x install is still on your user `PATH` and its `defensec
 
 `defenseclaw init` stops before it changes anything when a DefenseClaw Setup 0.8.x install of your account still has hooks in an agent's settings. The 1.x hooks would sit beside them and the two disagree. The message names the Setup install and the settings file.
 
-**Fix.** Run `defenseclaw uninstall` to remove the 0.8.x Setup install (it keeps that install's data folder), then run `defenseclaw init` again.
+**Fix.** No command removes only the 0.8.x install. `defenseclaw uninstall` removes it (and keeps its data folder), and it also stops this release's gateway and removes the hooks of the connectors it has configured. Run it, then run `defenseclaw init` again to set them up.
 
 **Check.** `defenseclaw init` finishes and `defenseclaw doctor` shows the agent as guarded.
 
