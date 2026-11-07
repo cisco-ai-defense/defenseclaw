@@ -37,8 +37,13 @@ type fakeHolderHandle struct {
 	access     uint32
 	id         windowsHookHolderIdentity
 	disk       bool
-	notFile    bool          // its object type is not File: the scan must not touch it
-	denyDelete bool          // this is the handle that refuses every start
+	notFile    bool // its object type is not File: the scan must not touch it
+	denyDelete bool // this is the handle that refuses every start
+	// allowsStart: the handle denies deletion but a start of the hook works
+	// (it shares reading); only with denyDelete.
+	allowsStart bool
+	// closeFails: the close is made and its last call reports a failure.
+	closeFails bool
 	block      chan struct{} // Identify does not answer until it is closed (a synchronous pipe)
 	closeBlock chan struct{} // CloseIf does not answer until it is closed (the value became a blocked pipe)
 	// commitFirst makes CloseIf tell the caller the close has begun before
@@ -105,6 +110,10 @@ func (p *fakeHolderProcess) CloseIf(handle uintptr, want windowsHookHolderIdenti
 	if h != nil && h.wrongObject {
 		h.closed = true
 		return errWindowsHolderWrongObject
+	}
+	if h != nil && h.closeFails {
+		h.closed = true
+		return fmt.Errorf("%w (%v)", errWindowsHolderCloseFailed, errors.New("access denied"))
 	}
 	if h != nil && h.rotateTo != nil {
 		h.closed = true
@@ -199,6 +208,22 @@ func (s *fakeHolderSystem) blocked() bool {
 	return false
 }
 
+// startRefused is whether a start-style open of the hook is refused: a handle
+// that denies deletion and does not allow reading to be shared.
+func (s *fakeHolderSystem) startRefused() bool {
+	for _, p := range s.procs {
+		for _, h := range p.handles {
+			if h.denyDelete && !h.allowsStart && !h.closed {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// fakeWriteAccess is a read handle that can also write and append.
+const fakeWriteAccess = 0x12008f
+
 type holdRig struct {
 	t       *testing.T
 	sys     *fakeHolderSystem
@@ -215,15 +240,21 @@ func newHoldRig(t *testing.T) *holdRig {
 	rig.advance = fakeWindowsHeldSwapClock(t)
 	rig.sys = &fakeHolderSystem{t: t, hook: windowsHookHolderIdentity{volume: 7, id: [16]byte{1, 2, 3}}, procs: map[uint32]*fakeHolderProcess{}}
 	savedStandalone, savedSys, savedBlocked, savedPost, savedName := windowsHolderStandalone, windowsHolderSys, windowsHookBinaryDeleteBlocked, windowsHolderAuditPost, windowsHolderUserName
+	savedOpenRefused, savedKeep := windowsHookBinaryOpenRefused, windowsHookBinaryKeep
 	savedTimeout, savedHung, savedProbes, savedWrite, savedCommit := windowsHolderProbeTimeout, windowsHolderMaxHung, windowsHolderMaxProbes, windowsHolderAuditWrite, windowsHolderCommitWait
 	windowsHolderStandalone = func() bool { return true }
 	windowsHolderSys = rig.sys
 	windowsHookBinaryDeleteBlocked = func(string) bool { return rig.sys.blocked() }
+	windowsHookBinaryOpenRefused = func(string) bool { return rig.sys.startRefused() }
+	// The guardian's wrapper runs a hold pass of the test's own in place of
+	// the check under the mutex; the wrapper itself is the real one.
+	windowsHookBinaryKeep = func(stderr io.Writer, _ bool) { writeWindowsHolderLog(stderr) }
 	windowsHolderAuditPost = func(row windowsHolderAuditRow) error { rig.posted = append(rig.posted, row); return nil }
 	windowsHolderUserName = func(sid string) string { return `HOST\user-` + sid[len(sid)-4:] }
 	resetWindowsHolderOutputForTest()
 	t.Cleanup(func() {
 		windowsHolderStandalone, windowsHolderSys, windowsHookBinaryDeleteBlocked, windowsHolderAuditPost, windowsHolderUserName = savedStandalone, savedSys, savedBlocked, savedPost, savedName
+		windowsHookBinaryOpenRefused, windowsHookBinaryKeep = savedOpenRefused, savedKeep
 		windowsHolderProbeTimeout, windowsHolderMaxHung, windowsHolderMaxProbes, windowsHolderAuditWrite, windowsHolderCommitWait = savedTimeout, savedHung, savedProbes, savedWrite, savedCommit
 		resetWindowsHolderOutputForTest()
 	})
@@ -252,7 +283,7 @@ func reportWindowsHookHolders(stderr io.Writer) {
 func (r *holdRig) check() (int, error) {
 	r.t.Helper()
 	closed, err := endWindowsExclusiveHold(r.target)
-	reportWindowsHookHolders(&r.log)
+	keepWindowsStandaloneHookBinary(&r.log, false)
 	return closed, err
 }
 
@@ -515,12 +546,12 @@ func TestWindowsHolderLeavesAHandleItsOwnerProtectedFromClosing(t *testing.T) {
 	}
 }
 
-// S2. The handle table does not show whose handle refuses the start. While a
-// service (a refused holder) has the hook open the guardian closes no user's
-// handle: the service's may be the one that refuses, and a user's harmless
-// read is not closed for nothing. The service is named, once, and the user's
-// handle is closed as soon as the service has let go.
-func TestWindowsHolderARefusedHolderOnTheHookKeepsTheGuardianFromClosingAUsersHandle(t *testing.T) {
+// S1 (review r6). While a service (a refused holder) that could be what refuses
+// the start has the hook open, the guardian closes no user's handle at first:
+// it names the service, once, and backs off. After about 30 seconds of the
+// user's hold it closes that user's handles once in the streak, to rule the
+// service out, and says so in the row. It does not do it again in the streak.
+func TestWindowsHolderARefusedHolderThatCouldRefuseTheStartKeepsTheGuardianOffUntilTheBoundedOverride(t *testing.T) {
 	rig := newHoldRig(t)
 	user := rig.sys.sharing(0x44)
 	userProc := rig.sys.add(4100, fakeUserSID, 2, user)
@@ -531,31 +562,160 @@ func TestWindowsHolderARefusedHolderOnTheHookKeepsTheGuardianFromClosingAUsersHa
 	}
 	closed, err := rig.tick()
 	if closed != 0 || err == nil || !strings.Contains(err.Error(), "has the hook open and may be what refuses its starts") ||
-		!strings.Contains(err.Error(), "closes none of the 1 handle(s) of signed-in users") {
+		!strings.Contains(err.Error(), "closes none of the 1 handle(s) of signed-in users") || !strings.Contains(err.Error(), "after about 30 seconds") {
 		t.Fatalf("closed %d, %v", closed, err)
 	}
-	for i := 0; i < 12; i++ {
+	for i := 0; i < 5; i++ {
 		if closed, _ := rig.tick(); closed != 0 {
 			t.Fatalf("tick %d closed %d handle(s) while the service has the hook open", i, closed)
 		}
 	}
-	if user.closed || len(userProc.closeLog) != 0 {
-		t.Fatalf("the user's handle was closed while the service refused the start: %v", userProc.closeLog)
+	if user.closed || len(userProc.closeLog) != 0 || len(rig.posted) != 1 || rig.posted[0].Closed || rig.posted[0].Holder.PID != 700 || !strings.Contains(rig.posted[0].Reason, "LocalSystem") {
+		t.Fatalf("before the override: closes %v, rows %+v, want one row that names the service and says nothing was closed", userProc.closeLog, rig.posted)
 	}
-	if len(rig.posted) != 1 || rig.posted[0].Closed || rig.posted[0].Holder.PID != 700 || !strings.Contains(rig.posted[0].Reason, "LocalSystem") {
-		t.Fatalf("rows %+v, want one row that names the service and says nothing was closed", rig.posted)
+	// 35 s into the hold: the bounded override.
+	closed, err = rig.tick()
+	if closed != 1 || err != nil || !user.closed || service.closed {
+		t.Fatalf("override: closed %d, %v (user %v, service %v)", closed, err, user.closed, service.closed)
 	}
-	// The user's handle is the one that refuses once the service lets go.
-	service.closed = true
-	user.denyDelete = true
-	for i := 0; i < 5 && !user.closed; i++ {
+	if len(rig.posted) != 2 || !rig.posted[1].Closed || rig.posted[1].Holder.PID != 4100 || !strings.Contains(rig.posted[1].Note, "once per streak") ||
+		!strings.Contains(rig.posted[1].event().Details, "rule the other holder out") || !strings.Contains(rig.log.String(), "rule the other holder out") {
+		t.Fatalf("override rows %+v, log %q", rig.posted, rig.log.String())
+	}
+	// Once per streak: another user handle is not closed while the service stays.
+	again := rig.sys.sharing(0x50)
+	rig.sys.add(4300, fakeUserSID, 2, again)
+	for i := 0; i < 8; i++ {
 		rig.advance(windowsHeldSwapBackoffBase)
+		if closed, _ := rig.tick(); closed != 0 {
+			t.Fatalf("second override in the streak (tick %d)", i)
+		}
+	}
+	if _, err := rig.check(); again.closed || err == nil || !strings.Contains(err.Error(), "already closed one user's handles once in this streak") {
+		t.Fatalf("second handle %v, %v", again.closed, err)
+	}
+	// Once the service has let go the user's handle is the one that refuses.
+	service.closed = true
+	again.denyDelete = true
+	rig.advance(6 * time.Minute) // past every backoff
+	for i := 0; i < 6 && !again.closed; i++ {
 		if _, err := rig.tick(); err != nil {
 			t.Fatalf("after the service let go: %v", err)
 		}
 	}
-	if !user.closed {
+	if !again.closed {
 		t.Fatal("the user's handle was not closed after the service let go")
+	}
+}
+
+// S1 (review r6), the sharper rule. A start needs read and execute and shares
+// read and delete, so a holder that only reads, beside another file object,
+// cannot be what refuses it: it is named and the user's blocker is closed.
+func TestWindowsHolderAReadOnlyRefusedHolderBesideAnotherObjectDoesNotKeepAUsersBlockerOpen(t *testing.T) {
+	rig := newHoldRig(t)
+	service := rig.sys.culprit(0x90)
+	service.object, service.allowsStart = 100, true // read only, denies deletion, a start works
+	rig.sys.add(700, "S-1-5-18", 0, service)
+	user := rig.sys.culprit(0x44)
+	user.object, user.access = 200, fakeWriteAccess // an admin process that reads and writes
+	userProc := rig.sys.add(4100, fakeUserSID, 2, user)
+	if _, err := rig.check(); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := rig.tick()
+	if closed != 1 || err != nil || !user.closed || service.closed || len(userProc.closeLog) != 1 {
+		t.Fatalf("closed %d, %v (user %v, service %v)", closed, err, user.closed, service.closed)
+	}
+	if len(rig.posted) != 2 {
+		t.Fatalf("rows %+v, want one for the service and one for the closed handle", rig.posted)
+	}
+	byPID := map[uint32]windowsHolderAuditRow{}
+	for _, row := range rig.posted {
+		byPID[row.Holder.PID] = row
+	}
+	if row := byPID[4100]; !row.Closed || row.Counts.Closed != 1 {
+		t.Fatalf("the closed handle's row %+v", row)
+	}
+	if row := byPID[700]; row.Closed || !strings.Contains(row.Reason, "LocalSystem") {
+		t.Fatalf("the service's row %+v, want closed=false", row)
+	}
+	if !strings.Contains(rig.log.String(), "cannot be what refuses a start") {
+		t.Fatalf("log %q", rig.log.String())
+	}
+}
+
+// The same service, able to write, can refuse the start: it keeps the guardian
+// off. So does a read-only service that is the only file object on the hook,
+// and a handle on a file object the system did not show (it may be anything).
+func TestWindowsHolderARefusedHolderThatCanRefuseTheStartStillBlocksTheClose(t *testing.T) {
+	cases := []struct {
+		name       string
+		serviceObj uintptr
+		serviceAcc uint32
+		userObj    uintptr
+	}{
+		{"it can write", 100, fakeWriteAccess, 200},
+		{"the only object", 100, 0x120089, 100},
+		{"an object the system did not show", 0, 0x120089, 200},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newHoldRig(t)
+			service := rig.sys.culprit(0x90)
+			service.object, service.access = tc.serviceObj, tc.serviceAcc
+			rig.sys.add(700, "S-1-5-18", 0, service)
+			user := rig.sys.sharing(0x44)
+			user.object = tc.userObj
+			rig.sys.add(4100, fakeUserSID, 2, user)
+			_, _ = rig.check()
+			for i := 0; i < 4; i++ {
+				if closed, _ := rig.tick(); closed != 0 || user.closed {
+					t.Fatalf("tick %d: closed %d", i, closed)
+				}
+			}
+			if len(rig.posted) != 1 || rig.posted[0].Closed {
+				t.Fatalf("rows %+v", rig.posted)
+			}
+		})
+	}
+}
+
+// Review r5 -> r6 regression: a user's own handle that its owner protected
+// from closing is skipped and named; the others are still closed.
+func TestWindowsHolderAUsersProtectedHandleIsSkippedAndTheOthersAreStillClosed(t *testing.T) {
+	rig := newHoldRig(t)
+	decoy := rig.sys.sharing(0x44)
+	decoyProc := rig.sys.add(4100, fakeUserSID, 2, decoy)
+	decoyProc.attributes = windowsObjProtectClose
+	culprit := rig.sys.culprit(0x50)
+	culpritProc := rig.sys.add(4200, fakeUserSID, 2, culprit)
+	_, _ = rig.check()
+	closed, err := rig.tick()
+	if closed != 1 || err != nil || !culprit.closed || decoy.closed || len(decoyProc.closeLog) != 0 || len(culpritProc.closeLog) != 1 {
+		t.Fatalf("closed %d, %v (culprit %v, decoy %v)", closed, err, culprit.closed, decoy.closed)
+	}
+	if len(rig.posted) != 2 {
+		t.Fatalf("rows %+v", rig.posted)
+	}
+	for _, row := range rig.posted {
+		if row.Holder.PID == 4100 && (row.Closed || !strings.Contains(row.Reason, "protected the handle from being closed")) {
+			t.Fatalf("the protected handle's row %+v", row)
+		}
+	}
+}
+
+// S1 (review r6), point 4. A handle that only denies deletion is not closed
+// once a start works.
+func TestWindowsHolderStopsClosingOnceAStartWorks(t *testing.T) {
+	rig := newHoldRig(t)
+	refuses := rig.sys.culprit(0x44)
+	deletionOnly := rig.sys.culprit(0x48)
+	deletionOnly.allowsStart = true
+	rig.sys.add(4100, fakeUserSID, 2, refuses, deletionOnly)
+	_, _ = rig.check()
+	closed, err := rig.tick()
+	if closed != 1 || err != nil || !refuses.closed || deletionOnly.closed {
+		t.Fatalf("closed %d, %v (refuses %v, deletion only %v)", closed, err, refuses.closed, deletionOnly.closed)
 	}
 }
 
@@ -1192,11 +1352,15 @@ func TestWindowsHolderACloseThatFinishesLateIsAuditedWithoutAnotherHoldPass(t *t
 	setWindowsHolderAuditPath(file)
 	culprit := rig.sys.culprit(0x44)
 	culprit.closeBlock, culprit.commitFirst = make(chan struct{}), true
-	rig.sys.add(4100, fakeUserSID, 2, culprit)
+	rig.sys.add(4100, fakeUserSID, 2, culprit, rig.sys.sharing(0x48))
 	_, _ = rig.check()
 	closed, err := rig.tick()
 	if closed != 0 || err == nil || !strings.Contains(err.Error(), "may have been closed") || strings.Contains(err.Error(), "so it was not closed") {
 		t.Fatalf("closed %d, %v: the verdict must not say the handle was not closed", closed, err)
+	}
+	// L1: a close that had begun counts in the streak, with its backoff.
+	if windowsHolderGate.closes != 1 || windowsHolderGate.nextClose.IsZero() {
+		t.Fatalf("a begun close was not counted in the streak: closes %d, next %v", windowsHolderGate.closes, windowsHolderGate.nextClose)
 	}
 	close(culprit.closeBlock)
 	waitFor(t, 2*time.Second, func() bool { return queuedWindowsHolderRows() == 1 })
@@ -1212,9 +1376,15 @@ func TestWindowsHolderACloseThatFinishesLateIsAuditedWithoutAnotherHoldPass(t *t
 	if err := json.Unmarshal(data, &saved); err != nil || len(saved) != 1 || !saved[0].Closed || saved[0].Holder.PID != 4100 {
 		t.Fatalf("saved rows %+v, %v", saved, err)
 	}
-	// The hook is free now: the guardian runs no hold pass, only its wrapper's flush.
-	reportWindowsHookHolders(&rig.log)
-	reportWindowsHookHolders(&rig.log)
+	// S3: the row carries the pass's own counts (2 handles on 2 file objects
+	// in 1 process), not a made-up 1/1/1.
+	if c := saved[0].Counts; c.Handles != 2 || c.Processes != 1 || c.Objects != 2 {
+		t.Fatalf("late row counts %+v, want 2 handles, 1 process, 2 objects", c)
+	}
+	// The hook is free now: the guardian runs no hold pass, only the real
+	// wrapper's flush.
+	keepWindowsStandaloneHookBinary(&rig.log, false)
+	keepWindowsStandaloneHookBinary(&rig.log, false)
 	if len(rig.posted) != 1 || !rig.posted[0].Closed || rig.posted[0].Holder.PID != 4100 || !strings.Contains(rig.posted[0].Note, "stopped waiting") {
 		t.Fatalf("rows %+v, want exactly one late-close row", rig.posted)
 	}
@@ -1265,6 +1435,32 @@ func TestWindowsHolderACloseOfTheWrongObjectIsAudited(t *testing.T) {
 	}
 	if len(rig.posted) != 1 || !strings.Contains(rig.posted[0].Note, "proved not to be one on the hook") || !strings.Contains(rig.log.String(), "proved not to be on the hook binary") {
 		t.Fatalf("rows %+v, log %q", rig.posted, rig.log.String())
+	}
+}
+
+// L2 (review r6). DuplicateHandle with DUPLICATE_CLOSE_SOURCE closes the
+// source handle even when it fails: the guardian audits that as a close that
+// may have happened.
+func TestWindowsHolderACloseWhoseLastCallFailedIsAudited(t *testing.T) {
+	rig := newHoldRig(t)
+	culprit := rig.sys.culprit(0x44)
+	culprit.closeFails = true
+	rig.sys.add(4100, fakeUserSID, 2, culprit)
+	_, _ = rig.check()
+	if closed, err := rig.tick(); closed != 0 || err == nil {
+		t.Fatalf("closed %d, %v", closed, err)
+	}
+	if len(rig.posted) != 1 || !strings.Contains(rig.posted[0].Note, "closes the source handle whatever that call returns") || !strings.Contains(rig.log.String(), "the last call failed") {
+		t.Fatalf("rows %+v, log %q", rig.posted, rig.log.String())
+	}
+}
+
+// S2 (review r6). Only 400, 413, 415 and 422 describe a bad row.
+func TestWindowsHolderAuditRefusalPermanentStatuses(t *testing.T) {
+	for status, want := range map[int]bool{400: true, 413: true, 415: true, 422: true, 401: false, 403: false, 404: false, 405: false, 408: false, 409: false, 429: false, 500: false, 503: false} {
+		if got := (windowsHolderAuditRefusal{Status: status}).permanent(); got != want {
+			t.Errorf("HTTP %d: permanent = %v, want %v", status, got, want)
+		}
 	}
 }
 
@@ -1546,7 +1742,7 @@ func TestWindowsHolderAuditRowTheGatewayRefusesForGoodIsDroppedAndDoesNotBlockTh
 	for _, pid := range []uint32{100, 101} {
 		queueWindowsHolderAudit(windowsHolderAuditRow{Hook: rig.target, Holder: windowsHolderProcess{PID: pid}})
 	}
-	for _, retry := range []int{503, 408, 429} {
+	for _, retry := range []int{503, 408, 429, 401, 403, 404, 405} {
 		status = retry
 		for i := 0; i < windowsHolderAuditMaxRejects+3; i++ {
 			rig.advance(10 * time.Minute)

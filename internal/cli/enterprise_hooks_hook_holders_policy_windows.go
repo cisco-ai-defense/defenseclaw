@@ -74,10 +74,18 @@ import (
 //	    LocalSystem, LocalService, NetworkService or any other service
 //	    identity, never in session 0; only in a process of a user account in
 //	    an interactive session. The token is read from the process. The
-//	    handle table does not show whose handle refuses the start, so while
-//	    such a holder is on the hook, however briefly, the guardian closes no
-//	    handle at all: it names the holder, and it does not close a user's
-//	    handle on the chance that the service's is the cause;
+//	    handle table does not show whose handle refuses the start, but the
+//	    sharing rules say which file objects can: a start asks for read and
+//	    execute and shares read and delete, so an object can refuse it only if
+//	    one of its handles can write or append, or if it is the only object on
+//	    the hook. A holder of that kind on such an object may be the cause, so
+//	    while one is there the guardian names it and closes no user's handle,
+//	    except that after about 30 seconds, once per streak, it closes one
+//	    user's handles, one object at a time, to rule that holder out. A
+//	    holder on an object that cannot refuse the start (it only reads, beside
+//	    another object) is named and the user's blockers are still closed. A
+//	    user's handle that its owner protected from closing is named and
+//	    skipped, and the others are still closed;
 //	(d) every close writes a HIGH connector-hook-tampered audit row (image
 //	    path, process id, account SID and name, session, granted access, hook
 //	    path, how many candidate handles, processes and file objects there
@@ -377,15 +385,17 @@ var errWindowsHolderMaybeClosed = errors.New("the handle did not answer in time,
 // once DuplicateHandle has begun) is audited by the worker as soon as it
 // finishes: waiting for a later pass would lose it, because the pass only
 // exists while the hook is still held.
-func closeWindowsHolderHandle(target string, h windowsHolderHandle, want windowsHookHolderIdentity) error {
+func closeWindowsHolderHandle(target string, h windowsHolderHandle, want windowsHookHolderIdentity, counts windowsHolderCounts) error {
 	err, answered, began := runWindowsHolderCall(h.proc, func(commit func() bool) error {
 		return h.proc.CloseIf(h.Handle, want, commit)
 	}, func(err error) {
 		switch {
 		case err == nil:
-			auditWindowsHolderClose(target, h, "The close finished after the guardian had stopped waiting for it.")
+			auditWindowsHolderClose(target, h, "The close finished after the guardian had stopped waiting for it.", counts)
 		case errors.Is(err, errWindowsHolderWrongObject):
-			auditWindowsHolderWrongClose(target, h)
+			auditWindowsHolderWrongClose(target, h, counts)
+		case errors.Is(err, errWindowsHolderCloseFailed):
+			auditWindowsHolderFailedClose(target, h, counts)
 		}
 	})
 	switch {
@@ -400,23 +410,36 @@ func closeWindowsHolderHandle(target string, h windowsHolderHandle, want windows
 // auditWindowsHolderClose logs and queues the row of a close that happened
 // outside a pass of the guardian's check (it finished late). It needs no
 // guardian state: the row goes to the queue, and so to its file, at once, and
-// the next check of the guardian delivers it.
-func auditWindowsHolderClose(target string, h windowsHolderHandle, note string) {
+// the next check of the guardian delivers it. counts are the pass's own: how
+// many candidates, processes and file objects it chose from.
+func auditWindowsHolderClose(target string, h windowsHolderHandle, note string, counts windowsHolderCounts) {
 	account := windowsHolderAccount(h.Process.SID)
-	logWindowsHolder(fmt.Sprintf("[hook-guardian] tamper: closed the handle %s had on the hook binary %s (access 0x%08x). %s", h.describe(), target, h.Access, note))
+	logWindowsHolder(fmt.Sprintf("[hook-guardian] tamper: closed the handle %s had on the hook binary %s (access 0x%08x; one of %d candidate handle(s) in %d process(es) on %d file object(s)). %s", h.describe(), target, h.Access, counts.Handles, counts.Processes, counts.Objects, note))
 	queueWindowsHolderAudit(windowsHolderAuditRow{At: windowsHeldSwapNow().UTC(), Hook: target, Holder: h.Process, Handle: h.Handle, Access: h.Access,
-		Closed: true, Note: note, Account: account, Counts: windowsHolderCounts{Handles: 1, Processes: 1, Objects: 1, Closed: 1}})
+		Closed: true, Note: note, Account: account, Counts: counts})
 }
 
 // auditWindowsHolderWrongClose is the same for a close that hit a handle that
 // was not the hook's: the owner replaced the handle between the guardian's
 // last check and the close.
-func auditWindowsHolderWrongClose(target string, h windowsHolderHandle) {
-	note := "After the close the handle proved not to be one on the hook: its owner had replaced it between the guardian's check and the close, so a handle that was not on the hook may have been closed."
+func auditWindowsHolderWrongClose(target string, h windowsHolderHandle, counts windowsHolderCounts) {
+	auditWindowsHolderDoubtfulClose(target, h, counts, "closed a handle in %s that, after the close, proved not to be on the hook binary %s (access 0x%08x). %s",
+		"After the close the handle proved not to be one on the hook: its owner had replaced it between the guardian's check and the close, so a handle that was not on the hook may have been closed.")
+}
+
+// auditWindowsHolderFailedClose is the same for a close whose last call failed.
+// DuplicateHandle with DUPLICATE_CLOSE_SOURCE closes the source handle whatever
+// it returns, so the handle may be gone.
+func auditWindowsHolderFailedClose(target string, h windowsHolderHandle, counts windowsHolderCounts) {
+	auditWindowsHolderDoubtfulClose(target, h, counts, "tried to close a handle in %s on the hook binary %s (access 0x%08x), and the last call failed. %s",
+		"The last call of the close failed, and Windows closes the source handle whatever that call returns, so the handle may have been closed.")
+}
+
+func auditWindowsHolderDoubtfulClose(target string, h windowsHolderHandle, counts windowsHolderCounts, warn, note string) {
 	account := windowsHolderAccount(h.Process.SID)
-	logWindowsHolder(fmt.Sprintf("[hook-guardian] warn: closed a handle in %s that, after the close, proved not to be on the hook binary %s (access 0x%08x). %s", h.describe(), target, h.Access, note))
+	logWindowsHolder("[hook-guardian] warn: " + fmt.Sprintf(warn, h.describe(), target, h.Access, note))
 	queueWindowsHolderAudit(windowsHolderAuditRow{At: windowsHeldSwapNow().UTC(), Hook: target, Holder: h.Process, Handle: h.Handle, Access: h.Access,
-		Closed: true, Note: note, Account: account, Counts: windowsHolderCounts{Handles: 1, Processes: 1, Objects: 1, Closed: 1}})
+		Closed: true, Note: note, Account: account, Counts: counts})
 }
 
 // scanWindowsHolders finds the handles of other processes that name the
@@ -596,6 +619,9 @@ type windowsHolderState struct {
 	nextScan   time.Time
 	lastErr    error
 	rows       map[windowsHolderProcKey]bool
+	// overridden is set once the guardian has used its bounded override in
+	// this streak (see windowsHolderOverrideAfter).
+	overridden bool
 }
 
 var windowsHolderGate windowsHolderState
@@ -650,6 +676,12 @@ func (h *windowsHolderHold) persistent(candidate windowsHolderHandle) bool {
 	}
 	return false
 }
+
+// windowsHolderOverrideAfter is how long a user's hold must have lasted,
+// beside a holder the guardian will not touch that could be what refuses the
+// start, before the guardian closes that user's handles once in the streak to
+// rule the holder out: six checks, about 30 seconds.
+func windowsHolderOverrideAfter() time.Duration { return 6 * windowsHookBinaryCheckInterval }
 
 // windowsHolderPersist is how long a user must have had a candidate on the
 // hook, across checks, before a handle is closed: about two guardian ticks.
@@ -796,6 +828,76 @@ type windowsHolderCounts struct {
 	Objects   int
 	Closed    int      // handles closed in the pass
 	Left      []string // holders that were named and not closed
+	// Note is a sentence the audit rows of a pass add (the bounded override).
+	Note string
+}
+
+// windowsHolderObjectKey names a file object among the holders: the address
+// the handle table shows, or the handle itself when the system shows none
+// (such a handle is an object of its own).
+type windowsHolderObjectKey struct {
+	object uintptr
+	pid    uint32
+	handle uintptr
+}
+
+func (h windowsHolderHandle) objectKey() windowsHolderObjectKey {
+	if h.Object != 0 {
+		return windowsHolderObjectKey{object: h.Object}
+	}
+	return windowsHolderObjectKey{pid: h.Process.PID, handle: h.Handle}
+}
+
+// windowsHolderWriteAccess is the access that lets a handle refuse a start:
+// a handle that can write or append is denied by the start's share mode.
+const windowsHolderWriteAccess = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA
+
+// windowsHolderStartBlockers says, for each file object among the data
+// handles on the hook, whether it can be what refuses a start. A start asks
+// for read and execute and shares read and delete. Windows allows a new open
+// only if its access fits the share mode of every open handle and its share
+// mode fits the access of every open handle, so with two or more objects every
+// object without a write or append handle shares reading, and cannot be the
+// cause. An object can refuse the start if it is the only object on the hook
+// or one of its handles can write or append. A handle whose object address the
+// system does not show may be anything: its object counts as one that can.
+func windowsHolderStartBlockers(holders []windowsHolderHandle) map[windowsHolderObjectKey]bool {
+	can := map[windowsHolderObjectKey]bool{}
+	for _, h := range holders {
+		key := h.objectKey()
+		can[key] = can[key] || h.Access&windowsHolderWriteAccess != 0 || h.Object == 0
+	}
+	if len(can) == 1 {
+		for key := range can {
+			can[key] = true
+		}
+	}
+	return can
+}
+
+// overrideCandidates are the handles of the one user, the one whose hold began
+// first, whose hold has lasted windowsHolderOverrideAfter, when the guardian
+// has not used its override in this streak. eligible is in hold order.
+func (g *windowsHolderState) overrideCandidates(now time.Time, eligible []windowsHolderHandle) []windowsHolderHandle {
+	if g.overridden {
+		return nil
+	}
+	var first windowsHolderGroup
+	found := false
+	var out []windowsHolderHandle
+	for _, h := range eligible {
+		hold := g.holds[h.group()]
+		if hold == nil || now.Sub(hold.first) < windowsHolderOverrideAfter() {
+			continue
+		}
+		if !found {
+			first, found = h.group(), true
+		}
+		if h.group() == first {
+			out = append(out, h)
+		}
+	}
+	return out
 }
 
 // orderWindowsHolderCandidates puts the candidates in the order they are
@@ -831,18 +933,9 @@ func orderWindowsHolderCandidates(eligible []windowsHolderHandle) ([]windowsHold
 // orderWindowsHolderUser orders one user's candidates by file object and
 // returns how many objects there are.
 func orderWindowsHolderUser(eligible []windowsHolderHandle) ([]windowsHolderHandle, int) {
-	type objectKey struct {
-		object uintptr
-		pid    uint32
-		handle uintptr
-	}
-	groups := map[objectKey][]windowsHolderHandle{}
+	groups := map[windowsHolderObjectKey][]windowsHolderHandle{}
 	for _, h := range eligible {
-		key := objectKey{object: h.Object}
-		if h.Object == 0 {
-			key = objectKey{pid: h.Process.PID, handle: h.Handle}
-		}
-		groups[key] = append(groups[key], h)
+		groups[h.objectKey()] = append(groups[h.objectKey()], h)
 	}
 	list := make([][]windowsHolderHandle, 0, len(groups))
 	less := func(a, b windowsHolderHandle) bool {
@@ -869,25 +962,32 @@ func orderWindowsHolderUser(eligible []windowsHolderHandle) ([]windowsHolderHand
 }
 
 // closeWindowsHolderCandidates closes the candidates in order, one at a
-// time, asking before each whether the hook can be started yet, and stops
-// when it can. A close that does not answer in time stops the pass: nothing
-// more is closed in that pass and the next check tries again (a close that
-// had begun and finishes later is audited by its worker).
-func closeWindowsHolderCandidates(target string, identity windowsHookHolderIdentity, ordered []windowsHolderHandle) (closed []windowsHolderHandle, timedOut, onlyChanged bool, firstErr error) {
+// time, asking before each whether the hook still refuses a start and still
+// refuses an open for deletion, and stops as soon as either has cleared: a
+// handle that only denies deletion is not closed once a start works. A close
+// that does not answer in time stops the pass: nothing more is closed in that
+// pass and the next check tries again (a close that had begun and finishes
+// later is audited by its worker; began says one had).
+func closeWindowsHolderCandidates(target string, identity windowsHookHolderIdentity, ordered []windowsHolderHandle, counts windowsHolderCounts) (closed []windowsHolderHandle, timedOut, began, onlyChanged bool, firstErr error) {
 	changed, others := 0, 0
 	defer func() { onlyChanged = changed > 0 && others == 0 && !timedOut }()
 	for _, holder := range ordered {
-		if len(closed) >= windowsHolderMaxCloses || !windowsHookBinaryDeleteBlocked(target) {
-			// Enough for one pass, or the hook is clear: the remaining
-			// handles block nothing and stay.
+		if len(closed) >= windowsHolderMaxCloses || !windowsHookBinaryDeleteBlocked(target) || windowsHookBinaryHeldOpen(target) == "" {
+			// Enough for one pass, or a start works or the hook is clear: the
+			// remaining handles block nothing and stay.
 			break
 		}
-		err := closeWindowsHolderHandle(target, holder, identity)
+		counts.Closed = len(closed) + 1
+		err := closeWindowsHolderHandle(target, holder, identity, counts)
 		switch {
 		case errors.Is(err, errWindowsHolderTimedOut), errors.Is(err, errWindowsHolderMaybeClosed):
 			timedOut = true
+			suffix := "tries again at the next check"
+			if errors.Is(err, errWindowsHolderMaybeClosed) {
+				began, suffix = true, "looks again after the backoff of this streak"
+			}
 			if firstErr == nil {
-				firstErr = fmt.Errorf("the handle of %s %s; the guardian tries again at the next check", holder.describe(), strings.TrimPrefix(err.Error(), "the handle "))
+				firstErr = fmt.Errorf("the handle of %s %s; the guardian %s", holder.describe(), strings.TrimPrefix(err.Error(), "the handle "), suffix)
 			}
 		case err != nil:
 			if errors.Is(err, errWindowsHolderChanged) {
@@ -896,7 +996,10 @@ func closeWindowsHolderCandidates(target string, identity windowsHookHolderIdent
 				others++
 			}
 			if errors.Is(err, errWindowsHolderWrongObject) {
-				auditWindowsHolderWrongClose(target, holder)
+				auditWindowsHolderWrongClose(target, holder, counts)
+			}
+			if errors.Is(err, errWindowsHolderCloseFailed) {
+				auditWindowsHolderFailedClose(target, holder, counts)
 			}
 			if firstErr == nil {
 				firstErr = fmt.Errorf("could not close the handle of %s: %w", holder.describe(), err)
@@ -908,7 +1011,7 @@ func closeWindowsHolderCandidates(target string, identity windowsHookHolderIdent
 		}
 		break
 	}
-	return closed, timedOut, false, firstErr
+	return closed, timedOut, began, false, firstErr
 }
 
 // endWindowsExclusiveHold is called, with windowsHookBinaryMu held, when the
@@ -972,42 +1075,94 @@ func (gate *windowsHolderState) pass(target string, now time.Time, last bool) (c
 		}
 		return 0, false, nil
 	}
-	// The handle table does not show whose handle refuses the start. A holder
-	// the guardian will not touch (a service, a protected process, session 0)
-	// may be it, so while one is on the hook the guardian closes no user's
-	// handle: closing them would end a user's harmless read for nothing. A
-	// refused holder seen for the first time is waited for; one that has
-	// persisted is named, audited, and backed off from.
-	var eligible, refused []windowsHolderHandle
-	var refusedReasons []string
+	// The handle table does not show whose handle refuses the start, but the
+	// sharing rules say which file objects can (windowsHolderStartBlockers). A
+	// holder the guardian will not touch (a service, a protected process,
+	// session 0) on an object that can refuse the start may be the cause: while
+	// one is there the guardian closes no user's handle, except once per
+	// streak, after about 30 seconds, to rule it out. A refused holder on an
+	// object that cannot refuse a start is named, and the user's blockers are
+	// still closed. A user's handle its owner protected from closing is named
+	// and skipped, and the others are still closed. A refused holder seen for
+	// the first time is waited for.
+	blockers := windowsHolderStartBlockers(scan.Holders)
+	refusedObjects := map[windowsHolderObjectKey]bool{}
+	for _, holder := range scan.Holders {
+		if windowsHolderRefusal(holder.Process) != "" {
+			refusedObjects[holder.objectKey()] = true
+		}
+	}
+	var eligible, blocking, named []windowsHolderHandle
+	var blockingReasons, namedReasons []string
 	for _, holder := range persistent {
-		if reason := windowsHolderHandleRefusal(holder); reason != "" {
-			refused, refusedReasons = append(refused, holder), append(refusedReasons, reason)
-		} else {
+		reason := windowsHolderHandleRefusal(holder)
+		switch {
+		case reason == "" && refusedObjects[holder.objectKey()]:
+			// The same file object as a handle the guardian will not touch:
+			// closing this one frees nothing.
+		case reason == "":
 			eligible = append(eligible, holder)
+		case windowsHolderRefusal(holder.Process) != "" && blockers[holder.objectKey()]:
+			blocking, blockingReasons = append(blocking, holder), append(blockingReasons, reason)
+		default:
+			named, namedReasons = append(named, holder), append(namedReasons, reason)
 		}
 	}
 	ordered, counts := orderWindowsHolderCandidates(eligible)
-	for i, holder := range refused {
-		counts.Left = append(counts.Left, holder.describe()+": "+refusedReasons[i])
-		gate.record(target, holder, false, refusedReasons[i], scan, counts)
+	for i, holder := range blocking {
+		counts.Left = append(counts.Left, holder.describe()+": "+blockingReasons[i])
+		gate.record(target, holder, false, blockingReasons[i], scan, counts)
 	}
-	if len(refused) > 0 {
-		more := ""
-		if len(refused) > 1 {
-			more = fmt.Sprintf(" (and %d more handle(s) of that kind)", len(refused)-1)
+	for i, holder := range named {
+		if windowsHolderRefusal(holder.Process) != "" && !gate.rows[holder.procKey()] {
+			logWindowsHolder(fmt.Sprintf("[hook-guardian] note: %s has the hook open and the guardian will not touch it (%s), but it only reads and another file object is open too, so it cannot be what refuses a start; the guardian closes the user's blockers", holder.describe(), namedReasons[i]))
 		}
-		kept := ""
-		if len(eligible) > 0 {
-			kept = fmt.Sprintf("; it closes none of the %d handle(s) of signed-in users that are open on the hook too, because it cannot tell whose handle refuses the start", len(eligible))
-		}
-		return 0, false, gate.refuse(now, fmt.Errorf("%s has the hook open and may be what refuses its starts; the guardian does not close handles of that kind: %s%s%s", refused[0].describe(), refusedReasons[0], more, kept))
+		counts.Left = append(counts.Left, holder.describe()+": "+namedReasons[i])
+		gate.record(target, holder, false, namedReasons[i], scan, counts)
 	}
-	for _, holder := range scan.Holders {
-		if windowsHolderHandleRefusal(holder) != "" {
-			// A service's handle seen for the first time: wait for the next
-			// check before closing anything.
-			return 0, false, nil
+	override := false
+	if len(blocking) > 0 {
+		candidates := gate.overrideCandidates(now, eligible)
+		if len(candidates) == 0 {
+			more := ""
+			if len(blocking) > 1 {
+				more = fmt.Sprintf(" (and %d more handle(s) of that kind)", len(blocking)-1)
+			}
+			kept := ""
+			switch {
+			case len(eligible) > 0 && gate.overridden:
+				kept = fmt.Sprintf("; it closes none of the %d handle(s) of signed-in users that are open on the hook too: it already closed one user's handles once in this streak to rule that handle out", len(eligible))
+			case len(eligible) > 0:
+				kept = fmt.Sprintf("; it closes none of the %d handle(s) of signed-in users that are open on the hook too, because that handle could be what refuses the start; if it is still there after about %d seconds the guardian closes one user's handles once, to rule it out", len(eligible), int(windowsHolderOverrideAfter()/time.Second))
+			}
+			return 0, false, gate.refuse(now, fmt.Errorf("%s has the hook open and may be what refuses its starts; the guardian does not close handles of that kind: %s%s%s", blocking[0].describe(), blockingReasons[0], more, kept))
+		}
+		override = true
+		left := counts.Left
+		ordered, counts = orderWindowsHolderCandidates(candidates)
+		counts.Left = left
+		counts.Note = fmt.Sprintf("The guardian could not tell whether %s (%s) or this user's handle refused the start. This user's hold had lasted %d seconds, so the guardian closed this user's handles one at a time to rule the other holder out. It does this once per streak.",
+			blocking[0].describe(), blockingReasons[0], int(now.Sub(gate.holds[candidates[0].group()].first)/time.Second))
+	}
+	if len(eligible) == 0 {
+		if len(named) > 0 {
+			more := ""
+			if len(named) > 1 {
+				more = fmt.Sprintf(" (and %d more handle(s) of that kind)", len(named)-1)
+			}
+			return 0, false, gate.refuse(now, fmt.Errorf("%s has the hook open and may be what refuses its starts; the guardian does not close handles of that kind: %s%s", named[0].describe(), namedReasons[0], more))
+		}
+		// What the guardian could close shares a file object with a holder
+		// it has only just seen: wait for the next check.
+		return 0, false, nil
+	}
+	if !override {
+		for _, holder := range scan.Holders {
+			if windowsHolderRefusal(holder.Process) != "" && blockers[holder.objectKey()] {
+				// A holder the guardian will not touch, seen for the first
+				// time: wait for the next check before closing anything.
+				return 0, false, nil
+			}
 		}
 	}
 	if scan.Listed && len(scan.Unopened) > 0 {
@@ -1021,11 +1176,21 @@ func (gate *windowsHolderState) pass(target string, now time.Time, last bool) (c
 		gate.nextScan = gate.nextClose.Add(-windowsHolderPersist())
 		return 0, false, nil
 	}
-	done, timedOut, onlyChanged, firstErr := closeWindowsHolderCandidates(target, scan.Identity, ordered)
+	if override {
+		gate.overridden = true
+	}
+	done, timedOut, began, onlyChanged, firstErr := closeWindowsHolderCandidates(target, scan.Identity, ordered, counts)
 	if len(done) == 0 {
 		if timedOut {
-			// Not a refusal: no backoff, the next check tries again.
+			// Not a refusal: the next check tries again, unless a close had
+			// begun (the handle may be gone and a late row is coming): that
+			// counts in the streak like any close, with its backoff.
 			gate.lastErr = nil
+			if began {
+				gate.closes++
+				gate.nextClose = now.Add(windowsHeldSwapDelay(gate.closes))
+				gate.nextScan = gate.nextClose.Add(-windowsHolderPersist())
+			}
 			return 0, false, firstErr
 		}
 		if firstErr == nil {
@@ -1092,6 +1257,9 @@ func (g *windowsHolderState) record(target string, holder windowsHolderHandle, c
 		if len(counts.Left) > 0 {
 			line += "; also open and not closed: " + strings.Join(counts.Left, "; ")
 		}
+		if counts.Note != "" {
+			line += ". " + counts.Note
+		}
 		logWindowsHolder(line)
 	}
 	if g.rows == nil {
@@ -1102,7 +1270,7 @@ func (g *windowsHolderState) record(target string, holder windowsHolderHandle, c
 	}
 	g.rows[holder.procKey()] = true
 	row := windowsHolderAuditRow{At: windowsHeldSwapNow().UTC(), Hook: target, Holder: holder.Process, Handle: holder.Handle, Access: holder.Access,
-		Closed: closed, Reason: reason, Streak: g.closes, Counts: counts}
+		Closed: closed, Reason: reason, Streak: g.closes, Counts: counts, Note: counts.Note}
 	if scan != nil {
 		row.ScanMS, row.Listed, row.Probed = scan.Elapsed.Milliseconds(), scan.Entries, scan.Probed
 	}
@@ -1194,9 +1362,17 @@ func (e windowsHolderAuditRefusal) Error() string {
 }
 
 // permanent is true for a refusal that sending the same row again does not
-// change: a 4xx other than "request timeout" and "too many requests".
+// change: 400, 413, 415 and 422, the answers that describe a bad row (the
+// gateway checks only the action, the JSON and the store). 401, 403, 404 and
+// 405 are answers about the gateway, not the row (a token that does not match
+// while it restarts, a route a gateway of another version lacks mid-upgrade):
+// the row stays queued and a later try can deliver it.
 func (e windowsHolderAuditRefusal) permanent() bool {
-	return e.Status >= 400 && e.Status < 500 && e.Status != http.StatusRequestTimeout && e.Status != http.StatusTooManyRequests
+	switch e.Status {
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnsupportedMediaType, http.StatusUnprocessableEntity:
+		return true
+	}
+	return false
 }
 
 // windowsHolderAuditMaxRejects is how many times the gateway may refuse a row

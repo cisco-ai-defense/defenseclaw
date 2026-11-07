@@ -152,9 +152,13 @@ func removeWindowsReplacementCopies(dir string) []string {
 // guardian's handle closes go to the gateway after windowsHookBinaryMu is
 // released, so a gateway that is down or slow never holds up the guardian.
 func keepWindowsStandaloneHookBinary(stderr io.Writer, onlyWhenDamaged bool) {
-	keepWindowsStandaloneHookBinaryLocked(stderr, onlyWhenDamaged)
+	windowsHookBinaryKeep(stderr, onlyWhenDamaged)
 	flushWindowsHolderAudit(stderr)
 }
+
+// windowsHookBinaryKeep is the guardian's check under windowsHookBinaryMu;
+// tests replace it to run the wrapper above with a hold pass of their own.
+var windowsHookBinaryKeep = keepWindowsStandaloneHookBinaryLocked
 
 func keepWindowsStandaloneHookBinaryLocked(stderr io.Writer, onlyWhenDamaged bool) {
 	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)

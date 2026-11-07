@@ -292,6 +292,11 @@ var errWindowsHolderChanged = errors.New("the handle no longer names the hook")
 // guardian's check and the close.
 var errWindowsHolderWrongObject = errors.New("the handle closed was not the hook's: it changed between the check and the close")
 
+// errWindowsHolderCloseFailed is returned when the last call of a close failed.
+// DuplicateHandle with DUPLICATE_CLOSE_SOURCE closes the source handle
+// whatever it returns, so the handle may be gone.
+var errWindowsHolderCloseFailed = errors.New("the last call of the close failed, and the handle may have been closed anyway")
+
 // CloseIf closes one handle in its owner, after a fresh duplicate shows that
 // it is still a data or execute handle on the hook's file object, and checks
 // the duplicate the close itself returns. DuplicateHandle with
@@ -330,7 +335,8 @@ func (p *windowsNativeHolderProc) CloseIf(handle uintptr, want windowsHookHolder
 	}
 	closing, err := p.duplicate(handle, windows.DUPLICATE_CLOSE_SOURCE)
 	if err != nil {
-		return err
+		// The source is closed regardless of an error status.
+		return fmt.Errorf("%w (%v)", errWindowsHolderCloseFailed, err)
 	}
 	defer windows.CloseHandle(closing)
 	if got, err := windowsFileIdentity(closing); err != nil || got != want {
