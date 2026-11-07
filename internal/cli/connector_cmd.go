@@ -30,6 +30,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
@@ -146,7 +147,7 @@ only that connector is checked. The installers run it after a rollback or an
 upgrade, and 'defenseclaw setup remove' runs it for a connector that is not
 configured.`,
 	Hidden:      true,
-	Annotations: map[string]string{auditOptionalAnnotation: "true"},
+	Annotations: map[string]string{auditOptionalAnnotation: "true", configOptionalAnnotation: "true"},
 	RunE:        runConnectorPruneOrphans,
 }
 
@@ -1149,14 +1150,22 @@ func runConnectorPruneOrphans(cmd *cobra.Command, _ []string) error {
 	if dataDir == "" {
 		return fmt.Errorf("connector prune-orphans: no data directory configured (set --data-dir)")
 	}
-	// What is configured decides what is an orphan: without config.yaml or
-	// with an unreadable connector state nothing is removed on a guess.
-	if cfg == nil {
-		return fmt.Errorf("connector prune-orphans: config.yaml is not loaded; nothing was removed")
-	}
+	// What is configured decides what is an orphan: with a config.yaml that
+	// does not load, or an unreadable connector state, nothing is removed on a
+	// guess. A rolled-back install that was never initialized has no
+	// config.yaml at all; the saved newer install's backup records still prove
+	// the exact bytes of each vendor file, so only that restore runs (and no
+	// orphan is guessed at).
 	configured := map[string]bool{}
-	for _, name := range cfg.ActiveConnectors() {
-		configured[strings.ToLower(strings.TrimSpace(name))] = true
+	restoreOnly := false
+	if cfg != nil {
+		for _, name := range cfg.ActiveConnectors() {
+			configured[strings.ToLower(strings.TrimSpace(name))] = true
+		}
+	} else if _, statErr := os.Stat(filepath.Join(dataDir, config.DefaultConfigName)); connectorRollbackBackupsDir != "" && errors.Is(statErr, os.ErrNotExist) {
+		restoreOnly = true
+	} else {
+		return fmt.Errorf("connector prune-orphans: config.yaml is not loaded; nothing was removed")
 	}
 	active, _, err := connector.ReadActiveConnectorState(dataDir)
 	if err != nil {
@@ -1188,7 +1197,7 @@ func runConnectorPruneOrphans(cmd *cobra.Command, _ []string) error {
 		)
 	}
 	for _, name := range names {
-		if configured[name] {
+		if configured[name] || restoreOnly {
 			continue
 		}
 		conn, _ := reg.Get(name)
