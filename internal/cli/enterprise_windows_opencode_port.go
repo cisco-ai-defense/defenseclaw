@@ -129,7 +129,7 @@ func windowsOpenCodePortClearCommand(port int) string {
 	if err != nil {
 		return fmt.Sprintf("defenseclaw-gateway enterprise windows opencode-port-clear %d --yes", port)
 	}
-	return fmt.Sprintf("& \"%s\" enterprise windows opencode-port-clear %d --yes", filepath.Join(layout.BinDir, "defenseclaw-gateway.exe"), port)
+	return managed.WindowsCommandLine(filepath.Join(layout.BinDir, "defenseclaw-gateway.exe"), "enterprise", "windows", "opencode-port-clear", strconv.Itoa(port), "--yes")
 }
 
 func newWindowsOpenCodePortClearCommand() *cobra.Command {
