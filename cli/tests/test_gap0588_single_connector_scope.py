@@ -357,3 +357,77 @@ def test_config_set_first_entry_beside_claw_mode_hook_connector_stays_allowed(tm
     )
     assert result.exit_code == 0, result.output
     assert after != before
+
+
+@pytest.mark.parametrize(
+    ("installed", "roster", "key", "value", "message"),
+    [
+        # Implicit default OpenClaw (no guardrail.connector, no claw.mode in the file).
+        ("openclaw", "  enabled: true\n", "guardrail.connectors.kiro.hook_fail_mode", "closed", "hook connectors (kiro)"),
+        # A primary-selector edit is judged by the final file, like an entry edit.
+        ("kiro", "  connector: kiro\n  connectors:\n    kiro: {}\n", "guardrail.connector", "openclaw", "hook connectors (kiro)"),
+        ("openclaw", "  connector: openclaw\n  connectors:\n    openclaw: {}\n", "guardrail.connector", "kiro", "hook connectors (kiro)"),
+    ],
+)
+def test_config_set_refuses_implicit_and_primary_selector_proxy_mix(
+    tmp_path: Path, installed: str, roster: str, key: str, value: str, message: str
+) -> None:
+    app = _app(tmp_path, [installed])
+    result, before, after = _set_in_file(tmp_path, app, roster, key, value)
+    assert result.exit_code != 0
+    assert "needs a proxy binding" in result.output
+    assert message in result.output
+    assert after == before
+
+
+def test_config_set_claw_mode_switch_to_proxy_beside_hook_roster_is_refused(tmp_path: Path) -> None:
+    app = _app(tmp_path, ["kiro"])
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        f"config_version: 9\ndata_dir: {tmp_path}\nclaw:\n  mode: kiro\nguardrail:\n  connectors:\n    kiro: {{}}\n",
+        encoding="utf-8",
+    )
+    before = path.read_bytes()
+    with (
+        patch.object(cmd_config.config_module, "config_path", return_value=path),
+        patch.object(config_writer, "_use_go_validator", return_value=False),
+        patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+        patch.object(cmd_config, "_refresh_stopped_gateway_hooks", return_value=[]),
+    ):
+        result = CliRunner().invoke(cmd_config.config_set, ["claw.mode", "openclaw"], obj=app)
+    assert result.exit_code != 0
+    assert "openclaw needs a proxy binding" in result.output
+    assert path.read_bytes() == before
+
+
+_DISABLED_KIRO = "  connector: openclaw\n  connectors:\n    kiro:\n      enabled: false\n"
+
+
+@pytest.mark.parametrize(
+    ("installed", "roster", "key", "value"),
+    [
+        # An explicitly disabled entry is not part of the process: its own settings stay editable.
+        ("openclaw", _DISABLED_KIRO, "guardrail.connectors.kiro.hook_fail_mode", "closed"),
+        ("openclaw", _DISABLED_KIRO, "guardrail.connectors.kiro.rule_pack", "default"),
+        ("openclaw", _DISABLED_KIRO, "guardrail.connectors.kiro.enabled", "false"),
+        # Hook beside hook and the proxy's own entry stay ordinary settings.
+        ("kiro", "  connector: kiro\n  connectors:\n    kiro: {}\n", "guardrail.connector", "codex"),
+        ("openclaw", "  connector: openclaw\n", "guardrail.connector", "openclaw"),
+        ("kiro", "  enabled: true\n", "guardrail.connectors.codex.hook_fail_mode", "closed"),
+    ],
+)
+def test_config_set_disabled_entry_and_same_kind_selection_stay_allowed(
+    tmp_path: Path, installed: str, roster: str, key: str, value: str
+) -> None:
+    app = _app(tmp_path, [installed])
+    result, before, after = _set_in_file(tmp_path, app, roster, key, value)
+    assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize("key", ["guardrail.connectors.kiro.hook_fail_mode", "guardrail.connectors.kiro"])
+def test_config_unset_of_disabled_entry_setting_stays_allowed(tmp_path: Path, key: str) -> None:
+    app = _app(tmp_path, ["openclaw"])
+    roster = _DISABLED_KIRO + "      hook_fail_mode: closed\n"
+    result, before, after = _unset_in_file(tmp_path, app, roster, key)
+    assert result.exit_code == 0, result.output
+    assert after != before
