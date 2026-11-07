@@ -17763,8 +17763,9 @@ def _restart_openclaw_gateway() -> bool:
             # the gateway answers, and it reloads openclaw.json on its own.
             click.echo(" - (no OpenClaw gateway service to restart)")
             click.echo(
-                "    If OpenClaw runs in a terminal (openclaw gateway run), restart it there if it does not "
-                "load the DefenseClaw plugin."
+                "    Restart required: a gateway that was already running in a terminal (openclaw gateway run) "
+                "must be stopped and started again there so it loads the DefenseClaw plugin at startup; "
+                "do not rely on its config hot reload."
             )
             return True
         if result.returncode == 0:
