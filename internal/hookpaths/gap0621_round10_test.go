@@ -161,3 +161,64 @@ func TestGAP0621R10PlainFolderManifestLinkFolderSource(t *testing.T) {
 		})
 	}
 }
+
+// REVIEW-11: a linked project manifest and a distinct Skill beside the link
+// target keep separate identities. The target folder selects its own
+// SKILL.md; only the linked file and the project link select the project
+// skill.
+func TestGAP0621R10SiblingManifestSelection(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "project")
+	root := filepath.Join(project, ".claude", "skills")
+	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), root); err != nil {
+		t.Skipf("root link unavailable: %v", err)
+	}
+	if got := inspectProjectSkillRoot(home, root); got != ProjectSkillRootOutsideProfile {
+		t.Fatalf("root classification: %q", got)
+	}
+	projectSkill := filepath.Join(root, "sample")
+	if err := os.MkdirAll(projectSkill, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "sample")
+	round6Skill(t, outside, "sample")
+	linked := filepath.Join(outside, "linked.md")
+	if err := os.WriteFile(linked, []byte("---\nname: sample\n---\nlinked\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(linked, filepath.Join(projectSkill, "SKILL.md")); err != nil {
+		t.Skipf("manifest link unavailable: %v", err)
+	}
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(outside, alias); err != nil {
+		t.Skipf("alias unavailable: %v", err)
+	}
+	relative, err := filepath.Rel(project, outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		label, source string
+		bound         bool
+	}{
+		{"own folder", outside, false},
+		{"own manifest", filepath.Join(outside, "SKILL.md"), false},
+		{"own alias folder", alias, false},
+		{"own relative folder", relative, false},
+		{"linked target", linked, true},
+		{"project link", filepath.Join(projectSkill, "SKILL.md"), true},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			got := round6Selected(round9Facts(root, home, project, tc.source))
+			if tc.bound && (len(got) != 1 || got[0] != projectSkill) {
+				t.Errorf("source %s did not bind the project folder: %v", tc.source, got)
+			}
+			if !tc.bound && len(got) != 0 {
+				t.Errorf("source %s claimed the project folder: %v", tc.source, got)
+			}
+		})
+	}
+}
