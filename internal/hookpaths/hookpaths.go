@@ -280,39 +280,18 @@ type stateOperand struct {
 }
 
 // childStateOperands lists the redirect targets of a child reading of the
-// action (actionfacts.SimpleCommands) that only the known values of the
-// action name (user, ActionKnownUser), and those of the static body of each
-// shell -c call of it (literalShellCallBody), read in cwd: the shell that
-// runs the body inherits the values.
-func childStateOperands(command, cwd, home, user string) []stateOperand {
-	// Every POSIX shell program name holds "sh" (posixShellProgram).
-	named := strings.Contains(command, "USER") || strings.Contains(command, "LOGNAME")
-	if !named && !strings.Contains(command, "sh") {
+// action (actionfacts.SimpleCommands), read in cwd. The reading spells USER
+// and LOGNAME with the values the shell gives them where it runs, so a
+// target below <parent>/$USER is the file its value names.
+func childStateOperands(command, cwd, home string) []stateOperand {
+	if !strings.Contains(command, ">") {
 		return nil
 	}
-	file, parsed := parseShell(command)
-	if !parsed {
-		return nil
+	redirects, _, _ := ShellWriteOperands(command, cwd, home)
+	operands := make([]stateOperand, 0, len(redirects))
+	for _, name := range redirects {
+		operands = append(operands, stateOperand{path: name})
 	}
-	var operands []stateOperand
-	if named {
-		_, known, _ := shellFileWriteOperands(file, cwd, home, user)
-		for _, name := range known {
-			operands = append(operands, stateOperand{path: name})
-		}
-	}
-	syntax.Walk(file, func(node syntax.Node) bool {
-		if call, isCall := node.(*syntax.CallExpr); isCall {
-			if body := literalShellCallBody(call, home); body != "" {
-				if redirects, known, ok, _ := shellWriteOperands(body, cwd, home, user); ok {
-					for _, name := range append(redirects, known...) {
-						operands = append(operands, stateOperand{path: name})
-					}
-				}
-			}
-		}
-		return true
-	})
 	return operands
 }
 
@@ -1569,17 +1548,14 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					// gateway reads the state names those targets reach behind
 					// ProtectHome only from this map (rel-1-0-6:GAP-0601,
 					// GAP-0630 review 2).
-					bodyRedirects := knownUser != "" && strings.Contains(command, ">")
 					for _, simple := range simples {
 						if simple.EvaluationFailure == "" && simple.Text != command && filepath.IsAbs(simple.CWD) &&
 							filepath.Clean(simple.CWD) != filepath.Clean(cwd) {
 							commandLinksWithFacts(simple.Text, simple.CWD, home, sourceFacts, true)
 						}
 						if simple.EvaluationFailure == "" && simple.Text != command && filepath.IsAbs(simple.CWD) {
-							if bodyRedirects {
-								stateOperands = append(stateOperands, childStateOperands(simple.Text, simple.CWD, home, knownUser)...)
-							}
-							stateOperands = append(stateOperands, inPlaceStateOperands(simple.Text, simple.CWD, home, knownUser)...)
+							stateOperands = append(stateOperands, childStateOperands(simple.Text, simple.CWD, home)...)
+							stateOperands = append(stateOperands, inPlaceStateOperands(simple.Text, simple.CWD, home, "")...)
 						}
 					}
 					safeRedirects = SafeShellRedirectOccurrencesWithFacts(command, cwd, home, sourceFacts)
