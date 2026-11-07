@@ -468,9 +468,6 @@ func DeactivateWindowsClaudeManagedPolicy() error {
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
 		return err
 	}
-	if kept, keptErr := windowsClaudeManagedPolicyLinkKept(); keptErr != nil || kept {
-		return keptErr
-	}
 	return withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
 		path, err := windowsClaudeManagedPolicyPath()
 		if err != nil {
@@ -619,9 +616,6 @@ func PrepareWindowsClaudeManagedPolicyTeardown(
 func VerifyWindowsClaudeManagedPolicyTeardown() error {
 	if err := requireWindowsClaudeTeardownAdministrator(); err != nil {
 		return err
-	}
-	if kept, keptErr := windowsClaudeManagedPolicyLinkKept(); keptErr != nil || kept {
-		return keptErr
 	}
 	return withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
 		path, err := windowsClaudeManagedPolicyPath()
@@ -1822,9 +1816,6 @@ func installWindowsClaudeManagedPolicyUnlocked(
 }
 
 func removeWindowsClaudeManagedPolicyTarget(targetSID *windows.SID) error {
-	if kept, keptErr := windowsClaudeManagedPolicyLinkKept(); keptErr != nil || kept {
-		return keptErr
-	}
 	return withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
 		return removeWindowsClaudeManagedPolicyTargetUnlocked(targetSID)
 	})

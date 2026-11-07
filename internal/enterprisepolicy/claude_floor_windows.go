@@ -60,7 +60,10 @@ func RemoveWindowsClaudeVersionFloor(opts Options) (State, error) {
 		}
 		// A link sits at the managed-settings folder: nothing of DefenseClaw
 		// is behind it to restore or remove, and the link is not followed.
-		// Only DefenseClaw's own record of the floor goes (GAP-0758).
+		// Only DefenseClaw's own record of the floor goes (GAP-0758). That
+		// record lives under the state root, which the purge removes, so
+		// dropping it does not hide the kept folder: the created-folder record
+		// of the folder stays and a later purge looks again.
 		state.detail("Claude Code version floor: a link sits at the managed-settings folder, so it is kept and the floor drop-in is not looked for behind it")
 		return state, deleteRecord(opts, claudeVersionFloorRecord)
 	}
