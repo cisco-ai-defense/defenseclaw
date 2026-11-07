@@ -104,34 +104,34 @@ func WriteWindowsMCPSpool(dir, connector string, manifest Manifest, setOwnership
 // of them is admitted (fail closed). A session-only CODEX_HOME is not seen
 // here: the hook names it, and the gateway admits only a server this record
 // holds (assetfacts MCPServer.Relocated).
-func windowsCodexUserServers(sid, home string, _ func(string, ...any)) ([]config.MCPServerEntry, string, error) {
+func windowsCodexUserServers(sid, home string, _ func(string, ...any)) ([]config.MCPServerEntry, string, []ClaudeMCPProjectSkip, error) {
 	path := filepath.Join(home, ".codex", "config.toml")
 	account, err := windows.StringToSid(sid)
 	if err != nil {
-		return nil, path, err
+		return nil, path, nil, err
 	}
 	relocated, err := windowsAccountFolderVariable(account, home, "CODEX_HOME")
 	if err != nil {
-		return nil, path, fmt.Errorf("resolve CODEX_HOME: %w", err)
+		return nil, path, nil, fmt.Errorf("resolve CODEX_HOME: %w", err)
 	}
 	if relocated != "" {
 		path = filepath.Join(relocated, "config.toml")
 	}
 	data, err := windowsCodexConfigRead(path, account, home)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, "", nil
+		return nil, "", nil, nil
 	}
 	if err == nil && len(data) > maxCodexMCPBytes {
 		err = fmt.Errorf("config.toml is larger than %d bytes", maxCodexMCPBytes)
 	}
 	if err != nil {
-		return nil, path, err
+		return nil, path, nil, err
 	}
 	servers, err := config.ParseCodexUserMCPServers(data, path)
 	if err != nil {
-		return nil, path, fmt.Errorf("parse %s: %w", path, err)
+		return nil, path, nil, fmt.Errorf("parse %s: %w", path, err)
 	}
-	return servers, "", nil
+	return servers, "", nil, nil
 }
 
 // windowsCodexConfigRead is readWindowsAccountFile; tests replace it.
