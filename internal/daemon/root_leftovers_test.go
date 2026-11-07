@@ -4,6 +4,7 @@
 package daemon
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -272,5 +273,26 @@ func TestRootLeftoversRemedySweepsAHiddenStoreAfterTheReturn(t *testing.T) {
 	}
 	if strings.Contains(RootLeftoversRemedy(home, []string{filepath.Join(home, "x.json")}), "find ") {
 		t.Fatal("a visible file is repaired with a sweep")
+	}
+}
+
+// FailedPIDRecord names the record the identity check refused, with the error
+// text unchanged, and nothing for an error from elsewhere.
+func TestFailedPIDRecordNamesTheRefusedRecord(t *testing.T) {
+	for _, record := range []string{PIDFileName, WatchdogPIDFileName} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, record), []byte("invalid\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := New(dir).ValidateStartIdentityFiles()
+		if err == nil || FailedPIDRecord(err) != record {
+			t.Fatalf("%s: err=%v record=%q", record, err, FailedPIDRecord(err))
+		}
+		if !errors.Is(err, ErrUnsafeProcessIdentity) || !strings.Contains(err.Error(), record) {
+			t.Fatalf("%s: the identity text changed: %v", record, err)
+		}
+	}
+	if got := FailedPIDRecord(errors.New("other")); got != "" {
+		t.Fatalf("FailedPIDRecord(other) = %q", got)
 	}
 }

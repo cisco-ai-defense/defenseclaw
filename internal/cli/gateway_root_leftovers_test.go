@@ -7,10 +7,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 )
 
 // rootStartBlockersSeen is what the stubbed blockers lookup was asked.
@@ -140,50 +142,74 @@ func TestRootOwnedRuntimeLeftoversRefusalChainTakesAwayLooseAccess(t *testing.T)
 	}
 }
 
+// pidIdentityError is the real start preflight failing on a malformed PID
+// record, the way the account sees it. The record stays account-owned: the
+// root-owned state is stubbed separately.
+func pidIdentityError(t *testing.T, record string) error {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", home)
+	if err := os.WriteFile(filepath.Join(home, record), []byte("invalid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := daemon.New(home).ValidateStartIdentityFiles()
+	if err == nil || daemon.FailedPIDRecord(err) != record {
+		t.Fatalf("identity preflight for %s = %v", record, err)
+	}
+	return err
+}
+
 // A root-owned PID record fails the identity check that runs before the
 // config is read; the refusal still happens, with the chain in place of the
 // raw identity text. An identity error with no root-owned cause is unchanged.
 func TestRefuseOverRootOwnedStateReplacesOnlyARootOwnedCause(t *testing.T) {
-	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
-	identityErr := errors.New("gateway PID record is unsafe")
-
-	stubRootRuntimeLeftovers(t, "gateway.pid")
-	for _, verb := range []string{"start", "restart"} {
-		err := refuseOverRootOwnedState(startCmd, verb, identityErr)
-		if err == nil || errors.Is(err, identityErr) || !strings.Contains(err.Error(), "cannot "+verb+" the gateway") ||
-			!strings.Contains(err.Error(), "gateway.pid") || !strings.Contains(err.Error(), `sudo chown -R "$(id -un)" `) {
-			t.Fatalf("%s identity refusal over a root-owned record = %v", verb, err)
+	for _, record := range []string{"gateway.pid", "watchdog.pid"} {
+		identityErr := pidIdentityError(t, record)
+		stubRootRuntimeLeftovers(t, record)
+		for _, verb := range []string{"start", "restart"} {
+			err := refuseOverRootOwnedState(startCmd, verb, identityErr)
+			if err == nil || errors.Is(err, identityErr) || !strings.Contains(err.Error(), "cannot "+verb+" the gateway") ||
+				!strings.Contains(err.Error(), record) || !strings.Contains(err.Error(), `sudo chown -R "$(id -un)" `) {
+				t.Fatalf("%s identity refusal over a root-owned %s = %v", verb, record, err)
+			}
 		}
-	}
 
-	stubRootRuntimeLeftovers(t)
-	if err := refuseOverRootOwnedState(startCmd, "start", identityErr); !errors.Is(err, identityErr) {
-		t.Fatalf("an identity error with no root-owned cause was replaced: %v", err)
+		stubRootRuntimeLeftovers(t)
+		if err := refuseOverRootOwnedState(startCmd, "start", identityErr); !errors.Is(err, identityErr) {
+			t.Fatalf("an identity error with no root-owned cause was replaced: %v", err)
+		}
 	}
 }
 
-// A PID record the account owns can be malformed while another runtime file is
-// root-owned. Returning the ownership does not make the record valid, so the
-// identity error and its guidance stay first and the root-owned report follows
-// (GAP-0788 review 2).
+// An account-owned PID record can be malformed while another runtime file, or
+// the other PID record, is root-owned. Returning the ownership does not make
+// the malformed record valid, so the identity error and its guidance stay first
+// and the root-owned report follows (GAP-0788 reviews 2 and 3).
 func TestRefuseOverRootOwnedStateKeepsAnIndependentPIDCause(t *testing.T) {
-	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
-	identityErr := errors.New("gateway PID record is malformed")
-
-	stubRootRuntimeLeftovers(t, "active_connector.json")
-	for _, verb := range []string{"start", "restart"} {
-		err := refuseOverRootOwnedState(startCmd, verb, identityErr)
-		if err == nil || !errors.Is(err, identityErr) {
-			t.Fatalf("%s: the PID reason was lost: %v", verb, err)
-		}
-		for _, want := range []string{"active_connector.json", `sudo chown -R "$(id -un)" `, "cannot " + verb + " the gateway"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("%s: mixed refusal lacks %q: %v", verb, want, err)
+	cases := []struct{ name, malformed, rootOwned string }{
+		{"other_runtime_file", "gateway.pid", "active_connector.json"},
+		{"malformed_gateway_root_watchdog", "gateway.pid", "watchdog.pid"},
+		{"malformed_watchdog_root_gateway", "watchdog.pid", "gateway.pid"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			identityErr := pidIdentityError(t, tc.malformed)
+			stubRootRuntimeLeftovers(t, tc.rootOwned)
+			for _, verb := range []string{"start", "restart"} {
+				err := refuseOverRootOwnedState(startCmd, verb, identityErr)
+				if err == nil || !errors.Is(err, identityErr) {
+					t.Fatalf("%s: the PID reason was lost: %v", verb, err)
+				}
+				for _, want := range []string{tc.rootOwned, `sudo chown -R "$(id -un)" `, "cannot " + verb + " the gateway"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("%s: mixed refusal lacks %q: %v", verb, want, err)
+					}
+				}
+				if strings.Index(err.Error(), identityErr.Error()) > strings.Index(err.Error(), tc.rootOwned) {
+					t.Errorf("%s: the PID reason does not come first: %v", verb, err)
+				}
 			}
-		}
-		if strings.Index(err.Error(), identityErr.Error()) > strings.Index(err.Error(), "active_connector.json") {
-			t.Errorf("%s: the PID reason does not come first: %v", verb, err)
-		}
+		})
 	}
 }
 
@@ -196,11 +222,24 @@ func TestRootOwnedStartRefusalAttributesAHiddenStoreToThePIDCheckOnlyInTheInstal
 	cfg := config.DefaultConfig()
 
 	cfg.DataDir = config.DefaultDataPath()
-	if refusal, pidCause := rootOwnedStartRefusal(cfg, "start"); refusal == nil || !pidCause {
-		t.Fatalf("hidden install home: refusal=%v pidCause=%v", refusal, pidCause)
+	if pidBlockers, refusal := rootOwnedStartRefusal(cfg, "start"); refusal == nil || !slices.Contains(pidBlockers, daemon.StoreDirEntry) {
+		t.Fatalf("hidden install home: refusal=%v pidBlockers=%v", refusal, pidBlockers)
 	}
 	cfg.DataDir = filepath.Join(t.TempDir(), "moved")
-	if refusal, pidCause := rootOwnedStartRefusal(cfg, "start"); refusal == nil || pidCause {
-		t.Fatalf("hidden moved store: refusal=%v pidCause=%v", refusal, pidCause)
+	if pidBlockers, refusal := rootOwnedStartRefusal(cfg, "start"); refusal == nil || len(pidBlockers) != 0 {
+		t.Fatalf("hidden moved store: refusal=%v pidBlockers=%v", refusal, pidBlockers)
+	}
+}
+
+// A hidden install home is the cause of whichever PID record failed: the chain
+// replaces the identity text for either record.
+func TestRefuseOverRootOwnedStateHiddenInstallHomeReplacesEitherPIDRecord(t *testing.T) {
+	for _, record := range []string{"gateway.pid", "watchdog.pid"} {
+		identityErr := pidIdentityError(t, record)
+		stubRootRuntimeLeftovers(t, "./")
+		err := refuseOverRootOwnedState(startCmd, "start", identityErr)
+		if err == nil || errors.Is(err, identityErr) || !strings.Contains(err.Error(), "cannot start the gateway") {
+			t.Fatalf("hidden install home over a failed %s = %v", record, err)
+		}
 	}
 }

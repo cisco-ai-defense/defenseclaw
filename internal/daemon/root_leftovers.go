@@ -4,6 +4,7 @@
 package daemon
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -108,6 +109,28 @@ func RootOwnedStartBlockers(dataDir, pidDir string, aiDiscoveryEnabled bool) (bl
 // of the PID records start and restart validate, in either folder.
 func NamesGatewayPIDRecord(blocker string) bool {
 	return slices.Contains(gatewayPIDRecordNames, filepath.Base(blocker))
+}
+
+// pidRecordError marks which PID record failed the identity check, so a caller
+// that explains a refused start can tell a record it can repair (root-owned)
+// from a record that is refused for its own reason (malformed). The text is the
+// wrapped error unchanged.
+type pidRecordError struct {
+	record string
+	err    error
+}
+
+func (e *pidRecordError) Error() string { return e.err.Error() }
+func (e *pidRecordError) Unwrap() error { return e.err }
+
+// FailedPIDRecord names the PID record (gateway.pid or watchdog.pid) whose
+// validation produced err, or "" when err does not come from that check.
+func FailedPIDRecord(err error) string {
+	var rec *pidRecordError
+	if errors.As(err, &rec) {
+		return rec.record
+	}
+	return ""
 }
 
 type rootOwnedEntry struct {
