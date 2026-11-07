@@ -141,6 +141,9 @@ func TestGAP0686CodexHookDecidesOnTheRefreshedDefinition(t *testing.T) {
 	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "codex"
+	// Enrolled users run the strict profile, where a server still being
+	// scanned is refused; the balanced default lets the call run.
+	cfg.Guardrail.RulePack = "strict"
 	api := &APIServer{scannerCfg: cfg}
 	refreshed, refreshErr := 0, error(nil)
 	api.SetMCPRefreshBeforeCall(func(_ context.Context, connector string) error {
@@ -156,6 +159,12 @@ func TestGAP0686CodexHookDecidesOnTheRefreshedDefinition(t *testing.T) {
 	if resp := api.evaluateCodexHook(context.Background(), call); resp.Action != "block" || refreshed != 1 {
 		t.Fatalf("added server: %+v after %d refreshes, want a block after one", resp, refreshed)
 	}
+	cfg.Guardrail.RulePack = ""
+	refreshed = 1
+	if resp := api.evaluateCodexHook(context.Background(), call); resp.Action == "block" {
+		t.Fatalf("balanced default with a scan pending: %+v, want the call allowed", resp)
+	}
+	cfg.Guardrail.RulePack = "strict"
 	api.SetMCPAdmissionPending(func(_, server, _, _ string) (string, bool) { return server, false })
 	refreshErr = errors.New("the hook enumerator did not answer")
 	if resp := api.evaluateCodexHook(context.Background(), call); resp.Action != "block" {
