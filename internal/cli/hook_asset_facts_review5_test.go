@@ -119,7 +119,7 @@ func TestHookAssetFactsPluginRegistryPastTheBoundKeepsTheSignal(t *testing.T) {
 	pluginDir := filepath.Join(t.TempDir(), "r109_kit")
 	review5Write(t, filepath.Join(pluginDir, "skills", "notes", "SKILL.md"), review5Skill)
 	registry := filepath.Join(claudeDir, "plugins", "installed_plugins.json")
-	prefix := `{"plugins":{"r109_kit@local":[{"installPath":` + strconvQuote(pluginDir) + `}]}`
+	prefix := `{"plugins":{"r109_kit@local":[{"installPath":` + review5Quote(pluginDir) + `}]}`
 	write := func(pad int) {
 		t.Helper()
 		review5Write(t, registry, prefix+strings.Repeat(" ", pad)+"}")
@@ -147,7 +147,7 @@ func TestHookAssetFactsPluginRegistryPastTheBoundKeepsTheSignal(t *testing.T) {
 	}
 }
 
-func strconvQuote(s string) string {
+func review5Quote(s string) string {
 	raw, _ := json.Marshal(s)
 	return string(raw)
 }

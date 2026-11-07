@@ -541,7 +541,9 @@ watches. Assets in profiles are judged at the hook, from their content: set
 `asset_policy.enabled: true`, `asset_policy.skill.runtime_detection.enabled: true`
 and `asset_policy.plugin.runtime_detection.enabled: true` (MCP runtime detection
 already defaults to true) and `asset_policy.mode: action`. The hook reads the
-skill folder the request selects (Claude Code, Codex and Copilot CLI), and the
+skill folder the request selects (Claude Code, Codex and Copilot CLI, under the
+skill roots of each, for Copilot CLI including `.agents\skills`, `COPILOT_HOME`
+and `COPILOT_SKILLS_DIRS`), and the
 Claude Code plugin it belongs to (including a plugin installed from a local
 marketplace folder and the tools of its bundled server), as the user, following
 links as the agent does. The gateway scans that text with the in-process
@@ -553,7 +555,10 @@ while the gateway was stopped is judged the first time it is used. A skill or
 plugin the hook found but sent no text for, or could not read in full (a file
 past 64 KiB, more than 64 files, a link that leads nowhere readable, text that
 is not UTF-8), is refused (`profile-asset-unscanned`): a verdict on part of an
-asset is not a verdict on it. Verdicts are cached by content digest. Ordinary skills and plugins are not
+asset is not a verdict on it. So is a skill folder the hook found but could not
+read, a plugin the registry gives no folder for (missing, unreadable, or larger
+than the 4 MiB the hook reads), and a tool of a plugin's bundled server whose
+owner no plugin content names. Verdicts are cached by content digest. Ordinary skills and plugins are not
 refused, and nothing changes while `asset_policy.enabled` is false or the mode
 is `observe`. The text is the hook's claim and the detector is the in-process
 one: the skill-scanner and CodeGuard are not run on profile assets, and a
@@ -685,8 +690,11 @@ DefenseClaw. A trusted project server is not published: it is refused the same
 way when it would override a published server of that name, when asset policy
 is enabled in action mode (the mode of the connector counts) with MCP runtime
 detection on, or when its definition is too long for the hook to send and an
-`asset_policy.mcp.denied` rule pins an endpoint, which cannot be checked against
-it; otherwise it keeps running as before.
+`asset_policy.mcp.denied` rule that pins an endpoint may match it (the hook
+sends a digest of each value such a rule compares, so a deny pinned to another
+URL, command, arguments or transport does not refuse it); otherwise it keeps
+running as before. When the user config marks a folder `trusted` and a project
+below it `untrusted`, the entry nearest the project decides.
 
 ### Release a blocked or quarantined skill
 
