@@ -17636,8 +17636,8 @@ function New-DefenseClawTransaction {
         }
         foreach ($destination in @(
             $Layout.CodexMachinePolicyPath,
-            $Layout.CodexManagedHooksStatePath,
-            (Get-DefenseClawCodexManagedHooksStateCommittedPath -Layout $Layout),
+            $Layout.CodexManagedHooksStatePath
+        ) + @(Get-DefenseClawCodexManagedHooksStateWriterCopyList -Layout $Layout) + @(
             $Layout.CodexRequirementsOwnershipPath,
             $Layout.CodexRequirementsAclBackupPath
         )) {
@@ -18254,8 +18254,8 @@ function Add-DefenseClawCodexTransactionSnapshot {
     $index = $files.Count
     foreach ($destination in @(
         $Layout.CodexMachinePolicyPath,
-        $Layout.CodexManagedHooksStatePath,
-        (Get-DefenseClawCodexManagedHooksStateCommittedPath -Layout $Layout),
+        $Layout.CodexManagedHooksStatePath
+    ) + @(Get-DefenseClawCodexManagedHooksStateWriterCopyList -Layout $Layout) + @(
         $Layout.CodexRequirementsOwnershipPath,
         $Layout.CodexRequirementsAclBackupPath
     )) {
@@ -18358,6 +18358,31 @@ function Add-DefenseClawTransactionCreatedSharedDirectory {
     Write-DefenseClawJsonAtomic -Value $snapshot -Path $SnapshotPath
 }
 
+function Test-DefenseClawCodexOwnFileName {
+    <#
+        True for the name of a lock or state file DefenseClaw's own Codex
+        steps write into the Codex machine-policy folder (g582 round 9, the
+        g091 round 4 live finding): the runtime selector lock a Repair's
+        snapshot step takes before the adoption runs, the Codex writer lock
+        and the lock of 1.0.8, and the managed-hooks state in its three forms
+        (1.0.8's fixed name, the writer copy, the hook copy
+        '.defenseclaw-managed-hooks.state.<n>'). Never requirements.toml: a
+        policy file is not DefenseClaw's lock. The pattern of the hook copy
+        is the one Get-DefenseClawCodexManagedHooksStateCopies reads.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+    return (
+        $Name -in @(
+            '.defenseclaw-managed-runtime-selector.lock',
+            '.defenseclaw-managed-hooks.writer.lock',
+            '.defenseclaw-managed-hooks.lock',
+            '.defenseclaw-managed-hooks.state',
+            '.defenseclaw-managed-hooks.state.committed'
+        ) -or
+        $Name -match '^\.defenseclaw-managed-hooks\.state\.[1-9][0-9]{0,7}$'
+    )
+}
+
 function Test-DefenseClawEmptyAdministratorVendorFolder {
     <#
         True for a folder an administrator, SYSTEM or TrustedInstaller owns,
@@ -18366,6 +18391,15 @@ function Test-DefenseClawEmptyAdministratorVendorFolder {
         too: a vendor folder DefenseClaw did not create that holds no
         DefenseClaw file (case b of the g582 vendor-folder ruling, GAP-0092;
         g582 review 7 S2). A folder it cannot read is not empty.
+
+        The only files that do not make it non-empty are DefenseClaw's own
+        Codex lock and state files (Test-DefenseClawCodexOwnFileName), when a
+        trusted account owns them and they are not reparse points: a Repair's
+        selector snapshot writes its lock into the Codex folder before the
+        adoption of the folder above it runs, and that lock is no vendor
+        content (g582 round 9; found by the g091 round 4 integrated case).
+        A file a standard user added is owned by that user and keeps the
+        refusal.
     #>
     param([Parameter(Mandatory)][string]$Path)
     $trusted = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
@@ -18380,8 +18414,11 @@ function Test-DefenseClawEmptyAdministratorVendorFolder {
             return $false
         }
         foreach ($child in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $Path -Force -Recurse -ErrorAction Stop)) {
-            if (-not $child.PSIsContainer -or
-                ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            if (($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                return $false
+            }
+            if (-not $child.PSIsContainer -and
+                -not (Test-DefenseClawCodexOwnFileName -Name $child.Name)) {
                 return $false
             }
             $childOwner = [string](Get-DefenseClawAclOwnerSID -Acl (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $child.FullName -ErrorAction Stop))
@@ -18557,6 +18594,20 @@ function Get-DefenseClawCodexManagedHooksStateCommittedPath {
     #>
     param([Parameter(Mandatory)][hashtable]$Layout)
     return ([string]$Layout.CodexManagedHooksStatePath + '.committed')
+}
+
+function Get-DefenseClawCodexManagedHooksStateWriterCopyList {
+    <#
+        The writer copy as a list for the transaction snapshots: empty on
+        Secure Client, whose Codex writers keep the fixed-name state of 1.0.8
+        and never create it (GAP-0650 is standalone only; g582 round 9, the
+        Secure Client rule).
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return @()
+    }
+    return @(Get-DefenseClawCodexManagedHooksStateCommittedPath -Layout $Layout)
 }
 
 function Resolve-DefenseClawCodexManagedHooksStateCopy {
@@ -45105,6 +45156,21 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         }
     }
     if ($priorCodexTargetEnabled) {
+        if (Test-DefenseClawStandaloneProfile) {
+            # An empty vendor folder an administrator made again is adopted, or
+            # refused, here: before the lifecycle snapshot writes DefenseClaw's
+            # own lock into it, and before any service stops or any record is
+            # taken, so a refusal leaves no transaction pending (g582 round 9;
+            # the g091 round 4 integrated case, where the check after the
+            # snapshot refused and the recovery refused again). The later
+            # Initialize-DefenseClawCodexMachinePolicyParent finds a folder
+            # that already passes.
+            foreach ($codexVendorFolder in @($Layout.CodexVendorDirectory, $Layout.CodexMachinePolicyDirectory)) {
+                if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $codexVendorFolder -PathType Container) {
+                    Assert-DefenseClawCodexMachinePolicyDirectory -Path $codexVendorFolder -Adopt
+                }
+            }
+        }
         # Authenticate pre-existing shared machine files before the lifecycle
         # snapshot reads them or any managed service/artifact is changed.
         Assert-DefenseClawCodexMachinePolicyFilePreflight -Layout $Layout

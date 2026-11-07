@@ -127,6 +127,56 @@ try {
         }
     }
 
+    # g582 round 9 (the g091 round 4 integrated case): a Repair's selector
+    # snapshot writes DefenseClaw's own lock into the empty Codex folder before
+    # the adoption of the folder above it runs. That lock is no vendor content:
+    # the folder is adopted. A lock a standard user owns, any other file and
+    # requirements.toml keep the refusal.
+    foreach ($row in @(
+        @{ Name = 'selector lock'; Files = @('.defenseclaw-managed-runtime-selector.lock'); Owner = ''; Adopted = $true },
+        @{ Name = 'writer lock, writer copy and hook copy'; Files = @('.defenseclaw-managed-hooks.writer.lock', '.defenseclaw-managed-hooks.state.committed', '.defenseclaw-managed-hooks.state.18'); Owner = ''; Adopted = $true },
+        @{ Name = 'lock of 1.0.8 and state of 1.0.8'; Files = @('.defenseclaw-managed-hooks.lock', '.defenseclaw-managed-hooks.state'); Owner = ''; Adopted = $true },
+        @{ Name = 'selector lock owned by Users'; Files = @('.defenseclaw-managed-runtime-selector.lock'); Owner = '*S-1-5-32-545'; Adopted = $false },
+        @{ Name = 'selector lock beside a foreign file'; Files = @('.defenseclaw-managed-runtime-selector.lock', 'notes.txt'); Owner = ''; Adopted = $false },
+        @{ Name = 'requirements.toml'; Files = @('requirements.toml'); Owner = ''; Adopted = $false },
+        @{ Name = 'hook copy with a leading zero'; Files = @('.defenseclaw-managed-hooks.state.04'); Owner = ''; Adopted = $false }
+    )) {
+        $ownVendor = New-StandIn
+        $ownCodex = [IO.Path]::Combine($ownVendor, 'Codex')
+        [void][IO.Directory]::CreateDirectory($ownCodex)
+        foreach ($name in $row.Files) {
+            $path = [IO.Path]::Combine($ownCodex, $name)
+            [IO.File]::WriteAllBytes($path, [byte[]]@())
+            if ($row.Owner -ne '' -and $name -like '.defenseclaw-*') {
+                $ownerResult = & icacls.exe $path /setowner $row.Owner 2>&1
+                if ($LASTEXITCODE -ne 0) {
+                    $failures.Add("icacls /setowner $($row.Owner) on $path failed: $ownerResult")
+                }
+            }
+        }
+        $ownResult = & $module {
+            param($Vendor, $Codex)
+            function Test-DefenseClawStandaloneProfile { return $true }
+            $errors = @()
+            foreach ($path in @($Vendor, $Codex)) {
+                try { Assert-DefenseClawCodexMachinePolicyDirectory -Path $path -Adopt }
+                catch { $errors += "${path}: $($_.Exception.Message)"; break }
+            }
+            return , $errors
+        } $ownVendor $ownCodex
+        $adopted = @($ownResult).Count -eq 0
+        if ($adopted -ne $row.Adopted) {
+            $failures.Add("codex folder holding $($row.Name): adopted=$adopted, want $($row.Adopted): $($ownResult -join ' | ')")
+        }
+        elseif ($adopted) {
+            foreach ($name in $row.Files) {
+                if (-not [IO.File]::Exists([IO.Path]::Combine($ownCodex, $name))) {
+                    $failures.Add("the adoption removed DefenseClaw's own file $name")
+                }
+            }
+        }
+    }
+
     # An entry added between the emptiness check and the stamp is caught after the stamp.
     $raced = New-StandIn
     $racedMessage = & $module {

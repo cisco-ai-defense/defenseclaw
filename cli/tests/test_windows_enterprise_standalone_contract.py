@@ -3255,3 +3255,41 @@ def test_lazy_lock_files_are_standalone_only_and_name_every_product_lock() -> No
         line for line in _text(MODULE).splitlines() if "Get-DefenseClawLazyLockFiles -Layout" in line
     ]
     assert len(callers) == 2, "stamp (repair) and verify both read the one list"
+
+
+def test_codex_vendor_folder_adoption_runs_before_the_snapshot_and_tolerates_defenseclaws_own_lock() -> None:
+    # g582 round 9 (the g091 round 4 integrated case): a Repair over an empty
+    # administrator-made OpenAI\\Codex failed 1603 and left the transaction
+    # pending, because the lifecycle snapshot wrote the Codex selector lock
+    # into the folder before the adoption of its parent ran, so the folder was
+    # no longer empty. The adoption now runs in the preflight, before anything
+    # is written and before any service stops, and the emptiness test lets
+    # DefenseClaw's own lock and state names through.
+    module = _text(MODULE)
+    lifecycle = _function_body(module, "Invoke-DefenseClawInstallLikeLifecycle")
+    preflight = lifecycle.index("if ($priorCodexTargetEnabled) {")
+    adopt = lifecycle.index("Assert-DefenseClawCodexMachinePolicyDirectory -Path $codexVendorFolder -Adopt", preflight)
+    files = lifecycle.index("Assert-DefenseClawCodexMachinePolicyFilePreflight -Layout $Layout", preflight)
+    snapshot = lifecycle.index("Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand", preflight)
+    stopped = lifecycle.index("Stop-DefenseClawService -Name $GuardianServiceName", preflight)
+    assert preflight < adopt < files < snapshot < stopped
+    assert "Test-DefenseClawStandaloneProfile" in lifecycle[preflight:adopt]
+    # Only install, ensure and repair adopt: the preflight and the parent
+    # initialization, never the checks of verify, the guardian or a rollback.
+    callers = [
+        match.start()
+        for match in re.finditer(r"Assert-DefenseClawCodexMachinePolicyDirectory[^\n]*-Adopt", module)
+    ]
+    assert len(callers) == 2
+
+    emptiness = _function_body(module, "Test-DefenseClawEmptyAdministratorVendorFolder")
+    assert "Test-DefenseClawCodexOwnFileName -Name $child.Name" in emptiness
+    names = _function_body(module, "Test-DefenseClawCodexOwnFileName")
+    for name in (
+        ".defenseclaw-managed-runtime-selector.lock",
+        ".defenseclaw-managed-hooks.writer.lock",
+        ".defenseclaw-managed-hooks.state.committed",
+    ):
+        assert f"'{name}'" in names
+    assert "'requirements.toml'" not in names
+    assert r"'^\.defenseclaw-managed-hooks\.state\.[1-9][0-9]{0,7}$'" in names
