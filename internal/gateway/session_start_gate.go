@@ -53,6 +53,9 @@ type sessionStartEntry struct {
 	// there is no start payload, only the checks a start runs and a call
 	// does not. A call does not wait for it past its answer window.
 	inPlace bool
+	// pinned is the identity refusal text this entry holds trusted
+	// (pinIdentityRefusal) for as long as the gate keeps the entry.
+	pinned string
 }
 
 // sessionStartTicket is one session start being judged.
@@ -163,6 +166,7 @@ func (g *sessionStartGate) beginLocked(key string) *sessionStartTicket {
 	if len(g.entries) >= sessionStartGateLimit {
 		g.evictLocked(time.Now())
 	}
+	g.dropLocked(key)
 	g.entries[key] = entry
 	g.seenLocked(key, entry.at)
 	return &sessionStartTicket{gate: g, key: key, entry: entry}
@@ -180,7 +184,7 @@ func (g *sessionStartGate) evictLocked(now time.Time) {
 			continue
 		}
 		if now.Sub(entry.at) > sessionStartGateTTL {
-			delete(g.entries, key)
+			g.dropLocked(key)
 			continue
 		}
 		if oldestKey == "" || entry.at.Before(oldest) {
@@ -188,8 +192,18 @@ func (g *sessionStartGate) evictLocked(now time.Time) {
 		}
 	}
 	if len(g.entries) >= sessionStartGateLimit && oldestKey != "" {
-		delete(g.entries, oldestKey)
+		g.dropLocked(oldestKey)
 	}
+}
+
+// dropLocked forgets the entry of key and releases the identity refusal it
+// pinned.
+func (g *sessionStartGate) dropLocked(key string) {
+	if entry := g.entries[key]; entry != nil && entry.pinned != "" {
+		unpinIdentityRefusal(entry.pinned)
+		entry.pinned = ""
+	}
+	delete(g.entries, key)
 }
 
 // seenLocked records that key's start was seen or judged, and wakes the calls waiting for it. It keeps at most
@@ -224,8 +238,14 @@ func (t *sessionStartTicket) finish(blocked bool, reason string) {
 		g := t.gate
 		g.mu.Lock()
 		t.entry.blocked, t.entry.reason, t.entry.at = blocked, reason, time.Now()
-		if !blocked && g.entries[t.key] == t.entry {
-			delete(g.entries, t.key)
+		if g.entries[t.key] == t.entry {
+			if !blocked {
+				g.dropLocked(t.key)
+			} else if pinIdentityRefusal(reason) {
+				// A live blocked session keeps its readable cause however
+				// many other refusals are issued meanwhile (GAP-0718).
+				t.entry.pinned = reason
+			}
 		}
 		g.mu.Unlock()
 		close(t.entry.done)
@@ -308,7 +328,7 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival 
 				if time.Since(entry.at) > sessionStartGateTTL {
 					g.mu.Lock()
 					if g.entries[key] == entry {
-						delete(g.entries, key)
+						g.dropLocked(key)
 					}
 					g.mu.Unlock()
 					return "", false

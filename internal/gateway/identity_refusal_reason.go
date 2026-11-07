@@ -45,22 +45,31 @@ func identityFactClause(fact string) string {
 	return "identity fact " + fact + " is unconfirmed"
 }
 
-// identityRefusals is the set of refusal texts this process wrote, the
-// oldest dropped once it is full. The display trusts a text because the
-// producer issued it, never because of how it reads: a recognizer of the
-// final string cannot tell a value the producer verified from one that only
-// fits the same shape (a forged user ID, a fact word, a path that holds the
-// option delimiter) and drops a valid rendering it did not expect.
+// identityRefusals is the set of refusal texts this process wrote. The
+// display trusts a text because the producer issued it, never because of how
+// it reads: a recognizer of the final string cannot tell a value the
+// producer verified from one that only fits the same shape (a forged user
+// ID, a fact word, a path that holds the option delimiter) and drops a valid
+// rendering it did not expect.
+//
+// Two tiers keep it bounded without losing a live verdict. The recent ring
+// holds the last texts written, the oldest dropped once it is full. A text
+// the session start gate retains for a blocked session is also pinned for as
+// long as the gate keeps that verdict (up to its 4,096 sessions and seven
+// days), so the refusals of other accounts never turn a live session into
+// redacted spans (GAP-0718).
 var identityRefusals struct {
 	mu     sync.Mutex
 	issued map[string]struct{}
 	order  [identityRefusalIssuedMax]string
 	next   int
+	pinned map[string]int
 }
 
-// identityRefusalIssuedMax bounds the set. A refusal is the text of one
-// account, connector and fact set, so a host has few distinct ones; a text
-// pushed out reads as free-form (redacted), the safe side.
+// identityRefusalIssuedMax bounds the recent ring. A refusal is the text of
+// one account, connector and fact set, so a host has few distinct ones; a
+// text pushed out and not pinned reads as free-form (redacted), the safe
+// side.
 const identityRefusalIssuedMax = 512
 
 // issueIdentityRefusal records a refusal text the producer has just written
@@ -84,6 +93,35 @@ func issueIdentityRefusal(text string) string {
 	return text
 }
 
+// pinIdentityRefusal keeps a refusal text trusted until it is unpinned, for
+// a verdict the session start gate retains. It pins only a text the
+// producer issued and reports whether it did.
+func pinIdentityRefusal(text string) bool {
+	r := &identityRefusals
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.issued[text]; !ok && r.pinned[text] == 0 {
+		return false
+	}
+	if r.pinned == nil {
+		r.pinned = make(map[string]int)
+	}
+	r.pinned[text]++
+	return true
+}
+
+// unpinIdentityRefusal releases one pin of pinIdentityRefusal.
+func unpinIdentityRefusal(text string) {
+	r := &identityRefusals
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.pinned[text] > 1 {
+		r.pinned[text]--
+		return
+	}
+	delete(r.pinned, text)
+}
+
 // trustedIdentityRefusalReason reports a refusal text exactly as
 // identityUncertaintyReason issued it. Any other text, however it reads,
 // stays free-form and redacted.
@@ -91,6 +129,8 @@ func trustedIdentityRefusalReason(reason string) bool {
 	r := &identityRefusals
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	_, ok := r.issued[reason]
-	return ok
+	if _, ok := r.issued[reason]; ok {
+		return true
+	}
+	return r.pinned[reason] > 0
 }
