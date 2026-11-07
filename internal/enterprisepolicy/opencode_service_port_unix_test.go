@@ -10,7 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // A port that already matches is checked like a port that does not
@@ -133,4 +136,191 @@ func TestSetOpenCodeServicePortLeavesAnOrdinaryMatchingFile(t *testing.T) {
 			t.Fatalf("mode %o: %+v %v", mode, result, err)
 		}
 	}
+}
+
+// The whole path to service.json is checked before a matching port is
+// accepted and before a write (GAP-0053 REVIEW-2 MF1b): a folder another
+// account can write, anywhere on the resolved path or on the path of a link
+// the walk passes through, makes the file replaceable.
+func TestSetOpenCodeServicePortChecksEveryFolderOnThePath(t *testing.T) {
+	const port = 25001
+	type layout struct {
+		name  string
+		build func(t *testing.T, home string) // makes the layout and opens one folder
+	}
+	writeFile := func(t *testing.T, dir string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "service.json"), []byte(`{"port":25001}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []layout{
+		{"opencode folder world writable", func(t *testing.T, home string) {
+			dir := filepath.Dir(OpenCodeServiceConfigPath(home))
+			writeFile(t, dir)
+			if err := os.Chmod(dir, 0o777); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"config folder world writable", func(t *testing.T, home string) {
+			writeFile(t, filepath.Dir(OpenCodeServiceConfigPath(home)))
+			if err := os.Chmod(filepath.Join(home, ".config"), 0o777); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"home world writable", func(t *testing.T, home string) {
+			writeFile(t, filepath.Dir(OpenCodeServiceConfigPath(home)))
+			if err := os.Chmod(home, 0o777); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"link target parent world writable", func(t *testing.T, home string) {
+			parent := filepath.Join(home, "dotfiles")
+			writeFile(t, filepath.Join(parent, "opencode"))
+			if err := os.MkdirAll(filepath.Join(home, ".config"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(parent, "opencode"), filepath.Join(home, ".config", "opencode")); err != nil {
+				t.Skip(err)
+			}
+			if err := os.Chmod(parent, 0o777); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"folder holding the link world writable", func(t *testing.T, home string) {
+			writeFile(t, filepath.Join(home, "dotfiles", "opencode"))
+			if err := os.MkdirAll(filepath.Join(home, ".config"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(home, "dotfiles", "opencode"), filepath.Join(home, ".config", "opencode")); err != nil {
+				t.Skip(err)
+			}
+			if err := os.Chmod(filepath.Join(home, ".config"), 0o777); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			home := reachableHome(t)
+			c.build(t, home)
+			path := OpenCodeServiceConfigPath(home)
+			before, _ := os.ReadFile(path)
+			if result, err := SetOpenCodeServicePort(home, port); err == nil {
+				t.Fatalf("a matching port was accepted through a folder another account can write: %+v", result)
+			}
+			if result, err := SetOpenCodeServicePort(home, port+1); err == nil {
+				t.Fatalf("a port was written through a folder another account can write: %+v", result)
+			}
+			if after, _ := os.ReadFile(path); string(after) != string(before) {
+				t.Fatalf("the file changed: %s", after)
+			}
+		})
+	}
+}
+
+// Benign twin: a sticky folder everyone can write (the shared scratch root)
+// above a private home, and the private-group layout of Debian and Ubuntu,
+// keep a matching port a no-op.
+func TestSetOpenCodeServicePortAcceptsStickyAndPrivateGroupFolders(t *testing.T) {
+	const port = 25001
+	t.Run("sticky world writable folder above the home", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.Chmod(root, os.ModeSticky|0o777); err != nil {
+			t.Fatal(err)
+		}
+		home := filepath.Join(root, "home")
+		path := OpenCodeServiceConfigPath(home)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(`{"port":25001}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		result, err := SetOpenCodeServicePort(home, port)
+		if err != nil || result.Changed || result.Port != port {
+			t.Fatalf("%+v %v", result, err)
+		}
+	})
+	t.Run("stow target in the private group of the account", func(t *testing.T) {
+		home := t.TempDir()
+		target := filepath.Join(home, "dotfiles", "opencode")
+		if err := os.MkdirAll(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(target, 0o775); err != nil {
+			t.Fatal(err)
+		}
+		info, _ := os.Lstat(target)
+		if !connector.OwnerPrivateGroup(target, info) {
+			t.Skip("the primary group of this account is not private to it")
+		}
+		if err := os.WriteFile(filepath.Join(target, "service.json"), []byte(`{"port":25001}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(home, ".config"), 0o775); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(home, ".config", "opencode")); err != nil {
+			t.Skip(err)
+		}
+		result, err := SetOpenCodeServicePort(home, port)
+		if err != nil || result.Changed || result.Port != port {
+			t.Fatalf("a stow target in the private group was refused: %+v %v", result, err)
+		}
+	})
+}
+
+// A group-write folder is refused when its group is not the private group of
+// the account (a supplementary group stands in for a shared one).
+func TestSetOpenCodeServicePortRefusesASharedGroupFolder(t *testing.T) {
+	gid := -1
+	groups, _ := os.Getgroups()
+	for _, g := range groups {
+		if g != os.Getegid() {
+			gid = g
+			break
+		}
+	}
+	if gid < 0 {
+		t.Skip("this account has no supplementary group")
+	}
+	home := t.TempDir()
+	dir := filepath.Dir(OpenCodeServiceConfigPath(home))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "service.json"), []byte(`{"port":25001}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(dir, -1, gid); err != nil {
+		t.Skip(err)
+	}
+	if err := os.Chmod(dir, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	if info, _ := os.Lstat(dir); info.Sys().(*syscall.Stat_t).Gid != uint32(gid) {
+		t.Skip("the group was not applied")
+	}
+	if result, err := SetOpenCodeServicePort(home, 25001); err == nil {
+		t.Fatalf("a folder a shared group can write was accepted: %+v", result)
+	}
+}
+
+// reachableHome returns a new home directly beneath the shared scratch root,
+// so every folder above it is searchable by another account (a t.TempDir
+// parent is mode 0700 and would hide the folders the test opens).
+func reachableHome(t *testing.T) string {
+	t.Helper()
+	home, err := os.MkdirTemp(os.TempDir(), "opencode-port-home-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(home, 0o700); _ = os.RemoveAll(home) })
+	if err := os.Chmod(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return home
 }
