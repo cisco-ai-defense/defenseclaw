@@ -390,6 +390,17 @@ _BREAKS = {
     "not-an-executable-image": [(_COFF + 18, 0x0020, 2)],
     "pe-header-past-the-file": [(0x3C, 0x10000, 4)],
     "pe-signature-wrong": [(0x80, ord("X"), 1)],
+    "image-base-not-64k-aligned": [(_OPTIONAL + 24, 0x140001000, 8)],
+    "reserved-win32-version-set": [(_OPTIONAL + 52, 1, 4)],
+    "headers-size-not-file-aligned": [(_OPTIONAL + 60, 0x1FC, 4)],
+    "section-raw-size-not-file-aligned": [(_SECTION + 16, 0x1F0, 4)],
+    "low-section-alignment-with-a-larger-file-alignment": [(_OPTIONAL + 32, 0x400, 4)],
+    "low-section-alignment-with-the-section-away-from-its-file-offset": [(_OPTIONAL + 32, 0x200, 4)],
+}
+
+# Breaks that need file bytes past the fixture, so only the one field is wrong.
+_BREAKS_NEEDING_SLACK = {
+    "section-raw-offset-not-file-aligned": [(_SECTION + 20, 0x210, 4)],
 }
 
 
@@ -404,6 +415,54 @@ def test_one_broken_loader_field_makes_the_launcher_not_a_windows_executable(tmp
     image = tmp_path / "defenseclaw-hook.exe"
     image.write_bytes(_pe_image(patches=tuple(_BREAKS[name])))
     assert hook_integrity._launcher_defect(str(image)) == "is not a Windows executable"
+
+
+@pytest.mark.parametrize("name", sorted(_BREAKS_NEEDING_SLACK))
+def test_a_break_that_needs_file_slack_is_still_not_a_windows_executable(tmp_path, name):
+    image = tmp_path / "defenseclaw-hook.exe"
+    image.write_bytes(_pe_image(extra=bytes(0x40), patches=tuple(_BREAKS_NEEDING_SLACK[name])))
+    assert hook_integrity._launcher_defect(str(image)) == "is not a Windows executable"
+
+
+_NEAR_VARIANTS = [
+    "image-base-not-64k-aligned",
+    "reserved-win32-version-set",
+    "headers-size-not-file-aligned",
+    "section-raw-size-not-file-aligned",
+    "low-section-alignment-with-a-larger-file-alignment",
+    "low-section-alignment-with-the-section-away-from-its-file-offset",
+]
+
+
+@pytest.mark.parametrize("connector", ["kiro", "antigravity"])
+@pytest.mark.parametrize("name", _NEAR_VARIANTS)
+def test_a_loader_invalid_layout_is_named_with_no_recorded_digest(tmp_path, windows_launcher, connector, name):
+    launcher, text = windows_launcher
+    cfg, _config = _register(tmp_path, connector, text)
+    assert not Path(cfg.data_dir, "installer").exists()
+    launcher.write_bytes(_pe_image(patches=tuple(_BREAKS[name])))
+
+    problems = hook_registration_problems(cfg, connector)
+
+    assert problems == [f"the DefenseClaw hook launcher {text} is not a Windows executable, so every hook call fails"]
+    assert repair_command(connector, problems[0]) == LAUNCHER_REINSTALL_STEP
+
+
+@pytest.mark.parametrize("name", _NEAR_VARIANTS)
+def test_doctor_fails_the_kiro_row_for_a_loader_invalid_layout(tmp_path, windows_launcher, monkeypatch, name):
+    launcher, text = windows_launcher
+    cfg, _config = _register(tmp_path, "kiro", text)
+    monkeypatch.setattr("defenseclaw.commands.cmd_doctor._edited_hook_problem", lambda *_: "")
+    monkeypatch.setattr("defenseclaw.commands.cmd_doctor._unguarded_tool_call_problem", lambda *_: "")
+    launcher.write_bytes(_pe_image(patches=tuple(_BREAKS[name])))
+
+    result = _DoctorResult(passive=True, quiet=True)
+    _check_hook_health(cfg, "kiro", result)
+
+    (row,) = result.checks
+    assert (row["label"], row["status"]) == ("Kiro hooks", "fail")
+    assert text in row["detail"] and "is not a Windows executable" in row["detail"]
+    assert row["remediation"] == LAUNCHER_REINSTALL_STEP
 
 
 def test_a_hand_made_stub_with_pe_signatures_is_not_a_working_launcher(tmp_path, windows_launcher):
