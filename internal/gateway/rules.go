@@ -92,6 +92,12 @@ type RuleFinding struct {
 	// class on a shell command (markShellProtectedFileFindings). It is
 	// private and value-free; profileClassFloor reads it.
 	shellProtectedFile bool
+	// namesState marks an evaluation-limit finding on a call whose text names
+	// the DefenseClaw state folder (markShellProtectedFileFindings). The call
+	// could not be analysed, but self-protection does not wait for a proof:
+	// guardrailActionForProfile keeps its block in every profile. Private and
+	// value-free.
+	namesState bool
 }
 
 type findingEnforcement uint8
