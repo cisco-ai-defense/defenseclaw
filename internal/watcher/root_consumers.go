@@ -6,28 +6,36 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
-// rootConsumersOf is every connector that loads a watched root holding the
+// rootConsumersOf is every connector that loads the watched root holding the
 // skill or plugin event, owner first. A root several connectors load (an
 // explicit gateway.watcher folder, or a shared layout) has one event owner,
 // but each of its consumers loads what lands there, so each consumer has its
-// connector-scoped asset rules applied to it. Connectors that do not load the
-// root are never in the list, so their scoped rules do not reach it.
+// connector-scoped asset rules applied to it. Only the innermost watched root
+// holding the event counts: a root nested inside another watched root owns
+// what lands in it, so the outer root consumers never load it as their own.
+// Connectors that do not load the root are never in the list, so their scoped
+// rules do not reach it. The Secure Client profile keeps the owner alone.
 func (w *InstallWatcher) rootConsumersOf(evt InstallEvent, owner string) []string {
 	out := []string{owner}
-	if evt.Type != InstallSkill && evt.Type != InstallPlugin || len(w.rootConsumers) == 0 || strings.TrimSpace(evt.Path) == "" {
+	if evt.Type != InstallSkill && evt.Type != InstallPlugin || len(w.rootConsumers) == 0 || strings.TrimSpace(evt.Path) == "" || w.secureClientActive() {
 		return out
 	}
 	path := w.rootCoveragePath(evt.Path)
 	prefix := string(evt.Type) + "\x00"
-	for key, connectors := range w.rootConsumers {
+	var innermost string
+	var connectors []string
+	for key, loaded := range w.rootConsumers {
 		root, ok := strings.CutPrefix(key, prefix)
 		if !ok || !pathWithinRoot(path, root) {
 			continue
 		}
-		for _, connector := range connectors {
-			if !containsFold(out, connector) {
-				out = append(out, connector)
-			}
+		if connectors == nil || len(root) > len(innermost) {
+			innermost, connectors = root, loaded
+		}
+	}
+	for _, connector := range connectors {
+		if !containsFold(out, connector) {
+			out = append(out, connector)
 		}
 	}
 	return out
