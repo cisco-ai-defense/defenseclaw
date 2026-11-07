@@ -12,8 +12,9 @@ import (
 
 // ErrPluginFolderCustody marks the refusal to publish a managed plugin because
 // another account can write into its folder chain or onto the plugin file. The
-// error text names the folders and the one command that clears the refusal,
-// so a caller must not add the generic "close the agent" advice (GAP-0730).
+// error text names the folders and the one command that clears the refusal, or
+// the link that must be replaced by hand, so a caller must not add the generic
+// "close the agent" advice (GAP-0730).
 var ErrPluginFolderCustody = errors.New("plugin folder is writable by another account")
 
 // pluginCustodyError is cause (the first refusal the directory walk met) plus

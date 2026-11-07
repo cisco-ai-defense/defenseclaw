@@ -86,8 +86,8 @@ func TestGAP0730RefusalNamesAPluginFileOthersCanWrite(t *testing.T) {
 }
 
 // Benign twin: private folders and a private plugin stay accepted, and a
-// refusal that is not about permissions keeps its own text and no custody
-// marker (a link in the chain is not fixed with chmod).
+// refusal that is not about permissions is given no chmod (a link in the chain
+// is not fixed with one).
 func TestGAP0730PrivateFoldersStayAcceptedAndOtherRefusalsKeepTheirText(t *testing.T) {
 	_, opencode, plugin := custodyFixture(t, 0o755, 0o755)
 	if err := validatePluginArtifactDestination(plugin); err != nil {
@@ -107,8 +107,45 @@ func TestGAP0730PrivateFoldersStayAcceptedAndOtherRefusalsKeepTheirText(t *testi
 	if err == nil {
 		t.Fatal("a plugin folder reached through a link was accepted")
 	}
-	if errors.Is(err, ErrPluginFolderCustody) || strings.Contains(err.Error(), "chmod") {
-		t.Fatalf("a link refusal was given a chmod fix: %v", err)
+	if strings.Contains(err.Error(), "chmod") || !strings.Contains(err.Error(), "replace "+link) {
+		t.Fatalf("a link refusal was given a chmod fix or does not name the link: %v", err)
+	}
+}
+
+// A link whose target is group/other writable is still a link refusal: the
+// chmod that would clear the target does not clear the link, so no chmod is
+// offered and the link is named (review 1 of GAP-0730). A link to a private
+// target and a link to an open one are refused with the same advice.
+func TestGAP0730LinkToAnOpenFolderIsNamedAndGetsNoChmod(t *testing.T) {
+	for _, mode := range []os.FileMode{0o700, 0o777} {
+		_, opencode, _ := custodyFixture(t, 0o755, mode)
+		link := filepath.Join(filepath.Dir(opencode), "linked")
+		if err := os.Symlink(opencode, link); err != nil {
+			t.Skip("symlinks unavailable")
+		}
+		err := validatePluginArtifactDestination(filepath.Join(link, "plugins", "defenseclaw.js"))
+		if err == nil {
+			t.Fatalf("mode %o: a plugin folder reached through a link was accepted", mode)
+		}
+		if strings.Contains(err.Error(), "chmod") || !strings.Contains(err.Error(), "replace "+link) || !errors.Is(err, ErrPluginFolderCustody) {
+			t.Fatalf("mode %o: a link refusal must name the link and no chmod:\n%v", mode, err)
+		}
+	}
+}
+
+// The plugin file itself as a link is structural too.
+func TestGAP0730PluginFileThatIsALinkIsNamedAndGetsNoChmod(t *testing.T) {
+	_, _, plugin := custodyFixture(t, 0o755, 0o755)
+	target := filepath.Join(t.TempDir(), "elsewhere.js")
+	if err := os.WriteFile(target, []byte("//\n"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, plugin); err != nil {
+		t.Skip("symlinks unavailable")
+	}
+	err := validatePluginArtifactDestination(plugin)
+	if err == nil || strings.Contains(err.Error(), "chmod") || !strings.Contains(err.Error(), "replace "+plugin) {
+		t.Fatalf("err=%v", err)
 	}
 }
 

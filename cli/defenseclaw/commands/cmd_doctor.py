@@ -11363,12 +11363,12 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
             # The gateway refuses to publish the plugin into a folder other
             # accounts can write, and stops; the other rows only showed the
             # gateway down.
-            named, fix = opencode_custody_text(unsafe)
+            advice = opencode_custody_text(unsafe)
             _emit(
                 "fail",
                 label,
-                f"{named} can be written by other accounts, so the gateway refuses to install the "
-                f"OpenCode plugin there and does not start. Run `{fix}`, "
+                f"{advice.named} {advice.why}, so the gateway refuses to install the "
+                f"OpenCode plugin there and does not start. {advice.action[:1].upper()}{advice.action[1:]}, "
                 "then `defenseclaw-gateway restart`",
                 r=r,
             )
@@ -11406,14 +11406,14 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                     # The running gateway installed the plugin before another
                     # account could write there; its next start refuses to
                     # (GAP-0730), so name the fix while it still runs.
-                    named, fix = opencode_custody_text(unsafe)
+                    advice = opencode_custody_text(unsafe)
                     _emit(
                         "warn",
                         label,
-                        f"plugin installed at {path}, but {named} can be written by other accounts, "
+                        f"plugin installed at {path}, but {advice.named} {advice.why}, "
                         "so the next gateway start refuses to load OpenCode",
                         r=r,
-                        remediation=f"{fix}, then defenseclaw-gateway restart",
+                        remediation=f"{advice.command or advice.action}, then defenseclaw-gateway restart",
                     )
                 else:
                     status, runtime_detail = _opencode_load_heartbeat_status(cfg)
@@ -11741,6 +11741,26 @@ def _amp_non_defenseclaw_direct_plugins(cfg) -> list[str]:
     return discovered
 
 
+_RECORDED_REASON_CAUSE_LIMIT = 400
+_RECORDED_REASON_FIX_LIMIT = 1200
+
+
+def _bounded_recorded_reason(reason: object) -> str:
+    """Whitespace-collapse the gateway's recorded reason and bound it without dropping the repair.
+
+    The gateway ends a custody refusal with ``; fix: <command>``. Bounding the
+    whole text would cut that command off, so the cause is bounded and the
+    ``; fix:`` tail is kept whole up to a larger limit.
+    """
+    text = " ".join(str(reason).split())
+    head, marker, fix = text.rpartition("; fix: ")
+    if not marker:
+        return text if len(text) <= _RECORDED_REASON_CAUSE_LIMIT else text[:_RECORDED_REASON_CAUSE_LIMIT] + "…"
+    if len(head) > _RECORDED_REASON_CAUSE_LIMIT:
+        head = head[:_RECORDED_REASON_CAUSE_LIMIT] + "…"
+    return head + marker + fix[:_RECORDED_REASON_FIX_LIMIT]
+
+
 def _check_connector_skipped_at_start(connector: str, live_health: dict | None, r: _DoctorResult) -> None:
     """Warn when the running gateway skipped *connector* at start.
 
@@ -11769,14 +11789,14 @@ def _check_connector_skipped_at_start(connector: str, live_health: dict | None, 
         return
     # The gateway recorded why it skipped the connector; quote it (bounded)
     # instead of sending the user to gateway.log (GAP-0731).
-    recorded = " ".join(str(_connectors_not_started_reasons(live_health).get(connector, "")).split())[:400]
+    recorded = _bounded_recorded_reason(_connectors_not_started_reasons(live_health).get(connector, ""))
+    label = _CONNECTOR_LABELS.get(connector, connector)
     _emit(
         "warn",
         "Connector setup",
-        f"{_CONNECTOR_LABELS.get(connector, connector)} was skipped when the gateway started, so it is not "
-        f"enforced: {recorded}" if recorded else
-        f"{_CONNECTOR_LABELS.get(connector, connector)} was skipped when the gateway started, so it is not "
-        "enforced; gateway.log has the reason",
+        f"{label} was skipped when the gateway started, so it is not enforced: {recorded}"
+        if recorded
+        else f"{label} was skipped when the gateway started, so it is not enforced; gateway.log has the reason",
         r=r,
         remediation=f"defenseclaw setup {connector}",
     )
@@ -19832,8 +19852,8 @@ def _repair_gateway_lifecycle(cfg, *, start_if_stopped: bool) -> tuple[bool, str
         # The gateway stops when OpenCode's plugin folder is writable by
         # other accounts; name the folder instead of a generic readiness line.
         if unsafe := opencode_unsafe_plugin_paths(connector_config_files("opencode")[:1]):
-            named, fix = opencode_custody_text(unsafe)
-            reason = f"{named} can be written by other accounts; run `{fix}`"
+            advice = opencode_custody_text(unsafe)
+            reason = f"{advice.named} {advice.why}; {advice.action}"
     if not repaired and not reason:
         reason = (
             "managed lifecycle did not reach verified readiness; run `defenseclaw-gateway start` to see why"

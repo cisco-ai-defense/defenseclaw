@@ -116,7 +116,7 @@ func hookAPIValidateDirectoryChainWith(clean string, agentDirectory bool) error 
 			return err
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			if cur == clean || (!hookAPITrustedDarwinRootAlias(cur) && !hookAPITrustedSystemSymlink(cur, info)) {
+			if hookAPISymlinkRefused(cur, clean, info) {
 				return fmt.Errorf("symlinks are not allowed: %s", cur)
 			}
 			targetInfo, err := os.Stat(cur)
@@ -142,6 +142,15 @@ func hookAPIValidateDirectoryChainWith(clean string, agentDirectory bool) error 
 		}
 	}
 	return nil
+}
+
+// hookAPISymlinkRefused is the walk's decision on a link in the folder chain
+// of clean: the named folder itself is never a link, and an ancestor may be one
+// only when it is a root-owned system link (a macOS root alias or a link inside
+// a root-owned private parent). The plugin-custody explainer asks this same
+// function so it never offers a permission fix for a link.
+func hookAPISymlinkRefused(cur, clean string, info os.FileInfo) bool {
+	return cur == clean || (!hookAPITrustedDarwinRootAlias(cur) && !hookAPITrustedSystemSymlink(cur, info))
 }
 
 func hookAPITrustedDarwinRootAlias(path string) bool {

@@ -16391,11 +16391,10 @@ def _preflight_opencode_plugin_folder() -> None:
     )
 
     if unsafe := opencode_unsafe_plugin_paths(connector_config_files("opencode")[:1]):
-        named, fix = opencode_custody_text(unsafe)
+        advice = opencode_custody_text(unsafe)
         kind = "folder" if os.path.isdir(unsafe[0]) else "file"
         raise click.ClickException(
-            f"OpenCode plugin {kind} {named} is group/other writable; "
-            f"run `{fix}` and retry setup. No changes made."
+            f"OpenCode plugin {kind} {advice.named} {advice.why}; {advice.action} and retry setup. No changes made."
         )
 
 
