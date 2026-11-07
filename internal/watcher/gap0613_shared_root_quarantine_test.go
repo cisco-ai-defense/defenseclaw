@@ -196,3 +196,109 @@ func TestGAP0613SharedRootDefaultDenyThatQuarantinesLeavesNoRuntimeDisable(t *te
 	}
 	requireRuntimeHold(t, w, false)
 }
+
+func requireJournalClear(t *testing.T, w *InstallWatcher) {
+	t.Helper()
+	for _, connector := range []string{"amp", "codex"} {
+		entry, err := w.store.GetActionForConnector("skill", "blocked-skill", connector)
+		if err != nil || (entry != nil && (entry.Actions.Install != "" || entry.Actions.Runtime != "")) {
+			t.Errorf("%s journal = %+v (err %v), want no install block and no runtime disable", connector, entry, err)
+		}
+	}
+}
+
+// GAP-0613 review 10: the runtime hold a denial left on the denying consumer
+// is lifted along with the owner row when the denial goes, whatever lifts it:
+// a global allow rule, an allow rule scoped to the denying connector, or a
+// default that no longer denies. The rescan notices it without a new copy.
+func TestGAP0613SharedRootPolicyHoldIsLiftedForEveryConnectorWhenTheDenialGoes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the quarantine store is made unwritable with a file")
+	}
+	for _, tc := range []struct {
+		name  string
+		relax func(cfg *config.Config)
+	}{
+		{"global allow rule", func(cfg *config.Config) {
+			cfg.AssetPolicy.Skill.Allowed = []config.AssetPolicyRule{{Name: "blocked-skill"}}
+		}},
+		{"allow rule scoped to the denying connector", func(cfg *config.Config) {
+			cfg.AssetPolicy.Skill.Allowed = []config.AssetPolicyRule{{Name: "blocked-skill", Connector: "codex"}}
+		}},
+		{"default no longer denies", func(cfg *config.Config) {
+			cfg.AssetPolicy.Connectors["codex"] = config.PerConnectorAssetPolicy{Skill: &config.PerConnectorAssetTypePolicy{Default: "allow"}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, cfg, evt := sharedRootDefaultDenyWatcher(t, false)
+			if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictBlocked {
+				t.Fatalf("admission = %+v, want blocked", res)
+			}
+			requireRuntimeHold(t, w, true)
+			if w.policyHoldReleases(evt) {
+				t.Fatal("the rescan would lift a hold while the default deny stands")
+			}
+			tc.relax(cfg)
+			if !w.policyHoldReleases(evt) {
+				t.Fatal("the rescan does not notice that no rule denies the held skill")
+			}
+			w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "skill-scanner"} }
+			if res := w.runAdmission(context.Background(), evt); res.Verdict == VerdictBlocked {
+				t.Fatalf("admission = %+v, want the skill admitted", res)
+			}
+			requireRuntimeHold(t, w, false)
+			requireJournalClear(t, w)
+			if w.policyHoldReleases(evt) {
+				t.Error("the rescan still sees a hold after it was lifted")
+			}
+		})
+	}
+}
+
+// A denied copy that an operator restored stays in its folder while the
+// owner install block stands. The connector whose default deny applies still
+// gets the runtime disable, which the hook enforces without
+// runtime_detection; before, no row was written for it and the copy stayed
+// callable.
+func TestGAP0613SharedRootDeniedRestoredCopyIsDisabledAtRuntimeForTheDenyingConnector(t *testing.T) {
+	w, _, evt := sharedRootDefaultDenyWatcher(t, true)
+	if err := w.store.SetActionFieldForConnector("skill", evt.Name, "amp", "install", "block", "blocked by an earlier scan"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.store.SetSourcePathForConnector("skill", evt.Name, "amp", evt.Path); err != nil {
+		t.Fatal(err)
+	}
+	if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictBlocked {
+		t.Fatalf("admission = %+v, want blocked", res)
+	}
+	if _, err := os.Lstat(evt.Path); err != nil {
+		t.Fatalf("the restored copy must stay in place: %v", err)
+	}
+	requireRuntimeHold(t, w, true)
+	entry, _ := w.store.GetActionForConnector("skill", evt.Name, "codex")
+	if entry == nil || entry.Actions.Install != "block" || entry.SourcePath != evt.Path || !strings.HasSuffix(entry.Reason, policyDenialMark) {
+		t.Errorf("codex journal = %+v, want install block, runtime disable and the source path", entry)
+	}
+	// The hold does not make the next admission quarantine the restored copy.
+	if !w.preserveRestoredBlockedAsset(evt) {
+		t.Error("the restored copy lost its restore exception")
+	}
+}
+
+// Benign twin: a block no asset policy denial wrote (a failed scan-verdict
+// quarantine) is not lifted merely because the policy does not deny the
+// skill.
+func TestGAP0613ScanVerdictBlockIsNotAPolicyHold(t *testing.T) {
+	w, _, evt := sharedRootDefaultDenyWatcher(t, true)
+	w.SetRootConsumers(nil)
+	w.journalFailedQuarantine(evt, "skill", os.ErrPermission)
+	if err := w.store.SetSourcePathForConnector("skill", evt.Name, "amp", evt.Path); err != nil {
+		t.Fatal(err)
+	}
+	if scopes := w.policyHeldScopes(evt); len(scopes) != 0 {
+		t.Errorf("policy holds = %v, want none for a scan-verdict block", scopes)
+	}
+	if w.policyHoldReleases(evt) {
+		t.Error("the rescan would lift a block that no policy denial wrote")
+	}
+}
