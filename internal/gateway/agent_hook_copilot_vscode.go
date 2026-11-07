@@ -63,21 +63,17 @@ func copilotCLIMixedLocalFields(payload map[string]interface{}) bool {
 	return false
 }
 
+// copilotSharedLocalFileCall marks a Local-dialect body delivered through the
+// per-user CLI document. The file-tool class is decided where the typed facts
+// are read (actionfacts.PathTool), so every accepted file operation, whatever
+// its tool name, has its resolved target judged like its lexical path.
 func copilotSharedLocalFileCall(ctx context.Context, req agentHookRequest) bool {
 	if req.ConnectorName != "copilot" {
 		return false
 	}
 	_, local := copilotargs.CLIHookLocalEvent(
 		copilotCLISharedEventFromContext(ctx), payloadString(req.Payload, "hook_event_name"))
-	if !local {
-		return false
-	}
-	switch copilotargs.LocalActionTool(req.ToolName) {
-	case "read_file", "create_file", "edit_file", "create", "edit":
-		return true
-	default:
-		return false
-	}
+	return local
 }
 
 func copilotHookDialectFromHeaders(header http.Header) string {
