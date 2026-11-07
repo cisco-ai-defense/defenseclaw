@@ -73,7 +73,7 @@ lists each):
 | Authorization ledger | `/var/lib/defenseclaw-hook-guardian`, with each user's latest AI Discovery scan in `ai-discovery/` | `root:defenseclaw`, `0750` |
 | Logs | `/var/log/defenseclaw`: empty unless a `jsonl` destination writes there. Services log to the journal ([Logs and events](/docs/enterprise/operations)) | `defenseclaw`, `0750` |
 | Hook socket | `/run/defenseclaw-hook/hook.sock` | Directory `defenseclaw`, `0755`. Socket `0666`: every user may connect, and the gateway authorizes each caller by uid |
-| Sandbox launcher | `/usr/bin/defenseclaw`, a link to `defenseclaw-gateway` that offers users only the `sandbox` commands | `root`, `0755` |
+| Sandbox launcher | `/usr/bin/defenseclaw`, a link to `defenseclaw-gateway` that offers users only the commands in [Managed command availability](/docs/enterprise/managed-commands) | `root`, `0755` |
 | Sandbox state | `/var/lib/defenseclaw/sandbox/`, and `/etc/defenseclaw/openshell/gateway.toml` when `enterprise.openshell` is set | `defenseclaw`, `0600` files; `root` |
 
 The gateway runs as the `defenseclaw` system account, created with
@@ -580,7 +580,7 @@ A `config.yaml` a per-user install left in `~/.defenseclaw` is not the policy th
 device enforces. An older per-user CLI on the user's `PATH` refuses per-user
 commands and exits `3`. The packaged managed `defenseclaw` launcher shows the
 account's own connectors with `status`, and offers sandbox and guardrail profile
-views. It refuses `doctor`, `alerts`, `tui` and per-user configuration commands
+views; the full list is in [Managed command availability](/docs/enterprise/managed-commands). It refuses `doctor`, `alerts`, `tui` and per-user configuration commands
 with exit `2`, naming the installed administrator status, verify and audit
 export commands.
 
