@@ -219,11 +219,21 @@ func projectSkillSourceFolders(root, name, source, home, cwd string) []string {
 		return nil
 	}
 	for _, entry := range entries {
-		if kind := entry.Type(); kind == 0 || kind == fs.ModeDir {
+		kind := entry.Type()
+		if kind == 0 {
 			continue
 		}
 		dir := filepath.Join(root, entry.Name())
-		resolved, err := filepath.EvalSymlinks(dir)
+		path := dir
+		if kind == fs.ModeDir {
+			// A plain folder can still hold a manifest that is a link to
+			// the source: the manifest is then the entry to resolve.
+			path = filepath.Join(dir, "SKILL.md")
+			if info, err := os.Lstat(path); err != nil || info.Mode().IsRegular() {
+				continue
+			}
+		}
+		resolved, err := filepath.EvalSymlinks(path)
 		if err == nil && projectSkillSourceSelects(home, resolved, resolvedSource) {
 			return []string{dir}
 		}
@@ -235,7 +245,7 @@ func projectSkillSourceFolders(root, name, source, home, cwd string) []string {
 // resolved project folder: the source is the folder, its manifest or a path
 // in it that no other skill folder owns. The nearest skill folder holding the
 // source, the project folder itself included, is its owner. When the caller
-// profile holds that owner privately, the source is that user skill's own
+// profile holds that owner privately, manifest included, the source is that user skill's own
 // selection, whichever way a project link reaches it, so the project folder
 // does not claim it. An owner another user can change, or one outside the
 // profile, still counts.
@@ -251,12 +261,25 @@ func projectSkillSourceSelects(home, folder, source string) bool {
 	}
 	for dir := source; ; dir = filepath.Dir(dir) {
 		if info, err := os.Stat(filepath.Join(dir, "SKILL.md")); err == nil && info.Mode().IsRegular() {
-			return !projectSkillPrivateFolder(home, dir)
+			return !projectSkillPrivateOwner(home, dir)
 		}
 		if parent := filepath.Dir(dir); projectSkillRootKey(dir) == projectSkillRootKey(folder) || parent == dir {
 			return true
 		}
 	}
+}
+
+// projectSkillPrivateOwner reports whether a skill folder is private to the
+// caller: the folder, and the final target of its manifest when that is a
+// link, both lie in the profile with nothing writable by another user on the
+// way. A manifest that leaves the profile makes the skill another user file,
+// whatever the folder holding the link is.
+func projectSkillPrivateOwner(home, dir string) bool {
+	if !projectSkillPrivateFolder(home, dir) {
+		return false
+	}
+	manifest, err := filepath.EvalSymlinks(filepath.Join(dir, "SKILL.md"))
+	return err == nil && projectSkillPrivateFolder(home, manifest)
 }
 
 // projectSkillPrivateFolder reports whether a resolved folder lies in the
