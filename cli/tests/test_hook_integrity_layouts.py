@@ -392,6 +392,11 @@ def test_managed_claude_guard_view_carries_closed_and_neutral_answers(monkeypatc
         words = hook_integrity._claude_managed_wrapper_words(guard, launcher, event)
         handler = {"command": "C:\\Windows\\System32\\cmd.exe", "args": words}
         assert words[-1] == unavailable_exit
+        # A missing guard gives the reason that names it and the repair command.
+        missing = " ".join(words[words.index("(") + 1:words.index(")")])
+        assert "defenseclaw-hook-guard.exe" in missing
+        assert "enterprise windows repair --profile standalone" in missing
+        assert missing.endswith(f"exit /b {unavailable_exit}")
         assert hook_integrity.claude_launcher_guard_view(handler) == {
             **handler,
             "command": launcher,

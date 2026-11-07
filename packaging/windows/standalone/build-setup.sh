@@ -118,6 +118,7 @@ PAYLOAD_FILES=(
     DefenseClawEnterprise.psm1
     defenseclaw-acp.exe
     defenseclaw-gateway.exe
+    defenseclaw-hook-guard.exe
     defenseclaw-hook.exe
     defenseclaw-scanners.exe
     defenseclaw-sensor-helper.exe
@@ -180,6 +181,7 @@ else
     build "${STAGE_DIR}/defenseclaw-gateway.exe" ./cmd/defenseclaw gateway console
     build "${STAGE_DIR}/defenseclaw-acp.exe" ./cmd/defenseclaw-acp acp-guard console
     build "${STAGE_DIR}/defenseclaw-hook.exe" ./cmd/defenseclaw-hook hook gui
+    build "${STAGE_DIR}/defenseclaw-hook-guard.exe" ./cmd/defenseclaw-hook-guard hook-guard gui
     build "${STAGE_DIR}/defenseclaw-sensor-helper.exe" ./cmd/defenseclaw-sensor-helper sensor-helper gui
     echo "==> building the scanner runtime"
     "${REPO_ROOT}/packaging/windows/standalone/build-scanner-runtime.sh" --out-dir "${STAGE_DIR}/scanner-runtime"

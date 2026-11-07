@@ -39,7 +39,7 @@ cannot change either tree.
 
 | Item | Path |
 | --- | --- |
-| Binaries | `C:\Program Files\Cisco\DefenseClaw\bin`: `defenseclaw.exe`, `defenseclaw-gateway.exe`, `defenseclaw-hook.exe`, `defenseclaw-acp.exe`, `defenseclaw-sensor-helper.exe` |
+| Binaries | `C:\Program Files\Cisco\DefenseClaw\bin`: `defenseclaw.exe`, `defenseclaw-gateway.exe`, `defenseclaw-hook.exe`, `defenseclaw-hook-guard.exe`, `defenseclaw-acp.exe`, `defenseclaw-sensor-helper.exe` |
 | Lifecycle scripts | `C:\Program Files\Cisco\DefenseClaw\libexec` |
 | Managed OpenCode plugin | `C:\Program Files\Cisco\DefenseClaw\share\opencode\defenseclaw.js`. Users hold read, execute and write-attributes on this one file because OpenCode opens every module with that right ([Managed OpenCode plugin](/docs/enterprise/machine-policy)) |
 | Config | `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml` |
@@ -1291,7 +1291,7 @@ do not satisfy WDAC or AppLocker rules that require a publisher signature.
 
 The lifecycle CLI can also run from a folder with the payload files
 (`defenseclaw.exe`, `defenseclaw-gateway.exe`, `defenseclaw-hook.exe`,
-`defenseclaw-acp.exe`, `defenseclaw-sensor-helper.exe`, `install-enterprise.ps1`,
+`defenseclaw-hook-guard.exe`, `defenseclaw-acp.exe`, `defenseclaw-sensor-helper.exe`, `install-enterprise.ps1`,
 `DefenseClawEnterprise.psm1`) for your own build or re-signing pipeline, with
 `ensure --profile standalone --config <path> --json`. Unsigned files need
 `--trust-mode hash_pinned --payload-manifest <file>`, a JSON file of the form
