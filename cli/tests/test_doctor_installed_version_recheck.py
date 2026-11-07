@@ -634,3 +634,103 @@ def test_the_doctor_command_closes_its_run_scope_when_it_ends() -> None:
 
     assert CliRunner().invoke(run).exit_code == 0
     assert not doctor_health._probe_run_scoped
+
+
+# ---- review 6 M1: an unreadable install never supplies protection -----------
+
+
+def test_kiro_unreadable_old_install_does_not_protect_a_below_floor_current_one() -> None:
+    # The old path is still listed but does not answer; the CLI launched now is
+    # positively below its floor. The recorded version of the old install is
+    # not evidence: no protected install, the lifecycle gate refuses.
+    old, new = _above(KIRO_CLI_HOOK_FLOOR), _below(KIRO_CLI_HOOK_FLOOR)
+    gate, row = _kiro_gate_and_row(
+        old,
+        (_K_NEW, _K_OLD),
+        {_K_NEW: (f"kiro-cli {new}", ""), _K_OLD: ("", agent_discovery.VERSION_PROBE_TIMED_OUT)},
+    )
+    assert gate.state == "manual"
+    assert row["status"] != "pass"
+    assert f"recorded={old}" not in row["detail"] and f"installed={old}" not in row["detail"]
+
+
+def test_kiro_unreadable_old_install_beside_a_supported_current_one_is_not_a_failure() -> None:
+    # Benign twin: the install launched now is protected; the one that cannot
+    # answer is reported as unread and does not block repair.
+    old = new = _above(KIRO_CLI_HOOK_FLOOR)
+    gate, row = _kiro_gate_and_row(
+        old,
+        (_K_NEW, _K_OLD),
+        {_K_NEW: (f"kiro-cli {new}", ""), _K_OLD: ("", agent_discovery.VERSION_PROBE_TIMED_OUT)},
+    )
+    assert gate.state != "manual"
+    assert row["status"] == "pass"
+    assert f"installed={new}" in row["detail"]
+
+
+def test_kiro_unreadable_install_is_recorded_unread_not_with_its_old_version() -> None:
+    old = _above(KIRO_CLI_HOOK_FLOOR)
+    check = _kiro_check(
+        old,
+        (_K_NEW, _K_OLD),
+        {_K_NEW: (f"kiro-cli {old}", ""), _K_OLD: ("", agent_discovery.VERSION_PROBE_TIMED_OUT)},
+    )
+    forms = {f["path"]: f for f in check.discovery.agents["kiro"].kiro_forms}
+    assert forms[_K_OLD]["version"] == "" and "could not be read" in forms[_K_OLD]["unread"]
+    assert forms[_K_NEW]["version"] == f"kiro-cli {old}"
+
+
+# ---- review 6 M2: the evidence is one per run --------------------------------
+
+
+def _two_reads_gate_and_row(first, second, answers, *, scoped: bool):
+    r = _DoctorResult()
+    probe = _by_path(answers)
+    if scoped:
+        doctor_health.begin_installed_version_run()
+    with (
+        mock.patch.object(agent_discovery, "_version_for_agent_binary", probe),
+        mock.patch.object(cmd_doctor, "_doctor_active_connectors", return_value=["codex"]),
+        mock.patch("defenseclaw.doctor_health.read_cached_discovery", side_effect=[first, second]),
+        mock.patch.object(cmd_doctor, "_doctor_component_evidence", return_value=()),
+        mock.patch.object(cmd_doctor, "_connector_enabled", return_value=True),
+        mock.patch.object(cmd_doctor, "_unverified_executable_note", return_value=("", "")),
+    ):
+        cfg = SimpleNamespace(data_dir="")
+        gate = cmd_doctor._plan_connector_compatibility_gate(cfg)
+        cmd_doctor._check_component_connector_compatibility(cfg, ["codex"], r)
+    row = next(c for c in r.checks if c["label"] == "Connector compatibility: codex")
+    return gate, row, probe
+
+
+def test_a_recorded_path_that_changes_mid_run_does_not_split_the_gate_from_the_row() -> None:
+    answers = {_OLD: ("codex-cli 0.160.0", ""), _NEW: ("codex-cli 0.100.0", "")}
+    gate, row, probe = _two_reads_gate_and_row(
+        _discovery(binary=_OLD), _discovery(binary=_NEW), answers, scoped=True
+    )
+    assert gate.state == "noop" and row["status"] == "pass"
+    assert "installed=0.160.0" in row["detail"]
+    assert [c.args[1] for c in probe.call_args_list] == [_OLD]
+
+
+def test_outside_a_run_the_evidence_is_read_again() -> None:
+    # Nothing shares evidence without a Doctor run (no clock-based sharing).
+    answers = {_OLD: ("codex-cli 0.160.0", ""), _NEW: ("codex-cli 0.100.0", "")}
+    reads = iter([_discovery(binary=_OLD), _discovery(binary=_NEW)])
+    with mock.patch("defenseclaw.doctor_health.read_cached_discovery", side_effect=lambda _d: next(reads)):
+        first = doctor_health.read_run_discovery("")
+        second = doctor_health.read_run_discovery("")
+    assert first.agents["codex"].binary_path == _OLD
+    assert second.agents["codex"].binary_path == _NEW
+    assert answers  # probes are not involved
+
+
+def test_the_run_evidence_is_read_again_after_the_attended_refresh() -> None:
+    reads = iter([_discovery(binary=_OLD), _discovery(binary=_NEW)])
+    doctor_health.begin_installed_version_run()
+    with mock.patch("defenseclaw.doctor_health.read_cached_discovery", side_effect=lambda _d: next(reads)):
+        first = doctor_health.read_run_discovery("")
+        assert doctor_health.read_run_discovery("") is first
+        doctor_health.reset_installed_version_probes()
+        second = doctor_health.read_run_discovery("")
+    assert second.agents["codex"].binary_path == _NEW
