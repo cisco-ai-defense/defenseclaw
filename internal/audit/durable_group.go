@@ -169,13 +169,20 @@ func attemptDurableBatch(ctx context.Context, s *Store, db *sql.DB, items []*gro
 // the one connection that all hook calls share, and that doubled the time a
 // batch held the write lock (rel-1-0-6 GAP-0490). The file is compared by
 // its identity (device and inode, os.SameFile); where it cannot be read, or
-// is a different file, the folder is flushed as before.
+// is a different file, the folder is flushed as before, and a missing file
+// clears what was covered (a SQLite WAL file stays while any connection of
+// the store is open, so a file that goes and comes back is seen missing).
 // auditDirSync is a test seam: the folder flush syncDurableDir makes.
 var auditDirSync = syncAuditDBDir
 
 func (s *Store) syncDurableDir() error {
 	wal, statErr := os.Stat(s.dbPath + "-wal")
 	if statErr != nil {
+		// No file to vouch for: forget the one covered before, so a file
+		// created later (which may reuse its inode) is flushed.
+		s.dirSyncMu.Lock()
+		s.dirSyncedWAL = nil
+		s.dirSyncMu.Unlock()
 		return auditDirSync(filepath.Dir(s.dbPath))
 	}
 	s.dirSyncMu.Lock()
