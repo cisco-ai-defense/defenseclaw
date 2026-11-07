@@ -579,8 +579,10 @@ def _real_ownership(tmp_path: Path, owner: str, current: str = "S-1-5-21-1-2-3-1
 def test_a_folder_of_another_account_stays_with_a_step_for_an_administrator(tmp_path: Path) -> None:
     found = _real_ownership(tmp_path, "S-1-5-18")
     assert found is not None
-    assert "belongs to another account (S-1-5-18)" in found.problem
-    assert found.problem_step.startswith("Ask an administrator, or the account that owns it (S-1-5-18), to remove ")
+    # Windows names the account too (NT AUTHORITY\SYSTEM, S-1-5-18); elsewhere the SID stands alone.
+    assert "belongs to another account (" in found.problem and "S-1-5-18)" in found.problem
+    assert found.problem_step.startswith("Ask an administrator, or the account that owns it (")
+    assert "S-1-5-18), to remove " in found.problem_step
     assert found.root in found.problem_step
     assert "close" not in found.problem_step.lower()
     _done, problems = legacy_setup_install.remove(found, edit_user_path=lambda _path: False)
