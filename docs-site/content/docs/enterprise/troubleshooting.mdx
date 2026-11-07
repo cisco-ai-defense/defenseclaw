@@ -204,7 +204,7 @@ These appear in `status` and `verify` on Linux when the sensor helper uses Tetra
 [Tetragon on a Linux fleet](/docs/enterprise/tetragon)). They are warnings: a problem with your
 Tetragon never fails `enterprise linux verify`, and `security_complete` does not depend on it.
 `enterprise linux tetragon verify`, the readiness check for a mode, does fail while Tetragon is
-down or refused. The managed `defenseclaw` command runs only `sandbox` commands, so run
+down or refused. The managed `defenseclaw` command runs only the commands in [Managed command availability](/docs/enterprise/managed-commands), so run
 `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify` first: it prints
 the failing check with the command that fixes it. On a per-user install, `defenseclaw doctor` has
 a **Kernel sensor (Tetragon)** row with two codes: `tetragon-tcp-api` (in brackets below) and
