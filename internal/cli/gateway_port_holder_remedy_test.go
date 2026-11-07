@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 
@@ -42,11 +43,41 @@ func TestGAP0706RootGatewayMessagesHaveSinglePunctuation(t *testing.T) {
 		if strings.Contains(message, "..") || strings.Contains(message, ".;") {
 			t.Errorf("%s message doubles punctuation: %q", name, message)
 		}
-		if !strings.Contains(message, "running as root") || !strings.Contains(message, "sudo env DEFENSECLAW_HOME=") {
+		if !strings.Contains(message, "running as root") || !namesRootGatewayRemedy(runtime.GOOS, message) {
 			t.Errorf("%s message lost the root reason or remedy: %q", name, message)
 		}
 	}
 	if problemClause("held by another process") != "held by another process" {
 		t.Fatal("a problem without a final period changed")
+	}
+}
+
+// namesRootGatewayRemedy reports whether text carries the remedy of the
+// given OS (GAP-0706, GAP-0746): macOS and Linux name the privileged
+// stop with the account's home (sudo env DEFENSECLAW_HOME=), Windows names
+// the administrator prompt and never sudo.
+func namesRootGatewayRemedy(goos, text string) bool {
+	if goos == "windows" {
+		return strings.Contains(text, "administrator prompt") && !strings.Contains(text, "sudo ")
+	}
+	return strings.Contains(text, "sudo env DEFENSECLAW_HOME=")
+}
+
+// GAP-0746: the root-gateway remedy check follows the OS. Each OS accepts its
+// own remedy only: the Unix sudo form is not a Windows remedy, and the
+// administrator prompt is not a macOS or Linux one.
+func TestGAP0746RootGatewayRemedyCheckFollowsTheOS(t *testing.T) {
+	const unix = "Stop it, return its files to your account and start it as yourself with: sudo env DEFENSECLAW_HOME='/h' '/bin/defenseclaw-gateway' stop && defenseclaw-gateway start"
+	const windows = "Stop it from an administrator prompt (defenseclaw-gateway stop), then start it as yourself (defenseclaw-gateway start)"
+	for _, tc := range []struct {
+		goos, text string
+		want       bool
+	}{
+		{"linux", unix, true}, {"darwin", unix, true}, {"windows", windows, true},
+		{"windows", unix, false}, {"linux", windows, false}, {"darwin", windows, false},
+	} {
+		if got := namesRootGatewayRemedy(tc.goos, tc.text); got != tc.want {
+			t.Errorf("%s remedy check on %q = %v, want %v", tc.goos, tc.text, got, tc.want)
+		}
 	}
 }
