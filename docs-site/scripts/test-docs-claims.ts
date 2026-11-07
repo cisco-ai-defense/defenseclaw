@@ -1374,17 +1374,37 @@ function commandSpans(sentence: string, table: LauncherCommands): Array<[number,
   return patterns.flatMap((pattern) => [...sentence.matchAll(pattern)].map((m): [number, number] => [m.index, m.index + m[0].length]));
 }
 
-// The words between a command and an availability cue: a cue states something
-// about the command only when it sits next to it, in the same clause.
+// How far a cue may sit from the command it states something about: in words,
+// inside one clause. A clause ends at ; or :, and a subordinate clause ("when
+// the write is blocked", "why a rule is denied") has its own subject, so a cue
+// in one says nothing of the command. A comma-set aside phrase right after the
+// command ("`defenseclaw doctor`, once the account is enrolled, is available")
+// is skipped: the command is still the subject of the cue after it.
 const cueDistance = 8;
+const subordinator = /\b(?:when|whenever|if|because|while|until|after|before|since|although|unless|where|which|that|why|how|whether|so)\b/i;
+
+function inSameClause(between: string): boolean {
+  const main = between.replace(/^`?\s*,[^,;:]*,/, " ");
+  return !/[;:]/.test(main) && !subordinator.test(main) && main.split(/\s+/).filter(Boolean).length <= cueDistance;
+}
 
 function cueBesideCommand(sentence: string, table: LauncherCommands): boolean {
   const spans = commandSpans(sentence, table);
   if (spans.length === 0) return false;
   const cues = [...sentence.matchAll(new RegExp(availabilityCue.source, 'gi'))].map((m): [number, number] => [m.index, m.index + m[0].length]);
+  // A command that is the subject of "runs": "`defenseclaw doctor` runs".
+  for (const [, ce] of spans) {
+    for (const m of sentence.slice(ce).matchAll(/\bruns\b/gi)) cues.push([ce + m.index, ce + m.index + m[0].length]);
+  }
+  // Managed Windows has no launcher: a user who runs a command of the table
+  // there is a claim about the launcher. On Linux and macOS "a standard user
+  // runs `defenseclaw status` to see ..." is ordinary guidance.
+  if (/\bWindows\b/i.test(sentence)) {
+    for (const m of sentence.matchAll(/\b(?:users?|accounts?|employees?|persons?)(?:\x27s)? (?:\w+ ){0,3}runs?\b/gi)) cues.push([m.index, m.index + m[0].length]);
+  }
   return spans.some(([cs, ce]) => cues.some(([us, ue]) => {
-    const between = us >= ce ? sentence.slice(ce, us) : cs >= ue ? sentence.slice(ue, cs) : '';
-    return !/[;:]/.test(between) && between.split(/\s+/).filter(Boolean).length <= cueDistance;
+    const between = us >= ce ? sentence.slice(ce, us) : cs >= ue ? sentence.slice(ue, cs) : null;
+    return between !== null && inSameClause(between);
   }));
 }
 
@@ -1504,7 +1524,12 @@ describe('what a managed user can and cannot run (GAP-0635)', () => {
       ["On managed Linux, `defenseclaw status` does not show up as an available command.", "show up is availability, not output"],
       ["On Intune Windows, `defenseclaw status` works for users.", "managed Windows named by Intune"],
       ["On MDM Windows computers, `defenseclaw status` works for standard users.", "managed Windows named by MDM"],
-      ["With Group Policy on Windows, `defenseclaw status` works for users.", "managed Windows named by Group Policy"],
+      ["With Group Policy on Windows, the user runs `defenseclaw status`.", "managed Windows named by Group Policy"],
+      ["With Group Policy on Windows, `defenseclaw status` works for users.", "managed Windows named by Group Policy, the command as the subject"],
+      ["On managed Linux, `defenseclaw doctor` runs.", "a command that runs, stated of a refused command"],
+      ["On managed Linux, `defenseclaw status` runs.", "a command that runs"],
+      ["On managed Linux, `defenseclaw doctor`, when invoked from the installed package for an enrolled enterprise account, runs.", "a set-aside phrase between the command and runs"],
+      ["On managed Linux, `defenseclaw doctor`, when invoked from the installed package for an enrolled enterprise account, is available.", "a set-aside phrase between the command and an availability word"],
       ["Under management on Windows, the standard user's `defenseclaw` runs `status`.", "managed Windows through the word management"],
       ["On managed Linux, users cannot run `status` because the gateway is reserved for administrators.", "an ownership sentence does not excuse a denial"],
       ["On a managed computer, none of the steps in this page work.", "a blanket claim that says the steps do not run"],
@@ -1526,6 +1551,9 @@ describe('what a managed user can and cannot run (GAP-0635)', () => {
       ["On managed Linux, `defenseclaw status` only shows the enrolled account's protections.", "output guidance names no availability"],
       ["On managed Linux, run `defenseclaw status` to see your own protections.", "an imperative that names a command"],
       ["On managed Windows, run `defenseclaw-gateway status` from an elevated Administrator prompt.", "the administrator's command on Windows"],
+      ["On managed Linux, `defenseclaw config set` prints a message when the write is blocked.", "a blocked write is the subject of a subordinate clause, not the command"],
+      ["On managed Linux, `defenseclaw config set` prints a message when the write is refused.", "a refused write is the subject of a subordinate clause, not the command"],
+      ["On managed Linux, `defenseclaw doctor` explains why a rule is blocked.", "a blocked rule is the subject of a subordinate clause, not the command"],
     ];
     for (const [text, why] of allowed) assert.equal(claims(text), 0, why);
   });
