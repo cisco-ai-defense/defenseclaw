@@ -86,7 +86,7 @@ func claudeChainGenerationName(name string) bool {
 		return false
 	}
 	for _, c := range name[len("chain-"):] {
-		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9') {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
 			return false
 		}
 	}
