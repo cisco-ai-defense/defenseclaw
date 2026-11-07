@@ -167,6 +167,38 @@ type runResult struct {
 // invoking user's diagnostic directory is home.
 func userLogHome(home string) func() string { return func() string { return home } }
 
+// hookHome is the temporary Home of a hook call. A hook leaves background
+// goroutines that open and append its failure logs; one of them can still
+// be creating a file when the test ends, and testing.T.TempDir fails the
+// test on a directory that is not empty at that moment (the removal races
+// with the file creation). The cleanup waits for those files instead: it
+// removes the tree again until it is gone, for at most hookHomeCleanupWait.
+// A tree that cannot be removed in that time still fails the test.
+func hookHome(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "dc-hook-home-")
+	if err != nil {
+		t.Fatalf("temporary home: %v", err)
+	}
+	t.Cleanup(func() {
+		deadline := time.Now().Add(hookHomeCleanupWait)
+		for {
+			err := os.RemoveAll(dir)
+			if _, statErr := os.Lstat(dir); err == nil && os.IsNotExist(statErr) {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("temporary home %s was not removable after %s: %v", dir, hookHomeCleanupWait, err)
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	})
+	return dir
+}
+
+const hookHomeCleanupWait = 10 * time.Second
+
 func run(t *testing.T, connector string, rt *stubRT, mutate func(*Options)) runResult {
 	return runWithContext(t, context.Background(), connector, rt, mutate)
 }
@@ -179,7 +211,7 @@ func runWithContext(
 	mutate func(*Options),
 ) runResult {
 	t.Helper()
-	home := t.TempDir()
+	home := hookHome(t)
 	hookDir := filepath.Join(home, "hooks")
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		t.Fatalf("mkdir hookDir: %v", err)
