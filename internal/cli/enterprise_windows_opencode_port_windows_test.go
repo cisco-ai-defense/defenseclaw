@@ -51,3 +51,15 @@ func TestManagedWindowsOpenCodeStatusNamesAccountAndHeldPort(t *testing.T) {
 		t.Fatalf("unavailable connector list warning: %+v", unavailable.Warnings)
 	}
 }
+
+// The clear hint is the renderer's PowerShell call of the installed gateway,
+// never a hand-built or a bare command.
+func TestManagedWindowsOpenCodePortClearHintIsARenderedPowerShellCall(t *testing.T) {
+	old := managedWindowsAdminCLI
+	managedWindowsAdminCLI = func() string { return `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe` }
+	t.Cleanup(func() { managedWindowsAdminCLI = old })
+	want := `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' enterprise windows opencode-port-clear 25002 --yes`
+	if got := windowsOpenCodePortClearCommand(25002); got != want {
+		t.Fatalf("clear hint = %q, want %q", got, want)
+	}
+}
