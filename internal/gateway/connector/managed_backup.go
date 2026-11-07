@@ -952,7 +952,7 @@ func RestoreManagedFileBackupsForRollback(
 			kept = append(kept, b.Path)
 			return nil
 		}
-		if managedFileSnapshotHash(b.PristineBytes, b.Existed) != b.PristineSHA256 {
+		if !managedBackupDigestMatches(b) {
 			return fmt.Errorf("restore %s: connector backup does not match its saved digest", b.Path)
 		}
 		ok, restoreErr := restoreManagedFileBackupIfUnchanged(savedDataDir, b.Connector, b.LogicalName, b.Path)
@@ -967,6 +967,28 @@ func RestoreManagedFileBackupsForRollback(
 		return nil
 	})
 	return restored, kept, err
+}
+
+func managedBackupDigestMatches(b managedFileBackup) bool {
+	return managedFileSnapshotHash(b.PristineBytes, b.Existed) == b.PristineSHA256
+}
+
+// VerifyManagedFileBackups reads every connector backup record in dataDir and
+// returns how many there are. A record that does not load, does not sit where
+// its connector and name put it, or does not match its saved digest is an
+// error, so a nil error with a positive count means the whole list is usable.
+// Rollback cleanup that has no config.yaml to go by needs that proof before it
+// removes anything.
+func VerifyManagedFileBackups(dataDir string) (int, error) {
+	count := 0
+	err := forEachManagedFileBackup(dataDir, func(b managedFileBackup) error {
+		count++
+		if !managedBackupDigestMatches(b) {
+			return fmt.Errorf("connector backup %s does not match its saved digest", b.Path)
+		}
+		return nil
+	})
+	return count, err
 }
 
 // ManagedFileBackupTargets lists the agent file each connector backup record
