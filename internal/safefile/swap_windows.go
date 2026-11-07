@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -24,11 +26,9 @@ import (
 // the one it expected: another writer changed it. The newer file is kept.
 var ErrSwapRaced = errors.New("safefile: the file changed concurrently")
 
-// ErrSwapUnsupported reports a volume without POSIX-semantics renames
-// (FileRenameInfoEx). There an ordinary rename replaces only a file nobody
-// has open, so the swap would have to release its hold on the compared file
-// first, and an in-place save landing then would be overwritten. The swap
-// refuses instead: the file at the path is left as it is (GAP-0897).
+// ErrSwapUnsupported reports that a volume without POSIX-semantics renames
+// cannot replace the file while the compared file is held. Releasing the
+// hold could overwrite a concurrent save, so the file is left in place.
 var ErrSwapUnsupported = errors.New("safefile: this volume has no POSIX-semantics rename, so a shared file cannot be replaced without losing a concurrent save; nothing was changed")
 
 // swapLockTimeout bounds how long a compare-and-swap waits for another
@@ -50,6 +50,19 @@ var swapBeforeReplace = func(string) {}
 // swapRenameReplace is renameReplace; tests replace it to stand for a volume
 // without POSIX renames.
 var swapRenameReplace = renameReplace
+
+// swapMoveFileReplace is the one-step replacement on volumes that reject
+// FileRenameInfoEx. Tests replace it to check the fallback while the compared
+// file remains held.
+var swapMoveFileReplace = moveFileReplace
+
+var swapMoveFileWarning sync.Once
+
+func warnSwapMoveFileFallback() {
+	swapMoveFileWarning.Do(func() {
+		log.Printf("defenseclaw: WARNING: this volume does not support POSIX file replacement; trying MoveFileEx while the compared file remains held")
+	})
+}
 
 // SwapExpectation is the file a compare-and-swap may replace: absent, or
 // present with exactly Data and, when Metadata is set, exactly that owner,
@@ -276,8 +289,8 @@ func holdMatchedFileForReplace(
 // It waits a short while for a reader that has destination open without
 // sharing deletion.
 //
-// beforeRename runs just before each rename attempt, while held still names
-// the file at destination.
+// beforeRename runs just before each publication attempt, while held still
+// names the file at destination.
 func replaceHeldFile(source, destination string, held *os.File, beforeRename func()) error {
 	deadline := time.Now().Add(swapLockTimeout)
 	for {
@@ -291,9 +304,22 @@ func replaceHeldFile(source, destination string, held *os.File, beforeRename fun
 				err = swapRaced(destination)
 			}
 			if err == nil {
-				beforeRename()
-				err = swapRenameReplace(source, destination, windows.FileRenameInfoEx,
-					fileRenameReplaceIfExists|fileRenamePOSIXSemantics|fileRenameIgnoreReadOnlyAttribute)
+				var flags uint32
+				flags, err = swapPOSIXRenameFlags(target)
+				if err == nil {
+					beforeRename()
+					err = swapRenameReplace(source, destination, windows.FileRenameInfoEx, flags)
+					if posixRenameUnsupported(err) || errors.Is(err, windows.ERROR_INVALID_FUNCTION) {
+						// Keep both holds while trying the other one-step API. If
+						// the volume cannot replace an open destination, refuse the
+						// swap instead of releasing the comparison and losing a save.
+						warnSwapMoveFileFallback()
+						err = swapMoveFileReplace(source, destination)
+						if swapBusy(err) {
+							err = fmt.Errorf("%w (%s: %v)", ErrSwapUnsupported, destination, err)
+						}
+					}
+				}
 			}
 			_ = target.Close()
 			if err == nil {
@@ -301,18 +327,24 @@ func replaceHeldFile(source, destination string, held *os.File, beforeRename fun
 			}
 		}
 		switch {
-		case errors.Is(err, windows.ERROR_INVALID_PARAMETER) ||
-			errors.Is(err, windows.ERROR_NOT_SUPPORTED) ||
-			errors.Is(err, windows.ERROR_INVALID_FUNCTION):
-			// A volume without POSIX renames replaces only a file nobody
-			// has open. Releasing the hold would let a writer save in place
-			// before the rename, which would then overwrite that save.
-			return fmt.Errorf("%w (%s: %v)", ErrSwapUnsupported, destination, err)
 		case !swapBusy(err) || !time.Now().Before(deadline):
 			return err
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+func swapPOSIXRenameFlags(target *os.File) (uint32, error) {
+	flags := uint32(fileRenameReplaceIfExists | fileRenamePOSIXSemantics)
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(windows.Handle(target.Fd()), &info); err != nil {
+		return 0, err
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_READONLY != 0 {
+		// Windows requires this flag to replace a read-only destination.
+		flags |= fileRenameIgnoreReadOnlyAttribute
+	}
+	return flags, nil
 }
 
 func swapBusy(err error) bool {
@@ -488,6 +520,14 @@ func deleteLockedFile(file *os.File) error {
 
 // moveFileNoReplace moves source to destination, which must not exist.
 func moveFileNoReplace(source, destination string) error {
+	return moveFileForSwap(source, destination, windows.MOVEFILE_WRITE_THROUGH)
+}
+
+func moveFileReplace(source, destination string) error {
+	return moveFileForSwap(source, destination, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+}
+
+func moveFileForSwap(source, destination string, flags uint32) error {
 	from, err := winpath.UTF16Ptr(source)
 	if err != nil {
 		return err
@@ -496,7 +536,7 @@ func moveFileNoReplace(source, destination string) error {
 	if err != nil {
 		return err
 	}
-	return windows.MoveFileEx(from, to, windows.MOVEFILE_WRITE_THROUGH)
+	return windows.MoveFileEx(from, to, flags)
 }
 
 func swapNameTaken(err error) bool {
