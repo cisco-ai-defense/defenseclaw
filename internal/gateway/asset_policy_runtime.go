@@ -221,7 +221,7 @@ func (a *APIServer) mcpUnpublishedSourceDecision(ctx context.Context, connectorN
 	}
 	server := claimedAssetFactsFromContext(ctx).MCP
 	home, serviceAccount := callerHomeForAssets(ctx)
-	if server == nil || !(server.Relocated || server.ProjectScope) || !serviceAccount || home == "" ||
+	if server == nil || (!server.Relocated && !server.ProjectScope) || !serviceAccount || home == "" ||
 		!config.SameMCPToolServer(connectorName, server.Name, probe.ServerName) {
 		return config.AssetPolicyDecision{}, false
 	}

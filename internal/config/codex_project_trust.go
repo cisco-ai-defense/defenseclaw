@@ -106,7 +106,7 @@ func (t codexProjectTrust) nearest(folder string) (codexProjectEntry, bool) {
 	var best codexProjectEntry
 	found := false
 	for _, entry := range t.entries {
-		if entry.path == "" || !(folder == entry.path || strings.HasPrefix(folder, strings.TrimSuffix(entry.path, "/")+"/")) {
+		if entry.path == "" || (folder != entry.path && !strings.HasPrefix(folder, strings.TrimSuffix(entry.path, "/")+"/")) {
 			continue
 		}
 		if !found || len(entry.path) > len(best.path) {
