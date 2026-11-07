@@ -87,7 +87,8 @@ func ManagedUserStateFile(rel string) bool {
 				return true
 			}
 		}
-		return managedHookScriptName(name)
+		_, err := fs.Stat(hookFS, "hooks/"+name)
+		return err == nil
 	case "logs":
 		return name == "hook-failures.jsonl" || name == "hook.log" || name == "hooks.log"
 	case "shims":
@@ -98,21 +99,6 @@ func ManagedUserStateFile(rel string) bool {
 		return name == nativeCodeGuardCodexReceiptName
 	case "foreign-hook-sessions":
 		return managedSessionRecordName(name)
-	}
-	return false
-}
-
-// managedHookScriptName reports a hook asset (hooks/*.sh, the plugins and the
-// helpers) and the PowerShell adapter written for a hook script on Windows:
-// the script name with .sh replaced by .ps1, as the hook command builders
-// derive it. Only a script that exists as an asset has an adapter.
-func managedHookScriptName(name string) bool {
-	if _, err := fs.Stat(hookFS, "hooks/"+name); err == nil {
-		return true
-	}
-	if stem, ok := strings.CutSuffix(name, ".ps1"); ok {
-		_, err := fs.Stat(hookFS, "hooks/"+stem+".sh")
-		return err == nil
 	}
 	return false
 }

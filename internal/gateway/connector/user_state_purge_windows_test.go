@@ -19,7 +19,7 @@ func TestPurgeUserStateInRootHandlesReadOnlyFiles(t *testing.T) {
 	if err := os.Mkdir(hooks, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	script, token := filepath.Join(hooks, "devin-hook.ps1"), filepath.Join(hooks, ".hook-devin.token")
+	script, token := filepath.Join(hooks, "cursor-hook.ps1"), filepath.Join(hooks, ".hook-devin.token")
 	for path, body := range map[string]string{script: hookMarker + "5\r\n", token: "secret"} {
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
