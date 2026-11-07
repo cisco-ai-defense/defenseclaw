@@ -65,12 +65,12 @@ try {
                 return $script:HookCommitCapable
             }
             function script:Invoke-DefenseClawCodexRequirementsCommand {
-                param($Layout, $GatewayServiceName, $Action)
+                param($Layout, $GatewayServiceName, $Action, [switch]$Teardown)
                 $script:HookCommitEvents.Add("codex:$Action")
                 return [pscustomobject]@{ ok = $true }
             }
             function script:Complete-DefenseClawCodexRequirementsRemoval {
-                param($Layout, $GatewayServiceName, $Report)
+                param($Layout, $GatewayServiceName, $Report, [switch]$Teardown)
             }
             function script:Get-DefenseClawDeploymentMetadata {
                 param($Layout, [switch]$Required)
