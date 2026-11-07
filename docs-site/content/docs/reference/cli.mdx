@@ -1185,7 +1185,7 @@ exit `0`. `config set` prints `This device is managed: change config.yaml in the
 `unblock` writers are refused with exit `3` too. These answers name the
 administrator's next command: `skill`, `mcp`, `plugin` and `tool` name
 `policy show`, `setup` names `enterprise windows status --profile standalone`,
-and `sandbox` (sandboxes do not run on Windows, exit `3`) names
+and `sandbox` (Windows has no sandboxes, exit `3`) names
 `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' enterprise windows sandbox list --user NAME`, each from
 an elevated PowerShell prompt. Its `guardrail` commands are
 refused with exit `3` like `config set` (`guardrail disable` prints `This device is managed: change config.yaml in the admin config (MDM or management plane); guardrail disable did not change it`).

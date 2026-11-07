@@ -578,11 +578,11 @@ Nothing migrates a per-user install. Before you deploy, have each user run
 
 A `config.yaml` a per-user install left in `~/.defenseclaw` is not the policy the
 device enforces. An older per-user CLI on the user's `PATH` refuses per-user
-commands and exits `3`. The packaged managed `defenseclaw` launcher shows the
-account's own connectors with `status`, and offers sandbox and guardrail profile
-views. It refuses `doctor`, `alerts`, `tui` and per-user configuration commands
-with exit `2`, naming the installed administrator status, verify and audit
-export commands.
+commands and exits `3`. On managed Linux and macOS, the packaged `defenseclaw` runs `sandbox` commands,
+`status`, `guardrail profile explain`, `help` and `--version`; every other command
+exits `2` with the managed message.
+`status` shows the account's own connectors, and the message names the installed
+administrator status, verify and audit export commands.
 
 A per-user gateway still running holds the managed port `127.0.0.1:18970` unless
 its user moved it. The install then stops before it changes anything with

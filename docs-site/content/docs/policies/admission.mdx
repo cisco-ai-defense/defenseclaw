@@ -859,7 +859,7 @@ writer refuses, and the attempt is recorded in the audit log:
 This device is managed: the asset_policy block and allow lists are set in the admin config (MDM or management plane)
 ```
 
-The CLI exits with code 3, and `defenseclaw config set` refuses with the
+The CLI exits with code 3, and `defenseclaw config set` prints the
 message `error: This device is managed: change config.yaml in the admin config
 (MDM or management plane), not on the device`, also exit 3. REST answers `403`
 with `{"error":"managed_device","detail":"policy changes are made in the
