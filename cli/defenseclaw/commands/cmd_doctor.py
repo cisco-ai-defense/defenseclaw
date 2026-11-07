@@ -11833,16 +11833,18 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
         if registered and (unguarded := _unguarded_tool_call_problem(cfg, connector, path)):
             _emit("fail", label, unguarded, r=r, remediation=unguarded.repair)
             return
-        if registered and (launcher := _hook_launcher_problem(cfg, connector)):
+        if registered:
             # Per-user Windows: a hook that names a launcher the agent cannot
             # start is blocked on every call, so the row cannot pass on the
-            # registration alone (rel-1-0-6 GAP-0810).
-            from defenseclaw.hook_integrity import repair_command
+            # registration alone. The launcher is looked at once and both the
+            # FAIL and the unverified WARN come from that result
+            # (rel-1-0-6 GAP-0810).
+            launcher, unverified = _hook_launcher_report(cfg, connector)
+            if launcher:
+                from defenseclaw.hook_integrity import repair_command
 
-            _emit("fail", label, launcher, r=r, remediation=repair_command(connector, launcher))
-            return
-        if registered:
-            unverified = _hook_launcher_unverified(cfg, connector)
+                _emit("fail", label, launcher, r=r, remediation=repair_command(connector, launcher))
+                return
             if connector == "cursor":
                 _check_cursor_configured_runtime(
                     cfg,
@@ -19033,25 +19035,15 @@ def _check_hook_contract_lock(
         _emit("warn", "Hook contract", detail, r=r)
 
 
-def _hook_launcher_problem(cfg, connector: str) -> str:
-    """The first launcher or guard problem of the registered hooks of ``connector``, or "" (GAP-0810)."""
-    from defenseclaw.hook_integrity import hook_launcher_problems
+def _hook_launcher_report(cfg, connector: str) -> tuple[str, str]:
+    """The first launcher or guard problem and the first unverified launcher of ``connector`` (GAP-0810)."""
+    from defenseclaw.hook_integrity import hook_launcher_report
 
     try:
-        problems = hook_launcher_problems(cfg, connector)
+        report = hook_launcher_report(cfg, connector)
     except Exception:  # noqa: BLE001 - the hook rows still report what they can read.
-        return ""
-    return problems[0] if problems else ""
-
-
-def _hook_launcher_unverified(cfg, connector: str) -> str:
-    """The registered launcher no installer digest vouches for, or "" (GAP-0810)."""
-    from defenseclaw.hook_integrity import hook_launcher_unverified
-
-    try:
-        return hook_launcher_unverified(cfg, connector)
-    except Exception:  # noqa: BLE001 - the hook rows still report what they can read.
-        return ""
+        return "", ""
+    return (report.problems[0] if report.problems else ""), report.unverified
 
 
 def _hook_runtime_file_problems(cfg, connector: str) -> list[str]:

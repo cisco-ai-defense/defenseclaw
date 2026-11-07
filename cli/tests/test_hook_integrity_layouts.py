@@ -198,7 +198,7 @@ def test_windows_launcher_registrations_are_registered(tmp_path, monkeypatch, co
     monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
     # The golden commands name launchers of another host; the launcher file
     # check has its own tests (test_hook_launcher_encoded_bridge.py).
-    monkeypatch.setattr(hook_integrity, "_launcher_defect", lambda launcher, data_dir="": "")
+    monkeypatch.setattr(hook_integrity, "_launcher_health", lambda launcher, data_dir="": hook_integrity.LauncherHealth())
     command = _LAYOUTS["windows_commands"][connector]
     assert "defenseclaw" not in command.lower()
     cfg, config = _install(tmp_path, connector, _windows_document(connector, command))

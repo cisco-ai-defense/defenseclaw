@@ -215,7 +215,7 @@ def test_the_launcher_with_the_recorded_digest_is_healthy_and_verified(tmp_path,
     _record_launcher_digest(cfg)
 
     assert hook_integrity.hook_launcher_problems(cfg, connector) == []
-    assert hook_integrity.hook_launcher_unverified(cfg, connector) == ""
+    assert hook_integrity.hook_launcher_report(cfg, connector).unverified == ""
 
 
 @pytest.mark.parametrize("connector", _CONNECTORS)
@@ -225,11 +225,11 @@ def test_a_launcher_with_no_recorded_digest_is_unverified_not_damaged(tmp_path, 
     cfg, _config = _register(tmp_path, connector, text)
 
     assert hook_registration_problems(cfg, connector) == []
-    assert hook_integrity.hook_launcher_unverified(cfg, connector) == (
+    assert hook_integrity.hook_launcher_report(cfg, connector).unverified == (
         f"the DefenseClaw hook launcher {text} is not verified: the installer recorded no copy of it to compare with"
     )
     _record_launcher_digest(cfg)
-    assert hook_integrity.hook_launcher_unverified(cfg, connector) == ""
+    assert hook_integrity.hook_launcher_report(cfg, connector).unverified == ""
 
 
 def test_a_digest_recorded_for_another_binary_is_no_record_for_the_launcher(tmp_path, windows_launcher):
@@ -240,60 +240,122 @@ def test_a_digest_recorded_for_another_binary_is_no_record_for_the_launcher(tmp_
     digest = hashlib.sha256(_BODY).hexdigest()
     (installer / "binaries.sha256").write_text(f"{digest}  defenseclaw-gateway.exe\n", encoding="utf-8")
 
-    assert hook_integrity.hook_launcher_unverified(cfg, "kiro") != ""
+    assert hook_integrity.hook_launcher_report(cfg, "kiro").unverified != ""
 
 
-_UNREADABLE = "is not verified: it cannot be read here to compare it with the installer record"
+_UNREADABLE = "cannot be read here, so it cannot be checked against the installer record"
 
 
-def _deny_access(monkeypatch, text: str, how: str) -> None:
-    """Make the launcher at *text* unreadable (Defender or a deny ACE holding it); nothing else changes."""
+class _LauncherSeam:
+    """Run *act* at the first look at the launcher (lstat or open), then let every later look through.
 
-    real_open, real_lstat = open, os.lstat
+    Stands for a launcher that Defender holds, or that is swapped, between two
+    looks. ``looks`` counts the looks of the chosen kind.
+    """
 
-    def guarded_open(path, *args, **kwargs):
-        if how == "read" and str(path) == text:
-            raise PermissionError("held")
-        return real_open(path, *args, **kwargs)
+    def __init__(self, monkeypatch, launcher: Path, text: str, how: str, act) -> None:
+        self.looks = 0
+        real_open, real_lstat = open, os.lstat
 
-    def guarded_lstat(path, *args, **kwargs):
-        if how == "stat" and str(path) == text:
-            raise PermissionError("held")
-        return real_lstat(path, *args, **kwargs)
+        def look(path) -> None:
+            if str(path) == text:
+                self.looks += 1
+                if self.looks == 1:
+                    act(launcher)
 
-    monkeypatch.setattr("builtins.open", guarded_open)
-    monkeypatch.setattr(os, "lstat", guarded_lstat)
+        def seamed_open(path, *args, **kwargs):
+            if how == "read":
+                look(path)
+            return real_open(path, *args, **kwargs)
+
+        def seamed_lstat(path, *args, **kwargs):
+            if how == "stat":
+                look(path)
+            return real_lstat(path, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", seamed_open)
+        monkeypatch.setattr(os, "lstat", seamed_lstat)
 
 
-@pytest.mark.parametrize("how", ["read", "stat"])
+def _held(_launcher: Path) -> None:
+    raise PermissionError("held")
+
+
+def _swapped_to_a_folder(launcher: Path) -> None:
+    launcher.unlink()
+    launcher.mkdir()
+
+
+def _swapped_to_another_program(launcher: Path) -> None:
+    launcher.write_bytes(b"another program")
+
+
+def _held_then_altered(launcher: Path) -> None:
+    launcher.write_bytes(b"another program")
+    raise PermissionError("held")
+
+
+# The first look finds a state that the next look would not: held, held and then
+# altered, swapped to a folder, swapped to other bytes. Each is a defect, never a pass.
+_FIRST_LOOKS = [
+    ("read", _held, _UNREADABLE),
+    ("stat", _held, _UNREADABLE),
+    ("read", _held_then_altered, _UNREADABLE),
+    ("stat", _held_then_altered, _UNREADABLE),
+    ("read", _swapped_to_a_folder, _UNREADABLE),
+    ("read", _swapped_to_another_program, _MISMATCH),
+]
+
+
+@pytest.mark.parametrize("how, act, defect", _FIRST_LOOKS)
 @pytest.mark.parametrize("connector", _CONNECTORS)
-def test_a_launcher_that_cannot_be_read_is_unverified_not_damaged_and_not_healthy(
-    tmp_path, windows_launcher, monkeypatch, connector, how
+def test_a_launcher_that_changes_between_looks_is_a_defect_in_status(
+    tmp_path, windows_launcher, monkeypatch, connector, how, act, defect
 ):
-    # Held by Defender or a deny ACE: not proof of damage, and no digest was computed,
-    # so it is not a match either. Doctor warns; status does not call it unprotected.
     launcher, text = windows_launcher
     cfg, _config = _register(tmp_path, connector, text)
     _record_launcher_digest(cfg)
-    _damage(launcher, "other-program")
-    _deny_access(monkeypatch, text, how)
+    seam = _LauncherSeam(monkeypatch, launcher, text, how, act)
 
-    assert hook_integrity._launcher_defect(text, cfg.data_dir) == ""
-    assert hook_registration_problems(cfg, connector) == []
-    assert hook_integrity.hook_launcher_unverified(cfg, connector) == f"the DefenseClaw hook launcher {text} {_UNREADABLE}"
+    problems = hook_registration_problems(cfg, connector)
+
+    assert problems == [f"the DefenseClaw hook launcher {text} {defect}, so every hook call fails"]
+    assert repair_command(connector, problems[0]) == LAUNCHER_REINSTALL_STEP
+    assert seam.looks == 1
 
 
-def test_doctor_warns_the_kiro_row_for_a_launcher_that_cannot_be_read(tmp_path, windows_launcher, monkeypatch):
+@pytest.mark.parametrize("how, act, defect", _FIRST_LOOKS)
+def test_doctor_fails_the_kiro_row_from_one_look_at_a_launcher_that_changes(
+    tmp_path, windows_launcher, monkeypatch, how, act, defect
+):
+    # One probe feeds the FAIL, the WARN and the PASS of the row: a launcher
+    # that is held, swapped or altered at the first look cannot read as healthy.
     launcher, text = windows_launcher
     cfg, _config = _register(tmp_path, "kiro", text)
     _record_launcher_digest(cfg)
-    _damage(launcher, "other-program")
-    _deny_access(monkeypatch, text, "read")
+    seam = _LauncherSeam(monkeypatch, launcher, text, how, act)
 
     row = _kiro_doctor_row(cfg, monkeypatch)
 
-    assert (row["label"], row["status"]) == ("Kiro hooks", "warn")
-    assert text in row["detail"] and "cannot be read here" in row["detail"]
+    assert (row["label"], row["status"]) == ("Kiro hooks", "fail")
+    assert text in row["detail"] and defect in row["detail"]
+    assert row["remediation"] == LAUNCHER_REINSTALL_STEP
+    assert seam.looks == 1
+
+
+@pytest.mark.parametrize("how", ["read", "stat"])
+def test_a_launcher_that_cannot_be_read_is_a_defect_even_when_its_bytes_are_the_recorded_ones(
+    tmp_path, windows_launcher, monkeypatch, how
+):
+    launcher, text = windows_launcher
+    cfg, _config = _register(tmp_path, "kiro", text)
+    _record_launcher_digest(cfg)
+    _LauncherSeam(monkeypatch, launcher, text, how, _held)
+
+    row = _kiro_doctor_row(cfg, monkeypatch)
+
+    assert (row["label"], row["status"]) == ("Kiro hooks", "fail")
+    assert text in row["detail"] and _UNREADABLE in row["detail"]
 
 
 @pytest.mark.parametrize("tag", [0xA000000C, 0xA0000003])
@@ -302,7 +364,7 @@ def test_a_windows_symlink_or_junction_reparse_point_is_a_link(monkeypatch, kind
     info = SimpleNamespace(st_mode=kind | 0o644, st_file_attributes=0x400, st_reparse_tag=tag)
     monkeypatch.setattr(os, "lstat", lambda _path: info)
 
-    assert hook_integrity._launcher_defect("C:/x/defenseclaw-hook.exe", "") == _LINK
+    assert hook_integrity._launcher_health("C:/x/defenseclaw-hook.exe", "").defect == _LINK
 
 
 def _reparse_tagged(monkeypatch, text: str, tag: int) -> None:
@@ -330,7 +392,7 @@ def test_a_regular_launcher_with_a_non_link_reparse_tag_is_judged_by_its_digest(
     _reparse_tagged(monkeypatch, text, tag)
 
     assert hook_registration_problems(cfg, "kiro") == []
-    assert hook_integrity.hook_launcher_unverified(cfg, "kiro") == ""
+    assert hook_integrity.hook_launcher_report(cfg, "kiro").unverified == ""
     assert _kiro_doctor_row(cfg, monkeypatch)["status"] == "pass"
 
     _damage(launcher, "other-program")
@@ -346,7 +408,7 @@ def test_managed_install_keeps_its_own_status(tmp_path, windows_launcher):
     cfg.deployment_mode = "managed_enterprise"
 
     assert hook_integrity.hook_launcher_problems(cfg, "kiro") == []
-    assert hook_integrity.hook_launcher_unverified(cfg, "kiro") == ""
+    assert hook_integrity.hook_launcher_report(cfg, "kiro").unverified == ""
 
 
 def _kiro_doctor_row(cfg, monkeypatch):
@@ -450,7 +512,7 @@ def test_a_large_launcher_with_no_recorded_digest_is_unverified_not_read(tmp_pat
     launcher.write_bytes(bytes(8192))
 
     assert hook_integrity.hook_launcher_problems(cfg, "kiro") == []
-    assert hook_integrity.hook_launcher_unverified(cfg, "kiro") != ""
+    assert hook_integrity.hook_launcher_report(cfg, "kiro").unverified != ""
 
 
 def test_a_hook_guard_too_large_to_hash_is_not_the_recorded_copy(tmp_path, monkeypatch):
