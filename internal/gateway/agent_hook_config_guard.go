@@ -1035,6 +1035,10 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 		// disablement of this call's hooks.
 		parts := agentHookConfigPlacedCommands(managedRaw, request.Input.CWD, request.Input.ActiveHome, 0)
 		for _, part := range parts {
+			if len(parts) > 1 && part.Command == managedRaw &&
+				(strings.Contains(managedRaw, "cd ") || strings.Contains(managedRaw, "pushd ")) {
+				continue
+			}
 			guard := newAgentHookConfigGuard(part.Dir, request.Input.ActiveHome)
 			if hookpaths.RegistrationWriteCandidate(part.Command) {
 				registered := agentHookConfigRegistrationPaths(guard)
@@ -1046,10 +1050,6 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 						add(agentHookConfigDisableRuleID, "changes a registered DefenseClaw hook file", path)
 					}
 				}
-			}
-			if len(parts) > 1 && part.Command == managedRaw &&
-				(strings.Contains(managedRaw, "cd ") || strings.Contains(managedRaw, "pushd ")) {
-				continue
 			}
 			facts := []actionfacts.Facts{actionfacts.Analyze(actionfacts.Input{
 				Tool: "Bash", Command: part.Command, CWD: part.Dir, ActiveHome: request.Input.ActiveHome,
@@ -1116,6 +1116,10 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 	rawCommand := agentHookConfigRawShellCommand(request.Input)
 	parts := agentHookConfigPlacedCommands(rawCommand, guard.cwd, guard.home, 0)
 	for _, part := range parts {
+		if len(parts) > 1 && part.Command == rawCommand &&
+			(strings.Contains(rawCommand, "cd ") || strings.Contains(rawCommand, "pushd ")) {
+			continue
+		}
 		partGuard := guard
 		if part.Dir != guard.cwd {
 			partGuard = newAgentHookConfigGuard(part.Dir, guard.home)
@@ -1142,10 +1146,6 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 			if folder := hookpaths.RegistrationArchivePossibleReach(part.Command, part.Dir, guard.home, registered); folder != "" {
 				add(agentHookConfigWriteRuleID, "archive may replace a registered hook file", folder)
 			}
-		}
-		if len(parts) > 1 && part.Command == rawCommand &&
-			(strings.Contains(rawCommand, "cd ") || strings.Contains(rawCommand, "pushd ")) {
-			continue
 		}
 		facts := []actionfacts.Facts{actionfacts.Analyze(actionfacts.Input{
 			Tool: "Bash", Command: part.Command, CWD: part.Dir, ActiveHome: guard.home,
@@ -1312,7 +1312,10 @@ func agentHookConfigGitGlobalSubcommand(argv []string, guard *agentHookConfigGua
 					break
 				}
 			}
-			return index, root
+			// Without a repository there is no tracked registration file for
+			// this Git call to rewrite. A worktree supplied explicitly above
+			// remains eligible even when it is outside the hook directory.
+			return -1, ""
 		}
 	}
 	return -1, ""

@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -240,6 +241,11 @@ func RegistrationArchivePossibleReach(command, cwd, home string, names []string)
 		}
 		for _, dest := range ArchiveExtractionDestinations(program, args) {
 			folder := OperandPath(dest, cwd)
+			// A generic ancestor such as /tmp is not a registered hook
+			// folder merely because a test home happens to live below it.
+			if !slices.Contains(names, folder) {
+				continue
+			}
 			for _, name := range names {
 				if name != folder && strings.HasPrefix(name, folder+string(filepath.Separator)) {
 					found = folder
