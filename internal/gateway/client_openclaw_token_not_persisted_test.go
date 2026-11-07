@@ -302,3 +302,58 @@ func TestTokenRejectionWithoutPersistedTokenDoesNotAssumeARuntimeToken(t *testin
 		}
 	}
 }
+
+// A JSON5 line comment ends at any line terminator, including U+2028 and
+// U+2029, and a bare key may spell a letter as a Unicode escape. Neither may
+// hide the token (or its absence) from the reader.
+func TestOpenClawTokenReaderFollowsJSON5LineTerminatorsAndEscapedKeys(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body      string
+		wantToken string
+	}{
+		"U+2028 ends a comment, token after it":    {"{gateway:{auth:{mode:'token',// c\u2028token:'persisted-token'}}}", "persisted-token"},
+		"U+2029 ends a comment, token after it":    {"{gateway:{auth:{mode:'token',// c\u2029token:'persisted-token'}}}", "persisted-token"},
+		"escaped letter in a parent key":           {"{g\\u0061teway:{auth:{token:'persisted-token'}}}", "persisted-token"},
+		"escaped letter in the token key":          {"{gateway:{auth:{t\\u006fken:'persisted-token'}}}", "persisted-token"},
+		"escaped first letter, upper-case hex":     {"{\\u0067ateway:{auth:{\\u0074oken:'persisted-token'}}}", "persisted-token"},
+		"U+2028 ends a comment, no token":          {"{gateway:{auth:{mode:'token',// c\u2028}}}", ""},
+		"U+2029 ends a comment, no token":          {"{gateway:{auth:{mode:'token',// c\u2029}}}", ""},
+		"escaped key, no token":                    {"{g\\u0061teway:{auth:{mode:'token'}}}", ""},
+		"comment text that looks like a token key": {"{gateway:{auth:{mode:'token',// token:'x'\n}}}", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			writeOpenClawJSON(t, home, tc.body)
+			token, ok, err := readOpenClawGatewayToken(home)
+			if tc.wantToken != "" {
+				if err != nil || !ok || token != tc.wantToken {
+					t.Fatalf("token=%q ok=%v err=%v, want %q adopted", token, ok, err, tc.wantToken)
+				}
+				return
+			}
+			if ok || !errors.Is(err, errOpenClawTokenNotPersisted) {
+				t.Fatalf("token=%q ok=%v err=%v, want the not-persisted signal", token, ok, err)
+			}
+		})
+	}
+}
+
+// Text that OpenClaw cannot parse is "could not read", never the prefix of it
+// taken as the effective config.
+func TestOpenClawTokenReaderDoesNotAdoptATokenFromMalformedJSON5(t *testing.T) {
+	for name, body := range map[string]string{
+		"unterminated block comment after the object": "{gateway:{auth:{token:'new-token'}}}/*",
+		"unterminated block comment inside":           "{gateway:{auth:{token:'new-token'}} /* open",
+		"escaped key with a short escape":             "{gateway:{auth:{t\\u006oken:'new-token'}}}",
+		"escape that is not an identifier character":  "{gateway:{auth:{t\\u0020oken:'new-token'}}}",
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			writeOpenClawJSON(t, home, body)
+			token, ok, err := readOpenClawGatewayToken(home)
+			if ok || err != nil || token != "" {
+				t.Fatalf("token=%q ok=%v err=%v, want an unreadable file", token, ok, err)
+			}
+		})
+	}
+}
