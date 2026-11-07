@@ -119,3 +119,58 @@ func TestSecureClientCodexMachinePolicyDoesNotWaitForAHeldRequirements(t *testin
 		t.Fatalf("the held requirements changed: %v", readErr)
 	}
 }
+
+// g582 round 11b (GAP-0764, GAP-0765) are standalone only. A Secure Client
+// transaction writes the state at its fixed name in place every time it is
+// asked to, even with the bytes it already holds (base behavior: no copy, no
+// counter, no writer lock), and a fixed-name state a process holds open fails
+// the plain way, with no named holder and no wait.
+func TestSecureClientCodexStateStaysDirectForTheRound11bRules(t *testing.T) {
+	row := windowsCodexRemovalRowsForTest[0]
+	opts := newWindowsCodexMachineGuardFixtureForTest(t, row.requirements)
+	opts.SecureClient = true
+	dir := filepath.Dir(opts.RequirementsPath)
+	if report, err := ReconcileWindowsCodexMachineRequirements(opts); err != nil || !report.OK {
+		t.Fatalf("Secure Client reconcile: %+v, %v", report, err)
+	}
+	same, err := os.ReadFile(opts.ManagedStatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(opts.ManagedStatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := withWindowsCodexMachineMutation(opts, func() error {
+		return writeWindowsCodexManagedState(opts.ManagedStatePath, same)
+	}); err != nil {
+		t.Fatalf("Secure Client write of the same bytes: %v", err)
+	}
+	after, err := os.Stat(opts.ManagedStatePath)
+	if err != nil || os.SameFile(before, after) {
+		t.Fatalf("Secure Client did not write the state in place again (err %v): the same-bytes rule must not reach it", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if windowsCodexManagedStateCopyName(entry.Name()) || entry.Name() == WindowsCodexManagedWriterLockFile {
+			t.Fatalf("Secure Client created %s", entry.Name())
+		}
+	}
+
+	held := holdWindowsCodexFileForTest(t, opts.ManagedStatePath, 0)
+	defer windows.CloseHandle(held)
+	previousSleep := windowsCodexHeldRetrySleep
+	t.Cleanup(func() { windowsCodexHeldRetrySleep = previousSleep })
+	windowsCodexHeldRetrySleep = func(time.Duration) { t.Error("a Secure Client transaction waited for the held state file") }
+	err = withWindowsCodexMachineMutation(opts, func() error {
+		_, readErr := readWindowsCodexManagedState(opts.ManagedStatePath, false)
+		return readErr
+	})
+	var heldErr *WindowsCodexRequirementsHeldError
+	if err == nil || errors.As(err, &heldErr) {
+		t.Fatalf("held state file: err = %v; want the plain failure of 1.0.8, no named holder", err)
+	}
+}
