@@ -262,3 +262,8 @@ func hookAPIValidatePluginFilePermissions(path string, info os.FileInfo) error {
 func hookAPIValidateDirectoryFor(path, _ string) error {
 	return hookAPIValidateAgentDirectory(path)
 }
+
+// mkdirHookAPITokenDir creates the hooks directory private to its owner.
+func mkdirHookAPITokenDir(hooksDir string) error {
+	return os.Mkdir(hooksDir, 0o700)
+}

@@ -185,10 +185,10 @@ func canonicalize(path string, kind ObjectKind, opts CanonicalOptions, repair bo
 		reportUntrustedOwnerTransfer(clean, kind, desc.Owner, opts)
 	}
 	spec := canonicalSpecFor(kind, gatewaySID)
-	if gatewaySID == "" && spec.GatewayNeedsAccess && kind != ObjectConfigFile && kind != ObjectConfigDirectory {
+	if canonicalIdentityMissing(kind, spec, gatewaySID) {
 		// Every runtime form names the gateway service; stamping without it
 		// would lock the gateway out.
-		result.RepairError = "gateway service identity is unavailable"
+		result.RepairError = ErrCanonicalIdentityUnavailable.Error()
 		reportCanonicalResult(result, opts)
 		return result, nil
 	}
@@ -235,6 +235,67 @@ func canonicalize(path string, kind ObjectKind, opts CanonicalOptions, repair bo
 	}
 	reportCanonicalResult(result, opts)
 	return result, nil
+}
+
+// ErrCanonicalIdentityUnavailable reports that the gateway service identity
+// kind names could not be resolved, so no descriptor is stamped or created.
+var ErrCanonicalIdentityUnavailable = errors.New("gateway service identity is unavailable")
+
+// canonicalIdentityMissing reports whether spec names the gateway service but
+// its SID could not be resolved. Config objects only need it to read.
+func canonicalIdentityMissing(kind ObjectKind, spec canonicalSpec, gatewaySID string) bool {
+	return gatewaySID == "" && spec.GatewayNeedsAccess && kind != ObjectConfigFile && kind != ObjectConfigDirectory
+}
+
+// CreateCanonicalDirectory creates path as a new directory that carries kind
+// canonical protected descriptor from its first instant: the same owner,
+// group and explicit protected DACL EnsureCanonical stamps, built from the
+// same spec. A directory made with a plain mkdir inherits its parent entries
+// unprotected, which the Guardian then logs as drift on its next pass, so
+// every DefenseClaw-created managed directory is created through this.
+// ErrCanonicalIdentityUnavailable is returned, and nothing is created, when
+// the gateway service SID cannot be resolved. An existing path fails like
+// os.Mkdir (errors.Is os.ErrExist); the parent must exist.
+func CreateCanonicalDirectory(path string, kind ObjectKind, opts CanonicalOptions) error {
+	if !kind.valid() || !kind.Directory() {
+		return fmt.Errorf("managed object kind %q is not a directory kind", kind)
+	}
+	gatewaySID := ""
+	if sid, err := windowsVirtualServiceSID(canonicalGatewayAccount(opts)); err == nil && sid != nil {
+		gatewaySID = sid.String()
+	}
+	spec := canonicalSpecFor(kind, gatewaySID)
+	if canonicalIdentityMissing(kind, spec, gatewaySID) {
+		return ErrCanonicalIdentityUnavailable
+	}
+	pointer, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return err
+	}
+	sddl := spec.canonicalSDDL()
+	attributes, err := setupSecurityAttributes(sddl)
+	if err != nil {
+		return err
+	}
+	err = windows.CreateDirectory(pointer, attributes)
+	if !errors.Is(err, windows.ERROR_INVALID_OWNER) {
+		return err
+	}
+	// The token cannot assign the canonical owner at creation: create with
+	// the default owner and the same protected DACL, then take the owner
+	// through the shared repair. A refused owner leaves trusted owner drift
+	// for the Guardian, never an unprotected directory.
+	attributes, err = setupSecurityAttributes(strings.TrimPrefix(sddl, "O:"+spec.Forms[0].Owner))
+	if err != nil {
+		return err
+	}
+	if err := windows.CreateDirectory(pointer, attributes); err != nil {
+		return err
+	}
+	quiet := opts
+	quiet.Quiet = true
+	_, _ = canonicalize(path, kind, quiet, !WindowsCurrentProcessIsGatewayService())
+	return nil
 }
 
 // reportUntrustedOwnerTransfer logs, as a MarkerBoundary finding, that a
