@@ -3969,12 +3969,9 @@ func watcherConnectors(reg *connector.Registry, cfg *config.Config) []connector.
 // connector that lists it for events and every connector that loads it for
 // root coverage. Explicit gateway.watcher dirs apply once and keep the
 // primary connector for events, but they replace every connector's own
-// folders, so every configured connector is a consumer of each of them.
+// folders, so every configured connector is a consumer of each of them. With
+// no active connector the standalone machine policy's connectors still are.
 func resolveWatcherDirsForConnectors(cfg *config.Config, conns []connector.Connector, wcfg config.GatewayWatcherConfig) (skillDirs, pluginDirs []string, roots map[string]string, src watcherDirSources, consumers []watcher.RootConsumer) {
-	if len(conns) == 0 {
-		skillDirs, pluginDirs, src = resolveWatcherDirs(cfg, nil, wcfg)
-		return skillDirs, pluginDirs, nil, src, nil
-	}
 	roots = map[string]string{}
 	seenSkill, seenPlugin := map[string]bool{}, map[string]bool{}
 	add := func(out *[]string, seen map[string]bool, dirs []string, kind, owner string, tag bool) {
@@ -3993,6 +3990,9 @@ func resolveWatcherDirsForConnectors(cfg *config.Config, conns []connector.Conne
 				roots[dir] = owner
 			}
 		}
+	}
+	if len(conns) == 0 {
+		skillDirs, pluginDirs, src = resolveWatcherDirs(cfg, nil, wcfg)
 	}
 	for i, conn := range conns {
 		skills, plugins, connSrc := resolveWatcherDirs(cfg, conn, wcfg)
@@ -4015,15 +4015,23 @@ func resolveWatcherDirsForConnectors(cfg *config.Config, conns []connector.Conne
 			continue
 		}
 		have[name] = true
-		if src.Skill == watcherDirsFromConfig {
-			for _, dir := range skillDirs {
-				consumers = append(consumers, watcher.RootConsumer{Kind: "skill", Path: dir, Connector: name})
+		explicit := func(kind string, dirs []string) {
+			for _, dir := range dirs {
+				consumers = append(consumers, watcher.RootConsumer{Kind: kind, Path: dir, Connector: name})
+				// With no active connector the first protected one (the
+				// roster is sorted) owns the explicit folders' events, as the
+				// primary connector does otherwise; without an owner its
+				// connector-scoped asset rules never apply there.
+				if len(conns) == 0 && roots[dir] == "" {
+					roots[dir] = name
+				}
 			}
 		}
+		if src.Skill == watcherDirsFromConfig {
+			explicit("skill", skillDirs)
+		}
 		if src.Plugin == watcherDirsFromConfig {
-			for _, dir := range pluginDirs {
-				consumers = append(consumers, watcher.RootConsumer{Kind: "plugin", Path: dir, Connector: name})
-			}
+			explicit("plugin", pluginDirs)
 		}
 	}
 	return skillDirs, pluginDirs, roots, src, consumers
@@ -4502,7 +4510,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		w.SetMCPDiscoveryPoll(true)
 	} else {
 		w.SetRootConsumers(consumers)
-		if len(conns) > 1 || len(projectRoots) > 0 {
+		if len(conns) != 1 || len(projectRoots) > 0 {
 			// Each folder belongs to the connector that lists it, so its
 			// events, rule pack and enforcement are that connector's
 			// (GAP-0392).
