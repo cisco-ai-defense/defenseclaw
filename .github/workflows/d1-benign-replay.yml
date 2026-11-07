@@ -33,6 +33,7 @@ jobs:
           DC_D1_CORPUS: ${{ vars.D1_CORPUS_PATH }}
           DC_D1_BASELINE: ${{ vars.D1_BASELINE_PATH }}
           DC_D1_OUTPUT: ${{ runner.temp }}/d1-head.tsv
+          DC_D1_RATIFIED: ${{ vars.D1_RATIFIED_PATH }}
           DC_D1_SHARD_INDEX: ${{ matrix.shard }}
           DC_D1_SHARD_COUNT: 16
           GOMAXPROCS: 8
@@ -40,7 +41,17 @@ jobs:
           set -euo pipefail
           test -d "$DC_D1_CORPUS"
           test -f "$DC_D1_BASELINE"
-          GOTOOLCHAIN=go1.26.4 nice -n 15 go test -p 4 -tags d1corpus -count=1 -timeout 14m \
-            -run '^TestD1BenignReplay$' ./internal/gateway
-          python3 scripts/d1diff.py "$DC_D1_BASELINE" "$DC_D1_OUTPUT" \
+          # The replay records every cell, including a row that never returns
+          # (it stops cleanly and the next run resumes), and exits 0. d1diff is
+          # the one gate: it fails on any new allow/alert-to-refusal change and
+          # on any error or timeout cell unless the owner listed that exact
+          # row and cell (row<TAB>cell lines) in the file D1_RATIFIED_PATH names.
+          python3 scripts/d1_replay_run.py -- env GOTOOLCHAIN=go1.26.4 nice -n 15 \
+            go test -p 4 -tags d1corpus -count=1 -timeout 14m -run '^TestD1BenignReplay$' ./internal/gateway
+          ratified=()
+          if [ -n "${DC_D1_RATIFIED:-}" ]; then
+            test -f "$DC_D1_RATIFIED"
+            ratified=(--ratified "$DC_D1_RATIFIED")
+          fi
+          python3 scripts/d1diff.py "$DC_D1_BASELINE" "$DC_D1_OUTPUT" "${ratified[@]}" \
             --shard-index "$DC_D1_SHARD_INDEX" --shard-count "$DC_D1_SHARD_COUNT"

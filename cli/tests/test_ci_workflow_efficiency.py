@@ -208,6 +208,21 @@ def test_gap0607_private_replay_tracks_labeled_pr_pushes() -> None:
     assert "github.event.pull_request.head.repo.full_name == github.repository" in condition
 
 
+def test_gap0607_private_replay_reaches_its_strict_comparison() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/d1-benign-replay.yml").read_text(encoding="utf-8"))
+    step = next(s for s in workflow["jobs"]["replay"]["steps"] if "d1diff.py" in s.get("run", ""))
+    script = step["run"]
+    # The replay runs through the resuming driver, so a row that never returns
+    # does not end the run before d1diff, and d1diff is the one gate.
+    assert "python3 scripts/d1_replay_run.py --" in script
+    assert script.index("scripts/d1_replay_run.py") < script.index("scripts/d1diff.py")
+    assert "-run '^TestD1BenignReplay$'" in script
+    # The owner's ratified cells reach d1diff through a runner file.
+    assert step["env"]["DC_D1_RATIFIED"] == "${{ vars.D1_RATIFIED_PATH }}"
+    assert '--ratified "$DC_D1_RATIFIED"' in script
+    assert "DC_D1_TIMEOUT_ROWS" not in script
+
+
 def test_release_validates_reviewed_macos_pin_without_freshness_block() -> None:
     workflow = (ROOT / ".github/workflows/release.yaml").read_text(encoding="utf-8")
 
