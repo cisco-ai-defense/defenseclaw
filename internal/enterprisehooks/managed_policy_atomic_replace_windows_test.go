@@ -102,10 +102,7 @@ func TestWindowsManagedPolicyWriterKeepsMatchingContentWithSharedDeleteHandle(t 
 	if err := writeWindowsManagedFile(path, initial, true); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	before := managedPolicyTestFileID(t, path)
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		t.Fatal(err)
@@ -120,13 +117,34 @@ func TestWindowsManagedPolicyWriterKeepsMatchingContentWithSharedDeleteHandle(t 
 	if err := writeWindowsManagedFile(path, initial, true); err != nil {
 		t.Fatal(err)
 	}
-	after, err := os.Stat(path)
+	after := managedPolicyTestFileID(t, path)
+	if before != after {
+		t.Fatal("matching managed content was replaced")
+	}
+}
+
+type managedPolicyFileID struct {
+	volume, high, low uint32
+}
+
+func managedPolicyTestFileID(t *testing.T, path string) managedPolicyFileID {
+	t.Helper()
+	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !os.SameFile(before, after) {
-		t.Fatal("matching managed content was replaced")
+	handle, err := windows.CreateFile(name, windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer windows.CloseHandle(handle)
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		t.Fatal(err)
+	}
+	return managedPolicyFileID{info.VolumeSerialNumber, info.FileIndexHigh, info.FileIndexLow}
 }
 
 func TestWindowsManagedPolicyWriterPublishesChangedContent(t *testing.T) {
@@ -135,18 +153,12 @@ func TestWindowsManagedPolicyWriterPublishesChangedContent(t *testing.T) {
 	if err := writeWindowsManagedFile(path, []byte("old\r\n"), true); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	before := managedPolicyTestFileID(t, path)
 	if err := writeWindowsManagedFile(path, []byte("new\r\n"), true); err != nil {
 		t.Fatal(err)
 	}
-	after, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if os.SameFile(before, after) {
+	after := managedPolicyTestFileID(t, path)
+	if before == after {
 		t.Fatal("changed managed content kept the old file identity")
 	}
 	body, err := os.ReadFile(path)

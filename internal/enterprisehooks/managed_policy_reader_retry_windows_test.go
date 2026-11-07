@@ -49,6 +49,31 @@ func TestReadTrustedWindowsManagedPolicyRetriesFirstNameLookup(t *testing.T) {
 	}
 }
 
+func TestReadTrustedWindowsManagedPolicyRetriesChangedIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "90-defenseclaw.json")
+	stage := path + ".stage"
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stage, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	originalTrust := windowsManagedPolicyFileTrustCheck
+	var changed bool
+	windowsManagedPolicyFileTrustCheck = func(string) error {
+		if changed {
+			return nil
+		}
+		changed = true
+		return safefile.ReplaceFileAtomically(stage, path)
+	}
+	t.Cleanup(func() { windowsManagedPolicyFileTrustCheck = originalTrust })
+	data, present, err := readTrustedWindowsManagedPolicyFile(path)
+	if err != nil || !present || string(data) != "new" || !changed {
+		t.Fatalf("body = %q, present = %v, changed = %v, err = %v", data, present, changed, err)
+	}
+}
+
 func TestWindowsManagedPolicyWriterKeepsMatchingFileAfterFirstMiss(t *testing.T) {
 	paths := withWindowsCursorStandaloneSeamsForTest(t)
 	path := paths.Adapter
@@ -56,10 +81,7 @@ func TestWindowsManagedPolicyWriterKeepsMatchingFileAfterFirstMiss(t *testing.T)
 	if err := writeWindowsManagedFile(path, body, true); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	before := managedPolicyTestFileID(t, path)
 	parked := path + ".parked"
 	if err := os.Rename(path, parked); err != nil {
 		t.Fatal(err)
@@ -78,11 +100,8 @@ func TestWindowsManagedPolicyWriterKeepsMatchingFileAfterFirstMiss(t *testing.T)
 	if !restored || restoreErr != nil {
 		t.Fatalf("retry did not restore the fixture: restored = %v, err = %v", restored, restoreErr)
 	}
-	after, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !os.SameFile(before, after) {
+	after := managedPolicyTestFileID(t, path)
+	if before != after {
 		t.Fatal("matching managed content was replaced after a first lookup miss")
 	}
 }

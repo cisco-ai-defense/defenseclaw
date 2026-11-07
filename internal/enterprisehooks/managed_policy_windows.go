@@ -2210,8 +2210,11 @@ func readTrustedWindowsManagedPolicyFileOnce(path string, seen *bool) ([]byte, e
 	if err != nil {
 		return nil, fmt.Errorf("enterprise hooks: inspect opened Claude Code managed policy %s: %w", path, err)
 	}
-	if !openedInfo.Mode().IsRegular() || openedInfo.Size() > windowsClaudeManagedPolicyLimit || !os.SameFile(info, openedInfo) {
-		return nil, fmt.Errorf("enterprise hooks: Claude Code managed policy changed identity, type, or size: %s", path)
+	if !openedInfo.Mode().IsRegular() || openedInfo.Size() > windowsClaudeManagedPolicyLimit {
+		return nil, fmt.Errorf("enterprise hooks: Claude Code managed policy changed type or size: %s", path)
+	}
+	if !os.SameFile(info, openedInfo) {
+		return nil, fmt.Errorf("enterprise hooks: Claude Code managed policy changed identity: %s: %w", path, safefile.ErrReadIdentityChanged)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, windowsClaudeManagedPolicyLimit+1))
 	if err != nil {
@@ -2224,8 +2227,11 @@ func readTrustedWindowsManagedPolicyFileOnce(path string, seen *bool) ([]byte, e
 	if err != nil {
 		return nil, fmt.Errorf("enterprise hooks: re-inspect Claude Code managed policy %s: %w", path, err)
 	}
-	if !current.Mode().IsRegular() || !os.SameFile(openedInfo, current) {
-		return nil, fmt.Errorf("enterprise hooks: Claude Code managed policy changed identity during read: %s", path)
+	if !current.Mode().IsRegular() {
+		return nil, fmt.Errorf("enterprise hooks: Claude Code managed policy changed type during read: %s", path)
+	}
+	if !os.SameFile(openedInfo, current) {
+		return nil, fmt.Errorf("enterprise hooks: Claude Code managed policy changed identity during read: %s: %w", path, safefile.ErrReadIdentityChanged)
 	}
 	return data, nil
 }

@@ -1021,6 +1021,13 @@ func TestWriteWindowsPreservesStricterExistingDACL(t *testing.T) {
 	if got := windowsAllowMaskForSID(t, path, system); got != wantSystemMask {
 		t.Fatalf("SYSTEM mask = 0x%x, want preserved 0x%x", uint32(got), uint32(wantSystemMask))
 	}
+	protected, err := windowsDACLProtected(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !protected {
+		t.Fatal("stricter DACL lost its protected inheritance state")
+	}
 }
 
 func TestWriteWindowsReplacesForeignReadACE(t *testing.T) {

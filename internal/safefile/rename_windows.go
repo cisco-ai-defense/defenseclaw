@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -86,6 +87,12 @@ func replaceExistingThroughPublishedStage(destination string, from, to *uint16) 
 	if err := copyExistingWindowsFile(to, stageName); err != nil {
 		return err
 	}
+	// CopyFileW copies the body and streams, but the staged file can inherit a
+	// different DACL. ReplaceFileW merges the staged file's DACL into the new
+	// body, so restore the original protection before that merge.
+	if err := copyExistingWindowsDACL(destination, stagePath); err != nil {
+		return err
+	}
 	if err := replaceExistingWindowsFile(stageName, from); err != nil {
 		return err
 	}
@@ -113,6 +120,58 @@ func copyExistingWindowsFile(source, destination *uint16) error {
 		return syscall.EINVAL
 	}
 	return callErr
+}
+
+func copyExistingWindowsDACL(source, destination string) error {
+	from, err := winpath.UTF16Ptr(source)
+	if err != nil {
+		return err
+	}
+	current, err := windows.CreateFile(from, windows.READ_CONTROL,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(current)
+	descriptor, err := windows.GetSecurityInfo(current, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	if descriptor == nil {
+		return fmt.Errorf("safefile: original file has no security descriptor")
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return err
+	}
+	if dacl == nil {
+		return fmt.Errorf("safefile: original file has no DACL")
+	}
+	control, _, err := descriptor.Control()
+	if err != nil {
+		return err
+	}
+	to, err := winpath.UTF16Ptr(destination)
+	if err != nil {
+		return err
+	}
+	stage, err := windows.CreateFile(to, windows.WRITE_DAC,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(stage)
+	information := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION)
+	if control&windows.SE_DACL_PROTECTED != 0 {
+		information |= windows.PROTECTED_DACL_SECURITY_INFORMATION
+	} else {
+		information |= windows.UNPROTECTED_DACL_SECURITY_INFORMATION
+	}
+	err = windows.SetSecurityInfo(stage, windows.SE_FILE_OBJECT, information, nil, nil, dacl, nil)
+	runtime.KeepAlive(descriptor)
+	return err
 }
 
 // replaceFileOnceWith prepares metadata when the destination exists. A missing
