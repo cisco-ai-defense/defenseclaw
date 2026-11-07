@@ -459,6 +459,19 @@ def test_restricted_setup_scan_probes_every_form_of_an_active_peer(monkeypatch, 
     assert result.agents["claudecode"].version == "2.1.286 (Claude Code)"
 
 
+def _windows_change_times_from_stat(monkeypatch) -> None:
+    """On a host that is not Windows, the change time Windows gives is the one this
+    system keeps (``st_ctime``), so a test of Windows rules sees a readable change
+    time that moves with every write. On Windows itself the real read is used."""
+    if os.name == "nt":
+        return
+    monkeypatch.setattr(
+        ad,
+        "_windows_change_time",
+        lambda path: os.lstat(path).st_ctime_ns // 100 + ad._WINDOWS_TICKS_AT_UNIX_EPOCH,
+    )
+
+
 @pytest.mark.parametrize(
     ("schema", "identified"),
     [(3, False), (6, False), (ad.CACHE_SCHEMA_VERSION, False), (ad.CACHE_SCHEMA_VERSION, True)],
@@ -486,6 +499,8 @@ def test_release_cache_keeps_a_peer_version_only_for_an_entry_that_names_its_exe
     os.utime(binary, (old, old))
     time.sleep(0.05)
     monkeypatch.setattr(ad, "_is_windows_host", lambda: windows_semantics)
+    if windows_semantics:
+        _windows_change_times_from_stat(monkeypatch)
     cached = _discovery("claudecode")
     cached.scanned_at = ad._format_rfc3339(ad._now_utc())
     cached.agents["claudecode"].binary_path = str(binary)
@@ -2943,6 +2958,8 @@ def test_timed_out_probe_keeps_version_of_unchanged_binary(monkeypatch, tmp_path
         return fake
 
     monkeypatch.setattr(ad, "_is_windows_host", lambda: windows)
+    if windows:
+        _windows_change_times_from_stat(monkeypatch)
     monkeypatch.setattr(ad, "_scan_agent", scan("amp 0.0.1", ""))
     ad.discover_agents(use_cache=False, refresh=True, data_dir=data)
 
