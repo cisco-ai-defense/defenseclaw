@@ -58,23 +58,51 @@ func TestLateCandidateDotDotThroughProcessRelativeLinkStaysUnproved(t *testing.T
 	}
 }
 
-func TestProcessRelativeLinkNamesNumericAndSelfForms(t *testing.T) {
+func TestProcessRelativeLinkNamesOpenerRelativeForms(t *testing.T) {
 	for path, want := range map[string]bool{
 		"/proc/self/cwd":           true,
 		"/proc/thread-self/root":   true,
-		"/proc/1234/cwd":           true,
-		"/proc/1234/task/5678/cwd": true,
-		"/proc/1234/fd/3":          true,
+		"/proc/self/task/5678/cwd": true,
+		"/proc/self/fd/3":          true,
 		"/dev/fd/3":                true,
-		"/proc/1234/status":        false,
-		"/proc/12a4/cwd":           false,
-		"/proc/1234/task/x/cwd":    false,
+		"/dev/stdout":              true,
+		"/proc/1234/cwd":           false,
+		"/proc/1234/task/5678/cwd": false,
+		"/proc/1234/fd/3":          false,
+		"/proc/self/status":        false,
+		"/proc/self/task/x/cwd":    false,
 		"/proc/cpuinfo":            false,
 		"/home/user/project/jump":  false,
-		"/tmp/proc/1234/cwd":       false,
+		"/tmp/proc/self/cwd":       false,
 	} {
 		if got := processRelativeLink(path); got != want {
 			t.Errorf("processRelativeLink(%q)=%v want %v", path, got, want)
+		}
+	}
+}
+
+func TestFixedPIDLinkNamesTheLinkOfAnExplicitProcess(t *testing.T) {
+	for path, want := range map[string]string{
+		"/proc/1234/cwd":             "/proc/1234/cwd",
+		"/proc/1234/cwd/sub/file":    "/proc/1234/cwd",
+		"/proc/1234/root/etc":        "/proc/1234/root",
+		"/proc/1234/exe":             "/proc/1234/exe",
+		"/proc/1234/fd/3":            "/proc/1234/fd/3",
+		"/proc/1234/fd/3/../status":  "/proc/1234/fd/3",
+		"/proc/1234/task/5678/cwd/x": "/proc/1234/task/5678/cwd",
+		"/proc/1234/map_files/a-b/x": "/proc/1234/map_files/a-b",
+		"/proc/1234/fd":              "",
+		"/proc/1234/fd/":             "",
+		"/proc/1234/status":          "",
+		"/proc/1234/task/x/cwd":      "",
+		"/proc/12a4/cwd":             "",
+		"/proc/self/cwd":             "",
+		"/tmp/proc/1234/cwd":         "",
+		"/home/user/project/jump":    "",
+	} {
+		got, ok := fixedPIDLink(path)
+		if got != want || ok != (want != "") {
+			t.Errorf("fixedPIDLink(%q)=%q,%v want %q", path, got, ok, want)
 		}
 	}
 }
