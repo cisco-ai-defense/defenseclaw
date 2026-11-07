@@ -534,7 +534,7 @@ fail_response() {
     emit_cursor_allow
     exit 0
   fi
-  emit_cursor_deny "DefenseClaw hook failed closed"
+  emit_cursor_deny "{{if .Sandbox}}$(defenseclaw_json_escape "${2:-DefenseClaw hook failed closed}"){{else}}DefenseClaw hook failed closed{{end}}"
 {{if not .SecureClient}}  if cursor_event_unread; then exit 2; fi
 {{end}}  exit 0
 }
@@ -622,7 +622,11 @@ elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/nul
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}  fail_response "gateway returned HTTP ${HTTP_CODE}"
 {{else}}  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
 {{end}}
-elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
+{{if .Sandbox}}elif [ "$HTTP_CODE" = 429 ]; then
+  # The gateway named the limit that refused the call: show it.
+  rate_reason="$(defenseclaw_sandbox_rate_refusal_reason "$RESULT")"
+  fail_response "$rate_reason" "$rate_reason"
+{{end}}elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi{{end}}
 

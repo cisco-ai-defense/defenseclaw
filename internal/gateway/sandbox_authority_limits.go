@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -266,20 +267,48 @@ const (
 // sandboxHookRefusal names the cause of a 429 on a sandbox request: the
 // stable reason and a message that says which limit refused it, so a hook
 // shows the real cause and not the account budget for every refusal. err is
-// what the binding's limiter returned, or the refusal string the account
-// class budget (hookCallerLimiter.chargeClass) or admission produced.
+// what the binding's limiter returned (a *sandboxauth.LimitError carrying the
+// limit in force for that binding and bucket), or the refusal string the
+// account class budget (hookCallerLimiter.chargeClass) or admission produced.
+// A binding refusal that does not carry its limit says which kind of limit
+// refused and states no number.
 func sandboxHookRefusal(err error) (reason, message string) {
+	var limit *sandboxauth.LimitError
 	switch {
+	case errors.As(err, &limit):
+		return sandboxLimitRefusal(limit)
 	case errors.Is(err, sandboxauth.ErrRateLimited):
-		return sandboxReasonBindingRate, fmt.Sprintf("DefenseClaw is limiting how fast this one sandbox may send requests (tool calls: %d a second, a burst of %d); this request did not run, so retry in a few seconds",
-			sandboxauth.DefaultHookRPS, sandboxauth.DefaultHookBurst)
+		return sandboxReasonBindingRate, "DefenseClaw is limiting how fast this one sandbox may send requests; this request did not run, so retry in a few seconds"
 	case errors.Is(err, sandboxauth.ErrTooManyInFlight):
-		return sandboxReasonBindingInFlight, fmt.Sprintf("this sandbox already has as many requests waiting for DefenseClaw's answer as it may (%d); this request did not run, so retry in a few seconds",
-			sandboxauth.DefaultMaxInFlight)
+		return sandboxReasonBindingInFlight, "this sandbox already has as many requests waiting for DefenseClaw's answer as it may; this request did not run, so retry in a few seconds"
 	case err != nil && err.Error() == managedHookReasonOverloaded:
 		return managedHookReasonOverloaded, managedHookOverloadedMessage
 	case err != nil && err.Error() == managedHookReasonRateLimited:
 		return managedHookReasonRateLimited, sandboxHookBudgetMessage()
 	}
 	return managedHookReasonRateLimited, managedHookRateLimitedMessage
+}
+
+// sandboxLimitRefusal words a binding limiter refusal with the numbers the
+// limiter applied to that binding and bucket.
+func sandboxLimitRefusal(e *sandboxauth.LimitError) (reason, message string) {
+	const retry = "; this request did not run, so retry in a few seconds"
+	if errors.Is(e, sandboxauth.ErrRateLimited) {
+		what := "tool calls"
+		switch e.Limit {
+		case sandboxauth.LimitReceipt:
+			what = "tool-call confirmations"
+		case sandboxauth.LimitTelemetry:
+			what = "telemetry uploads"
+		}
+		return sandboxReasonBindingRate, fmt.Sprintf("DefenseClaw is limiting how fast this one sandbox may send %s (%s a second, a burst of %d)%s",
+			what, strconv.FormatFloat(e.RPS, 'g', -1, 64), e.Burst, retry)
+	}
+	switch e.Limit {
+	case sandboxauth.LimitTelemetry:
+		return sandboxReasonBindingInFlight, fmt.Sprintf("this sandbox already has as many telemetry uploads waiting as it may (%d)%s", e.MaxInFlight, retry)
+	case sandboxauth.LimitTelemetryTotal:
+		return sandboxReasonBindingInFlight, fmt.Sprintf("DefenseClaw is already receiving as many telemetry uploads from all sandboxes together as it may (%d)%s", e.MaxInFlight, retry)
+	}
+	return sandboxReasonBindingInFlight, fmt.Sprintf("this sandbox already has as many requests waiting for DefenseClaw's answer as it may (%d)%s", e.MaxInFlight, retry)
 }

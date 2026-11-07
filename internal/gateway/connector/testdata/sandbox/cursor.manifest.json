@@ -45,8 +45,8 @@
     "/usr/local/lib/defenseclaw/hooks/cursor-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 8303,
-      "sha256": "d2f207576619938c31b0d6edb84556f4009a2d115b52e5f721f569a22a8c4af3"
+      "size": 8516,
+      "sha256": "98c6f4ff84bf99bb7fa219af4da6507480fc5fbf8a42c7bbea69a16b6a4b5303"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",

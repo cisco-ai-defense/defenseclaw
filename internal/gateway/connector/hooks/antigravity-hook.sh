@@ -644,6 +644,10 @@ elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/nul
 {{if .Sandbox}}elif [ "$HTTP_CODE" -ge 400 ] 2>/dev/null && [ "$HTTP_CODE" -lt 500 ] 2>/dev/null; then
   # The request was refused (a malformed hook input, a token or route the
   # ingress does not accept, a rate limit), which is no unreachable service.
+  if [ "$HTTP_CODE" = 429 ]; then
+    rate_reason="$(defenseclaw_sandbox_rate_refusal_reason "$RESULT")"
+    fail_response "$rate_reason" "$rate_reason"
+  fi
   fail_response "gateway returned HTTP ${HTTP_CODE}" "DefenseClaw hook request was refused (HTTP ${HTTP_CODE}), so the tool call is blocked."
 {{end}}elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
