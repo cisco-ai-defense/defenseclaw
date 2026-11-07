@@ -300,7 +300,7 @@ const (
 	// SYSTEM/Administrators-only folder Setup protects, so an ordinary account
 	// can neither create nor open it.
 	WindowsOpenCodeReconcileLockFileName = "opencode-service-ports.lock"
-	windowsOpenCodeReconcileLockSDDL     = "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
+	windowsOpenCodeReconcileLockSDDL     = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)"
 )
 
 var windowsOpenCodeReconcileLocal sync.Mutex
@@ -309,9 +309,10 @@ var windowsOpenCodeReconcileLocal sync.Mutex
 // the guardian read, plan, commit and account rewrites, or for administrator
 // clear. The lock is a byte-range lock (LockFileEx) on a file inside the
 // protected record folder, opened only after that folder passes the same
-// SYSTEM/Administrators-only check as the record. The file carries a
-// protected SYSTEM/Administrators DACL, so no other account can create, open
-// or hold it (a named kernel object cannot give that guarantee: any account
+// SYSTEM/Administrators-only check as the record. The file carries an
+// Administrators owner and a protected SYSTEM/Administrators DACL, so no
+// other account can create, open or hold it, or rewrite its DACL as owner
+// (a named kernel object cannot give that guarantee: any account
 // can create it first). The local mutex serializes goroutines in this process.
 func LockWindowsOpenCodeServicePorts(recordPath string) (func(), error) {
 	windowsOpenCodeReconcileLocal.Lock()
@@ -390,21 +391,16 @@ func createWindowsOpenCodeReconcileLockFile(lockPath string) (windows.Handle, er
 		attributes, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 }
 
-// validateWindowsOpenCodeReconcileLockHandle requires a protected DACL that
-// allows only SYSTEM and Administrators, checked on the handle that will be
-// locked.
+// validateWindowsOpenCodeReconcileLockHandle requires a SYSTEM or
+// Administrators owner and a protected DACL that allows only SYSTEM and
+// Administrators, checked on the handle that will be locked. The owner counts
+// as much as the DACL: an object owner holds implicit WRITE_DAC, so a file
+// created by an ordinary account (before Setup protected the folder) could be
+// reopened and have its DACL changed after this check passed.
 func validateWindowsOpenCodeReconcileLockHandle(handle windows.Handle, lockPath string) error {
-	actual, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	actual, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return err
-	}
-	control, _, err := actual.Control()
-	if err != nil {
-		return err
-	}
-	dacl, _, err := actual.DACL()
-	if err != nil || dacl == nil || control&windows.SE_DACL_PROTECTED == 0 || dacl.AceCount == 0 {
-		return fmt.Errorf("enterprise hooks: OpenCode port reconcile lock is not administrator-only: %s", lockPath)
 	}
 	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
 	if err != nil {
@@ -413,6 +409,18 @@ func validateWindowsOpenCodeReconcileLockHandle(handle windows.Handle, lockPath 
 	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 	if err != nil {
 		return err
+	}
+	owner, _, err := actual.Owner()
+	if err != nil || owner == nil || (!owner.Equals(system) && !owner.Equals(admins)) {
+		return fmt.Errorf("enterprise hooks: OpenCode port reconcile lock is not owned by SYSTEM or Administrators: %s", lockPath)
+	}
+	control, _, err := actual.Control()
+	if err != nil {
+		return err
+	}
+	dacl, _, err := actual.DACL()
+	if err != nil || dacl == nil || control&windows.SE_DACL_PROTECTED == 0 || dacl.AceCount == 0 {
+		return fmt.Errorf("enterprise hooks: OpenCode port reconcile lock is not administrator-only: %s", lockPath)
 	}
 	for index := uint16(0); index < dacl.AceCount; index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE

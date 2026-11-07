@@ -16,6 +16,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 func TestManagedWindowsOpenCodePortRecordIsSystemOnly(t *testing.T) {
@@ -322,6 +324,93 @@ func TestManagedWindowsOpenCodeLockRefusesWidenedLockFile(t *testing.T) {
 		unlock()
 		t.Fatal("a lock file readable by ordinary accounts was accepted")
 	}
+}
+
+// lockFileOwnerForTest returns the owner SID of the lock file.
+func lockFileOwnerForTest(t *testing.T, lockPath string) *windows.SID {
+	t.Helper()
+	descriptor, err := windows.GetNamedSecurityInfo(lockPath, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner == nil {
+		t.Fatalf("lock file owner: %v", err)
+	}
+	return owner
+}
+
+// A new lock file is owned by Administrators, never by the creating token's
+// default owner: an object owner holds implicit WRITE_DAC, so only a fixed
+// administrator owner keeps the protected DACL out of an ordinary account's
+// reach. The benign twin: the file is reused on the next pass.
+func TestManagedWindowsOpenCodeLockFileIsAdministratorOwned(t *testing.T) {
+	dir := prepareWindowsTargetsManifestTestDirectory(t)
+	path := WindowsOpenCodeServicePortsPath(filepath.Join(dir, "targets.yaml"))
+	lockPath := filepath.Join(dir, WindowsOpenCodeReconcileLockFileName)
+	unlock, err := LockWindowsOpenCodeServicePorts(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner := lockFileOwnerForTest(t, lockPath); !owner.Equals(administrators) {
+		t.Fatalf("lock file owner = %s, want Administrators", owner)
+	}
+	unlock, err = LockWindowsOpenCodeServicePorts(path)
+	if err != nil {
+		t.Fatalf("an Administrators-owned lock file was refused: %v", err)
+	}
+	unlock()
+}
+
+// A lock file planted by another account keeps a trusted-looking protected
+// SYSTEM/Administrators DACL but is owned by that account, which could still
+// rewrite the DACL and hold the lock. It is refused, for the guardian pass,
+// for the administrator clear (same function), and on every retry.
+func TestManagedWindowsOpenCodeLockRefusesLockFileOwnedByAnotherAccount(t *testing.T) {
+	dir := prepareWindowsTargetsManifestTestDirectory(t)
+	path := WindowsOpenCodeServicePortsPath(filepath.Join(dir, "targets.yaml"))
+	lockPath := filepath.Join(dir, WindowsOpenCodeReconcileLockFileName)
+	unlock, err := LockWindowsOpenCodeServicePorts(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	other, err := windows.CreateWellKnownSid(windows.WinLocalServiceSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extended, err := winpath.Extended(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Another account as owner needs SeRestorePrivilege (skipped when the
+	// token lacks it). The DACL stays the accepted SYSTEM/Administrators one.
+	assignNativeOTLPFixtureOwnerOrSkip(t, extended, other)
+	if owner := lockFileOwnerForTest(t, lockPath); !owner.Equals(other) {
+		t.Fatalf("fixture owner = %s, want %s", owner, other)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if unlock, err := LockWindowsOpenCodeServicePorts(path); err == nil {
+			unlock()
+			t.Fatal("a lock file owned by another account was accepted")
+		}
+	}
+	// Handing the file back to Administrators makes it trusted again.
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignNativeOTLPFixtureOwnerOrSkip(t, extended, administrators)
+	unlock, err = LockWindowsOpenCodeServicePorts(path)
+	if err != nil {
+		t.Fatalf("an Administrators-owned lock file was refused: %v", err)
+	}
+	unlock()
 }
 
 func createWindowsStandardAccountToken() (windows.Token, error) {
