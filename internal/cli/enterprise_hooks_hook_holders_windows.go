@@ -287,6 +287,11 @@ func (p *windowsNativeHolderProc) Identify(handle uintptr) (windowsHookHolderIde
 // errWindowsHolderChanged is returned when the handle no longer names the hook.
 var errWindowsHolderChanged = errors.New("the handle no longer names the hook")
 
+// errWindowsHolderWrongObject is returned when the close was made and the
+// handle it closed was not the hook's: its owner replaced it between the
+// guardian's check and the close.
+var errWindowsHolderWrongObject = errors.New("the handle closed was not the hook's: it changed between the check and the close")
+
 // CloseIf closes one handle in its owner, after a fresh duplicate shows that
 // it is still a data or execute handle on the hook's file object, and checks
 // the duplicate the close itself returns. DuplicateHandle with
@@ -296,9 +301,11 @@ var errWindowsHolderChanged = errors.New("the handle no longer names the hook")
 //
 // The caller runs all of it on a worker with a timeout (closeWindowsHolderHandle):
 // the owner can close the handle value and get it back as a synchronous pipe
-// with a read pending, and GetFileType on a duplicate of that blocks. proceed
-// is false once the caller gave up; the close is then not made.
-func (p *windowsNativeHolderProc) CloseIf(handle uintptr, want windowsHookHolderIdentity, proceed func() bool) error {
+// with a read pending, and GetFileType on a duplicate of that blocks. commit
+// is false once the caller gave up, and the close is then not made; when it
+// is true the caller knows the close has begun and waits a little longer for
+// the answer.
+func (p *windowsNativeHolderProc) CloseIf(handle uintptr, want windowsHookHolderIdentity, commit func() bool) error {
 	fresh, err := p.duplicate(handle, 0)
 	if err != nil {
 		return fmt.Errorf("%w (%v)", errWindowsHolderChanged, err)
@@ -318,7 +325,7 @@ func (p *windowsNativeHolderProc) CloseIf(handle uintptr, want windowsHookHolder
 	if !valid {
 		return errWindowsHolderChanged
 	}
-	if !proceed() {
+	if !commit() {
 		return errWindowsHolderTimedOut
 	}
 	closing, err := p.duplicate(handle, windows.DUPLICATE_CLOSE_SOURCE)
@@ -327,7 +334,7 @@ func (p *windowsNativeHolderProc) CloseIf(handle uintptr, want windowsHookHolder
 	}
 	defer windows.CloseHandle(closing)
 	if got, err := windowsFileIdentity(closing); err != nil || got != want {
-		return errors.New("the handle closed was not the hook's: it changed between the check and the close")
+		return errWindowsHolderWrongObject
 	}
 	return nil
 }
