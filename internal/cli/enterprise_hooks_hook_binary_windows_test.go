@@ -7,6 +7,9 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
+	"context"
+	"debug/pe"
 	"encoding/base64"
 	"flag"
 	"fmt"
@@ -304,14 +307,22 @@ func TestKeepWindowsManagedFileCopyReplacesAHookHeldOpenForWriting(t *testing.T)
 // sharing and keeps it open until release is called. The child ends by itself
 // and prints "alive" if its handle was closed by someone else; it is never
 // killed by the test while the fixture is needed. shell names the PowerShell
-// to run (the 64-bit or the 32-bit one); a missing one skips the test.
+// to run (the 64-bit PowerShell, or the 32-bit Go holder that
+// buildWindowsWow64Holder returns); a missing PowerShell skips the test.
 func startWindowsExclusiveHolder(t *testing.T, shell, path string) (release func() string, pid int) {
 	t.Helper()
-	if _, err := os.Stat(shell); err != nil {
-		t.Skipf("PowerShell unavailable: %v", err)
+	var cmd *exec.Cmd
+	if isWindowsGoHolder(shell) {
+		cmd = exec.Command(shell, "exclusive", path)
+	} else {
+		if _, err := os.Stat(shell); err != nil {
+			t.Skipf("PowerShell unavailable: %v", err)
+		}
+		script := fmt.Sprintf(`$f = [IO.File]::Open('%s', 'Open', 'Read', 'None'); [Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); [void][Console]::In.ReadLine(); [Console]::Out.WriteLine('alive')`, strings.ReplaceAll(path, "'", "''"))
+		cmd = exec.Command(shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
 	}
-	script := fmt.Sprintf(`$f = [IO.File]::Open('%s', 'Open', 'Read', 'None'); [Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); [void][Console]::In.ReadLine(); [Console]::Out.WriteLine('alive')`, strings.ReplaceAll(path, "'", "''"))
-	cmd := exec.Command(shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -338,8 +349,7 @@ func startWindowsExclusiveHolder(t *testing.T, shell, path string) (release func
 			t.Fatalf("holder said %q", line)
 		}
 	case <-time.After(30 * time.Second):
-		_ = cmd.Process.Kill()
-		t.Fatal("the holder did not open the file")
+		holderNeverReady(t, cmd, &stderr, 30*time.Second)
 	}
 	done := false
 	release = func() string {
@@ -391,11 +401,142 @@ func (p interactiveFactsProc) Facts() windowsHolderProcess {
 	return facts
 }
 
-func powershellForTest(wow64 bool) string {
-	if wow64 {
-		return filepath.Join(os.Getenv("SystemRoot"), "SysWOW64", "WindowsPowerShell", "v1.0", "powershell.exe")
-	}
+func powershellForTest() string {
 	return filepath.Join(os.Getenv("SystemRoot"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+}
+
+// windowsGoHolderName is the image name of the 32-bit holder that
+// buildWindowsWow64Holder compiles.
+const windowsGoHolderName = "dc-wow64-holder.exe"
+
+// windowsGoHolderBuildLimit bounds the compile of the 32-bit holder: a cold
+// GOARCH=386 build of runtime and syscall takes well under a minute on a
+// loaded hosted runner.
+const windowsGoHolderBuildLimit = 4 * time.Minute
+
+// windowsGoHolderSource is a holder with the protocol of the PowerShell
+// holders, in the one language the CI image always has a 32-bit toolchain for.
+// "exclusive" opens the file with no sharing, says ready, blocks in a read on
+// its (synchronous) stdin pipe and says alive when that read returns.
+// "reacquire" opens it the same way and opens it again whenever a read on its
+// handle fails, saying "reopened N". It imports only os, strconv, syscall and
+// time, so the cold 32-bit build is small.
+const windowsGoHolderSource = `package main
+
+import (
+	"os"
+	"strconv"
+	"syscall"
+	"time"
+)
+
+func open(path string) (syscall.Handle, error) {
+	name, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return 0, err
+	}
+	return syscall.CreateFile(name, syscall.GENERIC_READ, 0, nil, syscall.OPEN_EXISTING, syscall.FILE_ATTRIBUTE_NORMAL, 0)
+}
+
+func say(line string) { _, _ = os.Stdout.WriteString(line + "\n") }
+
+func main() {
+	if len(os.Args) != 3 {
+		os.Exit(2)
+	}
+	h, err := open(os.Args[2])
+	if err != nil {
+		_, _ = os.Stderr.WriteString("open: " + err.Error() + "\n")
+		os.Exit(1)
+	}
+	say("ready")
+	switch os.Args[1] {
+	case "exclusive":
+		var b [1]byte
+		_, _ = os.Stdin.Read(b[:])
+		say("alive")
+	case "reacquire":
+		reopened := 0
+		for i := 0; i < 1200; i++ {
+			time.Sleep(100 * time.Millisecond)
+			var b [1]byte
+			var n uint32
+			_, _ = syscall.SetFilePointer(h, 0, nil, 0)
+			if syscall.ReadFile(h, b[:], &n, nil) != nil {
+				if again, err := open(os.Args[2]); err == nil {
+					h = again
+					reopened++
+					say("reopened " + strconv.Itoa(reopened))
+				}
+			}
+		}
+	default:
+		os.Exit(2)
+	}
+}
+`
+
+// isWindowsGoHolder says whether shell is the holder program built by
+// buildWindowsWow64Holder, not a PowerShell.
+func isWindowsGoHolder(shell string) bool {
+	return strings.EqualFold(filepath.Base(shell), windowsGoHolderName)
+}
+
+// buildWindowsWow64Holder compiles the holder for GOARCH=386 into the test's
+// temp folder and returns its path. A 32-bit process on 64-bit Windows is a
+// WOW64 process whatever its language; the test builds one instead of using
+// the SysWOW64 PowerShell, which the hosted runner did not start within a
+// bounded wait. The build and every wait are bounded, and a failure says
+// which step failed.
+func buildWindowsWow64Holder(t *testing.T) string {
+	t.Helper()
+	goTool, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatalf("cannot build the 32-bit holder: there is no go tool on PATH (%v); the test needs a real 32-bit process and compiles one", err)
+	}
+	dir := t.TempDir()
+	src := filepath.Join(dir, "holder.go")
+	if err := os.WriteFile(src, []byte(windowsGoHolderSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, windowsGoHolderName)
+	ctx, cancel := context.WithTimeout(context.Background(), windowsGoHolderBuildLimit)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, goTool, "build", "-trimpath", "-o", exe, src)
+	cmd.Dir = dir
+	cmd.Env = append(withoutEnv(os.Environ(), "GOOS", "GOARCH", "GOFLAGS", "CGO_ENABLED", "GOWORK"), "GOOS=windows", "GOARCH=386", "CGO_ENABLED=0", "GOWORK=off")
+	started := time.Now()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if len(out) > 4000 {
+			out = out[len(out)-4000:]
+		}
+		t.Fatalf("building the 32-bit holder (%s build, GOARCH=386) failed after %s: %v (build limit %s)\n%s", goTool, time.Since(started).Round(time.Millisecond), err, windowsGoHolderBuildLimit, out)
+	}
+	t.Logf("built the 32-bit holder in %s", time.Since(started).Round(time.Millisecond))
+	image, err := pe.Open(exe)
+	if err != nil {
+		t.Fatalf("the built holder is not a Windows image: %v", err)
+	}
+	defer image.Close()
+	if image.Machine != pe.IMAGE_FILE_MACHINE_I386 {
+		t.Fatalf("the built holder is machine 0x%04x, want a 32-bit image (0x%04x)", image.Machine, pe.IMAGE_FILE_MACHINE_I386)
+	}
+	return exe
+}
+
+// holderNeverReady ends a holder that did not say ready in time and fails the
+// test with what is known: the wait, how the process ended and what it wrote
+// to stderr.
+func holderNeverReady(t *testing.T, cmd *exec.Cmd, stderr *bytes.Buffer, limit time.Duration) {
+	t.Helper()
+	_ = cmd.Process.Kill()
+	waitErr := cmd.Wait()
+	text := strings.TrimSpace(stderr.String())
+	if len(text) > 2000 {
+		text = text[:2000]
+	}
+	t.Fatalf("the holder %s (pid %d) did not open the file and say ready within %s (wait: %v, exit code %d, stderr %q)", filepath.Base(cmd.Path), cmd.Process.Pid, limit, waitErr, cmd.ProcessState.ExitCode(), text)
 }
 
 // GAP-0755: a handle that shares nothing, held by another process, refuses
@@ -405,13 +546,14 @@ func powershellForTest(wow64 bool) string {
 // row names the holder. A holder that takes the handle again waits out the
 // backoff, and a hold in a later streak writes a new row.
 func TestKeepWindowsManagedFileCopyEndsAnExclusiveHoldOfAnotherProcess(t *testing.T) {
-	endsAnExclusiveHold(t, powershellForTest(false))
+	endsAnExclusiveHold(t, powershellForTest())
 }
 
 // The same with a 32-bit holder (WOW64): the handle values and the calls are
-// the same, and the audit row says so.
+// the same, and the audit row says so. The holder is a GOARCH=386 program the
+// test compiles, so it does not depend on the SysWOW64 PowerShell.
 func TestKeepWindowsManagedFileCopyEndsAnExclusiveHoldOfAWow64Process(t *testing.T) {
-	endsAnExclusiveHold(t, powershellForTest(true))
+	endsAnExclusiveHold(t, buildWindowsWow64Holder(t))
 }
 
 func endsAnExclusiveHold(t *testing.T, shell string) {
@@ -486,12 +628,9 @@ func endsAnExclusiveHold(t *testing.T, shell string) {
 	}
 	row := rows[0]
 	t.Logf("row: holder %s pid %d session %d sid %s wow64 %v access 0x%08x; scan %d ms, %d handles listed, %d inspected", row.Holder.Image, row.Holder.PID, row.Holder.Session, row.Holder.SID, row.Holder.Wow64, row.Access, row.ScanMS, row.Listed, row.Probed)
-	if row.Holder.PID != uint32(pid) || !row.Closed || !strings.EqualFold(filepath.Base(row.Holder.Image), "powershell.exe") || row.Holder.SID == "" ||
-		row.Access&windowsHolderDataAccess == 0 || row.Hook != target || row.Holder.Wow64 != strings.Contains(shell, "SysWOW64") {
+	if row.Holder.PID != uint32(pid) || !row.Closed || !strings.EqualFold(filepath.Base(row.Holder.Image), filepath.Base(shell)) || row.Holder.SID == "" ||
+		row.Access&windowsHolderDataAccess == 0 || row.Hook != target || row.Holder.Wow64 != isWindowsGoHolder(shell) {
 		t.Fatalf("row %+v", row)
-	}
-	if wow := strings.Contains(shell, "SysWOW64"); wow && !strings.Contains(strings.ToLower(row.Holder.Image), "syswow64") {
-		t.Fatalf("image %q is not the 32-bit PowerShell", row.Holder.Image)
 	}
 	if !strings.Contains(log.String(), "tamper: closed the handle") || strings.Count(log.String(), "[hook-guardian]") != 1 {
 		t.Fatalf("log %q", log.String())
@@ -550,10 +689,28 @@ func endsAnExclusiveHold(t *testing.T, shell string) {
 // whenever its handle is gone; reopened is how many times that happened.
 func startWindowsReacquiringHolder(t *testing.T, shell, path string) (stop func(), reopened func() int) {
 	t.Helper()
-	// An unbuffered stream, so that every poll is a read on the handle and
-	// fails when the handle is gone.
-	script := fmt.Sprintf(`$p = '%s'; $n = 0; $b = New-Object byte[] 1; $f = New-Object IO.FileStream($p, 'Open', 'Read', 'None', 1); [Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); for ($i = 0; $i -lt 1200; $i++) { Start-Sleep -Milliseconds 100; try { [void]$f.Seek(0, 0); [void]$f.Read($b, 0, 1) } catch { try { $f = New-Object IO.FileStream($p, 'Open', 'Read', 'None', 1); $n++; [Console]::Out.WriteLine('reopened ' + $n); [Console]::Out.Flush() } catch {} } }`, strings.ReplaceAll(path, "'", "''"))
-	cmd := exec.Command(shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
+	var cmd *exec.Cmd
+	if isWindowsGoHolder(shell) {
+		cmd = exec.Command(shell, "reacquire", path)
+	} else {
+		cmd = exec.Command(shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", reacquiringHolderScript(path))
+	}
+	return runWindowsReacquiringHolder(t, cmd)
+}
+
+// reacquiringHolderScript is the PowerShell body of the re-opening holder: an
+// unbuffered stream, so that every poll is a read on the handle and fails when
+// the handle is gone.
+func reacquiringHolderScript(path string) string {
+	return fmt.Sprintf(`$p = '%s'; $n = 0; $b = New-Object byte[] 1; $f = New-Object IO.FileStream($p, 'Open', 'Read', 'None', 1); [Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); for ($i = 0; $i -lt 1200; $i++) { Start-Sleep -Milliseconds 100; try { [void]$f.Seek(0, 0); [void]$f.Read($b, 0, 1) } catch { try { $f = New-Object IO.FileStream($p, 'Open', 'Read', 'None', 1); $n++; [Console]::Out.WriteLine('reopened ' + $n); [Console]::Out.Flush() } catch {} } }`, strings.ReplaceAll(path, "'", "''"))
+}
+
+// runWindowsReacquiringHolder starts cmd and waits for it to say ready; reopened
+// is how many times the holder opened the file again.
+func runWindowsReacquiringHolder(t *testing.T, cmd *exec.Cmd) (stop func(), reopened func() int) {
+	t.Helper()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -576,8 +733,7 @@ func startWindowsReacquiringHolder(t *testing.T, shell, path string) (stop func(
 	select {
 	case <-ready:
 	case <-time.After(30 * time.Second):
-		_ = cmd.Process.Kill()
-		t.Fatal("the holder did not open the file")
+		holderNeverReady(t, cmd, &stderr, 30*time.Second)
 	}
 	stopped := false
 	stop = func() {
@@ -740,7 +896,7 @@ func TestKeepWindowsManagedFileCopyEndsAHoldThatRotatesItsHandle(t *testing.T) {
 		out, err := exec.Command(target).Output()
 		return err == nil && len(strings.TrimSpace(string(out))) > 0
 	}
-	_, state := startWindowsRotatingHolder(t, powershellForTest(false), target)
+	_, state := startWindowsRotatingHolder(t, powershellForTest(), target)
 	if started() {
 		t.Fatal("a start succeeded while another process held the hook with no sharing")
 	}
