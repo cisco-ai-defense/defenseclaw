@@ -49,7 +49,7 @@ func TestCursorSetupAndTeardownOwnThePreTypographicQuoteRender(t *testing.T) {
 			// Setup leaves exactly one DefenseClaw entry per event, after the
 			// foreign one.
 			cfg := fileWithOldEntries()
-			renderCursorHooks(cfg, current, shellScript, false)
+			renderCursorHooks(cfg, current, shellScript, false, false)
 			hooks := cfg["hooks"].(map[string]interface{})
 			for _, event := range cursorHookEvents {
 				entries, _ := hooks[event].([]interface{})
@@ -65,7 +65,9 @@ func TestCursorSetupAndTeardownOwnThePreTypographicQuoteRender(t *testing.T) {
 			}
 
 			// Teardown removes the old entry and keeps the foreign one.
-			pruned, _ := removeHookScriptReferences(fileWithOldEntries(), cursorOwnedHookCommands(opts)...).(map[string]interface{})
+			owned := cursorOwnedHookCommands(opts)
+			matcher := newCursorHookCommandMatcher(owned)
+			pruned, _ := removeHookScriptReferencesWithMatcher(fileWithOldEntries(), &matcher, owned...).(map[string]interface{})
 			prunedHooks, _ := pruned["hooks"].(map[string]interface{})
 			for _, event := range cursorHookEvents {
 				entries, _ := prunedHooks[event].([]interface{})
