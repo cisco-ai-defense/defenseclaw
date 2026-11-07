@@ -270,6 +270,13 @@ paced), and 267 with paced safefile replacement reads. The standalone module
 metadata reader saw 8,288 missing names. These are stress-run counts, not
 field rates; the exact values depend on writer frequency and scheduling.
 
+The policy compare-and-swap reader test also reached this Windows name
+window. In 50 native repetitions on the same Windows Server 2025 host, the
+release base passed 45 and branch head `afc6eea8c6` passed 46. The published
+body remained complete, but a fresh open occasionally found no name during a
+replacement. The test keeps its existing assertion so later Windows behavior
+changes remain visible.
+
 ### Build
 
 `packaging/windows/standalone/build-setup.sh` builds the standalone Setup on
