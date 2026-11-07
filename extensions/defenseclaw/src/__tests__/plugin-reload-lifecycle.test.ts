@@ -486,10 +486,9 @@ describe("module copies that share the transport, with a live copy of an older b
     await globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
     expect(wrapped).toContain(`http://127.0.0.1:${PORT + 1}/v1/chat/completions`);
 
-    // The stop of the holder puts the old transport back over everything above it.
-    // The check of the patch settles within microtasks, before any I/O.
+    // The stop of the holder puts the old transport back over everything above it;
+    // the patch is back inside that stop, before any microtask runs.
     holder.stop();
-    await settleRecheck();
     expect(globalThis.fetch).not.toBe(baseFetch);
     await globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
     expect(modelCalls(seen)).toEqual([`http://127.0.0.1:${PORT + 1}/v1/chat/completions`]);
@@ -662,7 +661,119 @@ describe("module copies that share the transport, with a live copy of an older b
 
     bystander.stop();
     holder.stop(); // puts the old transport back over everything above it
-    await settleRecheck();
+    expect(globalThis.fetch).not.toBe(baseFetch);
+    await globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
+    expect(modelCalls(seen)).toEqual([`http://127.0.0.1:${PORT + 1}/v1/chat/completions`]);
+    fresh.stop();
+    expect(globalThis.fetch).toBe(baseFetch);
+  });
+
+  /** A wrapper that refuses a call whose signal is already aborted before it delegates, as many instrumentations do. */
+  function wrapFetchCheckingAbortedSignal(): void {
+    const previous = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.signal?.aborted) throw init.signal.reason;
+      return previous(input, init);
+    }) as typeof fetch;
+  }
+
+  it("the first model call right after the older holder stops is guarded, with no microtask in between", async () => {
+    const holder = olderBuildCopy(PORT);
+    holder.start();
+    const bystander = olderBuildCopy(PORT + 5);
+    bystander.start();
+    const { createFetchInterceptor } = await loadCopy();
+    const fresh = createFetchInterceptor(PORT + 1);
+    fresh.start();
+    wrapFetchLikeAnotherComponent();
+    wrapNodeHttpLayersLikeAnotherComponent();
+
+    bystander.stop();
+    holder.stop();
+    const call = globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
+    await call;
+    expect(modelCalls(seen)).toEqual([`http://127.0.0.1:${PORT + 1}/v1/chat/completions`]);
+    fresh.stop();
+  });
+
+  it.each([
+    ["checks an already aborted signal before it delegates", () => wrapFetchCheckingAbortedSignal(), 30],
+    [
+      "forwards only after a timer",
+      () => wrapFetchAsynchronously(() => new Promise<void>((resolve) => setTimeout(resolve, 150))),
+      400,
+    ],
+  ])(
+    "another component wraps every layer with a wrapper that %s, then a copy that never held the transport stops: the stop of the current copy leaves the native transport, and a later copy uses its own proxy",
+    async (_name, wrap, waitMs) => {
+      const holder = olderBuildCopy(PORT);
+      holder.start();
+      const bystander = olderBuildCopy(PORT + 5);
+      bystander.start();
+      const { createFetchInterceptor } = await loadCopy();
+      const fresh = createFetchInterceptor(PORT + 1);
+      fresh.start();
+      holder.stop();
+      wrap();
+      wrapNodeHttpLayersLikeAnotherComponent();
+      const wrappedFetch = globalThis.fetch;
+
+      bystander.stop();
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+
+      expect(globalThis.fetch).toBe(wrappedFetch);
+      fresh.stop();
+      expect(globalThis.fetch).toBe(baseFetch);
+      expect(http.request.name).not.toContain("patched");
+
+      const later = createFetchInterceptor(PORT + 2);
+      later.start();
+      await globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
+      expect(modelCalls(seen)).toEqual([`http://127.0.0.1:${PORT + 2}/v1/chat/completions`]);
+      later.stop();
+      expect(globalThis.fetch).toBe(baseFetch);
+    },
+  );
+
+  it("another component wraps the second patch before the check ends: model calls stay guarded once, and the stop restores the native transport", async () => {
+    const holder = olderBuildCopy(PORT);
+    holder.start();
+    const bystander = olderBuildCopy(PORT + 5);
+    bystander.start();
+    const { createFetchInterceptor } = await loadCopy();
+    const fresh = createFetchInterceptor(PORT + 1);
+    fresh.start();
+    holder.stop();
+    wrapFetchAsynchronously(() => new Promise<void>((resolve) => setTimeout(resolve, 100)));
+    wrapNodeHttpLayersLikeAnotherComponent();
+
+    bystander.stop(); // patched again at once, not yet known to be redundant
+    const wrapped = wrapFetchLikeAnotherComponent();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(wrapped).toEqual([]);
+
+    await globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
+    expect(wrapped).toEqual(["https://api.openai.com/v1/chat/completions"]);
+    expect(modelCalls(seen)).toEqual([`http://127.0.0.1:${PORT + 1}/v1/chat/completions`]);
+    fresh.stop();
+    expect(globalThis.fetch).toBe(baseFetch);
+  });
+
+  it("the older holder removed the patch under a wrapper of another component: the patch stays after the check, and the stop restores the transport it found last", async () => {
+    const holder = olderBuildCopy(PORT);
+    holder.start();
+    const bystander = olderBuildCopy(PORT + 5);
+    bystander.start();
+    const { createFetchInterceptor } = await loadCopy();
+    const fresh = createFetchInterceptor(PORT + 1);
+    fresh.start();
+    wrapFetchAsynchronously(() => Promise.resolve());
+    wrapNodeHttpLayersLikeAnotherComponent();
+
+    bystander.stop();
+    holder.stop();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
     expect(globalThis.fetch).not.toBe(baseFetch);
     await globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
     expect(modelCalls(seen)).toEqual([`http://127.0.0.1:${PORT + 1}/v1/chat/completions`]);

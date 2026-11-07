@@ -1245,10 +1245,12 @@ export interface InterceptionSelfTest {
 
 const INTERCEPTION_SELF_TEST_URL = "https://api.openai.com/v1/chat/completions";
 const INTERCEPTION_SELF_TEST_INTERVAL_MS = 60_000;
-// A call to this URL, made with an already aborted signal while a copy checks
-// that its own fetch wrapper is still reachable, never leaves the process.
+// A call to this URL, made while a copy checks that its own fetch wrapper is
+// still reachable, is answered by that wrapper. If the wrapper is gone the call
+// is a refused connection to a loopback port. The bound only ends a wrapper of
+// another component that never forwards the call.
 const REACHABILITY_PROBE_URL = "http://127.0.0.1:1/defenseclaw-transport-probe";
-const REACHABILITY_PROBE_TIMEOUT_MS = 1_000;
+const REACHABILITY_PROBE_TIMEOUT_MS = 30_000;
 export const INTERCEPTION_PROBE_HEADER = "X-DC-Interception-Probe";
 
 function readUndiciHeader(headers: unknown, name: string): string {
@@ -1481,10 +1483,37 @@ export function createFetchInterceptor(
     interceptorOpts.getCorrelationHeaders ?? emptyCorrelationHeaders;
   const proxyBase = `http://127.0.0.1:${guardrailPort}`;
   let originalFetch: typeof globalThis.fetch | null = null;
-  let transportGone: (() => boolean) | null = null;
+  /** One transport patch of this copy: what it found, and what it put in place. */
+  interface PatchState {
+    originalFetch: typeof globalThis.fetch | null;
+    originalHttpsRequest: typeof https.request | null;
+    originalHttpRequest: typeof http.request | null;
+    originalHttpGet: typeof http.get | null;
+    originalUndiciDispatcher: UndiciDispatcher | null;
+    hostUndici: ReturnType<typeof resolveHostUndici>;
+    originalHostDispatch: UndiciDispatchFn | null;
+    egressReporter: EgressReporter | null;
+    ours: OurWrappers | null;
+    disarm: (() => void) | null;
+  }
+  interface OurWrappers {
+    fetch: typeof globalThis.fetch;
+    httpsRequest: typeof https.request;
+    httpRequest: typeof http.request;
+    httpGet: typeof http.get;
+    undiciDispatcher: unknown;
+    hostDispatch: UndiciDispatchFn | null;
+    /** The layers as they were found, unbound, so a retraction puts back the very same functions. */
+    found: { httpsRequest: typeof https.request; httpRequest: typeof http.request; httpGet: typeof http.get };
+  }
+  // The wrappers of the current patch, null before start() and after stop().
+  let ours: OurWrappers | null = null;
+  let disarmCurrent: (() => void) | null = null;
+  // Earlier patches of this copy (oldest first) that a re-patch left in place
+  // until it is known whether they are still reachable.
+  let superseded: PatchState[] = [];
   let reachabilityProbing = false;
   let reachabilityProbeSeen = false;
-  let recheckPending = false;
   let recheckSeq = 0;
   let originalHttpsRequest: typeof https.request | null = null;
   let originalHttpRequest: typeof http.request | null = null;
@@ -1692,6 +1721,10 @@ export function createFetchInterceptor(
     const nativeFetch = globalThis.fetch;
     originalFetch = nativeFetch;
     egressReporter = createEgressReporter({ guardrailPort });
+    // A patch that a re-patch found to be redundant is disarmed: it hands every
+    // call to what it found and guards nothing (it may stay in a chain that
+    // another component wrapped around it).
+    let armed = true;
 
     // Layer 4 (governance): pull the sidecar's merged provider
     // registry so operator-added domains (via `defenseclaw setup
@@ -1709,6 +1742,7 @@ export function createFetchInterceptor(
       input: RequestInfo | URL,
       init?: RequestInit,
     ): Promise<Response> => {
+      if (!armed) return nativeFetch(input, init);
       const urlStr = String(input instanceof Request ? input.url : input);
 
       if (reachabilityProbing && urlStr === REACHABILITY_PROBE_URL) {
@@ -1897,9 +1931,11 @@ export function createFetchInterceptor(
     // dispatcher patch above, not this https.request patch.
     const nativeHttpsRequest = https.request.bind(https);
     const nativeHttpRequest = http.request.bind(http);
+    const foundLayers = { httpsRequest: https.request, httpRequest: http.request, httpGet: http.get };
+    const nativeHttpGet = http.get.bind(http);
     originalHttpsRequest = nativeHttpsRequest;
     originalHttpRequest = nativeHttpRequest;
-    originalHttpGet = http.get.bind(http);
+    originalHttpGet = nativeHttpGet;
 
     type NodeRequestOptions = Record<string, unknown>;
     type NodeIncomingMessage = unknown;
@@ -2023,6 +2059,9 @@ export function createFetchInterceptor(
       optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
       callback?: (res: NodeIncomingMessage) => void,
     ): NodeClientRequest {
+      if (!armed) {
+        return nativeHttpsRequest(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+      }
       const urlStr = buildUrlStringFromArgs(urlOrOptions, optionsOrCallback);
 
       if (urlStr && shouldPassthroughChatGPTCodexResponseBackendUrl(urlStr)) {
@@ -2210,6 +2249,9 @@ export function createFetchInterceptor(
       optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
       callback?: (res: NodeIncomingMessage) => void,
     ): NodeClientRequest {
+      if (!armed) {
+        return nativeHttpRequest(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+      }
       const urlStr = buildUrlStringFromArgs(urlOrOptions, optionsOrCallback);
       // Layer 0: known provider domain or registered local LLM port
       // with a recognizable LLM path (original Ollama-only gate).
@@ -2255,6 +2297,9 @@ export function createFetchInterceptor(
       optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
       callback?: (res: NodeIncomingMessage) => void,
     ): NodeClientRequest {
+      if (!armed) {
+        return nativeHttpGet(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+      }
       const req = patchedHttpRequest(urlOrOptions, optionsOrCallback, callback);
       try {
         (req as unknown as { end?: () => void }).end?.();
@@ -2265,6 +2310,9 @@ export function createFetchInterceptor(
     }
 
     http.get = patchedHttpGet as typeof http.get;
+
+    let ourUndiciDispatcher: unknown = null;
+    let ourHostDispatch: UndiciDispatchFn | null = null;
 
     // ─── Undici dispatcher interception ───
     // Node 18+ globalThis.fetch is backed by undici's internal
@@ -2281,10 +2329,10 @@ export function createFetchInterceptor(
       originalUndiciDispatcher = undici.getGlobalDispatcher() as UndiciDispatcher;
       const parentDispatcher = originalUndiciDispatcher;
 
+      const parentDispatch = (nextOpts: UndiciDispatchOptions, nextHandler: unknown): boolean =>
+        (parentDispatcher as unknown as { dispatch: UndiciDispatchFn }).dispatch(nextOpts, nextHandler);
       const interceptingDispatch: UndiciDispatchFn = (opts, handler) =>
-        interceptUndiciDispatch(opts, handler, "global", (nextOpts, nextHandler) =>
-          (parentDispatcher as unknown as { dispatch: UndiciDispatchFn }).dispatch(nextOpts, nextHandler),
-        );
+        armed ? interceptUndiciDispatch(opts, handler, "global", parentDispatch) : parentDispatch(opts, handler);
 
       // Proxy object that delegates dispatch to our interceptor and
       // all other Dispatcher methods to the original.
@@ -2292,6 +2340,7 @@ export function createFetchInterceptor(
         dispatch: { value: interceptingDispatch, writable: true, configurable: true },
       });
       undici.setGlobalDispatcher(proxyDispatcher);
+      ourUndiciDispatcher = proxyDispatcher;
     }
 
     // The host application's own undici copy: its requests carry an explicit
@@ -2306,21 +2355,26 @@ export function createFetchInterceptor(
         opts: UndiciDispatchOptions,
         handler: unknown,
       ): boolean {
+        if (!armed) return original.call(this, opts, handler);
         return interceptUndiciDispatch(opts, handler, "host", (nextOpts, nextHandler) =>
           original.call(this, nextOpts, nextHandler),
         );
       };
+      ourHostDispatch = base.dispatch;
     }
 
-    // An older copy that held the transport puts fetch, https.request,
-    // http.request and http.get back in one stop; another component wrapping
-    // one of them leaves the others ours. The dispatchers are not looked at:
-    // not every older build restores them.
-    transportGone = () =>
-      globalThis.fetch !== guardedFetch &&
-      https.request !== (patchedHttpsRequest as typeof https.request) &&
-      http.request !== (patchedHttpRequest as typeof http.request) &&
-      http.get !== (patchedHttpGet as typeof http.get);
+    ours = {
+      fetch: guardedFetch,
+      httpsRequest: patchedHttpsRequest as typeof https.request,
+      httpRequest: patchedHttpRequest as typeof http.request,
+      httpGet: patchedHttpGet as typeof http.get,
+      undiciDispatcher: ourUndiciDispatcher,
+      hostDispatch: ourHostDispatch,
+      found: foundLayers,
+    };
+    disarmCurrent = () => {
+      armed = false;
+    };
 
     logInfo(
       `[defenseclaw] LLM fetch interceptor active (proxy: ${proxyBase})`,
@@ -2488,80 +2542,197 @@ export function createFetchInterceptor(
   }
 
   /**
-   * Ask whether a call made through the global fetch still passes through the
-   * wrapper of this copy: another component can wrap every layer above it, and
-   * only a call that gets through shows it is still in place. The probe stays
-   * armed until the call settles, so a wrapper that forwards later (after an
-   * await, a microtask or a timer) is seen the same as one that forwards at
-   * once. A wrapper that has not forwarded when the timeout ends counts as
-   * removed (the safe side: patching again is guarded, leaving a hole is not).
-   * Resolves when the probe is over; read reachabilityProbeSeen then.
+   * An older copy that held the transport puts fetch, https.request,
+   * http.request and http.get back in one stop; another component wrapping
+   * one of them leaves the others ours. The dispatchers are not looked at:
+   * not every older build restores them.
    */
-  function probeFetchPatch(): Promise<void> {
+  function transportGone(): boolean {
+    return (
+      ours !== null &&
+      globalThis.fetch !== ours.fetch &&
+      https.request !== ours.httpsRequest &&
+      http.request !== ours.httpRequest &&
+      http.get !== ours.httpGet
+    );
+  }
+
+  function adoptPatch(patch: PatchState): void {
+    originalFetch = patch.originalFetch;
+    originalHttpsRequest = patch.originalHttpsRequest;
+    originalHttpRequest = patch.originalHttpRequest;
+    originalHttpGet = patch.originalHttpGet;
+    originalUndiciDispatcher = patch.originalUndiciDispatcher;
+    hostUndici = patch.hostUndici;
+    originalHostDispatch = patch.originalHostDispatch;
+    egressReporter = patch.egressReporter;
+    ours = patch.ours;
+    disarmCurrent = patch.disarm;
+  }
+
+  function currentPatch(): PatchState {
+    return {
+      originalFetch,
+      originalHttpsRequest,
+      originalHttpRequest,
+      originalHttpGet,
+      originalUndiciDispatcher,
+      hostUndici,
+      originalHostDispatch,
+      egressReporter,
+      ours,
+      disarm: disarmCurrent,
+    };
+  }
+
+  function cancelPendingCheck(): void {
+    recheckSeq++;
+    reachabilityProbing = false;
+  }
+
+  /**
+   * Does a call through the global fetch reach the wrapper of this copy before
+   * the call returns? Only a positive answer is evidence: a wrapper that
+   * forwards later, or not for a call that is already aborted, looks the same
+   * as a removed patch.
+   */
+  function patchReachableAtOnce(): boolean {
     reachabilityProbeSeen = false;
     reachabilityProbing = true;
-    let call: Promise<unknown>;
     try {
-      call = Promise.resolve(
+      void Promise.resolve(
         globalThis.fetch(REACHABILITY_PROBE_URL, { signal: AbortSignal.abort() }),
-      );
+      ).catch(() => undefined);
     } catch {
-      call = Promise.resolve(); // a wrapper that throws does not forward the probe
-    }
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, REACHABILITY_PROBE_TIMEOUT_MS);
-      (timer as { unref?: () => void }).unref?.();
-    });
-    return Promise.race([call.then(() => undefined, () => undefined), timeout]).then(() => {
-      clearTimeout(timer);
+      // a wrapper that throws did not forward the probe
+    } finally {
       reachabilityProbing = false;
-    });
+    }
+    return reachabilityProbeSeen;
   }
 
   /**
    * An older plugin copy reported a stop while this copy holds the transport.
-   * If that copy was the one that really held it, its stop put the old
-   * transport back over every layer of the patch of this copy: patch again on
-   * top of what is there now, so no model call goes out unguarded. If any layer
-   * is still ours, or a call through the global fetch still reaches the wrapper
-   * of this copy (whether the wrapper above it forwards at once or later), the
-   * stop came from a copy that never held the transport and another component
-   * wrapped the layers above ours: nothing happens (GAP-0745). The decision
-   * waits for the probe call to settle, which takes microtasks, not I/O; a
-   * stop of this copy in between cancels it.
+   * If that copy was the one that held it, its stop put the old transport
+   * back over every layer of the patch of this copy, and the next model call
+   * would go to the provider directly. This runs inside that stop, so it
+   * cannot wait for an answer to "was the patch removed?": if no layer is ours
+   * and a call does not reach our wrapper at once, the transport is patched
+   * again in the same call (GAP-0745). Whether that was needed is checked
+   * afterwards, however long a wrapper of another component takes to forward
+   * (verifyPatchedAgain), and a redundant patch is taken back out.
    */
   function recheckTransport(): void {
-    if (recheckPending || !originalFetch || !transportGone || !transportGone()) return;
-    recheckPending = true;
-    const seq = recheckSeq;
-    void probeFetchPatch().then(() => {
-      recheckPending = false;
-      if (seq !== recheckSeq || reachabilityProbeSeen) return;
-      if (!originalFetch || !transportGone || !transportGone()) return;
-      console.warn(
-        "[defenseclaw] An older DefenseClaw plugin copy removed the LLM transport patch when it stopped; " +
-          "this copy is patching again.",
-      );
-      recheckSeq++;
-      originalFetch = null;
-      originalHttpsRequest = null;
-      originalHttpRequest = null;
-      originalHttpGet = null;
-      originalUndiciDispatcher = null;
-      hostUndici = null;
-      originalHostDispatch = null;
-      egressReporter?.stop();
-      egressReporter = null;
-      transportGone = null;
-      _shared.owner = null;
-      start();
+    if (!originalFetch || !transportGone()) return;
+    cancelPendingCheck();
+    if (patchReachableAtOnce()) return;
+    const earlier = currentPatch();
+    superseded.push(earlier);
+    originalFetch = null;
+    originalHttpsRequest = null;
+    originalHttpRequest = null;
+    originalHttpGet = null;
+    originalUndiciDispatcher = null;
+    hostUndici = null;
+    originalHostDispatch = null;
+    egressReporter = null;
+    ours = null;
+    disarmCurrent = null;
+    _shared.owner = null;
+    start();
+    verifyPatchedAgain(earlier);
+  }
+
+  /**
+   * The patch made by recheckTransport stays until a probe call shows whether
+   * the earlier patch of this copy is still in the chain. The probe goes
+   * through what the new patch found, so it passes any wrapper of another
+   * component sitting there and reaches the earlier patch if it is there:
+   *   reached: the older copy removed nothing and the new patch was redundant;
+   *     it is taken out (identity restored where it is still on top,
+   *     disarmed where another component wrapped it meanwhile);
+   *   not reached: the earlier patch is gone and the new one is the guard.
+   * A stop of this copy in between cancels the check and puts back what the
+   * first patch of this copy found.
+   */
+  function verifyPatchedAgain(earlier: PatchState): void {
+    if (!originalFetch) return;
+    const seq = ++recheckSeq;
+    const below = originalFetch;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        resolve();
+      }, REACHABILITY_PROBE_TIMEOUT_MS);
+      (timer as { unref?: () => void }).unref?.();
+    });
+    reachabilityProbeSeen = false;
+    reachabilityProbing = true;
+    let call: Promise<unknown>;
+    try {
+      call = Promise.resolve(below(REACHABILITY_PROBE_URL, { signal: controller.signal }));
+    } catch {
+      call = Promise.resolve(); // a wrapper that throws did not forward the probe
+    }
+    void Promise.race([call.then(() => undefined, () => undefined), bound]).then(() => {
+      clearTimeout(timer);
+      if (seq !== recheckSeq) return;
+      const reached = reachabilityProbeSeen;
+      cancelPendingCheck();
+      if (reached) retractPatch(earlier);
+      else commitPatch();
     });
   }
 
+  function retractPatch(earlier: PatchState): void {
+    const mine = ours;
+    if (mine) {
+      if (originalFetch && globalThis.fetch === mine.fetch) globalThis.fetch = originalFetch;
+      if (https.request === mine.httpsRequest) https.request = mine.found.httpsRequest;
+      if (http.request === mine.httpRequest) http.request = mine.found.httpRequest;
+      if (http.get === mine.httpGet) http.get = mine.found.httpGet;
+      if (
+        undici &&
+        originalUndiciDispatcher &&
+        mine.undiciDispatcher &&
+        undici.getGlobalDispatcher() === mine.undiciDispatcher
+      ) {
+        undici.setGlobalDispatcher(originalUndiciDispatcher);
+      }
+      if (hostUndici && originalHostDispatch && mine.hostDispatch && hostUndici.base.dispatch === mine.hostDispatch) {
+        hostUndici.base.dispatch = originalHostDispatch;
+      }
+    }
+    disarmCurrent?.();
+    egressReporter?.stop();
+    superseded = superseded.filter((patch) => patch !== earlier);
+    adoptPatch(earlier);
+  }
+
+  function commitPatch(): void {
+    for (const patch of superseded) patch.egressReporter?.stop();
+    superseded = [];
+    console.warn(
+      "[defenseclaw] An older DefenseClaw plugin copy removed the LLM transport patch when it stopped; " +
+        "this copy patched it again.",
+    );
+  }
+
   function stop(): void {
-    recheckSeq++;
-    transportGone = null;
+    cancelPendingCheck();
+    if (superseded.length > 0) {
+      // Put back what the first patch of this copy found, under every patch
+      // this copy made since.
+      egressReporter?.stop();
+      for (const patch of superseded.slice(1)) patch.egressReporter?.stop();
+      const first = superseded[0];
+      superseded = [];
+      adoptPatch(first);
+    }
+    ours = null;
+    disarmCurrent = null;
     if (originalFetch) {
       globalThis.fetch = originalFetch;
       originalFetch = null;
