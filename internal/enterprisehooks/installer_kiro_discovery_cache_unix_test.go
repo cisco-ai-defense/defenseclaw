@@ -29,6 +29,7 @@ func writeKiroDiscoveryCache(t *testing.T, home, selected, cli, ide string) {
 		"agents": map[string]any{"kiro": map[string]any{
 			"name": "kiro", "installed": true, "version": selected,
 			"binary_path":      "/usr/local/bin/kiro",
+			"identity":         []any{"/usr/local/bin/kiro", 1, 2, 3, 4, 5},
 			"kiro_cli_version": cli, "kiro_ide_version": ide,
 		}},
 	}
