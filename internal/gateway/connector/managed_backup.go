@@ -982,21 +982,28 @@ func managedBackupRollbackTargetUsable(b managedFileBackup, currentDataDir, home
 }
 
 // VerifyManagedFileBackups reads every connector backup record in dataDir and
-// returns how many there are. A record that does not load, does not sit where
-// its connector and name put it, does not match its saved digest, or names no
-// agent file a rollback could restore (a path that is empty, relative, outside
-// home, or inside currentDataDir) is an error, so a nil error with a positive
-// count means the whole list is usable. Rollback cleanup that has no
-// config.yaml to go by needs that proof before it removes anything.
+// returns how many name an agent file a rollback can restore: an absolute path
+// inside home and outside currentDataDir. A record that does not load, does
+// not sit where its connector and name put it, does not match its saved
+// digest, or names a path that is empty, relative or inside currentDataDir is
+// an error. A record for an absolute path outside home (a connector whose
+// config root the operator moved) is valid but is left alone by the restore,
+// so it is neither proof nor a veto: the other records decide. A nil error
+// with a positive count therefore means every record is sound and at least
+// one is usable. Rollback cleanup that has no config.yaml to go by needs that
+// proof before it removes anything.
 func VerifyManagedFileBackups(dataDir, currentDataDir, home string) (int, error) {
 	count := 0
 	err := forEachManagedFileBackup(dataDir, func(b managedFileBackup) error {
-		count++
-		if !managedBackupRollbackTargetUsable(b, currentDataDir, home) {
-			return fmt.Errorf("connector backup %q does not name an agent file under the account home", b.Path)
+		usable := managedBackupRollbackTargetUsable(b, currentDataDir, home)
+		if !usable && (!filepath.IsAbs(b.Path) || managedBackupTargetInside(currentDataDir, b.Path)) {
+			return fmt.Errorf("connector backup %q does not name an agent file a rollback can restore", b.Path)
 		}
 		if !managedBackupDigestMatches(b) {
 			return fmt.Errorf("connector backup %s does not match its saved digest", b.Path)
+		}
+		if usable {
+			count++
 		}
 		return nil
 	})
