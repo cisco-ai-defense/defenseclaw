@@ -19,6 +19,7 @@ record is missing (the scan ran before setup) or older than its executable."""
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import threading
@@ -1304,3 +1305,276 @@ def test_an_executable_rewritten_in_place_with_its_time_restored_while_it_answer
     assert calls[0] == 2
     assert result.agents["cursor"].version == "2.3.999"
     assert ad._read_cache(data_dir=data).agents["cursor"].version == "2.3.999"
+
+
+# --- GAP-0752 review 8: a peer's new selection, a kept entry and a Windows
+# --- in-place update are each judged against the executable itself ----
+
+
+def _selection_moved(tmp_path: Path, *, error: str) -> tuple[Path, Path, ad.AgentDiscovery]:
+    """Cursor cached at a version of one executable; the launch order has since
+    moved to another one (the first stays on disk, unchanged)."""
+    old = tmp_path / "old-cursor"
+    new = tmp_path / "new-cursor"
+    old.write_text("3.19.13", encoding="utf-8")
+    new.write_text("cursor 2.3.99", encoding="utf-8")
+    _peer_cache(tmp_path, old, "3.19.13")
+    fresh = _later_scan_of_the_peer(new, error=error)
+    return old, new, fresh
+
+
+def test_a_peer_whose_launch_selection_moved_to_another_executable_loses_the_old_version_when_unread(tmp_path):
+    _old, new, fresh = _selection_moved(tmp_path, error=f"x: {ad.VERSION_PROBE_TIMED_OUT}")
+
+    assert ad._publish_agent_signal(fresh, "codex", data_dir=tmp_path)
+
+    cached = ad._read_cache(data_dir=tmp_path).agents["cursor"]
+    assert cached.version == ""
+    assert cached.binary_path == str(new)
+
+
+def test_a_peer_selected_elsewhere_by_a_scan_with_no_identity_loses_the_old_version_too(tmp_path):
+    _old, new, fresh = _selection_moved(tmp_path, error=f"x: {ad.VERSION_PROBE_TIMED_OUT}")
+    fresh.agents["cursor"].identity = []
+
+    assert ad._publish_agent_signal(fresh, "codex", data_dir=tmp_path)
+
+    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == ""
+
+
+def test_a_peer_selected_elsewhere_that_the_scan_read_is_cached_at_the_version_it_read(tmp_path):
+    _old, new, fresh = _selection_moved(tmp_path, error="")
+    fresh.agents["cursor"].version = "cursor 2.3.99"
+
+    assert ad._publish_agent_signal(fresh, "codex", data_dir=tmp_path)
+
+    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == "cursor 2.3.99"
+
+
+def test_a_peer_the_scan_selected_through_another_link_to_the_same_file_keeps_its_cached_version(tmp_path):
+    binary = tmp_path / "cursor"
+    binary.write_text("3.19.13", encoding="utf-8")
+    link = tmp_path / "cursor-link"
+    link.symlink_to(binary)
+    _peer_cache(tmp_path, binary, "3.19.13")
+    fresh = _later_scan_of_the_peer(link, error=f"x: {ad.VERSION_PROBE_TIMED_OUT}")
+
+    assert ad._publish_agent_signal(fresh, "codex", data_dir=tmp_path)
+
+    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == "3.19.13"
+
+
+def test_a_real_scan_that_selected_another_executable_and_timed_out_does_not_leave_the_old_version(monkeypatch, tmp_path):
+    old = tmp_path / "old-cursor"
+    new = tmp_path / "new-cursor"
+    old.write_text("3.19.13", encoding="utf-8")
+    new.write_text("cursor 2.3.99", encoding="utf-8")
+    _peer_cache(tmp_path, old, "3.19.13")
+    candidates = {"cursor": str(new), "codex": str(tmp_path / "codex")}
+    (tmp_path / "codex").write_text("codex-cli 0.160.0", encoding="utf-8")
+
+    def probe(name, *_args, **_kwargs):
+        return ("", ad.VERSION_PROBE_TIMED_OUT) if name == "cursor" else ("codex-cli 0.160.0", "")
+
+    monkeypatch.setattr(ad, "_ai_discovery_trust_config", lambda *_a, **_k: (False, []))
+    monkeypatch.setattr(ad, "_configured_probe_names", lambda *_a, **_k: frozenset({"codex", "cursor"}))
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda name, _spec: (candidates[name],) if name in candidates else ())
+    monkeypatch.setattr(ad, "_version_for_agent_binary", probe)
+    monkeypatch.setattr(ad, "_missing_probe_state", lambda *_a, **_k: ([], []))
+    scan = ad.discover_with_probes(["codex"], use_cache=False, refresh=True, data_dir=tmp_path, persist_cache=False)
+    assert scan.agents["cursor"].binary_path == str(new)
+
+    assert ad._publish_agent_signal(scan, "codex", data_dir=tmp_path)
+
+    cached = ad._read_cache(data_dir=tmp_path).agents["cursor"]
+    assert cached.version == ""
+    assert cached.binary_path == str(new)
+
+
+def _newer_cached_reading_then_replacement(tmp_path: Path) -> tuple[Path, ad.AgentDiscovery]:
+    """A reading taken after the scan being written is in the cache; the
+    executable is replaced after that reading."""
+    binary = tmp_path / "cursor"
+    binary.write_text("3.19.13", encoding="utf-8")
+    older = _identified_scan(binary, "3.19.13")
+    older.agents["cursor"].observed_at = ad._format_rfc3339(ad._now_utc() - timedelta(seconds=30))
+    newer = _identified_scan(binary, "3.19.13")
+    newer.agents["cursor"].observed_at = ad._format_rfc3339(ad._now_utc() - timedelta(seconds=5))
+    assert ad._write_cache(newer, data_dir=tmp_path)
+    _replace(binary, "cursor 2.3.99")
+    return binary, older
+
+
+def test_a_full_write_does_not_keep_a_newer_cached_version_of_an_executable_replaced_since(tmp_path):
+    binary, older = _newer_cached_reading_then_replacement(tmp_path)
+
+    assert ad._write_cache(older, data_dir=tmp_path)
+
+    cached = ad._read_cache(data_dir=tmp_path).agents["cursor"]
+    assert cached.version == ""
+    assert cached.error == ad.VERSION_NOT_PROBED
+
+
+def test_a_publish_does_not_keep_a_newer_cached_version_of_an_executable_replaced_since(tmp_path):
+    binary, older = _newer_cached_reading_then_replacement(tmp_path)
+
+    assert ad._publish_agent_signal(older, "cursor", data_dir=tmp_path)
+
+    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == ""
+
+
+def test_a_write_keeps_a_newer_cached_version_of_an_executable_that_did_not_change(tmp_path):
+    binary = tmp_path / "cursor"
+    binary.write_text("3.19.13", encoding="utf-8")
+    older = _identified_scan(binary, "3.19.13")
+    older.agents["cursor"].observed_at = ad._format_rfc3339(ad._now_utc() - timedelta(seconds=30))
+    newer = _identified_scan(binary, "3.19.13")
+    newer.agents["cursor"].observed_at = ad._format_rfc3339(ad._now_utc() - timedelta(seconds=5))
+    assert ad._write_cache(newer, data_dir=tmp_path)
+
+    assert ad._write_cache(older, data_dir=tmp_path)
+
+    cached = ad._read_cache(data_dir=tmp_path).agents["cursor"]
+    assert cached.version == "3.19.13"
+    assert cached.observed_at == newer.agents["cursor"].observed_at
+
+
+def _on_windows(monkeypatch, original: os.stat_result, binary: Path) -> None:
+    """Windows semantics for one file: ``st_ctime`` is the creation time (it
+    stays what the file was created with), and the NTFS change time moves with
+    every write (here the change time this system keeps)."""
+    real_stat = os.stat
+
+    class WindowsStat:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+            self.st_ctime_ns = original.st_ctime_ns
+
+        def __getattr__(self, name):
+            return getattr(self.wrapped, name)
+
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(ad.os, "stat", lambda path, *a, **k: WindowsStat(real_stat(path, *a, **k)))
+    monkeypatch.setattr(ad, "_windows_change_time", lambda path: real_stat(path).st_ctime_ns)
+
+
+def test_a_same_size_rewrite_with_the_modification_time_restored_changes_the_identity_on_windows(monkeypatch, tmp_path):
+    binary = tmp_path / "cursor"
+    binary.write_text("3.19.13", encoding="utf-8")
+    original = binary.stat()
+    _on_windows(monkeypatch, original, binary)
+    before = ad._executable_identity(str(binary))
+    assert ad._executable_identity(str(binary)) == before
+
+    time.sleep(0.02)
+    binary.write_text("2.3.999", encoding="utf-8")
+    os.utime(binary, ns=(original.st_atime_ns, original.st_mtime_ns))
+
+    assert ad._executable_identity(str(binary)) != before
+
+
+def test_a_windows_executable_that_was_not_written_to_keeps_its_identity_and_its_version(monkeypatch, tmp_path):
+    binary = tmp_path / "cursor"
+    binary.write_text("3.19.13", encoding="utf-8")
+    _on_windows(monkeypatch, binary.stat(), binary)
+    scan = _identified_scan(binary, "3.19.13")
+
+    assert ad._write_cache(scan, data_dir=tmp_path)
+
+    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == "3.19.13"
+
+
+def test_a_windows_in_place_rewrite_after_the_scan_is_not_cached_at_the_old_version(monkeypatch, tmp_path):
+    binary = tmp_path / "cursor"
+    binary.write_text("3.19.13", encoding="utf-8")
+    original = binary.stat()
+    _on_windows(monkeypatch, original, binary)
+    scan = _identified_scan(binary, "3.19.13")
+    time.sleep(0.02)
+    binary.write_text("2.3.999", encoding="utf-8")
+    os.utime(binary, ns=(original.st_atime_ns, original.st_mtime_ns))
+
+    assert ad._write_cache(scan, data_dir=tmp_path)
+
+    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == ""
+
+
+def test_the_identity_falls_back_to_the_stat_change_time_when_windows_gives_none(monkeypatch, tmp_path):
+    binary = tmp_path / "cursor"
+    binary.write_text("3.19.13", encoding="utf-8")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(ad, "_windows_change_time", lambda path: None)
+
+    assert ad._executable_identity(str(binary))[5] == binary.stat().st_ctime_ns
+
+
+class _Foreign:
+    """A foreign function: callable, with the prototype attributes ctypes sets."""
+
+    argtypes = None
+    restype = None
+
+    def __init__(self, call):
+        self._call = call
+
+    def __call__(self, *args):
+        return self._call(*args)
+
+
+class _FakeKernel32:
+    """CreateFileW / GetFileInformationByHandleEx / CloseHandle, as far as the
+    change-time read uses them."""
+
+    def __init__(self, *, change_time: int, handle: int | None = 7, query_ok: bool = True):
+        self.change_time = change_time
+        self.handle = handle
+        self.query_ok = query_ok
+        self.closed: list[int] = []
+        self.opened: list[tuple] = []
+        self.CreateFileW = _Foreign(self._create)
+        self.GetFileInformationByHandleEx = _Foreign(self._query)
+        self.CloseHandle = _Foreign(self._close)
+
+    def _create(self, path, access, share, security, disposition, flags, template):
+        self.opened.append((path, access, share, disposition, flags))
+        return self.handle
+
+    def _query(self, handle, info_class, buffer, size):
+        assert info_class == 0 and size == ctypes.sizeof(ad._WindowsFileBasicInfo) == 40
+        buffer._obj.change_time = self.change_time
+        return 1 if self.query_ok else 0
+
+    def _close(self, handle):
+        self.closed.append(handle)
+        return 1
+
+
+def _fake_windows_api(monkeypatch, kernel32: _FakeKernel32) -> None:
+    monkeypatch.setattr(ad.ctypes, "WinDLL", lambda *_a, **_k: kernel32, raising=False)
+
+
+def test_the_windows_change_time_is_read_through_a_read_attributes_handle_that_is_closed(monkeypatch):
+    kernel32 = _FakeKernel32(change_time=133_000_000_000_000_000)
+    _fake_windows_api(monkeypatch, kernel32)
+
+    assert ad._windows_change_time("C:\\tools\\cursor.exe") == 133_000_000_000_000_000
+
+    assert kernel32.closed == [7]
+    path, access, share, disposition, _flags = kernel32.opened[0]
+    assert access == 0x80 and share == 7 and disposition == 3  # read attributes only, never exclusive
+
+
+@pytest.mark.parametrize(
+    "kernel32",
+    [
+        _FakeKernel32(change_time=1, handle=ctypes.c_void_p(-1).value),
+        _FakeKernel32(change_time=1, handle=None),
+        _FakeKernel32(change_time=1, query_ok=False),
+        _FakeKernel32(change_time=0),
+    ],
+)
+def test_the_windows_change_time_is_none_when_windows_does_not_give_one(monkeypatch, kernel32):
+    _fake_windows_api(monkeypatch, kernel32)
+
+    assert ad._windows_change_time("C:\\tools\\cursor.exe") is None
+    assert kernel32.closed == ([7] if kernel32.handle == 7 else [])
