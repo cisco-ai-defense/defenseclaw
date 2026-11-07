@@ -22,8 +22,9 @@ import (
 	"testing"
 )
 
-// hookWithPrivateListenerTable points a released copilot-hook.sh's pre-send
-// listener check at a private socket table in place of the host's /proc/net.
+// hookWithPrivateListenerTable points the pre-send listener check of a released
+// per-user hook script (Copilot, Cursor or Antigravity, 1.0.0 to 1.0.3) at a
+// private socket table in place of the host /proc/net.
 // The 1.0.0 to 1.0.3 check walks the table one row at a time in Bash, and Linux
 // answers each backward seek in /proc/net/tcp by replaying the table from its
 // start, so one hook run costs time quadratic in the host's socket count (the
