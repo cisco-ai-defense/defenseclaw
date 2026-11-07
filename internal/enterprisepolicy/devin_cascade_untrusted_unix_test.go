@@ -147,3 +147,30 @@ func TestDevinCascadeNotesAnUntrustedFileWithoutTheRefusal(t *testing.T) {
 		t.Fatalf("an untrusted file was edited: %s", data)
 	}
 }
+
+// An untrusted file that is valid JSON and still holds the earlier refusal,
+// but is too large for DefenseClaw to read, cannot be proved clean: verify
+// and ensure must report a conflict and leave the file alone, whatever made
+// the second read fail.
+func TestDevinCascadeReportsAnUntrustedFileItCannotRead(t *testing.T) {
+	opts := untrustedCascadeOptions(t)
+	legacy, err := devinCascadeLegacyHooksPath(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	padded := earlierReleaseCascadeFile(t, opts, legacy, `{"note":"`+strings.Repeat("x", policyFileLimit+1)+`"}`)
+	writeUntrustedCascadeFile(t, legacy, padded)
+	for label, run := range map[string]func(Options, []string) (Result, error){"ensure": Publish, "verify": VerifyAll} {
+		result, err := run(opts, []string{"devin"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		state := devinCascadeStateOf(t, result.States)
+		if result.Complete() || state.Covered || len(state.Conflicts) == 0 || !strings.Contains(strings.Join(state.Conflicts, " "), "cannot read it") {
+			t.Fatalf("%s passed a file it could not inspect: complete=%v state=%+v", label, result.Complete(), state)
+		}
+	}
+	if data, _ := os.ReadFile(legacy); string(data) != padded {
+		t.Fatal("an untrusted file was edited")
+	}
+}

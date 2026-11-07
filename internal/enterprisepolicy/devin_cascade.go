@@ -152,6 +152,10 @@ type devinCascadeFile struct {
 	// untrusted is why an unprivileged principal controls the file; current
 	// and exists then hold the file as it is, read without the trust rules.
 	untrusted error
+	// unreadable is why an untrusted file could not be read at all (size,
+	// access, change during the read); current and exists are then empty and
+	// say nothing about the file.
+	unreadable error
 }
 
 func devinCascadeFiles(opts Options) ([]devinCascadeFile, error) {
@@ -167,13 +171,16 @@ func devinCascadeFiles(opts Options) ([]devinCascadeFile, error) {
 // content is read as it is, only to report whether it still carries the
 // refusal an earlier release wrote.
 func (f *devinCascadeFile) read(opts Options, state *State) error {
+	f.unreadable = nil
 	current, exists, err := readPolicyFile(opts, f.path)
 	var untrusted *untrustedPolicyFileError
 	if errors.As(err, &untrusted) {
 		f.untrusted = untrusted.err
 		current, exists, err = readPolicyFileWith(opts, f.path, func(Options, string) error { return nil })
 		if err != nil {
-			// The file cannot be inspected at all; inspect reports it.
+			// The file cannot be inspected at all; inspect reports it as a
+			// conflict, never as an empty file.
+			f.unreadable = err
 			current, exists, err = nil, false, nil
 		}
 	} else {
@@ -268,6 +275,10 @@ func countDevinCascadeEntries(opts Options, hooks *object) int {
 // Devin Local, and one in the Devin file is inert.
 func inspectDevinCascade(opts Options, files []devinCascadeFile, state *State) {
 	for _, file := range files {
+		if file.unreadable != nil {
+			state.conflict("%s is not administrator-controlled (%v) and DefenseClaw cannot read it (%v), so it cannot tell whether a Cascade refusal from an earlier release is still in it; an administrator must restore its owner and mode and keep it readable, or remove it", file.path, file.untrusted, file.unreadable)
+			continue
+		}
 		if !file.exists && file.untrusted == nil {
 			continue
 		}
