@@ -51,7 +51,6 @@ from defenseclaw.scanner.plugin_scanner.policy import (
     from_yaml,
     is_suppressed,
 )
-from defenseclaw.scanner.plugin_scanner.protected_links import audit_protected_links
 from defenseclaw.scanner.plugin_scanner.self_identity import is_first_party_self_target
 from defenseclaw.scanner.plugin_scanner.types import (
     Finding,
@@ -206,10 +205,7 @@ def scan_plugin(
         capabilities=set(),
         finding_counter=[1],
         previous_findings=[],
-        metadata={
-            "secure_client_rules": bool(options and options.disable_vendor_identity),
-            "data_dir": options.data_dir if options else "",
-        },
+        metadata={},
     )
 
     # --- Run analyzers sequentially ---
@@ -229,15 +225,6 @@ def scan_plugin(
         f.id = f"plugin-{ctx.finding_counter[0]}"
         ctx.finding_counter[0] += 1
         all_findings.append(f)
-
-    # The source walk skips node_modules, so a dependency folder link into
-    # protected state is judged here, on every profile and for every vendor.
-    # Secure Client keeps its ordinary scan decision.
-    if not ctx.metadata["secure_client_rules"]:
-        for f in audit_protected_links(target, data_dir=ctx.metadata["data_dir"]):
-            f.id = f"plugin-{ctx.finding_counter[0]}"
-            ctx.finding_counter[0] += 1
-            all_findings.append(f)
 
     for analyzer in analyzers:
         # Policy is a precondition of correlation, not merely an output

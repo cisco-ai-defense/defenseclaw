@@ -68,11 +68,7 @@ class DependencyAnalyzer:
         if not ctx.manifest:
             return []
         findings: list[Finding] = []
-        check_dependencies(
-            ctx.manifest, findings, ctx.plugin_dir,
-            protected_sources=not ctx.metadata.get("secure_client_rules"),
-            data_dir=ctx.metadata.get("data_dir", ""),
-        )
+        check_dependencies(ctx.manifest, findings, ctx.plugin_dir)
         return findings
 
 
@@ -131,7 +127,6 @@ class SourceAnalyzer:
             source_files_out=ctx.source_files,
             force_include=force_include,
             python_host=ctx.manifest is not None and ctx.manifest.source in ("plugin.yaml", "plugin.yml"),
-            secure_client_rules=bool(ctx.metadata.get("secure_client_rules")),
         )
         ctx.metadata["file_count"] = file_count
         ctx.metadata["total_size_bytes"] = total_bytes
