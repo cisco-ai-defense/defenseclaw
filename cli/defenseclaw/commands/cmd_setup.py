@@ -16678,9 +16678,16 @@ def _restart_services(
     if kept_note_pending and not failed:
         # Said only when nothing else failed: with a failed defenseclaw-gateway
         # restart the setup rolls back, and the config is not kept.
+        # A rollback restart runs on the restored configuration: the attempted
+        # new one is not kept there.
+        outcome = (
+            "the previous configuration stays in place"
+            if title == _ROLLBACK_RESTART_TITLE
+            else "the new configuration is kept"
+        )
         click.echo(
             "  OpenClaw could not restart its gateway through a service manager here, but the "
-            f"gateway answers at {oc_host}:{oc_port}, so the new configuration is kept."
+            f"gateway answers at {oc_host}:{oc_port}, so {outcome}."
         )
         click.echo(
             "    OpenClaw reloads openclaw.json on its own; if it does not load the DefenseClaw "
@@ -17732,7 +17739,10 @@ def _restart_openclaw_gateway() -> bool:
         result = subprocess.run(
             ["openclaw", "gateway", "restart"],
             capture_output=True,
-            text=True,
+            # Output is only shown to the operator: bytes that do not decode
+            # must not turn into an exception that skips the health probe.
+            encoding="utf-8",
+            errors="replace",
             timeout=60,
         )
         output = f"{result.stdout or ''}\n{result.stderr or ''}".lower()

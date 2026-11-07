@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import subprocess
+import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -131,3 +134,66 @@ def test_openclaw_cli_that_cannot_run_with_a_down_gateway_still_rolls_back(tmp_p
         cmd_setup._restart_services(str(tmp_path), connector="openclaw")
     check.assert_called_once()
     assert "configuration is kept" not in buf.getvalue()
+
+
+def _rollback_app(root) -> SimpleNamespace:
+    cfg = SimpleNamespace(
+        data_dir=str(root),
+        gateway=SimpleNamespace(host="127.0.0.1", port=18789),
+        active_connector=lambda: "openclaw",
+        active_connectors=lambda: ["openclaw"],
+    )
+    return SimpleNamespace(cfg=cfg)
+
+
+def test_rollback_restart_does_not_claim_the_new_configuration_is_kept(tmp_path) -> None:
+    """The rollback caller restarts on the restored config; the attempted one is gone."""
+    buf = io.StringIO()
+    with (
+        patch.object(cmd_setup, "_restart_defense_gateway", return_value=True),
+        patch.object(cmd_setup, "_restart_openclaw_gateway", return_value=False),
+        patch.object(cmd_setup, "_check_openclaw_gateway", return_value=True),
+        contextlib.redirect_stdout(buf),
+    ):
+        cmd_setup._restart_restored_connector_runtime(
+            _rollback_app(tmp_path),
+            same_failure=cmd_setup._GatewayRestartFailed("defenseclaw-gateway restart failed"),
+        )
+    text = buf.getvalue()
+    assert cmd_setup._ROLLBACK_RESTART_TITLE in text
+    assert "the new configuration is kept" not in text
+    assert "the previous configuration stays in place" in text
+
+
+def test_rollback_restart_without_captured_failure_does_not_claim_the_new_configuration(tmp_path) -> None:
+    buf = io.StringIO()
+    with (
+        patch.object(cmd_setup, "_restart_defense_gateway", return_value=True),
+        patch.object(cmd_setup, "_restart_openclaw_gateway", return_value=False),
+        patch.object(cmd_setup, "_check_openclaw_gateway", return_value=True),
+        contextlib.redirect_stdout(buf),
+    ):
+        cmd_setup._restart_restored_connector_runtime(_rollback_app(tmp_path))
+    assert "the new configuration is kept" not in buf.getvalue()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs a POSIX shell script as the openclaw CLI")
+@pytest.mark.parametrize("answers", [True, False])
+def test_undecodable_openclaw_cli_output_is_decided_by_the_health_probe(tmp_path, answers: bool) -> None:
+    cli = tmp_path / "openclaw"
+    cli.write_bytes(b'#!/bin/sh\nprintf "\\377" 1>&2\nexit 1\n')
+    cli.chmod(0o755)
+    buf = io.StringIO()
+    with (
+        patch.dict(os.environ, {"PATH": str(tmp_path)}),
+        patch.object(cmd_setup, "_restart_defense_gateway", return_value=True),
+        patch.object(cmd_setup, "_check_openclaw_gateway", return_value=answers) as check,
+        contextlib.redirect_stdout(buf),
+    ):
+        if answers:
+            cmd_setup._restart_services(str(tmp_path), connector="openclaw")
+        else:
+            with pytest.raises(cmd_setup._OpenClawGatewayNotRunning):
+                cmd_setup._restart_services(str(tmp_path), connector="openclaw")
+    check.assert_called_once()
+    assert ("the new configuration is kept" in buf.getvalue()) is answers
