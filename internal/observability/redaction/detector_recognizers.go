@@ -606,17 +606,27 @@ func recognizeHighEntropy(input string, fieldClass observability.FieldClass, pri
 	for _, index := range indices {
 		boundary := entropyBoundary(input, index[0], index[1])
 		span := input[index[0]:index[1]]
-		parts := splitAtProductFolders(span)
-		// A folder name is not what decides the outcome. The span is a secret
-		// only when the detector would redact it as written and would still
-		// redact it with the folder components taken out; then every remaining
-		// range is redacted, even when each piece alone is below the length
-		// minimum, and the folder names stay readable. A span the detector
-		// leaves alone as written is never pulled in by the join, and a span
-		// that is only a secret because of a folder name is not one. Otherwise
-		// each range is judged on its own.
-		whole := boundary && validHighEntropy(span, fieldClass) && validHighEntropy(joinRanges(span, parts), fieldClass)
-		for _, part := range parts {
+		parts, folderFound := splitAtProductFolders(span)
+		// A folder name is not what decides the outcome.
+		//   - The detector redacts the span as written: it is a secret only if it
+		//     is still one with the folder components taken out; then every
+		//     remaining range is redacted, even when each piece alone is below the
+		//     length minimum, and the folder names stay readable. If it is not,
+		//     each range is judged on its own (a range of a span the base
+		//     redacted is never newly redacted).
+		//   - The detector leaves the span alone as written (a hyphenated folder
+		//     name inside a slash-form path makes the alphabet check fail): the
+		//     remaining ranges are not pulled in as paths, so an ordinary parent
+		//     directory stays readable; only a path component that is a
+		//     high-entropy value on its own is redacted, as in the backslash form.
+		//   - No folder component: the base path exactly.
+		asWritten := boundary && validHighEntropy(span, fieldClass)
+		whole := asWritten && validHighEntropy(joinRanges(span, parts), fieldClass)
+		units := parts
+		if folderFound && !asWritten {
+			units = splitComponents(span, parts)
+		}
+		for _, part := range units {
 			start, end := index[0]+part[0], index[0]+part[1]
 			accepted := whole || (boundary && validHighEntropy(input[start:end], fieldClass))
 			if overlapsCredentialClaim(start, end, prior) {
@@ -626,6 +636,25 @@ func recognizeHighEntropy(input string, fieldClass observability.FieldClass, pri
 		}
 	}
 	return result
+}
+
+// splitComponents cuts each range at slashes and returns the non-empty path
+// components.
+func splitComponents(span string, parts [][2]int) [][2]int {
+	components := make([][2]int, 0, len(parts))
+	for _, part := range parts {
+		for componentStart := part[0]; componentStart <= part[1]; {
+			componentEnd := part[1]
+			if cut := strings.IndexByte(span[componentStart:part[1]], byte(0x2f)); cut >= 0 {
+				componentEnd = componentStart + cut
+			}
+			if componentEnd > componentStart {
+				components = append(components, [2]int{componentStart, componentEnd})
+			}
+			componentStart = componentEnd + 1
+		}
+	}
+	return components
 }
 
 // joinRanges rebuilds span with the product folder components taken out: the
@@ -648,9 +677,10 @@ func joinRanges(span string, parts [][2]int) string {
 // path reaches the detector as one span with the folder inside it. A folder
 // name is recognized only as a whole path component; a secret that merely
 // contains or extends one stays in the surrounding range and is judged as
-// before. A span without a product folder component is returned whole.
-func splitAtProductFolders(span string) [][2]int {
-	parts := make([][2]int, 0, 1)
+// before. A span without a product folder component is returned whole, with
+// found false.
+func splitAtProductFolders(span string) (parts [][2]int, found bool) {
+	parts = make([][2]int, 0, 1)
 	runStart, runEnd := -1, 0
 	flush := func() {
 		if runStart >= 0 && runEnd > runStart {
@@ -664,6 +694,7 @@ func splitAtProductFolders(span string) [][2]int {
 			componentEnd = len(span)
 		}
 		if productlayout.IsFolderName(span[componentStart:componentEnd]) {
+			found = true
 			flush()
 		} else {
 			if runStart < 0 {
@@ -674,7 +705,7 @@ func splitAtProductFolders(span string) [][2]int {
 		componentStart = componentEnd + 1
 	}
 	flush()
-	return parts
+	return parts, found
 }
 
 func validHighEntropy(value string, fieldClass observability.FieldClass) bool {
