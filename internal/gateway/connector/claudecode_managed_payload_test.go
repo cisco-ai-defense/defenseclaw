@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookguard"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func managedPayloadRepoFile(t *testing.T, relative string) string {
@@ -154,7 +155,7 @@ func TestManagedClaudeCodeWrapperNamesMissingGuardAndRepair(t *testing.T) {
 			t.Fatalf("%s: wrapper has no missing-guard block: %q", group.eventType, args)
 		}
 		block := strings.Join(args[open+1:closeIndex], " ")
-		for _, want := range []string{windowsHookGuardBinaryName, "enterprise windows repair --profile standalone", "1>&2"} {
+		for _, want := range []string{windowsHookGuardBinaryName, managed.WindowsStandaloneSetupName + " /repair", "1>&2"} {
 			if !strings.Contains(block, want) {
 				t.Errorf("%s: missing-guard block %q lacks %q", group.eventType, block, want)
 			}

@@ -862,14 +862,16 @@ _CLAUDE_CHAIN_WARNING = (
 ).split()
 
 
-# The managed standalone wrapper names the missing guard and the repair command.
+# The managed standalone wrapper names the missing guard and the repair that
+# can restore it: Setup /repair, the only route that carries the guard payload.
 # Keep it identical to claudeManagedGuardMissingWords in
 # internal/gateway/connector/claudecode_chain.go.
 _CLAUDE_MANAGED_GUARD_MISSING = (
     "DefenseClaw could not start its Claude Code hook guard defenseclaw-hook-guard.exe "
     "because it is missing from the install folder. "
-    "Run defenseclaw.exe enterprise windows repair --profile standalone "
-    "from that folder as an administrator to restore it."
+    "Run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair "
+    "as an administrator to restore it. "
+    "Setup is not installed on this computer: use the copy in your MDM package or the release download."
 ).split()
 
 

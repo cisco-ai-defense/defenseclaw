@@ -794,6 +794,9 @@ func runWindowsEnterpriseStandaloneAction(
 	if err := refuseWindowsEnterpriseStandaloneDeferredState(action, opts); err != nil {
 		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 	}
+	if err := refuseWindowsEnterpriseStandaloneWithoutHookGuard(action, opts); err != nil {
+		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+	}
 	if err := refuseWindowsEnterpriseRepairFromAnotherRelease(action, opts); err != nil {
 		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 	}
@@ -5078,7 +5081,7 @@ func planWindowsEnterpriseEnsure(
 	}
 	if drift != "" {
 		if missing := missingWindowsEnterpriseSources(opts); len(missing) != 0 && drift != "bundle" {
-			if windowsEnterpriseStandalone(opts) && len(missing) == len(missingWindowsEnterpriseSources(&windowsEnterpriseLifecycleOptions{})) {
+			if windowsEnterpriseStandalone(opts) && len(missing) == len(missingWindowsEnterpriseSources(&windowsEnterpriseLifecycleOptions{resolvedProfile: opts.resolvedProfile})) {
 				// The installed CLI carries no payload, so it can never pass
 				// the binary flags; naming them sent administrators the wrong
 				// way (GAP-0682). Setup is the command that applies a config.
@@ -5157,7 +5160,25 @@ func missingWindowsEnterpriseSources(opts *windowsEnterpriseLifecycleOptions) []
 			missing = append(missing, source.flag)
 		}
 	}
+	// The standalone Claude Code policy starts every hook through the guard
+	// installed beside the hook, so a payload without it is incomplete: the
+	// install would refuse ordinary calls (Secure Client has no guard).
+	if windowsEnterpriseStandalone(opts) && strings.TrimSpace(opts.hookGuardBinary) == "" {
+		missing = append(missing, "--hook-guard-binary")
+	}
 	return missing
+}
+
+// refuseWindowsEnterpriseStandaloneWithoutHookGuard refuses a direct install
+// or upgrade that names no hook guard source before anything is changed. The
+// extracted-payload route passes the sources as flags, and the installer
+// repeats the check for a caller that reaches it without this CLI.
+func refuseWindowsEnterpriseStandaloneWithoutHookGuard(action string, opts *windowsEnterpriseLifecycleOptions) error {
+	if (action != "install" && action != "upgrade") || !windowsEnterpriseStandalone(opts) || strings.TrimSpace(opts.hookGuardBinary) != "" {
+		return nil
+	}
+	return windowsEnterpriseInvalidArguments("%s requires --hook-guard-binary (defenseclaw-hook-guard.exe from the Setup payload): "+
+		"the managed Claude Code hooks start through it, and without it they refuse ordinary calls (nothing was changed)", action)
 }
 
 // windowsBundleRollbackWithoutPayload reports the nested ensure that puts
