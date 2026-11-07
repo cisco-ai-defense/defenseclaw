@@ -373,7 +373,9 @@ fail_response() {
 {{end}}  defenseclaw_allow_failed_stop_event devin devin-hook "" "${PAYLOAD:-}" "$1" response
   defenseclaw_log_hook_failure devin devin-hook "$1" response "$FAIL_MODE" fail_closed
   echo "defenseclaw: devin hook error, blocking devin tool (sandbox hooks fail closed): $1" >&2
-  printf 'DefenseClaw hook failed closed\n'
+  # $2, when given, is the readable cause the gateway stated (a 429 names the
+  # limit that refused the call): the agent sees it.
+  printf '%s\n' "${2:-DefenseClaw hook failed closed}"
   exit 2
 }
 {{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
@@ -448,9 +450,8 @@ fail_response() {
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0
   fi
-{{if .Sandbox}}  printf '%s\n' "${2:-DefenseClaw hook failed closed}"
-{{else}}  printf 'DefenseClaw hook failed closed\n'
-{{end}}  exit 2
+  printf 'DefenseClaw hook failed closed\n'
+  exit 2
 }
 {{end}}
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}{{.ManagedHTTPFailureSH}}{{end}}{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
