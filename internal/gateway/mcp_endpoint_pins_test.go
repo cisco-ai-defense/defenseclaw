@@ -89,3 +89,54 @@ func TestDeniedPrefixPastTheHeldDigestsMayMatch(t *testing.T) {
 		t.Error("a prefix longer than the arguments the server has was not ruled out")
 	}
 }
+
+// A deny that differs only past the full digests a claim carries is still ruled
+// out by the one-byte tail, and the same-argument twin still blocks.
+func TestProjectMCPDenyDifferingPastTheFullDigestsIsRuledOut(t *testing.T) {
+	args := make([]string, 2050)
+	for i := range args {
+		args[i] = fmt.Sprintf("--arg-%d", i)
+	}
+	entry := config.MCPServerEntry{Name: "notes", Command: "/opt/tools/node", Args: args}
+	for _, mode := range []string{"off", "observe"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+			if mode == "observe" {
+				cfg.AssetPolicy.Enabled = true
+				cfg.AssetPolicy.Mode = config.AssetPolicyModeObserve
+			}
+			prefix := append([]string(nil), args[:2049]...)
+			prefix[2048] = "--other"
+			cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{Name: "notes", Command: "node", ArgsPrefix: prefix}}
+			api := &APIServer{scannerCfg: cfg}
+			gap0686Publish(api, cfg)
+			decision, matched := gap0686Hook(t, api, t.TempDir(), "PreToolUse", gap0686Claim(entry, false))
+			if matched && decision.Action == "block" {
+				t.Errorf("ordinary server blocked past pin bound: %+v", decision)
+			}
+			cfg.AssetPolicy.MCP.Denied[0].ArgsPrefix[2048] = args[2048]
+			decision, matched = gap0686Hook(t, api, t.TempDir(), "PreToolUse", gap0686Claim(entry, false))
+			if !matched || decision.Action != "block" {
+				t.Errorf("protected twin allowed: matched=%v decision=%+v", matched, decision)
+			}
+		})
+	}
+}
+
+// An exact deny of an argument list longer than 65,536 entries blocks: the
+// count a claim states is not clamped below it.
+func TestProjectMCPExactDenyOfAVeryLongArgumentListBlocks(t *testing.T) {
+	args := make([]string, 1<<16+1)
+	for i := range args {
+		args[i] = "--same"
+	}
+	entry := config.MCPServerEntry{Name: "notes", Command: "/opt/tools/node", Args: args}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{Name: "notes", Command: "node", ArgsPrefix: args}}
+	api := &APIServer{scannerCfg: cfg}
+	gap0686Publish(api, cfg)
+	decision, matched := gap0686Hook(t, api, t.TempDir(), "PreToolUse", gap0686Claim(entry, false))
+	if !matched || decision.Action != "block" {
+		t.Errorf("exact denied prefix past ArgCount clamp allowed: matched=%v decision=%+v", matched, decision)
+	}
+}

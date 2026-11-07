@@ -4,6 +4,7 @@
 package assetfacts
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,7 +46,7 @@ func TestMCPPinsSurviveTheBoundsAndAnotherPass(t *testing.T) {
 
 // GAP-0699, GAP-0701 review 5: a content is never dropped for not fitting. A
 // folder path past the bound loses the path and keeps the text; an asset past
-// the count bound keeps a truncated content with no text, once per name.
+// the size budget keeps a truncated content with no text, once per name.
 func TestContentIsNeverDroppedForNotFitting(t *testing.T) {
 	long := filepath.Join(t.TempDir(), strings.Repeat("a", 1100), "deep")
 	facts, _ := Decode(Encode(Facts{Contents: []Content{{
@@ -55,16 +56,33 @@ func TestContentIsNeverDroppedForNotFitting(t *testing.T) {
 	if len(got) != 1 || got[0].Dir != "" || len(got[0].Files) != 1 || got[0].Truncated {
 		t.Fatalf("long-path skill = %+v, want its text kept and no path", got)
 	}
+	// Names and folders this long exhaust the size budget after about a
+	// hundred contents: each keeps its text while the budget lasts, and one
+	// past it is a truncated content with no text, once per name.
+	dir := filepath.Join(t.TempDir(), strings.Repeat("a", 900))
 	var many []Content
-	for _, name := range []string{"a", "b", "c", "d", "d", "e"} {
-		many = append(many, Content{Kind: ContentPlugin, Name: name, Dir: filepath.Join(t.TempDir(), name), Files: []ContentFile{{Rel: "plugin.json", Text: "{}"}}})
+	for i := 0; i < 120; i++ {
+		many = append(many, Content{Kind: ContentPlugin, Name: fmt.Sprintf("%s%03d", strings.Repeat("n", 200), i), Dir: dir, Files: []ContentFile{{Rel: "plugin.json", Text: "{}"}}})
 	}
+	many = append(many, many[len(many)-1])
 	facts, _ = Decode(Encode(Facts{Contents: many}))
-	for name, want := range map[string]bool{"a": false, "b": false, "c": false, "d": true, "e": true} {
-		got := facts.ContentsFor(ContentPlugin, name)
-		if len(got) != 1 || got[0].Truncated != want || (want && len(got[0].Files) != 0) {
-			t.Errorf("plugin %q past the count bound = %+v, want one content, truncated=%v", name, got, want)
+	kept, stubs := 0, 0
+	for _, content := range facts.Contents {
+		switch {
+		case !content.Truncated && len(content.Files) == 1:
+			kept++
+		case content.Truncated && len(content.Files) == 0:
+			stubs++
+		default:
+			t.Errorf("content %q = %+v, want its text or a truncated content without text", content.Name[len(content.Name)-3:], content)
 		}
+	}
+	if kept < 100 || stubs == 0 || kept+stubs != len(many)-1 {
+		t.Errorf("kept %d with text and %d truncated of %d (one a repeat), want none dropped and the repeat stubbed once", kept, stubs, len(many)-1)
+	}
+	last := many[len(many)-1].Name
+	if got := facts.ContentsFor(ContentPlugin, last); len(got) != 1 || !got[0].Truncated {
+		t.Errorf("last plugin = %+v, want one truncated content", got)
 	}
 }
 

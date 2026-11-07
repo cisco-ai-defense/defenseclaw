@@ -5,6 +5,7 @@ package assetfacts
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -38,5 +39,40 @@ func TestMCPPinsCoverArgumentsPastTheFactBound(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// Arguments past the full digests are pinned by one byte each, up to the
+// bound, and survive another pass of the codec; the count is stated as is,
+// past 65,536, so an exact deny of a very long list is never ruled out by it.
+func TestMCPPinsTailCoversArgumentsPastTheFullDigests(t *testing.T) {
+	args := make([]string, maxPinArgs+maxTailPins+10)
+	for i := range args {
+		args[i] = fmt.Sprintf("--argument-%d", i)
+	}
+	server := &MCPServer{Name: "notes", Command: "node", Args: args, ProjectScope: true, Digest: strings.Repeat("ab", 32)}
+	facts, ok := Decode(Encode(Facts{MCP: server}))
+	if !ok || facts.MCP == nil || facts.MCP.Pins == nil {
+		t.Fatalf("no pins: %+v", facts.MCP)
+	}
+	again, _ := Decode(Encode(facts))
+	for _, pins := range []*MCPPins{facts.MCP.Pins, again.MCP.Pins} {
+		tail := pins.TailBytes()
+		if pins == nil || pins.ArgCount != len(args) || len(pins.Args) != maxPinArgs || len(tail) != maxTailPins {
+			t.Fatalf("pins = %d count, %d digests, %d tail bytes", pins.ArgCount, len(pins.Args), len(tail))
+		}
+		for _, i := range []int{maxPinArgs, maxPinArgs + 1, maxPinArgs + maxTailPins - 1} {
+			if tail[i-maxPinArgs] != PinTailByte(args[i]) {
+				t.Errorf("tail byte %d does not digest %q", i, args[i])
+			}
+		}
+	}
+	over := make([]string, 1<<16+1)
+	for i := range over {
+		over[i] = "--same"
+	}
+	big, _ := Decode(Encode(Facts{MCP: &MCPServer{Name: "notes", Command: "node", Args: over, ProjectScope: true, Digest: strings.Repeat("ab", 32)}}))
+	if big.MCP == nil || big.MCP.Pins == nil || big.MCP.Pins.ArgCount != len(over) {
+		t.Fatalf("the argument count was changed: %+v", big.MCP)
 	}
 }

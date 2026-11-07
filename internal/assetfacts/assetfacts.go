@@ -28,6 +28,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -51,6 +52,14 @@ const (
 	// past maxArgs still pins every argument a deny prefix can sensibly name.
 	// A prefix longer than this cannot be ruled out and is refused.
 	maxPinArgs = 2048
+	// maxTailPins bounds the one-byte argument digests (MCPPins.Tail) that
+	// follow the maxPinArgs full ones, so a deny prefix that differs deep in
+	// a long argument list is still ruled out. An argument past both bounds
+	// cannot be ruled out and is refused as a possible match.
+	maxTailPins = 1 << 16
+	// maxPinArgCount bounds the argument count a claim states; it is a
+	// sanity bound, not a clamp that could rule out an exact deny.
+	maxPinArgCount = math.MaxInt32
 	// pinArgDigestLen is the hex length of an argument digest: a collision
 	// only makes a rule "may match", the safe side.
 	pinArgDigestLen  = 16
@@ -134,14 +143,31 @@ type MCPServer struct {
 // MCPPins are the SHA-256 digests (hex) of the values an asset_policy rule
 // compares on an MCP server, taken from the complete definition the hook
 // read: the trimmed URL, the base name of the trimmed command, and each
-// trimmed argument (up to maxPinArgs, as PinArgSum), with the count of
-// arguments and the transport.
+// trimmed argument (up to maxPinArgs, as PinArgSum), then one byte of the
+// digest of each further argument (Tail, up to maxTailPins), with the count
+// of arguments and the transport.
 type MCPPins struct {
-	URL       string   `json:"url,omitempty"`
-	Command   string   `json:"command,omitempty"`
-	Args      []string `json:"args,omitempty"`
-	ArgCount  int      `json:"arg_count,omitempty"`
-	Transport string   `json:"transport,omitempty"`
+	URL      string   `json:"url,omitempty"`
+	Command  string   `json:"command,omitempty"`
+	Args     []string `json:"args,omitempty"`
+	ArgCount int      `json:"arg_count,omitempty"`
+	// Tail holds PinTailByte of the arguments from position len(Args) on,
+	// base64url, only when Args is full. A byte that differs rules a deny
+	// out; one that matches only keeps it as a possible match.
+	Tail      string `json:"tail,omitempty"`
+	Transport string `json:"transport,omitempty"`
+}
+
+// TailBytes are the decoded Tail digests, or nil.
+func (p *MCPPins) TailBytes() []byte {
+	if p == nil || p.Tail == "" {
+		return nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(p.Tail)
+	if err != nil {
+		return nil
+	}
+	return raw[:min(len(raw), maxTailPins)]
 }
 
 // Encode renders facts as a header value, or "" when there is nothing to
@@ -274,6 +300,13 @@ func PinSum(value string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// PinTailByte is the digest of one argument as MCPPins.Tail holds it: the
+// first byte of PinSum.
+func PinTailByte(value string) byte {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(value)))
+	return sum[0]
+}
+
 // PinArgSum is the digest of one argument as MCPPins.Args holds it: the
 // first pinArgDigestLen hex characters of PinSum.
 func PinArgSum(value string) string { return PinSum(value)[:pinArgDigestLen] }
@@ -288,28 +321,43 @@ func pinsOf(server MCPServer) *MCPPins {
 		}
 		pins := MCPPins{
 			URL: cleanDigest(server.Pins.URL), Command: cleanDigest(server.Pins.Command),
-			ArgCount: min(max(server.Pins.ArgCount, 0), 1<<16), Transport: clean(server.Pins.Transport, 64),
+			ArgCount: min(max(server.Pins.ArgCount, 0), maxPinArgCount), Transport: clean(server.Pins.Transport, 64),
 		}
 		for _, arg := range server.Pins.Args {
 			if sum := cleanArgDigest(arg); sum != "" && len(pins.Args) < maxPinArgs {
 				pins.Args = append(pins.Args, sum)
 			}
 		}
-		pins.ArgCount = max(pins.ArgCount, len(pins.Args))
+		held := len(pins.Args)
+		if held == maxPinArgs {
+			// A tail follows only a full run of digests; its positions start
+			// there.
+			if tail := server.Pins.TailBytes(); len(tail) > 0 {
+				pins.Tail = base64.RawURLEncoding.EncodeToString(tail)
+				held += len(tail)
+			}
+		}
+		pins.ArgCount = max(pins.ArgCount, held)
 		return &pins
 	}
 	pins := MCPPins{ArgCount: len(server.Args), Transport: clean(server.Transport, 64)}
+	var tail []byte
 	if strings.TrimSpace(server.URL) != "" {
 		pins.URL = PinSum(server.URL)
 	}
 	if command := strings.TrimSpace(server.Command); command != "" {
 		pins.Command = PinSum(filepath.Base(command))
 	}
-	for _, arg := range server.Args {
-		if len(pins.Args) == maxPinArgs {
-			break
+	for i, arg := range server.Args {
+		switch {
+		case i < maxPinArgs:
+			pins.Args = append(pins.Args, PinArgSum(arg))
+		case len(tail) < maxTailPins:
+			tail = append(tail, PinTailByte(arg))
 		}
-		pins.Args = append(pins.Args, PinArgSum(arg))
+	}
+	if len(tail) > 0 {
+		pins.Tail = base64.RawURLEncoding.EncodeToString(tail)
 	}
 	return &pins
 }
@@ -480,8 +528,8 @@ func CopilotHomeSet() bool {
 // EnvSkillRoots lists the skill folders a connector takes from the
 // environment of the agent process: Copilot's COPILOT_HOME and
 // COPILOT_SKILLS_DIRS (comma separated; "~/" is the home, a relative one is
-// below Copilot launch workspace, which a hook knows only as cwd or a folder
-// above it up to the repository root, so each is a root). Only the standalone hook, which runs in the agent's
+// below Copilot launch workspace, which a hook knows only as cwd or the
+// outermost repository root (or home) above it: launchWorkspaces). Only the standalone hook, which runs in the agent's
 // environment, can know them; a gateway's own environment is not the user's.
 func EnvSkillRoots(connector, home, cwd string) []string {
 	if strings.ToLower(strings.TrimSpace(connector)) != "copilot" {
@@ -505,11 +553,7 @@ func EnvSkillRoots(connector, home, cwd string) []string {
 			}
 			dir = filepath.Join(home, dir[2:])
 		case !filepath.IsAbs(dir):
-			levels := projectLevels(home, cwd)
-			if len(levels) == 0 && filepath.IsAbs(cwd) {
-				levels = []string{filepath.Clean(cwd)}
-			}
-			for _, level := range levels {
+			for _, level := range launchWorkspaces(home, cwd) {
 				if root := filepath.Join(level, dir); !slices.Contains(roots, root) {
 					roots = append(roots, root)
 				}
@@ -521,6 +565,46 @@ func EnvSkillRoots(connector, home, cwd string) []string {
 		}
 	}
 	return roots
+}
+
+// launchWorkspaces are the folders a relative COPILOT_SKILLS_DIRS entry can
+// belong to: Copilot resolves it against the one folder it was started in,
+// never against the folders between it and the repository root. A hook sees
+// its event cwd, which is that folder, or a folder below it: so the roots are
+// cwd itself and the outermost folder above it that is a repository root, or
+// home when no repository is found below home. A skill folder of an
+// intermediate folder is not a root, so it can neither be judged in place of
+// the selected one nor hide it behind a nested repository or the home folder.
+func launchWorkspaces(home, cwd string) []string {
+	dir := strings.TrimSpace(cwd)
+	if !filepath.IsAbs(dir) {
+		return nil
+	}
+	dir = filepath.Clean(dir)
+	out := []string{dir}
+	home = filepath.Clean(strings.TrimSpace(home))
+	outer, homeAbove := "", ""
+	for level := 0; level < maxProjectLevels; level++ {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			outer = dir
+		}
+		if home != "" && home == dir {
+			homeAbove = dir
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	if outer == "" {
+		outer = homeAbove
+	}
+	if outer != "" && !slices.Contains(out, outer) {
+		out = append(out, outer)
+	}
+	return out
 }
 
 // SkillNameFromInput is the folder name of the skill a tool call selects

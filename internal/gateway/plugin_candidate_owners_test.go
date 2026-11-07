@@ -42,3 +42,25 @@ func TestAmbiguousPluginServerIsJudgedOnEveryCandidateOwnerText(t *testing.T) {
 		})
 	}
 }
+
+// Four installed plugins can own one plugin tool name: all four with ordinary
+// text allow the call, in the managed and the default configuration.
+func TestFourOrdinaryPluginCandidateOwnersAllow(t *testing.T) {
+	saved := profileAssetScanApplies
+	t.Cleanup(func() { profileAssetScanApplies = saved })
+	profileAssetScanApplies = func(*config.Config) bool { return true }
+	names := []string{"p", "p_a", "p_a_b", "p_a_b_c"}
+	var contents []assetfacts.Content
+	for _, name := range names {
+		contents = append(contents, assetfacts.Content{Kind: assetfacts.ContentPlugin, Name: name,
+			Dir: filepath.Join(t.TempDir(), name), Files: []assetfacts.ContentFile{{Rel: "SKILL.md", Text: gap0699Plain}}})
+	}
+	req := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "mcp__plugin_p_a_b_c_d__run", MCPServerName: "plugin_p_a_b_c_d"}
+	facts := assetfacts.Facts{Contents: contents}
+	if action, reason := gap0699Claude(t, gap0699Config("claudecode"), req, facts); action != "allow" {
+		t.Errorf("four ordinary candidate owners blocked: action=%q reason=%q", action, reason)
+	}
+	if action, reason := gap0699Claude(t, config.DefaultConfig(), req, facts); action != "allow" {
+		t.Errorf("default configuration blocked: action=%q reason=%q", action, reason)
+	}
+}

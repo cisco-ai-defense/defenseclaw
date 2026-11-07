@@ -4,6 +4,7 @@
 package assetfacts
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,3 +73,23 @@ func TestClaudePluginRootsReadTheRegistry(t *testing.T) {
 }
 
 func jsonQuote(s string) string { return `"` + strings.ReplaceAll(s, `\`, `\\`) + `"` }
+
+// Every candidate owner of one tool name that fits the size budget keeps its
+// text, however many there are; one that does not is kept as a truncated
+// content without text.
+func TestEncodeKeepsTextOfEveryContentWithinTheBudget(t *testing.T) {
+	var contents []Content
+	for c := 0; c < 12; c++ {
+		contents = append(contents, Content{Kind: ContentPlugin, Name: fmt.Sprintf("p_%d", c), Dir: filepath.Join(t.TempDir(), "p"),
+			Files: []ContentFile{{Rel: "SKILL.md", Text: "ordinary text"}}})
+	}
+	got, ok := Decode(Encode(Facts{Contents: contents}))
+	if !ok || len(got.Contents) != len(contents) {
+		t.Fatalf("contents = %d ok=%v, want %d", len(got.Contents), ok, len(contents))
+	}
+	for _, content := range got.Contents {
+		if content.Truncated || len(content.Files) != 1 {
+			t.Errorf("content %q lost its text: %+v", content.Name, content)
+		}
+	}
+}
