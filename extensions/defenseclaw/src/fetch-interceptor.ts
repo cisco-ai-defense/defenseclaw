@@ -88,13 +88,23 @@ interface InterceptorSharedState {
   ollamaPorts: string[];
   installed: boolean;
   guardrailPort: number | null;
+  /**
+   * start() of every instance that found the transport already patched by
+   * another instance. When the installing instance stops, the next one takes
+   * over, so a plugin reload never leaves the transport unguarded (GAP-0745).
+   */
+  waiting: Array<() => void>;
 }
 
 function getOrCreateSharedState(): InterceptorSharedState {
   const existing = (globalThis as Record<symbol, unknown>)[
     INTERCEPTOR_STATE_KEY
   ] as InterceptorSharedState | undefined;
-  if (existing) return existing;
+  if (existing) {
+    // State created by an older plugin build in this process has no queue.
+    existing.waiting ??= [];
+    return existing;
+  }
 
   const state: InterceptorSharedState = {
     llmDomains: providersConfig.providers.flatMap(
@@ -103,6 +113,7 @@ function getOrCreateSharedState(): InterceptorSharedState {
     ollamaPorts: providersConfig.ollama_ports.map(String),
     installed: false,
     guardrailPort: null,
+    waiting: [],
   };
   (globalThis as Record<symbol, unknown>)[INTERCEPTOR_STATE_KEY] = state;
   return state;
@@ -1509,6 +1520,10 @@ export function createFetchInterceptor(
     return next(opts, handler);
   }
 
+  // True only for the instance that put the transport patch in place: only it
+  // may take the shared "installed" mark back down when it stops.
+  let ownsInstall = false;
+
   function start(): void {
     if (originalFetch) return; // this instance already started
 
@@ -1517,6 +1532,9 @@ export function createFetchInterceptor(
     // (so our operator-added domains merge into the shared list) and
     // return without re-wrapping fetch/https/http/undici.
     if (_shared.installed) {
+      // Queue behind the installing instance: if it stops (a plugin reload
+      // stops the old copy after the new one registered), this one installs.
+      if (!_shared.waiting.includes(start)) _shared.waiting.push(start);
       // Pass the sidecar token like the first instance does: the
       // endpoint is authenticated, and an unauthenticated call is
       // logged as an api-auth-failure security event.
@@ -1528,6 +1546,7 @@ export function createFetchInterceptor(
     }
     _shared.installed = true;
     _shared.guardrailPort = guardrailPort;
+    ownsInstall = true;
 
     originalFetch = globalThis.fetch;
     egressReporter = createEgressReporter({ guardrailPort });
@@ -2348,8 +2367,22 @@ export function createFetchInterceptor(
       clearInterval(selfTestTimer);
       selfTestTimer = null;
     }
-    _shared.installed = false;
-    _shared.guardrailPort = null;
+    const queued = _shared.waiting.indexOf(start);
+    if (queued >= 0) _shared.waiting.splice(queued, 1);
+    if (ownsInstall) {
+      ownsInstall = false;
+      _shared.installed = false;
+      _shared.guardrailPort = null;
+      // Hand the transport to an instance that was waiting for it.
+      const successor = _shared.waiting.shift();
+      if (successor) {
+        try {
+          successor();
+        } catch {
+          // The successor reports its own failure; stop() must not throw.
+        }
+      }
+    }
     logInfo("[defenseclaw] LLM fetch interceptor stopped");
   }
 
