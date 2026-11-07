@@ -44,6 +44,10 @@ func NeutralEvent(event string) bool {
 // a neutral event.
 const NonBlockingExitMessage = "DefenseClaw could not check this Claude Code lifecycle event; run the DefenseClaw installer again to repair its hook launcher."
 
+// OpenExitMessage is the visible answer for an unavailable launcher in the
+// default and permissive tiers.
+const OpenExitMessage = "DefenseClaw could not check this Claude Code event; run the DefenseClaw installer again to repair its hook launcher."
+
 // MissingMessage is the sentence the guard prints when it blocks because
 // nothing is at the launcher path. It is also the cmd.exe guard's sentence
 // (one argument per word), which teardown recognizes: keep it unchanged.
@@ -84,43 +88,39 @@ func AbsoluteHookExecutable(path string) bool {
 	return strings.EqualFold(path[strings.LastIndexAny(path, `\/`)+1:], hookBinaryName)
 }
 
-// Argv returns the launcher and hook argv the guard runs for args, its
-// arguments after the program name. Only an absolute defenseclaw-hook.exe
-// launcher with the per-user Claude Code hook argv is accepted, so the guard
-// starts nothing but DefenseClaw's launcher.
-func Argv(args []string) (launcher string, hookArgs []string, ok bool) {
-	launcher, hookArgs, _, _, ok = ParseInvocation(args)
-	return launcher, hookArgs, ok
-}
-
-// ParseInvocation accepts the released guard argv and the event-bound form.
-// The latter lets the guard answer stop and session-end failures without
-// depending on the order or size of fields in the hook's stdin JSON.
-func ParseInvocation(args []string) (launcher string, hookArgs []string, event string, wrapped bool, ok bool) {
+// ParseInvocationMode reads the event and availability answer bound by Setup.
+// Older registrations without a mode keep their released closed answer.
+func ParseInvocationMode(args []string) (launcher string, hookArgs []string, event string, wrapped, open, ok bool) {
 	want := []string{"hook", "--connector", "claudecode"}
-	if len(args) != 2+len(want) && len(args) != 4+len(want) {
-		return "", nil, "", false, false
+	if len(args) != 2+len(want) && len(args) != 4+len(want) && len(args) != 6+len(want) {
+		return "", nil, "", false, false, false
 	}
 	if args[0] != Subcommand && args[0] != WrappedSubcommand ||
 		!Guardable(args[1]) || !AbsoluteHookExecutable(args[1]) {
-		return "", nil, "", false, false
+		return "", nil, "", false, false, false
 	}
 	for i, arg := range want {
 		if args[2+i] != arg {
-			return "", nil, "", false, false
+			return "", nil, "", false, false, false
 		}
 	}
-	if len(args) == 4+len(want) {
+	if len(args) >= 4+len(want) {
 		if args[5] != "--event" || !validEventName(args[6]) {
-			return "", nil, "", false, false
+			return "", nil, "", false, false, false
 		}
 		event = args[6]
 	} else if args[0] == WrappedSubcommand {
-		return "", nil, "", false, false
+		return "", nil, "", false, false, false
 	} else {
 		event = "PreToolUse" // the released direct guard form
 	}
-	return args[1], append([]string(nil), want...), event, args[0] == WrappedSubcommand, true
+	if len(args) == 6+len(want) {
+		if args[7] != "--unavailable-mode" || args[8] != "open" {
+			return "", nil, "", false, false, false
+		}
+		open = true
+	}
+	return args[1], append([]string(nil), want...), event, args[0] == WrappedSubcommand, open, true
 }
 
 func validEventName(event string) bool {
@@ -135,19 +135,12 @@ func validEventName(event string) bool {
 	return true
 }
 
-// Run runs launcher with hookArgs and passes its stdin, stdout, stderr and
-// exit code through. When the launcher cannot run it returns 2, which Claude
-// Code treats as a block, and prints MissingMessage when nothing is at the
-// launcher path and CannotStartMessage otherwise.
-func Run(launcher string, hookArgs []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	code, _ := run(launcher, hookArgs, "PreToolUse", stdin, stdout, stderr)
-	return code
-}
-
-// RunEvent runs one registered event. Wrapped answers encode ordinary child
-// error exits so cmd.exe can distinguish them from a guard start failure.
-func RunEvent(launcher string, hookArgs []string, event string, wrapped bool, stdin io.Reader, stdout, stderr io.Writer) int {
-	code, _ := run(launcher, hookArgs, event, stdin, stdout, stderr)
+// RunEventMode runs one registered event. A wrapped child error exit is shifted
+// so cmd.exe can distinguish it from a guard start failure. It applies the
+// bound availability mode only when the launcher
+// cannot start. A started hook keeps its own answer and output unchanged.
+func RunEventMode(launcher string, hookArgs []string, event string, wrapped, open bool, stdin io.Reader, stdout, stderr io.Writer) int {
+	code, _ := run(launcher, hookArgs, event, open, stdin, stdout, stderr)
 	if wrapped && code != 0 && code != 2 {
 		if code < 0 || code >= WrappedExitBase {
 			code = 1
@@ -162,7 +155,7 @@ func RunEvent(launcher string, hookArgs []string, event string, wrapped bool, st
 func ExceptionStatus(code int) bool { return code < 0 || uint32(code) >= 0x80000000 }
 
 // run is Run that also reports whether the launcher started.
-func run(launcher string, hookArgs []string, event string, stdin io.Reader, stdout, stderr io.Writer) (int, bool) {
+func run(launcher string, hookArgs []string, event string, open bool, stdin io.Reader, stdout, stderr io.Writer) (int, bool) {
 	command := exec.Command(launcher, hookArgs...)
 	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, stderr
 	err := command.Run()
@@ -178,6 +171,10 @@ func run(launcher string, hookArgs []string, event string, stdin io.Reader, stdo
 	}
 	if NeutralEvent(event) {
 		fmt.Fprintln(stderr, NonBlockingExitMessage)
+		return 1, false
+	}
+	if open {
+		fmt.Fprintln(stderr, OpenExitMessage)
 		return 1, false
 	}
 	if _, statErr := os.Lstat(launcher); errors.Is(statErr, fs.ErrNotExist) {
