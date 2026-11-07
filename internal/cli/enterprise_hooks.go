@@ -779,14 +779,19 @@ type enterpriseHookReconcileRun struct {
 	// Targets are the targets of the manifest the run reconciled (standalone
 	// Unix only): under manifest enrollment they, not the eligible-accounts
 	// record, say who is enrolled (GAP-0761).
-	Targets             []enterprisehooks.ManifestTarget
-	Rows                []enterpriseHookReconcileRow
-	Failures            int
-	Pending             int
-	Repairs             int             `json:"-"`
-	RestoredPaths       []string        `json:"-"` // owned files returned to the last verified fingerprint
-	RepairedTargets     map[string]bool `json:"-"` // target keys whose worker reported a repair
-	StateErr            error
+	Targets         []enterprisehooks.ManifestTarget
+	Rows            []enterpriseHookReconcileRow
+	Failures        int
+	Pending         int
+	Repairs         int             `json:"-"`
+	RestoredPaths   []string        `json:"-"` // owned files returned to the last verified fingerprint
+	RepairedTargets map[string]bool `json:"-"` // target keys whose worker reported a repair
+	StateErr        error
+	// PolicyErr is a vendor folder that does not protect DefenseClaw's
+	// recorded machine policy file (standalone Windows, E3 case c): the
+	// publish refused it, so the reconcile is not clean. It is not a
+	// target failure and not a state write failure (GAP-0756, GAP-0760).
+	PolicyErr           error
 	WatchDirs           []string
 	WatchExclusiveFiles []string // DC-only writers: react to any event
 	WatchSharedFiles    []string // agent + DC writers: react only to Create/Remove/Rename
@@ -1206,17 +1211,23 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 	attentionFailures := run.attentionFailures()
 	if enterpriseHookJSON {
 		payload := map[string]any{
-			"ok":       attentionFailures == 0 && run.StateErr == nil,
+			"ok":       attentionFailures == 0 && run.StateErr == nil && run.PolicyErr == nil,
 			"manifest": run.Manifest,
 			"results":  run.Rows,
 		}
 		if run.StateErr != nil {
 			payload["state_error"] = run.StateErr.Error()
 		}
+		if run.PolicyErr != nil {
+			payload["policy_error"] = run.PolicyErr.Error()
+		}
 		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(payload)
-		if attentionFailures > 0 || run.StateErr != nil {
+		if attentionFailures > 0 || run.StateErr != nil || run.PolicyErr != nil {
 			if run.StateErr != nil {
 				return fmt.Errorf("enterprise hooks reconcile state write failed: %w", run.StateErr)
+			}
+			if attentionFailures == 0 {
+				return fmt.Errorf("enterprise hooks reconcile refused the machine policy: %w", run.PolicyErr)
 			}
 			return fmt.Errorf("enterprise hooks reconcile failed for %d target(s)", attentionFailures)
 		}
@@ -1235,12 +1246,18 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 			fmt.Fprintf(cmd.ErrOrStderr(), "  %s %s: %s\n", Style("✗", "fg=red", "bold"), label, row.Error)
 		}
 	}
+	if run.PolicyErr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "  %s machine policy: %s\n", Style("✗", "fg=red", "bold"), run.PolicyErr.Error())
+	}
 	if run.StateErr != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "  %s hook guardian state: %s\n", Style("✗", "fg=red", "bold"), run.StateErr.Error())
 		return fmt.Errorf("enterprise hooks reconcile state write failed: %w", run.StateErr)
 	}
 	if attentionFailures > 0 {
 		return fmt.Errorf("enterprise hooks reconcile failed for %d target(s)", attentionFailures)
+	}
+	if run.PolicyErr != nil {
+		return fmt.Errorf("enterprise hooks reconcile refused the machine policy: %w", run.PolicyErr)
 	}
 	return nil
 }
@@ -3118,7 +3135,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		)
 	}
 	registry := newEnterpriseHooksConnectorRegistry()
-	enterpriseHookStandalonePlatformPrepare(os.Stderr)
+	run.PolicyErr = enterpriseHookStandalonePlatformPrepare(os.Stderr)
 	openCodePorts, openCodePortsErr := enterpriseHookStandaloneOpenCodePorts(ctx, manifest)
 	if openCodePortsErr != nil {
 		fmt.Fprintf(os.Stderr, "defenseclaw: enterprise hooks: %v\n", openCodePortsErr)
@@ -3764,7 +3781,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			failedOwnedPaths = enterpriseHookWatchFailedOwnedPaths(run)
 		}
 		status := "ok"
-		if run.attentionFailures() > 0 || run.StateErr != nil {
+		if run.attentionFailures() > 0 || run.StateErr != nil || run.PolicyErr != nil {
 			status = "attention"
 		}
 		rowsHash := enterpriseHookReconcileRowsHash(run.Rows)
@@ -3792,7 +3809,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] state write failed: %s\n", run.StateErr)
 		}
 		if legacyWatch {
-			legacyRepairRetryNeeded = run.Failures > 0 || run.StateErr != nil
+			legacyRepairRetryNeeded = run.Failures > 0 || run.StateErr != nil || run.PolicyErr != nil
 			if !legacyRepairRetryNeeded {
 				legacyRepairRetryDelay = 0
 			}
