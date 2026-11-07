@@ -14,7 +14,6 @@
   "github.com/defenseclaw/defenseclaw/cmd/defenseclaw-launcher": 6.1,
   "github.com/defenseclaw/defenseclaw/cmd/defenseclaw-scanners": 6.2,
   "github.com/defenseclaw/defenseclaw/cmd/defenseclaw-sensor-helper": 6.3,
-  "github.com/defenseclaw/defenseclaw/cmd/defenseclaw-setup": 29.5,
   "github.com/defenseclaw/defenseclaw/cmd/defenseclaw-startup": 6.0,
   "github.com/defenseclaw/defenseclaw/cmd/generate-guardrail-catalog": 6.0,
   "github.com/defenseclaw/defenseclaw/cmd/internal/hookpriority": 6.0,

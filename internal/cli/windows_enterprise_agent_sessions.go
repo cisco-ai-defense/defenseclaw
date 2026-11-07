@@ -80,7 +80,7 @@ var (
 	// windowsEnterpriseEnrolledTargets returns the targets the installed
 	// guardian manifest enrolls, keyed as windowsEnterpriseManifestRowKey.
 	windowsEnterpriseEnrolledTargets = func() (map[string]bool, error) {
-		layout, err := managed.StandaloneWindowsLayout()
+		layout, err := windowsManagedLayout.standalone()
 		if err != nil {
 			return nil, err
 		}
@@ -109,7 +109,7 @@ var (
 	// put back each target's hooks, keyed as windowsEnterpriseManifestRowKey,
 	// or an error when its record stays unreadable.
 	windowsEnterpriseGuardianRestores = func() (map[string]time.Time, error) {
-		layout, err := managed.StandaloneWindowsLayout()
+		layout, err := windowsManagedLayout.standalone()
 		if err != nil {
 			return nil, err
 		}

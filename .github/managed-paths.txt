@@ -51,7 +51,6 @@ internal/*secure-client*
 # Cowork host delivery uses a shared configuration package.
 internal/config/cowork_vm_sensor*.go
 cmd/*enterprise*
-cmd/*managed*
 cmd/*standalone*
 
 # Secure Client gRPC contract.

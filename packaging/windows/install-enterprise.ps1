@@ -4606,8 +4606,8 @@ try {
             throw ("DefenseClaw enterprise installer rejected its module before import: " +
                 "could not read the installed deployment metadata $($script:DefenseClawBootstrapUnreadableRecord), " +
                 'which holds the digest this deployment admits its installed module by; nothing was changed. ' +
-                'Run Setup /repair to rebuild it: the installed release''s DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1, ' +
-                'as LocalSystem or from an elevated prompt')
+                'Run Setup /repair to rebuild it: the installed release''s Setup, & ''.\DefenseClawSetup-Enterprise-Standalone-x64.exe'' /repair JSON=1, ' +
+                'as LocalSystem or from an elevated PowerShell prompt (Setup is not installed on this computer: use the copy in your MDM package or the release download)')
         }
         throw "DefenseClaw enterprise installer rejected its module before import: $rejection"
     }

@@ -1816,13 +1816,36 @@ func runEnterpriseHookWorkerPoolReporting(ctx context.Context, jobs []enterprise
 	}
 	outcomes := make([]enterpriseHookWorkerOutcome, len(jobs))
 	semaphore := make(chan struct{}, parallelism)
+	active, _ := ctx.Value(enterpriseHookWatchActiveWorkersKey{}).(*enterpriseHookWatchActiveWorkers)
 	var wg sync.WaitGroup
 	for i := range jobs {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			semaphore <- struct{}{}
+			var watchedKeys []string
+			var watchedIndex map[int]string
+			if active != nil {
+				watchedIndex = make(map[int]string, len(jobs[i].Request.Targets))
+				for _, target := range jobs[i].Request.Targets {
+					key := active.targetKey(jobs[i].Account.Home, jobs[i].Account.User, target.Options.ConnectorName)
+					if key != "" {
+						watchedKeys = append(watchedKeys, key)
+						watchedIndex[target.Index] = key
+					}
+				}
+				active.start(watchedKeys)
+			}
 			response, err := enterpriseHookWorkerRunner(ctx, jobs[i].Account, jobs[i].Request)
+			if active != nil {
+				var repairedKeys []string
+				for _, target := range response.Targets {
+					if key := watchedIndex[target.Index]; target.Repaired && key != "" {
+						repairedKeys = append(repairedKeys, key)
+					}
+				}
+				active.finish(watchedKeys, repairedKeys)
+			}
 			// The slot is free before done runs: a removal record that waits
 			// for its account's lock never holds off another account's worker.
 			<-semaphore
@@ -1984,4 +2007,40 @@ func (found *enterpriseHookWorkerDiscovery) response(connectors []string) enterp
 	}
 	response.PrivateInstalls = append(installs, found.unlisted...)
 	return response
+}
+
+func (w *enterpriseHookWatchActiveWorkers) targetKey(home, user, connector string) string {
+	if key := w.targetKeys[enterpriseHookWatchTargetID(home, connector)]; key != "" {
+		return key
+	}
+	return enterpriseHookProtectedTargetKey(enterpriseHookReconcileRow{User: user, UserHome: home, Connector: connector})
+}
+
+func (w *enterpriseHookWatchActiveWorkers) start(keys []string) {
+	w.mu.Lock()
+	if w.active == nil {
+		w.active = make(map[string]int)
+	}
+	for _, key := range keys {
+		w.active[key]++
+	}
+	w.mu.Unlock()
+}
+
+func (w *enterpriseHookWatchActiveWorkers) finish(keys, repairedKeys []string) {
+	w.mu.Lock()
+	if len(repairedKeys) > 0 && w.repaired == nil {
+		w.repaired = make(map[string]bool)
+	}
+	for _, key := range repairedKeys {
+		w.repaired[key] = true
+	}
+	for _, key := range keys {
+		if w.active[key] <= 1 {
+			delete(w.active, key)
+		} else {
+			w.active[key]--
+		}
+	}
+	w.mu.Unlock()
 }

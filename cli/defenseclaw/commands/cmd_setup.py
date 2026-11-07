@@ -17619,10 +17619,10 @@ def _wait_for_connector_runtime(
                     tolerated=tolerated,
                 )
             if snapshot_ready:
-                # The Windows native setup launcher publishes the complete roster
-                # before this sequential passive-Doctor pass. Do not make that
-                # roster share the residual publication no-progress window; the
-                # existing count-aware absolute deadline is its transaction bound.
+                # On Windows the complete roster is published before this
+                # sequential passive-Doctor pass. Do not make that roster share
+                # the residual publication no-progress window; the existing
+                # count-aware absolute deadline is its transaction bound.
                 # Preserve the established non-Windows timing contract in this
                 # Windows-parity change.
                 deadline = (

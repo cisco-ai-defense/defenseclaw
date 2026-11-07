@@ -75,8 +75,8 @@ func TestStandaloneManagedInstallRepairRefusesDriftedContentFiles(t *testing.T) 
 		if !ok {
 			t.Fatalf("%s: no result in %+v", name, results)
 		}
-		if result.Outcome != CanonicalBoundary || !strings.Contains(result.RepairError, "Setup /ensure") {
-			t.Fatalf("%s: result = %+v, want a boundary refusal naming Setup /ensure", name, result)
+		if result.Outcome != CanonicalBoundary || !strings.Contains(result.RepairError, `.\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure`) {
+			t.Fatalf("%s: result = %+v, want a boundary refusal naming the Setup /ensure command", name, result)
 		}
 		if err := ValidateTrustedFilePath(files[name], name); err == nil {
 			t.Fatalf("%s: the drifted content file was re-ACLed in place", name)
@@ -148,8 +148,8 @@ func TestRefuseStandaloneContentRepairDecision(t *testing.T) {
 		result, refused := refuseStandaloneContentRepair(
 			managedDataTarget{path: drifted[name], kind: kind, content: true}, CanonicalOptions{Quiet: true},
 		)
-		if !refused || result.Outcome != CanonicalBoundary || !strings.Contains(result.RepairError, "Setup /ensure") {
-			t.Fatalf("%s: refused=%t result=%+v, want a boundary refusal naming Setup /ensure", name, refused, result)
+		if !refused || result.Outcome != CanonicalBoundary || !strings.Contains(result.RepairError, `.\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure`) {
+			t.Fatalf("%s: refused=%t result=%+v, want a boundary refusal naming the Setup /ensure command", name, refused, result)
 		}
 		if err := ValidateTrustedFilePath(drifted[name], name); err == nil {
 			t.Fatalf("%s: the refusal changed the descriptor", name)

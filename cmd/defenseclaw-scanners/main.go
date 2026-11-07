@@ -256,7 +256,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	defer release()
 	if err := validateRuntimeCodeTree(); err != nil {
-		fmt.Fprintf(stderr, "defenseclaw-scanners: runtime code is not trusted: %v; run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1 as LocalSystem\n", err)
+		fmt.Fprintf(stderr, "defenseclaw-scanners: runtime code is not trusted: %v; run `%s` as LocalSystem. %s\n", err, managed.WindowsSetupCommand("/repair", "JSON=1"), managed.WindowsSetupSource)
 		return 1
 	}
 	pythonDir := filepath.Join(dir, "python")
@@ -514,7 +514,7 @@ func prepareRuntime(manifest runtimeManifest) (string, error) {
 		return "", fmt.Errorf("the unpacked scanner runtime does not match this build: %w", err)
 	}
 	if err := validateRuntimeCodeTree(); err != nil {
-		return "", fmt.Errorf("the unpacked scanner runtime code is not trusted: %w; run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1 as LocalSystem", err)
+		return "", fmt.Errorf("the unpacked scanner runtime code is not trusted: %w; run `%s` as LocalSystem. %s", err, managed.WindowsSetupCommand("/repair", "JSON=1"), managed.WindowsSetupSource)
 	}
 	return dir, nil
 }

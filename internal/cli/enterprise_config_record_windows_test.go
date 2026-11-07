@@ -135,7 +135,15 @@ func TestTheGuardianKeepsAnEditBehindALifecycleLockItCannotOpen(t *testing.T) {
 				t.Fatal(err)
 			}
 			setTestFileDACL(t, lock, "D:P")
-			restore := func() { setTestFileDACL(t, lock, "D:P(A;;FA;;;SY)(A;;FA;;;BA)") }
+			// The test account opens it again whoever runs the tests: a
+			// standard user is neither SYSTEM nor an administrator
+			// (cowork-1-0-8 GAP-0094).
+			user, err := windows.GetCurrentProcessToken().GetTokenUser()
+			if err != nil || user == nil || user.User.Sid == nil {
+				t.Fatalf("resolve the test account: %v", err)
+			}
+			me := user.User.Sid.String()
+			restore := func() { setTestFileDACL(t, lock, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;"+me+")") }
 			t.Cleanup(restore)
 			return restore
 		}},

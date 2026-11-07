@@ -23,6 +23,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 type createdFolderFixture struct {
@@ -298,6 +300,7 @@ func TestStandaloneCreatedFolderRecordSkipsDefenseClawsOwnFolders(t *testing.T) 
 // GAP-0091 review 2 S1: the CLI's removal of C:\Program Files\Cisco removes
 // only a recorded, empty, trusted plain folder, and takes its record with it.
 func TestRemoveWindowsCreatedFolderIfEmptyTakesTheRecordWithTheFolder(t *testing.T) {
+	realStandaloneProcess := windowsEnterpriseStandaloneProcess
 	previousFileTrust := windowsManagedPolicyFileTrustCheck
 	t.Cleanup(func() { windowsManagedPolicyFileTrustCheck = previousFileTrust })
 	windowsManagedPolicyFileTrustCheck = trustAll
@@ -367,10 +370,45 @@ func TestRemoveWindowsCreatedFolderIfEmptyTakesTheRecordWithTheFolder(t *testing
 			t.Fatalf("junction: removed=%v err=%v target=%v record=%v, want refused", removed, err, exists(target), exists(record))
 		}
 	})
-	t.Run("secure client", func(t *testing.T) {
+	// Review 3 L2: the CLI that removes the folder after an uninstall carries
+	// no standalone profile pin, so the removal must not test one. This row
+	// runs the real pin test with the variable unset, as the CLI process
+	// does, and removes the folder through its record.
+	t.Run("a process without the profile pin removes the recorded folder", func(t *testing.T) {
 		reset(t, true, "")
-		windowsEnterpriseStandaloneProcess = func() bool { return false }
+		windowsEnterpriseStandaloneProcess = realStandaloneProcess
 		t.Cleanup(func() { windowsEnterpriseStandaloneProcess = func() bool { return true } })
+		t.Setenv(managed.EnterpriseProfileEnv, "")
+		if realStandaloneProcess() {
+			t.Fatal("the process pin must be unset for this row")
+		}
+		if removed, err := RemoveWindowsCreatedFolderIfEmpty(folder); err != nil || !removed || exists(folder) || exists(record) {
+			t.Fatalf("no pin: removed=%v err=%v folder=%v record=%v, want both gone", removed, err, exists(folder), exists(record))
+		}
+	})
+	// Review 3 L3: a back-filled record (origin upgrade) is treated like one
+	// written at creation; nothing reads the origin.
+	t.Run("an upgrade record is removed like any other", func(t *testing.T) {
+		reset(t, false, "")
+		body, err := json.Marshal(windowsCreatedFolderRecord{SchemaVersion: 1, Path: folder, Origin: "upgrade"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(fixture.records, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(record, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if removed, err := RemoveWindowsCreatedFolderIfEmpty(folder); err != nil || !removed || exists(folder) || exists(record) {
+			t.Fatalf("origin upgrade: removed=%v err=%v folder=%v record=%v, want both gone", removed, err, exists(folder), exists(record))
+		}
+	})
+	t.Run("secure client keeps no record, so nothing is removed", func(t *testing.T) {
+		reset(t, false, "")
+		windowsEnterpriseStandaloneProcess = realStandaloneProcess
+		t.Cleanup(func() { windowsEnterpriseStandaloneProcess = func() bool { return true } })
+		t.Setenv(managed.EnterpriseProfileEnv, "")
 		if removed, err := RemoveWindowsCreatedFolderIfEmpty(folder); err != nil || removed || !exists(folder) {
 			t.Fatalf("Secure Client: removed=%v err=%v, want nothing removed", removed, err)
 		}

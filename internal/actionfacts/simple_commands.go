@@ -1714,7 +1714,8 @@ func simpleRelativePathOperand(source string) bool {
 		}
 	}
 	call, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
-	if !ok {
+	if !ok || len(call.Args) == 0 {
+		// No program word, so no path operand: a redirect-only or assignment-only statement.
 		return false
 	}
 	for _, arg := range call.Args[1:] {

@@ -144,8 +144,7 @@ func repairEnterpriseHookManagedInstallPlatform() {
 		return
 	}
 	executable, _ := os.Executable()
-	programFiles, _ := winpath.TrustedProgramFiles()
-	programData, _ := winpath.TrustedProgramData()
+	programFiles, programData := windowsManagedLayout.programRoots()
 	if layout, ok := enterpriseHookManagedInstallLayout(
 		executable, cfg.DataDir, enterpriseHookManifest, programFiles, programData,
 	); ok {

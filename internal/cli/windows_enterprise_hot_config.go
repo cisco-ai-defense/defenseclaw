@@ -43,7 +43,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	gwconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // A config-only ensure used to run the whole upgrade transaction: it stops
@@ -68,7 +67,7 @@ const windowsEnterpriseHotConfigMaxBytes = 4 << 20
 var (
 	windowsEnterpriseHotConfigTimeout        = 30 * time.Second
 	windowsEnterpriseHotConfigRestartTimeout = 2 * time.Minute
-	windowsEnterpriseHotConfigLayout         = managed.StandaloneWindowsLayout
+	windowsEnterpriseHotConfigLayout         = windowsManagedStandaloneLayout
 	windowsEnterpriseHotConfigLock           = acquireWindowsEnterpriseLifecycleLock
 	windowsEnterpriseHotConfigValidate       = validateWindowsServiceConfig
 	windowsEnterpriseHotConfigPoll           = 2 * time.Second
@@ -210,7 +209,7 @@ func windowsBundleTakeOverPendingCommit(ctx context.Context, opts *windowsEnterp
 	if err != nil {
 		return false
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return false
 	}
@@ -309,7 +308,7 @@ func windowsEnterpriseHotConfigApply(
 	if config.NeedsMigrationV9(next) {
 		return unavailable("the staged config needs a config_version migration")
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return unavailable("cannot resolve the trusted enterprise roots: " + err.Error())
 	}
@@ -1588,7 +1587,7 @@ func installWindowsEnterpriseSuppliedConfigOverUnparseable(configPath string) (s
 	if err := windowsEnterpriseStandaloneConfigPreflight(supplied); err != nil {
 		return "", err
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return "", nil
 	}

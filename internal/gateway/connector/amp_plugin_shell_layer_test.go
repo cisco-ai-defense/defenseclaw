@@ -15,11 +15,11 @@ import (
 	"testing"
 )
 
-// ampShellLayerPattern is the check the Windows Setup acceptance
-// (scripts/windows-native-ci.ps1, wizard-selected Amp) and the Windows
-// connector contract (scripts/live-connector-e2e/run-windows.ps1,
-// setup-created Amp) run over the Amp policy plugin: the plugin talks to the
-// gateway itself and must not depend on a shell hook, WSL or a POSIX shell.
+// ampShellLayerPattern is the check the Windows connector contract
+// (scripts/live-connector-e2e/run-windows-install.ps1, setup-created Amp on an
+// install.ps1 install) runs over the Amp policy plugin: the plugin talks to
+// the gateway itself and must not depend on a shell hook, WSL or a POSIX
+// shell.
 var ampShellLayerPattern = regexp.MustCompile(`(?i)defenseclaw-hook(?:\.exe|\.cmd)|\bwsl\b|\bbash\b|\bchmod\b`)
 
 // TestAmpPluginNamesNoShellLayer: every rendered Amp policy plugin, the

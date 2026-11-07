@@ -339,7 +339,7 @@ func TestWindowsEnterpriseHeldHookClosureIsReportedAndReleased(t *testing.T) {
 			if tc.wantError {
 				messages = result.Errors
 			}
-			if !windowsBundleHasCode(messages, tc.wantCode) || !strings.Contains(messages[len(messages)-1].Message, "/repair") {
+			if !windowsBundleHasCode(messages, tc.wantCode) || !strings.Contains(messages[len(messages)-1].Message, windowsEnterpriseAdminCommand("repair")) {
 				t.Fatalf("held closure not named: errors=%v warnings=%v", result.Errors, result.Warnings)
 			}
 		})

@@ -15,9 +15,11 @@ package cli
 import (
 	"fmt"
 	"io/fs"
+	"runtime"
 	"syscall"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -30,7 +32,9 @@ import (
 // classification of the real check errors is pinned on every OS by
 // managed.TestStoredCredentialValue.
 func TestManagedBundleSecretValueWindows(t *testing.T) {
-	layout, err := managed.StandaloneWindowsLayout()
+	// The layout the verify and apply read the store from
+	// (enterprisebundle.Layout), not windowsManagedLayout's sandbox.
+	layout, err := enterprisebundle.Layout(runtime.GOOS)
 	if err != nil {
 		t.Fatal(err)
 	}

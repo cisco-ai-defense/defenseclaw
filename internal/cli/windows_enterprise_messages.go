@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // Windows enterprise result wording that does not depend on Windows APIs,
@@ -52,9 +54,10 @@ const windowsEnterpriseActiveSessionWhen = "while the accounts have an active (c
 // LocalSystem run removes: install again, then run the given Setup action,
 // both as LocalSystem while the accounts have an active session.
 func windowsEnterpriseLocalSystemRemedy(action string) string {
-	return "run DefenseClaw Setup /ensure and then " + action + ", both as LocalSystem " + windowsEnterpriseActiveSessionWhen + " " +
+	return "run " + windowsEnterpriseSetupCommand("/ensure") + " and then " + windowsEnterpriseSetupCommand(strings.Fields(action)...) +
+		", both as LocalSystem " + windowsEnterpriseActiveSessionWhen + " " +
 		"(an MDM system context, or from an elevated prompt a one-time scheduled task that runs as SYSTEM; " +
-		"see \"Run Setup as LocalSystem\" in the Windows enterprise guide)"
+		"see \"Run Setup as LocalSystem\" in the Windows enterprise guide). " + managed.WindowsSetupSource
 }
 
 // windowsEnterpriseInstallerExitFailure names an installer engine that
@@ -87,7 +90,8 @@ func windowsEnterpriseUserStateRemainingMessage(count int, accounts string, reru
 		next = "sign the account out or close its agents, then delete each folder named below by hand as an administrator: " +
 			"this purge already removed the machine deployment that lists the enrolled accounts, so /uninstall PURGE=1 run again no longer finds them. " +
 			"Do not delete a folder kept for the account's agent registrations (its connector_backups restore them): " +
-			"run Setup /ensure and then /uninstall PURGE=1 while that account has an active session. "
+			"run " + windowsEnterpriseSetupCommand("/ensure") + " and then " + windowsEnterpriseSetupCommand("/uninstall", "PURGE=1") +
+			" while that account has an active session (" + managed.WindowsSetupSource + "). "
 	}
 	return fmt.Sprintf("--purge ran as LocalSystem but could not remove all DefenseClaw per-user data and binaries of %d enrolled account(s), "+
 		"which keep per-user hook tokens that nothing accepts any more. Usually an agent or editor that account runs still holds a file: "+

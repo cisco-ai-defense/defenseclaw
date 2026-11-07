@@ -279,16 +279,32 @@ if ($readers.Count -ne 1) {
 }
 else {
     . ([scriptblock]::Create([string]$readers[0].Extent.Text))
+    foreach ($hintName in @('Test-DefenseClawStandaloneProfile', 'Format-DefenseClawSetupAction')) {
+        $hint = @($moduleAst.FindAll({
+                    param($node)
+                    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and [string]$node.Name -ceq $hintName
+                }, $true))
+        if ($hint.Count -ne 1) { $failures.Add("expected one $hintName, found $($hint.Count)"); continue }
+        . ([scriptblock]::Create([string]$hint[0].Extent.Text))
+    }
     $script:UnreadableMetadataMessage = 'could not read the installed deployment metadata'
-    foreach ($case in @(@('empty', ''), @('garbage', 'e-not-a-record'), @('array', '[1]'), @('number', '5'))) {
-        try {
-            [void](ConvertFrom-DefenseClawDeploymentMetadataText -Path 'C:\x\deployment.json' -Text $case[1])
-            $failures.Add("module reader accepted the $($case[0]) record")
-        }
-        catch {
-            if (-not ([string]$_.Exception.Message).StartsWith($script:UnreadableMetadataMessage) -or
-                -not ([string]$_.Exception.Message).Contains('Setup /repair')) {
-                $failures.Add("module reader $($case[0]) record: $($_.Exception.Message)")
+    # GAP-0095: a standalone computer has no Setup installed, so the hint runs
+    # it from its folder and says where it comes from; another profile keeps
+    # "Setup /repair" as it was.
+    foreach ($profileCase in @(
+            @('Standalone', "run & '.\DefenseClawSetup-Enterprise-Standalone-x64.exe' /repair (Setup is not installed on this computer: use the copy in your MDM package or the release download) to rebuild it"),
+            @('SecureClient', 'run Setup /repair to rebuild it'))) {
+        $script:DefenseClawEnterpriseProfile = $profileCase[0]
+        foreach ($case in @(@('empty', ''), @('garbage', 'e-not-a-record'), @('array', '[1]'), @('number', '5'))) {
+            try {
+                [void](ConvertFrom-DefenseClawDeploymentMetadataText -Path 'C:\x\deployment.json' -Text $case[1])
+                $failures.Add("module reader accepted the $($case[0]) record")
+            }
+            catch {
+                if (-not ([string]$_.Exception.Message).StartsWith($script:UnreadableMetadataMessage) -or
+                    -not ([string]$_.Exception.Message).EndsWith($profileCase[1])) {
+                    $failures.Add("module reader $($case[0]) record under $($profileCase[0]): $($_.Exception.Message)")
+                }
             }
         }
     }

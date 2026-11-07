@@ -762,6 +762,10 @@ $failures = & $module {
                 $agForeignDropIn = [IO.Path]::Combine($agDropIns, '50-other-vendor.json')
                 [IO.File]::WriteAllText($agForeignDropIn, '{}')
                 Add-DefenseClawStandaloneUpgradeVendorFolderRecords @agArgs
+                $agMarker = [IO.Path]::Combine($agRecords, 'agent-folder-backfill.done')
+                if (-not [IO.File]::Exists($agMarker)) {
+                    $failures.Add('GAP-0704 review 3 S2: the first agent-folder back-fill left no one-shot marker')
+                }
                 foreach ($case in @(@('Cursor', $agCursor, $true), @('OpenAI\Codex', $agCodex, $true), @('OpenAI (its only child recorded)', $agOpenAI, $true),
                         @('managed-settings.d holding a foreign file', $agDropIns, $false), @('ClaudeCode above an unrecorded child', $agClaude, $false),
                         @('the Cisco folder with an inherited descriptor', $agVendor, $false))) {
@@ -769,7 +773,11 @@ $failures = & $module {
                         $failures.Add("GAP-0704 back-fill: $($case[0]) recorded=$(-not $case[2]), want $($case[2])")
                     }
                 }
-                $unproven = @(Get-DefenseClawUnprovenVendorFolders -RecordDirectory $agRecords -ProgramData $agPd -ProgramFiles $agPf)
+                # Review 3 L4: only the folders DefenseClaw touched (a
+                # DefenseClaw file, or a DefenseClaw folder, in them), taken
+                # before the uninstall removes its files.
+                $touched = @(Get-DefenseClawTouchedUnrecordedVendorFolders -RecordDirectory $agRecords -ProgramData $agPd -ProgramFiles $agPf)
+                $unproven = @(Get-DefenseClawUnprovenVendorFolders -Touched $touched -RecordDirectory $agRecords)
                 foreach ($want in @($agDropIns, $agClaude, $agVendor)) {
                     if (@($unproven | Microsoft.PowerShell.Core\Where-Object { $_ -ceq $want }).Count -ne 1) {
                         $failures.Add("GAP-0704 rule (i): $want is not listed once as not provably created: $($unproven -join '; ')")
@@ -779,6 +787,17 @@ $failures = & $module {
                     $failures.Add("GAP-0704 rule (i): want exactly the three unproven folders, got: $($unproven -join '; ')")
                 }
                 [IO.File]::Delete($agForeignDropIn)
+                # Review 3 S2: the back-fill is one-shot. The foreign file is
+                # gone, but a later install, upgrade or repair does not
+                # record the two folders.
+                Add-DefenseClawStandaloneUpgradeVendorFolderRecords @agArgs
+                foreach ($folder in @($agDropIns, $agClaude)) {
+                    if ([IO.File]::Exists((& $agRecord $folder))) {
+                        $failures.Add("GAP-0704 review 3 S2: a second back-fill recorded $folder")
+                    }
+                }
+                # A first run that did not reach its marker back-fills again.
+                [IO.File]::Delete($agMarker)
                 Add-DefenseClawStandaloneUpgradeVendorFolderRecords @agArgs
                 foreach ($folder in @($agDropIns, $agClaude, $agCursor, $agCodex, $agOpenAI)) {
                     $recordFile = & $agRecord $folder
@@ -814,6 +833,187 @@ $failures = & $module {
                     if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $folder)) {
                         $failures.Add("GAP-0704: the purge removed $folder, which nothing proves DefenseClaw created")
                     }
+                }
+                if ([IO.File]::Exists($agMarker) -or [IO.Directory]::Exists($agRecords)) {
+                    $failures.Add('GAP-0704 review 3 S2: the purge left the one-shot marker or the record folder')
+                }
+
+                # Review 3: a fixture for each new row, with its own roots,
+                # StateRoot and lifecycle folder.
+                $r4Root = [IO.Path]::Combine($root, 'g0704r4')
+                $r4New = {
+                    param([string]$Name)
+                    $c = @{}
+                    $base = [IO.Path]::Combine($r4Root, $Name)
+                    $c.Pd = [IO.Path]::Combine($base, 'ProgramData')
+                    $c.Pf = [IO.Path]::Combine($base, 'Program Files')
+                    $c.Vendor = [IO.Path]::Combine($c.Pd, 'Cisco')
+                    $c.State = [IO.Path]::Combine($c.Vendor, 'DefenseClaw')
+                    $c.Life = [IO.Path]::Combine($c.Vendor, 'DefenseClaw-Lifecycle')
+                    $c.Records = [IO.Path]::Combine($c.Life, 'created-folders')
+                    foreach ($folder in @($c.Pd, $c.Pf, $c.Vendor, $c.State)) {
+                        [void][IO.Directory]::CreateDirectory($folder)
+                    }
+                    Set-G091AdministratorsOwner -Path @($c.Pd, $c.Pf, $c.Vendor, $c.State)
+                    [void]$native::CreateDirectorySecure($c.Life, $adminOnly)
+                    [IO.File]::WriteAllText([IO.Path]::Combine($c.Life, 'lifecycle.lock'), '')
+                    $c.Roots = @($c.Pd, $c.Pf)
+                    $c.Args = @{ RecordDirectory = $c.Records; Roots = $c.Roots; StateRoot = $c.State; ProgramData = $c.Pd; ProgramFiles = $c.Pf
+                        ProgramDataVendorFolder = $c.Vendor; ProgramFilesVendorFolder = [IO.Path]::Combine($c.Pf, 'Cisco') }
+                    $c.OpenAI = [IO.Path]::Combine($c.Pd, 'OpenAI')
+                    $c.Codex = [IO.Path]::Combine($c.OpenAI, 'Codex')
+                    $c.Ownership = [IO.Path]::Combine($c.State, 'install', 'codex-requirements-ownership.json')
+                    $c
+                }
+                $r4Fill = { param($c) $fillArgs = $c.Args; Add-DefenseClawStandaloneUpgradeVendorFolderRecords @fillArgs }
+                $r4Has = { param($c, [string]$Folder) [IO.File]::Exists([IO.Path]::Combine($c.Records, (Get-DefenseClawCreatedFolderRecordName -Path $Folder))) }
+                # A Codex folder as the machine-policy writer of this release
+                # leaves it: the writer lock (its size is the counter), the
+                # writer copy and the hook copy of the state.
+                $r4Codex = {
+                    param($c, [switch]$Committed, [string]$HookCopy = '4', [string]$LockBytes = 'abc')
+                    & $agNew @($c.OpenAI, $c.Codex)
+                    $toml = [IO.Path]::Combine($c.Codex, 'requirements.toml')
+                    [IO.File]::WriteAllText($toml, "[hooks]`n")
+                    $hash = Get-DefenseClawPlainFileSha256 -Path $toml
+                    $state = (@{ requirements_sha256 = $hash } | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress)
+                    [IO.File]::WriteAllText([IO.Path]::Combine($c.Codex, '.defenseclaw-managed-hooks.writer.lock'), $LockBytes)
+                    if ($Committed) {
+                        [IO.File]::WriteAllText([IO.Path]::Combine($c.Codex, '.defenseclaw-managed-hooks.state.committed'), $state)
+                    }
+                    if ($HookCopy) {
+                        [IO.File]::WriteAllText([IO.Path]::Combine($c.Codex, ('.defenseclaw-managed-hooks.state.' + $HookCopy)), $state)
+                    }
+                    [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($c.Ownership))
+                    [IO.File]::WriteAllText($c.Ownership, (@{ preimage_existed = $false; postimage_sha256 = $hash } | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress))
+                }
+
+                # Review 3 S1: the files the Codex machine-policy writer adds
+                # (.defenseclaw-managed-hooks.writer.lock, .state.committed,
+                # .state.<n>) are DefenseClaw's own, and the state copy the
+                # lock names binds requirements.toml, so a back-fill after
+                # that writer has published still recognises the folder.
+                foreach ($case in @(
+                        @('s1a', 'writer lock, writer copy and hook copy', @{ Committed = $true }, $true),
+                        @('s1b', 'hook copy named by the lock only', @{}, $true),
+                        @('s1c', 'a hook copy the lock does not name', @{ HookCopy = '6' }, $false),
+                        @('s1d', 'a state copy name DefenseClaw does not write', @{ HookCopy = '04' }, $false))) {
+                    $c = & $r4New $case[0]
+                    $codexArgs = $case[2]
+                    & $r4Codex $c @codexArgs
+                    & $r4Fill $c
+                    $got = [bool](& $r4Has $c $c.Codex)
+                    if ($got -ne $case[3]) {
+                        $failures.Add("GAP-0704 review 3 S1: Codex folder with $($case[1]) recorded=$got, want $($case[3]): $(Get-DefenseClawAgentFolderBackfillRefusal -Path $c.Codex -Kind Codex -StateRoot $c.State -RecordDirectory $c.Records -CodexOwnershipPath $c.Ownership)")
+                    }
+                    if ($case[3] -and $got) {
+                        if (-not (& $r4Has $c $c.OpenAI)) {
+                            $failures.Add("GAP-0704 review 3 S1: OpenAI above the $($case[1]) folder was not recorded")
+                        }
+                        $document = [IO.File]::ReadAllText([IO.Path]::Combine($c.Records, (Get-DefenseClawCreatedFolderRecordName -Path $c.Codex))) | Microsoft.PowerShell.Utility\ConvertFrom-Json
+                        if ([string]$document.origin -cne 'upgrade') {
+                            $failures.Add('GAP-0704 review 3 S1: the Codex record is not origin upgrade')
+                        }
+                    }
+                }
+                # The names belong to Codex only.
+                $c = & $r4New 's1e'
+                $cursorHere = [IO.Path]::Combine($c.Pd, 'Cursor')
+                & $agNew @($cursorHere)
+                [IO.File]::WriteAllText([IO.Path]::Combine($cursorHere, '.defenseclaw-managed-hooks.writer.lock'), 'abc')
+                if (([string](Get-DefenseClawAgentFolderBackfillRefusal -Path $cursorHere -Kind Cursor -StateRoot $c.State -RecordDirectory $c.Records)) -notlike '*writer.lock*') {
+                    $failures.Add('GAP-0704 review 3 S1: a Cursor folder holding the Codex writer lock was not refused')
+                }
+
+                # Review 3 S2: an empty folder an administrator made after the
+                # first run, adopted by Setup (g582 case b: re-stamped with
+                # DefenseClaw's descriptor, then holding DefenseClaw's lock),
+                # is not recorded by a later repair, and a purge keeps it.
+                $c = & $r4New 's2'
+                & $r4Fill $c
+                if (-not [IO.File]::Exists([IO.Path]::Combine($c.Records, 'agent-folder-backfill.done'))) {
+                    $failures.Add('GAP-0704 review 3 S2: the first run on an empty deployment left no marker')
+                }
+                & $r4Codex $c -Committed
+                & $r4Fill $c
+                if ((& $r4Has $c $c.Codex) -or (& $r4Has $c $c.OpenAI)) {
+                    $failures.Add('GAP-0704 review 3 S2: a repair after the adoption recorded the adopted folder')
+                }
+                $adoptedTouched = @(Get-DefenseClawTouchedUnrecordedVendorFolders -RecordDirectory $c.Records -ProgramData $c.Pd -ProgramFiles $c.Pf)
+                if (@($adoptedTouched | Microsoft.PowerShell.Core\Where-Object { $_ -ceq $c.Codex }).Count -ne 1) {
+                    $failures.Add("GAP-0704 review 3 S2: the adopted folder is not named as touched: $($adoptedTouched -join '; ')")
+                }
+                foreach ($file in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $c.Codex -Force -File)) {
+                    [IO.File]::Delete($file.FullName)
+                }
+                [void](Invoke-DefenseClawStandaloneCreatedFolderRemoval -Layout @{ SelfUninstallReceiptPath = [IO.Path]::Combine($c.Life, ('self-uninstall-' + ('5' * 64) + '.json')) } -RecordDirectory $c.Records -Roots $c.Roots -SkipDeploymentCheck)
+                if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $c.Codex) -or -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $c.OpenAI)) {
+                    $failures.Add('GAP-0704 review 3 S2: the purge removed the folder Setup adopted')
+                }
+                if ([IO.Directory]::Exists($c.Records)) {
+                    $failures.Add('GAP-0704 review 3 S2: the purge left the record folder (the marker) behind')
+                }
+
+                # Review 3 L4: only the folders DefenseClaw touched are named.
+                $c = & $r4New 'l4'
+                $mdmCursor = [IO.Path]::Combine($c.Pd, 'Cursor')
+                [void][IO.Directory]::CreateDirectory($mdmCursor)
+                [IO.File]::WriteAllText([IO.Path]::Combine($mdmCursor, 'mdm-made.json'), '{}')
+                [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($c.Pf, 'Cisco', 'Cisco Secure Client'))
+                $touched = @(Get-DefenseClawTouchedUnrecordedVendorFolders -RecordDirectory $c.Records -ProgramData $c.Pd -ProgramFiles $c.Pf)
+                if (@($touched | Microsoft.PowerShell.Core\Where-Object { $_ -ceq $mdmCursor -or $_ -ceq [IO.Path]::Combine($c.Pf, 'Cisco') }).Count -ne 0 -or
+                    @($touched | Microsoft.PowerShell.Core\Where-Object { $_ -ceq $c.Vendor }).Count -ne 1) {
+                    $failures.Add("GAP-0704 review 3 L4: touched = '$($touched -join '; ')', want the ProgramData Cisco folder only (not a Cursor folder with another product's file, not a Cisco folder with Secure Client)")
+                }
+                [IO.File]::WriteAllText([IO.Path]::Combine($mdmCursor, '.defenseclaw-managed-runtime-selector.lock'), '')
+                $touched = @(Get-DefenseClawTouchedUnrecordedVendorFolders -RecordDirectory $c.Records -ProgramData $c.Pd -ProgramFiles $c.Pf)
+                if (@($touched | Microsoft.PowerShell.Core\Where-Object { $_ -ceq $mdmCursor }).Count -ne 1) {
+                    $failures.Add('GAP-0704 review 3 L4: a Cursor folder holding a DefenseClaw file is not touched')
+                }
+                $unproven = @(Get-DefenseClawUnprovenVendorFolders -Touched $touched -RecordDirectory $c.Records)
+                if ($unproven.Count -ne $touched.Count) {
+                    $failures.Add("GAP-0704 review 3 L4: unproven = '$($unproven -join '; ')', want the touched folders: '$($touched -join '; ')'")
+                }
+                Add-DefenseClawStandaloneCreatedFolderRecord -Path @($mdmCursor) -RecordDirectory $c.Records -Roots $c.Roots
+                if (@(Get-DefenseClawUnprovenVendorFolders -Touched $touched -RecordDirectory $c.Records | Microsoft.PowerShell.Core\Where-Object { $_ -ceq $mdmCursor }).Count -ne 0) {
+                    $failures.Add('GAP-0704 review 3 L4: a recorded folder is still named as not provably created')
+                }
+
+                # Review 3 L1: an error while reporting what an uninstall left
+                # must not escape the lifecycle `finally`, and one folder's
+                # failure loses no other.
+                $reported = [Collections.Generic.List[string]]::new()
+                $reportThrew = ''
+                & {
+                    function Get-DefenseClawStandaloneCreatedFolderPreview { param($Layout, $RecordDirectory, $Roots) throw 'the record folder cannot be listed' }
+                    function Get-DefenseClawUnprovenVendorFolders { param($Touched, $RecordDirectory) 'C:\one'; 'C:\two' }
+                    function Add-DefenseClawCreatedFolderKept {
+                        param($Folder, $Note)
+                        if ($Folder -ceq 'C:\one') { throw 'the event could not be written' }
+                        $reported.Add($Folder)
+                    }
+                    try {
+                        Write-DefenseClawUninstallCreatedFolderReport -Layout @{ Marker = 1 } -Touched @('C:\one', 'C:\two') -LeftNothing $true
+                    }
+                    catch {
+                        $reportThrew = [string]$_.Exception.Message
+                    }
+                }
+                if ($reportThrew -ne '' -or $reported.Count -ne 1 -or $reported[0] -cne 'C:\two') {
+                    $failures.Add("GAP-0704 review 3 L1: the uninstall report threw '$reportThrew' or lost the second folder: $($reported -join '; ')")
+                }
+                $reportThrew = ''
+                & {
+                    function Get-DefenseClawUnprovenVendorFolders { param($Touched, $RecordDirectory) throw 'the record folder cannot be listed' }
+                    try {
+                        Write-DefenseClawUninstallCreatedFolderReport -Layout @{ Marker = 1 } -Touched @('C:\one') -LeftNothing $true
+                    }
+                    catch {
+                        $reportThrew = [string]$_.Exception.Message
+                    }
+                }
+                if ($reportThrew -ne '') {
+                    $failures.Add("GAP-0704 review 3 L1: an unlistable record folder escaped the uninstall report: $reportThrew")
                 }
 
                 # Rule (ii): Secure Client.

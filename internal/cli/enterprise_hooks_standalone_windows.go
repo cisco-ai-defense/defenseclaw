@@ -28,7 +28,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // The standalone Unix guardian (per-user workers, NSS fallback, reconcile
@@ -151,8 +150,13 @@ func enterpriseHookStandaloneConfigRefresh(w io.Writer) {
 // long as it records an edit, so no run starts writing in between. When it
 // cannot take it, the reason says whether a run owns the file or the
 // guardian cannot tell; it records nothing then, and retries next cycle.
-func windowsEnterpriseConfigLifecycleClaim() managedConfigOwnership {
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+//
+// A seam for tests (cowork-1-0-8 GAP-0094): the package's tests take the
+// run's own lock in their temp folder (isolateTestRunFolders). The claim
+// opened the computer's real lock, so an elevated run held it, and a
+// standard user, who cannot open it, never recorded a generation.
+var windowsEnterpriseConfigLifecycleClaim = func() managedConfigOwnership {
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return managedConfigOwnership{reason: "the lifecycle folder cannot be resolved (" + err.Error() + ")"}
 	}

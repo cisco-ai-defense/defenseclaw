@@ -6045,7 +6045,8 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     assert "Add-DefenseClawStandaloneCreatedFolderRecord -Path @($directory)" in codex
     record = _psm1_function(module, "Add-DefenseClawStandaloneCreatedFolderRecord")
     assert "if (-not (Test-DefenseClawStandaloneProfile) -or @($Path).Count -eq 0) {" in record
-    assert "[IO.FileMode]::CreateNew" in record
+    assert "Write-DefenseClawCreatedFolderRecordFile -Path $recordPath -Body $body" in record
+    assert "[IO.FileMode]::CreateNew" in _psm1_function(module, "Write-DefenseClawCreatedFolderRecordFile")
     assert "_ = windowsCreatedFolderRecorder(created)" in ensure
     assert "!windowsEnterpriseStandaloneProcess()" in go
 
@@ -6128,7 +6129,7 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     assert tail.index("Remove-DefenseClawMdmRotationJournal -Purge") < tail.index(
         "$createdFolders = [string[]]@(Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout)"
     ) < tail.index("Remove-DefenseClawStandaloneCreatedFolders -Path $createdFolders") < tail.index(
-        "Get-DefenseClawStandaloneCreatedFolderPreview -Layout $layout"
+        "Write-DefenseClawUninstallCreatedFolderReport -Layout $layout -Touched $touchedVendorFolders"
     )
     finalizer = _psm1_function(module, "Complete-DefenseClawSelfUninstallRetirement")
     assert (
@@ -6154,6 +6155,11 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     assert "if err := os.Remove(recordPath); err != nil" in go
     registration = read(ROOT / "internal" / "cli" / "windows_enterprise_registration.go")
     assert "enterprisehooks.RemoveWindowsCreatedFolderIfEmpty(filepath.Dir(root))" in registration
+    # Review 3 L2: the CLI process carries no profile pin, so the removal
+    # does not test one (its caller is the standalone result handler).
+    removal = go[go.index("func RemoveWindowsCreatedFolderIfEmpty") :]
+    removal = removal[: removal.index("\n}\n")]
+    assert "windowsEnterpriseStandaloneProcess" not in removal and "if !filepath.IsAbs(path) {" in removal
     assert 'strings.EqualFold(filepath.Base(parent), "Cisco")' not in registration
 
     # GAP-0704: the agent folders are back-filled with "origin":"upgrade"
@@ -6166,7 +6172,44 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     assert "$dacl.Count -ne 3" in agent and "$ace.AceFlags -ne $inherit" in agent
     assert "[bool]$ownership.preimage_existed" in agent and "[bool]$receipt.config_preexisting" in agent
     assert "$document['origin'] = $Origin" in _psm1_function(module, "Add-DefenseClawStandaloneCreatedFolderRecord")
-    assert "'left in place: not provably created by DefenseClaw'" in lifecycle
+    report = _psm1_function(module, "Write-DefenseClawUninstallCreatedFolderReport")
+    assert "'left in place: not provably created by DefenseClaw'" in report
+    # Review 3 L1: nothing in the report can replace the lifecycle's own
+    # error or fail an uninstall that has finished: each step and each folder
+    # has its own try/catch with Write-Verbose, and the lifecycle `finally`
+    # calls only this function for them.
+    assert report.count("catch {") == 4 and report.count("try {") == 4
+    assert "Get-DefenseClawUnprovenVendorFolders" not in lifecycle
+    assert "Add-DefenseClawCreatedFolderKept -Folder $kept.Folder" not in lifecycle
+    # Review 3 L4: the unproven list is the folders DefenseClaw touched,
+    # taken before the uninstall (the snapshot precedes the lifecycle try).
+    assert lifecycle.index("Get-DefenseClawTouchedUnrecordedVendorFolders") < lifecycle.index(
+        "Remove-DefenseClawStandaloneLifecycleLockLeftover"
+    )
+    unproven = _psm1_function(module, "Get-DefenseClawUnprovenVendorFolders")
+    assert "foreach ($folder in @($Touched))" in unproven and "Get-DefenseClawAgentFolders" not in unproven
+    touched = _psm1_function(module, "Get-DefenseClawTouchedUnrecordedVendorFolders")
+    assert "Test-DefenseClawAgentFolderOwnFileName" in touched and "'^DefenseClaw(-[A-Za-z]+)?$'" in touched
+    # Review 3 L3: the origin is written, never read back by the module.
+    assert "Origin =" not in _psm1_function(module, "Get-DefenseClawStandaloneCreatedFolderRecords")
+    # Review 3 S1: the allow-list knows what the Codex machine-policy writer
+    # adds, and requirements.toml is bound by any state copy.
+    names = _psm1_function(module, "Test-DefenseClawAgentFolderOwnFileName")
+    assert "'.defenseclaw-managed-hooks.writer.lock'" in names
+    assert "'.defenseclaw-managed-hooks.state.committed'" in names
+    assert "'^\\.defenseclaw-managed-hooks\\.state\\.[1-9][0-9]{0,7}$'" in names
+    hashes = _psm1_function(module, "Get-DefenseClawCodexStateRequirementsHashes")
+    assert "'.defenseclaw-managed-hooks.writer.lock'" in hashes and "'.defenseclaw-managed-hooks.state.committed'" in hashes
+    assert "Get-DefenseClawCodexStateRequirementsHashes -Directory $Path" in agent
+    # Review 3 S2: the agent-folder back-fill runs once per deployment, with
+    # an administrator-only marker in the record folder that a purge removes.
+    assert backfill.index("Test-DefenseClawAgentFolderBackfillDone -RecordDirectory $RecordDirectory") < backfill.index(
+        "Get-DefenseClawAgentFolders"
+    ) < backfill.index("Set-DefenseClawAgentFolderBackfillDone -RecordDirectory $RecordDirectory")
+    assert "$script:AgentFolderBackfillMarker = 'agent-folder-backfill.done'" in module
+    assert "$script:AgentFolderBackfillMarker" in consumer
+    assert consumer.index("$script:AgentFolderBackfillMarker") < consumer.index("[IO.Directory]::Delete($RecordDirectory, $false)")
+    assert "Set-DefenseClawAgentFolderBackfillDone" not in lifecycle
     assert "'(?i)secure ?client|anyconnect'" in refusal
     assert 'Origin string `json:"origin,omitempty"`' in go
 

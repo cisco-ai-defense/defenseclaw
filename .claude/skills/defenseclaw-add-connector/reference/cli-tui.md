@@ -79,7 +79,7 @@ Batch mode (`setup -c a -c b --detected --all`, `--replace`), rollback and the c
 
 ### Step 7. Onboarding
 
-- `cmd_init.py`: the `--connector` Choice, plus the hidden Windows-installer flags (for example `--native-setup-copilot`).
+- `cmd_init.py`: the `--connector` Choice.
 - `cmd_quickstart.py`: the `--connector/--agent` Choice. It exits 2 on an ambiguous or contradictory choice.
 - `bootstrap._connector_readiness`: one arm per connector. Without one it returns `warn "unknown connector"`.
 - TUI first run: `tui/panels/first_run.CONNECTOR_CHOICES`.
@@ -101,7 +101,6 @@ Batch mode (`setup -c a -c b --detected --all`, `--replace`), rollback and the c
 
 - **Backup markers.** `cmd_uninstall._CONNECTOR_BACKUP_MARKERS` lists fixed backup file names under `connector_backups/<x>/`. `_teardown_connectors` uses them to also sweep inactive but dirty connectors.
 - **Teardown failures.** `_connector_teardown` aborts uninstall if Go teardown fails for any connector other than openclaw. `_GATEWAY_UNKNOWN_CONNECTOR_EXIT = 2` turns a connector this build no longer ships into a warning.
-- **Native installer state.** `commands/windows_native_uninstall.py` has the allowlist of connectors in authenticated native-installer state.
 - **Renaming or retiring.** Use `legacy_connector.py`, which mirrors Go `internal/legacyconnector` (core.md §1). It lists every config map where a connector ID appears. `defenseclaw migrate` persists the change.
 
 ### Step 10. Credentials and registries
@@ -135,18 +134,12 @@ Brand casing is explicit (`test_tui_label_maps_have_explicit_brand_cases`).
 - **`hook.go`** flags and `hookFailureExitCode` (core.md §5 and §8).
 - **`--config-home` path safety:** `connector_config_home_{other,windows}.go`.
 
-### Step 13. Installers and the Windows native Setup
+### Step 13. Installers
 
 | File : symbol | Notes |
 |---|---|
 | `scripts/install.sh` `CONNECTOR_CHOICES` | writes `picked_connector`, which `cmd_setup._read_picked_connector` reads |
 | `scripts/install.ps1` `$ConnectorChoices` | must equal the Windows supported, preview and not-certified sets minus ACP-only, and end with `"none"` (`test_windows_installer_tracks_supported_connectors`) |
-| `cmd/defenseclaw-setup/main.go` `nativeLifecycleConnectorNames`, `normalizeConnector`, per-connector cases | Windows native Setup: which connectors it can set up, plus accepted aliases (Copilot accepts `githubcopilot` and `github-copilot`) |
-| `cmd/defenseclaw-setup/wizard_windows.go` `wizardConnectorChoices` | wizard labels; pinned by `wizard_windows_test.go` |
-| `cmd/defenseclaw-setup/transaction.go`, `connector_reconciliation.go` | per-connector home resolution and rollback (`resolvePreviousConnectorHome`, backup names) |
-| `cmd/defenseclaw-setup/platform_windows.go` (`defaultDevinConfigDir`, `defaultDevinExecutable`, `defaultHermesHome`, `officialAntigravityConfigHomeForTransaction`) | the vendor's Windows config home and executable location, when they aren't under the user profile's default |
-| `cmd/defenseclaw-setup/devin_admission_windows.go` `verifyDevinExecutableAdmission` | pattern for a vendor whose executable Setup must admit (signer, identity and version output) before pinning it |
-| `internal/nativeinstallstate/state.go` | persisted vendor homes (for example `CopilotHome` / `COPILOT_HOME`) |
 | `packaging/macos/lib/installer_lib.sh` | **Secure Client allowlist; don't add connectors** |
 
 ### Step 14. Env vars and generated data
@@ -233,7 +226,6 @@ Tests: `Tests/SetupDefinitionsParityTests.swift`, `Tests/ConnectorOnboardingTest
 
 **Go:**
 - `internal/cli/connector_cmd_test.go`, `connector_config_home_test.go`, `status_connectors_test.go`.
-- `cmd/defenseclaw-setup/wizard_windows_test.go`, `main_test.go`.
 
 **macOS app:** `make macos-app-test` (step 15).
 

@@ -1,8 +1,9 @@
 # Native Windows CI
 
 `Windows Native CI` is DefenseClaw's deterministic Windows x64 merge gate. It
-runs on pull requests and pushes to `main` without WSL, MSYS, Git Bash, or
-provider credentials.
+runs on pull requests and pushes to `main` without WSL or provider
+credentials. Only the connector contract uses Git Bash, to run the shared
+`contract-smoke.sh`.
 
 Repository merge rules should require the aggregate check name
 `Windows Native Required`. The aggregate fails when a required Windows job
@@ -18,41 +19,33 @@ The merge gate covers:
   updater and headless TUI checks on pull requests; main and
   manual/release-candidate runs retain both exhaustive telemetry-registry
   modules and the complete TUI suite;
-- PowerShell parsing, timeout, redaction, and process-tree cleanup contracts;
-- a release-shaped Windows amd64 gateway archive and Python wheel;
-- a disposable-user fresh installation;
-- the public `install.ps1` authentication and native handoff path under a
-  token-bound disposable Windows profile;
-- installed CLI, gateway lifecycle, doctor, scanner, and dependency checks;
-- live-gateway Doctor custody checks for the audit database and HMAC-bound
-  device identity, proving the detached gateway and watchdog do not pin the
-  protected data directory;
-- Setup build and native install/repair/uninstall acceptance, including the
-  staged connector selection, repair, custody, and exact-restoration paths;
-- deterministic packaged connector contract tests for Codex, Claude Code,
-  Amp, Copilot, Cursor, Devin, Hermes, Antigravity, and OpenCode. OpenCode's
-  contract imports the installed JavaScript bridge, proves
-  `tool.execute.before` permits on normal return and blocks on a thrown error,
-  and treats `tool.execute.after` as observation only. Devin's cell stages the
-  digest-pinned official `3000.4.25` Windows archive solely to retain the
-  product's exact fixed-path, Authenticode-signer, and version admission; it
-  does not log in, run an interactive client session, or claim live-client
-  evidence; and
-- the Amp cell covers setup, observe/action
-  allow/block behavior, audit correlation, gateway-generated connector
-  telemetry, bounded timeout handling, teardown, and cleanup. It additionally
-  proves all five documented plugin callbacks, the Task/subagent boundary, a
-  private managed plugin, self-heal, and tamper-recovery behavior.
+- PowerShell parsing of every script and module, the standalone
+  managed-enterprise lifecycle smokes (`packaging/windows/tests`), the
+  `install.ps1` bootstrap and offline contract tests
+  (`cli/tests/test_install_ps1.py`), and the harness self-test (timeout,
+  redaction and process-tree cleanup contracts);
+- the connector contract on a per-user install: `contract-assets` builds this
+  tree's release-shaped Windows assets (`scripts/build-release-assets.sh ...
+  windows/amd64`), and each `connector-contract` cell (codex, claudecode, amp,
+  copilot, cursor, devin, hermes, antigravity, opencode) installs them with
+  `install.ps1 -Local` into a throwaway profile and runs
+  `scripts/live-connector-e2e/run-windows-install.ps1`: observe setup and the
+  Windows checks of what it wrote (exact hook commands, the Cursor and
+  Copilot PowerShell adapters, the Amp and OpenCode plugins, the Doctor row),
+  `contract-smoke.sh`'s golden allow and block payloads through the installed
+  hook with the gateway evidence, the observability v8 records, and teardown
+  restoring the vendor config byte for byte. No vendor agent is installed, so
+  a green cell is not connector certification.
+  `cli/tests/test_windows_connector_contract.py` pins the matrix to the
+  Windows connectors;
+- the install lifecycle on the same assets (`install-lifecycle`): install,
+  version, status, doctor, the TUI at 80x24, a repair re-run, and a full
+  uninstall that leaves no files, processes, Run value or Path entry; then the
+  `fresh` and `files-in-use` lanes of `scripts/test-install-lifecycle.ps1`.
 
-These deterministic packaged cells do not certify authenticated official-client
-behavior. Secret-bearing real-client evidence remains a separate manual layer.
-
-The packaged test artifact is built once and reused by the disposable lifecycle
-jobs. The public-bootstrap shard's child launch uses sandbox-relative arguments to stay
-deterministically below `CreateProcessWithLogonW`'s 1,024-character command-line
-limit even when the parent state root is deeply nested. Failure diagnostics are
-bounded, secret-redacted, retained for five days, and followed by unconditional
-process, listener, account/profile, and temporary-state cleanup.
+Failure diagnostics are bounded, secret-redacted, retained for five
+days, and followed by unconditional process, listener, and temporary-state
+cleanup.
 
 ## Relationship to Release
 
@@ -61,10 +54,7 @@ that boundary and does not poll or replay `Windows Native CI`.
 
 The secret-bearing real-client cells in `Connector Live E2E` are a separate,
 manual regression layer, not a release dependency or fork-pull-request merge
-gate. Its native Windows matrix covers Codex, Claude Code, and Amp. The Amp cell
-uses `AMP_API_KEY`, runs the official CLI through its native TypeScript plugin,
-and requires lifecycle, tool allow/block, audit, and gateway-generated
-connector telemetry evidence. It does not claim that Amp exports native OTLP.
+gate. They run on Linux and macOS only; the workflow has no Windows cells.
 
 One manual Release dispatch (`.github/workflows/release.yaml`) builds the
 publishable Windows assets from the reviewed `main` commit selected by that
