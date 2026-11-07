@@ -3609,7 +3609,7 @@
     {
       "name": "DEFENSECLAW_NO_SANDBOX",
       "category": "security_opt_out",
-      "purpose": "Set to 1 to run a harness natively for one command when `defenseclaw sandbox enable <harness>` has wrapped it in your shell (for example `DEFENSECLAW_NO_SANDBOX=1 claude`), where your organization allows a host run: when the policy lists the agent in `required_for` the host run is still refused unless the account is in `enterprise.enrollment.exempt_users`, or sandboxes are unavailable to the account and the effective `when_unavailable` setting is `alert`. The wrapper then calls the real harness instead of `defenseclaw sandbox run`.",
+      "purpose": "Set to 1 to run a harness natively for one command when `defenseclaw sandbox enable <harness>` has wrapped it in your shell (for example `DEFENSECLAW_NO_SANDBOX=1 claude`), where your organization allows a host run. On a managed computer whose policy lists the agent in `required_for` the host run is still refused unless the account is in `enterprise.enrollment.exempt_users`, or sandboxes are unavailable to the account and the effective `when_unavailable` setting is `alert`; a per-user gateway does not read `required_for`. The wrapper then calls the real harness instead of `defenseclaw sandbox run`.",
       "default": "unset",
       "accepted_values": [
         "1",
