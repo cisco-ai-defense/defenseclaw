@@ -113,12 +113,6 @@ var claudeChainSource = func(launcher string) string {
 		return ""
 	}
 	candidates := []string{filepath.Join(filepath.Dir(launcher), windowsHookGuardBinaryName)}
-	if stable, installed := canonicalNativeWindowsHookBinary(), canonicalNativeWindowsInstalledHookBinary(); stable != "" && installed != "" && pathidentity.Same(launcher, stable) {
-		// Packaged installs ship this distinct small program in their signed
-		// inventory. A spare file beside HookRuntime's stable launcher is not
-		// the installer source for this layout.
-		candidates = []string{filepath.Join(filepath.Dir(installed), windowsHookGuardBinaryName)}
-	}
 	if gateway, err := claudeChainGatewayExecutable(); err == nil && strings.EqualFold(filepath.Base(gateway), windowsGatewayBinaryName) {
 		candidates = append(candidates, filepath.Join(filepath.Dir(gateway), windowsHookGuardBinaryName))
 	}
@@ -236,9 +230,6 @@ func ensureClaudeChain(launcher string) error {
 	if source == "" {
 		if present && claudeFileMatches(files.approved, record.Digest) {
 			return restoreProbedClaudeChainGuard(files, record.Digest, dir)
-		}
-		if stable := canonicalNativeWindowsHookBinary(); stable != "" && pathidentity.Same(launcher, stable) {
-			return fmt.Errorf("the packaged Claude Code hook guard is unavailable; run the DefenseClaw installer again")
 		}
 		return fmt.Errorf("the Claude Code hook guard is unavailable; run the DefenseClaw installer again")
 	}
