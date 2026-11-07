@@ -1479,9 +1479,14 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			// A hard link keeps its own name while it is a state file: a
 			// managed gateway cannot compare the identity of a file in the
 			// user's project, so the target map names the state file the
-			// patch target is (the full active-state set, as the gateway's
-			// own alias check reads it; GAP-0488, GAP-0073).
-			if state, same := ResolveActiveStateHardlinkTarget(resolved, home); same {
+			// patch target is (the full active-state set, read fresh; GAP-0488,
+			// GAP-0073). Where that cannot be proved the target is left
+			// unresolved, so the patch is not attested.
+			state, same, complete := ResolveActiveStateIdentity(resolved, home)
+			switch {
+			case !complete:
+				ok = false
+			case same:
 				resolved = state
 			}
 		}
@@ -2015,7 +2020,9 @@ func (w *PatchTargetWatch) Changed() bool {
 			return true
 		}
 		if multiplyLinkedFile(resolved) {
-			if _, state := ResolveActiveStateHardlinkTarget(resolved, w.home); state {
+			// Read fresh and complete: a state file made since the proof, or
+			// one a bounded walk did not reach, must refuse the patch.
+			if _, state, complete := ResolveActiveStateIdentity(resolved, w.home); state || !complete {
 				return true
 			}
 		}

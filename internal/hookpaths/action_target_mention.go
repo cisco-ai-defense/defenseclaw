@@ -1959,11 +1959,13 @@ func ResolveActiveStateHardlinkTarget(value, home string) (string, bool) {
 }
 
 // The identity index of one active state tree is built at most once per
-// activeStateIndexTTL and shared by every operand and request in that time,
-// so a command naming many ordinary hard links costs one bounded walk. The
-// walk stops after activeStateIndexEntries entries or activeStateIndexBudget,
+// activeStateIndexTTL and shared by every shell operand and request in that
+// time, so a command naming many ordinary hard links costs one bounded walk.
+// The walk stops after activeStateIndexEntries entries or activeStateIndexBudget,
 // well inside every hook deadline; a file it did not reach is not mapped (no
-// block), which never refuses ordinary work.
+// block), which never refuses ordinary shell work. A native patch target is
+// judged by ResolveActiveStateIdentity instead, which neither caches nor
+// treats an unfinished walk as an answer (GAP-0488, GAP-0073).
 var (
 	activeStateIndexEntries = 4096
 	activeStateIndexBudget  = 250 * time.Millisecond
@@ -1973,6 +1975,11 @@ var (
 		sync.Mutex
 		byRoot map[string]activeStateIdentityIndex
 	}
+	// The identity walk of a patch target has its own, wider bound: it runs
+	// only for an existing multiply linked target, and it never answers
+	// from a partial view.
+	activeStateExactEntries = 1 << 16
+	activeStateExactBudget  = time.Second
 )
 
 type activeStateIdentity struct {
@@ -2000,50 +2007,100 @@ func activeStateIdentities(activeRoot string) []activeStateIdentity {
 	if activeStateIndex.byRoot == nil {
 		activeStateIndex.byRoot = make(map[string]activeStateIdentityIndex)
 	}
-	files := walkActiveStateIdentities(activeRoot, now.Add(activeStateIndexBudget))
+	activeStateIndexWalks.Add(1)
+	var files []activeStateIdentity
+	walkActiveStateFiles(activeRoot, activeStateIndexEntries, now.Add(activeStateIndexBudget), func(relative string, info os.FileInfo) bool {
+		files = append(files, activeStateIdentity{relative: relative, info: info})
+		return false
+	})
 	activeStateIndex.byRoot[activeRoot] = activeStateIdentityIndex{built: now, files: files}
 	return files
 }
 
-func walkActiveStateIdentities(activeRoot string, deadline time.Time) []activeStateIdentity {
-	activeStateIndexWalks.Add(1)
-	var files []activeStateIdentity
+// ResolveActiveStateIdentity reports whether an existing write target is,
+// by file identity, a file of the active DefenseClaw state, and which one.
+// It reads the state tree fresh on every call and only for a regular file
+// with a second link (any other target, one that does not resolve, or a home
+// without state cannot alias a state file). complete is false only when the
+// walk reached its bound before it found the file: what it did not visit is
+// unknown, and a caller that would otherwise allow must treat that as not
+// proved (GAP-0488, GAP-0073).
+func ResolveActiveStateIdentity(value, home string) (state string, same, complete bool) {
+	resolved, ok := ResolveWriteTarget(value)
+	if !ok {
+		return "", false, true
+	}
+	info, err := pathStat(resolved)
+	if err != nil || !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
+		return "", false, true
+	}
+	activeRoot, ok := ResolveWriteTarget(filepath.Join(home, ".defenseclaw"))
+	if !ok {
+		return "", false, true
+	}
+	found := ""
+	finished := walkActiveStateFiles(activeRoot, activeStateExactEntries, time.Now().Add(activeStateExactBudget), func(relative string, file os.FileInfo) bool {
+		if os.SameFile(info, file) {
+			found = relative
+			return true
+		}
+		return false
+	})
+	if found != "" {
+		return filepath.Join(home, ".defenseclaw", filepath.FromSlash(found)), true, true
+	}
+	return "", false, finished
+}
+
+// walkActiveStateFiles visits the regular files of the active state in the
+// order of activeStateFiles and activeStateTrees until visit returns true. It
+// reports whether it finished: false when it stopped at the entry or time
+// bound, so what it did not visit is unknown.
+func walkActiveStateFiles(activeRoot string, limit int, deadline time.Time, visit func(relative string, info os.FileInfo) bool) (finished bool) {
 	visited := 0
 	exhausted := func() bool {
 		visited++
-		return visited > activeStateIndexEntries || time.Now().After(deadline)
+		return visited > limit || time.Now().After(deadline)
 	}
-	add := func(path, relative string) {
-		if info, err := pathStat(path); err == nil && info.Mode().IsRegular() {
-			files = append(files, activeStateIdentity{relative: relative, info: info})
+	stop := false
+	file := func(path, relative string) {
+		if info, err := pathStat(path); err == nil && info.Mode().IsRegular() && visit(relative, info) {
+			stop = true
 		}
 	}
 	for _, name := range activeStateFiles {
 		if exhausted() {
-			return files
+			return false
 		}
-		add(filepath.Join(activeRoot, name), name)
+		if file(filepath.Join(activeRoot, name), name); stop {
+			return true
+		}
 	}
 	for _, tree := range activeStateTrees {
-		stopped := false
+		bounded := false
 		_ = filepath.WalkDir(filepath.Join(activeRoot, tree), func(path string, entry fs.DirEntry, walkErr error) error {
 			if exhausted() {
-				stopped = true
+				bounded = true
 				return fs.SkipAll
 			}
 			if walkErr != nil || entry.IsDir() {
 				return nil
 			}
 			if relative, err := filepath.Rel(activeRoot, path); err == nil {
-				add(path, filepath.ToSlash(relative))
+				if file(path, filepath.ToSlash(relative)); stop {
+					return fs.SkipAll
+				}
 			}
 			return nil
 		})
-		if stopped {
-			break
+		if stop {
+			return true
+		}
+		if bounded {
+			return false
 		}
 	}
-	return files
+	return true
 }
 
 // actionPosixNestedShellMention scans each static shell -c or env -S body as
