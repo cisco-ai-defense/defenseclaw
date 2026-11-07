@@ -104,6 +104,8 @@ func (f b36ManagedHookFixture) serve(call *hookCall) (string, string) {
 	switch {
 	case strings.HasPrefix(body, `{"action":"block"`):
 		return "block", body
+	case strings.HasPrefix(body, `{"action":"alert"`):
+		return "alert", body
 	case strings.HasPrefix(body, `{"action":"allow"`):
 		return "allow", body
 	}
