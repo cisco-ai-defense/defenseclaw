@@ -441,11 +441,10 @@ pinned to a path do not match in it. `defenseclaw-gateway policy show` prints
 the whole compiled admission policy.
 
 The `defenseclaw config get ... --effective` reads above are for a per-user
-installation; they do not show the managed verdict. On managed Linux and macOS, the packaged `defenseclaw` runs `sandbox` commands, `status`, `guardrail profile explain`, `help` and `--version`; every other command exits `2` with the managed message. The managed
-Windows CLI has no `config get`.
+installation; they do not show the managed verdict. On managed Linux and macOS, the packaged `defenseclaw` runs `sandbox` commands, `status`, `guardrail profile explain`, `help` and `--version`; every other command exits `2` with the managed message. The Windows CLI of the managed package has no `config get`.
 A standard account is refused when it tries to read the managed policy with
 the gateway command. To check the managed policy, run `policy evaluate` for
-one asset or `policy show` for the compiled policy as root on managed Linux:
+one asset or `policy show` for the compiled policy as root on Linux with the managed package:
 
 ```bash
 sudo /opt/defenseclaw/bin/defenseclaw-gateway policy evaluate --target-type skill --target-name risky-skill

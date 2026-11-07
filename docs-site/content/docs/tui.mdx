@@ -107,9 +107,7 @@ sandbox. `defenseclaw agent usage --sandbox NAME` lists one sandbox's.
 
 The Runtime panel reads the same gateway as `agent discovery runtime status`. WATCHING means every selected plane is running, with a coverage note (for example, without elevation shadow egress sees only your own connections). DEGRADED means a selected plane is unavailable or not running.
 It has no Tetragon lines. Only a managed Linux gateway reports Tetragon, and
-the managed Linux packages ship no TUI. On managed Linux and macOS, the packaged `defenseclaw` runs `sandbox` commands, `status`, `guardrail profile explain`, `help` and `--version`; every other command exits `2` with the managed message. On managed Linux,
-`sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery`
-prints the kernel sensor, the kernel controls and your own Tetragon policies,
+the managed Linux packages ship no TUI. On managed Linux and macOS, the packaged `defenseclaw` runs `sandbox` commands, `status`, `guardrail profile explain`, `help` and `--version`; every other command exits `2` with the managed message. On Linux with the managed package, `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery` prints the kernel sensor, the kernel controls and your own Tetragon policies,
 `enterprise linux tetragon status` the rest, and `/opt/defenseclaw/bin/defenseclaw-gateway status`
 ends its Subsystems list with a `Kernel sensor:` line; see
 [Tetragon on a Linux fleet](/docs/enterprise/tetragon).

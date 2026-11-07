@@ -120,7 +120,7 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway audit export --since 2h --co
 | `audit export` | The audit records as JSONL, oldest first. `--since` and `--until` take an RFC3339 time or a duration ago (`30m`, `2h`). `--limit N` keeps the first N matching rows, or with `--newest` the N most recent. `--connector` keeps one agent's rows, and `--output` writes a file (it refuses to replace one unless you pass `--force`). An administrator can use `--db <copied-audit.db>` to read a retained database copy read-only after decommission; keep its WAL and SHM companions with it. |
 | `audit findings` | The distinct current scan findings: skill, MCP, plugin, code, AIBOM and inventory scans. Guardrail decisions are not tracked here; use `alerts` or `audit export` |
 
-`scan skill`, `scan plugin` and `scan mcp` also run as root on a managed Linux or macOS host: the
+`scan skill`, `scan plugin` and `scan mcp` also run as root on Linux and macOS with the managed package: the
 package installs the scanners and the scan runs through the managed gateway. A folder the
 service cannot read is refused (exit `3`) until you copy it to one it can. On Linux that is
 a folder inside a home folder, `/root`, `/tmp`, `/var/tmp` or `/run/user`; on macOS one
@@ -488,8 +488,7 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy show --jso
   pass the native executable, not the npm `codex` launcher (`codex.js` needs `node`,
   which is not on the probe's minimal `PATH`): for a global npm install it is
   `node_modules/@openai/codex/node_modules/@openai/codex-<platform>/vendor/<target>/bin/codex`.
-  The default timeout is 90 seconds (`--timeout`). A managed Windows host refuses
-  `--live`: use the static `verify` and confirm with `audit export` (see
+  The default timeout is 90 seconds (`--timeout`). Windows with the managed package refuses `--live`: use the static `verify` and confirm with `audit export` (see
   [Windows: Inspect machine policy](/docs/enterprise/windows#inspect-machine-policy)).
 
 ```bash title="Linux: live check for one user"

@@ -538,7 +538,7 @@ in the services by hand.
 | `DEFENSECLAW_UNIX_SERVICE_ACCOUNT` | The macOS service definitions, and the gateway commands the macOS lifecycle runs, set it to `_defenseclaw`. Linux uses the default, `defenseclaw`. Set it yourself only for custom packaging that runs the gateway under another account; a wrong value makes the runtime trust check reject the real service account |
 | `DEFENSECLAW_INSTALL_MANAGED_DESCRIPTOR` | Test-only. Points `install.sh` at a temporary runtime descriptor. The per-user gateway still refuses to start on a managed host |
 
-On standalone managed Linux and macOS, run the installed `enterprise policy`
+On Linux and macOS with the standalone managed package, run the installed `enterprise policy`
 commands as root without setting `DEFENSECLAW_CONFIG`. The commands use the
 trusted runtime descriptor to pin the installed config, data directory and
 deployment mode together instead of reading root's per-user config:
@@ -548,8 +548,7 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
 sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
 ```
 
-The first command is for Linux; the second is for macOS. On managed Windows with
-the standalone profile, use an elevated PowerShell prompt to run
+The first command is for Linux; the second is for macOS. On Windows with the managed package and the standalone profile, use an elevated PowerShell prompt to run
 `enterprise policy show --json` without setting `DEFENSECLAW_CONFIG`:
 
 ```powershell
@@ -579,7 +578,7 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status --js
 
 These status commands report deployment health. To check ignored overrides, compare
 the administrator-owned service environment's variable names with this catalog's
-`ignore` and `tighten_only` rows. On managed Windows, run `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --json`
+`ignore` and `tighten_only` rows. On Windows with the managed package, run `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --json`
 from an elevated PowerShell prompt; its `doctor` command only prints administrator guidance.
 For Fleet and Edge services, inspect their supervisor's environment and resolved `config.yaml`.
 

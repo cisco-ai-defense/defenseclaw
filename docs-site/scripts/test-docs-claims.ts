@@ -1042,13 +1042,13 @@ describe('1.0.4 operator routes and limits', () => {
     assert.match(unixPin, /managedStandaloneAdminDeployment\(\)/);
     assert.match(unixPin, /managed\.ConfigPathEnv:\s+layout\.ConfigPath/);
     assert.match(unixPin, /"DEFENSECLAW_HOME":\s+layout\.DataDir/);
-    assert.match(envVars, /On standalone managed Linux and macOS.*without setting `DEFENSECLAW_CONFIG`/is);
+    assert.match(envVars, /On Linux and macOS with the standalone managed package.*without setting `DEFENSECLAW_CONFIG`/is);
     assert.match(envVars, /sudo \/opt\/defenseclaw\/bin\/defenseclaw-gateway enterprise policy show --json/);
     assert.match(envVars, /sudo \/opt\/cisco\/defenseclaw\/bin\/defenseclaw-gateway enterprise policy show --json/);
     assert.doesNotMatch(envVars, /sudo DEFENSECLAW_CONFIG=.*enterprise policy show --json/);
     assert.match(hooks, /On managed Windows.*enterprise windows status.*enterprise windows verify/i);
     assert.match(hooks, /DEFENSECLAW_CONFIG.*alone.*does not.*guardian/i);
-    assert.match(envVars, /On managed Windows.*elevated.*enterprise policy show --json.*without setting `DEFENSECLAW_CONFIG`/i);
+    assert.match(envVars, /On Windows with the managed package.*elevated.*enterprise policy show --json.*without setting `DEFENSECLAW_CONFIG`/i);
     assert.doesNotMatch(envVars, /On Windows, set.*\$env:DEFENSECLAW_CONFIG/i);
   });
 
@@ -1352,25 +1352,22 @@ function launcherSentence(table: LauncherCommands): string {
   return `On managed Linux and macOS, the packaged \`defenseclaw\` runs ${offeredList(table)}; every other command exits \`2\` with the managed message.`;
 }
 
-// Where a sentence names a command of the table: an offered command in
-// backticks (`status`) or after the `defenseclaw` prefix (defenseclaw status),
-// a refused one only after the prefix (its bare names, `config`, `enterprise`,
-// `start`, are ordinary words in backticks). Bare words ("exit status",
-// "status of the install") are ordinary prose and never match, so a true
-// sentence is not blocked for its spelling. The sandbox tree counts as one
-// command: a sentence about one of its subcommands (`defenseclaw sandbox
-// setup`) is about that subcommand.
+// Where a sentence names a command of the table: a code span that starts with
+// the command, with or without the `defenseclaw` prefix and with or without
+// arguments (`status`, `status --json`, `defenseclaw doctor`), or the command
+// after the `defenseclaw` prefix outside a code span (defenseclaw status). One
+// rule serves an offered and a refused command. Bare words outside a code
+// span ("exit status", "status of the install") are ordinary prose and never
+// match, so a true sentence is not blocked for its spelling. The sandbox tree
+// counts as one command: a sentence about one of its subcommands
+// (`defenseclaw sandbox setup`) is about that subcommand.
 function commandSpans(sentence: string, table: LauncherCommands): Array<[number, number]> {
   const patterns: RegExp[] = [];
-  for (const name of table.offered) {
-    if (name === 'sandbox') {
-      patterns.push(/`sandbox`(?! (?:user|section|block|key|setting))|`defenseclaw sandbox`|\bdefenseclaw sandbox(?![\w -])/g);
-      continue;
-    }
+  for (const name of [...table.offered, ...table.refused]) {
     const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    patterns.push(new RegExp(`\`${escaped}\`|(?<![\\w./~-])defenseclaw ${escaped}(?![\\w-])`, 'g'));
+    const notSetting = name === 'sandbox' ? '(?! (?:user|section|block|key|setting))' : '';
+    patterns.push(new RegExp(`\`(?:defenseclaw )?${escaped}(?: [^\`]*)?\`${notSetting}|(?<![\\w./~-])defenseclaw ${escaped}(?![\\w-])`, 'g'));
   }
-  for (const name of table.refused) patterns.push(new RegExp(`(?<![\\w./~-])defenseclaw ${name}(?![\\w-])`, 'g'));
   return patterns.flatMap((pattern) => [...sentence.matchAll(pattern)].map((m): [number, number] => [m.index, m.index + m[0].length]));
 }
 
@@ -1464,6 +1461,13 @@ describe('what a managed user can and cannot run (GAP-0635)', () => {
       ["On managed Linux, `defenseclaw status` shows protections, and the gateway runs a policy check.", "the verb and the subject are never read"],
       ["On managed Linux, `defenseclaw config set` prints a message when the write is blocked.", "a subordinate clause is never read"],
       ["On MANAGED LINUX, `defenseclaw doctor` works.", "case does not matter"],
+      ["On managed Linux, `status --json` is refused to users.", "an offered command with an argument in its code span"],
+      ["On managed Linux, `guardrail profile explain --user alice` is refused.", "an offered command with arguments, denied"],
+      ["On managed Linux, `defenseclaw status --json` is refused.", "the prefixed form with an argument"],
+      ["On managed Linux, `doctor` does run.", "a refused command in its own code span, without the prefix"],
+      ["On managed Linux, `alerts` is available to users.", "another refused command in its own code span"],
+      ["On managed macOS, `tui` is available.", "a refused command in its own code span on macOS"],
+      ["On managed Linux, `doctor --json` is refused.", "a refused command with an argument in its code span"],
     ];
     for (const [text, why] of flagged) assert.equal(claims(text), 1, why);
     const allowed: Array<[string, string]> = [
@@ -1478,6 +1482,9 @@ describe('what a managed user can and cannot run (GAP-0635)', () => {
       ["On a managed computer, run `defenseclaw sandbox status` to see your sandboxes.", "no managed OS word in the sentence"],
       ["On a managed computer, `defenseclaw doctor` is available to the administrator.", "the lexical scope needs the OS word: managed computer is outside it"],
       ["`defenseclaw doctor` runs on a standalone Linux install.", "a standalone install is not a managed OS"],
+      ["On a standalone Linux install, `status --json` and `doctor` run.", "no managed OS word in the sentence"],
+      ["On managed Linux, the administrator's `defenseclaw-gateway status --json` shows every account.", "the administrator's command is not a table command"],
+      ["On managed Linux, doctor does run on a standalone install and the status field is set.", "bare words are never commands"],
       ["The per-user setup commands on this page do not run on a managed computer.", "no table command named"],
       ["Managed host: `ignore`<br/>Values: `start`, `status`, `restart`", "a table cell: a line break ends the sentence"],
     ];

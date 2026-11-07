@@ -353,7 +353,7 @@ The first table lists the keys under `openshell.admin` that exist for every Open
 | `on_silence` | `stop`, `alert` | The response when a user-tier agent works without its hooks | `stop` wins | Live |
 | `max_silence_after` | duration, 1m or more | How long a user-tier agent may work without hooks | The minimum | Live |
 | `process_tree` | bool | Sample the sandbox's process tree | `true` wins | Live |
-| `foreign_sandboxes` | `stop`, `alert` | What to do with a sandbox DefenseClaw did not start. Default on a managed host: `stop`. | `stop` wins | Live |
+| `foreign_sandboxes` | `stop`, `alert` | What to do with a sandbox DefenseClaw did not start. Default with the managed package: `stop`. | `stop` wins | Live |
 | `allow_upstream_telemetry` | bool | Let OpenShell send its own usage telemetry. Off on a managed host unless set. | `false` wins | At create |
 | `delete_stopped_after` | duration or `Nd`, 1h or more | Delete a sandbox that has been stopped, or has completed, this long; one in the error phase is left to its owner | The minimum | Live |
 | `request_access` | text, up to 512 bytes | Who the person contacts for an exception. Falls back to "contact your IT help desk" when empty. | A profile value replaces the floor's | Live |
