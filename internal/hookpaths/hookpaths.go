@@ -641,63 +641,88 @@ func knownNamesBound(node syntax.Node, home string, depth int) bool {
 // words and body are read with the login in the iteration that has it
 // (loopListReadsActive; rel-1-0-6:GAP-0681 review 6).
 func firstUserBinding(node syntax.Node, home string, depth int, keepLoops bool) (int, bool) {
+	first, names := userBindings(node, home, depth, keepLoops)
+	return first, len(names) != 0
+}
+
+// userBindings is firstUserBinding with every name bound anywhere in node.
+func userBindings(node syntax.Node, home string, depth int, keepLoops bool) (int, map[string]bool) {
 	known := func(name string) bool { return name == "USER" || name == "LOGNAME" }
 	first := -1
+	names := map[string]bool{}
 	keptLoops := map[*syntax.WordIter]bool{}
-	note := func(at syntax.Node) {
+	note := func(at syntax.Node, bound ...string) {
 		if end := int(at.End().Offset()); first < 0 || end < first {
 			first = end
+		}
+		for _, name := range bound {
+			names[name] = true
 		}
 	}
 	syntax.Walk(node, func(node syntax.Node) bool {
 		switch node := node.(type) {
 		case *syntax.Assign:
 			if node.Name != nil && known(node.Name.Value) {
-				note(node)
+				note(node, node.Name.Value)
 			}
 		case *syntax.ForClause:
 			if iter, ok := node.Loop.(*syntax.WordIter); ok && keepLoops && iter.Name != nil && known(iter.Name.Value) &&
-				loopListReadsActive(iter, home) {
+				loopListReadsActive(iter, home, nil) {
 				keptLoops[iter] = true
-				note(node)
+				note(node, iter.Name.Value)
 			}
 		case *syntax.WordIter:
 			if node.Name != nil && known(node.Name.Value) && !keptLoops[node] {
-				note(node)
+				note(node, node.Name.Value)
 			}
 		case *syntax.CallExpr:
-			bound := len(actionfacts.CallBindsUserNames(node)) != 0
+			bound := actionfacts.CallBindsUserNames(node)
 			for _, arg := range node.Args {
 				if word, static := StaticWord(arg, home); static {
 					if name, _, cut := strings.Cut(word, "="); cut && known(name) {
-						bound = true
+						bound = append(bound, name)
 					}
 				}
 			}
-			if body := literalShellCallBody(node, home); !bound && body != "" {
+			if body := literalShellCallBody(node, home); len(bound) == 0 && body != "" {
 				inner, parsed := parseShell(body)
-				bound = !parsed || depth >= 4 || knownNamesBound(inner, home, depth+1)
+				if !parsed || depth >= 4 {
+					bound = []string{"USER", "LOGNAME"}
+				} else if _, innerNames := userBindings(inner, home, depth+1, false); len(innerNames) != 0 {
+					for name := range innerNames {
+						bound = append(bound, name)
+					}
+				}
 			}
-			if bound {
-				note(node)
+			if len(bound) != 0 {
+				note(node, bound...)
 			}
 		}
 		return true
 	})
-	return first, first >= 0
+	return first, names
 }
 
 // loopListReadsActive reports a for or select list that can give its name
 // the active login: an empty list (the positional parameters), a word the
 // scan cannot read or that has a pattern, or the login itself, as the name
-// or spelled out. A list of other logins only does not.
-func loopListReadsActive(iter *syntax.WordIter, home string) bool {
+// or spelled out. A name that an earlier statement bound (bound) is not the
+// login. A list of other logins only does not.
+func loopListReadsActive(iter *syntax.WordIter, home string, bound map[string]bool) bool {
 	active := homeUser(home)
 	if active == "" || len(iter.Items) == 0 {
 		return true
 	}
+	env := []string{"HOME=" + strings.TrimRight(home, "/")}
+	for _, name := range []string{"USER", "LOGNAME"} {
+		value := active
+		if bound[name] {
+			value = "bound-by-an-earlier-statement"
+		}
+		env = append(env, name+"="+value)
+	}
 	for _, word := range iter.Items {
-		value, static := knownValueWord(word, home, KnownUser{Name: active})
+		value, static := staticShellWord(word, expand.ListEnviron(env...), home != "")
 		if !static || value == active || strings.ContainsAny(value, "*?[") {
 			return true
 		}
@@ -4065,10 +4090,13 @@ func TopLevelStatements(command, cwd, home string) ([]PlacedStatement, bool) {
 		return nil, false
 	}
 	out := make([]PlacedStatement, 0, len(statements))
-	user := ""
+	active := ""
 	if strings.Contains(command, "USER") || strings.Contains(command, "LOGNAME") {
-		user = homeUser(home)
+		active = homeUser(home)
 	}
+	user := active
+	// bound holds the names an earlier statement bound: not the login.
+	bound := map[string]bool{}
 	for i, stmt := range statements {
 		start, end := int(stmt.Pos().Offset()), int(stmt.End().Offset())
 		if start < 0 || end > len(command) || start >= end {
@@ -4080,17 +4108,41 @@ func TopLevelStatements(command, cwd, home string) ([]PlacedStatement, bool) {
 		// with the value they have where they come, before the first
 		// binding in it.
 		reads := KnownUser{Name: user}
-		if user != "" {
-			if bindEnd, bound := firstUserBinding(stmt, home, 0, true); bound {
+		if active != "" {
+			bindEnd, names := userBindings(stmt, home, 0, true)
+			if user == "" && statementLoopReadsActive(stmt, home, bound) {
+				// A for or select loop whose list holds the login gives its
+				// name that login in the iteration that has it, whatever an
+				// earlier statement bound (rel-1-0-6:GAP-0681 review 7).
+				reads = KnownUser{Name: active}
+			} else if user != "" && len(names) != 0 {
 				if _, simple := stmt.Cmd.(*syntax.CallExpr); !simple {
 					reads.Until = max(bindEnd-start, 1)
 				}
+			}
+			if len(names) != 0 {
 				user = ""
+			}
+			for name := range names {
+				bound[name] = true
 			}
 		}
 		out = append(out, PlacedStatement{Command: command[start:end], Dir: dirs[i], User: reads})
 	}
 	return out, true
+}
+
+// statementLoopReadsActive reports a statement that is a for or select loop
+// over USER or LOGNAME whose list can hold the active login, given the
+// names the statements before it bound.
+func statementLoopReadsActive(stmt *syntax.Stmt, home string, bound map[string]bool) bool {
+	loop, ok := stmt.Cmd.(*syntax.ForClause)
+	if !ok {
+		return false
+	}
+	iter, ok := loop.Loop.(*syntax.WordIter)
+	return ok && iter.Name != nil && (iter.Name.Value == "USER" || iter.Name.Value == "LOGNAME") &&
+		loopListReadsActive(iter, home, bound)
 }
 
 // plainWrappedChild returns the index of the program word that a chain of
