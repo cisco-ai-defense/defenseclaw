@@ -2243,33 +2243,26 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	cfg := decisionPolicy.Config
 	connector := w.eventConnector(evt)
 	// A root several connectors load applies each one scoped asset rules.
-	assetDecision, assetConnector := w.evaluateRootAssetPolicy(cfg, evt, connector, func(c string) config.AssetPolicyInput {
-		return w.withMCPDefinition(cfg, evt, config.AssetPolicyInput{
-			TargetType:     targetType,
-			Name:           evt.Name,
-			DeclaredNames:  declaredAssetNames(cfg, evt),
-			Connector:      c,
-			SourcePath:     evt.Path,
-			RuntimeSurface: "watcher",
-		})
-	})
+	assetDecision, assetConnector := w.rootAssetPolicy(cfg, evt, connector)
 	if assetDecision.Enabled && assetDecision.RawAction == "block" {
 		if assetDecision.Action == "block" {
 			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 				fmt.Sprintf("type=%s reason=%s source=%s", targetType, assetDecision.Reason, assetDecision.Source))
-			if err := w.enforceBlockWith(ctx, evt, true, ""); err != nil && !w.secureClientActive() {
-				// skill list and skill info say the quarantine of a
-				// denied asset failed, as they do for a scan verdict;
-				// they said quarantined (GAP-0133). The connector whose
-				// rule denied it is told too when it is not the owner.
-				w.journalFailedPolicyQuarantine(evt, targetType, err, assetConnector)
-			}
+			// skill list and skill info say the quarantine of a denied
+			// asset failed, as they do for a scan verdict; they said
+			// quarantined (GAP-0133). An asset that stays in its folder,
+			// because the move failed or an operator-restored copy is
+			// kept, is held for the connector whose rule denied it too.
+			w.journalPolicyDenied(evt, targetType, w.enforceBlockWith(ctx, evt, true, ""), assetConnector)
 			w.recordAdmission(ctx, "blocked", targetType)
 			res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: assetDecision.Reason}
 			return res
 		}
 		w.logAssetPolicyWouldBlock(ctx, evt, targetType, assetConnector, assetDecision)
 	}
+	// No connector rule denies it (any more): a hold an earlier denial left
+	// on the owner or on a consumer goes.
+	w.releasePolicyHolds(evt)
 
 	if res, done := w.legacyAllowPathMismatch(ctx, cfg, evt, targetType); done {
 		return res
@@ -2435,18 +2428,11 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	// the scan ran applies as the pre-scan check applies it; the lists
 	// alone missed it (GAP-1155).
 	if post := decisionPolicy.Config; post != nil {
-		if decision, decidedBy := w.evaluateRootAssetPolicy(post, evt, connector, func(c string) config.AssetPolicyInput {
-			return w.withMCPDefinition(post, evt, config.AssetPolicyInput{
-				TargetType: targetType, Name: evt.Name, DeclaredNames: declaredAssetNames(post, evt),
-				Connector: c, SourcePath: evt.Path, RuntimeSurface: "watcher",
-			})
-		}); decision.Enabled && decision.RawAction == "block" && decision.Action == "block" {
+		if decision, decidedBy := w.rootAssetPolicy(post, evt, connector); decision.Enabled && decision.RawAction == "block" && decision.Action == "block" {
 			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 				fmt.Sprintf("type=%s reason=%s source=%s post-scan", targetType, decision.Reason, decision.Source))
 			scanID := w.logScanID(ctx, evt, result, "blocked")
-			if err := w.enforceBlockWith(ctx, evt, true, ""); err != nil && !w.secureClientActive() {
-				w.journalFailedPolicyQuarantine(evt, targetType, err, decidedBy)
-			}
+			w.journalPolicyDenied(evt, targetType, w.enforceBlockWith(ctx, evt, true, ""), decidedBy)
 			w.recordAdmission(ctx, "blocked", targetType)
 			res = AdmissionResult{
 				ScanID: scanID,
@@ -3235,30 +3221,101 @@ func (w *InstallWatcher) journalFailedQuarantine(evt InstallEvent, targetType st
 	}
 }
 
-// journalFailedPolicyQuarantine is journalFailedQuarantine for an asset an
-// asset_policy rule denied: the asset stays in its folder, so the owner and
-// the connector whose rule denied it also get the runtime disable. Without
-// it a denial by the default (default_action deny) rule, which the hook
-// evaluates only when runtime_detection is on, left the surviving skill
-// callable. An operator "enable" or an allow rule clears both fields
-// (releaseAllowListed).
-func (w *InstallWatcher) journalFailedPolicyQuarantine(evt InstallEvent, targetType string, err error, decidedBy string) {
-	if w.store == nil {
+// policyDenialMark ends the journal reason of a block and runtime disable
+// that journalPolicyDenied wrote, so releasePolicyHolds lifts those and only
+// those once no connector rule denies the asset.
+const policyDenialMark = " [asset policy]"
+
+// retainedPolicyReason leads the reason of a hold on an operator-restored
+// copy that stays in its folder although a connector rule denies it.
+const retainedPolicyReason = "a restored copy stays in its folder while an asset policy rule denies it"
+
+// journalPolicyDenied records, after enforceBlockWith (err is its result) on
+// an asset an asset_policy rule denied, that the asset is still in its
+// folder: because the quarantine failed (err), or because the files of an
+// operator restore are kept while the install block stands. The owner and
+// the connector whose rule denied it both get the install block and the
+// runtime disable. Without the runtime disable a denial by the default
+// (default_action deny) rule, which the hook evaluates only when
+// runtime_detection is on, left the surviving skill callable.
+// releasePolicyHolds lifts them when the denial goes; an operator enable
+// clears them too. A removed link, or an asset that is gone, leaves nothing
+// to run and no runtime disable.
+func (w *InstallWatcher) journalPolicyDenied(evt InstallEvent, targetType string, err error, decidedBy string) {
+	if w.store == nil || w.secureClientActive() {
 		return
 	}
-	w.journalFailedQuarantine(evt, targetType, err, decidedBy)
-	if errors.Is(err, errLinkRemoved) {
-		// The link is gone: nothing is left to run.
+	var reason string
+	switch {
+	case errors.Is(err, errLinkRemoved):
+		w.journalFailedQuarantine(evt, targetType, err, decidedBy)
+		return
+	case err != nil:
+		reason = quarantineFailedReason + err.Error()
+	case (evt.Type == InstallSkill || evt.Type == InstallPlugin) && assetStillThere(evt.Path):
+		reason = retainedPolicyReason
+	default:
 		return
 	}
-	reason := quarantineFailedReason + err.Error()
+	reason += policyDenialMark
 	scopes := []string{w.journalScope(w.eventConnector(evt))}
 	if scope := w.journalScope(decidedBy); !slices.Contains(scopes, scope) {
 		scopes = append(scopes, scope)
 	}
 	for _, scope := range scopes {
+		_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "install", "block", reason)
 		_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "runtime", "disable", reason)
 		_ = w.store.SetSourcePathForConnector(targetType, journalName(evt), scope, evt.Path)
+	}
+}
+
+func assetStillThere(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil
+}
+
+// policyHeldScopes are the journal scopes of the owner and of every consumer
+// of the root holding evt whose row is a hold journalPolicyDenied wrote for
+// this path.
+func (w *InstallWatcher) policyHeldScopes(evt InstallEvent) []string {
+	if w.secureClientActive() || w.store == nil || (evt.Type != InstallSkill && evt.Type != InstallPlugin) {
+		return nil
+	}
+	var scopes []string
+	for _, connector := range w.rootConsumersOf(evt, w.eventConnector(evt)) {
+		scope := w.journalScope(connector)
+		if slices.Contains(scopes, scope) {
+			continue
+		}
+		entry, err := w.store.GetActionForConnector(string(evt.Type), journalName(evt), scope)
+		if err != nil || entry == nil || !strings.HasSuffix(entry.Reason, policyDenialMark) ||
+			(entry.Actions.Runtime == "" && entry.Actions.Install == "") ||
+			(entry.SourcePath != "" && !sameWatcherPath(entry.SourcePath, evt.Path)) {
+			continue
+		}
+		scopes = append(scopes, scope)
+	}
+	return scopes
+}
+
+// releasePolicyHolds lifts, from the owner and from every consumer, the
+// install block and runtime disable that a policy denial left on an asset
+// that stayed in its folder, once no connector rule denies it: an allow rule
+// for it (a global one or one scoped to the denying connector) or a policy
+// that no longer denies. Without it an allow rule cleared only the owner row
+// and the allowed skill stayed blocked for the denying connector.
+func (w *InstallWatcher) releasePolicyHolds(evt InstallEvent) {
+	for _, scope := range w.policyHeldScopes(evt) {
+		var cleared []string
+		for _, field := range []string{"install", "runtime"} {
+			if err := w.store.ClearActionFieldForConnector(string(evt.Type), journalName(evt), scope, field); err == nil {
+				cleared = append(cleared, field)
+			}
+		}
+		if len(cleared) > 0 {
+			_ = w.logger.LogAction(string(audit.ActionEnable), evt.Path,
+				fmt.Sprintf("type=%s released: no asset policy rule denies it; cleared %s connector=%s", evt.Type, strings.Join(cleared, " "), scope))
+		}
 	}
 }
 
@@ -3517,6 +3574,17 @@ func (w *InstallWatcher) allowRuleReleases(ctx context.Context, evt InstallEvent
 	cfg := w.liveConfig()
 	out := w.evaluateAdmission(ctx, w.admissionInputFor(cfg, evt, string(evt.Type), connector))
 	return out != nil && out.Verdict == "allowed" && w.allowedAuditReason(out.Reason) == "allow-listed"
+}
+
+// policyHoldReleases reports a skill or plugin whose owner or consumer row
+// still holds it after an asset-policy denial although no connector rule
+// denies it now, so the rescan admits it again and lifts the hold.
+func (w *InstallWatcher) policyHoldReleases(evt InstallEvent) bool {
+	if len(w.policyHeldScopes(evt)) == 0 {
+		return false
+	}
+	decision, _ := w.rootAssetPolicy(w.liveConfig(), evt, w.eventConnector(evt))
+	return !(decision.Enabled && decision.RawAction == "block" && decision.Action == "block")
 }
 
 // quarantinedCopyIsBack reports a skill or plugin at a path that holds an
