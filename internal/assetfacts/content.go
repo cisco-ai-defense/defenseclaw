@@ -84,6 +84,17 @@ func (f Facts) ContentsFor(kind, name string) []Content {
 	return out
 }
 
+// UnreadContent is the failure state of an asset the hook found or was
+// told of but could not read: a truncated content without text, which the
+// gateway refuses as unscanned. dir may be empty when no folder is known.
+func UnreadContent(kind, name, dir string) Content {
+	out := Content{Kind: kind, Name: name, Truncated: true}
+	if dir != "" {
+		out.Dir = filepath.Clean(dir)
+	}
+	return out
+}
+
 var contentTextExt = map[string]bool{
 	"": true, ".md": true, ".txt": true, ".json": true, ".yaml": true, ".yml": true, ".toml": true,
 	".py": true, ".js": true, ".mjs": true, ".cjs": true, ".ts": true, ".sh": true, ".ps1": true,
@@ -287,23 +298,46 @@ func ClaudePluginNames(claudeDir string) []string {
 	return names
 }
 
+// maxContentStubs bounds the contents kept as a failure state only.
+const maxContentStubs = 32
+
 // boundedContents applies the bounds of a hook fact to claimed contents and
-// recomputes their digests.
+// recomputes their digests. A content is never dropped for not fitting: one
+// whose folder path is too long or unusable keeps its text and loses the
+// path, and one past the count or size bounds is kept as a truncated content
+// without text, which the gateway refuses as unscanned. Dropping it would
+// let the asset run unjudged.
 func boundedContents(in []Content) []Content {
 	var out []Content
-	total := 0
+	total, kept, stubs := 0, 0, 0
+	stubbed := map[string]bool{}
 	for _, content := range in {
-		if len(out) == maxContentAssets {
-			break
-		}
 		if content.Kind != ContentSkill && content.Kind != ContentPlugin {
 			continue
 		}
 		name, dir := clean(content.Name, maxNameBytes), clean(content.Dir, maxFieldBytes)
-		if name == "" || !filepath.IsAbs(dir) {
+		if name == "" {
 			continue
 		}
-		next := Content{Kind: content.Kind, Name: name, Dir: filepath.Clean(dir), Truncated: content.Truncated}
+		if !filepath.IsAbs(dir) {
+			dir = ""
+		} else {
+			dir = filepath.Clean(dir)
+		}
+		next := Content{Kind: content.Kind, Name: name, Dir: dir, Truncated: content.Truncated}
+		if kept == maxContentAssets {
+			// One failure state per asset name is enough: the gateway refuses
+			// the asset when any of its contents is truncated.
+			key := content.Kind + "\x00" + strings.ToLower(name)
+			if !stubbed[key] && stubs < maxContentStubs {
+				stubbed[key] = true
+				stubs++
+				next.Truncated = true
+				out = append(out, next)
+			}
+			continue
+		}
+		kept++
 		escaped := 0
 		for _, file := range content.Files {
 			rel := clean(file.Rel, maxFieldBytes)
