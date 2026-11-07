@@ -92,6 +92,8 @@ func TestGAP0518HookPostLateOrdinaryNoAnswerExit(t *testing.T) {
 		{"codex hard link", "/api/v1/codex/hook", "Bash", "cat hardlink", hookexec.PerUserPostNoAnswerExit},
 		{"claude 2000 operands, link last", "/api/v1/claude-code/hook", "Bash", long + " keylink", hookexec.PerUserPostNoAnswerExit},
 		{"claude keys path", "/api/v1/claude-code/hook", "Bash", "cat ../.ssh/authorized_keys", hookexec.PerUserPostNoAnswerExit},
+		{"claude echo of a state folder word", "/api/v1/claude-code/hook", "Bash", "echo openclaw", hookexec.PerUserPostLateOrdinaryExit},
+		{"codex sed write command to the link", "/api/v1/codex/hook", "Bash", `sed -n -e "w keylink" plain.txt`, hookexec.PerUserPostNoAnswerExit},
 		{"other connector", "/api/v1/cursor/hook", "Bash", "echo hi", hookexec.PerUserPostNoAnswerExit},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
