@@ -2247,7 +2247,7 @@ func verifyWindowsManagedHooksTeardownClean(
 		if !report.OK || !report.SafeToRemoveBinary ||
 			report.SurvivingOwnedPathReferences != 0 {
 			return report.SurvivingOwnedPathReferences, errors.New(
-				"Codex machine requirements are not clean after managed-hook teardown",
+				"the Codex machine requirements are not clean after managed-hook teardown",
 			)
 		}
 	}
