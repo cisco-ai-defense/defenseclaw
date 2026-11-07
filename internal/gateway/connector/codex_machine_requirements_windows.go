@@ -2530,6 +2530,22 @@ func setWindowsCodexMachineFileProtection(path string, userReadable bool) error 
 }
 
 func deleteWindowsCodexMachineFile(path, label string) error {
+	return deleteWindowsCodexMachineFileChecked(path, label, true)
+}
+
+// deleteWindowsCodexManagedStateCopy removes a copy of the Codex managed
+// runtime state (a hook copy or the fixed name of 1.0.8) without judging its
+// access list first. DefenseClaw wrote the file and only removes it, and a
+// copy that was given another access list is exactly the one that has to go:
+// judging it first refused the delete on a standalone deployment, so a
+// replaced copy with a drifted list stayed in the folder for good, through
+// every later pass and the purge (g582 round 11c). The handle-bound checks
+// stay: a regular file, no reparse point, one link.
+func deleteWindowsCodexManagedStateCopy(path string) error {
+	return deleteWindowsCodexMachineFileChecked(path, windowsCodexManagedStateLabel, false)
+}
+
+func deleteWindowsCodexMachineFileChecked(path, label string, judgeAccessList bool) error {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -2540,8 +2556,10 @@ func deleteWindowsCodexMachineFile(path, label string) error {
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("%s is not a regular file", label)
 	}
-	if err := ensureWindowsCodexMachineFileTrust(path, label, true); err != nil {
-		return err
+	if judgeAccessList {
+		if err := ensureWindowsCodexMachineFileTrust(path, label, true); err != nil {
+			return err
+		}
 	}
 	handle, err := openWindowsCodexNoFollow(
 		path,

@@ -1039,3 +1039,41 @@ func TestWindowsCodexRequirementsHeldProbeSeesAHolderThatDeniesReadSharing(t *te
 		}
 	}
 }
+
+// g582 round 11c. A replaced state copy that carries another access list is
+// removed like any other: the delete does not judge the list first (on a
+// standalone deployment that judgement refuses a drifted file, and the copy
+// stayed in the folder through every pass and the purge). It still refuses
+// what is not a plain file of one link.
+func TestWindowsCodexManagedStateCopyDeleteDoesNotJudgeTheAccessList(t *testing.T) {
+	f := newWindowsCodexStateTxFixture(t)
+	first := f.run(t, f.write("state-one"))
+	current := windowsCodexStableStateFile(f.dir, first)
+	stampWindowsCodexSDDLForTest(t, current, "O:BAD:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;FRFW;;;BU)")
+	judged := false
+	previous := windowsCodexMachineTrustedFileCheck
+	windowsCodexMachineTrustedFileCheck = func(path, label string) error {
+		judged = true
+		return errors.New("an untrusted writer can change the file")
+	}
+	t.Cleanup(func() { windowsCodexMachineTrustedFileCheck = previous })
+	if err := deleteWindowsCodexManagedStateCopy(current); err != nil {
+		t.Fatalf("delete of a copy with a drifted list: %v", err)
+	}
+	if judged {
+		t.Fatal("the delete judged the access list of the state copy")
+	}
+	if _, err := os.Lstat(current); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the copy stayed: %v", err)
+	}
+	// The generic delete still judges, as before.
+	other := filepath.Join(f.dir, "other.bin")
+	if err := os.WriteFile(other, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	judged = false
+	_ = deleteWindowsCodexMachineFile(other, "other")
+	if !judged {
+		t.Fatal("the generic delete skipped the trust check")
+	}
+}
