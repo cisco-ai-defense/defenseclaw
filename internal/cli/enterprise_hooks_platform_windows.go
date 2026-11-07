@@ -54,6 +54,10 @@ var enterpriseHookCodexRequirementsLayoutResolver = resolveWindowsCodexRequireme
 var enterpriseHookCodexRuntimeRegistryReader = connector.ResolveWindowsCodexManagedRuntimeRegistry
 var enterpriseHookCodexRequirementsRemover = connector.RemoveWindowsCodexMachineRequirements
 var enterpriseHookCodexRequirementsReconciler = connector.ReconcileWindowsCodexMachineRequirements
+
+// enterpriseHookCodexRequirementsUnreadable reports a requirements.toml that
+// ordinary users cannot read; tests replace it.
+var enterpriseHookCodexRequirementsUnreadable = connector.WindowsCodexRequirementsUnreadable
 var enterpriseHookCodexTargetsPublisher = connector.PublishWindowsCodexManagedRuntimeTargets
 var enterpriseHookClaudePolicyEnsurer = enterprisehooks.EnsureWindowsStandaloneClaudeManagedPolicy
 var enterpriseHookClaudePolicyRestorer = enterprisehooks.RestoreWindowsClaudeManagedPolicyDrift
@@ -391,7 +395,16 @@ func syncEnterpriseHookManagedMachineEnrollments(
 		codexOpts.HookBinary,
 	)
 	var deferredCodexErr error
-	if cfg.StandaloneEnterprise() && configured["codex"] && (err != nil || !currentCodex.Active) {
+	// A requirements.toml that ordinary users cannot read is published again
+	// with the read restored by the reconcile below, and that reconcile is
+	// the only step that does it: the target publication after it verifies
+	// the read and fails on such a file, so the file has to be healed first
+	// or the guardian never recovers on its own (g582 round 11c, the r11
+	// residual: a holder that denied read sharing left the file unreadable
+	// and every later pass stopped here until an administrator granted the
+	// read by hand).
+	if cfg.StandaloneEnterprise() && configured["codex"] &&
+		(err != nil || !currentCodex.Active || enterpriseHookCodexRequirementsUnreadable(codexOpts.RequirementsPath)) {
 		codexOpts.CodexTargetEnabled = true
 		report, reconcileErr := enterpriseHookCodexRequirementsReconciler(codexOpts)
 		if reconcileErr != nil {
