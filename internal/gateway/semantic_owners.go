@@ -860,18 +860,6 @@ func isDefiniteFixturePath(
 	return true
 }
 
-// systemEtcPath names a file below the system /etc by its /etc spelling. On
-// macOS /etc is a link to /private/etc, so a resolved target (a link to
-// /etc/shadow) arrives as /private/etc/shadow, whether or not the file exists.
-// The exact system-file rules compare this form, so the resolved name is
-// judged like the direct one (GAP-0769).
-func systemEtcPath(value string) string {
-	if value == "/private/etc" || strings.HasPrefix(value, "/private/etc/") {
-		return strings.TrimPrefix(value, "/private")
-	}
-	return value
-}
-
 func canonicalSemanticPath(value string) string {
 	value = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/"))
 	if value == "" {
@@ -1470,10 +1458,7 @@ func semanticPathValue(path actionfacts.PathFact) string {
 	if value == "" {
 		value = path.Value
 	}
-	// Every exact /etc rule reads this value, so the macOS physical spelling of
-	// a resolved target is folded once here instead of in each matcher
-	// (GAP-0769).
-	return systemEtcPath(strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/")))
+	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/"))
 }
 
 func matchesActiveSensitivePath(
