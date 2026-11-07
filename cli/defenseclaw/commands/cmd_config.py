@@ -1213,51 +1213,74 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
         raise click.ClickException(
             f"an empty value does not set {key}; use defenseclaw config unset {key}"
         )
-    roster_change = parts == ["guardrail"] or parts[:2] == ["guardrail", "connectors"]
-    check_candidate = _check_guardrail_connector_roster if roster_change else None
+    check_candidate = _connector_roster_check(app, [parts])
     _write_config_change(app, [Change(key, parsed)], expect_sha256, "set", check_candidate=check_candidate)
 
 
-def _check_guardrail_connector_roster(_path: str, candidate: bytes) -> None:
-    """Check the final enabled roster while the writer holds config.yaml.lock."""
+def _selects_connectors(parts: list) -> bool:
+    """True for a key that can change which connectors share the gateway process."""
+    return (
+        parts in (["guardrail"], ["claw"], ["guardrail", "connector"], ["claw", "mode"])
+        or parts[:2] == ["guardrail", "connectors"]
+    )
+
+
+def _connector_roster_check(app: AppContext, parts_list: list[list]):
+    """The final-file check for a set or unset that can change the process.
+
+    One rule for every selection key (guardrail.connector, claw.mode, an entry
+    under guardrail.connectors): judge the written file, not the key. The
+    installed connector comes from the file, else from the config that was
+    loaded before the edit, so an implicit default OpenClaw counts too.
+    """
+    if not any(_selects_connectors(parts) for parts in parts_list):
+        return None
+    try:
+        implicit = app.cfg.active_connector() if app.cfg is not None else ""
+    except Exception:
+        implicit = ""
+    return lambda path, candidate: _check_guardrail_connector_roster(path, candidate, implicit=implicit)
+
+
+def _check_guardrail_connector_roster(_path: str, candidate: bytes, *, implicit: str = "") -> None:
+    """Refuse a final file that puts a proxy connector beside another enabled one.
+
+    A proxy connector (openclaw, zeptoclaw) needs its own proxy binding, so it
+    cannot share a gateway process with hook connectors (GAP-0588). The
+    process is the enabled roster entries plus the installed connector;
+    an entry that is explicitly disabled is not part of it.
+    """
     from defenseclaw import config_writer
 
     document = config_writer._parse_config_document(candidate)
     if config_writer.secure_client_document(document):
         return
     guardrail = document.get("guardrail", {}) if isinstance(document, dict) else {}
-    roster = guardrail.get("connectors", {}) if isinstance(guardrail, dict) else {}
-    if not isinstance(roster, dict):
-        return
-    configured = {normalize_connector(name) for name in roster if isinstance(name, str)}
-    enabled = {
+    guardrail = guardrail if isinstance(guardrail, dict) else {}
+    roster = guardrail.get("connectors", {})
+    roster = roster if isinstance(roster, dict) else {}
+    process = {
         normalize_connector(name)
         for name, entry in roster.items()
         if isinstance(name, str) and isinstance(entry, dict) and entry.get("enabled") is not False
     }
-    # The installed connector (guardrail.connector, else an explicit claw.mode)
-    # is part of the process too: a first entry for another connector beside a
-    # single OpenClaw or ZeptoClaw install is the same mix as a two-entry map
-    # (GAP-0588). An entry of its own that is disabled keeps it out.
     claw = document.get("claw") if isinstance(document, dict) else None
-    named = guardrail.get("connector") if isinstance(guardrail, dict) else None
-    if not (isinstance(named, str) and named.strip()) and isinstance(claw, dict):
-        named = claw.get("mode")
+    claw = claw if isinstance(claw, dict) else {}
+    named = guardrail.get("connector")
+    if not (isinstance(named, str) and named.strip()):
+        named = claw.get("mode") if "mode" in claw else implicit
     if isinstance(named, str) and named.strip() and not config_module._is_retired_connector_name(named):
         installed = normalize_connector(named)
         own = next(
             (e for n, e in roster.items() if isinstance(n, str) and normalize_connector(n) == installed),
             None,
         )
-        configured.add(installed)
         if not (isinstance(own, dict) and own.get("enabled") is False):
-            enabled.add(installed)
-    if len(configured) < 2:
-        return
-    proxies = sorted(enabled & {"openclaw", "zeptoclaw"})
-    if proxies:
+            process.add(installed)
+    proxies = sorted(process & {"openclaw", "zeptoclaw"})
+    if proxies and len(process) > 1:
         proxy = proxies[0]
-        others = sorted(configured - {proxy})
+        others = sorted(process - {proxy})
         label = "hook connectors" if not set(others) & {"openclaw", "zeptoclaw"} else "other connectors"
         raise config_writer.ConfigWriteError(
             f"{proxy} needs a proxy binding and cannot share a gateway process "
@@ -1315,11 +1338,7 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
         )
         for key, parts in parsed
     ]
-    roster_change = any(
-        parts == ["guardrail"] or parts[:2] == ["guardrail", "connectors"]
-        for _key, parts in parsed
-    )
-    check_candidate = _check_guardrail_connector_roster if roster_change else None
+    check_candidate = _connector_roster_check(app, [parts for _key, parts in parsed])
     if _write_config_change(app, changes, expect_sha256, "unset", check_candidate=check_candidate):
         for note in _left_roster_notes(parsed, roster):
             click.echo(note)
