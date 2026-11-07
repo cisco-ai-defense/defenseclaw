@@ -417,7 +417,11 @@ def _archive_package_digest(archive: bytes) -> str | None:
 _LOCK_FILES = ("package-lock.json", "npm-shrinkwrap.json", "node_modules/.package-lock.json")
 _LOCK_MAX_BYTES = 32 * 1024 * 1024
 _RECORDED_VERSION = re.compile(r"[0-9][0-9A-Za-z.+-]*")
-_RECORDED_SPEC = r"(?:@[0-9A-Za-z.+^~*<>=| -]*)?"
+_SPEC_CHARS = r"[0-9A-Za-z.+^~*<>=| -]*"
+_RECORDED_SPEC = r"(?:@" + _SPEC_CHARS + r")?"
+_DEPENDENCY_FIELDS = (
+    "dependencies", "devDependencies", "optionalDependencies", "peerDependencies",
+)
 
 
 def _registry_archive(address: object, name: str, version: str | None = None) -> bool:
@@ -459,28 +463,109 @@ def _lock_folders(plugin_dir: str) -> list[str]:
     ]
 
 
-def _named_entries(lock: dict, name: str):
-    """Every entry of an npm lock that records the package ``name``."""
+def _registry_spec(value: object, name: str) -> bool:
+    """Whether ``value`` asks the registry for a version, a range or a tag of ``name``.
 
+    A scheme, a path or an address is never a registry request, whatever the
+    scheme is called, so the check is on the shape of the spec and not on a
+    list of the source kinds npm knows.
+    """
+
+    if not isinstance(value, str):
+        return False
+    return any(
+        value.startswith(prefix) and re.fullmatch(_SPEC_CHARS, value[len(prefix):])
+        for prefix in ("", name + "@", "npm:" + name + "@")
+    )
+
+
+def _fold(path: str) -> str:
+    return path.casefold() if os.name == "nt" else path
+
+
+def _key_names(key: str) -> list[str]:
+    """The package names on a lock path: ``node_modules/a/node_modules/@s/b`` -> a, @s/b."""
+
+    if not key.startswith(_DEPENDENCY_DIR + "/"):
+        return []
+    return [part.rstrip("/") for part in re.split(r"(?:^|/)node_modules/", key)[1:]]
+
+
+def _resolved_copy(known: set[str], owner: str, name: str) -> str | None:
+    """The lock path that ``name`` resolves to for the package at ``owner``.
+
+    Node looks in the package own ``node_modules`` and then in each one above
+    it, so a copy nested under a package is the one that package gets.
+    """
+
+    base = owner
+    while True:
+        candidate = (base + "/" if base else "") + _DEPENDENCY_DIR + "/" + name
+        if candidate in known:
+            return candidate
+        if not base:
+            return None
+        cut = base.rfind(_DEPENDENCY_DIR + "/")
+        base = base[:cut].rstrip("/") if cut > 0 else ""
+
+
+def _lock_records(lock: dict, name: str, key: str | None) -> list[dict] | None:
+    """The entries of an npm lock that record this package, or None when a
+    dependency spec that resolves to it asks for a source other than the registry.
+
+    ``key`` is the path of the package below the folder of the lock. A lock
+    that sits in the package folder itself has no key: every record that names
+    the package counts. In a lock above it only what the lock records at that
+    path, and the specs that resolve to that path, describe this install; a
+    copy of the same name somewhere else in the project is another install.
+    """
+
+    entries: list[dict] = []
+    wanted = None if key is None else _fold(key)
     packages = lock.get("packages")
     if isinstance(packages, dict):
-        for key, entry in packages.items():
-            if isinstance(entry, dict) and key and (
-                key == f"{_DEPENDENCY_DIR}/{name}"
-                or key.endswith(f"/{_DEPENDENCY_DIR}/{name}")
-                or entry.get("name") == name
+        known = {_fold(path) for path in packages if isinstance(path, str)}
+        for path, entry in packages.items():
+            if not isinstance(path, str) or not isinstance(entry, dict):
+                continue
+            if path and (
+                _fold(path) == wanted if wanted is not None else (
+                    path == f"{_DEPENDENCY_DIR}/{name}"
+                    or path.endswith(f"/{_DEPENDENCY_DIR}/{name}")
+                    or entry.get("name") == name
+                )
             ):
-                yield entry
-    pending = [lock.get("dependencies")]
-    while pending:
-        dependencies = pending.pop()
-        if not isinstance(dependencies, dict):
-            continue
-        for key, entry in dependencies.items():
-            if isinstance(entry, dict):
-                if key == name:
-                    yield entry
-                pending.append(entry.get("dependencies"))
+                entries.append(entry)
+            for field in _DEPENDENCY_FIELDS:
+                specs = entry.get(field)
+                if not isinstance(specs, dict) or name not in specs:
+                    continue
+                if wanted is not None and _resolved_copy(known, _fold(path), name) != wanted:
+                    continue
+                if not _registry_spec(specs[name], name):
+                    return None
+    if wanted is None:
+        pending = [lock.get("dependencies")]
+        while pending:
+            dependencies = pending.pop()
+            if not isinstance(dependencies, dict):
+                continue
+            for dependency, entry in dependencies.items():
+                if isinstance(entry, dict):
+                    if dependency == name:
+                        entries.append(entry)
+                    pending.append(entry.get("dependencies"))
+    else:
+        node, found = lock.get("dependencies"), None
+        for segment in _key_names(key):
+            found = node.get(segment) if isinstance(node, dict) else None
+            if not isinstance(found, dict):
+                found = None
+                break
+            node = found.get("dependencies")
+        if found is not None:
+            entries.append(found)
+    return entries
 
 
 def _install_records(plugin_dir: str, manifest: dict, name: str) -> list[dict] | None:
@@ -496,12 +581,24 @@ def _install_records(plugin_dir: str, manifest: dict, name: str) -> list[dict] |
         isinstance(source, str) and re.fullmatch(re.escape(name) + _RECORDED_SPEC, source)
     ):
         return None
-    if requested is not None and not (
-        isinstance(requested, dict) and requested.get("type") in ("version", "range", "tag")
-    ):
-        return None
+    if requested is not None:
+        if not (
+            isinstance(requested, dict) and requested.get("type") in ("version", "range", "tag")
+        ):
+            return None
+        # The type is the installer's word for it; every address the record
+        # carries (raw, rawSpec, saveSpec, fetchSpec, ...) must agree.
+        for field, value in requested.items():
+            if field in ("type", "where", "name", "escapedName") or value is None or isinstance(
+                value, bool,
+            ):
+                continue
+            if not _registry_spec(value, name):
+                return None
     records: list[dict] = []
-    for folder in _lock_folders(plugin_dir):
+    root = os.path.abspath(plugin_dir)
+    for position, folder in enumerate(_lock_folders(plugin_dir)):
+        key = None if position == 0 else os.path.relpath(root, folder).replace(os.sep, "/")
         for relative in _LOCK_FILES:
             path = os.path.join(folder, *relative.split("/"))
             try:
@@ -521,7 +618,10 @@ def _install_records(plugin_dir: str, manifest: dict, name: str) -> list[dict] |
                 return None
             if not isinstance(lock, dict):
                 continue
-            for entry in _named_entries(lock, name):
+            scoped = _lock_records(lock, name, key)
+            if scoped is None:
+                return None
+            for entry in scoped:
                 version = entry.get("version")
                 if entry.get("link") or (
                     version is not None
