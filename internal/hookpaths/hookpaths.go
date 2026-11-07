@@ -7096,3 +7096,35 @@ func CopySourceLinkTargets(source string, facts map[string]string) []string {
 	}
 	return targets
 }
+
+// HasTreeCopies reports that the command copies a tree in a way that keeps
+// links.
+func (l Links) HasTreeCopies() bool { return len(l.links.treeCopies) > 0 }
+
+// CopySourcesLinkFree reports that the command copies trees and every source
+// of those copies is known to hold no link: the user-side hook read it so
+// (SourceLinkFactPrefix "0"), or, with no fact, this view of the disk shows
+// none. Such a copy carries no link to a protected file.
+func (l Links) CopySourcesLinkFree(facts map[string]string) bool {
+	if len(l.links.treeCopies) == 0 {
+		return false
+	}
+	for _, copied := range l.links.treeCopies {
+		for _, source := range copied.sources {
+			if !filepath.IsAbs(source) {
+				return false
+			}
+			source = filepath.Clean(source)
+			if fact, present := facts[SourceLinkFactPrefix+source]; present {
+				if fact != "0" {
+					return false
+				}
+				continue
+			}
+			if found, ok := sourceDiskLinks(source); !ok || len(found) > 0 {
+				return false
+			}
+		}
+	}
+	return true
+}

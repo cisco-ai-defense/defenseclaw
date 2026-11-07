@@ -34,12 +34,6 @@ func cfrEncode(t *testing.T, targets map[string]string) string {
 	return encoded
 }
 
-// cfrBlockedOrAlerted reports a hook answer that is a block or the balanced
-// profile alert of an unproven finding (rel-1-0-6:GAP-0675); never an allow.
-func cfrBlockedOrAlerted(answer string) bool {
-	return answer == "block" || strings.HasPrefix(answer, `status 200 body {"action":"alert"`)
-}
-
 func TestCFRForgedSourceEvidenceMustBlock(t *testing.T) {
 	f := newB36ManagedHookFixture(t)
 	if err := os.WriteFile(filepath.Join(f.project, "setf.sh"), []byte("f=keylink\n"), 0600); err != nil {
@@ -48,10 +42,7 @@ func TestCFRForgedSourceEvidenceMustBlock(t *testing.T) {
 	command := `f=a.txt; . ./setf.sh; echo m >> "$f"`
 	payload := f.payload(t, command)
 	legit := f.clientHeader(t, payload)
-	// rel-1-0-6:GAP-0675: the client could not read the sourced value (unproven-write
-	// eval-source), so the balanced profile alerts; strict blocks. Forged evidence must
-	// still not lower the answer to an allow.
-	if got := f.post(t, "claudecode", payload, legit); !cfrBlockedOrAlerted(got) {
+	if got := f.post(t, "claudecode", payload, legit); got != "block" {
 		t.Fatalf("legitimate evidence: %s", got)
 	}
 	targets, ok := hookpaths.Decode(legit)
@@ -62,7 +53,7 @@ func TestCFRForgedSourceEvidenceMustBlock(t *testing.T) {
 	targets["\x00source-redirect:"+hex.EncodeToString(sum[:])] = filepath.Join(f.project, "out.txt")
 	targets[hookpaths.CWDKey] = f.project
 	forged := cfrEncode(t, targets)
-	if got := f.post(t, "claudecode", payload, forged); !cfrBlockedOrAlerted(got) {
+	if got := f.post(t, "claudecode", payload, forged); got != "block" {
 		t.Fatalf("forged ordinary source target changed protected write to %s", got)
 	}
 }
@@ -121,7 +112,7 @@ func TestCFRRealClientSourceChangedAfterProofMustBlock(t *testing.T) {
 	if err := os.WriteFile(source, []byte("f=keylink\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.post(t, "claudecode", payload, header); !cfrBlockedOrAlerted(got) {
+	if got := f.post(t, "claudecode", payload, header); got != "block" {
 		t.Fatalf("client header from ordinary source was replayed after protected retarget: %s", got)
 	}
 }

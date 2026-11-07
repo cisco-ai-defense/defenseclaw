@@ -151,7 +151,7 @@ func actionClientProvedSafeVariableTargetsWithBindings(command, cwd, home string
 					value, fixed := StaticWord(source, home)
 					unsafe = !fixed || strings.HasPrefix(value, "-") || !actionClientQuotedVariableTarget(node.Args[len(node.Args)-1])
 				}
-			case "rsync":
+			case "rsync", "cp":
 				if len(node.Args) != 3 {
 					unsafe = true
 				} else {
@@ -250,7 +250,7 @@ func actionClientProvedSafeVariableTargetsWithBindings(command, cwd, home string
 			case *syntax.CallExpr:
 				if len(node.Args) >= 2 {
 					program, fixed := staticProgramWord(node.Args[0], home)
-					if fixed && (programBase(program) == "install" || programBase(program) == "rsync" || programBase(program) == "tee") {
+					if fixed && (programBase(program) == "install" || programBase(program) == "rsync" || programBase(program) == "cp" || programBase(program) == "tee") {
 						targets = append(targets, node.Args[len(node.Args)-1])
 					}
 				}
@@ -291,50 +291,13 @@ func actionClientProvedSafeVariableTargetsWithBindings(command, cwd, home string
 	return seen
 }
 
-// ProvedOrdinaryVariableTargets applies the client proof to a call that uses
-// a declared shell function. The local gateway can then resolve user paths.
+// ProvedOrdinaryVariableTargets applies the proof the user-side hook runs to a
+// call whose write targets are variables: every target has a known ordinary
+// value at its write (a value that an earlier assignment left is dead), in a
+// call that holds no construct that can change a binding unseen. The local
+// gateway resolves user paths and reaches the same answer as the hook.
 func ProvedOrdinaryVariableTargets(command, cwd, home string) bool {
-	if !actionClientBindingSyntax(command) {
-		return false
-	}
-	file, ok := parseShell(command)
-	if !ok {
-		return false
-	}
-	functions := make(map[string]bool)
-	called := false
-	binding := false
-	for _, stmt := range file.Stmts {
-		if function, ok := stmt.Cmd.(*syntax.FuncDecl); ok {
-			if function.Name != nil {
-				functions[function.Name.Value] = true
-			}
-			continue
-		}
-		syntax.Walk(stmt, func(node syntax.Node) bool {
-			switch node := node.(type) {
-			case *syntax.FuncDecl:
-				return false
-			case *syntax.DeclClause:
-				binding = binding || actionClientReadonlyDecl(node, home)
-			case *syntax.CallExpr:
-				if len(node.Args) > 0 {
-					name, fixed := staticProgramWord(node.Args[0], home)
-					called = called || fixed && functions[name]
-					if fixed && name == "printf" && len(node.Args) > 1 {
-						option, known := StaticWord(node.Args[1], home)
-						binding = binding || known && strings.HasPrefix(option, "-v")
-					}
-					binding = binding || fixed && name == "readonly" && actionClientReadonlyName(node, home)
-				}
-			}
-			return !called && !binding
-		})
-		if called || binding {
-			return actionClientProvedSafeVariableTargetsWithBindings(command, cwd, home, true)
-		}
-	}
-	return false
+	return actionClientProvedSafeVariableTargetsForHook(command, cwd, home)
 }
 
 func actionClientBindingSyntax(command string) bool {

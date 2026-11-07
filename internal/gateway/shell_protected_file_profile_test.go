@@ -133,10 +133,10 @@ func TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute(t *testing.T) {
 		{"keys copy onto link", "cp notes.txt keyslink", always, keysRule},
 		{"ssh control file", "echo Host >> ~/.ssh/config", always, keysRule},
 		{"keys shell body", "bash -c \"echo x >> ~/.ssh/authorized_keys\"", always, keysRule},
-		// A shell startup file is the rating of the pack (alert), never a
-		// silent allow, and a block in strict.
-		{"shell profile append", "echo marker >> ~/.bashrc",
-			map[string]string{"default": "alert", "permissive": "alert", "strict": "block"}, profileRule},
+		// A shell startup file the call names is a protected file too: every
+		// profile blocks it, whatever the pack rates the rule.
+		{"shell profile append", "echo marker >> ~/.bashrc", always, profileRule},
+		{"shell profile known value", "dst=~/.bashrc; echo marker >> \"$dst\"", always, profileRule},
 		{"DefenseClaw state append", "printf changed >> ~/.defenseclaw/config.yaml", always, stateRule},
 		{"ordinary write", "echo marker >> notes.txt",
 			map[string]string{"default": "allow", "permissive": "allow", "strict": "allow"}, ""},
@@ -179,6 +179,7 @@ func TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute(t *testing.T) {
 func TestGAP0675ShellProtectedFilePostureDecision(t *testing.T) {
 	marked := RuleFinding{RuleID: "persistence.ssh_authorized_keys_command", Severity: "CRITICAL", shellFile: shellFileUnproven}
 	proven := RuleFinding{RuleID: "persistence.ssh_authorized_keys_command", Severity: "CRITICAL", shellFile: shellFileProven}
+	kept := RuleFinding{RuleID: "persistence.ssh_authorized_keys_command", Severity: "CRITICAL", shellFile: shellFileKept}
 	native := RuleFinding{RuleID: "persistence.ssh_authorized_keys_command", Severity: "CRITICAL"}
 	state := RuleFinding{RuleID: "tamper.detector_state_write", Severity: "HIGH"}
 	detection := RuleFinding{RuleID: "PATH-SSH-DIR", Severity: "HIGH", shellFile: shellFileUnproven, enforcement: findingEnforcementDetectionOnly}
@@ -196,11 +197,14 @@ func TestGAP0675ShellProtectedFilePostureDecision(t *testing.T) {
 		{"permissive", []RuleFinding{marked, native, detection}, false, "permissive", []bool{true, false, false}, "alert"},
 		{"strict", []RuleFinding{marked, native, detection}, false, "strict", []bool{false, false, false}, "alert"},
 		{"secure client", []RuleFinding{marked, native, detection}, true, "default", []bool{false, false, false}, "allow"},
-		// A proven target keeps its enforcement in every posture and is at
-		// least an alert, as the unproven class is.
-		{"proven default", []RuleFinding{proven}, false, "default", []bool{false}, "alert"},
-		{"proven permissive", []RuleFinding{proven, marked}, false, "permissive", []bool{false, true}, "alert"},
-		{"proven strict", []RuleFinding{proven}, false, "strict", []bool{false}, "alert"},
+		// A proven target keeps its enforcement and is a block in every
+		// posture; a kept finding (a link or copy the call makes) keeps the
+		// rating of the pack and is at least an alert.
+		{"proven default", []RuleFinding{proven}, false, "default", []bool{false}, "block"},
+		{"proven permissive", []RuleFinding{proven, marked}, false, "permissive", []bool{false, true}, "block"},
+		{"proven strict", []RuleFinding{proven}, false, "strict", []bool{false}, "block"},
+		{"kept default", []RuleFinding{kept}, false, "default", []bool{false}, "alert"},
+		{"kept permissive", []RuleFinding{kept}, false, "permissive", []bool{false}, "alert"},
 		{"self-protection permissive", []RuleFinding{state, marked}, false, "permissive", []bool{false, true}, "block"},
 		{"self-protection strict", []RuleFinding{state}, false, "strict", []bool{false}, "block"},
 		{"self-protection secure client", []RuleFinding{state}, true, "permissive", []bool{false}, "allow"},

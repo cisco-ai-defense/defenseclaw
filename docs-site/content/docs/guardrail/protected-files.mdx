@@ -42,8 +42,12 @@ and names it as the operand it writes, directly, through a value the command
 sets or through a link, is blocked in action mode in every rule pack. A
 protected name in a comment, or in text the command only prints or writes
 elsewhere, does not name a target. When the rules only suspect such a
-write (the command does not name a protected file), the `default` (balanced)
-and `permissive` rule packs raise an alert instead: the agent shows the warning
+write (the command does not name a protected file, makes no link, copies no
+tree that holds a link and runs no code the rules cannot read), the `default`
+(balanced) and `permissive` rule packs raise an alert instead. A command that
+does make a link, copy a tree with a link or run unseen code keeps the rating
+of the rule pack. The same alert covers the removal of an ordinary project file
+(not under a dot folder, not a link) in a command the parser can only recover: the agent shows the warning
 with the rule ID, the command runs, and the audit record has `decision=alert`.
 The `strict` pack, and a managed strict policy, block it. This holds per-user
 and managed, and on every connector. A native file tool (Write, Edit,

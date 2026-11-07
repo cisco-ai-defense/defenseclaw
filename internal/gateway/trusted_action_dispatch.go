@@ -303,7 +303,7 @@ func dispatchTrustedAction(
 	}
 	request.Input.ActiveStateTreeNames = clientStateTreeNames(request.ResolvedWriteTargets)
 	if request.EnforcementCapable && request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey] == "shell-parse-bound" {
-		return trustedActionLimitFindings(true)
+		return markRecoveredParseOrdinary(request, trustedActionLimitFindings(true))
 	}
 	if trustedActionCommandTooDeep(request.Input) {
 		// Past the reading bounds: no reader below parses it, and the call

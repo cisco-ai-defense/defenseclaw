@@ -70,18 +70,7 @@ func checkSelfProtRows(t *testing.T, rows []selfProtRow, connectors ...string) {
 	for _, managed := range []bool{true, false} {
 		for _, connector := range connectors {
 			for _, r := range rows {
-				// want is one verdict, or per-user/managed where the managed hook
-				// client cannot read a copy source behind ProtectHome and the
-				// call is an alert (rel-1-0-6:GAP-0675).
-				want, wantManaged, split := strings.Cut(r.want, "/")
-				if managed && split {
-					want = wantManaged
-				}
-				got := selfProtVerdict(t, r, managed, connector)
-				if want == "alert" && strings.HasPrefix(got, `status 200 body {"action":"alert"`) {
-					got = "alert"
-				}
-				if got != want {
+				if got := selfProtVerdict(t, r, managed, connector); got != r.want {
 					t.Errorf("%s managed=%v %s: %q = %s, want %s", r.id, managed, connector, r.cmd, got, r.want)
 				}
 			}
