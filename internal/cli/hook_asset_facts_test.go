@@ -194,3 +194,62 @@ func TestHookAssetFactsMarkTheRelocatedCodexConfig(t *testing.T) {
 		t.Fatalf("claude facts = %+v, want them unmarked", got)
 	}
 }
+
+// GAP-0699, GAP-0701: the hook reads, as the user, the text of the skill
+// folder a request selects and of the plugin it belongs to, for a gateway
+// that may not read the profile; a request that selects neither reads none.
+func TestHookAssetFactsCarryTheTextOfTheSelectedSkillAndPlugin(t *testing.T) {
+	home := t.TempDir()
+	for _, name := range []string{"HOME", "USERPROFILE"} {
+		t.Setenv(name, home)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	saved := hookAgentCommandLine
+	t.Cleanup(func() { hookAgentCommandLine = saved })
+	hookAgentCommandLine = func() ([]string, string, error) { return nil, "", agentprocess.ErrNoAgent }
+	write := func(path, text string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(home, ".claude", "skills", "np10", "SKILL.md"), "# np10\nskill text\n")
+	plugin := filepath.Join(t.TempDir(), "r109kit")
+	write(filepath.Join(plugin, "skills", "notes", "SKILL.md"), "# notes\nplugin skill text\n")
+	registry, err := json.Marshal(map[string]any{"plugins": map[string]any{"r109kit@r109mkt": []map[string]string{{"installPath": plugin}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(filepath.Join(home, ".claude", "plugins", "installed_plugins.json"), string(registry))
+	project := t.TempDir()
+	facts := func(payload string) assetfacts.Facts {
+		t.Helper()
+		got, _ := assetfacts.Decode(hookAssetFacts("claudecode", []byte(payload)))
+		return got
+	}
+	cwd := filepath.ToSlash(project)
+	got := facts(`{"tool_name":"Skill","tool_input":{"skill":"np10"},"cwd":"` + cwd + `"}`)
+	if c := got.ContentsFor(assetfacts.ContentSkill, "np10"); len(c) != 1 || len(c[0].Files) != 1 || c[0].Files[0].Rel != "SKILL.md" || c[0].Files[0].Text != "# np10\nskill text\n" {
+		t.Fatalf("skill facts = %+v, want the SKILL.md text", got)
+	}
+	for _, payload := range []string{
+		`{"hook_event_name":"UserPromptExpansion","prompt":"/r109kit:notes","command_name":"r109kit:notes","cwd":"` + cwd + `"}`,
+		`{"tool_name":"mcp__plugin_r109kit_kit-time__kit_time","tool_input":{},"cwd":"` + cwd + `"}`,
+		`{"tool_name":"Skill","tool_input":{"skill":"r109kit:notes"},"cwd":"` + cwd + `"}`,
+	} {
+		if c := facts(payload).ContentsFor(assetfacts.ContentPlugin, "r109kit"); len(c) != 1 || len(c[0].Files) != 1 || c[0].Files[0].Rel != "skills/notes/SKILL.md" {
+			t.Fatalf("plugin facts for %s = %+v, want the plugin text", payload, c)
+		}
+	}
+	for _, payload := range []string{
+		`{"tool_name":"Bash","tool_input":{"command":"ls"},"cwd":"` + cwd + `"}`,
+		`{"tool_name":"Skill","tool_input":{"skill":"missing"},"cwd":"` + cwd + `"}`,
+	} {
+		if got := facts(payload); len(got.Contents) != 0 {
+			t.Fatalf("facts for %s = %+v, want no text read", payload, got)
+		}
+	}
+}

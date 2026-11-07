@@ -83,7 +83,11 @@ and keep shared skills outside profiles. For policy on profile assets, set
 `runtime_detection.enabled: true` so hooks apply default, registry and
 approval rules to profile assets; use `asset_policy.mode: action` to block.
 Set `asset_policy.enabled: true` as well. Denied names are refused by hooks
-even with runtime detection off. Profile skills and plugins are not scanned as the enrolled user.
+even with runtime detection off. With asset policy in action mode and runtime
+detection on, the hook also sends the text of the selected profile skill or
+plugin, and the gateway refuses one the in-process prompt-injection detector
+rates HIGH or CRITICAL, or a skill whose text was not sent. Profile skills and
+plugins are not scanned by the skill-scanner as the enrolled user.
 
 Each enrolled user's MCP server has its own verdict. The install block and
 runtime disable that admission records for one user's server apply to that
@@ -654,7 +658,7 @@ without waiting for its files to change. An MCP server is matched on its
 definition too, so a `command` or `url` rule added later rejects a server
 that was already installed; the hooks refuse its tool calls once the config
 applies. Managed Windows profile assets and managed Linux/macOS connector
-assets are refused only by the hooks. Remove those assets with your device
+assets are refused only by the hooks (on managed Windows from their content, as above). Remove those assets with your device
 management tool while the hooks refuse them.
 
 A Claude Code plugin is refused at the hook as well. Claude Code runs a plugin
