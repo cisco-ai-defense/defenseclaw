@@ -324,3 +324,54 @@ func reachableHome(t *testing.T) string {
 	}
 	return home
 }
+
+// REVIEW-3 MF1: a 0775 target whose group the local files call private, but
+// the name service gives a second member (the proof says no), is refused even
+// when service.json already names the recorded port: the member can rename a
+// new file over it. The setter must not report the port as reconciled; the
+// guardian warns instead. The proof itself is TestOwnerPrivateGroupStrictAsksTheNameService.
+func TestSetOpenCodeServicePortRefusesALinkedTargetWhoseGroupIsNotProvablyPrivate(t *testing.T) {
+	const port = 25001
+	for _, private := range []bool{true, false} {
+		name := "group proven private"
+		if !private {
+			name = "group has a member the name service lists"
+		}
+		t.Run(name, func(t *testing.T) {
+			old := openCodeOwnerPrivateGroup
+			openCodeOwnerPrivateGroup = func(string, os.FileInfo) bool { return private }
+			t.Cleanup(func() { openCodeOwnerPrivateGroup = old })
+			home := t.TempDir()
+			target := filepath.Join(home, "dotfiles", "opencode")
+			if err := os.MkdirAll(target, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(target, 0o775); err != nil {
+				t.Fatal(err)
+			}
+			file := filepath.Join(target, "service.json")
+			if err := os.WriteFile(file, []byte(`{"port":25001}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(home, ".config"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(home, ".config", "opencode")); err != nil {
+				t.Skip(err)
+			}
+			result, err := SetOpenCodeServicePort(home, port)
+			if private {
+				if err != nil || result.Changed || result.Port != port {
+					t.Fatalf("a private-group stow target was refused: %+v %v", result, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("a target another account can write was reported as reconciled: %+v", result)
+			}
+			if after, _ := os.ReadFile(file); string(after) != `{"port":25001}` {
+				t.Fatalf("the file changed: %s", after)
+			}
+		})
+	}
+}
