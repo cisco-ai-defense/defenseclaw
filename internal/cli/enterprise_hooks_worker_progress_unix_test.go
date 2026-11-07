@@ -103,6 +103,9 @@ func TestRestoredHookElementsAreTheOnesThatWentFromBrokenToMatching(t *testing.T
 		// The script is its own element: putting it back counts while another
 		// runtime file is still broken (GAP-0754).
 		{"script back, record still broken", []string{script, record}, enterprisehooks.HookElements{Entry: true, BrokenRuntime: []string{record}}, []string{script}},
+		// The lock stays missing (the aggregate stays broken) while the script
+		// is put back: the script alone is the restore.
+		{"script back, lock still missing", []string{enterprisehooks.HookElementRuntime, script}, enterprisehooks.HookElements{Entry: true, BrokenRuntime: runtimeElement}, []string{script}},
 		{"record back, script still broken", []string{script, record}, enterprisehooks.HookElements{Entry: true, BrokenRuntime: []string{script}}, []string{record}},
 	} {
 		if got := restoredHookElements(tc.broken, tc.after); !slices.Equal(got, tc.want) {
