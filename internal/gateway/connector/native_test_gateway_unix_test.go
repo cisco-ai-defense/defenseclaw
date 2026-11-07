@@ -34,22 +34,9 @@ type hookPostBuild struct {
 
 var nativeHookPostForHookTests hookPostBuild
 
-// heldProofHookPostForHookTests is hook-post built so that its restart proofs
-// never spend a budget on a timer (internal/proofclock heldTimersBake): the
-// proof ends on its own result, not on the speed of the host.
-var heldProofHookPostForHookTests hookPostBuild
-
 func installNativeHookPostForHookTest(t *testing.T, home string) {
 	t.Helper()
 	installHookPostBuild(t, home, &nativeHookPostForHookTests)
-}
-
-// installHeldProofHookPostForHookTest installs hook-post with its proof
-// timers held, for a test whose positive outcome is a restart proof.
-func installHeldProofHookPostForHookTest(t *testing.T, home string) {
-	t.Helper()
-	installHookPostBuild(t, home, &heldProofHookPostForHookTests,
-		"-ldflags", "-X github.com/defenseclaw/defenseclaw/internal/proofclock.heldTimersBake=1")
 }
 
 func installHookPostBuild(t *testing.T, home string, build *hookPostBuild, buildFlags ...string) {
