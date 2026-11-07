@@ -414,6 +414,14 @@ func parseShell(command string) (*syntax.File, bool) {
 // escapes, a leading ~/ and $HOME. Anything whose value depends on the
 // runtime (another parameter, a substitution, a glob, ~user) is not static.
 func staticShellWord(word *syntax.Word, env expand.Environ, haveHome bool) (string, bool) {
+	if value, ok := plainLiteralWord(word); ok {
+		return value, true
+	}
+	return expandStaticShellWord(word, env, haveHome)
+}
+
+// expandStaticShellWord is staticShellWord by the full check and expansion.
+func expandStaticShellWord(word *syntax.Word, env expand.Environ, haveHome bool) (string, bool) {
 	for i, part := range word.Parts {
 		switch part := part.(type) {
 		case *syntax.Lit:
@@ -464,7 +472,36 @@ func StaticWord(word *syntax.Word, home string) (string, bool) {
 	if word == nil {
 		return "", false
 	}
+	if value, ok := plainLiteralWord(word); ok {
+		return value, true
+	}
 	return staticShellWord(word, expand.ListEnviron("HOME="+strings.TrimRight(home, "/")), home != "")
+}
+
+// plainLiteralWord is the value of a word that is one literal of plain path
+// characters. Expansion leaves such a word as it is: it holds no quote,
+// escape, brace, tilde, parameter or glob, so the one field is the literal
+// itself and the expansion (an environment and a field list per word) is
+// skipped. A long list of operands pays that cost once per word per pass.
+func plainLiteralWord(word *syntax.Word) (string, bool) {
+	if len(word.Parts) != 1 {
+		return "", false
+	}
+	lit, ok := word.Parts[0].(*syntax.Lit)
+	if !ok || lit.Value == "" {
+		return "", false
+	}
+	for i := 0; i < len(lit.Value); i++ {
+		c := lit.Value[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			c == '_', c == '.', c == '/', c == '-', c == ',', c == ':', c == '@',
+			c == '%', c == '+', c == '=':
+		default:
+			return "", false
+		}
+	}
+	return lit.Value, true
 }
 
 func homeParam(param *syntax.ParamExp, haveHome bool) bool {
