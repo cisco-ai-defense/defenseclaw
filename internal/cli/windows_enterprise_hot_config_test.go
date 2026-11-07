@@ -1939,9 +1939,10 @@ func TestWindowsEnterpriseEnsureHealsAStaleApprovedConfigSource(t *testing.T) {
 	stale := fmt.Sprintf(record, configwrite.SHA256Hex([]byte(approvedSourceConfigA)))
 
 	layout := stage(t, stale)
+	stageConfigGeneration(t, layout.ConfigPath, approvedSourceConfigB, "lifecycle")
 	result := &enterprisestatus.Result{}
 	healWindowsStandaloneApprovedConfigSource(result)
-	if copyOf(layout) != approvedSourceConfigB || len(result.Changes) != 1 || len(result.Warnings) != 0 {
+	if copyOf(layout) != approvedSourceConfigB || len(result.Changes) != 1 || len(result.Warnings) != 0 || len(result.Errors) != 0 {
 		t.Fatalf("stale source: copy %q, changes %q, warnings %v", copyOf(layout), result.Changes, result.Warnings)
 	}
 
@@ -1965,12 +1966,30 @@ func TestWindowsEnterpriseEnsureHealsAStaleApprovedConfigSource(t *testing.T) {
 		t.Fatalf("a signed-bundle deployment was healed: copy %q, %+v", copyOf(layout), result)
 	}
 
-	// A record it cannot bind warns and never panics.
+	// A record it cannot bind fails the run and never panics.
 	layout = stage(t, `{"installed":true,"profile":"standalone","approved_policy_sources":null}`)
 	result = &enterprisestatus.Result{}
 	healWindowsStandaloneApprovedConfigSource(result)
-	if copyOf(layout) != approvedSourceConfigA || len(result.Warnings) != 1 || result.Warnings[0].Code != "approved_config_source_stale" {
-		t.Fatalf("null source record: copy %q, warnings %+v", copyOf(layout), result.Warnings)
+	if copyOf(layout) != approvedSourceConfigA || len(result.Errors) != 1 || result.Errors[0].Code != "approved_config_source_stale" {
+		t.Fatalf("null source record: copy %q, errors %+v", copyOf(layout), result.Errors)
+	}
+
+	// A stale source whose config is not bound to a lifecycle generation, or
+	// whose lock another run holds, fails the run and leaves A.
+	layout = stage(t, stale)
+	result = &enterprisestatus.Result{}
+	healWindowsStandaloneApprovedConfigSource(result)
+	if copyOf(layout) != approvedSourceConfigA || len(result.Errors) != 1 || result.Errors[0].Code != "approved_config_source_stale" ||
+		windowsEnterpriseFailureCodeFor(result) != enterprisestatus.WindowsExitFailure {
+		t.Fatalf("no generation record: copy %q, errors %+v", copyOf(layout), result.Errors)
+	}
+	stageConfigGeneration(t, layout.ConfigPath, approvedSourceConfigB, "lifecycle")
+	windowsEnterpriseHotConfigLock = func(string) (func(), error) { return nil, windows.ERROR_SHARING_VIOLATION }
+	result = &enterprisestatus.Result{}
+	healWindowsStandaloneApprovedConfigSource(result)
+	if copyOf(layout) != approvedSourceConfigA || len(result.Errors) != 1 || result.Errors[0].Code != "lifecycle_busy" ||
+		windowsEnterpriseFailureCodeFor(result) != enterprisestatus.WindowsExitBusy {
+		t.Fatalf("busy lock: copy %q, errors %+v", copyOf(layout), result.Errors)
 	}
 }
 
@@ -1998,5 +2017,95 @@ func TestWindowsEnterpriseEnsureUndoesAHotApplyWhoseApprovedSourceRecordIsMalfor
 	got, _ := os.ReadFile(host.configPath)
 	if string(got) != previous || stub.calls[len(stub.calls)-1][1] != "Upgrade" {
 		t.Fatalf("malformed approved source record: config %q, installer runs %q", got, stub.calls)
+	}
+}
+
+// GAP-0779 review: a run that fails its closure proof, or that fails for any
+// other reason, never changes the approved config source (the check is the
+// last step of a run that otherwise succeeded); a source that stays stale
+// fails an ensure that would otherwise be compliant, so a later hand edit and
+// Repair cannot restore an older config after an apparent success.
+func TestWindowsEnterpriseEnsureChecksTheApprovedSourceLastAndFailsOnAStaleOne(t *testing.T) {
+	const config = "config_version: 9\nguardrail:\n  hook_fail_mode: open\n"
+	for _, tc := range []struct {
+		name        string
+		digestFails bool
+		healError   bool
+		wantHeals   int
+		wantOK      bool
+		wantCode    string
+	}{
+		{name: "clean ensure checks once", wantHeals: 1, wantOK: true},
+		{name: "closure proof fails, source untouched", digestFails: true, wantHeals: 0, wantCode: "hook_closure_held"},
+		{name: "stale source fails the ensure", healError: true, wantHeals: 1, wantCode: "approved_config_source_stale"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, opts := newHotConfigHost(t, config, config)
+			host.closureHeld, host.adopted = true, true
+			digest := windowsEnterprisePolicyDigest
+			t.Cleanup(func() { windowsEnterprisePolicyDigest = digest })
+			opts.configPath = ""
+			stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("verify")}}
+			stub.install(t)
+			windowsEnterprisePolicyDigest = host.digest
+			if tc.digestFails {
+				windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return nil, errors.New("readback unavailable") }
+			}
+			windowsEnterpriseHealApprovedSource = func(result *enterprisestatus.Result) {
+				host.heals++
+				if tc.healError {
+					result.AddError("approved_config_source_stale", "the approved config source could not be refreshed")
+				}
+			}
+			command := &cobra.Command{}
+			var stdout bytes.Buffer
+			command.SetOut(&stdout)
+			command.SetErr(&bytes.Buffer{})
+			runErr := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`)
+			var result enterprisestatus.Result
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("ensure output: %v\n%s", err, stdout.String())
+			}
+			if host.heals != tc.wantHeals || result.OK != tc.wantOK || (runErr == nil) != tc.wantOK ||
+				(tc.wantCode != "" && !windowsBundleHasCode(result.Errors, tc.wantCode)) {
+				t.Fatalf("heals=%d ok=%t err=%v errors=%v, want heals=%d ok=%t code %q",
+					host.heals, result.OK, runErr, result.Errors, tc.wantHeals, tc.wantOK, tc.wantCode)
+			}
+		})
+	}
+}
+
+// GAP-0779 review: an explicit upgrade (no CONFIG=) or repair that ends
+// without an error checks the approved config source too, because an upgrade
+// carries the earlier digest forward and Repair would restore it; a failed
+// run does not.
+func TestWindowsEnterpriseExplicitUpgradeAndRepairCheckTheApprovedSource(t *testing.T) {
+	const config = "config_version: 9\nguardrail:\n  hook_fail_mode: open\n"
+	failed := installedStatus("upgrade")
+	failed["ok"], failed["errors"] = false, []string{"the upgrade failed"}
+	for _, tc := range []struct {
+		name      string
+		action    string
+		replies   []map[string]any
+		wantHeals int
+	}{
+		{name: "upgrade", action: "upgrade", replies: []map[string]any{installedStatus("upgrade")}, wantHeals: 1},
+		{name: "repair", action: "repair", replies: []map[string]any{installedStatus("repair")}, wantHeals: 1},
+		{name: "failed upgrade", action: "upgrade", replies: []map[string]any{failed, installedStatus("status"), installedStatus("status")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, _ := newHotConfigHost(t, config, config)
+			stub := &ensureStub{t: t, replies: tc.replies}
+			stub.install(t)
+			opts := ensureTestOptions()
+			opts.configPath, opts.manifestPath = "", ""
+			command := &cobra.Command{}
+			command.SetOut(&bytes.Buffer{})
+			command.SetErr(&bytes.Buffer{})
+			_ = runWindowsEnterpriseStandaloneAction(context.Background(), command, tc.action, opts, `C:\x\install-enterprise.ps1`, windowsEnterprisePowerShellArgs(tc.action, opts))
+			if host.heals != tc.wantHeals {
+				t.Fatalf("%s checked the approved source %d times, want %d", tc.action, host.heals, tc.wantHeals)
+			}
+		})
 	}
 }
