@@ -397,6 +397,9 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 			return fmt.Errorf("cannot start the gateway: %s. %s", problemClause(problem), foreignGatewayListenerFix(cfg))
 		}
 	}
+	if err := rootOwnedRuntimeLeftoversRefusal(cfg, "start"); err != nil {
+		return err
+	}
 	if !coldStart {
 		upgradeAuditStoreBeforeStart(cfg, os.Stdout, os.Stderr)
 	}
@@ -836,6 +839,9 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	if err := gatewayDiskFullError("restart", config.DefaultDataPath()); err != nil {
+		return err
+	}
+	if err := rootOwnedRuntimeLeftoversRefusal(cfg, "restart"); err != nil {
 		return err
 	}
 	var cfgErr error

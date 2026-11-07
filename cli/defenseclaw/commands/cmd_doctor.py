@@ -2088,6 +2088,40 @@ def _root_leftovers_remedy(cfg) -> str:
     )
 
 
+def _root_leftover_start_blocker(cfg) -> tuple[list[str], str]:
+    """Root-owned runtime files that stop this account's gateway from starting (GAP-0788).
+
+    Returns ``(names, remedy)``, or ``([], "")`` when nothing blocks the start.
+    It reads the same store, with the same helper, as the Sudo leftovers row
+    and gives the same remedy chain, so the Sidecar API row and ``doctor --fix``
+    never send the user to a start the gateway refuses over files only root
+    can change. A managed install and a Secure Client host keep their own
+    guidance, as the Sudo leftovers row does.
+    """
+    if os.name == "nt" or _gateway_store_unknown(cfg) or not _root_leftovers_account_can_repair(cfg):
+        return [], ""
+    data_dir = _gateway_store_dir(cfg)
+    if not data_dir:
+        return [], ""
+    names = sudo_runtime_leftover_relpaths(data_dir)
+    if not names:
+        return [], ""
+    return names, _root_leftovers_remedy(cfg)
+
+
+def _stopped_gateway_start_advice(cfg) -> tuple[str, str]:
+    """The Sidecar API row's ``(detail suffix, remediation)`` for a stopped gateway.
+
+    A start cannot work while root-owned runtime files remain, so the row names
+    them and the chain instead of advising a start that fails (GAP-0788).
+    """
+    names, remedy = _root_leftover_start_blocker(cfg)
+    if names:
+        return f"it cannot start while these files are root-owned: {', '.join(names)}; {remedy}", remedy
+    start = "start it: 'defenseclaw-gateway start' or 'defenseclaw doctor --fix'"
+    return start, start
+
+
 def _root_gateway_install_home(cfg) -> str:
     """The PID-record home that the root gateway was started for."""
     from defenseclaw.config import default_data_path, install_home_for_bound_store
@@ -5754,13 +5788,13 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
             )
             r.gateway_down = "foreign"
         elif trust.code == "missing":
-            start = "start it: 'defenseclaw-gateway start' or 'defenseclaw doctor --fix'"
+            start, remediation = _stopped_gateway_start_advice(cfg)
             _emit(
                 "fail",
                 "Sidecar API",
                 f"the gateway is not running (no verified listener on {bind}:{cfg.gateway.api_port}); {start}",
                 r=r,
-                remediation=start,
+                remediation=remediation,
             )
             r.gateway_down = "stopped"
         else:
@@ -5780,13 +5814,13 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
         )
         r.gateway_down = "foreign"
     elif code == 0 and "refused" in body.lower():
-        start = "start it: 'defenseclaw-gateway start' or 'defenseclaw doctor --fix'"
+        start, remediation = _stopped_gateway_start_advice(cfg)
         _emit(
             "fail",
             "Sidecar API",
             f"the gateway is not running (nothing listens on {bind}:{cfg.gateway.api_port}); {start}",
             r=r,
-            remediation=start,
+            remediation=remediation,
         )
         r.gateway_down = "stopped"
     else:
@@ -20748,6 +20782,16 @@ def _fix_gateway_service(
     if pid and not inspected_fingerprint:
         return ("fail", "gateway PID record changed or is unsafe; refusing lifecycle mutation")
     action = "restart" if pid else "start"
+    # A start or restart the gateway will refuse over files only root can
+    # change is not tried: it would fail, and a restart would leave a running
+    # gateway stopped. Say so and print the chain instead (GAP-0788).
+    blocked_by, chain = _root_leftover_start_blocker(cfg)
+    if blocked_by:
+        return (
+            "fail",
+            f"cannot {action} the gateway: {', '.join(blocked_by)} are root-owned and doctor cannot "
+            f"repair root-owned files as this account, so the {action} was not tried; {chain}",
+        )
     if plan_only:
         return (
             "plan",
