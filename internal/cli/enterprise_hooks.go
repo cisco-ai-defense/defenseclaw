@@ -2449,15 +2449,19 @@ func enterpriseHookLiveTargetVerifier(ctx context.Context, opts enterprisehooks.
 	return enterpriseHookLivePublicVerifier(ctx, opts)
 }
 
+// enterpriseHookManagedEnrollmentVerifier compares the protected enrollment set
+// the Guardian published with the one verify expects.
+var enterpriseHookManagedEnrollmentVerifier = verifyEnterpriseHookManagedEnrollments
+
 func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOnly bool) (enterpriseHookVerifyRun, error) {
-	run := enterpriseHookVerifyRun{Manifest: enterpriseHookManifest}
 	if cfg == nil {
-		return run, fmt.Errorf("enterprise hooks verify: config is not loaded")
+		return enterpriseHookVerifyRun{Manifest: enterpriseHookManifest}, fmt.Errorf("enterprise hooks verify: config is not loaded")
 	}
 	if enterpriseHooksStandaloneUnixActive() {
 		return runEnterpriseHookVerifyAttemptStandaloneUnix(ctx, registrationOnly)
 	}
-	if cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) {
+	run := enterpriseHookVerifyRun{Manifest: enterpriseHookManifest}
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		if err := enterpriseHookManifestFileTrustCheck(enterpriseHookManifest); err != nil {
 			return run, fmt.Errorf("enterprise hooks verify: manifest trust check failed: %w", err)
 		}
@@ -2465,6 +2469,14 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 			return run, err
 		}
 	}
+	return runEnterpriseHookVerifyAttemptRows(ctx, registrationOnly)
+}
+
+// runEnterpriseHookVerifyAttemptRows verifies every manifest row of a
+// deployment whose manifest and runtime were already found trusted, then the
+// exact protected enrollment set. cfg is loaded.
+func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bool) (enterpriseHookVerifyRun, error) {
+	run := enterpriseHookVerifyRun{Manifest: enterpriseHookManifest}
 	manifest, manifestSHA256, err := enterprisehooks.LoadManifestWithSHA256(enterpriseHookManifest)
 	if err != nil {
 		return run, err
@@ -2748,7 +2760,7 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 		}
 		run.Rows = append(run.Rows, row)
 	}
-	if err := verifyEnterpriseHookManagedEnrollments(enterpriseHookEnrollmentManifest(manifest, unenrolled), apiAddr); err != nil {
+	if err := enterpriseHookManagedEnrollmentVerifier(enterpriseHookEnrollmentManifest(manifest, unenrolled), apiAddr); err != nil {
 		if run.AuthorizationErr == nil {
 			run.AuthorizationErr = fmt.Errorf("protected enrollment set is not exact: %w", err)
 		} else {
