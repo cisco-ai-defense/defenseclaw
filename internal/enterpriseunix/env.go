@@ -329,6 +329,10 @@ type Env struct {
 	// GuardianReportTimeout bounds how long a change waits for the hook
 	// guardian's report on its targets.
 	GuardianReportTimeout time.Duration
+	// GuardianRetireTimeout bounds how long verify waits for the guardian
+	// to record the retirement of a target whose account was just deleted:
+	// the guardian reconciles each minute.
+	GuardianRetireTimeout time.Duration
 	// InstallScanTimeout bounds how long a change waits for the restarted
 	// enumerator to publish its first unprotected-agents record
 	// (awaitInstallScan).
@@ -500,6 +504,9 @@ func (e *Env) fillDefaults() {
 	}
 	if e.GuardianReportTimeout <= 0 {
 		e.GuardianReportTimeout = 30 * time.Second
+	}
+	if e.GuardianRetireTimeout <= 0 {
+		e.GuardianRetireTimeout = 75 * time.Second
 	}
 	if e.InstallScanTimeout <= 0 {
 		e.InstallScanTimeout = 30 * time.Second

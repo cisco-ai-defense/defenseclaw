@@ -468,6 +468,11 @@ func newTestHost(t *testing.T, goos string) *testHost {
 		darwinProcessArgv = func(int) ([]string, error) { return nil, errors.New("fake macOS host: no process argv") }
 		t.Cleanup(func() { darwinProcessArgv = previous })
 	}
+	// A fake host never asks the real directory whether an account is gone:
+	// on a macOS runner it answered "gone" for every made-up name.
+	previousGone := guardianAccountConfirmedGone
+	guardianAccountConfirmedGone = func(string, int) bool { return false }
+	t.Cleanup(func() { guardianAccountConfirmedGone = previousGone })
 	env := &Env{
 		GOOS:           goos,
 		Root:           t.TempDir(),
@@ -481,6 +486,7 @@ func newTestHost(t *testing.T, goos string) *testHost {
 		PollInterval:   10 * time.Millisecond,
 		// No guardian runs in the fake host.
 		GuardianReportTimeout: 50 * time.Millisecond,
+		GuardianRetireTimeout: 50 * time.Millisecond,
 		// Nor does its enumerator publish a record (testHost.run does).
 		InstallScanTimeout: 5 * time.Millisecond,
 	}
