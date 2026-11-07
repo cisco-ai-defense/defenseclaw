@@ -789,7 +789,7 @@ jobs:
     # through the installed hook, the gateway evidence, the observability v8
     # records, and teardown restoring the vendor config. No vendor agent runs.
     # cli/tests/test_windows_connector_contract.py pins the matrix.
-    name: Windows x64 connector contract / ${{ matrix.connector }}${{ matrix.leaf == 'contract' && '' || ' (launcher path with parentheses)' }}
+    name: Windows x64 connector contract / ${{ matrix.connector }}${{ matrix.leaf != 'contract' && ' (launcher path with parentheses)' || '' }}
     needs: [changes, contract-assets]
     if: ${{ !cancelled() && needs.contract-assets.result == 'success' }}
     runs-on: windows-latest
@@ -837,7 +837,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: windows-native-contract-results-${{ matrix.connector }}${{ matrix.leaf == 'contract' && '' || '-bridge' }}
+          name: windows-native-contract-results-${{ matrix.connector }}${{ matrix.leaf != 'contract' && '-bridge' || '' }}
           path: ${{ env.DC_STATE_ROOT }}\${{ matrix.leaf }}\results.jsonl
           if-no-files-found: warn
           retention-days: 5
@@ -848,7 +848,7 @@ jobs:
         if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: windows-native-contract-diagnostics-${{ matrix.connector }}${{ matrix.leaf == 'contract' && '' || '-bridge' }}
+          name: windows-native-contract-diagnostics-${{ matrix.connector }}${{ matrix.leaf != 'contract' && '-bridge' || '' }}
           path: ${{ env.DC_DIAGNOSTICS }}\**
           if-no-files-found: ignore
           retention-days: 5

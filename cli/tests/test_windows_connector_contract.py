@@ -131,14 +131,57 @@ def test_one_codex_cell_runs_where_only_the_powershell_bridge_can_start_the_laun
     assert "-StateRoot (Join-Path $env:DC_STATE_ROOT $env:CONTRACT_LEAF)" in run
     assert contract["env"]["CONTRACT_LEAF"] == "${{ matrix.leaf }}"
     # Two codex cells must not upload to the same artifact name or read the other's results.
+    # The suffix must sit on the truthy side: "a && '' || b" is always b, because '' is falsy (review g088r M1).
+    assert contract["name"] == (
+        "Windows x64 connector contract / ${{ matrix.connector }}"
+        "${{ matrix.leaf != 'contract' && ' (launcher path with parentheses)' || '' }}"
+    )
     uploads = [step["with"] for step in contract["steps"] if str(step.get("uses", "")).startswith("actions/upload-artifact")]
-    assert uploads and all("matrix.leaf" in upload["name"] for upload in uploads)
+    assert [upload["name"] for upload in uploads] == [
+        "windows-native-contract-results-${{ matrix.connector }}${{ matrix.leaf != 'contract' && '-bridge' || '' }}",
+        "windows-native-contract-diagnostics-${{ matrix.connector }}${{ matrix.leaf != 'contract' && '-bridge' || '' }}",
+    ]
     assert "matrix.leaf" in uploads[0]["path"]
+    assert "&& '' ||" not in WORKFLOW.read_text(encoding="utf-8")
+    # Evaluate the three names for every cell (the official @actions/expressions evaluator gave the
+    # same answers; see IN-r109-g088r.md). Only the bridge cell is renamed, and no two cells collide.
+    cells = [{"connector": connector, "leaf": leaf} for connector in matrix["connector"] for leaf in matrix["leaf"]]
+    cells += [dict(entry) for entry in matrix["include"]]
+    names = {"job": [], "results": [], "diagnostics": []}
+    for cell in cells:
+        for key, template in (("job", contract["name"]), ("results", uploads[0]["name"]), ("diagnostics", uploads[1]["name"])):
+            names[key].append(_render(template, cell))
+    for key, rendered in names.items():
+        assert len(rendered) == len(set(rendered)) == len(matrix["connector"]) + 1, (key, rendered)
+    renamed = [cell for cell, name in zip(cells, names["results"]) if name.endswith("-bridge")]
+    assert renamed == extra
+    assert [name for name in names["job"] if name.endswith(" (launcher path with parentheses)")] == [
+        "Windows x64 connector contract / codex (launcher path with parentheses)"
+    ]
     harness = HARNESS.read_text(encoding="utf-8")
-    # The harness computes the same condition and refuses the direct form on such a path.
+    # The harness computes the same condition and refuses the direct form on such a path. The throw
+    # statement itself is pinned, so removing it (or its condition) fails here and not only the text.
     assert "$script:BinNeedsBridge" in harness
     assert "[\\p{L}\\p{Nd} \\\\._~-]" in harness
-    assert "although $script:Bin has a character that form cannot carry" in harness
+    assert re.search(
+        r"if \(\$script:BinNeedsBridge -and \$null -ne \$bridge\) \{\s*throw \"Codex command_windows starts the launcher "
+        r"through cmd\.exe although \$script:Bin has a character that form cannot carry",
+        harness,
+    )
+
+
+def _render(template: str, cell: dict[str, str]) -> str:
+    """Evaluate the only expression shapes the contract names use: matrix.connector and the leaf ternary."""
+
+    def one(match: re.Match[str]) -> str:
+        expression = match.group(1).strip()
+        if expression == "matrix.connector":
+            return cell["connector"]
+        ternary = re.fullmatch(r"matrix\.leaf != 'contract' && '([^']+)' \|\| ''", expression)
+        assert ternary, f"unexpected expression {expression!r}"
+        return ternary.group(1) if cell["leaf"] != "contract" else ""
+
+    return re.sub(r"\$\{\{(.*?)\}\}", one, template)
 
 
 def test_the_parser_self_test_runs_in_the_powershell_job() -> None:
