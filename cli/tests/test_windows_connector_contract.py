@@ -107,6 +107,40 @@ def test_windows_native_required_needs_the_contract_jobs() -> None:
         assert "needs.contract-assets.result == 'success'" in jobs[name]["if"]
 
 
+def test_one_codex_cell_runs_where_only_the_powershell_bridge_can_start_the_launcher() -> None:
+    """Setup writes Codex's bridge form for a launcher path cmd.exe cannot carry (review g088r S1).
+
+    windowsCmdDirectPath (internal/gateway/connector/helpers.go) carries letters, digits and
+    \\ . _ - ~ only, so a folder such as "Jean (work)" or "O'Brien" gets the encoded PowerShell
+    bridge. That form is the whole fail-closed answer on such a path, so one more Codex cell runs
+    the contract (setup, the Doctor row, allow and block through the hook) from a state root that
+    has such a character. The harness reads both bridge forms (before and after GAP-0676), so the
+    cell needs no gate on the g676 branch.
+    """
+    contract = _jobs()["connector-contract"]
+    matrix = contract["strategy"]["matrix"]
+    # `leaf` has one value for every connector; the include overwrites it, which is what makes the
+    # include a new cell and not an extra key on the existing codex one.
+    assert matrix["leaf"] == ["contract"]
+    extra = [entry for entry in matrix["include"] if entry["connector"] == "codex"]
+    assert len(extra) == 1 and len(matrix["include"]) == 1
+    leaf = extra[0]["leaf"]
+    assert leaf != "contract"
+    assert re.search(r"[^A-Za-z0-9\\._~ -]", leaf), f"{leaf!r} is a folder the direct cmd.exe form can carry"
+    run = "\n".join(step.get("run", "") for step in contract["steps"])
+    assert "-StateRoot (Join-Path $env:DC_STATE_ROOT $env:CONTRACT_LEAF)" in run
+    assert contract["env"]["CONTRACT_LEAF"] == "${{ matrix.leaf }}"
+    # Two codex cells must not upload to the same artifact name or read the other's results.
+    uploads = [step["with"] for step in contract["steps"] if str(step.get("uses", "")).startswith("actions/upload-artifact")]
+    assert uploads and all("matrix.leaf" in upload["name"] for upload in uploads)
+    assert "matrix.leaf" in uploads[0]["path"]
+    harness = HARNESS.read_text(encoding="utf-8")
+    # The harness computes the same condition and refuses the direct form on such a path.
+    assert "$script:BinNeedsBridge" in harness
+    assert "[\\p{L}\\p{Nd} \\\\._~-]" in harness
+    assert "although $script:Bin has a character that form cannot carry" in harness
+
+
 def test_the_parser_self_test_runs_in_the_powershell_job() -> None:
     steps = "\n".join(step.get("run", "") for step in _jobs()["powershell-static"]["steps"])
     assert "run-windows-install.ps1 -Operation self-test" in steps

@@ -29,8 +29,8 @@
         install.ps1, then `defenseclaw uninstall --all --binaries --yes` and
         nothing of the install left (files, processes and, with -PersistPath,
         the user Path entry install.ps1 added; the user Path is back to what it
-        was). No 1.0 release writes a Run value (install.ps1 only removes the
-        ones a 0.8 Setup wrote), so there is none to check.
+        was). install.ps1 writes no Run value (it only removes the ones a 0.8
+        Setup wrote), so there is none to check.
       -Operation self-test
         the hook command parsers read every form setup renders (no install).
 
@@ -79,6 +79,10 @@ $script:Results = Join-Path $StateRoot 'results.jsonl'
 $script:Failures = [Collections.Generic.List[string]]::new()
 $script:HarnessBash = $null
 $script:Bin = ''
+# True when the install folder has a character cmd.exe cannot be handed bare
+# (a parenthesis, an apostrophe, ...): setup then registers Codex's PowerShell
+# bridge instead of the direct cmd.exe command, and the cell checks it did.
+$script:BinNeedsBridge = $false
 $script:AgentFixtures = @()
 $script:UserPathBefore = ''
 $script:SeededConfig = $null
@@ -173,6 +177,9 @@ function Enter-Profile {
     # environment, unless HERMES_HOME names it: keep its config in this profile.
     $env:HERMES_HOME = Join-Path $env:LOCALAPPDATA 'hermes'
     $script:Bin = Join-Path $script:ProfileHome '.local\bin'
+    # The direct form carries only letters, digits and \ . _ - ~ (and spaces,
+    # quoted): windowsCmdDirectPath in internal/gateway/connector/helpers.go.
+    $script:BinNeedsBridge = $script:Bin -notmatch '^[A-Za-z]:\\[\p{L}\p{Nd} \\._~-]+$'
     $script:DcHome = Join-Path $script:ProfileHome '.defenseclaw'
     $script:VenvPython = Join-Path $script:DcHome '.venv\Scripts\python.exe'
     # The install's commands first; the runner's tools (Git Bash, jq, node, uv) after them.
@@ -522,6 +529,9 @@ function Assert-CodexRegistration([string]$Config) {
         $literal = $entry.Groups['literal'].Value
         $command = if ($literal.StartsWith("'", [StringComparison]::Ordinal)) { $literal.Substring(1, $literal.Length - 2) } else { $literal | ConvertFrom-Json }
         $bridge = Get-DirectHookCommand $command
+        if ($script:BinNeedsBridge -and $null -ne $bridge) {
+            throw "Codex command_windows starts the launcher through cmd.exe although $script:Bin has a character that form cannot carry; the PowerShell bridge is the only fail-closed answer there: $command"
+        }
         if ($null -eq $bridge) { $bridge = Get-EncodedHookBridge $command 'Codex command_windows' }
         $arguments = @(if ($null -ne $bridge) { $bridge.Arguments })
         $hookEvent = if ($arguments.Count -eq 7) { $arguments[4] } else { '' }
@@ -540,7 +550,8 @@ function Assert-CodexRegistration([string]$Config) {
     # for this Codex version (the hook refuses any other).
     $env:DC_E2E_CODEX_HOOK_CONTRACT = @($contracts)[0]
     if (-not $bound.Contains('PreToolUse')) { throw 'Codex registration has no PreToolUse hook' }
-    return "$($bound.Count) events bound to the installed defenseclaw-hook.exe ($env:DC_E2E_CODEX_HOOK_CONTRACT)"
+    $form = if ($script:BinNeedsBridge) { ', every one through the PowerShell bridge (the install folder cannot be a direct cmd.exe path)' } else { '' }
+    return "$($bound.Count) events bound to the installed defenseclaw-hook.exe ($env:DC_E2E_CODEX_HOOK_CONTRACT)$form"
 }
 
 function Assert-CopilotRegistration([string]$Config) {
