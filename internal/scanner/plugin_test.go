@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -200,21 +201,21 @@ func resolvePluginCLI() (binary string, strict bool) {
 	return "defenseclaw", false
 }
 
-// errPluginCLINotLaunchable marks a CLI the operating system could not start:
-// the file is missing or not executable, or its interpreter (the shebang
-// target of a console script) was removed. The process is never created, so
-// cmd.Start fails. Only this outcome means "not installed". Once the process
-// started, its exit status is the CLI's own answer, whatever the number: a
-// shell launcher or a script can print its output and exit 126 or 127 for its
-// own reasons, so a status cannot show that the file was missing. A CLI that
-// ran and then failed or hung is a real defect and is never reported through
-// this error.
-var errPluginCLINotLaunchable = errors.New("plugin CLI cannot be launched")
+// errPluginCLIAbsent marks a CLI whose file, or whose interpreter (the shebang
+// target of a console script), is not there: cmd.Start failed because a path
+// does not exist. Only this outcome means "not installed". A start failure for
+// any other reason (access denied, a resource limit) means the CLI is present
+// and broken. Once the process started, its exit status is the answer of the
+// CLI itself, whatever the number: a shell launcher or a script can print its
+// output and exit 126 or 127 for its own reasons, so a status cannot show that
+// the file was missing. A CLI that ran and then failed or hung is a real defect
+// and is never reported through this error.
+var errPluginCLIAbsent = errors.New("plugin CLI is not installed")
 
 // pluginCLIStarts runs the CLI with --help (no scan). It returns an error
-// wrapping errPluginCLINotLaunchable when the process could not be started, a
-// plain error when it started but exited nonzero or did not finish in time,
-// and nil when it answered.
+// wrapping errPluginCLIAbsent when a path it needs does not exist, a plain
+// error when it could not start for another reason, started but exited
+// nonzero, or did not finish in time, and nil when it answered.
 func pluginCLIStarts(binary string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -223,7 +224,10 @@ func pluginCLIStarts(binary string, timeout time.Duration) error {
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("%w: %v", errPluginCLINotLaunchable, err)
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, exec.ErrNotFound) {
+			return fmt.Errorf("%w: %v", errPluginCLIAbsent, err)
+		}
+		return fmt.Errorf("plugin CLI %s is present but cannot be started: %w", binary, err)
 	}
 	err := cmd.Wait()
 	if err == nil {
@@ -238,14 +242,15 @@ func pluginCLIStarts(binary string, timeout time.Duration) error {
 
 // gatePluginCLI decides what the integration test does with the CLI it
 // picked. A CLI chosen on purpose (DEFENSECLAW_BIN or the repo .venv) must
-// start: a broken one is a real failure. A CLI found only on PATH can be a
-// stale install on a shared box (its interpreter removed with the tree it was
-// built from); only that, "cannot be launched", means skip. A PATH CLI that
-// started and then failed (any exit status, 126 and 127 included) or hung is
+// start: a broken or missing one is a real failure. A CLI found only on PATH
+// can be a stale install on a shared box (its interpreter removed with the tree
+// it was built from); only that, a missing file or interpreter, means skip. A
+// PATH CLI that is present but cannot be started (access denied), or that
+// started and then failed (any exit status, 126 and 127 included) or hung, is
 // still a failure.
 func gatePluginCLI(binary string, strict bool, timeout time.Duration) (skip bool, err error) {
 	err = pluginCLIStarts(binary, timeout)
-	return err != nil && !strict && errors.Is(err, errPluginCLINotLaunchable), err
+	return err != nil && !strict && errors.Is(err, errPluginCLIAbsent), err
 }
 
 func TestGatePluginCLISkipsOnlyAnAbsentPathInstall(t *testing.T) {
@@ -264,6 +269,15 @@ func TestGatePluginCLISkipsOnlyAnAbsentPathInstall(t *testing.T) {
 	broken := script("broken", "#!/bin/sh\nexit 23\n")
 	working := script("working", "#!/bin/sh\nexit 0\n")
 	stale := script("stale", "#!"+filepath.Join(dir, "removed-venv", "bin", "python")+"\nprint(1)\n")
+	notExecutable := script("not-executable", "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(notExecutable, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	interpreter := script("interpreter-without-execute", "print(1)\n")
+	if err := os.Chmod(interpreter, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cannotRunInterpreter := script("cannot-run-interpreter", "#!"+interpreter+"\nprint(1)\n")
 	startedThenNotFound := script("started-127", "#!/bin/sh\necho started --help\nexit 127\n")
 	startedThenCannotExec := script("started-126", "#!/bin/sh\necho started --help\nexit 126\n")
 	for _, tc := range []struct {
@@ -275,6 +289,9 @@ func TestGatePluginCLISkipsOnlyAnAbsentPathInstall(t *testing.T) {
 	}{
 		{"path install that is absent skips", absent, false, true, true},
 		{"path install whose interpreter was removed skips", stale, false, true, true},
+		{"path install without the execute bit fails", notExecutable, false, false, true},
+		{"path install whose interpreter lacks the execute bit fails", cannotRunInterpreter, false, false, true},
+		{"explicit install without the execute bit fails", notExecutable, true, false, true},
 		{"path install that exits nonzero fails", broken, false, false, true},
 		{"path install that starts and exits 127 fails", startedThenNotFound, false, false, true},
 		{"path install that starts and exits 126 fails", startedThenCannotExec, false, false, true},
@@ -304,24 +321,24 @@ func TestPluginCLIStartsRejectsAStaleInstallAndAcceptsAWorkingOne(t *testing.T) 
 		return path
 	}
 	stale := script("stale", "#!"+filepath.Join(dir, "removed-venv", "bin", "python")+"\nprint(1)\n")
-	if err := pluginCLIStarts(stale, time.Minute); !errors.Is(err, errPluginCLINotLaunchable) {
+	if err := pluginCLIStarts(stale, time.Minute); !errors.Is(err, errPluginCLIAbsent) {
 		t.Fatalf("a shim whose interpreter was removed must count as not installed, got %v", err)
 	}
 	for _, code := range []string{"126", "127"} {
 		started := script("started-"+code, "#!/bin/sh\necho started --help\nexit "+code+"\n")
-		if err := pluginCLIStarts(started, time.Minute); err == nil || errors.Is(err, errPluginCLINotLaunchable) {
+		if err := pluginCLIStarts(started, time.Minute); err == nil || errors.Is(err, errPluginCLIAbsent) {
 			t.Fatalf("a CLI that started and exited %s is broken, not absent, got %v", code, err)
 		}
 	}
-	if err := pluginCLIStarts(filepath.Join(dir, "missing"), time.Minute); !errors.Is(err, errPluginCLINotLaunchable) {
+	if err := pluginCLIStarts(filepath.Join(dir, "missing"), time.Minute); !errors.Is(err, errPluginCLIAbsent) {
 		t.Fatalf("a missing file must count as not installed, got %v", err)
 	}
 	broken := script("broken", "#!/bin/sh\necho boom >&2\nexit 23\n")
-	if err := pluginCLIStarts(broken, time.Minute); err == nil || errors.Is(err, errPluginCLINotLaunchable) {
+	if err := pluginCLIStarts(broken, time.Minute); err == nil || errors.Is(err, errPluginCLIAbsent) {
 		t.Fatalf("a CLI that starts and exits nonzero is broken, not absent, got %v", err)
 	}
 	hung := script("hung", "#!/bin/sh\nexec sleep 30\n")
-	if err := pluginCLIStarts(hung, 200*time.Millisecond); err == nil || errors.Is(err, errPluginCLINotLaunchable) {
+	if err := pluginCLIStarts(hung, 200*time.Millisecond); err == nil || errors.Is(err, errPluginCLIAbsent) {
 		t.Fatalf("a CLI that does not answer in time is broken, not absent, got %v", err)
 	}
 	working := script("working", "#!/bin/sh\nexit 0\n")
@@ -337,15 +354,22 @@ func TestResolvePluginCLIKeepsExplicitChoicesStrict(t *testing.T) {
 	}
 }
 
+// TestPluginScannerIntegrationFailsForAMissingExplicitCLI runs the integration
+// test itself with DEFENSECLAW_BIN naming a file that is not there. An
+// explicit choice is strict, so the test must fail, not skip.
+func TestPluginScannerIntegrationFailsForAMissingExplicitCLI(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestPluginScanner_Integration$", "-test.v")
+	cmd.Env = append(os.Environ(), "DEFENSECLAW_BIN="+filepath.Join(t.TempDir(), "missing", "defenseclaw"))
+	output, err := cmd.CombinedOutput()
+	if err == nil || strings.Contains(string(output), "--- SKIP") || !strings.Contains(string(output), "--- FAIL") {
+		t.Fatalf("a missing explicit DEFENSECLAW_BIN must fail the integration test, err=%v:\n%s", err, output)
+	}
+}
+
 // TestPluginScanner_Integration calls the real Python CLI and verifies
 // Go can parse its output end-to-end. Skipped if defenseclaw is not installed.
 func TestPluginScanner_Integration(t *testing.T) {
 	binary, strict := resolvePluginCLI()
-	if _, err := exec.LookPath(binary); err != nil {
-		if _, err2 := os.Stat(binary); err2 != nil {
-			t.Skipf("skipping: %s not found: %v", binary, err)
-		}
-	}
 	if skip, err := gatePluginCLI(binary, strict, 2*time.Minute); err != nil {
 		if skip {
 			t.Skipf("skipping: defenseclaw on PATH (%s) is not installed: %v", binary, err)
