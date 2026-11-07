@@ -492,22 +492,25 @@ func (s *hookPathScan) blankOrdinaryPrograms(command, home string) (string, bool
 	if !ok {
 		return command, false
 	}
-	return s.scanCommand(file, command, home, s.workDirs(), 0)
+	return s.scanCommand(file, command, home, hookState{dirs: s.workDirs()}, 0)
 }
 
-// maxHookNestedShells bounds how deep "bash -c" text is read as a command.
-const maxHookNestedShells = 3
+// maxHookNestedShells bounds how deep "bash -c" text is read as a command. Each
+// level is quoted inside the one before it and the kernel limits one argument to
+// 128 KiB, so a command cannot nest deeper than this.
+const maxHookNestedShells = 32
 
 // scanCommand is blankOrdinaryPrograms for the parsed text of one command,
 // whose words are read from the directories start.
-func (s *hookPathScan) scanCommand(file *syntax.File, command, home string, start []string, depth int) (string, bool) {
-	dirs := s.trackWorkDirs(file, home, start)
-	dirsAt := func(word *syntax.Word) []string {
-		if at, ok := dirs[word]; ok {
+func (s *hookPathScan) scanCommand(file *syntax.File, command, home string, start hookState, depth int) (string, bool) {
+	states, calls := s.trackWorkDirs(file, home, start)
+	stateAt := func(word *syntax.Word) hookState {
+		if at, ok := states[word]; ok {
 			return at
 		}
 		return start
 	}
+	dirsAt := func(word *syntax.Word) []string { return stateAt(word).dirs }
 	var out strings.Builder
 	named := false
 	copied := 0
@@ -564,7 +567,14 @@ func (s *hookPathScan) scanCommand(file *syntax.File, command, home string, star
 		// The program is one word whatever characters its name holds, and so
 		// is the script it opens. The other arguments stay in the text: the
 		// program may run one as a shell line.
-		program, operands, _ := hookProgramWord(call.Args)
+		program, operands, dir := hookProgramWord(call.Args)
+		if dir != nil {
+			// env opens its -C directory before it changes into it.
+			if reads, ok := calls[call]; ok && s.wordNamesManaged(dir, home, reads.dirs) {
+				named = true
+				return false
+			}
+		}
 		if program == nil {
 			return true
 		}
@@ -592,7 +602,7 @@ func (s *hookPathScan) scanCommand(file *syntax.File, command, home string, star
 			}
 			text := strings.Join(texts, " ")
 			if inner, ok := shellparse.Parse(text); ok && text != "" {
-				if _, innerNamed := s.scanCommand(inner, text, home, dirsAt(operand), depth+1); innerNamed {
+				if _, innerNamed := s.scanCommand(inner, text, home, stateAt(operand), depth+1); innerNamed {
 					named = true
 					return false
 				}
