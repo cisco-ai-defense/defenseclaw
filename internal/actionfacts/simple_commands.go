@@ -218,10 +218,21 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			parent := previousScope[:index]
 			body, ran := states[previousScope]
 			switch previousScope[index+1] {
-			case 'c':
+			case 'c', 'u', 'o':
 				if ran {
 					merged := append(simpleScopeStates(states, parent), body...)
-					states[parent] = uniqueSimpleStates(simpleJoinForgottenUserVars(merged, body))
+					merged = simpleJoinForgottenUserVars(merged, body)
+					for name, kind := range loopScopeKinds {
+						if previousScope[index+1] == kind {
+							// A loop leaves its name the value of its last
+							// iteration, which the walk does not follow.
+							for i := range merged {
+								merged[i] = merged[i].clone()
+								simpleForgetUserVars(merged[i].vars, []string{name})
+							}
+						}
+					}
+					states[parent] = uniqueSimpleStates(merged)
 				}
 			case 'f':
 				// A called function body always runs; its local HOME ends
@@ -255,7 +266,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		emitted := make(map[SimpleCommand]bool)
 		for _, prior := range variants {
 			state := prior.clone()
-			simpleForgetUserVars(state.vars, part.binds)
+			simpleApplyLoopBinds(state.vars, part.binds, simpleInitialUserVars(home, nil))
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) == 0 && len(call.Assigns) != 0 && len(stmt.Redirs) == 0 {
 				updateSimpleVariables(state.vars, call.Assigns)
 				changed = true
@@ -1245,6 +1256,29 @@ func evalCodeBindsUser(text string, depth int) []string {
 		return true
 	})
 	return names
+}
+
+// simpleApplyLoopBinds gives each name a for or select loop binds the value
+// it has in the iteration that matters. A list that can hold the login the
+// home spells (an empty list, the login or a name that holds it, a word the
+// walk cannot read or that has a pattern) gives the name that login in the
+// iteration that has it: the statement in the body is read with it, as the
+// shell runs it. A list of other logins only leaves the name without a
+// value the walk can follow (rel-1-0-6:GAP-0630, GAP-0681 review 7).
+func simpleApplyLoopBinds(vars map[string]string, binds []simpleLoopBind, login map[string]string) {
+	for _, bind := range binds {
+		active, hasLogin := login[bind.name]
+		reads := hasLogin && len(bind.items) == 0
+		for _, word := range bind.items {
+			value, known := simpleStaticWord(word, vars)
+			reads = reads || hasLogin && (!known || value == active || strings.ContainsAny(value, "*?["))
+		}
+		if reads {
+			vars[bind.name] = active
+		} else {
+			delete(vars, bind.name)
+		}
+	}
 }
 
 // simpleForgetUserVars drops the value of each name from vars.
