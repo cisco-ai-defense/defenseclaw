@@ -1307,11 +1307,13 @@ def _configured_agent_evidence_is_stale(cached: AgentDiscovery, data_dir: str | 
 
     That is an installed agent the scan never ran (``VERSION_NOT_PROBED``: it
     was not set up when the scan ran, as on a fresh account after ``init``),
-    or one whose executable was written or replaced at or after the scan (an
-    agent update). Agents nobody set up are never run (GAP-0901); Kiro, which
-    has several forms, and an agent whose probe already failed for another
-    reason are left to ``agent discover --refresh``, so a broken CLI is not
-    run on every call.
+    or one whose selection changed since the scan: the executable, a link or
+    folder on its way was written, replaced or re-linked at or after the scan
+    (:func:`_resolves_unchanged_since`), or the launch order now offers a
+    different executable ahead of it (:func:`_unchanged_candidates_ahead`).
+    Agents nobody set up are never run (GAP-0901); Kiro, which has several
+    forms, and an agent whose probe already failed for another reason are left
+    to ``agent discover --refresh``, so a broken CLI is not run on every call.
     """
     configured = _configured_probe_names(data_dir)
     if not configured or _PROBE_ONLY.get() is not None:
@@ -1319,26 +1321,21 @@ def _configured_agent_evidence_is_stale(cached: AgentDiscovery, data_dir: str | 
     scanned = _parse_rfc3339(cached.scanned_at)
     if scanned is None:
         return False
+    since = scanned.timestamp()
     for name in configured - {"kiro"}:
         signal = cached.agents.get(name)
         if signal is None or not signal.installed or not signal.binary_path:
             continue
-        if not signal.version and signal.error == VERSION_NOT_PROBED:
+        if not signal.version:
+            if signal.error == VERSION_NOT_PROBED:
+                return True
+            continue
+        if not os.path.isabs(signal.binary_path) or not _resolves_unchanged_since(signal.binary_path, since):
             return True
-        if signal.version and _executable_changed_since(signal.binary_path, scanned.timestamp()):
+        recorded = {"skipped_binaries": list(signal.skipped_binaries)}
+        if _unchanged_candidates_ahead(name, signal.binary_path, recorded, since) is None:
             return True
     return False
-
-
-def _executable_changed_since(path: str, since: float) -> bool:
-    """Whether the file *path* resolves to was written, replaced or re-linked
-    at or after *since* (ctime cannot be set back, so an update that keeps the
-    old mtime still counts). A file that cannot be read counts as changed."""
-    try:
-        info = os.stat(os.path.realpath(path))
-    except OSError:
-        return True
-    return max(info.st_mtime, info.st_ctime) >= since
 
 
 def _keep_versions_of_slow_unchanged_agents(
@@ -1513,8 +1510,9 @@ def _resolves_unchanged_since(path: str, since: float) -> bool:
     ``current`` link to another version folder, or installing a new version
     over the old one, makes the agent changed. ctime cannot be set back.
     """
-    pending = [part for part in reversed(path.split(os.sep)) if part]
-    resolved = os.sep
+    drive, rest = os.path.splitdrive(path.replace(os.altsep, os.sep) if os.altsep else path)
+    pending = [part for part in reversed(rest.split(os.sep)) if part]
+    resolved = drive + os.sep
     links = 0
     while pending:
         part = pending.pop()
@@ -1538,9 +1536,10 @@ def _resolves_unchanged_since(path: str, since: float) -> bool:
             target = os.readlink(candidate)
         except OSError:
             return False
+        target_drive, target_rest = os.path.splitdrive(target)
         if os.path.isabs(target):
-            resolved = os.sep
-        pending.extend(part for part in reversed(target.split(os.sep)) if part)
+            resolved = (target_drive or drive) + os.sep
+        pending.extend(part for part in reversed(target_rest.split(os.sep)) if part)
     for checked in (resolved, os.path.dirname(resolved)):
         try:
             info = os.lstat(checked)
@@ -3348,6 +3347,51 @@ def _write_cache(
             "ttl_seconds": CACHE_TTL_SECONDS,
             "agents": {name: asdict(signal) for name, signal in disc.agents.items()},
         }
+        body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        atomic_write_private_bytes(path, body.encode("utf-8"))
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _publish_agent_signal(
+    disc: AgentDiscovery,
+    name: str,
+    *,
+    data_dir: str | os.PathLike[str] | None = None,
+) -> bool:
+    """Record one agent signal from a scan in the discovery cache and leave
+    every other entry as the cache holds it.
+
+    A scan made for one connector can miss an unrelated peer for a moment (a
+    slow or unreadable CLI), and the gateway reads each peer version from this
+    cache, so publishing the whole scan would erase a version a peer was
+    reviewed at. A missing or unreadable cache has nothing to keep and takes
+    the scan; a cache past its time limit is left alone: it is no longer
+    read, and the next discovery scans again (GAP-0752).
+    """
+    signal = disc.agents.get(name)
+    if signal is None:
+        return False
+    path = _cache_path(data_dir=data_dir)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except FileNotFoundError:
+        return _write_cache(disc, data_dir=data_dir)
+    except (OSError, ValueError):
+        payload = None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("version") != CACHE_SCHEMA_VERSION
+        or not isinstance(payload.get("agents"), dict)
+    ):
+        return _write_cache(disc, data_dir=data_dir)
+    scanned = _parse_rfc3339(str(payload.get("scanned_at") or ""))
+    if scanned is None or _now_utc() - scanned > timedelta(seconds=CACHE_TTL_SECONDS):
+        return False
+    payload["agents"][name] = asdict(signal)
+    try:
         body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
         atomic_write_private_bytes(path, body.encode("utf-8"))
         return True

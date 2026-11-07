@@ -47,6 +47,7 @@ def _check(host: str, write_ok: bool, tmp_path) -> tuple[bool, mock.Mock]:
         mock.patch.object(cmd_setup.platform_support, "host_os", return_value=host),
         mock.patch.object(cmd_setup.agent_discovery, "discover_with_probes", return_value=_disc()),
         mock.patch.object(cmd_setup.agent_discovery, "_write_cache", write),
+        mock.patch.object(cmd_setup.agent_discovery, "_publish_agent_signal", write),
     ):
         ok = cmd_setup._check_connector_version_supported_for_setup(
             "codex", mode="action", emit=False, data_dir=str(tmp_path), _allow_prompt=False
@@ -60,6 +61,8 @@ def test_setup_publishes_the_codex_version_it_accepted(host, tmp_path) -> None:
     assert ok is True
     write.assert_called_once()
     assert write.call_args.args[0].agents["codex"].version == "codex-cli 0.160.0"
+    if host == "windows":
+        assert write.call_args.args[1] == "codex"
 
 
 def test_a_failed_write_on_windows_does_not_refuse_setup(tmp_path) -> None:
@@ -73,3 +76,28 @@ def test_a_failed_write_elsewhere_still_refuses_setup(tmp_path) -> None:
     # Unchanged: the gateway restart reads the cache on these hosts.
     ok, _ = _check("linux", False, tmp_path)
     assert ok is False
+
+
+def test_windows_setup_keeps_a_peer_version_the_fresh_scan_missed(tmp_path) -> None:
+    peers = {
+        name: ad.AgentSignal(name=name, installed=False, config_path="", binary_path="", version="", error="")
+        for name in ad.DISCOVERABLE_CONNECTORS
+    }
+    peers["cursor"] = ad.AgentSignal(
+        name="cursor", installed=True, config_path="", binary_path="/opt/cursor/bin/cursor", version="3.19.13", error=""
+    )
+    scanned = ad._format_rfc3339(ad._now_utc())
+    assert ad._write_cache(ad.AgentDiscovery(scanned_at=scanned, agents=peers, cache_hit=False), data_dir=tmp_path)
+
+    with (
+        mock.patch.object(cmd_setup.platform_support, "host_os", return_value="windows"),
+        mock.patch.object(cmd_setup.agent_discovery, "discover_with_probes", return_value=_disc()),
+    ):
+        ok = cmd_setup._check_connector_version_supported_for_setup(
+            "codex", mode="action", emit=False, data_dir=str(tmp_path), _allow_prompt=False
+        )
+
+    cache = ad._read_cache(data_dir=tmp_path)
+    assert ok is True
+    assert cache.agents["codex"].version == "codex-cli 0.160.0"
+    assert cache.agents["cursor"].version == "3.19.13"
