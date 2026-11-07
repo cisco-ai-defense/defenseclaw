@@ -2404,9 +2404,9 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		if session := strings.TrimSpace(req.SessionID); verdict.Action == "block" && verdict.Mode == "action" {
 			rememberOpenClawBlockNotice(req.Tool, req.ToolCallID, session, evalCtx.RuleIDs, verdict.Reason)
 		} else {
-			// Not a block: the call id is noted so that a block of another
-			// session under the same id is known to be ambiguous.
-			observeOpenClawToolCall(req.ToolCallID, session)
+			// Not a block: the call id is noted so that a block under the
+			// same id is known to be ambiguous.
+			observeOpenClawToolCall(req.ToolCallID)
 		}
 	}
 

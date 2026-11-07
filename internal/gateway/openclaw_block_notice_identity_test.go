@@ -84,7 +84,7 @@ func TestGAP0644ResultIDMustEqualTheRecordedID(t *testing.T) {
 		{"call_abc", "", false},                      // no result id
 	} {
 		resetOpenClawBlockNotices(t)
-		rememberOpenClawBlockNotice("exec", tc.recorded, "", []string{noticeTestRule}, "r")
+		rememberOpenClawBlockNotice("exec", tc.recorded, noticeTestSession, []string{noticeTestRule}, "r")
 		out, _ := serveNoticeWith(t, noticeServe{reqBody: chat(tc.sent), ctype: noticeJSONType, respBody: noticeChatReply})
 		wantPending := tc.recorded != "" && !tc.want
 		if noticeServed(out) != tc.want || openClawBlockNoticesPending() != wantPending {
@@ -118,7 +118,7 @@ func TestGAP0644ResponsesResultIDIsTheCallPartOfTheRecordedID(t *testing.T) {
 		{"|fc_1", "", "", false},
 	} {
 		resetOpenClawBlockNotices(t)
-		rememberOpenClawBlockNotice("exec", tc.recorded, "", []string{noticeTestRule}, "r")
+		rememberOpenClawBlockNotice("exec", tc.recorded, noticeTestSession, []string{noticeTestRule}, "r")
 		out, _ := serveNoticeWith(t, noticeServe{reqBody: responses(tc.sent, tc.item), ctype: noticeJSONType, respBody: noticeChatReply})
 		if noticeServed(out) != tc.want || openClawBlockNoticesPending() == tc.want {
 			t.Errorf("recorded %q, responses call_id %q item %q: served=%v pending=%v, want served=%v", tc.recorded, tc.sent, tc.item, noticeServed(out), openClawBlockNoticesPending(), tc.want)

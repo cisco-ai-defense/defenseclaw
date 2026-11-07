@@ -5,6 +5,9 @@ package gateway
 
 import (
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -18,9 +21,19 @@ func chatToolResult(id, content string) string {
 	return `{"messages":[{"role":"assistant","tool_calls":[{"id":"` + id + `","type":"function","function":{"name":"read","arguments":"{}"}}]},{"role":"tool","tool_call_id":"` + id + `","content":"` + content + `"}]}`
 }
 
+// serveInSession sends a request of the session, marked by the plugin as having
+// observed it; an empty session names none.
 func serveInSession(t *testing.T, session, body string) string {
 	t.Helper()
-	out, _ := serveNoticeWith(t, noticeServe{session: session, reqBody: body, ctype: noticeJSONType, respBody: noticeChatReply})
+	out, _ := serveNoticeWith(t, noticeServe{session: session, noSession: session == "", reqBody: body, ctype: noticeJSONType, respBody: noticeChatReply})
+	return out
+}
+
+// serveStaleHeader sends a request whose session header is the plugin's
+// last-seen context, which the plugin did not observe for this request.
+func serveStaleHeader(t *testing.T, session, body string) string {
+	t.Helper()
+	out, _ := serveNoticeWith(t, noticeServe{session: session, unbound: true, reqBody: body, ctype: noticeJSONType, respBody: noticeChatReply})
 	return out
 }
 
@@ -39,14 +52,14 @@ func TestGAP0644OtherSessionSameCallIDKeepsTheReplyAndTheNotice(t *testing.T) {
 
 // The session of the request must be the session of the block. A request that
 // names no session, or a block recorded with none, cannot prove an equal call id
-// is the same call; two empty sessions (a plugin that sends none) are equal.
+// is the same call, and two empty sessions are not a session.
 func TestGAP0644SessionMustEqualTheRecordedOne(t *testing.T) {
 	for _, tc := range []struct {
 		name, recorded, request string
 		want                    bool
 	}{
 		{"same session", "sess-a", "sess-a", true},
-		{"neither names a session", "", "", true},
+		{"neither names a session", "", "", false},
 		{"request names no session", "sess-a", "", false},
 		{"block recorded without a session", "", "sess-a", false},
 		{"another session", "sess-a", "sess-b", false},
@@ -59,7 +72,7 @@ func TestGAP0644SessionMustEqualTheRecordedOne(t *testing.T) {
 			if noticeServed(out) != tc.want || openClawBlockNoticesPending() == tc.want {
 				t.Fatalf("served=%v pending=%v, want served=%v", noticeServed(out), openClawBlockNoticesPending(), tc.want)
 			}
-			if !tc.want {
+			if !tc.want && tc.recorded != "" {
 				// The block is still there for its own session.
 				if out := serveInSession(t, tc.recorded, chatToolResult("call_x", "blocked")); !noticeServed(out) {
 					t.Fatalf("the blocked session lost its notice: %s", out)
@@ -86,32 +99,34 @@ func TestGAP0644TwoSessionsSameCallIDShowNothing(t *testing.T) {
 	}
 }
 
-// An allowed call of another session that used the same call id makes a block
-// ambiguous, whichever was inspected first. The header of an ordinary result
-// can be stale, so this is how the gateway knows the id is shared.
+// A second inspected call under the call id of a block makes the block
+// ambiguous, whichever was inspected first and whichever session made it: an
+// ordinary result with that id is not told from the blocked one by anything the
+// request carries (a header can be stale, and a session can reuse an id).
 func TestGAP0644CallOfAnotherSessionUnderTheSameIDMakesTheBlockAmbiguous(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		setup func()
 	}{
 		{"allowed call inspected first", func() {
-			observeOpenClawToolCall("call_shared", "sess-b")
+			observeOpenClawToolCall("call_shared")
 			rememberOpenClawBlockNotice("exec", "call_shared", "sess-a", []string{noticeTestRule}, "protected write")
 		}},
 		{"allowed call inspected after", func() {
 			rememberOpenClawBlockNotice("exec", "call_shared", "sess-a", []string{noticeTestRule}, "protected write")
-			observeOpenClawToolCall("call_shared", "sess-b")
+			observeOpenClawToolCall("call_shared")
 		}},
-		{"call of a session that sent none", func() {
-			observeOpenClawToolCall("call_shared", "")
+		{"two allowed calls and the block between", func() {
+			observeOpenClawToolCall("call_shared")
 			rememberOpenClawBlockNotice("exec", "call_shared", "sess-a", []string{noticeTestRule}, "protected write")
+			observeOpenClawToolCall("call_shared")
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resetOpenClawBlockNotices(t)
 			tc.setup()
-			// A stale header: the ordinary result of the other session arrives
-			// with the session of the block.
+			// The ordinary result of the other call arrives with the session of
+			// the block.
 			if out := serveInSession(t, "sess-a", chatToolResult("call_shared", "ordinary output")); strings.Contains(out, openClawBlockNoticeMark) {
 				t.Fatalf("a result of a shared id showed a line: %s", out)
 			}
@@ -122,17 +137,15 @@ func TestGAP0644CallOfAnotherSessionUnderTheSameIDMakesTheBlockAmbiguous(t *test
 	}
 }
 
-// Benign twins: calls of the same session under the same id (a local model
-// that numbers its calls), calls under other ids, and a call of another
-// session that is older than the memory of the gateway do not make a block
+// Benign twins: calls under other ids, calls without an id, and a call under
+// the same id that is older than the memory of the gateway do not make a block
 // ambiguous.
 func TestGAP0644UnrelatedCallsLeaveTheBlockShown(t *testing.T) {
 	resetOpenClawBlockNotices(t)
-	observeOpenClawToolCall("call_x", "sess-a")
-	observeOpenClawToolCall("call_other", "sess-b")
-	observeOpenClawToolCall("", "sess-b")
+	observeOpenClawToolCall("call_other")
+	observeOpenClawToolCall("")
 	openClawBlockNotices.mu.Lock()
-	openClawBlockNotices.seen = append(openClawBlockNotices.seen, openClawSeenCall{callID: "call_x", session: "sess-b", at: time.Now().Add(-openClawSeenCallTTL - time.Minute)})
+	openClawBlockNotices.seen = append(openClawBlockNotices.seen, openClawSeenCall{callID: "call_x", at: time.Now().Add(-openClawSeenCallTTL - time.Minute)})
 	openClawBlockNotices.mu.Unlock()
 	rememberOpenClawBlockNotice("exec", "call_x", "sess-a", []string{noticeTestRule}, "protected write")
 	if out := serveInSession(t, "sess-a", chatToolResult("call_x", "blocked")); !noticeServed(out) {
@@ -144,7 +157,7 @@ func TestGAP0644UnrelatedCallsLeaveTheBlockShown(t *testing.T) {
 func TestGAP0644SeenCallMemoryIsBounded(t *testing.T) {
 	resetOpenClawBlockNotices(t)
 	for i := 0; i < openClawSeenCallCap+50; i++ {
-		observeOpenClawToolCall(fmt.Sprintf("call_%d", i), "sess-a")
+		observeOpenClawToolCall(fmt.Sprintf("call_%d", i))
 	}
 	openClawBlockNotices.mu.Lock()
 	n := len(openClawBlockNotices.seen)
@@ -178,7 +191,7 @@ func TestGAP0644RequestThatCannotPickBetweenTwoBlocksShowsNothing(t *testing.T) 
 // Two different blocks under one id and one session cannot be told apart: the
 // first result shows no reason, and not the reason of the second block.
 func TestGAP0644TwoBlocksSameIDSameSessionShowNothing(t *testing.T) {
-	for _, session := range []string{"", "sess-a"} {
+	for _, session := range []string{"sess-a"} {
 		resetOpenClawBlockNotices(t)
 		rememberOpenClawBlockNotice("exec", "call_shared", session, []string{noticeTestRule}, "first protected write")
 		rememberOpenClawBlockNotice("read", "call_shared", session, []string{noticeTestRule}, "second protected read")
@@ -299,16 +312,16 @@ func TestGAP0644CallPartOfAResponsesIDIsNotAKeyOnOtherAdapters(t *testing.T) {
 	for name, body := range others {
 		t.Run(name, func(t *testing.T) {
 			resetOpenClawBlockNotices(t)
-			rememberOpenClawBlockNotice("exec", "call_shared|fc_1", "", []string{noticeTestRule}, "protected write")
-			if out := serveInSession(t, "", body); out != noticeChatReply || !openClawBlockNoticesPending() {
+			rememberOpenClawBlockNotice("exec", "call_shared|fc_1", "sess-a", []string{noticeTestRule}, "protected write")
+			if out := serveInSession(t, "sess-a", body); out != noticeChatReply || !openClawBlockNoticesPending() {
 				t.Fatalf("a result with the call part took the notice: served=%v pending=%v", noticeServed(out), openClawBlockNoticesPending())
 			}
 		})
 	}
 	// The Responses result of the blocked item still takes it.
 	resetOpenClawBlockNotices(t)
-	rememberOpenClawBlockNotice("exec", "call_shared|fc_1", "", []string{noticeTestRule}, "protected write")
-	if out := serveInSession(t, "", responsesBody("function_call_output", "call_shared", [2]string{"call_shared", "fc_1"})); !noticeServed(out) || openClawBlockNoticesPending() {
+	rememberOpenClawBlockNotice("exec", "call_shared|fc_1", "sess-a", []string{noticeTestRule}, "protected write")
+	if out := serveInSession(t, "sess-a", responsesBody("function_call_output", "call_shared", [2]string{"call_shared", "fc_1"})); !noticeServed(out) || openClawBlockNoticesPending() {
 		t.Fatalf("the Responses result lost its notice: %s", out)
 	}
 }
@@ -316,10 +329,10 @@ func TestGAP0644CallPartOfAResponsesIDIsNotAKeyOnOtherAdapters(t *testing.T) {
 // Two blocked Responses items of one call part are not told apart.
 func TestGAP0644ResponsesItemsOfOneCallIDShowNothing(t *testing.T) {
 	resetOpenClawBlockNotices(t)
-	rememberOpenClawBlockNotice("exec", "call_x|fc_1", "", []string{noticeTestRule}, "protected write")
-	rememberOpenClawBlockNotice("read", "call_x|fc_2", "", []string{noticeTestRule}, "protected read")
+	rememberOpenClawBlockNotice("exec", "call_x|fc_1", "sess-a", []string{noticeTestRule}, "protected write")
+	rememberOpenClawBlockNotice("read", "call_x|fc_2", "sess-a", []string{noticeTestRule}, "protected read")
 	body := responsesBody("function_call_output", "call_x", [2]string{"call_x", "fc_1"}, [2]string{"call_x", "fc_2"})
-	if out := serveInSession(t, "", body); out != noticeChatReply {
+	if out := serveInSession(t, "sess-a", body); out != noticeChatReply {
 		t.Fatalf("two items shared a call part and one showed: %s", out)
 	}
 }
@@ -341,28 +354,35 @@ func TestGAP0644InspectRecordsTheSessionOfTheBlock(t *testing.T) {
 	}
 }
 
-func TestGAP0644InspectOfAnAllowedCallInAnotherSessionMakesTheBlockAmbiguous(t *testing.T) {
-	for _, allowedFirst := range []bool{true, false} {
-		resetOpenClawBlockNotices(t)
-		api := testAPIServerWithConfig(t, "action")
-		allowed := func() {
-			_, v := postInspectForConnector(t, api, "openclaw", `{"tool":"exec","tool_call_id":"call_blk1","session_id":"sess-b","args":{"command":"echo hello"}}`)
-			if v.Action != "allow" {
-				t.Fatalf("benign call: %+v", v)
+func TestGAP0644InspectOfAnotherCallUnderTheSameIDMakesTheBlockAmbiguous(t *testing.T) {
+	// The other call is made by another session, by the same session, or by a
+	// session that sent none; it is inspected before or after the block, and the
+	// ordinary result arrives first or the blocked one does.
+	for _, other := range []string{"sess-b", "sess-a", ""} {
+		for _, allowedFirst := range []bool{true, false} {
+			resetOpenClawBlockNotices(t)
+			api := testAPIServerWithConfig(t, "action")
+			allowed := func() {
+				_, v := postInspectForConnector(t, api, "openclaw", `{"tool":"exec","tool_call_id":"callshared","session_id":"`+other+`","args":{"command":"echo hello"}}`)
+				if v.Action != "allow" {
+					t.Fatalf("benign call: %+v", v)
+				}
 			}
-		}
-		if allowedFirst {
-			allowed()
-		}
-		_, blocked := postInspectForConnector(t, api, "openclaw", `{"tool":"exec","tool_call_id":"call_blk1","session_id":"sess-a","args":{"command":"echo k >> ~/.ssh/authorized_keys"}}`)
-		if blocked.Action != "block" {
-			t.Fatalf("protected call: %+v", blocked)
-		}
-		if !allowedFirst {
-			allowed()
-		}
-		if out := serveInSession(t, "sess-a", noticeChatReq()); strings.Contains(out, openClawBlockNoticeMark) {
-			t.Fatalf("allowedFirst=%v: a call id two sessions used showed a line: %s", allowedFirst, out)
+			if allowedFirst {
+				allowed()
+			}
+			_, blocked := postInspectForConnector(t, api, "openclaw", `{"tool":"exec","tool_call_id":"callshared","session_id":"sess-a","args":{"command":"echo k >> ~/.ssh/authorized_keys"}}`)
+			if blocked.Action != "block" {
+				t.Fatalf("protected call: %+v", blocked)
+			}
+			if !allowedFirst {
+				allowed()
+			}
+			for _, result := range []string{"ordinary output", "blocked"} {
+				if out := serveInSession(t, "sess-a", chatToolResult("callshared", result)); strings.Contains(out, openClawBlockNoticeMark) {
+					t.Fatalf("other=%q allowedFirst=%v: a call id used twice showed a line on the %s result: %s", other, allowedFirst, result, out)
+				}
+			}
 		}
 	}
 	// A claudecode inspect under the same id is not an OpenClaw call.
@@ -372,5 +392,51 @@ func TestGAP0644InspectOfAnAllowedCallInAnotherSessionMakesTheBlockAmbiguous(t *
 	postInspectForConnector(t, api, "openclaw", `{"tool":"exec","tool_call_id":"call_blk1","session_id":"sess-a","args":{"command":"echo k >> ~/.ssh/authorized_keys"}}`)
 	if out := serveInSession(t, "sess-a", noticeChatReq()); !noticeServed(out) {
 		t.Fatalf("another connector call hid the notice: %s", out)
+	}
+	// Benign twin: an allowed call under another id leaves the block shown.
+	resetOpenClawBlockNotices(t)
+	api = testAPIServerWithConfig(t, "action")
+	postInspectForConnector(t, api, "openclaw", `{"tool":"exec","tool_call_id":"call_ok9","session_id":"sess-a","args":{"command":"echo hello"}}`)
+	postInspectForConnector(t, api, "openclaw", `{"tool":"exec","tool_call_id":"call_blk1","session_id":"sess-a","args":{"command":"echo k >> ~/.ssh/authorized_keys"}}`)
+	if out := serveInSession(t, "sess-a", noticeChatReq()); !noticeServed(out) {
+		t.Fatalf("an unrelated allowed call hid the notice: %s", out)
+	}
+}
+
+// The session header is the plugin's last-seen context. A request the plugin
+// did not mark as having observed that session claims nothing, even when its
+// header equals the session of the block and its result carries the blocked
+// call id, and the block stays for the request that is marked.
+func TestGAP0644RequestWithAStaleSessionHeaderTakesNothing(t *testing.T) {
+	resetOpenClawBlockNotices(t)
+	rememberOpenClawBlockNotice("exec", "call_x", "sess-a", []string{noticeTestRule}, "protected write")
+	if out := serveStaleHeader(t, "sess-a", chatToolResult("call_x", "ordinary output of another session")); out != noticeChatReply || !openClawBlockNoticesPending() {
+		t.Fatalf("an unmarked request took the notice: served=%v pending=%v", noticeServed(out), openClawBlockNoticesPending())
+	}
+	if out := serveInSession(t, "sess-a", chatToolResult("call_x", "blocked")); !noticeServed(out) || openClawBlockNoticesPending() {
+		t.Fatalf("the marked request lost its notice: %s", out)
+	}
+}
+
+// The marker only counts when it says 1.
+func TestGAP0644OnlyTheMarkerValueOneBindsTheSession(t *testing.T) {
+	for _, v := range []string{"", "0", "true", "yes"} {
+		resetOpenClawBlockNotices(t)
+		rememberOpenClawBlockNotice("exec", "call_x", "sess-a", []string{noticeTestRule}, "protected write")
+		var out string
+		h := openClawBlockNoticeMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", noticeJSONType)
+			_, _ = io.WriteString(w, noticeChatReply)
+		}), func(*http.Request) bool { return true })
+		req := httptest.NewRequest(http.MethodPost, "/v1/x", strings.NewReader(chatToolResult("call_x", "blocked")))
+		req = req.WithContext(withThresholdConnector(req.Context(), "openclaw"))
+		req.Header.Set(SessionIDHeader, "sess-a")
+		req.Header.Set(SessionBoundHeader, v)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		out = rec.Body.String()
+		if out != noticeChatReply || !openClawBlockNoticesPending() {
+			t.Fatalf("marker %q bound the session: served=%v", v, noticeServed(out))
+		}
 	}
 }

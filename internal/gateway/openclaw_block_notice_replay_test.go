@@ -27,7 +27,7 @@ func TestGAP0644RewrittenResultIDShowsNothing(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			resetOpenClawBlockNotices(t)
-			rememberOpenClawBlockNotice("exec", c.recorded, "", []string{noticeTestRule}, "protected write")
+			rememberOpenClawBlockNotice("exec", c.recorded, noticeTestSession, []string{noticeTestRule}, "protected write")
 			out, _ := serveNoticeWith(t, noticeServe{reqBody: c.req, ctype: noticeJSONType, respBody: noticeChatReply})
 			if out != noticeChatReply || !openClawBlockNoticesPending() {
 				t.Fatalf("a result with an unknown id took the notice: served=%v pending=%v", noticeServed(out), openClawBlockNoticesPending())

@@ -51,6 +51,7 @@ import {
   HEADER_DEFENSECLAW_AGENT_NAME,
   HEADER_DEFENSECLAW_POLICY_ID,
   HEADER_DEFENSECLAW_RUN_ID,
+  HEADER_DEFENSECLAW_SESSION_BOUND,
   HEADER_DEFENSECLAW_SESSION_ID,
   HEADER_DEFENSECLAW_SIDECAR_INSTANCE_ID,
   HEADER_DEFENSECLAW_TRACE_ID,
@@ -349,6 +350,11 @@ export default function (api: DefenseClawPluginHost) {
   // that the sidecar's CorrelationMiddleware already validates and
   // length-caps.
   let currentToolContext: { sessionId?: string; runId?: string } = {};
+  // True from a tool call until the next intercepted model request is stamped.
+  // The session header is the last-seen context and can be stale; only the one
+  // request that follows a tool call is marked as having observed it, which is
+  // the only request the gateway lets claim a tool block notice (GAP-0644).
+  let toolContextUnclaimed = false;
 
   const trackToolContext = (ctx?: ToolContext): void => {
     if (!ctx) return;
@@ -356,6 +362,7 @@ export default function (api: DefenseClawPluginHost) {
     const runId = ctx.runId;
     if (sessionId || runId) {
       currentToolContext = { sessionId, runId };
+      toolContextUnclaimed = true;
     }
   };
 
@@ -390,7 +397,9 @@ export default function (api: DefenseClawPluginHost) {
 
     if (currentToolContext.sessionId) {
       h[HEADER_DEFENSECLAW_SESSION_ID] = currentToolContext.sessionId;
+      if (toolContextUnclaimed) h[HEADER_DEFENSECLAW_SESSION_BOUND] = "1";
     }
+    toolContextUnclaimed = false;
     if (currentToolContext.runId) {
       h[HEADER_DEFENSECLAW_RUN_ID] = currentToolContext.runId;
     }
