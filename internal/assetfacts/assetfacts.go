@@ -131,6 +131,13 @@ func Encode(facts Facts) string {
 	}
 	value := base64.RawURLEncoding.EncodeToString(bytes.TrimSuffix(raw.Bytes(), []byte{10}))
 	if len(value) > maxHeaderBytes {
+		if len(facts.Contents) > 0 && hasContentFiles(facts.Contents) {
+			// Too much text for one header: keep the facts, and the contents
+			// as truncated ones without text, which the gateway refuses as
+			// unknown; dropping them would let the asset run unjudged.
+			facts.Contents = withoutContentFiles(facts.Contents)
+			return Encode(facts)
+		}
 		return ""
 	}
 	return value
@@ -319,6 +326,8 @@ func ProjectSkillDirs(connector string) []string {
 		return []string{filepath.Join(".claude", "skills")}
 	case "codex":
 		return []string{filepath.Join(".agents", "skills"), filepath.Join(".codex", "skills")}
+	case "copilot":
+		return []string{filepath.Join(".github", "skills"), filepath.Join(".claude", "skills")}
 	}
 	return nil
 }
@@ -333,6 +342,8 @@ func SkillRoots(connector, home, cwd string) []string {
 		user = []string{filepath.Join(".claude", "skills")}
 	case "codex":
 		user = []string{filepath.Join(".codex", "skills"), filepath.Join(".agents", "skills")}
+	case "copilot":
+		user = []string{filepath.Join(".copilot", "skills"), filepath.Join(".claude", "skills")}
 	default:
 		return nil
 	}

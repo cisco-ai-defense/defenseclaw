@@ -53,6 +53,11 @@ func gap0686Publish(api *APIServer, cfg *config.Config, servers ...config.MCPSer
 // claim is the hook fact for a definition read from a source the enumerator
 // does not publish.
 func gap0686Claim(entry config.MCPServerEntry, relocated bool) *assetfacts.MCPServer {
+	if entry.SourceScope == "project" && entry.TrustRequired {
+		// The hook sends no claim for a project file Codex does not trust: the
+		// definition in effect is the one the gateway already knows.
+		return nil
+	}
 	return &assetfacts.MCPServer{
 		Name: entry.Name, URL: entry.URL, Command: entry.Command, Args: entry.Args, Transport: entry.Transport,
 		Relocated: relocated, ProjectScope: !relocated, Digest: config.MCPLaunchDigest(entry),

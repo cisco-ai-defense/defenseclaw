@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
@@ -180,6 +181,22 @@ func TestHookAssetFactsMarkTheRelocatedCodexConfig(t *testing.T) {
 	// A project .codex/config.toml takes precedence over the user config and
 	// is marked as a source the enumerator does not publish.
 	write(filepath.Join(project, ".codex"), "http://127.0.0.1:28563/mcp")
+	// Codex runs a project definition only for a project its user config
+	// trusts: until then the user definition is the one in effect and nothing
+	// is marked as an unpublished source (GAP-0686 review 4).
+	if got := facts("codex"); got == nil || got.URL != "http://127.0.0.1:28561/mcp" || !got.Relocated || got.ProjectScope {
+		t.Fatalf("untrusted project facts = %+v, want the user definition, not the project one", got)
+	}
+	trust, err := os.OpenFile(filepath.Join(relocated, "config.toml"), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := trust.WriteString("\n[projects." + strconv.Quote(project) + "]\ntrust_level = \"trusted\"\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := trust.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if got := facts("codex"); got == nil || got.URL != "http://127.0.0.1:28563/mcp" || got.Relocated || !got.ProjectScope || got.Digest == "" {
 		t.Fatalf("project facts = %+v, want the project definition marked", got)
 	}

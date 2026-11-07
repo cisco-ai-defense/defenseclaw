@@ -541,14 +541,19 @@ watches. Assets in profiles are judged at the hook, from their content: set
 `asset_policy.enabled: true`, `asset_policy.skill.runtime_detection.enabled: true`
 and `asset_policy.plugin.runtime_detection.enabled: true` (MCP runtime detection
 already defaults to true) and `asset_policy.mode: action`. The hook reads the
-skill folder the request selects, and the Claude Code plugin it belongs to
-(including a plugin installed from a local marketplace folder and its bundled
-server's tools), as the user. The gateway scans that text with the in-process
-prompt-injection detector and refuses the call when a finding is HIGH or
-CRITICAL (`profile-asset-verdict`), whatever the guardrail mode is, so a skill
-created while the gateway was stopped is judged the first time it is used. A
-skill the hook found but sent no text for is refused (`profile-asset-unscanned`).
-Verdicts are cached by content digest. Ordinary skills and plugins are not
+skill folder the request selects (Claude Code, Codex and Copilot CLI), and the
+Claude Code plugin it belongs to (including a plugin installed from a local
+marketplace folder and the tools of its bundled server), as the user, following
+links as the agent does. The gateway scans that text with the in-process
+prompt-injection detector and refuses the call when it holds an instruction
+that overrides the role or instructions of the agent, a fake system or delimiter
+block, base64-hidden instructions or tag characters, rated HIGH or CRITICAL
+(`profile-asset-verdict`), whatever the guardrail mode is, so a skill created
+while the gateway was stopped is judged the first time it is used. A skill or
+plugin the hook found but sent no text for, or could not read in full (a file
+past 64 KiB, more than 64 files, a link that leads nowhere readable, text that
+is not UTF-8), is refused (`profile-asset-unscanned`): a verdict on part of an
+asset is not a verdict on it. Verdicts are cached by content digest. Ordinary skills and plugins are not
 refused, and nothing changes while `asset_policy.enabled` is false or the mode
 is `observe`. The text is the hook's claim and the detector is the in-process
 one: the skill-scanner and CodeGuard are not run on profile assets, and a
@@ -686,10 +691,14 @@ server defined in that file until the same definition is published
 that digest with the published server, so a definition that differs in an
 argument past the 32nd, in a long URL or in the environment is not taken for the
 scanned one. A Codex project `.codex\config.toml` takes precedence over the user
-file and is not published: a project server is refused the same way when it
-would override a published server of that name, or when asset policy is enabled
-in action mode with MCP runtime detection on; otherwise it keeps running as
-before.
+file, but only for a project the user config trusts (`[projects."<path>"]
+trust_level = "trusted"`); an untrusted project file is ignored by Codex and by
+DefenseClaw. A trusted project server is not published: it is refused the same
+way when it would override a published server of that name, when asset policy
+is enabled in action mode (the mode of the connector counts) with MCP runtime
+detection on, or when its definition is too long for the hook to send and an
+`asset_policy.mcp.denied` rule pins an endpoint, which cannot be checked against
+it; otherwise it keeps running as before.
 
 ### Release a blocked or quarantined skill
 
