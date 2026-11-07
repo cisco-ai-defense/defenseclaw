@@ -218,15 +218,31 @@ func networkPathRead(path string) (unanswered, budgetCut bool) {
 
 // networkPathReadAs is networkPathRead for a path that is on a share, or
 // that a link on its way (and, with followLast, the last component) leads
-// into one: the share the read opens is the one asked.
+// into one. Every share the read opens is asked, in the order the system
+// opens them: a link inside an answered share may lead on to another share,
+// and a name with a trailing separator opens its last link as well
+// (os.Lstat follows it), so the walk goes on from each answered share until
+// no link leads into a further share (rel-1-0-9:GAP-0621).
 func networkPathReadAs(path string, followLast bool) (unanswered, budgetCut bool) {
-	root := networkShareRootOf(path)
-	if root == "" {
-		root = linkedNetworkShare(path, followLast)
+	if path != "" && os.IsPathSeparator(path[len(path)-1]) {
+		followLast = true
 	}
-	if root == "" {
-		return false, false
+	for range networkLinkHopLimit + 1 {
+		if root := networkShareRootOf(path); root != "" {
+			if silent, cut := askNetworkShare(root); silent {
+				return true, cut
+			}
+		}
+		if path = linkIntoShare(path, followLast); path == "" {
+			return false, false
+		}
 	}
+	return false, false
+}
+
+// askNetworkShare asks the share root once for every call that names it and
+// waits for its answer as the budget of the call allows.
+func askNetworkShare(root string) (unanswered, budgetCut bool) {
 	// One probe per share, whichever slashes the path spells it with.
 	key := strings.ToLower(filepath.ToSlash(root))
 	now := time.Now()
