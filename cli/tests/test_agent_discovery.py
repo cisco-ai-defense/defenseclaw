@@ -204,6 +204,7 @@ def test_antigravity_binary_digest_is_bounded_and_matches_stable_bytes(monkeypat
 def windows_host_no_path(monkeypatch) -> None:
     monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
     monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    _windows_change_times_from_stat(monkeypatch)
 
 
 @pytest.fixture

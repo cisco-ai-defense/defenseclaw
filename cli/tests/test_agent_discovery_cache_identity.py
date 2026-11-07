@@ -2064,3 +2064,54 @@ def test_a_kiro_nobody_set_up_is_never_run_for_a_cache_before_identities(monkeyp
     disc = ad.discover_agents(data_dir=data)
 
     assert not rescans and disc.cache_hit is True
+
+
+def _rewrite_during_first_version_probe(monkeypatch, tmp_path, *, change_time_readable: bool):
+    """A Windows scan of a versioned Cursor whose executable is rewritten, to a
+    lower version of the same size with the modification time restored, while
+    the first version probe runs."""
+    data = tmp_path / "data"
+    data.mkdir()
+    binary = tmp_path / "cursor"
+    binary.write_text("3.19.13", encoding="utf-8")
+    original = binary.stat()
+    answers: list[str] = []
+
+    def probe(_name, path, *_args, **_kwargs):
+        answer = Path(path).read_text(encoding="utf-8")
+        answers.append(answer)
+        if len(answers) == 1:
+            time.sleep(_FILE_CLOCK_TICK)
+            binary.write_text("2.3.999", encoding="utf-8")
+            os.utime(binary, ns=(original.st_atime_ns, original.st_mtime_ns))
+        return answer, ""
+
+    _one_cursor(monkeypatch, binary, probe)
+    _on_windows(monkeypatch, original, binary)
+    if not change_time_readable:
+        monkeypatch.setattr(ad, "_windows_change_time", lambda path: None)
+    result = ad.discover_agents(use_cache=False, refresh=True, data_dir=data)
+    return result.agents["cursor"], ad._read_cache(data_dir=data).agents["cursor"], answers
+
+
+def test_a_rewrite_during_the_version_probe_is_read_again_when_windows_gives_the_change_time(monkeypatch, tmp_path):
+    scanned, cached, answers = _rewrite_during_first_version_probe(monkeypatch, tmp_path, change_time_readable=True)
+
+    assert (scanned.version, cached.version) == ("2.3.999", "2.3.999"), answers
+
+
+def test_a_version_read_while_windows_gives_no_change_time_is_not_returned_or_cached(monkeypatch, tmp_path):
+    scanned, cached, answers = _rewrite_during_first_version_probe(monkeypatch, tmp_path, change_time_readable=False)
+
+    assert (scanned.version, cached.version) == ("", ""), answers
+    assert ad.VERSION_EXECUTABLE_CHANGED in scanned.error
+    assert "3.19.13" not in scanned.error
+
+
+def test_a_version_probe_of_a_path_with_no_file_is_not_dropped_for_want_of_an_identity(monkeypatch, tmp_path):
+    binary = tmp_path / "cursor"
+    _one_cursor(monkeypatch, binary, lambda *_a, **_k: ("3.19.13", ""))
+
+    scanned = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path).agents["cursor"]
+
+    assert scanned.version == "3.19.13"
