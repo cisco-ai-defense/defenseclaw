@@ -11,8 +11,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -59,7 +61,8 @@ func TestReadStateSurvivesTransientNameBurst(t *testing.T) {
 		t.Fatal(err)
 	}
 	previous := readStateReparseCheck
-	const transientChecks = 20
+	const transientChecks = 40
+	t.Cleanup(safefile.SetTransientRetrySleepForTest(func(time.Duration) {}))
 	checks := 0
 	readStateReparseCheck = func(checked string) error {
 		checks++

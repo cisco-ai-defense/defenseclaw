@@ -107,7 +107,7 @@ func PathForPlatform(standaloneUnix bool, dataDir, authDir string) string {
 // hot path; discard it.
 func ReadState(path string) string {
 	var state string
-	err := safefile.RetryTransientRead(func() error {
+	err := safefile.RetryPublishedRead(func() error {
 		var readErr error
 		state, readErr = readStateOnce(path)
 		return readErr

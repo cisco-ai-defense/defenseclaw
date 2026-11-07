@@ -46,6 +46,47 @@ func TestRetryTransientReadRepeatsAMomentaryMiss(t *testing.T) {
 	}
 }
 
+func TestRetryPublishedReadSurvivesFastIdentityChanges(t *testing.T) {
+	slept := withoutTransientSleep(t)
+	calls := 0
+	err := RetryPublishedRead(func() error {
+		calls++
+		if calls <= 64 {
+			return ErrReadIdentityChanged
+		}
+		return nil
+	})
+	if err != nil || calls != 65 || len(*slept) != 64 {
+		t.Fatalf("err=%v calls=%d waits=%d; want nil, 65, 64", err, calls, len(*slept))
+	}
+}
+
+func TestRetryPublishedReadKeepsStableAndPermanentResults(t *testing.T) {
+	slept := withoutTransientSleep(t)
+	for _, expected := range []error{nil, windows.ERROR_ACCESS_DENIED} {
+		calls := 0
+		err := RetryPublishedRead(func() error { calls++; return expected })
+		if !errors.Is(err, expected) || calls != 1 {
+			t.Fatalf("expected=%v err=%v calls=%d; want one attempt", expected, err, calls)
+		}
+	}
+	if len(*slept) != 0 {
+		t.Fatalf("waited for stable or permanent results: %v", *slept)
+	}
+}
+
+func TestRetryPublishedReadReportsRealAbsenceWithinItsWindow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "absent.json")
+	started := time.Now()
+	err := RetryPublishedRead(func() error {
+		_, err := os.Lstat(path)
+		return err
+	})
+	if !errors.Is(err, os.ErrNotExist) || time.Since(started) > time.Second {
+		t.Fatalf("err=%v elapsed=%v; want bounded absence", err, time.Since(started))
+	}
+}
+
 func TestRetryTransientReadReportsARealAbsenceInBoundedTime(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "never-written.json")

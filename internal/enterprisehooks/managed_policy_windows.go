@@ -2081,11 +2081,15 @@ func validateExistingWindowsManagedPolicyDirectory(path string) (bool, error) {
 func readTrustedWindowsManagedPolicyFile(path string) ([]byte, bool, error) {
 	var data []byte
 	var seen bool
-	err := safefile.RetryTransientRead(func() error {
+	read := func() error {
 		var readErr error
 		data, readErr = readTrustedWindowsManagedPolicyFileOnce(path, &seen)
 		return readErr
-	})
+	}
+	err := safefile.RetryTransientRead(read)
+	if errors.Is(err, safefile.ErrReadIdentityChanged) {
+		err = safefile.RetryPublishedRead(read)
+	}
 	if errors.Is(err, os.ErrNotExist) && !seen {
 		return nil, false, nil
 	}
