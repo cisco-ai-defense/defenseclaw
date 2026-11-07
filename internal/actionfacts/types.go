@@ -70,6 +70,12 @@ type Input struct {
 	// command then resolve under it (GAP-2473); the whole action keeps its
 	// own reading.
 	MovedWindowsShellCWD bool `json:"-"`
+	// CurrentWindowsDrive is trusted caller context: the drive letter of the
+	// directory the hook payload reported, for a gateway that could not place
+	// that directory itself (CWD is empty). A Windows path with no drive of
+	// its own is on it. Empty when unknown; ActionFacts never derives it from
+	// action input.
+	CurrentWindowsDrive string `json:"-"`
 	// CurlCapabilities is trusted caller context for resolved curl executables.
 	// ActionFacts never discovers capabilities from GOOS, dialect, basename,
 	// PATH, or process state. Callers must authenticate and invalidate this
@@ -97,6 +103,7 @@ type Facts struct {
 	Tool                                     string
 	CWD                                      string
 	ActiveHome                               string
+	CurrentWindowsDrive                      string `json:"-"`
 	ActiveAgentFiles                         []string
 	ActiveAgentFilesCaseInsensitive          []string `json:"-"`
 	ActiveAgentFilesCaseInsensitiveUncertain bool     `json:"-"`

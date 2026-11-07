@@ -116,13 +116,14 @@ func posixMachineKey(value string, caseFold bool) string {
 func matchesDefenseClawMachineLayout(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
 	layout := defenseClawMachineLayout()
 	caseFold := runtime.GOOS == "darwin" || strings.HasPrefix(facts.ActiveHome, "/Users/")
+	current, currentKnown := windowsCurrentDrive(facts)
 	seen := make(map[string]bool, 4)
 	for _, value := range []string{exactSemanticPathValue(candidate), candidate.Value, candidate.Normalized, candidate.Resolved} {
 		if value == "" || seen[value] {
 			continue
 		}
 		seen[value] = true
-		if layout.posixPath(value, caseFold) || layout.windowsPath(value) {
+		if layout.posixPath(value, caseFold) || layout.windowsPath(value, current, currentKnown) {
 			return true
 		}
 	}
@@ -146,12 +147,42 @@ func (l machineLayout) posixPath(value string, caseFold bool) bool {
 	return false
 }
 
+// windowsCurrentDrive is the drive the hook runs on: a path with no drive of
+// its own is on it. It is read from the working directory the gateway placed
+// (facts.CWD) and, where the gateway could not place it (a service account
+// that cannot reach the user directories), from the directory the hook
+// payload reported. known is false when neither is given; the drive is empty
+// when the directory has none (a UNC share or a POSIX directory), and a path
+// with no drive is then not on any drive of the layout.
+func windowsCurrentDrive(facts actionfacts.Facts) (drive string, known bool) {
+	if facts.CWD != "" {
+		drive, _, _ = windowsVolumeAndNames(facts.CWD)
+		return drive, true
+	}
+	return facts.CurrentWindowsDrive, facts.CurrentWindowsDrive != ""
+}
+
+// reportedWindowsDrive is the drive of the directory a hook payload reported,
+// empty when it names none.
+func reportedWindowsDrive(reportedCWD string) string {
+	drive, _, _ := windowsVolumeAndNames(reportedCWD)
+	return drive
+}
+
 // windowsPath reads a Windows spelling of a path that is, or is below, one of
-// the folders of the layout. See windowsVolumeAndNames for the spellings.
-func (l machineLayout) windowsPath(value string) bool {
+// the folders of the layout. See windowsVolumeAndNames for the spellings. A
+// path with no drive is on the current drive; when the working directory is
+// not given it is read on every drive, the protective side.
+func (l machineLayout) windowsPath(value, current string, currentKnown bool) bool {
 	drive, names, ok := windowsVolumeAndNames(value)
 	if !ok {
 		return false
+	}
+	if drive == "" && currentKnown {
+		if current == "" {
+			return false
+		}
+		drive = current
 	}
 	for _, folder := range l.windows {
 		if folder.holds(drive, names) {
@@ -161,9 +192,8 @@ func (l machineLayout) windowsPath(value string) bool {
 	return false
 }
 
-// holds reports a path on drive (empty when the path names none, a path on
-// the current drive) whose leading names are those of the folder, each by its
-// long name or its 8.3 short name.
+// holds reports a path on drive (empty when it is on any drive) whose leading
+// names are those of the folder, each by its long name or its 8.3 short name.
 func (f windowsMachineFolder) holds(drive string, names []string) bool {
 	if drive != "" && f.drive != drive || len(names) < len(f.names) {
 		return false

@@ -296,6 +296,9 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 	)
 	respellTrustedPOSIXHomeTilde(&facts, homeRewrittenCommands, homeTildeOperands)
 	resolveTrustedDriveHomePaths(&facts)
+	if drive := strings.ToLower(input.CurrentWindowsDrive); len(drive) == 1 && drive >= "a" && drive <= "z" {
+		facts.CurrentWindowsDrive = drive
+	}
 	facts.ActiveAgentFiles = cloneSlice(activeAgentFiles)
 	facts.ActiveAgentFilesCaseInsensitive = cloneSlice(
 		activeAgentFilesCaseInsensitive,
