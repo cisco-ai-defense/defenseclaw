@@ -224,6 +224,105 @@ func TestGAP0518LateOrdinaryCall(t *testing.T) {
 	}
 }
 
+// TestGAP0518LateOrdinaryCallRound4: a cd moves the folder every later word is
+// looked up in, a word a program takes as text is no path but a direct link
+// still is one, a sed script may hold several plain commands, and the pattern
+// of grep or ls is text. Every other spelling stays closed.
+func TestGAP0518LateOrdinaryCallRound4(t *testing.T) {
+	f := newLateFixture(t)
+	sub := filepath.Join(f.project, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(f.home, ".ssh", "authorized_keys"), filepath.Join(sub, "childlink")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "plain.txt"), []byte("plain\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, command string
+		want          bool
+	}{
+		// cd.
+		{"cd then a plain file", "cd sub && cat plain.txt", true},
+		{"cd into a folder, a file of it", "cd src && cat main.go", true},
+		{"cd then a new file", "cd sub && touch fresh.txt", true},
+		{"cd then a link of that folder", "cd sub && cat childlink", false},
+		{"cd then a write to a link of that folder", "cd sub && echo x > childlink", false},
+		{"cd then a link after a semicolon", "cd sub; cat childlink", false},
+		{"cd or a link", "cd sub || cat childlink", false},
+		{"cd, then another cd, then the link", "cd sub && cd . && cat childlink", false},
+		{"cd up from a folder that may not exist", "cd sub && cd .. && cat plain.txt", false},
+		{"cd in a pipe", "cd sub | cat childlink", false},
+		{"cd with a redirect", "cd sub > out.txt", false},
+		{"cd to a link", "cd dirlink && ls", false},
+		{"cd to the ssh folder", "cd ../.ssh && ls", false},
+		{"cd without a folder", "cd && ls", false},
+		{"cd to the previous folder", "cd - && ls", false},
+		{"cd with a flag", "cd -P sub && ls", false},
+		{"cd with two words", "cd sub src && ls", false},
+		{"cd to a tilde", "cd ~ && ls", false},
+		{"cd to a file", "cd plain.txt && ls", false},
+		{"cd to a missing folder", "cd gone && ls", false},
+		{"cd to the home", "cd .. && ls", false},
+		{"pushd", "pushd sub && cat childlink", false},
+		// Text words.
+		{"echo flag next to a link", "echo -l", true},
+		{"echo of a state folder word", "echo openclaw", true},
+		{"echo of a link", "echo keylink", false},
+		{"echo of a quoted link with a space", "echo 'key link'", false},
+		{"echo of a hard link", "echo hardlink", false},
+		{"echo of a path through a folder link", "echo dirlink/x", false},
+		{"echo of a keys path", "echo " + filepath.Join(f.home, ".ssh", "authorized_keys"), false},
+		{"printf of a link", "printf %s keylink", false},
+		{"echo of a parent", "echo ../x", false},
+		// sed.
+		{"sed two prints", "sed -n '1p;2p' plain.txt", true},
+		{"sed two prints with a space", "sed -n '1p; 2p' plain.txt", true},
+		{"sed two substitutions", "sed -e 's/a/b/;s/c/d/' plain.txt", true},
+		{"sed substitution of a state word", "sed s/openclaw/x/ plain.txt", true},
+		{"sed print and a write to a link", "sed -n '1p;w keylink' plain.txt", false},
+		{"sed print and a run", "sed -n '1p;1e id' plain.txt", false},
+		{"sed print and a read of a link", "sed -n '1p;r keylink' plain.txt", false},
+		{"sed trailing separator", "sed -n '1p;' plain.txt", false},
+		{"sed substitution cut at a semicolon", "sed 's/a;b/c/' plain.txt", false},
+		{"sed print of a link", "sed -n 1p keylink", false},
+		// Patterns.
+		{"grep pattern option", "grep -e openclaw plain.txt", true},
+		{"grep attached pattern option", "grep -eopenclaw plain.txt", true},
+		{"grep long pattern option", "grep --regexp=openclaw plain.txt", true},
+		{"grep long pattern option, next word", "grep --regexp openclaw plain.txt", true},
+		{"grep first operand pattern", "grep openclaw plain.txt", true},
+		{"egrep first operand pattern", "egrep -rn openclaw src", true},
+		{"grep in a pipe", "cat plain.txt | grep authorized", true},
+		{"ls ignore pattern", "ls -Iopenclaw plain.txt", true},
+		{"ls ignore pattern, next word", "ls -I openclaw plain.txt", true},
+		{"ls long ignore pattern", "ls --ignore=openclaw", true},
+		{"grep pattern file", "grep -f keylink plain.txt", false},
+		{"grep attached pattern file", "grep -fkeylink plain.txt", false},
+		{"grep long pattern file", "grep --file=keylink x", false},
+		{"grep long pattern file, next word", "grep --file keylink x", false},
+		{"grep a link as the file", "grep -e x keylink", false},
+		{"grep a link after the pattern", "grep openclaw keylink", false},
+		{"grep a link as the pattern", "grep keylink plain.txt", false},
+		{"grep a state path", "grep x openclaw/f", false},
+		{"grep a keys path", "grep -e x ../.ssh/authorized_keys", false},
+		{"grep a keys path after the pattern", "grep x " + filepath.Join(f.home, ".ssh", "authorized_keys"), false},
+		{"ls ignore a link", "ls -Ikeylink", false},
+		{"ls ignore then a link", "ls -I x keylink", false},
+		{"ls a link", "ls -la keylink", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, call := range []struct{ connector, tool string }{{"claudecode", "Bash"}, {"codex", "exec_command"}} {
+				if got := LateOrdinaryCall(call.connector, lateBash(t, call.tool, f.project, tc.command)); got != tc.want {
+					t.Errorf("%s %s: %q ordinary=%v, want %v", call.connector, call.tool, tc.command, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
 // TestGAP0518LateOrdinaryCallArgv: an argv is a list of words, so a space or
 // a shell character inside one stays in the word (round 3).
 func TestGAP0518LateOrdinaryCallArgv(t *testing.T) {
@@ -240,7 +339,8 @@ func TestGAP0518LateOrdinaryCallArgv(t *testing.T) {
 		{"link with a space in its name", []string{"cat", "key link"}, false},
 		{"part of a word is a link", []string{"cat", "x keylink"}, false},
 		{"link", []string{"cat", "keylink"}, false},
-		{"redirect word is a plain word of echo", []string{"echo", "x", ">", "keylink"}, true},
+		{"redirect word is a plain word of echo, a link stays closed", []string{"echo", "x", ">", "keylink"}, false},
+		{"redirect word is a plain word of echo", []string{"echo", "x", ">", "plain.txt"}, true},
 		{"shell wrapper", []string{"bash", "-lc", "echo hi"}, false},
 		{"quote in a word", []string{"cat", "it\x27s"}, false},
 		{"empty word", []string{"cat", ""}, false},
