@@ -1013,7 +1013,8 @@ describe('1.0.4 operator routes and limits', () => {
     assert.match(api, /\| Hook, notify and inspect \| 25\/s \| 100 \| 32 \|\s*\| Delivery receipts \| 25\/s \| 100 \| 32 \|/);
     assert.match(api, /Receipts have the budget of their own above, so a tool\s+call counts once against the hook budget/);
     const managed = page('enterprise/sandboxes.mdx');
-    assert.match(managed, /per-user budget \(100 per second, burst 200\)\. Each sandbox also has its own budget at the user's daemon \(25 per second, burst 100\)\. The receipt that confirms an allowed call counts apart/);
+    assert.match(managed, /per-user budget \(40 per second, burst 100 for all of the user's sandboxes together: the rate the managed gateway answers inside the hook's 3\.5 second window\)\. The refusal is immediate and its message names the budget/);
+    assert.match(managed, /Each sandbox also has its own budget at the user's daemon \(25 per second, burst 100\)\. The receipt that confirms an allowed call counts apart/);
   });
 
   it('does not advertise local files as MCP scan targets', () => {
