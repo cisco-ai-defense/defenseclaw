@@ -130,6 +130,132 @@ def test_activation_rebind_uses_protected_metadata_publication() -> None:
     assert protected < moved
 
 
+def test_deployment_metadata_entry_and_reader_retry_the_validated_lookup() -> None:
+    # GAP-0655: a changed metadata body may briefly hide its pathname from a
+    # concurrent reader. Both the entry probe and the full read must retry.
+    module = _text(MODULE)
+    entry = _function_body(module, "Invoke-DefenseClawEnterpriseLifecycle")
+    rebind = _function_body(module, "Sync-DefenseClawStandaloneManagedHooksActivationBinding")
+    reader = _function_body(module, "Get-DefenseClawDeploymentMetadata")
+    entry_probe = _function_body(module, "Test-DefenseClawDeploymentMetadataPresent")
+    once = _function_body(module, "Get-DefenseClawDeploymentMetadataOnce")
+    assert "Test-DefenseClawDeploymentMetadataPresent -Path $layout.MetadataPath" in entry
+    assert "Test-DefenseClawDeploymentMetadataPresent -Path $Layout.MetadataPath" in rebind
+    assert "Get-DefenseClawDeploymentMetadataOnce" in reader
+    assert "Test-DefenseClawTransientDeploymentMetadataError" in reader
+    assert "Test-DefenseClawTransientDeploymentMetadataError" in entry_probe
+    assert "Start-Sleep -Milliseconds $delays[$attempt]" in entry_probe
+    assert "-not (Test-DefenseClawStandaloneProfile)" in reader
+    assert once.index("Assert-DefenseClawNoReparsePath") < once.index("Get-Content")
+    assert once.rindex("Assert-DefenseClawCanonicalPathAcl") > once.index("Get-Content")
+
+
+def test_deployment_metadata_retry_keeps_permanent_failures_and_secure_client_single_pass() -> None:
+    module = _text(MODULE)
+    reader = _function_body(module, "Get-DefenseClawDeploymentMetadata")
+    transient = _function_body(module, "Test-DefenseClawTransientDeploymentMetadataError")
+    assert reader.index("if (-not (Test-DefenseClawStandaloneProfile))") < reader.index("for ($attempt")
+    assert "return Get-DefenseClawDeploymentMetadataOnce -Layout $Layout -Required:$Required" in reader
+    assert "if (-not (Test-DefenseClawTransientDeploymentMetadataError" in reader
+    assert "$exception -is [Management.Automation.ItemNotFoundException]" in transient
+    assert "NativeErrorCode -in @(2, 3, 32)" in transient
+    assert "$exception.HResult -band 0xffff) -in @(2, 3, 32)" in transient
+
+
+def test_deployment_metadata_retry_recovers_only_a_transient_name(tmp_path: Path) -> None:
+    import json
+
+    engine = _portable_pwsh()
+    if engine is None:
+        pytest.skip("PowerShell 7 (pwsh) is not installed")
+    module = _text(MODULE)
+    functions = "\n".join(
+        _function_body(module, name)
+        for name in (
+            "Test-DefenseClawTransientDeploymentMetadataError",
+            "Get-DefenseClawDeploymentMetadata",
+        )
+    )
+    harness = tmp_path / "metadata-transient-read.ps1"
+    harness.write_text(
+        "param([string]$MetadataPath)\n$ErrorActionPreference = 'Stop'\nSet-StrictMode -Version Latest\n"
+        + functions
+        + r"""
+$script:Standalone = $true
+$script:Mode = 'transient'
+$script:Attempts = 0
+function Test-DefenseClawStandaloneProfile { return $script:Standalone }
+function Get-DefenseClawDeploymentMetadataOnce {
+    param([hashtable]$Layout, [switch]$Required)
+    $script:Attempts++
+    if ($script:Mode -eq 'absent' -or
+        ($script:Mode -eq 'transient' -and $script:Attempts -eq 1)) {
+        throw [IO.FileNotFoundException]::new('metadata is missing', $Layout.MetadataPath)
+    }
+    if ($script:Mode -eq 'sharing' -and $script:Attempts -eq 1) {
+        throw [ComponentModel.Win32Exception]::new(32)
+    }
+    if ($script:Mode -eq 'denied') {
+        throw [UnauthorizedAccessException]::new('metadata access denied')
+    }
+    return [pscustomobject]@{ installed = $true }
+}
+$layout = @{ MetadataPath = $MetadataPath }
+[IO.File]::WriteAllText($MetadataPath, '{}')
+$accepted = Get-DefenseClawDeploymentMetadata -Layout $layout -Required
+$transientAttempts = $script:Attempts
+$script:Mode = 'sharing'; $script:Attempts = 0
+$shared = Get-DefenseClawDeploymentMetadata -Layout $layout -Required
+$sharingAttempts = $script:Attempts
+$script:Mode = 'denied'; $script:Attempts = 0
+$denied = $false
+try { [void](Get-DefenseClawDeploymentMetadata -Layout $layout -Required) }
+catch { $denied = $_.Exception -is [UnauthorizedAccessException] }
+$deniedAttempts = $script:Attempts
+[IO.File]::Delete($MetadataPath)
+$script:Mode = 'absent'; $script:Attempts = 0
+$missing = Get-DefenseClawDeploymentMetadata -Layout $layout
+$missingAttempts = $script:Attempts
+$script:Standalone = $false; $script:Mode = 'transient'; $script:Attempts = 0
+$secureClientThrew = $false
+try { [void](Get-DefenseClawDeploymentMetadata -Layout $layout -Required) }
+catch { $secureClientThrew = $_.Exception -is [IO.FileNotFoundException] }
+[pscustomobject]@{
+    accepted = [bool]$accepted.installed
+    transient_attempts = $transientAttempts
+    sharing_accepted = [bool]$shared.installed
+    sharing_attempts = $sharingAttempts
+    denied = $denied
+    denied_attempts = $deniedAttempts
+    missing = ($null -eq $missing)
+    missing_attempts = $missingAttempts
+    secure_client_threw = $secureClientThrew
+    secure_client_attempts = $script:Attempts
+} | ConvertTo-Json -Compress
+""",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [engine, "-NoProfile", "-File", str(harness), str(tmp_path / "deployment.json")],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout) == {
+        "accepted": True,
+        "transient_attempts": 2,
+        "sharing_accepted": True,
+        "sharing_attempts": 2,
+        "denied": True,
+        "denied_attempts": 1,
+        "missing": True,
+        "missing_attempts": 7,
+        "secure_client_threw": True,
+        "secure_client_attempts": 1,
+    }
+
+
 def test_profile_roots_are_named_in_one_place_and_agree() -> None:
     module = _functions_naming(_text(MODULE), SECURE_CLIENT)
     assert set(module) <= ALLOWED_MODULE_FUNCTIONS, {
@@ -1839,7 +1965,10 @@ def test_repair_rebuilds_deployment_metadata_that_is_not_json(tmp_path: Path) ->
         _function_body(module, name)
         for name in (
             "ConvertFrom-DefenseClawDeploymentMetadataText",
+            "Test-DefenseClawTransientDeploymentMetadataError",
+            "Test-DefenseClawDeploymentMetadataPresent",
             "Get-DefenseClawDeploymentMetadata",
+            "Get-DefenseClawDeploymentMetadataOnce",
             "Repair-DefenseClawUnreadableDeploymentMetadata",
             "Format-DefenseClawSetupAction",
             "Write-DefenseClawJsonAtomic",
@@ -1877,6 +2006,10 @@ function Assert-DefenseClawCanonicalPathAcl {
     if ($global:Drifted) { throw "managed DACL is not protected after exact ACL replacement: $Path" }
 }
 function Set-DefenseClawPathAcl { param([string]$Path, [string]$Kind, [string]$GatewayServiceSID) $global:Drifted = $false; $global:Stamps++ }
+function Move-DefenseClawNonImageFileReplacing {
+    param([string]$Source, [string]$Destination)
+    [IO.File]::Move($Source, $Destination, $true)
+}
 function Test-DefenseClawTrustStrictAncestors { return $false }
 function Write-DefenseClawAclSelfHealAdvisory { param($Path, $Reason) }
 # Setup reads the metadata elevated, so the authenticated ACL repair runs
@@ -2052,6 +2185,10 @@ function Get-DefenseClawDeploymentMetadata {
     $raw = [IO.File]::ReadAllText($Layout.MetadataPath)
     if (-not $raw.StartsWith('{')) { throw "$($script:UnreadableMetadataMessage) $($Layout.MetadataPath)" }
     return $raw | ConvertFrom-Json
+}
+function Test-DefenseClawDeploymentMetadataPresent {
+    param([string]$Path)
+    return Test-Path -LiteralPath $Path -PathType Leaf
 }
 function Test-DefenseClawServiceExists { param($Name) return $true }
 function Assert-DefenseClawOwnedServiceOrAbsent { param($Name, $ExpectedGatewayPath) }
@@ -2563,6 +2700,10 @@ $layout = @{
     PurgeScopeSHA256 = ('e' * 64)
 }
 function Test-DefenseClawStandaloneProfile { return $true }
+function Test-DefenseClawDeploymentMetadataPresent {
+    param([string]$Path)
+    return Test-Path -LiteralPath $Path -PathType Leaf
+}
 function Get-DefenseClawDeploymentMetadata {
     param($Layout, [switch]$Required)
     return ([IO.File]::ReadAllText($Layout.MetadataPath) | ConvertFrom-Json)
@@ -2575,6 +2716,10 @@ function Get-DefenseClawStandaloneManifestAdoption {
 }
 function Add-DefenseClawSignedOutUntrustedFolders { param($Adoption) }
 function Set-DefenseClawPathAcl { param($Path, $Kind, $GatewayServiceSID) }
+function Write-DefenseClawDeploymentMetadataBytes {
+    param([string]$Path, [byte[]]$Bytes)
+    [IO.File]::WriteAllBytes($Path, $Bytes)
+}
 function Test-DefenseClawPathPresentNoFollow { param($Path) return (Test-Path -LiteralPath $Path) }
 function Write-DefenseClawLifecyclePhase { param($Stage) $global:Phases += $Stage }
 function Assert-DefenseClawDescendant { param($Path, $Root, $Label) return $Path }
