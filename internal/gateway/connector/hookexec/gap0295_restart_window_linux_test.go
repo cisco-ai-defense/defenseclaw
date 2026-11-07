@@ -54,7 +54,9 @@ func TestGAP0295FreshListenerHelper(t *testing.T) {
 		}
 		if os.Getenv(freshListenerCloseAcceptedEnv) == "1" {
 			_, _ = fmt.Fprintln(os.Stdout, "accepted")
-			time.Sleep(2 * time.Second)
+			// Closed when the test says so, once it has what it needs from the
+			// open connection; an ended stdin closes it too.
+			_, _ = bufio.NewReader(os.Stdin).ReadString(0x0a)
 			_ = conn.Close()
 			_, _ = fmt.Fprintln(os.Stdout, "closed")
 			continue
@@ -67,9 +69,14 @@ func TestGAP0295FreshListenerHelper(t *testing.T) {
 // whose accepted socket closes as its answer deadline ends. The owner proof
 // captured while it was open is still valid for that call.
 func TestGAP0295FreshOwnerSurvivesSocketClose(t *testing.T) {
+	unhurriedFreshGateway(t)
 	cmd := exec.Command(os.Args[0], "-test.run=^TestGAP0295FreshListenerHelper$")
 	cmd.Env = append(os.Environ(), freshListenerHelperEnv+"=1", freshListenerCloseAcceptedEnv+"=1")
 	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeAccepted, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,10 +122,14 @@ func TestGAP0295FreshOwnerSurvivesSocketClose(t *testing.T) {
 	sp, _ := specFor("claudecode")
 	w := &answerWatchdog{restart: &perUserRestartAnswer{mode: "open"}}
 	w.restartWindowContact(Options{Home: dataDir}, sp, "open", check)
-	for end := time.Now().Add(time.Second); time.Now().Before(end) && check.owner.Load() == nil; time.Sleep(10 * time.Millisecond) {
+	for end := time.Now().Add(freshOwnerCaptureWait); time.Now().Before(end) && check.owner.Load() == nil; time.Sleep(10 * time.Millisecond) {
 	}
 	if owner := check.owner.Load(); owner == nil || owner.pid != pid {
 		t.Fatalf("captured owner = %+v, want the fresh gateway", owner)
+	}
+	// Only now does the gateway close the accepted socket.
+	if _, err := fmt.Fprintln(closeAccepted, "close"); err != nil {
+		t.Fatal(err)
 	}
 	if line, err := lines.ReadString('\n'); err != nil || strings.TrimSpace(line) != "closed" {
 		t.Fatalf("close signal = %q, %v", line, err)
@@ -140,6 +151,7 @@ func TestGAP0295FreshOwnerSurvivesSocketClose(t *testing.T) {
 // another process and a stale record are no proof; a sibling call answered
 // after this connection was made does not end this call's window (v108k).
 func TestGAP0295FreshGatewayHoldsCallProof(t *testing.T) {
+	unhurriedFreshGateway(t)
 	cmd := exec.Command(os.Args[0], "-test.run=^TestGAP0295FreshListenerHelper$")
 	cmd.Env = append(os.Environ(), freshListenerHelperEnv+"=1")
 	stdout, err := cmd.StdoutPipe()

@@ -209,6 +209,7 @@ func TestPerUserConnectedPeerIsTheProcessBehindTheSocket(t *testing.T) {
 // call's connection is gone, was replaced, or no longer owns the port.
 // gateway.pid is not read at all, and an unknown peer is no proof.
 func TestPerUserGatewayRestartProvenReadsTheConnectedPeer(t *testing.T) {
+	unhurriedRestartProof(t)
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
