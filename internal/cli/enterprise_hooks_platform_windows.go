@@ -217,7 +217,7 @@ func enterpriseHookMachinePolicyContract(manifest enterprisehooks.Manifest) stri
 // enterpriseHookStandaloneManifestPath is the standalone guardian's
 // targets.yaml, the manifest the deployment-wide Claude contract comes from.
 var enterpriseHookStandaloneManifestPath = func() (string, error) {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return "", err
 	}

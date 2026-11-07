@@ -71,8 +71,13 @@ func diffTestMachineRegistry(before, after map[string]string) []string {
 // into their own records on every pass, at any depth.
 var testServiceVolatileKeys = map[string]bool{"updated_at": true, "reconcile_id": true}
 
-// testServiceFileHashLimit bounds the files the guard hashes; a larger file
-// in a service folder (the hook payload) is compared by size and time.
+// testServiceFileHashLimit bounds the files the guard reads whole; a larger
+// file in a service folder (the hook payload) is compared by size and time.
+// A log has no limit: it is hashed as a stream and only its new tail is read
+// (testServiceLogFingerprint), because the hook guardian's log grows by about
+// 1 MB a day and is never rotated, so on a computer up more than about nine
+// days a size-and-time compare reported every guardian pass again (GAP-0093
+// review S1).
 const testServiceFileHashLimit = 8 << 20
 
 // testServiceFolders are the service-owned folders of one machine
@@ -145,6 +150,9 @@ func testServiceFileFingerprint(path, before string, runMarkers []string) string
 	if err != nil {
 		return "unreadable: " + err.Error()
 	}
+	if strings.EqualFold(filepath.Ext(path), ".log") {
+		return testServiceLogFingerprint(path, before, runMarkers)
+	}
 	if info.Size() > testServiceFileHashLimit {
 		return fmt.Sprintf("service file %d %s", info.Size(), info.ModTime().UTC().Format(time.RFC3339Nano))
 	}
@@ -158,8 +166,6 @@ func testServiceFileFingerprint(path, before string, runMarkers []string) string
 			return "service record " + testSHA256(canonical)
 		}
 		return fmt.Sprintf("service record unparsed %d %s", len(body), testSHA256(body))
-	case ".log":
-		return testServiceLogFingerprint(body, before, runMarkers)
 	}
 	return fmt.Sprintf("service file %d %s", len(body), testSHA256(body))
 }
@@ -217,24 +223,97 @@ func dropTestServiceVolatileKeys(value any) any {
 // snapshot. In a later one, a log that kept its earlier content as its
 // exact start and only grew by text that does not name this run keeps its
 // first fingerprint; a log that was rewritten, truncated, or grew by text
-// that names this run gets another.
-func testServiceLogFingerprint(body []byte, before string, runMarkers []string) string {
-	now := fmt.Sprintf("service log %d %s", len(body), testSHA256(body))
+// that names this run gets another. The log is read as a stream, whatever
+// its size: its earlier bytes are hashed, not held, and only the tail
+// written since is searched for the run's markers.
+func testServiceLogFingerprint(path, before string, runMarkers []string) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return "unreadable: " + err.Error()
+	}
+	defer file.Close()
+	whole := sha256.New()
 	fields := strings.Fields(before)
-	if len(fields) != 4 || fields[0] != "service" || fields[1] != "log" {
-		return now
+	size, sizeErr := int64(-1), errors.New("no earlier fingerprint")
+	if len(fields) == 4 && fields[0] == "service" && fields[1] == "log" {
+		size, sizeErr = strconv.ParseInt(fields[2], 10, 64)
 	}
-	size, err := strconv.Atoi(fields[2])
-	if err != nil || size > len(body) || testSHA256(body[:size]) != fields[3] {
-		return now + " (its earlier content was rewritten or truncated)"
-	}
-	added := strings.ToLower(string(body[size:]))
-	for _, marker := range runMarkers {
-		if marker = strings.ToLower(strings.TrimSpace(marker)); marker != "" && strings.Contains(added, marker) {
-			return now + " (a line written during the run names the test run: " + marker + ")"
+	if sizeErr != nil || size < 0 {
+		read, err := io.Copy(whole, file)
+		if err != nil {
+			return "unreadable: " + err.Error()
 		}
+		return fmt.Sprintf("service log %d %s", read, hex.EncodeToString(whole.Sum(nil)))
+	}
+	earlier := sha256.New()
+	read, err := io.CopyN(io.MultiWriter(earlier, whole), file, size)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "unreadable: " + err.Error()
+	}
+	kept := read == size && hex.EncodeToString(earlier.Sum(nil)) == fields[3]
+	tail := newTestRunMarkerScanner(runMarkers)
+	added, err := io.Copy(io.MultiWriter(whole, tail), file)
+	if err != nil {
+		return "unreadable: " + err.Error()
+	}
+	now := fmt.Sprintf("service log %d %s", read+added, hex.EncodeToString(whole.Sum(nil)))
+	switch {
+	case !kept:
+		return now + " (its earlier content was rewritten or truncated)"
+	case tail.found != "":
+		return now + " (a line written during the run names the test run: " + tail.found + ")"
 	}
 	return before
+}
+
+// testRunMarkerScanner is an io.Writer that reports the first run marker
+// the text written to it names, ignoring ASCII case, across the boundaries
+// of the writes.
+type testRunMarkerScanner struct {
+	markers [][]byte
+	carry   []byte
+	keep    int
+	found   string
+}
+
+func newTestRunMarkerScanner(runMarkers []string) *testRunMarkerScanner {
+	scanner := &testRunMarkerScanner{}
+	for _, marker := range runMarkers {
+		if marker = strings.TrimSpace(marker); marker != "" {
+			lower := testASCIILower([]byte(marker))
+			scanner.markers = append(scanner.markers, lower)
+			scanner.keep = max(scanner.keep, len(lower)-1)
+		}
+	}
+	return scanner
+}
+
+func (s *testRunMarkerScanner) Write(chunk []byte) (int, error) {
+	if s.found != "" || len(s.markers) == 0 {
+		return len(chunk), nil
+	}
+	text := append(s.carry, testASCIILower(chunk)...)
+	for _, marker := range s.markers {
+		if bytes.Contains(text, marker) {
+			s.found = string(marker)
+			return len(chunk), nil
+		}
+	}
+	s.carry = append(s.carry[:0], text[max(0, len(text)-s.keep):]...)
+	return len(chunk), nil
+}
+
+// testASCIILower is a lower-case copy of text, ASCII letters only, so a
+// marker split across two writes still matches byte for byte.
+func testASCIILower(text []byte) []byte {
+	lower := make([]byte, len(text))
+	for i, c := range text {
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		lower[i] = c
+	}
+	return lower
 }
 
 // TestTestMachineServiceFoldersTellTheServicesWritesFromATests checks the
@@ -344,6 +423,97 @@ func TestTestMachineServiceFoldersTellTheServicesWritesFromATests(t *testing.T) 
 			}
 			if strings.Contains(changes, "audit.db") {
 				t.Fatalf("the guard reports the left-out data folder:\n%s", changes)
+			}
+		})
+	}
+}
+
+// GAP-0093 review S1: a service log larger than testServiceFileHashLimit is
+// still compared by content (the guardian's log is never rotated), and a
+// marker the run's tail names across the scanner's write boundaries is
+// still seen.
+func TestTestMachineServiceLogOverTheHashLimitIsComparedByContent(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "logs", "hook-guardian.log")
+	if err := os.MkdirAll(filepath.Dir(log), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	line := []byte("[hook-guardian] reconcile reason=interval status=ok users=3\n")
+	big := bytes.Repeat(line, testServiceFileHashLimit/len(line)+4096)
+	if len(big) <= testServiceFileHashLimit {
+		t.Fatalf("fixture log is %d bytes, not over the %d byte limit", len(big), testServiceFileHashLimit)
+	}
+	runTemp := filepath.Join(dir, "defenseclaw-cli-test-4242")
+	markers := []string{runTemp, `Software\DefenseClaw-test-42`}
+	reset := func() {
+		t.Helper()
+		if err := os.WriteFile(log, big, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendLog := func(text []byte) {
+		t.Helper()
+		file, err := os.OpenFile(log, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := file.Write(text); err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot := func(before map[string]string) map[string]string {
+		out := map[string]string{}
+		fingerprintTestServiceFolders(out, testServiceFolders{roots: []string{filepath.Dir(log)}, before: before, runMarkers: markers})
+		return out
+	}
+
+	reset()
+	before := snapshot(nil)
+	if got := before["file "+log]; !strings.HasPrefix(got, fmt.Sprintf("service log %d ", len(big))) {
+		t.Fatalf("a %d byte log is fingerprinted as %q, not by its content", len(big), got)
+	}
+	time.Sleep(20 * time.Millisecond) // a later modification time
+	appendLog(bytes.Repeat(line, 3))
+	if changes := diffTestMachineRegistry(before, snapshot(before)); len(changes) != 0 {
+		t.Fatalf("the guardian's own lines appended to a log over the limit are reported:\n%s", strings.Join(changes, "\n"))
+	}
+
+	// A tail longer than one copy buffer (32 KiB) that names the run where
+	// two writes to the scanner meet.
+	straddle := append(bytes.Repeat([]byte("x"), 32<<10-10), []byte(" warn: restore record in "+strings.ToUpper(runTemp)+`\TestX\001`+"\n")...)
+	for _, tc := range []struct {
+		name  string
+		write func()
+	}{
+		{"a line naming the run's temp folder", func() { appendLog([]byte("[hook-guardian] warn: " + filepath.Join(runTemp, "TestX", "001") + "\n")) }},
+		{"a long tail naming the run across a write boundary", func() { appendLog(straddle) }},
+		{"a rewritten earlier byte", func() {
+			file, err := os.OpenFile(log, os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := file.WriteAt([]byte("X"), int64(len(big)/2)); err != nil {
+				t.Fatal(err)
+			}
+			if err := file.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a truncated log", func() {
+			if err := os.Truncate(log, int64(len(big)-len(line))); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reset()
+			before := snapshot(nil)
+			tc.write()
+			if changes := diffTestMachineRegistry(before, snapshot(before)); len(changes) != 1 || !strings.Contains(changes[0], log) {
+				t.Fatalf("the guard missed %s in a log over the limit:\n%s", tc.name, strings.Join(changes, "\n"))
 			}
 		})
 	}

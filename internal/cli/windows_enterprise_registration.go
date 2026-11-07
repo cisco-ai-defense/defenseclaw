@@ -297,7 +297,7 @@ func windowsEnterpriseMarkerTrustMode(opts *windowsEnterpriseLifecycleOptions) s
 }
 
 func writeWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) error {
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return err
 	}
@@ -544,7 +544,7 @@ func removeEmptyWindowsRegistryKey(path string) error {
 // remove any empty Cisco folder there by name. A folder that holds anything,
 // or fails the purge's ownership checks, stays with its record.
 var removeEmptyWindowsEnterpriseInstallParent = func() {
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil || strings.TrimSpace(roots.InstallRoot) == "" {
 		return
 	}
@@ -559,7 +559,7 @@ var removeEmptyWindowsEnterpriseInstallParent = func() {
 // enterprise.coexistence.disable_self_update from the installed config;
 // managed hosts disable self-update unless the administrator opts out.
 func readWindowsEnterpriseSelfUpdateDisabled() bool {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return true
 	}
@@ -736,7 +736,7 @@ func windowsEnterprisePurgeRemovedMachineDeployment(result *enterprisestatus.Res
 // windowsEnterpriseInstallRootGone reports that the standalone install root
 // does not exist. A seam for tests.
 var windowsEnterpriseInstallRootGone = func() bool {
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil || strings.TrimSpace(roots.InstallRoot) == "" {
 		return false
 	}

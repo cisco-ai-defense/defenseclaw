@@ -820,7 +820,7 @@ func windowsScannerRuntimeCertificationRun(opts *windowsEnterpriseLifecycleOptio
 // and state roots, from the trusted known folders as the installer resolves
 // them; a seam for tests.
 var windowsEnterpriseProductionRoots = func() (install, state string, err error) {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return "", "", err
 	}
@@ -1906,7 +1906,7 @@ func (d windowsStandaloneScannerDocument) skillJudgeDisabled() bool {
 // readWindowsStandaloneScannerConfig reads the installed admin config; a
 // seam for tests.
 var readWindowsStandaloneScannerConfig = func() ([]byte, error) {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return nil, err
 	}

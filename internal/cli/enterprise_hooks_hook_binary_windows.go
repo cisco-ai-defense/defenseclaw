@@ -112,7 +112,7 @@ var windowsReplacementCopyPattern = lazyregexp.New(`^(?i:defenseclaw[a-z0-9-]*\.
 // thread still ran. Only an upgrade or uninstall used to remove it, so a
 // no-op ensure and a guardian restart left it in bin (GAP-0934, GAP-0937).
 func removeWindowsStandaloneReplacementCopies(stderr io.Writer) {
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil || !strings.HasPrefix(strings.ToLower(filepath.Clean(enterpriseHookManifest)), strings.ToLower(roots.StateRoot)+`\`) {
 		return
 	}
@@ -145,7 +145,7 @@ func removeWindowsReplacementCopies(dir string) []string {
 // hook binary and restores the binary from it when it is damaged. With
 // onlyWhenDamaged it does not refresh the copy.
 func keepWindowsStandaloneHookBinary(stderr io.Writer, onlyWhenDamaged bool) {
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil || !strings.HasPrefix(strings.ToLower(filepath.Clean(enterpriseHookManifest)), strings.ToLower(roots.StateRoot)+`\`) {
 		return
 	}
@@ -198,7 +198,7 @@ var windowsClaudeDropInLastErr string
 // every enrolled user's Claude Code prompt failed closed and the reconcile
 // and Setup /repair refused the file as an administrator edit (GAP-1108).
 func keepWindowsStandaloneClaudeDropIn(stderr io.Writer) {
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil || !strings.HasPrefix(strings.ToLower(filepath.Clean(enterpriseHookManifest)), strings.ToLower(roots.StateRoot)+`\`) {
 		return
 	}

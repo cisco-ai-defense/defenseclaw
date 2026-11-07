@@ -44,7 +44,7 @@ var (
 	windowsEnterprisePayloadLeafPattern  = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 	// Seams for inspectTrustedWindowsEnterpriseDeployment.
-	windowsEnterpriseRecordRoots     = winpath.TrustedEnterpriseRoots
+	windowsEnterpriseRecordRoots     = windowsManagedRoots
 	windowsEnterpriseRecordInspector = winpath.InspectEnterpriseDeployment
 	windowsEnterpriseRecordValidator = windowsEnterpriseRecordValidatorDefault
 )
@@ -291,7 +291,7 @@ type windowsEnterpriseConfiguredTrust struct {
 // windowsEnterpriseInstalledConfigPath is the installed standalone config;
 // tests replace it.
 var windowsEnterpriseInstalledConfigPath = func() (string, error) {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return "", err
 	}

@@ -20,7 +20,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // Every enrolled user's hook reads the machine policy summary in
@@ -33,7 +32,7 @@ import (
 // Seams for tests.
 var (
 	windowsEnterpriseHookRuntimeDir = func() (string, error) {
-		layout, err := managed.StandaloneWindowsLayout()
+		layout, err := windowsManagedLayout.standalone()
 		return layout.HookRuntimeDir, err
 	}
 	windowsEnterpriseInspectPublicDir = enterprisepolicy.InspectWindowsPublicDir

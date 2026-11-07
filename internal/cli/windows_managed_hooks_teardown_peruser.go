@@ -179,7 +179,7 @@ var windowsManagedClaudeGuardianLeftoverRemover = func() error {
 	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileStandalone)
+	roots, err := windowsManagedLayout.roots(winpath.EnterpriseProfileStandalone)
 	if err != nil {
 		return err
 	}

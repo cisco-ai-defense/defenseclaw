@@ -54,6 +54,7 @@ func isolateTestHost() func() {
 	sandboxSeam("secureClientHost", &secureClientHost, func() bool { return false })
 	pinTestProcessIdentity()
 	normalizeTestTokenDefaultOwner()
+	restoreTemp := isolateTestRunTemp()
 	dir, err := os.MkdirTemp("", "defenseclaw-cli-test-")
 	if err != nil {
 		sandboxSeam("windowsScannerRuntimeDir", &windowsScannerRuntimeDir, func() (string, error) { return "", err })
@@ -61,8 +62,13 @@ func isolateTestHost() func() {
 		isolateTestDeploymentReaders(os.TempDir())
 		isolateTestRunFolders("")
 		isolateTestGatewayPortClaims(filepath.Join(os.TempDir(), "defenseclaw-cli-test-no-port-claims"))
-		return isolateTestMachineWriters("")
+		restoreMachine := isolateTestMachineWriters("")
+		return func() {
+			restoreMachine()
+			restoreTemp()
+		}
 	}
+	testRunTempDirs = append(testRunTempDirs, dir)
 	isolateTestDeploymentReaders(dir)
 	isolateTestRunFolders(dir)
 	isolateTestGatewayPortClaims(filepath.Join(dir, "port-claims"))
@@ -75,6 +81,48 @@ func isolateTestHost() func() {
 	return func() {
 		restoreMachine()
 		_ = os.RemoveAll(dir)
+		restoreTemp()
+	}
+}
+
+// testRunTempDirs are this run's own temp folders: the folder TMP and TEMP
+// name for the run (isolateTestRunTemp) and the sandbox folder isolateTestHost
+// points the deployment seams at. Both are new and unique to the run, so a
+// service log line that names one was written for a test (testRunMarkers).
+var testRunTempDirs []string
+
+// isolateTestRunTemp points TMP and TEMP at a new folder of this run, so
+// every t.TempDir() of a run as an administrator or a standard user is in a
+// folder unique to the run, and restores both after the run (GAP-0093
+// review L1). The temp folder itself is not unique to the run: as
+// LocalSystem it is C:\Windows\SystemTemp, which the SYSTEM services use too,
+// so a guardian line that named it was taken for a test's write. Windows
+// gives LocalSystem C:\Windows\SystemTemp whatever TMP says (GetTempPath2),
+// so there the run's markers are its own folders only.
+func isolateTestRunTemp() func() {
+	root, err := os.MkdirTemp("", "defenseclaw-cli-run-")
+	if err != nil {
+		return func() {}
+	}
+	testRunTempDirs = append(testRunTempDirs, root)
+	previous := map[string]*string{}
+	for _, name := range []string{"TMP", "TEMP"} {
+		if value, ok := os.LookupEnv(name); ok {
+			previous[name] = &value
+		} else {
+			previous[name] = nil
+		}
+		_ = os.Setenv(name, root)
+	}
+	return func() {
+		for name, value := range previous {
+			if value == nil {
+				_ = os.Unsetenv(name)
+			} else {
+				_ = os.Setenv(name, *value)
+			}
+		}
+		_ = os.RemoveAll(root)
 	}
 }
 
@@ -467,11 +515,23 @@ func testServiceOwnedFolders(layout managed.StandaloneLayout) []string {
 	}
 }
 
-// testRunMarkers name this test run in text it writes: its temp folder, its
-// HKCU registry sandbox and its executable. A service log line written
-// during the run that names one of them was written by a test.
+// testRunTempIsTheRuns reports whether the temp folder is the run's own
+// (TMP was honoured: not LocalSystem).
+func testRunTempIsTheRuns() bool {
+	for _, dir := range testRunTempDirs {
+		if strings.EqualFold(filepath.Clean(dir), filepath.Clean(os.TempDir())) {
+			return true
+		}
+	}
+	return false
+}
+
+// testRunMarkers name this test run in text it writes: its own temp
+// folders (testRunTempDirs, not the shared temp folder: GAP-0093 review
+// L1), its HKCU registry sandbox and its executable. A service log line
+// written during the run that names one of them was written by a test.
 func testRunMarkers() []string {
-	markers := []string{os.TempDir(), testMachineRegistrySandbox}
+	markers := append(append([]string{}, testRunTempDirs...), testMachineRegistrySandbox)
 	if executable, err := os.Executable(); err == nil {
 		markers = append(markers, filepath.Base(executable))
 	}
@@ -692,6 +752,21 @@ func isolateTestDeploymentReaders(dir string) {
 		missing = managed.StandaloneLayout{ConfigPath: filepath.Join(dir, "no-config.yaml"),
 			ManifestPath: filepath.Join(dir, "no-manifest.json"), DataDir: filepath.Join(dir, "no-data")}
 	}
+	// cowork-1-0-8 GAP-0093 (round 2): the one place internal/cli resolves
+	// the computer's own standalone layout and trusted roots. Every non-test
+	// file asks windowsManagedLayout, so this one sandbox covers the readers
+	// no seam had (the lifecycle, guardian and status internals) and every
+	// one a later change adds. The Secure Client profile's roots are left as
+	// they are.
+	missingRoots, missingRootsErr := winpath.EnterpriseRootsFor(managed.ProfileStandalone,
+		filepath.Join(dir, "no-program-files"), filepath.Join(dir, "no-program-data"))
+	sandboxSeam("windowsManagedLayout.standalone", &windowsManagedLayout.standalone, func() (managed.StandaloneLayout, error) { return missing, nil })
+	sandboxSeam("windowsManagedLayout.roots", &windowsManagedLayout.roots, func(profile string) (winpath.EnterpriseRoots, error) {
+		if profile != managed.ProfileStandalone {
+			return winpath.TrustedEnterpriseRoots(profile)
+		}
+		return missingRoots, missingRootsErr
+	})
 	sandboxSeam("windowsEnterpriseInstalledConfigPath", &windowsEnterpriseInstalledConfigPath, func() (string, error) { return missing.ConfigPath, nil })
 	sandboxSeam("windowsEnterpriseInstalledConfigForStatus", &windowsEnterpriseInstalledConfigForStatus, func() (*config.Config, error) {
 		return loadWindowsEnterpriseStandaloneConfig(missing.ConfigPath)
@@ -825,6 +900,15 @@ func isolateTestRunFolders(dir string) {
 		}
 		return lock, nil
 	})
+	// cowork-1-0-8 GAP-0094: the hook guardian's claim of config.yaml opened
+	// the computer's own lifecycle.lock. An elevated run held it, and a
+	// standard user, who cannot open it, never recorded a generation.
+	sandboxSeam("windowsEnterpriseConfigLifecycleClaim", &windowsEnterpriseConfigLifecycleClaim, func() managedConfigOwnership {
+		if lock == "" {
+			return managedConfigOwnership{reason: noDir.Error()}
+		}
+		return claimWindowsEnterpriseConfigFromLifecycle(lock, func() (managed.StandaloneLayout, error) { return windowsEnterpriseHotConfigLayout() })
+	})
 }
 
 // errTestSandboxNoServiceControl is what the gateway and guardian service
@@ -915,6 +999,17 @@ func testRunsAsLocalSystem() bool {
 // installed scanner runtime in reach, managed or not, with every machine
 // writer in the sandbox and the identity pinned.
 func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
+	// GAP-0093 review L1: the run's markers are its own folders, never the
+	// shared temp folder.
+	t.Logf("temp folder %s, run markers %q", os.TempDir(), testRunMarkers())
+	if len(testRunTempDirs) == 0 {
+		t.Fatal("the run has no temp folder of its own")
+	}
+	for _, marker := range testRunMarkers() {
+		if strings.EqualFold(filepath.Clean(marker), filepath.Clean(os.TempDir())) && !testRunTempIsTheRuns() {
+			t.Fatalf("the shared temp folder %s is a run marker", marker)
+		}
+	}
 	if where, managed := managedHostWindowsStandalone(); managed {
 		t.Fatalf("the managed-host guard reads the real deployment (%s)", where)
 	}
@@ -1018,6 +1113,58 @@ func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 			t.Fatalf("%s does not take the run's lifecycle lock %s: %v", name, lockPath, err)
 		}
 	}
+	// cowork-1-0-8 GAP-0094: the guardian's config.yaml claim opens the
+	// run's lifecycle lock, not the computer's. While the run's lock is
+	// held, the claim says a run holds it.
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(lockPath); _ = os.Remove(filepath.Dir(lockPath)) })
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	held, err := tryWindowsEnterpriseLifecycleLock(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner := windowsEnterpriseConfigLifecycleClaim(); !strings.Contains(owner.reason, "holds lifecycle.lock") {
+		if owner.release != nil {
+			owner.release()
+		}
+		held()
+		t.Fatalf("the guardian's config.yaml claim does not take the run's lifecycle lock %s: %+v", lockPath, owner)
+	}
+	held()
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatal(err)
+	}
+	if owner := windowsEnterpriseConfigLifecycleClaim(); owner.reason != "" || owner.release == nil {
+		t.Fatalf("the guardian's config.yaml claim without the run's lock file: %+v", owner)
+	} else {
+		owner.release()
+	}
+	// cowork-1-0-8 GAP-0093 (round 2): the one layout source answers the
+	// run's missing deployment; the Secure Client roots are the computer's.
+	layout, err := windowsManagedLayout.standalone()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{layout.ConfigPath, layout.ConfigDir, layout.DataDir, layout.SecretsDir, layout.LifecycleDir,
+		layout.GuardianAuthDir, layout.ManifestPath, layout.LogDir} {
+		inTemp("the standalone layout", path)
+	}
+	standaloneRoots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{standaloneRoots.InstallRoot, standaloneRoots.StateRoot, standaloneRoots.LifecycleDir, standaloneRoots.CertificationInstallBase} {
+		inTemp("the standalone roots", path)
+	}
+	if want, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileSecureClient); err == nil {
+		if got, err := windowsManagedLayout.roots(winpath.EnterpriseProfileSecureClient); err != nil || got != want {
+			t.Fatalf("the Secure Client roots changed in the sandbox: %+v, %v; want %+v", got, err, want)
+		}
+	}
 	// g079 review 2 R2c: the unelevated staging is in the run's temp folder.
 	if sameTestFunc(windowsEnterpriseUserTempDirectory, trustedWindowsEnterpriseUserTempDirectory) {
 		t.Fatal("the lifecycle stages in the token's own LocalAppData Temp folder")
@@ -1108,7 +1255,8 @@ func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 		"windowsEnterpriseHotConfigRestart", "windowsEnterpriseHotConfigRecover", "windowsEnterpriseHotConfigFailClosed",
 		"windowsEnterpriseHotConfigGuardianReconcile", "windowsSecretRestartGateway", "windowsSecretSpawnRecovery",
 		"enterpriseHooksPlatformPreflight", "windowsEnterpriseStagingElevated", "windowsBundleSyncMarker",
-		"windowsEnterpriseLifecycleYield", "sidecarRaisePriority", "windowsEnterpriseRecordInspector"} {
+		"windowsEnterpriseLifecycleYield", "sidecarRaisePriority", "windowsEnterpriseRecordInspector",
+		"windowsManagedLayout.standalone", "windowsManagedLayout.roots", "windowsEnterpriseConfigLifecycleClaim"} {
 		if !registered[name] {
 			t.Errorf("seam %s is not registered with the sandbox guard", name)
 		}

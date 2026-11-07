@@ -20,7 +20,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // bundleNotAppliedCode is the lifecycle error of a bundle-mode device whose
@@ -193,7 +192,7 @@ func restoreWindowsBundleConfig(ctx context.Context, replacing string) windowsBu
 	if !e.ConfigReplaced() && e.InstalledConfig != nil {
 		return out
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return fail("bundle_restore_failed", "cannot resolve the trusted enterprise roots to re-apply "+label+": "+windowsEnterpriseBoundedDiagnostic(err.Error()))
 	}

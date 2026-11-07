@@ -27,7 +27,7 @@ import (
 )
 
 // windowsEnterpriseStandaloneLayoutForPreflight is replaceable in tests.
-var windowsEnterpriseStandaloneLayoutForPreflight = managed.StandaloneWindowsLayout
+var windowsEnterpriseStandaloneLayoutForPreflight = windowsManagedStandaloneLayout
 var windowsEnterpriseStandaloneRuntimeCandidateCheck = config.ValidateManagedStandaloneRuntimeCandidate
 
 // windowsEnterpriseStandaloneConfigSource refuses an administrator config
@@ -253,7 +253,7 @@ func windowsEnterpriseRulePackPrivacyProblems(cfg *config.Config) []string {
 	grant := managed.RulePackServiceReadGrant(os.Getenv(managed.WindowsServiceAccountEnv))
 	// The packs the product ships are the same on every computer and public.
 	var shipped string
-	if layout, err := managed.StandaloneWindowsLayout(); err == nil {
+	if layout, err := windowsManagedLayout.standalone(); err == nil {
 		shipped = strings.ToLower(filepath.Clean(layout.InstallRoot))
 	}
 	dirs := cfg.ReferencedRulePackDirs()
@@ -316,7 +316,7 @@ func addWindowsEnterpriseInstalledConfigWarnings(result *enterprisestatus.Result
 // transaction an interrupted run left: its recovery restores the deployment
 // as it was before, config and rule packs included. Tests replace it.
 var windowsEnterpriseStandaloneTransactionPending = func() bool {
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil || strings.TrimSpace(roots.MetadataPath) == "" {
 		return false
 	}
@@ -351,7 +351,7 @@ var windowsEnterpriseStandaloneRecoveryPending = func(opts *windowsEnterpriseLif
 // trusted roots, which name the production scope and the lifecycle folder.
 // Tests replace it.
 var windowsEnterpriseStandaloneRecoveryRoots = func() (winpath.EnterpriseRoots, error) {
-	return winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	return windowsManagedLayout.roots(managed.ProfileStandalone)
 }
 
 // The service names install-enterprise.ps1 takes when the CLI passes none

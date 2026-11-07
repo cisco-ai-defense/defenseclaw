@@ -16,7 +16,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // windowsEnterpriseConfigGenerationRepair is
@@ -51,7 +50,7 @@ func repairWindowsEnterpriseConfigGeneration(ctx context.Context, opts *windowsE
 	if err != nil {
 		return false, nil
 	} // The ordinary source preflight reports it.
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return false, err
 	}
@@ -87,7 +86,7 @@ func repairWindowsEnterpriseConfigGeneration(ctx context.Context, opts *windowsE
 	if report.GatewayReportedDigest != "" {
 		floor = max(floor, report.GatewayReportedConfigGeneration)
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return false, err
 	}

@@ -232,7 +232,7 @@ var windowsEnterpriseRepairDataDirBeforePlan = func() string {
 	if !windowsEnterpriseIsElevated() {
 		return ""
 	}
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil || strings.TrimSpace(layout.DataDir) == "" {
 		return ""
 	}
@@ -262,7 +262,7 @@ var windowsEnterpriseGuardianRepairsSinceLastRun = func() []string {
 	if err != nil {
 		return nil
 	}
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return nil
 	}
@@ -306,7 +306,7 @@ func noteWindowsEnterpriseEnsureDriftRepairs(result *enterprisestatus.Result, re
 // windowsEnterpriseRemoveReplacementCopies removes the unused replacement
 // copies in the production bin folder; replaceable in tests.
 var windowsEnterpriseRemoveReplacementCopies = func() []string {
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return nil
 	}
@@ -2415,7 +2415,7 @@ func windowsEnterpriseBoundedLabels(items []string) string {
 // windowsEnterpriseUnprotectedAgentsReader reads the enumerator's
 // unprotected-agents record; tests replace it.
 var windowsEnterpriseUnprotectedAgentsReader = func() ([]enterprisehooks.UnprotectedAgent, error) {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return nil, err
 	}
@@ -2507,7 +2507,7 @@ var windowsEnterpriseGatewayStartFailure = readWindowsEnterpriseGatewayStartFail
 const windowsEnterpriseGatewayLogTailBytes = 64 << 10
 
 func readWindowsEnterpriseGatewayStartFailure() (string, string) {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil || strings.TrimSpace(layout.LogDir) == "" {
 		return "", ""
 	}
@@ -2636,7 +2636,7 @@ var (
 )
 
 func readWindowsEnterpriseManifestAccounts() ([]windowsEnterpriseManifestAccount, error) {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return nil, err
 	}
@@ -2726,7 +2726,7 @@ func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
 // windowsEnterpriseDiscoveryHomeDirs reads ai_discovery.home_dirs of the
 // installed config; tests replace it.
 var windowsEnterpriseDiscoveryHomeDirs = func() ([]string, error) {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return nil, err
 	}
@@ -2811,7 +2811,7 @@ func windowsEnterpriseConfigConnectors(path string) ([]string, error) {
 // loadWindowsEnterpriseStandaloneConfig loads path (the installed config
 // when empty) the way the guardian loads the installed one.
 func loadWindowsEnterpriseStandaloneConfig(path string) (*config.Config, error) {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return nil, err
 	}
@@ -3423,7 +3423,7 @@ func windowsEnterpriseLiveStandaloneServices() []enterprisestatus.Service {
 // owned by SYSTEM, Administrators, or TrustedInstaller) is not a DefenseClaw
 // footprint: no lifecycle ever wrote it.
 func windowsEnterpriseStandaloneFootprintPresent() (bool, error) {
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return false, err
 	}
@@ -3496,7 +3496,7 @@ func windowsEnterpriseFootprintUserCreated(path string) bool {
 // per-user command managed Windows does not offer (GAP-1105). A config that
 // does not compile leaves the list out.
 func readWindowsEnterpriseStandaloneDestinations() []enterprisestatus.Destination {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return nil
 	}
@@ -3524,7 +3524,7 @@ func readWindowsEnterpriseStandaloneEnrollment() (enterprisestatus.Enrollment, e
 	}
 	// The accounts the config holds out get no manifest rows: name them
 	// (GAP-1243). An unreadable config leaves the lists out.
-	if standaloneLayout, layoutErr := managed.StandaloneWindowsLayout(); layoutErr == nil {
+	if standaloneLayout, layoutErr := windowsManagedLayout.standalone(); layoutErr == nil {
 		if body, readErr := readWindowsEnterpriseBoundedFile(standaloneLayout.ConfigPath, windowsEnterpriseConfigProfileLimit); readErr == nil {
 			enrollment.ExcludedUsers, enrollment.ExcludedGroups, _ = windowsEnterpriseEnrollmentExclusions(body)
 		}
@@ -3574,7 +3574,7 @@ func readWindowsEnterpriseStandaloneEnrollmentAt(manifestPath, runtimeDir string
 // readWindowsEnterpriseStandaloneAIDefense reports whether the installed
 // config enables the optional AI Defense augmentation.
 func readWindowsEnterpriseStandaloneAIDefense() (bool, error) {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return false, err
 	}
@@ -4615,11 +4615,11 @@ func defaultWindowsEnterpriseEnsurePayload(opts *windowsEnterpriseLifecycleOptio
 // windowsEnterpriseEnsureDrift compares the supplied sources with the
 // installed deployment's recorded digests and config.
 func windowsEnterpriseEnsureDrift(opts *windowsEnterpriseLifecycleOptions, script string) (string, error) {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return "", err
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return "", err
 	}
@@ -4724,7 +4724,7 @@ func confirmedWindowsBundleCompilerDrift(run *windowsBundleRun) (bool, error) {
 	if sha256HexBytes(run.prepared.Config) != run.prepared.ConfigSHA256 {
 		return false, errors.New("confirmed bundle config hash is invalid")
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return false, err
 	}
