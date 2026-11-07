@@ -8,7 +8,9 @@ package safefile
 import (
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/runtimeowner"
@@ -188,7 +190,7 @@ func preflightMissingDirectory(dir string) error {
 			case perm&0o022 != 0:
 				return fmt.Errorf("safefile: private directory %s does not exist and root would create it inside %s, which other accounts can write (mode %04o): start the gateway as the account the directory is for, or create the directory as that account first", dir, ancestor, perm)
 			}
-			return nil
+			return preflightRootOwnsNewDirectory(dir, ancestor)
 		}
 		if !os.IsNotExist(err) {
 			return fmt.Errorf("safefile: inspect the folder that would hold private directory %s: %w", dir, err)
@@ -197,6 +199,54 @@ func preflightMissingDirectory(dir string) error {
 			return nil
 		}
 	}
+}
+
+// preflightRootOwnsNewDirectory is the intended-owner proof for a missing
+// directory below a root-owned folder nobody else can write (/home is one).
+// Without a sudo account the run is root's own and the directory is root's. A
+// sudo start belongs to the account that ran sudo, and the directory root would
+// create (a whole missing account home, with the log and PID record in it) is
+// owned by root and mode 0700, which that account cannot enter to start its own
+// gateway. It is let through only inside root's own home, where root is the
+// owner whoever ran sudo; anywhere else it is refused before anything is
+// created (GAP-0714).
+func preflightRootOwnsNewDirectory(dir, ancestor string) error {
+	if raw := strings.TrimSpace(os.Getenv("SUDO_UID")); raw == "" || raw == "0" {
+		return nil
+	}
+	if home := rootHomeDir(); home != "" && insideDirectory(dir, ancestor, home) {
+		return nil
+	}
+	return fmt.Errorf("safefile: private directory %s does not exist and root would create it owned by root for the account that ran sudo: start the gateway as that account, or create the directory as that account first", dir)
+}
+
+// rootHomeDir is root's login directory from the account database, never from
+// the environment a sudo run inherits. A variable so a test can stand in for it.
+var rootHomeDir = func() string {
+	account, err := user.LookupId("0")
+	if err != nil || account == nil {
+		return ""
+	}
+	return account.HomeDir
+}
+
+// insideDirectory reports whether dir, a missing path whose nearest existing
+// folder is ancestor, lies inside base once links are resolved.
+func insideDirectory(dir, ancestor, base string) bool {
+	resolvedBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		return false
+	}
+	resolvedAncestor, err := filepath.EvalSymlinks(ancestor)
+	if err != nil {
+		return false
+	}
+	missing, err := filepath.Rel(ancestor, dir)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(resolvedBase, filepath.Join(resolvedAncestor, missing))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // pathOwnerAndMode is the owner and the permission bits of the

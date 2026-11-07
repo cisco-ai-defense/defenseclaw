@@ -151,3 +151,78 @@ def test_the_store_doctor_loaded_never_stands_in_for_the_install_home_config(
         assert "/srv/unrelated-store" not in remedy, name
         assert ("could not be read here" in remedy) == (home_config != "missing"), name
     assert cmd_doctor._root_gateway_install_home(cfg) == os.fspath(home)
+
+
+def _doctor_cfg_from_unrelated_cwd(monkeypatch, tmp_path):
+    """A relative DEFENSECLAW_CONFIG names a different file here than in the install home."""
+    install_home = tmp_path / "account" / ".defenseclaw"
+    working_dir = tmp_path / "elsewhere"
+    actual_store = tmp_path / "actual-store"
+    unrelated_store = tmp_path / "unrelated-store"
+    for path in (install_home, working_dir, actual_store, unrelated_store):
+        path.mkdir(parents=True)
+    (install_home / "other.yaml").write_text(f"data_dir: {actual_store}\n")
+    (working_dir / "other.yaml").write_text(f"data_dir: {unrelated_store}\n")
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(install_home))
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", "other.yaml")
+    monkeypatch.chdir(working_dir)
+    return install_home, actual_store, unrelated_store, config_module.load()
+
+
+def test_sudo_leftovers_scans_the_store_the_gateway_reads(monkeypatch, tmp_path):
+    """GAP-0711/0713: diagnosis and remedy name the same (install-home) store."""
+    _home, actual_store, unrelated_store, cfg = _doctor_cfg_from_unrelated_cwd(monkeypatch, tmp_path)
+    assert os.path.realpath(cfg.data_dir) == os.path.realpath(unrelated_store)
+    scanned = []
+
+    def leftovers(data_dir):
+        scanned.append(os.path.realpath(data_dir))
+        return ["active_connector.json"] if os.path.realpath(data_dir) == os.path.realpath(actual_store) else []
+
+    monkeypatch.setattr(cmd_doctor, "sudo_runtime_leftover_relpaths", leftovers)
+    result = cmd_doctor._DoctorResult(quiet=True)
+    cmd_doctor._check_sudo_runtime_leftovers(cfg, result)
+    assert result.checks[-1]["status"] == "fail", result.checks[-1]
+    assert scanned == [os.path.realpath(actual_store)]
+
+
+def test_sudo_leftovers_in_the_unrelated_store_is_not_the_gateways(monkeypatch, tmp_path):
+    """Benign twin: root files only in the folder doctor was run in are not the gateway's."""
+    _home, actual_store, unrelated_store, cfg = _doctor_cfg_from_unrelated_cwd(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        cmd_doctor,
+        "sudo_runtime_leftover_relpaths",
+        lambda data_dir: ["active_connector.json"] if os.path.realpath(data_dir) == os.path.realpath(unrelated_store) else [],
+    )
+    result = cmd_doctor._DoctorResult(quiet=True)
+    cmd_doctor._check_sudo_runtime_leftovers(cfg, result)
+    assert result.checks[-1]["status"] == "pass", result.checks[-1]
+
+
+def test_sudo_leftovers_keep_the_loaded_store_when_both_readers_agree(monkeypatch, tmp_path):
+    """Benign twin: no relative DEFENSECLAW_CONFIG, so the loaded config is the gateway's."""
+    store = tmp_path / "store"
+    store.mkdir()
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "account"))
+    seen = []
+    monkeypatch.setattr(cmd_doctor, "sudo_runtime_leftover_relpaths", lambda data_dir: seen.append(data_dir) or [])
+    cmd_doctor._check_sudo_runtime_leftovers(SimpleNamespace(data_dir=str(store)), cmd_doctor._DoctorResult(quiet=True))
+    assert seen == [str(store)]
+
+
+def test_hook_contract_lock_is_read_from_the_store_the_gateway_reads(monkeypatch, tmp_path):
+    _home, actual_store, unrelated_store, cfg = _doctor_cfg_from_unrelated_cwd(monkeypatch, tmp_path)
+    (actual_store / "hook_contract_lock.json").write_text("{}")
+    (unrelated_store / "hook_contract_lock.json").unlink(missing_ok=True)
+    opened = []
+    real_open = open
+
+    def tracking_open(path, *args, **kwargs):
+        if os.path.basename(str(path)) == "hook_contract_lock.json":
+            opened.append(os.path.realpath(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", tracking_open)
+    cmd_doctor._check_hook_contract_lock(cfg, "codex", cmd_doctor._DoctorResult(quiet=True))
+    assert opened and opened[0] == os.path.realpath(actual_store / "hook_contract_lock.json"), opened
