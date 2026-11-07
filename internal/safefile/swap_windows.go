@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -419,6 +420,28 @@ func renameReplace(source, destination string, class uint32, flags uint32) error
 		return err
 	}
 	defer windows.CloseHandle(handle)
+	return renameHandle(handle, 0, destination, class, flags)
+}
+
+// ReplaceFileInDirectory publishes a staged file through its held handle and
+// an already-validated parent directory handle. The destination is one leaf
+// in that directory. Unsupported volumes use the classic replacement request.
+func ReplaceFileInDirectory(parent, source *os.File, targetName string) error {
+	if targetName == "" || targetName == "." || targetName == ".." ||
+		strings.ContainsAny(targetName, `\/:`) {
+		return fmt.Errorf("safefile: invalid destination leaf")
+	}
+	err := renameHandle(windows.Handle(source.Fd()), windows.Handle(parent.Fd()), targetName,
+		windows.FileRenameInfoEx, fileRenameReplaceIfExists|fileRenamePOSIXSemantics|fileRenameIgnoreReadOnlyAttribute)
+	if err == nil || !posixRenameUnsupported(err) {
+		return err
+	}
+	warnClassicRenameFallback()
+	return renameHandle(windows.Handle(source.Fd()), windows.Handle(parent.Fd()), targetName,
+		windows.FileRenameInfo, fileRenameReplaceIfExists)
+}
+
+func renameHandle(handle, parent windows.Handle, destination string, class uint32, flags uint32) error {
 	name, err := windows.UTF16FromString(destination)
 	if err != nil {
 		return err
@@ -433,6 +456,7 @@ func renameReplace(source, destination string, class uint32, flags uint32) error
 	buffer := make([]uint64, (size+7)/8)
 	info := (*fileRenameInfo)(unsafe.Pointer(&buffer[0]))
 	info.Flags = flags
+	info.RootDirectory = parent
 	info.FileNameLength = uint32((len(name) - 1) * 2)
 	copy(unsafe.Slice(&info.FileName[0], len(name)), name)
 	return windows.SetFileInformationByHandle(handle, class, (*byte)(unsafe.Pointer(&buffer[0])), uint32(size))
