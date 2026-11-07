@@ -5080,7 +5080,7 @@ def _foreign_gateway_port_holder(cfg, *, status_only: bool = False) -> str:
     return holder
 
 
-def _own_foreground_gateway(cfg) -> _ForegroundGatewayOwner | None:
+def _own_foreground_gateway(cfg, *, platform_name: str | None = None) -> _ForegroundGatewayOwner | None:
     """This account's PID-file-less foreground gateway on the API port, or None.
 
     The one ownership proof "defenseclaw status" and "defenseclaw-gateway
@@ -5088,7 +5088,7 @@ def _own_foreground_gateway(cfg) -> _ForegroundGatewayOwner | None:
     the same process foreign. A failed proof is "not proven", never an error.
     """
     try:
-        return _foreground_gateway_status_owner(cfg)
+        return _foreground_gateway_status_owner(cfg, platform_name=platform_name)
     except Exception:  # noqa: BLE001 - a failed ownership proof is unverified
         return None
 
@@ -7005,6 +7005,32 @@ def _read_process_env_var(pid: int, var_name: str) -> str | None:
 _NEEDS_RUNNING_GATEWAY = "needs the gateway, which is not running (see Sidecar API)"
 
 
+def _emit_windows_foreground_gateway_rows(
+    cfg, r: _DoctorResult, evidence: GatewayEvidence, platform_name: str
+) -> bool:
+    """Skip the PID-bound rows for this account's own foreground gateway.
+
+    The Sidecar API row already named the process (r.gateway_down is
+    "foreground"). A gateway started without a PID file cannot pass the
+    PID-bound identity, owner, token and home rows, and the token is never
+    sent to it, so those rows would only call it foreign. The ownership is
+    proven again now, for the listener this pass sees, before any row is
+    downgraded; if the proof no longer holds the normal rows run and fail.
+    """
+    owner = _own_foreground_gateway(cfg, platform_name=platform_name)
+    if owner is None:
+        return False
+    listener = evidence.listener(_gateway_api_port(cfg), host=_gateway_api_host(cfg))
+    if listener.status == "ok" and listener.pid != owner.pid:
+        return False
+    served = f"this account's own foreground gateway (PID {owner.pid}) serves the API port without a PID file"
+    _emit("skip", "Gateway PID identity", f"{served}; its identity is unverified (see Sidecar API)", r=r)
+    _emit("skip", "Gateway listener owner", f"{served}; ownership is proven, PID-bound checks do not apply", r=r)
+    for label in ("Gateway token drift", "Gateway home"):
+        _emit("skip", label, f"{served}; refusing to send the gateway token", r=r)
+    return True
+
+
 def _check_windows_gateway_diagnostics(
     cfg,
     r: _DoctorResult,
@@ -7033,6 +7059,8 @@ def _check_windows_gateway_diagnostics(
             _emit("skip", label, _NEEDS_RUNNING_GATEWAY, r=r)
         return True
     evidence = evidence or GatewayEvidence(platform_name=platform_name)
+    if r.gateway_down == "foreground" and _emit_windows_foreground_gateway_rows(cfg, r, evidence, platform_name):
+        return True
     pid_path = gateway_pid_path(data_dir)
     record = evidence.pid_record(pid_path)
     process = evidence.process(record.pid) if record.status == "ok" else None

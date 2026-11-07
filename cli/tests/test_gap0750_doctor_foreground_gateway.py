@@ -14,7 +14,9 @@ from unittest.mock import patch
 
 import pytest
 from defenseclaw.commands import cmd_doctor
+from defenseclaw.doctor_gateway import ListenerEvidence, PIDRecord
 
+from tests.test_cmd_doctor_windows_gateway import FakeEvidence
 from tests.test_gap0604_foreground_status import _proof
 
 UNVERIFIED = "gateway listener identity is unverified: no PID file"
@@ -170,3 +172,61 @@ def test_fix_still_refuses_another_accounts_holder(cfg, platform: str, changes: 
         status, detail = cmd_doctor._fix_gateway_service(cfg, assume_yes=True, plan_only=True)
     assert status == "fail"
     assert "held by PID 4242" in detail
+
+
+WINDOWS_ROWS = ("Gateway PID identity", "Gateway listener owner", "Gateway token drift", "Gateway home")
+
+
+def _windows_pass(cfg, r, *, proof_changes=None, listener=None, gateway_down=None):
+    """Run the Windows gateway diagnostics after the Sidecar row, as Doctor does."""
+    if gateway_down is not None:
+        r.gateway_down = gateway_down
+    stack, probe = _proof("win32", listener_pids=(4242, 4242, 4242, 4242), **(proof_changes or {}))
+    evidence = FakeEvidence(record=PIDRecord("missing"), listener=listener)
+    with stack, patch.object(cmd_doctor, "_daemon_effective_gateway_token", return_value=("dummy", "", "test")):
+        cmd_doctor._check_windows_gateway_diagnostics(cfg, r, evidence=evidence, platform_name="win32")
+    return probe
+
+
+def _windows_rows(r):
+    return {c["label"]: c for c in r.checks if c["label"] in WINDOWS_ROWS}
+
+
+def test_windows_diagnostics_do_not_fail_the_proven_foreground_gateway(cfg) -> None:
+    r = _run_sidecar(cfg, "win32", listener_pids=(4242, 4242, 4242, 4242))
+    assert r.gateway_down == "foreground"
+    probe = _windows_pass(cfg, r)
+    rows = _windows_rows(r)
+    assert set(rows) == set(WINDOWS_ROWS)
+    assert {row["status"] for row in rows.values()} == {"skip"}
+    assert all("PID 4242" in row["detail"] and "own foreground gateway" in row["detail"] for row in rows.values())
+    assert "not by this account" not in " ".join(row["detail"] for row in rows.values())
+    assert r.failed == 0
+    probe.assert_not_called()
+
+
+def test_windows_diagnostics_fail_when_the_listener_is_another_accounts_now(cfg) -> None:
+    r = _run_sidecar(cfg, "win32", listener_pids=(4242, 4242, 4242, 4242))
+    _windows_pass(cfg, r, proof_changes={"peer_sid": "S-1-5-21-2000"})
+    rows = _windows_rows(r)
+    assert rows["Gateway listener owner"]["status"] == "fail"
+    assert "not by this account's gateway" in rows["Gateway listener owner"]["detail"]
+    assert rows["Gateway PID identity"]["status"] == "fail"
+    assert rows["Gateway token drift"]["status"] == "fail"
+
+
+def test_windows_diagnostics_fail_when_the_listener_pid_changed(cfg) -> None:
+    r = _run_sidecar(cfg, "win32", listener_pids=(4242, 4242, 4242, 4242))
+    _windows_pass(cfg, r, listener=ListenerEvidence("ok", pid=9999))
+    rows = _windows_rows(r)
+    assert rows["Gateway listener owner"]["status"] == "fail"
+    assert rows["Gateway PID identity"]["status"] == "fail"
+
+
+def test_windows_diagnostics_fail_when_no_foreground_proof_was_made(cfg) -> None:
+    r = cmd_doctor._DoctorResult(quiet=True)
+    _windows_pass(cfg, r, gateway_down="foreign")
+    rows = _windows_rows(r)
+    assert rows["Gateway listener owner"]["status"] == "fail"
+    assert "not by this account's gateway" in rows["Gateway listener owner"]["detail"]
+    assert rows["Gateway PID identity"]["status"] == "fail"
