@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from defenseclaw import bootstrap, config_inspect, gateway  # noqa: E402
+from defenseclaw import bootstrap, config_inspect, gateway, gateway_path  # noqa: E402
 from defenseclaw.commands import cmd_setup, cmd_uninstall, legacy_setup_install  # noqa: E402
 
 posix_only = pytest.mark.skipif(os.name == "nt", reason="uses POSIX modes")
@@ -83,7 +83,7 @@ def test_a_repeated_candidate_is_checked_once() -> None:
 
 def test_path_gateway_prefers_the_override_then_the_own_layout_then_path() -> None:
     with (
-        patch.object(gateway, "_launcher_sibling_gateway", return_value="/own/gw"),
+        patch.object(gateway_path, "_launcher_sibling_gateway", return_value="/own/gw"),
         patch.object(gateway.shutil, "which", return_value="/path/gw"),
     ):
         with patch.dict(os.environ, {"DEFENSECLAW_GATEWAY_BIN": " /env/gw "}):
@@ -92,7 +92,7 @@ def test_path_gateway_prefers_the_override_then_the_own_layout_then_path() -> No
         with patch.dict(os.environ, {"DEFENSECLAW_GATEWAY_BIN": ""}):
             assert gateway.path_gateway() == "/own/gw"
     with (
-        patch.object(gateway, "_launcher_sibling_gateway", return_value=None),
+        patch.object(gateway_path, "_launcher_sibling_gateway", return_value=None),
         patch.object(gateway.shutil, "which", return_value="/path/gw"),
         patch.dict(os.environ, {"DEFENSECLAW_GATEWAY_BIN": ""}),
     ):

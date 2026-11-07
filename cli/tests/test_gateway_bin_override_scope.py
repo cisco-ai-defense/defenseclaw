@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from defenseclaw import bootstrap, fail_mode, gateway  # noqa: E402
+from defenseclaw import bootstrap, fail_mode, gateway_path  # noqa: E402
 from defenseclaw.commands import cmd_init, cmd_uninstall, legacy_setup_install  # noqa: E402
 
 posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX layout")
@@ -34,7 +34,7 @@ def two_gateways(tmp_path: Path):
     real = _file(tmp_path / "home" / ".local" / "bin" / "defenseclaw-gateway")
     planted = _file(tmp_path / "elsewhere" / "defenseclaw-gateway")
     with (
-        patch.object(gateway, "_launcher_sibling_gateway", return_value=str(real)),
+        patch.object(gateway_path, "_launcher_sibling_gateway", return_value=str(real)),
         patch.dict(os.environ, {"DEFENSECLAW_GATEWAY_BIN": str(planted), "HOME": str(tmp_path / "home")}),
     ):
         yield real, planted
