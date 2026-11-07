@@ -72,7 +72,10 @@ import (
 // rules that name it. Whatever the number of shares the call asked before,
 // a body the budget kept unread is never taken as a body that wrote nothing
 // (rel-1-0-6:GAP-0482 reviews 7 and 8). A share that is merely slower than
-// its own wait is the owner-accepted bound and is not recorded.
+// its own wait is the owner-accepted bound and is not recorded. A script
+// whose path passes more links than the walk follows (networkLinkHopLimit)
+// is recorded the same way: the walk could not show that no share on the
+// way is left unasked, so the body was not read (rel-1-0-9:GAP-0621).
 
 // errNetworkShareUnanswered is the error of a read below a network share
 // that has not answered. It is not fs.ErrNotExist: the path may exist.
@@ -130,9 +133,10 @@ type hookCall struct {
 	// (networkShareCallShares answer waits and tail at its start); tail is
 	// the part of it that the shares after the full waits share.
 	waitLeft, tail time.Duration
-	// bodyUnread is set when the budget cut short a read of a script body
+	// bodyUnread is set when the budget cut short a read of a script body,
+	// bodyLinks when the link bound stopped the walk to it
 	// (ShareBodyUnread).
-	bodyUnread bool
+	bodyUnread, bodyLinks bool
 }
 
 // shareWait is how long the call may wait for the next share: a full answer
@@ -202,6 +206,21 @@ func networkPathUnanswered(path string) bool {
 	return unanswered
 }
 
+// shareReadCut is why a read of a path that did not answer is not final.
+type shareReadCut uint8
+
+const (
+	// shareReadFinal: the share itself did not answer within its own wait
+	// (the owner-accepted bound), or the path answered.
+	shareReadFinal shareReadCut = iota
+	// shareReadBudgetCut: the call budget ended the wait for a share that
+	// might have answered had the call had more budget.
+	shareReadBudgetCut
+	// shareReadLinkBound: the link bound stopped the walk before it could
+	// tell whether a further link leads into a share.
+	shareReadLinkBound
+)
+
 // linkUnanswered is networkPathUnanswered for a read that opens no link at
 // the end of the path (lstat, readlink, a directory walk).
 func linkUnanswered(path string) bool {
@@ -211,8 +230,9 @@ func linkUnanswered(path string) bool {
 
 // networkPathRead is networkPathUnanswered that also reports whether the
 // call budget, not the own wait of the share, ended the wait for a share
-// that did not answer: it might have answered had the call had more budget.
-func networkPathRead(path string) (unanswered, budgetCut bool) {
+// that did not answer (it might have answered had the call had more
+// budget), or the link bound stopped the walk to the path.
+func networkPathRead(path string) (unanswered bool, cut shareReadCut) {
 	return networkPathReadAs(path, true)
 }
 
@@ -227,25 +247,28 @@ func networkPathRead(path string) (unanswered, budgetCut bool) {
 // reported as unanswered, never as a completed check; a chain of links that
 // comes back to a path it has asked is a loop, which the system fails, and
 // every share on it has been asked.
-func networkPathReadAs(path string, followLast bool) (unanswered, budgetCut bool) {
+func networkPathReadAs(path string, followLast bool) (unanswered bool, cut shareReadCut) {
 	if path != "" && os.IsPathSeparator(path[len(path)-1]) {
 		followLast = true
 	}
 	var seen map[string]bool
 	for range networkLinkHopLimit + 1 {
 		if root := networkShareRootOf(path); root != "" {
-			if silent, cut := askNetworkShare(root); silent {
-				return true, cut
+			if silent, budgetCut := askNetworkShare(root); silent {
+				if budgetCut {
+					return true, shareReadBudgetCut
+				}
+				return true, shareReadFinal
 			}
 		}
 		next, exhausted := linkIntoShare(path, followLast)
 		switch {
 		case exhausted:
-			return true, false
+			return true, shareReadLinkBound
 		case next == "":
-			return false, false
+			return false, shareReadFinal
 		case seen[next]:
-			return false, false
+			return false, shareReadFinal
 		}
 		if seen == nil {
 			seen = make(map[string]bool)
@@ -253,7 +276,7 @@ func networkPathReadAs(path string, followLast bool) (unanswered, budgetCut bool
 		seen[next] = true
 		path = next
 	}
-	return true, false
+	return true, shareReadLinkBound
 }
 
 // askNetworkShare asks the share root once for every call that names it and
@@ -358,7 +381,19 @@ func OverrideNetworkSharesForTest(rootOf func(path string) string, ask func(root
 // one it cannot evaluate, the others with an alert.
 func ShareBodyUnread() bool {
 	call := currentHookCall()
-	return call != nil && call.bodyUnread
+	return call != nil && (call.bodyUnread || call.bodyLinks)
+}
+
+// ShareBodyUnreadCauses tells why ShareBodyUnread is set: the call budget
+// kept the share from being asked, or the path to the script passes more
+// links than the walk follows, so a share on it may not have been asked
+// (rel-1-0-9:GAP-0621). Both can hold in one call.
+func ShareBodyUnreadCauses() (budget, linkBound bool) {
+	call := currentHookCall()
+	if call == nil {
+		return false, false
+	}
+	return call.bodyUnread, call.bodyLinks
 }
 
 // evictNetworkShareProbesLocked drops the finished probes and reports
@@ -415,9 +450,14 @@ func pathOpen(name string) (*os.File, error) {
 // pathOpenRoot is os.OpenRoot with the root read as pathOpen reads it.
 // A read through the root stays below the root, so on the same share.
 func pathOpenRoot(name string) (*os.Root, error) {
-	if unanswered, budgetCut := networkPathRead(name); unanswered {
-		if call := currentHookCall(); call != nil && budgetCut {
-			call.bodyUnread = true
+	if unanswered, cut := networkPathRead(name); unanswered {
+		if call := currentHookCall(); call != nil {
+			switch cut {
+			case shareReadBudgetCut:
+				call.bodyUnread = true
+			case shareReadLinkBound:
+				call.bodyLinks = true
+			}
 		}
 		return nil, networkShareError("openroot", name)
 	}

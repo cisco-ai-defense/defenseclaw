@@ -302,8 +302,8 @@ func dispatchTrustedAction(
 	// judges the call as one past the evaluation limit, the others alert
 	// (shareBodyUnreadFindings, rel-1-0-6:GAP-0482).
 	defer func() {
-		if hookpaths.ShareBodyUnread() {
-			findings = shareBodyUnreadFindings(parent, findings, request.EnforcementCapable)
+		if budget, linkBound := hookpaths.ShareBodyUnreadCauses(); budget || linkBound {
+			findings = shareBodyUnreadFindings(parent, findings, request.EnforcementCapable, budget, linkBound)
 		}
 	}()
 	if _, ok := managedHookPeerFromContext(parent); ok {
