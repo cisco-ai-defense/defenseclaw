@@ -49,6 +49,7 @@ func TestLateLockPeerHelper(t *testing.T) {
 // the read deferred to the proof (c68e763cc9) the exited holder was no
 // longer named and the restart went unproven.
 func TestRestartProofNamesThePeerReadAtConnect(t *testing.T) {
+	unhurriedRestartProof(t)
 	reservation, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

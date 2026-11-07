@@ -25,7 +25,15 @@ import (
 
 // perUserFreshGatewayWindow covers the short interval after a gateway start
 // when its listener has returned but the first hook answer is still pending.
-const perUserFreshGatewayWindow = 12 * time.Second
+//
+// It is a variable only so a test that waits on real processes can keep
+// the whole of its sequence inside the window on a loaded host.
+var perUserFreshGatewayWindow = 12 * time.Second
+
+// freshOwnerCaptureWait bounds the background read of the sole holder of a
+// verified connection (perUserCaptureFreshGatewayOwner); a read past it
+// leaves the owner unknown and the call closed.
+var freshOwnerCaptureWait = time.Second
 
 // PerUserGatewayFreshStartNoAnswer recognizes a no-status call sent to a
 // recently started gateway recorded for this account. The connected peer,
@@ -146,8 +154,10 @@ func perUserCaptureFreshGatewayOwner(check *perUserPeerCheck) {
 	if !okc || !oks {
 		return
 	}
+	// Read now: the goroutine may outlive the call.
+	wait := freshOwnerCaptureWait
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), wait)
 		defer cancel()
 		pid, ok := perUserConnectedPeerPIDWithin(ctx, client, server)
 		if !ok {
