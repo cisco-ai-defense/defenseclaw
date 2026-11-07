@@ -2271,7 +2271,9 @@ func (w *activeStateWalk) directory(path, relative string, depth int) {
 		w.partial = true
 	}
 	for _, entry := range entries {
-		child, name := filepath.Join(path, entry.Name()), relative+"/"+entry.Name()
+		// path is clean and a listed name holds no separator, so joining by
+		// hand reads the same path as filepath.Join without cleaning it.
+		child, name := path+string(filepath.Separator)+entry.Name(), relative+"/"+entry.Name()
 		if entry.IsDir() {
 			if w.enter() {
 				w.directory(child, name, depth+1)

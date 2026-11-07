@@ -1395,7 +1395,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		// are read again, so the reading is the last step before the answer.
 		_ = resp.Body.Close()
 	}
-	patchWatch := hookpaths.NewPatchTargetWatch(opts.requestFacts.evidence())
+	patchWatch := opts.requestFacts.watch()
 	if patchWatch.Changed() {
 		// The gateway judged the patch targets the hook read before the
 		// request; one leads elsewhere now. Behind ProtectHome only this hook
@@ -1753,6 +1753,9 @@ func sendHookRequest(
 type hookRequestFacts struct {
 	once   sync.Once
 	header http.Header
+	// patchWatch reads the patch targets the evidence attests again, nil when
+	// it attests none.
+	patchWatch *hookpaths.PatchTargetWatch
 }
 
 // set adds the call's facts to header; a nil hookRequestFacts computes them
@@ -1764,29 +1767,33 @@ func (f *hookRequestFacts) set(header http.Header, opts Options, payload []byte)
 	}
 	f.once.Do(func() {
 		f.header = make(http.Header)
-		setHookRequestFacts(f.header, opts, payload)
+		f.patchWatch = setHookRequestFacts(f.header, opts, payload)
 	})
 	for name, values := range f.header {
 		header[name] = slices.Clone(values)
 	}
 }
 
-// evidence is the write evidence the call sent the gateway, empty when none.
-func (f *hookRequestFacts) evidence() string {
+// watch is the watch of the patch targets the write evidence the call sent
+// the gateway attests, nil when it attests none.
+func (f *hookRequestFacts) watch() *hookpaths.PatchTargetWatch {
 	if f == nil {
-		return ""
+		return nil
 	}
-	return f.header.Get(hookpaths.Header)
+	return f.patchWatch
 }
 
-func setHookRequestFacts(header http.Header, opts Options, payload []byte) {
+// setHookRequestFacts sets the facts of the call on header and returns the
+// watch of the patch targets its write evidence attests.
+func setHookRequestFacts(header http.Header, opts Options, payload []byte) (patchWatch *hookpaths.PatchTargetWatch) {
 	startupEvent := hookpaths.IsSessionStartEvent(opts.Event)
 	if opts.ManagedEnterprise && !opts.SecureClient &&
 		(runtime.GOOS != "windows" || startupEvent) {
 		// The surface and bound event are the ones this call sends the
 		// gateway (HookDialectHeader, X-DefenseClaw-Copilot-Event), so the
 		// evidence reads the body in the dialect the gateway judges.
-		if resolved := hookpaths.ResolveConnector(opts.Connector, hookDialect(opts), opts.Event, payload); resolved != "" {
+		var resolved string
+		if resolved, patchWatch = hookpaths.ResolveConnectorWatch(opts.Connector, hookDialect(opts), opts.Event, payload); resolved != "" {
 			header.Set(hookpaths.Header, resolved)
 		}
 	}
@@ -1796,6 +1803,7 @@ func setHookRequestFacts(header http.Header, opts Options, payload []byte) {
 			header.Set(assetfacts.Header, value)
 		}
 	}
+	return patchWatch
 }
 
 // setUserIdentityHeaders reports which end user this hook is running as.

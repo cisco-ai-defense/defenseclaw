@@ -923,6 +923,22 @@ func hookShellDialect(connector, tool string) actionfacts.Dialect {
 // so the map lists that call's targets and the limit alone does not make it
 // incomplete. Any other reason still does.
 func ResolveConnector(connector, surface, event string, payload []byte) string {
+	return resolveConnector(connector, surface, event, payload, nil)
+}
+
+// ResolveConnectorWatch is ResolveConnector and also returns the watch of
+// the patch targets the evidence attests complete, nil when it attests none.
+// The hook reads those targets again with it after the gateway has answered,
+// without decoding the evidence it sent.
+func ResolveConnectorWatch(connector, surface, event string, payload []byte) (string, *PatchTargetWatch) {
+	var watch *PatchTargetWatch
+	evidence := resolveConnector(connector, surface, event, payload, &watch)
+	return evidence, watch
+}
+
+// resolveConnector is ResolveConnector; a non-nil watch receives the watch of
+// the evidence it returns.
+func resolveConnector(connector, surface, event string, payload []byte, watch **PatchTargetWatch) string {
 	defer HookCall()()
 	if len(payload) > MaxPayloadBytes {
 		return incompleteEvidence("")
@@ -1092,10 +1108,14 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	// A V4A target that reaches a protected key file is the client's positive
 	// protected-target decision, which a gateway behind ProtectHome keeps.
 	hermesV4AProtected := false
+	protected := newProtectedFiles(home)
 	if hermesV4AKnown {
-		protected := newProtectedFiles(home).keysOnlyWith(home, nil)
+		// The files that are no key file are dropped only for a target that
+		// reaches a protected file at all, so an ordinary target reads none
+		// of them.
 		for _, target := range hermesV4ATargets {
-			if protectedReachPath(target, protected, filepath.Join(home, ".ssh")) {
+			if protectedReachPath(target, protected, filepath.Join(home, ".ssh")) &&
+				protectedReachPath(target, protected.keysOnlyWith(home, nil), filepath.Join(home, ".ssh")) {
 				hermesV4AProtected = true
 				break
 			}
@@ -1144,6 +1164,10 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	var identities, fileIdentities []string
 	writeIdentities := make(map[string]string)
 	instructions := NewInstructionFiles(cwd, home, nil)
+	// One reading of each instruction directory and file serves the target
+	// identities below and the sighting of the reached directories.
+	reads := &scanReads{}
+	instructions.reads = reads
 	noteIdentity := func(resolved string) {
 		// Every instruction name of the target's file (GAP-1127).
 		named := instructions.Identities(resolved)
@@ -1391,7 +1415,6 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	targets := map[string]string{CWDKey: cwd}
 	// The fixed part counts the truncation marker, so setting it never
 	// exceeds the budget.
-	protected := newProtectedFiles(home)
 	size := 2 + len(jsonString(CWDKey)) + 1 + len(jsonString(cwd)) + 1 + len(jsonString(TruncatedKey)) + 1 + 3 +
 		len(jsonString(BudgetKey)) + 1 + 3 + 1
 	// overBudget is set when an operand or fact is left out only because the
@@ -1784,7 +1807,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		}
 	}
 	for _, directories := range [][]string{append(slices.Clone(reached), InstructionDirectories(cwd, home)...), reached} {
-		value := reachedEvidence(directories)
+		value := reads.reachedEvidence(directories)
 		if value == "" {
 			continue
 		}
@@ -1804,6 +1827,9 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	encoded, err := json.Marshal(targets)
 	if err != nil || len(encoded) > maxEncodedTargets {
 		return incompleteEvidence(cwd)
+	}
+	if watch != nil {
+		*watch = patchTargetWatchOf(targets, home)
 	}
 	return base64.RawURLEncoding.EncodeToString(encoded)
 }
@@ -1970,22 +1996,26 @@ func sameAliasValue(a, b json.RawMessage) bool {
 // once the answer is written. It is nil for evidence that does not attest a
 // complete patch, and a nil watch never reports a change.
 type PatchTargetWatch struct {
-	targets   map[string]string
-	home      string
-	protected protectedFiles
+	targets map[string]string
+	home    string
+	// protected is read at the first Changed, which is after the gateway
+	// answered, so it is never older than that answer.
+	protectedOnce sync.Once
+	protected     protectedFiles
 }
 
-// NewPatchTargetWatch returns the watch of evidence, or nil when it does not
-// attest a complete patch.
-func NewPatchTargetWatch(evidence string) *PatchTargetWatch {
-	targets, ok := Decode(evidence)
-	if !ok || targets[PatchCompleteKey] != "1" {
+// patchTargetWatchOf returns the watch of the final evidence map targets, or
+// nil when it does not attest a complete patch. Only the targets it lists as
+// absolute paths are kept.
+func patchTargetWatchOf(targets map[string]string, home string) *PatchTargetWatch {
+	if targets[PatchCompleteKey] != "1" {
 		return nil
 	}
-	home, _ := os.UserHomeDir()
-	watch := &PatchTargetWatch{targets: targets, home: home}
-	if home != "" {
-		watch.protected = newProtectedFiles(home)
+	watch := &PatchTargetWatch{targets: make(map[string]string, len(targets)), home: home}
+	for path, attested := range targets {
+		if filepath.IsAbs(path) {
+			watch.targets[path] = attested
+		}
 	}
 	return watch
 }
@@ -2000,14 +2030,9 @@ func (w *PatchTargetWatch) Changed() bool {
 	if w == nil {
 		return false
 	}
-	if w.home == "" {
-		return true
-	}
+	w.protectedOnce.Do(func() { w.protected = newProtectedFiles(w.home) })
 	links := shellLinks{known: true}
 	for path, attested := range w.targets {
-		if !filepath.IsAbs(path) {
-			continue
-		}
 		resolved, ok := links.resolve(path, w.protected)
 		if !ok || resolved != attested || w.protected.has(resolved) {
 			return true
