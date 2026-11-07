@@ -98,39 +98,6 @@ func launcherActive() bool {
 	return managedHost
 }
 
-// launcherOffers reports whether the launcher runs args at all. The bare
-// command and the help and version requests show the launcher's own text.
-func launcherOffers(args []string) bool {
-	if len(args) == 0 {
-		return true
-	}
-	switch args[0] {
-	case "sandbox", "-h", "--help", "--version":
-		return true
-	case "status":
-		// The user's own protection state (cowork-1-0-8 GAP-0053).
-		return true
-	case "guardrail":
-		// The user's own guardrail profile (GAP-0431, GAP-0422), and nothing
-		// else of the guardrail tree.
-		return len(args) >= 3 && args[1] == "profile" && args[2] == "explain"
-	case "help":
-		// `help` explains the sandbox tree; cobra would answer `help status`
-		// with the root help, as if status existed. `help --help` is the
-		// help command's own usage: the root help lists `help`, so asking
-		// about it must answer (GAP-0471).
-		if len(args) == 1 {
-			return true
-		}
-		switch args[1] {
-		case "sandbox", "status", "-h", "--help":
-			return true
-		}
-		return false
-	}
-	return false
-}
-
 // prepareLauncherRoot cuts root down to the sandbox tree: the other commands
 // are removed, the gateway's daemon bootstrap and the sidecar run are
 // replaced by the launcher's help, and the help describes the launcher.

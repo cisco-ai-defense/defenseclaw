@@ -671,7 +671,7 @@ The policy commands read the managed config, which only administrators can read.
 
 #### This computer is managed (`defenseclaw` exits 2)
 
-You see this on Linux: "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. For administrator views, run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status`, `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify`, or `sudo /opt/defenseclaw/bin/defenseclaw-gateway audit export --since 2h`. The managed launcher does not offer doctor, alerts, or tui." On macOS it names `/opt/cisco/defenseclaw/bin/defenseclaw-gateway` and `enterprise macos` instead of the Linux path and `enterprise linux`. The command exits `2`. On a managed Linux or macOS computer the packaged `defenseclaw` runs only `defenseclaw sandbox` commands and `defenseclaw status` (your own protection state); everything else belongs to the administrator.
+You see this on Linux: "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. For administrator views, run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status`, `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify`, or `sudo /opt/defenseclaw/bin/defenseclaw-gateway audit export --since 2h`. The managed launcher does not offer doctor, alerts, or tui." On macOS it names `/opt/cisco/defenseclaw/bin/defenseclaw-gateway` and `enterprise macos` instead of the Linux path and `enterprise linux`. The command exits `2`. On a managed Linux or macOS computer the packaged `defenseclaw` runs only the commands in [Managed command availability](/docs/enterprise/managed-commands); everything else belongs to the administrator.
 
 **Fix.** Use `defenseclaw status` to see whether your Claude Code and Cowork are protected, and `defenseclaw sandbox ...` for sandboxes. An administrator runs `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status` on macOS) as root. Policy changes go in the admin config. On a managed Windows computer a standard account's `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' status` shows the same own state.
 
@@ -679,7 +679,7 @@ You see this on Linux: "This computer is managed; use `defenseclaw status` for y
 
 #### A command exits `3` with `This device is managed`
 
-This is a per-user CLI left from an earlier install. It covers `config set`, `config unset`, `skill`, `mcp`, `plugin` and `tool block`, `allow`, `unblock`. The gateway answers `403` `managed_device` on `/enforce/block` and `/enforce/allow`. The host is a managed standalone deployment: its policy comes from the admin config only, so every local writer refuses, even for root. On Linux and macOS each attempt is audited as `outcome=refused reason=managed_device`. On managed Windows `defenseclaw.exe` exits `3` and writes no audit row, so check the exit code there.
+This is a per-user CLI left from an earlier install. It covers `config set`, `config unset`, `skill`, `mcp`, `plugin` and `tool block`, `allow`, `unblock`. The gateway answers `403` `managed_device` on `/enforce/block` and `/enforce/allow`. The host is a managed standalone deployment: its policy comes from the admin config only, so every local writer refuses, even for root. On Linux and macOS each attempt is audited as `outcome=refused reason=managed_device`. On managed Windows `defenseclaw.exe` exits `3` and writes no audit row, so check the exit code there. [Managed command availability](/docs/enterprise/managed-commands) lists which commands a managed computer refuses.
 
 **Fix.** Make the change in the admin config: `asset_policy` for block and allow lists, `guardrail.block_at` for thresholds. See [Policy changes on a managed host](/docs/enterprise#policy-changes-on-a-managed-host).
 
@@ -691,7 +691,7 @@ The registry marks it `ignore` on a managed standalone host, so the value is rea
 
 **Fix.** Set the equivalent key in the admin config. See [Policy changes on a managed host](/docs/enterprise#policy-changes-on-a-managed-host).
 
-**Check.** On managed Linux and macOS, `doctor` is unavailable: the packaged launcher runs only sandbox commands. As root, run the installed gateway's `enterprise linux status --json` or `enterprise macos status --json` and check that `policy.applied` is `true`. The `Ignored environment overrides` row belongs to the per-user Python CLI.
+**Check.** On managed Linux and macOS, `doctor` is refused by the packaged launcher ([Managed command availability](/docs/enterprise/managed-commands)). As root, run the installed gateway's `enterprise linux status --json` or `enterprise macos status --json` and check that `policy.applied` is `true`. The `Ignored environment overrides` row belongs to the per-user Python CLI.
 
 #### AI Defense is not used
 
