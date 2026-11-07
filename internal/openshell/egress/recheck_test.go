@@ -273,6 +273,15 @@ func TestRecheckEndsInFlightForwardedRequests(t *testing.T) {
 			if r := <-streamed; r.err == nil || r.body != "first chunk" {
 				t.Errorf("streamed response = %d %q, %v; want it cut after the first chunk", r.status, r.body, r.err)
 			}
+			if tc.category != "" {
+				blocked := h.sink.wait(t, EventBlocked, 2)
+				allowed := h.sink.ofKind(EventAllowed)
+				if len(allowed) != 1 || len(blocked) != 2 || blocked[0].TunnelID == "" ||
+					blocked[1].TunnelID == "" || blocked[0].TunnelID == blocked[1].TunnelID ||
+					(blocked[0].TunnelID == allowed[0].TunnelID) == (blocked[1].TunnelID == allowed[0].TunnelID) {
+					t.Errorf("forwarded recheck event order: allowed=%+v blocked=%+v", allowed, blocked)
+				}
+			}
 			eventually(t, "both requests to finish", func() bool { return h.proxy.activeTunnels() == 0 })
 			if e := h.sink.wait(t, EventClosed, 1)[0]; !e.Terminated {
 				t.Errorf("closed event of the streamed response = %+v, want terminated", e)

@@ -844,8 +844,8 @@ func (e *Env) lifecycleCommand(action string) string {
 	return e.gatewayCommand("enterprise " + group + " " + action)
 }
 
-// gatewayCommand is the installed gateway, by its absolute path, with args: the
-// packages put the gateway on no PATH, and sudo's secure_path does not include
+// gatewayCommand is the installed gateway, by its absolute path, with args:
+// it is not on the PATH, and sudo's secure_path does not include
 // the install directory, so a bare defenseclaw-gateway is "command not found".
 func (e *Env) gatewayCommand(args string) string {
 	return filepath.Join(e.Layout.BinDir, binGateway) + " " + args

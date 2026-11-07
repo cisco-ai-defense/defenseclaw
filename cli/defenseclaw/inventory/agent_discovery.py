@@ -67,6 +67,7 @@ from defenseclaw.connector_paths import (
 from defenseclaw.file_permissions import (
     atomic_write_private_bytes,
     open_regular_file_no_follow,
+    other_accounts_can_write,
     reject_reparse_path,
 )
 from defenseclaw.inventory.claude_desktop import EngineBuild, claude_desktop_engines
@@ -2270,7 +2271,7 @@ def _windows_acl_chain_is_safe(resolved: str, prefix: str) -> bool:
     return False
 
 
-def _trusted_prefix_dir_mode_error(st: os.stat_result) -> str | None:
+def _trusted_prefix_dir_mode_error(path: str, st: os.stat_result) -> str | None:
     """Return a human-readable refusal when a directory mode is unsafe to trust.
 
     Mirrors the parent-directory permission checks in ``_is_trusted_binary_path``
@@ -2286,7 +2287,7 @@ def _trusted_prefix_dir_mode_error(st: os.stat_result) -> str | None:
                 grp_name = _grp.getgrgid(st.st_gid).gr_name
             except (KeyError, OSError):
                 grp_name = ""
-        if grp_name not in ("root", "wheel", "admin"):
+        if grp_name not in ("root", "wheel", "admin") and other_accounts_can_write(path, st):
             return "directory is group-writable"
     return None
 
@@ -2329,7 +2330,7 @@ def validate_trusted_prefix(path: str) -> tuple[str, str | None]:
         return resolved, f"cannot stat path ({exc})"
     if not os.path.isdir(resolved):
         return resolved, "path is not a directory"
-    mode_err = _windows_acl_write_error(resolved) if os.name == "nt" else _trusted_prefix_dir_mode_error(st)
+    mode_err = _windows_acl_write_error(resolved) if os.name == "nt" else _trusted_prefix_dir_mode_error(resolved, st)
     if mode_err:
         return resolved, mode_err
     return resolved, None
@@ -2368,22 +2369,8 @@ def _is_trusted_binary_path(
             parent_st = os.stat(parent)
         except OSError:
             return False
-        # World-writable parent → an attacker who can write to that dir
-        # could swap the binary at any time. Treat as untrusted.
-        if parent_st.st_mode & 0o002:
+        if _trusted_prefix_dir_mode_error(parent, parent_st) is not None:
             return False
-        # also reject group-writable parents unless the
-        # group is the system root group. A non-root user that shares a
-        # group with the parent dir can swap the binary.
-        if parent_st.st_mode & 0o020:
-            grp_name = ""
-            if _grp is not None:
-                try:
-                    grp_name = _grp.getgrgid(parent_st.st_gid).gr_name
-                except (KeyError, OSError):
-                    grp_name = ""
-            if grp_name not in ("root", "wheel", "admin"):
-                return False
         # refuse a binary whose own file is writable by
         # anyone other than the trusted system owner. The user-writable
         # ~/.local/bin/* case is the canonical exploit path; even if an

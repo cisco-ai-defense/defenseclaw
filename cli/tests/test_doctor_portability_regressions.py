@@ -853,6 +853,31 @@ def test_doctor_names_sudo_runtime_leftovers(monkeypatch, tmp_path) -> None:
     assert check["reason_code"] == "sudo-runtime-leftovers"
 
 
+def _recovery_chain(remediation: str) -> str:
+    """The copy-and-paste command that ends a root-gateway remedy."""
+    for marker in ("Without the app, run: ", "start it as yourself with: "):
+        if marker in remediation:
+            return remediation.split(marker, 1)[1]
+    raise AssertionError(f"no recovery command in {remediation!r}")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX per-user gateway account")
+@pytest.mark.parametrize("platform_name", ["linux", "darwin", "win32"])
+def test_root_gateway_remedy_is_written_for_the_running_os(monkeypatch, tmp_path, platform_name) -> None:
+    """GAP-0706: macOS advice is for macOS only, and no remedy ends in a doubled period."""
+    monkeypatch.setattr(cmd_doctor, "sys", SimpleNamespace(platform=platform_name))
+    monkeypatch.setattr(gateway_module, "resolve_gateway_binary", lambda: "")
+    remedy = cmd_doctor._root_gateway_remedy(SimpleNamespace(data_dir=os.fspath(tmp_path), deployment_mode=""))
+
+    assert ("DefenseClawMac" in remedy) == (platform_name == "darwin")
+    assert ("Start Gateway" in remedy) == (platform_name == "darwin")
+    assert "macOS" not in remedy
+    assert ("sudo env DEFENSECLAW_HOME=" in remedy) == (platform_name != "win32")
+    assert ("sudo chown -R" in remedy) == (platform_name != "win32")
+    assert not remedy.endswith(".") and ".." not in remedy
+    assert (cmd_doctor.ROOT_GATEWAY_REASON + " " + remedy + ".").count("..") == 0
+
+
 def _gateway_account_fixture(monkeypatch, tmp_path, *, process_uid, deployment_mode=""):
     code = "root_gateway" if process_uid == 0 and deployment_mode != "managed_enterprise" else "trusted"
     monkeypatch.setattr(
@@ -877,8 +902,10 @@ def test_doctor_warns_when_per_user_gateway_runs_as_root(monkeypatch, tmp_path) 
     assert check["label"] == "Gateway account"
     assert "running as root" in check["detail"]
     assert check["reason_code"] == "per-user-gateway-runs-as-root"
-    assert "DefenseClawMac" in check["remediation"]
+    assert ("DefenseClawMac" in check["remediation"]) == (sys.platform == "darwin")
     assert "sudo env DEFENSECLAW_HOME=" in check["remediation"]
+    assert not check["remediation"].endswith(".")
+    assert ".." not in check["remediation"]
 
 
 @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX per-user gateway account")
@@ -894,7 +921,7 @@ def test_doctor_gateway_account_hint_quotes_the_home(monkeypatch, tmp_path) -> N
 
     remediation = result.checks[-1]["remediation"]
     assert shlex.quote(os.fspath(home)) in remediation
-    tokens = shlex.split(remediation.split("Otherwise: ", 1)[1])
+    tokens = shlex.split(_recovery_chain(remediation))
     assert tokens[:5] == ["sudo", "env", f"DEFENSECLAW_HOME={home}", os.fspath(binary), "stop"]
     assert tokens[10] == os.fspath(home)
 
@@ -966,9 +993,11 @@ def test_doctor_custom_store_root_gateway_uses_pid_record_home(
             ("Gateway account", "warn")
         ]
         remediation = result.checks[0]["remediation"]
-        assert ["sudo", "env", f"DEFENSECLAW_HOME={home}", os.fspath(binary), "stop"] == (
-            shlex.split(remediation.split("Otherwise: ", 1)[1])[:5]
-        )
+        tokens = shlex.split(_recovery_chain(remediation))
+        assert ["sudo", "env", f"DEFENSECLAW_HOME={home}", os.fspath(binary), "stop"] == tokens[:5]
+        # The root run left files in the install home and in the moved store.
+        assert tokens[9:12] == ["$(id -un)", os.fspath(home), os.fspath(store)]
+        assert tokens[-3:] == ["&&", "defenseclaw-gateway", "start"]
         assert f"DEFENSECLAW_HOME={store}" not in remediation
 
     foreign = PIDRecord(

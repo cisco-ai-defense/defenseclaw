@@ -857,10 +857,10 @@ You are an AI agent working for an administrator, on an admin workstation or a t
 2. Check the candidate file before anything is installed.
 
    ```bash
-   /opt/defenseclaw/bin/defenseclaw-gateway config validate ./config.yaml
+   "$PAYLOAD/defenseclaw-gateway" config validate ./config.yaml
    ```
 
-   Expected: no error, and the previous config stays in force either way. The CLI is not installed on a managed host, and the gateway is on no `PATH`: run the gateway by its full path (`/opt/defenseclaw/bin/defenseclaw-gateway` on Linux, `/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS), or the `defenseclaw-gateway` of the unpacked release archive.
+   Expected: no error, and the previous config stays in force either way. `$PAYLOAD` is the folder of the unpacked release archive. On a host that already has the package, run the installed gateway instead: `/opt/defenseclaw/bin/defenseclaw-gateway` on Linux, `/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS. It is not on the `PATH`.
    If it prints an error: report the setting it names and the profile; do not guess a value (`config_invalid` in [Enterprise troubleshooting](/docs/enterprise/troubleshooting)).
 
 3. Show the administrator the config and the artifact name and SHA-256 you will use. Ask: "Run ensure on this host?" Continue only on yes.

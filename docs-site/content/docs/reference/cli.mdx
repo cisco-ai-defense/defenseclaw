@@ -51,7 +51,7 @@ DefenseClaw ships three binaries. Each row below is on the Python CLI unless it 
 | Configuration | `config get|set|unset` | [Configuration](#configuration) |
 | Upgrade and uninstall | `upgrade`, `uninstall` | [Upgrade](#upgrade), [Uninstall](#uninstall--disable) |
 | Sandboxes | `sandbox ...` | [Sandbox](#sandbox) |
-| Enterprise lifecycle | `defenseclaw-gateway enterprise ...` | [Enterprise](#enterprise) |
+| Enterprise lifecycle | `enterprise ...`, run by the gateway's full path | [Enterprise](#enterprise) |
 
 `config.yaml` holds every setting you choose. Every command that changes one (`config set`, `guardrail ...`, `skill|mcp|plugin|tool block|allow`, `policy activate`, the `setup` commands, the TUI) goes through the same config writer, which checks the change before it writes. A running gateway applies a valid change itself and shows a new policy generation in `defenseclaw status`; only the [restart-required keys](#restart-required-keys) need `defenseclaw-gateway restart`. Files derived from `config.yaml`, such as `custom-providers.json` and the generated hook scripts, are rewritten for you. See [Source of truth](/docs/reference/source-of-truth).
 
@@ -1306,8 +1306,9 @@ see also [Sandbox](/docs/sandboxes/first-session).
 ## Enterprise
 
 Commands for administrator-owned [enterprise deployments](/docs/enterprise).
-They are on the Go binary. Run them as root on Linux and macOS, and from an
-elevated prompt on Windows.
+They are on the Go binary, which is not on the `PATH`: run it by its full path
+from the table below, as root on Linux and macOS and from an elevated prompt on
+Windows.
 
 | OS | Binary |
 | --- | --- |
@@ -1318,8 +1319,7 @@ elevated prompt on Windows.
 ### Standalone lifecycle on Linux and macOS
 
 `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux <action>` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos <action>` on macOS) manages the standalone
-deployment. Run `linux` on Linux and `macos` on macOS; the other one exits `2`. The packages put
-`defenseclaw-gateway` on no `PATH`: in this section, run it by those full paths.
+deployment. Run `linux` on Linux and `macos` on macOS; the other one exits `2`.
 Every mutating action is a transaction that rolls back on failure. See
 [Upgrade, repair and remove](/docs/enterprise/lifecycle).
 
@@ -1526,7 +1526,7 @@ Install first, then store the key. See [AI Defense key](/docs/enterprise/ai-defe
 
 ### Re-read directory facts (`enterprise identity refresh`)
 
-`/opt/defenseclaw/bin/defenseclaw-gateway enterprise identity refresh [--user U] [--flush-os-cache] [--max-users N] [--json]` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS; the installed `defenseclaw.exe` on Windows) re-reads groups and UPN now, for one account or for every account the managed gateway has cached (default at most 500), and lists the accounts whose guardrail profile changed. Hook calls use the new facts from their next call. Root, or an elevated prompt or SYSTEM on Windows; anyone else gets `not_admin`. Standalone managed deployments only.
+`/opt/defenseclaw/bin/defenseclaw-gateway enterprise identity refresh [--user U] [--flush-os-cache] [--max-users N] [--json]` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS; `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'` from an elevated PowerShell prompt on Windows) re-reads groups and UPN now, for one account or for every account the managed gateway has cached (default at most 500), and lists the accounts whose guardrail profile changed. Hook calls use the new facts from their next call. Root, or an elevated prompt or SYSTEM on Windows; anyone else gets `not_admin`. Standalone managed deployments only.
 
 | Flag | Effect |
 | --- | --- |

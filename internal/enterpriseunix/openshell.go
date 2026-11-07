@@ -529,6 +529,9 @@ func (l *lifecycle) planOpenShell(p *plan) error {
 		if link.Kind == "enable" {
 			op.dirs = append(op.dirs, desiredDir{Path: filepath.Dir(link.Path), Mode: 0o755, Owner: root, External: true})
 		}
+		if link.Kind == "launcher" {
+			op.dirs = append(op.dirs, env.launcherParentDirs()...)
+		}
 	}
 	op.daemonInputs = daemonInputsDigest(units, p.payload, op.digest)
 	p.files = append(p.files, op.files...)
@@ -564,8 +567,22 @@ func (e *Env) planPackagedMacOSSandbox(p *plan, op *openshellPlan) error {
 	}
 	if !e.foreignLauncher() {
 		op.links = append(op.links, desiredLink{Path: e.launcherPath(), Target: e.launcherTarget(), Kind: "launcher"})
+		p.dirs = append(p.dirs, e.launcherParentDirs()...)
 	}
 	return nil
+}
+
+// launcherParentDirs are the shared folders above the launcher, created when
+// absent and recorded so an uninstall removes them once empty, and only
+// then (GAP-0091): /usr/local and /usr/local/bin on macOS, /usr/bin on Linux.
+// One that already existed is never re-moded or removed.
+func (e *Env) launcherParentDirs() []desiredDir {
+	root := rootOwner()
+	var dirs []desiredDir
+	for dir := filepath.Dir(e.launcherPath()); dir != "/usr" && dir != "/" && dir != "."; dir = filepath.Dir(dir) {
+		dirs = append([]desiredDir{{Path: dir, Mode: 0o755, Owner: root, External: true}}, dirs...)
+	}
+	return dirs
 }
 
 // daemonInputsDigest is what a running sandbox daemon depends on.
@@ -634,7 +651,6 @@ func (l *lifecycle) applyOpenShellLinks(p *plan) error {
 			return fmt.Errorf("%s: %w", path, err)
 		}
 		l.noteChange("removed %s, which the deployment no longer uses", path)
-		_ = removeDirIfEmpty(env.P(filepath.Dir(path)))
 	}
 	if !p.openshell.settings.Enabled {
 		// What the lifecycle derived while the subsystem was on goes with it.
@@ -966,7 +982,9 @@ func (l *lifecycle) removeOpenShellFiles(record *Deployment) {
 			l.result.AddWarning(codeOpenShell, fmt.Sprintf("could not remove %s: %v", link.Path, err))
 			continue
 		}
-		_ = removeDirIfEmpty(env.P(filepath.Dir(link.Path)))
+		// The folder above the link goes with the recorded folders
+		// (CreatedDirs), never by name: /usr/local/bin or a *.wants folder
+		// that existed before stays (GAP-0091).
 	}
 	if env.GOOS == "linux" {
 		for _, u := range env.userUnits() {

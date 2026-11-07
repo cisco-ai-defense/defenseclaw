@@ -481,6 +481,8 @@ func newTestHost(t *testing.T, goos string) *testHost {
 		PollInterval:   10 * time.Millisecond,
 		// No guardian runs in the fake host.
 		GuardianReportTimeout: 50 * time.Millisecond,
+		// Nor does its enumerator publish a record (testHost.run does).
+		InstallScanTimeout: 5 * time.Millisecond,
 	}
 	if goos == "darwin" {
 		// Nor its executable: kern.procargs2 and proc_pidpath of a live PID

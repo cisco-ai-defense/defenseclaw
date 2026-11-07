@@ -273,6 +273,7 @@ def _hook_decision(hook_details: list[str], hook_event: str = "") -> str:
     (GAP-1303)."""
     from defenseclaw.hook_metrics import (  # noqa: PLC0415
         POST_TOOL_DECISION,
+        allowed_finding_hook_label,
         detection_only_hook_label,
         would_block_hook_label,
     )
@@ -292,6 +293,8 @@ def _hook_decision(hook_details: list[str], hook_event: str = "") -> str:
             # the connector's mode (GAP-1303, GAP-1531); a Hermes or Amp prompt
             # in action mode got a notice instead (GAP-0898).
             decision = would_block_hook_label(hook_event, kv.get("mode", ""))
+        elif not decision and action == "allow":
+            decision = allowed_finding_hook_label(hook_event, kv.get("mode", "")) or "allow"
         elif not decision and action:
             decision = action
     return decision

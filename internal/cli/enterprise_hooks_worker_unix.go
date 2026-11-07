@@ -219,6 +219,11 @@ type enterpriseHookWorkerTarget struct {
 	Mode                string                      `json:"mode"`
 	PreviouslyProtected bool                        `json:"previously_protected,omitempty"`
 	Options             enterpriseHookWorkerOptions `json:"options"`
+	// PriorCredentials are the target's credentials from the other key of
+	// the credential rotation the guardian holds
+	// (enterpriseHookPriorUserTokens). They only classify a reinstall as
+	// configuration; nothing is rendered from them.
+	PriorCredentials *enterprisehooks.HookCredentials `json:"prior_credentials,omitempty"`
 }
 
 type enterpriseHookWorkerRequest struct {
@@ -719,8 +724,9 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			result, err = enterpriseHookWorkerVerifier(ctx, opts)
 			recheck = err == nil && recheckWindow > 0
 			if err != nil {
+				policyOnly := request.Standalone && enterprisehooks.PreviousHookRuntimeIntactForConfigurationChange(ctx, opts, target.PriorCredentials)
 				result, err = enterpriseHookWorkerInstaller(ctx, opts)
-				outcome.Repaired = err == nil
+				outcome.Repaired = err == nil && !policyOnly
 			}
 		case enterpriseHookWorkerModeRemove:
 			previousHome := strings.TrimSpace(target.Options.PreviousHome)

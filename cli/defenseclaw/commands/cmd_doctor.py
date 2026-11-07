@@ -1858,24 +1858,65 @@ ROOT_GATEWAY_REASON = "Your DefenseClaw gateway is running as root."
 
 
 def _root_gateway_remedy(cfg) -> str:
-    """Name this account's data home in the privileged stop command."""
+    """The next step for a root-run gateway, in the words of this OS (GAP-0706).
+
+    Same table as ``daemon.RootGatewayListenerRemedy``. A root run leaves
+    root-owned files in the home, so the Unix remedy is one sequence that stops
+    the root gateway, returns the home and starts it as this account
+    (GAP-0711, GAP-0713). DefenseClawMac exists only on macOS. No final period:
+    callers end the sentence themselves.
+    """
+    return _root_gateway_remedy_for(sys.platform, cfg)
+
+
+def _root_gateway_remedy_for(platform_name: str, cfg) -> str:
+    if platform_name.startswith("win"):
+        return (
+            "Stop it from an administrator prompt (defenseclaw-gateway stop), "
+            "then start it as yourself (defenseclaw-gateway start)"
+        )
+    if platform_name == "darwin":
+        return (
+            "Open DefenseClawMac and choose Start Gateway: it stops the root gateway with "
+            "administrator approval, returns its files to you and starts the gateway as you. "
+            "Without the app, run: " + _root_gateway_recovery_command(cfg)
+        )
     return (
-        f"Stop it with {_root_gateway_stop_command(cfg)}, "
-        "then start it as yourself (defenseclaw-gateway start). "
-        "On macOS, use DefenseClawMac to repair root-owned gateway files."
+        "Stop it, return its files to your account and start it as yourself with: "
+        + _root_gateway_recovery_command(cfg)
     )
+
+
+def _root_gateway_recovery_command(cfg) -> str:
+    """Stop the root gateway, return the home and the store, start as this account."""
+    data_dir = _configured_gateway_data_dir(cfg)
+    homes = [_root_gateway_install_home(cfg)]
+    if data_dir and data_dir not in homes:
+        homes.append(data_dir)
+    return (
+        _root_gateway_stop_command(cfg)
+        + ' && sudo chown -R "$(id -un)" '
+        + " ".join(shlex.quote(home) for home in homes)
+        + " && defenseclaw-gateway start"
+    )
+
+
+def _root_gateway_install_home(cfg) -> str:
+    """The PID-record home that the root gateway was started for."""
+    from defenseclaw.config import default_data_path
+
+    data_dir = _configured_gateway_data_dir(cfg) or os.fspath(default_data_path())
+    try:
+        return gateway_home_for_data_dir(data_dir)
+    except (OSError, TypeError, ValueError):
+        return data_dir
 
 
 def _root_gateway_stop_command(cfg) -> str:
     """Use the PID-record home and resolve the binary before sudo resets PATH."""
-    from defenseclaw.config import default_data_path
     from defenseclaw.gateway import resolve_gateway_binary
 
-    data_dir = _configured_gateway_data_dir(cfg) or os.fspath(default_data_path())
-    try:
-        install_home = gateway_home_for_data_dir(data_dir)
-    except (OSError, TypeError, ValueError):
-        install_home = data_dir
+    install_home = _root_gateway_install_home(cfg)
     binary = resolve_gateway_binary()
     if binary and os.path.isabs(binary) and os.path.isfile(binary) and os.access(binary, os.X_OK):
         executable = shlex.quote(binary)
@@ -1933,19 +1974,7 @@ def _check_gateway_account(cfg, r: _DoctorResult) -> None:
     trust = _trusted_gateway_listener(cfg)
     if trust.code != "root_gateway" and not _root_gateway_record_without_listener(cfg, trust):
         return
-    data_dir = _configured_gateway_data_dir(cfg)
-    remediation = (
-        _root_gateway_remedy(cfg) + " "
-        "on macOS open DefenseClawMac and choose Start Gateway: it stops the root gateway with "
-        "administrator approval, returns its files to you and starts the gateway as you. "
-        "Otherwise: "
-        + _root_gateway_stop_command(cfg)
-        + " && sudo chown -R "
-        + shlex.quote(getpass.getuser())
-        + " "
-        + shlex.quote(data_dir)
-        + " && defenseclaw-gateway start"
-    )
+    remediation = _root_gateway_remedy(cfg)
     _emit(
         "warn",
         "Gateway account",
@@ -4349,17 +4378,21 @@ def _check_component_connector_compatibility(
 ) -> None:
     """Render bounded component and connector-contract evidence.
 
-    Discovery is read from the existing protected cache only.  This keeps
-    ``doctor --fix --dry-run`` read-only and prevents Doctor from executing an
-    unsupported connector binary merely to decide whether it should be
-    repaired.
+    Discovery is read from the existing protected cache only, and never
+    rescanned or written, so ``doctor --fix --dry-run`` stays read-only. The
+    one thing run is the bounded ``--version`` probe of the executable that
+    evidence names, at a trusted install path (``recheck_installed_versions``):
+    a cached or setup-recorded version can be a day or an agent update old,
+    and the row must not call it installed (GAP-0723). A probe that cannot
+    run leaves the row on the recorded version and says so.
     """
 
     from defenseclaw.doctor_health import (
         HealthStatus,
         build_health_report,
         hook_call_after_scan,
-        read_cached_discovery,
+        read_run_discovery,
+        recheck_installed_versions,
         supported_range_text,
     )
 
@@ -4384,7 +4417,8 @@ def _check_component_connector_compatibility(
         return live_activity.get(connector)
 
     try:
-        discovery = read_cached_discovery(data_dir)
+        rechecked = recheck_installed_versions(read_run_discovery(data_dir), enabled, data_dir)
+        discovery = rechecked.discovery
         report = build_health_report(
             enabled,
             discovery,
@@ -4437,8 +4471,20 @@ def _check_component_connector_compatibility(
     agents = getattr(discovery, "agents", None)
     for finding in report.connectors:
         detail = finding.summary
-        if finding.installed_version:
+        if finding.installed_version and finding.connector in rechecked.unchecked:
+            detail += (
+                f"; recorded={finding.installed_version} "
+                f"(not re-checked now: {rechecked.unchecked[finding.connector]})"
+            )
+        elif finding.installed_version:
             detail += f"; installed={finding.installed_version}"
+            if finding.connector in rechecked.changed:
+                # Only a plain semver of the recorded text reaches the row.
+                was = rechecked.changed[finding.connector]
+                detail += (
+                    f" (recorded as {was} before the agent updated)" if was else " (it changed since it was recorded)"
+                )
+        if finding.installed_version:
             signal = agents.get(finding.connector) if isinstance(agents, dict) else None
             if getattr(signal, "source", "") == "claude-desktop":
                 # GAP-0036: the version is the one of Claude Desktop's engine.
@@ -11865,7 +11911,7 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
             lock_drift,
         )
 
-    configured_mode = str(fail_mode.get("configured") or "")
+    configured_mode = str(fail_mode.get("configured") or fail_mode.get("desired") or "")
     lock_mode_target = configured_mode
     # Runtime locks are rendered from the mode-aware desired posture.  The
     # report keeps the raw legacy/global value in ``configured`` so Status can
@@ -12272,6 +12318,16 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
         return
 
     label = "OpenClaw interception" if connectors == ["openclaw"] else "Proxy interception"
+    if "openclaw" in connectors:
+        from defenseclaw.openclaw_plugin_config import configured_openclaw_plugin_config_issue
+
+        if issue := configured_openclaw_plugin_config_issue(cfg):
+            _emit(
+                "fail", label, issue,
+                remediation="run `defenseclaw setup openclaw` to migrate the plugin config, then rerun doctor",
+                r=r,
+            )
+            return
     info = live_health.get("interception") if isinstance(live_health, dict) else None
     uptime_ms = live_health.get("uptime_ms") if isinstance(live_health, dict) else None
     if (
@@ -15294,6 +15350,12 @@ def doctor(
     failed/dependency-blocked repair.
     """
     global _json_mode
+    from defenseclaw.doctor_health import begin_installed_version_run, end_installed_version_run
+
+    # One version probe per agent for the whole run, however long it takes (GAP-0723).
+    begin_installed_version_run()
+    if (click_ctx := click.get_current_context(silent=True)) is not None:
+        click_ctx.call_on_close(end_installed_version_run)
     if dry_run and not do_fix:
         raise click.UsageError("--dry-run requires --fix")
     if assume_yes and not do_fix:
@@ -16087,13 +16149,15 @@ def _connector_compatibility_problems(cfg) -> tuple[object, ...]:
     from defenseclaw.doctor_health import (
         HealthStatus,
         assess_connector_health,
-        read_cached_discovery,
+        read_run_discovery,
+        recheck_installed_versions,
     )
 
     connectors = tuple(connector for connector in _doctor_active_connectors(cfg) if _connector_enabled(cfg, connector))
     if not connectors:
         return ()
-    discovery = read_cached_discovery(str(getattr(cfg, "data_dir", "") or ""))
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    discovery = recheck_installed_versions(read_run_discovery(data_dir), connectors, data_dir).discovery
     findings = assess_connector_health(connectors, discovery)
     return tuple(finding for finding in findings if finding.status is not HealthStatus.SUPPORTED)
 
@@ -16259,6 +16323,9 @@ def _fix_connector_compatibility_review(cfg, *, assume_yes: bool) -> tuple[str, 
             "fail",
             f"{type(exc).__name__}: bounded connector version discovery failed; no version change was attempted",
         )
+    from defenseclaw.doctor_health import reset_installed_version_probes
+
+    reset_installed_version_probes()  # the refresh just re-read every version
     remaining = _connector_compatibility_problems(cfg)
     if not remaining:
         return ("pass", "refreshed version evidence now matches registered connector contracts")

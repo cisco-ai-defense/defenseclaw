@@ -49,6 +49,7 @@ var enterpriseInformationalWarningCodes = map[string]bool{
 	"user_runtime_folder_untrusted":            true,
 	"runtime_generations_not_collected":        true,
 	"rule_pack_readable_by_users":              true,
+	"claude_project_skipped":                   true,
 	enterprisestatus.CodeSandboxDefaultProfile: true,
 	enterprisestatus.CodeSandboxAdvisory:       true,
 }

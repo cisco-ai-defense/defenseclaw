@@ -332,6 +332,7 @@ class TestAdditiveSetupCommand(unittest.TestCase):
             connector="cursor",
             connectors=["codex", "cursor"],
             wait_for_connector_ready=True,
+            notice_connectors=["cursor"],
         )
 
     def test_setup_waits_only_for_guarded_peers(self):
@@ -372,6 +373,7 @@ class TestAdditiveSetupCommand(unittest.TestCase):
             wait_for_connector_ready=True,
             start_if_stopped=True,
             required_connectors=frozenset({"codex", "cursor"}),
+            notice_connectors=["codex", "cursor"],
         )
 
     def test_bare_batch_cannot_report_success_when_readiness_gate_fails(self):
