@@ -115,6 +115,12 @@ func hookAssetFacts(connector string, payload []byte) string {
 // user can see.
 func hookSkillRoots(connector, home, cwd string) []string {
 	roots := assetfacts.SkillRoots(connector, home, cwd)
+	if connector == "copilot" && assetfacts.CopilotHomeSet() {
+		// COPILOT_HOME replaces ~/.copilot as the home of Copilot: a skill left
+		// in the default one is not loaded, and judging it would block the
+		// skill of that name the agent does load.
+		roots = slices.DeleteFunc(roots, func(root string) bool { return root == filepath.Join(home, ".copilot", "skills") })
+	}
 	for _, root := range assetfacts.EnvSkillRoots(connector, home, cwd) {
 		if !slices.Contains(roots, root) {
 			roots = append(roots, root)
@@ -207,22 +213,25 @@ func hookInvokedPluginNames(claudeDir, toolName string, toolInput map[string]any
 	}
 	if rest, ok := strings.CutPrefix(strings.TrimSpace(toolName), "mcp__plugin_"); ok {
 		server, _, _ := strings.Cut(rest, "__")
-		best := ""
+		// A plugin name and a server name may both hold an underscore: the
+		// server kit_time of plugin r109 and the server time of plugin
+		// r109_kit are one tool name. Every registered plugin the name can
+		// start with is a candidate owner, as the gateway treats them, and
+		// the text of each is sent; the nearest alone would leave another,
+		// possibly the protected one, unjudged.
+		found := false
 		for _, plugin := range assetfacts.ClaudePluginNames(claudeDir) {
-			if strings.HasPrefix(server, plugin+"_") && len(plugin) > len(best) {
-				best = plugin
+			if strings.HasPrefix(server, plugin+"_") && len(server) > len(plugin)+1 {
+				add(plugin)
+				found = true
 			}
 		}
-		if best == "" {
+		if !found {
 			// No registered plugin name starts the server name: the plugin is
 			// not known, so the whole server name stands for it and carries the
 			// failure state (a plugin the registry cannot be read for).
-			best = server
+			add(server)
 		}
-		add(best)
-	}
-	if len(names) > 2 {
-		names = names[:2]
 	}
 	return names
 }

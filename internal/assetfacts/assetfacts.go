@@ -43,10 +43,17 @@ import (
 const Header = "X-DefenseClaw-Asset-Facts"
 
 const (
-	maxHeaderBytes   = 256 << 10
-	maxSkills        = 16
-	maxFieldBytes    = 1024
-	maxArgs          = 32
+	maxHeaderBytes = 256 << 10
+	maxSkills      = 16
+	maxFieldBytes  = 1024
+	maxArgs        = 32
+	// maxPinArgs bounds the argument digests a claim carries: a definition
+	// past maxArgs still pins every argument a deny prefix can sensibly name.
+	// A prefix longer than this cannot be ruled out and is refused.
+	maxPinArgs = 2048
+	// pinArgDigestLen is the hex length of an argument digest: a collision
+	// only makes a rule "may match", the safe side.
+	pinArgDigestLen  = 16
 	maxManifestBytes = 64 << 10
 	maxNameBytes     = 255
 	maxInputStrings  = 64
@@ -127,7 +134,8 @@ type MCPServer struct {
 // MCPPins are the SHA-256 digests (hex) of the values an asset_policy rule
 // compares on an MCP server, taken from the complete definition the hook
 // read: the trimmed URL, the base name of the trimmed command, and each
-// trimmed argument, with the count of arguments and the transport.
+// trimmed argument (up to maxPinArgs, as PinArgSum), with the count of
+// arguments and the transport.
 type MCPPins struct {
 	URL       string   `json:"url,omitempty"`
 	Command   string   `json:"command,omitempty"`
@@ -266,6 +274,10 @@ func PinSum(value string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// PinArgSum is the digest of one argument as MCPPins.Args holds it: the
+// first pinArgDigestLen hex characters of PinSum.
+func PinArgSum(value string) string { return PinSum(value)[:pinArgDigestLen] }
+
 // pinsOf takes the pins of a definition: from its fields while it holds them,
 // otherwise the ones an earlier pass already took, or none: a claim from a
 // hook that took no pins cannot refute a rule.
@@ -279,7 +291,7 @@ func pinsOf(server MCPServer) *MCPPins {
 			ArgCount: min(max(server.Pins.ArgCount, 0), 1<<16), Transport: clean(server.Pins.Transport, 64),
 		}
 		for _, arg := range server.Pins.Args {
-			if sum := cleanDigest(arg); sum != "" && len(pins.Args) < maxArgs {
+			if sum := cleanArgDigest(arg); sum != "" && len(pins.Args) < maxPinArgs {
 				pins.Args = append(pins.Args, sum)
 			}
 		}
@@ -294,18 +306,23 @@ func pinsOf(server MCPServer) *MCPPins {
 		pins.Command = PinSum(filepath.Base(command))
 	}
 	for _, arg := range server.Args {
-		if len(pins.Args) == maxArgs {
+		if len(pins.Args) == maxPinArgs {
 			break
 		}
-		pins.Args = append(pins.Args, PinSum(arg))
+		pins.Args = append(pins.Args, PinArgSum(arg))
 	}
 	return &pins
 }
 
 // cleanDigest keeps a value only when it is a hex SHA-256.
-func cleanDigest(value string) string {
+func cleanDigest(value string) string { return cleanHexDigest(value, 64) }
+
+// cleanArgDigest keeps a value only when it is a PinArgSum.
+func cleanArgDigest(value string) string { return cleanHexDigest(value, pinArgDigestLen) }
+
+func cleanHexDigest(value string, length int) string {
 	value = strings.ToLower(strings.TrimSpace(value))
-	if len(value) != 64 {
+	if len(value) != length {
 		return ""
 	}
 	for _, r := range value {
@@ -417,32 +434,54 @@ func SkillRoots(connector, home, cwd string) []string {
 			roots = append(roots, filepath.Join(home, rel))
 		}
 	}
-	if dir := strings.TrimSpace(cwd); filepath.IsAbs(dir) {
-		dir = filepath.Clean(dir)
-		for level := 0; level < maxProjectLevels; level++ {
-			if home != "" && filepath.Clean(home) == dir {
-				break
-			}
-			for _, rel := range project {
-				roots = append(roots, filepath.Join(dir, rel))
-			}
-			if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
-				break
-			}
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
+	for _, dir := range projectLevels(home, cwd) {
+		for _, rel := range project {
+			roots = append(roots, filepath.Join(dir, rel))
 		}
 	}
 	return roots
 }
 
+// projectLevels lists the folders from cwd up to the repository root (or
+// maxProjectLevels folders, stopping at home) a project skill folder is
+// looked for in.
+func projectLevels(home, cwd string) []string {
+	dir := strings.TrimSpace(cwd)
+	if !filepath.IsAbs(dir) {
+		return nil
+	}
+	dir = filepath.Clean(dir)
+	var levels []string
+	for level := 0; level < maxProjectLevels; level++ {
+		if home != "" && filepath.Clean(home) == dir {
+			break
+		}
+		levels = append(levels, dir)
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return levels
+}
+
+// CopilotHomeSet reports whether COPILOT_HOME is set: Copilot then loads its
+// user skills from there and not from ~/.copilot, whether or not the value is
+// usable.
+func CopilotHomeSet() bool {
+	_, exists := os.LookupEnv("COPILOT_HOME")
+	return exists
+}
+
 // EnvSkillRoots lists the skill folders a connector takes from the
 // environment of the agent process: Copilot's COPILOT_HOME and
 // COPILOT_SKILLS_DIRS (comma separated; "~/" is the home, a relative one is
-// below cwd). Only the standalone hook, which runs in the agent's
+// below Copilot launch workspace, which a hook knows only as cwd or a folder
+// above it up to the repository root, so each is a root). Only the standalone hook, which runs in the agent's
 // environment, can know them; a gateway's own environment is not the user's.
 func EnvSkillRoots(connector, home, cwd string) []string {
 	if strings.ToLower(strings.TrimSpace(connector)) != "copilot" {
@@ -466,13 +505,19 @@ func EnvSkillRoots(connector, home, cwd string) []string {
 			}
 			dir = filepath.Join(home, dir[2:])
 		case !filepath.IsAbs(dir):
-			if !filepath.IsAbs(cwd) {
-				continue
+			levels := projectLevels(home, cwd)
+			if len(levels) == 0 && filepath.IsAbs(cwd) {
+				levels = []string{filepath.Clean(cwd)}
 			}
-			dir = filepath.Join(cwd, dir)
+			for _, level := range levels {
+				if root := filepath.Join(level, dir); !slices.Contains(roots, root) {
+					roots = append(roots, root)
+				}
+			}
+			continue
 		}
-		if !slices.Contains(roots, dir) {
-			roots = append(roots, filepath.Clean(dir))
+		if dir = filepath.Clean(dir); !slices.Contains(roots, dir) {
+			roots = append(roots, dir)
 		}
 	}
 	return roots
