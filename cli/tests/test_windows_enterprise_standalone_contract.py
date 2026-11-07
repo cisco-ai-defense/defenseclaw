@@ -1964,7 +1964,10 @@ def _repair_rollback_config_cases(tmp_path: Path) -> dict[str, dict]:
             "Assert-DefenseClawRepairRollbackConfig",
             "Repair-DefenseClawUnreadableDeploymentMetadata",
             "Get-DefenseClawRepairRollbackApprovedConfigSource",
+            "Get-DefenseClawRecordedConfigGeneration",
             "Get-DefenseClawRecordedConfigGenerationHash",
+            "Test-DefenseClawSignedBundleStoreHoldsVersions",
+            "Get-DefenseClawHandEditApprovedConfigSource",
             "Get-DefenseClawApprovedPolicySource",
             "Get-DefenseClawApprovedPolicyHash",
             "Get-DefenseClawApprovedPolicyPath",
@@ -2153,6 +2156,23 @@ def _csharp_method_body(text: str, name: str) -> str:
     start = text.index(f" {name}(string path)\n")
     end = text.index("\n        }\n", start)
     return text[start : end + 11]
+
+
+def test_a_hand_edited_config_is_replaced_by_the_approved_source_before_the_gateway_starts() -> None:
+    # GAP-0743: a hand edit is recorded in config.generation.json for the
+    # installed bytes, so Repair must not treat installed == recorded as
+    # approved, and a rollback must not restore bytes managed startup refuses.
+    module = _text(MODULE)
+    install = _function_body(module, "Invoke-DefenseClawInstallLikeLifecycle")
+    recovery = install.index("-ApprovedConfig $repairApprovedConfig")
+    assert recovery < install.index("Stop-DefenseClawService -Name $GatewayServiceName")
+    assert recovery < install.index("$approvedConfigSHA256 = [string]$repairApprovedConfig['config']")
+    restore = _function_body(module, "Restore-DefenseClawTransaction")
+    approved = restore.index("Restore-DefenseClawApprovedConfigOverHandEdit")
+    assert approved < restore.index("Register-DefenseClawRestoredConfigGeneration")
+    assert approved < restore.index("Start-DefenseClawTransactionServices")
+    generation = _function_body(module, "Get-DefenseClawRecordedConfigGeneration")
+    assert "hand-edit:*" in generation
 
 
 def test_squatted_root_messages_name_the_link_owner() -> None:

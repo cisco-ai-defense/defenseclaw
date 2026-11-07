@@ -20523,6 +20523,9 @@ function Restore-DefenseClawTransaction {
         Restore-DefenseClawCoworkCreatedDirectories -Layout $Layout -Snapshot $snapshot
     }
     if (Test-DefenseClawStandaloneProfile) {
+        Restore-DefenseClawApprovedConfigOverHandEdit `
+            -Layout $Layout `
+            -GatewayServiceName ([string]$snapshot.gateway_service)
         Register-DefenseClawRestoredConfigGeneration `
             -Layout $Layout `
             -GatewayServiceName ([string]$snapshot.gateway_service)
@@ -33280,11 +33283,18 @@ function Get-DefenseClawApprovedPolicySource {
     return $source
 }
 
-function Get-DefenseClawRecordedConfigGenerationHash {
+function Get-DefenseClawRecordedConfigGeneration {
+    <#
+        config.generation.json as the lifecycle and the gateway wrote it, or
+        $null without the file. hand_edit says the record names bytes that no
+        config writer wrote (an edit in a text editor, kept by the hook
+        guardian or the gateway under a "hand-edit:" actor): managed startup
+        refuses those bytes, so they are never an approved generation.
+    #>
     param([Parameter(Mandatory)][hashtable]$Layout)
     $generationPath = [IO.Path]::Combine([string]$Layout.ConfigDirectory, 'config.generation.json')
     if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $generationPath -PathType Leaf)) {
-        return ''
+        return $null
     }
     Assert-DefenseClawPathAcl -Path $generationPath `
         -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
@@ -33296,7 +33306,98 @@ function Get-DefenseClawRecordedConfigGenerationHash {
     if ($activeHash -cnotmatch '^[0-9a-f]{64}$') {
         throw 'Repair cannot read the recorded config generation; run Setup /ensure CONFIG=<approved absolute config path>'
     }
-    return $activeHash
+    $actorProperty = $generation.PSObject.Properties['actor']
+    $actor = if ($null -eq $actorProperty) { '' } else { [string]$actorProperty.Value }
+    return [pscustomobject]@{
+        hash      = $activeHash
+        actor     = $actor
+        hand_edit = [bool]($actor -clike 'hand-edit:*')
+    }
+}
+
+function Get-DefenseClawRecordedConfigGenerationHash {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $generation = Get-DefenseClawRecordedConfigGeneration -Layout $Layout
+    if ($null -eq $generation) { return '' }
+    return [string]$generation.hash
+}
+
+function Test-DefenseClawSignedBundleStoreHoldsVersions {
+    <#
+        Whether this deployment ever stored a signed policy bundle (the
+        etc\bundles folder). A bundle-managed config is repaired by the
+        installed CLI, and Setup's own approved copy is not proof of its
+        current bytes.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $directory = [IO.Path]::Combine([string]$Layout.ConfigDirectory, 'bundles')
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $directory)) {
+        return $false
+    }
+    Assert-DefenseClawNoReparsePath -Path $directory
+    return (@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $directory -Force).Count -gt 0)
+}
+
+function Get-DefenseClawHandEditApprovedConfigSource {
+    <#
+        The recorded approved config source that replaces a config.yaml whose
+        generation record is a hand edit, or $null when the record is not a
+        hand edit (GAP-0743). A hand edit leaves no lifecycle-recorded
+        predecessor to compare the approved copy with, so the copy is current
+        only while the deployment has never stored a signed bundle; a
+        bundle-managed deployment is refused with the installed CLI's repair
+        command. A missing or changed approved copy is refused by
+        Get-DefenseClawApprovedPolicySource. Nothing is changed here.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Metadata
+    )
+    $generation = Get-DefenseClawRecordedConfigGeneration -Layout $Layout
+    if ($null -eq $generation -or -not [bool]$generation.hand_edit) { return $null }
+    if (Test-DefenseClawSignedBundleStoreHoldsVersions -Layout $Layout) {
+        throw ('Repair cannot prove that the recorded approved config source is current; ' +
+            'run ' + (Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout) + ' ' +
+            'on a signed-bundle deployment, or Setup /ensure CONFIG=<approved absolute config path> otherwise')
+    }
+    return (Get-DefenseClawApprovedPolicySource -Layout $Layout -Metadata $Metadata -Name config)
+}
+
+function Restore-DefenseClawApprovedConfigOverHandEdit {
+    <#
+        Standalone rollback, best effort (GAP-0743). A rollback puts
+        config.yaml back as the transaction found it. When that is a hand edit,
+        managed startup refuses it: the restored gateway stays down and every
+        later recovery fails the same way. The approved generation is what ran
+        before the edit, so the recorded approved source takes its place and
+        the caller records it as the lifecycle generation. Anything that cannot
+        be proven leaves the restored bytes as they are.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    try {
+        $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
+        if ($null -eq $metadata) { return }
+        $approved = Get-DefenseClawHandEditApprovedConfigSource -Layout $Layout -Metadata $metadata
+        if ($null -eq $approved) { return }
+        Assert-DefenseClawNoReparsePath -Path $Layout.ConfigPath -AllowMissingLeaf
+        Install-DefenseClawSourceDescriptor -Source $approved -Destination $Layout.ConfigPath
+        Set-DefenseClawPathAcl -Path $Layout.ConfigPath -Kind ConfigFile `
+            -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
+            path   = [string]$Layout.ConfigPath
+            reason = 'rollback restored the recorded approved config in place of a hand-edited preimage that managed startup refuses'
+        }
+    }
+    catch {
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
+            path   = [string]$Layout.ConfigPath
+            reason = ('rollback kept the restored config: ' +
+                (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512))
+        }
+    }
 }
 
 function Get-DefenseClawRepairRollbackApprovedConfigSource {
@@ -33304,8 +33405,15 @@ function Get-DefenseClawRepairRollbackApprovedConfigSource {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)]$Metadata
     )
-    $activeHash = Get-DefenseClawRecordedConfigGenerationHash -Layout $Layout
-    if ([string]::IsNullOrEmpty($activeHash)) { return $null }
+    $generation = Get-DefenseClawRecordedConfigGeneration -Layout $Layout
+    if ($null -eq $generation) { return $null }
+    if ([bool]$generation.hand_edit) {
+        # The installed bytes are a hand edit, so the record cannot vouch for
+        # them; Repair and its rollback both put the approved copy back
+        # (GAP-0743), and that is what the candidate must validate.
+        return (Get-DefenseClawHandEditApprovedConfigSource -Layout $Layout -Metadata $Metadata)
+    }
+    $activeHash = [string]$generation.hash
     Assert-DefenseClawNoReparsePath -Path $Layout.ConfigPath -AllowMissingLeaf
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.ConfigPath -PathType Leaf) {
         $installedHash = (
@@ -33327,7 +33435,11 @@ function Invoke-DefenseClawRepairApprovedPolicyRecovery {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][hashtable]$Sources,
         [Parameter(Mandatory)]$Metadata,
-        [Parameter(Mandatory)][string]$GatewayServiceName
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        # Receives the sha256 of the approved config this recovery left
+        # installed over a hand-edit generation record (GAP-0743); the config
+        # step then records those bytes as the lifecycle generation.
+        [hashtable]$ApprovedConfig = @{}
     )
     $adminWriters = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
     foreach ($name in @('config', 'manifest')) {
@@ -33338,6 +33450,37 @@ function Invoke-DefenseClawRepairApprovedPolicyRecovery {
         foreach ($parent in $parentPaths) {
             Assert-DefenseClawPathAcl -Path ([string]$parent) `
                 -AllowedWriterSIDs $adminWriters -AllowInheritance -IgnoreCreatorTemplates
+        }
+        if ($name -ceq 'config') {
+            # A hand edit is recorded in config.generation.json for exactly the
+            # bytes now installed, so installed == recorded proves nothing: the
+            # gateway refuses to start on them. The approved copy replaces
+            # them before the gateway is started or any readiness is awaited.
+            $handEditApproved = Get-DefenseClawHandEditApprovedConfigSource `
+                -Layout $Layout -Metadata $Metadata
+            if ($null -ne $handEditApproved) {
+                $approvedHash = ([string]$handEditApproved.sha256).ToLowerInvariant()
+                $installedHash = ''
+                if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $destination -PathType Leaf) {
+                    try {
+                        Assert-DefenseClawPathAcl -Path $destination `
+                            -AllowedWriterSIDs $adminWriters -AllowInheritance -IgnoreCreatorTemplates
+                        $installedHash = (
+                            Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $destination -Algorithm SHA256
+                        ).Hash.ToLowerInvariant()
+                    }
+                    catch {
+                        $installedHash = ''
+                    }
+                }
+                if ($installedHash -cne $approvedHash) {
+                    Install-DefenseClawSourceDescriptor -Source $handEditApproved -Destination $destination
+                    Set-DefenseClawPathAcl -Path $destination -Kind ConfigFile `
+                        -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)
+                }
+                $ApprovedConfig['config'] = $approvedHash
+                continue
+            }
         }
         $needsRewrite = -not (Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $destination -PathType Leaf)
@@ -33389,6 +33532,12 @@ function Invoke-DefenseClawRepairApprovedPolicyRecovery {
         $kind = if ($name -ceq 'config') { 'ConfigFile' } else { 'AdminFile' }
         Set-DefenseClawPathAcl -Path $destination -Kind $kind `
             -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)
+        if ($name -ceq 'config') {
+            # The hook guardian may record these approved bytes as a hand edit
+            # before the config step runs; the step records them as the
+            # lifecycle generation because Repair named them approved.
+            $ApprovedConfig['config'] = ([string]$approved.sha256).ToLowerInvariant()
+        }
     }
 }
 
@@ -42337,12 +42486,14 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -ReplacedArtifacts $replaced `
             -Action $Action
     }
+    $repairApprovedConfig = @{}
     if ($Action -eq 'Repair' -and (Test-DefenseClawStandaloneProfile)) {
         Invoke-DefenseClawRepairApprovedPolicyRecovery `
             -Layout $Layout `
             -Sources $Sources `
             -Metadata $metadata `
-            -GatewayServiceName $GatewayServiceName
+            -GatewayServiceName $GatewayServiceName `
+            -ApprovedConfig $repairApprovedConfig
     }
 
     $priorCodexTargetEnabled = $false
@@ -42937,6 +43088,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         $approvedConfigSHA256 = ''
         if ($Sources.ContainsKey('config') -and $Sources['config'] -is [System.Collections.IDictionary]) {
             $approvedConfigSHA256 = ([string]$Sources['config']['sha256']).ToLowerInvariant()
+        }
+        elseif ($repairApprovedConfig.ContainsKey('config')) {
+            $approvedConfigSHA256 = [string]$repairApprovedConfig['config']
         }
         if ($approvedConfigSHA256 -cnotmatch '^[0-9a-f]{64}$') {
             $approvedConfigSHA256 = ''
