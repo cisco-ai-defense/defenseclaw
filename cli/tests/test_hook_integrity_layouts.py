@@ -395,7 +395,8 @@ def test_managed_claude_guard_view_carries_closed_and_neutral_answers(monkeypatc
         # A missing guard gives the reason that names it and the repair command.
         missing = " ".join(words[words.index("(") + 1:words.index(")")])
         assert "defenseclaw-hook-guard.exe" in missing
-        assert "enterprise windows repair --profile standalone" in missing
+        assert "DefenseClawSetup-Enterprise-Standalone-x64.exe /repair" in missing
+        assert "enterprise windows repair" not in missing
         assert missing.endswith(f"exit /b {unavailable_exit}")
         assert hook_integrity.claude_launcher_guard_view(handler) == {
             **handler,

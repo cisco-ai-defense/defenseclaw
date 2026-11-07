@@ -1293,7 +1293,9 @@ The lifecycle CLI can also run from a folder with the payload files
 (`defenseclaw.exe`, `defenseclaw-gateway.exe`, `defenseclaw-hook.exe`,
 `defenseclaw-hook-guard.exe`, `defenseclaw-acp.exe`, `defenseclaw-sensor-helper.exe`, `install-enterprise.ps1`,
 `DefenseClawEnterprise.psm1`) for your own build or re-signing pipeline, with
-`ensure --profile standalone --config <path> --json`. Unsigned files need
+`ensure --profile standalone --config <path> --json`. A folder without
+`defenseclaw-hook-guard.exe` is refused before anything changes, and so is a direct
+`install` or `upgrade` without `--hook-guard-binary`. Unsigned files need
 `--trust-mode hash_pinned --payload-manifest <file>`, a JSON file of the form
 `{"schema_version":1,"files":{"<file name>":"<sha256>"}}` that pins every unsigned
 file including `defenseclaw-scanners.exe`. The `...payload-manifest.json` release
