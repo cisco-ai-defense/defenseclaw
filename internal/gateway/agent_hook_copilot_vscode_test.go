@@ -259,6 +259,16 @@ func TestGAP0691SharedLocalFileTargetsAndEnvelope(t *testing.T) {
 		{"linked insert", "insert_edit_into_file", map[string]any{"filePath": linked, "code": "b"}, false, true},
 		{"linked read", "read_file", map[string]any{"filePath": linked}, false, true},
 		{"linked CLI write", "Write", map[string]any{"path": linked, "file_text": "notes"}, false, true},
+		{"linked apply_patch", "apply_patch", "*** Begin Patch\n*** Update File: " + linked + "\n@@\n-a\n+b\n*** End Patch", false, true},
+		{"ordinary apply_patch", "apply_patch", "*** Begin Patch\n*** Update File: " + ordinary + "\n@@\n-a\n+b\n*** End Patch", false, false},
+		{"ordinary linked apply_patch", "apply_patch", "*** Begin Patch\n*** Update File: " + ordinaryLink + "\n@@\n-a\n+b\n*** End Patch", false, false},
+		{"linked Edit patch text", "Edit", "*** Begin Patch\n*** Update File: " + linked + "\n@@\n-a\n+b\n*** End Patch", false, true},
+		{"ordinary Edit patch text", "Edit", "*** Begin Patch\n*** Update File: " + ordinaryLink + "\n@@\n-a\n+b\n*** End Patch", false, false},
+		{"linked write_file", "write_file", map[string]any{"path": linked, "content": "notes"}, false, true},
+		{"ordinary linked write_file", "write_file", map[string]any{"path": ordinaryLink, "content": "notes"}, false, false},
+		{"linked append_file", "append_file", map[string]any{"path": linked, "content": "notes"}, false, true},
+		{"ordinary linked append_file", "append_file", map[string]any{"path": ordinaryLink, "content": "notes"}, false, false},
+		{"direct write_file", "write_file", map[string]any{"path": "/etc/shadow", "content": "notes"}, false, true},
 		{"mixed event field", "run_in_terminal", map[string]any{"command": "echo hello"}, true, true},
 	}
 	for _, tier := range []string{"implicit", "default", "permissive", "strict"} {

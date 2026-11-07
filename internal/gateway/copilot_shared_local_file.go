@@ -15,7 +15,7 @@ import (
 // resolve a path locally when that evidence is absent. Only file tools that
 // follow their final path reach this function.
 func copilotSharedLocalFileFacts(facts actionfacts.Facts, request trustedActionRequest) actionfacts.Facts {
-	if !request.CopilotSharedLocalFile || !facts.Authoritative() || !facts.EnforcementEligible() {
+	if !request.CopilotSharedLocalFile || !actionfacts.PathTool(request.Input.Tool) || !facts.Authoritative() || !facts.EnforcementEligible() {
 		return facts
 	}
 	originalPaths := len(facts.Paths)
@@ -62,7 +62,7 @@ func copilotSharedLocalPathFindings(
 	facts actionfacts.Facts,
 	options ruleScanOptions,
 ) []RuleFinding {
-	if !request.CopilotSharedLocalFile || !facts.Authoritative() || !facts.EnforcementEligible() {
+	if !request.CopilotSharedLocalFile || !actionfacts.PathTool(request.Input.Tool) || !facts.Authoritative() || !facts.EnforcementEligible() {
 		return nil
 	}
 	var findings []RuleFinding
