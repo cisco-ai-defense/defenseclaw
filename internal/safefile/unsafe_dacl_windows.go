@@ -16,70 +16,93 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// UnsafePrivateDACLError is the refusal of a private path whose DACL another
-// account can write through. It names the account and every folder whose DACL
-// carries the entry, which is not the refused path when the entry is
-// inherited: removing it from the refused path alone does nothing, and an
-// entry granted again higher up is inherited again, so all of them are named.
-type UnsafePrivateDACLError struct {
-	// Path is the path whose DACL was refused.
-	Path string
-	// Carriers are the folders or files that hold the refused entry as their
-	// own (not inherited), outermost first; removing the trustee from all of
-	// them clears the refusal. Empty when none could be found.
-	Carriers []string
+// UnsafeDACLEntry is one refused entry of a private path DACL: the account, the
+// kind, and every folder or file that holds the entry as its own (not
+// inherited), outermost first. Removing the account from all of them clears
+// this entry; an entry granted again higher up is inherited again, so all of
+// them are named.
+type UnsafeDACLEntry struct {
 	// Trustee is the account of the entry as DOMAIN\name, or *SID when the
-	// name cannot be resolved. Empty when no single entry is to blame.
+	// name cannot be resolved.
 	Trustee string
 	// Deny reports that the entry is a deny entry.
 	Deny bool
+	// Carriers are the folders or files that hold the entry as their own,
+	// outermost first. Empty when none could be found.
+	Carriers []string
+}
+
+// UnsafePrivateDACLError is the refusal of a private path whose DACL another
+// account can write through. It names every account whose entry the check
+// refuses (a DACL can hold several, and one repaired at a time leaves the
+// refusal in place) and, for each, every folder whose DACL carries the entry,
+// which is not the refused path when the entry is inherited: removing it from
+// the refused path alone does nothing.
+type UnsafePrivateDACLError struct {
+	// Path is the path whose DACL was refused.
+	Path string
+	// Entries are the refused entries, one per account and kind, in the order
+	// of the DACL. Empty when no single entry is to blame.
+	Entries []UnsafeDACLEntry
 }
 
 func (e *UnsafePrivateDACLError) Error() string {
 	msg := "safefile: private path DACL is unsafe to repair: " + e.Path
-	if e.Trustee == "" {
+	if len(e.Entries) == 0 {
 		return msg
 	}
-	kind := "has write access"
-	if e.Deny {
-		kind = "has a deny entry"
-	}
-	own := false
-	var above []string
-	for _, carrier := range e.Carriers {
-		if carrier == e.Path {
-			own = true
-		} else {
-			above = append(above, carrier)
+	parts := make([]string, len(e.Entries))
+	for i, entry := range e.Entries {
+		kind := "has write access"
+		if entry.Deny {
+			kind = "has a deny entry"
+		}
+		own := false
+		var above []string
+		for _, carrier := range entry.Carriers {
+			if carrier == e.Path {
+				own = true
+			} else {
+				above = append(above, carrier)
+			}
+		}
+		switch {
+		case len(above) == 0:
+			parts[i] = fmt.Sprintf("%s %s there", entry.Trustee, kind)
+		case own:
+			parts[i] = fmt.Sprintf("%s %s there and inherited from %s", entry.Trustee, kind, strings.Join(above, ", "))
+		default:
+			parts[i] = fmt.Sprintf("%s %s there, inherited from %s", entry.Trustee, kind, strings.Join(above, ", "))
 		}
 	}
-	switch {
-	case len(above) == 0:
-		return fmt.Sprintf("%s (%s %s there)", msg, e.Trustee, kind)
-	case own:
-		return fmt.Sprintf("%s (%s %s there and inherited from %s)", msg, e.Trustee, kind, strings.Join(above, ", "))
-	default:
-		return fmt.Sprintf("%s (%s %s there, inherited from %s)", msg, e.Trustee, kind, strings.Join(above, ", "))
-	}
+	return fmt.Sprintf("%s (%s)", msg, strings.Join(parts, "; "))
 }
 
 // unsafePrivateDACLError builds the refusal of path. It asks the one rule that
-// refused the DACL (privateSecurityDescriptorRefusal) which entry it was, so
-// the named account is the one the check meant. Anything that cannot be read
-// leaves the account and folder out and keeps the refusal.
+// refused the DACL (privateSecurityDescriptorRefusals) which entries it
+// refused, so the named accounts are the ones the check meant. Anything that
+// cannot be read leaves the accounts and folders out and keeps the refusal.
 func unsafePrivateDACLError(path string, identity windowsProtectionSubject, trustSystemOwners bool) error {
 	refusal := &UnsafePrivateDACLError{Path: path}
 	sd, err := privateDACLDescriptor(path)
 	if err != nil {
 		return refusal
 	}
-	why, err := privateSecurityDescriptorRefusal(sd, identity, trustSystemOwners)
-	if err != nil || why == nil || why.sid == nil {
+	refused, err := privateSecurityDescriptorRefusals(sd, identity, trustSystemOwners)
+	if err != nil {
 		return refusal
 	}
-	refusal.Trustee = trusteeName(why.sid)
-	refusal.Deny = why.deny
-	refusal.Carriers = daclEntryCarriers(path, why)
+	for _, why := range refused {
+		if why.sid == nil {
+			// An entry the check cannot name: the repair cannot be listed whole.
+			return &UnsafePrivateDACLError{Path: path}
+		}
+		refusal.Entries = append(refusal.Entries, UnsafeDACLEntry{
+			Trustee:  trusteeName(why.sid),
+			Deny:     why.deny,
+			Carriers: daclEntryCarriers(path, why),
+		})
+	}
 	return refusal
 }
 

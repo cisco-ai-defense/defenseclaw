@@ -177,6 +177,16 @@ def test_a_long_recorded_reason_keeps_its_repair_whole() -> None:
     assert len(long_without_fix) <= 401 and long_without_fix.endswith("…")
 
 
+def test_a_long_manual_only_repair_is_kept_whole() -> None:
+    steps = "replace the link " + "/Users/lane/very/long/path/" * 20 + "with a real folder, then run the upgrade"
+    reason = "validate plugin directory custody: " + "x" * 520 + f"; by hand: {steps}"
+    bounded = cmd_doctor._bounded_recorded_reason(reason)
+    assert bounded.endswith(f"; by hand: {steps}")
+    assert len(bounded) < len(reason)
+    short = "validate plugin directory custody: link; by hand: replace it"
+    assert cmd_doctor._bounded_recorded_reason(short) == short
+
+
 def test_a_repair_of_a_dozen_deep_folders_is_not_cut() -> None:
     steps = [f'icacls "C:\\Users\\lane\\{"deep-folder-" * 6}{n}" /remove:g "HOST\\other"' for n in range(12)]
     fix = "; ".join(steps)
@@ -233,6 +243,87 @@ def test_the_standalone_profile_keeps_the_strict_macos_rule(monkeypatch) -> None
     assert file_permissions._plugin_darwin_acl_refused("/x") is True
     _darwin(monkeypatch, listing, standalone=False)
     assert file_permissions._plugin_darwin_acl_refused("/x") is False
+
+
+@pytest.mark.parametrize(
+    "listing",
+    [
+        " 0: user:other allow",
+        " 0: user:other",
+        " 0: user:root allow write\n 1: user:other allow",
+    ],
+)
+def test_the_standalone_profile_refuses_an_entry_it_cannot_parse(monkeypatch, listing: str) -> None:
+    # The gateway strict parser reports such an entry as unparseable and refuses.
+    _darwin(monkeypatch, listing, standalone=True)
+    assert file_permissions._plugin_darwin_acl_refused("/x") is True
+
+
+@pytest.mark.parametrize(
+    "listing",
+    [
+        " 0: user:other allow list,search,readattr",
+        " 0: user:other deny write,append",
+        " 0: group:staff inherited allow read",
+    ],
+)
+def test_the_standalone_profile_leaves_read_and_deny_entries_alone(monkeypatch, listing: str) -> None:
+    _darwin(monkeypatch, listing, standalone=True)
+    assert file_permissions._plugin_darwin_acl_refused("/x") is False
+
+
+class _Listing:
+    returncode = 0
+    stdout = "drwxr-xr-x+ 3 me staff 96 Nov  6 12:00 /x\n 0: user:other allow list,search\n"
+
+
+def _ls(monkeypatch, outcomes: list) -> list[float]:
+    # Run _darwin_acl_output with /bin/ls replaced by the outcomes; return the timeouts it used.
+    import subprocess
+
+    timeouts: list[float] = []
+
+    def run(_argv, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(file_permissions.sys, "platform", "darwin")
+    monkeypatch.setattr(file_permissions, "trusted_system_subprocess_env", lambda: {})
+    monkeypatch.setattr(subprocess, "run", run)
+    return timeouts
+
+
+def test_one_slow_acl_inspection_is_retried_like_the_gateway_does(monkeypatch) -> None:
+    import subprocess
+
+    timeouts = _ls(monkeypatch, [subprocess.TimeoutExpired("ls", 5.0), _Listing()])
+    mode, acl = file_permissions._darwin_acl_output("/x")
+    assert mode == "drwxr-xr-x+" and "user:other allow list,search" in acl
+    # The gateway bound is five seconds (hookAPIACLInspectionTimeout), once more.
+    assert timeouts == [5.0, 5.0]
+    # The clean listing then passes the plugin rule, as it does in the gateway.
+    monkeypatch.setattr(file_permissions, "_plugin_standalone_scope", lambda: False)
+    _ls(monkeypatch, [subprocess.TimeoutExpired("ls", 5.0), _Listing()])
+    assert file_permissions._plugin_darwin_acl_refused("/x") is False
+
+
+def test_a_second_acl_inspection_timeout_is_the_verdict(monkeypatch) -> None:
+    import subprocess
+
+    timeouts = _ls(monkeypatch, [subprocess.TimeoutExpired("ls", 5.0), subprocess.TimeoutExpired("ls", 5.0)])
+    assert file_permissions._darwin_acl_output("/x") == ("", "")
+    assert timeouts == [5.0, 5.0]
+    _ls(monkeypatch, [subprocess.TimeoutExpired("ls", 5.0), subprocess.TimeoutExpired("ls", 5.0)])
+    assert file_permissions._plugin_darwin_acl_refused("/x") is True
+
+
+def test_a_failed_acl_inspection_that_is_not_a_timeout_is_not_retried(monkeypatch) -> None:
+    timeouts = _ls(monkeypatch, [FileNotFoundError("ls")])
+    assert file_permissions._darwin_acl_output("/x") == ("", "")
+    assert timeouts == [5.0]
 
 
 def test_a_macos_acl_that_cannot_be_read_is_refused(monkeypatch) -> None:

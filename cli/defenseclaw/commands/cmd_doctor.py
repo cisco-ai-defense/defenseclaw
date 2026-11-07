@@ -11935,13 +11935,17 @@ _RECORDED_REASON_FIX_LIMIT = 8192
 def _bounded_recorded_reason(reason: object) -> str:
     """Whitespace-collapse the gateway's recorded reason and bound its cause, never its repair.
 
-    The gateway ends a custody refusal with ``; fix: <command>``. Bounding the
-    whole text would cut that command off, so only the cause is bounded and
-    the ``; fix:`` tail is kept whole. A tail past the (large) limit is not
+    The gateway ends a custody refusal with ``; fix: <command>`` (or, when only
+    a person can repair it, ``; by hand: <steps>``). Bounding the whole text
+    would cut that off, so only the cause is bounded and the tail is kept
+    whole. A tail past the (large) limit is not
     shown cut: the row says it was left out and where the whole text is.
     """
     text = " ".join(str(reason).split())
     head, marker, fix = text.rpartition("; fix: ")
+    if not marker:
+        # A refusal only a person can repair ends with "; by hand: ..." and has no command.
+        head, marker, fix = text.rpartition("; by hand: ")
     if not marker:
         return text if len(text) <= _RECORDED_REASON_CAUSE_LIMIT else text[:_RECORDED_REASON_CAUSE_LIMIT] + "…"
     if len(head) > _RECORDED_REASON_CAUSE_LIMIT:
