@@ -16,6 +16,7 @@ scripts/test-install-lifecycle.ps1. These checks pin what other code relies on.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -4670,6 +4671,38 @@ def test_hook_fail_mode_refresh_runs_without_json_sidecar(tmp_path: Path) -> Non
         installed.unlink()
 
 
+def test_every_test_that_runs_powershell_is_skipped_where_it_is_not_installed() -> None:
+    # GAP-0733: one test called _run_powershell without the skipif its
+    # siblings carry, so on a host without PowerShell it failed with a
+    # TypeError (the interpreter path was None) instead of being skipped.
+    source = Path(__file__).read_text(encoding="utf-8")
+    functions = [node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef)]
+    runners = {"_run_powershell", "POWERSHELL"}
+    grew = True
+    while grew:
+        grew = False
+        for node in functions:
+            if node.name.startswith("test_") or node.name in runners:
+                continue
+            if {name.id for name in ast.walk(node) if isinstance(name, ast.Name)} & runners:
+                runners.add(node.name)
+                grew = True
+    ungated = []
+    for node in functions:
+        if not node.name.startswith("test_"):
+            continue
+        if not {name.id for name in ast.walk(node) if isinstance(name, ast.Name)} & runners:
+            continue
+        gate = " ".join(ast.get_source_segment(source, decorator) or "" for decorator in node.decorator_list)
+        body = ast.get_source_segment(source, node) or ""
+        decorated = "POWERSHELL" in gate and "skipif" in gate
+        guarded = "if not POWERSHELL" in body and "pytest.skip(" in body
+        if not (decorated or guarded):
+            ungated.append(node.name)
+    assert ungated == []
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 def test_installed_hooks_are_refreshed_without_the_json_sidecar(tmp_path: Path) -> None:
     # GAP-0365: with hooks\.hookcfg gone, the refresh (and the hold for a
     # running gateway) was skipped, so a 1.0.2 copilot-hook.ps1 kept its baked
