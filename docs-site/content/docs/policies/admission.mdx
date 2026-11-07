@@ -86,7 +86,9 @@ Set `asset_policy.enabled: true` as well. Denied names are refused by hooks
 even with runtime detection off. With asset policy in action mode and runtime
 detection on, the hook also sends the text of the selected profile skill or
 plugin, and the gateway refuses one the in-process prompt-injection detector
-rates HIGH or CRITICAL, or a skill whose text was not sent. Profile skills and
+rates HIGH or CRITICAL (role or instruction override, fake system or delimiter
+blocks, base64-hidden instructions, tag characters), and a skill or plugin whose
+text was not sent or could not be read in full. Profile skills and
 plugins are not scanned by the skill-scanner as the enrolled user.
 
 Each enrolled user's MCP server has its own verdict. The install block and

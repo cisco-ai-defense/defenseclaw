@@ -218,7 +218,14 @@ func (a *APIServer) mcpUnpublishedSourceDecision(ctx context.Context, connectorN
 	source := "a Codex config.toml under a CODEX_HOME"
 	if server.ProjectScope {
 		runtime, _ := cfg.AssetRuntimeDetectionFor("mcp")
-		if !published.Named && !(cfg.AssetPolicy.Enabled && cfg.AssetPolicy.Mode == config.AssetPolicyModeAction && runtime.Enabled) {
+		enforcing := cfg.AssetPolicy.Enabled && assetRuntimeModeIsAction(cfg.EffectiveAssetPolicyModeForConnector(connectorName)) && runtime.Enabled
+		// A claim that did not fit the header holds the name and the digest
+		// only, so a deny pinned to where the server points cannot be checked
+		// against it: it is refused where such a rule exists, as for any
+		// definition that cannot be resolved (GAP-1187).
+		unresolved := server.URL == "" && server.Command == "" &&
+			rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Denied, connectorName, probe.ServerName)
+		if !published.Named && !enforcing && !unresolved {
 			return config.AssetPolicyDecision{}, false
 		}
 		source = "a project .codex/config.toml"

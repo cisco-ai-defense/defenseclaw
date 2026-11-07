@@ -25,9 +25,12 @@ const (
 
 const (
 	maxContentAssets  = 3
-	maxContentFiles   = 32
-	maxContentFile    = 16 << 10
-	maxContentEscaped = 32 << 10
+	maxContentFiles   = 64
+	maxContentFile    = 64 << 10
+	maxContentEscaped = 96 << 10
+	// maxContentTotal bounds the escaped text of every content in one fact
+	// set, so that the encoded header always fits maxHeaderBytes.
+	maxContentTotal   = 128 << 10
 	maxContentEntries = 512
 	maxContentDepth   = 4
 	maxRegistryBytes  = 4 << 20
@@ -46,7 +49,8 @@ type Content struct {
 	Digest string        `json:"digest,omitempty"`
 	Files  []ContentFile `json:"files,omitempty"`
 	// Truncated says the folder holds more than Files: files over the bounds,
-	// links, text that is not UTF-8 or past the entry limit.
+	// links that do not lead to a text file, text that is not UTF-8 or past
+	// the entry limit. A verdict on Files is then not a verdict on the folder.
 	Truncated bool `json:"truncated,omitempty"`
 }
 
@@ -88,16 +92,31 @@ var contentTextExt = map[string]bool{
 
 var contentSkipDir = map[string]bool{".git": true, "node_modules": true, "__pycache__": true}
 
-// ReadContent reads the text files of the folder dir without following
-// links, within the bounds a hook fact carries: the files nearest the root
-// first, SKILL.md and the manifests among them. ok is false when dir is not
-// a readable folder.
+// ReadContent reads the text files of the folder dir, within the bounds a
+// hook fact carries: the files nearest the root first, SKILL.md and the
+// manifests among them. A folder that is a link, and a file that is a link
+// to a text file, are read through, as the agent reads them; any other link
+// marks the content Truncated. ok is false when dir is not a readable
+// folder.
 func ReadContent(kind, name, dir string) (Content, bool) {
+	out := Content{Kind: kind, Name: name, Dir: filepath.Clean(dir)}
 	info, err := os.Lstat(dir)
-	if err != nil || !info.IsDir() {
+	if err != nil {
 		return Content{}, false
 	}
-	out := Content{Kind: kind, Name: name, Dir: filepath.Clean(dir)}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		real, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			return Content{}, false
+		}
+		dir = real
+		if info, err = os.Stat(dir); err != nil {
+			return Content{}, false
+		}
+	}
+	if !info.IsDir() {
+		return Content{}, false
+	}
 	type candidate struct {
 		rel   string
 		depth int
@@ -124,7 +143,13 @@ func ReadContent(kind, name, dir string) (Content, bool) {
 		depth := strings.Count(filepath.ToSlash(rel), "/")
 		switch {
 		case entry.Type()&fs.ModeSymlink != 0:
-			out.Truncated = true
+			target, statErr := os.Stat(p)
+			switch {
+			case statErr != nil || !target.Mode().IsRegular():
+				out.Truncated = true
+			case contentTextExt[strings.ToLower(filepath.Ext(entry.Name()))]:
+				found = append(found, candidate{rel: filepath.ToSlash(rel), depth: depth, size: target.Size()})
+			}
 		case entry.IsDir():
 			if contentSkipDir[entry.Name()] {
 				return filepath.SkipDir
@@ -179,9 +204,10 @@ func ReadContent(kind, name, dir string) (Content, bool) {
 	return out, true
 }
 
-// readPrefix reads at most limit bytes of a regular file; nil when it cannot.
+// readPrefix reads at most limit bytes of a regular file, or of the regular
+// file a link leads to; nil when it cannot.
 func readPrefix(p string, limit int) (data []byte, truncated bool) {
-	info, err := os.Lstat(p)
+	info, err := os.Stat(p)
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, false
 	}
@@ -265,6 +291,7 @@ func ClaudePluginNames(claudeDir string) []string {
 // recomputes their digests.
 func boundedContents(in []Content) []Content {
 	var out []Content
+	total := 0
 	for _, content := range in {
 		if len(out) == maxContentAssets {
 			break
@@ -285,15 +312,35 @@ func boundedContents(in []Content) []Content {
 				continue
 			}
 			quoted, _ := json.Marshal(file.Text)
-			if escaped+len(quoted) > maxContentEscaped {
+			if escaped+len(quoted) > maxContentEscaped || total+len(quoted) > maxContentTotal {
 				next.Truncated = true
 				continue
 			}
 			escaped += len(quoted)
+			total += len(quoted)
 			next.Files = append(next.Files, ContentFile{Rel: rel, Text: file.Text})
 		}
 		next.Digest = ContentDigest(next.Files)
 		out = append(out, next)
+	}
+	return out
+}
+
+func hasContentFiles(in []Content) bool {
+	for _, content := range in {
+		if len(content.Files) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// withoutContentFiles returns in with the text removed and every content
+// marked truncated.
+func withoutContentFiles(in []Content) []Content {
+	out := make([]Content, len(in))
+	for i, content := range in {
+		out[i] = Content{Kind: content.Kind, Name: content.Name, Dir: content.Dir, Truncated: true}
 	}
 	return out
 }

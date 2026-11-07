@@ -87,8 +87,9 @@ func scanProfileAssetContent(content assetfacts.Content) profileAssetVerdict {
 
 // profileAssetContentDecision refuses a skill or plugin of an enrolled
 // account whose text the hook read and the detector rates HIGH or CRITICAL,
-// and a skill the hook found but sent no text for (an old hook, or one that
-// could not read the folder, must not skip the scan). It applies on a managed
+// and a skill or plugin the hook found but sent no text for, or sent only
+// part of (an old hook, or one that could not read all of the folder, must
+// not skip the scan). It applies on a managed
 // Windows gateway when asset_policy is enabled in action mode with runtime
 // detection on for the asset type, and then whatever the guardrail mode says;
 // the default configuration, observe mode, other gateways and Secure Client
@@ -109,16 +110,42 @@ func (a *APIServer) profileAssetContentDecision(
 	name := strings.TrimSpace(probe.SkillName)
 	facts := claimedAssetFactsFromContext(ctx)
 	contents := facts.ContentsFor(targetType, name)
+	// A Claude Code skill spelled plugin:skill is a skill of that plugin, and
+	// the hook sends the plugin folder; one with no folder sent was not found.
+	pluginOfSkill := ""
+	if plugin, _, qualified := strings.Cut(name, ":"); qualified && targetType == "skill" && connector == "claudecode" && plugin != "" {
+		pluginOfSkill = plugin
+		contents = append(contents, facts.ContentsFor("plugin", plugin)...)
+	}
 	refuse := func(reason, source string) (config.AssetPolicyDecision, bool) {
 		decision := runtimeAssetDisableBlockDecision(targetType, name, connector, runtimeSurface, reason, source)
 		decision.RegistryStatus = "unknown"
 		return decision, true
 	}
 	for _, content := range contents {
+		if content.Truncated {
+			// The hook could not read all of it (a file past the bounds, a link
+			// that leads nowhere readable, text that is not UTF-8): a verdict on
+			// the part it sent is not a verdict on the asset.
+			return refuse(fmt.Sprintf("%s %q holds content DefenseClaw could not read in full; asset_policy runtime detection refuses an asset it cannot scan", targetType, name),
+				"profile-asset-unscanned")
+		}
 		if verdict := scanProfileAssetContent(content); verdict.Blocking {
 			return refuse(fmt.Sprintf("%s %q holds content rated %s (%s); asset_policy runtime detection refuses it",
 				targetType, name, verdict.Severity, strings.Join(verdict.Rules, ", ")), "profile-asset-verdict")
 		}
+	}
+	if pluginOfSkill != "" && len(contents) == 0 {
+		return refuse(fmt.Sprintf("skill %q belongs to plugin %q in the account's profile and its content was not sent for scanning; asset_policy runtime detection refuses an unscanned plugin skill", name, pluginOfSkill),
+			"profile-asset-unscanned")
+	}
+	if targetType == "plugin" && len(contents) == 0 && connector == "claudecode" && name != "" && !strings.EqualFold(name, "unknown") &&
+		probe.ToolName != coworkPluginInstallTool {
+		// The hook reads every Claude Code plugin a request names; a named
+		// plugin with no content is one it could not find or read (or an old
+		// hook), and so one nothing has scanned.
+		return refuse(fmt.Sprintf("plugin %q is in the account's profile and its content was not sent for scanning; asset_policy runtime detection refuses an unscanned plugin", name),
+			"profile-asset-unscanned")
 	}
 	if targetType == "skill" {
 		for _, dir := range facts.SkillDirs {
