@@ -290,13 +290,40 @@ def _swapped_to_another_program(launcher: Path) -> None:
     launcher.write_bytes(b"another program")
 
 
+def _link_or_skip(launcher: Path, target: Path) -> None:
+    try:
+        launcher.symlink_to(target)
+    except OSError:
+        pytest.skip("this host cannot create symbolic links")
+
+
+def _swapped_to_a_link_to_the_recorded_bytes(launcher: Path) -> None:
+    target = launcher.parent / "elsewhere.exe"
+    target.write_bytes(_BODY)
+    launcher.unlink()
+    _link_or_skip(launcher, target)
+
+
+def _moved_and_its_old_name_linked(launcher: Path) -> None:
+    target = launcher.parent / "moved.exe"
+    launcher.rename(target)
+    _link_or_skip(launcher, target)
+
+
+def _replaced_by_another_file_with_the_recorded_bytes(launcher: Path) -> None:
+    copy = launcher.parent / "copy.exe"
+    copy.write_bytes(_BODY)
+    os.replace(copy, launcher)
+
+
 def _held_then_altered(launcher: Path) -> None:
     launcher.write_bytes(b"another program")
     raise PermissionError("held")
 
 
 # The first look finds a state that the next look would not: held, held and then
-# altered, swapped to a folder, swapped to other bytes. Each is a defect, never a pass.
+# altered, swapped to a folder, swapped to other bytes, or swapped to a link (or a
+# different file) that still has the recorded bytes. Each is a defect, never a pass.
 _FIRST_LOOKS = [
     ("read", _held, _UNREADABLE),
     ("stat", _held, _UNREADABLE),
@@ -304,6 +331,9 @@ _FIRST_LOOKS = [
     ("stat", _held_then_altered, _UNREADABLE),
     ("read", _swapped_to_a_folder, _UNREADABLE),
     ("read", _swapped_to_another_program, _MISMATCH),
+    ("read", _swapped_to_a_link_to_the_recorded_bytes, _MISMATCH),
+    ("read", _moved_and_its_old_name_linked, _MISMATCH),
+    ("read", _replaced_by_another_file_with_the_recorded_bytes, _MISMATCH),
 ]
 
 
