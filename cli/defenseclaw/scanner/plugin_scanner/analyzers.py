@@ -45,7 +45,12 @@ from defenseclaw.scanner.plugin_scanner.helpers import (
     strip_comment,
     strip_hash_comment,
 )
-from defenseclaw.scanner.plugin_scanner.regexp_receiver import RegexpReceivers, regexp_may_be_changed
+from defenseclaw.scanner.plugin_scanner.regexp_receiver import (
+    RegexpReceivers,
+    code_view,
+    file_facts,
+    regexp_may_be_changed,
+)
 from defenseclaw.scanner.plugin_scanner.rules import (
     BINARY_EXTENSIONS,
     BUNDLE_DIRS,
@@ -569,14 +574,12 @@ def scan_source_files(
 
     # A RegExp match is told from a command only when no file of the plugin
     # can change what a regular expression reaches (see regexp_receiver).
+    views: dict[str, str] = {}
     scripts = [(path, text) for path, text in loaded if not path.casefold().endswith(".py")]
-    regexp_aware = not secure_client_rules and not (
-        any("exec" in text for _, text in scripts)
-        and any(
-            regexp_may_be_changed(path, [strip_comment(line) for line in text.split("\n")])
-            for path, text in scripts
-        )
-    )
+    if not secure_client_rules and any("exec" in text for _, text in scripts):
+        views = {path: code_view(text) for path, text in scripts}
+        if regexp_may_be_changed([file_facts(path, view) for path, view in views.items()]):
+            views = {}
 
     for file_path, content in loaded:
         total_bytes += len(content)
@@ -622,7 +625,7 @@ def scan_source_files(
 
         _scan_suspicious_patterns(
             call_lines, rel_path, findings, capabilities, profile, in_test, "py" if is_py else "js", code_lines,
-            regexp_aware=regexp_aware,
+            receivers=RegexpReceivers(views[file_path]) if file_path in views else None,
         )
         _check_for_hardcoded_secrets(lines, rel_path, findings, in_test)
         _check_for_credential_access(code_lines, rel_path, findings, capabilities, in_test)
@@ -650,9 +653,8 @@ def _scan_suspicious_patterns(
     in_test_path: bool,
     language: str = "js",
     evidence_lines: list[str] | None = None,
-    regexp_aware: bool = True,
+    receivers: RegexpReceivers | None = None,
 ) -> None:
-    receivers = RegexpReceivers(code_lines) if language == "js" and regexp_aware else None
     for rule in SOURCE_PATTERN_RULES:
         if profile not in rule.profiles or language not in rule.languages:
             continue
@@ -662,7 +664,7 @@ def _scan_suspicious_patterns(
                 if (
                     rule.pattern_match_is_not_execution
                     and receivers is not None
-                    and receivers.only_pattern_matches(line)
+                    and receivers.only_pattern_matches(i)
                 ):
                     continue
                 if evidence_lines is not None and i < len(evidence_lines):
