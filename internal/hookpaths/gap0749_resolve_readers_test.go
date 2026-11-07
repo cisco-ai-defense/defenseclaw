@@ -48,6 +48,8 @@ func gap0749ResolveReaders(command, cwd, home string) {
 	plainMoveDestinationsWithStatements(fallback, fallbackFacts, simples)
 	callPastArgvBound(command)
 	ShellWriteOperands(command, cwd, home)
+	shellWriteOperands(command, cwd, home, KnownUser{})
+	knownStateOperands(command, cwd, home)
 	LiteralWriteOperands(command, cwd, home)
 	AdjacentAssignedWriteOperands(command, cwd, home)
 	DeclaredRedirectWriteOperands(command, cwd, home)
@@ -110,8 +112,8 @@ var gap0749ResolveReaderCalls = []string{
 	"actionClientProvedSafeVariableTargetsForHook", "actionClientVariableWriteCandidate",
 	"actionConcreteProtectedWriteOnWithOperands", "actionGlobFacts", "actionfacts.ActiveUserTildeTwin",
 	"actionfacts.Analyze", "actionfacts.DynamicOperandTwins", "actionfacts.SimpleCommands", "actionfacts.WrapperUnwrapTwin",
-	"callPastArgvBound", "clientStatementBudgetExceeded", "commandLinksWithFacts", "noDereferenceTouchStatus",
-	"plainMoveDestinationsWithStatements", "shellparse.TooDeep",
+	"callPastArgvBound", "clientStatementBudgetExceeded", "commandLinksWithFacts", "knownStateOperands", "noDereferenceTouchStatus",
+	"plainMoveDestinationsWithStatements", "shellWriteOperands", "shellparse.TooDeep",
 }
 
 // TestGAP0749ResolveReadersCoverResolve: the argv readers a bounded sweep
