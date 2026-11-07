@@ -506,10 +506,14 @@ if not isinstance(roster, dict):
     roster = {}
 if sorted(roster) != expected:
     problems.append("the JSON roster is %s, want %s" % (sorted(roster), expected))
+# The states the gateway emits for a connector row (managed_own_status.go).
+valid_states = ("protected", "not protected", "not confirmed")
 states = {}
 for name, row in roster.items():
     if not isinstance(row, dict) or not isinstance(row.get("protected"), bool) or not isinstance(row.get("state"), str) or not row["state"]:
         problems.append("connector %s has no protection state in the JSON answer" % name)
+    elif row["state"] not in valid_states:
+        problems.append("connector %s has the unknown state %r in the JSON answer, want one of %s" % (name, row["state"], list(valid_states)))
     elif (row["state"] == "protected") != row["protected"]:
         problems.append("connector %s has protected=%s but state %r in the JSON answer" % (name, row["protected"], row["state"]))
     else:
@@ -521,8 +525,10 @@ if first is None or last is None or last < first:
     problems.append("the text has no Account row followed by a Cowork row")
 else:
     # A connector row is two spaces, the label padded to 13 columns, a space
-    # and the state (showOwnStatus); the label is the connector name with
-    # capitals and spaces, so it maps back to the roster key.
+    # and the state (showOwnStatus). The label must be the exact one the CLI
+    # prints (ownConnectorLabel); Claude Code comes first, the rest by key.
+    special = {"opencode": "OpenCode", "openclaw": "OpenClaw", "claudecode": "Claude Code"}
+    labels = {special.get(key, key[:1].upper() + key[1:]): key for key in expected}
     rows = {}
     for line in lines[first + 1:last]:
         if not line.strip():
@@ -531,12 +537,17 @@ else:
         if not line.startswith("  ") or line[15:16] != " " or not label or not state:
             problems.append("the text has an unreadable connector row %r" % line)
             continue
-        key = label.lower().replace(" ", "")
+        key = labels.get(label)
+        if key is None:
+            problems.append("the text shows the label %r, want one of %s" % (label, sorted(labels)))
+            continue
         if key in rows:
             problems.append("the text shows %s twice" % label)
         rows[key] = state
     if sorted(rows) != expected:
         problems.append("the text shows connectors %s, want %s" % (sorted(rows), expected))
+    elif list(rows) != [k for k in expected if k == "claudecode"] + [k for k in expected if k != "claudecode"]:
+        problems.append("the text lists connectors in the order %s, want Claude Code first and the rest by name" % list(rows))
     for key, state in sorted(rows.items()):
         if key in states and states[key] != state:
             problems.append("the text shows %s as %r, the JSON answer says %r" % (key, state, states[key]))
