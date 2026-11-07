@@ -260,6 +260,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 						return false
 					}
 				}
+				actionLoopBindsUser(iter, values, effectiveCWD, home)
 				return true
 			}
 			stmt, ok := node.(*syntax.Stmt)
@@ -600,6 +601,25 @@ func actionInterpreterHomeWriteProved(code, language, cwd, home string) bool {
 	}
 	class, _ := unprovenInterpreterCode(code, language, cwd, home, true)
 	return class == ""
+}
+
+// actionLoopBindsUser takes USER or LOGNAME out of values when the for or
+// select loop iter binds it to words that all read as other logins: the
+// loop body and the statements after it name another user home, not the
+// active one. A word the scan cannot read, an empty list (the positional
+// parameters) or the active login itself keeps the value, so the body is
+// still read as the active user (rel-1-0-6:GAP-0601 review 5).
+func actionLoopBindsUser(iter *syntax.WordIter, values actionValues, cwd, home string) {
+	if iter.Name == nil || iter.Name.Value != "USER" && iter.Name.Value != "LOGNAME" || len(iter.Items) == 0 {
+		return
+	}
+	active := values[iter.Name.Value]
+	for _, word := range iter.Items {
+		if value, known := actionWordValue(word, values, cwd, home); !known || value == active || strings.ContainsAny(value, "*?[") {
+			return
+		}
+	}
+	delete(values, iter.Name.Value)
 }
 
 // actionUncalledFunctions lists the function definitions whose name the
