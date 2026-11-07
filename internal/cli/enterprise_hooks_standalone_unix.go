@@ -539,9 +539,6 @@ type enterpriseHookStandaloneOutcome struct {
 	result   *enterprisehooks.InstallResult
 	// agentConfig is the worker's connector.AgentConfigStatus code.
 	agentConfig string
-	// inferred marks a repair the guardian proved from the target files
-	// because the worker never answered (GAP-0754).
-	inferred bool
 }
 
 // dispatchEnterpriseHookStandaloneJobs runs the worker pool and maps every
@@ -1069,16 +1066,14 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			delete(jobsToRun, uid)
 		}
 	}
-	dispatchedOwned := fingerprintEnterpriseHookDispatchedOwnedFiles(slots, jobsToRun, ownedByRow)
-	outcomes := dispatchEnterpriseHookStandaloneJobs(ctx, jobsToRun)
+	outcomes := dispatchEnterpriseHookStandaloneJobs(withEnterpriseHookWorkerInterruptDrain(ctx), jobsToRun)
 	if err := ctx.Err(); err != nil {
 		// The watch loop interrupted the pass after workers that had
 		// finished put their targets back: those repairs still happened and
 		// are reported, because the next pass finds the files in order
-		// (GAP-0754). A worker the interrupt killed after it restored a file
-		// and before its answer was accepted left only the file behind: the
-		// guardian proves that restore from the files themselves.
-		inferEnterpriseHookStandaloneLostRestores(cfg.DataDir, slots, rows, ownedByRow, dispatchedOwned, outcomes)
+		// (GAP-0754). The dispatch gave each running worker the interrupt
+		// drain to answer, so a worker that restored a file is not killed
+		// before it says so.
 		run.RepairedTargets = reportEnterpriseHookStandaloneInterruptedRepairs(cfg.DataDir, hookSocket, slots, rows, outcomes)
 		run.Repairs = len(run.RepairedTargets)
 		return run, err
@@ -1206,76 +1201,6 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	return run, nil
 }
 
-// fingerprintEnterpriseHookDispatchedOwnedFiles takes, before the workers run,
-// the fingerprint of every exclusive-writer hook file of each dispatched target
-// the guardian protected before. It is the state an interrupted pass compares
-// the files with when a worker never answered (GAP-0754).
-func fingerprintEnterpriseHookDispatchedOwnedFiles(slots map[int]enterpriseHookStandaloneSlot,
-	jobs map[int]*enterpriseHookWorkerJob, ownedByRow map[int][]string) map[int]map[string]string {
-	dispatched := map[int]bool{}
-	for _, job := range jobs {
-		for _, target := range job.Request.Targets {
-			dispatched[target.Index] = true
-		}
-	}
-	before := map[int]map[string]string{}
-	for index, slot := range slots {
-		if !slot.verifiable || !dispatched[index] || len(ownedByRow[index]) == 0 {
-			continue
-		}
-		files := make(map[string]string, len(ownedByRow[index]))
-		for _, path := range ownedByRow[index] {
-			files[path] = enterpriseHookOwnedFileFingerprint(path)
-		}
-		before[index] = files
-	}
-	return before
-}
-
-// inferEnterpriseHookStandaloneLostRestores marks as repaired, in outcomes,
-// each previously protected target whose worker gave no answer to an
-// interrupted pass but whose exclusive hook file now holds regular content it
-// did not hold when the pass began. The worker is the only writer of those
-// files, and the production runner drops its response once the pass context
-// is canceled, so the file is the only record of the restore left. When the
-// guardian recorded the target files at its last pass, the new content must
-// be that recorded content: a file an event just tampered with is repaired
-// and reported by the next pass, not here.
-func inferEnterpriseHookStandaloneLostRestores(dataDir string, slots map[int]enterpriseHookStandaloneSlot,
-	rows []enterpriseHookReconcileRow, ownedByRow map[int][]string, before map[int]map[string]string,
-	outcomes map[int]enterpriseHookStandaloneOutcome) {
-	var record enterprisehooks.GuardianOwnedFilesRecord
-	if dataDir = strings.TrimSpace(dataDir); dataDir != "" {
-		record, _ = enterprisehooks.ReadGuardianOwnedFilesRecord(filepath.Join(dataDir, enterprisehooks.GuardianOwnedFilesFile))
-	}
-	for index, files := range before {
-		if index >= len(rows) || outcomes[index].ok {
-			continue
-		}
-		slot, row := slots[index], rows[index]
-		var recorded map[string]string
-		for _, target := range record.Targets {
-			if target.UID == slot.account.UID && target.User == row.User && strings.EqualFold(target.Connector, row.Connector) {
-				recorded = make(map[string]string, len(target.Files))
-				for _, file := range target.Files {
-					recorded[file.Path] = file.Fingerprint
-				}
-			}
-		}
-		for _, path := range ownedByRow[index] {
-			now := enterpriseHookOwnedFileFingerprint(path)
-			if now == files[path] || now == "absent" || now == "unreadable" || strings.HasPrefix(now, "irregular:") {
-				continue
-			}
-			if recorded != nil && recorded[path] != now {
-				continue
-			}
-			outcomes[index] = enterpriseHookStandaloneOutcome{ok: true, repaired: true, inferred: true}
-			break
-		}
-	}
-}
-
 // reportEnterpriseHookStandaloneInterruptedRepairs accounts the targets the
 // workers of an interrupted pass answered as repaired, exactly as a pass that
 // ran to its end does: the repairs record, the audit report to the gateway
@@ -1295,21 +1220,16 @@ func reportEnterpriseHookStandaloneInterruptedRepairs(dataDir, hookSocket string
 	restoredAt := time.Now().UTC().Format(time.RFC3339Nano)
 	for index, slot := range slots {
 		outcome, ok := outcomes[index]
-		if !ok || !outcome.ok || !outcome.repaired || (outcome.result == nil && !outcome.inferred) || index >= len(rows) {
+		if !ok || !outcome.ok || !outcome.repaired || outcome.result == nil || index >= len(rows) {
 			continue
 		}
-		user, name := rows[index].User, rows[index].Connector
-		if outcome.result != nil {
-			name = outcome.result.Connector
-		}
+		user, name := rows[index].User, outcome.result.Connector
 		uid := slot.account.UID
 		repairedTargets[slot.key] = true
 		repaired = append(repaired, enterpriseHookGuardianRepair{User: user, Connector: name})
 		audits = append(audits, enterpriseHookGuardianAuditReport{User: user, UID: uid, Connector: name})
 		restored = append(restored, enterpriseHookGuardianRestore{UID: &uid, User: user, Connector: name, RestoredAt: restoredAt})
-		if !outcome.inferred {
-			answered[user+"\x00"+strings.ToLower(name)] = true
-		}
+		answered[user+"\x00"+strings.ToLower(name)] = true
 		if outcome.agentConfig != "" {
 			notices = append(notices, enterpriseHookGuardianNotice{User: user, Connector: name, AgentConfig: outcome.agentConfig})
 		}
