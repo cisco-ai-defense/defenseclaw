@@ -8855,7 +8855,9 @@ def test_an_install_keeps_a_recorded_hook_guard_copy_an_older_roll_forward_canno
     body = _ps1_function("Save-HelperRecoveryCopy")
     assert 'Install-File $guard (Join-Path $InstallerDir "defenseclaw-hook-guard.exe")' in body
     assert 'Join-Path $InstallerDir "binaries.sha256"' in body
-    assert '@("defenseclaw-gateway.exe", "defenseclaw-hook-guard.exe")' in body
+    # The launcher's digest is recorded with them so doctor and status can tell
+    # the installed launcher from another program under its name (GAP-0810).
+    assert '@("defenseclaw-gateway.exe", "defenseclaw-hook.exe", "defenseclaw-hook-guard.exe")' in body
     assert "Publish-File" in body and "catch" in body
     install_new = _ps1_function("Install-New")
     loop = install_new.index("foreach ($name in $ManagedBinaries)")

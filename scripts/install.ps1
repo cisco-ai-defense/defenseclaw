@@ -3541,7 +3541,11 @@ function Save-HelperRecoveryCopy {
     try {
         New-Item -ItemType Directory -Path $InstallerDir -Force | Out-Null
         Install-File $guard (Join-Path $InstallerDir "defenseclaw-hook-guard.exe")
-        $lines = foreach ($name in @("defenseclaw-gateway.exe", "defenseclaw-hook-guard.exe")) {
+        # The launcher's digest lets doctor and status tell the installed
+        # launcher from another program under its name (GAP-0810).
+        $recorded = @("defenseclaw-gateway.exe", "defenseclaw-hook.exe", "defenseclaw-hook-guard.exe") |
+            Where-Object { Test-Path -LiteralPath (Join-Path $BinDir $PSItem) -PathType Leaf }
+        $lines = foreach ($name in $recorded) {
             "$((Get-Sha256 (Join-Path $BinDir $name)).ToLowerInvariant())  $name"
         }
         $record = Join-Path $InstallerDir "binaries.sha256"
