@@ -1350,7 +1350,7 @@ def _configured_agent_evidence_is_stale(cached: AgentDiscovery, data_dir: str | 
         if not os.path.isabs(signal.binary_path) or not _resolves_unchanged_since(signal.binary_path, since, data_dir):
             return True
         if _executable_replaced_since_read(
-            signal.binary_path, signal.identity, _parse_rfc3339(signal.observed_at) or scanned
+            signal.binary_path, signal.identity, _parse_rfc3339(signal.observed_at) or scanned, data_dir
         ):
             return True
         recorded = {"skipped_binaries": list(signal.skipped_binaries)}
@@ -1459,14 +1459,18 @@ def _keep_versions_of_slow_unchanged_agents(
                 signal.error = VERSION_NOT_PROBED
                 signal.installed = True
             continue
-        try:
-            changed_at = os.stat(os.path.realpath(previous_binary)).st_mtime
-        except OSError:
-            continue
-        if changed_at >= previous_scan.timestamp():
-            continue
+        # The same judgement every other reader of a cached version makes: the
+        # file must still be the one that answered, by its identity, or (an
+        # entry from before identities, as a 1.0.8 upgrade leaves) by the times
+        # of the file and of every link and folder on its way against the time
+        # it was read. A probe that timed out on a replaced file keeps nothing.
         recorded_identity = _recorded_identity(previous)
-        if recorded_identity and _executable_identity(previous_binary) != recorded_identity:
+        if _executable_replaced_since_read(
+            previous_binary,
+            recorded_identity,
+            _entry_observed_at(previous, payload) or previous_scan,
+            data_dir,
+        ):
             continue
         signal.binary_path = previous_binary
         signal.version = version
@@ -1535,13 +1539,9 @@ def _resolves_unchanged_since(
     path: str,
     since: float,
     data_dir: str | os.PathLike[str] | None = None,
-    *,
-    links_only: bool = False,
 ) -> bool:
     """Whether *path* resolves to a regular file through links and folders
     none of which, nor the file, changed (mtime or ctime) at or after *since*.
-    With ``links_only`` only the links on the way are judged (a link moved to
-    another file, whatever that file's own times are).
 
     Every link on the way counts, also a link in a parent folder: switching a
     ``current`` link to another version folder, or installing a new version
@@ -1589,8 +1589,6 @@ def _resolves_unchanged_since(
         if os.path.isabs(target):
             resolved = (target_drive or drive) + os.sep
         pending.extend(part for part in reversed(target_rest.split(os.sep)) if part)
-    if links_only:
-        return True
     holders = _data_dir_holders(data_dir)
     always = {resolved, os.path.dirname(resolved)}
     for checked in dict.fromkeys(chain):
@@ -3610,7 +3608,12 @@ def _entry_for_cache(signal: AgentSignal, observed_at: str) -> dict[str, Any]:
     return {**asdict(_current_signal(signal)), _ENTRY_OBSERVED_AT: observed_at}
 
 
-def _executable_replaced_since_read(path: str, recorded: list[Any], read_at: datetime | None) -> bool:
+def _executable_replaced_since_read(
+    path: str,
+    recorded: list[Any],
+    read_at: datetime | None,
+    data_dir: str | os.PathLike[str] | None = None,
+) -> bool:
     """Whether the version read at *read_at* from the executable at *path* is
     no longer the version of the file there.
 
@@ -3619,8 +3622,11 @@ def _executable_replaced_since_read(path: str, recorded: list[Any], read_at: dat
     removed one). A reading with a recorded identity is compared with the file
     now (:func:`_executable_identity`); one written before identities existed
     is judged by the times of the file against the read time (the change time
-    in the unit of the modification time), and by the links on the way, which a
-    switch to another installed file leaves with old file times.
+    in the unit of the modification time), and by every link and folder on the
+    way (:func:`_resolves_unchanged_since`): a link switched to another
+    installed file, or a folder replaced by a ready-made one, leaves the file
+    with old times and rebinds the path. A folder that changed for another
+    reason only costs one new probe.
     """
     current = _executable_identity(path) if path else []
     if not current:
@@ -3630,11 +3636,13 @@ def _executable_replaced_since_read(path: str, recorded: list[Any], read_at: dat
     if read_at is None:
         return False
     return max(current[2], current[5]) >= int(read_at.timestamp() * 1_000_000_000) or not _resolves_unchanged_since(
-        path, read_at.timestamp(), links_only=True
+        path, read_at.timestamp(), data_dir
     )
 
 
-def _entry_executable_changed(entry: Any, payload: dict[str, Any]) -> bool:
+def _entry_executable_changed(
+    entry: Any, payload: dict[str, Any], data_dir: str | os.PathLike[str] | None = None
+) -> bool:
     """Whether the version a cached *entry* records belongs to an executable
     that is no longer the one at its path (:func:`_executable_replaced_since_read`).
 
@@ -3649,7 +3657,9 @@ def _entry_executable_changed(entry: Any, payload: dict[str, Any]) -> bool:
     path = str(entry.get("binary_path") or "")
     if not path:
         return False
-    return _executable_replaced_since_read(path, _recorded_identity(entry), _entry_observed_at(entry, payload))
+    return _executable_replaced_since_read(
+        path, _recorded_identity(entry), _entry_observed_at(entry, payload), data_dir
+    )
 
 
 def _entry_selected_elsewhere(entry: Any, fresh: AgentSignal) -> bool:
@@ -3684,7 +3694,12 @@ def _signal_observed_at(signal: AgentSignal, disc: AgentDiscovery) -> datetime |
     return _parse_rfc3339(signal.observed_at) or _parse_rfc3339(disc.scanned_at)
 
 
-def _cached_entry_is_newer(entry: Any, payload: dict[str, Any], read_at: datetime | None) -> bool:
+def _cached_entry_is_newer(
+    entry: Any,
+    payload: dict[str, Any],
+    read_at: datetime | None,
+    data_dir: str | os.PathLike[str] | None = None,
+) -> bool:
     """Whether a cached entry holds a reading (a version, or a probe that
     could not read one) taken after *read_at*, the time the scan being written
     took its own. Such an entry is newer evidence and stays, whichever scan
@@ -3694,7 +3709,7 @@ def _cached_entry_is_newer(entry: Any, payload: dict[str, Any], read_at: datetim
     version belongs to an executable replaced since is no evidence at all
     (:func:`_entry_executable_changed`): it is judged here, when it would be
     kept, so a late writer cannot restore it."""
-    if read_at is None or not _entry_was_read(entry) or _entry_executable_changed(entry, payload):
+    if read_at is None or not _entry_was_read(entry) or _entry_executable_changed(entry, payload, data_dir):
         return False
     observed = _entry_observed_at(entry, payload)
     return observed is not None and observed > read_at
@@ -3741,7 +3756,7 @@ def _write_cache(
             if existing is not None:
                 for name, entry in existing["agents"].items():
                     if name in agents and _cached_entry_is_newer(
-                        entry, existing, _signal_observed_at(disc.agents[name], disc)
+                        entry, existing, _signal_observed_at(disc.agents[name], disc), target_dir
                     ):
                         observed = _format_rfc3339(_entry_observed_at(entry, existing))
                         agents[name] = {**entry, _ENTRY_OBSERVED_AT: observed}
@@ -3801,12 +3816,12 @@ def _publish_agent_signal(
                     if (
                         peer != name
                         and not _scan_read_version(fresh)
-                        and not _entry_executable_changed(cached_peer, payload)
+                        and not _entry_executable_changed(cached_peer, payload, data_dir)
                         and not _entry_selected_elsewhere(cached_peer, fresh)
                     ):
                         continue
                     read_at = _signal_observed_at(fresh, disc)
-                    if _cached_entry_is_newer(cached_peer, payload, read_at):
+                    if _cached_entry_is_newer(cached_peer, payload, read_at, data_dir):
                         continue
                     payload["agents"][peer] = _entry_for_cache(fresh, fresh.observed_at or disc.scanned_at)
                 body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
