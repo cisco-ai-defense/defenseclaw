@@ -27,129 +27,215 @@ func plistRecord(uids []string, homes []string, names []string) string {
 	return "\t<dict>\n" + field("NFSHomeDirectory", homes) + field("RecordName", names) + field("UniqueID", uids) + "\t</dict>\n"
 }
 
+// plistAnswer is what dscl -plist prints for the given records.
 func plistAnswer(records ...string) string {
 	return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
 		"<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n" +
 		"<plist version=\"1.0\">\n<array>\n" + strings.Join(records, "") + "</array>\n</plist>\n"
 }
 
+// jsonRecord and jsonAnswer are what `plutil -convert json -o - -` prints for
+// the same records: an array of objects whose values are arrays of strings.
+func jsonRecord(uids []string, homes []string, names []string) string {
+	list := func(values []string) string {
+		quoted := make([]string, len(values))
+		for i, v := range values {
+			quoted[i] = fmt.Sprintf("%q", v)
+		}
+		return "[" + strings.Join(quoted, ",") + "]"
+	}
+	var fields []string
+	for _, f := range []struct {
+		key    string
+		values []string
+	}{{"NFSHomeDirectory", homes}, {"RecordName", names}, {"UniqueID", uids}} {
+		if f.values != nil {
+			fields = append(fields, fmt.Sprintf("%q:%s", "dsAttrTypeStandard:"+f.key, list(f.values)))
+		}
+	}
+	return "{" + strings.Join(fields, ",") + "}"
+}
+
+func jsonAnswer(records ...string) string { return "[" + strings.Join(records, ",") + "]\n" }
+
 var (
-	recordAlice = plistRecord([]string{"502"}, []string{"/Users/shared"}, []string{"alice"})
-	recordCorp  = plistRecord([]string{"1000501"}, []string{"/Users/corp", "/Users/shared"}, []string{"corp", "corp.alias"})
-	recordBob   = plistRecord([]string{"503"}, []string{"/Users/bob"}, []string{"bob"})
+	jsonAlice = jsonRecord([]string{"502"}, []string{"/Users/shared"}, []string{"alice"})
+	jsonCorp  = jsonRecord([]string{"1000501"}, []string{"/Users/corp", "/Users/shared"}, []string{"corp", "corp.alias"})
+	jsonBob   = jsonRecord([]string{"503"}, []string{"/Users/bob"}, []string{"bob"})
+	dsclAlice = plistRecord([]string{"502"}, []string{"/Users/shared"}, []string{"alice"})
+	dsclBob   = plistRecord([]string{"503"}, []string{"/Users/bob"}, []string{"bob"})
 )
 
-func plistResult(s string) func() (commandResult, error) {
+func dsclResult(s string) func() (commandResult, error) {
 	return func() (commandResult, error) { return commandResult{stdout: []byte(s)}, nil }
 }
 
-// The accounts at a home are read from one structured answer across the whole
-// search policy: a local account and a directory account both answer, other
-// homes are not held, and an answer that is not a complete plist whose
-// records all carry the fields is an error so the home is never taken for free.
+// plutilStub stands for the system tool: it records what was piped in and
+// answers with the recorded output and exit code.
+type plutilStub struct {
+	input  string
+	called bool
+	out    string
+	exit   int
+	err    error
+}
+
+func (p *plutilStub) convert(plist []byte) (commandResult, error) {
+	p.input, p.called = string(plist), true
+	return commandResult{stdout: []byte(p.out), exitCode: p.exit}, p.err
+}
+
+// The accounts at a home are read from the system tool's JSON of one dscl
+// plist answer across the search policy: a local account and a directory
+// account both answer and other homes are not held.
 func TestDSCLHomeAccounts(t *testing.T) {
 	const home = "/Users/shared"
 	cases := []struct {
-		name    string
-		answer  string
-		want    []HomeAccount
-		wantErr bool
+		name string
+		json string
+		want []HomeAccount
 	}{
-		{"one holder", plistAnswer(recordAlice, recordBob), []HomeAccount{{"alice", 502}}, false},
-		{"a local and a directory holder", plistAnswer(recordAlice, recordBob, recordCorp), []HomeAccount{{"alice", 502}, {"corp", 1000501}}, false},
-		{"no holder among other records", plistAnswer(recordBob), nil, false},
-		{"no records at all", plistAnswer(), nil, false},
-		{"an empty array element", "<plist version=\"1.0\"><array/></plist>", nil, false},
-		{"a home that only shares a prefix", plistAnswer(plistRecord([]string{"504"}, []string{"/Users/shared2"}, []string{"dan"})), nil, false},
-		{"a negative uid", plistAnswer(plistRecord([]string{"-2"}, []string{home}, []string{"nobody"})), []HomeAccount{{"nobody", -2}}, false},
-
-		{"an empty answer", "", nil, true},
-		{"the old text rows", "alice\t\tNFSHomeDirectory = (\n    \"/Users/shared\"\n)\n", nil, true},
-		{"an indented text row", "  alice\t\tNFSHomeDirectory = (\n    \"/Users/shared\"\n)\n", nil, true},
-		{"an indented row after a valid one", "carol\t\tNFSHomeDirectory = (\n    \"/Users/shared\"\n)\n  bob\t\tNFSHomeDirectory = (\n    \"/Users/shared\"\n)\n", nil, true},
-		{"an indented line with no record", "   something\n", nil, true},
-		{"a closing parenthesis alone", ")\n", nil, true},
-		{"text after the plist", plistAnswer(recordBob) + "more\n", nil, true},
-		{"warning text before the plist", "directory warning: truncated holder list\n<plist><array/></plist>", nil, true},
-		{"warning text before the plist and its record", "directory warning\n" + plistAnswer(recordAlice), nil, true},
-		{"text between the declaration and the plist", "<?xml version=\"1.0\"?>\nunknown holder\n<plist><array/></plist>", nil, true},
-		{"another processing instruction before the plist", "<?other x?>\n<plist><array/></plist>", nil, true},
-		{"a declaration, a comment and white space before the plist", "<?xml version=\"1.0\"?>\n<!-- note -->\n  <plist><array/></plist>", nil, false},
-		{"an unknown directive before an empty list", "<!UNKNOWN truncated holder list>\n<plist><array/></plist>", nil, true},
-		{"an unknown directive before a record", "<!UNKNOWN truncated holder list>\n" + plistAnswer(recordAlice), nil, true},
-		{"an unknown directive inside the record array", strings.Replace(plistAnswer(recordAlice, recordBob), "<array>\n", "<array>\n<!UNKNOWN truncated holder list>\n", 1), nil, true},
-		{"an unknown directive inside a record", plistAnswer(strings.Replace(recordAlice, "<dict>\n", "<dict>\n<!UNKNOWN field>\n", 1)), nil, true},
-		{"a processing instruction inside the plist", "<plist><?note truncated?><array/></plist>", nil, true},
-		{"a declaration that states no version", "<?xml warning?>\n<plist><array/></plist>", nil, true},
-		{"two declarations", "<?xml version=\"1.0\"?>\n<?xml version=\"1.0\"?>\n<plist><array/></plist>", nil, true},
-		{"two doctypes", "<!DOCTYPE plist>\n<!DOCTYPE plist>\n<plist><array/></plist>", nil, true},
-		{"a doctype of another document", "<!DOCTYPE html>\n<plist><array/></plist>", nil, true},
-		{"a second plist after the first", plistAnswer(recordBob) + plistAnswer(recordAlice), nil, true},
-		{"a root that is not a plist", strings.ReplaceAll(plistAnswer(recordAlice), "plist", "other"), nil, true},
-		{"a dict outside the array", "<plist><dict></dict></plist>", nil, true},
-		{"an item that is not a dict", "<plist><array><string>alice</string></array></plist>", nil, true},
-		{"a record with no uid", plistAnswer(plistRecord(nil, []string{home}, []string{"alice"})), nil, true},
-		{"a record with no home", plistAnswer(recordAlice, plistRecord([]string{"503"}, nil, []string{"bob"})), nil, true},
-		{"a record with no name", plistAnswer(plistRecord([]string{"502"}, []string{home}, nil)), nil, true},
-		{"a record with an empty value list", plistAnswer(plistRecord([]string{"502"}, []string{}, []string{"alice"})), nil, true},
-		{"a record with two uids", plistAnswer(plistRecord([]string{"502", "503"}, []string{home}, []string{"alice"})), nil, true},
-		{"a uid that is not a number", plistAnswer(plistRecord([]string{"abc"}, []string{home}, []string{"alice"})), nil, true},
-		{"an empty home string", plistAnswer(plistRecord([]string{"502"}, []string{" "}, []string{"alice"})), nil, true},
-		{"a name that is not an account name", plistAnswer(plistRecord([]string{"502"}, []string{home}, []string{"a/b"})), nil, true},
-		{"text in an otherwise empty record array", "<plist><array>unknown holder</array></plist>", nil, true},
-		{"text in the plist beside the array", "<plist>unknown holder<array/></plist>", nil, true},
-		{"text among the records", strings.Replace(plistAnswer(recordAlice), "<array>\n", "<array>\nunknown holder\n", 1), nil, true},
-		{"text inside a record", plistAnswer(strings.Replace(recordAlice, "<dict>\n", "<dict>\nunknown field\n", 1)), nil, true},
-		{"text inside a value array", plistAnswer(strings.Replace(recordAlice, "<string>/Users/shared</string>", "<string>/Users/shared</string>unknown second home", 1)), nil, true},
-		{"an element inside a key", plistAnswer(strings.Replace(recordAlice, "<key>dsAttrTypeStandard:UniqueID</key>", "<key>dsAttrTypeStandard:UniqueID<x/></key>", 1)), nil, true},
-		{"white space and a comment between elements", strings.Replace(plistAnswer(recordAlice, recordBob), "<array>\n", "<array>\n  <!-- note -->\n  ", 1), []HomeAccount{{"alice", 502}}, false},
-		{"a key with no value", strings.Replace(plistAnswer(recordAlice), "<array>\n\t\t\t<string>502</string>\n\t\t</array>", "", 1), nil, true},
-		{"a field repeated in one record", strings.Replace(recordAlice, "</dict>", plistRecord([]string{"1"}, []string{home}, []string{"x"})[len("\t<dict>\n"):], 1), nil, true},
+		{"one holder", jsonAnswer(jsonAlice, jsonBob), []HomeAccount{{"alice", 502}}},
+		{"a local and a directory holder", jsonAnswer(jsonAlice, jsonBob, jsonCorp), []HomeAccount{{"alice", 502}, {"corp", 1000501}}},
+		{"no holder among other records", jsonAnswer(jsonBob), nil},
+		{"no records at all", jsonAnswer(), nil},
+		{"pretty printed output", "[\n  {\n    \"dsAttrTypeStandard:NFSHomeDirectory\" : [\n      \"/Users/shared\"\n    ],\n    \"dsAttrTypeStandard:RecordName\" : [\n      \"alice\"\n    ],\n    \"dsAttrTypeStandard:UniqueID\" : [\n      \"502\"\n    ]\n  }\n]\n", []HomeAccount{{"alice", 502}}},
+		{"a home that only shares a prefix", jsonAnswer(jsonRecord([]string{"504"}, []string{"/Users/shared2"}, []string{"dan"})), nil},
+		{"a negative uid", jsonAnswer(jsonRecord([]string{"-2"}, []string{home}, []string{"nobody"})), []HomeAccount{{"nobody", -2}}},
+		{"an extra field that is an array of strings", strings.Replace(jsonAnswer(jsonAlice), "}", `,"dsAttrTypeStandard:Other":["x"]}`, 1), []HomeAccount{{"alice", 502}}},
 	}
 	for _, tc := range cases {
-		answer := tc.answer
-		if strings.HasPrefix(answer, "\t<dict>") {
-			answer = plistAnswer(answer)
+		stub := &plutilStub{out: tc.json}
+		dscl := plistAnswer(dsclAlice, dsclBob)
+		got, err := dsclHomeAccounts(home, dsclResult(dscl), stub.convert)
+		if err != nil || !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: got %v, %v; want %v", tc.name, got, err, tc.want)
 		}
-		got, err := dsclHomeAccounts(home, plistResult(answer))
-		if (err != nil) != tc.wantErr || !reflect.DeepEqual(got, tc.want) {
-			t.Errorf("%s: got %v, %v; want %v, error=%v", tc.name, got, err, tc.want, tc.wantErr)
+		if !stub.called || stub.input != dscl {
+			t.Errorf("%s: the converter must be given the dscl answer unchanged, got %q", tc.name, stub.input)
 		}
 	}
 }
 
-// Every proper prefix of a valid answer is an error: output cut anywhere never
-// turns into a shorter list of holders or an empty one.
-func TestDSCLHomeAccountsTruncatedAnswerIsAnError(t *testing.T) {
-	full := plistAnswer(recordCorp, recordBob, recordAlice)
-	if got, err := dsclHomeAccounts("/Users/shared", plistResult(full)); err != nil || len(got) != 2 {
+// A dscl answer the system tool refuses to convert (non-zero exit: another
+// document's doctype, a declaration without a version or with an unknown
+// field, text before or after the plist, the old text rows, an empty answer,
+// a cut answer) is an error and never an empty list or a shorter one. The
+// plist itself is not read by this code.
+func TestDSCLHomeAccountsRefusedConversionIsAnError(t *testing.T) {
+	const home = "/Users/shared"
+	plain := plistAnswer(dsclAlice, dsclBob)
+	answers := map[string]string{
+		"an empty answer":                     "",
+		"the old text rows":                   "alice\t\tNFSHomeDirectory = (\n    \"/Users/shared\"\n)\n",
+		"text after the plist":                plain + "more\n",
+		"warning text before the plist":       "directory warning: truncated holder list\n<plist><array/></plist>",
+		"a doctype named like plist":          "<!DOCTYPE plistBackup>\n<plist><array/></plist>",
+		"a doctype with a suffix":             "<!DOCTYPE plist:extra>\n<plist><array/></plist>",
+		"a doctype of another document":       "<!DOCTYPE html>\n<plist><array/></plist>",
+		"a version of garbage":                "<?xml version=garbage?>\n<plist><array/></plist>",
+		"a declaration with no version":       "<?xml encoding=\"UTF-8\"?>\n<plist><array/></plist>",
+		"a declaration with an unknown field": "<?xml version=\"1.0\" other=\"x\"?>\n<plist><array/></plist>",
+		"two declarations":                    "<?xml version=\"1.0\"?>\n<?xml version=\"1.0\"?>\n<plist><array/></plist>",
+		"a second plist after the first":      plain + plain,
+		"a cut answer":                        plain[:len(plain)/2],
+	}
+	for name, dscl := range answers {
+		stub := &plutilStub{exit: 1}
+		if got, err := dsclHomeAccounts(home, dsclResult(dscl), stub.convert); err == nil {
+			t.Errorf("%s: accepted as %v", name, got)
+		}
+		if !stub.called || stub.input != dscl {
+			t.Errorf("%s: the converter must be given the dscl answer unchanged, got %q", name, stub.input)
+		}
+	}
+	stub := &plutilStub{err: errors.New("timed out")}
+	if _, err := dsclHomeAccounts(home, dsclResult(plain), stub.convert); err == nil {
+		t.Error("a conversion that did not run must be an error")
+	}
+}
+
+// The tool's output must be exactly the expected structure with the field
+// types: anything else leaves the holders unknown and is an error.
+func TestDSCLHomeAccountsUnexpectedJSONIsAnError(t *testing.T) {
+	const home = "/Users/shared"
+	cases := map[string]string{
+		"no output":                        "",
+		"not json":                         "alice\t\tNFSHomeDirectory\n",
+		"text after the array":             jsonAnswer(jsonAlice) + "more\n",
+		"a second array after the first":   jsonAnswer(jsonAlice) + jsonAnswer(jsonBob),
+		"an object, not an array":          jsonAlice,
+		"an array of arrays":               `[[]]`,
+		"an item that is not an object":    `["alice"]`,
+		"null":                             `null`,
+		"a null item":                      `[null]`,
+		"a record with no uid":             jsonAnswer(jsonRecord(nil, []string{home}, []string{"alice"})),
+		"a record with no home":            jsonAnswer(jsonAlice, jsonRecord([]string{"503"}, nil, []string{"bob"})),
+		"a record with no name":            jsonAnswer(jsonRecord([]string{"502"}, []string{home}, nil)),
+		"a record with an empty home list": jsonAnswer(jsonRecord([]string{"502"}, []string{}, []string{"alice"})),
+		"a record with two uids":           jsonAnswer(jsonRecord([]string{"502", "503"}, []string{home}, []string{"alice"})),
+		"a uid that is not a number":       jsonAnswer(jsonRecord([]string{"abc"}, []string{home}, []string{"alice"})),
+		"a uid that is a json number":      `[{"dsAttrTypeStandard:UniqueID":502,"dsAttrTypeStandard:NFSHomeDirectory":["/Users/shared"],"dsAttrTypeStandard:RecordName":["alice"]}]`,
+		"a value that is a string":         `[{"dsAttrTypeStandard:UniqueID":"502","dsAttrTypeStandard:NFSHomeDirectory":"/Users/shared","dsAttrTypeStandard:RecordName":["alice"]}]`,
+		"a value that is null":             `[{"dsAttrTypeStandard:UniqueID":["502"],"dsAttrTypeStandard:NFSHomeDirectory":null,"dsAttrTypeStandard:RecordName":["alice"]}]`,
+		"a value with a non-string item":   `[{"dsAttrTypeStandard:UniqueID":["502"],"dsAttrTypeStandard:NFSHomeDirectory":["/Users/shared",1],"dsAttrTypeStandard:RecordName":["alice"]}]`,
+		"an empty home string":             jsonAnswer(jsonRecord([]string{"502"}, []string{" "}, []string{"alice"})),
+		"a name that is not an account":    jsonAnswer(jsonRecord([]string{"502"}, []string{home}, []string{"a/b"})),
+		"a field repeated in one record":   `[{"dsAttrTypeStandard:UniqueID":["502"],"dsAttrTypeStandard:UniqueID":["1"],"dsAttrTypeStandard:NFSHomeDirectory":["/Users/shared"],"dsAttrTypeStandard:RecordName":["alice"]}]`,
+		"an extra field of another type":   `[{"dsAttrTypeStandard:UniqueID":["502"],"dsAttrTypeStandard:NFSHomeDirectory":["/Users/shared"],"dsAttrTypeStandard:RecordName":["alice"],"x":1}]`,
+		"an unclosed array":                `[` + jsonAlice,
+		"a trailing comma":                 `[` + jsonAlice + `,]`,
+		"a record after a bad record":      `[{},` + jsonAlice + `]`,
+	}
+	for name, out := range cases {
+		stub := &plutilStub{out: out}
+		if got, err := dsclHomeAccounts(home, dsclResult(plistAnswer(dsclAlice)), stub.convert); err == nil {
+			t.Errorf("%s: accepted as %v", name, got)
+		}
+	}
+}
+
+// Every proper prefix of a valid JSON answer is an error: output cut anywhere
+// never turns into a shorter list of holders or an empty one.
+func TestDSCLHomeAccountsTruncatedOutputIsAnError(t *testing.T) {
+	full := jsonAnswer(jsonCorp, jsonBob, jsonAlice)
+	stub := &plutilStub{out: full}
+	if got, err := dsclHomeAccounts("/Users/shared", dsclResult("x"), stub.convert); err != nil || len(got) != 2 {
 		t.Fatalf("the full answer: got %v, %v", got, err)
 	}
 	for cut := 0; cut < len(full)-1; cut++ {
-		prefix := full[:cut]
 		if strings.TrimSpace(full[cut:]) == "" {
 			continue
 		}
-		if got, err := dsclHomeAccounts("/Users/shared", plistResult(prefix)); err == nil {
-			t.Fatalf("answer cut at %d bytes was accepted as %v", cut, got)
+		stub := &plutilStub{out: full[:cut]}
+		if got, err := dsclHomeAccounts("/Users/shared", dsclResult("x"), stub.convert); err == nil {
+			t.Fatalf("output cut at %d bytes was accepted as %v", cut, got)
 		}
 	}
 }
 
 func TestDSCLHomeAccountsFailuresAreErrors(t *testing.T) {
-	if _, err := dsclHomeAccounts("/Users/shared", func() (commandResult, error) { return commandResult{}, errors.New("timed out") }); err == nil {
+	good := &plutilStub{out: jsonAnswer(jsonBob)}
+	if _, err := dsclHomeAccounts("/Users/shared", func() (commandResult, error) { return commandResult{}, errors.New("timed out") }, good.convert); err == nil {
 		t.Error("a failed read must be an error")
 	}
+	if good.called {
+		t.Error("a failed read must not be converted")
+	}
 	if _, err := dsclHomeAccounts("/Users/shared", func() (commandResult, error) {
-		return commandResult{stdout: []byte(plistAnswer(recordBob)), exitCode: 14}, nil
-	}); err == nil {
+		return commandResult{stdout: []byte(plistAnswer(dsclBob)), exitCode: 14}, nil
+	}, good.convert); err == nil {
 		t.Error("a non-zero exit must be an error, whatever it printed")
+	}
+	if good.called {
+		t.Error("a failed dscl must not be converted")
 	}
 	var many []string
 	for i := 0; i <= homeAccountsLimit; i++ {
-		many = append(many, plistRecord([]string{fmt.Sprint(600 + i)}, []string{"/Users/shared"}, []string{fmt.Sprintf("u%d", i)}))
+		many = append(many, jsonRecord([]string{fmt.Sprint(600 + i)}, []string{"/Users/shared"}, []string{fmt.Sprintf("u%d", i)}))
 	}
-	if _, err := dsclHomeAccounts("/Users/shared", plistResult(plistAnswer(many...))); err == nil {
+	tooMany := &plutilStub{out: jsonAnswer(many...)}
+	if _, err := dsclHomeAccounts("/Users/shared", dsclResult("x"), tooMany.convert); err == nil {
 		t.Error("more holders than the bound must be an error")
 	}
 }
