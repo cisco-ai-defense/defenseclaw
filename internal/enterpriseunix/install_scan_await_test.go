@@ -59,7 +59,10 @@ func TestEnsureWaitsForTheRestartedEnumeratorsFirstRecord(t *testing.T) {
 				go func() {
 					time.Sleep(300 * time.Millisecond)
 					path := h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath))
-					data, err := enterprisehooks.MarshalUnprotectedAgents(nil)
+					// The restarted enumerator stamps its scan with the config
+					// the change just committed (GAP-0640); an unstamped record
+					// would be pending by design.
+					data, err := h.marshalCompletedScan(nil)
 					if err == nil {
 						err = os.WriteFile(path, data, 0o600)
 					}
