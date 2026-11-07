@@ -866,9 +866,35 @@ func privateSecurityDescriptorIsWriterRepairableForSubject(
 // this check does not parse).
 type daclRefusal struct {
 	sid       *windows.SID
-	aceFlags  byte
 	deny      bool
 	inherited bool
+}
+
+// untrustedDACLWrite is the access that makes an allow entry of an untrusted
+// account unsafe.
+const untrustedDACLWrite = windows.ACCESS_MASK(
+	windows.GENERIC_ALL |
+		windows.GENERIC_WRITE |
+		windows.DELETE |
+		windows.WRITE_DAC |
+		windows.WRITE_OWNER |
+		windows.FILE_WRITE_DATA |
+		windows.FILE_APPEND_DATA |
+		windows.FILE_WRITE_EA |
+		windows.FILE_WRITE_ATTRIBUTES |
+		0x00000040, // FILE_DELETE_CHILD
+)
+
+// daclEntryRefused is the one judgement of a single entry: a deny entry of a
+// trusted account with any access, or an allow entry of an untrusted account
+// with write access. privateSecurityDescriptorRefusal applies it to the refused
+// path, and the carrier lookup applies it to the parents, so both look for the
+// same kind of entry.
+func daclEntryRefused(deny, trusted bool, mask windows.ACCESS_MASK) bool {
+	if deny {
+		return trusted && mask != 0
+	}
+	return !trusted && mask&untrustedDACLWrite != 0
 }
 
 // privateSecurityDescriptorRefusal is the one rule behind "writer repairable":
@@ -903,18 +929,6 @@ func privateSecurityDescriptorRefusal(
 	if !ownerTrustedForSubject(owner, identity, trustSystemOwners) {
 		return &daclRefusal{}, nil
 	}
-	untrustedWrite := windows.ACCESS_MASK(
-		windows.GENERIC_ALL |
-			windows.GENERIC_WRITE |
-			windows.DELETE |
-			windows.WRITE_DAC |
-			windows.WRITE_OWNER |
-			windows.FILE_WRITE_DATA |
-			windows.FILE_APPEND_DATA |
-			windows.FILE_WRITE_EA |
-			windows.FILE_WRITE_ATTRIBUTES |
-			0x00000040, // FILE_DELETE_CHILD
-	)
 	for index := uint16(0); index < dacl.AceCount; index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
@@ -930,20 +944,9 @@ func privateSecurityDescriptorRefusal(
 		trusted := sid.Equals(identity.sid) || sid.Equals(system) ||
 			sid.IsWellKnown(windows.WinCreatorOwnerRightsSid) ||
 			(trustSystemOwners && winowner.Trusted(sid.String(), ""))
-		refusal := &daclRefusal{
-			sid:       sid,
-			aceFlags:  ace.Header.AceFlags,
-			deny:      ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE,
-			inherited: ace.Header.AceFlags&windows.INHERITED_ACE != 0,
-		}
-		if refusal.deny {
-			if trusted && ace.Mask != 0 {
-				return refusal, nil
-			}
-			continue
-		}
-		if !trusted && ace.Mask&untrustedWrite != 0 {
-			return refusal, nil
+		deny := ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE
+		if daclEntryRefused(deny, trusted, ace.Mask) {
+			return &daclRefusal{sid: sid, deny: deny, inherited: ace.Header.AceFlags&windows.INHERITED_ACE != 0}, nil
 		}
 	}
 	return nil, nil

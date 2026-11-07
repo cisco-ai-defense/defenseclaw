@@ -146,6 +146,109 @@ def owner_private_group(path: str, info: os.stat_result) -> bool:
     return account.pw_name == name and account.pw_gid == gid and group.gr_name == name and set(group.gr_mem) <= {name}
 
 
+_ACL_USER_OBJ, _ACL_USER, _ACL_GROUP_OBJ, _ACL_GROUP, _ACL_MASK, _ACL_OTHER = 0x01, 0x02, 0x04, 0x08, 0x10, 0x20
+_ACL_WRITE = 0x02
+
+
+def _plugin_trusted_owner(uid: int) -> bool:
+    """The gateway's trusted owners for a plugin folder: root, this account, the service account."""
+    if trusted_runtime_owner(uid):
+        return True
+    try:
+        import pwd
+    except ImportError:
+        return False
+    for name in ("defenseclaw", "_defenseclaw") if sys.platform == "darwin" else ("defenseclaw",):
+        try:
+            if pwd.getpwnam(name).pw_uid == uid:
+                return True
+        except (KeyError, OSError):
+            continue
+    return False
+
+
+def plugin_owner_untrusted(info: os.stat_result) -> bool:
+    """True when the owner is not one the gateway accepts for a plugin folder or file."""
+    return not _plugin_trusted_owner(info.st_uid)
+
+
+def plugin_acl_refused(path: str) -> bool:
+    """True when the gateway's ACL rule would refuse *path* (hook_api_acl_{linux,darwin}.go).
+
+    macOS: any allow entry with a write-class right. Linux: an NFSv4 ACL, an
+    unreadable or incomplete POSIX ACL, or a POSIX ACL whose effective write
+    belongs to a group, to other, or to a named user that is not trusted.
+    """
+    if sys.platform == "darwin":
+        return darwin_acl_write_error(path) is not None
+    getxattr = getattr(os, "getxattr", None)
+    if getxattr is None:
+        return False
+    absent = (errno.ENODATA, errno.ENOTSUP, getattr(errno, "ENOATTR", errno.ENODATA))
+    for attribute in ("system.nfs4_acl", "system.nfs4acl"):
+        try:
+            getxattr(path, attribute)
+        except OSError as exc:
+            if exc.errno in absent:
+                continue
+        return True
+    try:
+        data = getxattr(path, "system.posix_acl_access")
+    except OSError as exc:
+        return exc.errno not in absent
+    if len(data) < 4 or struct.unpack_from("<I", data)[0] != 2 or (len(data) - 4) % 8:
+        return True
+    entries = [struct.unpack_from("<HHI", data, offset) for offset in range(4, len(data), 8)]
+    tags = [tag for tag, _, _ in entries]
+    named = any(tag in (_ACL_USER, _ACL_GROUP) for tag in tags)
+    if (
+        tags.count(_ACL_USER_OBJ) != 1
+        or tags.count(_ACL_GROUP_OBJ) != 1
+        or tags.count(_ACL_OTHER) != 1
+        or tags.count(_ACL_MASK) > 1
+        or (named and tags.count(_ACL_MASK) != 1)
+    ):
+        return True
+    mask = next((perm for tag, perm, _ in entries if tag == _ACL_MASK), 0x7)
+    for tag, perm, uid in entries:
+        if tag in (_ACL_USER, _ACL_GROUP_OBJ, _ACL_GROUP):
+            perm &= mask
+        elif tag not in (_ACL_USER_OBJ, _ACL_OTHER, _ACL_MASK):
+            return True
+        if not perm & _ACL_WRITE:
+            continue
+        if tag == _ACL_USER and not _plugin_trusted_owner(uid):
+            return True
+        if tag in (_ACL_GROUP_OBJ, _ACL_GROUP, _ACL_OTHER):
+            return True
+    return False
+
+
+def plugin_link_refused(path: str, info: os.stat_result, *, leaf: bool) -> bool:
+    """True when the gateway's folder walk refuses the link *path*.
+
+    The plugin folder itself is never a link; an ancestor may be one only when
+    it is a root-owned system link (a macOS root alias, or a link inside a
+    root-owned private parent) that leads to a folder.
+    """
+    if not leaf:
+        alias = sys.platform == "darwin" and os.path.normpath(path) in ("/etc", "/tmp", "/var")
+        if not alias and info.st_uid == 0:
+            try:
+                parent = os.lstat(os.path.dirname(path))
+            except OSError:
+                parent = None
+            alias = (
+                parent is not None
+                and stat.S_ISDIR(parent.st_mode)
+                and not parent.st_mode & 0o022
+                and parent.st_uid == 0
+            )
+        if alias:
+            return not os.path.isdir(path)
+    return True
+
+
 def other_accounts_can_write(path: str, info: os.stat_result) -> bool:
     """Check other-write and group-write after proving a private group."""
     mode = stat.S_IMODE(info.st_mode)

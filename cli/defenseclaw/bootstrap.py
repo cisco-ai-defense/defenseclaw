@@ -2337,13 +2337,13 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
         if unsafe := opencode_unsafe_plugin_paths([path]):
             # The gateway will not install its plugin there and does not
             # start; `setup opencode` would fail the same way.
-            named, fix = opencode_custody_text(unsafe)
+            advice = opencode_custody_text(unsafe)
             return StepResult(
                 "Connector",
                 "warn",
-                f"{named} can be written by other accounts, so the gateway does not install the "
-                "OpenCode plugin there; fix its mode, then run `defenseclaw-gateway restart`",
-                fix,
+                f"{advice.named} {advice.why}, so the gateway does not install the OpenCode plugin there; "
+                f"{advice.action}, then run `defenseclaw-gateway restart`",
+                advice.command or "defenseclaw setup opencode",
             )
         return StepResult(
             "Connector",

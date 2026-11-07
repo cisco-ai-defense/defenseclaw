@@ -7,6 +7,7 @@
 package connector
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -60,45 +61,74 @@ func (f *custodyFix) command() string {
 	return strings.Join(steps, " && ")
 }
 
-// explainPluginArtifactRefusal turns the refusal of validatePluginArtifactDestinationFor
+// pluginStructureError is a refusal of a plugin destination that a permission
+// change cannot clear: a link in the folder chain or as the plugin file, or
+// an element that is not a folder. The walk refuses a link whatever it points
+// to, so the one repair is a real folder or file owned by this account.
+type pluginStructureError struct {
+	cause error
+	paths []string
+}
+
+func (e *pluginStructureError) Error() string {
+	return fmt.Sprintf("%v; replace %s with a real folder or file owned by this account (a link is refused whatever it points to, and changing permissions does not clear it)",
+		e.cause, pluginCustodyQuoteAll(e.paths))
+}
+
+func (e *pluginStructureError) Unwrap() []error { return []error{e.cause, ErrPluginFolderCustody} }
+
+// explainPluginArtifactRefusal turns the refusal of checkPluginArtifactDestination
 // into one that names what to fix. The walk checks the leaf folder first and
 // stops there, but a folder above it can be just as open, so naming the leaf
 // alone sends the user to a fix that does not clear the refusal. This asks the
 // same per-element judgement (hookAPIValidateDirectoryMetadataWith, with the
-// same advisory ancestors and the same agent-directory private-group rule) of
-// every element from the top down, then of the plugin file. When no element
-// is refused on permissions (a structural refusal such as a link, or a change
-// made since), cause is returned unchanged.
+// same advisory ancestors and the same agent-directory private-group rule, and
+// hookAPISymlinkRefused for links) of every element from the top down, then of
+// the plugin file. A link or a non-folder is a structural refusal that no
+// permission change clears, so it is named on its own, without a chmod. When
+// no element is refused (a change made since), cause is returned unchanged.
 func explainPluginArtifactRefusal(path string, cause error) error {
 	if cause == nil || !filepath.IsAbs(path) {
 		return cause
 	}
 	dir := filepath.Dir(filepath.Clean(path))
-	chains := [][]string{pluginCustodyChain(dir)}
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil && resolved != dir {
-		chains = append(chains, pluginCustodyChain(resolved))
-	}
+	chain := pluginCustodyChain(dir)
 	var fix custodyFix
-	for _, chain := range chains {
-		leaf := chain[len(chain)-1]
-		for _, cur := range chain {
-			info, err := os.Lstat(cur)
-			if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-				continue
+	var structural []string
+	for _, cur := range chain {
+		info, err := os.Lstat(cur)
+		if err != nil {
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			if target, err := os.Stat(cur); hookAPISymlinkRefused(cur, dir, info) || err != nil || !target.IsDir() {
+				structural = append(structural, cur)
 			}
-			advisory := cur != leaf && managed.AdvisoryAncestorPath(cur)
-			if hookAPIValidateDirectoryMetadataWith(cur, info, cur != leaf, advisory, true) == nil {
-				continue
+			continue
+		}
+		if !info.IsDir() {
+			structural = append(structural, cur)
+			continue
+		}
+		advisory := cur != dir && managed.AdvisoryAncestorPath(cur)
+		if hookAPIValidateDirectoryMetadataWith(cur, info, cur != dir, advisory, true) == nil {
+			continue
+		}
+		stat, _ := info.Sys().(*syscall.Stat_t)
+		fix.add(cur, info.Mode().Perm()&0o022 != 0, hookAPIValidateDirectoryACL(cur) != nil, stat != nil && !hookAPITrustedOwner(stat.Uid))
+	}
+	if info, err := os.Lstat(path); err == nil {
+		if !info.Mode().IsRegular() {
+			structural = append(structural, path)
+		} else {
+			ownerBad := hookAPIValidateOwnerFor(path, info, "") != nil
+			if hookAPIValidatePluginFilePermissions(path, info) != nil || ownerBad {
+				fix.add(path, info.Mode().Perm()&0o022 != 0, hookAPIValidateDirectoryACL(path) != nil, ownerBad)
 			}
-			stat, _ := info.Sys().(*syscall.Stat_t)
-			fix.add(cur, info.Mode().Perm()&0o022 != 0, hookAPIValidateDirectoryACL(cur) != nil, stat != nil && !hookAPITrustedOwner(stat.Uid))
 		}
 	}
-	if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
-		ownerBad := hookAPIValidateOwnerFor(path, info, "") != nil
-		if hookAPIValidatePluginFilePermissions(path, info) != nil || ownerBad {
-			fix.add(path, info.Mode().Perm()&0o022 != 0, hookAPIValidateDirectoryACL(path) != nil, ownerBad)
-		}
+	if len(structural) > 0 {
+		return &pluginStructureError{cause: cause, paths: structural}
 	}
 	if len(fix.failing) == 0 {
 		return cause
