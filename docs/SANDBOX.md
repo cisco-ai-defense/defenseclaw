@@ -355,9 +355,13 @@ The harness spec builds the environment passed to `openshell sandbox create
   `http://<user>:<secret>@host.openshell.internal:<egress_port>`, and
   `DEFENSECLAW_EGRESS_BYPASS` lists `host.openshell.internal` plus the
   provider hosts of the harness's credential profile and sandbox-local
-  loopback addresses (`localhost`, `127.0.0.1`, `127.0.0.0/8`, `::1`), so
-  hooks and local service calls stay direct while LLM calls stay on
-  OpenShell's provider rules. The strict profile sets no proxy.
+  loopback addresses (`localhost`, `127.0.0.1`, `127.0.0.0/8`, `::1`).
+  In proxy-enabled profiles, the workload's proxy endpoint is a listener on
+  the sandbox's own `127.0.0.1`. It connects loopback requests inside that
+  sandbox and relays other requests to the authenticated egress proxy. This
+  also covers clients that do not understand the CIDR or IPv6 exclusions.
+  The host egress guard still refuses loopback requests sent to it. The strict
+  profile sets no proxy or local listener.
   `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`
   (and their lowercase forms) and `NODE_USE_ENV_PROXY=1` are passed too, but
   OpenShell 0.1.1 drops them at create, so the workload gets them from the
