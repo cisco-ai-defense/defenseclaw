@@ -2771,10 +2771,14 @@ var activeDefenseClawStateNames = []string{
 	"quarantine", "receipts", "registries",
 }
 
+// managedSettingsCaseFold reports a host whose file system ignores case; a
+// variable so that a test can stand in for the platform.
+var managedSettingsCaseFold = actionfacts.CaseInsensitiveFilesystem
+
 // managedAgentSettingsCandidate reports a path of the machine policy files
 // DefenseClaw publishes for an agent, in either path syntax.
 func managedAgentSettingsCandidate(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
-	caseFold := actionfacts.CaseInsensitiveFilesystem(facts.ActiveHome)
+	caseFold := managedSettingsCaseFold()
 	// The cleaned forms collapse a leading // of a \\host\C$ share path into
 	// one slash, which names another directory: the text as written names
 	// the volume, so it is read too.

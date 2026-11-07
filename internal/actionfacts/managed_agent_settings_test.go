@@ -60,12 +60,10 @@ func TestManagedAgentSettingsPath(t *testing.T) {
 	}
 }
 
+// The platform decides, not the spelling of a home (round 11 M2).
 func TestCaseInsensitiveFilesystem(t *testing.T) {
-	if CaseInsensitiveFilesystem("/home/vn") && runtime.GOOS != "darwin" {
-		t.Error("a /home user is on a case-sensitive file system")
-	}
-	if !CaseInsensitiveFilesystem("/Users/vn") {
-		t.Error("a /Users home is a macOS home: case-insensitive")
+	if got, want := CaseInsensitiveFilesystem(), runtime.GOOS == "darwin"; got != want {
+		t.Errorf("CaseInsensitiveFilesystem() = %t on %s, want %t", got, runtime.GOOS, want)
 	}
 }
 
@@ -165,5 +163,42 @@ func TestWindowsManagedAgentSettingsPathLongFormDecides(t *testing.T) {
 		if got := WindowsManagedAgentSettingsPath(path); got != want {
 			t.Errorf("WindowsManagedAgentSettingsPath(%q) = %t, want %t", path, got, want)
 		}
+	}
+}
+
+// rel-1-0-6:GAP-0734 review 11 M1: a UNC server is this machine only by a
+// whole name of it. The same first label in another DNS domain is another
+// machine.
+func TestWindowsLocalHostIsAWholeName(t *testing.T) {
+	saved := localHostNames
+	t.Cleanup(func() { localHostNames = saved })
+	localHostNames = func() []string { return []string{"box.corp.example.com", "box"} }
+	for host, want := range map[string]bool{
+		"box":                     true,
+		"BOX":                     true,
+		"box.":                    true,
+		"box.corp.example.com":    true,
+		"BOX.Corp.Example.Com.":   true,
+		"localhost":               true,
+		"127.0.0.1":               true,
+		"[::1]":                   true,
+		"box.other.example.com":   false,
+		"box.corp.example.com.xy": false,
+		"box.corp":                false,
+		"boxx":                    false,
+		"xbox":                    false,
+		"corp.example.com":        false,
+		"":                        false,
+		"10.0.0.5":                false,
+	} {
+		if got := windowsLocalHost(host); got != want {
+			t.Errorf("windowsLocalHost(%q) = %t, want %t", host, got, want)
+		}
+	}
+	if drive, ok := WindowsLocalDrivePath(`\\box.corp.example.com\C$\dir`); !ok || drive != "C:/dir" {
+		t.Errorf("own fully qualified name = %q, %t, want C:/dir", drive, ok)
+	}
+	if _, ok := WindowsLocalDrivePath(`\\box.other.example.com\C$\dir`); ok {
+		t.Error("the same short name in another domain is another machine")
 	}
 }
