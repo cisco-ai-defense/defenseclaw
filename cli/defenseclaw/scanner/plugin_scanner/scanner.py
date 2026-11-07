@@ -23,6 +23,7 @@ assessment.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import stat
@@ -32,7 +33,7 @@ import yaml
 
 from defenseclaw.scanner.plugin_scanner.analyzer import ScanContext
 from defenseclaw.scanner.plugin_scanner.analyzer_factory import build_analyzers
-from defenseclaw.scanner.plugin_scanner.analyzers import has_install_scripts, scan_source_files
+from defenseclaw.scanner.plugin_scanner.analyzers import has_install_scripts
 from defenseclaw.scanner.plugin_scanner.helpers import (
     PathLinkStatus,
     audit_skipped_dirs_for_native,
@@ -40,7 +41,6 @@ from defenseclaw.scanner.plugin_scanner.helpers import (
     deduplicate_findings,
     inspect_path_link,
     make_finding,
-    resolve_entrypoint_files,
 )
 from defenseclaw.scanner.plugin_scanner.llm_analyzer import JUDGE_TAG
 from defenseclaw.scanner.plugin_scanner.policy import (
@@ -70,26 +70,43 @@ _YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 # ---------------------------------------------------------------------------
 
 
-def _names_protected_content(target: str, profile: str) -> bool:
-    """Whether the package source names a credential file or an agent identity file.
+# What a published provider release has on its own code (the exec class), and
+# the rules that read what a package declares: dependencies, install scripts
+# and permissions. A published release declares nothing that these rules flag
+# at MEDIUM or above. An identity that rests on an install record alone waives
+# the first and nothing else (see ``_ordinary_scan_unless_vendor_code_only``).
+_PROVIDER_CODE_RULES = frozenset({"SRC-EXEC"})
+_DECLARATION_RULE_PREFIXES = ("DEP-", "SCRIPT-", "PERM-")
 
-    An identity that rests on an install record alone (the registry could not
-    be asked) does not outweigh the rules for protected files: such a tree gets
-    the ordinary scan, in every profile.
+
+def _beyond_provider_code(finding: Finding) -> bool:
+    if finding.severity in ("HIGH", "CRITICAL"):
+        return finding.rule_id not in _PROVIDER_CODE_RULES
+    return finding.severity == "MEDIUM" and finding.rule_id.startswith(_DECLARATION_RULE_PREFIXES)
+
+
+def _ordinary_scan_unless_vendor_code_only(
+    target: str, options: PluginScanOptions | None,
+) -> ScanResult | None:
+    """The ordinary scan of an unverified provider tree, or None to admit it.
+
+    The registry could not be asked, so the bytes are not proven: the same
+    analyzers as for any other plugin read the tree, manifest scripts,
+    dependencies and permissions as much as source and protected-file rules.
+    The tree is admitted only when every finding that counts belongs to the
+    class that the published provider code has by itself; any other finding
+    gives the ordinary verdict, in every profile. The judge stays off:
+    it would be a network call on an outage.
     """
 
-    # The ordinary scan also reads the entrypoints the manifest declares, whatever
-    # their extension or folder; so does this check.
-    manifest = _load_manifest(target)
-    found: list[Finding] = []
-    scan_source_files(
-        target, found, set(), profile,
-        force_include=resolve_entrypoint_files(
-            target, manifest.entrypoints if manifest is not None else None,
+    override = {**((options.llm_override if options else None) or {}), "enabled": False}
+    ordinary = scan_plugin(
+        target,
+        dataclasses.replace(
+            options or PluginScanOptions(), disable_vendor_identity=True, llm_override=override,
         ),
-        python_host=manifest is not None and manifest.source in ("plugin.yaml", "plugin.yml"),
     )
-    return any(f.rule_id.startswith("CRED-") or f.rule_id == "COG-TAMPER" for f in found)
+    return ordinary if any(_beyond_provider_code(f) for f in ordinary.findings) else None
 
 
 def scan_plugin(
@@ -148,10 +165,10 @@ def scan_plugin(
         official = inspect_official_provider_tree(
             target, data_dir=options.data_dir if options else "",
         )
-        if official is not None and official.unverified and _names_protected_content(
-            target, profile,
-        ):
-            official = None
+        if official is not None and official.unverified:
+            ordinary = _ordinary_scan_unless_vendor_code_only(target, options)
+            if ordinary is not None:
+                return ordinary
         if official is not None:
             findings = audit_skipped_dirs_for_native(target)
             if official.possible_peer:
