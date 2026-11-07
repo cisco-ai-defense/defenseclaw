@@ -938,12 +938,13 @@ func RestoreManagedFileBackups(dataDir, home string) (restored, kept []string, e
 func RestoreManagedFileBackupsForRollback(
 	savedDataDir, currentDataDir, home string, configured map[string]bool, onlyConnector string,
 ) (restored, kept []string, err error) {
+	current := newManagedDataDir(currentDataDir)
 	err = forEachManagedFileBackup(savedDataDir, func(b managedFileBackup) error {
 		if configured[strings.ToLower(strings.TrimSpace(b.Connector))] ||
 			(onlyConnector != "" && !strings.EqualFold(b.Connector, onlyConnector)) {
 			return nil
 		}
-		if !managedBackupRollbackTargetUsable(b, currentDataDir, home) {
+		if !managedBackupRollbackTargetUsable(b, current, home) {
 			kept = append(kept, b.Path)
 			return nil
 		}
@@ -976,25 +977,62 @@ func managedBackupDigestMatches(b managedFileBackup) bool {
 // agent file the record names: an absolute path inside the account home and
 // outside the data directory now in place. Restore and verification share it,
 // so a record the restore would not touch is never counted as proof.
-func managedBackupRollbackTargetUsable(b managedFileBackup, currentDataDir, home string) bool {
-	return managedBackupTargetInside(home, b.Path) && !managedBackupTargetInDataDir(currentDataDir, b.Path)
+func managedBackupRollbackTargetUsable(b managedFileBackup, current *managedDataDir, home string) bool {
+	return managedBackupTargetInside(home, b.Path) && !current.contains(b.Path)
 }
 
-// managedBackupTargetInDataDir reports whether path is inside dataDir by
-// either spelling or by physical location: dataDir as given (a relative
-// folder is taken from the working directory) and both sides with their links
-// resolved. A relative or linked --data-dir therefore excludes the same files
-// as its absolute twin.
-func managedBackupTargetInDataDir(dataDir, path string) bool {
-	if strings.TrimSpace(dataDir) == "" || !filepath.IsAbs(path) {
-		return false
+// managedDataDir is the data directory a rollback is putting back, resolved
+// once: as given (a relative folder is taken from the working directory),
+// with its links resolved, and as the directory it physically is.
+type managedDataDir struct {
+	abs      string
+	resolved string
+	info     os.FileInfo
+}
+
+// newManagedDataDir resolves dir once. A blank or unresolvable dir yields a
+// matcher that contains nothing; a dir that does not exist yet is compared by
+// spelling only.
+func newManagedDataDir(dir string) *managedDataDir {
+	if strings.TrimSpace(dir) == "" {
+		return &managedDataDir{}
 	}
-	abs, err := filepath.Abs(dataDir)
+	abs, err := filepath.Abs(dir)
 	if err != nil {
+		return &managedDataDir{}
+	}
+	d := &managedDataDir{abs: abs, resolved: resolveExistingPrefix(abs)}
+	if info, err := os.Stat(abs); err == nil && info.IsDir() {
+		d.info = info
+	}
+	return d
+}
+
+// contains reports whether path is inside the data directory by spelling, by
+// resolved links, or by identity: a folder the filesystem opens through a
+// different spelling (a case variant on a case-insensitive volume, a link)
+// is the same directory whatever its components are called.
+func (d *managedDataDir) contains(path string) bool {
+	if d == nil || d.abs == "" || !filepath.IsAbs(path) {
 		return false
 	}
-	return managedBackupTargetInside(abs, path) ||
-		managedBackupTargetInside(resolveExistingPrefix(abs), resolveExistingPrefix(path))
+	if managedBackupTargetInside(d.abs, path) ||
+		managedBackupTargetInside(d.resolved, resolveExistingPrefix(path)) {
+		return true
+	}
+	if d.info == nil {
+		return false
+	}
+	for cur := filepath.Dir(filepath.Clean(path)); ; {
+		if info, err := os.Stat(cur); err == nil && os.SameFile(info, d.info) {
+			return true
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return false
+		}
+		cur = parent
+	}
 }
 
 // resolveExistingPrefix resolves links in the longest existing leading part
@@ -1029,9 +1067,10 @@ func resolveExistingPrefix(path string) string {
 // proof before it removes anything.
 func VerifyManagedFileBackups(dataDir, currentDataDir, home string) (int, error) {
 	count := 0
+	current := newManagedDataDir(currentDataDir)
 	err := forEachManagedFileBackup(dataDir, func(b managedFileBackup) error {
-		usable := managedBackupRollbackTargetUsable(b, currentDataDir, home)
-		if !usable && (!filepath.IsAbs(b.Path) || managedBackupTargetInDataDir(currentDataDir, b.Path)) {
+		usable := managedBackupRollbackTargetUsable(b, current, home)
+		if !usable && (!filepath.IsAbs(b.Path) || current.contains(b.Path)) {
 			return fmt.Errorf("connector backup %q does not name an agent file a rollback can restore", b.Path)
 		}
 		if !managedBackupDigestMatches(b) {
