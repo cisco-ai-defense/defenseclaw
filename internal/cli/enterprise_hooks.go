@@ -844,15 +844,17 @@ const enterpriseHookAccountLinkFailure = "enterprise hooks: the account's own De
 const enterpriseHookAccountForeignLinkFailure = "enterprise hooks: the account's DefenseClaw folder is a link its account does not own; it was left untouched and the account is not protected until an administrator removes the link"
 
 // enterpriseHookStandaloneCanonicalDataDir reports, on a standalone
-// deployment only, whether target's data directory is the canonical
-// <home>\.defenseclaw folder of the account.
+// deployment only, whether target's effective data directory is the
+// canonical <home>\.defenseclaw folder of the account. A manifest target
+// that omits data_dir is valid: the Windows runtime resolves it to that same
+// folder, so a blank value is the canonical folder, not a missing one.
 func enterpriseHookStandaloneCanonicalDataDir(target enterprisehooks.ManifestTarget, home, sid string) bool {
 	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() ||
 		strings.TrimSpace(home) == "" || strings.TrimSpace(sid) == "" {
 		return false
 	}
 	dataDir := strings.TrimSpace(target.DataDir)
-	return dataDir != "" && sameEnterpriseHookPath(dataDir, filepath.Join(home, ".defenseclaw"))
+	return dataDir == "" || sameEnterpriseHookPath(dataDir, filepath.Join(home, ".defenseclaw"))
 }
 
 func enterpriseHookTargetAccountLink(target enterprisehooks.ManifestTarget, home, sid string) bool {
