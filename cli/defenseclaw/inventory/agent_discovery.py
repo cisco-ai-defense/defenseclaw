@@ -103,7 +103,7 @@ VERSION_PROBE_TIMED_OUT = "version probe timed out"
 #: The error of an agent whose CLI the current command did not run because it
 #: only sets up other connectors (GAP-0901).
 VERSION_NOT_PROBED = "version not probed: not being set up"
-VERSION_EXECUTABLE_CHANGED = "version probe: the executable changed while it was being read"
+VERSION_EXECUTABLE_CHANGED = "version probe: the executable could not be shown unchanged while it was being read"
 PACKAGE_MANAGER_CONFIG_TIMEOUT_SECONDS = 5.0
 _ANTIGRAVITY_BINARY_MAX_BYTES = 256 << 20
 _KIRO_IDE_PRODUCT_MAX_BYTES = 256 << 10
@@ -2003,9 +2003,15 @@ def _scan_agent(
         # A version belongs to the executable that answered. One replaced (or
         # re-linked) while the probe ran may have answered for the file that
         # is gone, so that answer is dropped and the path asked again; one that
-        # keeps changing is unread, never recorded at either version.
+        # keeps changing is unread, never recorded at either version. Two
+        # empty identities of a file that is there (Windows gave no change
+        # time) are not the same file twice: they prove nothing, so a version
+        # read under them is dropped like one read from a changed file. Two
+        # empty identities of a path with no file, and an answer without a
+        # version, claim nothing and are returned as they are.
         for _attempt in range(2):
             identity = _executable_identity(candidate)
+            was_there = os.path.isfile(candidate)
             answer = _version_for_agent_binary(
                 name,
                 candidate,
@@ -2014,7 +2020,8 @@ def _scan_agent(
                 data_dir=data_dir,
             )
             read_at[candidate] = _now_utc()
-            if _executable_identity(candidate) == identity:
+            unproven = not identity and bool(answer[0]) and (was_there or os.path.isfile(candidate))
+            if _executable_identity(candidate) == identity and not unproven:
                 read_from[candidate] = identity
                 return answer
         read_from[candidate] = []
