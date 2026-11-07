@@ -1385,11 +1385,13 @@ func actionFixedForItems(clause *syntax.ForClause, values actionValues, cwd, hom
 			// expanded text is not a pattern.
 		case !wordExpandsParameter(word) && !strings.ContainsAny(item, "*?["):
 		case simpleShellParameter(word) != "" && !strings.ContainsAny(item, "*?["):
-			// An unquoted expansion splits at the default field separators.
-			if _, changed := values["IFS"]; changed {
-				return "", nil, false
+			// An unquoted expansion splits at the field separators the
+			// shell has: the default ones, or the IFS the command set.
+			separators := " \t\n"
+			if set, changed := values["IFS"]; changed {
+				separators = set
 			}
-			fields := strings.Fields(item)
+			fields := shellFields(item, separators)
 			if len(items)+len(fields) > 16 {
 				return "", nil, false
 			}
@@ -1401,6 +1403,50 @@ func actionFixedForItems(clause *syntax.ForClause, values actionValues, cwd, hom
 		items = append(items, item)
 	}
 	return loop.Name.Value, items, true
+}
+
+// shellFields splits the text of an unquoted expansion as the shell does at
+// the characters of ifs. A white space separator is dropped at the ends and
+// merged with its neighbours; any other separator ends a field, empty or not.
+func shellFields(text, ifs string) []string {
+	if ifs == "" {
+		if text == "" {
+			return nil
+		}
+		return []string{text}
+	}
+	runes := []rune(text)
+	separator := func(r rune) bool { return strings.ContainsRune(ifs, r) }
+	space := func(r rune) bool { return (r == ' ' || r == '\t' || r == '\n') && separator(r) }
+	var fields []string
+	i := 0
+	skipSpace := func() {
+		for i < len(runes) && space(runes[i]) {
+			i++
+		}
+	}
+	skipSpace()
+	for i < len(runes) {
+		start := i
+		for i < len(runes) && !separator(runes[i]) {
+			i++
+		}
+		fields = append(fields, string(runes[start:i]))
+		if i >= len(runes) {
+			break
+		}
+		if space(runes[i]) {
+			skipSpace()
+			if i < len(runes) && separator(runes[i]) {
+				i++
+				skipSpace()
+			}
+		} else {
+			i++
+			skipSpace()
+		}
+	}
+	return fields
 }
 
 // actionWordOneField reports a word whose expansions are all quoted and

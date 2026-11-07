@@ -82,6 +82,27 @@ func actionFunctionField(value string) bool {
 	return len(value) <= MaxWriteTargetPathBytes && !strings.ContainsAny(value, "\x00\x01\x02")
 }
 
+// actionKeepAcrossFunctionCall adds the values before a call of a function
+// the command defines to those after it. The tracker forgets every value at
+// such a call, as the function may assign any name; a reader of known
+// protected values must also consider that it did not.
+func actionKeepAcrossFunctionCall(stmt *syntax.Stmt, before, after []actionValues, home string) []actionValues {
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) == 0 {
+		return after
+	}
+	program, fixed := StaticWord(call.Args[0], home)
+	if !fixed {
+		return after
+	}
+	for _, state := range before {
+		if _, defined := state[actionFunctionValuePrefix+program]; defined {
+			return actionAppendValueCandidates(after, before)
+		}
+	}
+	return after
+}
+
 func actionClearFunctionValues(values actionValues) {
 	for name := range values {
 		if !strings.HasPrefix(name, "\x00") {
