@@ -23,12 +23,15 @@ package assetfacts
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -113,6 +116,24 @@ type MCPServer struct {
 	// and carry no environment, so a gateway that holds the published record
 	// compares the digest, never the bounded fields.
 	Digest string `json:"digest,omitempty"`
+	// Pins holds, for a claim whose definition does not fit the bounds, what
+	// a rule that pins where the server points can be checked against: a
+	// SHA-256 of each value a rule compares exactly. A gateway tells a deny
+	// pinned to another endpoint from one that may match, instead of
+	// refusing every server of that name.
+	Pins *MCPPins `json:"pins,omitempty"`
+}
+
+// MCPPins are the SHA-256 digests (hex) of the values an asset_policy rule
+// compares on an MCP server, taken from the complete definition the hook
+// read: the trimmed URL, the base name of the trimmed command, and each
+// trimmed argument, with the count of arguments and the transport.
+type MCPPins struct {
+	URL       string   `json:"url,omitempty"`
+	Command   string   `json:"command,omitempty"`
+	Args      []string `json:"args,omitempty"`
+	ArgCount  int      `json:"arg_count,omitempty"`
+	Transport string   `json:"transport,omitempty"`
 }
 
 // Encode renders facts as a header value, or "" when there is nothing to
@@ -226,7 +247,7 @@ func bounded(facts Facts) Facts {
 			// gateway still knows an unpublished source runs and judges the
 			// published record by its digest; falling back to the config
 			// files it reads would judge another definition.
-			facts.MCP = &MCPServer{Name: out.Name, Relocated: out.Relocated, ProjectScope: out.ProjectScope, Digest: out.Digest}
+			facts.MCP = &MCPServer{Name: out.Name, Relocated: out.Relocated, ProjectScope: out.ProjectScope, Digest: out.Digest, Pins: pinsOf(*server)}
 		case out.Name != "" && (out.URL != "" || out.Command != "") && !(commandLine && lossy):
 			facts.MCP = &out
 		case commandLine && facts.MCPUnproven == "":
@@ -237,6 +258,48 @@ func bounded(facts Facts) Facts {
 	}
 	facts.MCPUnproven = clean(facts.MCPUnproven, maxNameBytes)
 	return facts
+}
+
+// PinSum is the digest of one value as MCPPins holds it.
+func PinSum(value string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(value)))
+	return hex.EncodeToString(sum[:])
+}
+
+// pinsOf takes the pins of a definition: from its fields while it holds them,
+// otherwise the ones an earlier pass already took, or none: a claim from a
+// hook that took no pins cannot refute a rule.
+func pinsOf(server MCPServer) *MCPPins {
+	if server.URL == "" && server.Command == "" && len(server.Args) == 0 {
+		if server.Pins == nil {
+			return nil
+		}
+		pins := MCPPins{
+			URL: cleanDigest(server.Pins.URL), Command: cleanDigest(server.Pins.Command),
+			ArgCount: min(max(server.Pins.ArgCount, 0), 1<<16), Transport: clean(server.Pins.Transport, 64),
+		}
+		for _, arg := range server.Pins.Args {
+			if sum := cleanDigest(arg); sum != "" && len(pins.Args) < maxArgs {
+				pins.Args = append(pins.Args, sum)
+			}
+		}
+		pins.ArgCount = max(pins.ArgCount, len(pins.Args))
+		return &pins
+	}
+	pins := MCPPins{ArgCount: len(server.Args), Transport: clean(server.Transport, 64)}
+	if strings.TrimSpace(server.URL) != "" {
+		pins.URL = PinSum(server.URL)
+	}
+	if command := strings.TrimSpace(server.Command); command != "" {
+		pins.Command = PinSum(filepath.Base(command))
+	}
+	for _, arg := range server.Args {
+		if len(pins.Args) == maxArgs {
+			break
+		}
+		pins.Args = append(pins.Args, PinSum(arg))
+	}
+	return &pins
 }
 
 // cleanDigest keeps a value only when it is a hex SHA-256.
@@ -327,7 +390,7 @@ func ProjectSkillDirs(connector string) []string {
 	case "codex":
 		return []string{filepath.Join(".agents", "skills"), filepath.Join(".codex", "skills")}
 	case "copilot":
-		return []string{filepath.Join(".github", "skills"), filepath.Join(".claude", "skills")}
+		return []string{filepath.Join(".github", "skills"), filepath.Join(".claude", "skills"), filepath.Join(".agents", "skills")}
 	}
 	return nil
 }
@@ -343,7 +406,7 @@ func SkillRoots(connector, home, cwd string) []string {
 	case "codex":
 		user = []string{filepath.Join(".codex", "skills"), filepath.Join(".agents", "skills")}
 	case "copilot":
-		user = []string{filepath.Join(".copilot", "skills"), filepath.Join(".claude", "skills")}
+		user = []string{filepath.Join(".copilot", "skills"), filepath.Join(".claude", "skills"), filepath.Join(".agents", "skills")}
 	default:
 		return nil
 	}
@@ -374,6 +437,94 @@ func SkillRoots(connector, home, cwd string) []string {
 		}
 	}
 	return roots
+}
+
+// EnvSkillRoots lists the skill folders a connector takes from the
+// environment of the agent process: Copilot's COPILOT_HOME and
+// COPILOT_SKILLS_DIRS (comma separated; "~/" is the home, a relative one is
+// below cwd). Only the standalone hook, which runs in the agent's
+// environment, can know them; a gateway's own environment is not the user's.
+func EnvSkillRoots(connector, home, cwd string) []string {
+	if strings.ToLower(strings.TrimSpace(connector)) != "copilot" {
+		return nil
+	}
+	var roots []string
+	if configured, exists := os.LookupEnv("COPILOT_HOME"); exists {
+		if strings.TrimSpace(configured) == configured && !strings.ContainsAny(configured, "\x00\r\n") &&
+			filepath.IsAbs(configured) && filepath.Clean(configured) == configured {
+			roots = append(roots, filepath.Join(configured, "skills"))
+		}
+	}
+	for _, raw := range strings.Split(os.Getenv("COPILOT_SKILLS_DIRS"), ",") {
+		dir := strings.TrimSpace(raw)
+		switch {
+		case dir == "":
+			continue
+		case strings.HasPrefix(dir, "~/") || strings.HasPrefix(dir, `~\`):
+			if !filepath.IsAbs(home) {
+				continue
+			}
+			dir = filepath.Join(home, dir[2:])
+		case !filepath.IsAbs(dir):
+			if !filepath.IsAbs(cwd) {
+				continue
+			}
+			dir = filepath.Join(cwd, dir)
+		}
+		if !slices.Contains(roots, dir) {
+			roots = append(roots, filepath.Clean(dir))
+		}
+	}
+	return roots
+}
+
+// SkillNameFromInput is the folder name of the skill a tool call selects
+// through its arguments, under every spelling the gateway's skill probe
+// reads (skill_name, skill, skill_key, a nested skill object, a skill path),
+// or "" when it selects none. The hook reads the folder under the name the
+// gateway will judge, so a spelling the gateway recognises cannot be one the
+// hook skips.
+func SkillNameFromInput(input map[string]any) string {
+	first := func(values map[string]any, keys ...string) string {
+		for _, key := range keys {
+			if text, ok := values[key].(string); ok && strings.TrimSpace(text) != "" {
+				return strings.TrimSpace(text)
+			}
+		}
+		return ""
+	}
+	if raw := first(input, "skill_name", "skillName", "skill_key", "skillKey", "skill_id", "skillId"); raw != "" {
+		return normalizeSkillName(raw)
+	}
+	for _, key := range []string{"skill", "skill_info", "skillInfo", "source_skill", "sourceSkill"} {
+		switch value := input[key].(type) {
+		case string:
+			if name := normalizeSkillName(value); name != "" {
+				return name
+			}
+		case map[string]any:
+			raw := first(value, "name", "key", "id", "skill_name", "skillName", "skill_key", "skillKey", "skill_id", "skillId")
+			if raw == "" {
+				raw = first(value, "path", "source_path", "sourcePath", "skill_path", "skillPath")
+			}
+			if name := normalizeSkillName(raw); name != "" {
+				return name
+			}
+		}
+	}
+	return normalizeSkillName(first(input, "skill_path", "skillPath", "source_path", "sourcePath"))
+}
+
+func normalizeSkillName(value string) string {
+	name := strings.Trim(strings.TrimSpace(value), `"'`)
+	if strings.ContainsAny(name, `/\`) {
+		path := filepath.Clean(name)
+		if strings.EqualFold(filepath.Base(path), "SKILL.md") {
+			path = filepath.Dir(path)
+		}
+		name = filepath.Base(path)
+	}
+	return strings.TrimSpace(strings.TrimPrefix(name, "@"))
 }
 
 // FolderRef is a skill folder a tool call names: the folder path as far as
