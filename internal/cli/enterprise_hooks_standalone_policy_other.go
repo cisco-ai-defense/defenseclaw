@@ -17,7 +17,7 @@ import (
 // reconcile on other platforms (the standalone Unix guardian has its own),
 // except the watch loop's tamper check.
 
-func enterpriseHookStandalonePlatformPrepare(io.Writer) {}
+func enterpriseHookStandalonePlatformPrepare(io.Writer) error { return nil }
 
 // enterpriseHookStandalonePlatformWatch checks, for the life of the watch
 // loop, for a missing hook binary or a changed machine-policy drop-in.

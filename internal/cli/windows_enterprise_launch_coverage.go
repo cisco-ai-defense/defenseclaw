@@ -18,8 +18,10 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -137,6 +139,34 @@ func reportWindowsManagedInstallCoverage(agent enterprisehooks.UnprotectedAgent)
 }
 
 func postWindowsManagedCoverageAlert(source, summary string, details map[string]any) error {
+	return postWindowsManagedObservability(map[string]any{"kind": "alert", "alert": map[string]any{
+		"source": source, "severity": "HIGH",
+		"summary": summary, "details": details,
+	}})
+}
+
+func init() { windowsEnterpriseHookRepairedAudit = postWindowsManagedHookRepaired }
+
+// postWindowsManagedHookRepaired writes the HIGH connector-hook-repaired
+// audit row for a vendor folder DefenseClaw put back to its protected form
+// (E3 case c safe transaction): the connector, the folder, the access list
+// before and after, and who did it (GAP-0756). A healed tamper always leaves
+// a trail.
+func postWindowsManagedHookRepaired(folder enterprisepolicy.ReprotectedFolder, actor string) error {
+	return postWindowsManagedObservability(map[string]any{"kind": "activity", "activity": map[string]any{
+		"actor":       actor,
+		"action":      string(audit.ActionConnectorHookRepaired),
+		"target_type": "connector",
+		"target_id":   folder.Connector,
+		"severity":    "HIGH",
+		"before":      map[string]any{"path": folder.Dir, "recorded_file": folder.File, "sddl": folder.Before, "why": folder.Why},
+		"after":       map[string]any{"path": folder.Dir, "recorded_file": folder.File, "sddl": folder.After},
+	}})
+}
+
+// postWindowsManagedObservability sends one canonical observability request
+// to the managed gateway over the service's own socket.
+func postWindowsManagedObservability(payload map[string]any) error {
 	base, token, managedHost, err := windowsManagedLaunchAuditEndpoint()
 	if err != nil {
 		return err
@@ -144,10 +174,7 @@ func postWindowsManagedCoverageAlert(source, summary string, details map[string]
 	if !managedHost || token == "" {
 		return errors.New("managed gateway audit endpoint is unavailable")
 	}
-	body, err := json.Marshal(map[string]any{"kind": "alert", "alert": map[string]any{
-		"source": source, "severity": "HIGH",
-		"summary": summary, "details": details,
-	}})
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}

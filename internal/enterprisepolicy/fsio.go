@@ -80,6 +80,24 @@ type policyTakeBack struct {
 	// found by a removal walk (policyFolderUse.removal), which does not fail
 	// closed on it: the walk stops there and takes nothing over.
 	unprotected []unprotectedVendorFolder
+	// reprotected are case c folders that did not protect the recorded file
+	// and that the safe transaction put back to DefenseClaw's protected form.
+	reprotected []ReprotectedFolder
+}
+
+// ReprotectedFolder is a vendor folder DefenseClaw did not create, holding a
+// file DefenseClaw recorded, that a reconcile put back to DefenseClaw's
+// protected form after proving nothing else held or changed it (E3 case c,
+// GAP-0756). Before and After are the owner and access list as SDDL; the
+// caller writes one HIGH connector-hook-repaired audit row from it.
+type ReprotectedFolder struct {
+	Connector string `json:"connector"`
+	Dir       string `json:"dir"`
+	File      string `json:"file"`
+	// Why says what was wrong with the folder.
+	Why    string `json:"why"`
+	Before string `json:"before"`
+	After  string `json:"after"`
 }
 
 // policyFolderUse is how the vendor uses the folder that holds a policy
@@ -140,6 +158,13 @@ func takeBackPolicyPathFor(opts Options, path string, use policyFolderUse, state
 	}
 	for _, note := range result.left {
 		state.detail("%s", note)
+	}
+	for _, folder := range result.reprotected {
+		folder.Connector = state.Connector
+		state.detail("re-protected %s: %s; nothing held it open, DefenseClaw's recorded files in it were as DefenseClaw wrote them and it held "+
+			"nothing else DefenseClaw did not account for, so it now has DefenseClaw's owner and protected access list", folder.Dir, folder.Why)
+		state.Reprotected = append(state.Reprotected, folder)
+		state.Changed = true
 	}
 	if err != nil || len(result.unprotected) != 0 {
 		return result.created, result.unprotected, err

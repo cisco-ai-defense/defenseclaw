@@ -774,6 +774,12 @@ func runWindowsEnterpriseStandaloneAction(
 			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 		}
 	}
+	switch action {
+	case "install", "upgrade", "repair", "reconcile":
+		if err := refuseWindowsEnterpriseUntrustedVendorFolders(opts); err != nil {
+			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+		}
+	}
 	// The installer refuses these for the recorded deployment, or for an
 	// untrusted scanner runtime it cannot remove, before it changes
 	// anything: refused here, they come before this run's first change too.
@@ -1836,6 +1842,7 @@ func applyWindowsEnterpriseInstallerReport(
 		applyWindowsEnterpriseUnprotectedAgents(result)
 		applyWindowsEnterpriseEnrolledConnectors(result)
 		applyWindowsEnterpriseAmpMachineFolder(result)
+		applyWindowsEnterpriseVendorFolders(result)
 		applyWindowsEnterpriseInstalledConfigWarnings(result)
 		applyWindowsEnterpriseAccountFolders(result)
 		if result.Action == "status" || result.Action == "verify" {
@@ -3142,6 +3149,110 @@ func applyWindowsEnterpriseAmpMachineFolder(result *enterprisestatus.Result) {
 			result.AddWarning("machine_folder_not_held", problem)
 		}
 		result.SecurityComplete = false
+	}
+}
+
+// windowsEnterpriseVendorFolderProblems lists the vendor folders (Copilot's
+// policy.d, OpenCode's, Devin's and Windsurf's) that DefenseClaw did not
+// create, that hold a file DefenseClaw recorded, and that another account
+// can use to delete or replace that file, or, for a vendor that loads every
+// file in the folder, to add one. It is the verdict the guardian's publish
+// and machine-policy verify reach for the same folders
+// (enterprisepolicy.InspectRecordedVendorFolders). A host with no installed
+// standalone config has none. Replaceable in tests.
+var windowsEnterpriseVendorFolderProblems = func() []enterprisepolicy.VendorFolderProblem {
+	installed, err := loadWindowsEnterpriseStandaloneConfig("")
+	if err != nil || installed == nil {
+		return nil
+	}
+	opts, connectors, standalone, err := standaloneGuardianOptionsFor(installed)
+	if err != nil || !standalone {
+		return nil
+	}
+	return enterprisepolicy.InspectRecordedVendorFolders(opts, connectors)
+}
+
+// windowsEnterpriseVendorFolderHeal runs the safe transaction for each such
+// folder it can put right (enterprisepolicy.ReprotectRecordedVendorFolders)
+// and returns what it re-protected and what it could not. Replaceable in
+// tests.
+var windowsEnterpriseVendorFolderHeal = func() ([]enterprisepolicy.ReprotectedFolder, []enterprisepolicy.VendorFolderProblem) {
+	installed, err := loadWindowsEnterpriseStandaloneConfig("")
+	if err != nil || installed == nil {
+		return nil, nil
+	}
+	opts, connectors, standalone, err := standaloneGuardianOptionsFor(installed)
+	if err != nil || !standalone {
+		return nil, nil
+	}
+	return enterprisepolicy.ReprotectRecordedVendorFolders(opts, connectors)
+}
+
+// windowsEnterpriseHookRepairedAudit writes the HIGH connector-hook-repaired
+// audit row for a re-protected folder; the Windows build sets it. Replaceable
+// in tests.
+var windowsEnterpriseHookRepairedAudit func(folder enterprisepolicy.ReprotectedFolder, actor string) error
+
+// windowsEnterpriseVendorFolderCode is the result code of a vendor folder that
+// does not protect DefenseClaw's recorded policy file.
+const windowsEnterpriseVendorFolderCode = "vendor_folder_not_held"
+
+// refuseWindowsEnterpriseUntrustedVendorFolders is the install-like
+// lifecycle's and the reconcile's judgement of the vendor folders DefenseClaw
+// did not create that hold a file DefenseClaw recorded (E3 case c: Devin and
+// Windsurf, Copilot's policy.d, OpenCode). It runs before any service stops or
+// file changes, on a standalone deployment. A folder that lets another
+// account delete or replace the recorded file (or, for a vendor that loads
+// every file in it, add one) is put back to DefenseClaw's protected form by
+// the safe transaction, and Setup reports it in the changes and writes the
+// audit row; the transaction does it only when nothing holds the folder or its
+// recorded files open, the files are still as DefenseClaw wrote them and the
+// folder holds nothing DefenseClaw did not account for. Otherwise the action
+// is refused, by name, with the access list unchanged and the administrator's
+// recovery commands in the message, so reporting success never leaves the
+// connector unprotected (GAP-0756, GAP-0760). A fresh install, and a folder
+// with no recorded file (case b), pass: the first publish takes that folder
+// over.
+func refuseWindowsEnterpriseUntrustedVendorFolders(opts *windowsEnterpriseLifecycleOptions) error {
+	if !windowsEnterpriseStandalone(opts) {
+		return nil
+	}
+	healed, blocked := windowsEnterpriseVendorFolderHeal()
+	for _, folder := range healed {
+		change := "re-protected " + folder.Dir + ", a vendor folder DefenseClaw did not create: " + folder.Why +
+			"; nothing held it open, DefenseClaw's recorded files in it were as DefenseClaw wrote them and it held nothing else DefenseClaw did not account for, " +
+			"so it now has DefenseClaw's owner and protected access list (" + folder.Connector + ")"
+		if windowsEnterpriseHookRepairedAudit != nil {
+			if err := windowsEnterpriseHookRepairedAudit(folder, "defenseclaw-setup"); err != nil {
+				change += "; the audit row could not be written: " + err.Error()
+			}
+		}
+		opts.recoveryChanges = append(opts.recoveryChanges, change)
+	}
+	if len(blocked) == 0 {
+		return nil
+	}
+	messages := make([]string, 0, len(blocked))
+	for _, problem := range blocked {
+		messages = append(messages, problem.Connector+": "+problem.Message)
+	}
+	return fmt.Errorf("%s (DefenseClaw does not take over a vendor folder it did not create unless it can prove nothing else holds it or has changed it, "+
+		"and does not give a file another account could change a trusted access list back in place): %s", windowsEnterpriseGateRefusal, strings.Join(messages, "; "))
+}
+
+// applyWindowsEnterpriseVendorFolders reports the same folders in a status,
+// verify or any other result: coverage and security are incomplete while a
+// vendor folder does not protect DefenseClaw's recorded file, and verify
+// fails on it.
+func applyWindowsEnterpriseVendorFolders(result *enterprisestatus.Result) {
+	for _, problem := range windowsEnterpriseVendorFolderProblems() {
+		message := problem.Connector + ": " + problem.Message
+		if result.Action == "verify" {
+			result.AddError(windowsEnterpriseVendorFolderCode, message)
+		} else {
+			result.AddWarning(windowsEnterpriseVendorFolderCode, message)
+		}
+		result.CoverageComplete, result.SecurityComplete = false, false
 	}
 }
 
@@ -4665,6 +4776,9 @@ func planWindowsEnterpriseEnsure(
 			return windowsEnterpriseEnsurePlan{}, err
 		}
 		if err := refuseWindowsEnterpriseAPIPortChange(opts); err != nil {
+			return windowsEnterpriseEnsurePlan{}, err
+		}
+		if err := refuseWindowsEnterpriseUntrustedVendorFolders(opts); err != nil {
 			return windowsEnterpriseEnsurePlan{}, err
 		}
 	}

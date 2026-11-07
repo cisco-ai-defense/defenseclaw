@@ -25,6 +25,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -838,6 +839,9 @@ func isolateTestDeploymentReaders(dir string) {
 	sandboxSeam("windowsEnterpriseAgentSettingsNotices", &windowsEnterpriseAgentSettingsNotices, func() []string { return nil })
 	sandboxSeam("windowsEnterpriseNativeOTLPNotices", &windowsEnterpriseNativeOTLPNotices, func() []string { return nil })
 	sandboxSeam("windowsEnterpriseAmpMachineFolderProblems", &windowsEnterpriseAmpMachineFolderProblems, func() []string { return nil })
+	sandboxSeam("windowsEnterpriseVendorFolderProblems", &windowsEnterpriseVendorFolderProblems, func() []enterprisepolicy.VendorFolderProblem { return nil })
+	sandboxSeam("windowsEnterpriseVendorFolderHeal", &windowsEnterpriseVendorFolderHeal,
+		func() ([]enterprisepolicy.ReprotectedFolder, []enterprisepolicy.VendorFolderProblem) { return nil, nil })
 	sandboxSeam("windowsEnterpriseDiscoveryHomeDirs", &windowsEnterpriseDiscoveryHomeDirs, func() ([]string, error) { return nil, nil })
 	// g079 review F1: the bundle store, the protected credentials and the
 	// change spool of the computer's own layout, the uninstall footprint

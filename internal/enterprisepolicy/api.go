@@ -289,6 +289,10 @@ func VerifyAll(opts Options, connectors []string) (Result, error) {
 			verifyPublishedFiles(opts, name, &state)
 			noteVerifyOnlyExport(opts, &state)
 		}
+		if state.Route == RouteMachinePolicy {
+			// Also when the target's own read failed on the same folder.
+			noteVendorFolderProblem(opts, name, &state)
+		}
 		result.States = append(result.States, state)
 	}
 	// A connector whose entries drifted from what a publish writes (a file
@@ -302,6 +306,26 @@ func VerifyAll(opts Options, connectors []string) (Result, error) {
 	}
 	result.MachinePolicyConnectors = reconciledConnectors(inPlace)
 	return result, errors.Join(errs...)
+}
+
+// noteVendorFolderProblem makes machine-policy verify say what the publish,
+// the repair and Setup's lifecycle say about the same vendor folder: a folder
+// DefenseClaw did not create that holds its recorded file and lets another
+// account delete or replace that file (or, for a vendor that loads every file
+// in it, add one) leaves the connector uncovered, with the folder, the unsafe
+// entry and the fix named (GAP-0756, GAP-0760). Standalone Windows only.
+func noteVendorFolderProblem(opts Options, name string, state *State) {
+	problem := VendorFolderProblemFor(opts, name)
+	if problem == nil {
+		return
+	}
+	for _, conflict := range state.Conflicts {
+		if conflict == problem.Message {
+			return
+		}
+	}
+	state.Conflicts = append([]string{problem.Message}, state.Conflicts...)
+	state.finish()
 }
 
 // policyExportCommand is the `enterprise policy export` whose output an

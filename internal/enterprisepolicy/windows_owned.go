@@ -37,6 +37,20 @@ var windowsGoOwnedTargets = map[string]bool{
 // windowsGoOwnedNames are windowsGoOwnedTargets in retire and remove order.
 var windowsGoOwnedNames = []string{ConnectorCopilot, ConnectorDevinCascade, ConnectorOpenCode}
 
+// windowsGoOwnedFolderUse is how the vendor of a Go-owned Windows target
+// uses the folder that holds its policy file: Copilot loads every *.json
+// file in it and OpenCode two config names, so another account that can add
+// a file there changes the policy; Devin and Windsurf read only hooks.json.
+func windowsGoOwnedFolderUse(name string) policyFolderUse {
+	switch name {
+	case ConnectorCopilot:
+		return copilotFolderUse
+	case ConnectorOpenCode:
+		return opencodeFolderUse
+	}
+	return policyFolderUse{}
+}
+
 // IsWindowsGoOwned reports whether the Go guardian owns connector's Windows
 // machine policy.
 func IsWindowsGoOwned(connector string) bool {
@@ -177,12 +191,9 @@ func takeBackWindowsGoOwnedForRemoval(opts Options, target Target) ([]unprotecte
 		return nil, nil
 	}
 	walk := paths[:1]
-	use := policyFolderUse{removal: true}
+	use := windowsGoOwnedFolderUse(target.Name())
+	use.removal = true
 	switch target.Name() {
-	case ConnectorCopilot:
-		use.siblings = copilotFolderUse.siblings
-	case ConnectorOpenCode:
-		use.siblings = opencodeFolderUse.siblings
 	case ConnectorDevinCascade:
 		// The pre-rename Windsurf file is removed as well when DefenseClaw
 		// recorded writing it.

@@ -583,40 +583,29 @@ func reclaimPolicyDirsFor(opts Options, dir string, use policyFolderUse) (policy
 				loaded := loadRecordedPolicyPaths(opts)
 				recorded = &loaded
 			}
-			if file := recorded.heldFile(cur); file != "" && !recorded.createdFolder(cur) {
-				// Case c: a vendor folder DefenseClaw did not create that
-				// holds a file DefenseClaw recorded is never taken over. The
-				// recorded file keeps its own administrator-only access list,
-				// which every read and publish judges. That protects it only
-				// while no standard user can delete or replace an entry of
-				// the folder (the ancestor rule), and, in the folder that
-				// holds the policy file, while no standard user can add a
-				// file the vendor loads beside it (Copilot's policy.d,
-				// OpenCode's opencode.jsonc: g582 review 7 M1). Otherwise the
-				// connector fails closed, naming the folder and the fix; a
-				// removal walk reports the folder and goes on (S1).
-				refused := (*recordedVendorFolderError)(nil)
-				switch {
-				case index != len(parts)-1:
-					refused = &recordedVendorFolderError{dir: cur, file: file, err: trustErr}
-				default:
-					if replaceErr := validateTrustedDir(cur); replaceErr != nil {
-						refused = &recordedVendorFolderError{dir: cur, file: file, err: replaceErr}
-					} else if use.siblings != "" {
-						refused = &recordedVendorFolderError{dir: cur, file: file, err: trustErr, siblings: use.siblings}
-					}
-				}
-				if refused != nil {
+			if verdict := judgeRecordedVendorFolder(recorded, cur, index == len(parts)-1, use, trustErr); verdict.caseC {
+				if verdict.refused != nil {
 					if use.removal {
-						result.unprotected = append(result.unprotected, refused.folder())
+						result.unprotected = append(result.unprotected, verdict.refused.folder())
 						return result, nil
 					}
-					return result, refused
+					// The safe transaction: the folder is put back to
+					// DefenseClaw's protected form only when nothing holds
+					// it, its recorded files are as DefenseClaw wrote them
+					// and it holds nothing else; otherwise it is refused by
+					// name with the ACL unchanged.
+					healed, blocker := reprotectRecordedVendorFolder(recorded, cur, index == len(parts)-1, use, verdict.refused, validate)
+					if blocker != nil {
+						verdict.refused.blocker = blocker.Error()
+						return result, verdict.refused
+					}
+					result.reprotected = append(result.reprotected, healed)
+					continue
 				}
 				result.left = append(result.left, fmt.Sprintf("left %s as it is: DefenseClaw did not create it and it "+
 					"holds DefenseClaw's %s; standard users may add entries there (%v), but they cannot delete or "+
 					"replace that file, which keeps its own administrator-only access list, and the vendor reads "+
-					"only that file name there", cur, file, trustErr))
+					"only that file name there", cur, verdict.file, trustErr))
 				continue
 			}
 		}
@@ -1251,6 +1240,9 @@ var windowsOwnershipRecordTrusted = managed.WindowsAdminOnlyRecord
 type recordedPolicyPaths struct {
 	files   []string
 	created []string
+	// digests maps a recorded file (lower case) to the SHA-256 of the bytes
+	// DefenseClaw last wrote there.
+	digests map[string]string
 }
 
 func loadRecordedPolicyPaths(opts Options) recordedPolicyPaths {
@@ -1276,6 +1268,10 @@ func loadRecordedPolicyPaths(opts Options) recordedPolicyPaths {
 		}
 		if path := recordedWindowsPath(record.Path); path != "" {
 			recorded.files = append(recorded.files, path)
+			if recorded.digests == nil {
+				recorded.digests = map[string]string{}
+			}
+			recorded.digests[strings.ToLower(path)] = record.PostimageSHA256
 		}
 		for _, dir := range record.CreatedDirs {
 			if path := recordedWindowsPath(dir); path != "" {
@@ -1317,10 +1313,35 @@ func (r *recordedPolicyPaths) heldFile(dir string) string {
 	return ""
 }
 
+// filesUnder returns every recorded file anywhere under dir.
+func (r *recordedPolicyPaths) filesUnder(dir string) []string {
+	prefix := strings.ToLower(strings.TrimRight(filepath.Clean(dir), `\`)) + `\`
+	var out []string
+	for _, path := range r.files {
+		if strings.HasPrefix(strings.ToLower(path), prefix) {
+			out = append(out, path)
+		}
+	}
+	return out
+}
+
+// namesFileIn reports whether DefenseClaw recorded a file called name
+// directly in dir.
+func (r *recordedPolicyPaths) namesFileIn(dir, name string) bool {
+	want := strings.ToLower(filepath.Join(dir, name))
+	for _, path := range r.files {
+		if strings.ToLower(path) == want {
+			return true
+		}
+	}
+	return false
+}
+
 // recordedVendorFolderError is case c failing closed: a vendor folder
 // DefenseClaw did not create, holding a file DefenseClaw recorded, lets an
 // account other than SYSTEM, Administrators and TrustedInstaller delete or
-// replace that file. DefenseClaw does not take the folder over, so the
+// replace that file, and the safe transaction (vendor_folder_judge_windows.go)
+// could not put it right. DefenseClaw does not take the folder over, so the
 // connector is not protected until an administrator fixes the folder.
 type recordedVendorFolderError struct {
 	dir, file string
@@ -1328,12 +1349,19 @@ type recordedVendorFolderError struct {
 	// siblings is set when standard users may only add files to the folder,
 	// and says what else the vendor loads from it (policyFolderUse).
 	siblings string
+	// blocker says what stopped the safe transaction; empty for a folder
+	// seen only by the removal walk.
+	blocker string
 }
 
 func (e *recordedVendorFolderError) Error() string {
-	return fmt.Sprintf("%s; DefenseClaw did not create this folder, so a standalone install does not take it over, "+
+	because := ""
+	if e.blocker != "" {
+		because = " unless it can prove nothing else holds it or has changed it, and it could not: " + e.blocker
+	}
+	return fmt.Sprintf("%s; DefenseClaw did not create this folder, so a standalone install does not take it over%s, "+
 		"and this connector is not protected until an administrator fixes the folder: from an elevated prompt run %s, "+
-		"then run Setup /ensure", e.reason(), e.fix())
+		"then run Setup /ensure", e.reason(), because, e.fix())
 }
 
 func (e *recordedVendorFolderError) Unwrap() error { return e.err }

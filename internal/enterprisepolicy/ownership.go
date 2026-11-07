@@ -495,6 +495,10 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 		return restoreOrStripUnprotected(opts, connector, record, strip, folder, state)
 	}
 	current, exists, err := readPolicyFile(opts, path)
+	var untrusted *untrustedPolicyFileError
+	if errors.As(err, &untrusted) && opts.removing && opts.goos() == "windows" && reclaimRefusesContentDrift() {
+		return keepUntrustedRecordedFile(opts, connector, record, path, untrusted, state)
+	}
 	if err != nil {
 		return err
 	}
@@ -587,6 +591,29 @@ func removeRecordedCreatedDirs(opts Options, record *ownershipRecord, state *Sta
 			state.detail("left %s in place: %v", dir, err)
 		}
 	}
+}
+
+// keepUntrustedRecordedFile is the removal of a recorded policy file that
+// another account owns or can change (Windows standalone, GAP-0761): the
+// bytes may no longer be DefenseClaw's or the administrator's, so the
+// uninstall never writes through the file. It leaves it byte for byte, drops
+// DefenseClaw's record, removes the empty folders DefenseClaw created, and
+// warns once: the file may still hold DefenseClaw's hook entries, which now
+// name programs the uninstall removed, what the agent does with them, and how
+// to take the account's entry off the file and the hook entries out of it.
+// Failing the uninstall instead would keep DefenseClaw's services and its
+// binaries only to protect nothing it still claims.
+func keepUntrustedRecordedFile(opts Options, connector string, record *ownershipRecord, path string, untrusted *untrustedPolicyFileError, state *State) error {
+	state.detail("left %s as it is: %v", path, untrusted.err)
+	state.warn("%s was left byte for byte because another account can change it: %v. It may still hold DefenseClaw's hook entries, "+
+		"which now name programs this uninstall removed; the agent runs them at its next tool call, the program is not there, and "+
+		"depending on the agent the call fails or is blocked until they are gone. To finish: remove that account's access entry "+
+		"(the Fix command in this message), check the file, then delete the entries whose command names DefenseClaw's hook "+
+		"(defenseclaw-hook.exe), or restore the file from a backup", path, untrusted.err)
+	if record != nil {
+		removeRecordedCreatedDirs(opts, record, state, true)
+	}
+	return deleteRecord(opts, connector)
 }
 
 // restoreOrStripUnprotected is restoreOrStrip for a recorded file in a
