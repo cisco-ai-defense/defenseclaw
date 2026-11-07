@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -13,21 +14,52 @@ from pathlib import Path, PureWindowsPath
 from typing import NamedTuple
 
 from defenseclaw.hermes_skills import (
+    _SKILL_FILE_MAX_BYTES,
+    _SKILL_TREE_MAX_BYTES,
     _filesystem_identity,
+    _hash_regular_file,
     _is_link_or_junction,
     _is_real_directory,
+    _is_regular_file,
     _read_regular_file,
-    _tree_sha256,
 )
 
-# SHA-256 of sorted relative paths and file bytes, using the same bounded,
-# non-link tree reader as the Hermes vendor library. These are the published
-# npm package trees, including their bundled dependencies.
+# Digests of the published package own files, see ``_package_digest``. The
+# installed dependency tree is not part of the identity: npm resolves it from
+# the registry when the plugin is installed, so it differs between installs of
+# the same provider version. Generate the rows for a new release with
+# ``scripts/openclaw_provider_digests.py``.
 VENDOR_DIGESTS = {
+    ("@openclaw/amazon-bedrock-provider", "2026.9.33"):
+        "227f9139d20266784b1a8f736bc57c7a8c015c66a210fb9b0ed2d3c53f8a3c5c",
+    ("@openclaw/amazon-bedrock-provider", "2026.9.34"):
+        "cb06f530edaa3c1c21a3daf19de2d3feec3ba19c127ecaeb39cc1e45405c67dc",
+    ("@openclaw/amazon-bedrock-provider", "2026.9.35"):
+        "d35b540fb7ba1e34de31b1a49331f8d081865524aa4b5f44972b9e3732648e82",
+    ("@openclaw/amazon-bedrock-provider", "2026.9.36"):
+        "f093f56e06772aa423b59e4ba2ea8651d30cdf4f1da9f3067c37401c3cd864bf",
+    ("@openclaw/amazon-bedrock-provider", "2026.10.1"):
+        "82a8271d9502ef9e17590cea67f3fd894077829fd21a457680d0b19315f7bcff",
+    ("@openclaw/amazon-bedrock-provider", "2026.10.2"):
+        "60de8fadf40ec6fbe2da249312b4bc8aa71a397ea9ab5f3b60fb0c2a40005721",
+    ("@openclaw/amazon-bedrock-provider", "2026.10.3"):
+        "44c5f821816b129fafe47f02807a95d745acb9d28f1fd85033eb01092af28752",
+    ("@openclaw/amazon-bedrock-provider", "2026.10.4"):
+        "8eb455002ce747ad4d9b005fdc17e7345725f7a9cdcf96cb51d200053f236924",
+    ("@openclaw/amazon-bedrock-provider", "2026.10.5"):
+        "d46d1d71159e309841d2776df87dc42640d5e17b417d0eac2d7f89816a07e8b9",
+    ("@openclaw/amazon-bedrock-provider", "2026.10.6"):
+        "e27d05f4124ca33cd0d625f3caa3fe0a0766198e2a9dc1df08d018bf16f8aff0",
+    ("@openclaw/amazon-bedrock-provider", "2026.10.7"):
+        "00beac565275b2d387311b88f962100fc950ddc3bd38441868929416089e734f",
+    ("@openclaw/amazon-bedrock-provider", "2026.10.8"):
+        "a7a398c64326b8bd083ce20f5a043e839b3f44fe7702a5f71f08327a696d9f99",
     ("@openclaw/amazon-bedrock-provider", "2026.10.9"):
-        "88d9c6715528c0ddfb47adf43a35ccbfec3bb4b8fe75f233e8be431b9ddce3cb",
+        "1a932902454e24eaa8406106d417cd54c29c615fc5a23136704939b997645bf2",
     ("@openclaw/amazon-bedrock-provider", "2026.10.10"):
-        "48b7d1fb0862b9914c722b514a3214202ce7a1efe7b2a6d8a50fe31456ae431a",
+        "31167f79f18e916248d1bcb4b7be2e6bd5d5ec878aa7660c0344d44988b829e3",
+    ("@openclaw/amazon-bedrock-provider", "2026.11.1"):
+        "a059007a42818a11cbf8be2f04cf24897ac9aa99130a141b920aad503e651cbc",
 }
 
 _PRIVATE_INSTALL_COMPONENTS = frozenset({
@@ -84,9 +116,9 @@ def inspect_official_provider_tree(plugin_dir: str, *, data_dir: str = "") -> Pr
     if before_tree is None:
         return None
     # A same-size edit can retain its mtime, and Windows ctime is creation
-    # time. Recheck the published bytes and links before admitting.
+    # time. Recheck the package files and links before admitting.
     for _ in range(2):
-        if _tree_sha256(plugin_dir, tolerated_links=frozenset(tolerated)) != want:
+        if _package_digest(plugin_dir, tolerated_links=frozenset(tolerated)) != want:
             return None
         for peer, (link, before) in links.items():
             try:
@@ -100,6 +132,116 @@ def inspect_official_provider_tree(plugin_dir: str, *, data_dir: str = "") -> Pr
         name=name,
         possible_peer=any(state[1] is not None for _, state in links.values()),
     )
+
+
+# Fields an installer adds to or removes from the published manifest. None of
+# them changes which code runs: development dependencies are never installed,
+# and bundled dependencies only matter when the package is packed.
+_INSTALLER_MANIFEST_FIELDS = frozenset({
+    "devDependencies", "bundledDependencies", "bundleDependencies",
+})
+_MANIFEST_MAX_BYTES = 1024 * 1024
+_DEPENDENCY_DIR = "node_modules"
+_DEPENDENCY_ENTRY_LIMIT = 500_000
+
+
+def _published_manifest_bytes(payload: bytes) -> bytes | None:
+    """The manifest as published: installer fields and npm metadata removed."""
+
+    try:
+        manifest = json.loads(payload)
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    kept = {
+        key: value for key, value in manifest.items()
+        if key not in _INSTALLER_MANIFEST_FIELDS and not key.startswith("_")
+    }
+    return json.dumps(kept, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _package_digest(
+    plugin_dir: str, *, tolerated_links: frozenset[str] = frozenset(),
+) -> str | None:
+    """Digest of the package own files, whichever way it was installed.
+
+    Every entry outside the top-level ``node_modules`` is part of the digest:
+    its relative path and a digest of its bytes, with the manifest reduced to
+    its published form. Any link, device or other non-regular entry there makes
+    the tree unidentified. ``node_modules`` holds what npm resolved for this
+    install, so it is not hashed, but it must hold only directories and regular
+    files; the one link allowed is a tolerated installer peer link, which the
+    caller validates and which is never followed.
+    """
+
+    root = os.path.abspath(plugin_dir)
+    try:
+        root_before = os.stat(root, follow_symlinks=False)
+    except OSError:
+        return None
+    if not _is_real_directory(root_before):
+        return None
+
+    files: list[tuple[str, str, int]] = []
+    own_bytes = 0
+    dependency_entries = 0
+    try:
+        for current, dirs, names in os.walk(root, topdown=True, followlinks=False):
+            if not _is_real_directory(os.stat(current, follow_symlinks=False)):
+                return None
+            safe_dirs: list[str] = []
+            for name in dirs:
+                child = os.path.join(current, name)
+                info = os.stat(child, follow_symlinks=False)
+                relative = os.path.relpath(child, root).replace("\\", "/")
+                if _is_link_or_junction(info) and relative in tolerated_links:
+                    continue
+                if not _is_real_directory(info):
+                    return None
+                safe_dirs.append(name)
+            dirs[:] = safe_dirs
+            for name in names:
+                full = os.path.join(current, name)
+                info = os.stat(full, follow_symlinks=False)
+                relative = os.path.relpath(full, root).replace("\\", "/")
+                if _is_link_or_junction(info) and relative in tolerated_links:
+                    continue
+                if not _is_regular_file(info):
+                    return None
+                if relative.startswith(_DEPENDENCY_DIR + "/"):
+                    dependency_entries += 1
+                    if dependency_entries > _DEPENDENCY_ENTRY_LIMIT:
+                        return None
+                    continue
+                if info.st_size > _SKILL_FILE_MAX_BYTES:
+                    return None
+                own_bytes += info.st_size
+                if own_bytes > _SKILL_TREE_MAX_BYTES:
+                    return None
+                files.append((relative, full, info.st_size))
+    except OSError:
+        return None
+
+    outer = hashlib.sha256()
+    for relative, full, size in sorted(files, key=lambda item: item[0]):
+        inner = hashlib.sha256()
+        if relative == "package.json":
+            payload = _read_regular_file(full, max_bytes=_MANIFEST_MAX_BYTES)
+            published = None if payload is None else _published_manifest_bytes(payload)
+            if published is None:
+                return None
+            inner.update(published)
+        elif not _hash_regular_file(full, size, inner):
+            return None
+        outer.update(relative.encode("utf-8") + b"\0" + inner.digest())
+    try:
+        root_after = os.stat(root, follow_symlinks=False)
+    except OSError:
+        return None
+    if _filesystem_identity(root_before) != _filesystem_identity(root_after):
+        return None
+    return outer.hexdigest()
 
 
 def _tree_entry_state(root: str) -> tuple | None:

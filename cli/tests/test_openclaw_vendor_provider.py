@@ -49,7 +49,7 @@ def test_r108_g501_exact_provider_tree_and_scanned_twins(tmp_path, monkeypatch) 
     source = 'const region = /region/.exec(value);\n'
     official = tmp_path / "official"
     _package(official, "@openclaw/amazon-bedrock-provider", source)
-    digest = vendor_identity._tree_sha256(str(official))
+    digest = vendor_identity._package_digest(str(official))
     assert digest
     monkeypatch.setitem(
         vendor_identity.VENDOR_DIGESTS,
@@ -89,7 +89,7 @@ def test_r109_g501_identity_matrix(tmp_path, monkeypatch) -> None:
     dependency = source / "node_modules" / "dependency"
     dependency.mkdir()
     (dependency / "index.d.ts").write_text("export const value: string;\n", encoding="utf-8")
-    digest = vendor_identity._tree_sha256(str(source))
+    digest = vendor_identity._package_digest(str(source))
     assert digest
     monkeypatch.setitem(
         vendor_identity.VENDOR_DIGESTS,
@@ -100,8 +100,8 @@ def test_r109_g501_identity_matrix(tmp_path, monkeypatch) -> None:
     installed = tmp_path / "installed"
     shutil.copytree(source, installed)
     (installed / "node_modules" / "openclaw").symlink_to(peer, target_is_directory=True)
-    assert vendor_identity._tree_sha256(str(installed)) is None
-    assert vendor_identity._tree_sha256(
+    assert vendor_identity._package_digest(str(installed)) is None
+    assert vendor_identity._package_digest(
         str(installed), tolerated_links=frozenset({"node_modules/openclaw"}),
     ) == digest
     source_identity = vendor_identity.inspect_official_provider_tree(str(source))
@@ -151,18 +151,6 @@ def test_r109_g501_identity_matrix(tmp_path, monkeypatch) -> None:
     change("single-byte-change", lambda root: (root / "index.js").write_text(
         "const match = /Region/.exec(value);\n", encoding="utf-8",
     ))
-    change("extra-readme", lambda root: (root / "node_modules" / "README").write_text(
-        "Package usage notes.\n", encoding="utf-8",
-    ))
-    change("extra-types", lambda root: (root / "node_modules" / "index.d.ts").write_text(
-        "export const value: string;\n", encoding="utf-8",
-    ))
-    change("changed-types", lambda root: (root / "node_modules" / "dependency" / "index.d.ts").write_text(
-        "export const value: number;\n", encoding="utf-8",
-    ))
-    change("extra-text", lambda root: (root / "node_modules" / "payload.txt").write_text(
-        "Local note.\n", encoding="utf-8",
-    ))
     change("missing-file", lambda root: (root / "index.js").unlink(), expect_high=False)
     change("unexpected-link", lambda root: (root / "node_modules" / "other").symlink_to(
         peer, target_is_directory=True,
@@ -196,7 +184,7 @@ def test_r109_g501_identity_matrix(tmp_path, monkeypatch) -> None:
     assert "SRC-EXEC" not in _high_rules(benign)
 
     (dependency / "addon.node").write_bytes(b"native fixture")
-    native_digest = vendor_identity._tree_sha256(str(source))
+    native_digest = vendor_identity._package_digest(str(source))
     assert native_digest
     monkeypatch.setitem(
         vendor_identity.VENDOR_DIGESTS,
@@ -219,7 +207,7 @@ def test_r109_g501_peer_link_revalidated_after_hash(tmp_path, monkeypatch) -> No
         "const match = /region/.exec(value);\n", encoding="utf-8",
     )
     (published / "node_modules").mkdir()
-    digest = vendor_identity._tree_sha256(str(published))
+    digest = vendor_identity._package_digest(str(published))
     assert digest
     monkeypatch.setitem(
         vendor_identity.VENDOR_DIGESTS,
@@ -231,14 +219,14 @@ def test_r109_g501_peer_link_revalidated_after_hash(tmp_path, monkeypatch) -> No
     wrong = tmp_path / "wrong-peer"
     wrong.mkdir()
     (wrong / "package.json").write_text('{"name":"other"}', encoding="utf-8")
-    original = vendor_identity._tree_sha256
+    original = vendor_identity._package_digest
 
     def create_link_during_hash(path, **kwargs):
         if path == str(installed):
             peer.symlink_to(wrong, target_is_directory=True)
         return original(path, **kwargs)
 
-    monkeypatch.setattr(vendor_identity, "_tree_sha256", create_link_during_hash)
+    monkeypatch.setattr(vendor_identity, "_package_digest", create_link_during_hash)
     assert "SRC-EXEC" in _high_rules(installed)
 
 
@@ -265,7 +253,7 @@ def test_r109_g610_peer_destination_bound_by_file_identity(tmp_path, monkeypatch
     monkeypatch.setitem(
         vendor_identity.VENDOR_DIGESTS,
         ("@openclaw/amazon-bedrock-provider", "2026.10.9"),
-        vendor_identity._tree_sha256(str(published)),
+        vendor_identity._package_digest(str(published)),
     )
     installed = tmp_path / "installed"
     shutil.copytree(published, installed)
@@ -278,7 +266,7 @@ def test_r109_g610_peer_destination_bound_by_file_identity(tmp_path, monkeypatch
     identity = vendor_identity.inspect_official_provider_tree(str(installed))
     assert identity is not None and identity.possible_peer
 
-    original = vendor_identity._tree_sha256
+    original = vendor_identity._package_digest
     replaced = []
 
     def replace_target_during_hash(path, **kwargs):
@@ -291,7 +279,7 @@ def test_r109_g610_peer_destination_bound_by_file_identity(tmp_path, monkeypatch
             replaced.append(not os.path.samestat(before, target.stat()))
         return result
 
-    monkeypatch.setattr(vendor_identity, "_tree_sha256", replace_target_during_hash)
+    monkeypatch.setattr(vendor_identity, "_package_digest", replace_target_during_hash)
     assert vendor_identity.inspect_official_provider_tree(str(installed)) is None
     assert replaced == [True]
 
@@ -306,7 +294,7 @@ def test_r109_g501_peer_ancestor_revalidated_after_hash(tmp_path, monkeypatch) -
         "peerDependencies": {"openclaw": ">=2026.10.9"},
     }), encoding="utf-8")
     (published / "index.js").write_text("const match = /region/.exec(value);\n", encoding="utf-8")
-    digest = vendor_identity._tree_sha256(str(published))
+    digest = vendor_identity._package_digest(str(published))
     assert digest
     monkeypatch.setitem(
         vendor_identity.VENDOR_DIGESTS,
@@ -318,7 +306,7 @@ def test_r109_g501_peer_ancestor_revalidated_after_hash(tmp_path, monkeypatch) -
     (installed / "node_modules" / "openclaw").symlink_to(peer_target, target_is_directory=True)
     assert not _high_rules(installed)  # Ordinary installed provider remains allowed.
 
-    original = vendor_identity._tree_sha256
+    original = vendor_identity._package_digest
 
     def swap_ancestor_after_hash(path, **kwargs):
         result = original(path, **kwargs)
@@ -327,7 +315,7 @@ def test_r109_g501_peer_ancestor_revalidated_after_hash(tmp_path, monkeypatch) -
             (installed / "node_modules").symlink_to(tmp_path / "saved-node_modules", target_is_directory=True)
         return result
 
-    monkeypatch.setattr(vendor_identity, "_tree_sha256", swap_ancestor_after_hash)
+    monkeypatch.setattr(vendor_identity, "_package_digest", swap_ancestor_after_hash)
     assert "SRC-EXEC" in _high_rules(installed)
 
 
@@ -345,7 +333,7 @@ def test_r109_g501_whole_tree_revalidated_after_hash(tmp_path, monkeypatch) -> N
     (published / "runtime" / "child" / "entry.js").write_text(
         "export const value = 1;\n", encoding="utf-8",
     )
-    digest = vendor_identity._tree_sha256(str(published))
+    digest = vendor_identity._package_digest(str(published))
     assert digest
     monkeypatch.setitem(
         vendor_identity.VENDOR_DIGESTS,
@@ -355,7 +343,7 @@ def test_r109_g501_whole_tree_revalidated_after_hash(tmp_path, monkeypatch) -> N
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "entry.js").write_text("exec('changed command');\n", encoding="utf-8")
-    original = vendor_identity._tree_sha256
+    original = vendor_identity._package_digest
 
     for profile in ("default", "permissive"):
         installed = tmp_path / profile
@@ -381,7 +369,7 @@ def test_r109_g501_whole_tree_revalidated_after_hash(tmp_path, monkeypatch) -> N
             return result
 
         with monkeypatch.context() as patch:
-            patch.setattr(vendor_identity, "_tree_sha256", change_unrelated_entry)
+            patch.setattr(vendor_identity, "_package_digest", change_unrelated_entry)
             assert "SRC-EXEC" in {f.rule_id for f in scan_plugin(
                 str(installed), PluginScanOptions(policy=profile),
             ).findings if f.severity == "HIGH"}
@@ -398,7 +386,7 @@ def _linked_provider(tmp_path, monkeypatch, target):
     (published / "index.js").write_text(
         "const match = /region/.exec(value);\n", encoding="utf-8",
     )
-    digest = vendor_identity._tree_sha256(str(published))
+    digest = vendor_identity._package_digest(str(published))
     assert digest
     monkeypatch.setitem(
         vendor_identity.VENDOR_DIGESTS,
@@ -740,7 +728,7 @@ def test_r109_g501_contents_rehashed_after_metadata_stable_edit(tmp_path, monkey
     safe_source = "export const value = 1;".ljust(len(changed_source) - 1) + "\n"
     assert len(safe_source) == len(changed_source)
     (published / "index.js").write_text(safe_source, encoding="utf-8")
-    digest = vendor_identity._tree_sha256(str(published))
+    digest = vendor_identity._package_digest(str(published))
     assert digest
     monkeypatch.setitem(
         vendor_identity.VENDOR_DIGESTS,
@@ -750,7 +738,7 @@ def test_r109_g501_contents_rehashed_after_metadata_stable_edit(tmp_path, monkey
     shutil.copytree(published, installed)
     assert not _high_rules(installed)
 
-    original_digest = vendor_identity._tree_sha256
+    original_digest = vendor_identity._package_digest
     original_identity = vendor_identity._filesystem_identity
     monkeypatch.setattr(
         vendor_identity, "_filesystem_identity",
@@ -769,7 +757,7 @@ def test_r109_g501_contents_rehashed_after_metadata_stable_edit(tmp_path, monkey
             changed = True
         return result
 
-    monkeypatch.setattr(vendor_identity, "_tree_sha256", edit_after_first_digest)
+    monkeypatch.setattr(vendor_identity, "_package_digest", edit_after_first_digest)
     assert "SRC-EXEC" in _high_rules(installed)
     assert changed
 
@@ -894,7 +882,7 @@ def _windows_peer_identity(monkeypatch, provider, links, data_dir):
 
     with monkeypatch.context() as patch:
         patch.setattr(vendor_identity, "_read_regular_file", manifest)
-        patch.setattr(vendor_identity, "_tree_sha256", lambda *_args, **_kwargs: pinned)
+        patch.setattr(vendor_identity, "_package_digest", lambda *_args, **_kwargs: pinned)
         patch.setattr(vendor_identity, "_tree_entry_state", lambda _root: ("stable",))
         _WindowsShareModel(links).install(patch)
         return vendor_identity.inspect_official_provider_tree(provider, data_dir=data_dir)
@@ -1173,7 +1161,7 @@ def test_r109_g724_tree_state_does_not_read_directory_listing_metadata(
 
         # A real edit made after the digest is still found: the provider is
         # then scanned like any other plugin.
-        original = vendor_identity._tree_sha256
+        original = vendor_identity._package_digest
 
         def edit_after_hash(path, **kwargs):
             result = original(path, **kwargs)
@@ -1181,7 +1169,7 @@ def test_r109_g724_tree_state_does_not_read_directory_listing_metadata(
                 handle.write("exec(changed);\n")
             return result
 
-        patch.setattr(vendor_identity, "_tree_sha256", edit_after_hash)
+        patch.setattr(vendor_identity, "_package_digest", edit_after_hash)
         assert vendor_identity.inspect_official_provider_tree(str(installed)) is None
 
 
@@ -1211,3 +1199,4 @@ def test_r109_g724_stored_parent_name_after_private_name_is_judged(monkeypatch) 
         assert (identity is not None) is possible, label
         if possible:
             assert identity.possible_peer, label
+
