@@ -5,6 +5,8 @@ package gateway
 
 import (
 	"bytes"
+	"compress/gzip"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +16,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
 
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
@@ -25,25 +29,37 @@ import (
 // which already carries the [DefenseClaw] banner for proxy blocks.
 //
 // The inspect endpoint records each enforced OpenClaw tool block here, keyed by
-// the tool call id the plugin sends. The next model request that carries the
-// tool result for that id takes the notice, and the proxy puts one line in
-// front of the first text of the reply (stream or not). A notice is taken by one
+// the tool call id the plugin sends and the plugin session. The next
+// authenticated OpenClaw model request in that session that carries the tool
+// result for that call takes the notice, and the proxy puts one line in front
+// of the first text of the reply (stream or not). A notice is taken by one
 // request, so a block is shown once and an allowed call never has one. A reply
-// with no text (another tool call) or an upstream error gives the notice back
-// until it expires, so the line lands on the first reply that has text.
+// with no text to lead with, or in a format that is not rewritten, gives the
+// notice back until it expires, so the line lands on the first reply that can
+// carry it. A reply DefenseClaw wrote itself (it starts with the block banner)
+// is never prefixed, so history laundering still recognises it.
 
 const (
-	openClawBlockNoticeTTL       = 2 * time.Minute
-	openClawBlockNoticeCap       = 256
-	openClawBlockNoticeMark      = "[DefenseClaw] Tool call blocked"
-	openClawBlockNoticeMaxBody   = 32 << 20
-	openClawBlockNoticeMaxFrame  = 4 << 20
-	openClawBlockNoticeKeyLength = 32
+	openClawBlockNoticeTTL      = 2 * time.Minute
+	openClawBlockNoticeCap      = 256
+	openClawBlockNoticeMark     = "[DefenseClaw] Tool call blocked"
+	openClawBlockNoticeMaxBody  = 32 << 20
+	openClawBlockNoticeMaxFrame = 4 << 20
+	// A provider that keeps only nine alphanumerics of a call id (the strictest
+	// id policy OpenClaw has) sends this much of it back.
+	openClawStrictIDLength = 9
 )
 
 type openClawBlockNotice struct {
-	key, line string
-	at        time.Time
+	// ids is every form of the call id a provider adapter may send back: the
+	// id itself, with and without characters the provider cannot carry, and the
+	// strict short form. A request id matches only by being one of them, so two
+	// different calls never share a notice.
+	ids     []string
+	tool    string
+	session string
+	line    string
+	at      time.Time
 }
 
 var openClawBlockNotices struct {
@@ -51,27 +67,52 @@ var openClawBlockNotices struct {
 	entries []openClawBlockNotice
 }
 
-// openClawToolCallKey normalizes a tool call id so the plugin hook id and the
-// id a provider adapter sends back compare equal: the OpenClaw Responses ids
-// are "<call id>|<item id>", and other providers need ids restricted to
-// letters, digits, "_" and "-".
-func openClawToolCallKey(id string) string {
+// openClawRequestCallID is the call id a model request names: the OpenClaw
+// Responses ids are "<call id>|<item id>" and the request carries the first
+// part.
+func openClawRequestCallID(id string) string {
 	id = strings.TrimSpace(id)
 	if i := strings.Index(id, "|"); i >= 0 {
 		id = id[:i]
 	}
-	var b strings.Builder
+	return id
+}
+
+func openClawCallIDForms(id string) []string {
+	id = openClawRequestCallID(id)
+	if id == "" {
+		return nil
+	}
+	var kept, alnum strings.Builder
 	for _, r := range id {
-		if r < unicode.MaxASCII && (unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune("_-", r)) {
-			b.WriteRune(r)
-		} else {
-			b.WriteString("_")
-		}
-		if b.Len() >= openClawBlockNoticeKeyLength {
-			break
+		switch {
+		case r < unicode.MaxASCII && (unicode.IsLetter(r) || unicode.IsDigit(r)):
+			kept.WriteRune(r)
+			alnum.WriteRune(r)
+		case r == '_' || r == '-':
+			kept.WriteRune(r)
+		default:
+			kept.WriteByte('_')
 		}
 	}
-	return b.String()
+	forms := []string{id}
+	add := func(f string) {
+		if f == "" {
+			return
+		}
+		for _, have := range forms {
+			if have == f {
+				return
+			}
+		}
+		forms = append(forms, f)
+	}
+	add(kept.String())
+	add(alnum.String())
+	if a := alnum.String(); len(a) > openClawStrictIDLength {
+		add(a[:openClawStrictIDLength])
+	}
+	return forms
 }
 
 func openClawNoticeText(s string, limit int) string {
@@ -88,6 +129,9 @@ func openClawNoticeText(s string, limit int) string {
 	return s
 }
 
+// openClawBlockNoticeLine is the one line the user reads. The reason goes
+// through the sink projection (rule ids kept, literals redacted) and never
+// follows the operator's log reveal flag: this text is part of a model reply.
 func openClawBlockNoticeLine(tool string, ruleIDs []string, reason string) string {
 	var b strings.Builder
 	b.WriteString(openClawBlockNoticeMark)
@@ -100,7 +144,7 @@ func openClawBlockNoticeLine(tool string, ruleIDs []string, reason string) strin
 			break
 		}
 	}
-	if r := openClawNoticeText(redaction.Reason(reason), 240); r != "" {
+	if r := openClawNoticeText(redaction.ForSinkReason(reason), 240); r != "" {
 		b.WriteString(" - " + r)
 	}
 	return b.String()
@@ -108,16 +152,23 @@ func openClawBlockNoticeLine(tool string, ruleIDs []string, reason string) strin
 
 // rememberOpenClawBlockNotice records an enforced block of one OpenClaw tool
 // call. A call without an id cannot be matched to its tool result and has none.
-func rememberOpenClawBlockNotice(toolCallID, tool string, ruleIDs []string, reason string) {
-	key := openClawToolCallKey(toolCallID)
-	if key == "" {
+func rememberOpenClawBlockNotice(session, toolCallID, tool string, ruleIDs []string, reason string) {
+	ids := openClawCallIDForms(toolCallID)
+	if len(ids) == 0 {
 		return
 	}
 	openClawBlockNotices.mu.Lock()
 	defer openClawBlockNotices.mu.Unlock()
 	now := openClawToolOutcomeNow()
 	openClawBlockNotices.entries = append(pruneOpenClawBlockNotices(openClawBlockNotices.entries, now),
-		openClawBlockNotice{key: key, line: openClawBlockNoticeLine(tool, ruleIDs, reason), at: now})
+		openClawBlockNotice{
+			ids: ids, tool: strings.ToLower(strings.TrimSpace(tool)), session: strings.TrimSpace(session),
+			line: openClawBlockNoticeLine(tool, ruleIDs, reason), at: now,
+		})
+	capOpenClawBlockNotices()
+}
+
+func capOpenClawBlockNotices() {
 	if n := len(openClawBlockNotices.entries); n > openClawBlockNoticeCap {
 		openClawBlockNotices.entries = openClawBlockNotices.entries[n-openClawBlockNoticeCap:]
 	}
@@ -133,34 +184,79 @@ func pruneOpenClawBlockNotices(entries []openClawBlockNotice, now time.Time) []o
 	return kept
 }
 
-func openClawBlockNoticesPending() bool {
-	openClawBlockNotices.mu.Lock()
-	defer openClawBlockNotices.mu.Unlock()
-	return len(openClawBlockNotices.entries) > 0
+// openClawNoticeSessionFits reports whether a notice recorded in one session
+// may show in a request from another: only when both name a session and the
+// names differ is it ruled out.
+func openClawNoticeSessionFits(entry, request string) bool {
+	return entry == "" || request == "" || entry == request
 }
 
-// openClawRequestToolCallKeys collects the normalized tool call ids a model
-// request names, in any provider shape: tool_call_id (Chat Completions),
-// call_id (Responses), tool_use_id (Anthropic) and toolUseId (Bedrock).
-func openClawRequestToolCallKeys(body []byte) map[string]bool {
+// openClawBlockNoticesPending reports whether a live notice may belong to a
+// request of this session. Expired notices are dropped first, so one block
+// costs later requests at most the notice lifetime.
+func openClawBlockNoticesPending(session string) bool {
+	openClawBlockNotices.mu.Lock()
+	defer openClawBlockNotices.mu.Unlock()
+	openClawBlockNotices.entries = pruneOpenClawBlockNotices(openClawBlockNotices.entries, openClawToolOutcomeNow())
+	for _, e := range openClawBlockNotices.entries {
+		if openClawNoticeSessionFits(e.session, session) {
+			return true
+		}
+	}
+	return false
+}
+
+// openClawNoticeRefs is what a model request names about its tool results.
+type openClawNoticeRefs struct {
+	// ids are the call ids, in any provider shape: tool_call_id (Chat
+	// Completions), call_id (Responses), tool_use_id (Anthropic), toolUseId
+	// (Bedrock) and the id of a Gemini functionResponse.
+	ids map[string]bool
+	// tools are the tool names of results that carry no call id (a Gemini
+	// functionResponse name, an Ollama tool_name); used only when the request
+	// names no call id at all.
+	tools map[string]bool
+}
+
+func openClawRequestRefs(body []byte) openClawNoticeRefs {
+	refs := openClawNoticeRefs{ids: map[string]bool{}, tools: map[string]bool{}}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	var doc any
 	if dec.Decode(&doc) != nil {
-		return nil
+		return refs
 	}
-	keys := map[string]bool{}
+	addID := func(v any) {
+		if s, ok := v.(string); ok {
+			if id := openClawRequestCallID(s); id != "" {
+				refs.ids[id] = true
+			}
+		}
+	}
+	addTool := func(v any) {
+		if s, ok := v.(string); ok {
+			if t := strings.ToLower(strings.TrimSpace(s)); t != "" {
+				refs.tools[t] = true
+			}
+		}
+	}
 	var walk func(v any)
 	walk = func(v any) {
 		switch t := v.(type) {
 		case map[string]any:
+			if role, _ := t["role"].(string); role == "tool" {
+				addTool(t["tool_name"])
+			}
 			for k, val := range t {
-				if s, ok := val.(string); ok {
-					switch k {
-					case "tool_call_id", "call_id", "tool_use_id", "toolUseId":
-						if key := openClawToolCallKey(s); key != "" {
-							keys[key] = true
-						}
+				switch k {
+				case "tool_call_id", "call_id", "tool_use_id", "toolUseId":
+					addID(val)
+					continue
+				case "functionResponse", "function_response":
+					// The result body is tool output: only its name and id count.
+					if fr, ok := val.(map[string]any); ok {
+						addTool(fr["name"])
+						addID(fr["id"])
 					}
 					continue
 				}
@@ -173,25 +269,33 @@ func openClawRequestToolCallKeys(body []byte) map[string]bool {
 		}
 	}
 	walk(doc)
-	return keys
+	return refs
 }
 
-func takeOpenClawBlockNotices(body []byte) []openClawBlockNotice {
-	if !openClawBlockNoticesPending() {
-		return nil
+func (r openClawNoticeRefs) matches(e openClawBlockNotice) bool {
+	if len(r.ids) > 0 {
+		for _, f := range e.ids {
+			if r.ids[f] {
+				return true
+			}
+		}
+		return false
 	}
-	keys := openClawRequestToolCallKeys(body)
-	if len(keys) == 0 {
+	return e.tool != "" && r.tools[e.tool]
+}
+
+func takeOpenClawBlockNotices(body []byte, session string) []openClawBlockNotice {
+	refs := openClawRequestRefs(body)
+	if len(refs.ids) == 0 && len(refs.tools) == 0 {
 		return nil
 	}
 	openClawBlockNotices.mu.Lock()
 	defer openClawBlockNotices.mu.Unlock()
-	now := openClawToolOutcomeNow()
-	openClawBlockNotices.entries = pruneOpenClawBlockNotices(openClawBlockNotices.entries, now)
+	openClawBlockNotices.entries = pruneOpenClawBlockNotices(openClawBlockNotices.entries, openClawToolOutcomeNow())
 	var taken []openClawBlockNotice
 	kept := make([]openClawBlockNotice, 0, len(openClawBlockNotices.entries))
 	for _, e := range openClawBlockNotices.entries {
-		if keys[e.key] {
+		if openClawNoticeSessionFits(e.session, session) && refs.matches(e) {
 			taken = append(taken, e)
 		} else {
 			kept = append(kept, e)
@@ -208,9 +312,7 @@ func restoreOpenClawBlockNotices(notices []openClawBlockNotice) {
 	openClawBlockNotices.mu.Lock()
 	defer openClawBlockNotices.mu.Unlock()
 	openClawBlockNotices.entries = append(notices, pruneOpenClawBlockNotices(openClawBlockNotices.entries, openClawToolOutcomeNow())...)
-	if n := len(openClawBlockNotices.entries); n > openClawBlockNoticeCap {
-		openClawBlockNotices.entries = openClawBlockNotices.entries[n-openClawBlockNoticeCap:]
-	}
+	capOpenClawBlockNotices()
 }
 
 // openClawNoticeReply reports whether an assistant turn is a model reply that
@@ -236,11 +338,18 @@ type openClawNoticeBody struct {
 }
 
 // openClawBlockNoticeMiddleware prefixes the first reply text that follows an
-// OpenClaw tool block with the block notice. Requests with no pending notice
-// pass through untouched and unbuffered.
-func openClawBlockNoticeMiddleware(next http.Handler) http.Handler {
+// OpenClaw tool block with the block notice. Only a request that authorized
+// proves is the gateway owner's, that is not routed to another connector, and
+// whose session fits a live notice is read; every other request passes through
+// untouched and unbuffered.
+func openClawBlockNoticeMiddleware(next http.Handler, authorized func(*http.Request) bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.Body == nil || !openClawBlockNoticesPending() {
+		if r.Method != http.MethodPost || r.Body == nil || !openClawNoticeRoute(r) || !authorized(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		session := strings.TrimSpace(r.Header.Get(SessionIDHeader))
+		if !openClawBlockNoticesPending(session) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -252,7 +361,7 @@ func openClawBlockNoticeMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
-		notices := takeOpenClawBlockNotices(body)
+		notices := takeOpenClawBlockNotices(body, session)
 		if len(notices) == 0 {
 			next.ServeHTTP(w, r)
 			return
@@ -268,17 +377,28 @@ func openClawBlockNoticeMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+type proxyConnectorKey struct{}
+
+// openClawNoticeRoute is false for a request that connectorPrefixStripper
+// routed to a connector other than OpenClaw (/c/<name>/...); OpenClaw's own
+// fetch interceptor sends no connector prefix.
+func openClawNoticeRoute(r *http.Request) bool {
+	name, _ := r.Context().Value(proxyConnectorKey{}).(string)
+	return name == "" || name == "openclaw"
+}
+
 const (
-	noticeUndecided = iota
-	noticePass
+	noticePass = iota
 	noticeSSE
+	noticeNDJSON
+	noticeEventStream
 	noticeJSON
 )
 
 // openClawNoticeWriter rewrites the first assistant text of a model reply. It
-// understands Chat Completions, Responses and Anthropic Messages streams and
-// bodies, and Bedrock Converse bodies; any other reply passes through and
-// drops the notice.
+// understands Chat Completions, Responses, Anthropic Messages, Gemini and Ollama
+// streams and bodies, and Bedrock Converse bodies and event streams; any other
+// reply passes through and the notice waits for a later one.
 type openClawNoticeWriter struct {
 	http.ResponseWriter
 	notices []openClawBlockNotice
@@ -287,7 +407,11 @@ type openClawNoticeWriter struct {
 	status  int
 	started bool
 	applied bool
-	buf     []byte
+	// synthetic is set when the first text is a reply DefenseClaw wrote: it is
+	// left as it is, and the notice waits.
+	synthetic bool
+	gzipped   bool
+	buf       []byte
 	// Responses stream state: the item and content part the line went into,
 	// so the done events and the final response carry the same text.
 	itemID, partIdx string
@@ -301,16 +425,23 @@ func (w *openClawNoticeWriter) WriteHeader(code int) {
 	}
 	w.started, w.status = true, code
 	ct := strings.ToLower(w.Header().Get("Content-Type"))
-	enc := strings.ToLower(w.Header().Get("Content-Encoding"))
+	enc := strings.ToLower(strings.TrimSpace(w.Header().Get("Content-Encoding")))
 	switch {
 	case code < 200 || code >= 300:
 		w.mode = noticePass
-		restoreOpenClawBlockNotices(w.notices)
-		w.notices = nil
+	case enc == "gzip" && strings.Contains(ct, "json") && !strings.Contains(ct, "ndjson"):
+		w.mode, w.gzipped = noticeJSON, true
+		return
 	case enc != "" && enc != "identity":
 		w.mode = noticePass
 	case strings.Contains(ct, "text/event-stream"):
 		w.mode = noticeSSE
+		w.Header().Del("Content-Length")
+	case strings.Contains(ct, "ndjson"):
+		w.mode = noticeNDJSON
+		w.Header().Del("Content-Length")
+	case strings.Contains(ct, "application/vnd.amazon.eventstream"):
+		w.mode = noticeEventStream
 		w.Header().Del("Content-Length")
 	case strings.Contains(ct, "json"):
 		w.mode = noticeJSON
@@ -332,9 +463,9 @@ func (w *openClawNoticeWriter) Write(p []byte) (int, error) {
 			w.release()
 		}
 		return len(p), nil
-	case noticeSSE:
+	case noticeSSE, noticeNDJSON, noticeEventStream:
 		w.buf = append(w.buf, p...)
-		return len(p), w.drainSSE(false)
+		return len(p), w.drain(false)
 	}
 	return w.ResponseWriter.Write(p)
 }
@@ -366,19 +497,44 @@ func (w *openClawNoticeWriter) Flush() {
 func (w *openClawNoticeWriter) finish() {
 	switch w.mode {
 	case noticeJSON:
-		var out []byte
-		out, w.applied = w.rewriteBody(w.buf)
-		w.Header().Set("Content-Length", strconv.Itoa(len(out)))
-		w.ResponseWriter.WriteHeader(w.status)
-		_, _ = w.ResponseWriter.Write(out)
-	case noticeSSE:
-		_ = w.drainSSE(true)
+		w.finishJSON()
+	case noticeSSE, noticeNDJSON, noticeEventStream:
+		_ = w.drain(true)
 	}
-	// A reply with no text to lead with, or none at all, leaves the notice for
-	// the next reply; a reply in a format that is not rewritten drops it.
-	if w.mode != noticePass && !w.applied {
+	// A reply with no text to lead with, a DefenseClaw-written reply, an error
+	// or a format that is not rewritten leaves the notice for the next reply.
+	if !w.applied {
 		restoreOpenClawBlockNotices(w.notices)
 	}
+}
+
+func (w *openClawNoticeWriter) finishJSON() {
+	out := w.buf
+	if w.gzipped {
+		if plain, ok := gunzipNoticeBody(w.buf); ok {
+			if rewritten, applied := w.rewriteBody(plain); applied {
+				w.applied, out = true, rewritten
+				w.Header().Del("Content-Encoding")
+			}
+		}
+	} else {
+		out, w.applied = w.rewriteBody(w.buf)
+	}
+	w.Header().Set("Content-Length", strconv.Itoa(len(out)))
+	w.ResponseWriter.WriteHeader(w.status)
+	_, _ = w.ResponseWriter.Write(out)
+}
+
+func gunzipNoticeBody(raw []byte) ([]byte, bool) {
+	zr, err := gzip.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		return nil, false
+	}
+	plain, err := io.ReadAll(io.LimitReader(zr, openClawBlockNoticeMaxBody+1))
+	if err != nil || len(plain) > openClawBlockNoticeMaxBody {
+		return nil, false
+	}
+	return plain, true
 }
 
 func sseFrameEnd(b []byte) (int, int) {
@@ -392,28 +548,67 @@ func sseFrameEnd(b []byte) (int, int) {
 	return -1, 0
 }
 
-func (w *openClawNoticeWriter) drainSSE(final bool) error {
+func lineFrameEnd(b []byte) (int, int) {
+	if i := bytes.IndexByte(b, '\n'); i >= 0 {
+		return i, 1
+	}
+	return -1, 0
+}
+
+// eventStreamFrameEnd reads the total length from the prelude of an AWS event
+// stream message. A length no message can have gives up (-2).
+func eventStreamFrameEnd(b []byte) (int, int) {
+	if len(b) < 4 {
+		return -1, 0
+	}
+	total := int(binary.BigEndian.Uint32(b[:4]))
+	if total < 16 || total > openClawBlockNoticeMaxFrame {
+		return -2, 0
+	}
+	if len(b) < total {
+		return -1, 0
+	}
+	return total, 0
+}
+
+func (w *openClawNoticeWriter) drain(final bool) error {
+	frameEnd, rewrite := sseFrameEnd, w.rewriteFrame
+	switch w.mode {
+	case noticeNDJSON:
+		frameEnd, rewrite = lineFrameEnd, w.rewriteLine
+	case noticeEventStream:
+		frameEnd, rewrite = eventStreamFrameEnd, w.rewriteEventStreamMessage
+	}
 	for {
-		idx, n := sseFrameEnd(w.buf)
+		idx, n := frameEnd(w.buf)
+		if idx == -2 {
+			return w.flushRest(false)
+		}
 		if idx < 0 {
 			break
 		}
 		frame := append([]byte(nil), w.buf[:idx+n]...)
 		w.buf = w.buf[idx+n:]
-		if _, err := w.ResponseWriter.Write(w.rewriteFrame(frame)); err != nil {
+		if _, err := w.ResponseWriter.Write(rewrite(frame)); err != nil {
 			return err
 		}
 	}
 	if len(w.buf) > openClawBlockNoticeMaxFrame || (final && len(w.buf) > 0) {
-		rest := w.buf
-		w.buf = nil
-		if !final {
-			w.mode = noticePass
-		}
-		_, err := w.ResponseWriter.Write(rest)
-		return err
+		return w.flushRest(final)
 	}
 	return nil
+}
+
+// flushRest sends what is buffered unchanged and, unless the reply is over,
+// stops rewriting.
+func (w *openClawNoticeWriter) flushRest(final bool) error {
+	rest := w.buf
+	w.buf = nil
+	if !final {
+		w.mode = noticePass
+	}
+	_, err := w.ResponseWriter.Write(rest)
+	return err
 }
 
 func decodeNoticeJSON(raw []byte) (map[string]any, bool) {
@@ -426,7 +621,7 @@ func decodeNoticeJSON(raw []byte) (map[string]any, bool) {
 	return obj, true
 }
 
-func encodeNoticeJSON(obj map[string]any) ([]byte, bool) {
+func encodeNoticeJSON(obj any) ([]byte, bool) {
 	var out bytes.Buffer
 	enc := json.NewEncoder(&out)
 	enc.SetEscapeHTML(false)
@@ -436,9 +631,17 @@ func encodeNoticeJSON(obj map[string]any) ([]byte, bool) {
 	return bytes.TrimRight(out.Bytes(), "\n"), true
 }
 
-// rewriteFrame puts the notice in one SSE frame when it carries text that
+// rewritePayload puts the notice in one JSON event when it carries text that
 // should lead with it, and keeps the Responses done events in step with the
 // deltas.
+func (w *openClawNoticeWriter) rewritePayload(payload []byte) ([]byte, bool) {
+	obj, ok := decodeNoticeJSON(payload)
+	if !ok || !w.rewriteEvent(obj) {
+		return nil, false
+	}
+	return encodeNoticeJSON(obj)
+}
+
 func (w *openClawNoticeWriter) rewriteFrame(frame []byte) []byte {
 	if w.applied && w.itemID == "" {
 		return frame
@@ -458,12 +661,7 @@ func (w *openClawNoticeWriter) rewriteFrame(frame []byte) []byte {
 	}
 	line := lines[dataAt]
 	cr := bytes.HasSuffix(line, []byte("\r"))
-	payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
-	obj, ok := decodeNoticeJSON(payload)
-	if !ok || !w.rewriteEvent(obj) {
-		return frame
-	}
-	enc, ok := encodeNoticeJSON(obj)
+	enc, ok := w.rewritePayload(bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:"))))
 	if !ok {
 		return frame
 	}
@@ -472,6 +670,50 @@ func (w *openClawNoticeWriter) rewriteFrame(frame []byte) []byte {
 		lines[dataAt] = append(lines[dataAt], "\r"...)
 	}
 	return bytes.Join(lines, []byte("\n"))
+}
+
+// rewriteLine handles one line of a newline-delimited JSON stream (Ollama).
+func (w *openClawNoticeWriter) rewriteLine(line []byte) []byte {
+	if w.applied {
+		return line
+	}
+	body := bytes.TrimRight(line, "\r\n")
+	enc, ok := w.rewritePayload(bytes.TrimSpace(body))
+	if !ok {
+		return line
+	}
+	return append(enc, line[len(body):]...)
+}
+
+// rewriteEventStreamMessage handles one message of a Bedrock ConverseStream.
+func (w *openClawNoticeWriter) rewriteEventStreamMessage(frame []byte) []byte {
+	if w.applied {
+		return frame
+	}
+	msg, err := eventstream.NewDecoder().Decode(bytes.NewReader(frame), nil)
+	if err != nil || msg.Headers.Get(":event-type") == nil || msg.Headers.Get(":event-type").String() != "contentBlockDelta" {
+		return frame
+	}
+	obj, ok := decodeNoticeJSON(msg.Payload)
+	if !ok {
+		return frame
+	}
+	delta, _ := obj["delta"].(map[string]any)
+	if delta == nil || !w.prefixField(delta, "text") {
+		return frame
+	}
+	payload, ok := encodeNoticeJSON(obj)
+	if !ok {
+		w.applied = false
+		return frame
+	}
+	msg.Payload = payload
+	var out bytes.Buffer
+	if eventstream.NewEncoder().Encode(&out, msg) != nil {
+		w.applied = false
+		return frame
+	}
+	return out.Bytes()
 }
 
 func (w *openClawNoticeWriter) rewriteEvent(obj map[string]any) bool {
@@ -488,24 +730,58 @@ func (w *openClawNoticeWriter) rewriteEvent(obj map[string]any) bool {
 	case strings.HasPrefix(typ, "response."):
 		return w.rewriteResponsesEvent(typ, obj)
 	case typ == "" && !w.applied:
-		choices, _ := obj["choices"].([]any)
-		if len(choices) == 0 {
-			return false
+		// Chat Completions chunk, Gemini candidate or Ollama message.
+		if choices, _ := obj["choices"].([]any); len(choices) > 0 {
+			c0, _ := choices[0].(map[string]any)
+			delta, _ := c0["delta"].(map[string]any)
+			return delta != nil && w.prefixField(delta, "content")
 		}
-		c0, _ := choices[0].(map[string]any)
-		delta, _ := c0["delta"].(map[string]any)
-		if delta != nil {
-			return w.prefixField(delta, "content")
+		if w.prefixGemini(obj) {
+			return true
+		}
+		msg, _ := obj["message"].(map[string]any)
+		return msg != nil && w.prefixField(msg, "content")
+	}
+	return false
+}
+
+// prefixGemini puts the notice in the first answer part of a Gemini reply.
+func (w *openClawNoticeWriter) prefixGemini(obj map[string]any) bool {
+	cands, _ := obj["candidates"].([]any)
+	if len(cands) == 0 {
+		return false
+	}
+	c0, _ := cands[0].(map[string]any)
+	content, _ := c0["content"].(map[string]any)
+	if content == nil {
+		return false
+	}
+	parts, _ := content["parts"].([]any)
+	for _, p := range parts {
+		part, _ := p.(map[string]any)
+		if part == nil {
+			continue
+		}
+		if thought, _ := part["thought"].(bool); thought {
+			continue
+		}
+		if w.prefixField(part, "text") {
+			return true
 		}
 	}
 	return false
 }
 
 // prefixField puts the notice in front of a non-empty string field and counts
-// it as shown.
+// it as shown. A text that starts with the block banner is a reply DefenseClaw
+// wrote: it stays as it is and nothing after it is prefixed.
 func (w *openClawNoticeWriter) prefixField(m map[string]any, key string) bool {
 	s, _ := m[key].(string)
-	if s == "" {
+	if s == "" || w.synthetic {
+		return false
+	}
+	if strings.HasPrefix(strings.TrimLeft(s, " \t\r\n"), defenseClawBlockBanner) {
+		w.synthetic = true
 		return false
 	}
 	m[key] = w.prefix + s
@@ -585,15 +861,30 @@ func (w *openClawNoticeWriter) prefixItem(item map[string]any) bool {
 // rewriteBody puts the notice in front of the first text of a non-streamed
 // reply. The second result is false when the body has no text to lead with.
 func (w *openClawNoticeWriter) rewriteBody(body []byte) ([]byte, bool) {
-	obj, ok := decodeNoticeJSON(body)
-	if !ok {
+	var doc any
+	if trimmed := bytes.TrimLeft(body, " \t\r\n"); len(trimmed) > 0 && trimmed[0] == '[' {
+		// A Gemini reply streamed without alt=sse is one JSON array of chunks.
+		dec := json.NewDecoder(bytes.NewReader(body))
+		dec.UseNumber()
+		var arr []any
+		if dec.Decode(&arr) != nil {
+			return body, false
+		}
+		for _, el := range arr {
+			if obj, _ := el.(map[string]any); obj != nil && w.rewriteBodyObject(obj) {
+				doc = arr
+				break
+			}
+		}
+	} else if obj, ok := decodeNoticeJSON(body); ok && w.rewriteBodyObject(obj) {
+		doc = obj
+	}
+	if doc == nil {
 		return body, false
 	}
-	if !w.rewriteBodyObject(obj) {
-		return body, false
-	}
-	out, ok := encodeNoticeJSON(obj)
+	out, ok := encodeNoticeJSON(doc)
 	if !ok {
+		w.applied = false
 		return body, false
 	}
 	return out, true
@@ -610,6 +901,10 @@ func (w *openClawNoticeWriter) rewriteBodyObject(obj map[string]any) bool {
 			}
 			return w.prefixParts(msg["content"], "text")
 		}
+	}
+	// Gemini.
+	if w.prefixGemini(obj) {
+		return true
 	}
 	// Responses.
 	if output, _ := obj["output"].([]any); len(output) > 0 {
@@ -629,6 +924,10 @@ func (w *openClawNoticeWriter) rewriteBodyObject(obj map[string]any) bool {
 	// Anthropic Messages.
 	if obj["type"] == "message" {
 		return w.prefixParts(obj["content"], "text")
+	}
+	// Ollama chat.
+	if msg, _ := obj["message"].(map[string]any); msg != nil {
+		return w.prefixField(msg, "content")
 	}
 	return false
 }
