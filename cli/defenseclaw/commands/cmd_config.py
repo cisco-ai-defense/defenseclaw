@@ -996,7 +996,8 @@ _MOVED_DATA_DIR_LOCK = "hook_contract_lock.json"
 _MOVED_DATA_DIR_BACKUP_TREE = "connector_backups"
 _MOVED_STATE_MAX_FILE_BYTES = 32 << 20
 _MOVED_STATE_MAX_ENTRIES = 4096
-_MOVED_STATE_MAX_DEPTH = 6
+# A CodeGuard archive of a skill folder sits five folders deep and holds that folder as it was.
+_MOVED_STATE_MAX_DEPTH = 16
 
 
 def _state_entry_is_account_owned(path: str, info: os.stat_result) -> bool:
@@ -1065,6 +1066,88 @@ def _moved_state_sources(old_dir: str) -> tuple[list[tuple[str, os.stat_result]]
     return files, refused
 
 
+class _MovedStateConflictError(OSError):
+    """The new data_dir already has something else at a path being carried."""
+
+
+def _store_moved_state_file(new_dir: str, rel: str, data: bytes) -> bool:
+    """Create ``new_dir/rel`` with *data*, private; never replace or follow a link.
+
+    True when the file was created, False when an identical regular file was
+    already there. Raises :class:`_MovedStateConflictError` for anything else that is
+    already there (different bytes, a link, a folder) and ``OSError`` when a
+    folder on the way is a link, belongs to another account or cannot be made.
+    On POSIX every folder is opened from the one before it without following
+    links, so the destination stays bound while the file is written; Windows
+    makes each folder with the private-folder helper, which refuses a reparse
+    point.
+    """
+    from defenseclaw.file_permissions import make_private_directory, open_regular_file_no_follow
+
+    parts = rel.split(os.sep)
+    create = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    make_private_directory(new_dir)
+    if os.name == "nt":
+        current = new_dir
+        for part in parts[:-1]:
+            current = os.path.join(current, part)
+            make_private_directory(current)
+        target = os.path.join(current, parts[-1])
+        try:
+            fd = os.open(target, create, 0o600)
+        except FileExistsError:
+            try:
+                with os.fdopen(open_regular_file_no_follow(target), "rb") as handle:
+                    same = handle.read(len(data) + 1) == data
+            except OSError as exc:
+                raise _MovedStateConflictError(rel) from exc
+            if same:
+                return False
+            raise _MovedStateConflictError(rel) from None
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        return True
+
+    folder = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(new_dir, folder)
+    try:
+        for part in parts[:-1]:
+            try:
+                os.mkdir(part, 0o700, dir_fd=fd)
+            except FileExistsError:
+                pass
+            child = os.open(part, folder, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            info = os.fstat(fd)
+            if info.st_uid != os.geteuid():
+                raise OSError(f"{part} belongs to another account")
+            if info.st_mode & 0o077:
+                os.fchmod(fd, 0o700)
+        name = parts[-1]
+        try:
+            leaf = os.open(name, create, 0o600, dir_fd=fd)
+        except FileExistsError:
+            try:
+                existing = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+            except OSError as exc:
+                raise _MovedStateConflictError(rel) from exc
+            with os.fdopen(existing, "rb") as handle:
+                same = stat.S_ISREG(os.fstat(handle.fileno()).st_mode) and handle.read(len(data) + 1) == data
+            if same:
+                return False
+            raise _MovedStateConflictError(rel) from None
+        try:
+            with os.fdopen(leaf, "wb") as handle:
+                handle.write(data)
+        except OSError:
+            os.unlink(name, dir_fd=fd)
+            raise
+        return True
+    finally:
+        os.close(fd)
+
+
 def _carry_connector_seals(old_dir: str, new_dir: str) -> list[str]:
     """Copy the hook contract lock and the connector backups the new data_dir lacks.
 
@@ -1074,7 +1157,7 @@ def _carry_connector_seals(old_dir: str, new_dir: str) -> list[str]:
     links. A file another account could have written is refused, and every
     copy is private to this account whatever the source mode or ACL was.
     """
-    from defenseclaw.file_permissions import make_private_directory, open_regular_file_no_follow
+    from defenseclaw.file_permissions import open_regular_file_no_follow
 
     if config_module._is_admin_process() or not old_dir or not new_dir:
         return []
@@ -1096,22 +1179,17 @@ def _carry_connector_seals(old_dir: str, new_dir: str) -> list[str]:
         ]
     sources, refused = _moved_state_sources(old_dir)
     carried: list[str] = []
+    differs: list[str] = []
     for rel, info in sources:
-        source = os.path.join(old_dir, rel)
-        target = os.path.join(new_dir, rel)
         try:
-            if os.path.lexists(target):
-                continue
-            with os.fdopen(open_regular_file_no_follow(source, expected_stat=info), "rb") as handle:
+            with os.fdopen(open_regular_file_no_follow(os.path.join(old_dir, rel), expected_stat=info), "rb") as handle:
                 data = handle.read(_MOVED_STATE_MAX_FILE_BYTES + 1)
             if len(data) > _MOVED_STATE_MAX_FILE_BYTES:
                 raise OSError("file is too large")
-            make_private_directory(new_dir)
-            make_private_directory(os.path.dirname(target))
-            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
-            carried.append(rel)
+            if _store_moved_state_file(new_dir, rel, data):
+                carried.append(rel)
+        except _MovedStateConflictError:
+            differs.append(rel)
         except OSError:
             refused.append(rel)
     notes = []
@@ -1121,10 +1199,15 @@ def _carry_connector_seals(old_dir: str, new_dir: str) -> list[str]:
             [f"{backups} connector backup file{'s' if backups != 1 else ''}"] if backups else []
         )
         notes.append("Copied the connector seals to the new data_dir: " + ", ".join(parts) + ".")
+    repair = "if the gateway skips a connector at start, run: defenseclaw setup <connector> --yes"
+    if differs:
+        notes.append(
+            f"warning: {new_dir} already has connector state that differs from the old data_dir's, "
+            f"or that is not a plain file; it was kept as it is ({', '.join(sorted(set(differs)))}); {repair}"
+        )
     if refused:
         notes.append(
-            f"warning: some connector state was not copied to {new_dir} ({', '.join(sorted(set(refused)))}); "
-            "if the gateway skips a connector at start, run: defenseclaw setup <connector> --yes"
+            f"warning: some connector state was not copied to {new_dir} ({', '.join(sorted(set(refused)))}); {repair}"
         )
     return notes
 

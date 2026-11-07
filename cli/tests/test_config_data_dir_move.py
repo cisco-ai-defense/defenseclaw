@@ -329,6 +329,11 @@ def test_config_set_data_dir_keeps_the_seals_a_populated_data_dir_already_has(tm
     assert (moved / "connector_backups" / "codex" / "config.toml.json").read_bytes() == b'{"kept": true}\n'
     assert (moved / "connector_backups" / "opencode" / "config.json").read_bytes() == b'{"original": "opencode"}\n'
     assert "Copied the connector seals to the new data_dir: 1 connector backup file." in result.output
+    # What the new folder kept does not match what setup sealed: say so, with the way out.
+    assert "already has connector state that differs" in result.output
+    assert "hook_contract_lock.json" in result.output
+    assert "connector_backups/codex/config.toml.json" in result.output
+    assert "defenseclaw setup <connector> --yes" in result.output
 
 
 def test_config_set_data_dir_without_seals_copies_nothing_and_says_nothing(tmp_path, monkeypatch):
@@ -409,3 +414,117 @@ def test_config_set_data_dir_leaves_an_existing_audit_store_alone(tmp_path, monk
     assert result.exit_code == 0, result.output
     assert (moved / "audit.db").read_bytes() == b"not a database, but the gateway's to judge\n"
     assert "audit store was not created" not in result.output
+
+
+def test_config_set_data_dir_is_quiet_about_seals_the_new_folder_already_has_as_they_are(tmp_path, monkeypatch):
+    home, _ = _install_home(tmp_path, monkeypatch)
+    lock, backups = _seal_connector_state(home)
+    moved = tmp_path / "dcdata"
+    (moved / "connector_backups" / "codex").mkdir(parents=True)
+    (moved / "hook_contract_lock.json").write_bytes(lock)
+    (moved / "connector_backups" / "codex" / "config.toml.json").write_bytes(backups["codex/config.toml.json"])
+    monkeypatch.setattr(cmd_config.config_module, "_is_admin_process", lambda: False)
+
+    result = CliRunner().invoke(cmd_config.config_cmd, ["set", "data_dir", str(moved)], obj=AppContext())
+
+    assert result.exit_code == 0, result.output
+    assert (moved / "connector_backups" / "opencode" / "config.json").is_file()
+    assert "Copied the connector seals to the new data_dir: 1 connector backup file." in result.output
+    assert "warning" not in result.output.lower().replace("warnings", "")
+
+
+def test_config_set_data_dir_reports_a_linked_backup_the_new_folder_already_has(tmp_path, monkeypatch):
+    if os.name == "nt":
+        return  # creating a link needs a privilege there; the helper refuses reparse points by the same test
+    home, _ = _install_home(tmp_path, monkeypatch)
+    _seal_connector_state(home)
+    moved = tmp_path / "dcdata"
+    (moved / "connector_backups" / "opencode").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_bytes(b'{"original": "opencode"}\n')
+    os.symlink(elsewhere, moved / "connector_backups" / "opencode" / "config.json")
+    monkeypatch.setattr(cmd_config.config_module, "_is_admin_process", lambda: False)
+
+    result = CliRunner().invoke(cmd_config.config_cmd, ["set", "data_dir", str(moved)], obj=AppContext())
+
+    assert result.exit_code == 0, result.output
+    assert os.path.islink(moved / "connector_backups" / "opencode" / "config.json")
+    assert elsewhere.read_bytes() == b'{"original": "opencode"}\n'
+    assert "already has connector state that differs" in result.output
+    assert "connector_backups/opencode/config.json" in result.output
+    assert "defenseclaw setup <connector> --yes" in result.output
+
+
+def _codeguard_archive(home):
+    """The two archive shapes `_archive_path` writes: a replaced file and a replaced folder."""
+    stamp = home / "connector_backups" / "codeguard" / "claudecode" / "skill" / "20261107T000000Z"
+    (stamp / "codeguard" / "rules").mkdir(parents=True)
+    files = {
+        "codeguard.md": b"replaced file\n",
+        "codeguard/SKILL.md": b"replaced folder\n",
+        "codeguard/rules/a.md": b"nested rule\n",
+    }
+    for rel, body in files.items():
+        (stamp / rel).write_bytes(body)
+    return stamp.relative_to(home), files
+
+
+def test_config_set_data_dir_carries_a_whole_codeguard_archive(tmp_path, monkeypatch):
+    home, _ = _install_home(tmp_path, monkeypatch)
+    lock, _backups = _seal_connector_state(home)
+    stamp, files = _codeguard_archive(home)
+    moved = tmp_path / "dcdata"
+    monkeypatch.setattr(cmd_config.config_module, "_is_admin_process", lambda: False)
+
+    result = CliRunner().invoke(cmd_config.config_cmd, ["set", "data_dir", str(moved)], obj=AppContext())
+
+    assert result.exit_code == 0, result.output
+    for rel, body in files.items():
+        assert (moved / stamp / rel).read_bytes() == body
+        assert _is_private(moved / stamp / rel)
+    assert (moved / "hook_contract_lock.json").read_bytes() == lock
+    assert "5 connector backup files" in result.output
+    assert "was not copied" not in result.output
+
+
+def test_config_set_data_dir_copies_nothing_through_a_linked_folder_in_the_new_data_dir(tmp_path, monkeypatch):
+    if os.name == "nt":
+        return  # creating a link needs a privilege there; the helper refuses reparse points by the same test
+    home, _ = _install_home(tmp_path, monkeypatch)
+    _seal_connector_state(home)
+    _codeguard_archive(home)
+    moved = tmp_path / "dcdata"
+    moved.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    os.symlink(outside, moved / "connector_backups")
+    monkeypatch.setattr(cmd_config.config_module, "_is_admin_process", lambda: False)
+
+    result = CliRunner().invoke(cmd_config.config_cmd, ["set", "data_dir", str(moved)], obj=AppContext())
+
+    assert result.exit_code == 0, result.output
+    assert os.listdir(outside) == []
+    assert "some connector state was not copied" in result.output
+    assert "defenseclaw setup <connector> --yes" in result.output
+    # The lock is still carried: it is the one file that is not behind the link.
+    assert (moved / "hook_contract_lock.json").is_file()
+
+
+def test_config_set_data_dir_copies_nothing_through_a_linked_folder_below_the_backup_root(tmp_path, monkeypatch):
+    if os.name == "nt":
+        return
+    home, _ = _install_home(tmp_path, monkeypatch)
+    _seal_connector_state(home)
+    moved = tmp_path / "dcdata"
+    (moved / "connector_backups").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    os.symlink(outside, moved / "connector_backups" / "codex")
+    monkeypatch.setattr(cmd_config.config_module, "_is_admin_process", lambda: False)
+
+    result = CliRunner().invoke(cmd_config.config_cmd, ["set", "data_dir", str(moved)], obj=AppContext())
+
+    assert result.exit_code == 0, result.output
+    assert os.listdir(outside) == []
+    assert (moved / "connector_backups" / "opencode" / "config.json").is_file()
+    assert "connector_backups/codex/config.toml.json" in result.output
