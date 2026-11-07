@@ -197,6 +197,10 @@ _DC_INSTALL_WINDOW_SEEN=0
 # Set only by defenseclaw_await_gateway for this call; an inherited value can
 # never open a per-user outage (defenseclaw_per_user_outage_open).
 _DC_TRANSPORT_STATUS=""
+# Set by defenseclaw_await_gateway for a verified gateway that took the call
+# and was late with one that names nothing protected (hook-post status 12,
+# GAP-0518): the outage status 7, but not a restart.
+_DC_LATE_ORDINARY=""
 # The config's outage mode for this call (defenseclaw_config_outage_open);
 # never inherited.
 _DC_CONFIG_OUTAGE_MODE=""
@@ -2234,6 +2238,10 @@ defenseclaw_await_gateway() {
     defenseclaw_refused_while_coming_up && return 7
     status=1
   fi
+  if [ "$status" = 12 ]; then
+    _DC_LATE_ORDINARY=1
+    status=7
+  fi
   _DC_TRANSPORT_STATUS="$status"
   [ -n "$post" ] || return "$status"
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
@@ -2251,7 +2259,7 @@ defenseclaw_await_gateway() {
     # its restart window. Keep that outage result before another attempt can
     # reach a newly listening gateway and run out of answer time.
     if defenseclaw_own_gateway_alive; then
-      _DC_GATEWAY_RESTART_WAITED=1
+      [ -n "$_DC_LATE_ORDINARY" ] || _DC_GATEWAY_RESTART_WAITED=1
       return 7
     fi
     # An operator stop is not a restart: the fail mode applies at once. An
@@ -4168,6 +4176,13 @@ _dc_gateway_post_once() {
         # during the call, the restart outage (rel-1-0-6 GAP-0295). The
         # restart wait names it.
         10) return 7 ;;
+        # 12 (hookexec.PerUserPostLateOrdinaryExit): the verified gateway took
+        # the call and gave no status by the deadline, and the helper's scan
+        # found nothing protected in the call (GAP-0518). The first try runs in
+        # a command substitution: the status carries it to
+        # defenseclaw_await_gateway, which reads it as the outage without the
+        # restart wait. Another caller reads it as any failure, closed.
+        12) return 12 ;;
         *) _dc_post_peer_final=1 ;;
       esac
       return 1
