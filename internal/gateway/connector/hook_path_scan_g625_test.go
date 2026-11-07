@@ -356,3 +356,61 @@ func TestGAP0625PathScanProgramWordUnknownPrefix(t *testing.T) {
 		})
 	}
 }
+
+// The program word is the text the shell makes of all its parts: an escaped
+// dollar sign or backtick is a plain character, and adjacent quoted or
+// unquoted parts are one word. The existing ordinary file stays the user's
+// program, so a managed path in its name is not a hook the entry runs. A part
+// that is a real substitution next to literal parts keeps the whole word
+// unread, and the managed hook named inside stays protected.
+func TestGAP0625PathScanProgramWordEscapesAndAdjacentParts(t *testing.T) {
+	prefixes := []string{"", "env ", "command ", "TOKEN=one exec "}
+	// escape quotes the file name as one shell word the way the case needs.
+	cases := []struct {
+		name    string
+		file    func(home, owned string) string
+		word    func(program string) string
+		managed bool
+	}{
+		{"escaped dollar in double quotes", func(home, owned string) string { return filepath.Join(home, "ordinary$("+owned+")") },
+			func(program string) string { return "\"" + strings.ReplaceAll(program, "$", "\\$") + "\"" }, false},
+		{"escaped backticks in double quotes", func(home, owned string) string { return filepath.Join(home, "ordinary`"+owned+"`") },
+			func(program string) string { return "\"" + strings.ReplaceAll(program, "`", "\\`") + "\"" }, false},
+		{"escaped quote and backslash in double quotes", func(home, owned string) string { return filepath.Join(home, "q\"b\\; "+owned) },
+			func(program string) string {
+				return "\"" + strings.NewReplacer("\\", "\\\\", "\"", "\\\"").Replace(program) + "\""
+			}, false},
+		{"double then single parts", func(home, owned string) string { return filepath.Join(home, "ordinary; "+owned) },
+			func(program string) string {
+				cut := strings.Index(program, ";") + 1
+				return "\"" + program[:cut] + "\"'" + program[cut:] + "'"
+			}, false},
+		{"single then double then unquoted parts", func(home, owned string) string { return filepath.Join(home, "ordinary;"+owned) },
+			func(program string) string {
+				cut := strings.Index(program, ";") + 1
+				return "'" + program[:cut] + "'\"" + program[cut:cut+3] + "\"" + program[cut+3:]
+			}, false},
+		{"escaped spaces unquoted", func(home, owned string) string { return filepath.Join(home, "ordinary; "+owned) },
+			func(program string) string { return strings.NewReplacer(" ", "\\ ", ";", "\\;").Replace(program) }, false},
+		{"quoted part next to a command substitution", func(home, owned string) string { return filepath.Join(home, "ordinary; "+owned) },
+			func(program string) string { return "'" + program + "'\"$(" + program + ")\"" }, true},
+		{"unquoted glob after a quoted part", func(home, owned string) string { return filepath.Join(home, "ordinary; "+owned) },
+			func(program string) string { return "'" + program + "'*" }, true},
+	}
+	for _, prefix := range prefixes {
+		for _, tc := range cases {
+			t.Run(strings.TrimSpace(prefix)+"|"+tc.name, func(t *testing.T) {
+				verifyErr, commands, entry, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+					owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
+					program := gap0625WriteExecutable(t, tc.file(home, owned))
+					return prefix + tc.word(program) + " --event pre_tool_call"
+				})
+				if tc.managed {
+					gap0625ExpectProtected(t, verifyErr, commands, userHook)
+				} else {
+					gap0625ExpectOrdinary(t, verifyErr, commands, entry, userHook)
+				}
+			})
+		}
+	}
+}
