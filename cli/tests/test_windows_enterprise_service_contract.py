@@ -7102,3 +7102,37 @@ def test_a_pinned_staged_source_is_admitted_once_per_lifecycle_run() -> None:
     cached = current.index("$current = Get-DefenseClawPinnedSourceDescriptor -Source $Source")
     fallback = current.index("$current = Get-DefenseClawSourceDescriptor `")
     assert cached < fallback < current.index("foreach ($field in @('path', 'label', 'sha256'))")
+
+
+def test_module_smoke_removes_the_certification_folders_it_creates() -> None:
+    # GAP-0780: the elevated lifecycle-lock block makes smoke roots under
+    # <root>\Cisco\Cisco Secure Client\DefenseClaw-Cert\<token>; its own cleanup
+    # removes only the token folder, so the parents it created stayed on the host.
+    # The smoke records which parents already exist, then removes only the empty
+    # ones it created, in a finally that wraps the block. Nothing else may be
+    # removed: no -Recurse, no pre-existing folder, no reparse point.
+    smoke = read(MODULE_SMOKE)
+
+    record = smoke.index("$certificationLayoutParents = @(")
+    function = smoke.index("function Remove-CertificationLayoutParentsCreatedBySmoke {")
+    block = smoke.index("if ($elevated) {")
+    assert record < function < block
+    recorded = smoke[record:function]
+    for segment in ("'Cisco'", "'Cisco Secure Client'", "'DefenseClaw-Cert'"):
+        assert segment in recorded
+    assert "Existed = (Test-Path -LiteralPath $parent)" in recorded
+    assert "$programFiles, $programData" in recorded
+
+    cleanup = smoke[function : smoke.index("$tokens = $null", function)]
+    assert "if ($entry.Existed) {" in cleanup
+    assert "[IO.FileAttributes]::ReparsePoint" in cleanup
+    assert "Select-Object -First 1" in cleanup
+    assert "Remove-Item -LiteralPath $entry.Path -Force -ErrorAction Stop" in cleanup
+    assert "-Recurse" not in cleanup
+    assert "$index--" in cleanup  # deepest parent first
+
+    assert "try {\n    if ($elevated) {" in smoke
+    final = "finally {\n    Remove-CertificationLayoutParentsCreatedBySmoke\n}\n"
+    assert final in smoke
+    # The finally closes the block that holds the lock test and its else branch.
+    assert smoke.index("Remove-DefenseClawManagedTree", block) < smoke.index(final)
