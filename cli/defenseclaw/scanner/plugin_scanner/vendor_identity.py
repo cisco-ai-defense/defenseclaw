@@ -5,30 +5,75 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import io
 import json
 import os
 import re
 import stat
+import tarfile
+import tempfile
+import urllib.parse
+import urllib.request
 from pathlib import Path, PureWindowsPath
 from typing import NamedTuple
 
 from defenseclaw.hermes_skills import (
+    _SKILL_FILE_MAX_BYTES,
+    _SKILL_TREE_MAX_BYTES,
     _filesystem_identity,
+    _hash_regular_file,
     _is_link_or_junction,
     _is_real_directory,
+    _is_regular_file,
     _read_regular_file,
-    _tree_sha256,
 )
 
-# SHA-256 of sorted relative paths and file bytes, using the same bounded,
-# non-link tree reader as the Hermes vendor library. These are the published
-# npm package trees, including their bundled dependencies.
+# Digests of the published package own files, see ``_package_digest``. The
+# installed dependency tree is not part of the identity: npm resolves it from
+# the registry when the plugin is installed, so it differs between installs of
+# the same provider version. These pins let a host with no registry access
+# identify the releases below; any other release is confirmed against the npm
+# registry (``_registry_digest``), so a new release needs no change here.
+# ``scripts/openclaw_provider_digests.py`` prints the rows for a release.
 VENDOR_DIGESTS = {
+    ("@openclaw/amazon-bedrock-provider", "2026.9.33"):
+        "227f9139d20266784b1a8f736bc57c7a8c015c66a210fb9b0ed2d3c53f8a3c5c",
+    ("@openclaw/amazon-bedrock-provider", "2026.9.34"):
+        "cb06f530edaa3c1c21a3daf19de2d3feec3ba19c127ecaeb39cc1e45405c67dc",
+    ("@openclaw/amazon-bedrock-provider", "2026.9.35"):
+        "d35b540fb7ba1e34de31b1a49331f8d081865524aa4b5f44972b9e3732648e82",
+    ("@openclaw/amazon-bedrock-provider", "2026.9.36"):
+        "f093f56e06772aa423b59e4ba2ea8651d30cdf4f1da9f3067c37401c3cd864bf",
+    ("@openclaw/amazon-bedrock-provider", "2026.10.1"):
+        "82a8271d9502ef9e17590cea67f3fd894077829fd21a457680d0b19315f7bcff",
+    ("@openclaw/amazon-bedrock-provider", "2026.10.2"):
+        "60de8fadf40ec6fbe2da249312b4bc8aa71a397ea9ab5f3b60fb0c2a40005721",
+    ("@openclaw/amazon-bedrock-provider", "2026.10.3"):
+        "44c5f821816b129fafe47f02807a95d745acb9d28f1fd85033eb01092af28752",
+    ("@openclaw/amazon-bedrock-provider", "2026.10.4"):
+        "8eb455002ce747ad4d9b005fdc17e7345725f7a9cdcf96cb51d200053f236924",
+    ("@openclaw/amazon-bedrock-provider", "2026.10.5"):
+        "d46d1d71159e309841d2776df87dc42640d5e17b417d0eac2d7f89816a07e8b9",
+    ("@openclaw/amazon-bedrock-provider", "2026.10.6"):
+        "e27d05f4124ca33cd0d625f3caa3fe0a0766198e2a9dc1df08d018bf16f8aff0",
+    ("@openclaw/amazon-bedrock-provider", "2026.10.7"):
+        "00beac565275b2d387311b88f962100fc950ddc3bd38441868929416089e734f",
+    ("@openclaw/amazon-bedrock-provider", "2026.10.8"):
+        "a7a398c64326b8bd083ce20f5a043e839b3f44fe7702a5f71f08327a696d9f99",
     ("@openclaw/amazon-bedrock-provider", "2026.10.9"):
-        "88d9c6715528c0ddfb47adf43a35ccbfec3bb4b8fe75f233e8be431b9ddce3cb",
+        "1a932902454e24eaa8406106d417cd54c29c615fc5a23136704939b997645bf2",
     ("@openclaw/amazon-bedrock-provider", "2026.10.10"):
-        "48b7d1fb0862b9914c722b514a3214202ce7a1efe7b2a6d8a50fe31456ae431a",
+        "31167f79f18e916248d1bcb4b7be2e6bd5d5ec878aa7660c0344d44988b829e3",
+    ("@openclaw/amazon-bedrock-provider", "2026.11.1"):
+        "a059007a42818a11cbf8be2f04cf24897ac9aa99130a141b920aad503e651cbc",
 }
+
+# Packages whose identity is checked: the pinned releases above, and any other
+# release the npm registry publishes under the same name.
+_OFFICIAL_PACKAGES = frozenset(name for name, _ in VENDOR_DIGESTS)
 
 _PRIVATE_INSTALL_COMPONENTS = frozenset({
     ".ssh", ".aws", ".gnupg", ".kube", ".azure", ".docker", ".defenseclaw",
@@ -57,9 +102,11 @@ def inspect_official_provider_tree(plugin_dir: str, *, data_dir: str = "") -> Pr
     name, version = package.get("name"), package.get("version")
     if not isinstance(name, str) or not isinstance(version, str):
         return None
-    want = VENDOR_DIGESTS.get((name, version))
-    if not want:
+    if name not in _OFFICIAL_PACKAGES:
         return None
+    # A release without a pinned digest is confirmed against the npm registry
+    # below, once the local tree has passed the cheap checks.
+    want = VENDOR_DIGESTS.get((name, version))
 
     peers = package.get("peerDependencies", {})
     if not isinstance(peers, dict):
@@ -84,9 +131,14 @@ def inspect_official_provider_tree(plugin_dir: str, *, data_dir: str = "") -> Pr
     if before_tree is None:
         return None
     # A same-size edit can retain its mtime, and Windows ctime is creation
-    # time. Recheck the published bytes and links before admitting.
+    # time. Recheck the package files and links before admitting.
     for _ in range(2):
-        if _tree_sha256(plugin_dir, tolerated_links=frozenset(tolerated)) != want:
+        found = _package_digest(plugin_dir, tolerated_links=frozenset(tolerated))
+        if found is None:
+            return None
+        if not want:
+            want = _registry_digest(name, version)
+        if not want or not hmac.compare_digest(found, want):
             return None
         for peer, (link, before) in links.items():
             try:
@@ -100,6 +152,209 @@ def inspect_official_provider_tree(plugin_dir: str, *, data_dir: str = "") -> Pr
         name=name,
         possible_peer=any(state[1] is not None for _, state in links.values()),
     )
+
+
+# Fields an installer adds to or removes from the published manifest.
+# bundledDependencies names what npm packs, never a source, and is dropped
+# once the dependencies are installed. OpenClaw adds one development-only
+# line for its plugin SDK; development dependencies are never installed. Any
+# other development dependency keeps its value in the digest, so a manifest
+# source (a URL, a local path) that the dependency checks judge is never
+# hidden by the identity.
+_BUNDLED_FIELDS = frozenset({"bundledDependencies", "bundleDependencies"})
+_INSTALLER_DEV_DEPENDENCIES = {"@openclaw/plugin-sdk": "workspace:*"}
+_MANIFEST_MAX_BYTES = 1024 * 1024
+_DEPENDENCY_DIR = "node_modules"
+_DEPENDENCY_ENTRY_LIMIT = 500_000
+
+
+def _published_manifest_bytes(payload: bytes) -> bytes | None:
+    """The manifest as published: installer fields and npm metadata removed."""
+
+    try:
+        manifest = json.loads(payload)
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    kept = {
+        key: value for key, value in manifest.items()
+        if key not in _BUNDLED_FIELDS and not key.startswith("_")
+    }
+    if kept.get("devDependencies") == _INSTALLER_DEV_DEPENDENCIES:
+        del kept["devDependencies"]
+    return json.dumps(kept, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _package_digest(
+    plugin_dir: str, *, tolerated_links: frozenset[str] = frozenset(),
+) -> str | None:
+    """Digest of the package own files, whichever way it was installed.
+
+    Every entry outside the top-level ``node_modules`` is part of the digest:
+    its relative path and a digest of its bytes, with the manifest reduced to
+    its published form. Any link, device or other non-regular entry there makes
+    the tree unidentified. ``node_modules`` holds what npm resolved for this
+    install, so it is not hashed, but it must hold only directories and regular
+    files; the one link allowed is a tolerated installer peer link, which the
+    caller validates and which is never followed.
+    """
+
+    root = os.path.abspath(plugin_dir)
+    try:
+        root_before = os.stat(root, follow_symlinks=False)
+    except OSError:
+        return None
+    if not _is_real_directory(root_before):
+        return None
+
+    files: list[tuple[str, str, int]] = []
+    own_bytes = 0
+    dependency_entries = 0
+    try:
+        for current, dirs, names in os.walk(root, topdown=True, followlinks=False):
+            if not _is_real_directory(os.stat(current, follow_symlinks=False)):
+                return None
+            safe_dirs: list[str] = []
+            for name in dirs:
+                child = os.path.join(current, name)
+                info = os.stat(child, follow_symlinks=False)
+                relative = os.path.relpath(child, root).replace("\\", "/")
+                if _is_link_or_junction(info) and relative in tolerated_links:
+                    continue
+                if not _is_real_directory(info):
+                    return None
+                safe_dirs.append(name)
+            dirs[:] = safe_dirs
+            for name in names:
+                full = os.path.join(current, name)
+                info = os.stat(full, follow_symlinks=False)
+                relative = os.path.relpath(full, root).replace("\\", "/")
+                if _is_link_or_junction(info) and relative in tolerated_links:
+                    continue
+                if not _is_regular_file(info):
+                    return None
+                if relative.startswith(_DEPENDENCY_DIR + "/"):
+                    dependency_entries += 1
+                    if dependency_entries > _DEPENDENCY_ENTRY_LIMIT:
+                        return None
+                    continue
+                if info.st_size > _SKILL_FILE_MAX_BYTES:
+                    return None
+                own_bytes += info.st_size
+                if own_bytes > _SKILL_TREE_MAX_BYTES:
+                    return None
+                files.append((relative, full, info.st_size))
+    except OSError:
+        return None
+
+    outer = hashlib.sha256()
+    for relative, full, size in sorted(files, key=lambda item: item[0]):
+        inner = hashlib.sha256()
+        if relative == "package.json":
+            payload = _read_regular_file(full, max_bytes=_MANIFEST_MAX_BYTES)
+            published = None if payload is None else _published_manifest_bytes(payload)
+            if published is None:
+                return None
+            inner.update(published)
+        elif not _hash_regular_file(full, size, inner):
+            return None
+        outer.update(relative.encode("utf-8") + b"\0" + inner.digest())
+    try:
+        root_after = os.stat(root, follow_symlinks=False)
+    except OSError:
+        return None
+    if _filesystem_identity(root_before) != _filesystem_identity(root_after):
+        return None
+    return outer.hexdigest()
+
+
+_REGISTRY = "https://registry.npmjs.org"
+_REGISTRY_TIMEOUT_SECONDS = 20
+_REGISTRY_METADATA_MAX_BYTES = 4 * 1024 * 1024
+_REGISTRY_TARBALL_MAX_BYTES = 64 * 1024 * 1024
+_REGISTRY_MEMBER_LIMIT = 100_000
+_VERSION = re.compile(r"\d{1,4}\.\d{1,3}\.\d{1,3}(?:-[0-9A-Za-z.]{1,32})?")
+_registry_digests: dict[tuple[str, str], str] = {}
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """The registry serves its tarballs itself; a redirect is not followed."""
+
+    def redirect_request(self, *_args, **_kwargs):
+        return None
+
+
+def _registry_get(url: str, limit: int) -> bytes:
+    if not url.startswith(_REGISTRY + "/"):
+        raise ValueError("not a registry address")
+    opener = urllib.request.build_opener(_NoRedirect)
+    with opener.open(url, timeout=_REGISTRY_TIMEOUT_SECONDS) as response:
+        if response.status != 200:
+            raise ValueError("registry did not answer 200")
+        payload = response.read(limit + 1)
+    if len(payload) > limit:
+        raise ValueError("registry answer too large")
+    return payload
+
+
+def _registry_digest(name: str, version: str) -> str | None:
+    """The package-own-files digest of a release as the npm registry publishes it.
+
+    The registry states the integrity of the release archive; the archive is
+    fetched from the registry address that names it, checked against that
+    integrity, and its own files are digested exactly as an installed tree is.
+    Any failure (offline, another address, another integrity, an unreadable
+    archive) gives no identity, so the plugin gets the ordinary scan.
+    """
+
+    key = (name, version)
+    if key in _registry_digests:
+        return _registry_digests[key]
+    if name not in _OFFICIAL_PACKAGES or not _VERSION.fullmatch(version):
+        return None
+    package = name.split("/", 1)[1]
+    try:
+        quoted = urllib.parse.quote(name, safe="@")
+        metadata = json.loads(_registry_get(
+            f"{_REGISTRY}/{quoted}/{version}", _REGISTRY_METADATA_MAX_BYTES,
+        ))
+        dist = metadata["dist"]
+        integrity = dist["integrity"]
+        if (
+            metadata["name"] != name or metadata["version"] != version
+            or dist["tarball"] != f"{_REGISTRY}/{name}/-/{package}-{version}.tgz"
+            or not isinstance(integrity, str) or not integrity.startswith("sha512-")
+        ):
+            return None
+        archive = _registry_get(dist["tarball"], _REGISTRY_TARBALL_MAX_BYTES)
+        expected = base64.b64decode(integrity[len("sha512-"):], validate=True)
+        if not hmac.compare_digest(hashlib.sha512(archive).digest(), expected):
+            return None
+        digest = _archive_package_digest(archive)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, tarfile.TarError):
+        return None
+    if digest:
+        _registry_digests[key] = digest
+    return digest
+
+
+def _archive_package_digest(archive: bytes) -> str | None:
+    """Digest the package own files of a release archive; dependencies are not unpacked."""
+
+    with tempfile.TemporaryDirectory(prefix="dc-provider-") as scratch:
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as bundle:
+            members = []
+            for member in bundle:
+                if len(members) >= _REGISTRY_MEMBER_LIMIT:
+                    return None
+                if not member.name.startswith("package/"):
+                    return None
+                if member.name.startswith("package/" + _DEPENDENCY_DIR + "/"):
+                    continue
+                members.append(member)
+            bundle.extractall(scratch, members=members, filter="data")
+        return _package_digest(os.path.join(scratch, "package"))
 
 
 def _tree_entry_state(root: str) -> tuple | None:
@@ -193,7 +448,11 @@ def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
     too) to its last name, and the final destination is judged again.
     """
 
-    roots = _private_roots(data_dir)
+    from defenseclaw.config import default_data_path
+
+    roots = {os.path.realpath(str(default_data_path()))}
+    if data_dir:
+        roots.add(os.path.realpath(data_dir))
 
     def private(location: str) -> bool:
         resolved = os.path.realpath(location)
@@ -253,39 +512,6 @@ def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
     destination = os.path.realpath(link)
     return _names_private_state(destination) or any(
         _path_within(root, destination) for root in roots
-    )
-
-
-def _private_roots(data_dir: str) -> set[str]:
-    from defenseclaw.config import default_data_path
-
-    roots = {os.path.realpath(str(default_data_path()))}
-    if data_dir:
-        roots.add(os.path.realpath(data_dir))
-    return roots
-
-
-def link_reaches_private_state(link: str, data_dir: str = "") -> bool:
-    """A link or junction names or resolves into protected state, hop by hop.
-
-    A path that cannot be walked (too deep, too many links, unreadable) is
-    treated as reaching it: an unjudged link is not a trusted one.
-    """
-
-    try:
-        return _peer_path_uses_private_state(link, data_dir)
-    except (OSError, ValueError, TypeError, AttributeError):
-        return True
-
-
-def path_reaches_private_state(path: str, data_dir: str = "") -> bool:
-    """A path, as written or as it resolves, names or lies in protected state."""
-
-    resolved = os.path.realpath(path)
-    return (
-        _names_private_state(path)
-        or _names_private_state(resolved)
-        or any(_path_within(root, resolved) for root in _private_roots(data_dir))
     )
 
 

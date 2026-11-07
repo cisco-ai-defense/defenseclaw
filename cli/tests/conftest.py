@@ -228,3 +228,19 @@ def _no_live_gateway_policy_reload(monkeypatch: pytest.MonkeyPatch):
         raise requests.ConnectionError("test isolation: no gateway")
 
     monkeypatch.setattr(gateway.OrchestratorClient, "reload_policy", _unreachable)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_package_registry(monkeypatch: pytest.MonkeyPatch):
+    """Keep the provider identity check off the real npm registry.
+
+    A release without a pinned digest is confirmed against the registry; tests
+    that exercise that path serve their own answers through ``_registry_get``.
+    """
+    from defenseclaw.scanner.plugin_scanner import vendor_identity
+
+    def _offline(url, limit):
+        raise OSError("test isolation: no package registry")
+
+    monkeypatch.setattr(vendor_identity, "_registry_get", _offline)
+    monkeypatch.setattr(vendor_identity, "_registry_digests", {})
