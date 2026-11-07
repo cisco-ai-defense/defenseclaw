@@ -159,12 +159,15 @@ type AssetPolicyInput struct {
 }
 
 type AssetPolicyDecision struct {
-	Enabled            bool
-	Mode               string
-	Action             string // allow | block
-	RawAction          string // allow | block
-	WouldBlock         bool
-	RetryAfterSeconds  int // bounded admission retry guidance, zero for other decisions
+	Enabled           bool
+	Mode              string
+	Action            string // allow | block
+	RawAction         string // allow | block
+	WouldBlock        bool
+	RetryAfterSeconds int // bounded admission retry guidance, zero for other decisions
+	// ScanIssue says why a server whose admission scan failed cannot be
+	// scanned (launcher | address), "" when the definition does not show it.
+	ScanIssue          string
 	Reason             string
 	Source             string
 	RegistryStatus     string // registered | unregistered | unknown
