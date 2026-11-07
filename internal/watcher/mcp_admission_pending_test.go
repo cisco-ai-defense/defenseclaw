@@ -210,3 +210,35 @@ func TestChangedMCPServerDefinitionIsPendingUntilReadmitted(t *testing.T) {
 		t.Fatalf("an unchanged server was admitted again: %+v", admitted[3:])
 	}
 }
+
+// GAP-0686: a definition the account's agent runs is admitted only when the
+// watcher holds the same URL, command and arguments for that account.
+func TestMCPDefinitionPublishedIsPerAccountAndPerDefinition(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	servers := []config.MCPServerEntry{
+		{Name: "notes", URL: "http://127.0.0.1:28561/mcp", Connector: "codex", Home: "/home/u1"},
+		{Name: "loop", Command: "node", Args: []string{"a.js"}, Connector: "codex", Home: "/home/u1"},
+		{Name: "docs", URL: "https://docs.example/mcp", Connector: "codex", Home: "/home/u1", Bundled: true},
+	}
+	w := New(cfg, nil, nil, store, logger, nil, nil)
+	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return servers, nil })
+	u1 := MCPAdmissionQuery{Connector: "codex", Server: "notes", Home: "/home/u1"}
+	for _, tc := range []struct {
+		name string
+		q    MCPAdmissionQuery
+		def  config.MCPServerEntry
+		want bool
+	}{
+		{"same url", u1, config.MCPServerEntry{URL: "http://127.0.0.1:28561/mcp"}, true},
+		{"another url under the same name", u1, config.MCPServerEntry{URL: "http://127.0.0.1:28562/mcp"}, false},
+		{"another account", MCPAdmissionQuery{Connector: "codex", Server: "notes", Home: "/home/u2"}, config.MCPServerEntry{URL: "http://127.0.0.1:28561/mcp"}, false},
+		{"another connector", MCPAdmissionQuery{Connector: "claudecode", Server: "notes", Home: "/home/u1"}, config.MCPServerEntry{URL: "http://127.0.0.1:28561/mcp"}, false},
+		{"same command", MCPAdmissionQuery{Connector: "codex", Server: "loop", Home: "/home/u1"}, config.MCPServerEntry{Command: "node", Args: []string{"a.js"}}, true},
+		{"other arguments", MCPAdmissionQuery{Connector: "codex", Server: "loop", Home: "/home/u1"}, config.MCPServerEntry{Command: "node", Args: []string{"b.js"}}, false},
+		{"built-in server is not an admission target", MCPAdmissionQuery{Connector: "codex", Server: "docs", Home: "/home/u1"}, config.MCPServerEntry{URL: "https://docs.example/mcp"}, false},
+	} {
+		if got := w.MCPDefinitionPublished(tc.q, tc.def); got != tc.want {
+			t.Errorf("%s: MCPDefinitionPublished = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

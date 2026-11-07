@@ -96,7 +96,7 @@ func (u ClaudeStateUnreadable) Blocked(label string) string {
 			"%s as them; they are scanned again once they sign in", label, u.Account(), u.Account(), u.Path)
 	}
 	return fmt.Sprintf("the %s MCP servers of %s are blocked: the hook enumerator could not read %s (%s); "+
-		"give SYSTEM read access to the file again or repair its JSON", label, u.Account(), u.Path, u.Reason)
+		"give SYSTEM read access to the file again or repair the file so it parses", label, u.Account(), u.Path, u.Reason)
 }
 
 // Account is how status and the refusal name the account.

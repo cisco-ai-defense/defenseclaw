@@ -94,6 +94,12 @@ type MCPServer struct {
 	// Source is SourceCommandLine for a definition from the agent's command
 	// line, "" for one from its config files.
 	Source string `json:"source,omitempty"`
+	// Relocated marks a user-scope, non-built-in definition the hook read
+	// from the config file of a CODEX_HOME other than ~/.codex: the file the
+	// agent runs, which a gateway reading the default one would miss. A
+	// managed Windows gateway admits it only when the enumerator published
+	// the same definition (GAP-0686).
+	Relocated bool `json:"relocated,omitempty"`
 }
 
 // Encode renders facts as a header value, or "" when there is nothing to
@@ -185,6 +191,8 @@ func bounded(facts Facts) Facts {
 		commandLine := server.Source == SourceCommandLine
 		if commandLine {
 			out.Source = SourceCommandLine
+		} else {
+			out.Relocated = server.Relocated
 		}
 		facts.MCP = nil
 		switch {

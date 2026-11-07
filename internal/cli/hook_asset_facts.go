@@ -81,6 +81,8 @@ func hookAssetFacts(connector string, payload []byte) string {
 				Name: entry.Name, URL: entry.URL, Command: entry.Command, Args: entry.Args, Transport: entry.Transport,
 				Source: source,
 			}
+			facts.MCP.Relocated = connector == "codex" && source == "" && !entry.Bundled &&
+				entry.SourceScope == "user" && config.CodexHomeRelocated()
 		}
 	}
 	return assetfacts.Encode(facts)

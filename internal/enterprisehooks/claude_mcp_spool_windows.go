@@ -90,46 +90,46 @@ func WriteWindowsMCPSpool(dir, connector string, manifest Manifest, setOwnership
 }
 
 // windowsCodexUserServers reads the Codex user MCP servers of the account
-// whose profile is home: ~/.codex/config.toml, and the config.toml under the
-// account persistent CODEX_HOME (its own value over the machine one), which
-// Codex reads instead while it is set. Both are published, so a server is
-// admitted whichever of them a session of the account reads (GAP-0686). They
-// are read as the agent reads them, through a link or outside the profile
-// only when the account owns the file (readWindowsAccountFile). A missing
-// file adds no server; any other failure makes the account Codex servers
-// unknown, so none of them is admitted (fail closed).
+// whose profile is home from the one config.toml Codex reads for it: the
+// file under the account persistent CODEX_HOME (its own value over the
+// machine one) when that is set, else ~/.codex/config.toml. Codex reads that
+// folder and no other, so a server of the other file is not published: an old
+// same-named definition could displace the one that runs, and an unreadable
+// file Codex does not read could refuse its calls (GAP-0686). It is read as
+// the agent reads it, through a link or outside the profile only when the
+// account owns the file (readWindowsAccountFile). A missing file adds no
+// server; any other failure makes the account Codex servers unknown, so none
+// of them is admitted (fail closed). A session-only CODEX_HOME is not seen
+// here: the hook names it, and the gateway admits only a server this record
+// holds (assetfacts MCPServer.Relocated).
 func windowsCodexUserServers(sid, home string, _ func(string, ...any)) ([]config.MCPServerEntry, string, error) {
+	path := filepath.Join(home, ".codex", "config.toml")
 	account, err := windows.StringToSid(sid)
 	if err != nil {
-		return nil, filepath.Join(home, ".codex", "config.toml"), err
+		return nil, path, err
 	}
-	paths := []string{filepath.Join(home, ".codex", "config.toml")}
 	relocated, err := windowsAccountFolderVariable(account, home, "CODEX_HOME")
 	if err != nil {
-		return nil, paths[0], fmt.Errorf("resolve CODEX_HOME: %w", err)
+		return nil, path, fmt.Errorf("resolve CODEX_HOME: %w", err)
 	}
-	if relocated != "" && !strings.EqualFold(filepath.Join(relocated, "config.toml"), paths[0]) {
-		paths = append(paths, filepath.Join(relocated, "config.toml"))
+	if relocated != "" {
+		path = filepath.Join(relocated, "config.toml")
 	}
-	var out []config.MCPServerEntry
-	for _, path := range paths {
-		data, err := windowsCodexConfigRead(path, account, home)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err == nil && len(data) > maxCodexMCPBytes {
-			err = fmt.Errorf("config.toml is larger than %d bytes", maxCodexMCPBytes)
-		}
-		if err != nil {
-			return nil, path, err
-		}
-		servers, err := config.ParseCodexUserMCPServers(data, path)
-		if err != nil {
-			return nil, path, fmt.Errorf("parse %s: %w", path, err)
-		}
-		out = append(out, servers...)
+	data, err := windowsCodexConfigRead(path, account, home)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, "", nil
 	}
-	return out, "", nil
+	if err == nil && len(data) > maxCodexMCPBytes {
+		err = fmt.Errorf("config.toml is larger than %d bytes", maxCodexMCPBytes)
+	}
+	if err != nil {
+		return nil, path, err
+	}
+	servers, err := config.ParseCodexUserMCPServers(data, path)
+	if err != nil {
+		return nil, path, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return servers, "", nil
 }
 
 // windowsCodexConfigRead is readWindowsAccountFile; tests replace it.
