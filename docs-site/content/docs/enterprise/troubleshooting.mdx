@@ -504,6 +504,22 @@ It puts the hook back to the recorded digest and rebuilds the guardian's copy. T
 
 **Check.** The new Setup `/ensure` exits `0`.
 
+#### Setup stops a rollback on a Codex file a program holds open
+
+A run that failed after it stopped the services puts the Codex files back from its snapshot. If a program opened `requirements.toml` (or the Codex state file) after Setup's first check and does not share delete access, Setup cannot replace the file. It retries for 30 seconds, then ends with `codex_requirements_held` or `codex_state_held` (exit `1618`) and names the program. The transaction stays pending and the services stay stopped, because the rollback is not finished.
+
+**Fix.** Close the program (an editor, a backup or scan job, a user's agent), then run `DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved config> JSON=1` as LocalSystem (or `/repair`). It finishes the rollback and the next lines of the result show a normal run. An MDM retries `1618` on its own.
+
+**Check.** Setup exits `0` and `transaction_pending` is `false`.
+
+#### Setup `/repair` or `/ensure` replaced a hand-edited Codex `requirements.toml`
+
+An administrator changed the DefenseClaw part of `C:\ProgramData\OpenAI\Codex\requirements.toml` by hand (removed a managed hook group, set `allow_managed_hooks_only` to false) and a later Setup run was interrupted or failed. Recovery used to put that file back and stop at "Codex requirements verify failed", so every `/repair` and `/ensure` failed the same way and only `/uninstall FORCE=1` cleared it. Recovery now publishes the managed policy again, keeps the other settings it can merge, and rebuilds the file from the policy DefenseClaw recorded before it first changed the file when the edit cannot be merged. The result warns `codex_requirements_replaced` and names the copy of your file: `C:\ProgramData\Cisco\DefenseClaw\install\recovered-policy\requirements.toml.hand-edited.<time>.<hash>.bak`, byte for byte, readable by Administrators and SYSTEM only.
+
+**Fix.** Nothing is needed to recover. To keep a setting from the saved copy, put it in the file again after the run (the managed groups and `allow_managed_hooks_only = true` are DefenseClaw's and are written back by the guardian). A file a program holds open ends the run with `codex_requirements_held` instead (see above).
+
+**Check.** `/verify` exits `0` with no `codex_requirements_replaced` on the run after.
+
 #### Setup `/ensure` exits `1603` while waiting for the hook guardian
 
 Setup waits up to 10 minutes for the guardian's first reconcile while it makes progress. The error says "the hook guardian's first reconcile is still running" or "the hook guardian process" is "no longer running during its first reconcile".
