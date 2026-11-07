@@ -179,6 +179,13 @@ func TestLauncherOffersHelpOnlyForTheSandboxTree(t *testing.T) {
 		{[]string{"help", "-h"}, true},
 		{[]string{"help", "--host"}, false},
 		{[]string{"sandbox", "list"}, true},
+		{[]string{"status"}, true},
+		{[]string{"status", "--json"}, true},
+		{[]string{"guardrail", "profile", "explain", "--connector", "codex"}, true},
+		{[]string{"guardrail", "profile"}, false},
+		{[]string{"guardrail", "status"}, false},
+		{[]string{"-h"}, true},
+		{[]string{"doctor"}, false},
 		{[]string{"--version-json"}, false},
 		{[]string{"--host", "x"}, false},
 	} {

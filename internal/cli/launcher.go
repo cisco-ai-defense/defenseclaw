@@ -23,7 +23,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -62,7 +64,15 @@ func launcherRefusalFor(goos string) string {
 		platform = "macos"
 	}
 	gateway := filepath.Join(layout.BinDir, "defenseclaw-gateway")
-	return message + fmt.Sprintf(" For administrator views, run `sudo %s enterprise %s status`, `sudo %s enterprise %s verify`, or `sudo %s audit export --since 2h`. The managed launcher does not offer doctor, alerts, or tui.", gateway, platform, gateway, platform, gateway)
+	return message + fmt.Sprintf(" For administrator views, run `sudo %s enterprise %s status`, `sudo %s enterprise %s verify`, or `sudo %s audit export --since 2h`. The managed launcher does not offer %s.", gateway, platform, gateway, platform, gateway, joinWithOr(launcherRefusedByName))
+}
+
+// joinWithOr spells names as "a, b, or c".
+func joinWithOr(names []string) string {
+	if len(names) < 2 {
+		return strings.Join(names, "")
+	}
+	return strings.Join(names[:len(names)-1], ", ") + ", or " + names[len(names)-1]
 }
 
 // launcherArgv0 is the name the process was started under; a seam for tests.
@@ -94,23 +104,40 @@ func launcherActive() bool {
 	return managedHost
 }
 
+// launcherOffer is one thing the launcher runs for a standard user: the name
+// the documentation gives it, and the leading arguments that select it.
+type launcherOffer struct {
+	Name  string
+	Match [][]string
+}
+
+// launcherOffered is the one table of what the launcher runs. launcherOffers
+// reads it, and so does TestLauncherCommandsFixture, which writes it with the
+// commands the launcher refuses to testdata/launcher_commands.json for the
+// docs gate: a page that says what a managed user can or cannot run is
+// compared with this table, not with the spelling of a sentence. `help` has
+// no Match; launcherOffers answers it topic by topic.
+var launcherOffered = []launcherOffer{
+	{Name: "sandbox", Match: [][]string{{"sandbox"}}},
+	// The user's own protection state (cowork-1-0-8 GAP-0053).
+	{Name: "status", Match: [][]string{{"status"}}},
+	// The user's own guardrail profile (GAP-0431, GAP-0422), and nothing else
+	// of the guardrail tree.
+	{Name: "guardrail profile explain", Match: [][]string{{"guardrail", "profile", "explain"}}},
+	{Name: "help"},
+	{Name: "--version", Match: [][]string{{"--version"}, {"-h"}, {"--help"}}},
+}
+
+// launcherRefusedByName are the commands the refusal names as not offered.
+var launcherRefusedByName = []string{"doctor", "alerts", "tui"}
+
 // launcherOffers reports whether the launcher runs args at all. The bare
 // command and the help and version requests show the launcher's own text.
 func launcherOffers(args []string) bool {
 	if len(args) == 0 {
 		return true
 	}
-	switch args[0] {
-	case "sandbox", "-h", "--help", "--version":
-		return true
-	case "status":
-		// The user's own protection state (cowork-1-0-8 GAP-0053).
-		return true
-	case "guardrail":
-		// The user's own guardrail profile (GAP-0431, GAP-0422), and nothing
-		// else of the guardrail tree.
-		return len(args) >= 3 && args[1] == "profile" && args[2] == "explain"
-	case "help":
+	if args[0] == "help" {
 		// `help` explains the sandbox tree; cobra would answer `help status`
 		// with the root help, as if status existed. `help --help` is the
 		// help command's own usage: the root help lists `help`, so asking
@@ -123,6 +150,13 @@ func launcherOffers(args []string) bool {
 			return true
 		}
 		return false
+	}
+	for _, offer := range launcherOffered {
+		for _, match := range offer.Match {
+			if len(args) >= len(match) && slices.Equal(args[:len(match)], match) {
+				return true
+			}
+		}
 	}
 	return false
 }

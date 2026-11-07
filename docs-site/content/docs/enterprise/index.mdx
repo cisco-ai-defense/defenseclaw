@@ -119,10 +119,7 @@ the only policy. Only the lifecycle (and a migration it runs) writes the config.
 Under the Secure Client profile none of this applies. The model is in
 [Configuration: one source of truth](/docs/reference/source-of-truth).
 
-On Linux and macOS the enterprise package installs `defenseclaw` as a launcher
-that runs only `defenseclaw sandbox` commands and `defenseclaw status`, which
-shows the person their own Claude Code and Cowork protection state (never
-another account's). Every other command prints this and exits `2`:
+On Linux and macOS the enterprise package installs `defenseclaw` as a launcher that runs only `sandbox` commands, `status`, `guardrail profile explain`, `help` and `--version`. `defenseclaw status` shows the person their own Claude Code and Cowork protection state (never another account's). Every other command prints this and exits `2`:
 
 ```text
 This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. For administrator views, run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status`, `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify`, or `sudo /opt/defenseclaw/bin/defenseclaw-gateway audit export --since 2h`. The managed launcher does not offer doctor, alerts, or tui.
@@ -131,6 +128,19 @@ This computer is managed; use `defenseclaw status` for your protection state, `d
 ```
 
 The first message is the Linux text and the second is the macOS text; the administrator-view commands name the installed gateway of that platform.
+
+What a standard user can and cannot run, from the launcher's own command table:
+
+{/* launcher-commands:start */}
+| Command | The managed `defenseclaw` on Linux and macOS |
+| --- | --- |
+| `sandbox` commands | Runs |
+| `status` | Runs |
+| `guardrail profile explain` | Runs |
+| `help` | Runs |
+| `--version` | Runs |
+| `alerts`, `audit`, `config`, `connector`, `doctor`, `enterprise`, `policy`, `provenance`, `restart`, `rulepack`, `scan`, `start`, `stop`, `tui`, `watchdog` and every other command | Refused: exit `2` with the managed message |
+{/* launcher-commands:end */}
 
 Windows has no launcher: `defenseclaw.exe` there is the administrator command. Setup puts no DefenseClaw command on `PATH`, so run it by its full path: `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' ...` in PowerShell, or `"C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe" ...` in `cmd.exe`. It refuses the per-user writers itself:
 

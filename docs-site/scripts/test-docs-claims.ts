@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -1304,11 +1304,6 @@ describe('managed launcher refusal on every page (GAP-1387, GAP-1569, GAP-0635)'
       const name = relative(docs, file);
       assert.ok(!text.includes('commands are available here'), `${name} quotes the retired launcher refusal`);
       assert.ok(!text.includes('Other commands require an administrator'), `${name} quotes the retired launcher refusal ending`);
-      // The launcher admits status, guardrail profile explain, help and
-      // --version beside the sandbox tree, so no page may list it shorter.
-      for (const match of text.matchAll(/offers only (?:the )?`?sandbox`? commands([^.;]{0,200})/g)) {
-        assert.ok(match[1].includes('status`'), `${name} says the launcher offers only sandbox commands, without status`);
-      }
       if (!text.includes(refusal.message)) continue;
       quoted += 1;
       assert.ok(givesAdministratorGuidance(text, refusal), `${name} quotes the launcher refusal without the current administrator views`);
@@ -1321,11 +1316,139 @@ describe('managed launcher refusal on every page (GAP-1387, GAP-1569, GAP-0635)'
     assert.ok(trouble.includes(refusal.linux), 'enterprise/troubleshooting.mdx does not quote the Linux launcher refusal');
     assert.ok(trouble.includes('/opt/cisco/defenseclaw/bin/defenseclaw-gateway') && trouble.includes('enterprise macos'), 'enterprise/troubleshooting.mdx does not name the macOS gateway');
   });
+});
 
-  it('does not tell a managed user that status or Check it is refused', () => {
-    assert.ok(!/readers included \([^)]*`status`/.test(page('reference/cli.mdx')), 'reference/cli.mdx lists status among the refused commands');
-    const copilot = page('connectors/copilot.mdx');
-    assert.ok(copilot.includes('`defenseclaw status` from Check it still runs there'), 'connectors/copilot.mdx says the Check it status step is refused');
+// What a managed user can and cannot run is read from the launcher's own
+// table: TestLauncherCommandsFixture (internal/cli) writes
+// testdata/launcher_commands.json from launcherOffered and the gateway's
+// command tree and fails unless the file is current. No page states that set
+// in its own words: the list below is generated from the file, every sentence
+// that restricts what the launcher runs carries it, and one table is compared
+// with it whole.
+type LauncherCommands = { offered: string[]; refused: string[] };
+
+function launcherCommands(): LauncherCommands {
+  const table = JSON.parse(source('internal/cli/testdata/launcher_commands.json')) as LauncherCommands;
+  assert.ok(table.offered?.length >= 5 && table.refused?.length >= 5, 'launcher_commands.json must hold the offered and the refused commands');
+  assert.ok(table.offered.includes('status') && table.offered.includes('guardrail profile explain'), 'launcher_commands.json must offer status and guardrail profile explain');
+  return table;
+}
+
+function joinAnd(parts: string[]): string {
+  return parts.length < 2 ? parts.join('') : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+}
+
+// How a page names what the launcher runs: `sandbox` commands, `status`, ...
+function offeredList(table: LauncherCommands): string {
+  return joinAnd(table.offered.map((name) => (name === 'sandbox' ? '`sandbox` commands' : `\`${name}\``)));
+}
+
+function namesLauncherCommand(sentence: string, name: string): boolean {
+  if (name === 'sandbox') return /`sandbox`|sandbox commands|defenseclaw sandbox\b/.test(sentence);
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`\`${escaped}\`|defenseclaw ${escaped}(?![\\w-])`).test(sentence);
+}
+
+// The refusal itself quotes the offered commands; it is checked on its own.
+function withoutRefusalQuote(text: string): string {
+  return text.replace(/"?This computer is managed[^"]*"/g, '').replace(/`?\\?"?This computer is managed; use[^.]*\.\S*/g, '');
+}
+
+// The sentences of a page that restrict what the managed `defenseclaw` runs:
+// they say "only", "refused", "exits 2" or "not available", speak of the
+// launcher or the `defenseclaw` command on a managed computer, and name a
+// command of the table (or say the commands of a page do not run there).
+function launcherRestrictions(raw: string, table: LauncherCommands): string[] {
+  const restricts = /\b(?:only|exits?\b[^.]{0,20}\b2|refus\w*|not (?:offer\w*|available|run\w*)|unavailable|cannot run|are not|is not)\b/i;
+  const managed = /launcher|managed|standard user|enterprise (?:package|install)/i;
+  const subject = /`defenseclaw`|\blauncher\b|\bpackaged `?defenseclaw|\bthe user's `?defenseclaw/i;
+  const blanket = /\bcommands (?:on|in) this page\b/i;
+  const found: string[] = [];
+  for (const block of raw.split(/\n\s*\n|\n\s*(?:[-*]|\d+\.)\s|\|/)) {
+    const flat = block.split(/\s+/).join(' ');
+    // The paragraph says it is about a managed computer even when its
+    // sentence only quotes the refusal elsewhere.
+    if (!managed.test(flat)) continue;
+    for (const sentence of withoutRefusalQuote(flat).split(/(?<=[.!?;])\s+(?=[A-Z`*(])/)) {
+      if (!restricts.test(sentence)) continue;
+      // A sentence that only names refused commands (config set exits 3) is
+      // true by construction: the Go fixture test lists what is refused.
+      const offered = table.offered.some((name) => namesLauncherCommand(sentence, name));
+      if ((subject.test(sentence) && offered) || blanket.test(sentence)) found.push(sentence);
+    }
+  }
+  return found;
+}
+
+function docPages(path = docs): string[] {
+  return readdirSync(path, { withFileTypes: true }).flatMap((entry) => {
+    const child = join(path, entry.name);
+    if (entry.isDirectory()) return docPages(child);
+    return entry.isFile() && entry.name.endsWith('.mdx') ? [child] : [];
+  });
+}
+
+const launcherTableStart = '{/* launcher-commands:start */}';
+const launcherTableEnd = '{/* launcher-commands:end */}';
+
+function launcherTable(table: LauncherCommands): string {
+  const rows = table.offered.map((name) => `| ${name === 'sandbox' ? '`sandbox` commands' : `\`${name}\``} | Runs |`);
+  rows.push(`| ${joinAnd([...table.refused.map((name) => `\`${name}\``), 'every other command'])} | Refused: exit \`2\` with the managed message |`);
+  return ['| Command | The managed `defenseclaw` on Linux and macOS |', '| --- | --- |', ...rows].join('\n');
+}
+
+describe('what a managed user can and cannot run (GAP-0635)', () => {
+  it('every page that restricts the managed defenseclaw carries the launcher\'s own offered list', () => {
+    const table = launcherCommands();
+    const list = offeredList(table);
+    let checked = 0;
+    const without: string[] = [];
+    for (const file of docPages()) {
+      for (const sentence of launcherRestrictions(readFileSync(file, 'utf8'), table)) {
+        checked += 1;
+        if (!sentence.includes(list)) without.push(`${relative(docs, file)}: ${sentence.slice(0, 160)}`);
+      }
+    }
+    assert.deepEqual(without, [], `these sentences restrict what the managed defenseclaw runs without the launcher's offered list (${list})`);
+    assert.ok(checked >= 15, `expected at least 15 restricting sentences, found ${checked}`);
+  });
+
+  it('the detector sees a restriction in other words, and a list that leaves out a command', () => {
+    const table = launcherCommands();
+    const list = offeredList(table);
+    const short = 'On managed Linux and macOS the user\'s `defenseclaw` runs only `sandbox` commands, `help` and `--version`.';
+    assert.equal(launcherRestrictions(short, table).length, 1);
+    assert.ok(!short.includes(list));
+    assert.equal(launcherRestrictions(`On managed Linux the packaged \`defenseclaw\` accepts ${list}.`, table).length, 0, 'no restriction word: not a claim');
+    assert.equal(launcherRestrictions(`On managed Linux the launcher refuses everything but ${list}.`, table).filter((sentence) => !sentence.includes(list)).length, 0);
+    assert.equal(launcherRestrictions('The per-user commands on this page do not run on a managed computer.', table).length, 1);
+  });
+
+  it('no page says a command the launcher offers is refused', () => {
+    const table = launcherCommands();
+    for (const file of docPages()) {
+      const text = withoutRefusalQuote(readFileSync(file, 'utf8').split(/\s+/).join(' '));
+      for (const name of ['status', 'guardrail profile explain']) {
+        assert.ok(table.offered.includes(name));
+        assert.ok(!new RegExp(`\`defenseclaw ${name}\` (?:is|are) (?:refused|not available|unavailable)`).test(text), `${relative(docs, file)} says defenseclaw ${name} is refused on a managed computer`);
+        assert.ok(!new RegExp(`readers included \\([^)]*\`${name}\``).test(text), `${relative(docs, file)} lists ${name} among the refused commands`);
+      }
+    }
+  });
+
+  it('the table on enterprise/index.mdx is the generated one', () => {
+    const table = launcherCommands();
+    const file = join(docs, 'enterprise/index.mdx');
+    const raw = readFileSync(file, 'utf8');
+    const start = raw.indexOf(launcherTableStart);
+    const end = raw.indexOf(launcherTableEnd);
+    const block = `${launcherTableStart}\n${launcherTable(table)}\n${launcherTableEnd}`;
+    if (process.env.DOCS_UPDATE_LAUNCHER_TABLE === '1' && start >= 0 && end > start) {
+      writeFileSync(file, raw.slice(0, start) + block + raw.slice(end + launcherTableEnd.length));
+      return;
+    }
+    assert.ok(start >= 0 && end > start, 'enterprise/index.mdx lacks the launcher-commands block');
+    assert.equal(raw.slice(start, end + launcherTableEnd.length), block, 'enterprise/index.mdx table differs from internal/cli/testdata/launcher_commands.json: run DOCS_UPDATE_LAUNCHER_TABLE=1 npm run test:docs-claims');
   });
 });
 

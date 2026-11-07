@@ -1,0 +1,26 @@
+{
+  "offered": [
+    "sandbox",
+    "status",
+    "guardrail profile explain",
+    "help",
+    "--version"
+  ],
+  "refused": [
+    "alerts",
+    "audit",
+    "config",
+    "connector",
+    "doctor",
+    "enterprise",
+    "policy",
+    "provenance",
+    "restart",
+    "rulepack",
+    "scan",
+    "start",
+    "stop",
+    "tui",
+    "watchdog"
+  ]
+}

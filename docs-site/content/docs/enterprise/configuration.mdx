@@ -284,7 +284,7 @@ The gateway ships three rule packs, `default`, `strict` and `permissive`, under 
    sudo /opt/defenseclaw/bin/defenseclaw-gateway rulepack validate --dir /etc/defenseclaw/policies/guardrail/my-pack
    ```
 
-   `--json` prints a versioned result. The `defenseclaw` command of the enterprise packages runs only `sandbox` commands, so `defenseclaw guardrail validate-pack` and `defenseclaw setup guardrail` from the [per-user workflow](/docs/policies/rulepack-validation) are not available.
+   `--json` prints a versioned result. The `defenseclaw` command of the enterprise packages runs only `sandbox` commands, `status`, `guardrail profile explain`, `help` and `--version`, so `defenseclaw guardrail validate-pack` and `defenseclaw setup guardrail` from the [per-user workflow](/docs/policies/rulepack-validation) are not available.
 4. **Point the config at it.** Add the pack under `guardrail.custom_packs` with its path and the `custom_packs pin` value `rulepack validate` prints (`sha256:` and the digest of the pack's own files), select it with `guardrail.rule_pack` (or `guardrail.connectors.<name>.rule_pack` for one agent), and apply the config with `ensure --config` or through your MDM.
 
    ```yaml
