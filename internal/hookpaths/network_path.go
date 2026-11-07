@@ -64,10 +64,14 @@ import (
 // budget cut short (the share might have answered within its own wait) and
 // that was to read the body of a script (an explicit source, make or awk -f:
 // pathOpenRoot) is recorded on the call (ShareBodyUnread); the gateway then
-// judges the call as past its evaluation limit, as it judges a command it
-// cannot read to the end. Whatever the number of shares the call asked
-// before, a body the budget kept unread is never taken as a body that wrote
-// nothing (rel-1-0-6:GAP-0482 review 7). A share that is merely slower than
+// judges the call by its policy tier: as past its evaluation limit, as it
+// judges a command it cannot read to the end, in the strict tier, and with
+// an alert that does not block in the default and permissive tiers, since
+// an unread body is neither a named nor a known protected target. A
+// protected file or link the command names is blocked in every tier by the
+// rules that name it. Whatever the number of shares the call asked before,
+// a body the budget kept unread is never taken as a body that wrote nothing
+// (rel-1-0-6:GAP-0482 reviews 7 and 8). A share that is merely slower than
 // its own wait is the owner-accepted bound and is not recorded.
 
 // errNetworkShareUnanswered is the error of a read below a network share
@@ -301,7 +305,8 @@ func OverrideNetworkSharesForTest(rootOf func(path string) string, ask func(root
 // ShareBodyUnread reports that the hook call on the calling goroutine
 // could not read the body of a script on a network share because its share
 // budget was spent. The body might have written a protected file; the
-// caller judges the call as it judges one it cannot evaluate.
+// caller judges the call by the policy tier: the strict tier as it judges
+// one it cannot evaluate, the others with an alert.
 func ShareBodyUnread() bool {
 	call := currentHookCall()
 	return call != nil && call.bodyUnread
