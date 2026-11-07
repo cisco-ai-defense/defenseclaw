@@ -75,8 +75,11 @@ func TestReplaceFileInDirectoryUsesSourceDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	stage := os.NewFile(uintptr(handle), stagePath)
-	defer stage.Close()
+	t.Cleanup(func() { _ = stage.Close() })
 	if err := ReplaceFileInDirectory(parent, stage, "target.json"); err != nil {
+		t.Fatal(err)
+	}
+	if err := stage.Close(); err != nil {
 		t.Fatal(err)
 	}
 	requireSwapDirForTest(t, dir, map[string]string{
