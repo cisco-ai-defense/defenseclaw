@@ -6217,6 +6217,11 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     # behind a link at the folder.
     selector = _psm1_function(module, "Remove-DefenseClawOwnRuntimeSelector")
     assert selector.index("Assert-DefenseClawNoReparsePath -Path $Directory -AllowMissingLeaf") < selector.index("Test-Path -LiteralPath $state")
+    committed = _psm1_function(module, "Remove-DefenseClawCommittedManagedHooksSerializationLocks")
+    assert committed.index("Assert-DefenseClawNoReparsePath -Path ([IO.Path]::GetDirectoryName($full)) -AllowMissingLeaf") < committed.index(
+        "Remove-DefenseClawManagedHooksSerializationLock"
+    )
+    assert "Add-DefenseClawCreatedFolderKept -Folder ([IO.Path]::GetDirectoryName($full))" in committed
     lock = _psm1_function(module, "Open-DefenseClawRuntimeSelectorLock")
     assert lock.index("Assert-DefenseClawNoReparsePath -Path ([IO.Path]::GetDirectoryName($Path))") < lock.index("[IO.FileMode]::CreateNew")
     assert "[bool]$ownership.preimage_existed" in agent and "[bool]$receipt.config_preexisting" in agent

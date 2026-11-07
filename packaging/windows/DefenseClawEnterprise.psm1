@@ -18029,8 +18029,19 @@ function Remove-DefenseClawCommittedManagedHooksSerializationLocks {
         if ([string]::IsNullOrWhiteSpace($path)) {
             continue
         }
+        $full = [IO.Path]::GetFullPath($path)
+        # A link at the lock folder or above it (GAP-0758): the lock is not
+        # looked for behind it, the uninstall goes on, and the folder is named.
+        try {
+            Assert-DefenseClawNoReparsePath -Path ([IO.Path]::GetDirectoryName($full)) -AllowMissingLeaf
+        }
+        catch {
+            Add-DefenseClawCreatedFolderKept -Folder ([IO.Path]::GetDirectoryName($full)) -Note ('kept: a link sits on its path, so the ' + $lock.Label + ' is not looked for behind it: ' +
+                (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512))
+            continue
+        }
         Remove-DefenseClawManagedHooksSerializationLock `
-            -Path ([IO.Path]::GetFullPath($path)) `
+            -Path $full `
             -Label $lock.Label
     }
 }

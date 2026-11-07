@@ -1315,6 +1315,25 @@ $failures = & $module {
                 if ((& $s2Listing) -cne $s2Before) {
                     $failures.Add("GAP-0758 review S2: the selector purge changed the folder behind the link: $(& $s2Listing)")
                 }
+                # The committed-uninstall lock removal meets the same link: it
+                # neither throws (a 1603 over a link) nor touches the lock behind it.
+                $s2Lock = [IO.Path]::Combine($s2Target, '.defenseclaw-managed-hooks.lock')
+                [IO.File]::WriteAllText($s2Lock, 'decoy lock')
+                $s2LockBefore = & $s2Listing
+                $script:DefenseClawCreatedFoldersKept.Clear()
+                try {
+                    Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout @{ ClaudeManagedHooksLockPath = [IO.Path]::Combine($s2Link, '.defenseclaw-managed-hooks.lock') }
+                }
+                catch {
+                    $failures.Add("GAP-0758 review S2: the committed lock removal threw over a link: $($_.Exception.Message)")
+                }
+                if ((& $s2Listing) -cne $s2LockBefore) {
+                    $failures.Add("GAP-0758 review S2: the committed lock removal changed the folder behind the link: $(& $s2Listing)")
+                }
+                if (@(Get-DefenseClawCreatedFoldersKept | Microsoft.PowerShell.Core\Where-Object { ([string]$_).StartsWith("${s2Link}: kept: a link sits on its path") }).Count -ne 1) {
+                    $failures.Add("GAP-0758 review S2: the committed lock removal did not name the linked folder once: $((Get-DefenseClawCreatedFoldersKept) -join ' | ')")
+                }
+                $script:DefenseClawCreatedFoldersKept.Clear()
 
                 # GAP-0767: C:\ProgramData\ampcode. The 1.0.2 policy writer
                 # created it empty, with the descriptor above and no marker; a
