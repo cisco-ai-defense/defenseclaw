@@ -581,7 +581,7 @@ skill or plugin folders, so the same hook settings are needed for those
 assets. MCP runtime detection defaults to true, so configured MCP default and
 registry rules can apply to profile servers at the hook when asset policy is
 enabled, unless an administrator turns runtime detection off.
-On managed Linux and macOS, `ensure`, `status` and `verify` emit
+Under enterprise management on Linux and macOS, `ensure`, `status` and `verify` emit
 `asset_policy_not_enforced` for these rules when runtime detection is off
 and no explicit watcher folder admits that type.
 Windows `status` and `verify` do not emit `asset_policy_not_enforced`; the

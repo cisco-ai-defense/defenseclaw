@@ -904,7 +904,7 @@ On a managed standalone device the three policy verbs are refused with exit
 
 The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Most operators never run these directly: `defenseclaw setup *` commands restart a running sidecar for you, and the sidecar applies a valid change to `config.yaml` by itself, with no restart, unless the change touches a [restart-required key](#restart-required-keys). Running `defenseclaw-gateway` with no arguments starts the sidecar in the foreground.
 
-On a managed Windows computer `status`, `audit findings` and `connector list-backups` have no per-user gateway to read and exit `1`, and the managed help hides `start`, `stop`, `restart` and `watchdog`, which are not for a managed computer; see [Managed devices](#managed-devices-and-exit-code-3).
+On a Windows computer under enterprise management, `status`, `audit findings` and `connector list-backups` have no per-user gateway to read and exit `1`, and the managed help hides `start`, `stop`, `restart` and `watchdog`, which are not for a managed computer; see [Managed devices](#managed-devices-and-exit-code-3).
 
 | Command | Use it for |
 | --- | --- |

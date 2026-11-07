@@ -335,7 +335,7 @@ ai_discovery:
 
 Each entry is a DNS domain of at least two labels, compared without regard to
 case and a trailing dot. On a managed Linux host, the administrator runs
-`sudo /opt/defenseclaw/bin/defenseclaw-gateway config validate ./config.yaml`; per-user installs use `defenseclaw config validate`. Validation refuses a wildcard
+`sudo /opt/defenseclaw/bin/defenseclaw-gateway config validate ./config.yaml`. Per-user installs use `defenseclaw config validate`. Validation refuses a wildcard
 (`*.corp.example.com`), a NetBIOS name (`EMEA`), an account (`alice@...` or
 `EMEA\alice`) and an entry listed twice. The gateway applies a changed list
 at reload and looks every account up again; the guardian uses it at its next

@@ -1374,80 +1374,33 @@ function commandSpans(sentence: string, table: LauncherCommands): Array<[number,
   return patterns.flatMap((pattern) => [...sentence.matchAll(pattern)].map((m): [number, number] => [m.index, m.index + m[0].length]));
 }
 
-// How far a cue may sit from the command it states something about: in words,
-// inside one clause. A clause ends at ; or :, and a subordinate clause ("when
-// the write is blocked", "why a rule is denied") has its own subject, so a cue
-// in one says nothing of the command. A comma-set aside phrase right after the
-// command ("`defenseclaw doctor`, once the account is enrolled, is available")
-// is skipped: the command is still the subject of the cue after it.
-const cueDistance = 8;
-const subordinator = /\b(?:when|whenever|if|because|while|until|after|before|since|although|unless|where|which|that|why|how|whether|so)\b/i;
-
-function inSameClause(between: string): boolean {
-  const main = between.replace(/^`?\s*,[^,;:]*,/, " ");
-  return !/[;:]/.test(main) && !subordinator.test(main) && main.split(/\s+/).filter(Boolean).length <= cueDistance;
-}
-
-function cueBesideCommand(sentence: string, table: LauncherCommands): boolean {
-  const spans = commandSpans(sentence, table);
-  if (spans.length === 0) return false;
-  const cues = [...sentence.matchAll(new RegExp(availabilityCue.source, 'gi'))].map((m): [number, number] => [m.index, m.index + m[0].length]);
-  // A command that is the subject of "runs": "`defenseclaw doctor` runs".
-  for (const [, ce] of spans) {
-    for (const m of sentence.slice(ce).matchAll(/\bruns\b/gi)) cues.push([ce + m.index, ce + m.index + m[0].length]);
-  }
-  // Managed Windows has no launcher: a user who runs a command of the table
-  // there is a claim about the launcher. On Linux and macOS "a standard user
-  // runs `defenseclaw status` to see ..." is ordinary guidance.
-  if (/\bWindows\b/i.test(sentence)) {
-    for (const m of sentence.matchAll(/\b(?:users?|accounts?|employees?|persons?)(?:\x27s)? (?:\w+ ){0,3}runs?\b/gi)) cues.push([m.index, m.index + m[0].length]);
-  }
-  return spans.some(([cs, ce]) => cues.some(([us, ue]) => {
-    const between = us >= ce ? sentence.slice(ce, us) : cs >= ue ? sentence.slice(ue, cs) : null;
-    return between !== null && inSameClause(between);
-  }));
-}
-
 // The refusal itself quotes the offered commands; it is checked on its own.
 function withoutRefusalQuote(text: string): string {
   return text.replace(/"?This computer is managed[^"]*"/g, '').replace(/`?\\?"?This computer is managed; use[^.]*\.\S*/g, '');
 }
 
-const managedContext = /\bmanag\w*|\bstandard user|\bstandalone\b|\benterprise\b|\bMDM\b|\bIntune\b|\bGroup Policy\b|launcher/i;
-// What makes a sentence a claim about a command: it says whether the command
-// is available, runs, is offered, or is refused. This is a lint on those
-// words, not a reading of the sentence: output guidance ("only shows", "does
-// not show another account") and imperatives ("run `defenseclaw sandbox
-// status`") say nothing of availability and never match.
-const availabilityCue = /\b(?:available|unavailable|offers?|offered|accessible|inaccessible|usable|unusable|supported|unsupported|permitted|allowed|disallowed|runnable|works?|runs for|listed as|show(?:s|ed)? up|refus\w+|reject\w+|den(?:y|ies|ied)|blocked|forbidden|prohibited|disabled|restricted|limited|confin\w+|reserved|can(?:not|'t)? (?:use|run)|(?:cannot|can't|can not|may not|must not|do not|does not|don't|doesn't|will not|won't|never|not|no longer) (?:be )?(?:run|runs|work|works|used?))\b|(?:\blauncher|`defenseclaw`) (?:\w+ ){0,2}runs\b|\bexits? (?:with )?(?:status |code )?`?2\b/i;
-// "The commands on this page do not run": true or false depending on the
-// page, so it is never allowed. Only commands, steps and instructions are
-// blanket nouns, and only a statement that they do not run or are refused.
-const blanketClaim = /\b(?:commands|steps|instructions)(?: \w+)? (?:on|in|of) (?:this|the) page\b|\bthis page's (?:commands|steps)\b|\bevery (?:command|step) on (?:this|the) page\b|\b(?:commands|steps|instructions) (?:above|below)\b/i;
-const blanketDenial = /\b(?:not|never|cannot|can't) (?:run|work)\b|\bn't (?:run|work)\b|\bnone of\b[^.]*\b(?:run|work)\b|\b(?:forbidden|disabled|unavailable|refused|blocked|prohibited|inaccessible)\b/i;
+// The scope of the gate is lexical, whatever the verb and whatever the truth:
+// a sentence that names a command of the launcher's table (see commandSpans)
+// and a managed operating system in the same sentence states what the
+// managed launcher runs, and the only allowed form of that is the generated
+// sentence (or the generated table). No subject, verb, clause or meaning is
+// read: a page that wants to say something else about such a command names
+// the command without a managed OS word in that sentence, or says it in
+// bare words.
+const managedOsWord = /\bmanaged (?:Linux|macOS|Windows|host)\b/i;
 
-// The sentences of a page that state whether a command of the launcher's
-// table is available on a managed computer and are not the generated
-// sentence: a sentence in a managed context that names a command of the table
-// in backticks or after the `defenseclaw` prefix (a refused command only after
-// the prefix) and carries an availability cue; and a sentence that says the commands of a
-// page do not run. Every one is a failure whatever its truth: the page must
-// carry the generated sentence instead of its own.
+// The sentences of a page that are not the generated sentence and name a
+// command of the launcher's table together with a managed OS word.
 function launcherClaims(raw: string, table: LauncherCommands): string[] {
   const generated = launcherSentence(table);
   const tableStart = raw.indexOf(launcherTableStart);
   const tableEnd = raw.indexOf(launcherTableEnd);
   const withoutTable = tableStart >= 0 && tableEnd > tableStart ? raw.slice(0, tableStart) + raw.slice(tableEnd + launcherTableEnd.length) : raw;
   const found: string[] = [];
-  for (const block of withoutTable.split(/\n\s*\n|\n\s*(?:[-*]|\d+\.)\s|\|/)) {
+  for (const block of withoutTable.split(/\n\s*\n|\n\s*(?:[-*]|\d+\.)\s|\||<br\s*\/?>/)) {
     const flat = block.split(/\s+/).join(' ');
     for (const sentence of withoutRefusalQuote(flat.split(generated).join('')).split(/(?<=[.!?;])\s+(?=[A-Z`*(])/)) {
-      if (!managedContext.test(sentence)) continue;
-      if (blanketClaim.test(sentence) && blanketDenial.test(sentence)) {
-        found.push(sentence);
-        continue;
-      }
-      if (cueBesideCommand(sentence, table)) found.push(sentence);
+      if (managedOsWord.test(sentence) && commandSpans(sentence, table).length > 0) found.push(sentence);
     }
   }
   return found;
@@ -1485,75 +1438,48 @@ describe('what a managed user can and cannot run (GAP-0635)', () => {
     assert.ok(pages >= 15, `expected the generated sentence on at least 15 pages, found ${pages}`);
   });
 
-  it('the detector sees a claim in any wording, a denied command, and the launcher given to Windows', () => {
+  it('the detector is lexical: a table command and a managed OS word in one sentence', () => {
     const table = launcherCommands();
     const generated = launcherSentence(table);
     const claims = (text: string) => launcherClaims(text, table).length;
     assert.equal(claims(`On managed Linux and macOS ${generated}`), 0, 'the generated sentence is the one allowed claim');
-    assert.equal(claims('On managed Linux and macOS the standard user\'s `defenseclaw` runs `sandbox` commands, `help` and `--version`.'), 1, 'a list that leaves out commands');
-    assert.equal(claims('On managed Linux and macOS the packaged launcher is limited to `sandbox` commands, `help` and `--version`.'), 1, 'a restriction without the usual words');
-    assert.equal(claims('On managed Linux and macOS `defenseclaw status` does not run.'), 1, 'a command the launcher offers, denied');
-    assert.equal(claims('On a managed computer `defenseclaw guardrail profile explain` is not something a standard user can use.'), 1, 'guardrail profile explain denied');
-    assert.equal(claims('On a managed computer the user\'s `defenseclaw` confines itself to `sandbox` commands.'), 1, 'a single command and a limiting word');
-    assert.equal(claims('The per-user setup commands on this page do not run on a managed computer.'), 1, 'a blanket denial without the generated sentence');
-    assert.equal(claims(`The commands on this page do not run on a managed computer. ${generated}`), 1, 'a blanket denial next to the generated sentence is still false when the page has a working command');
-    assert.equal(claims('On managed Linux, the `status` command is unavailable to the user.'), 1, 'a denial that names the command without the defenseclaw prefix');
-    assert.equal(claims('On managed Windows, the packaged `defenseclaw` runs `status` for standard users.'), 1, 'Windows given one offered command');
-    assert.equal(claims('On a managed Windows computer `status` runs for standard users.'), 1, 'Windows given one offered command without a launcher word');
-    assert.equal(claims('On a managed Windows computer `status`, `audit findings` and `connector list-backups` have no per-user gateway to read and exit `1`.'), 0, 'what Windows really does');
-    assert.equal(claims('On managed Linux and macOS, `defenseclaw status` does not show another account\'s protection state.'), 0, 'own-status privacy guidance is about output');
-    assert.equal(claims('On managed Linux and macOS, `defenseclaw status` is not available to a second account.'), 1, 'a denial that is not about output');
-    assert.equal(claims('On managed Windows the launcher runs only `sandbox` commands, `status`, `guardrail profile explain`, `help` and `--version`.'), 1, 'the Linux and macOS launcher given to Windows');
-    assert.equal(claims('On a managed Windows computer the standard user\'s `defenseclaw` runs `sandbox` commands and `status`.'), 1, 'Windows named with a short list');
-    assert.equal(claims('On a managed Windows computer the launcher is not installed, so use the administrator\'s `defenseclaw.exe`.'), 0, 'Windows has no launcher: a true statement');
-    assert.equal(claims('On a managed computer, run `defenseclaw sandbox status` to see your sandboxes.'), 0, 'ordinary guidance that names one offered command');
-    assert.equal(claims('On a managed computer an administrator runs `defenseclaw-gateway scan skill FOLDER`, and the per-user `defenseclaw skill` commands are not used.'), 0, 'a refused command named alone');
-    // The scope is a lint: a command named in backticks or after the
-    // `defenseclaw` prefix, on a managed computer, with a statement of whether
-    // it runs. Each wording below is a claim whatever its truth; bare prose that
-    // names no command that way is never matched.
-    const denied: Array<[string, string]> = [
-      ["On managed Linux, `defenseclaw status` is not shown as an available command.", "a passive denial"],
-      ["On managed Linux, `defenseclaw status` is not listed among commands available to users.", "a passive denial of the listing"],
-      ["On a managed computer, the commands on this page are forbidden.", "a blanket denial: forbidden"],
-      ["On a managed computer, the commands on this page are disabled.", "a blanket denial: disabled"],
-      ["On managed Linux, users cannot run `guardrail profile explain`.", "a backticked nearby command"],
+    const flagged: Array<[string, string]> = [
+      ["On managed Linux and macOS the standard user's `defenseclaw` runs `sandbox` commands, `help` and `--version`.", "a list that leaves out commands"],
+      ["On managed Linux and macOS the packaged launcher is limited to `sandbox` commands, `help` and `--version`.", "a restriction without the usual words"],
+      ["On managed Linux and macOS `defenseclaw status` does not run.", "a command the launcher offers, denied"],
+      ["On managed macOS `defenseclaw guardrail profile explain` is not something a standard user can use.", "guardrail profile explain denied"],
+      ["On managed Linux, the `status` command is unavailable to the user.", "a denial that names the command in backticks"],
       ["On managed Linux, `status` is inaccessible to users.", "a backticked command and an unlisted denial word"],
-      ["On managed Linux, `defenseclaw status` is forbidden to users.", "forbidden"],
-      ["On managed Linux, `status` is not offered to standard users.", "an availability word with a plain negation"],
-      ["On managed Linux, `defenseclaw status` does not show up as an available command.", "show up is availability, not output"],
-      ["On Intune Windows, `defenseclaw status` works for users.", "managed Windows named by Intune"],
-      ["On MDM Windows computers, `defenseclaw status` works for standard users.", "managed Windows named by MDM"],
-      ["With Group Policy on Windows, the user runs `defenseclaw status`.", "managed Windows named by Group Policy"],
-      ["With Group Policy on Windows, `defenseclaw status` works for users.", "managed Windows named by Group Policy, the command as the subject"],
-      ["On managed Linux, `defenseclaw doctor` runs.", "a command that runs, stated of a refused command"],
-      ["On managed Linux, `defenseclaw status` runs.", "a command that runs"],
-      ["On managed Linux, `defenseclaw doctor`, when invoked from the installed package for an enrolled enterprise account, runs.", "a set-aside phrase between the command and runs"],
-      ["On managed Linux, `defenseclaw doctor`, when invoked from the installed package for an enrolled enterprise account, is available.", "a set-aside phrase between the command and an availability word"],
-      ["Under management on Windows, the standard user's `defenseclaw` runs `status`.", "managed Windows through the word management"],
-      ["On managed Linux, users cannot run `status` because the gateway is reserved for administrators.", "an ownership sentence does not excuse a denial"],
-      ["On a managed computer, none of the steps in this page work.", "a blanket claim that says the steps do not run"],
-      ["On managed Linux, `defenseclaw status` is available to users.", "a positive availability claim"],
+      ["On managed Windows, the packaged `defenseclaw` runs `status` for standard users.", "Windows given one offered command"],
+      ["On a managed Windows computer `status` runs for standard users.", "Windows given one offered command without a launcher word"],
+      ["On a managed Windows computer `status`, `audit findings` and `connector list-backups` exit `1`.", "a true statement is still a hand-written one"],
+      ["On managed Windows the launcher runs only `sandbox` commands, `status`, `guardrail profile explain`, `help` and `--version`.", "the Linux and macOS launcher given to Windows"],
+      ["On managed Linux, `defenseclaw doctor` runs.", "a refused command that runs"],
+      ["On managed Linux, `defenseclaw doctor` does run.", "the near variant: does run"],
       ["On managed Linux, `defenseclaw doctor` is available to users.", "a positive claim about a refused command"],
-      ["On managed Linux, the `status` command is unavailable.", "a denial with no launcher or user cue"],
-      ["On managed Linux, `defenseclaw status` is available to standard users and does not show another account's state.", "availability is a claim even next to output guidance"],
       ["On managed Linux, `defenseclaw doctor` is refused.", "a refused command stated as refused"],
+      ["On managed Linux, users cannot run `defenseclaw doctor`.", "a prefixed command with a denial"],
+      ["On a managed host, `defenseclaw status` only shows the enrolled account's protections.", "output guidance is still a sentence about the command on a managed host"],
+      ["On managed Linux, run `defenseclaw status` to see your own protections.", "an imperative is not exempt"],
+      ["On managed Linux, `defenseclaw status` shows protections, and the gateway runs a policy check.", "the verb and the subject are never read"],
+      ["On managed Linux, `defenseclaw config set` prints a message when the write is blocked.", "a subordinate clause is never read"],
+      ["On MANAGED LINUX, `defenseclaw doctor` works.", "case does not matter"],
     ];
-    for (const [text, why] of denied) assert.equal(claims(text), 1, why);
+    for (const [text, why] of flagged) assert.equal(claims(text), 1, why);
     const allowed: Array<[string, string]> = [
       ["On managed Linux, exit status is unavailable to the user until the command exits.", "bare prose that names no command"],
       ["On managed Linux, status is unavailable to the user until the gateway starts.", "a bare word is not a command name"],
       ["On managed Linux, the exit status of a refused command is 2.", "exit status is not the command"],
-      ["On a managed computer, the examples on this page show how to run the administrator gateway commands.", "a blanket sentence that denies nothing"],
-      ["On a managed computer, the examples on this page explain why administrator gateway commands require elevation.", "a blanket sentence that denies nothing"],
-      ["On managed Linux, the administrator's `defenseclaw-gateway status` shows every account.", "the administrator's own command"],
-      ["On managed Linux, none of the examples on this page reveal another user's data.", "bare prose that names no command and says nothing of availability"],
-      ["On managed Linux, `defenseclaw status` only shows the enrolled account's protections.", "output guidance names no availability"],
-      ["On managed Linux, run `defenseclaw status` to see your own protections.", "an imperative that names a command"],
+      ["On managed Linux, status shows protections, and the gateway runs a policy check.", "ordinary output prose without a backticked command"],
+      ["On managed Linux, the alert engine runs independently.", "ordinary prose that names no command"],
+      ["On managed Linux, the administrator's `defenseclaw-gateway status` shows every account.", "the administrator's own command is not a table command"],
       ["On managed Windows, run `defenseclaw-gateway status` from an elevated Administrator prompt.", "the administrator's command on Windows"],
-      ["On managed Linux, `defenseclaw config set` prints a message when the write is blocked.", "a blocked write is the subject of a subordinate clause, not the command"],
-      ["On managed Linux, `defenseclaw config set` prints a message when the write is refused.", "a refused write is the subject of a subordinate clause, not the command"],
-      ["On managed Linux, `defenseclaw doctor` explains why a rule is blocked.", "a blocked rule is the subject of a subordinate clause, not the command"],
+      ["On a managed Windows computer the launcher is not installed, so use the administrator's `defenseclaw.exe`.", "Windows has no launcher: no table command named"],
+      ["On a managed computer, run `defenseclaw sandbox status` to see your sandboxes.", "no managed OS word in the sentence"],
+      ["On a managed computer, `defenseclaw doctor` is available to the administrator.", "the lexical scope needs the OS word: managed computer is outside it"],
+      ["`defenseclaw doctor` runs on a standalone Linux install.", "a standalone install is not a managed OS"],
+      ["The per-user setup commands on this page do not run on a managed computer.", "no table command named"],
+      ["Managed host: `ignore`<br/>Values: `start`, `status`, `restart`", "a table cell: a line break ends the sentence"],
     ];
     for (const [text, why] of allowed) assert.equal(claims(text), 0, why);
   });
@@ -1909,7 +1835,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2240", page: "policies/defaults.mdx", has: ["Available policies: * default [built-in] [active] Balanced security policy", "Activate a policy: defenseclaw policy activate <name> Show details: defenseclaw policy show <name>", "`*` and `[active]` mark the active preset."], lacks: ["Available policies: default [built-in]"] },
   { gap: "GAP-2247", page: "scanning/mcp-scanner.mdx", has: ["| `analyzers` | unset, read back as `auto` | The analyzers to run. Unset (`config get` prints `auto`) and `[]` both mean YARA, plus the LLM judge when it is ready. |"], lacks: ["| `analyzers` | `[]` (auto) |"] },
   { gap: "GAP-2293", page: "reference/cli.mdx", section: "Managed devices and exit code 3", has: ["`config set` prints `This device is managed: change config.yaml in the admin config (MDM or management plane); config set did not change it`", "no `version` command (run `& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw.exe' --version`) and no `policy activate`", "`connector list-backups`, exit `1` with `this computer's DefenseClaw is managed by your organization`", "(the Windows package has no `policy activate`; see below)"], lacks: ["`rollback` with a note that the computer is managed, refuses `config set`,"] },
-  { gap: "GAP-2293", page: "reference/cli.mdx", section: "Gateway daemon", has: ["On a managed Windows computer `status`, `audit findings` and `connector list-backups` have no per-user gateway to read and exit `1`"] },
+  { gap: "GAP-2293", page: "reference/cli.mdx", section: "Gateway daemon", has: ["On a Windows computer under enterprise management, `status`, `audit findings` and `connector list-backups` have no per-user gateway to read and exit `1`"] },
   { gap: "GAP-2287", page: "enterprise/troubleshooting.mdx", has: ["`installed_version` is the recorded version when an administrator gave an unknown `--profile`; it is omitted for a standard account, which cannot read the deployment record."], lacks: ["because they were not checked, and `installed_version` is omitted."] },
   { gap: "GAP-2300", page: "enterprise/configuration.mdx", section: "Files next to the config", has: ["on Windows an `ensure` that repairs a missing record keeps the proven count and says `(recovered config generation)` in `reason` instead"] },
   { gap: "GAP-2301", page: "enterprise/configuration.mdx", section: "Where the config lives", has: ["(Administrators and SYSTEM full control; the gateway service, `NT SERVICE\\DefenseClawGateway`, can only read it)"], lacks: ["config.yaml` (Administrators only)"] },
