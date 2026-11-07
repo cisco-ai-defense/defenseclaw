@@ -34362,11 +34362,27 @@ function Get-DefenseClawRecordedConfigGeneration {
     }
     $actorProperty = $generation.PSObject.Properties['actor']
     $actor = if ($null -eq $actorProperty) { '' } else { [string]$actorProperty.Value }
+    $generationProperty = $generation.PSObject.Properties['generation']
     return [pscustomobject]@{
-        hash      = $activeHash
-        actor     = $actor
-        hand_edit = [bool]($actor -clike 'hand-edit:*')
+        hash       = $activeHash
+        actor      = $actor
+        hand_edit  = [bool]($actor -clike 'hand-edit:*')
+        generation = if ($null -eq $generationProperty) { $null } else { ConvertTo-DefenseClawConfigGenerationNumber -Value $generationProperty.Value }
     }
+}
+
+function ConvertTo-DefenseClawConfigGenerationNumber {
+    <#
+        A config generation counter as an unsigned integer, or $null when the
+        value is not a plain non-negative integer.
+    #>
+    param($Value)
+    $number = [uint64]0
+    if ($null -ne $Value -and [uint64]::TryParse([string]$Value, [Globalization.NumberStyles]::None,
+            [Globalization.CultureInfo]::InvariantCulture, [ref]$number)) {
+        return $number
+    }
+    return $null
 }
 
 function Get-DefenseClawRecordedConfigGenerationHash {
@@ -34414,7 +34430,67 @@ function Get-DefenseClawHandEditApprovedConfigSource {
             'run ' + (Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout) + ' ' +
             'on a signed-bundle deployment, or ' + (Format-DefenseClawSetupAction -Action '/ensure CONFIG=<approved absolute config path>') + ' otherwise')
     }
-    return (Get-DefenseClawApprovedPolicySource -Layout $Layout -Metadata $Metadata -Name config)
+    $approved = Get-DefenseClawApprovedPolicySource -Layout $Layout -Metadata $Metadata -Name config
+    Assert-DefenseClawApprovedConfigProven -Layout $Layout -Approved $approved -Generation $generation
+    return $approved
+}
+
+function Assert-DefenseClawApprovedConfigProven {
+    <#
+        Whether a lifecycle run of this release proved the approved config
+        copy current, for a config.yaml the generation record calls a hand
+        edit (GAP-0779). The hand edit record names no lifecycle predecessor,
+        and a digest that matches the copy proves only that the copy is intact:
+        a build that applied a config in place left the copy at an older
+        config. approved-config.current.json, written by the Go lifecycle next
+        to the copy, names the copy digest and the config generation that
+        recorded the config as applied. The copy is current only when the hand
+        edit directly follows that generation; a config recorded after the
+        proof (by a build that does not write the proof) leaves a larger gap.
+        This is the one place that restores the copy over a hand edit, so
+        Setup Repair, a direct run of install-enterprise.ps1 and the rollback
+        all stop here, before anything is changed. Nothing is changed here.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Approved,
+        [Parameter(Mandatory)]$Generation
+    )
+    $refusal = 'Repair cannot prove that the recorded approved config source is the config the last lifecycle run applied; run ' +
+        (Format-DefenseClawSetupAction -Action '/ensure CONFIG=<approved absolute config path>') +
+        ' with the approved config, then repair again (nothing was changed)'
+    $proofPath = [IO.Path]::Combine([string]$Layout.InstallStateDirectory, 'approved-config.current.json')
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $proofPath -PathType Leaf)) {
+        throw $refusal
+    }
+    Assert-DefenseClawNoReparsePath -Path $proofPath
+    Assert-DefenseClawPathAcl `
+        -Path $proofPath `
+        -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+        -AllowedReaderSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+        -RejectUntrustedRead `
+        -AllowInheritance `
+        -IgnoreCreatorTemplates
+    $proof = $null
+    try {
+        $proof = Microsoft.PowerShell.Management\Get-Content -LiteralPath $proofPath -Raw |
+            Microsoft.PowerShell.Utility\ConvertFrom-Json
+    }
+    catch {
+        throw $refusal
+    }
+    if ($proof -isnot [Management.Automation.PSCustomObject]) { throw $refusal }
+    $digestProperty = $proof.PSObject.Properties['config_sha256']
+    $generationProperty = $proof.PSObject.Properties['generation']
+    if ($null -eq $digestProperty -or $null -eq $generationProperty -or
+        [string]$digestProperty.Value -cne ([string]$Approved.sha256).ToLowerInvariant()) {
+        throw $refusal
+    }
+    $proven = ConvertTo-DefenseClawConfigGenerationNumber -Value $generationProperty.Value
+    if ($null -eq $proven -or $null -eq $Generation.generation -or
+        $Generation.generation -le $proven -or ($Generation.generation - $proven) -ne 1) {
+        throw $refusal
+    }
 }
 
 function Restore-DefenseClawApprovedConfigOverHandEdit {

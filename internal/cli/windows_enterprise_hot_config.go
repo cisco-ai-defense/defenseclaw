@@ -105,7 +105,7 @@ func approveWindowsStandaloneConfigSource(layout managed.StandaloneLayout) error
 	if err != nil {
 		return fmt.Errorf("read the installed config: %w", err)
 	}
-	return refreshManagedApprovedConfigSource(layout.LifecycleDir, installed)
+	return refreshManagedApprovedConfigSource(layout.LifecycleDir, layout.ConfigPath, installed)
 }
 
 // windowsEnterpriseHealApprovedSource is the check at the end of a lifecycle
