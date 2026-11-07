@@ -37,6 +37,18 @@ type SimpleCommand struct {
 	// in the action but this walk could not carry its value into Text. The
 	// original action decides the protected-write class for that value.
 	UnresolvedBoundVariable bool
+	// UnboundUser means Text names USER or LOGNAME after a binding the walk
+	// cannot follow (read, a loop, eval): the value is unknown, not the
+	// login the home spells. A reader may keep the guess that the name is
+	// that login for the spelling of the path, but a file it reaches only
+	// through a link on disk is not a file the command names
+	// (rel-1-0-6:GAP-0601 review 5).
+	UnboundUser bool
+	// AbsoluteOnly means the directory of the command is unknown (an eval,
+	// an unreadable cd) and no operand of Text depends on it: CWD is empty,
+	// and the directory the action starts in judges the command as well as
+	// any other (rel-1-0-6:GAP-0630 review 5).
+	AbsoluteOnly bool
 	// EvaluationFailure is "limit" or "parse" when no complete per-command
 	// view can be produced. A parse gap is not an action refusal.
 	EvaluationFailure string
@@ -303,13 +315,16 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			if strings.TrimSpace(text) == "" {
 				return []SimpleCommand{{EvaluationFailure: "parse"}}
 			}
-			if state.cwdUnknown && simpleRelativePathOperand(text) {
+			relative := state.cwdUnknown && simpleRelativePathOperand(text)
+			if relative {
 				unproven = true
 			}
 			call, _ := stmt.Cmd.(*syntax.CallExpr)
 			command := SimpleCommand{Text: text, CWD: state.cwd,
 				ZshHistoryBuiltin:       simpleZshHistoryCall(call, effective, interpreter),
-				UnresolvedBoundVariable: simpleUnresolvedBoundVariable(text, effective, bound)}
+				UnresolvedBoundVariable: simpleUnresolvedBoundVariable(text, effective, bound),
+				UnboundUser:             simpleUnboundUser(text, effective, bound),
+				AbsoluteOnly:            state.cwdUnknown && !relative}
 			if !emitted[command] {
 				result = append(result, command)
 				emitted[command] = true
@@ -321,7 +336,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				if reading := resolve(unprefixed); strings.TrimSpace(reading) != "" {
 					alone := SimpleCommand{Text: reading, CWD: state.cwd,
 						ZshHistoryBuiltin:       command.ZshHistoryBuiltin,
-						UnresolvedBoundVariable: simpleUnresolvedBoundVariable(reading, effective, bound)}
+						UnresolvedBoundVariable: simpleUnresolvedBoundVariable(reading, effective, bound),
+						UnboundUser:             simpleUnboundUser(reading, effective, bound),
+						AbsoluteOnly:            command.AbsoluteOnly}
 					if !emitted[alone] {
 						result = append(result, alone)
 						emitted[alone] = true
@@ -374,6 +391,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						}
 						child.UnresolvedBoundVariable = child.UnresolvedBoundVariable ||
 							simpleUnresolvedBoundVariable(child.Text, effective, bound)
+						child.UnboundUser = child.UnboundUser || simpleUnboundUser(child.Text, effective, bound)
 						result = append(result, child)
 						if len(result) > maxSimpleEvaluations {
 							return []SimpleCommand{{EvaluationFailure: "limit"}}
@@ -396,7 +414,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				updateSimpleDeclVariables(&state, decl, part.scope)
 			}
 			if call != nil {
-				simpleForgetUserVars(state.vars, simpleCallBindsUser(call))
+				simpleForgetUserVars(state.vars, CallBindsUserNames(call))
 			}
 			nextCWD, changedDirectory := simpleCommandNextCWD(text, &state, effective)
 			if !changedDirectory {
@@ -1091,12 +1109,13 @@ func simpleBoundVariables(file *syntax.File) (bound map[string]bool) {
 	return bound
 }
 
-// simpleCallBindsUser returns the names of USER and LOGNAME that the call
-// binds where the walk cannot follow the value: read, mapfile and readarray
-// name them, printf -v names one, and the text of an eval, trap or source
-// may bind any it spells (any when it is not static). The statements after
-// the call read no value for them; the statements before it do.
-func simpleCallBindsUser(call *syntax.CallExpr) []string {
+// CallBindsUserNames returns the names of USER and LOGNAME that the call
+// binds where a walk cannot follow the value: read and mapfile (readarray)
+// name them as variables, not as the value of an option such as read -p, a
+// printf -v names one, and the text of an eval, trap or source may bind any
+// it spells (any when it is not static). The statements after the call read
+// no value for them; the statements before it do.
+func CallBindsUserNames(call *syntax.CallExpr) []string {
 	if call == nil || len(call.Args) == 0 {
 		return nil
 	}
@@ -1118,21 +1137,113 @@ func simpleCallBindsUser(call *syntax.CallExpr) []string {
 			}
 		}
 	case "read", "mapfile", "readarray":
-		for _, arg := range call.Args[1:] {
-			if name, known := simpleStaticWord(arg, nil); known {
+		// An option that takes a value takes the next word: read -p USER
+		// OTHER binds OTHER (and the array of read -a), not USER. A word the
+		// walk cannot read may be any name.
+		valued := "dinNptu"
+		if program != "read" {
+			valued = "dnOsuC"
+		}
+		options := true
+		for index := 1; index < len(call.Args); index++ {
+			name, known := simpleStaticWord(call.Args[index], nil)
+			switch {
+			case !known:
+				for _, user := range simpleUserNames {
+					add(user)
+				}
+			case options && name == "--":
+				options = false
+			case options && len(name) > 1 && name[0] == '-':
+				for at := 1; at < len(name); at++ {
+					if strings.ContainsRune(valued, rune(name[at])) {
+						if at == len(name)-1 {
+							index++
+						}
+						break
+					}
+					if program == "read" && name[at] == 'a' && at == len(name)-1 && index+1 < len(call.Args) {
+						// read -a names the array it fills.
+						array, _ := simpleStaticWord(call.Args[index+1], nil)
+						add(array)
+						index++
+					}
+				}
+			default:
+				options = false
 				add(name)
 			}
 		}
-	case "eval", "trap", ".", "source":
-		for _, arg := range call.Args[1:] {
-			text, known := simpleStaticWord(arg, nil)
-			for _, name := range simpleUserNames {
-				if !known || strings.Contains(text, name) {
-					add(name)
-				}
+	case ".", "source":
+		// The sourced file is code the walk does not read.
+		for _, name := range simpleUserNames {
+			add(name)
+		}
+	case "eval", "trap":
+		// The code an eval or trap runs binds the names it binds itself: a
+		// no-op, or code that only mentions USER, binds nothing.
+		code := call.Args[1:]
+		if program == "trap" {
+			code = code[:min(len(code), 1)]
+			if len(code) != 0 && simpleStaticWordOrEmpty(code[0], '-') {
+				code = nil
 			}
 		}
+		var words []string
+		for _, arg := range code {
+			text, known := simpleStaticWord(arg, nil)
+			if !known {
+				for _, name := range simpleUserNames {
+					add(name)
+				}
+				return names
+			}
+			words = append(words, text)
+		}
+		for _, name := range evalCodeBindsUser(strings.Join(words, " "), 0) {
+			add(name)
+		}
 	}
+	return names
+}
+
+// simpleStaticWordOrEmpty reports a static word that starts with prefix.
+func simpleStaticWordOrEmpty(word *syntax.Word, prefix byte) bool {
+	text, known := simpleStaticWord(word, nil)
+	return known && text != "" && text[0] == prefix
+}
+
+// evalCodeBindsUser returns the names of USER and LOGNAME that the shell
+// code text binds: an assignment, a loop name, or a call that binds one
+// (CallBindsUserNames). Code that does not parse may bind any.
+func evalCodeBindsUser(text string, depth int) []string {
+	file, ok := shellparse.Parse(text)
+	if !ok || depth >= 4 {
+		return simpleUserNames
+	}
+	var names []string
+	add := func(name string) {
+		if slices.Contains(simpleUserNames, name) && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.Assign:
+			if node.Name != nil {
+				add(node.Name.Value)
+			}
+		case *syntax.WordIter:
+			if node.Name != nil {
+				add(node.Name.Value)
+			}
+		case *syntax.CallExpr:
+			for _, name := range CallBindsUserNames(node) {
+				add(name)
+			}
+		}
+		return true
+	})
 	return names
 }
 
@@ -1200,6 +1311,29 @@ func simpleUnresolvedBoundVariable(source string, vars map[string]string, bound 
 		return !unresolved
 	})
 	return unresolved
+}
+
+// simpleUnboundUser reports a USER or LOGNAME parameter of source that the
+// action binds and vars carries no value for.
+func simpleUnboundUser(source string, vars map[string]string, bound map[string]bool) bool {
+	if !strings.ContainsRune(source, '$') || !bound["USER"] && !bound["LOGNAME"] {
+		return false
+	}
+	file, ok := shellparse.Parse(source)
+	if !ok {
+		return false
+	}
+	unbound := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if param, ok := node.(*syntax.ParamExp); ok && param.Param != nil &&
+			slices.Contains(simpleUserNames, param.Param.Value) && bound[param.Param.Value] {
+			if _, known := vars[param.Param.Value]; !known {
+				unbound = true
+			}
+		}
+		return !unbound
+	})
+	return unbound
 }
 
 func simpleStaticWord(word *syntax.Word, vars map[string]string) (string, bool) {
