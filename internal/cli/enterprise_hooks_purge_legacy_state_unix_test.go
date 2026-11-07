@@ -70,8 +70,8 @@ func TestRemoveAllPurgesTheLegacyStateOnlyOfAccountsWithoutAnOwnInstall(t *testi
 	}
 	for _, home := range []string{legacy, own} {
 		write(filepath.Join(home, ".defenseclaw", "hooks", "claude-code-hook.sh"), "#!/bin/sh\nexit 0\n")
-		write(filepath.Join(home, ".defenseclaw", ".hook-claudecode.token"), "sample\n")
-		write(filepath.Join(home, ".defenseclaw", ".hookcfg-claudecode.json"), "{}\n")
+		write(filepath.Join(home, ".defenseclaw", "hooks", ".hook-claudecode.token"), "sample\n")
+		write(filepath.Join(home, ".defenseclaw", "hooks", ".hookcfg.claudecode"), "{}\n")
 		write(filepath.Join(home, ".defenseclaw", "connector_backups", "claudecode", "settings.json.json"), "{}\n")
 	}
 	write(filepath.Join(legacy, ".defenseclaw", "personal.txt"), "account note\n")
@@ -113,7 +113,7 @@ func TestRemoveAllPurgesTheLegacyStateOnlyOfAccountsWithoutAnOwnInstall(t *testi
 	if got, err := os.ReadFile(filepath.Join(legacyData, "personal.txt")); err != nil || string(got) != "account note\n" {
 		t.Fatalf("eligible account file changed: %q, %v", got, err)
 	}
-	for _, rel := range []string{"hooks/claude-code-hook.sh", ".hook-claudecode.token", ".hookcfg-claudecode.json"} {
+	for _, rel := range []string{"hooks/claude-code-hook.sh", "hooks/.hook-claudecode.token", "hooks/.hookcfg.claudecode"} {
 		if _, err := os.Lstat(filepath.Join(legacyData, filepath.FromSlash(rel))); !os.IsNotExist(err) {
 			t.Errorf("managed file %s stayed: %v", rel, err)
 		}
