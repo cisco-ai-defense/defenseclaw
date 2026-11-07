@@ -1072,7 +1072,8 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 		// finished put their targets back: those repairs still happened and
 		// are reported, because the next pass finds the files in order
 		// (GAP-0754).
-		reportEnterpriseHookStandaloneInterruptedRepairs(cfg.DataDir, hookSocket, slots, rows, outcomes)
+		run.RepairedTargets = reportEnterpriseHookStandaloneInterruptedRepairs(cfg.DataDir, hookSocket, slots, rows, outcomes)
+		run.Repairs = len(run.RepairedTargets)
 		return run, err
 	}
 	for index, outcome := range cachedFailures {
@@ -1199,14 +1200,21 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 }
 
 // reportEnterpriseHookStandaloneInterruptedRepairs accounts the targets the
-// workers of an interrupted pass answered as repaired: the repairs record,
-// the audit report to the gateway (on a context the interrupt did not cancel)
-// and the restore entries the next recording pass writes.
+// workers of an interrupted pass answered as repaired, exactly as a pass that
+// ran to its end does: the repairs record, the audit report to the gateway
+// (on a context the interrupt did not cancel), the agent config notice the
+// worker returned and the restore entry, recorded now because the pass that
+// records them may not come soon. It returns the repaired targets by slot key;
+// the caller counts them as the pass repairs and the watch loop logs them
+// (GAP-0754).
 func reportEnterpriseHookStandaloneInterruptedRepairs(dataDir, hookSocket string, slots map[int]enterpriseHookStandaloneSlot,
-	rows []enterpriseHookReconcileRow, outcomes map[int]enterpriseHookStandaloneOutcome) {
+	rows []enterpriseHookReconcileRow, outcomes map[int]enterpriseHookStandaloneOutcome) map[string]bool {
+	repairedTargets := map[string]bool{}
 	var repaired []enterpriseHookGuardianRepair
 	var audits []enterpriseHookGuardianAuditReport
 	var restored []enterpriseHookGuardianRestore
+	var notices []enterpriseHookGuardianNotice
+	answered := map[string]bool{}
 	restoredAt := time.Now().UTC().Format(time.RFC3339Nano)
 	for index, slot := range slots {
 		outcome, ok := outcomes[index]
@@ -1215,18 +1223,34 @@ func reportEnterpriseHookStandaloneInterruptedRepairs(dataDir, hookSocket string
 		}
 		user, name := rows[index].User, outcome.result.Connector
 		uid := slot.account.UID
+		repairedTargets[slot.key] = true
 		repaired = append(repaired, enterpriseHookGuardianRepair{User: user, Connector: name})
 		audits = append(audits, enterpriseHookGuardianAuditReport{User: user, UID: uid, Connector: name})
 		restored = append(restored, enterpriseHookGuardianRestore{UID: &uid, User: user, Connector: name, RestoredAt: restoredAt})
+		answered[user+"\x00"+strings.ToLower(name)] = true
+		if outcome.agentConfig != "" {
+			notices = append(notices, enterpriseHookGuardianNotice{User: user, Connector: name, AgentConfig: outcome.agentConfig})
+		}
 	}
 	if len(repaired) == 0 {
-		return
+		return nil
 	}
 	writeEnterpriseHookGuardianRepairs(dataDir, repaired)
+	// The record holds every target notice, and this pass answered only some:
+	// replace the notices of the repaired targets and keep the others.
+	merged := notices
+	for _, notice := range readEnterpriseHookGuardianNotices(dataDir) {
+		if !answered[notice.User+"\x00"+strings.ToLower(notice.Connector)] {
+			merged = append(merged, notice)
+		}
+	}
+	writeEnterpriseHookGuardianNotices(enterpriseHookWorkerLog, dataDir, merged)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	reportEnterpriseHookGuardianRepairs(ctx, hookSocket, audits)
-	holdEnterpriseHookGuardianRestores(dataDir, restored)
+	// A failed record is kept in memory and written by a later pass.
+	_ = recordEnterpriseHookGuardianRestores(enterpriseHookWorkerLog, dataDir, rows, restored)
+	return repairedTargets
 }
 
 // enterpriseHookCredentialKeyID names the per-user credential key a

@@ -75,6 +75,50 @@ func TestGAP0754GuardianReportsWhatItRestored(t *testing.T) {
 	}
 }
 
+// A second event that cancels the pass while its worker finishes still leaves
+// the repair in the reconcile log: the next pass finds the file in order and
+// repairs nothing, so without this line no log says repairs>0 (GAP-0754).
+func TestGAP0754InterruptedPassLogsTheRepairItMade(t *testing.T) {
+	const script = "#!/bin/sh\nexec defenseclaw-hook\n"
+	path, log, _ := startGAP0754RealGuardian(t, filepath.Join(".defenseclaw", "hooks", "hermes-hook.sh"), script, "")
+	if err := os.WriteFile(path, []byte(script+"#\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The worker restores the file and spends 300 ms finishing: a change of
+	// the manifest in that window preempts the pass.
+	deadline := time.After(6 * time.Second)
+	for {
+		if body, err := os.ReadFile(path); err == nil && string(body) == script {
+			break
+		}
+		select {
+		case <-time.After(5 * time.Millisecond):
+		case <-deadline:
+			t.Fatalf("the worker never restored the script: %s", log.String())
+		}
+	}
+	manifest, err := os.ReadFile(enterpriseHookManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(enterpriseHookManifest, append(manifest, []byte("\n# preempt\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := "reconcile reason=fsnotify status=interrupted"
+	for {
+		for _, line := range strings.Split(log.String(), "\n") {
+			if strings.Contains(line, want) && strings.Contains(line, "repairs=1") {
+				return
+			}
+		}
+		select {
+		case <-time.After(10 * time.Millisecond):
+		case <-deadline:
+			t.Fatalf("the interrupted pass logged no repair (GAP-0754): %s", log.String())
+		}
+	}
+}
+
 // Nothing changed, nothing is reported: a rewrite of the verified bytes is
 // not a repair, so a quiet file adds no repairs=1 row.
 func TestGAP0754RewriteWithTheVerifiedBytesReportsNoRepair(t *testing.T) {
