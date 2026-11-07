@@ -304,6 +304,14 @@ func runEnterpriseHooksEnumerateCycle(
 	if state, err := configwrite.ReadGenerationState(config.ConfigPath()); err == nil {
 		configGeneration, snapshotSHA256 = state.Generation, state.ConfigSHA256
 	}
+	// A cycle that starts on a config its record does not name says so before
+	// the scan, so the lifecycle change that restarted this enumerator sees
+	// the new generation at once and waits for the result (GAP-0782).
+	if !opts.dryRun {
+		if err := enterpriseHooksEnumerateScanStartedWriter(enterprisehooks.UnprotectedAgentsPath(manifestPath), configGeneration, snapshotSHA256); err != nil {
+			fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the start of the scan: %v\n", err)
+		}
+	}
 	// Reload each cycle so an administrator enrollment change applies
 	// without restarting the service.
 	current, loadedSHA256, err := enterpriseHooksEnumerateConfigLoader()
@@ -439,6 +447,7 @@ var (
 	enterpriseHooksEnumerateManifestWriter    = enterprisehooks.WriteUnixTargetsManifestAtomic
 	enterpriseHooksEnumerateEligibleWriter    = enterprisehooks.WriteUnixEnumeratorAccounts
 	enterpriseHooksEnumerateUnprotectedWriter = enterprisehooks.WriteUnixUnprotectedAgentsForConfig
+	enterpriseHooksEnumerateScanStartedWriter = enterprisehooks.WriteUnixUnprotectedAgentsScanStarted
 	enterpriseHooksEnumerateRefusedWriter     = writeEnterpriseHookRefusedSurfaces
 	enterpriseHooksEnumerateGatewayAgents     = publishEnterpriseHookUnixGatewayUnprotectedAgents
 )

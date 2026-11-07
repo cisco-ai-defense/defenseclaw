@@ -189,11 +189,17 @@ type UnprotectedAgent struct {
 }
 
 type unprotectedAgentsFile struct {
-	Version          int                `json:"version"`
-	Generation       string             `json:"generation,omitempty"`
-	ConfigGeneration uint64             `json:"config_generation,omitempty"`
-	ConfigSHA256     string             `json:"config_sha256,omitempty"`
-	Agents           []UnprotectedAgent `json:"agents"`
+	Version          int    `json:"version"`
+	Generation       string `json:"generation,omitempty"`
+	ConfigGeneration uint64 `json:"config_generation,omitempty"`
+	ConfigSHA256     string `json:"config_sha256,omitempty"`
+	// ScanInProgress marks the record the enumerator writes when a cycle
+	// starts on a config the previous record does not name: the stamp is the
+	// new config's, the agents are the previous scan's, and the scan of the new
+	// config has not finished. It is never a completed scan; the cycle's
+	// final record replaces it (GAP-0782).
+	ScanInProgress bool               `json:"scan_in_progress,omitempty"`
+	Agents         []UnprotectedAgent `json:"agents"`
 }
 
 // UnprotectedAgentsPath is the unprotected-agents record for manifestPath.
@@ -309,12 +315,33 @@ func MarshalUnprotectedAgents(agents []UnprotectedAgent) ([]byte, error) {
 // lifecycle generation readable; status cannot infer their config freshness
 // from these fields.
 func MarshalUnprotectedAgentsForConfig(agents []UnprotectedAgent, configGeneration uint64, configSHA256 string) ([]byte, error) {
+	return marshalUnprotectedAgents(agents, configGeneration, configSHA256, false)
+}
+
+// MarshalUnprotectedAgentsScanStarted is the record of a scan of the config
+// (generation, digest) that has started and not finished: it carries the
+// previous scan's agents so status keeps reporting them, and reads as pending
+// until the cycle's final record replaces it.
+func MarshalUnprotectedAgentsScanStarted(previous []UnprotectedAgent, configGeneration uint64, configSHA256 string) ([]byte, error) {
+	return marshalUnprotectedAgents(previous, configGeneration, configSHA256, true)
+}
+
+func marshalUnprotectedAgents(agents []UnprotectedAgent, configGeneration uint64, configSHA256 string, scanInProgress bool) ([]byte, error) {
 	normalized := normalizeUnprotectedAgents(agents)
-	data, err := json.MarshalIndent(unprotectedAgentsFile{Version: 1, Generation: UnprotectedAgentsGeneration(), ConfigGeneration: configGeneration, ConfigSHA256: configSHA256, Agents: normalized}, "", "  ")
+	data, err := json.MarshalIndent(unprotectedAgentsFile{Version: 1, Generation: UnprotectedAgentsGeneration(), ConfigGeneration: configGeneration, ConfigSHA256: configSHA256, ScanInProgress: scanInProgress, Agents: normalized}, "", "  ")
 	if err != nil {
 		return nil, err
 	}
 	return append(data, '\n'), nil
+}
+
+// UnprotectedAgentsRecordScanInProgress reports a record written when a scan
+// started and not yet replaced by its result.
+func UnprotectedAgentsRecordScanInProgress(data []byte) bool {
+	var record struct {
+		ScanInProgress bool `json:"scan_in_progress"`
+	}
+	return json.Unmarshal(data, &record) == nil && record.ScanInProgress
 }
 
 // UnprotectedAgentsRecordConfigGeneration is the config generation a

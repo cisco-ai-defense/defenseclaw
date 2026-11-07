@@ -500,29 +500,52 @@ func (l *lifecycle) installScanVerdict(data []byte, modTime, now time.Time) (rea
 		enterprisehooks.UnprotectedAgentsRecordConfigSHA256(data) != current.ConfigSHA256 {
 		return "from a different config generation", true, ""
 	}
+	// The enumerator announces a scan of this config before it runs it; the
+	// announcement carries the previous scan's agents and is not a result.
+	if enterprisehooks.UnprotectedAgentsRecordScanInProgress(data) {
+		return "still being rewritten by a scan of the new config that has not finished", true, ""
+	}
 	return "", false, ""
 }
+
+// defaultInstallScanTimeout bounds awaitInstallScan. The restarted macOS
+// enumerator wrote its first record 38 s after the launchd kickstart (GAP-0782,
+// two measurements on the standalone pkg host), so the bound is more than
+// twice that.
+const defaultInstallScanTimeout = 90 * time.Second
+
+// installScanProgressEvery spaces the progress lines of awaitInstallScan.
+const installScanProgressEvery = 10 * time.Second
 
 // awaitInstallScan waits, bounded by InstallScanTimeout, for the enumerator
 // this change restarted to publish its first record, so the result of an
 // upgrade reports the install scan of the new install, not the previous
-// one's. Without it an ensure that restarts the enumerator a moment before
+// release's. Without it an ensure that restarts the enumerator a moment before
 // its own verify read "NOT COVERED (scan pending)" from the record the
 // previous release wrote (GAP-0726: the Enterprise Upgrade Lane (pkg) step
 // "upgrade to 9.9.9" exited 0 with coverage_complete=false). The wait ends
 // at once when the record is already current (this install, the installed
 // config generation), so a change that left the enumerator running does
-// not wait. A record still pending at the deadline
-// is reported by describeUnprotectedAgents with its remedy.
+// not wait. It polls and prints a progress line while it waits. A record
+// still pending at the deadline is reported by describeUnprotectedAgents
+// with its remedy.
 func (l *lifecycle) awaitInstallScan(ctx context.Context) bool {
 	env := l.env
-	deadline := env.Now().Add(env.InstallScanTimeout)
+	start := env.Now()
+	deadline := start.Add(env.InstallScanTimeout)
+	nextProgress := start
 	for {
 		if !l.installScanPending() {
 			return true
 		}
-		if !env.Now().Before(deadline) {
+		now := env.Now()
+		if !now.Before(deadline) {
 			return false
+		}
+		if env.Progress != nil && !now.Before(nextProgress) {
+			env.Progress(fmt.Sprintf("waiting for the enumerator to scan the new config (%s of at most %s)",
+				now.Sub(start).Round(time.Second), env.InstallScanTimeout))
+			nextProgress = now.Add(installScanProgressEvery)
 		}
 		select {
 		case <-ctx.Done():
