@@ -1594,6 +1594,9 @@ func (w *InstallWatcher) recordAdmissionBaseline(evt InstallEvent, snap *TargetS
 // persistSnapshot upserts the baseline snapshot (content/dep/config/endpoint
 // hashes plus the scan ID and scanner fingerprint) without running a scan.
 func (w *InstallWatcher) persistSnapshot(evt InstallEvent, snap *TargetSnapshot, scanID, fingerprint string) {
+	if evt.Type == InstallMCP && !w.secureClientActive() && !w.mcpDefinitionIsSnapshot(evt, snap) {
+		return // the verdict is for a definition the snapshot does not name
+	}
 	depJSON, _ := json.Marshal(snap.DependencyHashes)
 	cfgJSON, _ := json.Marshal(snap.ConfigHashes)
 	epJSON, _ := json.Marshal(snap.NetworkEndpoints)
