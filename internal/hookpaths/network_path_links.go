@@ -23,8 +23,10 @@ import (
 // elsewhere). Tests that fake a share turn it on.
 var networkShareLinkWalk = runtime.GOOS == "windows"
 
-// networkLinkHopLimit bounds the links one walk follows; a longer chain is
-// left to the operating system, which fails it.
+// networkLinkHopLimit bounds the links one walk follows. A walk that reaches
+// the bound has not proven the path free of an unasked share (the system
+// follows far more links than this), so it reports the path as unanswered,
+// as a share that did not answer, and never as a completed check.
 const networkLinkHopLimit = 40
 
 // trimPathSeparators drops the leading separators of path.
@@ -62,9 +64,11 @@ func joinPathElement(dir, elem string) string {
 // only with followLast: lstat, readlink and a directory walk open no final
 // link. The caller asks the share and then walks the resolved path on, so
 // a link inside the share that leads into another share is met too.
-func linkIntoShare(path string, followLast bool) string {
+// exhausted reports a walk that followed networkLinkHopLimit links and was
+// stopped before it could tell whether a further link leads into a share.
+func linkIntoShare(path string, followLast bool) (resolved string, exhausted bool) {
 	if !networkShareLinkWalk || path == "" {
-		return ""
+		return "", false
 	}
 	sep := string(filepath.Separator)
 	vol := filepath.VolumeName(path)
@@ -87,12 +91,12 @@ func linkIntoShare(path string, followLast bool) string {
 			continue
 		}
 		if rest == "" && !followLast {
-			return ""
+			return "", false
 		}
 		next := joinPathElement(cur, elem)
 		info, err := os.Lstat(next)
 		if err != nil {
-			return ""
+			return "", false
 		}
 		if info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
 			cur = next
@@ -103,11 +107,11 @@ func linkIntoShare(path string, followLast bool) string {
 			cur = next
 			continue
 		}
-		if hops++; hops > networkLinkHopLimit {
-			return ""
-		}
 		if networkShareRootOf(target) != "" {
-			return joinPathElement(target, rest)
+			return joinPathElement(target, rest), false
+		}
+		if hops++; hops > networkLinkHopLimit {
+			return "", true
 		}
 		targetVol := filepath.VolumeName(target)
 		tail := target[len(targetVol):]
@@ -134,5 +138,5 @@ func linkIntoShare(path string, followLast bool) string {
 		}
 		rest = tail
 	}
-	return ""
+	return "", false
 }
