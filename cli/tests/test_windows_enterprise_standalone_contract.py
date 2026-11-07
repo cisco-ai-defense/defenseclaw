@@ -305,6 +305,9 @@ function Test-TransientProbePath {
     if ($PathType -eq 'Container') { return $true }
     $script:Attempts++
     if ($script:Attempts -eq 1) {
+        if ($script:Mode -eq 'probe_false') {
+            return $false
+        }
         if ($script:Mode -eq 'lock_win32') {
             throw [ComponentModel.Win32Exception]::new(33)
         }
@@ -315,6 +318,7 @@ function Test-TransientProbePath {
             throw [UnauthorizedAccessException]::new('metadata access denied')
         }
     }
+    if ($script:Mode -eq 'absent') { return $false }
     return $true
 }
 $path = [IO.Path]::Combine([IO.Path]::GetTempPath(), 'deployment.json')
@@ -323,6 +327,12 @@ $win32Attempts = $script:Attempts
 $script:Mode = 'lock_io'; $script:Attempts = 0
 $ioPresent = Test-DefenseClawDeploymentMetadataPresent -Path $path
 $ioAttempts = $script:Attempts
+$script:Mode = 'probe_false'; $script:Attempts = 0
+$falseThenPresent = Test-DefenseClawDeploymentMetadataPresent -Path $path
+$falseThenPresentAttempts = $script:Attempts
+$script:Mode = 'absent'; $script:Attempts = 0
+$absent = Test-DefenseClawDeploymentMetadataPresent -Path $path
+$absentAttempts = $script:Attempts
 $script:Mode = 'denied'; $script:Attempts = 0
 $denied = $false
 try { [void](Test-DefenseClawDeploymentMetadataPresent -Path $path) }
@@ -332,15 +342,24 @@ $script:Standalone = $false; $script:Mode = 'lock_win32'; $script:Attempts = 0
 $secureClientThrew = $false
 try { [void](Test-DefenseClawDeploymentMetadataPresent -Path $path) }
 catch { $secureClientThrew = $_.Exception -is [ComponentModel.Win32Exception] }
+$secureClientAttempts = $script:Attempts
+$script:Mode = 'probe_false'; $script:Attempts = 0
+$secureClientFalse = Test-DefenseClawDeploymentMetadataPresent -Path $path
 [pscustomobject]@{
     win32_present = $win32Present
     win32_attempts = $win32Attempts
     io_present = $ioPresent
     io_attempts = $ioAttempts
+    false_then_present = $falseThenPresent
+    false_then_present_attempts = $falseThenPresentAttempts
+    absent = $absent
+    absent_attempts = $absentAttempts
     denied = $denied
     denied_attempts = $deniedAttempts
     secure_client_threw = $secureClientThrew
-    secure_client_attempts = $script:Attempts
+    secure_client_attempts = $secureClientAttempts
+    secure_client_false = $secureClientFalse
+    secure_client_false_attempts = $script:Attempts
 } | ConvertTo-Json -Compress
 """,
         encoding="utf-8",
@@ -357,10 +376,16 @@ catch { $secureClientThrew = $_.Exception -is [ComponentModel.Win32Exception] }
         "win32_attempts": 2,
         "io_present": True,
         "io_attempts": 2,
+        "false_then_present": True,
+        "false_then_present_attempts": 2,
+        "absent": False,
+        "absent_attempts": 7,
         "denied": True,
         "denied_attempts": 1,
         "secure_client_threw": True,
         "secure_client_attempts": 1,
+        "secure_client_false": False,
+        "secure_client_false_attempts": 1,
     }
 
 
