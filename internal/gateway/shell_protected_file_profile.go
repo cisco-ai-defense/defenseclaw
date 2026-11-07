@@ -77,16 +77,81 @@ func markShellProtectedFileFindings(request trustedActionRequest, findings []Rul
 	return findings
 }
 
-// textNamesStateFolder reports a command text that spells the DefenseClaw
-// state folder (".defenseclaw"), also with quotes, escapes or backticks in
-// the name or in any case. It is the text test of a call no reader could
-// analyse; a name built from variables or patterns is not seen (a documented
-// limit of the default and permissive profiles; strict blocks the call).
+// textNamesStateFolder reports a command text that names the DefenseClaw
+// state folder (".defenseclaw") as a path component: after a path separator
+// ("~/.defenseclaw", "$HOME/.defenseclaw/config.yaml", a backslash form on
+// Windows), before one (".defenseclaw/config.yaml") or joined to a home root
+// ("Join-Path $HOME .defenseclaw"), also with quotes, escapes or backticks in
+// the name or in any case. A word that only contains the name (an unrelated
+// ".defenseclaw-backup" file, a printed ".defenseclaw") is not the folder. It
+// is the text test of a call no reader could analyse; a name built from
+// variables or patterns, or a bare relative name beside no home root, is not
+// seen (a documented limit of the default and permissive profiles; strict
+// blocks the call).
 func textNamesStateFolder(command string) bool {
-	return strings.Contains(strings.ToLower(stateNameStripper.Replace(command)), ".defenseclaw")
+	if !strings.Contains(strings.ToLower(command), "defense") {
+		return false
+	}
+	// A backslash is an escape in one reading and a path separator in the
+	// other ("%USERPROFILE%\.defenseclaw").
+	for _, backslash := range []string{"", "/"} {
+		text := stateQuoteStripper.Replace(strings.ReplaceAll(command, "\\", backslash))
+		if stateFolderComponent(strings.ToLower(text)) {
+			return true
+		}
+	}
+	return false
 }
 
-var stateNameStripper = strings.NewReplacer("'", "", "\"", "", "\\", "", "`", "")
+var stateQuoteStripper = strings.NewReplacer("'", "", "\"", "", "`", "")
+
+// stateHomeRoots are the spellings of the user home that a call joins to the
+// state folder name as a separate word.
+var stateHomeRoots = []string{"~", "$home", "${home}", "$env:home", "$env:userprofile", "$userprofile",
+	"%userprofile%", "%home%", "%homepath%", "$env:homepath"}
+
+// stateFolderComponent reports text that has ".defenseclaw" as a whole path
+// component: neither side continues the name, and a separator or a home root
+// is beside it.
+func stateFolderComponent(text string) bool {
+	const name = ".defenseclaw"
+	for from := 0; ; {
+		at := strings.Index(text[from:], name)
+		if at < 0 {
+			return false
+		}
+		at += from
+		end := at + len(name)
+		from = end
+		var before, after byte
+		if at > 0 {
+			before = text[at-1]
+		}
+		if end < len(text) {
+			after = text[end]
+		}
+		if stateNameByte(before) || stateNameByte(after) {
+			continue
+		}
+		if before == '/' || after == '/' || stateJoinedToHomeRoot(text[:at]) {
+			return true
+		}
+	}
+}
+
+// stateNameByte reports a byte that continues a file name.
+func stateNameByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.'
+}
+
+// stateJoinedToHomeRoot reports a prefix whose last word is a home root.
+func stateJoinedToHomeRoot(prefix string) bool {
+	word := strings.TrimRight(prefix, " \t\r\n,")
+	if cut := strings.LastIndexAny(word, " \t\r\n,(;|&"); cut >= 0 {
+		word = word[cut+1:]
+	}
+	return slices.Contains(stateHomeRoots, word)
+}
 
 // selfProtectionRules are the rules that protect DefenseClaw itself: a
 // write, append, delete or metadata change of its state, configuration,
