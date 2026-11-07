@@ -449,7 +449,20 @@ func (m *TargetMemo) dotDotReach(raw, clean, home string, sshOnly bool) Grade {
 			return GradePossible
 		}
 	}
-	physical, ok := m.resolveWriteTarget(raw)
+	// A link read on the way may lead through a process-relative hop (the
+	// hook reads its own directory there); the steps after it belong to the
+	// process that opens the path, so the walk proves nothing past it.
+	processRelative := false
+	readlink := func(path string) (string, error) {
+		if processRelativeLink(path) {
+			processRelative = true
+		}
+		return PathReadlink(path)
+	}
+	physical, _, _, ok := walkWritePathMemoWithReaders("", raw, 0, false, false, nil, PathLstat, readlink)
+	if processRelative {
+		return GradePossible
+	}
 	if !ok {
 		// A step the walk could not cross leaves the opened path unproved:
 		// the clean spelling is the strongest lexical reading.
@@ -498,7 +511,7 @@ func processRelativeLink(path string) bool {
 			return false
 		}
 		for _, r := range s {
-			if r < 0 || r > 9 {
+			if r < '0' || r > '9' {
 				return false
 			}
 		}
