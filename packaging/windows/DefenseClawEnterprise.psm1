@@ -10201,7 +10201,9 @@ function Move-DefenseClawNonImageFileReplacing {
             return
         }
         if ($result -ceq 'classic') {
-            Microsoft.PowerShell.Utility\Write-Warning 'DefenseClaw: this volume refused POSIX file replacement; concurrent readers may need to retry'
+            Microsoft.PowerShell.Utility\Write-Warning `
+                -Message 'DefenseClaw: this volume refused POSIX file replacement; concurrent readers may need to retry' `
+                -WarningAction Continue
             return
         }
         $stage, $code = $result.Split(':', 2)
