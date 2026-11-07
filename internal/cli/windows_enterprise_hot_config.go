@@ -149,10 +149,11 @@ func healWindowsStandaloneApprovedConfigSource(result *enterprisestatus.Result) 
 	})
 	switch {
 	case errors.Is(err, errManagedApprovedSourceBusy):
-		result.AddError("lifecycle_busy", "another DefenseClaw lifecycle run holds lifecycle.lock, so the approved config source, which differs from the installed config, was not refreshed and a Setup /repair after a hand edit could restore an older config; the run can be retried")
+		result.AddError("lifecycle_busy", "another DefenseClaw lifecycle run holds lifecycle.lock, so the approved config source, which differs from the installed config, was not refreshed and "+
+			windowsEnterpriseSetupCommand("/repair", "JSON=1")+" after a hand edit could restore an older config; the run can be retried."+windowsEnterpriseSetupSourceNote)
 	case err != nil:
 		result.AddError("approved_config_source_stale", "the approved config source differs from the installed config and could not be refreshed ("+
-			windowsEnterpriseBoundedDiagnostic(err.Error())+"); a Setup /repair after a hand edit could restore an older config. Next step: run "+
+			windowsEnterpriseBoundedDiagnostic(err.Error())+"); "+windowsEnterpriseSetupCommand("/repair", "JSON=1")+" after a hand edit could restore an older config. Next step: run "+
 			windowsEnterpriseSetupCommand("/ensure", "CONFIG=<approved absolute config path>", "JSON=1")+" from an elevated PowerShell prompt."+windowsEnterpriseSetupSourceNote)
 	case changed:
 		result.Changes = append(result.Changes, "refreshed the approved config source to the installed config, which an earlier release had left at an older config")
