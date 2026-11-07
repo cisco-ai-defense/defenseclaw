@@ -80,3 +80,45 @@ func TestProductFolderPrefixOrSuffixIsNotAllowed(t *testing.T) {
 		}
 	}
 }
+
+// A high-entropy value does not become readable because a product folder name
+// sits between two pieces of it: the folder is taken out before judging, and
+// what remains is judged as one value.
+func TestProductFolderBetweenSecretPiecesDoesNotHideTheSecret(t *testing.T) {
+	t.Parallel()
+	for _, folder := range []string{
+		productlayout.ProductFolder,
+		strings.ToLower(productlayout.ProductFolder),
+		strings.ToUpper(productlayout.ProductFolder),
+		productlayout.WindowsHookRuntimeFolder,
+	} {
+		for _, shape := range []string{
+			`aB3dE5gH7jK/%s/mN1pQ3sT5uV`,
+			`/aB3dE5gH7jK/%s/mN1pQ3sT5uV`,
+			`aB3dE5gH7jK/%s/mN1pQ3sT5uV/%s/xY2zA4bC6dE`,
+		} {
+			input := strings.ReplaceAll(shape, "%s", folder)
+			got := redactAuditTarget(t, input)
+			if got == input || strings.Contains(got, "aB3dE5gH7jK") || strings.Contains(got, "mN1pQ3sT5uV") {
+				t.Errorf("secret pieces left readable around %q: %q -> %q", folder, input, got)
+			}
+			if !strings.Contains(got, folder) {
+				t.Errorf("product folder lost beside secret pieces: %q -> %q", input, got)
+			}
+		}
+	}
+}
+
+// The benign twin: short ordinary components around a product folder name stay
+// readable, in every case spelling.
+func TestProductFolderBesideOrdinaryComponentsStaysVisible(t *testing.T) {
+	t.Parallel()
+	for _, folder := range []string{productlayout.ProductFolder, strings.ToLower(productlayout.ProductFolder), productlayout.WindowsHookRuntimeFolder} {
+		for _, shape := range []string{`/opt/cisco/%s/x`, `/opt/cisco/%s/logs/%s/x`, `/var/lib/%s`} {
+			input := strings.ReplaceAll(shape, "%s", folder)
+			if got := redactAuditTarget(t, input); got != input {
+				t.Errorf("ordinary path redacted: %q -> %q", input, got)
+			}
+		}
+	}
+}

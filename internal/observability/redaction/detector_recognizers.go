@@ -605,9 +605,18 @@ func recognizeHighEntropy(input string, fieldClass observability.FieldClass, pri
 	result := make([]candidate, 0, len(indices))
 	for _, index := range indices {
 		boundary := entropyBoundary(input, index[0], index[1])
-		for _, part := range splitAtProductFolders(input[index[0]:index[1]]) {
+		span := input[index[0]:index[1]]
+		parts := splitAtProductFolders(span)
+		// A folder name is not what decides the outcome. When the span with its
+		// folder components taken out still reads as one key (it carries a digit
+		// and passes the value test), every remaining range is redacted, even
+		// when each piece alone is below the length minimum. A path made of
+		// ordinary words has no digit run to speak of, so it is not pulled in by
+		// the join. Otherwise each range is judged on its own.
+		whole := boundary && byteAny(span, isASCIIDigit) && validHighEntropy(joinRanges(span, parts), fieldClass)
+		for _, part := range parts {
 			start, end := index[0]+part[0], index[0]+part[1]
-			accepted := boundary && validHighEntropy(input[start:end], fieldClass)
+			accepted := whole || (boundary && validHighEntropy(input[start:end], fieldClass))
 			if overlapsCredentialClaim(start, end, prior) {
 				accepted = false
 			}
@@ -615,6 +624,19 @@ func recognizeHighEntropy(input string, fieldClass observability.FieldClass, pri
 		}
 	}
 	return result
+}
+
+// joinRanges rebuilds span with the product folder components taken out: the
+// ranges in order, one slash where a folder stood.
+func joinRanges(span string, parts [][2]int) string {
+	var builder strings.Builder
+	for i, part := range parts {
+		if i > 0 {
+			builder.WriteByte(byte(0x2f))
+		}
+		builder.WriteString(span[part[0]:part[1]])
+	}
+	return builder.String()
 }
 
 // splitAtProductFolders returns the byte ranges of span that remain candidates
