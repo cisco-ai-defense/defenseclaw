@@ -118,3 +118,89 @@ func TestHookAssetFactsCopilotHomeReplacesTheDefaultSkillRoot(t *testing.T) {
 		t.Fatalf("relocated home: contents = %+v, want only the skill under %q", got, active)
 	}
 }
+
+// Every registered plugin a tool name can start with keeps its complete text.
+func TestFourOrdinaryPluginCandidatesKeepCompleteText(t *testing.T) {
+	claudeDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	review5Home(t, t.TempDir())
+	names := []string{"p", "p_a", "p_a_b", "p_a_b_c"}
+	registry := map[string]any{}
+	for _, name := range names {
+		dir := filepath.Join(t.TempDir(), name)
+		review5Write(t, filepath.Join(dir, "skills", "notes", "SKILL.md"), review5Skill)
+		registry[name+"@local"] = []map[string]string{{"installPath": dir}}
+	}
+	data, err := json.Marshal(map[string]any{"plugins": registry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	review5Write(t, filepath.Join(claudeDir, "plugins", "installed_plugins.json"), string(data))
+	facts, ok := assetfacts.Decode(hookAssetFacts("claudecode", []byte(`{"tool_name":"mcp__plugin_p_a_b_c_d__run"}`)))
+	if !ok {
+		t.Fatal("no facts")
+	}
+	for _, name := range names {
+		got := facts.ContentsFor(assetfacts.ContentPlugin, name)
+		if len(got) != 1 || got[0].Truncated || len(got[0].Files) == 0 {
+			t.Errorf("ordinary candidate %q has incomplete text: %+v", name, got)
+		}
+	}
+}
+
+// A relative COPILOT_SKILLS_DIRS entry is read below the folder Copilot was
+// started in: behind a nested repository, below home, and not in a folder
+// between the event cwd and that root.
+func TestCopilotRelativeSkillRootPastNestedRepository(t *testing.T) {
+	review5Home(t, t.TempDir())
+	workspace := t.TempDir()
+	nested := filepath.Join(workspace, "vendor", "nested")
+	cwd := filepath.Join(nested, "sub")
+	if err := os.MkdirAll(cwd, 0700); err != nil {
+		t.Fatal(err)
+	}
+	review5Write(t, filepath.Join(workspace, ".git", "HEAD"), "ref: refs/heads/main\n")
+	review5Write(t, filepath.Join(nested, ".git", "HEAD"), "ref: refs/heads/nested\n")
+	review5Write(t, filepath.Join(workspace, "relative-skills", "selected", "SKILL.md"), selectedAssetHarmful)
+	t.Setenv("COPILOT_SKILLS_DIRS", "relative-skills")
+	facts, _ := assetfacts.Decode(hookAssetFacts("copilot", selectedAssetCopilotEvent(t, cwd, "selected")))
+	if got := facts.ContentsFor(assetfacts.ContentSkill, "selected"); len(got) != 1 || len(got[0].Files) == 0 {
+		t.Errorf("selected protected skill in launch workspace omitted behind nested .git: %+v", facts)
+	}
+}
+
+func TestCopilotRelativeSkillRootSkipsIntermediateFolder(t *testing.T) {
+	review5Home(t, t.TempDir())
+	workspace := t.TempDir()
+	intermediate := filepath.Join(workspace, "module")
+	cwd := filepath.Join(intermediate, "sub")
+	if err := os.MkdirAll(cwd, 0700); err != nil {
+		t.Fatal(err)
+	}
+	review5Write(t, filepath.Join(workspace, ".git", "HEAD"), "ref: refs/heads/main\n")
+	active := filepath.Join(workspace, "relative-skills", "selected")
+	decoy := filepath.Join(intermediate, "relative-skills", "selected")
+	review5Write(t, filepath.Join(active, "SKILL.md"), review5Skill)
+	review5Write(t, filepath.Join(decoy, "SKILL.md"), selectedAssetHarmful)
+	t.Setenv("COPILOT_SKILLS_DIRS", "relative-skills")
+	facts, _ := assetfacts.Decode(hookAssetFacts("copilot", selectedAssetCopilotEvent(t, cwd, "selected")))
+	got := facts.ContentsFor(assetfacts.ContentSkill, "selected")
+	if len(got) != 1 || got[0].Dir != active {
+		t.Errorf("ordinary launch-workspace skill sent with inactive decoy: %+v", got)
+	}
+}
+
+func TestCopilotRelativeSkillRootAtHomeWorkspace(t *testing.T) {
+	home := t.TempDir()
+	review5Home(t, home)
+	cwd := filepath.Join(home, "subdir")
+	if err := os.MkdirAll(cwd, 0700); err != nil {
+		t.Fatal(err)
+	}
+	review5Write(t, filepath.Join(home, "relative-skills", "selected", "SKILL.md"), selectedAssetHarmful)
+	t.Setenv("COPILOT_SKILLS_DIRS", "relative-skills")
+	facts, _ := assetfacts.Decode(hookAssetFacts("copilot", selectedAssetCopilotEvent(t, cwd, "selected")))
+	if got := facts.ContentsFor(assetfacts.ContentSkill, "selected"); len(got) != 1 || len(got[0].Files) == 0 {
+		t.Errorf("protected skill in launch home workspace omitted: %+v", facts)
+	}
+}
