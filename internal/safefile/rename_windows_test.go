@@ -176,3 +176,51 @@ func TestReplaceFilePreservesExistingNTFSAlternateDataStream(t *testing.T) {
 		t.Fatalf("alternate stream=%q error=%v, want preserved metadata", metadata, err)
 	}
 }
+
+// A metadata merge must finish away from the name used by readers. A refused
+// final publication keeps that name bound to its prior complete file.
+func TestReplaceFileKeepsPublishedNameWhenFinalRenameIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "settings.json")
+	source := filepath.Join(dir, "stage.json")
+	if err := os.WriteFile(destination, []byte("old body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("new body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := atomicRenameReplace
+	t.Cleanup(func() { atomicRenameReplace = previous })
+	calls := 0
+	atomicRenameReplace = func(_, _ string) error {
+		calls++
+		return windows.ERROR_INVALID_NAME
+	}
+	if err := ReplaceFile(source, destination); !errors.Is(err, windows.ERROR_INVALID_NAME) {
+		t.Fatalf("replacement error = %v, want refused final rename", err)
+	}
+	if calls != 1 {
+		t.Fatalf("POSIX publication calls = %d, want 1", calls)
+	}
+	if body, err := os.ReadFile(destination); err != nil || string(body) != "old body" {
+		t.Fatalf("published body = %q, error = %v", body, err)
+	}
+}
+
+func TestReplaceFilePublishesChangedBodyWithOrdinaryMetadata(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "settings.json")
+	source := filepath.Join(dir, "stage.json")
+	if err := os.WriteFile(destination, []byte("old body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("new body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReplaceFile(source, destination); err != nil {
+		t.Fatal(err)
+	}
+	if body, err := os.ReadFile(destination); err != nil || string(body) != "new body" {
+		t.Fatalf("published body = %q, error = %v", body, err)
+	}
+}
