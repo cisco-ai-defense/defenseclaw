@@ -140,7 +140,12 @@ func TestGAP0675ShellProtectedFileKeepsItsBlockOnEveryRoute(t *testing.T) {
 		{"shell profile append", "echo marker >> ~/.bashrc",
 			map[string]string{"default": "alert", "permissive": "alert", "strict": "block"}, profileRule},
 		{"DefenseClaw state append", "printf changed >> ~/.defenseclaw/config.yaml", everywhere, stateRule},
+		{"shell profile append after a patch word", "echo apply_patch; echo marker >> ~/.bashrc",
+			map[string]string{"default": "alert", "permissive": "alert", "strict": "block"}, profileRule},
+		{"keys append after a patch header word", "echo '*** Begin Patch'; echo marker >> ~/.ssh/authorized_keys", everywhere, keysRule},
 		{"ordinary write", "echo marker >> notes.txt",
+			map[string]string{"default": "allow", "permissive": "allow", "strict": "allow"}, ""},
+		{"ordinary write, patch word", "echo apply_patch >> notes.txt",
 			map[string]string{"default": "allow", "permissive": "allow", "strict": "allow"}, ""},
 		{"ordinary write, harmless word", "printf defenseclaw >> notes.txt",
 			map[string]string{"default": "allow", "permissive": "allow", "strict": "allow"}, ""},
@@ -205,9 +210,10 @@ func TestGAP0675ShellProtectedFileFloorDecision(t *testing.T) {
 		{"Bash", "", true}, {"shell", "", true}, {"exec_command", "", true}, {"terminal", "", true},
 		{"write_file", "", false}, {"Write", "", false}, {"apply_patch", "x", false}, {"persist", "", false},
 		{"anything", "echo x", true},
-		// A patch envelope a shell runs keeps the enforcement of the patch.
-		{"Bash", "apply_patch <<'P'\n*** Begin Patch\n*** Update File: x\n*** End Patch\nP", false},
-		{"exec_command", "cat k.patch | applypatch", false},
+		// The word apply_patch in a shell call does not take the call out of
+		// the class: a separate write in the same call keeps its floor.
+		{"Bash", "echo apply_patch; echo x >> ~/.bashrc", true},
+		{"exec_command", "cat k.patch | applypatch", true},
 	} {
 		marks := markShellProtectedFileFindings(trustedActionRequest{Input: actionfacts.Input{Tool: tc.tool, Command: tc.command}},
 			[]RuleFinding{{RuleID: "PERSISTENCE.SSH_AUTHORIZED_KEYS_COMMAND"}, {RuleID: "tamper.detector_state_write"}})
