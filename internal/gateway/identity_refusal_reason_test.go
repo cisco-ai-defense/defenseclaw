@@ -578,3 +578,27 @@ func TestIdentityRefusalWatchEndsWithTheStart(t *testing.T) {
 		t.Errorf("an expired watch pinned a text: %q", reason)
 	}
 }
+
+// The substitution guidance follows the command the refusal prints: an OSS
+// account without a verified ID is told to list profiles, a command with no
+// connector argument, so a configured connector adds no step to replace.
+func TestIdentityRefusalGuidanceFollowsThePrintedCommand(t *testing.T) {
+	redaction.SetAgentReasonRedactionDisabled(false)
+	t.Cleanup(func() { redaction.SetAgentReasonRedactionDisabled(false) })
+	const name = "acme-plugin"
+	set := &guardrailProfileSet{base: &config.Config{Guardrail: config.GuardrailConfig{
+		Connectors: map[string]config.PerConnectorGuardrailConfig{name: {}},
+	}}}
+	for _, subject := range []*profileSubject{nil, {}, {UserID: " 1006"}} {
+		reason := set.identityUncertaintyReason(subject, []string{"account:unknown"}, name, "")
+		if !strings.Contains(reason, "`"+profileExplainList+"`") || strings.Contains(reason, profileConnectorPlaceholder) ||
+			strings.Contains(reason, identityRefusalConnectorHint) || strings.Contains(reason, name) {
+			t.Errorf("subject %+v: guidance does not follow the printed command: %q", subject, reason)
+		}
+	}
+	// The benign twin: a verified ID prints the connector argument and its guidance.
+	reason := set.identityUncertaintyReason(&profileSubject{UserID: "1006"}, []string{"account:unknown"}, name, "")
+	if !strings.Contains(reason, " --connector "+profileConnectorPlaceholder+"`") || !strings.HasSuffix(reason, identityRefusalConnectorHint) {
+		t.Errorf("verified ID lost the substitution guidance: %q", reason)
+	}
+}
