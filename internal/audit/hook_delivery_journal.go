@@ -9,7 +9,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -172,26 +171,31 @@ func (s *Store) execHookDeliveryJournal(ctx context.Context, insert bool, query 
 	defer release()
 	db, durable := s.db, s.dbPathGuard != nil && !s.dbPathGuard.inMemory
 	if durable {
-		if db, err = s.durableConn(); err != nil {
+		// Concurrent journal writes share one commit and one flush
+		// (durableGrouped). An insert flushes the database folder too: the WAL
+		// file can be newer than the folder entry the store opened.
+		var result sql.Result
+		err := s.durableGrouped(ctx, insert, func(ctx context.Context, tx *sql.Tx) error {
+			if insert {
+				if _, err := tx.ExecContext(ctx, hookDeliveryJournalSchema); err != nil {
+					return fmt.Errorf("create the hook delivery journal: %w", err)
+				}
+			}
+			var err error
+			result, err = tx.ExecContext(ctx, query, args...)
+			return err
+		})
+		if err != nil {
 			return nil, err
 		}
+		return result, nil
 	}
 	if insert {
 		if _, err := execHookDeliveryJournalRetryingBusy(ctx, db, hookDeliveryJournalSchema); err != nil {
 			return nil, fmt.Errorf("create the hook delivery journal: %w", err)
 		}
 	}
-	result, err := execHookDeliveryJournalRetryingBusy(ctx, db, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	if durable && insert {
-		// The WAL file can be newer than the folder entry the store opened.
-		if err := syncAuditDBDir(filepath.Dir(s.dbPath)); err != nil {
-			return nil, fmt.Errorf("flush the audit database folder: %w", err)
-		}
-	}
-	return result, nil
+	return execHookDeliveryJournalRetryingBusy(ctx, db, query, args...)
 }
 
 // hookDeliveryJournalBusyWait bounds how long one journal write retries a
