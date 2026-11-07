@@ -5,7 +5,8 @@
 
 package skillrootsafe
 
-func validateLinkedPath(path, _ string) error {
-	// Ownership of Windows reparse points requires a handle and ACL proof.
-	return unsafeRoot(path)
+// acceptLinkedRoot refuses every linked root: ownership of Windows reparse
+// points requires a handle and ACL proof that is not implemented.
+func acceptLinkedRoot(path, _ string) (string, error) {
+	return "", unsafeRoot(path)
 }
