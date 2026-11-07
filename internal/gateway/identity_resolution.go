@@ -15,6 +15,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -697,7 +698,7 @@ const (
 func (set *guardrailProfileSet) profileCommandSuffix(connectorName, agent string, agentNeeded bool) string {
 	suffix := ""
 	if set.profileCommandConnector(connectorName) {
-		suffix += " --connector " + connectorName
+		suffix += " --connector " + profileCommandConnectorArgument(connectorName)
 	}
 	if agentNeeded && profileCommandAgent(agent) {
 		suffix += " --agent " + agent
@@ -711,13 +712,35 @@ func profileCommandUser(id string) bool {
 }
 
 // profileCommandConnector reports a connector name the build ships or the
-// configuration lists, spelled as a plain token.
+// configuration lists, spelled as a plain token of any length the
+// configuration accepts.
 func (set *guardrailProfileSet) profileCommandConnector(name string) bool {
 	return profileCommandToken(name) && (connector.IsKnownBuiltinConnector(name) || set.knownConnector(name))
 }
 
+// profileConnectorPlaceholder stands for a configured connector name that
+// is shaped like a credential: the refusal text is shown as written, and a
+// name the credential and command-line detectors would mask must not ride
+// in it. The administrator knows the name; the flag stays so the command
+// still checks that connector.
+const profileConnectorPlaceholder = "<connector>"
+
+// profileCommandConnectorArgument is the value of --connector for a name
+// that passed profileCommandConnector: the name, or the placeholder when
+// the detectors DefenseClaw masks secrets with (a known key prefix, a
+// secret-named or key-shaped argument) would mask it.
+func profileCommandConnectorArgument(name string) string {
+	if redaction.AssertNoCredentials(name) != nil {
+		return profileConnectorPlaceholder
+	}
+	if words := redaction.CommandArgs([]string{name}); len(words) != 1 || words[0] != name {
+		return profileConnectorPlaceholder
+	}
+	return name
+}
+
 func profileCommandToken(value string) bool {
-	if value == "" || len(value) > 64 {
+	if value == "" {
 		return false
 	}
 	for _, r := range value {
