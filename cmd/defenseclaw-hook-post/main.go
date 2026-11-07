@@ -19,9 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -72,19 +70,9 @@ func runWithPeer(args []string, input io.Reader, output io.Writer, peer *hookexe
 		_, err = output.Write(review)
 		return err
 	}
-	if len(args) == 0 || args[0] != "hook-post" {
-		return fmt.Errorf("expected hook-post subcommand")
-	}
-	flags := flag.NewFlagSet("hook-post", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	apiAddr := flags.String("api-addr", "", "gateway loopback host:port")
-	maxTime := flags.Int("max-time", 10, "maximum request time in seconds")
-	curlOutput := flags.Bool("curl-output", false, "print response body and trailing HTTP code")
-	if err := flags.Parse(args[1:]); err != nil {
+	opts, err := parseHookPostFlags(args)
+	if err != nil {
 		return err
-	}
-	if flags.NArg() != 0 || *apiAddr == "" || *maxTime < 1 || *maxTime > 30 {
-		return fmt.Errorf("invalid per-user hook transport arguments")
 	}
 	data, err := io.ReadAll(io.LimitReader(input, maxInput+1))
 	if err != nil {
@@ -94,7 +82,7 @@ func runWithPeer(args []string, input io.Reader, output io.Writer, peer *hookexe
 		return fmt.Errorf("native hook input is invalid or too large")
 	}
 	var request hookexec.PerUserPluginRequest
-	if *curlOutput {
+	if opts.curlOutput {
 		if !bytes.HasPrefix(data, []byte("DCPOST1\x00")) {
 			return fmt.Errorf("native hook input is invalid or too large")
 		}
@@ -106,7 +94,7 @@ func runWithPeer(args []string, input io.Reader, output io.Writer, peer *hookexe
 	} else if request, err = hookexec.DecodePerUserPluginRequest(data); err != nil {
 		return err
 	}
-	timeout := requestTimeout(*maxTime)
+	timeout := requestTimeout(opts.maxTime)
 	if request.Headers == nil {
 		request.Headers = map[string]string{}
 	}
@@ -115,16 +103,47 @@ func runWithPeer(args []string, input io.Reader, output io.Writer, peer *hookexe
 	request.Headers[hookexec.HookAnswerWithinHeader] = strconv.FormatInt(timeout.Milliseconds(), 10)
 	ctx, cancel := context.WithTimeout(hookexec.WithPerUserPeerRecord(context.Background(), peer), timeout)
 	defer cancel()
-	response, err := hookexec.PostPerUserHook(ctx, *apiAddr, request.Path, request.Headers, []byte(request.Body))
+	response, err := hookexec.PostPerUserHook(ctx, opts.apiAddr, request.Path, request.Headers, []byte(request.Body))
 	if err != nil {
 		return err
 	}
 	hookexec.PerUserGatewayRecordObservedAnswer(os.Getenv(hookPostDataDirEnv), peer)
-	if !*curlOutput {
+	if !opts.curlOutput {
 		return json.NewEncoder(output).Encode(response)
 	}
 	_, err = fmt.Fprintf(output, "%s\n%d", response.Body, response.Status)
 	return err
+}
+
+// hookPostFlags are the parsed arguments of the hook-post subcommand.
+type hookPostFlags struct {
+	apiAddr    string
+	maxTime    int
+	curlOutput bool
+}
+
+// parseHookPostFlags is the one reading of the hook-post arguments: the
+// request, and the diagnosis printed after a refused listener, take the
+// address and output mode from it, so every spelling the flag package
+// accepts (name value, name=value, a repeated flag, --curl-output=true)
+// reaches both the same way (rel-1-0-6 GAP-0712).
+func parseHookPostFlags(args []string) (hookPostFlags, error) {
+	if len(args) == 0 || args[0] != "hook-post" {
+		return hookPostFlags{}, fmt.Errorf("expected hook-post subcommand")
+	}
+	flags := flag.NewFlagSet("hook-post", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var opts hookPostFlags
+	flags.StringVar(&opts.apiAddr, "api-addr", "", "gateway loopback host:port")
+	flags.IntVar(&opts.maxTime, "max-time", 10, "maximum request time in seconds")
+	flags.BoolVar(&opts.curlOutput, "curl-output", false, "print response body and trailing HTTP code")
+	if err := flags.Parse(args[1:]); err != nil {
+		return hookPostFlags{}, err
+	}
+	if flags.NArg() != 0 || opts.apiAddr == "" || opts.maxTime < 1 || opts.maxTime > 30 {
+		return hookPostFlags{}, fmt.Errorf("invalid per-user hook transport arguments")
+	}
+	return opts, nil
 }
 
 // hookPostDeadlineEnv is the shell hook's time left for this request in
@@ -270,8 +289,8 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 		// Amp plugins send again (GAP-2083). The shell hook reads the
 		// root-gateway diagnosis from stdout, as it does from the gateway
 		// CLI hook-post (rel-1-0-6 GAP-0712).
-		if slices.Contains(args, "--curl-output") {
-			_, _ = io.WriteString(output, peerRefusalOutput(err, flagValue(args, "--api-addr"), dataDir))
+		if opts, perr := parseHookPostFlags(args); perr == nil && opts.curlOutput {
+			_, _ = io.WriteString(output, peerRefusalOutput(err, opts.apiAddr, dataDir))
 		}
 		return hookexec.PerUserPostPeerUnverifiedExit
 	case hookexec.PerUserPostNoAnswer(err):
@@ -295,30 +314,13 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 		} else {
 			// The shell consumes this fixed token only for exit 9. It never
 			// reaches the agent or changes the no-answer decision.
-			for _, arg := range args {
-				if arg == "--curl-output" {
-					_, _ = fmt.Fprint(output, "DCPOSTPROOF1:"+reason)
-					break
-				}
+			if opts, perr := parseHookPostFlags(args); perr == nil && opts.curlOutput {
+				_, _ = fmt.Fprint(output, "DCPOSTPROOF1:"+reason)
 			}
 		}
 		return hookexec.PerUserPostNoAnswerExit
 	}
 	return 1
-}
-
-// flagValue is the value of a name value or name=value argument, or empty
-// when args has none.
-func flagValue(args []string, name string) string {
-	for i, arg := range args {
-		if arg == name && i+1 < len(args) {
-			return args[i+1]
-		}
-		if value, ok := strings.CutPrefix(arg, name+"="); ok {
-			return value
-		}
-	}
-	return ""
 }
 
 func runUserHookGuardAt(self string, args []string, input io.Reader, output, errOutput io.Writer) int {

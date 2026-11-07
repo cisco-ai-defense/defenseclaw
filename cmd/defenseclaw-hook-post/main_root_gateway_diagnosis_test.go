@@ -44,6 +44,12 @@ func TestHookPostPrintsTheRootGatewayDiagnosisOnARefusedListener(t *testing.T) {
 	for _, form := range [][]string{
 		{"hook-post", "--api-addr", addr, "--max-time", "5", "--curl-output"},
 		{"hook-post", "--api-addr=" + addr, "--max-time", "5", "--curl-output"},
+		{"hook-post", "--api-addr", addr, "--max-time", "5", "--curl-output=true"},
+		{"hook-post", "--api-addr", addr, "--max-time", "5", "-curl-output=1"},
+		// A repeated flag: the request goes to the last address, so the
+		// diagnosis is for the last address.
+		{"hook-post", "--api-addr", "127.0.0.1:1", "--api-addr", addr, "--max-time", "5", "--curl-output"},
+		{"hook-post", "--api-addr=127.0.0.1:1", "--api-addr=" + addr, "--max-time", "5", "--curl-output"},
 	} {
 		gotAddr, gotDir = "", ""
 		var out bytes.Buffer
@@ -73,18 +79,25 @@ func TestHookPostPrintsNothingForAListenerThatIsNoRootGateway(t *testing.T) {
 	}
 }
 
-func TestFlagValueReadsBothSpellings(t *testing.T) {
+func TestParseHookPostFlagsTakesWhatTheRequestUses(t *testing.T) {
 	for _, tc := range []struct {
 		args []string
-		want string
+		want hookPostFlags
+		ok   bool
 	}{
-		{[]string{"hook-post", "--api-addr", "127.0.0.1:1"}, "127.0.0.1:1"},
-		{[]string{"hook-post", "--api-addr=127.0.0.1:2", "--curl-output"}, "127.0.0.1:2"},
-		{[]string{"hook-post", "--api-addr"}, ""},
-		{[]string{"hook-post", "--max-time", "3"}, ""},
+		{[]string{"hook-post", "--api-addr", "127.0.0.1:1"}, hookPostFlags{"127.0.0.1:1", 10, false}, true},
+		{[]string{"hook-post", "--api-addr=127.0.0.1:2", "--curl-output"}, hookPostFlags{"127.0.0.1:2", 10, true}, true},
+		{[]string{"hook-post", "--api-addr=127.0.0.1:2", "--curl-output=true"}, hookPostFlags{"127.0.0.1:2", 10, true}, true},
+		{[]string{"hook-post", "--api-addr=127.0.0.1:2", "--curl-output=false"}, hookPostFlags{"127.0.0.1:2", 10, false}, true},
+		{[]string{"hook-post", "--api-addr", "127.0.0.1:1", "--api-addr", "127.0.0.1:3", "--max-time", "4"}, hookPostFlags{"127.0.0.1:3", 4, false}, true},
+		{[]string{"hook-post", "--api-addr"}, hookPostFlags{}, false},
+		{[]string{"hook-post", "--max-time", "3"}, hookPostFlags{}, false},
+		{[]string{"hook-post", "--api-addr", "127.0.0.1:1", "extra"}, hookPostFlags{}, false},
+		{[]string{"other", "--api-addr", "127.0.0.1:1"}, hookPostFlags{}, false},
 	} {
-		if got := flagValue(tc.args, "--api-addr"); got != tc.want {
-			t.Errorf("flagValue(%v) = %q, want %q", tc.args, got, tc.want)
+		got, err := parseHookPostFlags(tc.args)
+		if (err == nil) != tc.ok || got != tc.want {
+			t.Errorf("parseHookPostFlags(%v) = %+v, %v, want %+v (ok %v)", tc.args, got, err, tc.want, tc.ok)
 		}
 	}
 }
