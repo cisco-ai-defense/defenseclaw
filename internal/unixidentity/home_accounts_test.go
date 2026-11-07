@@ -82,6 +82,13 @@ func TestDSCLHomeAccounts(t *testing.T) {
 		{"a uid that is not a number", plistAnswer(plistRecord([]string{"abc"}, []string{home}, []string{"alice"})), nil, true},
 		{"an empty home string", plistAnswer(plistRecord([]string{"502"}, []string{" "}, []string{"alice"})), nil, true},
 		{"a name that is not an account name", plistAnswer(plistRecord([]string{"502"}, []string{home}, []string{"a/b"})), nil, true},
+		{"text in an otherwise empty record array", "<plist><array>unknown holder</array></plist>", nil, true},
+		{"text in the plist beside the array", "<plist>unknown holder<array/></plist>", nil, true},
+		{"text among the records", strings.Replace(plistAnswer(recordAlice), "<array>\n", "<array>\nunknown holder\n", 1), nil, true},
+		{"text inside a record", plistAnswer(strings.Replace(recordAlice, "<dict>\n", "<dict>\nunknown field\n", 1)), nil, true},
+		{"text inside a value array", plistAnswer(strings.Replace(recordAlice, "<string>/Users/shared</string>", "<string>/Users/shared</string>unknown second home", 1)), nil, true},
+		{"an element inside a key", plistAnswer(strings.Replace(recordAlice, "<key>dsAttrTypeStandard:UniqueID</key>", "<key>dsAttrTypeStandard:UniqueID<x/></key>", 1)), nil, true},
+		{"white space and a comment between elements", strings.Replace(plistAnswer(recordAlice, recordBob), "<array>\n", "<array>\n  <!-- note -->\n  ", 1), []HomeAccount{{"alice", 502}}, false},
 		{"a key with no value", strings.Replace(plistAnswer(recordAlice), "<array>\n\t\t\t<string>502</string>\n\t\t</array>", "", 1), nil, true},
 		{"a field repeated in one record", strings.Replace(recordAlice, "</dict>", plistRecord([]string{"1"}, []string{home}, []string{"x"})[len("\t<dict>\n"):], 1), nil, true},
 	}

@@ -678,6 +678,11 @@ func (l *lifecycle) describeGuardianCleanups(ctx context.Context) {
 // home is temporarily unavailable. Enrollment is retained for a retry.
 const codeEnrolledHomeUnavailable = "enrolled_home_unavailable"
 
+// codeCopilotHomeUnclear names the home of a deleted account whose current
+// holders the directory did not answer clearly: the home is pending, not free
+// and not drift.
+const codeCopilotHomeUnclear = "copilot_home_unclear"
+
 // describeUnavailableEnrolledHomes names enrolled targets whose home cannot
 // currently be found. The enumerator decides separately whether an account
 // has definitively disappeared.

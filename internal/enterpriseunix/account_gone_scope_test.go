@@ -196,10 +196,58 @@ func TestCopilotAccountScopeKeepsAReusedHomeBeforeTheRecordRefreshes(t *testing.
 	if scoped, out := homes(); len(scoped) != 0 || len(out) != 0 {
 		t.Fatalf("homes no live account holds: scoped=%v out=%v", scoped, out)
 	}
+	// A directory that does not answer is not proof that a home is free, nor
+	// a reason to call a hook file there drift: the homes are unclear.
 	failure = errors.New("directory does not answer")
 	scoped, out := homes()
-	if !reflect.DeepEqual(scoped, []string{h.env.P("/home/alice")}) || !reflect.DeepEqual(out, []string{h.env.P("/home/bob")}) {
-		t.Fatalf("a directory that does not answer keeps the recorded scope: scoped=%v out=%v", scoped, out)
+	if len(scoped) != 0 || len(out) != 0 {
+		t.Fatalf("a directory that does not answer puts no home in a list: scoped=%v out=%v", scoped, out)
+	}
+	scope, err := (&policyManager{env: h.env}).copilotAccountScope(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(scope.unclear, []string{h.env.P("/home/alice"), h.env.P("/home/bob")}) {
+		t.Fatalf("a directory that does not answer leaves both homes unclear: %v", scope.unclear)
+	}
+}
+
+// A deleted account whose home holders the directory answers unclearly leaves
+// status and verify pending, never verify_failed: the missing Local hook of
+// the deleted account is not drift (the guardian removed it), and the home is
+// neither called free nor failed. A clear answer, empty or not, leaves no
+// warning.
+func TestUnclearHomeHoldersLeaveStatusAndVerifyPending(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "copilot")}))
+	writeFreshLedger(t, h)
+	eligible := enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath)
+	guardian := filepath.Join(h.env.Layout.GuardianAuthDir, enterprisehooks.UnixCopilotVSCodeAccountsFileName)
+	for _, record := range []string{eligible, guardian} {
+		writeHostFile(t, h, record, `{"version":1,"accounts":[{"user":"alice","uid":501,"home":"/home/alice"}]}`)
+		if err := os.Chmod(h.env.P(record), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(h.env.P("/home/alice"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stubAccountsGone(t, "alice")
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		// Benign twin: a clear answer that nobody holds the home is free.
+		guardianAccountsAtHome = func(string) ([]unixidentity.HomeAccount, error) { return nil, nil }
+		clear := h.run(Options{Action: action})
+		if clear.ExitCode != 0 || hasWarning(clear, codeCopilotHomeUnclear) {
+			t.Fatalf("%s, clear empty answer: exit=%d errors=%v warnings=%v", action, clear.ExitCode, clear.Errors, clear.Warnings)
+		}
+		guardianAccountsAtHome = func(string) ([]unixidentity.HomeAccount, error) { return nil, errors.New("unclear plist") }
+		unclear := h.run(Options{Action: action})
+		if unclear.ExitCode != 0 || len(unclear.Errors) != 0 {
+			t.Fatalf("%s, unclear answer failed: exit=%d errors=%v", action, unclear.ExitCode, unclear.Errors)
+		}
+		if !hasWarning(unclear, codeCopilotHomeUnclear) || unclear.SecurityComplete {
+			t.Fatalf("%s, unclear answer is not reported pending: complete=%v warnings=%v", action, unclear.SecurityComplete, unclear.Warnings)
+		}
 	}
 }
 
