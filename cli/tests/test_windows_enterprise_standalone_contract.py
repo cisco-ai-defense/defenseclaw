@@ -113,6 +113,23 @@ def test_fresh_install_rebinds_adopted_hook_manifest_before_retiring_its_journal
     assert 0 <= committed < rebound < retired
 
 
+def test_activation_rebind_uses_protected_metadata_publication() -> None:
+    # GAP-0655: a changed manifest updates the deployment record through the
+    # same protected, staged publication path as other metadata writers.
+    module = _text(MODULE)
+    rebind = _function_body(module, "Sync-DefenseClawStandaloneManagedHooksActivationBinding")
+    staged = rebind.index("$json = $document.ToJsonString")
+    published = rebind.index("Write-DefenseClawDeploymentMetadataBytes", staged)
+    verified = rebind.index("$rebound = Get-DefenseClawDeploymentMetadata", published)
+    assert staged < published < verified
+    assert "Microsoft.PowerShell.Management\\Move-Item" not in rebind
+
+    writer = _function_body(module, "Write-DefenseClawDeploymentMetadataBytes")
+    protected = writer.index("Set-DefenseClawPathAcl")
+    moved = writer.index("Move-DefenseClawNonImageFileReplacing", protected)
+    assert protected < moved
+
+
 def test_profile_roots_are_named_in_one_place_and_agree() -> None:
     module = _functions_naming(_text(MODULE), SECURE_CLIENT)
     assert set(module) <= ALLOWED_MODULE_FUNCTIONS, {

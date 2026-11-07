@@ -32952,23 +32952,9 @@ function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
     $options.WriteIndented = $true
     $options.Encoder = [System.Text.Encodings.Web.JavaScriptEncoder]::UnsafeRelaxedJsonEscaping
     $json = $document.ToJsonString($options)
-    $temporary = "$($Layout.MetadataPath).new.$([Guid]::NewGuid().ToString('N'))"
-    try {
-        [IO.File]::WriteAllText($temporary, $json, [Text.UTF8Encoding]::new($false))
-        Set-DefenseClawPathAcl `
-            -Path $temporary `
-            -Kind AdminFile `
-            -GatewayServiceSID $script:AdministratorsSID
-        Microsoft.PowerShell.Management\Move-Item `
-            -LiteralPath $temporary `
-            -Destination $Layout.MetadataPath `
-            -Force
-    }
-    finally {
-        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $temporary) {
-            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $temporary -Force
-        }
-    }
+    Write-DefenseClawDeploymentMetadataBytes `
+        -Path $Layout.MetadataPath `
+        -Bytes ([Text.UTF8Encoding]::new($false).GetBytes($json))
     Set-DefenseClawPathAcl `
         -Path $Layout.MetadataPath `
         -Kind AdminFile `
