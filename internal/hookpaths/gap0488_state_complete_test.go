@@ -244,12 +244,7 @@ func TestG622b9KeptViewIsReadAgainWhenTheStateChanges(t *testing.T) {
 						t.Fatal("a settled state was not kept")
 					}
 					if !settled {
-						resetActiveStateViews()
-						mustDo(t, os.WriteFile(filepath.Join(s.policies, "fresh.rego"), nil, 0o600))
-						ResolveActiveStateIdentity(extra, s.home)
-						if kept(s) {
-							t.Fatal("a view of a state changed inside the guard was kept")
-						}
+						youngStateViewIsNotKept(t, s, extra, kept)
 					}
 					change(t, s, extra)
 					if setBack {
@@ -264,6 +259,44 @@ func TestG622b9KeptViewIsReadAgainWhenTheStateChanges(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// youngStateViewIsNotKept changes the policies directory and reads at once.
+// Where the guard is a fixed time (activeStateViewGuard) the view of that
+// state is never kept. Where it is the filesystem clock tick, the view is not
+// kept unless the write fell in an earlier tick than the read, which the
+// stamp of the directory shows: a kept view then has every stamp older than
+// the clock, and some of a few tries read in the tick of the write.
+func youngStateViewIsNotKept(t *testing.T, s g622b9State, extra string, kept func(g622b9State) bool) {
+	t.Helper()
+	_, tickClock := filesystemClockNow()
+	notKept := 0
+	for try := 0; try < 40; try++ {
+		resetActiveStateViews()
+		mustDo(t, os.WriteFile(filepath.Join(s.policies, fmt.Sprintf("fresh-%d.rego", try)), nil, 0o600))
+		ResolveActiveStateIdentity(extra, s.home)
+		if !kept(s) {
+			notKept++
+			if !tickClock {
+				return
+			}
+			continue
+		}
+		if !tickClock {
+			t.Fatal("a view of a state changed inside the guard was kept")
+		}
+		info, err := os.Stat(s.policies)
+		if err != nil {
+			t.Fatal(err)
+		}
+		changed, _ := statChangeTime(info)
+		if now, _ := filesystemClockNow(); !changed.Before(now) {
+			t.Fatalf("a view was kept with a stamp %v not older than the filesystem clock %v", changed, now)
+		}
+	}
+	if notKept == 0 {
+		t.Fatal("a view of a state changed a moment ago was always kept")
 	}
 }
 
