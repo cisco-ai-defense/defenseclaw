@@ -224,10 +224,17 @@ func TestEnumerateCyclePublishesTheUnprotectedAgentsRecord(t *testing.T) {
 	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}
 	origLoader, origResolver, origSessions := enterpriseHooksEnumerateConfigLoader, enterpriseHooksEnumerateResolver, enterpriseHookSessionUIDs
 	origManifestWriter, origEligibleWriter, origUnprotectedWriter := enterpriseHooksEnumerateManifestWriter, enterpriseHooksEnumerateEligibleWriter, enterpriseHooksEnumerateUnprotectedWriter
+	origGatewayAgents := enterpriseHooksEnumerateGatewayAgents
 	t.Cleanup(func() {
 		enterpriseHooksEnumerateConfigLoader, enterpriseHooksEnumerateResolver, enterpriseHookSessionUIDs = origLoader, origResolver, origSessions
 		enterpriseHooksEnumerateManifestWriter, enterpriseHooksEnumerateEligibleWriter, enterpriseHooksEnumerateUnprotectedWriter = origManifestWriter, origEligibleWriter, origUnprotectedWriter
+		enterpriseHooksEnumerateGatewayAgents = origGatewayAgents
 	})
+	var gatewayCopy []enterprisehooks.UnprotectedAgent
+	enterpriseHooksEnumerateGatewayAgents = func(_ string, agents []enterprisehooks.UnprotectedAgent) error {
+		gatewayCopy = append([]enterprisehooks.UnprotectedAgent(nil), agents...)
+		return nil
+	}
 	current := standaloneTestConfig(f.dataDir)
 	current.Enterprise.Enrollment.IncludeUsers = []string{"alice"}
 	current.Enterprise.Enrollment.HomeRoots = []string{f.homes}
@@ -259,7 +266,7 @@ func TestEnumerateCyclePublishesTheUnprotectedAgentsRecord(t *testing.T) {
 	opts := enterpriseHooksEnumerateOptions{manifest: f.manifest, descriptor: filepath.Join(f.root, "absent.json")}
 	cycle := func() {
 		t.Helper()
-		requests, recordPath, recorded = nil, "", nil
+		requests, recordPath, recorded, gatewayCopy = nil, "", nil, nil
 		state := &enterprisehooks.UnixEnumeratorState{Version: 1}
 		if _, err := runEnterpriseHooksEnumerateCycle(context.Background(), io.Discard, f.manifest, opts, state); err != nil {
 			t.Fatal(err)
@@ -269,6 +276,10 @@ func TestEnumerateCyclePublishesTheUnprotectedAgentsRecord(t *testing.T) {
 		}
 		if len(recorded) != 1 || recorded[0].User != "alice" || recorded[0].Connector != "opencode" {
 			t.Fatalf("record = %+v, want alice's opencode", recorded)
+		}
+		// The gateway answers a user's own status from its copy of the same scan.
+		if len(gatewayCopy) != len(recorded) || gatewayCopy[0].User != recorded[0].User || gatewayCopy[0].Connector != recorded[0].Connector {
+			t.Fatalf("gateway copy = %+v, want the published record %+v", gatewayCopy, recorded)
 		}
 	}
 

@@ -399,6 +399,11 @@ func runEnterpriseHooksEnumerateCycle(
 	if err := enterpriseHooksEnumerateUnprotectedWriter(enterprisehooks.UnprotectedAgentsPath(manifestPath), cycle.Unprotected, configGeneration, configSHA256); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the unprotected agents: %v\n", err)
 	}
+	// The gateway cannot read that root-only record; it answers a user's own
+	// status from this copy (rel-1-0-6 GAP-0789).
+	if err := enterpriseHooksEnumerateGatewayAgents(current.DataDir, cycle.Unprotected); err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the unprotected agents for the gateway: %v\n", err)
+	}
 	if !manifestMode {
 		if err := enterpriseHooksEnumerateRefusedWriter(current.DataDir, cycle.RefusedSurfaces); err != nil {
 			fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the refused surfaces: %v\n", err)
@@ -432,6 +437,7 @@ var (
 	enterpriseHooksEnumerateEligibleWriter    = enterprisehooks.WriteUnixEnumeratorAccounts
 	enterpriseHooksEnumerateUnprotectedWriter = enterprisehooks.WriteUnixUnprotectedAgentsForConfig
 	enterpriseHooksEnumerateRefusedWriter     = writeEnterpriseHookRefusedSurfaces
+	enterpriseHooksEnumerateGatewayAgents     = writeEnterpriseHookGatewayUnprotectedAgents
 )
 
 // enterpriseHooksEnumerateResolver is replaceable in tests.
@@ -664,9 +670,43 @@ func readEnterpriseHookRefusedSurfaces(dataDir string, stderr io.Writer) []enter
 // under enterprise.enrollment.unverified_versions: refuse, next to the
 // ledger and with its ownership and mode. An empty list removes the file.
 func writeEnterpriseHookRefusedSurfaces(dataDir string, refused []enterprisehooks.UnixRefusedSurface) error {
+	var data []byte
+	if len(refused) > 0 {
+		encoded, err := json.MarshalIndent(struct {
+			Version int                                  `json:"version"`
+			Refused []enterprisehooks.UnixRefusedSurface `json:"refused_surfaces"`
+		}{Version: 1, Refused: refused}, "", "  ")
+		if err != nil {
+			return err
+		}
+		data = append(encoded, '\n')
+	}
+	return publishEnterpriseHookAuthorizationRecord(dataDir, managed.HookGuardianRefusedSurfacesFile, data)
+}
+
+// writeEnterpriseHookGatewayUnprotectedAgents publishes the cycle's
+// unprotected agents for the gateway, which cannot read the root-only record
+// the administrator's status reads: a user's own status says the same as
+// that record about the user's own agents (rel-1-0-6 GAP-0789). No agents
+// removes the file.
+func writeEnterpriseHookGatewayUnprotectedAgents(dataDir string, agents []enterprisehooks.UnprotectedAgent) error {
+	var data []byte
+	if len(agents) > 0 {
+		encoded, err := enterprisehooks.MarshalUnprotectedAgents(agents)
+		if err != nil {
+			return err
+		}
+		data = encoded
+	}
+	return publishEnterpriseHookAuthorizationRecord(dataDir, managed.HookGuardianUnprotectedAgentsFile, data)
+}
+
+// publishEnterpriseHookAuthorizationRecord writes data as name next to the
+// guardian ledger, with its ownership and mode; empty data removes it.
+func publishEnterpriseHookAuthorizationRecord(dataDir, name string, data []byte) error {
 	dir := managed.HookGuardianAuthorizationDir(dataDir)
-	path := filepath.Join(dir, managed.HookGuardianRefusedSurfacesFile)
-	if len(refused) == 0 {
+	path := filepath.Join(dir, name)
+	if len(data) == 0 {
 		// Nothing to withdraw when no list was ever published. Checking
 		// first keeps a read-only parent (EROFS on unlink) from warning on
 		// every cycle (GAP-1441).
@@ -681,14 +721,7 @@ func writeEnterpriseHookRefusedSurfaces(dataDir string, refused []enterprisehook
 	if err := ensureEnterpriseHookStandaloneAuthDir(dir); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(struct {
-		Version int                                  `json:"version"`
-		Refused []enterprisehooks.UnixRefusedSurface `json:"refused_surfaces"`
-	}{Version: 1, Refused: refused}, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := writeEnterpriseHookProtectedFile(path, append(data, '\n')); err != nil {
+	if err := writeEnterpriseHookProtectedFile(path, data); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	if err := os.Chmod(path, 0o640); err != nil {

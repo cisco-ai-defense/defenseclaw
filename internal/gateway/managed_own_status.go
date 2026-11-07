@@ -177,6 +177,10 @@ func (a *APIServer) ownConnectorStates(cfg *config.Config, uid, name string) map
 	if err != nil {
 		return states
 	}
+	// Agents the enumerator cannot protect for this caller: the administrator's
+	// status lists them, so the caller's own status never says protected for
+	// them. An unreadable record confirms nothing.
+	unprotected, unprotectedKnown := a.ownUnprotectedAgents(callerUID, name)
 	peer := managedHookPeer{UID: callerUID, Name: name}
 	strictExempt := strict && len(cfg.Enterprise.Enrollment.ExemptUsers) > 0 &&
 		(&managedHookAuthorizer{enrollment: cfg.Enterprise.Enrollment}).hostRunExempt(peer)
@@ -197,6 +201,18 @@ func (a *APIServer) ownConnectorStates(cfg *config.Config, uid, name string) map
 	}
 	for _, connector := range enterprisepolicy.StandaloneConnectors(cfg) {
 		state := map[string]any{"protected": false, "state": "not confirmed"}
+		if !unprotectedKnown {
+			states[connector] = state
+			continue
+		}
+		if gap, ok := unprotected[connector]; ok {
+			states[connector] = ownUnprotectedState(gap)
+			continue
+		}
+		if gap, ok := unprotected[""]; ok {
+			states[connector] = ownUnprotectedState(gap)
+			continue
+		}
 		if view != nil && (view.admitted == nil || view.admitted[connector]) {
 			if proof, ok := view.connectors[connector]; ok {
 				protected := !rootDenied && !proof.shared && !proof.allAccounts && !proof.accounts[name] &&
