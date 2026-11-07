@@ -43,11 +43,21 @@ func lateOrdinaryProject(t *testing.T) string {
 	if err := os.Symlink(keys, filepath.Join(project, "-keylink")); err != nil {
 		t.Fatal(err)
 	}
+	// A link with a one-letter name and one with a space in its name.
+	if err := os.WriteFile(filepath.Join(project, "plain.txt"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(project, "plain.txt"), filepath.Join(project, "l")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(keys, filepath.Join(project, "key link")); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", home)
 	return project
 }
 
-func lateOrdinaryPayload(t *testing.T, project, command string) string {
+func lateOrdinaryPayload(t *testing.T, project string, command any) string {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": project, "tool_name": "Bash",
 		"tool_input": map[string]any{"command": command}})
@@ -79,9 +89,10 @@ func TestGAP0518LateOrdinaryCallFollowsTheOutageMode(t *testing.T) {
 	long := "touch " + strings.Join(words, " ")
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, tc := range []struct {
-			name, command string
-			mode          string
-			blocks        bool
+			name    string
+			command any
+			mode    string
+			blocks  bool
 		}{
 			{"echo, open tier", "echo hi", "open", false},
 			{"build with a redirect and a filter, open tier", "go test ./... 2>&1 | tail -5", "open", false},
@@ -100,6 +111,16 @@ func TestGAP0518LateOrdinaryCallFollowsTheOutageMode(t *testing.T) {
 			{"key=value operand to the link, open tier", "d" + "d if=plain.txt of=keylink", "open", true},
 			{"redirect to a dash-named link, open tier", "echo x > -keylink", "open", true},
 			{"known value, open tier", "cat $HOME/.ssh/authorized_keys", "open", true},
+			// Round 3: a word is told by what its program does with it.
+			{"echo of a state folder word, open tier", "echo openclaw", "open", false},
+			{"echo flag next to a one-letter link, open tier", "echo -l", "open", false},
+			{"ls flag next to a one-letter link, open tier", "ls -l", "open", false},
+			{"sed print, open tier", "sed -n 1,5p plain.txt", "open", false},
+			{"argv with a plain file, open tier", []string{"cat", "plain.txt"}, "open", false},
+			{"sed write command to the link, open tier", `sed -n -e "w keylink" plain.txt`, "open", true},
+			{"sed write flag to the link, open tier", `sed -n "s/a/b/w keylink" plain.txt`, "open", true},
+			{"argv with a link that has a space, open tier", []string{"cat", "key link"}, "open", true},
+			{"quoted link that has a space, open tier", `cat "key link"`, "open", true},
 		} {
 			t.Run(connector+"/"+tc.name, func(t *testing.T) {
 				result, _ := runAgainstGateway(t, connector, addr, func(opts *Options) {
