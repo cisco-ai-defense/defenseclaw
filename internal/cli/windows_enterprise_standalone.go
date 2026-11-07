@@ -1901,7 +1901,7 @@ func applyWindowsEnterpriseInstallerReport(
 			message += windowsEnterpriseInvalidRuntimeBundleNextStep(original)
 			message += windowsEnterpriseMissingArtifactNextStep(original, opts != nil && strings.TrimSpace(opts.hookBinary) != "")
 		}
-		result.AddError(code, message)
+		result.AddError(code, windowsEnterpriseTrimHeldCodePrefix(code, message))
 	}
 	addWindowsEnterpriseSelfUninstallCleanup(result, report)
 	addWindowsEnterpriseMdmRotationJournalKept(result, report)
@@ -3218,6 +3218,25 @@ var windowsEnterpriseVendorFolderHeal = func() ([]enterprisepolicy.ReprotectedFo
 // in tests.
 var windowsEnterpriseHookRepairedAudit func(folder enterprisepolicy.ReprotectedFolder, actor string) error
 
+// windowsEnterpriseVendorFolderAlert writes Setup's
+// managed_vendor_folder_not_protected alert row for a refused vendor folder,
+// the one the guardian pass writes. Replaceable in tests.
+var windowsEnterpriseVendorFolderAlert = postWindowsManagedCoverageAlert
+
+// windowsEnterpriseAuditRetryDelay is the pause before Setup writes an audit
+// or alert row the gateway did not take a second time. Replaceable in tests.
+var windowsEnterpriseAuditRetryDelay = time.Second
+
+// writeWindowsEnterpriseAuditRow writes one audit or alert row and, when the
+// gateway did not take it (busy, or restarting), tries once more.
+func writeWindowsEnterpriseAuditRow(write func() error) error {
+	if err := write(); err == nil {
+		return nil
+	}
+	time.Sleep(windowsEnterpriseAuditRetryDelay)
+	return write()
+}
+
 // windowsEnterpriseVendorFolderCode is the result code of a vendor folder that
 // does not protect DefenseClaw's recorded policy file.
 const windowsEnterpriseVendorFolderCode = "vendor_folder_not_held"
@@ -3247,8 +3266,11 @@ func refuseWindowsEnterpriseUntrustedVendorFolders(opts *windowsEnterpriseLifecy
 		change := "re-protected " + folder.Dir + ", a vendor folder DefenseClaw did not create: " + folder.Why +
 			"; nothing held it open, DefenseClaw's recorded files in it were as DefenseClaw wrote them and it held nothing else DefenseClaw did not account for, " +
 			"so it now has DefenseClaw's owner and protected access list (" + folder.Connector + ")"
+		for _, note := range folder.Displaced {
+			change += "; " + note
+		}
 		if windowsEnterpriseHookRepairedAudit != nil {
-			if err := windowsEnterpriseHookRepairedAudit(folder, "defenseclaw-setup"); err != nil {
+			if err := writeWindowsEnterpriseAuditRow(func() error { return windowsEnterpriseHookRepairedAudit(folder, "defenseclaw-setup") }); err != nil {
 				change += "; the audit row could not be written: " + err.Error()
 			}
 		}
@@ -3259,7 +3281,17 @@ func refuseWindowsEnterpriseUntrustedVendorFolders(opts *windowsEnterpriseLifecy
 	}
 	messages := make([]string, 0, len(blocked))
 	for _, problem := range blocked {
-		messages = append(messages, problem.Connector+": "+problem.Message)
+		message := problem.Connector + ": " + problem.Message
+		// The same alert row the guardian pass writes, so a refusal Setup
+		// finds first (or with the guardian stopped) leaves a trail too.
+		details := windowsVendorFolderAlertDetails(problem.Dir, problem.Message)
+		details["connector"], details["actor"] = problem.Connector, "defenseclaw-setup"
+		if err := writeWindowsEnterpriseAuditRow(func() error {
+			return windowsEnterpriseVendorFolderAlert("managed-vendor-folder", "managed_vendor_folder_not_protected", details)
+		}); err != nil {
+			message += " (the alert row could not be written: " + err.Error() + ")"
+		}
+		messages = append(messages, message)
 	}
 	return fmt.Errorf("%s (DefenseClaw does not take over a vendor folder it did not create unless it can prove nothing else holds it or has changed it, "+
 		"and does not give a file another account could change a trusted access list back in place): %s", windowsEnterpriseGateRefusal, strings.Join(messages, "; "))
@@ -3309,6 +3341,18 @@ func windowsEnterpriseMessageCode(message, fallback string) string {
 	return fallback
 }
 
+// windowsEnterpriseTrimHeldCodePrefix drops the leading "code: " the module
+// puts on the two Codex hold deferrals so the code that is a field of the
+// error is not repeated at the start of its message ("codex_state_held:
+// codex_state_held: ...", g582 round 11c, L3).
+func windowsEnterpriseTrimHeldCodePrefix(code, message string) string {
+	switch code {
+	case "codex_state_held", "codex_requirements_held":
+		return strings.TrimPrefix(message, code+": ")
+	}
+	return message
+}
+
 // windowsEnterpriseKnownCodes are the stable refusal codes the standalone
 // installer and module emit.
 var windowsEnterpriseKnownCodes = []string{
@@ -3344,11 +3388,13 @@ func windowsEnterpriseFailureCodeFor(result *enterprisestatus.Result) int {
 			return enterprisestatus.WindowsExitBusy
 		case "bundle_apply_failed", "bundle_policy_not_adopted", "bundle_post_verify_failed", "bundle_targets_refresh_failed":
 			return enterprisestatus.WindowsExitBusy
-		case "hook_calls_running", "hook_in_use", "codex_state_held":
+		case "hook_calls_running", "hook_in_use", "codex_state_held", "codex_requirements_held":
 			// The lifecycle deferred before it changed anything, while hook
 			// calls of the installed release still run (GAP-1124), another
 			// program holds the installed hook open (GAP-2001) or a user
-			// holds the Codex state of 1.0.8 open without sharing (GAP-0765).
+			// holds the Codex state of 1.0.8 or the Codex requirements open
+			// in a way that would fail the run after the services stopped
+			// (GAP-0765, g582 round 11c).
 			return enterprisestatus.WindowsExitBusy
 		case "scanner_runtime_unavailable":
 			if strings.HasSuffix(message.Message, windowsScannerPrepareRetryNotice) {

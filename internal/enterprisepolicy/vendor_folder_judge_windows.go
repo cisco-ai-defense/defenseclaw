@@ -253,10 +253,18 @@ func handleDescriptorSDDL(handle windows.Handle) string {
 	return sd.String()
 }
 
+// reprotectBeforeStamp runs after the safe transaction's checks and before
+// its stamp, while the handles are open; tests replace it to change the
+// folder in between.
+var reprotectBeforeStamp = func(string) {}
+
 // reprotectRecordedVendorFolder runs the safe transaction for the weak case c
 // folder cur: it checks, then stamps, on the same handles. It returns the
-// reason it refused, or the folder it re-protected.
-func reprotectRecordedVendorFolder(recorded *recordedPolicyPaths, cur string, last bool, use policyFolderUse, refused *recordedVendorFolderError, validate func(string) error) (ReprotectedFolder, error) {
+// reason it refused, or the folder it re-protected. A refusal found after the
+// stamp (a file added in between that cannot be moved aside, a folder that
+// still fails its check) also returns the re-protected folder, so the change
+// that was made is reported and audited.
+func reprotectRecordedVendorFolder(opts Options, recorded *recordedPolicyPaths, cur string, last bool, use policyFolderUse, refused *recordedVendorFolderError, validate func(string) error) (ReprotectedFolder, error) {
 	var out ReprotectedFolder
 	err := reclaimDirHandle(cur, func() error {
 		tx, err := beginReprotect(recorded, cur, last, use, true)
@@ -264,6 +272,7 @@ func reprotectRecordedVendorFolder(recorded *recordedPolicyPaths, cur string, la
 			return err
 		}
 		defer tx.close()
+		reprotectBeforeStamp(cur)
 		before, after, err := tx.stamp()
 		if err != nil {
 			return fmt.Errorf("DefenseClaw could not apply its access list to %s: %v", cur, err)
@@ -274,10 +283,48 @@ func reprotectRecordedVendorFolder(recorded *recordedPolicyPaths, cur string, la
 	if err != nil {
 		return ReprotectedFolder{}, err
 	}
+	if last && use.siblings != "" {
+		displaced, err := displaceAddedDuringReprotect(opts, recorded, cur)
+		out.Displaced = displaced
+		if err != nil {
+			return out, err
+		}
+	}
 	if validateErr := validate(cur); validateErr != nil {
-		return ReprotectedFolder{}, fmt.Errorf("%s still does not protect DefenseClaw's file after DefenseClaw applied its access list: %v", cur, validateErr)
+		return out, fmt.Errorf("%s still does not protect DefenseClaw's file after DefenseClaw applied its access list: %v", cur, validateErr)
 	}
 	return out, nil
+}
+
+// displaceAddedDuringReprotect lists cur again once the stamp is done. The
+// transaction's folder handle shares writing, so an account that could add a
+// file before the stamp may have added one between the transaction's listing
+// and the stamp; after the stamp no such account can add one, so this listing
+// is final. Each entry DefenseClaw did not write is moved aside, as the
+// publish moves aside a file a standard user left in the folder
+// (displaceUntrustedPolicyFiles, and OpenCode's displaceUntrustedPolicyFile).
+// One DefenseClaw cannot move aside (an administrator's, which DefenseClaw
+// never removes) refuses the transaction by name. It returns what it moved.
+func displaceAddedDuringReprotect(opts Options, recorded *recordedPolicyPaths, cur string) ([]string, error) {
+	entries, err := os.ReadDir(cur)
+	if err != nil {
+		return nil, fmt.Errorf("could not list %s again after DefenseClaw applied its access list: %v", cur, err)
+	}
+	var notes []string
+	for _, entry := range entries {
+		if recorded.namesFileIn(cur, entry.Name()) {
+			continue
+		}
+		path := filepath.Join(cur, entry.Name())
+		note, err := displacePlanted(opts, path)
+		if err != nil {
+			return notes, fmt.Errorf("%s appeared in %s while DefenseClaw put the folder back to its protected form, and "+
+				"DefenseClaw could not move it aside (%v); the vendor would load it beside DefenseClaw's file: check it and "+
+				"remove it, then run Setup /ensure", path, cur, err)
+		}
+		notes = append(notes, note)
+	}
+	return notes, nil
 }
 
 // weakVendorFolder is a case c folder that does not protect DefenseClaw's
@@ -361,6 +408,13 @@ func InspectRecordedVendorFolders(opts Options, connectors []string) []VendorFol
 	var problems []VendorFolderProblem
 	for _, folder := range weak {
 		problem := VendorFolderProblem{Connector: folder.connector, Dir: folder.refused.dir, File: folder.refused.file}
+		// The same checks as the transaction, on the same opens: the
+		// recorded files share reading only, so the verdict cannot differ
+		// from the one Setup or the guardian reaches. For the instant these
+		// read handles are open, a guardian write of a recorded file fails
+		// with a sharing violation and is made again at the next pass. Only
+		// a weak folder is inspected this way, and the guardian rewrites a
+		// recorded file only when it changed, so the window is negligible.
 		tx, err := beginReprotect(recorded, folder.refused.dir, folder.last, folder.use, false)
 		if err == nil {
 			tx.close()
@@ -379,30 +433,63 @@ func InspectRecordedVendorFolders(opts Options, connectors []string) []VendorFol
 	return problems
 }
 
+// reprotectWalks bounds the walks of one ReprotectRecordedVendorFolders call.
+// Every walk but the last heals at least one folder of a vendor path, and no
+// vendor path has more folders below ProgramData than this.
+const reprotectWalks = 8
+
 // ReprotectRecordedVendorFolders is InspectRecordedVendorFolders that also
 // runs the safe transaction for each folder it can put right: it returns the
 // folders it re-protected, and the problems it could not (with what blocks
 // them). Setup calls it before an install-like action or a reconcile, so a
 // weak but clean folder is healed and reported instead of left to the next
-// guardian pass.
+// guardian pass. The inspection stops at the first folder of a path that
+// fails its check, and the check of a folder includes the folders above it,
+// so a heal can uncover the next weak folder of the same path (a weak
+// GitHub\Copilot hides a weak policy.d). It walks again until nothing is weak
+// or a walk heals nothing, so one call heals the whole path, as the publish
+// walk does.
 func ReprotectRecordedVendorFolders(opts Options, connectors []string) ([]ReprotectedFolder, []VendorFolderProblem) {
-	recorded, weak := weakVendorFolders(opts, connectors)
 	var healed []ReprotectedFolder
-	var blocked []VendorFolderProblem
-	for _, folder := range weak {
-		done, err := reprotectRecordedVendorFolder(recorded, folder.refused.dir, folder.last, folder.use, folder.refused, folder.validate)
-		if err == nil {
-			done.Connector = folder.connector
-			healed = append(healed, done)
-			continue
+	// stuck are the refusals found after a stamp. Such a folder is reported
+	// once and not tried again in a later walk.
+	var stuck, blocked []VendorFolderProblem
+	stuckDirs := map[string]bool{}
+	for walk := 0; walk < reprotectWalks; walk++ {
+		recorded, weak := weakVendorFolders(opts, connectors)
+		blocked = nil
+		progress := false
+		for _, folder := range weak {
+			key := strings.ToLower(filepath.Clean(folder.refused.dir))
+			if stuckDirs[key] {
+				continue
+			}
+			done, err := reprotectRecordedVendorFolder(opts, recorded, folder.refused.dir, folder.last, folder.use, folder.refused, folder.validate)
+			if done.Dir != "" {
+				done.Connector = folder.connector
+				healed = append(healed, done)
+				progress = true
+			}
+			if err == nil {
+				continue
+			}
+			refusal := *folder.refused
+			refusal.blocker = err.Error()
+			problem := VendorFolderProblem{
+				Connector: folder.connector, Dir: refusal.dir, File: refusal.file, Message: refusal.Error(), Blocker: refusal.blocker,
+			}
+			if done.Dir != "" {
+				stuckDirs[key] = true
+				stuck = append(stuck, problem)
+			} else {
+				blocked = append(blocked, problem)
+			}
 		}
-		refusal := *folder.refused
-		refusal.blocker = err.Error()
-		blocked = append(blocked, VendorFolderProblem{
-			Connector: folder.connector, Dir: refusal.dir, File: refusal.file, Message: refusal.Error(), Blocker: refusal.blocker,
-		})
+		if !progress {
+			break
+		}
 	}
-	return healed, blocked
+	return healed, append(stuck, blocked...)
 }
 
 // VendorFolderProblemFor is the problem InspectRecordedVendorFolders reports
@@ -414,11 +501,38 @@ func VendorFolderProblemFor(opts Options, connector string) *VendorFolderProblem
 	return nil
 }
 
-// IsVendorFolderRefusal reports whether err is, or wraps, the refusal of a
-// vendor folder that does not protect DefenseClaw's recorded file.
-func IsVendorFolderRefusal(err error) bool {
-	var refusal *recordedVendorFolderError
-	return errors.As(err, &refusal)
+// VendorFolderRefusal is one vendor folder a publish refused because it does
+// not protect DefenseClaw's recorded file: the folder and the refusal text.
+type VendorFolderRefusal struct {
+	Dir     string
+	Message string
+}
+
+// VendorFolderRefusals returns the refusal of each vendor folder that err
+// carries (a publish joins the errors of its connectors), once per folder, in
+// order; nil when there is none.
+func VendorFolderRefusals(err error) []VendorFolderRefusal {
+	var out []VendorFolderRefusal
+	seen := map[string]bool{}
+	var walk func(error)
+	walk = func(err error) {
+		switch typed := err.(type) {
+		case nil:
+		case *recordedVendorFolderError:
+			if key := strings.ToLower(filepath.Clean(typed.dir)); !seen[key] {
+				seen[key] = true
+				out = append(out, VendorFolderRefusal{Dir: typed.dir, Message: typed.Error()})
+			}
+		case interface{ Unwrap() []error }:
+			for _, inner := range typed.Unwrap() {
+				walk(inner)
+			}
+		case interface{ Unwrap() error }:
+			walk(typed.Unwrap())
+		}
+	}
+	walk(err)
+	return out
 }
 
 // inspectRecordedVendorFolder walks dir from ProgramData as
