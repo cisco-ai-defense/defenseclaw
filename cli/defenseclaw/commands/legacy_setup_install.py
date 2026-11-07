@@ -31,6 +31,7 @@ folder.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import re
@@ -60,8 +61,21 @@ class LegacySetupInstall:
     data_root: str
     cache: str
     hook_state: str
-    # problem is why it is left in place ("" when it can be removed).
+    # problem is why it is left in place ("" when it can be removed);
+    # problem_step is what the user does about that reason.
     problem: str = ""
+    problem_step: str = ""
+
+
+class Problem(str):
+    """What could not be done (or why the install stays), with the next step for that reason."""
+
+    step: str
+
+    def __new__(cls, text: str, step: str = "") -> Problem:
+        obj = super().__new__(cls, text)
+        obj.step = step
+        return obj
 
 
 def local_app_data() -> str:
@@ -90,7 +104,18 @@ def find(platform_name: str) -> LegacySetupInstall | None:
     try:
         state = _read_state(state_path)
     except OSError as exc:
-        return LegacySetupInstall(root, "", "", cache, hook_state, problem=str(exc))
+        return LegacySetupInstall(
+            root,
+            "",
+            "",
+            cache,
+            hook_state,
+            problem=str(exc),
+            problem_step=(
+                f"Uninstall DefenseClaw Setup from Apps & Features, or delete {root} yourself "
+                "(ask an administrator if your account cannot)."
+            ),
+        )
     if not isinstance(state, dict) or state.get("install_kind") != "native-windows-exe":
         return None
     version = state.get("version")
@@ -98,17 +123,27 @@ def find(platform_name: str) -> LegacySetupInstall | None:
         # Only the released 0.8.x Setups: a newer per-user Setup was never published.
         return None
     data_root = state.get("data_root") if isinstance(state.get("data_root"), str) else ""
-    problem = ""
+    problem = step = ""
     install_root = state.get("install_root")
     if state.get("install_scope") != "user":
         problem = "its install state does not describe a per-user install"
+        step = f"Uninstall it with its own uninstaller (Apps & Features), or ask an administrator to remove {root}."
     elif not isinstance(install_root, str) or not _same_path(install_root, root):
         problem = f"its install state names another program folder ({install_root})"
+        step = (
+            f"Uninstall DefenseClaw Setup from Apps & Features, or delete {root} and the folder "
+            "its install state names yourself."
+        )
     elif _inside(os.path.abspath(sys.executable), root):
         problem = "this command runs from that install"
+        step = (
+            f"Run the uninstall with a defenseclaw outside {root} (where.exe defenseclaw lists the "
+            "ones on your Path), or uninstall DefenseClaw Setup from Apps & Features."
+        )
     else:
         problem = _ownership_problem(root)
-    return LegacySetupInstall(root, version, data_root, cache, hook_state, problem=problem)
+        step = getattr(problem, "step", "")
+    return LegacySetupInstall(root, version, data_root, cache, hook_state, problem=problem, problem_step=step)
 
 
 def plan_lines(install: LegacySetupInstall, data_dir: str) -> list[str]:
@@ -137,41 +172,70 @@ def remove(install: LegacySetupInstall, *, edit_user_path) -> tuple[list[str], l
     done: list[str] = []
     problems: list[str] = []
     if install.problem:
-        return done, [f"{install.root}: {install.problem}"]
+        return done, [Problem(f"{install.root}: {install.problem}", install.problem_step)]
     # Off first: the launcher can start the old gateway again, and so can its sign-in start.
     try:
         if _turn_hook_launcher_off(install.hook_state, install.root):
             done.append(f"turned the DefenseClaw Setup hook launcher off ({install.hook_state} removed)")
     except OSError as exc:
-        problems.append(f"could not turn the DefenseClaw Setup hook launcher off ({install.hook_state}): {exc}")
+        problems.append(
+            Problem(
+                f"could not turn the DefenseClaw Setup hook launcher off ({install.hook_state}): {exc}",
+                _path_step(exc, install.hook_state),
+            )
+        )
     try:
         for name in _remove_run_values(install.root, install.cache):
             done.append(f"removed its sign-in start (HKCU\\{_RUN_KEY}\\{name})")
     except OSError as exc:
-        problems.append(f"could not read or change HKCU\\{_RUN_KEY}: {exc}")
+        problems.append(
+            Problem(
+                f"could not read or change HKCU\\{_RUN_KEY}: {exc}",
+                f"Delete the DefenseClaw Setup values under HKCU\\{_RUN_KEY} yourself "
+                "(Task Manager > Startup apps, or regedit), then run the command again.",
+            )
+        )
     try:
         stopped = _stop_processes_under(install.root)
         if stopped:
             done.append(f"stopped {stopped} DefenseClaw Setup program(s) running from {install.root}")
     except OSError as exc:
-        problems.append(f"could not stop the programs running from {install.root}: {exc}")
+        problems.append(
+            Problem(
+                f"could not stop the programs running from {install.root}: {exc}",
+                f"End the DefenseClaw programs running from {install.root} in Task Manager "
+                "(or sign out and back in), then run the command again.",
+            )
+        )
     try:
         if _remove_uninstall_entry(install.root):
             done.append(f"removed its Apps & Features entry (HKCU\\{_UNINSTALL_KEY})")
     except OSError as exc:
-        problems.append(f"could not remove HKCU\\{_UNINSTALL_KEY}: {exc}")
+        problems.append(
+            Problem(
+                f"could not remove HKCU\\{_UNINSTALL_KEY}: {exc}",
+                f"Uninstall DefenseClaw Setup from Apps & Features, or delete HKCU\\{_UNINSTALL_KEY} "
+                "in regedit, then run the command again.",
+            )
+        )
     bin_dir = os.path.join(install.root, "bin")
     try:
         if edit_user_path(bin_dir):
             done.append(f"removed {bin_dir} from your user Path (new terminals get the change)")
     except OSError as exc:
-        problems.append(f"could not remove {bin_dir} from your user Path: {exc}")
+        problems.append(
+            Problem(
+                f"could not remove {bin_dir} from your user Path: {exc}",
+                f"Remove {bin_dir} from your user Path yourself (Settings > System > About > "
+                "Advanced system settings > Environment Variables), then run the command again.",
+            )
+        )
     for path in (install.root, install.cache):
         try:
             if _remove_tree(path):
                 done.append(f"removed {path}")
         except OSError as exc:
-            problems.append(f"could not remove {path}: {exc}")
+            problems.append(Problem(f"could not remove {path}: {exc}", _path_step(exc, path)))
     return done, problems
 
 
@@ -193,31 +257,61 @@ def _read_state(path: str) -> object:
 
 
 def _ownership_problem(root: str) -> str:
-    """Why *root* is not this account's own folder ("" when it is)."""
+    """Why *root* is not this account's own folder, with the step for it as ``.step`` ("" when it is)."""
     from defenseclaw.commands.windows_uninstall_helper import _validate_root
     from defenseclaw.file_permissions import _windows_acl_snapshot, _windows_current_user_sid
 
+    link_step = (
+        f"Delete the link {root} (or the link above it) yourself; the folder it points to is not "
+        "touched. Then run the command again."
+    )
     if _is_reparse(root):
-        return "its program folder is a link"
+        return Problem("its program folder is a link", link_step)
     try:
         # A link above the folder redirects it as well as one at the folder.
         _validate_root(root, "its program folder")
     except ValueError as exc:
-        return str(exc)
+        return Problem(str(exc), link_step)
     try:
         owner, _null_dacl, _entries = _windows_acl_snapshot(root)
         current = _windows_current_user_sid()
     except OSError as exc:
-        return f"its owner could not be read ({exc})"
+        return Problem(
+            f"its owner could not be read ({exc})",
+            f"Ask an administrator to remove {root}, or to give your account access to it, then run the command again.",
+        )
     # The user's own account, or Administrators: an elevated install is owned by
     # the group. The folder is still the user's own Known Folder path with no
     # link above it, and removing it takes no authority this account lacks.
     if owner not in (current, _ADMINISTRATORS_SID):
-        return (
-            f"its program folder belongs to another account ({owner or 'unknown'}); "
-            "sign in as that account to uninstall it, or delete the folder yourself"
+        who = owner or "unknown"
+        return Problem(
+            f"its program folder belongs to another account ({who}); "
+            "sign in as that account to uninstall it, or delete the folder yourself",
+            f"Ask an administrator, or the account that owns it ({who}), to remove {root}.",
         )
     return ""
+
+
+def _path_step(error: BaseException, path: str) -> str:
+    """What to do about *path*, from why its removal failed (held, denied or other)."""
+    from defenseclaw.commands import windows_uninstall_helper as helper
+
+    winerror = getattr(error, "winerror", None)
+    code = getattr(error, "errno", None)
+    # The error names the file inside *path* that it could not remove.
+    named = getattr(error, "filename", None)
+    where = named if isinstance(named, str) and named else path
+    if winerror in (helper._ERROR_SHARING_VIOLATION, helper._ERROR_LOCK_VIOLATION, helper._ERROR_DIR_NOT_EMPTY) or (
+        winerror is None and code in (errno.EBUSY, errno.ENOTEMPTY)
+    ):
+        return f"Close the program that holds {where}, then run the command again."
+    if winerror == helper._ERROR_ACCESS_DENIED or (winerror is None and code in (errno.EACCES, errno.EPERM)):
+        return (
+            f"Your account cannot remove {where}: ask an administrator to remove it (or to give your "
+            "account full control of it), then run the command again."
+        )
+    return f"Remove {path} yourself, then run the command again."
 
 
 def _turn_hook_launcher_off(hook_state: str, root: str) -> bool:

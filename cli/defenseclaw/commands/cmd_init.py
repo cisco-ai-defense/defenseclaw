@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from defenseclaw.config import Config
 from defenseclaw.config import gateway_pid_path
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.gateway import path_gateway
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.openclaw_presence import openclaw_installed
 from defenseclaw.paths import (
@@ -3783,7 +3784,7 @@ def _setup_guardrail_inline(app, cfg, logger) -> bool:
 
 def _start_gateway(cfg, logger) -> None:
     """Start the defenseclaw-gateway sidecar and verify it is running."""
-    gw_bin = shutil.which("defenseclaw-gateway")
+    gw_bin = path_gateway()
     if not gw_bin:
         click.echo("  Sidecar:       not found (binary not installed)")
         click.echo("                 install with: make gateway-install")
@@ -3837,7 +3838,7 @@ def _start_gateway(cfg, logger) -> None:
 
 def _get_gateway_version() -> str | None:
     """Try to get the gateway binary version."""
-    gw = shutil.which("defenseclaw-gateway")
+    gw = path_gateway()
     if not gw:
         return None
     try:
@@ -3856,7 +3857,7 @@ def _get_gateway_version() -> str | None:
 
 def _restart_gateway_quiet() -> None:
     """Restart the gateway sidecar silently (used after guardrail setup during init)."""
-    gw = shutil.which("defenseclaw-gateway")
+    gw = path_gateway()
     if not gw:
         return
     from defenseclaw.bootstrap import _GATEWAY_START_TIMEOUT

@@ -51,6 +51,7 @@ from defenseclaw.connector_paths import (
     opencode_custody_text,
     opencode_unsafe_plugin_paths,
 )
+from defenseclaw.gateway import path_gateway
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.scanner_binary import MCP_SCANNER_BINARY, SKILL_SCANNER_BINARY
 
@@ -1274,7 +1275,7 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
     else:
         steps.append(StepResult("Cisco AI Defense", "skip", "scanner_mode is local"))
 
-    if shutil.which("defenseclaw-gateway") is None:
+    if path_gateway() is None:
         steps.append(
             StepResult(
                 "Gateway binary",
@@ -2054,7 +2055,7 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
     :func:`_running_connector_from_state_file` for the I-don't-know
     sentinel rule.
     """
-    gw = shutil.which("defenseclaw-gateway")
+    gw = path_gateway()
     if not gw:
         return StepResult("Sidecar", "warn", "defenseclaw-gateway not on PATH", "make gateway-install")
     pid_file = gateway_pid_path(cfg.data_dir)

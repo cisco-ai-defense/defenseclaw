@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import stat
 import subprocess
 import sys
@@ -30,6 +29,7 @@ from defenseclaw.connector_paths import (
     normalize,
 )
 from defenseclaw.file_lock import _lock_file_exclusive, _unlock_file
+from defenseclaw.gateway import path_gateway
 from defenseclaw.winquote import powershell_command_line
 
 _VALID_MODES = frozenset({"open", "closed"})
@@ -2221,7 +2221,7 @@ def restore_fail_mode_transaction(snapshots: tuple[FileSnapshot, ...]) -> None:
 
 def reconcile_connector_registration(cfg: Any, connector: str) -> ConnectorFailModeState:
     name = normalize(connector)
-    executable = shutil.which("defenseclaw-gateway")
+    executable = path_gateway()
     if not executable or (_is_windows() and Path(executable).suffix.lower() != ".exe"):
         raise OSError("native defenseclaw-gateway executable not found")
     environment = os.environ.copy()

@@ -301,6 +301,8 @@ class ExecutionPhaseResult:
     name: str
     status: str
     detail: str = ""
+    # What the user does about each distinct reason a phase failed (one line each).
+    next_steps: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -420,7 +422,7 @@ def uninstall_cmd(
     if cowork_plugin and not cowork_problem:
         ux.warn(f"DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
     _render_kept_and_next_steps(plan)
-    legacy_left = _legacy_setup_left(result) if plan.legacy_setup is not None else ""
+    legacy_left = _legacy_setup_left(result) if plan.legacy_setup is not None else None
     if cowork_problem:
         if legacy_left:
             _print_legacy_setup_left(legacy_left)
@@ -433,17 +435,22 @@ def uninstall_cmd(
 _LEGACY_SETUP_PHASE = "DefenseClaw Setup 0.8.x removal"
 
 
-def _legacy_setup_left(result: ExecutionResult) -> str:
-    """What the removal of a DefenseClaw Setup 0.8.x install could not do ("" when all of it went)."""
+def _legacy_setup_left(result: ExecutionResult) -> ExecutionPhaseResult | None:
+    """The removal of a DefenseClaw Setup 0.8.x install, when it could not do all of it (None when it did)."""
     for phase in result.phases:
         if phase.name == _LEGACY_SETUP_PHASE and phase.status == "failed":
-            return phase.detail
-    return ""
+            return phase
+    return None
 
 
-def _print_legacy_setup_left(detail: str) -> None:
-    ux.err(f"DefenseClaw Setup 0.8.x was not removed completely: {detail}")
-    ux.err("Fix what is named above (close a program that holds a file, for example), then run the command again.")
+def _print_legacy_setup_left(phase: ExecutionPhaseResult) -> None:
+    """Say what stayed, then one next step for each distinct reason it stayed."""
+    ux.err(f"DefenseClaw Setup 0.8.x was not removed completely: {phase.detail}")
+    if not phase.next_steps:
+        ux.err("Fix what is named above, then run the command again.")
+        return
+    for step in phase.next_steps:
+        ux.err(f"  - {step}")
 
 
 # The one reminder that always reaches the user: the in-chat notice after an
@@ -2724,8 +2731,11 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         # After connector teardown; before the leftovers and the data, which
         # the old gateway may hold open when both use one data folder.
         problems = _remove_legacy_setup_install(plan.legacy_setup)
+        steps = tuple(dict.fromkeys(step for step in (getattr(item, "step", "") for item in problems) if step))
         phases.append(
-            ExecutionPhaseResult(_LEGACY_SETUP_PHASE, "failed" if problems else "succeeded", "; ".join(problems))
+            ExecutionPhaseResult(
+                _LEGACY_SETUP_PHASE, "failed" if problems else "succeeded", "; ".join(problems), steps
+            )
         )
         # What is left on disk now decides, not the plan.
         setup_leftovers = _windows_setup_leftovers(plan.platform_name) if plan.remove_binaries else ()

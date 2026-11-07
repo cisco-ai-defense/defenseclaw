@@ -824,8 +824,8 @@ def _per_user_connected_verifier() -> str:
     else:
         candidates = [
             os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip(),
-            shutil.which(GATEWAY_BIN_NAME) or "",
             _launcher_sibling_gateway() or "",
+            shutil.which(GATEWAY_BIN_NAME) or "",
             canonical_install_path(),
         ]
     for candidate in dict.fromkeys(candidates):
@@ -1806,12 +1806,15 @@ def resolve_gateway_binary() -> str | None:
        binary somewhere non-standard.  Returned verbatim (even when the
        file is missing) so the real ``exec`` error surfaces to the
        caller rather than a generic "not found" from here.
-    3. ``shutil.which(GATEWAY_BIN_NAME)`` — honours ``PATH``.  The
+    3. The directory of the ``defenseclaw`` launcher this process runs as,
+       where the installers put the gateway too. It comes before ``PATH``
+       because a shell opened before the install can still list an older
+       DefenseClaw (a 0.8.x Setup install, say) first, and that gateway
+       rejects this release's config (GAP-0099). A CI job with a bare
+       ``PATH`` and its own ``HOME`` finds it too.
+    4. ``shutil.which(GATEWAY_BIN_NAME)`` — honours ``PATH``.  The
        happy path for installed releases and for users whose shell has
        already sourced the updated rc file.
-    4. The directory of the ``defenseclaw`` launcher this process runs as,
-       where the installers put the gateway too: a CI job with a bare
-       ``PATH`` and its own ``HOME`` still finds it.
     5. :func:`canonical_install_path` — the ``~/.local/bin`` fallback
        that keeps ``defenseclaw tui`` working in the same shell that
        just ran ``make all``.
@@ -1830,16 +1833,14 @@ def resolve_gateway_binary() -> str | None:
     if override:
         return override
 
-    via_path = shutil.which(GATEWAY_BIN_NAME)
+    # The installers put both binaries in one directory: the gateway next to
+    # this launcher is this release's own, so it wins over a PATH that lists
+    # an older install first (GAP-0099), and a CI job that runs
+    # ~/.local/bin/defenseclaw with a bare PATH (and its own HOME) still
+    # finds it (GAP-0253).
+    via_path = path_gateway()
     if via_path:
         return via_path
-
-    # The installers put both binaries in one directory: a CI job that runs
-    # ~/.local/bin/defenseclaw with a bare PATH (and its own HOME) still
-    # finds the gateway next to it (GAP-0253).
-    sibling = _launcher_sibling_gateway()
-    if sibling:
-        return sibling
 
     canonical = canonical_install_path()
     if _is_runnable_file(canonical):
@@ -1877,15 +1878,55 @@ GATEWAY_NOT_FOUND_MESSAGE = (
 )
 
 
+def path_gateway() -> str | None:
+    """The gateway of this ``defenseclaw``'s own install, else the first on ``PATH``.
+
+    Callers that ran ``shutil.which("defenseclaw-gateway")`` took whatever
+    comes first on ``PATH``: with a DefenseClaw Setup 0.8.x install listed
+    before this one (a terminal opened before the install), that was the 0.8.x
+    gateway, which rejects this release's ``config.yaml`` (GAP-0099).
+    """
+    return _launcher_sibling_gateway() or shutil.which(GATEWAY_BIN_NAME)
+
+
 def _launcher_sibling_gateway() -> str | None:
-    """The gateway next to the ``defenseclaw`` launcher this process runs as, or None."""
+    """The gateway of the install this ``defenseclaw`` runs from, or None.
+
+    Two layouts: the gateway next to a ``defenseclaw`` launcher this process
+    was started as, and the per-user installer's, where a native launcher in
+    ``~/.local/bin`` starts the CLI from the data folder's ``.venv`` and the
+    gateway stays in ``~/.local/bin`` (the process then runs as
+    ``<data>/.venv/Scripts/defenseclaw``, with no gateway beside it).
+    """
 
     launcher = sys.argv[0] if sys.argv else ""
     name = os.path.basename(launcher).lower().removesuffix(".exe")
-    if name != "defenseclaw":
+    if name == "defenseclaw":
+        candidate = os.path.join(os.path.dirname(os.path.abspath(launcher)), os.path.basename(canonical_install_path()))
+        if _is_runnable_file(candidate):
+            return candidate
+    return _installer_venv_gateway()
+
+
+def _installer_venv_gateway() -> str | None:
+    """The installer's gateway when this process runs from the installer's ``.venv``.
+
+    Only the installer's own layout counts: the interpreter's environment is
+    ``<data folder>/.venv`` with the installer's ``installer`` folder beside it,
+    and the installer's ``defenseclaw`` launcher sits next to the gateway. A
+    project's own ``.venv`` or a source checkout still resolves the gateway
+    through ``PATH``.
+    """
+    prefix = os.path.abspath(sys.prefix)
+    if os.path.basename(prefix).lower() != ".venv" or not os.path.isdir(
+        os.path.join(os.path.dirname(prefix), "installer")
+    ):
         return None
-    candidate = os.path.join(os.path.dirname(os.path.abspath(launcher)), os.path.basename(canonical_install_path()))
-    return candidate if _is_runnable_file(candidate) else None
+    gateway_path = canonical_install_path()
+    launcher = os.path.join(os.path.dirname(gateway_path), "defenseclaw" + (".exe" if os.name == "nt" else ""))
+    if _is_runnable_file(gateway_path) and os.path.lexists(launcher):
+        return gateway_path
+    return None
 
 
 def resolve_trusted_gateway_binary() -> str | None:
