@@ -173,3 +173,71 @@ func TestProbeHookElementsNamesEachBrokenRuntimeFile(t *testing.T) {
 	write(shared, installedShared, 0o600)
 	probe("everything put back")
 }
+
+// GAP-0754: a hook contract lock that is missing or names another connector
+// breaks the runtime as a whole, and nothing more. Each runtime file is still
+// read against what DefenseClaw renders for it, so a script put back while the
+// lock stays missing is a restore of the script, and a script left alone is
+// not named.
+func TestProbeHookElementsReadsRuntimeFilesWhileTheContractLockIsMissing(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	setStandaloneProfileForTest(t, true)
+	home := newTestHome(t)
+	opts := hermesStandaloneOptions(t, home)
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	dataDir := filepath.Join(home, ".defenseclaw")
+	script := filepath.Join(dataDir, "hooks", "hermes-hook.sh")
+	lock := filepath.Join(dataDir, "hook_contract_lock.json")
+	installedScript, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := func(step string, want ...string) {
+		t.Helper()
+		got, err := ProbeHookElements(context.Background(), opts)
+		if err != nil {
+			t.Fatalf("%s: %v", step, err)
+		}
+		if !slices.Equal(got.Broken(), want) {
+			t.Fatalf("%s: broken elements = %v, want %v", step, got.Broken(), want)
+		}
+	}
+	scriptElement := hookRuntimeFileElement(script)
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	probe("lock missing, script intact", HookElementRuntime)
+
+	if err := os.WriteFile(script, append(slices.Clone(installedScript), "# edited\n"...), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	probe("lock missing, script edited", HookElementRuntime, scriptElement)
+	if err := os.WriteFile(script, installedScript, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	probe("lock missing, script put back", HookElementRuntime)
+
+	if err := os.Remove(script); err != nil {
+		t.Fatal(err)
+	}
+	probe("lock missing, script deleted", HookElementRuntime, scriptElement)
+	if err := os.WriteFile(script, installedScript, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// A lock that cannot be read breaks the runtime the same way.
+	if err := os.WriteFile(lock, []byte("not a lock"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, append(slices.Clone(installedScript), "# edited\n"...), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	probe("lock unreadable, script edited", HookElementRuntime, scriptElement)
+	if err := os.WriteFile(script, installedScript, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	probe("lock unreadable, script put back", HookElementRuntime)
+}

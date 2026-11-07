@@ -68,12 +68,16 @@ func ProbeHookElements(ctx context.Context, opts InstallOptions) (HookElements, 
 		return withOwnerCredentials(target.uid, target.gid, func() error {
 			lock, lockErr := connector.LoadHookContractLockEntryForMode(target.dataDir, conn.Name(), false)
 			if lockErr != nil || lock.Connector != conn.Name() {
+				// Without a usable lock the runtime as a whole is broken, but
+				// every runtime file is still read against what DefenseClaw
+				// renders for it, so a file put back is told apart from the
+				// lock that stays missing.
+				lock = connector.HookContractLockEntry{}
 				elements.BrokenRuntime = []string{HookElementRuntime}
-			} else {
-				for _, fault := range standaloneHookRuntimeFaults(conn, setupOpts, opts.GuardrailMode, lock, target.uid, true) {
-					if !slices.Contains(elements.BrokenRuntime, fault.element) {
-						elements.BrokenRuntime = append(elements.BrokenRuntime, fault.element)
-					}
+			}
+			for _, fault := range standaloneHookRuntimeFaults(conn, setupOpts, opts.GuardrailMode, lock, target.uid, true) {
+				if !slices.Contains(elements.BrokenRuntime, fault.element) {
+					elements.BrokenRuntime = append(elements.BrokenRuntime, fault.element)
 				}
 			}
 			if len(elements.BrokenRuntime) > 0 {
