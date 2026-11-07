@@ -89,20 +89,32 @@ func TestGAP0488PatchTargetsChangedFollowsWhereTargetsLead(t *testing.T) {
 						"tool_input": map[string]any{"filePath": filepath.Join(project, "swap.txt"), "content": "y"}, "cwd": project})
 				}
 				evidence := ResolveConnector(c.connector, "", c.event, body)
-				if NewPatchTargetWatch(evidence).Changed() {
+				if watchOfEvidence(evidence).Changed() {
 					t.Fatal("unchanged targets read as changed")
 				}
 				change.mutate(t, project, keys)
 				want := change.want && c.patch
-				if got := NewPatchTargetWatch(evidence).Changed(); got != want {
+				if got := watchOfEvidence(evidence).Changed(); got != want {
 					t.Errorf("changed = %v, want %v", got, want)
 				}
 			})
 		}
 	}
-	if NewPatchTargetWatch("").Changed() {
+	if watchOfEvidence("").Changed() {
 		t.Error("no evidence read as changed")
 	}
+}
+
+// watchOfEvidence is the watch of an evidence header a hook sent, as the hook
+// builds it from the map it encoded; nil when the header attests no complete
+// patch.
+func watchOfEvidence(evidence string) *PatchTargetWatch {
+	targets, ok := Decode(evidence)
+	if !ok {
+		return nil
+	}
+	home, _ := os.UserHomeDir()
+	return patchTargetWatchOf(targets, home)
 }
 
 func mustWrite(t *testing.T, path, content string) {
