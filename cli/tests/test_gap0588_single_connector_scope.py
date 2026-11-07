@@ -760,3 +760,74 @@ def test_a_whole_document_restore_is_not_judged_by_the_activation_rule(tmp_path:
     with patch.object(config_writer, "_use_go_validator", return_value=False):
         config_writer.replace_document(raw, "cli:test", "restore", path=path)
     assert path.read_bytes() == raw
+
+
+def test_the_activation_rule_holds_whatever_check_the_caller_adds(tmp_path: Path) -> None:
+    """A caller-supplied candidate check adds to the writer rule; it never replaces it."""
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        f"config_version: 9\ndata_dir: {tmp_path}\nguardrail:\n{_BAD_ROSTER_OFF}", encoding="utf-8"
+    )
+    before = path.read_bytes()
+    seen: list[bytes] = []
+    with patch.object(config_writer, "_use_go_validator", return_value=False):
+        with pytest.raises(config_writer.ConfigWriteError, match="needs a proxy binding"):
+            config_writer.apply(
+                [config_writer.Change("guardrail.enabled", True)], "cli:test", "test", path=path,
+                check_candidate=lambda _p, candidate: seen.append(candidate),
+            )
+    assert seen and path.read_bytes() == before
+
+
+def test_a_caller_check_does_not_block_a_bootable_activation(tmp_path: Path) -> None:
+    """Benign twin: the same callback with a hook-only roster still turns protection on."""
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        f"config_version: 9\ndata_dir: {tmp_path}\nguardrail:\n  enabled: false\n  connector: kiro\n"
+        "  connectors:\n    kiro: {}\n    codex: {}\n",
+        encoding="utf-8",
+    )
+    with patch.object(config_writer, "_use_go_validator", return_value=False):
+        config_writer.apply(
+            [config_writer.Change("guardrail.enabled", True)], "cli:test", "test", path=path,
+            check_candidate=lambda _p, _c: None,
+        )
+    assert b"enabled: true" in path.read_bytes()
+
+
+def _first_save(tmp_path: Path, names: tuple[str, ...], primary: str) -> str:
+    cfg = dcconfig.Config(
+        data_dir=str(tmp_path),
+        audit_db=str(tmp_path / "audit.db"),
+        quarantine_dir=str(tmp_path / "quarantine"),
+        plugin_dir=str(tmp_path / "plugins"),
+        policy_dir=str(tmp_path / "policies"),
+        environment="macos",
+        guardrail=dcconfig.GuardrailConfig(
+            enabled=True,
+            connector=primary,
+            connectors={name: dcconfig.PerConnectorGuardrailConfig() for name in names},
+        ),
+    )
+    with patch.object(config_writer, "_use_go_validator", return_value=False):
+        try:
+            cfg.save()
+        except config_writer.ConfigWriteError:
+            return "block"
+    return "allow"
+
+
+@pytest.mark.parametrize(
+    ("names", "primary"),
+    [(("codex",), ""), (("codex", "hermes"), ""), (("codex", "hermes"), "codex")],
+)
+def test_the_first_save_of_a_hook_only_roster_needs_no_earlier_selection(
+    tmp_path: Path, names: tuple[str, ...], primary: str
+) -> None:
+    """A new file has no earlier connector; the roster it writes names its own primary."""
+    assert _first_save(tmp_path, names, primary) == "allow"
+
+
+def test_the_first_save_of_a_proxy_beside_a_hook_entry_is_still_refused(tmp_path: Path) -> None:
+    assert _first_save(tmp_path, ("codex", "openclaw"), "") == "block"
+    assert not (tmp_path / "config.yaml").exists()
