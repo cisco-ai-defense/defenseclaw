@@ -333,7 +333,6 @@ func startWindowsExclusiveHolder(t *testing.T, shell, path string) (release func
 		}
 		close(lines)
 	}()
-	// A 32-bit PowerShell on a loaded runner can take a long time to start.
 	started := time.Now()
 	select {
 	case line := <-lines:
@@ -342,10 +341,15 @@ func startWindowsExclusiveHolder(t *testing.T, shell, path string) (release func
 			t.Fatalf("holder said %q", line)
 		}
 		t.Logf("the holder opened the file after %s", time.Since(started).Round(time.Millisecond))
-	case <-time.After(2 * time.Minute):
+	case <-time.After(30 * time.Second):
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		t.Fatalf("the holder did not open the file (holder error output %q)", holderErrors.String())
+		// CPU time tells a hang (none used) from a slow start (busy the whole time).
+		var cpu time.Duration
+		if state := cmd.ProcessState; state != nil {
+			cpu = state.UserTime() + state.SystemTime()
+		}
+		t.Fatalf("the holder did not open the file within 30s (holder cpu time %s, holder error output %q)", cpu, holderErrors.String())
 	}
 	done := false
 	release = func() string {
