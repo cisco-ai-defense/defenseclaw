@@ -26,7 +26,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -38,11 +37,17 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
+// hermesTestAnswer is one answer of the real scanner, kept for a test run.
+type hermesTestAnswer struct {
+	entrypoints []string
+	err         error
+}
+
 var (
 	hermesPythonOnce sync.Once
 	hermesPythonPath string
 	hermesPythonErr  error
-	hermesAnswers    sync.Map
+	hermesAnswers    sync.Map // manifest digest -> hermesTestAnswer
 	// hermesTestPath is the PATH at process start: the plugin fixtures empty
 	// PATH for their own test.
 	hermesTestPath = os.Getenv("PATH")
@@ -77,11 +82,11 @@ func hermesScannerLoader(t *testing.T) hermesManifestLoader {
 	return func(manifests map[string][]byte) ([]string, error) {
 		key := hermesManifestKey(manifests)
 		if cached, ok := hermesAnswers.Load(key); ok {
-			answer := cached.(hermesManifestAnswer)
+			answer := cached.(hermesTestAnswer)
 			return answer.entrypoints, answer.err
 		}
 		entrypoints, err := runHermesManifestCommand(manifests)
-		hermesAnswers.Store(key, hermesManifestAnswer{entrypoints: entrypoints, err: err})
+		hermesAnswers.Store(key, hermesTestAnswer{entrypoints: entrypoints, err: err})
 		return entrypoints, err
 	}
 }
@@ -207,9 +212,11 @@ func TestHermesManifestLoaderFailureBindsEveryCacheFile(t *testing.T) {
 	}
 }
 
-// The scanner is started once for the same manifest bytes, and again when they
-// change.
-func TestHermesManifestLoaderAsksTheScannerOncePerManifest(t *testing.T) {
+// An answer is never remembered (what the scanner declares can change while
+// its launcher and the manifest stay the same), so each request starts the
+// scanner. A failure is remembered briefly for the same manifest, so a scanner
+// that cannot run is not started for every file event.
+func TestHermesManifestLoaderAsksTheScannerEveryTimeAndRemembersOnlyFailures(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell fixture")
 	}
@@ -225,18 +232,35 @@ func TestHermesManifestLoaderAsksTheScannerOncePerManifest(t *testing.T) {
 		data, _ := os.ReadFile(count)
 		return strings.Count(string(data), "x")
 	}
-	first := map[string][]byte{"plugin.yaml": []byte("name: p\n")}
+	manifests := map[string][]byte{"plugin.yaml": []byte("name: p\n")}
 	for range 3 {
-		got, err := load(first)
+		got, err := load(manifests)
 		if err != nil || !slices.Equal(got, []string{"lib/run.js"}) {
 			t.Fatalf("answer = %q, %v", got, err)
 		}
 	}
-	if got := runs(); got != 1 {
-		t.Fatalf("scanner started %d times for one manifest", got)
+	if got := runs(); got != 3 {
+		t.Fatalf("scanner started %d times for three requests", got)
 	}
-	if _, err := load(map[string][]byte{"plugin.yaml": []byte("name: q\n")}); err != nil || runs() != 2 {
-		t.Fatalf("changed manifest: err %v, %d runs", err, runs())
+
+	failCount := filepath.Join(dir, "failures")
+	failScript := filepath.Join(dir, "failing", "defenseclaw")
+	if err := os.MkdirAll(filepath.Dir(failScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	failBody := fmt.Sprintf("#!/bin/sh\necho x >> %q\ncat >/dev/null\nexit 1\n", failCount)
+	if err := os.WriteFile(failScript, []byte(failBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	failing := newHermesManifestCache().loader(&scanner.PluginScanner{BinaryPath: failScript})
+	for range 3 {
+		if _, err := failing(manifests); err == nil {
+			t.Fatal("a failing scanner gave an answer")
+		}
+	}
+	data, _ := os.ReadFile(failCount)
+	if got := strings.Count(string(data), "x"); got != 1 {
+		t.Errorf("a failing scanner was started %d times for three requests, want 1", got)
 	}
 }
 
@@ -423,8 +447,9 @@ func TestHermesManifestOutageBindsNamedCacheFileWhateverTheSpelling(t *testing.T
 		{"yaml alias of an escaped value", "plugin.yaml", "name: p\nnote: &entry \"__pycache__/r\\x75n.pyc\"\nmain: *entry\n", true},
 		{"yaml line continuation", "plugin.yaml", "main: \"__pycache__/ru\\\n      n.pyc\"\n", true},
 		{"yaml single quoted", "plugin.yaml", "main: '__pycache__/run.pyc'\n", true},
-		{"yaml plain list item", "plugin.yaml", "entrypoints:\n  - __pycache__/run.pyc\n", true},
-		{"yaml flow list", "plugin.yaml", "entrypoints: [lib/a.js, __pycache__/run.pyc]\n", true},
+		{"plural key, plain list item (the scanner reads no file from it)", "plugin.yaml", "entrypoints:\n  - __pycache__/run.pyc\n", false},
+		{"plural key, flow list (the scanner reads no file from it)", "plugin.yaml", "entrypoints: [lib/a.js, __pycache__/run.pyc]\n", false},
+		{"bin as a list (the scanner reads no file from it)", "plugin.yaml", "bin: [__pycache__/run.pyc]\n", false},
 		{"yaml anchored plain value", "plugin.yaml", "main: &m __pycache__/run.pyc\n", true},
 		{"dot segments and a leading slash", "plugin.json", `{"main":"/./lib/../__pycache__/run.pyc"}`, true},
 		{"prose that only holds the base name", "plugin.yaml", "name: p\nmain: lib/a.js\ndescription: run.pyc\n", false},
@@ -667,7 +692,7 @@ func TestHermesManifestOutageCandidatesKeepPunctuationOfDeclaredNames(t *testing
 		{"yaml single quoted comma", "plugin.yaml", "name: p\nmain: '__pycache__/run,1.pyc'\n", "__pycache__/run,1.pyc"},
 		{"yaml single quoted doubled quote", "plugin.yaml", "main: '__pycache__/it''s.pyc'\n", "__pycache__/it's.pyc"},
 		{"yaml plain comma", "plugin.yaml", "main: __pycache__/run,1.pyc\n", "__pycache__/run,1.pyc"},
-		{"yaml flow list quoted comma", "plugin.yaml", "entrypoints: [lib/a.js, \"__pycache__/run,1.pyc\"]\n", "__pycache__/run,1.pyc"},
+		{"yaml flow bin map quoted comma", "plugin.yaml", "bin: {a: lib/a.js, b: \"__pycache__/run,1.pyc\"}\n", "__pycache__/run,1.pyc"},
 		{"yaml bin map braces", "plugin.yaml", "bin: {a: lib/a.js, b: '__pycache__/run{1}.pyc'}\n", "__pycache__/run{1}.pyc"},
 		{"yaml bin block map comma", "plugin.yaml", "bin:\n  a: lib/a.js\n  b: \"__pycache__/r,un.pyc\"\n", "__pycache__/r,un.pyc"},
 		{"yaml quoted key", "plugin.yaml", "\"main\": \"__pycache__/run[1].pyc\"\n", "__pycache__/run[1].pyc"},
@@ -764,34 +789,6 @@ func TestHermesManifestOutageEditOfPunctuatedEntrypointReachesScan(t *testing.T)
 	f.w.runRescanCycle(context.Background())
 	if got := f.scan.scans(path); got != firstScans+1 {
 		t.Errorf("an edit of the protected entrypoint caused %d additional scans during the outage, want 1", got-firstScans)
-	}
-}
-
-// hermesEntrypointKeys is the scanner list of keys that start code.
-func TestHermesEntrypointKeysMatchScanner(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join("..", "..", "cli", "defenseclaw", "scanner", "plugin_scanner", "scanner.py"))
-	if err != nil {
-		t.Skipf("plugin scanner: %v", err)
-	}
-	block := regexp.MustCompile(`(?s)_EXECUTABLE_MANIFEST_KEYS\s*=\s*frozenset\(\{(.*?)\}\)`).FindSubmatch(src)
-	if block == nil {
-		t.Fatal("_EXECUTABLE_MANIFEST_KEYS not found in the plugin scanner")
-	}
-	var scanned []string
-	for _, m := range regexp.MustCompile(`"([^"]+)"`).FindAllSubmatch(block[1], -1) {
-		scanned = append(scanned, string(m[1]))
-	}
-	ours := slices.Clone(hermesEntrypointKeys)
-	slices.Sort(scanned)
-	slices.Sort(ours)
-	if len(scanned) == 0 || !slices.Equal(scanned, ours) {
-		t.Fatalf("entrypoint keys = %q, scanner lists %q", ours, scanned)
-	}
-	// declared_entrypoints reads these four keys, all of which must be listed.
-	for _, key := range []string{"main", "bin", "entry", "entrypoint"} {
-		if !slices.Contains(ours, key) {
-			t.Errorf("declared entrypoint key %q is not listed", key)
-		}
 	}
 }
 

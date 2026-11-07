@@ -299,10 +299,10 @@ const hermesManifestMaxEntrypoints = 10000
 // manifest exists that cannot be read, or the scanner cannot answer under a
 // strict or managed policy. When the scanner cannot answer under a policy
 // that fails open (a per-user default or permissive tier), the candidates are
-// every string the manifests hold (hermesManifestCandidates), resolved the
-// same way, so a file that a manifest names, however it spells the name,
-// stays bound, and an ordinary generated cache file is not rejected for an
-// outage of the reader.
+// the entrypoints a parsed tree of the manifests declares
+// (hermesManifestCandidates), resolved the same way, so a file that a manifest
+// declares, however it spells the name, stays bound, and an ordinary generated
+// cache file is not rejected for an outage of the reader.
 func hermesDeclaredFiles(root *os.Root, dir string, load hermesManifestLoader) (declared []fs.FileInfo, every bool) {
 	manifests := map[string][]byte{}
 	for _, name := range hermesManifestFiles {
