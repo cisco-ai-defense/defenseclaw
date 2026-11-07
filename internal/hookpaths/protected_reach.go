@@ -245,16 +245,18 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 	names := m.protectedReachNames(home, sshOnly)
 	raw := target
 	target = filepath.Clean(raw)
-	if names.has(target) {
-		return GradeNamed
-	}
 	if processRelativeLink(target) {
 		// The kernel resolves this hop for the process that opens it; the
 		// hook's own reading proves a different path.
 		return GradePossible
 	}
 	if hasDotDotStep(raw) {
+		// The cleaned spelling names a path the kernel may never open, so
+		// it is not graded before the link walk.
 		return m.dotDotReach(raw, target, home, sshOnly)
+	}
+	if names.has(target) {
+		return GradeNamed
 	}
 	parent := filepath.Dir(target)
 	share := SharePath(target) || SharePath(home)
@@ -447,12 +449,16 @@ func (m *TargetMemo) dotDotReach(raw, clean, home string, sshOnly bool) Grade {
 			return GradePossible
 		}
 	}
-	grade := m.protectedReach(clean, home, sshOnly)
 	physical, ok := m.resolveWriteTarget(raw)
 	if !ok {
-		return grade.Max(GradePossible)
+		// A step the walk could not cross leaves the opened path unproved:
+		// the clean spelling is the strongest lexical reading.
+		return m.protectedReach(clean, home, sshOnly).Max(GradePossible)
 	}
-	return grade.Max(m.protectedReach(physical, home, sshOnly))
+	// Every component was read, so the physical path is the one the kernel
+	// opens. A protected link that only the cleaned spelling names is a
+	// different entry that the kernel never reads.
+	return m.protectedReach(physical, home, sshOnly)
 }
 
 // stateTreeHardlinkReach compares a multiply linked file with the active
