@@ -1068,6 +1068,11 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	}
 	outcomes := dispatchEnterpriseHookStandaloneJobs(ctx, jobsToRun)
 	if err := ctx.Err(); err != nil {
+		// The watch loop interrupted the pass after workers that had
+		// finished put their targets back: those repairs still happened and
+		// are reported, because the next pass finds the files in order
+		// (GAP-0754).
+		reportEnterpriseHookStandaloneInterruptedRepairs(cfg.DataDir, hookSocket, slots, rows, outcomes)
 		return run, err
 	}
 	for index, outcome := range cachedFailures {
@@ -1191,6 +1196,37 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	run.WatchPathOwners = watchPathOwners
 	runEnterpriseHookStandaloneForeignCleanup(ctx, os.Stderr, time.Now(), manifest, enterpriseHookPerUserEnrolled(manifest, machinePolicy), hookSocket)
 	return run, nil
+}
+
+// reportEnterpriseHookStandaloneInterruptedRepairs accounts the targets the
+// workers of an interrupted pass answered as repaired: the repairs record,
+// the audit report to the gateway (on a context the interrupt did not cancel)
+// and the restore entries the next recording pass writes.
+func reportEnterpriseHookStandaloneInterruptedRepairs(dataDir, hookSocket string, slots map[int]enterpriseHookStandaloneSlot,
+	rows []enterpriseHookReconcileRow, outcomes map[int]enterpriseHookStandaloneOutcome) {
+	var repaired []enterpriseHookGuardianRepair
+	var audits []enterpriseHookGuardianAuditReport
+	var restored []enterpriseHookGuardianRestore
+	restoredAt := time.Now().UTC().Format(time.RFC3339Nano)
+	for index, slot := range slots {
+		outcome, ok := outcomes[index]
+		if !ok || !outcome.ok || !outcome.repaired || outcome.result == nil || index >= len(rows) {
+			continue
+		}
+		user, name := rows[index].User, outcome.result.Connector
+		uid := slot.account.UID
+		repaired = append(repaired, enterpriseHookGuardianRepair{User: user, Connector: name})
+		audits = append(audits, enterpriseHookGuardianAuditReport{User: user, UID: uid, Connector: name})
+		restored = append(restored, enterpriseHookGuardianRestore{UID: &uid, User: user, Connector: name, RestoredAt: restoredAt})
+	}
+	if len(repaired) == 0 {
+		return
+	}
+	writeEnterpriseHookGuardianRepairs(dataDir, repaired)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	reportEnterpriseHookGuardianRepairs(ctx, hookSocket, audits)
+	holdEnterpriseHookGuardianRestores(dataDir, restored)
 }
 
 // enterpriseHookCredentialKeyID names the per-user credential key a
