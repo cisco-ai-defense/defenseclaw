@@ -5,6 +5,7 @@ package managed
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -37,10 +38,25 @@ func TestStandaloneLayoutOwnedPathsAreItsPathFields(t *testing.T) {
 }
 
 func TestStandaloneWindowsOwnFoldersAreTheLayoutRoots(t *testing.T) {
-	got := StandaloneWindowsOwnFolders()
-	slices.Sort(got)
-	want := []string{`Cisco\DefenseClaw`, `Cisco\DefenseClaw-HookRuntime`, `Cisco\DefenseClaw-ScannerRuntime`}
-	if !slices.Equal(got, want) {
-		t.Fatalf("own folders = %v, want %v", got, want)
+	for _, roots := range [][2]string{
+		{`C:\Program Files`, `C:\ProgramData`},
+		{`D:\Applications`, `E:\CompanyData\`},
+	} {
+		programFiles, programData := strings.TrimRight(roots[0], `\`), strings.TrimRight(roots[1], `\`)
+		got := StandaloneWindowsOwnFolders(roots[0], roots[1])
+		slices.Sort(got)
+		want := []string{
+			programFiles + `\Cisco\DefenseClaw`,
+			programData + `\Cisco\DefenseClaw`,
+			programData + `\Cisco\DefenseClaw-HookRuntime`,
+			programData + `\Cisco\DefenseClaw-ScannerRuntime`,
+		}
+		slices.Sort(want)
+		if !slices.Equal(got, want) {
+			t.Errorf("own folders under %v = %v, want %v", roots, got, want)
+		}
+	}
+	if got := StandaloneWindowsOwnFolders(`relative`, `C:\ProgramData`); got != nil {
+		t.Errorf("a root that is not an absolute drive path has own folders: %v", got)
 	}
 }
