@@ -83,26 +83,97 @@ try {
 // only one instance installs the transport patch.
 const INTERCEPTOR_STATE_KEY = Symbol.for("defenseclaw.interceptor.state");
 
+/**
+ * Who holds the transport patch right now. Ownership follows the current
+ * holder through every reload, copy and restart: it is named in the shared
+ * state and is never inferred from a mark an earlier holder left behind
+ * (GAP-0745).
+ */
+interface TransportHolder {
+  /**
+   * An older plugin build. It has no queue and no stop hook, and only writes
+   * the shared `installed` mark: true when it installs, false when any of its
+   * copies stops, including a copy that never held the transport.
+   */
+  legacy: boolean;
+  /** Older build: true once the copy that holds the transport has put it back. */
+  restored?: () => boolean;
+  warned?: boolean;
+}
+
 interface InterceptorSharedState {
   llmDomains: string[];
   ollamaPorts: string[];
+  /** True while a holder exists; a write from an older build is read through `owner`. */
   installed: boolean;
   guardrailPort: number | null;
-  /**
-   * Set by an instance of this build when it installs the patch. State whose
-   * owner never set it belongs to an older plugin build still running in this
-   * process, which has no way to be asked to hand the transport over (GAP-0745).
-   */
-  generation?: number;
+  /** The copy that put the transport patch in place, or null. */
+  owner: TransportHolder | null;
   /**
    * start() of every instance that found the transport already patched by
-   * another instance. When the installing instance stops, the next one takes
-   * over, so a plugin reload never leaves the transport unguarded (GAP-0745).
+   * another instance. When the holder stops, the next one takes over, so a
+   * plugin reload never leaves the transport unguarded (GAP-0745).
    */
   waiting: Array<() => void>;
 }
 
-const SHARED_STATE_GENERATION = 2;
+/** Give the transport to the next instance waiting for it, if any. */
+function handOverTransport(): void {
+  const successor = _shared.waiting.shift();
+  if (!successor) return;
+  try {
+    successor();
+  } catch {
+    // The successor reports its own failure; stop() must not throw.
+  }
+}
+
+/**
+ * Route the marks an older build writes through the holder record, so a stop
+ * of a copy that is not the holder, or a second stop of one that already
+ * stopped, cannot take the mark down under the real holder.
+ *   - installed=true from an older build: it holds the transport; it restores
+ *     the fetch it found when it stops.
+ *   - installed=false: the holder is released only when its transport is back.
+ *   - guardrailPort=null while a holder exists is ignored (diagnostic mark).
+ * Remove with the last supported upgrade from 1.0.8 (1.0.10 at the earliest).
+ */
+function adoptSharedMarks(state: InterceptorSharedState): void {
+  if (Object.getOwnPropertyDescriptor(state, "installed")?.get) return; // already adopted
+  const guardedFetch = globalThis.fetch;
+  state.owner = state.installed
+    ? { legacy: true, restored: () => globalThis.fetch !== guardedFetch }
+    : null;
+  let port = state.guardrailPort ?? null;
+  Object.defineProperty(state, "installed", {
+    configurable: true,
+    enumerable: true,
+    get: () => state.owner !== null,
+    set: (value: boolean) => {
+      const holder = state.owner;
+      if (value) {
+        if (holder === null) {
+          const nativeFetch = globalThis.fetch;
+          state.owner = { legacy: true, restored: () => globalThis.fetch === nativeFetch };
+        }
+        return;
+      }
+      if (!holder?.legacy || !holder.restored?.()) return;
+      state.owner = null;
+      port = null;
+      handOverTransport();
+    },
+  });
+  Object.defineProperty(state, "guardrailPort", {
+    configurable: true,
+    enumerable: true,
+    get: () => port,
+    set: (value: number | null) => {
+      if (value === null && state.owner !== null) return;
+      port = value;
+    },
+  });
+}
 
 function getOrCreateSharedState(): InterceptorSharedState {
   const existing = (globalThis as Record<symbol, unknown>)[
@@ -111,6 +182,7 @@ function getOrCreateSharedState(): InterceptorSharedState {
   if (existing) {
     // State created by an older plugin build in this process has no queue.
     existing.waiting ??= [];
+    adoptSharedMarks(existing);
     return existing;
   }
 
@@ -121,8 +193,10 @@ function getOrCreateSharedState(): InterceptorSharedState {
     ollamaPorts: providersConfig.ollama_ports.map(String),
     installed: false,
     guardrailPort: null,
+    owner: null,
     waiting: [],
   };
+  adoptSharedMarks(state);
   (globalThis as Record<symbol, unknown>)[INTERCEPTOR_STATE_KEY] = state;
   return state;
 }
@@ -1528,54 +1602,20 @@ export function createFetchInterceptor(
     return next(opts, handler);
   }
 
-  // True only for the instance that put the transport patch in place: only it
-  // may take the shared "installed" mark back down when it stops.
-  let ownsInstall = false;
+  // Names this instance as the holder of the transport patch: only it may
+  // release the shared owner when it stops.
+  const ownerMark: TransportHolder = { legacy: false };
 
-  /** Give the transport to the next instance waiting for it, if any. */
-  function handOverTransport(): void {
-    const successor = _shared.waiting.shift();
-    if (!successor) return;
-    try {
-      successor();
-    } catch {
-      // The successor reports its own failure; stop() must not throw.
-    }
-  }
-
-  /**
-   * The copy holding the transport is from an older plugin build in this
-   * process. It cannot be asked to stop and has no waiting queue, but its
-   * stop() takes the shared mark down as its last act: watch that write and
-   * install in the same call, so the transport is never left to the native
-   * fetch. While that copy lives it keeps guarding the port it was started
-   * with, and this one stays inactive, which the interceptor-layer warning
-   * reports. A running OpenClaw gateway is only fully on this build after a
-   * restart (GAP-0745). Remove with the last supported upgrade from 1.0.8.
-   */
-  function watchOlderBuildOwner(): void {
-    const mark = Object.getOwnPropertyDescriptor(_shared, "installed");
-    if (!mark || !("value" in mark)) return; // already watched
+  /** An older build holds the transport: this copy waits for it and says so once. */
+  function warnOlderBuildOwner(): void {
+    const holder = _shared.owner;
+    if (!holder?.legacy || holder.warned) return;
+    holder.warned = true;
     console.warn(
       "[defenseclaw] An older DefenseClaw plugin copy still guards this OpenClaw gateway process " +
         `(guardrail port ${String(_shared.guardrailPort)}); this copy takes over when it stops. ` +
         "Restart the OpenClaw gateway to load this version.",
     );
-    Object.defineProperty(_shared, "installed", {
-      configurable: true,
-      enumerable: true,
-      get: () => true,
-      set: (value: boolean) => {
-        if (value) return;
-        Object.defineProperty(_shared, "installed", {
-          configurable: true,
-          enumerable: true,
-          writable: true,
-          value: false,
-        });
-        handOverTransport();
-      },
-    });
   }
 
   function start(): void {
@@ -1589,7 +1629,7 @@ export function createFetchInterceptor(
       // Queue behind the installing instance: if it stops (a plugin reload
       // stops the old copy after the new one registered), this one installs.
       if (!_shared.waiting.includes(start)) _shared.waiting.push(start);
-      if (_shared.generation === undefined) watchOlderBuildOwner();
+      warnOlderBuildOwner();
       // Pass the sidecar token like the first instance does: the
       // endpoint is authenticated, and an unauthenticated call is
       // logged as an api-auth-failure security event.
@@ -1599,10 +1639,8 @@ export function createFetchInterceptor(
       });
       return;
     }
-    _shared.installed = true;
-    _shared.generation = SHARED_STATE_GENERATION;
+    _shared.owner = ownerMark;
     _shared.guardrailPort = guardrailPort;
-    ownsInstall = true;
 
     // The wrappers below call these captured natives, not the mutable
     // fields stop() clears: a model call admitted before a plugin reload
@@ -2432,9 +2470,8 @@ export function createFetchInterceptor(
     }
     const queued = _shared.waiting.indexOf(start);
     if (queued >= 0) _shared.waiting.splice(queued, 1);
-    if (ownsInstall) {
-      ownsInstall = false;
-      _shared.installed = false;
+    if (_shared.owner === ownerMark) {
+      _shared.owner = null;
       _shared.guardrailPort = null;
       handOverTransport();
     }
