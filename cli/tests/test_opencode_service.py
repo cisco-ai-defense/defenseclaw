@@ -71,7 +71,11 @@ def test_uninstall_restarts_the_running_background_server_and_says_so(monkeypatc
     monkeypatch.setattr(cmd_uninstall, "_with_listed_sandboxes", lambda plan, stop: plan)
     monkeypatch.setattr(cmd_uninstall, "_render_plan", lambda plan, dry_run: None)
     monkeypatch.setattr(cmd_uninstall, "_refuse_running_sandboxes", lambda plan: None)
-    monkeypatch.setattr(cmd_uninstall, "_execute_plan", lambda plan: order.append("teardown"))
+    monkeypatch.setattr(
+        cmd_uninstall,
+        "_execute_plan",
+        lambda plan: order.append("teardown") or cmd_uninstall.ExecutionResult(()),
+    )
     # Uninstall hands it the gateway ports it read before the teardown (rel-1-0-2 GAP-0376).
     monkeypatch.setattr(cmd_uninstall, "_remove_marked_native_otel_left", lambda gateway_ports=frozenset(): None)
     monkeypatch.setattr(cmd_uninstall, "_render_kept_and_next_steps", lambda plan: None)

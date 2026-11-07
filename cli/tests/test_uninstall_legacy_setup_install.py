@@ -28,6 +28,7 @@ from click.testing import CliRunner
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from defenseclaw import link_guard  # noqa: E402
 from defenseclaw.commands import cmd_uninstall, legacy_setup_install  # noqa: E402
 
 
@@ -521,7 +522,7 @@ def test_the_owner_check_accepts_this_account_and_administrators_only(monkeypatc
     from defenseclaw import file_permissions
     from defenseclaw.commands import windows_uninstall_helper
 
-    monkeypatch.setattr(legacy_setup_install, "_is_reparse", lambda _path: False)
+    monkeypatch.setattr(link_guard, "is_reparse", lambda _path: False)
     monkeypatch.setattr(windows_uninstall_helper, "_validate_root", lambda _root, _label: None)
     monkeypatch.setattr(file_permissions, "_windows_acl_snapshot", lambda _path: (owner, False, []))
     monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: "S-1-5-21-1-2-3-1001")
