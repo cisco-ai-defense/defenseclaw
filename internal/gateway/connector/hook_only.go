@@ -1234,6 +1234,13 @@ func (c *hookOnlyConnector) migrateDevinConfigTarget(opts SetupOpts, target stri
 func (c *hookOnlyConnector) migrateConfigTarget(opts SetupOpts, target, label string) error {
 	backup, err := loadManagedFileBackupPath(managedFileBackupPath(opts.DataDir, c.name, "config"))
 	if os.IsNotExist(err) {
+		// Older installations can retain a copy or notice after their
+		// receipt is gone. Keep only state bound to this target.
+		if spec, ok := agentConfigSpecFor(c.name); ok {
+			if err := spec.removeOtherTargetState(opts.DataDir, target); err != nil {
+				return fmt.Errorf("retire previous %s restore state: %w", label, err)
+			}
+		}
 		return nil
 	}
 	if err != nil {
@@ -1252,19 +1259,31 @@ func (c *hookOnlyConnector) migrateConfigTarget(opts SetupOpts, target, label st
 		equal = strings.EqualFold(oldPath, newPath)
 	}
 	if equal {
+		// An earlier target's notice can outlive the receipt migration.
+		if spec, ok := agentConfigSpecFor(c.name); ok {
+			if err := spec.removeOtherTargetState(opts.DataDir, target); err != nil {
+				return fmt.Errorf("retire previous %s restore state: %w", label, err)
+			}
+		}
 		return nil
 	}
 	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, "config", oldPath)
 	if err != nil {
 		return fmt.Errorf("restore previous %s config target: %w", label, err)
 	}
-	if restored {
-		return nil
+	if !restored {
+		if err := c.removeConfigEntries(oldPath, c.hookCommand(opts), opts); err != nil {
+			return fmt.Errorf("remove previous %s hook entries: %w", label, err)
+		}
+		discardManagedFileBackup(opts.DataDir, c.name, "config")
 	}
-	if err := c.removeConfigEntries(oldPath, c.hookCommand(opts), opts); err != nil {
-		return fmt.Errorf("remove previous %s hook entries: %w", label, err)
+	// A kept settings copy and restore notice are bound to the old target.
+	// They must not inform a later setup at the new target.
+	if spec, ok := agentConfigSpecFor(c.name); ok {
+		if err := spec.removeOtherTargetState(opts.DataDir, target); err != nil {
+			return fmt.Errorf("retire previous %s restore state: %w", label, err)
+		}
 	}
-	discardManagedFileBackup(opts.DataDir, c.name, "config")
 	return nil
 }
 

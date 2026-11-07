@@ -7,8 +7,17 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
+import stat
+from pathlib import Path
 
-from defenseclaw.hermes_skills import _read_regular_file, _tree_sha256
+from defenseclaw.hermes_skills import (
+    _filesystem_identity,
+    _is_real_directory,
+    _read_regular_file,
+    _tree_sha256,
+)
 
 # SHA-256 of sorted relative paths and file bytes, using the same bounded,
 # non-link tree reader as the Hermes vendor library. These are the published
@@ -21,22 +30,182 @@ VENDOR_DIGESTS = {
 }
 
 
-def is_official_provider_tree(plugin_dir: str) -> bool:
-    """Trust only an unchanged published package with its declared identity."""
+def inspect_official_provider_tree(plugin_dir: str) -> str | None:
+    """Identify published bytes plus validated installer-created peer links."""
 
     manifest = _read_regular_file(
         os.path.join(plugin_dir, "package.json"), max_bytes=64 * 1024,
     )
     if manifest is None:
-        return False
+        return None
     try:
         package = json.loads(manifest)
     except (UnicodeDecodeError, ValueError):
-        return False
+        return None
     if not isinstance(package, dict):
-        return False
+        return None
     name, version = package.get("name"), package.get("version")
     if not isinstance(name, str) or not isinstance(version, str):
-        return False
+        return None
     want = VENDOR_DIGESTS.get((name, version))
-    return bool(want) and _tree_sha256(plugin_dir) == want
+    if not want:
+        return None
+
+    peers = package.get("peerDependencies", {})
+    if not isinstance(peers, dict):
+        return None
+    root = os.path.abspath(plugin_dir)
+    tolerated: set[str] = set()
+    links: dict[str, tuple[str, tuple]] = {}
+    for peer in peers:
+        if not isinstance(peer, str) or not re.fullmatch(
+            r"(?:@[a-z0-9._-]+/)?[a-z0-9._-]+", peer,
+        ) or any(part in (".", "..") for part in peer.split("/")):
+            return None
+        relative = "node_modules/" + peer
+        link = os.path.join(plugin_dir, *relative.split("/"))
+        tolerated.add(relative)
+        try:
+            links[peer] = (link, _validated_peer_link(link, root, peer))
+        except (OSError, ValueError, TypeError, AttributeError):
+            return None
+
+    before_tree = _tree_entry_state(root)
+    if before_tree is None:
+        return None
+    # A same-size edit can retain its mtime, and Windows ctime is creation
+    # time. Recheck the published bytes and links before admitting.
+    for _ in range(2):
+        if _tree_sha256(plugin_dir, tolerated_links=frozenset(tolerated)) != want:
+            return None
+        for peer, (link, before) in links.items():
+            try:
+                if before != _validated_peer_link(link, root, peer):
+                    return None
+            except (OSError, ValueError, TypeError, AttributeError):
+                return None
+        if before_tree != _tree_entry_state(root):
+            return None
+    return name
+
+
+def _tree_entry_state(root: str) -> tuple | None:
+    """Record every in-root entry so the digest describes the final tree."""
+
+    try:
+        root_info = os.stat(root, follow_symlinks=False)
+        if not _is_real_directory(root_info):
+            return None
+        entries = [(".", root_info.st_mode, _filesystem_identity(root_info), None)]
+        pending = [(root, "")]
+        while pending:
+            current, parent = pending.pop()
+            with os.scandir(current) as children:
+                for child in children:
+                    info = child.stat(follow_symlinks=False)
+                    relative = os.path.join(parent, child.name).replace("\\", "/")
+                    target = os.readlink(child.path) if stat.S_ISLNK(info.st_mode) else None
+                    entries.append((relative, info.st_mode, _filesystem_identity(info), target))
+                    if _is_real_directory(info):
+                        pending.append((child.path, relative))
+        return tuple(sorted(entries))
+    except (OSError, ValueError):
+        return None
+
+
+def _validated_peer_link(link: str, root: str, peer: str) -> tuple:
+    """Record the complete in-root path to an optional installer peer link."""
+
+    relative = os.path.relpath(link, root)
+    parts = relative.split(os.sep)
+    ancestors = []
+    current = root
+    for part in ("", *parts[:-1]):
+        if part:
+            current = os.path.join(current, part)
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            ancestors.append(None)
+            return tuple(ancestors), None
+        if not _is_real_directory(info):
+            raise ValueError("peer path contains a non-directory entry")
+        ancestors.append(_filesystem_identity(info))
+
+    try:
+        info = os.lstat(link)
+    except FileNotFoundError:
+        return tuple(ancestors), None
+    if not stat.S_ISLNK(info.st_mode):
+        raise ValueError("peer entry is not a link")
+    destination = os.path.realpath(link)
+    if os.path.commonpath((os.path.realpath(root), destination)) == os.path.realpath(root):
+        raise ValueError("peer link points inside the package")
+    active_root = _active_openclaw_root() if peer == "openclaw" else None
+    if active_root is None or os.path.normcase(destination) != os.path.normcase(active_root):
+        raise ValueError("peer link points outside the active installation")
+    if not stat.S_ISDIR(os.stat(destination, follow_symlinks=False).st_mode):
+        raise ValueError("peer link target is not a directory")
+    manifest = _read_regular_file(
+        os.path.join(destination, "package.json"), max_bytes=1024 * 1024,
+    )
+    if manifest is None or json.loads(manifest).get("name") != peer:
+        raise ValueError("peer link target has another package identity")
+    return tuple(ancestors), (_filesystem_identity(info), os.readlink(link), manifest)
+
+
+def _active_openclaw_root() -> str | None:
+    """Locate the OpenClaw package used by the operator's executable."""
+
+    executable = shutil.which("openclaw")
+    if executable is None:
+        home = Path.home()
+        for candidate in (
+            home / ".npm-global" / "bin" / "openclaw",
+            home / ".local" / "bin" / "openclaw",
+            Path("/usr/local/bin/openclaw"),
+            Path("/opt/homebrew/bin/openclaw"),
+        ):
+            if candidate.is_file():
+                executable = str(candidate)
+                break
+    if executable is None:
+        return None
+
+    def named_package(path: str) -> bool:
+        if (
+            os.path.basename(path) != "openclaw"
+            or os.path.basename(os.path.dirname(path)) != "node_modules"
+        ):
+            return False
+        manifest = _read_regular_file(
+            os.path.join(path, "package.json"), max_bytes=1024 * 1024,
+        )
+        if manifest is None:
+            return False
+        try:
+            return json.loads(manifest).get("name") == "openclaw"
+        except (UnicodeDecodeError, ValueError, AttributeError):
+            return False
+
+    resolved_executable = os.path.realpath(executable)
+    directory = os.path.dirname(resolved_executable)
+    for _ in range(16):
+        if named_package(directory):
+            return directory
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            break
+        directory = parent
+
+    # npm's Windows .cmd shim sits beside node_modules; Unix wrappers can
+    # live in the bin directory of the same npm prefix.
+    bin_dir = os.path.dirname(os.path.abspath(executable))
+    for candidate in (
+        os.path.join(bin_dir, "node_modules", "openclaw"),
+        os.path.join(os.path.dirname(bin_dir), "lib", "node_modules", "openclaw"),
+    ):
+        resolved = os.path.realpath(candidate)
+        if named_package(resolved):
+            return resolved
+    return None

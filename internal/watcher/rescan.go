@@ -1519,7 +1519,23 @@ func (w *InstallWatcher) admissionSnapshot(evt InstallEvent) *TargetSnapshot {
 // alerts for one install (GAP-2507). A target admission moved away gets no
 // baseline.
 func (w *InstallWatcher) recordAdmissionBaseline(evt InstallEvent, snap *TargetSnapshot, res AdmissionResult) {
-	if w.movedByAdmission(evt) || snap == nil || res.ScanID == "" {
+	if w.movedByAdmission(evt) || res.ScanID == "" {
+		return
+	}
+	if !w.cfg.Watch.RescanEnabled {
+		if evt.Type != InstallPlugin || w.secureClientActive() ||
+			(res.Verdict != VerdictRejected && res.Verdict != VerdictBlocked) {
+			return
+		}
+		if snap == nil {
+			var err error
+			snap, err = w.snapshotForEvent(evt)
+			if err != nil {
+				return
+			}
+		}
+	}
+	if snap == nil {
 		return
 	}
 	if _, err := os.Lstat(evt.Path); err != nil {
@@ -1660,6 +1676,8 @@ func (w *InstallWatcher) scannerFingerprint(evt InstallEvent) string {
 		parts = append(parts,
 			"binary="+bin,
 			"binver="+w.scannerBinaryVersion(bin),
+			"policy="+pluginScannerPolicy(cfg, w.eventConnector(evt)),
+			fmt.Sprintf("vendor_identity_disabled=%t", cfg.SecureClientIntegration()),
 			"llm_model="+llm.Model,
 			"llm_provider="+llm.Provider,
 			"llm_base_url="+llm.BaseURL,
@@ -2150,7 +2168,8 @@ func (w *InstallWatcher) snapshotForEvent(evt InstallEvent) (*TargetSnapshot, er
 		if _, err := os.Stat(path); err != nil {
 			return nil, err
 		}
-		return SnapshotTarget(path)
+		return snapshotTarget(path, evt.Type == InstallPlugin &&
+			(w.cfg == nil || !w.cfg.SecureClientIntegration()))
 	}
 }
 

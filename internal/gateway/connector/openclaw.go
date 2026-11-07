@@ -540,12 +540,13 @@ func writeEmbeddedTree(fsys embed.FS, srcRoot, dstRoot string, fileMode, dirMode
 func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropRejectedApprovals bool) error {
 	return withFileLock(configPath, func() error {
 		cfg := map[string]interface{}{}
-		if data, err := os.ReadFile(configPath); err == nil && len(data) > 0 {
-			if err := json.Unmarshal(data, &cfg); err != nil {
+		original, readErr := os.ReadFile(configPath)
+		if readErr == nil && len(original) > 0 {
+			if err := json.Unmarshal(original, &cfg); err != nil {
 				return fmt.Errorf("parse %s: %w", configPath, err)
 			}
-		} else if err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("read %s: %w", configPath, err)
+		} else if readErr != nil && !os.IsNotExist(readErr) {
+			return fmt.Errorf("read %s: %w", configPath, readErr)
 		}
 
 		plugins, _ := cfg["plugins"].(map[string]interface{})
@@ -564,6 +565,9 @@ func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropR
 		entry, _ := entries["defenseclaw"].(map[string]interface{})
 		if entry == nil {
 			entry = map[string]interface{}{}
+		}
+		if err := reconcileOpenClawPluginConfig(entry, configPath, original); err != nil {
+			return err
 		}
 		entry["enabled"] = true
 		entries["defenseclaw"] = entry

@@ -587,3 +587,42 @@ func TestRemoveHookAPITokenRevokesAndRotatesTheCredential(t *testing.T) {
 		t.Fatal("Cursor hook API token was reused after revocation")
 	}
 }
+
+func TestGAP0083InstallSnapshotAcceptsOnlyVerifiedAbsentHooksDirectory(t *testing.T) {
+	const published = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	t.Run("trusted existing data directory", func(t *testing.T) {
+		dataDir := testenv.PrivateTempDir(t)
+		snapshot, err := SnapshotHookAPITokenForInstall(dataDir, "amp", published)
+		if err != nil {
+			t.Fatalf("snapshot empty token directory: %v", err)
+		}
+		if err := PublishHookAPIToken(dataDir, "amp", published); err != nil {
+			t.Fatalf("publish token: %v", err)
+		}
+		if err := snapshot.RestoreIfPublished(); err != nil {
+			t.Fatalf("restore empty snapshot: %v", err)
+		}
+		if token, err := LoadHookAPIToken(dataDir, "amp"); err != nil || token != "" {
+			t.Fatalf("token after restore = present:%t err:%v", token != "", err)
+		}
+	})
+	t.Run("linked hook directory", func(t *testing.T) {
+		dataDir := testenv.PrivateTempDir(t)
+		targetDir := testenv.PrivateTempDir(t)
+		createTestDirectoryRedirect(t, filepath.Join(dataDir, "hooks"), targetDir)
+		if _, err := SnapshotHookAPITokenForInstall(dataDir, "amp", published); err == nil {
+			t.Fatal("linked hook directory accepted")
+		}
+	})
+	if runtime.GOOS != "windows" {
+		t.Run("untrusted data directory", func(t *testing.T) {
+			dataDir := testenv.PrivateTempDir(t)
+			if err := os.Chmod(dataDir, 0o777); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := SnapshotHookAPITokenForInstall(dataDir, "amp", published); err == nil {
+				t.Fatal("untrusted data directory accepted")
+			}
+		})
+	}
+}

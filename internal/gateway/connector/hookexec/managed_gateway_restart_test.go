@@ -35,9 +35,15 @@ func fastRestartRetries(t *testing.T) {
 // refuses or is not running still tries about as many times as it does in
 // production, then gets its outage answer in 0.3 s instead of 3 s
 // (rel-1-0-6 GAP-0660: the package ran past the 11-minute CI limit). The
-// decisions do not depend on the budget's length; the tests that measure
-// the 3 s budget itself (TestManagedRetryEndsAtTheRestartBudgetWhenItCannotConnect,
-// TestPerUserHookBlocksWithinTheBudgetWhenNothingListens) keep it.
+// decisions do not depend on the budget's length. Three tests keep the real
+// 3 s, and must not use this helper:
+//   - TestManagedRetryEndsAtTheRestartBudgetWhenItCannotConnect measures the
+//     budget (elapsed time within +/-0.5 s of it);
+//   - TestPerUserHookBlocksWithinTheBudgetWhenNothingListens measures that
+//     the hook blocks within the budget;
+//   - TestManagedClaudeMissingGatewayKeepsOutageModes places its StartedAt
+//     (-2.5 s) relative to the 3 s, so a shorter budget would test a
+//     different window.
 func shortRestartBudget(t *testing.T) {
 	t.Helper()
 	budget, delay := gatewayRestartBudget, gatewayRestartRetryDelay

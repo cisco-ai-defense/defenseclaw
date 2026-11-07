@@ -2230,6 +2230,10 @@ func ensureWindowsManagedPolicyDirectory(path string) error {
 			return cleanupCreated(fmt.Errorf("enterprise hooks: verify managed policy directory %s: %w", directory, err))
 		}
 	}
+	// A purge removes these folders once they are empty, and only these
+	// (GAP-0091): a folder that already existed is never recorded. Best
+	// effort; an unrecorded folder just stays after a purge.
+	_ = windowsCreatedFolderRecorder(created)
 	return nil
 }
 

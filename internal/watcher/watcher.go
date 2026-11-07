@@ -1408,8 +1408,32 @@ func (w *InstallWatcher) queueDueIssues() {
 		if !slices.ContainsFunc(roots, func(root string) bool { return watcherPathAtOrBelow(issue.Path, root) }) {
 			continue
 		}
+		if issue.Kind == AdmissionNotQuarantined && w.blockedPluginDecisionUnchanged(issue) {
+			continue
+		}
 		w.queuePending(issue.Path)
 	}
+}
+
+// An unchanged, disabled plugin already has a final admission decision. A
+// failed physical move remains visible, while a changed copy is admitted again.
+func (w *InstallWatcher) blockedPluginDecisionUnchanged(issue AdmissionIssue) bool {
+	if issue.Type != string(InstallPlugin) || w.secureClientActive() || w.store == nil {
+		return false
+	}
+	evt := InstallEvent{Type: InstallPlugin, Name: issue.Name, Path: issue.Path, Connector: issue.Connector}
+	entry, err := w.store.GetActionForConnector("plugin", journalName(evt), w.journalScope(w.eventConnector(evt)))
+	if err != nil || entry == nil || entry.Actions.Install != "block" || entry.Actions.Runtime != "disable" ||
+		!sameWatcherPath(entry.SourcePath, evt.Path) {
+		return false
+	}
+	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
+	if err != nil || baseline == nil || baseline.ScanID == "" ||
+		baseline.ScannerFingerprint != w.scannerFingerprint(evt) {
+		return false
+	}
+	current, err := w.snapshotForEvent(evt)
+	return err == nil && current != nil && current.ContentHash == baseline.ContentHash
 }
 
 // watchedRoot is a skill or plugin root Run watches and the folder it was
@@ -1591,6 +1615,12 @@ func (w *InstallWatcher) processPending(ctx context.Context) {
 				}
 				w.state.set(evt, AdmissionScanning)
 				snap := w.admissionSnapshot(evt)
+				if snap == nil && evt.Type == InstallPlugin && !w.cfg.Watch.RescanEnabled &&
+					!w.secureClientActive() && w.store != nil {
+					// Keep the pre-scan identity for a blocked plugin even when
+					// periodic rescan is disabled.
+					snap, _ = w.snapshotForEvent(evt)
+				}
 				result := w.runAdmission(ctx, evt)
 				if result.Interrupted {
 					w.markInterruptedAdmission(evt, snap, w.scannerFingerprint(evt))
@@ -2618,10 +2648,23 @@ func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
 		plugin := scanner.NewPluginScanner(cfg.Scanners.PluginScanner)
 		plugin.Connector = w.eventConnector(evt)
 		plugin.LLM = cfg.ResolveLLM("scanners.plugin")
+		plugin.Policy = pluginScannerPolicy(cfg, plugin.Connector)
+		plugin.DisableVendorIdentity = cfg.SecureClientIntegration()
 		return plugin
 	default:
 		return nil
 	}
+}
+
+// pluginScannerPolicy carries the effective strict tier to the plugin scanner.
+func pluginScannerPolicy(cfg *config.Config, connector string) string {
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return ""
+	}
+	if cfg.HookPolicyTierForConnector(connector) == "strict" {
+		return "strict"
+	}
+	return ""
 }
 
 // defaultScanTimeout bounds a plugin or MCP scan, which have no timeout key.

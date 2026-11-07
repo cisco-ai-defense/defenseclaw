@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
+from typing import Protocol
 
 from defenseclaw.file_permissions import open_regular_file_no_follow
 from defenseclaw.hermes_vendor_digests import VENDOR_DIGESTS
@@ -28,6 +29,10 @@ from defenseclaw.hermes_vendor_digests import VENDOR_DIGESTS
 _SKILL_MARKER_MAX_BYTES = 64 * 1024
 _SKILL_FILE_MAX_BYTES = 64 * 1024 * 1024
 _SKILL_TREE_MAX_BYTES = 256 * 1024 * 1024
+
+
+class _DigestWriter(Protocol):
+    def update(self, data: bytes, /) -> None: ...
 
 
 def _filesystem_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
@@ -93,6 +98,37 @@ def _read_regular_file(path: str, *, max_bytes: int) -> bytes | None:
         os.close(fd)
 
 
+def _hash_regular_file(path: str, size: int, digest: _DigestWriter) -> bool:
+    """Add a bounded regular file to a tree digest without buffering it."""
+
+    try:
+        fd = open_regular_file_no_follow(path)
+    except OSError:
+        return False
+    try:
+        before = os.fstat(fd)
+        if not _is_regular_file(before) or before.st_size != size:
+            return False
+        remaining = size
+        while remaining:
+            chunk = os.read(fd, min(64 * 1024, remaining))
+            if not chunk:
+                return False
+            digest.update(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(fd)
+        named = os.stat(path, follow_symlinks=False)
+        return (
+            not os.read(fd, 1)
+            and _filesystem_identity(before) == _filesystem_identity(after)
+            and os.path.samestat(after, named)
+        )
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
 def skill_name(skill_dir: str) -> str:
     """Return Hermes's manifest identity from ``SKILL.md`` frontmatter."""
 
@@ -119,7 +155,7 @@ def skill_name(skill_dir: str) -> str:
     return fallback
 
 
-def _tree_sha256(skill_dir: str) -> str | None:
+def _tree_sha256(skill_dir: str, *, tolerated_links: frozenset[str] = frozenset()) -> str | None:
     """Hash the complete skill tree for comparison with the vendor digest."""
 
     root = os.path.abspath(skill_dir)
@@ -140,7 +176,11 @@ def _tree_sha256(skill_dir: str) -> str | None:
             safe_dirs: list[str] = []
             for name in dirs:
                 child = os.path.join(current, name)
-                if _is_real_directory(os.stat(child, follow_symlinks=False)):
+                info = os.stat(child, follow_symlinks=False)
+                relative = os.path.relpath(child, root).replace("\\", "/")
+                if stat.S_ISLNK(info.st_mode) and relative in tolerated_links:
+                    continue
+                if _is_real_directory(info):
                     safe_dirs.append(name)
                 else:
                     return None
@@ -148,6 +188,9 @@ def _tree_sha256(skill_dir: str) -> str | None:
             for name in names:
                 full = os.path.join(current, name)
                 info = os.stat(full, follow_symlinks=False)
+                relative = os.path.relpath(full, root).replace("\\", "/")
+                if stat.S_ISLNK(info.st_mode) and relative in tolerated_links:
+                    continue
                 if not _is_regular_file(info):
                     return None
                 if info.st_size > _SKILL_FILE_MAX_BYTES:
@@ -155,7 +198,7 @@ def _tree_sha256(skill_dir: str) -> str | None:
                 tree_bytes += info.st_size
                 if tree_bytes > _SKILL_TREE_MAX_BYTES:
                     return None
-                files.append((os.path.relpath(full, root).replace("\\", "/"), full, info.st_size))
+                files.append((relative, full, info.st_size))
     except OSError:
         return None
 
@@ -164,11 +207,9 @@ def _tree_sha256(skill_dir: str) -> str | None:
         files,
         key=lambda item: item[0],
     ):
-        payload = _read_regular_file(full, max_bytes=size)
-        if payload is None:
-            return None
         digest.update(relative.encode("utf-8"))
-        digest.update(payload)
+        if not _hash_regular_file(full, size, digest):
+            return None
     try:
         root_after = os.stat(root, follow_symlinks=False)
     except OSError:
