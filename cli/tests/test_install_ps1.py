@@ -215,7 +215,7 @@ def _after_env_options(env_word, words, environ, cwd) -> tuple:  # type: ignore[
         if newdir is None:
             return cwd
         target = os.path.realpath(os.path.join(cwd, newdir))
-        return target if newdir and os.path.isdir(target) else None
+        return target if newdir and _can_enter(target) else None
 
     while i < len(words) and isinstance(words[i], str):
         word = words[i]
@@ -319,6 +319,10 @@ def _command_word(args, kwargs):  # type: ignore[no-untyped-def]
     # hands the next the environment its own options and assignments left.
     environ = kwargs["env"] if kwargs.get("env") is not None else os.environ
     cwd = os.fsdecode(os.fspath(kwargs["cwd"])) if kwargs.get("cwd") is not None else os.curdir
+    if not _can_enter(cwd):
+        # Popen changes into cwd before it looks the program up and raises
+        # when it cannot: that is the launch failing, not the program missing.
+        return _NO_COMMAND, environ, cwd
     while words:
         if not isinstance(words[0], (str, os.PathLike)) or _base_name(words[0]) not in _ENV_NAMES:
             return words[0], environ, cwd
@@ -326,23 +330,48 @@ def _command_word(args, kwargs):  # type: ignore[no-untyped-def]
     return _NO_COMMAND, environ, cwd
 
 
+def _can_enter(directory) -> bool:  # type: ignore[no-untyped-def]
+    # Whether a process can change into `directory`: a directory that exists
+    # and can be searched. One that is missing, not a directory or closed to
+    # this user is a launch that fails, whatever program it names.
+    return os.path.isdir(directory) and os.access(directory, os.X_OK)
+
+
+def _may_exist(path: str) -> bool:
+    # Whether `path` is there for exec to try. Only the no-such-file answer
+    # (ENOENT, or ENOTDIR for a parent that is a file) means absent; exec skips
+    # those candidates and reports the program missing. A file that is not
+    # executable, a directory, a dangling link or a parent this user may not
+    # search are all present: starting them fails (EACCES, ELOOP), and that
+    # failure belongs in the test result, not in a skip that says PowerShell
+    # is not installed.
+    try:
+        os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def _is_found_in(word, environ, cwd) -> bool:  # type: ignore[no-untyped-def]
-    # Whether the operating system finds `word` the way exec does, from `cwd`,
-    # the directory the command starts in: a word with a separator is a path;
-    # a bare name is looked for on the PATH of the environment the command
-    # starts in (the default path where that environment has none; an empty
-    # entry is the current directory), not the PATH of this process, and not
-    # in the directory this process happens to be in. A relative path and a
-    # relative PATH entry both start at `cwd`. Windows searches by its own
-    # rules, from this process's directory.
+    # Whether the operating system has `word` to try the way exec looks, from
+    # `cwd`, the directory the command starts in: a word with a separator is a
+    # path; a bare name is looked for on the PATH of the environment the
+    # command starts in (the default path where that environment has none; an
+    # empty entry is the current directory), not the PATH of this process, and
+    # not in the directory this process happens to be in. A relative path and
+    # a relative PATH entry both start at `cwd`. Present means present, not
+    # runnable (see _may_exist). Windows searches by its own rules, from this
+    # process directory.
     word = os.fsdecode(os.fspath(word))
     if os.name == "nt":
         if os.path.isfile(word):
             return True
         return any(shutil.which(word, path=folder or os.curdir) for folder in os.get_exec_path(environ))
     if os.sep in word:
-        return os.path.isfile(os.path.join(cwd, word))
-    return any(shutil.which(word, path=os.path.join(cwd, folder or os.curdir)) for folder in os.get_exec_path(environ))
+        return _may_exist(os.path.join(cwd, word))
+    return any(_may_exist(os.path.join(cwd, folder or os.curdir, word)) for folder in os.get_exec_path(environ))
 
 
 def _launches_a_missing_powershell(args, kwargs) -> bool:  # type: ignore[no-untyped-def]
@@ -5566,6 +5595,74 @@ def test_a_relative_path_still_runs_where_powershell_is_not_installed(
     for refused in (str(tmp_path / "no-such-folder"), ""):
         done = subprocess.run([env, "-C", refused, "pwsh"], capture_output=True, check=False)
         assert done.returncode == 125
+
+
+def _launch_outcome(launch: list, kwargs: dict) -> str:
+    try:
+        return f"exit {subprocess.run(launch, capture_output=True, check=False, **kwargs).returncode}"
+    except OSError as error:
+        return type(error).__name__
+
+
+def test_a_powershell_that_is_present_but_cannot_start_is_not_taken_for_a_missing_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The gate skips a test only where the operating system finds no PowerShell.
+    # A program that is there but cannot be started (not executable, a
+    # directory) and a launch directory that cannot be entered fail the launch
+    # for another reason, and that failure has to reach the test, directly and
+    # behind env and env -C, as it does for the real launch.
+    if os.name == "nt":
+        pytest.skip("the lookup checked here is POSIX exec")
+    env = shutil.which("env")
+    if env is None or not _env_is_gnu_coreutils(env):
+        pytest.skip("the -C grammar checked here is GNU coreutils")
+    if any(shutil.which(name) for name in ("pwsh", "powershell", "pwsh.exe", "powershell.exe")):
+        pytest.skip("PowerShell is installed")
+    monkeypatch.setenv("LC_ALL", "C")
+    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
+    child = tmp_path / "child"
+    (child / "bin").mkdir(parents=True)
+    program = child / "bin" / "pwsh"
+    program.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (child / "directory" / "pwsh").mkdir(parents=True)
+    closed = tmp_path / "closed"
+    closed.mkdir()
+    closed.chmod(0)
+    try:
+        # (launch, kwargs, what the real launch does)
+        cases = [
+            (["pwsh"], {"cwd": child, "env": {"PATH": "bin"}}, "PermissionError"),
+            ([env, "PATH=bin", "pwsh"], {"cwd": child}, "exit 126"),
+            ([env, "-C", str(child), "PATH=bin", "pwsh"], {}, "exit 126"),
+            (["directory/pwsh"], {"cwd": child}, "PermissionError"),
+            ([env, "-C", str(child), "directory/pwsh"], {}, "exit 126"),
+            (["pwsh"], {"cwd": tmp_path / "no-such-folder", "env": {"PATH": "bin"}}, "FileNotFoundError"),
+            (["pwsh"], {"cwd": program, "env": {"PATH": "bin"}}, "NotADirectoryError"),
+        ]
+        if not os.access(closed, os.X_OK):  # a user the mode does not bind (root) can enter it
+            cases += [
+                ([env, "-C", str(closed), "pwsh"], {}, "exit 125"),
+                (["pwsh"], {"cwd": closed, "env": {"PATH": "bin"}}, "PermissionError"),
+            ]
+        # A present program that does run is the control: same call shapes, mode 0755.
+        program.chmod(0o755)
+        for launch, kwargs in [cases[0][:2], cases[1][:2], cases[2][:2]]:
+            assert _launch_outcome(launch, kwargs) == "exit 0", (launch, kwargs)
+            assert not _launches_a_missing_powershell(launch, kwargs), (launch, kwargs)
+        program.chmod(0o644)
+        _skip_powershell_calls_when_missing(monkeypatch)
+        for launch, kwargs, expected in cases:
+            with _gate_off("running the real launch"):
+                assert _launch_outcome(launch, kwargs) == expected, (launch, kwargs)
+            assert not _launches_a_missing_powershell(launch, kwargs), (launch, kwargs)
+            try:
+                gated = _launch_outcome(launch, kwargs)
+            except pytest.skip.Exception:  # a skip here would hide the broken target this test is for
+                pytest.fail(f"a launch that fails for another reason was skipped as a missing PowerShell: {launch} {kwargs}")
+            assert gated == expected, (launch, kwargs)
+    finally:
+        closed.chmod(0o700)
 
 
 def test_env_actions_that_run_no_powershell_still_run_where_it_is_not_installed(
