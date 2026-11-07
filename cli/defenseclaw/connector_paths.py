@@ -3118,64 +3118,79 @@ class PluginCustodyPath(str):
 def opencode_unsafe_plugin_paths(plugin_paths: list[str]) -> list[PluginCustodyPath]:
     """Return every element of an OpenCode plugin destination the gateway refuses, outermost first.
 
-    Ask each element of the literal folder chain the gateway's own questions
+    Ask each element of the folder chain the gateway's own questions
     (``hookAPIValidateDirectoryChainWith`` and the plugin-file check in
     ``internal/gateway/connector``): is it a link or not a folder, can another
     account write it by mode, is its owner untrusted, does an access list grant
-    write. The chain is not resolved first, because the gateway refuses a link
-    whatever it points to. The gateway checks the leaf first and stops there,
-    but fixing the leaf does not clear the refusal while a folder above it is
-    as open, so every refused element is returned (folders from the top down,
-    then the plugin file), and :func:`opencode_custody_text` gives the one
-    repair. Ancestors the gateway judges only advisory (the Secure Client tree)
-    are not part of a per-user config folder and are not mirrored here.
+    write. The gateway checks the leaf first and stops there, but fixing the
+    leaf does not clear the refusal while a folder above it is as open, so
+    every refused element is returned (folders from the top down, then the
+    plugin file), and :func:`opencode_custody_text` gives the one repair.
+
+    A link the gateway refuses (whatever it points to) is returned and ends the
+    walk: the folders below it change when it is replaced. A link it accepts (a
+    root-owned system link) leads to a folder it then judges as well, so the
+    resolved chain is judged too. Ancestors the gateway judges only advisory
+    (the Secure Client tree) are not part of a per-user config folder and are
+    not mirrored here.
     """
     if os.name == "nt":
         return []
-    from defenseclaw.file_permissions import plugin_link_refused
 
     for plugin_path in plugin_paths:
         plugin = os.path.abspath(plugin_path)
         plugin_folder = os.path.dirname(plugin)
-        folder = plugin_folder
-        ancestors = []
-        while True:
-            ancestors.append(folder)
-            parent = os.path.dirname(folder)
-            if parent == folder:
-                break
-            folder = parent
         unsafe: list[PluginCustodyPath] = []
-        for folder in reversed(ancestors):
+        if _opencode_judge_folders(plugin_folder, unsafe):
+            resolved = os.path.realpath(plugin_folder)
+            if resolved != plugin_folder:
+                _opencode_judge_folders(resolved, unsafe)
             try:
-                info = os.lstat(folder)
+                info = os.lstat(plugin)
             except OSError:
-                continue
-            if stat.S_ISLNK(info.st_mode):
-                if plugin_link_refused(folder, info, leaf=folder == plugin_folder):
-                    unsafe.append(PluginCustodyPath(folder, "link"))
-                continue
-            if not stat.S_ISDIR(info.st_mode):
-                unsafe.append(PluginCustodyPath(folder, "link"))
-                continue
-            # A root-owned sticky ancestor above the plugin folder (/tmp) is
-            # accepted by mode, as in the gateway.
-            sticky = folder != plugin_folder and info.st_uid == 0 and bool(info.st_mode & stat.S_ISVTX)
-            problems = _opencode_element_problems(folder, info, sticky)
-            if problems:
-                unsafe.append(PluginCustodyPath(folder, *problems))
-        try:
-            info = os.lstat(plugin)
-        except OSError:
-            info = None
-        if info is not None:
-            if not stat.S_ISREG(info.st_mode):
-                unsafe.append(PluginCustodyPath(plugin, "link"))
-            elif problems := _opencode_element_problems(plugin, info, False):
-                unsafe.append(PluginCustodyPath(plugin, *problems))
+                info = None
+            if info is not None:
+                if not stat.S_ISREG(info.st_mode):
+                    unsafe.append(PluginCustodyPath(plugin, "link"))
+                elif problems := _opencode_element_problems(plugin, info, False):
+                    unsafe.append(PluginCustodyPath(plugin, *problems))
         if unsafe:
             return unsafe
     return []
+
+
+def _opencode_judge_folders(leaf: str, unsafe: list[PluginCustodyPath]) -> bool:
+    """Judge *leaf* and its ancestors, outermost first, into *unsafe*; False after a refused link or non-folder."""
+    from defenseclaw.file_permissions import plugin_link_refused
+
+    chain = []
+    folder = leaf
+    while True:
+        chain.append(folder)
+        parent = os.path.dirname(folder)
+        if parent == folder:
+            break
+        folder = parent
+    for folder in reversed(chain):
+        try:
+            info = os.lstat(folder)
+        except OSError:
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            if plugin_link_refused(folder, info, leaf=folder == leaf):
+                unsafe.append(PluginCustodyPath(folder, "link"))
+                return False
+            continue
+        if not stat.S_ISDIR(info.st_mode):
+            unsafe.append(PluginCustodyPath(folder, "link"))
+            return False
+        # A root-owned sticky ancestor above the plugin folder (/tmp) is
+        # accepted by mode, as in the gateway.
+        sticky = folder != leaf and info.st_uid == 0 and bool(info.st_mode & stat.S_ISVTX)
+        problems = _opencode_element_problems(folder, info, sticky)
+        if problems and folder not in unsafe:
+            unsafe.append(PluginCustodyPath(folder, *problems))
+    return True
 
 
 def _opencode_element_problems(path: str, info: os.stat_result, sticky: bool) -> list[str]:
@@ -3196,39 +3211,38 @@ class OpenCodeCustodyAdvice(NamedTuple):
     """What to tell the user about the paths :func:`opencode_unsafe_plugin_paths` returned.
 
     ``named`` is the path list for a sentence, ``why`` the cause, ``action`` the
-    sentence that fixes it, and ``command`` the shell command in it (empty when
-    the repair is not a command).
+    sentence that fixes it, ``command`` the shell command in it (empty when no
+    repair is a command) and ``manual`` the steps only a person can do (empty
+    when the command is the whole repair).
     """
 
     named: str
     why: str
     action: str
     command: str
+    manual: str = ""
+
+    @property
+    def remedy(self) -> str:
+        """The shell command alone when it is the whole repair, else the full sentence."""
+        return self.action if self.manual else (self.command or self.action)
 
 
 def opencode_custody_text(unsafe: list[PluginCustodyPath]) -> OpenCodeCustodyAdvice:
-    """Return the one account of how to clear *unsafe*, matching what each element failed on.
+    """Return the one account of how to clear *unsafe*, one repair per refused element.
 
-    A link or non-folder is named alone, because no permission change clears
-    it (the gateway refuses a link whatever it points to). Otherwise the mode,
-    access-list and owner repairs are combined: ``chmod go-w`` for the first,
-    ``setfacl -b`` (Linux) or ``chmod -N`` (macOS) for the second, and an
-    administrator for the third, which no command of this account can do.
+    ``chmod go-w`` clears a mode, ``setfacl -b`` (Linux) or ``chmod -N``
+    (macOS) an access list; those are the command. Replacing a link or
+    non-folder (no permission change clears it, the gateway refuses a link
+    whatever it points to) and an owner no command of this account can fix are
+    steps by hand, named separately, never joined into the command.
     """
 
     def quote(paths: list[PluginCustodyPath]) -> str:
         return " ".join(shlex.quote(path) for path in paths)
 
-    links = [path for path in unsafe if "link" in path.problems]
-    if links:
-        named = ", ".join(links)
-        return OpenCodeCustodyAdvice(
-            named,
-            "is a link or not a folder, which the gateway refuses whatever it points to",
-            f"replace {quote(links)} with a real folder owned by this account (changing permissions does not clear it)",
-            "",
-        )
     named = unsafe[0] if len(unsafe) == 1 else f"{unsafe[0]} (and {', '.join(unsafe[1:])})"
+    links = [path for path in unsafe if "link" in path.problems]
     chmod = [path for path in unsafe if "mode" in path.problems]
     # On Linux the group bits of a path with an access list are its mask, so
     # the chmod above also removes the list's effective write.
@@ -3244,17 +3258,28 @@ def opencode_custody_text(unsafe: list[PluginCustodyPath]) -> OpenCodeCustodyAdv
     if acl:
         steps.append(("chmod -N " if sys.platform == "darwin" else "setfacl -b ") + quote(acl))
     command = " && ".join(steps)
-    action = f"run `{command}`" if command else ""
+    by_hand = []
+    if links:
+        by_hand.append(
+            f"replace {quote(links)} with a real folder or file owned by this account "
+            "(a link is refused whatever it points to; changing permissions does not clear it)"
+        )
     if owner:
-        handover = f"have an administrator give {quote(owner)} back to this account"
-        action = f"{action} and {handover}" if action else handover
-    if all(path.problems == ("mode",) for path in unsafe):
+        by_hand.append(f"have an administrator give {quote(owner)} back to this account")
+    manual = "; ".join(by_hand)
+    action = f"run `{command}`" if command else ""
+    if manual:
+        action = f"{action}, then {manual}" if action else manual
+    problems = {problem for path in unsafe for problem in path.problems}
+    if problems == {"mode"}:
         why = "is group/other writable"
-    elif all(path.problems == ("owner",) for path in unsafe):
+    elif problems == {"owner"}:
         why = "is owned by another account"
+    elif problems == {"link"}:
+        why = "is a link or not a folder, which the gateway refuses whatever it points to"
     else:
-        why = "is not private to this account (mode, owner or access list)"
-    return OpenCodeCustodyAdvice(named, why, action, command)
+        why = "is not private to this account (mode, owner, access list or link)"
+    return OpenCodeCustodyAdvice(named, why, action, command, manual)
 
 
 def _opencode_config_dir() -> str:

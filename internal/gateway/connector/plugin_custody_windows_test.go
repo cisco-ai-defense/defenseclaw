@@ -21,9 +21,9 @@ import (
 // is set, with one icacls command that names the account.
 func TestGAP0731RefusalNamesTheCarrierAndTheIcaclsCommand(t *testing.T) {
 	cause := &safefile.UnsafePrivateDACLError{
-		Path:    `C:\Users\lane\.config\opencode\plugins`,
-		Carrier: `C:\Users\lane\.config\opencode`,
-		Trustee: `HOST\other`,
+		Path:     `C:\Users\lane\.config\opencode\plugins`,
+		Carriers: []string{`C:\Users\lane\.config\opencode`},
+		Trustee:  `HOST\other`,
 	}
 	err := explainPluginArtifactRefusal(`C:\Users\lane\.config\opencode\plugins\defenseclaw.js`, cause)
 	if !errors.Is(err, ErrPluginFolderCustody) || !errors.Is(err, cause) {
@@ -32,6 +32,17 @@ func TestGAP0731RefusalNamesTheCarrierAndTheIcaclsCommand(t *testing.T) {
 	want := `fix: icacls "C:\Users\lane\.config\opencode" /remove:g "HOST\other"`
 	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("message lacks %q:\n%v", want, err)
+	}
+	// An entry granted at two levels is removed at both, each as its own
+	// complete command (review 2 of GAP-0731).
+	two := &safefile.UnsafePrivateDACLError{
+		Path:     `C:\Users\lane\.config\opencode\plugins`,
+		Carriers: []string{`C:\Users\lane\.config`, `C:\Users\lane\.config\opencode`},
+		Trustee:  `HOST\other`,
+	}
+	wantTwo := `fix: icacls "C:\Users\lane\.config" /remove:g "HOST\other"; icacls "C:\Users\lane\.config\opencode" /remove:g "HOST\other"`
+	if got := explainPluginArtifactRefusal("", two).Error(); !strings.Contains(got, wantTwo) {
+		t.Fatalf("message lacks %q:\n%s", wantTwo, got)
 	}
 	cause.Deny = true
 	if got := explainPluginArtifactRefusal("", cause).Error(); !strings.Contains(got, `/remove:d "HOST\other"`) {

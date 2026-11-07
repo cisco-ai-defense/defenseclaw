@@ -32,6 +32,16 @@ func custodyFixture(t *testing.T, configMode, opencodeMode os.FileMode) (config,
 	return config, opencode, filepath.Join(plugins, "defenseclaw.js")
 }
 
+// skipWhenRootLinksAreTrusted skips a test that needs the walk to refuse a link
+// in the folder chain: a root-owned link inside a root-owned private parent is
+// a trusted system link, so under root the test's own links are accepted.
+func skipWhenRootLinksAreTrusted(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("a link made by root is a trusted system link")
+	}
+}
+
 // GAP-0730: the walk checks the leaf first, so the refusal named the leaf
 // while a folder above it was just as open and fixing the leaf did not clear
 // it. Every refused folder is named, outermost first, with one command.
@@ -89,6 +99,7 @@ func TestGAP0730RefusalNamesAPluginFileOthersCanWrite(t *testing.T) {
 // refusal that is not about permissions is given no chmod (a link in the chain
 // is not fixed with one).
 func TestGAP0730PrivateFoldersStayAcceptedAndOtherRefusalsKeepTheirText(t *testing.T) {
+	skipWhenRootLinksAreTrusted(t)
 	_, opencode, plugin := custodyFixture(t, 0o755, 0o755)
 	if err := validatePluginArtifactDestination(plugin); err != nil {
 		t.Fatalf("private folders refused: %v", err)
@@ -117,6 +128,7 @@ func TestGAP0730PrivateFoldersStayAcceptedAndOtherRefusalsKeepTheirText(t *testi
 // offered and the link is named (review 1 of GAP-0730). A link to a private
 // target and a link to an open one are refused with the same advice.
 func TestGAP0730LinkToAnOpenFolderIsNamedAndGetsNoChmod(t *testing.T) {
+	skipWhenRootLinksAreTrusted(t)
 	for _, mode := range []os.FileMode{0o700, 0o777} {
 		_, opencode, _ := custodyFixture(t, 0o755, mode)
 		link := filepath.Join(filepath.Dir(opencode), "linked")
@@ -158,5 +170,88 @@ func TestGAP0730FixCommandQuotesPathsThatNeedIt(t *testing.T) {
 		if got := pluginCustodyQuote(in); got != want {
 			t.Fatalf("quote(%q)=%q, want %q", in, got, want)
 		}
+	}
+}
+
+// A refusal can have more than one cause: a link below an open folder is two
+// refusals, and the second shows only after the first is fixed. Each gets its
+// own repair, the open folder a chmod and the link a replacement by hand, and
+// the shell command carries no prose (review 2 of GAP-0730).
+func TestGAP0730LinkBelowAnOpenFolderGetsBothRepairs(t *testing.T) {
+	config, opencode, _ := custodyFixture(t, 0o777, 0o700)
+	link := filepath.Join(config, "linked")
+	if err := os.Symlink(opencode, link); err != nil {
+		t.Skip("symlinks unavailable")
+	}
+	err := validatePluginArtifactDestination(filepath.Join(link, "plugins", "defenseclaw.js"))
+	if err == nil || !errors.Is(err, ErrPluginFolderCustody) {
+		t.Fatalf("err=%v", err)
+	}
+	text := err.Error()
+	command, manual, found := strings.Cut(text[strings.Index(text, "; fix: ")+len("; fix: "):], "; then by hand: ")
+	if !found {
+		t.Fatalf("no command followed by a step by hand:\n%s", text)
+	}
+	if command != "chmod go-w "+config {
+		t.Fatalf("the shell command must be the chmod alone, got %q:\n%s", command, text)
+	}
+	if !strings.Contains(manual, "replace "+link) || strings.Contains(manual, "chmod") {
+		t.Fatalf("the link is replaced by hand, with no chmod: %q", manual)
+	}
+}
+
+// The command is only commands: an owner nobody here can change is a step by
+// hand, never joined to a mode repair with &&.
+func TestGAP0730FixCommandHoldsNoProse(t *testing.T) {
+	fix := custodyFix{}
+	fix.add("/a/open", true, false, false)
+	fix.add("/a/other-owner", false, false, true)
+	fix.addStructure("/a/link")
+	if got := fix.command(); got != "chmod go-w /a/open" {
+		t.Fatalf("command=%q, want the chmod alone", got)
+	}
+	manual := fix.manual()
+	if !strings.Contains(manual, "replace /a/link") || !strings.Contains(manual, "have an administrator give /a/other-owner back to this account") {
+		t.Fatalf("manual=%q", manual)
+	}
+	err := &pluginCustodyError{cause: errors.New("refused"), failing: fix.failing, fix: fix.command(), manual: manual}
+	if want := "; fix: chmod go-w /a/open; then by hand: replace /a/link"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("message lacks %q:\n%v", want, err)
+	}
+	owner := custodyFix{}
+	owner.add("/a/other-owner", false, false, true)
+	if owner.command() != "" || !strings.Contains((&pluginCustodyError{cause: errors.New("x"), failing: owner.failing, manual: owner.manual()}).Error(), "; by hand: have an administrator") {
+		t.Fatal("an owner-only refusal has no command")
+	}
+}
+
+// A link the walk accepts (a root-owned system link) leads to a folder the
+// walk also judges; the explainer must name that folder too, or the gateway
+// refuses and the repair is missing. Needs root to make the accepted link.
+func TestGAP0730AcceptedLinkDoesNotHideAnOpenTarget(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("an accepted system link is root-owned")
+	}
+	base := t.TempDir()
+	if err := os.Chmod(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(base, "real")
+	plugins := filepath.Join(real, "opencode", "plugins")
+	if err := os.MkdirAll(plugins, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(real, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(base, "sys")); err != nil {
+		t.Skip("symlinks unavailable")
+	}
+	err := validatePluginArtifactDestination(filepath.Join(base, "sys", "opencode", "plugins", "defenseclaw.js"))
+	if err == nil || !errors.Is(err, ErrPluginFolderCustody) {
+		t.Fatalf("err=%v", err)
+	}
+	if !strings.Contains(err.Error(), "fix: chmod go-w "+real) {
+		t.Fatalf("the open target of an accepted link is not named:\n%v", err)
 	}
 }

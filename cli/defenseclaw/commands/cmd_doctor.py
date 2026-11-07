@@ -11413,7 +11413,7 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                         f"plugin installed at {path}, but {advice.named} {advice.why}, "
                         "so the next gateway start refuses to load OpenCode",
                         r=r,
-                        remediation=f"{advice.command or advice.action}, then defenseclaw-gateway restart",
+                        remediation=f"{advice.remedy}, then defenseclaw-gateway restart",
                     )
                 else:
                     status, runtime_detail = _opencode_load_heartbeat_status(cfg)
@@ -11742,15 +11742,17 @@ def _amp_non_defenseclaw_direct_plugins(cfg) -> list[str]:
 
 
 _RECORDED_REASON_CAUSE_LIMIT = 400
-_RECORDED_REASON_FIX_LIMIT = 1200
+#: A repair longer than this (dozens of deep folders) is left out, said so, instead of being cut mid-command.
+_RECORDED_REASON_FIX_LIMIT = 8192
 
 
 def _bounded_recorded_reason(reason: object) -> str:
-    """Whitespace-collapse the gateway's recorded reason and bound it without dropping the repair.
+    """Whitespace-collapse the gateway's recorded reason and bound its cause, never its repair.
 
     The gateway ends a custody refusal with ``; fix: <command>``. Bounding the
-    whole text would cut that command off, so the cause is bounded and the
-    ``; fix:`` tail is kept whole up to a larger limit.
+    whole text would cut that command off, so only the cause is bounded and
+    the ``; fix:`` tail is kept whole. A tail past the (large) limit is not
+    shown cut: the row says it was left out and where the whole text is.
     """
     text = " ".join(str(reason).split())
     head, marker, fix = text.rpartition("; fix: ")
@@ -11758,7 +11760,9 @@ def _bounded_recorded_reason(reason: object) -> str:
         return text if len(text) <= _RECORDED_REASON_CAUSE_LIMIT else text[:_RECORDED_REASON_CAUSE_LIMIT] + "…"
     if len(head) > _RECORDED_REASON_CAUSE_LIMIT:
         head = head[:_RECORDED_REASON_CAUSE_LIMIT] + "…"
-    return head + marker + fix[:_RECORDED_REASON_FIX_LIMIT]
+    if len(fix) > _RECORDED_REASON_FIX_LIMIT:
+        return f"{head}; the repair is {len(fix)} characters, too long for this row: gateway.log has it whole"
+    return head + marker + fix
 
 
 def _check_connector_skipped_at_start(connector: str, live_health: dict | None, r: _DoctorResult) -> None:

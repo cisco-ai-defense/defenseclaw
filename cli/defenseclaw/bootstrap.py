@@ -2343,7 +2343,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
                 "warn",
                 f"{advice.named} {advice.why}, so the gateway does not install the OpenCode plugin there; "
                 f"{advice.action}, then run `defenseclaw-gateway restart`",
-                advice.command or "defenseclaw setup opencode",
+                advice.remedy,
             )
         return StepResult(
             "Connector",

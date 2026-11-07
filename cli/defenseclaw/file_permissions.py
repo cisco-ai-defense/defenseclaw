@@ -172,15 +172,60 @@ def plugin_owner_untrusted(info: os.stat_result) -> bool:
     return not _plugin_trusted_owner(info.st_uid)
 
 
+def _plugin_darwin_acl_refused(path: str) -> bool:
+    """The gateway's macOS ACL rule for a plugin folder or file (hook_api_acl_darwin.go).
+
+    The standalone managed profile refuses any allow entry with a write-class
+    right. Every other scope (a per-user install, Secure Client) refuses only
+    an effective allow entry with a write-class right for a principal other
+    than root, wheel and admin, and leaves read, deny, inherit-only and those
+    trusted entries alone. An ACL that cannot be read or parsed is a refusal in
+    both. Asking the stricter rule everywhere would warn about, and make setup
+    refuse, a folder the gateway accepts.
+    """
+    mode_field, acl_text = _darwin_acl_output(path)
+    if not mode_field:
+        return True
+    if not acl_text:
+        return "+" in mode_field
+    if _plugin_standalone_scope():
+        return _darwin_acl_allows(acl_text, _DARWIN_ACL_WRITE_PERMISSIONS)
+    for raw_line in acl_text.splitlines():
+        index, colon, entry = raw_line.strip().lower().partition(":")
+        if not colon or not index.isdigit():
+            continue
+        fields = entry.split()
+        verb = next((i for i, field in enumerate(fields) if field in ("allow", "deny")), -1)
+        if verb < 1 or verb + 1 >= len(fields):
+            return True
+        if fields[verb] != "allow" or fields[0] in _DARWIN_ACL_TRUSTED_PRINCIPALS:
+            continue
+        rights = set(fields[verb + 1].split(","))
+        if rights & _DARWIN_ACL_WRITE_PERMISSIONS and "only_inherit" not in rights:
+            return True
+    return False
+
+
+def _plugin_standalone_scope() -> bool:
+    """Whether the gateway on this host judges by the standalone managed profile."""
+    try:
+        from defenseclaw.envvars import managed_standalone
+
+        return managed_standalone()
+    except (ImportError, OSError, ValueError, RuntimeError):
+        return False
+
+
 def plugin_acl_refused(path: str) -> bool:
     """True when the gateway's ACL rule would refuse *path* (hook_api_acl_{linux,darwin}.go).
 
-    macOS: any allow entry with a write-class right. Linux: an NFSv4 ACL, an
+    macOS: the rule of the gateway's trust scope (see
+    :func:`_plugin_darwin_acl_refused`). Linux: an NFSv4 ACL, an
     unreadable or incomplete POSIX ACL, or a POSIX ACL whose effective write
     belongs to a group, to other, or to a named user that is not trusted.
     """
     if sys.platform == "darwin":
-        return darwin_acl_write_error(path) is not None
+        return _plugin_darwin_acl_refused(path)
     getxattr = getattr(os, "getxattr", None)
     if getxattr is None:
         return False
@@ -1142,6 +1187,25 @@ def _darwin_acl_output(path: str | os.PathLike[str]) -> tuple[str, str]:
     return mode_field, "\n".join(lines[1:])
 
 
+_DARWIN_ACL_WRITE_PERMISSIONS = frozenset(
+    {
+        "add_file",
+        "add_subdirectory",
+        "append",
+        "chown",
+        "delete",
+        "delete_child",
+        "write",
+        "writeattr",
+        "writeextattr",
+        "writesecurity",
+    }
+)
+#: Principals whose allow entries the gateway ignores outside the standalone
+#: profile: they hold administrator authority on macOS already.
+_DARWIN_ACL_TRUSTED_PRINCIPALS = frozenset({"user:root", "group:wheel", "group:admin"})
+
+
 def _darwin_acl_allows(acl_text: str, permissions: frozenset[str]) -> bool:
     for raw_line in acl_text.splitlines():
         line = raw_line.strip().lower()
@@ -1176,21 +1240,9 @@ def darwin_acl_write_error(path: str | os.PathLike[str]) -> str | None:
         return "extended ACL could not be inspected"
     if not acl_text:
         return "extended ACL could not be interpreted" if "+" in mode_field else None
-    write_permissions = frozenset(
-        {
-            "add_file",
-            "add_subdirectory",
-            "append",
-            "chown",
-            "delete",
-            "delete_child",
-            "write",
-            "writeattr",
-            "writeextattr",
-            "writesecurity",
-        }
-    )
-    return "extended ACL grants additional write access" if _darwin_acl_allows(acl_text, write_permissions) else None
+    if _darwin_acl_allows(acl_text, _DARWIN_ACL_WRITE_PERMISSIONS):
+        return "extended ACL grants additional write access"
+    return None
 
 
 def _clear_darwin_extended_acl(fd: int, path: str) -> None:
