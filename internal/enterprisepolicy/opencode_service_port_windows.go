@@ -54,3 +54,10 @@ func writeOpenCodeServiceConfig(home, path string, data []byte) error {
 	}
 	return safefile.Write(path, data)
 }
+
+// openCodeImportFileTrusted reports that service.json belongs to the account or
+// the system owners and no other account has write access (the DACL check the
+// write uses).
+func openCodeImportFileTrusted(path string, _ *os.File) bool {
+	return !openCodeServiceFileShared(path)
+}

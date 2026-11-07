@@ -160,3 +160,11 @@ func openCodeServiceFileShared(path string) bool {
 	info, err := os.Lstat(path)
 	return err != nil || info.Mode().Perm()&0o022 != 0
 }
+
+// openCodeImportFileTrusted reports that the open service.json is owned by
+// this account or root and that no group or other account can write it. It
+// asks the open file, not the path, so what is read is what was checked.
+func openCodeImportFileTrusted(_ string, file *os.File) bool {
+	info, err := file.Stat()
+	return err == nil && openCodeTrustedOwner(info) && info.Mode().Perm()&0o022 == 0
+}
