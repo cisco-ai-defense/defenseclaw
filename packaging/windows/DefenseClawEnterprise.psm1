@@ -41443,35 +41443,6 @@ function Invoke-DefenseClawTombstoneUserStatePurge {
     }
 }
 
-function Remove-DefenseClawHookHolderAuditQueue {
-    <#
-        GAP-0755: the hook guardian keeps the audit rows of the hook handles
-        it closed in hook-guardian\holder-audit-queue.json until the gateway
-        has them. After an uninstall nothing would ever send them, and a later
-        install must not send rows about a hook that is gone. Removes the
-        file and the <file>.tmp-<process id> an interrupted save leaves.
-        The folder is administrator-only and its services are gone; a name
-        that is a link is removed as a link, never followed.
-    #>
-    param([Parameter(Mandatory)][hashtable]$Layout)
-    $directory = [string]$Layout.GuardianDirectory
-    if (-not [IO.Directory]::Exists($directory)) {
-        return
-    }
-    foreach ($path in @([IO.Directory]::GetFiles($directory, 'holder-audit-queue.json*'))) {
-        $name = [IO.Path]::GetFileName($path)
-        if ($name -ne 'holder-audit-queue.json' -and -not $name.StartsWith('holder-audit-queue.json.tmp-', [StringComparison]::OrdinalIgnoreCase)) {
-            continue
-        }
-        try {
-            [IO.File]::Delete($path)
-        }
-        catch {
-            Microsoft.PowerShell.Utility\Write-Warning "could not remove ${path}: $($_.Exception.Message)"
-        }
-    }
-}
-
 function Invoke-DefenseClawCommittedUninstallCleanup {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -41685,7 +41656,6 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
         }
         return $result
     }
-    Remove-DefenseClawHookHolderAuditQueue -Layout $Layout
     [void](Revoke-DefenseClawManagedIPCServiceAccess `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
