@@ -89,6 +89,10 @@ type candidate struct {
 	start    int
 	end      int
 	accepted bool
+	// continues marks a further range of the span the previous candidate
+	// started (a span split around product folder names). It is one lexical
+	// span, so it does not count toward the candidate or match limits again.
+	continues bool
 }
 
 type acceptedMatch struct {
@@ -135,6 +139,7 @@ func DetectAndRedact(
 	}
 	accepted := make([]acceptedMatch, 0, 8)
 	candidateCount := 0
+	acceptedSpans := 0
 	for _, definition := range generatedCatalogDefinitions {
 		if _, ok := enabled[definition.id]; !ok {
 			continue
@@ -144,9 +149,11 @@ func DetectAndRedact(
 			return failedDetection(codeFromError(scanErr))
 		}
 		for _, item := range found {
-			candidateCount++
-			if candidateCount > MaxFieldCandidates {
-				return failedDetectionWithCandidates(FailureCandidateLimit, candidateCount)
+			if !item.continues {
+				candidateCount++
+				if candidateCount > MaxFieldCandidates {
+					return failedDetectionWithCandidates(FailureCandidateLimit, candidateCount)
+				}
 			}
 			if !validCandidate(item, len(input), definition.candidateBound) || !item.accepted {
 				continue
@@ -155,13 +162,16 @@ func DetectAndRedact(
 				start: item.start, end: item.end, id: definition.id,
 				group: definition.group, order: definition.order,
 			})
-			if len(accepted) > MaxFieldMatches {
+			if !item.continues {
+				acceptedSpans++
+			}
+			if acceptedSpans > MaxFieldMatches {
 				return failedDetectionWithCandidates(FailureFieldMatchLimit, candidateCount)
 			}
 		}
 	}
 
-	if !recordBudget.consume(len(accepted)) {
+	if !recordBudget.consume(acceptedSpans) {
 		return failedDetectionWithCandidates(FailureRecordMatchLimit, candidateCount)
 	}
 	clusters := clusterMatches(accepted)

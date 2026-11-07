@@ -221,3 +221,36 @@ func TestProductFolderBesideMixedCaseNamesStaysVisible(t *testing.T) {
 		}
 	}
 }
+
+// A product folder does not use up the field budgets: a field that repeats
+// ordinary product-folder paths stays within the candidate limit exactly as the
+// same field with an ordinary folder name does, and a field of secret-bearing
+// paths stays within the match limit, one span being one candidate and one match
+// however many ranges the folder splits it into.
+func TestProductFolderPathsStayWithinFieldBudgets(t *testing.T) {
+	t.Parallel()
+	key := make([]byte, hashV1KeySize)
+	detect := func(input string) DetectionResult {
+		t.Helper()
+		result, err := DetectAndRedact(input, observability.FieldClassContent, DetectorGroups(), key, NewRecordMatchBudget())
+		if err != nil {
+			t.Fatalf("DetectAndRedact: %v (%q...)", err, result.Value)
+		}
+		return result
+	}
+	for _, folder := range []string{productlayout.WindowsHookRuntimeFolder, productlayout.ProductFolder} {
+		ordinary := detect(strings.Repeat(`/opt/cisco/`+folder+`/x `, 200))
+		control := detect(strings.Repeat(`/opt/cisco/Ordinary-Hook/x `, 200))
+		if ordinary.Failure != "" || ordinary.Value != strings.Repeat(`/opt/cisco/`+folder+`/x `, 200) {
+			t.Errorf("repeated %s paths redacted or failed: failure=%q", folder, ordinary.Failure)
+		}
+		if ordinary.LexicalCandidates > control.LexicalCandidates {
+			t.Errorf("%s: %d lexical candidates, ordinary folder %d", folder, ordinary.LexicalCandidates, control.LexicalCandidates)
+		}
+	}
+	plain := productlayout.ProductFolder
+	secret := detect(strings.Repeat(plantedPathToken+`/`+plain+`/`+plantedPathToken+` `, 200))
+	if secret.Failure != "" || strings.Contains(secret.Value, plantedPathToken) || !strings.Contains(secret.Value, plain) {
+		t.Errorf("repeated secret paths: failure=%q folderKept=%v tokenLeft=%v", secret.Failure, strings.Contains(secret.Value, plain), strings.Contains(secret.Value, plantedPathToken))
+	}
+}

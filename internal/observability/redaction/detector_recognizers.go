@@ -625,9 +625,9 @@ func recognizeHighEntropy(input string, fieldClass observability.FieldClass, pri
 			continue
 		}
 		accepted = accepted && validHighEntropy(joinRanges(span, parts), fieldClass)
-		for _, part := range parts {
+		for i, part := range parts {
 			start, end := index[0]+part[0], index[0]+part[1]
-			result = append(result, candidate{start: start, end: end, accepted: accepted && !overlapsCredentialClaim(start, end, prior)})
+			result = append(result, candidate{start: start, end: end, accepted: accepted && !overlapsCredentialClaim(start, end, prior), continues: i > 0})
 		}
 	}
 	return result
