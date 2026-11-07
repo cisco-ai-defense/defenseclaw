@@ -1018,6 +1018,9 @@ func TestWriteWindowsPreservesStricterExistingDACL(t *testing.T) {
 	if err := Write(path, []byte("second")); err != nil {
 		t.Fatal(err)
 	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "second" {
+		t.Fatalf("published body = %q, err = %v", data, err)
+	}
 	if got := windowsAllowMaskForSID(t, path, system); got != wantSystemMask {
 		t.Fatalf("SYSTEM mask = 0x%x, want preserved 0x%x", uint32(got), uint32(wantSystemMask))
 	}

@@ -201,14 +201,27 @@ func TestAtomicWriteFilePublishesChangedContent(t *testing.T) {
 	if err := atomicWriteFile(path, []byte("old\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.Stat(path)
+	beforeFile, err := os.Open(path)
 	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := beforeFile.Stat()
+	if err != nil {
+		_ = beforeFile.Close()
+		t.Fatal(err)
+	}
+	if err := beforeFile.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if err := atomicWriteFile(path, []byte("new\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	after, err := os.Stat(path)
+	afterFile, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer afterFile.Close()
+	after, err := afterFile.Stat()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +253,7 @@ func TestBoundWindowsConfigReplacementKeepsHeldReader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer stage.Close()
+	t.Cleanup(func() { _ = stage.Close() })
 	name, err := windows.UTF16PtrFromString(targetPath)
 	if err != nil {
 		t.Fatal(err)
@@ -255,6 +268,9 @@ func TestBoundWindowsConfigReplacementKeepsHeldReader(t *testing.T) {
 	defer reader.Close()
 	if err := renameAtomicTransformBoundFilePlatform(parent, stage, "settings.json", true); err != nil {
 		t.Fatalf("publish while old file is held: %v", err)
+	}
+	if err := stage.Close(); err != nil {
+		t.Fatal(err)
 	}
 	oldBody, err := io.ReadAll(reader)
 	if err != nil || string(oldBody) != "old body" {

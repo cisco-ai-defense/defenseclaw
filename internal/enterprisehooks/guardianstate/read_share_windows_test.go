@@ -6,10 +6,12 @@
 package guardianstate
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
@@ -44,5 +46,27 @@ func TestReadStateReadsAnOrdinaryFile(t *testing.T) {
 	}
 	if got := ReadState(path); got != StateWaitingForTargets {
 		t.Fatalf("ordinary state = %q, want %q", got, StateWaitingForTargets)
+	}
+}
+
+func TestWriteStatePublishesWhileOldReaderIsHeld(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	if err := WriteState(path, StateWaitingForTargets); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := winpath.OpenReadShared(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	if err := WriteState(path, StateReady); err != nil {
+		t.Fatalf("replace state while old reader is held: %v", err)
+	}
+	oldBody, err := io.ReadAll(reader)
+	if err != nil || string(oldBody) != StateWaitingForTargets+"\n" {
+		t.Fatalf("held reader body = %q, err = %v", oldBody, err)
+	}
+	if got := ReadState(path); got != StateReady {
+		t.Fatalf("published state = %q, want %q", got, StateReady)
 	}
 }

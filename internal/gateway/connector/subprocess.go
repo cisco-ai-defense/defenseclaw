@@ -2429,13 +2429,31 @@ func readStableManagedRuntimeFileForOwner(
 	maxBytes int64,
 	expectedOwnerSID string,
 ) ([]byte, bool, error) {
+	var data []byte
+	var exists bool
+	err := safefile.RetryTransientRead(func() error {
+		var readErr error
+		data, exists, readErr = readStableManagedRuntimeFileForOwnerOnce(
+			path, label, maxBytes, expectedOwnerSID,
+		)
+		return readErr
+	})
+	if allowMissing && errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	return data, exists, err
+}
+
+// Each attempt binds pathname, opened handle, protection and body together.
+func readStableManagedRuntimeFileForOwnerOnce(
+	path, label string,
+	maxBytes int64,
+	expectedOwnerSID string,
+) ([]byte, bool, error) {
 	if maxBytes <= 0 {
 		return nil, false, fmt.Errorf("%s has an invalid read limit", label)
 	}
 	expected, err := pathidentity.LstatPinned(path)
-	if errors.Is(err, os.ErrNotExist) && allowMissing {
-		return nil, false, nil
-	}
 	if err != nil {
 		return nil, false, err
 	}
@@ -2461,7 +2479,7 @@ func readStableManagedRuntimeFileForOwner(
 	}
 	if opened.Mode()&os.ModeSymlink != 0 || !opened.Mode().IsRegular() ||
 		!os.SameFile(expected, opened) {
-		return nil, false, fmt.Errorf("%s changed identity before open", label)
+		return nil, false, fmt.Errorf("%s changed identity before open: %w", label, safefile.ErrReadIdentityChanged)
 	}
 	if err := validateHookRuntimeOpenedFile(file, label); err != nil {
 		return nil, false, err
@@ -2515,7 +2533,7 @@ func readStableManagedRuntimeFileForOwner(
 		!between.ModTime().Equal(opened.ModTime()) ||
 		!after.ModTime().Equal(opened.ModTime()) ||
 		!bytes.Equal(first, second) {
-		return nil, false, fmt.Errorf("%s changed during bounded read", label)
+		return nil, false, fmt.Errorf("%s changed during bounded read: %w", label, safefile.ErrReadIdentityChanged)
 	}
 	return first, true, nil
 }
