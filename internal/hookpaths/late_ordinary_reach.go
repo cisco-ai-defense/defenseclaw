@@ -72,7 +72,7 @@ func (s *lateScan) follow(path string) (string, bool) {
 			continue
 		}
 		hops++
-		text, err := os.Readlink(next)
+		text, err := pathReadlink(next)
 		if hops > 40 || err != nil || strings.IndexByte(text, 0) >= 0 || lateNamesProtected(text) {
 			return "", false
 		}
@@ -129,7 +129,7 @@ func (s *lateScan) reachesProtected(real string, info os.FileInfo) bool {
 // the first lateHomeEntries entries it can read.
 func (s *lateScan) listRoots() {
 	s.reach.haveRoots = true
-	entries, _ := os.ReadDir(s.home)
+	entries, _ := pathReadDir(s.home)
 	if len(entries) > lateHomeEntries {
 		entries = entries[:lateHomeEntries]
 	}
@@ -137,7 +137,7 @@ func (s *lateScan) listRoots() {
 		if !lateNamesProtected(entry.Name()) {
 			continue
 		}
-		real, err := filepath.EvalSymlinks(filepath.Join(s.home, entry.Name()))
+		real, err := pathEvalSymlinks(filepath.Join(s.home, entry.Name()))
 		if err != nil {
 			continue
 		}
@@ -176,7 +176,7 @@ func (s *lateScan) indexRoots() {
 		}
 	}
 	for _, root := range s.reach.rootPaths {
-		_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		_ = pathWalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 			if visited++; visited > lateReachEntries {
 				return fs.SkipAll
 			}
