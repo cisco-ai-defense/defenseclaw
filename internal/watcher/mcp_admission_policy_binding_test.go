@@ -6,9 +6,11 @@ package watcher
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
 // The live policy and the definition are read after an admission starts. A
@@ -291,5 +293,137 @@ func TestPostScanFindingOnAStableDefinitionStillDisablesIt(t *testing.T) {
 	}
 	if state := h.journal(*server); state.Runtime != "disable" || state.Install != "block" {
 		t.Fatalf("a finding on a stable definition did not disable it: %+v", state)
+	}
+}
+
+// A block an earlier failed scan left belongs to the definition that failed.
+// It is released only when the admission that releases it has settled on the
+// definition it was started for: a definition that changes again while the
+// policy is read decides nothing, and the block stays.
+
+// failedJudgeScanner is a scanner whose judge failed, so the scan ends as a
+// failure that blocks the server.
+func failedJudgeScanner() scanner.Scanner {
+	return &countingScanner{name: "mcp-scanner", findings: []scanner.Finding{{
+		RuleID: scanner.RuleLLMAnalysisFailed, Severity: scanner.SeverityHigh, Title: "judge unavailable",
+	}}}
+}
+
+// blockedByFailedScan returns a harness whose server a failed scan blocked.
+func blockedByFailedScan(t *testing.T) *definitionChangeHarness {
+	t.Helper()
+	h := newDefinitionChangeHarness(t, enrolledMCPServer(t.TempDir(), "1001", "faulty"))
+	h.w.cfg.Guardrail.RulePack = "balanced"
+	h.w.scannerFactory = func(InstallEvent) scanner.Scanner { return failedJudgeScanner() }
+	if got := h.poll(); len(got) != 1 || got[0].Verdict != VerdictBlocked {
+		t.Fatalf("initial failed scan: %+v", got)
+	}
+	if state := h.journal(h.servers[0]); state.Install != "block" || state.Runtime != "disable" {
+		t.Fatalf("initial scan failure not blocked: %+v", state)
+	}
+	return h
+}
+
+// A clean scan of a changed definition releases the earlier block when the
+// definition stays as it was scanned.
+func TestCleanScanOfTheSnapshottedDefinitionReleasesTheScanFailureBlock(t *testing.T) {
+	h := blockedByFailedScan(t)
+	h.w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "mcp-scanner"} }
+	server := &h.servers[0]
+	server.Args = []string{"-y", "ordinary-new"}
+	evt := policyBindingEvent(*server)
+	snap, err := h.w.snapshotForEvent(evt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := h.w.runAdmission(context.Background(), evt.admittingSnapshot(snap))
+	if res.Interrupted || res.Verdict != VerdictClean {
+		t.Fatalf("clean scan of a stable definition: %+v", res)
+	}
+	if state := h.journal(*server); state.Install == "block" || state.Runtime == "disable" {
+		t.Fatalf("a clean scan of the snapshotted definition kept the block: %+v", state)
+	}
+}
+
+// A clean scan whose definition changes again at the post-scan policy read
+// releases nothing: the definition now in the file is unscanned.
+func TestCleanScanDoesNotReleaseTheScanFailureBlockOfAMovedDefinition(t *testing.T) {
+	h := blockedByFailedScan(t)
+	h.w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "mcp-scanner"} }
+	server := &h.servers[0]
+	server.Args = []string{"-y", "ordinary-new"}
+	evt := policyBindingEvent(*server)
+	snap, err := h.w.snapshotForEvent(evt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reads := 0
+	h.w.SetAdmissionPolicySource(func() AdmissionPolicySnapshot {
+		reads++
+		if reads == 2 {
+			server.Args = []string{"-y", "unscanned-new"}
+		}
+		return AdmissionPolicySnapshot{Config: h.w.cfg}
+	})
+	res := h.w.runAdmission(context.Background(), evt.admittingSnapshot(snap))
+	if reads < 2 || !res.Interrupted {
+		t.Fatalf("post-scan change not interrupted: reads=%d result=%+v", reads, res)
+	}
+	if state := h.journal(*server); state.Install != "block" || state.Runtime != "disable" {
+		t.Fatalf("the unscanned definition lost the scan-failure block: status=%+v journal=%+v", statusOf(h, *server), state)
+	}
+}
+
+// A server the scanner refuses releases the earlier block when the definition
+// stays as it was scanned: the balanced tier keeps it with a warning.
+func TestRefusedDefinitionReleasesTheScanFailureBlockWhenStable(t *testing.T) {
+	h := blockedByFailedScan(t)
+	server := &h.servers[0]
+	server.Command, server.Args = "node", []string{"server.js"}
+	evt := policyBindingEvent(*server)
+	snap, err := h.w.snapshotForEvent(evt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.w.scannerFactory = func(InstallEvent) scanner.Scanner {
+		return &scriptedMCPScanner{h: h, fail: errors.New(nodeRefusal)}
+	}
+	res := h.w.runAdmission(context.Background(), evt.admittingSnapshot(snap))
+	if res.Interrupted || res.Verdict != VerdictScanError {
+		t.Fatalf("refused stable definition: %+v", res)
+	}
+	if state := h.journal(*server); state.Install == "block" || state.Runtime == "disable" {
+		t.Fatalf("a kept, refused definition left the scan-failure block of the one it replaced: %+v", state)
+	}
+}
+
+// A refusal whose definition changes at the policy read that decides to keep
+// it releases nothing.
+func TestRefusedDefinitionDoesNotReleaseTheScanFailureBlockOfAMovedDefinition(t *testing.T) {
+	h := blockedByFailedScan(t)
+	server := &h.servers[0]
+	server.Command, server.Args = "node", []string{"server.js"}
+	evt := policyBindingEvent(*server)
+	snap, err := h.w.snapshotForEvent(evt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.w.scannerFactory = func(InstallEvent) scanner.Scanner {
+		return &scriptedMCPScanner{h: h, fail: errors.New(nodeRefusal)}
+	}
+	reads := 0
+	h.w.SetAdmissionPolicySource(func() AdmissionPolicySnapshot {
+		reads++
+		if reads == 2 {
+			server.Command, server.Args = "npx", []string{"-y", "decoy-new"}
+		}
+		return AdmissionPolicySnapshot{Config: h.w.cfg}
+	})
+	res := h.w.runAdmission(context.Background(), evt.admittingSnapshot(snap))
+	if reads < 2 || !res.Interrupted {
+		t.Fatalf("policy-read change not interrupted: reads=%d result=%+v", reads, res)
+	}
+	if state := h.journal(*server); state.Install != "block" || state.Runtime != "disable" {
+		t.Fatalf("an unscanned definition lost the scan-failure block: status=%+v journal=%+v", statusOf(h, *server), state)
 	}
 }
