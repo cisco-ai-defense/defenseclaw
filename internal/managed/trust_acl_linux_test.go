@@ -47,3 +47,30 @@ func TestCheckPOSIXAccessACL(t *testing.T) {
 		}
 	}
 }
+
+// The account rule skips a named entry for root or the account, not for
+// another account or a group (GAP-0053 REVIEW-7 MF1).
+func TestPOSIXAccessACLForAccountSkipsOnlyRootAndTheAccount(t *testing.T) {
+	const userObj, other = 0x01, 0x20
+	skip := func(tag uint16, id uint32) bool { return tag == posixACLUser && (id == 0 || id == 1000) }
+	acl := func(kind uint32, id uint32) []byte {
+		return posixACL([3]uint32{userObj, 7, 0}, [3]uint32{kind, 7, id}, [3]uint32{posixACLMask, 7, 0}, [3]uint32{other, 5, 0})
+	}
+	for _, tc := range []struct {
+		name    string
+		acl     []byte
+		wantErr bool
+	}{
+		{"root", acl(posixACLUser, 0), false},
+		{"the account", acl(posixACLUser, 1000), false},
+		{"another account", acl(posixACLUser, 1001), true},
+		{"a group of the same number", acl(posixACLGroup, 1000), true},
+	} {
+		if err := checkPOSIXAccessACLFor("/x", tc.acl, skip); (err != nil) != tc.wantErr {
+			t.Fatalf("%s: error %v, want refusal=%v", tc.name, err, tc.wantErr)
+		}
+		if err := checkPOSIXAccessACL("/x", tc.acl); err == nil {
+			t.Fatalf("%s: the strict rule accepted a named writer", tc.name)
+		}
+	}
+}

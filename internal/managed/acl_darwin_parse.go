@@ -173,3 +173,32 @@ func JudgeDarwinACLOutputStrict(path string, output []byte) error {
 	}
 	return nil
 }
+
+// JudgeDarwinACLOutputForAccount is the rule for a path the account itself
+// owns (its own configuration folders): the strict rule of
+// JudgeDarwinACLOutputStrict, except that an allow entry for root, wheel,
+// admin or the account itself is not judged. Those principals can change the
+// path whatever its list says, so the entry adds no authority; an entry for
+// any other principal, "everyone" and inherit-only entries included, is a
+// permission verdict. Output that cannot be parsed is a plain error.
+func JudgeDarwinACLOutputForAccount(path string, output []byte, account string) error {
+	entries, err := parseDarwinACLEntries(path, output)
+	if err != nil {
+		return err
+	}
+	self := ""
+	if account != "" {
+		self = "user:" + strings.ToLower(account)
+	}
+	var writers []string
+	for _, entry := range entries {
+		if !entry.Allow || !entry.grantsWrite() || darwinTrustedACLPrincipals[entry.Principal] || entry.Principal == self {
+			continue
+		}
+		writers = append(writers, entry.Principal)
+	}
+	if len(writers) > 0 {
+		return newTrustVerdict("%s has a write-capable macOS ACL entry for %s", path, strings.Join(writers, ","))
+	}
+	return nil
+}

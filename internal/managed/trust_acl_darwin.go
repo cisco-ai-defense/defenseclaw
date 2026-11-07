@@ -125,3 +125,12 @@ func judgeDarwinPathACLStrict(path string) error {
 	}
 	return JudgeDarwinACLOutputStrict(path, output)
 }
+
+// validateAccountPathACL is ValidatePathACLForAccount on macOS.
+func validateAccountPathACL(path string, _ int, account string) error {
+	output, err := readDarwinACL(path)
+	if err != nil {
+		return err
+	}
+	return JudgeDarwinACLOutputForAccount(path, output, account)
+}

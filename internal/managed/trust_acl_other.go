@@ -9,3 +9,5 @@ package managed
 func validateTrustedPathACL(string) error { return nil }
 
 func validateStrictPathACL(string) error { return nil }
+
+func validateAccountPathACL(string, int, string) error { return nil }
