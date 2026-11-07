@@ -144,6 +144,7 @@ from defenseclaw.file_permissions import (
     windows_acl_custody_confidentiality_error,
     windows_acl_custody_write_error,
     windows_acl_write_error,
+    windows_untrusted_writer_sid,
 )
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.logger import (
@@ -7630,9 +7631,8 @@ def setup_guardrail(
             app.cfg, capture_runtime=_windows_runtime_rollback(restart)
         )
     except OSError as exc:
-        raise click.ClickException(
-            f"cannot establish guardrail setup rollback point: {exc}\n{_SETUP_ROLLBACK_POINT_NEXT_STEP}"
-        ) from exc
+        reason, next_step = _setup_rollback_point_failure(exc)
+        raise click.ClickException(f"cannot establish guardrail setup rollback point: {reason}\n{next_step}") from exc
 
     protected_selection: _VerifiedSetupAgentSelections | None = None
     selection_attempted = False
@@ -8785,11 +8785,13 @@ class RollbackSourceRefusedError(OSError):
     (cowork-1-0-8 GAP-0074).
     """
 
-    def __init__(self, label: str, path: str, problem: str, kind: str) -> None:
+    def __init__(self, label: str, path: str, problem: str, kind: str, detail: str | None = None) -> None:
         self.label = label
         self.path = path
         self.problem = problem
         self.kind = kind
+        self.detail = detail
+        self._account: tuple[str, str] | None = None
         super().__init__(self._render("the file", "run the command again"))
 
     def _render(self, file: str, rerun: str) -> str:
@@ -8805,6 +8807,30 @@ class RollbackSourceRefusedError(OSError):
     def for_user(self, command: str) -> str:
         """The message with the full path, for the account that owns the file."""
         return self._render(self.path, f"run {command} again")
+
+    def writer(self) -> tuple[str, str] | None:
+        """The account that can write the file, as (name for a sentence, icacls argument), on Windows."""
+        if (sid := windows_untrusted_writer_sid(self.detail)) is None:
+            return None
+        if self._account is None:
+            try:
+                from defenseclaw.inventory.claw_inventory import _windows_account_name_for_sid
+
+                name = _windows_account_name_for_sid(sid)
+            except Exception:  # noqa: BLE001 - an unresolved account is named by its SID, which icacls takes after *.
+                name = ""
+            self._account = (name, f'"{name}"') if name else (sid, f"*{sid}")
+        return self._account
+
+    def repair(self, path: str | None = None) -> tuple[str, str]:
+        """The one way out as (sentence, command) for the full path; the command is empty when only a person acts."""
+        shown = path or self.path
+        if (writer := self.writer()) is not None:
+            command = f'icacls "{shown}" /remove:g {writer[1]}'
+            return "Remove that account's access to it, then run the command again:", command
+        if self.kind == "shared":
+            return "Make it owner-only, then run the command again:", f"chmod 600 {shlex.quote(shown)}"
+        return "Move it out of the folder, or delete it if you did not create it, then run the command again.", ""
 
 
 def _capture_protected_setup_file(
@@ -8854,7 +8880,7 @@ def _capture_protected_setup_file(
             if acl_error is not None:
                 if skip_if_untrusted:
                     return False, b"", None
-                raise RollbackSourceRefusedError(label, path, "not protected", "foreign")
+                raise RollbackSourceRefusedError(label, path, "not protected", "foreign", acl_error)
         else:
             if not trusted_runtime_owner(info.st_uid):
                 if skip_if_untrusted:
@@ -8920,6 +8946,39 @@ def _setup_runtime_subject(name: object) -> str:
     return f"id-{_setup_runtime_ref(raw)}"
 
 
+class _SetupRuntimeCustodyRefusedError(OSError):
+    """A file read for the rollback point can be changed by another account.
+
+    Not a transient read failure: setup stays refused and nothing is written,
+    and the account gets the file, who can change it and the one repair.
+    ``str()`` names no path, like every recorded rollback-point error;
+    :meth:`reason` and :meth:`next_step` name it for the account's own terminal.
+    """
+
+    def __init__(self, role: str, identity: str, path: str, refusal: RollbackSourceRefusedError) -> None:
+        self.role = role
+        self.path = path
+        self.refusal = refusal
+        refusal.writer()  # resolve the account now, while the capture still sees the host as it was
+        super().__init__(f"{role} evidence {identity[:12]} is not protected")
+
+    def reason(self) -> str:
+        if (writer := self.refusal.writer()) is not None:
+            return f"{self.role} file {self.path} can be changed by {writer[0]}"
+        return f"{self.role} file {self.path} is not protected the way DefenseClaw writes its files"
+
+    def next_step(self) -> str:
+        sentence, command = self.refusal.repair(self.path)
+        return f"Nothing was changed. {sentence}" + (f"\n      {command}" if command else "")
+
+
+def _setup_rollback_point_failure(exc: OSError) -> tuple[str, str]:
+    """The reason and next step to print for a rollback point setup could not take."""
+    if isinstance(exc, _SetupRuntimeCustodyRefusedError):
+        return exc.reason(), exc.next_step()
+    return str(exc), _SETUP_ROLLBACK_POINT_NEXT_STEP
+
+
 def _capture_setup_runtime_location(path: object, role: str) -> tuple[str, str, str]:
     raw = os.fspath(path) if isinstance(path, str | os.PathLike) else ""
     if not raw or not os.path.isabs(raw) or "\x00" in raw:
@@ -8939,6 +8998,10 @@ def _capture_setup_runtime_location(path: object, role: str) -> tuple[str, str, 
             # gateway's custody rule (#1026) applies here as well.
             trust_windows_administrators=True,
         )
+    except RollbackSourceRefusedError as exc:
+        # The refusal stays; the account is told which file and the repair
+        # instead of a bounded-retry reference (rel-1-0-6 GAP-0804).
+        raise _SetupRuntimeCustodyRefusedError(role, identity, os.path.normpath(os.path.abspath(raw)), exc) from None
     except Exception:
         raise OSError(f"{role} evidence {identity[:12]} is unavailable") from None
     if not existed or generation is None:
@@ -9439,6 +9502,8 @@ def _capture_setup_applied_runtime(
             time.sleep(_SETUP_RUNTIME_SNAPSHOT_RETRY_SECONDS)
     if last_difference is None and isinstance(last_error, _SetupGatewayNoAnswerError):
         raise _SetupGatewayNoAnswerError(last_error.pid, time.monotonic() - started) from None
+    if previous is None and isinstance(last_error, _SetupRuntimeCustodyRefusedError):
+        raise last_error from None
     if last_difference is not None:
         reference = f"diff={last_difference}"
     elif last_error is not None:
@@ -11467,9 +11532,9 @@ def _apply_hook_connector_setup(
         return False
     except OSError as exc:
         restore_preflight_discovery()
+        reason, next_step = _setup_rollback_point_failure(exc)
         ux.echo(
-            f"  ✗ Cannot establish connector setup rollback point: {exc}\n"
-            f"    {_SETUP_ROLLBACK_POINT_NEXT_STEP}",
+            f"  ✗ Cannot establish connector setup rollback point: {reason}\n    {next_step}",
             err=True,
         )
         return False
@@ -14774,9 +14839,8 @@ def _setup_guardrail_connector_alias(
     try:
         prior_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
     except OSError as exc:
-        raise click.ClickException(
-            f"cannot establish guardrail setup rollback point: {exc}\n{_SETUP_ROLLBACK_POINT_NEXT_STEP}"
-        ) from exc
+        reason, next_step = _setup_rollback_point_failure(exc)
+        raise click.ClickException(f"cannot establish guardrail setup rollback point: {reason}\n{next_step}") from exc
     if replaced:
         app.cfg.guardrail.connectors = {}
     if connector == "openclaw":
