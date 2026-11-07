@@ -30,6 +30,7 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	prepareConnectorTestProcess()
+	secureClientAdded := guardSecureClientTree()
 	cleanup, err := hermespath.IsolateHostForTests()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "isolate the tests from the host's Hermes:", err)
@@ -37,6 +38,14 @@ func TestMain(m *testing.M) {
 	}
 	code := m.Run()
 	cleanup()
+	// The tests never write the real Cisco Secure Client folders (GAP-0780).
+	if added := secureClientAdded(); len(added) > 0 {
+		fmt.Fprintln(os.Stderr, "the tests left entries in the real Cisco Secure Client folders; a test must use a temp layout or a layout seam:")
+		for _, path := range added {
+			fmt.Fprintln(os.Stderr, "  "+path)
+		}
+		code = 1
+	}
 	os.Exit(code)
 }
 
