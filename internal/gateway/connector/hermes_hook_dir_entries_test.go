@@ -220,3 +220,191 @@ func TestHermesTeardownWarnsAboutKeptEntryThatMentionsDefenseClaw(t *testing.T) 
 		t.Fatalf("notice = %q; want one warning line naming the event", notice.String())
 	}
 }
+
+// A path that reaches the managed directory by an equivalent spelling is still
+// named: spaces in the account home (quoted or escaped), "/./", "//" and a
+// step in and back out. Teardown removes it, VerifyClean refuses it, and the
+// user hook beside it stays.
+func TestHermesDirectlyNamedHookSpellingsAreRemovedAndNotVerified(t *testing.T) {
+	forms := map[string]struct {
+		spaced  bool
+		command func(dataDir string) string
+	}{
+		"quoted path with space in account": {true, func(d string) string { return "'" + filepath.Join(d, "hooks", "hookX") + "'" }},
+		"double quoted with arguments":      {true, func(d string) string { return "\"" + filepath.Join(d, "hooks", "hookX") + "\" --event pre_tool_call" }},
+		"escaped spaces":                    {true, func(d string) string { return strings.ReplaceAll(filepath.Join(d, "hooks", "hookX"), " ", "\\ ") }},
+		"after wrapper with space":          {true, func(d string) string { return "bash -c '" + filepath.Join(d, "hooks", "hookX") + "'" }},
+		"dot before managed directory":      {false, func(d string) string { return filepath.Dir(d) + "/./.defenseclaw/hooks/hookX" }},
+		"double slash":                      {false, func(d string) string { return filepath.Dir(d) + "//.defenseclaw//hooks/hookX" }},
+		"parent step inside":                {false, func(d string) string { return d + "/other/../hooks/hookX" }},
+		"quoted variable":                   {false, func(string) string { return "\"$HOME\"/.defenseclaw/hooks/hookX" }},
+		"assignment":                        {false, func(d string) string { return "--hook=" + filepath.Join(d, "hooks", "hookX") }},
+	}
+	for name, form := range forms {
+		t.Run(name, func(t *testing.T) {
+			root := testenv.PrivateTempDir(t)
+			if form.spaced {
+				root = filepath.Join(root, "operator with space")
+			}
+			if err := os.MkdirAll(filepath.Join(root, ".hermes"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("HOME", root)
+			opts := SetupOpts{DataDir: filepath.Join(root, ".defenseclaw")}
+			configPath := filepath.Join(root, ".hermes", "config.yaml")
+			user := filepath.Join(root, "user-hooks", "hookX")
+			writeHermesPreToolEntries(t, configPath, []interface{}{
+				map[string]interface{}{"command": form.command(opts.DataDir), "fail_closed": true, "matcher": ".*", "timeout": 30},
+				map[string]interface{}{"command": user, "matcher": ".*", "timeout": 30},
+			})
+			previous := HermesConfigPathOverride
+			HermesConfigPathOverride = configPath
+			t.Cleanup(func() { HermesConfigPathOverride = previous })
+			captureHermesNotices(t)
+			conn := NewHermesConnector()
+			if err := conn.VerifyClean(opts); err == nil {
+				t.Fatalf("VerifyClean accepted a directly named hook: %q", form.command(opts.DataDir))
+			}
+			if err := conn.Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			if got := hermesPreToolCommands(t, configPath); len(got) != 1 || got[0] != user {
+				t.Fatalf("remaining commands = %q; want only %q", got, user)
+			}
+			if err := conn.VerifyClean(opts); err != nil {
+				t.Fatalf("VerifyClean after teardown: %v", err)
+			}
+		})
+	}
+}
+
+// ~/, $HOME/ and ${HOME}/ mean the home the connector is bound to for the
+// target account, not the process user's home.
+func TestHermesHomeSpellingsReadTheBoundAccountHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Unix Hermes registration uses a script path")
+	}
+	for _, command := range []string{
+		"~/.defenseclaw/hooks/hookX",
+		"$HOME/.defenseclaw/hooks/hookX",
+		"${HOME}/.defenseclaw/hooks/hookX",
+	} {
+		t.Run(command, func(t *testing.T) {
+			root := testenv.PrivateTempDir(t)
+			configPath := filepath.Join(root, ".hermes", "config.yaml")
+			if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			opts := SetupOpts{DataDir: filepath.Join(root, ".defenseclaw")}
+			writeHermesPreToolEntries(t, configPath, []interface{}{
+				map[string]interface{}{"command": command, "fail_closed": true, "matcher": ".*", "timeout": 30},
+			})
+			previous := HermesConfigPathOverride
+			HermesConfigPathOverride = configPath
+			t.Cleanup(func() { HermesConfigPathOverride = previous })
+			captureHermesNotices(t)
+			conn := NewHermesConnector()
+			if err := WithUserHomeDir(root, func() error {
+				if err := conn.VerifyClean(opts); err == nil {
+					t.Errorf("VerifyClean accepted %q under the bound account home", command)
+				}
+				return conn.Teardown(context.Background(), opts)
+			}); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			if got := hermesPreToolCommands(t, configPath); len(got) != 0 {
+				t.Errorf("teardown kept %q", got)
+			}
+		})
+	}
+}
+
+// Benign twin: spellings that lead somewhere else stay the user's.
+func TestHermesHomeAndSpacedSpellingsOutsideManagedDirStay(t *testing.T) {
+	forms := map[string]func(dataDir, root string) string{
+		"home variable elsewhere": func(_, _ string) string { return "$HOME/user-hooks/hookX" },
+		"tilde elsewhere":         func(_, _ string) string { return "~/.defenseclaw-other/hooks/hookX" },
+		"quoted other directory":  func(_, root string) string { return "'" + filepath.Join(root, "my hooks", "hookX") + "'" },
+		"step out of directory":   func(d, _ string) string { return "'" + d + "/hooks/../../hookX'" },
+		"two words":               func(d, root string) string { return filepath.Join(root, "bin", "run") + " " + d + "/hooksX/hookX" },
+	}
+	for name, form := range forms {
+		t.Run(name, func(t *testing.T) {
+			var command string
+			conn, opts, configPath, _ := hermesHookDirFixture(t, func(dataDir, root string) []string {
+				command = form(dataDir, root)
+				return []string{command}
+			})
+			captureHermesNotices(t)
+			if err := conn.VerifyClean(opts); err != nil {
+				t.Fatalf("VerifyClean rejected a user entry: %v", err)
+			}
+			if err := conn.Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			if got := hermesPreToolCommands(t, configPath); len(got) != 1 || got[0] != command {
+				t.Fatalf("remaining commands = %q; want %q kept", got, command)
+			}
+		})
+	}
+}
+
+// The kept copy never writes through, replaces or reuses what is already at
+// its name: a link to a user file leaves that file as it is, and an earlier
+// copy is kept, with the new one next to it.
+func TestHermesEditedHooksCopyKeepsWhatIsAlreadyAtItsName(t *testing.T) {
+	for _, existing := range []string{"link to user file", "earlier copy", "dangling link"} {
+		t.Run(existing, func(t *testing.T) {
+			conn, opts, configPath, root := hermesHookDirFixture(t, func(dataDir, _ string) []string {
+				return []string{filepath.Join(dataDir, "hooks", "hookX")}
+			})
+			notice := captureHermesNotices(t)
+			before, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(root, ".ssh", "authorized_keys")
+			want := []byte("operator data must be preserved\n")
+			copyPath := configPath + hermesEditedHooksBackupSuffix
+			switch existing {
+			case "link to user file":
+				if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(target, want, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, copyPath); err != nil {
+					t.Fatal(err)
+				}
+			case "dangling link":
+				if err := os.Symlink(target, copyPath); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				if err := os.WriteFile(copyPath, want, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				target = copyPath
+			}
+			if err := conn.Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			if existing != "dangling link" {
+				got, err := os.ReadFile(target)
+				if err != nil || !bytes.Equal(got, want) {
+					t.Fatalf("file at the copy name changed: err=%v got=%q", err, got)
+				}
+			} else if _, err := os.Lstat(target); !os.IsNotExist(err) {
+				t.Fatalf("teardown created the file a dangling link led to: %v", err)
+			}
+			kept, err := os.ReadFile(copyPath + ".1")
+			if err != nil || !bytes.Equal(kept, before) {
+				t.Fatalf("numbered copy: err=%v equal=%v", err, bytes.Equal(kept, before))
+			}
+			if !strings.Contains(notice.String(), copyPath+".1") {
+				t.Fatalf("notice = %q; want the copy path named", notice.String())
+			}
+		})
+	}
+}

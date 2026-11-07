@@ -5163,8 +5163,8 @@ func removeHermesHooks(path, hookScript string, backup *managedFileBackup) error
 		// An entry that only names the hooks directory is removed as
 		// DefenseClaw (GAP-0625); the file as it was is kept next to it and
 		// the removal is reported once.
-		copyPath := path + hermesEditedHooksBackupSuffix
-		if err := atomicWriteFile(copyPath, current, 0o600); err != nil {
+		copyPath, err := keepHermesEditedHooksCopy(path, current)
+		if err != nil {
 			return fmt.Errorf("keep a copy of %s before removing edited DefenseClaw hook entries: %w", path, err)
 		}
 		fmt.Fprintf(hermesSetupWarningOutput, "[connector] hermes teardown: removed %d edited DefenseClaw hook entries from %s; the previous file is at %s\n", named, path, copyPath)
