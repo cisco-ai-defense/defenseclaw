@@ -17,6 +17,8 @@ func TestBraceExpansionBudget(t *testing.T) {
 		{"cp config.yaml{,.bak}", false},
 		{"echo {1..100}", false},
 		{"echo {a..z}{a..z}", false},
+		{"echo {a..1}{a..1}{a..1}{a..1}", false},
+		{"echo {1..a}{1..a}{1..a}{1..a}", false},
 		{"echo {1..60000}", false},
 		{"echo ${HOME}/{a,b}", false},
 		{"echo '{1..100000000}'", false},
