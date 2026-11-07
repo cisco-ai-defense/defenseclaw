@@ -100,3 +100,65 @@ func TestGAP0641ProcessCwdBeforeDotDotIsNotOrdinary(t *testing.T) {
 		t.Errorf("ordinary /proc/self/status = %s, want None", got)
 	}
 }
+
+// GAP-0641 review 9: the supplied working directory can itself be a link.
+// A leading dot-dot step is applied to that directory by the kernel, so the
+// spelling must stay raw until the link walk, as it does for a step inside
+// the operand. Every position of the step reads the same protected link;
+// the ordinary twins stay ordinary.
+func TestGAP0641LeadingParentFromLinkedWorkingDirectory(t *testing.T) {
+	home, cwd, other := dotDotFixture(t)
+	linked := filepath.Join(cwd, "jump")
+	if err := os.WriteFile(filepath.Join(other, "child", "note"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(linked)
+	if data, err := os.ReadFile("../status"); err != nil || string(data) != "protected-entry" {
+		t.Fatalf("kernel read %q err=%v", data, err)
+	}
+	for _, row := range []struct {
+		name, command string
+		want          Grade
+	}{
+		{"leading parent", "cat ../status", GradeNamed},
+		{"leading parent after options end", "cat -- ../status", GradeNamed},
+		{"leading parent as option value", "grep -f ../status x", GradeNamed},
+		{"leading parent as attached option value", "grep --file=../status x", GradeNamed},
+		{"dot then parent", "cat ./../status", GradeNamed},
+		{"absolute spelling", "cat " + linked + "/../status", GradeNamed},
+		{"two steps back to the linked name", "cat ../child/../status", GradeNamed},
+		{"clean twin", "cat status", GradeNone},
+		{"leading parent to an ordinary file", "cat ../child/note", GradeNone},
+		{"the parent directory itself", "cat ..", GradeNone},
+		{"parent of a real directory", "cat ../../project/status", GradeNone},
+	} {
+		if got := LateCallGrade(row.command, linked, home); got != row.want {
+			t.Errorf("%s: LateCallGrade(%q)=%s, want %s", row.name, row.command, got, row.want)
+		}
+	}
+	// From the ordinary directory the same spelling is an ordinary parent.
+	if got := LateCallGrade("cat ../project/status", filepath.Join(cwd, "plain"), home); got != GradeNone {
+		t.Errorf("leading parent from a real directory = %s, want None", got)
+	}
+}
+
+// OperandPath keeps a dot-dot step at any position raw, including the first
+// and the whole operand, and keeps the clean spelling for the rest.
+func TestOperandPathKeepsEveryDotDotStepRaw(t *testing.T) {
+	cwd := filepath.Join(string(filepath.Separator), "work", "dir")
+	for _, row := range []struct{ name, want string }{
+		{"..", cwd + "/.."},
+		{"../x", cwd + "/../x"},
+		{"./../x", cwd + "/./../x"},
+		{"a/../x", cwd + "/a/../x"},
+		{"a/..", cwd + "/a/.."},
+		{"x", cwd + "/x"},
+		{"./x", cwd + "/x"},
+		{"..x", cwd + "/..x"},
+		{".../x", cwd + "/.../x"},
+	} {
+		if got := filepath.ToSlash(OperandPath(row.name, cwd)); got != filepath.ToSlash(row.want) {
+			t.Errorf("OperandPath(%q)=%q, want %q", row.name, got, row.want)
+		}
+	}
+}
