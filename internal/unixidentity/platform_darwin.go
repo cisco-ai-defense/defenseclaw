@@ -64,6 +64,7 @@ func ConfirmLocalAccount(r Resolver, uid int, name string) error {
 const (
 	darwinDSCL   = "/usr/bin/dscl"
 	darwinODUtil = "/usr/bin/odutil"
+	darwinPlutil = "/usr/bin/plutil"
 )
 
 // platformOpenDirectoryNodeStates runs `odutil show nodenames`, which lists
@@ -242,16 +243,26 @@ func platformAccountUIDGone(ctx context.Context, name string, uid int) bool {
 const homeAccountsOutputLimit = 4 << 20
 
 // platformAccountsAtHome asks Open Directory in a fresh dscl process, across
-// the search policy, for every account record as a property list and keeps
-// those with home as a home folder.
+// the search policy, for every account record as a property list, converts it
+// to JSON with plutil and keeps those with home as a home folder.
 func platformAccountsAtHome(ctx context.Context, home string) ([]HomeAccount, error) {
 	if err := validateTrustedTool(darwinDSCL); err != nil {
 		return nil, err
 	}
-	return dsclHomeAccounts(home, func() (commandResult, error) {
-		return runTrustedCommandLimit(ctx, darwinDSCL,
-			[]string{"-plist", "/Search", "-readall", "/Users", "UniqueID", "NFSHomeDirectory", "RecordName"}, homeAccountsOutputLimit)
-	})
+	if err := validateTrustedTool(darwinPlutil); err != nil {
+		return nil, err
+	}
+	return dsclHomeAccounts(home,
+		func() (commandResult, error) {
+			return runTrustedCommandLimit(ctx, darwinDSCL,
+				[]string{"-plist", "/Search", "-readall", "/Users", "UniqueID", "NFSHomeDirectory", "RecordName"}, homeAccountsOutputLimit)
+		},
+		func(plist []byte) (commandResult, error) {
+			// A plist is never read here: the system tool converts it, and an
+			// answer it refuses is an error.
+			return runTrustedCommandInput(ctx, darwinPlutil,
+				[]string{"-convert", "json", "-o", "-", "-"}, plist, homeAccountsOutputLimit)
+		})
 }
 
 // platformLoginShell reads the UserShell of the account through the Open

@@ -13,8 +13,9 @@
 package unixidentity
 
 import (
+	"bytes"
 	"context"
-	"encoding/xml"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -36,9 +37,9 @@ const homeAccountsLimit = 32
 // home folder, in a fresh process. It is how a caller learns who holds the
 // home of an account that has gone: a replacement may be a local account or a
 // directory account, and its name and uid are its own. No account is an empty
-// list and no error; a directory that does not answer, an answer that is not
-// a complete property list and every platform other than macOS are an error,
-// so a caller never takes them for a free home.
+// list and no error; a directory that does not answer, an answer the system
+// property list tool does not convert and every platform other than macOS are
+// an error, so a caller never takes them for a free home.
 func AccountsAtHome(ctx context.Context, home string) ([]HomeAccount, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -49,13 +50,18 @@ func AccountsAtHome(ctx context.Context, home string) ([]HomeAccount, error) {
 	return platformAccountsAtHome(ctx, home)
 }
 
+// errUnclearHomeAnswer is the one error for an answer that does not prove
+// who holds a home: the home stays pending and its holders stay kept.
+var errUnclearHomeAnswer = errors.New("unixidentity: unclear account record answer")
+
 // dsclHomeAccounts decides AccountsAtHome from the structured answer of
 // `dscl -plist /Search -readall /Users UniqueID NFSHomeDirectory RecordName`.
-// It is shared so it can be tested on every platform. The answer must be one
-// complete property list in which every record carries the three fields; any
-// other answer (truncated, odd, a record missing a field) is an error, never
-// an empty list.
-func dsclHomeAccounts(home string, readall func() (commandResult, error)) ([]HomeAccount, error) {
+// The plist is not read here: toJSON converts it with the system tool
+// (`plutil -convert json -o - -`), and only that tool's JSON is read, with
+// strict types. A failed read, a failed conversion, output that is not the
+// expected structure and a record missing a field are errors, never an empty
+// list. It is shared so it can be tested on every platform.
+func dsclHomeAccounts(home string, readall func() (commandResult, error), toJSON func(plist []byte) (commandResult, error)) ([]HomeAccount, error) {
 	result, err := readall()
 	if err != nil {
 		return nil, err
@@ -63,7 +69,14 @@ func dsclHomeAccounts(home string, readall func() (commandResult, error)) ([]Hom
 	if result.exitCode != 0 {
 		return nil, fmt.Errorf("unixidentity: dscl exited %d", result.exitCode)
 	}
-	records, err := parseDSCLHomeRecords(result.stdout)
+	converted, err := toJSON(result.stdout)
+	if err != nil {
+		return nil, err
+	}
+	if converted.exitCode != 0 {
+		return nil, fmt.Errorf("unixidentity: plutil exited %d", converted.exitCode)
+	}
+	records, err := parseDSCLHomeRecords(converted.stdout)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +93,7 @@ func dsclHomeAccounts(home string, readall func() (commandResult, error)) ([]Hom
 	return accounts, nil
 }
 
-// dsclHomeRecord is one account record of the plist answer.
+// dsclHomeRecord is one account record of the answer.
 type dsclHomeRecord struct {
 	name  string
 	uid   int
@@ -111,168 +124,102 @@ func comparableHome(path string) string {
 	return path
 }
 
-// plistNode is an XML element with its text and child elements.
-type plistNode struct {
-	XMLName  xml.Name
-	Text     string
-	Children []plistNode
-}
-
-// onlyElements reports whether the node holds nothing but white space between
-// its child elements. Text beside the elements of a container is not part of
-// a property list, so the answer is not one complete list.
-func (n plistNode) onlyElements() bool { return strings.TrimSpace(n.Text) == "" }
-
 const (
 	dsclHomeKeyUID  = "dsAttrTypeStandard:UniqueID"
 	dsclHomeKeyHome = "dsAttrTypeStandard:NFSHomeDirectory"
 	dsclHomeKeyName = "dsAttrTypeStandard:RecordName"
 )
 
-// parseDSCLHomeRecords reads the plist answer: one <plist> holding one
-// <array> of <dict> records, each with the UniqueID, NFSHomeDirectory and
-// RecordName fields as non-empty arrays of strings (UniqueID exactly one). A
-// document that does not end where it should, an element that is not where
-// the format puts it, text beside the elements of a container and a record
-// missing a field are errors.
+// parseDSCLHomeRecords reads the JSON the system tool made of the answer: one
+// array of objects, each with the UniqueID, NFSHomeDirectory and RecordName
+// fields as non-empty arrays of non-empty strings (UniqueID exactly one),
+// followed by nothing. Anything else (not JSON, cut short, text after it, an
+// object where an array belongs, a field of another type, a repeated field,
+// a record missing a field) is an error.
 func parseDSCLHomeRecords(output []byte) ([]dsclHomeRecord, error) {
-	unclear := errors.New("unixidentity: unclear account record answer")
-	decoder := xml.NewDecoder(strings.NewReader(string(output)))
-	var root plistNode
-	if !decodePlistRoot(decoder, &root) || root.XMLName.Local != "plist" {
-		return nil, unclear
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	if !jsonDelim(decoder, '[') {
+		return nil, errUnclearHomeAnswer
 	}
-	for {
-		token, err := decoder.Token()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, unclear
-		}
-		switch t := token.(type) {
-		case xml.Comment:
-		case xml.CharData:
-			if strings.TrimSpace(string(t)) != "" {
-				return nil, unclear
-			}
-		default:
-			return nil, unclear
-		}
-	}
-	if !root.onlyElements() || len(root.Children) != 1 || root.Children[0].XMLName.Local != "array" || !root.Children[0].onlyElements() {
-		return nil, unclear
-	}
-	var records []dsclHomeRecord
-	for _, dict := range root.Children[0].Children {
-		record, ok := dsclHomeRecordOf(dict)
+	records := []dsclHomeRecord{}
+	for decoder.More() {
+		fields, ok := jsonRecordFields(decoder)
 		if !ok {
-			return nil, unclear
+			return nil, errUnclearHomeAnswer
+		}
+		record, ok := dsclHomeRecordOf(fields)
+		if !ok {
+			return nil, errUnclearHomeAnswer
 		}
 		records = append(records, record)
+	}
+	if !jsonDelim(decoder, ']') {
+		return nil, errUnclearHomeAnswer
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, errUnclearHomeAnswer
 	}
 	return records, nil
 }
 
-// decodePlistRoot reads the root element into root. Before it only white
-// space, comments, one XML declaration that states its version and one
-// doctype of a plist are allowed: any other text or markup ahead of the
-// document (a warning line from the directory tool, say) means the answer is
-// not one complete plist. Inside the root only elements, text and comments
-// are allowed; a directive or processing instruction there is not part of a
-// property list either.
-func decodePlistRoot(decoder *xml.Decoder, root *plistNode) bool {
-	declared, typed := false, false
-	for {
-		token, err := decoder.Token()
-		if err != nil {
-			return false
-		}
-		switch t := token.(type) {
-		case xml.StartElement:
-			return readPlistElement(decoder, t, root)
-		case xml.Comment:
-		case xml.Directive:
-			if typed || !strings.HasPrefix(string(t), "DOCTYPE plist") {
-				return false
-			}
-			typed = true
-		case xml.ProcInst:
-			if declared || t.Target != "xml" || !strings.HasPrefix(strings.TrimSpace(string(t.Inst)), "version=") {
-				return false
-			}
-			declared = true
-		case xml.CharData:
-			if strings.TrimSpace(string(t)) != "" {
-				return false
-			}
-		default:
-			return false
-		}
+// jsonDelim reads the next token and reports whether it is want.
+func jsonDelim(decoder *json.Decoder, want json.Delim) bool {
+	token, err := decoder.Token()
+	if err != nil {
+		return false
 	}
+	got, ok := token.(json.Delim)
+	return ok && got == want
 }
 
-// readPlistElement reads the element that start opened, with its text and
-// child elements, up to its end tag. A directive or processing instruction
-// inside it makes the answer not one complete plist.
-func readPlistElement(decoder *xml.Decoder, start xml.StartElement, node *plistNode) bool {
-	node.XMLName = start.Name
-	var text strings.Builder
-	for {
-		token, err := decoder.Token()
-		if err != nil {
-			return false
-		}
-		switch t := token.(type) {
-		case xml.StartElement:
-			var child plistNode
-			if !readPlistElement(decoder, t, &child) {
-				return false
-			}
-			node.Children = append(node.Children, child)
-		case xml.EndElement:
-			node.Text = text.String()
-			return true
-		case xml.CharData:
-			text.Write(t)
-		case xml.Comment:
-		default:
-			return false
-		}
-	}
-}
-
-// dsclHomeRecordOf reads one <dict> record.
-func dsclHomeRecordOf(dict plistNode) (dsclHomeRecord, bool) {
-	if dict.XMLName.Local != "dict" || !dict.onlyElements() || len(dict.Children)%2 != 0 {
-		return dsclHomeRecord{}, false
+// jsonRecordFields reads one object whose every value is an array of
+// strings. A repeated key, which a map would silently resolve, and a null or
+// another type are not accepted.
+func jsonRecordFields(decoder *json.Decoder) (map[string][]string, bool) {
+	if !jsonDelim(decoder, '{') {
+		return nil, false
 	}
 	fields := map[string][]string{}
-	for i := 0; i < len(dict.Children); i += 2 {
-		key, value := dict.Children[i], dict.Children[i+1]
-		if key.XMLName.Local != "key" || len(key.Children) != 0 || value.XMLName.Local != "array" || !value.onlyElements() {
-			return dsclHomeRecord{}, false
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, false
 		}
-		name := strings.TrimSpace(key.Text)
-		if _, repeated := fields[name]; repeated {
-			return dsclHomeRecord{}, false
+		key, ok := token.(string)
+		if !ok {
+			return nil, false
+		}
+		if _, repeated := fields[key]; repeated {
+			return nil, false
 		}
 		var values []string
-		for _, item := range value.Children {
-			if item.XMLName.Local != "string" || len(item.Children) != 0 || strings.TrimSpace(item.Text) == "" {
+		if err := decoder.Decode(&values); err != nil || values == nil {
+			return nil, false
+		}
+		fields[key] = values
+	}
+	return fields, jsonDelim(decoder, '}')
+}
+
+// dsclHomeRecordOf checks the fields of one record.
+func dsclHomeRecordOf(fields map[string][]string) (dsclHomeRecord, bool) {
+	for _, values := range fields {
+		for _, value := range values {
+			if strings.TrimSpace(value) == "" {
 				return dsclHomeRecord{}, false
 			}
-			values = append(values, strings.TrimSpace(item.Text))
 		}
-		fields[name] = values
 	}
 	uids, homes, names := fields[dsclHomeKeyUID], fields[dsclHomeKeyHome], fields[dsclHomeKeyName]
-	if len(uids) != 1 || len(homes) == 0 || len(names) == 0 || validName(names[0]) != nil {
+	if len(uids) != 1 || len(homes) == 0 || len(names) == 0 || validName(strings.TrimSpace(names[0])) != nil {
 		return dsclHomeRecord{}, false
 	}
-	uid, err := parseSignedDSCLID(uids[0])
+	uid, err := parseSignedDSCLID(strings.TrimSpace(uids[0]))
 	if err != nil {
 		return dsclHomeRecord{}, false
 	}
-	return dsclHomeRecord{name: names[0], uid: uid, homes: homes}, true
+	for i := range homes {
+		homes[i] = strings.TrimSpace(homes[i])
+	}
+	return dsclHomeRecord{name: strings.TrimSpace(names[0]), uid: uid, homes: homes}, true
 }
