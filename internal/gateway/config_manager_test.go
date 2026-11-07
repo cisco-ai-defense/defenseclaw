@@ -39,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -1998,6 +1999,61 @@ func TestClaudeTierChangeWithSavedOpenRefreshesRegistration(t *testing.T) {
 		if !hookRuntimePolicyChanged(oldCfg, newCfg, "claudecode") || !hookPolicyNeedsSetup(oldCfg, newCfg) {
 			t.Fatalf("%s to %s did not refresh the registration", tc.before, tc.after)
 		}
+	}
+}
+
+func TestClaudeCustomPackPostureEditRefreshesSavedOpenRegistration(t *testing.T) {
+	for _, tc := range []struct{ before, after string }{
+		{"default", "strict"}, {"strict", "default"}, {"default", "default"},
+	} {
+		t.Run(tc.before+"_to_"+tc.after, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Cleanup(func() { packPostures.Delete(dir); pendingPackPostures.Delete(dir) })
+			manifest := filepath.Join(dir, "defenseclaw-pack.json")
+			writePosture := func(posture string) {
+				t.Helper()
+				if err := os.WriteFile(manifest, []byte(`{"posture":"`+posture+`"}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writePosture(tc.before)
+			old := config.DefaultConfig()
+			old.Guardrail.Enabled = true
+			old.Guardrail.Connector = "claudecode"
+			old.Guardrail.HookSelfHeal = false
+			old.Guardrail.HookFailMode = "open"
+			old.Guardrail.RulePack = "custom"
+			old.Guardrail.CustomPacks = map[string]config.CustomRulePack{"custom": {Path: dir}}
+			if got := old.HookPolicyTierForConnector("claudecode"); got != tc.before {
+				t.Fatalf("initial tier = %q", got)
+			}
+			notePackPosture(dir, guardrail.ReadPackPosture(dir))
+			buildThresholdTable(old, nil)
+			publishPackPostures()
+
+			writePosture(tc.after)
+			next := cloneConfig(old)
+			if got := next.HookPolicyTierForConnector("claudecode"); got != tc.after {
+				t.Fatalf("candidate tier = %q", got)
+			}
+			notePackPosture(dir, guardrail.ReadPackPosture(dir))
+			buildThresholdTable(next, nil)
+			wantRefresh := tc.before != tc.after
+			if got := hookPolicyNeedsSetup(old, next); got != wantRefresh {
+				t.Fatalf("registration refresh = %t, want %t", got, wantRefresh)
+			}
+			if got := hookPolicyTierForConnector(old, "claudecode"); got != tc.before {
+				t.Fatalf("published generation tier = %q, want %q", got, tc.before)
+			}
+			if got := hookPolicyTierForConnector(next, "claudecode"); got != tc.after {
+				t.Fatalf("candidate generation tier = %q, want %q", got, tc.after)
+			}
+			published := (&Sidecar{}).publishConfig(next)
+			writePosture(tc.before)
+			if got := hookPolicyTierForConnector(published, "claudecode"); got != tc.after {
+				t.Fatalf("published registration tier changed with the manifest: %q, want %q", got, tc.after)
+			}
+		})
 	}
 }
 
