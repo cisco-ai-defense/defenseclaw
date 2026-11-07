@@ -460,21 +460,25 @@ func hookCommandNamesDir(command, home string, files, dirs []string, fold bool) 
 
 // blankOrdinaryPrograms returns command with each program word that is
 // literal (hookLiteralWord) and is not an absolute managed path replaced, when
-// the shell runs it as a file of that exact name, by "_" for an existing
-// absolute path (it may hold spaces and separators that the scan below would
-// split) or by its text with the home prefixes made plain for a relative name
+// the shell runs it as a file of that exact name, by "_" for an existing path
+// (it may hold spaces and separators that the scan below would split) or by
+// its text with the home prefixes made plain for a relative name
 // (hookRelativeNameText: a quoted "~/x" or "$HOME/x" is that file name for the
 // shell, not the home directory), and each other ANSI-C quoted program word
 // replaced by its decoded text in single quotes, so an escaped spelling of a
-// managed path is scanned as the path. It also reports whether a literal word
-// anywhere in the command (a program, an argument such as "bash <link>", a
+// managed path is scanned as the path. The script a shell, "source", "." or a
+// script interpreter opens is read the same way (hookScriptOperand): it is one
+// file name whatever characters it holds. It also reports whether a literal
+// word anywhere in the command (a program, an argument such as "bash <link>", a
 // value a variable holds, a redirect target, a loop item) is a path that names
 // a managed hook file or lies in a managed hook directory, directly or through
 // a link, by the exact name the shell uses. An absolute word is that path; a
-// relative word is the existing file of that name in the working directory
-// (wordFile). The scan below reads text with its quotes and escapes dropped,
-// which loses an apostrophe in a file or link name. A shell runs that word as the program
-// whatever its characters are, so the managed path inside
+// relative word is read from the directory the command stands in at that word
+// (trackWorkDirs: "cd D && bash ./f" reads ./f in D) and is that file there
+// (wordFile). The text a "bash -c" runs is read the same way, as its own
+// command. The scan below reads text with its quotes and escapes dropped, which
+// loses an apostrophe in a file or link name. A shell runs that word as the
+// program whatever its characters are, so the managed path inside
 // "/home/u/a /home/u/.defenseclaw/hooks/b" is not a word of its own. The words
 // come from the shared shell lexer (shellparse), not from the first byte of the
 // text: the program is the first word of a command after its assignments and
@@ -482,48 +486,40 @@ func hookCommandNamesDir(command, home string, files, dirs []string, fold bool) 
 // the command stands. A word that holds an expansion or command substitution
 // ($(...), backticks) is not a literal, whatever file the bytes name: the shell
 // runs the substitution before it picks the program. A word that is not the
-// program is an argument and the program may run its text as a shell line
-// ("sh -c ..."), so it stays in the text. Text the lexer does not read stays
-// whole.
+// program or its script is an argument and the program may run its text as a
+// shell line ("eval ..."), so it stays in the text. Text the lexer does not
+// read stays whole.
 func (s *hookPathScan) blankOrdinaryPrograms(command, home string) (string, bool) {
 	file, ok := shellparse.Parse(command)
 	if !ok {
 		return command, false
 	}
+	return s.scanCommand(file, command, home, s.workDirs(), 0)
+}
+
+// maxHookNestedShells bounds how deep "bash -c" text is read as a command.
+const maxHookNestedShells = 3
+
+// scanCommand is blankOrdinaryPrograms for the parsed text of one command,
+// whose words are read from the directories start.
+func (s *hookPathScan) scanCommand(file *syntax.File, command, home string, start []string, depth int) (string, bool) {
+	dirs := s.trackWorkDirs(file, home, start)
+	dirsAt := func(word *syntax.Word) []string {
+		if at, ok := dirs[word]; ok {
+			return at
+		}
+		return start
+	}
 	var out strings.Builder
 	named := false
 	copied := 0
-	syntax.Walk(file, func(node syntax.Node) bool {
-		if named {
-			return false
-		}
-		if word, isWord := node.(*syntax.Word); isWord {
-			// Every word the shell reads can open a file: a program, an
-			// argument ("bash <link>"), a value a variable holds for a later
-			// command ("HOOK=<link> bash -c 'bash $HOOK'", "export HOOK=<link>",
-			// "env HOOK=<link> ..."), a redirect target or a loop item.
-			value := hookAssignmentValue(word)
-			if s.wordNamesManaged(word, home) || value != nil && s.wordNamesManaged(value, home) {
-				named = true
-				return false
-			}
-			return true
-		}
-		call, isCall := node.(*syntax.CallExpr)
-		if !isCall {
-			return true
-		}
-		// The program is one word whatever characters its name holds. The
-		// arguments stay in the text: the program may run one as a shell line.
-		word := hookProgramWord(call.Args)
-		if word == nil {
-			return true
-		}
+	// keep makes the text of a word the scan below reads as one name.
+	keep := func(word *syntax.Word, script bool) {
 		literal, ok := s.literalWord(word, home)
-		if !ok {
-			return true
+		if !ok || script && strings.HasPrefix(literal, "-") {
+			return
 		}
-		_, exists := s.wordFile(literal)
+		_, exists := s.wordFile(literal, dirsAt(word))
 		replacement := ""
 		switch {
 		case exists && strings.ContainsFunc(literal, hookShellSeparator):
@@ -534,7 +530,7 @@ func (s *hookPathScan) blankOrdinaryPrograms(command, home string) (string, bool
 		}
 		from, to := int(word.Pos().Offset()), int(word.End().Offset())
 		if from < copied || from >= to || to > len(command) {
-			return true
+			return
 		}
 		if replacement == "" && hookAnsiCWord(word) {
 			// The scan reads text, not escapes: give it the decoded name.
@@ -544,6 +540,65 @@ func (s *hookPathScan) blankOrdinaryPrograms(command, home string) (string, bool
 			out.WriteString(command[copied:from])
 			out.WriteString(replacement)
 			copied = to
+		}
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if named {
+			return false
+		}
+		if word, isWord := node.(*syntax.Word); isWord {
+			// Every word the shell reads can open a file: a program, an
+			// argument ("bash <link>"), a value a variable holds for a later
+			// command ("HOOK=<link> bash -c 'bash $HOOK'", "export HOOK=<link>",
+			// "env HOOK=<link> ..."), a redirect target or a loop item.
+			at := dirsAt(word)
+			value := hookAssignmentValue(word)
+			if s.wordNamesManaged(word, home, at) || value != nil && s.wordNamesManaged(value, home, at) {
+				named = true
+				return false
+			}
+			return true
+		}
+		call, isCall := node.(*syntax.CallExpr)
+		if !isCall {
+			return true
+		}
+		// The program is one word whatever characters its name holds, and so
+		// is the script it opens. The other arguments stay in the text: the
+		// program may run one as a shell line.
+		program, operands, _ := hookProgramWord(call.Args)
+		if program == nil {
+			return true
+		}
+		keep(program, false)
+		name, ok := s.literalWord(program, home)
+		if !ok || s.fold {
+			return true
+		}
+		operand, isCommand := hookScriptOperand(path.Base(name), operands)
+		switch {
+		case operand == nil:
+		case !isCommand:
+			keep(operand, true)
+		case depth < maxHookNestedShells:
+			// The text a shell runs with -c, or eval joins from its operands,
+			// is a command of its own.
+			var texts []string
+			for _, word := range hookCommandOperands(path.Base(name), operand, operands) {
+				text, ok := s.literalWord(word, home)
+				if !ok {
+					texts = nil
+					break
+				}
+				texts = append(texts, text)
+			}
+			text := strings.Join(texts, " ")
+			if inner, ok := shellparse.Parse(text); ok && text != "" {
+				if _, innerNamed := s.scanCommand(inner, text, home, dirsAt(operand), depth+1); innerNamed {
+					named = true
+					return false
+				}
+			}
 		}
 		return true
 	})
@@ -573,44 +628,70 @@ func (s *hookPathScan) literalWord(word *syntax.Word, home string) (string, bool
 }
 
 // wordNamesManaged reports whether a literal word names a managed hook file or
-// lies in a managed hook directory (see wordFile).
-func (s *hookPathScan) wordNamesManaged(word *syntax.Word, home string) bool {
+// lies in a managed hook directory (see wordFile), read from the directories
+// dirs.
+func (s *hookPathScan) wordNamesManaged(word *syntax.Word, home string, dirs []string) bool {
 	literal, ok := s.literalWord(word, home)
 	if !ok {
 		return false
 	}
-	named, _ := s.wordFile(literal)
+	named, _ := s.wordFile(literal, dirs)
 	return named
 }
 
-// wordFile is span for a literal word as the shell opens it: an absolute word
-// is that path, and a relative word is the file of that name in the working
-// directory, kept as written so a link is read before a later ".." step, as the
-// kernel does. A relative word counts only when that file exists, because the
-// directory the hook runs in is not known: a name that is not there cannot be
-// a link to a managed file, and an ordinary argument is not claimed because
-// the working directory happens to be a managed one. A relative word is not
-// resolved when folding (Windows).
-func (s *hookPathScan) wordFile(literal string) (named, exists bool) {
-	if hookPathStart(literal, 0, s.fold) {
-		return s.span(literal)
-	}
+// workDirs returns the working directory a relative word is resolved from when
+// the command has not changed it: that of this process. It is not used when
+// folding (Windows), where a relative word is not resolved.
+func (s *hookPathScan) workDirs() []string {
 	if s.fold {
-		return false, false
+		return nil
 	}
 	if !s.cwdRead {
 		s.cwdRead = true
 		s.cwd, _ = os.Getwd()
 	}
 	if s.cwd == "" {
+		return nil
+	}
+	return []string{s.cwd}
+}
+
+// wordFile is span for a literal word as the shell opens it: an absolute word
+// is that path, and a relative word is the file of that name in each of the
+// directories dirs, kept as written so a link is read before a later ".." step,
+// as the kernel does. A relative name that is not there is still managed when
+// the name itself leads into a managed directory ("../hooks/gone"): the hooks
+// directory stays owned whether or not the file survives. It is not when the
+// directory it is read from is already inside a managed one, because then every
+// argument would be: an ordinary argument is not claimed because the working
+// directory happens to be a managed one. A relative word is not resolved when
+// folding (Windows).
+func (s *hookPathScan) wordFile(literal string, dirs []string) (named, exists bool) {
+	if hookPathStart(literal, 0, s.fold) {
+		return s.span(literal)
+	}
+	if s.fold {
 		return false, false
 	}
-	path := s.cwd + "/" + literal
-	if _, err := os.Lstat(filepath.FromSlash(path)); err != nil {
-		return false, false
+	for _, dir := range dirs {
+		name := strings.TrimSuffix(dir, "/") + "/" + literal
+		_, err := os.Lstat(filepath.FromSlash(name))
+		if err != nil {
+			// Only a name with a separator can lead out of the directory
+			// it is read from.
+			if !strings.Contains(literal, "/") {
+				continue
+			}
+			if inside, _ := s.span(dir); inside {
+				continue
+			}
+		}
+		if in, _ := s.span(name); in {
+			named = true
+		}
+		exists = exists || err == nil
 	}
-	named, _ = s.span(path)
-	return named, true
+	return named, exists
 }
 
 // hookAssignmentValue returns the value of a NAME=value word (an assignment
@@ -619,10 +700,24 @@ func hookAssignmentValue(word *syntax.Word) *syntax.Word {
 	if !hookAssignmentWord(word) {
 		return nil
 	}
-	_, value, _ := strings.Cut(word.Parts[0].(*syntax.Lit).Value, "=")
+	lit := word.Parts[0].(*syntax.Lit).Value
+	return hookWordTail(word, strings.Index(lit, "=")+1)
+}
+
+// hookLeadLit reports whether word starts with the literal text prefix and has
+// more after it; the rest may be quoted ("--chdir='/a b'").
+func hookLeadLit(word *syntax.Word, prefix string) bool {
+	lit, ok := word.Parts[0].(*syntax.Lit)
+	return ok && strings.HasPrefix(lit.Value, prefix) && (len(lit.Value) > len(prefix) || len(word.Parts) > 1)
+}
+
+// hookWordTail returns word without the first n bytes of its leading literal
+// part, or nil when nothing is left.
+func hookWordTail(word *syntax.Word, n int) *syntax.Word {
+	lit := word.Parts[0].(*syntax.Lit)
 	parts := slices.Clone(word.Parts[1:])
-	if value != "" {
-		parts = append([]syntax.WordPart{&syntax.Lit{Value: value}}, parts...)
+	if tail := lit.Value[n:]; tail != "" {
+		parts = append([]syntax.WordPart{&syntax.Lit{Value: tail}}, parts...)
 	}
 	if len(parts) == 0 {
 		return nil
@@ -890,49 +985,77 @@ func hookDigit(c byte, base int) bool {
 // word after the prefixes env, command, exec, nohup and nice and their usual
 // options. It returns the word at which the prefixes stop, so an option it does
 // not know ("env -S ...") is returned instead of the word after it, and nil for
-// a command without words.
-func hookProgramWord(args []*syntax.Word) *syntax.Word {
+// a command without words. operands are the words after the program, and dir
+// is the directory word of "env -C" or "env --chdir", which changes the
+// directory of the command it runs.
+func hookProgramWord(args []*syntax.Word) (program *syntax.Word, operands []*syntax.Word, dir *syntax.Word) {
 	for len(args) > 0 {
 		var rest []*syntax.Word
 		switch args[0].Lit() {
 		case "command":
-			rest = hookSkipPrefixOptions(args[1:], []string{"-p", "--"}, nil, false)
+			rest = hookSkipPrefixOptions(args[1:], []string{"-p", "--"}, nil)
 		case "exec":
-			rest = hookSkipPrefixOptions(args[1:], []string{"-c", "-l", "--"}, []string{"-a"}, false)
+			rest = hookSkipPrefixOptions(args[1:], []string{"-c", "-l", "--"}, []string{"-a"})
 		case "nohup":
 			rest = args[1:]
 		case "nice":
-			rest = hookSkipPrefixOptions(args[1:], []string{"--"}, []string{"-n"}, false)
+			rest = hookSkipPrefixOptions(args[1:], []string{"--"}, []string{"-n"})
 		case "env":
-			rest = hookSkipPrefixOptions(args[1:], []string{"-i", "-", "--ignore-environment", "--"},
-				[]string{"-u", "--unset", "-C", "--chdir"}, true)
+			var chdir *syntax.Word
+			rest, chdir = hookEnvOperands(args[1:])
+			if chdir != nil {
+				dir = chdir
+			}
 		default:
-			return args[0]
+			return args[0], args[1:], dir
 		}
 		if len(rest) == 0 {
-			return args[0]
+			return args[0], args[1:], dir
 		}
 		args = rest
 	}
-	return nil
+	return nil, nil, dir
 }
 
-// hookSkipPrefixOptions drops the leading flags, options with one argument
-// and, for env, NAME=value words from args.
-func hookSkipPrefixOptions(args []*syntax.Word, flags, withArg []string, assignments bool) []*syntax.Word {
+// hookSkipPrefixOptions drops the leading flags and options with one argument
+// from args.
+func hookSkipPrefixOptions(args []*syntax.Word, flags, withArg []string) []*syntax.Word {
 	for len(args) > 0 {
 		switch name := args[0].Lit(); {
 		case name != "" && slices.Contains(flags, name):
 			args = args[1:]
 		case name != "" && slices.Contains(withArg, name) && len(args) > 1:
 			args = args[2:]
-		case assignments && hookAssignmentWord(args[0]):
-			args = args[1:]
 		default:
 			return args
 		}
 	}
 	return args
+}
+
+// hookEnvOperands drops the leading options and NAME=value words of an env
+// command from args, and returns the directory word of -C, -Cdir, --chdir dir
+// or --chdir=dir.
+func hookEnvOperands(args []*syntax.Word) (rest []*syntax.Word, dir *syntax.Word) {
+	for len(args) > 0 {
+		switch name := args[0].Lit(); {
+		case name != "" && slices.Contains([]string{"-i", "-", "--ignore-environment", "--"}, name):
+			args = args[1:]
+		case (name == "-u" || name == "--unset") && len(args) > 1:
+			args = args[2:]
+		case (name == "-C" || name == "--chdir") && len(args) > 1:
+			dir, args = args[1], args[2:]
+		case hookLeadLit(args[0], "--chdir="):
+			dir, args = hookWordTail(args[0], len("--chdir=")), args[1:]
+		case hookLeadLit(args[0], "-C"):
+			dir, args = hookWordTail(args[0], 2), args[1:]
+		case hookAssignmentWord(args[0]):
+			args = args[1:]
+		default:
+			return args, dir
+		}
+	}
+	return args, dir
 }
 
 // hookAssignmentWord reports whether word starts with NAME=.
