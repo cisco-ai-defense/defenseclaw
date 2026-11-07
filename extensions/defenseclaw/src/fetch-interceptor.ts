@@ -1245,11 +1245,21 @@ export interface InterceptionSelfTest {
 
 const INTERCEPTION_SELF_TEST_URL = "https://api.openai.com/v1/chat/completions";
 const INTERCEPTION_SELF_TEST_INTERVAL_MS = 60_000;
-// A call to this URL, made while a copy checks that its own fetch wrapper is
-// still reachable, is answered by that wrapper. If the wrapper is gone the call
-// is a refused connection to a loopback port. The bound only ends a wrapper of
-// another component that never forwards the call.
-const REACHABILITY_PROBE_URL = "http://127.0.0.1:1/defenseclaw-transport-probe";
+// A copy that checks whether its own fetch wrapper is still reachable sends a
+// call to this URL, a provider host like any model call, so that a wrapper of
+// another component (a local-network filter, a cache, a request allow-list)
+// handles it as it handles model traffic. It carries a header naming the one
+// check it belongs to; the wrapper of this copy answers it locally and notes
+// it for that check only. Only the answer "reached" is evidence, and it can
+// only come from this copy's own wrapper. The bound ends a wrapper of another
+// component that never forwards the call. Where no wrapper of this copy is in
+// the chain the call reaches the real transport: one credential-free GET of
+// the provider model-list path, ended at once (first check) or when the check
+// settles (second check), and it carries no request data.
+const REACHABILITY_PROBE_URL = "https://api.openai.com/v1/models";
+/** A different address for every check, so a cache of another component cannot answer one for the next. */
+const reachabilityProbeUrl = (id: string): string => `${REACHABILITY_PROBE_URL}?dc-probe=${id}`;
+const REACHABILITY_PROBE_HEADER = "X-DC-Transport-Probe";
 const REACHABILITY_PROBE_TIMEOUT_MS = 30_000;
 export const INTERCEPTION_PROBE_HEADER = "X-DC-Interception-Probe";
 
@@ -1512,8 +1522,15 @@ export function createFetchInterceptor(
   // Earlier patches of this copy (oldest first) that a re-patch left in place
   // until it is known whether they are still reachable.
   let superseded: PatchState[] = [];
-  let reachabilityProbing = false;
-  let reachabilityProbeSeen = false;
+  // Earlier patches a check could not show to be in the chain (removed, or kept
+  // from the probe by another component): they stay below this copy's current
+  // patch and are disarmed by its stop, so none keeps routing calls to a copy
+  // that stopped.
+  let suspected: PatchState[] = [];
+  // The reachability checks in flight, by id: a wrapper that forwards a probe
+  // late (after the check ended or was replaced) notes nothing in a later one.
+  const pendingProbes = new Map<string, { seen: boolean }>();
+  let probeCounter = 0;
   let recheckSeq = 0;
   let originalHttpsRequest: typeof https.request | null = null;
   let originalHttpRequest: typeof http.request | null = null;
@@ -1745,9 +1762,15 @@ export function createFetchInterceptor(
       if (!armed) return nativeFetch(input, init);
       const urlStr = String(input instanceof Request ? input.url : input);
 
-      if (reachabilityProbing && urlStr === REACHABILITY_PROBE_URL) {
-        reachabilityProbeSeen = true;
-        throw new DOMException("transport reachability probe", "AbortError");
+      if (urlStr.startsWith(`${REACHABILITY_PROBE_URL}?dc-probe=`)) {
+        const probeId = new Headers(
+          init?.headers ?? (input instanceof Request ? input.headers : undefined),
+        ).get(REACHABILITY_PROBE_HEADER);
+        if (probeId !== null) {
+          const probe = pendingProbes.get(probeId);
+          if (probe) probe.seen = true;
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        }
       }
 
       // Never self-loop: a request already aimed at the guardrail proxy
@@ -2587,7 +2610,15 @@ export function createFetchInterceptor(
 
   function cancelPendingCheck(): void {
     recheckSeq++;
-    reachabilityProbing = false;
+    pendingProbes.clear();
+  }
+
+  /** Start a check of reachability: a probe id, and the record the wrapper of this copy notes it in. */
+  function newProbe(): { id: string; probe: { seen: boolean } } {
+    const id = `${++probeCounter}`;
+    const probe = { seen: false };
+    pendingProbes.set(id, probe);
+    return { id, probe };
   }
 
   /**
@@ -2597,18 +2628,25 @@ export function createFetchInterceptor(
    * as a removed patch.
    */
   function patchReachableAtOnce(): boolean {
-    reachabilityProbeSeen = false;
-    reachabilityProbing = true;
+    const { id, probe } = newProbe();
+    // Aborted right after the call is issued: the wrapper of this copy answers
+    // in that same call; a call that finds no such wrapper is ended before it
+    // sends anything.
+    const controller = new AbortController();
     try {
       void Promise.resolve(
-        globalThis.fetch(REACHABILITY_PROBE_URL, { signal: AbortSignal.abort() }),
+        globalThis.fetch(reachabilityProbeUrl(id), {
+          headers: { [REACHABILITY_PROBE_HEADER]: id },
+          signal: controller.signal,
+        }),
       ).catch(() => undefined);
     } catch {
       // a wrapper that throws did not forward the probe
     } finally {
-      reachabilityProbing = false;
+      controller.abort();
+      pendingProbes.delete(id);
     }
-    return reachabilityProbeSeen;
+    return probe.seen;
   }
 
   /**
@@ -2668,20 +2706,23 @@ export function createFetchInterceptor(
       }, REACHABILITY_PROBE_TIMEOUT_MS);
       (timer as { unref?: () => void }).unref?.();
     });
-    reachabilityProbeSeen = false;
-    reachabilityProbing = true;
+    const { id, probe } = newProbe();
     let call: Promise<unknown>;
     try {
-      call = Promise.resolve(below(REACHABILITY_PROBE_URL, { signal: controller.signal }));
+      call = Promise.resolve(
+        below(reachabilityProbeUrl(id), {
+          headers: { [REACHABILITY_PROBE_HEADER]: id },
+          signal: controller.signal,
+        }),
+      );
     } catch {
       call = Promise.resolve(); // a wrapper that throws did not forward the probe
     }
     void Promise.race([call.then(() => undefined, () => undefined), bound]).then(() => {
       clearTimeout(timer);
       if (seq !== recheckSeq) return;
-      const reached = reachabilityProbeSeen;
       cancelPendingCheck();
-      if (reached) retractPatch(earlier);
+      if (probe.seen) retractPatch(earlier);
       else commitPatch();
     });
   }
@@ -2711,8 +2752,17 @@ export function createFetchInterceptor(
     adoptPatch(earlier);
   }
 
+  /**
+   * The earlier patch did not answer the probe: it is gone, or something in
+   * the chain kept the probe from reaching it, and the answer cannot tell
+   * those apart. The current patch guards either way. The earlier ones stay
+   * armed until this copy stops, then they are disarmed (stop()), so a patch
+   * that is still in the chain below another component's wrapper no longer
+   * routes calls to this copy.
+   */
   function commitPatch(): void {
     for (const patch of superseded) patch.egressReporter?.stop();
+    suspected.push(...superseded);
     superseded = [];
     console.warn(
       "[defenseclaw] An older DefenseClaw plugin copy removed the LLM transport patch when it stopped; " +
@@ -2733,6 +2783,8 @@ export function createFetchInterceptor(
     }
     ours = null;
     disarmCurrent = null;
+    for (const patch of suspected) patch.disarm?.();
+    suspected = [];
     if (originalFetch) {
       globalThis.fetch = originalFetch;
       originalFetch = null;
