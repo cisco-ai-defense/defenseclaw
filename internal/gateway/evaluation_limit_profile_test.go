@@ -155,6 +155,12 @@ func TestEvaluationLimitOnlyCallAlertsOutsideStrict(t *testing.T) {
 		{"ordinary parent step removal behind an unparsed statement", "PowerShell", unparsed + "Remove-Item -Recurse -Force ~/project/normal/../settings.json", alertOutsideStrict, true},
 		{"state folder removal behind an unparsed statement", "PowerShell", unparsed + "Remove-Item -Recurse -Force ~/.defenseclaw", everywhere, false},
 		{"state folder removal, quoted name, behind an unparsed statement", "PowerShell", unparsed + "Remove-Item -Recurse -Force ~/.defense'claw", everywhere, false},
+		// Ordinary calls that only mention the state folder name: a printed
+		// word and an unrelated file whose name starts with it.
+		{"printed state folder name behind an unparsed statement", "PowerShell", unparsed + "Write-Output '.defenseclaw'", alertOutsideStrict, true},
+		{"unrelated backup file behind an unparsed statement", "PowerShell", unparsed + "Remove-Item ~/project/.defenseclaw-backup", alertOutsideStrict, true},
+		{"state folder joined to the home behind an unparsed statement", "PowerShell", unparsed + "Remove-Item -Recurse (Join-Path $HOME '.defenseclaw')", everywhere, false},
+		{"state folder, Windows spelling, behind an unparsed statement", "PowerShell", unparsed + `Remove-Item -Recurse $env:USERPROFILE\.defenseclaw`, everywhere, false},
 		{"ordinary command over the statement budget", "Bash", over, alertOutsideStrict, true},
 		{"DefenseClaw state write over the statement budget", "Bash", over + "; printf changed >> ~/.defenseclaw/config.yaml", everywhere, false},
 		// The documented limit: no target is proven in these calls, so they
@@ -189,13 +195,24 @@ func TestEvaluationLimitOnlyCallAlertsOutsideStrict(t *testing.T) {
 // plainly, quoted, escaped or in any case is named; other words are not.
 func TestTextNamesStateFolder(t *testing.T) {
 	for command, want := range map[string]bool{
-		"Remove-Item ~/.defenseclaw":               true,
-		"rm -rf ~/.Defense'claw/":                  true,
-		`rm -rf ~/.defense\claw`:                   true,
-		"rm -rf ~/.defense`claw":                   true,
-		"openclaw status && git commit -m defense": false,
-		"printf x >> notes.txt":                    false,
-		"":                                         false,
+		"Remove-Item ~/.defenseclaw":                   true,
+		"rm -rf ~/.Defense'claw/":                      true,
+		`rm -rf ~/.defense\claw`:                       true,
+		"rm -rf ~/.defense`claw":                       true,
+		"Remove-Item ~/.defenseclaw*":                  true,
+		`rm -rf $HOME/.defenseclaw/config.yaml`:        true,
+		`Remove-Item $env:USERPROFILE\.defenseclaw`:    true,
+		"Remove-Item $HOME\\.defense`claw":             true,
+		"Remove-Item (Join-Path $HOME '.defenseclaw')": true,
+		"Remove-Item .defenseclaw/config.yaml":         true,
+		"Write-Output '.defenseclaw'":                  false,
+		"echo see .defenseclaw docs":                   false,
+		"Remove-Item ~/project/.defenseclaw-backup":    false,
+		"ls ~/project/.defenseclaw.bak":                false,
+		"cat ~/x.defenseclaw/a":                        false,
+		"openclaw status && git commit -m defense":     false,
+		"printf x >> notes.txt":                        false,
+		"":                                             false,
 	} {
 		if got := textNamesStateFolder(command); got != want {
 			t.Errorf("%q: names the state folder = %t, want %t", command, got, want)

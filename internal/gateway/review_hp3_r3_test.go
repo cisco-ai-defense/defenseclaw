@@ -84,9 +84,13 @@ var reviewHP3R3Rows = []struct{ name, command, want string }{
 	{"r3-0312-allow-for-other", `f=a.txt; for i in 1 2; do f=b.txt; done; echo m >> "$f"`, "allow"},
 	{"r3-0312-allow-case-other", `f=a.txt; case x in x) f=b.txt;; esac; echo m >> "$f"`, "allow"},
 	// A redirect through a name assigned in a group after an if/else or a
-	// for loop; the latter remains a pre-existing conservative block.
+	// for loop. Both are ordinary and allowed on every route, Codex managed
+	// included (the client marks the group-assigned target unproven; the
+	// managed gateway reads it as it does for Claude Code), while the same
+	// group writing through a link to the keys file blocks.
 	{"r3-pre-ifelse-then-group-redirect", "if [ -f src/m0.c ]; then o0=build/m0.o; else o0=build/gen0.o; fi\n{ g4=logs/g4.log; echo \"$c4\" >> \"$g4\"; }", "allow"},
-	{"r3-pre-for-then-group-redirect", "for f in src/*.c; do b1=\"${f%.c}.bak\"; cp \"$f\" \"$b1\"; done\n{ g4=logs/g4.log; echo \"$c4\" >> \"$g4\"; }", ""},
+	{"r3-pre-for-then-group-redirect", "for f in src/*.c; do b1=\"${f%.c}.bak\"; cp \"$f\" \"$b1\"; done\n{ g4=logs/g4.log; echo \"$c4\" >> \"$g4\"; }", "allow"},
+	{"r3-pre-for-then-group-redirect-keylink", "for f in src/*.c; do b1=\"${f%.c}.bak\"; cp \"$f\" \"$b1\"; done\n{ g4=keylink; echo \"$c4\" >> \"$g4\"; }", "block"},
 	// The 512 bound: a protected candidate must survive the cut.
 	{"r3-cap-keylink-before", `f=keylink; if [ -n "$X" ]; then f=a.txt; fi; ` + hp3r3Conds(9) + `echo m >> "$f"`, "block"},
 	{"r3-cap-keylink-before-tee", `f=keylink; if [ -n "$X" ]; then f=a.txt; fi; ` + hp3r3Conds(9) + `cat a.txt | tee -a "$f"`, "block"},
