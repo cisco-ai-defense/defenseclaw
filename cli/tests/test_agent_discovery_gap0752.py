@@ -498,3 +498,205 @@ def test_an_installed_executable_behind_a_replaced_higher_folder_is_probed_again
 
     assert disc.cache_hit is False
     assert disc.agents["codex"].version == "codex-cli 0.167.0"
+
+
+# Round 5: entries are ordered by when each version was read.
+
+
+def _read_scan(*, started_ago: float, read_ago: float, cursor: str, codex: str = "codex-cli 0.160.0") -> ad.AgentDiscovery:
+    """A scan that began *started_ago* seconds ago and read the Cursor version
+    *read_ago* seconds ago (a scan reads its connectors one after another)."""
+    disc = _scan(seconds_old=0, cursor=cursor, codex=codex)
+    now = ad._now_utc()
+    disc.scanned_at = ad._format_rfc3339(now - timedelta(seconds=started_ago))
+    for signal in disc.agents.values():
+        signal.observed_at = ad._format_rfc3339(now - timedelta(seconds=read_ago))
+    return disc
+
+
+def _slug(version: str) -> str:
+    return version.replace(chr(32), chr(45))
+
+
+_VERSION_PAIRS = (("3.19.13", "cursor 2.3.99"), ("cursor 2.3.99", "3.19.13"))
+
+
+def test_a_scan_that_started_first_but_read_later_keeps_its_reading(tmp_path):
+    # Scan A started three seconds ago and read Cursor half a second ago; scan B
+    # started one second ago and read it two seconds ago. B publishes first and
+    # A last. A holds the later reading, whichever way the version moved.
+    for later, earlier in _VERSION_PAIRS:
+        for writer in ("publish", "write"):
+            data = tmp_path / f"{writer}-{_slug(later)}"
+            data.mkdir()
+            scan_b = _read_scan(started_ago=1, read_ago=2, cursor=earlier)
+            scan_a = _read_scan(started_ago=3, read_ago=0.5, cursor=later)
+            assert ad._write_cache(scan_b, data_dir=data)
+
+            if writer == "publish":
+                assert ad._publish_agent_signal(scan_a, "codex", data_dir=data)
+            else:
+                assert ad._write_cache(scan_a, data_dir=data)
+
+            assert ad._read_cache(data_dir=data).agents["cursor"].version == later
+
+
+def test_a_scan_that_started_later_but_read_earlier_does_not_replace_a_later_reading(tmp_path):
+    for later, earlier in _VERSION_PAIRS:
+        for writer in ("publish", "write"):
+            data = tmp_path / f"{writer}-{_slug(later)}"
+            data.mkdir()
+            assert ad._write_cache(_read_scan(started_ago=3, read_ago=0.5, cursor=later), data_dir=data)
+            late_start = _read_scan(started_ago=1, read_ago=2, cursor=earlier)
+
+            if writer == "publish":
+                assert ad._publish_agent_signal(late_start, "codex", data_dir=data)
+            else:
+                assert ad._write_cache(late_start, data_dir=data)
+
+            assert ad._read_cache(data_dir=data).agents["cursor"].version == later
+
+
+def test_scans_started_in_one_second_are_ordered_by_their_readings(tmp_path):
+    # Benign twin of the order tests: nothing is held back when the later
+    # reading arrives last; and the same second is no longer a tie.
+    for later, earlier in _VERSION_PAIRS:
+        for first, second in (("later", "earlier"), ("earlier", "later")):
+            data = tmp_path / f"{first}-{_slug(later)}"
+            data.mkdir()
+            start = ad._now_utc().replace(microsecond=0)
+            scans = {
+                "earlier": _read_scan(started_ago=0, read_ago=0, cursor=earlier),
+                "later": _read_scan(started_ago=0, read_ago=0, cursor=later),
+            }
+            for scan, offset in ((scans["earlier"], 100), (scans["later"], 900)):
+                stamp = ad._format_rfc3339(start + timedelta(milliseconds=offset))
+                scan.scanned_at = stamp
+                for signal in scan.agents.values():
+                    signal.observed_at = stamp
+            assert ad._write_cache(scans[first], data_dir=data)
+            assert ad._publish_agent_signal(scans[second], "codex", data_dir=data)
+
+            assert ad._read_cache(data_dir=data).agents["cursor"].version == later
+
+
+def test_first_writers_on_a_fresh_account_are_serialized_and_ordered(monkeypatch, tmp_path):
+    # Two scans both see no data folder. The one holding the earlier reading
+    # reaches the write second; it must not put its reading over the later one.
+    for later, earlier in _VERSION_PAIRS:
+        data = tmp_path / f"fresh-{_slug(later)}" / "data"
+        scans = {
+            "later": _read_scan(started_ago=3, read_ago=0.5, cursor=later),
+            "earlier": _read_scan(started_ago=1, read_ago=2, cursor=earlier),
+        }
+        writing = {"now": 0, "most": 0}
+        guard = threading.Lock()
+        real_write = ad.atomic_write_private_bytes
+        newer_has_begun = threading.Event()
+
+        def slow_write(path, body, _real=real_write, _writing=writing, _guard=guard, _begun=newer_has_begun):
+            with _guard:
+                _writing["now"] += 1
+                _writing["most"] = max(_writing["most"], _writing["now"])
+            _begun.set()
+            time.sleep(0.2)
+            try:
+                _real(path, body)
+            finally:
+                with _guard:
+                    _writing["now"] -= 1
+
+        monkeypatch.setattr(ad, "atomic_write_private_bytes", slow_write)
+        results: dict[str, bool] = {}
+
+        def run(label: str) -> None:
+            results[label] = ad._write_cache(scans[label], data_dir=data)
+
+        first = threading.Thread(target=run, args=("later",))
+        second = threading.Thread(target=run, args=("earlier",))
+        first.start()
+        assert newer_has_begun.wait(timeout=5)
+        second.start()
+        first.join(timeout=20)
+        second.join(timeout=20)
+
+        assert results == {"later": True, "earlier": True}
+        assert writing["most"] == 1
+        assert ad._read_cache(data_dir=data).agents["cursor"].version == later
+        if os.name != "nt":
+            assert (data.stat().st_mode & 0o077) == 0
+        monkeypatch.setattr(ad, "atomic_write_private_bytes", real_write)
+
+
+def test_a_probe_stamps_when_the_version_was_read(monkeypatch, tmp_path):
+    binary = tmp_path / "codex"
+    binary.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda name, spec: (str(binary),))
+    monkeypatch.setattr(ad, "_version_for_binary", lambda *_a, **_k: ("codex-cli 0.167.0", ""))
+    before = ad._now_utc()
+
+    signal = ad._scan_agent("codex", data_dir=tmp_path, require_trusted_binary_paths=False)
+
+    read_at = ad._parse_rfc3339(signal.observed_at)
+    assert signal.version == "codex-cli 0.167.0"
+    assert read_at is not None and before <= read_at <= ad._now_utc()
+
+
+def test_a_kept_version_keeps_the_time_it_was_read(monkeypatch, tmp_path):
+    binary = tmp_path / "codex"
+    binary.write_text("#!/bin/sh\n")
+    cached = _signal("codex", binary=str(binary), version="codex-cli 0.160.0")
+    cached.observed_at = ad._format_rfc3339(ad._now_utc() - timedelta(minutes=3))
+    # The scan that read it is newer than the executable.
+    _seed(tmp_path, cached, age=-timedelta(minutes=5))
+    agents = {name: _signal(name) for name in ad.DISCOVERABLE_CONNECTORS}
+    agents["codex"] = _signal("codex", binary=str(binary), error=ad.VERSION_NOT_PROBED)
+
+    ad._keep_versions_of_slow_unchanged_agents(agents, data_dir=tmp_path)
+
+    assert agents["codex"].version == "codex-cli 0.160.0"
+    assert agents["codex"].observed_at == cached.observed_at
+
+
+def test_two_overlapping_discoveries_leave_the_version_read_last(monkeypatch, tmp_path):
+    # End to end through the real scan: discovery A starts first and is held at
+    # its Cursor probe; discovery B starts, reads Cursor and publishes; A then
+    # reads Cursor and publishes last. A holds the later reading in either
+    # direction of the version change.
+    binary = tmp_path / "cursor"
+    binary.write_text("#!/bin/sh\n")
+    for later, earlier in _VERSION_PAIRS:
+        data = tmp_path / f"overlap-{_slug(later)}"
+        data.mkdir()
+        monkeypatch.setattr(ad, "_ai_discovery_trust_config", lambda _d: (False, []))
+        monkeypatch.setattr(ad, "_configured_probe_names", lambda _d: frozenset({"cursor"}))
+        monkeypatch.setattr(
+            ad,
+            "_binary_candidates_for_agent",
+            lambda name, spec: (str(binary),) if name == "cursor" else (),
+        )
+        calls: list[str] = []
+        lock = threading.Lock()
+        a_in_probe, b_done = threading.Event(), threading.Event()
+
+        def version_for_binary(*_args, _calls=calls, _lock=lock, _in=a_in_probe, _done=b_done, **_kw):
+            with _lock:
+                _calls.append("probe")
+                mine = len(_calls)
+            if mine == 1:  # discovery A
+                _in.set()
+                assert _done.wait(timeout=10)
+                return later, ""
+            return earlier, ""
+
+        monkeypatch.setattr(ad, "_version_for_agent_binary", version_for_binary)
+        a = threading.Thread(target=lambda: ad.discover_agents(use_cache=False, refresh=True, data_dir=data))
+        a.start()
+        assert a_in_probe.wait(timeout=10)
+        time.sleep(1.1)  # B starts in a later second than A
+        ad.discover_agents(use_cache=False, refresh=True, data_dir=data)
+        b_done.set()
+        a.join(timeout=20)
+        assert not a.is_alive()
+
+        assert ad._read_cache(data_dir=data).agents["cursor"].version == later

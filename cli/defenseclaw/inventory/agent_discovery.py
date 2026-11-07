@@ -67,6 +67,7 @@ from defenseclaw.connector_paths import (
 from defenseclaw.file_lock import locked_file_update
 from defenseclaw.file_permissions import (
     atomic_write_private_bytes,
+    make_private_directory,
     open_regular_file_no_follow,
     other_accounts_can_write,
     reject_reparse_path,
@@ -843,6 +844,11 @@ class AgentSignal:
     #: Claude Code only: SOURCE_CLI or SOURCE_CLAUDE_DESKTOP for the
     #: installation ``binary_path`` names; "" when none was found.
     source: str = ""
+    #: When the version above was read (RFC 3339, microseconds): after the
+    #: probe that returned it, or the time a kept version was first read.
+    #: Two scans that overlap are ordered by this, not by when each started;
+    #: "" means the scan time stands for it (GAP-0752).
+    observed_at: str = ""
 
 
 #: The most Kiro forms one signal records.
@@ -1447,6 +1453,8 @@ def _keep_versions_of_slow_unchanged_agents(
             continue
         signal.binary_path = previous_binary
         signal.version = version
+        # The kept version was read when the last scan read it, not now.
+        signal.observed_at = str(previous.get("observed_at") or payload.get("scanned_at") or "")
         if signal.name == "kiro":
             if payload["version"] in {3, 6}:
                 if _kiro_binary_surface(previous_binary, version) == "cli":
@@ -1967,6 +1975,7 @@ def _scan_agent(
         kiro_ide_version=kiro_versions.get("ide", ("", ""))[1],
         kiro_forms=kiro_forms[:_KIRO_FORMS_MAX],
         source=_agent_source(name, binary_path) if installed or timed_out else "",
+        observed_at=_format_rfc3339(_now_utc()),
     )
 
 
@@ -3358,6 +3367,7 @@ def _read_cache(*, data_dir: str | os.PathLike[str] | None = None) -> AgentDisco
                 kiro_ide_version=str(raw.get("kiro_ide_version") or ""),
                 kiro_forms=_kiro_forms_from_cache(raw.get("kiro_forms")),
                 source=str(raw.get("source") or "") if raw.get("source") in _SOURCES else "",
+                observed_at=str(raw.get("observed_at") or ""),
             )
     except Exception:
         return None
@@ -3368,8 +3378,8 @@ def _read_cache(*, data_dir: str | os.PathLike[str] | None = None) -> AgentDisco
 #: How long a cache update waits for another process updating the same file.
 _CACHE_LOCK_SECONDS = 5.0
 
-#: Entry key: when the scan that produced the entry started. An entry without
-#: it was written with the file and carries the file ``scanned_at``.
+#: Entry key: when the entry version was read (``AgentSignal.observed_at``). An
+#: entry without it was written with the file and carries the file ``scanned_at``.
 _ENTRY_OBSERVED_AT = "observed_at"
 
 
@@ -3379,15 +3389,14 @@ def _cache_update(path: Path) -> Iterator[None]:
 
     Two processes can scan at the same time (a setup and a doctor run), and
     each writes when its scan ends, so the one that ends last would otherwise
-    replace the newer facts of the other. The lock is only taken where the
-    folder already exists: a missing folder has no other writer and is
-    created with its private permissions by the write itself.
+    replace the newer facts of the other. A fresh account has no folder yet and
+    two first writers can arrive together, so the folder is created private
+    here, before the lock, and every writer takes the same lock.
     """
-    if not path.parent.is_dir():
-        yield
-        return
-    # The write refuses a folder that redirects (a link); the lock file must
-    # not be created through it either.
+    # The folder is created (or tightened) the way the write does it, and
+    # refused when it redirects (a link): the lock file must not be created
+    # through one either.
+    make_private_directory(path.parent)
     reject_reparse_path(path)
     with locked_file_update(str(path), timeout_seconds=_CACHE_LOCK_SECONDS):
         yield
@@ -3405,15 +3414,21 @@ def _entry_observed_at(entry: dict[str, Any], payload: dict[str, Any]) -> dateti
     return _parse_rfc3339(str(entry.get(_ENTRY_OBSERVED_AT) or payload.get("scanned_at") or ""))
 
 
-def _cached_entry_is_newer(entry: Any, payload: dict[str, Any], scan: datetime | None) -> bool:
-    """Whether a cached entry holds a version read by a scan that started after
-    *scan*. Such an entry is newer evidence than the scan being written and
-    stays. Equal times are not proof of order, so the scan being written
-    wins then, as it did before the entries were timed."""
-    if scan is None or not _entry_has_version(entry):
+def _signal_observed_at(signal: AgentSignal, disc: AgentDiscovery) -> datetime | None:
+    """When the scan read the version of *signal*; the scan time when the
+    signal does not say."""
+    return _parse_rfc3339(signal.observed_at) or _parse_rfc3339(disc.scanned_at)
+
+
+def _cached_entry_is_newer(entry: Any, payload: dict[str, Any], read_at: datetime | None) -> bool:
+    """Whether a cached entry holds a version read after *read_at*, the time the
+    scan being written read its own. Such an entry is newer evidence and
+    stays, whichever scan started first or ended last. Equal times are not
+    proof of order, so the scan being written wins then."""
+    if read_at is None or not _entry_has_version(entry):
         return False
     observed = _entry_observed_at(entry, payload)
-    return observed is not None and observed > scan
+    return observed is not None and observed > read_at
 
 
 def _read_cache_payload(path: Path) -> dict[str, Any] | None:
@@ -3439,19 +3454,24 @@ def _write_cache(
 ) -> bool:
     """Write one complete scan, keeping an entry a newer scan already read.
 
-    Another process can finish a later scan, and publish it, while this one is
-    still writing; its versions are the newer facts and replace nothing here.
+    Another process can read a version later than this scan did, and publish
+    it, while this one is still writing; that version is the newer fact and is
+    replaced by nothing here.
     """
     target_dir = Path(data_dir) if data_dir else default_data_path()
     path = _cache_path(data_dir=target_dir)
     try:
-        agents = {name: asdict(signal) for name, signal in disc.agents.items()}
+        agents = {
+            name: {**asdict(signal), _ENTRY_OBSERVED_AT: signal.observed_at or disc.scanned_at}
+            for name, signal in disc.agents.items()
+        }
         with _cache_update(path):
             existing = _read_cache_payload(path)
-            scan = _parse_rfc3339(disc.scanned_at)
             if existing is not None:
                 for name, entry in existing["agents"].items():
-                    if name in agents and _cached_entry_is_newer(entry, existing, scan):
+                    if name in agents and _cached_entry_is_newer(
+                        entry, existing, _signal_observed_at(disc.agents[name], disc)
+                    ):
                         observed = _format_rfc3339(_entry_observed_at(entry, existing))
                         agents[name] = {**entry, _ENTRY_OBSERVED_AT: observed}
             payload = {
@@ -3487,11 +3507,11 @@ def _publish_agent_signal(
     reviewed at. A peer the scan did read (installed, with a version) is a
     newer fact than the cache holds and replaces it, whichever way the version
     moved: the gateway admits a peer by the version in this file. A peer the
-    scan could not read keeps its cached entry. An entry read by a scan that
-    started after this one is newer still and stays (the read, compare and
-    write are one locked step, so a scan that ends late cannot put back what
-    a later one found). A missing or unreadable cache has nothing to keep and
-    takes the scan; a cache past its time limit is left alone: it is no longer
+    scan could not read keeps its cached entry. An entry whose version was
+    read after this scan read its own is newer still and stays (the read,
+    compare and write are one locked step, so a scan that ends late cannot put
+    back what a later reading found, however the scans overlapped). A missing or unreadable cache has nothing to keep
+    and takes the scan; a cache past its time limit is left alone: it is no longer
     read, and the next discovery scans again (GAP-0752).
     """
     signal = disc.agents.get(name)
@@ -3505,13 +3525,14 @@ def _publish_agent_signal(
                 scanned = _parse_rfc3339(str(payload.get("scanned_at") or ""))
                 if scanned is None or _now_utc() - scanned > timedelta(seconds=CACHE_TTL_SECONDS):
                     return False
-                scan = _parse_rfc3339(disc.scanned_at)
                 for peer, fresh in disc.agents.items():
                     if peer != name and not _scan_read_version(fresh):
                         continue
-                    if _cached_entry_is_newer(payload["agents"].get(peer), payload, scan):
+                    read_at = _signal_observed_at(fresh, disc)
+                    if _cached_entry_is_newer(payload["agents"].get(peer), payload, read_at):
                         continue
-                    payload["agents"][peer] = {**asdict(fresh), _ENTRY_OBSERVED_AT: disc.scanned_at}
+                    observed = fresh.observed_at or disc.scanned_at
+                    payload["agents"][peer] = {**asdict(fresh), _ENTRY_OBSERVED_AT: observed}
                 body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
                 atomic_write_private_bytes(path, body.encode("utf-8"))
                 return True
@@ -3531,7 +3552,7 @@ def _now_utc() -> datetime:
 
 
 def _format_rfc3339(ts: datetime) -> str:
-    return ts.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return ts.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _parse_rfc3339(value: str) -> datetime | None:
