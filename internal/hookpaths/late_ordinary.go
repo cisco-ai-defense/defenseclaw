@@ -132,7 +132,16 @@ func lateCommandText(args map[string]json.RawMessage) (string, bool) {
 	if json.Unmarshal(command, &argv) != nil || len(argv) == 0 {
 		return "", false
 	}
-	return strings.Join(argv, " "), true
+	// An argv is a list of words, not a shell text: each element is one
+	// quoted word, so a space, a semicolon or a dash inside one stays in it.
+	words := make([]string, len(argv))
+	for i, arg := range argv {
+		if strings.ContainsAny(arg, "\x27\"\\$`\n\r\x00") {
+			return "", false
+		}
+		words[i] = "\x27" + arg + "\x27"
+	}
+	return strings.Join(words, " "), true
 }
 
 // lateScan is the state of one call's scan: the physical working directory
@@ -183,7 +192,7 @@ func lateNamesProtected(text string) bool {
 // a second hard link included), and not the root or the home itself or one
 // of their parents. A name that does not exist yet is ordinary.
 func (s *lateScan) path(word string) bool {
-	if word == "" || strings.IndexByte(word, 0) >= 0 || lateNamesProtected(word) {
+	if word == "" || strings.IndexByte(word, 0) >= 0 || strings.HasPrefix(word, "~") || lateNamesProtected(word) {
 		return false
 	}
 	current := s.cwd
@@ -241,12 +250,41 @@ var (
 	// lateWrappers run another program or a shell text the scan cannot read.
 	lateWrappers = []string{"sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "eval", "exec", "source", ".",
 		"env", "sudo", "su", "doas", "xargs", "nohup", "command", "builtin", "time", "watch", "timeout", "setsid",
-		"ssh", "scp", "sftp", "nc", "ncat", "socat", "script", "screen", "tmux", "at", "crontab"}
+		"ssh", "scp", "sftp", "nc", "ncat", "socat", "script", "screen", "tmux", "at", "crontab",
+		"vi", "vim", "view", "nvim", "ex", "ed", "emacs", "nano"}
 	// lateInterpreters run program text given on the command line.
 	lateInterpreters = []string{"python", "python2", "python3", "node", "nodejs", "deno", "bun", "perl", "ruby", "php",
 		"lua", "awk", "gawk", "tclsh", "Rscript"}
 	lateCodeFlags = []string{"-c", "-e", "-E", "-p", "-r", "-x", "--eval", "--print", "--command"}
+	// lateTextPrograms read and write no file: their words are text, so only
+	// a redirect target is a path.
+	lateTextPrograms = []string{"echo", "printf", "true", "false", "pwd", "whoami", "uname", "id", "sleep", "seq",
+		"basename", "dirname", "expr"}
+	// lateShortOptions lists, for programs whose options are known, the short
+	// flags and the short options that take a value: in -la nothing is a
+	// value, in -Ifile the file is. A cluster with any other letter, and a
+	// program that is not listed, may take a value at any letter.
+	lateShortOptions = map[string]lateOptions{
+		"ls":    {"lLaAbBcCdDfFgGhHikmnNopqQrRsStuUvxXZ1", "ITw"},
+		"cat":   {"AbeEnstTuv", ""},
+		"wc":    {"clLmw", ""},
+		"head":  {"qvz", "nc"},
+		"tail":  {"fFqrvz", "ncs"},
+		"sort":  {"bcCdfgGhiMmnRrsuVz", "okStT"},
+		"uniq":  {"cdDiuz", "fsw"},
+		"cut":   {"nsz", "bcdf"},
+		"tr":    {"cdst", ""},
+		"grep":  {"EFGPiyvwxcLlonqsHhbaIrRTUzZ", "efmABCdD"},
+		"touch": {"acfhm", "drt"},
+		"mkdir": {"pvZ", "m"},
+		"rm":    {"fFiIrRdv", ""},
+		"cp":    {"abdfHiLlnPpRrsTuvxZ", "St"},
+		"mv":    {"bfinTuvxZ", "St"},
+	}
 )
+
+// lateOptions are the short flags and the short options with a value of one program.
+type lateOptions struct{ flags, values string }
 
 // lateToken is one word of the command text, its quotes removed.
 type lateToken struct {
@@ -318,6 +356,7 @@ func (s *lateScan) command(command string) bool {
 	}
 	atCommand, afterPipe, redirect := true, false, false
 	var program string
+	var sed lateSed
 	for _, token := range tokens {
 		if token.operator {
 			switch {
@@ -334,21 +373,36 @@ func (s *lateScan) command(command string) bool {
 		switch {
 		case redirect:
 			redirect = false
+			if !s.word("", text) {
+				return false
+			}
 		case atCommand:
 			if name, value, assigned := strings.Cut(text, "="); assigned && lateIdentifier(name) {
-				text = value
-				break
+				if !s.word("", value) {
+					return false
+				}
+				continue
 			}
 			base := filepath.Base(text)
 			if slices.Contains(lateWrappers, base) || afterPipe && !slices.Contains(lateFilters, base) {
 				return false
 			}
-			atCommand, afterPipe, program = false, false, base
+			atCommand, afterPipe, program, sed = false, false, base, lateSed{}
+			if !s.word("", text) {
+				return false
+			}
 		case slices.Contains(lateInterpreters, program) && slices.Contains(lateCodeFlags, text):
 			return false
-		}
-		if !s.word(text) {
-			return false
+		case slices.Contains(lateTextPrograms, program):
+		case program == "sed":
+			ordinary, isPath := sed.accept(text)
+			if !ordinary || isPath && !s.word(program, text) {
+				return false
+			}
+		default:
+			if !s.word(program, text) {
+				return false
+			}
 		}
 	}
 	return !atCommand && !redirect
@@ -356,24 +410,115 @@ func (s *lateScan) command(command string) bool {
 
 // lateIdentifier reports a shell variable name.
 func lateIdentifier(name string) bool {
-	if name == "" || name[0] >= '0' && name[0] <= '9' {
+	if name == "" || strings.IndexByte("0123456789", name[0]) >= 0 {
 		return false
 	}
 	for i := range len(name) {
-		c := name[i]
-		if !(c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
+		if strings.IndexByte(lateLetters+"0123456789", name[i]) < 0 {
 			return false
 		}
 	}
 	return true
 }
 
-// word checks every path an argument may name: see lateCandidates.
-func (s *lateScan) word(text string) bool {
-	if lateNamesProtected(text) {
+const lateLetters = "_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+// lateSed follows the words of one sed call. A sed script is a small
+// program that can write a file (w), read one (r), or run a command (e), so
+// the script is ordinary only in the two plain shapes lateSedScript knows;
+// any other script, and a script file, is not.
+type lateSed struct{ expectScript, haveScript bool }
+
+// accept reports a sed word that is ordinary; isPath is true when the word
+// is also a path or a path-bearing option to look at.
+func (q *lateSed) accept(text string) (ordinary, isPath bool) {
+	switch {
+	case q.expectScript:
+		q.expectScript, q.haveScript = false, true
+		return lateSedScript(text), true
+	case !strings.HasPrefix(text, "-") || text == "-":
+		if q.haveScript {
+			return true, true
+		}
+		q.haveScript = true
+		return lateSedScript(text), true
+	case text == "--expression":
+		q.expectScript = true
+		return true, false
+	case strings.HasPrefix(text, "--expression="):
+		q.haveScript = true
+		return lateSedScript(strings.TrimPrefix(text, "--expression=")), true
+	case strings.HasPrefix(text, "--"):
+		return slices.Contains([]string{"--quiet", "--silent", "--regexp-extended", "--separate", "--unbuffered",
+			"--null-data", "--posix", "--debug", "--sandbox", "--follow-symlinks", "--binary"}, text), false
+	}
+	for i := 1; i < len(text); i++ {
+		switch {
+		case strings.IndexByte("nEsuzr", text[i]) >= 0:
+		case text[i:i+1] == "i":
+			return true, true
+		case text[i:i+1] == "e":
+			if i+1 == len(text) {
+				q.expectScript = true
+				return true, false
+			}
+			q.haveScript = true
+			return lateSedScript(text[i+1:]), true
+		default:
+			return false, false
+		}
+	}
+	return true, false
+}
+
+// lateSedScript reports a script of one command that touches no file and
+// runs nothing: [address]p, d, q, P, D, = or n, or [address]s/old/new/flags
+// with the flags g, p, I, i, M or a number. An address is a line number, a
+// range of two, or a /regexp/; ! may follow it. The delimiter of s is one of
+// / | # and a comma, and old and new hold no further delimiter.
+func lateSedScript(script string) bool {
+	rest := script
+	number := func() bool {
+		n := len(rest) - len(strings.TrimLeft(rest, "0123456789"))
+		rest = rest[n:]
+		return n > 0
+	}
+	switch {
+	case strings.HasPrefix(rest, "/"):
+		end := strings.Index(rest[1:], "/")
+		if end < 0 {
+			return false
+		}
+		rest = rest[end+2:]
+	case number():
+		if strings.HasPrefix(rest, ",") {
+			rest = rest[1:]
+			if !number() {
+				return false
+			}
+		}
+	}
+	rest = strings.TrimPrefix(rest, "!")
+	if slices.Contains([]string{"p", "d", "q", "P", "D", "=", "n"}, rest) {
+		return true
+	}
+	if len(rest) < 4 || !strings.HasPrefix(rest, "s") || strings.IndexByte("/|#,", rest[1]) < 0 {
 		return false
 	}
-	for _, candidate := range lateCandidates(text) {
+	parts := strings.Split(rest[2:], rest[1:2])
+	if len(parts) != 3 {
+		return false
+	}
+	return strings.Trim(parts[2], "gpIiM0123456789") == ""
+}
+
+// word checks every path an argument of program may name: see
+// lateCandidates. A word of more than a few thousand bytes is not scanned.
+func (s *lateScan) word(program, text string) bool {
+	if len(text) > 4096 || lateNamesProtected(text) {
+		return false
+	}
+	for _, candidate := range lateCandidates(program, text) {
 		if !s.path(candidate) {
 			return false
 		}
@@ -382,19 +527,58 @@ func (s *lateScan) word(text string) bool {
 }
 
 // lateCandidates are the paths a program may read out of one word: the word
-// itself (an operand, a redirect target, a file named like an option), the
-// part after any "=", ":", ",", "@", "+" or "%" (--out=file, of=file,
-// a:file), and for a word that starts with "-" every part from its second
-// character on, since a short option takes its value attached (-ofile,
-// -vofile, -f/path). A part that is a link, a hard link or ".." makes the
-// call not ordinary; a part that is no file is ordinary.
-func lateCandidates(text string) []string {
-	candidates := []string{text}
-	attached := strings.HasPrefix(text, "-")
-	for i := 1; i < len(text); i++ {
-		if attached || strings.IndexByte("=:,@+%", text[i-1]) >= 0 {
-			candidates = append(candidates, text[i:])
+// itself (an operand, a redirect target, a file named like an option), each
+// space-separated part of it (a quoted word may hold several), the part
+// after any "=", ":", ",", "@", "+" or "%" (--out=file, of=file, a:file),
+// and for a short option the value attached to it (-ofile, -vofile,
+// -f/path). A part that is a link, a hard link or ".." makes the call not
+// ordinary; a part that is no file is ordinary.
+func lateCandidates(program, text string) []string {
+	parts := []string{text}
+	if fields := strings.Fields(text); len(fields) != 1 || fields[0] != text {
+		parts = append(parts, fields...)
+	}
+	var candidates []string
+	for _, part := range parts {
+		candidates = append(candidates, part)
+		for i := 1; i < len(part); i++ {
+			if strings.IndexByte("=:,@+%", part[i-1]) >= 0 {
+				candidates = append(candidates, part[i:])
+			}
 		}
+		candidates = append(candidates, lateAttached(program, part)...)
 	}
 	return candidates
+}
+
+// lateAttached are the values attached to a short option (-ofile). For a
+// program in lateShortOptions it is what follows its first value-taking
+// letter, and nothing for a cluster of its flags such as -la. For any other
+// program or cluster every tail counts, because any letter might take one.
+func lateAttached(program, part string) []string {
+	if len(part) < 2 || !strings.HasPrefix(part, "-") || strings.HasPrefix(part, "--") {
+		return nil
+	}
+	if known, listed := lateShortOptions[program]; listed {
+		plain := true
+		for i := 1; i < len(part) && plain; i++ {
+			switch {
+			case strings.IndexByte(known.values, part[i]) >= 0:
+				if i+1 < len(part) {
+					return []string{part[i+1:]}
+				}
+				return nil
+			case strings.IndexByte(known.flags+"0123456789", part[i]) < 0:
+				plain = false
+			}
+		}
+		if plain {
+			return nil
+		}
+	}
+	var tails []string
+	for i := 1; i < len(part); i++ {
+		tails = append(tails, part[i:])
+	}
+	return tails
 }
