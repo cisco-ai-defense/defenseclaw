@@ -241,6 +241,7 @@ func newHoldRig(t *testing.T) *holdRig {
 	rig.sys = &fakeHolderSystem{t: t, hook: windowsHookHolderIdentity{volume: 7, id: [16]byte{1, 2, 3}}, procs: map[uint32]*fakeHolderProcess{}}
 	savedStandalone, savedSys, savedBlocked, savedPost, savedName := windowsHolderStandalone, windowsHolderSys, windowsHookBinaryDeleteBlocked, windowsHolderAuditPost, windowsHolderUserName
 	savedOpenRefused, savedKeep := windowsHookBinaryOpenRefused, windowsHookBinaryKeep
+	savedDataRead, savedDataDelete, savedDataDir := windowsHookDataReadRefused, windowsHookDataDeleteBlocked, windowsHookRuntimeDir
 	savedTimeout, savedHung, savedProbes, savedWrite, savedCommit := windowsHolderProbeTimeout, windowsHolderMaxHung, windowsHolderMaxProbes, windowsHolderAuditWrite, windowsHolderCommitWait
 	windowsHolderStandalone = func() bool { return true }
 	windowsHolderSys = rig.sys
@@ -255,6 +256,7 @@ func newHoldRig(t *testing.T) *holdRig {
 	t.Cleanup(func() {
 		windowsHolderStandalone, windowsHolderSys, windowsHookBinaryDeleteBlocked, windowsHolderAuditPost, windowsHolderUserName = savedStandalone, savedSys, savedBlocked, savedPost, savedName
 		windowsHookBinaryOpenRefused, windowsHookBinaryKeep = savedOpenRefused, savedKeep
+		windowsHookDataReadRefused, windowsHookDataDeleteBlocked, windowsHookRuntimeDir = savedDataRead, savedDataDelete, savedDataDir
 		windowsHolderProbeTimeout, windowsHolderMaxHung, windowsHolderMaxProbes, windowsHolderAuditWrite, windowsHolderCommitWait = savedTimeout, savedHung, savedProbes, savedWrite, savedCommit
 		resetWindowsHolderOutputForTest()
 	})
@@ -270,6 +272,7 @@ func resetWindowsHolderOutputForTest() {
 	windowsHolderAuditSeq, windowsHolderAuditPath, windowsHolderAuditLoaded = 0, "", false
 	windowsHolderAuditLastErr, windowsHolderAuditFails, windowsHolderAuditNext, windowsHolderAuditSaveErr = "", 0, time.Time{}, ""
 	windowsHolderNames.Clear()
+	windowsHolderDataGates, windowsHolderDataLast = map[string]*windowsHolderState{}, map[string]string{}
 }
 
 // reportWindowsHookHolders is what the guardian does after a check: the log
@@ -1766,6 +1769,188 @@ func TestWindowsHolderAuditRowTheGatewayRefusesForGoodIsDroppedAndDoesNotBlockTh
 		t.Fatalf("posted %+v, queued %d: the row behind the refused one was held up", rig.posted, queuedWindowsHolderRows())
 	}
 	if !strings.Contains(rig.log.String(), "dropped the hook-holder audit row") || !strings.Contains(rig.log.String(), "process id 100") {
+		t.Fatalf("log %q", rig.log.String())
+	}
+}
+
+// dataRig is a rig whose watched folder holds machine-policy.json and an
+// enrollment under a connector folder; only the paths in held are held.
+func dataRig(t *testing.T, held ...string) (rig *holdRig, dir string) {
+	t.Helper()
+	rig = newHoldRig(t)
+	dir = filepath.Join(t.TempDir(), "DefenseClaw-HookRuntime")
+	for _, name := range []string{"machine-policy.json", filepath.Join("claudecode", "enrollment-S-1-5-21-1.json")} {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	isHeld := func(path string) bool {
+		for _, h := range held {
+			if !filepath.IsAbs(h) {
+				h = filepath.Join(dir, h)
+			}
+			if strings.EqualFold(h, path) {
+				return true
+			}
+		}
+		return false
+	}
+	windowsHookRuntimeDir = func() (string, error) { return dir, nil }
+	windowsHookDataReadRefused = func(path string) bool { return isHeld(path) && rig.sys.startRefused() }
+	windowsHookDataDeleteBlocked = func(path string) bool { return isHeld(path) && rig.sys.blocked() }
+	return rig, dir
+}
+
+// keepData is one guardian check of the runtime files, then its report.
+func keepData(rig *holdRig) {
+	keepWindowsHookRuntimeFiles(&rig.log)
+	writeWindowsHolderLog(&rig.log)
+	flushWindowsHolderAudit(&rig.log)
+}
+
+// GAP-0755 (lead, class fix). The watch list is the regular files under the
+// hook runtime folder, not links, a bounded depth and count; nothing else.
+func TestWindowsHookRuntimeWatchListIsTheRuntimeFolderOnly(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "DefenseClaw-HookRuntime")
+	deep := filepath.Join(dir, "a", "b", "c", "d", "e")
+	for _, path := range []string{
+		filepath.Join(dir, "machine-policy.json"),
+		filepath.Join(dir, "claudecode", "selector.json"),
+		filepath.Join(deep, "too-deep.json"),
+		filepath.Join(root, "config.yaml"), // beside the folder, not in it
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := windowsHookRuntimeWatchList(dir)
+	want := []string{filepath.Join(dir, "claudecode", "selector.json"), filepath.Join(dir, "machine-policy.json")}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("watch list %v, want %v", got, want)
+	}
+	if list := windowsHookRuntimeWatchList(""); len(list) != 0 {
+		t.Fatalf("an empty folder name listed %v", list)
+	}
+	for i := 0; i < windowsHolderWatchMaxFiles+10; i++ {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("many-%03d.json", i)), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if list := windowsHookRuntimeWatchList(dir); len(list) != windowsHolderWatchMaxFiles {
+		t.Fatalf("%d files listed, want the cap %d", len(list), windowsHolderWatchMaxFiles)
+	}
+}
+
+// A hold of machine-policy.json (every guarded call fails closed while the
+// hook cannot read it) is closed at the second check by the same bounded
+// close, with one HIGH row that names the file.
+func TestWindowsHolderAHeldMachinePolicyIsClosedAfterTwoChecksWithOneRow(t *testing.T) {
+	rig, dir := dataRig(t, "machine-policy.json")
+	policy := filepath.Join(dir, "machine-policy.json")
+	holder := rig.sys.culprit(0x44)
+	proc := rig.sys.add(4100, fakeUserSID, 2, holder)
+	keepData(rig)
+	if holder.closed {
+		t.Fatal("closed at first sight")
+	}
+	rig.advance(windowsHookBinaryCheckInterval)
+	keepData(rig)
+	if !holder.closed || len(proc.closeLog) != 1 {
+		t.Fatalf("not closed at the second check: %v", proc.closeLog)
+	}
+	if len(rig.posted) != 1 || !rig.posted[0].Closed || rig.posted[0].Hook != policy {
+		t.Fatalf("rows %+v, want one closed=true row for %s", rig.posted, policy)
+	}
+	event := rig.posted[0].event()
+	if event.Target != policy || event.Severity != "HIGH" || !strings.Contains(event.Details, "the hook runtime file "+policy) ||
+		!strings.Contains(event.Details, "A read of the file by the hook was refused") || strings.Contains(event.Details, "hook binary") {
+		t.Fatalf("event %+v", event)
+	}
+	if !strings.Contains(rig.log.String(), "closed the handle") || !strings.Contains(rig.log.String(), "the hook runtime file") {
+		t.Fatalf("log %q", rig.log.String())
+	}
+	// The hold is gone: the next check is quiet.
+	rig.advance(windowsHookBinaryCheckInterval)
+	keepData(rig)
+	if len(rig.posted) != 1 {
+		t.Fatalf("rows after the hold ended: %d", len(rig.posted))
+	}
+}
+
+// A file that is held but is not on the watch list is never looked at: no
+// scan, no close, no row. A held watched file does not draw the guardian to
+// its neighbour, and each file has its own gate.
+func TestWindowsHolderAHeldFileThatIsNotWatchedIsIgnored(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(outside, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rig, _ := dataRig(t, outside)
+	holder := rig.sys.culprit(0x44)
+	rig.sys.add(4100, fakeUserSID, 2, holder)
+	for i := 0; i < 6; i++ {
+		keepData(rig)
+		rig.advance(windowsHookBinaryCheckInterval)
+	}
+	if rig.sys.snapshots != 0 || holder.closed || len(rig.posted) != 0 {
+		t.Fatalf("a file outside the runtime folder was acted on: scans %d, closed %v, rows %d", rig.sys.snapshots, holder.closed, len(rig.posted))
+	}
+	// Two watched files, one held: the gates are separate.
+	rig2, dir2 := dataRig(t, "machine-policy.json")
+	a, b := filepath.Join(dir2, "machine-policy.json"), filepath.Join(dir2, "claudecode", "enrollment-S-1-5-21-1.json")
+	h2 := rig2.sys.culprit(0x44)
+	rig2.sys.add(4100, fakeUserSID, 2, h2)
+	keepData(rig2)
+	rig2.advance(windowsHookBinaryCheckInterval)
+	keepData(rig2)
+	if !h2.closed || len(windowsHolderDataGates) != 2 || windowsHolderDataGates[strings.ToLower(a)].closes != 1 || windowsHolderDataGates[strings.ToLower(b)].closes != 0 {
+		t.Fatalf("closed %v, gates %d", h2.closed, len(windowsHolderDataGates))
+	}
+}
+
+// Outside the standalone profile the guardian reads no handle table for a
+// runtime file.
+func TestWindowsHolderDataFilesAreLeftAloneOutsideTheStandaloneProfile(t *testing.T) {
+	rig, _ := dataRig(t, "machine-policy.json")
+	windowsHolderStandalone = func() bool { return false }
+	holder := rig.sys.culprit(0x44)
+	rig.sys.add(4100, fakeUserSID, 2, holder)
+	for i := 0; i < 4; i++ {
+		keepData(rig)
+		rig.advance(windowsHookBinaryCheckInterval)
+	}
+	if rig.sys.snapshots != 0 || holder.closed || len(rig.posted) != 0 {
+		t.Fatalf("outside the standalone profile: scans %d, closed %v, rows %d", rig.sys.snapshots, holder.closed, len(rig.posted))
+	}
+}
+
+// A service's hold of the file is named and not closed, like the hook binary's.
+func TestWindowsHolderAServiceHoldOfARuntimeFileIsNamedAndNotClosed(t *testing.T) {
+	rig, dir := dataRig(t, "machine-policy.json")
+	policy := filepath.Join(dir, "machine-policy.json")
+	service := rig.sys.culprit(0x90)
+	rig.sys.add(700, "S-1-5-18", 0, service)
+	user := rig.sys.sharing(0x44)
+	rig.sys.add(4100, fakeUserSID, 2, user)
+	for i := 0; i < 4; i++ {
+		keepData(rig)
+		rig.advance(windowsHookBinaryCheckInterval)
+	}
+	if service.closed || user.closed {
+		t.Fatal("a handle was closed while a service holds the file")
+	}
+	if len(rig.posted) != 1 || rig.posted[0].Closed || rig.posted[0].Hook != policy || !strings.Contains(rig.posted[0].Reason, "LocalSystem") {
+		t.Fatalf("rows %+v", rig.posted)
+	}
+	if !strings.Contains(rig.log.String(), "the hook runtime file "+policy+" is held open") {
 		t.Fatalf("log %q", rig.log.String())
 	}
 }

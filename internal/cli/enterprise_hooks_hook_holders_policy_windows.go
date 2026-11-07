@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -414,7 +415,7 @@ func closeWindowsHolderHandle(target string, h windowsHolderHandle, want windows
 // many candidates, processes and file objects it chose from.
 func auditWindowsHolderClose(target string, h windowsHolderHandle, note string, counts windowsHolderCounts) {
 	account := windowsHolderAccount(h.Process.SID)
-	logWindowsHolder(fmt.Sprintf("[hook-guardian] tamper: closed the handle %s had on the hook binary %s (access 0x%08x; one of %d candidate handle(s) in %d process(es) on %d file object(s)). %s", h.describe(), target, h.Access, counts.Handles, counts.Processes, counts.Objects, note))
+	logWindowsHolder(fmt.Sprintf("[hook-guardian] tamper: closed the handle %s had on %s (access 0x%08x; one of %d candidate handle(s) in %d process(es) on %d file object(s)). %s", h.describe(), windowsHolderSubject(target), h.Access, counts.Handles, counts.Processes, counts.Objects, note))
 	queueWindowsHolderAudit(windowsHolderAuditRow{At: windowsHeldSwapNow().UTC(), Hook: target, Holder: h.Process, Handle: h.Handle, Access: h.Access,
 		Closed: true, Note: note, Account: account, Counts: counts})
 }
@@ -423,7 +424,7 @@ func auditWindowsHolderClose(target string, h windowsHolderHandle, note string, 
 // was not the hook's: the owner replaced the handle between the guardian's
 // last check and the close.
 func auditWindowsHolderWrongClose(target string, h windowsHolderHandle, counts windowsHolderCounts) {
-	auditWindowsHolderDoubtfulClose(target, h, counts, "closed a handle in %s that, after the close, proved not to be on the hook binary %s (access 0x%08x). %s",
+	auditWindowsHolderDoubtfulClose(target, h, counts, "closed a handle in %s that, after the close, proved not to be on %s (access 0x%08x). %s",
 		"After the close the handle proved not to be one on the hook: its owner had replaced it between the guardian's check and the close, so a handle that was not on the hook may have been closed.")
 }
 
@@ -431,13 +432,13 @@ func auditWindowsHolderWrongClose(target string, h windowsHolderHandle, counts w
 // DuplicateHandle with DUPLICATE_CLOSE_SOURCE closes the source handle whatever
 // it returns, so the handle may be gone.
 func auditWindowsHolderFailedClose(target string, h windowsHolderHandle, counts windowsHolderCounts) {
-	auditWindowsHolderDoubtfulClose(target, h, counts, "tried to close a handle in %s on the hook binary %s (access 0x%08x), and the last call failed. %s",
+	auditWindowsHolderDoubtfulClose(target, h, counts, "tried to close a handle in %s on %s (access 0x%08x), and the last call failed. %s",
 		"The last call of the close failed, and Windows closes the source handle whatever that call returns, so the handle may have been closed.")
 }
 
 func auditWindowsHolderDoubtfulClose(target string, h windowsHolderHandle, counts windowsHolderCounts, warn, note string) {
 	account := windowsHolderAccount(h.Process.SID)
-	logWindowsHolder("[hook-guardian] warn: " + fmt.Sprintf(warn, h.describe(), target, h.Access, note))
+	logWindowsHolder("[hook-guardian] warn: " + fmt.Sprintf(warn, h.describe(), windowsHolderSubject(target), h.Access, note))
 	queueWindowsHolderAudit(windowsHolderAuditRow{At: windowsHeldSwapNow().UTC(), Hook: target, Holder: h.Process, Handle: h.Handle, Access: h.Access,
 		Closed: true, Note: note, Account: account, Counts: counts})
 }
@@ -961,6 +962,203 @@ func orderWindowsHolderUser(eligible []windowsHolderHandle) ([]windowsHolderHand
 	return ordered, len(list)
 }
 
+// windowsHolderProbes are the two facts the close loop asks of the file it
+// works on before every close: whether an open for deletion is refused, and
+// whether the open the hook makes of it (a start, for the binary; a read, for a
+// runtime file) is refused.
+type windowsHolderProbes struct {
+	deleteBlocked func(path string) bool
+	startRefused  func(path string) bool
+}
+
+// windowsHolderBinaryProbes are the hook binary's: the replaceable seams are
+// read when called.
+var windowsHolderBinaryProbes = windowsHolderProbes{
+	deleteBlocked: func(path string) bool { return windowsHookBinaryDeleteBlocked(path) },
+	startRefused:  func(path string) bool { return windowsHookBinaryHeldOpen(path) != "" },
+}
+
+// windowsHolderDataProbes are a hook runtime file's.
+var windowsHolderDataProbes = windowsHolderProbes{
+	deleteBlocked: func(path string) bool { return windowsHookDataDeleteBlocked(path) },
+	startRefused:  func(path string) bool { return windowsHookDataReadRefused(path) },
+}
+
+// windowsHolderIsBinary tells the hook binary from the runtime files; the
+// binary is the only watched file with this name.
+func windowsHolderIsBinary(path string) bool {
+	return strings.EqualFold(filepath.Base(path), "defenseclaw-hook.exe")
+}
+
+// windowsHolderSubject names the watched file in words.
+func windowsHolderSubject(path string) string {
+	if windowsHolderIsBinary(path) {
+		return "the hook binary " + path
+	}
+	return "the hook runtime file " + path
+}
+
+// windowsHolderOpenSubject is windowsHolderSubject as the log line about a
+// refused holder names it: "the hook" for the binary, whose lines have said so
+// since the first round.
+func windowsHolderOpenSubject(path string) string {
+	if windowsHolderIsBinary(path) {
+		return "the hook"
+	}
+	return windowsHolderSubject(path)
+}
+
+// windowsHolderRefuses says what a refused holder may be keeping the hook from.
+func windowsHolderRefuses(path string) string {
+	if windowsHolderIsBinary(path) {
+		return "its starts"
+	}
+	return "the hook's reads (every guarded call fails closed)"
+}
+
+// windowsHolderRefusedWhat is the first half of the sentence an audit row and a
+// log line say about the refusal.
+func windowsHolderRefusedWhat(path string) string {
+	if windowsHolderIsBinary(path) {
+		return "A start of the hook was refused"
+	}
+	return "A read of the file by the hook was refused"
+}
+
+// The files besides the hook binary that a hook start reads, all of them
+// administrator-written and readable by the standard users whose hooks read
+// them: the public machine policy summary, the hot-config closure marker, and
+// the per-user connector enrollments, runtime selectors and generations, all in
+// the hook runtime folder. Everything else a hook reads is the user's own, or
+// is not readable by a standard user. The guardian watches exactly these.
+const (
+	windowsHolderWatchMaxFiles = 64
+	windowsHolderWatchDepth    = 4
+)
+
+// windowsHookRuntimeWatchList lists the regular files under the hook runtime
+// folder, at most windowsHolderWatchMaxFiles of them, not following links.
+func windowsHookRuntimeWatchList(dir string) []string {
+	if strings.TrimSpace(dir) == "" {
+		return nil
+	}
+	var files []string
+	base := filepath.Clean(dir)
+	_ = filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			rel, relErr := filepath.Rel(base, path)
+			if relErr != nil || (rel != "." && strings.Count(rel, string(filepath.Separator)) >= windowsHolderWatchDepth) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Type().IsRegular() && len(files) < windowsHolderWatchMaxFiles {
+			files = append(files, path)
+		}
+		return nil
+	})
+	sort.Strings(files)
+	return files
+}
+
+// windowsHookRuntimeDir is the hook runtime folder; tests replace it.
+var windowsHookRuntimeDir = func() (string, error) {
+	layout, err := windowsManagedLayout.standalone()
+	return layout.HookRuntimeDir, err
+}
+
+// windowsHookDataReadRefused is the open the hook makes of a runtime file
+// (ReadManagedHookRuntimeFile: read access, every sharing allowed) and whether
+// it hits a sharing violation. windowsHookDataDeleteBlocked is the same test
+// for deletion. Tests replace both.
+var (
+	windowsHookDataReadRefused = func(path string) bool {
+		return windowsOpenRefused(path, windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
+	}
+	windowsHookDataDeleteBlocked = func(path string) bool {
+		return windowsOpenRefused(path, windows.DELETE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
+	}
+)
+
+func windowsOpenRefused(path string, access, share uint32) bool {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return false
+	}
+	handle, err := windows.CreateFile(name, access, share, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		return true
+	}
+	if err == nil {
+		_ = windows.CloseHandle(handle)
+	}
+	return false
+}
+
+// windowsHolderDataGates and windowsHolderDataLast are the per-file gates and
+// the last verdict logged for each watched runtime file, guarded by
+// windowsHookBinaryMu.
+var (
+	windowsHolderDataGates = map[string]*windowsHolderState{}
+	windowsHolderDataLast  = map[string]string{}
+)
+
+// keepWindowsHookRuntimeFiles is the guardian's check of the runtime files a
+// hook start reads, called with windowsHookBinaryMu held. A file that refuses
+// the hook's own read and an open for deletion is a hold; the guardian ends it
+// by the same bounded close as the hook binary's (there is no swap for a data
+// file), with its own persistence, backoff and streak per file. A file that is
+// not on the watch list is never looked at.
+func keepWindowsHookRuntimeFiles(stderr io.Writer) {
+	if !windowsHolderCloserEnabled() {
+		return
+	}
+	dir, err := windowsHookRuntimeDir()
+	if err != nil {
+		return
+	}
+	watched := map[string]bool{}
+	for _, path := range windowsHookRuntimeWatchList(dir) {
+		key := strings.ToLower(path)
+		watched[key] = true
+		gate := windowsHolderDataGates[key]
+		if gate == nil {
+			gate = &windowsHolderState{}
+			windowsHolderDataGates[key] = gate
+		}
+		if !windowsHookDataReadRefused(path) || !windowsHookDataDeleteBlocked(path) {
+			gate.free()
+			delete(windowsHolderDataLast, key)
+			continue
+		}
+		closed, holdErr := endWindowsExclusiveHoldOn(gate, path, windowsHolderDataProbes)
+		var message string
+		switch {
+		case holdErr == nil && closed == 0:
+			continue
+		case holdErr == nil && !windowsHookDataReadRefused(path):
+			continue
+		case holdErr != nil:
+			message = fmt.Sprintf("the hook runtime file %s is held open by another program, so the hook cannot read it, and the guardian did not end the hold (%v)", path, holdErr)
+		default:
+			message = fmt.Sprintf("the hook runtime file %s is held open by another program, so the hook cannot read it, and the guardian did not end the hold (it closed %d handle(s), but a read is still refused)", path, closed)
+		}
+		if message != windowsHolderDataLast[key] {
+			windowsHolderDataLast[key] = message
+			fmt.Fprintf(stderr, "[hook-guardian] %s\n", message)
+		}
+	}
+	for key := range windowsHolderDataGates {
+		if !watched[key] {
+			delete(windowsHolderDataGates, key)
+			delete(windowsHolderDataLast, key)
+		}
+	}
+}
+
 // closeWindowsHolderCandidates closes the candidates in order, one at a
 // time, asking before each whether the hook still refuses a start and still
 // refuses an open for deletion, and stops as soon as either has cleared: a
@@ -968,11 +1166,11 @@ func orderWindowsHolderUser(eligible []windowsHolderHandle) ([]windowsHolderHand
 // that does not answer in time stops the pass: nothing more is closed in that
 // pass and the next check tries again (a close that had begun and finishes
 // later is audited by its worker; began says one had).
-func closeWindowsHolderCandidates(target string, identity windowsHookHolderIdentity, ordered []windowsHolderHandle, counts windowsHolderCounts) (closed []windowsHolderHandle, timedOut, began, onlyChanged bool, firstErr error) {
+func closeWindowsHolderCandidates(target string, probes windowsHolderProbes, identity windowsHookHolderIdentity, ordered []windowsHolderHandle, counts windowsHolderCounts) (closed []windowsHolderHandle, timedOut, began, onlyChanged bool, firstErr error) {
 	changed, others := 0, 0
 	defer func() { onlyChanged = changed > 0 && others == 0 && !timedOut }()
 	for _, holder := range ordered {
-		if len(closed) >= windowsHolderMaxCloses || !windowsHookBinaryDeleteBlocked(target) || windowsHookBinaryHeldOpen(target) == "" {
+		if len(closed) >= windowsHolderMaxCloses || !probes.deleteBlocked(target) || !probes.startRefused(target) {
 			// Enough for one pass, or a start works or the hook is clear: the
 			// remaining handles block nothing and stay.
 			break
@@ -1020,7 +1218,12 @@ func closeWindowsHolderCandidates(target string, identity windowsHookHolderIdent
 // allow, and returns how many handles it closed. A nil error with nothing
 // closed means it is waiting (the second check, or the backoff).
 func endWindowsExclusiveHold(target string) (int, error) {
-	gate := &windowsHolderGate
+	return endWindowsExclusiveHoldOn(&windowsHolderGate, target, windowsHolderBinaryProbes)
+}
+
+// endWindowsExclusiveHoldOn is endWindowsExclusiveHold for one file with its
+// own gate: the persistence, the backoff and the streak are per file.
+func endWindowsExclusiveHoldOn(gate *windowsHolderState, target string, probes windowsHolderProbes) (int, error) {
 	now := windowsHeldSwapNow()
 	if !gate.streakLast.IsZero() && now.Sub(gate.streakLast) > windowsHeldSwapStreakEnd {
 		gate.endStreak()
@@ -1034,7 +1237,7 @@ func endWindowsExclusiveHold(target string) (int, error) {
 		return 0, gate.lastErr
 	}
 	for attempt := 0; ; attempt++ {
-		closed, again, err := gate.pass(target, now, attempt >= windowsHolderRescans)
+		closed, again, err := gate.pass(target, probes, now, attempt >= windowsHolderRescans)
 		if !again {
 			return closed, err
 		}
@@ -1046,7 +1249,7 @@ func endWindowsExclusiveHold(target string) (int, error) {
 // scan, which is what a holder that rotates its handle looks like: the
 // caller looks again at once (a few times) instead of backing off. last is
 // true on the final look, which then ends as any other failed close.
-func (gate *windowsHolderState) pass(target string, now time.Time, last bool) (closed int, again bool, err error) {
+func (gate *windowsHolderState) pass(target string, probes windowsHolderProbes, now time.Time, last bool) (closed int, again bool, err error) {
 	scan, err := scanWindowsHolders(windowsHolderSys, target, uint32(os.Getpid()))
 	if err != nil {
 		return 0, false, gate.refuse(now, fmt.Errorf("the guardian could not list who holds the hook: %w", err))
@@ -1122,7 +1325,7 @@ func (gate *windowsHolderState) pass(target string, now time.Time, last bool) (c
 	}
 	for i, holder := range named {
 		if windowsHolderRefusal(holder.Process) != "" && !gate.rows[holder.procKey()] {
-			logWindowsHolder(fmt.Sprintf("[hook-guardian] note: %s has the hook open and the guardian will not touch it (%s), but it only reads and another file object is open too, so it cannot be what refuses a start; the guardian closes the user's blockers", holder.describe(), namedReasons[i]))
+			logWindowsHolder(fmt.Sprintf("[hook-guardian] note: %s has %s open and the guardian will not touch it (%s), but it only reads and another file object is open too, so it cannot be what refuses a start; the guardian closes the user's blockers", holder.describe(), windowsHolderOpenSubject(target), namedReasons[i]))
 		}
 		counts.Left = append(counts.Left, holder.describe()+": "+namedReasons[i])
 		gate.record(target, holder, false, namedReasons[i], scan, counts)
@@ -1142,7 +1345,7 @@ func (gate *windowsHolderState) pass(target string, now time.Time, last bool) (c
 			case len(eligible) > 0:
 				kept = fmt.Sprintf("; it closes none of the %d handle(s) of signed-in users that are open on the hook too, because that handle could be what refuses the start; if it is still there after about %d seconds the guardian closes one user's handles once, to rule it out", len(eligible), int(windowsHolderOverrideAfter()/time.Second))
 			}
-			return 0, false, gate.refuse(now, fmt.Errorf("%s has the hook open and may be what refuses its starts; the guardian does not close handles of that kind: %s%s%s", blocking[0].describe(), blockingReasons[0], more, kept))
+			return 0, false, gate.refuse(now, fmt.Errorf("%s has %s open and may be what refuses %s; the guardian does not close handles of that kind: %s%s%s", blocking[0].describe(), windowsHolderOpenSubject(target), windowsHolderRefuses(target), blockingReasons[0], more, kept))
 		}
 		override = true
 		left := counts.Left
@@ -1157,7 +1360,7 @@ func (gate *windowsHolderState) pass(target string, now time.Time, last bool) (c
 			if len(named) > 1 {
 				more = fmt.Sprintf(" (and %d more handle(s) of that kind)", len(named)-1)
 			}
-			return 0, false, gate.refuse(now, fmt.Errorf("%s has the hook open and may be what refuses its starts; the guardian does not close handles of that kind: %s%s", named[0].describe(), namedReasons[0], more))
+			return 0, false, gate.refuse(now, fmt.Errorf("%s has %s open and may be what refuses %s; the guardian does not close handles of that kind: %s%s", named[0].describe(), windowsHolderOpenSubject(target), windowsHolderRefuses(target), namedReasons[0], more))
 		}
 		// What the guardian could close shares a file object with a holder
 		// it has only just seen: wait for the next check.
@@ -1186,7 +1389,7 @@ func (gate *windowsHolderState) pass(target string, now time.Time, last bool) (c
 	if override {
 		gate.overridden = true
 	}
-	done, timedOut, began, onlyChanged, firstErr := closeWindowsHolderCandidates(target, scan.Identity, ordered, counts)
+	done, timedOut, began, onlyChanged, firstErr := closeWindowsHolderCandidates(target, probes, scan.Identity, ordered, counts)
 	if len(done) == 0 {
 		if timedOut {
 			// Not a refusal: the next check tries again, unless a close had
@@ -1259,8 +1462,8 @@ func (s *windowsHolderScan) summary() string {
 // log line for every close, the HIGH audit row once per holder per streak.
 func (g *windowsHolderState) record(target string, holder windowsHolderHandle, closed bool, reason string, scan *windowsHolderScan, counts windowsHolderCounts) {
 	if closed {
-		line := fmt.Sprintf("[hook-guardian] tamper: closed the handle %s had on the hook binary %s (access 0x%08x; one of %d candidate handle(s) in %d process(es) on %d file object(s), %d closed in this pass). A start of the hook was refused and so was a test open for deletion; the file was not changed and the process was left running (close %d of this streak; if it takes the handle again it is closed again no sooner than %s; scan: %s)",
-			holder.describe(), target, holder.Access, counts.Handles, counts.Processes, counts.Objects, counts.Closed, g.closes, g.nextClose.Format("15:04:05"), scan.summary())
+		line := fmt.Sprintf("[hook-guardian] tamper: closed the handle %s had on %s (access 0x%08x; one of %d candidate handle(s) in %d process(es) on %d file object(s), %d closed in this pass). %s and so was a test open for deletion; the file was not changed and the process was left running (close %d of this streak; if it takes the handle again it is closed again no sooner than %s; scan: %s)",
+			holder.describe(), windowsHolderSubject(target), holder.Access, counts.Handles, counts.Processes, counts.Objects, counts.Closed, windowsHolderRefusedWhat(target), g.closes, g.nextClose.Format("15:04:05"), scan.summary())
 		if len(counts.Left) > 0 {
 			line += "; also open and not closed: " + strings.Join(counts.Left, "; ")
 		}
@@ -1331,14 +1534,14 @@ func (r windowsHolderAuditRow) event() audit.Event {
 		image = "an unknown program"
 	}
 	who := fmt.Sprintf("%s (process id %d, account %s, session %d)", image, r.Holder.PID, clean(r.Account), r.Holder.Session)
-	observed := "A start of the hook was refused, and so was a test open of it for deletion."
+	observed := windowsHolderRefusedWhat(r.Hook) + ", and so was a test open of it for deletion."
 	var details string
 	if r.Closed {
-		details = fmt.Sprintf("%s had the hook binary %s open (access 0x%08x). %s The hook guardian closed that handle (one of %d candidate handle(s) in %d process(es) on %d file object(s)); the file was not changed and the process was not ended.",
-			who, r.Hook, r.Access, observed, r.Counts.Handles, r.Counts.Processes, r.Counts.Objects)
+		details = fmt.Sprintf("%s had %s open (access 0x%08x). %s The hook guardian closed that handle (one of %d candidate handle(s) in %d process(es) on %d file object(s)); the file was not changed and the process was not ended.",
+			who, windowsHolderSubject(r.Hook), r.Access, observed, r.Counts.Handles, r.Counts.Processes, r.Counts.Objects)
 	} else {
-		details = fmt.Sprintf("%s has the hook binary %s open (access 0x%08x). %s This handle may be the cause. The hook guardian did not close it: %s.",
-			who, r.Hook, r.Access, observed, clean(r.Reason))
+		details = fmt.Sprintf("%s has %s open (access 0x%08x). %s This handle may be the cause. The hook guardian did not close it: %s.",
+			who, windowsHolderSubject(r.Hook), r.Access, observed, clean(r.Reason))
 	}
 	if r.Note != "" {
 		details += " " + clean(r.Note)
