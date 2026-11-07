@@ -65,7 +65,7 @@ func TestGAP0403DeadValuesStayAllowedWithProtectHome(t *testing.T) {
 
 // A later assignment in the same compound statement cannot erase a write
 // that ran before it. These rows guard the dead-value exemption.
-func TestGAP0403WriteBeforeReassignmentStillBlocks(t *testing.T) {
+func TestGAP0403WriteBeforeReassignmentStillAlerts(t *testing.T) {
 	f := newB36ManagedHookFixture(t)
 	for _, row := range []struct{ name, command string }{
 		{"brace", `f=keylink; { echo m >> "$f"; f=a.txt; }; echo m >> "$f"`},
@@ -83,9 +83,9 @@ func TestGAP0403WriteBeforeReassignmentStillBlocks(t *testing.T) {
 				t.Fatal(err)
 			}
 			call.verdict, call.body = f.serve(call)
-			t.Logf("GAP0403ROW %s | %s | want block", call.name, call.verdict)
-			if call.verdict != "block" {
-				t.Errorf("%s: verdict %s, want block; body %.200s", call.name, call.verdict, call.body)
+			t.Logf("GAP0403ROW %s | %s | want alert", call.name, call.verdict)
+			if call.verdict != "alert" {
+				t.Errorf("%s: verdict %s, want alert; body %.200s", call.name, call.verdict, call.body)
 			}
 		}
 		if err := os.Chmod(f.homes, 0o700); err != nil {
@@ -113,7 +113,7 @@ func TestGAP0371LoopCopyDestinationsFourCell(t *testing.T) {
 	var names, wants []string
 	for _, row := range rows {
 		for _, kind := range []string{"protected", "benign"} {
-			command, want := row.command, "block"
+			command, want := row.command, "alert"
 			if kind == "benign" {
 				command, want = strings.ReplaceAll(command, "keylink", "out3.txt"), "allow"
 			}

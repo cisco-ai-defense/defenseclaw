@@ -5,25 +5,25 @@ package gateway
 
 import "testing"
 
-// TestR106ManagedMovedKeysLinkBlocksAsPerUser (rel-1-0-6:GAP-0045): on a
+// TestR106ManagedMovedKeysLinkMatchesPerUser (rel-1-0-6:GAP-0045): on a
 // managed host (ProtectHome) a move of an existing project link to the keys
 // file to a new name, then a write through the new name, was allowed in
 // action mode: the gateway cannot see the link, and the hook client's
 // concrete-write reading resolved the new name on the disk as it was before
-// the move. Managed now blocks as per-user does, Claude Code and Codex. A
+// the move. Managed now answers as per-user does (an alert in the default profile, GAP-0675), Claude Code and Codex. A
 // moved link to an ordinary file, a write to another name, plain reads
 // through the keys link and ordinary moves stay allowed on both.
-func TestR106ManagedMovedKeysLinkBlocksAsPerUser(t *testing.T) {
+func TestR106ManagedMovedKeysLinkMatchesPerUser(t *testing.T) {
 	for _, tc := range []struct {
 		command string
 		want    string
 	}{
-		{`mv keylink k2; echo x >> k2`, "block"},
-		{`ln -s README.md docs.md; mv keylink k2; echo x >> k2`, "block"},
-		{`cd ~/project && mv keylink k2; echo x >> k2`, "block"},
-		{`mv keylink k2 && printf y >> k2`, "block"},
-		{`mv keylink k2; cat notes.txt >> k2`, "block"},
-		{`mv -f keylink k2 && echo x | tee -a k2`, "block"},
+		{`mv keylink k2; echo x >> k2`, "alert"},
+		{`ln -s README.md docs.md; mv keylink k2; echo x >> k2`, "alert"},
+		{`cd ~/project && mv keylink k2; echo x >> k2`, "alert"},
+		{`mv keylink k2 && printf y >> k2`, "alert"},
+		{`mv keylink k2; cat notes.txt >> k2`, "alert"},
+		{`mv -f keylink k2 && echo x | tee -a k2`, "alert"},
 		{`mv readlink k2; echo x >> k2`, "allow"},
 		{`mv notes.txt n2; echo x >> n2`, "allow"},
 		{`grep x keylink`, "allow"},

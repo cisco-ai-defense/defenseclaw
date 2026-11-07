@@ -73,14 +73,14 @@ var reviewHP3R3Rows = []struct{ name, command, want string }{
 	// assignment inside each compound form (static-word conditions, so no
 	// truncated client evidence hides the kept reading), keeps the earlier
 	// value when a branch may be skipped, and narrows only on true/false.
-	{"r3-0312-for-inner-value", `f=a.txt; for i in 1 2; do f=keylink; done; echo m >> "$f"`, "block"},
-	{"r3-0312-while-inner-value", `f=a.txt; while true; do f=keylink; break; done; echo m >> "$f"`, "block"},
-	{"r3-0312-case-inner-value", `f=a.txt; case x in x) f=keylink;; esac; echo m >> "$f"`, "block"},
-	{"r3-0312-and-inner-value", `f=a.txt; true && f=keylink; echo m >> "$f"`, "block"},
-	{"r3-0312-or-inner-value", `f=a.txt; [ -f x.txt ] || f=keylink; echo m >> "$f"`, "block"},
-	{"r3-0409-if-unknown-keeps-earlier", `f=keylink; if [ -f x.txt ]; then f=a.txt; fi; echo m >> "$f"`, "block"},
-	{"r3-0409-while-false-keeps-earlier", `f=keylink; while false; do f=a.txt; done; echo m >> "$f"`, "block"},
-	{"r3-0409-negated-true-keeps-earlier", `f=keylink; if ! true; then f=a.txt; fi; echo m >> "$f"`, "block"},
+	{"r3-0312-for-inner-value", `f=a.txt; for i in 1 2; do f=keylink; done; echo m >> "$f"`, "alert"},
+	{"r3-0312-while-inner-value", `f=a.txt; while true; do f=keylink; break; done; echo m >> "$f"`, "alert"},
+	{"r3-0312-case-inner-value", `f=a.txt; case x in x) f=keylink;; esac; echo m >> "$f"`, "alert"},
+	{"r3-0312-and-inner-value", `f=a.txt; true && f=keylink; echo m >> "$f"`, "alert"},
+	{"r3-0312-or-inner-value", `f=a.txt; [ -f x.txt ] || f=keylink; echo m >> "$f"`, "alert"},
+	{"r3-0409-if-unknown-keeps-earlier", `f=keylink; if [ -f x.txt ]; then f=a.txt; fi; echo m >> "$f"`, "alert"},
+	{"r3-0409-while-false-keeps-earlier", `f=keylink; while false; do f=a.txt; done; echo m >> "$f"`, "alert"},
+	{"r3-0409-negated-true-keeps-earlier", `f=keylink; if ! true; then f=a.txt; fi; echo m >> "$f"`, "alert"},
 	{"r3-0312-allow-for-other", `f=a.txt; for i in 1 2; do f=b.txt; done; echo m >> "$f"`, "allow"},
 	{"r3-0312-allow-case-other", `f=a.txt; case x in x) f=b.txt;; esac; echo m >> "$f"`, "allow"},
 	// A redirect through a name assigned in a group after an if/else or a
@@ -88,32 +88,32 @@ var reviewHP3R3Rows = []struct{ name, command, want string }{
 	{"r3-pre-ifelse-then-group-redirect", "if [ -f src/m0.c ]; then o0=build/m0.o; else o0=build/gen0.o; fi\n{ g4=logs/g4.log; echo \"$c4\" >> \"$g4\"; }", "allow"},
 	{"r3-pre-for-then-group-redirect", "for f in src/*.c; do b1=\"${f%.c}.bak\"; cp \"$f\" \"$b1\"; done\n{ g4=logs/g4.log; echo \"$c4\" >> \"$g4\"; }", ""},
 	// The 512 bound: a protected candidate must survive the cut.
-	{"r3-cap-keylink-before", `f=keylink; if [ -n "$X" ]; then f=a.txt; fi; ` + hp3r3Conds(9) + `echo m >> "$f"`, "block"},
+	{"r3-cap-keylink-before", `f=keylink; if [ -n "$X" ]; then f=a.txt; fi; ` + hp3r3Conds(9) + `echo m >> "$f"`, "alert"},
 	{"r3-cap-keylink-before-tee", `f=keylink; if [ -n "$X" ]; then f=a.txt; fi; ` + hp3r3Conds(9) + `cat a.txt | tee -a "$f"`, "block"},
-	{"r3-cap-keylink-else", `f=a.txt; if [ -n "$X" ]; then f=b.txt; else f=keylink; fi; ` + hp3r3Conds(9) + `echo m >> "$f"`, "block"},
-	{"r3-cap-keylink-after", `f=a.txt; ` + hp3r3Conds(9) + `if [ -n "$X" ]; then f=keylink; fi; echo m >> "$f"`, "block"},
-	{"r3-cap-static-keylink-after", `f=a.txt; ` + hp3r3StaticConds(6) + `if [ -f a.txt ]; then f=keylink; fi; echo m >> "$f"`, "block"},
+	{"r3-cap-keylink-else", `f=a.txt; if [ -n "$X" ]; then f=b.txt; else f=keylink; fi; ` + hp3r3Conds(9) + `echo m >> "$f"`, "alert"},
+	{"r3-cap-keylink-after", `f=a.txt; ` + hp3r3Conds(9) + `if [ -n "$X" ]; then f=keylink; fi; echo m >> "$f"`, "alert"},
+	{"r3-cap-static-keylink-after", `f=a.txt; ` + hp3r3StaticConds(6) + `if [ -f a.txt ]; then f=keylink; fi; echo m >> "$f"`, "alert"},
 	{"r3-cap-static-tee-after", `f=a.txt; ` + hp3r3StaticConds(6) + `if [ -f a.txt ]; then f=keylink; fi; cat a.txt | tee -a "$f"`, "block"},
 	// Thirty-two candidates stay under the candidate cap. The no-op calls
 	// consume the step budget just before the protected assignment.
-	{"r4-step-cap-keylink-after", `f=a.txt; ` + hp3r3Conds(5) + strings.Repeat(":; ", 13) + `if true; then f=keylink; fi; echo m >> "$f"`, "block"},
+	{"r4-step-cap-keylink-after", `f=a.txt; ` + hp3r3Conds(5) + strings.Repeat(":; ", 13) + `if true; then f=keylink; fi; echo m >> "$f"`, "alert"},
 	// rel-1-0-6:GAP-0357: after the step cap, a dynamic eval or a
 	// compound assignment must invalidate the earlier ordinary value.
-	{"r5-step-cap-eval-dynamic", `g=keylink; f=a.txt; ` + hp3r3Conds(5) + strings.Repeat(":; ", 20) + `eval f=; echo m >> "$f"`, "block"},
-	{"r5-step-cap-andand-after", `f=a.txt; ` + hp3r3Conds(5) + strings.Repeat(":; ", 20) + `[ -n "$X" ] && f=keylink; echo m >> "$f"`, "block"},
-	{"r5-step-cap-group-redirect", `f=a.txt; ` + hp3r3Conds(5) + strings.Repeat(":; ", 20) + `{ f=keylink; echo m >> "$f"; }`, "block"},
-	{"r5-step-cap-while-read", `f=a.txt; ` + hp3r3Conds(5) + strings.Repeat(":; ", 20) + `while read -r f; do break; done < names.txt; echo m >> "$f"`, "block"},
+	{"r5-step-cap-eval-dynamic", `g=keylink; f=a.txt; ` + hp3r3Conds(5) + strings.Repeat(":; ", 20) + `eval f=; echo m >> "$f"`, "alert"},
+	{"r5-step-cap-andand-after", `f=a.txt; ` + hp3r3Conds(5) + strings.Repeat(":; ", 20) + `[ -n "$X" ] && f=keylink; echo m >> "$f"`, "alert"},
+	{"r5-step-cap-group-redirect", `f=a.txt; ` + hp3r3Conds(5) + strings.Repeat(":; ", 20) + `{ f=keylink; echo m >> "$f"; }`, "alert"},
+	{"r5-step-cap-while-read", `f=a.txt; ` + hp3r3Conds(5) + strings.Repeat(":; ", 20) + `while read -r f; do break; done < names.txt; echo m >> "$f"`, "alert"},
 	// rel-1-0-6:GAP-0349: compacting option states must keep a later
 	// variable destination when it names a link to the protected file.
-	{"r5-0349-if-defaults-keylink", hp3r4IfDefaults(10, `out=keylink; cp a.txt "$out"`), "block"},
-	{"r5-0349-options-cases-keylink", hp3r3BuildCases(6) + `out=keylink; cp a.txt "$out"`, "block"},
-	{"r3-under-cap-keylink-before", `f=keylink; if [ -n "$X" ]; then f=a.txt; fi; ` + hp3r3Conds(8) + `echo m >> "$f"`, "block"},
+	{"r5-0349-if-defaults-keylink", hp3r4IfDefaults(10, `out=keylink; cp a.txt "$out"`), "alert"},
+	{"r5-0349-options-cases-keylink", hp3r3BuildCases(6) + `out=keylink; cp a.txt "$out"`, "alert"},
+	{"r3-under-cap-keylink-before", `f=keylink; if [ -n "$X" ]; then f=a.txt; fi; ` + hp3r3Conds(8) + `echo m >> "$f"`, "alert"},
 	// rel-1-0-6:GAP-0229 managed regression (sweep 9 mgd-rhel-ad E2): the
 	// eval reassignment form onto the keys link, then a write through the
 	// variable (gap0409_dynamic_redirect_link_test.go and fbef6f821b forms).
-	{"r3-0229-eval-reassign-keylink", `f=other; eval f=keylink; echo marker >> "$f"`, "block"},
-	{"r3-0229-eval-reassign-keylink-dccert", `f=other; eval f=keylink; echo dccert-block-marker >> "$f"`, "block"},
-	{"r3-0229-eval-keylink-bare", `eval f=keylink; echo marker >> $f`, "block"},
+	{"r3-0229-eval-reassign-keylink", `f=other; eval f=keylink; echo marker >> "$f"`, "alert"},
+	{"r3-0229-eval-reassign-keylink-dccert", `f=other; eval f=keylink; echo dccert-block-marker >> "$f"`, "alert"},
+	{"r3-0229-eval-keylink-bare", `eval f=keylink; echo marker >> $f`, "alert"},
 	{"r3-0229-allow-eval-ordinary", `f=other; eval f=a.txt; echo marker >> "$f"`, ""},
 }
 

@@ -211,9 +211,12 @@ func TestReviewerG620ExplainNamesInspectionRefusal(t *testing.T) {
 	}
 }
 
-// An uncertain local namesake still protects a literal
-// target and a target carried by a known shell variable.
-func TestReviewerG620UncertainNamesakeKeepsProtectedHookBlock(t *testing.T) {
+// An uncertain local namesake still reaches the protected-file rule for a
+// literal target and a target carried by a known shell variable: the finding
+// is an alert (allowed with the rule ID shown) in the default pack
+// (rel-1-0-6:GAP-0675); the strict pack blocks it
+// (TestGAP0675ShellProtectedFileWarnsOutsideStrictOnEveryRoute).
+func TestReviewerG620UncertainNamesakeKeepsProtectedHookAlert(t *testing.T) {
 	subject := profileSubjectFromVerified(VerifiedSubject{
 		UserID: "700002", IDKind: useridentity.KindPOSIXUID, UserName: "alice",
 		Directory: useridentity.DirectoryFacts{Source: useridentity.SourceProcessCredentials,
@@ -234,8 +237,8 @@ func TestReviewerG620UncertainNamesakeKeepsProtectedHookBlock(t *testing.T) {
 		decision: got, set: set, derived: set.profileConfig(got.Name),
 	})
 	for _, tc := range []struct{ name, command, want string }{
-		{"direct", "printf marker >> ~/.ssh/authorized_keys", "block"},
-		{"known value", "P=~/.ssh/authorized_keys; printf marker >> $P", "block"},
+		{"direct", "printf marker >> ~/.ssh/authorized_keys", "alert"},
+		{"known value", "P=~/.ssh/authorized_keys; printf marker >> $P", "alert"},
 		{"ordinary", "printf marker >> notes.txt", "allow"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -243,7 +246,7 @@ func TestReviewerG620UncertainNamesakeKeepsProtectedHookBlock(t *testing.T) {
 			response := api.evaluateAgentHook(ctx, agentHookRequest{
 				ConnectorName: "claudecode", HookEventName: "PreToolUse", ToolName: "Bash", ToolArgs: args,
 			})
-			if response.Action != tc.want || (tc.want == "block" && response.RawAction != "block") {
+			if wantAction := wantHookAction(tc.want); response.Action != wantAction || (tc.want == "alert" && response.RawAction != "alert") {
 				t.Errorf("%s: action=%s raw=%s findings=%v; want %s", tc.name, response.Action, response.RawAction, response.Findings, tc.want)
 			}
 		})
@@ -296,8 +299,8 @@ func TestReviewerR4G620HolderFallbackPreservesVerifiedTarget(t *testing.T) {
 					decision: decision, set: set, derived: set.profileConfig(decision.Name),
 				})
 				for _, tc := range []struct{ name, command, want string }{
-					{"direct target", "echo marker >> ~/.ssh/authorized_keys", "block"},
-					{"link target", "ln -s ~/.ssh/authorized_keys keylink; echo marker >> keylink", "block"},
+					{"direct target", "echo marker >> ~/.ssh/authorized_keys", "alert"},
+					{"link target", "ln -s ~/.ssh/authorized_keys keylink; echo marker >> keylink", "alert"},
 					{"ordinary file", "echo marker >> notes.txt", "allow"},
 					{"ordinary prefix", "echo marker >> authorized_keys.bak", "allow"},
 				} {
@@ -306,7 +309,7 @@ func TestReviewerR4G620HolderFallbackPreservesVerifiedTarget(t *testing.T) {
 							ConnectorName: "claudecode", HookEventName: "PreToolUse", ToolName: "Bash",
 							ToolArgs: []byte(`{"command":"` + tc.command + `"}`),
 						})
-						if response.Action != tc.want || (tc.want == "block" && response.RawAction != "block") {
+						if wantAction := wantHookAction(tc.want); response.Action != wantAction || (tc.want == "alert" && response.RawAction != "alert") {
 							t.Errorf("%s: action=%s raw=%s; want %s", tc.name, response.Action, response.RawAction, tc.want)
 						}
 					})
@@ -342,4 +345,14 @@ func TestReviewerR4G620UnscopedExplainMatchesConfiguredConnector(t *testing.T) {
 			t.Errorf("pack %q: live=%+v unscoped=%+v; want same warned default", pack, live, unscoped)
 		}
 	}
+}
+
+// wantHookAction is the action field of a hook response for a verdict: an
+// alert runs the command and shows the finding (action allow, raw action
+// alert), as in the default pack for the protected-file shell class.
+func wantHookAction(verdict string) string {
+	if verdict == "alert" {
+		return "allow"
+	}
+	return verdict
 }

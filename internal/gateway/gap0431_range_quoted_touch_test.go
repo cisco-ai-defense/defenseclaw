@@ -17,8 +17,8 @@ func TestGAP0431PaddedRangeStepAndWidthFourCell(t *testing.T) {
 	rows := []struct{ name, link, command, want string }{
 		{"reverse-positive-step-odd", "0151", `touch {0300..0001..2}`, "allow"},
 		{"ascending-negative-step-even", "0150", `touch {0001..0300..-2}`, "allow"},
-		{"reverse-positive-step-even", "0150", `touch {0300..0001..2}`, "block"},
-		{"cross-zero-positive", "00148", `touch -- {-0150..0150}`, "block"},
+		{"reverse-positive-step-even", "0150", `touch {0300..0001..2}`, "alert"},
+		{"cross-zero-positive", "00148", `touch -- {-0150..0150}`, "alert"},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -41,9 +41,9 @@ func TestGAP0431PaddedRangeStepAndWidthFourCell(t *testing.T) {
 func TestGAP0431SignedStepRangeFourCell(t *testing.T) {
 	rows := []struct{ name, link, command, want string }{
 		{"ascending-skipped-name", "1", `touch {-0..+005..-2}`, "allow"},
-		{"ascending-member", "2", `touch {-0..+005..-2}`, "block"},
+		{"ascending-member", "2", `touch {-0..+005..-2}`, "alert"},
 		{"descending-skipped-name", "2", `touch {+005..-0..2}`, "allow"},
-		{"descending-member", "3", `touch {+005..-0..2}`, "block"},
+		{"descending-member", "3", `touch {+005..-0..2}`, "alert"},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -126,8 +126,14 @@ func TestGAP0431QuotedTouchIdentityFourCell(t *testing.T) {
 	f.answerAll(t, calls)
 	for i, call := range calls {
 		row := rows[i/4]
-		if call.verdict != row.want {
-			t.Errorf("%s: got %s, want %s", call.name, call.verdict, row.want)
+		// A row that targets a protected file (want "block" for the entry
+		// proof above) is an alert in the default profile (GAP-0675).
+		want := row.want
+		if want == "block" {
+			want = "alert"
+		}
+		if call.verdict != want {
+			t.Errorf("%s: got %s, want %s", call.name, call.verdict, want)
 		}
 	}
 }

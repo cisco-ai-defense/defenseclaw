@@ -10,9 +10,9 @@ import "testing"
 func TestGAP0418ReassignedHomeTildeFourCell(t *testing.T) {
 	f := newB36ManagedHookFixture(t)
 	rows := []struct{ name, command, want string }{
-		{"protected", "HOME=" + f.project + "; " + hp3r4IfDefaults(10, `echo m >> ~/keylink`), "block"},
+		{"protected", "HOME=" + f.project + "; " + hp3r4IfDefaults(10, `echo m >> ~/keylink`), "alert"},
 		{"ordinary", "HOME=" + f.project + "; " + hp3r4IfDefaults(10, `echo m >> ~/out.txt`), "allow"},
-		{"direct-protected", "HOME=" + f.project + `; echo m >> ~/keylink`, "block"},
+		{"direct-protected", "HOME=" + f.project + `; echo m >> ~/keylink`, "alert"},
 		{"direct-ordinary", "HOME=" + f.project + `; echo m >> ~/out.txt`, "allow"},
 	}
 	var payloads [][]byte

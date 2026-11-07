@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// TestGAP0409DynamicRedirectOntoKeysLinkBlocksEveryMode is rel-1-0-2
+// TestGAP0409DynamicRedirectOntoKeysLinkAlertsEveryMode is rel-1-0-2
 // GAP-0409 (sweep 7 and 8, managed RHEL corpus c and d): an append onto
 // a project link to the keys file whose redirect target is a variable set
 // by eval, a ${f:-default} after an unset inside an if, or a command
@@ -16,11 +16,11 @@ import (
 // reads the hook client's concrete-write fact), on both connectors. The
 // client's value tracker now reads $(echo word), drops the names a
 // compound statement assigns or unsets, and reads an eval of static
-// name=value words, so all four cells block; the ordinary-file twins stay
-// allowed.
-func TestGAP0409DynamicRedirectOntoKeysLinkBlocksEveryMode(t *testing.T) {
+// name=value words, so all four cells answer the protected-file alert (a
+// block in the strict pack); the ordinary-file twins stay allowed.
+func TestGAP0409DynamicRedirectOntoKeysLinkAlertsEveryMode(t *testing.T) {
 	f := newB36ManagedHookFixture(t)
-	blocked := []string{
+	alerted := []string{
 		`f=other; eval f=keylink; echo dccert-block-marker >> "$f"`,
 		`f=report.txt; if true; then unset f; fi; echo dccert-block-marker >> ${f:-keylink}`,
 		`f=$(echo keylink); echo dccert-block-marker >> "$f"`,
@@ -55,8 +55,8 @@ func TestGAP0409DynamicRedirectOntoKeysLinkBlocksEveryMode(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, command := range blocked {
-		check(command, "block")
+	for _, command := range alerted {
+		check(command, "alert")
 	}
 	for _, command := range allowed {
 		check(command, "allow")

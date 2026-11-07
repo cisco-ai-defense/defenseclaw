@@ -39,7 +39,7 @@ func TestGAP0356VariableSourcesFourCell(t *testing.T) {
 	var names, wants []string
 	for _, form := range forms {
 		for _, kind := range []string{"protected", "benign"} {
-			command, want := form.command, "block"
+			command, want := form.command, "alert"
 			if kind == "benign" {
 				command, want = strings.ReplaceAll(command, "keylink", "out.txt"), "allow"
 			}

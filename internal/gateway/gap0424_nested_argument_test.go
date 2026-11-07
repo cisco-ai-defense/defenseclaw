@@ -17,10 +17,10 @@ func TestGAP0424NestedCopyInCallArgumentFourCell(t *testing.T) {
 		t.Fatal(err)
 	}
 	rows := []struct{ name, command, want string }{
-		{"substitution", `cd ~ && f=project/keylink; echo $(cp project/a.txt $f)`, "block"},
-		{"quoted-substitution", `cd ~ && f=project/keylink; echo "$(cp project/a.txt $f)"`, "block"},
-		{"backquotes", "cd ~ && f=project/keylink; echo `cp project/a.txt $f`", "block"},
-		{"assignment-control", `cd ~ && f=project/keylink; x=$(cp project/a.txt $f)`, "block"},
+		{"substitution", `cd ~ && f=project/keylink; echo $(cp project/a.txt $f)`, "alert"},
+		{"quoted-substitution", `cd ~ && f=project/keylink; echo "$(cp project/a.txt $f)"`, "alert"},
+		{"backquotes", "cd ~ && f=project/keylink; echo `cp project/a.txt $f`", "alert"},
+		{"assignment-control", `cd ~ && f=project/keylink; x=$(cp project/a.txt $f)`, "alert"},
 		{"ordinary-substitution", `cd ~ && f=project/out.txt; echo $(cp project/a.txt $f)`, "allow"},
 		{"ordinary-quoted", `cd ~ && f=project/out.txt; echo "$(cp project/a.txt $f)"`, "allow"},
 		{"ordinary-backquotes", "cd ~ && f=project/out.txt; echo `cp project/a.txt $f`", "allow"},

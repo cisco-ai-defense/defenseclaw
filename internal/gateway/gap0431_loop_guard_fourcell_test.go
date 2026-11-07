@@ -27,16 +27,16 @@ func TestGAP0431LoopDestinationGuardsFourCell(t *testing.T) {
 		name, command, want string
 	}{
 		{"L5-entry-move", `for f in ordinary; do mv a.txt keylink; done`, "allow"},
-		{"L5-copy", `for f in ordinary; do cp a.txt keylink; done`, "block"},
+		{"L5-copy", `for f in ordinary; do cp a.txt keylink; done`, "alert"},
 		{"L6-entry-move", `for f in ordinary; do mv "$src" "$f/../keylink"; done`, "allow"},
-		{"L6-copy", `for f in ordinary; do cp a.txt "$f/../keylink"; done`, "block"},
+		{"L6-copy", `for f in ordinary; do cp a.txt "$f/../keylink"; done`, "alert"},
 		{"L6-copy-ordinary", `for f in ordinary; do cp a.txt "$f/../out2.txt"; done`, "allow"},
-		{"L6-quoted-copy", `src=a.txt; for f in keylink; do cp "$src" "$f"; done`, "block"},
-		{"L6-environment-source", `for f in keylink; do cp "$src" "$f"; done`, "block"},
-		{"L6-special-source-index", `OPTIND=; for f in keylink; do cp "$OPTIND" "$f"; done`, "block"},
-		{"L6-special-source-seconds", `SECONDS=; for f in keylink; do cp "$SECONDS" "$f"; done`, "block"},
-		{"L6-option-after-separator", `src=-n; for f in keylink; do cp -- "$src" "$f"; done`, "block"},
-		{"L6-joined-option-separator", `src=-n; for f in keylink; do cp "-"'-' "$src" "$f"; done`, "block"},
+		{"L6-quoted-copy", `src=a.txt; for f in keylink; do cp "$src" "$f"; done`, "alert"},
+		{"L6-environment-source", `for f in keylink; do cp "$src" "$f"; done`, "alert"},
+		{"L6-special-source-index", `OPTIND=; for f in keylink; do cp "$OPTIND" "$f"; done`, "alert"},
+		{"L6-special-source-seconds", `SECONDS=; for f in keylink; do cp "$SECONDS" "$f"; done`, "alert"},
+		{"L6-option-after-separator", `src=-n; for f in keylink; do cp -- "$src" "$f"; done`, "alert"},
+		{"L6-joined-option-separator", `src=-n; for f in keylink; do cp "-"'-' "$src" "$f"; done`, "alert"},
 	} {
 		payload := f.payload(t, row.command)
 		header := f.clientHeader(t, payload)
@@ -54,6 +54,8 @@ func TestGAP0431LoopDestinationGuardsFourCell(t *testing.T) {
 						switch {
 						case strings.HasPrefix(body, `{"action":"block"`):
 							got = "block"
+						case strings.HasPrefix(body, `{"action":"alert"`):
+							got = "alert"
 						case strings.HasPrefix(body, `{"action":"allow"`):
 							got = "allow"
 						default:
@@ -114,8 +116,8 @@ func TestGAP0431StartupSourceKeepsLinkedDestination(t *testing.T) {
 		payload := f.payload(t, command)
 		header := f.clientHeader(t, payload)
 		for _, connector := range []string{"claudecode", "codex"} {
-			if got := f.post(t, connector, payload, header); got != "block" {
-				t.Errorf("%s: %s: %s, want block", connector, command, got)
+			if got := f.post(t, connector, payload, header); got != "alert" {
+				t.Errorf("%s: %s: %s, want alert", connector, command, got)
 			}
 		}
 	}

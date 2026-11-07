@@ -52,27 +52,27 @@ func checkHP7ClientRows(t *testing.T, f b36ManagedHookFixture, rows []hp7ClientR
 func TestGAP0428PrintfBoundDestinationsFourCell(t *testing.T) {
 	f := newB36ManagedHookFixture(t)
 	checkHP7ClientRows(t, f, []hp7ClientRow{
-		{"GAP0428/attached", `f=a.txt; printf -vf %s keylink; echo m >> "$f"`, "block", "block"},
+		{"GAP0428/attached", `f=a.txt; printf -vf %s keylink; echo m >> "$f"`, "alert", "alert"},
 		{"GAP0428/attached-benign", `f=a.txt; printf -vf %s b.txt; echo m >> "$f"`, "allow", "allow"},
-		{"GAP0428/quoted-name", `f=a.txt; printf -v"f" %s keylink; echo m >> "$f"`, "block", "block"},
+		{"GAP0428/quoted-name", `f=a.txt; printf -v"f" %s keylink; echo m >> "$f"`, "alert", "alert"},
 		{"GAP0428/quoted-name-benign", `f=a.txt; printf -v"f" %s b.txt; echo m >> "$f"`, "allow", "allow"},
-		{"GAP0428/dynamic-option", `f=a.txt; opt=-vf; printf "$opt" %s keylink; echo m >> "$f"`, "block", "block"},
+		{"GAP0428/dynamic-option", `f=a.txt; opt=-vf; printf "$opt" %s keylink; echo m >> "$f"`, "alert", "alert"},
 		{"GAP0428/dynamic-option-benign", `f=a.txt; opt=-vf; printf "$opt" %s b.txt; echo m >> "$f"`, "allow", "allow"},
-		{"GAP0428/escaped-attached", `f=a.txt; printf -vf 'key\x6cink'; echo m >> "$f"`, "block", "block"},
+		{"GAP0428/escaped-attached", `f=a.txt; printf -vf 'key\x6cink'; echo m >> "$f"`, "alert", "alert"},
 		{"GAP0428/escaped-attached-benign", `f=a.txt; printf -vf 'b.\x74xt'; echo m >> "$f"`, "allow", "allow"},
-		{"GAP0428/escaped-separate", `f=a.txt; printf -v f 'key\x6cink'; echo m >> "$f"`, "block", "block"},
+		{"GAP0428/escaped-separate", `f=a.txt; printf -v f 'key\x6cink'; echo m >> "$f"`, "alert", "alert"},
 		{"GAP0428/escaped-separate-benign", `f=a.txt; printf -v f 'b.\x74xt'; echo m >> "$f"`, "allow", "allow"},
-		{"GAP0428/escaped-subst-attached", `f=a.txt; printf -vf 'key\x6cink%s' ''; echo m >> "$f"`, "block", "block"},
+		{"GAP0428/escaped-subst-attached", `f=a.txt; printf -vf 'key\x6cink%s' ''; echo m >> "$f"`, "alert", "alert"},
 		{"GAP0428/escaped-subst-attached-benign", `f=a.txt; printf -vf 'b.\x74xt%s' ''; echo m >> "$f"`, "allow", "allow"},
-		{"GAP0428/escaped-subst-separate", `f=a.txt; printf -v f 'key\x6cink%s' ''; echo m >> "$f"`, "block", "block"},
+		{"GAP0428/escaped-subst-separate", `f=a.txt; printf -v f 'key\x6cink%s' ''; echo m >> "$f"`, "alert", "alert"},
 		{"GAP0428/escaped-subst-separate-benign", `f=a.txt; printf -v f 'b.\x74xt%s' ''; echo m >> "$f"`, "allow", "allow"},
-		{"GAP0428/escaped-subst-no-arg-attached", `f=a.txt; printf -vf 'key\x6cink%s'; echo m >> "$f"`, "block", "block"},
+		{"GAP0428/escaped-subst-no-arg-attached", `f=a.txt; printf -vf 'key\x6cink%s'; echo m >> "$f"`, "alert", "alert"},
 		{"GAP0428/escaped-subst-no-arg-attached-benign", `f=a.txt; printf -vf 'b.\x74xt%s'; echo m >> "$f"`, "allow", "allow"},
-		{"GAP0428/escaped-subst-no-arg-separate", `f=a.txt; printf -v f 'key\x6cink%s'; echo m >> "$f"`, "block", "block"},
+		{"GAP0428/escaped-subst-no-arg-separate", `f=a.txt; printf -v f 'key\x6cink%s'; echo m >> "$f"`, "alert", "alert"},
 		{"GAP0428/escaped-subst-no-arg-separate-benign", `f=a.txt; printf -v f 'b.\x74xt%s'; echo m >> "$f"`, "allow", "allow"},
-		{"GAP0428/octal-attached", `f=a.txt; printf -vf 'key\154ink'; echo m >> "$f"`, "block", "block"},
+		{"GAP0428/octal-attached", `f=a.txt; printf -vf 'key\154ink'; echo m >> "$f"`, "alert", "alert"},
 		{"GAP0428/octal-attached-benign", `f=a.txt; printf -vf 'b.\164xt'; echo m >> "$f"`, "allow", "allow"},
-		{"GAP0428/unicode-separate", `f=a.txt; printf -v f 'key\u006cink'; echo m >> "$f"`, "block", "block"},
+		{"GAP0428/unicode-separate", `f=a.txt; printf -v f 'key\u006cink'; echo m >> "$f"`, "alert", "alert"},
 		{"GAP0428/unicode-separate-benign", `f=a.txt; printf -v f 'b.\u0074xt'; echo m >> "$f"`, "allow", "allow"},
 	})
 }
@@ -80,9 +80,9 @@ func TestGAP0428PrintfBoundDestinationsFourCell(t *testing.T) {
 func TestGAP0428DynamicPrintfRedirectOrderFourCell(t *testing.T) {
 	f := newB36ManagedHookFixture(t)
 	checkHP7ClientRows(t, f, []hp7ClientRow{
-		{"GAP0428/dynamic-same-redirect", `f=keylink; f=a.txt; printf "$fmt" >> "$f"`, "allow", "block"},
-		{"GAP0428/fixed-same-redirect", `f=keylink; f=a.txt; printf %s m >> "$f"`, "allow", "block"},
-		{"GAP0428/dynamic-later-target", `f=a.txt; opt=-vf; printf "$opt" %s keylink; echo m >> "$f"`, "block", "block"},
+		{"GAP0428/dynamic-same-redirect", `f=keylink; f=a.txt; printf "$fmt" >> "$f"`, "allow", "alert"},
+		{"GAP0428/fixed-same-redirect", `f=keylink; f=a.txt; printf %s m >> "$f"`, "allow", "alert"},
+		{"GAP0428/dynamic-later-target", `f=a.txt; opt=-vf; printf "$opt" %s keylink; echo m >> "$f"`, "alert", "alert"},
 	})
 }
 
@@ -91,12 +91,12 @@ func TestGAP0428DynamicPrintfRedirectOrderFourCell(t *testing.T) {
 func TestGAP0430LoopCopyNeighboursFourCell(t *testing.T) {
 	f := newB36ManagedHookFixture(t)
 	rows := []hp7ClientRow{
-		{"cd-prefix", `cd . && for f in out2.txt keylink; do cp a.txt $f; done`, "block", "block"},
-		{"second-statement", `true; for f in out2.txt keylink; do cp a.txt $f; done`, "block", "block"},
-		{"cp-option", `for f in out2.txt keylink; do cp -f a.txt $f; done`, "block", "block"},
-		{"mv", `for f in out2.txt keylink; do mv a.txt $f; done`, "block", "block"},
-		{"two-body", `for f in out2.txt keylink; do cp a.txt $f; echo ok; done`, "block", "block"},
-		{"install-option", `for f in out2.txt keylink; do install -m 644 a.txt $f; done`, "block", "block"},
+		{"cd-prefix", `cd . && for f in out2.txt keylink; do cp a.txt $f; done`, "alert", "alert"},
+		{"second-statement", `true; for f in out2.txt keylink; do cp a.txt $f; done`, "alert", "alert"},
+		{"cp-option", `for f in out2.txt keylink; do cp -f a.txt $f; done`, "alert", "alert"},
+		{"mv", `for f in out2.txt keylink; do mv a.txt $f; done`, "alert", "alert"},
+		{"two-body", `for f in out2.txt keylink; do cp a.txt $f; echo ok; done`, "alert", "alert"},
+		{"install-option", `for f in out2.txt keylink; do install -m 644 a.txt $f; done`, "alert", "alert"},
 	}
 	var paired []hp7ClientRow
 	for _, row := range rows {
@@ -113,9 +113,9 @@ func TestGAP0430LoopCopyNeighboursFourCell(t *testing.T) {
 func TestGAP0431MvAndHomeRowsFourCell(t *testing.T) {
 	f := newB36ManagedHookFixture(t)
 	checkHP7ClientRows(t, f, []hp7ClientRow{
-		{"GAP0431/mv-after-redirect", `g=keylink; f=a.txt; echo m >> "$f"; mv b.txt "$g"`, "block", "block"},
+		{"GAP0431/mv-after-redirect", `g=keylink; f=a.txt; echo m >> "$f"; mv b.txt "$g"`, "alert", "alert"},
 		{"GAP0431/mv-after-redirect-benign", `g=out.txt; f=a.txt; echo m >> "$f"; mv b.txt "$g"`, "allow", "allow"},
-		{"GAP0431/home-compact", "HOME=" + f.project + "; " + hp3r4IfDefaults(10, `echo m >> ~/keylink`), "", "block"},
+		{"GAP0431/home-compact", "HOME=" + f.project + "; " + hp3r4IfDefaults(10, `echo m >> ~/keylink`), "", "alert"},
 		{"GAP0431/home-compact-benign", "HOME=" + f.project + "; " + hp3r4IfDefaults(10, `echo m >> ~/out.txt`), "allow", "allow"},
 	})
 }

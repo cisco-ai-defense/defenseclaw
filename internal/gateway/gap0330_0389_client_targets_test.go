@@ -55,7 +55,7 @@ func TestGAP0330ConditionalBindingBeforeAbsoluteKeysFourCell(t *testing.T) {
 		{"if-false-redirect", `if false; then D=build; fi; `, `echo marker >> $D`},
 		{"true-or-redirect", `true || D=build; `, `echo marker >> $D`},
 	} {
-		rows = append(rows, hp7ClientRow{"GAP0330/" + form.name, form.prefix + form.write + f.keys, "block", "block"})
+		rows = append(rows, hp7ClientRow{"GAP0330/" + form.name, form.prefix + form.write + f.keys, "alert", "alert"})
 		benignWrite := form.write
 		if strings.Contains(form.name, "copy") {
 			benignWrite = strings.ReplaceAll(benignWrite, "$D", "")
@@ -64,8 +64,8 @@ func TestGAP0330ConditionalBindingBeforeAbsoluteKeysFourCell(t *testing.T) {
 	}
 	// The base already blocks this quoted tee form in per-user mode, while
 	// managed mode allows the overwritten ordinary destination.
-	rows = append(rows, hp7ClientRow{"GAP0389/tee-overwritten-benign", `f=keylink; f=out3.txt; echo m | tee "$f"`, "allow", "block"})
-	rows = append(rows, hp7ClientRow{"GAP0389/tee-quoted-protected", `f=keylink; echo m | tee "$f"`, "block", "block"})
+	rows = append(rows, hp7ClientRow{"GAP0389/tee-overwritten-benign", `f=keylink; f=out3.txt; echo m | tee "$f"`, "allow", "alert"})
+	rows = append(rows, hp7ClientRow{"GAP0389/tee-quoted-protected", `f=keylink; echo m | tee "$f"`, "alert", "alert"})
 	checkHP7ClientRows(t, f, rows)
 }
 
@@ -86,7 +86,7 @@ func TestGAP0389VariableLinkDestinationsFourCell(t *testing.T) {
 		{"literal-cd-install", `cd project && install -m 600 a.txt keylink`},
 		{"literal-cd-rsync", `cd project && rsync a.txt keylink`},
 	} {
-		rows = append(rows, hp7ClientRow{"GAP0389/" + form.name, form.command, "block", "block"})
+		rows = append(rows, hp7ClientRow{"GAP0389/" + form.name, form.command, "alert", "alert"})
 		if !strings.HasPrefix(form.name, "literal-") {
 			rows = append(rows, hp7ClientRow{"GAP0389/" + form.name + "-benign", strings.ReplaceAll(form.command, "keylink", "out3.txt"), "allow", "allow"})
 		}

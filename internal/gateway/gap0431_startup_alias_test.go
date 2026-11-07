@@ -19,7 +19,7 @@ func TestGAP0431ActiveStartupAliasFourCell(t *testing.T) {
 	}
 	t.Setenv("BASH_ENV", startup)
 	rows := []struct{ name, command, want string }{
-		{"active-alias", `f=a.txt; if [ -n "$X" ]; then f=out.txt; fi; g=$f; echo m >> "$g"`, "block"},
+		{"active-alias", `f=a.txt; if [ -n "$X" ]; then f=out.txt; fi; g=$f; echo m >> "$g"`, "alert"},
 		{"ordinary-direct", `echo m >> a.txt`, "allow"},
 	}
 	var calls []*hookCall

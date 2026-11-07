@@ -22,9 +22,9 @@ func TestGAP0404CompactionGuardsFourCell(t *testing.T) {
 	}
 	rows := []struct{ name, command, want string }{
 		{"future-read-protected", `f=a.txt; ` + hp3r3Conds(9) + `while read -r f; do break; done < names.txt; echo m >> "$f"`, "block"},
-		{"pwd-protected", hp3r4IfDefaults(10, `echo m >> "$PWD/keylink"`), "block"},
+		{"pwd-protected", hp3r4IfDefaults(10, `echo m >> "$PWD/keylink"`), "alert"},
 		{"pwd-benign", hp3r4IfDefaults(10, `echo m >> "$PWD/out.txt"`), "allow"},
-		{"home-protected", hp3r4IfDefaults(10, `echo m >> "$HOME/project/keylink"`), "block"},
+		{"home-protected", hp3r4IfDefaults(10, `echo m >> "$HOME/project/keylink"`), "alert"},
 		{"home-benign", hp3r4IfDefaults(10, `echo m >> "$HOME/project/out.txt"`), "allow"},
 	}
 	var payloads [][]byte
