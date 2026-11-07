@@ -195,6 +195,7 @@ func TestSandboxProfileExportsTheProxy(t *testing.T) {
 // an unknown zone, a path and a caller's TZ are left alone (cert
 // copilot:F10: the sandbox ran on UTC).
 func TestSandboxShellsTakeTheHostTimeZone(t *testing.T) {
+	requirePOSIXShell(t)
 	if _, err := os.Stat("/bin/bash"); err != nil {
 		t.Skip("/bin/bash is required")
 	}
@@ -242,6 +243,7 @@ func TestSandboxShellsTakeTheHostTimeZone(t *testing.T) {
 // start-up or Node loader variables) and its own arguments, and the wrapper
 // refuses to run without a command.
 func TestSandboxEnvRunsTheCommand(t *testing.T) {
+	requirePOSIXShell(t)
 	if _, err := os.Stat("/bin/bash"); err != nil {
 		t.Skip("/bin/bash is required")
 	}

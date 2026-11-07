@@ -43,6 +43,7 @@ var caVars = []string{"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "
 // trusted CAs keeps OpenShell's variables, and so does a sandbox where the
 // bundle cannot be written.
 func TestSandboxShellsGiveEveryRuntimeTheTrustedCAs(t *testing.T) {
+	requirePOSIXShell(t)
 	if _, err := os.Stat("/bin/bash"); err != nil {
 		t.Skip("/bin/bash is required")
 	}
