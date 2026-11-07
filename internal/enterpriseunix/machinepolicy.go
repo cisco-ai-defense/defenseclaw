@@ -216,14 +216,15 @@ func (m *policyManager) copilotAccountHomes(cfg *config.Config) ([]string, []str
 	// guardian retires the account in the pass that verify would otherwise
 	// call it an account outside enrollment (GAP-0777). It contributes
 	// nothing even where a live account shares its home, so the deleted
-	// account cannot put the home of the live one out of scope. Where no
-	// recorded account is live but a fresh read of the whole search policy
-	// finds accounts at the home (the record has not caught up with a
-	// replacement, local or from a directory), the home is scoped by the
-	// name and uid of those accounts, never by the deleted account: enrollment
-	// may leave out the one and not the other. A read that does not answer
-	// keeps the recorded scope, since a home that may be in use is never
-	// dropped.
+	// account cannot put the home of the live one out of scope. A fresh read
+	// of the whole search policy asks who holds the home of a gone account
+	// now, even when a recorded account is live there (the record has not
+	// caught up with a replacement, local or from a directory): each holder
+	// the record does not already name as live is scoped by its own name and
+	// uid, never by the deleted account, since enrollment may leave out the
+	// one and not the other. A read that does not answer keeps the recorded
+	// scope where no recorded account is live, since a home that may be in use
+	// is never dropped.
 	var scoped, outOfScope []string
 	add := func(home string, out bool) {
 		if out {
@@ -238,16 +239,23 @@ func (m *policyManager) copilotAccountHomes(cfg *config.Config) ([]string, []str
 			add(entry.home, entry.outOfScope)
 			continue
 		}
-		if goneHomes.live[entry.home] || replaced[entry.home] {
+		if replaced[entry.home] {
 			continue
 		}
 		holders, err := goneHomes.accountsAt(entry.home)
 		if err != nil {
-			add(entry.home, entry.outOfScope)
+			// A home a recorded live account holds is already judged by that
+			// account; any other unanswered home keeps the recorded scope.
+			if !goneHomes.live[entry.home] {
+				add(entry.home, entry.outOfScope)
+			}
 			continue
 		}
 		replaced[entry.home] = true
 		for _, holder := range holders {
+			if goneHomes.liveAccount(entry.home, holder.Name, holder.UID) {
+				continue
+			}
 			add(entry.home, leftOut[holder.Name] || leftOut[strconv.Itoa(holder.UID)] ||
 				!enrolled(enterprisehooks.UnixEligibleAccount{User: holder.Name, UID: holder.UID, Home: entry.home}))
 		}
@@ -331,6 +339,8 @@ type confirmedGoneHomes struct {
 	asked map[string]bool
 	live  map[string]bool
 	held  map[string]homeAccounts
+	// liveAt is the named accounts recorded live at each home (name:uid).
+	liveAt map[string]map[string]bool
 }
 
 // homeAccounts is the answer of one fresh read of the accounts at a home.
@@ -340,7 +350,7 @@ type homeAccounts struct {
 }
 
 func newConfirmedGoneHomes() *confirmedGoneHomes {
-	return &confirmedGoneHomes{asked: map[string]bool{}, live: map[string]bool{}, held: map[string]homeAccounts{}}
+	return &confirmedGoneHomes{asked: map[string]bool{}, live: map[string]bool{}, held: map[string]homeAccounts{}, liveAt: map[string]map[string]bool{}}
 }
 
 // note records one account recorded at home and returns whether it is
@@ -358,8 +368,18 @@ func (g *confirmedGoneHomes) note(user string, uid int, home string) bool {
 	}
 	if !gone {
 		g.live[home] = true
+		if g.liveAt[home] == nil {
+			g.liveAt[home] = map[string]bool{}
+		}
+		g.liveAt[home][key] = true
 	}
 	return gone
+}
+
+// liveAccount reports whether the account (name and uid) is one of those
+// recorded live at home, which the scope already judges by its own entry.
+func (g *confirmedGoneHomes) liveAccount(home, user string, uid int) bool {
+	return g.liveAt[home][user+":"+strconv.Itoa(uid)]
 }
 
 // accountsAt are the live accounts a fresh read of the search policy finds

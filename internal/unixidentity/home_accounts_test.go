@@ -35,6 +35,10 @@ func TestDSCLHomeAccounts(t *testing.T) {
 		{"an account with no uid", out("odd\t\tNFSHomeDirectory = (\n    \"/Users/shared\"\n)\n"), nil, true},
 		{"the search fails", func() (commandResult, error) { return commandResult{}, errors.New("timed out") }, nil, true},
 		{"the search exits non-zero", func() (commandResult, error) { return commandResult{exitCode: 14}, nil }, nil, true},
+		{"a space-padded answer", out("alice  NFSHomeDirectory = (\n    \"/Users/shared\"\n)\n"), nil, true},
+		{"a line that is not a record", out("alice\t\tNFSHomeDirectory = (\n    \"/Users/shared\"\n)\nsomething else\n"), nil, true},
+		{"a record of another attribute", out("alice\t\tUniqueID = (\n    502\n)\n"), nil, true},
+		{"blank lines around a record", out("\nalice\t\tNFSHomeDirectory = (\n    \"/Users/shared\"\n)\n\n"), []HomeAccount{{"alice", 502}}, false},
 		{"a name that is not an account name", out("a/b\t\tNFSHomeDirectory = (\n)\n"), nil, true},
 	}
 	for _, tc := range cases {
