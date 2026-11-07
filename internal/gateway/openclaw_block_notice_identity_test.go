@@ -55,10 +55,9 @@ func TestGAP0644OnlyTheBlockedCallResultTakesTheNotice(t *testing.T) {
 	}
 }
 
-// The id of a result equals the recorded id, or the part of it before "|"
-// (OpenClaw Responses ids are "<call id>|<item id>" and the Responses request
-// sends back the call id). Any other difference is another or an unknown call:
-// no lossy forms, no caps, no case folding, no trimming.
+// The id of a result must equal the recorded id: no lossy forms, no caps, no
+// case folding, no trimming, and no prefix. Chat Completions, Anthropic,
+// Bedrock and Gemini send the id back as it was recorded.
 func TestGAP0644ResultIDMustEqualTheRecordedID(t *testing.T) {
 	chat := func(id string) string {
 		return `{"messages":[{"role":"tool","tool_call_id":"` + id + `","content":"blocked"}]}`
@@ -68,8 +67,8 @@ func TestGAP0644ResultIDMustEqualTheRecordedID(t *testing.T) {
 		want           bool
 	}{
 		{"call_abc", "call_abc", true},
-		{"call_abc|fc_123", "call_abc", true},        // Responses "<call>|<item>", call part sent back
 		{"call_abc|fc_123", "call_abc|fc_123", true}, // the full id sent back
+		{"call_abc|fc_123", "call_abc", false},       // the head of a Responses id is another call here
 		{"call.abc|fc_1", "call_abc", false},         // punctuation replaced: not the same id
 		{"call.abc", "callabc", false},               // letters and digits only: not the same id
 		{"toolu_01ABCDEFGHIJ", "toolu01A", false},    // not the id
@@ -85,12 +84,40 @@ func TestGAP0644ResultIDMustEqualTheRecordedID(t *testing.T) {
 		{"call_abc", "", false},                      // no result id
 	} {
 		resetOpenClawBlockNotices(t)
-		rememberOpenClawBlockNotice("exec", tc.recorded, []string{noticeTestRule}, "r")
+		rememberOpenClawBlockNotice("exec", tc.recorded, "", []string{noticeTestRule}, "r")
 		out, _ := serveNoticeWith(t, noticeServe{reqBody: chat(tc.sent), ctype: noticeJSONType, respBody: noticeChatReply})
 		wantPending := tc.recorded != "" && !tc.want
 		if noticeServed(out) != tc.want || openClawBlockNoticesPending() != wantPending {
 			t.Errorf("recorded %q, result id %q: served=%v pending=%v, want served=%v pending=%v",
 				tc.recorded, tc.sent, noticeServed(out), openClawBlockNoticesPending(), tc.want, wantPending)
+		}
+	}
+}
+
+// OpenClaw names a Responses call "<call id>|<item id>" and the Responses
+// request sends back the call id alone. That equivalence holds for a
+// function_call_output item only.
+func TestGAP0644ResponsesResultIDIsTheCallPartOfTheRecordedID(t *testing.T) {
+	responses := func(id string) string {
+		return `{"input":[{"type":"function_call_output","call_id":"` + id + `","output":"blocked"}]}`
+	}
+	for _, tc := range []struct {
+		recorded, sent string
+		want           bool
+	}{
+		{"call_abc|fc_123", "call_abc", true},
+		{"call_abc|fc_123", "call_abc|fc_123", true},
+		{"call_abc", "call_abc", true},
+		{"call_abc|fc_1", "call_abd", false},
+		{"call_abc|fc_1", "fc_1", false},
+		{"call_abc|fc_1", "call_ab", false},
+		{"|fc_1", "", false},
+	} {
+		resetOpenClawBlockNotices(t)
+		rememberOpenClawBlockNotice("exec", tc.recorded, "", []string{noticeTestRule}, "r")
+		out, _ := serveNoticeWith(t, noticeServe{reqBody: responses(tc.sent), ctype: noticeJSONType, respBody: noticeChatReply})
+		if noticeServed(out) != tc.want || openClawBlockNoticesPending() == tc.want {
+			t.Errorf("recorded %q, responses call_id %q: served=%v pending=%v, want served=%v", tc.recorded, tc.sent, noticeServed(out), openClawBlockNoticesPending(), tc.want)
 		}
 	}
 }

@@ -33,16 +33,26 @@ import (
 // call id the plugin sends with the inspect request. A model request of this
 // OpenClaw route that carries a tool-result message with that id takes the
 // notice, and the proxy puts one line in front of the first text of the reply
-// (stream or not). Nothing else is a key: no text of the result, of the user
-// or of the model, no tool name, no session header. The body is decoded first
-// and only the id field of each tool-result message is read, so the same
-// words in any other place name no call. A call id the provider rewrote
-// before replay (a length cap, a new id for a repeated id) matches nothing and
-// the notice waits until it expires: the line is UX only, so when the tie is
-// unknown nothing is shown. A provider whose results carry no call id
-// (Ollama, Gemini without ids) cannot be keyed and shows nothing. An allowed
-// call records nothing. A notice is taken by one request, so a block is shown
-// once, and a new block with the same id replaces the old one. A reply with no
+// (stream or not). Nothing else names a call: no text of the result, of the
+// user or of the model, no tool name. The body is decoded first and only the
+// id field of each tool-result message is read, so the same words in any other
+// place name no call. A call id the provider rewrote before replay (a length
+// cap, a new id for a repeated id) matches nothing and the notice waits until
+// it expires: the line is UX only, so when the tie is unknown nothing is
+// shown. A provider whose results carry no call id (Ollama, Gemini without
+// ids) cannot be keyed and shows nothing. An allowed call records nothing.
+//
+// A call id is not unique: OpenClaw replay rewrites a repeated id, and two
+// sessions of one account can send the same one. The notice therefore records
+// the session of the block and is shown only when exactly one live block
+// claims the result id. A model request that names another session is not the
+// session of the block. Two blocks that claim one result id, in the same
+// session or in sessions the request does not tell apart, are ambiguous and
+// show nothing. The session is a veto and never a key: the plugin stamps model
+// requests from the last tool context, which can be a concurrent session, so a
+// request of the blocked session may carry another session and then waits for
+// the notice to expire. Not showing a line is the safe error. A notice is
+// taken by one request, so a block is shown once. A reply with no
 // text to lead with, or in a format that is not rewritten, gives the notice
 // back until it expires, so the line lands on the first reply that can carry
 // it. A reply DefenseClaw wrote itself (it starts with the block banner) is
@@ -60,8 +70,15 @@ type openClawBlockNotice struct {
 	// callID is the id OpenClaw gave the blocked call; the result message of
 	// that call carries it back.
 	callID string
-	line   string
-	at     time.Time
+	// session is the session id the plugin sent with the inspect request; empty
+	// when it sent none, which no request can contradict.
+	session string
+	line    string
+	at      time.Time
+	// ambiguous is set when a second, different block was recorded under the
+	// same call id and session: no result can be told apart, so the notice is
+	// consumed by the first result that claims it and shows nothing.
+	ambiguous bool
 }
 
 var openClawBlockNotices struct {
@@ -111,24 +128,36 @@ func openClawNoticeAllowed(cfg *config.Config) bool {
 }
 
 // rememberOpenClawBlockNotice records an enforced block of one OpenClaw tool
-// call under its call id. A call without an id cannot be tied to its result
-// and records nothing.
-func rememberOpenClawBlockNotice(tool, callID string, ruleIDs []string, reason string) {
+// call under its call id and session. A call without an id cannot be tied to
+// its result and records nothing. The same block recorded again (a retry of
+// the inspect call) refreshes its entry; a different block under the same id
+// and session makes that entry ambiguous instead of replacing it, so one
+// block never shows the reason of another.
+func rememberOpenClawBlockNotice(tool, callID, session string, ruleIDs []string, reason string) {
 	if callID == "" {
 		return
 	}
 	openClawBlockNotices.mu.Lock()
 	defer openClawBlockNotices.mu.Unlock()
 	now := openClawToolOutcomeNow()
+	line := openClawBlockNoticeLine(tool, ruleIDs, reason)
 	kept := pruneOpenClawBlockNotices(openClawBlockNotices.entries, now)
-	// One notice per id: a newer block of the same id replaces the older.
 	n := kept[:0]
+	collided := false
 	for _, e := range kept {
-		if e.callID != callID {
+		if e.callID != callID || e.session != session {
+			n = append(n, e)
+			continue
+		}
+		if e.ambiguous || e.line != line {
+			e.ambiguous, collided = true, true
 			n = append(n, e)
 		}
 	}
-	openClawBlockNotices.entries = append(n, openClawBlockNotice{callID: callID, line: openClawBlockNoticeLine(tool, ruleIDs, reason), at: now})
+	if !collided {
+		n = append(n, openClawBlockNotice{callID: callID, session: session, line: line, at: now})
+	}
+	openClawBlockNotices.entries = n
 	capOpenClawBlockNotices()
 }
 
@@ -158,10 +187,17 @@ func openClawBlockNoticesPending() bool {
 	return len(openClawBlockNotices.entries) > 0
 }
 
+// inSession is false only when both the block and the request name a session
+// and the two differ.
+func (n openClawBlockNotice) inSession(session string) bool {
+	return n.session == "" || session == "" || n.session == session
+}
+
 // takeOpenClawBlockNotices removes and returns the live notices whose call id
 // the request body carries on a tool-result message. The same id anywhere else
-// in the request takes nothing.
-func takeOpenClawBlockNotices(body []byte) []openClawBlockNotice {
+// in the request takes nothing. A result id claimed by more than one live
+// block of the request session is ambiguous and takes nothing.
+func takeOpenClawBlockNotices(body []byte, session string) []openClawBlockNotice {
 	// The body is decoded before any id is read: JSON allows the same string
 	// to be spelled with escapes, which a raw byte search misses.
 	ids := toolResultIDs(body)
@@ -170,14 +206,29 @@ func takeOpenClawBlockNotices(body []byte) []openClawBlockNotice {
 	}
 	openClawBlockNotices.mu.Lock()
 	defer openClawBlockNotices.mu.Unlock()
-	openClawBlockNotices.entries = pruneOpenClawBlockNotices(openClawBlockNotices.entries, openClawToolOutcomeNow())
+	entries := pruneOpenClawBlockNotices(openClawBlockNotices.entries, openClawToolOutcomeNow())
+	claimed := make([]bool, len(entries))
+	for _, r := range ids {
+		claim := -1
+		count := 0
+		for i, e := range entries {
+			if e.isResultOf(r) && e.inSession(session) {
+				claim = i
+				count++
+			}
+		}
+		if count == 1 {
+			claimed[claim] = true
+		}
+	}
 	var taken []openClawBlockNotice
-	kept := make([]openClawBlockNotice, 0, len(openClawBlockNotices.entries))
-	for _, e := range openClawBlockNotices.entries {
-		if e.isResultOfAny(ids) {
-			taken = append(taken, e)
-		} else {
+	kept := make([]openClawBlockNotice, 0, len(entries))
+	for i, e := range entries {
+		switch {
+		case !claimed[i]:
 			kept = append(kept, e)
+		case !e.ambiguous:
+			taken = append(taken, e)
 		}
 	}
 	openClawBlockNotices.entries = kept
@@ -239,7 +290,7 @@ func openClawBlockNoticeMiddleware(next http.Handler, authorized func(*http.Requ
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
-		notices := takeOpenClawBlockNotices(body)
+		notices := takeOpenClawBlockNotices(body, strings.TrimSpace(r.Header.Get(SessionIDHeader)))
 		if len(notices) == 0 {
 			next.ServeHTTP(w, r)
 			return
