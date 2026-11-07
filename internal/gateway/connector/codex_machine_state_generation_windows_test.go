@@ -615,7 +615,7 @@ func TestWindowsCodexStateUnchangedPassesAfterAReleasedHoldWriteNothing(t *testi
 		},
 		func() error {
 			windowsCodexActiveManagedState.requirementsTouched = windowsCodexRequirementsPublishChanges(
-				safefile.SharedFile{Exists: true, Data: []byte("same")}, []byte("same"), false)
+				safefile.SharedFile{Exists: true, Data: []byte("same")}, []byte("same"), false, false)
 			return nil
 		},
 		func() error { return nil },
@@ -660,19 +660,21 @@ func TestWindowsCodexStateUnchangedPassesAfterAReleasedHoldWriteNothing(t *testi
 func TestWindowsCodexRequirementsPublishChangesOnlyWhenTheFileChanges(t *testing.T) {
 	existing := safefile.SharedFile{Exists: true, Data: []byte("a")}
 	for _, row := range []struct {
-		name      string
-		base      safefile.SharedFile
-		candidate []byte
-		remove    bool
-		want      bool
+		name       string
+		base       safefile.SharedFile
+		candidate  []byte
+		remove     bool
+		unreadable bool
+		want       bool
 	}{
-		{"same bytes", existing, []byte("a"), false, false},
-		{"other bytes", existing, []byte("b"), false, true},
-		{"new file", safefile.SharedFile{}, []byte("a"), false, true},
-		{"remove an existing file", existing, nil, true, true},
-		{"remove an absent file", safefile.SharedFile{}, nil, true, false},
+		{"same bytes", existing, []byte("a"), false, false, false},
+		{"same bytes, users cannot read the file", existing, []byte("a"), false, true, true},
+		{"other bytes", existing, []byte("b"), false, false, true},
+		{"new file", safefile.SharedFile{}, []byte("a"), false, false, true},
+		{"remove an existing file", existing, nil, true, false, true},
+		{"remove an absent file", safefile.SharedFile{}, nil, true, false, false},
 	} {
-		if got := windowsCodexRequirementsPublishChanges(row.base, row.candidate, row.remove); got != row.want {
+		if got := windowsCodexRequirementsPublishChanges(row.base, row.candidate, row.remove, row.unreadable); got != row.want {
 			t.Errorf("%s: changes = %v, want %v", row.name, got, row.want)
 		}
 	}
