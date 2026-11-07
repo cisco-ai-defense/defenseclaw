@@ -14,7 +14,6 @@ import json
 import os
 import re
 import stat
-import sys
 import tarfile
 import tempfile
 import urllib.error
@@ -110,11 +109,10 @@ def inspect_official_provider_tree(plugin_dir: str, *, data_dir: str = "") -> Pr
         return None
     if name not in _OFFICIAL_PACKAGES:
         return None
-    # The install must not come from a protected file or link, or from a file,
-    # a link or an address outside the registry that its own lock entry names,
-    # whatever the bytes are (see ``_install_records``).
+    # Every place the install names its source must say the registry: any other
+    # source gives no identity, whatever the bytes are (see ``_install_records``).
     try:
-        records = _install_records(plugin_dir, package, name, data_dir)
+        records = _install_records(plugin_dir, package, name)
     except (OSError, ValueError):
         return None
     if records is None:
@@ -418,12 +416,15 @@ def _archive_package_digest(archive: bytes) -> str | None:
 # source, so an install that left none (OpenClaw copies the package) is not held
 # against; only an outage needs one (see ``_recorded_registry_release``).
 #
-# Separately, any place the install names its source (the manifest fields
-# ``_resolved``, ``_from`` and ``_requested``, the lock entry, and the spec that
-# the root of the project gives this package) must not name a protected file or
-# link. That check reads names, not the shape of the spec, so it is the same for
-# every way a source is spelled and it never holds a registry request against
-# the install. Specs of other packages are not read: they describe other copies.
+# Every place the install names its source (the manifest fields ``_resolved``,
+# ``_from`` and ``_requested``, the lock entry, and the spec that the package
+# owning this copy gives it) must say, in so many words, that the source is the
+# registry. That is the whole rule: an address is read as an address and a spec
+# as a spec, never as a file name, so no folder name, link or platform naming
+# rule decides anything. A source of any other kind (a file, a link, a path, a
+# git address, a URL alias, a list or an object) gives no identity, and the
+# plugin gets exactly the verdict of the ordinary scan. Specs of other packages
+# are not read: they describe other copies.
 _LOCK_FILES = ("package-lock.json", "npm-shrinkwrap.json", "node_modules/.package-lock.json")
 _LOCK_MAX_BYTES = 32 * 1024 * 1024
 _RECORDED_VERSION = re.compile(r"[0-9][0-9A-Za-z.+-]*")
@@ -431,97 +432,42 @@ _DEPENDENCY_FIELDS = (
     "dependencies", "devDependencies", "optionalDependencies", "peerDependencies",
 )
 _METADATA_FIELDS = ("_resolved", "_from", "_requested")
-# Folders and files that hold credentials or connector state. A source that
-# names one is a protected file or link, whatever else the install says.
-_PROTECTED_SOURCE_NAMES = _PRIVATE_INSTALL_COMPONENTS | frozenset({
-    ".codex", ".claude", ".claude.json",
-})
-_SOURCE_SCHEME = re.compile(r"(?:^|@)(?:git\+)?(?:file|link|portal):(?://)?", re.IGNORECASE)
+# A version, a range or a tag: letters, digits and range operators, with at
+# least one letter, digit or ``*``. A path separator, a colon or an ``@`` make a
+# different kind of spec, and a name that ends like an archive is a file.
+_REGISTRY_SPEC = re.compile(r"(?=.*[0-9A-Za-z*])[0-9A-Za-z.^~*<>=| +-]{0,128}")
+_ARCHIVE_NAME = re.compile(r"\.(?:tgz|tar|tar\.gz)$", re.IGNORECASE)
+_REQUEST_FIELDS = ("raw", "rawSpec", "saveSpec", "fetchSpec")
 
 
-def _name_folding() -> str:
-    """How this platform compares file names: windows, case or exact.
+def _registry_request(value: object, name: str) -> bool:
+    """Whether ``value`` is a plain registry request for the package ``name``.
 
-    Windows drops trailing dots and spaces and ignores case, macOS volumes
-    ignore case, and elsewhere ``.SSH`` and ``.ssh.`` are ordinary names of
-    their own, so a source that uses them is an ordinary source.
+    The request is a registry archive address of the package, a version, range
+    or tag, or the name followed by one of these.
     """
 
-    return {"win32": "windows", "darwin": "case"}.get(sys.platform, "exact")
-
-
-def _source_name(name: str) -> str:
-    folding = _name_folding()
-    if folding == "windows":
-        return name.rstrip(". ").casefold()
-    return name.casefold() if folding == "case" else name
-
-
-def _names_protected_state(path: str) -> bool:
-    return any(_source_name(name) in _PROTECTED_SOURCE_NAMES for name in _location_names(path))
-
-
-def _names_protected_source(value: object, data_dir: str = "", bases: tuple[str, ...] = ()) -> bool:
-    """Whether any string in ``value`` names a protected file or link.
-
-    ``value`` is install metadata or a dependency spec. Every name of a path
-    in it is judged (a relative spelling that climbs to a protected folder
-    names it as much as an absolute one), the credential file patterns of the
-    scanner apply, and a location is judged again after resolution and against
-    the state folders. A relative location is resolved from each of ``bases``
-    (the package folder and the folders that hold a lock), because a link on
-    the way can lead it to a protected folder. A registry request names none
-    of these.
-    """
-
-    pending = [value]
-    while pending:
-        item = pending.pop()
-        if isinstance(item, dict):
-            pending.extend(v for k, v in item.items() if k != "where")
-        elif isinstance(item, list):
-            pending.extend(item)
-        elif isinstance(item, str) and _text_names_protected_source(item, data_dir, bases):
-            return True
-    return False
-
-
-def _text_names_protected_source(text: str, data_dir: str, bases: tuple[str, ...]) -> bool:
-    from defenseclaw.config import default_data_path
-    from defenseclaw.scanner.plugin_scanner.rules import CREDENTIAL_PATH_PATTERNS
-
-    decoded = urllib.parse.unquote(text)
-    flat = decoded.replace("\\", "/")
-    if any(entry.pattern.search(flat) for entry in CREDENTIAL_PATH_PATTERNS):
-        return True
-    if any(_source_name(part) in _PROTECTED_SOURCE_NAMES for part in re.split(r"[/:@\s]+", flat)):
-        return True
-    marker = _SOURCE_SCHEME.search(decoded)
-    candidate = decoded[marker.end():] if marker else decoded
-    if re.match(r"/[A-Za-z]:", candidate):
-        candidate = candidate[1:]
-    candidate = os.path.expanduser(candidate)
-    roots = {os.path.realpath(str(default_data_path()))}
-    if data_dir:
-        roots.add(os.path.realpath(data_dir))
-
-    def protected(location: str) -> bool:
-        return _names_protected_state(location) or any(
-            _path_within(root, location) for root in roots
-        )
-
-    if os.path.isabs(candidate):
-        return protected(os.path.realpath(candidate)) or protected(candidate)
-    if not (marker or "/" in flat or flat.startswith(".")):
+    if not isinstance(value, str):
         return False
-    # A relative source is a protected one when a link on its way leads there
-    # from a place the install resolves it. A base that is itself under
-    # protected state does not make every relative spelling protected.
-    for base in bases:
-        resolved = os.path.realpath(os.path.join(base, candidate))
-        if protected(resolved) and not protected(os.path.realpath(base)):
-            return True
-    return False
+    if _registry_archive(value, name):
+        return True
+    spec = value[len(name) + 1:] if value.startswith(name + "@") else value
+    return _REGISTRY_SPEC.fullmatch(spec) is not None and not _ARCHIVE_NAME.search(spec)
+
+
+def _registry_metadata(field: str, value: object, name: str) -> bool:
+    """Whether a manifest install field (``_resolved``, ``_from``, ``_requested``) is the registry."""
+
+    if field == "_resolved":
+        return _registry_archive(value, name)
+    if field != "_requested" or not isinstance(value, dict):
+        return _registry_request(value, name)
+    # npm 6 records the request as an object: its kind and the spellings of
+    # the request. The other members (the folder it was run from, the name) say
+    # nothing about the source.
+    return value.get("type", "version") in ("version", "range", "tag") and all(
+        value.get(key) is None or _registry_request(value[key], name) for key in _REQUEST_FIELDS
+    )
 
 
 def _registry_archive(address: object, name: str, version: str | None = None) -> bool:
@@ -632,34 +578,33 @@ def _owner_specs(lock: dict, name: str, key: str | None) -> list[object]:
     if key is None or not (_fold(key) == _fold(suffix) or _fold(key).endswith("/" + _fold(suffix))):
         return []
     owner = _fold(key[:len(key) - len(suffix)].rstrip("/"))
+    # The ``dependencies`` of an npm 6 entry are the nested packages, not specs.
     tables = [
-        table for table in (lock.get("packages"), _flat_v1(lock.get("dependencies")))
-        if isinstance(table, dict)
+        (lock.get("packages"), _DEPENDENCY_FIELDS),
+        (_flat_v1(lock.get("dependencies")), ("requires",)),
     ]
     return [
-        specs[name] for table in tables for path, entry in table.items()
+        specs[name] for table, fields in tables if isinstance(table, dict)
+        for path, entry in table.items()
         if isinstance(path, str) and isinstance(entry, dict) and _fold(path) == owner
-        for field in (*_DEPENDENCY_FIELDS, "requires")
-        if isinstance(specs := entry.get(field), dict) and isinstance(specs.get(name), str)
+        for field in fields
+        if isinstance(specs := entry.get(field), dict) and name in specs
     ]
 
 
-def _install_records(
-    plugin_dir: str, manifest: dict, name: str, data_dir: str = "",
-) -> list[dict] | None:
-    """The lock entries that record this install, or None if the install names
-    a protected source or its entry names a source other than the registry. A
-    record that cannot be read raises."""
+def _install_records(plugin_dir: str, manifest: dict, name: str) -> list[dict] | None:
+    """The lock entries that record this install, or None if any place the
+    install names its source does not say the registry. A record that cannot be
+    read raises."""
 
-    folders = _lock_folders(plugin_dir)
-    bases = tuple(folders)
-    if any(
-        _names_protected_source(manifest.get(field), data_dir, bases) for field in _METADATA_FIELDS
+    if not all(
+        field not in manifest or _registry_metadata(field, manifest[field], name)
+        for field in _METADATA_FIELDS
     ):
         return None
     records: list[dict] = []
     root = os.path.abspath(plugin_dir)
-    for position, folder in enumerate(folders):
+    for position, folder in enumerate(_lock_folders(plugin_dir)):
         key = None if position == 0 else os.path.relpath(root, folder).replace(os.sep, "/")
         for relative in _LOCK_FILES:
             path = os.path.join(folder, *relative.split("/"))
@@ -680,10 +625,7 @@ def _install_records(
                 return None
             if not isinstance(lock, dict):
                 continue
-            if any(
-                _names_protected_source(spec, data_dir, bases)
-                for spec in _owner_specs(lock, name, key)
-            ):
+            if not all(_registry_request(spec, name) for spec in _owner_specs(lock, name, key)):
                 return None
             for entry in _lock_records(lock, name, key):
                 version = entry.get("version")
@@ -691,7 +633,7 @@ def _install_records(
                     version is not None
                     and not (isinstance(version, str) and _RECORDED_VERSION.fullmatch(version))
                 ) or ("resolved" in entry and not _registry_archive(entry["resolved"], name)) or (
-                    _names_protected_source(entry.get("from"), data_dir, bases)
+                    "from" in entry and not _registry_request(entry["from"], name)
                 ):
                     return None
                 records.append(entry)
