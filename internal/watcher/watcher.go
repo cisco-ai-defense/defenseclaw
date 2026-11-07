@@ -79,6 +79,20 @@ type InstallEvent struct {
 	// readmitReason names why the rescan admits a known target again; the
 	// watcher-block row carries it.
 	readmitReason string
+	// definitionHash is, for an MCP server, the hash of the definition the
+	// caller snapshotted for this admission (mcpDefinitionHash). Admission
+	// decides and enforces only while the server still has that definition.
+	definitionHash string
+}
+
+// admittingSnapshot binds an MCP admission to the definition snap hashed, so
+// the verdict, the block and the release it makes are for that definition and
+// no other. Other types, and a nil snapshot, are returned unchanged.
+func (evt InstallEvent) admittingSnapshot(snap *TargetSnapshot) InstallEvent {
+	if evt.Type == InstallMCP && snap != nil {
+		evt.definitionHash = snap.ContentHash
+	}
+	return evt
 }
 
 // Verdict is the outcome of running the admission gate on an install.
@@ -106,8 +120,10 @@ type AdmissionResult struct {
 	// ScanID is the scan_results row admission recorded, or "" when no
 	// scan was logged. It becomes the rescan baseline's scan (GAP-2507).
 	ScanID string
-	// Interrupted is a scan the watcher's own stop cut off: nothing was
-	// decided, no baseline is kept, and the next start admits the asset.
+	// Interrupted is a scan the watcher's own stop cut off, or an MCP
+	// admission whose server no longer has the definition it was started
+	// for: nothing was decided or enforced, no baseline is kept, and the
+	// next start or cycle admits the asset it finds.
 	Interrupted bool
 	// Unenforced is a rejection decided while take_action was off for the
 	// type, so nothing was blocked or quarantined. Its rescan baseline keeps
@@ -690,7 +706,7 @@ func (w *InstallWatcher) admitAddedMCPServer(ctx context.Context, evt InstallEve
 		return
 	}
 	fmt.Fprintf(os.Stderr, "[watch] mcp %s was added; running install admission\n", evt.Name)
-	res := w.runAdmission(ctx, evt)
+	res := w.runAdmission(ctx, evt.admittingSnapshot(snap))
 	w.noteMCPAdmissionOutcome(evt, snap, res)
 	w.notifyAdmission(res)
 	if !res.Interrupted {
@@ -2331,6 +2347,18 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	if res, refused := w.refuseForeignLink(ctx, evt, targetType); refused {
 		return res
 	}
+	// Every effect of this admission (a block, a disable, a release of an
+	// earlier block) belongs to one definition: the one the caller
+	// snapshotted, or the one found now when it did not snapshot. The check
+	// repeats once the scan is done, since the scan can run long.
+	if evt.Type == InstallMCP && !w.secureClientActive() && evt.definitionHash == "" {
+		if hash, err := w.mcpDefinitionHashOf(evt); err == nil {
+			evt.definitionHash = hash
+		}
+	}
+	if w.mcpDefinitionMoved(evt) {
+		return w.mcpMovedAdmission(evt)
+	}
 	policyID := enforce.PolicyStableID(w.cfg.PolicyDir)
 	decisionPolicy := w.admissionPolicySnapshot()
 	ctx, admissionTrace := w.startAdmissionTraceV8(ctx, evt, targetType, policyID, decisionPolicy)
@@ -2448,6 +2476,11 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		} else if unreadable != "" {
 			err = fmt.Errorf("%s: %w", unreadable, err)
 		}
+	}
+	if w.mcpDefinitionMoved(evt) {
+		// The scan read the server by name when it ran: its verdict is for
+		// whatever definition it found, so it is neither enforced nor kept.
+		return w.mcpMovedAdmission(evt)
 	}
 	if err != nil && ctx.Err() != nil && !w.secureClientActive() {
 		// The watcher itself is stopping (a config reload restarts it, or

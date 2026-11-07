@@ -1040,7 +1040,7 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				// acted on (GAP-1096). Secure Client keeps main's baseline
 				// (issue #1092).
 				fmt.Fprintf(os.Stderr, "[rescan] mcp %s is new; running install admission\n", evt.Name)
-				res := w.runAdmission(ctx, evt)
+				res := w.runAdmission(ctx, evt.admittingSnapshot(currentSnap))
 				w.notifyAdmission(res)
 				if !res.Interrupted {
 					w.persistSnapshot(evt, currentSnap, res.ScanID, w.admissionFingerprint(res, fingerprint))
@@ -1051,7 +1051,7 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				// Added while the gateway was stopped: admit it as the live
 				// watcher would (scan, verdict, block/quarantine; GAP-2475).
 				fmt.Fprintf(os.Stderr, "[rescan] %s %s is new since the last run; running install admission\n", evt.Type, evt.Name)
-				res := w.runAdmission(ctx, evt)
+				res := w.runAdmission(ctx, evt.admittingSnapshot(currentSnap))
 				w.notifyAdmission(res)
 				moved := w.movedByAdmission(evt)
 				if res.Interrupted {
@@ -1273,7 +1273,7 @@ func (w *InstallWatcher) rescanMCPAdmittedWithoutScan(ctx context.Context, evt I
 		return rescanSkipped
 	}
 	fmt.Fprintf(os.Stderr, "[rescan] mcp %s is admitted without a scan; running install admission\n", evt.Name)
-	res := w.runAdmission(ctx, evt)
+	res := w.runAdmission(ctx, evt.admittingSnapshot(snap))
 	w.noteMCPAdmissionOutcome(evt, snap, res)
 	w.notifyAdmission(res)
 	if !res.Interrupted {
@@ -1336,7 +1336,7 @@ func mcpLauncherRefusalFinal(baseline *audit.SnapshotRow, snap *TargetSnapshot, 
 func (w *InstallWatcher) readmitUnenforcedRejection(ctx context.Context, evt InstallEvent, snap *TargetSnapshot, fingerprint string) rescanOutcome {
 	fmt.Fprintf(os.Stderr, "[rescan] %s %s was rejected while take_action was off; take_action is on, running install admission\n", evt.Type, evt.Name)
 	evt.readmitReason = "rejected while take_action was off, enforced once it was turned on"
-	res := w.runAdmission(ctx, evt)
+	res := w.runAdmission(ctx, evt.admittingSnapshot(snap))
 	w.notifyAdmission(res)
 	moved := w.movedByAdmission(evt)
 	if res.Interrupted || res.ScanID == "" || moved {
@@ -1364,7 +1364,7 @@ func (w *InstallWatcher) readmitUnenforcedRejection(ctx context.Context, evt Ins
 // server list. Secure Client keeps main's rescan (issue #1092).
 func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, baseline *audit.SnapshotRow, snap *TargetSnapshot, deltas []DriftDelta, fingerprint, source string) rescanOutcome {
 	fmt.Fprintf(os.Stderr, "[%s] %s %s needs admission; scanning\n", source, evt.Type, evt.Name)
-	res := w.runAdmission(ctx, evt)
+	res := w.runAdmission(ctx, evt.admittingSnapshot(snap))
 	w.noteMCPAdmissionOutcome(evt, snap, res)
 	w.notifyAdmission(res)
 	if res.ScanID != "" {
@@ -1444,7 +1444,7 @@ func (w *InstallWatcher) markInterruptedAdmission(evt InstallEvent, snap *Target
 // mark stays until an admission decides; a decided target gets its baseline.
 func (w *InstallWatcher) readmitInterrupted(ctx context.Context, evt InstallEvent, snap *TargetSnapshot, fingerprint string) rescanOutcome {
 	fmt.Fprintf(os.Stderr, "[rescan] %s %s: its admission scan was cut off; running install admission\n", evt.Type, evt.Name)
-	res := w.runAdmission(ctx, evt)
+	res := w.runAdmission(ctx, evt.admittingSnapshot(snap))
 	w.notifyAdmission(res)
 	if res.Interrupted || res.Verdict == VerdictScanError || strings.HasPrefix(res.Reason, scanFailureReason) || w.movedByAdmission(evt) {
 		return rescanScanned
