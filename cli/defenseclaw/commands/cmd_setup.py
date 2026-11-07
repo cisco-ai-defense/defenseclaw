@@ -17855,6 +17855,7 @@ def _gateway_lifecycle_candidate(
 
     from defenseclaw.gateway import (
         GATEWAY_BIN_NAME,
+        _launcher_sibling_gateway,
         canonical_install_path,
         packaged_windows_gateway_path,
         packaged_windows_install_root,
@@ -17886,8 +17887,11 @@ def _gateway_lifecycle_candidate(
     # config loader accepts credential names from .env, so an attacker who
     # could previously write that file could otherwise plant an executable
     # override and have Doctor run it after merely tightening permissions.
-    executable = shutil.which(GATEWAY_BIN_NAME, path=sanitized_search_path)
-    if executable:
+    # This install's own gateway comes before PATH: a DefenseClaw Setup 0.8.x
+    # folder listed first would otherwise run the lifecycle call (GAP-0100).
+    own_gateway = _launcher_sibling_gateway() if search_path is None else None
+    executable = own_gateway or shutil.which(GATEWAY_BIN_NAME, path=sanitized_search_path)
+    if executable and not own_gateway:
         # Older Python runtimes on Windows can prepend the current directory
         # even when an explicit PATH is supplied. Accept only a concrete result
         # whose parent was one of the sanitized search directories.

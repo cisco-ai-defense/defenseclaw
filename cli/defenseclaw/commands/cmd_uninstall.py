@@ -76,6 +76,7 @@ from defenseclaw.commands import legacy_setup_install, windows_uninstall_helper
 from defenseclaw.commands.cmd_doctor import _codex_otel_marked_kept
 from defenseclaw.connector_paths import claude_settings_paths, codex_home
 from defenseclaw.file_lock import tui_lock_held
+from defenseclaw.gateway import path_gateway
 from defenseclaw.winquote import (
     powershell_literal,
     powershell_literal_before_typographic_quotes,
@@ -1131,7 +1132,7 @@ def _build_plan(
         gateway_path=(
             os.path.join(install_root, "defenseclaw-gateway.exe")
             if platform_name == "win32"
-            else (shutil.which("defenseclaw-gateway") or os.path.join(install_root, "defenseclaw-gateway"))
+            else (path_gateway() or os.path.join(install_root, "defenseclaw-gateway"))
         ),
         binary_targets=binary_targets,
         data_bound_launchers=data_bound_launchers,
@@ -2795,6 +2796,11 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
             run_phase("launcher removal", lambda: _remove_data_bound_launchers(plan))
     if plan.remove_data_dir and not plan.preserve_data_entries:
         _remove_empty_plugin_cache()
+    if (plan.remove_data_dir and not plan.preserve_data_entries) or plan.remove_binaries:
+        # The gateway start leaves this account's API-port claim where every
+        # account's init reads it (%ProgramData% on Windows, /var/tmp), so it
+        # stays when the data is kept; with the gateway gone it is stale
+        # (cowork-1-0-8 GAP-0102).
         remove_own_api_port_claims()
     if plan.remove_binaries and not deferred:
         run_phase("binary removal", lambda: _remove_binaries(plan))
@@ -3798,7 +3804,7 @@ def _pid_file_names_a_live_process(path: str) -> bool:
 
 
 def _stop_gateway(plan: UninstallPlan | None = None) -> None:
-    gw = plan.gateway_path if plan is not None else shutil.which("defenseclaw-gateway")
+    gw = plan.gateway_path if plan is not None else path_gateway()
     if gw is None:
         ux.subhead("sidecar not on PATH — nothing to stop")
         return
@@ -4200,7 +4206,7 @@ def _gateway_supports_connector_teardown(gateway_path: str | None = None) -> boo
     by asking for ``--help`` on the ``connector`` subcommand — which is
     a non-destructive probe — and checking exit code + output.
     """
-    gw = gateway_path or shutil.which("defenseclaw-gateway")
+    gw = gateway_path or path_gateway()
     if gw is None:
         return False
     try:
@@ -4290,7 +4296,7 @@ def _gateway_connector_is_unknown(connector: str, *, plan: UninstallPlan | None 
     gateway, a launch failure, or residue all return False so the caller keeps
     its fail-closed abort.
     """
-    gw = plan.gateway_path if plan is not None and plan.gateway_path else shutil.which("defenseclaw-gateway")
+    gw = plan.gateway_path if plan is not None and plan.gateway_path else path_gateway()
     if gw is None:
         return False
     try:
@@ -4339,7 +4345,7 @@ def _run_gateway_connector_teardown(
                 return lines[-1]
         return ""
 
-    gw = plan.gateway_path if plan is not None else shutil.which("defenseclaw-gateway")
+    gw = plan.gateway_path if plan is not None else path_gateway()
     if gw is None:
         return False
     ux.subhead(f"tearing down {connector} (on a busy host this can take a few minutes)...")

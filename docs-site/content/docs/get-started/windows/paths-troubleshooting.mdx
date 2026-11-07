@@ -184,6 +184,16 @@ A DefenseClaw Setup 0.8.x install is still on your user `PATH` and its `defensec
 
 </Accordion>
 
+<Accordion title="init says a DefenseClaw Setup 0.8.x install still has hooks">
+
+`defenseclaw init` stops before it changes anything when a DefenseClaw Setup 0.8.x install of your account still has hooks in an agent's settings. The 1.x hooks would sit beside them and the two disagree. The message names the Setup install and the settings file.
+
+**Fix.** Run `defenseclaw uninstall` to remove the 0.8.x Setup install (it keeps that install's data folder), then run `defenseclaw init` again.
+
+**Check.** `defenseclaw init` finishes and `defenseclaw doctor` shows the agent as guarded.
+
+</Accordion>
+
 <Accordion title="defenseclaw-hook --version prints after the prompt, or > file captures nothing">
 
 `defenseclaw-hook.exe` is a no-console program. PowerShell does not wait for it as the last command of a pipeline, so the prompt returns first and `$LASTEXITCODE` is not the hook's exit code.

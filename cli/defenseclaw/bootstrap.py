@@ -37,6 +37,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -53,7 +54,7 @@ from defenseclaw.connector_paths import (
 )
 from defenseclaw.gateway import path_gateway
 from defenseclaw.inventory import agent_discovery
-from defenseclaw.scanner_binary import MCP_SCANNER_BINARY, SKILL_SCANNER_BINARY
+from defenseclaw.scanner_binary import MCP_SCANNER_BINARY, SKILL_SCANNER_BINARY, resolve_scanner_binary
 
 if TYPE_CHECKING:
     from defenseclaw.config import Config, PerConnectorGuardrailConfig
@@ -829,6 +830,24 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             connector_mode_warnings=connector_mode_warnings,
         )
 
+    # Before any write: hooks of a DefenseClaw Setup 0.8.x install in the agent's
+    # settings (GAP-0101). Init names that install and the next step instead of
+    # starting the sidecar and rolling back over the two disagreeing registrations.
+    roster = _first_run_connector_roster(options, connector)
+    legacy_hooks = _first_run_legacy_hook_refusal(roster, options.rerun_command)
+    if legacy_hooks:
+        setup.append(StepResult("Older install", "fail", legacy_hooks, "defenseclaw uninstall"))
+        return FirstRunReport(
+            status="needs_attention",
+            config_file=str(cfg_mod.config_path()),
+            data_dir=cfg.data_dir,
+            connector=connector,
+            profile=profile,
+            setup=setup,
+            next_commands=["defenseclaw uninstall", options.rerun_command],
+            connector_mode_warnings=connector_mode_warnings,
+        )
+
     # Before any write: a connector setup refuses in every mode is not
     # configured in observe either (GAP-0554).
     refusal = ""
@@ -1385,6 +1404,28 @@ def _preflight_first_run_agent_selections(
     return verified, ""
 
 
+def _first_run_legacy_hook_refusal(connectors: tuple[str, ...], rerun: str) -> str:
+    """Say which DefenseClaw Setup 0.8.x install has hooks in the roster's agent settings, or "".
+
+    until the 0.8 bridge retires: only a Windows per-user Setup 0.8.x install
+    leaves hooks of its own in an agent's settings.
+    """
+    from contextlib import suppress
+
+    from defenseclaw.commands import legacy_setup_install
+
+    install = legacy_setup_install.find(sys.platform)
+    if install is None:
+        return ""
+    files: list[str] = []
+    for name in connectors:
+        if name and name != "none":
+            with suppress(Exception):
+                files.extend(connector_config_files(name))
+    files = legacy_setup_install.hook_entries(install, list(dict.fromkeys(files)))
+    return legacy_setup_install.hook_refusal(install, files, rerun) if files else ""
+
+
 def _first_run_setup_refusal(connector: str, data_dir, rerun: str = "defenseclaw init") -> str:
     """Say why setup refuses *connector* in observe and action mode, or "".
 
@@ -1793,7 +1834,9 @@ def _scanner_availability(cfg: Config) -> list[StepResult]:
     ]
     out: list[StepResult] = []
     for label, binary, next_command in scanners:
-        path = shutil.which(binary)
+        # This install's own scanner first: a DefenseClaw Setup 0.8.x folder listed
+        # first on PATH must not be reported as this release's scanner (GAP-0100).
+        path = resolve_scanner_binary(binary)
         if path:
             out.append(StepResult(label, "pass", path))
         else:

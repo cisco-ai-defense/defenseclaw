@@ -824,8 +824,7 @@ def _per_user_connected_verifier() -> str:
     else:
         candidates = [
             os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip(),
-            _launcher_sibling_gateway() or "",
-            shutil.which(GATEWAY_BIN_NAME) or "",
+            path_gateway() or "",
             canonical_install_path(),
         ]
     for candidate in dict.fromkeys(candidates):

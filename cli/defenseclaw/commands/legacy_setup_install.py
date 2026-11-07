@@ -43,6 +43,7 @@ from dataclasses import dataclass
 _LOCAL_APP_DATA_FOLDER_ID = "f1b32785-6fba-4fcf-9d55-7b8e7f157091"
 _MAX_STATE_BYTES = 256 * 1024
 _MAX_HOOK_STATE_BYTES = 64 * 1024
+_MAX_CONFIG_BYTES = 4 * 1024 * 1024
 _VERSION = re.compile(r"0\.(?:0|[1-9][0-9]{0,3})\.(?:0|[1-9][0-9]{0,3})\Z")
 _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\DefenseClaw"
@@ -144,6 +145,50 @@ def find(platform_name: str) -> LegacySetupInstall | None:
         problem = _ownership_problem(root)
         step = getattr(problem, "step", "")
     return LegacySetupInstall(root, version, data_root, cache, hook_state, problem=problem, problem_step=step)
+
+
+def hook_entries(install: LegacySetupInstall, config_files: list[str]) -> list[str]:
+    """The files among *config_files* that start a program of *install*.
+
+    A DefenseClaw Setup 0.8.x install registers its own hook launcher in the
+    agent's settings, and this release registers another one beside it. The
+    two commands then disagree and the registration check fails after the
+    sidecar has started (GAP-0101). Only a hook that runs from the program
+    folder or the hook runtime folder of this account's own 0.8.x install
+    counts; a hook of any other product, or of a copy of DefenseClaw in
+    another folder, does not.
+    """
+    prefixes = tuple(
+        _slashes(folder).rstrip("\\") + "\\"
+        for folder in (install.root, os.path.dirname(install.hook_state))
+        if folder
+    )
+    found: list[str] = []
+    for path in config_files:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                text = handle.read(_MAX_CONFIG_BYTES)
+        except OSError:
+            continue
+        # JSON escapes each backslash; settings written by hand may use slashes.
+        if any(prefix in _slashes(text.replace("\\\\", "\\")) for prefix in prefixes):
+            found.append(path)
+    return found
+
+
+def hook_refusal(install: LegacySetupInstall, files: list[str], rerun: str) -> str:
+    """Why init stops before it changes anything, naming the older install and the next step."""
+    name = f"DefenseClaw Setup {install.version}" if install.version else "DefenseClaw Setup"
+    return (
+        f"{name} at {install.root} still has hooks registered in {', '.join(files)}. "
+        "This release's hooks would sit beside them and the two disagree, so init changes nothing. "
+        "Run `defenseclaw uninstall` to remove the DefenseClaw Setup 0.8.x install (your data folder is kept), "
+        f"then run `{rerun}` again."
+    )
+
+
+def _slashes(value: str) -> str:
+    return value.replace("/", "\\").lower()
 
 
 def plan_lines(install: LegacySetupInstall, data_dir: str) -> list[str]:
