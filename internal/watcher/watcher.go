@@ -2508,6 +2508,10 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		w.recordScanError(ctx, s.Name(), targetType, classifyWatcherScanError(err))
 		w.logFailedMCPScan(ctx, evt, s.Name(), target, result, err)
 		if w.keepsUnverifiedMCPServer(evt, targetType, connector, result, err) {
+			// That decision read the live policy and the definition again.
+			if w.mcpDefinitionMoved(evt) {
+				return w.mcpMovedAdmission(evt)
+			}
 			return w.keepUnverifiedMCPServer(ctx, evt, targetType, s.Name(), err)
 		}
 		if assetPathGone(evt) && !w.secureClientActive() {
@@ -2563,7 +2567,12 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		}
 		return res
 	}
-	w.releaseScanFailureBlock(evt, targetType, "its scan succeeded (the verdict decides)")
+	// The block an earlier failed scan left is released below, only once the
+	// definition this scan was started for has passed every read of the
+	// policy and of the server that follows: until then the block stands.
+	releaseEarlierFailure := func() {
+		w.releaseScanFailureBlock(evt, targetType, "its scan succeeded (the verdict decides)")
+	}
 
 	// Phase 3: post-scan evaluation. Re-read the live config so a block or
 	// allow added while the scan was running wins.
@@ -2592,6 +2601,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		return w.mcpMovedAdmission(evt)
 	}
 	if decision := postDecision; decision.Enabled && decision.RawAction == "block" && decision.Action == "block" {
+		releaseEarlierFailure()
 		_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 			fmt.Sprintf("type=%s reason=%s source=%s post-scan", targetType, decision.Reason, decision.Source))
 		scanID := w.logScanID(ctx, evt, result, "blocked")
@@ -2606,6 +2616,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		return res
 	}
 	if input.BlockListed() {
+		releaseEarlierFailure()
 		reason := fmt.Sprintf("%s %q is on the block list — rejected", targetType, evt.Name)
 		_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 			fmt.Sprintf("type=%s reason=blocked-post-scan", targetType))
@@ -2621,6 +2632,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		return res
 	}
 	if input.AllowListed() {
+		releaseEarlierFailure()
 		reason := fmt.Sprintf("scan found findings but %s %q is allow-listed — skipping enforcement", targetType, evt.Name)
 		_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
 			fmt.Sprintf("type=%s reason=allow-listed-post-scan", targetType))
@@ -2640,6 +2652,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	if w.mcpDefinitionMoved(evt) {
 		return w.mcpMovedAdmission(evt)
 	}
+	releaseEarlierFailure()
 	w.applyPostScanEnforcement(ctx, out, evt, targetType, result, s.Name())
 	scanID := w.logScanID(ctx, evt, result, out.Verdict)
 	w.recordAdmission(ctx, out.Verdict, targetType)
