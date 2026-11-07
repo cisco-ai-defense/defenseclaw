@@ -19,9 +19,7 @@ package watcher
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,7 +28,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -55,21 +52,6 @@ var (
 	// PATH for their own test.
 	hermesTestPath = os.Getenv("PATH")
 )
-
-// hermesManifestKey is the digest of the names and bytes of manifests.
-func hermesManifestKey(manifests map[string][]byte) string {
-	names := make([]string, 0, len(manifests))
-	for name := range manifests {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	digest := sha256.New()
-	for _, name := range names {
-		fmt.Fprintf(digest, "%s\x00%d\x00", name, len(manifests[name]))
-		_, _ = digest.Write(manifests[name])
-	}
-	return hex.EncodeToString(digest.Sum(nil))
-}
 
 // hermesLookPython finds python3 on the PATH the process started with.
 func hermesLookPython() (string, error) {
@@ -98,7 +80,7 @@ func hermesScannerLoader(t *testing.T) hermesManifestLoader {
 		t.Skipf("the plugin scanner CLI is not available: %v", hermesPythonErr)
 	}
 	return func(manifests map[string][]byte) ([]string, error) {
-		key := hermesManifestKey(manifests)
+		key := hermesManifestDigest(manifests)
 		if cached, ok := hermesAnswers.Load(key); ok {
 			answer := cached.(hermesTestAnswer)
 			return answer.entrypoints, answer.err
@@ -230,9 +212,10 @@ func TestHermesManifestLoaderFailureBindsEveryCacheFile(t *testing.T) {
 	}
 }
 
-// Nothing is remembered, neither an answer nor a failure (what the scanner
-// declares, and whether it can run, change while its launcher and the manifest
-// stay the same), so each request starts the scanner.
+// The loader remembers nothing, neither an answer nor a failure (what the
+// scanner declares, and whether it can run, change while its launcher and the
+// manifest stay the same), so each request starts the scanner. Only the outage
+// policy keeps the last answer, and reads it only after a failure.
 func TestHermesManifestLoaderAsksTheScannerEveryTime(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell fixture")
@@ -319,10 +302,12 @@ func TestHermesManifestReplyWithoutEntrypointsListIsNotAnAnswer(t *testing.T) {
 	}
 }
 
-// The incomplete reply binds a cache file a manifest names directly, in the
-// full tree hash, whatever the policy: strict binds every cache file, the
-// per-user default binds the named one.
-func TestHermesManifestIncompleteReplyStillBindsNamedCacheFile(t *testing.T) {
+// A reply without an entrypoints list is not an answer. With no earlier
+// answer the manifests are unknown: a strict or managed policy binds every
+// cache file, and the per-user default binds none, so the cache file a
+// manifest names is not rejected for the outage (the policy warned and audited
+// it).
+func TestHermesManifestIncompleteReplyFollowsTheOutageRule(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell fixture")
 	}
@@ -334,20 +319,25 @@ func TestHermesManifestIncompleteReplyStillBindsNamedCacheFile(t *testing.T) {
 	writePluginFile(t, other, "one")
 	for _, open := range []bool{true, false} {
 		ps := &scanner.PluginScanner{BinaryPath: hermesReplyScript(t, "{}")}
-		cache := newHermesManifestPolicy()
+		cache := newHermesManifestPolicy("", nil)
 		load := cache.byPolicy(hermesManifestsFrom(ps), func() bool { return open })
 		first := skippedTreeHash(dir, load)
 		writePluginFile(t, named, "two")
-		if skippedTreeHash(dir, load) == first {
-			t.Errorf("open=%v: an edit of the named cache file was not seen", open)
+		second := skippedTreeHash(dir, load)
+		if open && (first != "" || second != "") {
+			t.Errorf("a cache file is bound while the manifests are unknown under a fail-open policy (hash %q then %q)", first, second)
+		}
+		if !open && first == second {
+			t.Error("an edit of a cache file was not seen under a closed policy")
 		}
 		writePluginFile(t, named, "one")
 	}
 }
 
-// GAP-0645 review 19: while the scanner cannot answer, the per-user default
-// and permissive tiers warn and leave an ordinary generated cache file alone,
-// and a strict or managed policy counts every cache file as declared.
+// GAP-0645 review 19: while the scanner has no answer for the manifests, the
+// per-user default and permissive tiers leave every cache file alone (the
+// policy warns and audits), and a strict or managed policy counts every cache
+// file as declared.
 func TestHermesManifestFailureFollowsThePolicyTier(t *testing.T) {
 	dir := t.TempDir()
 	writePluginFile(t, filepath.Join(dir, "plugin.yaml"), "name: p\nmain: lib/run.js\n")
@@ -356,30 +346,38 @@ func TestHermesManifestFailureFollowsThePolicyTier(t *testing.T) {
 	ordinary := filepath.Join(dir, "__pycache__", "generated.cpython-312.pyc")
 	writePluginFile(t, named, "one")
 	writePluginFile(t, ordinary, "one")
-	failing := func(map[string][]byte) ([]string, error) {
+	open := func(map[string][]byte) ([]string, error) {
 		return nil, fmt.Errorf("%w: scanner unavailable", errHermesManifestFailOpen)
 	}
-	base := skippedTreeHash(dir, failing)
-	if base == "" {
-		t.Fatal("the cache file a manifest names was not hashed while the scanner cannot answer")
+	if got := skippedTreeHash(dir, open); got != "" {
+		t.Errorf("a cache file was bound while the manifests are unknown under a fail-open policy: %q", got)
 	}
 	writePluginFile(t, ordinary, "two")
-	if skippedTreeHash(dir, failing) != base {
-		t.Error("an ordinary cache write changed the hash under a fail-open policy")
-	}
 	writePluginFile(t, named, "two")
-	if skippedTreeHash(dir, failing) == base {
-		t.Error("an edit of a named cache file was not seen under a fail-open policy")
+	if got := skippedTreeHash(dir, open); got != "" {
+		t.Errorf("a cache write was bound under a fail-open policy: %q", got)
+	}
+	closed := func(map[string][]byte) ([]string, error) { return nil, errors.New("scanner unavailable") }
+	base := skippedTreeHash(dir, closed)
+	if base == "" {
+		t.Fatal("no cache file was bound under a closed policy")
+	}
+	writePluginFile(t, ordinary, "three")
+	if skippedTreeHash(dir, closed) == base {
+		t.Error("a cache write was not seen under a closed policy")
 	}
 }
 
-// The watcher chooses the fallback from the policy of the current
-// configuration, and follows a reload of the scanner it points at.
+// The watcher chooses the outage rule from the policy of the current
+// configuration, and follows a reload of the scanner it points at. The last
+// answer for the same manifest bytes is applied in any policy; manifests with
+// no earlier answer are unknown and follow the tier.
 func TestHermesManifestLoaderFollowsPolicyAndConfigurationReload(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell fixture")
 	}
 	manifests := map[string][]byte{"plugin.yaml": []byte("name: p\n")}
+	changed := map[string][]byte{"plugin.yaml": []byte("name: q\n")}
 	older := hermesReplyScript(t, `{"entrypoints":[]}`)
 	newer := hermesReplyScript(t, `{"entrypoints":["__pycache__/x.pyc"]}`)
 	broken := hermesReplyScript(t, "")
@@ -396,11 +394,17 @@ func TestHermesManifestLoaderFollowsPolicyAndConfigurationReload(t *testing.T) {
 	}
 
 	cfg.Scanners.PluginScanner = broken
-	if _, err := w.manifestLoader()(manifests); !errors.Is(err, errHermesManifestFailOpen) {
-		t.Fatalf("per-user default: error %v is not the fail-open fallback", err)
+	if got, err := w.manifestLoader()(manifests); err != nil || !slices.Equal(got, []string{"__pycache__/x.pyc"}) {
+		t.Fatalf("an outage did not apply the last answer for the same manifests: %q, %v", got, err)
+	}
+	if _, err := w.manifestLoader()(changed); !errors.Is(err, errHermesManifestFailOpen) {
+		t.Fatalf("per-user default: error %v is not the fail-open outage rule", err)
 	}
 	cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
-	if _, err := w.manifestLoader()(manifests); err == nil || errors.Is(err, errHermesManifestFailOpen) {
+	if got, err := w.manifestLoader()(manifests); err != nil || !slices.Equal(got, []string{"__pycache__/x.pyc"}) {
+		t.Fatalf("managed: the last answer for the same manifests is not applied: %q, %v", got, err)
+	}
+	if _, err := w.manifestLoader()(changed); err == nil || errors.Is(err, errHermesManifestFailOpen) {
 		t.Fatalf("managed: error %v must stay closed", err)
 	}
 }
@@ -443,126 +447,6 @@ func TestHermesManifestFailureInWatcherFollowsThePolicyTier(t *testing.T) {
 // failingManifestLoader is a manifest reader that cannot answer.
 func failingManifestLoader(map[string][]byte) ([]string, error) {
 	return nil, errors.New("manifest command unavailable")
-}
-
-// GAP-0645 review 20: while the reader cannot answer under the per-user
-// default, a cache file that any string of a manifest resolves to stays
-// bound however the manifest spells it, and a cache file that only shares a
-// base name with a string is not bound. Each manifest below declares the
-// entrypoint __pycache__/run.pyc (the scanner agrees, see the differential
-// test) except the two that do not.
-func TestHermesManifestOutageBindsNamedCacheFileWhateverTheSpelling(t *testing.T) {
-	for _, tc := range []struct {
-		name, manifest, text string
-		declares             bool
-	}{
-		{"json unicode escape", "package.json", `{"name":"p","main":"__pycache__/r\u0075n.pyc"}`, true},
-		{"json escaped slash", "package.json", `{"main":"__pycache__\/run.pyc"}`, true},
-		{"json surrogate pair beside it", "package.json", `{"x":"\ud83d\ude00","main":"__pycache__/run.pyc"}`, true},
-		{"yaml hex escape", "plugin.yaml", "name: p\nmain: \"__pycache__/r\\x75n.pyc\"\n", true},
-		{"yaml long escape", "plugin.yaml", "name: p\nmain: \"__pycache__/\\U00000072un.pyc\"\n", true},
-		{"yaml alias of an escaped value", "plugin.yaml", "name: p\nnote: &entry \"__pycache__/r\\x75n.pyc\"\nmain: *entry\n", true},
-		{"yaml line continuation", "plugin.yaml", "main: \"__pycache__/ru\\\n      n.pyc\"\n", true},
-		{"yaml single quoted", "plugin.yaml", "main: '__pycache__/run.pyc'\n", true},
-		{"plural key, plain list item (the scanner reads no file from it)", "plugin.yaml", "entrypoints:\n  - __pycache__/run.pyc\n", false},
-		{"plural key, flow list (the scanner reads no file from it)", "plugin.yaml", "entrypoints: [lib/a.js, __pycache__/run.pyc]\n", false},
-		{"bin as a list (the scanner reads no file from it)", "plugin.yaml", "bin: [__pycache__/run.pyc]\n", false},
-		{"yaml anchored plain value", "plugin.yaml", "main: &m __pycache__/run.pyc\n", true},
-		{"dot segments and a leading slash", "plugin.json", `{"main":"/./lib/../__pycache__/run.pyc"}`, true},
-		{"prose that only holds the base name", "plugin.yaml", "name: p\nmain: lib/a.js\ndescription: run.pyc\n", false},
-		{"the same base name in another folder", "plugin.yaml", "name: p\nmain: lib/run.pyc\n", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			writePluginFile(t, filepath.Join(dir, tc.manifest), tc.text)
-			writePluginFile(t, filepath.Join(dir, "lib", "a.js"), "safe()\n")
-			writePluginFile(t, filepath.Join(dir, "lib", "run.pyc"), "safe()\n")
-			cache := filepath.Join(dir, "__pycache__", "run.pyc")
-			writePluginFile(t, cache, "one")
-			load := func(map[string][]byte) ([]string, error) {
-				return nil, fmt.Errorf("%w: reader unavailable", errHermesManifestFailOpen)
-			}
-			first := skippedTreeHash(dir, load)
-			writePluginFile(t, cache, "two")
-			second := skippedTreeHash(dir, load)
-			if tc.declares && (first == "" || first == second) {
-				t.Errorf("the declared cache file is not bound during the outage (hash %q then %q)", first, second)
-			}
-			if !tc.declares && (first != "" || second != "") {
-				t.Errorf("an ordinary cache file is bound during the outage (hash %q then %q)", first, second)
-			}
-		})
-	}
-}
-
-// Through the watcher, with the default policy: the escaped and aliased
-// spellings of a protected cache entrypoint are scanned when the file is
-// added during an outage, and a cache write that only shares a base name with
-// a manifest string is neither a scan nor an admission.
-func TestHermesManifestOutageInWatcherScansDeclaredAndLeavesOrdinaryCache(t *testing.T) {
-	for _, tc := range []struct {
-		name, manifest, text string
-		wantScans            int
-	}{
-		{"json unicode escape", "package.json", `{"name":"p","main":"__pycache__/r\u0075n.pyc"}`, 1},
-		{"yaml hex escape", "plugin.yaml", "name: p\nmain: \"__pycache__/r\\x75n.pyc\"\n", 1},
-		{"yaml alias of an escaped value", "plugin.yaml", "name: p\nnote: &entry \"__pycache__/r\\x75n.pyc\"\nmain: *entry\n", 1},
-		{"prose mention", "plugin.yaml", "name: p\nmain: lib/a.js\ndescription: run.pyc\n", 0},
-		{"same base name in another folder", "plugin.yaml", "name: p\nmain: lib/run.pyc\n", 0},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newHermesPluginFixture(t)
-			path := f.plugin(f.bundledRoot, "web/ddgs")
-			writePluginFile(t, filepath.Join(path, tc.manifest), tc.text)
-			writePluginFile(t, filepath.Join(path, "lib", "a.js"), "safe()\n")
-			writePluginFile(t, filepath.Join(path, "lib", "run.pyc"), "safe()\n")
-			f.pinVendor("web/ddgs", path)
-			f.w.runRescanCycle(context.Background())
-			f.unscannedVendor(path)
-			admitted := len(f.admitted[path])
-			f.w.hermesManifests = failingManifestLoader
-			writePluginFile(t, filepath.Join(path, "__pycache__", "run.pyc"), "exec()\n")
-			f.w.runRescanCycle(context.Background())
-			if got := f.scan.scans(path); got != tc.wantScans {
-				t.Errorf("cache file added during the outage caused %d scans, want %d", got, tc.wantScans)
-			}
-			if got := len(f.admitted[path]); tc.wantScans == 0 && got != admitted {
-				t.Errorf("an ordinary cache write caused %d admissions", got-admitted)
-			}
-		})
-	}
-}
-
-// The candidates are a superset of what the plugin scanner reads: for each
-// manifest the real scanner reports an entrypoint, the same string is among
-// the candidates. The test skips where the scanner CLI is absent.
-func TestHermesManifestCandidatesHoldEveryEntrypointTheScannerReads(t *testing.T) {
-	load := hermesScannerLoader(t)
-	for _, tc := range []struct{ name, manifest, text string }{
-		{"json escape", "package.json", `{"name":"p","main":"__pycache__/r\u0075n.pyc"}`},
-		{"yaml escape", "plugin.yaml", "name: p\nmain: \"__pycache__/r\\x75n.pyc\"\n"},
-		{"yaml alias", "plugin.yaml", "name: p\nnote: &entry \"__pycache__/r\\x75n.pyc\"\nmain: *entry\n"},
-		{"yaml bin map", "plugin.yaml", "name: p\nbin:\n  a: lib/a.js\n  b: __pycache__/run.pyc\n"},
-		{"yaml flow bin map", "plugin.yaml", "name: p\nbin: {a: lib/a.js, b: '__pycache__/run.pyc'}\n"},
-		{"yaml entrypoint", "plugin.yaml", "name: p\nentrypoint: \"./__pycache__/\\x72un.pyc\"\n"},
-		{"json bin map", "plugin.json", `{"bin":{"a":"lib/a.js","b":"./__pycache__/run.pyc"}}`},
-		{"json entry", "manifest.json", `{"entry":"__pycache__\/run.pyc"}`},
-		{"openclaw", "openclaw.plugin.json", `{"id":"p","main":"dist/\u0069ndex.js"}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			manifests := map[string][]byte{tc.manifest: []byte(tc.text)}
-			got, err := load(manifests)
-			if err != nil || len(got) == 0 {
-				t.Fatalf("scanner entrypoints = %q, %v", got, err)
-			}
-			candidates, _ := hermesManifestCandidates(manifests)
-			for _, entrypoint := range got {
-				if !slices.Contains(candidates, entrypoint) {
-					t.Errorf("scanner entrypoint %q is not among the candidates %q", entrypoint, candidates)
-				}
-			}
-		})
-	}
 }
 
 // GAP-0645 review 20: the answer follows the scanner executable. Replacing
@@ -693,119 +577,10 @@ func TestHermesManifestNullListElementIsNotAnAnswer(t *testing.T) {
 	dir := t.TempDir()
 	writePluginFile(t, filepath.Join(dir, "plugin.yaml"), "main: __pycache__/run.pyc\n")
 	writePluginFile(t, filepath.Join(dir, "__pycache__", "run.pyc"), "exec()\n")
-	cache := newHermesManifestPolicy()
+	cache := newHermesManifestPolicy("", nil)
 	load := cache.byPolicy(hermesManifestsFrom(ps), func() bool { return false })
 	if skippedTreeHash(dir, load) == "" {
 		t.Error("the closed fallback left a declared cache file unhashed after an invalid reply")
-	}
-}
-
-// While the reader cannot answer, the candidates hold the whole name a
-// manifest declares, whatever punctuation the name holds and however the
-// value is written. Each row declares the entrypoint in the last column.
-func TestHermesManifestOutageCandidatesKeepPunctuationOfDeclaredNames(t *testing.T) {
-	for _, tc := range []struct{ name, manifest, text, entry string }{
-		{"yaml double quoted brackets", "plugin.yaml", "name: p\nmain: \"__pycache__/run[1].pyc\"\n", "__pycache__/run[1].pyc"},
-		{"yaml single quoted comma", "plugin.yaml", "name: p\nmain: '__pycache__/run,1.pyc'\n", "__pycache__/run,1.pyc"},
-		{"yaml single quoted doubled quote", "plugin.yaml", "main: '__pycache__/it''s.pyc'\n", "__pycache__/it's.pyc"},
-		{"yaml plain comma", "plugin.yaml", "main: __pycache__/run,1.pyc\n", "__pycache__/run,1.pyc"},
-		{"yaml flow bin map quoted comma", "plugin.yaml", "bin: {a: lib/a.js, b: \"__pycache__/run,1.pyc\"}\n", "__pycache__/run,1.pyc"},
-		{"yaml bin map braces", "plugin.yaml", "bin: {a: lib/a.js, b: '__pycache__/run{1}.pyc'}\n", "__pycache__/run{1}.pyc"},
-		{"yaml bin block map comma", "plugin.yaml", "bin:\n  a: lib/a.js\n  b: \"__pycache__/r,un.pyc\"\n", "__pycache__/r,un.pyc"},
-		{"yaml quoted key", "plugin.yaml", "\"main\": \"__pycache__/run[1].pyc\"\n", "__pycache__/run[1].pyc"},
-		{"yaml escaped key", "plugin.yaml", "\"m\\u0061in\": \"__pycache__/run[1].pyc\"\n", "__pycache__/run[1].pyc"},
-		{"yaml explicit key", "plugin.yaml", "? main\n: \"__pycache__/run[1].pyc\"\n", "__pycache__/run[1].pyc"},
-		{"yaml alias of a punctuated value", "plugin.yaml", "note: &entry '__pycache__/run,1.pyc'\nmain: *entry\n", "__pycache__/run,1.pyc"},
-		{"yaml merge key", "plugin.yaml", "base: &base\n  main: \"__pycache__/run[1].pyc\"\n<<: *base\n", "__pycache__/run[1].pyc"},
-		{"yaml value on the next line", "plugin.yaml", "main:\n  \"__pycache__/run[1].pyc\"\n", "__pycache__/run[1].pyc"},
-		{"json braces", "package.json", `{"name":"p","main":"__pycache__/run{1}.pyc"}`, "__pycache__/run{1}.pyc"},
-		{"json bin map brackets", "package.json", `{"bin":{"a":"lib/a.js","b":"__pycache__/run[1].pyc"}}`, "__pycache__/run[1].pyc"},
-		{"json value on the next line", "package.json", "{\n\"main\":\n\"__pycache__/run,1.pyc\"}", "__pycache__/run,1.pyc"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			candidates, _ := hermesManifestCandidates(map[string][]byte{tc.manifest: []byte(tc.text)})
-			if !slices.Contains(candidates, tc.entry) {
-				t.Errorf("candidates omit the declared entrypoint %q: %q", tc.entry, candidates)
-			}
-		})
-	}
-}
-
-// Prose is not an entrypoint: a cache path named under any key the scanner
-// does not read as code (a description, a title, a keyword list, a block
-// scalar) binds nothing during an outage, so the ordinary cache write that
-// matches it is neither bound by the tree hash nor scanned nor admitted. The
-// declared entrypoint of the same manifest stays bound.
-func TestHermesManifestOutageProseNamingCachePathBindsNothing(t *testing.T) {
-	for _, tc := range []struct{ name, manifest, text string }{
-		{"description", "plugin.yaml", "name: p\nmain: lib/run.js\ndescription: __pycache__/generated.pyc\n"},
-		{"quoted description", "plugin.yaml", "name: p\nmain: lib/run.js\ndescription: \"writes __pycache__/generated.pyc, sometimes\"\n"},
-		{"title and keywords", "plugin.yaml", "main: lib/run.js\ntitle: __pycache__/generated.pyc\nkeywords: [a, __pycache__/generated.pyc]\n"},
-		{"block scalar description", "plugin.yaml", "main: lib/run.js\ndescription: |\n  see\n  __pycache__/generated.pyc\nversion: 1\n"},
-		{"json description", "package.json", `{"main":"lib/run.js","description":"__pycache__/generated.pyc","keywords":["__pycache__/generated.pyc"]}`},
-		{"comment", "plugin.yaml", "main: lib/run.js # __pycache__/generated.pyc\n"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if candidates, _ := hermesManifestCandidates(map[string][]byte{tc.manifest: []byte(tc.text)}); slices.Contains(candidates, "__pycache__/generated.pyc") {
-				t.Errorf("prose is among the candidates: %q", candidates)
-			}
-			dir := t.TempDir()
-			writePluginFile(t, filepath.Join(dir, tc.manifest), tc.text)
-			writePluginFile(t, filepath.Join(dir, "lib", "run.js"), "safe()\n")
-			cache := filepath.Join(dir, "__pycache__", "generated.pyc")
-			writePluginFile(t, cache, "one")
-			load := func(map[string][]byte) ([]string, error) {
-				return nil, fmt.Errorf("%w: reader unavailable", errHermesManifestFailOpen)
-			}
-			first := skippedTreeHash(dir, load)
-			writePluginFile(t, cache, "two")
-			if second := skippedTreeHash(dir, load); first != "" || second != "" {
-				t.Errorf("an ordinary cache file is bound by prose (hash %q then %q)", first, second)
-			}
-
-			f := newHermesPluginFixture(t)
-			path := f.plugin(f.bundledRoot, "web/ddgs")
-			writePluginFile(t, filepath.Join(path, tc.manifest), tc.text)
-			writePluginFile(t, filepath.Join(path, "lib", "run.js"), "safe()\n")
-			f.pinVendor("web/ddgs", path)
-			f.w.runRescanCycle(context.Background())
-			f.unscannedVendor(path)
-			admitted := len(f.admitted[path])
-			f.w.hermesManifests = failingManifestLoader
-			writePluginFile(t, filepath.Join(path, "__pycache__", "generated.pyc"), "ordinary cache")
-			f.w.runRescanCycle(context.Background())
-			if got := f.scan.scans(path); got != 0 {
-				t.Errorf("a cache write named only in prose caused %d scans", got)
-			}
-			if got := len(f.admitted[path]); got != admitted {
-				t.Errorf("a cache write named only in prose caused %d admissions", got-admitted)
-			}
-		})
-	}
-}
-
-// A protected cache entrypoint whose name holds punctuation is bound through
-// the watcher during an outage: a baseline made while the reader is down
-// still sees the edit as a change that reaches a scan.
-func TestHermesManifestOutageEditOfPunctuatedEntrypointReachesScan(t *testing.T) {
-	f := newHermesPluginFixture(t)
-	path := f.plugin(f.bundledRoot, "web/ddgs")
-	writePluginFile(t, filepath.Join(path, "plugin.yaml"), "name: p\nmain: \"__pycache__/run[1].pyc\"\n")
-	entry := filepath.Join(path, "__pycache__", "run[1].pyc")
-	writePluginFile(t, entry, "safe()\n")
-	f.pinVendor("web/ddgs", path)
-	f.w.runRescanCycle(context.Background())
-	f.unscannedVendor(path)
-	f.w.hermesManifests = failingManifestLoader
-	findings := f.scan.findings[path]
-	f.scan.findings[path] = nil
-	f.w.runRescanCycle(context.Background()) // a baseline while the reader is down
-	firstScans := f.scan.scans(path)
-	f.scan.findings[path] = findings
-	writePluginFile(t, entry, "exec()\n")
-	f.w.runRescanCycle(context.Background())
-	if got := f.scan.scans(path); got != firstScans+1 {
-		t.Errorf("an edit of the protected entrypoint caused %d additional scans during the outage, want 1", got-firstScans)
 	}
 }
 
@@ -1001,33 +776,5 @@ func TestHermesManifestRecoveredScannerDeclarationIsScanned(t *testing.T) {
 	f.w.runRescanCycle(context.Background())
 	if got := f.scan.scans(path); got != 1 {
 		t.Errorf("the entrypoint the recovered scanner declares caused %d scans, want 1", got)
-	}
-}
-
-// A manifest too deeply nested to read within the reader's bounds is neither
-// refused nor read: what it declares is unknown, and the caller binds every
-// cache file. A manifest nested within the bounds is decided.
-func TestHermesManifestCandidatesUndecidedBeyondTheBounds(t *testing.T) {
-	nested := func(depth int) string {
-		return "main: " + cachedProtected + "\nx: " + strings.Repeat("[", depth) + strings.Repeat("]", depth) + "\n"
-	}
-	if got, decided := hermesManifestCandidates(map[string][]byte{"plugin.yaml": []byte(nested(10))}); !decided || !slices.Equal(got, []string{cachedProtected}) {
-		t.Errorf("a manifest nested ten deep = %q, decided %v", got, decided)
-	}
-	if got, decided := hermesManifestCandidates(map[string][]byte{"plugin.yaml": []byte(nested(hermesYAMLMaxDepth + 10))}); decided {
-		t.Errorf("a manifest nested past the bound was decided as %q", got)
-	}
-
-	dir := t.TempDir()
-	writePluginFile(t, filepath.Join(dir, "plugin.yaml"), nested(hermesYAMLMaxDepth+10))
-	cache := filepath.Join(dir, "__pycache__", "generated.pyc")
-	writePluginFile(t, cache, "one")
-	failing := func(map[string][]byte) ([]string, error) {
-		return nil, fmt.Errorf("%w: scanner unavailable", errHermesManifestFailOpen)
-	}
-	first := skippedTreeHash(dir, failing)
-	writePluginFile(t, cache, "two")
-	if skippedTreeHash(dir, failing) == first {
-		t.Error("an edit of a cache file was not seen beside a manifest the reader could not read")
 	}
 }
