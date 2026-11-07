@@ -312,7 +312,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		chargeBudget := func(receipt bool) bool {
 			if err := chargeSandboxHookBudget(r.Context(), receipt); err != nil {
-				writeHookRateLimited(w, err.Error(), sandboxHookBudgetMessage())
+				reason, message := sandboxHookRefusal(err)
+				writeHookRateLimited(w, reason, message)
 				return false
 			}
 			return true

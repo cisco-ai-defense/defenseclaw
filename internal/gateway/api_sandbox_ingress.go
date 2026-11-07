@@ -830,8 +830,9 @@ func (a *APIServer) sandboxIngressAuthorize(
 			release, err = st.limiter.Acquire(binding, route.class)
 		}
 		if err != nil {
-			w.Header().Set("Retry-After", "1")
-			writeSandboxIngressError(w, http.StatusTooManyRequests, err.Error())
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			reason, message := sandboxHookRefusal(err)
+			writeHookRateLimited(w, reason, message)
 			if observed {
 				st.observeHookFailure(binding, route, sw, false)
 			}
