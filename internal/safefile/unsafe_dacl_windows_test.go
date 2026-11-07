@@ -122,3 +122,70 @@ func TestUnsafePrivateDACLErrorNamesTheFolderThatCarriesTheEntry(t *testing.T) {
 		t.Fatalf("a private folder was refused: %v", err)
 	}
 }
+
+// The carrier is the folder holding the refused entry itself, not a nearer
+// folder that holds a harmless entry of the same account: the middle folder
+// has its own read entry for Everyone and inherits the write entry from the
+// top one, so removing the read entry would leave the refusal (review 1 of
+// GAP-0731).
+func TestUnsafePrivateDACLCarrierFollowsTheRefusedEntryNotAnyEntryOfTheAccount(t *testing.T) {
+	top := filepath.Join(t.TempDir(), "top")
+	if err := os.Mkdir(top, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ownWindowsTestPath(t, top)
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant := func(path string, access windows.ACCESS_MASK, protected bool) {
+		t.Helper()
+		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		old, _, err := sd.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+			AccessPermissions: access,
+			AccessMode:        windows.GRANT_ACCESS,
+			Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+				TrusteeValue: windows.TrusteeValueFromSID(everyone),
+			},
+		}}, old)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.UNPROTECTED_DACL_SECURITY_INFORMATION)
+		if protected {
+			info = windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION
+		}
+		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, info, nil, nil, acl, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	grant(top, windows.GENERIC_ALL, true)
+	middle := filepath.Join(top, "middle")
+	if err := os.Mkdir(middle, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	grant(middle, windows.FILE_GENERIC_READ, false)
+	child := filepath.Join(middle, "plugins")
+	if err := os.Mkdir(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	err = ValidatePrivateDirectoryOwnershipAllowingAdministrators(child)
+	var refusal *UnsafePrivateDACLError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("err=%v, want an UnsafePrivateDACLError", err)
+	}
+	if refusal.Carrier != top {
+		t.Fatalf("carrier=%q, want %q (the folder holding the write entry itself)", refusal.Carrier, top)
+	}
+}

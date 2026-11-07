@@ -7,6 +7,7 @@ package safefile
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"unsafe"
 
@@ -90,8 +91,13 @@ func trusteeName(sid *windows.SID) string {
 }
 
 // daclEntryCarrier follows an inherited entry up the parents to the folder
-// that holds it as its own entry. It returns path when the entry is path's
-// own, and "" when the parents do not show it.
+// that holds it as its own entry. At each parent it looks for the entry the
+// check refused (the same account and kind, judged by daclEntryRefused, and
+// inheritable onto the child below it), not merely for any entry of the same
+// account: a parent can hold a harmless read entry of that account and inherit
+// the write entry from higher up, and removing the read entry would leave the
+// refusal. It returns path when the entry is path's own, and "" when the
+// parents do not show it.
 func daclEntryCarrier(path string, why *daclRefusal) string {
 	current := path
 	for depth := 0; depth < 64; depth++ {
@@ -102,38 +108,54 @@ func daclEntryCarrier(path string, why *daclRefusal) string {
 		if parent == current {
 			return ""
 		}
-		flags, found := daclEntryFlags(parent, why.sid, why.deny)
-		if !found {
+		childIsDir := true
+		if info, err := os.Stat(current); err == nil {
+			childIsDir = info.IsDir()
+		}
+		explicit, inherited := daclRefusedEntryOf(parent, why, childIsDir)
+		switch {
+		case explicit:
+			return parent
+		case inherited:
+			current = parent
+		default:
 			return ""
 		}
-		if flags&windows.INHERITED_ACE == 0 {
-			return parent
-		}
-		current = parent
 	}
 	return ""
 }
 
-// daclEntryFlags returns the flags of the first allow (or deny) entry of sid in
-// path's DACL.
-func daclEntryFlags(path string, sid *windows.SID, deny bool) (byte, bool) {
+// daclRefusedEntryOf reports whether path's DACL holds the entry why refused,
+// as its own entry (explicit) or inherited from above (inherited), among the
+// entries that pass on to a child that is a folder (childIsDir) or a file.
+func daclRefusedEntryOf(path string, why *daclRefusal, childIsDir bool) (explicit, inherited bool) {
 	sd, err := privateDACLDescriptor(path)
 	if err != nil {
-		return 0, false
+		return false, false
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil || dacl == nil {
-		return 0, false
+		return false, false
+	}
+	passes := byte(windows.OBJECT_INHERIT_ACE)
+	if childIsDir {
+		passes = windows.CONTAINER_INHERIT_ACE
 	}
 	for index := uint16(0); index < dacl.AceCount; index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if windows.GetAce(dacl, uint32(index), &ace) != nil || ace == nil || !isSimpleDiscretionaryACE(ace.Header.AceType) {
 			continue
 		}
-		isDeny := ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE
-		if isDeny == deny && (*windows.SID)(unsafe.Pointer(&ace.SidStart)).Equals(sid) {
-			return ace.Header.AceFlags, true
+		deny := ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE
+		// The refused entry's account is trusted exactly when it is a deny entry.
+		if deny != why.deny || ace.Header.AceFlags&passes == 0 ||
+			!(*windows.SID)(unsafe.Pointer(&ace.SidStart)).Equals(why.sid) || !daclEntryRefused(deny, deny, ace.Mask) {
+			continue
 		}
+		if ace.Header.AceFlags&windows.INHERITED_ACE == 0 {
+			return true, inherited
+		}
+		inherited = true
 	}
-	return 0, false
+	return false, inherited
 }
