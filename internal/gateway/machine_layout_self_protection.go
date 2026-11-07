@@ -215,7 +215,7 @@ func (f windowsMachineFolder) holds(drive string, names []string) bool {
 // suffix, as NTFS compares them, with . and .. applied.
 func windowsVolumeAndNames(value string) (drive string, names []string, ok bool) {
 	slashed := strings.ReplaceAll(value, `\`, "/")
-	rooted := strings.HasPrefix(value, `\`) && !strings.HasPrefix(value, `\\`)
+	rooted := strings.HasPrefix(slashed, "/") && !strings.HasPrefix(slashed, "//")
 	if rest, found := strings.CutPrefix(slashed, "//?/"); found {
 		slashed = rest
 	} else if rest, found := strings.CutPrefix(slashed, "//./"); found {
@@ -224,6 +224,7 @@ func windowsVolumeAndNames(value string) (drive string, names []string, ok bool)
 	if len(slashed) >= 4 && strings.EqualFold(slashed[:4], "unc/") {
 		slashed = "//" + slashed[4:]
 	}
+	shellDrive, shellRest := posixShellDrive(slashed)
 	var rest string
 	switch {
 	case strings.HasPrefix(slashed, "//"):
@@ -237,20 +238,15 @@ func windowsVolumeAndNames(value string) (drive string, names []string, ok bool)
 		drive, rest = strings.ToLower(slashed[:1]), slashed[3:]
 	case len(slashed) >= 3 && slashed[0] == '/' && isASCIILetterByte(slashed[1]) && slashed[2] == '/':
 		drive, rest = strings.ToLower(slashed[1:2]), slashed[3:]
+	case shellDrive != "":
+		drive, rest = shellDrive, shellRest
 	case rooted:
+		// \dir and /dir are both on the current drive: Windows reads
+		// either separator, and a file tool resolves the path against
+		// the drive of the working directory.
 		rest = slashed[1:]
 	default:
-		tail := ""
-		for _, prefix := range []string{"/mnt/", "/cygdrive/"} {
-			if t, found := strings.CutPrefix(slashed, prefix); found {
-				tail = t
-				break
-			}
-		}
-		if len(tail) < 2 || !isASCIILetterByte(tail[0]) || tail[1] != '/' {
-			return "", nil, false
-		}
-		drive, rest = strings.ToLower(tail[:1]), tail[2:]
+		return "", nil, false
 	}
 	for _, name := range strings.Split(rest, "/") {
 		if before, _, found := strings.Cut(name, ":"); found {
@@ -270,6 +266,18 @@ func windowsVolumeAndNames(value string) (drive string, names []string, ok bool)
 		}
 	}
 	return drive, names, true
+}
+
+// posixShellDrive splits a /mnt/c/ or /cygdrive/c/ path (a POSIX shell on
+// Windows) into its lower case drive letter and the path below the drive; the
+// drive is empty for any other path.
+func posixShellDrive(slashed string) (drive, rest string) {
+	for _, prefix := range []string{"/mnt/", "/cygdrive/"} {
+		if tail, found := strings.CutPrefix(slashed, prefix); found && len(tail) >= 2 && isASCIILetterByte(tail[0]) && tail[1] == '/' {
+			return strings.ToLower(tail[:1]), tail[2:]
+		}
+	}
+	return "", ""
 }
 
 // windowsShortNameOf reports the 8.3 short form NTFS gives a long name: its
