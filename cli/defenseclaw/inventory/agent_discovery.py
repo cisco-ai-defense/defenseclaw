@@ -1839,6 +1839,23 @@ def _scan_agent(
     # failed probe is an installed form whose version is unknown, GAP-0895).
     kiro_forms: list[dict[str, str]] = []
 
+    # When each binary was last asked for its version. The version a signal
+    # carries was obtained then, not when the scan finishes (probe-state
+    # bookkeeping after the probes can wait on another process), so this is
+    # the time the cache orders competing writes by.
+    read_at: dict[str, datetime] = {}
+
+    def read_version(candidate: str) -> tuple[str, str]:
+        answer = _version_for_agent_binary(
+            name,
+            candidate,
+            spec.version_args,
+            require_trusted_binary_paths=require_trusted_binary_paths,
+            data_dir=data_dir,
+        )
+        read_at[candidate] = _now_utc()
+        return answer
+
     def kiro_found(surface: str, candidate: str, version_for_surface: str) -> None:
         # Per surface the first install at or above its floor wins over an
         # earlier one below it, so the version cached for the gateway is the
@@ -1861,13 +1878,7 @@ def _scan_agent(
 
     missing_state = _missing_probe_state(name) if binary_candidates else ([], [])
     for candidate in binary_candidates:
-        candidate_version, candidate_error = _version_for_agent_binary(
-            name,
-            candidate,
-            spec.version_args,
-            require_trusted_binary_paths=require_trusted_binary_paths,
-            data_dir=data_dir,
-        )
+        candidate_version, candidate_error = read_version(candidate)
         if candidate_version and not candidate_error:
             if name == "kiro":
                 surface = _kiro_binary_surface(candidate, candidate_version)
@@ -1898,13 +1909,7 @@ def _scan_agent(
         # The first start of a CLI on a cold disk (a fresh host or clone) can
         # outlast the budget and answer in seconds right after, so ask once
         # more before calling it slow (GAP-0066).
-        candidate_version, candidate_error = _version_for_agent_binary(
-            name,
-            timed_out,
-            spec.version_args,
-            require_trusted_binary_paths=require_trusted_binary_paths,
-            data_dir=data_dir,
-        )
+        candidate_version, candidate_error = read_version(timed_out)
         if candidate_version and not candidate_error:
             if name == "kiro":
                 surface = _kiro_binary_surface(timed_out, candidate_version)
@@ -1975,7 +1980,7 @@ def _scan_agent(
         kiro_ide_version=kiro_versions.get("ide", ("", ""))[1],
         kiro_forms=kiro_forms[:_KIRO_FORMS_MAX],
         source=_agent_source(name, binary_path) if installed or timed_out else "",
-        observed_at=_format_rfc3339(_now_utc()),
+        observed_at=_format_rfc3339(read_at.get(binary_path) or _now_utc()),
     )
 
 
@@ -3402,11 +3407,15 @@ def _cache_update(path: Path) -> Iterator[None]:
         yield
 
 
-def _entry_has_version(entry: Any) -> bool:
+def _entry_was_read(entry: Any) -> bool:
+    """Whether a cached entry records an installed agent that a probe was
+    asked for its version: the version it answered, or the reason it did not
+    (a timeout after the executable changed). Both are readings; an entry that
+    was never probed is not."""
     return (
         isinstance(entry, dict)
         and bool(entry.get("installed"))
-        and any(str(entry.get(key) or "") for key in ("version", "kiro_cli_version", "kiro_ide_version"))
+        and str(entry.get("error") or "") != VERSION_NOT_PROBED
     )
 
 
@@ -3421,11 +3430,13 @@ def _signal_observed_at(signal: AgentSignal, disc: AgentDiscovery) -> datetime |
 
 
 def _cached_entry_is_newer(entry: Any, payload: dict[str, Any], read_at: datetime | None) -> bool:
-    """Whether a cached entry holds a version read after *read_at*, the time the
-    scan being written read its own. Such an entry is newer evidence and
-    stays, whichever scan started first or ended last. Equal times are not
-    proof of order, so the scan being written wins then."""
-    if read_at is None or not _entry_has_version(entry):
+    """Whether a cached entry holds a reading (a version, or a probe that
+    could not read one) taken after *read_at*, the time the scan being written
+    took its own. Such an entry is newer evidence and stays, whichever scan
+    started first or ended last: a later unread result for an executable that
+    changed is not put back to the version of the one it replaced. Equal times
+    are not proof of order, so the scan being written wins then."""
+    if read_at is None or not _entry_was_read(entry):
         return False
     observed = _entry_observed_at(entry, payload)
     return observed is not None and observed > read_at
