@@ -227,6 +227,7 @@ if ($Case -like 'held*') {
     # installed hook open: it closes after two looks (held-closes), or never
     # (held-stays).
     $script:holderLooks = 0
+    $script:probes = 0
     function Get-DefenseClawStateFileHolders {
         param([hashtable]$Layout, [string[]]$Paths, $Excluded)
         $script:holderLooks++
@@ -239,8 +240,12 @@ if ($Case -like 'held*') {
     # GAP-0789: the reader shares delete only in held-shares-delete.
     function Test-DefenseClawHookSharesDelete {
         param([string]$Path)
-        $script:events.Add('shares-delete:' + [string]($Case -eq 'held-shares-delete'))
-        return ($Case -eq 'held-shares-delete')
+        $script:probes++
+        # GAP-0656 round 4: a hook start in flight fails the probe for
+        # milliseconds; held-transient fails it twice and then succeeds.
+        $answer = ($Case -eq 'held-shares-delete') -or ($Case -eq 'held-transient' -and $script:probes -ge 3)
+        $script:events.Add('shares-delete:' + [string]$answer)
+        return $answer
     }
 }
 if ($Case -like 'restorer*') {
@@ -405,6 +410,10 @@ try {
             $script:events.Add('returned')
         }
         'held-shares-delete' {
+            Assert-DefenseClawHookNotHeld -Layout $layout -TimeoutSeconds 30
+            $script:events.Add('returned')
+        }
+        'held-transient' {
             Assert-DefenseClawHookNotHeld -Layout $layout -TimeoutSeconds 30
             $script:events.Add('returned')
         }
@@ -838,7 +847,18 @@ def test_a_program_holding_the_hook_open_defers_the_run_before_anything_changes(
 def test_the_run_goes_on_once_the_program_closed_the_hook(tmp_path: Path) -> None:
     result = _run(tmp_path, "held-closes")
     assert result["threw"] == "", result
-    assert result["events"] == ["shares-delete:False", "holders:1", "shares-delete:False", "holders:2", "shares-delete:False", "holders:3", "returned"], result
+    # Four delete probes (100 ms apart) before each question to Restart Manager.
+    probes = ["shares-delete:False"] * 4
+    assert result["events"] == probes + ["holders:1"] + probes + ["holders:2"] + probes + ["holders:3", "returned"], result
+
+
+def test_a_probe_failed_by_a_start_in_flight_does_not_ask_restart_manager(tmp_path: Path) -> None:
+    """GAP-0656 round 4 (L10): a program start in flight at the instant of the
+    probe fails it for milliseconds; the probe repeats before Restart Manager
+    (which itself opens the hook with no sharing) is asked."""
+    result = _run(tmp_path, "held-transient")
+    assert result["threw"] == "", result
+    assert result["events"] == ["shares-delete:False", "shares-delete:False", "shares-delete:True", "returned"], result
 
 
 def test_a_holder_that_shares_delete_does_not_defer_the_run(tmp_path: Path) -> None:
