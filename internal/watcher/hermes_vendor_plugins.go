@@ -294,27 +294,14 @@ const hermesManifestMaxEntrypoints = 10000
 // such as a description that mentions a file declares nothing.
 var hermesManifestEntrypointKeys = []string{"main", "bin", "entrypoint", "entry"}
 
-// stringKeyedMap returns v as a map with string keys.
-func stringKeyedMap(v any) (map[string]any, bool) {
-	switch m := v.(type) {
-	case map[string]any:
-		return m, true
-	case map[any]any:
-		out := make(map[string]any, len(m))
-		for key, value := range m {
-			if name, ok := key.(string); ok {
-				out[name] = value
-			}
-		}
-		return out, true
-	}
-	return nil, false
-}
+// hermesManifestMaxNodes bounds the YAML nodes hermesYAMLEntrypoints visits,
+// so aliases and merge keys that fan out cannot make a manifest expensive.
+const hermesManifestMaxNodes = 100000
 
-// hermesManifestEntrypoints lists the entrypoint strings of one parsed
+// hermesJSONEntrypoints lists the entrypoint strings of one parsed JSON
 // manifest, as the plugin scanner reads them.
-func hermesManifestEntrypoints(doc any) []string {
-	top, ok := stringKeyedMap(doc)
+func hermesJSONEntrypoints(doc any) []string {
+	top, ok := doc.(map[string]any)
 	if !ok {
 		return nil
 	}
@@ -323,9 +310,9 @@ func hermesManifestEntrypoints(doc any) []string {
 		switch value := top[key].(type) {
 		case string:
 			out = append(out, value)
-		default:
-			if bin, isMap := stringKeyedMap(value); isMap && key == "bin" {
-				for _, v := range bin {
+		case map[string]any:
+			if key == "bin" {
+				for _, v := range value {
 					if text, isString := v.(string); isString {
 						out = append(out, text)
 					}
@@ -334,6 +321,96 @@ func hermesManifestEntrypoints(doc any) []string {
 		}
 	}
 	return out
+}
+
+// hermesYAMLEntrypoints lists the entrypoint strings of one YAML manifest.
+// The plugin scanner loads YAML with PyYAML, which accepts a duplicate key,
+// a key that is not a string (a number, a Boolean, null) and a merge key, and
+// reads every value of a bin map whatever its key. The manifest is therefore
+// walked as a node tree, not decoded into a Go map, which rejects duplicate
+// keys and drops keys that are not strings: every pair named by an entrypoint
+// key is read, a duplicate included, a merged mapping is read like the pairs
+// beside it, and a scalar is taken as written whatever type YAML gives it, so
+// the result is a superset of what the scanner reads. ok is false when the
+// text is not YAML or the walk is over budget.
+func hermesYAMLEntrypoints(data []byte) (out []string, ok bool) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, false
+	}
+	budget := hermesManifestMaxNodes
+	var resolve func(n *yaml.Node) *yaml.Node
+	resolve = func(n *yaml.Node) *yaml.Node {
+		for n != nil && (n.Kind == yaml.AliasNode || n.Kind == yaml.DocumentNode) {
+			if budget--; budget < 0 {
+				return nil
+			}
+			if n.Kind == yaml.AliasNode {
+				n = n.Alias
+			} else if len(n.Content) > 0 {
+				n = n.Content[0]
+			} else {
+				return nil
+			}
+		}
+		return n
+	}
+	// pairs calls fn for each key and value of a mapping, reading the
+	// mappings a merge key names as if their pairs were written in place.
+	var pairs func(n *yaml.Node, fn func(key, value *yaml.Node))
+	pairs = func(n *yaml.Node, fn func(key, value *yaml.Node)) {
+		if n = resolve(n); n == nil || n.Kind != yaml.MappingNode {
+			return
+		}
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if budget--; budget < 0 {
+				return
+			}
+			key, value := resolve(n.Content[i]), n.Content[i+1]
+			if key != nil && key.Kind == yaml.ScalarNode && key.ShortTag() == "!!merge" {
+				if merged := resolve(value); merged != nil && merged.Kind == yaml.SequenceNode {
+					for _, item := range merged.Content {
+						pairs(item, fn)
+					}
+				} else {
+					pairs(merged, fn)
+				}
+				continue
+			}
+			fn(key, value)
+		}
+	}
+	scalar := func(n *yaml.Node) {
+		if n = resolve(n); n != nil && n.Kind == yaml.ScalarNode {
+			out = append(out, n.Value)
+		}
+	}
+	pairs(&doc, func(key, value *yaml.Node) {
+		if key == nil || key.Kind != yaml.ScalarNode || !slices.Contains(hermesManifestEntrypointKeys, key.Value) {
+			return
+		}
+		scalar(value)
+		if key.Value == "bin" {
+			pairs(value, func(_, binValue *yaml.Node) { scalar(binValue) })
+		}
+	})
+	return out, budget >= 0
+}
+
+// hermesManifestEntrypoints lists the entrypoint strings of the manifest rel
+// with contents data, as the plugin scanner reads them. A YAML manifest is
+// read by hermesYAMLEntrypoints. A JSON manifest is decoded as JSON; text
+// that is not JSON Go accepts (NaN and Infinity, which Python reads) is read
+// as YAML, which is a superset of JSON. ok is false when neither reads it.
+func hermesManifestEntrypoints(rel string, data []byte) ([]string, bool) {
+	if strings.HasSuffix(rel, ".yaml") || strings.HasSuffix(rel, ".yml") {
+		return hermesYAMLEntrypoints(data)
+	}
+	var doc any
+	if err := json.Unmarshal(data, &doc); err == nil {
+		return hermesJSONEntrypoints(doc), true
+	}
+	return hermesYAMLEntrypoints(data)
 }
 
 // hermesDeclaredFiles returns the files in root that a plugin manifest names
@@ -372,16 +449,11 @@ func hermesDeclaredFiles(root *os.Root, dir string) (declared []fs.FileInfo, ok 
 		if err != nil || len(data) > hermesPluginMaxFileBytes {
 			return nil, false
 		}
-		var doc any
-		if strings.HasSuffix(rel, ".yaml") || strings.HasSuffix(rel, ".yml") {
-			err = yaml.Unmarshal(data, &doc)
-		} else {
-			err = json.Unmarshal(data, &doc)
-		}
-		if err != nil {
+		entrypoints, parsed := hermesManifestEntrypoints(rel, data)
+		if !parsed {
 			return nil, false
 		}
-		for _, value := range hermesManifestEntrypoints(doc) {
+		for _, value := range entrypoints {
 			if resolved++; resolved > hermesManifestMaxEntrypoints {
 				return nil, false
 			}
