@@ -142,6 +142,22 @@ def scan_plugin(
                     location=os.path.join(target, "node_modules", "openclaw"),
                     tags=["supply-chain"],
                 ))
+            if official.unverified:
+                findings.append(make_finding(
+                    len(findings) + 1,
+                    rule_id="VENDOR-REGISTRY-UNVERIFIED",
+                    severity="MEDIUM",
+                    confidence=1.0,
+                    title="Provider release not confirmed against the registry",
+                    description=(
+                        "The npm registry could not be reached. The install record names "
+                        "the registry archive of this release; the package files were "
+                        "not compared with it. Scan again when the registry is reachable, "
+                        "or use the strict profile, which does not rely on the record."
+                    ),
+                    location=os.path.join(target, "package.json"),
+                    tags=["supply-chain"],
+                ))
             return build_result(
                 target, findings, start_ms,
                 ScanMetadata(manifest_name=official.name),

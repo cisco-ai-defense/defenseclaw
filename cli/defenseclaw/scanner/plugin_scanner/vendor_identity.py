@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import http.client
 import io
 import json
 import os
@@ -15,6 +16,7 @@ import re
 import stat
 import tarfile
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path, PureWindowsPath
@@ -83,6 +85,9 @@ _PRIVATE_INSTALL_COMPONENTS = frozenset({
 class ProviderIdentity(NamedTuple):
     name: str
     possible_peer: bool
+    # True when the registry could not be reached and the release was admitted
+    # on the install record alone (see ``_recorded_registry_release``).
+    unverified: bool = False
 
 
 def inspect_official_provider_tree(plugin_dir: str, *, data_dir: str = "") -> ProviderIdentity | None:
@@ -104,9 +109,18 @@ def inspect_official_provider_tree(plugin_dir: str, *, data_dir: str = "") -> Pr
         return None
     if name not in _OFFICIAL_PACKAGES:
         return None
+    # The install must not come from a file, a link or an address outside the
+    # registry, whatever the bytes are (see ``_install_records``).
+    try:
+        records = _install_records(plugin_dir, package, name)
+    except (OSError, ValueError):
+        return None
+    if records is None:
+        return None
     # A release without a pinned digest is confirmed against the npm registry
     # below, once the local tree has passed the cheap checks.
     want = VENDOR_DIGESTS.get((name, version))
+    unverified = False
 
     peers = package.get("peerDependencies", {})
     if not isinstance(peers, dict):
@@ -136,9 +150,15 @@ def inspect_official_provider_tree(plugin_dir: str, *, data_dir: str = "") -> Pr
         found = _package_digest(plugin_dir, tolerated_links=frozenset(tolerated))
         if found is None:
             return None
-        if not want:
-            want = _registry_digest(name, version)
-        if not want or not hmac.compare_digest(found, want):
+        if not want and not unverified:
+            try:
+                want = _registry_digest(name, version)
+            except _RegistryUnavailableError:
+                # An outage proves nothing about the bytes. The ordinary
+                # profiles still admit a release whose install record names
+                # the registry archive; strict never reaches this check.
+                unverified = _recorded_registry_release(records, name, version)
+        if not unverified and (not want or not hmac.compare_digest(found, want)):
             return None
         for peer, (link, before) in links.items():
             try:
@@ -151,18 +171,21 @@ def inspect_official_provider_tree(plugin_dir: str, *, data_dir: str = "") -> Pr
     return ProviderIdentity(
         name=name,
         possible_peer=any(state[1] is not None for _, state in links.values()),
+        unverified=unverified,
     )
 
 
 # Fields an installer adds to or removes from the published manifest.
 # bundledDependencies names what npm packs, never a source, and is dropped
 # once the dependencies are installed. OpenClaw adds one development-only
-# line for its plugin SDK; development dependencies are never installed. Any
-# other development dependency keeps its value in the digest, so a manifest
-# source (a URL, a local path) that the dependency checks judge is never
-# hidden by the identity.
+# line for its plugin SDK; development dependencies are never installed. That
+# one line is removed from the manifest on both sides of the comparison and
+# every other development dependency keeps its value in the digest, so a
+# manifest source (a URL, a local path) that the dependency checks judge is
+# never hidden by the identity, and a release that already has development
+# dependencies of its own is identified the same way as one that has none.
 _BUNDLED_FIELDS = frozenset({"bundledDependencies", "bundleDependencies"})
-_INSTALLER_DEV_DEPENDENCIES = {"@openclaw/plugin-sdk": "workspace:*"}
+_INSTALLER_DEV_DEPENDENCY = ("@openclaw/plugin-sdk", "workspace:*")
 _MANIFEST_MAX_BYTES = 1024 * 1024
 _DEPENDENCY_DIR = "node_modules"
 _DEPENDENCY_ENTRY_LIMIT = 500_000
@@ -181,8 +204,16 @@ def _published_manifest_bytes(payload: bytes) -> bytes | None:
         key: value for key, value in manifest.items()
         if key not in _BUNDLED_FIELDS and not key.startswith("_")
     }
-    if kept.get("devDependencies") == _INSTALLER_DEV_DEPENDENCIES:
-        del kept["devDependencies"]
+    development = kept.get("devDependencies")
+    if isinstance(development, dict):
+        development = {
+            key: value for key, value in development.items()
+            if (key, value) != _INSTALLER_DEV_DEPENDENCY
+        }
+        if development:
+            kept["devDependencies"] = development
+        else:
+            del kept["devDependencies"]
     return json.dumps(kept, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
@@ -298,14 +329,33 @@ def _registry_get(url: str, limit: int) -> bytes:
     return payload
 
 
+class _RegistryUnavailableError(Exception):
+    """The registry could not be reached or failed to answer: nothing was learned."""
+
+
+def _registry_fetch(url: str, limit: int) -> bytes:
+    """One registry request. An outage is told apart from an answer that is wrong."""
+
+    try:
+        return _registry_get(url, limit)
+    except urllib.error.HTTPError as exc:
+        if exc.code < 500 and exc.code != 429:
+            raise ValueError("registry refused the request") from exc
+        raise _RegistryUnavailableError from exc
+    except (OSError, http.client.HTTPException) as exc:
+        raise _RegistryUnavailableError from exc
+
+
 def _registry_digest(name: str, version: str) -> str | None:
     """The package-own-files digest of a release as the npm registry publishes it.
 
     The registry states the integrity of the release archive; the archive is
     fetched from the registry address that names it, checked against that
     integrity, and its own files are digested exactly as an installed tree is.
-    Any failure (offline, another address, another integrity, an unreadable
-    archive) gives no identity, so the plugin gets the ordinary scan.
+    Any wrong answer (another address, another integrity, an unreadable
+    archive) gives no identity, so the plugin gets the ordinary scan. When the
+    registry cannot be reached at all, ``_RegistryUnavailableError`` is raised and
+    the caller decides.
     """
 
     key = (name, version)
@@ -316,7 +366,7 @@ def _registry_digest(name: str, version: str) -> str | None:
     package = name.split("/", 1)[1]
     try:
         quoted = urllib.parse.quote(name, safe="@")
-        metadata = json.loads(_registry_get(
+        metadata = json.loads(_registry_fetch(
             f"{_REGISTRY}/{quoted}/{version}", _REGISTRY_METADATA_MAX_BYTES,
         ))
         dist = metadata["dist"]
@@ -327,7 +377,7 @@ def _registry_digest(name: str, version: str) -> str | None:
             or not isinstance(integrity, str) or not integrity.startswith("sha512-")
         ):
             return None
-        archive = _registry_get(dist["tarball"], _REGISTRY_TARBALL_MAX_BYTES)
+        archive = _registry_fetch(dist["tarball"], _REGISTRY_TARBALL_MAX_BYTES)
         expected = base64.b64decode(integrity[len("sha512-"):], validate=True)
         if not hmac.compare_digest(hashlib.sha512(archive).digest(), expected):
             return None
@@ -355,6 +405,154 @@ def _archive_package_digest(archive: bytes) -> str | None:
                 members.append(member)
             bundle.extractall(scratch, members=members, filter="data")
         return _package_digest(os.path.join(scratch, "package"))
+
+
+# Where an install came from. npm writes the ``resolved`` address of every
+# package into the lock files of the tree that holds it, and older npm writes
+# ``_resolved``, ``_from`` and ``_requested`` into the package manifest. The
+# bytes can match a published release while the record says the package was
+# taken from a file, a link or another address; such an install is judged by
+# the ordinary scan. A record that is absent is not evidence of a source, so an
+# install that left none (OpenClaw copies the package) is not held against.
+_LOCK_FILES = ("package-lock.json", "npm-shrinkwrap.json", "node_modules/.package-lock.json")
+_LOCK_MAX_BYTES = 32 * 1024 * 1024
+_RECORDED_VERSION = re.compile(r"[0-9][0-9A-Za-z.+-]*")
+_RECORDED_SPEC = r"(?:@[0-9A-Za-z.+^~*<>=| -]*)?"
+
+
+def _registry_archive(address: object, name: str, version: str | None = None) -> bool:
+    """Whether ``address`` is an https address of a registry archive of ``name``.
+
+    Any registry host (a mirror) is accepted: the bytes are proven against the
+    npm registry, not against this address, which only has to be a registry
+    address and not a file, a link or another kind of source.
+    """
+
+    if not isinstance(address, str):
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(address)
+        host = parsed.hostname
+        parsed.port
+    except ValueError:
+        return False
+    if parsed.scheme != "https" or not host or parsed.username is not None or (
+        parsed.password is not None
+    ):
+        return False
+    release = re.escape(version) if version else r"[0-9][0-9A-Za-z.+-]*"
+    package = re.escape(name.split("/", 1)[1])
+    return re.fullmatch(
+        r"(?:/[^/]+)*/" + re.escape(name) + "/-/" + package + "-" + release + r"\.tgz",
+        parsed.path,
+    ) is not None
+
+
+def _lock_folders(plugin_dir: str) -> list[str]:
+    """The package folder and each folder that owns a ``node_modules`` above it."""
+
+    root = os.path.abspath(plugin_dir)
+    parts = Path(root).parts
+    return [root] + [
+        os.path.join(*parts[:index]) for index, part in enumerate(parts)
+        if index and part.casefold() == _DEPENDENCY_DIR
+    ]
+
+
+def _named_entries(lock: dict, name: str):
+    """Every entry of an npm lock that records the package ``name``."""
+
+    packages = lock.get("packages")
+    if isinstance(packages, dict):
+        for key, entry in packages.items():
+            if isinstance(entry, dict) and key and (
+                key == f"{_DEPENDENCY_DIR}/{name}"
+                or key.endswith(f"/{_DEPENDENCY_DIR}/{name}")
+                or entry.get("name") == name
+            ):
+                yield entry
+    pending = [lock.get("dependencies")]
+    while pending:
+        dependencies = pending.pop()
+        if not isinstance(dependencies, dict):
+            continue
+        for key, entry in dependencies.items():
+            if isinstance(entry, dict):
+                if key == name:
+                    yield entry
+                pending.append(entry.get("dependencies"))
+
+
+def _install_records(plugin_dir: str, manifest: dict, name: str) -> list[dict] | None:
+    """The lock entries that record this package, or None if any record names
+    a source other than the registry. A record that cannot be read raises."""
+
+    resolved, source, requested = (
+        manifest.get(field) for field in ("_resolved", "_from", "_requested")
+    )
+    if resolved is not None and not _registry_archive(resolved, name):
+        return None
+    if source is not None and not (
+        isinstance(source, str) and re.fullmatch(re.escape(name) + _RECORDED_SPEC, source)
+    ):
+        return None
+    if requested is not None and not (
+        isinstance(requested, dict) and requested.get("type") in ("version", "range", "tag")
+    ):
+        return None
+    records: list[dict] = []
+    for folder in _lock_folders(plugin_dir):
+        for relative in _LOCK_FILES:
+            path = os.path.join(folder, *relative.split("/"))
+            try:
+                info = os.lstat(path)
+            except FileNotFoundError:
+                continue
+            if not _is_regular_file(info) or info.st_size > _LOCK_MAX_BYTES:
+                return None
+            payload = _read_regular_file(path, max_bytes=_LOCK_MAX_BYTES)
+            if payload is None:
+                return None
+            try:
+                lock = json.loads(payload)
+            except (UnicodeDecodeError, ValueError):
+                continue
+            except RecursionError:
+                return None
+            if not isinstance(lock, dict):
+                continue
+            for entry in _named_entries(lock, name):
+                version = entry.get("version")
+                if entry.get("link") or (
+                    version is not None
+                    and not (isinstance(version, str) and _RECORDED_VERSION.fullmatch(version))
+                ) or ("resolved" in entry and not _registry_archive(entry["resolved"], name)):
+                    return None
+                records.append(entry)
+    return records
+
+
+def _recorded_registry_release(records: list[dict], name: str, version: str) -> bool:
+    """Whether an install record names the registry archive of this release.
+
+    The record carries the sha512 integrity of the archive, which is what the
+    registry would confirm. It is a claim made by the install, not a check of
+    these bytes, so it is used only when the registry cannot be reached.
+    """
+
+    for entry in records:
+        integrity = entry.get("integrity")
+        if (
+            entry.get("version") == version
+            and _registry_archive(entry.get("resolved"), name, version)
+            and isinstance(integrity, str) and integrity.startswith("sha512-")
+        ):
+            try:
+                if len(base64.b64decode(integrity[len("sha512-"):], validate=True)) == 64:
+                    return True
+            except ValueError:
+                continue
+    return False
 
 
 def _tree_entry_state(root: str) -> tuple | None:

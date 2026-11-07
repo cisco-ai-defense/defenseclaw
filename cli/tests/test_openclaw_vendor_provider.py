@@ -884,6 +884,7 @@ def _windows_peer_identity(monkeypatch, provider, links, data_dir):
         patch.setattr(vendor_identity, "_read_regular_file", manifest)
         patch.setattr(vendor_identity, "_package_digest", lambda *_args, **_kwargs: pinned)
         patch.setattr(vendor_identity, "_tree_entry_state", lambda _root: ("stable",))
+        patch.setattr(vendor_identity, "_install_records", lambda *_args: [])
         _WindowsShareModel(links).install(patch)
         return vendor_identity.inspect_official_provider_tree(provider, data_dir=data_dir)
 
@@ -1199,4 +1200,3 @@ def test_r109_g724_stored_parent_name_after_private_name_is_judged(monkeypatch) 
         assert (identity is not None) is possible, label
         if possible:
             assert identity.possible_peer, label
-
