@@ -423,6 +423,8 @@ def test_config_set_data_dir_is_quiet_about_seals_the_new_folder_already_has_as_
     (moved / "connector_backups" / "codex").mkdir(parents=True)
     (moved / "hook_contract_lock.json").write_bytes(lock)
     (moved / "connector_backups" / "codex" / "config.toml.json").write_bytes(backups["codex/config.toml.json"])
+    protect_private_file(moved / "hook_contract_lock.json")
+    protect_private_file(moved / "connector_backups" / "codex" / "config.toml.json")
     monkeypatch.setattr(cmd_config.config_module, "_is_admin_process", lambda: False)
 
     result = CliRunner().invoke(cmd_config.config_cmd, ["set", "data_dir", str(moved)], obj=AppContext())
@@ -431,6 +433,32 @@ def test_config_set_data_dir_is_quiet_about_seals_the_new_folder_already_has_as_
     assert (moved / "connector_backups" / "opencode" / "config.json").is_file()
     assert "Copied the connector seals to the new data_dir: 1 connector backup file." in result.output
     assert "warning" not in result.output.lower().replace("warnings", "")
+
+
+def test_config_set_data_dir_reports_an_identical_lock_the_gateway_would_refuse(tmp_path, monkeypatch):
+    # Equal bytes are not enough: the gateway reads the lock and the backups only from a
+    # file that no other account can read, so a 0644 (or Everyone-readable) copy that
+    # was already there is kept and named, with the repair, never passed off as carried.
+    home, _ = _install_home(tmp_path, monkeypatch)
+    lock, backups = _seal_connector_state(home)
+    moved = tmp_path / "dcdata"
+    (moved / "connector_backups" / "codex").mkdir(parents=True)
+    (moved / "hook_contract_lock.json").write_bytes(lock)
+    (moved / "connector_backups" / "codex" / "config.toml.json").write_bytes(backups["codex/config.toml.json"])
+    protect_private_file(moved / "connector_backups" / "codex" / "config.toml.json")
+    _expose(moved / "hook_contract_lock.json")
+    monkeypatch.setattr(cmd_config.config_module, "_is_admin_process", lambda: False)
+
+    result = CliRunner().invoke(cmd_config.config_cmd, ["set", "data_dir", str(moved)], obj=AppContext())
+
+    assert result.exit_code == 0, result.output
+    assert not _is_private(moved / "hook_contract_lock.json")  # kept as it was, not rewritten
+    assert (moved / "connector_backups" / "opencode" / "config.json").is_file()
+    assert "already has connector state that differs" in result.output
+    assert "is open to other accounts" in result.output
+    assert "hook_contract_lock.json" in result.output
+    assert "connector_backups/codex/config.toml.json" not in result.output
+    assert "defenseclaw setup <connector> --yes" in result.output
 
 
 def test_config_set_data_dir_reports_a_linked_backup_the_new_folder_already_has(tmp_path, monkeypatch):
@@ -484,6 +512,26 @@ def test_config_set_data_dir_carries_a_whole_codeguard_archive(tmp_path, monkeyp
         assert _is_private(moved / stamp / rel)
     assert (moved / "hook_contract_lock.json").read_bytes() == lock
     assert "5 connector backup files" in result.output
+    assert "was not copied" not in result.output
+
+
+def test_config_set_data_dir_carries_an_archive_of_a_deeply_nested_skill_folder(tmp_path, monkeypatch):
+    # `_archive_path` copies the replaced skill folder as it was, however deep it is.
+    home, _ = _install_home(tmp_path, monkeypatch)
+    _seal_connector_state(home)
+    stamp = home / "connector_backups" / "codeguard" / "claudecode" / "skill" / "20261107T000000Z"
+    deep = stamp.joinpath("codeguard", *[f"d{i}" for i in range(24)])
+    deep.mkdir(parents=True)
+    (deep / "SKILL.md").write_bytes(b"deep rule\n")
+    moved = tmp_path / "dcdata"
+    monkeypatch.setattr(cmd_config.config_module, "_is_admin_process", lambda: False)
+
+    result = CliRunner().invoke(cmd_config.config_cmd, ["set", "data_dir", str(moved)], obj=AppContext())
+
+    assert result.exit_code == 0, result.output
+    carried = moved / deep.relative_to(home) / "SKILL.md"
+    assert carried.read_bytes() == b"deep rule\n"
+    assert _is_private(carried)
     assert "was not copied" not in result.output
 
 
