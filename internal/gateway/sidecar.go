@@ -4704,7 +4704,7 @@ func (s *Sidecar) handleSkillAdmission(r watcher.AdmissionResult) {
 	}
 
 	if shouldDisableAtGateway(r) && s.client != nil && s.fleetRPCsEnabled() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), watcherGatewayDisableTimeout)
 		defer cancel()
 
 		if err := s.client.DisableSkill(ctx, r.Event.Name); err != nil {
@@ -4846,6 +4846,12 @@ func formatEnforcementMessage(subjectType, subjectName, severity string, finding
 	return sb.String()
 }
 
+// watcherGatewayDisableTimeout bounds the disable of a rejected skill, plugin
+// or MCP server at the gateway. OpenClaw reports a config.patch only after it
+// applied it, which took 10.6 s on macOS, so a 10 s deadline logged a disable
+// that took effect as failed (GAP-0826).
+const watcherGatewayDisableTimeout = 30 * time.Second
+
 func (s *Sidecar) handlePluginAdmission(r watcher.AdmissionResult) {
 	if !s.currentConfig().Gateway.Watcher.Plugin.TakeAction {
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: plugin %s verdict=%s (take_action=false, logging only)\n",
@@ -4865,7 +4871,7 @@ func (s *Sidecar) handlePluginAdmission(r watcher.AdmissionResult) {
 	}
 
 	if shouldDisableAtGateway(r) && s.client != nil && s.fleetRPCsEnabled() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), watcherGatewayDisableTimeout)
 		defer cancel()
 
 		if err := s.client.DisablePlugin(ctx, r.Event.Name); err != nil {
@@ -4905,7 +4911,7 @@ func (s *Sidecar) handleMCPAdmission(r watcher.AdmissionResult) {
 	}
 
 	if shouldDisableAtGateway(r) && s.client != nil && s.fleetRPCsEnabled() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), watcherGatewayDisableTimeout)
 		defer cancel()
 
 		if err := s.client.BlockMCPServer(ctx, r.Event.Name); err != nil {
