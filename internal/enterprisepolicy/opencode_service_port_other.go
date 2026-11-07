@@ -6,57 +6,111 @@
 package enterprisepolicy
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
+
+// openCodeMaxLinks bounds the links the path walk follows.
+const openCodeMaxLinks = 40
 
 func writeOpenCodeServiceConfig(_ string, path string, data []byte) error {
 	return writePrivateUserFile(path, data)
 }
 
-// checkOpenCodeServiceConfigFolders reports whether the account's .config or
-// .config/opencode folder is a link (the stow layout). A write still refuses a
-// link in place of the opencode folder; a port that already matches needs no
-// write, so the link is accepted only if openCodeServiceFileShared finds the
-// file it leads to private to the account.
-func checkOpenCodeServiceConfigFolders(home, path string) (linked bool, err error) {
-	for _, dir := range []string{filepath.Join(home, ".config"), filepath.Dir(path)} {
-		info, err := os.Lstat(dir)
-		if os.IsNotExist(err) {
+// checkOpenCodeServiceConfigFolders walks the whole path to service.json, link
+// by link, without creating anything, and refuses it when another account
+// could replace what the walk passes through (REVIEW-2 MF1b). It runs before a
+// port that already matches is accepted and before a write, so a matching file
+// is no safer than a differing one. Every folder the walk stands in (the
+// folders on the way, the folder holding each link, the folders a link leads
+// through) must be owned by this account or root and closed to other accounts:
+// no other-write bit, and no group-write bit unless the group is the private
+// group of the account (GAP-0657, the rule the CLI preflight applies). A sticky
+// folder passes on those bits because each entry in it is owner-checked as the
+// walk reaches it. Every entry on the way (folder, link, file) must be owned by
+// this account or root. The stow layout, a link to the dotfiles of the account,
+// passes; the file mode is openCodeServiceFileShared to judge. A missing tail
+// is created by the write at 0700 and needs no check.
+func checkOpenCodeServiceConfigFolders(_, path string) error {
+	pending := strings.Split(filepath.Clean(path), string(filepath.Separator))
+	cur := string(filepath.Separator)
+	links := 0
+	for len(pending) > 0 {
+		name := pending[0]
+		pending = pending[1:]
+		switch name {
+		case "", ".":
+			continue
+		case "..":
+			cur = filepath.Dir(cur)
 			continue
 		}
+		dir, err := os.Lstat(cur)
 		if err != nil {
-			return false, err
+			return err
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			linked = true
+		if openCodeFolderOpenToOthers(cur, dir) {
+			return fmt.Errorf("%s is owned by or writable to another account", cur)
 		}
+		next := filepath.Join(cur, name)
+		entry, err := os.Lstat(next)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !openCodeTrustedOwner(entry) {
+			return fmt.Errorf("%s is owned by another account", next)
+		}
+		if entry.Mode()&os.ModeSymlink == 0 {
+			cur = next
+			continue
+		}
+		if links++; links > openCodeMaxLinks {
+			return fmt.Errorf("%s: too many links", path)
+		}
+		target, err := os.Readlink(next)
+		if err != nil {
+			return err
+		}
+		if filepath.IsAbs(target) {
+			cur = string(filepath.Separator)
+		}
+		pending = append(strings.Split(target, string(filepath.Separator)), pending...)
 	}
-	return linked, nil
+	return nil
 }
 
-// openCodeServiceFileShared reports a service.json another account can
-// write: a group or other write bit, and, when a link leads to it, a file the
-// account does not own or a folder another account can write. The write
-// replaces a shared regular file with a 0600 copy and refuses a link.
-func openCodeServiceFileShared(path string, linked bool) bool {
-	info, err := os.Lstat(path)
-	if err != nil || info.Mode().Perm()&0o022 != 0 {
+// openCodeTrustedOwner reports an entry this account or root owns; either one
+// can change it anyway.
+func openCodeTrustedOwner(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && (int(stat.Uid) == os.Geteuid() || stat.Uid == 0)
+}
+
+// openCodeFolderOpenToOthers reports a folder whose owner is another account
+// or whose mode lets another account add, remove or rename entries in it.
+func openCodeFolderOpenToOthers(path string, info os.FileInfo) bool {
+	if !openCodeTrustedOwner(info) {
 		return true
 	}
-	if !linked {
+	if info.Mode()&os.ModeSticky != 0 {
 		return false
 	}
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return true
-	}
-	file, err := os.Stat(resolved)
-	dir, dirErr := os.Stat(filepath.Dir(resolved))
-	if err != nil || dirErr != nil || file.Mode().Perm()&0o022 != 0 || dir.Mode().Perm()&0o022 != 0 {
-		return true
-	}
-	stat, ok := file.Sys().(*syscall.Stat_t)
-	return !ok || int(stat.Uid) != os.Geteuid()
+	perm := info.Mode().Perm()
+	return perm&0o002 != 0 || (perm&0o020 != 0 && !connector.OwnerPrivateGroup(path, info))
+}
+
+// openCodeServiceFileShared reports a service.json another account can write
+// (a group or other write bit). The write replaces it with a 0600 copy, or
+// refuses a link. Where the file lives is the folder check to judge.
+func openCodeServiceFileShared(path string) bool {
+	info, err := os.Lstat(path)
+	return err != nil || info.Mode().Perm()&0o022 != 0
 }
