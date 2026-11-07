@@ -109,6 +109,10 @@ var (
 	// windowsCodexRequirementsHeld reports whether another handle keeps
 	// path from being replaced; tests replace it.
 	windowsCodexRequirementsHeld = windowsCodexFileHeldAgainstDelete
+	// windowsCodexReadBlocked reports whether another handle keeps path from
+	// being opened for read (a state file of 1.0.8 that a user holds open
+	// without read sharing); tests replace it.
+	windowsCodexReadBlocked = windowsCodexFileReadBlocked
 	// windowsCodexRequirementsHolders names the holding processes; tests
 	// replace it.
 	windowsCodexRequirementsHolders = processutil.FileHolders
@@ -151,6 +155,42 @@ func windowsCodexFileHeldAgainstDelete(path string) bool {
 	return false
 }
 
+// windowsCodexFileReadBlocked opens path for read, sharing everything, with
+// no backup semantics: the open fails with a sharing or lock violation
+// exactly while another handle refuses read sharing, which is what keeps a
+// read from landing. The delete probe above cannot see such a holder when it
+// shares delete (GAP-0765).
+func windowsCodexFileReadBlocked(path string) bool {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return false
+	}
+	name, err := windows.UTF16PtrFromString(extended)
+	if err != nil {
+		return false
+	}
+	handle, err := windows.CreateFile(
+		name,
+		windows.GENERIC_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		return errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_LOCK_VIOLATION)
+	}
+	_ = windows.CloseHandle(handle)
+	return false
+}
+
+// windowsCodexStillHeld reports that path is still held in the way the
+// failure was: against replacing it, and for a read also against reading it.
+func windowsCodexStillHeld(path string, reading bool) bool {
+	return windowsCodexRequirementsHeld(path) || (reading && windowsCodexReadBlocked(path))
+}
+
 // windowsCodexRequirementsHeldFailure turns a failed write of the
 // requirements at path into a WindowsCodexRequirementsHeldError when another
 // handle holds the file open. A newer file another writer saved is not a
@@ -181,7 +221,7 @@ func windowsCodexFileHeldFailure(path string, err error, reading bool) error {
 		!errors.Is(err, windows.Errno(1176)) { // ERROR_UNABLE_TO_MOVE_REPLACEMENT
 		return err
 	}
-	if !windowsCodexRequirementsHeld(path) {
+	if !windowsCodexStillHeld(path, reading) {
 		return err
 	}
 	return &WindowsCodexRequirementsHeldError{Path: path, Holders: windowsCodexRequirementsHolders(path), Err: err, Reading: reading}
@@ -201,7 +241,7 @@ func withWindowsCodexRequirementsReleaseRetry(run func() error) error {
 			return err
 		}
 		emitManagedResilience(managed.MarkerDegraded, held.Path, held.Error(), map[string]string{"held_by": held.holder()})
-		for windowsCodexRequirementsHeld(held.Path) {
+		for windowsCodexStillHeld(held.Path, held.Reading) {
 			if !windowsCodexHeldRetryNow().Before(deadline) {
 				return err
 			}
