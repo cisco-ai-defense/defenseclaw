@@ -383,10 +383,19 @@ function Format-DefenseClawSetupAction {
         "Setup /ensure" is not a command there: the hint runs Setup from the
         folder that holds it and says where it comes from (cowork-1-0-8
         GAP-0095). Other profiles keep "Setup <action>" as it was.
+
+        Several actions are alternatives: each is its own command, joined with
+        "or" ("/install or /uninstall PURGE=1" is not one command). A
+        placeholder is quoted, as the Go hints quote it: PowerShell reads an
+        unquoted "<" as an error, and the quote keeps its spaces in one word.
     #>
-    param([Parameter(Mandatory)][string]$Action)
-    if (-not (Test-DefenseClawStandaloneProfile)) { return "Setup $Action" }
-    return "& '.\DefenseClawSetup-Enterprise-Standalone-x64.exe' $Action (Setup is not installed on this computer: use the copy in your MDM package or the release download)"
+    param([Parameter(Mandatory)][string[]]$Action)
+    if (-not (Test-DefenseClawStandaloneProfile)) { return 'Setup ' + ($Action -join ' or ') }
+    $commands = foreach ($item in $Action) {
+        $arguments = [regex]::Replace([string]$item, '(\S*<[^>]*>\S*)', "'`$1'")
+        "& '.\DefenseClawSetup-Enterprise-Standalone-x64.exe' $arguments"
+    }
+    return ($commands -join ' or ') + ' (Setup is not installed on this computer: use the copy in your MDM package or the release download)'
 }
 
 function Format-DefenseClawRepairAction {
@@ -398,6 +407,20 @@ function Format-DefenseClawRepairAction {
     param([Parameter(Mandatory)][hashtable]$Layout)
     if (-not (Test-DefenseClawStandaloneProfile)) { return 'Setup /repair' }
     return Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout
+}
+
+function Format-DefenseClawRerunStep {
+    <#
+        The end of a hint that asks for the failed run again. Setup is not
+        installed on a standalone computer, and the failed run may have been
+        the installed CLI's, so the hint asks for "the same command"
+        (cowork-1-0-8 GAP-0095). Other profiles keep "run Setup again" (or,
+        with -SameSetupCommand, "run the same Setup command again") as it was.
+    #>
+    param([switch]$SameSetupCommand)
+    if (Test-DefenseClawStandaloneProfile) { return 'run the same command again' }
+    if ($SameSetupCommand) { return 'run the same Setup command again' }
+    return 'run Setup again'
 }
 
 function Get-DefenseClawClaudeMinimumClientVersion {
@@ -6156,7 +6179,7 @@ function Get-DefenseClawServicePendingDeleteMessage {
     return Format-DefenseClawResilienceEvent -Marker defenseclaw_prereq -Fields @{
         check   = 'service_pending_delete'
         service = $Name
-        remedy  = 'restart Windows to finish deleting the service, then run Setup again'
+        remedy  = ('restart Windows to finish deleting the service, then ' + (Format-DefenseClawRerunStep))
     }
 }
 
@@ -6215,7 +6238,7 @@ function Assert-DefenseClawServicesNotPendingDelete {
             Write-DefenseClawResilienceEvent -Marker defenseclaw_prereq -Fields @{
                 check   = 'service_pending_delete'
                 service = [string]$name
-                remedy  = 'restart Windows to finish deleting the service, then run Setup again'
+                remedy  = ('restart Windows to finish deleting the service, then ' + (Format-DefenseClawRerunStep))
             }
             throw (Get-DefenseClawServicePendingDeleteMessage -Name ([string]$name))
         }
@@ -6265,7 +6288,7 @@ function Invoke-DefenseClawNative {
             Write-DefenseClawResilienceEvent -Marker defenseclaw_prereq -Fields @{
                 check   = 'service_pending_delete'
                 service = $serviceName
-                remedy  = 'restart Windows to finish deleting the service, then run Setup again'
+                remedy  = ('restart Windows to finish deleting the service, then ' + (Format-DefenseClawRerunStep))
             }
             throw $prereq
         }
@@ -9161,7 +9184,7 @@ function Install-DefenseClawFileAtomic {
                 throw (
                     "another program holds $Destination open, so Setup could not replace it (" +
                     (ConvertTo-DefenseClawBoundedDiagnostic -Value $replaceFailure.Message -MaxLength 256) +
-                    '). Close the program that has the file open (for example an antivirus scan or an editor), then run Setup again'
+                    '). Close the program that has the file open (for example an antivirus scan or an editor), then run the same command again'
                 )
             }
         }
@@ -14646,7 +14669,7 @@ function Repair-DefenseClawUnreadableDeploymentMetadata {
         throw "$unreadable; $carrier"
     }
     if (-not (Test-DefenseClawServiceExists -Name $GatewayServiceName)) {
-        throw "$unreadable; no $GatewayServiceName service is registered, so run $(Format-DefenseClawSetupAction -Action '/install or /uninstall PURGE=1')"
+        throw "$unreadable; no $GatewayServiceName service is registered, so run $(Format-DefenseClawSetupAction -Action @('/install', '/uninstall PURGE=1'))"
     }
     Assert-DefenseClawOwnedServiceOrAbsent `
         -Name $GatewayServiceName `
@@ -24274,7 +24297,7 @@ function Assert-DefenseClawInstalledHookCallsEnded {
     if ($running.Count -eq 0) {
         return
     }
-    throw ("hook_calls_running: {0} DefenseClaw hook process(es) of the installed release (process ids {1}) were still running after a {2} s wait; the gateway must keep answering them, so this run stopped and replaced nothing. Next step: let those agent calls finish or close those agent sessions, then run the same Setup command again (an MDM retries exit 1618 on its own)" -f $running.Count, ($running -join ', '), $TimeoutSeconds)
+    throw ("hook_calls_running: {0} DefenseClaw hook process(es) of the installed release (process ids {1}) were still running after a {2} s wait; the gateway must keep answering them, so this run stopped and replaced nothing. Next step: let those agent calls finish or close those agent sessions, then {3} (an MDM retries exit 1618 on its own)" -f $running.Count, ($running -join ', '), $TimeoutSeconds, (Format-DefenseClawRerunStep -SameSetupCommand))
 }
 
 function Assert-DefenseClawHookNotHeld {
@@ -24319,7 +24342,7 @@ function Assert-DefenseClawHookNotHeld {
             if ([string]::IsNullOrWhiteSpace([string]$_.UserName)) { '{0} (process id {1})' -f $_.Name, $_.Id }
             else { '{0} (process id {1}, {2})' -f $_.Name, $_.Id, $_.UserName }
         })
-    throw ("hook_in_use: {0} has {1} open, so Setup could not replace it; this run stopped and replaced nothing. Next step: close that program (for example an antivirus scan or an editor), then run the same Setup command again (an MDM retries exit 1618 on its own)" -f ($named -join ', '), $Layout.HookPath)
+    throw ("hook_in_use: {0} has {1} open, so Setup could not replace it; this run stopped and replaced nothing. Next step: close that program (for example an antivirus scan or an editor), then {2} (an MDM retries exit 1618 on its own)" -f ($named -join ', '), $Layout.HookPath, (Format-DefenseClawRerunStep -SameSetupCommand))
 }
 
 function Test-DefenseClawHookSharesDelete {
@@ -28041,7 +28064,10 @@ function Invoke-DefenseClawStandaloneRuntimeGenerationCollect {
         $lock = Enter-DefenseClawLifecycleLock -Layout $Layout
         try {
             if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath -PathType Leaf) {
-                throw ('a lifecycle transaction is pending; ' + (Format-DefenseClawSetupAction -Action '/ensure') + ' finishes it and collects the old runtime copies')
+                # Standalone only (the early return above). The installed CLI
+                # finishes a pending transaction without a payload, as the Go
+                # side of this refusal says (cowork-1-0-8 GAP-0095).
+                throw ('a lifecycle transaction is pending; ' + (Get-DefenseClawStandaloneEnsureCommand -Layout $Layout) + ' from an elevated PowerShell prompt finishes it and collects the old runtime copies')
             }
             [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
                 -Layout $Layout `
@@ -33490,6 +33516,12 @@ function Get-DefenseClawApprovedPolicyHash {
     $entry = $record.Value.PSObject.Properties[$Name]
     if ($null -eq $entry) { return '' }
     return [string]$entry.Value
+}
+
+function Get-DefenseClawStandaloneEnsureCommand {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $cli = [string]$Layout['CLIPath']
+    return "& '$($cli.Replace("'", "''"))' enterprise windows ensure --profile standalone"
 }
 
 function Get-DefenseClawStandaloneBundleRepairCommand {
@@ -48498,7 +48530,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                         # GAP-0274: Setup carries no compiler. It keeps the
                         # recorded compiler of a Fleet-enabled 1.0.2 install
                         # in place, unchanged, and installs none.
-                        throw 'Fleet-enabled standalone Setup carries no Fleet policy compiler and this host has no recorded one to keep; turn Fleet off in the config, then run Setup again'
+                        throw 'Fleet-enabled standalone Setup carries no Fleet policy compiler and this host has no recorded one to keep; turn Fleet off in the config, then run the same command again with that config'
                     }
                 }
             }

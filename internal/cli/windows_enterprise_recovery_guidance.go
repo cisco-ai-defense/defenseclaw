@@ -342,7 +342,7 @@ func windowsEnterprisePerUserDataDirNextStep(original, text string) string {
 	return ". DefenseClaw's managed install did not create " + folder +
 		"; a per-user DefenseClaw install leaves it, also after `defenseclaw uninstall --binaries`." +
 		" Next step: have that user run `defenseclaw uninstall --all --binaries --yes`, or move " + folder +
-		" out of the profile, then run Setup again."
+		" out of the profile, then run the same command again."
 }
 
 // windowsEnterpriseCommittedJournalNextStep says what an install, upgrade or

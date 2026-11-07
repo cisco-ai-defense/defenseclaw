@@ -1580,7 +1580,7 @@ var errWindowsScannerPrepareTimedOut = errors.New("the bound was reached")
 
 // windowsScannerPrepareRetryNotice ends the message of a prepare that hit its
 // bound; windowsEnterpriseFailureCodeFor reads it as retry-later.
-const windowsScannerPrepareRetryNotice = "run the same Setup command again (an MDM retry does): it continues the preparation"
+const windowsScannerPrepareRetryNotice = "run the same command again (an MDM retry does): it continues the preparation"
 
 // windowsScannerProgress receives a scanner runtime step progress lines:
 // standard output for a person, the lifecycle log's diagnostics in a JSON

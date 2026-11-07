@@ -162,9 +162,15 @@ func evaluateWindowsEnterprisePrerequisites(input windowsEnterprisePrereqInput, 
 	mutation := windowsEnterpriseMutationAction(input.Action)
 
 	if ops.elevated != nil && !ops.elevated() {
+		// Secure Client keeps its text. A standalone computer may be running
+		// the installed CLI, not Setup (cowork-1-0-8 GAP-0095).
+		remedy := "run Setup from an elevated administrator or LocalSystem context (the deployment system's machine context)"
+		if input.Standalone {
+			remedy = "run the same command from an elevated administrator or LocalSystem context (the deployment system's machine context)"
+		}
 		add(newWindowsEnterprisePrereq(prereqCheckElevation, map[string]string{
 			"reason": "the lifecycle is not running with an elevated administrator token",
-			"remedy": "run Setup from an elevated administrator or LocalSystem context (the deployment system's machine context)",
+			"remedy": remedy,
 		}))
 	}
 	if ops.volumeFindings != nil {

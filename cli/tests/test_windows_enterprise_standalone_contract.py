@@ -2154,6 +2154,7 @@ _SETUP_HINT_FUNCTIONS = (
     "Test-DefenseClawStandaloneProfile",
     "Format-DefenseClawSetupAction",
     "Format-DefenseClawRepairAction",
+    "Format-DefenseClawRerunStep",
     "Get-DefenseClawStandaloneBundleRepairCommand",
 )
 
@@ -2175,7 +2176,20 @@ def test_module_hints_do_not_name_setup_as_a_bare_command() -> None:
     assert "return 'Setup /repair'" in named[0], named
     assert "only Setup /repair carries every artifact" in named[1], named
     assert "DefenseClawSetup-Enterprise-Standalone-x64.exe" not in re.sub(r"<#.*?#>", "", module.replace(
-        "& '.\\DefenseClawSetup-Enterprise-Standalone-x64.exe' $Action", ""))
+        "\"& '.\\DefenseClawSetup-Enterprise-Standalone-x64.exe' $arguments\"", ""))
+    # "Run Setup again" names Setup with no command and no source. It is said
+    # only by Format-DefenseClawRerunStep, for a profile that is not standalone
+    # (the standalone profile asks for "the same command").
+    phrases = [
+        line.strip()
+        for line in module.splitlines()
+        if not line.lstrip().startswith("#")
+        and re.search(r"\b[Rr]un\s+(?:the\s+(?:same\s+)?)?Setup(?:\s+command)?\s+again\b|\bSetup\s+again\b", line)
+    ]
+    assert phrases == [
+        "if ($SameSetupCommand) { return 'run the same Setup command again' }",
+        "return 'run Setup again'",
+    ], phrases
 
 
 @pytest.mark.skipif(not _portable_pwsh(), reason="PowerShell 7 (pwsh) is not installed")
@@ -2193,12 +2207,19 @@ $script:DefenseClawEnterpriseProfile = 'Standalone'
 $standalone = [ordered]@{
     ensure = Format-DefenseClawSetupAction -Action '/ensure'
     config = Format-DefenseClawSetupAction -Action '/ensure CONFIG=<approved absolute config path>'
+    either = Format-DefenseClawSetupAction -Action @('/install', '/uninstall PURGE=1')
     repair = Format-DefenseClawRepairAction -Layout $Layout
+    rerun = Format-DefenseClawRerunStep
+    rerunSetup = Format-DefenseClawRerunStep -SameSetupCommand
 }
 $script:DefenseClawEnterpriseProfile = 'SecureClient'
 $other = [ordered]@{
     ensure = Format-DefenseClawSetupAction -Action '/ensure'
+    config = Format-DefenseClawSetupAction -Action '/ensure CONFIG=<approved config>'
+    either = Format-DefenseClawSetupAction -Action @('/install', '/uninstall PURGE=1')
     repair = Format-DefenseClawRepairAction -Layout $Layout
+    rerun = Format-DefenseClawRerunStep
+    rerunSetup = Format-DefenseClawRerunStep -SameSetupCommand
 }
 [ordered]@{ standalone = $standalone; other = $other } | ConvertTo-Json -Compress
 """,
@@ -2213,19 +2234,31 @@ $other = [ordered]@{
     source = "Setup is not installed on this computer: use the copy in your MDM package or the release download"
     setup = "& '.\\DefenseClawSetup-Enterprise-Standalone-x64.exe'"
     assert result["standalone"]["ensure"] == f"{setup} /ensure ({source})"
-    assert result["standalone"]["config"] == f"{setup} /ensure CONFIG=<approved absolute config path> ({source})"
+    # A placeholder is quoted as the Go hints quote it: unquoted, PowerShell reads "<" as an error.
+    assert result["standalone"]["config"] == f"{setup} /ensure 'CONFIG=<approved absolute config path>' ({source})"
+    # Alternatives are separate commands, not one command with "or" as an argument.
+    assert result["standalone"]["either"] == f"{setup} /install or {setup} /uninstall PURGE=1 ({source})"
+    assert result["standalone"]["rerun"] == result["standalone"]["rerunSetup"] == "run the same command again"
     assert result["standalone"]["repair"] == (
         "& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw.exe' enterprise windows repair --profile standalone --json"
     )
     # Another profile keeps "Setup /..." as it was, byte for byte.
-    assert result["other"] == {"ensure": "Setup /ensure", "repair": "Setup /repair"}
+    assert result["other"] == {
+        "ensure": "Setup /ensure",
+        "config": "Setup /ensure CONFIG=<approved config>",
+        "either": "Setup /install or /uninstall PURGE=1",
+        "repair": "Setup /repair",
+        "rerun": "run Setup again",
+        "rerunSetup": "run the same Setup command again",
+    }
 
 
 def test_repair_rollback_refusal_names_the_supported_next_step(tmp_path: Path) -> None:
     cases = _repair_rollback_config_cases(tmp_path)
     for name in ("invalid malformed", "invalid valid", "approved stale"):
         assert "Next step:" in cases[name]["error"], cases[name]
-        assert "/ensure CONFIG=" in cases[name]["error"], cases[name]
+        # The placeholder is quoted, as the Go hints quote it (PowerShell reads an unquoted "<" as an error).
+        assert "/ensure 'CONFIG=" in cases[name]["error"], cases[name]
     assert "enterprise windows repair --profile standalone --json" in cases["approved stale"]["error"]
     assert "administrator-selected path permissions" in cases["external policy ACL drift"]["error"]
     assert "Next step:" in cases["transitional service"]["error"]

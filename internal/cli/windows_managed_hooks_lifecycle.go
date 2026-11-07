@@ -2336,7 +2336,7 @@ var windowsManagedHooksVendorFolderTakeBack = func() error {
 	} {
 		if _, err := enterprisepolicy.TakeBackVendorPolicyFolder(opts, dir); err != nil {
 			return fmt.Errorf(
-				"%s or a folder above it was created by a standard user before DefenseClaw and could not be taken back (rename it aside as an administrator and run Setup again): %w",
+				"%s or a folder above it was created by a standard user before DefenseClaw and could not be taken back (rename it aside as an administrator and run the same command again): %w",
 				dir, err,
 			)
 		}

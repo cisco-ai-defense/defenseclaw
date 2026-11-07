@@ -166,7 +166,7 @@ func TestStandaloneFleetCompilerSourceIsOptInBeforeMutation(t *testing.T) {
 	supplied := strings.Index(lifecycle, "if (-not [string]::IsNullOrWhiteSpace($PolicyCompiler)) {")
 	add := strings.Index(lifecycle, "Add-DefenseClawStandaloneFleetCompilerSource `")
 	kept := strings.Index(lifecycle, "elseif ([string]::IsNullOrEmpty((Get-DefenseClawRecordedStandaloneCompilerPath -Layout $layout))) {")
-	refusal := strings.Index(lifecycle, "throw 'Fleet-enabled standalone Setup carries no Fleet policy compiler and this host has no recorded one to keep; turn Fleet off in the config, then run Setup again'")
+	refusal := strings.Index(lifecycle, "throw 'Fleet-enabled standalone Setup carries no Fleet policy compiler and this host has no recorded one to keep; turn Fleet off in the config, then run the same command again with that config'")
 	mutation := strings.Index(lifecycle, "Initialize-DefenseClawManagedRoot `")
 	if deferredGuard < 0 || inspect < deferredGuard || gate < inspect || supplied < gate || add < supplied || kept < add || refusal < kept || mutation < refusal {
 		t.Fatalf("Fleet-on without a recorded compiler must be refused before managed-root mutation (deferred guard %d, inspect %d, gate %d, supplied %d, add %d, kept %d, refusal %d, mutation %d)", deferredGuard, inspect, gate, supplied, add, kept, refusal, mutation)

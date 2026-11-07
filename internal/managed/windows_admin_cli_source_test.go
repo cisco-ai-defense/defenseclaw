@@ -37,23 +37,50 @@ var managedWindowsBareCommandAllowed = map[string][]string{
 	"internal/hookruntime/unavailable_windows.go": {"Run `defenseclaw doctor`"},
 }
 
-// managedWindowsBareSetupAllowed lists, by path prefix below the module root,
-// the sources that may name a Setup action ("Setup /ensure", the file name
-// with a switch) as plain text, with the reason. Setup is not installed on a
-// managed computer, so a hint that sends an administrator to it runs it with
+// managedWindowsSetupAllowance lets one source name a Setup action in plain
+// text (managedWindowsBareSetup, managedWindowsSetupPhrase). path is a file
+// below the module root, or a folder ending in "/". With words empty it covers
+// every literal of that path; with words set it covers a literal that holds
+// those words (they are taken out of the literal before it is checked again),
+// or, with exact set, only a literal that is those words. The reason says why
+// no administrator is sent to a Setup that is not installed.
+type managedWindowsSetupAllowance struct {
+	path, words, reason string
+	exact               bool
+}
+
+// managedWindowsBareSetupAllowed lists the sources that may name a Setup
+// action ("Setup /ensure", the file name with a switch, "run Setup again") as
+// plain text, with the reason. Setup is not installed on a managed computer,
+// so a hint that sends an administrator to it runs it with
 // managed.WindowsSetupCommand and says where it comes from
 // (managed.WindowsSetupSource); the installed CLI's own command
-// (managed.WindowsAdminCommand) is named instead where it does the same work
+// (managed.WindowsAdminCommand) is named instead where it does the same work;
+// a hint that only asks for the failed run again says "the same command"
 // (cowork-1-0-8 GAP-0095). An entry no literal uses fails the test.
-var managedWindowsBareSetupAllowed = map[string]string{
-	"cmd/defenseclaw-enterprise-setup/":                        "Setup's own usage and refusals: the administrator who reads them is running that Setup",
-	"internal/cli/enterprise_bundle_apply_windows.go":          "names the Setup switch that is the other way to deliver a bundle; whoever delivers one holds Setup",
-	"internal/cli/windows_enterprise_bundle.go":                "says which Setup switch takes BUNDLE= and TRUSTANCHORS=; the MDM that delivers them holds Setup",
-	"internal/cli/windows_managed_hooks_lifecycle.go":          "the Secure Client branch of the managed-hook lifecycle keeps the text it always had",
-	"internal/cli/enterprise_hooks_hook_binary_windows.go":     "states what restores a hook binary, for the standalone profile and Secure Client alike (no instruction); Secure Client text is unchanged",
-	"internal/cli/enterprise_hooks_platform_windows.go":        "states what prunes a deleted account's rows, for the standalone profile and Secure Client alike (no instruction); Secure Client text is unchanged",
-	"internal/enterprisehooks/install_windows.go":              "states what prunes a deleted account's rows, for the standalone profile and Secure Client alike (no instruction); Secure Client text is unchanged",
-	"internal/enterprisehooks/managed_policy_drift_windows.go": "the Secure Client branch keeps the text it always had",
+var managedWindowsBareSetupAllowed = []managedWindowsSetupAllowance{
+	{path: "cmd/defenseclaw-enterprise-setup/", reason: "Setup's own usage and refusals: the administrator who reads them is running that Setup"},
+	{path: "cmd/defenseclaw-setup/", reason: "the per-user Setup's own messages: the person who reads them is running that Setup, which they downloaded; it is not the managed Setup"},
+	{path: "internal/cli/enterprise_bundle_apply_windows.go", words: "Windows takes bundles from Setup /ensure BUNDLE= or --bundle",
+		reason: "names the Setup switch that is the other way to deliver a bundle, beside --bundle; whoever delivers one holds Setup"},
+	{path: "internal/cli/windows_enterprise_bundle.go", words: "with Setup /ensure",
+		reason: "a refusal of bundle arguments: says which Setup switch takes BUNDLE=, TRUSTANCHORS= and REFUSECAPABILITYLOSS=, and names the installed CLI's ensure beside it; the MDM that delivers a bundle holds Setup"},
+	{path: "internal/cli/enterprise_hooks_platform_windows.go", words: "Setup /repair or /ensure prunes them now",
+		reason: "states what prunes a deleted account's rows, for the standalone profile and Secure Client alike (an aside, not the instruction); Secure Client text is unchanged"},
+	{path: "internal/enterprisehooks/install_windows.go", words: "Setup /repair or /ensure prunes its rows",
+		reason: "states what prunes a deleted account's rows, for the standalone profile and Secure Client alike (an aside, not the instruction); Secure Client text is unchanged"},
+	{path: "internal/enterprisehooks/managed_policy_drift_windows.go", words: "Setup /ensure", exact: true,
+		reason: "the Secure Client branch of the ownership-record hint keeps the text it always had; the standalone branch renders Setup and its source"},
+	{path: "internal/cli/windows_managed_hooks_lifecycle.go", words: "Setup /repair", exact: true,
+		reason: "windowsManagedHooksRepairStep on Secure Client keeps the text it always had; the standalone profile names the installed CLI"},
+	{path: "internal/cli/windows_managed_hooks_lifecycle.go", words: "Setup /ensure", exact: true,
+		reason: "windowsManagedHooksEnsureStep on Secure Client keeps the text it always had; the standalone profile names the installed CLI"},
+	{path: "internal/cli/windows_enterprise_prereq.go", words: "run Setup from an elevated administrator or LocalSystem context (the deployment system's machine context)", exact: true,
+		reason: "the elevation remedy of a Secure Client run keeps its text; a standalone run asks for the same command (input.Standalone)"},
+	{path: "internal/cli/windows_enterprise_prereq.go", words: "then run Setup again",
+		reason: "the script-block remedies are classified for a Secure Client run only (windowsEnterpriseRunPowerShell, !standalone) and keep their text"},
+	{path: "internal/cli/windows_enterprise_service.go", words: "run Setup again", exact: true,
+		reason: "windowsEnterpriseStagingRetryStep on Secure Client keeps the text it always had; a standalone run asks for the same command"},
 }
 
 // managedWindowsCallAllowed lists, by path prefix below the module root,
@@ -127,7 +154,15 @@ var (
 	// runs on a managed computer, where Setup is not installed
 	// (cowork-1-0-8 GAP-0095).
 	managedWindowsBareSetup = regexp.MustCompile("(?i)DefenseClawSetup-Enterprise-Standalone-x64\\.exe[`'\"]?\\s+/[a-z]|\\bSetup\\s+/(?:repair|ensure|uninstall|install|upgrade|reconcile|recover|verify)\\b")
-	managedWindowsContext   = regexp.MustCompile(`(?i)elevated|powershell|administrator prompt|\bSetup /[a-z]|DefenseClawSetup`)
+	// managedWindowsSetupPhrase is an instruction to run Setup that names no
+	// command: "run Setup again", "Setup again", "run Setup." or "run
+	// DefenseClaw Setup from ...". On a managed computer there is no Setup to
+	// run, and the administrator is told neither the form nor the source. A
+	// sentence that goes on to name what Setup is to run ("run DefenseClaw
+	// Setup of the installed release as LocalSystem: `& ...`") is not one:
+	// its command comes from the renderer.
+	managedWindowsSetupPhrase = regexp.MustCompile(`\bSetup\s+again\b|\b(?:[Rr]e-?run|[Rr]un)\s+(?:(?:the|a|this|that|same)\s+)*(?:DefenseClaw\s+)?Setup\s*(?:[.,;:)]|$|(?:and|or|then|first|to|once|from|when|after|before)\b)`)
+	managedWindowsContext     = regexp.MustCompile(`(?i)elevated|powershell|administrator prompt|\bSetup /[a-z]|DefenseClawSetup`)
 )
 
 // cowork-1-0-8 GAP-0076, as a source check: the behavioural tables list
@@ -201,9 +236,12 @@ func TestManagedWindowsCommandsComeFromTheRenderer(t *testing.T) {
 			}
 		}
 	}
-	for prefix := range managedWindowsBareSetupAllowed {
-		if !used["setup\x00"+prefix] {
-			t.Errorf("managedWindowsBareSetupAllowed lists %q, where no literal names a Setup action in plain text", prefix)
+	for _, allowance := range managedWindowsBareSetupAllowed {
+		if allowance.reason == "" {
+			t.Errorf("managedWindowsBareSetupAllowed %q %q has no reason", allowance.path, allowance.words)
+		}
+		if !used["setup\x00"+allowance.path+"\x00"+allowance.words] {
+			t.Errorf("managedWindowsBareSetupAllowed lists %q %q, where no literal names Setup in plain text", allowance.path, allowance.words)
 		}
 	}
 	for prefix := range managedWindowsCallAllowed {
@@ -512,11 +550,9 @@ func managedWindowsLiteralProblems(rel, value string, windowsOnly bool, used map
 	if !renderer && strings.Contains(value, `Cisco\DefenseClaw\bin\defenseclaw`) {
 		problems = append(problems, "a hard-coded install path: use managed.WindowsAdminCommand or WindowsStandaloneAdminCLI")
 	}
-	if !renderer && managedWindowsBareSetup.MatchString(value) {
-		if prefix, ok := managedWindowsBareSetupPrefix(rel); ok {
-			used["setup\x00"+prefix] = true
-		} else {
-			problems = append(problems, "names Setup as a command in plain text, which is not installed on a managed computer: use managed.WindowsSetupCommand with managed.WindowsSetupSource, or the installed CLI's command (managed.WindowsAdminCommand)")
+	if !renderer && (managedWindowsBareSetup.MatchString(value) || managedWindowsSetupPhrase.MatchString(value)) {
+		if !managedWindowsSetupAllowedLiteral(rel, value, used) {
+			problems = append(problems, "names Setup in plain text, which is not installed on a managed computer: use managed.WindowsSetupCommand with managed.WindowsSetupSource, the installed CLI's command (managed.WindowsAdminCommand), or \"the same command\" for a retry of the failed run")
 		}
 	}
 	if managedWindowsBareAnywhere.MatchString(value) {
@@ -605,15 +641,32 @@ func managedWindowsCallPrefix(rel string) (string, bool) {
 	return "", false
 }
 
-// managedWindowsBareSetupPrefix is the managedWindowsBareSetupAllowed entry
-// that covers file rel.
-func managedWindowsBareSetupPrefix(rel string) (string, bool) {
-	for prefix := range managedWindowsBareSetupAllowed {
-		if rel == prefix || strings.HasSuffix(prefix, "/") && strings.HasPrefix(rel, prefix) {
-			return prefix, true
+// managedWindowsSetupAllowedLiteral reports whether the allowances of file rel
+// cover every plain-text Setup mention of value, and marks in used the
+// allowances it needed. An allowance with words takes those words out of
+// the literal, and what is left must name Setup in no other way.
+func managedWindowsSetupAllowedLiteral(rel, value string, used map[string]bool) bool {
+	rest := value
+	for _, allowance := range managedWindowsBareSetupAllowed {
+		if rel != allowance.path && (!strings.HasSuffix(allowance.path, "/") || !strings.HasPrefix(rel, allowance.path)) {
+			continue
+		}
+		key := "setup\x00" + allowance.path + "\x00" + allowance.words
+		switch {
+		case allowance.words == "":
+			used[key] = true
+			return true
+		case allowance.exact:
+			if value == allowance.words {
+				used[key] = true
+				return true
+			}
+		case strings.Contains(rest, allowance.words):
+			used[key] = true
+			rest = strings.ReplaceAll(rest, allowance.words, "")
 		}
 	}
-	return "", false
+	return !managedWindowsBareSetup.MatchString(rest) && !managedWindowsSetupPhrase.MatchString(rest)
 }
 
 // windowsOnlySource reports whether path builds for windows and for neither
@@ -723,6 +776,22 @@ func TestManagedWindowsLiteralProblems(t *testing.T) {
 		{"Setup short form, uninstall", "internal/enterpriseunix/x.go", "then Setup /uninstall PURGE=1", false, 1},
 		{"Setup in Setup's own output", "cmd/defenseclaw-enterprise-setup/host_busy.go", "run Setup /ensure again when the computer is less busy", true, 0},
 		{"Setup rendered by the renderer", "internal/cli/x_windows.go", "run %s from an elevated PowerShell prompt", true, 0},
+		// cowork-1-0-8 GAP-0095 round 2: "run Setup" with no switch names Setup with no command and no source.
+		{"run Setup again", "internal/cli/x_windows.go", "free some space, then run Setup again", true, 1},
+		{"Setup again alone", "internal/cli/x.go", "Setup again after the restart", false, 1},
+		{"run Setup, sentence end", "internal/cli/x_windows.go", "fix the folder and run Setup.", true, 1},
+		{"rerun Setup", "internal/cli/x_windows.go", "rerun Setup when the antivirus lets go", true, 1},
+		{"run the Setup, from", "internal/cli/x_windows.go", "run the Setup from an elevated prompt", true, 1},
+		{"run DefenseClaw Setup, then", "internal/cli/x_windows.go", "run DefenseClaw Setup then verify", true, 1},
+		{"Setup of the installed release, command follows", "internal/cli/x_windows.go", "run DefenseClaw Setup of the installed release as LocalSystem: ", true, 0},
+		{"a retry as the same command", "internal/cli/x_windows.go", "then run the same command again", true, 0},
+		{"the per-user Setup's own message", "cmd/defenseclaw-setup/disk_space.go", "free some space and run Setup again", false, 0},
+		{"an exact allowance covers its literal", "internal/cli/windows_managed_hooks_lifecycle.go", "Setup /repair", true, 0},
+		{"an exact allowance covers only its literal", "internal/cli/windows_managed_hooks_lifecycle.go", "run Setup /repair now", true, 1},
+		{"an exact allowance, another file", "internal/cli/x_windows.go", "Setup /repair", true, 1},
+		{"a words allowance covers its words", "internal/cli/windows_enterprise_bundle.go", "deliver both with Setup /ensure or, from an elevated PowerShell prompt, with the CLI", true, 0},
+		{"a words allowance leaves other mentions", "internal/cli/windows_enterprise_bundle.go", "deliver both with Setup /ensure or run Setup again", true, 1},
+		{"a words allowance leaves another switch", "internal/cli/windows_enterprise_bundle.go", "deliver both with Setup /ensure, or Setup /repair", true, 1},
 		{"Setup named without a switch", "internal/cli/x_windows.go", "the next Setup run", true, 0},
 		{"the renderer's own doc", "internal/managed/windows_admin_cli.go", "Setup /repair", false, 0},
 		{"verb-only run, capitalised", "internal/cli/x_windows.go", "Run enterprise windows repair to unpack it", true, 1},

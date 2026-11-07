@@ -54,7 +54,7 @@ const windowsEnterpriseActiveSessionWhen = "while the accounts have an active (c
 // LocalSystem run removes: install again, then run the given Setup action,
 // both as LocalSystem while the accounts have an active session.
 func windowsEnterpriseLocalSystemRemedy(action string) string {
-	return "run DefenseClaw Setup " + windowsEnterpriseSetupCommand("/ensure") + " and then " + windowsEnterpriseSetupCommand(strings.Fields(action)...) +
+	return "run " + windowsEnterpriseSetupCommand("/ensure") + " and then " + windowsEnterpriseSetupCommand(strings.Fields(action)...) +
 		", both as LocalSystem " + windowsEnterpriseActiveSessionWhen + " " +
 		"(an MDM system context, or from an elevated prompt a one-time scheduled task that runs as SYSTEM; " +
 		"see \"Run Setup as LocalSystem\" in the Windows enterprise guide). " + managed.WindowsSetupSource
