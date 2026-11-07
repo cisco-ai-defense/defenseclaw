@@ -26,6 +26,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -182,23 +184,77 @@ func TestParsePluginOutput_EmptyFindings(t *testing.T) {
 	}
 }
 
+// resolvePluginCLI picks the CLI the integration test drives and reports
+// whether it was chosen on purpose (strict) rather than found on PATH.
+func resolvePluginCLI() (binary string, strict bool) {
+	if envBin := os.Getenv("DEFENSECLAW_BIN"); envBin != "" {
+		return envBin, true
+	}
+	// Prefer repo .venv so we do not invoke a stale global install.
+	cand := filepath.Join("..", "..", ".venv", "bin", "defenseclaw")
+	if st, err := os.Stat(cand); err == nil && !st.IsDir() {
+		return cand, true
+	}
+	return "defenseclaw", false
+}
+
+// pluginCLIStarts reports whether the CLI can start at all (interpreter and
+// entry point resolve), without scanning anything.
+func pluginCLIStarts(binary string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if output, err := exec.CommandContext(ctx, binary, "--help").CombinedOutput(); err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func TestPluginCLIStartsRejectsAStaleInstallAndAcceptsAWorkingOne(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shebang shims are a Unix install shape")
+	}
+	dir := t.TempDir()
+	stale := filepath.Join(dir, "stale")
+	if err := os.WriteFile(stale, []byte("#!"+filepath.Join(dir, "removed-venv", "bin", "python")+"\nprint(1)\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := pluginCLIStarts(stale); err == nil {
+		t.Fatal("a shim whose interpreter was removed must not count as an installed CLI")
+	}
+	working := filepath.Join(dir, "working")
+	if err := os.WriteFile(working, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := pluginCLIStarts(working); err != nil {
+		t.Fatalf("a CLI that starts must pass: %v", err)
+	}
+}
+
+func TestResolvePluginCLIKeepsExplicitChoicesStrict(t *testing.T) {
+	t.Setenv("DEFENSECLAW_BIN", "/explicit/defenseclaw")
+	if binary, strict := resolvePluginCLI(); binary != "/explicit/defenseclaw" || !strict {
+		t.Fatalf("explicit DEFENSECLAW_BIN = (%q, %v), want strict", binary, strict)
+	}
+}
+
 // TestPluginScanner_Integration calls the real Python CLI and verifies
 // Go can parse its output end-to-end. Skipped if defenseclaw is not installed.
 func TestPluginScanner_Integration(t *testing.T) {
-	binary := "defenseclaw"
-	if envBin := os.Getenv("DEFENSECLAW_BIN"); envBin != "" {
-		binary = envBin
-	} else {
-		// Prefer repo .venv so we don't invoke a stale global install.
-		cand := filepath.Join("..", "..", ".venv", "bin", "defenseclaw")
-		if st, err := os.Stat(cand); err == nil && !st.IsDir() {
-			binary = cand
-		}
-	}
+	binary, strict := resolvePluginCLI()
 	if _, err := exec.LookPath(binary); err != nil {
 		if _, err2 := os.Stat(binary); err2 != nil {
 			t.Skipf("skipping: %s not found: %v", binary, err)
 		}
+	}
+	// A CLI that was chosen on purpose (DEFENSECLAW_BIN or the repo .venv)
+	// must start: a broken one is a real failure. A CLI found only on PATH
+	// can be a stale install on a shared box (its interpreter removed with
+	// the tree it was built from); that is "not installed", not a regression.
+	if err := pluginCLIStarts(binary); err != nil {
+		if strict {
+			t.Fatalf("plugin scanner CLI %s does not start: %v", binary, err)
+		}
+		t.Skipf("skipping: defenseclaw on PATH (%s) does not start: %v", binary, err)
 	}
 
 	// The target CLI is v8-only and its scan occurrence must enter the
