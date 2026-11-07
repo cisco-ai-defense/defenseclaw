@@ -3919,6 +3919,9 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		// even for a clean run, so the closure is settled on the error list
 		// as repair and verify settle it: released once the gateway proves
 		// the installed config, otherwise named (GAP-2087).
+		if len(result.Errors) == 0 && result.Installed && opts.bundle == nil {
+			windowsEnterpriseHealApprovedSource(result)
+		}
 		errorsBefore := len(result.Errors)
 		settleWindowsEnterpriseHotConfigClosure(ctx, result, "ensure")
 		if len(result.Errors) != errorsBefore {
