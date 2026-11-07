@@ -29,7 +29,7 @@ from defenseclaw.connector_paths import (
     normalize,
 )
 from defenseclaw.file_lock import _lock_file_exclusive, _unlock_file
-from defenseclaw.gateway import path_gateway
+from defenseclaw.gateway_path import path_gateway
 from defenseclaw.winquote import powershell_command_line
 
 _VALID_MODES = frozenset({"open", "closed"})

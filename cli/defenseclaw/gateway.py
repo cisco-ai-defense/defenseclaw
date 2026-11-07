@@ -45,6 +45,16 @@ import requests
 from urllib3.connection import HTTPConnection
 from urllib3.connectionpool import HTTPConnectionPool
 
+from defenseclaw.gateway_path import (  # noqa: F401  (re-exported: callers and tests reach them here)
+    _CANONICAL_INSTALL_DIR,
+    GATEWAY_BIN_NAME,
+    _installer_venv_gateway,
+    _is_runnable_file,
+    _launcher_sibling_gateway,
+    canonical_install_path,
+    path_gateway,
+)
+
 PLUGIN_MUTATION_TIMEOUT = 90
 ALERT_DISPOSITION_MIN_TIMEOUT_SECONDS = 30
 ALERT_DISPOSITION_MAX_TIMEOUT_SECONDS = 300
@@ -1777,19 +1787,9 @@ class OrchestratorClient:
 # CLI stays usable in the very same shell that ran ``make all``.
 
 
-GATEWAY_BIN_NAME = "defenseclaw-gateway"
-
-_CANONICAL_INSTALL_DIR = os.path.join(os.path.expanduser("~"), ".local", "bin")
 
 
-def canonical_install_path() -> str:
-    """Return the canonical install path written by the installers.
 
-    Exposed so error messages can reference the exact same path instead of
-    each hard-coding the string.
-    """
-    name = GATEWAY_BIN_NAME + (".exe" if os.name == "nt" else "")
-    return os.path.join(_CANONICAL_INSTALL_DIR, name)
 
 
 def resolve_gateway_binary() -> str | None:
@@ -1876,65 +1876,10 @@ GATEWAY_NOT_FOUND_MESSAGE = (
 )
 
 
-def path_gateway(*, honor_override: bool = True) -> str | None:
-    """The gateway to run: ``DEFENSECLAW_GATEWAY_BIN``, else this ``defenseclaw``'s own install, else ``PATH``.
-
-    Callers that ran ``shutil.which("defenseclaw-gateway")`` took whatever
-    comes first on ``PATH``: with a DefenseClaw Setup 0.8.x install listed
-    before this one (a terminal opened before the install), that was the 0.8.x
-    gateway, which rejects this release's ``config.yaml`` (GAP-0099).
-
-    ``honor_override=False`` skips ``DEFENSECLAW_GATEWAY_BIN``. The variable is not
-    custody-checked, so a caller that runs the result to change state passes it,
-    as Doctor's lifecycle code ignores the variable: uninstall, hook registration,
-    sidecar start and restart. ``resolve_gateway_binary`` (the general CLI
-    lookup), the readiness report and the trusted verifier (which checks
-    custody itself) follow it.
-    """
-    override = os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip() if honor_override else ""
-    if override:
-        return override
-    return _launcher_sibling_gateway() or shutil.which(GATEWAY_BIN_NAME)
 
 
-def _launcher_sibling_gateway() -> str | None:
-    """The gateway of the install this ``defenseclaw`` runs from, or None.
-
-    Two layouts: the gateway next to a ``defenseclaw`` launcher this process
-    was started as, and the per-user installer's, where a native launcher in
-    ``~/.local/bin`` starts the CLI from the data folder's ``.venv`` and the
-    gateway stays in ``~/.local/bin`` (the process then runs as
-    ``<data>/.venv/Scripts/defenseclaw``, with no gateway beside it).
-    """
-
-    launcher = sys.argv[0] if sys.argv else ""
-    name = os.path.basename(launcher).lower().removesuffix(".exe")
-    if name == "defenseclaw":
-        candidate = os.path.join(os.path.dirname(os.path.abspath(launcher)), os.path.basename(canonical_install_path()))
-        if _is_runnable_file(candidate):
-            return candidate
-    return _installer_venv_gateway()
 
 
-def _installer_venv_gateway() -> str | None:
-    """The installer's gateway when this process runs from the installer's ``.venv``.
-
-    Only the installer's own layout counts: the interpreter's environment is
-    ``<data folder>/.venv`` with the installer's ``installer`` folder beside it,
-    and the installer's ``defenseclaw`` launcher sits next to the gateway. A
-    project's own ``.venv`` or a source checkout still resolves the gateway
-    through ``PATH``.
-    """
-    prefix = os.path.abspath(sys.prefix)
-    if os.path.basename(prefix).lower() != ".venv" or not os.path.isdir(
-        os.path.join(os.path.dirname(prefix), "installer")
-    ):
-        return None
-    gateway_path = canonical_install_path()
-    launcher = os.path.join(os.path.dirname(gateway_path), "defenseclaw" + (".exe" if os.name == "nt" else ""))
-    if _is_runnable_file(gateway_path) and os.path.lexists(launcher):
-        return gateway_path
-    return None
 
 
 def resolve_trusted_gateway_binary() -> str | None:
@@ -2007,11 +1952,6 @@ def packaged_windows_install_root() -> str | None:
     return root
 
 
-def _is_runnable_file(path: str) -> bool:
-    try:
-        return os.path.isfile(path) and os.access(path, os.X_OK)
-    except OSError:
-        return False
 
 
 def local_policy_digest(cfg: Any, *, timeout: float = 60) -> dict | None:

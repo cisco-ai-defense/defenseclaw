@@ -26,7 +26,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
-from defenseclaw import gateway
+from defenseclaw import gateway, gateway_path
 
 
 class ResolveGatewayBinaryTests(unittest.TestCase):
@@ -41,11 +41,11 @@ class ResolveGatewayBinaryTests(unittest.TestCase):
         # duration of each test.  Patching a module-level constant is
         # the simplest way to redirect both canonical_install_path() and
         # the fallback lookup inside resolve_gateway_binary().
-        self._orig_install_dir = gateway._CANONICAL_INSTALL_DIR
-        gateway._CANONICAL_INSTALL_DIR = self._tmp.name
+        self._orig_install_dir = gateway_path._CANONICAL_INSTALL_DIR
+        gateway_path._CANONICAL_INSTALL_DIR = self._tmp.name
         self.addCleanup(
             lambda: setattr(
-                gateway,
+                gateway_path,
                 "_CANONICAL_INSTALL_DIR",
                 self._orig_install_dir,
             )

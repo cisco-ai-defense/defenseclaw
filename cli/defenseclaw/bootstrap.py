@@ -53,7 +53,7 @@ from defenseclaw.connector_paths import (
     opencode_custody_text,
     opencode_unsafe_plugin_paths,
 )
-from defenseclaw.gateway import path_gateway
+from defenseclaw.gateway_path import path_gateway
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.scanner_binary import MCP_SCANNER_BINARY, SKILL_SCANNER_BINARY, resolve_scanner_binary
 
