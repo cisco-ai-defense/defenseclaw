@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -43,31 +44,100 @@ _POPEN_BOUND_AT_IMPORT = subprocess.Popen
 
 _POWERSHELL_NAMES = frozenset({"powershell", "powershell.exe", "pwsh", "pwsh.exe"})
 _ENV_NAMES = frozenset({"env", "env.exe"})
-_ENV_OPTIONS_WITH_A_VALUE = frozenset({"-u", "--unset", "-C", "--chdir"})
+# The options of env(1). A long option may be shortened to any unambiguous
+# prefix; --help and --version run no command.
+_ENV_SHORT_FLAGS = "i0vuCSa"
+_ENV_SHORT_WITH_A_VALUE = "uCSa"
+_ENV_LONG_WITH_A_VALUE = ("unset", "chdir", "split-string", "argv0")
+_ENV_LONG_WITHOUT_A_VALUE = (
+    "ignore-environment",
+    "null",
+    "debug",
+    "block-signal",
+    "default-signal",
+    "ignore-signal",
+    "list-signal-handling",
+)
+_ENV_LONG_THAT_RUN_NOTHING = ("help", "version")
+_ENV_LONG = _ENV_LONG_WITH_A_VALUE + _ENV_LONG_WITHOUT_A_VALUE + _ENV_LONG_THAT_RUN_NOTHING
+# No word left to run: told apart from a word that is the None object, which
+# is what a test launches when it builds [POWERSHELL, ...] without PowerShell.
+_NO_COMMAND = object()
 
 
 def _base_name(word) -> str:  # type: ignore[no-untyped-def]
     return re.split(r"[\\/]", str(os.fspath(word)))[-1].lower()
 
 
+def _split_words(text: str) -> list[str]:
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return text.split()
+
+
+def _after_env_options(words) -> list:  # type: ignore[no-untyped-def]
+    # The words env(1) goes on to run, given the words that follow its own
+    # name: its options and NAME=VALUE assignments skipped, and the string of
+    # -S / --split-string split into words that are read as more env
+    # arguments. Empty when env runs nothing (no command, --help, --version,
+    # an unknown option, an option without its value).
+    words, i, options = list(words), 0, True
+    while i < len(words) and isinstance(words[i], str):
+        word = words[i]
+        i += 1
+        if options and word == "--":
+            options = False
+        elif options and word.startswith("--"):
+            name, has_value, value = word[2:].partition("=")
+            named = [n for n in _ENV_LONG if n == name] or [n for n in _ENV_LONG if n.startswith(name)]
+            if len(named) != 1 or named[0] in _ENV_LONG_THAT_RUN_NOTHING:
+                return []
+            if named[0] in _ENV_LONG_WITH_A_VALUE:
+                if not has_value:
+                    if i >= len(words) or not isinstance(words[i], str):
+                        return []
+                    value, i = words[i], i + 1
+                if named[0] == "split-string":
+                    words[i:i] = _split_words(value)
+        elif options and word.startswith("-"):
+            letters = word[1:]
+            for position, letter in enumerate(letters):
+                if letter not in _ENV_SHORT_FLAGS:
+                    return []
+                if letter in _ENV_SHORT_WITH_A_VALUE:
+                    value = letters[position + 1 :]
+                    if not value:
+                        if i >= len(words) or not isinstance(words[i], str):
+                            return []
+                        value, i = words[i], i + 1
+                    if letter == "S":
+                        words[i:i] = _split_words(value)
+                    break
+        elif "=" in word[1:]:
+            continue
+        else:
+            return words[i - 1 :]
+    return words[i:]
+
+
 def _command_word(args, kwargs):  # type: ignore[no-untyped-def]
     # The word a launch runs: the executable, or the first word of the argv or
-    # shell string, looking through `env [options] [NAME=VALUE ...]` wrappers,
-    # which hand the next word to the operating system unchanged.
-    if kwargs.get("executable") is not None:
-        return kwargs["executable"]
+    # shell string, looking through `env` wrappers, which hand the command word
+    # to the operating system unchanged. _NO_COMMAND when nothing is run.
     if isinstance(args, str):
         words = args.split()
     elif isinstance(args, (list, tuple)):
         words = list(args)
     else:
         words = [args]
-    while words and isinstance(words[0], (str, os.PathLike)) and _base_name(words[0]) in _ENV_NAMES:
-        rest, i = words[1:], 0
-        while i < len(rest) and isinstance(rest[i], str) and (rest[i].startswith("-") or "=" in rest[i]):
-            i += 2 if rest[i] in _ENV_OPTIONS_WITH_A_VALUE else 1
-        words = rest[i:]
-    return words[0] if words else None
+    if kwargs.get("executable") is not None and not kwargs.get("shell"):
+        words = [kwargs["executable"], *words[1:]]
+    while words:
+        if not isinstance(words[0], (str, os.PathLike)) or _base_name(words[0]) not in _ENV_NAMES:
+            return words[0]
+        words = _after_env_options(words[1:])
+    return _NO_COMMAND
 
 
 def _launches_a_missing_powershell(args, kwargs) -> bool:  # type: ignore[no-untyped-def]
@@ -76,9 +146,12 @@ def _launches_a_missing_powershell(args, kwargs) -> bool:  # type: ignore[no-unt
     # launches "None"; either may sit behind an `env` wrapper. A test that
     # names the interpreter directly ("pwsh", "powershell.exe") launches a
     # program that is not there. All three are the same missing interpreter.
+    # A launch that runs some other command, or none (`env --help`), is not.
     if POWERSHELL is not None:
         return False
     word = _command_word(args, kwargs)
+    if word is _NO_COMMAND:
+        return False
     if word is None or str(word) == "None":
         return True
     if not isinstance(word, (str, os.PathLike)):
@@ -4797,6 +4870,90 @@ def test_a_test_that_runs_powershell_is_skipped_where_it_is_not_installed(
         assert subprocess.run([env, "A=1", sys.executable, "-c", "pass"], check=False).returncode == 0
     arg_twin = [sys.executable, "-c", "import sys; sys.exit(sys.argv[1:] != ['None', 'pwsh'])", "None", "pwsh"]
     assert subprocess.run(arg_twin, check=False).returncode == 0
+
+
+_ORDINARY_ENV_LAUNCHES = [
+    ["env"],
+    ["env", "--help"],
+    ["env", "--version"],
+    ["env", "-i"],
+    ["env", "-0"],
+    ["env", "-"],
+    ["env", "A=1", "python3", "-c", "pass"],
+    ["env", "-u", "HOME", "python3"],
+    ["env", "--", "python3"],
+    ["env", "-S", "python3 -c pass"],
+    ["env", "-iS", "python3 -c pass"],
+    ["env", "--split-string=python3 -c pass"],
+    ["env", "--split=python3 -c pass"],
+    ["env", "-S", "env -i python3 -c pass"],
+    ["/usr/bin/env", "--unset=HOME", "--chdir=/tmp", "python3"],
+    ["env", "python3", "pwsh", "None"],
+    ["env", "-S", 'python3 -c "print(1)" None pwsh'],
+]
+_MISSING_POWERSHELL_ENV_LAUNCHES = [
+    ["env", "pwsh"],
+    ["env", "-i", "PATH=/usr/bin", "pwsh.exe"],
+    ["env", "-S", "pwsh -NoProfile"],
+    ["env", "--split-string=pwsh -NoProfile"],
+    ["env", "--split=pwsh -NoProfile"],
+    ["env", "-iS", "powershell.exe -NoProfile"],
+    ["env", "-S", "A=1 pwsh -c x"],
+    ["env", "-S", "-u HOME pwsh"],
+    ["env", "-S", "env -i pwsh"],
+    ["env", "-uHOME", "pwsh"],
+    ["env", "--", "pwsh"],
+    ["/usr/bin/env", "env", "-i", "pwsh"],
+    ["env", None],
+    ["env", "-i", "None"],
+    ["env", "-S", "None -NoProfile"],
+]
+
+
+@pytest.mark.parametrize("argv", _ORDINARY_ENV_LAUNCHES, ids=[" ".join(map(str, a)) for a in _ORDINARY_ENV_LAUNCHES])
+def test_an_ordinary_env_launch_is_not_taken_for_a_missing_powershell(
+    monkeypatch: pytest.MonkeyPatch, argv: list
+) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
+    monkeypatch.setattr(shutil, "which", lambda *args, **kwargs: None)
+    assert not _launches_a_missing_powershell(argv, {})
+
+
+@pytest.mark.parametrize(
+    "argv",
+    _MISSING_POWERSHELL_ENV_LAUNCHES,
+    ids=[" ".join(map(str, a)) for a in _MISSING_POWERSHELL_ENV_LAUNCHES],
+)
+def test_an_env_launch_of_a_missing_powershell_is_recognized_in_every_form(
+    monkeypatch: pytest.MonkeyPatch, argv: list
+) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
+    monkeypatch.setattr(shutil, "which", lambda *args, **kwargs: None)
+    assert _launches_a_missing_powershell(argv, {})
+
+
+def test_env_actions_that_run_no_powershell_still_run_where_it_is_not_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = shutil.which("env")
+    if env is None:
+        pytest.skip("env is not installed")
+    quoted = shlex.quote(sys.executable)
+    launches = [
+        [env, "--help"],
+        [env, "-i"],
+        [env, "-S", f"{quoted} -c pass"],
+        [env, f"--split-string={quoted} -c pass"],
+    ]
+    # What each launch does with the gate absent; the gate must leave it alone.
+    expected = [subprocess.run(argv, capture_output=True, check=False).returncode for argv in launches]
+    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
+    _skip_powershell_calls_when_missing(monkeypatch)
+    for argv, returncode in zip(launches, expected):
+        assert subprocess.run(argv, capture_output=True, check=False).returncode == returncode
+    if expected[2] == 0:
+        with pytest.raises(pytest.skip.Exception):
+            subprocess.run([env, "-S", "pwsh -NoProfile -Command exit"], check=False)
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
