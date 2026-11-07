@@ -291,13 +291,17 @@ func actionFunctionBodyEffect(function *syntax.FuncDecl, call *syntax.CallExpr, 
 // order: nil for a field of a value not known. A word that is one quoted
 // field is one field whatever its value; any other word with a known value is
 // the fields actionWordFields reads, none for an empty value. The list stops
-// at a word whose fields are not known (an unquoted pattern or brace character, a list
-// such as "$@", an unknown value, a separator set the command changed): the
+// at a word whose fields are not known (an unquoted pattern character, a brace pair
+// that expands, a list such as "$@", an unknown value, a separator set the command changed): the
 // parameters after it have no known position.
 func actionCallParameters(call *syntax.CallExpr, state actionValues, cwd, home string) []*string {
 	var params []*string
 	_, ifs := state["IFS"]
 	for _, arg := range call.Args[1:] {
+		if actionWordBraceExpands(arg) {
+			break
+		}
+		arg = actionUnescapedLiterals(arg)
 		value, known := actionWordValue(arg, state, cwd, home)
 		if actionWordQuotedField(arg) {
 			if known {
@@ -337,10 +341,10 @@ func actionWordFields(word *syntax.Word, state actionValues, cwd, home string) (
 		}
 		switch part := part.(type) {
 		case *syntax.Lit:
-			// Literal text with a pattern or brace character expands to
-			// names the reader does not know; quoted text and the value of an
-			// expansion are not brace-expanded.
-			if i > 0 && strings.HasPrefix(part.Value, "~") || strings.ContainsAny(part.Value, "*?[{") {
+			// Literal text with a pattern character expands to names the
+			// reader does not know; a brace pair that expands was refused
+			// above, and one that does not stays literal.
+			if i > 0 && strings.HasPrefix(part.Value, "~") || strings.ContainsAny(part.Value, "*?[") {
 				return nil, false
 			}
 			field, open = field+value, true
@@ -373,9 +377,77 @@ func actionWordFields(word *syntax.Word, state actionValues, cwd, home string) (
 	return fields, true
 }
 
+// actionWordBraceExpands reports a word the shell brace-expands: an unquoted
+// pair of braces with an unquoted comma or ".." at its top level. Quoted text,
+// an escaped brace and the value of an expansion are never brace-expanded, and
+// a pair without a comma or a sequence, such as {name}, is literal text.
+func actionWordBraceExpands(word *syntax.Word) bool {
+	var text []byte
+	for _, part := range word.Parts {
+		lit, ok := part.(*syntax.Lit)
+		if !ok {
+			// Anything but literal text counts as one ordinary character.
+			text = append(text, "x"...)
+			continue
+		}
+		for i := 0; i < len(lit.Value); i++ {
+			if lit.Value[i] == 0x5c && i+1 < len(lit.Value) {
+				text = append(text, "xx"...)
+				i++
+				continue
+			}
+			text = append(text, lit.Value[i])
+		}
+	}
+	for start := range text {
+		if text[start] != 0x7b {
+			continue
+		}
+		depth := 0
+		for end := start; end < len(text); end++ {
+			switch {
+			case text[end] == 0x7b:
+				depth++
+			case text[end] == 0x7d:
+				depth--
+			case depth == 1 && (text[end] == 0x2c || text[end] == 0x2e && end+1 < len(text) && text[end+1] == 0x2e):
+				return true
+			}
+			if depth == 0 {
+				break
+			}
+		}
+	}
+	return false
+}
+
+// actionUnescapedLiterals returns the word with the backslash of each escaped
+// character of its literal parts removed, which is the text the shell reads;
+// the printed form of a literal part keeps the backslash.
+func actionUnescapedLiterals(word *syntax.Word) *syntax.Word {
+	plain := &syntax.Word{Parts: make([]syntax.WordPart, len(word.Parts))}
+	for i, part := range word.Parts {
+		plain.Parts[i] = part
+		if lit, ok := part.(*syntax.Lit); ok && strings.Contains(lit.Value, "\\") {
+			var text strings.Builder
+			for j := 0; j < len(lit.Value); j++ {
+				if lit.Value[j] == 0x5c && j+1 < len(lit.Value) {
+					j++
+					if lit.Value[j] == 0x0a {
+						continue
+					}
+				}
+				text.WriteByte(lit.Value[j])
+			}
+			plain.Parts[i] = &syntax.Lit{Value: text.String()}
+		}
+	}
+	return plain
+}
+
 // actionWordQuotedField reports a word that expands to exactly one field:
-// quoted text, and literal text without a pattern or brace character, but no
-// unquoted expansion and no list such as "$@".
+// quoted text, and literal text without a pattern character, but no unquoted
+// expansion and no list such as "$@".
 func actionWordQuotedField(word *syntax.Word) bool {
 	if word == nil || len(word.Parts) == 0 {
 		return false
@@ -384,7 +456,7 @@ func actionWordQuotedField(word *syntax.Word) bool {
 		switch part := part.(type) {
 		case *syntax.SglQuoted:
 		case *syntax.Lit:
-			if strings.ContainsAny(part.Value, "*?[{~") {
+			if strings.ContainsAny(part.Value, "*?[~") {
 				return false
 			}
 		case *syntax.DblQuoted:

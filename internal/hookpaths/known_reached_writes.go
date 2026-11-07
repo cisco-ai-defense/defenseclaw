@@ -390,14 +390,12 @@ func (s *knownShadow) call(call *syntax.CallExpr, certain bool) {
 				s.eval(args[1:], certain)
 			}
 		case "unset":
-			// A removed function gives the name back to the builtin.
-			for _, arg := range args[1:] {
-				if word, known := StaticWord(arg, s.home); known {
-					delete(s.sure, word)
-				} else {
-					clear(s.sure)
-				}
+			if !skipsFunctions && s.sure[name] {
+				// A function named unset runs in its place.
+				s.functionBodies(name, certain)
+				return
 			}
+			s.unset(args[1:])
 		case "alias", "enable", "source", ".":
 			s.renameAll()
 		default:
@@ -406,6 +404,35 @@ func (s *knownShadow) call(call *syntax.CallExpr, certain bool) {
 			}
 		}
 		return
+	}
+}
+
+// unset applies a call of the builtin: a removed function gives the name back
+// to the builtin. With -v or -n and no -f the operands are variables, so no
+// function is removed; any other option, or none, can remove one.
+func (s *knownShadow) unset(args []*syntax.Word) {
+	variables, functions := false, false
+	for len(args) > 0 {
+		option, known := StaticWord(args[0], s.home)
+		if !known || !strings.HasPrefix(option, "-") || option == "-" {
+			break
+		}
+		args = args[1:]
+		if option == "--" {
+			break
+		}
+		variables = variables || strings.ContainsAny(option, "vn")
+		functions = functions || strings.Contains(option, "f")
+	}
+	if variables && !functions {
+		return
+	}
+	for _, arg := range args {
+		if word, known := StaticWord(arg, s.home); known {
+			delete(s.sure, word)
+		} else {
+			clear(s.sure)
+		}
 	}
 }
 
@@ -490,6 +517,77 @@ func knownLeavesEarly(tree syntax.Node, home string) bool {
 		if call, ok := node.(*syntax.CallExpr); ok && len(call.Args) != 0 {
 			name, known := StaticWord(call.Args[0], home)
 			leaves = leaves || !known || name == "return" || name == "break" || name == "continue"
+		}
+		return !leaves
+	})
+	return leaves
+}
+
+// calledFunctionsEndLoop reports that a function the loop can call has a loop
+// control (or a command the reader cannot name), which ends the pass of the
+// loop that calls it. A return only leaves the function, and a function the
+// loop does not call changes nothing for it. Commands that run text or a
+// handler the reader cannot follow (eval, trap, source) may call any function.
+func (r *knownReached) calledFunctionsEndLoop(loop syntax.Node) bool {
+	byName := map[string][]*syntax.FuncDecl{}
+	for _, definition := range r.definitions {
+		if definition.decl.Name != nil {
+			name := knownUnshadowed(definition.decl.Name.Value)
+			byName[name] = append(byName[name], definition.decl)
+		}
+	}
+	seen := map[string]bool{}
+	for pending := []syntax.Node{loop}; len(pending) != 0; {
+		tree := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		var names []string
+		anyFunction := false
+		syntax.Walk(tree, func(node syntax.Node) bool {
+			if call, ok := node.(*syntax.CallExpr); ok && len(call.Args) != 0 {
+				name, known := StaticWord(call.Args[0], r.home)
+				switch name {
+				case "eval", "trap", "source", ".", "alias":
+					anyFunction = true
+				}
+				names = append(names, knownUnshadowed(name))
+				anyFunction = anyFunction || !known
+			}
+			return true
+		})
+		if anyFunction {
+			for _, decls := range byName {
+				for _, decl := range decls {
+					if knownBreaksOut(decl, r.home) {
+						return true
+					}
+				}
+			}
+			return false
+		}
+		for _, name := range names {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			for _, decl := range byName[name] {
+				if knownBreaksOut(decl, r.home) {
+					return true
+				}
+				pending = append(pending, decl.Body)
+			}
+		}
+	}
+	return false
+}
+
+// knownBreaksOut reports a loop control or a command the reader cannot name
+// in the tree of a function a loop calls.
+func knownBreaksOut(tree syntax.Node, home string) bool {
+	leaves := false
+	syntax.Walk(tree, func(node syntax.Node) bool {
+		if call, ok := node.(*syntax.CallExpr); ok && len(call.Args) != 0 {
+			name, known := StaticWord(call.Args[0], home)
+			leaves = leaves || !known || name == "break" || name == "continue"
 		}
 		return !leaves
 	})
@@ -956,10 +1054,7 @@ func (r *knownReached) forClause(clause *syntax.ForClause, states []actionValues
 	var flow actionLoopFlow
 	// The body of a loop over a fixed list runs in order, once for each item,
 	// unless a loop control or return can end a pass early.
-	early := knownLeavesEarly(clause, r.home)
-	for _, definition := range r.definitions {
-		early = early || knownLeavesEarly(definition.decl, r.home)
-	}
+	early := knownLeavesEarly(clause, r.home) || r.calledFunctionsEndLoop(clause)
 	for _, state := range states {
 		name, items, fixed := actionFixedForItems(clause, state, r.cwd, r.home)
 		if _, set := state["IFS"]; fixed && !set && r.ifsAssigned {
