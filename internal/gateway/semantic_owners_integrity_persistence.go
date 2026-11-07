@@ -2787,6 +2787,12 @@ func matchesActiveDefenseClawStateInLine(
 	lineStaysOff func() bool,
 	clientTargets map[string]string,
 ) bool {
+	if candidate.Flavor == actionfacts.PathFlavorPOSIX && actionfacts.ManagedAgentSettingsPath(exactSemanticPathValue(candidate)) {
+		// The machine policy files DefenseClaw publishes for an agent are
+		// protected like its own state, whoever the active user is
+		// (rel-1-0-6:GAP-0734).
+		return true
+	}
 	relative, ok := activeHomeRelative(facts, candidate)
 	if runtime.GOOS == "linux" && !pathCaseFoldHost && candidate.Flavor == actionfacts.PathFlavorPOSIX {
 		relative, ok = exactActiveDefenseClawRelative(facts, candidate)
