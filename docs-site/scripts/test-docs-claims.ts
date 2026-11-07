@@ -1361,7 +1361,7 @@ function namesLauncherCommand(sentence: string, name: string): boolean {
   if (name === 'help') return /`help`|\bhelp(?:,| and| or) (?:and |or )?(?:`?--)?version\b|\bversion(?:,| and| or) (?:and |or )?help\b/.test(sentence);
   if (name === '--version') return /`--version`|\bhelp(?:,| and| or) (?:and |or )?(?:`?--)?version\b|\bversion(?:,| and| or) (?:and |or )?help\b/.test(sentence);
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`\`${escaped}\`|\\bdefenseclaw ${escaped}(?![\\w-])`).test(sentence);
+  return new RegExp(`\`${escaped}\`|\\bdefenseclaw ${escaped}(?![\\w-])|\\b${escaped} command\\b`).test(sentence);
 }
 
 // The refusal itself quotes the offered commands; it is checked on its own.
@@ -1379,7 +1379,18 @@ const packagedLauncher = /\b(?:packaged|installed|managed|standard user's|user's
 // Words that state, limit or deny: any of them next to a command of the
 // table in a managed context makes the sentence a claim about the launcher.
 const limitingWords = /\b(?:not|no|nor|neither|(?<!read-)only|just|solely|merely|limit\w*|restrict\w*|confin\w*|refus\w*|reject\w*|den(?:y|ies|ied)|block\w*|unavailable|cannot|without|except\w*|but|other than|instead|fail\w*|lacks?|missing|disabled?|removed?|hidden)\b|n't|\bexits? (?:with )?(?:status |code )?`?2\b/i;
-const blanketClaim = /\bcommands (?:on|in) this page\b/i;
+// A claim about "the commands on this page" is true or false depending on the
+// page, so it is never allowed: a sentence must name the commands it means.
+const blanketClaim = /\b(?:commands|steps|instructions|examples)(?: \w+)? (?:on|in|of) (?:this|the) page\b|\bthis page's (?:commands|steps)\b|\bevery (?:command|step) on (?:this|the) page\b/i;
+const blanketBeside = /\b(?:commands|steps|instructions) (?:above|below)\b/i;
+// A negation of what a command shows is guidance about its output, not a
+// statement that the command is refused: "does not show another account's state".
+const outputNegation = /\b(?:does(?:n't| not)|do(?:n't| not)|never|cannot|can(?:'t| not)|will not|won't)\s+(?:show|display|print|list|report|reveal|include|read|return|expose|contain|output|see|view|give|disclose)\b/gi;
+// What is true of managed Windows: it has no launcher, and the per-user
+// commands exit `1` there; a sentence that says so is not a claim.
+const windowsManaged = /\b(?:managed|standalone)\b[^.]*\bWindows\b|\bWindows\b[^.]*\b(?:managed|standalone)\b/i;
+const windowsTruth = /\bexits? (?:with )?(?:status |code )?`?1\b|\bdefenseclaw\.exe\b/i;
+const userAudience = /\b(?:to|for) (?:the |a |standard )*users?\b|\bthe user(?:'s)?\b/i;
 const noLauncher = /\b(?:no|not a|without a|has no|have no) (?:`?defenseclaw`? )?launcher\b|\blauncher (?:is|does) not\b|\bno `?defenseclaw`? command\b/i;
 
 // The sentences of a page that claim anything about what the managed
@@ -1401,15 +1412,22 @@ function launcherClaims(raw: string, table: LauncherCommands): string[] {
     const flat = block.split(/\s+/).join(' ');
     for (const sentence of withoutRefusalQuote(flat.split(generated).join('')).split(/(?<=[.!?;])\s+(?=[A-Z`*(])/)) {
       if (!managedContext.test(sentence)) continue;
-      if (blanketClaim.test(sentence) && !flat.includes(generated)) {
+      if (blanketClaim.test(sentence) || (blanketBeside.test(sentence) && limitingWords.test(sentence.replace(outputNegation, '')))) {
         found.push(sentence);
         continue;
       }
-      const launcher = packagedLauncher.test(sentence);
-      if (!launcher && !defenseclawCommand.test(sentence)) continue;
       const named = table.offered.filter((name) => namesLauncherCommand(sentence, name));
-      const crossPlatform = launcher && named.length >= 1 && /\bWindows\b/.test(sentence) && !noLauncher.test(sentence);
-      if (named.length >= 2 || (named.length >= 1 && limitingWords.test(sentence)) || crossPlatform) found.push(sentence);
+      if (named.length === 0) continue;
+      // The sentence is about what a user runs: the launcher, the `defenseclaw`
+      // command, or the user who types it. Administrator commands such as the
+      // gateway's `status` and `verify` are not the launcher's.
+      if (!(packagedLauncher.test(sentence) || defenseclawCommand.test(sentence) || userAudience.test(sentence))) continue;
+      const denial = limitingWords.test(sentence.replace(outputNegation, ''));
+      // The Linux and macOS launcher given to Windows, in any wording: a
+      // sentence about managed Windows that names an offered command and does
+      // not say Windows has no launcher or that its commands exit `1`.
+      const windows = windowsManaged.test(sentence.replace(/\benterprise windows \w+/g, '')) && !noLauncher.test(sentence) && !windowsTruth.test(sentence);
+      if (named.length >= 2 || denial || windows) found.push(sentence);
     }
   }
   return found;
@@ -1458,7 +1476,13 @@ describe('what a managed user can and cannot run (GAP-0635)', () => {
     assert.equal(claims('On a managed computer `defenseclaw guardrail profile explain` is not something a standard user can use.'), 1, 'guardrail profile explain denied');
     assert.equal(claims('On a managed computer the user\'s `defenseclaw` confines itself to `sandbox` commands.'), 1, 'a single command and a limiting word');
     assert.equal(claims('The per-user setup commands on this page do not run on a managed computer.'), 1, 'a blanket denial without the generated sentence');
-    assert.equal(claims(`The per-user setup commands on this page do not run on a managed computer. ${generated}`), 0, 'a blanket denial next to the generated sentence');
+    assert.equal(claims(`The commands on this page do not run on a managed computer. ${generated}`), 1, 'a blanket denial next to the generated sentence is still false when the page has a working command');
+    assert.equal(claims('On managed Linux, the `status` command is unavailable to the user.'), 1, 'a denial that names the command without the defenseclaw prefix');
+    assert.equal(claims('On managed Windows, the packaged `defenseclaw` runs `status` for standard users.'), 1, 'Windows given one offered command');
+    assert.equal(claims('On a managed Windows computer `status` runs for standard users.'), 1, 'Windows given one offered command without a launcher word');
+    assert.equal(claims('On a managed Windows computer `status`, `audit findings` and `connector list-backups` have no per-user gateway to read and exit `1`.'), 0, 'what Windows really does');
+    assert.equal(claims('On managed Linux and macOS, `defenseclaw status` does not show another account\'s protection state.'), 0, 'own-status privacy guidance is about output');
+    assert.equal(claims('On managed Linux and macOS, `defenseclaw status` is not available to a second account.'), 1, 'a denial that is not about output');
     assert.equal(claims('On managed Windows the launcher runs only `sandbox` commands, `status`, `guardrail profile explain`, `help` and `--version`.'), 1, 'the Linux and macOS launcher given to Windows');
     assert.equal(claims('On a managed Windows computer the standard user\'s `defenseclaw` runs `sandbox` commands and `status`.'), 1, 'Windows named with a short list');
     assert.equal(claims('On a managed Windows computer the launcher is not installed, so use the administrator\'s `defenseclaw.exe`.'), 0, 'Windows has no launcher: a true statement');
