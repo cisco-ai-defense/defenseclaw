@@ -527,11 +527,20 @@ def _older_gateway_note(binary: str) -> str:
     """
     from defenseclaw import __version__
 
+    # As the check itself ran: the pinned file, without the loader variables.
+    environment = {k: v for k, v in os.environ.items() if not _is_exec_control_environment_name(k)}
     try:
-        out = subprocess.run(
-            [binary, "--version"], capture_output=True, text=True, timeout=10, check=False
+        out = run_pinned_executable(
+            [binary, "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+            env=environment,
         ).stdout
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, UnsafePathError):
         return ""
     found = _GATEWAY_VERSION.search(out or "")
     mine = re.match(r"(\d+)\.(\d+)\.(\d+)", __version__)

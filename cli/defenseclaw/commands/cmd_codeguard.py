@@ -226,10 +226,10 @@ def _format_code_scan_command(executable: str) -> str:
 
 
 def _path_gateway_is(executable: str) -> bool:
-    from defenseclaw.gateway import path_gateway
+    import shutil
 
     try:
-        found = path_gateway()
+        found = shutil.which("defenseclaw-gateway")
         if not found:
             return False
         return os.path.normcase(os.path.realpath(found)) == os.path.normcase(os.path.realpath(executable))

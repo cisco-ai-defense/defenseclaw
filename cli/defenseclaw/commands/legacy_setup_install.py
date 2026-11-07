@@ -131,9 +131,11 @@ def find(platform_name: str) -> LegacySetupInstall | None:
         step = f"Uninstall it with its own uninstaller (Apps & Features), or ask an administrator to remove {root}."
     elif not isinstance(install_root, str) or not _same_path(install_root, root):
         problem = f"its install state names another program folder ({install_root})"
+        # The folder comes from a file the user can edit: name it, never advise deleting it.
+        named = "".join(ch for ch in str(install_root) if ch.isprintable())[:260]
         step = (
-            f"Uninstall DefenseClaw Setup from Apps & Features, or delete {root} and the folder "
-            "its install state names yourself."
+            f"Uninstall DefenseClaw Setup from Apps & Features. Its install state names {named}: "
+            "ask an administrator to check that folder. DefenseClaw does not remove it."
         )
     elif _inside(os.path.abspath(sys.executable), root):
         problem = "this command runs from that install"
@@ -171,9 +173,38 @@ def hook_entries(install: LegacySetupInstall, config_files: list[str]) -> list[s
         except OSError:
             continue
         # JSON escapes each backslash; settings written by hand may use slashes.
-        if any(prefix in _slashes(text.replace("\\\\", "\\")) for prefix in prefixes):
+        commands = _slashes(_hook_command_text(text).replace("\\\\", "\\"))
+        if any(prefix in commands for prefix in prefixes):
             found.append(path)
     return found
+
+
+def _hook_command_text(text: str) -> str:
+    """The part of an agent's settings file where a hook command can be.
+
+    JSON: the strings under a ``hooks`` key. Any other format (TOML, or JSON
+    with comments): the lines that set a ``command``. An allow-list rule or a
+    note that mentions the Setup folder is not a registration (L2).
+    """
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return "\n".join(line for line in text.splitlines() if "command" in line.lower())
+    found: list[str] = []
+
+    def walk(node: object, in_hooks: bool) -> None:
+        if isinstance(node, str):
+            if in_hooks:
+                found.append(node)
+        elif isinstance(node, dict):
+            for key, value in node.items():
+                walk(value, in_hooks or key == "hooks")
+        elif isinstance(node, list):
+            for value in node:
+                walk(value, in_hooks)
+
+    walk(data, False)
+    return "\n".join(found)
 
 
 def hook_refusal(install: LegacySetupInstall, files: list[str], rerun: str) -> str:
@@ -182,8 +213,9 @@ def hook_refusal(install: LegacySetupInstall, files: list[str], rerun: str) -> s
     return (
         f"{name} at {install.root} still has hooks registered in {', '.join(files)}. "
         "This release's hooks would sit beside them and the two disagree, so init changes nothing. "
-        "Run `defenseclaw uninstall` to remove the DefenseClaw Setup 0.8.x install (your data folder is kept), "
-        f"then run `{rerun}` again."
+        "No command removes only that install: `defenseclaw uninstall` removes DefenseClaw Setup 0.8.x "
+        "(your data folder is kept) and also stops this release's gateway and removes the hooks of the "
+        f"connectors it has configured. Run it, then run `{rerun}` again to set them up."
     )
 
 
@@ -306,17 +338,13 @@ def _ownership_problem(root: str) -> str:
     from defenseclaw.commands.windows_uninstall_helper import _validate_root
     from defenseclaw.file_permissions import _windows_acl_snapshot, _windows_current_user_sid
 
-    link_step = (
-        f"Delete the link {root} (or the link above it) yourself; the folder it points to is not "
-        "touched. Then run the command again."
-    )
     if _is_reparse(root):
-        return Problem("its program folder is a link", link_step)
+        return Problem("its program folder is a link", _link_step(root))
     try:
         # A link above the folder redirects it as well as one at the folder.
         _validate_root(root, "its program folder")
     except ValueError as exc:
-        return Problem(str(exc), link_step)
+        return Problem(str(exc), _link_step(root))
     try:
         owner, _null_dacl, _entries = _windows_acl_snapshot(root)
         current = _windows_current_user_sid()
@@ -329,13 +357,47 @@ def _ownership_problem(root: str) -> str:
     # the group. The folder is still the user's own Known Folder path with no
     # link above it, and removing it takes no authority this account lacks.
     if owner not in (current, _ADMINISTRATORS_SID):
-        who = owner or "unknown"
+        who = _account_label(owner)
         return Problem(
             f"its program folder belongs to another account ({who}); "
             "sign in as that account to uninstall it, or delete the folder yourself",
             f"Ask an administrator, or the account that owns it ({who}), to remove {root}.",
         )
     return ""
+
+
+def _link_step(root: str) -> str:
+    """The step for a link at or above *root*: name the link found, and delete nothing else."""
+    link = ""
+    candidate = os.path.abspath(root)
+    while True:
+        if os.path.lexists(candidate) and _is_reparse(candidate):
+            link = candidate
+            break
+        parent = os.path.dirname(candidate)
+        if parent == candidate:
+            break
+        candidate = parent
+    if not link:
+        return f"Ask an administrator to check {root}, then run the command again."
+    return (
+        f"{link} is a link. If it is a stray link to the DefenseClaw folder, delete only that link "
+        "(the folder it points to is not touched) and run the command again. If it is part of how "
+        f"this profile is set up, do not delete it: ask an administrator to remove {root}."
+    )
+
+
+def _account_label(sid: str) -> str:
+    """The account name and SID of *sid* ("unknown" when empty, the SID alone when the name cannot be read)."""
+    if not sid:
+        return "unknown"
+    try:
+        from defenseclaw.inventory.claw_inventory import _windows_account_name_for_sid
+
+        name = _windows_account_name_for_sid(sid)
+    except Exception:  # noqa: BLE001 - the name is best effort; the SID still names the owner.
+        return sid
+    return f"{name}, {sid}" if name else sid
 
 
 def _path_step(error: BaseException, path: str) -> str:

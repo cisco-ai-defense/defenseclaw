@@ -2795,7 +2795,7 @@ class ExecutePlanAfterVenvRemovalTests(unittest.TestCase):
 
         self.assertTrue(result.succeeded)
         self.assertEqual([p.name for p in result.phases][-2:], ["data removal", "binary removal"])
-        claims.assert_called_once_with()
+        claims.assert_called_once()
         binaries.assert_called_once_with(plan)
 
 

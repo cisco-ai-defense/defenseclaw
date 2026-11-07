@@ -502,7 +502,7 @@ class OlderGatewayNoteTests(unittest.TestCase):
     def _note(self, version_output: str, cli_version: str = "1.0.9") -> str:
         done = subprocess.CompletedProcess([], 0, stdout=version_output, stderr="")
         with (
-            patch.object(config_inspect.subprocess, "run", return_value=done),
+            patch.object(config_inspect, "run_pinned_executable", return_value=done),
             patch("defenseclaw.__version__", cli_version),
         ):
             return config_inspect._older_gateway_note("C:\\old\\defenseclaw-gateway.exe")
@@ -525,7 +525,7 @@ class OlderGatewayNoteTests(unittest.TestCase):
         self.assertEqual(self._note("no version here"), "")
 
     def test_a_gateway_that_cannot_be_asked_adds_nothing(self):
-        with patch.object(config_inspect.subprocess, "run", side_effect=OSError("gone")):
+        with patch.object(config_inspect, "run_pinned_executable", side_effect=OSError("gone")):
             self.assertEqual(config_inspect._older_gateway_note("x"), "")
 
     def test_a_failed_check_carries_the_note(self):

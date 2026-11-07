@@ -38,6 +38,7 @@ import shutil
 import stat
 import subprocess
 import sys
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -320,8 +321,12 @@ def _api_port_claimed_by_other_account(port: int, prefix: str = _API_PORT_CLAIM_
     return stat.S_ISREG(info.st_mode) and info.st_uid != os.getuid()
 
 
-def remove_own_api_port_claims() -> None:
-    """Drop this account's port claims (``uninstall --all``). Best effort."""
+def remove_own_api_port_claims(ports: Collection[int] | None = None) -> None:
+    """Drop this account's port claims. Best effort.
+
+    *ports* limits it to the claims of those ports (the ones a stopped gateway
+    held); None drops every claim of this account.
+    """
     windows = _windows_port_claims()
     if os.name == "nt" and not windows:
         return
@@ -332,8 +337,13 @@ def remove_own_api_port_claims() -> None:
         return
     own = _windows_own_sid() if windows else ""
     for name in names:
-        if not name.startswith((_API_PORT_CLAIM_PREFIX, _GUARDRAIL_PORT_CLAIM_PREFIX)):
+        prefix = next((p for p in (_API_PORT_CLAIM_PREFIX, _GUARDRAIL_PORT_CLAIM_PREFIX) if name.startswith(p)), "")
+        if not prefix:
             continue
+        if ports is not None:
+            number = name[len(prefix) :]
+            if not (number.isascii() and number.isdigit() and int(number) in ports):
+                continue
         path = os.path.join(claim_dir, name)
         if windows:
             sid = _windows_claim_sid(path)
@@ -726,6 +736,25 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         if new_config and getattr(cfg, "_source_config_version", 0) == 0:
             cfg_mod.prepare_fresh_v8_config(cfg)
 
+    # First step after the config loads, before anything is set aside, written or
+    # started: hooks of a DefenseClaw Setup 0.8.x install in the agent's settings
+    # (GAP-0101). Init names that install and the next step instead of starting
+    # the sidecar and rolling back over the two disagreeing registrations.
+    roster = _first_run_connector_roster(options, connector)
+    legacy_hooks = _first_run_legacy_hook_refusal(roster, options.rerun_command)
+    if legacy_hooks:
+        setup.append(StepResult("Older install", "fail", legacy_hooks, "defenseclaw uninstall"))
+        return FirstRunReport(
+            status="needs_attention",
+            config_file=str(cfg_mod.config_path()),
+            data_dir=cfg.data_dir,
+            connector=connector,
+            profile=profile,
+            setup=setup,
+            next_commands=["defenseclaw uninstall", options.rerun_command],
+            connector_mode_warnings=connector_mode_warnings,
+        )
+
     if new_config:
         port_note = choose_first_run_api_port(cfg)
         if port_note:
@@ -827,24 +856,6 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             profile=profile,
             setup=setup,
             next_commands=["defenseclaw init"],
-            connector_mode_warnings=connector_mode_warnings,
-        )
-
-    # Before any write: hooks of a DefenseClaw Setup 0.8.x install in the agent's
-    # settings (GAP-0101). Init names that install and the next step instead of
-    # starting the sidecar and rolling back over the two disagreeing registrations.
-    roster = _first_run_connector_roster(options, connector)
-    legacy_hooks = _first_run_legacy_hook_refusal(roster, options.rerun_command)
-    if legacy_hooks:
-        setup.append(StepResult("Older install", "fail", legacy_hooks, "defenseclaw uninstall"))
-        return FirstRunReport(
-            status="needs_attention",
-            config_file=str(cfg_mod.config_path()),
-            data_dir=cfg.data_dir,
-            connector=connector,
-            profile=profile,
-            setup=setup,
-            next_commands=["defenseclaw uninstall", options.rerun_command],
             connector_mode_warnings=connector_mode_warnings,
         )
 
@@ -1294,17 +1305,18 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
     else:
         steps.append(StepResult("Cisco AI Defense", "skip", "scanner_mode is local"))
 
-    if path_gateway() is None:
+    gateway_binary = path_gateway()
+    if gateway_binary is None:
         steps.append(
             StepResult(
                 "Gateway binary",
                 "warn",
-                "defenseclaw-gateway not on PATH",
+                "defenseclaw-gateway not found next to this defenseclaw or on PATH",
                 "make gateway-install",
             )
         )
     else:
-        steps.append(StepResult("Gateway binary", "pass", "found on PATH"))
+        steps.append(StepResult("Gateway binary", "pass", f"found at {gateway_binary}"))
 
     return steps
 
@@ -2100,7 +2112,12 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
     """
     gw = path_gateway()
     if not gw:
-        return StepResult("Sidecar", "warn", "defenseclaw-gateway not on PATH", "make gateway-install")
+        return StepResult(
+            "Sidecar",
+            "warn",
+            "defenseclaw-gateway not found next to this defenseclaw or on PATH",
+            "make gateway-install",
+        )
     pid_file = gateway_pid_path(cfg.data_dir)
     if _pid_file_running(pid_file):
         # Compare what the live sidecar booted with against what

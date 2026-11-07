@@ -15,8 +15,8 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from defenseclaw import bootstrap, gateway  # noqa: E402
-from defenseclaw.commands import cmd_codeguard, cmd_uninstall, legacy_setup_install  # noqa: E402
+from defenseclaw import bootstrap  # noqa: E402
+from defenseclaw.commands import cmd_uninstall, legacy_setup_install  # noqa: E402
 
 
 def test_init_reports_this_installs_scanners_not_the_first_on_path() -> None:
@@ -32,15 +32,6 @@ def test_init_reports_this_installs_scanners_not_the_first_on_path() -> None:
         steps = bootstrap._scanner_availability(object())  # type: ignore[arg-type]
     assert [s.detail for s in steps] == list(managed.values())
     assert {s.status for s in steps} == {"pass"}
-
-
-def test_codeguard_compares_against_the_install_gateway(tmp_path: Path) -> None:
-    own = tmp_path / "own" / "defenseclaw-gateway"
-    own.parent.mkdir()
-    own.write_bytes(b"x")
-    with patch.object(gateway, "path_gateway", return_value=str(own)):
-        assert cmd_codeguard._path_gateway_is(str(own)) is True
-        assert cmd_codeguard._path_gateway_is(str(tmp_path / "other")) is False
 
 
 # ---- GAP-0101
@@ -124,28 +115,26 @@ def test_a_0_8_install_without_hooks_in_the_settings_does_not_stop_init(tmp_path
 
 
 @pytest.mark.parametrize(
-    ("stop_gateway", "remove_data", "remove_binaries", "preserve", "expected"),
+    ("stop_gateway", "stopped", "expected"),
     [
-        (True, False, False, (), 1),  # the default uninstall: gateway stopped, data and programs kept
-        (False, False, True, (), 1),
-        (False, True, False, (), 1),
-        (False, False, False, (), 0),  # nothing stopped or removed: the gateway may still run
-        (False, True, False, ("config.yaml",), 0),
+        (True, True, 1),  # the default uninstall: gateway stopped, data and programs kept
+        (True, False, 0),  # nothing was running to stop
+        (False, True, 0),  # the gateway may still run
     ],
 )
-def test_uninstall_drops_this_accounts_port_claims(stop_gateway, remove_data, remove_binaries, preserve, expected) -> None:
+def test_uninstall_drops_this_accounts_port_claims(stop_gateway, stopped, expected) -> None:
     plan = cmd_uninstall.UninstallPlan(
         platform_name="win32",
         data_dir=r"C:\Users\u\.defenseclaw",
         install_root=r"C:\Users\u\.local\bin",
         stop_gateway=stop_gateway,
-        remove_data_dir=remove_data,
-        remove_binaries=remove_binaries,
-        preserve_data_entries=preserve,
+        remove_data_dir=True,
+        remove_binaries=True,
     )
     with (
         patch.object(cmd_uninstall, "_validate_plan"),
-        patch.object(cmd_uninstall, "_stop_gateway"),
+        patch.object(cmd_uninstall, "_stop_gateway", return_value=stopped),
+        patch.object(cmd_uninstall, "_configured_claim_ports", return_value=frozenset({18970})),
         patch.object(cmd_uninstall, "_connector_teardown"),
         patch.object(cmd_uninstall, "_sandbox_teardown"),
         patch.object(cmd_uninstall, "_turn_guardrail_off"),

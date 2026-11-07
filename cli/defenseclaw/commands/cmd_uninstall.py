@@ -71,7 +71,7 @@ from defenseclaw import config as config_module
 
 # Imported here, not where it is used: by then the data removal has deleted
 # the virtual environment this CLI runs from (GAP-1397).
-from defenseclaw.bootstrap import remove_own_api_port_claims
+from defenseclaw.bootstrap import _DEFAULT_GUARDRAIL_PORT, remove_own_api_port_claims
 from defenseclaw.commands import legacy_setup_install, windows_uninstall_helper
 from defenseclaw.commands.cmd_doctor import _codex_otel_marked_kept
 from defenseclaw.connector_paths import claude_settings_paths, codex_home
@@ -663,6 +663,25 @@ def _configured_gateway_ports() -> frozenset[int]:
     return frozenset({_DEFAULT_GATEWAY_API_PORT})
 
 
+def _configured_claim_ports() -> frozenset[int]:
+    """The API and guardrail ports this account's config.yaml names (the defaults when it cannot be read).
+
+    These are the ports a gateway stop releases; their claim files in the shared
+    claim folder are this account's to drop (cowork-1-0-8 GAP-0102).
+    """
+    ports = set(_configured_gateway_ports())
+    guardrail = _DEFAULT_GUARDRAIL_PORT
+    try:
+        data_dir = str(config_module.default_data_path())
+        if config_module.config_path_for_data_dir(data_dir).is_file():
+            guardrail = int(config_module.load().guardrail.port)
+    except Exception:  # noqa: BLE001 - an unreadable config falls back to the default port.
+        pass
+    if 0 < guardrail < 65536:
+        ports.add(guardrail)
+    return frozenset(ports)
+
+
 def _codex_gateway_exporters(otel, ports: frozenset[int]) -> list[tuple[str, str]]:
     """Codex [otel] exporters that only point at the DefenseClaw gateway port, as (field, target).
 
@@ -1132,7 +1151,7 @@ def _build_plan(
         gateway_path=(
             os.path.join(install_root, "defenseclaw-gateway.exe")
             if platform_name == "win32"
-            else (path_gateway() or os.path.join(install_root, "defenseclaw-gateway"))
+            else (path_gateway(honor_override=False) or os.path.join(install_root, "defenseclaw-gateway"))
         ),
         binary_targets=binary_targets,
         data_bound_launchers=data_bound_launchers,
@@ -2687,8 +2706,11 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
     if plan.sandbox_teardown:
         # Before the sidecar stops: the daemon deletes its own sandboxes.
         run_phase("sandbox teardown", lambda: _sandbox_teardown(plan))
+    # Read before the data goes: the ports of the gateway this run stops.
+    claim_ports = _configured_claim_ports() if plan.stop_gateway else frozenset()
+    gateway_stopped: list[bool] = []
     if plan.stop_gateway:
-        run_phase("gateway stop", lambda: _stop_gateway(plan))
+        run_phase("gateway stop", lambda: gateway_stopped.append(bool(_stop_gateway(plan))))
     if plan.connectors:
         run_phase("connector teardown", lambda: _connector_teardown(plan))
         if not plan.remove_data_dir:
@@ -2796,13 +2818,13 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
             run_phase("launcher removal", lambda: _remove_data_bound_launchers(plan))
     if plan.remove_data_dir and not plan.preserve_data_entries:
         _remove_empty_plugin_cache()
-    if plan.stop_gateway or plan.remove_binaries or (plan.remove_data_dir and not plan.preserve_data_entries):
-        # The gateway start leaves this account's API-port claim where every
-        # account's init reads it (%ProgramData% on Windows, /var/tmp). The
-        # default uninstall stops the gateway and keeps the data, so the claim
-        # stayed; with the gateway stopped it is stale, and the next gateway
-        # start claims its port again (cowork-1-0-8 GAP-0102).
-        remove_own_api_port_claims()
+    if gateway_stopped and gateway_stopped[0]:
+        # The gateway start leaves this account's port claims where every
+        # account's init reads them (%ProgramData% on Windows, /var/tmp). With
+        # the gateway stopped its claims are stale, and the next gateway start
+        # claims its ports again (cowork-1-0-8 GAP-0102). Only the ports this
+        # stop released, and only after it worked.
+        remove_own_api_port_claims(claim_ports)
     if plan.remove_binaries and not deferred:
         run_phase("binary removal", lambda: _remove_binaries(plan))
     elif plan.remove_binaries:
@@ -3804,16 +3826,17 @@ def _pid_file_names_a_live_process(path: str) -> bool:
     return True
 
 
-def _stop_gateway(plan: UninstallPlan | None = None) -> None:
+def _stop_gateway(plan: UninstallPlan | None = None) -> bool:
+    """Stop the sidecar: True when `stop` worked, False when there was nothing to stop."""
     gw = plan.gateway_path if plan is not None else path_gateway()
     if gw is None:
         ux.subhead("sidecar not on PATH — nothing to stop")
-        return
+        return False
     waiters: list[_WindowsProcessWaiter] = []
     try:
         if plan is not None and not os.path.isfile(gw):
             ux.subhead("owned sidecar is not installed — nothing to stop")
-            return
+            return False
         if plan is not None and plan.platform_name == "win32":
             waiters = _capture_managed_processes(plan)
         watchdog = subprocess.run(
@@ -3838,7 +3861,7 @@ def _stop_gateway(plan: UninstallPlan | None = None) -> None:
             # gateway is not running (and it cannot run there), so there is
             # nothing of this install to stop; the teardown continues.
             ux.subhead("no per-user sidecar runs for this account on this managed host — nothing to stop")
-            return
+            return False
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout or "unknown error").strip()
             raise click.ClickException(f"could not stop sidecar: {detail}")
@@ -3846,6 +3869,7 @@ def _stop_gateway(plan: UninstallPlan | None = None) -> None:
         _close_process_waiters(waiters)
         waiters = []
         ux.ok("sidecar stopped")
+        return True
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
         raise click.ClickException(f"could not stop sidecar: {exc}") from exc
     finally:

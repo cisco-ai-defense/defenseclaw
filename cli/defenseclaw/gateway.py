@@ -822,9 +822,12 @@ def _per_user_connected_verifier() -> str:
     if packaged_windows_install_root():
         candidates = [packaged_windows_gateway_path() or ""]
     else:
+        # env, this install's own layout, PATH, canonical: a sibling that
+        # fails the custody check still lets a trusted PATH gateway be tried.
         candidates = [
             os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip(),
-            path_gateway() or "",
+            _launcher_sibling_gateway() or "",
+            shutil.which(GATEWAY_BIN_NAME) or "",
             canonical_install_path(),
         ]
     for candidate in dict.fromkeys(candidates):
@@ -1817,7 +1820,7 @@ def resolve_gateway_binary() -> str | None:
     5. :func:`canonical_install_path` — the ``~/.local/bin`` fallback
        that keeps ``defenseclaw tui`` working in the same shell that
        just ran ``make all``.
-    5. The enterprise package's gateway on a managed Linux or macOS host.
+    6. The enterprise package's gateway on a managed Linux or macOS host.
 
     ``None`` only if every option above fails to resolve to a runnable
     file on disk.  Callers own the user-facing error message.
@@ -1827,10 +1830,6 @@ def resolve_gateway_binary() -> str | None:
         # A corroborated package must fail closed when its sibling is missing;
         # never fall through to a working-directory/PATH shadow.
         return packaged_windows_gateway_path()
-
-    override = os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip()
-    if override:
-        return override
 
     # The installers put both binaries in one directory: the gateway next to
     # this launcher is this release's own, so it wins over a PATH that lists
@@ -1877,14 +1876,20 @@ GATEWAY_NOT_FOUND_MESSAGE = (
 )
 
 
-def path_gateway() -> str | None:
-    """The gateway of this ``defenseclaw``'s own install, else the first on ``PATH``.
+def path_gateway(*, honor_override: bool = True) -> str | None:
+    """The gateway to run: ``DEFENSECLAW_GATEWAY_BIN``, else this ``defenseclaw``'s own install, else ``PATH``.
 
     Callers that ran ``shutil.which("defenseclaw-gateway")`` took whatever
     comes first on ``PATH``: with a DefenseClaw Setup 0.8.x install listed
     before this one (a terminal opened before the install), that was the 0.8.x
     gateway, which rejects this release's ``config.yaml`` (GAP-0099).
+
+    ``honor_override=False`` skips ``DEFENSECLAW_GATEWAY_BIN``, for the uninstall
+    plan, which accepts only a gateway named ``defenseclaw-gateway``.
     """
+    override = os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip() if honor_override else ""
+    if override:
+        return override
     return _launcher_sibling_gateway() or shutil.which(GATEWAY_BIN_NAME)
 
 
