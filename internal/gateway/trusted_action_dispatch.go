@@ -213,14 +213,15 @@ type trustedActionRequest struct {
 	// resolve (an empty map value: an unreadable folder, a link loop) and
 	// this gateway cannot resolve either (rel-1-0-2:GAP-0690).
 	unresolvedTarget *bool
-	// provenTarget, when set, is told that the authorized-keys proof found
-	// a protected path the call writes (not only a write it could not rule
-	// out): the finding keeps its block in every profile (shellFileProven).
-	provenTarget *bool
 	// evidenceCWD places a simple command whose cwd the gateway cannot see
 	// (ProtectHome) where the managed hook client keyed its evidence: the
 	// client's cwd followed through the command's static cd.
 	evidenceCWD string
+	// shellProof is shared by the levels of one nested dispatch: a level that
+	// proves the call writes a protected file (shellWritesProvenProtectedFile)
+	// tells the levels above it, whose own reading of the same call may have
+	// lost the operand (an unreadable home word in a managed twin).
+	shellProof *bool
 	// parentPatch is the whole shell call of a simple-command child. A stage
 	// such as the apply_patch of @'...'@ | apply_patch reads an envelope that
 	// only the whole text shows: when every apply_patch of that text reads a
@@ -287,6 +288,9 @@ func dispatchTrustedAction(
 	parent context.Context,
 	request trustedActionRequest,
 ) (findings []RuleFinding) {
+	if request.shellProof == nil {
+		request.shellProof = new(bool)
+	}
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
 	if ManagedEnterpriseActive() {
 		return nil

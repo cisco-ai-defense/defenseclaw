@@ -1530,8 +1530,6 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	evidence := request
 	evidence.overBudgetOmission = &overBudget
 	evidence.unresolvedTarget = &unresolved
-	proven := false
-	evidence.provenTarget = &proven
 	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(evidence, facts)
 	if !symlinkWrite && !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
 		(request.Connector == "claudecode" || request.Connector == "codex") &&
@@ -1601,19 +1599,11 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				// what it is, not as a key write (rel-1-0-2:GAP-0690).
 				title = unresolvedWriteTargetTitle
 			}
-			// The proof of this finding is the existing link (or copy of a
-			// link) the call writes through; a write the call may create a
-			// link for, or one nothing could resolve, is not proven.
-			mark := shellFileNone
-			if symlinkWrite && proven && title != archiveBeforeWriteTitle && title != unresolvedWriteTargetTitle {
-				mark = shellFileProven
-			}
 			return append(kept, adjustConfidence(input.Tool, RuleFinding{
 				RuleID: named.ID, Title: title, Severity: rule.Severity,
 				Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
 				Tags: append([]string(nil), named.Tags...), LineNumber: 1,
 				enforcement: findingEnforcementAllowed,
-				shellFile:   mark,
 			}))
 		}
 	}

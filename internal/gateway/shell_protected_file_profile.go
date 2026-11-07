@@ -78,12 +78,18 @@ func trustedShellCommandInput(input actionfacts.Input) bool {
 // a child or a twin of the call): the outermost call, which runs last, has
 // the whole command and decides.
 //
-// The class is the findings the readers could not prove. A call that
-// writes a protected file the structure of the command names, or one it
-// reaches through a link on disk, a value the command assigns, or an
-// apply_patch envelope directive, is not in the class: it keeps its block in
-// every profile (owner steer, Wave-3 rule: a protected file or link named
-// directly or through a known value stays blocked). A call that may reach the
+// The class is the findings the readers could not prove. Proof is evidence
+// about the mutable target, never about the words of the call: a mutated
+// path of the command structure (also after the links on disk are followed),
+// a copy, move or link operand that names a protected file or is, or holds,
+// a link on disk that reaches one, a link of the command to a protected name,
+// an apply_patch envelope directive, a target the managed hook client
+// resolved, or the evidence the finding producer itself found (a write
+// through an existing link). A call so proven is not in the class: it keeps
+// its block in every profile (owner steer, Wave-3 rule: a protected file or
+// link named directly or through a known value stays blocked). A protected
+// name in a comment, in text the call only prints or writes elsewhere, or in
+// a value the call overwrites proves nothing. A call that may reach the
 // DefenseClaw state is self-protection, not the class either: the
 // protected-write owners also report a write that reaches the state through
 // a link, and such a finding keeps its block in every profile
@@ -105,8 +111,12 @@ func markShellProtectedFileFindings(request trustedActionRequest, findings []Rul
 	if trustedShellCommandInput(request.Input) {
 		switch {
 		case slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.shellFile == shellFileProven }) ||
+			request.shellProof != nil && *request.shellProof ||
 			shellWritesProvenProtectedFile(request):
 			mark = shellFileProven
+			if request.shellProof != nil {
+				*request.shellProof = true
+			}
 		case !shellCommandMayReachState(request):
 			mark = shellFileUnproven
 		}
@@ -133,9 +143,25 @@ func markShellProtectedFileFindings(request trustedActionRequest, findings []Rul
 func shellWritesProvenProtectedFile(request trustedActionRequest) bool {
 	input := request.Input
 	facts := actionfacts.Analyze(input)
+	// The hookpaths reading of the command resolves the values it assigns and
+	// sees a value that is overwritten: its protected-target decision is the
+	// proof, and a call whose variable targets it proves ordinary has no
+	// other: the analysis below reads the first value a variable took.
+	if command, ok := trustedBashCommandInput(input); ok {
+		if request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(command, input.CWD, input.ActiveHome, input.DialectHint, clientGlobFacts(request)) == hookpaths.ProtectedTargetDecision {
+			return true
+		}
+		if !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
+			(request.Connector == "claudecode" || request.Connector == "codex") &&
+			hookpaths.ProvedOrdinaryVariableTargets(command, input.CWD, facts.ActiveHome) {
+			return false
+		}
+	}
 	for _, path := range facts.Paths {
 		command, ok := integrityCommandByID(facts, path.CommandID)
-		if !ok || !integrityCommandMutatesPath(command, path) {
+		// A link to a protected file is a protected name taken, whichever
+		// operand the readers call the write.
+		if !ok || !integrityCommandMutatesPath(command, path) && programBaseName(command.Program) != "ln" {
 			continue
 		}
 		if protectedFilePath(facts, path) {
@@ -154,10 +180,25 @@ func shellWritesProvenProtectedFile(request trustedActionRequest) bool {
 	// never a comment, a quoted data word or a value the command overwrites.
 	// A copy, move or link names its source operand as well: moving a file of
 	// that name into a place the command cannot read is the write.
+	sourceCWD := facts.CWD
+	if !filepath.IsAbs(sourceCWD) {
+		sourceCWD = request.ResolvedWriteTargets[hookpaths.CWDKey]
+	}
+	// A name the managed hook client resolved to an ordinary file, in a call
+	// that makes no link, is a decoy: the folder it sits in is not the SSH folder.
+	linkFree := false
+	if command, ok := trustedBashCommandInput(input); ok {
+		made := hookpaths.CommandLinksWithFacts(input.Tool, command, sourceCWD, input.ActiveHome, request.ResolvedWriteTargets)
+		linkFree = made.Known() && !made.HasAliases()
+	}
 	for _, path := range facts.Paths {
 		command, ok := integrityCommandByID(facts, path.CommandID)
 		if !ok || !protectedOperandName(path.Value, false) && !protectedOperandName(path.Normalized, false) &&
 			!protectedOperandName(path.Resolved, false) {
+			continue
+		}
+		if resolved := request.ResolvedWriteTargets[placedPath(path, sourceCWD)]; linkFree && resolved != "" &&
+			!protectedFilePath(facts, actionfacts.PathFact{Resolved: resolved, Absolute: true}) {
 			continue
 		}
 		if integrityCommandMutatesPath(command, path) || fileMovingProgram(command.Program) {
@@ -181,10 +222,6 @@ func shellWritesProvenProtectedFile(request trustedActionRequest) bool {
 	// protected file: the copy carries the link, and a write through its new
 	// name is the write (the managed hook client reads the source links for a
 	// gateway that cannot see the home).
-	sourceCWD := facts.CWD
-	if !filepath.IsAbs(sourceCWD) {
-		sourceCWD = request.ResolvedWriteTargets[hookpaths.CWDKey]
-	}
 	for _, path := range facts.Paths {
 		command, ok := integrityCommandByID(facts, path.CommandID)
 		if !ok || path.Access != actionfacts.PathAccessRead || !fileMovingProgram(command.Program) {
@@ -217,6 +254,11 @@ func shellWritesProvenProtectedFile(request trustedActionRequest) bool {
 			operands = append(operands, operand.Path)
 		}
 		for _, operand := range operands {
+			// A name a link the command makes reaches a protected file by.
+			if linked, ok := links.Target(hookpaths.OperandPath(operand, cwd)); ok &&
+				protectedFilePath(facts, actionfacts.PathFact{Resolved: linked, Absolute: true}) {
+				return true
+			}
 			for _, target := range links.CopiedLinkTargets(hookpaths.OperandPath(operand, cwd), request.ResolvedWriteTargets) {
 				if protectedFilePath(facts, actionfacts.PathFact{Resolved: target, Absolute: true}) {
 					return true
@@ -226,13 +268,6 @@ func shellWritesProvenProtectedFile(request trustedActionRequest) bool {
 	}
 	// The managed hook client resolved the call to a protected target.
 	if request.ProtectedHomeHook && request.ResolvedWriteTargets[hookpaths.ActionDecisionKey] == hookpaths.ProtectedTargetDecision {
-		return true
-	}
-	// The path readers of hookpaths place every target of the command in the
-	// user home (links, cd, brace lists, archives and copies included); the
-	// decision is theirs, not a side reader of the gateway.
-	if command, ok := trustedBashCommandInput(input); ok &&
-		request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(command, input.CWD, input.ActiveHome, input.DialectHint, clientGlobFacts(request)) == hookpaths.ProtectedTargetDecision {
 		return true
 	}
 	for _, target := range request.ResolvedWriteTargets {
