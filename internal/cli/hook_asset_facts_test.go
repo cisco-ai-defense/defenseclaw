@@ -18,6 +18,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // GAP-0570, GAP-0576: the standalone hook reports, read as the user, the
@@ -170,6 +171,20 @@ func TestHookAssetFactsMarkTheRelocatedCodexConfig(t *testing.T) {
 	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
 	if got := facts("codex"); got == nil || got.Relocated {
 		t.Fatalf("CODEX_HOME=~/.codex facts = %+v, want it unmarked", got)
+	}
+	// The digest binds the claim to the complete definition.
+	t.Setenv("CODEX_HOME", relocated)
+	if got := facts("codex"); got == nil || got.Digest != config.MCPLaunchDigest(config.MCPServerEntry{URL: "http://127.0.0.1:28561/mcp"}) || got.Digest == "" {
+		t.Fatalf("CODEX_HOME facts = %+v, want the digest of the definition", got)
+	}
+	// A project .codex/config.toml takes precedence over the user config and
+	// is marked as a source the enumerator does not publish.
+	write(filepath.Join(project, ".codex"), "http://127.0.0.1:28563/mcp")
+	if got := facts("codex"); got == nil || got.URL != "http://127.0.0.1:28563/mcp" || got.Relocated || !got.ProjectScope || got.Digest == "" {
+		t.Fatalf("project facts = %+v, want the project definition marked", got)
+	}
+	if err := os.RemoveAll(filepath.Join(project, ".codex")); err != nil {
+		t.Fatal(err)
 	}
 	t.Setenv("CODEX_HOME", relocated)
 	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"mcpServers":{"notes":{"type":"http","url":"http://127.0.0.1:28562/mcp"}}}`), 0o600); err != nil {

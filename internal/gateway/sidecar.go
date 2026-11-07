@@ -8900,10 +8900,10 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		})
 	})
 	if watcherUsesEnrolledUserDirs(s.currentConfig()) {
-		api.SetMCPDefinitionPublished(func(connector, server, home, cwd string, def config.MCPServerEntry) bool {
-			return s.installWatcher.Load().MCPDefinitionPublished(watcher.MCPAdmissionQuery{
+		api.SetMCPPublished(func(connector, server, home, cwd, digest string) watcher.MCPPublication {
+			return s.installWatcher.Load().MCPPublished(watcher.MCPAdmissionQuery{
 				Connector: connector, Server: server, Home: home, CWD: cwd,
-			}, def)
+			}, digest)
 		})
 	}
 	api.SetMCPRefreshBeforeCall(s.refreshEnrolledMCPBeforeCall)

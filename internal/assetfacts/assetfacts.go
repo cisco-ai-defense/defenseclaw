@@ -100,6 +100,15 @@ type MCPServer struct {
 	// managed Windows gateway admits it only when the enumerator published
 	// the same definition (GAP-0686).
 	Relocated bool `json:"relocated,omitempty"`
+	// ProjectScope marks a definition the hook read from a project
+	// .codex/config.toml, which takes precedence over the user config and
+	// which a managed Windows enumerator does not publish (GAP-0686).
+	ProjectScope bool `json:"project,omitempty"`
+	// Digest is config.MCPLaunchDigest of the complete definition the hook
+	// read, set with Relocated or ProjectScope. The fields above are bounded
+	// and carry no environment, so a gateway that holds the published record
+	// compares the digest, never the bounded fields.
+	Digest string `json:"digest,omitempty"`
 }
 
 // Encode renders facts as a header value, or "" when there is nothing to
@@ -189,13 +198,23 @@ func bounded(facts Facts) Facts {
 			lossy = lossy || out.Args[len(out.Args)-1] != strings.TrimSpace(arg)
 		}
 		commandLine := server.Source == SourceCommandLine
+		unpublished := false
 		if commandLine {
 			out.Source = SourceCommandLine
 		} else {
-			out.Relocated = server.Relocated
+			out.Relocated, out.ProjectScope = server.Relocated, server.ProjectScope
+			out.Digest = cleanDigest(server.Digest)
+			unpublished = out.Relocated || out.ProjectScope
 		}
 		facts.MCP = nil
 		switch {
+		case out.Name != "" && unpublished && (lossy || (out.URL == "" && out.Command == "")):
+			// The definition does not fit (or was already reduced to the name and
+			// digest by an earlier pass): keep the claim without it, so the
+			// gateway still knows an unpublished source runs and judges the
+			// published record by its digest; falling back to the config
+			// files it reads would judge another definition.
+			facts.MCP = &MCPServer{Name: out.Name, Relocated: out.Relocated, ProjectScope: out.ProjectScope, Digest: out.Digest}
 		case out.Name != "" && (out.URL != "" || out.Command != "") && !(commandLine && lossy):
 			facts.MCP = &out
 		case commandLine && facts.MCPUnproven == "":
@@ -206,6 +225,20 @@ func bounded(facts Facts) Facts {
 	}
 	facts.MCPUnproven = clean(facts.MCPUnproven, maxNameBytes)
 	return facts
+}
+
+// cleanDigest keeps a value only when it is a hex SHA-256.
+func cleanDigest(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if len(value) != 64 {
+		return ""
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return ""
+		}
+	}
+	return value
 }
 
 // clean drops a value that is not valid UTF-8, holds a control character or

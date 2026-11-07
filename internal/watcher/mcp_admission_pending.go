@@ -9,7 +9,6 @@ import (
 	"errors"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"time"
 
@@ -181,30 +180,47 @@ func mcpSnapshotFailed(row *audit.SnapshotRow) bool {
 		strings.HasSuffix(fingerprint, unverifiedMCPMark)
 }
 
-// MCPDefinitionPublished reports whether the servers this watcher admits for
-// the caller (q) include one with the URL, command and arguments of def. A
-// managed Windows gateway learns an enrolled account's Codex servers only
-// from the record the enumerator publishes; a definition the account's agent
-// runs that is not in it was never scanned (GAP-0686).
-func (w *InstallWatcher) MCPDefinitionPublished(q MCPAdmissionQuery, def config.MCPServerEntry) bool {
+// MCPPublication is what the servers a watcher admits hold for a tool call.
+type MCPPublication struct {
+	// Entry is the published definition whose launch digest matched.
+	Entry config.MCPServerEntry
+	// Matched says a published server serving the call has that digest.
+	Matched bool
+	// Named says a published server serves the call at all, whatever its
+	// definition: a definition that is not Matched would override it.
+	Named bool
+}
+
+// MCPPublished looks, among the servers this watcher admits for the caller
+// (q), for the definition the caller's agent runs, named by its launch digest
+// (config.MCPLaunchDigest). A managed Windows gateway learns an enrolled
+// account's Codex servers only from the record the enumerator publishes; a
+// definition the agent runs that is not in it was never scanned. The digest
+// covers the whole definition (URL, command, every argument, environment), so
+// a bounded hook fact cannot make a changed or oversized definition look like
+// the scanned one, and the published entry it returns is the complete one to
+// judge (GAP-0686).
+func (w *InstallWatcher) MCPPublished(q MCPAdmissionQuery, digest string) MCPPublication {
+	var out MCPPublication
 	if w == nil {
-		return false
+		return out
 	}
 	servers, err := w.readMCPServers()
 	if err != nil {
-		return false
+		return out
 	}
+	digest = strings.ToLower(strings.TrimSpace(digest))
 	for _, server := range servers {
 		if server.Bundled || !mcpServerServesQuery(server, q) {
 			continue
 		}
-		if strings.TrimSpace(server.URL) == strings.TrimSpace(def.URL) &&
-			strings.TrimSpace(server.Command) == strings.TrimSpace(def.Command) &&
-			slices.Equal(server.Args, def.Args) {
-			return true
+		out.Named = true
+		if digest != "" && config.MCPLaunchDigest(server) == digest {
+			out.Entry, out.Matched = server, true
+			return out
 		}
 	}
-	return false
+	return out
 }
 
 // mcpBaselineMatches reports whether the baseline admission recorded for an
