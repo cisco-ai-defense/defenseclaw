@@ -1200,40 +1200,40 @@ func (d *Daemon) protectedDaemonPIDs() (trackedPID int, watchdogPID int, err err
 	info, readErr := d.readPIDInfo()
 	if readErr == nil {
 		if info.PID <= 0 {
-			return 0, 0, fmt.Errorf(
+			return 0, 0, &pidRecordError{record: PIDFileName, err: fmt.Errorf(
 				"%w: gateway PID file %s contains an invalid PID",
 				ErrUnsafeProcessIdentity,
 				d.pidFile,
-			)
+			)}
 		}
 		trackedPID = info.PID
 	} else if !errors.Is(readErr, os.ErrNotExist) {
-		return 0, 0, fmt.Errorf(
+		return 0, 0, &pidRecordError{record: PIDFileName, err: fmt.Errorf(
 			"%w: gateway PID file %s cannot be trusted: %v",
 			ErrUnsafeProcessIdentity,
 			d.pidFile,
 			readErr,
-		)
+		)}
 	}
 
 	watchdogPID, readErr = d.readWatchdogPID()
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		if managedIdentityHeldByWriter(readErr) {
-			return 0, 0, fmt.Errorf(
+			return 0, 0, &pidRecordError{record: WatchdogPIDFileName, err: fmt.Errorf(
 				"%w: watchdog PID file %s is held by a legacy or live writer; "+
 					"safely stop the previous watchdog and complete the upgrade before retrying "+
 					"(do not delete the PID file while its process may be live): %w",
 				ErrUnsafeProcessIdentity,
 				filepath.Join(d.dataDir, WatchdogPIDFileName),
 				readErr,
-			)
+			)}
 		}
-		return 0, 0, fmt.Errorf(
+		return 0, 0, &pidRecordError{record: WatchdogPIDFileName, err: fmt.Errorf(
 			"%w: watchdog PID file %s cannot be trusted: %v",
 			ErrUnsafeProcessIdentity,
 			filepath.Join(d.dataDir, WatchdogPIDFileName),
 			readErr,
-		)
+		)}
 	}
 	return trackedPID, watchdogPID, nil
 }
