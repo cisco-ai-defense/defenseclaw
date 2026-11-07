@@ -56,7 +56,7 @@ You are an AI agent. Turn one sentence from the user into one rule in a custom r
 
 1. Observe first. Do not switch an agent to action mode, change a fail mode, disable a connector or edit `config.yaml` by hand without the user's yes. `use-pack` edits `config.yaml` through the CLI; ask first.
 2. Never put a real key, token or customer string in a rule or an example.
-3. Stop on a managed computer: exit code `3`, or `"deployment_mode": "managed_enterprise"` in `defenseclaw status --json`. There, the administrator delivers packs.
+3. Stop on a managed computer: exit code `3`, or `"deployment_mode": "managed_enterprise"` in `defenseclaw status --json` ([Managed command availability](/docs/enterprise/managed-commands)). There, the administrator delivers packs.
 4. Never edit the shipped `default`, `strict` or `permissive` packs. Copy one.
 
 ### Steps

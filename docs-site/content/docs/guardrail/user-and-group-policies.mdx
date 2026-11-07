@@ -719,7 +719,8 @@ the machine config, not in a user's home, and apply to every enrolled user.
    macOS report `config_invalid`; Windows argument preflight reports
    `invalid_arguments` (exit `1639`), with the reason in `errors[].message`.
    See [Change the config](/docs/enterprise/lifecycle#change-the-config).
-3. Check the result as root. A managed install has no `defenseclaw` Python CLI,
+3. Check the result as root. A managed install has no `defenseclaw` Python CLI
+   ([Managed command availability](/docs/enterprise/managed-commands)),
    so the checks use the gateway binary and print JSON:
 
    ```bash
