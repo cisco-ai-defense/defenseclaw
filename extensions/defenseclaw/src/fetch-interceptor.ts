@@ -1248,6 +1248,7 @@ const INTERCEPTION_SELF_TEST_INTERVAL_MS = 60_000;
 // A call to this URL, made with an already aborted signal while a copy checks
 // that its own fetch wrapper is still reachable, never leaves the process.
 const REACHABILITY_PROBE_URL = "http://127.0.0.1:1/defenseclaw-transport-probe";
+const REACHABILITY_PROBE_TIMEOUT_MS = 1_000;
 export const INTERCEPTION_PROBE_HEADER = "X-DC-Interception-Probe";
 
 function readUndiciHeader(headers: unknown, name: string): string {
@@ -1483,6 +1484,8 @@ export function createFetchInterceptor(
   let transportGone: (() => boolean) | null = null;
   let reachabilityProbing = false;
   let reachabilityProbeSeen = false;
+  let recheckPending = false;
+  let recheckSeq = 0;
   let originalHttpsRequest: typeof https.request | null = null;
   let originalHttpRequest: typeof http.request | null = null;
   let originalHttpGet: typeof http.get | null = null;
@@ -2485,58 +2488,79 @@ export function createFetchInterceptor(
   }
 
   /**
-   * True when a call made through the global fetch right now still passes
-   * through the wrapper of this copy: another component can wrap every layer
-   * above it, and only a call that gets through shows it is still in place.
-   * A wrapper that does not forward within the same call counts as removed
-   * (the safe side: patching again is guarded, leaving a hole is not).
+   * Ask whether a call made through the global fetch still passes through the
+   * wrapper of this copy: another component can wrap every layer above it, and
+   * only a call that gets through shows it is still in place. The probe stays
+   * armed until the call settles, so a wrapper that forwards later (after an
+   * await, a microtask or a timer) is seen the same as one that forwards at
+   * once. A wrapper that has not forwarded when the timeout ends counts as
+   * removed (the safe side: patching again is guarded, leaving a hole is not).
+   * Resolves when the probe is over; read reachabilityProbeSeen then.
    */
-  function fetchPatchReachable(): boolean {
+  function probeFetchPatch(): Promise<void> {
     reachabilityProbeSeen = false;
     reachabilityProbing = true;
+    let call: Promise<unknown>;
     try {
-      void Promise.resolve(
+      call = Promise.resolve(
         globalThis.fetch(REACHABILITY_PROBE_URL, { signal: AbortSignal.abort() }),
-      ).catch(() => undefined);
+      );
     } catch {
-      // A wrapper that throws does not forward the probe.
-    } finally {
-      reachabilityProbing = false;
+      call = Promise.resolve(); // a wrapper that throws does not forward the probe
     }
-    return reachabilityProbeSeen;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, REACHABILITY_PROBE_TIMEOUT_MS);
+      (timer as { unref?: () => void }).unref?.();
+    });
+    return Promise.race([call.then(() => undefined, () => undefined), timeout]).then(() => {
+      clearTimeout(timer);
+      reachabilityProbing = false;
+    });
   }
 
   /**
    * An older plugin copy reported a stop while this copy holds the transport.
    * If that copy was the one that really held it, its stop put the old
    * transport back over every layer of the patch of this copy: patch again on
-   * top of what is there now, in the same call, so no model call goes out
-   * unguarded. If any layer is still ours, or a call through the global fetch
-   * still reaches the wrapper of this copy, the stop came from a copy that
-   * never held the transport and another component wrapped the layers above
-   * ours: nothing happens (GAP-0745).
+   * top of what is there now, so no model call goes out unguarded. If any layer
+   * is still ours, or a call through the global fetch still reaches the wrapper
+   * of this copy (whether the wrapper above it forwards at once or later), the
+   * stop came from a copy that never held the transport and another component
+   * wrapped the layers above ours: nothing happens (GAP-0745). The decision
+   * waits for the probe call to settle, which takes microtasks, not I/O; a
+   * stop of this copy in between cancels it.
    */
   function recheckTransport(): void {
-    if (!originalFetch || !transportGone || !transportGone() || fetchPatchReachable()) return;
-    console.warn(
-      "[defenseclaw] An older DefenseClaw plugin copy removed the LLM transport patch when it stopped; " +
-        "this copy is patching again.",
-    );
-    originalFetch = null;
-    originalHttpsRequest = null;
-    originalHttpRequest = null;
-    originalHttpGet = null;
-    originalUndiciDispatcher = null;
-    hostUndici = null;
-    originalHostDispatch = null;
-    egressReporter?.stop();
-    egressReporter = null;
-    transportGone = null;
-    _shared.owner = null;
-    start();
+    if (recheckPending || !originalFetch || !transportGone || !transportGone()) return;
+    recheckPending = true;
+    const seq = recheckSeq;
+    void probeFetchPatch().then(() => {
+      recheckPending = false;
+      if (seq !== recheckSeq || reachabilityProbeSeen) return;
+      if (!originalFetch || !transportGone || !transportGone()) return;
+      console.warn(
+        "[defenseclaw] An older DefenseClaw plugin copy removed the LLM transport patch when it stopped; " +
+          "this copy is patching again.",
+      );
+      recheckSeq++;
+      originalFetch = null;
+      originalHttpsRequest = null;
+      originalHttpRequest = null;
+      originalHttpGet = null;
+      originalUndiciDispatcher = null;
+      hostUndici = null;
+      originalHostDispatch = null;
+      egressReporter?.stop();
+      egressReporter = null;
+      transportGone = null;
+      _shared.owner = null;
+      start();
+    });
   }
 
   function stop(): void {
+    recheckSeq++;
     transportGone = null;
     if (originalFetch) {
       globalThis.fetch = originalFetch;

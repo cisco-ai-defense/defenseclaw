@@ -486,8 +486,10 @@ describe("module copies that share the transport, with a live copy of an older b
     await globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
     expect(wrapped).toContain(`http://127.0.0.1:${PORT + 1}/v1/chat/completions`);
 
-    // The holder's stop puts the old transport back over everything above it.
+    // The stop of the holder puts the old transport back over everything above it.
+    // The check of the patch settles within microtasks, before any I/O.
     holder.stop();
+    await settleRecheck();
     expect(globalThis.fetch).not.toBe(baseFetch);
     await globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
     expect(modelCalls(seen)).toEqual([`http://127.0.0.1:${PORT + 1}/v1/chat/completions`]);
@@ -595,6 +597,97 @@ describe("module copies that share the transport, with a live copy of an older b
     expect(modelCalls(seen)).toEqual([`http://127.0.0.1:${PORT + 2}/v1/chat/completions`]);
     later.stop();
     expect(globalThis.fetch).toBe(baseFetch);
+  });
+
+  /** Let a pending check of the transport patch settle (it needs microtasks, not I/O). */
+  function settleRecheck(): Promise<void> {
+    return new Promise((resolve) => setImmediate(resolve));
+  }
+
+  /** The same wrapper as above, but it forwards after an await, as any async instrumentation does. */
+  function wrapFetchAsynchronously(delay: () => Promise<void>): void {
+    const previous = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      await delay();
+      return previous(input, init);
+    }) as typeof fetch;
+  }
+
+  it.each([
+    ["one microtask", () => Promise.resolve()],
+    ["three microtasks", async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); }],
+    ["a timer", () => new Promise<void>((resolve) => setTimeout(resolve, 5))],
+  ])(
+    "another component wraps every layer with a wrapper that forwards after %s, then a copy that never held the transport stops: nothing is patched again, and a later copy uses its own proxy",
+    async (_name, delay) => {
+      const holder = olderBuildCopy(PORT);
+      holder.start();
+      const bystander = olderBuildCopy(PORT + 5);
+      bystander.start();
+      const { createFetchInterceptor } = await loadCopy();
+      const fresh = createFetchInterceptor(PORT + 1);
+      fresh.start();
+      holder.stop();
+      wrapFetchAsynchronously(delay);
+      wrapNodeHttpLayersLikeAnotherComponent();
+      const wrappedFetch = globalThis.fetch;
+
+      bystander.stop();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(globalThis.fetch).toBe(wrappedFetch);
+      fresh.stop();
+      expect(globalThis.fetch).toBe(baseFetch);
+      expect(http.request.name).not.toContain("patched");
+
+      const later = createFetchInterceptor(PORT + 2);
+      later.start();
+      await globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
+      expect(modelCalls(seen)).toEqual([`http://127.0.0.1:${PORT + 2}/v1/chat/completions`]);
+      later.stop();
+      expect(globalThis.fetch).toBe(baseFetch);
+    },
+  );
+
+  it("an older copy removed the patch under an asynchronous wrapper of another component: the patch is put back, no model call goes direct", async () => {
+    const holder = olderBuildCopy(PORT);
+    holder.start();
+    const bystander = olderBuildCopy(PORT + 5);
+    bystander.start();
+    const { createFetchInterceptor } = await loadCopy();
+    const fresh = createFetchInterceptor(PORT + 1);
+    fresh.start();
+    wrapFetchAsynchronously(() => Promise.resolve());
+    wrapNodeHttpLayersLikeAnotherComponent();
+
+    bystander.stop();
+    holder.stop(); // puts the old transport back over everything above it
+    await settleRecheck();
+    expect(globalThis.fetch).not.toBe(baseFetch);
+    await globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
+    expect(modelCalls(seen)).toEqual([`http://127.0.0.1:${PORT + 1}/v1/chat/completions`]);
+    fresh.stop();
+    expect(globalThis.fetch).toBe(baseFetch);
+  });
+
+  it("the current copy stops while the check of its patch is pending: nothing is patched afterwards", async () => {
+    const holder = olderBuildCopy(PORT);
+    holder.start();
+    const bystander = olderBuildCopy(PORT + 5);
+    bystander.start();
+    const { createFetchInterceptor } = await loadCopy();
+    const fresh = createFetchInterceptor(PORT + 1);
+    fresh.start();
+    holder.stop();
+    wrapFetchAsynchronously(() => Promise.resolve());
+    wrapNodeHttpLayersLikeAnotherComponent();
+
+    bystander.stop();
+    fresh.stop();
+    await settleRecheck();
+
+    expect(globalThis.fetch).toBe(baseFetch);
+    expect(http.request.name).not.toContain("patched");
   });
 
   it("another component wraps only fetch while the older holder still holds the transport: a copy that never held it stops, and the new copy does not take over early", async () => {
