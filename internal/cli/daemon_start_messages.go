@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -114,9 +115,31 @@ func gatewayLogExitReason(path string, offset int64) string {
 		}
 	}
 	if len(reason) > 400 {
-		reason = strings.ToValidUTF8(reason[:400], "") + "..."
+		if gatewayRepairStepEnding.MatchString(reason) {
+			// Keep the end: the repair and the command that follows it.
+			reason = strings.ToValidUTF8(reason[:200], "") + "..." + strings.ToValidUTF8(reason[len(reason)-197:], "")
+		} else {
+			reason = strings.ToValidUTF8(reason[:400], "") + "..."
+		}
 	}
 	return reason
+}
+
+// gatewayRepairStepEnding matches a cause that already ends with the step to
+// run after the repair (for example an audit-folder refusal: "...chmod go-w
+// <folder>, then run: defenseclaw-gateway restart").
+var gatewayRepairStepEnding = regexp.MustCompile(`then run: defenseclaw-gateway (start|restart)$`)
+
+// gatewayReadinessFailure is the error of a start or restart that did not reach
+// readiness. A cause that ends with its own repair step stays the last words of
+// the message; every other cause is followed by the gateway-log pointer and, on a
+// full disk, the disk note (GAP-0825).
+func gatewayReadinessFailure(prefix string, err error, logFile string) error {
+	if gatewayRepairStepEnding.MatchString(err.Error()) {
+		return fmt.Errorf("%s: %w", prefix, err)
+	}
+	return fmt.Errorf("%s: %w (check %s for errors)%s", prefix, err, logFile,
+		gatewayStartFailureDiskNote(config.DefaultDataPath()))
 }
 
 // gatewayExitedBeforeReadinessError names the error the gateway exited on

@@ -206,3 +206,46 @@ func TestGatewayConfigLoadErrorNamesTheWrongValueType(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0825: a start or restart refused for a writable audit folder ends with the
+// repair and the restart step, not with the generic gateway-log pointer, and a
+// cause without a repair keeps that pointer.
+func TestGatewayReadinessFailureEndsWithTheRepairStep(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "gateway.log")
+	offset := gatewayLogSize(logPath)
+	folder := "/home/u"
+	repair := "audit: database directory " + folder + " is group- or other-writable; as the account that owns it, " +
+		"run: chmod go-w \x27" + folder + "\x27, then run: defenseclaw-gateway restart"
+	probe := fmt.Errorf("%w (last health probe: dial tcp: connection refused)", errGatewayExitedBeforeReadiness)
+	for _, tc := range []struct {
+		name, logged string
+		wantRepair   bool
+	}{
+		{"repair", "Error: failed to open audit store: " + repair + "\n", true},
+		{"long repair", "Error: failed to open audit store: " + strings.Repeat("x", 300) + " " + repair + "\n", true},
+		{"locked database", "Error: failed to open audit store: audit: refresh baselines: database is locked (5)\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(logPath, []byte("[gateway] starting\n"+tc.logged), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, prefix := range []string{"start daemon readiness", "restart daemon readiness"} {
+				cause := gatewayExitedBeforeReadinessError(probe, logPath, offset)
+				msg := gatewayReadinessFailure(prefix, cause, logPath).Error()
+				if tc.wantRepair {
+					if !strings.HasSuffix(msg, "then run: defenseclaw-gateway restart") {
+						t.Errorf("%q does not end with the restart step", msg)
+					}
+					if strings.Contains(msg, "for errors)") {
+						t.Errorf("%q still carries the generic gateway-log pointer", msg)
+					}
+					if !strings.Contains(msg, "chmod go-w \x27"+folder+"\x27") {
+						t.Errorf("%q lost the repair command", msg)
+					}
+				} else if !strings.HasSuffix(msg, "for errors)") || !strings.Contains(msg, logPath) {
+					t.Errorf("%q lost the gateway-log pointer", msg)
+				}
+			}
+		})
+	}
+}
