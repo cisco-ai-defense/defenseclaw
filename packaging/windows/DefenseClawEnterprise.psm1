@@ -24980,9 +24980,19 @@ function Assert-DefenseClawHookNotHeld {
         # is an open for DELETE that allows every sharing mode, so it blocks
         # no start; when it succeeds no holder stands in the swap's way, which
         # is what both earlier exits meant. Restart Manager only runs, to
-        # name the holder, once the probe says one blocks the swap.
-        if (Test-DefenseClawHookSharesDelete -Path ([string]$Layout.HookPath)) {
-            return
+        # name the holder, once the probe says one blocks the swap. A program
+        # start in flight at the instant of the probe also fails it (a start
+        # opens the image without sharing deletion, for milliseconds), so the
+        # probe repeats four times, 100 ms apart, before Restart Manager is
+        # asked: one probe in seven let it run in the ETW traces of the round
+        # 3 upgrades.
+        for ($probe = 0; $probe -lt 4; $probe++) {
+            if (Test-DefenseClawHookSharesDelete -Path ([string]$Layout.HookPath)) {
+                return
+            }
+            if ($probe -lt 3) {
+                Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 100
+            }
         }
         $holders = @((Get-DefenseClawStateFileHolders -Layout $Layout -Paths @([string]$Layout.HookPath) -Excluded $excluded).Values)
         if ($holders.Count -eq 0) {
