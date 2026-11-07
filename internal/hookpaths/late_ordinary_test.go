@@ -253,7 +253,9 @@ func TestGAP0518LateOrdinaryCallRound4(t *testing.T) {
 		{"cd then a link after a semicolon", "cd sub; cat childlink", false},
 		{"cd or a link", "cd sub || cat childlink", false},
 		{"cd, then another cd, then the link", "cd sub && cd . && cat childlink", false},
-		{"cd up from a folder that may not exist", "cd sub && cd .. && cat plain.txt", false},
+		{"cd up from a folder that was entered", "cd sub && cd .. && cat plain.txt", true},
+		{"cd up, then the link of the folder", "cd sub && cd .. && cat keylink", false},
+		{"cd up after a semicolon may stand at the home", "cd sub; cd .. ; cat plain.txt", false},
 		{"cd in a pipe", "cd sub | cat childlink", false},
 		{"cd with a redirect", "cd sub > out.txt", false},
 		{"cd to a link", "cd dirlink && ls", false},
@@ -285,8 +287,8 @@ func TestGAP0518LateOrdinaryCallRound4(t *testing.T) {
 		{"sed print and a write to a link", "sed -n '1p;w keylink' plain.txt", false},
 		{"sed print and a run", "sed -n '1p;1e id' plain.txt", false},
 		{"sed print and a read of a link", "sed -n '1p;r keylink' plain.txt", false},
-		{"sed trailing separator", "sed -n '1p;' plain.txt", false},
-		{"sed substitution cut at a semicolon", "sed 's/a;b/c/' plain.txt", false},
+		{"sed trailing separator", "sed -n '1p;' plain.txt", true},
+		{"sed substitution holding a semicolon", "sed 's/a;b/c/' plain.txt", true},
 		{"sed print of a link", "sed -n 1p keylink", false},
 		// Patterns.
 		{"grep pattern option", "grep -e openclaw plain.txt", true},
@@ -312,6 +314,128 @@ func TestGAP0518LateOrdinaryCallRound4(t *testing.T) {
 		{"ls ignore a link", "ls -Ikeylink", false},
 		{"ls ignore then a link", "ls -I x keylink", false},
 		{"ls a link", "ls -la keylink", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, call := range []struct{ connector, tool string }{{"claudecode", "Bash"}, {"codex", "exec_command"}} {
+				if got := LateOrdinaryCall(call.connector, lateBash(t, call.tool, f.project, tc.command)); got != tc.want {
+					t.Errorf("%s %s: %q ordinary=%v, want %v", call.connector, call.tool, tc.command, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestGAP0518LateOrdinaryCallRound5: the scan reads a link as the place it
+// leads to, a cd chain as the shell runs it, an option value of grep as a
+// value and a sed script as sed does. Every protected twin stays closed.
+func TestGAP0518LateOrdinaryCallRound5(t *testing.T) {
+	f := newLateFixture(t)
+	sub := filepath.Join(f.project, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(f.home, ".ssh", "authorized_keys"), filepath.Join(sub, "childlink")); err != nil {
+		t.Fatal(err)
+	}
+	links := map[string]string{
+		"chain":    filepath.Join(f.project, "keylink"),
+		"srclink":  filepath.Join(f.project, "src"),
+		"hardhop":  filepath.Join(f.project, "hardlink"),
+		"homelink": f.home,
+		"gonelink": filepath.Join(f.project, "gone.txt"),
+		"upplain":  filepath.Join(f.project, "l"),
+	}
+	for name, target := range links {
+		if err := os.Symlink(target, filepath.Join(f.project, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name, command string
+		want          bool
+	}{
+		// A link to an ordinary file or folder is as ordinary as its target.
+		{"echo of a benign link", "echo l", true},
+		{"grep pattern that is a benign link", "grep -e l plain.txt", true},
+		{"ls ignore that is a benign link", "ls -Il", true},
+		{"cat of a benign link", "cat l", true},
+		{"write through a benign link", "echo x > l", true},
+		{"link to a link to a file", "cat upplain", true},
+		{"file below a link to a folder", "cat srclink/main.go", true},
+		{"echo of a link to a folder", "echo srclink", true},
+		// A link that leads to anything protected stays closed.
+		{"echo of a protected link", "echo keylink", false},
+		{"cat of a protected link", "cat keylink", false},
+		{"link to a protected link", "echo chain", false},
+		{"cat of a link to a protected link", "cat chain", false},
+		{"link to a hard link", "echo hardhop", false},
+		{"link to the home", "echo homelink", false},
+		{"file below a link to the home", "cat homelink/proj/plain.txt", false},
+		{"link to nothing", "echo gonelink", false},
+		{"grep pattern that is a protected link", "grep -e keylink plain.txt", false},
+		{"ls ignore that is a protected link", "ls -Ikeylink", false},
+		{"protected link after a cd", "cd sub && cat childlink", false},
+		{"protected redirect after a cd", "cd sub && echo x > childlink", false},
+		// cd chains.
+		{"cd and back", "cd sub && cd .. && cat plain.txt", true},
+		{"cd to a sibling", "cd sub && cd ../src && cat main.go", true},
+		{"cd to a sibling by name", "cd src && cd ../sub && cat plain.txt", true},
+		{"cd twice into folders", "cd src && cd . && cat main.go", true},
+		{"cd chain with a link", "cd sub && cd .. && cat keylink", false},
+		{"cd up past the project", "cd sub && cd ../.. && ls", false},
+		{"cd skipped by an or, the link of the old folder", "true || cd sub && cat keylink", false},
+		{"cd skipped by an or, a plain file", "true || cd sub && cat plain.txt", true},
+		{"cd, an or, another cd, the link of the old folder", "cd src || true ; cd sub && cat keylink", false},
+		{"a semicolon ends the or: the cd then holds for the next command", "true || true ; cd sub && cat keylink", true},
+		{"cd up with a semicolon", "cd sub ; cd .. ; ls", false},
+		{"cd fails, next runs in the old folder", "cd gone || cat keylink", false},
+		// grep options.
+		{"grep after-context split", "grep -A 3 openclaw plain.txt", true},
+		{"grep before-context split", "grep -B 3 openclaw plain.txt", true},
+		{"grep context split", "grep -C 3 openclaw plain.txt", true},
+		{"grep max count split", "grep -m 3 openclaw plain.txt", true},
+		{"grep attached after-context", "grep -A3 openclaw plain.txt", true},
+		{"grep bundled flag and context", "grep -rnA 3 openclaw src", true},
+		{"grep long max count split", "grep --max-count 3 openclaw plain.txt", true},
+		{"grep long max count", "grep --max-count=3 openclaw plain.txt", true},
+		{"grep long context split", "grep --after-context 3 authorized plain.txt", true},
+		{"grep include", "grep -r --include=openclaw x src", true},
+		{"grep include split", "grep -r --include openclaw x src", true},
+		{"grep exclude", "grep -r --exclude=openclaw x src", true},
+		{"grep exclude dir", "grep -r --exclude-dir=.openclaw x src", true},
+		{"grep abbreviated include", "grep -r --incl=openclaw x src", true},
+		{"grep directories", "grep -d skip openclaw plain.txt", true},
+		{"grep a link after a context", "grep -A 3 x keylink", false},
+		{"grep an excludes file", "grep --exclude-from=keylink x plain.txt", false},
+		{"grep an excludes file, next word", "grep --exclude-from keylink x plain.txt", false},
+		{"grep a protected folder after include", "grep -r --include=x pattern ../.ssh", false},
+		{"grep a link as the folder", "grep -r --include=x pattern dirlink", false},
+		{"grep an ambiguous abbreviation reads its value as a path", "grep --in=keylink x plain.txt", false},
+		// sed scripts.
+		{"sed space before semicolon", "sed -n '1p ; 2p' plain.txt", true},
+		{"sed trailing semicolon", "sed -n '1p;2p;' plain.txt", true},
+		{"sed semicolon in a regexp address", "sed -n '/a;b/p' plain.txt", true},
+		{"sed semicolon in a replacement", "sed 's/a/b;c/' plain.txt", true},
+		{"sed semicolon as delimiter", "sed 's;a;b;g' plain.txt", true},
+		{"sed range with spaces", "sed -n '1,3 p' plain.txt", true},
+		{"sed regexp range", "sed -n '/a/,/b/p' plain.txt", true},
+		{"sed not", "sed '1!d' plain.txt", true},
+		{"sed quit", "sed 2q plain.txt", true},
+		{"sed y", "sed 'y/abc/xyz/;p' plain.txt", true},
+		{"sed state word in a replacement", "sed 's/x/openclaw/g;s/y/z/' plain.txt", true},
+		{"sed write after a plain command", "sed -n '1p;w keylink' plain.txt", false},
+		{"sed write flag after a number", "sed 's/a/b/2w keylink' plain.txt", false},
+		{"sed write flag after a space", "sed 's/a/b/ ; w keylink' plain.txt", false},
+		{"sed write at an address", "sed -n '/x/w keylink' plain.txt", false},
+		{"sed write at a range", "sed -n '1,2 w keylink' plain.txt", false},
+		{"sed read at an address", "sed '1r keylink' plain.txt", false},
+		{"sed y then write", "sed 'y/a/b/ w keylink' plain.txt", false},
+		{"sed run flag", "sed 's/a/b/ge' plain.txt", false},
+		{"sed backslash", "sed 's/a\\/b/' plain.txt", false},
+		{"sed unfinished s", "sed 's/a/b' plain.txt", false},
+		{"sed unfinished regexp address", "sed -n '/a' plain.txt", false},
+		{"sed a block", "sed -n '/a/{p}' plain.txt", false},
+		{"sed a link after the script", "sed -n '1p;2p;' keylink", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, call := range []struct{ connector, tool string }{{"claudecode", "Bash"}, {"codex", "exec_command"}} {

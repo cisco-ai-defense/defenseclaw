@@ -150,6 +150,23 @@ func TestGAP0518LateOrdinaryCallFollowsTheOutageMode(t *testing.T) {
 			{"grep pattern file link, open tier", "grep -f keylink plain.txt", "open", true},
 			{"ls ignore pattern, open tier", "ls -Iopenclaw plain.txt", "open", false},
 			{"ls ignore pattern then a link, open tier", "ls -Iopenclaw keylink", "open", true},
+			// Round 5: a link to an ordinary file is as ordinary as the file,
+			// a cd chain, grep option values and sed scripts are read as the
+			// program reads them; the protected twins stay closed.
+			{"echo of a link to a plain file, open tier", "echo l", "open", false},
+			{"grep pattern that is a link to a plain file, open tier", "grep -e l plain.txt", "open", false},
+			{"cd and back, open tier", "cd sub && cd .. && cat plain.txt", "open", false},
+			{"cd and back, then the link, open tier", "cd sub && cd .. && cat keylink", "open", true},
+			{"grep after-context, open tier", "grep -A 3 openclaw plain.txt", "open", false},
+			{"grep max count, open tier", "grep -m 3 openclaw plain.txt", "open", false},
+			{"grep include glob, open tier", "grep -r --include=openclaw x sub", "open", false},
+			{"grep exclude glob, open tier", "grep -r --exclude=openclaw x sub", "open", false},
+			{"grep after-context then the link, open tier", "grep -A 3 x keylink", "open", true},
+			{"sed trailing separator, open tier", `sed -n '1p;2p;' plain.txt`, "open", false},
+			{"sed spaced separator, open tier", `sed -n '1p ; 2p' plain.txt`, "open", false},
+			{"sed regexp holding a semicolon, open tier", `sed -n '/a;b/p' plain.txt`, "open", false},
+			{"sed write after a trailing separator, open tier", `sed -n '1p;w keylink;' plain.txt`, "open", true},
+			{"echo of a link to a plain file, strict tier", "echo l", "closed", true},
 		} {
 			t.Run(connector+"/"+tc.name, func(t *testing.T) {
 				result, _ := runAgainstGateway(t, connector, addr, func(opts *Options) {
