@@ -3,10 +3,12 @@
 package enterpriseunix
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -82,37 +84,114 @@ func TestCopilotAccountScopeSkipsConfirmedGoneAccounts(t *testing.T) {
 	}
 }
 
-// GAP-0777: verify run right after an enrolled account was deleted failed
-// between the delete and the guardian next reconcile, which still reported
-// the target protected. Verify waits, bounded by GuardianRetireTimeout, for
-// the guardian to record the target as removed; a live account is never
-// waited for, and a guardian that does not record it is named.
-func TestVerifyWaitsForTheGuardianToRecordAConfirmedRemoval(t *testing.T) {
-	for _, goos := range []string{"linux", "darwin"} {
-		t.Run(goos, func(t *testing.T) {
-			h := newTestHost(t, goos)
-			file, home := "linux-standalone.yaml", "/home/alice"
-			if goos == "darwin" {
-				file, home = "macos-standalone.yaml", "/Users/alice"
-			}
-			raw := strings.Replace(string(readSampleConfig(t, file)), "    claudecode: {}", "    claudecode: {}\n    hermes: {}", 1)
-			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: writeTempConfig(t, []byte(raw))}))
-			writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets:\n"+
-				"  - user: alice\n    uid: 1001\n    user_home: "+home+"\n    connector: hermes\n    agent_version: 0.21.0\n")
-			writeFreshLedger(t, h)
-			writeState := func(row map[string]any) {
-				t.Helper()
-				row["user"], row["user_home"], row["connector"] = "alice", home, "hermes"
-				data, err := json.Marshal(map[string]any{"results": []map[string]any{row}})
+// A home carries the verdict of every account recorded at it: a live account
+// that took the home over from a deleted one (a shared home, or a record that
+// still lists the deleted uid first) keeps it scoped, in either order; the
+// home of accounts that are all gone drops out.
+func TestCopilotAccountScopeKeepsAHomeWithALiveAccount(t *testing.T) {
+	for _, order := range []struct {
+		name     string
+		accounts string
+	}{
+		{"deleted account first", `{"user":"alice","uid":501,"home":"/home/shared"},{"user":"carol","uid":502,"home":"/home/shared"}`},
+		{"live account first", `{"user":"carol","uid":502,"home":"/home/shared"},{"user":"alice","uid":501,"home":"/home/shared"}`},
+	} {
+		t.Run(order.name, func(t *testing.T) {
+			h := newTestHost(t, "linux")
+			writeHostFile(t, h, enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath),
+				`{"version":1,"accounts":[`+order.accounts+`]}`)
+			cfg := &config.Config{}
+			cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"copilot": {}}
+			homes := func() ([]string, []string) {
+				scoped, out, err := (&policyManager{env: h.env}).copilotAccountHomes(cfg)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), data, 0o640); err != nil {
-					t.Fatal(err)
-				}
+				// Two accounts at one home list it twice; the verdict is the home's.
+				return slices.Compact(scoped), slices.Compact(out)
 			}
-			writeState(map[string]any{"ok": true})
-			h.env.GuardianRetireTimeout = 10 * time.Second
+			shared := h.env.P("/home/shared")
+
+			stubAccountsGone(t, "alice")
+			if scoped, _ := homes(); !reflect.DeepEqual(scoped, []string{shared}) {
+				t.Fatalf("a live account is at the home of a deleted one: scoped=%v", scoped)
+			}
+			stubAccountsGone(t, "alice", "carol")
+			if scoped, out := homes(); len(scoped) != 0 || len(out) != 0 {
+				t.Fatalf("every account at the home is gone: scoped=%v out=%v", scoped, out)
+			}
+			stubAccountsGone(t)
+			if scoped, _ := homes(); !reflect.DeepEqual(scoped, []string{shared}) {
+				t.Fatalf("every account answers: scoped=%v", scoped)
+			}
+		})
+	}
+}
+
+// goneAccountHost installs a host whose enumerator enrolled alice (uid 1001)
+// for Hermes, with the guardian state written by writeState.
+func goneAccountHost(t *testing.T, goos string) (*testHost, func(row map[string]any)) {
+	t.Helper()
+	h := newTestHost(t, goos)
+	file, home := "linux-standalone.yaml", "/home/alice"
+	if goos == "darwin" {
+		file, home = "macos-standalone.yaml", "/Users/alice"
+	}
+	raw := strings.Replace(string(readSampleConfig(t, file)), "    claudecode: {}", "    claudecode: {}\n    hermes: {}", 1)
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: writeTempConfig(t, []byte(raw))}))
+	writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets:\n"+
+		"  - user: alice\n    uid: 1001\n    user_home: "+home+"\n    connector: hermes\n    agent_version: 0.21.0\n")
+	writeFreshLedger(t, h)
+	h.env.Runner = &readinessReportsEnrolledHermes{Runner: h.env.Runner, readiness: "defenseclaw-gateway enterprise hooks readiness --manifest " + h.env.Layout.ManifestPath + " --json",
+		report: `{"ok":true,"scope":"machine_hook_registration","hermes_session_coverage":"not_covered","results":[{"connector":"hermes","user":"alice","user_home":"` + home + `","uid":1001,"ok":true}]}`}
+	writeState := func(row map[string]any) {
+		t.Helper()
+		row["user"], row["user_home"], row["connector"] = "alice", home, "hermes"
+		data, err := json.Marshal(map[string]any{"results": []map[string]any{row}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), data, 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return h, writeState
+}
+
+// readinessReportsEnrolledHermes answers the readiness check with a report
+// that proves the enrolled Hermes target, so a run's verdict rests on the
+// guardian state and the account checks alone.
+type readinessReportsEnrolledHermes struct {
+	Runner
+	readiness, report string
+}
+
+func (r *readinessReportsEnrolledHermes) Run(ctx context.Context, name string, args ...string) (CommandResult, error) {
+	if filepath.Base(name)+" "+strings.Join(args, " ") != r.readiness {
+		return r.Runner.Run(ctx, name, args...)
+	}
+	return CommandResult{Stdout: []byte(r.report)}, nil
+}
+
+// removedRow is the row the Unix guardian records for a target whose account
+// is gone (runEnterpriseHookReconcileOnceStandaloneUnix).
+func removedRow(uid int) map[string]any {
+	return map[string]any{"ok": false, "removed": true, "uid": uid,
+		"error": `enterprise hooks: target account "alice" does not exist: no such account`}
+}
+
+// GAP-0777: verify run right after an enrolled account was deleted failed
+// between the delete and the guardian next reconcile, which still reported
+// the target protected. Verify waits, bounded by GuardianReconcileTimeout,
+// for the guardian to record the target as removed and then exits 0; a live
+// account is never waited for, and a guardian that does not record it is
+// named.
+func TestVerifyWaitsForTheGuardianToRecordAConfirmedRemoval(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h, writeState := goneAccountHost(t, goos)
+			writeState(map[string]any{"ok": true, "uid": 1001})
+			h.env.GuardianReconcileTimeout = 10 * time.Second
 			h.env.PollInterval = 10 * time.Millisecond
 
 			// Benign twin: a live account is not waited for, whatever the state says.
@@ -121,16 +200,22 @@ func TestVerifyWaitsForTheGuardianToRecordAConfirmedRemoval(t *testing.T) {
 			if elapsed := time.Since(started); elapsed > 3*time.Second {
 				t.Fatalf("verify waited %s for a live account", elapsed)
 			}
+			if live.ExitCode != 0 || !live.OK {
+				t.Fatalf("verify of a live account: exit=%d errors=%+v", live.ExitCode, live.Errors)
+			}
 			if got := messagesOf(live.Warnings, codeGuardianReportPending); got != "" {
 				t.Fatalf("a live account was reported pending: %q", got)
 			}
 
 			// The account is gone; the guardian records the removal 300 ms in.
 			stubAccountsGone(t, "alice")
+			previousFresh := guardianFreshAccountRecordGone
+			guardianFreshAccountRecordGone = func(_ context.Context, user string) bool { return user == "alice" }
+			t.Cleanup(func() { guardianFreshAccountRecordGone = previousFresh })
 			recorded := make(chan struct{})
 			go func() {
 				time.Sleep(300 * time.Millisecond)
-				writeState(map[string]any{"ok": false, "removed": true, "error": "enterprise hooks: target account or profile removed"})
+				writeState(removedRow(1001))
 				close(recorded)
 			}()
 			started = time.Now()
@@ -142,11 +227,14 @@ func TestVerifyWaitsForTheGuardianToRecordAConfirmedRemoval(t *testing.T) {
 			if got := messagesOf(r.Warnings, codeGuardianReportPending); got != "" {
 				t.Fatalf("a removal recorded in time was reported pending: %q", got)
 			}
+			if r.ExitCode != 0 || !r.OK {
+				t.Fatalf("verify after the guardian recorded the removal: exit=%d errors=%+v", r.ExitCode, r.Errors)
+			}
 
 			// A guardian that never records it: verify stops at the bound and
 			// names the account.
-			writeState(map[string]any{"ok": true})
-			h.env.GuardianRetireTimeout = 100 * time.Millisecond
+			writeState(map[string]any{"ok": true, "uid": 1001})
+			h.env.GuardianReconcileTimeout = 100 * time.Millisecond
 			started = time.Now()
 			stuck := h.run(Options{Action: ActionVerify})
 			if elapsed := time.Since(started); elapsed > 5*time.Second {
@@ -157,12 +245,78 @@ func TestVerifyWaitsForTheGuardianToRecordAConfirmedRemoval(t *testing.T) {
 			}
 
 			// status never waits.
-			h.env.GuardianRetireTimeout = 10 * time.Second
+			h.env.GuardianReconcileTimeout = 10 * time.Second
 			started = time.Now()
 			h.run(Options{Action: ActionStatus})
 			if elapsed := time.Since(started); elapsed > 5*time.Second {
 				t.Fatalf("status waited %s for the guardian", elapsed)
 			}
 		})
+	}
+}
+
+// A removal recorded for an earlier account of the same name is no proof for
+// the account that took the name over: the manifest enrolled alice as uid
+// 1002, and only a row recorded for uid 1002 retires it.
+func TestVerifyDoesNotTakeAnEarlierAccountsRemovalForTheCurrentOne(t *testing.T) {
+	h, writeState := goneAccountHost(t, "linux")
+	writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets:\n"+
+		"  - user: alice\n    uid: 1002\n    user_home: /home/alice\n    connector: hermes\n    agent_version: 0.21.0\n")
+	stubAccountsGone(t, "alice")
+	h.env.GuardianReconcileTimeout = 100 * time.Millisecond
+	h.env.PollInterval = 10 * time.Millisecond
+
+	writeState(removedRow(1001))
+	earlier := h.run(Options{Action: ActionVerify})
+	if !strings.Contains(messagesOf(earlier.Warnings, codeGuardianReportPending), "has not recorded the removal of alice") {
+		t.Fatalf("the removal of uid 1001 retired uid 1002: %+v", earlier.Warnings)
+	}
+
+	writeState(removedRow(1002))
+	current := h.run(Options{Action: ActionVerify})
+	if got := messagesOf(current.Warnings, codeGuardianReportPending); got != "" {
+		t.Fatalf("the removal recorded for the current uid was reported pending: %q", got)
+	}
+}
+
+// The enumerator revokes the deleted account's target and rewrites the
+// manifest; the guardian reconciles it up to a minute later. Verify waits for
+// that reconcile longer than the guardian-report bound a change uses, and
+// exits 0 once the activation names the manifest.
+func TestVerifyWaitsOutTheGuardianMinuteAfterATargetIsRevoked(t *testing.T) {
+	h, writeState := goneAccountHost(t, "linux")
+	writeState(map[string]any{"ok": true, "uid": 1001})
+	current := manifestDigest(t, h)
+	writeActivation(t, h, strings.Repeat("0", 64))
+	h.env.GuardianReportTimeout = 50 * time.Millisecond
+	h.env.GuardianReconcileTimeout = 10 * time.Second
+	h.env.PollInterval = 10 * time.Millisecond
+	reconciled := make(chan error, 1)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		reconciled <- publishActivation(h, current)
+	}()
+	r := h.run(Options{Action: ActionVerify})
+	if err := <-reconciled; err != nil {
+		t.Fatal(err)
+	}
+	if r.ExitCode != 0 || !r.OK {
+		t.Fatalf("verify did not wait for the guardian to reconcile the revoked target's manifest: exit=%d errors=%+v", r.ExitCode, r.Errors)
+	}
+	if got := messagesOf(r.Warnings, codeGuardianReportPending); got != "" {
+		t.Fatalf("a reconcile that came in time was reported pending: %q", got)
+	}
+}
+
+// The default bound covers one guardian reconcile (each minute) with margin,
+// and a change's own guardian-report bound is unchanged.
+func TestGuardianReconcileTimeoutCoversTheGuardianMinute(t *testing.T) {
+	env := &Env{}
+	env.fillDefaults()
+	if env.GuardianReconcileTimeout < 60*time.Second+10*time.Second {
+		t.Fatalf("GuardianReconcileTimeout %s does not cover a one-minute guardian reconcile", env.GuardianReconcileTimeout)
+	}
+	if env.GuardianReportTimeout != 30*time.Second {
+		t.Fatalf("GuardianReportTimeout %s, want 30s", env.GuardianReportTimeout)
 	}
 }

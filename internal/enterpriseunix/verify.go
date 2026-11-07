@@ -194,9 +194,9 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	if strict && pending == nil {
 		// The enumerator may have just rewritten the manifest (a fresh install
 		// enrolls every eligible account): verify the guardian reconcile of it,
-		// not the seconds before it (GAP-2176).
-		l.awaitGuardianManifestReconcile(ctx)
-		l.awaitGuardianRetire(ctx)
+		// not the seconds before it (GAP-2176), and the retirement of an
+		// account just deleted (GAP-0777).
+		l.awaitGuardianReconcile(ctx)
 	}
 	problems := l.verifyInstalled(ctx, record, strict)
 	l.warnLowDiskSpace()
