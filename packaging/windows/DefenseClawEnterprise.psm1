@@ -14660,7 +14660,7 @@ function Repair-DefenseClawUnreadableDeploymentMetadata {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName
     )
-    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.MetadataPath -PathType Leaf) -or
+    if (-not (Test-DefenseClawDeploymentMetadataPresent -Path $Layout.MetadataPath) -or
         (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath)) {
         return $false
     }
@@ -14711,12 +14711,123 @@ function Repair-DefenseClawUnreadableDeploymentMetadata {
     return $true
 }
 
+function Test-DefenseClawTransientDeploymentMetadataError {
+    param(
+        [Parameter(Mandatory)][Management.Automation.ErrorRecord]$ErrorRecord,
+        [Parameter(Mandatory)][string]$Path
+    )
+    # The name check in Assert-DefenseClawNoReparsePath has its own error
+    # before Get-Content opens the file. Retry that exact missing-leaf result.
+    if ([string]$ErrorRecord.Exception.Message -ceq
+        "managed path is missing: $([IO.Path]::GetFullPath($Path))") {
+        return $true
+    }
+    if ([string]$ErrorRecord.FullyQualifiedErrorId -eq
+        'PathNotFound,Microsoft.PowerShell.Commands.GetContentCommand') {
+        return $true
+    }
+    for ($exception = $ErrorRecord.Exception;
+        $null -ne $exception;
+        $exception = $exception.InnerException) {
+        if ($exception -is [Management.Automation.ItemNotFoundException]) {
+            return $true
+        }
+        if ($exception -is [ComponentModel.Win32Exception] -and
+            [int]$exception.NativeErrorCode -in @(2, 3, 32)) {
+            return $true
+        }
+        if ($exception -is [IO.IOException] -and
+            ([int]$exception.HResult -band 0xffff) -in @(2, 3, 32)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Test-DefenseClawDeploymentMetadataPresent {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return [bool](Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Leaf)
+    }
+    $parent = [IO.Path]::GetDirectoryName($Path)
+    $delays = @(1, 2, 4, 8, 16, 19)
+    $lastError = $null
+    for ($attempt = 0; $attempt -le $delays.Count; $attempt++) {
+        try {
+            $present = Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Leaf
+            $lastError = $null
+        }
+        catch {
+            if (-not (Test-DefenseClawTransientDeploymentMetadataError `
+                    -ErrorRecord $_ -Path $Path)) {
+                throw
+            }
+            $present = $false
+            $lastError = $_
+        }
+        if ($present) {
+            return $true
+        }
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $parent -PathType Container)) {
+            if ($null -ne $lastError) { throw $lastError }
+            return $false
+        }
+        if ($attempt -lt $delays.Count) {
+            Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds $delays[$attempt]
+        }
+    }
+    if ($null -ne $lastError) { throw $lastError }
+    return $false
+}
+
 function Get-DefenseClawDeploymentMetadata {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [switch]$Required
     )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return Get-DefenseClawDeploymentMetadataOnce -Layout $Layout -Required:$Required
+    }
+    $delays = @(1, 2, 4, 8, 16, 19)
+    for ($attempt = 0; $attempt -le $delays.Count; $attempt++) {
+        try {
+            return Get-DefenseClawDeploymentMetadataOnce -Layout $Layout -Required:$Required
+        }
+        catch {
+            $readError = $_
+            if (-not (Test-DefenseClawTransientDeploymentMetadataError `
+                    -ErrorRecord $readError -Path $Layout.MetadataPath)) {
+                throw
+            }
+            $parent = [IO.Path]::GetDirectoryName($Layout.MetadataPath)
+            if ($attempt -eq $delays.Count -or
+                -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $parent -PathType Container)) {
+                if (-not (Microsoft.PowerShell.Management\Test-Path `
+                        -LiteralPath $Layout.MetadataPath -PathType Leaf)) {
+                    if ($Required) {
+                        throw "DefenseClaw enterprise deployment metadata is missing: $($Layout.MetadataPath)"
+                    }
+                    return $null
+                }
+                throw
+            }
+            Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds $delays[$attempt]
+        }
+    }
+}
+
+function Get-DefenseClawDeploymentMetadataOnce {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [switch]$Required
+    )
     if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.MetadataPath -PathType Leaf)) {
+        if (Test-DefenseClawStandaloneProfile) {
+            throw [IO.FileNotFoundException]::new(
+                "DefenseClaw enterprise deployment metadata is missing: $($Layout.MetadataPath)",
+                $Layout.MetadataPath
+            )
+        }
         if ($Required) {
             throw "DefenseClaw enterprise deployment metadata is missing: $($Layout.MetadataPath)"
         }
@@ -14738,6 +14849,11 @@ function Get-DefenseClawDeploymentMetadata {
                 -Kind deployment)
         }
         catch {
+            if ((Test-DefenseClawStandaloneProfile) -and
+                (Test-DefenseClawTransientDeploymentMetadataError `
+                    -ErrorRecord $_ -Path $Layout.MetadataPath)) {
+                throw
+            }
             if (Test-DefenseClawTrustStrictAncestors) {
                 throw
             }
@@ -14783,10 +14899,20 @@ function Get-DefenseClawDeploymentMetadata {
         # let someone forge: report it as unreadable, which Repair rebuilds.
         # A drifted file that parses stays refused for its DACL.
         $aclError = $_
+        if ((Test-DefenseClawStandaloneProfile) -and
+            (Test-DefenseClawTransientDeploymentMetadataError `
+                -ErrorRecord $aclError -Path $Layout.MetadataPath)) {
+            throw
+        }
         try {
             $driftedText = Microsoft.PowerShell.Management\Get-Content -LiteralPath $Layout.MetadataPath -Raw
         }
         catch {
+            if ((Test-DefenseClawStandaloneProfile) -and
+                (Test-DefenseClawTransientDeploymentMetadataError `
+                    -ErrorRecord $_ -Path $Layout.MetadataPath)) {
+                throw
+            }
             throw $aclError
         }
         [void](ConvertFrom-DefenseClawDeploymentMetadataText `
@@ -14798,6 +14924,11 @@ function Get-DefenseClawDeploymentMetadata {
         $metadataText = Microsoft.PowerShell.Management\Get-Content -LiteralPath $Layout.MetadataPath -Raw
     }
     catch {
+        if ((Test-DefenseClawStandaloneProfile) -and
+            (Test-DefenseClawTransientDeploymentMetadataError `
+                -ErrorRecord $_ -Path $Layout.MetadataPath)) {
+            throw
+        }
         # Bulldoze: a prior scoped uninstall cycle on this box may have
         # rewritten deployment.json's DACL into a state where even the
         # elevated LocalSystem/Administrator token lacks read access
@@ -14837,6 +14968,11 @@ function Get-DefenseClawDeploymentMetadata {
                 -Raw
         }
         catch {
+            if ((Test-DefenseClawStandaloneProfile) -and
+                (Test-DefenseClawTransientDeploymentMetadataError `
+                    -ErrorRecord $_ -Path $Layout.MetadataPath)) {
+                throw
+            }
             # Recovery read also denied. In non-strict mode this is
             # tolerable for both Required and optional callers: an
             # uninstall whose state root is this corrupted cannot be
@@ -14856,6 +14992,12 @@ function Get-DefenseClawDeploymentMetadata {
                 )
             return $null
         }
+    }
+    if (Test-DefenseClawStandaloneProfile) {
+        Assert-DefenseClawNoReparsePath -Path $Layout.MetadataPath
+        Assert-DefenseClawCanonicalPathAcl `
+            -Path $Layout.MetadataPath `
+            -Expected $expectedMetadataAcl
     }
     $metadata = ConvertFrom-DefenseClawDeploymentMetadataText `
         -Path $Layout.MetadataPath `
@@ -30832,7 +30974,7 @@ function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
             return $false
         }
     }
-    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.MetadataPath -PathType Leaf) -or
+    if (-not (Test-DefenseClawDeploymentMetadataPresent -Path $Layout.MetadataPath) -or
         -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.ManifestPath -PathType Leaf)) {
         return $false
     }
@@ -46934,9 +47076,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
         -AllowMissingCertificationCodexHome:($Action -in @('Status', 'Verify', 'Recover'))
-    if ((Microsoft.PowerShell.Management\Test-Path `
-            -LiteralPath $layout.MetadataPath `
-            -PathType Leaf) -and
+    if ((Test-DefenseClawDeploymentMetadataPresent -Path $layout.MetadataPath) -and
         ($Action -ne 'Status' -or (Test-DefenseClawAdministrator)) -and
         -not $recoverProductionUninstallAcl) {
         # Protected metadata, not a caller-supplied certification path, is the
