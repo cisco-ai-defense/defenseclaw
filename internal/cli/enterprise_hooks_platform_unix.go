@@ -68,6 +68,23 @@ var enterpriseHookRemovedAccountRow = func(row enterpriseHookReconcileRow) bool 
 // local-source evidence. An unavailable directory is never a removal.
 var enterpriseHookGuardianFreshAccountGone = unixidentity.AccountRecordGone
 
+// Prior records can disagree while a guardian pass is being repaired. An
+// identity is usable as removal evidence only when every positive prior UID
+// available for this target agrees.
+func enterpriseHookGuardianPriorUID(uids ...int) int {
+	uid := 0
+	for _, candidate := range uids {
+		if candidate <= 0 {
+			continue
+		}
+		if uid != 0 && uid != candidate {
+			return 0
+		}
+		uid = candidate
+	}
+	return uid
+}
+
 func enterpriseHookGuardianTargetRemoved(
 	ctx context.Context,
 	target enterprisehooks.ManifestTarget,
@@ -91,17 +108,8 @@ func enterpriseHookGuardianTargetRemoved(
 		if enterpriseHookRecordedAccountGone(checkCtx, user, recordedUID) {
 			return true
 		}
-		// A fresh local record under the same name but another UID replaces
-		// this target's identity even when the process resolver is stale.
-		local, err := enterpriseHooksEnumerateLocalAccounts(checkCtx)
-		if err == nil {
-			if currentUID, present := local[user]; present && currentUID > 0 && currentUID != recordedUID {
-				return true
-			}
-		}
 	}
-	if (recordedUID <= 0 || errors.Is(resolveErr, errEnterpriseHookTargetNotFound)) &&
-		enterpriseHookGuardianFreshAccountGone(checkCtx, user) {
+	if enterpriseHookGuardianFreshAccountGone(checkCtx, user) {
 		return true
 	}
 	if !errors.Is(resolveErr, errEnterpriseHookTargetNotFound) {

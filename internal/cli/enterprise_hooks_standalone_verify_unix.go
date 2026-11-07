@@ -51,12 +51,21 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 	activation, activationExists, activationErr := records.Activation, records.ActivationExists, records.ActivationErr
 	guardianState, guardianStateExists, guardianStateErr := records.State, records.StateExists, records.StateErr
 	recorded := make(map[string]enterpriseHookReconcileRow)
+	priorUIDs := map[string][]int{}
 	recordExcused := 0
 	if guardianStateErr == nil && guardianStateExists {
 		removed, awaiting, linked := enterpriseHookExcusedFailures(guardianState)
 		recordExcused = removed + awaiting + linked
 		for _, row := range guardianState.Results {
-			recorded[enterpriseHookProtectedTargetKey(row)] = row
+			key := enterpriseHookProtectedTargetKey(row)
+			recorded[key] = row
+			priorUIDs[key] = append(priorUIDs[key], row.UID)
+		}
+	}
+	if authorizationErr == nil && exists {
+		for _, row := range authorization.ProtectedTargets {
+			key := enterpriseHookProtectedTargetKey(row)
+			priorUIDs[key] = append(priorUIDs[key], row.UID)
 		}
 	}
 	freshnessErr := managed.ValidateHookGuardianFreshness(authorization.UpdatedAt, time.Now())
@@ -121,13 +130,20 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 			UserHome:  strings.TrimSpace(target.UserHome),
 			Connector: strings.TrimSpace(target.Connector),
 		}
+		proofRow := row
+		if target.UID == nil {
+			proofRow.UID = enterpriseHookGuardianPriorUID(priorUIDs[enterpriseHookProtectedTargetKey(row)]...)
+		}
 		fail := func(err error) {
 			row.Error = err.Error()
 			run.Rows = append(run.Rows, row)
 		}
 		account, pendingReason, err := resolveEnterpriseHookStandaloneAccount(target, resolver)
-		if enterpriseHookGuardianTargetRemoved(ctx, target, row, err) {
+		if enterpriseHookGuardianTargetRemoved(ctx, target, proofRow, err) {
 			row.Removed = true
+			if target.UID == nil {
+				row.UID = proofRow.UID
+			}
 			row.Error = fmt.Sprintf("enterprise hooks: target account %q does not exist: %s", row.User, errEnterpriseHookTargetNotFound)
 			run.Rows = append(run.Rows, row)
 			if prior, ok := recorded[enterpriseHookProtectedTargetKey(row)]; ok && enterpriseHookRemovedAccountRow(prior) {
