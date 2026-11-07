@@ -2964,7 +2964,9 @@ namespace $nativeNamespace
             // A plain open first: with backup semantics Windows does not
             // refuse a read open on a holder that denies read sharing, so the
             // privileged open is only the fallback for a file whose access
-            // list does not let the caller read it.
+            // list does not let the caller read it. Limit: that fallback open
+            // does not see a holder that denies read sharing, which is why
+            // the Codex files are checked for one before anything stops.
             handle = CreateFileNoFollowWithRetry(
                 path,
                 FILE_READ_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL,
@@ -5180,9 +5182,12 @@ function Open-DefenseClawRestampHold {
         Holds Path for an in-place re-stamp and returns the handle, or a zero
         handle when nothing is held: Secure Client, a path that is not an
         existing regular file. Pair with Close-DefenseClawRestampHold in a
-        finally block.
+        finally block. With TolerateHeld a file another program holds open
+        returns $null instead of the refusal: the caller does not stamp it
+        in place and does not fail (the Codex state copies a user may hold,
+        GAP-0650).
     #>
-    param([Parameter(Mandatory)][string]$Path)
+    param([Parameter(Mandatory)][string]$Path, [switch]$TolerateHeld)
     if (-not (Test-DefenseClawStandaloneProfile) -or
         -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Leaf)) {
         return [IntPtr]::Zero
@@ -5200,6 +5205,9 @@ function Open-DefenseClawRestampHold {
         throw ([string]$inner.Message)
     }
     if ($held) {
+        if ($TolerateHeld) {
+            return $null
+        }
         throw ('refusing to re-stamp a managed file while another program holds it open' +
             ' with write or delete access, or without sharing read access, and nothing was changed ' +
             '(close the program that holds it, then run Setup /ensure again): ' + $Path)
@@ -5220,6 +5228,71 @@ function Test-DefenseClawLiveWrittenFile {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Kind)
     return ($Kind -in @('RuntimeFile', 'RuntimeSecretFile')) -or
         ($Path -match '(?i)[\\/]logs[\\/]')
+}
+
+function Test-DefenseClawCodexStateCopyPath {
+    <#
+        True for a hook copy of the Codex managed runtime state,
+        .defenseclaw-managed-hooks.state.<n> (GAP-0650). A user may hold one
+        open; the fixed name, the writer copy and requirements.toml are other
+        files.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [string]$Kind = 'MachinePolicyFile')
+    return ($Kind -eq 'MachinePolicyFile') -and
+        ([IO.Path]::GetFileName($Path) -match '^\.defenseclaw-managed-hooks\.state\.[1-9][0-9]{0,7}$')
+}
+
+function Test-DefenseClawPathAclCanonical {
+    <#
+        True when Path already carries exactly the access list, owner and
+        protection Set-DefenseClawPathAcl would stamp for Kind. A security
+        query only: it opens no data handle, so a program that holds the file
+        open does not change the answer, and it writes nothing. Any failure
+        answers $false, so the stamp runs and reports what is wrong.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Kind,
+        [Parameter(Mandatory)][string]$GatewayServiceSID
+    )
+    try {
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        $expected = New-DefenseClawCanonicalPathAcl `
+            -IsDirectory ([bool]$item.PSIsContainer) `
+            -Kind $Kind `
+            -GatewayServiceSID $GatewayServiceSID
+        $nativeSecurity = Initialize-DefenseClawNativeSecurity
+        $actual = [Security.AccessControl.RawSecurityDescriptor]::new(
+            [byte[]]$nativeSecurity::GetFileSecurityDescriptor($Path),
+            0
+        )
+        return [bool](Test-DefenseClawCanonicalRawPathAcl -Actual $actual -Expected $expected)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-DefenseClawRestampHeldByOther {
+    <#
+        True when another program holds the regular file Path open in a way
+        that stops an in-place re-stamp: with write or delete access, or
+        without sharing read access (Open-DefenseClawRestampHold). A link, a
+        second hard link or any other failure answers $false; the stamp
+        reports those itself.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $hold = Open-DefenseClawRestampHold -Path $Path -TolerateHeld
+    }
+    catch {
+        return $false
+    }
+    if ($null -eq $hold) {
+        return $true
+    }
+    Close-DefenseClawRestampHold -Handle $hold
+    return $false
 }
 
 function Close-DefenseClawRestampHold {
@@ -7634,7 +7707,38 @@ function Set-DefenseClawPathAcl {
         $Kind -notin @('InstallFile', 'ServiceInstallFile') -and
         $Kind -notlike '*Directory' -and
         -not (Test-DefenseClawLiveWrittenFile -Path $Path -Kind $Kind)) {
-        $hold = Open-DefenseClawRestampHold -Path $Path
+        # Holders matter only when an access list has to be written. A file
+        # that already carries the canonical list is left alone and is not
+        # probed: a program that holds it open is not in the way (g582 round
+        # 11c, M1).
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Leaf) {
+            if (Test-DefenseClawPathAclCanonical -Path $Path -Kind $Kind -GatewayServiceSID $GatewayServiceSID) {
+                return
+            }
+        }
+        if (Test-DefenseClawCodexStateCopyPath -Path $Path -Kind $Kind) {
+            # A hook copy of the Codex state may be held open by a user
+            # (GAP-0650). It is not re-stamped in place behind that holder and
+            # it does not fail the run: the Codex writer finds the damaged
+            # access list at its next transaction and publishes a fresh copy
+            # under a new name with the canonical list, and a held old copy
+            # is removed once it is released.
+            $hold = Open-DefenseClawRestampHold -Path $Path -TolerateHeld
+            if ($null -eq $hold -and
+                (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Leaf)) {
+                Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
+                    path   = $Path
+                    reason = 'the Codex state copy has a drifted access list and another program holds it open; it is not re-stamped in place, and the next Codex transaction publishes a fresh copy'
+                }
+                return
+            }
+            if ($null -eq $hold) {
+                $hold = [IntPtr]::Zero
+            }
+        }
+        else {
+            $hold = Open-DefenseClawRestampHold -Path $Path
+        }
     }
     try {
         Invoke-DefenseClawPathAclStamp -Path $Path -Kind $Kind -GatewayServiceSID $GatewayServiceSID
@@ -7676,41 +7780,50 @@ function Invoke-DefenseClawPathAclStamp {
         # re-stamps the same descriptor under backup and restore privileges.
         $expectedSize = if ($Kind -eq 'RuntimeSecretFile') { [uint32]32 } else { [uint32]0 }
         $nativeSecurity = Initialize-DefenseClawNativeSecurity
-        if (Test-DefenseClawLiveWrittenFile -Path $Path -Kind $Kind) {
-            # A running service keeps this file open for write: the open of
-            # its stamp is the one it always had.
-            $nativeSecurity::RefuseHeldRestamp = $false
-        }
-        $before = $nativeSecurity::GetRegularFileSecuritySnapshotNoFollow(
-            $Path,
-            $expectedSize
-        )
+        # The native helper keeps this switch in a static field, so it is put
+        # back as it was after the stamp: the next stamp in this process must
+        # not inherit a live-written file's open (g582 round 11c, L1).
+        $refuseHeldBefore = $nativeSecurity::RefuseHeldRestamp
         try {
-            $after = $nativeSecurity::SetRegularFileSecurityDescriptorNoFollow(
+            if (Test-DefenseClawLiveWrittenFile -Path $Path -Kind $Kind) {
+                # A running service keeps this file open for write: the open of
+                # its stamp is the one it always had.
+                $nativeSecurity::RefuseHeldRestamp = $false
+            }
+            $before = $nativeSecurity::GetRegularFileSecuritySnapshotNoFollow(
                 $Path,
-                $sddl,
-                $expectedSize,
-                [string]$before.Identity
+                $expectedSize
             )
+            try {
+                $after = $nativeSecurity::SetRegularFileSecurityDescriptorNoFollow(
+                    $Path,
+                    $sddl,
+                    $expectedSize,
+                    [string]$before.Identity
+                )
+            }
+            catch {
+                $after = $nativeSecurity::SetPathSecurityDescriptorPrivilegedNoFollow(
+                    $Path,
+                    $sddl,
+                    $false
+                )
+            }
+            if ([string]$after.Identity -cne [string]$before.Identity) {
+                throw "managed $Kind identity changed during ACL replacement: $Path"
+            }
+            Assert-DefenseClawCanonicalRawPathAcl `
+                -Path $Path `
+                -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
+                    [byte[]]$after.SecurityDescriptor,
+                    0
+                )) `
+                -Expected $security `
+                -AllowSelfHeal
         }
-        catch {
-            $after = $nativeSecurity::SetPathSecurityDescriptorPrivilegedNoFollow(
-                $Path,
-                $sddl,
-                $false
-            )
+        finally {
+            $nativeSecurity::RefuseHeldRestamp = $refuseHeldBefore
         }
-        if ([string]$after.Identity -cne [string]$before.Identity) {
-            throw "managed $Kind identity changed during ACL replacement: $Path"
-        }
-        Assert-DefenseClawCanonicalRawPathAcl `
-            -Path $Path `
-            -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
-                [byte[]]$after.SecurityDescriptor,
-                0
-            )) `
-            -Expected $security `
-            -AllowSelfHeal
         return
     }
     try {
@@ -17532,12 +17645,23 @@ function New-DefenseClawTransaction {
             -Source $EarlyHookSource `
             -PriorDeploymentActive:$PriorDeploymentActive
     }
-    if ((Test-DefenseClawStandaloneProfile) -and -not $SkipRedactionKeySnapshot) {
-        # GAP-0765: the Codex managed-hooks state of 1.0.8 is read twice, by
-        # the snapshot below and by the first Codex transaction of this
-        # release. A user who holds it open without sharing fails both; it is
-        # found, waited for and named before anything is stopped.
-        Assert-DefenseClawCodexStateNotHeld -Layout $Layout
+    $codexReadHolds = $null
+    if ((Test-DefenseClawStandaloneProfile) -and -not $SkipRedactionKeySnapshot -and
+        $IncludeCodexMachineState) {
+        # GAP-0765 and the r11 residual: the Codex managed-hooks state of
+        # 1.0.8 and requirements.toml are read by the snapshot below (and the
+        # state again by the first Codex transaction of this release), and
+        # requirements.toml may need its access list written. A user who
+        # holds either in the way fails the run after the services stopped:
+        # they stayed stopped and the transaction stayed pending. The
+        # holder is found, waited for and named before anything is stopped,
+        # and the files stay held for read until the snapshot has copied them
+        # (a holder that appears after the check cannot open them without
+        # read sharing). Only a transaction that snapshots the Codex files and
+        # that Codex is enabled for reads them (L4).
+        $codexReadHolds = Assert-DefenseClawCodexFilesNotHeld `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName
     }
     $id = [Guid]::NewGuid().ToString('N')
     $directory = Assert-DefenseClawDescendant `
@@ -18115,8 +18239,29 @@ function New-DefenseClawTransaction {
                 # preimage is the prior release's, kept before the swap.
                 $preimageSource = $earlyHookPreimage
             }
+            $heldStream = $null
+            if ($null -ne $codexReadHolds) {
+                $heldKey = [IO.Path]::GetFullPath([string]$preimageSource).TrimEnd('\').ToLowerInvariant()
+                if ($codexReadHolds.Contains($heldKey)) {
+                    $heldStream = $codexReadHolds[$heldKey]
+                }
+            }
             try {
-                Microsoft.PowerShell.Management\Copy-Item -LiteralPath $preimageSource -Destination $backup -Force
+                if ($null -ne $heldStream) {
+                    # The read handle the gate opened: the copy cannot meet a
+                    # holder that arrived after the check.
+                    $heldStream.Position = 0
+                    $backupStream = [IO.File]::Create($backup)
+                    try {
+                        $heldStream.CopyTo($backupStream)
+                    }
+                    finally {
+                        $backupStream.Dispose()
+                    }
+                }
+                else {
+                    Microsoft.PowerShell.Management\Copy-Item -LiteralPath $preimageSource -Destination $backup -Force
+                }
             }
             catch [UnauthorizedAccessException] {
                 # Read-deny drift on a managed file (an EDR deny entry, a
@@ -18171,6 +18316,7 @@ function New-DefenseClawTransaction {
         })
         $index++
     }
+    Close-DefenseClawCodexFileHolds -Holds $codexReadHolds
     $priorAttestationExists = Microsoft.PowerShell.Management\Test-Path `
         -LiteralPath $Layout.AgentApplicationControlAttestationPath `
         -PathType Leaf
@@ -18268,6 +18414,7 @@ function New-DefenseClawTransaction {
     }
     catch {
         $snapshotError = $_
+        Close-DefenseClawCodexFileHolds -Holds $codexReadHolds
         if (-not $quiescingIntentPublished -and
             (Microsoft.PowerShell.Management\Test-Path `
                 -LiteralPath $Layout.PendingPath)) {
@@ -19102,17 +19249,34 @@ function Assert-DefenseClawCodexManagedHooksStateFilePreflight {
             throw "DefenseClaw Codex managed-hooks state exceeds the 4194304-byte limit: $copy"
         }
         # DefenseClaw writes this file, so drift on it is repaired, not judged.
-        Assert-DefenseClawPathAcl `
-            -Path $copy `
-            -AllowedWriterSIDs @(
-                $script:SystemSID,
-                $script:AdministratorsSID,
-                $script:TrustedInstallerSID
-            ) `
-            -AllowUsersRead `
-            -AllowInheritance `
-            -SelfHealKind MachinePolicyFile `
-            -SelfHealGatewayServiceSID $script:AdministratorsSID
+        try {
+            Assert-DefenseClawPathAcl `
+                -Path $copy `
+                -AllowedWriterSIDs @(
+                    $script:SystemSID,
+                    $script:AdministratorsSID,
+                    $script:TrustedInstallerSID
+                ) `
+                -AllowUsersRead `
+                -AllowInheritance `
+                -SelfHealKind MachinePolicyFile `
+                -SelfHealGatewayServiceSID $script:AdministratorsSID
+        }
+        catch {
+            # A hook copy a user holds open (GAP-0650) is not re-stamped in
+            # place and does not stop the run: the Codex writer publishes a
+            # fresh copy with the canonical list, and the verification after
+            # it judges that copy (g582 round 11c, M1).
+            if ($_.Exception.Message -like 'refusing to re-stamp*' -or
+                -not (Test-DefenseClawCodexStateCopyPath -Path $copy) -or
+                -not (Test-DefenseClawRestampHeldByOther -Path $copy)) {
+                throw
+            }
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
+                path   = $copy
+                reason = 'the Codex state copy is held open by another program; its access list is judged on the copy the Codex writer publishes next'
+            }
+        }
     }
     $committed = Get-DefenseClawCodexManagedHooksStateCommittedPath -Layout $Layout
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $committed) {
@@ -23214,6 +23378,45 @@ function Start-DefenseClawServiceWithLogonDiagnosis {
     }
 }
 
+function Repair-DefenseClawCodexRequirementsAccessBeforeGuardian {
+    <#
+        A transaction that stopped part way can leave the Codex
+        requirements.toml without the read ordinary users need, and the
+        guardian's coverage (which a recovery waits for) needs that read
+        back. When DefenseClaw owns the file (its ownership record exists),
+        its canonical access list is stamped before the guardian starts, as
+        every lifecycle run does anyway. A file a program holds open in the
+        way, or any other failure, is noted and left to the guardian and to
+        the run that follows (g582 round 11c).
+    #>
+    param(
+        [Parameter(Mandatory)]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $path = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CodexMachinePolicyPath)
+    $ownership = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CodexRequirementsOwnershipPath)
+    if ([string]::IsNullOrWhiteSpace($path) -or [string]::IsNullOrWhiteSpace($ownership) -or
+        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf) -or
+        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $ownership -PathType Leaf)) {
+        return
+    }
+    try {
+        Set-DefenseClawPathAcl `
+            -Path $path `
+            -Kind MachinePolicyFile `
+            -GatewayServiceSID (Get-DefenseClawServiceSIDForRecovery -ServiceName $GatewayServiceName)
+    }
+    catch {
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
+            path   = $path
+            reason = 'the Codex requirements access list was not restored before the guardian started: ' + $_.Exception.Message
+        }
+    }
+}
+
 function Start-DefenseClawTransactionServices {
     param(
         [Parameter(Mandatory)]$Services,
@@ -23370,6 +23573,12 @@ function Start-DefenseClawTransactionServices {
             throw 'transaction recovery could not restore the absent Enumerator preimage'
         }
     }
+    # The guardian cannot publish its coverage over a requirements.toml that
+    # ordinary users cannot read, and a recovery waits for that coverage: put
+    # the canonical access list back first (g582 round 11c, the r11 residual).
+    Repair-DefenseClawCodexRequirementsAccessBeforeGuardian `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName
     $gatewayNeedsProtection = (
         [bool]$gateway.existed -and (
             [bool]$gateway.running -or
@@ -26604,46 +26813,159 @@ function Assert-DefenseClawHookNotHeld {
     throw ("hook_in_use: {0} has {1} open, so Setup could not replace it; this run stopped and replaced nothing. Next step: close that program (for example an antivirus scan or an editor), then {2} (an MDM retries exit 1618 on its own)" -f ($named -join ', '), $Layout.HookPath, (Format-DefenseClawRerunStep -SameSetupCommand))
 }
 
-function Assert-DefenseClawCodexStateNotHeld {
+function Get-DefenseClawCodexFileHold {
     <#
-        GAP-0765: waits, up to TimeoutSeconds, until no program has the
-        Codex managed-hooks state at its fixed name open without read
-        sharing. 1.0.8 wrote that file where every standard user can read it,
-        so a user can open it with FileShare.None. The upgrade must read it
-        (the snapshot, then the first Codex transaction of this release),
-        and an unread state is never taken for an absent one. A holder still
-        there at the end defers the run with the retryable codex_state_held
-        (exit 1618) before the transaction stopped or replaced anything; the
-        state file is left as it was. A query that cannot name the holder
-        still defers the run. Only the standalone profile calls this: Secure
-        Client keeps the state at its fixed name and its behavior as it was.
+        GAP-0765 and the r11 residual (g582 round 11c): finds out whether a
+        program has one of the Codex machine-policy files open in a way that
+        would make this run fail after it stopped the services, and holds
+        those files for read until the snapshot has copied them. The files:
+        the Codex managed-hooks state at its fixed name (1.0.8 wrote it where
+        every user can read it, and this release reads it once to carry it
+        forward) and requirements.toml (the snapshot reads it, and a drifted
+        access list is stamped under a hold that refuses write or delete
+        access). Fills Holds with one read handle per file, opened sharing
+        read, write and delete: no later program can open the file without
+        read sharing while the handle is open, and the writers the services
+        run are not blocked. Returns $null when nothing blocks, else the file,
+        the stable code and what is wrong. The hook copies of the state
+        (.state.<n>) are not read here: a user may hold those, and no
+        transaction step needs them open.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
-        [int]$TimeoutSeconds = 30
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][hashtable]$Holds
     )
-    $path = [string]$Layout.CodexManagedHooksStatePath
-    if ([string]::IsNullOrWhiteSpace($path) -or
-        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
+    $targets = @(
+        [pscustomobject]@{
+            Path = [string]$Layout.CodexManagedHooksStatePath
+            Code = 'codex_state_held'
+            What = 'the Codex managed-hooks state of the installed release'
+        },
+        [pscustomobject]@{
+            Path = [string]$Layout.CodexMachinePolicyPath
+            Code = 'codex_requirements_held'
+            What = 'the Codex machine requirements'
+        }
+    )
+    foreach ($target in $targets) {
+        if ([string]::IsNullOrWhiteSpace($target.Path) -or
+            -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $target.Path -PathType Leaf)) {
+            continue
+        }
+        try {
+            $stream = [IO.FileStream]::new(
+                $target.Path,
+                [IO.FileMode]::Open,
+                [IO.FileAccess]::Read,
+                ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+            )
+        }
+        catch [IO.IOException] {
+            if ((([int]$_.Exception.HResult) -band 0xFFFF) -in @(32, 33)) {
+                return [pscustomobject]@{
+                    Path = $target.Path
+                    Code = $target.Code
+                    What = $target.What
+                    Why  = 'open without read sharing, so Setup could not read it'
+                }
+            }
+            continue
+        }
+        catch {
+            continue
+        }
+        $Holds[[IO.Path]::GetFullPath($target.Path).TrimEnd('\').ToLowerInvariant()] = $stream
+    }
+    $requirements = [string]$Layout.CodexMachinePolicyPath
+    if ($Holds.Count -gt 0 -and
+        $Holds.Contains([IO.Path]::GetFullPath($requirements).TrimEnd('\').ToLowerInvariant())) {
+        $serviceSID = ''
+        try {
+            $serviceSID = Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
+        }
+        catch {
+            $serviceSID = ''
+        }
+        # The access list is written only when it is not canonical already
+        # (Set-DefenseClawPathAcl), and the write needs a file nobody holds
+        # with write or delete access: found now, with nothing stopped.
+        if (-not [string]::IsNullOrWhiteSpace($serviceSID) -and
+            -not (Test-DefenseClawPathAclCanonical -Path $requirements -Kind MachinePolicyFile -GatewayServiceSID $serviceSID) -and
+            (Test-DefenseClawRestampHeldByOther -Path $requirements)) {
+            return [pscustomobject]@{
+                Path = $requirements
+                Code = 'codex_requirements_held'
+                What = 'the Codex machine requirements'
+                Why  = 'open with write or delete access, so Setup could not change its access list'
+            }
+        }
+    }
+    return $null
+}
+
+function Close-DefenseClawCodexFileHolds {
+    param($Holds)
+    if ($null -eq $Holds) {
         return
     }
+    foreach ($stream in @($Holds.Values)) {
+        try {
+            $stream.Dispose()
+        }
+        catch {
+            # A handle that cannot be closed is released with the process.
+        }
+    }
+    $Holds.Clear()
+}
+
+function Assert-DefenseClawCodexFilesNotHeld {
+    <#
+        GAP-0765 and the r11 residual (g582 round 11c): waits, up to
+        TimeoutSeconds, until no program has a Codex machine-policy file
+        open in a way that would fail this run after the services stopped
+        (Get-DefenseClawCodexFileHold). A holder still there at the end defers
+        the run with the retryable codex_state_held or
+        codex_requirements_held (exit 1618) before the transaction stopped or
+        replaced anything, naming the program; the files are as they were. A
+        query that cannot name the holder still defers the run. Returns the
+        read handles the snapshot copies from (Close-DefenseClawCodexFileHolds
+        closes them). Only the standalone profile calls this: Secure Client
+        keeps the state at its fixed name and its behavior as it was.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [int]$TimeoutSeconds = 30
+    )
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    while (Test-DefenseClawFileReadBlocked -Path $path) {
+    $holds = @{}
+    while ($true) {
+        $blocked = Get-DefenseClawCodexFileHold `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Holds $holds
+        if ($null -eq $blocked) {
+            return , $holds
+        }
+        Close-DefenseClawCodexFileHolds -Holds $holds
         if ([DateTime]::UtcNow -ge $deadline) {
-            $excluded = [Collections.Generic.HashSet[int]]::new()
-            [void]$excluded.Add([int]$PID)
-            $holders = @((Get-DefenseClawStateFileHolders -Layout $Layout -Paths @($path) -Excluded $excluded).Values)
-            $named = @($holders | Microsoft.PowerShell.Core\ForEach-Object {
-                    if ([string]::IsNullOrWhiteSpace([string]$_.UserName)) { '{0} (process id {1})' -f $_.Name, $_.Id }
-                    else { '{0} (process id {1}, {2})' -f $_.Name, $_.Id, $_.UserName }
-                })
-            if ($named.Count -eq 0) {
-                $named = @('a program')
-            }
-            throw ("codex_state_held: {0} has {1}, the Codex managed-hooks state of the installed release, open without sharing, so Setup could not read it to carry it into this release; this run stopped and changed nothing, and the state file is as it was. Next step: close that program, then run the same Setup command again (an MDM retries exit 1618 on its own)" -f ($named -join ', '), $path)
+            break
         }
         Microsoft.PowerShell.Utility\Start-Sleep -Seconds 1
     }
+    $excluded = [Collections.Generic.HashSet[int]]::new()
+    [void]$excluded.Add([int]$PID)
+    $holders = @((Get-DefenseClawStateFileHolders -Layout $Layout -Paths @([string]$blocked.Path) -Excluded $excluded).Values)
+    $named = @($holders | Microsoft.PowerShell.Core\ForEach-Object {
+            if ([string]::IsNullOrWhiteSpace([string]$_.UserName)) { '{0} (process id {1})' -f $_.Name, $_.Id }
+            else { '{0} (process id {1}, {2})' -f $_.Name, $_.Id, $_.UserName }
+        })
+    if ($named.Count -eq 0) {
+        $named = @('a program')
+    }
+    throw ("{0}: {1} has {2}, {3}, {4}; this run stopped and changed nothing, and the file is as it was. Next step: close that program, then run the same Setup command again (an MDM retries exit 1618 on its own)" -f $blocked.Code, ($named -join ', '), $blocked.Path, $blocked.What, $blocked.Why)
 }
 
 function Test-DefenseClawFileReadBlocked {
