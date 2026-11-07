@@ -359,6 +359,61 @@ func TestHermesManifestOutageDamagedStoredAnswerInStrictWatcher(t *testing.T) {
 	}
 }
 
+// A record of another digest that is damaged is dropped alone: the valid answer
+// for these manifests still applies during an outage, in every tier.
+func TestHermesManifestOutageDamagedSiblingKeepsTheValidAnswer(t *testing.T) {
+	digest := hermesManifestDigest(protectedManifests)
+	valid := `{"entrypoints":["` + cachedProtected + `"],"seen":123}`
+	open, closed := func() bool { return true }, func() bool { return false }
+	for _, tc := range []struct{ name, sibling string }{
+		{"entrypoints is not a list", `{"entrypoints":"x","seen":1}`},
+		{"entrypoints holds a number", `{"entrypoints":[1],"seen":1}`},
+		{"seen is not a number", `{"entrypoints":[],"seen":"x"}`},
+		{"record is a string", `"x"`},
+		{"record is a list", `[1,2]`},
+		{"record is null", `null`},
+		{"null element", `{"entrypoints":[null],"seen":1}`},
+		{"entrypoints missing", `{"seen":1}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := t.TempDir()
+			writePluginFile(t, filepath.Join(data, hermesStoreFileName),
+				`{"answers":{"sibling":`+tc.sibling+`,"`+digest+`":`+valid+`}}`)
+			for tier, isOpen := range map[string]func() bool{"per-user default": open, "strict": closed} {
+				got, err := newHermesManifestPolicy(data, nil).byPolicy(failingManifestLoader, isOpen)(protectedManifests)
+				if err != nil || !slices.Equal(got, []string{cachedProtected}) {
+					t.Errorf("%s: %q, %v, want the valid answer", tier, got, err)
+				}
+			}
+		})
+	}
+}
+
+// The same in the watcher, per-user default tier: the declared cache file
+// written during the outage is scanned although an unrelated record is damaged.
+func TestHermesManifestOutageDamagedSiblingInPerUserWatcher(t *testing.T) {
+	f := newHermesPluginFixture(t)
+	path := f.plugin(f.bundledRoot, "web/ddgs")
+	writePluginFile(t, filepath.Join(path, "plugin.yaml"), string(protectedManifests["plugin.yaml"]))
+	f.pinVendor("web/ddgs", path)
+	f.w.runRescanCycle(context.Background())
+	f.unscannedVendor(path)
+	digest := hermesManifestDigest(protectedManifests)
+	writePluginFile(t, filepath.Join(f.w.cfg.DataDir, hermesStoreFileName),
+		`{"answers":{"sibling":{"entrypoints":"x","seen":"y"},"`+digest+`":{"entrypoints":["`+cachedProtected+`"],"seen":123}}}`)
+	f.w.hermesManifests = failingManifestLoader
+	writePluginFile(t, filepath.Join(path, filepath.FromSlash(cachedGenerated)), "two")
+	f.w.runRescanCycle(context.Background())
+	if got := f.scan.scans(path); got != 0 {
+		t.Fatalf("an ordinary cache write during the outage caused %d scans", got)
+	}
+	writePluginFile(t, filepath.Join(path, filepath.FromSlash(cachedProtected)), "exec()\n")
+	f.w.runRescanCycle(context.Background())
+	if got := f.scan.scans(path); got == 0 {
+		t.Fatal("the declared cache file written during the outage was not scanned")
+	}
+}
+
 // An answer given again is the most recent, so the bound drops the manifests
 // unseen for longest, and an active manifest keeps its answer.
 func TestHermesManifestStoreKeepsAnswersGivenAgain(t *testing.T) {
