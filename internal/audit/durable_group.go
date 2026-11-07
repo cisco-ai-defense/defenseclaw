@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"time"
@@ -83,14 +84,14 @@ func (s *Store) runDurableBatch(batch []*groupedWrite) {
 			})()
 		}
 	}
-	failed, err := commitDurableBatch(ctx, db, live)
+	failed, err := commitDurableBatch(ctx, s, db, live)
 	switch {
 	case err == nil:
 	case failed != nil && len(live) > 1 && !isSQLiteBusy(err):
 		// One write failed on its own account: run each alone, so the
 		// others commit and every caller sees its own outcome.
 		for _, item := range live {
-			_, item.err = commitDurableBatch(item.ctx, db, []*groupedWrite{item})
+			_, item.err = commitDurableBatch(item.ctx, s, db, []*groupedWrite{item})
 		}
 	default:
 		for _, item := range live {
@@ -105,7 +106,7 @@ func (s *Store) runDurableBatch(batch []*groupedWrite) {
 	if !flush {
 		return
 	}
-	if dirErr := syncAuditDBDir(filepath.Dir(s.dbPath)); dirErr != nil {
+	if dirErr := s.syncDurableDir(); dirErr != nil {
 		for _, item := range live {
 			if item.err == nil && item.data.(bool) {
 				item.err = &durableDirSyncError{err: dirErr}
@@ -117,11 +118,11 @@ func (s *Store) runDurableBatch(batch []*groupedWrite) {
 // commitDurableBatch runs the writes of items in one transaction, and again
 // while the store answers SQLITE_BUSY (hookDeliveryJournalBusyWait). When a
 // write fails it returns that write with its error.
-func commitDurableBatch(ctx context.Context, db *sql.DB, items []*groupedWrite) (*groupedWrite, error) {
+func commitDurableBatch(ctx context.Context, s *Store, db *sql.DB, items []*groupedWrite) (*groupedWrite, error) {
 	deadline := time.Now().Add(hookDeliveryJournalBusyWait)
 	pause := 10 * time.Millisecond
 	for {
-		failed, err := attemptDurableBatch(ctx, db, items)
+		failed, err := attemptDurableBatch(ctx, s, db, items)
 		if err == nil || !isSQLiteBusy(err) || ctx.Err() != nil || !time.Now().Add(pause).Before(deadline) {
 			return failed, err
 		}
@@ -136,7 +137,12 @@ func commitDurableBatch(ctx context.Context, db *sql.DB, items []*groupedWrite) 
 	}
 }
 
-func attemptDurableBatch(ctx context.Context, db *sql.DB, items []*groupedWrite) (*groupedWrite, error) {
+func attemptDurableBatch(ctx context.Context, s *Store, db *sql.DB, items []*groupedWrite) (*groupedWrite, error) {
+	release, err := s.writeBaton.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -152,4 +158,37 @@ func attemptDurableBatch(ctx context.Context, db *sql.DB, items []*groupedWrite)
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 	return nil, nil
+}
+
+// syncDurableDir flushes the database folder after a durable batch, unless
+// that folder flush already covered the write-ahead log file now in place.
+// The flush exists to keep the directory entry of a WAL file created since
+// the store opened; an entry that an earlier successful flush made durable
+// stays durable for as long as the same file is there. Every batch of a
+// managed sandbox gateway flushed the folder again, a second disk flush on
+// the one connection that all hook calls share, and that doubled the time a
+// batch held the write lock (rel-1-0-6 GAP-0490). The file is compared by
+// its identity (device and inode, os.SameFile); where it cannot be read, or
+// is a different file, the folder is flushed as before.
+// auditDirSync is a test seam: the folder flush syncDurableDir makes.
+var auditDirSync = syncAuditDBDir
+
+func (s *Store) syncDurableDir() error {
+	wal, statErr := os.Stat(s.dbPath + "-wal")
+	if statErr != nil {
+		return auditDirSync(filepath.Dir(s.dbPath))
+	}
+	s.dirSyncMu.Lock()
+	done := s.dirSyncedWAL
+	s.dirSyncMu.Unlock()
+	if done != nil && os.SameFile(done, wal) {
+		return nil
+	}
+	if err := auditDirSync(filepath.Dir(s.dbPath)); err != nil {
+		return err
+	}
+	s.dirSyncMu.Lock()
+	s.dirSyncedWAL = wal
+	s.dirSyncMu.Unlock()
+	return nil
 }
