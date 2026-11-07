@@ -14,6 +14,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/productlayout"
 )
 
 // Windows enterprise profiles. The names match
@@ -68,15 +70,15 @@ func EnterpriseRootsFor(profile, programFiles, programData string) (EnterpriseRo
 	join := func(base string, parts ...string) string {
 		return base + `\` + strings.Join(parts, `\`)
 	}
-	state := join(programData, vendor, "DefenseClaw")
+	state := join(programData, vendor, productlayout.ProductFolder)
 	return EnterpriseRoots{
 		Profile:                  strings.ToLower(strings.TrimSpace(profile)),
-		InstallRoot:              join(programFiles, vendor, "DefenseClaw"),
+		InstallRoot:              join(programFiles, vendor, productlayout.ProductFolder),
 		StateRoot:                state,
-		CertificationInstallBase: join(programFiles, vendor, "DefenseClaw-Cert"),
-		CertificationStateBase:   join(programData, vendor, "DefenseClaw-Cert"),
-		ManagedIPCDir:            join(programFiles, vendor, "DefenseClaw", "ipc"),
-		LifecycleDir:             join(programData, vendor, "DefenseClaw-Lifecycle"),
+		CertificationInstallBase: join(programFiles, vendor, productlayout.WindowsCertificationFolder),
+		CertificationStateBase:   join(programData, vendor, productlayout.WindowsCertificationFolder),
+		ManagedIPCDir:            join(programFiles, vendor, productlayout.ProductFolder, "ipc"),
+		LifecycleDir:             join(programData, vendor, productlayout.WindowsLifecycleFolder),
 		MetadataPath:             join(state, "install", "deployment.json"),
 		PowerShellProfile:        powerShell,
 	}, nil
