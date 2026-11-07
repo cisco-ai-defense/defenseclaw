@@ -91,7 +91,10 @@ func TestDeniedPrefixPastTheHeldDigestsMayMatch(t *testing.T) {
 }
 
 // A deny that differs only past the full digests a claim carries is still ruled
-// out by the one-byte tail, and the same-argument twin still blocks.
+// out by the tail digest, and the same-argument twin still blocks. The
+// differing argument is one whose first digest byte equals the protected
+// argument first byte: a narrower digest would keep it as a possible match
+// and block the ordinary server.
 func TestProjectMCPDenyDifferingPastTheFullDigestsIsRuledOut(t *testing.T) {
 	args := make([]string, 2050)
 	for i := range args {
@@ -106,7 +109,7 @@ func TestProjectMCPDenyDifferingPastTheFullDigestsIsRuledOut(t *testing.T) {
 				cfg.AssetPolicy.Mode = config.AssetPolicyModeObserve
 			}
 			prefix := append([]string(nil), args[:2049]...)
-			prefix[2048] = "--other"
+			prefix[2048] = gap0686SameFirstByte(args[2048])
 			cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{Name: "notes", Command: "node", ArgsPrefix: prefix}}
 			api := &APIServer{scannerCfg: cfg}
 			gap0686Publish(api, cfg)
@@ -123,10 +126,21 @@ func TestProjectMCPDenyDifferingPastTheFullDigestsIsRuledOut(t *testing.T) {
 	}
 }
 
-// An exact deny of an argument list longer than 65,536 entries blocks: the
+// gap0686SameFirstByte is an argument other than value whose tail digest
+// begins with the same byte as the tail digest of value.
+func gap0686SameFirstByte(value string) string {
+	want := assetfacts.PinTailDigest(value)[0]
+	for i := 0; ; i++ {
+		if other := fmt.Sprintf("--other-%d", i); other != value && assetfacts.PinTailDigest(other)[0] == want {
+			return other
+		}
+	}
+}
+
+// An exact deny of an argument list longer than the pinned positions blocks: the
 // count a claim states is not clamped below it.
 func TestProjectMCPExactDenyOfAVeryLongArgumentListBlocks(t *testing.T) {
-	args := make([]string, 1<<16+1)
+	args := make([]string, 1<<14+1)
 	for i := range args {
 		args[i] = "--same"
 	}

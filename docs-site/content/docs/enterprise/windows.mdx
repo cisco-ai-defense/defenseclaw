@@ -544,8 +544,10 @@ already defaults to true) and `asset_policy.mode: action`. The hook reads the
 skill folder the request selects (Claude Code, Codex and Copilot CLI, under the
 skill roots of each, for Copilot CLI including `.agents\skills`, `COPILOT_HOME`
 and `COPILOT_SKILLS_DIRS`; a relative entry is read below the folder Copilot was
-started in, which the hook takes to be its working folder or the outermost
-repository (or home) above it, never a folder in between), and the
+started in, which the hook reads from the working folder of the Copilot process
+(Windows and Linux) when that is the event folder or a folder above it, and
+otherwise takes to be the event folder or the outermost repository (or home)
+above it, never a folder in between), and the
 Claude Code plugin it belongs to (including a plugin installed from a local
 marketplace folder and the tools of its bundled server), as the user, following
 links as the agent does. The gateway scans that text with the in-process
@@ -560,7 +562,7 @@ is not UTF-8), is refused (`profile-asset-unscanned`): a verdict on part of an
 asset is not a verdict on it. So is a skill folder the hook found but could not
 read, a plugin the registry gives no folder for (missing, unreadable, or larger
 than the 4 MiB the hook reads), and a tool of a plugin's bundled server whose
-owner no plugin content names. A tool name that several installed plugins could own (plugins `p` and `p_a` for a server `p_a_b`) is judged on the text of each of them, as many as fit the size budget of the claim. Verdicts are cached by content digest. Ordinary skills and plugins are not
+owner no plugin content names. A tool name that several installed plugins could own (plugins `p` and `p_a` for a server `p_a_b`) is judged on the text of each of them, as many as fit the size budget of the claim (about 384 KiB of text). Verdicts are cached by content digest. Ordinary skills and plugins are not
 refused, and nothing changes while `asset_policy.enabled` is false or the mode
 is `observe`. The text is the hook's claim and the detector is the in-process
 one: the skill-scanner and CodeGuard are not run on profile assets, and a
@@ -695,8 +697,8 @@ detection on, or when its definition is too long for the hook to send and an
 `asset_policy.mcp.denied` rule that pins an endpoint may match it (the hook
 sends a digest of each value such a rule compares, so a deny pinned to another
 URL, command, arguments or transport does not refuse it; the first 2,048
-arguments are digested in full and the next 65,536 by one byte each, so only a
-deny prefix that reaches past the 67,584th argument cannot be ruled out, and it
+arguments are digested in full and the next 8,192 by a digest as wide, so only
+a deny prefix that reaches past the 10,240th argument cannot be ruled out, and it
 refuses the call); otherwise it keeps running as before. When the user config marks a folder `trusted` and a project
 below it `untrusted`, the entry nearest the project decides.
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -56,12 +57,13 @@ func TestContentIsNeverDroppedForNotFitting(t *testing.T) {
 	if len(got) != 1 || got[0].Dir != "" || len(got[0].Files) != 1 || got[0].Truncated {
 		t.Fatalf("long-path skill = %+v, want its text kept and no path", got)
 	}
-	// Names and folders this long exhaust the size budget after about a
+	// Names and folders this long exhaust the size budget after a few
 	// hundred contents: each keeps its text while the budget lasts, and one
 	// past it is a truncated content with no text, once per name.
 	dir := filepath.Join(t.TempDir(), strings.Repeat("a", 900))
+	perContent := 200 + 3 + len(clean(dir, maxFieldBytes)) + contentFraming
 	var many []Content
-	for i := 0; i < 120; i++ {
+	for i := 0; i < maxContentTotal/perContent+20; i++ {
 		many = append(many, Content{Kind: ContentPlugin, Name: fmt.Sprintf("%s%03d", strings.Repeat("n", 200), i), Dir: dir, Files: []ContentFile{{Rel: "plugin.json", Text: "{}"}}})
 	}
 	many = append(many, many[len(many)-1])
@@ -77,7 +79,7 @@ func TestContentIsNeverDroppedForNotFitting(t *testing.T) {
 			t.Errorf("content %q = %+v, want its text or a truncated content without text", content.Name[len(content.Name)-3:], content)
 		}
 	}
-	if kept < 100 || stubs == 0 || kept+stubs != len(many)-1 {
+	if kept < maxContentTotal/perContent-2 || stubs == 0 || kept+stubs != len(many)-1 {
 		t.Errorf("kept %d with text and %d truncated of %d (one a repeat), want none dropped and the repeat stubbed once", kept, stubs, len(many)-1)
 	}
 	last := many[len(many)-1].Name
@@ -103,14 +105,14 @@ func TestCopilotSkillRootsAndSkillNameSpellings(t *testing.T) {
 	if !containsRoot(roots, filepath.Join(home, ".agents", "skills")) || !containsRoot(roots, filepath.Join(cwd, ".agents", "skills")) {
 		t.Errorf("copilot skill roots = %v, want the user and project .agents/skills", roots)
 	}
-	env := EnvSkillRoots("copilot", home, cwd)
+	env := EnvSkillRoots("copilot", home, cwd, "")
 	for _, want := range []string{filepath.Join(os.Getenv("COPILOT_HOME"), "skills"), custom, filepath.Join(home, "shared"), filepath.Join(cwd, "rel", "skills")} {
 		if !containsRoot(env, want) {
 			t.Errorf("environment skill roots = %v, missing %s", env, want)
 		}
 	}
-	if len(env) != 4 || EnvSkillRoots("claudecode", home, cwd) != nil {
-		t.Errorf("environment skill roots = %v (claudecode %v), want 4 for copilot and none for others", env, EnvSkillRoots("claudecode", home, cwd))
+	if len(env) != 4 || EnvSkillRoots("claudecode", home, cwd, "") != nil {
+		t.Errorf("environment skill roots = %v (claudecode %v), want 4 for copilot and none for others", env, EnvSkillRoots("claudecode", home, cwd, ""))
 	}
 	for name, input := range map[string]map[string]any{
 		"skill":              {"skill": "direct"},
@@ -138,4 +140,32 @@ func containsRoot(roots []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// A relative COPILOT_SKILLS_DIRS entry is rooted at the folder the agent runs
+// in when that folder is the event folder or above it, and only there; any
+// other report falls back to the event folder and the outermost root.
+func TestLaunchWorkspacesPreferTheAgentFolder(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	module := filepath.Join(root, "module")
+	sub := filepath.Join(module, "sub")
+	for name, tc := range map[string]struct {
+		cwd, launch string
+		want        []string
+	}{
+		"event folder":        {sub, sub, []string{sub}},
+		"intermediate folder": {sub, module, []string{module}},
+		"repository root":     {sub, root, []string{root}},
+		"unrelated folder":    {sub, t.TempDir(), []string{sub, root}},
+		"folder below":        {module, sub, []string{module, root}},
+		"relative":            {sub, "module", []string{sub, root}},
+		"unreported":          {sub, "", []string{sub, root}},
+	} {
+		if got := launchWorkspaces(t.TempDir(), tc.cwd, tc.launch); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: launchWorkspaces = %v, want %v", name, got, tc.want)
+		}
+	}
 }

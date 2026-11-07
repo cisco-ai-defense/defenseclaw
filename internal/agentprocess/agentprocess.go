@@ -227,6 +227,21 @@ func CommandLine() ([]string, string, error) {
 	return commandLine(agent.PID)
 }
 
+// WorkingDirectory returns the current directory of the agent process that
+// runs this process, or "" when there is no agent ancestor or the platform
+// does not report it (macOS). Copilot CLI resolves a relative
+// COPILOT_SKILLS_DIRS entry against the folder it runs in, which a hook event
+// names only as its own cwd, possibly a folder below it.
+func WorkingDirectory() string {
+	lookup, done := newLookup()
+	defer done()
+	agent, ok := agentFrom(lookup, os.Getpid())
+	if !ok {
+		return ""
+	}
+	return workingDirectory(agent.PID)
+}
+
 // CommandLineForPID reads an agent process's arguments for a privileged
 // managed coverage scan. Callers must first classify the process by its
 // executable and must not expose the returned arguments in status or audit.

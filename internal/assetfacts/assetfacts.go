@@ -44,7 +44,10 @@ import (
 const Header = "X-DefenseClaw-Asset-Facts"
 
 const (
-	maxHeaderBytes = 256 << 10
+	// maxHeaderBytes bounds the encoded facts. The gateway reads request
+	// headers up to the net/http default of 1 MiB; this leaves room for the
+	// others.
+	maxHeaderBytes = 768 << 10
 	maxSkills      = 16
 	maxFieldBytes  = 1024
 	maxArgs        = 32
@@ -52,11 +55,17 @@ const (
 	// past maxArgs still pins every argument a deny prefix can sensibly name.
 	// A prefix longer than this cannot be ruled out and is refused.
 	maxPinArgs = 2048
-	// maxTailPins bounds the one-byte argument digests (MCPPins.Tail) that
-	// follow the maxPinArgs full ones, so a deny prefix that differs deep in
-	// a long argument list is still ruled out. An argument past both bounds
-	// cannot be ruled out and is refused as a possible match.
-	maxTailPins = 1 << 16
+	// maxTailPins bounds the argument digests (MCPPins.Tail, pinTailDigestLen
+	// bytes each) that follow the maxPinArgs full ones, so a deny prefix that
+	// differs deep in a long argument list is still ruled out. An argument
+	// past both bounds cannot be ruled out and is refused as a possible match.
+	maxTailPins = 1 << 13
+	// pinTailDigestLen is the byte length of a tail digest. It is as wide as
+	// the full ones (pinArgDigestLen hex characters), so an argument that is
+	// not the one a rule names has no practical chance of sharing it: a
+	// matching tail digest is decisive, not a coin flip that blocks an
+	// ordinary call.
+	pinTailDigestLen = pinArgDigestLen / 2
 	// maxPinArgCount bounds the argument count a claim states; it is a
 	// sanity bound, not a clamp that could rule out an exact deny.
 	maxPinArgCount = math.MaxInt32
@@ -143,7 +152,7 @@ type MCPServer struct {
 // MCPPins are the SHA-256 digests (hex) of the values an asset_policy rule
 // compares on an MCP server, taken from the complete definition the hook
 // read: the trimmed URL, the base name of the trimmed command, and each
-// trimmed argument (up to maxPinArgs, as PinArgSum), then one byte of the
+// trimmed argument (up to maxPinArgs, as PinArgSum), then the same-width
 // digest of each further argument (Tail, up to maxTailPins), with the count
 // of arguments and the transport.
 type MCPPins struct {
@@ -151,14 +160,15 @@ type MCPPins struct {
 	Command  string   `json:"command,omitempty"`
 	Args     []string `json:"args,omitempty"`
 	ArgCount int      `json:"arg_count,omitempty"`
-	// Tail holds PinTailByte of the arguments from position len(Args) on,
-	// base64url, only when Args is full. A byte that differs rules a deny
-	// out; one that matches only keeps it as a possible match.
+	// Tail holds PinTailDigest of the arguments from position len(Args) on,
+	// concatenated and base64url encoded, only when Args is full. A digest
+	// that differs rules a deny out; one that matches keeps it.
 	Tail      string `json:"tail,omitempty"`
 	Transport string `json:"transport,omitempty"`
 }
 
-// TailBytes are the decoded Tail digests, or nil.
+// TailBytes are the decoded Tail digests, pinTailDigestLen bytes per
+// argument and whole digests only, or nil.
 func (p *MCPPins) TailBytes() []byte {
 	if p == nil || p.Tail == "" {
 		return nil
@@ -167,7 +177,17 @@ func (p *MCPPins) TailBytes() []byte {
 	if err != nil {
 		return nil
 	}
-	return raw[:min(len(raw), maxTailPins)]
+	return raw[:min(len(raw)/pinTailDigestLen, maxTailPins)*pinTailDigestLen]
+}
+
+// TailDigest is the digest at position i of the tail (the argument at
+// position len(Args)+i), or nil when the claim holds none there.
+func (p *MCPPins) TailDigest(i int) []byte {
+	tail := p.TailBytes()
+	if i < 0 || (i+1)*pinTailDigestLen > len(tail) {
+		return nil
+	}
+	return tail[i*pinTailDigestLen : (i+1)*pinTailDigestLen]
 }
 
 // Encode renders facts as a header value, or "" when there is nothing to
@@ -300,11 +320,11 @@ func PinSum(value string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// PinTailByte is the digest of one argument as MCPPins.Tail holds it: the
-// first byte of PinSum.
-func PinTailByte(value string) byte {
+// PinTailDigest is the digest of one argument as MCPPins.Tail holds it: the
+// first pinTailDigestLen bytes of the SHA-256 of the trimmed value.
+func PinTailDigest(value string) []byte {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(value)))
-	return sum[0]
+	return sum[:pinTailDigestLen]
 }
 
 // PinArgSum is the digest of one argument as MCPPins.Args holds it: the
@@ -334,7 +354,7 @@ func pinsOf(server MCPServer) *MCPPins {
 			// there.
 			if tail := server.Pins.TailBytes(); len(tail) > 0 {
 				pins.Tail = base64.RawURLEncoding.EncodeToString(tail)
-				held += len(tail)
+				held += len(tail) / pinTailDigestLen
 			}
 		}
 		pins.ArgCount = max(pins.ArgCount, held)
@@ -352,8 +372,8 @@ func pinsOf(server MCPServer) *MCPPins {
 		switch {
 		case i < maxPinArgs:
 			pins.Args = append(pins.Args, PinArgSum(arg))
-		case len(tail) < maxTailPins:
-			tail = append(tail, PinTailByte(arg))
+		case len(tail) < maxTailPins*pinTailDigestLen:
+			tail = append(tail, PinTailDigest(arg)...)
 		}
 	}
 	if len(tail) > 0 {
@@ -528,10 +548,11 @@ func CopilotHomeSet() bool {
 // EnvSkillRoots lists the skill folders a connector takes from the
 // environment of the agent process: Copilot's COPILOT_HOME and
 // COPILOT_SKILLS_DIRS (comma separated; "~/" is the home, a relative one is
-// below Copilot launch workspace, which a hook knows only as cwd or the
-// outermost repository root (or home) above it: launchWorkspaces). Only the standalone hook, which runs in the agent's
-// environment, can know them; a gateway's own environment is not the user's.
-func EnvSkillRoots(connector, home, cwd string) []string {
+// below the folder Copilot runs in: launch when the hook can read it from the
+// agent process, otherwise the guesses of launchWorkspaces). Only the
+// standalone hook, which runs in the environment of the agent, can know them;
+// the environment of a gateway is not the one of the user.
+func EnvSkillRoots(connector, home, cwd, launch string) []string {
 	if strings.ToLower(strings.TrimSpace(connector)) != "copilot" {
 		return nil
 	}
@@ -553,7 +574,7 @@ func EnvSkillRoots(connector, home, cwd string) []string {
 			}
 			dir = filepath.Join(home, dir[2:])
 		case !filepath.IsAbs(dir):
-			for _, level := range launchWorkspaces(home, cwd) {
+			for _, level := range launchWorkspaces(home, cwd, launch) {
 				if root := filepath.Join(level, dir); !slices.Contains(roots, root) {
 					roots = append(roots, root)
 				}
@@ -568,19 +589,30 @@ func EnvSkillRoots(connector, home, cwd string) []string {
 }
 
 // launchWorkspaces are the folders a relative COPILOT_SKILLS_DIRS entry can
-// belong to: Copilot resolves it against the one folder it was started in,
-// never against the folders between it and the repository root. A hook sees
-// its event cwd, which is that folder, or a folder below it: so the roots are
-// cwd itself and the outermost folder above it that is a repository root, or
-// home when no repository is found below home. A skill folder of an
-// intermediate folder is not a root, so it can neither be judged in place of
-// the selected one nor hide it behind a nested repository or the home folder.
-func launchWorkspaces(home, cwd string) []string {
+// belong to: Copilot resolves it against the one folder it runs in, never
+// against the folders between it and the repository root. launch is that
+// folder as the hook read it from the agent process; it is used when it is
+// the event cwd or a folder above it (an agent that reports anything else is
+// not trusted to name the root), and then it is the only root: a skill of
+// another folder is not loaded, so judging it would block the selected one.
+// Without it the hook sees only its event cwd, which is that folder or a
+// folder below it, so the roots are cwd itself and the outermost folder above
+// it that is a repository root, or home when no repository is found below
+// home. A skill folder of an intermediate folder is not a guessed root, so it
+// can neither be judged in place of the selected one nor hide it behind a
+// nested repository or the home folder.
+func launchWorkspaces(home, cwd, launch string) []string {
 	dir := strings.TrimSpace(cwd)
 	if !filepath.IsAbs(dir) {
 		return nil
 	}
 	dir = filepath.Clean(dir)
+	if launch = strings.TrimSpace(launch); filepath.IsAbs(launch) {
+		launch = filepath.Clean(launch)
+		if rel, err := filepath.Rel(launch, dir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return []string{launch}
+		}
+	}
 	out := []string{dir}
 	home = filepath.Clean(strings.TrimSpace(home))
 	outer, homeAbove := "", ""
