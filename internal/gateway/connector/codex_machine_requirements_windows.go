@@ -564,29 +564,57 @@ func VerifyWindowsCodexMachineRequirements(
 // requirements write or deletion is a compare-and-swap against the file the
 // removal was computed from: a save made in between is kept, and the removal
 // is computed again from it, up to windowsCodexMachineReconcileAttempts times.
+//
+// This is the strict removal every caller but an uninstall uses (the disabled
+// Codex reconcile, the hidden remove action and the guardian): a link at the
+// Codex machine-policy folder is refused, never reported as removed, so
+// SafeToRemoveBinary is never claimed for a folder that was not read. The
+// uninstall alone calls RemoveWindowsCodexMachineRequirementsForTeardown.
 func RemoveWindowsCodexMachineRequirements(
 	opts WindowsCodexMachineRequirementsOptions,
+) (WindowsCodexMachineRequirementsReport, error) {
+	return removeWindowsCodexMachineRequirements(opts, false)
+}
+
+// RemoveWindowsCodexMachineRequirementsForTeardown is the removal an uninstall
+// makes (GAP-0773). It is RemoveWindowsCodexMachineRequirements, except that a
+// link at the Codex machine-policy folder (standalone profile only) is kept,
+// not followed and not read: the result is ok with disposition "link_kept" and
+// LinkKept set to the link, and it attests neither SafeToRemoveBinary nor
+// ManagedStateRemovedOrAbsent, because nothing behind the link was checked. A
+// Codex requirement behind it may still name the hook binary the uninstall
+// removes; the caller says so where it names the kept link.
+func RemoveWindowsCodexMachineRequirementsForTeardown(
+	opts WindowsCodexMachineRequirementsOptions,
+) (WindowsCodexMachineRequirementsReport, error) {
+	return removeWindowsCodexMachineRequirements(opts, true)
+}
+
+func removeWindowsCodexMachineRequirements(
+	opts WindowsCodexMachineRequirementsOptions,
+	keepLink bool,
 ) (WindowsCodexMachineRequirementsReport, error) {
 	report := windowsCodexMachineReport("remove", opts)
 	if err := requireWindowsCodexMachineAdministrator(); err != nil {
 		report.Error = err.Error()
 		return report, err
 	}
-	// A link at the Codex machine-policy folder is kept and named (GAP-0773):
-	// nothing behind it is read, opened, locked, written or deleted, and the
-	// removal does not fail on it. Standalone only.
-	kept, err := WindowsCodexMachineFolderKept()
-	if err != nil {
-		report.Error = err.Error()
-		return report, err
-	}
-	if kept != "" {
-		report.OK = true
-		report.Disposition = "link_kept"
-		report.SafeToRemoveBinary = true
-		report.ManagedStateRemovedOrAbsent = true
-		report.Details = append(report.Details, "kept: a link sits at "+kept+"; DefenseClaw does not follow, change or remove it")
-		return report, nil
+	if keepLink {
+		// A link at the Codex machine-policy folder is kept and named
+		// (GAP-0773): nothing behind it is read, opened, locked, written or
+		// deleted, and the removal does not fail on it. Standalone only.
+		kept, err := WindowsCodexMachineFolderKept()
+		if err != nil {
+			report.Error = err.Error()
+			return report, err
+		}
+		if kept != "" {
+			report.OK = true
+			report.Disposition = "link_kept"
+			report.LinkKept = kept
+			report.Details = append(report.Details, windowsCodexMachineLinkKeptDetail(kept))
+			return report, nil
+		}
 	}
 	// The locked path below requires the Codex machine-policy directory, which
 	// exists only once a target has been enrolled. No artifact means nothing to

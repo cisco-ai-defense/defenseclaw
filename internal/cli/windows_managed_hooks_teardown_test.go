@@ -1500,6 +1500,70 @@ func TestWindowsManagedHooksOwnerRightsRestoreRefusesOutsideStandalone(t *testin
 	}
 }
 
+// The rollback of a teardown (restoreWindowsCodexManagedHooks) and its clean
+// check (verifyWindowsManagedHooksCodexClean) read nothing behind a kept link:
+// the verifier, reconciler and publisher are never called, and both succeed.
+// Without the link they do call them (GAP-0773).
+func TestWindowsManagedHooksTeardownRollbackAndCleanCheckSkipAKeptLink(t *testing.T) {
+	savedKept, savedVerifier := windowsManagedHooksCodexFolderKept, windowsManagedHooksCodexVerifier
+	savedReconciler, savedPublisher := windowsManagedHooksCodexReconciler, windowsManagedHooksCodexPublisher
+	t.Cleanup(func() {
+		windowsManagedHooksCodexFolderKept, windowsManagedHooksCodexVerifier = savedKept, savedVerifier
+		windowsManagedHooksCodexReconciler, windowsManagedHooksCodexPublisher = savedReconciler, savedPublisher
+	})
+	var calls []string
+	windowsManagedHooksCodexVerifier = func(connector.WindowsCodexMachineRequirementsOptions) (connector.WindowsCodexMachineRequirementsReport, error) {
+		calls = append(calls, "verify")
+		return connector.WindowsCodexMachineRequirementsReport{OK: true, SafeToRemoveBinary: true}, nil
+	}
+	windowsManagedHooksCodexReconciler = func(connector.WindowsCodexMachineRequirementsOptions) (connector.WindowsCodexMachineRequirementsReport, error) {
+		calls = append(calls, "reconcile")
+		return connector.WindowsCodexMachineRequirementsReport{OK: true}, nil
+	}
+	windowsManagedHooksCodexPublisher = func(connector.WindowsCodexMachineRequirementsOptions, []connector.WindowsCodexManagedRuntimeTarget) error {
+		calls = append(calls, "publish")
+		return nil
+	}
+	opts := connector.WindowsCodexMachineRequirementsOptions{}
+	targets := []connector.WindowsCodexManagedRuntimeTarget{{SID: "S-1-5-21-111-222-333-1001", DataDir: `C:\Users\alice\.defenseclaw`}}
+
+	windowsManagedHooksCodexFolderKept = func() (string, error) { return `C:\ProgramData\OpenAI\Codex`, nil }
+	for _, active := range []bool{true, false} {
+		if err := restoreWindowsCodexManagedHooks(opts, active, nil); err != nil {
+			t.Fatalf("rollback over a kept link (policy active %t): %v", active, err)
+		}
+	}
+	if surviving, err := verifyWindowsManagedHooksCodexClean(opts); err != nil || surviving != 0 {
+		t.Fatalf("clean check over a kept link: %d, %v", surviving, err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("a Codex read ran behind a kept link: %v", calls)
+	}
+
+	windowsManagedHooksCodexFolderKept = func() (string, error) { return "", nil }
+	if err := restoreWindowsCodexManagedHooks(opts, true, targets); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreWindowsCodexManagedHooks(opts, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifyWindowsManagedHooksCodexClean(opts); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(calls, ",") != "reconcile,publish,verify,verify,verify" {
+		t.Fatalf("without a link the rollback and clean check ran %v", calls)
+	}
+}
+
+// The Codex kept entry says what a kept link cannot promise, and the warning
+// still names it once as kept (GAP-0773).
+func TestWindowsCodexKeptLinkEntryNamesTheUnverifiedPolicy(t *testing.T) {
+	if !strings.HasPrefix(windowsEnterpriseCodexKeptLinkReason, windowsEnterpriseKeptLinkReason) ||
+		!strings.Contains(windowsEnterpriseCodexKeptLinkReason, "may still name the DefenseClaw hook binary") {
+		t.Fatalf("Codex kept-link reason = %q", windowsEnterpriseCodexKeptLinkReason)
+	}
+}
+
 // A link at the Codex machine-policy folder is kept and not read through
 // (GAP-0773). The teardown registry read then reports it in Kept and nothing
 // else; prepare keeps the expected policy bit, and the installed-state check

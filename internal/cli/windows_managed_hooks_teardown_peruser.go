@@ -279,6 +279,15 @@ var windowsManagedClaudeCurrentUserSID = func() (string, error) {
 // entry for a link a purge kept. The psm1 purge steps write the same text.
 const windowsEnterpriseKeptLinkReason = "kept: a link sits here; DefenseClaw does not follow, change or remove it"
 
+// windowsEnterpriseCodexKeptLinkReason is the reason for the link at the Codex
+// machine-policy folder: the entry starts with windowsEnterpriseKeptLinkReason
+// and says what a kept link cannot promise. Nothing behind the link is read,
+// so a Codex requirement there may still name the hook binary the uninstall
+// removes (GAP-0773). The psm1 purge steps write only the shorter text for a
+// link they meet, and the first entry for a path wins.
+const windowsEnterpriseCodexKeptLinkReason = windowsEnterpriseKeptLinkReason +
+	"; what is behind it was not checked, so a Codex requirement there may still name the DefenseClaw hook binary that the uninstall removes"
+
 // windowsManagedHooksKeptLinkedFolders names, as machine_state_remaining
 // entries (path: kept: reason), each vendor folder a teardown kept because a
 // link sits there: the ones the Cursor, Claude Code, selector and per-user
@@ -292,7 +301,7 @@ var windowsManagedHooksKeptLinkedFolders = func() []string {
 		out = append(out, folder+": "+reason)
 	}
 	for _, folder := range connector.WindowsCodexMachineFoldersKept() {
-		out = append(out, folder+": "+reason)
+		out = append(out, folder+": "+windowsEnterpriseCodexKeptLinkReason)
 	}
 	if layout, programFiles, programData, err := standaloneEnterprisePolicyLayout(); err == nil {
 		opts := enterprisepolicy.LayoutOptions(layout, programFiles, programData)

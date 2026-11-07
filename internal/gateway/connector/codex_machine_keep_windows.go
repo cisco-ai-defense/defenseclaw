@@ -135,6 +135,14 @@ func WindowsCodexMachineFolderKept() (string, error) {
 	return kept, nil
 }
 
+// windowsCodexMachineLinkKeptDetail is what a teardown says about a kept link:
+// kept, not verified, and what that can leave behind.
+func windowsCodexMachineLinkKeptDetail(kept string) string {
+	return "kept, not verified: a link sits at " + kept +
+		"; DefenseClaw does not follow, change or remove it and did not read what is behind it, " +
+		"so a Codex requirement there may still name the DefenseClaw hook binary that the uninstall removes"
+}
+
 // ResolveWindowsCodexManagedRuntimeRegistryForTeardown is the registry read a
 // teardown makes. A link at the Codex folder is not read through: the result
 // is an empty registry with Kept set to the link, and the caller keeps the

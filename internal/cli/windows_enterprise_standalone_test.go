@@ -2381,6 +2381,13 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 		strings.Count(linked[1].Message, `OpenAI\Codex`) != 1 {
 		t.Fatalf("a kept link listed twice, or as a failure: %+v", linked)
 	}
+	// The Codex entry carries the longer reason (the policy behind the link
+	// was not checked) and is still one kept item.
+	codex := warnings(base + `,"machine_state_remaining":["C:\\ProgramData\\OpenAI\\Codex: ` + windowsEnterpriseCodexKeptLinkReason + `"]}`)
+	if len(codex) != 1 || codex[0].Code != "machine_state_kept" ||
+		!strings.Contains(codex[0].Message, "may still name the DefenseClaw hook binary") {
+		t.Fatalf("the Codex kept link: %+v", codex)
+	}
 	if got := warnings(base + `}`); len(got) != 0 {
 		t.Fatalf("a report without the cleanup fields warned: %+v", got)
 	}

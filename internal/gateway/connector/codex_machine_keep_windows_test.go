@@ -219,19 +219,138 @@ func TestWindowsCodexMachineTeardownOverALinkTouchesNothingBehindIt(t *testing.T
 	if err != nil || registry.Kept != fixture.folder || registry.Active || len(registry.Targets) != 0 {
 		t.Fatalf("registry = %+v, %v; want an empty registry that names the link", registry, err)
 	}
-	report, err := RemoveWindowsCodexMachineRequirements(opts)
+	report, err := RemoveWindowsCodexMachineRequirementsForTeardown(opts)
 	if err != nil {
 		t.Fatalf("the removal failed on a link: %v (%s)", err, report.Error)
 	}
-	if !report.OK || report.Disposition != "link_kept" || !report.SafeToRemoveBinary ||
-		!report.ManagedStateRemovedOrAbsent || report.Changed || report.SurvivingOwnedPathReferences != 0 {
-		t.Fatalf("report = %+v", report)
-	}
+	assertCodexLinkKeptReport(t, report, fixture.folder)
 	if after := hashCodexKeepTree(t, fixture.folder); !equalCodexKeepTrees(after, fixture.decoys) {
 		t.Fatalf("the folder changed: before %v after %v", fixture.decoys, after)
 	}
 	if names := WindowsCodexMachineFoldersKept(); len(names) != 1 || names[0] != fixture.folder {
 		t.Fatalf("named %q, want the link once", names)
+	}
+}
+
+// assertCodexLinkKeptReport pins what a teardown says about a kept link: ok
+// and named, but kept and not verified, so it attests neither a binary that is
+// safe to remove nor a removed state (GAP-0773).
+func assertCodexLinkKeptReport(t *testing.T, report WindowsCodexMachineRequirementsReport, link string) {
+	t.Helper()
+	if !report.OK || report.Disposition != "link_kept" || !strings.EqualFold(report.LinkKept, link) ||
+		report.Changed || report.SurvivingOwnedPathReferences != 0 {
+		t.Fatalf("report = %+v", report)
+	}
+	if report.SafeToRemoveBinary || report.ManagedStateRemovedOrAbsent {
+		t.Fatalf("a link that was not read attested a safe binary or a removed state: %+v", report)
+	}
+	detail := strings.Join(report.Details, "\n")
+	if !strings.Contains(detail, "kept, not verified") || !strings.Contains(detail, "may still name the DefenseClaw hook binary") {
+		t.Fatalf("the report does not say the policy behind the link was not checked: %q", detail)
+	}
+}
+
+// Every removal but the uninstall's is strict (GAP-0773): the disabled Codex
+// reconcile, the hidden remove action and the guardian remover all call
+// RemoveWindowsCodexMachineRequirements, and the disabled reconcile calls it
+// from ReconcileWindowsCodexMachineRequirements. With an administrator link at
+// the Codex folder and DefenseClaw-named files behind it, each refuses on the
+// link: no OK, no kept link, no safe-to-remove-binary, nothing behind the link
+// read through or changed.
+func TestWindowsCodexMachineNonTeardownRemovalsRefuseALink(t *testing.T) {
+	if adminErr := requireWindowsCodexMachineAdministrator(); adminErr != nil {
+		t.Skipf("the removal requires an elevated Administrator or LocalSystem token: %v", adminErr)
+	}
+	programData := t.TempDir()
+	target := filepath.Join(t.TempDir(), "codex-target")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range codexKeepDecoyNames {
+		if err := os.WriteFile(filepath.Join(target, name), []byte("decoy "+name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	vendor := filepath.Join(programData, "OpenAI")
+	if err := os.MkdirAll(vendor, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	junction := filepath.Join(vendor, "Codex")
+	if output, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", junction, target).CombinedOutput(); err != nil {
+		t.Skipf("junction creation unavailable: %v (%s)", err, output)
+	}
+	t.Cleanup(func() { _ = os.Remove(junction) })
+	before := hashCodexKeepTree(t, target)
+
+	previousProgramData, previousStandalone := windowsCodexMachineProgramData, windowsCodexMachineStandaloneProcess
+	previousDir := windowsCodexMachineTrustedDirCheck
+	t.Cleanup(func() {
+		windowsCodexMachineProgramData, windowsCodexMachineStandaloneProcess = previousProgramData, previousStandalone
+		windowsCodexMachineTrustedDirCheck = previousDir
+		windowsCodexMachineKept.Lock()
+		windowsCodexMachineKept.paths = map[string]string{}
+		windowsCodexMachineKept.Unlock()
+	})
+	// The standalone profile, where a teardown would keep this link; the
+	// trust walk is reduced to its link rule so the refusal is the link's.
+	windowsCodexMachineProgramData = func() (string, error) { return programData, nil }
+	windowsCodexMachineStandaloneProcess = func() bool { return true }
+	windowsCodexMachineTrustedDirCheck = func(path, _ string) error { return rejectWindowsCodexMachineReparseChain(path) }
+	opts := codexKeepOptions(t, junction)
+
+	for _, tc := range []struct {
+		name string
+		run  func() (WindowsCodexMachineRequirementsReport, error)
+	}{
+		{"remove (hidden action and guardian)", func() (WindowsCodexMachineRequirementsReport, error) {
+			return RemoveWindowsCodexMachineRequirements(opts)
+		}},
+		{"reconcile with Codex disabled", func() (WindowsCodexMachineRequirementsReport, error) {
+			disabled := opts
+			disabled.CodexTargetEnabled = false
+			return ReconcileWindowsCodexMachineRequirements(disabled)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report, err := tc.run()
+			if err == nil || !strings.Contains(err.Error(), "reparse points are not allowed") ||
+				!strings.Contains(err.Error(), junction) {
+				t.Fatalf("want a refusal that names the link, got %v", err)
+			}
+			if report.OK || report.SafeToRemoveBinary || report.ManagedStateRemovedOrAbsent ||
+				report.LinkKept != "" || strings.Contains(report.Disposition, "link_kept") {
+				t.Fatalf("a non-teardown removal over a link reported success: %+v", report)
+			}
+			if after := hashCodexKeepTree(t, target); !equalCodexKeepTrees(after, before) {
+				t.Fatalf("the folder behind the link changed: before %v after %v", before, after)
+			}
+			if names := WindowsCodexMachineFoldersKept(); len(names) != 0 {
+				t.Fatalf("a non-teardown removal kept a link: %q", names)
+			}
+		})
+	}
+	// The same call from the uninstall keeps the link and reads nothing.
+	report, err := RemoveWindowsCodexMachineRequirementsForTeardown(opts)
+	if err != nil {
+		t.Fatalf("the uninstall's removal failed on the link: %v", err)
+	}
+	assertCodexLinkKeptReport(t, report, junction)
+	if after := hashCodexKeepTree(t, target); !equalCodexKeepTrees(after, before) {
+		t.Fatalf("the uninstall's removal changed the folder behind the link: before %v after %v", before, after)
+	}
+}
+
+// Outside the standalone profile the uninstall's removal is strict as well.
+func TestWindowsCodexMachineTeardownRemovalKeepsNothingOutsideStandalone(t *testing.T) {
+	fixture := newCodexKeepFixture(t, false)
+	opts := codexKeepOptions(t, fixture.folder)
+	if adminErr := requireWindowsCodexMachineAdministrator(); adminErr != nil {
+		t.Skipf("the removal requires an elevated Administrator or LocalSystem token: %v", adminErr)
+	}
+	windowsCodexMachineReparseProbe = func(string) (string, error) { return fixture.folder, nil }
+	report, _ := RemoveWindowsCodexMachineRequirementsForTeardown(opts)
+	if report.LinkKept != "" || report.Disposition == "link_kept" {
+		t.Fatalf("Secure Client kept a link: %+v", report)
 	}
 }
 
@@ -294,10 +413,11 @@ func TestWindowsCodexMachineTeardownKeepsARealJunction(t *testing.T) {
 	if err != nil || !strings.EqualFold(kept, junction) {
 		t.Fatalf("kept = %q, %v; want the junction %q", kept, err, junction)
 	}
-	report, err := RemoveWindowsCodexMachineRequirements(opts)
+	report, err := RemoveWindowsCodexMachineRequirementsForTeardown(opts)
 	if err != nil || !report.OK || report.Disposition != "link_kept" {
 		t.Fatalf("removal over a real junction: %+v, %v", report, err)
 	}
+	assertCodexLinkKeptReport(t, report, junction)
 	registry, err := ResolveWindowsCodexManagedRuntimeRegistryForTeardown(opts.HookBinary)
 	if err != nil || !strings.EqualFold(registry.Kept, junction) || registry.Active {
 		t.Fatalf("registry over a real junction: %+v, %v", registry, err)
