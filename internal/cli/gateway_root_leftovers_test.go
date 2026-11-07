@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,11 +13,25 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
-func stubRootRuntimeLeftovers(t *testing.T, names ...string) {
+// rootStartBlockersSeen is what the stubbed blockers lookup was asked.
+type rootStartBlockersSeen struct {
+	discovery   bool
+	installHome string
+	loose       []string
+}
+
+// stubRootRuntimeLeftovers stands in for the root-owned state it cannot create
+// as an ordinary user, and records what the refusal asked about.
+func stubRootRuntimeLeftovers(t *testing.T, names ...string) *rootStartBlockersSeen {
 	t.Helper()
-	old := rootRuntimeLeftovers
-	t.Cleanup(func() { rootRuntimeLeftovers = old })
-	rootRuntimeLeftovers = func(string) []string { return names }
+	seen := &rootStartBlockersSeen{}
+	old := rootRuntimeStartBlockers
+	t.Cleanup(func() { rootRuntimeStartBlockers = old })
+	rootRuntimeStartBlockers = func(_, installHome string, discovery bool) ([]string, []string) {
+		seen.discovery, seen.installHome = discovery, installHome
+		return names, seen.loose
+	}
+	return seen
 }
 
 // GAP-0788: a start or restart over root-owned runtime files from a stopped
@@ -88,5 +103,61 @@ func TestRunStartRefusesRootOwnedLeftoversBeforeLaunching(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "application_protection_state.json") ||
 		!strings.Contains(err.Error(), `sudo chown -R "$(id -un)" `) {
 		t.Fatalf("start over root-owned files = %v", err)
+	}
+}
+
+// The gateway reads the AI discovery state only when discovery is enabled, so
+// the refusal passes the configured flag; the install home is where the PID
+// records are validated.
+func TestRootOwnedRuntimeLeftoversRefusalAsksAboutTheConfiguredDiscoveryAndHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", home)
+	cfg := config.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	seen := stubRootRuntimeLeftovers(t, "gateway.pid")
+	for _, enabled := range []bool{false, true} {
+		cfg.AIDiscovery.Enabled = enabled
+		if err := rootOwnedRuntimeLeftoversRefusal(cfg, "start"); err == nil {
+			t.Fatal("a root-owned PID record was allowed")
+		}
+		if seen.discovery != enabled || seen.installHome != config.DefaultDataPath() {
+			t.Fatalf("asked discovery=%v home=%q, want discovery=%v home=%q", seen.discovery, seen.installHome, enabled, config.DefaultDataPath())
+		}
+	}
+}
+
+// A file the gateway refuses for its group or other access is repaired by the
+// chain, not only by the owner change.
+func TestRootOwnedRuntimeLeftoversRefusalChainTakesAwayLooseAccess(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	cfg := config.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	seen := stubRootRuntimeLeftovers(t, "active_connector.json")
+	seen.loose = []string{filepath.Join(cfg.DataDir, "active_connector.json")}
+	err := rootOwnedRuntimeLeftoversRefusal(cfg, "start")
+	if err == nil || !strings.Contains(err.Error(), " && chmod go-rwx ") || !strings.HasSuffix(err.Error(), " && defenseclaw-gateway start") {
+		t.Fatalf("refusal = %v", err)
+	}
+}
+
+// A root-owned PID record fails the identity check that runs before the
+// config is read; the refusal still happens, with the chain in place of the
+// raw identity text. An identity error with no root-owned cause is unchanged.
+func TestRefuseOverRootOwnedStateReplacesOnlyARootOwnedCause(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	identityErr := errors.New("gateway PID record is unsafe")
+
+	stubRootRuntimeLeftovers(t, "gateway.pid")
+	for _, verb := range []string{"start", "restart"} {
+		err := refuseOverRootOwnedState(startCmd, verb, identityErr)
+		if err == nil || errors.Is(err, identityErr) || !strings.Contains(err.Error(), "cannot "+verb+" the gateway") ||
+			!strings.Contains(err.Error(), "gateway.pid") || !strings.Contains(err.Error(), `sudo chown -R "$(id -un)" `) {
+			t.Fatalf("%s identity refusal over a root-owned record = %v", verb, err)
+		}
+	}
+
+	stubRootRuntimeLeftovers(t)
+	if err := refuseOverRootOwnedState(startCmd, "start", identityErr); !errors.Is(err, identityErr) {
+		t.Fatalf("an identity error with no root-owned cause was replaced: %v", err)
 	}
 }

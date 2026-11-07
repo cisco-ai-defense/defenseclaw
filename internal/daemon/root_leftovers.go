@@ -26,61 +26,117 @@ var rootRuntimeLeftoverNames = []string{
 	"device.key.provenance",
 }
 
+// gatewayPIDRecordNames are the PID records start and restart validate before
+// anything else, in the install home.
+var gatewayPIDRecordNames = []string{"gateway.pid", "watchdog.pid"}
+
+// StoreDirEntry names the data directory itself in RootOwnedStartBlockers.
+const StoreDirEntry = "./"
+
 // ownerOfFile is a variable so a test can stand in for the root-owned files
 // it cannot create as an ordinary user.
 var ownerOfFile = fileOwnerUID
 
-// RootOwnedRuntimeLeftovers returns the relative paths of the private runtime
-// files under dataDir that root owns while this process does not run as root.
-// Such a file cannot be read or replaced by this account, so a gateway start
-// over it fails (GAP-0788). It is the Go side of Doctor's Sudo leftovers row
-// and reads the same files with lstat, which needs no read access. It returns
-// nothing on Windows and for a root caller.
-func RootOwnedRuntimeLeftovers(dataDir string) []string {
+// dirUsable reports whether this account can write to and enter a directory.
+// It is a variable so a test can stand in for a root-owned directory.
+var dirUsable = accountCanUseDir
+
+// RootOwnedStartBlockers returns what root owns under dataDir (GAP-0788) that
+// stops a gateway start by an account that is not root, and which of those
+// files also grant group or others access. A gateway stopped after a sudo run
+// leaves them: this account cannot read or replace them, so the start fails
+// inside the daemon with the raw protected-state text. It is the Go side of
+// Doctor root_owned_start_blockers and reads with lstat, which needs no read
+// access:
+//   - a root-owned file from the runtime list, of any mode; the gateway also
+//     refuses one that grants group or others access, so loose reports it and
+//     the repair takes that access away after the owner is returned;
+//   - StoreDirEntry when root owns the data directory and this account cannot
+//     write there, since a root-owned 0700 store hides every file in it;
+//   - the PID records in pidDir when that is another folder than dataDir;
+//   - ai_discovery_state.json only when discovery is enabled, because the
+//     gateway reads it then and not otherwise.
+//
+// Paths in blockers and loose are relative to dataDir, except those from
+// pidDir, which are absolute. It returns nothing on Windows and for a root
+// caller.
+func RootOwnedStartBlockers(dataDir, pidDir string, aiDiscoveryEnabled bool) (blockers, loose []string) {
 	if dataDir == "" || os.Geteuid() <= 0 {
-		return nil
+		return nil, nil
 	}
-	var leftovers []string
+	names := make([]string, 0, len(rootRuntimeLeftoverNames))
 	for _, name := range rootRuntimeLeftoverNames {
-		if rootOwnedPrivateRegularFile(filepath.Join(dataDir, name)) {
-			leftovers = append(leftovers, name)
+		if aiDiscoveryEnabled || name != "ai_discovery_state.json" {
+			names = append(names, name)
 		}
 	}
-	hooksDir := filepath.Join(dataDir, "hooks")
+	if info, err := os.Lstat(dataDir); err == nil && info.IsDir() && rootOwned(info) && !dirUsable(dataDir) {
+		blockers = append(blockers, StoreDirEntry)
+	}
+	for _, entry := range rootOwnedRuntimeFiles(dataDir, names) {
+		blockers = append(blockers, entry.rel)
+		if entry.loose {
+			loose = append(loose, filepath.Join(dataDir, entry.rel))
+		}
+	}
+	if pidDir != "" && filepath.Clean(pidDir) != filepath.Clean(dataDir) {
+		for _, entry := range rootOwnedRuntimeFiles(pidDir, gatewayPIDRecordNames) {
+			path := filepath.Join(pidDir, entry.rel)
+			blockers = append(blockers, path)
+			if entry.loose {
+				loose = append(loose, path)
+			}
+		}
+	}
+	return blockers, loose
+}
+
+type rootOwnedEntry struct {
+	rel   string
+	loose bool
+}
+
+// rootOwnedRuntimeFiles lists the root-owned regular files from names under
+// dir, and the hooks directory and its tokens, with whether each grants group
+// or others anything.
+func rootOwnedRuntimeFiles(dir string, names []string) []rootOwnedEntry {
+	var found []rootOwnedEntry
+	add := func(rel string) {
+		info, err := os.Lstat(filepath.Join(dir, rel))
+		if err != nil || !info.Mode().IsRegular() || !rootOwned(info) {
+			return
+		}
+		found = append(found, rootOwnedEntry{rel: rel, loose: info.Mode().Perm()&0o077 != 0})
+	}
+	for _, name := range names {
+		add(name)
+	}
+	hooksDir := filepath.Join(dir, "hooks")
 	info, err := os.Lstat(hooksDir)
 	if err != nil || !info.IsDir() || info.Mode()&fs.ModeSymlink != 0 {
-		return leftovers
+		return found
 	}
-	if uid, ok := ownerOfFile(info); ok && uid == 0 && info.Mode().Perm()&0o022 == 0 {
-		leftovers = append(leftovers, "hooks/")
+	if rootOwned(info) && info.Mode().Perm()&0o022 == 0 {
+		found = append(found, rootOwnedEntry{rel: "hooks/"})
 	}
 	entries, err := os.ReadDir(hooksDir)
 	if err != nil {
-		return leftovers
+		return found
 	}
-	names := make([]string, 0, len(entries))
+	hookNames := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		names = append(names, entry.Name())
+		hookNames = append(hookNames, entry.Name())
 	}
-	sort.Strings(names)
-	for _, name := range names {
-		if !strings.HasPrefix(name, ".hook-") || !strings.HasSuffix(name, ".token") {
-			continue
-		}
-		if rootOwnedPrivateRegularFile(filepath.Join(hooksDir, name)) {
-			leftovers = append(leftovers, "hooks/"+name)
+	sort.Strings(hookNames)
+	for _, name := range hookNames {
+		if strings.HasPrefix(name, ".hook-") && strings.HasSuffix(name, ".token") {
+			add("hooks/" + name)
 		}
 	}
-	return leftovers
+	return found
 }
 
-// rootOwnedPrivateRegularFile reports a regular file that root owns and that
-// grants nothing to group or others.
-func rootOwnedPrivateRegularFile(path string) bool {
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
-		return false
-	}
+func rootOwned(info fs.FileInfo) bool {
 	uid, ok := ownerOfFile(info)
 	return ok && uid == 0
 }
@@ -89,9 +145,11 @@ func rootOwnedPrivateRegularFile(path string) bool {
 // sudo-started gateway left behind: the same stop, return, start chain Doctor
 // prints for its Sudo leftovers row (GAP-0711, GAP-0713). installHome is the
 // install home the root run was started for; the chain also returns the store
-// that home's config moved the data to.
-func RootLeftoversRemedy(installHome string) string {
-	command, note := rootGatewayRecoverySteps(installHome)
+// the config of that home moved the data to. loosen lists root-owned files that also
+// grant group or others access, which the gateway refuses once the owner is
+// returned: the chain takes that access away before the start.
+func RootLeftoversRemedy(installHome string, loosen []string) string {
+	command, note := rootGatewayRecoveryStepsLoosening(installHome, loosen)
 	lead := "stop"
 	if note != "" {
 		lead = note + "Then stop"

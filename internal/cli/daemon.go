@@ -332,7 +332,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	// Validate every process-identity artifact before that fast path so malformed
 	// or unreadable watchdog state can never be hidden by a valid gateway PID.
 	if err := d.ValidateStartIdentityFiles(); err != nil {
-		return err
+		return refuseOverRootOwnedState(cmd, "start", err)
 	}
 	bootSource := configSourceDigest(config.ConfigPath())
 	cfg, cfgLoadErr := loadDaemonConfig(cmd)
@@ -831,7 +831,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	// process-identity artifact before that first side effect so malformed or
 	// unreadable watchdog state can never authorize a partial restart.
 	if err := d.ValidateStartIdentityFiles(); err != nil {
-		return err
+		return refuseOverRootOwnedState(cmd, "restart", err)
 	}
 	cfg, cfgLoadErr := loadDaemonConfig(cmd)
 	// Refuse before stopping anything: the new gateway could not start.
